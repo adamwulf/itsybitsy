@@ -493,6 +493,26 @@ export class DashboardComponent implements Component {
     return this.rightPane.errors;
   }
 
+  /** Read-only access to current pane mode (for testing) */
+  get currentMode(): PaneMode {
+    return this.rightPane.mode;
+  }
+
+  /** Read-only access to denial filter (for testing) */
+  get denialFilter(): DenialFilter {
+    return this.rightPane.denialFilter;
+  }
+
+  /** Read-only access to questions selected index (for testing) */
+  get questionsSelectedIndex(): number {
+    return this.rightPane.questionsSelectedIndex;
+  }
+
+  /** Read-only access to selected agent (for testing) */
+  get selectedAgent(): Agent | null {
+    return this.agentTree.selectedAgent;
+  }
+
   constructor() {
     this.agentTree = new AgentTreeComponent();
     this.rightPane = new RightPaneComponent();

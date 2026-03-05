@@ -725,25 +725,23 @@ describe("DashboardComponent Phase 5.2 features", () => {
 
   test("t key cycles denials filter only in DENIALS mode", () => {
     setupDashboard();
-    // t outside DENIALS does nothing (no crash)
+    expect(dashboard.denialFilter).toBe("all");
+    // t outside DENIALS does nothing
     dashboard.handleInput("t");
-    // Jump to DENIALS mode
-    dashboard.handleInput("p"); // cycle pane modes
-    dashboard.handleInput("p");
-    // Now verify we're on DENIALS (mode index 2)
-    // Use direct jump instead
-    dashboard = new DashboardComponent();
-    const agent = makeAgent("agent-test", "/repos/test");
-    const flatList: FlatAgent[] = [{ agent, depth: 0 }];
-    dashboard.onUpdate([agent], flatList, []);
-    // Simulate being in DENIALS by cycling to mode 2
+    expect(dashboard.denialFilter).toBe("all");
+    // Cycle to DENIALS mode (mode index 2)
     dashboard.handleInput("p"); // 0→1
     dashboard.handleInput("p"); // 1→2 (DENIALS)
-    dashboard.handleInput("t"); // cycle filter
-    // No crash means it works
+    expect(dashboard.currentMode).toBe("DENIALS");
+    dashboard.handleInput("t"); // cycle filter: all → 1h
+    expect(dashboard.denialFilter).toBe("1h");
+    dashboard.handleInput("t"); // 1h → 10m
+    expect(dashboard.denialFilter).toBe("10m");
+    dashboard.handleInput("t"); // 10m → all
+    expect(dashboard.denialFilter).toBe("all");
   });
 
-  test("d key triggers diff loading", () => {
+  test("d key triggers diff loading and jumps to DIFF mode", async () => {
     setupDashboard();
     let diffCalled = false;
     setRunner(async (args, cwd) => {
@@ -751,38 +749,50 @@ describe("DashboardComponent Phase 5.2 features", () => {
       return { ok: true, exitCode: 0, stdout: "diff output", stderr: "" };
     });
     dashboard.handleInput("d");
-    // Diff should be loading or loaded
+    expect(dashboard.currentMode).toBe("DIFF");
+    await Bun.sleep(50);
+    expect(diffCalled).toBe(true);
   });
 
-  test("g key jumps to STATUS", () => {
+  test("g key jumps to STATUS mode", () => {
     setupDashboard();
+    expect(dashboard.currentMode).toBe("AGENT LOG");
     dashboard.handleInput("g");
-    // Should be on STATUS mode now (no crash = correct)
+    expect(dashboard.currentMode).toBe("STATUS");
   });
 
-  test("g key in QUESTIONS mode navigates to agent", () => {
+  test("g key in QUESTIONS mode navigates to agent and switches mode", () => {
     dashboard = new DashboardComponent();
     setRunner(async (args, cwd) => {
       lastIbCall = { args, cwd };
       return { ok: true, exitCode: 0, stdout: "", stderr: "" };
     });
 
-    const agent = makeAgent("agent-test", "/repos/test");
-    const flatList: FlatAgent[] = [{ agent, depth: 0 }];
+    const agent1 = makeAgent("agent-a", "/repos/test");
+    const agent2 = makeAgent("agent-b", "/repos/test");
+    const flatList: FlatAgent[] = [
+      { agent: agent1, depth: 0 },
+      { agent: agent2, depth: 0 },
+    ];
     const questions: PendingQuestion[] = [{
       id: "q-1",
-      agent: "agent-test",
+      agent: "agent-b",
       question: "Should I proceed?",
       timestamp: "2026-03-05T15:00:00Z",
       status: "pending",
     }];
-    dashboard.onUpdate([agent], flatList, questions);
+    dashboard.onUpdate([agent1, agent2], flatList, questions);
 
+    // Start with agent-a selected
+    expect(dashboard.selectedAgent?.id).toBe("agent-a");
     // Jump to QUESTIONS
     dashboard.handleInput("q");
-    // Press g to go to agent
+    expect(dashboard.currentMode).toBe("QUESTIONS");
+    // Press g to go to agent-b (the question's agent)
     dashboard.handleInput("g");
-    // Should navigate to agent-test (no crash = correct behavior)
+    // Should navigate to agent-b and switch mode
+    expect(dashboard.selectedAgent?.id).toBe("agent-b");
+    expect(dashboard.currentMode).toBe("AGENT LOG");
   });
 
   test("Enter in QUESTIONS mode opens answer dialog", () => {
@@ -884,11 +894,33 @@ describe("DashboardComponent Phase 5.2 features", () => {
     dashboard.onUpdate([agent1, agent2], flatList, questions);
 
     dashboard.handleInput("q"); // QUESTIONS mode
-    dashboard.handleInput("j"); // move down in questions
-    // No crash; question selection moved
+    expect(dashboard.questionsSelectedIndex).toBe(0);
+    dashboard.handleInput("j"); // move down
+    expect(dashboard.questionsSelectedIndex).toBe(1);
+    dashboard.handleInput("k"); // move back up
+    expect(dashboard.questionsSelectedIndex).toBe(0);
+    // j/k should not change agent tree selection in QUESTIONS mode
+    expect(dashboard.selectedAgent?.id).toBe("agent-a");
   });
 
-  test("selectAgentById selects the right agent", () => {
+  test("j/k in QUESTIONS mode clamps to bounds", () => {
+    dashboard = new DashboardComponent();
+    const agent = makeAgent("agent-a", "/repos/test");
+    const flatList: FlatAgent[] = [{ agent, depth: 0 }];
+    const questions: PendingQuestion[] = [
+      { id: "q-1", agent: "agent-a", question: "Q1?", timestamp: "2026-03-05T15:00:00Z", status: "pending" },
+    ];
+    dashboard.onUpdate([agent], flatList, questions);
+
+    dashboard.handleInput("q");
+    expect(dashboard.questionsSelectedIndex).toBe(0);
+    dashboard.handleInput("j"); // try to go past end
+    expect(dashboard.questionsSelectedIndex).toBe(0); // clamped
+    dashboard.handleInput("k"); // try to go before start
+    expect(dashboard.questionsSelectedIndex).toBe(0); // clamped
+  });
+
+  test("selectAgentById via g in QUESTIONS navigates correctly", () => {
     dashboard = new DashboardComponent();
     const agent1 = makeAgent("agent-a", "/repos/test");
     const agent2 = makeAgent("agent-b", "/repos/test");
@@ -896,11 +928,6 @@ describe("DashboardComponent Phase 5.2 features", () => {
       { agent: agent1, depth: 0 },
       { agent: agent2, depth: 0 },
     ];
-    dashboard.onUpdate([agent1, agent2], flatList, []);
-
-    // Jump to QUESTIONS, then go to an agent
-    dashboard.handleInput("q");
-    // Simulate g with a question pointing to agent-b
     const questions: PendingQuestion[] = [{
       id: "q-1",
       agent: "agent-b",
@@ -909,8 +936,10 @@ describe("DashboardComponent Phase 5.2 features", () => {
       status: "pending",
     }];
     dashboard.onUpdate([agent1, agent2], flatList, questions);
-    dashboard.handleInput("q"); // back to questions
+
+    expect(dashboard.selectedAgent?.id).toBe("agent-a");
+    dashboard.handleInput("q"); // QUESTIONS mode
     dashboard.handleInput("g"); // go to agent-b
-    // Should not crash; agent-b should be selected
+    expect(dashboard.selectedAgent?.id).toBe("agent-b");
   });
 });

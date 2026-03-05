@@ -24,6 +24,10 @@ This is a **full daily-driver replacement for `ib watch`**, extended to span mul
 
 - No web/browser UI
 - Cross-repo agent messaging (v2 — see below)
+- `ib watchdog` — the TUI's live state detection replaces the need for watchdog notifications
+- `ib ask` — agents asking the user a question is surfaced via `user-questions.json`; no need to shell to `ib ask` directly from itsybitsy
+- `ib info` — meta.json is read directly; raw field inspection available as a debug view (`i` keybinding, low priority)
+- `ib config` — itsybitsy reads `.ittybitty.json` directly rather than shelling to `ib config`
 
 ## Runtime & Dependencies
 
@@ -216,7 +220,7 @@ Key bindings (provisional):
 - `s` — send message to selected agent (inline input field)
 - `S` — status view: show agent's commits and uncommitted changes (`ib status`)
 - `d` — diff view: show full diff of agent's work (`ib diff`)
-- `l` — look/log view: show `agent.log` for selected agent
+- `l` — look/log view: read `agent.log` directly (no shell-out)
 - `q` — show pending questions (`ib questions`)
 - `g` — open in Ghostty
 - `/` — quit
@@ -271,9 +275,9 @@ Each phase ends at a usable checkpoint — something that works and can be teste
 ### Phase 2: Agent Data Layer
 **Checkpoint:** `itsybitsy agents` (debug command) prints all agents across all registered repos with correct states — no TUI yet. Basic error handling in place.
 
-- [ ] `src/agents.ts` — read `.ittybitty/agents/` directly; define `Agent` and `AgentState` types; read `user-questions.json` for pending questions; detect orphan tmux sessions
+- [ ] `src/agents.ts` — read `.ittybitty/agents/` directly; also scan `.ittybitty/archive/` for archived agents (include `archived: boolean` on the `Agent` type); define `Agent` and `AgentState` types; read `user-questions.json` for pending questions; detect orphan tmux sessions; compute `age` from `created_epoch` (don't leave date math to the TUI layer)
 - [ ] `src/parse-state.ts` — port `parse_state` bash logic to TypeScript; all state rules
-- [ ] `src/watcher.ts` — `fs.watch(path, { recursive: true })` on each repo's `.ittybitty/agents/`; emit `agentAdded`, `agentChanged`, `agentRemoved` events; `Promise.all` across repos; low-frequency fallback poll (10s) for macOS FSEvents reliability
+- [ ] `src/watcher.ts` — `fs.watch(path, { recursive: true })` on each repo's `.ittybitty/agents/`; emit `agentAdded`, `agentChanged`, `agentRemoved` events; `Promise.all` across repos; low-frequency fallback poll (10s) for macOS FSEvents reliability; **dynamic repo registration not supported while watch is running** — restart required after `itsybitsy add/remove`
 - [ ] Basic error handling from the start: try/catch around all file reads, graceful degradation for missing/malformed `meta.json`, missing `ib`/`tmux` detected at startup
 - [ ] Unit tests for `parse-state.ts` (it's pure string matching — highly testable)
 
@@ -315,7 +319,7 @@ Each phase ends at a usable checkpoint — something that works and can be teste
 - [ ] `s` — send message to selected agent (inline input field)
 - [ ] `S` — status view: replace right pane with `ib status` output
 - [ ] `d` — diff view: replace right pane with `ib diff` output
-- [ ] `l` — look/log view: show `agent.log` in right pane
+- [ ] `l` — look/log view: read `agent.log` directly from `.ittybitty/agents/{id}/agent.log` and display in right pane (same content as `ib look` but read directly, no shell-out)
 - [ ] `q` — questions view: show pending questions from `user-questions.json`; `ib acknowledge` to mark handled
 - [ ] `n` — new agent: prompt for repo (if multiple registered), task description, and flags (`--yolo`, `--worker`, `--model`); shell to `ib new-agent`
 - [ ] Status bar at bottom showing available keybindings for current context

@@ -204,28 +204,75 @@ CLI commands:
 
 ## TUI Layout (pi-tui)
 
-Left pane: agent tree grouped by repo, with state indicator and age.
-Right pane: live tmux output for selected agent (updated every ~1s).
-Bottom bar: keybinding hints for current context.
-Header: pending question count badge (e.g., `[2 questions]`) when questions exist.
+Broadly matches `ib watch` layout and keybindings so existing users feel at home.
 
-Key bindings (provisional):
-- `j/k` or arrow keys — navigate agent list
-- `Enter` — select agent / toggle focus between panes
-- `a` — toggle show/hide archived agents
-- `n` — new agent (prompt for repo, task, and optional flags: --yolo, --worker, --model)
-- `K` — kill selected agent (confirm prompt)
-- `r` — resume selected stopped agent
-- `m` — merge selected agent (runs merge-check first; confirm prompt)
-- `s` — send message to selected agent (inline input field)
-- `S` — status view: show agent's commits and uncommitted changes (`ib status`)
-- `d` — diff view: show full diff of agent's work (`ib diff`)
-- `l` — look/log view: read `agent.log` directly (no shell-out)
-- `q` — show pending questions (`ib questions`)
-- `g` — open in Ghostty
-- `/` — quit
+```
+┌─────────────────────────────────────────────────────────────┐
+│  repo-name  agent-id  state  age  model  prompt...          │  ← agent tree
+│    ↳ child-agent-id  state  age  model  prompt...           │    (scrolls with
+│  repo2-name agent-id  state  age  model  prompt...          │     selection)
+├──────────────────────────────┬──────────────────────────────┤
+│                              │                              │
+│  live tmux output            │  right pane (cycling)        │
+│  (left, fixed ~60 cols)      │  modes: log / prompt /       │
+│                              │  denials / tree / errors /   │
+│                              │  diff / status / questions   │
+│                              │                              │
+└──────────────────────────────┴──────────────────────────────┘
+  [state badge] [pending questions badge]  j/k @  p/n d g e q  s m x a
+```
 
-Note: `k` is reserved for navigate-down; use `K` (capital) for kill to avoid conflict.
+The agent tree at top shows all agents across all registered repos, grouped by repo, with recursive manager/child indentation. The bottom is split: tmux capture on the left (fixed width), cycling right pane on the right.
+
+### Right Pane Modes (cycle with `p`/`n`)
+
+| Mode | Content |
+|---|---|
+| 0 — AGENT LOG | `agent.log` read directly |
+| 1 — INITIAL PROMPT | Full prompt from `prompt.txt` |
+| 2 — DENIALS | Tool denials log |
+| 3 — TREE | Full agent tree (all repos) |
+| 4 — ERRORS | Agent creation/async errors |
+| 5 — DIFF | `ib diff` output |
+| 6 — STATUS | `ib status` output (commits + changes) |
+| 7 — QUESTIONS | Pending questions from `user-questions.json` |
+
+### Key Bindings
+
+Matching `ib watch` keybindings exactly where possible; new keys noted.
+
+**Navigation**
+- `j` / `k` or ↑ / ↓ — move selection up/down in agent tree (or within questions pane)
+- `@` — fuzzy jump to agent by name
+- `/` — fuzzy jump to pane mode by name
+
+**Right pane**
+- `p` / `n` or ← / → — cycle right pane mode forward/backward
+- `d` — jump directly to DIFF pane
+- `g` — jump directly to STATUS pane
+- `e` — jump directly to ERRORS pane
+- `q` — jump directly to QUESTIONS pane
+- `;` — scroll pane down (show older content)
+- `l` — scroll pane up (toward bottom / newer content)
+
+**Agent actions**
+- `s` — send message to selected agent (dialog)
+- `m` — merge agent (runs merge-check first; confirm dialog)
+- `x` — kill agent (confirm dialog)
+- `!` — force-kill / nuke agent (confirm dialog)
+- `a` — new agent (dialog: repo, prompt, --yolo/--worker/--model)
+- `r` — reassign agent's manager (dialog) ← matches `ib watch`
+- `R` — resume a stopped agent ← new, not in `ib watch`
+- `G` — open agent's tmux session in Ghostty ← new, not in `ib watch` (`g` is taken by status)
+- `w` — open agent worktree in Finder (matches `ib watch`)
+- `o` — open external diff tool if configured (matches `ib watch`)
+- `S` — capture tmux snapshot for debugging state detection (matches `ib watch`)
+- `c` — clear errors (only active in ERRORS pane)
+- `Enter` — answer selected question (only active in QUESTIONS pane)
+
+**App**
+- `h` — open settings/setup dialog
+- `Ctrl-C` — exit
 
 ## Ghostty Integration
 
@@ -286,15 +333,13 @@ Each phase ends at a usable checkpoint — something that works and can be teste
 ### Phase 3: Basic TUI Dashboard
 **Checkpoint:** `itsybitsy watch` launches a live TUI showing all agents across all repos, grouped by repo, with their states auto-updating via `fs.watch`.
 
-- [ ] `src/tui/dashboard.ts` — main TUI layout skeleton using pi-tui
-- [ ] Left pane: agent tree grouped by repo, showing `id`, `state`, `age`, `model`, truncated prompt
-- [ ] Tree structure: recursive traversal of `manager` field — supports multi-level hierarchies (managers with sub-managers); workers shown with distinct icon
-- [ ] State indicators (color-coded by state)
-- [ ] Keyboard navigation: `j/k` or arrow keys to move through agent list
+- [ ] `src/tui/dashboard.ts` — main TUI layout: agent tree at top (scrolls with selection), split pane below (tmux left + cycling right pane)
+- [ ] Agent tree: all agents across all repos, grouped by repo, recursive manager/child indentation, workers with distinct icon (`⚙`), state color-coded
+- [ ] Right pane modes 0–7 (see layout table above); `p`/`n` to cycle, direct jump keys `d`/`g`/`e`/`q`
+- [ ] Keyboard navigation: `j/k` or arrow keys through agent tree; `;`/`l` scroll pane content
 - [ ] Wire watcher events to TUI re-renders (`tui.requestRender()`)
-- [ ] Header badge showing pending question count
-- [ ] `a` to toggle archived agents
-- [ ] `/` to quit
+- [ ] Status bar showing pending question count badge and available keybindings
+- [ ] `Ctrl-C` to quit
 - [ ] **Validate ANSI passthrough** in `Text`/`Box` components before Phase 4
 
 ---
@@ -303,8 +348,8 @@ Each phase ends at a usable checkpoint — something that works and can be teste
 **Checkpoint:** Selecting an agent shows its live Claude session output in a right-hand pane, updating every ~1s.
 
 - [ ] `src/tmux-poller.ts` — polls `tmux capture-pane -t {tmux_session} -p -S -100 -E -` for the selected agent; emits output events; pauses when no agent selected
-- [ ] Right pane: render tmux output with ANSI passthrough
-- [ ] `Enter` to select agent / toggle focus between panes
+- [ ] Left pane: render tmux output with ANSI passthrough (fixed ~60 col width, matching `ib watch`'s `TMUX_WIDTH`)
+- [ ] Right pane mode 0 (AGENT LOG): render `agent.log` content
 - [ ] Graceful display when tmux session doesn't exist (agent stopped or orphaned)
 
 ---
@@ -313,16 +358,26 @@ Each phase ends at a usable checkpoint — something that works and can be teste
 **Checkpoint:** All core `ib` actions are accessible from the TUI.
 
 - [ ] `src/ib-commands.ts` — async wrappers for all `ib` mutations; **always sets `cwd` to the target repo root**
-- [ ] `K` — kill selected agent (confirm prompt)
-- [ ] `r` — resume selected stopped agent (`ib resume`)
-- [ ] `m` — merge selected agent (run `ib merge-check` first; show result in confirm prompt)
-- [ ] `s` — send message to selected agent (inline input field)
-- [ ] `S` — status view: replace right pane with `ib status` output
-- [ ] `d` — diff view: replace right pane with `ib diff` output
-- [ ] `l` — look/log view: read `agent.log` directly from `.ittybitty/agents/{id}/agent.log` and display in right pane (same content as `ib look` but read directly, no shell-out)
-- [ ] `q` — questions view: show pending questions from `user-questions.json`; `ib acknowledge` to mark handled
-- [ ] `n` — new agent: prompt for repo (if multiple registered), task description, and flags (`--yolo`, `--worker`, `--model`); shell to `ib new-agent`
-- [ ] Status bar at bottom showing available keybindings for current context
+- [ ] `x` — kill agent (confirm dialog, matches `ib watch`)
+- [ ] `!` — nuke/force-kill agent (confirm dialog, matches `ib watch`)
+- [ ] `R` — resume stopped agent (`ib resume`)
+- [ ] `r` — reassign agent's manager (dialog, matches `ib watch`)
+- [ ] `m` — merge agent (run `ib merge-check` first; show result in confirm dialog)
+- [ ] `s` — send message (dialog, matches `ib watch`)
+- [ ] `a` — new agent dialog: repo selector, prompt input, `--yolo`/`--worker`/`--model` flags; shells to `ib new-agent`
+- [ ] `d` — switch to DIFF pane (right pane mode 5, `ib diff` output)
+- [ ] `g` — switch to STATUS pane (right pane mode 6, `ib status` output)
+- [ ] `q` — switch to QUESTIONS pane (right pane mode 7); `Enter` to answer selected question via `ib send`; `ib acknowledge` to mark handled
+- [ ] Right pane mode 1 — INITIAL PROMPT: read `prompt.txt` directly
+- [ ] Right pane mode 2 — DENIALS: tool denials log
+- [ ] Right pane mode 3 — TREE: full cross-repo agent tree
+- [ ] Right pane mode 4 — ERRORS: async errors; `c` to clear
+- [ ] `G` — open agent's tmux session in Ghostty (new key, `g` is taken)
+- [ ] `w` — open agent worktree in Finder (matches `ib watch`)
+- [ ] `@` — fuzzy jump to agent by name (dialog)
+- [ ] `/` — fuzzy jump to pane mode (dialog)
+- [ ] `h` — settings/setup dialog
+- [ ] `S` — capture tmux snapshot for debugging (matches `ib watch`)
 
 ---
 
@@ -330,7 +385,7 @@ Each phase ends at a usable checkpoint — something that works and can be teste
 **Checkpoint:** Production-ready single binary you can install and use daily.
 
 - [ ] `src/ghostty.ts` — `ghostty --command="tmux attach -t {tmux_session}"`; detect if Ghostty is available; degrade gracefully
-- [ ] `g` keybinding — open selected agent's tmux session in Ghostty
+- [ ] `G` keybinding — open selected agent's tmux session in Ghostty (`g` is reserved for STATUS pane)
 - [ ] `bun build --compile` produces a single self-contained binary
 - [ ] README with install instructions and keybinding reference
 - [ ] Polish error messages: missing `ib`/`tmux`, unreadable repos, malformed `meta.json`

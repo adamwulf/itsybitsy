@@ -4,13 +4,17 @@
   "permissions": {
     "manager": {
       "allow": [
-        "ToolSearch"
+        "ToolSearch",
+        "Bash(bun:*)",
+        "Bash(bunx:*)"
       ],
       "deny": []
     },
     "worker": {
       "allow": [
-        "ToolSearch"
+        "ToolSearch",
+        "Bash(bun:*)",
+        "Bash(bunx:*)"
       ],
       "deny": []
     }

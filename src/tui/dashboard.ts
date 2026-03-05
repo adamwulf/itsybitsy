@@ -12,7 +12,7 @@ import {
   visibleWidth,
 } from "@mariozechner/pi-tui";
 import type { Component } from "@mariozechner/pi-tui";
-import { listRepos, loadRegistry } from "../registry";
+import { loadRegistry } from "../registry";
 import type { RepoEntry } from "../registry";
 import { AgentWatcher } from "../watcher";
 import { TmuxPoller, captureTmuxOutput } from "../tmux-poller";
@@ -62,7 +62,7 @@ type DialogState =
   | { type: "input"; prompt: string; value: string; onSubmit: (value: string) => void }
   | { type: "select"; prompt: string; items: string[]; selectedIndex: number; onSelect: (index: number) => void }
   | { type: "message"; text: string }
-  | { type: "fuzzy"; prompt: string; query: string; allItems: string[]; filteredItems: string[]; selectedIndex: number; onSelect: (originalIndex: number, filteredIndex: number) => void }
+  | { type: "fuzzy"; prompt: string; query: string; allItems: string[]; filteredItems: string[]; selectedIndex: number; onSelect: (originalIndex: number) => void }
   | { type: "help"; lines: string[] }
   | null;
 
@@ -1082,12 +1082,14 @@ export class DashboardComponent implements Component {
         if (this._dialog.filteredItems.length > 0) {
           const filteredIndices = fuzzyFilter(this._dialog.allItems, this._dialog.query);
           const originalIndex = filteredIndices[this._dialog.selectedIndex] ?? 0;
-          this._dialog.onSelect(originalIndex, this._dialog.selectedIndex);
+          this._dialog.onSelect(originalIndex);
         }
-      } else if (matchesKey(data, Key.down) || data === "j") {
-        this._dialog.selectedIndex = Math.min(this._dialog.filteredItems.length - 1, this._dialog.selectedIndex + 1);
+      } else if (matchesKey(data, Key.down)) {
+        if (this._dialog.filteredItems.length > 0) {
+          this._dialog.selectedIndex = Math.min(this._dialog.filteredItems.length - 1, this._dialog.selectedIndex + 1);
+        }
         this.tui?.requestRender();
-      } else if (matchesKey(data, Key.up) || data === "k") {
+      } else if (matchesKey(data, Key.up)) {
         this._dialog.selectedIndex = Math.max(0, this._dialog.selectedIndex - 1);
         this.tui?.requestRender();
       } else if (matchesKey(data, Key.backspace) || data === "\x7f") {

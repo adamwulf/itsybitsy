@@ -308,15 +308,17 @@ class TmuxPaneComponent implements Component {
       this.scrollBack = maxScrollBack;
     }
 
-    // Slice visible window from the bottom
+    // Slice visible window from the bottom.
+    // Reserve one line for the scroll indicator when scrolled back.
+    const contentHeight = this.scrollBack > 0 ? this.displayHeight - 1 : this.displayHeight;
     const end = wrapped.length - this.scrollBack;
-    const start = Math.max(0, end - this.displayHeight);
+    const start = Math.max(0, end - contentHeight);
     const visible = wrapped.slice(start, end);
 
     // Truncate each line (wrap should already fit, but ensure safety)
     const lines = visible.map((line) => truncateToWidth(line, width, ""));
 
-    // Show scroll indicator as an appended line if scrolled back
+    // Append scroll indicator when scrolled back (fits within displayHeight)
     if (this.scrollBack > 0) {
       lines.push(truncateToWidth(
         `${DIM}── ↓ ${this.scrollBack} lines below ──${RESET}`,

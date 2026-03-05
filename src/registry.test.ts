@@ -38,7 +38,7 @@ describe("registry", () => {
     expect(result.ok).toBe(true);
     const repos = await listRepos();
     expect(repos.length).toBe(1);
-    expect(repos[0].name).toBe("myrepo");
+    expect(repos[0]!.name).toBe("myrepo");
   });
 
   test("addRepo rejects duplicates", async () => {

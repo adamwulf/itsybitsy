@@ -38,8 +38,8 @@ describe("SplitPane", () => {
       expect(line).toContain("|");
     }
     // First line: "AAA" padded to 5 chars + "|" + "111..."
-    expect(result[0].startsWith("AAA  |")).toBe(true);
-    expect(result[1].startsWith("BBB  |")).toBe(true);
+    expect(result[0]!.startsWith("AAA  |")).toBe(true);
+    expect(result[1]!.startsWith("BBB  |")).toBe(true);
   });
 
   test("left pane padded to exact leftWidth", () => {
@@ -49,8 +49,8 @@ describe("SplitPane", () => {
 
     const result = sp.render(30);
     // Left part should be exactly 10 visible chars before the separator
-    const sepIdx = result[0].indexOf("|");
-    const leftPart = result[0].slice(0, sepIdx);
+    const sepIdx = result[0]!.indexOf("|");
+    const leftPart = result[0]!.slice(0, sepIdx);
     expect(visibleWidth(leftPart)).toBe(10);
   });
 
@@ -65,7 +65,7 @@ describe("SplitPane", () => {
 
     const result = sp.render(totalWidth);
     // Total visible width of each line should not exceed totalWidth
-    expect(visibleWidth(result[0])).toBeLessThanOrEqual(totalWidth);
+    expect(visibleWidth(result[0]!)).toBeLessThanOrEqual(totalWidth);
     // Right component must receive the correct width
     expect(right.lastWidth).toBe(expectedRightWidth);
     // Left component must receive leftWidth
@@ -84,14 +84,14 @@ describe("SplitPane", () => {
       expect(line).toContain("|");
     }
     // Line 1: right has content
-    expect(result[0].split("|")[1].trim()).toBe("R1");
+    expect(result[0]!.split("|")[1]!.trim()).toBe("R1");
     // Lines 2 and 3: right side should be padded empty (spaces or empty string)
-    expect(result[1].split("|")[1].trim()).toBe("");
-    expect(result[2].split("|")[1].trim()).toBe("");
+    expect(result[1]!.split("|")[1]!.trim()).toBe("");
+    expect(result[2]!.split("|")[1]!.trim()).toBe("");
     // Left side should still have its content on all 3 lines
-    expect(result[0].split("|")[0].trim()).toBe("L1");
-    expect(result[1].split("|")[0].trim()).toBe("L2");
-    expect(result[2].split("|")[0].trim()).toBe("L3");
+    expect(result[0]!.split("|")[0]!.trim()).toBe("L1");
+    expect(result[1]!.split("|")[0]!.trim()).toBe("L2");
+    expect(result[2]!.split("|")[0]!.trim()).toBe("L3");
   });
 
   test("handles right having more lines than left", () => {
@@ -106,14 +106,14 @@ describe("SplitPane", () => {
       expect(line).toContain("|");
     }
     // Line 1: left has content
-    expect(result[0].split("|")[0].trim()).toBe("L1");
+    expect(result[0]!.split("|")[0]!.trim()).toBe("L1");
     // Lines 2 and 3: left side should be padded empty
-    expect(result[1].split("|")[0].trim()).toBe("");
-    expect(result[2].split("|")[0].trim()).toBe("");
+    expect(result[1]!.split("|")[0]!.trim()).toBe("");
+    expect(result[2]!.split("|")[0]!.trim()).toBe("");
     // Right side has content on all 3 lines
-    expect(result[0].split("|")[1].trim()).toBe("R1");
-    expect(result[1].split("|")[1].trim()).toBe("R2");
-    expect(result[2].split("|")[1].trim()).toBe("R3");
+    expect(result[0]!.split("|")[1]!.trim()).toBe("R1");
+    expect(result[1]!.split("|")[1]!.trim()).toBe("R2");
+    expect(result[2]!.split("|")[1]!.trim()).toBe("R3");
   });
 
   test("single-line components", () => {
@@ -124,12 +124,12 @@ describe("SplitPane", () => {
     const result = sp.render(30);
     expect(result.length).toBe(1);
     // Left should be "only" padded to 8 chars
-    const sepIdx = result[0].indexOf("|");
-    const leftPart = result[0].slice(0, sepIdx);
+    const sepIdx = result[0]!.indexOf("|");
+    const leftPart = result[0]!.slice(0, sepIdx);
     expect(leftPart).toBe("only    "); // 4 chars + 4 spaces = 8
     expect(visibleWidth(leftPart)).toBe(8);
     // Right should contain "one"
-    const rightPart = result[0].slice(sepIdx + 1);
+    const rightPart = result[0]!.slice(sepIdx + 1);
     expect(rightPart.trimEnd()).toBe("one");
   });
 
@@ -139,7 +139,7 @@ describe("SplitPane", () => {
     const sp = new SplitPane(left, right, 5);
 
     const result = sp.render(20);
-    expect(result[0]).toContain("│");
+    expect(result[0]!).toContain("│");
   });
 
   test("setLeft and setRight replace child components", () => {
@@ -151,8 +151,8 @@ describe("SplitPane", () => {
     sp.setRight(stubComponent(["NEW"]));
 
     const result = sp.render(20);
-    expect(result[0]).toContain("NEW");
-    expect(result[0]).not.toContain("OLD");
+    expect(result[0]!).toContain("NEW");
+    expect(result[0]!).not.toContain("OLD");
   });
 
   test("setLeftWidth changes left column width", () => {
@@ -162,8 +162,8 @@ describe("SplitPane", () => {
 
     sp.setLeftWidth(12);
     const result = sp.render(30);
-    const sepIdx = result[0].indexOf("|");
-    const leftPart = result[0].slice(0, sepIdx);
+    const sepIdx = result[0]!.indexOf("|");
+    const leftPart = result[0]!.slice(0, sepIdx);
     expect(visibleWidth(leftPart)).toBe(12);
   });
 
@@ -173,8 +173,8 @@ describe("SplitPane", () => {
     const sp = new SplitPane(left, right, 5, "|");
 
     const result = sp.render(20);
-    const sepIdx = result[0].indexOf("|");
-    const leftPart = result[0].slice(0, sepIdx);
+    const sepIdx = result[0]!.indexOf("|");
+    const leftPart = result[0]!.slice(0, sepIdx);
     expect(visibleWidth(leftPart)).toBe(5);
   });
 
@@ -185,9 +185,9 @@ describe("SplitPane", () => {
 
     const result = sp.render(20);
     expect(result.length).toBe(1);
-    expect(result[0]).toContain("|");
+    expect(result[0]!).toContain("|");
     // Left part should be 5 spaces
-    const sepIdx = result[0].indexOf("|");
+    const sepIdx = result[0]!.indexOf("|");
     expect(sepIdx).toBe(5);
   });
 
@@ -209,11 +209,11 @@ describe("SplitPane", () => {
     const result = sp.render(30);
     expect(result.length).toBe(1);
     // Left should be padded to 8 visible chars (Hi + 6 spaces, with ANSI codes embedded)
-    const sepIdx = result[0].indexOf("|");
-    const leftPart = result[0].slice(0, sepIdx);
+    const sepIdx = result[0]!.indexOf("|");
+    const leftPart = result[0]!.slice(0, sepIdx);
     expect(visibleWidth(leftPart)).toBe(8);
     // Right side should contain the ANSI-colored "OK"
-    const rightPart = result[0].slice(sepIdx + 1);
+    const rightPart = result[0]!.slice(sepIdx + 1);
     expect(rightPart).toContain("OK");
     expect(visibleWidth(rightPart)).toBeGreaterThanOrEqual(2);
   });

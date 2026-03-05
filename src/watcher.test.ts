@@ -338,11 +338,11 @@ describe("AgentWatcher", () => {
       watcher.stop();
 
       // First update: 2 agents
-      expect(updates[0].map(a => a.id)).toEqual(["agent-a", "agent-b"]);
+      expect(updates[0]!.map(a => a.id)).toEqual(["agent-a", "agent-b"]);
       // Second update: 3 agents (C added)
-      expect(updates[1].map(a => a.id)).toEqual(["agent-a", "agent-b", "agent-c"]);
+      expect(updates[1]!.map(a => a.id)).toEqual(["agent-a", "agent-b", "agent-c"]);
       // Flat list matches
-      expect(flatUpdates[1].length).toBe(3);
+      expect(flatUpdates[1]!.length).toBe(3);
     });
 
     test("two-snapshot pipeline: agents removed between refreshes", async () => {
@@ -377,8 +377,8 @@ describe("AgentWatcher", () => {
       await watcher.refresh();
       watcher.stop();
 
-      expect(updates[0].map(a => a.id)).toEqual(["agent-a", "agent-b"]);
-      expect(updates[1].map(a => a.id)).toEqual(["agent-a"]);
+      expect(updates[0]!.map(a => a.id)).toEqual(["agent-a", "agent-b"]);
+      expect(updates[1]!.map(a => a.id)).toEqual(["agent-a"]);
     });
 
     test("two-snapshot pipeline: agent replaced between refreshes", async () => {
@@ -415,8 +415,8 @@ describe("AgentWatcher", () => {
       await watcher.refresh();
       watcher.stop();
 
-      expect(updates[0].map(a => a.id)).toEqual(["agent-a", "agent-b"]);
-      expect(updates[1].map(a => a.id)).toEqual(["agent-a", "agent-c"]);
+      expect(updates[0]!.map(a => a.id)).toEqual(["agent-a", "agent-b"]);
+      expect(updates[1]!.map(a => a.id)).toEqual(["agent-a", "agent-c"]);
     });
 
     test("detectAgentStates mutates agent state and result flows to onUpdate", async () => {
@@ -447,7 +447,7 @@ describe("AgentWatcher", () => {
 
       // The state mutation by detectAgentStates should be visible in onUpdate
       expect(receivedAgents.length).toBe(1);
-      expect(receivedAgents[0].state).toBe("running");
+      expect(receivedAgents[0]!.state).toBe("running");
       expect(mockDetectAgentStates).toHaveBeenCalledWith([agent1]);
     });
 
@@ -475,7 +475,7 @@ describe("AgentWatcher", () => {
       const states: string[] = [];
       const watcher = new AgentWatcher(
         [{ path: tempDir, name: "test" }],
-        { onUpdate: (agents) => { states.push(agents[0].state); } }
+        { onUpdate: (agents) => { states.push(agents[0]!.state); } }
       );
 
       await watcher.start();
@@ -491,8 +491,8 @@ describe("AgentWatcher", () => {
 
       mockReadAllAgents.mockResolvedValue({ agents: [agent1, agent2], errors: [] });
       mockDetectAgentStates.mockImplementation(async (agents: Agent[]) => {
-        agents[0].state = "running";
-        agents[1].state = "complete";
+        agents[0]!.state = "running";
+        agents[1]!.state = "complete";
       });
       mockBuildAgentTree.mockImplementation((agents) => {
         // Verify that agents passed to buildAgentTree have been mutated
@@ -513,9 +513,9 @@ describe("AgentWatcher", () => {
       watcher.stop();
 
       // buildAgentTree was called with agents that detectAgentStates already mutated
-      const argsToTree = mockBuildAgentTree.mock.calls[0][0];
-      expect(argsToTree[0].state).toBe("running");
-      expect(argsToTree[1].state).toBe("complete");
+      const argsToTree = mockBuildAgentTree.mock.calls[0]![0];
+      expect(argsToTree[0]!.state).toBe("running");
+      expect(argsToTree[1]!.state).toBe("complete");
     });
 
     test("questions are passed through from readPendingQuestions", async () => {
@@ -539,7 +539,7 @@ describe("AgentWatcher", () => {
       watcher.stop();
 
       expect(receivedQuestions.length).toBe(1);
-      expect(receivedQuestions[0].id).toBe("q-1");
+      expect(receivedQuestions[0]!.id).toBe("q-1");
     });
 
     test("multiple repos have questions merged", async () => {
@@ -587,7 +587,7 @@ describe("AgentWatcher", () => {
 
       // fs.watch on nonexistent dir should trigger onError
       expect(errors.length).toBeGreaterThanOrEqual(1);
-      expect(errors[0].message).toContain("Failed to watch");
+      expect(errors[0]!.message).toContain("Failed to watch");
     });
 
     test("onError called when readAllAgents returns errors", async () => {
@@ -635,7 +635,7 @@ describe("AgentWatcher", () => {
       watcher.stop();
 
       expect(errors.length).toBe(1);
-      expect(errors[0].message).toBe("disk on fire");
+      expect(errors[0]!.message).toBe("disk on fire");
     });
 
     test("onError handles non-Error throws", async () => {
@@ -658,7 +658,7 @@ describe("AgentWatcher", () => {
       watcher.stop();
 
       expect(errors.length).toBe(1);
-      expect(errors[0].message).toBe("string error");
+      expect(errors[0]!.message).toBe("string error");
     });
 
     test("continues working after error in refresh", async () => {

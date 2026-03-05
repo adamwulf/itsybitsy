@@ -44,13 +44,13 @@ export class SplitPane implements Component {
       const rl = i < rightLines.length ? rightLines[i] : "";
 
       // Pad left to exact width
-      const leftVisible = visibleWidth(ll);
+      const leftVisible = visibleWidth(ll!);
       const leftPadded = leftVisible >= lw
-        ? truncateToWidth(ll, lw, "")
+        ? truncateToWidth(ll!, lw, "")
         : ll + " ".repeat(lw - leftVisible);
 
       // Truncate right to fit
-      const rightTruncated = truncateToWidth(rl, rw, "");
+      const rightTruncated = truncateToWidth(rl!, rw, "");
 
       result.push(leftPadded + this.separator + rightTruncated);
     }

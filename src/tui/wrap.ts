@@ -42,7 +42,7 @@ export function wrapSingleLine(line: string, width: number): string[] {
     }
 
     // Measure the visible width of this character
-    const char = line[i];
+    const char = line[i]!;
     const charWidth = visibleWidth(char);
 
     // Check if adding this character would exceed the width

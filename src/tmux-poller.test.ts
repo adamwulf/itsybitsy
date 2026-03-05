@@ -45,8 +45,7 @@ describe("captureTmuxOutput", () => {
   });
 
   test("returns null when spawn throws", async () => {
-    // @ts-expect-error: monkey-patching Bun.spawn for testing
-    Bun.spawn = () => { throw new Error("spawn failed"); };
+    Bun.spawn = (() => { throw new Error("spawn failed"); }) as any;
     const result = await captureTmuxOutput("my-session");
     expect(result).toBeNull();
   });
@@ -169,8 +168,7 @@ describe("TmuxPoller", () => {
   });
 
   test("onError called when spawn throws", async () => {
-    // @ts-expect-error: monkey-patching Bun.spawn for testing
-    Bun.spawn = () => { throw new Error("tmux not found"); };
+    Bun.spawn = (() => { throw new Error("tmux not found"); }) as any;
     let errorMsg: string | undefined;
     poller = new TmuxPoller({
       onOutput() {},

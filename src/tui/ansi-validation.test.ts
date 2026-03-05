@@ -47,8 +47,8 @@ describe("ANSI passthrough validation", () => {
     // Red code for "rate_limited"
     expect(lines[1]).toContain("\x1b[31m");
     // Visible widths should be within bounds
-    expect(visibleWidth(lines[0])).toBeLessThanOrEqual(40);
-    expect(visibleWidth(lines[1])).toBeLessThanOrEqual(40);
+    expect(visibleWidth(lines[0]!)).toBeLessThanOrEqual(40);
+    expect(visibleWidth(lines[1]!)).toBeLessThanOrEqual(40);
   });
 
   test("Container preserves ANSI from child components", () => {
@@ -80,8 +80,8 @@ describe("ANSI passthrough validation", () => {
     expect(lines[0]).toContain("\x1b[31m");
     expect(lines[0]).toContain("\x1b[32m");
     // Total visible width should not exceed 50
-    expect(visibleWidth(lines[0])).toBeLessThanOrEqual(50);
+    expect(visibleWidth(lines[0]!)).toBeLessThanOrEqual(50);
     // Left side is padded to 20, separator is 1, right has content
-    expect(visibleWidth(lines[0])).toBeGreaterThanOrEqual(21);
+    expect(visibleWidth(lines[0]!)).toBeGreaterThanOrEqual(21);
   });
 });

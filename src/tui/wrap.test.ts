@@ -28,8 +28,8 @@ describe("wrapSingleLine", () => {
     expect(result.length).toBe(2);
     // First chunk should contain the red ANSI code
     expect(result[0]).toContain("\x1b[31m");
-    expect(visibleWidth(result[0])).toBe(8);
-    expect(visibleWidth(result[1])).toBe(5);
+    expect(visibleWidth(result[0]!)).toBe(8);
+    expect(visibleWidth(result[1]!)).toBe(5);
   });
 
   test("ANSI code at wrap boundary stays with current chunk", () => {
@@ -37,8 +37,8 @@ describe("wrapSingleLine", () => {
     const line = "abcd\x1b[32mefgh";
     const result = wrapSingleLine(line, 4);
     expect(result.length).toBe(2);
-    expect(visibleWidth(result[0])).toBe(4);
-    expect(visibleWidth(result[1])).toBe(4);
+    expect(visibleWidth(result[0]!)).toBe(4);
+    expect(visibleWidth(result[1]!)).toBe(4);
     // The ANSI code is consumed into the first chunk (after its 4 visible chars)
     expect(result[0]).toContain("\x1b[32m");
   });
@@ -68,8 +68,8 @@ describe("wrapSingleLine", () => {
     const result = wrapSingleLine(line, 4);
     // Should wrap at 4 visible columns = 2 CJK chars per line
     expect(result.length).toBe(2);
-    expect(visibleWidth(result[0])).toBe(4);
-    expect(visibleWidth(result[1])).toBe(4);
+    expect(visibleWidth(result[0]!)).toBe(4);
+    expect(visibleWidth(result[1]!)).toBe(4);
   });
 
   test("does not split a wide character across wrap boundary", () => {
@@ -77,7 +77,7 @@ describe("wrapSingleLine", () => {
     const line = "ab你c";
     const result = wrapSingleLine(line, 3);
     expect(result.length).toBe(2);
-    expect(visibleWidth(result[0])).toBe(2); // "ab" fits, "你" would exceed
+    expect(visibleWidth(result[0]!)).toBe(2); // "ab" fits, "你" would exceed
     expect(result[1]).toContain("你");
   });
 

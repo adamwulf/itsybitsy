@@ -493,6 +493,92 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(dashboard.dialog).toBeNull();
   });
 
+  test("a key with single repo skips repo select, goes straight to prompt", () => {
+    dashboard = new DashboardComponent();
+    dashboard.setRepos([{ path: "/repos/only", name: "only-repo" }]);
+    lastIbCall = null;
+
+    dashboard.handleInput("a");
+    // Should be input dialog (prompt), not select dialog (repo)
+    expect(dashboard.dialog!.type).toBe("input");
+    expect((dashboard.dialog as any).prompt).toContain("only-repo");
+  });
+
+  test("a key with multiple repos shows repo select first", () => {
+    dashboard = new DashboardComponent();
+    dashboard.setRepos([
+      { path: "/repos/one", name: "repo-one" },
+      { path: "/repos/two", name: "repo-two" },
+    ]);
+    lastIbCall = null;
+
+    dashboard.handleInput("a");
+    expect(dashboard.dialog!.type).toBe("select");
+    expect((dashboard.dialog as any).prompt).toContain("Select repo");
+  });
+
+  test("new-agent flag options: Worker sets worker flag", async () => {
+    dashboard = new DashboardComponent();
+    dashboard.setRepos([{ path: "/repos/only", name: "only-repo" }]);
+    lastIbCall = null;
+    setRunner(async (args, cwd) => {
+      lastIbCall = { args, cwd };
+      return { ok: true, exitCode: 0, stdout: "ok", stderr: "" };
+    });
+
+    dashboard.handleInput("a");
+    // Type prompt
+    for (const ch of "do stuff") dashboard.handleInput(ch);
+    dashboard.handleInput("\r");
+    // Flag select: pick "Worker (--worker)" (index 1)
+    expect(dashboard.dialog!.type).toBe("select");
+    dashboard.handleInput("j"); // move to index 1
+    dashboard.handleInput("\r");
+    await Bun.sleep(10);
+    expect(lastIbCall!.args).toEqual(["new-agent", "--worker", "do stuff"]);
+  });
+
+  test("new-agent flag options: Manager + YOLO sets yolo flag", async () => {
+    dashboard = new DashboardComponent();
+    dashboard.setRepos([{ path: "/repos/only", name: "only-repo" }]);
+    lastIbCall = null;
+    setRunner(async (args, cwd) => {
+      lastIbCall = { args, cwd };
+      return { ok: true, exitCode: 0, stdout: "ok", stderr: "" };
+    });
+
+    dashboard.handleInput("a");
+    for (const ch of "do stuff") dashboard.handleInput(ch);
+    dashboard.handleInput("\r");
+    // Pick "Manager + YOLO (--yolo)" (index 2)
+    dashboard.handleInput("j");
+    dashboard.handleInput("j");
+    dashboard.handleInput("\r");
+    await Bun.sleep(10);
+    expect(lastIbCall!.args).toEqual(["new-agent", "--yolo", "do stuff"]);
+  });
+
+  test("new-agent flag options: Worker + YOLO sets both flags", async () => {
+    dashboard = new DashboardComponent();
+    dashboard.setRepos([{ path: "/repos/only", name: "only-repo" }]);
+    lastIbCall = null;
+    setRunner(async (args, cwd) => {
+      lastIbCall = { args, cwd };
+      return { ok: true, exitCode: 0, stdout: "ok", stderr: "" };
+    });
+
+    dashboard.handleInput("a");
+    for (const ch of "do stuff") dashboard.handleInput(ch);
+    dashboard.handleInput("\r");
+    // Pick "Worker + YOLO (--worker --yolo)" (index 3)
+    dashboard.handleInput("j");
+    dashboard.handleInput("j");
+    dashboard.handleInput("j");
+    dashboard.handleInput("\r");
+    await Bun.sleep(10);
+    expect(lastIbCall!.args).toEqual(["new-agent", "--worker", "--yolo", "do stuff"]);
+  });
+
   test("A key toggles archived agents", () => {
     dashboard = new DashboardComponent();
     const agent1 = makeAgent("agent-active", "/repos/test");

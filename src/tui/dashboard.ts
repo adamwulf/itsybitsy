@@ -585,6 +585,11 @@ export class DashboardComponent implements Component {
       this.showMessage("No repos registered");
       return;
     }
+    // Single-repo shortcut: skip repo selection
+    if (this.repos.length === 1) {
+      this.showNewAgentPromptDialog(this.repos[0]!);
+      return;
+    }
     // Step 1: select repo
     this._dialog = {
       type: "select",
@@ -592,41 +597,49 @@ export class DashboardComponent implements Component {
       items: this.repos.map((r) => `${r.name} (${r.path})`),
       selectedIndex: 0,
       onSelect: (repoIndex: number) => {
-        const repo = this.repos[repoIndex]!;
-        // Step 2: enter prompt
-        this._dialog = {
-          type: "input",
-          prompt: `New agent prompt (repo: ${repo.name}):`,
-          value: "",
-          onSubmit: (prompt: string) => {
-            if (!prompt.trim()) {
-              this._dialog = null;
-              this.showMessage("New agent cancelled");
-              return;
-            }
-            const trimmedPrompt = prompt.trim();
-            // Step 3: select flags
-            this._dialog = {
-              type: "select",
-              prompt: "Agent type:",
-              items: ["manager (default)", "--worker", "--worker --yolo", "--worker --yolo --model opus"],
-              selectedIndex: 0,
-              onSelect: (flagIndex: number) => {
-                this._dialog = null;
-                const opts: NewAgentOptions = {};
-                if (flagIndex >= 1) opts.worker = true;
-                if (flagIndex >= 2) opts.yolo = true;
-                if (flagIndex === 3) opts.model = "opus";
-                this.executeAndRefresh(async () => {
-                  const result = await newAgent(repo.path, trimmedPrompt, opts);
-                  this.showMessage(result.ok ? `Created new agent in ${repo.name}` : `New agent failed: ${result.stderr || result.stdout}`);
-                });
-              },
-            };
-            this.tui?.requestRender();
-          },
-        };
-        this.tui?.requestRender();
+        this.showNewAgentPromptDialog(this.repos[repoIndex]!);
+      },
+    };
+    this.tui?.requestRender();
+  }
+
+  private showNewAgentPromptDialog(repo: RepoEntry) {
+    this._dialog = {
+      type: "input",
+      prompt: `New agent prompt (repo: ${repo.name}):`,
+      value: "",
+      onSubmit: (prompt: string) => {
+        if (!prompt.trim()) {
+          this._dialog = null;
+          this.showMessage("New agent cancelled");
+          return;
+        }
+        this.showNewAgentFlagsDialog(repo, prompt.trim());
+      },
+    };
+    this.tui?.requestRender();
+  }
+
+  private showNewAgentFlagsDialog(repo: RepoEntry, prompt: string) {
+    this._dialog = {
+      type: "select",
+      prompt: "Agent type:",
+      items: [
+        "Manager (default)",
+        "Worker (--worker)",
+        "Manager + YOLO (--yolo)",
+        "Worker + YOLO (--worker --yolo)",
+      ],
+      selectedIndex: 0,
+      onSelect: (flagIndex: number) => {
+        this._dialog = null;
+        const opts: NewAgentOptions = {};
+        if (flagIndex === 1 || flagIndex === 3) opts.worker = true;
+        if (flagIndex === 2 || flagIndex === 3) opts.yolo = true;
+        this.executeAndRefresh(async () => {
+          const result = await newAgent(repo.path, prompt, opts);
+          this.showMessage(result.ok ? `Created new agent in ${repo.name}` : `New agent failed: ${result.stderr || result.stdout}`);
+        });
       },
     };
     this.tui?.requestRender();

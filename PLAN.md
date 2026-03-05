@@ -366,31 +366,38 @@ Note: `tmux-poller.ts` was implemented in Phase 2/3. Phase 4 focuses on renderin
 
 ---
 
-### Phase 5: Agent Actions
-**Checkpoint:** All core `ib` actions are accessible from the TUI.
+### Phase 5.1: Core Agent Actions (Mutations)
+**Checkpoint:** Kill, resume, merge, send, and new-agent all work from the TUI with confirm dialogs.
 
-- [ ] `src/ib-commands.ts` — async wrappers for all `ib` mutations; **always sets `cwd` to the target repo root**
-- [ ] `x` — kill agent (confirm dialog, matches `ib watch`)
-- [ ] `!` — nuke/force-kill agent (confirm dialog, matches `ib watch`)
-- [ ] `R` — resume stopped agent (`ib resume`)
-- [ ] `r` — reassign agent's manager (dialog, matches `ib watch`)
-- [ ] `m` — merge agent (run `ib merge-check` first; show result in confirm dialog)
-- [ ] `s` — send message (dialog, matches `ib watch`)
-- [ ] `a` — new agent dialog: repo selector, prompt input, `--yolo`/`--worker`/`--model` flags; shells to `ib new-agent`
-- [ ] `d` — switch to DIFF pane (right pane mode 5, `ib diff` output)
-- [ ] `g` — switch to STATUS pane (right pane mode 6) when in normal context; navigate to agent when in QUESTIONS pane
-- [ ] `q` — switch to QUESTIONS pane (right pane mode 7); `Enter` to answer selected question via `ib send`; `ib acknowledge` to mark handled
-- [ ] `t` — cycle denials time filter (3 levels, only active in DENIALS pane mode 2)
-- [ ] Right pane mode 1 — INITIAL PROMPT: read `prompt.txt` directly
-- [ ] Right pane mode 2 — DENIALS: tool denials log (investigate source during implementation: likely filtered from `agent.log`)
-- [ ] Right pane mode 3 — TREE: full cross-repo agent tree
-- [ ] Right pane mode 4 — ERRORS: async errors; `c` to clear
-- [ ] `w` — open agent worktree in Finder (matches `ib watch`)
-- [ ] `o` — open external diff tool if configured (matches `ib watch`)
-- [ ] `@` — fuzzy jump to agent by name (dialog)
-- [ ] `/` — fuzzy jump to pane mode (dialog)
-- [ ] `h` — settings/setup dialog
-- [ ] `S` — capture tmux snapshot for debugging (matches `ib watch`)
+- [ ] `src/ib-commands.ts` — async wrappers for all `ib` mutations; **always sets `cwd` to the target repo root**; functions: `killAgent`, `nukeAgent`, `resumeAgent`, `reassignAgent`, `mergeAgent`, `mergeCheckAgent`, `sendMessage`, `newAgent`, `diffAgent`, `statusAgent`
+- [ ] `x` — kill agent: confirm dialog showing agent ID, then `ib kill {id}`
+- [ ] `!` — nuke/force-kill: confirm dialog, then `ib kill {id} --force`
+- [ ] `R` — resume stopped agent: `ib resume {id}` (only enabled when agent is stopped/complete)
+- [ ] `r` — reassign agent's manager: text input dialog, then `ib reassign {id} {new-manager}`
+- [ ] `m` — merge agent: run `ib merge-check {id}` first, show result in confirm dialog, then `ib merge {id} --force`
+- [ ] `s` — send message: text input dialog, then `ib send {id} "message"`
+- [ ] `a` — new agent: repo selector (from registry) → prompt input → optional flags (`--yolo`, `--worker`, `--model`); shells to `ib new-agent`
+
+---
+
+### Phase 5.2: Right Pane Content + Navigation
+**Checkpoint:** All right pane modes show real content. Fuzzy navigation, questions workflow, and remaining keybindings work.
+
+- [ ] Right pane mode 1 — INITIAL PROMPT: read `prompt.txt` from `.ittybitty/agents/{id}/prompt.txt`
+- [ ] Right pane mode 2 — DENIALS: tool denials log (investigate source during implementation: likely filtered from `agent.log` by looking for "PreToolUse" hook lines)
+- [ ] Right pane mode 3 — TREE: render full cross-repo agent tree as text (all repos, all agents, indented hierarchy)
+- [ ] Right pane mode 4 — ERRORS: async errors collected by watcher; `c` to clear
+- [ ] Right pane mode 5 — DIFF: `ib diff {id}` output, loaded async when pane is active
+- [ ] Right pane mode 6 — STATUS: `ib status {id}` output, loaded async when pane is active
+- [ ] `g` — STATUS pane in normal context; go-to-agent in QUESTIONS pane
+- [ ] `q` — QUESTIONS pane; `Enter` to answer selected question via `ib send`; `ib acknowledge` to dismiss without answering
+- [ ] `t` — cycle denials time filter (3 levels: all / last hour / last 10 min), only active in DENIALS pane
+- [ ] `@` — fuzzy jump to agent by name (pi-tui SelectList dialog)
+- [ ] `/` — fuzzy jump to pane mode (pi-tui SelectList dialog)
+- [ ] `w` — open agent worktree in Finder (`open {worktree}`)
+- [ ] `o` — open external diff tool if configured
+- [ ] `h` — settings/help dialog showing all keybindings
+- [ ] `S` — capture tmux snapshot for debugging (`ib snapshot {id}`)
 
 ---
 

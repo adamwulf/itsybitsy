@@ -1,5 +1,6 @@
 import { test, expect, describe } from "bun:test";
-import { truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
+import { truncateToWidth, visibleWidth, Text, Container } from "@mariozechner/pi-tui";
+import type { Component } from "@mariozechner/pi-tui";
 
 describe("ANSI passthrough validation", () => {
   test("visibleWidth ignores ANSI codes", () => {
@@ -15,13 +16,49 @@ describe("ANSI passthrough validation", () => {
     expect(visibleWidth(truncated)).toBeLessThanOrEqual(5);
   });
 
-  test("pi-tui Text render preserves ANSI in lines", () => {
-    // Text component's render returns string[] where each line must fit width
-    // ANSI codes are zero-width, so they don't count against the width
-    const line = "\x1b[32m✽ Processing\x1b[0m some task";
-    const truncated = truncateToWidth(line, 25, "");
-    expect(truncated).toContain("\x1b[32m");
-    expect(visibleWidth(truncated)).toBeLessThanOrEqual(25);
+  test("pi-tui Text component renders ANSI content", () => {
+    // Text wraps content with word-wrapping. Verify ANSI codes survive.
+    const ansiContent = "\x1b[32m✽ Processing\x1b[0m some task";
+    const text = new Text(ansiContent, 0, 0);
+    const lines = text.render(80);
+    // At least one line should contain our ANSI code
+    const hasAnsi = lines.some((l) => l.includes("\x1b[32m"));
+    expect(hasAnsi).toBe(true);
+  });
+
+  test("custom component with ANSI in render() output", () => {
+    // Simulate what dashboard components do — return ANSI-styled lines
+    class AnsiComponent implements Component {
+      invalidate() {}
+      render(width: number): string[] {
+        return [
+          truncateToWidth("\x1b[1m\x1b[32mrunning\x1b[0m agent-123", width, ""),
+          truncateToWidth("\x1b[31mrate_limited\x1b[0m agent-456", width, ""),
+        ];
+      }
+    }
+
+    const comp = new AnsiComponent();
+    const lines = comp.render(40);
+    expect(lines.length).toBe(2);
+    // Bold+green code for "running"
+    expect(lines[0]).toContain("\x1b[1m");
+    expect(lines[0]).toContain("\x1b[32m");
+    // Red code for "rate_limited"
+    expect(lines[1]).toContain("\x1b[31m");
+    // Visible widths should be within bounds
+    expect(visibleWidth(lines[0])).toBeLessThanOrEqual(40);
+    expect(visibleWidth(lines[1])).toBeLessThanOrEqual(40);
+  });
+
+  test("Container preserves ANSI from child components", () => {
+    // Container renders children vertically — verify ANSI passes through
+    const container = new Container();
+    const text = new Text("\x1b[34mblue text\x1b[0m", 0, 0);
+    container.addChild(text);
+    const lines = container.render(80);
+    const hasAnsi = lines.some((l) => l.includes("\x1b[34m"));
+    expect(hasAnsi).toBe(true);
   });
 
   test("SplitPane preserves ANSI across panes", async () => {

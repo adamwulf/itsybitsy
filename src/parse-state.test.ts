@@ -232,12 +232,21 @@ describe("parseState", () => {
       const input = "line1\n(Esc to interrupt)\nCompacting conversation\nline4\nline5";
       expect(parseState(input).state).toBe("compacting");
     });
-    test("tool waiting in last 15 beats running in last 5 (checked first)", () => {
-      // Order: compacting (5) → tool waiting (15) → running (5)
-      // Tool waiting is checked before active running, so it wins
+    test("running in last 5 beats tool waiting in last 15", () => {
+      // Order: compacting (5) → running (5) → tool waiting (15)
+      // Active running in last 5 takes priority over stale tool waiting
       const lines = Array(10).fill("line");
       lines.push("⎿  Waiting");
       lines.push("(Esc to interrupt)");
+      lines.push("line");
+      lines.push("line");
+      lines.push("line");
+      expect(parseState(lines.join("\n")).state).toBe("running");
+    });
+    test("tool waiting wins when no running indicator in last 5", () => {
+      const lines = Array(10).fill("line");
+      lines.push("⎿  Waiting");
+      lines.push("line");
       lines.push("line");
       lines.push("line");
       lines.push("line");

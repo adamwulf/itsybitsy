@@ -1,4 +1,5 @@
-import { join } from "path";
+import { join, resolve, basename } from "path";
+import { homedir } from "os";
 
 export interface RepoEntry {
   path: string;
@@ -10,7 +11,7 @@ export interface RegistryData {
 }
 
 function registryPath(): string {
-  return join(process.env.HOME ?? require("os").homedir(), ".itsybitsy.json");
+  return join(process.env.HOME ?? homedir(), ".itsybitsy.json");
 }
 
 export async function loadRegistry(): Promise<RegistryData> {
@@ -34,7 +35,7 @@ export async function saveRegistry(data: RegistryData): Promise<void> {
 }
 
 export async function addRepo(repoPath: string, name?: string): Promise<{ ok: boolean; message: string }> {
-  const resolved = require("path").resolve(repoPath);
+  const resolved = resolve(repoPath);
   const registry = await loadRegistry();
 
   // Check for duplicate
@@ -42,21 +43,14 @@ export async function addRepo(repoPath: string, name?: string): Promise<{ ok: bo
     return { ok: false, message: `Already registered: ${resolved}` };
   }
 
-  // Validate .ittybitty dir exists
-  const ittybittyDir = join(resolved, ".ittybitty");
-  const dirExists = await Bun.file(join(ittybittyDir, "repo-id")).exists();
-  if (!dirExists) {
-    // Allow adding even without .ittybitty, but warn
-  }
-
-  const repoName = name ?? require("path").basename(resolved);
+  const repoName = name ?? basename(resolved);
   registry.repos.push({ path: resolved, name: repoName });
   await saveRegistry(registry);
   return { ok: true, message: `Added: ${repoName} (${resolved})` };
 }
 
 export async function removeRepo(repoPath: string): Promise<{ ok: boolean; message: string }> {
-  const resolved = require("path").resolve(repoPath);
+  const resolved = resolve(repoPath);
   const registry = await loadRegistry();
   const before = registry.repos.length;
   registry.repos = registry.repos.filter((r) => r.path !== resolved);

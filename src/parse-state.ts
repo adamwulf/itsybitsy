@@ -79,14 +79,16 @@ export function parseState(input: string): ParseStateResult {
     return { state: "compacting", reason: "Compacting conversation in last 5 lines" };
   }
 
+  // Active running indicators in last 5 lines — checked BEFORE tool waiting
+  // because if agent resumed running (showing Esc to interrupt in last 5),
+  // a stale ⎿ Waiting in lines 6-15 should not override it.
+  if (/\([Ee]sc to interrupt|\(ctrl\+c to interrupt|⎿  Running/.test(last5)) {
+    return { state: "running", reason: "active execution indicator in last 5 lines" };
+  }
+
   // Tool waiting: "⎿  Waiting" means a tool is executing
   if (/⎿\s*Waiting/.test(last15)) {
     return { state: "waiting", reason: "tool waiting (⎿ Waiting)" };
-  }
-
-  // Active running indicators in last 5 lines
-  if (/\([Ee]sc to interrupt|\(ctrl\+c to interrupt|⎿  Running/.test(last5)) {
-    return { state: "running", reason: "active execution indicator in last 5 lines" };
   }
 
   // Rate limit checks in last 15 lines

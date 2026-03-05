@@ -14,9 +14,12 @@ import {
 import type { Component } from "@mariozechner/pi-tui";
 import { listRepos } from "../registry";
 import { AgentWatcher } from "../watcher";
+import { TmuxPoller } from "../tmux-poller";
 import type { FlatAgent } from "../watcher";
 import type { Agent, PendingQuestion } from "../agents";
 import { SplitPane } from "./split-pane";
+
+const MAX_TREE_HEIGHT = 7;
 
 // State color map
 const STATE_COLORS: Record<string, string> = {
@@ -66,11 +69,12 @@ function formatAgentRow(
   return `${sel}${truncateToWidth(line, width, "")}${selEnd}`;
 }
 
-/** Agent tree component */
+/** Agent tree component with height constraint and scrolling */
 class AgentTreeComponent implements Component {
   flatList: FlatAgent[] = [];
   selectedIndex = 0;
   showArchived = false;
+  private scrollOffset = 0;
 
   get visibleList(): FlatAgent[] {
     if (this.showArchived) return this.flatList;
@@ -85,10 +89,30 @@ class AgentTreeComponent implements Component {
     return null;
   }
 
+  toggleArchived() {
+    this.showArchived = !this.showArchived;
+    // Clamp selection after toggling
+    const visible = this.visibleList;
+    if (this.selectedIndex >= visible.length) {
+      this.selectedIndex = Math.max(0, visible.length - 1);
+    }
+    this.ensureSelectedVisible();
+  }
+
   moveSelection(delta: number) {
     const visible = this.visibleList;
     if (visible.length === 0) return;
     this.selectedIndex = Math.max(0, Math.min(visible.length - 1, this.selectedIndex + delta));
+    this.ensureSelectedVisible();
+  }
+
+  /** Keep selected index within the visible scroll window */
+  private ensureSelectedVisible() {
+    if (this.selectedIndex < this.scrollOffset) {
+      this.scrollOffset = this.selectedIndex;
+    } else if (this.selectedIndex >= this.scrollOffset + MAX_TREE_HEIGHT) {
+      this.scrollOffset = this.selectedIndex - MAX_TREE_HEIGHT + 1;
+    }
   }
 
   invalidate(): void {}
@@ -100,18 +124,25 @@ class AgentTreeComponent implements Component {
     }
 
     const lines: string[] = [];
-    // Group by repo
-    let currentRepo = "";
-    for (let i = 0; i < visible.length; i++) {
+    const start = this.scrollOffset;
+    const end = Math.min(visible.length, start + MAX_TREE_HEIGHT);
+
+    // Scroll indicator at top
+    if (start > 0) {
+      lines.push(truncateToWidth(`${DIM}  ▲ ${start} more${RESET}`, width, ""));
+    }
+
+    for (let i = start; i < end; i++) {
       const { agent, depth } = visible[i];
-      if (agent.repoName !== currentRepo) {
-        currentRepo = agent.repoName;
-        if (depth === 0) {
-          // Only show repo header for top-level agents
-        }
-      }
       lines.push(formatAgentRow(agent, depth, i === this.selectedIndex, width));
     }
+
+    // Scroll indicator at bottom
+    const remaining = visible.length - end;
+    if (remaining > 0) {
+      lines.push(truncateToWidth(`${DIM}  ▼ ${remaining} more${RESET}`, width, ""));
+    }
+
     return lines;
   }
 }
@@ -192,9 +223,10 @@ class RightPaneComponent implements Component {
   }
 }
 
-/** Tmux output placeholder (Phase 4 will add real capture) */
+/** Tmux output pane — shows live tmux capture for the selected agent */
 class TmuxPaneComponent implements Component {
   agent: Agent | null = null;
+  rawOutput: string = "";
 
   invalidate(): void {}
 
@@ -202,11 +234,15 @@ class TmuxPaneComponent implements Component {
     if (!this.agent) {
       return [truncateToWidth(`${DIM}No agent selected${RESET}`, width, "")];
     }
-    return [
-      truncateToWidth(`${BOLD}Live output: ${this.agent.id}${RESET}`, width, ""),
-      truncateToWidth(`${DIM}tmux: ${this.agent.meta.tmux_session}${RESET}`, width, ""),
-      truncateToWidth(`${DIM}(Phase 4: live tmux capture)${RESET}`, width, ""),
-    ];
+    if (!this.rawOutput) {
+      return [
+        truncateToWidth(`${BOLD}${this.agent.id}${RESET} ${DIM}(${this.agent.meta.tmux_session})${RESET}`, width, ""),
+        truncateToWidth(`${DIM}Waiting for tmux output...${RESET}`, width, ""),
+      ];
+    }
+    // Show raw output with ANSI, truncated per line
+    const lines = this.rawOutput.split("\n");
+    return lines.map((line) => truncateToWidth(line, width, ""));
   }
 }
 
@@ -242,6 +278,7 @@ class DashboardComponent implements Component {
   private statusBar: StatusBarComponent;
   private tui: TUI | null = null;
   private modeIndex = 0;
+  private tmuxPoller: TmuxPoller;
 
   constructor() {
     this.agentTree = new AgentTreeComponent();
@@ -251,10 +288,26 @@ class DashboardComponent implements Component {
 
     // Split pane: tmux left (~60 cols), right pane on right
     this.splitPane = new SplitPane(this.tmuxPane, this.rightPane, 60);
+
+    // Tmux poller for live output of selected agent
+    this.tmuxPoller = new TmuxPoller({
+      onOutput: (raw, _stripped) => {
+        this.tmuxPane.rawOutput = raw;
+        this.tui?.requestRender();
+      },
+    });
   }
 
   setTui(tui: TUI) {
     this.tui = tui;
+  }
+
+  startPolling() {
+    this.tmuxPoller.start();
+  }
+
+  stopPolling() {
+    this.tmuxPoller.stop();
   }
 
   onUpdate(agents: Agent[], flatList: FlatAgent[], questions: PendingQuestion[]) {
@@ -264,10 +317,7 @@ class DashboardComponent implements Component {
     this.statusBar.pendingQuestions = questions.length;
 
     // Update selected agent info
-    const selected = this.agentTree.selectedAgent;
-    this.rightPane.agent = selected;
-    this.tmuxPane.agent = selected;
-    this.rightPane.updateContent();
+    this.syncSelectedAgent();
 
     this.tui?.requestRender();
   }
@@ -277,6 +327,12 @@ class DashboardComponent implements Component {
     this.rightPane.agent = selected;
     this.tmuxPane.agent = selected;
     this.rightPane.updateContent();
+
+    // Update tmux poller target
+    this.tmuxPoller.setAgent(
+      selected?.meta.tmux_session ?? null,
+      selected?.repoPath ?? null
+    );
   }
 
   private cyclePaneMode(delta: number) {
@@ -332,6 +388,12 @@ class DashboardComponent implements Component {
       this.tui?.requestRender();
     } else if (data === "q") {
       this.jumpToMode("QUESTIONS");
+      this.tui?.requestRender();
+    }
+    // Toggle archived agents
+    else if (data === "a") {
+      this.agentTree.toggleArchived();
+      this.syncSelectedAgent();
       this.tui?.requestRender();
     }
     // Scroll pane content
@@ -398,6 +460,7 @@ export async function launchDashboard(): Promise<void> {
   // Global input handler
   tui.addInputListener((data) => {
     if (matchesKey(data, Key.ctrl("c"))) {
+      dashboard.stopPolling();
       watcher.stop();
       tui.stop();
       process.exit(0);
@@ -418,5 +481,6 @@ export async function launchDashboard(): Promise<void> {
   });
 
   tui.start();
+  dashboard.startPolling();
   await watcher.start();
 }

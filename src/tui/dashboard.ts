@@ -534,6 +534,10 @@ export class DashboardComponent implements Component {
     this.showMessage(`Running merge-check for ${agent.id}...`);
     mergeCheckAgent(agent).then((checkResult) => {
       const checkOutput = checkResult.stdout || checkResult.stderr || "(no output)";
+      if (!checkResult.ok) {
+        this.showMessage(`Merge-check failed for ${agent.id}: ${checkOutput}`);
+        return;
+      }
       this.dialog = {
         type: "confirm",
         prompt: `Merge ${agent.id}?\n${checkOutput}\n(y/n)`,
@@ -590,15 +594,31 @@ export class DashboardComponent implements Component {
           prompt: `New agent prompt (repo: ${repo.name}):`,
           value: "",
           onSubmit: (prompt: string) => {
-            this.dialog = null;
             if (!prompt.trim()) {
+              this.dialog = null;
               this.showMessage("New agent cancelled");
               return;
             }
-            this.executeAndRefresh(async () => {
-              const result = await newAgent(repo.path, prompt.trim());
-              this.showMessage(result.ok ? `Created new agent in ${repo.name}` : `New agent failed: ${result.stderr || result.stdout}`);
-            });
+            const trimmedPrompt = prompt.trim();
+            // Step 3: select flags
+            this.dialog = {
+              type: "select",
+              prompt: "Agent type:",
+              items: ["manager (default)", "--worker", "--worker --yolo", "--worker --yolo --model opus"],
+              selectedIndex: 0,
+              onSelect: (flagIndex: number) => {
+                this.dialog = null;
+                const opts: NewAgentOptions = {};
+                if (flagIndex >= 1) opts.worker = true;
+                if (flagIndex >= 2) opts.yolo = true;
+                if (flagIndex === 3) opts.model = "opus";
+                this.executeAndRefresh(async () => {
+                  const result = await newAgent(repo.path, trimmedPrompt, opts);
+                  this.showMessage(result.ok ? `Created new agent in ${repo.name}` : `New agent failed: ${result.stderr || result.stdout}`);
+                });
+              },
+            };
+            this.tui?.requestRender();
           },
         };
         this.tui?.requestRender();
@@ -825,9 +845,9 @@ export class DashboardComponent implements Component {
     lines.push(truncateToWidth(`${DIM}${"─".repeat(width)}${RESET}`, width, ""));
 
     // Compute available height for split pane
-    const statusHeight = 2;
+    const bottomHeight = this.dialog ? this.dialogHeight() : 2;
     const separatorHeight = 1; // bottom separator before status
-    const usedHeight = lines.length + separatorHeight + statusHeight;
+    const usedHeight = lines.length + separatorHeight + bottomHeight;
     const terminalRows = process.stdout.rows || 24;
     const availableHeight = Math.max(5, terminalRows - usedHeight);
 
@@ -854,6 +874,17 @@ export class DashboardComponent implements Component {
     return lines;
   }
 
+  private dialogHeight(): number {
+    if (!this.dialog) return 2;
+    if (this.dialog.type === "confirm") {
+      const maxLines = 8;
+      const promptLines = this.dialog.prompt.split("\n").length;
+      const capped = Math.min(promptLines, maxLines) + (promptLines > maxLines ? 1 : 0);
+      return Math.max(2, capped);
+    }
+    return 2; // message, input, select all use 2 lines
+  }
+
   private renderDialog(width: number): string[] {
     if (!this.dialog) return [];
 
@@ -866,13 +897,16 @@ export class DashboardComponent implements Component {
 
     if (this.dialog.type === "confirm") {
       const promptLines = this.dialog.prompt.split("\n");
+      const maxLines = 8; // Cap to avoid overflowing the terminal
       const lines: string[] = [];
-      for (const pl of promptLines) {
+      for (const pl of promptLines.slice(0, maxLines)) {
         lines.push(truncateToWidth(`${BOLD}${pl}${RESET}`, width, ""));
       }
-      // Ensure exactly 2 lines for consistent layout
+      if (promptLines.length > maxLines) {
+        lines.push(truncateToWidth(`${DIM}... ${promptLines.length - maxLines} more lines${RESET}`, width, ""));
+      }
+      // Ensure at least 2 lines
       while (lines.length < 2) lines.push("");
-      if (lines.length > 2) lines.splice(2);
       return lines;
     }
 

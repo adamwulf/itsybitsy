@@ -725,8 +725,11 @@ describe("AgentWatcher", () => {
       await mkdir(newAgentDir, { recursive: true });
       await writeFile(join(newAgentDir, "meta.json"), '{"id":"agent-new"}');
 
-      // Wait for debounce
-      await new Promise((r) => setTimeout(r, 400));
+      // Poll until the debounced refresh fires (50ms intervals, up to 2s)
+      const deadline = Date.now() + 2000;
+      while (updateCount <= initial && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
 
       expect(updateCount).toBeGreaterThan(initial);
 

@@ -8,6 +8,7 @@ export interface RepoEntry {
 
 export interface RegistryData {
   repos: RepoEntry[];
+  diffTool?: string;
 }
 
 function registryPath(): string {

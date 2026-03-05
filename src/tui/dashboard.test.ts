@@ -197,6 +197,42 @@ describe("TmuxPaneComponent scroll logic", () => {
     expect(result[1]).toBe("line 2");
     expect(result[2]).toBe("line 3");
   });
+
+  test("wrapped long lines expand line count and scrollBack accounts for it", () => {
+    const pane = new TmuxPaneComponent();
+    pane.agent = makeAgent("agent-wrap", "/tmp/test");
+    pane.hasPolled = true;
+    pane.displayHeight = 5;
+    // Create 3 lines, each 30 chars wide — at width=10, each wraps to 3 lines = 9 total
+    pane.rawOutput = [
+      "AAAAAAAAAA" + "BBBBBBBBBB" + "CCCCCCCCCC",
+      "1111111111" + "2222222222" + "3333333333",
+      "XXXXXXXXXX" + "YYYYYYYYYY" + "ZZZZZZZZZZ",
+    ].join("\n");
+
+    // scrollBack=0: show bottom 5 of 9 wrapped lines (auto-follow)
+    pane.scrollBack = 0;
+    const result = pane.render(10);
+    expect(result.length).toBe(5);
+    // Last visible content line should be the last wrap segment
+    const nonEmpty = result.filter((l) => l.length > 0);
+    expect(nonEmpty[nonEmpty.length - 1]).toBe("ZZZZZZZZZZ");
+
+    // scrollBack=4: scroll up 4 from bottom, showing from the top
+    // 9 wrapped lines, displayHeight=5, so maxScrollBack=4
+    pane.scrollBack = 4;
+    const scrolled = pane.render(10);
+    expect(scrolled.length).toBe(5);
+    // contentHeight = 5-1 = 4 (scroll indicator reserves 1 line)
+    // end = 9-4 = 5, start = max(0, 5-4) = 1
+    // So we see wrapped lines [1..4]: "BBBBBBBBBB", "CCCCCCCCCC", "1111111111", "2222222222"
+    expect(scrolled[0]).toBe("BBBBBBBBBB");
+    expect(scrolled[1]).toBe("CCCCCCCCCC");
+    expect(scrolled[2]).toBe("1111111111");
+    expect(scrolled[3]).toBe("2222222222");
+    // Line 4 is the scroll indicator (truncated to width=10, so check for "4 lin")
+    expect(scrolled[4]).toContain("4 lin");
+  });
 });
 
 describe("RightPaneComponent scroll logic", () => {
@@ -218,6 +254,10 @@ describe("RightPaneComponent scroll logic", () => {
     expect(result.length).toBe(10);
     // First line is the header
     expect(result[0]).toContain("INITIAL PROMPT");
+    // Content starts with "Prompt:" header then blank line then first prompt line
+    expect(result[1]).toContain("Prompt:");
+    expect(result[2]).toBe("");
+    expect(result[3]).toContain("prompt line 1");
   });
 
   test("scrollOffset clamped to maxOffset", () => {
@@ -250,6 +290,15 @@ describe("RightPaneComponent scroll logic", () => {
     const result = pane.render(80);
 
     expect(result.length).toBe(10);
+    // Header + "Prompt:" + "" + 2 prompt lines = 4 content lines after header
+    expect(result[0]).toContain("INITIAL PROMPT");
+    expect(result[1]).toContain("Prompt:");
+    expect(result[3]).toContain("prompt line 1");
+    expect(result[4]).toContain("prompt line 2");
+    // Remaining lines should be empty padding
+    for (let i = 5; i < 10; i++) {
+      expect(result[i]).toBe("");
+    }
   });
 
   test("setMode resets scrollOffset to 0", () => {

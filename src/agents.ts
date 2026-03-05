@@ -239,6 +239,50 @@ export async function detectAgentStates(agents: Agent[]): Promise<void> {
 }
 
 /**
+ * Read prompt.txt for a given agent.
+ * Falls back to meta.prompt if prompt.txt doesn't exist.
+ */
+export async function readAgentPrompt(agent: Agent): Promise<string[]> {
+  const dir = agent.archived ? "archive" : "agents";
+  const promptPath = join(agent.repoPath, ".ittybitty", dir, agent.id, "prompt.txt");
+  try {
+    const file = Bun.file(promptPath);
+    if (!(await file.exists())) {
+      // Fall back to meta.json prompt field
+      return agent.meta.prompt ? agent.meta.prompt.split("\n") : ["No prompt available"];
+    }
+    const text = await file.text();
+    return text ? text.split("\n") : ["prompt.txt is empty"];
+  } catch {
+    return agent.meta.prompt ? agent.meta.prompt.split("\n") : ["Failed to read prompt"];
+  }
+}
+
+export interface DenialEntry {
+  timestamp: string;
+  epoch: number;
+  line: string;
+}
+
+/**
+ * Parse agent.log for tool denial lines.
+ * Format: [YYYY-MM-DD HH:MM:SS] [PreToolUse] Permission denied: ...
+ */
+export function parseDenials(logLines: string[]): DenialEntry[] {
+  const denials: DenialEntry[] = [];
+  const pattern = /^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\] \[PreToolUse\] Permission denied:/;
+  for (const line of logLines) {
+    const match = pattern.exec(line);
+    if (match) {
+      const timestamp = match[1]!;
+      const epoch = new Date(timestamp.replace(" ", "T")).getTime() / 1000;
+      denials.push({ timestamp, epoch, line });
+    }
+  }
+  return denials;
+}
+
+/**
  * Read agent.log file for a given agent.
  * Returns the log content as an array of lines, or a placeholder message.
  */

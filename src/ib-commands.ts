@@ -104,3 +104,7 @@ export async function diffAgent(agent: Agent): Promise<IbCommandResult> {
 export async function statusAgent(agent: Agent): Promise<IbCommandResult> {
   return runIb(["status", agent.id], agent.repoPath);
 }
+
+export async function acknowledgeQuestion(repoPath: string, questionId: string): Promise<IbCommandResult> {
+  return runIb(["acknowledge", questionId], repoPath);
+}

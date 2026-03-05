@@ -241,8 +241,8 @@ describe("RightPaneComponent scroll logic", () => {
     const pane = new RightPaneComponent();
     pane.displayHeight = displayHeight;
     pane.agent = makeAgent("agent-right", "/tmp/test");
-    // Use INITIAL PROMPT mode and set a long prompt to generate content
-    pane.agent!.meta.prompt = Array.from({ length: contentLines }, (_, i) => `prompt line ${i + 1}`).join("\n");
+    // Set promptContent directly (loaded async in real use)
+    pane.promptContent = Array.from({ length: contentLines }, (_, i) => `prompt line ${i + 1}`);
     pane.setMode("INITIAL PROMPT");
     return pane;
   }

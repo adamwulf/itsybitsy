@@ -1,6 +1,6 @@
 /**
  * Main TUI dashboard — agent tree + live tmux pane.
- * Phase 5.1: agent mutations with confirm/input dialogs.
+ * Phase 5.2: right pane content for all modes.
  */
 
 import {
@@ -16,8 +16,8 @@ import { listRepos } from "../registry";
 import type { RepoEntry } from "../registry";
 import { AgentWatcher } from "../watcher";
 import { TmuxPoller } from "../tmux-poller";
-import { readAgentLog } from "../agents";
-import type { Agent, FlatAgent, PendingQuestion } from "../agents";
+import { readAgentLog, readAgentPrompt, parseDenials } from "../agents";
+import type { Agent, FlatAgent, PendingQuestion, DenialEntry } from "../agents";
 import { SplitPane } from "./split-pane";
 import { wrapLines } from "./wrap";
 import {
@@ -29,6 +29,9 @@ import {
   mergeAgent,
   sendMessage,
   newAgent,
+  diffAgent,
+  statusAgent,
+  acknowledgeQuestion,
 } from "../ib-commands";
 import type { NewAgentOptions } from "../ib-commands";
 
@@ -73,6 +76,10 @@ const PANE_MODES = [
 ] as const;
 type PaneMode = (typeof PANE_MODES)[number];
 
+// Denials time filter levels
+const DENIAL_FILTERS = ["all", "1h", "10m"] as const;
+type DenialFilter = (typeof DENIAL_FILTERS)[number];
+
 /** Format agent row for the tree */
 function formatAgentRow(
   agent: Agent,
@@ -111,6 +118,18 @@ class AgentTreeComponent implements Component {
       return visible[this.selectedIndex]!.agent;
     }
     return null;
+  }
+
+  /** Select agent by ID. Returns true if found. */
+  selectAgentById(agentId: string): boolean {
+    const visible = this.visibleList;
+    const idx = visible.findIndex((f) => f.agent.id === agentId);
+    if (idx !== -1) {
+      this.selectedIndex = idx;
+      this.ensureSelectedVisible();
+      return true;
+    }
+    return false;
   }
 
   toggleArchived() {
@@ -180,6 +199,15 @@ export class RightPaneComponent implements Component {
   scrollOffset = 0;
   displayHeight = 20;
   agentLogContent: string[] | null = null;
+  promptContent: string[] | null = null;
+  denialsContent: DenialEntry[] | null = null;
+  denialFilter: DenialFilter = "all";
+  errors: string[] = [];
+  diffContent: string[] | null = null;
+  diffLoading = false;
+  statusContent: string[] | null = null;
+  statusLoading = false;
+  questionsSelectedIndex = 0;
   private content: string[] = [];
 
   invalidate(): void {}
@@ -199,41 +227,93 @@ export class RightPaneComponent implements Component {
             : [`${DIM}No agent selected${RESET}`]);
         break;
       case "INITIAL PROMPT":
-        this.content = this.agent
-          ? [`${BOLD}Prompt:${RESET}`, "", ...this.agent.meta.prompt.split("\n")]
-          : [`${DIM}No agent selected${RESET}`];
+        if (!this.agent) {
+          this.content = [`${DIM}No agent selected${RESET}`];
+        } else if (this.promptContent) {
+          this.content = [`${BOLD}Prompt:${RESET}`, "", ...this.promptContent];
+        } else {
+          this.content = [`${DIM}Loading prompt.txt...${RESET}`];
+        }
         break;
       case "DENIALS":
-        this.content = [`${DIM}Denials view (Phase 5)${RESET}`];
+        if (!this.agent) {
+          this.content = [`${DIM}No agent selected${RESET}`];
+        } else if (!this.denialsContent) {
+          this.content = [`${DIM}Loading denials...${RESET}`];
+        } else {
+          const filtered = this.filterDenials(this.denialsContent);
+          const filterLabel = this.denialFilter === "all" ? "all time" : `last ${this.denialFilter}`;
+          this.content = [`${DIM}Filter: ${filterLabel} (t to cycle)  ${filtered.length} denial(s)${RESET}`];
+          if (filtered.length === 0) {
+            this.content.push(`${DIM}No denials found${RESET}`);
+          } else {
+            for (const d of filtered) {
+              this.content.push(`${DIM}[${d.timestamp}]${RESET} ${d.line.replace(/^\[.*?\] /, "")}`);
+            }
+          }
+        }
         break;
       case "TREE":
         this.content = this.allAgents.map(({ agent, depth }) => {
           const indent = "  ".repeat(depth);
           const icon = agent.meta.worker ? "⚙" : "◆";
           const stateColor = STATE_COLORS[agent.state] ?? STATE_COLORS.unknown;
-          return `${indent}${icon} ${agent.repoName}/${agent.id}  ${stateColor}${agent.state}${RESET}`;
+          return `${indent}${icon} ${agent.repoName}/${agent.id}  ${stateColor}${agent.state}${RESET}  ${agent.age}  ${agent.meta.model}`;
         });
         if (this.content.length === 0) this.content = [`${DIM}No agents${RESET}`];
         break;
       case "ERRORS":
-        this.content = [`${DIM}No errors${RESET}`];
+        if (this.errors.length === 0) {
+          this.content = [`${DIM}No errors${RESET}`];
+        } else {
+          this.content = [`${DIM}${this.errors.length} error(s) — press 'c' to clear${RESET}`, ""];
+          this.content.push(...this.errors);
+        }
         break;
       case "DIFF":
-        this.content = [`${DIM}Diff view (Phase 5: ib diff)${RESET}`];
+        if (!this.agent) {
+          this.content = [`${DIM}No agent selected${RESET}`];
+        } else if (this.diffLoading) {
+          this.content = [`${DIM}Loading diff...${RESET}`];
+        } else if (this.diffContent) {
+          this.content = this.diffContent;
+        } else {
+          this.content = [`${DIM}Press 'd' to load diff${RESET}`];
+        }
         break;
       case "STATUS":
-        this.content = [`${DIM}Status view (Phase 5: ib status)${RESET}`];
+        if (!this.agent) {
+          this.content = [`${DIM}No agent selected${RESET}`];
+        } else if (this.statusLoading) {
+          this.content = [`${DIM}Loading status...${RESET}`];
+        } else if (this.statusContent) {
+          this.content = this.statusContent;
+        } else {
+          this.content = [`${DIM}Press 'g' to load status${RESET}`];
+        }
         break;
       case "QUESTIONS":
         if (this.questions.length === 0) {
           this.content = [`${DIM}No pending questions${RESET}`];
         } else {
           this.content = this.questions.map(
-            (q) => `${BOLD}${q.agent}:${RESET} ${q.question}`
+            (q, i) => {
+              const sel = i === this.questionsSelectedIndex ? `${GREEN}> ` : "  ";
+              const selEnd = i === this.questionsSelectedIndex ? RESET : "";
+              return `${sel}${BOLD}${q.agent}:${RESET} ${q.question}${selEnd}`;
+            }
           );
+          this.content.push("", `${DIM}Enter:answer  Esc:acknowledge  g:go to agent${RESET}`);
         }
         break;
     }
+  }
+
+  private filterDenials(denials: DenialEntry[]): DenialEntry[] {
+    if (this.denialFilter === "all") return denials;
+    const now = Math.floor(Date.now() / 1000);
+    const cutoff = this.denialFilter === "1h" ? now - 3600 : now - 600;
+    return denials.filter((d) => d.epoch >= cutoff);
   }
 
   render(width: number): string[] {
@@ -406,6 +486,11 @@ export class DashboardComponent implements Component {
     return this._dialog;
   }
 
+  /** Read-only access to errors (for testing) */
+  get errors(): string[] {
+    return this.rightPane.errors;
+  }
+
   constructor() {
     this.agentTree = new AgentTreeComponent();
     this.rightPane = new RightPaneComponent();
@@ -443,6 +528,21 @@ export class DashboardComponent implements Component {
 
   setRepos(repos: RepoEntry[]) {
     this.repos = repos;
+  }
+
+  /** Add an error to the errors list (called from watcher onError) */
+  addError(message: string) {
+    const ts = new Date().toLocaleTimeString();
+    this.rightPane.errors.push(`${DIM}[${ts}]${RESET} ${message}`);
+    this.rightPane.updateContent();
+    this.tui?.requestRender();
+  }
+
+  /** Clear all errors */
+  clearErrors() {
+    this.rightPane.errors = [];
+    this.rightPane.updateContent();
+    this.tui?.requestRender();
   }
 
   private showMessage(text: string) {
@@ -649,6 +749,71 @@ export class DashboardComponent implements Component {
     this.tui?.requestRender();
   }
 
+  private handleAnswerQuestion() {
+    const questions = this.rightPane.questions;
+    const idx = this.rightPane.questionsSelectedIndex;
+    if (idx < 0 || idx >= questions.length) return;
+    const q = questions[idx]!;
+    // Find the agent for this question to get repoPath
+    const agentEntry = this.agentTree.flatList.find((f) => f.agent.id === q.agent);
+    if (!agentEntry) {
+      this.showMessage(`Agent ${q.agent} not found`);
+      return;
+    }
+    this._dialog = {
+      type: "input",
+      prompt: `Answer ${q.agent}'s question:`,
+      value: "",
+      onSubmit: (answer: string) => {
+        this._dialog = null;
+        if (!answer.trim()) {
+          this.showMessage("Answer cancelled");
+          return;
+        }
+        this.executeAndRefresh(async () => {
+          const ackResult = await acknowledgeQuestion(agentEntry.agent.repoPath, q.id);
+          if (!ackResult.ok) {
+            this.showMessage(`Acknowledge failed: ${ackResult.stderr || ackResult.stdout}`);
+            return;
+          }
+          const sendResult = await sendMessage(agentEntry.agent, answer.trim());
+          this.showMessage(sendResult.ok ? `Answered ${q.agent}` : `Send failed: ${sendResult.stderr || sendResult.stdout}`);
+        });
+      },
+    };
+    this.tui?.requestRender();
+  }
+
+  private handleAcknowledgeQuestion() {
+    const questions = this.rightPane.questions;
+    const idx = this.rightPane.questionsSelectedIndex;
+    if (idx < 0 || idx >= questions.length) return;
+    const q = questions[idx]!;
+    const agentEntry = this.agentTree.flatList.find((f) => f.agent.id === q.agent);
+    if (!agentEntry) {
+      this.showMessage(`Agent ${q.agent} not found`);
+      return;
+    }
+    this.executeAndRefresh(async () => {
+      const result = await acknowledgeQuestion(agentEntry.agent.repoPath, q.id);
+      this.showMessage(result.ok ? `Acknowledged ${q.id}` : `Acknowledge failed: ${result.stderr || result.stdout}`);
+    });
+  }
+
+  private handleGoToQuestionAgent() {
+    const questions = this.rightPane.questions;
+    const idx = this.rightPane.questionsSelectedIndex;
+    if (idx < 0 || idx >= questions.length) return;
+    const q = questions[idx]!;
+    if (this.agentTree.selectAgentById(q.agent)) {
+      this.syncSelectedAgent();
+      this.jumpToMode("AGENT LOG");
+      this.tui?.requestRender();
+    } else {
+      this.showMessage(`Agent ${q.agent} not found in tree`);
+    }
+  }
+
   private handleDialogInput(data: string): boolean {
     if (!this._dialog) return false;
 
@@ -711,6 +876,11 @@ export class DashboardComponent implements Component {
     this.rightPane.allAgents = flatList;
     this.statusBar.pendingQuestions = questions.length;
 
+    // Clamp questions selection
+    if (this.rightPane.questionsSelectedIndex >= questions.length) {
+      this.rightPane.questionsSelectedIndex = Math.max(0, questions.length - 1);
+    }
+
     // Update selected agent info
     this.syncSelectedAgent();
 
@@ -722,15 +892,22 @@ export class DashboardComponent implements Component {
     this.rightPane.agent = selected;
     this.tmuxPane.agent = selected;
 
-    // If agent changed, reset tmux pane state and reload agent log
+    // If agent changed, reset tmux pane state and reload agent data
     const newId = selected?.id ?? null;
     if (newId !== this.currentAgentId) {
       this.currentAgentId = newId;
       this.tmuxPane.resetForAgent();
       this.rightPane.agentLogContent = null;
+      this.rightPane.promptContent = null;
+      this.rightPane.denialsContent = null;
+      this.rightPane.diffContent = null;
+      this.rightPane.diffLoading = false;
+      this.rightPane.statusContent = null;
+      this.rightPane.statusLoading = false;
       this.rightPane.scrollOffset = 0;
       if (selected) {
         this.loadAgentLog(selected);
+        this.loadAgentPrompt(selected);
       }
     }
 
@@ -745,8 +922,67 @@ export class DashboardComponent implements Component {
     // Only apply if we're still looking at the same agent
     if (this.currentAgentId === agent.id) {
       this.rightPane.agentLogContent = content;
+      // Also parse denials from the log
+      this.rightPane.denialsContent = parseDenials(content);
       this.rightPane.updateContent();
       this.tui?.requestRender();
+    }
+  }
+
+  private async loadAgentPrompt(agent: Agent) {
+    const content = await readAgentPrompt(agent);
+    if (this.currentAgentId === agent.id) {
+      this.rightPane.promptContent = content;
+      this.rightPane.updateContent();
+      this.tui?.requestRender();
+    }
+  }
+
+  private async loadDiff(agent: Agent) {
+    if (this.rightPane.diffLoading) return;
+    this.rightPane.diffLoading = true;
+    this.rightPane.updateContent();
+    this.tui?.requestRender();
+    try {
+      const result = await diffAgent(agent);
+      if (this.currentAgentId === agent.id) {
+        const output = result.stdout || result.stderr || "(no output)";
+        this.rightPane.diffContent = output.split("\n");
+        this.rightPane.diffLoading = false;
+        this.rightPane.updateContent();
+        this.tui?.requestRender();
+      }
+    } catch (err) {
+      if (this.currentAgentId === agent.id) {
+        this.rightPane.diffContent = [`Error loading diff: ${err}`];
+        this.rightPane.diffLoading = false;
+        this.rightPane.updateContent();
+        this.tui?.requestRender();
+      }
+    }
+  }
+
+  private async loadStatus(agent: Agent) {
+    if (this.rightPane.statusLoading) return;
+    this.rightPane.statusLoading = true;
+    this.rightPane.updateContent();
+    this.tui?.requestRender();
+    try {
+      const result = await statusAgent(agent);
+      if (this.currentAgentId === agent.id) {
+        const output = result.stdout || result.stderr || "(no output)";
+        this.rightPane.statusContent = output.split("\n");
+        this.rightPane.statusLoading = false;
+        this.rightPane.updateContent();
+        this.tui?.requestRender();
+      }
+    } catch (err) {
+      if (this.currentAgentId === agent.id) {
+        this.rightPane.statusContent = [`Error loading status: ${err}`];
+        this.rightPane.statusLoading = false;
+        this.rightPane.updateContent();
+        this.tui?.requestRender();
+      }
     }
   }
 
@@ -755,6 +991,7 @@ export class DashboardComponent implements Component {
     this.rightPane.setMode(PANE_MODES[this.modeIndex]!);
     this.statusBar.currentMode = PANE_MODES[this.modeIndex]!;
     this.statusBar.modeIndex = this.modeIndex;
+    this.triggerAsyncLoadIfNeeded();
   }
 
   private jumpToMode(mode: PaneMode) {
@@ -764,6 +1001,19 @@ export class DashboardComponent implements Component {
       this.rightPane.setMode(mode);
       this.statusBar.currentMode = mode;
       this.statusBar.modeIndex = idx;
+      this.triggerAsyncLoadIfNeeded();
+    }
+  }
+
+  /** Trigger async loading for modes that need it */
+  private triggerAsyncLoadIfNeeded() {
+    const agent = this.agentTree.selectedAgent;
+    if (!agent) return;
+    const mode = PANE_MODES[this.modeIndex]!;
+    if (mode === "DIFF" && !this.rightPane.diffContent && !this.rightPane.diffLoading) {
+      this.loadDiff(agent);
+    } else if (mode === "STATUS" && !this.rightPane.statusContent && !this.rightPane.statusLoading) {
+      this.loadStatus(agent);
     }
   }
 
@@ -773,13 +1023,28 @@ export class DashboardComponent implements Component {
 
     // Navigation
     if (matchesKey(data, Key.down) || data === "j") {
-      this.agentTree.moveSelection(1);
-      this.syncSelectedAgent();
-      this.tui?.requestRender();
+      if (this.rightPane.mode === "QUESTIONS" && this.rightPane.questions.length > 0) {
+        this.rightPane.questionsSelectedIndex = Math.min(
+          this.rightPane.questions.length - 1,
+          this.rightPane.questionsSelectedIndex + 1
+        );
+        this.rightPane.updateContent();
+        this.tui?.requestRender();
+      } else {
+        this.agentTree.moveSelection(1);
+        this.syncSelectedAgent();
+        this.tui?.requestRender();
+      }
     } else if (matchesKey(data, Key.up) || data === "k") {
-      this.agentTree.moveSelection(-1);
-      this.syncSelectedAgent();
-      this.tui?.requestRender();
+      if (this.rightPane.mode === "QUESTIONS" && this.rightPane.questions.length > 0) {
+        this.rightPane.questionsSelectedIndex = Math.max(0, this.rightPane.questionsSelectedIndex - 1);
+        this.rightPane.updateContent();
+        this.tui?.requestRender();
+      } else {
+        this.agentTree.moveSelection(-1);
+        this.syncSelectedAgent();
+        this.tui?.requestRender();
+      }
     }
     // Right pane cycling: p = forward/next, n = backward/previous
     // Left arrow maps to p (forward), right arrow maps to n (backward)
@@ -796,7 +1061,7 @@ export class DashboardComponent implements Component {
       this.tui?.requestRender();
     } else if (data === "g") {
       if (this.rightPane.mode === "QUESTIONS") {
-        // Navigate to agent that asked the question (Phase 5)
+        this.handleGoToQuestionAgent();
       } else {
         this.jumpToMode("STATUS");
         this.tui?.requestRender();
@@ -807,6 +1072,33 @@ export class DashboardComponent implements Component {
     } else if (data === "q") {
       this.jumpToMode("QUESTIONS");
       this.tui?.requestRender();
+    }
+    // Denials time filter
+    else if (data === "t") {
+      if (this.rightPane.mode === "DENIALS") {
+        const currentIdx = DENIAL_FILTERS.indexOf(this.rightPane.denialFilter);
+        this.rightPane.denialFilter = DENIAL_FILTERS[(currentIdx + 1) % DENIAL_FILTERS.length]!;
+        this.rightPane.updateContent();
+        this.tui?.requestRender();
+      }
+    }
+    // Clear errors
+    else if (data === "c") {
+      if (this.rightPane.mode === "ERRORS") {
+        this.clearErrors();
+      }
+    }
+    // Enter: answer question in QUESTIONS pane
+    else if (matchesKey(data, Key.enter)) {
+      if (this.rightPane.mode === "QUESTIONS" && this.rightPane.questions.length > 0) {
+        this.handleAnswerQuestion();
+      }
+    }
+    // Escape: acknowledge question in QUESTIONS pane
+    else if (matchesKey(data, Key.escape)) {
+      if (this.rightPane.mode === "QUESTIONS" && this.rightPane.questions.length > 0) {
+        this.handleAcknowledgeQuestion();
+      }
     }
     // Toggle archived agents
     else if (data === "A") {
@@ -978,8 +1270,7 @@ export async function launchDashboard(): Promise<void> {
       dashboard.onUpdate(agents, flatList, questions);
     },
     onError: (err) => {
-      // Log to stderr to avoid corrupting TUI output
-      process.stderr.write(`Watcher error: ${err.message}\n`);
+      dashboard.addError(err.message);
     },
   });
 

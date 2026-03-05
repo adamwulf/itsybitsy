@@ -230,7 +230,7 @@ The agent tree at top shows all agents across all registered repos, grouped by r
 |---|---|
 | 0 — AGENT LOG | `agent.log` read directly |
 | 1 — INITIAL PROMPT | Full prompt from `prompt.txt` |
-| 2 — DENIALS | Tool denials log |
+| 2 — DENIALS | Tool denials log (parsed from `agent.log` or tmux output; source TBD during Phase 5 implementation) |
 | 3 — TREE | Full agent tree (all repos) |
 | 4 — ERRORS | Agent creation/async errors |
 | 5 — DIFF | `ib diff` output |
@@ -247,11 +247,12 @@ Matching `ib watch` keybindings exactly where possible; new keys noted.
 - `/` — fuzzy jump to pane mode by name
 
 **Right pane**
-- `p` / `n` or ← / → — cycle right pane mode forward/backward
+- `p` / `n` — cycle right pane mode forward/backward; `←` maps to `p` (forward/next), `→` maps to `n` (backward/previous) — note: counterintuitive arrow direction, matches ib watch exactly
 - `d` — jump directly to DIFF pane
-- `g` — jump directly to STATUS pane
+- `g` — jump to STATUS pane when in normal context; "go to agent" when in QUESTIONS pane (navigates to the agent that asked the selected question). Note: ib watch's help claims `g` = status jump but it's dead code in the bash implementation — itsybitsy intentionally implements both behaviors correctly
 - `e` — jump directly to ERRORS pane
 - `q` — jump directly to QUESTIONS pane
+- `t` — cycle denials time filter (only active in DENIALS pane, mode 2); 3 filter levels
 - `;` — scroll pane down (show older content)
 - `l` — scroll pane up (toward bottom / newer content)
 
@@ -335,7 +336,7 @@ Each phase ends at a usable checkpoint — something that works and can be teste
 
 - [ ] `src/tui/dashboard.ts` — main TUI layout: agent tree at top (scrolls with selection), split pane below (tmux left + cycling right pane)
 - [ ] Agent tree: all agents across all repos, grouped by repo, recursive manager/child indentation, workers with distinct icon (`⚙`), state color-coded
-- [ ] Right pane modes 0–7 (see layout table above); `p`/`n` to cycle, direct jump keys `d`/`g`/`e`/`q`
+- [ ] Right pane modes 0–7 (see layout table above); `p`/`n` to cycle, direct jump keys `d`/`g`/`e`/`q`; **right pane mode is global dashboard state** — persists across agent selection changes (user's pane choice is not reset when they navigate between agents)
 - [ ] Keyboard navigation: `j/k` or arrow keys through agent tree; `;`/`l` scroll pane content
 - [ ] Wire watcher events to TUI re-renders (`tui.requestRender()`)
 - [ ] Status bar showing pending question count badge and available keybindings
@@ -366,14 +367,15 @@ Each phase ends at a usable checkpoint — something that works and can be teste
 - [ ] `s` — send message (dialog, matches `ib watch`)
 - [ ] `a` — new agent dialog: repo selector, prompt input, `--yolo`/`--worker`/`--model` flags; shells to `ib new-agent`
 - [ ] `d` — switch to DIFF pane (right pane mode 5, `ib diff` output)
-- [ ] `g` — switch to STATUS pane (right pane mode 6, `ib status` output)
+- [ ] `g` — switch to STATUS pane (right pane mode 6) when in normal context; navigate to agent when in QUESTIONS pane
 - [ ] `q` — switch to QUESTIONS pane (right pane mode 7); `Enter` to answer selected question via `ib send`; `ib acknowledge` to mark handled
+- [ ] `t` — cycle denials time filter (3 levels, only active in DENIALS pane mode 2)
 - [ ] Right pane mode 1 — INITIAL PROMPT: read `prompt.txt` directly
-- [ ] Right pane mode 2 — DENIALS: tool denials log
+- [ ] Right pane mode 2 — DENIALS: tool denials log (investigate source during implementation: likely filtered from `agent.log`)
 - [ ] Right pane mode 3 — TREE: full cross-repo agent tree
 - [ ] Right pane mode 4 — ERRORS: async errors; `c` to clear
-- [ ] `G` — open agent's tmux session in Ghostty (new key, `g` is taken)
 - [ ] `w` — open agent worktree in Finder (matches `ib watch`)
+- [ ] `o` — open external diff tool if configured (matches `ib watch`)
 - [ ] `@` — fuzzy jump to agent by name (dialog)
 - [ ] `/` — fuzzy jump to pane mode (dialog)
 - [ ] `h` — settings/setup dialog
@@ -385,7 +387,7 @@ Each phase ends at a usable checkpoint — something that works and can be teste
 **Checkpoint:** Production-ready single binary you can install and use daily.
 
 - [ ] `src/ghostty.ts` — `ghostty --command="tmux attach -t {tmux_session}"`; detect if Ghostty is available; degrade gracefully
-- [ ] `G` keybinding — open selected agent's tmux session in Ghostty (`g` is reserved for STATUS pane)
+- [ ] `G` keybinding wired up — open selected agent's tmux session in Ghostty (`g` is reserved for STATUS pane / go-to-agent)
 - [ ] `bun build --compile` produces a single self-contained binary
 - [ ] README with install instructions and keybinding reference
 - [ ] Polish error messages: missing `ib`/`tmux`, unreadable repos, malformed `meta.json`
@@ -396,5 +398,5 @@ Each phase ends at a usable checkpoint — something that works and can be teste
 **Checkpoint:** An agent in repo A can send a message to an agent in repo B from within itsybitsy.
 
 - [ ] Design message broker protocol (itsybitsy writes to destination `.ittybitty/` in `ib send` format)
-- [ ] `x` keybinding — cross-repo send: pick destination repo + agent, enter message
+- [ ] `X` keybinding — cross-repo send: pick destination repo + agent, enter message (`x` is already kill-agent)
 - [ ] No changes required to `ib` itself

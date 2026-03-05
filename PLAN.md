@@ -380,8 +380,8 @@ Note: `tmux-poller.ts` was implemented in Phase 2/3. Phase 4 focuses on renderin
 
 ---
 
-### Phase 5.2: Right Pane Content + Navigation
-**Checkpoint:** All right pane modes show real content. Fuzzy navigation, questions workflow, and remaining keybindings work.
+### Phase 5.2: Right Pane Content
+**Checkpoint:** All right pane modes show real content. Must be merged before Phase 5.3 begins (both phases touch dashboard.ts).
 
 - [ ] Right pane mode 1 — INITIAL PROMPT: read `prompt.txt` from `.ittybitty/agents/{id}/prompt.txt`
 - [ ] Right pane mode 2 — DENIALS: tool denials log (investigate source during implementation: likely filtered from `agent.log` by looking for "PreToolUse" hook lines)
@@ -392,6 +392,12 @@ Note: `tmux-poller.ts` was implemented in Phase 2/3. Phase 4 focuses on renderin
 - [ ] `g` — STATUS pane in normal context; go-to-agent in QUESTIONS pane
 - [ ] `q` — QUESTIONS pane; `Enter` to answer selected question via `ib send`; `ib acknowledge` to dismiss without answering
 - [ ] `t` — cycle denials time filter (3 levels: all / last hour / last 10 min), only active in DENIALS pane
+
+---
+
+### Phase 5.3: Navigation & Remaining Keybindings
+**Checkpoint:** Fuzzy navigation, questions workflow, and all remaining keybindings work. Requires Phase 5.2 to be merged first.
+
 - [ ] `@` — fuzzy jump to agent by name (pi-tui SelectList dialog)
 - [ ] `/` — fuzzy jump to pane mode (pi-tui SelectList dialog)
 - [ ] `w` — open agent worktree in Finder (`open {worktree}`)

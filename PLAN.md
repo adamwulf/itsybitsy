@@ -201,15 +201,84 @@ Agents currently communicate via files in their own `.ittybitty/` dir.
 itsybitsy can act as a message broker: write to the destination repo's `.ittybitty/`
 in the same format that `ib send` uses. Does not require changes to `ib`.
 
-## Build Order
+## Phases
 
-1. `registry.ts` + `add/remove/list` CLI — no external deps, easy to test
-2. `agents.ts` — read `.ittybitty/agents/` directly, define `Agent` type
-3. `parse-state.ts` — port `parse_state` from bash; unit-testable
-4. `watcher.ts` — `fs.watch` + tmux poll loop, emit events
-5. `tui/dashboard.ts` — agent tree + live pane, wired to watcher
-6. `ib-commands.ts` — kill, merge, send, new-agent, diff wrappers
-7. `ghostty.ts` — open tmux in Ghostty
-8. Diff view pane
-9. New-agent flow (prompt UI)
-10. `bun build --compile` single binary
+Each phase ends at a usable checkpoint — something that works and can be tested end-to-end.
+
+---
+
+### Phase 1: CLI Foundation
+**Checkpoint:** `itsybitsy add/remove/list` works. You can register and inspect repos from the command line.
+
+- [ ] `src/index.ts` — CLI entrypoint, parse `add/remove/list/watch` subcommands
+- [ ] `src/registry.ts` — read/write `~/.itsybitsy.json`; add, remove, list repos
+- [ ] Wire up `itsybitsy add [path]`, `itsybitsy remove [path]`, `itsybitsy list`
+- [ ] Unit tests for registry
+
+---
+
+### Phase 2: Agent Data Layer
+**Checkpoint:** `itsybitsy list` (or a debug command) prints all agents across all registered repos with correct states — no TUI yet.
+
+- [ ] `src/agents.ts` — read `.ittybitty/agents/` directly; define `Agent` and `AgentState` types
+- [ ] `src/parse-state.ts` — port `parse_state` bash logic to TypeScript; all state rules
+- [ ] `src/watcher.ts` — `fs.watch` on each repo's `.ittybitty/agents/`; emit `agentAdded`, `agentChanged`, `agentRemoved` events; `Promise.all` across repos
+- [ ] Unit tests for `parse-state.ts` (it's pure string matching — highly testable)
+
+---
+
+### Phase 3: Basic TUI Dashboard
+**Checkpoint:** `itsybitsy watch` launches a live TUI showing all agents across all repos, grouped by repo, with their states auto-updating via `fs.watch`.
+
+- [ ] `src/tui/dashboard.ts` — main TUI layout skeleton using pi-tui
+- [ ] Left pane: agent tree grouped by repo, showing `id`, `state`, `age`, `model`, truncated prompt
+- [ ] Tree structure: manager agents at root, children indented beneath them
+- [ ] State indicators (color-coded by state)
+- [ ] Keyboard navigation: `j/k` or arrow keys to move through agent list
+- [ ] Wire watcher events to TUI re-renders (`tui.requestRender()`)
+- [ ] `q` to quit
+
+---
+
+### Phase 4: Live Tmux Pane
+**Checkpoint:** Selecting an agent shows its live Claude session output in a right-hand pane, updating every ~1s.
+
+- [ ] Right pane: `tmux capture-pane -t {tmux_session} -p -S -100 -E -` output rendered as scrollable text
+- [ ] Poll every ~1s for the selected agent (only); pause polling when no agent selected
+- [ ] ANSI passthrough so colors/formatting from Claude render correctly
+- [ ] `Enter` to select agent / toggle focus between panes
+- [ ] Graceful display when tmux session doesn't exist (agent stopped)
+
+---
+
+### Phase 5: Agent Actions
+**Checkpoint:** All core `ib` actions are accessible from the TUI — kill, merge, send, new-agent, diff.
+
+- [ ] `src/ib-commands.ts` — async wrappers for `ib kill`, `ib merge`, `ib send`, `ib new-agent`, `ib diff`
+- [ ] `k` — kill selected agent (confirm prompt)
+- [ ] `m` — merge selected agent (confirm prompt)
+- [ ] `s` — send message to selected agent (inline input field)
+- [ ] `d` — diff view: replace right pane with `ib diff` output for selected agent
+- [ ] `n` — new agent: prompt for repo (if multiple registered) and task description; shell to `ib new-agent`
+- [ ] `l` — look/log view: show `agent.log` for selected agent in right pane
+- [ ] Status bar at bottom showing available keybindings for current context
+
+---
+
+### Phase 6: Ghostty Integration & Distribution
+**Checkpoint:** Production-ready single binary you can install and use daily.
+
+- [ ] `src/ghostty.ts` — `ghostty --command="tmux attach -t {tmux_session}"`; detect if Ghostty is available; degrade gracefully
+- [ ] `g` keybinding — open selected agent's tmux session in Ghostty
+- [ ] `bun build --compile` produces a single self-contained binary
+- [ ] README with install instructions and keybinding reference
+- [ ] Error handling: missing `ib`/`tmux`, unreadable repos, malformed `meta.json`
+
+---
+
+### Phase 7 (v2): Cross-Repo Messaging
+**Checkpoint:** An agent in repo A can send a message to an agent in repo B from within itsybitsy.
+
+- [ ] Design message broker protocol (itsybitsy writes to destination `.ittybitty/` in `ib send` format)
+- [ ] `x` keybinding — cross-repo send: pick destination repo + agent, enter message
+- [ ] No changes required to `ib` itself

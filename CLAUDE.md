@@ -152,7 +152,8 @@ Compacting (last 5) > Active running (last 5) > Tool waiting (last 15) > Rate li
 ### Dashboard (src/tui/dashboard.ts)
 - Agent tree: max 7 visible rows with scroll indicators
 - Right pane mode is global state — persists across agent selection changes
-- `a` toggles archived agents visibility
+- `A` toggles archived agents visibility; `a` opens new-agent dialog
+- Agent actions: `x` kill, `!` nuke, `R` resume, `r` reassign, `m` merge, `s` send, `a` new-agent
 - `p`/`n` cycle pane modes (p=forward, n=backward); arrow keys mapped counterintuitively to match ib watch
 - TmuxPaneComponent: wraps lines via `wrapLines()`, scroll-back from bottom (`scrollBack` = lines from end, 0 = auto-follow)
 - `hasPolled` flag distinguishes "waiting for first poll" from "session not found" — enables graceful stopped/orphaned display
@@ -160,3 +161,9 @@ Compacting (last 5) > Active running (last 5) > Tool waiting (last 15) > Rate li
 - Both panes pad to `displayHeight` for consistent vertical alignment
 - `readAgentLog()` is async — loaded on agent selection change, stale-checked by agent ID
 - `;`/`l` scroll both tmux (left) and right pane simultaneously
+- Dialog system: confirm (y/n), text input, select list — renders in status bar area, variable height for confirm
+
+### ib-commands (src/ib-commands.ts)
+- All mutations use `Bun.spawn(["ib", ...args], { cwd })` for safe argument passing (no word-splitting)
+- `setRunner()`/`resetRunner()` for test injection — mock the runner to verify args without executing ib
+- Always sets `cwd` to `agent.repoPath` — ib requires running from a git repo root

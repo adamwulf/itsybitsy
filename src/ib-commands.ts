@@ -12,18 +12,25 @@ export interface IbCommandResult {
   stderr: string;
 }
 
-/** Pluggable runner — defaults to Bun.$, overridable for tests */
+/** Pluggable runner — defaults to Bun.spawn, overridable for tests */
 export type IbRunner = (args: string[], cwd: string) => Promise<IbCommandResult>;
 
 const defaultRunner: IbRunner = async (args, cwd) => {
-  const result = await Bun.$`ib ${args}`.cwd(cwd).nothrow().quiet();
-  const stdout = result.stdout.toString().trim();
-  const stderr = result.stderr.toString().trim();
+  const proc = Bun.spawn(["ib", ...args], {
+    cwd,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [stdout, stderr] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
+  const exitCode = await proc.exited;
   return {
-    ok: result.exitCode === 0,
-    exitCode: result.exitCode,
-    stdout,
-    stderr,
+    ok: exitCode === 0,
+    exitCode,
+    stdout: stdout.trim(),
+    stderr: stderr.trim(),
   };
 };
 

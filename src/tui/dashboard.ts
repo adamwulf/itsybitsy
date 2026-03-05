@@ -396,9 +396,14 @@ export class DashboardComponent implements Component {
   private modeIndex = 0;
   private tmuxPoller: TmuxPoller;
   private currentAgentId: string | null = null;
-  dialog: DialogState = null;
+  private _dialog: DialogState = null;
   private watcher: AgentWatcher | null = null;
   private repos: RepoEntry[] = [];
+
+  /** Read-only access to dialog state (for testing) */
+  get dialog(): DialogState {
+    return this._dialog;
+  }
 
   constructor() {
     this.agentTree = new AgentTreeComponent();
@@ -440,11 +445,11 @@ export class DashboardComponent implements Component {
   }
 
   private showMessage(text: string) {
-    this.dialog = { type: "message", text };
+    this._dialog = { type: "message", text };
     this.tui?.requestRender();
     setTimeout(() => {
-      if (this.dialog?.type === "message" && this.dialog.text === text) {
-        this.dialog = null;
+      if (this._dialog?.type === "message" && this._dialog.text === text) {
+        this._dialog = null;
         this.tui?.requestRender();
       }
     }, 3000);
@@ -462,11 +467,11 @@ export class DashboardComponent implements Component {
   private handleKill() {
     const agent = this.agentTree.selectedAgent;
     if (!agent) return;
-    this.dialog = {
+    this._dialog = {
       type: "confirm",
       prompt: `Kill agent ${agent.id}? (y/n)`,
       onYes: () => {
-        this.dialog = null;
+        this._dialog = null;
         this.executeAndRefresh(async () => {
           const result = await killAgent(agent);
           this.showMessage(result.ok ? `Killed ${agent.id}` : `Kill failed: ${result.stderr || result.stdout}`);
@@ -479,11 +484,11 @@ export class DashboardComponent implements Component {
   private handleNuke() {
     const agent = this.agentTree.selectedAgent;
     if (!agent) return;
-    this.dialog = {
+    this._dialog = {
       type: "confirm",
       prompt: `${RED}FORCE KILL ${agent.id}? This cannot be undone. (y/n)${RESET}`,
       onYes: () => {
-        this.dialog = null;
+        this._dialog = null;
         this.executeAndRefresh(async () => {
           const result = await nukeAgent(agent);
           this.showMessage(result.ok ? `Nuked ${agent.id}` : `Nuke failed: ${result.stderr || result.stdout}`);
@@ -509,12 +514,12 @@ export class DashboardComponent implements Component {
   private handleReassign() {
     const agent = this.agentTree.selectedAgent;
     if (!agent) return;
-    this.dialog = {
+    this._dialog = {
       type: "input",
       prompt: `Reassign ${agent.id} to manager:`,
       value: "",
       onSubmit: (newManager: string) => {
-        this.dialog = null;
+        this._dialog = null;
         if (!newManager.trim()) {
           this.showMessage("Reassign cancelled");
           return;
@@ -538,11 +543,11 @@ export class DashboardComponent implements Component {
         this.showMessage(`Merge-check failed for ${agent.id}: ${checkOutput}`);
         return;
       }
-      this.dialog = {
+      this._dialog = {
         type: "confirm",
         prompt: `Merge ${agent.id}?\n${checkOutput}\n(y/n)`,
         onYes: () => {
-          this.dialog = null;
+          this._dialog = null;
           this.executeAndRefresh(async () => {
             const result = await mergeAgent(agent);
             this.showMessage(result.ok ? `Merged ${agent.id}` : `Merge failed: ${result.stderr || result.stdout}`);
@@ -556,12 +561,12 @@ export class DashboardComponent implements Component {
   private handleSend() {
     const agent = this.agentTree.selectedAgent;
     if (!agent) return;
-    this.dialog = {
+    this._dialog = {
       type: "input",
       prompt: `Send message to ${agent.id}:`,
       value: "",
       onSubmit: (message: string) => {
-        this.dialog = null;
+        this._dialog = null;
         if (!message.trim()) {
           this.showMessage("Send cancelled");
           return;
@@ -581,7 +586,7 @@ export class DashboardComponent implements Component {
       return;
     }
     // Step 1: select repo
-    this.dialog = {
+    this._dialog = {
       type: "select",
       prompt: "Select repo for new agent:",
       items: this.repos.map((r) => `${r.name} (${r.path})`),
@@ -589,25 +594,25 @@ export class DashboardComponent implements Component {
       onSelect: (repoIndex: number) => {
         const repo = this.repos[repoIndex]!;
         // Step 2: enter prompt
-        this.dialog = {
+        this._dialog = {
           type: "input",
           prompt: `New agent prompt (repo: ${repo.name}):`,
           value: "",
           onSubmit: (prompt: string) => {
             if (!prompt.trim()) {
-              this.dialog = null;
+              this._dialog = null;
               this.showMessage("New agent cancelled");
               return;
             }
             const trimmedPrompt = prompt.trim();
             // Step 3: select flags
-            this.dialog = {
+            this._dialog = {
               type: "select",
               prompt: "Agent type:",
               items: ["manager (default)", "--worker", "--worker --yolo", "--worker --yolo --model opus"],
               selectedIndex: 0,
               onSelect: (flagIndex: number) => {
-                this.dialog = null;
+                this._dialog = null;
                 const opts: NewAgentOptions = {};
                 if (flagIndex >= 1) opts.worker = true;
                 if (flagIndex >= 2) opts.yolo = true;
@@ -628,54 +633,54 @@ export class DashboardComponent implements Component {
   }
 
   private handleDialogInput(data: string): boolean {
-    if (!this.dialog) return false;
+    if (!this._dialog) return false;
 
-    if (this.dialog.type === "message") {
+    if (this._dialog.type === "message") {
       // Any key dismisses message
-      this.dialog = null;
+      this._dialog = null;
       this.tui?.requestRender();
       return true;
     }
 
     // Escape cancels any dialog
     if (matchesKey(data, Key.escape)) {
-      this.dialog = null;
+      this._dialog = null;
       this.tui?.requestRender();
       return true;
     }
 
-    if (this.dialog.type === "confirm") {
+    if (this._dialog.type === "confirm") {
       if (data === "y" || data === "Y") {
-        this.dialog.onYes();
+        this._dialog.onYes();
       } else if (data === "n" || data === "N") {
-        this.dialog = null;
+        this._dialog = null;
         this.tui?.requestRender();
       }
       return true;
     }
 
-    if (this.dialog.type === "input") {
+    if (this._dialog.type === "input") {
       if (matchesKey(data, Key.enter)) {
-        this.dialog.onSubmit(this.dialog.value);
+        this._dialog.onSubmit(this._dialog.value);
       } else if (matchesKey(data, Key.backspace) || data === "\x7f") {
-        this.dialog.value = this.dialog.value.slice(0, -1);
+        this._dialog.value = this._dialog.value.slice(0, -1);
         this.tui?.requestRender();
       } else if (data.length === 1 && data >= " ") {
-        this.dialog.value += data;
+        this._dialog.value += data;
         this.tui?.requestRender();
       }
       return true;
     }
 
-    if (this.dialog.type === "select") {
+    if (this._dialog.type === "select") {
       if (matchesKey(data, Key.down) || data === "j") {
-        this.dialog.selectedIndex = Math.min(this.dialog.items.length - 1, this.dialog.selectedIndex + 1);
+        this._dialog.selectedIndex = Math.min(this._dialog.items.length - 1, this._dialog.selectedIndex + 1);
         this.tui?.requestRender();
       } else if (matchesKey(data, Key.up) || data === "k") {
-        this.dialog.selectedIndex = Math.max(0, this.dialog.selectedIndex - 1);
+        this._dialog.selectedIndex = Math.max(0, this._dialog.selectedIndex - 1);
         this.tui?.requestRender();
       } else if (matchesKey(data, Key.enter)) {
-        this.dialog.onSelect(this.dialog.selectedIndex);
+        this._dialog.onSelect(this._dialog.selectedIndex);
       }
       return true;
     }
@@ -747,7 +752,7 @@ export class DashboardComponent implements Component {
 
   handleInput(data: string): void {
     // Dialog input takes priority
-    if (this.dialog && this.handleDialogInput(data)) return;
+    if (this._dialog && this.handleDialogInput(data)) return;
 
     // Navigation
     if (matchesKey(data, Key.down) || data === "j") {
@@ -845,7 +850,7 @@ export class DashboardComponent implements Component {
     lines.push(truncateToWidth(`${DIM}${"─".repeat(width)}${RESET}`, width, ""));
 
     // Compute available height for split pane
-    const bottomHeight = this.dialog ? this.dialogHeight() : 2;
+    const bottomHeight = this._dialog ? this.dialogHeight() : 2;
     const separatorHeight = 1; // bottom separator before status
     const usedHeight = lines.length + separatorHeight + bottomHeight;
     const terminalRows = process.stdout.rows || 24;
@@ -863,7 +868,7 @@ export class DashboardComponent implements Component {
     lines.push(truncateToWidth(`${DIM}${"─".repeat(width)}${RESET}`, width, ""));
 
     // Dialog or status bar
-    if (this.dialog) {
+    if (this._dialog) {
       const dialogLines = this.renderDialog(width);
       lines.push(...dialogLines);
     } else {
@@ -875,10 +880,10 @@ export class DashboardComponent implements Component {
   }
 
   private dialogHeight(): number {
-    if (!this.dialog) return 2;
-    if (this.dialog.type === "confirm") {
+    if (!this._dialog) return 2;
+    if (this._dialog.type === "confirm") {
       const maxLines = 8;
-      const promptLines = this.dialog.prompt.split("\n").length;
+      const promptLines = this._dialog.prompt.split("\n").length;
       const capped = Math.min(promptLines, maxLines) + (promptLines > maxLines ? 1 : 0);
       return Math.max(2, capped);
     }
@@ -886,17 +891,17 @@ export class DashboardComponent implements Component {
   }
 
   private renderDialog(width: number): string[] {
-    if (!this.dialog) return [];
+    if (!this._dialog) return [];
 
-    if (this.dialog.type === "message") {
+    if (this._dialog.type === "message") {
       return [
-        truncateToWidth(`${YELLOW}${this.dialog.text}${RESET}`, width, ""),
+        truncateToWidth(`${YELLOW}${this._dialog.text}${RESET}`, width, ""),
         truncateToWidth(`${DIM}Press any key to dismiss${RESET}`, width, ""),
       ];
     }
 
-    if (this.dialog.type === "confirm") {
-      const promptLines = this.dialog.prompt.split("\n");
+    if (this._dialog.type === "confirm") {
+      const promptLines = this._dialog.prompt.split("\n");
       const maxLines = 8; // Cap to avoid overflowing the terminal
       const lines: string[] = [];
       for (const pl of promptLines.slice(0, maxLines)) {
@@ -910,19 +915,19 @@ export class DashboardComponent implements Component {
       return lines;
     }
 
-    if (this.dialog.type === "input") {
+    if (this._dialog.type === "input") {
       return [
-        truncateToWidth(`${BOLD}${this.dialog.prompt}${RESET}`, width, ""),
-        truncateToWidth(`> ${this.dialog.value}█`, width, ""),
+        truncateToWidth(`${BOLD}${this._dialog.prompt}${RESET}`, width, ""),
+        truncateToWidth(`> ${this._dialog.value}█`, width, ""),
       ];
     }
 
-    if (this.dialog.type === "select") {
-      const sel = this.dialog.selectedIndex;
+    if (this._dialog.type === "select") {
+      const sel = this._dialog.selectedIndex;
       const lines: string[] = [
-        truncateToWidth(`${BOLD}${this.dialog.prompt}${RESET} ${DIM}(j/k, Enter, Esc)${RESET}`, width, ""),
+        truncateToWidth(`${BOLD}${this._dialog.prompt}${RESET} ${DIM}(j/k, Enter, Esc)${RESET}`, width, ""),
       ];
-      const itemStrs = this.dialog.items.map((item, i) => {
+      const itemStrs = this._dialog.items.map((item, i) => {
         const prefix = i === sel ? `${GREEN}> ` : "  ";
         const suffix = i === sel ? RESET : "";
         return `${prefix}${item}${suffix}`;

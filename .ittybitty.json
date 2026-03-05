@@ -1,13 +1,17 @@
 {
   "maxAgents": 10,
-  "model": "sonnet",
+  "model": "opus",
   "permissions": {
     "manager": {
-      "allow": [],
+      "allow": [
+        "ToolSearch"
+      ],
       "deny": []
     },
     "worker": {
-      "allow": [],
+      "allow": [
+        "ToolSearch"
+      ],
       "deny": []
     }
   }

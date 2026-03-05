@@ -398,5 +398,5 @@ Each phase ends at a usable checkpoint — something that works and can be teste
 **Checkpoint:** An agent in repo A can send a message to an agent in repo B from within itsybitsy.
 
 - [ ] Design message broker protocol (itsybitsy writes to destination `.ittybitty/` in `ib send` format)
-- [ ] `X` keybinding — cross-repo send: pick destination repo + agent, enter message (`x` is already kill-agent)
+- [ ] `E` keybinding — cross-repo send: pick destination repo + agent, enter message (`e` lowercase is ERRORS pane, `x` is kill-agent)
 - [ ] No changes required to `ib` itself

@@ -14,7 +14,6 @@ export interface TmuxPollerEvents {
 
 export class TmuxPoller {
   private tmuxSession: string | null = null;
-  private repoPath: string | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
   private running = false;
   private events: TmuxPollerEvents;
@@ -26,9 +25,8 @@ export class TmuxPoller {
   }
 
   /** Set the agent to poll. Pass null to pause polling. */
-  setAgent(tmuxSession: string | null, repoPath: string | null): void {
+  setAgent(tmuxSession: string | null): void {
     this.tmuxSession = tmuxSession;
-    this.repoPath = repoPath;
     // Immediately poll on agent change
     if (tmuxSession && this.running) {
       this.poll();

@@ -329,10 +329,7 @@ class DashboardComponent implements Component {
     this.rightPane.updateContent();
 
     // Update tmux poller target
-    this.tmuxPoller.setAgent(
-      selected?.meta.tmux_session ?? null,
-      selected?.repoPath ?? null
-    );
+    this.tmuxPoller.setAgent(selected?.meta.tmux_session ?? null);
   }
 
   private cyclePaneMode(delta: number) {

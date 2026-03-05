@@ -8,19 +8,16 @@
 import { watch, type FSWatcher } from "fs";
 import { join } from "path";
 import { readAllAgents, buildAgentTree, flattenAgentTree, readPendingQuestions } from "./agents";
-import type { Agent, PendingQuestion } from "./agents";
+import type { Agent, FlatAgent, PendingQuestion } from "./agents";
 import type { RepoEntry } from "./registry";
 import { parseState } from "./parse-state";
 import { captureTmuxOutput } from "./tmux-poller";
 
+export type { FlatAgent } from "./agents";
+
 export interface WatcherEvents {
   onUpdate: (agents: Agent[], flatList: FlatAgent[], questions: PendingQuestion[]) => void;
   onError?: (error: Error) => void;
-}
-
-export interface FlatAgent {
-  agent: Agent;
-  depth: number;
 }
 
 export class AgentWatcher {

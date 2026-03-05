@@ -167,11 +167,16 @@ export function buildAgentTree(agents: Agent[]): Agent[] {
   return roots;
 }
 
+export interface FlatAgent {
+  agent: Agent;
+  depth: number;
+}
+
 /**
  * Flatten agent tree into display order (depth-first), with indentation level.
  */
-export function flattenAgentTree(roots: Agent[]): Array<{ agent: Agent; depth: number }> {
-  const result: Array<{ agent: Agent; depth: number }> = [];
+export function flattenAgentTree(roots: Agent[]): FlatAgent[] {
+  const result: FlatAgent[] = [];
 
   function walk(agent: Agent, depth: number) {
     result.push({ agent, depth });

@@ -399,6 +399,7 @@ export class DashboardComponent implements Component {
   private _dialog: DialogState = null;
   private watcher: AgentWatcher | null = null;
   private repos: RepoEntry[] = [];
+  private messageCounter = 0;
 
   /** Read-only access to dialog state (for testing) */
   get dialog(): DialogState {
@@ -445,10 +446,11 @@ export class DashboardComponent implements Component {
   }
 
   private showMessage(text: string) {
+    const id = ++this.messageCounter;
     this._dialog = { type: "message", text };
     this.tui?.requestRender();
     setTimeout(() => {
-      if (this._dialog?.type === "message" && this._dialog.text === text) {
+      if (this._dialog?.type === "message" && this.messageCounter === id) {
         this._dialog = null;
         this.tui?.requestRender();
       }
@@ -555,6 +557,8 @@ export class DashboardComponent implements Component {
         },
       };
       this.tui?.requestRender();
+    }).catch((err) => {
+      this.showMessage(`Merge-check error: ${err}`);
     });
   }
 

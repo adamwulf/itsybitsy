@@ -360,9 +360,9 @@ Each phase ends at a usable checkpoint — something that works and can be teste
 Note: `tmux-poller.ts` was implemented in Phase 2/3. Phase 4 focuses on rendering quality.
 
 - [x] `src/tmux-poller.ts` — already implemented: polls at ~1s, race-condition guard, integrated into dashboard
-- [ ] Left pane: improve tmux output rendering with proper line wrapping and scroll position (currently shows raw lines truncated to pane width)
-- [ ] Right pane mode 0 (AGENT LOG): read `agent.log` from disk instead of placeholder
-- [ ] Graceful display when tmux session doesn't exist (agent stopped or orphaned)
+- [x] Left pane: ANSI-aware line wrapping (`src/tui/wrap.ts`), scroll-back from bottom with `;`/`l`, auto-follow, display height computed from terminal size
+- [x] Right pane mode 0 (AGENT LOG): reads `agent.log` from disk (async loading, handles missing/empty files)
+- [x] Graceful display when tmux session doesn't exist: shows agent state, clear "No active tmux session" message for stopped/orphaned agents
 
 ---
 

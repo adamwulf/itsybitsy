@@ -237,3 +237,25 @@ export async function detectAgentStates(agents: Agent[]): Promise<void> {
     }
   }
 }
+
+/**
+ * Read agent.log file for a given agent.
+ * Returns the log content as an array of lines, or a placeholder message.
+ */
+export async function readAgentLog(agent: Agent): Promise<string[]> {
+  const dir = agent.archived ? "archive" : "agents";
+  const logPath = join(agent.repoPath, ".ittybitty", dir, agent.id, "agent.log");
+  try {
+    const file = Bun.file(logPath);
+    if (!(await file.exists())) {
+      return [`No agent.log found`];
+    }
+    const text = await file.text();
+    if (!text.trim()) {
+      return [`agent.log is empty`];
+    }
+    return text.split("\n");
+  } catch {
+    return [`Failed to read agent.log`];
+  }
+}

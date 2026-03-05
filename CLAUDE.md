@@ -112,7 +112,7 @@ For more information, read the Bun API docs in `node_modules/bun-types/docs/**.m
 
 ## itsybitsy Implementation Notes
 
-Phases 1-3 are complete. 79 tests across 4 files. Key architecture decisions for Phase 4+:
+Phases 1-4 are complete. 97 tests across 6 files. Key architecture decisions for Phase 5+:
 
 ### State detection flow
 1. `watcher.ts` calls `detectAgentStates()` (in `agents.ts`) on every refresh
@@ -138,8 +138,19 @@ pi-tui's `Box` is vertical-only. `SplitPane` renders two child components side-b
 ### parse-state.ts priority order
 Compacting (last 5) > Active running (last 5) > Tool waiting (last 15) > Rate limited (last 15) > Complete (last 15) > WAITING (last 15) > Other running (last 15) > Spinners (last 15) > Permission prompts (last 15) > Broader spinners (last 20) > Background tasks (last 15) > Race condition hook > Unknown
 
+### Line wrapping (src/tui/wrap.ts)
+- `wrapSingleLine(line, width)` and `wrapLines(text, width)` — ANSI-aware hard wrapping
+- Walks characters, skips ANSI escape sequences for width calculation
+- ANSI codes at wrap boundaries stay in the current chunk (no state carryover to next line)
+
 ### Dashboard (src/tui/dashboard.ts)
 - Agent tree: max 7 visible rows with scroll indicators
 - Right pane mode is global state — persists across agent selection changes
 - `a` toggles archived agents visibility
 - `p`/`n` cycle pane modes (p=forward, n=backward); arrow keys mapped counterintuitively to match ib watch
+- TmuxPaneComponent: wraps lines via `wrapLines()`, scroll-back from bottom (`scrollBack` = lines from end, 0 = auto-follow)
+- `hasPolled` flag distinguishes "waiting for first poll" from "session not found" — enables graceful stopped/orphaned display
+- `displayHeight` computed from `process.stdout.rows` minus header/tree/separators/status, set before each render
+- Both panes pad to `displayHeight` for consistent vertical alignment
+- `readAgentLog()` is async — loaded on agent selection change, stale-checked by agent ID
+- `;`/`l` scroll both tmux (left) and right pane simultaneously

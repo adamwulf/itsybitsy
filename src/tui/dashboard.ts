@@ -1,6 +1,6 @@
 /**
  * Main TUI dashboard — agent tree + live tmux pane.
- * Phase 4: improved tmux rendering with line wrapping, scroll, agent.log reading.
+ * Phase 5.1: agent mutations with confirm/input dialogs.
  */
 
 import {
@@ -13,12 +13,24 @@ import {
 } from "@mariozechner/pi-tui";
 import type { Component } from "@mariozechner/pi-tui";
 import { listRepos } from "../registry";
+import type { RepoEntry } from "../registry";
 import { AgentWatcher } from "../watcher";
 import { TmuxPoller } from "../tmux-poller";
 import { readAgentLog } from "../agents";
 import type { Agent, FlatAgent, PendingQuestion } from "../agents";
 import { SplitPane } from "./split-pane";
 import { wrapLines } from "./wrap";
+import {
+  killAgent,
+  nukeAgent,
+  resumeAgent,
+  reassignAgent,
+  mergeCheckAgent,
+  mergeAgent,
+  sendMessage,
+  newAgent,
+} from "../ib-commands";
+import type { NewAgentOptions } from "../ib-commands";
 
 const MAX_TREE_HEIGHT = 7;
 
@@ -36,6 +48,17 @@ const STATE_COLORS: Record<string, string> = {
 const RESET = "\x1b[0m";
 const BOLD = "\x1b[1m";
 const DIM = "\x1b[2m";
+const YELLOW = "\x1b[33m";
+const RED = "\x1b[31m";
+const GREEN = "\x1b[32m";
+
+// Dialog types for agent actions
+type DialogState =
+  | { type: "confirm"; prompt: string; onYes: () => void }
+  | { type: "input"; prompt: string; value: string; onSubmit: (value: string) => void }
+  | { type: "select"; prompt: string; items: string[]; selectedIndex: number; onSelect: (index: number) => void }
+  | { type: "message"; text: string }
+  | null;
 
 // Right pane modes
 const PANE_MODES = [
@@ -353,7 +376,7 @@ class StatusBarComponent implements Component {
         ? ` ${BOLD}\x1b[33m[${this.pendingQuestions} questions]${RESET}`
         : "";
 
-    const keys = `${DIM}j/k:nav  ;/l:scroll  p/n:pane  d:diff  g:status  e:errors  q:questions  Ctrl-C:quit${RESET}`;
+    const keys = `${DIM}j/k:nav  ;/l:scroll  p/n:pane  s:send  m:merge  x:kill  a:new  r:reassign  R:resume  A:archive  Ctrl-C:quit${RESET}`;
     const modeLine = `${DIM}[${this.modeIndex}] ${this.currentMode}${RESET}${questionBadge}`;
     return [
       truncateToWidth(modeLine, width, ""),
@@ -363,7 +386,7 @@ class StatusBarComponent implements Component {
 }
 
 /** Main dashboard component that composes everything */
-class DashboardComponent implements Component {
+export class DashboardComponent implements Component {
   private agentTree: AgentTreeComponent;
   private rightPane: RightPaneComponent;
   private tmuxPane: TmuxPaneComponent;
@@ -373,6 +396,9 @@ class DashboardComponent implements Component {
   private modeIndex = 0;
   private tmuxPoller: TmuxPoller;
   private currentAgentId: string | null = null;
+  dialog: DialogState = null;
+  private watcher: AgentWatcher | null = null;
+  private repos: RepoEntry[] = [];
 
   constructor() {
     this.agentTree = new AgentTreeComponent();
@@ -403,6 +429,238 @@ class DashboardComponent implements Component {
 
   stopPolling() {
     this.tmuxPoller.stop();
+  }
+
+  setWatcher(watcher: AgentWatcher) {
+    this.watcher = watcher;
+  }
+
+  setRepos(repos: RepoEntry[]) {
+    this.repos = repos;
+  }
+
+  private showMessage(text: string) {
+    this.dialog = { type: "message", text };
+    this.tui?.requestRender();
+    setTimeout(() => {
+      if (this.dialog?.type === "message" && this.dialog.text === text) {
+        this.dialog = null;
+        this.tui?.requestRender();
+      }
+    }, 3000);
+  }
+
+  private async executeAndRefresh(fn: () => Promise<void>) {
+    try {
+      await fn();
+    } catch (err) {
+      this.showMessage(`Error: ${err}`);
+    }
+    this.watcher?.refresh();
+  }
+
+  private handleKill() {
+    const agent = this.agentTree.selectedAgent;
+    if (!agent) return;
+    this.dialog = {
+      type: "confirm",
+      prompt: `Kill agent ${agent.id}? (y/n)`,
+      onYes: () => {
+        this.dialog = null;
+        this.executeAndRefresh(async () => {
+          const result = await killAgent(agent);
+          this.showMessage(result.ok ? `Killed ${agent.id}` : `Kill failed: ${result.stderr || result.stdout}`);
+        });
+      },
+    };
+    this.tui?.requestRender();
+  }
+
+  private handleNuke() {
+    const agent = this.agentTree.selectedAgent;
+    if (!agent) return;
+    this.dialog = {
+      type: "confirm",
+      prompt: `${RED}FORCE KILL ${agent.id}? This cannot be undone. (y/n)${RESET}`,
+      onYes: () => {
+        this.dialog = null;
+        this.executeAndRefresh(async () => {
+          const result = await nukeAgent(agent);
+          this.showMessage(result.ok ? `Nuked ${agent.id}` : `Nuke failed: ${result.stderr || result.stdout}`);
+        });
+      },
+    };
+    this.tui?.requestRender();
+  }
+
+  private handleResume() {
+    const agent = this.agentTree.selectedAgent;
+    if (!agent) return;
+    if (agent.state !== "stopped" && agent.state !== "complete") {
+      this.showMessage("Can only resume stopped or complete agents");
+      return;
+    }
+    this.executeAndRefresh(async () => {
+      const result = await resumeAgent(agent);
+      this.showMessage(result.ok ? `Resumed ${agent.id}` : `Resume failed: ${result.stderr || result.stdout}`);
+    });
+  }
+
+  private handleReassign() {
+    const agent = this.agentTree.selectedAgent;
+    if (!agent) return;
+    this.dialog = {
+      type: "input",
+      prompt: `Reassign ${agent.id} to manager:`,
+      value: "",
+      onSubmit: (newManager: string) => {
+        this.dialog = null;
+        if (!newManager.trim()) {
+          this.showMessage("Reassign cancelled");
+          return;
+        }
+        this.executeAndRefresh(async () => {
+          const result = await reassignAgent(agent, newManager.trim());
+          this.showMessage(result.ok ? `Reassigned ${agent.id} → ${newManager.trim()}` : `Reassign failed: ${result.stderr || result.stdout}`);
+        });
+      },
+    };
+    this.tui?.requestRender();
+  }
+
+  private handleMerge() {
+    const agent = this.agentTree.selectedAgent;
+    if (!agent) return;
+    this.showMessage(`Running merge-check for ${agent.id}...`);
+    mergeCheckAgent(agent).then((checkResult) => {
+      const checkOutput = checkResult.stdout || checkResult.stderr || "(no output)";
+      this.dialog = {
+        type: "confirm",
+        prompt: `Merge ${agent.id}?\n${checkOutput}\n(y/n)`,
+        onYes: () => {
+          this.dialog = null;
+          this.executeAndRefresh(async () => {
+            const result = await mergeAgent(agent);
+            this.showMessage(result.ok ? `Merged ${agent.id}` : `Merge failed: ${result.stderr || result.stdout}`);
+          });
+        },
+      };
+      this.tui?.requestRender();
+    });
+  }
+
+  private handleSend() {
+    const agent = this.agentTree.selectedAgent;
+    if (!agent) return;
+    this.dialog = {
+      type: "input",
+      prompt: `Send message to ${agent.id}:`,
+      value: "",
+      onSubmit: (message: string) => {
+        this.dialog = null;
+        if (!message.trim()) {
+          this.showMessage("Send cancelled");
+          return;
+        }
+        this.executeAndRefresh(async () => {
+          const result = await sendMessage(agent, message.trim());
+          this.showMessage(result.ok ? `Sent to ${agent.id}` : `Send failed: ${result.stderr || result.stdout}`);
+        });
+      },
+    };
+    this.tui?.requestRender();
+  }
+
+  private handleNewAgent() {
+    if (this.repos.length === 0) {
+      this.showMessage("No repos registered");
+      return;
+    }
+    // Step 1: select repo
+    this.dialog = {
+      type: "select",
+      prompt: "Select repo for new agent:",
+      items: this.repos.map((r) => `${r.name} (${r.path})`),
+      selectedIndex: 0,
+      onSelect: (repoIndex: number) => {
+        const repo = this.repos[repoIndex]!;
+        // Step 2: enter prompt
+        this.dialog = {
+          type: "input",
+          prompt: `New agent prompt (repo: ${repo.name}):`,
+          value: "",
+          onSubmit: (prompt: string) => {
+            this.dialog = null;
+            if (!prompt.trim()) {
+              this.showMessage("New agent cancelled");
+              return;
+            }
+            this.executeAndRefresh(async () => {
+              const result = await newAgent(repo.path, prompt.trim());
+              this.showMessage(result.ok ? `Created new agent in ${repo.name}` : `New agent failed: ${result.stderr || result.stdout}`);
+            });
+          },
+        };
+        this.tui?.requestRender();
+      },
+    };
+    this.tui?.requestRender();
+  }
+
+  private handleDialogInput(data: string): boolean {
+    if (!this.dialog) return false;
+
+    if (this.dialog.type === "message") {
+      // Any key dismisses message
+      this.dialog = null;
+      this.tui?.requestRender();
+      return true;
+    }
+
+    // Escape cancels any dialog
+    if (matchesKey(data, Key.escape)) {
+      this.dialog = null;
+      this.tui?.requestRender();
+      return true;
+    }
+
+    if (this.dialog.type === "confirm") {
+      if (data === "y" || data === "Y") {
+        this.dialog.onYes();
+      } else if (data === "n" || data === "N") {
+        this.dialog = null;
+        this.tui?.requestRender();
+      }
+      return true;
+    }
+
+    if (this.dialog.type === "input") {
+      if (matchesKey(data, Key.enter)) {
+        this.dialog.onSubmit(this.dialog.value);
+      } else if (matchesKey(data, Key.backspace) || data === "\x7f") {
+        this.dialog.value = this.dialog.value.slice(0, -1);
+        this.tui?.requestRender();
+      } else if (data.length === 1 && data >= " ") {
+        this.dialog.value += data;
+        this.tui?.requestRender();
+      }
+      return true;
+    }
+
+    if (this.dialog.type === "select") {
+      if (matchesKey(data, Key.down) || data === "j") {
+        this.dialog.selectedIndex = Math.min(this.dialog.items.length - 1, this.dialog.selectedIndex + 1);
+        this.tui?.requestRender();
+      } else if (matchesKey(data, Key.up) || data === "k") {
+        this.dialog.selectedIndex = Math.max(0, this.dialog.selectedIndex - 1);
+        this.tui?.requestRender();
+      } else if (matchesKey(data, Key.enter)) {
+        this.dialog.onSelect(this.dialog.selectedIndex);
+      }
+      return true;
+    }
+
+    return false;
   }
 
   onUpdate(agents: Agent[], flatList: FlatAgent[], questions: PendingQuestion[]) {
@@ -468,6 +726,9 @@ class DashboardComponent implements Component {
   }
 
   handleInput(data: string): void {
+    // Dialog input takes priority
+    if (this.dialog && this.handleDialogInput(data)) return;
+
     // Navigation
     if (matchesKey(data, Key.down) || data === "j") {
       this.agentTree.moveSelection(1);
@@ -506,7 +767,7 @@ class DashboardComponent implements Component {
       this.tui?.requestRender();
     }
     // Toggle archived agents
-    else if (data === "a") {
+    else if (data === "A") {
       this.agentTree.toggleArchived();
       this.syncSelectedAgent();
       this.tui?.requestRender();
@@ -522,6 +783,24 @@ class DashboardComponent implements Component {
       this.rightPane.scrollOffset = Math.max(0, this.rightPane.scrollOffset - 1);
       this.rightPane.updateContent();
       this.tui?.requestRender();
+    }
+    // Agent actions
+    else if (data === "x") {
+      this.handleKill();
+    } else if (data === "!") {
+      this.handleNuke();
+    } else if (data === "R") {
+      this.handleResume();
+    } else if (data === "r") {
+      this.handleReassign();
+    } else if (data === "m") {
+      this.handleMerge();
+    } else if (data === "s") {
+      this.handleSend();
+    }
+    // New agent
+    else if (data === "a") {
+      this.handleNewAgent();
     }
   }
 
@@ -563,11 +842,62 @@ class DashboardComponent implements Component {
     // Separator
     lines.push(truncateToWidth(`${DIM}${"─".repeat(width)}${RESET}`, width, ""));
 
-    // Status bar
-    const statusLines = this.statusBar.render(width);
-    lines.push(...statusLines);
+    // Dialog or status bar
+    if (this.dialog) {
+      const dialogLines = this.renderDialog(width);
+      lines.push(...dialogLines);
+    } else {
+      const statusLines = this.statusBar.render(width);
+      lines.push(...statusLines);
+    }
 
     return lines;
+  }
+
+  private renderDialog(width: number): string[] {
+    if (!this.dialog) return [];
+
+    if (this.dialog.type === "message") {
+      return [
+        truncateToWidth(`${YELLOW}${this.dialog.text}${RESET}`, width, ""),
+        truncateToWidth(`${DIM}Press any key to dismiss${RESET}`, width, ""),
+      ];
+    }
+
+    if (this.dialog.type === "confirm") {
+      const promptLines = this.dialog.prompt.split("\n");
+      const lines: string[] = [];
+      for (const pl of promptLines) {
+        lines.push(truncateToWidth(`${BOLD}${pl}${RESET}`, width, ""));
+      }
+      // Ensure exactly 2 lines for consistent layout
+      while (lines.length < 2) lines.push("");
+      if (lines.length > 2) lines.splice(2);
+      return lines;
+    }
+
+    if (this.dialog.type === "input") {
+      return [
+        truncateToWidth(`${BOLD}${this.dialog.prompt}${RESET}`, width, ""),
+        truncateToWidth(`> ${this.dialog.value}█`, width, ""),
+      ];
+    }
+
+    if (this.dialog.type === "select") {
+      const sel = this.dialog.selectedIndex;
+      const lines: string[] = [
+        truncateToWidth(`${BOLD}${this.dialog.prompt}${RESET} ${DIM}(j/k, Enter, Esc)${RESET}`, width, ""),
+      ];
+      const itemStrs = this.dialog.items.map((item, i) => {
+        const prefix = i === sel ? `${GREEN}> ` : "  ";
+        const suffix = i === sel ? RESET : "";
+        return `${prefix}${item}${suffix}`;
+      });
+      lines.push(truncateToWidth(itemStrs.join("  |  "), width, ""));
+      return lines;
+    }
+
+    return ["", ""];
   }
 }
 
@@ -583,7 +913,21 @@ export async function launchDashboard(): Promise<void> {
 
   const dashboard = new DashboardComponent();
   dashboard.setTui(tui);
+  dashboard.setRepos(repos);
   tui.addChild(dashboard);
+
+  // Start watcher (before input listener so dashboard has reference)
+  const watcher = new AgentWatcher(repos, {
+    onUpdate: (agents, flatList, questions) => {
+      dashboard.onUpdate(agents, flatList, questions);
+    },
+    onError: (err) => {
+      // Log to stderr to avoid corrupting TUI output
+      process.stderr.write(`Watcher error: ${err.message}\n`);
+    },
+  });
+
+  dashboard.setWatcher(watcher);
 
   // Global input handler
   tui.addInputListener((data) => {
@@ -595,17 +939,6 @@ export async function launchDashboard(): Promise<void> {
     }
     dashboard.handleInput(data);
     return undefined;
-  });
-
-  // Start watcher
-  const watcher = new AgentWatcher(repos, {
-    onUpdate: (agents, flatList, questions) => {
-      dashboard.onUpdate(agents, flatList, questions);
-    },
-    onError: (err) => {
-      // Log to stderr to avoid corrupting TUI output
-      process.stderr.write(`Watcher error: ${err.message}\n`);
-    },
   });
 
   tui.start();

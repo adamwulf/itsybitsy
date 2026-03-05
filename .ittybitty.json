@@ -1,0 +1,14 @@
+{
+  "maxAgents": 10,
+  "model": "sonnet",
+  "permissions": {
+    "manager": {
+      "allow": [],
+      "deny": []
+    },
+    "worker": {
+      "allow": [],
+      "deny": []
+    }
+  }
+}

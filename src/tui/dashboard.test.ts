@@ -3,8 +3,9 @@ import { join } from "path";
 import { mkdtemp, rm, mkdir } from "fs/promises";
 import { tmpdir } from "os";
 import { readAgentLog } from "../agents";
-import type { Agent, AgentMeta } from "../agents";
-import { TmuxPaneComponent, RightPaneComponent } from "./dashboard";
+import type { Agent, AgentMeta, FlatAgent } from "../agents";
+import { TmuxPaneComponent, RightPaneComponent, DashboardComponent } from "./dashboard";
+import { setRunner, resetRunner } from "../ib-commands";
 
 function makeAgent(id: string, repoPath: string, archived = false): Agent {
   return {
@@ -306,5 +307,291 @@ describe("RightPaneComponent scroll logic", () => {
     pane.scrollOffset = 5;
     pane.setMode("TREE");
     expect(pane.scrollOffset).toBe(0);
+  });
+});
+
+describe("DashboardComponent dialog and action handlers", () => {
+  let dashboard: DashboardComponent;
+  let lastIbCall: { args: string[]; cwd: string } | null;
+
+  function setupDashboardWithAgent(state = "running") {
+    dashboard = new DashboardComponent();
+    lastIbCall = null;
+    setRunner(async (args, cwd) => {
+      lastIbCall = { args, cwd };
+      return { ok: true, exitCode: 0, stdout: "ok", stderr: "" };
+    });
+
+    const agent = makeAgent("agent-test", "/repos/test");
+    agent.state = state as any;
+    const flatList: FlatAgent[] = [{ agent, depth: 0 }];
+    dashboard.onUpdate([agent], flatList, []);
+  }
+
+  afterEach(() => {
+    resetRunner();
+  });
+
+  test("x key opens kill confirm dialog", () => {
+    setupDashboardWithAgent();
+    dashboard.handleInput("x");
+    expect(dashboard.dialog).not.toBeNull();
+    expect(dashboard.dialog!.type).toBe("confirm");
+    expect((dashboard.dialog as any).prompt).toContain("Kill agent");
+    expect((dashboard.dialog as any).prompt).toContain("agent-test");
+  });
+
+  test("kill confirm dialog: y executes kill", async () => {
+    setupDashboardWithAgent();
+    dashboard.handleInput("x");
+    dashboard.handleInput("y");
+    // Wait for async execution
+    await Bun.sleep(10);
+    expect(lastIbCall).not.toBeNull();
+    expect(lastIbCall!.args).toEqual(["kill", "agent-test"]);
+    expect(lastIbCall!.cwd).toBe("/repos/test");
+  });
+
+  test("kill confirm dialog: n cancels", () => {
+    setupDashboardWithAgent();
+    dashboard.handleInput("x");
+    dashboard.handleInput("n");
+    expect(dashboard.dialog).toBeNull();
+    expect(lastIbCall).toBeNull();
+  });
+
+  test("kill confirm dialog: Escape cancels", () => {
+    setupDashboardWithAgent();
+    dashboard.handleInput("x");
+    dashboard.handleInput("\x1b");
+    expect(dashboard.dialog).toBeNull();
+    expect(lastIbCall).toBeNull();
+  });
+
+  test("! key opens nuke confirm dialog", () => {
+    setupDashboardWithAgent();
+    dashboard.handleInput("!");
+    expect(dashboard.dialog).not.toBeNull();
+    expect(dashboard.dialog!.type).toBe("confirm");
+    expect((dashboard.dialog as any).prompt).toContain("FORCE KILL");
+  });
+
+  test("nuke confirm: y executes kill --force", async () => {
+    setupDashboardWithAgent();
+    dashboard.handleInput("!");
+    dashboard.handleInput("y");
+    await Bun.sleep(10);
+    expect(lastIbCall!.args).toEqual(["kill", "agent-test", "--force"]);
+  });
+
+  test("R key resumes stopped agents", async () => {
+    setupDashboardWithAgent("stopped");
+    dashboard.handleInput("R");
+    await Bun.sleep(10);
+    expect(lastIbCall!.args).toEqual(["resume", "agent-test"]);
+  });
+
+  test("R key does not resume running agents", async () => {
+    setupDashboardWithAgent("running");
+    dashboard.handleInput("R");
+    await Bun.sleep(10);
+    expect(lastIbCall).toBeNull();
+    // Should show a message instead
+    expect(dashboard.dialog).not.toBeNull();
+    expect(dashboard.dialog!.type).toBe("message");
+  });
+
+  test("r key opens reassign input dialog", () => {
+    setupDashboardWithAgent();
+    dashboard.handleInput("r");
+    expect(dashboard.dialog!.type).toBe("input");
+    expect((dashboard.dialog as any).prompt).toContain("Reassign");
+  });
+
+  test("reassign input: typing and submitting", async () => {
+    setupDashboardWithAgent();
+    dashboard.handleInput("r");
+    // Type "agent-new"
+    for (const ch of "agent-new") {
+      dashboard.handleInput(ch);
+    }
+    expect((dashboard.dialog as any).value).toBe("agent-new");
+    // Submit
+    dashboard.handleInput("\r");
+    await Bun.sleep(10);
+    expect(lastIbCall!.args).toEqual(["reassign", "agent-test", "agent-new"]);
+  });
+
+  test("reassign input: empty submit cancels", async () => {
+    setupDashboardWithAgent();
+    dashboard.handleInput("r");
+    dashboard.handleInput("\r");
+    await Bun.sleep(10);
+    expect(lastIbCall).toBeNull();
+  });
+
+  test("s key opens send input dialog", () => {
+    setupDashboardWithAgent();
+    dashboard.handleInput("s");
+    expect(dashboard.dialog!.type).toBe("input");
+    expect((dashboard.dialog as any).prompt).toContain("Send message");
+  });
+
+  test("send input: typing, backspace, and submitting", async () => {
+    setupDashboardWithAgent();
+    dashboard.handleInput("s");
+    for (const ch of "hellx") dashboard.handleInput(ch);
+    dashboard.handleInput("\x7f"); // backspace
+    for (const ch of "o") dashboard.handleInput(ch);
+    expect((dashboard.dialog as any).value).toBe("hello");
+    dashboard.handleInput("\r");
+    await Bun.sleep(10);
+    expect(lastIbCall!.args).toEqual(["send", "agent-test", "hello"]);
+  });
+
+  test("m key runs merge-check then shows confirm", async () => {
+    setupDashboardWithAgent();
+    dashboard.handleInput("m");
+    // Wait for merge-check to complete
+    await Bun.sleep(50);
+    expect(dashboard.dialog!.type).toBe("confirm");
+    expect((dashboard.dialog as any).prompt).toContain("Merge agent-test");
+  });
+
+  test("merge: merge-check failure shows error message", async () => {
+    setupDashboardWithAgent();
+    setRunner(async () => ({
+      ok: false,
+      exitCode: 1,
+      stdout: "",
+      stderr: "not ready",
+    }));
+    dashboard.handleInput("m");
+    await Bun.sleep(50);
+    expect(dashboard.dialog!.type).toBe("message");
+    expect((dashboard.dialog as any).text).toContain("Merge-check failed");
+  });
+
+  test("dialog intercepts all input when active", () => {
+    setupDashboardWithAgent();
+    dashboard.handleInput("x"); // opens confirm
+    // Navigation keys should not change selection
+    dashboard.handleInput("j");
+    expect(dashboard.dialog).not.toBeNull(); // dialog still open
+    expect(dashboard.dialog!.type).toBe("confirm");
+  });
+
+  test("no dialog without selected agent", () => {
+    dashboard = new DashboardComponent();
+    setRunner(async (args, cwd) => {
+      lastIbCall = { args, cwd };
+      return { ok: true, exitCode: 0, stdout: "", stderr: "" };
+    });
+    lastIbCall = null;
+    // No agents loaded, so no agent selected
+    dashboard.handleInput("x");
+    expect(dashboard.dialog).toBeNull();
+  });
+
+  test("a key with single repo skips repo select, goes straight to prompt", () => {
+    dashboard = new DashboardComponent();
+    dashboard.setRepos([{ path: "/repos/only", name: "only-repo" }]);
+    lastIbCall = null;
+
+    dashboard.handleInput("a");
+    // Should be input dialog (prompt), not select dialog (repo)
+    expect(dashboard.dialog!.type).toBe("input");
+    expect((dashboard.dialog as any).prompt).toContain("only-repo");
+  });
+
+  test("a key with multiple repos shows repo select first", () => {
+    dashboard = new DashboardComponent();
+    dashboard.setRepos([
+      { path: "/repos/one", name: "repo-one" },
+      { path: "/repos/two", name: "repo-two" },
+    ]);
+    lastIbCall = null;
+
+    dashboard.handleInput("a");
+    expect(dashboard.dialog!.type).toBe("select");
+    expect((dashboard.dialog as any).prompt).toContain("Select repo");
+  });
+
+  test("new-agent flag options: Worker sets worker flag", async () => {
+    dashboard = new DashboardComponent();
+    dashboard.setRepos([{ path: "/repos/only", name: "only-repo" }]);
+    lastIbCall = null;
+    setRunner(async (args, cwd) => {
+      lastIbCall = { args, cwd };
+      return { ok: true, exitCode: 0, stdout: "ok", stderr: "" };
+    });
+
+    dashboard.handleInput("a");
+    // Type prompt
+    for (const ch of "do stuff") dashboard.handleInput(ch);
+    dashboard.handleInput("\r");
+    // Flag select: pick "Worker (--worker)" (index 1)
+    expect(dashboard.dialog!.type).toBe("select");
+    dashboard.handleInput("j"); // move to index 1
+    dashboard.handleInput("\r");
+    await Bun.sleep(10);
+    expect(lastIbCall!.args).toEqual(["new-agent", "--worker", "do stuff"]);
+  });
+
+  test("new-agent flag options: Manager + YOLO sets yolo flag", async () => {
+    dashboard = new DashboardComponent();
+    dashboard.setRepos([{ path: "/repos/only", name: "only-repo" }]);
+    lastIbCall = null;
+    setRunner(async (args, cwd) => {
+      lastIbCall = { args, cwd };
+      return { ok: true, exitCode: 0, stdout: "ok", stderr: "" };
+    });
+
+    dashboard.handleInput("a");
+    for (const ch of "do stuff") dashboard.handleInput(ch);
+    dashboard.handleInput("\r");
+    // Pick "Manager + YOLO (--yolo)" (index 2)
+    dashboard.handleInput("j");
+    dashboard.handleInput("j");
+    dashboard.handleInput("\r");
+    await Bun.sleep(10);
+    expect(lastIbCall!.args).toEqual(["new-agent", "--yolo", "do stuff"]);
+  });
+
+  test("new-agent flag options: Worker + YOLO sets both flags", async () => {
+    dashboard = new DashboardComponent();
+    dashboard.setRepos([{ path: "/repos/only", name: "only-repo" }]);
+    lastIbCall = null;
+    setRunner(async (args, cwd) => {
+      lastIbCall = { args, cwd };
+      return { ok: true, exitCode: 0, stdout: "ok", stderr: "" };
+    });
+
+    dashboard.handleInput("a");
+    for (const ch of "do stuff") dashboard.handleInput(ch);
+    dashboard.handleInput("\r");
+    // Pick "Worker + YOLO (--worker --yolo)" (index 3)
+    dashboard.handleInput("j");
+    dashboard.handleInput("j");
+    dashboard.handleInput("j");
+    dashboard.handleInput("\r");
+    await Bun.sleep(10);
+    expect(lastIbCall!.args).toEqual(["new-agent", "--worker", "--yolo", "do stuff"]);
+  });
+
+  test("A key toggles archived agents", () => {
+    dashboard = new DashboardComponent();
+    const agent1 = makeAgent("agent-active", "/repos/test");
+    const agent2 = makeAgent("agent-old", "/repos/test", true);
+    const flatList: FlatAgent[] = [
+      { agent: agent1, depth: 0 },
+      { agent: agent2, depth: 0 },
+    ];
+    dashboard.onUpdate([agent1, agent2], flatList, []);
+    // Initially archived agents are hidden
+    dashboard.handleInput("A");
+    // After toggle, archived agents should be visible (we just verify no crash)
+    dashboard.handleInput("A");
+    // Toggle back
   });
 });

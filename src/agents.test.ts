@@ -67,8 +67,8 @@ describe("buildAgentTree", () => {
     const agents = [makeAgent({ id: "agent-1" })];
     const roots = buildAgentTree(agents);
     expect(roots.length).toBe(1);
-    expect(roots[0].id).toBe("agent-1");
-    expect(roots[0].children.length).toBe(0);
+    expect(roots[0]!.id).toBe("agent-1");
+    expect(roots[0]!.children.length).toBe(0);
   });
 
   test("child is nested under manager", () => {
@@ -82,9 +82,9 @@ describe("buildAgentTree", () => {
     const agents = [manager, worker];
     const roots = buildAgentTree(agents);
     expect(roots.length).toBe(1);
-    expect(roots[0].id).toBe("agent-1");
-    expect(roots[0].children.length).toBe(1);
-    expect(roots[0].children[0].id).toBe("agent-2");
+    expect(roots[0]!.id).toBe("agent-1");
+    expect(roots[0]!.children.length).toBe(1);
+    expect(roots[0]!.children[0]!.id).toBe("agent-2");
   });
 
   test("agent with missing manager becomes root", () => {
@@ -92,7 +92,7 @@ describe("buildAgentTree", () => {
     agent.meta.manager = "nonexistent";
     const roots = buildAgentTree([agent]);
     expect(roots.length).toBe(1);
-    expect(roots[0].id).toBe("agent-1");
+    expect(roots[0]!.id).toBe("agent-1");
   });
 
   test("multi-level tree", () => {
@@ -104,9 +104,9 @@ describe("buildAgentTree", () => {
 
     const roots = buildAgentTree([root, mid, leaf]);
     expect(roots.length).toBe(1);
-    expect(roots[0].children.length).toBe(1);
-    expect(roots[0].children[0].children.length).toBe(1);
-    expect(roots[0].children[0].children[0].id).toBe("leaf");
+    expect(roots[0]!.children.length).toBe(1);
+    expect(roots[0]!.children[0]!.children.length).toBe(1);
+    expect(roots[0]!.children[0]!.children[0]!.id).toBe("leaf");
   });
 
   test("multiple roots", () => {
@@ -127,10 +127,10 @@ describe("flattenAgentTree", () => {
     const flat = flattenAgentTree(roots);
 
     expect(flat.length).toBe(2);
-    expect(flat[0].agent.id).toBe("root");
-    expect(flat[0].depth).toBe(0);
-    expect(flat[1].agent.id).toBe("child");
-    expect(flat[1].depth).toBe(1);
+    expect(flat[0]!.agent.id).toBe("root");
+    expect(flat[0]!.depth).toBe(0);
+    expect(flat[1]!.agent.id).toBe("child");
+    expect(flat[1]!.depth).toBe(1);
   });
 
   test("empty tree returns empty list", () => {
@@ -146,9 +146,9 @@ describe("flattenAgentTree", () => {
 
     const roots = buildAgentTree([root, mid, leaf]);
     const flat = flattenAgentTree(roots);
-    expect(flat[0].depth).toBe(0);
-    expect(flat[1].depth).toBe(1);
-    expect(flat[2].depth).toBe(2);
+    expect(flat[0]!.depth).toBe(0);
+    expect(flat[1]!.depth).toBe(1);
+    expect(flat[2]!.depth).toBe(2);
   });
 });
 
@@ -187,9 +187,9 @@ describe("readRepoAgents", () => {
     const { agents, errors } = await readRepoAgents(tempDir, "test-repo");
     expect(errors.length).toBe(0);
     expect(agents.length).toBe(1);
-    expect(agents[0].id).toBe("agent-abc");
-    expect(agents[0].repoName).toBe("test-repo");
-    expect(agents[0].archived).toBe(false);
+    expect(agents[0]!.id).toBe("agent-abc");
+    expect(agents[0]!.repoName).toBe("test-repo");
+    expect(agents[0]!.archived).toBe(false);
   });
 
   test("reads archived agents", async () => {
@@ -219,8 +219,8 @@ describe("readRepoAgents", () => {
     const { agents, errors } = await readRepoAgents(tempDir, "test-repo");
     expect(errors.length).toBe(0);
     expect(agents.length).toBe(1);
-    expect(agents[0].archived).toBe(true);
-    expect(agents[0].meta.worker).toBe(true);
+    expect(agents[0]!.archived).toBe(true);
+    expect(agents[0]!.meta.worker).toBe(true);
   });
 
   test("returns empty for missing .ittybitty dir", async () => {
@@ -237,7 +237,7 @@ describe("readRepoAgents", () => {
     const { agents, errors } = await readRepoAgents(tempDir, "test-repo");
     expect(agents.length).toBe(0);
     expect(errors.length).toBe(1);
-    expect(errors[0].error).toContain("missing or invalid");
+    expect(errors[0]!.error).toContain("missing or invalid");
   });
 
   test("reports error for unparseable meta.json", async () => {
@@ -248,7 +248,7 @@ describe("readRepoAgents", () => {
     const { agents, errors } = await readRepoAgents(tempDir, "test-repo");
     expect(agents.length).toBe(0);
     expect(errors.length).toBe(1);
-    expect(errors[0].error).toContain("Failed to read");
+    expect(errors[0]!.error).toContain("Failed to read");
   });
 
   test("skips directories without meta.json", async () => {
@@ -287,8 +287,8 @@ describe("readPendingQuestions", () => {
 
     const questions = await readPendingQuestions(tempDir);
     expect(questions.length).toBe(1);
-    expect(questions[0].id).toBe("q-1");
-    expect(questions[0].status).toBe("pending");
+    expect(questions[0]!.id).toBe("q-1");
+    expect(questions[0]!.status).toBe("pending");
   });
 
   test("returns empty for missing file", async () => {

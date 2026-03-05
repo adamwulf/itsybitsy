@@ -40,8 +40,8 @@ export class SplitPane implements Component {
     const result: string[] = [];
 
     for (let i = 0; i < maxLines; i++) {
-      const ll = i < leftLines.length ? leftLines[i] : "";
-      const rl = i < rightLines.length ? rightLines[i] : "";
+      const ll: string = i < leftLines.length ? leftLines[i]! : "";
+      const rl: string = i < rightLines.length ? rightLines[i]! : "";
 
       // Pad left to exact width
       const leftVisible = visibleWidth(ll);

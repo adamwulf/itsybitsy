@@ -85,7 +85,7 @@ class AgentTreeComponent implements Component {
   get selectedAgent(): Agent | null {
     const visible = this.visibleList;
     if (this.selectedIndex >= 0 && this.selectedIndex < visible.length) {
-      return visible[this.selectedIndex].agent;
+      return visible[this.selectedIndex]!.agent;
     }
     return null;
   }
@@ -134,7 +134,7 @@ class AgentTreeComponent implements Component {
     }
 
     for (let i = start; i < end; i++) {
-      const { agent, depth } = visible[i];
+      const { agent, depth } = visible[i]!;
       lines.push(formatAgentRow(agent, depth, i === this.selectedIndex, width));
     }
 
@@ -452,8 +452,8 @@ class DashboardComponent implements Component {
 
   private cyclePaneMode(delta: number) {
     this.modeIndex = (this.modeIndex + PANE_MODES.length + delta) % PANE_MODES.length;
-    this.rightPane.setMode(PANE_MODES[this.modeIndex]);
-    this.statusBar.currentMode = PANE_MODES[this.modeIndex];
+    this.rightPane.setMode(PANE_MODES[this.modeIndex]!);
+    this.statusBar.currentMode = PANE_MODES[this.modeIndex]!;
     this.statusBar.modeIndex = this.modeIndex;
   }
 

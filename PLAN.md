@@ -11,10 +11,11 @@ A cross-repo agent management dashboard for [ittybitty (`ib`)](https://github.co
 This is a **full daily-driver replacement for `ib watch`**, extended to span multiple repos:
 
 - **Unified dashboard** — see all agents across all registered repos in a single TUI
-- **Agent tree** — show manager/parent/child relationships, not just a flat list
+- **Agent tree** — show manager/parent/child relationships, recursively (multi-level)
 - **Live tmux output** — view the active Claude session for any agent (like `ib watch` does)
 - **Live status** — auto-detect agent state by parsing tmux output (port `parse_state` from `ib`)
-- **All `ib` actions** — kill, merge, send message, new-agent, diff, look (log), open in Ghostty
+- **All `ib` actions** — kill, resume, merge, merge-check, send, new-agent, diff, status, look (log), questions, open in Ghostty
+- **Pending questions** — surface `ib questions` in the TUI so agent questions aren't missed
 - **Ghostty integration** — open any agent's tmux session as a new Ghostty window
 - **Easy distribution** — single compiled binary via `bun build --compile`
 - **No browser UI** — terminal only
@@ -36,13 +37,15 @@ This is a **full daily-driver replacement for `ib watch`**, extended to span mul
 ### Read vs. Write split
 
 - **Read agent state:** read `.ittybitty/` files directly — faster than shelling to `ib list`
-- **Mutations:** shell out to `ib` commands (`ib kill`, `ib merge`, `ib send`, `ib new-agent`, `ib diff`)
+- **Mutations:** shell out to `ib` commands (`ib kill`, `ib resume`, `ib merge`, `ib merge-check`, `ib send`, `ib new-agent`, `ib diff`, `ib status`, `ib acknowledge`)
 - **Never** reimplement tmux/git/worktree mutation logic from `ib`
+- **Critical:** every `ib` command must be run with `cwd` set to the target repo root — `ib` requires being run from the root of a git repository
 
 ### Update strategy
 
-- `fs.watch` on each repo's `.ittybitty/agents/` for instant file-change events
-- Poll `tmux capture-pane` every ~1s for the currently-selected agent's live output
+- `fs.watch(path, { recursive: true })` on each repo's `.ittybitty/agents/` — **must use `recursive: true`** or file changes inside `agents/{id}/` subdirectories (e.g., `meta.json`) will never fire events
+- On macOS, `FSEvents` (backing `fs.watch`) can occasionally miss rapid events — add a low-frequency fallback poll (every 10s) as a safety net
+- Poll `tmux capture-pane` every ~1s for the currently-selected agent's live output only (pause when no agent selected)
 - `Promise.all()` across all registered repos for concurrent reads
 - Single-threaded Bun async model is sufficient — no worker threads needed
 
@@ -77,6 +80,12 @@ tmux capture-pane -t {tmux_session} -p -S -{lines} -E -
 Strip ANSI codes before pattern matching. Show raw output (with ANSI) in the live view pane.
 `tmux_session` comes from `meta.json` (e.g., `ittybitty-{repo-uuid}-{agent-id}`).
 
+**ANSI passthrough in pi-tui must be validated** before committing to Phase 4 — the `render(width): string[]` interface may or may not preserve ANSI sequences. Validate in Phase 3.
+
+### pi-tui horizontal layout
+
+The two-pane design (agent tree left, tmux output right) requires pi-tui `Box` to support horizontal side-by-side layout. **This must be validated in Phase 1** with a throwaway prototype before the design is locked in.
+
 ## File Layout
 
 ```
@@ -85,9 +94,13 @@ itsybitsy
 │   ├── index.ts           # CLI entrypoint: add/remove/list/watch subcommands
 │   ├── registry.ts        # Read/write ~/.itsybitsy.json
 │   ├── agents.ts          # Read .ittybitty/agents/ directly; types for Agent, AgentState
+│   │                      # Also reads user-questions.json for pending questions
 │   ├── parse-state.ts     # Port of ib's parse_state bash logic → TypeScript
-│   ├── watcher.ts         # fs.watch + tmux polling; emits state-change events
-│   ├── ib-commands.ts     # Wrappers for ib kill/merge/send/new-agent/diff
+│   ├── watcher.ts         # fs.watch({ recursive: true }) on .ittybitty/agents/;
+│   │                      # emits agentAdded, agentChanged, agentRemoved events;
+│   │                      # low-frequency fallback poll for macOS FSEvents reliability
+│   ├── tmux-poller.ts     # Polls tmux capture-pane for the selected agent (~1s interval)
+│   ├── ib-commands.ts     # Wrappers for ib mutations; always runs with cwd = repo root
 │   ├── ghostty.ts         # Open tmux sessions in Ghostty
 │   └── tui/
 │       └── dashboard.ts   # Main TUI: agent tree + live tmux pane
@@ -95,6 +108,8 @@ itsybitsy
 ├── CLAUDE.md
 └── package.json
 ```
+
+Note: `watcher.ts` and `tmux-poller.ts` are split by concern — `watcher.ts` handles structural changes (agents added/removed/changed via `fs.watch`); `tmux-poller.ts` handles live output capture for the selected agent. Different consumers, different error modes, different trigger conditions.
 
 ## .ittybitty/ Directory Structure
 
@@ -110,12 +125,12 @@ itsybitsy
 │       ├── exit-check.sh
 │       ├── repo            # Path to the worktree
 │       └── debug-logs/     # tmux captures from hooks
-├── archive/                # Closed agents
+├── archive/                # Closed agents (hidden by default in TUI; toggle with `a`)
 ├── feedback.json
 ├── repo-id                 # Unique repo UUID (used in tmux session names)
 ├── reports/
 ├── STATUS.md
-└── user-questions.json
+└── user-questions.json     # Pending questions from agents (see schema below)
 ```
 
 `meta.json` example:
@@ -136,10 +151,35 @@ itsybitsy
 }
 ```
 
+`worker: true` means the agent cannot spawn sub-agents. Display with a different icon in the tree (e.g., `⚙` vs `◆` for managers).
+
+`user-questions.json` schema:
+```json
+{
+  "questions": [
+    {
+      "id": "q-abc123",
+      "agent": "agent-1f5f04ce",
+      "question": "Should I proceed with X?",
+      "timestamp": "2026-03-03T17:10:00-06:00",
+      "status": "pending"
+    }
+  ]
+}
+```
+Status values: `pending`, `acknowledged`. Show pending count as a badge in the TUI header.
+
 `ib list --json` output format (for reference, prefer direct file reads):
 ```json
 [{"id":"agent-1f5f04ce","state":"waiting","age":"1d","manager":"-","model":"sonnet","prompt":"..."}]
 ```
+
+Per-repo `.ittybitty.json` config (read `fps` field to inform polling rate):
+```json
+{ "fps": 10, "maxAgents": 10, "model": "sonnet" }
+```
+
+**Orphan detection:** if a tmux session exists but has no matching `meta.json`, display it as an orphan warning in the TUI.
 
 ## Repo Registry (`~/.itsybitsy.json`)
 
@@ -163,17 +203,25 @@ CLI commands:
 Left pane: agent tree grouped by repo, with state indicator and age.
 Right pane: live tmux output for selected agent (updated every ~1s).
 Bottom bar: keybinding hints for current context.
+Header: pending question count badge (e.g., `[2 questions]`) when questions exist.
 
 Key bindings (provisional):
 - `j/k` or arrow keys — navigate agent list
-- `Enter` — select / expand
-- `n` — new agent (prompt for repo + task)
-- `k` — kill selected agent
-- `m` — merge selected agent
-- `s` — send message to selected agent
-- `d` — diff view for selected agent
+- `Enter` — select agent / toggle focus between panes
+- `a` — toggle show/hide archived agents
+- `n` — new agent (prompt for repo, task, and optional flags: --yolo, --worker, --model)
+- `K` — kill selected agent (confirm prompt)
+- `r` — resume selected stopped agent
+- `m` — merge selected agent (runs merge-check first; confirm prompt)
+- `s` — send message to selected agent (inline input field)
+- `S` — status view: show agent's commits and uncommitted changes (`ib status`)
+- `d` — diff view: show full diff of agent's work (`ib diff`)
+- `l` — look/log view: show `agent.log` for selected agent
+- `q` — show pending questions (`ib questions`)
 - `g` — open in Ghostty
-- `q` — quit
+- `/` — quit
+
+Note: `k` is reserved for navigate-down; use `K` (capital) for kill to avoid conflict.
 
 ## Ghostty Integration
 
@@ -194,6 +242,8 @@ Degrade gracefully if Ghostty is not available (skip or show error).
 - Components implement `render(width): string[]`; optional `handleInput(data)`, `invalidate()`
 - Built-ins: `Text`, `TruncatedText`, `Box`, `Spacer`, `SelectList`, `Input`, `Editor`, `Loader`, `Markdown`
 - No built-in table — render tables as formatted strings inside `Text`
+- **Horizontal layout:** validate that `Box` supports side-by-side layout in Phase 1 prototype
+- **ANSI passthrough:** validate that `Text`/`Box` preserve ANSI codes in Phase 3
 
 ## v2: Cross-Repo Messaging
 
@@ -208,21 +258,23 @@ Each phase ends at a usable checkpoint — something that works and can be teste
 ---
 
 ### Phase 1: CLI Foundation
-**Checkpoint:** `itsybitsy add/remove/list` works. You can register and inspect repos from the command line.
+**Checkpoint:** `itsybitsy add/remove/list` works. You can register and inspect repos from the command line. pi-tui horizontal layout is validated.
 
 - [ ] `src/index.ts` — CLI entrypoint, parse `add/remove/list/watch` subcommands
 - [ ] `src/registry.ts` — read/write `~/.itsybitsy.json`; add, remove, list repos
 - [ ] Wire up `itsybitsy add [path]`, `itsybitsy remove [path]`, `itsybitsy list`
 - [ ] Unit tests for registry
+- [ ] **Validate pi-tui horizontal Box layout** with a throwaway prototype — confirm side-by-side panes are possible before Phase 3 commits to the two-pane design
 
 ---
 
 ### Phase 2: Agent Data Layer
-**Checkpoint:** `itsybitsy list` (or a debug command) prints all agents across all registered repos with correct states — no TUI yet.
+**Checkpoint:** `itsybitsy agents` (debug command) prints all agents across all registered repos with correct states — no TUI yet. Basic error handling in place.
 
-- [ ] `src/agents.ts` — read `.ittybitty/agents/` directly; define `Agent` and `AgentState` types
+- [ ] `src/agents.ts` — read `.ittybitty/agents/` directly; define `Agent` and `AgentState` types; read `user-questions.json` for pending questions; detect orphan tmux sessions
 - [ ] `src/parse-state.ts` — port `parse_state` bash logic to TypeScript; all state rules
-- [ ] `src/watcher.ts` — `fs.watch` on each repo's `.ittybitty/agents/`; emit `agentAdded`, `agentChanged`, `agentRemoved` events; `Promise.all` across repos
+- [ ] `src/watcher.ts` — `fs.watch(path, { recursive: true })` on each repo's `.ittybitty/agents/`; emit `agentAdded`, `agentChanged`, `agentRemoved` events; `Promise.all` across repos; low-frequency fallback poll (10s) for macOS FSEvents reliability
+- [ ] Basic error handling from the start: try/catch around all file reads, graceful degradation for missing/malformed `meta.json`, missing `ib`/`tmux` detected at startup
 - [ ] Unit tests for `parse-state.ts` (it's pure string matching — highly testable)
 
 ---
@@ -232,35 +284,40 @@ Each phase ends at a usable checkpoint — something that works and can be teste
 
 - [ ] `src/tui/dashboard.ts` — main TUI layout skeleton using pi-tui
 - [ ] Left pane: agent tree grouped by repo, showing `id`, `state`, `age`, `model`, truncated prompt
-- [ ] Tree structure: manager agents at root, children indented beneath them
+- [ ] Tree structure: recursive traversal of `manager` field — supports multi-level hierarchies (managers with sub-managers); workers shown with distinct icon
 - [ ] State indicators (color-coded by state)
 - [ ] Keyboard navigation: `j/k` or arrow keys to move through agent list
 - [ ] Wire watcher events to TUI re-renders (`tui.requestRender()`)
-- [ ] `q` to quit
+- [ ] Header badge showing pending question count
+- [ ] `a` to toggle archived agents
+- [ ] `/` to quit
+- [ ] **Validate ANSI passthrough** in `Text`/`Box` components before Phase 4
 
 ---
 
 ### Phase 4: Live Tmux Pane
 **Checkpoint:** Selecting an agent shows its live Claude session output in a right-hand pane, updating every ~1s.
 
-- [ ] Right pane: `tmux capture-pane -t {tmux_session} -p -S -100 -E -` output rendered as scrollable text
-- [ ] Poll every ~1s for the selected agent (only); pause polling when no agent selected
-- [ ] ANSI passthrough so colors/formatting from Claude render correctly
+- [ ] `src/tmux-poller.ts` — polls `tmux capture-pane -t {tmux_session} -p -S -100 -E -` for the selected agent; emits output events; pauses when no agent selected
+- [ ] Right pane: render tmux output with ANSI passthrough
 - [ ] `Enter` to select agent / toggle focus between panes
-- [ ] Graceful display when tmux session doesn't exist (agent stopped)
+- [ ] Graceful display when tmux session doesn't exist (agent stopped or orphaned)
 
 ---
 
 ### Phase 5: Agent Actions
-**Checkpoint:** All core `ib` actions are accessible from the TUI — kill, merge, send, new-agent, diff.
+**Checkpoint:** All core `ib` actions are accessible from the TUI.
 
-- [ ] `src/ib-commands.ts` — async wrappers for `ib kill`, `ib merge`, `ib send`, `ib new-agent`, `ib diff`
-- [ ] `k` — kill selected agent (confirm prompt)
-- [ ] `m` — merge selected agent (confirm prompt)
+- [ ] `src/ib-commands.ts` — async wrappers for all `ib` mutations; **always sets `cwd` to the target repo root**
+- [ ] `K` — kill selected agent (confirm prompt)
+- [ ] `r` — resume selected stopped agent (`ib resume`)
+- [ ] `m` — merge selected agent (run `ib merge-check` first; show result in confirm prompt)
 - [ ] `s` — send message to selected agent (inline input field)
-- [ ] `d` — diff view: replace right pane with `ib diff` output for selected agent
-- [ ] `n` — new agent: prompt for repo (if multiple registered) and task description; shell to `ib new-agent`
-- [ ] `l` — look/log view: show `agent.log` for selected agent in right pane
+- [ ] `S` — status view: replace right pane with `ib status` output
+- [ ] `d` — diff view: replace right pane with `ib diff` output
+- [ ] `l` — look/log view: show `agent.log` in right pane
+- [ ] `q` — questions view: show pending questions from `user-questions.json`; `ib acknowledge` to mark handled
+- [ ] `n` — new agent: prompt for repo (if multiple registered), task description, and flags (`--yolo`, `--worker`, `--model`); shell to `ib new-agent`
 - [ ] Status bar at bottom showing available keybindings for current context
 
 ---
@@ -272,7 +329,7 @@ Each phase ends at a usable checkpoint — something that works and can be teste
 - [ ] `g` keybinding — open selected agent's tmux session in Ghostty
 - [ ] `bun build --compile` produces a single self-contained binary
 - [ ] README with install instructions and keybinding reference
-- [ ] Error handling: missing `ib`/`tmux`, unreadable repos, malformed `meta.json`
+- [ ] Polish error messages: missing `ib`/`tmux`, unreadable repos, malformed `meta.json`
 
 ---
 

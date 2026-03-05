@@ -960,8 +960,9 @@ export class DashboardComponent implements Component {
     }
   }
 
-  private async loadDiff(agent: Agent) {
+  private async loadDiff(agent: Agent, forceRefresh = false) {
     if (this.rightPane.diffLoading) return;
+    if (forceRefresh) this.rightPane.diffContent = null;
     this.rightPane.diffLoading = true;
     this.rightPane.updateContent();
     this.tui?.requestRender();
@@ -984,8 +985,9 @@ export class DashboardComponent implements Component {
     }
   }
 
-  private async loadStatus(agent: Agent) {
+  private async loadStatus(agent: Agent, forceRefresh = false) {
     if (this.rightPane.statusLoading) return;
+    if (forceRefresh) this.rightPane.statusContent = null;
     this.rightPane.statusLoading = true;
     this.rightPane.updateContent();
     this.tui?.requestRender();
@@ -1016,26 +1018,26 @@ export class DashboardComponent implements Component {
     this.triggerAsyncLoadIfNeeded();
   }
 
-  private jumpToMode(mode: PaneMode) {
+  private jumpToMode(mode: PaneMode, forceRefresh = false) {
     const idx = PANE_MODES.indexOf(mode);
     if (idx !== -1) {
       this.modeIndex = idx;
       this.rightPane.setMode(mode);
       this.statusBar.currentMode = mode;
       this.statusBar.modeIndex = idx;
-      this.triggerAsyncLoadIfNeeded();
+      this.triggerAsyncLoadIfNeeded(forceRefresh);
     }
   }
 
   /** Trigger async loading for modes that need it */
-  private triggerAsyncLoadIfNeeded() {
+  private triggerAsyncLoadIfNeeded(forceRefresh = false) {
     const agent = this.agentTree.selectedAgent;
     if (!agent) return;
     const mode = PANE_MODES[this.modeIndex]!;
-    if (mode === "DIFF" && !this.rightPane.diffContent && !this.rightPane.diffLoading) {
-      this.loadDiff(agent);
-    } else if (mode === "STATUS" && !this.rightPane.statusContent && !this.rightPane.statusLoading) {
-      this.loadStatus(agent);
+    if (mode === "DIFF" && (forceRefresh || (!this.rightPane.diffContent && !this.rightPane.diffLoading))) {
+      this.loadDiff(agent, forceRefresh);
+    } else if (mode === "STATUS" && (forceRefresh || (!this.rightPane.statusContent && !this.rightPane.statusLoading))) {
+      this.loadStatus(agent, forceRefresh);
     }
   }
 
@@ -1077,15 +1079,15 @@ export class DashboardComponent implements Component {
       this.cyclePaneMode(-1);
       this.tui?.requestRender();
     }
-    // Direct pane jumps
+    // Direct pane jumps — d and g force-refresh to always re-fetch
     else if (data === "d") {
-      this.jumpToMode("DIFF");
+      this.jumpToMode("DIFF", true);
       this.tui?.requestRender();
     } else if (data === "g") {
       if (this.rightPane.mode === "QUESTIONS") {
         this.handleGoToQuestionAgent();
       } else {
-        this.jumpToMode("STATUS");
+        this.jumpToMode("STATUS", true);
         this.tui?.requestRender();
       }
     } else if (data === "e") {

@@ -6,7 +6,8 @@
       "allow": [
         "ToolSearch",
         "Bash(bun:*)",
-        "Bash(bunx:*)"
+        "Bash(bunx:*)",
+        "Skill"
       ],
       "deny": []
     },
@@ -14,7 +15,8 @@
       "allow": [
         "ToolSearch",
         "Bash(bun:*)",
-        "Bash(bunx:*)"
+        "Bash(bunx:*)",
+        "Skill"
       ],
       "deny": []
     }

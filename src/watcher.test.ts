@@ -132,89 +132,148 @@ describe("AgentWatcher", () => {
   });
 
   describe("debounce logic", () => {
-    test("rapid file changes trigger only one refresh after debounce", async () => {
-      setupDefaultMocks();
-      let updateCount = 0;
-      const watcher = new AgentWatcher(
-        [{ path: tempDir, name: "test" }],
-        { onUpdate: () => { updateCount++; } }
-      );
-
-      await watcher.start();
-      expect(updateCount).toBe(1); // initial
-
-      // Trigger multiple rapid fs changes by writing files
-      const agentDir = join(agentsDir, "agent-test");
-      await mkdir(agentDir, { recursive: true });
-      await writeFile(join(agentDir, "meta.json"), "{}");
-      await writeFile(join(agentDir, "meta.json"), '{"a":1}');
-      await writeFile(join(agentDir, "meta.json"), '{"a":2}');
-
-      // Wait for debounce (200ms) + some buffer
-      await new Promise((r) => setTimeout(r, 400));
-
-      // Should have gotten at most 1 additional update (debounced), not 3
-      // fs.watch may coalesce events too, so we just verify it's not N
-      const additionalUpdates = updateCount - 1;
-      expect(additionalUpdates).toBeLessThanOrEqual(1);
-
-      watcher.stop();
-    });
-
-    test("debounce resets timer on each new change", async () => {
-      setupDefaultMocks();
-      let updateCount = 0;
-      const watcher = new AgentWatcher(
-        [{ path: tempDir, name: "test" }],
-        { onUpdate: () => { updateCount++; } }
-      );
-
-      await watcher.start();
-      const initialCount = updateCount;
-
-      // Write a file
-      const agentDir = join(agentsDir, "agent-debounce");
-      await mkdir(agentDir, { recursive: true });
-      await writeFile(join(agentDir, "meta.json"), "{}");
-
-      // Wait 100ms (less than 200ms debounce) then write again
-      await new Promise((r) => setTimeout(r, 100));
-      await writeFile(join(agentDir, "meta.json"), '{"b":1}');
-
-      // At 100ms after the second write, the first debounce should have been cancelled
-      await new Promise((r) => setTimeout(r, 100));
-
-      // The first write's debounce was reset, so at t=200ms total, no refresh yet
-      // (because second write reset the timer at t=100ms, so it fires at t=300ms)
-      const midCount = updateCount - initialCount;
-
-      // Wait for the debounce to actually fire
-      await new Promise((r) => setTimeout(r, 200));
-      const finalCount = updateCount - initialCount;
-
-      // Should have at most 1 refresh from the debounced writes
-      expect(finalCount).toBeLessThanOrEqual(1);
-
-      watcher.stop();
-    });
-  });
-
-  describe("fallback poll", () => {
-    test("poll timer is set up during start", async () => {
+    test("multiple rapid debounceRefresh calls produce exactly 1 refresh", async () => {
       setupDefaultMocks();
       const watcher = new AgentWatcher(
         [{ path: tempDir, name: "test" }],
         { onUpdate: () => {} }
       );
 
-      await watcher.start();
+      jest.useFakeTimers();
+      try {
+        await watcher.start();
+        const callsAfterStart = mockReadAllAgents.mock.calls.length;
+        expect(callsAfterStart).toBe(1); // initial refresh
 
-      // Verify refresh is callable and works (poll calls refresh)
-      const callsBefore = mockReadAllAgents.mock.calls.length;
-      await watcher.refresh();
-      expect(mockReadAllAgents.mock.calls.length).toBe(callsBefore + 1);
+        // Fire debounceRefresh 5 times rapidly
+        for (let i = 0; i < 5; i++) {
+          (watcher as any).debounceRefresh();
+        }
 
-      watcher.stop();
+        // Advance past the 200ms debounce window
+        jest.advanceTimersByTime(250);
+        // Allow the async refresh() promise to resolve
+        await Promise.resolve();
+        await Promise.resolve();
+
+        // Exactly 1 additional refresh should have fired (not 5)
+        expect(mockReadAllAgents.mock.calls.length).toBe(callsAfterStart + 1);
+
+        watcher.stop();
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    test("debounce timer resets on each new call", async () => {
+      setupDefaultMocks();
+      const watcher = new AgentWatcher(
+        [{ path: tempDir, name: "test" }],
+        { onUpdate: () => {} }
+      );
+
+      jest.useFakeTimers();
+      try {
+        await watcher.start();
+        const callsAfterStart = mockReadAllAgents.mock.calls.length;
+
+        // First debounce call
+        (watcher as any).debounceRefresh();
+
+        // Advance 150ms (less than 200ms debounce)
+        jest.advanceTimersByTime(150);
+        await Promise.resolve();
+
+        // No refresh yet — still within debounce window
+        expect(mockReadAllAgents.mock.calls.length).toBe(callsAfterStart);
+
+        // Second call resets the timer
+        (watcher as any).debounceRefresh();
+
+        // Advance another 150ms (300ms total, but only 150ms since last call)
+        jest.advanceTimersByTime(150);
+        await Promise.resolve();
+
+        // Still no refresh — timer was reset by second call
+        expect(mockReadAllAgents.mock.calls.length).toBe(callsAfterStart);
+
+        // Advance past the debounce window from the second call
+        jest.advanceTimersByTime(100);
+        await Promise.resolve();
+        await Promise.resolve();
+
+        // Now exactly 1 refresh should have fired
+        expect(mockReadAllAgents.mock.calls.length).toBe(callsAfterStart + 1);
+
+        watcher.stop();
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    test("debounceRefresh does nothing after stop", async () => {
+      setupDefaultMocks();
+      const watcher = new AgentWatcher(
+        [{ path: tempDir, name: "test" }],
+        { onUpdate: () => {} }
+      );
+
+      jest.useFakeTimers();
+      try {
+        await watcher.start();
+        const callsAfterStart = mockReadAllAgents.mock.calls.length;
+
+        watcher.stop();
+
+        (watcher as any).debounceRefresh();
+        jest.advanceTimersByTime(300);
+        await Promise.resolve();
+
+        // No additional refresh since watcher is stopped
+        expect(mockReadAllAgents.mock.calls.length).toBe(callsAfterStart);
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+  });
+
+  describe("fallback poll", () => {
+    test("poll fires refresh after 10s interval", async () => {
+      setupDefaultMocks();
+      const watcher = new AgentWatcher(
+        [{ path: tempDir, name: "test" }],
+        { onUpdate: () => {} }
+      );
+
+      jest.useFakeTimers();
+      try {
+        await watcher.start();
+        const callsAfterStart = mockReadAllAgents.mock.calls.length;
+        expect(callsAfterStart).toBe(1);
+
+        // Advance just under 10s — no poll yet
+        jest.advanceTimersByTime(9_999);
+        await Promise.resolve();
+        expect(mockReadAllAgents.mock.calls.length).toBe(callsAfterStart);
+
+        // Advance to exactly 10s
+        jest.advanceTimersByTime(1);
+        await Promise.resolve();
+        await Promise.resolve();
+
+        expect(mockReadAllAgents.mock.calls.length).toBe(callsAfterStart + 1);
+
+        // Advance another 10s — second poll fires
+        jest.advanceTimersByTime(10_000);
+        await Promise.resolve();
+        await Promise.resolve();
+
+        expect(mockReadAllAgents.mock.calls.length).toBe(callsAfterStart + 2);
+
+        watcher.stop();
+      } finally {
+        jest.useRealTimers();
+      }
     });
 
     test("poll timer is cleared on stop (no updates after stop)", async () => {
@@ -225,20 +284,157 @@ describe("AgentWatcher", () => {
         { onUpdate: () => { updateCount++; } }
       );
 
-      await watcher.start();
-      const afterStart = updateCount;
-      watcher.stop();
+      jest.useFakeTimers();
+      try {
+        await watcher.start();
+        const afterStart = updateCount;
+        watcher.stop();
 
-      // Wait well past debounce time - no poll should fire
-      await new Promise((r) => setTimeout(r, 500));
-      expect(updateCount).toBe(afterStart);
+        // Advance well past 10s — no poll should fire
+        jest.advanceTimersByTime(30_000);
+        await Promise.resolve();
+        expect(updateCount).toBe(afterStart);
+      } finally {
+        jest.useRealTimers();
+      }
     });
   });
 
   describe("change detection via refresh", () => {
-    test("onUpdate receives agents from readAllAgents", async () => {
+    test("two-snapshot pipeline: agents added between refreshes", async () => {
+      const agentA = makeAgent("agent-a");
+      const agentB = makeAgent("agent-b");
+      const agentC = makeAgent("agent-c");
+
+      // First snapshot: [A, B]
+      mockReadAllAgents.mockResolvedValueOnce({ agents: [agentA, agentB], errors: [] });
+      mockDetectAgentStates.mockResolvedValueOnce(undefined);
+      mockBuildAgentTree.mockReturnValueOnce([agentA, agentB]);
+      mockFlattenAgentTree.mockReturnValueOnce([
+        { agent: agentA, depth: 0 },
+        { agent: agentB, depth: 0 },
+      ]);
+      mockReadPendingQuestions.mockResolvedValue([]);
+
+      // Second snapshot: [A, B, C] — C was added
+      mockReadAllAgents.mockResolvedValueOnce({ agents: [agentA, agentB, agentC], errors: [] });
+      mockDetectAgentStates.mockResolvedValueOnce(undefined);
+      mockBuildAgentTree.mockReturnValueOnce([agentA, agentB, agentC]);
+      mockFlattenAgentTree.mockReturnValueOnce([
+        { agent: agentA, depth: 0 },
+        { agent: agentB, depth: 0 },
+        { agent: agentC, depth: 0 },
+      ]);
+
+      const updates: Agent[][] = [];
+      const flatUpdates: FlatAgent[][] = [];
+      const watcher = new AgentWatcher(
+        [{ path: tempDir, name: "test" }],
+        { onUpdate: (agents, flat) => { updates.push([...agents]); flatUpdates.push([...flat]); } }
+      );
+
+      await watcher.start();
+      await watcher.refresh();
+      watcher.stop();
+
+      // First update: 2 agents
+      expect(updates[0].map(a => a.id)).toEqual(["agent-a", "agent-b"]);
+      // Second update: 3 agents (C added)
+      expect(updates[1].map(a => a.id)).toEqual(["agent-a", "agent-b", "agent-c"]);
+      // Flat list matches
+      expect(flatUpdates[1].length).toBe(3);
+    });
+
+    test("two-snapshot pipeline: agents removed between refreshes", async () => {
+      const agentA = makeAgent("agent-a");
+      const agentB = makeAgent("agent-b");
+
+      // First snapshot: [A, B]
+      mockReadAllAgents.mockResolvedValueOnce({ agents: [agentA, agentB], errors: [] });
+      mockDetectAgentStates.mockResolvedValueOnce(undefined);
+      mockBuildAgentTree.mockReturnValueOnce([agentA, agentB]);
+      mockFlattenAgentTree.mockReturnValueOnce([
+        { agent: agentA, depth: 0 },
+        { agent: agentB, depth: 0 },
+      ]);
+      mockReadPendingQuestions.mockResolvedValue([]);
+
+      // Second snapshot: [A] — B removed
+      mockReadAllAgents.mockResolvedValueOnce({ agents: [agentA], errors: [] });
+      mockDetectAgentStates.mockResolvedValueOnce(undefined);
+      mockBuildAgentTree.mockReturnValueOnce([agentA]);
+      mockFlattenAgentTree.mockReturnValueOnce([
+        { agent: agentA, depth: 0 },
+      ]);
+
+      const updates: Agent[][] = [];
+      const watcher = new AgentWatcher(
+        [{ path: tempDir, name: "test" }],
+        { onUpdate: (agents) => updates.push([...agents]) }
+      );
+
+      await watcher.start();
+      await watcher.refresh();
+      watcher.stop();
+
+      expect(updates[0].map(a => a.id)).toEqual(["agent-a", "agent-b"]);
+      expect(updates[1].map(a => a.id)).toEqual(["agent-a"]);
+    });
+
+    test("two-snapshot pipeline: agent replaced between refreshes", async () => {
+      const agentA = makeAgent("agent-a");
+      const agentB = makeAgent("agent-b");
+      const agentC = makeAgent("agent-c");
+
+      // First snapshot: [A, B]
+      mockReadAllAgents.mockResolvedValueOnce({ agents: [agentA, agentB], errors: [] });
+      mockDetectAgentStates.mockResolvedValueOnce(undefined);
+      mockBuildAgentTree.mockReturnValueOnce([agentA, agentB]);
+      mockFlattenAgentTree.mockReturnValueOnce([
+        { agent: agentA, depth: 0 },
+        { agent: agentB, depth: 0 },
+      ]);
+      mockReadPendingQuestions.mockResolvedValue([]);
+
+      // Second snapshot: [A, C] — B removed, C added
+      mockReadAllAgents.mockResolvedValueOnce({ agents: [agentA, agentC], errors: [] });
+      mockDetectAgentStates.mockResolvedValueOnce(undefined);
+      mockBuildAgentTree.mockReturnValueOnce([agentA, agentC]);
+      mockFlattenAgentTree.mockReturnValueOnce([
+        { agent: agentA, depth: 0 },
+        { agent: agentC, depth: 0 },
+      ]);
+
+      const updates: Agent[][] = [];
+      const watcher = new AgentWatcher(
+        [{ path: tempDir, name: "test" }],
+        { onUpdate: (agents) => updates.push([...agents]) }
+      );
+
+      await watcher.start();
+      await watcher.refresh();
+      watcher.stop();
+
+      expect(updates[0].map(a => a.id)).toEqual(["agent-a", "agent-b"]);
+      expect(updates[1].map(a => a.id)).toEqual(["agent-a", "agent-c"]);
+    });
+
+    test("detectAgentStates mutates agent state and result flows to onUpdate", async () => {
       const agent1 = makeAgent("agent-1");
-      setupDefaultMocks([agent1]);
+      agent1.state = "unknown";
+
+      mockReadAllAgents.mockResolvedValue({ agents: [agent1], errors: [] });
+      // Simulate detectAgentStates mutating the agent's state in-place
+      mockDetectAgentStates.mockImplementation(async (agents: Agent[]) => {
+        for (const a of agents) {
+          a.state = "running";
+        }
+      });
+      mockBuildAgentTree.mockImplementation((agents) => agents);
+      mockFlattenAgentTree.mockImplementation((roots) =>
+        roots.map((a) => ({ agent: a, depth: 0 }))
+      );
+      mockReadPendingQuestions.mockResolvedValue([]);
 
       let receivedAgents: Agent[] = [];
       const watcher = new AgentWatcher(
@@ -249,104 +445,77 @@ describe("AgentWatcher", () => {
       await watcher.start();
       watcher.stop();
 
+      // The state mutation by detectAgentStates should be visible in onUpdate
       expect(receivedAgents.length).toBe(1);
-      expect(receivedAgents[0].id).toBe("agent-1");
+      expect(receivedAgents[0].state).toBe("running");
+      expect(mockDetectAgentStates).toHaveBeenCalledWith([agent1]);
     });
 
-    test("onUpdate receives flat list from flattenAgentTree", async () => {
+    test("detectAgentStates changes state between refreshes", async () => {
       const agent1 = makeAgent("agent-1");
-      const flat = [{ agent: agent1, depth: 0 }];
-      setupDefaultMocks([agent1]);
-      mockFlattenAgentTree.mockReturnValue(flat);
 
-      let receivedFlat: FlatAgent[] = [];
+      let callNum = 0;
+      mockReadAllAgents.mockImplementation(async () => {
+        // Return a fresh agent each time so state starts at "unknown"
+        const a = makeAgent("agent-1");
+        return { agents: [a], errors: [] };
+      });
+      mockDetectAgentStates.mockImplementation(async (agents: Agent[]) => {
+        callNum++;
+        for (const a of agents) {
+          a.state = callNum === 1 ? "running" : "complete";
+        }
+      });
+      mockBuildAgentTree.mockImplementation((agents) => agents);
+      mockFlattenAgentTree.mockImplementation((roots) =>
+        roots.map((a) => ({ agent: a, depth: 0 }))
+      );
+      mockReadPendingQuestions.mockResolvedValue([]);
+
+      const states: string[] = [];
       const watcher = new AgentWatcher(
         [{ path: tempDir, name: "test" }],
-        { onUpdate: (_, flatList) => { receivedFlat = flatList; } }
+        { onUpdate: (agents) => { states.push(agents[0].state); } }
       );
 
       await watcher.start();
-      watcher.stop();
-
-      expect(receivedFlat.length).toBe(1);
-      expect(receivedFlat[0].depth).toBe(0);
-    });
-
-    test("detects added agents on subsequent refresh", async () => {
-      setupDefaultMocks([]);
-      const updates: Agent[][] = [];
-      const watcher = new AgentWatcher(
-        [{ path: tempDir, name: "test" }],
-        { onUpdate: (agents) => updates.push([...agents]) }
-      );
-
-      await watcher.start();
-      expect(updates.length).toBe(1);
-      expect(updates[0].length).toBe(0);
-
-      // Now simulate an agent appearing
-      const newAgent = makeAgent("agent-new");
-      mockReadAllAgents.mockResolvedValue({ agents: [newAgent], errors: [] });
-      mockBuildAgentTree.mockReturnValue([newAgent]);
-      mockFlattenAgentTree.mockReturnValue([{ agent: newAgent, depth: 0 }]);
-
       await watcher.refresh();
-
-      expect(updates.length).toBe(2);
-      expect(updates[1].length).toBe(1);
-      expect(updates[1][0].id).toBe("agent-new");
-
       watcher.stop();
+
+      expect(states).toEqual(["running", "complete"]);
     });
 
-    test("detects removed agents on subsequent refresh", async () => {
+    test("buildAgentTree receives output of detectAgentStates", async () => {
       const agent1 = makeAgent("agent-1");
-      setupDefaultMocks([agent1]);
-      const updates: Agent[][] = [];
+      const agent2 = makeAgent("agent-2");
+
+      mockReadAllAgents.mockResolvedValue({ agents: [agent1, agent2], errors: [] });
+      mockDetectAgentStates.mockImplementation(async (agents: Agent[]) => {
+        agents[0].state = "running";
+        agents[1].state = "complete";
+      });
+      mockBuildAgentTree.mockImplementation((agents) => {
+        // Verify that agents passed to buildAgentTree have been mutated
+        // by detectAgentStates
+        return agents;
+      });
+      mockFlattenAgentTree.mockImplementation((roots) =>
+        roots.map((a) => ({ agent: a, depth: 0 }))
+      );
+      mockReadPendingQuestions.mockResolvedValue([]);
+
       const watcher = new AgentWatcher(
         [{ path: tempDir, name: "test" }],
-        { onUpdate: (agents) => updates.push([...agents]) }
+        { onUpdate: () => {} }
       );
 
       await watcher.start();
-      expect(updates[0].length).toBe(1);
-
-      // Agent removed
-      mockReadAllAgents.mockResolvedValue({ agents: [], errors: [] });
-      mockBuildAgentTree.mockReturnValue([]);
-      mockFlattenAgentTree.mockReturnValue([]);
-
-      await watcher.refresh();
-
-      expect(updates[1].length).toBe(0);
-
       watcher.stop();
-    });
 
-    test("detects changed agents on subsequent refresh", async () => {
-      const agent1 = makeAgent("agent-1");
-      agent1.state = "running";
-      setupDefaultMocks([agent1]);
-
-      const updates: Agent[][] = [];
-      const watcher = new AgentWatcher(
-        [{ path: tempDir, name: "test" }],
-        { onUpdate: (agents) => updates.push([...agents]) }
-      );
-
-      await watcher.start();
-
-      // Agent state changes
-      const updated = makeAgent("agent-1");
-      updated.state = "waiting_for_tool";
-      mockReadAllAgents.mockResolvedValue({ agents: [updated], errors: [] });
-      mockBuildAgentTree.mockReturnValue([updated]);
-      mockFlattenAgentTree.mockReturnValue([{ agent: updated, depth: 0 }]);
-
-      await watcher.refresh();
-
-      expect(updates.length).toBe(2);
-      watcher.stop();
+      // buildAgentTree was called with agents that detectAgentStates already mutated
+      const argsToTree = mockBuildAgentTree.mock.calls[0][0];
+      expect(argsToTree[0].state).toBe("running");
+      expect(argsToTree[1].state).toBe("complete");
     });
 
     test("questions are passed through from readPendingQuestions", async () => {
@@ -371,22 +540,6 @@ describe("AgentWatcher", () => {
 
       expect(receivedQuestions.length).toBe(1);
       expect(receivedQuestions[0].id).toBe("q-1");
-    });
-
-    test("detectAgentStates is called during refresh", async () => {
-      const agent1 = makeAgent("agent-1");
-      setupDefaultMocks([agent1]);
-
-      const watcher = new AgentWatcher(
-        [{ path: tempDir, name: "test" }],
-        { onUpdate: () => {} }
-      );
-
-      await watcher.start();
-      watcher.stop();
-
-      expect(mockDetectAgentStates).toHaveBeenCalledTimes(1);
-      expect(mockDetectAgentStates).toHaveBeenCalledWith([agent1]);
     });
 
     test("multiple repos have questions merged", async () => {

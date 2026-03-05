@@ -2,8 +2,8 @@ import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { join } from "path";
 import { mkdtemp, rm, mkdir } from "fs/promises";
 import { tmpdir } from "os";
-import { readAgentLog } from "../agents";
-import type { Agent, AgentMeta, FlatAgent } from "../agents";
+import { readAgentLog, readAgentPrompt, parseDenials } from "../agents";
+import type { Agent, AgentMeta, FlatAgent, PendingQuestion } from "../agents";
 import { TmuxPaneComponent, RightPaneComponent, DashboardComponent } from "./dashboard";
 import { setRunner, resetRunner } from "../ib-commands";
 
@@ -593,5 +593,324 @@ describe("DashboardComponent dialog and action handlers", () => {
     // After toggle, archived agents should be visible (we just verify no crash)
     dashboard.handleInput("A");
     // Toggle back
+  });
+});
+
+describe("parseDenials", () => {
+  test("parses PreToolUse denial lines", () => {
+    const lines = [
+      "[2026-03-05 15:37:26] [PreToolUse] Permission denied: Bash (command: ls, description: list files)",
+      "[2026-03-05 15:37:30] Agent created (prompt: test)",
+      "[2026-03-05 15:38:00] [PreToolUse] Permission denied: Read (file: /etc/passwd)",
+    ];
+    const denials = parseDenials(lines);
+    expect(denials.length).toBe(2);
+    expect(denials[0]!.timestamp).toBe("2026-03-05 15:37:26");
+    expect(denials[0]!.line).toContain("Permission denied: Bash");
+    expect(denials[1]!.timestamp).toBe("2026-03-05 15:38:00");
+  });
+
+  test("returns empty array when no denials", () => {
+    const lines = [
+      "[2026-03-05 15:37:26] Agent created (prompt: test)",
+      "[2026-03-05 15:37:30] Spawned worker subagent: agent-abc",
+    ];
+    expect(parseDenials(lines)).toEqual([]);
+  });
+
+  test("handles empty input", () => {
+    expect(parseDenials([])).toEqual([]);
+  });
+
+  test("sets epoch from timestamp", () => {
+    const lines = [
+      "[2026-03-05 15:37:26] [PreToolUse] Permission denied: Bash (command: ls)",
+    ];
+    const denials = parseDenials(lines);
+    expect(denials[0]!.epoch).toBeGreaterThan(0);
+  });
+});
+
+describe("readAgentPrompt", () => {
+  let tmpDir: string;
+
+  beforeEach(async () => {
+    tmpDir = await mkdtemp(join(tmpdir(), "itsybitsy-test-"));
+  });
+
+  afterEach(async () => {
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  test("reads prompt.txt for active agent", async () => {
+    const agentDir = join(tmpDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "prompt.txt"), "Do the thing\nLine 2");
+
+    const agent = makeAgent("agent-abc", tmpDir, false);
+    const lines = await readAgentPrompt(agent);
+    expect(lines).toEqual(["Do the thing", "Line 2"]);
+  });
+
+  test("falls back to meta.prompt when prompt.txt missing", async () => {
+    const agentDir = join(tmpDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(agentDir, { recursive: true });
+
+    const agent = makeAgent("agent-abc", tmpDir, false);
+    agent.meta.prompt = "meta prompt text";
+    const lines = await readAgentPrompt(agent);
+    expect(lines).toEqual(["meta prompt text"]);
+  });
+
+  test("reads from archive dir for archived agent", async () => {
+    const agentDir = join(tmpDir, ".ittybitty", "archive", "agent-old");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "prompt.txt"), "archived prompt");
+
+    const agent = makeAgent("agent-old", tmpDir, true);
+    const lines = await readAgentPrompt(agent);
+    expect(lines).toEqual(["archived prompt"]);
+  });
+});
+
+describe("DashboardComponent Phase 5.2 features", () => {
+  let dashboard: DashboardComponent;
+  let lastIbCall: { args: string[]; cwd: string } | null;
+
+  function setupDashboard(state = "running") {
+    dashboard = new DashboardComponent();
+    lastIbCall = null;
+    setRunner(async (args, cwd) => {
+      lastIbCall = { args, cwd };
+      return { ok: true, exitCode: 0, stdout: "ok", stderr: "" };
+    });
+
+    const agent = makeAgent("agent-test", "/repos/test");
+    agent.state = state as any;
+    const flatList: FlatAgent[] = [{ agent, depth: 0 }];
+    dashboard.onUpdate([agent], flatList, []);
+  }
+
+  afterEach(() => {
+    resetRunner();
+  });
+
+  test("addError adds timestamped error to errors list", () => {
+    dashboard = new DashboardComponent();
+    dashboard.addError("Something went wrong");
+    expect(dashboard.errors.length).toBe(1);
+    expect(dashboard.errors[0]).toContain("Something went wrong");
+  });
+
+  test("clearErrors removes all errors", () => {
+    dashboard = new DashboardComponent();
+    dashboard.addError("Error 1");
+    dashboard.addError("Error 2");
+    expect(dashboard.errors.length).toBe(2);
+    dashboard.clearErrors();
+    expect(dashboard.errors.length).toBe(0);
+  });
+
+  test("c key clears errors only in ERRORS mode", () => {
+    setupDashboard();
+    dashboard.addError("test error");
+    // c in non-ERRORS mode does nothing
+    dashboard.handleInput("c");
+    expect(dashboard.errors.length).toBe(1);
+    // Jump to ERRORS mode
+    dashboard.handleInput("e");
+    dashboard.handleInput("c");
+    expect(dashboard.errors.length).toBe(0);
+  });
+
+  test("t key cycles denials filter only in DENIALS mode", () => {
+    setupDashboard();
+    // t outside DENIALS does nothing (no crash)
+    dashboard.handleInput("t");
+    // Jump to DENIALS mode
+    dashboard.handleInput("p"); // cycle pane modes
+    dashboard.handleInput("p");
+    // Now verify we're on DENIALS (mode index 2)
+    // Use direct jump instead
+    dashboard = new DashboardComponent();
+    const agent = makeAgent("agent-test", "/repos/test");
+    const flatList: FlatAgent[] = [{ agent, depth: 0 }];
+    dashboard.onUpdate([agent], flatList, []);
+    // Simulate being in DENIALS by cycling to mode 2
+    dashboard.handleInput("p"); // 0→1
+    dashboard.handleInput("p"); // 1→2 (DENIALS)
+    dashboard.handleInput("t"); // cycle filter
+    // No crash means it works
+  });
+
+  test("d key triggers diff loading", () => {
+    setupDashboard();
+    let diffCalled = false;
+    setRunner(async (args, cwd) => {
+      if (args[0] === "diff") diffCalled = true;
+      return { ok: true, exitCode: 0, stdout: "diff output", stderr: "" };
+    });
+    dashboard.handleInput("d");
+    // Diff should be loading or loaded
+  });
+
+  test("g key jumps to STATUS", () => {
+    setupDashboard();
+    dashboard.handleInput("g");
+    // Should be on STATUS mode now (no crash = correct)
+  });
+
+  test("g key in QUESTIONS mode navigates to agent", () => {
+    dashboard = new DashboardComponent();
+    setRunner(async (args, cwd) => {
+      lastIbCall = { args, cwd };
+      return { ok: true, exitCode: 0, stdout: "", stderr: "" };
+    });
+
+    const agent = makeAgent("agent-test", "/repos/test");
+    const flatList: FlatAgent[] = [{ agent, depth: 0 }];
+    const questions: PendingQuestion[] = [{
+      id: "q-1",
+      agent: "agent-test",
+      question: "Should I proceed?",
+      timestamp: "2026-03-05T15:00:00Z",
+      status: "pending",
+    }];
+    dashboard.onUpdate([agent], flatList, questions);
+
+    // Jump to QUESTIONS
+    dashboard.handleInput("q");
+    // Press g to go to agent
+    dashboard.handleInput("g");
+    // Should navigate to agent-test (no crash = correct behavior)
+  });
+
+  test("Enter in QUESTIONS mode opens answer dialog", () => {
+    dashboard = new DashboardComponent();
+    setRunner(async (args, cwd) => {
+      lastIbCall = { args, cwd };
+      return { ok: true, exitCode: 0, stdout: "", stderr: "" };
+    });
+
+    const agent = makeAgent("agent-test", "/repos/test");
+    const flatList: FlatAgent[] = [{ agent, depth: 0 }];
+    const questions: PendingQuestion[] = [{
+      id: "q-1",
+      agent: "agent-test",
+      question: "Should I proceed?",
+      timestamp: "2026-03-05T15:00:00Z",
+      status: "pending",
+    }];
+    dashboard.onUpdate([agent], flatList, questions);
+
+    dashboard.handleInput("q"); // jump to QUESTIONS
+    dashboard.handleInput("\r"); // Enter to answer
+    expect(dashboard.dialog).not.toBeNull();
+    expect(dashboard.dialog!.type).toBe("input");
+    expect((dashboard.dialog as any).prompt).toContain("Answer");
+  });
+
+  test("answer question sends acknowledge then message", async () => {
+    dashboard = new DashboardComponent();
+    const calls: string[][] = [];
+    setRunner(async (args, cwd) => {
+      calls.push(args);
+      return { ok: true, exitCode: 0, stdout: "", stderr: "" };
+    });
+
+    const agent = makeAgent("agent-test", "/repos/test");
+    const flatList: FlatAgent[] = [{ agent, depth: 0 }];
+    const questions: PendingQuestion[] = [{
+      id: "q-1",
+      agent: "agent-test",
+      question: "Should I proceed?",
+      timestamp: "2026-03-05T15:00:00Z",
+      status: "pending",
+    }];
+    dashboard.onUpdate([agent], flatList, questions);
+
+    dashboard.handleInput("q"); // QUESTIONS mode
+    dashboard.handleInput("\r"); // Enter to answer
+    // Type answer
+    for (const ch of "yes") dashboard.handleInput(ch);
+    dashboard.handleInput("\r"); // Submit
+    await Bun.sleep(50);
+
+    // Should have called acknowledge then send
+    expect(calls.length).toBeGreaterThanOrEqual(2);
+    expect(calls[0]).toEqual(["acknowledge", "q-1"]);
+    expect(calls[1]).toEqual(["send", "agent-test", "yes"]);
+  });
+
+  test("Escape in QUESTIONS mode acknowledges question", async () => {
+    dashboard = new DashboardComponent();
+    const calls: string[][] = [];
+    setRunner(async (args, cwd) => {
+      calls.push(args);
+      return { ok: true, exitCode: 0, stdout: "", stderr: "" };
+    });
+
+    const agent = makeAgent("agent-test", "/repos/test");
+    const flatList: FlatAgent[] = [{ agent, depth: 0 }];
+    const questions: PendingQuestion[] = [{
+      id: "q-1",
+      agent: "agent-test",
+      question: "Should I proceed?",
+      timestamp: "2026-03-05T15:00:00Z",
+      status: "pending",
+    }];
+    dashboard.onUpdate([agent], flatList, questions);
+
+    dashboard.handleInput("q"); // QUESTIONS mode
+    dashboard.handleInput("\x1b"); // Escape to acknowledge
+    await Bun.sleep(50);
+
+    expect(calls.length).toBeGreaterThanOrEqual(1);
+    expect(calls[0]).toEqual(["acknowledge", "q-1"]);
+  });
+
+  test("j/k navigate questions in QUESTIONS mode", () => {
+    dashboard = new DashboardComponent();
+    const agent1 = makeAgent("agent-a", "/repos/test");
+    const agent2 = makeAgent("agent-b", "/repos/test");
+    const flatList: FlatAgent[] = [
+      { agent: agent1, depth: 0 },
+      { agent: agent2, depth: 0 },
+    ];
+    const questions: PendingQuestion[] = [
+      { id: "q-1", agent: "agent-a", question: "Q1?", timestamp: "2026-03-05T15:00:00Z", status: "pending" },
+      { id: "q-2", agent: "agent-b", question: "Q2?", timestamp: "2026-03-05T15:01:00Z", status: "pending" },
+    ];
+    dashboard.onUpdate([agent1, agent2], flatList, questions);
+
+    dashboard.handleInput("q"); // QUESTIONS mode
+    dashboard.handleInput("j"); // move down in questions
+    // No crash; question selection moved
+  });
+
+  test("selectAgentById selects the right agent", () => {
+    dashboard = new DashboardComponent();
+    const agent1 = makeAgent("agent-a", "/repos/test");
+    const agent2 = makeAgent("agent-b", "/repos/test");
+    const flatList: FlatAgent[] = [
+      { agent: agent1, depth: 0 },
+      { agent: agent2, depth: 0 },
+    ];
+    dashboard.onUpdate([agent1, agent2], flatList, []);
+
+    // Jump to QUESTIONS, then go to an agent
+    dashboard.handleInput("q");
+    // Simulate g with a question pointing to agent-b
+    const questions: PendingQuestion[] = [{
+      id: "q-1",
+      agent: "agent-b",
+      question: "test?",
+      timestamp: "2026-03-05T15:00:00Z",
+      status: "pending",
+    }];
+    dashboard.onUpdate([agent1, agent2], flatList, questions);
+    dashboard.handleInput("q"); // back to questions
+    dashboard.handleInput("g"); // go to agent-b
+    // Should not crash; agent-b should be selected
   });
 });

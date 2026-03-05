@@ -248,7 +248,9 @@ export class RightPaneComponent implements Component {
             this.content.push(`${DIM}No denials found${RESET}`);
           } else {
             for (const d of filtered) {
-              this.content.push(`${DIM}[${d.timestamp}]${RESET} ${d.line.replace(/^\[.*?\] /, "")}`);
+              // Strip timestamp and [PreToolUse] prefix from the line for cleaner display
+              const stripped = d.line.replace(/^\[.*?\] \[PreToolUse\] /, "");
+              this.content.push(`${DIM}[${d.timestamp}]${RESET} ${stripped}`);
             }
           }
         }

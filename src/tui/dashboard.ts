@@ -1,6 +1,6 @@
 /**
  * Main TUI dashboard — agent tree + live tmux pane.
- * Phase 3: basic dashboard with agent tree, state updates, keybindings.
+ * Phase 4: improved tmux rendering with line wrapping, scroll, agent.log reading.
  */
 
 import {
@@ -12,11 +12,13 @@ import {
   visibleWidth,
 } from "@mariozechner/pi-tui";
 import type { Component } from "@mariozechner/pi-tui";
+import { join } from "path";
 import { listRepos } from "../registry";
 import { AgentWatcher } from "../watcher";
 import { TmuxPoller } from "../tmux-poller";
 import type { Agent, FlatAgent, PendingQuestion } from "../agents";
 import { SplitPane } from "./split-pane";
+import { wrapLines } from "./wrap";
 
 const MAX_TREE_HEIGHT = 7;
 
@@ -66,6 +68,28 @@ function formatAgentRow(
   const line = `${indent}${icon} ${agent.repoName}/${agent.id}  ${stateColor}${agent.state}${RESET}  ${agent.age}  ${agent.meta.model}  ${archived}${shortPrompt}`;
 
   return `${sel}${truncateToWidth(line, width, "")}${selEnd}`;
+}
+
+/**
+ * Read agent.log file for a given agent.
+ * Returns the log content as an array of lines, or a placeholder message.
+ */
+export async function readAgentLog(agent: Agent): Promise<string[]> {
+  const dir = agent.archived ? "archive" : "agents";
+  const logPath = join(agent.repoPath, ".ittybitty", dir, agent.id, "agent.log");
+  try {
+    const file = Bun.file(logPath);
+    if (!(await file.exists())) {
+      return [`${DIM}No agent.log found${RESET}`];
+    }
+    const text = await file.text();
+    if (!text.trim()) {
+      return [`${DIM}agent.log is empty${RESET}`];
+    }
+    return text.split("\n");
+  } catch {
+    return [`${DIM}Failed to read agent.log${RESET}`];
+  }
 }
 
 /** Agent tree component with height constraint and scrolling */
@@ -153,6 +177,8 @@ class RightPaneComponent implements Component {
   questions: PendingQuestion[] = [];
   allAgents: FlatAgent[] = [];
   scrollOffset = 0;
+  displayHeight = 20;
+  agentLogContent: string[] | null = null;
   private content: string[] = [];
 
   invalidate(): void {}
@@ -166,9 +192,10 @@ class RightPaneComponent implements Component {
   updateContent() {
     switch (this.mode) {
       case "AGENT LOG":
-        this.content = this.agent
-          ? [`${DIM}Agent log for ${this.agent.id}${RESET}`, `${DIM}(Phase 4: will read agent.log)${RESET}`]
-          : [`${DIM}No agent selected${RESET}`];
+        this.content = this.agentLogContent
+          ?? (this.agent
+            ? [`${DIM}Loading agent.log...${RESET}`]
+            : [`${DIM}No agent selected${RESET}`]);
         break;
       case "INITIAL PROMPT":
         this.content = this.agent
@@ -212,37 +239,119 @@ class RightPaneComponent implements Component {
     const header = `${BOLD}${DIM}── ${this.mode} ──${RESET}`;
     const lines = [truncateToWidth(header, width, "")];
 
+    // Available lines after header
+    const available = Math.max(1, this.displayHeight - 1);
     const start = this.scrollOffset;
-    const visible = this.content.slice(start);
+    const visible = this.content.slice(start, start + available);
     for (const line of visible) {
       lines.push(truncateToWidth(line, width, ""));
+    }
+
+    // Pad to displayHeight so both panes are same height
+    while (lines.length < this.displayHeight) {
+      lines.push("");
     }
 
     return lines;
   }
 }
 
-/** Tmux output pane — shows live tmux capture for the selected agent */
+/**
+ * Tmux output pane — shows live tmux capture for the selected agent.
+ * Wraps long lines to pane width, supports scroll-back from bottom.
+ */
 class TmuxPaneComponent implements Component {
   agent: Agent | null = null;
   rawOutput: string = "";
+  /** Whether at least one poll has completed for the current agent */
+  hasPolled = false;
+  /** Lines scrolled back from the bottom. 0 = following newest output. */
+  scrollBack = 0;
+  /** Available display height, set by dashboard before render */
+  displayHeight = 20;
 
   invalidate(): void {}
 
+  /** Reset state when switching agents */
+  resetForAgent() {
+    this.rawOutput = "";
+    this.hasPolled = false;
+    this.scrollBack = 0;
+  }
+
+  scrollUp(amount = 1) {
+    this.scrollBack += amount;
+  }
+
+  scrollDown(amount = 1) {
+    this.scrollBack = Math.max(0, this.scrollBack - amount);
+  }
+
   render(width: number): string[] {
     if (!this.agent) {
-      return [truncateToWidth(`${DIM}No agent selected${RESET}`, width, "")];
+      return padLines([truncateToWidth(`${DIM}No agent selected${RESET}`, width, "")], this.displayHeight);
     }
+
+    // Graceful display for stopped/orphaned agents (no tmux session)
+    if (this.hasPolled && !this.rawOutput) {
+      const stateColor = STATE_COLORS[this.agent.state] ?? STATE_COLORS.unknown;
+      const lines = [
+        truncateToWidth(`${BOLD}${this.agent.id}${RESET}`, width, ""),
+        truncateToWidth(`${stateColor}${this.agent.state}${RESET}`, width, ""),
+        "",
+        truncateToWidth(`${DIM}No active tmux session${RESET}`, width, ""),
+      ];
+      if (this.agent.state === "stopped") {
+        lines.push(truncateToWidth(`${DIM}Agent has stopped or been archived.${RESET}`, width, ""));
+      } else {
+        lines.push(truncateToWidth(`${DIM}Session: ${this.agent.meta.tmux_session}${RESET}`, width, ""));
+      }
+      return padLines(lines, this.displayHeight);
+    }
+
     if (!this.rawOutput) {
-      return [
+      return padLines([
         truncateToWidth(`${BOLD}${this.agent.id}${RESET} ${DIM}(${this.agent.meta.tmux_session})${RESET}`, width, ""),
         truncateToWidth(`${DIM}Waiting for tmux output...${RESET}`, width, ""),
-      ];
+      ], this.displayHeight);
     }
-    // Show raw output with ANSI, truncated per line
-    const lines = this.rawOutput.split("\n");
-    return lines.map((line) => truncateToWidth(line, width, ""));
+
+    // Wrap lines to pane width
+    const wrapped = wrapLines(this.rawOutput, width);
+
+    // Clamp scrollBack to valid range
+    const maxScrollBack = Math.max(0, wrapped.length - this.displayHeight);
+    if (this.scrollBack > maxScrollBack) {
+      this.scrollBack = maxScrollBack;
+    }
+
+    // Slice visible window from the bottom
+    const end = wrapped.length - this.scrollBack;
+    const start = Math.max(0, end - this.displayHeight);
+    const visible = wrapped.slice(start, end);
+
+    // Truncate each line (wrap should already fit, but ensure safety)
+    const lines = visible.map((line) => truncateToWidth(line, width, ""));
+
+    // Show scroll indicator if scrolled back
+    if (this.scrollBack > 0 && lines.length > 0) {
+      lines[lines.length - 1] = truncateToWidth(
+        `${DIM}── ↓ ${this.scrollBack} lines below ──${RESET}`,
+        width,
+        ""
+      );
+    }
+
+    return padLines(lines, this.displayHeight);
   }
+}
+
+/** Pad lines array to exact height */
+function padLines(lines: string[], height: number): string[] {
+  while (lines.length < height) {
+    lines.push("");
+  }
+  return lines;
 }
 
 /** Status bar component */
@@ -259,7 +368,7 @@ class StatusBarComponent implements Component {
         ? ` ${BOLD}\x1b[33m[${this.pendingQuestions} questions]${RESET}`
         : "";
 
-    const keys = `${DIM}j/k:nav  p/n:pane  d:diff  g:status  e:errors  q:questions  Ctrl-C:quit${RESET}`;
+    const keys = `${DIM}j/k:nav  ;/l:scroll  p/n:pane  d:diff  g:status  e:errors  q:questions  Ctrl-C:quit${RESET}`;
     const modeLine = `${DIM}[${this.modeIndex}] ${this.currentMode}${RESET}${questionBadge}`;
     return [
       truncateToWidth(modeLine, width, ""),
@@ -278,6 +387,7 @@ class DashboardComponent implements Component {
   private tui: TUI | null = null;
   private modeIndex = 0;
   private tmuxPoller: TmuxPoller;
+  private currentAgentId: string | null = null;
 
   constructor() {
     this.agentTree = new AgentTreeComponent();
@@ -292,6 +402,7 @@ class DashboardComponent implements Component {
     this.tmuxPoller = new TmuxPoller({
       onOutput: (raw, _stripped) => {
         this.tmuxPane.rawOutput = raw;
+        this.tmuxPane.hasPolled = true;
         this.tui?.requestRender();
       },
     });
@@ -325,10 +436,33 @@ class DashboardComponent implements Component {
     const selected = this.agentTree.selectedAgent;
     this.rightPane.agent = selected;
     this.tmuxPane.agent = selected;
+
+    // If agent changed, reset tmux pane state and reload agent log
+    const newId = selected?.id ?? null;
+    if (newId !== this.currentAgentId) {
+      this.currentAgentId = newId;
+      this.tmuxPane.resetForAgent();
+      this.rightPane.agentLogContent = null;
+      this.rightPane.scrollOffset = 0;
+      if (selected) {
+        this.loadAgentLog(selected);
+      }
+    }
+
     this.rightPane.updateContent();
 
     // Update tmux poller target
     this.tmuxPoller.setAgent(selected?.meta.tmux_session ?? null);
+  }
+
+  private async loadAgentLog(agent: Agent) {
+    const content = await readAgentLog(agent);
+    // Only apply if we're still looking at the same agent
+    if (this.currentAgentId === agent.id) {
+      this.rightPane.agentLogContent = content;
+      this.rightPane.updateContent();
+      this.tui?.requestRender();
+    }
   }
 
   private cyclePaneMode(delta: number) {
@@ -392,12 +526,14 @@ class DashboardComponent implements Component {
       this.syncSelectedAgent();
       this.tui?.requestRender();
     }
-    // Scroll pane content
+    // Scroll pane content — scrolls both tmux pane and right pane
     else if (data === ";") {
+      this.tmuxPane.scrollUp();
       this.rightPane.scrollOffset++;
       this.rightPane.updateContent();
       this.tui?.requestRender();
     } else if (data === "l") {
+      this.tmuxPane.scrollDown();
       this.rightPane.scrollOffset = Math.max(0, this.rightPane.scrollOffset - 1);
       this.rightPane.updateContent();
       this.tui?.requestRender();
@@ -423,6 +559,17 @@ class DashboardComponent implements Component {
 
     // Separator
     lines.push(truncateToWidth(`${DIM}${"─".repeat(width)}${RESET}`, width, ""));
+
+    // Compute available height for split pane
+    const statusHeight = 2;
+    const separatorHeight = 1; // bottom separator before status
+    const usedHeight = lines.length + separatorHeight + statusHeight;
+    const terminalRows = process.stdout.rows || 24;
+    const availableHeight = Math.max(5, terminalRows - usedHeight);
+
+    // Set display heights on sub-components before rendering
+    this.tmuxPane.displayHeight = availableHeight;
+    this.rightPane.displayHeight = availableHeight;
 
     // Split pane (tmux left + right pane)
     const splitLines = this.splitPane.render(width);

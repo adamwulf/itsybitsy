@@ -15,8 +15,7 @@ import type { Component } from "@mariozechner/pi-tui";
 import { listRepos } from "../registry";
 import { AgentWatcher } from "../watcher";
 import { TmuxPoller } from "../tmux-poller";
-import type { FlatAgent } from "../watcher";
-import type { Agent, PendingQuestion } from "../agents";
+import type { Agent, FlatAgent, PendingQuestion } from "../agents";
 import { SplitPane } from "./split-pane";
 
 const MAX_TREE_HEIGHT = 7;

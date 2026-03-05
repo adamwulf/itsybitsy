@@ -47,9 +47,7 @@ async function main() {
     }
     case "agents": {
       // Debug command: print all agents across all repos with states
-      const { readAllAgents, buildAgentTree, flattenAgentTree } = await import("./agents");
-      const { parseState } = await import("./parse-state");
-      const { captureTmuxOutput } = await import("./tmux-poller");
+      const { readAllAgents, buildAgentTree, flattenAgentTree, detectAgentStates } = await import("./agents");
       const repos = await listRepos();
       if (repos.length === 0) {
         console.log("No repos registered. Use 'itsybitsy add <path>' to add one.");
@@ -59,20 +57,7 @@ async function main() {
       for (const err of errors) {
         console.error(`Warning: ${err.error}`);
       }
-      // Detect state for each agent via tmux
-      await Promise.all(
-        agents.map(async (agent) => {
-          if (agent.archived) {
-            agent.state = "stopped";
-            return;
-          }
-          const tmuxSession = agent.meta.tmux_session;
-          if (!tmuxSession) { agent.state = "unknown"; return; }
-          const output = await captureTmuxOutput(tmuxSession);
-          if (output === null) { agent.state = "stopped"; return; }
-          agent.state = parseState(output).state;
-        })
-      );
+      await detectAgentStates(agents);
       const roots = buildAgentTree(agents);
       const flat = flattenAgentTree(roots);
       if (flat.length === 0) {

@@ -6,6 +6,8 @@
 import { join } from "path";
 import { readdir } from "fs/promises";
 import type { AgentState } from "./parse-state";
+import { parseState } from "./parse-state";
+import { captureTmuxOutput } from "./tmux-poller";
 
 export interface AgentMeta {
   id: string;
@@ -204,4 +206,34 @@ export async function readAllAgents(
     agents: results.flatMap((r) => r.agents),
     errors: results.flatMap((r) => r.errors),
   };
+}
+
+/**
+ * Detect agent state for each agent by capturing tmux output and running parseState().
+ * Archived agents are set to "stopped". Mutates agent.state in place.
+ */
+export async function detectAgentStates(agents: Agent[]): Promise<void> {
+  const active = agents.filter((a) => !a.archived);
+
+  await Promise.all(
+    active.map(async (agent) => {
+      const tmuxSession = agent.meta.tmux_session;
+      if (!tmuxSession) {
+        agent.state = "unknown";
+        return;
+      }
+      const output = await captureTmuxOutput(tmuxSession);
+      if (output === null) {
+        agent.state = "stopped";
+        return;
+      }
+      agent.state = parseState(output).state;
+    })
+  );
+
+  for (const agent of agents) {
+    if (agent.archived) {
+      agent.state = "stopped";
+    }
+  }
 }

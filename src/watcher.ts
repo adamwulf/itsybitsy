@@ -7,13 +7,9 @@
 
 import { watch, type FSWatcher } from "fs";
 import { join } from "path";
-import { readAllAgents, buildAgentTree, flattenAgentTree, readPendingQuestions } from "./agents";
+import { readAllAgents, buildAgentTree, flattenAgentTree, readPendingQuestions, detectAgentStates } from "./agents";
 import type { Agent, FlatAgent, PendingQuestion } from "./agents";
 import type { RepoEntry } from "./registry";
-import { parseState } from "./parse-state";
-import { captureTmuxOutput } from "./tmux-poller";
-
-export type { FlatAgent } from "./agents";
 
 export interface WatcherEvents {
   onUpdate: (agents: Agent[], flatList: FlatAgent[], questions: PendingQuestion[]) => void;
@@ -106,39 +102,6 @@ export class AgentWatcher {
     }, 200);
   }
 
-  /** Detect agent state by capturing tmux output and running parseState() */
-  private async detectAgentStates(agents: Agent[]): Promise<void> {
-    // Only detect state for non-archived agents (archived are implicitly stopped)
-    const active = agents.filter((a) => !a.archived);
-
-    await Promise.all(
-      active.map(async (agent) => {
-        const tmuxSession = agent.meta.tmux_session;
-        if (!tmuxSession) {
-          agent.state = "unknown";
-          return;
-        }
-
-        const output = await captureTmuxOutput(tmuxSession);
-        if (output === null) {
-          // tmux session doesn't exist → stopped
-          agent.state = "stopped";
-          return;
-        }
-
-        const result = parseState(output);
-        agent.state = result.state;
-      })
-    );
-
-    // Archived agents are always stopped
-    for (const agent of agents) {
-      if (agent.archived) {
-        agent.state = "stopped";
-      }
-    }
-  }
-
   /** Read all agents, detect states, and emit update */
   async refresh(): Promise<void> {
     try {
@@ -150,7 +113,7 @@ export class AgentWatcher {
       }
 
       // Detect state for each agent via tmux capture + parseState
-      await this.detectAgentStates(agents);
+      await detectAgentStates(agents);
 
       const roots = buildAgentTree(agents);
       const flatList = flattenAgentTree(roots);

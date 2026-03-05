@@ -384,18 +384,18 @@ Note: `tmux-poller.ts` was implemented in Phase 2/3. Phase 4 focuses on renderin
 
 ---
 
-### Phase 5.2: Right Pane Content
+### Phase 5.2: Right Pane Content -- COMPLETE
 **Checkpoint:** All right pane modes show real content. Must be merged before Phase 5.3 begins (both phases touch dashboard.ts).
 
-- [ ] Right pane mode 1 — INITIAL PROMPT: read `prompt.txt` from `.ittybitty/agents/{id}/prompt.txt`
-- [ ] Right pane mode 2 — DENIALS: tool denials log (investigate source during implementation: likely filtered from `agent.log` by looking for "PreToolUse" hook lines)
-- [ ] Right pane mode 3 — TREE: render full cross-repo agent tree as text (all repos, all agents, indented hierarchy)
-- [ ] Right pane mode 4 — ERRORS: async errors collected by watcher; `c` to clear
-- [ ] Right pane mode 5 — DIFF: `ib diff {id}` output, loaded async when pane is active
-- [ ] Right pane mode 6 — STATUS: `ib status {id}` output, loaded async when pane is active
-- [ ] `g` — STATUS pane in normal context; go-to-agent in QUESTIONS pane
-- [ ] `q` — QUESTIONS pane; `Enter` to answer selected question via `ib send`; `ib acknowledge` to dismiss without answering
-- [ ] `t` — cycle denials time filter (3 levels: all / last hour / last 10 min), only active in DENIALS pane
+- [x] Right pane mode 1 — INITIAL PROMPT: reads `prompt.txt` from `.ittybitty/agents/{id}/prompt.txt`, falls back to `meta.prompt`
+- [x] Right pane mode 2 — DENIALS: parses `agent.log` for `[PreToolUse] Permission denied:` lines with timestamp-based time filter
+- [x] Right pane mode 3 — TREE: renders full cross-repo agent tree with age and model info
+- [x] Right pane mode 4 — ERRORS: async errors collected by watcher's `onError` callback; `c` to clear
+- [x] Right pane mode 5 — DIFF: `ib diff {id}` output, loaded async when pane is active, cached until agent changes
+- [x] Right pane mode 6 — STATUS: `ib status {id}` output, loaded async when pane is active, cached until agent changes
+- [x] `g` — STATUS pane in normal context; go-to-agent in QUESTIONS pane (selects agent and jumps to AGENT LOG)
+- [x] `q` — QUESTIONS pane; `Enter` to answer (acknowledges + sends); `Escape` to acknowledge without answering
+- [x] `t` — cycle denials time filter (3 levels: all / last hour / last 10 min), only active in DENIALS pane
 
 ---
 

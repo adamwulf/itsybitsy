@@ -11,6 +11,7 @@ import {
   newAgent,
   diffAgent,
   statusAgent,
+  acknowledgeQuestion,
   setRunner,
   resetRunner,
 } from "./ib-commands";
@@ -195,6 +196,14 @@ describe("ib-commands", () => {
     expect(result.ok).toBe(false);
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toBe("something broke");
+  });
+
+  test("acknowledgeQuestion passes ['acknowledge', questionId] with repoPath as cwd", async () => {
+    await acknowledgeQuestion("/repos/myproject", "q-1");
+    expect(lastCall).toEqual({
+      args: ["acknowledge", "q-1"],
+      cwd: "/repos/myproject",
+    });
   });
 
   test("cwd always matches agent.repoPath", async () => {

@@ -199,9 +199,12 @@ Per-repo `.ittybitty.json` config (read `fps` field to inform polling rate):
   "repos": [
     { "path": "/Users/adamwulf/Developer/muse/muse-ios", "name": "muse-ios" },
     { "path": "/Users/adamwulf/Developer/bash/ittybitty", "name": "ittybitty" }
-  ]
+  ],
+  "diffTool": "code --diff"
 }
 ```
+
+`diffTool` is optional. When set, `o` writes `ib diff {id}` output to a temp file and opens it with the configured command: `{diffTool} {tempfile}`. If not set, `o` shows a "No diff tool configured — set diffTool in ~/.itsybitsy.json" message. Read `diffTool` from registry alongside `repos`.
 
 CLI commands:
 - `itsybitsy add [path]` — register current or specified dir (default: cwd)
@@ -237,7 +240,7 @@ The agent tree at top shows all agents across all registered repos, grouped by r
 |---|---|
 | 0 — AGENT LOG | `agent.log` read directly |
 | 1 — INITIAL PROMPT | Full prompt from `prompt.txt` |
-| 2 — DENIALS | Tool denials log (parsed from `agent.log` or tmux output; source TBD during Phase 5 implementation) |
+| 2 — DENIALS | Tool denials log (parsed from `agent.log` — look for lines containing `denied`/`not allowed`/`permission denied`/`PreToolUse` hook output) |
 | 3 — TREE | Full agent tree (all repos) |
 | 4 — ERRORS | Agent creation/async errors |
 | 5 — DIFF | `ib diff` output |
@@ -268,18 +271,19 @@ Matching `ib watch` keybindings exactly where possible; new keys noted.
 - `m` — merge agent (runs merge-check first; confirm dialog)
 - `x` — kill agent (confirm dialog)
 - `!` — force-kill / nuke agent (confirm dialog)
-- `a` — new agent (dialog: repo, prompt, --yolo/--worker/--model)
+- `a` — new agent (dialog: repo, prompt, --worker/--yolo flags)
+- `A` — toggle archived agents visibility
 - `r` — reassign agent's manager (dialog) ← matches `ib watch`
 - `R` — resume a stopped agent ← new, not in `ib watch`
 - `G` — open agent's tmux session in Ghostty ← new, not in `ib watch` (`g` is taken by status)
-- `w` — open agent worktree in Finder (matches `ib watch`)
-- `o` — open external diff tool if configured (matches `ib watch`)
-- `S` — capture tmux snapshot for debugging state detection (matches `ib watch`)
+- `w` — open agent worktree in Finder (`open {worktree}`)
+- `o` — open diff in external tool: write `ib diff {id}` output to a temp file, then run `{diffTool} {tempfile}` where `diffTool` comes from `~/.itsybitsy.json`; show message if not configured
+- `S` — capture tmux snapshot for debugging state detection: capture tmux output for selected agent, run `parseState` on it, write result to `.ittybitty/agents/{id}/debug-logs/snapshot-{timestamp}-{state}.txt`, show status message with filename. **Not** an `ib` subcommand — implement directly using `captureTmuxOutput()` + `parseState()`.
 - `c` — clear errors (only active in ERRORS pane)
 - `Enter` — answer selected question (only active in QUESTIONS pane)
 
 **App**
-- `h` — open settings/setup dialog
+- `h` — read-only help dialog showing all keybindings; press any key to dismiss. Not interactive settings.
 - `Ctrl-C` — exit
 
 ## Ghostty Integration
@@ -398,12 +402,12 @@ Note: `tmux-poller.ts` was implemented in Phase 2/3. Phase 4 focuses on renderin
 ### Phase 5.3: Navigation & Remaining Keybindings
 **Checkpoint:** Fuzzy navigation, questions workflow, and all remaining keybindings work. Requires Phase 5.2 to be merged first.
 
-- [ ] `@` — fuzzy jump to agent by name (pi-tui SelectList dialog)
-- [ ] `/` — fuzzy jump to pane mode (pi-tui SelectList dialog)
-- [ ] `w` — open agent worktree in Finder (`open {worktree}`)
-- [ ] `o` — open external diff tool if configured
-- [ ] `h` — settings/help dialog showing all keybindings
-- [ ] `S` — capture tmux snapshot for debugging (`ib snapshot {id}`)
+- [ ] `@` — fuzzy jump to agent by name (pi-tui SelectList dialog overlay)
+- [ ] `/` — fuzzy jump to pane mode by name (pi-tui SelectList dialog overlay)
+- [ ] `w` — open agent worktree in Finder: `Bun.$\`open ${agent.worktree}\``; show error if worktree doesn't exist
+- [ ] `o` — open diff in external tool: write `diffAgent()` output to a temp file (`/tmp/itsybitsy-diff-{id}.txt`), run `{diffTool} {tempfile}`; show "No diff tool configured" message if `diffTool` not set in `~/.itsybitsy.json`
+- [ ] `h` — read-only help dialog listing all keybindings; press any key to dismiss (use existing message dialog type)
+- [ ] `S` — snapshot for debugging: call `captureTmuxOutput(agent.meta.tmux_session)`, run `parseState()` on stripped output, write full capture + state to `.ittybitty/agents/{id}/debug-logs/snapshot-{timestamp}-{state}.txt`, show status message. **Not** an `ib` subcommand — implement directly.
 
 ---
 

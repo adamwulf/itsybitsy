@@ -71,6 +71,7 @@ tmux output (after stripping ANSI codes). States:
 
 Key subtleties:
 - `compacting` checked before `running` (it also shows `(esc to interrupt)`)
+- Active running indicators in last 5 lines checked BEFORE `⎿  Waiting` in last 15 lines (prevents stale tool-waiting from overriding resumed running)
 - `⎿  Waiting` (tool waiting) treated as `waiting` not `running`
 - Stale `WAITING`: if `⏺` appears after `WAITING`, agent has resumed → `running`
 - Hook spinners filtered out before spinner detection
@@ -84,36 +85,42 @@ tmux capture-pane -t {tmux_session} -p -S -{lines} -E -
 Strip ANSI codes before pattern matching. Show raw output (with ANSI) in the live view pane.
 `tmux_session` comes from `meta.json` (e.g., `ittybitty-{repo-uuid}-{agent-id}`).
 
-**ANSI passthrough in pi-tui must be validated** before committing to Phase 4 — the `render(width): string[]` interface may or may not preserve ANSI sequences. Validate in Phase 3.
+**ANSI passthrough validated in Phase 3** — `visibleWidth()` and `truncateToWidth()` correctly ignore/preserve ANSI codes. `Text`, `Container`, and custom components all pass ANSI through to the terminal. See `src/tui/ansi-validation.test.ts`.
 
 ### pi-tui horizontal layout
 
-The two-pane design (agent tree left, tmux output right) requires pi-tui `Box` to support horizontal side-by-side layout. **This must be validated in Phase 1** with a throwaway prototype before the design is locked in.
+The two-pane design (agent tree left, tmux output right) requires pi-tui `Box` to support horizontal side-by-side layout. **Validated in Phase 1:** `Box` only supports vertical layout. A custom `SplitPane` component (`src/tui/split-pane.ts`) renders two children side-by-side by merging their `render()` output line-by-line, padding the left pane and truncating the right.
 
 ## File Layout
 
 ```
 itsybitsy
 ├── src/
-│   ├── index.ts           # CLI entrypoint: add/remove/list/watch subcommands
+│   ├── index.ts           # CLI entrypoint: add/remove/list/watch/agents subcommands
 │   ├── registry.ts        # Read/write ~/.itsybitsy.json
-│   ├── agents.ts          # Read .ittybitty/agents/ directly; types for Agent, AgentState
-│   │                      # Also reads user-questions.json for pending questions
+│   ├── registry.test.ts   # Registry unit tests (7 tests)
+│   ├── agents.ts          # Read .ittybitty/agents/ + archive/ directly; types for Agent,
+│   │                      # AgentState, FlatAgent; tree building; detectAgentStates();
+│   │                      # reads user-questions.json; returns structured errors
+│   ├── agents.test.ts     # Agent data layer tests (23 tests)
 │   ├── parse-state.ts     # Port of ib's parse_state bash logic → TypeScript
-│   ├── watcher.ts         # fs.watch({ recursive: true }) on .ittybitty/agents/;
-│   │                      # emits agentAdded, agentChanged, agentRemoved events;
-│   │                      # low-frequency fallback poll for macOS FSEvents reliability
-│   ├── tmux-poller.ts     # Polls tmux capture-pane for the selected agent (~1s interval)
-│   ├── ib-commands.ts     # Wrappers for ib mutations; always runs with cwd = repo root
-│   ├── ghostty.ts         # Open tmux sessions in Ghostty
+│   ├── parse-state.test.ts # State detection tests (43 tests)
+│   ├── watcher.ts         # fs.watch({ recursive: true }) on agents/, archive/,
+│   │                      # user-questions.json; 10s fallback poll; debounced refresh
+│   ├── tmux-poller.ts     # Polls tmux capture-pane for the selected agent (~1s interval);
+│   │                      # also exports captureTmuxOutput() for one-shot state detection
+│   ├── ib-commands.ts     # (Phase 5) Wrappers for ib mutations; cwd = repo root
+│   ├── ghostty.ts         # (Phase 6) Open tmux sessions in Ghostty
 │   └── tui/
-│       └── dashboard.ts   # Main TUI: agent tree + live tmux pane
+│       ├── dashboard.ts   # Main TUI: agent tree + split pane + status bar
+│       ├── split-pane.ts  # Custom horizontal layout (pi-tui Box is vertical-only)
+│       └── ansi-validation.test.ts  # ANSI passthrough tests (7 tests)
 ├── PLAN.md
 ├── CLAUDE.md
 └── package.json
 ```
 
-Note: `watcher.ts` and `tmux-poller.ts` are split by concern — `watcher.ts` handles structural changes (agents added/removed/changed via `fs.watch`); `tmux-poller.ts` handles live output capture for the selected agent. Different consumers, different error modes, different trigger conditions.
+Note: `watcher.ts` and `tmux-poller.ts` are split by concern — `watcher.ts` handles structural changes (agents added/removed/changed via `fs.watch` on `agents/`, `archive/`, `user-questions.json`) and detects state for ALL agents on each refresh; `tmux-poller.ts` handles live output capture for the SELECTED agent only (~1s poll). Different consumers, different error modes, different trigger conditions.
 
 ## .ittybitty/ Directory Structure
 
@@ -294,8 +301,8 @@ Degrade gracefully if Ghostty is not available (skip or show error).
 - Components implement `render(width): string[]`; optional `handleInput(data)`, `invalidate()`
 - Built-ins: `Text`, `TruncatedText`, `Box`, `Spacer`, `SelectList`, `Input`, `Editor`, `Loader`, `Markdown`
 - No built-in table — render tables as formatted strings inside `Text`
-- **Horizontal layout:** validate that `Box` supports side-by-side layout in Phase 1 prototype
-- **ANSI passthrough:** validate that `Text`/`Box` preserve ANSI codes in Phase 3
+- **Horizontal layout:** `Box` does NOT support side-by-side. Use custom `SplitPane` (see `src/tui/split-pane.ts`)
+- **ANSI passthrough:** Validated. `visibleWidth()`/`truncateToWidth()` handle ANSI correctly
 
 ## v2: Cross-Repo Messaging
 
@@ -309,48 +316,52 @@ Each phase ends at a usable checkpoint — something that works and can be teste
 
 ---
 
-### Phase 1: CLI Foundation
-**Checkpoint:** `itsybitsy add/remove/list` works. You can register and inspect repos from the command line. pi-tui horizontal layout is validated.
+### Phase 1: CLI Foundation -- COMPLETE
+**Checkpoint:** `itsybitsy add/remove/list` works. pi-tui horizontal layout validated (Box is vertical-only; custom SplitPane created).
 
-- [ ] `src/index.ts` — CLI entrypoint, parse `add/remove/list/watch` subcommands
-- [ ] `src/registry.ts` — read/write `~/.itsybitsy.json`; add, remove, list repos
-- [ ] Wire up `itsybitsy add [path]`, `itsybitsy remove [path]`, `itsybitsy list`
-- [ ] Unit tests for registry
-- [ ] **Validate pi-tui horizontal Box layout** with a throwaway prototype — confirm side-by-side panes are possible before Phase 3 commits to the two-pane design
-
----
-
-### Phase 2: Agent Data Layer
-**Checkpoint:** `itsybitsy agents` (debug command) prints all agents across all registered repos with correct states — no TUI yet. Basic error handling in place.
-
-- [ ] `src/agents.ts` — read `.ittybitty/agents/` directly; also scan `.ittybitty/archive/` for archived agents (include `archived: boolean` on the `Agent` type); define `Agent` and `AgentState` types; read `user-questions.json` for pending questions; detect orphan tmux sessions; compute `age` from `created_epoch` (don't leave date math to the TUI layer)
-- [ ] `src/parse-state.ts` — port `parse_state` bash logic to TypeScript; all state rules
-- [ ] `src/watcher.ts` — `fs.watch(path, { recursive: true })` on each repo's `.ittybitty/agents/`; emit `agentAdded`, `agentChanged`, `agentRemoved` events; `Promise.all` across repos; low-frequency fallback poll (10s) for macOS FSEvents reliability; **dynamic repo registration not supported while watch is running** — restart required after `itsybitsy add/remove`
-- [ ] Basic error handling from the start: try/catch around all file reads, graceful degradation for missing/malformed `meta.json`, missing `ib`/`tmux` detected at startup
-- [ ] Unit tests for `parse-state.ts` (it's pure string matching — highly testable)
+- [x] `src/index.ts` — CLI entrypoint, parse `add/remove/list/watch/agents` subcommands
+- [x] `src/registry.ts` — read/write `~/.itsybitsy.json`; add, remove, list repos
+- [x] Wire up `itsybitsy add [path]`, `itsybitsy remove [path]`, `itsybitsy list`
+- [x] Unit tests for registry (7 tests)
+- [x] **Validated pi-tui horizontal Box layout** — Box is vertical-only, created custom `SplitPane` component
 
 ---
 
-### Phase 3: Basic TUI Dashboard
-**Checkpoint:** `itsybitsy watch` launches a live TUI showing all agents across all repos, grouped by repo, with their states auto-updating via `fs.watch`.
+### Phase 2: Agent Data Layer -- COMPLETE
+**Checkpoint:** `itsybitsy agents` prints all agents across all registered repos with correct states (via tmux capture + parseState). Error handling in place.
 
-- [ ] `src/tui/dashboard.ts` — main TUI layout: agent tree at top (scrolls with selection), split pane below (tmux left + cycling right pane)
-- [ ] Agent tree: all agents across all repos, grouped by repo, recursive manager/child indentation, workers with distinct icon (`⚙`), state color-coded
-- [ ] Right pane modes 0–7 (see layout table above); `p`/`n` to cycle, direct jump keys `d`/`g`/`e`/`q`; **right pane mode is global dashboard state** — persists across agent selection changes (user's pane choice is not reset when they navigate between agents)
-- [ ] Keyboard navigation: `j/k` or arrow keys through agent tree; `;`/`l` scroll pane content
-- [ ] Wire watcher events to TUI re-renders (`tui.requestRender()`)
-- [ ] Status bar showing pending question count badge and available keybindings
-- [ ] `Ctrl-C` to quit
-- [ ] **Validate ANSI passthrough** in `Text`/`Box` components before Phase 4
+- [x] `src/agents.ts` — read `.ittybitty/agents/` and `archive/`; `Agent`, `AgentState`, `FlatAgent` types; `readPendingQuestions()`; `detectAgentStates()`; `computeAge()`; structured error reporting
+- [x] `src/parse-state.ts` — full port of `parse_state` bash logic; all state rules
+- [x] `src/watcher.ts` — `fs.watch({ recursive: true })` on `agents/`, `archive/`, `user-questions.json`; 200ms debounce; 10s fallback poll; calls `detectAgentStates()`
+- [x] `src/tmux-poller.ts` — polls selected agent at ~1s; `captureTmuxOutput()` for one-shot state detection; race-condition guard on agent switch
+- [x] Basic error handling: try/catch, graceful degradation for missing/malformed `meta.json`, structured `AgentReadError` reporting
+- [x] Unit tests: parse-state (43 tests), agents (23 tests)
+- [ ] Orphan tmux session detection (deferred to Phase 4/5)
+
+---
+
+### Phase 3: Basic TUI Dashboard -- COMPLETE
+**Checkpoint:** `itsybitsy watch` launches a live TUI with agent tree, state updates via fs.watch + tmux, split pane layout, and keybindings.
+
+- [x] `src/tui/dashboard.ts` — agent tree at top (max 7 rows, scrolls with selection), split pane below (tmux left + cycling right pane)
+- [x] Agent tree: recursive manager/child indentation, workers `⚙` vs managers `◆`, state color-coded, `a` to toggle archived
+- [x] Right pane modes 0–7; `p`/`n` to cycle, direct jump keys `d`/`g`/`e`/`q`; mode persists across agent selection changes
+- [x] Keyboard navigation: `j/k` or arrow keys; `;`/`l` scroll pane content
+- [x] Watcher events wired to `tui.requestRender()`; TmuxPoller integrated for live output
+- [x] Status bar with pending question count badge and keybinding hints
+- [x] `Ctrl-C` to quit
+- [x] **ANSI passthrough validated** — 7 tests in `ansi-validation.test.ts`
 
 ---
 
 ### Phase 4: Live Tmux Pane
 **Checkpoint:** Selecting an agent shows its live Claude session output in a right-hand pane, updating every ~1s.
 
-- [ ] `src/tmux-poller.ts` — polls `tmux capture-pane -t {tmux_session} -p -S -100 -E -` for the selected agent; emits output events; pauses when no agent selected
-- [ ] Left pane: render tmux output with ANSI passthrough (fixed ~60 col width, matching `ib watch`'s `TMUX_WIDTH`)
-- [ ] Right pane mode 0 (AGENT LOG): render `agent.log` content
+Note: `tmux-poller.ts` was implemented in Phase 2/3. Phase 4 focuses on rendering quality.
+
+- [x] `src/tmux-poller.ts` — already implemented: polls at ~1s, race-condition guard, integrated into dashboard
+- [ ] Left pane: improve tmux output rendering with proper line wrapping and scroll position (currently shows raw lines truncated to pane width)
+- [ ] Right pane mode 0 (AGENT LOG): read `agent.log` from disk instead of placeholder
 - [ ] Graceful display when tmux session doesn't exist (agent stopped or orphaned)
 
 ---

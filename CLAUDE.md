@@ -110,6 +110,12 @@ bun --hot ./index.ts
 
 For more information, read the Bun API docs in `node_modules/bun-types/docs/**.mdx`.
 
+## Code Quality Requirements
+
+After any code changes, always run:
+1. `bun test` — all tests must pass
+2. `bunx tsc --noEmit` — must report zero TypeScript errors; fix any new errors before committing
+
 ## itsybitsy Implementation Notes
 
 Phases 1-4 are complete. 97 tests across 6 files. Key architecture decisions for Phase 5+:

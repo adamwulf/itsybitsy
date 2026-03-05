@@ -149,7 +149,7 @@ class AgentTreeComponent implements Component {
 }
 
 /** Right pane content component */
-class RightPaneComponent implements Component {
+export class RightPaneComponent implements Component {
   mode: PaneMode = "AGENT LOG";
   agent: Agent | null = null;
   questions: PendingQuestion[] = [];
@@ -243,7 +243,7 @@ class RightPaneComponent implements Component {
  * Tmux output pane — shows live tmux capture for the selected agent.
  * Wraps long lines to pane width, supports scroll-back from bottom.
  */
-class TmuxPaneComponent implements Component {
+export class TmuxPaneComponent implements Component {
   agent: Agent | null = null;
   rawOutput: string = "";
   /** Whether at least one poll has completed for the current agent */

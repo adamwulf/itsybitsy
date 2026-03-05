@@ -51,17 +51,31 @@ export function computeAge(createdEpoch: number): string {
   return `${Math.floor(diff / 86400)}d`;
 }
 
-/** Read a single agent's meta.json */
-async function readAgentMeta(agentDir: string): Promise<AgentMeta | null> {
+export interface AgentReadError {
+  agentDir: string;
+  error: string;
+}
+
+/** Read a single agent's meta.json. Returns meta or an error description. */
+async function readAgentMeta(agentDir: string): Promise<{ meta: AgentMeta | null; error?: string }> {
   try {
     const metaPath = join(agentDir, "meta.json");
     const file = Bun.file(metaPath);
-    if (!(await file.exists())) return null;
+    if (!(await file.exists())) return { meta: null };
     const data = await file.json();
-    return data as AgentMeta;
-  } catch {
-    return null;
+    // Basic validation: id is required
+    if (!data || typeof data.id !== "string") {
+      return { meta: null, error: `Malformed meta.json in ${agentDir}: missing or invalid 'id'` };
+    }
+    return { meta: data as AgentMeta };
+  } catch (err) {
+    return { meta: null, error: `Failed to read meta.json in ${agentDir}: ${err}` };
   }
+}
+
+export interface ReadAgentsResult {
+  agents: Agent[];
+  errors: AgentReadError[];
 }
 
 /** Read agents from a single directory (agents/ or archive/) */
@@ -70,14 +84,18 @@ async function readAgentsFromDir(
   repoPath: string,
   repoName: string,
   archived: boolean
-): Promise<Agent[]> {
+): Promise<ReadAgentsResult> {
   const agents: Agent[] = [];
+  const errors: AgentReadError[] = [];
   try {
     const entries = await readdir(dir, { withFileTypes: true });
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
       const agentDir = join(dir, entry.name);
-      const meta = await readAgentMeta(agentDir);
+      const { meta, error } = await readAgentMeta(agentDir);
+      if (error) {
+        errors.push({ agentDir, error });
+      }
       if (!meta) continue;
 
       agents.push({
@@ -85,20 +103,20 @@ async function readAgentsFromDir(
         repoPath,
         repoName,
         meta,
-        state: "unknown", // Will be updated by watcher/tmux-poller
+        state: "unknown", // Updated by watcher via parseState()
         age: computeAge(meta.created_epoch),
         archived,
         children: [],
       });
     }
   } catch {
-    // Directory doesn't exist or isn't readable
+    // Directory doesn't exist — not an error (archive/ may be absent)
   }
-  return agents;
+  return { agents, errors };
 }
 
 /** Read all agents for a repo (both active and archived) */
-export async function readRepoAgents(repoPath: string, repoName: string): Promise<Agent[]> {
+export async function readRepoAgents(repoPath: string, repoName: string): Promise<ReadAgentsResult> {
   const agentsDir = join(repoPath, ".ittybitty", "agents");
   const archiveDir = join(repoPath, ".ittybitty", "archive");
 
@@ -107,7 +125,10 @@ export async function readRepoAgents(repoPath: string, repoName: string): Promis
     readAgentsFromDir(archiveDir, repoPath, repoName, true),
   ]);
 
-  return [...active, ...archived];
+  return {
+    agents: [...active.agents, ...archived.agents],
+    errors: [...active.errors, ...archived.errors],
+  };
 }
 
 /** Read pending questions for a repo */
@@ -170,9 +191,12 @@ export function flattenAgentTree(roots: Agent[]): Array<{ agent: Agent; depth: n
  */
 export async function readAllAgents(
   repos: Array<{ path: string; name: string }>
-): Promise<Agent[]> {
+): Promise<ReadAgentsResult> {
   const results = await Promise.all(
     repos.map((r) => readRepoAgents(r.path, r.name))
   );
-  return results.flat();
+  return {
+    agents: results.flatMap((r) => r.agents),
+    errors: results.flatMap((r) => r.errors),
+  };
 }

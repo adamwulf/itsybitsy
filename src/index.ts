@@ -55,7 +55,10 @@ async function main() {
         console.log("No repos registered. Use 'itsybitsy add <path>' to add one.");
         break;
       }
-      const agents = await readAllAgents(repos);
+      const { agents, errors } = await readAllAgents(repos);
+      for (const err of errors) {
+        console.error(`Warning: ${err.error}`);
+      }
       // Detect state for each agent via tmux
       await Promise.all(
         agents.map(async (agent) => {

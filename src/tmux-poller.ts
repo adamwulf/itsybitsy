@@ -53,15 +53,20 @@ export class TmuxPoller {
   }
 
   private async poll(): Promise<void> {
-    if (!this.tmuxSession) return;
+    // Snapshot the session before async work to detect agent switches
+    const targetSession = this.tmuxSession;
+    if (!targetSession) return;
 
     try {
       const proc = Bun.spawn(
-        ["tmux", "capture-pane", "-t", this.tmuxSession, "-p", `-S`, `-${this.lines}`, "-E", "-"],
+        ["tmux", "capture-pane", "-t", targetSession, "-p", `-S`, `-${this.lines}`, "-E", "-"],
         { stdout: "pipe", stderr: "pipe" }
       );
       const raw = await new Response(proc.stdout).text();
       const exitCode = await proc.exited;
+
+      // Discard result if the agent changed while we were awaiting
+      if (this.tmuxSession !== targetSession) return;
 
       if (exitCode !== 0) {
         // tmux session doesn't exist
@@ -72,6 +77,8 @@ export class TmuxPoller {
       const stripped = stripAnsi(raw);
       this.events.onOutput(raw, stripped);
     } catch (err) {
+      // Discard errors for stale polls too
+      if (this.tmuxSession !== targetSession) return;
       this.events.onError?.(err instanceof Error ? err : new Error(String(err)));
     }
   }

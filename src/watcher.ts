@@ -145,7 +145,12 @@ export class AgentWatcher {
   /** Read all agents, detect states, and emit update */
   async refresh(): Promise<void> {
     try {
-      const agents = await readAllAgents(this.repos);
+      const { agents, errors } = await readAllAgents(this.repos);
+
+      // Report any read errors
+      for (const err of errors) {
+        this.events.onError?.(new Error(err.error));
+      }
 
       // Detect state for each agent via tmux capture + parseState
       await this.detectAgentStates(agents);

@@ -6,7 +6,17 @@
 import { visibleWidth } from "@mariozechner/pi-tui";
 
 /**
+ * Check if a byte is a CSI sequence terminator (0x40-0x7E per ECMA-48).
+ * This includes letters (A-Z, a-z) and symbols like @, [, \, ], ^, _, `, {, |, }, ~.
+ */
+function isCsiTerminator(code: number): boolean {
+  return code >= 0x40 && code <= 0x7e;
+}
+
+/**
  * Wrap a single line to the given width, preserving ANSI codes.
+ * Handles wide characters (CJK, emoji) by measuring each character's
+ * visible width rather than assuming width 1.
  * Returns an array of wrapped line segments.
  */
 export function wrapSingleLine(line: string, width: number): string[] {
@@ -19,27 +29,31 @@ export function wrapSingleLine(line: string, width: number): string[] {
   let i = 0;
 
   while (i < line.length) {
-    // Check for ANSI escape sequence: ESC [ ... letter
+    // Check for ANSI escape sequence: ESC [ ... terminator
     if (line[i] === "\x1b" && i + 1 < line.length && line[i + 1] === "[") {
       let j = i + 2;
-      while (j < line.length && !isLetter(line.charCodeAt(j))) {
+      while (j < line.length && !isCsiTerminator(line.charCodeAt(j))) {
         j++;
       }
-      if (j < line.length) j++; // include terminating letter
+      if (j < line.length) j++; // include terminating byte
       current += line.slice(i, j);
       i = j;
       continue;
     }
 
-    // Regular character — check if we need to wrap
-    if (visWidth >= width) {
+    // Measure the visible width of this character
+    const char = line[i];
+    const charWidth = visibleWidth(char);
+
+    // Check if adding this character would exceed the width
+    if (visWidth + charWidth > width) {
       chunks.push(current);
       current = "";
       visWidth = 0;
     }
 
-    current += line[i];
-    visWidth++;
+    current += char;
+    visWidth += charWidth;
     i++;
   }
 
@@ -48,10 +62,6 @@ export function wrapSingleLine(line: string, width: number): string[] {
   }
 
   return chunks;
-}
-
-function isLetter(code: number): boolean {
-  return (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
 }
 
 /**

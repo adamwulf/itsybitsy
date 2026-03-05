@@ -2,8 +2,8 @@ import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { join } from "path";
 import { mkdtemp, rm, mkdir } from "fs/promises";
 import { tmpdir } from "os";
+import { readAgentLog } from "../agents";
 import type { Agent, AgentMeta } from "../agents";
-import { readAgentLog } from "./dashboard";
 
 function makeAgent(id: string, repoPath: string, archived = false): Agent {
   return {

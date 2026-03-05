@@ -61,6 +61,37 @@ describe("wrapSingleLine", () => {
     const result = wrapSingleLine("abc", 1);
     expect(result).toEqual(["a", "b", "c"]);
   });
+
+  test("handles wide characters (CJK) that take 2 columns", () => {
+    // Each CJK character is 2 columns wide
+    const line = "你好世界"; // 4 chars, 8 visible columns
+    const result = wrapSingleLine(line, 4);
+    // Should wrap at 4 visible columns = 2 CJK chars per line
+    expect(result.length).toBe(2);
+    expect(visibleWidth(result[0])).toBe(4);
+    expect(visibleWidth(result[1])).toBe(4);
+  });
+
+  test("does not split a wide character across wrap boundary", () => {
+    // "ab" = 2 cols, "你" = 2 cols. Width = 3 means "ab" fits (2), but adding "你" (2) would be 4 > 3
+    const line = "ab你c";
+    const result = wrapSingleLine(line, 3);
+    expect(result.length).toBe(2);
+    expect(visibleWidth(result[0])).toBe(2); // "ab" fits, "你" would exceed
+    expect(result[1]).toContain("你");
+  });
+
+  test("handles non-letter CSI terminators (e.g. \\x1b[@)", () => {
+    // CSI @ (0x40) is a valid CSI terminator per ECMA-48.
+    // wrapSingleLine skips the sequence for width counting.
+    // "abc" = 3 visible chars, then \x1b[@ (0 visible), then "def" = 3 visible.
+    const line = "abc\x1b[@def";
+    const result = wrapSingleLine(line, 3);
+    // Wrap should treat it as 6 visible chars total → 2 chunks of 3
+    expect(result.length).toBe(2);
+    expect(result[0]).toContain("abc");
+    expect(result[1]).toBe("def");
+  });
 });
 
 describe("wrapLines", () => {

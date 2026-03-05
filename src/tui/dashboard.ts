@@ -12,10 +12,10 @@ import {
   visibleWidth,
 } from "@mariozechner/pi-tui";
 import type { Component } from "@mariozechner/pi-tui";
-import { join } from "path";
 import { listRepos } from "../registry";
 import { AgentWatcher } from "../watcher";
 import { TmuxPoller } from "../tmux-poller";
+import { readAgentLog } from "../agents";
 import type { Agent, FlatAgent, PendingQuestion } from "../agents";
 import { SplitPane } from "./split-pane";
 import { wrapLines } from "./wrap";
@@ -68,28 +68,6 @@ function formatAgentRow(
   const line = `${indent}${icon} ${agent.repoName}/${agent.id}  ${stateColor}${agent.state}${RESET}  ${agent.age}  ${agent.meta.model}  ${archived}${shortPrompt}`;
 
   return `${sel}${truncateToWidth(line, width, "")}${selEnd}`;
-}
-
-/**
- * Read agent.log file for a given agent.
- * Returns the log content as an array of lines, or a placeholder message.
- */
-export async function readAgentLog(agent: Agent): Promise<string[]> {
-  const dir = agent.archived ? "archive" : "agents";
-  const logPath = join(agent.repoPath, ".ittybitty", dir, agent.id, "agent.log");
-  try {
-    const file = Bun.file(logPath);
-    if (!(await file.exists())) {
-      return [`${DIM}No agent.log found${RESET}`];
-    }
-    const text = await file.text();
-    if (!text.trim()) {
-      return [`${DIM}agent.log is empty${RESET}`];
-    }
-    return text.split("\n");
-  } catch {
-    return [`${DIM}Failed to read agent.log${RESET}`];
-  }
 }
 
 /** Agent tree component with height constraint and scrolling */
@@ -241,6 +219,11 @@ class RightPaneComponent implements Component {
 
     // Available lines after header
     const available = Math.max(1, this.displayHeight - 1);
+    // Clamp scrollOffset to valid range
+    const maxOffset = Math.max(0, this.content.length - available);
+    if (this.scrollOffset > maxOffset) {
+      this.scrollOffset = maxOffset;
+    }
     const start = this.scrollOffset;
     const visible = this.content.slice(start, start + available);
     for (const line of visible) {
@@ -333,13 +316,13 @@ class TmuxPaneComponent implements Component {
     // Truncate each line (wrap should already fit, but ensure safety)
     const lines = visible.map((line) => truncateToWidth(line, width, ""));
 
-    // Show scroll indicator if scrolled back
-    if (this.scrollBack > 0 && lines.length > 0) {
-      lines[lines.length - 1] = truncateToWidth(
+    // Show scroll indicator as an appended line if scrolled back
+    if (this.scrollBack > 0) {
+      lines.push(truncateToWidth(
         `${DIM}── ↓ ${this.scrollBack} lines below ──${RESET}`,
         width,
         ""
-      );
+      ));
     }
 
     return padLines(lines, this.displayHeight);

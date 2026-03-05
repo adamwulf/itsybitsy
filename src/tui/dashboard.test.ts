@@ -4,6 +4,7 @@ import { mkdtemp, rm, mkdir } from "fs/promises";
 import { tmpdir } from "os";
 import { readAgentLog } from "../agents";
 import type { Agent, AgentMeta } from "../agents";
+import { TmuxPaneComponent, RightPaneComponent } from "./dashboard";
 
 function makeAgent(id: string, repoPath: string, archived = false): Agent {
   return {
@@ -81,5 +82,180 @@ describe("readAgentLog", () => {
     const lines = await readAgentLog(agent);
     expect(lines.length).toBe(1);
     expect(lines[0]).toContain("empty");
+  });
+});
+
+describe("TmuxPaneComponent scroll logic", () => {
+  function makeTmuxPane(lineCount: number, displayHeight: number): TmuxPaneComponent {
+    const pane = new TmuxPaneComponent();
+    pane.agent = makeAgent("agent-tmux", "/tmp/test");
+    pane.hasPolled = true;
+    // Create rawOutput with lineCount lines (each shorter than render width)
+    pane.rawOutput = Array.from({ length: lineCount }, (_, i) => `line ${i + 1}`).join("\n");
+    pane.displayHeight = displayHeight;
+    return pane;
+  }
+
+  test("scrollBack=0 shows bottom lines (auto-follow)", () => {
+    const pane = makeTmuxPane(30, 10);
+    pane.scrollBack = 0;
+    const result = pane.render(80);
+
+    expect(result.length).toBe(10);
+    // Last non-empty line should be the final content line
+    const nonEmpty = result.filter((l) => l.length > 0);
+    expect(nonEmpty[nonEmpty.length - 1]).toBe("line 30");
+  });
+
+  test("scrollBack clamped to maxScrollBack", () => {
+    const pane = makeTmuxPane(20, 10);
+    // Set scrollBack way beyond max
+    pane.scrollBack = 999;
+    const result = pane.render(80);
+
+    // maxScrollBack = max(0, 20 - 10) = 10
+    expect(pane.scrollBack).toBe(10);
+    expect(result.length).toBe(10);
+    // With scroll indicator reserving 1 line, contentHeight=9, so start=1
+    expect(result[0]).toBe("line 2");
+  });
+
+  test("scroll indicator shown when scrollBack > 0", () => {
+    const pane = makeTmuxPane(30, 10);
+    pane.scrollBack = 5;
+    const result = pane.render(80);
+
+    expect(result.length).toBe(10);
+    // The last non-pad line should be the scroll indicator
+    const lastNonEmpty = result.filter((l) => l.length > 0);
+    const indicator = lastNonEmpty[lastNonEmpty.length - 1];
+    expect(indicator).toContain("5 lines below");
+  });
+
+  test("scroll indicator does not push past displayHeight", () => {
+    const pane = makeTmuxPane(30, 10);
+    pane.scrollBack = 3;
+    const result = pane.render(80);
+
+    // Total lines returned should be exactly displayHeight
+    expect(result.length).toBe(10);
+  });
+
+  test("scroll indicator reserves one line from content", () => {
+    const pane = makeTmuxPane(30, 10);
+    pane.scrollBack = 1;
+    const result = pane.render(80);
+
+    // With scrollBack=1, contentHeight = displayHeight - 1 = 9
+    // So we show 9 content lines + 1 indicator line = 10 total
+    expect(result.length).toBe(10);
+
+    // The content should show 9 lines, not 10
+    const contentLines = result.filter((l) => l.length > 0 && !l.includes("lines below"));
+    expect(contentLines.length).toBe(9);
+  });
+
+  test("no scroll indicator at scrollBack=0", () => {
+    const pane = makeTmuxPane(30, 10);
+    pane.scrollBack = 0;
+    const result = pane.render(80);
+
+    const hasIndicator = result.some((l) => l.includes("lines below"));
+    expect(hasIndicator).toBe(false);
+  });
+
+  test("scrollUp increments scrollBack", () => {
+    const pane = makeTmuxPane(30, 10);
+    pane.scrollUp(3);
+    expect(pane.scrollBack).toBe(3);
+  });
+
+  test("scrollDown decrements scrollBack but not below 0", () => {
+    const pane = makeTmuxPane(30, 10);
+    pane.scrollBack = 2;
+    pane.scrollDown(5);
+    expect(pane.scrollBack).toBe(0);
+  });
+
+  test("resetForAgent clears scroll state", () => {
+    const pane = makeTmuxPane(30, 10);
+    pane.scrollBack = 5;
+    pane.resetForAgent();
+    expect(pane.scrollBack).toBe(0);
+    expect(pane.hasPolled).toBe(false);
+    expect(pane.rawOutput).toBe("");
+  });
+
+  test("fewer lines than displayHeight still renders to displayHeight", () => {
+    const pane = makeTmuxPane(3, 10);
+    pane.scrollBack = 0;
+    const result = pane.render(80);
+
+    expect(result.length).toBe(10);
+    // First 3 lines should have content
+    expect(result[0]).toBe("line 1");
+    expect(result[1]).toBe("line 2");
+    expect(result[2]).toBe("line 3");
+  });
+});
+
+describe("RightPaneComponent scroll logic", () => {
+  function makeRightPane(contentLines: number, displayHeight: number): RightPaneComponent {
+    const pane = new RightPaneComponent();
+    pane.displayHeight = displayHeight;
+    pane.agent = makeAgent("agent-right", "/tmp/test");
+    // Use INITIAL PROMPT mode and set a long prompt to generate content
+    pane.agent!.meta.prompt = Array.from({ length: contentLines }, (_, i) => `prompt line ${i + 1}`).join("\n");
+    pane.setMode("INITIAL PROMPT");
+    return pane;
+  }
+
+  test("scrollOffset=0 shows content from start", () => {
+    const pane = makeRightPane(20, 10);
+    pane.scrollOffset = 0;
+    const result = pane.render(80);
+
+    expect(result.length).toBe(10);
+    // First line is the header
+    expect(result[0]).toContain("INITIAL PROMPT");
+  });
+
+  test("scrollOffset clamped to maxOffset", () => {
+    const pane = makeRightPane(20, 10);
+    // Content is: "Prompt:" + empty line + 20 prompt lines = 22 lines
+    // available = displayHeight - 1 = 9
+    // maxOffset = max(0, 22 - 9) = 13
+    pane.scrollOffset = 999;
+    pane.render(80);
+
+    expect(pane.scrollOffset).toBe(13);
+  });
+
+  test("content sliced from scrollOffset", () => {
+    const pane = makeRightPane(20, 10);
+    pane.scrollOffset = 5;
+    const result = pane.render(80);
+
+    expect(result.length).toBe(10);
+    // Header is always first
+    expect(result[0]).toContain("INITIAL PROMPT");
+    // Content starts at offset 5: "Prompt:", "", "line1", "line2", "line3" skipped
+    // So next is "prompt line 4"
+    expect(result[1]).toContain("prompt line 4");
+  });
+
+  test("pads to displayHeight when content is short", () => {
+    const pane = makeRightPane(2, 10);
+    pane.scrollOffset = 0;
+    const result = pane.render(80);
+
+    expect(result.length).toBe(10);
+  });
+
+  test("setMode resets scrollOffset to 0", () => {
+    const pane = makeRightPane(20, 10);
+    pane.scrollOffset = 5;
+    pane.setMode("TREE");
+    expect(pane.scrollOffset).toBe(0);
   });
 });

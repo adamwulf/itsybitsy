@@ -42,48 +42,20 @@ import { openInGhostty } from "../ghostty";
 const MAX_TREE_HEIGHT = 7;
 const TEXTAREA_VISIBLE_HEIGHT = 5;
 const DIALOG_WIDTH = 60;
-const DIALOG_INNER_WIDTH = DIALOG_WIDTH - 4; // 2 border + 2 padding
 
-/** A visual line produced by wrapping a logical textarea line at a fixed width. */
-type VisualLine = { text: string; logicalLine: number; logicalColStart: number };
-
-/**
- * Wrap logical textarea lines into visual lines of at most `width` characters.
- * Uses plain character slicing (not wrapSingleLine from wrap.ts) because we need
- * logicalColStart offsets for cursor mapping — textarea content is plain text with
- * no ANSI codes so byte-offset slicing is correct.
- */
-function buildVisualLines(lines: string[], width: number): VisualLine[] {
-  const result: VisualLine[] = [];
-  for (let li = 0; li < lines.length; li++) {
-    const raw = lines[li]!;
+/** Wrap logical lines into visual lines of at most `width` characters each. */
+function wrapTextareaLines(lines: string[], width: number): string[] {
+  const result: string[] = [];
+  for (const raw of lines) {
     if (raw.length === 0) {
-      result.push({ text: "", logicalLine: li, logicalColStart: 0 });
+      result.push("");
     } else {
-      let col = 0;
-      while (col < raw.length) {
-        result.push({ text: raw.slice(col, col + width), logicalLine: li, logicalColStart: col });
-        col += width;
+      for (let col = 0; col < raw.length; col += width) {
+        result.push(raw.slice(col, col + width));
       }
     }
   }
   return result;
-}
-
-/** Find the visual line index containing the given logical cursor position. */
-function findCursorVisualLine(visualLines: VisualLine[], cursorLine: number, cursorCol: number, width: number): number {
-  // Use findLastIndex so that at a wrap boundary (cursorCol === logicalColStart + width),
-  // the cursor belongs to the next visual line rather than rendering on two lines.
-  let last = -1;
-  for (let i = 0; i < visualLines.length; i++) {
-    const vl = visualLines[i]!;
-    if (vl.logicalLine === cursorLine &&
-      cursorCol >= vl.logicalColStart &&
-      cursorCol <= vl.logicalColStart + width) {
-      last = i;
-    }
-  }
-  return last;
 }
 
 // State color map
@@ -116,9 +88,6 @@ type DialogState =
       type: "textarea";
       prompt: string;
       lines: string[];
-      cursorLine: number;
-      cursorCol: number;
-      scrollOffset: number;
       focusedButton: "text" | "send" | "cancel";
       onSubmit: (value: string) => void;
     }
@@ -626,36 +595,30 @@ class DialogOverlayComponent implements Component {
       case "textarea": {
         const visibleHeight = TEXTAREA_VISIBLE_HEIGHT;
         const lines: string[] = [];
-        const visualLines = buildVisualLines(dialog.lines, innerWidth);
+        const visualLines = wrapTextareaLines(dialog.lines, innerWidth);
 
-        const cursorVlIdx = dialog.focusedButton === "text"
-          ? findCursorVisualLine(visualLines, dialog.cursorLine, dialog.cursorCol, innerWidth)
-          : -1;
-        const hasAbove = dialog.scrollOffset > 0;
-        const hasBelow = dialog.scrollOffset + visibleHeight < visualLines.length;
+        // Always follow the bottom (cursor is always at end)
+        const scrollOffset = Math.max(0, visualLines.length - visibleHeight);
 
         for (let i = 0; i < visibleHeight; i++) {
-          const vlIdx = dialog.scrollOffset + i;
+          const vlIdx = scrollOffset + i;
           if (vlIdx >= visualLines.length) {
             lines.push(" ".repeat(innerWidth));
             continue;
           }
-          const vl = visualLines[vlIdx]!;
-          let lineText = vl.text;
-          // Insert cursor block only on the single visual line that owns the cursor
-          if (vlIdx === cursorVlIdx) {
-            const localCol = Math.min(dialog.cursorCol - vl.logicalColStart, vl.text.length);
-            lineText = vl.text.slice(0, localCol) + "█" + vl.text.slice(localCol);
+          let lineText = visualLines[vlIdx]!;
+          // Show cursor block at end of last visual line when text is focused
+          if (vlIdx === visualLines.length - 1 && dialog.focusedButton === "text") {
+            lineText = lineText + "█";
           }
           lineText = truncateToWidth(lineText, innerWidth, "");
           const pad = Math.max(0, innerWidth - visibleWidth(lineText));
           lines.push(lineText + " ".repeat(pad));
         }
 
-        // Scroll indicators
-        if (hasAbove || hasBelow) {
-          const indicators = (hasAbove ? "↑" : " ") + " " + (hasBelow ? "↓" : " ");
-          lines.push(`${DIM}${indicators}${RESET}`);
+        // Scroll indicator
+        if (scrollOffset > 0) {
+          lines.push(`${DIM}↑${RESET}`);
         }
 
         // Button row
@@ -915,9 +878,6 @@ export class DashboardComponent implements Component {
       type: "textarea",
       prompt: `Send message to ${agent.id}:`,
       lines: [""],
-      cursorLine: 0,
-      cursorCol: 0,
-      scrollOffset: 0,
       focusedButton: "text",
       onSubmit: (message: string) => {
         this.closeDialog();
@@ -1351,19 +1311,9 @@ export class DashboardComponent implements Component {
 
     if (this._dialog.type === "textarea") {
       const d = this._dialog;
-      const adjustScroll = () => {
-        const vls = buildVisualLines(d.lines, DIALOG_INNER_WIDTH);
-        const vli = findCursorVisualLine(vls, d.cursorLine, d.cursorCol, DIALOG_INNER_WIDTH);
-        if (vli >= 0) {
-          if (vli < d.scrollOffset) d.scrollOffset = vli;
-          if (vli >= d.scrollOffset + TEXTAREA_VISIBLE_HEIGHT) d.scrollOffset = vli - TEXTAREA_VISIBLE_HEIGHT + 1;
-        }
-      };
-      const insertChar = (ch: string) => {
-        const line = d.lines[d.cursorLine] ?? "";
-        d.lines[d.cursorLine] = line.slice(0, d.cursorCol) + ch + line.slice(d.cursorCol);
-        d.cursorCol++;
-        adjustScroll();
+      const appendChar = (ch: string) => {
+        const lastIdx = d.lines.length - 1;
+        d.lines[lastIdx] = (d.lines[lastIdx] ?? "") + ch;
         this.tui?.requestRender();
       };
 
@@ -1374,67 +1324,19 @@ export class DashboardComponent implements Component {
           d.focusedButton = "send";
           this.tui?.requestRender();
         } else if (matchesKey(data, Key.enter)) {
-          // Split current line at cursor
-          const line = d.lines[d.cursorLine] ?? "";
-          d.lines[d.cursorLine] = line.slice(0, d.cursorCol);
-          d.lines.splice(d.cursorLine + 1, 0, line.slice(d.cursorCol));
-          d.cursorLine++;
-          d.cursorCol = 0;
-          adjustScroll();
+          d.lines.push("");
           this.tui?.requestRender();
         } else if (matchesKey(data, Key.backspace) || data === "\x7f") {
-          if (d.cursorCol > 0) {
-            const line = d.lines[d.cursorLine] ?? "";
-            d.lines[d.cursorLine] = line.slice(0, d.cursorCol - 1) + line.slice(d.cursorCol);
-            d.cursorCol--;
-            adjustScroll();
-          } else if (d.cursorLine > 0) {
-            const prevLine = d.lines[d.cursorLine - 1] ?? "";
-            const curLine = d.lines[d.cursorLine] ?? "";
-            d.cursorCol = prevLine.length;
-            d.lines[d.cursorLine - 1] = prevLine + curLine;
-            d.lines.splice(d.cursorLine, 1);
-            d.cursorLine--;
-            adjustScroll();
-          }
-          this.tui?.requestRender();
-        } else if (matchesKey(data, Key.left) || data === "\x1b[D") {
-          if (d.cursorCol > 0) {
-            d.cursorCol--;
-            adjustScroll();
-          } else if (d.cursorLine > 0) {
-            d.cursorLine--;
-            d.cursorCol = (d.lines[d.cursorLine] ?? "").length;
-            adjustScroll();
-          }
-          this.tui?.requestRender();
-        } else if (matchesKey(data, Key.right) || data === "\x1b[C") {
-          const lineLen = (d.lines[d.cursorLine] ?? "").length;
-          if (d.cursorCol < lineLen) {
-            d.cursorCol++;
-            adjustScroll();
-          } else if (d.cursorLine < d.lines.length - 1) {
-            d.cursorLine++;
-            d.cursorCol = 0;
-            adjustScroll();
-          }
-          this.tui?.requestRender();
-        } else if (matchesKey(data, Key.up) || data === "\x1b[A") {
-          if (d.cursorLine > 0) {
-            d.cursorLine--;
-            d.cursorCol = Math.min(d.cursorCol, (d.lines[d.cursorLine] ?? "").length);
-            adjustScroll();
-          }
-          this.tui?.requestRender();
-        } else if (matchesKey(data, Key.down) || data === "\x1b[B") {
-          if (d.cursorLine < d.lines.length - 1) {
-            d.cursorLine++;
-            d.cursorCol = Math.min(d.cursorCol, (d.lines[d.cursorLine] ?? "").length);
-            adjustScroll();
+          const lastIdx = d.lines.length - 1;
+          const lastLine = d.lines[lastIdx] ?? "";
+          if (lastLine.length > 0) {
+            d.lines[lastIdx] = lastLine.slice(0, -1);
+          } else if (lastIdx > 0) {
+            d.lines.pop();
           }
           this.tui?.requestRender();
         } else if (data.length === 1 && data >= " ") {
-          insertChar(data);
+          appendChar(data);
         }
       } else if (d.focusedButton === "send") {
         if (matchesKey(data, Key.enter)) {
@@ -1446,7 +1348,7 @@ export class DashboardComponent implements Component {
           this.closeDialog();
         } else if (data.length === 1 && data >= " ") {
           d.focusedButton = "text";
-          insertChar(data);
+          appendChar(data);
         }
       } else if (d.focusedButton === "cancel") {
         if (matchesKey(data, Key.enter)) {
@@ -1458,7 +1360,7 @@ export class DashboardComponent implements Component {
           this.closeDialog();
         } else if (data.length === 1 && data >= " ") {
           d.focusedButton = "text";
-          insertChar(data);
+          appendChar(data);
         }
       }
       return true;

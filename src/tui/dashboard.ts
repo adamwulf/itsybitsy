@@ -17,6 +17,7 @@ import type { RepoEntry } from "../registry";
 import { AgentWatcher } from "../watcher";
 import { TmuxPoller, captureTmuxOutput } from "../tmux-poller";
 import { stripAnsi, parseState } from "../parse-state";
+import { stat } from "node:fs/promises";
 import { readAgentLog, readAgentPrompt, parseDenials } from "../agents";
 import type { Agent, FlatAgent, PendingQuestion, DenialEntry } from "../agents";
 import { SplitPane } from "./split-pane";
@@ -922,16 +923,22 @@ export class DashboardComponent implements Component {
     } else {
       worktreePath = `${agent.repoPath}/.ittybitty/${dir}/${agent.id}/repo`;
     }
-    // Check if worktree path exists, fall back to repoPath
-    Bun.file(worktreePath).exists().then(async (exists) => {
-      const pathToOpen = exists ? worktreePath : agent.repoPath;
+    // Check if worktree path exists (it's a directory, so use fs.stat), fall back to repoPath
+    (async () => {
       try {
+        let pathToOpen = worktreePath;
+        try {
+          const s = await stat(worktreePath);
+          if (!s.isDirectory()) pathToOpen = agent.repoPath;
+        } catch {
+          pathToOpen = agent.repoPath;
+        }
         await Bun.$`open ${pathToOpen}`.quiet();
         this.showMessage(`Opened ${pathToOpen}`);
       } catch (err) {
         this.showMessage(`Failed to open worktree: ${err}`);
       }
-    });
+    })();
   }
 
   private handleOpenDiffTool() {

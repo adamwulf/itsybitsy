@@ -1359,6 +1359,13 @@ export class DashboardComponent implements Component {
           if (vli >= d.scrollOffset + TEXTAREA_VISIBLE_HEIGHT) d.scrollOffset = vli - TEXTAREA_VISIBLE_HEIGHT + 1;
         }
       };
+      const insertChar = (ch: string) => {
+        const line = d.lines[d.cursorLine] ?? "";
+        d.lines[d.cursorLine] = line.slice(0, d.cursorCol) + ch + line.slice(d.cursorCol);
+        d.cursorCol++;
+        adjustScroll();
+        this.tui?.requestRender();
+      };
 
       if (d.focusedButton === "text") {
         if (matchesKey(data, Key.escape)) {
@@ -1380,6 +1387,7 @@ export class DashboardComponent implements Component {
             const line = d.lines[d.cursorLine] ?? "";
             d.lines[d.cursorLine] = line.slice(0, d.cursorCol - 1) + line.slice(d.cursorCol);
             d.cursorCol--;
+            adjustScroll();
           } else if (d.cursorLine > 0) {
             const prevLine = d.lines[d.cursorLine - 1] ?? "";
             const curLine = d.lines[d.cursorLine] ?? "";
@@ -1393,6 +1401,7 @@ export class DashboardComponent implements Component {
         } else if (matchesKey(data, Key.left) || data === "\x1b[D") {
           if (d.cursorCol > 0) {
             d.cursorCol--;
+            adjustScroll();
           } else if (d.cursorLine > 0) {
             d.cursorLine--;
             d.cursorCol = (d.lines[d.cursorLine] ?? "").length;
@@ -1403,6 +1412,7 @@ export class DashboardComponent implements Component {
           const lineLen = (d.lines[d.cursorLine] ?? "").length;
           if (d.cursorCol < lineLen) {
             d.cursorCol++;
+            adjustScroll();
           } else if (d.cursorLine < d.lines.length - 1) {
             d.cursorLine++;
             d.cursorCol = 0;
@@ -1424,11 +1434,7 @@ export class DashboardComponent implements Component {
           }
           this.tui?.requestRender();
         } else if (data.length === 1 && data >= " ") {
-          const line = d.lines[d.cursorLine] ?? "";
-          d.lines[d.cursorLine] = line.slice(0, d.cursorCol) + data + line.slice(d.cursorCol);
-          d.cursorCol++;
-          adjustScroll();
-          this.tui?.requestRender();
+          insertChar(data);
         }
       } else if (d.focusedButton === "send") {
         if (matchesKey(data, Key.enter)) {
@@ -1440,12 +1446,7 @@ export class DashboardComponent implements Component {
           this.closeDialog();
         } else if (data.length === 1 && data >= " ") {
           d.focusedButton = "text";
-          // Also type the character
-          const line = d.lines[d.cursorLine] ?? "";
-          d.lines[d.cursorLine] = line.slice(0, d.cursorCol) + data + line.slice(d.cursorCol);
-          d.cursorCol++;
-          adjustScroll();
-          this.tui?.requestRender();
+          insertChar(data);
         }
       } else if (d.focusedButton === "cancel") {
         if (matchesKey(data, Key.enter)) {
@@ -1457,11 +1458,7 @@ export class DashboardComponent implements Component {
           this.closeDialog();
         } else if (data.length === 1 && data >= " ") {
           d.focusedButton = "text";
-          const line = d.lines[d.cursorLine] ?? "";
-          d.lines[d.cursorLine] = line.slice(0, d.cursorCol) + data + line.slice(d.cursorCol);
-          d.cursorCol++;
-          adjustScroll();
-          this.tui?.requestRender();
+          insertChar(data);
         }
       }
       return true;

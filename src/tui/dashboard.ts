@@ -873,6 +873,7 @@ export class DashboardComponent implements Component {
   private lastSentNotice: string | null = null;
   private lastSentCounter = 0;
   private usageTimer: ReturnType<typeof setInterval> | null = null;
+  currentThemeName: "dark" | "light" = "dark";
 
   /** Read-only access to dialog state (for testing) */
   get dialog(): DialogState {
@@ -1331,6 +1332,7 @@ export class DashboardComponent implements Component {
       { label: "open diff in tool — o", action: () => this.handleOpenDiffTool() },
       { label: "open in Ghostty — G", action: () => this.handleOpenGhostty() },
       { label: "debug snapshot — S", action: () => this.handleSnapshot() },
+      { label: "toggle theme — T", action: () => this.handleToggleTheme() },
       // Navigation
       { label: "fuzzy jump to agent — @", action: () => this.handleFuzzyAgent() },
       { label: "help — h", action: () => this.handleHelp() },
@@ -1446,11 +1448,23 @@ export class DashboardComponent implements Component {
         `${BOLD}Scroll:${RESET} ; scroll up  ${DIM}|${RESET}  l scroll down`,
         `${BOLD}Actions:${RESET} s send  ${DIM}|${RESET}  m merge  ${DIM}|${RESET}  x kill  ${DIM}|${RESET}  ! nuke  ${DIM}|${RESET}  R resume  ${DIM}|${RESET}  r reassign  ${DIM}|${RESET}  a new  ${DIM}|${RESET}  A archive`,
         `${BOLD}Open:${RESET} w worktree  ${DIM}|${RESET}  o diff tool  ${DIM}|${RESET}  G Ghostty  ${DIM}|${RESET}  S snapshot`,
-        `${BOLD}App:${RESET} h help  ${DIM}|${RESET}  Ctrl-C quit`,
+        `${BOLD}App:${RESET} h help  ${DIM}|${RESET}  T toggle theme  ${DIM}|${RESET}  Ctrl-C quit`,
         "",
         `${DIM}Press any key to dismiss${RESET}`,
       ],
     });
+  }
+
+  private handleToggleTheme() {
+    if (this.currentThemeName === "dark") {
+      this.currentThemeName = "light";
+      setTheme(LIGHT_THEME);
+    } else {
+      this.currentThemeName = "dark";
+      setTheme(DARK_THEME);
+    }
+    this.showMessage(`Theme: ${this.currentThemeName === "dark" ? "Dark" : "Light"}`);
+    this.tui?.requestRender();
   }
 
   private handleOpenGhostty() {
@@ -2038,6 +2052,10 @@ export class DashboardComponent implements Component {
     else if (data === "S") {
       this.handleSnapshot();
     }
+    // Toggle light/dark theme
+    else if (data === "T") {
+      this.handleToggleTheme();
+    }
     // Folder browser to add repo
     else if (data === "+") {
       this.handleFolderBrowser();
@@ -2139,6 +2157,7 @@ export async function launchDashboard(): Promise<void> {
 
   // Color scheme detection
   const { cleanup: cleanupColorScheme, inputFilter: colorSchemeFilter } = watchColorScheme((scheme) => {
+    dashboard.currentThemeName = scheme === "dark" ? "dark" : "light";
     setTheme(scheme === "dark" ? DARK_THEME : LIGHT_THEME);
     tui.requestRender();
   });

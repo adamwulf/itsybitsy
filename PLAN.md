@@ -392,7 +392,7 @@ Note: `tmux-poller.ts` was implemented in Phase 2/3. Phase 4 focuses on renderin
 ---
 
 ### Phase 5.2: Right Pane Content -- COMPLETE
-**Checkpoint:** All right pane modes show real content. Must be merged before Phase 5.3 begins (both phases touch dashboard.ts).
+**Checkpoint:** All right pane modes show real content.
 
 - [x] Right pane mode 1 — INITIAL PROMPT: reads `prompt.txt` from `.ittybitty/agents/{id}/prompt.txt`, falls back to `meta.prompt`
 - [x] Right pane mode 2 — DENIALS: parses `agent.log` for `[PreToolUse] Permission denied:` lines with timestamp-based time filter
@@ -407,7 +407,7 @@ Note: `tmux-poller.ts` was implemented in Phase 2/3. Phase 4 focuses on renderin
 ---
 
 ### Phase 5.3: Navigation & Remaining Keybindings -- COMPLETE
-**Checkpoint:** Fuzzy navigation, questions workflow, and all remaining keybindings work. Requires Phase 5.2 to be merged first.
+**Checkpoint:** Fuzzy navigation, questions workflow, and all remaining keybindings work.
 
 - [x] `@` — fuzzy jump to agent by name (pi-tui SelectList dialog overlay)
 - [x] `/` — fuzzy jump to pane mode by name (pi-tui SelectList dialog overlay)

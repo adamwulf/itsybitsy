@@ -37,6 +37,7 @@ import {
   acknowledgeQuestion,
 } from "../ib-commands";
 import type { NewAgentOptions } from "../ib-commands";
+import { openInGhostty } from "../ghostty";
 
 const MAX_TREE_HEIGHT = 7;
 
@@ -982,6 +983,21 @@ export class DashboardComponent implements Component {
     this.tui?.requestRender();
   }
 
+  private handleOpenGhostty() {
+    const agent = this.agentTree.selectedAgent;
+    if (!agent) {
+      this.showMessage("No agent selected");
+      return;
+    }
+    if (!agent.meta.tmux_session) {
+      this.showMessage("No active tmux session");
+      return;
+    }
+    openInGhostty(agent.meta.tmux_session).then((result) => {
+      this.showMessage(result.message);
+    });
+  }
+
   private handleSnapshot() {
     const agent = this.agentTree.selectedAgent;
     if (!agent) {
@@ -1397,6 +1413,10 @@ export class DashboardComponent implements Component {
     // Help dialog
     else if (data === "h") {
       this.handleHelp();
+    }
+    // Open in Ghostty
+    else if (data === "G") {
+      this.handleOpenGhostty();
     }
     // Debug snapshot
     else if (data === "S") {

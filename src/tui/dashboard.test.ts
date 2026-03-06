@@ -4,7 +4,7 @@ import { mkdtemp, rm, mkdir } from "fs/promises";
 import { tmpdir } from "os";
 import { readAgentLog, readAgentPrompt, parseDenials } from "../agents";
 import type { Agent, AgentMeta, FlatAgent, PendingQuestion } from "../agents";
-import { TmuxPaneComponent, RightPaneComponent, DashboardComponent } from "./dashboard";
+import { TmuxPaneComponent, RightPaneComponent, DashboardComponent, colorizeDiff, colorizeLog } from "./dashboard";
 import { setRunner, resetRunner } from "../ib-commands";
 
 function makeAgent(id: string, repoPath: string, archived = false): Agent {
@@ -942,5 +942,65 @@ describe("DashboardComponent right pane and navigation features", () => {
     dashboard.handleInput("q"); // QUESTIONS mode
     dashboard.handleInput("g"); // go to agent-b
     expect(dashboard.selectedAgent?.id).toBe("agent-b");
+  });
+});
+
+describe("colorizeDiff", () => {
+  test("'+' line is wrapped in green", () => {
+    const result = colorizeDiff(["+added line"]);
+    expect(result[0]).toBe("\x1b[32m+added line\x1b[0m");
+  });
+
+  test("'+++' line is wrapped in dim, not green", () => {
+    const result = colorizeDiff(["+++ a/file.ts"]);
+    expect(result[0]).toBe("\x1b[2m+++ a/file.ts\x1b[0m");
+  });
+
+  test("'-' line is wrapped in red", () => {
+    const result = colorizeDiff(["-removed line"]);
+    expect(result[0]).toBe("\x1b[31m-removed line\x1b[0m");
+  });
+
+  test("'---' line is wrapped in dim, not red", () => {
+    const result = colorizeDiff(["--- b/file.ts"]);
+    expect(result[0]).toBe("\x1b[2m--- b/file.ts\x1b[0m");
+  });
+
+  test("'@@' line is wrapped in dim", () => {
+    const result = colorizeDiff(["@@ -1,3 +1,4 @@"]);
+    expect(result[0]).toBe("\x1b[2m@@ -1,3 +1,4 @@\x1b[0m");
+  });
+
+  test("'diff ' line is wrapped in dim", () => {
+    const result = colorizeDiff(["diff --git a/file.ts b/file.ts"]);
+    expect(result[0]).toBe("\x1b[2mdiff --git a/file.ts b/file.ts\x1b[0m");
+  });
+
+  test("regular context line is unchanged", () => {
+    const result = colorizeDiff([" normal line"]);
+    expect(result[0]).toBe(" normal line");
+  });
+});
+
+describe("colorizeLog", () => {
+  test("timestamp prefix is wrapped in dim", () => {
+    const result = colorizeLog(["[2026-03-05 15:37:26] Some event"]);
+    expect(result[0]).toBe("\x1b[2m[2026-03-05 15:37:26]\x1b[0m Some event");
+  });
+
+  test("bracket token after timestamp is wrapped in cyan", () => {
+    const result = colorizeLog(["[2026-03-05 15:37:26] [PreToolUse] Permission denied"]);
+    expect(result[0]).toContain("\x1b[36m[PreToolUse]\x1b[0m");
+  });
+
+  test("multiple bracket tokens after timestamp are all cyan", () => {
+    const result = colorizeLog(["[2026-03-05 15:37:26] [PreToolUse] foo [Bash]"]);
+    expect(result[0]).toContain("\x1b[36m[PreToolUse]\x1b[0m");
+    expect(result[0]).toContain("\x1b[36m[Bash]\x1b[0m");
+  });
+
+  test("line with no special patterns is unchanged", () => {
+    const result = colorizeLog(["just text"]);
+    expect(result[0]).toBe("just text");
   });
 });

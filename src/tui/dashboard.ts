@@ -44,6 +44,48 @@ const TEXTAREA_VISIBLE_HEIGHT = 5;
 const DIALOG_WIDTH = 60;
 const DIALOG_INNER_WIDTH = DIALOG_WIDTH - 4; // 2 border + 2 padding
 
+/** A visual line produced by wrapping a logical textarea line at a fixed width. */
+type VisualLine = { text: string; logicalLine: number; logicalColStart: number };
+
+/**
+ * Wrap logical textarea lines into visual lines of at most `width` characters.
+ * Uses plain character slicing (not wrapSingleLine from wrap.ts) because we need
+ * logicalColStart offsets for cursor mapping — textarea content is plain text with
+ * no ANSI codes so byte-offset slicing is correct.
+ */
+function buildVisualLines(lines: string[], width: number): VisualLine[] {
+  const result: VisualLine[] = [];
+  for (let li = 0; li < lines.length; li++) {
+    const raw = lines[li]!;
+    if (raw.length === 0) {
+      result.push({ text: "", logicalLine: li, logicalColStart: 0 });
+    } else {
+      let col = 0;
+      while (col < raw.length) {
+        result.push({ text: raw.slice(col, col + width), logicalLine: li, logicalColStart: col });
+        col += width;
+      }
+    }
+  }
+  return result;
+}
+
+/** Find the visual line index containing the given logical cursor position. */
+function findCursorVisualLine(visualLines: VisualLine[], cursorLine: number, cursorCol: number, width: number): number {
+  // Use findLastIndex so that at a wrap boundary (cursorCol === logicalColStart + width),
+  // the cursor belongs to the next visual line rather than rendering on two lines.
+  let last = -1;
+  for (let i = 0; i < visualLines.length; i++) {
+    const vl = visualLines[i]!;
+    if (vl.logicalLine === cursorLine &&
+      cursorCol >= vl.logicalColStart &&
+      cursorCol <= vl.logicalColStart + width) {
+      last = i;
+    }
+  }
+  return last;
+}
+
 // State color map
 const STATE_COLORS: Record<string, string> = {
   creating: "\x1b[33m",    // yellow
@@ -584,23 +626,11 @@ class DialogOverlayComponent implements Component {
       case "textarea": {
         const visibleHeight = TEXTAREA_VISIBLE_HEIGHT;
         const lines: string[] = [];
+        const visualLines = buildVisualLines(dialog.lines, innerWidth);
 
-        // Build visual lines by wrapping each logical line
-        type VisualLine = { text: string; logicalLine: number; logicalColStart: number };
-        const visualLines: VisualLine[] = [];
-        for (let li = 0; li < dialog.lines.length; li++) {
-          const raw = dialog.lines[li]!;
-          if (raw.length === 0) {
-            visualLines.push({ text: "", logicalLine: li, logicalColStart: 0 });
-          } else {
-            let col = 0;
-            while (col < raw.length) {
-              visualLines.push({ text: raw.slice(col, col + innerWidth), logicalLine: li, logicalColStart: col });
-              col += innerWidth;
-            }
-          }
-        }
-
+        const cursorVlIdx = dialog.focusedButton === "text"
+          ? findCursorVisualLine(visualLines, dialog.cursorLine, dialog.cursorCol, innerWidth)
+          : -1;
         const hasAbove = dialog.scrollOffset > 0;
         const hasBelow = dialog.scrollOffset + visibleHeight < visualLines.length;
 
@@ -612,12 +642,10 @@ class DialogOverlayComponent implements Component {
           }
           const vl = visualLines[vlIdx]!;
           let lineText = vl.text;
-          // Insert cursor block if this is the cursor's visual line and text is focused
-          if (vl.logicalLine === dialog.cursorLine && dialog.focusedButton === "text") {
-            const localCol = dialog.cursorCol - vl.logicalColStart;
-            if (localCol >= 0 && localCol <= vl.text.length && localCol <= innerWidth) {
-              lineText = vl.text.slice(0, localCol) + "█" + vl.text.slice(localCol);
-            }
+          // Insert cursor block only on the single visual line that owns the cursor
+          if (vlIdx === cursorVlIdx) {
+            const localCol = Math.min(dialog.cursorCol - vl.logicalColStart, vl.text.length);
+            lineText = vl.text.slice(0, localCol) + "█" + vl.text.slice(localCol);
           }
           lineText = truncateToWidth(lineText, innerWidth, "");
           const pad = Math.max(0, innerWidth - visibleWidth(lineText));
@@ -1324,26 +1352,8 @@ export class DashboardComponent implements Component {
     if (this._dialog.type === "textarea") {
       const d = this._dialog;
       const adjustScroll = () => {
-        // Recompute visual lines to find cursor's visual line index
-        type VL = { logicalLine: number; logicalColStart: number };
-        const vls: VL[] = [];
-        for (let li = 0; li < d.lines.length; li++) {
-          const raw = d.lines[li]!;
-          if (raw.length === 0) {
-            vls.push({ logicalLine: li, logicalColStart: 0 });
-          } else {
-            let col = 0;
-            while (col < raw.length) {
-              vls.push({ logicalLine: li, logicalColStart: col });
-              col += DIALOG_INNER_WIDTH;
-            }
-          }
-        }
-        const vli = vls.findIndex(
-          (vl) => vl.logicalLine === d.cursorLine &&
-            d.cursorCol >= vl.logicalColStart &&
-            d.cursorCol <= vl.logicalColStart + DIALOG_INNER_WIDTH
-        );
+        const vls = buildVisualLines(d.lines, DIALOG_INNER_WIDTH);
+        const vli = findCursorVisualLine(vls, d.cursorLine, d.cursorCol, DIALOG_INNER_WIDTH);
         if (vli >= 0) {
           if (vli < d.scrollOffset) d.scrollOffset = vli;
           if (vli >= d.scrollOffset + TEXTAREA_VISIBLE_HEIGHT) d.scrollOffset = vli - TEXTAREA_VISIBLE_HEIGHT + 1;
@@ -1417,6 +1427,7 @@ export class DashboardComponent implements Component {
           const line = d.lines[d.cursorLine] ?? "";
           d.lines[d.cursorLine] = line.slice(0, d.cursorCol) + data + line.slice(d.cursorCol);
           d.cursorCol++;
+          adjustScroll();
           this.tui?.requestRender();
         }
       } else if (d.focusedButton === "send") {

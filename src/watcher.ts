@@ -24,6 +24,7 @@ export class AgentWatcher {
   private stateTimer: ReturnType<typeof setInterval> | null = null;
   private refreshTimer: ReturnType<typeof setTimeout> | null = null;
   private running = false;
+  private polling = false;
   private lastAgents: Agent[] = [];
 
   constructor(repos: RepoEntry[], events: WatcherEvents) {
@@ -115,18 +116,24 @@ export class AgentWatcher {
 
   /** Poll states for all known agents without re-reading from disk */
   private async pollStates(): Promise<void> {
-    if (this.lastAgents.length === 0) return;
+    const agents = this.lastAgents;
+    if (agents.length === 0 || this.polling) return;
+    this.polling = true;
     try {
-      await detectAgentStates(this.lastAgents);
-      const roots = buildAgentTree(this.lastAgents);
+      await detectAgentStates(agents);
+      // If refresh() swapped lastAgents while we were awaiting, discard stale results
+      if (agents !== this.lastAgents) return;
+      const roots = buildAgentTree(agents);
       const flatList = flattenAgentTree(roots);
       const questionResults = await Promise.all(
         this.repos.map((r) => readPendingQuestions(r.path))
       );
       const questions = questionResults.flat();
-      this.events.onUpdate(this.lastAgents, flatList, questions);
+      this.events.onUpdate(agents, flatList, questions);
     } catch (err) {
       this.events.onError?.(err instanceof Error ? err : new Error(String(err)));
+    } finally {
+      this.polling = false;
     }
   }
 

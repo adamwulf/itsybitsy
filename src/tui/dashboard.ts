@@ -10,6 +10,7 @@ import {
   Key,
   truncateToWidth,
   visibleWidth,
+  fuzzyFilter,
 } from "@mariozechner/pi-tui";
 import type { Component } from "@mariozechner/pi-tui";
 import { loadRegistry } from "../registry";
@@ -84,20 +85,13 @@ type PaneMode = (typeof PANE_MODES)[number];
 const DENIAL_FILTERS = ["all", "1h", "10m"] as const;
 type DenialFilter = (typeof DENIAL_FILTERS)[number];
 
-/** Simple fuzzy filter: matches items where all query chars appear in order (case-insensitive) */
-function fuzzyFilter(items: string[], query: string): number[] {
+/** Wraps items with original indices, filters via pi-tui fuzzyFilter, returns original indices */
+type IndexedItem = { text: string; index: number };
+function fuzzyFilterIndices(items: string[], query: string): number[] {
   if (!query) return items.map((_, i) => i);
-  const lowerQuery = query.toLowerCase();
-  const results: number[] = [];
-  for (let i = 0; i < items.length; i++) {
-    const lowerItem = items[i]!.toLowerCase();
-    let qi = 0;
-    for (let ci = 0; ci < lowerItem.length && qi < lowerQuery.length; ci++) {
-      if (lowerItem[ci] === lowerQuery[qi]) qi++;
-    }
-    if (qi === lowerQuery.length) results.push(i);
-  }
-  return results;
+  const indexed: IndexedItem[] = items.map((text, index) => ({ text, index }));
+  const filtered = fuzzyFilter(indexed, query, (item) => item.text);
+  return filtered.map((item) => item.index);
 }
 
 /** Format agent row for the tree */
@@ -1083,7 +1077,7 @@ export class DashboardComponent implements Component {
     if (this._dialog.type === "fuzzy") {
       const refilter = () => {
         const d = this._dialog as Extract<DialogState, { type: "fuzzy" }>;
-        const indices = fuzzyFilter(d.allItems, d.query);
+        const indices = fuzzyFilterIndices(d.allItems, d.query);
         d.filteredIndices = indices;
         d.filteredItems = indices.map((i) => d.allItems[i]!);
         d.selectedIndex = 0;

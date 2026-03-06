@@ -2,6 +2,9 @@ import { test, expect, describe } from "bun:test";
 import { parseState, stripAnsi, STARTUP_MARKERS } from "./parse-state";
 
 describe("STARTUP_MARKERS", () => {
+  test("has exactly 4 markers", () => {
+    expect(STARTUP_MARKERS.length).toBe(4);
+  });
   test("contains 'Claude Code v'", () => {
     expect(STARTUP_MARKERS).toContain("Claude Code v");
   });

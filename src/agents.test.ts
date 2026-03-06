@@ -425,9 +425,19 @@ describe("computeStateFromContent", () => {
     expect(computeStateFromContent(input)).toBeNull();
   });
 
+  test("exactly 9 non-empty lines with no startup markers → returns 'creating'", () => {
+    const lines = Array(9).fill("line").join("\n");
+    expect(computeStateFromContent(lines)).toBe("creating");
+  });
+
   test(">= 10 non-empty lines with no startup markers → returns null", () => {
     const lines = Array(10).fill("line").join("\n");
     expect(computeStateFromContent(lines)).toBeNull();
+  });
+
+  test("whitespace-only lines don't count as non-empty", () => {
+    const input = "   \n  \n\t\n";
+    expect(computeStateFromContent(input)).toBe("creating");
   });
 
   test("output with '[AGENT CONTEXT]' marker → returns null", () => {

@@ -990,13 +990,22 @@ describe("colorizeLog", () => {
 
   test("bracket token after timestamp is wrapped in cyan", () => {
     const result = colorizeLog(["[2026-03-05 15:37:26] [PreToolUse] Permission denied"]);
-    expect(result[0]).toContain("\x1b[36m[PreToolUse]\x1b[0m");
+    expect(result[0]).toBe("\x1b[2m[2026-03-05 15:37:26]\x1b[0m \x1b[36m[PreToolUse]\x1b[0m Permission denied");
   });
 
   test("multiple bracket tokens after timestamp are all cyan", () => {
     const result = colorizeLog(["[2026-03-05 15:37:26] [PreToolUse] foo [Bash]"]);
-    expect(result[0]).toContain("\x1b[36m[PreToolUse]\x1b[0m");
-    expect(result[0]).toContain("\x1b[36m[Bash]\x1b[0m");
+    expect(result[0]).toBe("\x1b[2m[2026-03-05 15:37:26]\x1b[0m \x1b[36m[PreToolUse]\x1b[0m foo \x1b[36m[Bash]\x1b[0m");
+  });
+
+  test("brackets without preceding timestamp are NOT colorized", () => {
+    const result = colorizeLog(["[PreToolUse] Permission denied"]);
+    expect(result[0]).toBe("[PreToolUse] Permission denied");
+  });
+
+  test("timestamp-only line with no trailing text", () => {
+    const result = colorizeLog(["[2026-03-05 15:37:26]"]);
+    expect(result[0]).toBe("\x1b[2m[2026-03-05 15:37:26]\x1b[0m");
   });
 
   test("line with no special patterns is unchanged", () => {

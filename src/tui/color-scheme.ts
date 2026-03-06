@@ -4,7 +4,19 @@
  * and subscribes to Ghostty's mode 2031 notifications.
  */
 
+import { appendFileSync } from "node:fs";
+
 export type ColorScheme = "light" | "dark";
+
+const DEBUG_LOG = "/tmp/itsybitsy-color-debug.txt";
+
+function debugLog(msg: string): void {
+  try {
+    appendFileSync(DEBUG_LOG, `[${new Date().toISOString()}] ${msg}\n`);
+  } catch {
+    // Ignore write errors
+  }
+}
 
 /**
  * Parse an OSC 11 response to extract RGB values (normalized 0-1).
@@ -49,49 +61,6 @@ export function luminanceToScheme(luminance: number): ColorScheme {
   return luminance < 0.5 ? "dark" : "light";
 }
 
-/**
- * Query the terminal's background color via OSC 11 and return the detected scheme.
- * Times out after 100ms and defaults to 'dark'.
- * Must be called when stdin is in raw mode (the dashboard already does this).
- */
-export async function detectColorScheme(): Promise<ColorScheme> {
-  return new Promise<ColorScheme>((resolve) => {
-    let resolved = false;
-    let buffer = "";
-
-    const timer = setTimeout(() => {
-      if (!resolved) {
-        resolved = true;
-        process.stdin.removeListener("data", onData);
-        resolve("dark");
-      }
-    }, 100);
-
-    function onData(chunk: Buffer) {
-      buffer += chunk.toString();
-      // Look for the OSC 11 response: ESC ] 11 ; rgb:... BEL or ST
-      // BEL = \x07, ST = ESC \ (\x1b\\)
-      const match = buffer.match(/\x1b\]11;([^\x07\x1b]*?)(?:\x07|\x1b\\)/);
-      if (match) {
-        resolved = true;
-        clearTimeout(timer);
-        process.stdin.removeListener("data", onData);
-        const rgb = parseOSC11Response(match[1]!);
-        if (rgb) {
-          const lum = computeLuminance(rgb.r, rgb.g, rgb.b);
-          resolve(luminanceToScheme(lum));
-        } else {
-          resolve("dark");
-        }
-      }
-    }
-
-    process.stdin.on("data", onData);
-    // Send OSC 11 query
-    process.stdout.write("\x1b]11;?\x07");
-  });
-}
-
 // Escape sequences for Ghostty mode 2031 notifications
 const GHOSTTY_ENABLE = "\x1b[?2031h";
 const GHOSTTY_DISABLE = "\x1b[?2031l";
@@ -113,34 +82,93 @@ const FOCUS_IN = "\x1b[I";
 export type InputFilter = (data: string) => boolean;
 
 /**
- * Watch for color scheme changes. On startup, detects the current scheme
- * and calls onChange. Then listens for:
- * - Ghostty mode 2031 notifications (dark/light)
- * - Focus-in events (re-detect via OSC 11)
+ * Send the OSC 11 background-color query to the terminal.
+ * The response will arrive on stdin and should be intercepted by the inputFilter.
+ */
+function sendOSC11Query(): void {
+  debugLog("Sending OSC 11 query");
+  process.stdout.write("\x1b]11;?\x07");
+}
+
+/**
+ * Watch for color scheme changes. Sets up:
+ * - An inputFilter to intercept OSC 11 responses and Ghostty mode 2031 notifications
+ * - Ghostty notification opt-in and focus reporting
  *
- * Returns a cleanup object with:
- * - cleanup(): disable notifications and remove listeners
- * - inputFilter: an InputFilter to call from the dashboard's input handler
+ * IMPORTANT: Call queryColorScheme() AFTER stdin is in raw mode (i.e., after tui.start())
+ * to trigger initial detection. The OSC 11 query requires raw mode to receive the response.
+ *
+ * Returns:
+ * - cleanup(): disable notifications
+ * - inputFilter: call from the dashboard's input handler BEFORE other key processing
+ * - queryColorScheme(): send OSC 11 query (call after tui.start())
  */
 export function watchColorScheme(
   onChange: (scheme: ColorScheme) => void
-): { cleanup: () => void; inputFilter: InputFilter } {
+): { cleanup: () => void; inputFilter: InputFilter; queryColorScheme: () => void } {
   let currentScheme: ColorScheme | null = null;
+  let pendingDetection = false;
+  let detectionTimer: ReturnType<typeof setTimeout> | null = null;
 
-  // Initial detection
-  detectColorScheme().then((scheme) => {
-    currentScheme = scheme;
-    onChange(scheme);
-  });
+  debugLog("watchColorScheme() called");
+
+  function queryColorScheme(): void {
+    pendingDetection = true;
+    if (detectionTimer) clearTimeout(detectionTimer);
+    detectionTimer = setTimeout(() => {
+      if (pendingDetection) {
+        pendingDetection = false;
+        debugLog("OSC 11 detection timed out after 500ms, defaulting to dark");
+        if (currentScheme === null) {
+          currentScheme = "dark";
+          onChange("dark");
+        }
+      }
+    }, 500);
+    sendOSC11Query();
+  }
 
   // Enable Ghostty notifications and focus reporting
   process.stdout.write(GHOSTTY_ENABLE);
   process.stdout.write(FOCUS_ENABLE);
+  debugLog("Enabled Ghostty mode 2031 and focus reporting");
 
   // The input filter intercepts color-scheme escape sequences
   // before they reach normal key handling
   const inputFilter: InputFilter = (data: string): boolean => {
+    // Log raw hex for any escape sequences to help debug
+    if (data.startsWith("\x1b")) {
+      const hex = Buffer.from(data).toString("hex");
+      debugLog(`inputFilter received escape sequence: hex=${hex} len=${data.length}`);
+    }
+
+    // Check for OSC 11 response: ESC ] 11 ; rgb:... BEL or ST
+    if (data.includes("\x1b]11;")) {
+      debugLog(`Received OSC 11 response: ${JSON.stringify(data)}`);
+      const match = data.match(/\x1b\]11;([^\x07\x1b]*?)(?:\x07|\x1b\\)/);
+      if (match) {
+        const rgb = parseOSC11Response(match[1]!);
+        if (rgb) {
+          const lum = computeLuminance(rgb.r, rgb.g, rgb.b);
+          const scheme = luminanceToScheme(lum);
+          debugLog(`OSC 11 parsed: r=${rgb.r.toFixed(4)} g=${rgb.g.toFixed(4)} b=${rgb.b.toFixed(4)} luminance=${lum.toFixed(4)} scheme=${scheme}`);
+          pendingDetection = false;
+          if (detectionTimer) clearTimeout(detectionTimer);
+          if (scheme !== currentScheme) {
+            currentScheme = scheme;
+            onChange(scheme);
+          }
+        } else {
+          debugLog(`OSC 11 response did not contain valid RGB: ${match[1]}`);
+        }
+      } else {
+        debugLog("OSC 11 response regex did not match complete sequence");
+      }
+      return true;
+    }
+
     if (data === GHOSTTY_DARK || data.includes(GHOSTTY_DARK)) {
+      debugLog("Received Ghostty dark notification");
       if (currentScheme !== "dark") {
         currentScheme = "dark";
         onChange("dark");
@@ -148,6 +176,7 @@ export function watchColorScheme(
       return true;
     }
     if (data === GHOSTTY_LIGHT || data.includes(GHOSTTY_LIGHT)) {
+      debugLog("Received Ghostty light notification");
       if (currentScheme !== "light") {
         currentScheme = "light";
         onChange("light");
@@ -155,19 +184,11 @@ export function watchColorScheme(
       return true;
     }
     if (data === FOCUS_IN || data.includes(FOCUS_IN)) {
+      debugLog("Received focus-in event, re-querying OSC 11");
       // Re-detect on focus-in
-      detectColorScheme().then((scheme) => {
-        if (scheme !== currentScheme) {
-          currentScheme = scheme;
-          onChange(scheme);
-        }
-      });
+      queryColorScheme();
       // Don't consume — other handlers may want focus events too
       return false;
-    }
-    // Check for OSC 11 response in normal input stream
-    if (data.includes("\x1b]11;")) {
-      return true;
     }
     return false;
   };
@@ -176,9 +197,11 @@ export function watchColorScheme(
   const cleanup = () => {
     if (cleaned) return;
     cleaned = true;
+    if (detectionTimer) clearTimeout(detectionTimer);
     process.stdout.write(GHOSTTY_DISABLE);
     process.stdout.write(FOCUS_DISABLE);
+    debugLog("cleanup: disabled Ghostty mode 2031 and focus reporting");
   };
 
-  return { cleanup, inputFilter };
+  return { cleanup, inputFilter, queryColorScheme };
 }

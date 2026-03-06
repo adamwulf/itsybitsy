@@ -1,5 +1,20 @@
 import { test, expect, describe } from "bun:test";
-import { parseState, stripAnsi } from "./parse-state";
+import { parseState, stripAnsi, STARTUP_MARKERS } from "./parse-state";
+
+describe("STARTUP_MARKERS", () => {
+  test("contains 'Claude Code v'", () => {
+    expect(STARTUP_MARKERS).toContain("Claude Code v");
+  });
+  test("contains '[USER TASK]'", () => {
+    expect(STARTUP_MARKERS).toContain("[USER TASK]");
+  });
+  test("contains '╭─ Claude Code'", () => {
+    expect(STARTUP_MARKERS).toContain("╭─ Claude Code");
+  });
+  test("contains '[AGENT CONTEXT]'", () => {
+    expect(STARTUP_MARKERS).toContain("[AGENT CONTEXT]");
+  });
+});
 
 describe("stripAnsi", () => {
   test("strips color codes", () => {

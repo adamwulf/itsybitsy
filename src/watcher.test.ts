@@ -708,6 +708,140 @@ describe("AgentWatcher", () => {
     });
   });
 
+  describe("background state polling", () => {
+    test("state poll fires every 2s and emits updates without readAllAgents", async () => {
+      const agent1 = makeAgent("agent-1");
+      setupDefaultMocks([agent1]);
+
+      let updateCount = 0;
+      const watcher = new AgentWatcher(
+        [{ path: tempDir, name: "test" }],
+        { onUpdate: () => { updateCount++; } }
+      );
+
+      jest.useFakeTimers();
+      try {
+        await watcher.start();
+        const afterStart = updateCount; // 1 from initial refresh
+        const readsAfterStart = mockReadAllAgents.mock.calls.length; // 1
+
+        // Advance 2s — state poll fires
+        jest.advanceTimersByTime(2_000);
+        // Flush multiple microtask ticks for the async pollStates chain
+        for (let i = 0; i < 10; i++) await Promise.resolve();
+
+        expect(updateCount).toBe(afterStart + 1);
+        // readAllAgents should NOT have been called again (state poll skips disk read)
+        expect(mockReadAllAgents.mock.calls.length).toBe(readsAfterStart);
+        // detectAgentStates should have been called again
+        expect(mockDetectAgentStates.mock.calls.length).toBe(2); // 1 from refresh + 1 from state poll
+
+        // Advance another 2s — second state poll
+        jest.advanceTimersByTime(2_000);
+        for (let i = 0; i < 10; i++) await Promise.resolve();
+
+        expect(updateCount).toBe(afterStart + 2);
+        expect(mockDetectAgentStates.mock.calls.length).toBe(3);
+
+        watcher.stop();
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    test("state poll does not fire when lastAgents is empty", async () => {
+      setupDefaultMocks([]); // no agents
+
+      let updateCount = 0;
+      const watcher = new AgentWatcher(
+        [{ path: tempDir, name: "test" }],
+        { onUpdate: () => { updateCount++; } }
+      );
+
+      jest.useFakeTimers();
+      try {
+        await watcher.start();
+        const afterStart = updateCount; // 1 from initial refresh
+
+        // Advance 2s — state poll fires but skips (no agents)
+        jest.advanceTimersByTime(2_000);
+        for (let i = 0; i < 10; i++) await Promise.resolve();
+
+        // No additional update since lastAgents is empty
+        expect(updateCount).toBe(afterStart);
+
+        watcher.stop();
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    test("state poll timer is cleared on stop", async () => {
+      const agent1 = makeAgent("agent-1");
+      setupDefaultMocks([agent1]);
+
+      let updateCount = 0;
+      const watcher = new AgentWatcher(
+        [{ path: tempDir, name: "test" }],
+        { onUpdate: () => { updateCount++; } }
+      );
+
+      jest.useFakeTimers();
+      try {
+        await watcher.start();
+        const afterStart = updateCount;
+        watcher.stop();
+
+        // Advance well past multiple state poll intervals
+        jest.advanceTimersByTime(10_000);
+        await Promise.resolve();
+
+        // No additional updates after stop
+        expect(updateCount).toBe(afterStart);
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    test("state poll reflects state changes via detectAgentStates", async () => {
+      const agent1 = makeAgent("agent-1");
+      setupDefaultMocks([agent1]);
+
+      let callNum = 0;
+      mockDetectAgentStates.mockImplementation(async (agents: Agent[]) => {
+        callNum++;
+        for (const a of agents) {
+          a.state = callNum <= 1 ? "running" : "complete";
+        }
+      });
+      mockBuildAgentTree.mockImplementation((agents) => agents);
+      mockFlattenAgentTree.mockImplementation((roots) =>
+        roots.map((a) => ({ agent: a, depth: 0 }))
+      );
+
+      const states: string[] = [];
+      const watcher = new AgentWatcher(
+        [{ path: tempDir, name: "test" }],
+        { onUpdate: (agents) => { states.push(agents[0]!.state); } }
+      );
+
+      jest.useFakeTimers();
+      try {
+        await watcher.start(); // callNum=1 → running
+
+        // Advance 2s — state poll fires, callNum=2 → complete
+        jest.advanceTimersByTime(2_000);
+        for (let i = 0; i < 10; i++) await Promise.resolve();
+
+        expect(states).toEqual(["running", "complete"]);
+
+        watcher.stop();
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+  });
+
   describe("fs.watch integration", () => {
     test("file change in agents dir triggers refresh", async () => {
       setupDefaultMocks();

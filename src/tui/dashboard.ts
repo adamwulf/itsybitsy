@@ -496,6 +496,7 @@ function padLines(lines: string[], height: number): string[] {
 /** Status bar component */
 class StatusBarComponent implements Component {
   pendingQuestions = 0;
+  errorCount = 0;
   currentMode: PaneMode = "AGENT LOG";
   modeIndex = 0;
   usage: UsageData | null = null;
@@ -507,8 +508,12 @@ class StatusBarComponent implements Component {
       this.pendingQuestions > 0
         ? ` ${BOLD}\x1b[33m[${this.pendingQuestions} questions]${RESET}`
         : "";
+    const errorBadge =
+      this.errorCount > 0
+        ? ` ${BOLD}${RED}[${this.errorCount} errors]${RESET}`
+        : "";
 
-    const modeLine = `${DIM}[${this.modeIndex}] ${this.currentMode}${RESET}${questionBadge}`;
+    const modeLine = `${DIM}[${this.modeIndex}] ${this.currentMode}${RESET}${questionBadge}${errorBadge}`;
 
     // Build usage string for right side of keys line
     const usageStr = this.formatUsage();
@@ -792,6 +797,7 @@ export class DashboardComponent implements Component {
   addError(message: string) {
     const ts = new Date().toLocaleTimeString();
     this.rightPane.errors.push(`${DIM}[${ts}]${RESET} ${message}`);
+    this.statusBar.errorCount = this.rightPane.errors.length;
     this.rightPane.updateContent();
     this.tui?.requestRender();
   }
@@ -799,6 +805,7 @@ export class DashboardComponent implements Component {
   /** Clear all errors */
   clearErrors() {
     this.rightPane.errors = [];
+    this.statusBar.errorCount = 0;
     this.rightPane.updateContent();
     this.tui?.requestRender();
   }
@@ -1489,6 +1496,12 @@ export class DashboardComponent implements Component {
     const newId = selected?.id ?? null;
     if (newId !== this.currentAgentId) {
       this.currentAgentId = newId;
+      // Update terminal title
+      if (newId) {
+        process.stdout.write(`\x1b]0;itsybitsy: ${newId}\x07`);
+      } else {
+        process.stdout.write(`\x1b]0;itsybitsy\x07`);
+      }
       this.tmuxPane.resetForAgent();
       this.rightPane.agentLogContent = null;
       this.rightPane.promptContent = null;
@@ -1582,7 +1595,21 @@ export class DashboardComponent implements Component {
   }
 
   private cyclePaneMode(delta: number) {
-    this.modeIndex = (this.modeIndex + PANE_MODES.length + delta) % PANE_MODES.length;
+    const startIndex = this.modeIndex;
+    let nextIndex = (this.modeIndex + PANE_MODES.length + delta) % PANE_MODES.length;
+
+    // Skip empty panes (ERRORS when no errors, QUESTIONS when no questions)
+    const maxSteps = PANE_MODES.length;
+    for (let i = 0; i < maxSteps; i++) {
+      const candidate = PANE_MODES[nextIndex]!;
+      const skip =
+        (candidate === "ERRORS" && this.rightPane.errors.length === 0) ||
+        (candidate === "QUESTIONS" && this.rightPane.questions.length === 0);
+      if (!skip || nextIndex === startIndex) break;
+      nextIndex = (nextIndex + PANE_MODES.length + delta) % PANE_MODES.length;
+    }
+
+    this.modeIndex = nextIndex;
     const mode = PANE_MODES[this.modeIndex]!;
     this.rightPane.setMode(mode);
     this.statusBar.currentMode = mode;
@@ -1763,6 +1790,12 @@ export class DashboardComponent implements Component {
   }
 
   render(width: number): string[] {
+    // Minimum terminal size check
+    const termRows = process.stdout.rows || 24;
+    if (termRows < 20 || width < 80) {
+      return [`${BOLD}${YELLOW}[Terminal too small — resize to at least 80×20]${RESET}`];
+    }
+
     const lines: string[] = [];
 
     // Header

@@ -125,7 +125,7 @@ const TOP_ANCHORED_MODES: Set<PaneMode> = new Set(["DIFF", "ERRORS", "STATUS", "
 const SCROLL_STEP = 10;
 
 /** Colorize diff output lines */
-function colorizeDiff(lines: string[]): string[] {
+export function colorizeDiff(lines: string[]): string[] {
   return lines.map((line) => {
     if (line.startsWith("+++") || line.startsWith("---") || line.startsWith("@@") || line.startsWith("diff ")) {
       return `\x1b[2m${line}\x1b[0m`;
@@ -139,7 +139,7 @@ function colorizeDiff(lines: string[]): string[] {
 }
 
 /** Colorize agent log lines — dim timestamps, cyan bracket markers */
-function colorizeLog(lines: string[]): string[] {
+export function colorizeLog(lines: string[]): string[] {
   return lines.map((line) => {
     // Dim timestamp prefix like [2026-03-06 12:00:00]
     let result = line.replace(/^(\[\d{4}-[^\]]*\])/, `\x1b[2m$1\x1b[0m`);

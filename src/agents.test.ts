@@ -9,6 +9,7 @@ import {
   readRepoAgents,
   readPendingQuestions,
   readAllAgents,
+  computeStateFromContent,
 } from "./agents";
 import type { Agent, AgentMeta } from "./agents";
 
@@ -114,6 +115,39 @@ describe("buildAgentTree", () => {
     const b = makeAgent({ id: "b" });
     const roots = buildAgentTree([a, b]);
     expect(roots.length).toBe(2);
+  });
+
+  test("agent with valid manager is not orphaned", () => {
+    const manager = makeAgent({ id: "mgr" });
+    const worker = makeAgent({ id: "w1" });
+    worker.meta.manager = "mgr";
+    buildAgentTree([manager, worker]);
+    expect(worker.orphaned).toBe(false);
+  });
+
+  test("agent with non-existent manager is orphaned", () => {
+    const agent = makeAgent({ id: "a1" });
+    agent.meta.manager = "does-not-exist";
+    buildAgentTree([agent]);
+    expect(agent.orphaned).toBe(true);
+  });
+
+  test("agent with no manager is not orphaned", () => {
+    const agent = makeAgent({ id: "a1" });
+    buildAgentTree([agent]);
+    expect(agent.orphaned).toBe(false);
+  });
+
+  test("orphaned flag resets correctly on second call", () => {
+    const agent = makeAgent({ id: "a1" });
+    agent.meta.manager = "missing";
+    buildAgentTree([agent]);
+    expect(agent.orphaned).toBe(true);
+
+    // Now add the missing manager and rebuild
+    const manager = makeAgent({ id: "missing" });
+    buildAgentTree([manager, agent]);
+    expect(agent.orphaned).toBe(false);
   });
 });
 
@@ -373,6 +407,37 @@ describe("readPendingQuestions", () => {
     await Bun.write(join(tempDir, ".ittybitty", "user-questions.json"), "garbage");
     const questions = await readPendingQuestions(tempDir);
     expect(questions.length).toBe(0);
+  });
+});
+
+describe("computeStateFromContent", () => {
+  test("empty string → returns 'creating'", () => {
+    expect(computeStateFromContent("")).toBe("creating");
+  });
+
+  test("< 10 non-empty lines with no startup markers → returns 'creating'", () => {
+    const input = "line1\nline2\nline3\n\n\n";
+    expect(computeStateFromContent(input)).toBe("creating");
+  });
+
+  test("< 10 non-empty lines WITH a startup marker → returns null", () => {
+    const input = "Claude Code v1.0\nline2\nline3";
+    expect(computeStateFromContent(input)).toBeNull();
+  });
+
+  test(">= 10 non-empty lines with no startup markers → returns null", () => {
+    const lines = Array(10).fill("line").join("\n");
+    expect(computeStateFromContent(lines)).toBeNull();
+  });
+
+  test("output with '[AGENT CONTEXT]' marker → returns null", () => {
+    const input = "[AGENT CONTEXT]\nline2\nline3";
+    expect(computeStateFromContent(input)).toBeNull();
+  });
+
+  test("output with '╭─ Claude Code' marker → returns null", () => {
+    const input = "╭─ Claude Code\nline2";
+    expect(computeStateFromContent(input)).toBeNull();
   });
 });
 

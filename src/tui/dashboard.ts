@@ -120,6 +120,33 @@ const FULL_WIDTH_MODES: Set<PaneMode> = new Set(["DENIALS", "TREE", "ERRORS", "D
 const DENIAL_FILTERS = ["all", "1h", "10m"] as const;
 type DenialFilter = (typeof DENIAL_FILTERS)[number];
 
+const TOP_ANCHORED_MODES: Set<PaneMode> = new Set(["DIFF", "ERRORS", "STATUS", "QUESTIONS"]);
+
+/** Colorize diff output lines */
+function colorizeDiff(lines: string[]): string[] {
+  return lines.map((line) => {
+    if (line.startsWith("+++") || line.startsWith("---") || line.startsWith("@@") || line.startsWith("diff ")) {
+      return `\x1b[2m${line}\x1b[0m`;
+    } else if (line.startsWith("+")) {
+      return `\x1b[32m${line}\x1b[0m`;
+    } else if (line.startsWith("-")) {
+      return `\x1b[31m${line}\x1b[0m`;
+    }
+    return line;
+  });
+}
+
+/** Colorize agent log lines — dim timestamps, cyan bracket markers */
+function colorizeLog(lines: string[]): string[] {
+  return lines.map((line) => {
+    // Dim timestamp prefix like [2026-03-06 12:00:00]
+    let result = line.replace(/^(\[\d{4}-[^\]]*\])/, `\x1b[2m$1\x1b[0m`);
+    // Cyan bracket markers like [PreToolUse], [PostToolUse], etc. (but not the timestamp we already handled)
+    result = result.replace(/(?<=\x1b\[0m.*)(\[[^\]]+\])/g, `\x1b[36m$1\x1b[0m`);
+    return result;
+  });
+}
+
 /** Wraps items with original indices, filters via pi-tui fuzzyFilter, returns original indices */
 type IndexedItem = { text: string; index: number };
 function fuzzyFilterIndices(items: string[], query: string): number[] {
@@ -137,6 +164,7 @@ function formatAgentRow(
   width: number
 ): string {
   const indent = depth === 0 ? "" : "  ".repeat(depth) + "↳ ";
+  const orphanedPrefix = agent.orphaned ? "⚠ " : "";
   const icon = agent.meta.worker ? "⚙" : "◆";
   const stateColor = STATE_COLORS[agent.state] ?? STATE_COLORS.unknown;
   const archived = agent.archived ? `${DIM}[archived]${RESET} ` : "";
@@ -144,7 +172,7 @@ function formatAgentRow(
   const selEnd = selected ? `${RESET}` : "";
 
   const shortPrompt = agent.meta.prompt.replace(/\n/g, " ").slice(0, 40);
-  const line = `${indent}${icon} ${agent.repoName}/${agent.id}  ${stateColor}${agent.state}${RESET}  ${agent.age}  ${agent.meta.model}  ${archived}${shortPrompt}`;
+  const line = `${indent}${orphanedPrefix}${icon} ${agent.repoName}/${agent.id}  ${stateColor}${agent.state}${RESET}  ${agent.age}  ${agent.meta.model}  ${archived}${shortPrompt}`;
 
   return `${sel}${truncateToWidth(line, width, "")}${selEnd}`;
 }
@@ -309,7 +337,8 @@ export class RightPaneComponent implements Component {
           const indent = "  ".repeat(depth);
           const icon = agent.meta.worker ? "⚙" : "◆";
           const stateColor = STATE_COLORS[agent.state] ?? STATE_COLORS.unknown;
-          return `${indent}${icon} ${agent.repoName}/${agent.id}  ${stateColor}${agent.state}${RESET}  ${agent.age}  ${agent.meta.model}`;
+          const shortPrompt = agent.meta.prompt.replace(/\n/g, " ").slice(0, 40);
+          return `${indent}${icon} ${agent.repoName}/${agent.id}  ${stateColor}${agent.state}${RESET}  ${agent.age}  ${agent.meta.model}  ${shortPrompt}`;
         });
         if (this.content.length === 0) this.content = [`${DIM}No agents${RESET}`];
         break;
@@ -373,12 +402,18 @@ export class RightPaneComponent implements Component {
 
     // Available lines after header
     const available = Math.max(1, this.displayHeight - 1);
-    // scrollOffset is lines scrolled back from the tail (0 = tail-snapped)
     const maxOffset = Math.max(0, this.content.length - available);
     if (this.scrollOffset > maxOffset) {
       this.scrollOffset = maxOffset;
     }
-    const start = Math.max(0, this.content.length - available - this.scrollOffset);
+    let start: number;
+    if (TOP_ANCHORED_MODES.has(this.mode)) {
+      // Top-anchored: scrollOffset moves view down from top
+      start = this.scrollOffset;
+    } else {
+      // Bottom-anchored: scrollOffset moves view up from tail (0 = tail-snapped)
+      start = Math.max(0, this.content.length - available - this.scrollOffset);
+    }
     const visible = this.content.slice(start, start + available);
     for (const line of visible) {
       lines.push(truncateToWidth(line, width, ""));
@@ -1527,7 +1562,7 @@ export class DashboardComponent implements Component {
     const content = await readAgentLog(agent);
     // Only apply if we're still looking at the same agent
     if (this.currentAgentId === agent.id) {
-      this.rightPane.agentLogContent = content;
+      this.rightPane.agentLogContent = colorizeLog(content);
       // Also parse denials from the log
       this.rightPane.denialsContent = parseDenials(content);
       this.rightPane.updateContent();
@@ -1554,7 +1589,7 @@ export class DashboardComponent implements Component {
       const result = await diffAgent(agent);
       if (this.currentAgentId === agent.id) {
         const output = result.stdout || result.stderr || "(no output)";
-        this.rightPane.diffContent = output.split("\n");
+        this.rightPane.diffContent = colorizeDiff(output.split("\n"));
         this.rightPane.diffLoading = false;
         this.rightPane.updateContent();
         this.tui?.requestRender();

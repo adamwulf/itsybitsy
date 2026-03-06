@@ -886,11 +886,42 @@ export class DashboardComponent implements Component {
     this.tui?.requestRender();
   }
 
-  private handleFuzzyPaneMode() {
-    const allItems = [...PANE_MODES] as string[];
+  private handleCommandPalette() {
+    type Command = { label: string; action: () => void };
+    const commands: Command[] = [
+      // Pane modes
+      { label: "AGENT LOG — show agent log", action: () => this.jumpToMode("AGENT LOG") },
+      { label: "INITIAL PROMPT — show initial prompt", action: () => this.jumpToMode("INITIAL PROMPT") },
+      { label: "DENIALS — show tool denials", action: () => this.jumpToMode("DENIALS") },
+      { label: "TREE — show full agent tree", action: () => this.jumpToMode("TREE") },
+      { label: "ERRORS — show errors", action: () => this.jumpToMode("ERRORS") },
+      { label: "DIFF — run ib diff", action: () => this.jumpToMode("DIFF", true) },
+      { label: "STATUS — run ib status", action: () => this.jumpToMode("STATUS", true) },
+      { label: "QUESTIONS — show pending questions", action: () => this.jumpToMode("QUESTIONS") },
+      // Agent actions
+      { label: "send message — s", action: () => this.handleSend() },
+      { label: "merge agent — m", action: () => this.handleMerge() },
+      { label: "kill agent — x", action: () => this.handleKill() },
+      { label: "force kill agent — !", action: () => this.handleNuke() },
+      { label: "resume agent — R", action: () => this.handleResume() },
+      { label: "reassign manager — r", action: () => this.handleReassign() },
+      { label: "new agent — a", action: () => this.handleNewAgent() },
+      { label: "toggle archived — A", action: () => this.handleToggleArchived() },
+      { label: "open worktree — w", action: () => this.handleOpenWorktree() },
+      { label: "open diff in tool — o", action: () => this.handleOpenDiffTool() },
+      { label: "open in Ghostty — G", action: () => this.handleOpenGhostty() },
+      { label: "debug snapshot — S", action: () => this.handleSnapshot() },
+      // Navigation
+      { label: "fuzzy jump to agent — @", action: () => this.handleFuzzyAgent() },
+      { label: "help — h", action: () => this.handleHelp() },
+      { label: "scroll up — ;", action: () => this.handleScrollUp() },
+      { label: "scroll down — l", action: () => this.handleScrollDown() },
+    ];
+
+    const allItems = commands.map((c) => c.label);
     this._dialog = {
       type: "fuzzy",
-      prompt: "Jump to pane",
+      prompt: "Command palette",
       query: "",
       allItems,
       filteredIndices: allItems.map((_, i) => i),
@@ -898,10 +929,30 @@ export class DashboardComponent implements Component {
       selectedIndex: 0,
       onSelect: (originalIndex: number) => {
         this._dialog = null;
-        this.jumpToMode(PANE_MODES[originalIndex]!);
+        commands[originalIndex]!.action();
         this.tui?.requestRender();
       },
     };
+    this.tui?.requestRender();
+  }
+
+  private handleToggleArchived() {
+    this.agentTree.toggleArchived();
+    this.syncSelectedAgent();
+    this.tui?.requestRender();
+  }
+
+  private handleScrollUp() {
+    this.tmuxPane.scrollUp();
+    this.rightPane.scrollOffset++;
+    this.rightPane.updateContent();
+    this.tui?.requestRender();
+  }
+
+  private handleScrollDown() {
+    this.tmuxPane.scrollDown();
+    this.rightPane.scrollOffset = Math.max(0, this.rightPane.scrollOffset - 1);
+    this.rightPane.updateContent();
     this.tui?.requestRender();
   }
 
@@ -1362,21 +1413,13 @@ export class DashboardComponent implements Component {
     }
     // Toggle archived agents
     else if (data === "A") {
-      this.agentTree.toggleArchived();
-      this.syncSelectedAgent();
-      this.tui?.requestRender();
+      this.handleToggleArchived();
     }
     // Scroll pane content — scrolls both tmux pane and right pane
     else if (data === ";") {
-      this.tmuxPane.scrollUp();
-      this.rightPane.scrollOffset++;
-      this.rightPane.updateContent();
-      this.tui?.requestRender();
+      this.handleScrollUp();
     } else if (data === "l") {
-      this.tmuxPane.scrollDown();
-      this.rightPane.scrollOffset = Math.max(0, this.rightPane.scrollOffset - 1);
-      this.rightPane.updateContent();
-      this.tui?.requestRender();
+      this.handleScrollDown();
     }
     // Agent actions
     else if (data === "x") {
@@ -1400,9 +1443,9 @@ export class DashboardComponent implements Component {
     else if (data === "@") {
       this.handleFuzzyAgent();
     }
-    // Fuzzy jump to pane mode
+    // Command palette
     else if (data === "/") {
-      this.handleFuzzyPaneMode();
+      this.handleCommandPalette();
     }
     // Open worktree in Finder
     else if (data === "w") {

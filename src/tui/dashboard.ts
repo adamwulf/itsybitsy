@@ -1444,6 +1444,7 @@ export class DashboardComponent implements Component {
           const line = d.lines[d.cursorLine] ?? "";
           d.lines[d.cursorLine] = line.slice(0, d.cursorCol) + data + line.slice(d.cursorCol);
           d.cursorCol++;
+          adjustScroll();
           this.tui?.requestRender();
         }
       } else if (d.focusedButton === "cancel") {
@@ -1459,6 +1460,7 @@ export class DashboardComponent implements Component {
           const line = d.lines[d.cursorLine] ?? "";
           d.lines[d.cursorLine] = line.slice(0, d.cursorCol) + data + line.slice(d.cursorCol);
           d.cursorCol++;
+          adjustScroll();
           this.tui?.requestRender();
         }
       }

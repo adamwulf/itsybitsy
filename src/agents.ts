@@ -181,23 +181,38 @@ export function buildAgentTree(agents: Agent[]): Agent[] {
 export interface FlatAgent {
   agent: Agent;
   depth: number;
+  connector: string;
 }
 
 /**
  * Flatten agent tree into display order (depth-first), with indentation level.
+ * Computes box-drawing connector strings (├──, └──, │) for tree display.
  */
 export function flattenAgentTree(roots: Agent[]): FlatAgent[] {
   const result: FlatAgent[] = [];
 
-  function walk(agent: Agent, depth: number) {
-    result.push({ agent, depth });
-    for (const child of agent.children) {
-      walk(child, depth + 1);
+  function walk(agent: Agent, depth: number, ancestorIsLast: boolean[]) {
+    let connector = "";
+    if (ancestorIsLast.length > 0) {
+      // Build prefix from ancestors: "│   " if ancestor has more siblings, "    " if last
+      for (let i = 0; i < ancestorIsLast.length - 1; i++) {
+        connector += ancestorIsLast[i] ? "    " : "│   ";
+      }
+      // Current level connector
+      connector += ancestorIsLast[ancestorIsLast.length - 1] ? "└── " : "├── ";
+    }
+
+    result.push({ agent, depth, connector });
+    for (let i = 0; i < agent.children.length; i++) {
+      const isLast = i === agent.children.length - 1;
+      walk(agent.children[i]!, depth + 1, [...ancestorIsLast, isLast]);
     }
   }
 
-  for (const root of roots) {
-    walk(root, 0);
+  const multiRoot = roots.length > 1;
+  for (let ri = 0; ri < roots.length; ri++) {
+    const isLast = ri === roots.length - 1;
+    walk(roots[ri]!, 0, multiRoot ? [isLast] : []);
   }
   return result;
 }

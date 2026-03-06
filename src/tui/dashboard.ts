@@ -117,10 +117,12 @@ type PaneMode = (typeof PANE_MODES)[number];
 const FULL_WIDTH_MODES: Set<PaneMode> = new Set(["DENIALS", "TREE", "ERRORS", "DIFF", "QUESTIONS"]);
 
 // Denials time filter levels
-const DENIAL_FILTERS = ["all", "1h", "10m"] as const;
+const DENIAL_FILTERS = ["all", "24h", "7d"] as const;
 type DenialFilter = (typeof DENIAL_FILTERS)[number];
 
 const TOP_ANCHORED_MODES: Set<PaneMode> = new Set(["DIFF", "ERRORS", "STATUS", "QUESTIONS"]);
+
+const SCROLL_STEP = 10;
 
 /** Colorize diff output lines */
 function colorizeDiff(lines: string[]): string[] {
@@ -159,11 +161,10 @@ function fuzzyFilterIndices(items: string[], query: string): number[] {
 /** Format agent row for the tree */
 function formatAgentRow(
   agent: Agent,
-  depth: number,
+  connector: string,
   selected: boolean,
   width: number
 ): string {
-  const indent = depth === 0 ? "" : "  ".repeat(depth) + "↳ ";
   const orphanedPrefix = agent.orphaned ? "⚠ " : "";
   const icon = agent.meta.worker ? "⚙" : "◆";
   const stateColor = STATE_COLORS[agent.state] ?? STATE_COLORS.unknown;
@@ -172,7 +173,7 @@ function formatAgentRow(
   const selEnd = selected ? `${RESET}` : "";
 
   const shortPrompt = agent.meta.prompt.replace(/\n/g, " ").slice(0, 40);
-  const line = `${indent}${orphanedPrefix}${icon} ${agent.repoName}/${agent.id}  ${stateColor}${agent.state}${RESET}  ${agent.age}  ${agent.meta.model}  ${archived}${shortPrompt}`;
+  const line = `${connector}${orphanedPrefix}${icon} ${agent.repoName}/${agent.id}  ${stateColor}${agent.state}${RESET}  ${agent.age}  ${agent.meta.model}  ${archived}${shortPrompt}`;
 
   return `${sel}${truncateToWidth(line, width, "")}${selEnd}`;
 }
@@ -253,8 +254,8 @@ class AgentTreeComponent implements Component {
     }
 
     for (let i = start; i < end; i++) {
-      const { agent, depth } = visible[i]!;
-      lines.push(formatAgentRow(agent, depth, i === this.selectedIndex, width));
+      const { agent, connector } = visible[i]!;
+      lines.push(formatAgentRow(agent, connector, i === this.selectedIndex, width));
     }
 
     // Scroll indicator at bottom
@@ -333,12 +334,11 @@ export class RightPaneComponent implements Component {
         }
         break;
       case "TREE":
-        this.content = this.allAgents.map(({ agent, depth }) => {
-          const indent = "  ".repeat(depth);
+        this.content = this.allAgents.map(({ agent, connector }) => {
           const icon = agent.meta.worker ? "⚙" : "◆";
           const stateColor = STATE_COLORS[agent.state] ?? STATE_COLORS.unknown;
           const shortPrompt = agent.meta.prompt.replace(/\n/g, " ").slice(0, 40);
-          return `${indent}${icon} ${agent.repoName}/${agent.id}  ${stateColor}${agent.state}${RESET}  ${agent.age}  ${agent.meta.model}  ${shortPrompt}`;
+          return `${connector}${icon} ${agent.repoName}/${agent.id}  ${stateColor}${agent.state}${RESET}  ${agent.age}  ${agent.meta.model}  ${shortPrompt}`;
         });
         if (this.content.length === 0) this.content = [`${DIM}No agents${RESET}`];
         break;
@@ -392,7 +392,7 @@ export class RightPaneComponent implements Component {
   private filterDenials(denials: DenialEntry[]): DenialEntry[] {
     if (this.denialFilter === "all") return denials;
     const now = Math.floor(Date.now() / 1000);
-    const cutoff = this.denialFilter === "1h" ? now - 3600 : now - 600;
+    const cutoff = this.denialFilter === "24h" ? now - 86400 : now - 604800;
     return denials.filter((d) => d.epoch >= cutoff);
   }
 
@@ -1217,15 +1217,15 @@ export class DashboardComponent implements Component {
   }
 
   private handleScrollUp() {
-    this.tmuxPane.scrollUp(5);
-    this.rightPane.scrollOffset += 5;
+    this.tmuxPane.scrollUp(SCROLL_STEP);
+    this.rightPane.scrollOffset += SCROLL_STEP;
     this.rightPane.updateContent();
     this.tui?.requestRender();
   }
 
   private handleScrollDown() {
-    this.tmuxPane.scrollDown(5);
-    this.rightPane.scrollOffset = Math.max(0, this.rightPane.scrollOffset - 5);
+    this.tmuxPane.scrollDown(SCROLL_STEP);
+    this.rightPane.scrollOffset = Math.max(0, this.rightPane.scrollOffset - SCROLL_STEP);
     this.rightPane.updateContent();
     this.tui?.requestRender();
   }

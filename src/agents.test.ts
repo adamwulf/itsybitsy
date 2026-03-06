@@ -150,6 +150,78 @@ describe("flattenAgentTree", () => {
     expect(flat[1]!.depth).toBe(1);
     expect(flat[2]!.depth).toBe(2);
   });
+
+  test("single root has no connector", () => {
+    const root = makeAgent({ id: "root" });
+    const roots = buildAgentTree([root]);
+    const flat = flattenAgentTree(roots);
+    expect(flat[0]!.connector).toBe("");
+  });
+
+  test("multiple roots get ├── and └── connectors", () => {
+    const a = makeAgent({ id: "a" });
+    const b = makeAgent({ id: "b" });
+    const roots = buildAgentTree([a, b]);
+    const flat = flattenAgentTree(roots);
+    expect(flat[0]!.connector).toBe("├── ");
+    expect(flat[1]!.connector).toBe("└── ");
+  });
+
+  test("child connectors use ├── and └──", () => {
+    const root = makeAgent({ id: "root" });
+    const c1 = makeAgent({ id: "c1" });
+    c1.meta.manager = "root";
+    const c2 = makeAgent({ id: "c2" });
+    c2.meta.manager = "root";
+
+    const roots = buildAgentTree([root, c1, c2]);
+    const flat = flattenAgentTree(roots);
+    expect(flat[0]!.connector).toBe("");       // single root
+    expect(flat[1]!.connector).toBe("├── ");   // first child
+    expect(flat[2]!.connector).toBe("└── ");   // last child
+  });
+
+  test("nested children use │ continuation lines", () => {
+    const root = makeAgent({ id: "root" });
+    const c1 = makeAgent({ id: "c1" });
+    c1.meta.manager = "root";
+    const c2 = makeAgent({ id: "c2" });
+    c2.meta.manager = "root";
+    const leaf = makeAgent({ id: "leaf" });
+    leaf.meta.manager = "c1";
+
+    const roots = buildAgentTree([root, c1, c2, leaf]);
+    const flat = flattenAgentTree(roots);
+    // root (no connector, single root)
+    expect(flat[0]!.connector).toBe("");
+    // c1 (first child of root, not last)
+    expect(flat[1]!.connector).toBe("├── ");
+    // leaf (child of c1, c1 is not last sibling so prefix has │)
+    expect(flat[2]!.connector).toBe("│   └── ");
+    // c2 (last child of root)
+    expect(flat[3]!.connector).toBe("└── ");
+  });
+
+  test("deep nesting with mixed last-sibling flags", () => {
+    const root = makeAgent({ id: "root" });
+    const a = makeAgent({ id: "a" });
+    a.meta.manager = "root";
+    const b = makeAgent({ id: "b" });
+    b.meta.manager = "root";
+    const a1 = makeAgent({ id: "a1" });
+    a1.meta.manager = "a";
+    const a1x = makeAgent({ id: "a1x" });
+    a1x.meta.manager = "a1";
+
+    const roots = buildAgentTree([root, a, b, a1, a1x]);
+    const flat = flattenAgentTree(roots);
+    // a1x is under a1 (last child of a), a is not last child of root
+    expect(flat[0]!.connector).toBe("");           // root
+    expect(flat[1]!.connector).toBe("├── ");       // a
+    expect(flat[2]!.connector).toBe("│   └── ");   // a1
+    expect(flat[3]!.connector).toBe("│       └── "); // a1x
+    expect(flat[4]!.connector).toBe("└── ");       // b
+  });
 });
 
 describe("readRepoAgents", () => {

@@ -112,6 +112,8 @@ const PANE_MODES = [
 ] as const;
 type PaneMode = (typeof PANE_MODES)[number];
 
+const FULL_WIDTH_MODES: Set<PaneMode> = new Set(["DENIALS", "TREE", "ERRORS", "DIFF", "QUESTIONS"]);
+
 // Denials time filter levels
 const DENIAL_FILTERS = ["all", "1h", "10m"] as const;
 type DenialFilter = (typeof DENIAL_FILTERS)[number];
@@ -1528,9 +1530,11 @@ export class DashboardComponent implements Component {
 
   private cyclePaneMode(delta: number) {
     this.modeIndex = (this.modeIndex + PANE_MODES.length + delta) % PANE_MODES.length;
-    this.rightPane.setMode(PANE_MODES[this.modeIndex]!);
-    this.statusBar.currentMode = PANE_MODES[this.modeIndex]!;
+    const mode = PANE_MODES[this.modeIndex]!;
+    this.rightPane.setMode(mode);
+    this.statusBar.currentMode = mode;
     this.statusBar.modeIndex = this.modeIndex;
+    this.splitPane.fullWidth = FULL_WIDTH_MODES.has(mode);
     this.triggerAsyncLoadIfNeeded();
   }
 
@@ -1541,6 +1545,7 @@ export class DashboardComponent implements Component {
       this.rightPane.setMode(mode);
       this.statusBar.currentMode = mode;
       this.statusBar.modeIndex = idx;
+      this.splitPane.fullWidth = FULL_WIDTH_MODES.has(mode);
       this.triggerAsyncLoadIfNeeded(forceRefresh);
     }
   }
@@ -1739,6 +1744,7 @@ export class DashboardComponent implements Component {
     this.rightPane.displayHeight = availableHeight;
 
     // Split pane (tmux left + right pane)
+    this.splitPane.fullWidth = FULL_WIDTH_MODES.has(this.rightPane.mode);
     const splitLines = this.splitPane.render(width);
     lines.push(...splitLines);
 

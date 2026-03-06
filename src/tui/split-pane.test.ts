@@ -200,6 +200,49 @@ describe("SplitPane", () => {
     expect(result.length).toBe(0);
   });
 
+  test("fullWidth=false renders split layout (default)", () => {
+    const left = stubComponent(["LEFT"]);
+    const right = stubComponent(["RIGHT"]);
+    const sp = new SplitPane(left, right, 10, "|");
+
+    expect(sp.fullWidth).toBe(false);
+    const result = sp.render(30);
+    expect(result[0]!).toContain("|");
+    expect(result[0]!).toContain("LEFT");
+    expect(result[0]!).toContain("RIGHT");
+  });
+
+  test("fullWidth=true renders only right pane at full width", () => {
+    const left = stubComponent(["LEFT"]);
+    const right = recordingComponent(["RIGHT"]);
+    const sp = new SplitPane(left, right, 10, "|");
+
+    sp.fullWidth = true;
+    const result = sp.render(40);
+    // Should not contain left content or separator
+    expect(result.length).toBe(1);
+    expect(result[0]!).toBe("RIGHT");
+    expect(result[0]!).not.toContain("|");
+    expect(result[0]!).not.toContain("LEFT");
+    // Right component should receive full width
+    expect(right.lastWidth).toBe(40);
+  });
+
+  test("fullWidth can be toggled back to split mode", () => {
+    const left = stubComponent(["LEFT"]);
+    const right = stubComponent(["RIGHT"]);
+    const sp = new SplitPane(left, right, 10, "|");
+
+    sp.fullWidth = true;
+    let result = sp.render(30);
+    expect(result[0]!).not.toContain("|");
+
+    sp.fullWidth = false;
+    result = sp.render(30);
+    expect(result[0]!).toContain("|");
+    expect(result[0]!).toContain("LEFT");
+  });
+
   test("ANSI content uses visible width for padding, not byte length", () => {
     // "\x1b[31mHi\x1b[0m" is "Hi" visually (2 chars) but many more bytes
     const left = stubComponent(["\x1b[31mHi\x1b[0m"]);

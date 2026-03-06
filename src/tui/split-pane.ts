@@ -11,6 +11,7 @@ export class SplitPane implements Component {
   private right: Component;
   private leftWidth: number;
   private separator: string;
+  fullWidth = false;
 
   constructor(left: Component, right: Component, leftWidth: number, separator = "│") {
     this.left = left;
@@ -29,6 +30,10 @@ export class SplitPane implements Component {
   }
 
   render(width: number): string[] {
+    if (this.fullWidth) {
+      return this.right.render(width);
+    }
+
     const sepWidth = visibleWidth(this.separator);
     const lw = Math.min(this.leftWidth, width - sepWidth - 1);
     const rw = width - lw - sepWidth;

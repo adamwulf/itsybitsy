@@ -7,7 +7,8 @@
         "ToolSearch",
         "Bash(bun:*)",
         "Bash(bunx:*)",
-        "Skill"
+        "Skill",
+        "Bash(wc:*)"
       ],
       "deny": []
     },
@@ -16,7 +17,8 @@
         "ToolSearch",
         "Bash(bun:*)",
         "Bash(bunx:*)",
-        "Skill"
+        "Skill",
+        "Bash(wc:*)"
       ],
       "deny": []
     }

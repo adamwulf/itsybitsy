@@ -119,10 +119,10 @@ type DialogState =
       type: "folder-browser";
       currentPath: string;
       items: FolderItem[];
-      selectedIdx: number;
+      selectedIndex: number;
       addFocused: boolean;
       scrollOffset: number;
-      onConfirm: (path: string) => void;
+      onSelect: (path: string) => void;
     }
   | null;
 
@@ -761,14 +761,14 @@ class DialogOverlayComponent implements Component {
       }
       case "folder-browser": {
         const lines: string[] = [];
-        const { items, selectedIdx, addFocused, scrollOffset } = dialog;
+        const { items, selectedIndex, addFocused, scrollOffset } = dialog;
 
         // Compute visible window
         const maxVisible = FOLDER_BROWSER_HEIGHT;
         let start = scrollOffset;
         // Ensure selected item is visible
-        if (selectedIdx < start) start = selectedIdx;
-        if (selectedIdx >= start + maxVisible) start = selectedIdx - maxVisible + 1;
+        if (selectedIndex < start) start = selectedIndex;
+        if (selectedIndex >= start + maxVisible) start = selectedIndex - maxVisible + 1;
         const end = Math.min(items.length, start + maxVisible);
 
         if (start > 0) {
@@ -777,7 +777,7 @@ class DialogOverlayComponent implements Component {
 
         for (let i = start; i < end; i++) {
           const item = items[i]!;
-          const isSelected = i === selectedIdx && !addFocused;
+          const isSelected = i === selectedIndex && !addFocused;
 
           // Build indentation with tree connectors
           let prefix: string;
@@ -834,7 +834,7 @@ class DialogOverlayComponent implements Component {
         }
 
         // Button row
-        const selectedItem = items[selectedIdx];
+        const selectedItem = items[selectedIndex];
         const addEnabled = selectedItem?.isGit ?? false;
         const addLabel = addFocused
           ? `${BOLD}${GREEN}[ Add ]${RESET}`
@@ -988,11 +988,12 @@ export class DashboardComponent implements Component {
     this._dialog = dialog;
     // Folder browser needs a wider dialog for long paths
     const width = dialog.type === "folder-browser" ? 70 : DIALOG_WIDTH;
-    if (this.overlayHandle) {
+    if (width !== DIALOG_WIDTH && this.overlayHandle) {
+      // Only recreate overlay when switching to a non-standard width
       this.overlayHandle.hide();
       this.overlayHandle = null;
     }
-    if (this.tui) {
+    if (!this.overlayHandle && this.tui) {
       this.overlayHandle = this.tui.showOverlay(this.dialogOverlay, {
         width,
         anchor: "center",
@@ -1510,10 +1511,10 @@ export class DashboardComponent implements Component {
       type: "folder-browser",
       currentPath: startPath,
       items,
-      selectedIdx: currentIdx !== -1 ? currentIdx : 0,
+      selectedIndex: currentIdx !== -1 ? currentIdx : 0,
       addFocused: false,
       scrollOffset: Math.max(0, (currentIdx !== -1 ? currentIdx : 0) - 7),
-      onConfirm: (path: string) => {
+      onSelect: (path: string) => {
         addRepo(path).then((result) => {
           this.showMessage(result.message);
           if (result.ok) {
@@ -1643,47 +1644,47 @@ export class DashboardComponent implements Component {
       const d = this._dialog;
       if (matchesKey(data, Key.down) || data === "j") {
         if (!d.addFocused) {
-          d.selectedIdx = Math.min(d.items.length - 1, d.selectedIdx + 1);
+          d.selectedIndex = Math.min(d.items.length - 1, d.selectedIndex + 1);
           // Ensure visible
           const maxVisible = FOLDER_BROWSER_HEIGHT;
-          if (d.selectedIdx >= d.scrollOffset + maxVisible) {
-            d.scrollOffset = d.selectedIdx - maxVisible + 1;
+          if (d.selectedIndex >= d.scrollOffset + maxVisible) {
+            d.scrollOffset = d.selectedIndex - maxVisible + 1;
           }
         }
         this.tui?.requestRender();
       } else if (matchesKey(data, Key.up) || data === "k") {
         if (!d.addFocused) {
-          d.selectedIdx = Math.max(0, d.selectedIdx - 1);
-          if (d.selectedIdx < d.scrollOffset) {
-            d.scrollOffset = d.selectedIdx;
+          d.selectedIndex = Math.max(0, d.selectedIndex - 1);
+          if (d.selectedIndex < d.scrollOffset) {
+            d.scrollOffset = d.selectedIndex;
           }
         }
         this.tui?.requestRender();
       } else if (data === "\t") {
-        const selectedItem = d.items[d.selectedIdx];
+        const selectedItem = d.items[d.selectedIndex];
         if (selectedItem?.isGit) {
           d.addFocused = !d.addFocused;
           this.tui?.requestRender();
         }
       } else if (matchesKey(data, Key.enter)) {
         if (d.addFocused) {
-          const selectedItem = d.items[d.selectedIdx];
+          const selectedItem = d.items[d.selectedIndex];
           if (selectedItem?.isGit) {
             this.closeDialog();
-            d.onConfirm(selectedItem.path);
+            d.onSelect(selectedItem.path);
           }
         } else {
           // Navigate into selected folder
-          const selectedItem = d.items[d.selectedIdx];
+          const selectedItem = d.items[d.selectedIndex];
           if (selectedItem) {
             const newItems = buildFolderItems(selectedItem.path);
             // Find the item that matches the navigated-to path to keep it highlighted
             const newIdx = newItems.findIndex((i) => i.path === selectedItem.path);
             d.currentPath = selectedItem.path;
             d.items = newItems;
-            d.selectedIdx = newIdx !== -1 ? newIdx : 0;
+            d.selectedIndex = newIdx !== -1 ? newIdx : 0;
             d.addFocused = false;
-            d.scrollOffset = Math.max(0, d.selectedIdx - 7);
+            d.scrollOffset = Math.max(0, d.selectedIndex - 7);
             this.tui?.requestRender();
           }
         }

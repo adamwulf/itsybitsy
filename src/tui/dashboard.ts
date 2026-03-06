@@ -817,7 +817,8 @@ class DialogOverlayComponent implements Component {
           const line = `${prefix}${nameStr}${gitSuffix}`;
 
           if (isSelected) {
-            lines.push(truncateToWidth(`${BOLD}\x1b[7m ${line} ${RESET}`, innerWidth, ""));
+            const t = getCurrentTheme();
+            lines.push(truncateToWidth(`${BOLD}${t.selectedHighlight} ${line} ${RESET}`, innerWidth, ""));
           } else {
             lines.push(truncateToWidth(` ${line}`, innerWidth, ""));
           }
@@ -841,9 +842,7 @@ class DialogOverlayComponent implements Component {
           : addEnabled
             ? `[ Add ]`
             : `${DIM}[ Add ]${RESET}`;
-        const cancelLabel = !addFocused
-          ? `${DIM}[ Cancel ]${RESET}`
-          : `[ Cancel ]`;
+        const cancelLabel = `${DIM}[ Cancel ]${RESET}`;
         lines.push("");
         lines.push(`  ${addLabel}    ${cancelLabel}`);
 

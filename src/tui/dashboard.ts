@@ -12,7 +12,7 @@ import {
   visibleWidth,
   fuzzyFilter,
 } from "@mariozechner/pi-tui";
-import type { Component } from "@mariozechner/pi-tui";
+import type { Component, OverlayHandle } from "@mariozechner/pi-tui";
 import { loadRegistry } from "../registry";
 import type { RepoEntry } from "../registry";
 import { AgentWatcher } from "../watcher";
@@ -482,6 +482,96 @@ class StatusBarComponent implements Component {
   }
 }
 
+/** Draws the current dialog as a centered bordered box overlay */
+class DialogOverlayComponent implements Component {
+  private getDialog: () => DialogState;
+
+  constructor(getDialog: () => DialogState) {
+    this.getDialog = getDialog;
+  }
+
+  invalidate(): void {}
+
+  render(width: number): string[] {
+    const dialog = this.getDialog();
+    if (!dialog) return [];
+
+    const innerWidth = width - 4; // 2 border + 2 padding
+    const { title, contentLines } = this.buildContent(dialog, innerWidth);
+
+    // Build the box
+    const lines: string[] = [];
+    // Top border with title
+    const titleStr = ` ${title} `;
+    const topPadding = Math.max(0, width - 3 - visibleWidth(titleStr));
+    lines.push(`┌─${BOLD}${titleStr}${RESET}${"─".repeat(topPadding)}┐`);
+
+    // Content lines
+    for (const cl of contentLines) {
+      const pad = Math.max(0, innerWidth - visibleWidth(cl));
+      lines.push(`│  ${cl}${" ".repeat(pad)}│`);
+    }
+
+    // Bottom border
+    lines.push(`└${"─".repeat(width - 2)}┘`);
+
+    return lines;
+  }
+
+  private buildContent(dialog: NonNullable<DialogState>, innerWidth: number): { title: string; contentLines: string[] } {
+    switch (dialog.type) {
+      case "confirm": {
+        const wrapped = wrapLines(dialog.prompt, innerWidth);
+        return { title: "Confirm", contentLines: [...wrapped, "", `${DIM}(y/n)${RESET}`] };
+      }
+      case "input": {
+        return {
+          title: dialog.prompt,
+          contentLines: [truncateToWidth(`> ${dialog.value}█`, innerWidth, "")],
+        };
+      }
+      case "select": {
+        const lines: string[] = [`${DIM}(j/k, Enter, Esc)${RESET}`];
+        for (let i = 0; i < dialog.items.length; i++) {
+          const prefix = i === dialog.selectedIndex ? `${GREEN}> ` : "  ";
+          const suffix = i === dialog.selectedIndex ? RESET : "";
+          lines.push(truncateToWidth(`${prefix}${dialog.items[i]}${suffix}`, innerWidth, ""));
+        }
+        return { title: dialog.prompt, contentLines: lines };
+      }
+      case "fuzzy": {
+        const matchCount = dialog.filteredItems.length;
+        const headerLine = `${DIM}[${matchCount} matches]${RESET}`;
+        const queryLine = truncateToWidth(`> ${dialog.query}█`, innerWidth, "");
+        const maxVisible = 5;
+        const start = Math.max(0, Math.min(dialog.selectedIndex - maxVisible + 1, dialog.filteredItems.length - maxVisible));
+        const visible = dialog.filteredItems.slice(start, start + maxVisible);
+        const itemLines = visible.map((item, i) => {
+          const actualIndex = start + i;
+          const prefix = actualIndex === dialog.selectedIndex ? `${GREEN}> ` : "  ";
+          const suffix = actualIndex === dialog.selectedIndex ? RESET : "";
+          return truncateToWidth(`${prefix}${item}${suffix}`, innerWidth, "");
+        });
+        return { title: `${dialog.prompt}`, contentLines: [headerLine, queryLine, ...itemLines] };
+      }
+      case "help": {
+        const lines = dialog.lines.map((line) => truncateToWidth(line, innerWidth, ""));
+        return { title: "Help", contentLines: lines };
+      }
+      case "message": {
+        return {
+          title: "Info",
+          contentLines: [
+            truncateToWidth(`${YELLOW}${dialog.text}${RESET}`, innerWidth, ""),
+            "",
+            `${DIM}Press any key to dismiss${RESET}`,
+          ],
+        };
+      }
+    }
+  }
+}
+
 /** Main dashboard component that composes everything */
 export class DashboardComponent implements Component {
   private agentTree: AgentTreeComponent;
@@ -494,6 +584,8 @@ export class DashboardComponent implements Component {
   private tmuxPoller: TmuxPoller;
   private currentAgentId: string | null = null;
   private _dialog: DialogState = null;
+  private overlayHandle: OverlayHandle | null = null;
+  private dialogOverlay: DialogOverlayComponent;
   private watcher: AgentWatcher | null = null;
   private repos: RepoEntry[] = [];
   private messageCounter = 0;
@@ -534,6 +626,7 @@ export class DashboardComponent implements Component {
     this.rightPane = new RightPaneComponent();
     this.tmuxPane = new TmuxPaneComponent();
     this.statusBar = new StatusBarComponent();
+    this.dialogOverlay = new DialogOverlayComponent(() => this._dialog);
 
     // Split pane: tmux left (~60 cols), right pane on right
     this.splitPane = new SplitPane(this.tmuxPane, this.rightPane, 60);
@@ -587,14 +680,30 @@ export class DashboardComponent implements Component {
     this.tui?.requestRender();
   }
 
+  private showDialog(dialog: NonNullable<DialogState>) {
+    this._dialog = dialog;
+    if (!this.overlayHandle && this.tui) {
+      this.overlayHandle = this.tui.showOverlay(this.dialogOverlay, {
+        width: 60,
+        anchor: "center",
+      });
+    }
+    this.tui?.requestRender();
+  }
+
+  private closeDialog() {
+    this._dialog = null;
+    this.overlayHandle?.hide();
+    this.overlayHandle = null;
+    this.tui?.requestRender();
+  }
+
   private showMessage(text: string) {
     const id = ++this.messageCounter;
-    this._dialog = { type: "message", text };
-    this.tui?.requestRender();
+    this.showDialog({ type: "message", text });
     setTimeout(() => {
       if (this._dialog?.type === "message" && this.messageCounter === id) {
-        this._dialog = null;
-        this.tui?.requestRender();
+        this.closeDialog();
       }
     }, 3000);
   }
@@ -611,35 +720,33 @@ export class DashboardComponent implements Component {
   private handleKill() {
     const agent = this.agentTree.selectedAgent;
     if (!agent) return;
-    this._dialog = {
+    this.showDialog({
       type: "confirm",
-      prompt: `Kill agent ${agent.id}? (y/n)`,
+      prompt: `Kill agent ${agent.id}?`,
       onYes: () => {
-        this._dialog = null;
+        this.closeDialog();
         this.executeAndRefresh(async () => {
           const result = await killAgent(agent);
           this.showMessage(result.ok ? `Killed ${agent.id}` : `Kill failed: ${result.stderr || result.stdout}`);
         });
       },
-    };
-    this.tui?.requestRender();
+    });
   }
 
   private handleNuke() {
     const agent = this.agentTree.selectedAgent;
     if (!agent) return;
-    this._dialog = {
+    this.showDialog({
       type: "confirm",
-      prompt: `${RED}FORCE KILL ${agent.id}? This cannot be undone. (y/n)${RESET}`,
+      prompt: `${RED}FORCE KILL ${agent.id}? This cannot be undone.${RESET}`,
       onYes: () => {
-        this._dialog = null;
+        this.closeDialog();
         this.executeAndRefresh(async () => {
           const result = await nukeAgent(agent);
           this.showMessage(result.ok ? `Nuked ${agent.id}` : `Nuke failed: ${result.stderr || result.stdout}`);
         });
       },
-    };
-    this.tui?.requestRender();
+    });
   }
 
   private handleResume() {
@@ -658,12 +765,12 @@ export class DashboardComponent implements Component {
   private handleReassign() {
     const agent = this.agentTree.selectedAgent;
     if (!agent) return;
-    this._dialog = {
+    this.showDialog({
       type: "input",
       prompt: `Reassign ${agent.id} to manager:`,
       value: "",
       onSubmit: (newManager: string) => {
-        this._dialog = null;
+        this.closeDialog();
         if (!newManager.trim()) {
           this.showMessage("Reassign cancelled");
           return;
@@ -673,8 +780,7 @@ export class DashboardComponent implements Component {
           this.showMessage(result.ok ? `Reassigned ${agent.id} → ${newManager.trim()}` : `Reassign failed: ${result.stderr || result.stdout}`);
         });
       },
-    };
-    this.tui?.requestRender();
+    });
   }
 
   private handleMerge() {
@@ -687,18 +793,17 @@ export class DashboardComponent implements Component {
         this.showMessage(`Merge-check failed for ${agent.id}: ${checkOutput}`);
         return;
       }
-      this._dialog = {
+      this.showDialog({
         type: "confirm",
-        prompt: `Merge ${agent.id}?\n${checkOutput}\n(y/n)`,
+        prompt: `Merge ${agent.id}?\n${checkOutput}`,
         onYes: () => {
-          this._dialog = null;
+          this.closeDialog();
           this.executeAndRefresh(async () => {
             const result = await mergeAgent(agent);
             this.showMessage(result.ok ? `Merged ${agent.id}` : `Merge failed: ${result.stderr || result.stdout}`);
           });
         },
-      };
-      this.tui?.requestRender();
+      });
     }).catch((err) => {
       this.showMessage(`Merge-check error: ${err}`);
     });
@@ -707,12 +812,12 @@ export class DashboardComponent implements Component {
   private handleSend() {
     const agent = this.agentTree.selectedAgent;
     if (!agent) return;
-    this._dialog = {
+    this.showDialog({
       type: "input",
       prompt: `Send message to ${agent.id}:`,
       value: "",
       onSubmit: (message: string) => {
-        this._dialog = null;
+        this.closeDialog();
         if (!message.trim()) {
           this.showMessage("Send cancelled");
           return;
@@ -722,8 +827,7 @@ export class DashboardComponent implements Component {
           this.showMessage(result.ok ? `Sent to ${agent.id}` : `Send failed: ${result.stderr || result.stdout}`);
         });
       },
-    };
-    this.tui?.requestRender();
+    });
   }
 
   private handleNewAgent() {
@@ -737,7 +841,7 @@ export class DashboardComponent implements Component {
       return;
     }
     // Step 1: select repo
-    this._dialog = {
+    this.showDialog({
       type: "select",
       prompt: "Select repo for new agent:",
       items: this.repos.map((r) => `${r.name} (${r.path})`),
@@ -745,29 +849,27 @@ export class DashboardComponent implements Component {
       onSelect: (repoIndex: number) => {
         this.showNewAgentPromptDialog(this.repos[repoIndex]!);
       },
-    };
-    this.tui?.requestRender();
+    });
   }
 
   private showNewAgentPromptDialog(repo: RepoEntry) {
-    this._dialog = {
+    this.showDialog({
       type: "input",
       prompt: `New agent prompt (repo: ${repo.name}):`,
       value: "",
       onSubmit: (prompt: string) => {
         if (!prompt.trim()) {
-          this._dialog = null;
+          this.closeDialog();
           this.showMessage("New agent cancelled");
           return;
         }
         this.showNewAgentFlagsDialog(repo, prompt.trim());
       },
-    };
-    this.tui?.requestRender();
+    });
   }
 
   private showNewAgentFlagsDialog(repo: RepoEntry, prompt: string) {
-    this._dialog = {
+    this.showDialog({
       type: "select",
       prompt: "Agent type:",
       items: [
@@ -778,7 +880,7 @@ export class DashboardComponent implements Component {
       ],
       selectedIndex: 0,
       onSelect: (flagIndex: number) => {
-        this._dialog = null;
+        this.closeDialog();
         const opts: NewAgentOptions = {};
         if (flagIndex === 1 || flagIndex === 3) opts.worker = true;
         if (flagIndex === 2 || flagIndex === 3) opts.yolo = true;
@@ -787,8 +889,7 @@ export class DashboardComponent implements Component {
           this.showMessage(result.ok ? `Created new agent in ${repo.name}` : `New agent failed: ${result.stderr || result.stdout}`);
         });
       },
-    };
-    this.tui?.requestRender();
+    });
   }
 
   private handleAnswerQuestion() {
@@ -802,12 +903,12 @@ export class DashboardComponent implements Component {
       this.showMessage(`Agent ${q.agent} not found`);
       return;
     }
-    this._dialog = {
+    this.showDialog({
       type: "input",
       prompt: `Answer ${q.agent}'s question:`,
       value: "",
       onSubmit: (answer: string) => {
-        this._dialog = null;
+        this.closeDialog();
         if (!answer.trim()) {
           this.showMessage("Answer cancelled");
           return;
@@ -822,8 +923,7 @@ export class DashboardComponent implements Component {
           this.showMessage(sendResult.ok ? `Answered ${q.agent}` : `Send failed: ${sendResult.stderr || sendResult.stdout}`);
         });
       },
-    };
-    this.tui?.requestRender();
+    });
   }
 
   private handleAcknowledgeQuestion() {
@@ -866,7 +966,7 @@ export class DashboardComponent implements Component {
       const shortPrompt = f.agent.meta.prompt.replace(/\n/g, " ").slice(0, 40);
       return `${f.agent.repoName}/${f.agent.id}  ${f.agent.state}  ${shortPrompt}`;
     });
-    this._dialog = {
+    this.showDialog({
       type: "fuzzy",
       prompt: "Jump to agent",
       query: "",
@@ -875,15 +975,14 @@ export class DashboardComponent implements Component {
       filteredItems: [...allItems],
       selectedIndex: 0,
       onSelect: (originalIndex: number) => {
-        this._dialog = null;
+        this.closeDialog();
         const agent = visible[originalIndex]!;
         this.agentTree.selectAgentById(agent.agent.id);
         this.syncSelectedAgent();
         this.jumpToMode("AGENT LOG");
         this.tui?.requestRender();
       },
-    };
-    this.tui?.requestRender();
+    });
   }
 
   private handleCommandPalette() {
@@ -919,7 +1018,7 @@ export class DashboardComponent implements Component {
     ];
 
     const allItems = commands.map((c) => c.label);
-    this._dialog = {
+    this.showDialog({
       type: "fuzzy",
       prompt: "Command palette",
       query: "",
@@ -928,12 +1027,11 @@ export class DashboardComponent implements Component {
       filteredItems: [...allItems],
       selectedIndex: 0,
       onSelect: (originalIndex: number) => {
-        this._dialog = null;
+        this.closeDialog();
         commands[originalIndex]!.action();
         this.tui?.requestRender();
       },
-    };
-    this.tui?.requestRender();
+    });
   }
 
   private handleToggleArchived() {
@@ -1016,7 +1114,7 @@ export class DashboardComponent implements Component {
   }
 
   private handleHelp() {
-    this._dialog = {
+    this.showDialog({
       type: "help",
       lines: [
         `${BOLD}Keybindings${RESET}`,
@@ -1030,8 +1128,7 @@ export class DashboardComponent implements Component {
         "",
         `${DIM}Press any key to dismiss${RESET}`,
       ],
-    };
-    this.tui?.requestRender();
+    });
   }
 
   private handleOpenGhostty() {
@@ -1088,22 +1185,19 @@ export class DashboardComponent implements Component {
 
     if (this._dialog.type === "message") {
       // Any key dismisses message
-      this._dialog = null;
-      this.tui?.requestRender();
+      this.closeDialog();
       return true;
     }
 
     if (this._dialog.type === "help") {
       // Any key dismisses help
-      this._dialog = null;
-      this.tui?.requestRender();
+      this.closeDialog();
       return true;
     }
 
     // Escape cancels any dialog
     if (matchesKey(data, Key.escape)) {
-      this._dialog = null;
-      this.tui?.requestRender();
+      this.closeDialog();
       return true;
     }
 
@@ -1111,8 +1205,7 @@ export class DashboardComponent implements Component {
       if (data === "y" || data === "Y") {
         this._dialog.onYes();
       } else if (data === "n" || data === "N") {
-        this._dialog = null;
-        this.tui?.requestRender();
+        this.closeDialog();
       }
       return true;
     }
@@ -1490,7 +1583,7 @@ export class DashboardComponent implements Component {
     lines.push(truncateToWidth(`${DIM}${"─".repeat(width)}${RESET}`, width, ""));
 
     // Compute available height for split pane
-    const bottomHeight = this._dialog ? this.dialogHeight() : 2;
+    const bottomHeight = 2; // status bar is always 2 lines
     const separatorHeight = 1; // bottom separator before status
     const usedHeight = lines.length + separatorHeight + bottomHeight;
     const terminalRows = process.stdout.rows || 24;
@@ -1507,104 +1600,13 @@ export class DashboardComponent implements Component {
     // Separator
     lines.push(truncateToWidth(`${DIM}${"─".repeat(width)}${RESET}`, width, ""));
 
-    // Dialog or status bar
-    if (this._dialog) {
-      const dialogLines = this.renderDialog(width);
-      lines.push(...dialogLines);
-    } else {
-      const statusLines = this.statusBar.render(width);
-      lines.push(...statusLines);
-    }
+    // Status bar (always visible — dialogs are overlays now)
+    const statusLines = this.statusBar.render(width);
+    lines.push(...statusLines);
 
     return lines;
   }
 
-  private dialogHeight(): number {
-    if (!this._dialog) return 2;
-    if (this._dialog.type === "confirm") {
-      const maxLines = 8;
-      const promptLines = this._dialog.prompt.split("\n").length;
-      const capped = Math.min(promptLines, maxLines) + (promptLines > maxLines ? 1 : 0);
-      return Math.max(2, capped);
-    }
-    if (this._dialog.type === "fuzzy") return 3;
-    if (this._dialog.type === "help") return this._dialog.lines.length;
-    return 2; // message, input, select all use 2 lines
-  }
-
-  private renderDialog(width: number): string[] {
-    if (!this._dialog) return [];
-
-    if (this._dialog.type === "message") {
-      return [
-        truncateToWidth(`${YELLOW}${this._dialog.text}${RESET}`, width, ""),
-        truncateToWidth(`${DIM}Press any key to dismiss${RESET}`, width, ""),
-      ];
-    }
-
-    if (this._dialog.type === "confirm") {
-      const promptLines = this._dialog.prompt.split("\n");
-      const maxLines = 8; // Cap to avoid overflowing the terminal
-      const lines: string[] = [];
-      for (const pl of promptLines.slice(0, maxLines)) {
-        lines.push(truncateToWidth(`${BOLD}${pl}${RESET}`, width, ""));
-      }
-      if (promptLines.length > maxLines) {
-        lines.push(truncateToWidth(`${DIM}... ${promptLines.length - maxLines} more lines${RESET}`, width, ""));
-      }
-      // Ensure at least 2 lines
-      while (lines.length < 2) lines.push("");
-      return lines;
-    }
-
-    if (this._dialog.type === "input") {
-      return [
-        truncateToWidth(`${BOLD}${this._dialog.prompt}${RESET}`, width, ""),
-        truncateToWidth(`> ${this._dialog.value}█`, width, ""),
-      ];
-    }
-
-    if (this._dialog.type === "select") {
-      const sel = this._dialog.selectedIndex;
-      const lines: string[] = [
-        truncateToWidth(`${BOLD}${this._dialog.prompt}${RESET} ${DIM}(j/k, Enter, Esc)${RESET}`, width, ""),
-      ];
-      const itemStrs = this._dialog.items.map((item, i) => {
-        const prefix = i === sel ? `${GREEN}> ` : "  ";
-        const suffix = i === sel ? RESET : "";
-        return `${prefix}${item}${suffix}`;
-      });
-      lines.push(truncateToWidth(itemStrs.join("  |  "), width, ""));
-      return lines;
-    }
-
-    if (this._dialog.type === "fuzzy") {
-      const d = this._dialog;
-      const matchCount = d.filteredItems.length;
-      const lines: string[] = [
-        truncateToWidth(`${BOLD}${d.prompt}${RESET} ${DIM}[${matchCount} matches]${RESET}`, width, ""),
-        truncateToWidth(`> ${d.query}█`, width, ""),
-      ];
-      // Slide the visible window to keep selectedIndex in view
-      const maxVisible = 5;
-      const start = Math.max(0, Math.min(d.selectedIndex - maxVisible + 1, d.filteredItems.length - maxVisible));
-      const visible = d.filteredItems.slice(start, start + maxVisible);
-      const itemStrs = visible.map((item, i) => {
-        const actualIndex = start + i;
-        const prefix = actualIndex === d.selectedIndex ? `>${GREEN}` : " ";
-        const suffix = actualIndex === d.selectedIndex ? RESET : "";
-        return `${prefix}${item}${suffix}`;
-      });
-      lines.push(truncateToWidth(itemStrs.join("  "), width, ""));
-      return lines;
-    }
-
-    if (this._dialog.type === "help") {
-      return this._dialog.lines.map((line) => truncateToWidth(line, width, ""));
-    }
-
-    return ["", ""];
-  }
 }
 
 export async function launchDashboard(): Promise<void> {

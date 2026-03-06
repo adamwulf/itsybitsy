@@ -1463,7 +1463,14 @@ export class DashboardComponent implements Component {
       this.currentThemeName = "dark";
       setTheme(DARK_THEME);
     }
-    this.showMessage(`Theme: ${this.currentThemeName === "dark" ? "Dark" : "Light"}`);
+    const id = ++this.lastSentCounter;
+    this.lastSentNotice = `Theme: ${this.currentThemeName === "dark" ? "Dark" : "Light"}`;
+    setTimeout(() => {
+      if (this.lastSentCounter === id) {
+        this.lastSentNotice = null;
+        this.tui?.requestRender();
+      }
+    }, 3000);
     this.invalidate();
     this.tui?.requestRender();
   }
@@ -2156,8 +2163,8 @@ export async function launchDashboard(): Promise<void> {
 
   dashboard.setWatcher(watcher);
 
-  // Color scheme detection
-  const { cleanup: cleanupColorScheme, inputFilter: colorSchemeFilter } = watchColorScheme((scheme) => {
+  // Color scheme detection — set up filter before tui.start(), query after
+  const { cleanup: cleanupColorScheme, inputFilter: colorSchemeFilter, queryColorScheme } = watchColorScheme((scheme) => {
     dashboard.currentThemeName = scheme === "dark" ? "dark" : "light";
     setTheme(scheme === "dark" ? DARK_THEME : LIGHT_THEME);
     dashboard.invalidate();
@@ -2176,12 +2183,14 @@ export async function launchDashboard(): Promise<void> {
     // Filter out key release events (Kitty protocol sends both press and release)
     if (isKeyRelease(data)) return undefined;
     // Let color scheme filter intercept escape sequences first
-    colorSchemeFilter(data);
+    if (colorSchemeFilter(data)) return undefined;
     dashboard.handleInput(data);
     return undefined;
   });
 
   tui.start();
+  // Query OSC 11 AFTER tui.start() — stdin is now in raw mode so the response will arrive
+  queryColorScheme();
   dashboard.startPolling();
   await watcher.start();
 }

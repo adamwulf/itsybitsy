@@ -995,6 +995,8 @@ export class DashboardComponent implements Component {
     }
     openInGhostty(agent.meta.tmux_session).then((result) => {
       this.showMessage(result.message);
+    }).catch((err) => {
+      this.showMessage(`Ghostty error: ${err}`);
     });
   }
 

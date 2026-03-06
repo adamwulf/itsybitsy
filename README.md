@@ -54,6 +54,7 @@ itsybitsy watch
 | `e` | Jump to ERRORS pane |
 | `q` | Jump to QUESTIONS pane |
 | `t` | Cycle denials time filter (in DENIALS pane) |
+| `c` | Clear errors (in ERRORS pane) |
 | `;` | Scroll up (older content) |
 | `l` | Scroll down (newer content) |
 

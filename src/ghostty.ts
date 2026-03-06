@@ -13,6 +13,7 @@ export async function openInGhostty(
     if (!/^[\w-]+$/.test(tmuxSession)) {
       return { ok: false, message: "Invalid tmux session name" };
     }
+    // Ghostty's --command takes a single shell string; array-style args aren't possible here
     const proc = Bun.spawn(["ghostty", `--command=tmux attach -t ${tmuxSession}`], {
       stdio: ["ignore", "ignore", "ignore"],
     });

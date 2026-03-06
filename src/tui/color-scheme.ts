@@ -8,9 +8,10 @@ import { appendFileSync } from "node:fs";
 
 export type ColorScheme = "light" | "dark";
 
-const DEBUG_LOG = "/tmp/itsybitsy-color-debug.txt";
+const DEBUG_LOG = process.env.ITSYBITSY_DEBUG ? "/tmp/itsybitsy-color-debug.txt" : "";
 
 function debugLog(msg: string): void {
+  if (!DEBUG_LOG) return;
   try {
     appendFileSync(DEBUG_LOG, `[${new Date().toISOString()}] ${msg}\n`);
   } catch {
@@ -82,21 +83,16 @@ const FOCUS_IN = "\x1b[I";
 export type InputFilter = (data: string) => boolean;
 
 /**
- * Send the OSC 11 background-color query to the terminal.
- * The response will arrive on stdin and should be intercepted by the inputFilter.
- */
-function sendOSC11Query(): void {
-  debugLog("Sending OSC 11 query");
-  process.stdout.write("\x1b]11;?\x07");
-}
-
-/**
  * Watch for color scheme changes. Sets up:
  * - An inputFilter to intercept OSC 11 responses and Ghostty mode 2031 notifications
  * - Ghostty notification opt-in and focus reporting
  *
  * IMPORTANT: Call queryColorScheme() AFTER stdin is in raw mode (i.e., after tui.start())
  * to trigger initial detection. The OSC 11 query requires raw mode to receive the response.
+ *
+ * The inputFilter receives data from pi-tui's StdinBuffer, which guarantees that OSC
+ * sequences (ESC ] ... BEL/ST) are delivered as complete sequences, never split across
+ * multiple data events. This means we don't need our own accumulation buffer.
  *
  * Returns:
  * - cleanup(): disable notifications
@@ -125,7 +121,8 @@ export function watchColorScheme(
         }
       }
     }, 500);
-    sendOSC11Query();
+    debugLog("Sending OSC 11 query");
+    process.stdout.write("\x1b]11;?\x07");
   }
 
   // Enable Ghostty notifications and focus reporting
@@ -136,12 +133,6 @@ export function watchColorScheme(
   // The input filter intercepts color-scheme escape sequences
   // before they reach normal key handling
   const inputFilter: InputFilter = (data: string): boolean => {
-    // Log raw hex for any escape sequences to help debug
-    if (data.startsWith("\x1b")) {
-      const hex = Buffer.from(data).toString("hex");
-      debugLog(`inputFilter received escape sequence: hex=${hex} len=${data.length}`);
-    }
-
     // Check for OSC 11 response: ESC ] 11 ; rgb:... BEL or ST
     if (data.includes("\x1b]11;")) {
       debugLog(`Received OSC 11 response: ${JSON.stringify(data)}`);

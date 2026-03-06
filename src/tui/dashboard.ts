@@ -10,12 +10,15 @@ import {
   Key,
   truncateToWidth,
   visibleWidth,
+  fuzzyFilter,
 } from "@mariozechner/pi-tui";
 import type { Component } from "@mariozechner/pi-tui";
-import { listRepos } from "../registry";
+import { loadRegistry } from "../registry";
 import type { RepoEntry } from "../registry";
 import { AgentWatcher } from "../watcher";
-import { TmuxPoller } from "../tmux-poller";
+import { TmuxPoller, captureTmuxOutput } from "../tmux-poller";
+import { stripAnsi, parseState } from "../parse-state";
+import { stat } from "node:fs/promises";
 import { readAgentLog, readAgentPrompt, parseDenials } from "../agents";
 import type { Agent, FlatAgent, PendingQuestion, DenialEntry } from "../agents";
 import { SplitPane } from "./split-pane";
@@ -61,6 +64,8 @@ type DialogState =
   | { type: "input"; prompt: string; value: string; onSubmit: (value: string) => void }
   | { type: "select"; prompt: string; items: string[]; selectedIndex: number; onSelect: (index: number) => void }
   | { type: "message"; text: string }
+  | { type: "fuzzy"; prompt: string; query: string; allItems: string[]; filteredIndices: number[]; filteredItems: string[]; selectedIndex: number; onSelect: (originalIndex: number) => void }
+  | { type: "help"; lines: string[] }
   | null;
 
 // Right pane modes
@@ -79,6 +84,15 @@ type PaneMode = (typeof PANE_MODES)[number];
 // Denials time filter levels
 const DENIAL_FILTERS = ["all", "1h", "10m"] as const;
 type DenialFilter = (typeof DENIAL_FILTERS)[number];
+
+/** Wraps items with original indices, filters via pi-tui fuzzyFilter, returns original indices */
+type IndexedItem = { text: string; index: number };
+function fuzzyFilterIndices(items: string[], query: string): number[] {
+  if (!query) return items.map((_, i) => i);
+  const indexed: IndexedItem[] = items.map((text, index) => ({ text, index }));
+  const filtered = fuzzyFilter(indexed, query, (item) => item.text);
+  return filtered.map((item) => item.index);
+}
 
 /** Format agent row for the tree */
 function formatAgentRow(
@@ -482,6 +496,7 @@ export class DashboardComponent implements Component {
   private watcher: AgentWatcher | null = null;
   private repos: RepoEntry[] = [];
   private messageCounter = 0;
+  private diffTool: string | undefined;
 
   /** Read-only access to dialog state (for testing) */
   get dialog(): DialogState {
@@ -550,6 +565,10 @@ export class DashboardComponent implements Component {
 
   setRepos(repos: RepoEntry[]) {
     this.repos = repos;
+  }
+
+  setDiffTool(tool: string | undefined) {
+    this.diffTool = tool;
   }
 
   /** Add an error to the errors list (called from watcher onError) */
@@ -836,11 +855,177 @@ export class DashboardComponent implements Component {
     }
   }
 
+  private handleFuzzyAgent() {
+    const visible = this.agentTree.visibleList;
+    if (visible.length === 0) {
+      this.showMessage("No agents to search");
+      return;
+    }
+    const allItems = visible.map((f) => {
+      const shortPrompt = f.agent.meta.prompt.replace(/\n/g, " ").slice(0, 40);
+      return `${f.agent.repoName}/${f.agent.id}  ${f.agent.state}  ${shortPrompt}`;
+    });
+    this._dialog = {
+      type: "fuzzy",
+      prompt: "Jump to agent",
+      query: "",
+      allItems,
+      filteredIndices: allItems.map((_, i) => i),
+      filteredItems: [...allItems],
+      selectedIndex: 0,
+      onSelect: (originalIndex: number) => {
+        this._dialog = null;
+        const agent = visible[originalIndex]!;
+        this.agentTree.selectAgentById(agent.agent.id);
+        this.syncSelectedAgent();
+        this.jumpToMode("AGENT LOG");
+        this.tui?.requestRender();
+      },
+    };
+    this.tui?.requestRender();
+  }
+
+  private handleFuzzyPaneMode() {
+    const allItems = [...PANE_MODES] as string[];
+    this._dialog = {
+      type: "fuzzy",
+      prompt: "Jump to pane",
+      query: "",
+      allItems,
+      filteredIndices: allItems.map((_, i) => i),
+      filteredItems: [...allItems],
+      selectedIndex: 0,
+      onSelect: (originalIndex: number) => {
+        this._dialog = null;
+        this.jumpToMode(PANE_MODES[originalIndex]!);
+        this.tui?.requestRender();
+      },
+    };
+    this.tui?.requestRender();
+  }
+
+  private handleOpenWorktree() {
+    const agent = this.agentTree.selectedAgent;
+    if (!agent) {
+      this.showMessage("No agent selected");
+      return;
+    }
+    const dir = agent.archived ? "archive" : "agents";
+    let worktreePath: string;
+    if (agent.meta.worktree === false) {
+      worktreePath = agent.repoPath;
+    } else {
+      worktreePath = `${agent.repoPath}/.ittybitty/${dir}/${agent.id}/repo`;
+    }
+    // Check if worktree path exists (it's a directory, so use fs.stat), fall back to repoPath
+    (async () => {
+      try {
+        let pathToOpen = worktreePath;
+        try {
+          const s = await stat(worktreePath);
+          if (!s.isDirectory()) pathToOpen = agent.repoPath;
+        } catch {
+          pathToOpen = agent.repoPath;
+        }
+        await Bun.$`open ${pathToOpen}`.quiet();
+        this.showMessage(`Opened ${pathToOpen}`);
+      } catch (err) {
+        this.showMessage(`Failed to open worktree: ${err}`);
+      }
+    })();
+  }
+
+  private handleOpenDiffTool() {
+    const agent = this.agentTree.selectedAgent;
+    if (!agent) {
+      this.showMessage("No agent selected");
+      return;
+    }
+    if (!this.diffTool) {
+      this.showMessage("No diff tool configured — set diffTool in ~/.itsybitsy.json");
+      return;
+    }
+    const tool = this.diffTool;
+    this.showMessage("Loading diff...");
+    diffAgent(agent).then(async (result) => {
+      try {
+        const output = result.stdout || result.stderr || "(no output)";
+        const tmpPath = `/tmp/itsybitsy-diff-${agent.id}.txt`;
+        await Bun.write(tmpPath, output);
+        const parts = tool.split(" ");
+        Bun.spawn([...parts, tmpPath], { cwd: agent.repoPath });
+        this.showMessage(`Opened diff in ${tool}`);
+      } catch (err) {
+        this.showMessage(`Failed to open diff: ${err}`);
+      }
+    }).catch((err) => {
+      this.showMessage(`Diff error: ${err}`);
+    });
+  }
+
+  private handleHelp() {
+    this._dialog = {
+      type: "help",
+      lines: [
+        `${BOLD}Keybindings${RESET}`,
+        "",
+        `${BOLD}Navigation:${RESET} j/k ↑↓ move  ${DIM}|${RESET}  @ fuzzy agent  ${DIM}|${RESET}  / fuzzy mode`,
+        `${BOLD}Pane:${RESET} p/n ←→ cycle  ${DIM}|${RESET}  d DIFF  ${DIM}|${RESET}  g STATUS  ${DIM}|${RESET}  e ERRORS  ${DIM}|${RESET}  q QUESTIONS`,
+        `${BOLD}Scroll:${RESET} ; scroll up  ${DIM}|${RESET}  l scroll down`,
+        `${BOLD}Actions:${RESET} s send  ${DIM}|${RESET}  m merge  ${DIM}|${RESET}  x kill  ${DIM}|${RESET}  ! nuke  ${DIM}|${RESET}  R resume  ${DIM}|${RESET}  r reassign  ${DIM}|${RESET}  a new  ${DIM}|${RESET}  A archive`,
+        `${BOLD}Open:${RESET} w worktree  ${DIM}|${RESET}  o diff tool  ${DIM}|${RESET}  G Ghostty  ${DIM}|${RESET}  S snapshot`,
+        `${BOLD}App:${RESET} h help  ${DIM}|${RESET}  Ctrl-C quit`,
+        "",
+        `${DIM}Press any key to dismiss${RESET}`,
+      ],
+    };
+    this.tui?.requestRender();
+  }
+
+  private handleSnapshot() {
+    const agent = this.agentTree.selectedAgent;
+    if (!agent) {
+      this.showMessage("No agent selected");
+      return;
+    }
+    captureTmuxOutput(agent.meta.tmux_session).then(async (rawOutput) => {
+      try {
+        if (!rawOutput) {
+          this.showMessage("No tmux output captured");
+          return;
+        }
+        const stripped = stripAnsi(rawOutput);
+        const result = parseState(stripped);
+        const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+        const filename = `snapshot-${timestamp}-${result.state}.txt`;
+        const dir = agent.archived ? "archive" : "agents";
+        const debugDir = `${agent.repoPath}/.ittybitty/${dir}/${agent.id}/debug-logs`;
+        await Bun.$`mkdir -p ${debugDir}`.quiet();
+        await Bun.write(
+          `${debugDir}/${filename}`,
+          `State: ${result.state}\nReason: ${result.reason}\n\n${rawOutput}`
+        );
+        this.showMessage(`Snapshot saved: ${filename} (state: ${result.state})`);
+      } catch (err) {
+        this.showMessage(`Snapshot error: ${err}`);
+      }
+    }).catch((err) => {
+      this.showMessage(`Snapshot error: ${err}`);
+    });
+  }
+
   private handleDialogInput(data: string): boolean {
     if (!this._dialog) return false;
 
     if (this._dialog.type === "message") {
       // Any key dismisses message
+      this._dialog = null;
+      this.tui?.requestRender();
+      return true;
+    }
+
+    if (this._dialog.type === "help") {
+      // Any key dismisses help
       this._dialog = null;
       this.tui?.requestRender();
       return true;
@@ -885,6 +1070,39 @@ export class DashboardComponent implements Component {
         this.tui?.requestRender();
       } else if (matchesKey(data, Key.enter)) {
         this._dialog.onSelect(this._dialog.selectedIndex);
+      }
+      return true;
+    }
+
+    if (this._dialog.type === "fuzzy") {
+      const refilter = () => {
+        const d = this._dialog as Extract<DialogState, { type: "fuzzy" }>;
+        const indices = fuzzyFilterIndices(d.allItems, d.query);
+        d.filteredIndices = indices;
+        d.filteredItems = indices.map((i) => d.allItems[i]!);
+        d.selectedIndex = 0;
+      };
+      if (matchesKey(data, Key.enter)) {
+        if (this._dialog.filteredItems.length > 0) {
+          const originalIndex = this._dialog.filteredIndices[this._dialog.selectedIndex] ?? 0;
+          this._dialog.onSelect(originalIndex);
+        }
+      } else if (matchesKey(data, Key.down)) {
+        if (this._dialog.filteredItems.length > 0) {
+          this._dialog.selectedIndex = Math.min(this._dialog.filteredItems.length - 1, this._dialog.selectedIndex + 1);
+        }
+        this.tui?.requestRender();
+      } else if (matchesKey(data, Key.up)) {
+        this._dialog.selectedIndex = Math.max(0, this._dialog.selectedIndex - 1);
+        this.tui?.requestRender();
+      } else if (matchesKey(data, Key.backspace) || data === "\x7f") {
+        this._dialog.query = this._dialog.query.slice(0, -1);
+        refilter();
+        this.tui?.requestRender();
+      } else if (data.length === 1 && data >= " ") {
+        this._dialog.query += data;
+        refilter();
+        this.tui?.requestRender();
       }
       return true;
     }
@@ -1160,6 +1378,30 @@ export class DashboardComponent implements Component {
     else if (data === "a") {
       this.handleNewAgent();
     }
+    // Fuzzy jump to agent
+    else if (data === "@") {
+      this.handleFuzzyAgent();
+    }
+    // Fuzzy jump to pane mode
+    else if (data === "/") {
+      this.handleFuzzyPaneMode();
+    }
+    // Open worktree in Finder
+    else if (data === "w") {
+      this.handleOpenWorktree();
+    }
+    // Open diff in external tool
+    else if (data === "o") {
+      this.handleOpenDiffTool();
+    }
+    // Help dialog
+    else if (data === "h") {
+      this.handleHelp();
+    }
+    // Debug snapshot
+    else if (data === "S") {
+      this.handleSnapshot();
+    }
   }
 
   invalidate(): void {
@@ -1220,6 +1462,8 @@ export class DashboardComponent implements Component {
       const capped = Math.min(promptLines, maxLines) + (promptLines > maxLines ? 1 : 0);
       return Math.max(2, capped);
     }
+    if (this._dialog.type === "fuzzy") return 3;
+    if (this._dialog.type === "help") return this._dialog.lines.length;
     return 2; // message, input, select all use 2 lines
   }
 
@@ -1269,12 +1513,38 @@ export class DashboardComponent implements Component {
       return lines;
     }
 
+    if (this._dialog.type === "fuzzy") {
+      const d = this._dialog;
+      const matchCount = d.filteredItems.length;
+      const lines: string[] = [
+        truncateToWidth(`${BOLD}${d.prompt}${RESET} ${DIM}[${matchCount} matches]${RESET}`, width, ""),
+        truncateToWidth(`> ${d.query}█`, width, ""),
+      ];
+      // Slide the visible window to keep selectedIndex in view
+      const maxVisible = 5;
+      const start = Math.max(0, Math.min(d.selectedIndex - maxVisible + 1, d.filteredItems.length - maxVisible));
+      const visible = d.filteredItems.slice(start, start + maxVisible);
+      const itemStrs = visible.map((item, i) => {
+        const actualIndex = start + i;
+        const prefix = actualIndex === d.selectedIndex ? `>${GREEN}` : " ";
+        const suffix = actualIndex === d.selectedIndex ? RESET : "";
+        return `${prefix}${item}${suffix}`;
+      });
+      lines.push(truncateToWidth(itemStrs.join("  "), width, ""));
+      return lines;
+    }
+
+    if (this._dialog.type === "help") {
+      return this._dialog.lines.map((line) => truncateToWidth(line, width, ""));
+    }
+
     return ["", ""];
   }
 }
 
 export async function launchDashboard(): Promise<void> {
-  const repos = await listRepos();
+  const registry = await loadRegistry();
+  const repos = registry.repos;
   if (repos.length === 0) {
     console.log("No repos registered. Use 'itsybitsy add <path>' to add one.");
     process.exit(1);
@@ -1286,6 +1556,7 @@ export async function launchDashboard(): Promise<void> {
   const dashboard = new DashboardComponent();
   dashboard.setTui(tui);
   dashboard.setRepos(repos);
+  dashboard.setDiffTool(registry.diffTool);
   tui.addChild(dashboard);
 
   // Start watcher (before input listener so dashboard has reference)

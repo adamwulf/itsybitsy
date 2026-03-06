@@ -264,7 +264,7 @@ class AgentTreeComponent implements Component {
   invalidate(): void {}
 
   render(width: number): string[] {
-        const visible = this.visibleList;
+    const visible = this.visibleList;
     if (visible.length === 0) {
       return [truncateToWidth(`${DIM}  No agents found${RESET}`, width, "")];
     }
@@ -322,7 +322,7 @@ export class RightPaneComponent implements Component {
   }
 
   updateContent() {
-            switch (this.mode) {
+    switch (this.mode) {
       case "AGENT LOG":
         this.content = this.agentLogContent
           ?? (this.agent
@@ -422,7 +422,7 @@ export class RightPaneComponent implements Component {
   }
 
   render(width: number): string[] {
-        const header = `${BOLD}${DIM}── ${this.mode} ──${RESET}`;
+    const header = `${BOLD}${DIM}── ${this.mode} ──${RESET}`;
     const lines = [truncateToWidth(header, width, "")];
 
     // Available lines after header
@@ -485,7 +485,7 @@ export class TmuxPaneComponent implements Component {
   }
 
   render(width: number): string[] {
-            if (!this.agent) {
+    if (!this.agent) {
       return padLines([truncateToWidth(`${DIM}No agent selected${RESET}`, width, "")], this.displayHeight);
     }
 
@@ -634,7 +634,7 @@ class DialogOverlayComponent implements Component {
     // Build the box
     const lines: string[] = [];
     // Top border with title
-        const titleStr = ` ${title} `;
+    const titleStr = ` ${title} `;
     const topPadding = Math.max(0, width - 3 - visibleWidth(titleStr));
     lines.push(`┌─${BOLD}${titleStr}${RESET}${"─".repeat(topPadding)}┐`);
 
@@ -651,7 +651,7 @@ class DialogOverlayComponent implements Component {
   }
 
   private buildContent(dialog: NonNullable<DialogState>, innerWidth: number): { title: string; contentLines: string[] } {
-        switch (dialog.type) {
+    switch (dialog.type) {
       case "confirm": {
         const wrapped = wrapLines(dialog.prompt, innerWidth);
         return { title: "Confirm", contentLines: [...wrapped, "", `${DIM}(y/n)${RESET}`] };
@@ -2008,7 +2008,7 @@ export class DashboardComponent implements Component {
 
   render(width: number): string[] {
     // Minimum terminal size check
-        const termRows = process.stdout.rows || 24;
+    const termRows = process.stdout.rows || 24;
     if (termRows < 20 || width < 80) {
       return [`${BOLD}${YELLOW}[Terminal too small — resize to at least 80×20]${RESET}`];
     }

@@ -906,7 +906,7 @@ export class DashboardComponent implements Component {
       { label: "resume agent — R", action: () => this.handleResume() },
       { label: "reassign manager — r", action: () => this.handleReassign() },
       { label: "new agent — a", action: () => this.handleNewAgent() },
-      { label: "toggle archived — A", action: () => { this.agentTree.toggleArchived(); this.syncSelectedAgent(); this.tui?.requestRender(); } },
+      { label: "toggle archived — A", action: () => this.handleToggleArchived() },
       { label: "open worktree — w", action: () => this.handleOpenWorktree() },
       { label: "open diff in tool — o", action: () => this.handleOpenDiffTool() },
       { label: "open in Ghostty — G", action: () => this.handleOpenGhostty() },
@@ -914,8 +914,8 @@ export class DashboardComponent implements Component {
       // Navigation
       { label: "fuzzy jump to agent — @", action: () => this.handleFuzzyAgent() },
       { label: "help — h", action: () => this.handleHelp() },
-      { label: "scroll up — ;", action: () => { this.tmuxPane.scrollUp(); this.rightPane.scrollOffset++; this.rightPane.updateContent(); this.tui?.requestRender(); } },
-      { label: "scroll down — l", action: () => { this.tmuxPane.scrollDown(); this.rightPane.scrollOffset = Math.max(0, this.rightPane.scrollOffset - 1); this.rightPane.updateContent(); this.tui?.requestRender(); } },
+      { label: "scroll up — ;", action: () => this.handleScrollUp() },
+      { label: "scroll down — l", action: () => this.handleScrollDown() },
     ];
 
     const allItems = commands.map((c) => c.label);
@@ -929,10 +929,30 @@ export class DashboardComponent implements Component {
       selectedIndex: 0,
       onSelect: (originalIndex: number) => {
         this._dialog = null;
-        this.tui?.requestRender();
         commands[originalIndex]!.action();
+        this.tui?.requestRender();
       },
     };
+    this.tui?.requestRender();
+  }
+
+  private handleToggleArchived() {
+    this.agentTree.toggleArchived();
+    this.syncSelectedAgent();
+    this.tui?.requestRender();
+  }
+
+  private handleScrollUp() {
+    this.tmuxPane.scrollUp();
+    this.rightPane.scrollOffset++;
+    this.rightPane.updateContent();
+    this.tui?.requestRender();
+  }
+
+  private handleScrollDown() {
+    this.tmuxPane.scrollDown();
+    this.rightPane.scrollOffset = Math.max(0, this.rightPane.scrollOffset - 1);
+    this.rightPane.updateContent();
     this.tui?.requestRender();
   }
 
@@ -1393,21 +1413,13 @@ export class DashboardComponent implements Component {
     }
     // Toggle archived agents
     else if (data === "A") {
-      this.agentTree.toggleArchived();
-      this.syncSelectedAgent();
-      this.tui?.requestRender();
+      this.handleToggleArchived();
     }
     // Scroll pane content — scrolls both tmux pane and right pane
     else if (data === ";") {
-      this.tmuxPane.scrollUp();
-      this.rightPane.scrollOffset++;
-      this.rightPane.updateContent();
-      this.tui?.requestRender();
+      this.handleScrollUp();
     } else if (data === "l") {
-      this.tmuxPane.scrollDown();
-      this.rightPane.scrollOffset = Math.max(0, this.rightPane.scrollOffset - 1);
-      this.rightPane.updateContent();
-      this.tui?.requestRender();
+      this.handleScrollDown();
     }
     // Agent actions
     else if (data === "x") {

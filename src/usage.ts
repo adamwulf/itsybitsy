@@ -1,6 +1,6 @@
 /**
  * Claude API usage tracking — fetches session/weekly utilization from Anthropic API.
- * Caches at ~/.claude/usage-cache.json with 10s TTL.
+ * Caches at ~/.claude/usage-cache.json with 30s TTL.
  */
 
 import { homedir } from "node:os";
@@ -9,7 +9,7 @@ import { rename } from "node:fs/promises";
 
 const CACHE_PATH = join(homedir(), ".claude", "usage-cache.json");
 const CREDENTIALS_PATH = join(homedir(), ".claude", ".credentials.json");
-const CACHE_TTL_MS = 10_000;
+const CACHE_TTL_MS = 30_000;
 
 export interface UsageData {
   sessionPct: number | null;
@@ -43,6 +43,7 @@ export function formatResetTime(isoDate: string, now?: Date): string {
 
   if (days > 0) return `${days}d ${hours}h`;
   if (hours > 0) return `${hours}h ${minutes}m`;
+  if (minutes === 0) return "<1m";
   return `${minutes}m`;
 }
 
@@ -129,6 +130,15 @@ export async function fetchUsage(): Promise<UsageData | null> {
         "anthropic-beta": "oauth-2025-04-20",
       },
     });
+
+    if (!resp.ok) {
+      // HTTP error — use stale cache if available
+      if (cache) {
+        await writeCache({ timestamp: Math.floor(now / 1000), response: cache.response });
+        return parseUsageResponse(cache.response);
+      }
+      return null;
+    }
 
     const body = (await resp.json()) as ApiResponse;
 

@@ -105,11 +105,15 @@ itsybitsy
 │   ├── agents.test.ts        # Agent data layer tests
 │   ├── parse-state.ts        # Port of ib's parse_state bash logic → TypeScript
 │   ├── parse-state.test.ts   # State detection tests
+│   ├── usage.ts              # Fetches Claude API quota from Anthropic OAuth API;
+│   │                         # caches at ~/.claude/usage-cache.json (10s TTL)
+│   ├── usage.test.ts         # Usage fetch/parse tests
 │   ├── watcher.ts            # fs.watch({ recursive: true }) on agents/, archive/,
-│   │                         # user-questions.json; 10s fallback poll; debounced refresh
+│   │                         # user-questions.json; 10s fallback poll; debounced refresh;
+│   │                         # 2s stateTimer for between-refresh state polling
 │   ├── watcher.test.ts       # Watcher tests
-│   ├── tmux-poller.ts        # Polls tmux capture-pane for the selected agent (~1s interval);
-│   │                         # also exports captureTmuxOutput() for one-shot state detection
+│   ├── tmux-poller.ts        # Polls tmux capture-pane for the selected agent (~1s, 500 lines);
+│   │                         # also exports captureTmuxOutput() for one-shot state detection (100 lines)
 │   ├── tmux-poller.test.ts   # Tmux poller tests
 │   ├── ib-commands.ts        # Wrappers for ib mutations; cwd = repo root
 │   ├── ib-commands.test.ts   # ib-commands tests
@@ -117,17 +121,28 @@ itsybitsy
 │   └── tui/
 │       ├── dashboard.ts      # Main TUI: agent tree + split pane + status bar + dialogs
 │       ├── dashboard.test.ts # Dashboard tests
-│       ├── split-pane.ts     # Custom horizontal layout (pi-tui Box is vertical-only)
+│       ├── split-pane.ts     # Custom horizontal layout (pi-tui Box is vertical-only);
+│       │                     # fullWidth flag hides left pane for DIFF/DENIALS/TREE/ERRORS/QUESTIONS
 │       ├── split-pane.test.ts # Split pane tests
 │       ├── wrap.ts           # ANSI-aware line wrapping
 │       ├── wrap.test.ts      # Wrap tests
 │       └── ansi-validation.test.ts  # ANSI passthrough tests
+├── research/                 # Deep-dive analysis docs (not shipped)
+│   ├── ib-watch-analysis.md        # ib bash watch implementation deep dive
+│   ├── itsybitsy-watch-analysis.md # itsybitsy TS implementation deep dive
+│   ├── watch-parity-gaps.md        # Initial gap analysis (P0/P1/P2)
+│   ├── parity-check-ux.md          # Post-P0 UX parity check (G-01 through G-16)
+│   └── parity-check-logic.md       # Post-P0 logic/correctness parity check
 ├── PLAN.md
 ├── CLAUDE.md
 └── package.json
 ```
 
 Note: `watcher.ts` and `tmux-poller.ts` are split by concern — `watcher.ts` handles structural changes (agents added/removed/changed via `fs.watch` on `agents/`, `archive/`, `user-questions.json`) and detects state for ALL agents on each refresh; `tmux-poller.ts` handles live output capture for the SELECTED agent only (~1s poll). Different consumers, different error modes, different trigger conditions.
+
+`watcher.ts` runs three timers: (1) `fs.watch` debounced 200ms for instant structural changes, (2) 10s fallback poll for FSEvents misses, (3) 2s `stateTimer` that calls `detectAgentStates()` on cached agents to keep state fresh between structural refreshes without re-reading disk.
+
+Also: `src/usage.ts` — fetches Claude API session+weekly utilization from `GET https://api.anthropic.com/api/oauth/usage`, caches at `~/.claude/usage-cache.json` (10s TTL), reads credentials from `~/.claude/.credentials.json` or macOS Keychain. Dashboard footer refreshes every 30s and color-codes >80% yellow, >90% red.
 
 ## .ittybitty/ Directory Structure
 
@@ -429,7 +444,77 @@ Note: `tmux-poller.ts` was implemented in Phase 2/3. Phase 4 focuses on renderin
 
 ---
 
-### Phase 7 (v2): Cross-Repo Messaging
+---
+
+### Phase 7: ib watch Parity — P0 -- COMPLETE
+
+Deep analysis of `ib watch` (bash, ~8200 lines) vs itsybitsy (TypeScript) produced a full gap inventory. See `research/` for the full analysis docs. P0 gaps are fixed.
+
+**Fixed in this phase:**
+- [x] **Tmux capture depth** — `captureTmuxOutput()` default 20→100 lines; `TmuxPoller` display 100→500 lines (matches ib's `-S -500`)
+- [x] **Full-width pane modes** — `SplitPane.fullWidth` flag; DIFF, DENIALS, TREE, ERRORS, QUESTIONS hide left pane and use full terminal width
+- [x] **All-agent state polling** — `watcher.ts` `stateTimer` (2s) calls `detectAgentStates()` on all agents between `fs.watch` events; keeps state fresh without re-reading disk
+- [x] **Claude API usage display** — `src/usage.ts` fetches session+weekly quota from Anthropic OAuth API; dashboard footer shows color-coded percentages (>80% yellow, >90% red) every 30s
+- [x] **Flaky fs.watch test** — poll-until-ready with 5s deadline + explicit 10s test timeout
+
+**Known intentional deviation from ib:**
+- `parseState()` checks active-running (last 5) before tool-waiting (last 15), opposite of ib's order. Rationale: if agent resumed (Esc visible in last 5), a stale `⎿ Waiting` at line 6–15 should not override. Documented in `research/parity-check-logic.md`.
+
+---
+
+### Phase 8: ib watch Parity — P1
+
+Remaining parity gaps from `research/parity-check-ux.md` (G-01–G-16) and `research/parity-check-logic.md`. All are low–medium complexity.
+
+A single coordinator can parallelize **Phase 8A** and **Phase 8B** simultaneously (they own different files), then run **Phase 8C** after both are merged (it touches the same files as 8B), then **Phase 8D** last.
+
+---
+
+#### Phase 8A: Logic & Data Layer (parallelizable with 8B)
+
+Files: `src/parse-state.ts`, `src/agents.ts`, `src/tmux-poller.ts` — no dashboard.ts changes.
+
+- [ ] **G-12 / Logic-1.2: `compute_state_from_content` wrapper** (`src/agents.ts:234`) — wrap `parseState()` call in `detectAgentStates()` with a pre-check: count non-empty lines; if < 10 and no Claude startup markers found → return `"creating"` instead of delegating to `parseState()`
+- [ ] **Logic-1.3: Missing startup indicators** (`src/parse-state.ts:61`) — add `"╭─ Claude Code"` and `"[AGENT CONTEXT]"` to the creating-state startup check (worker agents inject `[AGENT CONTEXT]` before `Claude Code v` appears)
+- [ ] **Logic-2.3: State detection capture depth** (`src/tmux-poller.ts:89`) — increase `captureTmuxOutput()` default from 100 to 500 lines to match ib's capture depth for state detection
+- [ ] **G-06 part 1: `orphaned` flag on Agent** (`src/agents.ts:158`) — in `buildAgentTree()`, when `agent.meta.manager` is set but not found in `byId`, set `agent.orphaned = true`; add `orphaned?: boolean` to `Agent` type
+
+---
+
+#### Phase 8B: Dashboard UX & Control Flow (parallelizable with 8A)
+
+Files: `src/tui/dashboard.ts` — control flow, navigation, status bar. No rendering changes.
+
+- [ ] **G-03: Pane cycling skips empty panes** (`src/tui/dashboard.ts:1584`) — in `cyclePaneMode()`, after computing next mode: if ERRORS mode and `errors.length === 0`, skip; if QUESTIONS mode and `questions.length === 0`, skip; handle wrap-around
+- [ ] **G-07: Error count badge in footer** (`src/tui/dashboard.ts:505`) — add `errorCount` to `StatusBarComponent`; show red `[N errors]` badge next to question badge when `errorCount > 0`; `addError()` increments, `clearErrors()` resets
+- [ ] **G-10: Terminal title** (`src/tui/dashboard.ts` — `syncSelectedAgent()`) — emit `\x1b]0;itsybitsy: ${agentId}\x07` on agent selection change; emit `\x1b]0;itsybitsy\x07` when no agent selected
+- [ ] **G-11: Minimum terminal size** (`src/tui/dashboard.ts:1765`) — at top of `render()`, if `process.stdout.rows < 20 || width < 80`, render a single warning line and return early
+
+---
+
+#### Phase 8C: Dashboard Rendering (sequential — after 8A and 8B merged)
+
+Files: `src/tui/dashboard.ts` — render paths. Depends on `agent.orphaned` flag from Phase 8A.
+
+- [ ] **G-04: Diff colorization** (`src/tui/dashboard.ts:1541`) — post-process `diffContent` lines: `+` lines (not `+++`) → green `\x1b[32m`; `-` lines (not `---`) → red `\x1b[31m`; `@@`/`---`/`+++`/`diff ` lines → dim `\x1b[2m`
+- [ ] **G-05: Agent log colorization** (`src/tui/dashboard.ts:1513`) — in `loadAgentLog()`, apply: dim `\x1b[2m` ISO timestamp prefix (`\d{4}-\d{2}-\d{2}T` or `[2026-`); cyan `\x1b[36m` for `[bracket]` markers; reset after each
+- [ ] **G-08: Scroll direction for top-anchored panes** (`src/tui/dashboard.ts:370`) — define `TOP_ANCHORED_MODES = new Set(["DIFF", "ERRORS", "STATUS", "QUESTIONS"])`; in `RightPaneComponent.render()`, branch: top-anchored uses `scrollOffset` as start index from top; bottom-anchored keeps existing behavior
+- [ ] **G-09: TREE pane prompt column** (`src/tui/dashboard.ts:308`) — append truncated prompt to each TREE row: `agent.meta.prompt.replace(/\n/g, " ").slice(0, 40)`, respecting available width
+- [ ] **G-06 part 2: Orphaned worker indicator** (`src/tui/dashboard.ts:133`) — in `formatAgentRow()`, prepend `⚠ ` when `agent.orphaned === true`
+
+---
+
+#### Phase 8D: P2 Polish (sequential — after 8A/8B/8C all merged)
+
+Low-impact quality-of-life improvements. Can be split across 2–3 parallel workers.
+
+- [ ] **G-13: Scroll step size** (`src/tui/dashboard.ts:1178`) — change scroll step constant from `5` to `10` lines to match ib watch; extract as `const SCROLL_STEP = 10`
+- [ ] **G-14: Denial filter intervals** (`src/tui/dashboard.ts:120`) — change `DENIAL_FILTERS` from `["all", "1h", "10m"]` to `["all", "24h", "7d"]`; update `filterDenials()` cutoff math accordingly
+- [ ] **G-15: Tree connector style** (`src/tui/dashboard.ts:139`) — replace `"  ".repeat(depth) + "↳ "` with box-drawing connectors (`├── `, `└── `, `│   `); requires threading `isLastChild` flag through `flattenAgentTree()` → `FlatAgent` type → `formatAgentRow()`
+
+---
+
+### Phase 9 (v2): Cross-Repo Messaging
 **Checkpoint:** An agent in repo A can send a message to an agent in repo B from within itsybitsy.
 
 - [ ] Design message broker protocol (itsybitsy writes to destination `.ittybitty/` in `ib send` format)

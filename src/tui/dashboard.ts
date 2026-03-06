@@ -39,9 +39,10 @@ import {
 } from "../ib-commands";
 import type { NewAgentOptions } from "../ib-commands";
 import { openInGhostty } from "../ghostty";
+import { watchColorScheme } from "./color-scheme";
+import { setTheme, DARK_THEME, LIGHT_THEME, getCurrentTheme } from "./theme";
 import { fetchUsage } from "../usage";
 import type { UsageData } from "../usage";
-import { getCurrentTheme } from "./theme";
 
 const MAX_TREE_HEIGHT = 7;
 const TEXTAREA_VISIBLE_HEIGHT = 5;
@@ -1947,9 +1948,16 @@ export async function launchDashboard(): Promise<void> {
 
   dashboard.setWatcher(watcher);
 
+  // Color scheme detection
+  const { cleanup: cleanupColorScheme, inputFilter: colorSchemeFilter } = watchColorScheme((scheme) => {
+    setTheme(scheme === "dark" ? DARK_THEME : LIGHT_THEME);
+    tui.requestRender();
+  });
+
   // Global input handler
   tui.addInputListener((data) => {
     if (matchesKey(data, Key.ctrl("c"))) {
+      cleanupColorScheme();
       dashboard.stopPolling();
       watcher.stop();
       tui.stop();
@@ -1957,6 +1965,8 @@ export async function launchDashboard(): Promise<void> {
     }
     // Filter out key release events (Kitty protocol sends both press and release)
     if (isKeyRelease(data)) return undefined;
+    // Let color scheme filter intercept escape sequences first
+    colorSchemeFilter(data);
     dashboard.handleInput(data);
     return undefined;
   });

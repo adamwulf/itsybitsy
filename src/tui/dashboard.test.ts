@@ -673,7 +673,7 @@ describe("readAgentPrompt", () => {
   });
 });
 
-describe("DashboardComponent Phase 5.2 features", () => {
+describe("DashboardComponent right pane and navigation features", () => {
   let dashboard: DashboardComponent;
   let lastIbCall: { args: string[]; cwd: string } | null;
 

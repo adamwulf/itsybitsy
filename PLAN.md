@@ -347,7 +347,7 @@ Each phase ends at a usable checkpoint — something that works and can be teste
 - [x] `src/tmux-poller.ts` — polls selected agent at ~1s; `captureTmuxOutput()` for one-shot state detection; race-condition guard on agent switch
 - [x] Basic error handling: try/catch, graceful degradation for missing/malformed `meta.json`, structured `AgentReadError` reporting
 - [x] Unit tests: parse-state (43 tests), agents (23 tests)
-- [ ] Orphan tmux session detection (deferred to Phase 4/5)
+- [ ] Orphan tmux session detection (deferred — low priority)
 
 ---
 
@@ -365,7 +365,7 @@ Each phase ends at a usable checkpoint — something that works and can be teste
 
 ---
 
-### Phase 4: Live Tmux Pane
+### Phase 4: Live Tmux Pane -- COMPLETE
 **Checkpoint:** Selecting an agent shows its live Claude session output in a right-hand pane, updating every ~1s.
 
 Note: `tmux-poller.ts` was implemented in Phase 2/3. Phase 4 focuses on rendering quality.
@@ -377,7 +377,7 @@ Note: `tmux-poller.ts` was implemented in Phase 2/3. Phase 4 focuses on renderin
 
 ---
 
-### Phase 5.1: Core Agent Actions (Mutations)
+### Phase 5.1: Core Agent Actions (Mutations) -- COMPLETE
 **Checkpoint:** Kill, resume, merge, send, and new-agent all work from the TUI with confirm dialogs.
 
 - [x] `src/ib-commands.ts` — async wrappers for all `ib` mutations; **always sets `cwd` to the target repo root**; functions: `killAgent`, `nukeAgent`, `resumeAgent`, `reassignAgent`, `mergeAgent`, `mergeCheckAgent`, `sendMessage`, `newAgent`, `diffAgent`, `statusAgent`
@@ -406,7 +406,7 @@ Note: `tmux-poller.ts` was implemented in Phase 2/3. Phase 4 focuses on renderin
 
 ---
 
-### Phase 5.3: Navigation & Remaining Keybindings
+### Phase 5.3: Navigation & Remaining Keybindings -- COMPLETE
 **Checkpoint:** Fuzzy navigation, questions workflow, and all remaining keybindings work. Requires Phase 5.2 to be merged first.
 
 - [x] `@` — fuzzy jump to agent by name (pi-tui SelectList dialog overlay)
@@ -418,7 +418,7 @@ Note: `tmux-poller.ts` was implemented in Phase 2/3. Phase 4 focuses on renderin
 
 ---
 
-### Phase 6: Ghostty Integration & Distribution
+### Phase 6: Ghostty Integration & Distribution -- COMPLETE
 **Checkpoint:** Production-ready single binary you can install and use daily.
 
 - [x] `src/ghostty.ts` — `ghostty --command="tmux attach -t {tmux_session}"`; detect if Ghostty is available; degrade gracefully

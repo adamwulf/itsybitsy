@@ -1463,7 +1463,14 @@ export class DashboardComponent implements Component {
       this.currentThemeName = "dark";
       setTheme(DARK_THEME);
     }
-    this.showMessage(`Theme: ${this.currentThemeName === "dark" ? "Dark" : "Light"}`);
+    const id = ++this.lastSentCounter;
+    this.lastSentNotice = `Theme: ${this.currentThemeName === "dark" ? "Dark" : "Light"}`;
+    setTimeout(() => {
+      if (this.lastSentCounter === id) {
+        this.lastSentNotice = null;
+        this.tui?.requestRender();
+      }
+    }, 3000);
     this.invalidate();
     this.tui?.requestRender();
   }

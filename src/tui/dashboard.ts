@@ -11,6 +11,7 @@ import {
   truncateToWidth,
   visibleWidth,
   fuzzyFilter,
+  isKeyRelease,
 } from "@mariozechner/pi-tui";
 import type { Component, OverlayHandle } from "@mariozechner/pi-tui";
 import { loadRegistry } from "../registry";
@@ -1918,6 +1919,8 @@ export async function launchDashboard(): Promise<void> {
       tui.stop();
       process.exit(0);
     }
+    // Filter out key release events (Kitty protocol sends both press and release)
+    if (isKeyRelease(data)) return undefined;
     dashboard.handleInput(data);
     return undefined;
   });

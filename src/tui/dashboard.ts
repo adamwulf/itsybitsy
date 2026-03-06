@@ -161,11 +161,10 @@ function fuzzyFilterIndices(items: string[], query: string): number[] {
 /** Format agent row for the tree */
 function formatAgentRow(
   agent: Agent,
-  depth: number,
+  connector: string,
   selected: boolean,
   width: number
 ): string {
-  const indent = depth === 0 ? "" : "  ".repeat(depth) + "↳ ";
   const orphanedPrefix = agent.orphaned ? "⚠ " : "";
   const icon = agent.meta.worker ? "⚙" : "◆";
   const stateColor = STATE_COLORS[agent.state] ?? STATE_COLORS.unknown;
@@ -174,7 +173,7 @@ function formatAgentRow(
   const selEnd = selected ? `${RESET}` : "";
 
   const shortPrompt = agent.meta.prompt.replace(/\n/g, " ").slice(0, 40);
-  const line = `${indent}${orphanedPrefix}${icon} ${agent.repoName}/${agent.id}  ${stateColor}${agent.state}${RESET}  ${agent.age}  ${agent.meta.model}  ${archived}${shortPrompt}`;
+  const line = `${connector}${orphanedPrefix}${icon} ${agent.repoName}/${agent.id}  ${stateColor}${agent.state}${RESET}  ${agent.age}  ${agent.meta.model}  ${archived}${shortPrompt}`;
 
   return `${sel}${truncateToWidth(line, width, "")}${selEnd}`;
 }
@@ -255,8 +254,8 @@ class AgentTreeComponent implements Component {
     }
 
     for (let i = start; i < end; i++) {
-      const { agent, depth } = visible[i]!;
-      lines.push(formatAgentRow(agent, depth, i === this.selectedIndex, width));
+      const { agent, connector } = visible[i]!;
+      lines.push(formatAgentRow(agent, connector, i === this.selectedIndex, width));
     }
 
     // Scroll indicator at bottom

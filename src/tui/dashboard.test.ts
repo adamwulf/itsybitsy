@@ -323,7 +323,7 @@ describe("DashboardComponent dialog and action handlers", () => {
 
     const agent = makeAgent("agent-test", "/repos/test");
     agent.state = state as any;
-    const flatList: FlatAgent[] = [{ agent, depth: 0 }];
+    const flatList: FlatAgent[] = [{ agent, depth: 0, connector: "" }];
     dashboard.onUpdate([agent], flatList, []);
   }
 
@@ -585,8 +585,8 @@ describe("DashboardComponent dialog and action handlers", () => {
     const agent1 = makeAgent("agent-active", "/repos/test");
     const agent2 = makeAgent("agent-old", "/repos/test", true);
     const flatList: FlatAgent[] = [
-      { agent: agent1, depth: 0 },
-      { agent: agent2, depth: 0 },
+      { agent: agent1, depth: 0, connector: "├── " },
+      { agent: agent2, depth: 0, connector: "└── " },
     ];
     dashboard.onUpdate([agent1, agent2], flatList, []);
     // Initially archived agents are hidden
@@ -688,7 +688,7 @@ describe("DashboardComponent right pane and navigation features", () => {
 
     const agent = makeAgent("agent-test", "/repos/test");
     agent.state = state as any;
-    const flatList: FlatAgent[] = [{ agent, depth: 0 }];
+    const flatList: FlatAgent[] = [{ agent, depth: 0, connector: "" }];
     dashboard.onUpdate([agent], flatList, []);
   }
 
@@ -772,8 +772,8 @@ describe("DashboardComponent right pane and navigation features", () => {
     const agent1 = makeAgent("agent-a", "/repos/test");
     const agent2 = makeAgent("agent-b", "/repos/test");
     const flatList: FlatAgent[] = [
-      { agent: agent1, depth: 0 },
-      { agent: agent2, depth: 0 },
+      { agent: agent1, depth: 0, connector: "├── " },
+      { agent: agent2, depth: 0, connector: "└── " },
     ];
     const questions: PendingQuestion[] = [{
       id: "q-1",
@@ -804,7 +804,7 @@ describe("DashboardComponent right pane and navigation features", () => {
     });
 
     const agent = makeAgent("agent-test", "/repos/test");
-    const flatList: FlatAgent[] = [{ agent, depth: 0 }];
+    const flatList: FlatAgent[] = [{ agent, depth: 0, connector: "" }];
     const questions: PendingQuestion[] = [{
       id: "q-1",
       agent: "agent-test",
@@ -830,7 +830,7 @@ describe("DashboardComponent right pane and navigation features", () => {
     });
 
     const agent = makeAgent("agent-test", "/repos/test");
-    const flatList: FlatAgent[] = [{ agent, depth: 0 }];
+    const flatList: FlatAgent[] = [{ agent, depth: 0, connector: "" }];
     const questions: PendingQuestion[] = [{
       id: "q-1",
       agent: "agent-test",
@@ -862,7 +862,7 @@ describe("DashboardComponent right pane and navigation features", () => {
     });
 
     const agent = makeAgent("agent-test", "/repos/test");
-    const flatList: FlatAgent[] = [{ agent, depth: 0 }];
+    const flatList: FlatAgent[] = [{ agent, depth: 0, connector: "" }];
     const questions: PendingQuestion[] = [{
       id: "q-1",
       agent: "agent-test",
@@ -885,8 +885,8 @@ describe("DashboardComponent right pane and navigation features", () => {
     const agent1 = makeAgent("agent-a", "/repos/test");
     const agent2 = makeAgent("agent-b", "/repos/test");
     const flatList: FlatAgent[] = [
-      { agent: agent1, depth: 0 },
-      { agent: agent2, depth: 0 },
+      { agent: agent1, depth: 0, connector: "├── " },
+      { agent: agent2, depth: 0, connector: "└── " },
     ];
     const questions: PendingQuestion[] = [
       { id: "q-1", agent: "agent-a", question: "Q1?", timestamp: "2026-03-05T15:00:00Z", status: "pending" },
@@ -907,7 +907,7 @@ describe("DashboardComponent right pane and navigation features", () => {
   test("j/k in QUESTIONS mode clamps to bounds", () => {
     dashboard = new DashboardComponent();
     const agent = makeAgent("agent-a", "/repos/test");
-    const flatList: FlatAgent[] = [{ agent, depth: 0 }];
+    const flatList: FlatAgent[] = [{ agent, depth: 0, connector: "" }];
     const questions: PendingQuestion[] = [
       { id: "q-1", agent: "agent-a", question: "Q1?", timestamp: "2026-03-05T15:00:00Z", status: "pending" },
     ];
@@ -926,8 +926,8 @@ describe("DashboardComponent right pane and navigation features", () => {
     const agent1 = makeAgent("agent-a", "/repos/test");
     const agent2 = makeAgent("agent-b", "/repos/test");
     const flatList: FlatAgent[] = [
-      { agent: agent1, depth: 0 },
-      { agent: agent2, depth: 0 },
+      { agent: agent1, depth: 0, connector: "├── " },
+      { agent: agent2, depth: 0, connector: "└── " },
     ];
     const questions: PendingQuestion[] = [{
       id: "q-1",

@@ -21,8 +21,10 @@ export class AgentWatcher {
   private events: WatcherEvents;
   private watchers: FSWatcher[] = [];
   private pollTimer: ReturnType<typeof setInterval> | null = null;
+  private stateTimer: ReturnType<typeof setInterval> | null = null;
   private refreshTimer: ReturnType<typeof setTimeout> | null = null;
   private running = false;
+  private lastAgents: Agent[] = [];
 
   constructor(repos: RepoEntry[], events: WatcherEvents) {
     this.repos = repos;
@@ -76,6 +78,11 @@ export class AgentWatcher {
     this.pollTimer = setInterval(() => {
       if (this.running) this.refresh();
     }, 10_000);
+
+    // Background state poll every 2s — keeps agent states fresh between fs.watch events
+    this.stateTimer = setInterval(() => {
+      if (this.running) this.pollStates();
+    }, 2_000);
   }
 
   stop(): void {
@@ -87,6 +94,10 @@ export class AgentWatcher {
     if (this.pollTimer) {
       clearInterval(this.pollTimer);
       this.pollTimer = null;
+    }
+    if (this.stateTimer) {
+      clearInterval(this.stateTimer);
+      this.stateTimer = null;
     }
     if (this.refreshTimer) {
       clearTimeout(this.refreshTimer);
@@ -102,6 +113,23 @@ export class AgentWatcher {
     }, 200);
   }
 
+  /** Poll states for all known agents without re-reading from disk */
+  private async pollStates(): Promise<void> {
+    if (this.lastAgents.length === 0) return;
+    try {
+      await detectAgentStates(this.lastAgents);
+      const roots = buildAgentTree(this.lastAgents);
+      const flatList = flattenAgentTree(roots);
+      const questionResults = await Promise.all(
+        this.repos.map((r) => readPendingQuestions(r.path))
+      );
+      const questions = questionResults.flat();
+      this.events.onUpdate(this.lastAgents, flatList, questions);
+    } catch (err) {
+      this.events.onError?.(err instanceof Error ? err : new Error(String(err)));
+    }
+  }
+
   /** Read all agents, detect states, and emit update */
   async refresh(): Promise<void> {
     try {
@@ -111,6 +139,9 @@ export class AgentWatcher {
       for (const err of errors) {
         this.events.onError?.(new Error(err.error));
       }
+
+      // Save agents for background state polling
+      this.lastAgents = agents;
 
       // Detect state for each agent via tmux capture + parseState
       await detectAgentStates(agents);

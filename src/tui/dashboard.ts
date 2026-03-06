@@ -38,6 +38,8 @@ import {
 } from "../ib-commands";
 import type { NewAgentOptions } from "../ib-commands";
 import { openInGhostty } from "../ghostty";
+import { fetchUsage } from "../usage";
+import type { UsageData } from "../usage";
 
 const MAX_TREE_HEIGHT = 7;
 const TEXTAREA_VISIBLE_HEIGHT = 5;
@@ -111,6 +113,8 @@ const PANE_MODES = [
   "QUESTIONS",
 ] as const;
 type PaneMode = (typeof PANE_MODES)[number];
+
+const FULL_WIDTH_MODES: Set<PaneMode> = new Set(["DENIALS", "TREE", "ERRORS", "DIFF", "QUESTIONS"]);
 
 // Denials time filter levels
 const DENIAL_FILTERS = ["all", "1h", "10m"] as const;
@@ -494,6 +498,7 @@ class StatusBarComponent implements Component {
   pendingQuestions = 0;
   currentMode: PaneMode = "AGENT LOG";
   modeIndex = 0;
+  usage: UsageData | null = null;
 
   invalidate(): void {}
 
@@ -503,12 +508,44 @@ class StatusBarComponent implements Component {
         ? ` ${BOLD}\x1b[33m[${this.pendingQuestions} questions]${RESET}`
         : "";
 
-    const keys = `${DIM}j/k:nav  ;/l:scroll  p/n:pane  s:send  m:merge  x:kill  a:new  r:reassign  R:resume  A:archive  Ctrl-C:quit${RESET}`;
     const modeLine = `${DIM}[${this.modeIndex}] ${this.currentMode}${RESET}${questionBadge}`;
+
+    // Build usage string for right side of keys line
+    const usageStr = this.formatUsage();
+    const keys = `${DIM}j/k:nav  ;/l:scroll  p/n:pane  s:send  m:merge  x:kill  a:new  r:reassign  R:resume  A:archive  Ctrl-C:quit${RESET}`;
+
+    let keysLine: string;
+    if (usageStr) {
+      const keysWidth = visibleWidth(keys);
+      const usageWidth = visibleWidth(usageStr);
+      const gap = Math.max(2, width - keysWidth - usageWidth);
+      keysLine = truncateToWidth(keys + " ".repeat(gap) + usageStr, width, "");
+    } else {
+      keysLine = truncateToWidth(keys, width, "");
+    }
+
     return [
       truncateToWidth(modeLine, width, ""),
-      truncateToWidth(keys, width, ""),
+      keysLine,
     ];
+  }
+
+  private formatUsage(): string {
+    if (!this.usage) return "";
+    const parts: string[] = [];
+    if (this.usage.sessionPct !== null) {
+      const pct = this.usage.sessionPct;
+      const color = pct > 90 ? RED : pct > 80 ? YELLOW : DIM;
+      const reset = this.usage.sessionReset ? ` (${this.usage.sessionReset})` : "";
+      parts.push(`${color}session:${pct}%${reset}${RESET}`);
+    }
+    if (this.usage.weeklyPct !== null) {
+      const pct = this.usage.weeklyPct;
+      const color = pct > 90 ? RED : pct > 80 ? YELLOW : DIM;
+      const reset = this.usage.weeklyReset ? ` (${this.usage.weeklyReset})` : "";
+      parts.push(`${color}weekly:${pct}%${reset}${RESET}`);
+    }
+    return parts.length > 0 ? parts.join("  ") : "";
   }
 }
 
@@ -658,6 +695,7 @@ export class DashboardComponent implements Component {
   private diffTool: string | undefined;
   private lastSentNotice: string | null = null;
   private lastSentCounter = 0;
+  private usageTimer: ReturnType<typeof setInterval> | null = null;
 
   /** Read-only access to dialog state (for testing) */
   get dialog(): DialogState {
@@ -715,10 +753,27 @@ export class DashboardComponent implements Component {
 
   startPolling() {
     this.tmuxPoller.start();
+    this.refreshUsage();
+    this.usageTimer = setInterval(() => this.refreshUsage(), 30_000);
   }
 
   stopPolling() {
     this.tmuxPoller.stop();
+    if (this.usageTimer) {
+      clearInterval(this.usageTimer);
+      this.usageTimer = null;
+    }
+  }
+
+  private refreshUsage() {
+    fetchUsage()
+      .then((data) => {
+        this.statusBar.usage = data;
+        this.tui?.requestRender();
+      })
+      .catch(() => {
+        // Silently ignore usage fetch errors
+      });
   }
 
   setWatcher(watcher: AgentWatcher) {
@@ -1528,9 +1583,11 @@ export class DashboardComponent implements Component {
 
   private cyclePaneMode(delta: number) {
     this.modeIndex = (this.modeIndex + PANE_MODES.length + delta) % PANE_MODES.length;
-    this.rightPane.setMode(PANE_MODES[this.modeIndex]!);
-    this.statusBar.currentMode = PANE_MODES[this.modeIndex]!;
+    const mode = PANE_MODES[this.modeIndex]!;
+    this.rightPane.setMode(mode);
+    this.statusBar.currentMode = mode;
     this.statusBar.modeIndex = this.modeIndex;
+    this.splitPane.fullWidth = FULL_WIDTH_MODES.has(mode);
     this.triggerAsyncLoadIfNeeded();
   }
 
@@ -1541,6 +1598,7 @@ export class DashboardComponent implements Component {
       this.rightPane.setMode(mode);
       this.statusBar.currentMode = mode;
       this.statusBar.modeIndex = idx;
+      this.splitPane.fullWidth = FULL_WIDTH_MODES.has(mode);
       this.triggerAsyncLoadIfNeeded(forceRefresh);
     }
   }
@@ -1739,6 +1797,7 @@ export class DashboardComponent implements Component {
     this.rightPane.displayHeight = availableHeight;
 
     // Split pane (tmux left + right pane)
+    this.splitPane.fullWidth = FULL_WIDTH_MODES.has(this.rightPane.mode);
     const splitLines = this.splitPane.render(width);
     lines.push(...splitLines);
 

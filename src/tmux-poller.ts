@@ -19,7 +19,7 @@ export class TmuxPoller {
   private events: TmuxPollerEvents;
   private lines: number;
 
-  constructor(events: TmuxPollerEvents, lines = 100) {
+  constructor(events: TmuxPollerEvents, lines = 500) {
     this.events = events;
     this.lines = lines;
   }
@@ -86,7 +86,7 @@ export class TmuxPoller {
  * Capture tmux output for a single agent (one-shot).
  * Used by watcher to detect agent state.
  */
-export async function captureTmuxOutput(tmuxSession: string, lines = 20): Promise<string | null> {
+export async function captureTmuxOutput(tmuxSession: string, lines = 100): Promise<string | null> {
   try {
     const proc = Bun.spawn(
       ["tmux", "capture-pane", "-t", tmuxSession, "-p", `-S`, `-${lines}`, "-E", "-"],

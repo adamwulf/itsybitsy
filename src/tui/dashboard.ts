@@ -41,6 +41,8 @@ import { openInGhostty } from "../ghostty";
 
 const MAX_TREE_HEIGHT = 7;
 const TEXTAREA_VISIBLE_HEIGHT = 5;
+const DIALOG_WIDTH = 60;
+const DIALOG_INNER_WIDTH = DIALOG_WIDTH - 4; // 2 border + 2 padding
 
 // State color map
 const STATE_COLORS: Record<string, string> = {
@@ -582,16 +584,40 @@ class DialogOverlayComponent implements Component {
       case "textarea": {
         const visibleHeight = TEXTAREA_VISIBLE_HEIGHT;
         const lines: string[] = [];
+
+        // Build visual lines by wrapping each logical line
+        type VisualLine = { text: string; logicalLine: number; logicalColStart: number };
+        const visualLines: VisualLine[] = [];
+        for (let li = 0; li < dialog.lines.length; li++) {
+          const raw = dialog.lines[li]!;
+          if (raw.length === 0) {
+            visualLines.push({ text: "", logicalLine: li, logicalColStart: 0 });
+          } else {
+            let col = 0;
+            while (col < raw.length) {
+              visualLines.push({ text: raw.slice(col, col + innerWidth), logicalLine: li, logicalColStart: col });
+              col += innerWidth;
+            }
+          }
+        }
+
         const hasAbove = dialog.scrollOffset > 0;
-        const hasBelow = dialog.scrollOffset + visibleHeight < dialog.lines.length;
+        const hasBelow = dialog.scrollOffset + visibleHeight < visualLines.length;
 
         for (let i = 0; i < visibleHeight; i++) {
-          const lineIdx = dialog.scrollOffset + i;
-          let lineText = lineIdx < dialog.lines.length ? dialog.lines[lineIdx]! : "";
-          // Insert cursor block if this is the cursor line and text is focused
-          if (lineIdx === dialog.cursorLine && dialog.focusedButton === "text") {
-            const col = Math.min(dialog.cursorCol, lineText.length);
-            lineText = lineText.slice(0, col) + "█" + lineText.slice(col);
+          const vlIdx = dialog.scrollOffset + i;
+          if (vlIdx >= visualLines.length) {
+            lines.push(" ".repeat(innerWidth));
+            continue;
+          }
+          const vl = visualLines[vlIdx]!;
+          let lineText = vl.text;
+          // Insert cursor block if this is the cursor's visual line and text is focused
+          if (vl.logicalLine === dialog.cursorLine && dialog.focusedButton === "text") {
+            const localCol = dialog.cursorCol - vl.logicalColStart;
+            if (localCol >= 0 && localCol <= vl.text.length && localCol <= innerWidth) {
+              lineText = vl.text.slice(0, localCol) + "█" + vl.text.slice(localCol);
+            }
           }
           lineText = truncateToWidth(lineText, innerWidth, "");
           const pad = Math.max(0, innerWidth - visibleWidth(lineText));
@@ -729,7 +755,7 @@ export class DashboardComponent implements Component {
     this._dialog = dialog;
     if (!this.overlayHandle && this.tui) {
       this.overlayHandle = this.tui.showOverlay(this.dialogOverlay, {
-        width: 60,
+        width: DIALOG_WIDTH,
         anchor: "center",
       });
     }
@@ -1298,8 +1324,30 @@ export class DashboardComponent implements Component {
     if (this._dialog.type === "textarea") {
       const d = this._dialog;
       const adjustScroll = () => {
-        if (d.cursorLine < d.scrollOffset) d.scrollOffset = d.cursorLine;
-        if (d.cursorLine >= d.scrollOffset + TEXTAREA_VISIBLE_HEIGHT) d.scrollOffset = d.cursorLine - TEXTAREA_VISIBLE_HEIGHT + 1;
+        // Recompute visual lines to find cursor's visual line index
+        type VL = { logicalLine: number; logicalColStart: number };
+        const vls: VL[] = [];
+        for (let li = 0; li < d.lines.length; li++) {
+          const raw = d.lines[li]!;
+          if (raw.length === 0) {
+            vls.push({ logicalLine: li, logicalColStart: 0 });
+          } else {
+            let col = 0;
+            while (col < raw.length) {
+              vls.push({ logicalLine: li, logicalColStart: col });
+              col += DIALOG_INNER_WIDTH;
+            }
+          }
+        }
+        const vli = vls.findIndex(
+          (vl) => vl.logicalLine === d.cursorLine &&
+            d.cursorCol >= vl.logicalColStart &&
+            d.cursorCol <= vl.logicalColStart + DIALOG_INNER_WIDTH
+        );
+        if (vli >= 0) {
+          if (vli < d.scrollOffset) d.scrollOffset = vli;
+          if (vli >= d.scrollOffset + TEXTAREA_VISIBLE_HEIGHT) d.scrollOffset = vli - TEXTAREA_VISIBLE_HEIGHT + 1;
+        }
       };
 
       if (d.focusedButton === "text") {
@@ -1391,7 +1439,7 @@ export class DashboardComponent implements Component {
         if (matchesKey(data, Key.enter)) {
           this.closeDialog();
         } else if (data === "\t" || matchesKey(data, Key.left) || matchesKey(data, Key.right)) {
-          d.focusedButton = "send";
+          d.focusedButton = "text";
           this.tui?.requestRender();
         } else if (matchesKey(data, Key.escape)) {
           this.closeDialog();

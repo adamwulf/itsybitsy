@@ -43,6 +43,9 @@ import { watchColorScheme } from "./color-scheme";
 import { setTheme, DARK_THEME, LIGHT_THEME, getCurrentTheme } from "./theme";
 import { fetchUsage } from "../usage";
 import type { UsageData } from "../usage";
+import { buildFolderItems } from "./folder-browser";
+import type { FolderItem } from "./folder-browser";
+import { addRepo } from "../registry";
 
 const MAX_TREE_HEIGHT = 7;
 const TEXTAREA_VISIBLE_HEIGHT = 5;
@@ -111,6 +114,15 @@ type DialogState =
       lines: string[];
       focusedButton: "text" | "send" | "cancel";
       onSubmit: (value: string) => void;
+    }
+  | {
+      type: "folder-browser";
+      currentPath: string;
+      items: FolderItem[];
+      selectedIdx: number;
+      addFocused: boolean;
+      scrollOffset: number;
+      onConfirm: (path: string) => void;
     }
   | null;
 
@@ -746,6 +758,97 @@ class DialogOverlayComponent implements Component {
 
         return { title: dialog.prompt, contentLines: lines };
       }
+      case "folder-browser": {
+        const BROWSER_HEIGHT = 15;
+        const lines: string[] = [];
+        const { items, selectedIdx, addFocused, scrollOffset } = dialog;
+
+        // Compute visible window
+        const maxVisible = BROWSER_HEIGHT;
+        let start = scrollOffset;
+        // Ensure selected item is visible
+        if (selectedIdx < start) start = selectedIdx;
+        if (selectedIdx >= start + maxVisible) start = selectedIdx - maxVisible + 1;
+        const end = Math.min(items.length, start + maxVisible);
+
+        if (start > 0) {
+          lines.push(`${DIM}  ▲ ${start} more${RESET}`);
+        }
+
+        for (let i = start; i < end; i++) {
+          const item = items[i]!;
+          const isSelected = i === selectedIdx && !addFocused;
+
+          // Build indentation with tree connectors
+          let prefix: string;
+          if (item.isAncestor) {
+            if (item.depth === 0) {
+              prefix = "";
+            } else {
+              prefix = `${DIM}${"    ".repeat(item.depth - 1)}└── ${RESET}`;
+            }
+          } else if (item.isCurrent) {
+            if (item.depth === 0) {
+              prefix = "";
+            } else {
+              prefix = `${"    ".repeat(item.depth - 1)}└── `;
+            }
+          } else {
+            // Child items
+            const isLast = i === items.length - 1 || (i + 1 < items.length && !items[i + 1]!.isCurrent && items[i + 1]!.isAncestor);
+            const childPrefix = isLast ? "└── " : "├── ";
+            prefix = `${"    ".repeat(item.depth - 1)}${childPrefix}`;
+          }
+
+          // Git suffix
+          const gitSuffix = item.isGit ? ` ${DIM}(git)${RESET} ${GREEN}✓${RESET}` : "";
+
+          // Name with / suffix for directories
+          const displayName = item.name + "/";
+
+          // Ancestor styling
+          let nameStr: string;
+          if (item.isAncestor) {
+            nameStr = `${DIM}${displayName}${RESET}`;
+          } else {
+            nameStr = displayName;
+          }
+
+          const line = `${prefix}${nameStr}${gitSuffix}`;
+
+          if (isSelected) {
+            lines.push(truncateToWidth(`${BOLD}\x1b[7m ${line} ${RESET}`, innerWidth, ""));
+          } else {
+            lines.push(truncateToWidth(` ${line}`, innerWidth, ""));
+          }
+        }
+
+        const remaining = items.length - end;
+        if (remaining > 0) {
+          lines.push(`${DIM}  ▼ ${remaining} more${RESET}`);
+        }
+
+        // Pad to BROWSER_HEIGHT
+        while (lines.length < BROWSER_HEIGHT + (start > 0 ? 1 : 0) + (remaining > 0 ? 1 : 0)) {
+          lines.push("");
+        }
+
+        // Button row
+        const selectedItem = items[selectedIdx];
+        const addEnabled = selectedItem?.isGit ?? false;
+        const addLabel = addFocused
+          ? `${BOLD}${GREEN}[ Add ]${RESET}`
+          : addEnabled
+            ? `[ Add ]`
+            : `${DIM}[ Add ]${RESET}`;
+        const cancelLabel = !addFocused
+          ? `${DIM}[ Cancel ]${RESET}`
+          : `[ Cancel ]`;
+        lines.push("");
+        lines.push(`  ${addLabel}    ${cancelLabel}`);
+
+        return { title: "Add Repository", contentLines: lines };
+      }
     }
   }
 }
@@ -883,9 +986,15 @@ export class DashboardComponent implements Component {
 
   private showDialog(dialog: NonNullable<DialogState>) {
     this._dialog = dialog;
-    if (!this.overlayHandle && this.tui) {
+    // Folder browser needs a wider dialog for long paths
+    const width = dialog.type === "folder-browser" ? 70 : DIALOG_WIDTH;
+    if (this.overlayHandle) {
+      this.overlayHandle.hide();
+      this.overlayHandle = null;
+    }
+    if (this.tui) {
       this.overlayHandle = this.tui.showOverlay(this.dialogOverlay, {
-        width: DIALOG_WIDTH,
+        width,
         anchor: "center",
       });
     }
@@ -1393,6 +1502,30 @@ export class DashboardComponent implements Component {
     });
   }
 
+  private handleFolderBrowser() {
+    const startPath = process.cwd();
+    const items = buildFolderItems(startPath);
+    const currentIdx = items.findIndex((i) => i.isCurrent);
+    this.showDialog({
+      type: "folder-browser",
+      currentPath: startPath,
+      items,
+      selectedIdx: currentIdx !== -1 ? currentIdx : 0,
+      addFocused: false,
+      scrollOffset: Math.max(0, (currentIdx !== -1 ? currentIdx : 0) - 7),
+      onConfirm: (path: string) => {
+        addRepo(path).then((result) => {
+          this.showMessage(result.message);
+          if (result.ok) {
+            this.watcher?.refresh();
+          }
+        }).catch((err) => {
+          this.showMessage(`Error adding repo: ${err}`);
+        });
+      },
+    });
+  }
+
   private handleDialogInput(data: string): boolean {
     if (!this._dialog) return false;
 
@@ -1501,6 +1634,58 @@ export class DashboardComponent implements Component {
         } else if (data.length === 1 && data >= " ") {
           d.focusedButton = "text";
           appendChar(data);
+        }
+      }
+      return true;
+    }
+
+    if (this._dialog.type === "folder-browser") {
+      const d = this._dialog;
+      if (matchesKey(data, Key.down) || data === "j") {
+        if (!d.addFocused) {
+          d.selectedIdx = Math.min(d.items.length - 1, d.selectedIdx + 1);
+          // Ensure visible
+          const maxVisible = 15;
+          if (d.selectedIdx >= d.scrollOffset + maxVisible) {
+            d.scrollOffset = d.selectedIdx - maxVisible + 1;
+          }
+        }
+        this.tui?.requestRender();
+      } else if (matchesKey(data, Key.up) || data === "k") {
+        if (!d.addFocused) {
+          d.selectedIdx = Math.max(0, d.selectedIdx - 1);
+          if (d.selectedIdx < d.scrollOffset) {
+            d.scrollOffset = d.selectedIdx;
+          }
+        }
+        this.tui?.requestRender();
+      } else if (data === "\t") {
+        const selectedItem = d.items[d.selectedIdx];
+        if (selectedItem?.isGit) {
+          d.addFocused = !d.addFocused;
+          this.tui?.requestRender();
+        }
+      } else if (matchesKey(data, Key.enter)) {
+        if (d.addFocused) {
+          const selectedItem = d.items[d.selectedIdx];
+          if (selectedItem?.isGit) {
+            this.closeDialog();
+            d.onConfirm(selectedItem.path);
+          }
+        } else {
+          // Navigate into selected folder
+          const selectedItem = d.items[d.selectedIdx];
+          if (selectedItem) {
+            const newItems = buildFolderItems(selectedItem.path);
+            // Find the item that matches the navigated-to path to keep it highlighted
+            const newIdx = newItems.findIndex((i) => i.path === selectedItem.path);
+            d.currentPath = selectedItem.path;
+            d.items = newItems;
+            d.selectedIdx = newIdx !== -1 ? newIdx : 0;
+            d.addFocused = false;
+            d.scrollOffset = Math.max(0, d.selectedIdx - 7);
+            this.tui?.requestRender();
+          }
         }
       }
       return true;
@@ -1852,6 +2037,10 @@ export class DashboardComponent implements Component {
     // Debug snapshot
     else if (data === "S") {
       this.handleSnapshot();
+    }
+    // Folder browser to add repo
+    else if (data === "+") {
+      this.handleFolderBrowser();
     }
   }
 

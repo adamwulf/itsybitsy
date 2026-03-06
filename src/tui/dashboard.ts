@@ -43,7 +43,9 @@ const MAX_TREE_HEIGHT = 7;
 const TEXTAREA_VISIBLE_HEIGHT = 5;
 const DIALOG_WIDTH = 60;
 
-/** Wrap logical lines into visual lines of at most `width` characters each. */
+/** Wrap logical lines into visual lines of at most `width` characters each.
+ *  Adds a trailing empty line when the last logical line fills exactly to the width
+ *  boundary, so the cursor block has room to render. */
 function wrapTextareaLines(lines: string[], width: number): string[] {
   const result: string[] = [];
   for (const raw of lines) {
@@ -54,6 +56,10 @@ function wrapTextareaLines(lines: string[], width: number): string[] {
         result.push(raw.slice(col, col + width));
       }
     }
+  }
+  // Ensure cursor has room on the last visual line
+  if (result.length > 0 && result[result.length - 1]!.length === width) {
+    result.push("");
   }
   return result;
 }

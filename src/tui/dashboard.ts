@@ -117,10 +117,12 @@ type PaneMode = (typeof PANE_MODES)[number];
 const FULL_WIDTH_MODES: Set<PaneMode> = new Set(["DENIALS", "TREE", "ERRORS", "DIFF", "QUESTIONS"]);
 
 // Denials time filter levels
-const DENIAL_FILTERS = ["all", "1h", "10m"] as const;
+const DENIAL_FILTERS = ["all", "24h", "7d"] as const;
 type DenialFilter = (typeof DENIAL_FILTERS)[number];
 
 const TOP_ANCHORED_MODES: Set<PaneMode> = new Set(["DIFF", "ERRORS", "STATUS", "QUESTIONS"]);
+
+const SCROLL_STEP = 10;
 
 /** Colorize diff output lines */
 function colorizeDiff(lines: string[]): string[] {
@@ -392,7 +394,7 @@ export class RightPaneComponent implements Component {
   private filterDenials(denials: DenialEntry[]): DenialEntry[] {
     if (this.denialFilter === "all") return denials;
     const now = Math.floor(Date.now() / 1000);
-    const cutoff = this.denialFilter === "1h" ? now - 3600 : now - 600;
+    const cutoff = this.denialFilter === "24h" ? now - 86400 : now - 604800;
     return denials.filter((d) => d.epoch >= cutoff);
   }
 
@@ -1217,15 +1219,15 @@ export class DashboardComponent implements Component {
   }
 
   private handleScrollUp() {
-    this.tmuxPane.scrollUp(5);
-    this.rightPane.scrollOffset += 5;
+    this.tmuxPane.scrollUp(SCROLL_STEP);
+    this.rightPane.scrollOffset += SCROLL_STEP;
     this.rightPane.updateContent();
     this.tui?.requestRender();
   }
 
   private handleScrollDown() {
-    this.tmuxPane.scrollDown(5);
-    this.rightPane.scrollOffset = Math.max(0, this.rightPane.scrollOffset - 5);
+    this.tmuxPane.scrollDown(SCROLL_STEP);
+    this.rightPane.scrollOffset = Math.max(0, this.rightPane.scrollOffset - SCROLL_STEP);
     this.rightPane.updateContent();
     this.tui?.requestRender();
   }

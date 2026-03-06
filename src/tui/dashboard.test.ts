@@ -734,11 +734,11 @@ describe("DashboardComponent right pane and navigation features", () => {
     dashboard.handleInput("p"); // 0→1
     dashboard.handleInput("p"); // 1→2 (DENIALS)
     expect(dashboard.currentMode).toBe("DENIALS");
-    dashboard.handleInput("t"); // cycle filter: all → 1h
-    expect(dashboard.denialFilter).toBe("1h");
-    dashboard.handleInput("t"); // 1h → 10m
-    expect(dashboard.denialFilter).toBe("10m");
-    dashboard.handleInput("t"); // 10m → all
+    dashboard.handleInput("t"); // cycle filter: all → 24h
+    expect(dashboard.denialFilter).toBe("24h");
+    dashboard.handleInput("t"); // 24h → 7d
+    expect(dashboard.denialFilter).toBe("7d");
+    dashboard.handleInput("t"); // 7d → all
     expect(dashboard.denialFilter).toBe("all");
   });
 

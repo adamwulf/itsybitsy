@@ -71,13 +71,12 @@ async function main() {
       if (flat.length === 0) {
         console.log("No agents found across registered repos.");
       } else {
-        for (const { agent, depth } of flat) {
-          const indent = "  ".repeat(depth);
+        for (const { agent, connector } of flat) {
           const icon = agent.meta.worker ? "⚙" : "◆";
           const archived = agent.archived ? " [archived]" : "";
           const prompt = agent.meta.prompt.slice(0, 60).replace(/\n/g, " ");
           console.log(
-            `${indent}${icon} ${agent.repoName}/${agent.id}  ${agent.state}  ${agent.age}  ${agent.meta.model}  ${prompt}${archived}`
+            `${connector}${icon} ${agent.repoName}/${agent.id}  ${agent.state}  ${agent.age}  ${agent.meta.model}  ${prompt}${archived}`
           );
         }
       }

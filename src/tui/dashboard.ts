@@ -334,12 +334,11 @@ export class RightPaneComponent implements Component {
         }
         break;
       case "TREE":
-        this.content = this.allAgents.map(({ agent, depth }) => {
-          const indent = "  ".repeat(depth);
+        this.content = this.allAgents.map(({ agent, connector }) => {
           const icon = agent.meta.worker ? "⚙" : "◆";
           const stateColor = STATE_COLORS[agent.state] ?? STATE_COLORS.unknown;
           const shortPrompt = agent.meta.prompt.replace(/\n/g, " ").slice(0, 40);
-          return `${indent}${icon} ${agent.repoName}/${agent.id}  ${stateColor}${agent.state}${RESET}  ${agent.age}  ${agent.meta.model}  ${shortPrompt}`;
+          return `${connector}${icon} ${agent.repoName}/${agent.id}  ${stateColor}${agent.state}${RESET}  ${agent.age}  ${agent.meta.model}  ${shortPrompt}`;
         });
         if (this.content.length === 0) this.content = [`${DIM}No agents${RESET}`];
         break;

@@ -4,7 +4,7 @@
  */
 
 import { join, dirname, sep } from "path";
-import { readdirSync, existsSync, statSync } from "fs";
+import { readdirSync, existsSync } from "fs";
 
 export interface FolderItem {
   path: string;

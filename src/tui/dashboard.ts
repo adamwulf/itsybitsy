@@ -148,6 +148,7 @@ type DenialFilter = (typeof DENIAL_FILTERS)[number];
 const TOP_ANCHORED_MODES: Set<PaneMode> = new Set(["DIFF", "ERRORS", "STATUS", "QUESTIONS"]);
 
 const SCROLL_STEP = 10;
+const FOLDER_BROWSER_HEIGHT = 15;
 
 /** Colorize diff output lines */
 export function colorizeDiff(lines: string[]): string[] {
@@ -759,12 +760,11 @@ class DialogOverlayComponent implements Component {
         return { title: dialog.prompt, contentLines: lines };
       }
       case "folder-browser": {
-        const BROWSER_HEIGHT = 15;
         const lines: string[] = [];
         const { items, selectedIdx, addFocused, scrollOffset } = dialog;
 
         // Compute visible window
-        const maxVisible = BROWSER_HEIGHT;
+        const maxVisible = FOLDER_BROWSER_HEIGHT;
         let start = scrollOffset;
         // Ensure selected item is visible
         if (selectedIdx < start) start = selectedIdx;
@@ -795,7 +795,7 @@ class DialogOverlayComponent implements Component {
             }
           } else {
             // Child items
-            const isLast = i === items.length - 1 || (i + 1 < items.length && !items[i + 1]!.isCurrent && items[i + 1]!.isAncestor);
+            const isLast = i === items.length - 1;
             const childPrefix = isLast ? "└── " : "├── ";
             prefix = `${"    ".repeat(item.depth - 1)}${childPrefix}`;
           }
@@ -828,8 +828,8 @@ class DialogOverlayComponent implements Component {
           lines.push(`${DIM}  ▼ ${remaining} more${RESET}`);
         }
 
-        // Pad to BROWSER_HEIGHT
-        while (lines.length < BROWSER_HEIGHT + (start > 0 ? 1 : 0) + (remaining > 0 ? 1 : 0)) {
+        // Pad to consistent height
+        while (lines.length < FOLDER_BROWSER_HEIGHT + (start > 0 ? 1 : 0) + (remaining > 0 ? 1 : 0)) {
           lines.push("");
         }
 
@@ -1645,7 +1645,7 @@ export class DashboardComponent implements Component {
         if (!d.addFocused) {
           d.selectedIdx = Math.min(d.items.length - 1, d.selectedIdx + 1);
           // Ensure visible
-          const maxVisible = 15;
+          const maxVisible = FOLDER_BROWSER_HEIGHT;
           if (d.selectedIdx >= d.scrollOffset + maxVisible) {
             d.scrollOffset = d.selectedIdx - maxVisible + 1;
           }

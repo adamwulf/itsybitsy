@@ -1464,6 +1464,7 @@ export class DashboardComponent implements Component {
       setTheme(DARK_THEME);
     }
     this.showMessage(`Theme: ${this.currentThemeName === "dark" ? "Dark" : "Light"}`);
+    this.invalidate();
     this.tui?.requestRender();
   }
 
@@ -2159,6 +2160,7 @@ export async function launchDashboard(): Promise<void> {
   const { cleanup: cleanupColorScheme, inputFilter: colorSchemeFilter } = watchColorScheme((scheme) => {
     dashboard.currentThemeName = scheme === "dark" ? "dark" : "light";
     setTheme(scheme === "dark" ? DARK_THEME : LIGHT_THEME);
+    dashboard.invalidate();
     tui.requestRender();
   });
 

@@ -41,6 +41,7 @@ import type { NewAgentOptions } from "../ib-commands";
 import { openInGhostty } from "../ghostty";
 import { fetchUsage } from "../usage";
 import type { UsageData } from "../usage";
+import { getCurrentTheme } from "./theme";
 
 const MAX_TREE_HEIGHT = 7;
 const TEXTAREA_VISIBLE_HEIGHT = 5;
@@ -67,23 +68,33 @@ function wrapTextareaLines(lines: string[], width: number): string[] {
   return result;
 }
 
-// State color map
-const STATE_COLORS: Record<string, string> = {
-  creating: "\x1b[33m",    // yellow
-  running: "\x1b[32m",     // green
-  waiting: "\x1b[36m",     // cyan
-  complete: "\x1b[34m",    // blue
-  compacting: "\x1b[35m",  // magenta
-  rate_limited: "\x1b[31m",// red
-  stopped: "\x1b[90m",     // dim
-  unknown: "\x1b[37m",     // white
-};
-const RESET = "\x1b[0m";
-const BOLD = "\x1b[1m";
-const DIM = "\x1b[2m";
-const YELLOW = "\x1b[33m";
-const RED = "\x1b[31m";
-const GREEN = "\x1b[32m";
+// Theme-aware color accessors — read from current theme at call time
+function getStateColors(): Record<string, string> {
+  const t = getCurrentTheme();
+  return {
+    creating: t.stateCreating,
+    running: t.stateRunning,
+    waiting: t.stateWaiting,
+    complete: t.stateComplete,
+    compacting: t.stateCompacting,
+    rate_limited: t.stateRateLimited,
+    stopped: t.stateStopped,
+    unknown: t.stateUnknown,
+  };
+}
+
+/** Theme color shortcuts — call at render time so theme changes take effect */
+function tc() {
+  const t = getCurrentTheme();
+  return {
+    RESET: t.reset,
+    BOLD: t.bold,
+    DIM: t.dim,
+    YELLOW: t.yellow,
+    RED: t.red,
+    GREEN: t.green,
+  };
+}
 
 // Dialog types for agent actions
 type DialogState =
@@ -127,13 +138,14 @@ const SCROLL_STEP = 10;
 
 /** Colorize diff output lines */
 export function colorizeDiff(lines: string[]): string[] {
+  const t = getCurrentTheme();
   return lines.map((line) => {
     if (line.startsWith("+++") || line.startsWith("---") || line.startsWith("@@") || line.startsWith("diff ")) {
-      return `\x1b[2m${line}\x1b[0m`;
+      return `${t.diffMeta}${line}${t.reset}`;
     } else if (line.startsWith("+")) {
-      return `\x1b[32m${line}\x1b[0m`;
+      return `${t.diffAdd}${line}${t.reset}`;
     } else if (line.startsWith("-")) {
-      return `\x1b[31m${line}\x1b[0m`;
+      return `${t.diffRemove}${line}${t.reset}`;
     }
     return line;
   });
@@ -141,13 +153,19 @@ export function colorizeDiff(lines: string[]): string[] {
 
 /** Colorize agent log lines — dim timestamps, cyan bracket markers */
 export function colorizeLog(lines: string[]): string[] {
+  const t = getCurrentTheme();
   return lines.map((line) => {
     // Dim timestamp prefix like [2026-03-06 12:00:00]
-    let result = line.replace(/^(\[\d{4}-[^\]]*\])/, `\x1b[2m$1\x1b[0m`);
+    let result = line.replace(/^(\[\d{4}-[^\]]*\])/, `${t.logTimestamp}$1${t.reset}`);
     // Cyan bracket markers like [PreToolUse], [PostToolUse], etc. (but not the timestamp we already handled)
-    result = result.replace(/(?<=\x1b\[0m.*)(\[[^\]]+\])/g, `\x1b[36m$1\x1b[0m`);
+    result = result.replace(new RegExp(`(?<=${escapeForRegex(t.reset)}.*)(\\[[^\\]]+\\])`, "g"), `${t.logBracket}$1${t.reset}`);
     return result;
   });
+}
+
+/** Escape a string for use in a RegExp */
+function escapeForRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 /** Wraps items with original indices, filters via pi-tui fuzzyFilter, returns original indices */
@@ -166,11 +184,14 @@ function formatAgentRow(
   selected: boolean,
   width: number
 ): string {
+  const { RESET, BOLD, DIM } = tc();
+  const STATE_COLORS = getStateColors();
+  const t = getCurrentTheme();
   const orphanedPrefix = agent.orphaned ? "⚠ " : "";
   const icon = agent.meta.worker ? "⚙" : "◆";
   const stateColor = STATE_COLORS[agent.state] ?? STATE_COLORS.unknown;
   const archived = agent.archived ? `${DIM}[archived]${RESET} ` : "";
-  const sel = selected ? `${BOLD}\x1b[7m` : "";
+  const sel = selected ? `${BOLD}${t.selectedHighlight}` : "";
   const selEnd = selected ? `${RESET}` : "";
 
   const shortPrompt = agent.meta.prompt.replace(/\n/g, " ").slice(0, 40);
@@ -240,6 +261,7 @@ class AgentTreeComponent implements Component {
   invalidate(): void {}
 
   render(width: number): string[] {
+    const { RESET, DIM } = tc();
     const visible = this.visibleList;
     if (visible.length === 0) {
       return [truncateToWidth(`${DIM}  No agents found${RESET}`, width, "")];
@@ -298,6 +320,8 @@ export class RightPaneComponent implements Component {
   }
 
   updateContent() {
+    const { RESET, BOLD, DIM, GREEN } = tc();
+    const STATE_COLORS = getStateColors();
     switch (this.mode) {
       case "AGENT LOG":
         this.content = this.agentLogContent
@@ -398,6 +422,7 @@ export class RightPaneComponent implements Component {
   }
 
   render(width: number): string[] {
+    const { RESET, BOLD, DIM } = tc();
     const header = `${BOLD}${DIM}── ${this.mode} ──${RESET}`;
     const lines = [truncateToWidth(header, width, "")];
 
@@ -461,6 +486,8 @@ export class TmuxPaneComponent implements Component {
   }
 
   render(width: number): string[] {
+    const { RESET, BOLD, DIM } = tc();
+    const STATE_COLORS = getStateColors();
     if (!this.agent) {
       return padLines([truncateToWidth(`${DIM}No agent selected${RESET}`, width, "")], this.displayHeight);
     }
@@ -540,13 +567,15 @@ class StatusBarComponent implements Component {
   invalidate(): void {}
 
   render(width: number): string[] {
+    const { RESET, BOLD, DIM } = tc();
+    const t = getCurrentTheme();
     const questionBadge =
       this.pendingQuestions > 0
-        ? ` ${BOLD}\x1b[33m[${this.pendingQuestions} questions]${RESET}`
+        ? ` ${BOLD}${t.questionBadge}[${this.pendingQuestions} questions]${RESET}`
         : "";
     const errorBadge =
       this.errorCount > 0
-        ? ` ${BOLD}${RED}[${this.errorCount} errors]${RESET}`
+        ? ` ${BOLD}${t.red}[${this.errorCount} errors]${RESET}`
         : "";
 
     const modeLine = `${DIM}[${this.modeIndex}] ${this.currentMode}${RESET}${questionBadge}${errorBadge}`;
@@ -573,16 +602,18 @@ class StatusBarComponent implements Component {
 
   private formatUsage(): string {
     if (!this.usage) return "";
+    const t = getCurrentTheme();
+    const { RESET, DIM } = tc();
     const parts: string[] = [];
     if (this.usage.sessionPct !== null) {
       const pct = this.usage.sessionPct;
-      const color = pct > 90 ? RED : pct > 80 ? YELLOW : DIM;
+      const color = pct > 90 ? t.usageCritical : pct > 80 ? t.usageWarning : DIM;
       const reset = this.usage.sessionReset ? ` (${this.usage.sessionReset})` : "";
       parts.push(`${color}session:${pct}%${reset}${RESET}`);
     }
     if (this.usage.weeklyPct !== null) {
       const pct = this.usage.weeklyPct;
-      const color = pct > 90 ? RED : pct > 80 ? YELLOW : DIM;
+      const color = pct > 90 ? t.usageCritical : pct > 80 ? t.usageWarning : DIM;
       const reset = this.usage.weeklyReset ? ` (${this.usage.weeklyReset})` : "";
       parts.push(`${color}weekly:${pct}%${reset}${RESET}`);
     }
@@ -610,6 +641,7 @@ class DialogOverlayComponent implements Component {
     // Build the box
     const lines: string[] = [];
     // Top border with title
+    const { RESET, BOLD } = tc();
     const titleStr = ` ${title} `;
     const topPadding = Math.max(0, width - 3 - visibleWidth(titleStr));
     lines.push(`┌─${BOLD}${titleStr}${RESET}${"─".repeat(topPadding)}┐`);
@@ -627,6 +659,7 @@ class DialogOverlayComponent implements Component {
   }
 
   private buildContent(dialog: NonNullable<DialogState>, innerWidth: number): { title: string; contentLines: string[] } {
+    const { RESET, BOLD, DIM, YELLOW, GREEN } = tc();
     switch (dialog.type) {
       case "confirm": {
         const wrapped = wrapLines(dialog.prompt, innerWidth);
@@ -831,6 +864,7 @@ export class DashboardComponent implements Component {
 
   /** Add an error to the errors list (called from watcher onError) */
   addError(message: string) {
+    const { DIM, RESET } = tc();
     const ts = new Date().toLocaleTimeString();
     this.rightPane.errors.push(`${DIM}[${ts}]${RESET} ${message}`);
     this.statusBar.errorCount = this.rightPane.errors.length;
@@ -904,7 +938,7 @@ export class DashboardComponent implements Component {
     if (!agent) return;
     this.showDialog({
       type: "confirm",
-      prompt: `${RED}FORCE KILL ${agent.id}? This cannot be undone.${RESET}`,
+      prompt: `${tc().RED}FORCE KILL ${agent.id}? This cannot be undone.${tc().RESET}`,
       onYes: () => {
         this.closeDialog();
         this.executeAndRefresh(async () => {
@@ -1291,6 +1325,7 @@ export class DashboardComponent implements Component {
   }
 
   private handleHelp() {
+    const { RESET, BOLD, DIM } = tc();
     this.showDialog({
       type: "help",
       lines: [
@@ -1827,6 +1862,7 @@ export class DashboardComponent implements Component {
 
   render(width: number): string[] {
     // Minimum terminal size check
+    const { RESET, BOLD, DIM, YELLOW } = tc();
     const termRows = process.stdout.rows || 24;
     if (termRows < 20 || width < 80) {
       return [`${BOLD}${YELLOW}[Terminal too small — resize to at least 80×20]${RESET}`];

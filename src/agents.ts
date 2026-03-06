@@ -32,6 +32,7 @@ export interface Agent {
   state: AgentState;
   age: string;
   archived: boolean;
+  orphaned?: boolean;
   children: Agent[];
 }
 
@@ -167,6 +168,10 @@ export function buildAgentTree(agents: Agent[]): Agent[] {
     if (agent.meta.manager && byId.has(agent.meta.manager)) {
       byId.get(agent.meta.manager)!.children.push(agent);
     } else {
+      // If manager is set but not found in the agent list, mark as orphaned
+      if (agent.meta.manager) {
+        agent.orphaned = true;
+      }
       roots.push(agent);
     }
   }
@@ -212,6 +217,23 @@ export async function readAllAgents(
   };
 }
 
+/** Claude startup markers that indicate the session has progressed past initial creation */
+const STARTUP_MARKERS = ["Claude Code v", "[USER TASK]", "╭─ Claude Code", "[AGENT CONTEXT]"];
+
+/**
+ * Pre-parseState check: if the output has very few non-empty lines and no
+ * Claude startup markers, the agent is still being created (tmux session exists
+ * but Claude hasn't rendered yet).
+ * Returns "creating" or null (null = fall through to parseState).
+ */
+export function computeStateFromContent(stripped: string): AgentState | null {
+  const nonEmptyLines = stripped.split("\n").filter((l) => l.trim() !== "").length;
+  if (nonEmptyLines < 10 && !STARTUP_MARKERS.some((m) => stripped.includes(m))) {
+    return "creating";
+  }
+  return null;
+}
+
 /**
  * Detect agent state for each agent by capturing tmux output and running parseState().
  * Archived agents are set to "stopped". Mutates agent.state in place.
@@ -231,7 +253,8 @@ export async function detectAgentStates(agents: Agent[]): Promise<void> {
         agent.state = "stopped";
         return;
       }
-      agent.state = parseState(output).state;
+      const preCheck = computeStateFromContent(output);
+      agent.state = preCheck ?? parseState(output).state;
     })
   );
 

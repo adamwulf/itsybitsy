@@ -67,11 +67,15 @@ async function readAgentMeta(agentDir: string): Promise<{ meta: AgentMeta | null
     const data = await file.json();
     // Basic validation: id is required
     if (!data || typeof data.id !== "string") {
-      return { meta: null, error: `Malformed meta.json in ${agentDir}: missing or invalid 'id'` };
+      return { meta: null, error: `Malformed ${metaPath}: missing or invalid 'id'` };
+    }
+    // Default tmux_session to empty string if missing
+    if (typeof data.tmux_session !== "string") {
+      data.tmux_session = "";
     }
     return { meta: data as AgentMeta };
   } catch (err) {
-    return { meta: null, error: `Failed to read meta.json in ${agentDir}: ${err}` };
+    return { meta: null, error: `Failed to read ${join(agentDir, "meta.json")}: ${err}` };
   }
 }
 

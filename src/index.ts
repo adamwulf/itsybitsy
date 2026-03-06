@@ -41,6 +41,14 @@ async function main() {
       break;
     }
     case "watch": {
+      if (!Bun.which("ib")) {
+        console.error("Error: 'ib' not found on PATH. Install ittybitty first: https://github.com/anthropics/ittybitty");
+        process.exit(1);
+      }
+      if (!Bun.which("tmux")) {
+        console.error("Error: 'tmux' not found on PATH. Install tmux: brew install tmux");
+        process.exit(1);
+      }
       const { launchDashboard } = await import("./tui/dashboard");
       await launchDashboard();
       break;

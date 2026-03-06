@@ -430,20 +430,22 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(lastIbCall).toBeNull();
   });
 
-  test("s key opens send input dialog", () => {
+  test("s key opens send textarea dialog", () => {
     setupDashboardWithAgent();
     dashboard.handleInput("s");
-    expect(dashboard.dialog!.type).toBe("input");
+    expect(dashboard.dialog!.type).toBe("textarea");
     expect((dashboard.dialog as any).prompt).toContain("Send message");
   });
 
-  test("send input: typing, backspace, and submitting", async () => {
+  test("send textarea: typing, backspace, and submitting", async () => {
     setupDashboardWithAgent();
     dashboard.handleInput("s");
     for (const ch of "hellx") dashboard.handleInput(ch);
     dashboard.handleInput("\x7f"); // backspace
     for (const ch of "o") dashboard.handleInput(ch);
-    expect((dashboard.dialog as any).value).toBe("hello");
+    expect((dashboard.dialog as any).lines.join("\n")).toBe("hello");
+    // Tab to send button, then Enter to submit
+    dashboard.handleInput("\t");
     dashboard.handleInput("\r");
     await Bun.sleep(10);
     expect(lastIbCall!.args).toEqual(["send", "agent-test", "hello"]);

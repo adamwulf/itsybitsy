@@ -96,25 +96,32 @@ The two-pane design (agent tree left, tmux output right) requires pi-tui `Box` t
 ```
 itsybitsy
 ├── src/
-│   ├── index.ts           # CLI entrypoint: add/remove/list/watch/agents subcommands
-│   ├── registry.ts        # Read/write ~/.itsybitsy.json
-│   ├── registry.test.ts   # Registry unit tests (7 tests)
-│   ├── agents.ts          # Read .ittybitty/agents/ + archive/ directly; types for Agent,
-│   │                      # AgentState, FlatAgent; tree building; detectAgentStates();
-│   │                      # reads user-questions.json; returns structured errors
-│   ├── agents.test.ts     # Agent data layer tests (23 tests)
-│   ├── parse-state.ts     # Port of ib's parse_state bash logic → TypeScript
-│   ├── parse-state.test.ts # State detection tests (43 tests)
-│   ├── watcher.ts         # fs.watch({ recursive: true }) on agents/, archive/,
-│   │                      # user-questions.json; 10s fallback poll; debounced refresh
-│   ├── tmux-poller.ts     # Polls tmux capture-pane for the selected agent (~1s interval);
-│   │                      # also exports captureTmuxOutput() for one-shot state detection
-│   ├── ib-commands.ts     # (Phase 5) Wrappers for ib mutations; cwd = repo root
-│   ├── ghostty.ts         # (Phase 6) Open tmux sessions in Ghostty
+│   ├── index.ts              # CLI entrypoint: add/remove/list/watch/agents subcommands
+│   ├── registry.ts           # Read/write ~/.itsybitsy.json
+│   ├── registry.test.ts      # Registry unit tests
+│   ├── agents.ts             # Read .ittybitty/agents/ + archive/ directly; types for Agent,
+│   │                         # AgentState, FlatAgent; tree building; detectAgentStates();
+│   │                         # reads user-questions.json; returns structured errors
+│   ├── agents.test.ts        # Agent data layer tests
+│   ├── parse-state.ts        # Port of ib's parse_state bash logic → TypeScript
+│   ├── parse-state.test.ts   # State detection tests
+│   ├── watcher.ts            # fs.watch({ recursive: true }) on agents/, archive/,
+│   │                         # user-questions.json; 10s fallback poll; debounced refresh
+│   ├── watcher.test.ts       # Watcher tests
+│   ├── tmux-poller.ts        # Polls tmux capture-pane for the selected agent (~1s interval);
+│   │                         # also exports captureTmuxOutput() for one-shot state detection
+│   ├── tmux-poller.test.ts   # Tmux poller tests
+│   ├── ib-commands.ts        # Wrappers for ib mutations; cwd = repo root
+│   ├── ib-commands.test.ts   # ib-commands tests
+│   ├── ghostty.ts            # Open tmux sessions in Ghostty
 │   └── tui/
-│       ├── dashboard.ts   # Main TUI: agent tree + split pane + status bar
-│       ├── split-pane.ts  # Custom horizontal layout (pi-tui Box is vertical-only)
-│       └── ansi-validation.test.ts  # ANSI passthrough tests (7 tests)
+│       ├── dashboard.ts      # Main TUI: agent tree + split pane + status bar + dialogs
+│       ├── dashboard.test.ts # Dashboard tests
+│       ├── split-pane.ts     # Custom horizontal layout (pi-tui Box is vertical-only)
+│       ├── split-pane.test.ts # Split pane tests
+│       ├── wrap.ts           # ANSI-aware line wrapping
+│       ├── wrap.test.ts      # Wrap tests
+│       └── ansi-validation.test.ts  # ANSI passthrough tests
 ├── PLAN.md
 ├── CLAUDE.md
 └── package.json
@@ -373,14 +380,14 @@ Note: `tmux-poller.ts` was implemented in Phase 2/3. Phase 4 focuses on renderin
 ### Phase 5.1: Core Agent Actions (Mutations)
 **Checkpoint:** Kill, resume, merge, send, and new-agent all work from the TUI with confirm dialogs.
 
-- [ ] `src/ib-commands.ts` — async wrappers for all `ib` mutations; **always sets `cwd` to the target repo root**; functions: `killAgent`, `nukeAgent`, `resumeAgent`, `reassignAgent`, `mergeAgent`, `mergeCheckAgent`, `sendMessage`, `newAgent`, `diffAgent`, `statusAgent`
-- [ ] `x` — kill agent: confirm dialog showing agent ID, then `ib kill {id}`
-- [ ] `!` — nuke/force-kill: confirm dialog, then `ib kill {id} --force`
-- [ ] `R` — resume stopped agent: `ib resume {id}` (only enabled when agent is stopped/complete)
-- [ ] `r` — reassign agent's manager: text input dialog, then `ib reassign {id} {new-manager}`
-- [ ] `m` — merge agent: run `ib merge-check {id}` first, show result in confirm dialog, then `ib merge {id} --force`
-- [ ] `s` — send message: text input dialog, then `ib send {id} "message"`
-- [ ] `a` — new agent: repo selector (from registry) → prompt input → optional flags (`--yolo`, `--worker`, `--model`); shells to `ib new-agent`
+- [x] `src/ib-commands.ts` — async wrappers for all `ib` mutations; **always sets `cwd` to the target repo root**; functions: `killAgent`, `nukeAgent`, `resumeAgent`, `reassignAgent`, `mergeAgent`, `mergeCheckAgent`, `sendMessage`, `newAgent`, `diffAgent`, `statusAgent`
+- [x] `x` — kill agent: confirm dialog showing agent ID, then `ib kill {id}`
+- [x] `!` — nuke/force-kill: confirm dialog, then `ib kill {id} --force`
+- [x] `R` — resume stopped agent: `ib resume {id}` (only enabled when agent is stopped/complete)
+- [x] `r` — reassign agent's manager: text input dialog, then `ib reassign {id} {new-manager}`
+- [x] `m` — merge agent: run `ib merge-check {id}` first, show result in confirm dialog, then `ib merge {id} --force`
+- [x] `s` — send message: text input dialog, then `ib send {id} "message"`
+- [x] `a` — new agent: repo selector (from registry) → prompt input → optional flags (`--yolo`, `--worker`, `--model`); shells to `ib new-agent`
 
 ---
 
@@ -402,23 +409,23 @@ Note: `tmux-poller.ts` was implemented in Phase 2/3. Phase 4 focuses on renderin
 ### Phase 5.3: Navigation & Remaining Keybindings
 **Checkpoint:** Fuzzy navigation, questions workflow, and all remaining keybindings work. Requires Phase 5.2 to be merged first.
 
-- [ ] `@` — fuzzy jump to agent by name (pi-tui SelectList dialog overlay)
-- [ ] `/` — fuzzy jump to pane mode by name (pi-tui SelectList dialog overlay)
-- [ ] `w` — open agent worktree in Finder: `Bun.$\`open ${agent.worktree}\``; show error if worktree doesn't exist
-- [ ] `o` — open diff in external tool: write `diffAgent()` output to a temp file (`/tmp/itsybitsy-diff-{id}.txt`), run `{diffTool} {tempfile}`; show "No diff tool configured" message if `diffTool` not set in `~/.itsybitsy.json`
-- [ ] `h` — read-only help dialog listing all keybindings; press any key to dismiss (use existing message dialog type)
-- [ ] `S` — snapshot for debugging: call `captureTmuxOutput(agent.meta.tmux_session)`, run `parseState()` on stripped output, write full capture + state to `.ittybitty/agents/{id}/debug-logs/snapshot-{timestamp}-{state}.txt`, show status message. **Not** an `ib` subcommand — implement directly.
+- [x] `@` — fuzzy jump to agent by name (pi-tui SelectList dialog overlay)
+- [x] `/` — fuzzy jump to pane mode by name (pi-tui SelectList dialog overlay)
+- [x] `w` — open agent worktree in Finder: `Bun.$\`open ${agent.worktree}\``; show error if worktree doesn't exist
+- [x] `o` — open diff in external tool: write `diffAgent()` output to a temp file (`/tmp/itsybitsy-diff-{id}.txt`), run `{diffTool} {tempfile}`; show "No diff tool configured" message if `diffTool` not set in `~/.itsybitsy.json`
+- [x] `h` — read-only help dialog listing all keybindings; press any key to dismiss (use existing message dialog type)
+- [x] `S` — snapshot for debugging: call `captureTmuxOutput(agent.meta.tmux_session)`, run `parseState()` on stripped output, write full capture + state to `.ittybitty/agents/{id}/debug-logs/snapshot-{timestamp}-{state}.txt`, show status message. **Not** an `ib` subcommand — implement directly.
 
 ---
 
 ### Phase 6: Ghostty Integration & Distribution
 **Checkpoint:** Production-ready single binary you can install and use daily.
 
-- [ ] `src/ghostty.ts` — `ghostty --command="tmux attach -t {tmux_session}"`; detect if Ghostty is available; degrade gracefully
-- [ ] `G` keybinding wired up — open selected agent's tmux session in Ghostty (`g` is reserved for STATUS pane / go-to-agent)
-- [ ] `bun build --compile` produces a single self-contained binary
-- [ ] README with install instructions and keybinding reference
-- [ ] Polish error messages: missing `ib`/`tmux`, unreadable repos, malformed `meta.json`
+- [x] `src/ghostty.ts` — `ghostty --command="tmux attach -t {tmux_session}"`; detect if Ghostty is available; degrade gracefully
+- [x] `G` keybinding wired up — open selected agent's tmux session in Ghostty (`g` is reserved for STATUS pane / go-to-agent)
+- [x] `bun build --compile` produces a single self-contained binary
+- [x] README with install instructions and keybinding reference
+- [x] Polish error messages: missing `ib`/`tmux`, unreadable repos, malformed `meta.json`
 
 ---
 

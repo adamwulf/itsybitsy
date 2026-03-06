@@ -41,7 +41,7 @@ export function setRunner(runner: IbRunner) {
   currentRunner = runner;
 }
 
-/** Reset to the default Bun.$ runner */
+/** Reset to the default Bun.spawn runner */
 export function resetRunner() {
   currentRunner = defaultRunner;
 }

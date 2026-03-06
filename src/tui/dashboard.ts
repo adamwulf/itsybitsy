@@ -1,6 +1,6 @@
 /**
  * Main TUI dashboard — agent tree + live tmux pane.
- * Phase 5.2: right pane content for all modes.
+ * Composes agent tree, split pane (tmux + right pane), status bar, and dialog system.
  */
 
 import {

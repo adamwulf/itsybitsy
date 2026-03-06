@@ -118,7 +118,7 @@ After any code changes, always run:
 
 ## itsybitsy Implementation Notes
 
-Phases 1-4 are complete. 97 tests across 6 files. Key architecture decisions for Phase 5+:
+All 6 phases are complete. 226 tests across 10 test files.
 
 ### State detection flow
 1. `watcher.ts` calls `detectAgentStates()` (in `agents.ts`) on every refresh
@@ -167,3 +167,14 @@ Compacting (last 5) > Active running (last 5) > Tool waiting (last 15) > Rate li
 - All mutations use `Bun.spawn(["ib", ...args], { cwd })` for safe argument passing (no word-splitting)
 - `setRunner()`/`resetRunner()` for test injection — mock the runner to verify args without executing ib
 - Always sets `cwd` to `agent.repoPath` — ib requires running from a git repo root
+
+### Dialog system (in dashboard.ts)
+- 6 dialog types: `confirm`, `input`, `select`, `message`, `fuzzy`, `help`
+- `message` auto-dismisses after 3s or on any key; `messageCounter` prevents stale timeouts
+- `fuzzy` uses pi-tui's `fuzzyFilter`; wraps items with original indices to map filtered selection back
+- `executeAndRefresh(fn)` wraps simple mutations (try/catch + watcher refresh)
+- Multi-step flows (merge, diff-tool, snapshot) use `.then().catch()` because they need intermediate UI or skip refresh
+
+### Ghostty (src/ghostty.ts)
+- Validates tmux session name with `/^[\w-]+$/` before interpolating into `--command`
+- `proc.unref()` so Ghostty window outlives the dashboard process

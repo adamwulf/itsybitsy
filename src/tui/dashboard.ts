@@ -67,6 +67,16 @@ type DialogState =
   | { type: "message"; text: string }
   | { type: "fuzzy"; prompt: string; query: string; allItems: string[]; filteredIndices: number[]; filteredItems: string[]; selectedIndex: number; onSelect: (originalIndex: number) => void }
   | { type: "help"; lines: string[] }
+  | {
+      type: "textarea";
+      prompt: string;
+      lines: string[];
+      cursorLine: number;
+      cursorCol: number;
+      scrollOffset: number;
+      focusedButton: "text" | "send" | "cancel";
+      onSubmit: (value: string) => void;
+    }
   | null;
 
 // Right pane modes
@@ -568,6 +578,38 @@ class DialogOverlayComponent implements Component {
           ],
         };
       }
+      case "textarea": {
+        const visibleHeight = 5;
+        const lines: string[] = [];
+        const hasAbove = dialog.scrollOffset > 0;
+        const hasBelow = dialog.scrollOffset + visibleHeight < dialog.lines.length;
+
+        for (let i = 0; i < visibleHeight; i++) {
+          const lineIdx = dialog.scrollOffset + i;
+          let lineText = lineIdx < dialog.lines.length ? dialog.lines[lineIdx]! : "";
+          // Insert cursor block if this is the cursor line and text is focused
+          if (lineIdx === dialog.cursorLine && dialog.focusedButton === "text") {
+            const col = Math.min(dialog.cursorCol, lineText.length);
+            lineText = lineText.slice(0, col) + "█" + lineText.slice(col);
+          }
+          lineText = truncateToWidth(lineText, innerWidth, "");
+          const pad = Math.max(0, innerWidth - visibleWidth(lineText));
+          lines.push(lineText + " ".repeat(pad));
+        }
+
+        // Scroll indicators
+        if (hasAbove || hasBelow) {
+          const indicators = (hasAbove ? "↑" : " ") + " " + (hasBelow ? "↓" : " ");
+          lines.push(`${DIM}${indicators}${RESET}`);
+        }
+
+        // Button row
+        const sendLabel = dialog.focusedButton === "send" ? `${BOLD}${GREEN}[ Send ]${RESET}` : `${DIM}[ Send ]${RESET}`;
+        const cancelLabel = dialog.focusedButton === "cancel" ? `${BOLD}${GREEN}[ Cancel ]${RESET}` : `${DIM}[ Cancel ]${RESET}`;
+        lines.push(`  ${sendLabel}   ${cancelLabel}`);
+
+        return { title: dialog.prompt, contentLines: lines };
+      }
     }
   }
 }
@@ -590,6 +632,8 @@ export class DashboardComponent implements Component {
   private repos: RepoEntry[] = [];
   private messageCounter = 0;
   private diffTool: string | undefined;
+  private lastSentNotice: string | null = null;
+  private lastSentCounter = 0;
 
   /** Read-only access to dialog state (for testing) */
   get dialog(): DialogState {
@@ -813,9 +857,13 @@ export class DashboardComponent implements Component {
     const agent = this.agentTree.selectedAgent;
     if (!agent) return;
     this.showDialog({
-      type: "input",
+      type: "textarea",
       prompt: `Send message to ${agent.id}:`,
-      value: "",
+      lines: [""],
+      cursorLine: 0,
+      cursorCol: 0,
+      scrollOffset: 0,
+      focusedButton: "text",
       onSubmit: (message: string) => {
         this.closeDialog();
         if (!message.trim()) {
@@ -824,6 +872,16 @@ export class DashboardComponent implements Component {
         }
         this.executeAndRefresh(async () => {
           const result = await sendMessage(agent, message.trim());
+          if (result.ok) {
+            const id = ++this.lastSentCounter;
+            this.lastSentNotice = `sent to ${agent.id}`;
+            setTimeout(() => {
+              if (this.lastSentCounter === id) {
+                this.lastSentNotice = null;
+                this.tui?.requestRender();
+              }
+            }, 3000);
+          }
           this.showMessage(result.ok ? `Sent to ${agent.id}` : `Send failed: ${result.stderr || result.stdout}`);
         });
       },
@@ -1236,6 +1294,117 @@ export class DashboardComponent implements Component {
       return true;
     }
 
+    if (this._dialog.type === "textarea") {
+      const d = this._dialog;
+      const adjustScroll = () => {
+        if (d.cursorLine < d.scrollOffset) d.scrollOffset = d.cursorLine;
+        if (d.cursorLine >= d.scrollOffset + 5) d.scrollOffset = d.cursorLine - 4;
+      };
+
+      if (d.focusedButton === "text") {
+        if (matchesKey(data, Key.escape)) {
+          this.closeDialog();
+        } else if (data === "\t") {
+          d.focusedButton = "send";
+          this.tui?.requestRender();
+        } else if (matchesKey(data, Key.enter) || data === "\r") {
+          // Split current line at cursor
+          const line = d.lines[d.cursorLine] ?? "";
+          d.lines[d.cursorLine] = line.slice(0, d.cursorCol);
+          d.lines.splice(d.cursorLine + 1, 0, line.slice(d.cursorCol));
+          d.cursorLine++;
+          d.cursorCol = 0;
+          adjustScroll();
+          this.tui?.requestRender();
+        } else if (matchesKey(data, Key.backspace) || data === "\x7f") {
+          if (d.cursorCol > 0) {
+            const line = d.lines[d.cursorLine] ?? "";
+            d.lines[d.cursorLine] = line.slice(0, d.cursorCol - 1) + line.slice(d.cursorCol);
+            d.cursorCol--;
+          } else if (d.cursorLine > 0) {
+            const prevLine = d.lines[d.cursorLine - 1] ?? "";
+            const curLine = d.lines[d.cursorLine] ?? "";
+            d.cursorCol = prevLine.length;
+            d.lines[d.cursorLine - 1] = prevLine + curLine;
+            d.lines.splice(d.cursorLine, 1);
+            d.cursorLine--;
+            adjustScroll();
+          }
+          this.tui?.requestRender();
+        } else if (matchesKey(data, Key.left) || data === "\x1b[D") {
+          if (d.cursorCol > 0) {
+            d.cursorCol--;
+          } else if (d.cursorLine > 0) {
+            d.cursorLine--;
+            d.cursorCol = (d.lines[d.cursorLine] ?? "").length;
+            adjustScroll();
+          }
+          this.tui?.requestRender();
+        } else if (matchesKey(data, Key.right) || data === "\x1b[C") {
+          const lineLen = (d.lines[d.cursorLine] ?? "").length;
+          if (d.cursorCol < lineLen) {
+            d.cursorCol++;
+          } else if (d.cursorLine < d.lines.length - 1) {
+            d.cursorLine++;
+            d.cursorCol = 0;
+            adjustScroll();
+          }
+          this.tui?.requestRender();
+        } else if (matchesKey(data, Key.up) || data === "\x1b[A") {
+          if (d.cursorLine > 0) {
+            d.cursorLine--;
+            d.cursorCol = Math.min(d.cursorCol, (d.lines[d.cursorLine] ?? "").length);
+            adjustScroll();
+          }
+          this.tui?.requestRender();
+        } else if (matchesKey(data, Key.down) || data === "\x1b[B") {
+          if (d.cursorLine < d.lines.length - 1) {
+            d.cursorLine++;
+            d.cursorCol = Math.min(d.cursorCol, (d.lines[d.cursorLine] ?? "").length);
+            adjustScroll();
+          }
+          this.tui?.requestRender();
+        } else if (data.length === 1 && data >= " ") {
+          const line = d.lines[d.cursorLine] ?? "";
+          d.lines[d.cursorLine] = line.slice(0, d.cursorCol) + data + line.slice(d.cursorCol);
+          d.cursorCol++;
+          this.tui?.requestRender();
+        }
+      } else if (d.focusedButton === "send") {
+        if (matchesKey(data, Key.enter)) {
+          d.onSubmit(d.lines.join("\n"));
+        } else if (data === "\t" || matchesKey(data, Key.left) || matchesKey(data, Key.right)) {
+          d.focusedButton = "cancel";
+          this.tui?.requestRender();
+        } else if (matchesKey(data, Key.escape)) {
+          this.closeDialog();
+        } else if (data.length === 1 && data >= " ") {
+          d.focusedButton = "text";
+          // Also type the character
+          const line = d.lines[d.cursorLine] ?? "";
+          d.lines[d.cursorLine] = line.slice(0, d.cursorCol) + data + line.slice(d.cursorCol);
+          d.cursorCol++;
+          this.tui?.requestRender();
+        }
+      } else if (d.focusedButton === "cancel") {
+        if (matchesKey(data, Key.enter)) {
+          this.closeDialog();
+        } else if (data === "\t" || matchesKey(data, Key.left) || matchesKey(data, Key.right)) {
+          d.focusedButton = "send";
+          this.tui?.requestRender();
+        } else if (matchesKey(data, Key.escape)) {
+          this.closeDialog();
+        } else if (data.length === 1 && data >= " ") {
+          d.focusedButton = "text";
+          const line = d.lines[d.cursorLine] ?? "";
+          d.lines[d.cursorLine] = line.slice(0, d.cursorCol) + data + line.slice(d.cursorCol);
+          d.cursorCol++;
+          this.tui?.requestRender();
+        }
+      }
+      return true;
+    }
+
     if (this._dialog.type === "fuzzy") {
       const refilter = () => {
         const d = this._dialog as Extract<DialogState, { type: "fuzzy" }>;
@@ -1572,7 +1741,16 @@ export class DashboardComponent implements Component {
     const lines: string[] = [];
 
     // Header
-    lines.push(truncateToWidth(`${BOLD}itsybitsy${RESET} ${DIM}— agent dashboard${RESET}`, width, ""));
+    const headerLeft = `${BOLD}itsybitsy${RESET} ${DIM}— agent dashboard${RESET}`;
+    if (this.lastSentNotice) {
+      const leftWidth = visibleWidth(headerLeft);
+      const notice = `${DIM}${this.lastSentNotice}${RESET}`;
+      const noticeWidth = visibleWidth(notice);
+      const gap = Math.max(1, width - leftWidth - noticeWidth);
+      lines.push(truncateToWidth(headerLeft + " ".repeat(gap) + notice, width, ""));
+    } else {
+      lines.push(truncateToWidth(headerLeft, width, ""));
+    }
     lines.push(truncateToWidth(`${DIM}${"─".repeat(width)}${RESET}`, width, ""));
 
     // Agent tree (top section)

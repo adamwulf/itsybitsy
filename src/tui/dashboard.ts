@@ -40,6 +40,7 @@ import type { NewAgentOptions } from "../ib-commands";
 import { openInGhostty } from "../ghostty";
 
 const MAX_TREE_HEIGHT = 7;
+const TEXTAREA_VISIBLE_HEIGHT = 5;
 
 // State color map
 const STATE_COLORS: Record<string, string> = {
@@ -579,7 +580,7 @@ class DialogOverlayComponent implements Component {
         };
       }
       case "textarea": {
-        const visibleHeight = 5;
+        const visibleHeight = TEXTAREA_VISIBLE_HEIGHT;
         const lines: string[] = [];
         const hasAbove = dialog.scrollOffset > 0;
         const hasBelow = dialog.scrollOffset + visibleHeight < dialog.lines.length;
@@ -1298,7 +1299,7 @@ export class DashboardComponent implements Component {
       const d = this._dialog;
       const adjustScroll = () => {
         if (d.cursorLine < d.scrollOffset) d.scrollOffset = d.cursorLine;
-        if (d.cursorLine >= d.scrollOffset + 5) d.scrollOffset = d.cursorLine - 4;
+        if (d.cursorLine >= d.scrollOffset + TEXTAREA_VISIBLE_HEIGHT) d.scrollOffset = d.cursorLine - TEXTAREA_VISIBLE_HEIGHT + 1;
       };
 
       if (d.focusedButton === "text") {
@@ -1307,7 +1308,7 @@ export class DashboardComponent implements Component {
         } else if (data === "\t") {
           d.focusedButton = "send";
           this.tui?.requestRender();
-        } else if (matchesKey(data, Key.enter) || data === "\r") {
+        } else if (matchesKey(data, Key.enter)) {
           // Split current line at cursor
           const line = d.lines[d.cursorLine] ?? "";
           d.lines[d.cursorLine] = line.slice(0, d.cursorCol);

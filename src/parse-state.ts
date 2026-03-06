@@ -3,6 +3,9 @@
  * Pure string matching — no side effects.
  */
 
+/** Claude startup markers that indicate the session has progressed past initial creation */
+export const STARTUP_MARKERS = ["Claude Code v", "[USER TASK]", "╭─ Claude Code", "[AGENT CONTEXT]"];
+
 export type AgentState =
   | "creating"
   | "running"
@@ -58,7 +61,7 @@ export function parseState(input: string): ParseStateResult {
 
   // Check for 'creating' state — permission screens before Claude starts
   // Only if Claude logo/[USER TASK] is NOT present
-  if (!input.includes("Claude Code v") && !input.includes("[USER TASK]") && !input.includes("╭─ Claude Code") && !input.includes("[AGENT CONTEXT]")) {
+  if (!STARTUP_MARKERS.some((m) => input.includes(m))) {
     if (input.includes("Enter to confirm")) {
       if (
         input.includes("Do you trust the files") ||

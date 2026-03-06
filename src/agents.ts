@@ -6,7 +6,7 @@
 import { join } from "path";
 import { readdir } from "fs/promises";
 import type { AgentState } from "./parse-state";
-import { parseState } from "./parse-state";
+import { parseState, STARTUP_MARKERS } from "./parse-state";
 import { captureTmuxOutput } from "./tmux-poller";
 
 export interface AgentMeta {
@@ -160,6 +160,7 @@ export function buildAgentTree(agents: Agent[]): Agent[] {
   const byId = new Map<string, Agent>();
   for (const agent of agents) {
     agent.children = [];
+    agent.orphaned = false;
     byId.set(agent.id, agent);
   }
 
@@ -232,8 +233,6 @@ export async function readAllAgents(
   };
 }
 
-/** Claude startup markers that indicate the session has progressed past initial creation */
-const STARTUP_MARKERS = ["Claude Code v", "[USER TASK]", "╭─ Claude Code", "[AGENT CONTEXT]"];
 
 /**
  * Pre-parseState check: if the output has very few non-empty lines and no

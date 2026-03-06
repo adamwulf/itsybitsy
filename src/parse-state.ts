@@ -58,7 +58,7 @@ export function parseState(input: string): ParseStateResult {
 
   // Check for 'creating' state — permission screens before Claude starts
   // Only if Claude logo/[USER TASK] is NOT present
-  if (!input.includes("Claude Code v") && !input.includes("[USER TASK]")) {
+  if (!input.includes("Claude Code v") && !input.includes("[USER TASK]") && !input.includes("╭─ Claude Code") && !input.includes("[AGENT CONTEXT]")) {
     if (input.includes("Enter to confirm")) {
       if (
         input.includes("Do you trust the files") ||

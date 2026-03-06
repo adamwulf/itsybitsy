@@ -43,6 +43,9 @@ import { watchColorScheme } from "./color-scheme";
 import { setTheme, DARK_THEME, LIGHT_THEME, getCurrentTheme } from "./theme";
 import { fetchUsage } from "../usage";
 import type { UsageData } from "../usage";
+import { buildFolderItems } from "./folder-browser";
+import type { FolderItem } from "./folder-browser";
+import { addRepo } from "../registry";
 
 const MAX_TREE_HEIGHT = 7;
 const TEXTAREA_VISIBLE_HEIGHT = 5;
@@ -112,6 +115,15 @@ type DialogState =
       focusedButton: "text" | "send" | "cancel";
       onSubmit: (value: string) => void;
     }
+  | {
+      type: "folder-browser";
+      currentPath: string;
+      items: FolderItem[];
+      selectedIndex: number;
+      addFocused: boolean;
+      scrollOffset: number;
+      onSelect: (path: string) => void;
+    }
   | null;
 
 // Right pane modes
@@ -136,6 +148,7 @@ type DenialFilter = (typeof DENIAL_FILTERS)[number];
 const TOP_ANCHORED_MODES: Set<PaneMode> = new Set(["DIFF", "ERRORS", "STATUS", "QUESTIONS"]);
 
 const SCROLL_STEP = 10;
+const FOLDER_BROWSER_HEIGHT = 15;
 
 /** Colorize diff output lines */
 export function colorizeDiff(lines: string[]): string[] {
@@ -746,6 +759,95 @@ class DialogOverlayComponent implements Component {
 
         return { title: dialog.prompt, contentLines: lines };
       }
+      case "folder-browser": {
+        const lines: string[] = [];
+        const { items, selectedIndex, addFocused, scrollOffset } = dialog;
+
+        // Compute visible window
+        const maxVisible = FOLDER_BROWSER_HEIGHT;
+        let start = scrollOffset;
+        // Ensure selected item is visible
+        if (selectedIndex < start) start = selectedIndex;
+        if (selectedIndex >= start + maxVisible) start = selectedIndex - maxVisible + 1;
+        const end = Math.min(items.length, start + maxVisible);
+
+        if (start > 0) {
+          lines.push(`${DIM}  ▲ ${start} more${RESET}`);
+        }
+
+        for (let i = start; i < end; i++) {
+          const item = items[i]!;
+          const isSelected = i === selectedIndex && !addFocused;
+
+          // Build indentation with tree connectors
+          let prefix: string;
+          if (item.isAncestor) {
+            if (item.depth === 0) {
+              prefix = "";
+            } else {
+              prefix = `${DIM}${"    ".repeat(item.depth - 1)}└── ${RESET}`;
+            }
+          } else if (item.isCurrent) {
+            if (item.depth === 0) {
+              prefix = "";
+            } else {
+              prefix = `${"    ".repeat(item.depth - 1)}└── `;
+            }
+          } else {
+            // Child items
+            const isLast = i === items.length - 1;
+            const childPrefix = isLast ? "└── " : "├── ";
+            prefix = `${"    ".repeat(item.depth - 1)}${childPrefix}`;
+          }
+
+          // Git suffix
+          const gitSuffix = item.isGit ? ` ${DIM}(git)${RESET} ${GREEN}✓${RESET}` : "";
+
+          // Name with / suffix for directories
+          const displayName = item.name + "/";
+
+          // Ancestor styling
+          let nameStr: string;
+          if (item.isAncestor) {
+            nameStr = `${DIM}${displayName}${RESET}`;
+          } else {
+            nameStr = displayName;
+          }
+
+          const line = `${prefix}${nameStr}${gitSuffix}`;
+
+          if (isSelected) {
+            const t = getCurrentTheme();
+            lines.push(truncateToWidth(`${BOLD}${t.selectedHighlight} ${line} ${RESET}`, innerWidth, ""));
+          } else {
+            lines.push(truncateToWidth(` ${line}`, innerWidth, ""));
+          }
+        }
+
+        const remaining = items.length - end;
+        if (remaining > 0) {
+          lines.push(`${DIM}  ▼ ${remaining} more${RESET}`);
+        }
+
+        // Pad to consistent height
+        while (lines.length < FOLDER_BROWSER_HEIGHT + (start > 0 ? 1 : 0) + (remaining > 0 ? 1 : 0)) {
+          lines.push("");
+        }
+
+        // Button row
+        const selectedItem = items[selectedIndex];
+        const addEnabled = selectedItem?.isGit ?? false;
+        const addLabel = addFocused
+          ? `${BOLD}${GREEN}[ Add ]${RESET}`
+          : addEnabled
+            ? `[ Add ]`
+            : `${DIM}[ Add ]${RESET}`;
+        const cancelLabel = `${DIM}[ Cancel ]${RESET}`;
+        lines.push("");
+        lines.push(`  ${addLabel}    ${cancelLabel}`);
+
+        return { title: "Add Repository", contentLines: lines };
+      }
     }
   }
 }
@@ -883,9 +985,16 @@ export class DashboardComponent implements Component {
 
   private showDialog(dialog: NonNullable<DialogState>) {
     this._dialog = dialog;
+    // Folder browser needs a wider dialog for long paths
+    const width = dialog.type === "folder-browser" ? 70 : DIALOG_WIDTH;
+    if (width !== DIALOG_WIDTH && this.overlayHandle) {
+      // Only recreate overlay when switching to a non-standard width
+      this.overlayHandle.hide();
+      this.overlayHandle = null;
+    }
     if (!this.overlayHandle && this.tui) {
       this.overlayHandle = this.tui.showOverlay(this.dialogOverlay, {
-        width: DIALOG_WIDTH,
+        width,
         anchor: "center",
       });
     }
@@ -1393,6 +1502,30 @@ export class DashboardComponent implements Component {
     });
   }
 
+  private handleFolderBrowser() {
+    const startPath = process.cwd();
+    const items = buildFolderItems(startPath);
+    const currentIdx = items.findIndex((i) => i.isCurrent);
+    this.showDialog({
+      type: "folder-browser",
+      currentPath: startPath,
+      items,
+      selectedIndex: currentIdx !== -1 ? currentIdx : 0,
+      addFocused: false,
+      scrollOffset: Math.max(0, (currentIdx !== -1 ? currentIdx : 0) - 7),
+      onSelect: (path: string) => {
+        addRepo(path).then((result) => {
+          this.showMessage(result.message);
+          if (result.ok) {
+            this.watcher?.refresh();
+          }
+        }).catch((err) => {
+          this.showMessage(`Error adding repo: ${err}`);
+        });
+      },
+    });
+  }
+
   private handleDialogInput(data: string): boolean {
     if (!this._dialog) return false;
 
@@ -1501,6 +1634,58 @@ export class DashboardComponent implements Component {
         } else if (data.length === 1 && data >= " ") {
           d.focusedButton = "text";
           appendChar(data);
+        }
+      }
+      return true;
+    }
+
+    if (this._dialog.type === "folder-browser") {
+      const d = this._dialog;
+      if (matchesKey(data, Key.down) || data === "j") {
+        if (!d.addFocused) {
+          d.selectedIndex = Math.min(d.items.length - 1, d.selectedIndex + 1);
+          // Ensure visible
+          const maxVisible = FOLDER_BROWSER_HEIGHT;
+          if (d.selectedIndex >= d.scrollOffset + maxVisible) {
+            d.scrollOffset = d.selectedIndex - maxVisible + 1;
+          }
+        }
+        this.tui?.requestRender();
+      } else if (matchesKey(data, Key.up) || data === "k") {
+        if (!d.addFocused) {
+          d.selectedIndex = Math.max(0, d.selectedIndex - 1);
+          if (d.selectedIndex < d.scrollOffset) {
+            d.scrollOffset = d.selectedIndex;
+          }
+        }
+        this.tui?.requestRender();
+      } else if (data === "\t") {
+        const selectedItem = d.items[d.selectedIndex];
+        if (selectedItem?.isGit) {
+          d.addFocused = !d.addFocused;
+          this.tui?.requestRender();
+        }
+      } else if (matchesKey(data, Key.enter)) {
+        if (d.addFocused) {
+          const selectedItem = d.items[d.selectedIndex];
+          if (selectedItem?.isGit) {
+            this.closeDialog();
+            d.onSelect(selectedItem.path);
+          }
+        } else {
+          // Navigate into selected folder
+          const selectedItem = d.items[d.selectedIndex];
+          if (selectedItem) {
+            const newItems = buildFolderItems(selectedItem.path);
+            // Find the item that matches the navigated-to path to keep it highlighted
+            const newIdx = newItems.findIndex((i) => i.path === selectedItem.path);
+            d.currentPath = selectedItem.path;
+            d.items = newItems;
+            d.selectedIndex = newIdx !== -1 ? newIdx : 0;
+            d.addFocused = false;
+            d.scrollOffset = Math.max(0, d.selectedIndex - 7);
+            this.tui?.requestRender();
+          }
         }
       }
       return true;
@@ -1852,6 +2037,10 @@ export class DashboardComponent implements Component {
     // Debug snapshot
     else if (data === "S") {
       this.handleSnapshot();
+    }
+    // Folder browser to add repo
+    else if (data === "+") {
+      this.handleFolderBrowser();
     }
   }
 

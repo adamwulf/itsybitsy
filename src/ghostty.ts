@@ -9,7 +9,14 @@ export async function openInGhostty(
     return { ok: false, message: "Ghostty not found on PATH" };
   }
   try {
-    Bun.spawn(["ghostty", `--command=tmux attach -t ${tmuxSession}`]);
+    // Validate session name contains only safe characters (alphanumeric, hyphens, underscores)
+    if (!/^[\w-]+$/.test(tmuxSession)) {
+      return { ok: false, message: "Invalid tmux session name" };
+    }
+    const proc = Bun.spawn(["ghostty", `--command=tmux attach -t ${tmuxSession}`], {
+      stdio: ["ignore", "ignore", "ignore"],
+    });
+    proc.unref();
     return { ok: true, message: "Opened in Ghostty" };
   } catch (err) {
     return { ok: false, message: `${err}` };

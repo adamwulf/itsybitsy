@@ -1120,15 +1120,15 @@ export class DashboardComponent implements Component {
   }
 
   private handleScrollUp() {
-    this.tmuxPane.scrollUp();
-    this.rightPane.scrollOffset++;
+    this.tmuxPane.scrollUp(5);
+    this.rightPane.scrollOffset += 5;
     this.rightPane.updateContent();
     this.tui?.requestRender();
   }
 
   private handleScrollDown() {
-    this.tmuxPane.scrollDown();
-    this.rightPane.scrollOffset = Math.max(0, this.rightPane.scrollOffset - 1);
+    this.tmuxPane.scrollDown(5);
+    this.rightPane.scrollOffset = Math.max(0, this.rightPane.scrollOffset - 5);
     this.rightPane.updateContent();
     this.tui?.requestRender();
   }

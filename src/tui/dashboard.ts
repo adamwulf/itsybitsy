@@ -369,12 +369,12 @@ export class RightPaneComponent implements Component {
 
     // Available lines after header
     const available = Math.max(1, this.displayHeight - 1);
-    // Clamp scrollOffset to valid range
+    // scrollOffset is lines scrolled back from the tail (0 = tail-snapped)
     const maxOffset = Math.max(0, this.content.length - available);
     if (this.scrollOffset > maxOffset) {
       this.scrollOffset = maxOffset;
     }
-    const start = this.scrollOffset;
+    const start = Math.max(0, this.content.length - available - this.scrollOffset);
     const visible = this.content.slice(start, start + available);
     for (const line of visible) {
       lines.push(truncateToWidth(line, width, ""));

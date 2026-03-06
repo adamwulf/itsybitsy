@@ -247,7 +247,7 @@ describe("RightPaneComponent scroll logic", () => {
     return pane;
   }
 
-  test("scrollOffset=0 shows content from start", () => {
+  test("scrollOffset=0 shows tail (last lines)", () => {
     const pane = makeRightPane(20, 10);
     pane.scrollOffset = 0;
     const result = pane.render(80);
@@ -255,10 +255,9 @@ describe("RightPaneComponent scroll logic", () => {
     expect(result.length).toBe(10);
     // First line is the header
     expect(result[0]).toContain("INITIAL PROMPT");
-    // Content starts with "Prompt:" header then blank line then first prompt line
-    expect(result[1]).toContain("Prompt:");
-    expect(result[2]).toBe("");
-    expect(result[3]).toContain("prompt line 1");
+    // Content is "Prompt:" + "" + 20 prompt lines = 22 lines
+    // available=9, start = max(0, 22-9-0) = 13 → first content line is "prompt line 12"
+    expect(result[1]).toContain("prompt line 12");
   });
 
   test("scrollOffset clamped to maxOffset", () => {
@@ -280,9 +279,9 @@ describe("RightPaneComponent scroll logic", () => {
     expect(result.length).toBe(10);
     // Header is always first
     expect(result[0]).toContain("INITIAL PROMPT");
-    // Content starts at offset 5: "Prompt:", "", "line1", "line2", "line3" skipped
-    // So next is "prompt line 4"
-    expect(result[1]).toContain("prompt line 4");
+    // scrollOffset=5 means 5 lines back from tail
+    // content=22 lines, available=9, start = max(0, 22-9-5) = 8 → "prompt line 7"
+    expect(result[1]).toContain("prompt line 7");
   });
 
   test("pads to displayHeight when content is short", () => {

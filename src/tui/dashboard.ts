@@ -62,7 +62,7 @@ type DialogState =
   | { type: "input"; prompt: string; value: string; onSubmit: (value: string) => void }
   | { type: "select"; prompt: string; items: string[]; selectedIndex: number; onSelect: (index: number) => void }
   | { type: "message"; text: string }
-  | { type: "fuzzy"; prompt: string; query: string; allItems: string[]; filteredItems: string[]; selectedIndex: number; onSelect: (originalIndex: number) => void }
+  | { type: "fuzzy"; prompt: string; query: string; allItems: string[]; filteredIndices: number[]; filteredItems: string[]; selectedIndex: number; onSelect: (originalIndex: number) => void }
   | { type: "help"; lines: string[] }
   | null;
 
@@ -875,6 +875,7 @@ export class DashboardComponent implements Component {
       prompt: "Jump to agent",
       query: "",
       allItems,
+      filteredIndices: allItems.map((_, i) => i),
       filteredItems: [...allItems],
       selectedIndex: 0,
       onSelect: (originalIndex: number) => {
@@ -896,6 +897,7 @@ export class DashboardComponent implements Component {
       prompt: "Jump to pane",
       query: "",
       allItems,
+      filteredIndices: allItems.map((_, i) => i),
       filteredItems: [...allItems],
       selectedIndex: 0,
       onSelect: (originalIndex: number) => {
@@ -1074,14 +1076,14 @@ export class DashboardComponent implements Component {
     if (this._dialog.type === "fuzzy") {
       const refilter = () => {
         const d = this._dialog as Extract<DialogState, { type: "fuzzy" }>;
-        const filteredIndices = fuzzyFilter(d.allItems, d.query);
-        d.filteredItems = filteredIndices.map((i) => d.allItems[i]!);
+        const indices = fuzzyFilter(d.allItems, d.query);
+        d.filteredIndices = indices;
+        d.filteredItems = indices.map((i) => d.allItems[i]!);
         d.selectedIndex = 0;
       };
       if (matchesKey(data, Key.enter)) {
         if (this._dialog.filteredItems.length > 0) {
-          const filteredIndices = fuzzyFilter(this._dialog.allItems, this._dialog.query);
-          const originalIndex = filteredIndices[this._dialog.selectedIndex] ?? 0;
+          const originalIndex = this._dialog.filteredIndices[this._dialog.selectedIndex] ?? 0;
           this._dialog.onSelect(originalIndex);
         }
       } else if (matchesKey(data, Key.down)) {
@@ -1517,10 +1519,14 @@ export class DashboardComponent implements Component {
         truncateToWidth(`${BOLD}${d.prompt}${RESET} ${DIM}[${matchCount} matches]${RESET}`, width, ""),
         truncateToWidth(`> ${d.query}█`, width, ""),
       ];
-      const visible = d.filteredItems.slice(0, 5);
+      // Slide the visible window to keep selectedIndex in view
+      const maxVisible = 5;
+      const start = Math.max(0, Math.min(d.selectedIndex - maxVisible + 1, d.filteredItems.length - maxVisible));
+      const visible = d.filteredItems.slice(start, start + maxVisible);
       const itemStrs = visible.map((item, i) => {
-        const prefix = i === d.selectedIndex ? `>${GREEN}` : " ";
-        const suffix = i === d.selectedIndex ? RESET : "";
+        const actualIndex = start + i;
+        const prefix = actualIndex === d.selectedIndex ? `>${GREEN}` : " ";
+        const suffix = actualIndex === d.selectedIndex ? RESET : "";
         return `${prefix}${item}${suffix}`;
       });
       lines.push(truncateToWidth(itemStrs.join("  "), width, ""));

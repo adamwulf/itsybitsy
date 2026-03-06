@@ -1562,7 +1562,7 @@ export class DashboardComponent implements Component {
     const content = await readAgentLog(agent);
     // Only apply if we're still looking at the same agent
     if (this.currentAgentId === agent.id) {
-      this.rightPane.agentLogContent = content ? colorizeLog(content) : content;
+      this.rightPane.agentLogContent = colorizeLog(content);
       // Also parse denials from the log
       this.rightPane.denialsContent = parseDenials(content);
       this.rightPane.updateContent();

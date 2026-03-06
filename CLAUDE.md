@@ -118,7 +118,7 @@ After any code changes, always run:
 
 ## itsybitsy Implementation Notes
 
-All 6 phases are complete. 226 tests across 10 test files.
+All 6 phases complete. 226 tests across 10 files.
 
 ### State detection flow
 1. `watcher.ts` calls `detectAgentStates()` (in `agents.ts`) on every refresh
@@ -140,6 +140,7 @@ pi-tui's `Box` is vertical-only. `SplitPane` renders two child components side-b
 - `FlatAgent` type lives here (not in watcher.ts) since `flattenAgentTree()` produces it
 - `detectAgentStates()` is the single source of truth for state detection — both CLI and watcher use it
 - `buildAgentTree()` mutates `agent.children` in place; call it after state detection
+- `readAgentLog()`, `readAgentPrompt()`, `parseDenials()` — async helpers for right pane content
 
 ### parse-state.ts priority order
 Compacting (last 5) > Active running (last 5) > Tool waiting (last 15) > Rate limited (last 15) > Complete (last 15) > WAITING (last 15) > Other running (last 15) > Spinners (last 15) > Permission prompts (last 15) > Broader spinners (last 20) > Background tasks (last 15) > Race condition hook > Unknown
@@ -161,12 +162,14 @@ Compacting (last 5) > Active running (last 5) > Tool waiting (last 15) > Rate li
 - Both panes pad to `displayHeight` for consistent vertical alignment
 - `readAgentLog()` is async — loaded on agent selection change, stale-checked by agent ID
 - `;`/`l` scroll both tmux (left) and right pane simultaneously
-- Dialog system: confirm (y/n), text input, select list — renders in status bar area, variable height for confirm
+- Dialog system: confirm, text input, select list, fuzzy search, help overlay, timed message — renders in status bar area, variable height
+- `executeAndRefresh()` wraps all mutations: runs the action, catches errors, then triggers watcher refresh
 
 ### ib-commands (src/ib-commands.ts)
 - All mutations use `Bun.spawn(["ib", ...args], { cwd })` for safe argument passing (no word-splitting)
 - `setRunner()`/`resetRunner()` for test injection — mock the runner to verify args without executing ib
 - Always sets `cwd` to `agent.repoPath` — ib requires running from a git repo root
+- Commands: killAgent, nukeAgent, resumeAgent, reassignAgent, mergeCheckAgent, mergeAgent, sendMessage, newAgent, diffAgent, statusAgent, acknowledgeQuestion
 
 ### Dialog system (in dashboard.ts)
 - 6 dialog types: `confirm`, `input`, `select`, `message`, `fuzzy`, `help`
@@ -176,5 +179,6 @@ Compacting (last 5) > Active running (last 5) > Tool waiting (last 15) > Rate li
 - Multi-step flows (merge, diff-tool, snapshot) use `.then().catch()` because they need intermediate UI or skip refresh
 
 ### Ghostty (src/ghostty.ts)
-- Validates tmux session name with `/^[\w-]+$/` before interpolating into `--command`
-- `proc.unref()` so Ghostty window outlives the dashboard process
+- `openInGhostty(tmuxSession)` spawns `ghostty --command="tmux attach -t {session}"` detached via `proc.unref()`
+- Validates session name with `/^[\w-]+$/` before interpolating into `--command`
+- Returns `{ ok, message }` — caller shows result via `showMessage()`

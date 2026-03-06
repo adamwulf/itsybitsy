@@ -1,6 +1,6 @@
 /**
- * Main TUI dashboard — agent tree + live tmux pane.
- * Composes agent tree, split pane (tmux + right pane), status bar, and dialog system.
+ * Main TUI dashboard — agent tree + live tmux pane + all keybindings.
+ * Composes AgentTree, TmuxPane, RightPane, StatusBar, and dialog system.
  */
 
 import {

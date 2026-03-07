@@ -1011,7 +1011,7 @@ class DialogOverlayComponent implements Component {
         const wrapped = wrapLines(dialog.prompt, innerWidth);
         const confirmBtn = dialog.focusedButton === "confirm" ? `${BOLD}${GREEN}[ ${dialog.confirmLabel} ]${RESET}` : `${DIM}[ ${dialog.confirmLabel} ]${RESET}`;
         const cancelBtn = dialog.focusedButton === "cancel" ? `${BOLD}${GREEN}[ Cancel ]${RESET}` : `${DIM}[ Cancel ]${RESET}`;
-        return { title: "Confirm", contentLines: [...wrapped, "", `  ${confirmBtn}   ${cancelBtn}`] };
+        return { title: "Confirm", contentLines: [...wrapped, "", `  ${cancelBtn}   ${confirmBtn}`] };
       }
       case "input": {
         return {
@@ -1080,7 +1080,7 @@ class DialogOverlayComponent implements Component {
         // Button row
         const sendLabel = dialog.focusedButton === "send" ? `${BOLD}${GREEN}[ Send ]${RESET}` : `${DIM}[ Send ]${RESET}`;
         const cancelLabel = dialog.focusedButton === "cancel" ? `${BOLD}${GREEN}[ Cancel ]${RESET}` : `${DIM}[ Cancel ]${RESET}`;
-        lines.push(`  ${sendLabel}   ${cancelLabel}`);
+        lines.push(`  ${cancelLabel}   ${sendLabel}`);
 
         return { title: dialog.prompt, contentLines: lines };
       }
@@ -1181,7 +1181,7 @@ class DialogOverlayComponent implements Component {
             : `${DIM}[ Add ]${RESET}`;
         const cancelLabel = `${DIM}[ Cancel ]${RESET}`;
         lines.push("");
-        lines.push(`  ${addLabel}    ${cancelLabel}`);
+        lines.push(`  ${cancelLabel}    ${addLabel}`);
 
         return { title: "Add Repository", contentLines: lines };
       }
@@ -1931,10 +1931,10 @@ export class DashboardComponent implements Component {
         if (matchesKey(data, Key.escape)) {
           this.closeDialog();
         } else if (matchesKey(data, Key.tab)) {
-          d.focusedButton = "send";
+          d.focusedButton = "cancel";
           this.tui?.requestRender();
         } else if (matchesKey(data, Key.shift("tab"))) {
-          d.focusedButton = "cancel";
+          d.focusedButton = "send";
           this.tui?.requestRender();
         } else if (matchesKey(data, Key.enter)) {
           d.lines.push("");
@@ -1955,10 +1955,10 @@ export class DashboardComponent implements Component {
         if (matchesKey(data, Key.enter)) {
           d.onSubmit(d.lines.join("\n"));
         } else if (matchesKey(data, Key.tab) || matchesKey(data, Key.right)) {
-          d.focusedButton = "cancel";
+          d.focusedButton = "text";
           this.tui?.requestRender();
         } else if (matchesKey(data, Key.shift("tab")) || matchesKey(data, Key.left)) {
-          d.focusedButton = "text";
+          d.focusedButton = "cancel";
           this.tui?.requestRender();
         } else if (matchesKey(data, Key.escape)) {
           this.closeDialog();
@@ -1970,10 +1970,10 @@ export class DashboardComponent implements Component {
         if (matchesKey(data, Key.enter)) {
           this.closeDialog();
         } else if (matchesKey(data, Key.tab) || matchesKey(data, Key.right)) {
-          d.focusedButton = "text";
+          d.focusedButton = "send";
           this.tui?.requestRender();
         } else if (matchesKey(data, Key.shift("tab")) || matchesKey(data, Key.left)) {
-          d.focusedButton = "send";
+          d.focusedButton = "text";
           this.tui?.requestRender();
         } else if (matchesKey(data, Key.escape)) {
           this.closeDialog();

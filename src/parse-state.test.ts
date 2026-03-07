@@ -245,6 +245,76 @@ describe("parseState", () => {
     });
   });
 
+  describe("trailing blank lines", () => {
+    test("WAITING detected despite trailing blank lines pushing it out of last-15 window", () => {
+      // Simulate real tmux output: agent content ending with WAITING,
+      // followed by many trailing blank lines (terminal height padding).
+      // Without stripping, the blanks push WAITING out of the last-15 window.
+      const content = Array(10).fill("some agent output");
+      content.push("⏺ WAITING");
+      // Trailing blank lines from terminal padding
+      for (let i = 0; i < 30; i++) {
+        content.push("");
+      }
+      const input = content.join("\n");
+      const result = parseState(input);
+      expect(result.state).toBe("waiting");
+      expect(result.reason).toContain("WAITING");
+    });
+
+    test("WAITING with status bar and trailing blanks is detected", () => {
+      // More realistic: content + status bar + terminal padding
+      const content = Array(5).fill("some agent output");
+      content.push("⏺ WAITING");
+      // Claude Code status bar (~8 lines)
+      content.push("─────────────────────────────────────");
+      content.push("❯ ");
+      content.push("─────────────────────────────────────");
+      content.push("/Users/user/repo");
+      content.push("agent-abc12345");
+      content.push("ctx: 45% ····················");
+      content.push("⏵⏵ accept edits on (shift+tab to cycle)");
+      content.push("");
+      // Terminal height padding
+      for (let i = 0; i < 30; i++) {
+        content.push("");
+      }
+      const input = content.join("\n");
+      const result = parseState(input);
+      // WAITING should be in the last-15 window (6 content + 8 status bar = 14 lines)
+      expect(result.state).toBe("waiting");
+    });
+
+    test("WAITING with trailing whitespace-only lines is still detected", () => {
+      const lines = Array(5).fill("output");
+      lines.push("WAITING");
+      // Add whitespace-only trailing lines
+      lines.push("   ");
+      lines.push("\t");
+      lines.push("  \t  ");
+      for (let i = 0; i < 20; i++) {
+        lines.push("");
+      }
+      expect(parseState(lines.join("\n")).state).toBe("waiting");
+    });
+
+    test("blank lines within content are preserved (not stripped)", () => {
+      // Ensure internal blank lines don't get stripped
+      const lines = [
+        "line1",
+        "",
+        "line3",
+        "",
+        "⎿  Waiting",
+        "",
+        "line7",
+        "line8",
+        "line9",
+      ];
+      expect(parseState(lines.join("\n")).state).toBe("waiting");
+    });
+  });
+
   describe("priority", () => {
     test("compacting beats running", () => {
       const input = "line1\n(Esc to interrupt)\nCompacting conversation\nline4\nline5";

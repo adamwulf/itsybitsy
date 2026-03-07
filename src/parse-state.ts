@@ -27,9 +27,18 @@ export function stripAnsi(text: string): string {
   return text.replace(/\x1b\[[0-9;]*[a-zA-Z]|\x1b\].*?(\x07|\x1b\\)|\x1b_.*?\x07|\x1b[()][AB012]/g, "");
 }
 
-/** Get the last N lines from text */
+/** Strip trailing blank/whitespace-only lines from an array of lines */
+function stripTrailingBlanks(lines: string[]): string[] {
+  let end = lines.length;
+  while (end > 0 && (lines[end - 1] ?? "").trim() === "") {
+    end--;
+  }
+  return lines.slice(0, end);
+}
+
+/** Get the last N lines from text, ignoring trailing blank lines */
 function lastNLines(text: string, n: number): string {
-  const lines = text.split("\n");
+  const lines = stripTrailingBlanks(text.split("\n"));
   return lines.slice(-n).join("\n");
 }
 

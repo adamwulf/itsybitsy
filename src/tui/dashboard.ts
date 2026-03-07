@@ -1382,7 +1382,9 @@ export class DashboardComponent implements Component {
   private showDialog(dialog: NonNullable<DialogState>) {
     this._dialog = dialog;
     // Folder browser needs a wider dialog for long paths
-    const width = (dialog.type === "folder-browser" || dialog.type === "new-agent-form" || dialog.type === "help") ? 72 : DIALOG_WIDTH;
+    const width = dialog.type === "help" ? 72
+      : (dialog.type === "folder-browser" || dialog.type === "new-agent-form") ? 70
+      : DIALOG_WIDTH;
     if (width !== DIALOG_WIDTH && this.overlayHandle) {
       // Only recreate overlay when switching to a non-standard width
       this.overlayHandle.hide();
@@ -1849,13 +1851,10 @@ export class DashboardComponent implements Component {
   }
 
   private handleHelp() {
-    const K = BOLD;  // key style
-    const R = RESET;
-    const D = DIM;
     const pad = (key: string, w: number) => key + " ".repeat(Math.max(0, w - key.length));
     const kw = 18; // key column width
-    const row = (key: string, desc: string) => `  ${K}${pad(key, kw)}${R}${desc}`;
-    const header = (title: string) => `${K}${title}${R}`;
+    const row = (key: string, desc: string) => `  ${BOLD}${pad(key, kw)}${RESET}${desc}`;
+    const header = (title: string) => `${BOLD}${title}${RESET}`;
 
     this.showDialog({
       type: "help",
@@ -1864,9 +1863,10 @@ export class DashboardComponent implements Component {
         row("j / k / ↑↓", "select agent"),
         row("@", "fuzzy jump to agent"),
         row("/", "fuzzy mode picker"),
+        row("+", "add repo folder"),
         "",
         header("Panes"),
-        row("p / n", "cycle pane left/right"),
+        row("p / n / ←→", "cycle pane left/right"),
         row("d / g / e / q", "diff / status / errors / questions"),
         "",
         header("Scroll"),
@@ -1891,7 +1891,7 @@ export class DashboardComponent implements Component {
         row("h", "help"),
         row("Ctrl-C", "quit"),
         "",
-        `${D}Press any key to dismiss${R}`,
+        `${DIM}Press any key to dismiss${RESET}`,
       ],
     });
   }

@@ -1011,7 +1011,7 @@ class DialogOverlayComponent implements Component {
         const wrapped = wrapLines(dialog.prompt, innerWidth);
         const confirmBtn = dialog.focusedButton === "confirm" ? `${BOLD}${GREEN}[ ${dialog.confirmLabel} ]${RESET}` : `${DIM}[ ${dialog.confirmLabel} ]${RESET}`;
         const cancelBtn = dialog.focusedButton === "cancel" ? `${BOLD}${GREEN}[ Cancel ]${RESET}` : `${DIM}[ Cancel ]${RESET}`;
-        return { title: "Confirm", contentLines: [...wrapped, "", `  ${confirmBtn}   ${cancelBtn}`] };
+        return { title: "Confirm", contentLines: [...wrapped, "", `  ${cancelBtn}   ${confirmBtn}`] };
       }
       case "input": {
         return {

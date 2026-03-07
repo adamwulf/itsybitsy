@@ -253,7 +253,7 @@ type DialogState =
       currentPath: string;
       items: FolderItem[];
       selectedIndex: number;
-      addFocused: boolean;
+      focused: "list" | "add" | "cancel";
       scrollOffset: number;
       onSelect: (path: string) => void;
     }
@@ -968,9 +968,11 @@ class StatusBarComponent implements Component {
 /** Draws the current dialog as a centered bordered box overlay */
 class DialogOverlayComponent implements Component {
   private getDialog: () => DialogState;
+  private getRepoPaths: () => Set<string>;
 
-  constructor(getDialog: () => DialogState) {
+  constructor(getDialog: () => DialogState, getRepoPaths: () => Set<string>) {
     this.getDialog = getDialog;
+    this.getRepoPaths = getRepoPaths;
   }
 
   invalidate(): void {}
@@ -1083,7 +1085,10 @@ class DialogOverlayComponent implements Component {
       }
       case "folder-browser": {
         const lines: string[] = [];
-        const { items, selectedIndex, addFocused, scrollOffset } = dialog;
+        const { items, selectedIndex, focused, scrollOffset } = dialog;
+        const addFocused = focused === "add";
+        const cancelFocused = focused === "cancel";
+        const registeredPaths = this.getRepoPaths();
 
         // Compute visible window
         const maxVisible = FOLDER_BROWSER_HEIGHT;
@@ -1109,7 +1114,7 @@ class DialogOverlayComponent implements Component {
 
         for (let i = start; i < end; i++) {
           const item = items[i]!;
-          const isSelected = i === selectedIndex && !addFocused;
+          const isSelected = i === selectedIndex && focused === "list";
 
           // Build indentation with tree connectors
           let prefix: string;
@@ -1132,8 +1137,11 @@ class DialogOverlayComponent implements Component {
             prefix = `${"    ".repeat(item.depth - 1)}${childPrefix}`;
           }
 
-          // Git suffix
-          const gitSuffix = item.isGit ? ` ${DIM}(git)${RESET} ${GREEN}✓${RESET}` : "";
+          // Git suffix + registered indicator
+          const isRegistered = registeredPaths.has(item.path);
+          const gitSuffix = isRegistered
+            ? ` ${DIM}(added)${RESET} ${DIM}✓${RESET}`
+            : item.isGit ? ` ${DIM}(git)${RESET} ${GREEN}✓${RESET}` : "";
 
           // Name with / suffix for directories
           const displayName = item.name + "/";
@@ -1170,13 +1178,15 @@ class DialogOverlayComponent implements Component {
 
         // Button row
         const selectedItem = items[selectedIndex];
-        const addEnabled = selectedItem?.isGit ?? false;
+        const addEnabled = selectedItem?.isGit && !registeredPaths.has(selectedItem.path);
         const addLabel = addFocused
           ? `${BOLD}${GREEN}[ Add ]${RESET}`
           : addEnabled
             ? `[ Add ]`
             : `${DIM}[ Add ]${RESET}`;
-        const cancelLabel = `[ Cancel ]`;
+        const cancelLabel = cancelFocused
+          ? `${BOLD}${GREEN}[ Cancel ]${RESET}`
+          : `[ Cancel ]`;
         lines.push("");
         lines.push(`  ${cancelLabel}    ${addLabel}`);
 
@@ -1306,7 +1316,7 @@ export class DashboardComponent implements Component {
     this.rightPane = new RightPaneComponent();
     this.tmuxPane = new TmuxPaneComponent();
     this.statusBar = new StatusBarComponent();
-    this.dialogOverlay = new DialogOverlayComponent(() => this._dialog);
+    this.dialogOverlay = new DialogOverlayComponent(() => this._dialog, () => new Set(this.repos.map((r) => r.path)));
 
     // Split pane: tmux left, right pane on right
     this.splitPane = new SplitPane(this.tmuxPane, this.rightPane, DEFAULT_LEFT_WIDTH, `${DIM_GRAY}│${RESET}`);
@@ -1978,7 +1988,7 @@ export class DashboardComponent implements Component {
       currentPath: startPath,
       items,
       selectedIndex: currentIdx !== -1 ? currentIdx : 0,
-      addFocused: false,
+      focused: "list",
       scrollOffset: Math.max(0, (currentIdx !== -1 ? currentIdx : 0) - 7),
       onSelect: (path: string) => {
         addRepo(path).then((result) => {
@@ -2245,8 +2255,12 @@ export class DashboardComponent implements Component {
 
     if (this._dialog.type === "folder-browser") {
       const d = this._dialog;
+      const registeredPaths = new Set(this.repos.map((r) => r.path));
+      const selectedItem = d.items[d.selectedIndex];
+      const addEnabled = selectedItem?.isGit && !registeredPaths.has(selectedItem.path);
+
       if (matchesKey(data, Key.down) || data === "j") {
-        if (!d.addFocused) {
+        if (d.focused === "list") {
           d.selectedIndex = Math.min(d.items.length - 1, d.selectedIndex + 1);
           // Ensure visible
           const maxVisible = FOLDER_BROWSER_HEIGHT;
@@ -2256,7 +2270,7 @@ export class DashboardComponent implements Component {
         }
         this.tui?.requestRender();
       } else if (matchesKey(data, Key.up) || data === "k") {
-        if (!d.addFocused) {
+        if (d.focused === "list") {
           d.selectedIndex = Math.max(0, d.selectedIndex - 1);
           if (d.selectedIndex < d.scrollOffset) {
             d.scrollOffset = d.selectedIndex;
@@ -2264,21 +2278,35 @@ export class DashboardComponent implements Component {
         }
         this.tui?.requestRender();
       } else if (matchesKey(data, Key.tab)) {
-        const selectedItem = d.items[d.selectedIndex];
-        if (selectedItem?.isGit) {
-          d.addFocused = !d.addFocused;
-          this.tui?.requestRender();
+        // Tab cycles: list → cancel → add (if enabled) → list
+        if (d.focused === "list") {
+          d.focused = "cancel";
+        } else if (d.focused === "cancel") {
+          d.focused = addEnabled ? "add" : "list";
+        } else {
+          d.focused = "list";
         }
+        this.tui?.requestRender();
+      } else if (matchesKey(data, Key.shift("tab"))) {
+        // Shift-Tab cycles in reverse: list → add (if enabled) → cancel → list
+        if (d.focused === "list") {
+          d.focused = addEnabled ? "add" : "cancel";
+        } else if (d.focused === "add") {
+          d.focused = "cancel";
+        } else {
+          d.focused = "list";
+        }
+        this.tui?.requestRender();
       } else if (matchesKey(data, Key.enter)) {
-        if (d.addFocused) {
-          const selectedItem = d.items[d.selectedIndex];
-          if (selectedItem?.isGit) {
+        if (d.focused === "cancel") {
+          this.closeDialog();
+        } else if (d.focused === "add") {
+          if (selectedItem?.isGit && !registeredPaths.has(selectedItem.path)) {
             this.closeDialog();
             d.onSelect(selectedItem.path);
           }
         } else {
           // Navigate into selected folder
-          const selectedItem = d.items[d.selectedIndex];
           if (selectedItem) {
             const newItems = buildFolderItems(selectedItem.path);
             // Find the item that matches the navigated-to path to keep it highlighted
@@ -2286,7 +2314,7 @@ export class DashboardComponent implements Component {
             d.currentPath = selectedItem.path;
             d.items = newItems;
             d.selectedIndex = newIdx !== -1 ? newIdx : 0;
-            d.addFocused = false;
+            d.focused = "list";
             d.scrollOffset = Math.max(0, d.selectedIndex - 7);
             this.tui?.requestRender();
           }

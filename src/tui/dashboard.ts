@@ -1564,7 +1564,22 @@ export class DashboardComponent implements Component {
     });
   }
 
+  /** 'a' — always show repo picker (when >1 repo) */
   private handleNewAgent() {
+    if (this.repos.length === 0) {
+      this.setNotice("No repos registered");
+      return;
+    }
+    // Single-repo shortcut: skip repo selection
+    if (this.repos.length === 1) {
+      this.showNewAgentFormDialog(this.repos[0]!);
+      return;
+    }
+    this.showRepoPicker();
+  }
+
+  /** 'A' — skip picker, infer repo from current selection */
+  private handleNewAgentInCurrentRepo() {
     if (this.repos.length === 0) {
       this.setNotice("No repos registered");
       return;
@@ -1591,6 +1606,10 @@ export class DashboardComponent implements Component {
       }
     }
     // Fallback: show repo picker
+    this.showRepoPicker();
+  }
+
+  private showRepoPicker() {
     this.showDialog({
       type: "select",
       prompt: "Select repo for new agent:",
@@ -1743,7 +1762,8 @@ export class DashboardComponent implements Component {
       { label: "force kill agent — !", action: () => this.handleNuke() },
       { label: "resume agent — R", action: () => this.handleResume() },
       { label: "reassign manager — r", action: () => this.handleReassign() },
-      { label: "new agent — a", action: () => this.handleNewAgent() },
+      { label: "new agent (pick repo) — a", action: () => this.handleNewAgent() },
+      { label: "new agent (current repo) — A", action: () => this.handleNewAgentInCurrentRepo() },
       { label: "open worktree — w", action: () => this.handleOpenWorktree() },
       { label: "open diff in tool — o", action: () => this.handleOpenDiffTool() },
       { label: "open in Ghostty — G", action: () => this.handleOpenGhostty() },
@@ -2531,9 +2551,11 @@ export class DashboardComponent implements Component {
     } else if (data === "s") {
       this.handleSend();
     }
-    // New agent
+    // New agent — 'a' always shows repo picker, 'A' infers from current selection
     else if (data === "a") {
       this.handleNewAgent();
+    } else if (data === "A") {
+      this.handleNewAgentInCurrentRepo();
     }
     // Fuzzy jump to agent
     else if (data === "@") {

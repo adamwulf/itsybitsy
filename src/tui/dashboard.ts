@@ -476,11 +476,10 @@ export class RightPaneComponent implements Component {
   }
 
   render(width: number): string[] {
-    const header = `${BOLD}${DIM}── ${this.mode} ──${RESET}`;
-    const lines = [truncateToWidth(header, width, "")];
+    const lines: string[] = [];
 
-    // Available lines after header
-    const available = Math.max(1, this.displayHeight - 1);
+    // Available lines
+    const available = Math.max(1, this.displayHeight);
     const maxOffset = Math.max(0, this.content.length - available);
     if (this.scrollOffset > maxOffset) {
       this.scrollOffset = maxOffset;
@@ -2059,6 +2058,15 @@ export class DashboardComponent implements Component {
     }
   }
 
+  private buildTitledSeparator(leftTitle: string, rightTitle: string, width: number): string {
+    const leftPad = 3;
+    const rightPad = 3;
+    const fixedChars = leftPad + leftTitle.length + rightPad + rightTitle.length;
+    const fillCount = Math.max(1, width - fixedChars);
+    const sep = `${DIM}${"─".repeat(leftPad)}${RESET}${BOLD}${leftTitle}${RESET}${DIM}${"─".repeat(fillCount)}${RESET}${BOLD}${rightTitle}${RESET}${DIM}${"─".repeat(rightPad)}${RESET}`;
+    return truncateToWidth(sep, width, "");
+  }
+
   invalidate(): void {
     this.agentTree.invalidate();
     this.splitPane.invalidate();
@@ -2089,8 +2097,8 @@ export class DashboardComponent implements Component {
       const treeHeight = Math.max(5, terminalRows - 6);
       this.agentTree.maxHeight = treeHeight;
 
-      // Tree header
-      lines.push(truncateToWidth(`${BOLD}${DIM}── TREE ──${RESET}`, width, ""));
+      // Separator with TREE title
+      lines.push(this.buildTitledSeparator("", " TREE ", width));
 
       const treeLines = this.agentTree.render(width);
       lines.push(...treeLines);
@@ -2108,8 +2116,11 @@ export class DashboardComponent implements Component {
       const treeLines = this.agentTree.render(width);
       lines.push(...treeLines);
 
-      // Separator
-      lines.push(truncateToWidth(`${DIM}${"─".repeat(width)}${RESET}`, width, ""));
+      // Separator with pane titles
+      const selAgent = this.agentTree.selectedAgent;
+      const leftTitle = selAgent ? ` ${selAgent.id} ` : "";
+      const rightTitle = ` ${this.rightPane.mode} `;
+      lines.push(this.buildTitledSeparator(leftTitle, rightTitle, width));
 
       // Compute available height for split pane
       const bottomHeight = 2; // status bar is always 2 lines

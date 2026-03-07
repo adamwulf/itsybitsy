@@ -23,6 +23,7 @@ export class SplitPane implements Component {
   setLeft(c: Component) { this.left = c; }
   setRight(c: Component) { this.right = c; }
   setLeftWidth(w: number) { this.leftWidth = w; }
+  getLeftWidth(): number { return this.leftWidth; }
 
   invalidate(): void {
     this.left.invalidate();

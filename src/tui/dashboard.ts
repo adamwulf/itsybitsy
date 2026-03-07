@@ -326,7 +326,7 @@ export function formatAgentRow(
   const namePad = Math.max(0, nameColWidth - visibleWidth(namePrefix));
   const promptText = agent.meta.prompt.replace(/\n/g, " ");
   const coloredState = `${stateColor}${displayState}${RESET}${" ".repeat(Math.max(0, STATE_COL_WIDTH - displayState.length))}`;
-  const paddedAge = agent.age.padEnd(AGE_COL_WIDTH);
+  const paddedAge = agent.age.padStart(AGE_COL_WIDTH);
   const line = `${namePrefix}${" ".repeat(namePad)}  ${coloredState}  ${paddedAge}  ${agent.meta.model}  ${promptText}`;
 
   const truncated = truncateToWidth(line, width, "");
@@ -626,7 +626,7 @@ export class RightPaneComponent implements Component {
           const stateColor = getStateColors()[displayState] ?? getStateColors().unknown;
           const promptText = agent.meta.prompt.replace(/\n/g, " ");
           const coloredState = `${stateColor}${displayState}${RESET}${" ".repeat(Math.max(0, STATE_COL_WIDTH - displayState.length))}`;
-          const paddedAge = agent.age.padEnd(AGE_COL_WIDTH);
+          const paddedAge = agent.age.padStart(AGE_COL_WIDTH);
           return `${connector}${icon} ${agent.repoName}/${agent.id}  ${coloredState}  ${paddedAge}  ${agent.meta.model}  ${promptText}`;
         });
         if (this.content.length === 0) this.content = [`${DIM}No agents${RESET}`];
@@ -1581,7 +1581,7 @@ export class DashboardComponent implements Component {
     const allItems = visible.map((f) => {
       const promptText = f.agent.meta.prompt.replace(/\n/g, " ");
       const displayState = f.agent.state === "unknown" ? "running" : f.agent.state;
-      return `${f.agent.repoName}/${f.agent.id}  ${displayState.padEnd(STATE_COL_WIDTH)}  ${f.agent.age.padEnd(AGE_COL_WIDTH)}  ${promptText}`;
+      return `${f.agent.repoName}/${f.agent.id}  ${displayState.padEnd(STATE_COL_WIDTH)}  ${f.agent.age.padStart(AGE_COL_WIDTH)}  ${promptText}`;
     });
     this.showDialog({
       type: "fuzzy",

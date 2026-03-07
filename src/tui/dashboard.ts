@@ -718,9 +718,11 @@ export class RightPaneComponent implements Component {
       for (const line of visible) {
         if (lines.length >= this.displayHeight) break;
         const wrapped = wrapLines(line, innerWidth);
-        for (const wl of wrapped) {
+        for (let wi = 0; wi < wrapped.length; wi++) {
           if (lines.length >= this.displayHeight) break;
-          lines.push(" " + truncateToWidth(wl, innerWidth, ""));
+          // In QUESTIONS mode, indent continuation lines by 2 spaces
+          const indent = this.mode === "QUESTIONS" && wi > 0 ? "  " : "";
+          lines.push(" " + indent + truncateToWidth(wrapped[wi]!, innerWidth - indent.length, ""));
         }
       }
     } else {

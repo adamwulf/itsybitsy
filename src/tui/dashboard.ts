@@ -408,8 +408,18 @@ class AgentTreeComponent implements Component {
     }
 
     const lines: string[] = [];
-    const start = this.scrollOffset;
-    const end = Math.min(visible.length, start + this.maxHeight);
+    let start = this.scrollOffset;
+    let end = Math.min(visible.length, start + this.maxHeight);
+
+    // If only 1 hidden above, show it instead of a scroll indicator
+    if (start === 1) {
+      start = 0;
+    }
+
+    // If only 1 hidden below, show it instead of a scroll indicator
+    if (visible.length - end === 1 && end - start < this.maxHeight) {
+      end = visible.length;
+    }
 
     // Scroll indicator at top
     if (start > 0) {
@@ -970,7 +980,17 @@ class DialogOverlayComponent implements Component {
         // Ensure selected item is visible
         if (selectedIndex < start) start = selectedIndex;
         if (selectedIndex >= start + maxVisible) start = selectedIndex - maxVisible + 1;
-        const end = Math.min(items.length, start + maxVisible);
+        let end = Math.min(items.length, start + maxVisible);
+
+        // If only 1 hidden above, show it instead of a scroll indicator
+        if (start === 1) {
+          start = 0;
+        }
+
+        // If only 1 hidden below, show it instead of a scroll indicator
+        if (items.length - end === 1 && end - start < maxVisible) {
+          end = items.length;
+        }
 
         if (start > 0) {
           lines.push(`${DIM}  ▲ ${start} more${RESET}`);

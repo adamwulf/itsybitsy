@@ -388,13 +388,13 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect((dashboard.dialog as any).confirmLabel).toBe("Nuke");
   });
 
-  test("nuke confirm: Enter on Nuke button executes kill --force", async () => {
+  test("nuke confirm: Enter on Nuke button executes nuke --force", async () => {
     setupDashboardWithAgent();
     dashboard.handleInput("!");
     // focusedButton defaults to "confirm" (Nuke), press Enter
     dashboard.handleInput("\r");
     await Bun.sleep(10);
-    expect(lastIbCall!.args).toEqual(["kill", "agent-test", "--force"]);
+    expect(lastIbCall!.args).toEqual(["nuke", "agent-test", "--force"]);
   });
 
   test("R key resumes stopped agents", async () => {
@@ -410,6 +410,48 @@ describe("DashboardComponent dialog and action handlers", () => {
     await Bun.sleep(10);
     expect(lastIbCall).toBeNull();
     // Should show a notice in the header instead
+    expect(dashboard.notice).not.toBeNull();
+  });
+
+  test("P key opens pause confirm dialog for running agents", () => {
+    setupDashboardWithAgent("running");
+    dashboard.handleInput("P");
+    expect(dashboard.dialog).not.toBeNull();
+    expect(dashboard.dialog!.type).toBe("confirm");
+    expect((dashboard.dialog as any).prompt).toContain("Pause agent");
+    expect((dashboard.dialog as any).confirmLabel).toBe("Pause");
+    expect((dashboard.dialog as any).focusedButton).toBe("cancel");
+  });
+
+  test("P key pause confirm executes pause command", async () => {
+    setupDashboardWithAgent("running");
+    dashboard.handleInput("P");
+    // Tab to confirm, then Enter
+    dashboard.handleInput("\t");
+    dashboard.handleInput("\r");
+    await Bun.sleep(10);
+    expect(lastIbCall).not.toBeNull();
+    expect(lastIbCall!.args).toEqual(["pause", "agent-test"]);
+  });
+
+  test("P key works for waiting agents", () => {
+    setupDashboardWithAgent("waiting");
+    dashboard.handleInput("P");
+    expect(dashboard.dialog).not.toBeNull();
+    expect(dashboard.dialog!.type).toBe("confirm");
+  });
+
+  test("P key does not pause stopped agents", () => {
+    setupDashboardWithAgent("stopped");
+    dashboard.handleInput("P");
+    expect(dashboard.dialog).toBeNull();
+    expect(dashboard.notice).not.toBeNull();
+  });
+
+  test("P key does not pause complete agents", () => {
+    setupDashboardWithAgent("complete");
+    dashboard.handleInput("P");
+    expect(dashboard.dialog).toBeNull();
     expect(dashboard.notice).not.toBeNull();
   });
 

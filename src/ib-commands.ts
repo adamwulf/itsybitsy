@@ -55,7 +55,7 @@ export async function killAgent(agent: Agent): Promise<IbCommandResult> {
 }
 
 export async function nukeAgent(agent: Agent): Promise<IbCommandResult> {
-  return runIb(["kill", agent.id, "--force"], agent.repoPath);
+  return runIb(["nuke", agent.id, "--force"], agent.repoPath);
 }
 
 export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
@@ -105,6 +105,10 @@ export async function diffAgent(agent: Agent): Promise<IbCommandResult> {
 
 export async function statusAgent(agent: Agent): Promise<IbCommandResult> {
   return runIb(["status", agent.id], agent.repoPath);
+}
+
+export async function pauseAgent(agent: Agent): Promise<IbCommandResult> {
+  return runIb(["pause", agent.id], agent.repoPath);
 }
 
 export async function acknowledgeQuestion(repoPath: string, questionId: string): Promise<IbCommandResult> {

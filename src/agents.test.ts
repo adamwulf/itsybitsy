@@ -379,8 +379,8 @@ describe("readPendingQuestions", () => {
     await rm(tempDir, { recursive: true, force: true });
   });
 
-  test("reads pending questions", async () => {
-    await mkdir(join(tempDir, ".ittybitty"), { recursive: true });
+  test("reads pending questions from existing agents", async () => {
+    await mkdir(join(tempDir, ".ittybitty", "agents", "agent-1"), { recursive: true });
     await Bun.write(
       join(tempDir, ".ittybitty", "user-questions.json"),
       JSON.stringify({
@@ -395,6 +395,24 @@ describe("readPendingQuestions", () => {
     expect(questions.length).toBe(1);
     expect(questions[0]!.id).toBe("q-1");
     expect(questions[0]!.status).toBe("pending");
+  });
+
+  test("filters out questions from agents that no longer exist", async () => {
+    // Only agent-2 exists in agents dir; agent-1 does not
+    await mkdir(join(tempDir, ".ittybitty", "agents", "agent-2"), { recursive: true });
+    await Bun.write(
+      join(tempDir, ".ittybitty", "user-questions.json"),
+      JSON.stringify({
+        questions: [
+          { id: "q-1", agent: "agent-1", question: "Should I?", timestamp: "2026-03-05T00:00:00Z", status: "pending" },
+          { id: "q-2", agent: "agent-2", question: "Done?", timestamp: "2026-03-05T00:01:00Z", status: "pending" },
+        ],
+      })
+    );
+
+    const questions = await readPendingQuestions(tempDir);
+    expect(questions.length).toBe(1);
+    expect(questions[0]!.id).toBe("q-2");
   });
 
   test("returns empty for missing file", async () => {

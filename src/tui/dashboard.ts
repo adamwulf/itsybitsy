@@ -2438,10 +2438,16 @@ export class DashboardComponent implements Component {
     const terminalRows = process.stdout.rows || 24;
     const isTreeMode = this.rightPane.mode === "TREE";
 
+    // Header (always shown — needed for status messages)
+    const subtitle = this.lastSentNotice
+      ? `${DIM}—${RESET} ${YELLOW}${this.lastSentNotice}${RESET}`
+      : `${DIM}— agent dashboard${RESET}`;
+    lines.push(truncateToWidth(`${BOLD}itsybitsy${RESET} ${subtitle}`, width, ""));
+
     if (isTreeMode) {
-      // TREE mode: full-height navigable tree — skip header to avoid duplicate separator lines
-      // separator(1) + separator(1) + statusBar(2) = 4 lines of chrome
-      const treeHeight = Math.max(5, terminalRows - 4);
+      // TREE mode: skip header separator — the TREE separator below serves that role
+      // title(1) + separator(1) + separator(1) + statusBar(2) = 5 lines of chrome
+      const treeHeight = Math.max(5, terminalRows - 5);
       this.agentTree.maxHeight = treeHeight;
 
       // Separator with TREE title
@@ -2456,11 +2462,7 @@ export class DashboardComponent implements Component {
         lines.push("");
       }
     } else {
-      // Normal layout: header + compact top tree + split pane
-      const subtitle = this.lastSentNotice
-        ? `${DIM}—${RESET} ${YELLOW}${this.lastSentNotice}${RESET}`
-        : `${DIM}— agent dashboard${RESET}`;
-      lines.push(truncateToWidth(`${BOLD}itsybitsy${RESET} ${subtitle}`, width, ""));
+      // Normal layout: separator after header + compact top tree + split pane
       lines.push(truncateToWidth(`${DIM_GRAY}${"─".repeat(width)}${RESET}`, width, ""));
 
       this.agentTree.maxHeight = MAX_TREE_HEIGHT;

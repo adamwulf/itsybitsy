@@ -216,7 +216,7 @@ function setupColorSchemeDetection(
 
 // Dialog types for agent actions
 type DialogState =
-  | { type: "confirm"; prompt: string; onYes: () => void }
+  | { type: "confirm"; prompt: string; confirmLabel: string; focusedButton: "confirm" | "cancel"; onYes: () => void }
   | { type: "input"; prompt: string; value: string; onSubmit: (value: string) => void }
   | { type: "select"; prompt: string; items: string[]; selectedIndex: number; onSelect: (index: number) => void }
   | { type: "fuzzy"; prompt: string; query: string; allItems: string[]; filteredIndices: number[]; filteredItems: string[]; selectedIndex: number; onSelect: (originalIndex: number) => void }
@@ -969,7 +969,9 @@ class DialogOverlayComponent implements Component {
     switch (dialog.type) {
       case "confirm": {
         const wrapped = wrapLines(dialog.prompt, innerWidth);
-        return { title: "Confirm", contentLines: [...wrapped, "", `${DIM}(y/n)${RESET}`] };
+        const confirmBtn = dialog.focusedButton === "confirm" ? `${BOLD}${GREEN}[ ${dialog.confirmLabel} ]${RESET}` : `${DIM}[ ${dialog.confirmLabel} ]${RESET}`;
+        const cancelBtn = dialog.focusedButton === "cancel" ? `${BOLD}${GREEN}[ Cancel ]${RESET}` : `${DIM}[ Cancel ]${RESET}`;
+        return { title: "Confirm", contentLines: [...wrapped, "", `  ${confirmBtn}   ${cancelBtn}`] };
       }
       case "input": {
         return {
@@ -1338,6 +1340,8 @@ export class DashboardComponent implements Component {
     this.showDialog({
       type: "confirm",
       prompt: `Kill agent ${agent.id}?`,
+      confirmLabel: "Kill",
+      focusedButton: "confirm",
       onYes: () => {
         this.closeDialog();
         this.executeAndRefresh(async () => {
@@ -1354,6 +1358,8 @@ export class DashboardComponent implements Component {
     this.showDialog({
       type: "confirm",
       prompt: `${RED}FORCE KILL ${agent.id}? This cannot be undone.${RESET}`,
+      confirmLabel: "Nuke",
+      focusedButton: "confirm",
       onYes: () => {
         this.closeDialog();
         this.executeAndRefresh(async () => {
@@ -1411,6 +1417,8 @@ export class DashboardComponent implements Component {
       this.showDialog({
         type: "confirm",
         prompt: `Merge ${agent.id}?\n${checkOutput}`,
+        confirmLabel: "Merge",
+        focusedButton: "confirm",
         onYes: () => {
           this.closeDialog();
           this.executeAndRefresh(async () => {
@@ -1831,10 +1839,18 @@ export class DashboardComponent implements Component {
     }
 
     if (this._dialog.type === "confirm") {
-      if (data === "y" || data === "Y") {
-        this._dialog.onYes();
-      } else if (data === "n" || data === "N") {
-        this.closeDialog();
+      if (matchesKey(data, Key.tab)) {
+        this._dialog.focusedButton = this._dialog.focusedButton === "confirm" ? "cancel" : "confirm";
+        this.tui?.requestRender();
+      } else if (matchesKey(data, Key.shift("tab"))) {
+        this._dialog.focusedButton = this._dialog.focusedButton === "confirm" ? "cancel" : "confirm";
+        this.tui?.requestRender();
+      } else if (matchesKey(data, Key.enter)) {
+        if (this._dialog.focusedButton === "confirm") {
+          this._dialog.onYes();
+        } else {
+          this.closeDialog();
+        }
       }
       return true;
     }

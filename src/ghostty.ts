@@ -1,5 +1,10 @@
 /**
  * Open a tmux session in a new Ghostty window.
+ *
+ * Note: Ghostty's `+new-window` action (which would reuse a running instance) is
+ * GTK-only and does not work on macOS. On macOS there is no CLI mechanism to open
+ * a new window in an existing Ghostty process, so we spawn a new Ghostty instance
+ * each time. This means a new app appears in the Dock per session — accepted limitation.
  */
 
 export async function openInGhostty(
@@ -14,7 +19,7 @@ export async function openInGhostty(
       return { ok: false, message: "Invalid tmux session name" };
     }
     // Wrap in bash -c so Ghostty's login shell flags (--posix --login) go to bash, not tmux
-    const proc = Bun.spawn(["ghostty", "+new-window", `--command=bash -c "tmux attach -t ${tmuxSession}"`], {
+    const proc = Bun.spawn(["ghostty", `--command=bash -c "tmux attach -t ${tmuxSession}"`], {
       stdio: ["ignore", "ignore", "ignore"],
     });
     proc.unref();

@@ -1110,7 +1110,10 @@ class DialogOverlayComponent implements Component {
           const line = `${prefix}${nameStr}${gitSuffix}`;
 
           if (isSelected) {
-            lines.push(truncateToWidth(`${BOLD}${REVERSE} ${line} ${RESET}`, innerWidth, ""));
+            const raw = truncateToWidth(`${BOLD} ${line} `, innerWidth, "");
+            const pad = Math.max(0, innerWidth - visibleWidth(raw));
+            const highlighted = raw.replaceAll(RESET, RESET + REVERSE);
+            lines.push(`${REVERSE}${highlighted}${" ".repeat(pad)}${RESET}`);
           } else {
             lines.push(truncateToWidth(` ${line}`, innerWidth, ""));
           }

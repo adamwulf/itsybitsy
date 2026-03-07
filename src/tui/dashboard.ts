@@ -1382,7 +1382,9 @@ export class DashboardComponent implements Component {
   private showDialog(dialog: NonNullable<DialogState>) {
     this._dialog = dialog;
     // Folder browser needs a wider dialog for long paths
-    const width = (dialog.type === "folder-browser" || dialog.type === "new-agent-form") ? 70 : DIALOG_WIDTH;
+    const width = dialog.type === "help" ? 72
+      : (dialog.type === "folder-browser" || dialog.type === "new-agent-form") ? 70
+      : DIALOG_WIDTH;
     if (width !== DIALOG_WIDTH && this.overlayHandle) {
       // Only recreate overlay when switching to a non-standard width
       this.overlayHandle.hide();
@@ -1849,17 +1851,45 @@ export class DashboardComponent implements Component {
   }
 
   private handleHelp() {
+    const pad = (key: string, w: number) => key + " ".repeat(Math.max(0, w - key.length));
+    const kw = 18; // key column width
+    const row = (key: string, desc: string) => `  ${BOLD}${pad(key, kw)}${RESET}${desc}`;
+    const header = (title: string) => `${BOLD}${title}${RESET}`;
+
     this.showDialog({
       type: "help",
       lines: [
-        `${BOLD}Keybindings${RESET}`,
+        header("Navigation"),
+        row("j / k / ↑↓", "select agent"),
+        row("@", "fuzzy jump to agent"),
+        row("/", "fuzzy mode picker"),
+        row("+", "add repo folder"),
         "",
-        `${BOLD}Navigation:${RESET} j/k ↑↓ move  ${DIM}|${RESET}  @ fuzzy agent  ${DIM}|${RESET}  / fuzzy mode`,
-        `${BOLD}Pane:${RESET} p/n ←→ cycle  ${DIM}|${RESET}  d DIFF  ${DIM}|${RESET}  g STATUS  ${DIM}|${RESET}  e ERRORS  ${DIM}|${RESET}  q QUESTIONS`,
-        `${BOLD}Scroll:${RESET} ; scroll up  ${DIM}|${RESET}  l scroll down`,
-        `${BOLD}Actions:${RESET} s send  ${DIM}|${RESET}  m merge  ${DIM}|${RESET}  x kill  ${DIM}|${RESET}  ! nuke  ${DIM}|${RESET}  R resume  ${DIM}|${RESET}  r reassign  ${DIM}|${RESET}  a new`,
-        `${BOLD}Open:${RESET} w worktree  ${DIM}|${RESET}  o diff tool  ${DIM}|${RESET}  G Ghostty  ${DIM}|${RESET}  S snapshot`,
-        `${BOLD}App:${RESET} h help  ${DIM}|${RESET}  Ctrl-C quit`,
+        header("Panes"),
+        row("p / n / ←→", "cycle pane left/right"),
+        row("d / g / e / q", "diff / status / errors / questions"),
+        "",
+        header("Scroll"),
+        row(";", "scroll up"),
+        row("l", "scroll down"),
+        "",
+        header("Actions"),
+        row("s", "send message"),
+        row("m", "merge"),
+        row("x / !", "kill / nuke"),
+        row("R", "resume"),
+        row("r", "reassign"),
+        row("a / A", "new agent (pick repo / current repo)"),
+        "",
+        header("Open"),
+        row("w", "worktree"),
+        row("o", "diff tool"),
+        row("G", "Ghostty"),
+        row("S", "snapshot"),
+        "",
+        header("App"),
+        row("h", "help"),
+        row("Ctrl-C", "quit"),
         "",
         `${DIM}Press any key to dismiss${RESET}`,
       ],

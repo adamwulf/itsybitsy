@@ -320,7 +320,8 @@ export function formatAgentRow(
   const namePrefix = `${connector}${orphanedPrefix}${icon} ${agent.repoName}/${agent.id}`;
   const namePad = Math.max(0, nameColWidth - visibleWidth(namePrefix));
   const promptText = agent.meta.prompt.replace(/\n/g, " ");
-  const line = `${namePrefix}${" ".repeat(namePad)}  ${stateColor}${agent.state}${RESET}  ${agent.age}  ${agent.meta.model}  ${promptText}`;
+  const displayState = agent.state === "unknown" ? "running" : agent.state;
+  const line = `${namePrefix}${" ".repeat(namePad)}  ${stateColor}${displayState}${RESET}  ${agent.age}  ${agent.meta.model}  ${promptText}`;
 
   const truncated = truncateToWidth(line, width, "");
   if (selected) {
@@ -617,7 +618,8 @@ export class RightPaneComponent implements Component {
           const icon = agent.meta.worker ? "⚙" : "◆";
           const stateColor = getStateColors()[agent.state] ?? getStateColors().unknown;
           const promptText = agent.meta.prompt.replace(/\n/g, " ");
-          return `${connector}${icon} ${agent.repoName}/${agent.id}  ${stateColor}${agent.state}${RESET}  ${agent.age}  ${agent.meta.model}  ${promptText}`;
+          const displayState = agent.state === "unknown" ? "running" : agent.state;
+          return `${connector}${icon} ${agent.repoName}/${agent.id}  ${stateColor}${displayState}${RESET}  ${agent.age}  ${agent.meta.model}  ${promptText}`;
         });
         if (this.content.length === 0) this.content = [`${DIM}No agents${RESET}`];
         break;

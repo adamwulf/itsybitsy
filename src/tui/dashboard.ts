@@ -346,14 +346,17 @@ export function formatAgentRow(
   selected: boolean,
   width: number,
   nameColWidth: number,
-  stateColWidth: number = MIN_STATE_COL_WIDTH
+  stateColWidth: number = MIN_STATE_COL_WIDTH,
+  hasQuestion: boolean = false
 ): string {
   const orphanedPrefix = agent.orphaned ? "⚠ " : "";
   const icon = agent.meta.worker ? "⚙" : "◆";
   const state = displayState(agent.state);
   const stateColor = getStateColors()[state] ?? getStateColors().unknown;
 
-  const namePrefix = `${connector}${orphanedPrefix}${icon} ${agent.id}`;
+  const nameColor = hasQuestion ? RED : "";
+  const nameEnd = hasQuestion ? RESET : "";
+  const namePrefix = `${connector}${orphanedPrefix}${icon} ${nameColor}${agent.id}${nameEnd}`;
   const namePad = Math.max(0, nameColWidth - visibleWidth(namePrefix));
   const promptText = agent.meta.prompt.replace(/\n/g, " ");
   const coloredState = `${stateColor}${state}${RESET}${" ".repeat(Math.max(0, stateColWidth - state.length))}`;
@@ -376,6 +379,7 @@ export class AgentTreeComponent implements Component {
   maxHeight = MAX_TREE_HEIGHT;
   private scrollOffset = 0;
   private selectedId: string | null = null;
+  questionAgentIds: Set<string> = new Set();
 
   get flatList(): FlatAgent[] {
     return this._flatList;
@@ -554,7 +558,8 @@ export class AgentTreeComponent implements Component {
           lines.push(truncated);
         }
       } else {
-        lines.push(formatAgentRow(item.agent, item.connector, i === this.selectedIndex, width, maxNameWidth, stateColWidth));
+        const hasQ = this.questionAgentIds.has(item.agent.id);
+        lines.push(formatAgentRow(item.agent, item.connector, i === this.selectedIndex, width, maxNameWidth, stateColWidth, hasQ));
       }
     }
 
@@ -587,6 +592,12 @@ export class RightPaneComponent implements Component {
   statusLoading = false;
   questionsSelectedIndex = 0;
   private content: string[] = [];
+
+  /** Return questions filtered by the currently selected agent. If no agent, return all. */
+  get filteredQuestions(): PendingQuestion[] {
+    if (!this.agent) return this.questions;
+    return this.questions.filter((q) => q.agent === this.agent!.id);
+  }
 
   invalidate(): void {}
 
@@ -716,13 +727,17 @@ export class RightPaneComponent implements Component {
           this.content = [`${DIM}Loading status...${RESET}`];
         }
         break;
-      case "QUESTIONS":
-        if (this.questions.length === 0) {
-          this.content = [`${DIM}No pending questions${RESET}`];
+      case "QUESTIONS": {
+        const filtered = this.filteredQuestions;
+        if (filtered.length === 0) {
+          const label = this.agent
+            ? `${DIM}No pending questions for ${this.agent.id}${RESET}`
+            : `${DIM}No pending questions${RESET}`;
+          this.content = [label];
         } else {
           this.content = [];
-          for (let i = 0; i < this.questions.length; i++) {
-            const q = this.questions[i]!;
+          for (let i = 0; i < filtered.length; i++) {
+            const q = filtered[i]!;
             const sel = i === this.questionsSelectedIndex ? `${GREEN}> ` : "  ";
             const selEnd = i === this.questionsSelectedIndex ? RESET : "";
             const prefix = `${sel}${BOLD}${q.agent}:${RESET} `;
@@ -737,9 +752,10 @@ export class RightPaneComponent implements Component {
               this.content.push(`${selStart}${indent}${textLines[j]}${selEnd}`);
             }
           }
-          this.content.push("", `${DIM}Enter:answer  Esc:acknowledge  g:go to agent${RESET}`);
+          this.content.push("", `${DIM}Tab:focus tree  Enter:answer  Esc:acknowledge  g:go to agent${RESET}`);
         }
         break;
+      }
     }
   }
 
@@ -1276,6 +1292,12 @@ export class DashboardComponent implements Component {
   private lastSentNotice: string | null = null;
   private usageTimer: ReturnType<typeof setInterval> | null = null;
   private pendingSelectNewestInRepo: string | null = null;
+  private _questionsFocused = false;
+
+  /** Read-only access to whether questions list has focus (for testing) */
+  get questionsFocused(): boolean {
+    return this._questionsFocused;
+  }
 
   /** Read-only access to dialog state (for testing) */
   get dialog(): DialogState {
@@ -1677,7 +1699,7 @@ export class DashboardComponent implements Component {
   }
 
   private handleAnswerQuestion() {
-    const questions = this.rightPane.questions;
+    const questions = this.rightPane.filteredQuestions;
     const idx = this.rightPane.questionsSelectedIndex;
     if (idx < 0 || idx >= questions.length) return;
     const q = questions[idx]!;
@@ -1712,7 +1734,7 @@ export class DashboardComponent implements Component {
   }
 
   private handleAcknowledgeQuestion() {
-    const questions = this.rightPane.questions;
+    const questions = this.rightPane.filteredQuestions;
     const idx = this.rightPane.questionsSelectedIndex;
     if (idx < 0 || idx >= questions.length) return;
     const q = questions[idx]!;
@@ -1728,7 +1750,7 @@ export class DashboardComponent implements Component {
   }
 
   private handleGoToQuestionAgent() {
-    const questions = this.rightPane.questions;
+    const questions = this.rightPane.filteredQuestions;
     const idx = this.rightPane.questionsSelectedIndex;
     if (idx < 0 || idx >= questions.length) return;
     const q = questions[idx]!;
@@ -2393,9 +2415,15 @@ export class DashboardComponent implements Component {
     this.rightPane.allAgents = flatList;
     this.statusBar.pendingQuestions = questions.length;
 
-    // Clamp questions selection
-    if (this.rightPane.questionsSelectedIndex >= questions.length) {
-      this.rightPane.questionsSelectedIndex = Math.max(0, questions.length - 1);
+    // Build set of agent IDs that have pending questions (for red indicator in tree)
+    const qIds = new Set<string>();
+    for (const q of questions) qIds.add(q.agent);
+    this.agentTree.questionAgentIds = qIds;
+
+    // Clamp questions selection to filtered list
+    const filtered = this.rightPane.filteredQuestions;
+    if (this.rightPane.questionsSelectedIndex >= filtered.length) {
+      this.rightPane.questionsSelectedIndex = Math.max(0, filtered.length - 1);
     }
 
     // Auto-select newly created agent if pending
@@ -2444,6 +2472,11 @@ export class DashboardComponent implements Component {
       this.rightPane.statusContent = null;
       this.rightPane.statusLoading = false;
       this.rightPane.scrollOffset = 0;
+      // Reset questions selection for the new agent's filtered list
+      this.rightPane.questionsSelectedIndex = 0;
+      if (this.rightPane.filteredQuestions.length === 0) {
+        this._questionsFocused = false;
+      }
       if (selected) {
         this.loadAgentLog(selected);
         this.loadAgentPrompt(selected);
@@ -2548,6 +2581,7 @@ export class DashboardComponent implements Component {
     const mode = PANE_MODES[this.modeIndex]!;
     this.rightPane.setMode(mode);
     this.splitPane.fullWidth = FULL_WIDTH_MODES.has(mode);
+    if (mode !== "QUESTIONS") this._questionsFocused = false;
     this.triggerAsyncLoadIfNeeded();
   }
 
@@ -2557,6 +2591,7 @@ export class DashboardComponent implements Component {
       this.modeIndex = idx;
       this.rightPane.setMode(mode);
       this.splitPane.fullWidth = FULL_WIDTH_MODES.has(mode);
+      if (mode !== "QUESTIONS") this._questionsFocused = false;
       this.triggerAsyncLoadIfNeeded(forceRefresh);
     }
   }
@@ -2577,11 +2612,21 @@ export class DashboardComponent implements Component {
     // Dialog input takes priority
     if (this._dialog && this.handleDialogInput(data)) return;
 
+    // Tab / Shift-Tab: toggle focus between tree and questions list when in QUESTIONS mode
+    if (data === "\t" || data === "\x1b[Z") {
+      if (this.rightPane.mode === "QUESTIONS" && this.rightPane.filteredQuestions.length > 0) {
+        this._questionsFocused = !this._questionsFocused;
+        this.rightPane.updateContent();
+        this.tui?.requestRender();
+        return;
+      }
+    }
+
     // Navigation
     if (matchesKey(data, Key.down) || data === "j") {
-      if (this.rightPane.mode === "QUESTIONS" && this.rightPane.questions.length > 0) {
+      if (this.rightPane.mode === "QUESTIONS" && this._questionsFocused && this.rightPane.filteredQuestions.length > 0) {
         this.rightPane.questionsSelectedIndex = Math.min(
-          this.rightPane.questions.length - 1,
+          this.rightPane.filteredQuestions.length - 1,
           this.rightPane.questionsSelectedIndex + 1
         );
         this.rightPane.updateContent();
@@ -2592,7 +2637,7 @@ export class DashboardComponent implements Component {
         this.tui?.requestRender();
       }
     } else if (matchesKey(data, Key.up) || data === "k") {
-      if (this.rightPane.mode === "QUESTIONS" && this.rightPane.questions.length > 0) {
+      if (this.rightPane.mode === "QUESTIONS" && this._questionsFocused && this.rightPane.filteredQuestions.length > 0) {
         this.rightPane.questionsSelectedIndex = Math.max(0, this.rightPane.questionsSelectedIndex - 1);
         this.rightPane.updateContent();
         this.tui?.requestRender();
@@ -2646,13 +2691,13 @@ export class DashboardComponent implements Component {
     }
     // Enter: answer question in QUESTIONS pane
     else if (matchesKey(data, Key.enter)) {
-      if (this.rightPane.mode === "QUESTIONS" && this.rightPane.questions.length > 0) {
+      if (this.rightPane.mode === "QUESTIONS" && this.rightPane.filteredQuestions.length > 0) {
         this.handleAnswerQuestion();
       }
     }
     // Escape: acknowledge question in QUESTIONS pane
     else if (matchesKey(data, Key.escape)) {
-      if (this.rightPane.mode === "QUESTIONS" && this.rightPane.questions.length > 0) {
+      if (this.rightPane.mode === "QUESTIONS" && this.rightPane.filteredQuestions.length > 0) {
         this.handleAcknowledgeQuestion();
       }
     }

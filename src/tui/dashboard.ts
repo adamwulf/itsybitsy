@@ -2353,16 +2353,16 @@ export class DashboardComponent implements Component {
         leftDashStr = "─".repeat(leftHalfDashes);
       }
       const sep =
-        `${DIM}${"─".repeat(leftPad)}${RESET}${BOLD}${leftTitle}${RESET}` +
-        `${DIM}${leftDashStr}${RESET}` +
+        `${DIM_GRAY}${"─".repeat(leftPad)}${RESET}${BOLD}${leftTitle}${RESET}` +
+        `${DIM_GRAY}${leftDashStr}${RESET}` +
         `${BOLD}${rightTitle}${RESET}` +
-        `${DIM}${"─".repeat(rightHalfDashes)}${"─".repeat(rightPad)}${RESET}`;
+        `${DIM_GRAY}${"─".repeat(rightHalfDashes)}${"─".repeat(rightPad)}${RESET}`;
       return truncateToWidth(sep, width, "");
     }
 
     const fixedChars = leftPad + leftTitle.length + rightPad + rightTitle.length;
     const fillCount = Math.max(1, width - fixedChars);
-    const sep = `${DIM}${"─".repeat(leftPad)}${RESET}${BOLD}${leftTitle}${RESET}${DIM}${"─".repeat(fillCount)}${RESET}${BOLD}${rightTitle}${RESET}${DIM}${"─".repeat(rightPad)}${RESET}`;
+    const sep = `${DIM_GRAY}${"─".repeat(leftPad)}${RESET}${BOLD}${leftTitle}${RESET}${DIM_GRAY}${"─".repeat(fillCount)}${RESET}${BOLD}${rightTitle}${RESET}${DIM_GRAY}${"─".repeat(rightPad)}${RESET}`;
     return truncateToWidth(sep, width, "");
   }
 
@@ -2388,7 +2388,7 @@ export class DashboardComponent implements Component {
       ? `${DIM}—${RESET} ${YELLOW}${this.lastSentNotice}${RESET}`
       : `${DIM}— agent dashboard${RESET}`;
     lines.push(truncateToWidth(`${BOLD}itsybitsy${RESET} ${subtitle}`, width, ""));
-    lines.push(truncateToWidth(`${DIM}${"─".repeat(width)}${RESET}`, width, ""));
+    lines.push(truncateToWidth(`${DIM_GRAY}${"─".repeat(width)}${RESET}`, width, ""));
 
     if (isTreeMode) {
       // TREE mode: full-height navigable tree replaces both top tree and split pane
@@ -2444,9 +2444,9 @@ export class DashboardComponent implements Component {
     if (useBottomJunction) {
       const jPos = this.splitPane.getLeftWidth();
       const bottomSep = "─".repeat(jPos) + "┴" + "─".repeat(Math.max(0, width - jPos - 1));
-      lines.push(truncateToWidth(`${DIM}${bottomSep}${RESET}`, width, ""));
+      lines.push(truncateToWidth(`${DIM_GRAY}${bottomSep}${RESET}`, width, ""));
     } else {
-      lines.push(truncateToWidth(`${DIM}${"─".repeat(width)}${RESET}`, width, ""));
+      lines.push(truncateToWidth(`${DIM_GRAY}${"─".repeat(width)}${RESET}`, width, ""));
     }
 
     // Status bar (always visible — dialogs are overlays now)

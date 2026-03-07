@@ -96,7 +96,7 @@ function displayState(state: string): string {
 }
 
 /** Compute state column width from the agents being displayed */
-export function computeStateColWidth(agents: FlatAgent[]): number {
+function computeStateColWidth(agents: FlatAgent[]): number {
   let maxLen = MIN_STATE_COL_WIDTH;
   for (const f of agents) {
     if (!f.repoHeader) {
@@ -515,13 +515,12 @@ export class AgentTreeComponent implements Component {
 
     // Compute max name prefix width and state column width across all visible agent rows
     let maxNameWidth = 0;
-    let stateColWidth = MIN_STATE_COL_WIDTH;
     for (const item of visible) {
       if (!item.repoHeader) {
         maxNameWidth = Math.max(maxNameWidth, agentNamePrefixWidth(item.agent, item.connector));
-        stateColWidth = Math.max(stateColWidth, displayState(item.agent.state).length);
       }
     }
+    const stateColWidth = computeStateColWidth(visible);
 
     // Scroll indicator at top
     if (start > 0) {

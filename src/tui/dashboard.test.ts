@@ -1345,6 +1345,34 @@ describe("AgentTreeComponent scroll indicators", () => {
     expect(lines.some((l) => l.includes("▼ 1 more"))).toBe(false);
   });
 
+  test("navigate up to scrollOffset=1 then navigate down past maxHeight-2: selected visible", () => {
+    // Regression for effectiveScrollOffset trigger bug:
+    // 1. Start at scrollOffset=2, selectedIndex=3 (window=[2..7] with topSlot)
+    // 2. Navigate up: selectedIndex→2, scroll-up check sets scrollOffset=1
+    //    (render absorbs scrollOffset=1 to start=0, window=[0..5]+▼3more)
+    // 3. Navigate down past maxHeight-2=5 (to selectedIndex=6)
+    //    effectiveScrollOffset=0, topSlot=0, trigger: 7>=7 → scrollOffset=Math.max(2,2)=2
+    //    render: start=2, topSlot=1, end=7, remaining=2 → agent-6 visible
+    const tree = makeTree(9, 7, 2);
+    (tree as any).selectedIndex = 3;
+
+    // Navigate up: selectedIndex→2, scrollOffset should become 1
+    tree.moveSelection(-1);
+    expect((tree as any).scrollOffset).toBe(1);
+
+    // Navigate down past maxHeight-2=5 to selectedIndex=6
+    tree.moveSelection(1); // →3
+    tree.moveSelection(1); // →4
+    tree.moveSelection(1); // →5 (maxHeight-2)
+    tree.moveSelection(1); // →6 (past maxHeight-2)
+
+    const lines = renderLines(tree);
+    expect(lines.some((l) => l.includes("agent-6"))).toBe(true);
+    expect(lines.length).toBeLessThanOrEqual(7);
+    expect(lines.some((l) => l.includes("▲ 1 more"))).toBe(false);
+    expect(lines.some((l) => l.includes("▼ 1 more"))).toBe(false);
+  });
+
   test("dynamic list shrink: removing item above keeps no '▼ 1 more'", () => {
     // n=10, h=7, scrollOffset=3: start=3, topSlot=1, maxContent=6,
     // end=min(10,3+5)=8, remaining=2 → shows "▼ 2 more".

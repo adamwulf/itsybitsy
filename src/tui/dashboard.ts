@@ -445,14 +445,19 @@ export class AgentTreeComponent implements Component {
       this.scrollOffset = 0;
     }
 
-    // Scroll down: keep selected visible. Use +3 (not +2/+1) and Math.max(2,...) because:
-    // - The new render reserves 1 slot for a bottom indicator, reducing effective capacity.
-    // - scrollOffset=1 is absorbed to start=0 in render(), which can hide selectedIndex=maxHeight-1.
-    // Both branches use the same formula; render()'s remaining=1 absorption suppresses the
-    // bottom indicator automatically when the selected item lands at the last content row.
-    if (this.selectedIndex < lastIndex && this.selectedIndex + 1 >= this.scrollOffset + this.maxHeight) {
+    // Scroll down: keep selected visible.
+    // effectiveScrollOffset: render() absorbs scrollOffset=1 to start=0, so the visible window
+    // for scrollOffset=1 is identical to scrollOffset=0. Use the effective value in the trigger.
+    // topSlot: when effectiveScrollOffset >= 2, the top indicator consumes 1 slot, reducing
+    // the effective window end by 1 (effective_end = effectiveOffset + maxHeight - topSlot - 1).
+    // Fire when selectedIndex >= effective_end, i.e. selectedIndex+1 >= effectiveOffset+maxHeight-topSlot.
+    // Formula uses +3 (not +2/+1): render reserves 1 bottom-indicator slot, shrinking capacity.
+    // Math.max(2,...): prevents scrollOffset=1 (absorbed to 0) from leaving selected invisible.
+    const effectiveScrollOffset = this.scrollOffset === 1 ? 0 : this.scrollOffset;
+    const topSlot = effectiveScrollOffset > 0 ? 1 : 0;
+    if (this.selectedIndex < lastIndex && this.selectedIndex + 1 >= effectiveScrollOffset + this.maxHeight - topSlot) {
       this.scrollOffset = Math.max(2, this.selectedIndex - this.maxHeight + 3);
-    } else if (this.selectedIndex === lastIndex && this.selectedIndex >= this.scrollOffset + this.maxHeight) {
+    } else if (this.selectedIndex === lastIndex && this.selectedIndex >= effectiveScrollOffset + this.maxHeight - topSlot) {
       this.scrollOffset = Math.max(2, this.selectedIndex - this.maxHeight + 3);
     }
   }

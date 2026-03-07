@@ -717,10 +717,16 @@ export class RightPaneComponent implements Component {
       // Wrap long lines instead of truncating, but cap to available height
       for (const line of visible) {
         if (lines.length >= this.displayHeight) break;
-        const wrapped = wrapLines(line, innerWidth);
-        for (const wl of wrapped) {
+        // In QUESTIONS mode, wrap narrower to leave room for 2-space indent on continuation lines
+        const isQ = this.mode === "QUESTIONS";
+        const wrapped = isQ ? wrapLines(line, innerWidth - 2) : wrapLines(line, innerWidth);
+        for (let wi = 0; wi < wrapped.length; wi++) {
           if (lines.length >= this.displayHeight) break;
-          lines.push(" " + truncateToWidth(wl, innerWidth, ""));
+          if (isQ && wi > 0) {
+            lines.push("   " + truncateToWidth(wrapped[wi]!, innerWidth - 2, ""));
+          } else {
+            lines.push(" " + truncateToWidth(wrapped[wi]!, innerWidth, ""));
+          }
         }
       }
     } else {

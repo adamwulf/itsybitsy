@@ -531,7 +531,7 @@ export class AgentTreeComponent implements Component {
       const item = visible[i]!;
       if (item.repoHeader) {
         const selected = i === this.selectedIndex;
-        const truncated = truncateToWidth(`${BOLD}◆ ${item.repoHeader}${RESET}`, width, "");
+        const truncated = truncateToWidth(`${BOLD}▸ ${item.repoHeader}${RESET}`, width, "");
         if (selected) {
           const pad = Math.max(0, width - visibleWidth(truncated));
           const highlighted = truncated.replaceAll(RESET, RESET + REVERSE);
@@ -593,7 +593,7 @@ export class RightPaneComponent implements Component {
     }
 
     const lines: string[] = [];
-    lines.push(`${BOLD}◆ ${repoName}${RESET}`);
+    lines.push(`${BOLD}▸ ${repoName}${RESET}`);
     lines.push("");
 
     // Find repo path from first agent

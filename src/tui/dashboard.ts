@@ -380,6 +380,7 @@ export class AgentTreeComponent implements Component {
   private scrollOffset = 0;
   private selectedId: string | null = null;
   questionAgentIds: Set<string> = new Set();
+  suppressSelection = false;
 
   get flatList(): FlatAgent[] {
     return this._flatList;
@@ -548,7 +549,7 @@ export class AgentTreeComponent implements Component {
     for (let i = start; i < end; i++) {
       const item = visible[i]!;
       if (item.repoHeader) {
-        const selected = i === this.selectedIndex;
+        const selected = i === this.selectedIndex && !this.suppressSelection;
         const truncated = truncateToWidth(`${BOLD}▸ ${item.repoHeader}${RESET}`, width, "");
         if (selected) {
           const pad = Math.max(0, width - visibleWidth(truncated));
@@ -559,7 +560,7 @@ export class AgentTreeComponent implements Component {
         }
       } else {
         const hasQ = this.questionAgentIds.has(item.agent.id);
-        lines.push(formatAgentRow(item.agent, item.connector, i === this.selectedIndex, width, maxNameWidth, stateColWidth, hasQ));
+        lines.push(formatAgentRow(item.agent, item.connector, i === this.selectedIndex && !this.suppressSelection, width, maxNameWidth, stateColWidth, hasQ));
       }
     }
 
@@ -591,6 +592,7 @@ export class RightPaneComponent implements Component {
   statusContent: string[] | null = null;
   statusLoading = false;
   questionsSelectedIndex = 0;
+  questionsFocused = false;
   private content: string[] = [];
 
   /** Return questions filtered by the currently selected agent. If no agent, return all. */
@@ -738,12 +740,16 @@ export class RightPaneComponent implements Component {
           this.content = [];
           for (let i = 0; i < filtered.length; i++) {
             const q = filtered[i]!;
-            const sel = i === this.questionsSelectedIndex ? `${GREEN}> ` : "  ";
-            const selEnd = i === this.questionsSelectedIndex ? RESET : "";
-            const prefix = `${sel}${BOLD}${q.agent}:${RESET} `;
+            const isSel = i === this.questionsSelectedIndex;
+            const showHighlight = isSel && this.questionsFocused;
+            const sel = isSel ? (showHighlight ? `${REVERSE}> ` : `${GREEN}> `) : "  ";
+            const selEnd = isSel ? RESET : "";
+            const prefix = showHighlight
+              ? `${sel}${BOLD}${q.agent}:${RESET}${REVERSE} `
+              : `${sel}${BOLD}${q.agent}:${RESET} `;
             // First line has the prefix; continuation lines are indented to align
             const indent = "    "; // visual width of "> " or "  " + 2 more
-            const selStart = i === this.questionsSelectedIndex ? GREEN : "";
+            const selStart = showHighlight ? REVERSE : (isSel ? GREEN : "");
             const fullText = `${prefix}${q.question}${selEnd}`;
             // Split on existing newlines and add as separate content lines
             const textLines = fullText.split("\n");
@@ -1297,6 +1303,12 @@ export class DashboardComponent implements Component {
   /** Read-only access to whether questions list has focus (for testing) */
   get questionsFocused(): boolean {
     return this._questionsFocused;
+  }
+
+  private setQuestionsFocused(value: boolean) {
+    this._questionsFocused = value;
+    this.agentTree.suppressSelection = value;
+    this.rightPane.questionsFocused = value;
   }
 
   /** Read-only access to dialog state (for testing) */
@@ -2475,7 +2487,7 @@ export class DashboardComponent implements Component {
       // Reset questions selection for the new agent's filtered list
       this.rightPane.questionsSelectedIndex = 0;
       if (this.rightPane.filteredQuestions.length === 0) {
-        this._questionsFocused = false;
+        this.setQuestionsFocused(false);
       }
       if (selected) {
         this.loadAgentLog(selected);
@@ -2581,7 +2593,7 @@ export class DashboardComponent implements Component {
     const mode = PANE_MODES[this.modeIndex]!;
     this.rightPane.setMode(mode);
     this.splitPane.fullWidth = FULL_WIDTH_MODES.has(mode);
-    if (mode !== "QUESTIONS") this._questionsFocused = false;
+    if (mode !== "QUESTIONS") this.setQuestionsFocused(false);
     this.triggerAsyncLoadIfNeeded();
   }
 
@@ -2591,7 +2603,7 @@ export class DashboardComponent implements Component {
       this.modeIndex = idx;
       this.rightPane.setMode(mode);
       this.splitPane.fullWidth = FULL_WIDTH_MODES.has(mode);
-      if (mode !== "QUESTIONS") this._questionsFocused = false;
+      if (mode !== "QUESTIONS") this.setQuestionsFocused(false);
       this.triggerAsyncLoadIfNeeded(forceRefresh);
     }
   }
@@ -2615,7 +2627,7 @@ export class DashboardComponent implements Component {
     // Tab / Shift-Tab: toggle focus between tree and questions list when in QUESTIONS mode
     if (data === "\t" || data === "\x1b[Z") {
       if (this.rightPane.mode === "QUESTIONS" && this.rightPane.filteredQuestions.length > 0) {
-        this._questionsFocused = !this._questionsFocused;
+        this.setQuestionsFocused(!this._questionsFocused);
         this.rightPane.updateContent();
         this.tui?.requestRender();
         return;

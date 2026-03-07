@@ -902,26 +902,9 @@ class StatusBarComponent implements Component {
   usage: UsageData | null = null;
   version = "";
 
-  // FPS tracking: rolling 1-second window
-  private renderTimestamps: number[] = [];
-
   invalidate(): void {}
 
-  /** Record a render timestamp and return current FPS */
-  private trackFps(): number {
-    const now = Date.now();
-    this.renderTimestamps.push(now);
-    // Keep only timestamps within the last 1 second
-    const cutoff = now - 1000;
-    while (this.renderTimestamps.length > 0 && this.renderTimestamps[0]! < cutoff) {
-      this.renderTimestamps.shift();
-    }
-    return this.renderTimestamps.length;
-  }
-
   render(width: number): string[] {
-    const fps = this.trackFps();
-
     // Row 1 left: navigation keys with inline context
     const qLabel = this.pendingQuestions > 0
       ? `q: questions (${this.pendingQuestions})`
@@ -937,11 +920,11 @@ class StatusBarComponent implements Component {
     // Row 2 left: secondary/app keys
     const row2Left = `${DIM}@: jump    /: commands    a: new agent    h: help    x: kill    R: resume    r: reassign    w: worktree    G: ghostty${RESET}`;
 
-    // Row 2 right: fps · time · version
+    // Row 2 right: time · version
     const now = new Date();
     const timeStr = now.toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
     const versionStr = this.version ? `v${this.version}` : "";
-    const row2Right = `${DIM}fps: ${fps}  ${timeStr}  ${versionStr}${RESET}`;
+    const row2Right = `${DIM}${timeStr}  ${versionStr}${RESET}`;
 
     // Compose row 1
     const row1 = this.composeLine(row1Left, usageStr, width);

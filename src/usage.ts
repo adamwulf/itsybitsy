@@ -139,7 +139,7 @@ export async function fetchUsage(): Promise<UsageData | null> {
     if (!resp.ok) {
       if (cache) {
         const backoffMs = Math.min(cache.nextBackoffMs ?? 60_000, MAX_BACKOFF_MS);
-        const nextBackoffMs = Math.min(backoffMs * 2, MAX_BACKOFF_MS);
+        const nextBackoffMs = Math.min(backoffMs + 60_000, MAX_BACKOFF_MS);
         // Set timestamp so next retry happens after backoffMs
         const retryTimestamp = Math.floor((now + backoffMs - CACHE_TTL_MS) / 1000);
         await writeCache({ timestamp: retryTimestamp, response: cache.response, nextBackoffMs });
@@ -153,7 +153,7 @@ export async function fetchUsage(): Promise<UsageData | null> {
     if (body.error) {
       if (cache) {
         const backoffMs = Math.min(cache.nextBackoffMs ?? 60_000, MAX_BACKOFF_MS);
-        const nextBackoffMs = Math.min(backoffMs * 2, MAX_BACKOFF_MS);
+        const nextBackoffMs = Math.min(backoffMs + 60_000, MAX_BACKOFF_MS);
         const retryTimestamp = Math.floor((now + backoffMs - CACHE_TTL_MS) / 1000);
         await writeCache({ timestamp: retryTimestamp, response: cache.response, nextBackoffMs });
         return parseUsageResponse(cache.response);

@@ -322,7 +322,7 @@ function fuzzyFilterIndices(items: string[], query: string): number[] {
 function agentNamePrefixWidth(agent: Agent, connector: string): number {
   const orphanedPrefix = agent.orphaned ? "⚠ " : "";
   const icon = agent.meta.worker ? "⚙" : "◆";
-  return visibleWidth(`${connector}${orphanedPrefix}${icon} ${agent.repoName}/${agent.id}`);
+  return visibleWidth(`${connector}${orphanedPrefix}${icon} ${agent.id}`);
 }
 
 /** Format agent row for the tree */
@@ -339,7 +339,7 @@ export function formatAgentRow(
   const state = displayState(agent.state);
   const stateColor = getStateColors()[state] ?? getStateColors().unknown;
 
-  const namePrefix = `${connector}${orphanedPrefix}${icon} ${agent.repoName}/${agent.id}`;
+  const namePrefix = `${connector}${orphanedPrefix}${icon} ${agent.id}`;
   const namePad = Math.max(0, nameColWidth - visibleWidth(namePrefix));
   const promptText = agent.meta.prompt.replace(/\n/g, " ");
   const coloredState = `${stateColor}${state}${RESET}${" ".repeat(Math.max(0, stateColWidth - state.length))}`;
@@ -667,7 +667,7 @@ export class RightPaneComponent implements Component {
           const promptText = agent.meta.prompt.replace(/\n/g, " ");
           const coloredState = `${stateColor}${state}${RESET}${" ".repeat(Math.max(0, treeStateColWidth - state.length))}`;
           const paddedAge = agent.age.padStart(AGE_COL_WIDTH);
-          return `${connector}${icon} ${agent.repoName}/${agent.id}  ${coloredState}  ${paddedAge}  ${agent.meta.model}  ${promptText}`;
+          return `${connector}${icon} ${agent.id}  ${coloredState}  ${paddedAge}  ${agent.meta.model}  ${promptText}`;
         });
       }
         if (this.content.length === 0) this.content = [`${DIM}No agents${RESET}`];

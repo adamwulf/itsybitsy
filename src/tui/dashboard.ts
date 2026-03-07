@@ -319,13 +319,16 @@ function formatAgentRow(
   const orphanedPrefix = agent.orphaned ? "⚠ " : "";
   const icon = agent.meta.worker ? "⚙" : "◆";
   const stateColor = getStateColors()[agent.state] ?? getStateColors().unknown;
-  const sel = selected ? `${BOLD}${REVERSE}` : "";
-  const selEnd = selected ? `${RESET}` : "";
 
-  const shortPrompt = agent.meta.prompt.replace(/\n/g, " ").slice(0, 40);
-  const line = `${connector}${orphanedPrefix}${icon} ${agent.repoName}/${agent.id}  ${stateColor}${agent.state}${RESET}  ${agent.age}  ${agent.meta.model}  ${shortPrompt}`;
+  const promptText = agent.meta.prompt.replace(/\n/g, " ");
+  const line = `${connector}${orphanedPrefix}${icon} ${agent.repoName}/${agent.id}  ${stateColor}${agent.state}${RESET}  ${agent.age}  ${agent.meta.model}  ${promptText}`;
 
-  return `${sel}${truncateToWidth(line, width, "")}${selEnd}`;
+  const truncated = truncateToWidth(line, width, "");
+  if (selected) {
+    const pad = width - visibleWidth(truncated);
+    return `${REVERSE}${truncated}${RESET}${REVERSE}${pad > 0 ? " ".repeat(pad) : ""}${RESET}`;
+  }
+  return truncated;
 }
 
 /** Agent tree component with height constraint and scrolling */
@@ -405,9 +408,14 @@ class AgentTreeComponent implements Component {
     for (let i = start; i < end; i++) {
       const item = visible[i]!;
       if (item.repoHeader) {
-        const sel = i === this.selectedIndex ? `${BOLD}${REVERSE}` : "";
-        const selEnd = i === this.selectedIndex ? `${RESET}` : "";
-        lines.push(`${sel}${truncateToWidth(`${BOLD}◆ ${item.repoHeader}${RESET}`, width, "")}${selEnd}`);
+        const selected = i === this.selectedIndex;
+        const truncated = truncateToWidth(`${BOLD}◆ ${item.repoHeader}${RESET}`, width, "");
+        if (selected) {
+          const pad = width - visibleWidth(truncated);
+          lines.push(`${REVERSE}${truncated}${RESET}${REVERSE}${pad > 0 ? " ".repeat(pad) : ""}${RESET}`);
+        } else {
+          lines.push(truncated);
+        }
       } else {
         lines.push(formatAgentRow(item.agent, item.connector, i === this.selectedIndex, width));
       }
@@ -532,8 +540,8 @@ export class RightPaneComponent implements Component {
         this.content = this.allAgents.map(({ agent, connector }) => {
           const icon = agent.meta.worker ? "⚙" : "◆";
           const stateColor = getStateColors()[agent.state] ?? getStateColors().unknown;
-          const shortPrompt = agent.meta.prompt.replace(/\n/g, " ").slice(0, 40);
-          return `${connector}${icon} ${agent.repoName}/${agent.id}  ${stateColor}${agent.state}${RESET}  ${agent.age}  ${agent.meta.model}  ${shortPrompt}`;
+          const promptText = agent.meta.prompt.replace(/\n/g, " ");
+          return `${connector}${icon} ${agent.repoName}/${agent.id}  ${stateColor}${agent.state}${RESET}  ${agent.age}  ${agent.meta.model}  ${promptText}`;
         });
         if (this.content.length === 0) this.content = [`${DIM}No agents${RESET}`];
         break;
@@ -1465,8 +1473,8 @@ export class DashboardComponent implements Component {
       return;
     }
     const allItems = visible.map((f) => {
-      const shortPrompt = f.agent.meta.prompt.replace(/\n/g, " ").slice(0, 40);
-      return `${f.agent.repoName}/${f.agent.id}  ${f.agent.state}  ${shortPrompt}`;
+      const promptText = f.agent.meta.prompt.replace(/\n/g, " ");
+      return `${f.agent.repoName}/${f.agent.id}  ${f.agent.state}  ${promptText}`;
     });
     this.showDialog({
       type: "fuzzy",
@@ -2265,7 +2273,7 @@ export class DashboardComponent implements Component {
       const treeHeight = Math.max(5, terminalRows - 6);
       this.agentTree.maxHeight = treeHeight;
 
-      // Separator with TREE title
+      // Separator with TREE title at left edge
       lines.push(this.buildTitledSeparator(" TREE ", "", width));
 
       const treeLines = this.agentTree.render(width);

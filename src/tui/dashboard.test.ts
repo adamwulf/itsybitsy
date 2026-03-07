@@ -4,7 +4,7 @@ import { mkdtemp, rm, mkdir } from "fs/promises";
 import { tmpdir } from "os";
 import { readAgentLog, readAgentPrompt, parseDenials } from "../agents";
 import type { Agent, AgentMeta, FlatAgent, PendingQuestion } from "../agents";
-import { TmuxPaneComponent, RightPaneComponent, DashboardComponent, colorizeDiff, colorizeLog, formatAgentRow } from "./dashboard";
+import { TmuxPaneComponent, RightPaneComponent, DashboardComponent, AgentTreeComponent, colorizeDiff, colorizeLog, formatAgentRow } from "./dashboard";
 import { visibleWidth } from "@mariozechner/pi-tui";
 import { setRunner, resetRunner } from "../ib-commands";
 
@@ -1161,5 +1161,143 @@ describe("formatAgentRow full-width highlight", () => {
     const narrowPane = 40;
     const row = formatAgentRow(agent, "", true, narrowPane, 30);
     expect(visibleWidth(row)).toBe(narrowPane);
+  });
+});
+
+describe("AgentTreeComponent scroll indicators", () => {
+  /** Build a tree component with N fake agents and the given maxHeight/scrollOffset. */
+  function makeTree(agentCount: number, maxHeight: number, scrollOffset: number): AgentTreeComponent {
+    const tree = new AgentTreeComponent();
+    tree.maxHeight = maxHeight;
+    const flatList: FlatAgent[] = Array.from({ length: agentCount }, (_, i) => ({
+      agent: makeAgent(`agent-${i}`, "/repos/test"),
+      depth: 0,
+      connector: "",
+    }));
+    tree.setFlatList(flatList);
+    // Override scrollOffset (private) via type assertion for testing
+    (tree as any).scrollOffset = scrollOffset;
+    return tree;
+  }
+
+  /** Strip ANSI escape codes for plain-text assertions. */
+  function stripAnsi(s: string): string {
+    // eslint-disable-next-line no-control-regex
+    return s.replace(/\x1b\[[0-9;]*m/g, "");
+  }
+
+  function renderLines(tree: AgentTreeComponent): string[] {
+    return tree.render(80).map(stripAnsi);
+  }
+
+  test("all items fit — no indicators, total equals item count", () => {
+    const tree = makeTree(5, 7, 0);
+    const lines = renderLines(tree);
+    expect(lines.length).toBe(5);
+    expect(lines.some((l) => l.includes("more"))).toBe(false);
+  });
+
+  test("scroll offset 0, many items — shows bottom indicator only, total = maxHeight", () => {
+    const tree = makeTree(14, 7, 0);
+    const lines = renderLines(tree);
+    expect(lines.length).toBe(7);
+    expect(lines.some((l) => l.includes("▲"))).toBe(false);
+    const bottom = lines[lines.length - 1]!;
+    expect(bottom).toContain("▼");
+    expect(bottom).not.toContain("▼ 1 more");
+  });
+
+  test("scroll offset 1 — absorbs hidden-above row, shows no top indicator", () => {
+    const tree = makeTree(14, 7, 1);
+    const lines = renderLines(tree);
+    expect(lines.length).toBe(7);
+    // No top indicator: item 0 should be visible
+    expect(lines.some((l) => l.includes("▲"))).toBe(false);
+    // Should show a bottom indicator for the items below
+    expect(lines.some((l) => l.includes("▼"))).toBe(true);
+    expect(lines.some((l) => l.includes("▼ 1 more"))).toBe(false);
+  });
+
+  test("scroll offset 2+ — shows top indicator with correct count, total = maxHeight", () => {
+    const tree = makeTree(14, 7, 2);
+    const lines = renderLines(tree);
+    expect(lines.length).toBe(7);
+    expect(lines[0]).toContain("▲ 2 more");
+    expect(lines[lines.length - 1]).toContain("▼");
+    expect(lines.some((l) => l.includes("▼ 1 more"))).toBe(false);
+    expect(lines.some((l) => l.includes("▲ 1 more"))).toBe(false);
+  });
+
+  test("near-bottom: remaining === 1 is absorbed, no bottom indicator", () => {
+    // 10 items, maxHeight 7, scrollOffset 4 → end = min(10, 4+6-1)=9, remaining=1 → absorbed
+    const tree = makeTree(10, 7, 4);
+    const lines = renderLines(tree);
+    expect(lines.length).toBe(7);
+    expect(lines.some((l) => l.includes("▼ 1 more"))).toBe(false);
+    expect(lines.some((l) => l.includes("▼"))).toBe(false);
+    // Top indicator should show "4 more"
+    expect(lines[0]).toContain("▲ 4 more");
+  });
+
+  test("remaining === 2 shows bottom indicator, not absorbed", () => {
+    // 11 items, maxHeight 7, scrollOffset 4 → remaining=2 → shows indicator
+    const tree = makeTree(11, 7, 4);
+    const lines = renderLines(tree);
+    expect(lines.length).toBe(7);
+    expect(lines[lines.length - 1]).toContain("▼ 2 more");
+    expect(lines[0]).toContain("▲ 4 more");
+  });
+
+  test("never shows '▲ 1 more'", () => {
+    // Test many configurations: no render should ever produce "▲ 1 more"
+    for (let n = 1; n <= 15; n++) {
+      for (let offset = 0; offset < n; offset++) {
+        const tree = makeTree(n, 7, offset);
+        const lines = renderLines(tree);
+        for (const line of lines) {
+          expect(line).not.toContain("▲ 1 more");
+        }
+      }
+    }
+  });
+
+  test("never shows '▼ 1 more'", () => {
+    // Test many configurations: no render should ever produce "▼ 1 more"
+    for (let n = 1; n <= 15; n++) {
+      for (let offset = 0; offset < n; offset++) {
+        const tree = makeTree(n, 7, offset);
+        const lines = renderLines(tree);
+        for (const line of lines) {
+          expect(line).not.toContain("▼ 1 more");
+        }
+      }
+    }
+  });
+
+  test("total rendered rows never exceeds maxHeight", () => {
+    for (let n = 1; n <= 15; n++) {
+      for (let offset = 0; offset < n; offset++) {
+        const tree = makeTree(n, 7, offset);
+        const lines = renderLines(tree);
+        expect(lines.length).toBeLessThanOrEqual(7);
+      }
+    }
+  });
+
+  test("scroll offset 0, exactly maxHeight items — all shown, no indicators", () => {
+    const tree = makeTree(7, 7, 0);
+    const lines = renderLines(tree);
+    expect(lines.length).toBe(7);
+    expect(lines.some((l) => l.includes("more"))).toBe(false);
+  });
+
+  test("scroll offset 0, maxHeight+1 items — bottom item hidden, no '▼ 1 more'", () => {
+    // 8 items, maxHeight 7, scrollOffset 0: remaining would be 1 → absorb? No room.
+    // Reserved slot: end = min(8, 0+7-1)=6, remaining=2 → show "▼ 2 more".
+    const tree = makeTree(8, 7, 0);
+    const lines = renderLines(tree);
+    expect(lines.length).toBe(7);
+    expect(lines.some((l) => l.includes("▼ 1 more"))).toBe(false);
+    expect(lines.some((l) => l.includes("▲ 1 more"))).toBe(false);
   });
 });

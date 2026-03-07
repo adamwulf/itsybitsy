@@ -1211,7 +1211,7 @@ export class DashboardComponent implements Component {
     this.dialogOverlay = new DialogOverlayComponent(() => this._dialog);
 
     // Split pane: tmux left (~60 cols), right pane on right
-    this.splitPane = new SplitPane(this.tmuxPane, this.rightPane, 60);
+    this.splitPane = new SplitPane(this.tmuxPane, this.rightPane, 60, `${DIM_GRAY}│${RESET}`);
 
     // Tmux poller for live output of selected agent
     this.tmuxPoller = new TmuxPoller({

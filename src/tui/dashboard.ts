@@ -309,19 +309,29 @@ function fuzzyFilterIndices(items: string[], query: string): number[] {
   return filtered.map((item) => item.index);
 }
 
+/** Compute the visible width of the name prefix (connector + icon + repo/id) for an agent row */
+function agentNamePrefixWidth(agent: Agent, connector: string): number {
+  const orphanedPrefix = agent.orphaned ? "⚠ " : "";
+  const icon = agent.meta.worker ? "⚙" : "◆";
+  return visibleWidth(`${connector}${orphanedPrefix}${icon} ${agent.repoName}/${agent.id}`);
+}
+
 /** Format agent row for the tree */
 function formatAgentRow(
   agent: Agent,
   connector: string,
   selected: boolean,
-  width: number
+  width: number,
+  nameColWidth: number
 ): string {
   const orphanedPrefix = agent.orphaned ? "⚠ " : "";
   const icon = agent.meta.worker ? "⚙" : "◆";
   const stateColor = getStateColors()[agent.state] ?? getStateColors().unknown;
 
+  const namePrefix = `${connector}${orphanedPrefix}${icon} ${agent.repoName}/${agent.id}`;
+  const namePad = Math.max(0, nameColWidth - visibleWidth(namePrefix));
   const promptText = agent.meta.prompt.replace(/\n/g, " ");
-  const line = `${connector}${orphanedPrefix}${icon} ${agent.repoName}/${agent.id}  ${stateColor}${agent.state}${RESET}  ${agent.age}  ${agent.meta.model}  ${promptText}`;
+  const line = `${namePrefix}${" ".repeat(namePad)}  ${stateColor}${agent.state}${RESET}  ${agent.age}  ${agent.meta.model}  ${promptText}`;
 
   const truncated = truncateToWidth(line, width, "");
   if (selected) {
@@ -467,6 +477,14 @@ class AgentTreeComponent implements Component {
       end = visible.length;
     }
 
+    // Compute max name prefix width across all visible agent rows for column alignment
+    let maxNameWidth = 0;
+    for (const item of visible) {
+      if (!item.repoHeader) {
+        maxNameWidth = Math.max(maxNameWidth, agentNamePrefixWidth(item.agent, item.connector));
+      }
+    }
+
     // Scroll indicator at top
     if (start > 0) {
       lines.push(truncateToWidth(`${DIM}  ▲ ${start} more${RESET}`, width, ""));
@@ -484,7 +502,7 @@ class AgentTreeComponent implements Component {
           lines.push(truncated);
         }
       } else {
-        lines.push(formatAgentRow(item.agent, item.connector, i === this.selectedIndex, width));
+        lines.push(formatAgentRow(item.agent, item.connector, i === this.selectedIndex, width, maxNameWidth));
       }
     }
 

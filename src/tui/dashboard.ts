@@ -39,8 +39,6 @@ import {
 } from "../ib-commands";
 import type { NewAgentOptions } from "../ib-commands";
 import { openInGhostty } from "../ghostty";
-import { watchColorScheme } from "./color-scheme";
-import { setTheme, DARK_THEME, LIGHT_THEME, getCurrentTheme } from "./theme";
 import { fetchUsage } from "../usage";
 import type { UsageData } from "../usage";
 import { buildFolderItems } from "./folder-browser";
@@ -72,33 +70,30 @@ function wrapTextareaLines(lines: string[], width: number): string[] {
   return result;
 }
 
-// Theme-aware color accessors — read from current theme at call time
-function getStateColors(): Record<string, string> {
-  const t = getCurrentTheme();
-  return {
-    creating: t.stateCreating,
-    running: t.stateRunning,
-    waiting: t.stateWaiting,
-    complete: t.stateComplete,
-    compacting: t.stateCompacting,
-    rate_limited: t.stateRateLimited,
-    stopped: t.stateStopped,
-    unknown: t.stateUnknown,
-  };
-}
+// ANSI escape constants
+const RESET = "\x1b[0m";
+const BOLD = "\x1b[1m";
+const DIM = "\x1b[2m";
+const REVERSE = "\x1b[7m";
+const RED = "\x1b[31m";
+const GREEN = "\x1b[32m";
+const YELLOW = "\x1b[33m";
+const BLUE = "\x1b[34m";
+const MAGENTA = "\x1b[35m";
+const CYAN = "\x1b[36m";
+const WHITE = "\x1b[37m";
+const DIM_GRAY = "\x1b[90m";
 
-/** Theme color shortcuts — call at render time so theme changes take effect */
-function tc() {
-  const t = getCurrentTheme();
-  return {
-    RESET: t.reset,
-    BOLD: t.bold,
-    DIM: t.dim,
-    YELLOW: t.yellow,
-    RED: t.red,
-    GREEN: t.green,
-  };
-}
+const STATE_COLORS: Record<string, string> = {
+  creating: YELLOW,
+  running: GREEN,
+  waiting: CYAN,
+  complete: BLUE,
+  compacting: MAGENTA,
+  rate_limited: RED,
+  stopped: DIM_GRAY,
+  unknown: WHITE,
+};
 
 // Dialog types for agent actions
 type DialogState =
@@ -151,14 +146,13 @@ const FOLDER_BROWSER_HEIGHT = 15;
 
 /** Colorize diff output lines */
 export function colorizeDiff(lines: string[]): string[] {
-  const t = getCurrentTheme();
   return lines.map((line) => {
     if (line.startsWith("+++") || line.startsWith("---") || line.startsWith("@@") || line.startsWith("diff ")) {
-      return `${t.diffMeta}${line}${t.reset}`;
+      return `${DIM}${line}${RESET}`;
     } else if (line.startsWith("+")) {
-      return `${t.diffAdd}${line}${t.reset}`;
+      return `${GREEN}${line}${RESET}`;
     } else if (line.startsWith("-")) {
-      return `${t.diffRemove}${line}${t.reset}`;
+      return `${RED}${line}${RESET}`;
     }
     return line;
   });
@@ -166,12 +160,11 @@ export function colorizeDiff(lines: string[]): string[] {
 
 /** Colorize agent log lines — dim timestamps, cyan bracket markers */
 export function colorizeLog(lines: string[]): string[] {
-  const t = getCurrentTheme();
   return lines.map((line) => {
     // Dim timestamp prefix like [2026-03-06 12:00:00]
-    let result = line.replace(/^(\[\d{4}-[^\]]*\])/, `${t.logTimestamp}$1${t.reset}`);
+    let result = line.replace(/^(\[\d{4}-[^\]]*\])/, `${DIM}$1${RESET}`);
     // Cyan bracket markers like [PreToolUse], [PostToolUse], etc. (but not the timestamp we already handled)
-    result = result.replace(new RegExp(`(?<=${escapeForRegex(t.reset)}.*)(\\[[^\\]]+\\])`, "g"), `${t.logBracket}$1${t.reset}`);
+    result = result.replace(new RegExp(`(?<=${escapeForRegex(RESET)}.*)(\\[[^\\]]+\\])`, "g"), `${CYAN}$1${RESET}`);
     return result;
   });
 }
@@ -197,14 +190,11 @@ function formatAgentRow(
   selected: boolean,
   width: number
 ): string {
-  const { RESET, BOLD, DIM } = tc();
-  const STATE_COLORS = getStateColors();
-  const t = getCurrentTheme();
   const orphanedPrefix = agent.orphaned ? "⚠ " : "";
   const icon = agent.meta.worker ? "⚙" : "◆";
   const stateColor = STATE_COLORS[agent.state] ?? STATE_COLORS.unknown;
   const archived = agent.archived ? `${DIM}[archived]${RESET} ` : "";
-  const sel = selected ? `${BOLD}${t.selectedHighlight}` : "";
+  const sel = selected ? `${BOLD}${REVERSE}` : "";
   const selEnd = selected ? `${RESET}` : "";
 
   const shortPrompt = agent.meta.prompt.replace(/\n/g, " ").slice(0, 40);
@@ -274,7 +264,6 @@ class AgentTreeComponent implements Component {
   invalidate(): void {}
 
   render(width: number): string[] {
-    const { RESET, DIM } = tc();
     const visible = this.visibleList;
     if (visible.length === 0) {
       return [truncateToWidth(`${DIM}  No agents found${RESET}`, width, "")];
@@ -333,8 +322,6 @@ export class RightPaneComponent implements Component {
   }
 
   updateContent() {
-    const { RESET, BOLD, DIM, GREEN } = tc();
-    const STATE_COLORS = getStateColors();
     switch (this.mode) {
       case "AGENT LOG":
         this.content = this.agentLogContent
@@ -435,7 +422,6 @@ export class RightPaneComponent implements Component {
   }
 
   render(width: number): string[] {
-    const { RESET, BOLD, DIM } = tc();
     const header = `${BOLD}${DIM}── ${this.mode} ──${RESET}`;
     const lines = [truncateToWidth(header, width, "")];
 
@@ -499,8 +485,6 @@ export class TmuxPaneComponent implements Component {
   }
 
   render(width: number): string[] {
-    const { RESET, BOLD, DIM } = tc();
-    const STATE_COLORS = getStateColors();
     if (!this.agent) {
       return padLines([truncateToWidth(`${DIM}No agent selected${RESET}`, width, "")], this.displayHeight);
     }
@@ -580,15 +564,13 @@ class StatusBarComponent implements Component {
   invalidate(): void {}
 
   render(width: number): string[] {
-    const { RESET, BOLD, DIM } = tc();
-    const t = getCurrentTheme();
     const questionBadge =
       this.pendingQuestions > 0
-        ? ` ${BOLD}${t.questionBadge}[${this.pendingQuestions} questions]${RESET}`
+        ? ` ${BOLD}${YELLOW}[${this.pendingQuestions} questions]${RESET}`
         : "";
     const errorBadge =
       this.errorCount > 0
-        ? ` ${BOLD}${t.red}[${this.errorCount} errors]${RESET}`
+        ? ` ${BOLD}${RED}[${this.errorCount} errors]${RESET}`
         : "";
 
     const modeLine = `${DIM}[${this.modeIndex}] ${this.currentMode}${RESET}${questionBadge}${errorBadge}`;
@@ -615,18 +597,16 @@ class StatusBarComponent implements Component {
 
   private formatUsage(): string {
     if (!this.usage) return "";
-    const t = getCurrentTheme();
-    const { RESET, DIM } = tc();
     const parts: string[] = [];
     if (this.usage.sessionPct !== null) {
       const pct = this.usage.sessionPct;
-      const color = pct > 90 ? t.usageCritical : pct > 80 ? t.usageWarning : DIM;
+      const color = pct > 90 ? RED : pct > 80 ? YELLOW : DIM;
       const reset = this.usage.sessionReset ? ` (${this.usage.sessionReset})` : "";
       parts.push(`${color}session:${pct}%${reset}${RESET}`);
     }
     if (this.usage.weeklyPct !== null) {
       const pct = this.usage.weeklyPct;
-      const color = pct > 90 ? t.usageCritical : pct > 80 ? t.usageWarning : DIM;
+      const color = pct > 90 ? RED : pct > 80 ? YELLOW : DIM;
       const reset = this.usage.weeklyReset ? ` (${this.usage.weeklyReset})` : "";
       parts.push(`${color}weekly:${pct}%${reset}${RESET}`);
     }
@@ -654,7 +634,6 @@ class DialogOverlayComponent implements Component {
     // Build the box
     const lines: string[] = [];
     // Top border with title
-    const { RESET, BOLD } = tc();
     const titleStr = ` ${title} `;
     const topPadding = Math.max(0, width - 3 - visibleWidth(titleStr));
     lines.push(`┌─${BOLD}${titleStr}${RESET}${"─".repeat(topPadding)}┐`);
@@ -672,7 +651,6 @@ class DialogOverlayComponent implements Component {
   }
 
   private buildContent(dialog: NonNullable<DialogState>, innerWidth: number): { title: string; contentLines: string[] } {
-    const { RESET, BOLD, DIM, YELLOW, GREEN } = tc();
     switch (dialog.type) {
       case "confirm": {
         const wrapped = wrapLines(dialog.prompt, innerWidth);
@@ -806,8 +784,7 @@ class DialogOverlayComponent implements Component {
           const line = `${prefix}${nameStr}${gitSuffix}`;
 
           if (isSelected) {
-            const t = getCurrentTheme();
-            lines.push(truncateToWidth(`${BOLD}${t.selectedHighlight} ${line} ${RESET}`, innerWidth, ""));
+            lines.push(truncateToWidth(`${BOLD}${REVERSE} ${line} ${RESET}`, innerWidth, ""));
           } else {
             lines.push(truncateToWidth(` ${line}`, innerWidth, ""));
           }
@@ -861,7 +838,6 @@ export class DashboardComponent implements Component {
   private diffTool: string | undefined;
   private lastSentNotice: string | null = null;
   private usageTimer: ReturnType<typeof setInterval> | null = null;
-  currentThemeName: "dark" | "light" = "dark";
 
   /** Read-only access to dialog state (for testing) */
   get dialog(): DialogState {
@@ -961,7 +937,6 @@ export class DashboardComponent implements Component {
 
   /** Add an error to the errors list (called from watcher onError) */
   addError(message: string) {
-    const { DIM, RESET } = tc();
     const ts = new Date().toLocaleTimeString();
     this.rightPane.errors.push(`${DIM}[${ts}]${RESET} ${message}`);
     this.statusBar.errorCount = this.rightPane.errors.length;
@@ -1045,7 +1020,7 @@ export class DashboardComponent implements Component {
     if (!agent) return;
     this.showDialog({
       type: "confirm",
-      prompt: `${tc().RED}FORCE KILL ${agent.id}? This cannot be undone.${tc().RESET}`,
+      prompt: `${RED}FORCE KILL ${agent.id}? This cannot be undone.${RESET}`,
       onYes: () => {
         this.closeDialog();
         this.executeAndRefresh(async () => {
@@ -1318,7 +1293,6 @@ export class DashboardComponent implements Component {
       { label: "open diff in tool — o", action: () => this.handleOpenDiffTool() },
       { label: "open in Ghostty — G", action: () => this.handleOpenGhostty() },
       { label: "debug snapshot — S", action: () => this.handleSnapshot() },
-      { label: "toggle theme — T", action: () => this.handleToggleTheme() },
       // Navigation
       { label: "fuzzy jump to agent — @", action: () => this.handleFuzzyAgent() },
       { label: "help — h", action: () => this.handleHelp() },
@@ -1423,7 +1397,6 @@ export class DashboardComponent implements Component {
   }
 
   private handleHelp() {
-    const { RESET, BOLD, DIM } = tc();
     this.showDialog({
       type: "help",
       lines: [
@@ -1434,22 +1407,11 @@ export class DashboardComponent implements Component {
         `${BOLD}Scroll:${RESET} ; scroll up  ${DIM}|${RESET}  l scroll down`,
         `${BOLD}Actions:${RESET} s send  ${DIM}|${RESET}  m merge  ${DIM}|${RESET}  x kill  ${DIM}|${RESET}  ! nuke  ${DIM}|${RESET}  R resume  ${DIM}|${RESET}  r reassign  ${DIM}|${RESET}  a new  ${DIM}|${RESET}  A archive`,
         `${BOLD}Open:${RESET} w worktree  ${DIM}|${RESET}  o diff tool  ${DIM}|${RESET}  G Ghostty  ${DIM}|${RESET}  S snapshot`,
-        `${BOLD}App:${RESET} h help  ${DIM}|${RESET}  T toggle theme  ${DIM}|${RESET}  Ctrl-C quit`,
+        `${BOLD}App:${RESET} h help  ${DIM}|${RESET}  Ctrl-C quit`,
         "",
         `${DIM}Press any key to dismiss${RESET}`,
       ],
     });
-  }
-
-  private handleToggleTheme() {
-    if (this.currentThemeName === "dark") {
-      this.currentThemeName = "light";
-      setTheme(LIGHT_THEME);
-    } else {
-      this.currentThemeName = "dark";
-      setTheme(DARK_THEME);
-    }
-    this.setNotice(`Theme: ${this.currentThemeName === "dark" ? "Dark" : "Light"}`);
   }
 
   private handleOpenGhostty() {
@@ -2031,10 +1993,6 @@ export class DashboardComponent implements Component {
     else if (data === "S") {
       this.handleSnapshot();
     }
-    // Toggle light/dark theme
-    else if (data === "T") {
-      this.handleToggleTheme();
-    }
     // Folder browser to add repo
     else if (data === "+") {
       this.handleFolderBrowser();
@@ -2049,7 +2007,6 @@ export class DashboardComponent implements Component {
 
   render(width: number): string[] {
     // Minimum terminal size check
-    const { RESET, BOLD, DIM, YELLOW } = tc();
     const termRows = process.stdout.rows || 24;
     if (termRows < 20 || width < 80) {
       return [`${BOLD}${YELLOW}[Terminal too small — resize to at least 80×20]${RESET}`];
@@ -2134,18 +2091,9 @@ export async function launchDashboard(): Promise<void> {
 
   dashboard.setWatcher(watcher);
 
-  // Color scheme detection — set up filter before tui.start(), query after
-  const { cleanup: cleanupColorScheme, inputFilter: colorSchemeFilter, queryColorScheme } = watchColorScheme((scheme) => {
-    dashboard.currentThemeName = scheme === "dark" ? "dark" : "light";
-    setTheme(scheme === "dark" ? DARK_THEME : LIGHT_THEME);
-    dashboard.invalidate();
-    tui.requestRender();
-  });
-
   // Global input handler
   tui.addInputListener((data) => {
     if (matchesKey(data, Key.ctrl("c"))) {
-      cleanupColorScheme();
       dashboard.stopPolling();
       watcher.stop();
       tui.stop();
@@ -2153,15 +2101,11 @@ export async function launchDashboard(): Promise<void> {
     }
     // Filter out key release events (Kitty protocol sends both press and release)
     if (isKeyRelease(data)) return undefined;
-    // Let color scheme filter intercept escape sequences first
-    if (colorSchemeFilter(data)) return undefined;
     dashboard.handleInput(data);
     return undefined;
   });
 
   tui.start();
-  // Query OSC 11 AFTER tui.start() — stdin is now in raw mode so the response will arrive
-  queryColorScheme();
   dashboard.startPolling();
   await watcher.start();
 }

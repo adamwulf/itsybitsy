@@ -6,7 +6,6 @@ import { readAgentLog, readAgentPrompt, parseDenials } from "../agents";
 import type { Agent, AgentMeta, FlatAgent, PendingQuestion } from "../agents";
 import { TmuxPaneComponent, RightPaneComponent, DashboardComponent, colorizeDiff, colorizeLog } from "./dashboard";
 import { setRunner, resetRunner } from "../ib-commands";
-import { getCurrentTheme, DARK_THEME, LIGHT_THEME, setTheme } from "./theme";
 
 function makeAgent(id: string, repoPath: string, archived = false): Agent {
   return {
@@ -595,23 +594,6 @@ describe("DashboardComponent dialog and action handlers", () => {
     // Toggle back
   });
 
-  test("T key toggles between dark and light themes", () => {
-    // Reset theme to dark before test (other tests may have changed it)
-    setTheme(DARK_THEME);
-    dashboard = new DashboardComponent();
-    expect(dashboard.currentThemeName).toBe("dark");
-    expect(getCurrentTheme()).toBe(DARK_THEME);
-
-    dashboard.handleInput("T");
-    expect(dashboard.currentThemeName).toBe("light");
-    expect(getCurrentTheme()).toBe(LIGHT_THEME);
-
-    // First T shows a message dialog; dismiss it before toggling again
-    dashboard.handleInput(" "); // dismiss message
-    dashboard.handleInput("T");
-    expect(dashboard.currentThemeName).toBe("dark");
-    expect(getCurrentTheme()).toBe(DARK_THEME);
-  });
 });
 
 describe("parseDenials", () => {

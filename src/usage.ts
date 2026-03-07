@@ -115,6 +115,7 @@ async function writeCache(cache: CacheFile): Promise<void> {
 }
 
 export async function fetchUsage(): Promise<UsageData | null> {
+  await mkdir(ITSYBITSY_DIR, { recursive: true });
   // Check cache
   const cache = await readCache();
   const now = Date.now();

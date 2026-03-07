@@ -128,8 +128,8 @@ const PANE_MODES = [
   "TREE",
   "ERRORS",
   "DIFF",
-  "STATUS",
   "QUESTIONS",
+  "STATUS",
 ] as const;
 type PaneMode = (typeof PANE_MODES)[number];
 

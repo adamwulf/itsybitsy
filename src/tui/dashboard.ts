@@ -445,11 +445,13 @@ export class AgentTreeComponent implements Component {
       this.scrollOffset = 0;
     }
 
-    // Scroll down: keep at least 1 row below selected (unless selected is at very bottom of list)
+    // Scroll down: keep at least 1 row below selected (unless selected is at very bottom of list).
+    // Use Math.max(2, ...) because scrollOffset=1 is absorbed to start=0 in render(), which
+    // shows items[0..maxHeight-2] — potentially hiding the selected item at index maxHeight-1.
     if (this.selectedIndex < lastIndex && this.selectedIndex + 1 >= this.scrollOffset + this.maxHeight) {
-      this.scrollOffset = this.selectedIndex - this.maxHeight + 2;
+      this.scrollOffset = Math.max(2, this.selectedIndex - this.maxHeight + 2);
     } else if (this.selectedIndex === lastIndex && this.selectedIndex >= this.scrollOffset + this.maxHeight) {
-      this.scrollOffset = this.selectedIndex - this.maxHeight + 1;
+      this.scrollOffset = Math.max(2, this.selectedIndex - this.maxHeight + 1);
     }
   }
 

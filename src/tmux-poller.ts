@@ -9,6 +9,7 @@ import { stripAnsi } from "./parse-state";
 export interface TmuxPollerEvents {
   /** Raw tmux output (with ANSI) for display */
   onOutput: (raw: string, stripped: string) => void;
+  onWidth?: (width: number) => void;
   onError?: (error: Error) => void;
 }
 
@@ -74,11 +75,51 @@ export class TmuxPoller {
 
       const stripped = stripAnsi(raw);
       this.events.onOutput(raw, stripped);
+
+      // Also query tmux window width
+      if (this.events.onWidth) {
+        getTmuxWindowWidth(targetSession).then((w) => {
+          if (w !== null && this.tmuxSession === targetSession) {
+            this.events.onWidth!(w);
+          }
+        });
+      }
     } catch (err) {
       // Discard errors for stale polls too
       if (this.tmuxSession !== targetSession) return;
       this.events.onError?.(err instanceof Error ? err : new Error(String(err)));
     }
+  }
+}
+
+/** Get the width of a tmux window for a session */
+export async function getTmuxWindowWidth(tmuxSession: string): Promise<number | null> {
+  try {
+    const proc = Bun.spawn(
+      ["tmux", "display-message", "-t", tmuxSession, "-p", "#{window_width}"],
+      { stdout: "pipe", stderr: "pipe" }
+    );
+    const raw = await new Response(proc.stdout).text();
+    const exitCode = await proc.exited;
+    if (exitCode !== 0) return null;
+    const width = parseInt(raw.trim(), 10);
+    return isNaN(width) ? null : width;
+  } catch {
+    return null;
+  }
+}
+
+/** Resize a tmux window to a given width */
+export async function resizeTmuxWindow(tmuxSession: string, width: number): Promise<boolean> {
+  try {
+    const proc = Bun.spawn(
+      ["tmux", "resize-window", "-t", tmuxSession, "-x", String(width)],
+      { stdout: "pipe", stderr: "pipe" }
+    );
+    const exitCode = await proc.exited;
+    return exitCode === 0;
+  } catch {
+    return false;
   }
 }
 

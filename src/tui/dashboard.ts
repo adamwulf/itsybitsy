@@ -17,7 +17,7 @@ import type { Component, OverlayHandle } from "@mariozechner/pi-tui";
 import { loadRegistry } from "../registry";
 import type { RepoEntry } from "../registry";
 import { AgentWatcher } from "../watcher";
-import { TmuxPoller, captureTmuxOutput } from "../tmux-poller";
+import { TmuxPoller, captureTmuxOutput, resizeTmuxWindow } from "../tmux-poller";
 import { stripAnsi, parseState } from "../parse-state";
 import { stat } from "node:fs/promises";
 import { readAgentLog, readAgentPrompt, parseDenials } from "../agents";
@@ -48,6 +48,10 @@ import { addRepo } from "../registry";
 const MAX_TREE_HEIGHT = 7;
 const TEXTAREA_VISIBLE_HEIGHT = 5;
 const DIALOG_WIDTH = 60;
+const MIN_LEFT_WIDTH = 40;
+const MAX_LEFT_WIDTH = 160;
+const DEFAULT_LEFT_WIDTH = 80;
+const LEFT_WIDTH_STEP = 5;
 
 /** Wrap logical lines into visual lines of at most `width` characters each.
  *  Adds a trailing empty line when the last logical line fills exactly to the width
@@ -1304,8 +1308,8 @@ export class DashboardComponent implements Component {
     this.statusBar = new StatusBarComponent();
     this.dialogOverlay = new DialogOverlayComponent(() => this._dialog);
 
-    // Split pane: tmux left (~60 cols), right pane on right
-    this.splitPane = new SplitPane(this.tmuxPane, this.rightPane, 60, `${DIM_GRAY}│${RESET}`);
+    // Split pane: tmux left, right pane on right
+    this.splitPane = new SplitPane(this.tmuxPane, this.rightPane, DEFAULT_LEFT_WIDTH, `${DIM_GRAY}│${RESET}`);
 
     // Tmux poller for live output of selected agent
     this.tmuxPoller = new TmuxPoller({
@@ -1313,6 +1317,13 @@ export class DashboardComponent implements Component {
         this.tmuxPane.rawOutput = raw;
         this.tmuxPane.hasPolled = true;
         this.tui?.requestRender();
+      },
+      onWidth: (width) => {
+        const clamped = Math.max(MIN_LEFT_WIDTH, Math.min(MAX_LEFT_WIDTH, width));
+        if (clamped !== this.splitPane.getLeftWidth()) {
+          this.splitPane.setLeftWidth(clamped);
+          this.tui?.requestRender();
+        }
       },
     });
   }
@@ -1867,6 +1878,7 @@ export class DashboardComponent implements Component {
         "",
         header("Panes"),
         row("p / n / ←→", "cycle pane left/right"),
+        row("[ / ]", "resize left pane"),
         row("d / g / e / q", "diff / status / errors / questions"),
         "",
         header("Scroll"),
@@ -1894,6 +1906,18 @@ export class DashboardComponent implements Component {
         `${DIM}Press any key to dismiss${RESET}`,
       ],
     });
+  }
+
+  private handleResizeLeft(delta: number) {
+    const current = this.splitPane.getLeftWidth();
+    const newWidth = Math.max(MIN_LEFT_WIDTH, Math.min(MAX_LEFT_WIDTH, current + delta));
+    if (newWidth === current) return;
+    this.splitPane.setLeftWidth(newWidth);
+    const agent = this.agentTree.selectedAgent;
+    if (agent?.meta.tmux_session) {
+      resizeTmuxWindow(agent.meta.tmux_session, newWidth);
+    }
+    this.tui?.requestRender();
   }
 
   private handleOpenGhostty() {
@@ -2597,6 +2621,12 @@ export class DashboardComponent implements Component {
     // Debug snapshot
     else if (data === "S") {
       this.handleSnapshot();
+    }
+    // Resize left pane
+    else if (data === "[") {
+      this.handleResizeLeft(-LEFT_WIDTH_STEP);
+    } else if (data === "]") {
+      this.handleResizeLeft(LEFT_WIDTH_STEP);
     }
     // Folder browser to add repo
     else if (data === "+") {

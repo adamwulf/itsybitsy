@@ -1320,6 +1320,31 @@ describe("AgentTreeComponent scroll indicators", () => {
     expect(lines.some((l) => l.includes("▼ 1 more"))).toBe(false);
   });
 
+  test("selected item visible after navigation to near-bottom: n=maxHeight+2", () => {
+    // n=9, h=7: non-lastIndex case where old Math.max(2, +2) formula was insufficient.
+    // moveSelection to index 7 must produce scrollOffset=3, showing items[3..8].
+    const tree = makeTree(9, 7, 0);
+    (tree as any).selectedIndex = 6;
+    tree.moveSelection(1); // selectedIndex → 7
+    const lines = renderLines(tree);
+    expect(lines.some((l) => l.includes("agent-7"))).toBe(true);
+    expect(lines.length).toBeLessThanOrEqual(7);
+    expect(lines.some((l) => l.includes("▲ 1 more"))).toBe(false);
+    expect(lines.some((l) => l.includes("▼ 1 more"))).toBe(false);
+  });
+
+  test("selected item visible at lastIndex: n=maxHeight+2, selectedIndex=lastIndex", () => {
+    // n=9, h=7, lastIndex=8: scrollDown formula must produce scrollOffset≥4 to show item 8.
+    const tree = makeTree(9, 7, 0);
+    (tree as any).selectedIndex = 7;
+    tree.moveSelection(1); // selectedIndex → 8 (lastIndex)
+    const lines = renderLines(tree);
+    expect(lines.some((l) => l.includes("agent-8"))).toBe(true);
+    expect(lines.length).toBeLessThanOrEqual(7);
+    expect(lines.some((l) => l.includes("▲ 1 more"))).toBe(false);
+    expect(lines.some((l) => l.includes("▼ 1 more"))).toBe(false);
+  });
+
   test("dynamic list shrink: removing item above keeps no '▼ 1 more'", () => {
     // n=10, h=7, scrollOffset=3: start=3, topSlot=1, maxContent=6,
     // end=min(10,3+5)=8, remaining=2 → shows "▼ 2 more".

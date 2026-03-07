@@ -396,6 +396,7 @@ class AgentTreeComponent implements Component {
     const len = visible.length;
     this.selectedIndex = ((this.selectedIndex + delta) % len + len) % len;
     this.updateSelectedId();
+    this.ensureSelectedVisible();
   }
 
   /** Update selectedId from current selectedIndex */

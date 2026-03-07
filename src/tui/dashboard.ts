@@ -83,17 +83,143 @@ const MAGENTA = "\x1b[35m";
 const CYAN = "\x1b[36m";
 const WHITE = "\x1b[37m";
 const DIM_GRAY = "\x1b[90m";
+const BRIGHT_BLUE = "\x1b[94m";
+const BRIGHT_MAGENTA = "\x1b[95m";
 
-const STATE_COLORS: Record<string, string> = {
-  creating: YELLOW,
-  running: GREEN,
-  waiting: CYAN,
-  complete: BLUE,
-  compacting: MAGENTA,
-  rate_limited: RED,
-  stopped: DIM_GRAY,
-  unknown: WHITE,
-};
+// --- Minimal light/dark terminal detection ---
+
+type ColorScheme = "dark" | "light";
+let colorScheme: ColorScheme = "dark";
+
+function getStateColors(): Record<string, string> {
+  if (colorScheme === "light") {
+    return {
+      creating: YELLOW,
+      running: GREEN,
+      waiting: CYAN,
+      complete: BLUE,
+      compacting: MAGENTA,
+      rate_limited: RED,
+      stopped: DIM_GRAY,
+      unknown: WHITE,
+    };
+  }
+  // Dark mode: use bright variants for readability
+  return {
+    creating: YELLOW,
+    running: GREEN,
+    waiting: CYAN,
+    complete: BRIGHT_BLUE,
+    compacting: BRIGHT_MAGENTA,
+    rate_limited: RED,
+    stopped: DIM_GRAY,
+    unknown: WHITE,
+  };
+}
+
+/** Parse an OSC 11 response to extract normalized RGB (0-1). */
+function parseOSC11Response(data: string): { r: number; g: number; b: number } | null {
+  const match = data.match(/rgb:([0-9a-fA-F]+)\/([0-9a-fA-F]+)\/([0-9a-fA-F]+)/);
+  if (!match) return null;
+  function normalize(hex: string): number {
+    const val = parseInt(hex, 16);
+    const max = hex.length <= 2 ? 0xff : 0xffff;
+    return val / max;
+  }
+  return { r: normalize(match[1]!), g: normalize(match[2]!), b: normalize(match[3]!) };
+}
+
+/** Compute relative luminance (ITU-R BT.709). */
+function computeLuminance(r: number, g: number, b: number): number {
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+// Ghostty mode 2031 escape sequences
+const GHOSTTY_ENABLE = "\x1b[?2031h";
+const GHOSTTY_DISABLE = "\x1b[?2031l";
+const GHOSTTY_DARK = "\x1b[?2031;1m";
+const GHOSTTY_LIGHT = "\x1b[?2031;2m";
+// Focus reporting
+const FOCUS_ENABLE = "\x1b[?1004h";
+const FOCUS_DISABLE = "\x1b[?1004l";
+const FOCUS_IN = "\x1b[I";
+
+/**
+ * Set up color scheme detection. Returns:
+ * - inputFilter: call before other key handling; returns true if data was consumed
+ * - queryColorScheme: send OSC 11 query (call after tui.start() when stdin is raw)
+ * - cleanup: disable notifications
+ */
+function setupColorSchemeDetection(
+  onSchemeChange: () => void
+): { inputFilter: (data: string) => boolean; queryColorScheme: () => void; cleanup: () => void } {
+  let pendingDetection = false;
+  let detectionTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function applyScheme(scheme: ColorScheme): void {
+    if (scheme !== colorScheme) {
+      colorScheme = scheme;
+      onSchemeChange();
+    }
+  }
+
+  function queryColorScheme(): void {
+    pendingDetection = true;
+    if (detectionTimer) clearTimeout(detectionTimer);
+    detectionTimer = setTimeout(() => {
+      if (pendingDetection) {
+        pendingDetection = false;
+      }
+    }, 500);
+    process.stdout.write("\x1b]11;?\x07");
+  }
+
+  process.stdout.write(GHOSTTY_ENABLE);
+  process.stdout.write(FOCUS_ENABLE);
+
+  const inputFilter = (data: string): boolean => {
+    // OSC 11 response
+    if (data.includes("\x1b]11;")) {
+      const match = data.match(/\x1b\]11;([^\x07\x1b]*?)(?:\x07|\x1b\\)/);
+      if (match) {
+        const rgb = parseOSC11Response(match[1]!);
+        if (rgb) {
+          const lum = computeLuminance(rgb.r, rgb.g, rgb.b);
+          pendingDetection = false;
+          if (detectionTimer) clearTimeout(detectionTimer);
+          applyScheme(lum < 0.5 ? "dark" : "light");
+        }
+      }
+      return true;
+    }
+    // Ghostty dark/light notifications
+    if (data === GHOSTTY_DARK || data.includes(GHOSTTY_DARK)) {
+      applyScheme("dark");
+      return true;
+    }
+    if (data === GHOSTTY_LIGHT || data.includes(GHOSTTY_LIGHT)) {
+      applyScheme("light");
+      return true;
+    }
+    // Focus-in: re-detect
+    if (data === FOCUS_IN || data.includes(FOCUS_IN)) {
+      queryColorScheme();
+      return false; // don't consume — other handlers may want focus events
+    }
+    return false;
+  };
+
+  let cleaned = false;
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+    if (detectionTimer) clearTimeout(detectionTimer);
+    process.stdout.write(GHOSTTY_DISABLE);
+    process.stdout.write(FOCUS_DISABLE);
+  };
+
+  return { inputFilter, queryColorScheme, cleanup };
+}
 
 // Dialog types for agent actions
 type DialogState =
@@ -192,7 +318,7 @@ function formatAgentRow(
 ): string {
   const orphanedPrefix = agent.orphaned ? "⚠ " : "";
   const icon = agent.meta.worker ? "⚙" : "◆";
-  const stateColor = STATE_COLORS[agent.state] ?? STATE_COLORS.unknown;
+  const stateColor = getStateColors()[agent.state] ?? getStateColors().unknown;
   const sel = selected ? `${BOLD}${REVERSE}` : "";
   const selEnd = selected ? `${RESET}` : "";
 
@@ -349,7 +475,7 @@ export class RightPaneComponent implements Component {
     lines.push(`${BOLD}Agents: ${repoAgents.length}${RESET}`);
     if (stateCounts.size > 0) {
       for (const [state, count] of stateCounts) {
-        const stateColor = STATE_COLORS[state] ?? STATE_COLORS.unknown;
+        const stateColor = getStateColors()[state] ?? getStateColors().unknown;
         lines.push(`  ${stateColor}${state}${RESET}: ${count}`);
       }
     }
@@ -405,7 +531,7 @@ export class RightPaneComponent implements Component {
       case "TREE":
         this.content = this.allAgents.map(({ agent, connector }) => {
           const icon = agent.meta.worker ? "⚙" : "◆";
-          const stateColor = STATE_COLORS[agent.state] ?? STATE_COLORS.unknown;
+          const stateColor = getStateColors()[agent.state] ?? getStateColors().unknown;
           const shortPrompt = agent.meta.prompt.replace(/\n/g, " ").slice(0, 40);
           return `${connector}${icon} ${agent.repoName}/${agent.id}  ${stateColor}${agent.state}${RESET}  ${agent.age}  ${agent.meta.model}  ${shortPrompt}`;
         });
@@ -556,7 +682,7 @@ export class TmuxPaneComponent implements Component {
 
     // Graceful display for stopped/orphaned agents (no tmux session)
     if (this.hasPolled && !this.rawOutput) {
-      const stateColor = STATE_COLORS[this.agent.state] ?? STATE_COLORS.unknown;
+      const stateColor = getStateColors()[this.agent.state] ?? getStateColors().unknown;
       const lines = [
         truncateToWidth(`${BOLD}${this.agent.id}${RESET}`, width, ""),
         truncateToWidth(`${stateColor}${this.agent.state}${RESET}`, width, ""),
@@ -2179,15 +2305,23 @@ export async function launchDashboard(): Promise<void> {
 
   dashboard.setWatcher(watcher);
 
+  // Set up terminal color scheme detection
+  const colorDetection = setupColorSchemeDetection(() => {
+    tui.requestRender();
+  });
+
   // Global input handler
   tui.addInputListener((data) => {
     if (matchesKey(data, Key.ctrl("c"))) {
+      colorDetection.cleanup();
       dashboard.stopPolling();
       watcher.stop();
       tui.stop();
       process.stdout.write("\x1b[2J\x1b[H");
       process.exit(0);
     }
+    // Intercept color-scheme escape sequences before other handling
+    if (colorDetection.inputFilter(data)) return undefined;
     // Filter out key release events (Kitty protocol sends both press and release)
     if (isKeyRelease(data)) return undefined;
     dashboard.handleInput(data);
@@ -2195,6 +2329,8 @@ export async function launchDashboard(): Promise<void> {
   });
 
   tui.start();
+  // Query terminal background color now that stdin is in raw mode
+  colorDetection.queryColorScheme();
   dashboard.startPolling();
   await watcher.start();
 }

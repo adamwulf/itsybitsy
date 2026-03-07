@@ -2404,7 +2404,8 @@ export class DashboardComponent implements Component {
       // Separator with pane titles — right title at left edge of right pane
       const selAgent = this.agentTree.selectedAgent;
       const leftTitle = selAgent ? ` ${selAgent.id} ` : "";
-      const rightTitle = ` ${this.rightPane.mode} `;
+      const repoHeader = this.agentTree.selectedRepoHeader;
+      const rightTitle = repoHeader ? ` ${repoHeader} ` : ` ${this.rightPane.mode} `;
       const splitAt = this.splitPane.getLeftWidth() + 1; // +1 for separator char
       lines.push(this.buildTitledSeparator(leftTitle, rightTitle, width, splitAt, FULL_WIDTH_MODES.has(this.rightPane.mode) ? "" : "┬"));
 

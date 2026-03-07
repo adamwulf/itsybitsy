@@ -748,42 +748,64 @@ function padLines(lines: string[], height: number): string[] {
 class StatusBarComponent implements Component {
   pendingQuestions = 0;
   errorCount = 0;
-  currentMode: PaneMode = "AGENT LOG";
-  modeIndex = 0;
   usage: UsageData | null = null;
+  version = "";
+
+  // FPS tracking: rolling 1-second window
+  private renderTimestamps: number[] = [];
 
   invalidate(): void {}
 
-  render(width: number): string[] {
-    const questionBadge =
-      this.pendingQuestions > 0
-        ? ` ${BOLD}${YELLOW}[${this.pendingQuestions} questions]${RESET}`
-        : "";
-    const errorBadge =
-      this.errorCount > 0
-        ? ` ${BOLD}${RED}[${this.errorCount} errors]${RESET}`
-        : "";
-
-    const modeLeft = `${DIM}[${this.modeIndex}] ${this.currentMode}${RESET}${questionBadge}${errorBadge}`;
-
-    // Build usage string for right side of mode line
-    const usageStr = this.formatUsage();
-    let modeLine: string;
-    if (usageStr) {
-      const modeWidth = visibleWidth(modeLeft);
-      const usageWidth = visibleWidth(usageStr);
-      const gap = Math.max(2, width - modeWidth - usageWidth);
-      modeLine = truncateToWidth(modeLeft + " ".repeat(gap) + usageStr, width, "");
-    } else {
-      modeLine = truncateToWidth(modeLeft, width, "");
+  /** Record a render timestamp and return current FPS */
+  private trackFps(): number {
+    const now = Date.now();
+    this.renderTimestamps.push(now);
+    // Keep only timestamps within the last 1 second
+    const cutoff = now - 1000;
+    while (this.renderTimestamps.length > 0 && this.renderTimestamps[0]! < cutoff) {
+      this.renderTimestamps.shift();
     }
+    return this.renderTimestamps.length;
+  }
 
-    const keys = `${DIM}j/k:nav  ;/l:scroll  p/n:pane  s:send  m:merge  x:kill  a:new  r:reassign  R:resume  Ctrl-C:quit${RESET}`;
+  render(width: number): string[] {
+    const fps = this.trackFps();
 
-    return [
-      modeLine,
-      truncateToWidth(keys, width, ""),
-    ];
+    // Row 1 left: navigation keys with inline context
+    const qLabel = this.pendingQuestions > 0
+      ? `q: questions (${this.pendingQuestions})`
+      : "q: questions";
+    const errBadge = this.errorCount > 0
+      ? `  ${BOLD}${RED}[${this.errorCount} errors]${RESET}${DIM}`
+      : "";
+    const row1Left = `${DIM}j/k: select    ;/l: scroll    p/n: pane    ${qLabel}    s: send    m: merge    Ctrl-C: quit${errBadge}${RESET}`;
+
+    // Row 1 right: usage stats
+    const usageStr = this.formatUsage();
+
+    // Row 2 left: secondary/app keys
+    const row2Left = `${DIM}@: jump    /: commands    a: new agent    h: help    x: kill    R: resume    r: reassign    w: worktree    G: ghostty${RESET}`;
+
+    // Row 2 right: fps · time · version
+    const now = new Date();
+    const timeStr = now.toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    const versionStr = this.version ? `v${this.version}` : "";
+    const row2Right = `${DIM}fps: ${fps}  ${timeStr}  ${versionStr}${RESET}`;
+
+    // Compose row 1
+    const row1 = this.composeLine(row1Left, usageStr, width);
+    // Compose row 2
+    const row2 = this.composeLine(row2Left, row2Right, width);
+
+    return [row1, row2];
+  }
+
+  private composeLine(left: string, right: string, width: number): string {
+    if (!right) return truncateToWidth(left, width, "");
+    const leftW = visibleWidth(left);
+    const rightW = visibleWidth(right);
+    const gap = Math.max(2, width - leftW - rightW);
+    return truncateToWidth(left + " ".repeat(gap) + right, width, "");
   }
 
   private formatUsage(): string {
@@ -1125,6 +1147,10 @@ export class DashboardComponent implements Component {
 
   setDiffTool(tool: string | undefined) {
     this.diffTool = tool;
+  }
+
+  setVersion(version: string) {
+    this.statusBar.version = version;
   }
 
   /** Add an error to the errors list (called from watcher onError) */
@@ -2013,8 +2039,6 @@ export class DashboardComponent implements Component {
     this.modeIndex = nextIndex;
     const mode = PANE_MODES[this.modeIndex]!;
     this.rightPane.setMode(mode);
-    this.statusBar.currentMode = mode;
-    this.statusBar.modeIndex = this.modeIndex;
     this.splitPane.fullWidth = FULL_WIDTH_MODES.has(mode);
     this.triggerAsyncLoadIfNeeded();
   }
@@ -2024,8 +2048,6 @@ export class DashboardComponent implements Component {
     if (idx !== -1) {
       this.modeIndex = idx;
       this.rightPane.setMode(mode);
-      this.statusBar.currentMode = mode;
-      this.statusBar.modeIndex = idx;
       this.splitPane.fullWidth = FULL_WIDTH_MODES.has(mode);
       this.triggerAsyncLoadIfNeeded(forceRefresh);
     }
@@ -2308,10 +2330,21 @@ export async function launchDashboard(): Promise<void> {
   const terminal = new ProcessTerminal();
   const tui = new TUI(terminal);
 
+  // Read version from package.json
+  let version = "";
+  try {
+    const pkgFile = Bun.file(new URL("../../package.json", import.meta.url).pathname);
+    const pkg = await pkgFile.json();
+    version = pkg.version ?? "";
+  } catch {
+    // Ignore — version will be empty
+  }
+
   const dashboard = new DashboardComponent();
   dashboard.setTui(tui);
   dashboard.setRepos(repos);
   dashboard.setDiffTool(registry.diffTool);
+  dashboard.setVersion(version);
   tui.addChild(dashboard);
 
   // Start watcher (before input listener so dashboard has reference)

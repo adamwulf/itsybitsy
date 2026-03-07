@@ -139,10 +139,6 @@ const GHOSTTY_ENABLE = "\x1b[?2031h";
 const GHOSTTY_DISABLE = "\x1b[?2031l";
 const GHOSTTY_DARK = "\x1b[?2031;1m";
 const GHOSTTY_LIGHT = "\x1b[?2031;2m";
-// Focus reporting
-const FOCUS_ENABLE = "\x1b[?1004h";
-const FOCUS_DISABLE = "\x1b[?1004l";
-const FOCUS_IN = "\x1b[I";
 
 /**
  * Set up color scheme detection. Returns:
@@ -175,7 +171,6 @@ function setupColorSchemeDetection(
   }
 
   process.stdout.write(GHOSTTY_ENABLE);
-  process.stdout.write(FOCUS_ENABLE);
 
   const inputFilter = (data: string): boolean => {
     // OSC 11 response
@@ -201,11 +196,6 @@ function setupColorSchemeDetection(
       applyScheme("light");
       return true;
     }
-    // Focus-in: re-detect
-    if (data === FOCUS_IN || data.includes(FOCUS_IN)) {
-      queryColorScheme();
-      return false; // don't consume — other handlers may want focus events
-    }
     return false;
   };
 
@@ -215,7 +205,6 @@ function setupColorSchemeDetection(
     cleaned = true;
     if (detectionTimer) clearTimeout(detectionTimer);
     process.stdout.write(GHOSTTY_DISABLE);
-    process.stdout.write(FOCUS_DISABLE);
   };
 
   return { inputFilter, queryColorScheme, cleanup };

@@ -10,8 +10,8 @@ import { rename, mkdir } from "node:fs/promises";
 const ITSYBITSY_DIR = join(homedir(), ".itsybitsy");
 const CACHE_PATH = join(ITSYBITSY_DIR, "usage-cache.json");
 const CREDENTIALS_PATH = join(homedir(), ".claude", ".credentials.json");
-const CACHE_TTL_MS = 5 * 60_000; // 5 minutes
-const RATE_LIMIT_TTL_MS = 60_000; // retry after 1 minute on 429
+const CACHE_TTL_MS = 60_000; // 1 minute normal refresh
+const MAX_BACKOFF_MS = 10 * 60_000; // 10 minutes max backoff on failures
 
 export interface UsageData {
   sessionPct: number | null;
@@ -29,6 +29,7 @@ interface ApiResponse {
 interface CacheFile {
   timestamp: number;
   response: ApiResponse;
+  nextBackoffMs?: number; // backoff interval for next failure (ms)
 }
 
 /** Format a duration from now to a future ISO date as human-readable. */
@@ -137,11 +138,11 @@ export async function fetchUsage(): Promise<UsageData | null> {
 
     if (!resp.ok) {
       if (cache) {
-        // On 429 rate limit, retry after 1 minute; other errors retry at normal TTL
-        const retryTimestamp = resp.status === 429
-          ? Math.floor((now - CACHE_TTL_MS + RATE_LIMIT_TTL_MS) / 1000)
-          : Math.floor(now / 1000);
-        await writeCache({ timestamp: retryTimestamp, response: cache.response });
+        const backoffMs = Math.min(cache.nextBackoffMs ?? 60_000, MAX_BACKOFF_MS);
+        const nextBackoffMs = Math.min(backoffMs * 2, MAX_BACKOFF_MS);
+        // Set timestamp so next retry happens after backoffMs
+        const retryTimestamp = Math.floor((now + backoffMs - CACHE_TTL_MS) / 1000);
+        await writeCache({ timestamp: retryTimestamp, response: cache.response, nextBackoffMs });
         return parseUsageResponse(cache.response);
       }
       return null;
@@ -150,15 +151,18 @@ export async function fetchUsage(): Promise<UsageData | null> {
     const body = (await resp.json()) as ApiResponse;
 
     if (body.error) {
-      // API error — bump cache timestamp but keep old response
       if (cache) {
-        await writeCache({ timestamp: Math.floor(now / 1000), response: cache.response });
+        const backoffMs = Math.min(cache.nextBackoffMs ?? 60_000, MAX_BACKOFF_MS);
+        const nextBackoffMs = Math.min(backoffMs * 2, MAX_BACKOFF_MS);
+        const retryTimestamp = Math.floor((now + backoffMs - CACHE_TTL_MS) / 1000);
+        await writeCache({ timestamp: retryTimestamp, response: cache.response, nextBackoffMs });
         return parseUsageResponse(cache.response);
       }
       return null;
     }
 
-    await writeCache({ timestamp: Math.floor(now / 1000), response: body });
+    // Success — write cache with no backoff
+    await writeCache({ timestamp: Math.floor(now / 1000), response: body, nextBackoffMs: 60_000 });
     return parseUsageResponse(body);
   } catch {
     // Network error — use stale cache if available

@@ -458,34 +458,35 @@ describe("DashboardComponent dialog and action handlers", () => {
     dashboard.handleInput("\x7f"); // backspace
     for (const ch of "o") dashboard.handleInput(ch);
     expect((dashboard.dialog as any).lines.join("\n")).toBe("hello");
-    // Tab to send button, then Enter to submit
+    // Tab to cancel, then tab to send button, then Enter to submit
+    dashboard.handleInput("\t");
     dashboard.handleInput("\t");
     dashboard.handleInput("\r");
     await Bun.sleep(10);
     expect(lastIbCall!.args).toEqual(["send", "agent-test", "hello"]);
   });
 
-  test("send textarea: Tab cycles forward through text → send → cancel → text", () => {
+  test("send textarea: Tab cycles forward through text → cancel → send → text", () => {
     setupDashboardWithAgent();
     dashboard.handleInput("s");
     expect((dashboard.dialog as any).focusedButton).toBe("text");
     dashboard.handleInput("\t");
-    expect((dashboard.dialog as any).focusedButton).toBe("send");
-    dashboard.handleInput("\t");
     expect((dashboard.dialog as any).focusedButton).toBe("cancel");
+    dashboard.handleInput("\t");
+    expect((dashboard.dialog as any).focusedButton).toBe("send");
     dashboard.handleInput("\t");
     expect((dashboard.dialog as any).focusedButton).toBe("text");
   });
 
-  test("send textarea: Shift+Tab cycles backward through text → cancel → send → text", () => {
+  test("send textarea: Shift+Tab cycles backward through text → send → cancel → text", () => {
     setupDashboardWithAgent();
     dashboard.handleInput("s");
     expect((dashboard.dialog as any).focusedButton).toBe("text");
     // Legacy Shift+Tab sequence
     dashboard.handleInput("\x1b[Z");
-    expect((dashboard.dialog as any).focusedButton).toBe("cancel");
-    dashboard.handleInput("\x1b[Z");
     expect((dashboard.dialog as any).focusedButton).toBe("send");
+    dashboard.handleInput("\x1b[Z");
+    expect((dashboard.dialog as any).focusedButton).toBe("cancel");
     dashboard.handleInput("\x1b[Z");
     expect((dashboard.dialog as any).focusedButton).toBe("text");
   });
@@ -496,9 +497,9 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect((dashboard.dialog as any).focusedButton).toBe("text");
     // Kitty protocol Shift+Tab: CSI 9;2u (tab=9, shift modifier=2)
     dashboard.handleInput("\x1b[9;2u");
-    expect((dashboard.dialog as any).focusedButton).toBe("cancel");
-    dashboard.handleInput("\x1b[9;2u");
     expect((dashboard.dialog as any).focusedButton).toBe("send");
+    dashboard.handleInput("\x1b[9;2u");
+    expect((dashboard.dialog as any).focusedButton).toBe("cancel");
     dashboard.handleInput("\x1b[9;2u");
     expect((dashboard.dialog as any).focusedButton).toBe("text");
   });
@@ -897,6 +898,7 @@ describe("DashboardComponent right pane and navigation features", () => {
     dashboard.handleInput("\r"); // Enter to answer — opens textarea
     // Type answer
     for (const ch of "yes") dashboard.handleInput(ch);
+    dashboard.handleInput("\t"); // Tab to Cancel button
     dashboard.handleInput("\t"); // Tab to Send button
     dashboard.handleInput("\r"); // Submit
     await Bun.sleep(50);

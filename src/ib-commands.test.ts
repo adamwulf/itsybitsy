@@ -11,6 +11,7 @@ import {
   newAgent,
   diffAgent,
   statusAgent,
+  pauseAgent,
   acknowledgeQuestion,
   setRunner,
   resetRunner,
@@ -73,11 +74,11 @@ describe("ib-commands", () => {
     });
   });
 
-  test("nukeAgent passes ['kill', id, '--force']", async () => {
+  test("nukeAgent passes ['nuke', id, '--force']", async () => {
     const agent = makeAgent("agent-abc", "/repos/myproject");
     await nukeAgent(agent);
     expect(lastCall).toEqual({
-      args: ["kill", "agent-abc", "--force"],
+      args: ["nuke", "agent-abc", "--force"],
       cwd: "/repos/myproject",
     });
   });
@@ -196,6 +197,15 @@ describe("ib-commands", () => {
     expect(result.ok).toBe(false);
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toBe("something broke");
+  });
+
+  test("pauseAgent passes ['pause', id] with agent's repoPath", async () => {
+    const agent = makeAgent("agent-abc", "/repos/myproject");
+    await pauseAgent(agent);
+    expect(lastCall).toEqual({
+      args: ["pause", "agent-abc"],
+      cwd: "/repos/myproject",
+    });
   });
 
   test("acknowledgeQuestion passes ['acknowledge', questionId] with repoPath as cwd", async () => {

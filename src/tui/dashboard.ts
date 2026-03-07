@@ -28,6 +28,7 @@ import {
   killAgent,
   nukeAgent,
   resumeAgent,
+  pauseAgent,
   reassignAgent,
   mergeCheckAgent,
   mergeAgent,
@@ -1499,6 +1500,28 @@ export class DashboardComponent implements Component {
     });
   }
 
+  private handlePause() {
+    const agent = this.agentTree.selectedAgent;
+    if (!agent) return;
+    if (agent.state === "stopped" || agent.state === "complete" || agent.archived) {
+      this.setNotice("Can only pause running or waiting agents");
+      return;
+    }
+    this.showDialog({
+      type: "confirm",
+      prompt: `Pause agent ${agent.id}?`,
+      confirmLabel: "Pause",
+      focusedButton: "cancel",
+      onYes: () => {
+        this.closeDialog();
+        this.executeAndRefresh(async () => {
+          const result = await pauseAgent(agent);
+          this.setNotice(result.ok ? `Paused ${agent.id}` : `Pause failed: ${result.stderr || result.stdout}`);
+        });
+      },
+    });
+  }
+
   private handleReassign() {
     const agent = this.agentTree.selectedAgent;
     if (!agent) return;
@@ -1767,6 +1790,7 @@ export class DashboardComponent implements Component {
       { label: "kill agent — x", action: () => this.handleKill() },
       { label: "force kill agent — !", action: () => this.handleNuke() },
       { label: "resume agent — R", action: () => this.handleResume() },
+      { label: "pause agent — P", action: () => this.handlePause() },
       { label: "reassign manager — r", action: () => this.handleReassign() },
       { label: "new agent (pick repo) — a", action: () => this.handleNewAgent() },
       { label: "new agent (current repo) — A", action: () => this.handleNewAgentInCurrentRepo() },
@@ -2645,6 +2669,8 @@ export class DashboardComponent implements Component {
       this.handleNuke();
     } else if (data === "R") {
       this.handleResume();
+    } else if (data === "P") {
+      this.handlePause();
     } else if (data === "r") {
       this.handleReassign();
     } else if (data === "m") {

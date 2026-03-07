@@ -138,7 +138,7 @@ export async function readRepoAgents(repoPath: string, repoName: string): Promis
   };
 }
 
-/** Read pending questions for a repo */
+/** Read pending questions for a repo, filtering out questions from non-existent agents */
 export async function readPendingQuestions(repoPath: string): Promise<PendingQuestion[]> {
   try {
     const questionsPath = join(repoPath, ".ittybitty", "user-questions.json");
@@ -146,7 +146,20 @@ export async function readPendingQuestions(repoPath: string): Promise<PendingQue
     if (!(await file.exists())) return [];
     const data = await file.json();
     if (!data || !Array.isArray(data.questions)) return [];
-    return data.questions.filter((q: PendingQuestion) => q.status === "pending");
+
+    // Read active agent IDs from the agents directory
+    const agentsDir = join(repoPath, ".ittybitty", "agents");
+    let activeAgentIds: Set<string>;
+    try {
+      const entries = await readdir(agentsDir, { withFileTypes: true });
+      activeAgentIds = new Set(entries.filter((e) => e.isDirectory()).map((e) => e.name));
+    } catch {
+      activeAgentIds = new Set();
+    }
+
+    return data.questions.filter(
+      (q: PendingQuestion) => q.status === "pending" && activeAgentIds.has(q.agent)
+    );
   } catch {
     return [];
   }

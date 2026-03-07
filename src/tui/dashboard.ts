@@ -1019,8 +1019,8 @@ class DialogOverlayComponent implements Component {
       case "confirm": {
         const wrapped = wrapLines(dialog.prompt, innerWidth);
         const btnColor = dialog.confirmColor ?? GREEN;
-        const confirmBtn = dialog.focusedButton === "confirm" ? `${BOLD}${btnColor}[ ${dialog.confirmLabel} ]${RESET}` : `${DIM}${btnColor}[ ${dialog.confirmLabel} ]${RESET}`;
-        const cancelBtn = dialog.focusedButton === "cancel" ? `${BOLD}${GREEN}[ Cancel ]${RESET}` : `${DIM}[ Cancel ]${RESET}`;
+        const confirmBtn = dialog.focusedButton === "confirm" ? `${BOLD}${btnColor}[ ${dialog.confirmLabel} ]${RESET}` : `[ ${dialog.confirmLabel} ]`;
+        const cancelBtn = dialog.focusedButton === "cancel" ? `${BOLD}${GREEN}[ Cancel ]${RESET}` : `[ Cancel ]`;
         return { title: "Confirm", contentLines: [...wrapped, "", `  ${cancelBtn}   ${confirmBtn}`] };
       }
       case "input": {
@@ -1088,8 +1088,8 @@ class DialogOverlayComponent implements Component {
         }
 
         // Button row
-        const sendLabel = dialog.focusedButton === "send" ? `${BOLD}${GREEN}[ Send ]${RESET}` : `${DIM}[ Send ]${RESET}`;
-        const cancelLabel = dialog.focusedButton === "cancel" ? `${BOLD}${GREEN}[ Cancel ]${RESET}` : `${DIM}[ Cancel ]${RESET}`;
+        const sendLabel = dialog.focusedButton === "send" ? `${BOLD}${GREEN}[ Send ]${RESET}` : `[ Send ]`;
+        const cancelLabel = dialog.focusedButton === "cancel" ? `${BOLD}${GREEN}[ Cancel ]${RESET}` : `[ Cancel ]`;
         lines.push(`  ${cancelLabel}   ${sendLabel}`);
 
         return { title: dialog.prompt, contentLines: lines };
@@ -1189,7 +1189,7 @@ class DialogOverlayComponent implements Component {
           : addEnabled
             ? `[ Add ]`
             : `${DIM}[ Add ]${RESET}`;
-        const cancelLabel = `${DIM}[ Cancel ]${RESET}`;
+        const cancelLabel = `[ Cancel ]`;
         lines.push("");
         lines.push(`  ${cancelLabel}    ${addLabel}`);
 
@@ -1248,7 +1248,7 @@ class DialogOverlayComponent implements Component {
         const createLabel = dialog.focused === "create"
           ? (createEnabled ? `${BOLD}${GREEN}[ Create ]${RESET}` : `${BOLD}${DIM}[ Create ]${RESET}`)
           : (createEnabled ? `[ Create ]` : `${DIM}[ Create ]${RESET}`);
-        const cancelLabel = dialog.focused === "cancel" ? `${BOLD}${GREEN}[ Cancel ]${RESET}` : `${DIM}[ Cancel ]${RESET}`;
+        const cancelLabel = dialog.focused === "cancel" ? `${BOLD}${GREEN}[ Cancel ]${RESET}` : `[ Cancel ]`;
         lines.push(`  ${cancelLabel}   ${createLabel}`);
 
         return { title: `New Agent (${dialog.repoName})`, contentLines: lines };

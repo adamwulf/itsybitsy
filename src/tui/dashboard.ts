@@ -317,7 +317,7 @@ function agentNamePrefixWidth(agent: Agent, connector: string): number {
 }
 
 /** Format agent row for the tree */
-function formatAgentRow(
+export function formatAgentRow(
   agent: Agent,
   connector: string,
   selected: boolean,
@@ -335,8 +335,9 @@ function formatAgentRow(
 
   const truncated = truncateToWidth(line, width, "");
   if (selected) {
-    const pad = width - visibleWidth(truncated);
-    return `${REVERSE}${truncated}${RESET}${REVERSE}${pad > 0 ? " ".repeat(pad) : ""}${RESET}`;
+    const pad = Math.max(0, width - visibleWidth(truncated));
+    const highlighted = truncated.replaceAll(RESET, RESET + REVERSE);
+    return `${REVERSE}${highlighted}${" ".repeat(pad)}${RESET}`;
   }
   return truncated;
 }
@@ -496,8 +497,9 @@ class AgentTreeComponent implements Component {
         const selected = i === this.selectedIndex;
         const truncated = truncateToWidth(`${BOLD}◆ ${item.repoHeader}${RESET}`, width, "");
         if (selected) {
-          const pad = width - visibleWidth(truncated);
-          lines.push(`${REVERSE}${truncated}${RESET}${REVERSE}${pad > 0 ? " ".repeat(pad) : ""}${RESET}`);
+          const pad = Math.max(0, width - visibleWidth(truncated));
+          const highlighted = truncated.replaceAll(RESET, RESET + REVERSE);
+          lines.push(`${REVERSE}${highlighted}${" ".repeat(pad)}${RESET}`);
         } else {
           lines.push(truncated);
         }
@@ -1108,7 +1110,10 @@ class DialogOverlayComponent implements Component {
           const line = `${prefix}${nameStr}${gitSuffix}`;
 
           if (isSelected) {
-            lines.push(truncateToWidth(`${BOLD}${REVERSE} ${line} ${RESET}`, innerWidth, ""));
+            const raw = truncateToWidth(`${BOLD} ${line} `, innerWidth, "");
+            const pad = Math.max(0, innerWidth - visibleWidth(raw));
+            const highlighted = raw.replaceAll(RESET, RESET + REVERSE);
+            lines.push(`${REVERSE}${highlighted}${" ".repeat(pad)}${RESET}`);
           } else {
             lines.push(truncateToWidth(` ${line}`, innerWidth, ""));
           }

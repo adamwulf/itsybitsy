@@ -979,22 +979,21 @@ describe("DashboardComponent right pane and navigation features", () => {
     ];
     const questions: PendingQuestion[] = [{
       id: "q-1",
-      agent: "agent-b",
+      agent: "agent-a",
       question: "Should I proceed?",
       timestamp: "2026-03-05T15:00:00Z",
       status: "pending",
     }];
     dashboard.onUpdate([agent1, agent2], flatList, questions);
 
-    // Start with agent-a selected
+    // Start with agent-a selected — questions filtered to agent-a
     expect(dashboard.selectedAgent?.id).toBe("agent-a");
     // Jump to QUESTIONS
     dashboard.handleInput("q");
     expect(dashboard.currentMode).toBe("QUESTIONS");
-    // Press g to go to agent-b (the question's agent)
+    // Press g to go to agent-a (the question's agent) — switches to AGENT LOG
     dashboard.handleInput("g");
-    // Should navigate to agent-b and switch mode
-    expect(dashboard.selectedAgent?.id).toBe("agent-b");
+    expect(dashboard.selectedAgent?.id).toBe("agent-a");
     expect(dashboard.currentMode).toBe("AGENT LOG");
   });
 
@@ -1084,7 +1083,34 @@ describe("DashboardComponent right pane and navigation features", () => {
     expect(calls[0]).toEqual(["acknowledge", "q-1"]);
   });
 
-  test("j/k navigate questions in QUESTIONS mode", () => {
+  test("j/k navigate questions in QUESTIONS mode when questions focused", () => {
+    dashboard = new DashboardComponent();
+    const agent1 = makeAgent("agent-a", "/repos/test");
+    const flatList: FlatAgent[] = [
+      { agent: agent1, depth: 0, connector: "" },
+    ];
+    const questions: PendingQuestion[] = [
+      { id: "q-1", agent: "agent-a", question: "Q1?", timestamp: "2026-03-05T15:00:00Z", status: "pending" },
+      { id: "q-2", agent: "agent-a", question: "Q2?", timestamp: "2026-03-05T15:01:00Z", status: "pending" },
+    ];
+    dashboard.onUpdate([agent1], flatList, questions);
+
+    dashboard.handleInput("q"); // QUESTIONS mode
+    expect(dashboard.questionsSelectedIndex).toBe(0);
+    // j/k navigate agents by default (not questions)
+    expect(dashboard.questionsFocused).toBe(false);
+    // Tab to focus questions list
+    dashboard.handleInput("\t");
+    expect(dashboard.questionsFocused).toBe(true);
+    dashboard.handleInput("j"); // move down in questions
+    expect(dashboard.questionsSelectedIndex).toBe(1);
+    dashboard.handleInput("k"); // move back up
+    expect(dashboard.questionsSelectedIndex).toBe(0);
+    // j/k should not change agent tree selection when questions focused
+    expect(dashboard.selectedAgent?.id).toBe("agent-a");
+  });
+
+  test("j/k navigate agents in QUESTIONS mode when tree focused", () => {
     dashboard = new DashboardComponent();
     const agent1 = makeAgent("agent-a", "/repos/test");
     const agent2 = makeAgent("agent-b", "/repos/test");
@@ -1099,16 +1125,13 @@ describe("DashboardComponent right pane and navigation features", () => {
     dashboard.onUpdate([agent1, agent2], flatList, questions);
 
     dashboard.handleInput("q"); // QUESTIONS mode
-    expect(dashboard.questionsSelectedIndex).toBe(0);
-    dashboard.handleInput("j"); // move down
-    expect(dashboard.questionsSelectedIndex).toBe(1);
-    dashboard.handleInput("k"); // move back up
-    expect(dashboard.questionsSelectedIndex).toBe(0);
-    // j/k should not change agent tree selection in QUESTIONS mode
+    expect(dashboard.questionsFocused).toBe(false);
     expect(dashboard.selectedAgent?.id).toBe("agent-a");
+    dashboard.handleInput("j"); // move to next agent
+    expect(dashboard.selectedAgent?.id).toBe("agent-b");
   });
 
-  test("j/k in QUESTIONS mode clamps to bounds", () => {
+  test("j/k in QUESTIONS mode clamps to bounds when questions focused", () => {
     dashboard = new DashboardComponent();
     const agent = makeAgent("agent-a", "/repos/test");
     const flatList: FlatAgent[] = [{ agent, depth: 0, connector: "" }];
@@ -1118,6 +1141,7 @@ describe("DashboardComponent right pane and navigation features", () => {
     dashboard.onUpdate([agent], flatList, questions);
 
     dashboard.handleInput("q");
+    dashboard.handleInput("\t"); // focus questions
     expect(dashboard.questionsSelectedIndex).toBe(0);
     dashboard.handleInput("j"); // try to go past end
     expect(dashboard.questionsSelectedIndex).toBe(0); // clamped
@@ -1142,10 +1166,14 @@ describe("DashboardComponent right pane and navigation features", () => {
     }];
     dashboard.onUpdate([agent1, agent2], flatList, questions);
 
+    // Select agent-b first so its question is visible
     expect(dashboard.selectedAgent?.id).toBe("agent-a");
-    dashboard.handleInput("q"); // QUESTIONS mode
-    dashboard.handleInput("g"); // go to agent-b
+    dashboard.handleInput("j"); // move to agent-b
     expect(dashboard.selectedAgent?.id).toBe("agent-b");
+    dashboard.handleInput("q"); // QUESTIONS mode — shows agent-b's question
+    dashboard.handleInput("g"); // go to agent-b (already selected, switches to AGENT LOG)
+    expect(dashboard.selectedAgent?.id).toBe("agent-b");
+    expect(dashboard.currentMode).toBe("AGENT LOG");
   });
 });
 

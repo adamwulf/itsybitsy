@@ -816,7 +816,7 @@ describe("DashboardComponent right pane and navigation features", () => {
     dashboard.handleInput("q"); // jump to QUESTIONS
     dashboard.handleInput("\r"); // Enter to answer
     expect(dashboard.dialog).not.toBeNull();
-    expect(dashboard.dialog!.type).toBe("input");
+    expect(dashboard.dialog!.type).toBe("textarea");
     expect((dashboard.dialog as any).prompt).toContain("Answer");
   });
 
@@ -840,9 +840,10 @@ describe("DashboardComponent right pane and navigation features", () => {
     dashboard.onUpdate([agent], flatList, questions);
 
     dashboard.handleInput("q"); // QUESTIONS mode
-    dashboard.handleInput("\r"); // Enter to answer
+    dashboard.handleInput("\r"); // Enter to answer — opens textarea
     // Type answer
     for (const ch of "yes") dashboard.handleInput(ch);
+    dashboard.handleInput("\t"); // Tab to Send button
     dashboard.handleInput("\r"); // Submit
     await Bun.sleep(50);
 

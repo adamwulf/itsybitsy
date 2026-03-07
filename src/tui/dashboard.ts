@@ -427,7 +427,7 @@ export class RightPaneComponent implements Component {
         } else if (this.diffContent) {
           this.content = this.diffContent;
         } else {
-          this.content = [`${DIM}Press 'd' to load diff${RESET}`];
+          this.content = [`${DIM}Loading diff...${RESET}`];
         }
         break;
       case "STATUS":
@@ -438,20 +438,30 @@ export class RightPaneComponent implements Component {
         } else if (this.statusContent) {
           this.content = this.statusContent;
         } else {
-          this.content = [`${DIM}Press 'g' to load status${RESET}`];
+          this.content = [`${DIM}Loading status...${RESET}`];
         }
         break;
       case "QUESTIONS":
         if (this.questions.length === 0) {
           this.content = [`${DIM}No pending questions${RESET}`];
         } else {
-          this.content = this.questions.map(
-            (q, i) => {
-              const sel = i === this.questionsSelectedIndex ? `${GREEN}> ` : "  ";
-              const selEnd = i === this.questionsSelectedIndex ? RESET : "";
-              return `${sel}${BOLD}${q.agent}:${RESET} ${q.question}${selEnd}`;
+          this.content = [];
+          for (let i = 0; i < this.questions.length; i++) {
+            const q = this.questions[i]!;
+            const sel = i === this.questionsSelectedIndex ? `${GREEN}> ` : "  ";
+            const selEnd = i === this.questionsSelectedIndex ? RESET : "";
+            const prefix = `${sel}${BOLD}${q.agent}:${RESET} `;
+            // First line has the prefix; continuation lines are indented to align
+            const indent = "    "; // visual width of "> " or "  " + 2 more
+            const selStart = i === this.questionsSelectedIndex ? GREEN : "";
+            const fullText = `${prefix}${q.question}${selEnd}`;
+            // Split on existing newlines and add as separate content lines
+            const textLines = fullText.split("\n");
+            this.content.push(textLines[0]!);
+            for (let j = 1; j < textLines.length; j++) {
+              this.content.push(`${selStart}${indent}${textLines[j]}${selEnd}`);
             }
-          );
+          }
           this.content.push("", `${DIM}Enter:answer  Esc:acknowledge  g:go to agent${RESET}`);
         }
         break;
@@ -484,8 +494,20 @@ export class RightPaneComponent implements Component {
       start = Math.max(0, this.content.length - available - this.scrollOffset);
     }
     const visible = this.content.slice(start, start + available);
-    for (const line of visible) {
-      lines.push(truncateToWidth(line, width, ""));
+    if (this.mode === "QUESTIONS") {
+      // Wrap long question lines instead of truncating, but cap to available height
+      for (const line of visible) {
+        if (lines.length >= this.displayHeight) break;
+        const wrapped = wrapLines(line, width);
+        for (const wl of wrapped) {
+          if (lines.length >= this.displayHeight) break;
+          lines.push(truncateToWidth(wl, width, ""));
+        }
+      }
+    } else {
+      for (const line of visible) {
+        lines.push(truncateToWidth(line, width, ""));
+      }
     }
 
     // Pad to displayHeight so both panes are same height
@@ -737,7 +759,8 @@ class DialogOverlayComponent implements Component {
       case "textarea": {
         const visibleHeight = TEXTAREA_VISIBLE_HEIGHT;
         const lines: string[] = [];
-        const visualLines = wrapTextareaLines(dialog.lines, innerWidth);
+        const textWidth = innerWidth - 2; // right padding to match left padding
+        const visualLines = wrapTextareaLines(dialog.lines, textWidth);
 
         // Always follow the bottom (cursor is always at end)
         const scrollOffset = Math.max(0, visualLines.length - visibleHeight);
@@ -1231,9 +1254,10 @@ export class DashboardComponent implements Component {
       return;
     }
     this.showDialog({
-      type: "input",
+      type: "textarea",
       prompt: `Answer ${q.agent}'s question:`,
-      value: "",
+      lines: [""],
+      focusedButton: "text",
       onSubmit: (answer: string) => {
         this.closeDialog();
         if (!answer.trim()) {
@@ -1768,6 +1792,8 @@ export class DashboardComponent implements Component {
     }
 
     this.rightPane.updateContent();
+    // Auto-load async pane content (e.g. DIFF, STATUS) if currently viewing that mode
+    this.triggerAsyncLoadIfNeeded();
 
     // Update tmux poller target
     this.tmuxPoller.setAgent(selected?.meta.tmux_session ?? null);

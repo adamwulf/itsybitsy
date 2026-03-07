@@ -232,7 +232,7 @@ function setupColorSchemeDetection(
 
 // Dialog types for agent actions
 type DialogState =
-  | { type: "confirm"; prompt: string; confirmLabel: string; focusedButton: "confirm" | "cancel"; onYes: () => void }
+  | { type: "confirm"; prompt: string; confirmLabel: string; focusedButton: "confirm" | "cancel"; confirmColor?: string; onYes: () => void }
   | { type: "input"; prompt: string; value: string; onSubmit: (value: string) => void }
   | { type: "select"; prompt: string; items: string[]; selectedIndex: number; onSelect: (index: number) => void }
   | { type: "fuzzy"; prompt: string; query: string; allItems: string[]; filteredIndices: number[]; filteredItems: string[]; selectedIndex: number; onSelect: (originalIndex: number) => void }
@@ -1009,7 +1009,8 @@ class DialogOverlayComponent implements Component {
     switch (dialog.type) {
       case "confirm": {
         const wrapped = wrapLines(dialog.prompt, innerWidth);
-        const confirmBtn = dialog.focusedButton === "confirm" ? `${BOLD}${GREEN}[ ${dialog.confirmLabel} ]${RESET}` : `${DIM}[ ${dialog.confirmLabel} ]${RESET}`;
+        const btnColor = dialog.confirmColor ?? GREEN;
+        const confirmBtn = dialog.focusedButton === "confirm" ? `${BOLD}${btnColor}[ ${dialog.confirmLabel} ]${RESET}` : `${DIM}${btnColor}[ ${dialog.confirmLabel} ]${RESET}`;
         const cancelBtn = dialog.focusedButton === "cancel" ? `${BOLD}${GREEN}[ Cancel ]${RESET}` : `${DIM}[ Cancel ]${RESET}`;
         return { title: "Confirm", contentLines: [...wrapped, "", `  ${cancelBtn}   ${confirmBtn}`] };
       }
@@ -1381,7 +1382,8 @@ export class DashboardComponent implements Component {
       type: "confirm",
       prompt: `Kill agent ${agent.id}?`,
       confirmLabel: "Kill",
-      focusedButton: "confirm",
+      focusedButton: "cancel",
+      confirmColor: RED,
       onYes: () => {
         this.closeDialog();
         this.executeAndRefresh(async () => {

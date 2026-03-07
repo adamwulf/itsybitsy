@@ -335,13 +335,15 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect((dashboard.dialog as any).prompt).toContain("Kill agent");
     expect((dashboard.dialog as any).prompt).toContain("agent-test");
     expect((dashboard.dialog as any).confirmLabel).toBe("Kill");
-    expect((dashboard.dialog as any).focusedButton).toBe("confirm");
+    expect((dashboard.dialog as any).focusedButton).toBe("cancel");
   });
 
   test("kill confirm dialog: Enter on Kill button executes kill", async () => {
     setupDashboardWithAgent();
     dashboard.handleInput("x");
-    // focusedButton defaults to "confirm" (Kill), press Enter
+    // focusedButton defaults to "cancel", Tab to Kill, then press Enter
+    dashboard.handleInput("\t");
+    expect((dashboard.dialog as any).focusedButton).toBe("confirm");
     dashboard.handleInput("\r");
     // Wait for async execution
     await Bun.sleep(10);
@@ -350,27 +352,23 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(lastIbCall!.cwd).toBe("/repos/test");
   });
 
-  test("kill confirm dialog: Tab cycles to Cancel, Enter cancels", () => {
+  test("kill confirm dialog: Enter on default Cancel dismisses", () => {
     setupDashboardWithAgent();
     dashboard.handleInput("x");
-    expect((dashboard.dialog as any).focusedButton).toBe("confirm");
-    dashboard.handleInput("\t");
     expect((dashboard.dialog as any).focusedButton).toBe("cancel");
     dashboard.handleInput("\r");
     expect(dashboard.dialog).toBeNull();
     expect(lastIbCall).toBeNull();
   });
 
-  test("kill confirm dialog: Shift+Tab cycles backward", () => {
+  test("kill confirm dialog: Tab cycles between buttons", () => {
     setupDashboardWithAgent();
     dashboard.handleInput("x");
-    expect((dashboard.dialog as any).focusedButton).toBe("confirm");
-    // Shift+Tab wraps to cancel
-    dashboard.handleInput("\x1b[Z");
     expect((dashboard.dialog as any).focusedButton).toBe("cancel");
-    // Shift+Tab wraps back to confirm
-    dashboard.handleInput("\x1b[Z");
+    dashboard.handleInput("\t");
     expect((dashboard.dialog as any).focusedButton).toBe("confirm");
+    dashboard.handleInput("\t");
+    expect((dashboard.dialog as any).focusedButton).toBe("cancel");
   });
 
   test("kill confirm dialog: Escape cancels", () => {

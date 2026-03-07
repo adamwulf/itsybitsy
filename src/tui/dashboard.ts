@@ -87,8 +87,24 @@ const BRIGHT_BLUE = "\x1b[94m";
 const BRIGHT_MAGENTA = "\x1b[95m";
 
 // Column widths for agent tree display
-const STATE_COL_WIDTH = 12; // max state length: "rate_limited"
+const MIN_STATE_COL_WIDTH = 8; // minimum: length of "complete"
 const AGE_COL_WIDTH = 3; // max age length: e.g. "27m"
+
+/** Map agent state for display: 'unknown' shows as 'running' */
+function displayState(state: string): string {
+  return state === "unknown" ? "running" : state;
+}
+
+/** Compute state column width from the agents being displayed */
+function computeStateColWidth(agents: FlatAgent[]): number {
+  let maxLen = MIN_STATE_COL_WIDTH;
+  for (const f of agents) {
+    if (!f.repoHeader) {
+      maxLen = Math.max(maxLen, displayState(f.agent.state).length);
+    }
+  }
+  return maxLen;
+}
 
 // --- Minimal light/dark terminal detection ---
 
@@ -315,17 +331,18 @@ export function formatAgentRow(
   connector: string,
   selected: boolean,
   width: number,
-  nameColWidth: number
+  nameColWidth: number,
+  stateColWidth: number = MIN_STATE_COL_WIDTH
 ): string {
   const orphanedPrefix = agent.orphaned ? "⚠ " : "";
   const icon = agent.meta.worker ? "⚙" : "◆";
-  const displayState = agent.state === "unknown" ? "running" : agent.state;
-  const stateColor = getStateColors()[displayState] ?? getStateColors().unknown;
+  const state = displayState(agent.state);
+  const stateColor = getStateColors()[state] ?? getStateColors().unknown;
 
   const namePrefix = `${connector}${orphanedPrefix}${icon} ${agent.repoName}/${agent.id}`;
   const namePad = Math.max(0, nameColWidth - visibleWidth(namePrefix));
   const promptText = agent.meta.prompt.replace(/\n/g, " ");
-  const coloredState = `${stateColor}${displayState}${RESET}${" ".repeat(Math.max(0, STATE_COL_WIDTH - displayState.length))}`;
+  const coloredState = `${stateColor}${state}${RESET}${" ".repeat(Math.max(0, stateColWidth - state.length))}`;
   const paddedAge = agent.age.padStart(AGE_COL_WIDTH);
   const line = `${namePrefix}${" ".repeat(namePad)}  ${coloredState}  ${paddedAge}  ${agent.meta.model}  ${promptText}`;
 
@@ -496,13 +513,14 @@ export class AgentTreeComponent implements Component {
     }
     // remaining >= 2: show "▼ N more" indicator using the reserved slot.
 
-    // Compute max name prefix width across all visible agent rows for column alignment
+    // Compute max name prefix width and state column width across all visible agent rows
     let maxNameWidth = 0;
     for (const item of visible) {
       if (!item.repoHeader) {
         maxNameWidth = Math.max(maxNameWidth, agentNamePrefixWidth(item.agent, item.connector));
       }
     }
+    const stateColWidth = computeStateColWidth(visible);
 
     // Scroll indicator at top
     if (start > 0) {
@@ -522,7 +540,7 @@ export class AgentTreeComponent implements Component {
           lines.push(truncated);
         }
       } else {
-        lines.push(formatAgentRow(item.agent, item.connector, i === this.selectedIndex, width, maxNameWidth));
+        lines.push(formatAgentRow(item.agent, item.connector, i === this.selectedIndex, width, maxNameWidth, stateColWidth));
       }
     }
 
@@ -640,16 +658,18 @@ export class RightPaneComponent implements Component {
           }
         }
         break;
-      case "TREE":
+      case "TREE": {
+        const treeStateColWidth = computeStateColWidth(this.allAgents);
         this.content = this.allAgents.map(({ agent, connector }) => {
           const icon = agent.meta.worker ? "⚙" : "◆";
-          const displayState = agent.state === "unknown" ? "running" : agent.state;
-          const stateColor = getStateColors()[displayState] ?? getStateColors().unknown;
+          const state = displayState(agent.state);
+          const stateColor = getStateColors()[state] ?? getStateColors().unknown;
           const promptText = agent.meta.prompt.replace(/\n/g, " ");
-          const coloredState = `${stateColor}${displayState}${RESET}${" ".repeat(Math.max(0, STATE_COL_WIDTH - displayState.length))}`;
+          const coloredState = `${stateColor}${state}${RESET}${" ".repeat(Math.max(0, treeStateColWidth - state.length))}`;
           const paddedAge = agent.age.padStart(AGE_COL_WIDTH);
           return `${connector}${icon} ${agent.repoName}/${agent.id}  ${coloredState}  ${paddedAge}  ${agent.meta.model}  ${promptText}`;
         });
+      }
         if (this.content.length === 0) this.content = [`${DIM}No agents${RESET}`];
         break;
       case "ERRORS":
@@ -1607,10 +1627,11 @@ export class DashboardComponent implements Component {
       this.setNotice("No agents to search");
       return;
     }
+    const fuzzyStateColWidth = computeStateColWidth(visible);
     const allItems = visible.map((f) => {
       const promptText = f.agent.meta.prompt.replace(/\n/g, " ");
-      const displayState = f.agent.state === "unknown" ? "running" : f.agent.state;
-      return `${f.agent.repoName}/${f.agent.id}  ${displayState.padEnd(STATE_COL_WIDTH)}  ${f.agent.age.padStart(AGE_COL_WIDTH)}  ${promptText}`;
+      const state = displayState(f.agent.state);
+      return `${f.agent.repoName}/${f.agent.id}  ${state.padEnd(fuzzyStateColWidth)}  ${f.agent.age.padStart(AGE_COL_WIDTH)}  ${promptText}`;
     });
     this.showDialog({
       type: "fuzzy",

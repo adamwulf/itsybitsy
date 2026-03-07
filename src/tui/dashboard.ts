@@ -1249,7 +1249,7 @@ class DialogOverlayComponent implements Component {
           ? (createEnabled ? `${BOLD}${GREEN}[ Create ]${RESET}` : `${BOLD}${DIM}[ Create ]${RESET}`)
           : (createEnabled ? `[ Create ]` : `${DIM}[ Create ]${RESET}`);
         const cancelLabel = dialog.focused === "cancel" ? `${BOLD}${GREEN}[ Cancel ]${RESET}` : `${DIM}[ Cancel ]${RESET}`;
-        lines.push(`  ${createLabel}   ${cancelLabel}`);
+        lines.push(`  ${cancelLabel}   ${createLabel}`);
 
         return { title: `New Agent (${dialog.repoName})`, contentLines: lines };
       }
@@ -2037,7 +2037,7 @@ export class DashboardComponent implements Component {
 
     if (this._dialog.type === "new-agent-form") {
       const d = this._dialog;
-      const focusOrder: Array<typeof d.focused> = ["name", "worker", "prompt", "create", "cancel"];
+      const focusOrder: Array<typeof d.focused> = ["name", "worker", "prompt", "cancel", "create"];
       const nextFocus = () => {
         const idx = focusOrder.indexOf(d.focused);
         d.focused = focusOrder[(idx + 1) % focusOrder.length]!;

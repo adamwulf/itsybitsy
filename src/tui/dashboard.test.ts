@@ -584,11 +584,11 @@ describe("DashboardComponent dialog and action handlers", () => {
     dashboard.handleInput("\t"); // Tab to prompt
     expect(d.focused).toBe("prompt");
 
-    dashboard.handleInput("\t"); // Tab to create
-    expect(d.focused).toBe("create");
-
     dashboard.handleInput("\t"); // Tab to cancel
     expect(d.focused).toBe("cancel");
+
+    dashboard.handleInput("\t"); // Tab to create
+    expect(d.focused).toBe("create");
 
     dashboard.handleInput("\t"); // Tab wraps to name
     expect(d.focused).toBe("name");
@@ -602,12 +602,12 @@ describe("DashboardComponent dialog and action handlers", () => {
     const d = dashboard.dialog as any;
     expect(d.focused).toBe("name");
 
-    // Shift+Tab should go to cancel (wrap around)
+    // Shift+Tab should go to create (wrap around)
     dashboard.handleInput("\x1b[Z"); // Shift+Tab escape sequence
-    expect(d.focused).toBe("cancel");
+    expect(d.focused).toBe("create");
 
     dashboard.handleInput("\x1b[Z");
-    expect(d.focused).toBe("create");
+    expect(d.focused).toBe("cancel");
   });
 
   test("new-agent form: Worker toggle with Space and Enter", () => {
@@ -646,7 +646,8 @@ describe("DashboardComponent dialog and action handlers", () => {
     // Tab to prompt, type text
     dashboard.handleInput("\t");
     for (const ch of "do stuff") dashboard.handleInput(ch);
-    // Tab to create, press Enter
+    // Tab to cancel, Tab to create, press Enter
+    dashboard.handleInput("\t");
     dashboard.handleInput("\t");
     dashboard.handleInput("\r");
     await Bun.sleep(10);
@@ -669,7 +670,8 @@ describe("DashboardComponent dialog and action handlers", () => {
     dashboard.handleInput("\t");
     dashboard.handleInput("\t");
     for (const ch of "do stuff") dashboard.handleInput(ch);
-    // Tab to create, press Enter
+    // Tab to cancel, Tab to create, press Enter
+    dashboard.handleInput("\t");
     dashboard.handleInput("\t");
     dashboard.handleInput("\r");
     await Bun.sleep(10);
@@ -686,7 +688,8 @@ describe("DashboardComponent dialog and action handlers", () => {
     });
 
     dashboard.handleInput("a");
-    // Tab past name, worker, prompt (empty) to create
+    // Tab past name, worker, prompt (empty), cancel to create
+    dashboard.handleInput("\t");
     dashboard.handleInput("\t");
     dashboard.handleInput("\t");
     dashboard.handleInput("\t");
@@ -708,7 +711,6 @@ describe("DashboardComponent dialog and action handlers", () => {
     // Tab to cancel
     dashboard.handleInput("\t"); // worker
     dashboard.handleInput("\t"); // prompt
-    dashboard.handleInput("\t"); // create
     dashboard.handleInput("\t"); // cancel
     expect((dashboard.dialog as any).focused).toBe("cancel");
     dashboard.handleInput("\r");

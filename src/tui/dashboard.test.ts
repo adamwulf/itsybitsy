@@ -253,22 +253,20 @@ describe("RightPaneComponent scroll logic", () => {
     const result = pane.render(80);
 
     expect(result.length).toBe(10);
-    // First line is the header
-    expect(result[0]).toContain("INITIAL PROMPT");
     // Content is "Prompt:" + "" + 20 prompt lines = 22 lines
-    // available=9, start = max(0, 22-9-0) = 13 → first content line is "prompt line 12"
-    expect(result[1]).toContain("prompt line 12");
+    // available=10, start = max(0, 22-10-0) = 12 → first visible is "prompt line 11"
+    expect(result[0]).toContain("prompt line 11");
   });
 
   test("scrollOffset clamped to maxOffset", () => {
     const pane = makeRightPane(20, 10);
     // Content is: "Prompt:" + empty line + 20 prompt lines = 22 lines
-    // available = displayHeight - 1 = 9
-    // maxOffset = max(0, 22 - 9) = 13
+    // available = displayHeight = 10
+    // maxOffset = max(0, 22 - 10) = 12
     pane.scrollOffset = 999;
     pane.render(80);
 
-    expect(pane.scrollOffset).toBe(13);
+    expect(pane.scrollOffset).toBe(12);
   });
 
   test("content sliced from scrollOffset", () => {
@@ -277,11 +275,9 @@ describe("RightPaneComponent scroll logic", () => {
     const result = pane.render(80);
 
     expect(result.length).toBe(10);
-    // Header is always first
-    expect(result[0]).toContain("INITIAL PROMPT");
     // scrollOffset=5 means 5 lines back from tail
-    // content=22 lines, available=9, start = max(0, 22-9-5) = 8 → "prompt line 7"
-    expect(result[1]).toContain("prompt line 7");
+    // content=22 lines, available=10, start = max(0, 22-10-5) = 7 → "prompt line 6"
+    expect(result[0]).toContain("prompt line 6");
   });
 
   test("pads to displayHeight when content is short", () => {
@@ -290,13 +286,12 @@ describe("RightPaneComponent scroll logic", () => {
     const result = pane.render(80);
 
     expect(result.length).toBe(10);
-    // Header + "Prompt:" + "" + 2 prompt lines = 4 content lines after header
-    expect(result[0]).toContain("INITIAL PROMPT");
-    expect(result[1]).toContain("Prompt:");
-    expect(result[3]).toContain("prompt line 1");
-    expect(result[4]).toContain("prompt line 2");
+    // "Prompt:" + "" + 2 prompt lines = 4 content lines
+    expect(result[0]).toContain("Prompt:");
+    expect(result[2]).toContain("prompt line 1");
+    expect(result[3]).toContain("prompt line 2");
     // Remaining lines should be empty padding
-    for (let i = 5; i < 10; i++) {
+    for (let i = 4; i < 10; i++) {
       expect(result[i]).toBe("");
     }
   });

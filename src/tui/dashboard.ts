@@ -611,6 +611,7 @@ export class RightPaneComponent implements Component {
 
   render(width: number): string[] {
     const lines: string[] = [];
+    const innerWidth = width - 1;
 
     // Available lines
     const available = Math.max(1, this.displayHeight);
@@ -631,21 +632,21 @@ export class RightPaneComponent implements Component {
       // Wrap long lines instead of truncating, but cap to available height
       for (const line of visible) {
         if (lines.length >= this.displayHeight) break;
-        const wrapped = wrapLines(line, width);
+        const wrapped = wrapLines(line, innerWidth);
         for (const wl of wrapped) {
           if (lines.length >= this.displayHeight) break;
-          lines.push(truncateToWidth(wl, width, ""));
+          lines.push(" " + truncateToWidth(wl, innerWidth, ""));
         }
       }
     } else {
       for (const line of visible) {
-        lines.push(truncateToWidth(line, width, ""));
+        lines.push(" " + truncateToWidth(line, innerWidth, ""));
       }
     }
 
     // Pad to displayHeight so both panes are same height
     while (lines.length < this.displayHeight) {
-      lines.push("");
+      lines.push(" ");
     }
 
     return lines;

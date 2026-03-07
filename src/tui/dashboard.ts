@@ -638,25 +638,25 @@ class StatusBarComponent implements Component {
         ? ` ${BOLD}${RED}[${this.errorCount} errors]${RESET}`
         : "";
 
-    const modeLine = `${DIM}[${this.modeIndex}] ${this.currentMode}${RESET}${questionBadge}${errorBadge}`;
+    const modeLeft = `${DIM}[${this.modeIndex}] ${this.currentMode}${RESET}${questionBadge}${errorBadge}`;
 
-    // Build usage string for right side of keys line
+    // Build usage string for right side of mode line
     const usageStr = this.formatUsage();
-    const keys = `${DIM}j/k:nav  ;/l:scroll  p/n:pane  s:send  m:merge  x:kill  a:new  r:reassign  R:resume  Ctrl-C:quit${RESET}`;
-
-    let keysLine: string;
+    let modeLine: string;
     if (usageStr) {
-      const keysWidth = visibleWidth(keys);
+      const modeWidth = visibleWidth(modeLeft);
       const usageWidth = visibleWidth(usageStr);
-      const gap = Math.max(2, width - keysWidth - usageWidth);
-      keysLine = truncateToWidth(keys + " ".repeat(gap) + usageStr, width, "");
+      const gap = Math.max(2, width - modeWidth - usageWidth);
+      modeLine = truncateToWidth(modeLeft + " ".repeat(gap) + usageStr, width, "");
     } else {
-      keysLine = truncateToWidth(keys, width, "");
+      modeLine = truncateToWidth(modeLeft, width, "");
     }
 
+    const keys = `${DIM}j/k:nav  ;/l:scroll  p/n:pane  s:send  m:merge  x:kill  a:new  r:reassign  R:resume  Ctrl-C:quit${RESET}`;
+
     return [
-      truncateToWidth(modeLine, width, ""),
-      keysLine,
+      modeLine,
+      truncateToWidth(keys, width, ""),
     ];
   }
 

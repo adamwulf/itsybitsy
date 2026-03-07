@@ -2184,9 +2184,29 @@ export class DashboardComponent implements Component {
     }
   }
 
-  private buildTitledSeparator(leftTitle: string, rightTitle: string, width: number): string {
+  /**
+   * Build a separator line with optional titles.
+   * leftTitle appears near the left edge.
+   * rightTitle appears at splitAt (left pane width), aligned to start of right pane.
+   * If splitAt is 0, rightTitle is right-aligned.
+   */
+  private buildTitledSeparator(leftTitle: string, rightTitle: string, width: number, splitAt = 0): string {
     const leftPad = 3;
     const rightPad = 3;
+
+    if (splitAt > 0 && rightTitle) {
+      // Left half: leftPad + leftTitle + dashes up to splitAt
+      const leftHalfDashes = Math.max(1, splitAt - leftPad - leftTitle.length);
+      // Right half: rightTitle + dashes to fill rest
+      const rightHalfDashes = Math.max(1, width - splitAt - rightTitle.length - rightPad);
+      const sep =
+        `${DIM}${"─".repeat(leftPad)}${RESET}${BOLD}${leftTitle}${RESET}` +
+        `${DIM}${"─".repeat(leftHalfDashes)}${RESET}` +
+        `${BOLD}${rightTitle}${RESET}` +
+        `${DIM}${"─".repeat(rightHalfDashes)}${"─".repeat(rightPad)}${RESET}`;
+      return truncateToWidth(sep, width, "");
+    }
+
     const fixedChars = leftPad + leftTitle.length + rightPad + rightTitle.length;
     const fillCount = Math.max(1, width - fixedChars);
     const sep = `${DIM}${"─".repeat(leftPad)}${RESET}${BOLD}${leftTitle}${RESET}${DIM}${"─".repeat(fillCount)}${RESET}${BOLD}${rightTitle}${RESET}${DIM}${"─".repeat(rightPad)}${RESET}`;
@@ -2242,11 +2262,12 @@ export class DashboardComponent implements Component {
       const treeLines = this.agentTree.render(width);
       lines.push(...treeLines);
 
-      // Separator with pane titles
+      // Separator with pane titles — right title at left edge of right pane
       const selAgent = this.agentTree.selectedAgent;
       const leftTitle = selAgent ? ` ${selAgent.id} ` : "";
       const rightTitle = ` ${this.rightPane.mode} `;
-      lines.push(this.buildTitledSeparator(leftTitle, rightTitle, width));
+      const splitAt = this.splitPane.getLeftWidth() + 1; // +1 for separator char
+      lines.push(this.buildTitledSeparator(leftTitle, rightTitle, width, splitAt));
 
       // Compute available height for split pane
       const bottomHeight = 2; // status bar is always 2 lines

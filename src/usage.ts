@@ -1,16 +1,20 @@
 /**
  * Claude API usage tracking — fetches session/weekly utilization from Anthropic API.
- * Caches at ~/.itsybitsy/usage-cache.json with 5-minute TTL.
+ * Caches at ~/.itsybitsy/usage-cache.json with 1-minute TTL.
+ * Uses a lock file to rate-limit API calls to once per 30s across processes.
  */
 
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { rename, mkdir } from "node:fs/promises";
+import { rename, mkdir, stat, writeFile, unlink } from "node:fs/promises";
 
 const ITSYBITSY_DIR = join(homedir(), ".itsybitsy");
 const CACHE_PATH = join(ITSYBITSY_DIR, "usage-cache.json");
+const LOCK_PATH = join(ITSYBITSY_DIR, "usage.lock");
 const CREDENTIALS_PATH = join(homedir(), ".claude", ".credentials.json");
 const CACHE_TTL_MS = 60_000; // 1 minute normal refresh
+const LOCK_MAX_AGE_MS = 30_000; // only one API attempt per 30s across processes
+const API_TIMEOUT_MS = 5_000; // 5s fetch timeout
 const MAX_BACKOFF_MS = 10 * 60_000; // 10 minutes max backoff on failures
 
 export interface UsageData {
@@ -116,6 +120,32 @@ async function writeCache(cache: CacheFile): Promise<void> {
   await rename(tmpPath, CACHE_PATH);
 }
 
+/** Returns true if a lock file exists and is younger than LOCK_MAX_AGE_MS. */
+async function isLocked(): Promise<boolean> {
+  try {
+    const s = await stat(LOCK_PATH);
+    return Date.now() - s.mtimeMs < LOCK_MAX_AGE_MS;
+  } catch {
+    return false;
+  }
+}
+
+async function acquireLock(): Promise<void> {
+  try {
+    await writeFile(LOCK_PATH, "");
+  } catch {
+    // ignore — best-effort
+  }
+}
+
+async function releaseLock(): Promise<void> {
+  try {
+    await unlink(LOCK_PATH);
+  } catch {
+    // ignore
+  }
+}
+
 export async function fetchUsage(): Promise<UsageData | null> {
   await mkdir(ITSYBITSY_DIR, { recursive: true });
   // Check cache
@@ -128,15 +158,24 @@ export async function fetchUsage(): Promise<UsageData | null> {
   const token = await readAccessToken();
   if (!token) return null;
 
+  // Rate limit: only one API attempt per 30s across all processes
+  if (await isLocked()) {
+    if (cache) return parseUsageResponse(cache.response);
+    return null;
+  }
+
+  await acquireLock();
   try {
     const resp = await fetch("https://api.anthropic.com/api/oauth/usage", {
       headers: {
         Authorization: `Bearer ${token}`,
         "anthropic-beta": "oauth-2025-04-20",
       },
+      signal: AbortSignal.timeout(API_TIMEOUT_MS),
     });
 
     if (!resp.ok) {
+      await releaseLock();
       if (cache) {
         const backoffMs = Math.min(cache.nextBackoffMs ?? 60_000, MAX_BACKOFF_MS);
         const nextBackoffMs = Math.min(backoffMs + 60_000, MAX_BACKOFF_MS);
@@ -151,6 +190,7 @@ export async function fetchUsage(): Promise<UsageData | null> {
     const body = (await resp.json()) as ApiResponse;
 
     if (body.error) {
+      await releaseLock();
       if (cache) {
         const backoffMs = Math.min(cache.nextBackoffMs ?? 60_000, MAX_BACKOFF_MS);
         const nextBackoffMs = Math.min(backoffMs + 60_000, MAX_BACKOFF_MS);
@@ -161,11 +201,13 @@ export async function fetchUsage(): Promise<UsageData | null> {
       return null;
     }
 
-    // Success — write cache with no backoff
+    // Success — write cache with no backoff, release lock
     await writeCache({ timestamp: Math.floor(now / 1000), response: body, nextBackoffMs: 60_000 });
+    await releaseLock();
     return parseUsageResponse(body);
   } catch {
-    // Network error — use stale cache if available
+    // Network error or timeout — use stale cache if available
+    await releaseLock();
     if (cache) return parseUsageResponse(cache.response);
     return null;
   }

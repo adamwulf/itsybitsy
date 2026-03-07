@@ -193,12 +193,11 @@ function formatAgentRow(
   const orphanedPrefix = agent.orphaned ? "⚠ " : "";
   const icon = agent.meta.worker ? "⚙" : "◆";
   const stateColor = STATE_COLORS[agent.state] ?? STATE_COLORS.unknown;
-  const archived = agent.archived ? `${DIM}[archived]${RESET} ` : "";
   const sel = selected ? `${BOLD}${REVERSE}` : "";
   const selEnd = selected ? `${RESET}` : "";
 
   const shortPrompt = agent.meta.prompt.replace(/\n/g, " ").slice(0, 40);
-  const line = `${connector}${orphanedPrefix}${icon} ${agent.repoName}/${agent.id}  ${stateColor}${agent.state}${RESET}  ${agent.age}  ${agent.meta.model}  ${archived}${shortPrompt}`;
+  const line = `${connector}${orphanedPrefix}${icon} ${agent.repoName}/${agent.id}  ${stateColor}${agent.state}${RESET}  ${agent.age}  ${agent.meta.model}  ${shortPrompt}`;
 
   return `${sel}${truncateToWidth(line, width, "")}${selEnd}`;
 }
@@ -207,11 +206,9 @@ function formatAgentRow(
 class AgentTreeComponent implements Component {
   flatList: FlatAgent[] = [];
   selectedIndex = 0;
-  showArchived = false;
   private scrollOffset = 0;
 
   get visibleList(): FlatAgent[] {
-    if (this.showArchived) return this.flatList;
     return this.flatList.filter((f) => !f.agent.archived);
   }
 
@@ -233,16 +230,6 @@ class AgentTreeComponent implements Component {
       return true;
     }
     return false;
-  }
-
-  toggleArchived() {
-    this.showArchived = !this.showArchived;
-    // Clamp selection after toggling
-    const visible = this.visibleList;
-    if (this.selectedIndex >= visible.length) {
-      this.selectedIndex = Math.max(0, visible.length - 1);
-    }
-    this.ensureSelectedVisible();
   }
 
   moveSelection(delta: number) {
@@ -577,7 +564,7 @@ class StatusBarComponent implements Component {
 
     // Build usage string for right side of keys line
     const usageStr = this.formatUsage();
-    const keys = `${DIM}j/k:nav  ;/l:scroll  p/n:pane  s:send  m:merge  x:kill  a:new  r:reassign  R:resume  A:archive  Ctrl-C:quit${RESET}`;
+    const keys = `${DIM}j/k:nav  ;/l:scroll  p/n:pane  s:send  m:merge  x:kill  a:new  r:reassign  R:resume  Ctrl-C:quit${RESET}`;
 
     let keysLine: string;
     if (usageStr) {
@@ -1288,7 +1275,6 @@ export class DashboardComponent implements Component {
       { label: "resume agent — R", action: () => this.handleResume() },
       { label: "reassign manager — r", action: () => this.handleReassign() },
       { label: "new agent — a", action: () => this.handleNewAgent() },
-      { label: "toggle archived — A", action: () => this.handleToggleArchived() },
       { label: "open worktree — w", action: () => this.handleOpenWorktree() },
       { label: "open diff in tool — o", action: () => this.handleOpenDiffTool() },
       { label: "open in Ghostty — G", action: () => this.handleOpenGhostty() },
@@ -1315,12 +1301,6 @@ export class DashboardComponent implements Component {
         this.tui?.requestRender();
       },
     });
-  }
-
-  private handleToggleArchived() {
-    this.agentTree.toggleArchived();
-    this.syncSelectedAgent();
-    this.tui?.requestRender();
   }
 
   private handleScrollUp() {
@@ -1405,7 +1385,7 @@ export class DashboardComponent implements Component {
         `${BOLD}Navigation:${RESET} j/k ↑↓ move  ${DIM}|${RESET}  @ fuzzy agent  ${DIM}|${RESET}  / fuzzy mode`,
         `${BOLD}Pane:${RESET} p/n ←→ cycle  ${DIM}|${RESET}  d DIFF  ${DIM}|${RESET}  g STATUS  ${DIM}|${RESET}  e ERRORS  ${DIM}|${RESET}  q QUESTIONS`,
         `${BOLD}Scroll:${RESET} ; scroll up  ${DIM}|${RESET}  l scroll down`,
-        `${BOLD}Actions:${RESET} s send  ${DIM}|${RESET}  m merge  ${DIM}|${RESET}  x kill  ${DIM}|${RESET}  ! nuke  ${DIM}|${RESET}  R resume  ${DIM}|${RESET}  r reassign  ${DIM}|${RESET}  a new  ${DIM}|${RESET}  A archive`,
+        `${BOLD}Actions:${RESET} s send  ${DIM}|${RESET}  m merge  ${DIM}|${RESET}  x kill  ${DIM}|${RESET}  ! nuke  ${DIM}|${RESET}  R resume  ${DIM}|${RESET}  r reassign  ${DIM}|${RESET}  a new`,
         `${BOLD}Open:${RESET} w worktree  ${DIM}|${RESET}  o diff tool  ${DIM}|${RESET}  G Ghostty  ${DIM}|${RESET}  S snapshot`,
         `${BOLD}App:${RESET} h help  ${DIM}|${RESET}  Ctrl-C quit`,
         "",
@@ -1936,10 +1916,6 @@ export class DashboardComponent implements Component {
       if (this.rightPane.mode === "QUESTIONS" && this.rightPane.questions.length > 0) {
         this.handleAcknowledgeQuestion();
       }
-    }
-    // Toggle archived agents
-    else if (data === "A") {
-      this.handleToggleArchived();
     }
     // Scroll pane content — scrolls both tmux pane and right pane
     else if (data === ";") {

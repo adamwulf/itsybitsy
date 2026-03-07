@@ -5,9 +5,10 @@
 
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { rename } from "node:fs/promises";
+import { rename, mkdir } from "node:fs/promises";
 
-const CACHE_PATH = join(homedir(), ".claude", "usage-cache.json");
+const ITSYBITSY_DIR = join(homedir(), ".itsybitsy");
+const CACHE_PATH = join(ITSYBITSY_DIR, "usage-cache.json");
 const CREDENTIALS_PATH = join(homedir(), ".claude", ".credentials.json");
 const CACHE_TTL_MS = 30_000;
 
@@ -107,6 +108,7 @@ async function readCache(): Promise<CacheFile | null> {
 }
 
 async function writeCache(cache: CacheFile): Promise<void> {
+  await mkdir(ITSYBITSY_DIR, { recursive: true });
   const tmpPath = CACHE_PATH + ".tmp." + process.pid;
   await Bun.write(tmpPath, JSON.stringify(cache));
   await rename(tmpPath, CACHE_PATH);

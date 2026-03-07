@@ -1993,6 +1993,11 @@ export class DashboardComponent implements Component {
     });
   }
 
+  /** Delete the last word (or trailing whitespace) from a string. */
+  private static deleteWord(s: string): string {
+    return s.replace(/(?:\s+|\S+)\s*$/, "");
+  }
+
   private handleDialogInput(data: string): boolean {
     if (!this._dialog) return false;
 
@@ -2025,6 +2030,9 @@ export class DashboardComponent implements Component {
     if (this._dialog.type === "input") {
       if (matchesKey(data, Key.enter)) {
         this._dialog.onSubmit(this._dialog.value);
+      } else if (matchesKey(data, Key.alt("backspace"))) {
+        this._dialog.value = DashboardComponent.deleteWord(this._dialog.value);
+        this.tui?.requestRender();
       } else if (matchesKey(data, Key.backspace) || data === "\x7f") {
         this._dialog.value = this._dialog.value.slice(0, -1);
         this.tui?.requestRender();
@@ -2065,8 +2073,18 @@ export class DashboardComponent implements Component {
         } else if (matchesKey(data, Key.shift("tab"))) {
           d.focusedButton = "send";
           this.tui?.requestRender();
-        } else if (matchesKey(data, Key.enter)) {
+        } else if (matchesKey(data, Key.enter) || matchesKey(data, Key.shift("enter"))) {
           d.lines.push("");
+          this.tui?.requestRender();
+        } else if (matchesKey(data, Key.alt("backspace"))) {
+          const lastIdx = d.lines.length - 1;
+          const lastLine = d.lines[lastIdx] ?? "";
+          const trimmed = DashboardComponent.deleteWord(lastLine);
+          if (trimmed.length < lastLine.length) {
+            d.lines[lastIdx] = trimmed;
+          } else if (lastIdx > 0) {
+            d.lines.pop();
+          }
           this.tui?.requestRender();
         } else if (matchesKey(data, Key.backspace) || data === "\x7f") {
           const lastIdx = d.lines.length - 1;
@@ -2146,6 +2164,9 @@ export class DashboardComponent implements Component {
           prevFocus();
         } else if (matchesKey(data, Key.enter)) {
           nextFocus();
+        } else if (matchesKey(data, Key.alt("backspace"))) {
+          d.name = DashboardComponent.deleteWord(d.name);
+          this.tui?.requestRender();
         } else if (matchesKey(data, Key.backspace) || data === "\x7f") {
           d.name = d.name.slice(0, -1);
           this.tui?.requestRender();
@@ -2167,8 +2188,18 @@ export class DashboardComponent implements Component {
           nextFocus();
         } else if (matchesKey(data, Key.shift("tab"))) {
           prevFocus();
-        } else if (matchesKey(data, Key.enter)) {
+        } else if (matchesKey(data, Key.enter) || matchesKey(data, Key.shift("enter"))) {
           d.lines.push("");
+          this.tui?.requestRender();
+        } else if (matchesKey(data, Key.alt("backspace"))) {
+          const lastIdx = d.lines.length - 1;
+          const lastLine = d.lines[lastIdx] ?? "";
+          const trimmed = DashboardComponent.deleteWord(lastLine);
+          if (trimmed.length < lastLine.length) {
+            d.lines[lastIdx] = trimmed;
+          } else if (lastIdx > 0) {
+            d.lines.pop();
+          }
           this.tui?.requestRender();
         } else if (matchesKey(data, Key.backspace) || data === "\x7f") {
           const lastIdx = d.lines.length - 1;
@@ -2283,6 +2314,10 @@ export class DashboardComponent implements Component {
         this.tui?.requestRender();
       } else if (matchesKey(data, Key.up)) {
         this._dialog.selectedIndex = Math.max(0, this._dialog.selectedIndex - 1);
+        this.tui?.requestRender();
+      } else if (matchesKey(data, Key.alt("backspace"))) {
+        this._dialog.query = DashboardComponent.deleteWord(this._dialog.query);
+        refilter();
         this.tui?.requestRender();
       } else if (matchesKey(data, Key.backspace) || data === "\x7f") {
         this._dialog.query = this._dialog.query.slice(0, -1);

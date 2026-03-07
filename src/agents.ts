@@ -193,6 +193,8 @@ export function flattenAgentTree(roots: Agent[]): FlatAgent[] {
   const result: FlatAgent[] = [];
 
   function walk(agent: Agent, depth: number, ancestorIsLast: boolean[]) {
+    if (agent.archived) return;
+
     let connector = "";
     if (ancestorIsLast.length > 0) {
       // Build prefix from ancestors: "│   " if ancestor has more siblings, "    " if last
@@ -204,16 +206,18 @@ export function flattenAgentTree(roots: Agent[]): FlatAgent[] {
     }
 
     result.push({ agent, depth, connector });
-    for (let i = 0; i < agent.children.length; i++) {
-      const isLast = i === agent.children.length - 1;
-      walk(agent.children[i]!, depth + 1, [...ancestorIsLast, isLast]);
+    const nonArchivedChildren = agent.children.filter((c) => !c.archived);
+    for (let i = 0; i < nonArchivedChildren.length; i++) {
+      const isLast = i === nonArchivedChildren.length - 1;
+      walk(nonArchivedChildren[i]!, depth + 1, [...ancestorIsLast, isLast]);
     }
   }
 
-  const multiRoot = roots.length > 1;
-  for (let ri = 0; ri < roots.length; ri++) {
-    const isLast = ri === roots.length - 1;
-    walk(roots[ri]!, 0, multiRoot ? [isLast] : []);
+  const nonArchivedRoots = roots.filter((r) => !r.archived);
+  const multiRoot = nonArchivedRoots.length > 1;
+  for (let ri = 0; ri < nonArchivedRoots.length; ri++) {
+    const isLast = ri === nonArchivedRoots.length - 1;
+    walk(nonArchivedRoots[ri]!, 0, multiRoot ? [isLast] : []);
   }
   return result;
 }

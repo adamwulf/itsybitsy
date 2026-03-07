@@ -1991,16 +1991,10 @@ export class DashboardComponent implements Component {
     const lines: string[] = [];
 
     // Header
-    const headerLeft = `${BOLD}itsybitsy${RESET} ${DIM}— agent dashboard${RESET}`;
-    if (this.lastSentNotice) {
-      const leftWidth = visibleWidth(headerLeft);
-      const notice = `${DIM}${this.lastSentNotice}${RESET}`;
-      const noticeWidth = visibleWidth(notice);
-      const gap = Math.max(1, width - leftWidth - noticeWidth);
-      lines.push(truncateToWidth(headerLeft + " ".repeat(gap) + notice, width, ""));
-    } else {
-      lines.push(truncateToWidth(headerLeft, width, ""));
-    }
+    const subtitle = this.lastSentNotice
+      ? `${DIM}—${RESET} ${YELLOW}${this.lastSentNotice}${RESET}`
+      : `${DIM}— agent dashboard${RESET}`;
+    lines.push(truncateToWidth(`${BOLD}itsybitsy${RESET} ${subtitle}`, width, ""));
     lines.push(truncateToWidth(`${DIM}${"─".repeat(width)}${RESET}`, width, ""));
 
     // Agent tree (top section)
@@ -2073,6 +2067,7 @@ export async function launchDashboard(): Promise<void> {
       dashboard.stopPolling();
       watcher.stop();
       tui.stop();
+      process.stdout.write("\x1b[2J\x1b[H");
       process.exit(0);
     }
     // Filter out key release events (Kitty protocol sends both press and release)

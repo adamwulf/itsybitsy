@@ -1839,10 +1839,7 @@ export class DashboardComponent implements Component {
     }
 
     if (this._dialog.type === "confirm") {
-      if (matchesKey(data, Key.tab)) {
-        this._dialog.focusedButton = this._dialog.focusedButton === "confirm" ? "cancel" : "confirm";
-        this.tui?.requestRender();
-      } else if (matchesKey(data, Key.shift("tab"))) {
+      if (matchesKey(data, Key.tab) || matchesKey(data, Key.shift("tab")) || matchesKey(data, Key.left) || matchesKey(data, Key.right)) {
         this._dialog.focusedButton = this._dialog.focusedButton === "confirm" ? "cancel" : "confirm";
         this.tui?.requestRender();
       } else if (matchesKey(data, Key.enter)) {

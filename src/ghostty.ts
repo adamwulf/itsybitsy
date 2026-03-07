@@ -18,8 +18,10 @@ export async function openInGhostty(
     if (!/^[\w-]+$/.test(tmuxSession)) {
       return { ok: false, message: "Invalid tmux session name" };
     }
-    // Wrap in bash -c so Ghostty's login shell flags (--posix --login) go to bash, not tmux
-    const proc = Bun.spawn(["ghostty", `--command=bash -c "tmux attach -t ${tmuxSession}"`], {
+    // Wrap in bash -c so Ghostty's login shell flags (--posix --login) go to bash, not tmux.
+    // Set window-size to 'latest' so tmux resizes to Ghostty's dimensions when attaching.
+    // Sessions are created at 60 cols by ib and don't auto-resize on re-attach without this.
+    const proc = Bun.spawn(["ghostty", `--command=bash -c "tmux set-option -t ${tmuxSession} window-size latest && tmux attach -t ${tmuxSession}"`], {
       stdio: ["ignore", "ignore", "ignore"],
     });
     proc.unref();

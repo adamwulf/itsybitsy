@@ -1998,7 +1998,8 @@ export class DashboardComponent implements Component {
       this.setNotice("No active tmux session");
       return;
     }
-    openInGhostty(agent.meta.tmux_session).then((result) => {
+    const session = agent.meta.tmux_session;
+    openInGhostty(session).then((result) => {
       this.setNotice(result.message);
     }).catch((err) => {
       this.setNotice(`Ghostty error: ${err}`);

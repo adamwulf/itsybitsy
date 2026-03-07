@@ -124,6 +124,25 @@ export async function resizeTmuxWindow(tmuxSession: string, width: number): Prom
 }
 
 /**
+ * Clear the manual size override on a tmux window, switching to automatic
+ * client-driven sizing. Call this before attaching a new client (e.g. Ghostty)
+ * so the client's terminal dimensions take effect instead of the fixed width
+ * set by `tmux new-session -d -x 60`.
+ */
+export async function clearTmuxWindowSizeOverride(tmuxSession: string): Promise<boolean> {
+  try {
+    const proc = Bun.spawn(
+      ["tmux", "resize-window", "-A", "-t", tmuxSession],
+      { stdout: "pipe", stderr: "pipe" }
+    );
+    const exitCode = await proc.exited;
+    return exitCode === 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Capture tmux output for a single agent (one-shot).
  * Used by watcher to detect agent state.
  */

@@ -14,7 +14,7 @@ export async function openInGhostty(
       return { ok: false, message: "Invalid tmux session name" };
     }
     // Wrap in bash -c so Ghostty's login shell flags (--posix --login) go to bash, not tmux
-    const proc = Bun.spawn(["ghostty", `--command=bash -c "tmux attach -t ${tmuxSession}"`], {
+    const proc = Bun.spawn(["ghostty", "+new-window", `--command=bash -c "tmux attach -t ${tmuxSession}"`], {
       stdio: ["ignore", "ignore", "ignore"],
     });
     proc.unref();

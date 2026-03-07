@@ -453,12 +453,13 @@ export class RightPaneComponent implements Component {
             const prefix = `${sel}${BOLD}${q.agent}:${RESET} `;
             // First line has the prefix; continuation lines are indented to align
             const indent = "    "; // visual width of "> " or "  " + 2 more
+            const selStart = i === this.questionsSelectedIndex ? GREEN : "";
             const fullText = `${prefix}${q.question}${selEnd}`;
             // Split on existing newlines and add as separate content lines
             const textLines = fullText.split("\n");
             this.content.push(textLines[0]!);
             for (let j = 1; j < textLines.length; j++) {
-              this.content.push(`${indent}${textLines[j]}${selEnd}`);
+              this.content.push(`${selStart}${indent}${textLines[j]}${selEnd}`);
             }
           }
           this.content.push("", `${DIM}Enter:answer  Esc:acknowledge  g:go to agent${RESET}`);
@@ -494,10 +495,12 @@ export class RightPaneComponent implements Component {
     }
     const visible = this.content.slice(start, start + available);
     if (this.mode === "QUESTIONS") {
-      // Wrap long question lines instead of truncating
+      // Wrap long question lines instead of truncating, but cap to available height
       for (const line of visible) {
+        if (lines.length >= this.displayHeight) break;
         const wrapped = wrapLines(line, width);
         for (const wl of wrapped) {
+          if (lines.length >= this.displayHeight) break;
           lines.push(truncateToWidth(wl, width, ""));
         }
       }

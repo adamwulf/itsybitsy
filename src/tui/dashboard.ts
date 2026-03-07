@@ -319,8 +319,6 @@ function formatAgentRow(
   const orphanedPrefix = agent.orphaned ? "⚠ " : "";
   const icon = agent.meta.worker ? "⚙" : "◆";
   const stateColor = getStateColors()[agent.state] ?? getStateColors().unknown;
-  const sel = selected ? `${BOLD}${REVERSE}` : "";
-  const selEnd = selected ? `${RESET}` : "";
 
   const promptText = agent.meta.prompt.replace(/\n/g, " ");
   const line = `${connector}${orphanedPrefix}${icon} ${agent.repoName}/${agent.id}  ${stateColor}${agent.state}${RESET}  ${agent.age}  ${agent.meta.model}  ${promptText}`;
@@ -328,7 +326,7 @@ function formatAgentRow(
   const truncated = truncateToWidth(line, width, "");
   if (selected) {
     const pad = width - visibleWidth(truncated);
-    return `${sel}${truncated}${pad > 0 ? " ".repeat(pad) : ""}${selEnd}`;
+    return `${REVERSE}${truncated}${RESET}${REVERSE}${pad > 0 ? " ".repeat(pad) : ""}${RESET}`;
   }
   return truncated;
 }
@@ -414,7 +412,7 @@ class AgentTreeComponent implements Component {
         const truncated = truncateToWidth(`${BOLD}◆ ${item.repoHeader}${RESET}`, width, "");
         if (selected) {
           const pad = width - visibleWidth(truncated);
-          lines.push(`${BOLD}${REVERSE}${truncated}${pad > 0 ? " ".repeat(pad) : ""}${RESET}`);
+          lines.push(`${REVERSE}${truncated}${RESET}${REVERSE}${pad > 0 ? " ".repeat(pad) : ""}${RESET}`);
         } else {
           lines.push(truncated);
         }

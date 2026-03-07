@@ -2171,7 +2171,8 @@ export class DashboardComponent implements Component {
           d.name = d.name.slice(0, -1);
           this.tui?.requestRender();
         } else if (data.length === 1 && data >= " ") {
-          d.name += data;
+          // Allow only alphanumeric and '-'; replace anything else with '-'
+          d.name += /^[a-zA-Z0-9-]$/.test(data) ? data : "-";
           this.tui?.requestRender();
         }
       } else if (d.focused === "worker") {

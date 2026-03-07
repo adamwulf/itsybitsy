@@ -290,9 +290,9 @@ describe("RightPaneComponent scroll logic", () => {
     expect(result[0]).toContain("Prompt:");
     expect(result[2]).toContain("prompt line 1");
     expect(result[3]).toContain("prompt line 2");
-    // Remaining lines should be empty padding
+    // Remaining lines should be padding (single space for left padding)
     for (let i = 4; i < 10; i++) {
-      expect(result[i]).toBe("");
+      expect(result[i]).toBe(" ");
     }
   });
 

@@ -2220,7 +2220,7 @@ export class DashboardComponent implements Component {
    * rightTitle appears at splitAt (left pane width), aligned to start of right pane.
    * If splitAt is 0, rightTitle is right-aligned.
    */
-  private buildTitledSeparator(leftTitle: string, rightTitle: string, width: number, splitAt = 0): string {
+  private buildTitledSeparator(leftTitle: string, rightTitle: string, width: number, splitAt = 0, junctionChar = ""): string {
     const leftPad = 3;
     const rightPad = 3;
 
@@ -2229,9 +2229,16 @@ export class DashboardComponent implements Component {
       const leftHalfDashes = Math.max(1, splitAt - leftPad - leftTitle.length);
       // Right half: rightTitle + dashes to fill rest
       const rightHalfDashes = Math.max(1, width - splitAt - rightTitle.length - rightPad);
+      // If junction requested, the last dash of leftHalfDashes becomes the junction char
+      let leftDashStr: string;
+      if (junctionChar && leftHalfDashes > 0) {
+        leftDashStr = "─".repeat(leftHalfDashes - 1) + junctionChar;
+      } else {
+        leftDashStr = "─".repeat(leftHalfDashes);
+      }
       const sep =
         `${DIM}${"─".repeat(leftPad)}${RESET}${BOLD}${leftTitle}${RESET}` +
-        `${DIM}${"─".repeat(leftHalfDashes)}${RESET}` +
+        `${DIM}${leftDashStr}${RESET}` +
         `${BOLD}${rightTitle}${RESET}` +
         `${DIM}${"─".repeat(rightHalfDashes)}${"─".repeat(rightPad)}${RESET}`;
       return truncateToWidth(sep, width, "");
@@ -2297,7 +2304,7 @@ export class DashboardComponent implements Component {
       const leftTitle = selAgent ? ` ${selAgent.id} ` : "";
       const rightTitle = ` ${this.rightPane.mode} `;
       const splitAt = this.splitPane.getLeftWidth() + 1; // +1 for separator char
-      lines.push(this.buildTitledSeparator(leftTitle, rightTitle, width, splitAt));
+      lines.push(this.buildTitledSeparator(leftTitle, rightTitle, width, splitAt, FULL_WIDTH_MODES.has(this.rightPane.mode) ? "" : "┬"));
 
       // Compute available height for split pane
       const bottomHeight = 2; // status bar is always 2 lines
@@ -2315,8 +2322,15 @@ export class DashboardComponent implements Component {
       lines.push(...splitLines);
     }
 
-    // Separator
-    lines.push(truncateToWidth(`${DIM}${"─".repeat(width)}${RESET}`, width, ""));
+    // Separator — use ┴ junction when split pane has a vertical separator
+    const useBottomJunction = !isTreeMode && !FULL_WIDTH_MODES.has(this.rightPane.mode);
+    if (useBottomJunction) {
+      const jPos = this.splitPane.getLeftWidth();
+      const bottomSep = "─".repeat(jPos) + "┴" + "─".repeat(Math.max(0, width - jPos - 1));
+      lines.push(truncateToWidth(`${DIM}${bottomSep}${RESET}`, width, ""));
+    } else {
+      lines.push(truncateToWidth(`${DIM}${"─".repeat(width)}${RESET}`, width, ""));
+    }
 
     // Status bar (always visible — dialogs are overlays now)
     const statusLines = this.statusBar.render(width);

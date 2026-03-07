@@ -584,14 +584,20 @@ describe("DashboardComponent dialog and action handlers", () => {
     dashboard.handleInput("\t"); // Tab to prompt
     expect(d.focused).toBe("prompt");
 
-    dashboard.handleInput("\t"); // Tab to cancel
+    dashboard.handleInput("\t"); // Tab to cancel (create skipped — prompt empty)
     expect(d.focused).toBe("cancel");
 
-    dashboard.handleInput("\t"); // Tab to create
-    expect(d.focused).toBe("create");
-
-    dashboard.handleInput("\t"); // Tab wraps to name
+    dashboard.handleInput("\t"); // Tab wraps to name (create skipped — prompt empty)
     expect(d.focused).toBe("name");
+
+    // Type something in prompt to enable create
+    dashboard.handleInput("\t"); // worker
+    dashboard.handleInput("\t"); // prompt
+    for (const ch of "hello") dashboard.handleInput(ch);
+    dashboard.handleInput("\t"); // cancel
+    expect(d.focused).toBe("cancel");
+    dashboard.handleInput("\t"); // create (now reachable)
+    expect(d.focused).toBe("create");
   });
 
   test("new-agent form: Shift+Tab cycles focus backwards", () => {
@@ -602,12 +608,12 @@ describe("DashboardComponent dialog and action handlers", () => {
     const d = dashboard.dialog as any;
     expect(d.focused).toBe("name");
 
-    // Shift+Tab should go to create (wrap around)
+    // Shift+Tab should go to cancel (create skipped — prompt empty)
     dashboard.handleInput("\x1b[Z"); // Shift+Tab escape sequence
-    expect(d.focused).toBe("create");
+    expect(d.focused).toBe("cancel");
 
     dashboard.handleInput("\x1b[Z");
-    expect(d.focused).toBe("cancel");
+    expect(d.focused).toBe("prompt");
   });
 
   test("new-agent form: Worker toggle with Space and Enter", () => {
@@ -688,13 +694,13 @@ describe("DashboardComponent dialog and action handlers", () => {
     });
 
     dashboard.handleInput("a");
-    // Tab past name, worker, prompt (empty), cancel to create
-    dashboard.handleInput("\t");
-    dashboard.handleInput("\t");
-    dashboard.handleInput("\t");
-    dashboard.handleInput("\t");
-    expect((dashboard.dialog as any).focused).toBe("create");
-    dashboard.handleInput("\r");
+    // Tab past name, worker, prompt (empty) — create is skipped, lands on cancel, wraps to name
+    dashboard.handleInput("\t"); // worker
+    dashboard.handleInput("\t"); // prompt
+    dashboard.handleInput("\t"); // cancel (create skipped)
+    expect((dashboard.dialog as any).focused).toBe("cancel");
+    dashboard.handleInput("\t"); // name (create still skipped — prompt still empty)
+    expect((dashboard.dialog as any).focused).toBe("name");
     await Bun.sleep(10);
     // Should NOT have called newAgent
     expect(lastIbCall).toBeNull();

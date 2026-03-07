@@ -2038,14 +2038,19 @@ export class DashboardComponent implements Component {
     if (this._dialog.type === "new-agent-form") {
       const d = this._dialog;
       const focusOrder: Array<typeof d.focused> = ["name", "worker", "prompt", "cancel", "create"];
+      const promptEmpty = () => d.lines.join("\n").trim().length === 0;
       const nextFocus = () => {
         const idx = focusOrder.indexOf(d.focused);
-        d.focused = focusOrder[(idx + 1) % focusOrder.length]!;
+        let next = (idx + 1) % focusOrder.length;
+        if (focusOrder[next] === "create" && promptEmpty()) next = (next + 1) % focusOrder.length;
+        d.focused = focusOrder[next]!;
         this.tui?.requestRender();
       };
       const prevFocus = () => {
         const idx = focusOrder.indexOf(d.focused);
-        d.focused = focusOrder[(idx - 1 + focusOrder.length) % focusOrder.length]!;
+        let prev = (idx - 1 + focusOrder.length) % focusOrder.length;
+        if (focusOrder[prev] === "create" && promptEmpty()) prev = (prev - 1 + focusOrder.length) % focusOrder.length;
+        d.focused = focusOrder[prev]!;
         this.tui?.requestRender();
       };
 

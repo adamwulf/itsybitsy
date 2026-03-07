@@ -337,6 +337,7 @@ class AgentTreeComponent implements Component {
   selectedIndex = 0;
   maxHeight = MAX_TREE_HEIGHT;
   private scrollOffset = 0;
+  private selectedId: string | null = null;
 
   get visibleList(): FlatAgent[] {
     return this.flatList.filter((f) => !f.agent.archived);
@@ -366,6 +367,7 @@ class AgentTreeComponent implements Component {
     const idx = visible.findIndex((f) => f.agent.id === agentId);
     if (idx !== -1) {
       this.selectedIndex = idx;
+      this.selectedId = agentId;
       this.ensureSelectedVisible();
       return true;
     }
@@ -377,6 +379,41 @@ class AgentTreeComponent implements Component {
     if (visible.length === 0) return;
     const len = visible.length;
     this.selectedIndex = ((this.selectedIndex + delta) % len + len) % len;
+    this.updateSelectedId();
+  }
+
+  /** Update selectedId from current selectedIndex */
+  private updateSelectedId() {
+    const visible = this.visibleList;
+    if (this.selectedIndex >= 0 && this.selectedIndex < visible.length) {
+      const item = visible[this.selectedIndex]!;
+      this.selectedId = item.repoHeader ? `repo:${item.repoHeader}` : item.agent.id;
+    }
+  }
+
+  /** Re-resolve selectedIndex from selectedId after flatList changes */
+  resolveSelection() {
+    const visible = this.visibleList;
+    if (visible.length === 0) {
+      this.selectedIndex = 0;
+      return;
+    }
+    if (this.selectedId === null) {
+      this.selectedIndex = 0;
+      this.updateSelectedId();
+      this.ensureSelectedVisible();
+      return;
+    }
+    const idx = visible.findIndex((f) =>
+      f.repoHeader ? `repo:${f.repoHeader}` === this.selectedId : f.agent.id === this.selectedId,
+    );
+    if (idx !== -1) {
+      this.selectedIndex = idx;
+    } else {
+      // Selected item gone — clamp to valid range
+      this.selectedIndex = Math.min(this.selectedIndex, visible.length - 1);
+      this.updateSelectedId();
+    }
     this.ensureSelectedVisible();
   }
 
@@ -1936,6 +1973,7 @@ export class DashboardComponent implements Component {
 
   onUpdate(agents: Agent[], flatList: FlatAgent[], questions: PendingQuestion[]) {
     this.agentTree.flatList = flatList;
+    this.agentTree.resolveSelection();
     this.rightPane.questions = questions;
     this.rightPane.allAgents = flatList;
     this.statusBar.pendingQuestions = questions.length;

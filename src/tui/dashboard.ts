@@ -1574,7 +1574,23 @@ export class DashboardComponent implements Component {
       this.showNewAgentFormDialog(this.repos[0]!);
       return;
     }
-    // Step 1: select repo
+    // Infer repo from selected agent or repo header
+    const selectedAgent = this.agentTree.selectedAgent;
+    const selectedRepoHeader = this.agentTree.selectedRepoHeader;
+    if (selectedAgent) {
+      const repo = this.repos.find((r) => r.path === selectedAgent.repoPath);
+      if (repo) {
+        this.showNewAgentFormDialog(repo);
+        return;
+      }
+    } else if (selectedRepoHeader) {
+      const repo = this.repos.find((r) => r.name === selectedRepoHeader);
+      if (repo) {
+        this.showNewAgentFormDialog(repo);
+        return;
+      }
+    }
+    // Fallback: show repo picker
     this.showDialog({
       type: "select",
       prompt: "Select repo for new agent:",

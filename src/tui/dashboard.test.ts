@@ -445,6 +445,44 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(lastIbCall!.args).toEqual(["send", "agent-test", "hello"]);
   });
 
+  test("send textarea: Tab cycles forward through text → send → cancel → text", () => {
+    setupDashboardWithAgent();
+    dashboard.handleInput("s");
+    expect((dashboard.dialog as any).focusedButton).toBe("text");
+    dashboard.handleInput("\t");
+    expect((dashboard.dialog as any).focusedButton).toBe("send");
+    dashboard.handleInput("\t");
+    expect((dashboard.dialog as any).focusedButton).toBe("cancel");
+    dashboard.handleInput("\t");
+    expect((dashboard.dialog as any).focusedButton).toBe("text");
+  });
+
+  test("send textarea: Shift+Tab cycles backward through text → cancel → send → text", () => {
+    setupDashboardWithAgent();
+    dashboard.handleInput("s");
+    expect((dashboard.dialog as any).focusedButton).toBe("text");
+    // Legacy Shift+Tab sequence
+    dashboard.handleInput("\x1b[Z");
+    expect((dashboard.dialog as any).focusedButton).toBe("cancel");
+    dashboard.handleInput("\x1b[Z");
+    expect((dashboard.dialog as any).focusedButton).toBe("send");
+    dashboard.handleInput("\x1b[Z");
+    expect((dashboard.dialog as any).focusedButton).toBe("text");
+  });
+
+  test("send textarea: Kitty protocol Shift+Tab cycles backward", () => {
+    setupDashboardWithAgent();
+    dashboard.handleInput("s");
+    expect((dashboard.dialog as any).focusedButton).toBe("text");
+    // Kitty protocol Shift+Tab: CSI 9;2u (tab=9, shift modifier=2)
+    dashboard.handleInput("\x1b[9;2u");
+    expect((dashboard.dialog as any).focusedButton).toBe("cancel");
+    dashboard.handleInput("\x1b[9;2u");
+    expect((dashboard.dialog as any).focusedButton).toBe("send");
+    dashboard.handleInput("\x1b[9;2u");
+    expect((dashboard.dialog as any).focusedButton).toBe("text");
+  });
+
   test("m key runs merge-check then shows confirm", async () => {
     setupDashboardWithAgent();
     dashboard.handleInput("m");

@@ -333,11 +333,20 @@ function formatAgentRow(
 
 /** Agent tree component with height constraint and scrolling */
 class AgentTreeComponent implements Component {
-  flatList: FlatAgent[] = [];
-  selectedIndex = 0;
+  private _flatList: FlatAgent[] = [];
+  private selectedIndex = 0;
   maxHeight = MAX_TREE_HEIGHT;
   private scrollOffset = 0;
   private selectedId: string | null = null;
+
+  get flatList(): FlatAgent[] {
+    return this._flatList;
+  }
+
+  setFlatList(list: FlatAgent[]) {
+    this._flatList = list;
+    this.resolveSelection();
+  }
 
   get visibleList(): FlatAgent[] {
     return this.flatList.filter((f) => !f.agent.archived);
@@ -392,7 +401,7 @@ class AgentTreeComponent implements Component {
   }
 
   /** Re-resolve selectedIndex from selectedId after flatList changes */
-  resolveSelection() {
+  private resolveSelection() {
     const visible = this.visibleList;
     if (visible.length === 0) {
       this.selectedIndex = 0;
@@ -1972,8 +1981,7 @@ export class DashboardComponent implements Component {
   }
 
   onUpdate(agents: Agent[], flatList: FlatAgent[], questions: PendingQuestion[]) {
-    this.agentTree.flatList = flatList;
-    this.agentTree.resolveSelection();
+    this.agentTree.setFlatList(flatList);
     this.rightPane.questions = questions;
     this.rightPane.allAgents = flatList;
     this.statusBar.pendingQuestions = questions.length;

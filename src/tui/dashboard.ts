@@ -317,7 +317,7 @@ function agentNamePrefixWidth(agent: Agent, connector: string): number {
 }
 
 /** Format agent row for the tree */
-function formatAgentRow(
+export function formatAgentRow(
   agent: Agent,
   connector: string,
   selected: boolean,

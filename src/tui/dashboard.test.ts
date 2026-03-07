@@ -4,7 +4,8 @@ import { mkdtemp, rm, mkdir } from "fs/promises";
 import { tmpdir } from "os";
 import { readAgentLog, readAgentPrompt, parseDenials } from "../agents";
 import type { Agent, AgentMeta, FlatAgent, PendingQuestion } from "../agents";
-import { TmuxPaneComponent, RightPaneComponent, DashboardComponent, colorizeDiff, colorizeLog } from "./dashboard";
+import { TmuxPaneComponent, RightPaneComponent, DashboardComponent, colorizeDiff, colorizeLog, formatAgentRow } from "./dashboard";
+import { visibleWidth } from "@mariozechner/pi-tui";
 import { setRunner, resetRunner } from "../ib-commands";
 
 function makeAgent(id: string, repoPath: string, archived = false): Agent {
@@ -1006,5 +1007,101 @@ describe("colorizeLog", () => {
   test("line with no special patterns is unchanged", () => {
     const result = colorizeLog(["just text"]);
     expect(result[0]).toBe("just text");
+  });
+});
+
+describe("formatAgentRow full-width highlight", () => {
+  const RESET = "\x1b[0m";
+  const REVERSE = "\x1b[7m";
+  const paneWidth = 80;
+
+  function makeTestAgent(overrides: Partial<Agent> = {}): Agent {
+    return {
+      id: "agent-abc",
+      repoPath: "/repos/test",
+      repoName: "test",
+      state: "running",
+      age: "1m",
+      archived: false,
+      children: [],
+      meta: {
+        id: "agent-abc",
+        session_id: "sess-1",
+        tmux_session: "tmux-agent-abc",
+        prompt: "do stuff",
+        manager: null,
+        created: "2026-03-05T00:00:00Z",
+        created_epoch: Math.floor(Date.now() / 1000) - 60,
+        worktree: true,
+        worker: false,
+        yolo: false,
+        model: "sonnet",
+        claude_pid: "12345",
+      } as AgentMeta,
+      ...overrides,
+    };
+  }
+
+  test("selected row visible width equals pane width", () => {
+    const agent = makeTestAgent();
+    const row = formatAgentRow(agent, "", true, paneWidth, 30);
+    expect(visibleWidth(row)).toBe(paneWidth);
+  });
+
+  test("selected row starts with REVERSE and ends with RESET", () => {
+    const agent = makeTestAgent();
+    const row = formatAgentRow(agent, "", true, paneWidth, 30);
+    expect(row.startsWith(REVERSE)).toBe(true);
+    expect(row.endsWith(RESET)).toBe(true);
+  });
+
+  test("selected row has no bare RESET that would cancel REVERSE", () => {
+    const agent = makeTestAgent();
+    const row = formatAgentRow(agent, "", true, paneWidth, 30);
+    // Every RESET inside the row (except the final one) should be followed by REVERSE
+    const inner = row.slice(REVERSE.length, -RESET.length);
+    const parts = inner.split(RESET);
+    // Every part except the last should be followed by REVERSE (which starts the next part)
+    for (let i = 0; i < parts.length - 1; i++) {
+      expect(parts[i + 1]!.startsWith(REVERSE)).toBe(true);
+    }
+  });
+
+  test("non-selected row has no REVERSE codes", () => {
+    const agent = makeTestAgent();
+    const row = formatAgentRow(agent, "", false, paneWidth, 30);
+    expect(row).not.toContain(REVERSE);
+  });
+
+  test("non-selected row is not padded to pane width", () => {
+    const agent = makeTestAgent();
+    const row = formatAgentRow(agent, "", false, paneWidth, 30);
+    // Non-selected row is truncated but not padded, so it should be <= paneWidth
+    // and typically shorter (no trailing spaces added)
+    expect(visibleWidth(row)).toBeLessThanOrEqual(paneWidth);
+  });
+
+  test("selected row with connector is still full width", () => {
+    const agent = makeTestAgent();
+    const row = formatAgentRow(agent, "├── ", true, paneWidth, 30);
+    expect(visibleWidth(row)).toBe(paneWidth);
+    expect(row.startsWith(REVERSE)).toBe(true);
+    expect(row.endsWith(RESET)).toBe(true);
+  });
+
+  test("selected row with short content is padded to full width", () => {
+    const agent = makeTestAgent({ id: "a", repoName: "r" });
+    agent.meta.prompt = "x";
+    const widePane = 120;
+    const row = formatAgentRow(agent, "", true, widePane, 10);
+    expect(visibleWidth(row)).toBe(widePane);
+  });
+
+  test("selected row with content exceeding width is truncated to width", () => {
+    const agent = makeTestAgent();
+    agent.meta.prompt = "a very long prompt that goes on and on and on and on and on and on and on and on";
+    const narrowPane = 40;
+    const row = formatAgentRow(agent, "", true, narrowPane, 30);
+    expect(visibleWidth(row)).toBe(narrowPane);
   });
 });

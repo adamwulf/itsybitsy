@@ -321,7 +321,9 @@ export function formatAgentRow(
   const namePad = Math.max(0, nameColWidth - visibleWidth(namePrefix));
   const promptText = agent.meta.prompt.replace(/\n/g, " ");
   const displayState = agent.state === "unknown" ? "running" : agent.state;
-  const line = `${namePrefix}${" ".repeat(namePad)}  ${stateColor}${displayState}${RESET}  ${agent.age}  ${agent.meta.model}  ${promptText}`;
+  const paddedState = displayState.padEnd(12);
+  const paddedAge = agent.age.padStart(4);
+  const line = `${namePrefix}${" ".repeat(namePad)}  ${stateColor}${paddedState}${RESET}  ${paddedAge}  ${agent.meta.model}  ${promptText}`;
 
   const truncated = truncateToWidth(line, width, "");
   if (selected) {
@@ -619,7 +621,9 @@ export class RightPaneComponent implements Component {
           const stateColor = getStateColors()[agent.state] ?? getStateColors().unknown;
           const promptText = agent.meta.prompt.replace(/\n/g, " ");
           const displayState = agent.state === "unknown" ? "running" : agent.state;
-          return `${connector}${icon} ${agent.repoName}/${agent.id}  ${stateColor}${displayState}${RESET}  ${agent.age}  ${agent.meta.model}  ${promptText}`;
+          const paddedState = displayState.padEnd(12);
+          const paddedAge = agent.age.padStart(4);
+          return `${connector}${icon} ${agent.repoName}/${agent.id}  ${stateColor}${paddedState}${RESET}  ${paddedAge}  ${agent.meta.model}  ${promptText}`;
         });
         if (this.content.length === 0) this.content = [`${DIM}No agents${RESET}`];
         break;
@@ -1572,7 +1576,8 @@ export class DashboardComponent implements Component {
     }
     const allItems = visible.map((f) => {
       const promptText = f.agent.meta.prompt.replace(/\n/g, " ");
-      return `${f.agent.repoName}/${f.agent.id}  ${f.agent.state}  ${promptText}`;
+      const displayState = f.agent.state === "unknown" ? "running" : f.agent.state;
+      return `${f.agent.repoName}/${f.agent.id}  ${displayState.padEnd(12)}  ${f.agent.age.padStart(4)}  ${promptText}`;
     });
     this.showDialog({
       type: "fuzzy",

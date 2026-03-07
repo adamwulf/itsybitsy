@@ -375,15 +375,26 @@ class AgentTreeComponent implements Component {
   moveSelection(delta: number) {
     const visible = this.visibleList;
     if (visible.length === 0) return;
-    this.selectedIndex = Math.max(0, Math.min(visible.length - 1, this.selectedIndex + delta));
+    const len = visible.length;
+    this.selectedIndex = ((this.selectedIndex + delta) % len + len) % len;
     this.ensureSelectedVisible();
   }
 
-  /** Keep selected index within the visible scroll window */
+  /** Keep selected index within the visible scroll window with 1-row scroll buffer */
   private ensureSelectedVisible() {
-    if (this.selectedIndex < this.scrollOffset) {
-      this.scrollOffset = this.selectedIndex;
-    } else if (this.selectedIndex >= this.scrollOffset + this.maxHeight) {
+    const lastIndex = this.visibleList.length - 1;
+
+    // Scroll up: keep at least 1 row above selected (unless selected is at very top of list)
+    if (this.selectedIndex > 0 && this.selectedIndex - 1 < this.scrollOffset) {
+      this.scrollOffset = this.selectedIndex - 1;
+    } else if (this.selectedIndex === 0) {
+      this.scrollOffset = 0;
+    }
+
+    // Scroll down: keep at least 1 row below selected (unless selected is at very bottom of list)
+    if (this.selectedIndex < lastIndex && this.selectedIndex + 1 >= this.scrollOffset + this.maxHeight) {
+      this.scrollOffset = this.selectedIndex - this.maxHeight + 2;
+    } else if (this.selectedIndex === lastIndex && this.selectedIndex >= this.scrollOffset + this.maxHeight) {
       this.scrollOffset = this.selectedIndex - this.maxHeight + 1;
     }
   }
@@ -2281,7 +2292,7 @@ export class DashboardComponent implements Component {
       const treeHeight = Math.max(5, terminalRows - 6);
       this.agentTree.maxHeight = treeHeight;
 
-      // Separator with TREE title at left edge
+      // Separator with TREE title
       lines.push(this.buildTitledSeparator(" TREE ", "", width));
 
       const treeLines = this.agentTree.render(width);

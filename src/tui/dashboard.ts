@@ -408,8 +408,18 @@ class AgentTreeComponent implements Component {
     }
 
     const lines: string[] = [];
-    const start = this.scrollOffset;
-    const end = Math.min(visible.length, start + this.maxHeight);
+    let start = this.scrollOffset;
+    let end = Math.min(visible.length, start + this.maxHeight);
+
+    // If only 1 hidden above, show it instead of a scroll indicator
+    if (start === 1) {
+      start = 0;
+    }
+
+    // If only 1 hidden below, show it instead of a scroll indicator
+    if (visible.length - end === 1) {
+      end = visible.length;
+    }
 
     // Scroll indicator at top
     if (start > 0) {

@@ -327,19 +327,22 @@ describe("DashboardComponent dialog and action handlers", () => {
     resetRunner();
   });
 
-  test("x key opens kill confirm dialog", () => {
+  test("x key opens kill confirm dialog with button UI", () => {
     setupDashboardWithAgent();
     dashboard.handleInput("x");
     expect(dashboard.dialog).not.toBeNull();
     expect(dashboard.dialog!.type).toBe("confirm");
     expect((dashboard.dialog as any).prompt).toContain("Kill agent");
     expect((dashboard.dialog as any).prompt).toContain("agent-test");
+    expect((dashboard.dialog as any).confirmLabel).toBe("Kill");
+    expect((dashboard.dialog as any).focusedButton).toBe("confirm");
   });
 
-  test("kill confirm dialog: y executes kill", async () => {
+  test("kill confirm dialog: Enter on Kill button executes kill", async () => {
     setupDashboardWithAgent();
     dashboard.handleInput("x");
-    dashboard.handleInput("y");
+    // focusedButton defaults to "confirm" (Kill), press Enter
+    dashboard.handleInput("\r");
     // Wait for async execution
     await Bun.sleep(10);
     expect(lastIbCall).not.toBeNull();
@@ -347,12 +350,27 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(lastIbCall!.cwd).toBe("/repos/test");
   });
 
-  test("kill confirm dialog: n cancels", () => {
+  test("kill confirm dialog: Tab cycles to Cancel, Enter cancels", () => {
     setupDashboardWithAgent();
     dashboard.handleInput("x");
-    dashboard.handleInput("n");
+    expect((dashboard.dialog as any).focusedButton).toBe("confirm");
+    dashboard.handleInput("\t");
+    expect((dashboard.dialog as any).focusedButton).toBe("cancel");
+    dashboard.handleInput("\r");
     expect(dashboard.dialog).toBeNull();
     expect(lastIbCall).toBeNull();
+  });
+
+  test("kill confirm dialog: Shift+Tab cycles backward", () => {
+    setupDashboardWithAgent();
+    dashboard.handleInput("x");
+    expect((dashboard.dialog as any).focusedButton).toBe("confirm");
+    // Shift+Tab wraps to cancel
+    dashboard.handleInput("\x1b[Z");
+    expect((dashboard.dialog as any).focusedButton).toBe("cancel");
+    // Shift+Tab wraps back to confirm
+    dashboard.handleInput("\x1b[Z");
+    expect((dashboard.dialog as any).focusedButton).toBe("confirm");
   });
 
   test("kill confirm dialog: Escape cancels", () => {
@@ -369,12 +387,14 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(dashboard.dialog).not.toBeNull();
     expect(dashboard.dialog!.type).toBe("confirm");
     expect((dashboard.dialog as any).prompt).toContain("FORCE KILL");
+    expect((dashboard.dialog as any).confirmLabel).toBe("Nuke");
   });
 
-  test("nuke confirm: y executes kill --force", async () => {
+  test("nuke confirm: Enter on Nuke button executes kill --force", async () => {
     setupDashboardWithAgent();
     dashboard.handleInput("!");
-    dashboard.handleInput("y");
+    // focusedButton defaults to "confirm" (Nuke), press Enter
+    dashboard.handleInput("\r");
     await Bun.sleep(10);
     expect(lastIbCall!.args).toEqual(["kill", "agent-test", "--force"]);
   });

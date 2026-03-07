@@ -1341,7 +1341,7 @@ export class DashboardComponent implements Component {
   startPolling() {
     this.tmuxPoller.start();
     this.refreshUsage();
-    this.usageTimer = setInterval(() => this.refreshUsage(), 30_000);
+    this.usageTimer = setInterval(() => this.refreshUsage(), 5 * 60_000);
   }
 
   stopPolling() {

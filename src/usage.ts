@@ -1,6 +1,6 @@
 /**
  * Claude API usage tracking — fetches session/weekly utilization from Anthropic API.
- * Caches at ~/.claude/usage-cache.json with 30s TTL.
+ * Caches at ~/.itsybitsy/usage-cache.json with 5-minute TTL.
  */
 
 import { homedir } from "node:os";
@@ -10,7 +10,8 @@ import { rename, mkdir } from "node:fs/promises";
 const ITSYBITSY_DIR = join(homedir(), ".itsybitsy");
 const CACHE_PATH = join(ITSYBITSY_DIR, "usage-cache.json");
 const CREDENTIALS_PATH = join(homedir(), ".claude", ".credentials.json");
-const CACHE_TTL_MS = 30_000;
+const CACHE_TTL_MS = 5 * 60_000; // 5 minutes
+const RATE_LIMIT_TTL_MS = 60_000; // retry after 1 minute on 429
 
 export interface UsageData {
   sessionPct: number | null;
@@ -135,9 +136,12 @@ export async function fetchUsage(): Promise<UsageData | null> {
     });
 
     if (!resp.ok) {
-      // HTTP error — use stale cache if available
       if (cache) {
-        await writeCache({ timestamp: Math.floor(now / 1000), response: cache.response });
+        // On 429 rate limit, retry after 1 minute; other errors retry at normal TTL
+        const retryTimestamp = resp.status === 429
+          ? Math.floor((now - CACHE_TTL_MS + RATE_LIMIT_TTL_MS) / 1000)
+          : Math.floor(now / 1000);
+        await writeCache({ timestamp: retryTimestamp, response: cache.response });
         return parseUsageResponse(cache.response);
       }
       return null;

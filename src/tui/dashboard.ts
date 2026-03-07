@@ -319,12 +319,12 @@ export function formatAgentRow(
 ): string {
   const orphanedPrefix = agent.orphaned ? "⚠ " : "";
   const icon = agent.meta.worker ? "⚙" : "◆";
-  const stateColor = getStateColors()[agent.state] ?? getStateColors().unknown;
+  const displayState = agent.state === "unknown" ? "running" : agent.state;
+  const stateColor = getStateColors()[displayState] ?? getStateColors().unknown;
 
   const namePrefix = `${connector}${orphanedPrefix}${icon} ${agent.repoName}/${agent.id}`;
   const namePad = Math.max(0, nameColWidth - visibleWidth(namePrefix));
   const promptText = agent.meta.prompt.replace(/\n/g, " ");
-  const displayState = agent.state === "unknown" ? "running" : agent.state;
   const coloredState = `${stateColor}${displayState}${RESET}${" ".repeat(Math.max(0, STATE_COL_WIDTH - displayState.length))}`;
   const paddedAge = agent.age.padEnd(AGE_COL_WIDTH);
   const line = `${namePrefix}${" ".repeat(namePad)}  ${coloredState}  ${paddedAge}  ${agent.meta.model}  ${promptText}`;
@@ -622,9 +622,9 @@ export class RightPaneComponent implements Component {
       case "TREE":
         this.content = this.allAgents.map(({ agent, connector }) => {
           const icon = agent.meta.worker ? "⚙" : "◆";
-          const stateColor = getStateColors()[agent.state] ?? getStateColors().unknown;
-          const promptText = agent.meta.prompt.replace(/\n/g, " ");
           const displayState = agent.state === "unknown" ? "running" : agent.state;
+          const stateColor = getStateColors()[displayState] ?? getStateColors().unknown;
+          const promptText = agent.meta.prompt.replace(/\n/g, " ");
           const coloredState = `${stateColor}${displayState}${RESET}${" ".repeat(Math.max(0, STATE_COL_WIDTH - displayState.length))}`;
           const paddedAge = agent.age.padEnd(AGE_COL_WIDTH);
           return `${connector}${icon} ${agent.repoName}/${agent.id}  ${coloredState}  ${paddedAge}  ${agent.meta.model}  ${promptText}`;

@@ -51,7 +51,7 @@ async function runIb(args: string[], cwd: string): Promise<IbCommandResult> {
 }
 
 export async function killAgent(agent: Agent): Promise<IbCommandResult> {
-  return runIb(["kill", agent.id], agent.repoPath);
+  return runIb(["kill", agent.id, "--force"], agent.repoPath);
 }
 
 export async function nukeAgent(agent: Agent): Promise<IbCommandResult> {

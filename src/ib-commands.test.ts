@@ -64,11 +64,11 @@ describe("ib-commands", () => {
     resetRunner();
   });
 
-  test("killAgent passes ['kill', id] with agent's repoPath", async () => {
+  test("killAgent passes ['kill', id, '--force'] with agent's repoPath", async () => {
     const agent = makeAgent("agent-abc", "/repos/myproject");
     await killAgent(agent);
     expect(lastCall).toEqual({
-      args: ["kill", "agent-abc"],
+      args: ["kill", "agent-abc", "--force"],
       cwd: "/repos/myproject",
     });
   });

@@ -346,7 +346,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     // Wait for async execution
     await Bun.sleep(10);
     expect(lastIbCall).not.toBeNull();
-    expect(lastIbCall!.args).toEqual(["kill", "agent-test"]);
+    expect(lastIbCall!.args).toEqual(["kill", "agent-test", "--force"]);
     expect(lastIbCall!.cwd).toBe("/repos/test");
   });
 

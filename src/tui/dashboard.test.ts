@@ -396,9 +396,8 @@ describe("DashboardComponent dialog and action handlers", () => {
     dashboard.handleInput("R");
     await Bun.sleep(10);
     expect(lastIbCall).toBeNull();
-    // Should show a message instead
-    expect(dashboard.dialog).not.toBeNull();
-    expect(dashboard.dialog!.type).toBe("message");
+    // Should show a notice in the header instead
+    expect(dashboard.notice).not.toBeNull();
   });
 
   test("r key opens reassign input dialog", () => {
@@ -470,8 +469,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     }));
     dashboard.handleInput("m");
     await Bun.sleep(50);
-    expect(dashboard.dialog!.type).toBe("message");
-    expect((dashboard.dialog as any).text).toContain("Merge-check failed");
+    expect(dashboard.notice).toContain("Merge-check failed");
   });
 
   test("dialog intercepts all input when active", () => {

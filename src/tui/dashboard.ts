@@ -105,7 +105,6 @@ type DialogState =
   | { type: "confirm"; prompt: string; onYes: () => void }
   | { type: "input"; prompt: string; value: string; onSubmit: (value: string) => void }
   | { type: "select"; prompt: string; items: string[]; selectedIndex: number; onSelect: (index: number) => void }
-  | { type: "message"; text: string }
   | { type: "fuzzy"; prompt: string; query: string; allItems: string[]; filteredIndices: number[]; filteredItems: string[]; selectedIndex: number; onSelect: (originalIndex: number) => void }
   | { type: "help"; lines: string[] }
   | {
@@ -713,16 +712,6 @@ class DialogOverlayComponent implements Component {
         const lines = dialog.lines.map((line) => truncateToWidth(line, innerWidth, ""));
         return { title: "Help", contentLines: lines };
       }
-      case "message": {
-        return {
-          title: "Info",
-          contentLines: [
-            truncateToWidth(`${YELLOW}${dialog.text}${RESET}`, innerWidth, ""),
-            "",
-            `${DIM}Press any key to dismiss${RESET}`,
-          ],
-        };
-      }
       case "textarea": {
         const visibleHeight = TEXTAREA_VISIBLE_HEIGHT;
         const lines: string[] = [];
@@ -868,16 +857,20 @@ export class DashboardComponent implements Component {
   private dialogOverlay: DialogOverlayComponent;
   private watcher: AgentWatcher | null = null;
   private repos: RepoEntry[] = [];
-  private messageCounter = 0;
+  private noticeCounter = 0;
   private diffTool: string | undefined;
   private lastSentNotice: string | null = null;
-  private lastSentCounter = 0;
   private usageTimer: ReturnType<typeof setInterval> | null = null;
   currentThemeName: "dark" | "light" = "dark";
 
   /** Read-only access to dialog state (for testing) */
   get dialog(): DialogState {
     return this._dialog;
+  }
+
+  /** Read-only access to header notice (for testing) */
+  get notice(): string | null {
+    return this.lastSentNotice;
   }
 
   /** Read-only access to errors (for testing) */
@@ -1009,12 +1002,15 @@ export class DashboardComponent implements Component {
     this.tui?.requestRender();
   }
 
-  private showMessage(text: string) {
-    const id = ++this.messageCounter;
-    this.showDialog({ type: "message", text });
+  private setNotice(text: string) {
+    const id = ++this.noticeCounter;
+    this.lastSentNotice = text;
+    this.invalidate();
+    this.tui?.requestRender();
     setTimeout(() => {
-      if (this._dialog?.type === "message" && this.messageCounter === id) {
-        this.closeDialog();
+      if (this.noticeCounter === id) {
+        this.lastSentNotice = null;
+        this.tui?.requestRender();
       }
     }, 3000);
   }
@@ -1023,7 +1019,7 @@ export class DashboardComponent implements Component {
     try {
       await fn();
     } catch (err) {
-      this.showMessage(`Error: ${err}`);
+      this.setNotice(`Error: ${err}`);
     }
     this.watcher?.refresh();
   }
@@ -1038,7 +1034,7 @@ export class DashboardComponent implements Component {
         this.closeDialog();
         this.executeAndRefresh(async () => {
           const result = await killAgent(agent);
-          this.showMessage(result.ok ? `Killed ${agent.id}` : `Kill failed: ${result.stderr || result.stdout}`);
+          this.setNotice(result.ok ? `Killed ${agent.id}` : `Kill failed: ${result.stderr || result.stdout}`);
         });
       },
     });
@@ -1054,7 +1050,7 @@ export class DashboardComponent implements Component {
         this.closeDialog();
         this.executeAndRefresh(async () => {
           const result = await nukeAgent(agent);
-          this.showMessage(result.ok ? `Nuked ${agent.id}` : `Nuke failed: ${result.stderr || result.stdout}`);
+          this.setNotice(result.ok ? `Nuked ${agent.id}` : `Nuke failed: ${result.stderr || result.stdout}`);
         });
       },
     });
@@ -1064,12 +1060,12 @@ export class DashboardComponent implements Component {
     const agent = this.agentTree.selectedAgent;
     if (!agent) return;
     if (agent.state !== "stopped" && agent.state !== "complete") {
-      this.showMessage("Can only resume stopped or complete agents");
+      this.setNotice("Can only resume stopped or complete agents");
       return;
     }
     this.executeAndRefresh(async () => {
       const result = await resumeAgent(agent);
-      this.showMessage(result.ok ? `Resumed ${agent.id}` : `Resume failed: ${result.stderr || result.stdout}`);
+      this.setNotice(result.ok ? `Resumed ${agent.id}` : `Resume failed: ${result.stderr || result.stdout}`);
     });
   }
 
@@ -1083,12 +1079,12 @@ export class DashboardComponent implements Component {
       onSubmit: (newManager: string) => {
         this.closeDialog();
         if (!newManager.trim()) {
-          this.showMessage("Reassign cancelled");
+          this.setNotice("Reassign cancelled");
           return;
         }
         this.executeAndRefresh(async () => {
           const result = await reassignAgent(agent, newManager.trim());
-          this.showMessage(result.ok ? `Reassigned ${agent.id} → ${newManager.trim()}` : `Reassign failed: ${result.stderr || result.stdout}`);
+          this.setNotice(result.ok ? `Reassigned ${agent.id} → ${newManager.trim()}` : `Reassign failed: ${result.stderr || result.stdout}`);
         });
       },
     });
@@ -1097,11 +1093,11 @@ export class DashboardComponent implements Component {
   private handleMerge() {
     const agent = this.agentTree.selectedAgent;
     if (!agent) return;
-    this.showMessage(`Running merge-check for ${agent.id}...`);
+    this.setNotice(`Running merge-check for ${agent.id}...`);
     mergeCheckAgent(agent).then((checkResult) => {
       const checkOutput = checkResult.stdout || checkResult.stderr || "(no output)";
       if (!checkResult.ok) {
-        this.showMessage(`Merge-check failed for ${agent.id}: ${checkOutput}`);
+        this.setNotice(`Merge-check failed for ${agent.id}: ${checkOutput}`);
         return;
       }
       this.showDialog({
@@ -1111,12 +1107,12 @@ export class DashboardComponent implements Component {
           this.closeDialog();
           this.executeAndRefresh(async () => {
             const result = await mergeAgent(agent);
-            this.showMessage(result.ok ? `Merged ${agent.id}` : `Merge failed: ${result.stderr || result.stdout}`);
+            this.setNotice(result.ok ? `Merged ${agent.id}` : `Merge failed: ${result.stderr || result.stdout}`);
           });
         },
       });
     }).catch((err) => {
-      this.showMessage(`Merge-check error: ${err}`);
+      this.setNotice(`Merge-check error: ${err}`);
     });
   }
 
@@ -1131,22 +1127,12 @@ export class DashboardComponent implements Component {
       onSubmit: (message: string) => {
         this.closeDialog();
         if (!message.trim()) {
-          this.showMessage("Send cancelled");
+          this.setNotice("Send cancelled");
           return;
         }
         this.executeAndRefresh(async () => {
           const result = await sendMessage(agent, message.trim());
-          if (result.ok) {
-            const id = ++this.lastSentCounter;
-            this.lastSentNotice = `sent to ${agent.id}`;
-            setTimeout(() => {
-              if (this.lastSentCounter === id) {
-                this.lastSentNotice = null;
-                this.tui?.requestRender();
-              }
-            }, 3000);
-          }
-          this.showMessage(result.ok ? `Sent to ${agent.id}` : `Send failed: ${result.stderr || result.stdout}`);
+          this.setNotice(result.ok ? `Sent to ${agent.id}` : `Send failed: ${result.stderr || result.stdout}`);
         });
       },
     });
@@ -1154,7 +1140,7 @@ export class DashboardComponent implements Component {
 
   private handleNewAgent() {
     if (this.repos.length === 0) {
-      this.showMessage("No repos registered");
+      this.setNotice("No repos registered");
       return;
     }
     // Single-repo shortcut: skip repo selection
@@ -1182,7 +1168,7 @@ export class DashboardComponent implements Component {
       onSubmit: (prompt: string) => {
         if (!prompt.trim()) {
           this.closeDialog();
-          this.showMessage("New agent cancelled");
+          this.setNotice("New agent cancelled");
           return;
         }
         this.showNewAgentFlagsDialog(repo, prompt.trim());
@@ -1208,7 +1194,7 @@ export class DashboardComponent implements Component {
         if (flagIndex === 2 || flagIndex === 3) opts.yolo = true;
         this.executeAndRefresh(async () => {
           const result = await newAgent(repo.path, prompt, opts);
-          this.showMessage(result.ok ? `Created new agent in ${repo.name}` : `New agent failed: ${result.stderr || result.stdout}`);
+          this.setNotice(result.ok ? `Created new agent in ${repo.name}` : `New agent failed: ${result.stderr || result.stdout}`);
         });
       },
     });
@@ -1222,7 +1208,7 @@ export class DashboardComponent implements Component {
     // Find the agent for this question to get repoPath
     const agentEntry = this.agentTree.flatList.find((f) => f.agent.id === q.agent);
     if (!agentEntry) {
-      this.showMessage(`Agent ${q.agent} not found`);
+      this.setNotice(`Agent ${q.agent} not found`);
       return;
     }
     this.showDialog({
@@ -1232,17 +1218,17 @@ export class DashboardComponent implements Component {
       onSubmit: (answer: string) => {
         this.closeDialog();
         if (!answer.trim()) {
-          this.showMessage("Answer cancelled");
+          this.setNotice("Answer cancelled");
           return;
         }
         this.executeAndRefresh(async () => {
           const ackResult = await acknowledgeQuestion(agentEntry.agent.repoPath, q.id);
           if (!ackResult.ok) {
-            this.showMessage(`Acknowledge failed: ${ackResult.stderr || ackResult.stdout}`);
+            this.setNotice(`Acknowledge failed: ${ackResult.stderr || ackResult.stdout}`);
             return;
           }
           const sendResult = await sendMessage(agentEntry.agent, answer.trim());
-          this.showMessage(sendResult.ok ? `Answered ${q.agent}` : `Send failed: ${sendResult.stderr || sendResult.stdout}`);
+          this.setNotice(sendResult.ok ? `Answered ${q.agent}` : `Send failed: ${sendResult.stderr || sendResult.stdout}`);
         });
       },
     });
@@ -1255,12 +1241,12 @@ export class DashboardComponent implements Component {
     const q = questions[idx]!;
     const agentEntry = this.agentTree.flatList.find((f) => f.agent.id === q.agent);
     if (!agentEntry) {
-      this.showMessage(`Agent ${q.agent} not found`);
+      this.setNotice(`Agent ${q.agent} not found`);
       return;
     }
     this.executeAndRefresh(async () => {
       const result = await acknowledgeQuestion(agentEntry.agent.repoPath, q.id);
-      this.showMessage(result.ok ? `Acknowledged ${q.id}` : `Acknowledge failed: ${result.stderr || result.stdout}`);
+      this.setNotice(result.ok ? `Acknowledged ${q.id}` : `Acknowledge failed: ${result.stderr || result.stdout}`);
     });
   }
 
@@ -1274,14 +1260,14 @@ export class DashboardComponent implements Component {
       this.jumpToMode("AGENT LOG");
       this.tui?.requestRender();
     } else {
-      this.showMessage(`Agent ${q.agent} not found in tree`);
+      this.setNotice(`Agent ${q.agent} not found in tree`);
     }
   }
 
   private handleFuzzyAgent() {
     const visible = this.agentTree.visibleList;
     if (visible.length === 0) {
-      this.showMessage("No agents to search");
+      this.setNotice("No agents to search");
       return;
     }
     const allItems = visible.map((f) => {
@@ -1380,7 +1366,7 @@ export class DashboardComponent implements Component {
   private handleOpenWorktree() {
     const agent = this.agentTree.selectedAgent;
     if (!agent) {
-      this.showMessage("No agent selected");
+      this.setNotice("No agent selected");
       return;
     }
     const dir = agent.archived ? "archive" : "agents";
@@ -1401,9 +1387,9 @@ export class DashboardComponent implements Component {
           pathToOpen = agent.repoPath;
         }
         await Bun.$`open ${pathToOpen}`.quiet();
-        this.showMessage(`Opened ${pathToOpen}`);
+        this.setNotice(`Opened ${pathToOpen}`);
       } catch (err) {
-        this.showMessage(`Failed to open worktree: ${err}`);
+        this.setNotice(`Failed to open worktree: ${err}`);
       }
     })();
   }
@@ -1411,15 +1397,15 @@ export class DashboardComponent implements Component {
   private handleOpenDiffTool() {
     const agent = this.agentTree.selectedAgent;
     if (!agent) {
-      this.showMessage("No agent selected");
+      this.setNotice("No agent selected");
       return;
     }
     if (!this.diffTool) {
-      this.showMessage("No diff tool configured — set diffTool in ~/.itsybitsy.json");
+      this.setNotice("No diff tool configured — set diffTool in ~/.itsybitsy.json");
       return;
     }
     const tool = this.diffTool;
-    this.showMessage("Loading diff...");
+    this.setNotice("Loading diff...");
     diffAgent(agent).then(async (result) => {
       try {
         const output = result.stdout || result.stderr || "(no output)";
@@ -1427,12 +1413,12 @@ export class DashboardComponent implements Component {
         await Bun.write(tmpPath, output);
         const parts = tool.split(" ");
         Bun.spawn([...parts, tmpPath], { cwd: agent.repoPath });
-        this.showMessage(`Opened diff in ${tool}`);
+        this.setNotice(`Opened diff in ${tool}`);
       } catch (err) {
-        this.showMessage(`Failed to open diff: ${err}`);
+        this.setNotice(`Failed to open diff: ${err}`);
       }
     }).catch((err) => {
-      this.showMessage(`Diff error: ${err}`);
+      this.setNotice(`Diff error: ${err}`);
     });
   }
 
@@ -1463,45 +1449,36 @@ export class DashboardComponent implements Component {
       this.currentThemeName = "dark";
       setTheme(DARK_THEME);
     }
-    const id = ++this.lastSentCounter;
-    this.lastSentNotice = `Theme: ${this.currentThemeName === "dark" ? "Dark" : "Light"}`;
-    setTimeout(() => {
-      if (this.lastSentCounter === id) {
-        this.lastSentNotice = null;
-        this.tui?.requestRender();
-      }
-    }, 3000);
-    this.invalidate();
-    this.tui?.requestRender();
+    this.setNotice(`Theme: ${this.currentThemeName === "dark" ? "Dark" : "Light"}`);
   }
 
   private handleOpenGhostty() {
     const agent = this.agentTree.selectedAgent;
     if (!agent) {
-      this.showMessage("No agent selected");
+      this.setNotice("No agent selected");
       return;
     }
     if (!agent.meta.tmux_session) {
-      this.showMessage("No active tmux session");
+      this.setNotice("No active tmux session");
       return;
     }
     openInGhostty(agent.meta.tmux_session).then((result) => {
-      this.showMessage(result.message);
+      this.setNotice(result.message);
     }).catch((err) => {
-      this.showMessage(`Ghostty error: ${err}`);
+      this.setNotice(`Ghostty error: ${err}`);
     });
   }
 
   private handleSnapshot() {
     const agent = this.agentTree.selectedAgent;
     if (!agent) {
-      this.showMessage("No agent selected");
+      this.setNotice("No agent selected");
       return;
     }
     captureTmuxOutput(agent.meta.tmux_session).then(async (rawOutput) => {
       try {
         if (!rawOutput) {
-          this.showMessage("No tmux output captured");
+          this.setNotice("No tmux output captured");
           return;
         }
         const stripped = stripAnsi(rawOutput);
@@ -1515,12 +1492,12 @@ export class DashboardComponent implements Component {
           `${debugDir}/${filename}`,
           `State: ${result.state}\nReason: ${result.reason}\n\n${rawOutput}`
         );
-        this.showMessage(`Snapshot saved: ${filename} (state: ${result.state})`);
+        this.setNotice(`Snapshot saved: ${filename} (state: ${result.state})`);
       } catch (err) {
-        this.showMessage(`Snapshot error: ${err}`);
+        this.setNotice(`Snapshot error: ${err}`);
       }
     }).catch((err) => {
-      this.showMessage(`Snapshot error: ${err}`);
+      this.setNotice(`Snapshot error: ${err}`);
     });
   }
 
@@ -1537,12 +1514,12 @@ export class DashboardComponent implements Component {
       scrollOffset: Math.max(0, (currentIdx !== -1 ? currentIdx : 0) - 7),
       onSelect: (path: string) => {
         addRepo(path).then((result) => {
-          this.showMessage(result.message);
+          this.setNotice(result.message);
           if (result.ok) {
             this.watcher?.refresh();
           }
         }).catch((err) => {
-          this.showMessage(`Error adding repo: ${err}`);
+          this.setNotice(`Error adding repo: ${err}`);
         });
       },
     });
@@ -1550,12 +1527,6 @@ export class DashboardComponent implements Component {
 
   private handleDialogInput(data: string): boolean {
     if (!this._dialog) return false;
-
-    if (this._dialog.type === "message") {
-      // Any key dismisses message
-      this.closeDialog();
-      return true;
-    }
 
     if (this._dialog.type === "help") {
       // Any key dismisses help

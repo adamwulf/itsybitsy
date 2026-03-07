@@ -493,8 +493,8 @@ export class RightPaneComponent implements Component {
       start = Math.max(0, this.content.length - available - this.scrollOffset);
     }
     const visible = this.content.slice(start, start + available);
-    if (this.mode === "QUESTIONS") {
-      // Wrap long question lines instead of truncating, but cap to available height
+    if (this.mode === "QUESTIONS" || this.mode === "AGENT LOG" || this.mode === "INITIAL PROMPT") {
+      // Wrap long lines instead of truncating, but cap to available height
       for (const line of visible) {
         if (lines.length >= this.displayHeight) break;
         const wrapped = wrapLines(line, width);

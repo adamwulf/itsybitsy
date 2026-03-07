@@ -2266,7 +2266,7 @@ export class DashboardComponent implements Component {
       this.agentTree.maxHeight = treeHeight;
 
       // Separator with TREE title
-      lines.push(this.buildTitledSeparator("", " TREE ", width));
+      lines.push(this.buildTitledSeparator(" TREE ", "", width));
 
       const treeLines = this.agentTree.render(width);
       lines.push(...treeLines);

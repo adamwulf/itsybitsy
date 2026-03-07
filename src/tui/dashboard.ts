@@ -253,6 +253,15 @@ type DialogState =
       scrollOffset: number;
       onSelect: (path: string) => void;
     }
+  | {
+      type: "new-agent-form";
+      repoName: string;
+      name: string;
+      worker: boolean;
+      lines: string[];
+      focused: "name" | "worker" | "prompt" | "create" | "cancel";
+      onSubmit: (name: string, worker: boolean, prompt: string) => void;
+    }
   | null;
 
 // Right pane modes
@@ -1186,6 +1195,64 @@ class DialogOverlayComponent implements Component {
 
         return { title: "Add Repository", contentLines: lines };
       }
+      case "new-agent-form": {
+        const lines: string[] = [];
+
+        // Name field
+        const nameLabel = dialog.focused === "name" ? `${BOLD}Name:${RESET}` : `${DIM}Name:${RESET}`;
+        const nameValue = dialog.focused === "name" ? `${dialog.name}█` : (dialog.name || `${DIM}(optional)${RESET}`);
+        lines.push(`${nameLabel}  ${truncateToWidth(nameValue, innerWidth - 8, "")}`);
+
+        // Worker toggle
+        const checkbox = dialog.worker ? "[x]" : "[ ]";
+        const workerLabel = dialog.focused === "worker"
+          ? `${BOLD}${GREEN}${checkbox} Worker${RESET}`
+          : `${checkbox} Worker`;
+        lines.push(workerLabel);
+
+        // Separator
+        lines.push("");
+
+        // Prompt label
+        const promptLabel = dialog.focused === "prompt" ? `${BOLD}Prompt:${RESET} ${DIM}(required)${RESET}` : `${DIM}Prompt: (required)${RESET}`;
+        lines.push(promptLabel);
+
+        // Prompt textarea (reuses same rendering as textarea dialog)
+        const visibleHeight = TEXTAREA_VISIBLE_HEIGHT;
+        const textWidth = innerWidth - 2;
+        const visualLines = wrapTextareaLines(dialog.lines, textWidth);
+        const scrollOffset = Math.max(0, visualLines.length - visibleHeight);
+
+        for (let i = 0; i < visibleHeight; i++) {
+          const vlIdx = scrollOffset + i;
+          if (vlIdx >= visualLines.length) {
+            lines.push(" ".repeat(innerWidth));
+            continue;
+          }
+          let lineText = visualLines[vlIdx]!;
+          if (vlIdx === visualLines.length - 1 && dialog.focused === "prompt") {
+            lineText = lineText + "█";
+          }
+          lineText = truncateToWidth(lineText, innerWidth, "");
+          const pad = Math.max(0, innerWidth - visibleWidth(lineText));
+          lines.push(lineText + " ".repeat(pad));
+        }
+
+        if (scrollOffset > 0) {
+          lines.push(`${DIM}↑${RESET}`);
+        }
+
+        // Button row
+        const promptText = dialog.lines.join("\n").trim();
+        const createEnabled = promptText.length > 0;
+        const createLabel = dialog.focused === "create"
+          ? (createEnabled ? `${BOLD}${GREEN}[ Create ]${RESET}` : `${BOLD}${DIM}[ Create ]${RESET}`)
+          : (createEnabled ? `[ Create ]` : `${DIM}[ Create ]${RESET}`);
+        const cancelLabel = dialog.focused === "cancel" ? `${BOLD}${GREEN}[ Cancel ]${RESET}` : `${DIM}[ Cancel ]${RESET}`;
+        lines.push(`  ${createLabel}   ${cancelLabel}`);
+
+        return { title: `New Agent (${dialog.repoName})`, contentLines: lines };
+      }
     }
   }
 }
@@ -1331,7 +1398,7 @@ export class DashboardComponent implements Component {
   private showDialog(dialog: NonNullable<DialogState>) {
     this._dialog = dialog;
     // Folder browser needs a wider dialog for long paths
-    const width = dialog.type === "folder-browser" ? 70 : DIALOG_WIDTH;
+    const width = (dialog.type === "folder-browser" || dialog.type === "new-agent-form") ? 70 : DIALOG_WIDTH;
     if (width !== DIALOG_WIDTH && this.overlayHandle) {
       // Only recreate overlay when switching to a non-standard width
       this.overlayHandle.hide();
@@ -1503,7 +1570,7 @@ export class DashboardComponent implements Component {
     }
     // Single-repo shortcut: skip repo selection
     if (this.repos.length === 1) {
-      this.showNewAgentPromptDialog(this.repos[0]!);
+      this.showNewAgentFormDialog(this.repos[0]!);
       return;
     }
     // Step 1: select repo
@@ -1513,43 +1580,24 @@ export class DashboardComponent implements Component {
       items: this.repos.map((r) => `${r.name} (${r.path})`),
       selectedIndex: 0,
       onSelect: (repoIndex: number) => {
-        this.showNewAgentPromptDialog(this.repos[repoIndex]!);
+        this.showNewAgentFormDialog(this.repos[repoIndex]!);
       },
     });
   }
 
-  private showNewAgentPromptDialog(repo: RepoEntry) {
+  private showNewAgentFormDialog(repo: RepoEntry) {
     this.showDialog({
-      type: "input",
-      prompt: `New agent prompt (repo: ${repo.name}):`,
-      value: "",
-      onSubmit: (prompt: string) => {
-        if (!prompt.trim()) {
-          this.closeDialog();
-          this.setNotice("New agent cancelled");
-          return;
-        }
-        this.showNewAgentFlagsDialog(repo, prompt.trim());
-      },
-    });
-  }
-
-  private showNewAgentFlagsDialog(repo: RepoEntry, prompt: string) {
-    this.showDialog({
-      type: "select",
-      prompt: "Agent type:",
-      items: [
-        "Manager (default)",
-        "Worker (--worker)",
-        "Manager + YOLO (--yolo)",
-        "Worker + YOLO (--worker --yolo)",
-      ],
-      selectedIndex: 0,
-      onSelect: (flagIndex: number) => {
+      type: "new-agent-form",
+      repoName: repo.name,
+      name: "",
+      worker: false,
+      lines: [""],
+      focused: "name",
+      onSubmit: (name: string, worker: boolean, prompt: string) => {
         this.closeDialog();
         const opts: NewAgentOptions = {};
-        if (flagIndex === 1 || flagIndex === 3) opts.worker = true;
-        if (flagIndex === 2 || flagIndex === 3) opts.yolo = true;
+        if (name.trim()) opts.name = name.trim();
+        if (worker) opts.worker = true;
         this.executeAndRefresh(async () => {
           const result = await newAgent(repo.path, prompt, opts);
           this.setNotice(result.ok ? `Created new agent in ${repo.name}` : `New agent failed: ${result.stderr || result.stdout}`);
@@ -1982,6 +2030,98 @@ export class DashboardComponent implements Component {
         } else if (data.length === 1 && data >= " ") {
           d.focusedButton = "text";
           appendChar(data);
+        }
+      }
+      return true;
+    }
+
+    if (this._dialog.type === "new-agent-form") {
+      const d = this._dialog;
+      const focusOrder: Array<typeof d.focused> = ["name", "worker", "prompt", "create", "cancel"];
+      const nextFocus = () => {
+        const idx = focusOrder.indexOf(d.focused);
+        d.focused = focusOrder[(idx + 1) % focusOrder.length]!;
+        this.tui?.requestRender();
+      };
+      const prevFocus = () => {
+        const idx = focusOrder.indexOf(d.focused);
+        d.focused = focusOrder[(idx - 1 + focusOrder.length) % focusOrder.length]!;
+        this.tui?.requestRender();
+      };
+
+      const appendPromptChar = (ch: string) => {
+        const lastIdx = d.lines.length - 1;
+        d.lines[lastIdx] = (d.lines[lastIdx] ?? "") + ch;
+        this.tui?.requestRender();
+      };
+
+      if (d.focused === "name") {
+        if (matchesKey(data, Key.tab)) {
+          nextFocus();
+        } else if (matchesKey(data, Key.shift("tab"))) {
+          prevFocus();
+        } else if (matchesKey(data, Key.enter)) {
+          nextFocus();
+        } else if (matchesKey(data, Key.backspace) || data === "\x7f") {
+          d.name = d.name.slice(0, -1);
+          this.tui?.requestRender();
+        } else if (data.length === 1 && data >= " ") {
+          d.name += data;
+          this.tui?.requestRender();
+        }
+      } else if (d.focused === "worker") {
+        if (matchesKey(data, Key.tab)) {
+          nextFocus();
+        } else if (matchesKey(data, Key.shift("tab"))) {
+          prevFocus();
+        } else if (matchesKey(data, Key.enter) || data === " ") {
+          d.worker = !d.worker;
+          this.tui?.requestRender();
+        }
+      } else if (d.focused === "prompt") {
+        if (matchesKey(data, Key.tab)) {
+          nextFocus();
+        } else if (matchesKey(data, Key.shift("tab"))) {
+          prevFocus();
+        } else if (matchesKey(data, Key.enter)) {
+          d.lines.push("");
+          this.tui?.requestRender();
+        } else if (matchesKey(data, Key.backspace) || data === "\x7f") {
+          const lastIdx = d.lines.length - 1;
+          const lastLine = d.lines[lastIdx] ?? "";
+          if (lastLine.length > 0) {
+            d.lines[lastIdx] = lastLine.slice(0, -1);
+          } else if (lastIdx > 0) {
+            d.lines.pop();
+          }
+          this.tui?.requestRender();
+        } else if (data.length === 1 && data >= " ") {
+          appendPromptChar(data);
+        }
+      } else if (d.focused === "create") {
+        if (matchesKey(data, Key.enter)) {
+          const promptText = d.lines.join("\n").trim();
+          if (promptText.length > 0) {
+            d.onSubmit(d.name, d.worker, promptText);
+          }
+        } else if (matchesKey(data, Key.tab) || matchesKey(data, Key.right)) {
+          nextFocus();
+        } else if (matchesKey(data, Key.shift("tab")) || matchesKey(data, Key.left)) {
+          prevFocus();
+        } else if (data.length === 1 && data >= " ") {
+          d.focused = "prompt";
+          appendPromptChar(data);
+        }
+      } else if (d.focused === "cancel") {
+        if (matchesKey(data, Key.enter)) {
+          this.closeDialog();
+        } else if (matchesKey(data, Key.tab) || matchesKey(data, Key.right)) {
+          nextFocus();
+        } else if (matchesKey(data, Key.shift("tab")) || matchesKey(data, Key.left)) {
+          prevFocus();
+        } else if (data.length === 1 && data >= " ") {
+          d.focused = "prompt";
+          appendPromptChar(data);
         }
       }
       return true;

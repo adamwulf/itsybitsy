@@ -545,15 +545,15 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(dashboard.dialog).toBeNull();
   });
 
-  test("a key with single repo skips repo select, goes straight to prompt", () => {
+  test("a key with single repo skips repo select, goes straight to form", () => {
     dashboard = new DashboardComponent();
     dashboard.setRepos([{ path: "/repos/only", name: "only-repo" }]);
     lastIbCall = null;
 
     dashboard.handleInput("a");
-    // Should be input dialog (prompt), not select dialog (repo)
-    expect(dashboard.dialog!.type).toBe("input");
-    expect((dashboard.dialog as any).prompt).toContain("only-repo");
+    // Should be new-agent-form dialog, not select dialog (repo)
+    expect(dashboard.dialog!.type).toBe("new-agent-form");
+    expect((dashboard.dialog as any).repoName).toBe("only-repo");
   });
 
   test("a key with multiple repos shows repo select first", () => {
@@ -569,7 +569,68 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect((dashboard.dialog as any).prompt).toContain("Select repo");
   });
 
-  test("new-agent flag options: Worker sets worker flag", async () => {
+  test("new-agent form: Tab cycles focus through all fields", () => {
+    dashboard = new DashboardComponent();
+    dashboard.setRepos([{ path: "/repos/only", name: "only-repo" }]);
+
+    dashboard.handleInput("a");
+    const d = dashboard.dialog as any;
+    expect(d.type).toBe("new-agent-form");
+    expect(d.focused).toBe("name");
+
+    dashboard.handleInput("\t"); // Tab to worker
+    expect(d.focused).toBe("worker");
+
+    dashboard.handleInput("\t"); // Tab to prompt
+    expect(d.focused).toBe("prompt");
+
+    dashboard.handleInput("\t"); // Tab to create
+    expect(d.focused).toBe("create");
+
+    dashboard.handleInput("\t"); // Tab to cancel
+    expect(d.focused).toBe("cancel");
+
+    dashboard.handleInput("\t"); // Tab wraps to name
+    expect(d.focused).toBe("name");
+  });
+
+  test("new-agent form: Shift+Tab cycles focus backwards", () => {
+    dashboard = new DashboardComponent();
+    dashboard.setRepos([{ path: "/repos/only", name: "only-repo" }]);
+
+    dashboard.handleInput("a");
+    const d = dashboard.dialog as any;
+    expect(d.focused).toBe("name");
+
+    // Shift+Tab should go to cancel (wrap around)
+    dashboard.handleInput("\x1b[Z"); // Shift+Tab escape sequence
+    expect(d.focused).toBe("cancel");
+
+    dashboard.handleInput("\x1b[Z");
+    expect(d.focused).toBe("create");
+  });
+
+  test("new-agent form: Worker toggle with Space and Enter", () => {
+    dashboard = new DashboardComponent();
+    dashboard.setRepos([{ path: "/repos/only", name: "only-repo" }]);
+
+    dashboard.handleInput("a");
+    const d = dashboard.dialog as any;
+    dashboard.handleInput("\t"); // focus worker
+    expect(d.focused).toBe("worker");
+    expect(d.worker).toBe(false);
+
+    dashboard.handleInput(" "); // Space toggles
+    expect(d.worker).toBe(true);
+
+    dashboard.handleInput(" "); // Space toggles back
+    expect(d.worker).toBe(false);
+
+    dashboard.handleInput("\r"); // Enter also toggles
+    expect(d.worker).toBe(true);
+  });
+
+  test("new-agent form: Worker flag sets --worker", async () => {
     dashboard = new DashboardComponent();
     dashboard.setRepos([{ path: "/repos/only", name: "only-repo" }]);
     lastIbCall = null;
@@ -579,18 +640,20 @@ describe("DashboardComponent dialog and action handlers", () => {
     });
 
     dashboard.handleInput("a");
-    // Type prompt
+    // Tab to worker, toggle on
+    dashboard.handleInput("\t");
+    dashboard.handleInput(" ");
+    // Tab to prompt, type text
+    dashboard.handleInput("\t");
     for (const ch of "do stuff") dashboard.handleInput(ch);
-    dashboard.handleInput("\r");
-    // Flag select: pick "Worker (--worker)" (index 1)
-    expect(dashboard.dialog!.type).toBe("select");
-    dashboard.handleInput("j"); // move to index 1
+    // Tab to create, press Enter
+    dashboard.handleInput("\t");
     dashboard.handleInput("\r");
     await Bun.sleep(10);
     expect(lastIbCall!.args).toEqual(["new-agent", "--worker", "do stuff"]);
   });
 
-  test("new-agent flag options: Manager + YOLO sets yolo flag", async () => {
+  test("new-agent form: Name field passes --name flag", async () => {
     dashboard = new DashboardComponent();
     dashboard.setRepos([{ path: "/repos/only", name: "only-repo" }]);
     lastIbCall = null;
@@ -600,17 +663,20 @@ describe("DashboardComponent dialog and action handlers", () => {
     });
 
     dashboard.handleInput("a");
+    // Type name
+    for (const ch of "my-agent") dashboard.handleInput(ch);
+    // Tab to worker (skip), Tab to prompt
+    dashboard.handleInput("\t");
+    dashboard.handleInput("\t");
     for (const ch of "do stuff") dashboard.handleInput(ch);
-    dashboard.handleInput("\r");
-    // Pick "Manager + YOLO (--yolo)" (index 2)
-    dashboard.handleInput("j");
-    dashboard.handleInput("j");
+    // Tab to create, press Enter
+    dashboard.handleInput("\t");
     dashboard.handleInput("\r");
     await Bun.sleep(10);
-    expect(lastIbCall!.args).toEqual(["new-agent", "--yolo", "do stuff"]);
+    expect(lastIbCall!.args).toEqual(["new-agent", "--name", "my-agent", "do stuff"]);
   });
 
-  test("new-agent flag options: Worker + YOLO sets both flags", async () => {
+  test("new-agent form: Create is no-op when prompt is empty", async () => {
     dashboard = new DashboardComponent();
     dashboard.setRepos([{ path: "/repos/only", name: "only-repo" }]);
     lastIbCall = null;
@@ -620,15 +686,49 @@ describe("DashboardComponent dialog and action handlers", () => {
     });
 
     dashboard.handleInput("a");
-    for (const ch of "do stuff") dashboard.handleInput(ch);
-    dashboard.handleInput("\r");
-    // Pick "Worker + YOLO (--worker --yolo)" (index 3)
-    dashboard.handleInput("j");
-    dashboard.handleInput("j");
-    dashboard.handleInput("j");
+    // Tab past name, worker, prompt (empty) to create
+    dashboard.handleInput("\t");
+    dashboard.handleInput("\t");
+    dashboard.handleInput("\t");
+    expect((dashboard.dialog as any).focused).toBe("create");
     dashboard.handleInput("\r");
     await Bun.sleep(10);
-    expect(lastIbCall!.args).toEqual(["new-agent", "--worker", "--yolo", "do stuff"]);
+    // Should NOT have called newAgent
+    expect(lastIbCall).toBeNull();
+    // Dialog should still be open
+    expect(dashboard.dialog).not.toBeNull();
+  });
+
+  test("new-agent form: Cancel button closes dialog", () => {
+    dashboard = new DashboardComponent();
+    dashboard.setRepos([{ path: "/repos/only", name: "only-repo" }]);
+
+    dashboard.handleInput("a");
+    expect(dashboard.dialog!.type).toBe("new-agent-form");
+    // Tab to cancel
+    dashboard.handleInput("\t"); // worker
+    dashboard.handleInput("\t"); // prompt
+    dashboard.handleInput("\t"); // create
+    dashboard.handleInput("\t"); // cancel
+    expect((dashboard.dialog as any).focused).toBe("cancel");
+    dashboard.handleInput("\r");
+    expect(dashboard.dialog).toBeNull();
+  });
+
+  test("new-agent form: Prompt supports multi-line with Enter", () => {
+    dashboard = new DashboardComponent();
+    dashboard.setRepos([{ path: "/repos/only", name: "only-repo" }]);
+
+    dashboard.handleInput("a");
+    // Tab to prompt
+    dashboard.handleInput("\t");
+    dashboard.handleInput("\t");
+    const d = dashboard.dialog as any;
+    expect(d.focused).toBe("prompt");
+    for (const ch of "line one") dashboard.handleInput(ch);
+    dashboard.handleInput("\r"); // newline in prompt
+    for (const ch of "line two") dashboard.handleInput(ch);
+    expect(d.lines).toEqual(["line one", "line two"]);
   });
 
   test("A key toggles archived agents", () => {

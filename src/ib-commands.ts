@@ -79,6 +79,7 @@ export async function sendMessage(agent: Agent, message: string): Promise<IbComm
 }
 
 export interface NewAgentOptions {
+  name?: string;
   worker?: boolean;
   yolo?: boolean;
   model?: string;
@@ -90,6 +91,7 @@ export async function newAgent(
   opts?: NewAgentOptions
 ): Promise<IbCommandResult> {
   const args = ["new-agent"];
+  if (opts?.name) args.push("--name", opts.name);
   if (opts?.worker) args.push("--worker");
   if (opts?.yolo) args.push("--yolo");
   if (opts?.model) args.push("--model", opts.model);

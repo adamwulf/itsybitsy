@@ -336,7 +336,8 @@ function formatAgentRow(
   const truncated = truncateToWidth(line, width, "");
   if (selected) {
     const pad = Math.max(0, width - visibleWidth(truncated));
-    return `${REVERSE}${truncated}${" ".repeat(pad)}${RESET}`;
+    const highlighted = truncated.replaceAll(RESET, RESET + REVERSE);
+    return `${REVERSE}${highlighted}${" ".repeat(pad)}${RESET}`;
   }
   return truncated;
 }
@@ -497,7 +498,8 @@ class AgentTreeComponent implements Component {
         const truncated = truncateToWidth(`${BOLD}◆ ${item.repoHeader}${RESET}`, width, "");
         if (selected) {
           const pad = Math.max(0, width - visibleWidth(truncated));
-          lines.push(`${REVERSE}${truncated}${" ".repeat(pad)}${RESET}`);
+          const highlighted = truncated.replaceAll(RESET, RESET + REVERSE);
+          lines.push(`${REVERSE}${highlighted}${" ".repeat(pad)}${RESET}`);
         } else {
           lines.push(truncated);
         }

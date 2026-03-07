@@ -4,7 +4,7 @@ import { mkdtemp, rm, mkdir } from "fs/promises";
 import { tmpdir } from "os";
 import { readAgentLog, readAgentPrompt, parseDenials } from "../agents";
 import type { Agent, AgentMeta, FlatAgent, PendingQuestion } from "../agents";
-import { TmuxPaneComponent, RightPaneComponent, DashboardComponent, colorizeDiff, colorizeLog, formatAgentRow } from "./dashboard";
+import { TmuxPaneComponent, RightPaneComponent, DashboardComponent, AgentTreeComponent, colorizeDiff, colorizeLog, formatAgentRow } from "./dashboard";
 import { visibleWidth } from "@mariozechner/pi-tui";
 import { setRunner, resetRunner } from "../ib-commands";
 
@@ -1161,5 +1161,230 @@ describe("formatAgentRow full-width highlight", () => {
     const narrowPane = 40;
     const row = formatAgentRow(agent, "", true, narrowPane, 30);
     expect(visibleWidth(row)).toBe(narrowPane);
+  });
+});
+
+describe("AgentTreeComponent scroll indicators", () => {
+  /** Build a tree component with N fake agents and the given maxHeight/scrollOffset. */
+  function makeTree(agentCount: number, maxHeight: number, scrollOffset: number): AgentTreeComponent {
+    const tree = new AgentTreeComponent();
+    tree.maxHeight = maxHeight;
+    const flatList: FlatAgent[] = Array.from({ length: agentCount }, (_, i) => ({
+      agent: makeAgent(`agent-${i}`, "/repos/test"),
+      depth: 0,
+      connector: "",
+    }));
+    tree.setFlatList(flatList);
+    // Override scrollOffset (private) via type assertion for testing
+    (tree as any).scrollOffset = scrollOffset;
+    return tree;
+  }
+
+  /** Strip ANSI escape codes for plain-text assertions. */
+  function stripAnsi(s: string): string {
+    // eslint-disable-next-line no-control-regex
+    return s.replace(/\x1b\[[0-9;]*m/g, "");
+  }
+
+  function renderLines(tree: AgentTreeComponent): string[] {
+    return tree.render(80).map(stripAnsi);
+  }
+
+  test("all items fit — no indicators, total equals item count", () => {
+    const tree = makeTree(5, 7, 0);
+    const lines = renderLines(tree);
+    expect(lines.length).toBe(5);
+    expect(lines.some((l) => l.includes("more"))).toBe(false);
+  });
+
+  test("scroll offset 0, many items — shows bottom indicator only, total = maxHeight", () => {
+    const tree = makeTree(14, 7, 0);
+    const lines = renderLines(tree);
+    expect(lines.length).toBe(7);
+    expect(lines.some((l) => l.includes("▲"))).toBe(false);
+    const bottom = lines[lines.length - 1]!;
+    expect(bottom).toContain("▼");
+    expect(bottom).not.toContain("▼ 1 more");
+  });
+
+  test("scroll offset 1 — absorbs hidden-above row, shows no top indicator", () => {
+    const tree = makeTree(14, 7, 1);
+    const lines = renderLines(tree);
+    expect(lines.length).toBe(7);
+    // No top indicator: item 0 should be visible
+    expect(lines.some((l) => l.includes("▲"))).toBe(false);
+    // Should show a bottom indicator for the items below
+    expect(lines.some((l) => l.includes("▼"))).toBe(true);
+    expect(lines.some((l) => l.includes("▼ 1 more"))).toBe(false);
+  });
+
+  test("scroll offset 2+ — shows top indicator with correct count, total = maxHeight", () => {
+    const tree = makeTree(14, 7, 2);
+    const lines = renderLines(tree);
+    expect(lines.length).toBe(7);
+    expect(lines[0]).toContain("▲ 2 more");
+    expect(lines[lines.length - 1]).toContain("▼");
+    expect(lines.some((l) => l.includes("▼ 1 more"))).toBe(false);
+    expect(lines.some((l) => l.includes("▲ 1 more"))).toBe(false);
+  });
+
+  test("near-bottom: remaining === 1 is absorbed, no bottom indicator", () => {
+    // 10 items, maxHeight 7, scrollOffset 4 → end = min(10, 4+6-1)=9, remaining=1 → absorbed
+    const tree = makeTree(10, 7, 4);
+    const lines = renderLines(tree);
+    expect(lines.length).toBe(7);
+    expect(lines.some((l) => l.includes("▼ 1 more"))).toBe(false);
+    expect(lines.some((l) => l.includes("▼"))).toBe(false);
+    // Top indicator should show "4 more"
+    expect(lines[0]).toContain("▲ 4 more");
+  });
+
+  test("remaining === 2 shows bottom indicator, not absorbed", () => {
+    // 11 items, maxHeight 7, scrollOffset 4 → remaining=2 → shows indicator
+    const tree = makeTree(11, 7, 4);
+    const lines = renderLines(tree);
+    expect(lines.length).toBe(7);
+    expect(lines[lines.length - 1]).toContain("▼ 2 more");
+    expect(lines[0]).toContain("▲ 4 more");
+  });
+
+  test("never shows '▲ 1 more'", () => {
+    // Test many configurations: no render should ever produce "▲ 1 more"
+    for (let n = 1; n <= 15; n++) {
+      for (let offset = 0; offset < n; offset++) {
+        const tree = makeTree(n, 7, offset);
+        const lines = renderLines(tree);
+        for (const line of lines) {
+          expect(line).not.toContain("▲ 1 more");
+        }
+      }
+    }
+  });
+
+  test("never shows '▼ 1 more'", () => {
+    // Test many configurations: no render should ever produce "▼ 1 more"
+    for (let n = 1; n <= 15; n++) {
+      for (let offset = 0; offset < n; offset++) {
+        const tree = makeTree(n, 7, offset);
+        const lines = renderLines(tree);
+        for (const line of lines) {
+          expect(line).not.toContain("▼ 1 more");
+        }
+      }
+    }
+  });
+
+  test("total rendered rows never exceeds maxHeight", () => {
+    for (let n = 1; n <= 15; n++) {
+      for (let offset = 0; offset < n; offset++) {
+        const tree = makeTree(n, 7, offset);
+        const lines = renderLines(tree);
+        expect(lines.length).toBeLessThanOrEqual(7);
+      }
+    }
+  });
+
+  test("scroll offset 0, exactly maxHeight items — all shown, no indicators", () => {
+    const tree = makeTree(7, 7, 0);
+    const lines = renderLines(tree);
+    expect(lines.length).toBe(7);
+    expect(lines.some((l) => l.includes("more"))).toBe(false);
+  });
+
+  test("scroll offset 0, maxHeight+1 items — bottom items hidden, no '▼ 1 more'", () => {
+    // 8 items, maxHeight 7, scrollOffset 0: reserved slot gives end=6, remaining=2 → "▼ 2 more".
+    const tree = makeTree(8, 7, 0);
+    const lines = renderLines(tree);
+    expect(lines.length).toBe(7);
+    expect(lines.some((l) => l.includes("▼ 1 more"))).toBe(false);
+    expect(lines.some((l) => l.includes("▲ 1 more"))).toBe(false);
+    // Bottom indicator should say "▼ 2 more" (both items 6 and 7 are hidden)
+    expect(lines[lines.length - 1]).toContain("▼ 2 more");
+  });
+
+  test("selected item is always visible when scrollOffset=1 (edge case n=maxHeight+1)", () => {
+    // n=8, h=7, scrollOffset=1: render absorbs to start=0, shows items[0..5]+▼2more.
+    // selectedIndex=6 must still be visible — ensureSelectedVisible bumps scrollOffset to 2.
+    const tree = makeTree(8, 7, 0);
+    // Simulate navigation: move selection to index 6 (near bottom)
+    (tree as any).selectedIndex = 5;
+    (tree as any).scrollOffset = 0;
+    tree.moveSelection(1); // selectedIndex → 6, triggers ensureSelectedVisible
+    const lines = renderLines(tree);
+    // Agent-6 must appear in the rendered output
+    expect(lines.some((l) => l.includes("agent-6"))).toBe(true);
+    // Total rows within maxHeight
+    expect(lines.length).toBeLessThanOrEqual(7);
+    // No "1 more" indicators
+    expect(lines.some((l) => l.includes("▲ 1 more"))).toBe(false);
+    expect(lines.some((l) => l.includes("▼ 1 more"))).toBe(false);
+  });
+
+  test("selected item visible after navigation to near-bottom: n=maxHeight+2", () => {
+    // n=9, h=7: non-lastIndex case where old Math.max(2, +2) formula was insufficient.
+    // moveSelection to index 7 must produce scrollOffset=3, showing items[3..8].
+    const tree = makeTree(9, 7, 0);
+    (tree as any).selectedIndex = 6;
+    tree.moveSelection(1); // selectedIndex → 7
+    const lines = renderLines(tree);
+    expect(lines.some((l) => l.includes("agent-7"))).toBe(true);
+    expect(lines.length).toBeLessThanOrEqual(7);
+    expect(lines.some((l) => l.includes("▲ 1 more"))).toBe(false);
+    expect(lines.some((l) => l.includes("▼ 1 more"))).toBe(false);
+  });
+
+  test("selected item visible at lastIndex: n=maxHeight+2, selectedIndex=lastIndex", () => {
+    // n=9, h=7, lastIndex=8: scrollDown formula must produce scrollOffset≥4 to show item 8.
+    const tree = makeTree(9, 7, 0);
+    (tree as any).selectedIndex = 7;
+    tree.moveSelection(1); // selectedIndex → 8 (lastIndex)
+    const lines = renderLines(tree);
+    expect(lines.some((l) => l.includes("agent-8"))).toBe(true);
+    expect(lines.length).toBeLessThanOrEqual(7);
+    expect(lines.some((l) => l.includes("▲ 1 more"))).toBe(false);
+    expect(lines.some((l) => l.includes("▼ 1 more"))).toBe(false);
+  });
+
+  test("navigate up to scrollOffset=1 then navigate down past maxHeight-2: selected visible", () => {
+    // Regression for effectiveScrollOffset trigger bug:
+    // 1. Start at scrollOffset=2, selectedIndex=3 (window=[2..7] with topSlot)
+    // 2. Navigate up: selectedIndex→2, scroll-up check sets scrollOffset=1
+    //    (render absorbs scrollOffset=1 to start=0, window=[0..5]+▼3more)
+    // 3. Navigate down past maxHeight-2=5 (to selectedIndex=6)
+    //    effectiveScrollOffset=0, topSlot=0, trigger: 7>=7 → scrollOffset=Math.max(2,2)=2
+    //    render: start=2, topSlot=1, end=7, remaining=2 → agent-6 visible
+    const tree = makeTree(9, 7, 2);
+    (tree as any).selectedIndex = 3;
+
+    // Navigate up: selectedIndex→2, scrollOffset should become 1
+    tree.moveSelection(-1);
+    expect((tree as any).scrollOffset).toBe(1);
+
+    // Navigate down past maxHeight-2=5 to selectedIndex=6
+    tree.moveSelection(1); // →3
+    tree.moveSelection(1); // →4
+    tree.moveSelection(1); // →5 (maxHeight-2)
+    tree.moveSelection(1); // →6 (past maxHeight-2)
+
+    const lines = renderLines(tree);
+    expect(lines.some((l) => l.includes("agent-6"))).toBe(true);
+    expect(lines.length).toBeLessThanOrEqual(7);
+    expect(lines.some((l) => l.includes("▲ 1 more"))).toBe(false);
+    expect(lines.some((l) => l.includes("▼ 1 more"))).toBe(false);
+  });
+
+  test("dynamic list shrink: removing item above keeps no '▼ 1 more'", () => {
+    // n=10, h=7, scrollOffset=3: start=3, topSlot=1, maxContent=6,
+    // end=min(10,3+5)=8, remaining=2 → shows "▼ 2 more".
+    const tree = makeTree(10, 7, 3);
+    expect(renderLines(tree).some((l) => l.includes("▼ 2 more"))).toBe(true);
+
+    // Shrink to n=9 (an agent above scrollOffset was deleted), scrollOffset stays at 3.
+    // Now: end=min(9,3+5)=8, remaining=1 → absorbed: end=9, remaining=0. No bottom indicator.
+    const tree2 = makeTree(9, 7, 3);
+    const lines = renderLines(tree2);
+    expect(lines.some((l) => l.includes("▼ 1 more"))).toBe(false);
+    expect(lines.some((l) => l.includes("▲ 1 more"))).toBe(false);
+    expect(lines.length).toBeLessThanOrEqual(7);
   });
 });

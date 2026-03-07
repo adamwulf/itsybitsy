@@ -339,7 +339,7 @@ export function formatAgentRow(
 }
 
 /** Agent tree component with height constraint and scrolling */
-class AgentTreeComponent implements Component {
+export class AgentTreeComponent implements Component {
   private _flatList: FlatAgent[] = [];
   private selectedIndex = 0;
   maxHeight = MAX_TREE_HEIGHT;
@@ -445,11 +445,20 @@ class AgentTreeComponent implements Component {
       this.scrollOffset = 0;
     }
 
-    // Scroll down: keep at least 1 row below selected (unless selected is at very bottom of list)
-    if (this.selectedIndex < lastIndex && this.selectedIndex + 1 >= this.scrollOffset + this.maxHeight) {
-      this.scrollOffset = this.selectedIndex - this.maxHeight + 2;
-    } else if (this.selectedIndex === lastIndex && this.selectedIndex >= this.scrollOffset + this.maxHeight) {
-      this.scrollOffset = this.selectedIndex - this.maxHeight + 1;
+    // Scroll down: keep selected visible.
+    // effectiveScrollOffset: render() absorbs scrollOffset=1 to start=0, so the visible window
+    // for scrollOffset=1 is identical to scrollOffset=0. Use the effective value in the trigger.
+    // topSlot: when effectiveScrollOffset >= 2, the top indicator consumes 1 slot, reducing
+    // the effective window end by 1 (effective_end = effectiveOffset + maxHeight - topSlot - 1).
+    // Fire when selectedIndex >= effective_end, i.e. selectedIndex+1 >= effectiveOffset+maxHeight-topSlot.
+    // Formula uses +3 (not +2/+1): render reserves 1 bottom-indicator slot, shrinking capacity.
+    // Math.max(2,...): prevents scrollOffset=1 (absorbed to 0) from leaving selected invisible.
+    const effectiveScrollOffset = this.scrollOffset === 1 ? 0 : this.scrollOffset;
+    const topSlot = effectiveScrollOffset > 0 ? 1 : 0;
+    if (this.selectedIndex < lastIndex && this.selectedIndex + 1 >= effectiveScrollOffset + this.maxHeight - topSlot) {
+      this.scrollOffset = Math.max(2, this.selectedIndex - this.maxHeight + 3);
+    } else if (this.selectedIndex === lastIndex && this.selectedIndex >= effectiveScrollOffset + this.maxHeight - topSlot) {
+      this.scrollOffset = Math.max(2, this.selectedIndex - this.maxHeight + 3);
     }
   }
 
@@ -463,17 +472,29 @@ class AgentTreeComponent implements Component {
 
     const lines: string[] = [];
     let start = this.scrollOffset;
-    let end = Math.min(visible.length, start + this.maxHeight);
 
-    // If only 1 hidden above, show it instead of a scroll indicator
-    if (start === 1) {
-      start = 0;
-    }
+    // If only 1 hidden above, absorb it: show that row instead of a "▲ 1 more" indicator.
+    if (start === 1) start = 0;
 
-    // If only 1 hidden below, show it instead of a scroll indicator
-    if (visible.length - end === 1 && end - start < this.maxHeight) {
+    // Top indicator takes 1 slot when 2+ items are hidden above (start >= 2).
+    const topSlot = start > 0 ? 1 : 0;
+    // Budget: maxHeight minus top slot, with 1 slot reserved for a potential bottom indicator.
+    const maxContent = this.maxHeight - topSlot;
+
+    // Compute end with the reserved bottom-indicator slot.
+    let end = Math.min(visible.length, start + Math.max(0, maxContent - 1));
+    let remaining = visible.length - end;
+
+    if (remaining === 0) {
+      // No items below: reclaim the reserved slot and show all remaining items.
+      end = Math.min(visible.length, start + maxContent);
+      remaining = visible.length - end;
+    } else if (remaining === 1) {
+      // Exactly 1 item below: absorb it into the reserved slot (no "▼ 1 more" indicator).
       end = visible.length;
+      remaining = 0;
     }
+    // remaining >= 2: show "▼ N more" indicator using the reserved slot.
 
     // Compute max name prefix width across all visible agent rows for column alignment
     let maxNameWidth = 0;
@@ -506,7 +527,6 @@ class AgentTreeComponent implements Component {
     }
 
     // Scroll indicator at bottom
-    const remaining = visible.length - end;
     if (remaining > 0) {
       lines.push(truncateToWidth(`${DIM}  ▼ ${remaining} more${RESET}`, width, ""));
     }

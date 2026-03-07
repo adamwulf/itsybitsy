@@ -179,6 +179,6 @@ Compacting (last 5) > Active running (last 5) > Tool waiting (last 15) > Rate li
 - Multi-step flows (merge, diff-tool, snapshot) use `.then().catch()` because they need intermediate UI or skip refresh
 
 ### Ghostty (src/ghostty.ts)
-- `openInGhostty(tmuxSession)` spawns `ghostty --command="tmux attach -t {session}"` detached via `proc.unref()`
+- `openInGhostty(tmuxSession)` spawns `ghostty --command='bash -c "tmux attach -t {session}"'` detached via `proc.unref()` — bash -c wrapper prevents Ghostty's login shell flags from being passed to tmux
 - Validates session name with `/^[\w-]+$/` before interpolating into `--command`
 - Returns `{ ok, message }` — caller shows result via `showMessage()`

@@ -1277,6 +1277,7 @@ export class DashboardComponent implements Component {
   private diffTool: string | undefined;
   private lastSentNotice: string | null = null;
   private usageTimer: ReturnType<typeof setInterval> | null = null;
+  private pendingSelectNewestInRepo: string | null = null;
 
   /** Read-only access to dialog state (for testing) */
   get dialog(): DialogState {
@@ -1600,7 +1601,12 @@ export class DashboardComponent implements Component {
         if (worker) opts.worker = true;
         this.executeAndRefresh(async () => {
           const result = await newAgent(repo.path, prompt, opts);
-          this.setNotice(result.ok ? `Created new agent in ${repo.name}` : `New agent failed: ${result.stderr || result.stdout}`);
+          if (result.ok) {
+            this.pendingSelectNewestInRepo = repo.path;
+            this.setNotice(`Created new agent in ${repo.name}`);
+          } else {
+            this.setNotice(`New agent failed: ${result.stderr || result.stdout}`);
+          }
         });
       },
     });
@@ -2229,6 +2235,21 @@ export class DashboardComponent implements Component {
     // Clamp questions selection
     if (this.rightPane.questionsSelectedIndex >= questions.length) {
       this.rightPane.questionsSelectedIndex = Math.max(0, questions.length - 1);
+    }
+
+    // Auto-select newly created agent if pending
+    if (this.pendingSelectNewestInRepo) {
+      const repoPath = this.pendingSelectNewestInRepo;
+      this.pendingSelectNewestInRepo = null;
+      const newest = flatList
+        .filter((f) => f.agent.repoPath === repoPath)
+        .reduce<FlatAgent | null>((best, f) => {
+          if (!best || f.agent.meta.created_epoch > best.agent.meta.created_epoch) return f;
+          return best;
+        }, null);
+      if (newest) {
+        this.agentTree.selectAgentById(newest.agent.id);
+      }
     }
 
     // Update selected agent info

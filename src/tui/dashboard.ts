@@ -1878,6 +1878,9 @@ export class DashboardComponent implements Component {
         } else if (data === "\t") {
           d.focusedButton = "send";
           this.tui?.requestRender();
+        } else if (data === "\x1b[Z") {
+          d.focusedButton = "cancel";
+          this.tui?.requestRender();
         } else if (matchesKey(data, Key.enter)) {
           d.lines.push("");
           this.tui?.requestRender();
@@ -1896,8 +1899,11 @@ export class DashboardComponent implements Component {
       } else if (d.focusedButton === "send") {
         if (matchesKey(data, Key.enter)) {
           d.onSubmit(d.lines.join("\n"));
-        } else if (data === "\t" || matchesKey(data, Key.left) || matchesKey(data, Key.right)) {
+        } else if (data === "\t" || matchesKey(data, Key.right)) {
           d.focusedButton = "cancel";
+          this.tui?.requestRender();
+        } else if (data === "\x1b[Z" || matchesKey(data, Key.left)) {
+          d.focusedButton = "text";
           this.tui?.requestRender();
         } else if (matchesKey(data, Key.escape)) {
           this.closeDialog();
@@ -1908,8 +1914,11 @@ export class DashboardComponent implements Component {
       } else if (d.focusedButton === "cancel") {
         if (matchesKey(data, Key.enter)) {
           this.closeDialog();
-        } else if (data === "\t" || matchesKey(data, Key.left) || matchesKey(data, Key.right)) {
+        } else if (data === "\t" || matchesKey(data, Key.right)) {
           d.focusedButton = "text";
+          this.tui?.requestRender();
+        } else if (data === "\x1b[Z" || matchesKey(data, Key.left)) {
+          d.focusedButton = "send";
           this.tui?.requestRender();
         } else if (matchesKey(data, Key.escape)) {
           this.closeDialog();

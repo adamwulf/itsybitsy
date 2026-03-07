@@ -839,7 +839,6 @@ export class DashboardComponent implements Component {
   private lastSentNotice: string | null = null;
   private usageTimer: ReturnType<typeof setInterval> | null = null;
 
-
   /** Read-only access to dialog state (for testing) */
   get dialog(): DialogState {
     return this._dialog;
@@ -1398,7 +1397,7 @@ export class DashboardComponent implements Component {
   }
 
   private handleHelp() {
-        this.showDialog({
+    this.showDialog({
       type: "help",
       lines: [
         `${BOLD}Keybindings${RESET}`,

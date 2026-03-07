@@ -7,7 +7,6 @@ import type { Agent, AgentMeta, FlatAgent, PendingQuestion } from "../agents";
 import { TmuxPaneComponent, RightPaneComponent, DashboardComponent, colorizeDiff, colorizeLog } from "./dashboard";
 import { setRunner, resetRunner } from "../ib-commands";
 
-
 function makeAgent(id: string, repoPath: string, archived = false): Agent {
   return {
     id,

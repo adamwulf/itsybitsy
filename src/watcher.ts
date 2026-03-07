@@ -124,7 +124,7 @@ export class AgentWatcher {
       // If refresh() swapped lastAgents while we were awaiting, discard stale results
       if (agents !== this.lastAgents) return;
       const roots = buildAgentTree(agents);
-      const flatList = flattenAgentTree(roots);
+      const flatList = flattenAgentTree(roots, this.repos.length);
       const questionResults = await Promise.all(
         this.repos.map((r) => readPendingQuestions(r.path))
       );
@@ -154,7 +154,7 @@ export class AgentWatcher {
       await detectAgentStates(agents);
 
       const roots = buildAgentTree(agents);
-      const flatList = flattenAgentTree(roots);
+      const flatList = flattenAgentTree(roots, this.repos.length);
 
       // Read pending questions from all repos
       const questionResults = await Promise.all(

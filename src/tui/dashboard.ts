@@ -133,7 +133,7 @@ const PANE_MODES = [
 ] as const;
 type PaneMode = (typeof PANE_MODES)[number];
 
-const FULL_WIDTH_MODES: Set<PaneMode> = new Set(["DENIALS", "TREE", "ERRORS", "DIFF", "QUESTIONS"]);
+const FULL_WIDTH_MODES: Set<PaneMode> = new Set(["DENIALS", "ERRORS", "DIFF", "QUESTIONS"]);
 
 // Denials time filter levels
 const DENIAL_FILTERS = ["all", "24h", "7d"] as const;
@@ -206,6 +206,7 @@ function formatAgentRow(
 class AgentTreeComponent implements Component {
   flatList: FlatAgent[] = [];
   selectedIndex = 0;
+  maxHeight = MAX_TREE_HEIGHT;
   private scrollOffset = 0;
 
   get visibleList(): FlatAgent[] {
@@ -215,7 +216,17 @@ class AgentTreeComponent implements Component {
   get selectedAgent(): Agent | null {
     const visible = this.visibleList;
     if (this.selectedIndex >= 0 && this.selectedIndex < visible.length) {
-      return visible[this.selectedIndex]!.agent;
+      const item = visible[this.selectedIndex]!;
+      if (item.repoHeader) return null;
+      return item.agent;
+    }
+    return null;
+  }
+
+  get selectedRepoHeader(): string | null {
+    const visible = this.visibleList;
+    if (this.selectedIndex >= 0 && this.selectedIndex < visible.length) {
+      return visible[this.selectedIndex]!.repoHeader ?? null;
     }
     return null;
   }
@@ -243,8 +254,8 @@ class AgentTreeComponent implements Component {
   private ensureSelectedVisible() {
     if (this.selectedIndex < this.scrollOffset) {
       this.scrollOffset = this.selectedIndex;
-    } else if (this.selectedIndex >= this.scrollOffset + MAX_TREE_HEIGHT) {
-      this.scrollOffset = this.selectedIndex - MAX_TREE_HEIGHT + 1;
+    } else if (this.selectedIndex >= this.scrollOffset + this.maxHeight) {
+      this.scrollOffset = this.selectedIndex - this.maxHeight + 1;
     }
   }
 
@@ -258,7 +269,7 @@ class AgentTreeComponent implements Component {
 
     const lines: string[] = [];
     const start = this.scrollOffset;
-    const end = Math.min(visible.length, start + MAX_TREE_HEIGHT);
+    const end = Math.min(visible.length, start + this.maxHeight);
 
     // Scroll indicator at top
     if (start > 0) {
@@ -266,8 +277,14 @@ class AgentTreeComponent implements Component {
     }
 
     for (let i = start; i < end; i++) {
-      const { agent, connector } = visible[i]!;
-      lines.push(formatAgentRow(agent, connector, i === this.selectedIndex, width));
+      const item = visible[i]!;
+      if (item.repoHeader) {
+        const sel = i === this.selectedIndex ? `${BOLD}${REVERSE}` : "";
+        const selEnd = i === this.selectedIndex ? `${RESET}` : "";
+        lines.push(`${sel}${truncateToWidth(`${BOLD}◆ ${item.repoHeader}${RESET}`, width, "")}${selEnd}`);
+      } else {
+        lines.push(formatAgentRow(item.agent, item.connector, i === this.selectedIndex, width));
+      }
     }
 
     // Scroll indicator at bottom
@@ -284,6 +301,7 @@ class AgentTreeComponent implements Component {
 export class RightPaneComponent implements Component {
   mode: PaneMode = "AGENT LOG";
   agent: Agent | null = null;
+  selectedRepoHeader: string | null = null;
   questions: PendingQuestion[] = [];
   allAgents: FlatAgent[] = [];
   scrollOffset = 0;
@@ -308,7 +326,46 @@ export class RightPaneComponent implements Component {
     this.updateContent();
   }
 
+  private buildRepoSummary(): string[] {
+    const repoName = this.selectedRepoHeader!;
+    const repoAgents = this.allAgents.filter(
+      (f) => !f.repoHeader && f.agent.repoName === repoName
+    );
+    const stateCounts = new Map<string, number>();
+    for (const { agent } of repoAgents) {
+      stateCounts.set(agent.state, (stateCounts.get(agent.state) ?? 0) + 1);
+    }
+
+    const lines: string[] = [];
+    lines.push(`${BOLD}◆ ${repoName}${RESET}`);
+    lines.push("");
+
+    // Find repo path from first agent
+    if (repoAgents.length > 0) {
+      lines.push(`${DIM}Path:${RESET} ${repoAgents[0]!.agent.repoPath}`);
+      lines.push("");
+    }
+
+    lines.push(`${BOLD}Agents: ${repoAgents.length}${RESET}`);
+    if (stateCounts.size > 0) {
+      for (const [state, count] of stateCounts) {
+        const stateColor = STATE_COLORS[state] ?? STATE_COLORS.unknown;
+        lines.push(`  ${stateColor}${state}${RESET}: ${count}`);
+      }
+    }
+    return lines;
+  }
+
   updateContent() {
+    // When a repo header is selected, show repo summary for agent-specific modes
+    if (this.selectedRepoHeader && !this.agent) {
+      const agentSpecificModes: Set<PaneMode> = new Set(["AGENT LOG", "INITIAL PROMPT", "DENIALS", "DIFF", "STATUS"]);
+      if (agentSpecificModes.has(this.mode)) {
+        this.content = this.buildRepoSummary();
+        return;
+      }
+    }
+
     switch (this.mode) {
       case "AGENT LOG":
         this.content = this.agentLogContent
@@ -1682,6 +1739,7 @@ export class DashboardComponent implements Component {
   private syncSelectedAgent() {
     const selected = this.agentTree.selectedAgent;
     this.rightPane.agent = selected;
+    this.rightPane.selectedRepoHeader = this.agentTree.selectedRepoHeader;
     this.tmuxPane.agent = selected;
 
     // If agent changed, reset tmux pane state and reload agent data
@@ -1989,6 +2047,8 @@ export class DashboardComponent implements Component {
     }
 
     const lines: string[] = [];
+    const terminalRows = process.stdout.rows || 24;
+    const isTreeMode = this.rightPane.mode === "TREE";
 
     // Header
     const subtitle = this.lastSentNotice
@@ -1997,28 +2057,49 @@ export class DashboardComponent implements Component {
     lines.push(truncateToWidth(`${BOLD}itsybitsy${RESET} ${subtitle}`, width, ""));
     lines.push(truncateToWidth(`${DIM}${"─".repeat(width)}${RESET}`, width, ""));
 
-    // Agent tree (top section)
-    const treeLines = this.agentTree.render(width);
-    lines.push(...treeLines);
+    if (isTreeMode) {
+      // TREE mode: full-height navigable tree replaces both top tree and split pane
+      // header(2) + separator(1) + separator(1) + statusBar(2) = 6 lines of chrome
+      const treeHeight = Math.max(5, terminalRows - 6);
+      this.agentTree.maxHeight = treeHeight;
 
-    // Separator
-    lines.push(truncateToWidth(`${DIM}${"─".repeat(width)}${RESET}`, width, ""));
+      // Tree header
+      lines.push(truncateToWidth(`${BOLD}${DIM}── TREE ──${RESET}`, width, ""));
 
-    // Compute available height for split pane
-    const bottomHeight = 2; // status bar is always 2 lines
-    const separatorHeight = 1; // bottom separator before status
-    const usedHeight = lines.length + separatorHeight + bottomHeight;
-    const terminalRows = process.stdout.rows || 24;
-    const availableHeight = Math.max(5, terminalRows - usedHeight);
+      const treeLines = this.agentTree.render(width);
+      lines.push(...treeLines);
 
-    // Set display heights on sub-components before rendering
-    this.tmuxPane.displayHeight = availableHeight;
-    this.rightPane.displayHeight = availableHeight;
+      // Pad to fill available space
+      const padNeeded = treeHeight - treeLines.length;
+      for (let i = 0; i < padNeeded; i++) {
+        lines.push("");
+      }
+    } else {
+      // Normal layout: compact top tree + split pane
+      this.agentTree.maxHeight = MAX_TREE_HEIGHT;
 
-    // Split pane (tmux left + right pane)
-    this.splitPane.fullWidth = FULL_WIDTH_MODES.has(this.rightPane.mode);
-    const splitLines = this.splitPane.render(width);
-    lines.push(...splitLines);
+      // Agent tree (top section)
+      const treeLines = this.agentTree.render(width);
+      lines.push(...treeLines);
+
+      // Separator
+      lines.push(truncateToWidth(`${DIM}${"─".repeat(width)}${RESET}`, width, ""));
+
+      // Compute available height for split pane
+      const bottomHeight = 2; // status bar is always 2 lines
+      const separatorHeight = 1; // bottom separator before status
+      const usedHeight = lines.length + separatorHeight + bottomHeight;
+      const availableHeight = Math.max(5, terminalRows - usedHeight);
+
+      // Set display heights on sub-components before rendering
+      this.tmuxPane.displayHeight = availableHeight;
+      this.rightPane.displayHeight = availableHeight;
+
+      // Split pane (tmux left + right pane)
+      this.splitPane.fullWidth = FULL_WIDTH_MODES.has(this.rightPane.mode);
+      const splitLines = this.splitPane.render(width);
+      lines.push(...splitLines);
+    }
 
     // Separator
     lines.push(truncateToWidth(`${DIM}${"─".repeat(width)}${RESET}`, width, ""));

@@ -362,7 +362,7 @@ Each phase ends at a usable checkpoint — something that works and can be teste
 - [x] `src/tmux-poller.ts` — polls selected agent at ~1s; `captureTmuxOutput()` for one-shot state detection; race-condition guard on agent switch
 - [x] Basic error handling: try/catch, graceful degradation for missing/malformed `meta.json`, structured `AgentReadError` reporting
 - [x] Unit tests: parse-state (43 tests), agents (23 tests)
-- [ ] Orphan tmux session detection (deferred — low priority)
+- [x] Orphan tmux session detection
 
 ---
 
@@ -506,9 +506,9 @@ Changes in `src/tui/dashboard.ts` render paths + `src/agents.ts` for orphan flag
 - [x] **Orphaned agent indicator (G-06 part 2)** (`src/tui/agent-tree.ts`) — in `formatAgentRow()`, prepend `⚠ ` when `agent.orphaned === true`.
 
 **Orphan tmux session detection:**
-- [ ] **Detect orphaned tmux sessions** (`src/agents.ts` or `src/tmux-poller.ts`) — after reading all agents, run `tmux list-sessions -F "#{session_name}"` and filter for sessions matching `ittybitty-{repo-id}-*`. Compare against known agent tmux session names. Sessions without matching agent data are stale orphans. Return as a separate list alongside agents.
-- [ ] **Display orphan tmux warnings** (`src/tui/dashboard.ts`) — show orphaned tmux sessions in the ERRORS pane with a message like "Orphaned tmux session: {session_name} (no matching agent)". Add a count to the error badge in footer.
-- [ ] **Orphan cleanup** (`src/tui/dashboard.ts`) — when viewing an orphan error, offer to kill the tmux session via confirm dialog (runs `tmux kill-session -t {session}`).
+- [x] **Detect orphaned tmux sessions** (`src/agents.ts` + `src/tmux-poller.ts`) — after reading all agents, run `tmux list-sessions -F "#{session_name}"` and filter for sessions matching `ittybitty-*`. Compare against known agent tmux session names. Sessions without matching agent data are stale orphans. Returned as `orphanedTmuxSessions` in `ReadAgentsResult`.
+- [x] **Display orphan tmux warnings** (`src/tui/pane-manager.ts`) — show orphaned tmux sessions in the ERRORS pane with a message like "⚠ {session_name} (no matching agent)". Count included in the error badge in footer.
+- [x] **Orphan cleanup** (`src/tui/agent-actions.ts`) — when viewing ERRORS pane, Enter opens confirm dialog to kill the orphaned tmux session (runs `tmux kill-session -t {session}` via `killTmuxSession()`).
 
 **Colorization:**
 - [ ] **Diff colorization (G-04)** — post-process `diffContent` lines: `+` lines (not `+++`) get green `\x1b[32m`; `-` lines (not `---`) get red `\x1b[31m`; `@@`/`---`/`+++`/`diff ` lines get dim `\x1b[2m`. Reset `\x1b[0m` at end of each colored line.

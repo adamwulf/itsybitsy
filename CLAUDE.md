@@ -178,6 +178,16 @@ Compacting (last 5) > Active running (last 5) > Tool waiting (last 15) > Rate li
 - `executeAndRefresh(fn)` wraps simple mutations (try/catch + watcher refresh)
 - Multi-step flows (merge, diff-tool, snapshot) use `.then().catch()` because they need intermediate UI or skip refresh
 
+### Agent monitoring loop
+
+When running parallel agents, start a 2-minute cron loop to auto-merge completed agents:
+
+1. Use the `loop` skill: `/loop 2m Check on all active ib agents. For any that are complete, verify they ran a review cycle (look for reviewer approval in their output). If they did, merge them with \`ib merge <id> --force\`. If they didn't, send them a message asking them to run a review cycle before completing. Report what you did each round.`
+2. Note the job ID returned (e.g. `455a3261`)
+3. When all target agents are merged, cancel: `CronDelete` with that job ID
+
+The loop handles: checking completion, enforcing review cycles, merging approved agents, nudging agents that skipped review, and freeing agent slots when sub-reviewers complete.
+
 ### Ghostty (src/ghostty.ts)
 - `openInGhostty(tmuxSession)` spawns `ghostty --command='bash -c "tmux attach -t {session}"'` detached via `proc.unref()` — bash -c wrapper prevents Ghostty's login shell flags from being passed to tmux. Note: `+new-window` (reuse existing instance) is GTK-only and not available on macOS, so each call spawns a new Ghostty app.
 - Validates session name with `/^[\w-]+$/` before interpolating into `--command`

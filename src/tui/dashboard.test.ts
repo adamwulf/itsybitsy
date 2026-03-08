@@ -377,6 +377,60 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(lastIbCall!.args).toEqual(["nuke", "agent-test", "--force"]);
   });
 
+  test("! key with no agent selected opens nuke-all confirm dialog", () => {
+    dashboard = new DashboardComponent();
+    lastIbCall = null;
+    setRunner(async (args, cwd) => {
+      lastIbCall = { args, cwd };
+      return { ok: true, exitCode: 0, stdout: "ok", stderr: "" };
+    });
+    dashboard.setRepos([{ name: "test-repo", path: "/repos/test" }]);
+    // No agents — so no agent is selected
+    dashboard.onUpdate([], [], []);
+    dashboard.handleInput("!");
+    expect(dashboard.dialog).not.toBeNull();
+    expect(dashboard.dialog!.type).toBe("confirm");
+    expect((dashboard.dialog as any).prompt).toContain("NUKE ALL");
+    expect((dashboard.dialog as any).confirmLabel).toBe("Nuke All");
+    expect((dashboard.dialog as any).focusedButton).toBe("cancel");
+  });
+
+  test("nuke-all confirm executes nuke --force with no agent ID", async () => {
+    dashboard = new DashboardComponent();
+    lastIbCall = null;
+    setRunner(async (args, cwd) => {
+      lastIbCall = { args, cwd };
+      return { ok: true, exitCode: 0, stdout: "ok", stderr: "" };
+    });
+    dashboard.setRepos([{ name: "test-repo", path: "/repos/test" }]);
+    dashboard.onUpdate([], [], []);
+    dashboard.handleInput("!");
+    // focusedButton is "cancel", Tab to move to confirm, then Enter
+    dashboard.handleInput("\t");
+    dashboard.handleInput("\r");
+    await Bun.sleep(10);
+    expect(lastIbCall!.args).toEqual(["nuke", "--force"]);
+    expect(lastIbCall!.cwd).toBe("/repos/test");
+  });
+
+  test("! key with no agent and multiple repos shows repo picker", () => {
+    dashboard = new DashboardComponent();
+    lastIbCall = null;
+    setRunner(async (args, cwd) => {
+      lastIbCall = { args, cwd };
+      return { ok: true, exitCode: 0, stdout: "ok", stderr: "" };
+    });
+    dashboard.setRepos([
+      { name: "repo-a", path: "/repos/a" },
+      { name: "repo-b", path: "/repos/b" },
+    ]);
+    dashboard.onUpdate([], [], []);
+    dashboard.handleInput("!");
+    expect(dashboard.dialog).not.toBeNull();
+    expect(dashboard.dialog!.type).toBe("select");
+    expect((dashboard.dialog as any).prompt).toContain("Nuke ALL");
+  });
+
   test("R key resumes stopped agents", async () => {
     setupDashboardWithAgent("stopped");
     dashboard.handleInput("R");

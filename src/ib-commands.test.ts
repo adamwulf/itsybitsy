@@ -4,6 +4,7 @@ import { makeAgent as _makeAgent } from "./test-utils";
 import {
   killAgent,
   nukeAgent,
+  nukeAllAgents,
   resumeAgent,
   reassignAgent,
   mergeCheckAgent,
@@ -58,6 +59,14 @@ describe("ib-commands", () => {
     await nukeAgent(agent);
     expect(lastCall).toEqual({
       args: ["nuke", "agent-abc", "--force"],
+      cwd: "/repos/myproject",
+    });
+  });
+
+  test("nukeAllAgents passes ['nuke', '--force'] with repoPath as cwd", async () => {
+    await nukeAllAgents("/repos/myproject");
+    expect(lastCall).toEqual({
+      args: ["nuke", "--force"],
       cwd: "/repos/myproject",
     });
   });

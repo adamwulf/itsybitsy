@@ -9,7 +9,7 @@ import type { Agent, FlatAgent, PendingQuestion } from "../agents";
 import type { RepoEntry } from "../registry";
 import { addRepo } from "../registry";
 import {
-  killAgent, nukeAgent, resumeAgent, pauseAgent, reassignAgent,
+  killAgent, nukeAgent, nukeAllAgents, resumeAgent, pauseAgent, reassignAgent,
   mergeCheckAgent, mergeAgent, sendMessage, newAgent, diffAgent,
   acknowledgeQuestion,
 } from "../ib-commands";
@@ -86,7 +86,11 @@ export function handleKill(ctx: ActionCtx) {
 
 export function handleNuke(ctx: ActionCtx) {
   const agent = ctx.agentTree.selectedAgent;
-  if (!agent) return;
+  if (!agent) {
+    // No agent selected — offer nuke-all (emergency stop for entire repo)
+    handleNukeAll(ctx);
+    return;
+  }
   ctx.showDialog({
     type: "confirm",
     prompt: `${RED}FORCE KILL ${agent.id}? This cannot be undone.${RESET}`,
@@ -97,6 +101,52 @@ export function handleNuke(ctx: ActionCtx) {
       ctx.executeAndRefresh(async () => {
         const result = await nukeAgent(agent);
         ctx.setNotice(result.ok ? `Nuked ${agent.id}` : `Nuke failed: ${result.stderr || result.stdout}`);
+      });
+    },
+  });
+}
+
+export function handleNukeAll(ctx: ActionCtx) {
+  if (ctx.repos.length === 0) { ctx.setNotice("No repos registered"); return; }
+  if (ctx.repos.length === 1) {
+    const repo = ctx.repos[0]!;
+    ctx.showDialog({
+      type: "confirm",
+      prompt: `${RED}NUKE ALL agents in ${repo.name}? This cannot be undone.${RESET}`,
+      confirmLabel: "Nuke All",
+      focusedButton: "cancel",
+      confirmColor: RED,
+      onYes: () => {
+        ctx.closeDialog();
+        ctx.executeAndRefresh(async () => {
+          const result = await nukeAllAgents(repo.path);
+          ctx.setNotice(result.ok ? `Nuked all agents in ${repo.name}` : `Nuke-all failed: ${result.stderr || result.stdout}`);
+        });
+      },
+    });
+    return;
+  }
+  // Multiple repos — show picker first
+  ctx.showDialog({
+    type: "select",
+    prompt: "Nuke ALL agents in which repo?",
+    items: ctx.repos.map((r) => `${r.name} (${r.path})`),
+    selectedIndex: 0,
+    onSelect: (repoIndex: number) => {
+      const repo = ctx.repos[repoIndex]!;
+      ctx.showDialog({
+        type: "confirm",
+        prompt: `${RED}NUKE ALL agents in ${repo.name}? This cannot be undone.${RESET}`,
+        confirmLabel: "Nuke All",
+        focusedButton: "cancel",
+        confirmColor: RED,
+        onYes: () => {
+          ctx.closeDialog();
+          ctx.executeAndRefresh(async () => {
+            const result = await nukeAllAgents(repo.path);
+            ctx.setNotice(result.ok ? `Nuked all agents in ${repo.name}` : `Nuke-all failed: ${result.stderr || result.stdout}`);
+          });
+        },
       });
     },
   });
@@ -436,7 +486,7 @@ export function handleHelp(ctx: ActionCtx) {
       header("Actions"),
       row("s", "send message"),
       row("m", "merge"),
-      row("x / !", "kill / nuke"),
+      row("x / !", "kill / nuke (all if none selected)"),
       row("R", "resume"),
       row("P", "pause"),
       row("r", "reassign"),

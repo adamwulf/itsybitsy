@@ -58,6 +58,10 @@ export async function nukeAgent(agent: Agent): Promise<IbCommandResult> {
   return runIb(["nuke", agent.id, "--force"], agent.repoPath);
 }
 
+export async function nukeAllAgents(repoPath: string): Promise<IbCommandResult> {
+  return runIb(["nuke", "--force"], repoPath);
+}
+
 export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
   return runIb(["resume", agent.id], agent.repoPath);
 }

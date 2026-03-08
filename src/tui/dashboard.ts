@@ -945,7 +945,7 @@ class StatusBarComponent implements Component {
     const usageStr = this.formatUsage();
 
     // Row 2 left: secondary/app keys
-    const row2Left = `${DIM}@: jump    /: commands    a: new agent    h: help    x: kill    R: resume    r: reassign    w: worktree    G: ghostty${RESET}`;
+    const row2Left = `${DIM}@: jump    /: commands    a: new agent    h: help    x: kill${RESET}`;
 
     // Row 2 right: time · version
     const now = new Date();

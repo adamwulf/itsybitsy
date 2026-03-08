@@ -420,6 +420,11 @@ export class DashboardComponent implements Component {
     this.tui = tui;
   }
 
+  /** Set the terminal window title via OSC 0. Extracted for testability. */
+  setTerminalTitle(title: string) {
+    process.stdout.write(`\x1b]0;${title}\x07`);
+  }
+
   startPolling() {
     this.tmuxPoller.start();
     this.refreshUsage();
@@ -634,11 +639,7 @@ export class DashboardComponent implements Component {
     const newId = selected?.id ?? null;
     if (newId !== this.currentAgentId) {
       this.currentAgentId = newId;
-      if (newId) {
-        process.stdout.write(`\x1b]0;itsybitsy: ${newId}\x07`);
-      } else {
-        process.stdout.write(`\x1b]0;itsybitsy\x07`);
-      }
+      this.setTerminalTitle(newId ? `itsybitsy: ${newId}` : "itsybitsy");
       this.tmuxPane.resetForAgent();
       this.rightPane.agentLogContent = null;
       this.rightPane.promptContent = null;
@@ -949,7 +950,7 @@ export async function launchDashboard(): Promise<void> {
       dashboard.stopPolling();
       watcher.stop();
       tui.stop();
-      process.stdout.write("\x1b]0;\x07");
+      dashboard.setTerminalTitle("");
       process.stdout.write("\x1b[2J\x1b[H");
       process.exit(0);
     }

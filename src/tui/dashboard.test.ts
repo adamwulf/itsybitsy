@@ -5,34 +5,13 @@ import { tmpdir } from "os";
 import { readAgentLog, readAgentPrompt, parseDenials } from "../agents";
 import type { Agent, AgentMeta, FlatAgent, PendingQuestion } from "../agents";
 import { stripAnsi } from "../parse-state";
+import { makeAgent as _makeAgent } from "../test-utils";
 import { TmuxPaneComponent, RightPaneComponent, DashboardComponent, AgentTreeComponent, colorizeDiff, colorizeLog, formatAgentRow } from "./dashboard";
 import { visibleWidth } from "@mariozechner/pi-tui";
 import { setRunner, resetRunner } from "../ib-commands";
 
 function makeAgent(id: string, repoPath: string, archived = false): Agent {
-  return {
-    id,
-    repoPath,
-    repoName: "test",
-    state: "unknown",
-    age: "1m",
-    archived,
-    children: [],
-    meta: {
-      id,
-      session_id: "sess-1",
-      tmux_session: `tmux-${id}`,
-      prompt: "test prompt",
-      manager: null,
-      created: "2026-03-05T00:00:00Z",
-      created_epoch: Math.floor(Date.now() / 1000) - 60,
-      worktree: true,
-      worker: false,
-      yolo: false,
-      model: "sonnet",
-      claude_pid: "12345",
-    } as AgentMeta,
-  };
+  return _makeAgent({ id, repoPath, archived });
 }
 
 describe("readAgentLog", () => {

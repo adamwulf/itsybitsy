@@ -116,8 +116,11 @@ async function readAgentsFromDir(
         children: [],
       });
     }
-  } catch {
-    // Directory doesn't exist — not an error (archive/ may be absent)
+  } catch (err: unknown) {
+    // ENOENT is expected — archive/ or agents/ may not exist yet
+    if (err instanceof Error && "code" in err && (err as NodeJS.ErrnoException).code !== "ENOENT") {
+      errors.push({ agentDir: dir, error: `Failed to read directory: ${err.message}` });
+    }
   }
   return { agents, errors };
 }
@@ -153,14 +156,22 @@ export async function readPendingQuestions(repoPath: string): Promise<PendingQue
     try {
       const entries = await readdir(agentsDir, { withFileTypes: true });
       activeAgentIds = new Set(entries.filter((e) => e.isDirectory()).map((e) => e.name));
-    } catch {
+    } catch (err: unknown) {
+      // ENOENT expected when agents/ dir doesn't exist; other errors are unexpected
+      if (err instanceof Error && "code" in err && (err as NodeJS.ErrnoException).code !== "ENOENT") {
+        process.stderr.write(`Warning: failed to read agents directory: ${(err as Error).message}\n`);
+      }
       activeAgentIds = new Set();
     }
 
     return data.questions.filter(
       (q: PendingQuestion) => q.status === "pending" && activeAgentIds.has(q.agent)
     );
-  } catch {
+  } catch (err: unknown) {
+    // Expected: file missing (ENOENT), malformed JSON, etc. — silently return empty
+    if (err instanceof Error && "code" in err && (err as NodeJS.ErrnoException).code !== "ENOENT") {
+      process.stderr.write(`Warning: failed to read pending questions: ${(err as Error).message}\n`);
+    }
     return [];
   }
 }

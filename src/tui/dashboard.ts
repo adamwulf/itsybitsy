@@ -23,7 +23,7 @@ import { stat } from "node:fs/promises";
 import { readAgentLog, readAgentPrompt, parseDenials } from "../agents";
 import type { Agent, FlatAgent, PendingQuestion, DenialEntry } from "../agents";
 import { SplitPane } from "./split-pane";
-import { wrapLines } from "./wrap";
+import { wrapLines, wrapSingleLine } from "./wrap";
 import {
   killAgent,
   nukeAgent,
@@ -54,22 +54,16 @@ const MAX_LEFT_WIDTH = 160;
 const DEFAULT_LEFT_WIDTH = 80;
 const LEFT_WIDTH_STEP = 5;
 
-/** Wrap logical lines into visual lines of at most `width` characters each.
- *  Adds a trailing empty line when the last logical line fills exactly to the width
+/** Wrap logical textarea lines into visual lines using ANSI-aware wrapping.
+ *  Adds a trailing empty line when the last visual line fills exactly to the width
  *  boundary, so the cursor block has room to render. */
 function wrapTextareaLines(lines: string[], width: number): string[] {
   const result: string[] = [];
   for (const raw of lines) {
-    if (raw.length === 0) {
-      result.push("");
-    } else {
-      for (let col = 0; col < raw.length; col += width) {
-        result.push(raw.slice(col, col + width));
-      }
-    }
+    result.push(...wrapSingleLine(raw, width));
   }
   // Ensure cursor has room on the last visual line
-  if (result.length > 0 && result[result.length - 1]!.length === width) {
+  if (result.length > 0 && visibleWidth(result[result.length - 1]!) === width) {
     result.push("");
   }
   return result;
@@ -2038,9 +2032,9 @@ export class DashboardComponent implements Component {
     });
   }
 
-  private handleFolderBrowser() {
+  private async handleFolderBrowser() {
     const startPath = process.cwd();
-    const items = buildFolderItems(startPath);
+    const items = await buildFolderItems(startPath);
     const currentIdx = items.findIndex((i) => i.isCurrent);
     this.showDialog({
       type: "folder-browser",
@@ -2367,15 +2361,15 @@ export class DashboardComponent implements Component {
         } else {
           // Navigate into selected folder
           if (selectedItem) {
-            const newItems = buildFolderItems(selectedItem.path);
-            // Find the item that matches the navigated-to path to keep it highlighted
-            const newIdx = newItems.findIndex((i) => i.path === selectedItem.path);
-            d.currentPath = selectedItem.path;
-            d.items = newItems;
-            d.selectedIndex = newIdx !== -1 ? newIdx : 0;
-            d.focused = "list";
-            d.scrollOffset = Math.max(0, d.selectedIndex - 7);
-            this.tui?.requestRender();
+            buildFolderItems(selectedItem.path).then((newItems) => {
+              const newIdx = newItems.findIndex((i) => i.path === selectedItem.path);
+              d.currentPath = selectedItem.path;
+              d.items = newItems;
+              d.selectedIndex = newIdx !== -1 ? newIdx : 0;
+              d.focused = "list";
+              d.scrollOffset = Math.max(0, d.selectedIndex - 7);
+              this.tui?.requestRender();
+            });
           }
         }
       }

@@ -162,6 +162,19 @@ async function releaseLock(): Promise<void> {
   }
 }
 
+/** Handle API failure: apply exponential backoff on cached response, or return null. */
+async function handleFailure(cache: CacheFile | null, now: number): Promise<UsageData | null> {
+  await releaseLock();
+  if (cache) {
+    const backoffMs = Math.min(cache.nextBackoffMs ?? 60_000, MAX_BACKOFF_MS);
+    const nextBackoffMs = Math.min(backoffMs + 60_000, MAX_BACKOFF_MS);
+    const retryTimestamp = Math.floor((now + backoffMs - CACHE_TTL_MS) / 1000);
+    await writeCache({ timestamp: retryTimestamp, response: cache.response, nextBackoffMs });
+    return parseUsageResponse(cache.response);
+  }
+  return null;
+}
+
 export async function fetchUsage(): Promise<UsageData | null> {
   await mkdir(ITSYBITSY_DIR, { recursive: true });
   // Check cache
@@ -191,30 +204,13 @@ export async function fetchUsage(): Promise<UsageData | null> {
     });
 
     if (!resp.ok) {
-      await releaseLock();
-      if (cache) {
-        const backoffMs = Math.min(cache.nextBackoffMs ?? 60_000, MAX_BACKOFF_MS);
-        const nextBackoffMs = Math.min(backoffMs + 60_000, MAX_BACKOFF_MS);
-        // Set timestamp so next retry happens after backoffMs
-        const retryTimestamp = Math.floor((now + backoffMs - CACHE_TTL_MS) / 1000);
-        await writeCache({ timestamp: retryTimestamp, response: cache.response, nextBackoffMs });
-        return parseUsageResponse(cache.response);
-      }
-      return null;
+      return await handleFailure(cache, now);
     }
 
     const body = (await resp.json()) as ApiResponse;
 
     if (body.error) {
-      await releaseLock();
-      if (cache) {
-        const backoffMs = Math.min(cache.nextBackoffMs ?? 60_000, MAX_BACKOFF_MS);
-        const nextBackoffMs = Math.min(backoffMs + 60_000, MAX_BACKOFF_MS);
-        const retryTimestamp = Math.floor((now + backoffMs - CACHE_TTL_MS) / 1000);
-        await writeCache({ timestamp: retryTimestamp, response: cache.response, nextBackoffMs });
-        return parseUsageResponse(cache.response);
-      }
-      return null;
+      return await handleFailure(cache, now);
     }
 
     // Success — write cache with no backoff, release lock

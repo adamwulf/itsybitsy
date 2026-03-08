@@ -66,7 +66,10 @@ export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
   return runIb(["resume", agent.id], agent.repoPath);
 }
 
-export async function reassignAgent(agent: Agent, newManager: string): Promise<IbCommandResult> {
+export async function reassignAgent(agent: Agent, newManager: string | null): Promise<IbCommandResult> {
+  if (newManager === null) {
+    return runIb(["reassign", agent.id, "--none"], agent.repoPath);
+  }
   return runIb(["reassign", agent.id, newManager], agent.repoPath);
 }
 

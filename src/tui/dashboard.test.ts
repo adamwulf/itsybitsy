@@ -497,33 +497,145 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(dashboard.notice).not.toBeNull();
   });
 
-  test("r key opens reassign input dialog", () => {
+  test("r key opens reassign fuzzy select dialog", () => {
     setupDashboardWithAgent();
     dashboard.handleInput("r");
-    expect(dashboard.dialog!.type).toBe("input");
+    expect(dashboard.dialog!.type).toBe("fuzzy");
     expect((dashboard.dialog as any).prompt).toContain("Reassign");
   });
 
-  test("reassign input: typing and submitting", async () => {
+  test("reassign fuzzy: shows '(No parent - make root)' as first option", () => {
     setupDashboardWithAgent();
     dashboard.handleInput("r");
-    // Type "agent-new"
-    for (const ch of "agent-new") {
-      dashboard.handleInput(ch);
-    }
-    expect((dashboard.dialog as any).value).toBe("agent-new");
-    // Submit
-    dashboard.handleInput("\r");
-    await Bun.sleep(10);
-    expect(lastIbCall!.args).toEqual(["reassign", "agent-test", "agent-new"]);
+    const items = (dashboard.dialog as any).allItems as string[];
+    expect(items[0]).toBe("(No parent - make root)");
   });
 
-  test("reassign input: empty submit cancels", async () => {
+  test("reassign fuzzy: selecting 'No parent' calls reassign with --none", async () => {
     setupDashboardWithAgent();
     dashboard.handleInput("r");
+    // First item is already selected (index 0 = No parent), press Enter
     dashboard.handleInput("\r");
     await Bun.sleep(10);
-    expect(lastIbCall).toBeNull();
+    expect(lastIbCall!.args).toEqual(["reassign", "agent-test", "--none"]);
+  });
+
+  test("reassign fuzzy: selecting a manager calls reassign with manager id", async () => {
+    // Set up with multiple agents so there's a candidate to select
+    dashboard = makeDashboard();
+    lastIbCall = null;
+    setRunner(async (args, cwd) => {
+      lastIbCall = { args, cwd };
+      return { ok: true, exitCode: 0, stdout: "ok", stderr: "" };
+    });
+
+    const agent1 = makeAgent("agent-test", "/repos/test");
+    agent1.state = "running" as any;
+    const agent2 = makeAgent("agent-manager", "/repos/test");
+    agent2.state = "running" as any;
+    const flatList: FlatAgent[] = [
+      { agent: agent1, depth: 0, connector: "" },
+      { agent: agent2, depth: 0, connector: "" },
+    ];
+    dashboard.onUpdate([agent1, agent2], flatList, []);
+
+    dashboard.handleInput("r");
+    const items = (dashboard.dialog as any).allItems as string[];
+    expect(items).toContain("agent-manager");
+    // Move down to agent-manager (index 1) and select — use arrow key, not j (which is a search char in fuzzy)
+    dashboard.handleInput("\x1b[B");
+    dashboard.handleInput("\r");
+    await Bun.sleep(10);
+    expect(lastIbCall!.args).toEqual(["reassign", "agent-test", "agent-manager"]);
+  });
+
+  test("reassign fuzzy: excludes self and workers from candidates", () => {
+    dashboard = makeDashboard();
+    lastIbCall = null;
+    setRunner(async (args, cwd) => {
+      lastIbCall = { args, cwd };
+      return { ok: true, exitCode: 0, stdout: "ok", stderr: "" };
+    });
+
+    const agent1 = makeAgent("agent-test", "/repos/test");
+    agent1.state = "running" as any;
+    const worker = makeAgent("agent-worker", "/repos/test");
+    worker.state = "running" as any;
+    worker.meta.worker = true;
+    const flatList: FlatAgent[] = [
+      { agent: agent1, depth: 0, connector: "" },
+      { agent: worker, depth: 0, connector: "" },
+    ];
+    dashboard.onUpdate([agent1, worker], flatList, []);
+
+    dashboard.handleInput("r");
+    const items = (dashboard.dialog as any).allItems as string[];
+    expect(items).not.toContain("agent-test");  // self excluded
+    expect(items).not.toContain("agent-worker");  // worker excluded
+    expect(items).toEqual(["(No parent - make root)"]);
+  });
+
+  test("reassign fuzzy: excludes descendants to prevent circular dependency", () => {
+    dashboard = makeDashboard();
+    lastIbCall = null;
+    setRunner(async (args, cwd) => {
+      lastIbCall = { args, cwd };
+      return { ok: true, exitCode: 0, stdout: "ok", stderr: "" };
+    });
+
+    const parent = makeAgent("agent-parent", "/repos/test");
+    parent.state = "running" as any;
+    const child = makeAgent("agent-child", "/repos/test");
+    child.state = "running" as any;
+    child.meta.manager = "agent-parent";
+    const grandchild = makeAgent("agent-grandchild", "/repos/test");
+    grandchild.state = "running" as any;
+    grandchild.meta.manager = "agent-child";
+    // Build tree
+    parent.children = [child];
+    child.children = [grandchild];
+    const sibling = makeAgent("agent-sibling", "/repos/test");
+    sibling.state = "running" as any;
+    const flatList: FlatAgent[] = [
+      { agent: parent, depth: 0, connector: "" },
+      { agent: child, depth: 1, connector: "├── " },
+      { agent: grandchild, depth: 2, connector: "│   └── " },
+      { agent: sibling, depth: 0, connector: "" },
+    ];
+    dashboard.onUpdate([parent, child, grandchild, sibling], flatList, []);
+
+    // Select parent and reassign
+    dashboard.handleInput("r");
+    const items = (dashboard.dialog as any).allItems as string[];
+    // Should not include child or grandchild (descendants of parent)
+    expect(items).not.toContain("agent-child");
+    expect(items).not.toContain("agent-grandchild");
+    // Should include sibling
+    expect(items).toContain("agent-sibling");
+    expect(items).toContain("(No parent - make root)");
+  });
+
+  test("reassign fuzzy: excludes agents from other repos", () => {
+    dashboard = makeDashboard();
+    lastIbCall = null;
+    setRunner(async (args, cwd) => {
+      lastIbCall = { args, cwd };
+      return { ok: true, exitCode: 0, stdout: "ok", stderr: "" };
+    });
+
+    const agent1 = makeAgent("agent-test", "/repos/test");
+    agent1.state = "running" as any;
+    const otherRepo = makeAgent("agent-other", "/repos/other");
+    otherRepo.state = "running" as any;
+    const flatList: FlatAgent[] = [
+      { agent: agent1, depth: 0, connector: "" },
+      { agent: otherRepo, depth: 0, connector: "" },
+    ];
+    dashboard.onUpdate([agent1, otherRepo], flatList, []);
+
+    dashboard.handleInput("r");
+    const items = (dashboard.dialog as any).allItems as string[];
+    expect(items).not.toContain("agent-other");
   });
 
   test("s key opens send textarea dialog", () => {

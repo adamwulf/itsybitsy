@@ -500,4 +500,12 @@ describe("readAllAgents", () => {
     expect(agents.length).toBe(2);
     expect(agents.map((a) => a.repoName).sort()).toEqual(["repo1", "repo2"]);
   });
+
+  test("returns orphanedTmuxSessions field (empty when no stale sessions)", async () => {
+    const { orphanedTmuxSessions } = await readAllAgents([
+      { path: tempDir1, name: "repo1" },
+    ]);
+    // orphanedTmuxSessions should be an array (may be empty depending on system state)
+    expect(Array.isArray(orphanedTmuxSessions)).toBe(true);
+  });
 });

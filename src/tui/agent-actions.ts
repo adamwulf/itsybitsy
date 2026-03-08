@@ -13,7 +13,7 @@ import {
   acknowledgeQuestion,
 } from "../ib-commands";
 import type { NewAgentOptions } from "../ib-commands";
-import { captureTmuxOutput, resizeTmuxWindow } from "../tmux-poller";
+import { captureTmuxOutput, resizeTmuxWindow, killTmuxSession } from "../tmux-poller";
 import { parseState } from "../parse-state";
 import { openInGhostty } from "../ghostty";
 import { buildFolderItems } from "./folder-browser";
@@ -45,6 +45,7 @@ export interface ActionCtx {
     questionsSelectedIndex: number;
     scrollOffset: number;
     errors: string[];
+    orphanedTmuxSessions: string[];
     updateContent(): void;
   };
   tmuxPane: { scrollUp(n?: number): void; scrollDown(n?: number): void };
@@ -553,6 +554,41 @@ export function handleSnapshot(ctx: ActionCtx) {
     }
   }).catch((err) => {
     ctx.setNotice(`Snapshot error: ${err}`);
+  });
+}
+
+export function handleKillOrphanedSessions(ctx: ActionCtx) {
+  const sessions = ctx.rightPane.orphanedTmuxSessions;
+  if (sessions.length === 0) return;
+  if (sessions.length === 1) {
+    handleKillOrphanedSession(ctx, sessions[0]!);
+    return;
+  }
+  ctx.showDialog({
+    type: "select",
+    prompt: "Kill orphaned tmux session:",
+    items: sessions,
+    selectedIndex: 0,
+    onSelect: (index: number) => {
+      handleKillOrphanedSession(ctx, sessions[index]!);
+    },
+  });
+}
+
+export function handleKillOrphanedSession(ctx: ActionCtx, session: string) {
+  ctx.showDialog({
+    type: "confirm",
+    prompt: `Kill orphaned tmux session "${session}"?`,
+    confirmLabel: "Kill",
+    focusedButton: "cancel",
+    confirmColor: RED,
+    onYes: () => {
+      ctx.closeDialog();
+      ctx.executeAndRefresh(async () => {
+        const ok = await killTmuxSession(session);
+        ctx.setNotice(ok ? `Killed session: ${session}` : `Failed to kill session: ${session}`);
+      });
+    },
   });
 }
 

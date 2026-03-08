@@ -180,7 +180,8 @@ export class RightPaneComponent implements Component {
         const totalErrors = this.errors.length + this.orphanedTmuxSessions.length;
         if (totalErrors === 0) { this.content = [`${DIM}No errors${RESET}`]; }
         else {
-          const hints = ["'c' to clear"];
+          const hints: string[] = [];
+          if (this.errors.length > 0) hints.push("'c' to clear");
           if (this.orphanedTmuxSessions.length > 0) hints.push("Enter to kill orphan");
           this.content = [`${DIM}${totalErrors} error(s) — ${hints.join(", ")}${RESET}`, ""];
           this.content.push(...this.errors);

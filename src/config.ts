@@ -1,0 +1,111 @@
+import { join } from "path";
+import { homedir } from "os";
+
+export type ConfigSource = "project" | "user" | "default";
+export type ConfigType = "number" | "boolean" | "string" | "string[]";
+
+export interface ConfigKeyDef {
+  key: string;
+  type: ConfigType;
+  default: unknown;
+}
+
+export interface ConfigEntry {
+  value: unknown;
+  source: ConfigSource;
+}
+
+export type ConfigResult = Record<string, ConfigEntry>;
+
+export const CONFIG_KEYS: ConfigKeyDef[] = [
+  { key: "maxAgents", type: "number", default: 10 },
+  { key: "model", type: "string", default: "sonnet" },
+  { key: "fps", type: "number", default: 10 },
+  { key: "createPullRequests", type: "boolean", default: false },
+  { key: "allowAgentQuestions", type: "boolean", default: true },
+  { key: "autoCompactThreshold", type: "number", default: undefined },
+  { key: "externalDiffTool", type: "string", default: undefined },
+  { key: "hooks.injectStatus", type: "boolean", default: true },
+  { key: "hooks.statusVisible", type: "boolean", default: true },
+  { key: "permissions.manager.allow", type: "string[]", default: [] },
+  { key: "permissions.manager.deny", type: "string[]", default: [] },
+  { key: "permissions.worker.allow", type: "string[]", default: [] },
+  { key: "permissions.worker.deny", type: "string[]", default: [] },
+];
+
+function getNestedValue(obj: Record<string, unknown>, dotKey: string): unknown {
+  const parts = dotKey.split(".");
+  let current: unknown = obj;
+  for (const part of parts) {
+    if (current == null || typeof current !== "object") return undefined;
+    current = (current as Record<string, unknown>)[part];
+  }
+  return current;
+}
+
+function setNestedValue(obj: Record<string, unknown>, dotKey: string, value: unknown): void {
+  const parts = dotKey.split(".");
+  let current = obj;
+  for (let i = 0; i < parts.length - 1; i++) {
+    const part = parts[i]!;
+    if (current[part] == null || typeof current[part] !== "object") {
+      current[part] = {};
+    }
+    current = current[part] as Record<string, unknown>;
+  }
+  current[parts[parts.length - 1]!] = value;
+}
+
+async function readJsonFile(filePath: string): Promise<Record<string, unknown>> {
+  try {
+    const file = Bun.file(filePath);
+    if (!(await file.exists())) return {};
+    return (await file.json()) as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+}
+
+function userConfigPath(): string {
+  return join(process.env.HOME ?? homedir(), ".ittybitty.json");
+}
+
+function projectConfigPath(repoPath: string): string {
+  return join(repoPath, ".ittybitty.json");
+}
+
+export interface ReadConfigOptions {
+  userConfigPath?: string;
+}
+
+export async function readConfig(repoPath: string, options?: ReadConfigOptions): Promise<ConfigResult> {
+  const projectData = await readJsonFile(projectConfigPath(repoPath));
+  const userPath = options?.userConfigPath ?? userConfigPath();
+  const userData = await readJsonFile(userPath);
+
+  const result: ConfigResult = {};
+
+  for (const def of CONFIG_KEYS) {
+    const projectVal = getNestedValue(projectData, def.key);
+    if (projectVal !== undefined) {
+      result[def.key] = { value: projectVal, source: "project" };
+      continue;
+    }
+
+    const userVal = getNestedValue(userData, def.key);
+    if (userVal !== undefined) {
+      result[def.key] = { value: userVal, source: "user" };
+      continue;
+    }
+
+    result[def.key] = { value: def.default, source: "default" };
+  }
+
+  return result;
+}
+
+export async function writeConfig(filePath: string, key: string, value: unknown): Promise<void> {
+  const data = await readJsonFile(filePath);
+  setNestedValue(data, key, value);
+  await Bun.write(filePath, JSON.stringify(data, null, 2) + "\n");
+}

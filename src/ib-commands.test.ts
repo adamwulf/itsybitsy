@@ -172,20 +172,6 @@ describe("ib-commands", () => {
     });
   });
 
-  test("returns result from runner", async () => {
-    setRunner(async () => ({
-      ok: false,
-      exitCode: 1,
-      stdout: "",
-      stderr: "something broke",
-    }));
-    const agent = makeAgent("agent-abc", "/repos/myproject");
-    const result = await killAgent(agent);
-    expect(result.ok).toBe(false);
-    expect(result.exitCode).toBe(1);
-    expect(result.stderr).toBe("something broke");
-  });
-
   test("pauseAgent passes ['pause', id] with agent's repoPath", async () => {
     const agent = makeAgent("agent-abc", "/repos/myproject");
     await pauseAgent(agent);
@@ -201,6 +187,20 @@ describe("ib-commands", () => {
       args: ["acknowledge", "q-1"],
       cwd: "/repos/myproject",
     });
+  });
+
+  test("returns result from runner", async () => {
+    setRunner(async () => ({
+      ok: false,
+      exitCode: 1,
+      stdout: "",
+      stderr: "something broke",
+    }));
+    const agent = makeAgent("agent-abc", "/repos/myproject");
+    const result = await killAgent(agent);
+    expect(result.ok).toBe(false);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toBe("something broke");
   });
 
   test("cwd always matches agent.repoPath", async () => {

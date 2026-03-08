@@ -3,7 +3,6 @@
  * Each function takes a context object that provides access to dashboard state.
  */
 
-import { visibleWidth } from "@mariozechner/pi-tui";
 import { stat } from "node:fs/promises";
 import type { Agent, FlatAgent, PendingQuestion } from "../agents";
 import type { RepoEntry } from "../registry";
@@ -28,7 +27,6 @@ const RESET = "\x1b[0m";
 const BOLD = "\x1b[1m";
 const DIM = "\x1b[2m";
 const RED = "\x1b[31m";
-const GREEN = "\x1b[32m";
 
 const SCROLL_STEP = 10;
 

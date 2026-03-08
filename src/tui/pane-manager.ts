@@ -110,7 +110,8 @@ export class RightPaneComponent implements Component {
       stateCounts.set(agent.state, (stateCounts.get(agent.state) ?? 0) + 1);
     }
     const lines: string[] = [];
-    lines.push(`${BOLD}▸ ${repoName}${RESET}`);
+    const triangle = repoAgents.length > 0 ? "▾" : "▸";
+    lines.push(`${BOLD}${triangle} ${repoName}${RESET}`);
     lines.push("");
     if (repoAgents.length > 0) {
       lines.push(`${DIM}Path:${RESET} ${repoAgents[0]!.agent.repoPath}`);

@@ -211,14 +211,17 @@ export interface FlatAgent {
   connector: string;
   /** When set, this row is a repo header (shown only in multi-repo mode) */
   repoHeader?: string;
+  /** Whether this repo header has agents under it */
+  repoHasAgents?: boolean;
 }
 
 /**
  * Flatten agent tree into display order (depth-first), with indentation level.
  * Computes box-drawing connector strings (├──, └──, │) for tree display.
- * When repoCount > 1, inserts non-selectable repo header rows and groups agents under them.
+ * When repoNames has > 1 entry, inserts repo header rows and groups agents under them.
+ * Empty repos (in repoNames but with no agents) get a header with repoHasAgents=false.
  */
-export function flattenAgentTree(roots: Agent[], repoCount = 1): FlatAgent[] {
+export function flattenAgentTree(roots: Agent[], repoNames: string[] | number = 1): FlatAgent[] {
   const result: FlatAgent[] = [];
 
   function walk(agent: Agent, depth: number, ancestorIsLast: boolean[]) {
@@ -244,6 +247,10 @@ export function flattenAgentTree(roots: Agent[], repoCount = 1): FlatAgent[] {
 
   const nonArchivedRoots = roots.filter((r) => !r.archived);
 
+  // Normalize: accept number for backward compat, or string[] for repo names
+  const repoCount = Array.isArray(repoNames) ? repoNames.length : repoNames;
+  const allRepoNames = Array.isArray(repoNames) ? repoNames : null;
+
   if (repoCount > 1) {
     // Group roots by repo name
     const repoGroups = new Map<string, Agent[]>();
@@ -253,13 +260,38 @@ export function flattenAgentTree(roots: Agent[], repoCount = 1): FlatAgent[] {
       repoGroups.set(agent.repoName, group);
     }
 
-    for (const [repoName, agents] of repoGroups) {
-      // Insert repo header row (uses first agent as placeholder, marked with repoHeader)
-      result.push({ agent: agents[0]!, depth: 0, connector: "", repoHeader: repoName });
-      // Each root agent under this repo gets ├── or └── connector
-      for (let i = 0; i < agents.length; i++) {
-        const isLast = i === agents.length - 1;
-        walk(agents[i]!, 0, [isLast]);
+    // Collect all repo names: from agents + from allRepoNames (for empty repos)
+    const allNames = new Set<string>(repoGroups.keys());
+    if (allRepoNames) {
+      for (const name of allRepoNames) allNames.add(name);
+    }
+
+    // Sort alphabetically
+    const sortedNames = [...allNames].sort((a, b) => a.localeCompare(b));
+
+    for (const repoName of sortedNames) {
+      const agents = repoGroups.get(repoName);
+      if (agents && agents.length > 0) {
+        // Repo with agents — use first agent as placeholder
+        result.push({ agent: agents[0]!, depth: 0, connector: "", repoHeader: repoName, repoHasAgents: true });
+        for (let i = 0; i < agents.length; i++) {
+          const isLast = i === agents.length - 1;
+          walk(agents[i]!, 0, [isLast]);
+        }
+      } else {
+        // Empty repo — create a minimal dummy agent for the header
+        const dummyAgent: Agent = {
+          id: `__repo_${repoName}`,
+          repoPath: "",
+          repoName,
+          meta: { id: "", session_id: "", tmux_session: "", prompt: "", model: "", worker: false, manager: "", created_epoch: 0, created: "", worktree: false, yolo: false, claude_pid: "" },
+          state: "unknown",
+          age: "",
+          children: [],
+          archived: false,
+          orphaned: false,
+        };
+        result.push({ agent: dummyAgent, depth: 0, connector: "", repoHeader: repoName, repoHasAgents: false });
       }
     }
   } else {

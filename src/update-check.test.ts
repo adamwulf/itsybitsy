@@ -1,12 +1,10 @@
-import { test, expect, describe, beforeEach, afterEach } from "bun:test";
+import { test, expect, describe, afterEach } from "bun:test";
 import {
   compareVersions,
   checkForUpdate,
-  getUpdateAvailable,
   startUpdateChecker,
   stopUpdateChecker,
   setTestFetch,
-  setTestVersion,
   resetTestOverrides,
 } from "./update-check";
 
@@ -111,17 +109,50 @@ describe("startUpdateChecker / stopUpdateChecker", () => {
     resetTestOverrides();
   });
 
-  test("getUpdateAvailable returns null before any check", () => {
-    expect(getUpdateAvailable()).toBeNull();
+  test("calls onResult callback with update version after timer fires", async () => {
+    setTestFetch(async () =>
+      new Response(JSON.stringify({ version: "5.0.0" }), { status: 200 })
+    );
+
+    const results: (string | null)[] = [];
+    // Use 0ms initial delay by starting checker, then manually triggering
+    startUpdateChecker("1.0.0", (version) => {
+      results.push(version);
+    });
+
+    // Wait for the 2s startup delay + fetch to complete
+    await new Promise((resolve) => setTimeout(resolve, 2_500));
+
+    expect(results.length).toBeGreaterThanOrEqual(1);
+    expect(results[0]).toBe("v5.0.0");
   });
 
-  test("stopUpdateChecker resets cached result", async () => {
-    setTestFetch(async () =>
-      new Response(JSON.stringify({ version: "9.9.9" }), { status: 200 })
+  test("onResult callback not called after stopUpdateChecker", async () => {
+    let fetchDelay: ReturnType<typeof setTimeout>;
+    setTestFetch(() =>
+      new Promise<Response>((resolve) => {
+        // Delay the response so we can stop before it resolves
+        fetchDelay = setTimeout(() => {
+          resolve(new Response(JSON.stringify({ version: "5.0.0" }), { status: 200 }));
+        }, 500);
+      })
     );
-    const result = await checkForUpdate("1.0.0");
-    expect(result).toBe("v9.9.9");
+
+    const results: (string | null)[] = [];
+    startUpdateChecker("1.0.0", (version) => {
+      results.push(version);
+    });
+
+    // Wait for the 2s startup delay so doCheck starts
+    await new Promise((resolve) => setTimeout(resolve, 2_200));
+
+    // Stop while fetch is in flight
     stopUpdateChecker();
-    expect(getUpdateAvailable()).toBeNull();
+
+    // Wait for the delayed fetch to resolve
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+
+    // Callback should not have been called since we stopped
+    expect(results.length).toBe(0);
   });
 });

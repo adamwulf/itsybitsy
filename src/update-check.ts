@@ -12,19 +12,13 @@ type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<
 
 /** For test injection */
 let fetchFn: FetchLike = globalThis.fetch;
-let currentVersionFn: () => string = () => "";
 
 export function setTestFetch(fn: FetchLike): void {
   fetchFn = fn;
 }
 
-export function setTestVersion(version: string): void {
-  currentVersionFn = () => version;
-}
-
 export function resetTestOverrides(): void {
   fetchFn = globalThis.fetch;
-  currentVersionFn = () => "";
 }
 
 /**
@@ -43,19 +37,13 @@ export function compareVersions(a: string, b: string): number {
   return 0;
 }
 
-/** Cached result: 'vX.X.X' if newer exists, null otherwise */
-let cachedResult: string | null = null;
 let lastCheckTime = 0;
 let timerHandle: ReturnType<typeof setTimeout> | null = null;
-
-/** Get the cached update result (non-blocking). */
-export function getUpdateAvailable(): string | null {
-  return cachedResult;
-}
+let stopped = false;
 
 /**
  * Perform a single check against the npm registry.
- * Sets cachedResult to 'vX.X.X' if a newer version exists.
+ * Returns 'vX.X.X' if a newer version exists, null otherwise.
  */
 export async function checkForUpdate(currentVersion: string): Promise<string | null> {
   if (!currentVersion) return null;
@@ -83,14 +71,14 @@ export async function checkForUpdate(currentVersion: string): Promise<string | n
  */
 export function startUpdateChecker(currentVersion: string, onResult: (version: string | null) => void): void {
   stopUpdateChecker();
-  currentVersionFn = () => currentVersion;
+  stopped = false;
 
   const doCheck = async () => {
     const now = Date.now();
     if (now - lastCheckTime < CHECK_INTERVAL_MS && lastCheckTime > 0) return;
     lastCheckTime = now;
-    const result = await checkForUpdate(currentVersionFn());
-    cachedResult = result;
+    const result = await checkForUpdate(currentVersion);
+    if (stopped) return;
     onResult(result);
   };
 
@@ -104,11 +92,11 @@ export function startUpdateChecker(currentVersion: string, onResult: (version: s
 
 /** Stop the background checker. */
 export function stopUpdateChecker(): void {
+  stopped = true;
   if (timerHandle !== null) {
     clearTimeout(timerHandle);
     clearInterval(timerHandle);
     timerHandle = null;
   }
-  cachedResult = null;
   lastCheckTime = 0;
 }

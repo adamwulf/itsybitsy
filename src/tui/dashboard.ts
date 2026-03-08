@@ -28,7 +28,7 @@ import type { Agent, FlatAgent, PendingQuestion } from "../agents";
 import { SplitPane } from "./split-pane";
 import { wrapLines } from "./wrap";
 import { fetchUsage } from "../usage";
-import { startUpdateChecker, stopUpdateChecker, getUpdateAvailable } from "../update-check";
+import { startUpdateChecker, stopUpdateChecker } from "../update-check";
 import type { UsageData } from "../usage";
 import { getStateColors, setupColorSchemeDetection } from "./color-scheme";
 import { AgentTreeComponent } from "./agent-tree";

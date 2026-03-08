@@ -261,7 +261,7 @@ export class RightPaneComponent implements Component {
       start = Math.max(0, this.content.length - available - this.scrollOffset);
     }
     const visible = this.content.slice(start, start + available);
-    if (this.mode === "QUESTIONS" || this.mode === "AGENT LOG" || this.mode === "INITIAL PROMPT") {
+    if (this.mode === "QUESTIONS" || this.mode === "AGENT LOG" || this.mode === "INITIAL PROMPT" || this.mode === "ERRORS") {
       for (const line of visible) {
         if (lines.length >= this.displayHeight) break;
         const isQ = this.mode === "QUESTIONS";

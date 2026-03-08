@@ -477,10 +477,20 @@ export class DashboardComponent implements Component {
     this.statusBar.version = version;
   }
 
-  /** Add an error to the errors list (called from watcher onError) */
+  /** Add an error to the errors list (called from watcher onError).
+   *  Deduplicates: if the same message already exists, updates its timestamp instead of adding a new entry. */
   addError(message: string) {
     const ts = new Date().toLocaleTimeString();
-    this.rightPane.errors.push(`${DIM}[${ts}]${RESET} ${message}`);
+    // Check if this message already exists (ignoring timestamp prefix).
+    // Match against the RESET+space separator to avoid false suffix matches.
+    const suffix = `${RESET} ${message}`;
+    const existingIndex = this.rightPane.errors.findIndex((e) => e.endsWith(suffix));
+    if (existingIndex !== -1) {
+      // Update the timestamp on the existing error
+      this.rightPane.errors[existingIndex] = `${DIM}[${ts}]${RESET} ${message}`;
+    } else {
+      this.rightPane.errors.push(`${DIM}[${ts}]${RESET} ${message}`);
+    }
     this.statusBar.errorCount = this.rightPane.errors.length + this.rightPane.orphanedTmuxSessions.length;
     this.rightPane.updateContent();
     this.tui?.requestRender();

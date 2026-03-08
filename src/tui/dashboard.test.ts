@@ -1672,6 +1672,13 @@ describe("Minimum terminal size (G-11)", () => {
     expect(stripAnsi(lines[0]!)).toContain("Terminal too small");
   });
 
+  test("renders normally at exactly 80x20 (boundary)", () => {
+    Object.defineProperty(process.stdout, "rows", { value: 20, writable: true, configurable: true });
+    const lines = dashboard.render(80);
+    expect(lines.length).toBeGreaterThan(1);
+    expect(stripAnsi(lines[0]!)).toContain("itsybitsy");
+  });
+
   test("renders normally when terminal is large enough", () => {
     Object.defineProperty(process.stdout, "rows", { value: 30, writable: true, configurable: true });
     const lines = dashboard.render(100);

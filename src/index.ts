@@ -67,7 +67,7 @@ async function main() {
       }
       await detectAgentStates(agents);
       const roots = buildAgentTree(agents);
-      const flat = flattenAgentTree(roots);
+      const flat = flattenAgentTree(roots, repos.map((r) => r.name));
       if (flat.length === 0) {
         console.log("No agents found across registered repos.");
       } else {

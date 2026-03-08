@@ -245,7 +245,8 @@ export class AgentTreeComponent implements Component {
       const item = visible[i]!;
       if (item.repoHeader) {
         const selected = i === this.selectedIndex && !this.suppressSelection;
-        const truncated = truncateToWidth(`${BOLD}▸ ${item.repoHeader}${RESET}`, width, "");
+        const triangle = item.repoHasAgents ? "▾" : "▸";
+        const truncated = truncateToWidth(`${BOLD}${triangle} ${item.repoHeader}${RESET}`, width, "");
         if (selected) {
           const pad = Math.max(0, width - visibleWidth(truncated));
           const highlighted = truncated.replaceAll(RESET, RESET + REVERSE);

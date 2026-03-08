@@ -24,7 +24,7 @@ This is a **full daily-driver replacement for `ib watch`**, extended to span mul
 
 - No web/browser UI
 - Cross-repo agent messaging (v2 — see below)
-- `ib watchdog` — the TUI's live state detection replaces the need for watchdog notifications
+- `ib watchdog` — Phase 13 adds a built-in watchdog to itsybitsy. Until then, agents spawned via `ib new-agent` get their own bash watchdog automatically
 - `ib ask` — agents asking the user a question is surfaced via `user-questions.json`; no need to shell to `ib ask` directly from itsybitsy
 - `ib info` — meta.json is read directly; raw field inspection available as a debug view (`i` keybinding, low priority)
 - `ib config` — itsybitsy reads `.ittybitty.json` directly rather than shelling to `ib config`
@@ -462,61 +462,199 @@ Deep analysis of `ib watch` (bash, ~8200 lines) vs itsybitsy (TypeScript) produc
 
 ---
 
-### Phase 8: ib watch Parity — P1
+### Phase 8: Quick Wins — Commands & State Detection
+**Checkpoint:** `!` (nuke) correctly kills descendants, `a` (new-agent) wires up manager hierarchy, `P` pauses agents, dead-agent questions filtered, `creating` state detected more reliably, state detection capture depth matches ib.
 
-Remaining parity gaps from `research/parity-check-ux.md` (G-01–G-16) and `research/parity-check-logic.md`. All are low–medium complexity.
+These are small, isolated changes — each is a few lines, low risk, and independently testable.
 
-A single coordinator can parallelize **Phase 8A** and **Phase 8B** simultaneously (they own different files), then run **Phase 8C** after both are merged (it touches the same files as 8B), then **Phase 8D** last.
+**Command fixes:**
+- [ ] **Fix `nukeAgent()` to use `ib nuke`** (`src/ib-commands.ts`) — change from `ib kill {id} --force` to `ib nuke {id} --force` so that `!` recursively kills the agent AND all its descendants. Update tests.
+- [ ] **Add nuke-all capability** (`src/ib-commands.ts`, `src/tui/dashboard.ts`) — add `nukeAllAgents(repoPath)` that calls `ib nuke --force` (no ID = kill all agents in repo). In the dashboard, when `!` is pressed with no agent selected, show confirm dialog for nuke-all. This is the emergency stop feature.
+- [ ] **Add `--manager` flag to `newAgent()`** (`src/ib-commands.ts`, `src/tui/dashboard.ts`) — add `manager?: string` to `NewAgentOptions`. In the new-agent dialog, if an agent is currently selected and is a manager (not a worker), auto-pass `--manager {selected.id}` to `ib new-agent`. This is critical for correct agent hierarchy when spawning from the TUI.
+- [ ] **Dead-agent question filtering** (`src/agents.ts`) — in `readPendingQuestions()`, after reading `user-questions.json`, filter out questions whose `agent` ID does not exist in the current `.ittybitty/agents/` directory. Matches ib's `cmd_questions()` which skips dead agents.
+- [ ] **Pause agent (`P` key)** (`src/ib-commands.ts`, `src/tui/dashboard.ts`) — add `pauseAgent(repoPath, id)` that calls `ib pause {id}`. Add `P` keybinding in dashboard with confirm dialog. Only enabled for running/waiting agents (not already stopped). After pause, agent shows as "stopped" and can be resumed with `R`.
 
----
-
-#### Phase 8A: Logic & Data Layer (parallelizable with 8B)
-
-Files: `src/parse-state.ts`, `src/agents.ts`, `src/tmux-poller.ts` — no dashboard.ts changes.
-
-- [ ] **G-12 / Logic-1.2: `compute_state_from_content` wrapper** (`src/agents.ts:234`) — wrap `parseState()` call in `detectAgentStates()` with a pre-check: count non-empty lines; if < 10 and no Claude startup markers found → return `"creating"` instead of delegating to `parseState()`
-- [ ] **Logic-1.3: Missing startup indicators** (`src/parse-state.ts:61`) — add `"╭─ Claude Code"` and `"[AGENT CONTEXT]"` to the creating-state startup check (worker agents inject `[AGENT CONTEXT]` before `Claude Code v` appears)
-- [ ] **Logic-2.3: State detection capture depth** (`src/tmux-poller.ts:89`) — increase `captureTmuxOutput()` default from 100 to 500 lines to match ib's capture depth for state detection
-- [ ] **G-06 part 1: `orphaned` flag on Agent** (`src/agents.ts:158`) — in `buildAgentTree()`, when `agent.meta.manager` is set but not found in `byId`, set `agent.orphaned = true`; add `orphaned?: boolean` to `Agent` type
-
----
-
-#### Phase 8B: Dashboard UX & Control Flow (parallelizable with 8A)
-
-Files: `src/tui/dashboard.ts` — control flow, navigation, status bar. No rendering changes.
-
-- [ ] **G-03: Pane cycling skips empty panes** (`src/tui/dashboard.ts:1584`) — in `cyclePaneMode()`, after computing next mode: if ERRORS mode and `errors.length === 0`, skip; if QUESTIONS mode and `questions.length === 0`, skip; handle wrap-around
-- [ ] **G-07: Error count badge in footer** (`src/tui/dashboard.ts:505`) — add `errorCount` to `StatusBarComponent`; show red `[N errors]` badge next to question badge when `errorCount > 0`; `addError()` increments, `clearErrors()` resets
-- [ ] **G-10: Terminal title** (`src/tui/dashboard.ts` — `syncSelectedAgent()`) — emit `\x1b]0;itsybitsy: ${agentId}\x07` on agent selection change; emit `\x1b]0;itsybitsy\x07` when no agent selected
-- [ ] **G-11: Minimum terminal size** (`src/tui/dashboard.ts:1765`) — at top of `render()`, if `process.stdout.rows < 20 || width < 80`, render a single warning line and return early
+**State detection fixes:**
+- [ ] **Missing startup indicators** (`src/parse-state.ts`) — add `"╭─ Claude Code"` and `"[AGENT CONTEXT]"` to the creating-state startup check alongside `"Claude Code v"`. Worker agents inject `[AGENT CONTEXT]` before `Claude Code v` appears; `╭─ Claude Code` is the box-drawing header variant.
+- [ ] **State detection capture depth** (`src/tmux-poller.ts`) — increase `captureTmuxOutput()` default from 100 to 500 lines to match ib's capture depth for state detection. The display poller already uses 500 lines; this aligns the state-detection one-shot calls used by `detectAgentStates()`.
+- [ ] **`compute_state_from_content` pre-check** (`src/agents.ts`) — in `detectAgentStates()`, before calling `parseState()`, count non-empty lines in the captured output. If < 10 lines AND none of the startup markers (`"Claude Code v"`, `"╭─ Claude Code"`, `"[AGENT CONTEXT]"`) are found, return `"creating"` directly instead of delegating to `parseState()`. This matches ib's `compute_state_from_content()` wrapper.
 
 ---
 
-#### Phase 8C: Dashboard Rendering (sequential — after 8A and 8B merged)
+### Phase 9: Dashboard UX — Control Flow & Footer
+**Checkpoint:** Pane cycling skips empty panes, footer shows error count, terminal title updates, small terminals show a warning, update notifications appear.
 
-Files: `src/tui/dashboard.ts` — render paths. Depends on `agent.orphaned` flag from Phase 8A.
+All changes in `src/tui/dashboard.ts` — control flow and status bar only, no rendering changes.
 
-- [ ] **G-04: Diff colorization** (`src/tui/dashboard.ts:1541`) — post-process `diffContent` lines: `+` lines (not `+++`) → green `\x1b[32m`; `-` lines (not `---`) → red `\x1b[31m`; `@@`/`---`/`+++`/`diff ` lines → dim `\x1b[2m`
-- [ ] **G-05: Agent log colorization** (`src/tui/dashboard.ts:1513`) — in `loadAgentLog()`, apply: dim `\x1b[2m` ISO timestamp prefix (`\d{4}-\d{2}-\d{2}T` or `[2026-`); cyan `\x1b[36m` for `[bracket]` markers; reset after each
-- [ ] **G-08: Scroll direction for top-anchored panes** (`src/tui/dashboard.ts:370`) — define `TOP_ANCHORED_MODES = new Set(["DIFF", "ERRORS", "STATUS", "QUESTIONS"])`; in `RightPaneComponent.render()`, branch: top-anchored uses `scrollOffset` as start index from top; bottom-anchored keeps existing behavior
-- [ ] **G-09: TREE pane prompt column** (`src/tui/dashboard.ts:308`) — append truncated prompt to each TREE row: `agent.meta.prompt.replace(/\n/g, " ").slice(0, 40)`, respecting available width
-- [ ] **G-06 part 2: Orphaned worker indicator** (`src/tui/dashboard.ts:133`) — in `formatAgentRow()`, prepend `⚠ ` when `agent.orphaned === true`
-
----
-
-#### Phase 8D: P2 Polish (sequential — after 8A/8B/8C all merged)
-
-Low-impact quality-of-life improvements. Can be split across 2–3 parallel workers.
-
-- [ ] **G-13: Scroll step size** (`src/tui/dashboard.ts:1178`) — change scroll step constant from `5` to `10` lines to match ib watch; extract as `const SCROLL_STEP = 10`
-- [ ] **G-14: Denial filter intervals** (`src/tui/dashboard.ts:120`) — change `DENIAL_FILTERS` from `["all", "1h", "10m"]` to `["all", "24h", "7d"]`; update `filterDenials()` cutoff math accordingly
-- [ ] **G-15: Tree connector style** (`src/tui/dashboard.ts:139`) — replace `"  ".repeat(depth) + "↳ "` with box-drawing connectors (`├── `, `└── `, `│   `); requires threading `isLastChild` flag through `flattenAgentTree()` → `FlatAgent` type → `formatAgentRow()`
+- [ ] **Pane cycling skips empty panes (G-03)** — in `cyclePaneMode()`, after computing next mode: if ERRORS mode and `errors.length === 0`, skip; if QUESTIONS mode and `questions.length === 0`, skip. Handle wrap-around (don't infinite-loop if all skippable).
+- [ ] **Error count badge in footer (G-07)** — add `errorCount` to `StatusBarComponent`. Show red `[N errors]` badge next to the question badge when `errorCount > 0`. `addError()` increments, `clearErrors()` resets.
+- [ ] **Terminal title (G-10)** — emit `\x1b]0;itsybitsy: ${agentId}\x07` on agent selection change. Emit `\x1b]0;itsybitsy\x07` when no agent is selected or on exit.
+- [ ] **Minimum terminal size (G-11)** — at top of `render()`, if `process.stdout.rows < 20 || width < 80`, render a single warning line ("Terminal too small — need at least 80x20") and return early.
+- [ ] **Scroll step size (G-13)** — change scroll step constant from `5` to `10` lines to match ib watch. Extract as `const SCROLL_STEP = 10`.
+- [ ] **Denial filter intervals (G-14)** — change `DENIAL_FILTERS` from `["all", "1h", "10m"]` to `["all", "24h", "7d"]`. Update `filterDenials()` cutoff math accordingly.
+- [ ] **Update notification** (`src/update-check.ts`, `src/tui/dashboard.ts`) — new module: check for updates once per hour by reading the `version` field from `package.json` (current version) and comparing against the latest version from the npm registry (`https://registry.npmjs.org/itsybitsy/latest`). Show "Update available: vX.X.X" in the dashboard header row if newer version exists. Fetch in background via `setTimeout`, never delay startup or block rendering.
 
 ---
 
-### Phase 9 (v2): Cross-Repo Messaging
+### Phase 10: Dashboard Rendering — Colorization & Layout
+**Checkpoint:** Diff output is colorized, agent log has syntax highlighting, top-anchored panes scroll correctly, TREE shows prompts, orphaned agents and tmux sessions are detected and marked.
+
+Changes in `src/tui/dashboard.ts` render paths + `src/agents.ts` for orphan flags.
+
+**Orphan detection (agents with missing managers):**
+- [ ] **Orphaned flag on Agent (G-06 part 1)** (`src/agents.ts`) — add `orphaned?: boolean` to `Agent` type. In `buildAgentTree()`, when `agent.meta.manager` is set but not found in `byId`, set `agent.orphaned = true`. Note: this is distinct from orphaned tmux sessions (below) — this flags agents whose parent manager was killed/archived.
+- [ ] **Orphaned agent indicator (G-06 part 2)** (`src/tui/dashboard.ts`) — in `formatAgentRow()`, prepend `⚠ ` when `agent.orphaned === true`.
+
+**Orphan tmux session detection:**
+- [ ] **Detect orphaned tmux sessions** (`src/agents.ts` or `src/tmux-poller.ts`) — after reading all agents, run `tmux list-sessions -F "#{session_name}"` and filter for sessions matching `ittybitty-{repo-id}-*`. Compare against known agent tmux session names. Sessions without matching agent data are stale orphans. Return as a separate list alongside agents.
+- [ ] **Display orphan tmux warnings** (`src/tui/dashboard.ts`) — show orphaned tmux sessions in the ERRORS pane with a message like "Orphaned tmux session: {session_name} (no matching agent)". Add a count to the error badge in footer.
+- [ ] **Orphan cleanup** (`src/tui/dashboard.ts`) — when viewing an orphan error, offer to kill the tmux session via confirm dialog (runs `tmux kill-session -t {session}`).
+
+**Colorization:**
+- [ ] **Diff colorization (G-04)** — post-process `diffContent` lines: `+` lines (not `+++`) get green `\x1b[32m`; `-` lines (not `---`) get red `\x1b[31m`; `@@`/`---`/`+++`/`diff ` lines get dim `\x1b[2m`. Reset `\x1b[0m` at end of each colored line.
+- [ ] **Agent log colorization (G-05)** — in `loadAgentLog()` post-processing, apply: dim `\x1b[2m` to ISO timestamp prefixes (`\d{4}-\d{2}-\d{2}T` or `[2026-` patterns); cyan `\x1b[36m` for `[bracket]` markers. Reset after each.
+
+**Layout:**
+- [ ] **Scroll direction for top-anchored panes (G-08)** — define `TOP_ANCHORED_MODES = new Set(["DIFF", "ERRORS", "STATUS", "QUESTIONS"])`. In `RightPaneComponent.render()`, branch: top-anchored uses `scrollOffset` as start index from top (slice forward); bottom-anchored keeps existing scroll-back-from-bottom behavior.
+- [ ] **TREE pane prompt column (G-09)** — append truncated prompt to each TREE row: `agent.meta.prompt.replace(/\n/g, " ").slice(0, 40)`, respecting available width after agent ID, state, age, and model columns.
+
+---
+
+### Phase 11: Dialog Improvements
+**Checkpoint:** Reassign uses a proper select list, send dialog supports broadcast to all agents.
+
+Changes in `src/tui/dashboard.ts` dialog handling.
+
+- [ ] **Reassign select list** — replace the free-text input dialog for `r` (reassign) with a select list showing all valid managers (non-worker agents) plus a "(No parent - make root)" option. Filter out the agent being reassigned and its descendants (circular dependency prevention). Use the existing fuzzy select dialog infrastructure.
+- [ ] **Send-to-all toggle** — in the `s` (send) dialog, add an `a` key toggle for "send to all alive agents." When toggled on, show `[ALL]` indicator in the dialog. On confirm, iterate all non-archived agents with active tmux sessions and call `sendMessage()` for each.
+
+---
+
+### Phase 12A: Setup Dialog — Hooks & Status (Tab 0)
+**Checkpoint:** `h` key opens a setup dialog showing hooks installation status with toggles. `?` key shows the read-only help overlay (moved from `h`).
+
+This is the first half of the setup dialog — Tab 0 only. Self-contained and simpler than config editing.
+
+Files: `src/tui/dashboard.ts`, new `src/config.ts` for config reading utilities.
+
+**Prerequisites:**
+- Move the current `h` help overlay to `?` key. Update the help text and keybinding reference.
+- Reassign `h` to open the setup dialog.
+
+**Tab 0 — Setup:**
+- [ ] **Hooks status display** — call `ib hooks status` (returns lines like `safety-hooks: installed` or `safety-hooks: not installed`). Parse output by splitting on `:` to get hook name and status. Render as a select list of rows, each showing hook name + installed/not-installed badge.
+- [ ] **Hooks toggle** — `Enter` on a hook row calls `ib hooks install` / `ib hooks uninstall` (or `install-intercept` / `uninstall-intercept` for task interception). Refresh status after toggle.
+- [ ] **Status indicators** — show read-only status rows for: `.gitignore` contains `.ittybitty` (check via `Bun.file("{repo}/.gitignore").text()` and search for `.ittybitty`), `.ittybitty.json` exists (check via `Bun.file("{repo}/.ittybitty.json").exists()`), current `externalDiffTool` value.
+- [ ] **External diff tool editing** — `Enter` on the diff tool row opens a text input dialog (using existing `input` dialog type) to set/change the value. Write to `.ittybitty.json`.
+
+**Dialog behavior:**
+- Dialog captures all keyboard input while open (existing dialog infrastructure already does this — dialogs intercept `handleInput` before dashboard keys).
+- `Escape` dismisses.
+- Tab 0 is the only tab in this phase — tab switching UI is added in Phase 12B.
+
+---
+
+### Phase 12B: Setup Dialog — Config Editing (Tabs 1 & 2)
+**Checkpoint:** Setup dialog has three tabs: Setup (Tab 0 from 12A), Project Settings, User Settings. Config values can be viewed and edited.
+
+Files: `src/tui/dashboard.ts`, `src/config.ts`.
+
+**`src/config.ts` module:**
+- [ ] `readConfig(repoPath)` — read `.ittybitty.json` from repo, merge with `~/.ittybitty.json` (user), apply defaults. Return `{ value, source: "project" | "user" | "default" }` for each key.
+- [ ] `writeConfig(filePath, key, value)` — read JSON, set key (supports dot-notation like `hooks.injectStatus`), write back.
+- [ ] Config key definitions with types: `{ key: string, type: "number" | "boolean" | "string" | "string[]", default: any }`. Full list: `maxAgents` (number, 10), `model` (string, "sonnet"), `fps` (number, 10), `createPullRequests` (boolean, false), `allowAgentQuestions` (boolean, true), `autoCompactThreshold` (number, none), `externalDiffTool` (string, none), `hooks.injectStatus` (boolean, true), `hooks.statusVisible` (boolean, true), `permissions.manager.allow` (string[], []), `permissions.manager.deny` (string[], []), `permissions.worker.allow` (string[], []), `permissions.worker.deny` (string[], []).
+
+**Tab switching:**
+- [ ] Add tab bar at top of setup dialog: `[Setup] [Project] [User]`. Active tab is highlighted.
+- [ ] Switch tabs via `1`/`2`/`3` number keys. Left/right arrows also cycle tabs (these keys are free inside the dialog since dialogs capture all input).
+
+**Tab 1 — Project Settings** (`.ittybitty.json`):
+- [ ] Render config keys as a select list. Each row: `key: value (source)`.
+- [ ] `Enter` on a row opens the appropriate editor based on type:
+  - `number` → existing `input` dialog, validate numeric input
+  - `boolean` → toggle immediately (no sub-dialog), re-render
+  - `string` → existing `input` dialog
+  - `string[]` → existing `select` dialog with options: "Add item" (opens `input`), "Remove item" (shows items as select list), "Back"
+- [ ] Write changes via `writeConfig()`.
+
+**Tab 2 — User Settings** (`~/.ittybitty.json`):
+- [ ] Same rendering and editing as Tab 1, but reads/writes `~/.ittybitty.json`.
+
+---
+
+### Phase 13: Built-in Watchdog
+**Checkpoint:** itsybitsy monitors all agents in-process, notifying managers of state changes, auto-compacting, and handling rate limits.
+
+New file: `src/watchdog.ts`. This is the highest-complexity feature but also the highest-value for multi-agent reliability.
+
+**Coexistence with bash watchdog:** Agents spawned via `ib new-agent` (which itsybitsy uses) automatically get a bash watchdog (`ib watchdog {id}` in background). The two watchdogs will coexist — both send notifications to managers, and duplicate notifications are harmless (managers already handle repeated messages). Long-term, if ib adds a `--no-watchdog` flag to `ib new-agent`, itsybitsy should pass it. For now, accept the duplication. Update the "Explicit Non-Goals" section to remove the `ib watchdog` line and note that Phase 13 replaces it.
+
+**Core loop:**
+- [ ] Run every 5 seconds (matching ib's watchdog poll interval) via `setInterval`.
+- [ ] Track `previousState: Map<string, AgentState>` for all agents across all repos.
+- [ ] On state transition, trigger the appropriate handler (see below).
+- [ ] Consume agent state from `watcher.ts` (register a callback or read cached state) — no duplicate tmux captures.
+
+**State handlers:**
+- [ ] `waiting` / `unknown` → increment wait counter. After threshold, send notification to manager via `ib send {manager} "[watchdog]: Your subtask {id} recently started waiting for input"`. Use exponential backoff: 30s → 1m → 2m → 4m → 8m → 16m → 32m → 64m cap.
+- [ ] `complete` → send one-time notification to manager: `"[watchdog]: Your subtask {id} recently completed"`. Track `completionNotified` flag; clear on resume.
+- [ ] `running` / `creating` / `compacting` → reset wait counter and backoff interval. Clear completion flag if agent resumed.
+- [ ] `rate_limited` → bypass the rate limit dialog by sending Enter to the tmux session: `tmux send-keys -t {tmux_session} Enter`. Check usage API (already in `usage.ts`). When session usage drops below 10%, send nudge to agent via `ib send`.
+- [ ] `stopped` → reset counters, no notification.
+
+**Auto-compact:**
+- [ ] Read `autoCompactThreshold` from `.ittybitty.json` config (via `src/config.ts` from Phase 12B, or read directly if Phase 12B isn't done yet).
+- [ ] Read agent context usage % from the Claude transcript file. Path pattern: `~/.claude/projects/{path-hash}/transcript.jsonl` where `{path-hash}` is the agent's worktree path with `/` replaced by `-`. Each line is a JSON object; look for `"type": "summary"` entries with a `"contextPercentage"` or `"costSoFar"` field. Port the parsing logic from ib's `get_agent_context_usage()` function (around line ~3200 in ib) which reads the last summary entry.
+- [ ] When usage % exceeds threshold, send `/compact` to agent's tmux session via `tmux send-keys -t {session} "/compact" Enter`.
+- [ ] Track `compactSent` flag per agent to avoid duplicate sends; clear when context drops below threshold or agent resumes.
+
+**Dashboard integration:**
+- [ ] Watchdog starts automatically with `itsybitsy watch`.
+- [ ] Show `[watchdog]` indicator in footer when watchdog is active.
+
+---
+
+### Phase 14 (v2): Cross-Repo Messaging
 **Checkpoint:** An agent in repo A can send a message to an agent in repo B from within itsybitsy.
 
-- [ ] Design message broker protocol (itsybitsy writes to destination `.ittybitty/` in `ib send` format)
-- [ ] `E` keybinding — cross-repo send: pick destination repo + agent, enter message (`e` lowercase is ERRORS pane, `x` is kill-agent)
+**Protocol:** itsybitsy acts as a message broker. To send a message from agent A (repo X) to agent B (repo Y):
+1. Look up agent B's tmux session from its `meta.json`
+2. Call `sendMessage(repoY, agentB.id, message)` which shells to `ib send {id} "{message}"` with `cwd` set to repo Y
+
+No new file format needed — reuses existing `ib send` infrastructure.
+
+**Dialog flow for `E` key:**
+- [ ] Step 1: Select destination repo (select list from registry, exclude current repo if only one agent)
+- [ ] Step 2: Select destination agent (select list of non-archived agents in chosen repo)
+- [ ] Step 3: Enter message (text input dialog)
+- [ ] Execute: call `sendMessage()` with the destination repo's path
 - [ ] No changes required to `ib` itself
+
+---
+
+### Phase 15 (future): Decoupled Agent Storage
+
+**Status:** Aspirational / longer-term architectural change. Not yet planned for implementation.
+
+**Current behavior:** itsybitsy reads agent data from `{repo}/.ittybitty/agents/` — the same directory structure that `ib` uses. This means itsybitsy and ib share agent state seamlessly.
+
+**Proposed change:** When itsybitsy spawns new agents (via `ib new-agent`), store agent metadata files in `~/.itsybitsy/{repo-name}/agents/` instead of `{repo}/.ittybitty/agents/`.
+
+**Motivation:**
+- Decouples itsybitsy's agent data from the ib directory structure — itsybitsy could evolve its metadata format independently.
+- Keeps agent data out of the repo tree entirely — no `.gitignore` management, no accidental commits.
+- Enables itsybitsy-specific metadata (cross-repo references, custom tags, UI state) without polluting ib's directory.
+- Centralizes all itsybitsy state under `~/.itsybitsy/` (alongside the existing `~/.itsybitsy.json` registry).
+- Note: none of these benefits are currently blocking — they are speculative advantages for future flexibility.
+
+**Tradeoffs:**
+- **Breaks compatibility with plain `ib` commands.** If agent files live in `~/.itsybitsy/`, then `ib list`, `ib look`, `ib status`, etc. won't find them (ib reads from `{repo}/.ittybitty/agents/`). This would require either (a) changes to ib to support an alternate agent directory, or (b) itsybitsy maintaining symlinks/mirrors.
+- **Dual-source complexity.** During migration, itsybitsy would need to read from both locations. Agents spawned by `ib` directly (outside itsybitsy) would still live in `.ittybitty/`.
+- **Watchdog/hooks break.** ib's hooks (`agent-path`, `agent-status`) and watchdog assume the `.ittybitty/agents/` layout. Moving metadata requires updating hook paths.
+- **Two users of the same data.** If both ib and itsybitsy need to read/write agent state, having two locations creates synchronization issues.
+- **Multi-machine divergence.** If a user runs itsybitsy on two machines (e.g., desktop + laptop), `~/.itsybitsy/` would diverge between them. The current `.ittybitty/` approach naturally syncs via git.
+- **Cache invalidation.** A read-only mirror approach (`~/.itsybitsy/{repo}/` as cache) introduces its own sync problems — when does the mirror update? What if ib modifies agent state between mirror syncs? This is a classic cache invalidation problem.
+
+**Prerequisite:** This change only makes sense after itsybitsy has its own built-in watchdog (Phase 13) and no longer depends on ib's watchdog. Even then, it requires coordination with ib's codebase.
+
+**Recommendation:** Keep using `{repo}/.ittybitty/agents/` for now. Revisit after Phases 13–14 are complete and itsybitsy has proven itself as a standalone daily driver. If pursued, start with a read-only mirror (`~/.itsybitsy/{repo}/` as a cache/index of `.ittybitty/agents/`) before attempting a full migration, but be aware of cache invalidation challenges.

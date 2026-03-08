@@ -1381,6 +1381,26 @@ describe("formatAgentRow full-width highlight", () => {
     const row = formatAgentRow(agent, "", true, narrowPane, 30);
     expect(visibleWidth(row)).toBe(narrowPane);
   });
+  test("orphaned agent has warning indicator", () => {
+    const agent = makeTestAgent({ orphaned: true });
+    const row = formatAgentRow(agent, "", false, paneWidth, 30);
+    // Strip ANSI codes for readable assertion
+    const stripped = row.replace(/\x1b\[[0-9;]*m/g, "");
+    expect(stripped).toContain("⚠ ");
+  });
+
+  test("non-orphaned agent has no warning indicator", () => {
+    const agent = makeTestAgent({ orphaned: false });
+    const row = formatAgentRow(agent, "", false, paneWidth, 30);
+    const stripped = row.replace(/\x1b\[[0-9;]*m/g, "");
+    expect(stripped).not.toContain("⚠ ");
+  });
+
+  test("orphaned selected row is still full width", () => {
+    const agent = makeTestAgent({ orphaned: true });
+    const row = formatAgentRow(agent, "", true, paneWidth, 30);
+    expect(visibleWidth(row)).toBe(paneWidth);
+  });
 });
 
 describe("AgentTreeComponent scroll indicators", () => {

@@ -1,5 +1,5 @@
 {
-  "maxAgents": 10,
+  "maxAgents": 20,
   "model": "opus",
   "permissions": {
     "manager": {

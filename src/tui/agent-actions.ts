@@ -395,8 +395,8 @@ export function handleOpenDiffTool(ctx: ActionCtx) {
       const output = result.stdout || result.stderr || "(no output)";
       const tmpPath = `/tmp/itsybitsy-diff-${agent.id}.txt`;
       await Bun.write(tmpPath, output);
-      // Use shell execution to properly handle tool paths with spaces
-      Bun.spawn(["bash", "-c", `${tool} "$1"`, "--", tmpPath], { cwd: agent.repoPath });
+      // Pass both tool and path as positional params to handle spaces safely
+      Bun.spawn(["bash", "-c", '"$1" "$2"', "--", tool, tmpPath], { cwd: agent.repoPath });
       ctx.setNotice(`Opened diff in ${tool}`);
     } catch (err) {
       ctx.setNotice(`Failed to open diff: ${err}`);

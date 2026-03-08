@@ -1,21 +1,21 @@
 import { test, expect, beforeEach, afterEach, describe } from "bun:test";
 import { readConfig, writeConfig, CONFIG_KEYS } from "./config";
 import { join } from "path";
-import { mkdtempSync, rmSync } from "fs";
+import { mkdtemp, rm } from "fs/promises";
 import { tmpdir } from "os";
 
 let tmpDir: string;
-let userConfigPath: string;
+let userCfgPath: string;
 
-const opts = () => ({ userConfigPath });
+const opts = () => ({ userConfigPath: userCfgPath });
 
-beforeEach(() => {
-  tmpDir = mkdtempSync(join(tmpdir(), "config-test-"));
-  userConfigPath = join(tmpDir, "user-config.json");
+beforeEach(async () => {
+  tmpDir = await mkdtemp(join(tmpdir(), "config-test-"));
+  userCfgPath = join(tmpDir, "user-config.json");
 });
 
-afterEach(() => {
-  rmSync(tmpDir, { recursive: true, force: true });
+afterEach(async () => {
+  await rm(tmpDir, { recursive: true, force: true });
 });
 
 describe("readConfig", () => {
@@ -70,7 +70,7 @@ describe("readConfig", () => {
   });
 
   test("reads user config values when no project config", async () => {
-    await Bun.write(userConfigPath, JSON.stringify({ model: "opus", fps: 5 }));
+    await Bun.write(userCfgPath, JSON.stringify({ model: "opus", fps: 5 }));
 
     const result = await readConfig(tmpDir, opts());
     expect(result["model"]).toEqual({ value: "opus", source: "user" });
@@ -79,13 +79,22 @@ describe("readConfig", () => {
   });
 
   test("project config overrides user config", async () => {
-    await Bun.write(userConfigPath, JSON.stringify({ maxAgents: 8, model: "opus" }));
+    await Bun.write(userCfgPath, JSON.stringify({ maxAgents: 8, model: "opus" }));
     const projectPath = join(tmpDir, ".ittybitty.json");
     await Bun.write(projectPath, JSON.stringify({ maxAgents: 3 }));
 
     const result = await readConfig(tmpDir, opts());
     expect(result["maxAgents"]).toEqual({ value: 3, source: "project" });
     expect(result["model"]).toEqual({ value: "opus", source: "user" });
+  });
+
+  test("default arrays are independent across calls", async () => {
+    const result1 = await readConfig(tmpDir, opts());
+    const arr1 = result1["permissions.manager.allow"]!.value as string[];
+    arr1.push("mutated");
+
+    const result2 = await readConfig(tmpDir, opts());
+    expect(result2["permissions.manager.allow"]!.value).toEqual([]);
   });
 
   test("handles malformed JSON gracefully", async () => {

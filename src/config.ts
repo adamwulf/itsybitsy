@@ -66,7 +66,7 @@ async function readJsonFile(filePath: string): Promise<Record<string, unknown>> 
   }
 }
 
-function userConfigPath(): string {
+function defaultUserConfigPath(): string {
   return join(process.env.HOME ?? homedir(), ".ittybitty.json");
 }
 
@@ -80,7 +80,7 @@ export interface ReadConfigOptions {
 
 export async function readConfig(repoPath: string, options?: ReadConfigOptions): Promise<ConfigResult> {
   const projectData = await readJsonFile(projectConfigPath(repoPath));
-  const userPath = options?.userConfigPath ?? userConfigPath();
+  const userPath = options?.userConfigPath ?? defaultUserConfigPath();
   const userData = await readJsonFile(userPath);
 
   const result: ConfigResult = {};
@@ -98,7 +98,8 @@ export async function readConfig(repoPath: string, options?: ReadConfigOptions):
       continue;
     }
 
-    result[def.key] = { value: def.default, source: "default" };
+    const defaultVal = Array.isArray(def.default) ? [...def.default] : def.default;
+    result[def.key] = { value: defaultVal, source: "default" };
   }
 
   return result;

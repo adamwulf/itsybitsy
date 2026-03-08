@@ -130,11 +130,17 @@ describe("ib-commands", () => {
     expect(lastCall!.args).toEqual(["new-agent", "--model", "opus", "build it"]);
   });
 
+  test("newAgent with --manager flag", async () => {
+    await newAgent("/repos/myproject", "build it", { manager: "agent-mgr" });
+    expect(lastCall!.args).toEqual(["new-agent", "--manager", "agent-mgr", "build it"]);
+  });
+
   test("newAgent with all options", async () => {
     await newAgent("/repos/myproject", "build it", {
       worker: true,
       yolo: true,
       model: "opus",
+      manager: "agent-mgr",
     });
     expect(lastCall!.args).toEqual([
       "new-agent",
@@ -142,6 +148,8 @@ describe("ib-commands", () => {
       "--yolo",
       "--model",
       "opus",
+      "--manager",
+      "agent-mgr",
       "build it",
     ]);
   });

@@ -58,6 +58,7 @@ tmux output. `meta.json` is the source of truth for agent state. The watcher onl
 | `complete` | stop hook detects completion signal | Agent signaled "I HAVE COMPLETED THE GOAL" |
 | `rate_limited` | stop hook detects rate limit prompt | Hit API rate limit, waiting for reset |
 | `stopped` | tmux session not found | Session killed or exited without hook; needs `ib resume` |
+| `corrupt` | meta.json unreadable or invalid JSON | File was corrupted (e.g. killed mid-write); agent needs manual cleanup |
 
 **No `unknown` state** — every agent is always in one of the above.
 
@@ -118,6 +119,7 @@ The watcher simply reads `meta.json` for each agent — state is always current.
 | Hook crash / silent failure | State stays `running` (acceptable; same as current unknown) |
 | meta.json write contention | Only hooks write; watcher reads only — no contention |
 | `ib resume` without hook | `ib resume` itself writes `running` to meta.json |
+| meta.json corrupt (killed mid-write) | Watcher catches JSON parse error → displays agent as `corrupt`; user can manually delete the agent directory |
 
 ## Implementation Plan
 

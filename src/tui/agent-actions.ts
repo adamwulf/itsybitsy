@@ -577,7 +577,7 @@ export function handleSetup(ctx: ActionCtx) {
   if (ctx.repos.length === 0) { ctx.setNotice("No repos registered"); return; }
 
   if (ctx.repos.length === 1) {
-    loadSetupDialog(ctx, ctx.repos[0]!.path);
+    loadSetupDialog(ctx, ctx.repos[0]!.path).catch((err) => ctx.setNotice(`Setup error: ${err}`));
     return;
   }
 
@@ -585,7 +585,7 @@ export function handleSetup(ctx: ActionCtx) {
   const selected = ctx.agentTree.selectedAgent;
   if (selected) {
     const repo = ctx.repos.find((r) => r.path === selected.repoPath);
-    if (repo) { loadSetupDialog(ctx, repo.path); return; }
+    if (repo) { loadSetupDialog(ctx, repo.path).catch((err) => ctx.setNotice(`Setup error: ${err}`)); return; }
   }
 
   // Show repo picker
@@ -595,7 +595,7 @@ export function handleSetup(ctx: ActionCtx) {
     items: ctx.repos.map((r) => `${r.name} (${r.path})`),
     selectedIndex: 0,
     onSelect: (repoIndex: number) => {
-      loadSetupDialog(ctx, ctx.repos[repoIndex]!.path);
+      loadSetupDialog(ctx, ctx.repos[repoIndex]!.path).catch((err) => ctx.setNotice(`Setup error: ${err}`));
     },
   });
 }

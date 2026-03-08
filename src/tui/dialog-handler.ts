@@ -662,22 +662,22 @@ export function buildSetupContent(
       const badge = installed ? `${GREEN}● installed${RESET}` : `${DIM}○ not installed${RESET}`;
       const label = `${item.label}  ${badge}`;
       if (isSelected) {
-        lines.push(`${GREEN}> ${BOLD}${label}${RESET}`);
+        lines.push(truncateToWidth(`${GREEN}> ${BOLD}${label}${RESET}`, innerWidth, ""));
       } else {
-        lines.push(`  ${label}`);
+        lines.push(truncateToWidth(`  ${label}`, innerWidth, ""));
       }
     } else if (item.kind === "difftool") {
       const val = item.value || `${DIM}(not set)${RESET}`;
       const label = `${item.label}: ${val}`;
       if (isSelected) {
-        lines.push(`${GREEN}> ${BOLD}${label}${RESET}`);
+        lines.push(truncateToWidth(`${GREEN}> ${BOLD}${label}${RESET}`, innerWidth, ""));
       } else {
-        lines.push(`  ${label}`);
+        lines.push(truncateToWidth(`  ${label}`, innerWidth, ""));
       }
     } else {
       // info — not selectable
       const val = item.value === "yes" ? `${GREEN}✓${RESET}` : `${DIM}✗${RESET}`;
-      lines.push(`  ${DIM}${item.label}:${RESET} ${val}`);
+      lines.push(truncateToWidth(`  ${DIM}${item.label}:${RESET} ${val}`, innerWidth, ""));
     }
   }
 

@@ -502,8 +502,8 @@ All changes in `src/tui/dashboard.ts` — control flow and status bar only, no r
 Changes in `src/tui/dashboard.ts` render paths + `src/agents.ts` for orphan flags.
 
 **Orphan detection (agents with missing managers):**
-- [ ] **Orphaned flag on Agent (G-06 part 1)** (`src/agents.ts`) — add `orphaned?: boolean` to `Agent` type. In `buildAgentTree()`, when `agent.meta.manager` is set but not found in `byId`, set `agent.orphaned = true`. Note: this is distinct from orphaned tmux sessions (below) — this flags agents whose parent manager was killed/archived.
-- [ ] **Orphaned agent indicator (G-06 part 2)** (`src/tui/dashboard.ts`) — in `formatAgentRow()`, prepend `⚠ ` when `agent.orphaned === true`.
+- [x] **Orphaned flag on Agent (G-06 part 1)** (`src/agents.ts`) — add `orphaned?: boolean` to `Agent` type. In `buildAgentTree()`, when `agent.meta.manager` is set but not found in `byId`, set `agent.orphaned = true`. Note: this is distinct from orphaned tmux sessions (below) — this flags agents whose parent manager was killed/archived.
+- [x] **Orphaned agent indicator (G-06 part 2)** (`src/tui/agent-tree.ts`) — in `formatAgentRow()`, prepend `⚠ ` when `agent.orphaned === true`.
 
 **Orphan tmux session detection:**
 - [ ] **Detect orphaned tmux sessions** (`src/agents.ts` or `src/tmux-poller.ts`) — after reading all agents, run `tmux list-sessions -F "#{session_name}"` and filter for sessions matching `ittybitty-{repo-id}-*`. Compare against known agent tmux session names. Sessions without matching agent data are stale orphans. Return as a separate list alongside agents.

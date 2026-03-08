@@ -230,6 +230,56 @@ describe("flattenAgentTree", () => {
     expect(flat[3]!.connector).toBe("│       └── "); // a1x
     expect(flat[4]!.connector).toBe("└── ");       // b
   });
+
+  test("multi-repo: groups agents under sorted repo headers", () => {
+    const a = makeAgent({ id: "a1", repoName: "zeta-repo" });
+    const b = makeAgent({ id: "b1", repoName: "alpha-repo" });
+    const roots = buildAgentTree([a, b]);
+    const flat = flattenAgentTree(roots, ["zeta-repo", "alpha-repo"]);
+
+    // Should be sorted alphabetically: alpha-repo first, then zeta-repo
+    expect(flat.length).toBe(4); // 2 headers + 2 agents
+    expect(flat[0]!.repoHeader).toBe("alpha-repo");
+    expect(flat[0]!.repoHasAgents).toBe(true);
+    expect(flat[1]!.agent.id).toBe("b1");
+    expect(flat[2]!.repoHeader).toBe("zeta-repo");
+    expect(flat[2]!.repoHasAgents).toBe(true);
+    expect(flat[3]!.agent.id).toBe("a1");
+  });
+
+  test("multi-repo: includes empty repos with repoHasAgents=false", () => {
+    const a = makeAgent({ id: "a1", repoName: "has-agents" });
+    const roots = buildAgentTree([a]);
+    const flat = flattenAgentTree(roots, ["has-agents", "empty-repo"]);
+
+    expect(flat.length).toBe(3); // 2 headers + 1 agent
+    // Sorted: empty-repo, has-agents
+    expect(flat[0]!.repoHeader).toBe("empty-repo");
+    expect(flat[0]!.repoHasAgents).toBe(false);
+    expect(flat[1]!.repoHeader).toBe("has-agents");
+    expect(flat[1]!.repoHasAgents).toBe(true);
+    expect(flat[2]!.agent.id).toBe("a1");
+  });
+
+  test("multi-repo: empty repos sorted alphabetically with populated repos", () => {
+    const flat = flattenAgentTree([], ["charlie", "alpha", "bravo"]);
+    expect(flat.length).toBe(3);
+    expect(flat[0]!.repoHeader).toBe("alpha");
+    expect(flat[0]!.repoHasAgents).toBe(false);
+    expect(flat[1]!.repoHeader).toBe("bravo");
+    expect(flat[1]!.repoHasAgents).toBe(false);
+    expect(flat[2]!.repoHeader).toBe("charlie");
+    expect(flat[2]!.repoHasAgents).toBe(false);
+  });
+
+  test("single repo: no headers when repoNames has 1 entry", () => {
+    const a = makeAgent({ id: "a1" });
+    const roots = buildAgentTree([a]);
+    const flat = flattenAgentTree(roots, ["test"]);
+    expect(flat.length).toBe(1);
+    expect(flat[0]!.repoHeader).toBeUndefined();
+    expect(flat[0]!.agent.id).toBe("a1");
+  });
 });
 
 describe("readRepoAgents", () => {

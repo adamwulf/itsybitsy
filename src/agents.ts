@@ -221,7 +221,7 @@ export interface FlatAgent {
  * When repoNames has > 1 entry, inserts repo header rows and groups agents under them.
  * Empty repos (in repoNames but with no agents) get a header with repoHasAgents=false.
  */
-export function flattenAgentTree(roots: Agent[], repoNames: string[] | number = 1): FlatAgent[] {
+export function flattenAgentTree(roots: Agent[], repoNames: string[] = []): FlatAgent[] {
   const result: FlatAgent[] = [];
 
   function walk(agent: Agent, depth: number, ancestorIsLast: boolean[]) {
@@ -247,11 +247,7 @@ export function flattenAgentTree(roots: Agent[], repoNames: string[] | number = 
 
   const nonArchivedRoots = roots.filter((r) => !r.archived);
 
-  // Normalize: accept number for backward compat, or string[] for repo names
-  const repoCount = Array.isArray(repoNames) ? repoNames.length : repoNames;
-  const allRepoNames = Array.isArray(repoNames) ? repoNames : null;
-
-  if (repoCount > 1) {
+  if (repoNames.length > 1) {
     // Group roots by repo name
     const repoGroups = new Map<string, Agent[]>();
     for (const agent of nonArchivedRoots) {
@@ -260,11 +256,9 @@ export function flattenAgentTree(roots: Agent[], repoNames: string[] | number = 
       repoGroups.set(agent.repoName, group);
     }
 
-    // Collect all repo names: from agents + from allRepoNames (for empty repos)
+    // Collect all repo names: from agents + from repoNames (for empty repos)
     const allNames = new Set<string>(repoGroups.keys());
-    if (allRepoNames) {
-      for (const name of allRepoNames) allNames.add(name);
-    }
+    for (const name of repoNames) allNames.add(name);
 
     // Sort alphabetically
     const sortedNames = [...allNames].sort((a, b) => a.localeCompare(b));

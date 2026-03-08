@@ -8,7 +8,8 @@
         "Bash(bun:*)",
         "Bash(bunx:*)",
         "Skill",
-        "Bash(wc:*)"
+        "Bash(wc:*)",
+        "Bash(git blame:*)"
       ],
       "deny": []
     },
@@ -18,7 +19,8 @@
         "Bash(bun:*)",
         "Bash(bunx:*)",
         "Skill",
-        "Bash(wc:*)"
+        "Bash(wc:*)",
+        "Bash(git blame:*)"
       ],
       "deny": []
     }

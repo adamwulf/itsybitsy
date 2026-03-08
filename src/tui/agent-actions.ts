@@ -438,6 +438,7 @@ export function handleHelp(ctx: ActionCtx) {
       row("m", "merge"),
       row("x / !", "kill / nuke"),
       row("R", "resume"),
+      row("P", "pause"),
       row("r", "reassign"),
       row("a / A", "new agent (pick repo / current repo)"),
       "",

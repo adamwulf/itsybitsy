@@ -1192,6 +1192,35 @@ describe("DashboardComponent right pane and navigation features", () => {
     expect(dashboard.errors[0]).toContain("Something went wrong");
   });
 
+  test("addError deduplicates same message and updates timestamp", () => {
+    dashboard = makeDashboard();
+    dashboard.addError("Failed to read meta.json");
+    expect(dashboard.errors.length).toBe(1);
+    const first = dashboard.errors[0]!;
+    // Adding the same message again should NOT create a second entry
+    dashboard.addError("Failed to read meta.json");
+    expect(dashboard.errors.length).toBe(1);
+    // The entry should still contain the message
+    expect(dashboard.errors[0]).toContain("Failed to read meta.json");
+  });
+
+  test("addError keeps different messages separate", () => {
+    dashboard = makeDashboard();
+    dashboard.addError("error A");
+    dashboard.addError("error B");
+    expect(dashboard.errors.length).toBe(2);
+    expect(dashboard.errors[0]).toContain("error A");
+    expect(dashboard.errors[1]).toContain("error B");
+  });
+
+  test("addError does not false-match suffix substrings", () => {
+    dashboard = makeDashboard();
+    dashboard.addError("parse error");
+    dashboard.addError("error");
+    // These are different messages — both should be kept
+    expect(dashboard.errors.length).toBe(2);
+  });
+
   test("clearErrors removes all errors", () => {
     dashboard = makeDashboard();
     dashboard.addError("Error 1");

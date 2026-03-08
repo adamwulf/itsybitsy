@@ -481,8 +481,10 @@ export class DashboardComponent implements Component {
    *  Deduplicates: if the same message already exists, updates its timestamp instead of adding a new entry. */
   addError(message: string) {
     const ts = new Date().toLocaleTimeString();
-    // Check if this message already exists (ignoring timestamp prefix)
-    const existingIndex = this.rightPane.errors.findIndex((e) => e.endsWith(message));
+    // Check if this message already exists (ignoring timestamp prefix).
+    // Match against the RESET+space separator to avoid false suffix matches.
+    const suffix = `${RESET} ${message}`;
+    const existingIndex = this.rightPane.errors.findIndex((e) => e.endsWith(suffix));
     if (existingIndex !== -1) {
       // Update the timestamp on the existing error
       this.rightPane.errors[existingIndex] = `${DIM}[${ts}]${RESET} ${message}`;

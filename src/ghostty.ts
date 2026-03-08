@@ -21,7 +21,8 @@ export async function openInGhostty(
     // Wrap in bash -c so Ghostty's login shell flags (--posix --login) go to bash, not tmux.
     // Set window-size to 'latest' so tmux resizes to Ghostty's dimensions when attaching.
     // Sessions are created at 60 cols by ib and don't auto-resize on re-attach without this.
-    const proc = Bun.spawn(["ghostty", `--command=bash -c "tmux set-option -t ${tmuxSession} window-size latest && tmux attach -t ${tmuxSession}"`], {
+    // Pass session name as a positional parameter ($1) to avoid shell interpolation
+    const proc = Bun.spawn(["ghostty", `--command=bash -c 'tmux set-option -t "$1" window-size latest && tmux attach -t "$1"' -- ${tmuxSession}`], {
       stdio: ["ignore", "ignore", "ignore"],
     });
     proc.unref();

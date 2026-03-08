@@ -57,12 +57,12 @@ export async function removeRepo(repoPath: string): Promise<{ ok: boolean; messa
   registry.repos = registry.repos.filter((r) => r.path !== resolved);
 
   if (registry.repos.length === before) {
-    // Try matching by name
-    const byName = registry.repos.filter((r) => r.name !== repoPath);
-    if (byName.length === before) {
+    // Try matching by name — only remove the first match
+    const idx = registry.repos.findIndex((r) => r.name === repoPath);
+    if (idx === -1) {
       return { ok: false, message: `Not found: ${repoPath}` };
     }
-    registry.repos = byName;
+    registry.repos.splice(idx, 1);
   }
 
   await saveRegistry(registry);

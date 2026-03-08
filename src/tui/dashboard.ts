@@ -1918,8 +1918,8 @@ export class DashboardComponent implements Component {
         const output = result.stdout || result.stderr || "(no output)";
         const tmpPath = `/tmp/itsybitsy-diff-${agent.id}.txt`;
         await Bun.write(tmpPath, output);
-        const parts = tool.split(" ");
-        Bun.spawn([...parts, tmpPath], { cwd: agent.repoPath });
+        // Use shell execution to properly handle tool paths with spaces
+        Bun.spawn(["bash", "-c", `${tool} "$1"`, "--", tmpPath], { cwd: agent.repoPath });
         this.setNotice(`Opened diff in ${tool}`);
       } catch (err) {
         this.setNotice(`Failed to open diff: ${err}`);

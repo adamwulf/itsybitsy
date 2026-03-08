@@ -949,6 +949,7 @@ export async function launchDashboard(): Promise<void> {
       dashboard.stopPolling();
       watcher.stop();
       tui.stop();
+      process.stdout.write("\x1b]0;itsybitsy\x07");
       process.stdout.write("\x1b[2J\x1b[H");
       process.exit(0);
     }

@@ -1594,3 +1594,88 @@ describe("AgentTreeComponent scroll indicators", () => {
     expect(lines.length).toBeLessThanOrEqual(7);
   });
 });
+
+describe("Terminal title (G-10)", () => {
+  let dashboard: DashboardComponent;
+  let written: string[];
+  let origWrite: typeof process.stdout.write;
+
+  beforeEach(() => {
+    dashboard = new DashboardComponent();
+    written = [];
+    origWrite = process.stdout.write;
+    process.stdout.write = ((chunk: any) => {
+      written.push(String(chunk));
+      return true;
+    }) as any;
+  });
+
+  afterEach(() => {
+    process.stdout.write = origWrite;
+  });
+
+  test("emits terminal title with agent id on selection change", () => {
+    const agent = makeAgent("agent-abc", "/repos/test");
+    const flatList: FlatAgent[] = [{ agent, depth: 0, connector: "" }];
+    dashboard.onUpdate([agent], flatList, []);
+    expect(written.some((s) => s === "\x1b]0;itsybitsy: agent-abc\x07")).toBe(true);
+  });
+
+  test("emits generic title when no agent is selected", () => {
+    // First select an agent, then deselect
+    const agent = makeAgent("agent-abc", "/repos/test");
+    const flatList: FlatAgent[] = [{ agent, depth: 0, connector: "" }];
+    dashboard.onUpdate([agent], flatList, []);
+    written = [];
+
+    // Clear the list — no agents means no selection
+    dashboard.onUpdate([], [], []);
+    expect(written.some((s) => s === "\x1b]0;itsybitsy\x07")).toBe(true);
+  });
+
+  test("does not emit title when agent id has not changed", () => {
+    const agent = makeAgent("agent-abc", "/repos/test");
+    const flatList: FlatAgent[] = [{ agent, depth: 0, connector: "" }];
+    dashboard.onUpdate([agent], flatList, []);
+    written = [];
+
+    // Update again with same agent — no title change expected
+    dashboard.onUpdate([agent], flatList, []);
+    expect(written.some((s) => s.includes("\x1b]0;"))).toBe(false);
+  });
+});
+
+describe("Minimum terminal size (G-11)", () => {
+  let dashboard: DashboardComponent;
+  let origRows: number | undefined;
+
+  beforeEach(() => {
+    dashboard = new DashboardComponent();
+    origRows = process.stdout.rows;
+  });
+
+  afterEach(() => {
+    Object.defineProperty(process.stdout, "rows", { value: origRows, writable: true, configurable: true });
+  });
+
+  test("renders warning when terminal height < 20", () => {
+    Object.defineProperty(process.stdout, "rows", { value: 15, writable: true, configurable: true });
+    const lines = dashboard.render(100);
+    expect(lines.length).toBe(1);
+    expect(stripAnsi(lines[0]!)).toContain("Terminal too small");
+  });
+
+  test("renders warning when terminal width < 80", () => {
+    Object.defineProperty(process.stdout, "rows", { value: 30, writable: true, configurable: true });
+    const lines = dashboard.render(60);
+    expect(lines.length).toBe(1);
+    expect(stripAnsi(lines[0]!)).toContain("Terminal too small");
+  });
+
+  test("renders normally when terminal is large enough", () => {
+    Object.defineProperty(process.stdout, "rows", { value: 30, writable: true, configurable: true });
+    const lines = dashboard.render(100);
+    expect(lines.length).toBeGreaterThan(1);
+    expect(stripAnsi(lines[0]!)).toContain("itsybitsy");
+  });
+});

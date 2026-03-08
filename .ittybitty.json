@@ -7,10 +7,10 @@
         "ToolSearch",
         "Bash(bun:*)",
         "Bash(bunx:*)",
-        "Bash(ib:*)",
         "Skill",
         "Bash(wc:*)",
-        "Bash(git blame:*)"
+        "Bash(git blame:*)",
+        "Bash(git log:*)"
       ],
       "deny": []
     },
@@ -19,10 +19,10 @@
         "ToolSearch",
         "Bash(bun:*)",
         "Bash(bunx:*)",
-        "Bash(ib:*)",
         "Skill",
         "Bash(wc:*)",
-        "Bash(git blame:*)"
+        "Bash(git blame:*)",
+        "Bash(git log:*)"
       ],
       "deny": []
     }

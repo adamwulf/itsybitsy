@@ -14,6 +14,13 @@ function makeAgent(id: string, repoPath: string, archived = false): Agent {
   return _makeAgent({ id, repoPath, archived });
 }
 
+/** Create a DashboardComponent with setTerminalTitle stubbed to prevent test output noise. */
+function makeDashboard(): DashboardComponent {
+  const d = new DashboardComponent();
+  d.setTerminalTitle = () => {};
+  return d;
+}
+
 describe("readAgentLog", () => {
   let tmpDir: string;
 
@@ -290,7 +297,7 @@ describe("DashboardComponent dialog and action handlers", () => {
   let lastIbCall: { args: string[]; cwd: string } | null;
 
   function setupDashboardWithAgent(state = "running") {
-    dashboard = new DashboardComponent();
+    dashboard = makeDashboard();
     lastIbCall = null;
     setRunner(async (args, cwd) => {
       lastIbCall = { args, cwd };
@@ -378,7 +385,7 @@ describe("DashboardComponent dialog and action handlers", () => {
   });
 
   test("! key with no agent selected opens nuke-all confirm dialog", () => {
-    dashboard = new DashboardComponent();
+    dashboard = makeDashboard();
     lastIbCall = null;
     setRunner(async (args, cwd) => {
       lastIbCall = { args, cwd };
@@ -396,7 +403,7 @@ describe("DashboardComponent dialog and action handlers", () => {
   });
 
   test("nuke-all confirm executes nuke --force with no agent ID", async () => {
-    dashboard = new DashboardComponent();
+    dashboard = makeDashboard();
     lastIbCall = null;
     setRunner(async (args, cwd) => {
       lastIbCall = { args, cwd };
@@ -414,7 +421,7 @@ describe("DashboardComponent dialog and action handlers", () => {
   });
 
   test("! key with no agent and multiple repos shows repo picker", () => {
-    dashboard = new DashboardComponent();
+    dashboard = makeDashboard();
     lastIbCall = null;
     setRunner(async (args, cwd) => {
       lastIbCall = { args, cwd };
@@ -610,7 +617,7 @@ describe("DashboardComponent dialog and action handlers", () => {
   });
 
   test("no dialog without selected agent", () => {
-    dashboard = new DashboardComponent();
+    dashboard = makeDashboard();
     setRunner(async (args, cwd) => {
       lastIbCall = { args, cwd };
       return { ok: true, exitCode: 0, stdout: "", stderr: "" };
@@ -622,7 +629,7 @@ describe("DashboardComponent dialog and action handlers", () => {
   });
 
   test("a key with single repo skips repo select, goes straight to form", () => {
-    dashboard = new DashboardComponent();
+    dashboard = makeDashboard();
     dashboard.setRepos([{ path: "/repos/only", name: "only-repo" }]);
     lastIbCall = null;
 
@@ -633,7 +640,7 @@ describe("DashboardComponent dialog and action handlers", () => {
   });
 
   test("a key with multiple repos shows repo select first", () => {
-    dashboard = new DashboardComponent();
+    dashboard = makeDashboard();
     dashboard.setRepos([
       { path: "/repos/one", name: "repo-one" },
       { path: "/repos/two", name: "repo-two" },
@@ -646,7 +653,7 @@ describe("DashboardComponent dialog and action handlers", () => {
   });
 
   test("new-agent form: Tab cycles focus through all fields", () => {
-    dashboard = new DashboardComponent();
+    dashboard = makeDashboard();
     dashboard.setRepos([{ path: "/repos/only", name: "only-repo" }]);
 
     dashboard.handleInput("a");
@@ -677,7 +684,7 @@ describe("DashboardComponent dialog and action handlers", () => {
   });
 
   test("new-agent form: Shift+Tab cycles focus backwards", () => {
-    dashboard = new DashboardComponent();
+    dashboard = makeDashboard();
     dashboard.setRepos([{ path: "/repos/only", name: "only-repo" }]);
 
     dashboard.handleInput("a");
@@ -693,7 +700,7 @@ describe("DashboardComponent dialog and action handlers", () => {
   });
 
   test("new-agent form: Worker toggle with Space and Enter", () => {
-    dashboard = new DashboardComponent();
+    dashboard = makeDashboard();
     dashboard.setRepos([{ path: "/repos/only", name: "only-repo" }]);
 
     dashboard.handleInput("a");
@@ -713,7 +720,7 @@ describe("DashboardComponent dialog and action handlers", () => {
   });
 
   test("new-agent form: Worker flag sets --worker", async () => {
-    dashboard = new DashboardComponent();
+    dashboard = makeDashboard();
     dashboard.setRepos([{ path: "/repos/only", name: "only-repo" }]);
     lastIbCall = null;
     setRunner(async (args, cwd) => {
@@ -737,7 +744,7 @@ describe("DashboardComponent dialog and action handlers", () => {
   });
 
   test("new-agent form: Name field passes --name flag", async () => {
-    dashboard = new DashboardComponent();
+    dashboard = makeDashboard();
     dashboard.setRepos([{ path: "/repos/only", name: "only-repo" }]);
     lastIbCall = null;
     setRunner(async (args, cwd) => {
@@ -761,7 +768,7 @@ describe("DashboardComponent dialog and action handlers", () => {
   });
 
   test("new-agent form: Create is no-op when prompt is empty", async () => {
-    dashboard = new DashboardComponent();
+    dashboard = makeDashboard();
     dashboard.setRepos([{ path: "/repos/only", name: "only-repo" }]);
     lastIbCall = null;
     setRunner(async (args, cwd) => {
@@ -785,7 +792,7 @@ describe("DashboardComponent dialog and action handlers", () => {
   });
 
   test("new-agent form: Cancel button closes dialog", () => {
-    dashboard = new DashboardComponent();
+    dashboard = makeDashboard();
     dashboard.setRepos([{ path: "/repos/only", name: "only-repo" }]);
 
     dashboard.handleInput("a");
@@ -800,7 +807,7 @@ describe("DashboardComponent dialog and action handlers", () => {
   });
 
   test("new-agent form: Prompt supports multi-line with Enter", () => {
-    dashboard = new DashboardComponent();
+    dashboard = makeDashboard();
     dashboard.setRepos([{ path: "/repos/only", name: "only-repo" }]);
 
     dashboard.handleInput("a");
@@ -816,7 +823,7 @@ describe("DashboardComponent dialog and action handlers", () => {
   });
 
   test("A key toggles archived agents", () => {
-    dashboard = new DashboardComponent();
+    dashboard = makeDashboard();
     const agent1 = makeAgent("agent-active", "/repos/test");
     const agent2 = makeAgent("agent-old", "/repos/test", true);
     const flatList: FlatAgent[] = [
@@ -915,7 +922,7 @@ describe("DashboardComponent right pane and navigation features", () => {
   let lastIbCall: { args: string[]; cwd: string } | null;
 
   function setupDashboard(state = "running") {
-    dashboard = new DashboardComponent();
+    dashboard = makeDashboard();
     lastIbCall = null;
     setRunner(async (args, cwd) => {
       lastIbCall = { args, cwd };
@@ -933,14 +940,14 @@ describe("DashboardComponent right pane and navigation features", () => {
   });
 
   test("addError adds timestamped error to errors list", () => {
-    dashboard = new DashboardComponent();
+    dashboard = makeDashboard();
     dashboard.addError("Something went wrong");
     expect(dashboard.errors.length).toBe(1);
     expect(dashboard.errors[0]).toContain("Something went wrong");
   });
 
   test("clearErrors removes all errors", () => {
-    dashboard = new DashboardComponent();
+    dashboard = makeDashboard();
     dashboard.addError("Error 1");
     dashboard.addError("Error 2");
     expect(dashboard.errors.length).toBe(2);
@@ -999,7 +1006,7 @@ describe("DashboardComponent right pane and navigation features", () => {
   });
 
   test("g key in QUESTIONS mode navigates to agent and switches mode", () => {
-    dashboard = new DashboardComponent();
+    dashboard = makeDashboard();
     setRunner(async (args, cwd) => {
       lastIbCall = { args, cwd };
       return { ok: true, exitCode: 0, stdout: "", stderr: "" };
@@ -1032,7 +1039,7 @@ describe("DashboardComponent right pane and navigation features", () => {
   });
 
   test("Enter in QUESTIONS mode opens answer dialog", () => {
-    dashboard = new DashboardComponent();
+    dashboard = makeDashboard();
     setRunner(async (args, cwd) => {
       lastIbCall = { args, cwd };
       return { ok: true, exitCode: 0, stdout: "", stderr: "" };
@@ -1057,7 +1064,7 @@ describe("DashboardComponent right pane and navigation features", () => {
   });
 
   test("answer question sends acknowledge then message", async () => {
-    dashboard = new DashboardComponent();
+    dashboard = makeDashboard();
     const calls: string[][] = [];
     setRunner(async (args, cwd) => {
       calls.push(args);
@@ -1091,7 +1098,7 @@ describe("DashboardComponent right pane and navigation features", () => {
   });
 
   test("Escape in QUESTIONS mode acknowledges question", async () => {
-    dashboard = new DashboardComponent();
+    dashboard = makeDashboard();
     const calls: string[][] = [];
     setRunner(async (args, cwd) => {
       calls.push(args);
@@ -1118,7 +1125,7 @@ describe("DashboardComponent right pane and navigation features", () => {
   });
 
   test("j/k navigate questions in QUESTIONS mode when questions focused", () => {
-    dashboard = new DashboardComponent();
+    dashboard = makeDashboard();
     const agent1 = makeAgent("agent-a", "/repos/test");
     const flatList: FlatAgent[] = [
       { agent: agent1, depth: 0, connector: "" },
@@ -1145,7 +1152,7 @@ describe("DashboardComponent right pane and navigation features", () => {
   });
 
   test("j/k navigate agents in QUESTIONS mode when tree focused", () => {
-    dashboard = new DashboardComponent();
+    dashboard = makeDashboard();
     const agent1 = makeAgent("agent-a", "/repos/test");
     const agent2 = makeAgent("agent-b", "/repos/test");
     const flatList: FlatAgent[] = [
@@ -1166,7 +1173,7 @@ describe("DashboardComponent right pane and navigation features", () => {
   });
 
   test("j/k in QUESTIONS mode clamps to bounds when questions focused", () => {
-    dashboard = new DashboardComponent();
+    dashboard = makeDashboard();
     const agent = makeAgent("agent-a", "/repos/test");
     const flatList: FlatAgent[] = [{ agent, depth: 0, connector: "" }];
     const questions: PendingQuestion[] = [
@@ -1184,7 +1191,7 @@ describe("DashboardComponent right pane and navigation features", () => {
   });
 
   test("selectAgentById via g in QUESTIONS navigates correctly", () => {
-    dashboard = new DashboardComponent();
+    dashboard = makeDashboard();
     const agent1 = makeAgent("agent-a", "/repos/test");
     const agent2 = makeAgent("agent-b", "/repos/test");
     const flatList: FlatAgent[] = [
@@ -1592,5 +1599,87 @@ describe("AgentTreeComponent scroll indicators", () => {
     expect(lines.some((l) => l.includes("▼ 1 more"))).toBe(false);
     expect(lines.some((l) => l.includes("▲ 1 more"))).toBe(false);
     expect(lines.length).toBeLessThanOrEqual(7);
+  });
+});
+
+describe("Terminal title (G-10)", () => {
+  let dashboard: DashboardComponent;
+  let titles: string[];
+
+  beforeEach(() => {
+    dashboard = makeDashboard();
+    titles = [];
+    dashboard.setTerminalTitle = (title: string) => { titles.push(title); };
+  });
+
+  test("emits terminal title with agent id on selection change", () => {
+    const agent = makeAgent("agent-abc", "/repos/test");
+    const flatList: FlatAgent[] = [{ agent, depth: 0, connector: "" }];
+    dashboard.onUpdate([agent], flatList, []);
+    expect(titles).toContain("itsybitsy: agent-abc");
+  });
+
+  test("emits generic title when no agent is selected", () => {
+    const agent = makeAgent("agent-abc", "/repos/test");
+    const flatList: FlatAgent[] = [{ agent, depth: 0, connector: "" }];
+    dashboard.onUpdate([agent], flatList, []);
+    titles = [];
+
+    // Clear the list — no agents means no selection
+    dashboard.onUpdate([], [], []);
+    expect(titles).toContain("itsybitsy");
+  });
+
+  test("does not emit title when agent id has not changed", () => {
+    const agent = makeAgent("agent-abc", "/repos/test");
+    const flatList: FlatAgent[] = [{ agent, depth: 0, connector: "" }];
+    dashboard.onUpdate([agent], flatList, []);
+    titles = [];
+
+    // Update again with same agent — no title change expected
+    dashboard.onUpdate([agent], flatList, []);
+    expect(titles).toHaveLength(0);
+  });
+});
+
+describe("Minimum terminal size (G-11)", () => {
+  let dashboard: DashboardComponent;
+  let origRows: number | undefined;
+
+  beforeEach(() => {
+    dashboard = makeDashboard();
+    origRows = process.stdout.rows;
+  });
+
+  afterEach(() => {
+    Object.defineProperty(process.stdout, "rows", { value: origRows, writable: true, configurable: true });
+  });
+
+  test("renders warning when terminal height < 20", () => {
+    Object.defineProperty(process.stdout, "rows", { value: 15, writable: true, configurable: true });
+    const lines = dashboard.render(100);
+    expect(lines.length).toBe(1);
+    expect(stripAnsi(lines[0]!)).toContain("Terminal too small");
+  });
+
+  test("renders warning when terminal width < 80", () => {
+    Object.defineProperty(process.stdout, "rows", { value: 30, writable: true, configurable: true });
+    const lines = dashboard.render(60);
+    expect(lines.length).toBe(1);
+    expect(stripAnsi(lines[0]!)).toContain("Terminal too small");
+  });
+
+  test("renders normally at exactly 80x20 (boundary)", () => {
+    Object.defineProperty(process.stdout, "rows", { value: 20, writable: true, configurable: true });
+    const lines = dashboard.render(80);
+    expect(lines.length).toBeGreaterThan(1);
+    expect(stripAnsi(lines[0]!)).toContain("itsybitsy");
+  });
+
+  test("renders normally when terminal is large enough", () => {
+    Object.defineProperty(process.stdout, "rows", { value: 30, writable: true, configurable: true });
+    const lines = dashboard.render(100);
+    expect(lines.length).toBeGreaterThan(1);
+    expect(stripAnsi(lines[0]!)).toContain("itsybitsy");
   });
 });

@@ -1,5 +1,8 @@
-import { test, expect, describe } from "bun:test";
-import { formatResetTime, parseUsageResponse } from "./usage";
+import { test, expect, describe, beforeEach, afterEach } from "bun:test";
+import { formatResetTime, parseUsageResponse, fetchUsage, setTestDir, resetTestDir } from "./usage";
+import { join } from "path";
+import { mkdtemp, rm, writeFile } from "fs/promises";
+import { tmpdir } from "os";
 
 describe("formatResetTime", () => {
   const now = new Date("2025-12-12T16:15:00Z");
@@ -92,5 +95,226 @@ describe("parseUsageResponse", () => {
       sessionReset: null,
       weeklyReset: null,
     });
+  });
+});
+
+describe("fetchUsage", () => {
+  let tmpDir: string;
+  let originalFetch: typeof globalThis.fetch;
+
+  const apiResponse = {
+    five_hour: { utilization: 42.0, resets_at: "2025-12-12T20:00:00Z" },
+    seven_day: { utilization: 25.0, resets_at: "2025-12-18T00:00:00Z" },
+  };
+
+  beforeEach(async () => {
+    tmpDir = await mkdtemp(join(tmpdir(), "usage-test-"));
+    setTestDir(tmpDir);
+    originalFetch = globalThis.fetch;
+  });
+
+  afterEach(async () => {
+    resetTestDir();
+    globalThis.fetch = originalFetch;
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  /** Write a credentials file so readAccessToken succeeds. */
+  async function writeCredentials(token = "test-token"): Promise<void> {
+    const credPath = join(tmpDir, "credentials.json");
+    await Bun.write(credPath, JSON.stringify({ claudeAiOauth: { accessToken: token } }));
+  }
+
+  /** Write a cache file with the given timestamp (epoch seconds). */
+  async function writeTestCache(timestampSec: number, response = apiResponse, nextBackoffMs?: number): Promise<void> {
+    const cachePath = join(tmpDir, "usage-cache.json");
+    const cache: any = { timestamp: timestampSec, response };
+    if (nextBackoffMs !== undefined) cache.nextBackoffMs = nextBackoffMs;
+    await Bun.write(cachePath, JSON.stringify(cache));
+  }
+
+  function mockFetch(response: any, ok = true, status = 200): void {
+    globalThis.fetch = (async () => ({
+      ok,
+      status,
+      json: async () => response,
+    })) as any;
+  }
+
+  test("returns cached response when cache is fresh", async () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    await writeTestCache(nowSec, apiResponse);
+    // No credentials needed — should return from cache without API call
+    let fetchCalled = false;
+    globalThis.fetch = (async () => { fetchCalled = true; return { ok: true, json: async () => ({}) }; }) as any;
+
+    const result = await fetchUsage();
+
+    expect(fetchCalled).toBe(false);
+    expect(result).not.toBeNull();
+    expect(result!.sessionPct).toBe(42);
+    expect(result!.weeklyPct).toBe(25);
+  });
+
+  test("fetches from API when cache is stale", async () => {
+    // Cache timestamp 2 minutes ago (stale, since TTL is 60s)
+    const staleSec = Math.floor(Date.now() / 1000) - 120;
+    await writeTestCache(staleSec, apiResponse);
+    await writeCredentials();
+
+    const freshResponse = {
+      five_hour: { utilization: 80.0, resets_at: "2025-12-12T22:00:00Z" },
+      seven_day: { utilization: 50.0, resets_at: "2025-12-19T00:00:00Z" },
+    };
+    mockFetch(freshResponse);
+
+    const result = await fetchUsage();
+
+    expect(result).not.toBeNull();
+    expect(result!.sessionPct).toBe(80);
+    expect(result!.weeklyPct).toBe(50);
+  });
+
+  test("returns null when no token available and no cache", async () => {
+    // No credentials file, no cache
+    globalThis.fetch = (async () => { throw new Error("should not be called"); }) as any;
+
+    const result = await fetchUsage();
+    expect(result).toBeNull();
+  });
+
+  test("returns stale cache when locked", async () => {
+    const staleSec = Math.floor(Date.now() / 1000) - 120;
+    await writeTestCache(staleSec, apiResponse);
+    await writeCredentials();
+    // Create a fresh lock file
+    await writeFile(join(tmpDir, "usage.lock"), "");
+
+    let fetchCalled = false;
+    globalThis.fetch = (async () => { fetchCalled = true; return { ok: true, json: async () => ({}) }; }) as any;
+
+    const result = await fetchUsage();
+
+    expect(fetchCalled).toBe(false);
+    expect(result).not.toBeNull();
+    expect(result!.sessionPct).toBe(42);
+  });
+
+  test("returns null when locked and no cache", async () => {
+    await writeCredentials();
+    await writeFile(join(tmpDir, "usage.lock"), "");
+
+    const result = await fetchUsage();
+    expect(result).toBeNull();
+  });
+
+  test("handles non-ok response with existing cache (backoff)", async () => {
+    const staleSec = Math.floor(Date.now() / 1000) - 120;
+    await writeTestCache(staleSec, apiResponse);
+    await writeCredentials();
+    mockFetch({}, false, 500);
+
+    const result = await fetchUsage();
+
+    // Should return stale cache data
+    expect(result).not.toBeNull();
+    expect(result!.sessionPct).toBe(42);
+
+    // Verify cache was rewritten with backoff timestamp
+    const cacheFile = Bun.file(join(tmpDir, "usage-cache.json"));
+    const updatedCache = await cacheFile.json();
+    expect(updatedCache.nextBackoffMs).toBeDefined();
+    // Retry timestamp should be in the future
+    expect(updatedCache.timestamp).toBeGreaterThan(staleSec);
+  });
+
+  test("returns null on non-ok response with no cache", async () => {
+    await writeCredentials();
+    mockFetch({}, false, 500);
+
+    const result = await fetchUsage();
+    expect(result).toBeNull();
+  });
+
+  test("handles API error field in response body", async () => {
+    const staleSec = Math.floor(Date.now() / 1000) - 120;
+    await writeTestCache(staleSec, apiResponse);
+    await writeCredentials();
+    mockFetch({ error: "something went wrong" });
+
+    const result = await fetchUsage();
+
+    // Should return stale cache
+    expect(result).not.toBeNull();
+    expect(result!.sessionPct).toBe(42);
+  });
+
+  test("handles network error with stale cache", async () => {
+    const staleSec = Math.floor(Date.now() / 1000) - 120;
+    await writeTestCache(staleSec, apiResponse);
+    await writeCredentials();
+    globalThis.fetch = (async () => { throw new Error("network error"); }) as any;
+
+    const result = await fetchUsage();
+
+    expect(result).not.toBeNull();
+    expect(result!.sessionPct).toBe(42);
+  });
+
+  test("returns null on network error with no cache", async () => {
+    await writeCredentials();
+    globalThis.fetch = (async () => { throw new Error("network error"); }) as any;
+
+    const result = await fetchUsage();
+    expect(result).toBeNull();
+  });
+
+  test("successful fetch writes cache and cleans up lock", async () => {
+    await writeCredentials();
+    mockFetch(apiResponse);
+
+    const result = await fetchUsage();
+
+    expect(result).not.toBeNull();
+    expect(result!.sessionPct).toBe(42);
+
+    // Cache should exist
+    const cacheFile = Bun.file(join(tmpDir, "usage-cache.json"));
+    expect(await cacheFile.exists()).toBe(true);
+    const cache = await cacheFile.json();
+    expect(cache.response).toEqual(apiResponse);
+    expect(cache.nextBackoffMs).toBe(60_000);
+
+    // Lock should be released
+    const lockFile = Bun.file(join(tmpDir, "usage.lock"));
+    expect(await lockFile.exists()).toBe(false);
+  });
+
+  test("backoff increases on repeated errors", async () => {
+    const staleSec = Math.floor(Date.now() / 1000) - 120;
+    // Simulate prior backoff of 120s
+    await writeTestCache(staleSec, apiResponse, 120_000);
+    await writeCredentials();
+    mockFetch({}, false, 500);
+
+    await fetchUsage();
+
+    const cache = await Bun.file(join(tmpDir, "usage-cache.json")).json();
+    // nextBackoffMs should be 120_000 + 60_000 = 180_000
+    expect(cache.nextBackoffMs).toBe(180_000);
+  });
+
+  test("backoff caps at MAX_BACKOFF_MS (10 minutes)", async () => {
+    const staleSec = Math.floor(Date.now() / 1000) - 120;
+    // Already at max backoff
+    await writeTestCache(staleSec, apiResponse, 600_000);
+    await writeCredentials();
+    mockFetch({}, false, 500);
+
+    await fetchUsage();
+
+    const cache = await Bun.file(join(tmpDir, "usage-cache.json")).json();
+    // Should cap at 600_000 (10 minutes)
+    expect(cache.nextBackoffMs).toBe(600_000);
   });
 });

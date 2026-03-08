@@ -8,14 +8,30 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { rename, mkdir, stat, writeFile, unlink } from "node:fs/promises";
 
-const ITSYBITSY_DIR = join(homedir(), ".itsybitsy");
-const CACHE_PATH = join(ITSYBITSY_DIR, "usage-cache.json");
-const LOCK_PATH = join(ITSYBITSY_DIR, "usage.lock");
-const CREDENTIALS_PATH = join(homedir(), ".claude", ".credentials.json");
+let ITSYBITSY_DIR = join(homedir(), ".itsybitsy");
+let CACHE_PATH = join(ITSYBITSY_DIR, "usage-cache.json");
+let LOCK_PATH = join(ITSYBITSY_DIR, "usage.lock");
+let CREDENTIALS_PATH = join(homedir(), ".claude", ".credentials.json");
 const CACHE_TTL_MS = 60_000; // 1 minute normal refresh
 const LOCK_MAX_AGE_MS = 30_000; // only one API attempt per 30s across processes
 const API_TIMEOUT_MS = 5_000; // 5s fetch timeout
 const MAX_BACKOFF_MS = 10 * 60_000; // 10 minutes max backoff on failures
+
+/** Override directory paths for testing. */
+export function setTestDir(dir: string): void {
+  ITSYBITSY_DIR = dir;
+  CACHE_PATH = join(dir, "usage-cache.json");
+  LOCK_PATH = join(dir, "usage.lock");
+  CREDENTIALS_PATH = join(dir, "credentials.json");
+}
+
+/** Reset directory paths to defaults. */
+export function resetTestDir(): void {
+  ITSYBITSY_DIR = join(homedir(), ".itsybitsy");
+  CACHE_PATH = join(ITSYBITSY_DIR, "usage-cache.json");
+  LOCK_PATH = join(ITSYBITSY_DIR, "usage.lock");
+  CREDENTIALS_PATH = join(homedir(), ".claude", ".credentials.json");
+}
 
 export interface UsageData {
   sessionPct: number | null;

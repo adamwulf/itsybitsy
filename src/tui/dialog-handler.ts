@@ -217,9 +217,7 @@ function handleTextareaDialog(
   data: string
 ): boolean {
   if (d.focusedButton === "text") {
-    if (matchesKey(data, Key.escape)) {
-      ctx.closeDialog();
-    } else if (matchesKey(data, Key.tab)) {
+    if (matchesKey(data, Key.tab)) {
       d.focusedButton = "cancel";
       ctx.tui?.requestRender();
     } else if (matchesKey(data, Key.shift("tab"))) {
@@ -237,8 +235,6 @@ function handleTextareaDialog(
     } else if (matchesKey(data, Key.shift("tab")) || matchesKey(data, Key.left)) {
       d.focusedButton = "cancel";
       ctx.tui?.requestRender();
-    } else if (matchesKey(data, Key.escape)) {
-      ctx.closeDialog();
     } else if (data.length === 1 && data >= " ") {
       d.focusedButton = "text";
       handleTextEdit(data, d.lines);
@@ -253,8 +249,6 @@ function handleTextareaDialog(
     } else if (matchesKey(data, Key.shift("tab")) || matchesKey(data, Key.left)) {
       d.focusedButton = "text";
       ctx.tui?.requestRender();
-    } else if (matchesKey(data, Key.escape)) {
-      ctx.closeDialog();
     } else if (data.length === 1 && data >= " ") {
       d.focusedButton = "text";
       handleTextEdit(data, d.lines);

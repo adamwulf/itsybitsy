@@ -3,7 +3,6 @@
  * Each function takes a context object that provides access to dashboard state.
  */
 
-import { visibleWidth } from "@mariozechner/pi-tui";
 import { stat } from "node:fs/promises";
 import type { Agent, FlatAgent, PendingQuestion } from "../agents";
 import type { RepoEntry } from "../registry";
@@ -15,7 +14,7 @@ import {
 } from "../ib-commands";
 import type { NewAgentOptions } from "../ib-commands";
 import { captureTmuxOutput, resizeTmuxWindow } from "../tmux-poller";
-import { stripAnsi, parseState } from "../parse-state";
+import { parseState } from "../parse-state";
 import { openInGhostty } from "../ghostty";
 import { buildFolderItems } from "./folder-browser";
 import type { DialogState } from "./dialog-handler";
@@ -28,7 +27,6 @@ const RESET = "\x1b[0m";
 const BOLD = "\x1b[1m";
 const DIM = "\x1b[2m";
 const RED = "\x1b[31m";
-const GREEN = "\x1b[32m";
 
 const SCROLL_STEP = 10;
 
@@ -536,11 +534,10 @@ export function handleOpenGhostty(ctx: ActionCtx) {
 export function handleSnapshot(ctx: ActionCtx) {
   const agent = ctx.agentTree.selectedAgent;
   if (!agent) { ctx.setNotice("No agent selected"); return; }
-  captureTmuxOutput(agent.meta.tmux_session).then(async (rawOutput) => {
+  captureTmuxOutput(agent.meta.tmux_session).then(async (strippedOutput) => {
     try {
-      if (!rawOutput) { ctx.setNotice("No tmux output captured"); return; }
-      const stripped = stripAnsi(rawOutput);
-      const result = parseState(stripped);
+      if (!strippedOutput) { ctx.setNotice("No tmux output captured"); return; }
+      const result = parseState(strippedOutput);
       const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
       const filename = `snapshot-${timestamp}-${result.state}.txt`;
       const dir = agent.archived ? "archive" : "agents";
@@ -548,7 +545,7 @@ export function handleSnapshot(ctx: ActionCtx) {
       await Bun.$`mkdir -p ${debugDir}`.quiet();
       await Bun.write(
         `${debugDir}/${filename}`,
-        `State: ${result.state}\nReason: ${result.reason}\n\n${rawOutput}`
+        `State: ${result.state}\nReason: ${result.reason}\n\n${strippedOutput}`
       );
       ctx.setNotice(`Snapshot saved: ${filename} (state: ${result.state})`);
     } catch (err) {

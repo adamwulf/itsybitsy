@@ -4,7 +4,7 @@
  */
 
 import type { Component } from "@mariozechner/pi-tui";
-import { truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
+import { truncateToWidth } from "@mariozechner/pi-tui";
 import type { Agent, FlatAgent, PendingQuestion, DenialEntry } from "../agents";
 import { readAgentLog, readAgentPrompt, parseDenials } from "../agents";
 import { diffAgent, statusAgent } from "../ib-commands";

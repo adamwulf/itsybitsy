@@ -10,15 +10,16 @@ import { addRepo } from "../registry";
 import {
   killAgent, nukeAgent, nukeAllAgents, resumeAgent, pauseAgent, reassignAgent,
   mergeCheckAgent, mergeAgent, sendMessage, newAgent, diffAgent,
-  acknowledgeQuestion,
+  acknowledgeQuestion, hooksStatus, installHook, uninstallHook,
 } from "../ib-commands";
 import type { NewAgentOptions } from "../ib-commands";
 import { captureTmuxOutput, resizeTmuxWindow, killTmuxSession } from "../tmux-poller";
 import { parseState } from "../parse-state";
 import { openInGhostty } from "../ghostty";
 import { buildFolderItems } from "./folder-browser";
-import type { DialogState } from "./dialog-handler";
+import type { DialogState, SetupItem } from "./dialog-handler";
 import { fuzzyFilterIndices } from "./dialog-handler";
+import { loadRegistry, saveRegistry } from "../registry";
 import { displayState, computeStateColWidth, AGE_COL_WIDTH } from "./agent-tree";
 import type { PaneMode } from "./pane-manager";
 
@@ -563,11 +564,145 @@ export function handleHelp(ctx: ActionCtx) {
       row("S", "snapshot"),
       "",
       header("App"),
-      row("h", "help"),
+      row("?", "help"),
+      row("h", "setup"),
       row("Ctrl-C", "quit"),
       "",
       `${DIM}Press any key to dismiss${RESET}`,
     ],
+  });
+}
+
+export function handleSetup(ctx: ActionCtx) {
+  // Determine repo path: selected agent's repo, or single repo, or show picker
+  if (ctx.repos.length === 0) { ctx.setNotice("No repos registered"); return; }
+
+  if (ctx.repos.length === 1) {
+    loadSetupDialog(ctx, ctx.repos[0]!.path);
+    return;
+  }
+
+  // Try to infer from selected agent
+  const selected = ctx.agentTree.selectedAgent;
+  if (selected) {
+    const repo = ctx.repos.find((r) => r.path === selected.repoPath);
+    if (repo) { loadSetupDialog(ctx, repo.path); return; }
+  }
+
+  // Show repo picker
+  ctx.showDialog({
+    type: "select",
+    prompt: "Setup for which repo?",
+    items: ctx.repos.map((r) => `${r.name} (${r.path})`),
+    selectedIndex: 0,
+    onSelect: (repoIndex: number) => {
+      loadSetupDialog(ctx, ctx.repos[repoIndex]!.path);
+    },
+  });
+}
+
+async function loadSetupDialog(ctx: ActionCtx, repoPath: string) {
+  const items: SetupItem[] = [];
+
+  // Fetch hooks status
+  const result = await hooksStatus(repoPath);
+  if (result.ok && result.stdout) {
+    for (const line of result.stdout.split("\n")) {
+      const colonIdx = line.indexOf(":");
+      if (colonIdx === -1) continue;
+      const hookName = line.slice(0, colonIdx).trim();
+      const status = line.slice(colonIdx + 1).trim();
+      if (!hookName) continue;
+      items.push({
+        label: hookName,
+        value: status === "installed" ? "installed" : "not installed",
+        actionable: true,
+        kind: "hook",
+      });
+    }
+  }
+
+  // Check .gitignore contains .ittybitty
+  let gitignoreHasIttybitty = false;
+  try {
+    const gitignoreFile = Bun.file(`${repoPath}/.gitignore`);
+    if (await gitignoreFile.exists()) {
+      const content = await gitignoreFile.text();
+      gitignoreHasIttybitty = content.split("\n").some((line) => line.trim() === ".ittybitty" || line.trim() === ".ittybitty/");
+    }
+  } catch { /* ignore */ }
+  items.push({
+    label: ".gitignore contains .ittybitty",
+    value: gitignoreHasIttybitty ? "yes" : "no",
+    actionable: false,
+    kind: "info",
+  });
+
+  // Check .ittybitsy.json exists
+  let registryExists = false;
+  try {
+    const regFile = Bun.file(`${process.env.HOME ?? ""}/.itsybitsy.json`);
+    registryExists = await regFile.exists();
+  } catch { /* ignore */ }
+  items.push({
+    label: ".itsybitsy.json exists",
+    value: registryExists ? "yes" : "no",
+    actionable: false,
+    kind: "info",
+  });
+
+  // Diff tool
+  items.push({
+    label: "Diff tool",
+    value: ctx.diffTool ?? "",
+    actionable: true,
+    kind: "difftool",
+  });
+
+  // Find first actionable index
+  const firstActionable = items.findIndex((i) => i.actionable);
+
+  ctx.showDialog({
+    type: "setup",
+    items,
+    selectedIndex: firstActionable !== -1 ? firstActionable : 0,
+    repoPath,
+    onAction: (item: SetupItem) => {
+      if (item.kind === "hook") {
+        const shouldInstall = item.value !== "installed";
+        const fn = shouldInstall ? installHook : uninstallHook;
+        fn(repoPath, item.label).then((res) => {
+          if (res.ok) {
+            item.value = shouldInstall ? "installed" : "not installed";
+            ctx.setNotice(`${shouldInstall ? "Installed" : "Uninstalled"} ${item.label}`);
+          } else {
+            ctx.setNotice(`Failed: ${res.stderr || res.stdout}`);
+          }
+          ctx.tui?.requestRender();
+        });
+      } else if (item.kind === "difftool") {
+        ctx.closeDialog();
+        ctx.showDialog({
+          type: "input",
+          prompt: "Diff tool command:",
+          value: ctx.diffTool ?? "",
+          onSubmit: (value: string) => {
+            ctx.closeDialog();
+            const newTool = value.trim() || undefined;
+            ctx.diffTool = newTool;
+            // Save to registry
+            loadRegistry().then((reg) => {
+              reg.diffTool = newTool;
+              return saveRegistry(reg);
+            }).then(() => {
+              ctx.setNotice(newTool ? `Diff tool set to: ${newTool}` : "Diff tool cleared");
+            }).catch((err) => {
+              ctx.setNotice(`Failed to save: ${err}`);
+            });
+          },
+        });
+      }
+    },
   });
 }
 

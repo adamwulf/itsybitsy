@@ -123,3 +123,15 @@ export async function pauseAgent(agent: Agent): Promise<IbCommandResult> {
 export async function acknowledgeQuestion(repoPath: string, questionId: string): Promise<IbCommandResult> {
   return runIb(["acknowledge", questionId], repoPath);
 }
+
+export async function hooksStatus(repoPath: string): Promise<IbCommandResult> {
+  return runIb(["hooks", "status"], repoPath);
+}
+
+export async function installHook(repoPath: string, hookName: string): Promise<IbCommandResult> {
+  return runIb(["hooks", "install", hookName], repoPath);
+}
+
+export async function uninstallHook(repoPath: string, hookName: string): Promise<IbCommandResult> {
+  return runIb(["hooks", "uninstall", hookName], repoPath);
+}

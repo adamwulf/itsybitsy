@@ -52,7 +52,21 @@ export type DialogState =
       focused: "name" | "worker" | "prompt" | "create" | "cancel";
       onSubmit: (name: string, worker: boolean, prompt: string) => void;
     }
+  | {
+      type: "setup";
+      items: SetupItem[];
+      selectedIndex: number;
+      repoPath: string;
+      onAction: (item: SetupItem) => void;
+    }
   | null;
+
+export type SetupItem = {
+  label: string;
+  value: string;
+  actionable: boolean;
+  kind: "hook" | "info" | "difftool";
+};
 
 /** Wrap logical textarea lines into visual lines using ANSI-aware wrapping.
  *  Adds a trailing empty line when the last visual line fills exactly to the width
@@ -205,6 +219,10 @@ export function handleDialogInput(ctx: DialogCtx, data: string): boolean {
 
   if (dialog.type === "fuzzy") {
     return handleFuzzyDialog(ctx, dialog, data);
+  }
+
+  if (dialog.type === "setup") {
+    return handleSetupDialog(ctx, dialog, data);
   }
 
   return false;
@@ -408,6 +426,39 @@ function handleFolderBrowserDialog(
   return true;
 }
 
+// --- Setup dialog ---
+
+function handleSetupDialog(
+  ctx: DialogCtx,
+  d: Extract<NonNullable<DialogState>, { type: "setup" }>,
+  data: string
+): boolean {
+  const actionableIndices = d.items.map((item, i) => item.actionable ? i : -1).filter((i) => i !== -1);
+  if (actionableIndices.length === 0) return true;
+
+  if (matchesKey(data, Key.down) || data === "j") {
+    // Move to next actionable item
+    const currentPos = actionableIndices.indexOf(d.selectedIndex);
+    if (currentPos < actionableIndices.length - 1) {
+      d.selectedIndex = actionableIndices[currentPos + 1]!;
+    }
+    ctx.tui?.requestRender();
+  } else if (matchesKey(data, Key.up) || data === "k") {
+    // Move to previous actionable item
+    const currentPos = actionableIndices.indexOf(d.selectedIndex);
+    if (currentPos > 0) {
+      d.selectedIndex = actionableIndices[currentPos - 1]!;
+    }
+    ctx.tui?.requestRender();
+  } else if (matchesKey(data, Key.enter)) {
+    const item = d.items[d.selectedIndex];
+    if (item && item.actionable) {
+      d.onAction(item);
+    }
+  }
+  return true;
+}
+
 // --- Fuzzy dialog ---
 
 function handleFuzzyDialog(
@@ -580,4 +631,44 @@ export function buildNewAgentFormContent(
   lines.push(`  ${cancelLabel}   ${createLabel}`);
 
   return { title: `New Agent (${dialog.repoName})`, contentLines: lines };
+}
+
+/** Build content for the setup dialog */
+export function buildSetupContent(
+  dialog: Extract<NonNullable<DialogState>, { type: "setup" }>,
+  innerWidth: number
+): DialogContent {
+  const lines: string[] = [];
+  lines.push(`${DIM}(j/k to navigate, Enter to toggle/edit, Esc to close)${RESET}`);
+  lines.push("");
+
+  for (let i = 0; i < dialog.items.length; i++) {
+    const item = dialog.items[i]!;
+    const isSelected = i === dialog.selectedIndex;
+
+    if (item.kind === "hook") {
+      const installed = item.value === "installed";
+      const badge = installed ? `${GREEN}● installed${RESET}` : `${DIM}○ not installed${RESET}`;
+      const label = `${item.label}  ${badge}`;
+      if (isSelected) {
+        lines.push(`${GREEN}> ${BOLD}${label}${RESET}`);
+      } else {
+        lines.push(`  ${label}`);
+      }
+    } else if (item.kind === "difftool") {
+      const val = item.value || `${DIM}(not set)${RESET}`;
+      const label = `${item.label}: ${val}`;
+      if (isSelected) {
+        lines.push(`${GREEN}> ${BOLD}${label}${RESET}`);
+      } else {
+        lines.push(`  ${label}`);
+      }
+    } else {
+      // info — not selectable
+      const val = item.value === "yes" ? `${GREEN}✓${RESET}` : `${DIM}✗${RESET}`;
+      lines.push(`  ${DIM}${item.label}:${RESET} ${val}`);
+    }
+  }
+
+  return { title: "Setup", contentLines: lines };
 }

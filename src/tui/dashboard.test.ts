@@ -1382,6 +1382,7 @@ describe("formatAgentRow full-width highlight", () => {
     const row = formatAgentRow(agent, "", true, narrowPane, 30);
     expect(visibleWidth(row)).toBe(narrowPane);
   });
+
   test("orphaned agent has warning indicator", () => {
     const agent = makeTestAgent({ orphaned: true });
     const row = formatAgentRow(agent, "", false, paneWidth, 30);

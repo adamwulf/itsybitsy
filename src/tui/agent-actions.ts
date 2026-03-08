@@ -87,6 +87,7 @@ export function handleKill(ctx: ActionCtx) {
 export function handleNuke(ctx: ActionCtx) {
   const agent = ctx.agentTree.selectedAgent;
   if (!agent) {
+    // No agent selected — offer nuke-all (emergency stop for entire repo)
     handleNukeAll(ctx);
     return;
   }
@@ -485,7 +486,7 @@ export function handleHelp(ctx: ActionCtx) {
       header("Actions"),
       row("s", "send message"),
       row("m", "merge"),
-      row("x / !", "kill / nuke"),
+      row("x / !", "kill / nuke (all if none selected)"),
       row("R", "resume"),
       row("P", "pause"),
       row("r", "reassign"),

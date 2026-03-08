@@ -187,7 +187,7 @@ export function handlePause(ctx: ActionCtx) {
 }
 
 /** Collect all descendant IDs of an agent (recursive). */
-export function getDescendantIds(agent: Agent): Set<string> {
+function getDescendantIds(agent: Agent): Set<string> {
   const ids = new Set<string>();
   function walk(a: Agent) {
     for (const child of a.children) {

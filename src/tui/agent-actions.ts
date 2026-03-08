@@ -235,20 +235,43 @@ export function handleMerge(ctx: ActionCtx) {
 export function handleSend(ctx: ActionCtx) {
   const agent = ctx.agentTree.selectedAgent;
   if (!agent) return;
-  ctx.showDialog({
+  const dialog: Extract<NonNullable<DialogState>, { type: "textarea" }> = {
     type: "textarea",
     prompt: `Send message to ${agent.id}:`,
     lines: [""],
     focusedButton: "text",
+    sendAll: false,
     onSubmit: (message: string) => {
       ctx.closeDialog();
       if (!message.trim()) { ctx.setNotice("Send cancelled"); return; }
-      ctx.executeAndRefresh(async () => {
-        const result = await sendMessage(agent, message.trim());
-        ctx.setNotice(result.ok ? `Sent to ${agent.id}` : `Send failed: ${result.stderr || result.stdout}`);
-      });
+      const trimmed = message.trim();
+      if (dialog.sendAll) {
+        // Send to all non-archived agents with active tmux sessions
+        const targets = ctx.agentTree.flatList.filter(
+          (f) => !f.agent.archived && f.agent.meta.tmux_session
+        );
+        if (targets.length === 0) { ctx.setNotice("No active agents to send to"); return; }
+        ctx.executeAndRefresh(async () => {
+          let sent = 0;
+          let failed = 0;
+          for (const f of targets) {
+            const result = await sendMessage(f.agent, trimmed);
+            if (result.ok) sent++; else failed++;
+          }
+          const notice = failed > 0
+            ? `Sent to ${sent} agents, ${failed} failed`
+            : `Sent to ${sent} agents`;
+          ctx.setNotice(notice);
+        });
+      } else {
+        ctx.executeAndRefresh(async () => {
+          const result = await sendMessage(agent, trimmed);
+          ctx.setNotice(result.ok ? `Sent to ${agent.id}` : `Send failed: ${result.stderr || result.stdout}`);
+        });
+      }
     },
-  });
+  };
+  ctx.showDialog(dialog);
 }
 
 /** 'a' — always show repo picker (when >1 repo) */

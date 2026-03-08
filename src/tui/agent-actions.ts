@@ -186,19 +186,61 @@ export function handlePause(ctx: ActionCtx) {
   });
 }
 
+/** Collect all descendant IDs of an agent (recursive). */
+export function getDescendantIds(agent: Agent): Set<string> {
+  const ids = new Set<string>();
+  function walk(a: Agent) {
+    for (const child of a.children) {
+      ids.add(child.id);
+      walk(child);
+    }
+  }
+  walk(agent);
+  return ids;
+}
+
+const NO_PARENT_LABEL = "(No parent - make root)";
+
 export function handleReassign(ctx: ActionCtx) {
   const agent = ctx.agentTree.selectedAgent;
   if (!agent) return;
+
+  // Collect all agents in the same repo, excluding:
+  // - the agent being reassigned
+  // - its descendants (circular dependency prevention)
+  // - worker agents (can't be managers)
+  // - archived agents
+  const descendantIds = getDescendantIds(agent);
+  const candidates = ctx.agentTree.flatList
+    .filter((f) =>
+      f.agent.repoPath === agent.repoPath &&
+      f.agent.id !== agent.id &&
+      !descendantIds.has(f.agent.id) &&
+      !f.agent.meta.worker &&
+      !f.agent.archived
+    );
+
+  // Build display items: "(No parent)" first, then candidate agents
+  const allItems = [
+    NO_PARENT_LABEL,
+    ...candidates.map((f) => f.agent.id),
+  ];
+
   ctx.showDialog({
-    type: "input",
-    prompt: `Reassign ${agent.id} to manager:`,
-    value: "",
-    onSubmit: (newManager: string) => {
+    type: "fuzzy",
+    prompt: `Reassign ${agent.id} to:`,
+    query: "",
+    allItems,
+    filteredIndices: allItems.map((_, i) => i),
+    filteredItems: [...allItems],
+    selectedIndex: 0,
+    onSelect: (originalIndex: number) => {
       ctx.closeDialog();
-      if (!newManager.trim()) { ctx.setNotice("Reassign cancelled"); return; }
+      const newManager = originalIndex === 0 ? null : candidates[originalIndex - 1]!.agent.id;
+      const desc = newManager ?? "root";
       ctx.executeAndRefresh(async () => {
-        const result = await reassignAgent(agent, newManager.trim());
-        ctx.setNotice(result.ok ? `Reassigned ${agent.id} → ${newManager.trim()}` : `Reassign failed: ${result.stderr || result.stdout}`);
+        const result = await reassignAgent(agent, newManager);
+        ctx.setNotice(result.ok ? `Reassigned ${agent.id} → ${desc}` : `Reassign failed: ${result.stderr || result.stdout}`);
       });
     },
   });

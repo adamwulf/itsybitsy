@@ -69,7 +69,7 @@ export async function checkForUpdate(currentVersion: string): Promise<string | n
  * First check runs after a short delay (not immediately) to avoid blocking startup.
  * Re-checks once per hour.
  */
-export function startUpdateChecker(currentVersion: string, onResult: (version: string | null) => void): void {
+export function startUpdateChecker(currentVersion: string, onResult: (version: string) => void): void {
   stopUpdateChecker();
   stopped = false;
 
@@ -79,7 +79,7 @@ export function startUpdateChecker(currentVersion: string, onResult: (version: s
     lastCheckTime = now;
     const result = await checkForUpdate(currentVersion);
     if (stopped) return;
-    onResult(result);
+    if (result !== null) onResult(result);
   };
 
   // First check after 2s delay to avoid blocking startup

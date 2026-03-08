@@ -25,6 +25,8 @@ export class AgentWatcher {
   private refreshTimer: ReturnType<typeof setTimeout> | null = null;
   private running = false;
   private polling = false;
+  private refreshing = false;
+  private refreshQueued = false;
   private lastAgents: Agent[] = [];
 
   constructor(repos: RepoEntry[], events: WatcherEvents) {
@@ -139,6 +141,11 @@ export class AgentWatcher {
 
   /** Read all agents, detect states, and emit update */
   async refresh(): Promise<void> {
+    if (this.refreshing) {
+      this.refreshQueued = true;
+      return;
+    }
+    this.refreshing = true;
     try {
       const { agents, errors } = await readAllAgents(this.repos);
 
@@ -165,6 +172,12 @@ export class AgentWatcher {
       this.events.onUpdate(agents, flatList, questions);
     } catch (err) {
       this.events.onError?.(err instanceof Error ? err : new Error(String(err)));
+    } finally {
+      this.refreshing = false;
+      if (this.refreshQueued) {
+        this.refreshQueued = false;
+        this.refresh();
+      }
     }
   }
 }

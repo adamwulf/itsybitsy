@@ -1,5 +1,6 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import type { Agent, AgentMeta } from "./agents";
+import { makeAgent as _makeAgent } from "./test-utils";
 import {
   killAgent,
   nukeAgent,
@@ -19,29 +20,7 @@ import {
 import type { IbCommandResult } from "./ib-commands";
 
 function makeAgent(id: string, repoPath: string, state = "running"): Agent {
-  return {
-    id,
-    repoPath,
-    repoName: "test-repo",
-    state: state as any,
-    age: "1m",
-    archived: false,
-    children: [],
-    meta: {
-      id,
-      session_id: "sess-1",
-      tmux_session: `tmux-${id}`,
-      prompt: "test prompt",
-      manager: null,
-      created: "2026-03-05T00:00:00Z",
-      created_epoch: Math.floor(Date.now() / 1000) - 60,
-      worktree: true,
-      worker: false,
-      yolo: false,
-      model: "sonnet",
-      claude_pid: "12345",
-    } as AgentMeta,
-  };
+  return _makeAgent({ id, repoPath, repoName: "test-repo", state: state as any });
 }
 
 describe("ib-commands", () => {

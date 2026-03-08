@@ -82,6 +82,8 @@ export class TmuxPoller {
           if (w !== null && this.tmuxSession === targetSession) {
             this.events.onWidth!(w);
           }
+        }).catch(() => {
+          // Silently ignore — width query is best-effort
         });
       }
     } catch (err) {

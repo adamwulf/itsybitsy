@@ -3,6 +3,7 @@ import { join } from "path";
 import { mkdtemp, rm, mkdir, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import type { Agent, FlatAgent, PendingQuestion } from "./agents";
+import { makeAgent as _makeAgent } from "./test-utils";
 import type { RepoEntry } from "./registry";
 
 // --- Mock agents module ---
@@ -24,29 +25,7 @@ mock.module("./agents", () => ({
 const { AgentWatcher } = await import("./watcher");
 
 function makeAgent(id: string, archived = false): Agent {
-  return {
-    id,
-    repoPath: "/tmp/test",
-    repoName: "test",
-    state: "unknown",
-    age: "1m",
-    archived,
-    children: [],
-    meta: {
-      id,
-      session_id: "sess-1",
-      tmux_session: `tmux-${id}`,
-      prompt: "test prompt",
-      manager: null,
-      created: "2026-03-05T00:00:00Z",
-      created_epoch: Math.floor(Date.now() / 1000) - 60,
-      worktree: true,
-      worker: false,
-      yolo: false,
-      model: "sonnet",
-      claude_pid: "1234",
-    },
-  };
+  return _makeAgent({ id, archived });
 }
 
 function setupDefaultMocks(agents: Agent[] = []) {

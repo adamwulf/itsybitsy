@@ -15,8 +15,8 @@ describe("buildFolderItems", () => {
     await rm(tmpDir, { recursive: true, force: true });
   });
 
-  test("ancestors extracted correctly for a deep path", () => {
-    const items = buildFolderItems(tmpDir);
+  test("ancestors extracted correctly for a deep path", async () => {
+    const items = await buildFolderItems(tmpDir);
     const ancestors = items.filter((i) => i.isAncestor);
     // Should have ancestors from / down to parent of tmpDir
     expect(ancestors.length).toBeGreaterThan(0);
@@ -28,8 +28,8 @@ describe("buildFolderItems", () => {
     }
   });
 
-  test("current folder identified correctly", () => {
-    const items = buildFolderItems(tmpDir);
+  test("current folder identified correctly", async () => {
+    const items = await buildFolderItems(tmpDir);
     const current = items.filter((i) => i.isCurrent);
     expect(current.length).toBe(1);
     expect(current[0]!.path).toBe(tmpDir);
@@ -41,7 +41,7 @@ describe("buildFolderItems", () => {
     await mkdir(join(tmpDir, ".hidden"));
     await mkdir(join(tmpDir, "visible"));
 
-    const items = buildFolderItems(tmpDir);
+    const items = await buildFolderItems(tmpDir);
     const children = items.filter((i) => !i.isAncestor && !i.isCurrent);
     const names = children.map((c) => c.name);
     expect(names).toContain("visible");
@@ -52,7 +52,7 @@ describe("buildFolderItems", () => {
     await mkdir(join(tmpDir, "git-repo", ".git"), { recursive: true });
     await mkdir(join(tmpDir, "not-a-repo"));
 
-    const items = buildFolderItems(tmpDir);
+    const items = await buildFolderItems(tmpDir);
     const gitRepo = items.find((i) => i.name === "git-repo");
     const notRepo = items.find((i) => i.name === "not-a-repo");
     expect(gitRepo!.isGit).toBe(true);
@@ -64,7 +64,7 @@ describe("buildFolderItems", () => {
     await mkdir(join(tmpDir, "alpha"));
     await mkdir(join(tmpDir, "mango"));
 
-    const items = buildFolderItems(tmpDir);
+    const items = await buildFolderItems(tmpDir);
     const children = items.filter((i) => !i.isAncestor && !i.isCurrent);
     const names = children.map((c) => c.name);
     expect(names).toEqual(["alpha", "mango", "zebra"]);
@@ -74,7 +74,7 @@ describe("buildFolderItems", () => {
     await mkdir(join(tmpDir, "child1"));
     await mkdir(join(tmpDir, "child2"));
 
-    const items = buildFolderItems(tmpDir);
+    const items = await buildFolderItems(tmpDir);
     const current = items.find((i) => i.isCurrent)!;
     const children = items.filter((i) => !i.isAncestor && !i.isCurrent);
     for (const child of children) {
@@ -82,8 +82,8 @@ describe("buildFolderItems", () => {
     }
   });
 
-  test("no children for empty directory", () => {
-    const items = buildFolderItems(tmpDir);
+  test("no children for empty directory", async () => {
+    const items = await buildFolderItems(tmpDir);
     const children = items.filter((i) => !i.isAncestor && !i.isCurrent);
     expect(children.length).toBe(0);
   });
@@ -91,7 +91,7 @@ describe("buildFolderItems", () => {
   test("current folder git detection works", async () => {
     await mkdir(join(tmpDir, ".git"));
 
-    const items = buildFolderItems(tmpDir);
+    const items = await buildFolderItems(tmpDir);
     const current = items.find((i) => i.isCurrent)!;
     expect(current.isGit).toBe(true);
   });

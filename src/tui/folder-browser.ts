@@ -4,7 +4,7 @@
  */
 
 import { join, dirname, sep } from "path";
-import { readdirSync, existsSync } from "fs";
+import { readdir, stat } from "fs/promises";
 
 export interface FolderItem {
   path: string;
@@ -19,7 +19,7 @@ export interface FolderItem {
  * Build the list of navigable folder items for the folder browser dialog.
  * Returns: ancestors (from / down to parent), current folder, then sorted child dirs.
  */
-export function buildFolderItems(currentPath: string): FolderItem[] {
+export async function buildFolderItems(currentPath: string): Promise<FolderItem[]> {
   const items: FolderItem[] = [];
 
   // Build ancestor chain from root down to parent
@@ -39,7 +39,7 @@ export function buildFolderItems(currentPath: string): FolderItem[] {
       path: seg,
       name: seg === sep ? sep : seg.split(sep).pop()!,
       depth: i,
-      isGit: checkIsGit(seg),
+      isGit: await checkIsGit(seg),
       isAncestor: true,
       isCurrent: false,
     });
@@ -51,14 +51,14 @@ export function buildFolderItems(currentPath: string): FolderItem[] {
     path: currentPath,
     name: currentPath === sep ? sep : currentPath.split(sep).pop()!,
     depth: currentDepth,
-    isGit: checkIsGit(currentPath),
+    isGit: await checkIsGit(currentPath),
     isAncestor: false,
     isCurrent: true,
   });
 
   // Children: directories only, no hidden, sorted alphabetically
   try {
-    const entries = readdirSync(currentPath, { withFileTypes: true });
+    const entries = await readdir(currentPath, { withFileTypes: true });
     const childDirs = entries
       .filter((e) => e.isDirectory() && !e.name.startsWith("."))
       .sort((a, b) => a.name.localeCompare(b.name));
@@ -69,7 +69,7 @@ export function buildFolderItems(currentPath: string): FolderItem[] {
         path: childPath,
         name: child.name,
         depth: currentDepth + 1,
-        isGit: checkIsGit(childPath),
+        isGit: await checkIsGit(childPath),
         isAncestor: false,
         isCurrent: false,
       });
@@ -81,6 +81,11 @@ export function buildFolderItems(currentPath: string): FolderItem[] {
   return items;
 }
 
-function checkIsGit(itemPath: string): boolean {
-  return existsSync(join(itemPath, ".git"));
+async function checkIsGit(itemPath: string): Promise<boolean> {
+  try {
+    await stat(join(itemPath, ".git"));
+    return true;
+  } catch {
+    return false;
+  }
 }

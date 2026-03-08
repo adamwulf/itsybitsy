@@ -586,6 +586,139 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect((dashboard.dialog as any).focusedButton).toBe("text");
   });
 
+  test("send textarea: sendAll defaults to false", () => {
+    setupDashboardWithAgent();
+    dashboard.handleInput("s");
+    expect((dashboard.dialog as any).sendAll).toBe(false);
+  });
+
+  test("send textarea: Ctrl+A toggles sendAll", () => {
+    setupDashboardWithAgent();
+    dashboard.handleInput("s");
+    expect((dashboard.dialog as any).sendAll).toBe(false);
+    dashboard.handleInput("\x01"); // Ctrl+A
+    expect((dashboard.dialog as any).sendAll).toBe(true);
+    dashboard.handleInput("\x01"); // Ctrl+A again
+    expect((dashboard.dialog as any).sendAll).toBe(false);
+  });
+
+  test("send textarea: Ctrl+A works from any focus position", () => {
+    setupDashboardWithAgent();
+    dashboard.handleInput("s");
+    // Start in text focus
+    expect((dashboard.dialog as any).focusedButton).toBe("text");
+    dashboard.handleInput("\x01");
+    expect((dashboard.dialog as any).sendAll).toBe(true);
+    // Tab to cancel
+    dashboard.handleInput("\t");
+    expect((dashboard.dialog as any).focusedButton).toBe("cancel");
+    dashboard.handleInput("\x01");
+    expect((dashboard.dialog as any).sendAll).toBe(false);
+    // Tab to send
+    dashboard.handleInput("\t");
+    expect((dashboard.dialog as any).focusedButton).toBe("send");
+    dashboard.handleInput("\x01");
+    expect((dashboard.dialog as any).sendAll).toBe(true);
+  });
+
+  test("send textarea: sendAll sends to all active non-archived agents", async () => {
+    dashboard = makeDashboard();
+    const ibCalls: { args: string[]; cwd: string }[] = [];
+    setRunner(async (args, cwd) => {
+      ibCalls.push({ args, cwd });
+      return { ok: true, exitCode: 0, stdout: "ok", stderr: "" };
+    });
+
+    const agent1 = makeAgent("agent-a", "/repos/test");
+    agent1.state = "running";
+    const agent2 = makeAgent("agent-b", "/repos/test");
+    agent2.state = "running";
+    const agent3 = makeAgent("agent-c", "/repos/test");
+    agent3.archived = true; // should be skipped
+    const agent4 = makeAgent("agent-d", "/repos/test");
+    agent4.meta.tmux_session = ""; // no tmux session, should be skipped
+    const flatList: FlatAgent[] = [
+      { agent: agent1, depth: 0, connector: "" },
+      { agent: agent2, depth: 0, connector: "" },
+      { agent: agent3, depth: 0, connector: "" },
+      { agent: agent4, depth: 0, connector: "" },
+    ];
+    dashboard.onUpdate([agent1, agent2, agent3, agent4], flatList, []);
+
+    dashboard.handleInput("s");
+    dashboard.handleInput("\x01"); // Ctrl+A to toggle sendAll
+    expect((dashboard.dialog as any).sendAll).toBe(true);
+    for (const ch of "hi") dashboard.handleInput(ch);
+    // Tab to cancel, tab to send, enter to submit
+    dashboard.handleInput("\t");
+    dashboard.handleInput("\t");
+    dashboard.handleInput("\r");
+    await Bun.sleep(10);
+    // Should have sent to agent-a and agent-b only (agent-c archived, agent-d no tmux)
+    const sendCalls = ibCalls.filter((c) => c.args[0] === "send");
+    expect(sendCalls.length).toBe(2);
+    expect(sendCalls[0]!.args).toEqual(["send", "agent-a", "hi"]);
+    expect(sendCalls[1]!.args).toEqual(["send", "agent-b", "hi"]);
+  });
+
+  test("send textarea: sendAll=false sends to selected agent only", async () => {
+    dashboard = makeDashboard();
+    const ibCalls: { args: string[]; cwd: string }[] = [];
+    setRunner(async (args, cwd) => {
+      ibCalls.push({ args, cwd });
+      return { ok: true, exitCode: 0, stdout: "ok", stderr: "" };
+    });
+
+    const agent1 = makeAgent("agent-a", "/repos/test");
+    agent1.state = "running";
+    const agent2 = makeAgent("agent-b", "/repos/test");
+    agent2.state = "running";
+    const flatList: FlatAgent[] = [
+      { agent: agent1, depth: 0, connector: "" },
+      { agent: agent2, depth: 0, connector: "" },
+    ];
+    dashboard.onUpdate([agent1, agent2], flatList, []);
+
+    dashboard.handleInput("s");
+    expect((dashboard.dialog as any).sendAll).toBe(false);
+    for (const ch of "hi") dashboard.handleInput(ch);
+    dashboard.handleInput("\t");
+    dashboard.handleInput("\t");
+    dashboard.handleInput("\r");
+    await Bun.sleep(10);
+    const sendCalls = ibCalls.filter((c) => c.args[0] === "send");
+    expect(sendCalls.length).toBe(1);
+    expect(sendCalls[0]!.args).toEqual(["send", "agent-a", "hi"]);
+  });
+
+  test("send textarea: sendAll state is reflected in dialog", () => {
+    setupDashboardWithAgent();
+    dashboard.handleInput("s");
+    // sendAll starts as false
+    expect((dashboard.dialog as any).sendAll).toBe(false);
+    // Toggle sendAll on
+    dashboard.handleInput("\x01");
+    expect((dashboard.dialog as any).sendAll).toBe(true);
+    // Dialog prompt remains the same (title unchanged)
+    expect((dashboard.dialog as any).prompt).toContain("Send message");
+  });
+
+  test("send textarea: answer question dialog does NOT have sendAll", () => {
+    dashboard = makeDashboard();
+    setRunner(async (args, cwd) => {
+      return { ok: true, exitCode: 0, stdout: "ok", stderr: "" };
+    });
+    const agent = makeAgent("agent-test", "/repos/test");
+    agent.state = "running";
+    const flatList: FlatAgent[] = [{ agent, depth: 0, connector: "" }];
+    const question = { id: "q1", agent: "agent-test", question: "What?", timestamp: "2026-03-05T00:00:00Z", status: "pending" as const, repoPath: "/repos/test" };
+    dashboard.onUpdate([agent], flatList, [question]);
+    dashboard.jumpToMode("QUESTIONS");
+    dashboard.handleInput("\r"); // Enter to answer
+    expect(dashboard.dialog!.type).toBe("textarea");
+    expect((dashboard.dialog as any).sendAll).toBeUndefined();
+  });
+
   test("m key runs merge-check then shows confirm", async () => {
     setupDashboardWithAgent();
     dashboard.handleInput("m");

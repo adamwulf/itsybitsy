@@ -303,6 +303,12 @@ class DialogOverlayComponent implements Component {
       }
       case "textarea": {
         const lines: string[] = [];
+        if (dialog.sendAll !== undefined) {
+          const allIndicator = dialog.sendAll
+            ? `${BOLD}${GREEN}[ALL]${RESET} ${DIM}Ctrl-A: toggle${RESET}`
+            : `${DIM}[ALL] Ctrl-A: send to all${RESET}`;
+          lines.push(allIndicator);
+        }
         const { outputLines, hasScrollIndicator } = renderTextareaBlock(dialog.lines, innerWidth, dialog.focusedButton === "text");
         lines.push(...outputLines);
         if (hasScrollIndicator) { lines.push(`${DIM}↑${RESET}`); }

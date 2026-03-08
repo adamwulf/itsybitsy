@@ -31,6 +31,7 @@ export type DialogState =
       prompt: string;
       lines: string[];
       focusedButton: "text" | "send" | "cancel";
+      sendAll?: boolean;
       onSubmit: (value: string) => void;
     }
   | {
@@ -216,6 +217,13 @@ function handleTextareaDialog(
   d: Extract<NonNullable<DialogState>, { type: "textarea" }>,
   data: string
 ): boolean {
+  // Ctrl+A toggles sendAll from any focus position
+  if (d.sendAll !== undefined && matchesKey(data, Key.ctrl("a"))) {
+    d.sendAll = !d.sendAll;
+    ctx.tui?.requestRender();
+    return true;
+  }
+
   if (d.focusedButton === "text") {
     if (matchesKey(data, Key.tab)) {
       d.focusedButton = "cancel";

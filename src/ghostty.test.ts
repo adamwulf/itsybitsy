@@ -97,8 +97,10 @@ describe("openInGhostty", () => {
 
       const cmdArray = spawnArgs[0] as string[];
       expect(cmdArray[0]).toBe("ghostty");
-      expect(cmdArray[1]).toContain("tmux attach -t test-session");
-      expect(cmdArray[1]).toContain("tmux set-option -t test-session window-size latest");
+      expect(cmdArray[1]).toContain("tmux attach -t");
+      expect(cmdArray[1]).toContain("tmux set-option -t");
+      // Session name passed as positional param after --
+      expect(cmdArray[1]).toContain("-- test-session");
     });
 
     test("spawns with stdio ignored", async () => {

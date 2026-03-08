@@ -181,7 +181,7 @@ class StatusBarComponent implements Component {
     const errBadge = this.errorCount > 0
       ? `  ${BOLD}${RED}[${this.errorCount} errors]${RESET}${DIM}`
       : "";
-    const row1Left = `${DIM}j/k: select    ;/l: scroll    p/n: pane    ${qLabel}    s: send    m: merge    Ctrl-C: quit${errBadge}${RESET}`;
+    const row1Left = `${DIM}j/k: select    ;/l: scroll    p/n: pane    ${qLabel}    s: send    m: merge${errBadge}${RESET}`;
     const usageStr = this.formatUsage();
     const row2Left = `${DIM}@: jump    /: commands    a: new agent    h: help    x: kill    R: resume    r: reassign    w: worktree    G: ghostty${RESET}`;
     const now = new Date();
@@ -190,7 +190,13 @@ class StatusBarComponent implements Component {
     const row2Right = `${DIM}${timeStr}  ${versionStr}${RESET}`;
     const row1 = this.composeLine(row1Left, usageStr, width);
     const row2 = this.composeLine(row2Left, row2Right, width);
-    return [row1, row2];
+    // Row 3: Ctrl-C hint centered at the bottom
+    const ctrlCHint = `${DIM}Ctrl-C: quit${RESET}`;
+    const ctrlCWidth = visibleWidth(ctrlCHint);
+    const ctrlCPad = Math.max(0, Math.floor((width - ctrlCWidth) / 2));
+    const row3 = truncateToWidth(" ".repeat(ctrlCPad) + ctrlCHint, width, "");
+
+    return [row1, row2, row3];
   }
 
   private composeLine(left: string, right: string, width: number): string {
@@ -835,7 +841,8 @@ export class DashboardComponent implements Component {
     lines.push(truncateToWidth(`${BOLD}itsybitsy${RESET} ${subtitle}`, width, ""));
 
     if (isTreeMode) {
-      const treeHeight = Math.max(5, terminalRows - 5);
+      // title(1) + separator(1) + separator(1) + statusBar(3) = 6 lines of chrome
+      const treeHeight = Math.max(5, terminalRows - 6);
       this.agentTree.maxHeight = treeHeight;
       lines.push(this.buildTitledSeparator(" TREE ", "", width));
       const treeLines = this.agentTree.render(width);
@@ -855,7 +862,7 @@ export class DashboardComponent implements Component {
       const splitAt = this.splitPane.getLeftWidth() + 1;
       lines.push(this.buildTitledSeparator(leftTitle, rightTitle, width, splitAt, FULL_WIDTH_MODES.has(this.rightPane.mode) ? "" : "┬"));
 
-      const bottomHeight = 2;
+      const bottomHeight = 3; // status bar is always 3 lines
       const separatorHeight = 1;
       const usedHeight = lines.length + separatorHeight + bottomHeight;
       const availableHeight = Math.max(5, terminalRows - usedHeight);

@@ -28,6 +28,7 @@ import type { Agent, FlatAgent, PendingQuestion } from "../agents";
 import { SplitPane } from "./split-pane";
 import { wrapLines } from "./wrap";
 import { fetchUsage } from "../usage";
+import { startUpdateChecker, stopUpdateChecker } from "../update-check";
 import type { UsageData } from "../usage";
 import { getStateColors, setupColorSchemeDetection } from "./color-scheme";
 import { AgentTreeComponent } from "./agent-tree";
@@ -342,6 +343,7 @@ export class DashboardComponent implements Component {
   private usageTimer: ReturnType<typeof setInterval> | null = null;
   pendingSelectNewestInRepo: string | null = null;
   private _questionsFocused = false;
+  updateAvailable: string | null = null;
 
   /** Read-only access to whether questions list has focus (for testing) */
   get questionsFocused(): boolean {
@@ -422,6 +424,10 @@ export class DashboardComponent implements Component {
     this.tmuxPoller.start();
     this.refreshUsage();
     this.usageTimer = setInterval(() => this.refreshUsage(), 60_000);
+    startUpdateChecker(this.statusBar.version, (version) => {
+      this.updateAvailable = version;
+      this.tui?.requestRender();
+    });
   }
 
   stopPolling() {
@@ -430,6 +436,7 @@ export class DashboardComponent implements Component {
       clearInterval(this.usageTimer);
       this.usageTimer = null;
     }
+    stopUpdateChecker();
   }
 
   private refreshUsage() {
@@ -833,10 +840,13 @@ export class DashboardComponent implements Component {
     const isTreeMode = this.rightPane.mode === "TREE";
 
     // Header
+    const updateTag = this.updateAvailable
+      ? ` ${GREEN}Update available: ${this.updateAvailable}${RESET}`
+      : "";
     const subtitle = this.lastSentNotice
       ? `${DIM}—${RESET} ${YELLOW}${this.lastSentNotice}${RESET}`
       : `${DIM}— agent dashboard${RESET}`;
-    lines.push(truncateToWidth(`${BOLD}itsybitsy${RESET} ${subtitle}`, width, ""));
+    lines.push(truncateToWidth(`${BOLD}itsybitsy${RESET} ${subtitle}${updateTag}`, width, ""));
 
     if (isTreeMode) {
       // title(1) + separator(1) + separator(1) + statusBar(3) = 6 lines of chrome

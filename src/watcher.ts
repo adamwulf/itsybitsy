@@ -12,7 +12,7 @@ import type { Agent, FlatAgent, PendingQuestion } from "./agents";
 import type { RepoEntry } from "./registry";
 
 export interface WatcherEvents {
-  onUpdate: (agents: Agent[], flatList: FlatAgent[], questions: PendingQuestion[]) => void;
+  onUpdate: (agents: Agent[], flatList: FlatAgent[], questions: PendingQuestion[], orphanedTmuxSessions: string[]) => void;
   onError?: (error: Error) => void;
 }
 
@@ -28,6 +28,7 @@ export class AgentWatcher {
   private refreshing = false;
   private refreshQueued = false;
   private lastAgents: Agent[] = [];
+  private lastOrphanedSessions: string[] = [];
 
   constructor(repos: RepoEntry[], events: WatcherEvents) {
     this.repos = repos;
@@ -131,7 +132,7 @@ export class AgentWatcher {
         this.repos.map((r) => readPendingQuestions(r.path))
       );
       const questions = questionResults.flat();
-      this.events.onUpdate(agents, flatList, questions);
+      this.events.onUpdate(agents, flatList, questions, this.lastOrphanedSessions);
     } catch (err) {
       this.events.onError?.(err instanceof Error ? err : new Error(String(err)));
     } finally {
@@ -147,15 +148,16 @@ export class AgentWatcher {
     }
     this.refreshing = true;
     try {
-      const { agents, errors } = await readAllAgents(this.repos);
+      const { agents, errors, orphanedTmuxSessions } = await readAllAgents(this.repos);
 
       // Report any read errors
       for (const err of errors) {
         this.events.onError?.(new Error(err.error));
       }
 
-      // Save agents for background state polling
+      // Save agents and orphaned sessions for background state polling
       this.lastAgents = agents;
+      this.lastOrphanedSessions = orphanedTmuxSessions;
 
       // Detect state for each agent via tmux capture + parseState
       await detectAgentStates(agents);
@@ -169,7 +171,7 @@ export class AgentWatcher {
       );
       const questions = questionResults.flat();
 
-      this.events.onUpdate(agents, flatList, questions);
+      this.events.onUpdate(agents, flatList, questions, orphanedTmuxSessions);
     } catch (err) {
       this.events.onError?.(err instanceof Error ? err : new Error(String(err)));
     } finally {

@@ -9,6 +9,7 @@ import { makeAgent as _makeAgent } from "../test-utils";
 import { TmuxPaneComponent, RightPaneComponent, DashboardComponent, AgentTreeComponent, colorizeDiff, colorizeLog, formatAgentRow } from "./dashboard";
 import { visibleWidth } from "@mariozechner/pi-tui";
 import { setRunner, resetRunner } from "../ib-commands";
+import { PANE_MODES } from "./pane-manager";
 
 function makeAgent(id: string, repoPath: string, archived = false): Agent {
   return _makeAgent({ id, repoPath, archived });
@@ -1659,6 +1660,124 @@ describe("Terminal title (G-10)", () => {
     // Update again with same agent — no title change expected
     dashboard.onUpdate([agent], flatList, []);
     expect(titles).toHaveLength(0);
+  });
+});
+
+describe("Orphaned tmux sessions (Phase 10)", () => {
+  let dashboard: DashboardComponent;
+
+  test("onUpdate stores orphaned sessions and updates error count", () => {
+    dashboard = makeDashboard();
+    const agent = makeAgent("agent-test", "/repos/test");
+    const flatList: FlatAgent[] = [{ agent, depth: 0, connector: "" }];
+    dashboard.onUpdate([agent], flatList, [], ["ittybitty-abc-orphan1", "ittybitty-abc-orphan2"]);
+    expect(dashboard.rightPane.orphanedTmuxSessions).toEqual(["ittybitty-abc-orphan1", "ittybitty-abc-orphan2"]);
+  });
+
+  test("ERRORS pane shows orphaned tmux sessions", () => {
+    dashboard = makeDashboard();
+    const agent = makeAgent("agent-test", "/repos/test");
+    const flatList: FlatAgent[] = [{ agent, depth: 0, connector: "" }];
+    dashboard.onUpdate([agent], flatList, [], ["ittybitty-abc-orphan1"]);
+    dashboard.jumpToMode("ERRORS");
+    const lines = dashboard.rightPane.render(80);
+    const allText = lines.map(stripAnsi).join("\n");
+    expect(allText).toContain("Orphaned tmux sessions:");
+    expect(allText).toContain("ittybitty-abc-orphan1");
+    expect(allText).toContain("no matching agent");
+  });
+
+  test("error count includes both errors and orphaned sessions", () => {
+    dashboard = makeDashboard();
+    const agent = makeAgent("agent-test", "/repos/test");
+    const flatList: FlatAgent[] = [{ agent, depth: 0, connector: "" }];
+    dashboard.onUpdate([agent], flatList, [], ["ittybitty-orphan"]);
+    dashboard.addError("Some error");
+    // Error badge should show 2 (1 error + 1 orphan)
+    const rendered = dashboard.render(120);
+    const allText = rendered.map(stripAnsi).join("\n");
+    expect(allText).toContain("[2 errors]");
+  });
+
+  test("clearErrors clears errors but preserves orphaned sessions in count", () => {
+    dashboard = makeDashboard();
+    const agent = makeAgent("agent-test", "/repos/test");
+    const flatList: FlatAgent[] = [{ agent, depth: 0, connector: "" }];
+    dashboard.onUpdate([agent], flatList, [], ["ittybitty-orphan"]);
+    dashboard.addError("Some error");
+    dashboard.clearErrors();
+    expect(dashboard.errors.length).toBe(0);
+    // Orphan still counts
+    dashboard.jumpToMode("ERRORS");
+    const lines = dashboard.rightPane.render(80);
+    const allText = lines.map(stripAnsi).join("\n");
+    expect(allText).toContain("ittybitty-orphan");
+  });
+
+  test("ERRORS pane shows Enter hint when orphans exist", () => {
+    dashboard = makeDashboard();
+    const agent = makeAgent("agent-test", "/repos/test");
+    const flatList: FlatAgent[] = [{ agent, depth: 0, connector: "" }];
+    dashboard.onUpdate([agent], flatList, [], ["ittybitty-orphan"]);
+    dashboard.jumpToMode("ERRORS");
+    const lines = dashboard.rightPane.render(80);
+    const allText = lines.map(stripAnsi).join("\n");
+    expect(allText).toContain("Enter to kill orphan");
+  });
+
+  test("Enter in ERRORS mode with orphans opens kill dialog", () => {
+    dashboard = makeDashboard();
+    setRunner(async () => ({ ok: true, exitCode: 0, stdout: "", stderr: "" }));
+    const agent = makeAgent("agent-test", "/repos/test");
+    const flatList: FlatAgent[] = [{ agent, depth: 0, connector: "" }];
+    dashboard.onUpdate([agent], flatList, [], ["ittybitty-orphan"]);
+    dashboard.handleInput("e"); // jump to ERRORS mode
+    dashboard.handleInput("\r"); // Enter
+    expect(dashboard.dialog).not.toBeNull();
+    expect(dashboard.dialog!.type).toBe("confirm");
+    expect((dashboard.dialog as any).prompt).toContain("ittybitty-orphan");
+    resetRunner();
+  });
+
+  test("Enter in ERRORS mode with multiple orphans shows select dialog", () => {
+    dashboard = makeDashboard();
+    setRunner(async () => ({ ok: true, exitCode: 0, stdout: "", stderr: "" }));
+    const agent = makeAgent("agent-test", "/repos/test");
+    const flatList: FlatAgent[] = [{ agent, depth: 0, connector: "" }];
+    dashboard.onUpdate([agent], flatList, [], ["ittybitty-orphan1", "ittybitty-orphan2"]);
+    dashboard.handleInput("e"); // jump to ERRORS mode
+    dashboard.handleInput("\r"); // Enter
+    expect(dashboard.dialog).not.toBeNull();
+    expect(dashboard.dialog!.type).toBe("select");
+    expect((dashboard.dialog as any).items).toContain("ittybitty-orphan1");
+    expect((dashboard.dialog as any).items).toContain("ittybitty-orphan2");
+    resetRunner();
+  });
+
+  test("pane cycle does not skip ERRORS when orphaned sessions exist", () => {
+    dashboard = makeDashboard();
+    const agent = makeAgent("agent-test", "/repos/test");
+    const flatList: FlatAgent[] = [{ agent, depth: 0, connector: "" }];
+    // No regular errors, but orphans exist
+    dashboard.onUpdate([agent], flatList, [], ["ittybitty-orphan"]);
+    // Cycle through all modes — ERRORS should be reachable
+    const modes: string[] = [];
+    for (let i = 0; i < PANE_MODES.length + 1; i++) {
+      modes.push(dashboard.currentMode);
+      dashboard.handleInput("p");
+    }
+    expect(modes).toContain("ERRORS");
+    resetRunner();
+  });
+
+  test("onUpdate with empty orphans clears previous orphans", () => {
+    dashboard = makeDashboard();
+    const agent = makeAgent("agent-test", "/repos/test");
+    const flatList: FlatAgent[] = [{ agent, depth: 0, connector: "" }];
+    dashboard.onUpdate([agent], flatList, [], ["ittybitty-orphan"]);
+    expect(dashboard.rightPane.orphanedTmuxSessions.length).toBe(1);
+    dashboard.onUpdate([agent], flatList, [], []);
+    expect(dashboard.rightPane.orphanedTmuxSessions.length).toBe(0);
   });
 });
 

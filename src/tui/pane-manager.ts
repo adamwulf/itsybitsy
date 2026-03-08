@@ -77,6 +77,7 @@ export class RightPaneComponent implements Component {
   denialsContent: DenialEntry[] | null = null;
   denialFilter: DenialFilter = "all";
   errors: string[] = [];
+  orphanedTmuxSessions: string[] = [];
   diffContent: string[] | null = null;
   diffLoading = false;
   statusContent: string[] | null = null;
@@ -175,13 +176,24 @@ export class RightPaneComponent implements Component {
         if (this.content.length === 0) this.content = [`${DIM}No agents${RESET}`];
         break;
       }
-      case "ERRORS":
-        if (this.errors.length === 0) { this.content = [`${DIM}No errors${RESET}`]; }
+      case "ERRORS": {
+        const totalErrors = this.errors.length + this.orphanedTmuxSessions.length;
+        if (totalErrors === 0) { this.content = [`${DIM}No errors${RESET}`]; }
         else {
-          this.content = [`${DIM}${this.errors.length} error(s) — press 'c' to clear${RESET}`, ""];
+          const hints = ["'c' to clear"];
+          if (this.orphanedTmuxSessions.length > 0) hints.push("Enter to kill orphan");
+          this.content = [`${DIM}${totalErrors} error(s) — ${hints.join(", ")}${RESET}`, ""];
           this.content.push(...this.errors);
+          if (this.orphanedTmuxSessions.length > 0) {
+            if (this.errors.length > 0) this.content.push("");
+            this.content.push(`${BOLD}Orphaned tmux sessions:${RESET}`);
+            for (const session of this.orphanedTmuxSessions) {
+              this.content.push(`  ${RED}⚠${RESET} ${session} ${DIM}(no matching agent)${RESET}`);
+            }
+          }
         }
         break;
+      }
       case "DIFF":
         if (!this.agent) { this.content = [`${DIM}No agent selected${RESET}`]; }
         else if (this.diffLoading) { this.content = [`${DIM}Loading diff...${RESET}`]; }
@@ -293,7 +305,7 @@ export function cyclePaneMode(ctx: PaneCtx, delta: number) {
   for (let i = 0; i < maxSteps; i++) {
     const candidate = PANE_MODES[nextIndex]!;
     const skip =
-      (candidate === "ERRORS" && ctx.rightPane.errors.length === 0) ||
+      (candidate === "ERRORS" && ctx.rightPane.errors.length === 0 && ctx.rightPane.orphanedTmuxSessions.length === 0) ||
       (candidate === "QUESTIONS" && ctx.rightPane.questions.length === 0);
     if (!skip || nextIndex === startIndex) break;
     nextIndex = (nextIndex + PANE_MODES.length + delta) % PANE_MODES.length;

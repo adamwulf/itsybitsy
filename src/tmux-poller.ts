@@ -145,6 +145,40 @@ export async function clearTmuxWindowSizeOverride(tmuxSession: string): Promise<
 }
 
 /**
+ * List all tmux session names. Returns empty array if tmux is not running.
+ */
+export async function listTmuxSessions(): Promise<string[]> {
+  try {
+    const proc = Bun.spawn(
+      ["tmux", "list-sessions", "-F", "#{session_name}"],
+      { stdout: "pipe", stderr: "pipe" }
+    );
+    const raw = await new Response(proc.stdout).text();
+    const exitCode = await proc.exited;
+    if (exitCode !== 0) return [];
+    return raw.trim().split("\n").filter((s) => s.length > 0);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Kill a tmux session by name.
+ */
+export async function killTmuxSession(sessionName: string): Promise<boolean> {
+  try {
+    const proc = Bun.spawn(
+      ["tmux", "kill-session", "-t", sessionName],
+      { stdout: "pipe", stderr: "pipe" }
+    );
+    const exitCode = await proc.exited;
+    return exitCode === 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Capture tmux output for a single agent (one-shot).
  * Used by watcher to detect agent state.
  */

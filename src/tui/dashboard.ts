@@ -475,7 +475,7 @@ export class DashboardComponent implements Component {
   addError(message: string) {
     const ts = new Date().toLocaleTimeString();
     this.rightPane.errors.push(`${DIM}[${ts}]${RESET} ${message}`);
-    this.statusBar.errorCount = this.rightPane.errors.length;
+    this.statusBar.errorCount = this.rightPane.errors.length + this.rightPane.orphanedTmuxSessions.length;
     this.rightPane.updateContent();
     this.tui?.requestRender();
   }
@@ -483,7 +483,7 @@ export class DashboardComponent implements Component {
   /** Clear all errors */
   clearErrors() {
     this.rightPane.errors = [];
-    this.statusBar.errorCount = 0;
+    this.statusBar.errorCount = this.rightPane.orphanedTmuxSessions.length;
     this.rightPane.updateContent();
     this.tui?.requestRender();
   }
@@ -596,11 +596,13 @@ export class DashboardComponent implements Component {
 
   // --- Data update + agent sync ---
 
-  onUpdate(agents: Agent[], flatList: FlatAgent[], questions: PendingQuestion[]) {
+  onUpdate(agents: Agent[], flatList: FlatAgent[], questions: PendingQuestion[], orphanedTmuxSessions: string[] = []) {
     this.agentTree.setFlatList(flatList);
     this.rightPane.questions = questions;
     this.rightPane.allAgents = flatList;
+    this.rightPane.orphanedTmuxSessions = orphanedTmuxSessions;
     this.statusBar.pendingQuestions = questions.length;
+    this.statusBar.errorCount = this.rightPane.errors.length + orphanedTmuxSessions.length;
 
     const qIds = new Set<string>();
     for (const q of questions) qIds.add(q.agent);
@@ -743,6 +745,11 @@ export class DashboardComponent implements Component {
     // Clear errors
     else if (data === "c") {
       if (this.rightPane.mode === "ERRORS") { this.clearErrors(); }
+    }
+    // Kill orphaned tmux session (Enter in ERRORS mode)
+    else if (matchesKey(data, Key.enter) && this.rightPane.mode === "ERRORS" && this.rightPane.orphanedTmuxSessions.length > 0) {
+      agentActions.handleKillOrphanedSessions(this);
+      return;
     }
     // Enter: answer question
     else if (matchesKey(data, Key.enter)) {
@@ -930,8 +937,8 @@ export async function launchDashboard(): Promise<void> {
   tui.addChild(dashboard);
 
   const watcher = new AgentWatcher(repos, {
-    onUpdate: (agents, flatList, questions) => {
-      dashboard.onUpdate(agents, flatList, questions);
+    onUpdate: (agents, flatList, questions, orphanedTmuxSessions) => {
+      dashboard.onUpdate(agents, flatList, questions, orphanedTmuxSessions);
     },
     onError: (err) => {
       dashboard.addError(err.message);

@@ -7,7 +7,7 @@ import { join } from "path";
 import { readdir } from "fs/promises";
 import type { AgentState } from "./parse-state";
 import { parseState, STARTUP_MARKERS } from "./parse-state";
-import { captureTmuxOutput } from "./tmux-poller";
+import { captureTmuxOutput, listTmuxSessions } from "./tmux-poller";
 
 export interface AgentMeta {
   id: string;
@@ -83,6 +83,7 @@ async function readAgentMeta(agentDir: string): Promise<{ meta: AgentMeta | null
 export interface ReadAgentsResult {
   agents: Agent[];
   errors: AgentReadError[];
+  orphanedTmuxSessions: string[];
 }
 
 /** Read agents from a single directory (agents/ or archive/) */
@@ -122,7 +123,7 @@ async function readAgentsFromDir(
       errors.push({ agentDir: dir, error: `Failed to read directory: ${err.message}` });
     }
   }
-  return { agents, errors };
+  return { agents, errors, orphanedTmuxSessions: [] };
 }
 
 /** Read all agents for a repo (both active and archived) */
@@ -138,6 +139,7 @@ export async function readRepoAgents(repoPath: string, repoName: string): Promis
   return {
     agents: [...active.agents, ...archived.agents],
     errors: [...active.errors, ...archived.errors],
+    orphanedTmuxSessions: [],
   };
 }
 
@@ -272,16 +274,33 @@ export function flattenAgentTree(roots: Agent[], repoCount = 1): FlatAgent[] {
 
 /**
  * Read all agents across multiple repos.
+ * Also detects orphaned tmux sessions (sessions matching ittybitty-* pattern
+ * that don't correspond to any known agent).
  */
 export async function readAllAgents(
   repos: Array<{ path: string; name: string }>
 ): Promise<ReadAgentsResult> {
-  const results = await Promise.all(
-    repos.map((r) => readRepoAgents(r.path, r.name))
+  const [results, tmuxSessions] = await Promise.all([
+    Promise.all(repos.map((r) => readRepoAgents(r.path, r.name))),
+    listTmuxSessions(),
+  ]);
+
+  const allAgents = results.flatMap((r) => r.agents);
+  const allErrors = results.flatMap((r) => r.errors);
+
+  // Detect orphaned tmux sessions: sessions starting with "ittybitty-"
+  // that don't match any known agent's tmux_session
+  const knownSessions = new Set(
+    allAgents.map((a) => a.meta.tmux_session).filter((s) => s)
   );
+  const orphanedTmuxSessions = tmuxSessions.filter(
+    (s) => s.startsWith("ittybitty-") && !knownSessions.has(s)
+  );
+
   return {
-    agents: results.flatMap((r) => r.agents),
-    errors: results.flatMap((r) => r.errors),
+    agents: allAgents,
+    errors: allErrors,
+    orphanedTmuxSessions,
   };
 }
 

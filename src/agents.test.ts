@@ -389,6 +389,22 @@ describe("readPendingQuestions", () => {
     expect(questions[0]!.id).toBe("q-2");
   });
 
+  test("filters out all questions when agents directory does not exist", async () => {
+    // Create questions file but no agents/ directory
+    await mkdir(join(tempDir, ".ittybitty"), { recursive: true });
+    await Bun.write(
+      join(tempDir, ".ittybitty", "user-questions.json"),
+      JSON.stringify({
+        questions: [
+          { id: "q-1", agent: "agent-ghost", question: "Hello?", timestamp: "2026-03-05T00:00:00Z", status: "pending" },
+        ],
+      })
+    );
+
+    const questions = await readPendingQuestions(tempDir);
+    expect(questions.length).toBe(0);
+  });
+
   test("returns empty for missing file", async () => {
     const questions = await readPendingQuestions(tempDir);
     expect(questions.length).toBe(0);

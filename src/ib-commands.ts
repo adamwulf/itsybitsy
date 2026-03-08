@@ -83,6 +83,7 @@ export interface NewAgentOptions {
   worker?: boolean;
   yolo?: boolean;
   model?: string;
+  manager?: string;
 }
 
 export async function newAgent(
@@ -95,6 +96,7 @@ export async function newAgent(
   if (opts?.worker) args.push("--worker");
   if (opts?.yolo) args.push("--yolo");
   if (opts?.model) args.push("--model", opts.model);
+  if (opts?.manager) args.push("--manager", opts.manager);
   args.push(prompt);
   return runIb(args, repoPath);
 }

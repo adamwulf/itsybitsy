@@ -238,6 +238,9 @@ function showRepoPicker(ctx: ActionCtx) {
 }
 
 function showNewAgentFormDialog(ctx: ActionCtx, repo: RepoEntry) {
+  // Auto-set manager to the currently selected agent (if any, and in same repo)
+  const selected = ctx.agentTree.selectedAgent;
+  const managerId = selected && selected.repoPath === repo.path ? selected.id : undefined;
   ctx.showDialog({
     type: "new-agent-form",
     repoName: repo.name,
@@ -250,6 +253,7 @@ function showNewAgentFormDialog(ctx: ActionCtx, repo: RepoEntry) {
       const opts: NewAgentOptions = {};
       if (name.trim()) opts.name = name.trim();
       if (worker) opts.worker = true;
+      if (managerId) opts.manager = managerId;
       ctx.executeAndRefresh(async () => {
         const result = await newAgent(repo.path, prompt, opts);
         if (result.ok) {

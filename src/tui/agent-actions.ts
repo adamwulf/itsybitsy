@@ -6,7 +6,7 @@
 import { stat } from "node:fs/promises";
 import type { Agent, FlatAgent, PendingQuestion } from "../agents";
 import type { RepoEntry } from "../registry";
-import { addRepo } from "../registry";
+import { addRepo, loadRegistry, saveRegistry } from "../registry";
 import {
   killAgent, nukeAgent, nukeAllAgents, resumeAgent, pauseAgent, reassignAgent,
   mergeCheckAgent, mergeAgent, sendMessage, newAgent, diffAgent,
@@ -19,7 +19,6 @@ import { openInGhostty } from "../ghostty";
 import { buildFolderItems } from "./folder-browser";
 import type { DialogState, SetupItem } from "./dialog-handler";
 import { fuzzyFilterIndices } from "./dialog-handler";
-import { loadRegistry, saveRegistry } from "../registry";
 import { displayState, computeStateColWidth, AGE_COL_WIDTH } from "./agent-tree";
 import type { PaneMode } from "./pane-manager";
 

@@ -436,17 +436,28 @@ function handleSetupDialog(
   const actionableIndices = d.items.map((item, i) => item.actionable ? i : -1).filter((i) => i !== -1);
   if (actionableIndices.length === 0) return true;
 
+  // Find nearest actionable index when current selection isn't actionable
+  const snapToNearest = (): number => {
+    let best = actionableIndices[0]!;
+    for (const idx of actionableIndices) {
+      if (Math.abs(idx - d.selectedIndex) < Math.abs(best - d.selectedIndex)) best = idx;
+    }
+    return best;
+  };
+
   if (matchesKey(data, Key.down) || data === "j") {
-    // Move to next actionable item
     const currentPos = actionableIndices.indexOf(d.selectedIndex);
-    if (currentPos < actionableIndices.length - 1) {
+    if (currentPos === -1) {
+      d.selectedIndex = snapToNearest();
+    } else if (currentPos < actionableIndices.length - 1) {
       d.selectedIndex = actionableIndices[currentPos + 1]!;
     }
     ctx.tui?.requestRender();
   } else if (matchesKey(data, Key.up) || data === "k") {
-    // Move to previous actionable item
     const currentPos = actionableIndices.indexOf(d.selectedIndex);
-    if (currentPos > 0) {
+    if (currentPos === -1) {
+      d.selectedIndex = snapToNearest();
+    } else if (currentPos > 0) {
       d.selectedIndex = actionableIndices[currentPos - 1]!;
     }
     ctx.tui?.requestRender();

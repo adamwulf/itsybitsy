@@ -8,9 +8,26 @@ import { stripAnsi } from "../parse-state";
 import { makeAgent as _makeAgent, makeFlatAgent, makeFlatRepoHeader } from "../test-utils";
 import { TmuxPaneComponent, RightPaneComponent, DashboardComponent, AgentTreeComponent, colorizeDiff, colorizeLog, formatAgentRow } from "./dashboard";
 import { visibleWidth } from "@mariozechner/pi-tui";
-import { setRunner, resetRunner } from "../ib-commands";
+import { setRunner, resetRunner, setSendSpawnRunner, resetSendSpawnRunner } from "../ib-commands";
+import type { SpawnResult } from "../types";
 import { PANE_MODES } from "./pane-manager";
 import { assertDialog } from "./test-helpers";
+
+/** Helper: create a mock send spawn runner that records calls as {args, cwd}-style entries */
+function mockSendSpawnRunner(calls: { args: string[]; cwd: string }[]) {
+  setSendSpawnRunner((cmd: string[]) => {
+    // Record "send" calls as ib-runner-style entries for test compatibility
+    if (cmd[0] === "tmux" && cmd[1] === "send-keys" && cmd.length === 5 && cmd[4] !== "Enter") {
+      // This is the actual message send — extract message
+      calls.push({ args: ["send", "TARGET", cmd[4]!], cwd: "" });
+    }
+    return {
+      stdout: new Response("").body!,
+      stderr: new Response("").body!,
+      exited: Promise.resolve(0),
+    } as SpawnResult;
+  });
+}
 
 function makeAgent(id: string, repoPath: string, archived = false): Agent {
   return _makeAgent({ id, repoPath, archived });
@@ -357,6 +374,26 @@ describe("RightPaneComponent scroll logic", () => {
 describe("DashboardComponent dialog and action handlers", () => {
   let dashboard: DashboardComponent;
   let lastIbCall: { args: string[]; cwd: string } | null;
+  /** Tracks messages sent via native sendMessage (tmux send-keys) */
+  let sentMessages: { target: string; message: string }[] = [];
+
+  /** Set up the send spawn runner mock that tracks messages */
+  function setupSendMock() {
+    sentMessages = [];
+    setSendSpawnRunner((cmd: string[]) => {
+      // Track the actual message send-keys calls (not Enter or has-session)
+      if (cmd[0] === "tmux" && cmd[1] === "send-keys" && cmd.length === 5 && cmd[4] !== "Enter") {
+        // Extract target session and message
+        const target = cmd[3]!;
+        sentMessages.push({ target, message: cmd[4]! });
+      }
+      return {
+        stdout: new Response("").body!,
+        stderr: new Response("").body!,
+        exited: Promise.resolve(0),
+      } as SpawnResult;
+    });
+  }
 
   function setupDashboardWithAgent(state = "running") {
     dashboard = makeDashboard();
@@ -365,6 +402,7 @@ describe("DashboardComponent dialog and action handlers", () => {
       lastIbCall = { args, cwd };
       return { ok: true, exitCode: 0, stdout: "ok", stderr: "" };
     });
+    setupSendMock();
 
     const agent = makeAgent("agent-test", "/repos/test");
     agent.state = state as any;
@@ -374,6 +412,7 @@ describe("DashboardComponent dialog and action handlers", () => {
 
   afterEach(() => {
     resetRunner();
+    resetSendSpawnRunner();
   });
 
   test("x key opens kill confirm dialog with button UI", () => {
@@ -716,7 +755,8 @@ describe("DashboardComponent dialog and action handlers", () => {
     dashboard.handleInput("\t");
     dashboard.handleInput("\r");
     await Bun.sleep(10);
-    expect(lastIbCall!.args).toEqual(["send", "agent-test", "hello"]);
+    expect(sentMessages.length).toBe(1);
+    expect(sentMessages[0]!.message).toBe("hello");
   });
 
   test("send textarea: Tab cycles forward through text → cancel → send → text", () => {
@@ -799,11 +839,7 @@ describe("DashboardComponent dialog and action handlers", () => {
 
   test("send textarea: sendAll sends to all active non-archived agents", async () => {
     dashboard = makeDashboard();
-    const ibCalls: { args: string[]; cwd: string }[] = [];
-    setRunner(async (args, cwd) => {
-      ibCalls.push({ args, cwd });
-      return { ok: true, exitCode: 0, stdout: "ok", stderr: "" };
-    });
+    setupSendMock();
 
     const agent1 = makeAgent("agent-a", "/repos/test");
     agent1.state = "running";
@@ -831,19 +867,14 @@ describe("DashboardComponent dialog and action handlers", () => {
     dashboard.handleInput("\r");
     await Bun.sleep(10);
     // Should have sent to agent-a and agent-b only (agent-c archived, agent-d no tmux)
-    const sendCalls = ibCalls.filter((c) => c.args[0] === "send");
-    expect(sendCalls.length).toBe(2);
-    expect(sendCalls[0]!.args).toEqual(["send", "agent-a", "hi"]);
-    expect(sendCalls[1]!.args).toEqual(["send", "agent-b", "hi"]);
+    expect(sentMessages.length).toBe(2);
+    expect(sentMessages[0]!.message).toBe("hi");
+    expect(sentMessages[1]!.message).toBe("hi");
   });
 
   test("send textarea: sendAll=false sends to selected agent only", async () => {
     dashboard = makeDashboard();
-    const ibCalls: { args: string[]; cwd: string }[] = [];
-    setRunner(async (args, cwd) => {
-      ibCalls.push({ args, cwd });
-      return { ok: true, exitCode: 0, stdout: "ok", stderr: "" };
-    });
+    setupSendMock();
 
     const agent1 = makeAgent("agent-a", "/repos/test");
     agent1.state = "running";
@@ -862,9 +893,8 @@ describe("DashboardComponent dialog and action handlers", () => {
     dashboard.handleInput("\t");
     dashboard.handleInput("\r");
     await Bun.sleep(10);
-    const sendCalls = ibCalls.filter((c) => c.args[0] === "send");
-    expect(sendCalls.length).toBe(1);
-    expect(sendCalls[0]!.args).toEqual(["send", "agent-a", "hi"]);
+    expect(sentMessages.length).toBe(1);
+    expect(sentMessages[0]!.message).toBe("hi");
   });
 
   test("send textarea: sendAll state is reflected in dialog", () => {
@@ -1223,6 +1253,21 @@ describe("readAgentPrompt", () => {
 describe("DashboardComponent right pane and navigation features", () => {
   let dashboard: DashboardComponent;
   let lastIbCall: { args: string[]; cwd: string } | null;
+  let sentMessages: { target: string; message: string }[] = [];
+
+  function setupSendMock() {
+    sentMessages = [];
+    setSendSpawnRunner((cmd: string[]) => {
+      if (cmd[0] === "tmux" && cmd[1] === "send-keys" && cmd.length === 5 && cmd[4] !== "Enter") {
+        sentMessages.push({ target: cmd[3]!, message: cmd[4]! });
+      }
+      return {
+        stdout: new Response("").body!,
+        stderr: new Response("").body!,
+        exited: Promise.resolve(0),
+      } as SpawnResult;
+    });
+  }
 
   function setupDashboard(state = "running") {
     dashboard = makeDashboard();
@@ -1231,6 +1276,7 @@ describe("DashboardComponent right pane and navigation features", () => {
       lastIbCall = { args, cwd };
       return { ok: true, exitCode: 0, stdout: "ok", stderr: "" };
     });
+    setupSendMock();
 
     const agent = makeAgent("agent-test", "/repos/test");
     agent.state = state as any;
@@ -1240,6 +1286,7 @@ describe("DashboardComponent right pane and navigation features", () => {
 
   afterEach(() => {
     resetRunner();
+    resetSendSpawnRunner();
   });
 
   test("addError adds timestamped error to errors list", () => {
@@ -1396,11 +1443,12 @@ describe("DashboardComponent right pane and navigation features", () => {
 
   test("answer question sends acknowledge then message", async () => {
     dashboard = makeDashboard();
-    const calls: string[][] = [];
+    const ibCalls: string[][] = [];
     setRunner(async (args, cwd) => {
-      calls.push(args);
+      ibCalls.push(args);
       return { ok: true, exitCode: 0, stdout: "", stderr: "" };
     });
+    setupSendMock();
 
     const agent = makeAgent("agent-test", "/repos/test");
     const flatList: FlatEntry[] = [makeFlatAgent(agent)];
@@ -1422,10 +1470,12 @@ describe("DashboardComponent right pane and navigation features", () => {
     dashboard.handleInput("\r"); // Submit
     await Bun.sleep(50);
 
-    // Should have called acknowledge then send
-    expect(calls.length).toBeGreaterThanOrEqual(2);
-    expect(calls[0]).toEqual(["acknowledge", "q-1"]);
-    expect(calls[1]).toEqual(["send", "agent-test", "yes"]);
+    // Should have called acknowledge (via ib runner)
+    expect(ibCalls.length).toBeGreaterThanOrEqual(1);
+    expect(ibCalls[0]).toEqual(["acknowledge", "q-1"]);
+    // And sent the message (via native send)
+    expect(sentMessages.length).toBe(1);
+    expect(sentMessages[0]!.message).toBe("yes");
   });
 
   test("Escape in QUESTIONS mode acknowledges question", async () => {

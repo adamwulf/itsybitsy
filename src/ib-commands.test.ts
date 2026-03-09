@@ -1,4 +1,7 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
+import { join } from "path";
+import { mkdtemp, rm, mkdir } from "fs/promises";
+import { tmpdir } from "os";
 import type { Agent, AgentMeta } from "./agents";
 import { makeAgent as _makeAgent } from "./test-utils";
 import {
@@ -17,8 +20,11 @@ import {
   acknowledgeQuestion,
   setRunner,
   resetRunner,
+  setSendSpawnRunner,
+  resetSendSpawnRunner,
 } from "./ib-commands";
 import type { IbCommandResult } from "./ib-commands";
+import type { SpawnResult } from "./types";
 
 function makeAgent(id: string, repoPath: string, state = "running"): Agent {
   return _makeAgent({ id, repoPath, repoName: "test-repo", state: state as any });
@@ -107,12 +113,128 @@ describe("ib-commands", () => {
     });
   });
 
-  test("sendMessage passes ['send', id, message]", async () => {
-    const agent = makeAgent("agent-abc", "/repos/myproject");
-    await sendMessage(agent, "hello world");
-    expect(lastCall).toEqual({
-      args: ["send", "agent-abc", "hello world"],
-      cwd: "/repos/myproject",
+  describe("sendMessage (native)", () => {
+    let spawnCalls: string[][] = [];
+    let tempDir: string;
+
+    beforeEach(async () => {
+      spawnCalls = [];
+      tempDir = await mkdtemp(join(tmpdir(), "send-test-"));
+      // Create agent directory for log writing
+      await mkdir(join(tempDir, ".ittybitty", "agents", "agent-abc"), { recursive: true });
+
+      setSendSpawnRunner((cmd: string[]) => {
+        spawnCalls.push(cmd);
+        return {
+          stdout: new Response("").body!,
+          stderr: new Response("").body!,
+          exited: Promise.resolve(0),
+        } as SpawnResult;
+      });
+    });
+
+    afterEach(async () => {
+      resetSendSpawnRunner();
+      await rm(tempDir, { recursive: true, force: true });
+    });
+
+    test("sends message via tmux send-keys then Enter", async () => {
+      const agent = makeAgent("agent-abc", tempDir);
+      const result = await sendMessage(agent, "hello world", { cwd: "/" });
+
+      expect(result.ok).toBe(true);
+      // Should have: has-session, send-keys (message), send-keys (Enter)
+      expect(spawnCalls.length).toBe(3);
+      expect(spawnCalls[0]).toEqual(["tmux", "has-session", "-t", `tmux-agent-abc`]);
+      expect(spawnCalls[1]).toEqual(["tmux", "send-keys", "-t", `tmux-agent-abc`, "hello world"]);
+      expect(spawnCalls[2]).toEqual(["tmux", "send-keys", "-t", `tmux-agent-abc`, "Enter"]);
+    });
+
+    test("returns error when tmux session not found", async () => {
+      setSendSpawnRunner((cmd: string[]) => {
+        spawnCalls.push(cmd);
+        if (cmd.includes("has-session")) {
+          return {
+            stdout: new Response("").body!,
+            stderr: new Response("session not found").body!,
+            exited: Promise.resolve(1),
+          } as SpawnResult;
+        }
+        return {
+          stdout: new Response("").body!,
+          stderr: new Response("").body!,
+          exited: Promise.resolve(0),
+        } as SpawnResult;
+      });
+
+      const agent = makeAgent("agent-abc", tempDir);
+      const result = await sendMessage(agent, "hello");
+
+      expect(result.ok).toBe(false);
+      expect(result.stderr).toContain("not running");
+    });
+
+    test("prefixes message when fromAgent is provided", async () => {
+      const agent = makeAgent("agent-abc", tempDir);
+      // Create sender dir for logging
+      await mkdir(join(tempDir, ".ittybitty", "agents", "agent-sender"), { recursive: true });
+
+      await sendMessage(agent, "hello", { fromAgent: "agent-sender" });
+
+      // The send-keys call should have the prefixed message
+      const sendKeysCall = spawnCalls.find(
+        (c) => c[0] === "tmux" && c[1] === "send-keys" && c.length === 5 && c[4] !== "Enter"
+      );
+      expect(sendKeysCall).toBeDefined();
+      expect(sendKeysCall![4]).toBe("[sent by agent agent-sender]: hello");
+    });
+
+    test("logs to recipient agent.log", async () => {
+      const agent = makeAgent("agent-abc", tempDir);
+      await sendMessage(agent, "test message", { cwd: "/" });
+
+      const logContent = await Bun.file(
+        join(tempDir, ".ittybitty", "agents", "agent-abc", "agent.log")
+      ).text();
+      expect(logContent).toContain("Received message: test message");
+    });
+
+    test("logs to sender agent.log when fromAgent set", async () => {
+      const agent = makeAgent("agent-abc", tempDir);
+      await mkdir(join(tempDir, ".ittybitty", "agents", "agent-sender"), { recursive: true });
+
+      await sendMessage(agent, "test", { fromAgent: "agent-sender" });
+
+      const senderLog = await Bun.file(
+        join(tempDir, ".ittybitty", "agents", "agent-sender", "agent.log")
+      ).text();
+      expect(senderLog).toContain("Sent message to agent-abc: test");
+
+      const recipientLog = await Bun.file(
+        join(tempDir, ".ittybitty", "agents", "agent-abc", "agent.log")
+      ).text();
+      expect(recipientLog).toContain("Received message from agent-sender: test");
+    });
+
+    test("returns 'Sent to <id>' in stdout when no fromAgent", async () => {
+      const agent = makeAgent("agent-abc", tempDir);
+      const result = await sendMessage(agent, "hello", { cwd: "/" });
+      expect(result.stdout).toBe("Sent to agent-abc");
+    });
+
+    test("returns empty stdout when fromAgent is set", async () => {
+      const agent = makeAgent("agent-abc", tempDir);
+      await mkdir(join(tempDir, ".ittybitty", "agents", "agent-sender"), { recursive: true });
+      const result = await sendMessage(agent, "hello", { fromAgent: "agent-sender" });
+      expect(result.stdout).toBe("");
+    });
+
+    test("returns error when agent has no tmux session", async () => {
+      const agent = makeAgent("agent-abc", tempDir);
+      agent.meta.tmux_session = "";
+      const result = await sendMessage(agent, "hello");
+      expect(result.ok).toBe(false);
+      expect(result.stderr).toContain("no tmux session");
     });
   });
 

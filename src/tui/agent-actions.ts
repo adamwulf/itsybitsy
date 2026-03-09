@@ -300,7 +300,7 @@ export function handleSend(ctx: ActionCtx) {
           let sent = 0;
           let failed = 0;
           for (const f of targets) {
-            const result = await sendMessage(f.agent, trimmed);
+            const result = await sendMessage(f.agent, trimmed, { cwd: "/" });
             if (result.ok) sent++; else failed++;
           }
           const notice = failed > 0
@@ -310,7 +310,7 @@ export function handleSend(ctx: ActionCtx) {
         });
       } else {
         ctx.executeAndRefresh(async () => {
-          const result = await sendMessage(agent, trimmed);
+          const result = await sendMessage(agent, trimmed, { cwd: "/" });
           ctx.setNotice(result.ok ? `Sent to ${agent.id}` : `Send failed: ${result.stderr || result.stdout}`);
         });
       }
@@ -384,7 +384,7 @@ export function handleAnswerQuestion(ctx: ActionCtx) {
       ctx.executeAndRefresh(async () => {
         const ackResult = await acknowledgeQuestion(agentEntry.agent.repoPath, q.id);
         if (!ackResult.ok) { ctx.setNotice(`Acknowledge failed: ${ackResult.stderr || ackResult.stdout}`); return; }
-        const sendResult = await sendMessage(agentEntry.agent, answer.trim());
+        const sendResult = await sendMessage(agentEntry.agent, answer.trim(), { cwd: "/" });
         ctx.setNotice(sendResult.ok ? `Answered ${q.agent}` : `Send failed: ${sendResult.stderr || sendResult.stdout}`);
       });
     },

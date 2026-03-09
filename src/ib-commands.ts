@@ -583,13 +583,17 @@ export function resetMergeSpawnRunner(): void {
 }
 
 /**
- * Helper: run a command via the merge spawn runner and return { stdout, exitCode }.
+ * Helper: run a command via the merge spawn runner and return { stdout, stderr, exitCode }.
+ * Drains both stdout and stderr to avoid buffer deadlocks.
  */
-async function mergeRunCmd(cmd: string[]): Promise<{ stdout: string; exitCode: number }> {
+async function mergeRunCmd(cmd: string[]): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   const proc = mergeSpawnRunner(cmd, { stdout: "pipe", stderr: "pipe" });
-  const stdout = await new Response(proc.stdout).text();
+  const [stdout, stderr] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
   const exitCode = await proc.exited;
-  return { stdout: stdout.trim(), exitCode };
+  return { stdout: stdout.trim(), stderr: stderr.trim(), exitCode };
 }
 
 /**
@@ -630,8 +634,11 @@ async function checkRebaseConflicts(
     result = { ok: true, output: "" };
   }
 
-  // Clean up: remove temp worktree and branch
-  await mergeRunCmd(["git", "-C", repoPath, "worktree", "remove", tempDir, "--force"]);
+  // Clean up: remove temp worktree and branch (with rm -rf fallback)
+  const worktreeRemove = await mergeRunCmd(["git", "-C", repoPath, "worktree", "remove", tempDir, "--force"]);
+  if (worktreeRemove.exitCode !== 0) {
+    try { await rm(tempDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
   await mergeRunCmd(["git", "-C", repoPath, "branch", "-D", tempBranch]);
 
   return result;
@@ -680,6 +687,12 @@ export async function mergeAgent(agent: Agent): Promise<IbCommandResult> {
     await readdir(worktreePath);
   } catch {
     return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' has no worktree (was created with --no-worktree?)` };
+  }
+
+  // 2b. Cannot merge from within the agent's own worktree
+  const currentDir = process.cwd();
+  if (currentDir.startsWith(worktreePath)) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: "Cannot merge agent from within its own worktree" };
   }
 
   // 3. Agent worktree must have no uncommitted changes
@@ -741,7 +754,7 @@ export async function mergeAgent(agent: Agent): Promise<IbCommandResult> {
     await logAgent(agentDir, `Rebasing ${branchName} onto ${targetBranch}...`);
     const rebaseResult = await mergeRunCmd(["git", "-C", worktreePath, "rebase", targetBranch]);
     if (rebaseResult.exitCode !== 0) {
-      return { ok: false, exitCode: 1, stdout: "", stderr: `Rebase failed: ${rebaseResult.stdout}` };
+      return { ok: false, exitCode: 1, stdout: "", stderr: `Rebase failed: ${rebaseResult.stderr || rebaseResult.stdout}` };
     }
     await logAgent(agentDir, "Rebase completed successfully");
 
@@ -749,7 +762,7 @@ export async function mergeAgent(agent: Agent): Promise<IbCommandResult> {
     await logAgent(agentDir, `Checking out ${targetBranch}...`);
     const checkoutResult = await mergeRunCmd(["git", "-C", agent.repoPath, "checkout", targetBranch]);
     if (checkoutResult.exitCode !== 0) {
-      return { ok: false, exitCode: 1, stdout: "", stderr: `Could not checkout ${targetBranch}: ${checkoutResult.stdout}` };
+      return { ok: false, exitCode: 1, stdout: "", stderr: `Could not checkout ${targetBranch}: ${checkoutResult.stderr || checkoutResult.stdout}` };
     }
 
     // 10. Merge — ff-only if agent, --no-ff if user
@@ -758,14 +771,14 @@ export async function mergeAgent(agent: Agent): Promise<IbCommandResult> {
       await logAgent(agentDir, `Fast-forwarding ${targetBranch} to ${branchName}...`);
       const ffResult = await mergeRunCmd(["git", "-C", agent.repoPath, "merge", "--ff-only", branchName]);
       if (ffResult.exitCode !== 0) {
-        return { ok: false, exitCode: 1, stdout: "", stderr: `Fast-forward failed: ${ffResult.stdout}` };
+        return { ok: false, exitCode: 1, stdout: "", stderr: `Fast-forward failed: ${ffResult.stderr || ffResult.stdout}` };
       }
       await logAgent(agentDir, "Fast-forward merge completed successfully");
     } else {
       await logAgent(agentDir, `Merging ${branchName} with --no-ff...`);
       const noFFResult = await mergeRunCmd(["git", "-C", agent.repoPath, "merge", "--no-ff", branchName, "-m", `Merge agent ${agent.id} work`]);
       if (noFFResult.exitCode !== 0) {
-        return { ok: false, exitCode: 1, stdout: "", stderr: `Merge failed: ${noFFResult.stdout}` };
+        return { ok: false, exitCode: 1, stdout: "", stderr: `Merge failed: ${noFFResult.stderr || noFFResult.stdout}` };
       }
       await logAgent(agentDir, "Merge completed successfully");
     }

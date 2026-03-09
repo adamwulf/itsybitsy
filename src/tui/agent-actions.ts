@@ -637,7 +637,7 @@ async function loadSetupDialog(ctx: ActionCtx, repoPath: string) {
     kind: "info",
   });
 
-  // Check .ittybitsy.json exists
+  // Check .itsybitsy.json exists
   let registryExists = false;
   try {
     const regFile = Bun.file(`${process.env.HOME ?? ""}/.itsybitsy.json`);

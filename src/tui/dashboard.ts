@@ -732,28 +732,25 @@ export class DashboardComponent implements Component {
   }
 
   /** Check if the selected agent's tmux session has an attached client, start/stop polling accordingly */
-  private _clientChecking = false;
   private checkClientAttached(agent: Agent) {
     const agentId = agent.id;
     const session = agent.meta.tmux_session;
 
     const doCheck = async () => {
-      if (this._clientChecking) return;
-      this._clientChecking = true;
-      let attached: boolean;
-      try {
-        attached = await hasAttachedClient(session);
-      } finally {
-        this._clientChecking = false;
-      }
+      const attached = await hasAttachedClient(session);
+
+      // Discard result if the agent changed while we were awaiting
+      const current = this.agentTree.selectedAgent;
+      if (!current || current.id !== agentId) return;
+
       const wasAttached = this._clientAttached.get(agentId) ?? false;
       this._clientAttached.set(agentId, attached);
 
       if (attached && !this.clientCheckTimer) {
         // Start polling every 3s to detect disconnect
         this.clientCheckTimer = setInterval(() => {
-          const current = this.agentTree.selectedAgent;
-          if (!current || current.id !== agentId) {
+          const sel = this.agentTree.selectedAgent;
+          if (!sel || sel.id !== agentId) {
             // Agent switched away, stop polling
             if (this.clientCheckTimer) {
               clearInterval(this.clientCheckTimer);
@@ -770,11 +767,7 @@ export class DashboardComponent implements Component {
       }
 
       if (attached !== wasAttached) {
-        // Sync to tmux pane if this is still the selected agent
-        const current = this.agentTree.selectedAgent;
-        if (current && current.id === agentId) {
-          this.tmuxPane.clientAttached = attached;
-        }
+        this.tmuxPane.clientAttached = attached;
         this.tui?.requestRender();
       }
     };

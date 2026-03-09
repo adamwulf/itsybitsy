@@ -8,13 +8,16 @@
  * are harmless since managers already handle repeated messages.
  *
  * Phase 15-A: Core loop + waiting/unknown handler with exponential backoff.
- * Phase 15-B will add complete/running/stopped/rate_limited handlers.
+ * Phase 15-B: complete/running/creating/compacting/stopped/rate_limited handlers.
  * Phase 15-C will add auto-compact support.
  */
 
 import type { Agent } from "./agents";
 import type { AgentState } from "./parse-state";
 import { sendMessage } from "./ib-commands";
+import { fetchUsage } from "./usage";
+import type { UsageData } from "./usage";
+import type { SpawnFn } from "./types";
 
 /** Function that returns the current list of agents. Used by the watchdog loop. */
 export type AgentProvider = () => Agent[];
@@ -25,6 +28,7 @@ export interface AgentTracker {
   waitCounter: number;
   notifyInterval: number; // in ticks (each tick = POLL_INTERVAL_MS)
   completionNotified: boolean;
+  rateLimitBypassed: boolean;
 }
 
 /** How often the watchdog polls, in milliseconds */
@@ -35,6 +39,9 @@ export const INITIAL_NOTIFY_TICKS = 6;
 
 /** Maximum notification interval in ticks (768 ticks * 5s = 3840s = 64 minutes) */
 export const MAX_NOTIFY_TICKS = 768;
+
+/** Recovery threshold for rate limits — matches ib bash's recovery_threshold (5%) */
+const RATE_LIMIT_RECOVERY_THRESHOLD = 5;
 
 /** State handler function signature — called on each tick for each agent */
 export type StateHandler = (
@@ -51,6 +58,39 @@ export function registerStateHandler(state: AgentState, handler: StateHandler): 
   stateHandlers.set(state, handler);
 }
 
+// ---------------------------------------------------------------------------
+// Test injection
+// ---------------------------------------------------------------------------
+
+let spawnRunner: SpawnFn = Bun.spawn as SpawnFn;
+
+/** Override spawn runner for testing (used by rate limit bypass). */
+export function setWatchdogSpawnRunner(runner: SpawnFn): void {
+  spawnRunner = runner;
+}
+
+/** Reset spawn runner to default. */
+export function resetWatchdogSpawnRunner(): void {
+  spawnRunner = Bun.spawn as SpawnFn;
+}
+
+/** Overridable fetchUsage for testing. */
+let fetchUsageFn: () => Promise<UsageData | null> = fetchUsage;
+
+/** Override fetchUsage for testing. */
+export function setWatchdogFetchUsage(fn: () => Promise<UsageData | null>): void {
+  fetchUsageFn = fn;
+}
+
+/** Reset fetchUsage to default. */
+export function resetWatchdogFetchUsage(): void {
+  fetchUsageFn = fetchUsage;
+}
+
+// ---------------------------------------------------------------------------
+// Tracker management
+// ---------------------------------------------------------------------------
+
 /** Create a fresh tracker for a newly-seen agent */
 export function createTracker(): AgentTracker {
   return {
@@ -58,6 +98,7 @@ export function createTracker(): AgentTracker {
     waitCounter: 0,
     notifyInterval: INITIAL_NOTIFY_TICKS,
     completionNotified: false,
+    rateLimitBypassed: false,
   };
 }
 
@@ -83,6 +124,10 @@ export function getAllTrackers(): ReadonlyMap<string, AgentTracker> {
 export function clearTrackers(): void {
   trackers.clear();
 }
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 /**
  * Find an agent by ID in the agents list.
@@ -116,6 +161,20 @@ export async function notifyManager(
   await sendMessage(manager, message);
 }
 
+/** Send Enter to a tmux session to dismiss a dialog. */
+async function sendTmuxEnter(tmuxSession: string): Promise<boolean> {
+  try {
+    const proc = spawnRunner(
+      ["tmux", "send-keys", "-t", tmuxSession, "Enter"],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    const exitCode = await proc.exited;
+    return exitCode === 0;
+  } catch {
+    return false;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Built-in state handlers
 // ---------------------------------------------------------------------------
@@ -123,7 +182,7 @@ export async function notifyManager(
 /**
  * Handler for "waiting" state.
  * Increments wait counter. After threshold, notifies manager with exponential backoff.
- * Backoff: 30s → 1m → 2m → 4m → 8m → 16m → 32m → 64m cap.
+ * Backoff: 30s -> 1m -> 2m -> 4m -> 8m -> 16m -> 32m -> 64m cap.
  */
 async function handleWaiting(agent: Agent, tracker: AgentTracker, allAgents: Agent[]): Promise<void> {
   tracker.waitCounter++;
@@ -161,9 +220,97 @@ async function handleUnknown(agent: Agent, tracker: AgentTracker, allAgents: Age
   }
 }
 
+/**
+ * Handler for "complete" state.
+ * One-time notification to manager. Sets completionNotified flag; cleared on resume (running only).
+ */
+async function handleComplete(agent: Agent, tracker: AgentTracker, allAgents: Agent[]): Promise<void> {
+  if (!tracker.completionNotified) {
+    await notifyManager(
+      agent,
+      `[watchdog]: Your subtask ${agent.id} recently completed`,
+      allAgents,
+    );
+    tracker.completionNotified = true;
+  }
+}
+
+/**
+ * Handler for "running" state.
+ * Resets counters (done by processAgents for all non-backoff states).
+ * Only running clears completionNotified — matches ib bash (lines 14573-14578).
+ */
+async function handleRunning(_agent: Agent, tracker: AgentTracker, _allAgents: Agent[]): Promise<void> {
+  if (tracker.completionNotified) {
+    tracker.completionNotified = false;
+  }
+  tracker.rateLimitBypassed = false;
+}
+
+/**
+ * Handler for "creating" state.
+ * Agent still initializing — just reset rate limit bypass flag.
+ * Does NOT clear completionNotified (matches ib bash).
+ */
+async function handleCreating(_agent: Agent, tracker: AgentTracker, _allAgents: Agent[]): Promise<void> {
+  tracker.rateLimitBypassed = false;
+}
+
+/**
+ * Handler for "compacting" state.
+ * Agent is compacting context — normal operation, just reset rate limit bypass flag.
+ * Does NOT clear completionNotified (matches ib bash).
+ */
+async function handleCompacting(_agent: Agent, tracker: AgentTracker, _allAgents: Agent[]): Promise<void> {
+  tracker.rateLimitBypassed = false;
+}
+
+/**
+ * Handler for "rate_limited" state.
+ * - Send Enter to dismiss the rate limit dialog (once per rate-limit episode)
+ * - Check usage API; when session usage drops below threshold, nudge agent
+ */
+async function handleRateLimited(agent: Agent, tracker: AgentTracker, _allAgents: Agent[]): Promise<void> {
+  const tmuxSession = agent.meta.tmux_session;
+
+  // Bypass rate limit dialog on first detection.
+  // TODO: ib bash uses a 3-attempt retry loop with 2s sleeps between attempts
+  // (bypass_rate_limit). Single Enter suffices since the watchdog re-checks every 5s,
+  // but a retry loop would be more robust for edge cases.
+  if (!tracker.rateLimitBypassed && tmuxSession) {
+    await sendTmuxEnter(tmuxSession);
+    tracker.rateLimitBypassed = true;
+  }
+
+  // Check usage API to see if usage has dropped enough to resume
+  const usage = await fetchUsageFn();
+  if (usage && usage.sessionPct !== null && usage.sessionPct < RATE_LIMIT_RECOVERY_THRESHOLD) {
+    await sendMessage(
+      agent,
+      `[watchdog]: Usage has refreshed (${usage.sessionPct}%). Please continue your task.`,
+    );
+    // Reset bypass flag so next rate-limit episode will re-bypass
+    tracker.rateLimitBypassed = false;
+  }
+}
+
+/**
+ * Handler for "stopped" state.
+ * No-op — counter reset is handled by processAgents for all non-backoff states.
+ */
+async function handleStopped(_agent: Agent, _tracker: AgentTracker, _allAgents: Agent[]): Promise<void> {
+  // No-op
+}
+
 // Register built-in handlers
 registerStateHandler("waiting", handleWaiting);
 registerStateHandler("unknown", handleUnknown);
+registerStateHandler("complete", handleComplete);
+registerStateHandler("running", handleRunning);
+registerStateHandler("creating", handleCreating);
+registerStateHandler("compacting", handleCompacting);
+registerStateHandler("rate_limited", handleRateLimited);
+registerStateHandler("stopped", handleStopped);
 
 // ---------------------------------------------------------------------------
 // Core watchdog loop

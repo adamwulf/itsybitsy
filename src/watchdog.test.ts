@@ -16,6 +16,10 @@ import {
   INITIAL_NOTIFY_TICKS,
   MAX_NOTIFY_TICKS,
   POLL_INTERVAL_MS,
+  setWatchdogSpawnRunner,
+  resetWatchdogSpawnRunner,
+  setWatchdogFetchUsage,
+  resetWatchdogFetchUsage,
   type AgentTracker,
   type StateHandler,
 } from "./watchdog";
@@ -78,13 +82,20 @@ describe("watchdog", () => {
     clearTrackers();
     spawnMock = mockSpawnRunner();
     setSendSpawnRunner(spawnMock.runner);
+    setWatchdogSpawnRunner(spawnMock.runner);
   });
 
   afterEach(() => {
     stopWatchdog();
     resetSendSpawnRunner();
+    resetWatchdogSpawnRunner();
+    resetWatchdogFetchUsage();
     clearTrackers();
   });
+
+  // =========================================================================
+  // Phase 15-A: Core loop, tracker management, waiting/unknown handlers
+  // =========================================================================
 
   describe("createTracker", () => {
     test("returns fresh tracker with default values", () => {
@@ -93,6 +104,7 @@ describe("watchdog", () => {
       expect(tracker.waitCounter).toBe(0);
       expect(tracker.notifyInterval).toBe(INITIAL_NOTIFY_TICKS);
       expect(tracker.completionNotified).toBe(false);
+      expect(tracker.rateLimitBypassed).toBe(false);
     });
   });
 
@@ -189,8 +201,6 @@ describe("watchdog", () => {
       for (let i = 0; i < 5; i++) {
         await tick(agents);
       }
-      // sendSpawnRunner is called for tmux has-session check, not for actual send
-      // Let's track the counter instead
       expect(getTracker("a1").waitCounter).toBe(5);
 
       // Tick 6 — threshold reached, notification sent
@@ -322,7 +332,7 @@ describe("watchdog", () => {
       expect(getTracker("a1").notifyInterval).toBe(INITIAL_NOTIFY_TICKS);
     });
 
-    test("waiting→running→waiting resets backoff completely", async () => {
+    test("waiting->running->waiting resets backoff completely", async () => {
       const mgr = agent("mgr", "running");
 
       // First waiting episode: build up backoff
@@ -349,6 +359,12 @@ describe("watchdog", () => {
 
       for (const state of nonBackoffStates) {
         clearTrackers();
+        spawnMock = mockSpawnRunner();
+        setSendSpawnRunner(spawnMock.runner);
+        setWatchdogSpawnRunner(spawnMock.runner);
+        // For rate_limited, provide a mock fetchUsage that returns high usage
+        setWatchdogFetchUsage(async () => ({ sessionPct: 80, weeklyPct: 50, sessionReset: "1h", weeklyReset: "2d" }));
+
         const tracker = getTracker("a1");
         tracker.waitCounter = 10;
         tracker.notifyInterval = INITIAL_NOTIFY_TICKS * 8;
@@ -394,19 +410,17 @@ describe("watchdog", () => {
   describe("registerStateHandler", () => {
     test("custom handler is called for registered state", async () => {
       let called = false;
-      // Register a temporary handler for "complete" (will be replaced in Phase 15-B)
-      const originalHandler = undefined; // no handler yet for complete
-      registerStateHandler("complete", async (agent, tracker) => {
+      // Override the stopped handler (effectively a no-op) temporarily
+      registerStateHandler("stopped", async (_agent, _tracker) => {
         called = true;
       });
 
-      const a1 = agent("a1", "complete");
+      const a1 = agent("a1", "stopped");
       await tick([a1]);
       expect(called).toBe(true);
 
-      // Clean up: remove the handler by restoring undefined behavior
-      // Since there's no unregister, register a no-op
-      registerStateHandler("complete", async () => {});
+      // Restore — register the real stopped handler (no-op)
+      registerStateHandler("stopped", async () => {});
     });
   });
 
@@ -583,6 +597,284 @@ describe("watchdog", () => {
       expect(tracker.waitCounter).toBe(0);
 
       expect(notifications).toEqual([6, 18, 42]);
+    });
+  });
+
+  // =========================================================================
+  // Phase 15-B: complete/running/creating/compacting/stopped/rate_limited handlers
+  // =========================================================================
+
+  describe("complete handler", () => {
+    test("sends one-time notification to manager via tick", async () => {
+      const mgr = agent("mgr", "running");
+      const w1 = agent("w1", "complete", "mgr");
+
+      await tick([mgr, w1]);
+
+      expect(getTracker("w1").completionNotified).toBe(true);
+      const sendKeysCalls = spawnMock.calls.filter((c) => {
+        const joined = c.args.join(" ");
+        return joined.includes("send-keys") && joined.includes("recently completed");
+      });
+      expect(sendKeysCalls.length).toBeGreaterThan(0);
+    });
+
+    test("does not re-notify on subsequent ticks", async () => {
+      const mgr = agent("mgr", "running");
+      const w1 = agent("w1", "complete", "mgr");
+
+      await tick([mgr, w1]);
+      await tick([mgr, w1]);
+      await tick([mgr, w1]);
+
+      const completedCalls = spawnMock.calls.filter((c) => {
+        const joined = c.args.join(" ");
+        return joined.includes("send-keys") && joined.includes("recently completed");
+      });
+      expect(completedCalls.length).toBe(1);
+    });
+
+    test("skips notification when no manager", async () => {
+      const w1 = agent("w1", "complete", null);
+
+      await tick([w1]);
+
+      expect(getTracker("w1").completionNotified).toBe(true);
+      const sendKeysCalls = spawnMock.calls.filter((c) =>
+        c.args.some((a: string) => typeof a === "string" && a.includes("send-keys"))
+      );
+      expect(sendKeysCalls.length).toBe(0);
+    });
+  });
+
+  describe("running handler (completionNotified clearing)", () => {
+    test("clears completionNotified when transitioning from complete to running", async () => {
+      const mgr = agent("mgr", "running");
+      const w1 = agent("w1", "complete", "mgr");
+
+      await tick([mgr, w1]);
+      expect(getTracker("w1").completionNotified).toBe(true);
+
+      const w1Running = agent("w1", "running", "mgr");
+      await tick([mgr, w1Running]);
+      expect(getTracker("w1").completionNotified).toBe(false);
+    });
+
+    test("complete -> running -> complete sends two notifications", async () => {
+      const mgr = agent("mgr", "running");
+
+      await tick([mgr, agent("w1", "complete", "mgr")]);
+      const firstCalls = spawnMock.calls.filter((c) => {
+        const joined = c.args.join(" ");
+        return joined.includes("send-keys") && joined.includes("recently completed");
+      }).length;
+      expect(firstCalls).toBe(1);
+
+      await tick([mgr, agent("w1", "running", "mgr")]);
+
+      await tick([mgr, agent("w1", "complete", "mgr")]);
+      const totalCalls = spawnMock.calls.filter((c) => {
+        const joined = c.args.join(" ");
+        return joined.includes("send-keys") && joined.includes("recently completed");
+      }).length;
+      expect(totalCalls).toBe(2);
+    });
+
+    test("clears rateLimitBypassed flag on running", async () => {
+      const a1 = agent("a1", "running");
+      const tracker = getTracker("a1");
+      tracker.rateLimitBypassed = true;
+
+      await tick([a1]);
+
+      expect(tracker.rateLimitBypassed).toBe(false);
+    });
+  });
+
+  describe("creating handler", () => {
+    test("does NOT clear completionNotified", async () => {
+      const a1 = agent("a1", "creating");
+      const tracker = getTracker("a1");
+      tracker.completionNotified = true;
+
+      await tick([a1]);
+
+      expect(tracker.completionNotified).toBe(true);
+    });
+
+    test("clears rateLimitBypassed flag", async () => {
+      const a1 = agent("a1", "creating");
+      const tracker = getTracker("a1");
+      tracker.rateLimitBypassed = true;
+
+      await tick([a1]);
+
+      expect(tracker.rateLimitBypassed).toBe(false);
+    });
+  });
+
+  describe("compacting handler", () => {
+    test("does NOT clear completionNotified", async () => {
+      const a1 = agent("a1", "compacting");
+      const tracker = getTracker("a1");
+      tracker.completionNotified = true;
+
+      await tick([a1]);
+
+      expect(tracker.completionNotified).toBe(true);
+    });
+
+    test("clears rateLimitBypassed flag", async () => {
+      const a1 = agent("a1", "compacting");
+      const tracker = getTracker("a1");
+      tracker.rateLimitBypassed = true;
+
+      await tick([a1]);
+
+      expect(tracker.rateLimitBypassed).toBe(false);
+    });
+  });
+
+  describe("rate_limited handler", () => {
+    test("sends Enter to tmux on first detection", async () => {
+      setWatchdogFetchUsage(async () => ({ sessionPct: 80, weeklyPct: 50, sessionReset: "1h", weeklyReset: "2d" }));
+
+      const a1 = agent("a1", "rate_limited");
+      await tick([a1]);
+
+      const enterCalls = spawnMock.calls.filter((c) =>
+        c.args.includes("send-keys") && c.args.includes("Enter") && c.args.includes("tmux-a1")
+      );
+      expect(enterCalls.length).toBe(1);
+      expect(getTracker("a1").rateLimitBypassed).toBe(true);
+    });
+
+    test("does not re-send Enter on subsequent ticks", async () => {
+      setWatchdogFetchUsage(async () => ({ sessionPct: 80, weeklyPct: 50, sessionReset: "1h", weeklyReset: "2d" }));
+
+      const a1 = agent("a1", "rate_limited");
+      await tick([a1]);
+      const firstEnterCalls = spawnMock.calls.filter((c) =>
+        c.args.includes("send-keys") && c.args.includes("Enter") && c.args.includes("tmux-a1")
+      ).length;
+
+      await tick([a1]);
+      const secondEnterCalls = spawnMock.calls.filter((c) =>
+        c.args.includes("send-keys") && c.args.includes("Enter") && c.args.includes("tmux-a1")
+      ).length;
+
+      expect(secondEnterCalls).toBe(firstEnterCalls);
+    });
+
+    test("nudges agent when usage drops below 5% threshold", async () => {
+      setWatchdogFetchUsage(async () => ({ sessionPct: 3, weeklyPct: 30, sessionReset: "now", weeklyReset: "2d" }));
+
+      const a1 = agent("a1", "rate_limited");
+      await tick([a1]);
+
+      const nudgeCalls = spawnMock.calls.filter((c) => {
+        const joined = c.args.join(" ");
+        return joined.includes("send-keys") && joined.includes("Usage has refreshed");
+      });
+      expect(nudgeCalls.length).toBeGreaterThan(0);
+      expect(getTracker("a1").rateLimitBypassed).toBe(false);
+    });
+
+    test("does not nudge when usage is still high", async () => {
+      setWatchdogFetchUsage(async () => ({ sessionPct: 50, weeklyPct: 30, sessionReset: "1h", weeklyReset: "2d" }));
+
+      const a1 = agent("a1", "rate_limited");
+      const tracker = getTracker("a1");
+      tracker.rateLimitBypassed = true;
+
+      await tick([a1]);
+
+      const nudgeCalls = spawnMock.calls.filter((c) => {
+        const joined = c.args.join(" ");
+        return joined.includes("send-keys") && joined.includes("Usage has refreshed");
+      });
+      expect(nudgeCalls.length).toBe(0);
+    });
+
+    test("handles null usage gracefully", async () => {
+      setWatchdogFetchUsage(async () => null);
+
+      const a1 = agent("a1", "rate_limited");
+      const tracker = getTracker("a1");
+      tracker.rateLimitBypassed = true;
+
+      await tick([a1]);
+
+      const nudgeCalls = spawnMock.calls.filter((c) => {
+        const joined = c.args.join(" ");
+        return joined.includes("send-keys") && joined.includes("Usage has refreshed");
+      });
+      expect(nudgeCalls.length).toBe(0);
+    });
+
+    test("resets wait counters", async () => {
+      setWatchdogFetchUsage(async () => ({ sessionPct: 80, weeklyPct: 50, sessionReset: "1h", weeklyReset: "2d" }));
+
+      const a1 = agent("a1", "rate_limited");
+      const tracker = getTracker("a1");
+      tracker.waitCounter = 10;
+      tracker.notifyInterval = INITIAL_NOTIFY_TICKS * 8;
+
+      await tick([a1]);
+
+      expect(tracker.waitCounter).toBe(0);
+      expect(tracker.notifyInterval).toBe(INITIAL_NOTIFY_TICKS);
+    });
+  });
+
+  describe("stopped handler", () => {
+    test("resets counters via non-backoff reset", async () => {
+      const a1 = agent("a1", "stopped");
+      const tracker = getTracker("a1");
+      tracker.waitCounter = 10;
+      tracker.notifyInterval = INITIAL_NOTIFY_TICKS * 8;
+
+      await tick([a1]);
+
+      expect(tracker.waitCounter).toBe(0);
+      expect(tracker.notifyInterval).toBe(INITIAL_NOTIFY_TICKS);
+    });
+
+    test("does not send any notifications", async () => {
+      const a1 = agent("a1", "stopped");
+      await tick([a1]);
+
+      const sendKeysCalls = spawnMock.calls.filter((c) =>
+        c.args.some((a: string) => typeof a === "string" && a.includes("send-keys"))
+      );
+      expect(sendKeysCalls.length).toBe(0);
+    });
+  });
+
+  // =========================================================================
+  // Full lifecycle integration tests
+  // =========================================================================
+
+  describe("lifecycle integration", () => {
+    test("waiting accumulates across ticks then resets on running", async () => {
+      const mgr = agent("mgr", "running");
+
+      for (let i = 0; i < 3; i++) {
+        await tick([mgr, agent("w1", "waiting", "mgr")]);
+      }
+      expect(getTracker("w1").waitCounter).toBe(3);
+
+      await tick([mgr, agent("w1", "running", "mgr")]);
+      expect(getTracker("w1").waitCounter).toBe(0);
+      expect(getTracker("w1").notifyInterval).toBe(INITIAL_NOTIFY_TICKS);
+
+      for (let i = 0; i < 5; i++) {
+        await tick([mgr, agent("w1", "waiting", "mgr")]);
+      }
+      expect(getTracker("w1").waitCounter).toBe(5);
+
+      await tick([mgr, agent("w1", "waiting", "mgr")]);
+      expect(getTracker("w1").waitCounter).toBe(0);
     });
   });
 });

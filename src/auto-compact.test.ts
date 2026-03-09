@@ -94,8 +94,8 @@ describe("transcriptPath", () => {
   test("builds correct path for worktree agent", () => {
     const agent = makeAgent();
     const path = transcriptPath(agent);
-    // agentWorktreePath joins with ".ittybitsy" (see agents.ts line 51)
-    const worktree = "/tmp/test-repo/.ittybitsy/agents/agent-abc123/repo";
+    // agentWorktreePath joins with ".ittybitty" (see agents.ts line 51)
+    const worktree = "/tmp/test-repo/.ittybitty/agents/agent-abc123/repo";
     const encoded = encodeClaudeProjectPath(worktree);
     const home = process.env.HOME!;
     expect(path).toBe(join(home, ".claude", "projects", encoded, "sess-001.jsonl"));

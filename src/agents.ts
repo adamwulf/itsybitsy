@@ -48,7 +48,7 @@ export interface PendingQuestion {
 export function agentWorktreePath(agent: Agent): string {
   if (agent.meta.worktree === false) return agent.repoPath;
   const dir = agent.archived ? "archive" : "agents";
-  return join(agent.repoPath, ".ittybitsy", dir, agent.id, "repo");
+  return join(agent.repoPath, ".ittybitty", dir, agent.id, "repo");
 }
 
 /** Compute human-readable age from epoch timestamp */

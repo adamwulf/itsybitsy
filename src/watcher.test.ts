@@ -1022,7 +1022,7 @@ describe("AgentWatcher", () => {
 
       // Create a second temp dir
       const tempDir2 = await mkdtemp(join(tmpdir(), "itsybitsy-watcher-test2-"));
-      const agentsDir2 = join(tempDir2, ".ittybitsy", "agents");
+      const agentsDir2 = join(tempDir2, ".ittybitty", "agents");
       await mkdir(agentsDir2, { recursive: true });
 
       let updateCount = 0;

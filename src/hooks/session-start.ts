@@ -15,7 +15,7 @@ export interface SessionContext {
   rootRepoPath: string;
 }
 
-const AGENT_CWD_PATTERN = /\.ittybitsy\/agents\/([^/]+)\/repo(\/|$)/;
+const AGENT_CWD_PATTERN = /\.ittybitty\/agents\/([^/]+)\/repo(\/|$)/;
 
 export function detectRole(
   cwd: string,
@@ -34,11 +34,11 @@ export function detectRole(
   }
 
   const agentId = match[1]!;
-  const ittybittyIdx = cwd.indexOf("/.ittybitsy/agents/");
+  const ittybittyIdx = cwd.indexOf("/.ittybitty/agents/");
   const rootRepoPath = cwd.substring(0, ittybittyIdx);
   const agentDir = join(
     rootRepoPath,
-    ".ittybitsy",
+    ".ittybitty",
     "agents",
     agentId
   );
@@ -297,14 +297,14 @@ export async function hookSessionStart(): Promise<void> {
   const cwd: string = data.cwd ?? process.cwd();
 
   // Detect role - read meta.json from filesystem if in an agent directory
-  const match = /\.ittybitsy\/agents\/([^/]+)\/repo(\/|$)/.exec(cwd);
+  const match = /\.ittybitty\/agents\/([^/]+)\/repo(\/|$)/.exec(cwd);
   let metaJson: { id?: string; manager?: string | null; worker?: boolean } | undefined;
 
   if (match) {
     const agentId = match[1]!;
-    const ittybittyIdx = cwd.indexOf("/.ittybitsy/agents/");
+    const ittybittyIdx = cwd.indexOf("/.ittybitty/agents/");
     const rootRepoPath = cwd.substring(0, ittybittyIdx);
-    const agentDir = join(rootRepoPath, ".ittybitsy", "agents", agentId);
+    const agentDir = join(rootRepoPath, ".ittybitty", "agents", agentId);
     try {
       const metaFile = Bun.file(join(agentDir, "meta.json"));
       if (await metaFile.exists()) {

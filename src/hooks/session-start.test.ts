@@ -10,7 +10,7 @@ describe("session-start", () => {
   });
 
   test("detectRole manager cwd (with meta)", () => {
-    const cwd = "/Users/me/project/.ittybitsy/agents/agent-abc12345/repo";
+    const cwd = "/Users/me/project/.ittybitty/agents/agent-abc12345/repo";
     const ctx = detectRole(cwd, {
       id: "agent-abc12345",
       manager: null,
@@ -25,7 +25,7 @@ describe("session-start", () => {
   });
 
   test("detectRole worker cwd (with meta)", () => {
-    const cwd = "/Users/me/project/.ittybitsy/agents/agent-def67890/repo";
+    const cwd = "/Users/me/project/.ittybitty/agents/agent-def67890/repo";
     const ctx = detectRole(cwd, {
       id: "agent-def67890",
       manager: "agent-abc12345",
@@ -46,7 +46,7 @@ describe("session-start", () => {
   });
 
   test("generateInstructions manager contains agent ID", () => {
-    const cwd = "/Users/me/project/.ittybitsy/agents/agent-abc12345/repo";
+    const cwd = "/Users/me/project/.ittybitty/agents/agent-abc12345/repo";
     const ctx = detectRole(cwd, {
       id: "agent-abc12345",
       manager: null,
@@ -59,7 +59,7 @@ describe("session-start", () => {
   });
 
   test("generateInstructions worker contains manager ID", () => {
-    const cwd = "/Users/me/project/.ittybitsy/agents/agent-def67890/repo";
+    const cwd = "/Users/me/project/.ittybitty/agents/agent-def67890/repo";
     const ctx = detectRole(cwd, {
       id: "agent-def67890",
       manager: "agent-abc12345",
@@ -72,7 +72,7 @@ describe("session-start", () => {
   });
 
   test("top-level manager has 'ib ask'", () => {
-    const cwd = "/Users/me/project/.ittybitsy/agents/agent-abc12345/repo";
+    const cwd = "/Users/me/project/.ittybitty/agents/agent-abc12345/repo";
     const ctx = detectRole(cwd, {
       id: "agent-abc12345",
       manager: null,
@@ -84,7 +84,7 @@ describe("session-start", () => {
   });
 
   test("sub-manager (has manager) no 'ib ask'", () => {
-    const cwd = "/Users/me/project/.ittybitsy/agents/agent-sub11111/repo";
+    const cwd = "/Users/me/project/.ittybitty/agents/agent-sub11111/repo";
     const ctx = detectRole(cwd, {
       id: "agent-sub11111",
       manager: "agent-parent00",

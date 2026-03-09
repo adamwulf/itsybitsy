@@ -22,7 +22,7 @@ const SKIP_SUBAGENT_TYPES = [
 
 const VALID_MODELS = new Set(["sonnet", "opus", "haiku", ""]);
 
-const AGENT_CWD_PATTERN = /\.ittybitsy\/agents\/([^/]+)\/repo(\/|$)/;
+const AGENT_CWD_PATTERN = /\.ittybitty\/agents\/([^/]+)\/repo(\/|$)/;
 
 export async function processTaskIntercept(
   input: {
@@ -49,8 +49,8 @@ export async function processTaskIntercept(
     const agentId = cwdMatch[1]!;
     const agentDir = input.cwd.substring(
       0,
-      input.cwd.indexOf(".ittybitsy/agents/" + agentId) +
-        ".ittybitsy/agents/".length +
+      input.cwd.indexOf(".ittybitty/agents/" + agentId) +
+        ".ittybitty/agents/".length +
         agentId.length
     );
     try {
@@ -90,7 +90,7 @@ export async function processTaskIntercept(
 
   // 7. Determine repoPath
   let repoPath = input.cwd;
-  const ittybittyIdx = input.cwd.indexOf("/.ittybitsy/agents/");
+  const ittybittyIdx = input.cwd.indexOf("/.ittybitty/agents/");
   if (ittybittyIdx !== -1) {
     repoPath = input.cwd.substring(0, ittybittyIdx);
   }
@@ -99,9 +99,11 @@ export async function processTaskIntercept(
   const callingAgentId = cwdMatch ? cwdMatch[1]! : undefined;
 
   // 9. Spawn agent
+  // Only set worker+manager when called from an agent context (callingAgentId present).
+  // From primary Claude, spawn managers (not workers).
   let result: { ok: boolean; stdout: string; stderr: string };
   const spawnOpts: Record<string, unknown> = {
-    worker: true,
+    worker: callingAgentId ? true : undefined,
     manager: callingAgentId,
     model: model || undefined,
   };
@@ -110,7 +112,7 @@ export async function processTaskIntercept(
     result = await opts.spawnAgent(repoPath, agentPrompt, spawnOpts);
   } else {
     const ibResult: IbCommandResult = await newAgent(repoPath, agentPrompt, {
-      worker: true,
+      worker: callingAgentId ? true : undefined,
       manager: callingAgentId,
       model: model || undefined,
     });

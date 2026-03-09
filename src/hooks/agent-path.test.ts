@@ -8,7 +8,7 @@ function makeCtx(overrides: Partial<PathCheckContext> = {}): PathCheckContext {
     agentId: "agent-abc123",
     agentDir: "/repo/.ittybitty/agents/agent-abc123",
     worktreePath: "/repo/.ittybitty/agents/agent-abc123/repo",
-    agentsDir: "/repo/.ittybitsy/agents",
+    agentsDir: "/repo/.ittybitty/agents",
     rootRepo: "/repo",
     isWorker: false,
     allowList: ["Read", "Write", "Edit", "Glob", "Grep", "Bash"],
@@ -21,7 +21,7 @@ function makeInput(overrides: Partial<PathCheckInput> = {}): PathCheckInput {
   return {
     toolName: "Read",
     toolInput: {},
-    cwd: "/repo/.ittybitsy/agents/agent-abc123/repo",
+    cwd: "/repo/.ittybitty/agents/agent-abc123/repo",
     ...overrides,
   };
 }

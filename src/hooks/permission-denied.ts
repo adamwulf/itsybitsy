@@ -31,10 +31,10 @@ export async function hookPermissionDenied(agentId: string): Promise<void> {
     agentDir = match[1]!;
   } else {
     // Fallback: assume standard agent directory layout
-    const agentsDirMatch = cwd.match(/(.*\/.ittybitsy\/agents)/);
+    const agentsDirMatch = cwd.match(/(.*\/.ittybitty\/agents)/);
     agentDir = agentsDirMatch
       ? join(agentsDirMatch[1]!, agentId)
-      : join(cwd, ".ittybitsy", "agents", agentId);
+      : join(cwd, ".ittybitty", "agents", agentId);
   }
 
   await logAgent(agentDir, `[PermissionRequest] Tool denied: ${toolName}`);

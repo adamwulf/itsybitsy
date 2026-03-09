@@ -19,7 +19,7 @@ describe("intercept-task", () => {
     const { join } = await import("path");
     const { mkdir } = await import("fs/promises");
     const agentId = "agent-abc12345";
-    const agentDir = join(tmpDir, ".ittybitsy", "agents", agentId);
+    const agentDir = join(tmpDir, ".ittybitty", "agents", agentId);
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await Bun.write(
       join(agentDir, "meta.json"),

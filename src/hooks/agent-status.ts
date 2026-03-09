@@ -69,9 +69,9 @@ export async function processStopHook(
   let state = detectStateFromMessage(lastMessage);
 
   // 2. If empty, fall back to tmux
+  // Keep tmuxOutput around for background task check later
+  let tmuxOutput: string | null = null;
   if (!state) {
-    let tmuxOutput: string | null = null;
-
     if (opts?.captureOutput) {
       tmuxOutput = await opts.captureOutput();
     } else {
@@ -117,12 +117,24 @@ export async function processStopHook(
   }
 
   if (state === "running") {
-    // Check for background tasks (⏵⏵ pattern in recent tmux output)
-    if (opts?.captureOutput) {
-      const output = await opts.captureOutput();
-      if (output && /⏵⏵/.test(output)) {
-        return { state, action: "none" };
-      }
+    // Check for background tasks (⏵⏵ pattern in recent tmux output).
+    // The bash version checks for the full footer pattern: ⏵⏵.*·\s\d+\s
+    let bgOutput = tmuxOutput;
+    if (!bgOutput && opts?.captureOutput) {
+      bgOutput = await opts.captureOutput();
+    } else if (!bgOutput) {
+      // Capture fresh for background task check
+      try {
+        const metaPath = join(agentDir, "meta.json");
+        const metaRaw = await readFile(metaPath, "utf-8");
+        const meta = JSON.parse(metaRaw);
+        if (meta.tmux_session) {
+          bgOutput = await captureTmuxOutput(meta.tmux_session, 15);
+        }
+      } catch { /* ignore */ }
+    }
+    if (bgOutput && /⏵⏵.*·\s\d+\s/.test(bgOutput)) {
+      return { state, action: "none" };
     }
     // Fall through to unknown/running handling below
   }
@@ -306,7 +318,7 @@ export async function hookStatus(agentId: string): Promise<void> {
   let agentDir = "";
   let agentsDir = "";
 
-  const agentMatch = cwd.match(/(.*\/.ittybitsy\/agents\/[^/]+)/);
+  const agentMatch = cwd.match(/(.*\/.ittybitty\/agents\/[^/]+)/);
   if (agentMatch) {
     agentDir = agentMatch[1]!;
     agentsDir = join(agentDir, "..");

@@ -601,7 +601,40 @@ Files: `src/tui/dashboard.ts`, `src/config.ts`.
 
 ---
 
-### Phase 13: Built-in Watchdog
+### Phase 13: Code Quality & Architecture Cleanup
+**Checkpoint:** Codebase is clean, internally consistent, and free of known architectural hacks identified in the code review.
+
+**FlatAgent discriminated union refactor:**
+- [ ] Replace the `__repo_<name>` dummy Agent hack with a proper discriminated union type:
+  ```ts
+  type FlatEntry =
+    | { kind: "agent"; agent: Agent; depth: number; connector: string; repoHeader: string | null; repoHasAgents: boolean }
+    | { kind: "repo-header"; repoName: string; repoPath: string; hasAgents: boolean }
+  ```
+- [ ] Update `flattenAgentTree()` in `src/agents.ts` to return `FlatEntry[]` instead of `FlatAgent[]`
+- [ ] Update all consumers: `agent-tree.ts`, `pane-manager.ts`, `dashboard.ts`, `agent-actions.ts`, `index.ts` — branch on `kind` instead of checking `agent.id.startsWith("__repo_")`
+- [ ] Remove the dummy Agent construction in `flattenAgentTree` — no more fake meta.json fields
+
+**Remaining review items:**
+- [ ] Add tests for `readAccessToken` keychain fallback path (`src/usage.ts`)
+- [ ] Add tests for `color-scheme.ts` OSC 11 query and Ghostty mode 2031 detection
+- [ ] Add tests for `folder-browser.ts` permission error path
+
+---
+
+### Phase 14: CLI Parity — Native Implementations
+**Checkpoint:** All `itsybitsy` CLI commands are implemented natively without shelling to `ib`. itsybitsy can fully replace `ib` for day-to-day agent management.
+
+Currently shelling to `ib` as temporary placeholders (marked TODO in code):
+- [ ] **`send <id> <message>`** — use `tmux send-keys -t {tmux_session} "{message}" Enter` directly via Bun.spawn
+- [ ] **`kill <id>`** — kill tmux session, move agent dir to `.ittybitty/archive/`, update any parent manager references
+- [ ] **`resume <id>`** — restart tmux session with claude, update agent state files
+- [ ] **`merge <id>`** — git rebase worktree onto main, fast-forward main, delete worktree, archive agent dir
+- [ ] **`new-agent <prompt>`** — create git worktree + branch, start tmux session, launch claude with correct flags, write meta.json, optionally start watchdog
+
+---
+
+### Phase 15: Built-in Watchdog
 **Checkpoint:** itsybitsy monitors all agents in-process, notifying managers of state changes, auto-compacting, and handling rate limits.
 
 New file: `src/watchdog.ts`. This is the highest-complexity feature but also the highest-value for multi-agent reliability.
@@ -633,7 +666,7 @@ New file: `src/watchdog.ts`. This is the highest-complexity feature but also the
 
 ---
 
-### Phase 14 (v2): Cross-Repo Messaging
+### Phase 16 (v2): Cross-Repo Messaging
 **Checkpoint:** An agent in repo A can send a message to an agent in repo B from within itsybitsy.
 
 **Protocol:** itsybitsy acts as a message broker. To send a message from agent A (repo X) to agent B (repo Y):
@@ -651,7 +684,7 @@ No new file format needed — reuses existing `ib send` infrastructure.
 
 ---
 
-### Phase 15 (future): Decoupled Agent Storage
+### Phase 17 (future): Decoupled Agent Storage
 
 **Status:** Aspirational / longer-term architectural change. Not yet planned for implementation.
 
@@ -674,6 +707,6 @@ No new file format needed — reuses existing `ib send` infrastructure.
 - **Multi-machine divergence.** If a user runs itsybitsy on two machines (e.g., desktop + laptop), `~/.itsybitsy/` would diverge between them. The current `.ittybitty/` approach naturally syncs via git.
 - **Cache invalidation.** A read-only mirror approach (`~/.itsybitsy/{repo}/` as cache) introduces its own sync problems — when does the mirror update? What if ib modifies agent state between mirror syncs? This is a classic cache invalidation problem.
 
-**Prerequisite:** This change only makes sense after itsybitsy has its own built-in watchdog (Phase 13) and no longer depends on ib's watchdog. Even then, it requires coordination with ib's codebase.
+**Prerequisite:** This change only makes sense after itsybitsy has its own built-in watchdog (Phase 15) and no longer depends on ib's watchdog. Even then, it requires coordination with ib's codebase.
 
-**Recommendation:** Keep using `{repo}/.ittybitty/agents/` for now. Revisit after Phases 13–14 are complete and itsybitsy has proven itself as a standalone daily driver. If pursued, start with a read-only mirror (`~/.itsybitsy/{repo}/` as a cache/index of `.ittybitty/agents/`) before attempting a full migration, but be aware of cache invalidation challenges.
+**Recommendation:** Keep using `{repo}/.ittybitty/agents/` for now. Revisit after Phases 15–16 are complete and itsybitsy has proven itself as a standalone daily driver. If pursued, start with a read-only mirror (`~/.itsybitsy/{repo}/` as a cache/index of `.ittybitty/agents/`) before attempting a full migration, but be aware of cache invalidation challenges.

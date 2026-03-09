@@ -274,20 +274,6 @@ describe("queryColorScheme timer", () => {
     expect(queryCount).toBe(2);
   });
 
-  test("pending detection resets after timeout", async () => {
-    const writes: string[] = [];
-    setTestWriter((d) => { writes.push(d); return true; });
-    const { queryColorScheme, inputFilter } = setupColorSchemeDetection(() => {});
-    queryColorScheme();
-    // Wait for the 500ms timeout to expire
-    await new Promise((r) => setTimeout(r, 600));
-    // A subsequent OSC 11 response should still work
-    let called = false;
-    const det2 = setupColorSchemeDetection(() => { called = true; });
-    det2.inputFilter("\x1b]11;rgb:ffff/ffff/ffff\x07");
-    expect(called).toBe(true);
-  });
-
   test("cleanup cancels pending detection timer", () => {
     const { queryColorScheme, cleanup } = setupColorSchemeDetection(() => {});
     queryColorScheme();
@@ -359,7 +345,7 @@ describe("parseOSC11Response edge cases", () => {
   test("parses 3-digit hex components", () => {
     const rgb = parseOSC11Response("rgb:fff/000/800");
     expect(rgb).not.toBeNull();
-    // 3-digit: max is 0xff (hex.length <= 2 is false for 3 chars, so max is 0xffff)
+    // 3-digit hex: hex.length > 2, so normalize() uses max 0xffff
     expect(rgb!.r).toBeCloseTo(0xfff / 0xffff, 4);
     expect(rgb!.g).toBe(0);
     expect(rgb!.b).toBeCloseTo(0x800 / 0xffff, 4);

@@ -1,0 +1,292 @@
+/**
+ * PreToolUse path isolation hook.
+ * Ported from ib bash script's check_pretooluse_access().
+ *
+ * Enforces that agents can only access files within their own worktree,
+ * their own agent.log, and general system paths.
+ */
+
+import { join, resolve, dirname, basename } from "path";
+import { realpath, stat } from "fs/promises";
+import { logAgent } from "../agent-lifecycle";
+
+// ── Types ────────────────────────────────────────────────────────────────────
+
+export interface PathCheckInput {
+  toolName: string;
+  toolInput: Record<string, unknown>;
+  cwd: string;
+}
+
+export interface PathCheckContext {
+  agentId: string;
+  agentDir: string;
+  worktreePath: string;
+  agentsDir: string;
+  rootRepo: string;
+  isWorker: boolean;
+  allowList: string[];
+}
+
+export interface HookDecision {
+  decision: "allow" | "deny";
+  reason: string;
+}
+
+// ── Pattern matching ─────────────────────────────────────────────────────────
+
+/**
+ * Check if a tool name + input matches an allow-list pattern.
+ *
+ * Patterns:
+ * - "Bash(prefix:*)": matches Bash tool where command starts with prefix
+ * - "ToolName": exact tool name match
+ */
+export function toolMatchesPattern(
+  toolName: string,
+  toolInput: Record<string, unknown>,
+  pattern: string
+): boolean {
+  // Check for Bash(prefix:*) pattern
+  const bashMatch = pattern.match(/^Bash\(([^:]+):\*\)$/);
+  if (bashMatch) {
+    const prefix = bashMatch[1]!;
+    if (toolName === "Bash") {
+      const command = String(toolInput.command ?? "");
+      if (command === prefix || command.startsWith(prefix + " ")) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // Exact tool name match
+  return pattern === toolName;
+}
+
+// ── Pure decision logic ──────────────────────────────────────────────────────
+
+/**
+ * Determine whether to allow or deny a tool invocation.
+ * Pure function — no I/O, fully testable.
+ */
+export function checkPathAccess(
+  input: PathCheckInput,
+  ctx: PathCheckContext
+): HookDecision {
+  const { toolName, toolInput, cwd } = input;
+  const { agentDir, worktreePath, agentsDir, rootRepo, isWorker, allowList } = ctx;
+
+  // 1. Block TaskCreate with role-specific message
+  if (toolName === "TaskCreate") {
+    if (isWorker) {
+      return { decision: "deny", reason: "TaskCreate is not available. Workers cannot create tasks." };
+    }
+    return { decision: "deny", reason: "TaskCreate is not available. Use ib new-agent --worker to spawn worker agents instead." };
+  }
+
+  // 2. Check allow list
+  let inAllowList = false;
+  for (const pattern of allowList) {
+    if (!pattern) continue;
+    if (toolMatchesPattern(toolName, toolInput, pattern)) {
+      inAllowList = true;
+      break;
+    }
+  }
+
+  if (!inAllowList) {
+    return { decision: "deny", reason: "Tool not in allow list" };
+  }
+
+  // 3. Special handling for Bash tool — check cd commands
+  if (toolName === "Bash") {
+    const command = String(toolInput.command ?? "");
+
+    if (command.startsWith("cd ") || command === "cd") {
+      // Extract cd target
+      let cdTarget = command.slice(3).trim();
+
+      // Remove surrounding quotes if present
+      if ((cdTarget.startsWith('"') && cdTarget.endsWith('"')) ||
+          (cdTarget.startsWith("'") && cdTarget.endsWith("'"))) {
+        cdTarget = cdTarget.slice(1, -1);
+      }
+
+      // Empty cd target → allow (cd to home)
+      if (!cdTarget || !cdTarget.trim()) {
+        return { decision: "allow", reason: "Tool in allow list" };
+      }
+
+      // Use cd target as file_path for further path checks below
+      return checkFilePath(cdTarget, cwd, toolName, ctx);
+    }
+
+    // Not a cd command — allowed by allow list, no path check needed
+    return { decision: "allow", reason: "Tool in allow list" };
+  }
+
+  // 4. Extract file_path or path from toolInput
+  const filePath = (toolInput.file_path as string | undefined) ??
+                   (toolInput.path as string | undefined);
+
+  if (!filePath) {
+    return { decision: "allow", reason: "Tool in allow list" };
+  }
+
+  return checkFilePath(filePath, cwd, toolName, ctx);
+}
+
+/**
+ * Check whether a resolved file path is allowed.
+ * Shared by both Bash cd and general file-path tools.
+ */
+function checkFilePath(
+  rawPath: string,
+  cwd: string,
+  toolName: string,
+  ctx: PathCheckContext
+): HookDecision {
+  const { agentDir, worktreePath, agentsDir, rootRepo } = ctx;
+
+  // 5. Resolve relative to absolute using cwd
+  let filePath = rawPath;
+  if (!filePath.startsWith("/")) {
+    filePath = join(cwd, filePath);
+  }
+
+  // 6. Normalize: resolve . and .. via path.resolve
+  filePath = resolve(filePath);
+
+  // 7. Allow: path within worktree
+  if (filePath.startsWith(worktreePath + "/") || filePath === worktreePath) {
+    return { decision: "allow", reason: "Tool in allow list, path in worktree" };
+  }
+
+  // 8. Allow: own agent.log
+  if (filePath === join(agentDir, "agent.log")) {
+    return { decision: "allow", reason: "Tool in allow list, accessing own log" };
+  }
+
+  // 9. Block: other agents' directories
+  if (filePath.startsWith(agentsDir + "/")) {
+    if (toolName === "Bash") {
+      return { decision: "deny", reason: "Access denied: cannot cd into other agents' worktrees" };
+    }
+    return { decision: "deny", reason: "Access denied: cannot access other agents' files" };
+  }
+
+  // 10. Block: main repo (outside worktree)
+  if (rootRepo && filePath.startsWith(rootRepo + "/") && !filePath.startsWith(worktreePath + "/")) {
+    return { decision: "deny", reason: "Access denied: work in your worktree, not the main repo" };
+  }
+
+  // 11. Allow: all other paths (system files, ~/.claude, etc.)
+  return { decision: "allow", reason: "Tool in allow list" };
+}
+
+// ── CLI entry point ──────────────────────────────────────────────────────────
+
+/**
+ * CLI entry for hook-check-path subcommand.
+ * Reads stdin JSON, resolves context, calls checkPathAccess(), outputs JSON.
+ */
+export async function hookCheckPath(agentId: string): Promise<void> {
+  // Read JSON from stdin
+  const raw = await new Response(Bun.stdin.stream()).text();
+  const json = JSON.parse(raw);
+
+  const toolName: string = json.tool_name ?? "";
+  const toolInput: Record<string, unknown> = json.tool_input ?? {};
+  const cwd: string = json.cwd ?? process.cwd();
+
+  // Resolve agent directory from cwd pattern
+  // cwd is typically: .../.ittybitty/agents/{id}/repo/...
+  const cwdMatch = cwd.match(/(.*\/.ittybitty\/agents)/);
+  const agentsDir = cwdMatch ? cwdMatch[1]! : join(process.cwd(), ".ittybitty", "agents");
+
+  const agentDir = join(agentsDir, agentId);
+  let worktreePath = join(agentDir, "repo");
+
+  // Resolve worktree to absolute path if it exists
+  try {
+    worktreePath = await realpath(worktreePath);
+  } catch {
+    // Keep the constructed path if realpath fails
+  }
+
+  // Read meta.json for worker flag
+  let isWorker = false;
+  try {
+    const metaFile = Bun.file(join(agentDir, "meta.json"));
+    if (await metaFile.exists()) {
+      const meta = await metaFile.json();
+      isWorker = meta.worker === true;
+    }
+  } catch { /* ignore */ }
+
+  // Read settings.local.json for allow list
+  let allowList: string[] = [];
+  try {
+    const settingsPath = join(worktreePath, ".claude", "settings.local.json");
+    const settingsFile = Bun.file(settingsPath);
+    if (await settingsFile.exists()) {
+      const settings = await settingsFile.json();
+      if (Array.isArray(settings?.permissions?.allow)) {
+        allowList = settings.permissions.allow;
+      }
+    }
+  } catch { /* ignore */ }
+
+  // Detect root repo via git worktree list --porcelain
+  let rootRepo = "";
+  try {
+    const proc = Bun.spawn(
+      ["git", "-C", worktreePath, "worktree", "list", "--porcelain"],
+      { stdout: "pipe", stderr: "pipe" }
+    );
+    const output = await new Response(proc.stdout).text();
+    const exitCode = await proc.exited;
+    if (exitCode === 0) {
+      const match = output.match(/^worktree (.+)$/m);
+      if (match) {
+        rootRepo = match[1]!;
+      }
+    }
+  } catch { /* ignore */ }
+
+  const decision = checkPathAccess(
+    { toolName, toolInput, cwd },
+    { agentId, agentDir, worktreePath, agentsDir, rootRepo, isWorker, allowList }
+  );
+
+  // Log denials
+  if (decision.decision === "deny") {
+    const params = formatToolInput(toolInput);
+    const suffix = params ? ` (${params})` : "";
+    await logAgent(agentDir, `[PreToolUse] Permission denied: ${toolName}${suffix}`);
+  }
+
+  // Output JSON decision
+  const output = {
+    hookSpecificOutput: {
+      hookEventName: "PreToolUse",
+      permissionDecision: decision.decision,
+      permissionDecisionReason: decision.reason,
+    },
+  };
+
+  console.log(JSON.stringify(output));
+}
+
+/** Format tool input params for logging (compact key=value pairs) */
+function formatToolInput(toolInput: Record<string, unknown>): string {
+  const parts: string[] = [];
+  for (const [key, value] of Object.entries(toolInput)) {
+    if (typeof value === "string") {
+      const truncated = value.length > 60 ? value.slice(0, 57) + "..." : value;
+      parts.push(`${key}=${truncated}`);
+    }
+  }
+  return parts.join(", ");
+}

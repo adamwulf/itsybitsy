@@ -1,0 +1,259 @@
+import { test, expect, describe } from "bun:test";
+import { checkPathAccess, toolMatchesPattern } from "./agent-path";
+import type { PathCheckInput, PathCheckContext } from "./agent-path";
+
+/** Build a default context for testing */
+function makeCtx(overrides: Partial<PathCheckContext> = {}): PathCheckContext {
+  return {
+    agentId: "agent-abc123",
+    agentDir: "/repo/.ittybitty/agents/agent-abc123",
+    worktreePath: "/repo/.ittybitty/agents/agent-abc123/repo",
+    agentsDir: "/repo/.ittybitsy/agents",
+    rootRepo: "/repo",
+    isWorker: false,
+    allowList: ["Read", "Write", "Edit", "Glob", "Grep", "Bash"],
+    ...overrides,
+  };
+}
+
+/** Shorthand to build input */
+function makeInput(overrides: Partial<PathCheckInput> = {}): PathCheckInput {
+  return {
+    toolName: "Read",
+    toolInput: {},
+    cwd: "/repo/.ittybitsy/agents/agent-abc123/repo",
+    ...overrides,
+  };
+}
+
+// ── toolMatchesPattern ───────────────────────────────────────────────────────
+
+describe("toolMatchesPattern", () => {
+  test("exact tool name match", () => {
+    expect(toolMatchesPattern("Read", {}, "Read")).toBe(true);
+    expect(toolMatchesPattern("Read", {}, "Write")).toBe(false);
+  });
+
+  test("Bash(prefix:*) matches command starting with prefix", () => {
+    expect(
+      toolMatchesPattern("Bash", { command: "ib send foo" }, "Bash(ib:*)")
+    ).toBe(true);
+  });
+
+  test("Bash(prefix:*) matches exact prefix", () => {
+    expect(
+      toolMatchesPattern("Bash", { command: "ib" }, "Bash(ib:*)")
+    ).toBe(true);
+  });
+
+  test("Bash(prefix:*) does not match different prefix", () => {
+    expect(
+      toolMatchesPattern("Bash", { command: "git status" }, "Bash(ib:*)")
+    ).toBe(false);
+  });
+
+  test("Bash(prefix:*) only matches Bash tool", () => {
+    expect(
+      toolMatchesPattern("Read", { command: "ib send" }, "Bash(ib:*)")
+    ).toBe(false);
+  });
+});
+
+// ── checkPathAccess ──────────────────────────────────────────────────────────
+
+describe("checkPathAccess", () => {
+  test("allow own worktree path", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Read",
+      toolInput: { file_path: "/repo/.ittybitty/agents/agent-abc123/repo/src/index.ts" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("allow");
+    expect(result.reason).toContain("path in worktree");
+  });
+
+  test("block other agent directory", () => {
+    const ctx = makeCtx({
+      agentsDir: "/repo/.ittybitty/agents",
+    });
+    const input = makeInput({
+      toolName: "Read",
+      toolInput: { file_path: "/repo/.ittybitty/agents/agent-other/repo/secret.ts" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("cannot access other agents");
+  });
+
+  test("block main repo path", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Read",
+      toolInput: { file_path: "/repo/src/index.ts" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("work in your worktree");
+  });
+
+  test("allow system paths (/tmp/foo)", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Read",
+      toolInput: { file_path: "/tmp/foo/bar.txt" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("allow");
+    expect(result.reason).toBe("Tool in allow list");
+  });
+
+  test("allow own agent.log", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Read",
+      toolInput: { file_path: "/repo/.ittybitty/agents/agent-abc123/agent.log" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("allow");
+    expect(result.reason).toContain("accessing own log");
+  });
+
+  test("TaskCreate denial — worker message", () => {
+    const ctx = makeCtx({ isWorker: true });
+    const input = makeInput({ toolName: "TaskCreate", toolInput: {} });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("Workers cannot create tasks");
+  });
+
+  test("TaskCreate denial — manager message", () => {
+    const ctx = makeCtx({ isWorker: false });
+    const input = makeInput({ toolName: "TaskCreate", toolInput: {} });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("ib new-agent --worker");
+  });
+
+  test("tool not in allow list", () => {
+    const ctx = makeCtx({ allowList: ["Read", "Write"] });
+    const input = makeInput({ toolName: "Bash", toolInput: { command: "ls" } });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toBe("Tool not in allow list");
+  });
+
+  test("Bash cd extraction — blocks cd to other agent", () => {
+    const ctx = makeCtx({
+      agentsDir: "/repo/.ittybitty/agents",
+    });
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "cd /repo/.ittybitty/agents/agent-other/repo" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("cannot cd into other agents");
+  });
+
+  test("Bash non-cd command → allow", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "ls -la" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("allow");
+    expect(result.reason).toBe("Tool in allow list");
+  });
+
+  test("cd empty target → allow", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "cd " },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("allow");
+    expect(result.reason).toBe("Tool in allow list");
+  });
+
+  test("cd with just 'cd' → allow (non-cd path since no space)", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "cd" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("allow");
+    expect(result.reason).toBe("Tool in allow list");
+  });
+
+  test("relative path resolution", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Read",
+      toolInput: { file_path: "src/foo.ts" },
+      cwd: "/repo/.ittybitty/agents/agent-abc123/repo",
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("allow");
+    expect(result.reason).toContain("path in worktree");
+  });
+
+  test("relative path with .. that escapes worktree → block", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Read",
+      toolInput: { file_path: "../../../../src/index.ts" },
+      cwd: "/repo/.ittybitty/agents/agent-abc123/repo",
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("work in your worktree");
+  });
+
+  test("no file_path or path in toolInput → allow", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Read",
+      toolInput: { pattern: "*.ts" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("allow");
+    expect(result.reason).toBe("Tool in allow list");
+  });
+
+  test("uses path field when file_path is absent", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Glob",
+      toolInput: { path: "/repo/.ittybitty/agents/agent-abc123/repo/src", pattern: "*.ts" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("allow");
+    expect(result.reason).toContain("path in worktree");
+  });
+
+  test("Bash cd with quoted path", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: 'cd "/repo/.ittybitty/agents/agent-abc123/repo/src"' },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("allow");
+    expect(result.reason).toContain("path in worktree");
+  });
+
+  test("worktree path exact match (not just prefix)", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Read",
+      toolInput: { file_path: "/repo/.ittybitty/agents/agent-abc123/repo" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("allow");
+    expect(result.reason).toContain("path in worktree");
+  });
+});

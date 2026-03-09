@@ -193,6 +193,25 @@ export async function killTmuxSession(sessionName: string): Promise<boolean> {
 }
 
 /**
+ * Check if a tmux session has any attached clients (e.g. opened in Ghostty/Terminal.app).
+ * Returns true if at least one client is attached.
+ */
+export async function hasAttachedClient(tmuxSession: string): Promise<boolean> {
+  try {
+    const proc = spawnRunner(
+      ["tmux", "list-clients", "-t", tmuxSession, "-F", "#{client_name}"],
+      { stdout: "pipe", stderr: "pipe" }
+    );
+    const raw = await new Response(proc.stdout).text();
+    const exitCode = await proc.exited;
+    if (exitCode !== 0) return false;
+    return raw.trim().split("\n").some((s) => s.length > 0);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Capture tmux output for a single agent (one-shot).
  * Used by watcher to detect agent state.
  */

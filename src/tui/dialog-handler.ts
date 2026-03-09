@@ -762,7 +762,8 @@ function buildSetupTab0Content(
     } else {
       // Checkbox items (safety-hooks, intercept-hook, gitignore, config-file when missing)
       const installed = item.value === "installed";
-      const checkbox = installed ? "[x]" : "[ ]";
+      const partial = item.value === "partial";
+      const checkbox = installed ? "[x]" : partial ? "[~]" : "[ ]";
       const label = `${checkbox} ${item.label}`;
       if (isSelected) {
         lines.push(truncateToWidth(`${GREEN}> ${BOLD}${label}${RESET}`, innerWidth, ""));

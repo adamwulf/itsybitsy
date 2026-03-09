@@ -28,8 +28,13 @@ export class AgentWatcher {
   private polling = false;
   private refreshing = false;
   private refreshQueued = false;
-  private lastAgents: Agent[] = [];
+  private _lastAgents: Agent[] = [];
   private lastOrphanedSessions: string[] = [];
+
+  /** Public read-only access to the most recently loaded agents list */
+  get lastAgents(): Agent[] {
+    return this._lastAgents;
+  }
 
   constructor(repos: RepoEntry[], events: WatcherEvents) {
     this.repos = repos;
@@ -120,13 +125,13 @@ export class AgentWatcher {
 
   /** Poll states for all known agents without re-reading from disk */
   private async pollStates(): Promise<void> {
-    const agents = this.lastAgents;
+    const agents = this._lastAgents;
     if (agents.length === 0 || this.polling || this.refreshing) return;
     this.polling = true;
     try {
       await detectAgentStates(agents);
       // If refresh() swapped lastAgents while we were awaiting, discard stale results
-      if (agents !== this.lastAgents) return;
+      if (agents !== this._lastAgents) return;
       const roots = buildAgentTree(agents);
       const repoInfos = this.repos.map((r) => ({ name: repoDisplayName(r), path: r.path }));
       const flatList = flattenAgentTree(roots, repoInfos);
@@ -160,7 +165,7 @@ export class AgentWatcher {
       }
 
       // Save agents and orphaned sessions for background state polling
-      this.lastAgents = agents;
+      this._lastAgents = agents;
       this.lastOrphanedSessions = orphanedTmuxSessions;
 
       // Detect state for each agent via tmux capture + parseState

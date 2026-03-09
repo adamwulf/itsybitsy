@@ -2585,3 +2585,91 @@ describe("Repo header selection persistence", () => {
     expect(dashboard.selectedAgent).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Watchdog dashboard integration
+// ---------------------------------------------------------------------------
+import { startWatchdog, stopWatchdog, isWatchdogRunning, clearTrackers } from "../watchdog";
+
+describe("watchdog dashboard integration", () => {
+  afterEach(() => {
+    stopWatchdog();
+    clearTrackers();
+  });
+
+  test("StatusBarComponent shows [watchdog] when watchdog is running", () => {
+    const dashboard = makeDashboard();
+    const agent = makeAgent("agent-1", "/repos/a");
+    const flatList: FlatEntry[] = [
+      makeFlatRepoHeader("a", "/repos/a", true),
+      makeFlatAgent(agent, { connector: "└── " }),
+    ];
+    dashboard.onUpdate([agent], flatList, []);
+
+    // Before starting watchdog — no indicator
+    const linesBefore = dashboard.render(120);
+    const footerBefore = linesBefore.map(l => stripAnsi(l)).join("\n");
+    expect(footerBefore).not.toContain("[watchdog]");
+
+    // Start watchdog
+    startWatchdog(() => [agent]);
+
+    // After starting watchdog — indicator present
+    const linesAfter = dashboard.render(120);
+    const footerAfter = linesAfter.map(l => stripAnsi(l)).join("\n");
+    expect(footerAfter).toContain("[watchdog]");
+  });
+
+  test("StatusBarComponent hides [watchdog] after stopWatchdog()", () => {
+    const dashboard = makeDashboard();
+    const agent = makeAgent("agent-1", "/repos/a");
+    const flatList: FlatEntry[] = [
+      makeFlatRepoHeader("a", "/repos/a", true),
+      makeFlatAgent(agent, { connector: "└── " }),
+    ];
+    dashboard.onUpdate([agent], flatList, []);
+
+    startWatchdog(() => [agent]);
+    expect(isWatchdogRunning()).toBe(true);
+
+    stopWatchdog();
+    expect(isWatchdogRunning()).toBe(false);
+
+    const lines = dashboard.render(120);
+    const footer = lines.map(l => stripAnsi(l)).join("\n");
+    expect(footer).not.toContain("[watchdog]");
+  });
+
+  test("isWatchdogRunning() reflects start/stop state", () => {
+    expect(isWatchdogRunning()).toBe(false);
+    startWatchdog(() => []);
+    expect(isWatchdogRunning()).toBe(true);
+    stopWatchdog();
+    expect(isWatchdogRunning()).toBe(false);
+  });
+
+  test("startPolling() starts watchdog when watcher is set", () => {
+    const dashboard = makeDashboard();
+    const watcher = { lastAgents: [] } as any;
+    dashboard.setWatcher(watcher);
+
+    expect(isWatchdogRunning()).toBe(false);
+    dashboard.startPolling();
+    expect(isWatchdogRunning()).toBe(true);
+
+    dashboard.stopPolling();
+    expect(isWatchdogRunning()).toBe(false);
+  });
+
+  test("stopPolling() stops watchdog", () => {
+    const dashboard = makeDashboard();
+    const watcher = { lastAgents: [] } as any;
+    dashboard.setWatcher(watcher);
+
+    dashboard.startPolling();
+    expect(isWatchdogRunning()).toBe(true);
+
+    dashboard.stopPolling();
+    expect(isWatchdogRunning()).toBe(false);
+  });
+});

@@ -7,21 +7,17 @@
 import { stripAnsi } from "./parse-state";
 import type { SpawnFn } from "./types";
 
-/** @deprecated Use SpawnFn from ./types instead */
-export type SpawnResult = import("./types").SpawnResult;
-export type SpawnRunner = SpawnFn;
-
 /** Pluggable spawn runner — defaults to Bun.spawn, overridable for tests */
 let spawnRunner: SpawnFn = Bun.spawn as SpawnFn;
 
 /** Override the spawn runner (for testing) */
-export function setSpawnRunner(runner: SpawnRunner): void {
+export function setSpawnRunner(runner: SpawnFn): void {
   spawnRunner = runner;
 }
 
 /** Reset to the default Bun.spawn runner */
 export function resetSpawnRunner(): void {
-  spawnRunner = Bun.spawn as SpawnRunner;
+  spawnRunner = Bun.spawn as SpawnFn;
 }
 
 export interface TmuxPollerEvents {

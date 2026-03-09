@@ -339,7 +339,7 @@ async function main() {
     case "kill": {
       const repos = await listRepos();
       const agent = await requireAgent(args[1], repos);
-      const extraArgs = args.slice(2);
+      const extraArgs = args.slice(2).filter((a) => a !== "--force");
       if (extraArgs.length > 0) {
         console.error(`Warning: unknown arguments ignored: ${extraArgs.join(" ")}`);
       }
@@ -350,7 +350,7 @@ async function main() {
     case "merge": {
       const repos = await listRepos();
       const agent = await requireAgent(args[1], repos);
-      const extraArgs = args.slice(2);
+      const extraArgs = args.slice(2).filter((a) => a !== "--force");
       if (extraArgs.length > 0) {
         console.error(`Warning: unknown arguments ignored: ${extraArgs.join(" ")}`);
       }
@@ -361,7 +361,7 @@ async function main() {
     case "resume": {
       const repos = await listRepos();
       const agent = await requireAgent(args[1], repos);
-      const extraArgs = args.slice(2);
+      const extraArgs = args.slice(2).filter((a) => a !== "--force");
       if (extraArgs.length > 0) {
         console.error(`Warning: unknown arguments ignored: ${extraArgs.join(" ")}`);
       }

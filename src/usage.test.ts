@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { formatResetTime, parseUsageResponse, fetchUsage, setTestDir, resetTestDir } from "./usage";
+import { formatResetTime, parseUsageResponse, fetchUsage, setTestDir, resetTestDir, setTestFetch, resetTestFetch } from "./usage";
 import { join } from "path";
 import { mkdtemp, rm, writeFile } from "fs/promises";
 import { tmpdir } from "os";
@@ -100,7 +100,6 @@ describe("parseUsageResponse", () => {
 
 describe("fetchUsage", () => {
   let tmpDir: string;
-  let originalFetch: typeof globalThis.fetch;
 
   const apiResponse = {
     five_hour: { utilization: 42.0, resets_at: "2025-12-12T20:00:00Z" },
@@ -110,12 +109,11 @@ describe("fetchUsage", () => {
   beforeEach(async () => {
     tmpDir = await mkdtemp(join(tmpdir(), "usage-test-"));
     setTestDir(tmpDir);
-    originalFetch = globalThis.fetch;
   });
 
   afterEach(async () => {
     resetTestDir();
-    globalThis.fetch = originalFetch;
+    resetTestFetch();
     await rm(tmpDir, { recursive: true, force: true });
   });
 
@@ -134,11 +132,11 @@ describe("fetchUsage", () => {
   }
 
   function mockFetch(response: any, ok = true, status = 200): void {
-    globalThis.fetch = (async () => ({
+    setTestFetch((async () => ({
       ok,
       status,
       json: async () => response,
-    })) as any;
+    })) as any);
   }
 
   test("returns cached response when cache is fresh", async () => {
@@ -146,7 +144,7 @@ describe("fetchUsage", () => {
     await writeTestCache(nowSec, apiResponse);
     // No credentials needed — should return from cache without API call
     let fetchCalled = false;
-    globalThis.fetch = (async () => { fetchCalled = true; return { ok: true, json: async () => ({}) }; }) as any;
+    setTestFetch((async () => { fetchCalled = true; return { ok: true, json: async () => ({}) }; }) as any);
 
     const result = await fetchUsage();
 
@@ -177,7 +175,7 @@ describe("fetchUsage", () => {
 
   test("returns null when no token available and no cache", async () => {
     // No credentials file, no cache
-    globalThis.fetch = (async () => { throw new Error("should not be called"); }) as any;
+    setTestFetch((async () => { throw new Error("should not be called"); }) as any);
 
     const result = await fetchUsage();
     expect(result).toBeNull();
@@ -191,7 +189,7 @@ describe("fetchUsage", () => {
     await writeFile(join(tmpDir, "usage.lock"), "");
 
     let fetchCalled = false;
-    globalThis.fetch = (async () => { fetchCalled = true; return { ok: true, json: async () => ({}) }; }) as any;
+    setTestFetch((async () => { fetchCalled = true; return { ok: true, json: async () => ({}) }; }) as any);
 
     const result = await fetchUsage();
 
@@ -253,7 +251,7 @@ describe("fetchUsage", () => {
     const staleSec = Math.floor(Date.now() / 1000) - 120;
     await writeTestCache(staleSec, apiResponse);
     await writeCredentials();
-    globalThis.fetch = (async () => { throw new Error("network error"); }) as any;
+    setTestFetch((async () => { throw new Error("network error"); }) as any);
 
     const result = await fetchUsage();
 
@@ -263,7 +261,7 @@ describe("fetchUsage", () => {
 
   test("returns null on network error with no cache", async () => {
     await writeCredentials();
-    globalThis.fetch = (async () => { throw new Error("network error"); }) as any;
+    setTestFetch((async () => { throw new Error("network error"); }) as any);
 
     const result = await fetchUsage();
     expect(result).toBeNull();

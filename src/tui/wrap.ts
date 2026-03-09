@@ -26,23 +26,28 @@ export function wrapSingleLine(line: string, width: number): string[] {
   const chunks: string[] = [];
   let current = "";
   let visWidth = 0;
+
+  // Use Array.from to split into Unicode codepoints (not UTF-16 code units),
+  // so surrogate pairs and multi-codepoint emoji are kept intact.
+  const codepoints = Array.from(line);
   let i = 0;
 
-  while (i < line.length) {
+  while (i < codepoints.length) {
     // Check for ANSI escape sequence: ESC [ ... terminator
-    if (line[i] === "\x1b" && i + 1 < line.length && line[i + 1] === "[") {
+    // ANSI sequences are pure ASCII, so codepoint indexing works fine here.
+    if (codepoints[i] === "\x1b" && i + 1 < codepoints.length && codepoints[i + 1] === "[") {
       let j = i + 2;
-      while (j < line.length && !isCsiTerminator(line.charCodeAt(j))) {
+      while (j < codepoints.length && !isCsiTerminator(codepoints[j]!.codePointAt(0)!)) {
         j++;
       }
-      if (j < line.length) j++; // include terminating byte
-      current += line.slice(i, j);
+      if (j < codepoints.length) j++; // include terminating byte
+      current += codepoints.slice(i, j).join("");
       i = j;
       continue;
     }
 
-    // Measure the visible width of this character
-    const char = line[i]!;
+    // Measure the visible width of this character (full codepoint)
+    const char = codepoints[i]!;
     const charWidth = visibleWidth(char);
 
     // Check if adding this character would exceed the width

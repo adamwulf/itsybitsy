@@ -8,6 +8,19 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { rename, mkdir, stat, writeFile, unlink } from "node:fs/promises";
 
+type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+
+/** For test injection — avoids monkey-patching globalThis.fetch */
+let fetchFn: FetchLike = globalThis.fetch;
+
+export function setTestFetch(fn: FetchLike): void {
+  fetchFn = fn;
+}
+
+export function resetTestFetch(): void {
+  fetchFn = globalThis.fetch;
+}
+
 let ITSYBITSY_DIR = join(homedir(), ".itsybitsy");
 let CACHE_PATH = join(ITSYBITSY_DIR, "usage-cache.json");
 let LOCK_PATH = join(ITSYBITSY_DIR, "usage.lock");
@@ -195,7 +208,7 @@ export async function fetchUsage(): Promise<UsageData | null> {
 
   await acquireLock();
   try {
-    const resp = await fetch("https://api.anthropic.com/api/oauth/usage", {
+    const resp = await fetchFn("https://api.anthropic.com/api/oauth/usage", {
       headers: {
         Authorization: `Bearer ${token}`,
         "anthropic-beta": "oauth-2025-04-20",

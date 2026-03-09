@@ -81,6 +81,65 @@ describe("wrapSingleLine", () => {
     expect(result[1]).toContain("你");
   });
 
+  test("handles emoji at wrap boundary", () => {
+    // "abcd" = 4 cols, "🎉" = 2 cols, "efg" = 3 cols. Width 4.
+    // First chunk: "abcd" (4), second chunk: "🎉ef" (4), third chunk: "g" (1)
+    const line = "abcd🎉efg";
+    const result = wrapSingleLine(line, 4);
+    expect(result.length).toBe(3);
+    expect(result[0]).toBe("abcd");
+    expect(result[1]).toBe("🎉ef");
+    expect(visibleWidth(result[1]!)).toBe(4);
+    expect(result[2]).toBe("g");
+  });
+
+  test("handles emoji in middle of line", () => {
+    const line = "ab🎉cd";
+    const result = wrapSingleLine(line, 4);
+    // "ab" = 2, "🎉" = 2, total = 4 for first chunk
+    expect(result[0]).toBe("ab🎉");
+    expect(visibleWidth(result[0]!)).toBe(4);
+  });
+
+  test("handles surrogate pairs (non-BMP characters)", () => {
+    // 𝕳 is U+1D573, encoded as surrogate pair in UTF-16
+    const line = "a𝕳b𝕳c";
+    const result = wrapSingleLine(line, 2);
+    // Each character is 1 column wide; should not split surrogate pairs
+    expect(result[0]).toBe("a𝕳");
+    expect(result[1]).toBe("b𝕳");
+    expect(result[2]).toBe("c");
+  });
+
+  test("handles CJK characters wrapping correctly", () => {
+    // Each CJK char is 2 columns; width 5 fits 2 CJK chars (4 cols) but not 3 (6 cols)
+    const line = "你好世界测试";
+    const result = wrapSingleLine(line, 5);
+    expect(result.length).toBe(3);
+    expect(visibleWidth(result[0]!)).toBe(4);
+    expect(visibleWidth(result[1]!)).toBe(4);
+    expect(visibleWidth(result[2]!)).toBe(4);
+  });
+
+  test("handles emoji mixed with ANSI codes", () => {
+    const line = "\x1b[31m🎉hello\x1b[0m";
+    const result = wrapSingleLine(line, 4);
+    // "🎉" = 2 cols, "he" = 2 cols → 4 cols first chunk
+    expect(result.length).toBe(2);
+    expect(result[0]).toContain("🎉");
+    expect(result[0]).toContain("\x1b[31m");
+    expect(visibleWidth(result[0]!)).toBe(4);
+  });
+
+  test("handles multi-emoji sequence", () => {
+    const line = "🎉🎊🎈🎁";
+    const result = wrapSingleLine(line, 4);
+    // Each emoji is 2 cols wide; 2 per line
+    expect(result.length).toBe(2);
+    expect(result[0]).toBe("🎉🎊");
+    expect(result[1]).toBe("🎈🎁");
+  });
+
   test("handles non-letter CSI terminators (e.g. \\x1b[@)", () => {
     // CSI @ (0x40) is a valid CSI terminator per ECMA-48.
     // wrapSingleLine skips the sequence for width counting.

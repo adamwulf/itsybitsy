@@ -14,9 +14,9 @@ import {
 
 function makeSetupItems(): SetupItem[] {
   return [
-    { label: "hook1", value: "installed", actionable: true, kind: "hook" },
-    { label: ".gitignore contains .ittybitty", value: "yes", actionable: false, kind: "info" },
-    { label: "Diff tool", value: "delta", actionable: true, kind: "difftool" },
+    { label: "Safety hooks", description: "Block cd into worktrees + inject status + session context", value: "installed", actionable: true, kind: "safety-hooks" },
+    { label: "Config file", description: ".ittybitty.json exists", value: "installed", actionable: false, kind: "config-file" },
+    { label: "Diff tool", description: "Command for 'o' key in diff view", value: "delta", actionable: true, kind: "difftool" },
   ];
 }
 
@@ -459,7 +459,7 @@ describe("setup dialog tab 0 still works", () => {
     ctx._dialog = dialog;
     handleDialogInput(ctx, "\r");
     expect(actionedItem).not.toBeNull();
-    expect(actionedItem!.kind).toBe("hook");
+    expect(actionedItem!.kind).toBe("safety-hooks");
   });
 });
 

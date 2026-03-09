@@ -124,14 +124,33 @@ export async function acknowledgeQuestion(repoPath: string, questionId: string):
   return runIb(["acknowledge", questionId], repoPath);
 }
 
+/** Returns "installed", "partial", or "not-installed" */
 export async function hooksStatus(repoPath: string): Promise<IbCommandResult> {
   return runIb(["hooks", "status"], repoPath);
 }
 
-export async function installHook(repoPath: string, hookName: string): Promise<IbCommandResult> {
-  return runIb(["hooks", "install", hookName], repoPath);
+/** Returns "installed" or "not-installed" for the intercept hook */
+export async function interceptHooksStatus(repoPath: string): Promise<IbCommandResult> {
+  return runIb(["hooks", "status", "--intercept"], repoPath);
 }
 
-export async function uninstallHook(repoPath: string, hookName: string): Promise<IbCommandResult> {
-  return runIb(["hooks", "uninstall", hookName], repoPath);
+/** Install all safety hooks (path isolation + status injection + session-start) */
+export async function installSafetyHooks(repoPath: string): Promise<IbCommandResult> {
+  return runIb(["hooks", "install"], repoPath);
 }
+
+/** Uninstall all safety hooks */
+export async function uninstallSafetyHooks(repoPath: string): Promise<IbCommandResult> {
+  return runIb(["hooks", "uninstall"], repoPath);
+}
+
+/** Install task interception hook */
+export async function installInterceptHook(repoPath: string): Promise<IbCommandResult> {
+  return runIb(["hooks", "install-intercept"], repoPath);
+}
+
+/** Uninstall task interception hook */
+export async function uninstallInterceptHook(repoPath: string): Promise<IbCommandResult> {
+  return runIb(["hooks", "uninstall-intercept"], repoPath);
+}
+

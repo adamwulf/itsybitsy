@@ -68,9 +68,10 @@ export type DialogState =
 
 export type SetupItem = {
   label: string;
+  description: string;
   value: string;
   actionable: boolean;
-  kind: "hook" | "info" | "difftool";
+  kind: "safety-hooks" | "intercept-hook" | "gitignore" | "config-file" | "difftool";
 };
 
 export type ConfigDialogItem = {
@@ -744,16 +745,7 @@ function buildSetupTab0Content(
     const item = dialog.items[i]!;
     const isSelected = i === dialog.selectedIndex;
 
-    if (item.kind === "hook") {
-      const installed = item.value === "installed";
-      const badge = installed ? `${GREEN}● installed${RESET}` : `${DIM}○ not installed${RESET}`;
-      const label = `${item.label}  ${badge}`;
-      if (isSelected) {
-        lines.push(truncateToWidth(`${GREEN}> ${BOLD}${label}${RESET}`, innerWidth, ""));
-      } else {
-        lines.push(truncateToWidth(`  ${label}`, innerWidth, ""));
-      }
-    } else if (item.kind === "difftool") {
+    if (item.kind === "difftool") {
       const val = item.value || `${DIM}(not set)${RESET}`;
       const label = `${item.label}: ${val}`;
       if (isSelected) {
@@ -761,11 +753,25 @@ function buildSetupTab0Content(
       } else {
         lines.push(truncateToWidth(`  ${label}`, innerWidth, ""));
       }
+      lines.push(truncateToWidth(`  ${DIM}${item.description}${RESET}`, innerWidth, ""));
+    } else if (item.kind === "config-file" && item.value === "installed") {
+      // Config file exists — show as non-toggleable [+]
+      const checkbox = `${DIM}[+] ${item.label}${RESET}`;
+      lines.push(truncateToWidth(`  ${checkbox}`, innerWidth, ""));
+      lines.push(truncateToWidth(`  ${DIM}${item.description}${RESET}`, innerWidth, ""));
     } else {
-      // info — not selectable
-      const val = item.value === "yes" ? `${GREEN}✓${RESET}` : `${DIM}✗${RESET}`;
-      lines.push(truncateToWidth(`  ${DIM}${item.label}:${RESET} ${val}`, innerWidth, ""));
+      // Checkbox items (safety-hooks, intercept-hook, gitignore, config-file when missing)
+      const installed = item.value === "installed";
+      const checkbox = installed ? "[x]" : "[ ]";
+      const label = `${checkbox} ${item.label}`;
+      if (isSelected) {
+        lines.push(truncateToWidth(`${GREEN}> ${BOLD}${label}${RESET}`, innerWidth, ""));
+      } else {
+        lines.push(truncateToWidth(`  ${label}`, innerWidth, ""));
+      }
+      lines.push(truncateToWidth(`  ${DIM}${item.description}${RESET}`, innerWidth, ""));
     }
+    lines.push("");
   }
 }
 

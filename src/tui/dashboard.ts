@@ -81,6 +81,7 @@ export class TmuxPaneComponent implements Component {
     this.rawOutput = "";
     this.hasPolled = false;
     this.scrollBack = 0;
+    this.clientAttached = false;
   }
 
   scrollUp(amount = 1) {
@@ -377,7 +378,7 @@ export class DashboardComponent implements Component {
   private _questionsFocused = false;
   updateAvailable: string | null = null;
   /** Cache of which agents have an attached tmux client */
-  clientAttached: Map<string, boolean> = new Map();
+  private _clientAttached: Map<string, boolean> = new Map();
   private clientCheckTimer: ReturnType<typeof setInterval> | null = null;
 
   /** Read-only access to whether questions list has focus (for testing) */
@@ -424,6 +425,11 @@ export class DashboardComponent implements Component {
   /** Read-only access to selected agent (for testing) */
   get selectedAgent(): Agent | null {
     return this.agentTree.selectedAgent;
+  }
+
+  /** Read-only access to client-attached cache (for testing) */
+  get clientAttachedCache(): Map<string, boolean> {
+    return this._clientAttached;
   }
 
   constructor() {
@@ -685,7 +691,7 @@ export class DashboardComponent implements Component {
     this.rightPane.agent = selected;
     this.rightPane.selectedRepoHeader = this.agentTree.selectedRepoHeader;
     this.tmuxPane.agent = selected;
-    this.tmuxPane.clientAttached = selected ? (this.clientAttached.get(selected.id) ?? false) : false;
+    this.tmuxPane.clientAttached = selected ? (this._clientAttached.get(selected.id) ?? false) : false;
     this.statusBar.repoHeaderSelected = !selected && this.agentTree.selectedRepoHeader !== null;
 
     const newId = selected?.id ?? null;
@@ -726,14 +732,22 @@ export class DashboardComponent implements Component {
   }
 
   /** Check if the selected agent's tmux session has an attached client, start/stop polling accordingly */
+  private _clientChecking = false;
   private checkClientAttached(agent: Agent) {
     const agentId = agent.id;
     const session = agent.meta.tmux_session;
 
     const doCheck = async () => {
-      const attached = await hasAttachedClient(session);
-      const wasAttached = this.clientAttached.get(agentId) ?? false;
-      this.clientAttached.set(agentId, attached);
+      if (this._clientChecking) return;
+      this._clientChecking = true;
+      let attached: boolean;
+      try {
+        attached = await hasAttachedClient(session);
+      } finally {
+        this._clientChecking = false;
+      }
+      const wasAttached = this._clientAttached.get(agentId) ?? false;
+      this._clientAttached.set(agentId, attached);
 
       if (attached && !this.clientCheckTimer) {
         // Start polling every 3s to detect disconnect

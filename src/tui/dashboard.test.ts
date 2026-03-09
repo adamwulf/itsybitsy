@@ -224,6 +224,66 @@ describe("TmuxPaneComponent scroll logic", () => {
     // Line 4 is the scroll indicator (truncated to width=10, so check for "4 lin")
     expect(scrolled[4]).toContain("4 lin");
   });
+
+  test("clientAttached shows centered message instead of tmux output", () => {
+    const pane = new TmuxPaneComponent();
+    pane.agent = makeAgent("agent-test", "/tmp/test");
+    pane.hasPolled = true;
+    pane.rawOutput = "some tmux output\nline 2\n";
+    pane.displayHeight = 10;
+    pane.clientAttached = true;
+
+    const result = pane.render(60);
+    expect(result.length).toBe(10);
+    // Should contain the centered message
+    const allText = result.join("\n");
+    expect(allText).toContain("[opened in terminal]");
+    expect(allText).toContain("agent-test");
+    // Should NOT contain the tmux output
+    expect(allText).not.toContain("some tmux output");
+  });
+
+  test("clientAttached message is vertically centered", () => {
+    const pane = new TmuxPaneComponent();
+    pane.agent = makeAgent("agent-center", "/tmp/test");
+    pane.displayHeight = 20;
+    pane.clientAttached = true;
+
+    const result = pane.render(60);
+    expect(result.length).toBe(20);
+
+    // The midpoint is line 10 (floor(20/2))
+    // agent id on line 9, session on line 10, message on line 11
+    // Lines before and after should be empty
+    expect(result[0]).toBe("");
+    expect(result[19]).toBe("");
+    // The three content lines should be non-empty
+    const mid = Math.floor(20 / 2);
+    expect(result[mid - 1]!.length).toBeGreaterThan(0); // agent id
+    expect(result[mid]!.length).toBeGreaterThan(0); // session
+    expect(result[mid + 1]).toContain("[opened in terminal]");
+  });
+
+  test("clientAttached=false shows normal tmux output", () => {
+    const pane = new TmuxPaneComponent();
+    pane.agent = makeAgent("agent-normal", "/tmp/test");
+    pane.hasPolled = true;
+    pane.rawOutput = "normal output here\n";
+    pane.displayHeight = 10;
+    pane.clientAttached = false;
+
+    const result = pane.render(60);
+    const allText = result.join("\n");
+    expect(allText).toContain("normal output here");
+    expect(allText).not.toContain("[opened in terminal]");
+  });
+
+  test("resetForAgent clears clientAttached", () => {
+    const pane = new TmuxPaneComponent();
+    pane.clientAttached = true;
+    pane.resetForAgent();
+    expect(pane.clientAttached).toBe(false);
+  });
 });
 
 describe("RightPaneComponent scroll logic", () => {

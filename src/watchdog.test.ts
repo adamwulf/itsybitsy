@@ -303,7 +303,75 @@ describe("watchdog", () => {
     });
   });
 
-  describe("states with no handler yet (Phase 15-B)", () => {
+  describe("counter reset on state transitions", () => {
+    test("running resets wait counter and backoff interval", async () => {
+      const a1 = agent("a1", "waiting", "mgr");
+      const mgr = agent("mgr", "running");
+
+      // Build up backoff state
+      for (let i = 0; i < INITIAL_NOTIFY_TICKS; i++) {
+        await tick([mgr, a1]);
+      }
+      // After first notification, interval doubled
+      expect(getTracker("a1").notifyInterval).toBe(INITIAL_NOTIFY_TICKS * 2);
+
+      // Transition to running
+      const a1Running = agent("a1", "running", "mgr");
+      await tick([mgr, a1Running]);
+      expect(getTracker("a1").waitCounter).toBe(0);
+      expect(getTracker("a1").notifyInterval).toBe(INITIAL_NOTIFY_TICKS);
+    });
+
+    test("waiting→running→waiting resets backoff completely", async () => {
+      const mgr = agent("mgr", "running");
+
+      // First waiting episode: build up backoff
+      const a1Waiting = agent("a1", "waiting", "mgr");
+      for (let i = 0; i < INITIAL_NOTIFY_TICKS; i++) {
+        await tick([mgr, a1Waiting]);
+      }
+      expect(getTracker("a1").notifyInterval).toBe(INITIAL_NOTIFY_TICKS * 2);
+
+      // Transition to running
+      await tick([mgr, agent("a1", "running", "mgr")]);
+      expect(getTracker("a1").notifyInterval).toBe(INITIAL_NOTIFY_TICKS);
+
+      // Second waiting episode: should start fresh
+      for (let i = 0; i < INITIAL_NOTIFY_TICKS; i++) {
+        await tick([mgr, a1Waiting]);
+      }
+      // Should be 12 (doubled once from 6), not continuing from 24
+      expect(getTracker("a1").notifyInterval).toBe(INITIAL_NOTIFY_TICKS * 2);
+    });
+
+    test("all non-backoff states reset counters", async () => {
+      const nonBackoffStates: AgentState[] = ["running", "creating", "complete", "stopped", "compacting", "rate_limited"];
+
+      for (const state of nonBackoffStates) {
+        clearTrackers();
+        const tracker = getTracker("a1");
+        tracker.waitCounter = 10;
+        tracker.notifyInterval = INITIAL_NOTIFY_TICKS * 8;
+
+        await tick([agent("a1", state)]);
+        expect(getTracker("a1").waitCounter).toBe(0);
+        expect(getTracker("a1").notifyInterval).toBe(INITIAL_NOTIFY_TICKS);
+      }
+    });
+
+    test("waiting and unknown do NOT reset their own counters mid-backoff", async () => {
+      const mgr = agent("mgr", "running");
+      const a1 = agent("a1", "waiting", "mgr");
+
+      // Tick 3 times
+      for (let i = 0; i < 3; i++) {
+        await tick([mgr, a1]);
+      }
+      expect(getTracker("a1").waitCounter).toBe(3);
+      // Interval stays at initial since we haven't hit threshold
+      expect(getTracker("a1").notifyInterval).toBe(INITIAL_NOTIFY_TICKS);
+    });
+
     test("running state does not increment wait counter", async () => {
       const a1 = agent("a1", "running");
       await tick([a1]);
@@ -421,10 +489,33 @@ describe("watchdog", () => {
   describe("startWatchdog / stopWatchdog", () => {
     test("isWatchdogRunning reports correct state", () => {
       expect(isWatchdogRunning()).toBe(false);
-      // Can't easily test startWatchdog without a real AgentWatcher,
-      // but we can test stopWatchdog cleans up
       stopWatchdog();
       expect(isWatchdogRunning()).toBe(false);
+    });
+
+    test("startWatchdog sets running, stopWatchdog clears it", () => {
+      expect(isWatchdogRunning()).toBe(false);
+      startWatchdog(() => []);
+      expect(isWatchdogRunning()).toBe(true);
+      stopWatchdog();
+      expect(isWatchdogRunning()).toBe(false);
+    });
+
+    test("startWatchdog is idempotent (no double-start)", () => {
+      startWatchdog(() => []);
+      expect(isWatchdogRunning()).toBe(true);
+      // Second call should be no-op
+      startWatchdog(() => []);
+      expect(isWatchdogRunning()).toBe(true);
+      stopWatchdog();
+    });
+
+    test("stopWatchdog clears trackers", () => {
+      startWatchdog(() => []);
+      getTracker("test-agent");
+      expect(getAllTrackers().size).toBe(1);
+      stopWatchdog();
+      expect(getAllTrackers().size).toBe(0);
     });
   });
 

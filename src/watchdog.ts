@@ -14,8 +14,10 @@
 
 import type { Agent } from "./agents";
 import type { AgentState } from "./parse-state";
-import type { AgentWatcher } from "./watcher";
 import { sendMessage } from "./ib-commands";
+
+/** Function that returns the current list of agents. Used by the watchdog loop. */
+export type AgentProvider = () => Agent[];
 
 /** Per-agent tracking state managed by the watchdog */
 export interface AgentTracker {
@@ -168,8 +170,7 @@ registerStateHandler("unknown", handleUnknown);
 // ---------------------------------------------------------------------------
 
 let watchdogTimer: ReturnType<typeof setInterval> | null = null;
-let currentWatcher: AgentWatcher | null = null;
-let latestAgents: Agent[] = [];
+let agentProvider: AgentProvider | null = null;
 
 /**
  * Process a single tick of the watchdog loop.
@@ -199,6 +200,9 @@ function collectIds(agents: Agent[], ids: Set<string>): void {
   }
 }
 
+/** States that use the wait counter / backoff system */
+const BACKOFF_STATES = new Set<AgentState>(["waiting", "unknown"]);
+
 /** Recursively process all agents through their state handlers */
 async function processAgents(agents: Agent[], allAgents: Agent[]): Promise<void> {
   for (const agent of agents) {
@@ -207,6 +211,14 @@ async function processAgents(agents: Agent[], allAgents: Agent[]): Promise<void>
 
     if (handler) {
       await handler(agent, tracker, allAgents);
+    }
+
+    // Reset wait counter and backoff when transitioning away from backoff states.
+    // Matches bash watchdog: running/creating/complete/stopped/compacting/rate_limited
+    // all reset waiting_counter=0 and notify_interval=6.
+    if (!BACKOFF_STATES.has(agent.state)) {
+      tracker.waitCounter = 0;
+      tracker.notifyInterval = INITIAL_NOTIFY_TICKS;
     }
 
     // Update previous state after handler runs
@@ -219,25 +231,20 @@ async function processAgents(agents: Agent[], allAgents: Agent[]): Promise<void>
 
 /**
  * Start the watchdog loop.
- * Consumes agent state from the watcher via its onUpdate callback.
+ * Accepts an AgentProvider function that returns the current agent list
+ * on each tick. Typically, the caller passes a closure over the watcher's
+ * cached agents (e.g., `() => watcher.lastAgents`).
  */
-export function startWatchdog(watcher: AgentWatcher): void {
+export function startWatchdog(provider: AgentProvider): void {
   if (watchdogTimer) return; // Already running
 
-  currentWatcher = watcher;
-
-  // Hook into watcher updates to keep our agent list current
-  const originalEvents = (watcher as any).events as { onUpdate: Function; onError?: Function };
-  const originalOnUpdate = originalEvents.onUpdate;
-  originalEvents.onUpdate = (...args: any[]) => {
-    latestAgents = args[0] as Agent[];
-    originalOnUpdate.apply(originalEvents, args);
-  };
+  agentProvider = provider;
 
   // Run the watchdog tick every POLL_INTERVAL_MS
   watchdogTimer = setInterval(async () => {
-    if (latestAgents.length > 0) {
-      await tick(latestAgents);
+    const agents = agentProvider?.() ?? [];
+    if (agents.length > 0) {
+      await tick(agents);
     }
   }, POLL_INTERVAL_MS);
 }
@@ -250,8 +257,7 @@ export function stopWatchdog(): void {
     clearInterval(watchdogTimer);
     watchdogTimer = null;
   }
-  currentWatcher = null;
-  latestAgents = [];
+  agentProvider = null;
   trackers.clear();
 }
 

@@ -471,4 +471,53 @@ describe("readAccessToken keychain fallback", () => {
     expect(result).not.toBeNull();
     expect(result!.sessionPct).toBe(42);
   });
+
+  test("falls through to keychain when credentials file has no claudeAiOauth field", async () => {
+    // Credentials file exists but missing the claudeAiOauth key
+    await Bun.write(join(tmpDir, "credentials.json"),
+      JSON.stringify({ someOtherKey: "value" }));
+
+    const keychainJson = JSON.stringify({ claudeAiOauth: { accessToken: "keychain-token" } });
+    mockSpawn(keychainJson, 0);
+    mockFetch(apiResponse);
+
+    const result = await fetchUsage();
+
+    expect(result).not.toBeNull();
+    expect(result!.sessionPct).toBe(42);
+  });
+
+  test("falls through to keychain when credentials file has non-string accessToken", async () => {
+    // accessToken is a number instead of string — typeof check fails
+    await Bun.write(join(tmpDir, "credentials.json"),
+      JSON.stringify({ claudeAiOauth: { accessToken: 12345 } }));
+
+    const keychainJson = JSON.stringify({ claudeAiOauth: { accessToken: "keychain-token" } });
+    mockSpawn(keychainJson, 0);
+    mockFetch(apiResponse);
+
+    const result = await fetchUsage();
+
+    expect(result).not.toBeNull();
+    expect(result!.sessionPct).toBe(42);
+  });
+
+  test("returns null when keychain returns JSON with empty accessToken", async () => {
+    // No credentials file; keychain returns valid JSON but token is empty string
+    const emptyTokenJson = JSON.stringify({ claudeAiOauth: { accessToken: "" } });
+    mockSpawn(emptyTokenJson, 0);
+
+    const result = await fetchUsage();
+
+    expect(result).toBeNull();
+  });
+
+  test("returns null when keychain returns whitespace-only output", async () => {
+    // No credentials file; keychain output trims to empty string
+    mockSpawn("   \n  \t  ", 0);
+
+    const result = await fetchUsage();
+
+    expect(result).toBeNull();
+  });
 });

@@ -108,19 +108,33 @@ itsybitsy
 │   ├── usage.ts              # Fetches Claude API quota from Anthropic OAuth API;
 │   │                         # caches at ~/.claude/usage-cache.json (10s TTL)
 │   ├── usage.test.ts         # Usage fetch/parse tests
+│   ├── update-check.ts       # Background npm registry version checker (hourly)
+│   ├── update-check.test.ts  # Update checker tests
+│   ├── config.ts             # Config reading/writing for .ittybitty.json
+│   ├── config.test.ts        # Config tests
 │   ├── watcher.ts            # fs.watch({ recursive: true }) on agents/, archive/,
 │   │                         # user-questions.json; 10s fallback poll; debounced refresh;
 │   │                         # 2s stateTimer for between-refresh state polling
 │   ├── watcher.test.ts       # Watcher tests
 │   ├── tmux-poller.ts        # Polls tmux capture-pane for the selected agent (~1s, 500 lines);
-│   │                         # also exports captureTmuxOutput() for one-shot state detection (100 lines)
+│   │                         # also exports captureTmuxOutput() for one-shot state detection (500 lines)
 │   ├── tmux-poller.test.ts   # Tmux poller tests
 │   ├── ib-commands.ts        # Wrappers for ib mutations; cwd = repo root
 │   ├── ib-commands.test.ts   # ib-commands tests
 │   ├── ghostty.ts            # Open tmux sessions in Ghostty
+│   ├── ghostty.test.ts       # Ghostty tests
+│   ├── orphan-detection.test.ts # Orphaned tmux session detection tests
+│   ├── test-utils.ts         # Shared test helpers
 │   └── tui/
 │       ├── dashboard.ts      # Main TUI: agent tree + split pane + status bar + dialogs
 │       ├── dashboard.test.ts # Dashboard tests
+│       ├── agent-tree.ts     # AgentTreeComponent + formatAgentRow
+│       ├── agent-actions.ts  # Agent action handlers (kill, merge, send, etc.)
+│       ├── pane-manager.ts   # RightPaneComponent + pane mode cycling + async loading
+│       ├── dialog-handler.ts # DialogState type + dialog input routing
+│       ├── color-scheme.ts   # Terminal color scheme detection + getStateColors
+│       ├── folder-browser.ts # Folder browser for adding repos
+│       ├── folder-browser.test.ts # Folder browser tests
 │       ├── split-pane.ts     # Custom horizontal layout (pi-tui Box is vertical-only);
 │       │                     # fullWidth flag hides left pane for DIFF/DENIALS/TREE/ERRORS/QUESTIONS
 │       ├── split-pane.test.ts # Split pane tests
@@ -158,7 +172,7 @@ Also: `src/usage.ts` — fetches Claude API session+weekly utilization from `GET
 │       ├── exit-check.sh
 │       ├── repo            # Path to the worktree
 │       └── debug-logs/     # tmux captures from hooks
-├── archive/                # Closed agents (hidden by default in TUI; toggle with `a`)
+├── archive/                # Closed agents (hidden by default in TUI; toggle with `A`)
 ├── feedback.json
 ├── repo-id                 # Unique repo UUID (used in tmux session names)
 ├── reports/
@@ -305,7 +319,8 @@ Matching `ib watch` keybindings exactly where possible; new keys noted.
 - `Enter` — answer selected question (only active in QUESTIONS pane)
 
 **App**
-- `h` — read-only help dialog showing all keybindings; press any key to dismiss. Not interactive settings.
+- `?` — read-only help dialog showing all keybindings; press any key to dismiss
+- `h` — setup dialog (hooks status, gitignore check, diff tool config)
 - `Ctrl-C` — exit
 
 ## Ghostty Integration
@@ -397,7 +412,7 @@ Note: `tmux-poller.ts` was implemented in Phase 2/3. Phase 4 focuses on renderin
 
 - [x] `src/ib-commands.ts` — async wrappers for all `ib` mutations; **always sets `cwd` to the target repo root**; functions: `killAgent`, `nukeAgent`, `resumeAgent`, `reassignAgent`, `mergeAgent`, `mergeCheckAgent`, `sendMessage`, `newAgent`, `diffAgent`, `statusAgent`
 - [x] `x` — kill agent: confirm dialog showing agent ID, then `ib kill {id}`
-- [x] `!` — nuke/force-kill: confirm dialog, then `ib kill {id} --force`
+- [x] `!` — nuke/force-kill: confirm dialog, then `ib nuke {id} --force`
 - [x] `R` — resume stopped agent: `ib resume {id}` (only enabled when agent is stopped/complete)
 - [x] `r` — reassign agent's manager: text input dialog, then `ib reassign {id} {new-manager}`
 - [x] `m` — merge agent: run `ib merge-check {id}` first, show result in confirm dialog, then `ib merge {id} --force`
@@ -544,7 +559,7 @@ Files: `src/tui/dashboard.ts`, `src/tui/agent-actions.ts`, `src/tui/dialog-handl
 **Tab 0 — Setup:**
 - [x] **Hooks status display** — call `ib hooks status` (returns lines like `safety-hooks: installed` or `safety-hooks: not installed`). Parse output by splitting on `:` to get hook name and status. Render as a select list of rows, each showing hook name + installed/not-installed badge.
 - [x] **Hooks toggle** — `Enter` on a hook row calls `ib hooks install` / `ib hooks uninstall` (or `install-intercept` / `uninstall-intercept` for task interception). Refresh status after toggle.
-- [x] **Status indicators** — show read-only status rows for: `.gitignore` contains `.ittybitty` (check via `Bun.file("{repo}/.gitignore").text()` and search for `.ittybitty`), `.itsybitsy.json` exists (check via `Bun.file("~/.itsybitsy.json").exists()`), current `externalDiffTool` value.
+- [x] **Status indicators** — show read-only status rows for: `.gitignore` contains `.ittybitty` (check via `Bun.file("{repo}/.gitignore").text()` and search for `.ittybitty`), `.itsybitsy.json` exists (check via `Bun.file("~/.itsybitsy.json").exists()`), current `diffTool` value.
 - [x] **External diff tool editing** — `Enter` on the diff tool row opens a text input dialog (using existing `input` dialog type) to set/change the value. Saves to `~/.itsybitsy.json` via registry.
 
 **Dialog behavior:**

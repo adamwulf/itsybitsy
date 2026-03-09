@@ -520,13 +520,7 @@ function handleSetupConfigTab(
   } else if (matchesKey(data, Key.enter)) {
     const item = items[idx];
     if (item) {
-      if (item.type === "boolean") {
-        // Toggle immediately
-        d.onConfigAction?.(item);
-      } else {
-        // Open input dialog
-        d.onConfigAction?.(item);
-      }
+      d.onConfigAction?.(item);
     }
   }
   return true;

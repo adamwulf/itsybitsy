@@ -666,7 +666,7 @@ async function loadSetupDialog(ctx: ActionCtx, repoPath: string, initialTab = 0)
   // Find first actionable index
   const firstActionable = items.findIndex((i) => i.actionable);
 
-  const buildConfigItems = (forTab: number): ConfigDialogItem[] => {
+  const buildConfigItems = (): ConfigDialogItem[] => {
     return CONFIG_KEYS.map((def) => {
       const entry = config[def.key]!;
       return {
@@ -686,7 +686,7 @@ async function loadSetupDialog(ctx: ActionCtx, repoPath: string, initialTab = 0)
       items,
       selectedIndex: firstActionable !== -1 ? firstActionable : 0,
       repoPath,
-      configItems: tab > 0 ? buildConfigItems(tab) : undefined,
+      configItems: tab > 0 ? buildConfigItems() : undefined,
       configSelectedIndex: tab > 0 ? 0 : undefined,
       onAction: handleSetupItemAction(ctx, repoPath),
       onTabChange: (newTab: number) => {
@@ -767,7 +767,7 @@ function handleConfigItemAction(
       ctx.showDialog({
         type: "input",
         prompt: `${item.key} (${item.type}):`,
-        value: currentStr === "undefined" ? "" : currentStr,
+        value: currentStr,
         onSubmit: (value: string) => {
           ctx.closeDialog();
           let parsed: unknown;

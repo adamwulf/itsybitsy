@@ -26,6 +26,8 @@ import {
   resetKillPauseSpawnRunner,
   setNukeResumeSpawnRunner,
   resetNukeResumeSpawnRunner,
+  setMergeSpawnRunner,
+  resetMergeSpawnRunner,
 } from "./ib-commands";
 import {
   setSpawnRunner as setLifecycleSpawnRunner,
@@ -79,14 +81,7 @@ describe("ib-commands", () => {
     });
   });
 
-  test("mergeAgent passes ['merge', id, '--force']", async () => {
-    const agent = makeAgent("agent-abc", "/repos/myproject");
-    await mergeAgent(agent);
-    expect(lastCall).toEqual({
-      args: ["merge", "agent-abc", "--force"],
-      cwd: "/repos/myproject",
-    });
-  });
+  // mergeAgent is now native — tested in dedicated describe block below
 
   describe("sendMessage (native)", () => {
     let spawnCalls: string[][] = [];
@@ -286,26 +281,7 @@ describe("ib-commands", () => {
     });
   });
 
-  test("IbRunner passthrough returns result from runner (mergeAgent)", async () => {
-    setRunner(async () => ({
-      ok: false,
-      exitCode: 1,
-      stdout: "",
-      stderr: "something broke",
-    }));
-    const agent = makeAgent("agent-abc", "/repos/myproject");
-    const result = await mergeAgent(agent);
-    expect(result.ok).toBe(false);
-    expect(result.exitCode).toBe(1);
-    expect(result.stderr).toBe("something broke");
-  });
-
-  test("cwd always matches agent.repoPath", async () => {
-    const agent = makeAgent("agent-abc", "/some/deep/path/to/repo");
-
-    await mergeAgent(agent);
-    expect(lastCall!.cwd).toBe("/some/deep/path/to/repo");
-  });
+  // mergeAgent passthrough tests removed — now native
 });
 
 // Helper: create a mock SpawnFn that records calls and returns success
@@ -981,5 +957,545 @@ describe("resumeAgent (native)", () => {
     // -c flag value should be tempDir (not the repo subdir)
     const cFlagIdx = newSessionCall!.indexOf("-c");
     expect(newSessionCall![cFlagIdx + 1]).toBe(tempDir);
+  });
+});
+
+describe("mergeAgent (native)", () => {
+  let tempDir: string;
+  let spawnCalls: string[][];
+
+  /**
+   * Create a smart mock that handles git commands needed for merge.
+   * - git status --porcelain → empty (no uncommitted changes)
+   * - git branch --show-current → "main"
+   * - git show-ref --verify → success
+   * - git log ... --oneline → "abc1234 commit msg" (1 commit)
+   * - git rebase → success
+   * - git checkout → success
+   * - git merge → success
+   * - tmux has-session → failure (no session)
+   * - Others → success
+   */
+  function makeMergeMock(
+    overrides?: {
+      worktreeHasChanges?: boolean;
+      repoHasChanges?: boolean;
+      currentBranch?: string;
+      branchExists?: boolean;
+      commitCount?: number;
+      rebaseFails?: boolean;
+      checkoutFails?: boolean;
+      mergeFails?: boolean;
+      conflictCheckFails?: boolean;
+    }
+  ): (cmd: string[], opts?: any) => SpawnResult {
+    const opts = {
+      worktreeHasChanges: false,
+      repoHasChanges: false,
+      currentBranch: "main",
+      branchExists: true,
+      commitCount: 1,
+      rebaseFails: false,
+      checkoutFails: false,
+      mergeFails: false,
+      conflictCheckFails: false,
+      ...overrides,
+    };
+
+    return (cmd: string[]) => {
+      spawnCalls.push(cmd);
+      const cmdStr = cmd.join(" ");
+
+      // git status --porcelain (worktree or repo)
+      if (cmdStr.includes("status") && cmdStr.includes("--porcelain")) {
+        const isWorktree = cmd.some((c) => c.includes("/repo"));
+        const hasChanges = isWorktree ? opts.worktreeHasChanges : opts.repoHasChanges;
+        return {
+          stdout: new Response(hasChanges ? "M file.ts\n" : "").body!,
+          stderr: new Response("").body!,
+          exited: Promise.resolve(0),
+        } as SpawnResult;
+      }
+
+      // git branch --show-current
+      if (cmdStr.includes("branch") && cmdStr.includes("--show-current")) {
+        return {
+          stdout: new Response(opts.currentBranch).body!,
+          stderr: new Response("").body!,
+          exited: Promise.resolve(0),
+        } as SpawnResult;
+      }
+
+      // git show-ref --verify
+      if (cmdStr.includes("show-ref") && cmdStr.includes("--verify")) {
+        return {
+          stdout: new Response("").body!,
+          stderr: new Response("").body!,
+          exited: Promise.resolve(opts.branchExists ? 0 : 1),
+        } as SpawnResult;
+      }
+
+      // git log ... --oneline (commit count)
+      if (cmdStr.includes("log") && cmdStr.includes("--oneline")) {
+        const lines = Array.from({ length: opts.commitCount }, (_, i) => `abc${i} commit ${i}`);
+        return {
+          stdout: new Response(opts.commitCount > 0 ? lines.join("\n") : "").body!,
+          stderr: new Response("").body!,
+          exited: Promise.resolve(0),
+        } as SpawnResult;
+      }
+
+      // Conflict check: git rebase in temp dir
+      if (cmd.includes("rebase") && cmdStr.includes("/tmp/ib-rebase-check-")) {
+        return {
+          stdout: new Response(opts.conflictCheckFails ? "CONFLICT (content): Merge conflict in file.ts" : "").body!,
+          stderr: new Response("").body!,
+          exited: Promise.resolve(opts.conflictCheckFails ? 1 : 0),
+        } as SpawnResult;
+      }
+
+      // Actual rebase in worktree
+      if (cmd.includes("rebase") && !cmdStr.includes("/tmp/ib-rebase-check-") && !cmd.includes("--abort")) {
+        return {
+          stdout: new Response(opts.rebaseFails ? "CONFLICT" : "").body!,
+          stderr: new Response("").body!,
+          exited: Promise.resolve(opts.rebaseFails ? 1 : 0),
+        } as SpawnResult;
+      }
+
+      // git checkout
+      if (cmd.includes("checkout")) {
+        return {
+          stdout: new Response("").body!,
+          stderr: new Response("").body!,
+          exited: Promise.resolve(opts.checkoutFails ? 1 : 0),
+        } as SpawnResult;
+      }
+
+      // git merge (but not merge in "merge-check")
+      if (cmd.includes("merge") && (cmd.includes("--ff-only") || cmd.includes("--no-ff"))) {
+        return {
+          stdout: new Response(opts.mergeFails ? "Merge conflict" : "").body!,
+          stderr: new Response("").body!,
+          exited: Promise.resolve(opts.mergeFails ? 1 : 0),
+        } as SpawnResult;
+      }
+
+      // tmux has-session → failure (no active session)
+      if (cmdStr.includes("has-session")) {
+        return {
+          stdout: new Response("").body!,
+          stderr: new Response("").body!,
+          exited: Promise.resolve(1),
+        } as SpawnResult;
+      }
+
+      // pgrep → failure (no processes)
+      if (cmd[0] === "pgrep") {
+        return {
+          stdout: new Response("").body!,
+          stderr: new Response("").body!,
+          exited: Promise.resolve(1),
+        } as SpawnResult;
+      }
+
+      // Default: success
+      return {
+        stdout: new Response("").body!,
+        stderr: new Response("").body!,
+        exited: Promise.resolve(0),
+      } as SpawnResult;
+    };
+  }
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "merge-test-"));
+    spawnCalls = [];
+  });
+
+  afterEach(async () => {
+    resetLifecycleSpawnRunner();
+    resetMergeSpawnRunner();
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  test("returns error when agent directory doesn't exist", async () => {
+    const runner = makeMergeMock();
+    setLifecycleSpawnRunner(runner);
+    setMergeSpawnRunner(runner);
+
+    const agent = makeAgent("agent-abc", tempDir);
+    const result = await mergeAgent(agent);
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("not found");
+  });
+
+  test("returns error when worktree directory doesn't exist", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-abc", tmux_session: "tmux-agent-abc",
+    }));
+    // Don't create repo/ subdirectory
+
+    const runner = makeMergeMock();
+    setLifecycleSpawnRunner(runner);
+    setMergeSpawnRunner(runner);
+
+    const agent = makeAgent("agent-abc", tempDir);
+    const result = await mergeAgent(agent);
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("no worktree");
+  });
+
+  test("returns error when worktree has uncommitted changes", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-abc", tmux_session: "tmux-agent-abc",
+    }));
+
+    const runner = makeMergeMock({ worktreeHasChanges: true });
+    setLifecycleSpawnRunner(runner);
+    setMergeSpawnRunner(runner);
+
+    const agent = makeAgent("agent-abc", tempDir);
+    const result = await mergeAgent(agent);
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("uncommitted changes");
+  });
+
+  test("returns error when repo has uncommitted changes", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-abc", tmux_session: "tmux-agent-abc",
+    }));
+
+    const runner = makeMergeMock({ repoHasChanges: true });
+    setLifecycleSpawnRunner(runner);
+    setMergeSpawnRunner(runner);
+
+    const agent = makeAgent("agent-abc", tempDir);
+    const result = await mergeAgent(agent);
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("uncommitted changes");
+  });
+
+  test("returns error when agent branch doesn't exist", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-abc", tmux_session: "tmux-agent-abc",
+    }));
+
+    const runner = makeMergeMock({ branchExists: false });
+    setLifecycleSpawnRunner(runner);
+    setMergeSpawnRunner(runner);
+
+    const agent = makeAgent("agent-abc", tempDir);
+    const result = await mergeAgent(agent);
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("does not exist");
+  });
+
+  test("returns error when pre-rebase conflict check fails", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-abc", tmux_session: "tmux-agent-abc",
+    }));
+
+    const runner = makeMergeMock({ conflictCheckFails: true });
+    setLifecycleSpawnRunner(runner);
+    setMergeSpawnRunner(runner);
+
+    const agent = makeAgent("agent-abc", tempDir);
+    const result = await mergeAgent(agent);
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("Rebase conflict detected");
+  });
+
+  test("returns error when rebase fails", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-abc", tmux_session: "tmux-agent-abc",
+    }));
+
+    const runner = makeMergeMock({ rebaseFails: true });
+    setLifecycleSpawnRunner(runner);
+    setMergeSpawnRunner(runner);
+
+    const agent = makeAgent("agent-abc", tempDir);
+    const result = await mergeAgent(agent);
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("Rebase failed");
+  });
+
+  test("succeeds with full merge sequence and returns 'Closed agent: <id>'", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-abc", tmux_session: "tmux-agent-abc",
+    }));
+
+    const runner = makeMergeMock();
+    setLifecycleSpawnRunner(runner);
+    setMergeSpawnRunner(runner);
+
+    const agent = makeAgent("agent-abc", tempDir);
+    const result = await mergeAgent(agent);
+
+    expect(result.ok).toBe(true);
+    expect(result.stdout).toBe("Closed agent: agent-abc");
+  });
+
+  test("performs git rebase, checkout, and merge in correct order", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-abc", tmux_session: "tmux-agent-abc",
+    }));
+
+    const runner = makeMergeMock();
+    setLifecycleSpawnRunner(runner);
+    setMergeSpawnRunner(runner);
+
+    const agent = makeAgent("agent-abc", tempDir);
+    await mergeAgent(agent);
+
+    // Find the actual rebase (not the conflict check one)
+    const rebaseCall = spawnCalls.find(
+      (c) => c.includes("rebase") && !c.some((a) => a.includes("/tmp/ib-rebase-check-")) && !c.includes("--abort")
+    );
+    expect(rebaseCall).toBeDefined();
+    expect(rebaseCall).toContain("main");
+
+    // Find checkout call
+    const checkoutCall = spawnCalls.find((c) => c.includes("checkout") && c.includes("main"));
+    expect(checkoutCall).toBeDefined();
+
+    // Find merge call — --ff-only when running as agent, --no-ff when not
+    const mergeCall = spawnCalls.find(
+      (c) => c.includes("merge") && (c.includes("--ff-only") || c.includes("--no-ff"))
+    );
+    expect(mergeCall).toBeDefined();
+    expect(mergeCall).toContain("agent/agent-abc");
+
+    // Verify order: rebase before checkout before merge
+    const rebaseIdx = spawnCalls.indexOf(rebaseCall!);
+    const checkoutIdx = spawnCalls.indexOf(checkoutCall!);
+    const mergeIdx = spawnCalls.indexOf(mergeCall!);
+    expect(rebaseIdx).toBeLessThan(checkoutIdx);
+    expect(checkoutIdx).toBeLessThan(mergeIdx);
+  });
+
+  test("removes agent directory after successful merge", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-abc", tmux_session: "tmux-agent-abc",
+    }));
+
+    const runner = makeMergeMock();
+    setLifecycleSpawnRunner(runner);
+    setMergeSpawnRunner(runner);
+
+    const agent = makeAgent("agent-abc", tempDir);
+    await mergeAgent(agent);
+
+    const exists = await Bun.file(join(agentDir, "meta.json")).exists().catch(() => false);
+    expect(exists).toBe(false);
+  });
+
+  test("removes user-questions.json entries for merged agent", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-abc", tmux_session: "tmux-agent-abc",
+    }));
+    await Bun.write(
+      join(tempDir, ".ittybitty", "user-questions.json"),
+      JSON.stringify({
+        questions: [
+          { agent: "agent-abc", question: "Q1" },
+          { agent: "agent-other", question: "Q2" },
+        ],
+      })
+    );
+
+    const runner = makeMergeMock();
+    setLifecycleSpawnRunner(runner);
+    setMergeSpawnRunner(runner);
+
+    const agent = makeAgent("agent-abc", tempDir);
+    await mergeAgent(agent);
+
+    const updated = await Bun.file(join(tempDir, ".ittybitty", "user-questions.json")).json();
+    expect(updated.questions).toEqual([{ agent: "agent-other", question: "Q2" }]);
+  });
+
+  test("skips rebase/checkout/merge when commit count is 0", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-abc", tmux_session: "tmux-agent-abc",
+    }));
+
+    const runner = makeMergeMock({ commitCount: 0 });
+    setLifecycleSpawnRunner(runner);
+    setMergeSpawnRunner(runner);
+
+    const agent = makeAgent("agent-abc", tempDir);
+    const result = await mergeAgent(agent);
+
+    expect(result.ok).toBe(true);
+
+    // Should NOT have actual rebase/checkout/merge calls
+    const rebaseCall = spawnCalls.find(
+      (c) => c.includes("rebase") && !c.some((a) => a.includes("/tmp/ib-rebase-check-")) && !c.includes("--abort")
+    );
+    expect(rebaseCall).toBeUndefined();
+
+    const checkoutCall = spawnCalls.find((c) => c.includes("checkout"));
+    expect(checkoutCall).toBeUndefined();
+
+    const mergeCall = spawnCalls.find((c) => c.includes("--ff-only") || c.includes("--no-ff"));
+    expect(mergeCall).toBeUndefined();
+  });
+
+  test("logs merge activity to agent.log", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-abc", tmux_session: "tmux-agent-abc",
+    }));
+
+    const runner = makeMergeMock();
+    setLifecycleSpawnRunner(runner);
+    setMergeSpawnRunner(runner);
+
+    const agent = makeAgent("agent-abc", tempDir);
+    await mergeAgent(agent);
+
+    // agent.log gets archived, but archive creates a copy.
+    // Since the dir gets removed at the end, we check archive instead.
+    const archiveDir = join(tempDir, ".ittybitty", "archive");
+    const archiveEntries = await (async () => {
+      try {
+        const { readdir } = await import("fs/promises");
+        return await readdir(archiveDir);
+      } catch { return []; }
+    })();
+
+    // Should have at least one archive entry
+    expect(archiveEntries.length).toBeGreaterThan(0);
+
+    // Check the archived agent.log
+    const archiveFolder = join(archiveDir, archiveEntries[0]!);
+    const log = await Bun.file(join(archiveFolder, "agent.log")).text();
+    expect(log).toContain("Starting rebase of agent/agent-abc onto main");
+    expect(log).toContain("Rebase completed successfully");
+    expect(log).toContain("Merge complete - archiving and closing agent");
+  });
+
+  test("deletes agent branch via git branch -D", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-abc", tmux_session: "tmux-agent-abc",
+    }));
+
+    const runner = makeMergeMock();
+    setLifecycleSpawnRunner(runner);
+    setMergeSpawnRunner(runner);
+
+    const agent = makeAgent("agent-abc", tempDir);
+    await mergeAgent(agent);
+
+    const branchDeleteCall = spawnCalls.find(
+      (c) => c.includes("branch") && c.includes("-D") && c.includes("agent/agent-abc")
+    );
+    expect(branchDeleteCall).toBeDefined();
+  });
+
+  test("removes worktree via git worktree remove --force", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-abc", tmux_session: "tmux-agent-abc",
+    }));
+
+    const runner = makeMergeMock();
+    setLifecycleSpawnRunner(runner);
+    setMergeSpawnRunner(runner);
+
+    const agent = makeAgent("agent-abc", tempDir);
+    await mergeAgent(agent);
+
+    const worktreeRemoveCall = spawnCalls.find(
+      (c) => c.includes("worktree") && c.includes("remove") && c.includes("--force")
+    );
+    expect(worktreeRemoveCall).toBeDefined();
+  });
+
+  test("conflict check creates temp branch and worktree", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-abc", tmux_session: "tmux-agent-abc",
+    }));
+
+    const runner = makeMergeMock();
+    setLifecycleSpawnRunner(runner);
+    setMergeSpawnRunner(runner);
+
+    const agent = makeAgent("agent-abc", tempDir);
+    await mergeAgent(agent);
+
+    // Should have created a temp branch
+    const tempBranchCreate = spawnCalls.find(
+      (c) => c.includes("branch") && c.some((a) => a.startsWith("temp-rebase-check-"))
+    );
+    expect(tempBranchCreate).toBeDefined();
+
+    // Should have created a temp worktree
+    const tempWorktreeAdd = spawnCalls.find(
+      (c) => c.includes("worktree") && c.includes("add") && c.some((a) => a.includes("/tmp/ib-rebase-check-"))
+    );
+    expect(tempWorktreeAdd).toBeDefined();
+
+    // Should have cleaned up temp branch
+    const tempBranchDelete = spawnCalls.find(
+      (c) => c.includes("branch") && c.includes("-D") && c.some((a) => a.startsWith("temp-rebase-check-"))
+    );
+    expect(tempBranchDelete).toBeDefined();
+  });
+
+  test("logs conflict check failure to agent.log", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-abc", tmux_session: "tmux-agent-abc",
+    }));
+
+    const runner = makeMergeMock({ conflictCheckFails: true });
+    setLifecycleSpawnRunner(runner);
+    setMergeSpawnRunner(runner);
+
+    const agent = makeAgent("agent-abc", tempDir);
+    await mergeAgent(agent);
+
+    // Agent dir should still exist since merge failed before cleanup
+    const log = await Bun.file(join(agentDir, "agent.log")).text();
+    expect(log).toContain("Pre-rebase conflict check failed");
   });
 });

@@ -1,11 +1,11 @@
 /**
  * Async wrappers for ib mutation commands.
  * Every command runs with cwd set to the agent's repoPath.
- * kill, pause, sendMessage, nuke, and resume are implemented natively; others delegate to ib CLI.
+ * kill, pause, sendMessage, nuke, resume, and merge are implemented natively; others delegate to ib CLI.
  */
 
 import { join } from "path";
-import { readdir, chmod } from "fs/promises";
+import { readdir, chmod, rm } from "fs/promises";
 import type { Agent } from "./agents";
 import {
   logAgent,
@@ -15,6 +15,9 @@ import {
   scanAndKillOrphans,
   getDescendantsRecursive,
   resolveGitRoot,
+  archiveAgent,
+  captureTmuxOutputToFile,
+  isRunningAsAgent,
 } from "./agent-lifecycle";
 import type { SpawnFn } from "./types";
 
@@ -566,8 +569,271 @@ export async function mergeCheckAgent(agent: Agent): Promise<IbCommandResult> {
   return runIb(["merge-check", agent.id], agent.repoPath);
 }
 
+/** Pluggable spawn runner for merge — defaults to Bun.spawn, overridable for tests */
+let mergeSpawnRunner: SpawnFn = Bun.spawn as SpawnFn;
+
+/** Override the merge spawn runner (for testing) */
+export function setMergeSpawnRunner(runner: SpawnFn): void {
+  mergeSpawnRunner = runner;
+}
+
+/** Reset the merge spawn runner */
+export function resetMergeSpawnRunner(): void {
+  mergeSpawnRunner = Bun.spawn as SpawnFn;
+}
+
+/**
+ * Helper: run a command via the merge spawn runner and return { stdout, exitCode }.
+ */
+async function mergeRunCmd(cmd: string[]): Promise<{ stdout: string; exitCode: number }> {
+  const proc = mergeSpawnRunner(cmd, { stdout: "pipe", stderr: "pipe" });
+  const stdout = await new Response(proc.stdout).text();
+  const exitCode = await proc.exited;
+  return { stdout: stdout.trim(), exitCode };
+}
+
+/**
+ * Pre-rebase conflict check: creates a temp branch/worktree, attempts rebase,
+ * and cleans up. Returns { ok: true } if no conflicts, { ok: false, output } if conflicts.
+ * Mirrors check_rebase_conflicts() in ib bash.
+ */
+async function checkRebaseConflicts(
+  repoPath: string,
+  targetBranch: string,
+  sourceBranch: string
+): Promise<{ ok: boolean; output: string }> {
+  const tempBranch = `temp-rebase-check-${process.pid}-${Math.floor(Date.now() / 1000)}`;
+  const tempDir = `/tmp/ib-rebase-check-${tempBranch}`;
+
+  // Create temp branch from source
+  const createBranch = await mergeRunCmd(["git", "-C", repoPath, "branch", tempBranch, sourceBranch]);
+  if (createBranch.exitCode !== 0) {
+    return { ok: false, output: "Could not create temp branch for conflict check" };
+  }
+
+  // Create temp worktree
+  const createWorktree = await mergeRunCmd(["git", "-C", repoPath, "worktree", "add", tempDir, tempBranch, "--quiet"]);
+  if (createWorktree.exitCode !== 0) {
+    await mergeRunCmd(["git", "-C", repoPath, "branch", "-D", tempBranch]);
+    return { ok: false, output: "Could not create temp worktree for conflict check" };
+  }
+
+  // Attempt rebase in temp worktree
+  const rebaseResult = await mergeRunCmd(["git", "-C", tempDir, "rebase", targetBranch]);
+  let result: { ok: boolean; output: string };
+
+  if (rebaseResult.exitCode !== 0) {
+    // Abort the failed rebase
+    await mergeRunCmd(["git", "-C", tempDir, "rebase", "--abort"]);
+    result = { ok: false, output: rebaseResult.stdout };
+  } else {
+    result = { ok: true, output: "" };
+  }
+
+  // Clean up: remove temp worktree and branch
+  await mergeRunCmd(["git", "-C", repoPath, "worktree", "remove", tempDir, "--force"]);
+  await mergeRunCmd(["git", "-C", repoPath, "branch", "-D", tempBranch]);
+
+  return result;
+}
+
+/**
+ * Native merge implementation — replaces `ib merge <id> --force`.
+ *
+ * Sequence (mirrors cmd_merge + do_merge in ib bash):
+ * 1. Verify agent directory exists
+ * 2. Verify worktree exists
+ * 3. Check worktree has no uncommitted changes
+ * 4. Detect target branch (current branch → main → master → error)
+ * 5. Verify agent branch exists
+ * 6. Check current dir has no uncommitted changes
+ * 7. Pre-rebase conflict check
+ * 8. Rebase agent branch onto target
+ * 9. Checkout target branch
+ * 10. Merge (ff-only if agent, --no-ff if user)
+ * 11. Capture tmux output
+ * 12. Kill Claude process
+ * 13. Kill tmux session
+ * 14. Copy settings.local.json from worktree
+ * 15. Remove worktree
+ * 16. Delete branch
+ * 17. Archive artifacts
+ * 18. Remove questions
+ * 19. Remove agent directory
+ * 20. Scan for orphaned processes
+ */
 export async function mergeAgent(agent: Agent): Promise<IbCommandResult> {
-  return runIb(["merge", agent.id, "--force"], agent.repoPath);
+  const agentDir = join(agent.repoPath, ".ittybitty", "agents", agent.id);
+  const agentsDir = join(agent.repoPath, ".ittybitty", "agents");
+  const branchName = `agent/${agent.id}`;
+  const worktreePath = join(agentDir, "repo");
+  const tmuxSession = agent.meta.tmux_session;
+
+  // 1. Agent dir must exist
+  const dirExists = await Bun.file(join(agentDir, "meta.json")).exists().catch(() => false);
+  if (!dirExists) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' not found` };
+  }
+
+  // 2. Agent must have a worktree
+  try {
+    await readdir(worktreePath);
+  } catch {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' has no worktree (was created with --no-worktree?)` };
+  }
+
+  // 3. Agent worktree must have no uncommitted changes
+  const worktreeStatus = await mergeRunCmd(["git", "-C", worktreePath, "status", "--porcelain"]);
+  if (worktreeStatus.exitCode === 0 && worktreeStatus.stdout.trim()) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' has uncommitted changes` };
+  }
+
+  // 4. Detect target branch
+  let targetBranch = "";
+  const currentBranch = await mergeRunCmd(["git", "-C", agent.repoPath, "branch", "--show-current"]);
+  if (currentBranch.exitCode === 0 && currentBranch.stdout.trim()) {
+    targetBranch = currentBranch.stdout.trim();
+  }
+  if (!targetBranch) {
+    const mainRef = await mergeRunCmd(["git", "-C", agent.repoPath, "show-ref", "--verify", "refs/heads/main"]);
+    if (mainRef.exitCode === 0) {
+      targetBranch = "main";
+    } else {
+      const masterRef = await mergeRunCmd(["git", "-C", agent.repoPath, "show-ref", "--verify", "refs/heads/master"]);
+      if (masterRef.exitCode === 0) {
+        targetBranch = "master";
+      } else {
+        return { ok: false, exitCode: 1, stdout: "", stderr: "Could not determine target branch (detached HEAD with no main/master)" };
+      }
+    }
+  }
+
+  // 5. Agent branch must exist
+  const branchRef = await mergeRunCmd(["git", "-C", agent.repoPath, "show-ref", "--verify", `refs/heads/${branchName}`]);
+  if (branchRef.exitCode !== 0) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Branch '${branchName}' does not exist` };
+  }
+
+  // 6. Current dir must have no uncommitted changes
+  const repoStatus = await mergeRunCmd(["git", "-C", agent.repoPath, "status", "--porcelain"]);
+  if (repoStatus.exitCode === 0 && repoStatus.stdout.trim()) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: "Current directory has uncommitted changes" };
+  }
+
+  // 7. Pre-rebase conflict check
+  const conflictResult = await checkRebaseConflicts(agent.repoPath, targetBranch, branchName);
+  if (!conflictResult.ok) {
+    await logAgent(agentDir, `Pre-rebase conflict check failed - conflicts detected with ${targetBranch}`);
+    return {
+      ok: false, exitCode: 1, stdout: "",
+      stderr: `Rebase conflict detected between '${branchName}' and '${targetBranch}'`,
+    };
+  }
+
+  // Count commits to merge
+  const logResult = await mergeRunCmd(["git", "-C", agent.repoPath, "log", `${targetBranch}..${branchName}`, "--oneline"]);
+  const commitCount = logResult.stdout.trim() ? logResult.stdout.trim().split("\n").length : 0;
+
+  await logAgent(agentDir, `Starting rebase of ${branchName} onto ${targetBranch} (${commitCount} commits)`);
+
+  if (commitCount > 0) {
+    // 8. Rebase agent branch onto target (in agent's worktree)
+    await logAgent(agentDir, `Rebasing ${branchName} onto ${targetBranch}...`);
+    const rebaseResult = await mergeRunCmd(["git", "-C", worktreePath, "rebase", targetBranch]);
+    if (rebaseResult.exitCode !== 0) {
+      return { ok: false, exitCode: 1, stdout: "", stderr: `Rebase failed: ${rebaseResult.stdout}` };
+    }
+    await logAgent(agentDir, "Rebase completed successfully");
+
+    // 9. Checkout target branch
+    await logAgent(agentDir, `Checking out ${targetBranch}...`);
+    const checkoutResult = await mergeRunCmd(["git", "-C", agent.repoPath, "checkout", targetBranch]);
+    if (checkoutResult.exitCode !== 0) {
+      return { ok: false, exitCode: 1, stdout: "", stderr: `Could not checkout ${targetBranch}: ${checkoutResult.stdout}` };
+    }
+
+    // 10. Merge — ff-only if agent, --no-ff if user
+    const runningAsAgent = await isRunningAsAgent();
+    if (runningAsAgent) {
+      await logAgent(agentDir, `Fast-forwarding ${targetBranch} to ${branchName}...`);
+      const ffResult = await mergeRunCmd(["git", "-C", agent.repoPath, "merge", "--ff-only", branchName]);
+      if (ffResult.exitCode !== 0) {
+        return { ok: false, exitCode: 1, stdout: "", stderr: `Fast-forward failed: ${ffResult.stdout}` };
+      }
+      await logAgent(agentDir, "Fast-forward merge completed successfully");
+    } else {
+      await logAgent(agentDir, `Merging ${branchName} with --no-ff...`);
+      const noFFResult = await mergeRunCmd(["git", "-C", agent.repoPath, "merge", "--no-ff", branchName, "-m", `Merge agent ${agent.id} work`]);
+      if (noFFResult.exitCode !== 0) {
+        return { ok: false, exitCode: 1, stdout: "", stderr: `Merge failed: ${noFFResult.stdout}` };
+      }
+      await logAgent(agentDir, "Merge completed successfully");
+    }
+  }
+
+  // 11. Capture tmux output before killing
+  await logAgent(agentDir, "Capturing tmux output...");
+  if (tmuxSession) {
+    const hasSession = await mergeRunCmd(["tmux", "has-session", "-t", tmuxSession]);
+    if (hasSession.exitCode === 0) {
+      await captureTmuxOutputToFile(tmuxSession, join(agentDir, "output.log"));
+    }
+  }
+
+  // 12. Kill Claude process
+  await logAgent(agentDir, "Terminating Claude process...");
+  const killed = await killAgentProcess(tmuxSession, { claude_pid: agent.meta.claude_pid });
+  if (killed) {
+    await logAgent(agentDir, "Claude process terminated");
+  }
+
+  // 13. Kill tmux session
+  if (tmuxSession) {
+    const hasSession2 = await mergeRunCmd(["tmux", "has-session", "-t", tmuxSession]);
+    if (hasSession2.exitCode === 0) {
+      await mergeRunCmd(["tmux", "kill-session", "-t", tmuxSession]);
+      await logAgent(agentDir, "Tmux session stopped");
+    }
+  }
+
+  // 14. Copy settings.local.json from worktree before removing
+  const settingsPath = join(worktreePath, ".claude", "settings.local.json");
+  try {
+    if (await Bun.file(settingsPath).exists()) {
+      const content = await Bun.file(settingsPath).text();
+      await Bun.write(join(agentDir, "settings.local.json"), content);
+    }
+  } catch { /* ignore */ }
+
+  // 15. Remove worktree
+  await logAgent(agentDir, "Removing worktree...");
+  const removeResult = await mergeRunCmd(["git", "-C", agent.repoPath, "worktree", "remove", worktreePath, "--force"]);
+  if (removeResult.exitCode !== 0) {
+    try { await rm(worktreePath, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+  await logAgent(agentDir, "Worktree removed");
+
+  // 16. Delete branch
+  await logAgent(agentDir, `Deleting branch ${branchName}...`);
+  const deleteBranch = await mergeRunCmd(["git", "-C", agent.repoPath, "branch", "-D", branchName]);
+  if (deleteBranch.exitCode === 0) {
+    await logAgent(agentDir, `Branch deleted: ${branchName}`);
+  }
+
+  // 17. Archive artifacts
+  await logAgent(agentDir, "Merge complete - archiving and closing agent");
+  await archiveAgent(agent.repoPath, agent.id, agentDir);
+
+  // 18. Remove questions
+  await removeAgentQuestions(agent.repoPath, agent.id);
+
+  // 19. Remove agent directory
+  try { await rm(agentDir, { recursive: true, force: true }); } catch { /* ignore */ }
+
+  // 20. Scan for orphaned Claude processes
+  await scanAndKillOrphans(agentsDir);
+
+  return { ok: true, exitCode: 0, stdout: `Closed agent: ${agent.id}`, stderr: "" };
 }
 
 /** Pluggable spawn runner for send — defaults to Bun.spawn, overridable for tests */

@@ -2244,3 +2244,96 @@ describe("Repo nickname display in agent tree", () => {
     resetRunner();
   });
 });
+
+describe("Repo header selection persistence", () => {
+  let dashboard: DashboardComponent;
+
+  afterEach(() => {
+    resetRunner();
+  });
+
+  function setupMultiRepo() {
+    dashboard = makeDashboard();
+    setRunner(async () => ({ ok: true, exitCode: 0, stdout: "", stderr: "" }));
+    Object.defineProperty(process.stdout, "rows", { value: 40, writable: true, configurable: true });
+
+    const agent1 = _makeAgent({ id: "agent-a", repoPath: "/repos/alpha", repoName: "alpha" });
+    agent1.state = "running";
+    const agent2 = _makeAgent({ id: "agent-b", repoPath: "/repos/beta", repoName: "beta" });
+    agent2.state = "running";
+
+    const flatList: FlatAgent[] = [
+      { agent: agent1, depth: 0, connector: "", repoHeader: "alpha", repoHasAgents: true },
+      { agent: agent1, depth: 0, connector: "└── " },
+      { agent: agent2, depth: 0, connector: "", repoHeader: "beta", repoHasAgents: true },
+      { agent: agent2, depth: 0, connector: "└── " },
+    ];
+    dashboard.setRepos([
+      { path: "/repos/alpha", name: "alpha" },
+      { path: "/repos/beta", name: "beta" },
+    ]);
+    dashboard.onUpdate([agent1, agent2], flatList, []);
+    return { agent1, agent2 };
+  }
+
+  test("repo header selection persists after tree refresh", () => {
+    const { agent1, agent2 } = setupMultiRepo();
+    // Select the beta repo header (index 2)
+    dashboard.handleInput("j"); // agent-a (index 1)
+    dashboard.handleInput("j"); // beta header (index 2)
+    expect(dashboard.agentTree.selectedRepoHeader).toBe("beta");
+
+    // Simulate a tree refresh with same data (e.g., after an agent state change)
+    const newFlatList: FlatAgent[] = [
+      { agent: agent1, depth: 0, connector: "", repoHeader: "alpha", repoHasAgents: true },
+      { agent: agent1, depth: 0, connector: "└── " },
+      { agent: agent2, depth: 0, connector: "", repoHeader: "beta", repoHasAgents: true },
+      { agent: agent2, depth: 0, connector: "└── " },
+    ];
+    dashboard.onUpdate([agent1, agent2], newFlatList, []);
+
+    // Selection should still be on beta repo header
+    expect(dashboard.agentTree.selectedRepoHeader).toBe("beta");
+    expect(dashboard.selectedAgent).toBeNull();
+  });
+
+  test("repo header selection persists after agent is removed from tree", () => {
+    const { agent1, agent2 } = setupMultiRepo();
+    // Select the beta repo header
+    dashboard.handleInput("j"); // agent-a
+    dashboard.handleInput("j"); // beta header
+    expect(dashboard.agentTree.selectedRepoHeader).toBe("beta");
+
+    // Simulate agent-a being removed (merged/killed) — beta header moves up
+    const newFlatList: FlatAgent[] = [
+      { agent: agent1, depth: 0, connector: "", repoHeader: "alpha", repoHasAgents: false },
+      { agent: agent2, depth: 0, connector: "", repoHeader: "beta", repoHasAgents: true },
+      { agent: agent2, depth: 0, connector: "└── " },
+    ];
+    dashboard.onUpdate([agent2], newFlatList, []);
+
+    // Selection should still be on beta
+    expect(dashboard.agentTree.selectedRepoHeader).toBe("beta");
+  });
+
+  test("repo header selection persists after display name changes (rename)", () => {
+    const { agent1, agent2 } = setupMultiRepo();
+    // Select the alpha repo header (index 0)
+    expect(dashboard.agentTree.selectedRepoHeader).toBe("alpha");
+
+    // Simulate rename: alpha → "my-alpha" — repoPath stays the same
+    const renamedAgent1 = _makeAgent({ id: "agent-a", repoPath: "/repos/alpha", repoName: "my-alpha" });
+    renamedAgent1.state = "running";
+    const newFlatList: FlatAgent[] = [
+      { agent: agent2, depth: 0, connector: "", repoHeader: "beta", repoHasAgents: true },
+      { agent: agent2, depth: 0, connector: "└── " },
+      { agent: renamedAgent1, depth: 0, connector: "", repoHeader: "my-alpha", repoHasAgents: true },
+      { agent: renamedAgent1, depth: 0, connector: "└── " },
+    ];
+    dashboard.onUpdate([renamedAgent1, agent2], newFlatList, []);
+
+    // Selection should follow the renamed repo (same path)
+    expect(dashboard.agentTree.selectedRepoHeader).toBe("my-alpha");
+    expect(dashboard.selectedAgent).toBeNull();
+  });
+});

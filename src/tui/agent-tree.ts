@@ -142,7 +142,7 @@ export class AgentTreeComponent implements Component {
     const visible = this.visibleList;
     if (this.selectedIndex >= 0 && this.selectedIndex < visible.length) {
       const item = visible[this.selectedIndex]!;
-      this.selectedId = item.repoHeader ? `repo:${item.repoHeader}` : item.agent.id;
+      this.selectedId = item.repoHeader ? `repopath:${item.agent.repoPath}` : item.agent.id;
     }
   }
 
@@ -160,7 +160,7 @@ export class AgentTreeComponent implements Component {
       return;
     }
     const idx = visible.findIndex((f) =>
-      f.repoHeader ? `repo:${f.repoHeader}` === this.selectedId : f.agent.id === this.selectedId,
+      f.repoHeader ? `repopath:${f.agent.repoPath}` === this.selectedId : f.agent.id === this.selectedId,
     );
     if (idx !== -1) {
       this.selectedIndex = idx;

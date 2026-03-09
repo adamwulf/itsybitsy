@@ -467,6 +467,49 @@ async function main() {
       await printAndExit(await acknowledgeQuestion(repoPath, questionId));
       break;
     }
+    // ── Hook subcommands (called by Claude Code's hook system) ──
+    case "hook-check-path": {
+      const id = args[1];
+      if (!id) { console.error("Usage: itsybitsy hook-check-path <agent-id>"); process.exit(1); }
+      const { hookCheckPath } = await import("./hooks/agent-path");
+      await hookCheckPath(id);
+      break;
+    }
+    case "hook-status": {
+      const id = args[1];
+      if (!id) { console.error("Usage: itsybitsy hook-status <agent-id>"); process.exit(1); }
+      const { hookStatus } = await import("./hooks/agent-status");
+      await hookStatus(id);
+      break;
+    }
+    case "hook-permission-denied": {
+      const id = args[1];
+      if (!id) { console.error("Usage: itsybitsy hook-permission-denied <agent-id>"); process.exit(1); }
+      const { hookPermissionDenied } = await import("./hooks/permission-denied");
+      await hookPermissionDenied(id);
+      break;
+    }
+    case "hooks": {
+      // Nested subcommands under "hooks"
+      const subcommand = args[1];
+      switch (subcommand) {
+        case "intercept-task": {
+          const { hookInterceptTask } = await import("./hooks/intercept-task");
+          await hookInterceptTask();
+          break;
+        }
+        case "session-start": {
+          const { hookSessionStart } = await import("./hooks/session-start");
+          await hookSessionStart();
+          break;
+        }
+        default:
+          console.error(`Unknown hooks subcommand: ${subcommand}`);
+          console.error("Available: intercept-task, session-start");
+          process.exit(1);
+      }
+      break;
+    }
     default: {
       console.log("itsybitsy — Cross-repo agent dashboard");
       console.log("");

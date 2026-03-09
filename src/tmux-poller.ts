@@ -6,6 +6,26 @@
 
 import { stripAnsi } from "./parse-state";
 
+/** Pluggable spawn runner — defaults to Bun.spawn, overridable for tests */
+export type SpawnResult = {
+  stdout: ReadableStream<Uint8Array> | null;
+  stderr: ReadableStream<Uint8Array> | null;
+  exited: Promise<number>;
+};
+export type SpawnRunner = (cmd: string[], opts?: { stdout: "pipe"; stderr: "pipe" }) => SpawnResult;
+
+let spawnRunner: SpawnRunner = Bun.spawn as SpawnRunner;
+
+/** Override the spawn runner (for testing) */
+export function setSpawnRunner(runner: SpawnRunner): void {
+  spawnRunner = runner;
+}
+
+/** Reset to the default Bun.spawn runner */
+export function resetSpawnRunner(): void {
+  spawnRunner = Bun.spawn as SpawnRunner;
+}
+
 export interface TmuxPollerEvents {
   /** Raw tmux output (with ANSI) for display */
   onOutput: (raw: string, stripped: string) => void;
@@ -57,7 +77,7 @@ export class TmuxPoller {
     if (!targetSession) return;
 
     try {
-      const proc = Bun.spawn(
+      const proc = spawnRunner(
         ["tmux", "capture-pane", "-t", targetSession, "-p", `-S`, `-${this.lines}`, "-E", "-"],
         { stdout: "pipe", stderr: "pipe" }
       );
@@ -97,7 +117,7 @@ export class TmuxPoller {
 /** Get the width of a tmux window for a session */
 export async function getTmuxWindowWidth(tmuxSession: string): Promise<number | null> {
   try {
-    const proc = Bun.spawn(
+    const proc = spawnRunner(
       ["tmux", "display-message", "-t", tmuxSession, "-p", "#{window_width}"],
       { stdout: "pipe", stderr: "pipe" }
     );
@@ -114,7 +134,7 @@ export async function getTmuxWindowWidth(tmuxSession: string): Promise<number | 
 /** Resize a tmux window to a given width */
 export async function resizeTmuxWindow(tmuxSession: string, width: number): Promise<boolean> {
   try {
-    const proc = Bun.spawn(
+    const proc = spawnRunner(
       ["tmux", "resize-window", "-t", tmuxSession, "-x", String(width)],
       { stdout: "pipe", stderr: "pipe" }
     );
@@ -133,7 +153,7 @@ export async function resizeTmuxWindow(tmuxSession: string, width: number): Prom
  */
 export async function clearTmuxWindowSizeOverride(tmuxSession: string): Promise<boolean> {
   try {
-    const proc = Bun.spawn(
+    const proc = spawnRunner(
       ["tmux", "resize-window", "-A", "-t", tmuxSession],
       { stdout: "pipe", stderr: "pipe" }
     );
@@ -149,7 +169,7 @@ export async function clearTmuxWindowSizeOverride(tmuxSession: string): Promise<
  */
 export async function listTmuxSessions(): Promise<string[]> {
   try {
-    const proc = Bun.spawn(
+    const proc = spawnRunner(
       ["tmux", "list-sessions", "-F", "#{session_name}"],
       { stdout: "pipe", stderr: "pipe" }
     );
@@ -167,7 +187,7 @@ export async function listTmuxSessions(): Promise<string[]> {
  */
 export async function killTmuxSession(sessionName: string): Promise<boolean> {
   try {
-    const proc = Bun.spawn(
+    const proc = spawnRunner(
       ["tmux", "kill-session", "-t", sessionName],
       { stdout: "pipe", stderr: "pipe" }
     );
@@ -184,7 +204,7 @@ export async function killTmuxSession(sessionName: string): Promise<boolean> {
  */
 export async function captureTmuxOutput(tmuxSession: string, lines = 500): Promise<string | null> {
   try {
-    const proc = Bun.spawn(
+    const proc = spawnRunner(
       ["tmux", "capture-pane", "-t", tmuxSession, "-p", `-S`, `-${lines}`, "-E", "-"],
       { stdout: "pipe", stderr: "pipe" }
     );

@@ -13,10 +13,12 @@ type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<
 /** For test injection — avoids monkey-patching globalThis.fetch */
 let fetchFn: FetchLike = globalThis.fetch;
 
+/** Override fetch for testing. */
 export function setTestFetch(fn: FetchLike): void {
   fetchFn = fn;
 }
 
+/** Reset fetch to globalThis.fetch. */
 export function resetTestFetch(): void {
   fetchFn = globalThis.fetch;
 }

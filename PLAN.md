@@ -422,7 +422,7 @@ Note: `tmux-poller.ts` was implemented in Phase 2/3. Phase 4 focuses on renderin
 - [x] `r` — reassign agent's manager: text input dialog, then `ib reassign {id} {new-manager}`
 - [x] `m` — merge agent: run `ib merge-check {id}` first, show result in confirm dialog, then `ib merge {id} --force`
 - [x] `s` — send message: text input dialog, then `ib send {id} "message"`
-- [x] `a` — new agent: repo selector (from registry) → prompt input → optional flags (`--yolo`, `--worker`, `--model`); shells to `ib new-agent`
+- [x] `a` — new agent: repo selector (from registry) → prompt input → optional flags (`--worker`); shells to `ib new-agent`
 
 ---
 
@@ -582,7 +582,7 @@ Files: `src/tui/dashboard.ts`, `src/config.ts`.
 **`src/config.ts` module:**
 - [ ] `readConfig(repoPath)` — read `.ittybitty.json` from repo, merge with `~/.ittybitty.json` (user), apply defaults. Return `{ value, source: "project" | "user" | "default" }` for each key.
 - [ ] `writeConfig(filePath, key, value)` — read JSON, set key (supports dot-notation like `hooks.injectStatus`), write back.
-- [ ] Config key definitions with types: `{ key: string, type: "number" | "boolean" | "string" | "string[]", default: any }`. Full list: `maxAgents` (number, 10), `model` (string, "sonnet"), `fps` (number, 10), `createPullRequests` (boolean, false), `allowAgentQuestions` (boolean, true), `autoCompactThreshold` (number, none), `externalDiffTool` (string, none), `hooks.injectStatus` (boolean, true), `hooks.statusVisible` (boolean, true), `permissions.manager.allow` (string[], []), `permissions.manager.deny` (string[], []), `permissions.worker.allow` (string[], []), `permissions.worker.deny` (string[], []).
+- [ ] Config key definitions with types: `{ key: string, type: "number" | "boolean" | "string" | "string[]", default: any }`. Full list: `maxAgents` (number, 10), `model` (string, "sonnet"), `fps` (number, 10), `createPullRequests` (boolean, false), `allowAgentQuestions` (boolean, true), `autoCompactThreshold` (number, none), `diffTool` (string, none), `hooks.injectStatus` (boolean, true), `hooks.statusVisible` (boolean, true), `permissions.manager.allow` (string[], []), `permissions.manager.deny` (string[], []), `permissions.worker.allow` (string[], []), `permissions.worker.deny` (string[], []).
 
 **Tab switching:**
 - [ ] Add tab bar at top of setup dialog: `[Setup] [Project] [User]`. Active tab is highlighted.

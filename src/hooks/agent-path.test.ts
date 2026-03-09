@@ -256,4 +256,71 @@ describe("checkPathAccess", () => {
     expect(result.decision).toBe("allow");
     expect(result.reason).toContain("path in worktree");
   });
+
+  test("notebook_path field is checked", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Edit",
+      toolInput: { notebook_path: "/repo/.ittybitty/agents/agent-other/repo/notebook.ipynb" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("cannot access other agents");
+  });
+
+  test("notebook_path allows own worktree", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Edit",
+      toolInput: { notebook_path: "/repo/.ittybitty/agents/agent-abc123/repo/notebook.ipynb" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("allow");
+    expect(result.reason).toContain("path in worktree");
+  });
+
+  test("path with .. traversal is normalized and blocked", () => {
+    const ctx = makeCtx();
+    // Goes up from repo → agent-abc123 → agents → .ittybitty, then into agent-other
+    // Resolves to /repo/.ittybitty/agent-other/repo/secret.ts which is under rootRepo
+    const input = makeInput({
+      toolName: "Read",
+      toolInput: { file_path: "/repo/.ittybitty/agents/agent-abc123/repo/../../../agent-other/repo/secret.ts" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("work in your worktree");
+  });
+
+  test("bash command referencing other agents directory is caught", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "cat /repo/.ittybitty/agents/agent-other/repo/secret.ts" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("bash command references other agents");
+  });
+
+  test("bash command referencing own agent directory is allowed", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "cat /repo/.ittybitty/agents/agent-abc123/repo/src/index.ts" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("allow");
+  });
+
+  test("bash command referencing main repo is caught", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "cat /repo/src/index.ts" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("bash command references main repo");
+  });
 });

@@ -8,6 +8,7 @@
 
 import { join, resolve, dirname, basename } from "path";
 import { realpath, stat } from "fs/promises";
+import { realpathSync } from "fs";
 import { logAgent } from "../agent-lifecycle";
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -122,19 +123,75 @@ export function checkPathAccess(
       return checkFilePath(cdTarget, cwd, toolName, ctx);
     }
 
+    // Check bash command for references to restricted directories
+    const bashDenial = checkBashCommandPaths(command, ctx);
+    if (bashDenial) return bashDenial;
+
     // Not a cd command — allowed by allow list, no path check needed
     return { decision: "allow", reason: "Tool in allow list" };
   }
 
-  // 4. Extract file_path or path from toolInput
+  // 4. Extract file_path or path or notebook_path from toolInput
   const filePath = (toolInput.file_path as string | undefined) ??
-                   (toolInput.path as string | undefined);
+                   (toolInput.path as string | undefined) ??
+                   (toolInput.notebook_path as string | undefined);
 
   if (!filePath) {
     return { decision: "allow", reason: "Tool in allow list" };
   }
 
   return checkFilePath(filePath, cwd, toolName, ctx);
+}
+
+/**
+ * Check a bash command string for references to restricted directories.
+ * Catches commands like `cat /repo/.ittybitty/agents/agent-other/...`
+ * or commands referencing the root repo directly.
+ *
+ * Only checks paths at word boundaries (preceded by space, quote, =, or start of string)
+ * to avoid false positives from substring matches within longer paths.
+ */
+function checkBashCommandPaths(
+  command: string,
+  ctx: PathCheckContext
+): HookDecision | null {
+  const { agentDir, agentsDir, worktreePath, rootRepo } = ctx;
+
+  // Check for references to other agents' directories
+  if (agentsDir) {
+    const needle = agentsDir + "/";
+    let pos = 0;
+    while ((pos = command.indexOf(needle, pos)) !== -1) {
+      // Only match at path boundaries (start of string, after space/quote/=)
+      if (pos === 0 || " '\"=".includes(command[pos - 1]!)) {
+        const pathFromHere = command.slice(pos);
+        // Allow if the path is under our own agent directory
+        if (!pathFromHere.startsWith(agentDir + "/") && !pathFromHere.startsWith(agentDir + " ")) {
+          return { decision: "deny", reason: "Access denied: bash command references other agents' directory" };
+        }
+      }
+      pos++;
+    }
+  }
+
+  // Check for references to root repo (when it's not the worktree)
+  if (rootRepo && rootRepo !== worktreePath) {
+    const needle = rootRepo + "/";
+    let pos = 0;
+    while ((pos = command.indexOf(needle, pos)) !== -1) {
+      // Only match at path boundaries
+      if (pos === 0 || " '\"=".includes(command[pos - 1]!)) {
+        const pathFromHere = command.slice(pos);
+        // Allow if the path is under our own worktree
+        if (!pathFromHere.startsWith(worktreePath + "/") && !pathFromHere.startsWith(worktreePath + " ") && pathFromHere !== worktreePath) {
+          return { decision: "deny", reason: "Access denied: bash command references main repo" };
+        }
+      }
+      pos++;
+    }
+  }
+
+  return null;
 }
 
 /**
@@ -155,8 +212,13 @@ function checkFilePath(
     filePath = join(cwd, filePath);
   }
 
-  // 6. Normalize: resolve . and .. via path.resolve
+  // 6. Normalize: resolve . and .. via path.resolve, then try realpathSync for symlinks
   filePath = resolve(filePath);
+  try {
+    filePath = realpathSync(filePath);
+  } catch {
+    // Path doesn't exist yet — keep the resolve() result
+  }
 
   // 7. Allow: path within worktree
   if (filePath.startsWith(worktreePath + "/") || filePath === worktreePath) {
@@ -203,7 +265,7 @@ export async function hookCheckPath(agentId: string): Promise<void> {
   // Resolve agent directory from cwd pattern
   // cwd is typically: .../.ittybitty/agents/{id}/repo/...
   const cwdMatch = cwd.match(/(.*\/.ittybitty\/agents)/);
-  const agentsDir = cwdMatch ? cwdMatch[1]! : join(process.cwd(), ".ittybitty", "agents");
+  const agentsDir = resolve(cwdMatch ? cwdMatch[1]! : join(process.cwd(), ".ittybitty", "agents"));
 
   const agentDir = join(agentsDir, agentId);
   let worktreePath = join(agentDir, "repo");
@@ -250,7 +312,7 @@ export async function hookCheckPath(agentId: string): Promise<void> {
     if (exitCode === 0) {
       const match = output.match(/^worktree (.+)$/m);
       if (match) {
-        rootRepo = match[1]!;
+        rootRepo = resolve(match[1]!);
       }
     }
   } catch { /* ignore */ }

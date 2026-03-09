@@ -808,24 +808,65 @@ These are straightforward — the CLI already implements them natively in `index
 
 ---
 
-### Phase 20: Replace `ib watchdog` Spawn with Built-in Watchdog
-**Checkpoint:** `newAgent()` no longer spawns `ib watchdog {id}`. The built-in watchdog from `src/watchdog.ts` handles all agent monitoring.
+### Phase 20: Standalone Watchdog — `itsybitsy watchdog` Background Process
+**Checkpoint:** Spawning an agent always launches a watchdog. `itsybitsy watchdog` runs as a standalone background process that reads agents directly from disk — no TUI required. `newAgent()` spawns `itsybitsy watchdog` instead of `ib watchdog {id}`.
 
-Files: `src/ib-commands.ts`, `src/watchdog.ts`
+Files: `src/ib-commands.ts`, `src/watchdog.ts`, `src/index.ts`
 
-**Current behavior (item 18 from audit):**
-`newAgent()` at line 1630 spawns `Bun.spawn(["ib", "watchdog", id])` for each new agent with a manager. This creates a per-agent bash watchdog process.
+**Architectural principle: `itsybitsy watch` is for humans, not for functionality.**
 
-**Target behavior:**
-The built-in watchdog in `src/watchdog.ts` already monitors all agents globally via the watcher's cached state. When running inside the TUI (`itsybitsy watch`), the watchdog is already active. For CLI-spawned agents (`itsybitsy new-agent`), the watchdog is not running — but the agent will be picked up by any running itsybitsy dashboard.
+`itsybitsy watch` (the TUI dashboard) is a UI for the human operator to observe and interact with agents. It is entirely optional — closing it does NOT stop agent monitoring. All functional work (watchdog, hooks, agent lifecycle) happens in background processes that run whether or not the TUI is open.
 
-- [ ] **Remove `ib watchdog` spawn** from `newAgent()` (ib-commands.ts:1626–1637) — delete the entire block that spawns `Bun.spawn(["ib", "watchdog", id])`
-- [ ] **Document the behavior change** — agents spawned via CLI (`itsybitsy new-agent`) will only get watchdog monitoring if an `itsybitsy watch` session is running. This matches the existing architecture where the watchdog is dashboard-integrated.
-- [ ] **Optional: standalone watchdog mode** — add `itsybitsy watchdog` CLI command that starts just the watchdog loop without the TUI. This would allow `newAgent()` to spawn `Bun.spawn(["itsybitsy", "watchdog"])` as a lightweight alternative. However, this is lower priority since the dashboard watchdog covers the common case.
+The standalone `itsybitsy watchdog` process is the **only** watchdog. It reads agents directly from disk on every tick using `readAllAgents()` + `detectAgentStates()` — no TUI dependency. The TUI's only watchdog-related jobs are:
+1. Check the lock file and show the `[watchdog]` status indicator if one is running
+2. Optionally spawn `itsybitsy watchdog` as a convenience if none is running when the TUI opens
+
+Phase 15-D's TUI integration (`startWatchdog()`/`stopWatchdog()` inline in the TUI process) will be removed as part of this phase. `isWatchdogRunning()` will read the lock file instead of checking module-level state.
+
+**Design: Idempotency via lock file**
+
+Multiple `itsybitsy watchdog` processes (one spawned by each `newAgent()` call, plus one from the TUI) would be wasteful. Use a lock file at `~/.itsybitsy/watchdog.lock` containing the PID. On startup, check if the PID in the lock file is still alive — if so, exit immediately (already covered). If not, write own PID and proceed. On exit, remove the lock file.
+
+**20a: Standalone agent provider**
+
+Files: `src/watchdog.ts`
+
+- [ ] Export `createDiskAgentProvider(registryPath: string): AgentProvider` — a function that, on each call, reads all repos from the registry, calls `readAllAgents()` on each, calls `detectAgentStates()` on the result, and returns the combined flat agent list. This is the standalone watchdog's provider.
+- [ ] Add tests for `createDiskAgentProvider()` with mocked `readAllAgents` and `detectAgentStates`.
+
+**20b: Lock file management**
+
+Files: `src/watchdog.ts`
+
+- [ ] Export `acquireWatchdogLock(): boolean` — writes `~/.itsybitsy/watchdog.lock` with current PID. Returns `true` if acquired (either no existing lock, or existing PID is dead). Returns `false` if another watchdog is already running.
+- [ ] Export `releaseWatchdogLock(): void` — removes the lock file if it contains our PID.
+- [ ] Add process exit handlers to call `releaseWatchdogLock()` on SIGTERM/SIGINT/exit.
+- [ ] Add tests for lock acquire/release, stale PID handling.
+
+**20c: `itsybitsy watchdog` CLI command**
+
+Files: `src/index.ts`
+
+- [ ] Add `watchdog` subcommand to the CLI switch statement.
+- [ ] On invocation: call `acquireWatchdogLock()` — if returns `false`, print "watchdog already running" and exit 0.
+- [ ] Read registry path, call `startWatchdog(createDiskAgentProvider(registryPath))`.
+- [ ] Keep the process alive (no `process.exit()` — let the setInterval hold the event loop).
+- [ ] Register cleanup: on SIGTERM/SIGINT, call `stopWatchdog()`, `releaseWatchdogLock()`, exit 0.
+
+**20d: Replace `ib watchdog` spawn in `newAgent()`**
+
+Files: `src/ib-commands.ts`
+
+- [ ] Replace `Bun.spawn(["ib", "watchdog", id], ...)` with `Bun.spawn(["itsybitsy", "watchdog"], { cwd: rootRepoPath, stdout: Bun.file(watchdogLog), stderr: Bun.file(watchdogLog) })` — note: no agent ID argument since our watchdog is global.
+- [ ] Call `.unref()` on the spawned process so it doesn't prevent the parent from exiting.
+- [ ] The spawned process will self-terminate immediately if a watchdog is already running (lock file check in 20b).
 
 **Tests:**
-- [ ] Verify `newAgent()` no longer attempts to spawn any `ib` process
-- [ ] Verify existing watchdog tests still pass (they don't depend on the spawn path)
+- [ ] `newAgent()` spawns `itsybitsy watchdog`, not `ib watchdog`
+- [ ] `acquireWatchdogLock()` returns false when lock is held by a live PID
+- [ ] `acquireWatchdogLock()` returns true when lock PID is dead (stale lock)
+- [ ] `itsybitsy watchdog` CLI exits cleanly if already running
+- [ ] Existing watchdog tests still pass
 
 ---
 

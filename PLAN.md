@@ -622,16 +622,27 @@ Files: `src/tui/dashboard.ts`, `src/config.ts`.
 
 ---
 
-### Phase 14: CLI Parity — Native Implementations
+### Phase 14: CLI Parity — Native Implementations -- COMPLETE
 **Checkpoint:** All `itsybitsy` CLI commands are implemented natively without shelling to `ib`. itsybitsy can fully replace `ib` for day-to-day agent management.
 
-Currently shelling to `ib` as temporary placeholders (marked TODO in code):
-- [ ] **`send <id> <message>`** — use `tmux send-keys -t {tmux_session} "{message}" Enter` directly via Bun.spawn
-- [ ] **`kill <id>`** — kill tmux session, move agent dir to `.ittybitty/archive/`, update any parent manager references
-- [ ] **`pause <id>`** — stop Claude process and tmux session, preserve agent dir/worktree/log for later resume (mirrors `ib pause`)
-- [ ] **`resume <id>`** — restart tmux session with claude, update agent state files
-- [ ] **`merge <id>`** — git rebase worktree onto main, fast-forward main, delete worktree, archive agent dir
-- [ ] **`new-agent <prompt>`** — create git worktree + branch, start tmux session, launch claude with correct flags, write meta.json, optionally start watchdog
+All commands now implemented natively in `src/ib-commands.ts` with shared helpers in `src/agent-lifecycle.ts`:
+- [x] **`send <id> <message>`** — direct tmux send-keys with delay calculation, sender auto-detection, logging
+- [x] **`kill <id>`** — teardown sequence: kill process, kill tmux, copy settings, remove worktree/branch, archive, cleanup
+- [x] **`pause <id>`** — kill process + tmux, preserve agent dir/worktree for resume
+- [x] **`resume <id>`** — create resume.sh, spawn tmux session, auto-accept trust, send nudge
+- [x] **`nuke [id]`** — teardown agent + descendants (or all), cleanup orphaned sessions
+- [x] **`merge <id>`** — pre-rebase conflict check, rebase, merge (ff-only or no-ff), teardown
+- [x] **`new-agent <prompt>`** — full agent creation: worktree, meta.json, prompt.txt, start.sh, exit-check.sh, settings, tmux, hooks
+
+658 tests across 19 files. Injectable spawn runners for testability (SpawnFn pattern).
+
+### Phase 14.1: Fix Flaky Test
+**Checkpoint:** All tests are deterministic with zero flaky failures.
+
+- [ ] Investigate intermittent test failure: 657 pass / 1 fail (observed ~1 in 6 runs). The failure shows in the summary line but the specific failing test name is not captured in output. Likely a timing-sensitive test in the new Phase 14 native implementations — possibly related to `Bun.sleep` delays, temp directory cleanup races, or mock spawn runner state leaking between tests. Steps:
+  1. Run `bun test` in a loop (10+ iterations) to reliably reproduce
+  2. Identify the specific test that fails
+  3. Fix the root cause (likely needs test isolation improvement or removing timing dependency)
 
 ---
 

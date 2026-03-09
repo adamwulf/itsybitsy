@@ -34,6 +34,28 @@ itsybitsy remove /path/to/project
 itsybitsy watch
 ```
 
+## Architecture
+
+itsybitsy reads agent data natively from disk for speed, but delegates all mutations to the `ib` CLI to avoid reimplementing write-side logic (kill, merge, send, new-agent, etc.). The data flow:
+
+```
+registry.ts        — Stores which repo paths to monitor (~/.itsybitsy.json)
+  ↓
+agents.ts          — Reads .ittybitty/agents/{id}/meta.json directly from each repo
+  ↓
+parse-state.ts     — Classifies agent state (running/waiting/complete/stopped/…)
+                     from tmux capture-pane output via pure string matching
+  ↓
+watcher.ts         — Drives updates: fs.watch on .ittybitty/agents/ for instant
+                     detection, plus ~1s tmux polling for the selected agent
+  ↓
+dashboard.ts       — TUI component tree using pi-tui; handles input and rendering
+  ↓
+ib-commands.ts     — Shells out to `ib` for all mutations (Bun.spawn, no shell)
+```
+
+The TUI uses a custom `SplitPane` component to render two panes side-by-side, since pi-tui's `Box` only supports vertical layout. Each child renders independently; `SplitPane` merges their output line-by-line with padding and a separator.
+
 ## Keybindings
 
 ### Navigation

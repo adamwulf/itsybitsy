@@ -6,7 +6,7 @@
 
 import { join } from "path";
 import { addRepo, removeRepo, listRepos, type RepoEntry } from "./registry";
-import type { Agent } from "./agents";
+import type { Agent, FlatAgent } from "./agents";
 
 const args = process.argv.slice(2);
 const command = args[0];
@@ -88,7 +88,7 @@ async function main() {
         console.log("No repos registered. Use 'itsybitsy add <path>' to add one.");
       } else {
         for (const r of repos) {
-          console.log(`  ${r.name}\t${r.path}`);
+          console.log(`  ${r.name}  →  ${r.path}`);
         }
       }
       break;
@@ -124,13 +124,70 @@ async function main() {
       if (flat.length === 0) {
         console.log("No agents found across registered repos.");
       } else {
-        for (const { agent, connector } of flat) {
-          const icon = agent.meta.worker ? "⚙" : "◆";
-          const archived = agent.archived ? " [archived]" : "";
-          const prompt = agent.meta.prompt.slice(0, 60).replace(/\n/g, " ");
-          console.log(
-            `${connector}${icon} ${agent.repoName}/${agent.id}  ${agent.state}  ${agent.age}  ${agent.meta.model}  ${prompt}${archived}`
-          );
+        const { visibleWidth } = await import("@mariozechner/pi-tui");
+        const { displayState, computeStateColWidth } = await import("./tui/agent-tree");
+        const { getStateColors } = await import("./tui/color-scheme");
+        const { BOLD, DIM, RESET } = await import("./tui/colors");
+
+        // Collect real agent rows for column width computation
+        const rowByEntry = new Map<FlatAgent, { prefix: string; state: string; age: string; model: string }>();
+        for (const entry of flat) {
+          if (entry.repoHeader) continue;
+          const orphanedPrefix = entry.agent.orphaned ? "⚠ " : "";
+          const icon = entry.agent.meta.worker ? "⚙" : "◆";
+          const prefix = `${entry.connector}${orphanedPrefix}${icon} ${entry.agent.id}`;
+          rowByEntry.set(entry, {
+            prefix,
+            state: displayState(entry.agent.state),
+            age: entry.agent.age,
+            model: entry.agent.meta.model,
+          });
+        }
+
+        // Compute max visible widths for alignment
+        const maxState = computeStateColWidth(flat);
+        let maxPrefix = 0, maxAge = 0, maxModel = 0;
+        for (const row of rowByEntry.values()) {
+          const pw = visibleWidth(row.prefix);
+          if (pw > maxPrefix) maxPrefix = pw;
+          if (row.age.length > maxAge) maxAge = row.age.length;
+          if (row.model.length > maxModel) maxModel = row.model.length;
+        }
+
+        // Compute available width for prompt (terminal width minus fixed columns and gaps)
+        const termWidth = process.stdout.columns || 120;
+        // prefix + 2 + state + 2 + age + 2 + model + 2 = fixed portion
+        const fixedWidth = maxPrefix + 2 + maxState + 2 + maxAge + 2 + maxModel + 2;
+        const promptWidth = Math.max(20, termWidth - fixedWidth);
+
+        const stateColors = getStateColors();
+        let isFirst = true;
+        for (const entry of flat) {
+          if (entry.repoHeader) {
+            if (!isFirst) console.log(""); // blank line between repos
+            isFirst = false;
+            console.log(`${BOLD}${entry.repoHeader}${RESET}`);
+            if (!entry.repoHasAgents) {
+              console.log(`  ${DIM}(no agents)${RESET}`);
+            }
+            continue;
+          }
+
+          const row = rowByEntry.get(entry)!;
+          // Pad prefix using visibleWidth to account for box-drawing/icon chars
+          const prefixPad = maxPrefix - visibleWidth(row.prefix);
+          const paddedPrefix = row.prefix + " ".repeat(Math.max(0, prefixPad));
+          const colorCode = stateColors[row.state] ?? DIM;
+          const prompt = entry.agent.meta.prompt.slice(0, promptWidth).replace(/\n/g, " ");
+          const archived = entry.agent.archived ? ` ${DIM}[archived]${RESET}` : "";
+          const line = [
+            paddedPrefix,
+            `${colorCode}${row.state.padEnd(maxState)}${RESET}`,
+            row.age.padEnd(maxAge),
+            row.model.padEnd(maxModel),
+            prompt + archived,
+          ].join("  ");
+          console.log(line);
         }
       }
       break;

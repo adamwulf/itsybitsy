@@ -44,6 +44,13 @@ export interface PendingQuestion {
   status: "pending" | "acknowledged";
 }
 
+/** Get the worktree path for an agent, or the repo root if worktree is false. */
+export function agentWorktreePath(agent: Agent): string {
+  if (agent.meta.worktree === false) return agent.repoPath;
+  const dir = agent.archived ? "archive" : "agents";
+  return join(agent.repoPath, ".ittybitsy", dir, agent.id, "repo");
+}
+
 /** Compute human-readable age from epoch timestamp */
 export function computeAge(createdEpoch: number): string {
   const now = Math.floor(Date.now() / 1000);

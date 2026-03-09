@@ -4,6 +4,7 @@
  */
 
 import { stat } from "node:fs/promises";
+import { agentWorktreePath } from "../agents";
 import type { Agent, FlatEntry, PendingQuestion } from "../agents";
 import type { RepoEntry } from "../registry";
 import { addRepo, loadRegistry, saveRegistry, renameRepo, removeRepo, repoDisplayName } from "../registry";
@@ -478,13 +479,7 @@ export function handleOpenWorktree(ctx: ActionCtx) {
     }
     return;
   }
-  const dir = agent.archived ? "archive" : "agents";
-  let worktreePath: string;
-  if (agent.meta.worktree === false) {
-    worktreePath = agent.repoPath;
-  } else {
-    worktreePath = `${agent.repoPath}/.ittybitty/${dir}/${agent.id}/repo`;
-  }
+  const worktreePath = agentWorktreePath(agent);
   (async () => {
     try {
       let pathToOpen = worktreePath;
@@ -508,14 +503,7 @@ export function handleOpenDiffTool(ctx: ActionCtx) {
   if (!ctx.diffTool) { ctx.setNotice("No diff tool configured — set diffTool in ~/.itsybitsy.json"); return; }
   const tool = ctx.diffTool;
 
-  // Determine worktree path (same logic as handleOpenWorktree)
-  const dir = agent.archived ? "archive" : "agents";
-  let cwd: string;
-  if (agent.meta.worktree === false) {
-    cwd = agent.repoPath;
-  } else {
-    cwd = `${agent.repoPath}/.ittybitty/${dir}/${agent.id}/repo`;
-  }
+  const cwd = agentWorktreePath(agent);
 
   // Run diff tool in the worktree, showing changes since merge-base with main.
   // Tool string is unquoted so multi-word tools (e.g. "git webdiff") are word-split correctly.

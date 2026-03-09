@@ -694,6 +694,382 @@ No new file format needed — reuses existing `ib send` infrastructure.
 
 ---
 
+### Phase 18: Wire CLI Commands to Native Implementations
+**Checkpoint:** All `itsybitsy` CLI subcommands (send, kill, merge, resume, new-agent, acknowledge) call native TypeScript implementations instead of shelling to `ib`. The `runIb()` function in `index.ts` is deleted.
+
+This is the lowest-hanging fruit — native implementations already exist in `ib-commands.ts` for send, kill, merge, resume, and new-agent. Only `acknowledge` needs a new native implementation.
+
+**18a: Wire existing native implementations into CLI (items 12–16 from audit)**
+
+Files: `src/index.ts`, `src/ib-commands.ts`
+
+- [ ] **`send` command** (index.ts:307–315) — replace `runIb(["send", ...])` with direct call to `sendMessage(agent, message)` from `ib-commands.ts`. Print result, exit with appropriate code.
+- [ ] **`kill` command** (index.ts:318–323) — replace `runIb(["kill", ...])` with `killAgent(agent)`. Parse `--force` flag from `extraArgs`. Print result.
+- [ ] **`merge` command** (index.ts:327–331) — replace `runIb(["merge", ...])` with `mergeAgent(agent, { force: extraArgs.includes("--force") })`. Print result.
+- [ ] **`resume` command** (index.ts:335–339) — replace `runIb(["resume", ...])` with `resumeAgent(agent)`. Print result.
+- [ ] **`new-agent` command** (index.ts:343–377) — replace `runIb(["new-agent", ...])` with `newAgent(repoPath, prompt, opts)`. Parse CLI args into `NewAgentOptions`: `--worker`, `--model`, `--name`, `--no-worktree`, `--yolo`, `--allow`, `--deny`. Print the returned agent ID.
+
+**18b: Native acknowledge implementation (item 17 from audit)**
+
+Files: `src/ib-commands.ts`, `src/index.ts`
+
+- [ ] **`acknowledgeQuestion(repoPath, questionId)`** — implement natively:
+  1. Read `{repoPath}/.ittybitty/user-questions.json`
+  2. Find the question entry matching `questionId`
+  3. If not found, return error
+  4. Set `acknowledged: true` and `acknowledged_at: ISO timestamp` on the question entry
+  5. Write back the JSON file
+  6. Return `{ ok: true, agentId }` so the caller can suggest `itsybitsy send <agent> "answer"`
+- [ ] Wire `acknowledge`/`ack` CLI command to call the native implementation instead of `runIb()`
+
+**18c: Remove `runIb()` from index.ts**
+
+- [ ] Delete the `runIb()` function from `index.ts` — it should have zero callers after 18a+18b
+- [ ] Verify no other imports of `runIb` exist in the codebase
+
+**Tests:**
+- [ ] Unit tests for `acknowledgeQuestion()`: happy path, question-not-found, malformed JSON
+- [ ] Integration-style tests verifying CLI argument parsing maps correctly to native function calls (mock the native functions, verify args)
+
+---
+
+### Phase 19: Native TUI Wrappers — reassign, mergeCheck, diff, status, acknowledge
+**Checkpoint:** All TUI dashboard wrappers in `ib-commands.ts` call native TypeScript code instead of `runIb()`. The `defaultRunner` / `currentRunner` / `runIb` infrastructure in `ib-commands.ts` is deleted.
+
+**19a: Native `reassignAgent()` (item 1 from audit)**
+
+Files: `src/ib-commands.ts`, `src/agent-lifecycle.ts`
+
+The reassign logic (from ib bash `do_reassign`):
+1. Validate agent exists
+2. Validate new parent exists and is not a worker
+3. Check for circular dependency (new parent is not a descendant of agent)
+4. Check for no-op (already has this parent, or already root)
+5. Update `manager` field in `meta.json` (set to new parent ID, or `null` for --none)
+6. Log the change to `agent.log`
+7. Notify old parent, new parent, and agent itself via `sendMessage()`
+
+- [ ] Implement `reassignAgent(agent, newManager)` natively in `ib-commands.ts`:
+  - Read meta.json to get old parent
+  - Validate new parent: resolve partial ID, check exists, check not worker, check not descendant (use `getDescendantsRecursive` from `agent-lifecycle.ts`)
+  - Update meta.json `manager` field using `Bun.write()`
+  - Log via `logAgent()`
+  - Send notifications to old parent, new parent, and agent via `sendMessage()`
+- [ ] Remove the `runIb(["reassign", ...])` call
+
+**19b: Native `mergeCheckAgent()` (item 2 from audit)**
+
+Files: `src/ib-commands.ts`
+
+The merge-check logic (from ib bash `do_merge_check`):
+1. Determine target branch (current branch if agent context, else main/master)
+2. Check for uncommitted changes in current directory
+3. Check for uncommitted changes in agent's worktree
+4. Check if agent branch exists
+5. Run `checkRebaseConflicts()` (already implemented natively in ib-commands.ts!)
+
+- [ ] Implement `mergeCheckAgent(agent)` natively:
+  - Determine target branch using git commands
+  - Check uncommitted changes via `git status --porcelain`
+  - Check agent branch exists via `git show-ref`
+  - Call existing `checkRebaseConflicts()` for conflict detection
+  - Return structured result: `{ status: "ok" | "main_uncommitted" | "agent_uncommitted" | "no_branch" | "conflicts", details?: string }`
+- [ ] Remove the `runIb(["merge-check", ...])` call
+
+**19c: Native `diffAgent()` and `statusAgent()` (items 3–4 from audit)**
+
+Files: `src/ib-commands.ts`
+
+These are straightforward — the CLI already implements them natively in `index.ts:257` and `index.ts:284`. The TUI wrappers just need the same logic.
+
+- [ ] **`diffAgent(agent)`** — implement natively:
+  1. Get agent worktree path via `agentWorktreePath(agent)`
+  2. Run `git merge-base HEAD main` in the worktree
+  3. Run `git diff {merge-base}` in the worktree
+  4. Return stdout as the diff content
+- [ ] **`statusAgent(agent)`** — implement natively:
+  1. Get agent worktree path
+  2. Run `git log --oneline main..HEAD` in the worktree
+  3. Run `git status --short` in the worktree
+  4. Return combined stdout
+
+- [ ] Remove the `runIb(["diff", ...])` and `runIb(["status", ...])` calls
+
+**19d: Remove `runIb` infrastructure from ib-commands.ts**
+
+- [ ] Delete `defaultRunner`, `currentRunner`, `setRunner()`, `resetRunner()`, and the `runIb()` helper
+- [ ] Update any remaining tests that mock `setRunner()` — they should mock the specific spawn runners instead
+- [ ] Verify zero references to `runIb` remain in the codebase
+
+**Tests:**
+- [ ] `reassignAgent()`: happy path, circular dependency detection, worker-as-parent rejection, same-parent no-op, agent-not-found
+- [ ] `mergeCheckAgent()`: clean merge, uncommitted changes (both sides), conflict detection, missing branch
+- [ ] `diffAgent()` / `statusAgent()`: basic output capture, worktree-not-found handling
+
+---
+
+### Phase 20: Replace `ib watchdog` Spawn with Built-in Watchdog
+**Checkpoint:** `newAgent()` no longer spawns `ib watchdog {id}`. The built-in watchdog from `src/watchdog.ts` handles all agent monitoring.
+
+Files: `src/ib-commands.ts`, `src/watchdog.ts`
+
+**Current behavior (item 18 from audit):**
+`newAgent()` at line 1630 spawns `Bun.spawn(["ib", "watchdog", id])` for each new agent with a manager. This creates a per-agent bash watchdog process.
+
+**Target behavior:**
+The built-in watchdog in `src/watchdog.ts` already monitors all agents globally via the watcher's cached state. When running inside the TUI (`itsybitsy watch`), the watchdog is already active. For CLI-spawned agents (`itsybitsy new-agent`), the watchdog is not running — but the agent will be picked up by any running itsybitsy dashboard.
+
+- [ ] **Remove `ib watchdog` spawn** from `newAgent()` (ib-commands.ts:1626–1637) — delete the entire block that spawns `Bun.spawn(["ib", "watchdog", id])`
+- [ ] **Document the behavior change** — agents spawned via CLI (`itsybitsy new-agent`) will only get watchdog monitoring if an `itsybitsy watch` session is running. This matches the existing architecture where the watchdog is dashboard-integrated.
+- [ ] **Optional: standalone watchdog mode** — add `itsybitsy watchdog` CLI command that starts just the watchdog loop without the TUI. This would allow `newAgent()` to spawn `Bun.spawn(["itsybitsy", "watchdog"])` as a lightweight alternative. However, this is lower priority since the dashboard watchdog covers the common case.
+
+**Tests:**
+- [ ] Verify `newAgent()` no longer attempts to spawn any `ib` process
+- [ ] Verify existing watchdog tests still pass (they don't depend on the spawn path)
+
+---
+
+### Phase 21: Native Agent Hooks — itsybitsy Subcommands
+**Checkpoint:** Agent settings reference `itsybitsy hook-*` commands instead of `ib hook-*`. Each hook is implemented as an itsybitsy CLI subcommand.
+
+This is the most complex phase. Agent hooks run inside spawned agent tmux sessions — they are invoked by Claude Code's hook system, not by itsybitsy itself. Currently they call `ib hook-check-path`, `ib hook-status`, `ib hook-permission-denied`, `ib hooks intercept-task`, and `ib hooks session-start`.
+
+**Phase 21 can run in parallel with Phases 18–20** since it touches the hook command implementations (new CLI subcommands) rather than the TUI/CLI wiring.
+
+**21a: `itsybitsy hook-check-path <agent-id>` (PreToolUse path isolation)**
+
+Files: `src/index.ts`, new `src/hooks/agent-path.ts`
+
+This hook enforces agent path isolation — prevents agents from accessing files outside their worktree. It reads JSON from stdin (Claude Code's PreToolUse hook format) and outputs a JSON permission decision.
+
+Implementation:
+- [ ] Read JSON from stdin: `{ tool_name, tool_input, cwd }`
+- [ ] Resolve agent's worktree path from `{agents_dir}/{id}/repo`
+- [ ] Resolve root repo path via `git worktree list --porcelain`
+- [ ] Read agent's `meta.json` for `worker` flag
+- [ ] Read agent's `settings.local.json` for `permissions.allow` list
+- [ ] Decision logic (port from ib's `check_pretooluse_access()`):
+  1. Block `TaskCreate` with role-specific message
+  2. Check if tool is in allow list (pattern matching)
+  3. For `Bash` tool: extract cd target, check path
+  4. Extract `file_path` or `path` from `tool_input`
+  5. Resolve to absolute path using `cwd`
+  6. Allow: path within worktree, path is own agent.log
+  7. Block: path in other agents' directories
+  8. Block: path in main repo (outside worktree)
+  9. Allow: all other paths (system files, ~/.claude, etc.)
+- [ ] Output JSON: `{ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow"|"deny", permissionDecisionReason: "..." } }`
+- [ ] Log denials to `agent.log` via `logAgent()`
+- [ ] Wire as `hook-check-path` subcommand in `src/index.ts`
+
+**21b: `itsybitsy hook-status <agent-id>` (Stop hook — agent nudging)**
+
+Files: `src/index.ts`, new `src/hooks/agent-status.ts`
+
+This hook fires when Claude stops generating. It detects the agent's state and takes action: nudge idle agents, notify managers of completion/waiting, remind about uncommitted changes.
+
+Implementation:
+- [ ] Read Stop hook JSON from stdin: `{ last_assistant_message, stop_hook_active, ... }`
+- [ ] Detect state from `last_assistant_message` first (more reliable than tmux):
+  - Last non-empty line is `"WAITING"` → `waiting`
+  - Last non-empty line is `"I HAVE COMPLETED THE GOAL"` → `complete`
+  - Otherwise → fall through to tmux-based detection
+- [ ] Fall back to tmux-based state detection via `parseState()` from `src/parse-state.ts`
+- [ ] Save debug capture to `{agent_dir}/debug-logs/stop-{timestamp}-{state}.txt`
+- [ ] State-specific actions:
+  - `rate_limited` → skip (watchdog handles this)
+  - `running` with background tasks (`⏵⏵` in footer) → skip
+  - `unknown` or `running` → debounce (5s), send nudge: "Resume your work, or end with 'WAITING' or 'I HAVE COMPLETED THE GOAL' as your final line."
+  - `complete`:
+    - Check for uncommitted changes → remind to commit
+    - Worker with manager → notify manager: `[hook]: Your subtask {id} just completed`
+    - Manager without unfinished children → no action
+    - Manager with unfinished children → remind about unmerged sub-agents
+  - `waiting` with manager → notify manager: `[hook]: Your subtask {id} is now waiting for input`
+- [ ] Wire as `hook-status` subcommand in `src/index.ts`
+
+**21c: `itsybitsy hook-permission-denied <agent-id>` (PermissionRequest logging)**
+
+Files: `src/index.ts`, new `src/hooks/permission-denied.ts`
+
+This hook fires when Claude requests permission for a tool that isn't auto-allowed. In ib bash, this command doesn't have its own implementation — it falls through to the help text (essentially a no-op). The PermissionRequest hook is set up but the actual permission enforcement happens via PreToolUse (`hook-check-path`).
+
+Implementation:
+- [ ] Read PermissionRequest JSON from stdin
+- [ ] Log the denied tool request to `agent.log`
+- [ ] Exit 0 (no permission decision needed — PermissionRequest hooks can't override permissions)
+- [ ] Wire as `hook-permission-denied` subcommand in `src/index.ts`
+
+**21d: `itsybitsy hooks intercept-task` (PreToolUse Task interception)**
+
+Files: `src/index.ts`, new `src/hooks/intercept-task.ts`
+
+This hook intercepts Claude's native `Task` tool calls and redirects them to spawn ib/itsybitsy agents instead.
+
+Implementation:
+- [ ] Read PreToolUse JSON from stdin: `{ tool_name, tool_input, cwd }`
+- [ ] Skip if not `Task` tool (exit 0)
+- [ ] Skip if called from a worker agent (check meta.json `worker` flag)
+- [ ] Skip if `subagent_type` is in skip list: `Bash`, `statusline-setup`, `claude-code-guide`, `meta-agent`, `ib-merge`
+- [ ] Extract `prompt`, `description`, `model` from `tool_input`
+- [ ] Validate model (only allow `sonnet`, `opus`, `haiku`, empty)
+- [ ] Spawn real agent via `newAgent()` with `--worker` flag
+- [ ] Return `permissionDecision: "allow"` with `updatedInput` that transforms the Task into a lightweight `claude-code-guide` stub (reports the spawned agent ID back to the caller)
+- [ ] Wire as `hooks intercept-task` subcommand in `src/index.ts` (note: this is a nested subcommand under `hooks`)
+
+**21e: `itsybitsy hooks session-start` (SessionStart context injection)**
+
+Files: `src/index.ts`, new `src/hooks/session-start.ts`
+
+This hook outputs role-specific ittybitty instructions when a Claude Code session starts.
+
+Implementation:
+- [ ] Read SessionStart JSON from stdin: `{ cwd, ... }`
+- [ ] Detect role from `cwd`:
+  - Not in agent worktree → `primary`
+  - In agent worktree, `worker=false` in meta.json → `manager`
+  - In agent worktree, `worker=true` in meta.json → `worker`
+- [ ] Generate role-specific instructions (port `get_ittybitty_instructions()` from ib bash)
+- [ ] Output JSON: `{ hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: "..." } }`
+- [ ] Wire as `hooks session-start` subcommand in `src/index.ts`
+
+**Tests:**
+- [ ] `hook-check-path`: allow within worktree, block outside worktree, block other agents, allow system paths, cd command extraction, TaskCreate denial
+- [ ] `hook-status`: state detection from message text, nudge debouncing, manager notification for complete/waiting, uncommitted changes reminder
+- [ ] `hook-permission-denied`: basic logging, JSON parsing
+- [ ] `intercept-task`: skip non-Task tools, skip workers, skip list bypass, agent spawning
+- [ ] `session-start`: role detection (primary/manager/worker), correct output format
+
+---
+
+### Phase 22: Update Agent Settings to Use itsybitsy Hooks
+**Checkpoint:** `buildAgentSettings()` writes `itsybitsy hook-*` commands instead of `ib hook-*` into agent settings. Agent permissions include `Bash(itsybitsy:*)` instead of `Bash(ib:*)`.
+
+**Depends on:** Phase 21 (hooks must exist before agents reference them)
+
+Files: `src/ib-commands.ts`
+
+**22a: Update hook commands in `buildAgentSettings()`**
+
+- [ ] Change `ib hook-check-path ${agentId}` → `itsybitsy hook-check-path ${agentId}` (line 1148)
+- [ ] Change `ib hooks intercept-task` → `itsybitsy hooks intercept-task` (line 1152)
+- [ ] Change `ib hook-status ${agentId}` → `itsybitsy hook-status ${agentId}` (line 1163)
+- [ ] Change `ib hook-permission-denied ${agentId}` → `itsybitsy hook-permission-denied ${agentId}` (line 1144, 1164)
+- [ ] Change `ib hooks session-start` → `itsybitsy hooks session-start` (line 1166)
+
+**22b: Update permissions**
+
+- [ ] Change `"Bash(ib:*)", "Bash(./ib:*)"` → `"Bash(itsybitsy:*)"` in agent permissions (line 1102–1103)
+- [ ] Change `"Bash(ib:*)"` → `"Bash(itsybitsy:*)"` in root repo settings (line 1372–1382)
+
+**22c: Update PATH exports in startup scripts**
+
+- [ ] In `start.sh` template (line 1528–1530): change `export PATH="${rootRepoPath}:$PATH"` comment from "so 'ib' is available" to "so 'itsybitsy' is available". Ensure itsybitsy binary location is on PATH. If itsybitsy is installed globally (e.g., via `bun link`), no PATH change needed. If running from source, add the project's bin directory.
+- [ ] In `resumeAgent()` resume.sh template (line 418): same PATH update.
+
+**Tests:**
+- [ ] Verify `buildAgentSettings()` output contains `itsybitsy` commands, not `ib` commands
+- [ ] Verify permissions include `Bash(itsybitsy:*)` and not `Bash(ib:*)`
+- [ ] Update existing tests that assert on hook command strings
+
+---
+
+### Phase 23: Native Hooks Management
+**Checkpoint:** The TUI setup dialog manages hooks natively without shelling to `ib hooks`. The `ib` startup guard is removed.
+
+**Depends on:** Phase 19d (runIb infrastructure removed)
+
+Files: `src/ib-commands.ts`, `src/index.ts`
+
+**23a: Native hooks management functions (items 6–11 from audit)**
+
+These functions manage hooks in the main repo's `.claude/settings.local.json` — they read/write JSON to add or remove hook entries.
+
+- [ ] **`hooksStatus(repoPath)`** — implement natively:
+  1. Read `{repoPath}/.claude/settings.local.json`
+  2. Check for main-path hook (PreToolUse entry blocking cd into agent worktrees)
+  3. Check for status hooks (UserPromptSubmit/PostToolUse status injection)
+  4. Check for session-start hook (SessionStart entry)
+  5. Return `"installed"` (all present), `"partial"` (some present), or `"not-installed"` (none)
+- [ ] **`interceptHooksStatus(repoPath)`** — check for intercept-task hook in PreToolUse entries. Return `"installed"` or `"not-installed"`.
+- [ ] **`installSafetyHooks(repoPath)`** — read settings JSON, add missing hooks (main-path, status, session-start), write back. Use `itsybitsy hooks *` commands instead of `ib hooks *` in the hook command strings.
+- [ ] **`uninstallSafetyHooks(repoPath)`** — read settings JSON, remove all ib/itsybitsy hook entries, write back.
+- [ ] **`installInterceptHook(repoPath)`** — add `intercept-task` PreToolUse entry.
+- [ ] **`uninstallInterceptHook(repoPath)`** — remove `intercept-task` PreToolUse entry.
+
+**23b: Remove startup guard (item 26 from audit)**
+
+- [ ] Remove `Bun.which("ib")` check from `index.ts:90–92` — itsybitsy should work without ib on PATH
+- [ ] Keep the `Bun.which("tmux")` check — tmux is still required
+
+**Tests:**
+- [ ] `hooksStatus()`: all installed, partial, none installed
+- [ ] `installSafetyHooks()` / `uninstallSafetyHooks()`: adds/removes correct JSON entries, idempotent
+- [ ] `installInterceptHook()` / `uninstallInterceptHook()`: adds/removes intercept-task entry
+- [ ] Startup without ib on PATH succeeds
+
+---
+
+### Phase 24: Final Cleanup & Validation
+**Checkpoint:** Zero runtime references to `ib` CLI. itsybitsy is 100% self-contained. All tests pass.
+
+**Depends on:** All previous phases (18–23)
+
+Files: all
+
+**24a: Audit and remove all remaining `ib` references**
+
+- [ ] Search entire codebase for `"ib"` string in runtime code paths (exclude comments, test descriptions, PLAN.md, CLAUDE.md)
+- [ ] Verify zero calls to `Bun.spawn(["ib", ...])` exist
+- [ ] Verify zero calls to `runIb()` exist
+- [ ] Verify `Bun.which("ib")` is not called anywhere
+
+**24b: Update documentation and comments**
+
+- [ ] Update `src/ib-commands.ts` module-level comment (line 1–4): remove "others delegate to ib CLI"
+- [ ] Update CLAUDE.md non-goals section: remove ib watchdog reference, note full self-containment
+- [ ] Update PLAN.md architecture section: remove "Mutations: shell out to `ib` commands" — all mutations are native now
+- [ ] Update agent-facing text: any `ib merge`, `ib kill`, `ib send` references in prompts/messages should use `itsybitsy` (but keep backward compatibility — agents can use either if both are on PATH)
+
+**24c: End-to-end validation**
+
+- [ ] Run full test suite: `bun test` — all tests pass
+- [ ] Run `bunx tsc --noEmit` — zero TypeScript errors
+- [ ] Manual smoke test: spawn agent via `itsybitsy new-agent`, verify hooks fire correctly, verify watchdog monitors agent, kill agent, verify cleanup
+- [ ] Test with `ib` removed from PATH: dashboard launches, agents spawn, hooks work, merge/kill/resume work
+
+**Tests:**
+- [ ] Add an integration test that asserts no `["ib"` string appears in spawn calls across all source files (grep-based test)
+
+---
+
+### Parallelism Notes for Phases 18–24
+
+The following phases can run in parallel:
+- **Phase 18** (CLI wiring) and **Phase 19** (TUI wrappers) are independent — they touch different call sites
+- **Phase 20** (watchdog spawn) is independent of 18 and 19
+- **Phase 21** (hook implementations) is independent of 18, 19, 20 — it adds new CLI subcommands
+
+Sequential dependencies:
+- **Phase 22** depends on **Phase 21** (hooks must exist before settings reference them)
+- **Phase 23** depends on **Phase 19d** (runIb removal) but can start in parallel with Phase 22
+- **Phase 24** depends on all previous phases
+
+Recommended execution order:
+```
+Phase 18 ──┐
+Phase 19 ──┤
+Phase 20 ──┼── all in parallel
+Phase 21 ──┘
+               ↓
+Phase 22 ──┐
+Phase 23 ──┼── in parallel (22 depends on 21, 23 depends on 19d)
+               ↓
+Phase 24 ──── final validation (depends on all)
+```
+
+---
+
 ### Phase 17 (future): Decoupled Agent Storage
 
 **Status:** Aspirational / longer-term architectural change. Not yet planned for implementation.

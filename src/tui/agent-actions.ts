@@ -594,7 +594,7 @@ export function handleSetup(ctx: ActionCtx) {
   ctx.showDialog({
     type: "select",
     prompt: "Setup for which repo?",
-    items: ctx.repos.map((r) => `${r.name} (${r.path})`),
+    items: ctx.repos.map((r) => `${repoDisplayName(r)} (${r.path})`),
     selectedIndex: 0,
     onSelect: (repoIndex: number) => {
       loadSetupDialog(ctx, ctx.repos[repoIndex]!.path).catch((err) => ctx.setNotice(`Setup error: ${err}`));

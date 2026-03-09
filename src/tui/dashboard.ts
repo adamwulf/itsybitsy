@@ -691,7 +691,6 @@ export class DashboardComponent implements Component {
     this.rightPane.agent = selected;
     this.rightPane.selectedRepoHeader = this.agentTree.selectedRepoHeader;
     this.tmuxPane.agent = selected;
-    this.tmuxPane.clientAttached = selected ? (this._clientAttached.get(selected.id) ?? false) : false;
     this.statusBar.repoHeaderSelected = !selected && this.agentTree.selectedRepoHeader !== null;
 
     const newId = selected?.id ?? null;

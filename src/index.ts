@@ -5,7 +5,7 @@
  */
 
 import { join } from "path";
-import { addRepo, removeRepo, listRepos, type RepoEntry } from "./registry";
+import { addRepo, removeRepo, listRepos, repoDisplayName, type RepoEntry } from "./registry";
 import type { Agent, FlatEntry } from "./agents";
 
 const args = process.argv.slice(2);
@@ -120,7 +120,7 @@ async function main() {
       }
       await detectAgentStates(agents);
       const roots = buildAgentTree(agents);
-      const flat = flattenAgentTree(roots, repos.map((r) => ({ name: r.name, path: r.path })));
+      const flat = flattenAgentTree(roots, repos.map((r) => ({ name: repoDisplayName(r), path: r.path })));
       if (flat.length === 0) {
         console.log("No agents found across registered repos.");
       } else {

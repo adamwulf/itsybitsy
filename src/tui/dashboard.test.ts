@@ -8,9 +8,27 @@ import { stripAnsi } from "../parse-state";
 import { makeAgent as _makeAgent, makeFlatAgent, makeFlatRepoHeader } from "../test-utils";
 import { TmuxPaneComponent, RightPaneComponent, DashboardComponent, AgentTreeComponent, colorizeDiff, colorizeLog, formatAgentRow } from "./dashboard";
 import { visibleWidth } from "@mariozechner/pi-tui";
-import { setRunner, resetRunner } from "../ib-commands";
+import { setRunner, resetRunner, setSendSpawnRunner, resetSendSpawnRunner, setKillPauseSpawnRunner, resetKillPauseSpawnRunner, setNukeResumeSpawnRunner, resetNukeResumeSpawnRunner, setNewAgentSpawnRunner, resetNewAgentSpawnRunner } from "../ib-commands";
+import { setSpawnRunner as setLifecycleSpawnRunner, resetSpawnRunner as resetLifecycleSpawnRunner } from "../agent-lifecycle";
+import type { SpawnResult } from "../types";
 import { PANE_MODES } from "./pane-manager";
 import { assertDialog } from "./test-helpers";
+
+/** Helper: create a mock send spawn runner that records calls as {args, cwd}-style entries */
+function mockSendSpawnRunner(calls: { args: string[]; cwd: string }[]) {
+  setSendSpawnRunner((cmd: string[]) => {
+    // Record "send" calls as ib-runner-style entries for test compatibility
+    if (cmd[0] === "tmux" && cmd[1] === "send-keys" && cmd.length === 5 && cmd[4] !== "Enter") {
+      // This is the actual message send — extract message
+      calls.push({ args: ["send", "TARGET", cmd[4]!], cwd: "" });
+    }
+    return {
+      stdout: new Response("").body!,
+      stderr: new Response("").body!,
+      exited: Promise.resolve(0),
+    } as SpawnResult;
+  });
+}
 
 function makeAgent(id: string, repoPath: string, archived = false): Agent {
   return _makeAgent({ id, repoPath, archived });
@@ -357,27 +375,78 @@ describe("RightPaneComponent scroll logic", () => {
 describe("DashboardComponent dialog and action handlers", () => {
   let dashboard: DashboardComponent;
   let lastIbCall: { args: string[]; cwd: string } | null;
+  /** Tracks messages sent via native sendMessage (tmux send-keys) */
+  let sentMessages: { target: string; message: string }[] = [];
 
-  function setupDashboardWithAgent(state = "running") {
+  /** Set up the send spawn runner mock that tracks messages */
+  function setupSendMock() {
+    sentMessages = [];
+    setSendSpawnRunner((cmd: string[]) => {
+      // Track the actual message send-keys calls (not Enter or has-session)
+      if (cmd[0] === "tmux" && cmd[1] === "send-keys" && cmd.length === 5 && cmd[4] !== "Enter") {
+        // Extract target session and message
+        const target = cmd[3]!;
+        sentMessages.push({ target, message: cmd[4]! });
+      }
+      return {
+        stdout: new Response("").body!,
+        stderr: new Response("").body!,
+        exited: Promise.resolve(0),
+      } as SpawnResult;
+    });
+  }
+
+  let actionTempDir: string | null = null;
+
+  async function setupDashboardWithAgent(state = "running") {
     dashboard = makeDashboard();
     lastIbCall = null;
+
+    // Create temp dir for native kill/pause operations
+    actionTempDir = await mkdtemp(join(tmpdir(), "dashboard-action-"));
+    const agentDir = join(actionTempDir, ".ittybitty", "agents", "agent-test");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-test",
+      tmux_session: "tmux-agent-test",
+    }));
+
     setRunner(async (args, cwd) => {
       lastIbCall = { args, cwd };
       return { ok: true, exitCode: 0, stdout: "ok", stderr: "" };
     });
+    setupSendMock();
 
-    const agent = makeAgent("agent-test", "/repos/test");
+    // Mock spawn runners for native kill/pause (all tmux/pgrep calls succeed with no-op)
+    const noopSpawn = (cmd: string[]) => ({
+      stdout: new Response("").body!,
+      stderr: new Response("").body!,
+      exited: Promise.resolve(cmd.includes("pgrep") ? 1 : 0),
+    } as SpawnResult);
+    setKillPauseSpawnRunner(noopSpawn);
+    setLifecycleSpawnRunner(noopSpawn);
+    setNukeResumeSpawnRunner(noopSpawn);
+
+    const agent = makeAgent("agent-test", actionTempDir);
     agent.state = state as any;
     const flatList: FlatEntry[] = [makeFlatAgent(agent)];
     dashboard.onUpdate([agent], flatList, []);
   }
 
-  afterEach(() => {
+  afterEach(async () => {
     resetRunner();
+    resetSendSpawnRunner();
+    resetKillPauseSpawnRunner();
+    resetLifecycleSpawnRunner();
+    resetNukeResumeSpawnRunner();
+    if (actionTempDir) {
+      await rm(actionTempDir, { recursive: true, force: true });
+      actionTempDir = null;
+    }
   });
 
-  test("x key opens kill confirm dialog with button UI", () => {
-    setupDashboardWithAgent();
+  test("x key opens kill confirm dialog with button UI", async () => {
+    await setupDashboardWithAgent();
     dashboard.handleInput("x");
     expect(dashboard.dialog).not.toBeNull();
     const d = assertDialog(dashboard.dialog, 'confirm');
@@ -388,7 +457,7 @@ describe("DashboardComponent dialog and action handlers", () => {
   });
 
   test("kill confirm dialog: Enter on Kill button executes kill", async () => {
-    setupDashboardWithAgent();
+    await setupDashboardWithAgent();
     dashboard.handleInput("x");
     // focusedButton defaults to "cancel", Tab to Kill, then press Enter
     dashboard.handleInput("\t");
@@ -396,13 +465,15 @@ describe("DashboardComponent dialog and action handlers", () => {
     dashboard.handleInput("\r");
     // Wait for async execution
     await Bun.sleep(10);
-    expect(lastIbCall).not.toBeNull();
-    expect(lastIbCall!.args).toEqual(["kill", "agent-test", "--force"]);
-    expect(lastIbCall!.cwd).toBe("/repos/test");
+    // Dialog should be dismissed after native kill executes
+    expect(dashboard.dialog).toBeNull();
+    // Agent directory should be removed by teardown
+    const agentDir = join(actionTempDir!, ".ittybitty", "agents", "agent-test");
+    expect(await Bun.file(join(agentDir, "meta.json")).exists()).toBe(false);
   });
 
-  test("kill confirm dialog: Enter on default Cancel dismisses", () => {
-    setupDashboardWithAgent();
+  test("kill confirm dialog: Enter on default Cancel dismisses", async () => {
+    await setupDashboardWithAgent();
     dashboard.handleInput("x");
     expect(assertDialog(dashboard.dialog, 'confirm').focusedButton).toBe("cancel");
     dashboard.handleInput("\r");
@@ -410,8 +481,8 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(lastIbCall).toBeNull();
   });
 
-  test("kill confirm dialog: Tab cycles between buttons", () => {
-    setupDashboardWithAgent();
+  test("kill confirm dialog: Tab cycles between buttons", async () => {
+    await setupDashboardWithAgent();
     dashboard.handleInput("x");
     const d = assertDialog(dashboard.dialog, 'confirm');
     expect(d.focusedButton).toBe("cancel");
@@ -421,16 +492,16 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(d.focusedButton).toBe("cancel");
   });
 
-  test("kill confirm dialog: Escape cancels", () => {
-    setupDashboardWithAgent();
+  test("kill confirm dialog: Escape cancels", async () => {
+    await setupDashboardWithAgent();
     dashboard.handleInput("x");
     dashboard.handleInput("\x1b");
     expect(dashboard.dialog).toBeNull();
     expect(lastIbCall).toBeNull();
   });
 
-  test("! key opens nuke confirm dialog", () => {
-    setupDashboardWithAgent();
+  test("! key opens nuke confirm dialog", async () => {
+    await setupDashboardWithAgent();
     dashboard.handleInput("!");
     expect(dashboard.dialog).not.toBeNull();
     const d = assertDialog(dashboard.dialog, 'confirm');
@@ -438,13 +509,17 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(d.confirmLabel).toBe("Nuke");
   });
 
-  test("nuke confirm: Enter on Nuke button executes nuke --force", async () => {
-    setupDashboardWithAgent();
+  test("nuke confirm: Enter on Nuke button executes native nuke", async () => {
+    await setupDashboardWithAgent();
     dashboard.handleInput("!");
     // focusedButton defaults to "confirm" (Nuke), press Enter
     dashboard.handleInput("\r");
     await Bun.sleep(10);
-    expect(lastIbCall!.args).toEqual(["nuke", "agent-test", "--force"]);
+    // Dialog should be dismissed after native nuke executes
+    expect(dashboard.dialog).toBeNull();
+    // Agent directory should be removed by native nuke teardown
+    const agentDir = join(actionTempDir!, ".ittybitty", "agents", "agent-test");
+    expect(await Bun.file(join(agentDir, "meta.json")).exists()).toBe(false);
   });
 
   test("! key with no agent selected opens nuke-all confirm dialog", () => {
@@ -465,22 +540,36 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(d.focusedButton).toBe("cancel");
   });
 
-  test("nuke-all confirm executes nuke --force with no agent ID", async () => {
+  test("nuke-all confirm executes native nuke-all", async () => {
     dashboard = makeDashboard();
     lastIbCall = null;
-    setRunner(async (args, cwd) => {
-      lastIbCall = { args, cwd };
-      return { ok: true, exitCode: 0, stdout: "ok", stderr: "" };
-    });
-    dashboard.setRepos([{ name: "test-repo", path: "/repos/test" }]);
+
+    // Create temp dir with agent for nukeAllAgents to find
+    actionTempDir = await mkdtemp(join(tmpdir(), "dashboard-nukeall-"));
+    const agentDir = join(actionTempDir, ".ittybitty", "agents", "agent-one");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-one",
+      tmux_session: "tmux-agent-one",
+    }));
+
+    const noopSpawn = (cmd: string[]) => ({
+      stdout: new Response("").body!,
+      stderr: new Response("").body!,
+      exited: Promise.resolve(cmd.includes("pgrep") || cmd.includes("list-sessions") ? 1 : 0),
+    } as SpawnResult);
+    setLifecycleSpawnRunner(noopSpawn);
+    setNukeResumeSpawnRunner(noopSpawn);
+
+    dashboard.setRepos([{ name: "test-repo", path: actionTempDir }]);
     dashboard.onUpdate([], [], []);
     dashboard.handleInput("!");
     // focusedButton is "cancel", Tab to move to confirm, then Enter
     dashboard.handleInput("\t");
     dashboard.handleInput("\r");
     await Bun.sleep(10);
-    expect(lastIbCall!.args).toEqual(["nuke", "--force"]);
-    expect(lastIbCall!.cwd).toBe("/repos/test");
+    // Agent directory should be removed by native nuke-all
+    expect(await Bun.file(join(agentDir, "meta.json")).exists()).toBe(false);
   });
 
   test("! key with no agent and multiple repos shows repo picker", () => {
@@ -501,14 +590,17 @@ describe("DashboardComponent dialog and action handlers", () => {
   });
 
   test("R key resumes stopped agents", async () => {
-    setupDashboardWithAgent("stopped");
+    await setupDashboardWithAgent("stopped");
     dashboard.handleInput("R");
     await Bun.sleep(10);
-    expect(lastIbCall!.args).toEqual(["resume", "agent-test"]);
+    // Native resume creates resume.sh and logs to agent.log
+    const agentDir = join(actionTempDir!, ".ittybitty", "agents", "agent-test");
+    const log = await Bun.file(join(agentDir, "agent.log")).text();
+    expect(log).toContain("Agent resumed");
   });
 
   test("R key does not resume running agents", async () => {
-    setupDashboardWithAgent("running");
+    await setupDashboardWithAgent("running");
     dashboard.handleInput("R");
     await Bun.sleep(10);
     expect(lastIbCall).toBeNull();
@@ -516,8 +608,8 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(dashboard.notice).not.toBeNull();
   });
 
-  test("P key opens pause confirm dialog for running agents", () => {
-    setupDashboardWithAgent("running");
+  test("P key opens pause confirm dialog for running agents", async () => {
+    await setupDashboardWithAgent("running");
     dashboard.handleInput("P");
     expect(dashboard.dialog).not.toBeNull();
     const d = assertDialog(dashboard.dialog, 'confirm');
@@ -527,52 +619,58 @@ describe("DashboardComponent dialog and action handlers", () => {
   });
 
   test("P key pause confirm executes pause command", async () => {
-    setupDashboardWithAgent("running");
+    await setupDashboardWithAgent("running");
     dashboard.handleInput("P");
     // Tab to confirm, then Enter
     dashboard.handleInput("\t");
     dashboard.handleInput("\r");
     await Bun.sleep(10);
-    expect(lastIbCall).not.toBeNull();
-    expect(lastIbCall!.args).toEqual(["pause", "agent-test"]);
+    // Dialog should be dismissed after native pause executes
+    expect(dashboard.dialog).toBeNull();
+    // Agent directory should be preserved (pause does NOT remove it)
+    const agentDir = join(actionTempDir!, ".ittybitty", "agents", "agent-test");
+    expect(await Bun.file(join(agentDir, "meta.json")).exists()).toBe(true);
+    // Agent.log should contain "Agent paused"
+    const log = await Bun.file(join(agentDir, "agent.log")).text();
+    expect(log).toContain("Agent paused");
   });
 
-  test("P key works for waiting agents", () => {
-    setupDashboardWithAgent("waiting");
+  test("P key works for waiting agents", async () => {
+    await setupDashboardWithAgent("waiting");
     dashboard.handleInput("P");
     expect(dashboard.dialog).not.toBeNull();
     expect(dashboard.dialog!.type).toBe("confirm");
   });
 
-  test("P key does not pause stopped agents", () => {
-    setupDashboardWithAgent("stopped");
+  test("P key does not pause stopped agents", async () => {
+    await setupDashboardWithAgent("stopped");
     dashboard.handleInput("P");
     expect(dashboard.dialog).toBeNull();
     expect(dashboard.notice).not.toBeNull();
   });
 
-  test("P key does not pause complete agents", () => {
-    setupDashboardWithAgent("complete");
+  test("P key does not pause complete agents", async () => {
+    await setupDashboardWithAgent("complete");
     dashboard.handleInput("P");
     expect(dashboard.dialog).toBeNull();
     expect(dashboard.notice).not.toBeNull();
   });
 
-  test("r key opens reassign fuzzy select dialog", () => {
-    setupDashboardWithAgent();
+  test("r key opens reassign fuzzy select dialog", async () => {
+    await setupDashboardWithAgent();
     dashboard.handleInput("r");
     expect(assertDialog(dashboard.dialog, 'fuzzy').prompt).toContain("Reassign");
   });
 
-  test("reassign fuzzy: shows '(No parent - make root)' as first option", () => {
-    setupDashboardWithAgent();
+  test("reassign fuzzy: shows '(No parent - make root)' as first option", async () => {
+    await setupDashboardWithAgent();
     dashboard.handleInput("r");
     const d = assertDialog(dashboard.dialog, 'fuzzy');
     expect(d.allItems[0]).toBe("(No parent - make root)");
   });
 
   test("reassign fuzzy: selecting 'No parent' calls reassign with --none", async () => {
-    setupDashboardWithAgent();
+    await setupDashboardWithAgent();
     dashboard.handleInput("r");
     // First item is already selected (index 0 = No parent), press Enter
     dashboard.handleInput("\r");
@@ -698,14 +796,14 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(d.allItems).not.toContain("agent-other");
   });
 
-  test("s key opens send textarea dialog", () => {
-    setupDashboardWithAgent();
+  test("s key opens send textarea dialog", async () => {
+    await setupDashboardWithAgent();
     dashboard.handleInput("s");
     expect(assertDialog(dashboard.dialog, 'textarea').prompt).toContain("Send message");
   });
 
   test("send textarea: typing, backspace, and submitting", async () => {
-    setupDashboardWithAgent();
+    await setupDashboardWithAgent();
     dashboard.handleInput("s");
     for (const ch of "hellx") dashboard.handleInput(ch);
     dashboard.handleInput("\x7f"); // backspace
@@ -716,11 +814,12 @@ describe("DashboardComponent dialog and action handlers", () => {
     dashboard.handleInput("\t");
     dashboard.handleInput("\r");
     await Bun.sleep(10);
-    expect(lastIbCall!.args).toEqual(["send", "agent-test", "hello"]);
+    expect(sentMessages.length).toBe(1);
+    expect(sentMessages[0]!.message).toBe("hello");
   });
 
-  test("send textarea: Tab cycles forward through text → cancel → send → text", () => {
-    setupDashboardWithAgent();
+  test("send textarea: Tab cycles forward through text → cancel → send → text", async () => {
+    await setupDashboardWithAgent();
     dashboard.handleInput("s");
     const d = assertDialog(dashboard.dialog, 'textarea');
     expect(d.focusedButton).toBe("text");
@@ -732,8 +831,8 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(d.focusedButton).toBe("text");
   });
 
-  test("send textarea: Shift+Tab cycles backward through text → send → cancel → text", () => {
-    setupDashboardWithAgent();
+  test("send textarea: Shift+Tab cycles backward through text → send → cancel → text", async () => {
+    await setupDashboardWithAgent();
     dashboard.handleInput("s");
     const d = assertDialog(dashboard.dialog, 'textarea');
     expect(d.focusedButton).toBe("text");
@@ -746,8 +845,8 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(d.focusedButton).toBe("text");
   });
 
-  test("send textarea: Kitty protocol Shift+Tab cycles backward", () => {
-    setupDashboardWithAgent();
+  test("send textarea: Kitty protocol Shift+Tab cycles backward", async () => {
+    await setupDashboardWithAgent();
     dashboard.handleInput("s");
     const d = assertDialog(dashboard.dialog, 'textarea');
     expect(d.focusedButton).toBe("text");
@@ -760,14 +859,14 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(d.focusedButton).toBe("text");
   });
 
-  test("send textarea: sendAll defaults to false", () => {
-    setupDashboardWithAgent();
+  test("send textarea: sendAll defaults to false", async () => {
+    await setupDashboardWithAgent();
     dashboard.handleInput("s");
     expect(assertDialog(dashboard.dialog, 'textarea').sendAll).toBe(false);
   });
 
-  test("send textarea: Ctrl+A toggles sendAll", () => {
-    setupDashboardWithAgent();
+  test("send textarea: Ctrl+A toggles sendAll", async () => {
+    await setupDashboardWithAgent();
     dashboard.handleInput("s");
     const d = assertDialog(dashboard.dialog, 'textarea');
     expect(d.sendAll).toBe(false);
@@ -777,8 +876,8 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(d.sendAll).toBe(false);
   });
 
-  test("send textarea: Ctrl+A works from any focus position", () => {
-    setupDashboardWithAgent();
+  test("send textarea: Ctrl+A works from any focus position", async () => {
+    await setupDashboardWithAgent();
     dashboard.handleInput("s");
     // Start in text focus
     const d = assertDialog(dashboard.dialog, 'textarea');
@@ -799,11 +898,7 @@ describe("DashboardComponent dialog and action handlers", () => {
 
   test("send textarea: sendAll sends to all active non-archived agents", async () => {
     dashboard = makeDashboard();
-    const ibCalls: { args: string[]; cwd: string }[] = [];
-    setRunner(async (args, cwd) => {
-      ibCalls.push({ args, cwd });
-      return { ok: true, exitCode: 0, stdout: "ok", stderr: "" };
-    });
+    setupSendMock();
 
     const agent1 = makeAgent("agent-a", "/repos/test");
     agent1.state = "running";
@@ -831,19 +926,14 @@ describe("DashboardComponent dialog and action handlers", () => {
     dashboard.handleInput("\r");
     await Bun.sleep(10);
     // Should have sent to agent-a and agent-b only (agent-c archived, agent-d no tmux)
-    const sendCalls = ibCalls.filter((c) => c.args[0] === "send");
-    expect(sendCalls.length).toBe(2);
-    expect(sendCalls[0]!.args).toEqual(["send", "agent-a", "hi"]);
-    expect(sendCalls[1]!.args).toEqual(["send", "agent-b", "hi"]);
+    expect(sentMessages.length).toBe(2);
+    expect(sentMessages[0]!.message).toBe("hi");
+    expect(sentMessages[1]!.message).toBe("hi");
   });
 
   test("send textarea: sendAll=false sends to selected agent only", async () => {
     dashboard = makeDashboard();
-    const ibCalls: { args: string[]; cwd: string }[] = [];
-    setRunner(async (args, cwd) => {
-      ibCalls.push({ args, cwd });
-      return { ok: true, exitCode: 0, stdout: "ok", stderr: "" };
-    });
+    setupSendMock();
 
     const agent1 = makeAgent("agent-a", "/repos/test");
     agent1.state = "running";
@@ -862,13 +952,12 @@ describe("DashboardComponent dialog and action handlers", () => {
     dashboard.handleInput("\t");
     dashboard.handleInput("\r");
     await Bun.sleep(10);
-    const sendCalls = ibCalls.filter((c) => c.args[0] === "send");
-    expect(sendCalls.length).toBe(1);
-    expect(sendCalls[0]!.args).toEqual(["send", "agent-a", "hi"]);
+    expect(sentMessages.length).toBe(1);
+    expect(sentMessages[0]!.message).toBe("hi");
   });
 
-  test("send textarea: sendAll state is reflected in dialog", () => {
-    setupDashboardWithAgent();
+  test("send textarea: sendAll state is reflected in dialog", async () => {
+    await setupDashboardWithAgent();
     dashboard.handleInput("s");
     // sendAll starts as false
     const d = assertDialog(dashboard.dialog, 'textarea');
@@ -897,7 +986,7 @@ describe("DashboardComponent dialog and action handlers", () => {
   });
 
   test("m key runs merge-check then shows confirm", async () => {
-    setupDashboardWithAgent();
+    await setupDashboardWithAgent();
     dashboard.handleInput("m");
     // Wait for merge-check to complete
     await Bun.sleep(50);
@@ -905,7 +994,7 @@ describe("DashboardComponent dialog and action handlers", () => {
   });
 
   test("merge: merge-check failure shows error message", async () => {
-    setupDashboardWithAgent();
+    await setupDashboardWithAgent();
     setRunner(async () => ({
       ok: false,
       exitCode: 1,
@@ -917,8 +1006,8 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(dashboard.notice).toContain("Merge-check failed");
   });
 
-  test("dialog intercepts all input when active", () => {
-    setupDashboardWithAgent();
+  test("dialog intercepts all input when active", async () => {
+    await setupDashboardWithAgent();
     dashboard.handleInput("x"); // opens confirm
     // Navigation keys should not change selection
     dashboard.handleInput("j");
@@ -1027,51 +1116,144 @@ describe("DashboardComponent dialog and action handlers", () => {
   });
 
   test("new-agent form: Worker flag sets --worker", async () => {
+    const newAgentTempDir = await mkdtemp(join(tmpdir(), "ib-na-test-"));
+    await mkdir(join(newAgentTempDir, ".ittybitty"), { recursive: true });
+    await Bun.write(join(newAgentTempDir, ".ittybitty", "repo-id"), "abcd1234\n");
+    await Bun.write(join(newAgentTempDir, ".ittybitty.json"), JSON.stringify({ model: "sonnet" }));
+
+    const spawnCalls: string[] = [];
+    const mockSpawn = (cmd: string[]): SpawnResult => {
+      const cmdStr = cmd.join(" ");
+      spawnCalls.push(cmdStr);
+      const makeResult = (s: string, c: number) => ({
+        stdout: new ReadableStream({ start(ctrl) { ctrl.enqueue(new TextEncoder().encode(s)); ctrl.close(); } }),
+        stderr: new ReadableStream({ start(ctrl) { ctrl.close(); } }),
+        exited: Promise.resolve(c),
+      });
+      if (cmdStr.includes("tmux has-session")) {
+        const afterNew = spawnCalls.some(c => c.includes("tmux new-session"));
+        return makeResult("", afterNew ? 0 : 1);
+      }
+      if (cmdStr.includes("tmux start-server")) return makeResult("", 0);
+      if (cmdStr.includes("tmux new-session")) return makeResult("", 0);
+      if (cmdStr.includes("worktree add")) {
+        const repoIdx = cmd.indexOf("add") + 1;
+        if (repoIdx > 0 && repoIdx < cmd.length) require("fs").mkdirSync(cmd[repoIdx]!, { recursive: true });
+        return makeResult("", 0);
+      }
+      if (cmdStr.includes("--git-common-dir")) return makeResult(".git", 0);
+      if (cmdStr.includes("--show-toplevel")) return makeResult(newAgentTempDir, 0);
+      if (cmdStr.includes("--git-dir")) return makeResult(".git", 0);
+      if (cmdStr.includes("which gh")) return makeResult("", 1);
+      if (cmd[cmd.length-1] === "remote") return makeResult("", 0);
+      if (cmdStr.includes("capture-pane")) return makeResult("Claude Code v1.0", 0);
+      return makeResult("", 0);
+    };
+    setNewAgentSpawnRunner(mockSpawn);
+    setLifecycleSpawnRunner(mockSpawn);
+
     dashboard = makeDashboard();
-    dashboard.setRepos([{ path: "/repos/only", name: "only-repo" }]);
-    lastIbCall = null;
-    setRunner(async (args, cwd) => {
-      lastIbCall = { args, cwd };
-      return { ok: true, exitCode: 0, stdout: "ok", stderr: "" };
-    });
+    dashboard.setRepos([{ path: newAgentTempDir, name: "only-repo" }]);
 
     dashboard.handleInput("a");
-    // Tab to worker, toggle on
     dashboard.handleInput("\t");
     dashboard.handleInput(" ");
-    // Tab to prompt, type text
     dashboard.handleInput("\t");
     for (const ch of "do stuff") dashboard.handleInput(ch);
-    // Tab to cancel, Tab to create, press Enter
     dashboard.handleInput("\t");
     dashboard.handleInput("\t");
     dashboard.handleInput("\r");
-    await Bun.sleep(10);
-    expect(lastIbCall!.args).toEqual(["new-agent", "--worker", "do stuff"]);
+
+    // Wait for async executeAndRefresh to complete
+    for (let i = 0; i < 20; i++) {
+      await Bun.sleep(20);
+      const agentsDir = join(newAgentTempDir, ".ittybitty", "agents");
+      try {
+        const { readdir: rd } = await import("fs/promises");
+        const entries = await rd(agentsDir, { withFileTypes: true });
+        if (entries.filter(e => e.isDirectory()).length > 0) break;
+      } catch { /* not yet */ }
+    }
+
+    // Find the created agent's meta.json
+    const agentsDir = join(newAgentTempDir, ".ittybitty", "agents");
+    const { readdir: rd } = await import("fs/promises");
+    const entries = await rd(agentsDir, { withFileTypes: true });
+    const agentDirs = entries.filter(e => e.isDirectory());
+    expect(agentDirs.length).toBe(1);
+    const meta = await Bun.file(join(agentsDir, agentDirs[0]!.name, "meta.json")).json();
+    expect(meta.worker).toBe(true);
+    expect(meta.prompt).toBe("do stuff");
+
+    resetNewAgentSpawnRunner();
+    resetLifecycleSpawnRunner();
+    await rm(newAgentTempDir, { recursive: true, force: true });
   });
 
   test("new-agent form: Name field passes --name flag", async () => {
+    const newAgentTempDir = await mkdtemp(join(tmpdir(), "ib-na-test-"));
+    await mkdir(join(newAgentTempDir, ".ittybitty"), { recursive: true });
+    await Bun.write(join(newAgentTempDir, ".ittybitty", "repo-id"), "abcd1234\n");
+    await Bun.write(join(newAgentTempDir, ".ittybitty.json"), JSON.stringify({ model: "sonnet" }));
+
+    const spawnCalls: string[] = [];
+    const mockSpawn = (cmd: string[]): SpawnResult => {
+      const cmdStr = cmd.join(" ");
+      spawnCalls.push(cmdStr);
+      const makeResult = (s: string, c: number) => ({
+        stdout: new ReadableStream({ start(ctrl) { ctrl.enqueue(new TextEncoder().encode(s)); ctrl.close(); } }),
+        stderr: new ReadableStream({ start(ctrl) { ctrl.close(); } }),
+        exited: Promise.resolve(c),
+      });
+      if (cmdStr.includes("tmux has-session")) {
+        const afterNew = spawnCalls.some(c => c.includes("tmux new-session"));
+        return makeResult("", afterNew ? 0 : 1);
+      }
+      if (cmdStr.includes("tmux start-server")) return makeResult("", 0);
+      if (cmdStr.includes("tmux new-session")) return makeResult("", 0);
+      if (cmdStr.includes("worktree add")) {
+        const repoIdx = cmd.indexOf("add") + 1;
+        if (repoIdx > 0 && repoIdx < cmd.length) require("fs").mkdirSync(cmd[repoIdx]!, { recursive: true });
+        return makeResult("", 0);
+      }
+      if (cmdStr.includes("--git-common-dir")) return makeResult(".git", 0);
+      if (cmdStr.includes("--show-toplevel")) return makeResult(newAgentTempDir, 0);
+      if (cmdStr.includes("--git-dir")) return makeResult(".git", 0);
+      if (cmdStr.includes("which gh")) return makeResult("", 1);
+      if (cmd[cmd.length-1] === "remote") return makeResult("", 0);
+      if (cmdStr.includes("capture-pane")) return makeResult("Claude Code v1.0", 0);
+      return makeResult("", 0);
+    };
+    setNewAgentSpawnRunner(mockSpawn);
+    setLifecycleSpawnRunner(mockSpawn);
+
     dashboard = makeDashboard();
-    dashboard.setRepos([{ path: "/repos/only", name: "only-repo" }]);
-    lastIbCall = null;
-    setRunner(async (args, cwd) => {
-      lastIbCall = { args, cwd };
-      return { ok: true, exitCode: 0, stdout: "ok", stderr: "" };
-    });
+    dashboard.setRepos([{ path: newAgentTempDir, name: "only-repo" }]);
 
     dashboard.handleInput("a");
-    // Type name
     for (const ch of "my-agent") dashboard.handleInput(ch);
-    // Tab to worker (skip), Tab to prompt
     dashboard.handleInput("\t");
     dashboard.handleInput("\t");
     for (const ch of "do stuff") dashboard.handleInput(ch);
-    // Tab to cancel, Tab to create, press Enter
     dashboard.handleInput("\t");
     dashboard.handleInput("\t");
     dashboard.handleInput("\r");
-    await Bun.sleep(10);
-    expect(lastIbCall!.args).toEqual(["new-agent", "--name", "my-agent", "do stuff"]);
+
+    // Wait for async executeAndRefresh to complete
+    for (let i = 0; i < 20; i++) {
+      await Bun.sleep(20);
+      try {
+        if (await Bun.file(join(newAgentTempDir, ".ittybitty", "agents", "my-agent", "meta.json")).exists()) break;
+      } catch { /* not yet */ }
+    }
+
+    const meta = await Bun.file(join(newAgentTempDir, ".ittybitty", "agents", "my-agent", "meta.json")).json();
+    expect(meta.id).toBe("my-agent");
+    expect(meta.prompt).toBe("do stuff");
+
+    resetNewAgentSpawnRunner();
+    resetLifecycleSpawnRunner();
+    await rm(newAgentTempDir, { recursive: true, force: true });
   });
 
   test("new-agent form: Create is no-op when prompt is empty", async () => {
@@ -1223,6 +1405,21 @@ describe("readAgentPrompt", () => {
 describe("DashboardComponent right pane and navigation features", () => {
   let dashboard: DashboardComponent;
   let lastIbCall: { args: string[]; cwd: string } | null;
+  let sentMessages: { target: string; message: string }[] = [];
+
+  function setupSendMock() {
+    sentMessages = [];
+    setSendSpawnRunner((cmd: string[]) => {
+      if (cmd[0] === "tmux" && cmd[1] === "send-keys" && cmd.length === 5 && cmd[4] !== "Enter") {
+        sentMessages.push({ target: cmd[3]!, message: cmd[4]! });
+      }
+      return {
+        stdout: new Response("").body!,
+        stderr: new Response("").body!,
+        exited: Promise.resolve(0),
+      } as SpawnResult;
+    });
+  }
 
   function setupDashboard(state = "running") {
     dashboard = makeDashboard();
@@ -1231,6 +1428,7 @@ describe("DashboardComponent right pane and navigation features", () => {
       lastIbCall = { args, cwd };
       return { ok: true, exitCode: 0, stdout: "ok", stderr: "" };
     });
+    setupSendMock();
 
     const agent = makeAgent("agent-test", "/repos/test");
     agent.state = state as any;
@@ -1240,6 +1438,7 @@ describe("DashboardComponent right pane and navigation features", () => {
 
   afterEach(() => {
     resetRunner();
+    resetSendSpawnRunner();
   });
 
   test("addError adds timestamped error to errors list", () => {
@@ -1396,11 +1595,12 @@ describe("DashboardComponent right pane and navigation features", () => {
 
   test("answer question sends acknowledge then message", async () => {
     dashboard = makeDashboard();
-    const calls: string[][] = [];
+    const ibCalls: string[][] = [];
     setRunner(async (args, cwd) => {
-      calls.push(args);
+      ibCalls.push(args);
       return { ok: true, exitCode: 0, stdout: "", stderr: "" };
     });
+    setupSendMock();
 
     const agent = makeAgent("agent-test", "/repos/test");
     const flatList: FlatEntry[] = [makeFlatAgent(agent)];
@@ -1422,10 +1622,12 @@ describe("DashboardComponent right pane and navigation features", () => {
     dashboard.handleInput("\r"); // Submit
     await Bun.sleep(50);
 
-    // Should have called acknowledge then send
-    expect(calls.length).toBeGreaterThanOrEqual(2);
-    expect(calls[0]).toEqual(["acknowledge", "q-1"]);
-    expect(calls[1]).toEqual(["send", "agent-test", "yes"]);
+    // Should have called acknowledge (via ib runner)
+    expect(ibCalls.length).toBeGreaterThanOrEqual(1);
+    expect(ibCalls[0]).toEqual(["acknowledge", "q-1"]);
+    // And sent the message (via native send)
+    expect(sentMessages.length).toBe(1);
+    expect(sentMessages[0]!.message).toBe("yes");
   });
 
   test("Escape in QUESTIONS mode acknowledges question", async () => {

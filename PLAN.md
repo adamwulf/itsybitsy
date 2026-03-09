@@ -301,6 +301,8 @@ Matching `ib watch` keybindings exactly where possible; new keys noted.
 - `t` — cycle denials time filter (only active in DENIALS pane, mode 2); 3 filter levels
 - `;` — scroll pane down (show older content)
 - `l` — scroll pane up (toward bottom / newer content)
+- `[` / `]` — resize left pane (decrease / increase width by 5)
+- `Tab` / `Shift-Tab` — toggle focus between agent tree and questions list (only in QUESTIONS pane)
 
 **Agent actions**
 - `s` — send message to selected agent (dialog)
@@ -322,6 +324,7 @@ Matching `ib watch` keybindings exactly where possible; new keys noted.
 **App**
 - `?` — read-only help dialog showing all keybindings; press any key to dismiss
 - `h` — setup dialog (hooks status, gitignore check, diff tool config)
+- `+` — add repo folder (folder browser dialog)
 - `Ctrl-C` — exit
 
 ## Ghostty Integration

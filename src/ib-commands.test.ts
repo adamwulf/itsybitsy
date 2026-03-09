@@ -2025,7 +2025,7 @@ describe("newAgent (native)", () => {
     expect(settingsExists).toBe(true);
 
     const settings = await Bun.file(settingsPath).json();
-    expect(settings.permissions.allow).toContain("Bash(ib:*)");
+    expect(settings.permissions.allow).toContain("Bash(itsybitsy:*)");
     expect(settings.permissions.allow).toContain("Read");
     expect(settings.permissions.allow).toContain("CustomTool"); // merged from base
     expect(settings.permissions.deny).toContain("EnterPlanMode");
@@ -2043,7 +2043,7 @@ describe("newAgent (native)", () => {
     expect(settingsExists).toBe(true);
 
     const settings = await Bun.file(settingsPath).json();
-    expect(settings.permissions.allow).toContain("Bash(ib:*)");
+    expect(settings.permissions.allow).toContain("Bash(itsybitsy:*)");
   });
 
   test("rejects unknown manager", async () => {

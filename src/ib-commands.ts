@@ -378,7 +378,7 @@ export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
   // Write resume.sh
   const resumeScript = join(agentDir, "resume.sh");
   const resumeContent = `#!/bin/bash
-# Add git repo root to PATH so 'ib' is available
+# Add git repo root to PATH so 'itsybitsy' is available
 export PATH="${gitRoot}:$PATH"
 
 # Clear Claude Code nesting detection so agents can start their own claude process
@@ -1217,7 +1217,7 @@ async function buildAgentSettings(
 
   // Mandatory permissions that are always added
   const ibPerms = [
-    "Bash(ib:*)", "Bash(./ib:*)",
+    "Bash(itsybitsy:*)",
     "Bash(git status:*)", "Bash(git add:*)", "Bash(git commit:*)",
     "Bash(git diff:*)", "Bash(git show:*)", "Bash(git log:*)",
     "Bash(git ls-files:*)", "Bash(git grep:*)", "Bash(git rm:*)",
@@ -1249,7 +1249,7 @@ async function buildAgentSettings(
         const hooks = entry?.hooks;
         if (Array.isArray(hooks)) {
           for (const h of hooks) {
-            if (typeof h?.command === "string" && h.command.includes("ib hooks intercept-task")) {
+            if (typeof h?.command === "string" && h.command.includes("itsybitsy hooks intercept-task")) {
               addIntercept = true;
             }
           }
@@ -1258,15 +1258,15 @@ async function buildAgentSettings(
     }
   }
 
-  const hookCmd = `ib hook-permission-denied ${agentId}`;
+  const hookCmd = `itsybitsy hook-permission-denied ${agentId}`;
 
   // Build PreToolUse hooks
   const preToolUseHooks: unknown[] = [
-    { matcher: "*", hooks: [{ type: "command", command: `ib hook-check-path ${agentId}` }] },
+    { matcher: "*", hooks: [{ type: "command", command: `itsybitsy hook-check-path ${agentId}` }] },
   ];
   if (addIntercept) {
     preToolUseHooks.push(
-      { matcher: "Task", hooks: [{ type: "command", command: "ib hooks intercept-task" }] }
+      { matcher: "Task", hooks: [{ type: "command", command: "itsybitsy hooks intercept-task" }] }
     );
   }
 
@@ -1277,10 +1277,10 @@ async function buildAgentSettings(
       deny: allDeny,
     },
     hooks: {
-      Stop: [{ matcher: "*", hooks: [{ type: "command", command: `ib hook-status ${agentId}` }] }],
+      Stop: [{ matcher: "*", hooks: [{ type: "command", command: `itsybitsy hook-status ${agentId}` }] }],
       PermissionRequest: [{ matcher: "*", hooks: [{ type: "command", command: hookCmd }] }],
       PreToolUse: preToolUseHooks,
-      SessionStart: [{ hooks: [{ type: "command", command: "ib hooks session-start" }] }],
+      SessionStart: [{ hooks: [{ type: "command", command: "itsybitsy hooks session-start" }] }],
     },
   };
 
@@ -1486,17 +1486,15 @@ export async function newAgent(
         const settings = await rootSettingsFile.json();
         const allow = (settings?.permissions?.allow as string[]) ?? [];
         let needsUpdate = false;
-        if (!allow.includes("Bash(ib:*)")) needsUpdate = true;
-        if (!allow.includes("Bash(./ib:*)")) needsUpdate = true;
+        if (!allow.includes("Bash(itsybitsy:*)")) needsUpdate = true;
         if (needsUpdate) {
-          if (!allow.includes("Bash(ib:*)")) allow.push("Bash(ib:*)");
-          if (!allow.includes("Bash(./ib:*)")) allow.push("Bash(./ib:*)");
+          if (!allow.includes("Bash(itsybitsy:*)")) allow.push("Bash(itsybitsy:*)");
           settings.permissions = { ...settings.permissions, allow };
           await Bun.write(rootSettingsPath, JSON.stringify(settings, null, 2));
         }
       } else {
         await mkdir(join(rootRepoPath, ".claude"), { recursive: true });
-        await Bun.write(rootSettingsPath, JSON.stringify({ permissions: { allow: ["Bash(ib:*)", "Bash(./ib:*)"] } }));
+        await Bun.write(rootSettingsPath, JSON.stringify({ permissions: { allow: ["Bash(itsybitsy:*)"] } }));
       }
     } catch { /* ignore */ }
   }
@@ -1643,7 +1641,7 @@ echo ""
   const absExitScript = join(agentDir, "exit-check.sh");
   const startScript = join(agentDir, "start.sh");
   const startContent = `#!/bin/bash
-# Add git repo root to PATH so 'ib' is available
+# Add git repo root to PATH so 'itsybitsy' is available
 export PATH="${rootRepoPath}:$PATH"
 
 # Clear Claude Code nesting detection so agents can start their own claude process

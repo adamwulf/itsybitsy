@@ -1,6 +1,6 @@
-import { test, expect, describe, beforeEach, afterEach } from "bun:test";
+import { test, expect, describe, afterEach } from "bun:test";
 import { join } from "path";
-import { mkdtemp, rm, mkdir, readdir, readFile } from "fs/promises";
+import { mkdtemp, rm, mkdir, readdir } from "fs/promises";
 import { tmpdir } from "os";
 import {
   logAgent,

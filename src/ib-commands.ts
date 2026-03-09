@@ -139,7 +139,7 @@ export async function sendMessage(
   let fromId = opts?.fromAgent ?? "";
   if (!fromId) {
     const cwd = opts?.cwd ?? process.cwd();
-    const worktreeMatch = cwd.match(/\/.ittybitty\/agents\/([^/]+)\/repo/);
+    const worktreeMatch = cwd.match(/\/.ittybitty\/agents\/(?:[^/]+)\/repo/);
     if (worktreeMatch) {
       // Read the sender's meta.json to get their ID
       const senderAgentDir = cwd.replace(/(\/\.ittybitty\/agents\/[^/]+)\/repo.*/, "$1");

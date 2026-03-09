@@ -153,7 +153,7 @@ Compacting (last 5) > Active running (last 5) > Tool waiting (last 15) > Rate li
 ### Dashboard (src/tui/dashboard.ts)
 - Agent tree: max 7 visible rows with scroll indicators
 - Right pane mode is global state — persists across agent selection changes
-- `A` toggles archived agents visibility; `a` opens new-agent dialog
+- `a` opens new-agent dialog (infers repo from selected agent/header, fallback to first repo)
 - Agent actions: `x` kill, `!` nuke, `R` resume, `r` reassign, `m` merge, `s` send, `a` new-agent
 - `p`/`n` cycle pane modes (p=forward, n=backward); arrow keys mapped counterintuitively to match ib watch
 - TmuxPaneComponent: wraps lines via `wrapLines()`, scroll-back from bottom (`scrollBack` = lines from end, 0 = auto-follow)

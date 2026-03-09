@@ -595,8 +595,7 @@ export class DashboardComponent implements Component {
       { label: "resume agent — R", action: () => agentActions.handleResume(this) },
       { label: "pause agent — P", action: () => agentActions.handlePause(this) },
       { label: "reassign manager — r", action: () => agentActions.handleReassign(this) },
-      { label: "new agent (pick repo) — a", action: () => agentActions.handleNewAgent(this) },
-      { label: "new agent (current repo) — A", action: () => agentActions.handleNewAgentInCurrentRepo(this) },
+      { label: "new agent — a", action: () => agentActions.handleNewAgent(this) },
       { label: "open worktree — w", action: () => agentActions.handleOpenWorktree(this) },
       { label: "open diff in tool — o", action: () => agentActions.handleOpenDiffTool(this) },
       { label: "open in Ghostty — G", action: () => agentActions.handleOpenGhostty(this) },
@@ -820,7 +819,6 @@ export class DashboardComponent implements Component {
     else if (data === "s") { agentActions.handleSend(this); }
     // New agent
     else if (data === "a") { agentActions.handleNewAgent(this); }
-    else if (data === "A") { agentActions.handleNewAgentInCurrentRepo(this); }
     // Fuzzy jump
     else if (data === "@") { agentActions.handleFuzzyAgent(this); }
     // Command palette

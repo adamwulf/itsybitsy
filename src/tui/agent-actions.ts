@@ -321,15 +321,8 @@ export function handleSend(ctx: ActionCtx) {
   ctx.showDialog(dialog);
 }
 
-/** 'a' — always show repo picker (when >1 repo) */
+/** 'a' — infer repo from current selection, fallback to first repo */
 export function handleNewAgent(ctx: ActionCtx) {
-  if (ctx.repos.length === 0) { ctx.setNotice("No repos registered"); return; }
-  if (ctx.repos.length === 1) { showNewAgentFormDialog(ctx, ctx.repos[0]!); return; }
-  showRepoPicker(ctx);
-}
-
-/** 'A' — skip picker, infer repo from current selection */
-export function handleNewAgentInCurrentRepo(ctx: ActionCtx) {
   if (ctx.repos.length === 0) { ctx.setNotice("No repos registered"); return; }
   if (ctx.repos.length === 1) { showNewAgentFormDialog(ctx, ctx.repos[0]!); return; }
   const selectedAgent = ctx.agentTree.selectedAgent;
@@ -341,19 +334,8 @@ export function handleNewAgentInCurrentRepo(ctx: ActionCtx) {
     const repo = ctx.repos.find((r) => repoDisplayName(r) === selectedRepoHeader);
     if (repo) { showNewAgentFormDialog(ctx, repo); return; }
   }
-  showRepoPicker(ctx);
-}
-
-function showRepoPicker(ctx: ActionCtx) {
-  ctx.showDialog({
-    type: "select",
-    prompt: "Select repo for new agent:",
-    items: ctx.repos.map((r) => `${repoDisplayName(r)} (${r.path})`),
-    selectedIndex: 0,
-    onSelect: (repoIndex: number) => {
-      showNewAgentFormDialog(ctx, ctx.repos[repoIndex]!);
-    },
-  });
+  // Fallback to first repo
+  showNewAgentFormDialog(ctx, ctx.repos[0]!);
 }
 
 function showNewAgentFormDialog(ctx: ActionCtx, repo: RepoEntry) {
@@ -576,7 +558,7 @@ export function handleHelp(ctx: ActionCtx) {
       row("R", "resume"),
       row("P", "pause"),
       row("r", "reassign"),
-      row("a / A", "new agent (pick repo / current repo)"),
+      row("a", "new agent"),
       "",
       header("Open"),
       row("w", "worktree"),

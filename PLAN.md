@@ -309,8 +309,7 @@ Matching `ib watch` keybindings exactly where possible; new keys noted.
 - `m` — merge agent (runs merge-check first; confirm dialog)
 - `x` — kill agent (confirm dialog)
 - `!` — force-kill / nuke agent (confirm dialog)
-- `a` — new agent with repo picker (dialog: repo, prompt, --worker flags)
-- `A` — new agent in current repo (skips repo picker)
+- `a` — new agent (infers repo from selection, dialog: prompt, --worker flags)
 - `r` — reassign agent's manager (dialog) ← matches `ib watch`
 - `P` — pause a running/waiting agent (confirm dialog) ← new, not in `ib watch`
 - `R` — resume a stopped agent ← new, not in `ib watch`
@@ -422,7 +421,7 @@ Note: `tmux-poller.ts` was implemented in Phase 2/3. Phase 4 focuses on renderin
 - [x] `r` — reassign agent's manager: text input dialog, then `ib reassign {id} {new-manager}`
 - [x] `m` — merge agent: run `ib merge-check {id}` first, show result in confirm dialog, then `ib merge {id} --force`
 - [x] `s` — send message: text input dialog, then `ib send {id} "message"`
-- [x] `a` — new agent: repo selector (from registry) → prompt input → optional flags (`--worker`); shells to `ib new-agent`
+- [x] `a` — new agent: infers repo from selection → name → worker toggle → prompt; shells to `ib new-agent`
 
 ---
 

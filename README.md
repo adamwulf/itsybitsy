@@ -69,7 +69,6 @@ itsybitsy watch
 | `R` | Resume stopped agent |
 | `r` | Reassign agent's manager |
 | `a` | Create new agent |
-| `A` | Toggle archived agents visibility |
 
 ### Open / External
 

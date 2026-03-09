@@ -43,7 +43,8 @@ async function runIb(ibArgs: string[], repoPath: string): Promise<void> {
 /** Get the worktree path for an agent, or the repo root if worktree is false. */
 function agentWorktreePath(agent: Agent): string {
   if (agent.meta.worktree === false) return agent.repoPath;
-  return join(agent.repoPath, ".ittybitty", "agents", agent.id, "repo");
+  const dir = agent.archived ? "archive" : "agents";
+  return join(agent.repoPath, ".ittybitty", dir, agent.id, "repo");
 }
 
 /** Require an agent ID argument, find it, or exit with error. */
@@ -326,11 +327,33 @@ async function main() {
     }
     case "acknowledge":
     case "ack": {
-      // Passthrough to ib for now
+      // ib acknowledge takes a question ID (e.g. "q-1"), not an agent ID.
+      // Pass all args through directly — ib resolves the question and repo.
+      const questionId = args[1];
+      if (!questionId) {
+        console.error("Usage: itsybitsy ack <question-id>");
+        process.exit(1);
+      }
+      // Find which repo has this question so we can set cwd correctly
+      const { readPendingQuestions } = await import("./agents");
       const repos = await listRepos();
-      const agent = await requireAgent(args[1], repos);
-      const extraArgs = args.slice(2);
-      await runIb(["acknowledge", agent.id, ...extraArgs], agent.repoPath);
+      let repoPath: string | null = null;
+      for (const repo of repos) {
+        const questions = await readPendingQuestions(repo.path);
+        if (questions.some((q) => q.id === questionId)) {
+          repoPath = repo.path;
+          break;
+        }
+      }
+      if (!repoPath) {
+        // Fall back to first repo — ib will handle the error if question doesn't exist
+        if (repos.length === 0) {
+          console.error("No repos registered.");
+          process.exit(1);
+        }
+        repoPath = repos[0]!.path;
+      }
+      await runIb(["acknowledge", questionId], repoPath);
       break;
     }
     default: {
@@ -352,7 +375,7 @@ async function main() {
       console.log("Communication:");
       console.log("  send <id> <msg>     Send a message to an agent");
       console.log("  questions, q        Show pending agent questions");
-      console.log("  ack, acknowledge    Acknowledge an agent's question");
+      console.log("  ack <question-id>   Acknowledge a pending question");
       console.log("");
       console.log("Agent Lifecycle:");
       console.log("  new-agent, new      Spawn a new agent");

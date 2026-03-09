@@ -1,12 +1,8 @@
-import { test, expect, describe, beforeEach, afterEach, mock } from "bun:test";
-import { TmuxPoller, captureTmuxOutput } from "./tmux-poller";
-
-// Save original Bun.spawn so we can restore it
-const originalSpawn = Bun.spawn;
+import { test, expect, describe, afterEach } from "bun:test";
+import { TmuxPoller, captureTmuxOutput, setSpawnRunner, resetSpawnRunner } from "./tmux-poller";
 
 function mockSpawn(stdout: string, exitCode: number, delay = 0) {
-  // @ts-expect-error: monkey-patching Bun.spawn for testing
-  Bun.spawn = (_cmd: string[], _opts?: any) => {
+  setSpawnRunner((_cmd: string[], _opts?: any) => {
     const encoder = new TextEncoder();
     const stream = new ReadableStream({
       start(controller) {
@@ -21,11 +17,11 @@ function mockSpawn(stdout: string, exitCode: number, delay = 0) {
         ? new Promise<number>((r) => setTimeout(() => r(exitCode), delay))
         : Promise.resolve(exitCode),
     };
-  };
+  });
 }
 
 afterEach(() => {
-  Bun.spawn = originalSpawn;
+  resetSpawnRunner();
 });
 
 // -------------------------------------------------------------------
@@ -45,15 +41,14 @@ describe("captureTmuxOutput", () => {
   });
 
   test("returns null when spawn throws", async () => {
-    Bun.spawn = (() => { throw new Error("spawn failed"); }) as any;
+    setSpawnRunner(() => { throw new Error("spawn failed"); });
     const result = await captureTmuxOutput("my-session");
     expect(result).toBeNull();
   });
 
   test("passes lines parameter to tmux command", async () => {
     let capturedCmd: string[] = [];
-    // @ts-expect-error: monkey-patching Bun.spawn for testing
-    Bun.spawn = (cmd: string[], _opts?: any) => {
+    setSpawnRunner((cmd: string[], _opts?: any) => {
       capturedCmd = cmd;
       const stream = new ReadableStream({ start(c) { c.close(); } });
       return {
@@ -61,7 +56,7 @@ describe("captureTmuxOutput", () => {
         stderr: new ReadableStream({ start(c) { c.close(); } }),
         exited: Promise.resolve(0),
       };
-    };
+    });
     await captureTmuxOutput("sess", 50);
     expect(capturedCmd).toContain("-50");
   });
@@ -168,7 +163,7 @@ describe("TmuxPoller", () => {
   });
 
   test("onError called when spawn throws", async () => {
-    Bun.spawn = (() => { throw new Error("tmux not found"); }) as any;
+    setSpawnRunner(() => { throw new Error("tmux not found"); });
     let errorMsg: string | undefined;
     poller = new TmuxPoller({
       onOutput() {},

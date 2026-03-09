@@ -13,7 +13,7 @@ import {
   acknowledgeQuestion, hooksStatus, interceptHooksStatus,
   installSafetyHooks, uninstallSafetyHooks,
   installInterceptHook, uninstallInterceptHook,
-  checkGitignoreHasIttybitty, toggleGitignore, createDefaultConfigFile,
+  checkGitignoreHasIttybitty, toggleGitignore, configFileExists, createDefaultConfigFile,
 } from "../ib-commands";
 import type { NewAgentOptions, IbCommandResult } from "../ib-commands";
 import { captureTmuxOutput, resizeTmuxWindow, killTmuxSession } from "../tmux-poller";
@@ -628,7 +628,7 @@ async function loadSetupDialog(ctx: ActionCtx, repoPath: string, initialTab = 0)
     hooksStatus(repoPath),
     interceptHooksStatus(repoPath),
     checkGitignoreHasIttybitty(repoPath),
-    Bun.file(`${repoPath}/.ittybitty.json`).exists().catch(() => false),
+    configFileExists(repoPath),
   ]);
 
   // "installed" or "partial" both have hooks present; only "not-installed" means fully absent

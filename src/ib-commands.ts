@@ -201,6 +201,15 @@ export async function toggleGitignore(repoPath: string, currentlyInstalled: bool
   }
 }
 
+/** Check if .ittybitty.json config file exists */
+export async function configFileExists(repoPath: string): Promise<boolean> {
+  try {
+    return await Bun.file(`${repoPath}/.ittybitty.json`).exists();
+  } catch {
+    return false;
+  }
+}
+
 /** Create default .ittybitty.json config file */
 export async function createDefaultConfigFile(repoPath: string): Promise<{ ok: boolean; message: string }> {
   const configPath = `${repoPath}/.ittybitty.json`;

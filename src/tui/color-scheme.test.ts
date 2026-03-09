@@ -252,6 +252,148 @@ describe("onSchemeChange callback", () => {
   });
 });
 
+/* ── queryColorScheme timer behavior ────────────────────────── */
+
+describe("queryColorScheme timer", () => {
+  test("can be called multiple times without error", () => {
+    const { queryColorScheme } = setupColorSchemeDetection(() => {});
+    queryColorScheme();
+    queryColorScheme();
+    queryColorScheme();
+    // No throw — previous timers are cleared on each call
+  });
+
+  test("each call writes OSC 11 query", () => {
+    const writes: string[] = [];
+    setTestWriter((d) => { writes.push(d); return true; });
+    const { queryColorScheme } = setupColorSchemeDetection(() => {});
+    writes.length = 0;
+    queryColorScheme();
+    queryColorScheme();
+    const queryCount = writes.filter((w) => w === "\x1b]11;?\x07").length;
+    expect(queryCount).toBe(2);
+  });
+
+  test("cleanup cancels pending detection timer", () => {
+    const { queryColorScheme, cleanup } = setupColorSchemeDetection(() => {});
+    queryColorScheme();
+    cleanup(); // should clear the detection timer without error
+  });
+});
+
+/* ── cross-method detection ────────────────────────────────── */
+
+describe("cross-method detection", () => {
+  test("Ghostty notification overrides OSC 11 detection", () => {
+    let count = 0;
+    const { inputFilter } = setupColorSchemeDetection(() => { count++; });
+    // OSC 11 → light
+    inputFilter("\x1b]11;rgb:ffff/ffff/ffff\x07");
+    expect(count).toBe(1);
+    expect(getStateColors().complete).toBe(BLUE);
+    // Ghostty → dark
+    inputFilter("\x1b[?2031;1m");
+    expect(count).toBe(2);
+    expect(getStateColors().complete).toBe(BRIGHT_BLUE);
+  });
+
+  test("OSC 11 overrides Ghostty detection", () => {
+    let count = 0;
+    const { inputFilter } = setupColorSchemeDetection(() => { count++; });
+    // Ghostty → light
+    inputFilter("\x1b[?2031;2m");
+    expect(count).toBe(1);
+    expect(getStateColors().complete).toBe(BLUE);
+    // OSC 11 → dark
+    inputFilter("\x1b]11;rgb:0000/0000/0000\x07");
+    expect(count).toBe(2);
+    expect(getStateColors().complete).toBe(BRIGHT_BLUE);
+  });
+});
+
+/* ── Ghostty no-op transitions ─────────────────────────────── */
+
+describe("Ghostty no-op transitions", () => {
+  test("Ghostty dark when already dark does not trigger callback", () => {
+    let called = false;
+    const { inputFilter } = setupColorSchemeDetection(() => { called = true; });
+    inputFilter("\x1b[?2031;1m"); // dark → dark
+    expect(called).toBe(false);
+  });
+
+  test("Ghostty light when already light does not trigger callback", () => {
+    let count = 0;
+    const { inputFilter } = setupColorSchemeDetection(() => { count++; });
+    inputFilter("\x1b[?2031;2m"); // dark → light (triggers)
+    expect(count).toBe(1);
+    inputFilter("\x1b[?2031;2m"); // light → light (no-op)
+    expect(count).toBe(1);
+  });
+});
+
+/* ── parseOSC11Response edge cases ─────────────────────────── */
+
+describe("parseOSC11Response edge cases", () => {
+  test("parses single-digit hex components", () => {
+    const rgb = parseOSC11Response("rgb:f/f/f");
+    expect(rgb).not.toBeNull();
+    expect(rgb!.r).toBe(15 / 255);
+    expect(rgb!.g).toBe(15 / 255);
+    expect(rgb!.b).toBe(15 / 255);
+  });
+
+  test("parses 3-digit hex components", () => {
+    const rgb = parseOSC11Response("rgb:fff/000/800");
+    expect(rgb).not.toBeNull();
+    // 3-digit hex: hex.length > 2, so normalize() uses max 0xffff
+    expect(rgb!.r).toBeCloseTo(0xfff / 0xffff, 4);
+    expect(rgb!.g).toBe(0);
+    expect(rgb!.b).toBeCloseTo(0x800 / 0xffff, 4);
+  });
+
+  test("parses 4-digit hex components", () => {
+    const rgb = parseOSC11Response("rgb:abcd/1234/5678");
+    expect(rgb).not.toBeNull();
+    expect(rgb!.r).toBeCloseTo(0xabcd / 0xffff, 4);
+    expect(rgb!.g).toBeCloseTo(0x1234 / 0xffff, 4);
+    expect(rgb!.b).toBeCloseTo(0x5678 / 0xffff, 4);
+  });
+
+  test("returns null for empty rgb values", () => {
+    expect(parseOSC11Response("rgb://")).toBeNull();
+  });
+});
+
+/* ── inputFilter with surrounding data ─────────────────────── */
+
+describe("inputFilter with surrounding data", () => {
+  test("OSC 11 response with data before it", () => {
+    let called = false;
+    const { inputFilter } = setupColorSchemeDetection(() => { called = true; });
+    const consumed = inputFilter("some-prefix\x1b]11;rgb:ffff/ffff/ffff\x07");
+    expect(consumed).toBe(true);
+    expect(called).toBe(true);
+    expect(getStateColors().complete).toBe(BLUE);
+  });
+
+  test("OSC 11 response with data before and after it", () => {
+    let called = false;
+    const { inputFilter } = setupColorSchemeDetection(() => { called = true; });
+    const consumed = inputFilter("pre\x1b]11;rgb:ffff/ffff/ffff\x07post");
+    expect(consumed).toBe(true);
+    expect(called).toBe(true);
+  });
+
+  test("Ghostty exact match sequence", () => {
+    let called = false;
+    const { inputFilter } = setupColorSchemeDetection(() => { called = true; });
+    // Test the exact equality branch (data === GHOSTTY_LIGHT)
+    const consumed = inputFilter("\x1b[?2031;2m");
+    expect(consumed).toBe(true);
+    expect(called).toBe(true);
+  });
+});
+
 /* ── luminance threshold boundary ───────────────────────────── */
 
 describe("luminance threshold", () => {

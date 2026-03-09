@@ -10,9 +10,12 @@ import { addRepo, loadRegistry, saveRegistry, renameRepo, removeRepo, repoDispla
 import {
   killAgent, nukeAgent, nukeAllAgents, resumeAgent, pauseAgent, reassignAgent,
   mergeCheckAgent, mergeAgent, sendMessage, newAgent,
-  acknowledgeQuestion, hooksStatus, installHook, uninstallHook,
+  acknowledgeQuestion, hooksStatus, interceptHooksStatus,
+  installSafetyHooks, uninstallSafetyHooks,
+  installInterceptHook, uninstallInterceptHook,
+  checkGitignoreHasIttybitty, toggleGitignore, configFileExists, createDefaultConfigFile,
 } from "../ib-commands";
-import type { NewAgentOptions } from "../ib-commands";
+import type { NewAgentOptions, IbCommandResult } from "../ib-commands";
 import { captureTmuxOutput, resizeTmuxWindow, killTmuxSession } from "../tmux-poller";
 import { parseState } from "../parse-state";
 import { openInGhostty } from "../ghostty";
@@ -620,68 +623,60 @@ export function handleSetup(ctx: ActionCtx) {
 }
 
 async function loadSetupDialog(ctx: ActionCtx, repoPath: string, initialTab = 0) {
-  const items: SetupItem[] = [];
+  // Fetch all statuses in parallel
+  const [safetyResult, interceptResult, gitignoreInstalled, configExists] = await Promise.all([
+    hooksStatus(repoPath),
+    interceptHooksStatus(repoPath),
+    checkGitignoreHasIttybitty(repoPath),
+    configFileExists(repoPath),
+  ]);
 
-  // Fetch hooks status
-  const result = await hooksStatus(repoPath);
-  if (result.ok && result.stdout) {
-    for (const line of result.stdout.split("\n")) {
-      const colonIdx = line.indexOf(":");
-      if (colonIdx === -1) continue;
-      const hookName = line.slice(0, colonIdx).trim();
-      const status = line.slice(colonIdx + 1).trim();
-      if (!hookName) continue;
-      items.push({
-        label: hookName,
-        value: status === "installed" ? "installed" : "not installed",
-        actionable: true,
-        kind: "hook",
-      });
-    }
-  }
+  // "installed" or "partial" both have hooks present; only "not-installed" means fully absent
+  const safetyStatus = safetyResult.ok ? safetyResult.stdout : "not-installed";
+  const safetyInstalled = safetyStatus === "installed";
+  const safetyPartial = safetyStatus === "partial";
+  const interceptInstalled = interceptResult.ok && (interceptResult.stdout === "installed");
 
-  // Check .gitignore contains .ittybitty
-  let gitignoreHasIttybitty = false;
-  try {
-    const gitignoreFile = Bun.file(`${repoPath}/.gitignore`);
-    if (await gitignoreFile.exists()) {
-      const content = await gitignoreFile.text();
-      gitignoreHasIttybitty = content.split("\n").some((line) => line.trim() === ".ittybitty" || line.trim() === ".ittybitty/");
-    }
-  } catch { /* ignore */ }
-  items.push({
-    label: ".gitignore contains .ittybitty",
-    value: gitignoreHasIttybitty ? "yes" : "no",
-    actionable: false,
-    kind: "info",
-  });
-
-  // Check .itsybitsy.json exists
-  let registryExists = false;
-  try {
-    const regFile = Bun.file(`${process.env.HOME ?? ""}/.itsybitsy.json`);
-    registryExists = await regFile.exists();
-  } catch { /* ignore */ }
-  items.push({
-    label: ".itsybitsy.json exists",
-    value: registryExists ? "yes" : "no",
-    actionable: false,
-    kind: "info",
-  });
-
-  // Diff tool
-  items.push({
-    label: "Diff tool",
-    value: ctx.diffTool ?? "",
-    actionable: true,
-    kind: "difftool",
-  });
+  const items: SetupItem[] = [
+    {
+      label: "Safety hooks",
+      description: "Block cd into worktrees + inject status + session context",
+      value: safetyInstalled ? "installed" : safetyPartial ? "partial" : "not installed",
+      actionable: true,
+      kind: "safety-hooks",
+    },
+    {
+      label: "Task interception",
+      description: "Redirect Task tool calls to spawn ib agents",
+      value: interceptInstalled ? "installed" : "not installed",
+      actionable: true,
+      kind: "intercept-hook",
+    },
+    {
+      label: "Gitignore",
+      description: "Add .ittybitty/ to .gitignore",
+      value: gitignoreInstalled ? "installed" : "not installed",
+      actionable: true,
+      kind: "gitignore",
+    },
+    {
+      label: "Config file",
+      description: configExists ? ".ittybitty.json exists" : "Create .ittybitty.json",
+      value: configExists ? "installed" : "not installed",
+      actionable: !configExists,
+      kind: "config-file",
+    },
+    {
+      label: "Diff tool",
+      description: "Command for 'o' key in diff view",
+      value: ctx.diffTool ?? "",
+      actionable: true,
+      kind: "difftool",
+    },
+  ];
 
   // Load config for tabs 1 & 2
   const config = await readConfig(repoPath);
-
-  // Find first actionable index
-  const firstActionable = items.findIndex((i) => i.actionable);
 
   const buildConfigItems = (): ConfigDialogItem[] => {
     return CONFIG_KEYS.map((def) => {
@@ -701,7 +696,7 @@ async function loadSetupDialog(ctx: ActionCtx, repoPath: string, initialTab = 0)
       type: "setup",
       tab,
       items,
-      selectedIndex: firstActionable !== -1 ? firstActionable : 0,
+      selectedIndex: 0,
       repoPath,
       configItems: tab > 0 ? buildConfigItems() : undefined,
       configSelectedIndex: tab > 0 ? 0 : undefined,
@@ -716,18 +711,51 @@ async function loadSetupDialog(ctx: ActionCtx, repoPath: string, initialTab = 0)
   showSetupDialogForTab(initialTab);
 }
 
+/** Toggle a hook install/uninstall and update the setup item in-place */
+function toggleHook(
+  ctx: ActionCtx,
+  item: SetupItem,
+  repoPath: string,
+  installFn: (p: string) => Promise<IbCommandResult>,
+  uninstallFn: (p: string) => Promise<IbCommandResult>,
+  label: string,
+) {
+  const shouldInstall = item.value !== "installed";
+  const fn = shouldInstall ? installFn : uninstallFn;
+  fn(repoPath).then((res) => {
+    if (res.ok) {
+      item.value = shouldInstall ? "installed" : "not installed";
+      ctx.setNotice(`${shouldInstall ? "Installed" : "Uninstalled"} ${label}`);
+    } else {
+      ctx.setNotice(`Failed: ${res.stderr || res.stdout}`);
+    }
+    ctx.tui?.requestRender();
+  });
+}
+
 function handleSetupItemAction(ctx: ActionCtx, repoPath: string) {
   return (item: SetupItem) => {
-    if (item.kind === "hook") {
-      const shouldInstall = item.value !== "installed";
-      const fn = shouldInstall ? installHook : uninstallHook;
-      fn(repoPath, item.label).then((res) => {
-        if (res.ok) {
-          item.value = shouldInstall ? "installed" : "not installed";
-          ctx.setNotice(`${shouldInstall ? "Installed" : "Uninstalled"} ${item.label}`);
-        } else {
-          ctx.setNotice(`Failed: ${res.stderr || res.stdout}`);
+    if (item.kind === "safety-hooks") {
+      toggleHook(ctx, item, repoPath, installSafetyHooks, uninstallSafetyHooks, "safety hooks");
+    } else if (item.kind === "intercept-hook") {
+      toggleHook(ctx, item, repoPath, installInterceptHook, uninstallInterceptHook, "task interception");
+    } else if (item.kind === "gitignore") {
+      const isInstalled = item.value === "installed";
+      toggleGitignore(repoPath, isInstalled).then((result) => {
+        if (result.ok) {
+          item.value = isInstalled ? "not installed" : "installed";
         }
+        ctx.setNotice(result.message);
+        ctx.tui?.requestRender();
+      });
+    } else if (item.kind === "config-file") {
+      createDefaultConfigFile(repoPath).then((result) => {
+        if (result.ok) {
+          item.value = "installed";
+          item.actionable = false;
+          item.description = ".ittybitty.json exists";
+        }
+        ctx.setNotice(result.message);
         ctx.tui?.requestRender();
       });
     } else if (item.kind === "difftool") {

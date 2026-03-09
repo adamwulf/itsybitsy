@@ -173,7 +173,7 @@ Five native hook implementations run as Claude Code hook commands inside spawned
 - `hooks intercept-task` maps to `intercept-task.ts`: PreToolUse hook — blocks disallowed models and unauthorized task spawning.
 - `hooks session-start` maps to `session-start.ts`: SessionStart hook — injects role-specific context at session start.
 
-All hooks read hook input JSON from stdin, write hook output JSON to stdout, exit 0 for allow/continue, exit 1 for deny/block.
+Hooks read input from stdin. Path-check, intercept-task, and session-start write JSON to stdout and use exit codes (0 allow, 1 deny). Agent-status writes a plain state string to stdout. Permission-denied only logs to agent.log and exits 0.
 
 ### Agent lifecycle (src/agent-lifecycle.ts)
 Shared agent lifecycle helpers used by multiple ib commands. Mirrors the ib bash script's teardown, archive, kill, and utility functions. Provides a pluggable `SpawnFn` runner (`setSpawnRunner()`/`resetSpawnRunner()`) for test injection. Handles formatting timestamps, archiving agent directories, and cleaning up tmux sessions and git worktrees.
@@ -182,7 +182,7 @@ Shared agent lifecycle helpers used by multiple ib commands. Mirrors the ib bash
 Reads Claude transcript JSONL files to determine an agent's context window usage percentage, then sends `/compact` to agents that exceed a configured threshold. Matches ib's `get_agent_context_usage()` logic for transcript parsing. Encodes worktree paths into Claude's project directory naming scheme to locate the correct transcript file.
 
 ### Config (src/config.ts)
-Layered configuration system with project, user, and default sources. Defines all config keys (`maxAgents`, `model`, `fps`, `createPullRequests`, `allowAgentQuestions`, `autoCompactThreshold`, `externalDiffTool`, hooks settings, and per-role permission allow/deny lists). Reads from `.ittybitty/config.json` (project) and `~/.ittybitty/config.json` (user), merging with typed defaults.
+Layered configuration system with project, user, and default sources. Defines all config keys (`maxAgents`, `model`, `fps`, `createPullRequests`, `allowAgentQuestions`, `autoCompactThreshold`, `externalDiffTool`, hooks settings, and per-role permission allow/deny lists). Reads from `.ittybitsy.json` (repo root) and `~/.ittybitsy.json` (user home), merging with typed defaults.
 
 ### Folder browser (src/tui/folder-browser.ts)
 Builds the navigable item list for the add-repo folder browser dialog. Given a current path, produces a list of `FolderItem` entries: ancestors from root down to parent, the current folder, and sorted child directories. Each item includes depth, git-repo detection, and ancestor/current flags for rendering the tree-style UI.

@@ -476,6 +476,10 @@ export class DashboardComponent implements Component {
       this.updateAvailable = version;
       this.tui?.requestRender();
     });
+    if (this.watcher) {
+      const watcher = this.watcher;
+      startWatchdog(() => watcher.lastAgents);
+    }
   }
 
   stopPolling() {
@@ -489,6 +493,7 @@ export class DashboardComponent implements Component {
       this.clientCheckTimer = null;
     }
     stopUpdateChecker();
+    stopWatchdog();
   }
 
   private refreshUsage() {
@@ -1077,7 +1082,6 @@ export async function launchDashboard(): Promise<void> {
   tui.addInputListener((data) => {
     if (matchesKey(data, Key.ctrl("c"))) {
       colorDetection.cleanup();
-      stopWatchdog();
       dashboard.stopPolling();
       watcher.stop();
       tui.stop();
@@ -1095,5 +1099,4 @@ export async function launchDashboard(): Promise<void> {
   colorDetection.queryColorScheme();
   dashboard.startPolling();
   await watcher.start();
-  startWatchdog(() => watcher.lastAgents);
 }

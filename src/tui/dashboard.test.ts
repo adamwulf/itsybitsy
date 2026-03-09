@@ -2647,4 +2647,29 @@ describe("watchdog dashboard integration", () => {
     stopWatchdog();
     expect(isWatchdogRunning()).toBe(false);
   });
+
+  test("startPolling() starts watchdog when watcher is set", () => {
+    const dashboard = makeDashboard();
+    const watcher = { lastAgents: [] } as any;
+    dashboard.setWatcher(watcher);
+
+    expect(isWatchdogRunning()).toBe(false);
+    dashboard.startPolling();
+    expect(isWatchdogRunning()).toBe(true);
+
+    dashboard.stopPolling();
+    expect(isWatchdogRunning()).toBe(false);
+  });
+
+  test("stopPolling() stops watchdog", () => {
+    const dashboard = makeDashboard();
+    const watcher = { lastAgents: [] } as any;
+    dashboard.setWatcher(watcher);
+
+    dashboard.startPolling();
+    expect(isWatchdogRunning()).toBe(true);
+
+    dashboard.stopPolling();
+    expect(isWatchdogRunning()).toBe(false);
+  });
 });

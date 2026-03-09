@@ -113,7 +113,7 @@ export async function getAgentContextUsage(agent: Agent): Promise<number | null>
 }
 
 /** Pluggable usage reader for checkAndCompact — allows test injection */
-type UsageReader = (agent: Agent) => Promise<number | null>;
+export type UsageReader = (agent: Agent) => Promise<number | null>;
 let usageReader: UsageReader = getAgentContextUsage;
 
 /** Override the usage reader (for testing) */

@@ -9,7 +9,7 @@ import type { RepoEntry } from "../registry";
 import { addRepo, loadRegistry, saveRegistry, renameRepo, removeRepo, repoDisplayName } from "../registry";
 import {
   killAgent, nukeAgent, nukeAllAgents, resumeAgent, pauseAgent, reassignAgent,
-  mergeCheckAgent, mergeAgent, sendMessage, newAgent, diffAgent,
+  mergeCheckAgent, mergeAgent, sendMessage, newAgent,
   acknowledgeQuestion, hooksStatus, installHook, uninstallHook,
 } from "../ib-commands";
 import type { NewAgentOptions } from "../ib-commands";
@@ -509,21 +509,38 @@ export function handleOpenDiffTool(ctx: ActionCtx) {
   if (!agent) { ctx.setNotice("No agent selected"); return; }
   if (!ctx.diffTool) { ctx.setNotice("No diff tool configured — set diffTool in ~/.itsybitsy.json"); return; }
   const tool = ctx.diffTool;
-  ctx.setNotice("Loading diff...");
-  diffAgent(agent).then(async (result) => {
+
+  // Determine worktree path (same logic as handleOpenWorktree)
+  const dir = agent.archived ? "archive" : "agents";
+  let cwd: string;
+  if (agent.meta.worktree === false) {
+    cwd = agent.repoPath;
+  } else {
+    cwd = `${agent.repoPath}/.ittybitty/${dir}/${agent.id}/repo`;
+  }
+
+  // Run diff tool in the worktree, showing changes since merge-base with main.
+  // Tool string is unquoted so multi-word tools (e.g. "git webdiff") are word-split correctly.
+  const proc = Bun.spawn(
+    ["bash", "-c", '$1 $(git merge-base HEAD main)', "--", tool],
+    { cwd, stdout: "pipe", stderr: "pipe" },
+  );
+  ctx.setNotice(`Opened diff in ${tool}`);
+
+  // Report errors asynchronously, stripping newlines for single-line status bar display
+  (async () => {
     try {
-      const output = result.stdout || result.stderr || "(no output)";
-      const tmpPath = `/tmp/itsybitsy-diff-${agent.id}.txt`;
-      await Bun.write(tmpPath, output);
-      // Pass both tool and path as positional params to handle spaces safely
-      Bun.spawn(["bash", "-c", '"$1" "$2"', "--", tool, tmpPath], { cwd: agent.repoPath });
-      ctx.setNotice(`Opened diff in ${tool}`);
+      const exitCode = await proc.exited;
+      if (exitCode !== 0) {
+        const stderr = await new Response(proc.stderr).text();
+        const msg = (stderr || `exit code ${exitCode}`).split("\n")[0]!.trim();
+        ctx.setNotice(`Diff tool error: ${msg}`);
+      }
     } catch (err) {
-      ctx.setNotice(`Failed to open diff: ${err}`);
+      const msg = String(err).split("\n")[0]!.trim();
+      ctx.setNotice(`Diff tool error: ${msg}`);
     }
-  }).catch((err) => {
-    ctx.setNotice(`Diff error: ${err}`);
-  });
+  })();
 }
 
 export function handleHelp(ctx: ActionCtx) {

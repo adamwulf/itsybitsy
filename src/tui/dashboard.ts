@@ -28,7 +28,7 @@ import type { Agent, FlatEntry, PendingQuestion } from "../agents";
 import { SplitPane } from "./split-pane";
 import { wrapLines } from "./wrap";
 import { fetchUsage } from "../usage";
-import { startWatchdog, stopWatchdog, isWatchdogRunning } from "../watchdog";
+import { isWatchdogRunning } from "../watchdog";
 import type { UsageData } from "../usage";
 import { getStateColors, setupColorSchemeDetection } from "./color-scheme";
 import { AgentTreeComponent } from "./agent-tree";
@@ -470,9 +470,15 @@ export class DashboardComponent implements Component {
     this.tmuxPoller.start();
     this.refreshUsage();
     this.usageTimer = setInterval(() => this.refreshUsage(), 60_000);
-    if (this.watcher) {
-      const watcher = this.watcher;
-      startWatchdog(() => watcher.lastAgents);
+    // Spawn standalone watchdog as background process if not already running
+    if (!isWatchdogRunning()) {
+      try {
+        const proc = Bun.spawn(["itsybitsy", "watchdog"], {
+          stdout: "ignore",
+          stderr: "ignore",
+        });
+        proc.unref();
+      } catch { /* ignore — watchdog is optional */ }
     }
   }
 
@@ -486,7 +492,7 @@ export class DashboardComponent implements Component {
       clearInterval(this.clientCheckTimer);
       this.clientCheckTimer = null;
     }
-    stopWatchdog();
+    // Watchdog runs as standalone process — do NOT stop it when TUI closes
   }
 
   private refreshUsage() {

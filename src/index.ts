@@ -86,6 +86,32 @@ async function main() {
       }
       break;
     }
+    case "watchdog": {
+      const { acquireWatchdogLock, releaseWatchdogLock, readLockPid, createDiskAgentProvider, stopWatchdog } = await import("./watchdog");
+      const { startWatchdog } = await import("./watchdog");
+
+      if (!acquireWatchdogLock()) {
+        const pid = readLockPid();
+        console.log(`watchdog already running (pid: ${pid})`);
+        process.exit(0);
+      }
+
+      const repos = await listRepos();
+      startWatchdog(createDiskAgentProvider(repos));
+
+      // Clean shutdown on signals
+      const cleanup = () => {
+        stopWatchdog();
+        releaseWatchdogLock();
+        process.exit(0);
+      };
+      process.on("SIGTERM", cleanup);
+      process.on("SIGINT", cleanup);
+      process.on("exit", () => releaseWatchdogLock());
+
+      // Keep process alive — setInterval in startWatchdog holds the event loop
+      break;
+    }
     case "watch": {
       if (!Bun.which("ib")) {
         console.error("Error: 'ib' not found on PATH. Install ittybitty first: https://github.com/anthropics/ittybitty");
@@ -417,6 +443,7 @@ async function main() {
       console.log("");
       console.log("Monitoring:");
       console.log("  watch               Launch TUI dashboard");
+      console.log("  watchdog            Run watchdog as background process");
       console.log("  agents, tree        List all agents with states");
       console.log("  look <id>           Show agent's live tmux output (--lines N, --all)");
       console.log("  status <id>         Show agent's git log and status");

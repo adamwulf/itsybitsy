@@ -1,4 +1,7 @@
 import { test, expect, describe, beforeEach, afterEach, mock, spyOn } from "bun:test";
+import { join } from "path";
+import { mkdirSync, writeFileSync, unlinkSync, existsSync, readFileSync } from "fs";
+import { tmpdir } from "os";
 import { makeAgent } from "./test-utils";
 import type { Agent } from "./agents";
 import type { AgentState } from "./parse-state";
@@ -20,6 +23,16 @@ import {
   resetWatchdogSpawnRunner,
   setWatchdogFetchUsage,
   resetWatchdogFetchUsage,
+  acquireWatchdogLock,
+  releaseWatchdogLock,
+  readLockPid,
+  setLockFilePath,
+  resetLockFilePath,
+  createDiskAgentProvider,
+  setDiskProviderReadAllAgents,
+  resetDiskProviderReadAllAgents,
+  setDiskProviderDetectAgentStates,
+  resetDiskProviderDetectAgentStates,
   type AgentTracker,
   type StateHandler,
 } from "./watchdog";
@@ -501,26 +514,10 @@ describe("watchdog", () => {
   });
 
   describe("startWatchdog / stopWatchdog", () => {
-    test("isWatchdogRunning reports correct state", () => {
-      expect(isWatchdogRunning()).toBe(false);
-      stopWatchdog();
-      expect(isWatchdogRunning()).toBe(false);
-    });
-
-    test("startWatchdog sets running, stopWatchdog clears it", () => {
-      expect(isWatchdogRunning()).toBe(false);
-      startWatchdog(() => []);
-      expect(isWatchdogRunning()).toBe(true);
-      stopWatchdog();
-      expect(isWatchdogRunning()).toBe(false);
-    });
-
     test("startWatchdog is idempotent (no double-start)", () => {
       startWatchdog(() => []);
-      expect(isWatchdogRunning()).toBe(true);
-      // Second call should be no-op
+      // Second call should be no-op (doesn't throw)
       startWatchdog(() => []);
-      expect(isWatchdogRunning()).toBe(true);
       stopWatchdog();
     });
 
@@ -875,6 +872,141 @@ describe("watchdog", () => {
 
       await tick([mgr, agent("w1", "waiting", "mgr")]);
       expect(getTracker("w1").waitCounter).toBe(0);
+    });
+  });
+
+  // =========================================================================
+  // Phase 20: Lock file management
+  // =========================================================================
+
+  describe("lock file management", () => {
+    let tmpLockFile: string;
+
+    beforeEach(() => {
+      const tmpDir = join(tmpdir(), `watchdog-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+      mkdirSync(tmpDir, { recursive: true });
+      tmpLockFile = join(tmpDir, "watchdog.lock");
+      setLockFilePath(tmpLockFile);
+    });
+
+    afterEach(() => {
+      try { unlinkSync(tmpLockFile); } catch { /* ok */ }
+      resetLockFilePath();
+    });
+
+    test("acquireWatchdogLock() writes PID and returns true when no lock exists", () => {
+      expect(acquireWatchdogLock()).toBe(true);
+      const content = readFileSync(tmpLockFile, "utf-8").trim();
+      expect(parseInt(content, 10)).toBe(process.pid);
+    });
+
+    test("acquireWatchdogLock() returns false when lock is held by a live PID", () => {
+      // Acquire first
+      expect(acquireWatchdogLock()).toBe(true);
+      // Try to acquire again from same process — PID is alive
+      expect(acquireWatchdogLock()).toBe(false);
+    });
+
+    test("acquireWatchdogLock() returns true for stale PID (dead process)", () => {
+      // Write a PID that definitely doesn't exist
+      writeFileSync(tmpLockFile, "999999999", "utf-8");
+      expect(acquireWatchdogLock()).toBe(true);
+      const content = readFileSync(tmpLockFile, "utf-8").trim();
+      expect(parseInt(content, 10)).toBe(process.pid);
+    });
+
+    test("releaseWatchdogLock() removes lock file when it contains our PID", () => {
+      acquireWatchdogLock();
+      expect(existsSync(tmpLockFile)).toBe(true);
+      releaseWatchdogLock();
+      expect(existsSync(tmpLockFile)).toBe(false);
+    });
+
+    test("releaseWatchdogLock() does NOT remove lock file with different PID", () => {
+      writeFileSync(tmpLockFile, "999999999", "utf-8");
+      releaseWatchdogLock();
+      expect(existsSync(tmpLockFile)).toBe(true);
+    });
+
+    test("readLockPid() returns PID from lock file", () => {
+      writeFileSync(tmpLockFile, "12345", "utf-8");
+      expect(readLockPid()).toBe(12345);
+    });
+
+    test("readLockPid() returns null when no lock file", () => {
+      expect(readLockPid()).toBeNull();
+    });
+
+    test("isWatchdogRunning() returns true when lock has live PID", () => {
+      acquireWatchdogLock();
+      expect(isWatchdogRunning()).toBe(true);
+      releaseWatchdogLock();
+    });
+
+    test("isWatchdogRunning() returns false when no lock file", () => {
+      expect(isWatchdogRunning()).toBe(false);
+    });
+
+    test("isWatchdogRunning() returns false when lock has dead PID", () => {
+      writeFileSync(tmpLockFile, "999999999", "utf-8");
+      expect(isWatchdogRunning()).toBe(false);
+    });
+  });
+
+  // =========================================================================
+  // Phase 20: Disk-based agent provider
+  // =========================================================================
+
+  describe("createDiskAgentProvider", () => {
+    afterEach(() => {
+      resetDiskProviderReadAllAgents();
+      resetDiskProviderDetectAgentStates();
+    });
+
+    test("returns agents from readAllAgents after detectAgentStates", async () => {
+      const mockAgents = [agent("a1", "unknown"), agent("a2", "unknown")];
+      setDiskProviderReadAllAgents(async () => ({
+        agents: mockAgents,
+        errors: [],
+        orphanedTmuxSessions: [],
+      }));
+      setDiskProviderDetectAgentStates(async (agents) => {
+        for (const a of agents) a.state = "running";
+      });
+
+      const provider = createDiskAgentProvider([{ path: "/repos/test", name: "test" }]);
+      const result = await provider();
+      expect(result.length).toBe(2);
+      expect(result[0]!.state).toBe("running");
+      expect(result[1]!.state).toBe("running");
+    });
+
+    test("returns empty array when no agents found", async () => {
+      setDiskProviderReadAllAgents(async () => ({
+        agents: [],
+        errors: [],
+        orphanedTmuxSessions: [],
+      }));
+
+      const provider = createDiskAgentProvider([{ path: "/repos/test", name: "test" }]);
+      const result = await provider();
+      expect(result.length).toBe(0);
+    });
+
+    test("does not call detectAgentStates when no agents", async () => {
+      let detectCalled = false;
+      setDiskProviderReadAllAgents(async () => ({
+        agents: [],
+        errors: [],
+        orphanedTmuxSessions: [],
+      }));
+      setDiskProviderDetectAgentStates(async () => {
+        detectCalled = true;
+      });
+
+      const provider = createDiskAgentProvider([{ path: "/repos/test", name: "test" }]);
+      await provider();
+      expect(detectCalled).toBe(false);
     });
   });
 });

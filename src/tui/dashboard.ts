@@ -47,7 +47,8 @@ import {
 } from "./pane-manager";
 import type { PaneMode, DenialFilter } from "./pane-manager";
 import * as agentActions from "./agent-actions";
-import { RESET, BOLD, DIM, RED, GREEN, YELLOW, DIM_GRAY, MIN_LEFT_WIDTH, MAX_LEFT_WIDTH } from "./colors";
+import { RESET, BOLD, DIM, RED, GREEN, YELLOW, DIM_GRAY } from "./colors";
+import { MIN_LEFT_WIDTH, MAX_LEFT_WIDTH } from "./split-pane";
 
 // Re-export for test compatibility
 export { AgentTreeComponent, formatAgentRow } from "./agent-tree";

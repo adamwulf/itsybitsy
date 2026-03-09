@@ -22,7 +22,3 @@ export const WHITE = "\x1b[37m";
 export const DIM_GRAY = "\x1b[90m";
 export const BRIGHT_BLUE = "\x1b[94m";
 export const BRIGHT_MAGENTA = "\x1b[95m";
-
-// Layout constants shared across modules
-export const MIN_LEFT_WIDTH = 40;
-export const MAX_LEFT_WIDTH = 160;

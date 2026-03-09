@@ -26,7 +26,8 @@ import type { ConfigResult } from "../config";
 import { fuzzyFilterIndices } from "./dialog-handler";
 import { displayState, computeStateColWidth, AGE_COL_WIDTH } from "./agent-tree";
 import type { PaneMode } from "./pane-manager";
-import { RESET, BOLD, DIM, RED, MIN_LEFT_WIDTH, MAX_LEFT_WIDTH } from "./colors";
+import { RESET, BOLD, DIM, RED } from "./colors";
+import { MIN_LEFT_WIDTH, MAX_LEFT_WIDTH } from "./split-pane";
 
 const SCROLL_STEP = 10;
 

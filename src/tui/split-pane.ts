@@ -7,6 +7,9 @@ import { truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 import type { Component } from "@mariozechner/pi-tui";
 import { RESET } from "./colors";
 
+export const MIN_LEFT_WIDTH = 40;
+export const MAX_LEFT_WIDTH = 160;
+
 export class SplitPane implements Component {
   private left: Component;
   private right: Component;

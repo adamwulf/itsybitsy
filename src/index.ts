@@ -339,6 +339,10 @@ async function main() {
     case "kill": {
       const repos = await listRepos();
       const agent = await requireAgent(args[1], repos);
+      const extraArgs = args.slice(2);
+      if (extraArgs.length > 0) {
+        console.error(`Warning: unknown arguments ignored: ${extraArgs.join(" ")}`);
+      }
       const { killAgent } = await import("./ib-commands");
       await printAndExit(await killAgent(agent));
       break;
@@ -346,6 +350,10 @@ async function main() {
     case "merge": {
       const repos = await listRepos();
       const agent = await requireAgent(args[1], repos);
+      const extraArgs = args.slice(2);
+      if (extraArgs.length > 0) {
+        console.error(`Warning: unknown arguments ignored: ${extraArgs.join(" ")}`);
+      }
       const { mergeAgent } = await import("./ib-commands");
       await printAndExit(await mergeAgent(agent));
       break;
@@ -353,6 +361,10 @@ async function main() {
     case "resume": {
       const repos = await listRepos();
       const agent = await requireAgent(args[1], repos);
+      const extraArgs = args.slice(2);
+      if (extraArgs.length > 0) {
+        console.error(`Warning: unknown arguments ignored: ${extraArgs.join(" ")}`);
+      }
       const { resumeAgent } = await import("./ib-commands");
       await printAndExit(await resumeAgent(agent));
       break;

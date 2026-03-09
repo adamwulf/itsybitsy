@@ -229,9 +229,6 @@ describe("ib-commands", () => {
       cwd: "/repos/myproject",
     });
   });
-
-
-  // mergeAgent passthrough tests removed — now native
 });
 
 // Helper: create a mock SpawnFn that records calls and returns success

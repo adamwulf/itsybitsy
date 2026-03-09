@@ -23,6 +23,27 @@ export function resetTestFetch(): void {
   fetchFn = globalThis.fetch;
 }
 
+/** Narrow types matching actual Bun.spawn usage in readAccessToken. */
+interface SpawnResult {
+  stdout: ReadableStream<Uint8Array> | null;
+  stderr: ReadableStream<Uint8Array> | null;
+  exited: Promise<number>;
+}
+type SpawnFn = (cmd: string[], opts?: { stdout: "pipe"; stderr: "pipe" }) => SpawnResult;
+
+/** For test injection of Bun.spawn used in keychain lookup. */
+let spawnFn: SpawnFn = Bun.spawn as SpawnFn;
+
+/** Override spawn for testing. */
+export function setTestSpawn(fn: SpawnFn): void {
+  spawnFn = fn;
+}
+
+/** Reset spawn to Bun.spawn. */
+export function resetTestSpawn(): void {
+  spawnFn = Bun.spawn as SpawnFn;
+}
+
 let ITSYBITSY_DIR = join(homedir(), ".itsybitsy");
 let CACHE_PATH = join(ITSYBITSY_DIR, "usage-cache.json");
 let LOCK_PATH = join(ITSYBITSY_DIR, "usage.lock");
@@ -108,7 +129,7 @@ async function readAccessToken(): Promise<string | null> {
 
   // Try macOS Keychain
   try {
-    const proc = Bun.spawn(
+    const proc = spawnFn(
       ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
       { stdout: "pipe", stderr: "pipe" },
     );

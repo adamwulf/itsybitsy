@@ -191,13 +191,8 @@ class StatusBarComponent implements Component {
 
     const row1 = this.composeLine(row1Left, usageStr, width);
     const row2 = this.composeLine(row2Left, row2Right, width);
-    // Row 3: Ctrl-C hint centered at the bottom
-    const ctrlCHint = `${DIM}Ctrl-C: quit${RESET}`;
-    const ctrlCWidth = visibleWidth(ctrlCHint);
-    const ctrlCPad = Math.max(0, Math.floor((width - ctrlCWidth) / 2));
-    const row3 = truncateToWidth(" ".repeat(ctrlCPad) + ctrlCHint, width, "");
 
-    return [row1, row2, row3];
+    return [row1, row2];
   }
 
   private composeLine(left: string, right: string, width: number): string {

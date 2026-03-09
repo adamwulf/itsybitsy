@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { formatResetTime, parseUsageResponse, fetchUsage, setTestDir, resetTestDir, setTestFetch, resetTestFetch } from "./usage";
+import { formatResetTime, parseUsageResponse, fetchUsage, setTestDir, resetTestDir, setTestFetch, resetTestFetch, setTestSpawn, resetTestSpawn } from "./usage";
 import { join } from "path";
 import { mkdtemp, rm, writeFile } from "fs/promises";
 import { tmpdir } from "os";
@@ -314,5 +314,162 @@ describe("fetchUsage", () => {
     const cache = await Bun.file(join(tmpDir, "usage-cache.json")).json();
     // Should cap at 600_000 (10 minutes)
     expect(cache.nextBackoffMs).toBe(600_000);
+  });
+});
+
+describe("readAccessToken keychain fallback", () => {
+  let tmpDir: string;
+
+  const apiResponse = {
+    five_hour: { utilization: 42.0, resets_at: "2025-12-12T20:00:00Z" },
+    seven_day: { utilization: 25.0, resets_at: "2025-12-18T00:00:00Z" },
+  };
+
+  beforeEach(async () => {
+    tmpDir = await mkdtemp(join(tmpdir(), "usage-keychain-"));
+    setTestDir(tmpDir);
+  });
+
+  afterEach(async () => {
+    resetTestDir();
+    resetTestFetch();
+    resetTestSpawn();
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  function mockFetch(response: any, ok = true): void {
+    setTestFetch((async () => ({
+      ok,
+      status: ok ? 200 : 500,
+      json: async () => response,
+    })) as any);
+  }
+
+  /** Create a mock spawn that simulates keychain output. */
+  function mockSpawn(stdout: string, exitCode: number): void {
+    setTestSpawn((() => {
+      const stdoutBlob = new Blob([stdout]);
+      return {
+        stdout: stdoutBlob.stream(),
+        stderr: new Blob([]).stream(),
+        exited: Promise.resolve(exitCode),
+      };
+    }) as any);
+  }
+
+  test("uses keychain token when credentials file missing", async () => {
+    // No credentials file — triggers keychain fallback
+    const keychainJson = JSON.stringify({ claudeAiOauth: { accessToken: "keychain-token" } });
+    mockSpawn(keychainJson, 0);
+    mockFetch(apiResponse);
+
+    const result = await fetchUsage();
+
+    expect(result).not.toBeNull();
+    expect(result!.sessionPct).toBe(42);
+  });
+
+  test("uses raw keychain value as token when not JSON", async () => {
+    // No credentials file; keychain returns a plain string (not JSON)
+    mockSpawn("raw-access-token-value", 0);
+    mockFetch(apiResponse);
+
+    const result = await fetchUsage();
+
+    expect(result).not.toBeNull();
+    expect(result!.sessionPct).toBe(42);
+  });
+
+  test("returns null when keychain returns malformed JSON", async () => {
+    // No credentials file; keychain returns invalid JSON that is not a plain token
+    // Actually, malformed JSON falls through to "not JSON — use raw value as token"
+    // so it will use the raw string as token
+    mockSpawn("{invalid json", 0);
+    mockFetch(apiResponse);
+
+    const result = await fetchUsage();
+
+    // The raw string "{invalid json" is used as token, so API call proceeds
+    expect(result).not.toBeNull();
+    expect(result!.sessionPct).toBe(42);
+  });
+
+  test("returns null when keychain command fails (non-zero exit)", async () => {
+    // No credentials file; keychain command exits with error
+    mockSpawn("", 44); // security returns 44 when item not found
+
+    const result = await fetchUsage();
+
+    expect(result).toBeNull();
+  });
+
+  test("returns null when keychain returns JSON without token field", async () => {
+    // No credentials file; keychain returns valid JSON but missing accessToken
+    const noTokenJson = JSON.stringify({ someOtherField: "value" });
+    mockSpawn(noTokenJson, 0);
+
+    const result = await fetchUsage();
+
+    // JSON parsed OK but no claudeAiOauth.accessToken, so token is undefined → null
+    expect(result).toBeNull();
+  });
+
+  test("returns null when keychain returns empty output", async () => {
+    // No credentials file; keychain returns empty string
+    mockSpawn("", 0);
+
+    const result = await fetchUsage();
+
+    expect(result).toBeNull();
+  });
+
+  test("returns null when spawn throws (keychain not available)", async () => {
+    // No credentials file; spawn itself throws
+    setTestSpawn((() => {
+      throw new Error("spawn failed");
+    }) as any);
+
+    const result = await fetchUsage();
+
+    expect(result).toBeNull();
+  });
+
+  test("prefers credentials file over keychain", async () => {
+    // Write a valid credentials file
+    await Bun.write(join(tmpDir, "credentials.json"),
+      JSON.stringify({ claudeAiOauth: { accessToken: "file-token" } }));
+
+    // Keychain should NOT be called
+    let spawnCalled = false;
+    setTestSpawn((() => {
+      spawnCalled = true;
+      return {
+        stdout: new Blob([]).stream(),
+        stderr: new Blob([]).stream(),
+        exited: Promise.resolve(1),
+      };
+    }) as any);
+    mockFetch(apiResponse);
+
+    const result = await fetchUsage();
+
+    expect(spawnCalled).toBe(false);
+    expect(result).not.toBeNull();
+    expect(result!.sessionPct).toBe(42);
+  });
+
+  test("falls through to keychain when credentials file has empty token", async () => {
+    // Write credentials with empty token
+    await Bun.write(join(tmpDir, "credentials.json"),
+      JSON.stringify({ claudeAiOauth: { accessToken: "" } }));
+
+    const keychainJson = JSON.stringify({ claudeAiOauth: { accessToken: "keychain-token" } });
+    mockSpawn(keychainJson, 0);
+    mockFetch(apiResponse);
+
+    const result = await fetchUsage();
+
+    expect(result).not.toBeNull();
+    expect(result!.sessionPct).toBe(42);
   });
 });

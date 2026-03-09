@@ -1805,7 +1805,34 @@ export async function pauseAgent(agent: Agent): Promise<IbCommandResult> {
 }
 
 export async function acknowledgeQuestion(repoPath: string, questionId: string): Promise<IbCommandResult> {
-  return runIb(["acknowledge", questionId], repoPath);
+  const questionsPath = join(repoPath, ".ittybitty", "user-questions.json");
+
+  let data: { questions: any[] };
+  try {
+    const file = Bun.file(questionsPath);
+    if (!(await file.exists())) {
+      return { ok: false, exitCode: 1, stdout: "", stderr: "No questions file found" };
+    }
+    data = await file.json();
+    if (!data || !Array.isArray(data.questions)) {
+      return { ok: false, exitCode: 1, stdout: "", stderr: "Malformed questions file" };
+    }
+  } catch {
+    return { ok: false, exitCode: 1, stdout: "", stderr: "Failed to read questions file" };
+  }
+
+  const question = data.questions.find((q: any) => q.id === questionId);
+  if (!question) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Question '${questionId}' not found` };
+  }
+
+  question.acknowledged = true;
+  question.acknowledged_at = new Date().toISOString();
+  question.status = "acknowledged";
+
+  await Bun.write(questionsPath, JSON.stringify(data, null, 2) + "\n");
+
+  return { ok: true, exitCode: 0, stdout: `Acknowledged question '${questionId}' from agent '${question.agent}'`, stderr: "" };
 }
 
 /** Returns "installed", "partial", or "not-installed" */

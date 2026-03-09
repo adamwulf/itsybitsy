@@ -7,14 +7,7 @@ import { matchesKey, Key, fuzzyFilter, truncateToWidth, visibleWidth } from "@ma
 import { wrapSingleLine } from "./wrap";
 import { buildFolderItems } from "./folder-browser";
 import type { FolderItem } from "./folder-browser";
-
-// ANSI escape constants for dialog rendering
-const RESET = "\x1b[0m";
-const BOLD = "\x1b[1m";
-const DIM = "\x1b[2m";
-const REVERSE = "\x1b[7m";
-const GREEN = "\x1b[32m";
-const DIM_GRAY = "\x1b[90m";
+import { RESET, BOLD, DIM, REVERSE, GREEN, DIM_GRAY } from "./colors";
 
 export const TEXTAREA_VISIBLE_HEIGHT = 5;
 export const FOLDER_BROWSER_HEIGHT = 15;

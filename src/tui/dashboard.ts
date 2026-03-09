@@ -47,23 +47,14 @@ import {
 } from "./pane-manager";
 import type { PaneMode, DenialFilter } from "./pane-manager";
 import * as agentActions from "./agent-actions";
+import { RESET, BOLD, DIM, RED, GREEN, YELLOW, DIM_GRAY } from "./colors";
+import { MIN_LEFT_WIDTH, MAX_LEFT_WIDTH } from "./split-pane";
 
 // Re-export for test compatibility
 export { AgentTreeComponent, formatAgentRow } from "./agent-tree";
 export { RightPaneComponent, colorizeDiff, colorizeLog } from "./pane-manager";
 
-// ANSI escape constants
-const RESET = "\x1b[0m";
-const BOLD = "\x1b[1m";
-const DIM = "\x1b[2m";
-const RED = "\x1b[31m";
-const GREEN = "\x1b[32m";
-const YELLOW = "\x1b[33m";
-const DIM_GRAY = "\x1b[90m";
-
 const DIALOG_WIDTH = 60;
-const MIN_LEFT_WIDTH = 40;
-const MAX_LEFT_WIDTH = 160;
 const DEFAULT_LEFT_WIDTH = 80;
 const LEFT_WIDTH_STEP = 5;
 

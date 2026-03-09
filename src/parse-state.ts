@@ -21,6 +21,11 @@ export interface ParseStateResult {
   reason: string;
 }
 
+// Window sizes for line-based pattern matching
+const RECENT_WINDOW = 5;
+const STANDARD_WINDOW = 15;
+const BROAD_WINDOW = 20;
+
 /** Strip ANSI escape sequences from text */
 export function stripAnsi(text: string): string {
   // eslint-disable-next-line no-control-regex
@@ -82,8 +87,8 @@ export function parseState(input: string): ParseStateResult {
     }
   }
 
-  const last15 = lastNLines(input, 15);
-  const last5 = lastNLines(input, 5);
+  const last15 = lastNLines(input, STANDARD_WINDOW);
+  const last5 = lastNLines(input, RECENT_WINDOW);
 
   // Compacting — highest priority among running states
   // Checked before running since compacting also shows "(esc to interrupt)"
@@ -172,8 +177,8 @@ export function parseState(input: string): ParseStateResult {
     }
   }
 
-  // Broader 20-line window for active spinners with interrupt markers
-  const last20 = lastNLines(input, 20);
+  // Broader window for active spinners with interrupt markers
+  const last20 = lastNLines(input, BROAD_WINDOW);
   const filtered20 = filterHookSpinners(last20);
   if (spinnerRegex.test(filtered20)) {
     if (/(?:Esc|ctrl\+c)\s+to\s+interrupt/.test(filtered20)) {

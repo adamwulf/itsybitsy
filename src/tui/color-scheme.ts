@@ -3,20 +3,13 @@
  * Exports getStateColors() and setupColorSchemeDetection().
  */
 
+import {
+  RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN, WHITE,
+  DIM_GRAY, BRIGHT_BLUE, BRIGHT_MAGENTA,
+} from "./colors";
+
 type ColorScheme = "dark" | "light";
 let colorScheme: ColorScheme = "dark";
-
-// ANSI colors used by state display
-const RED = "\x1b[31m";
-const GREEN = "\x1b[32m";
-const YELLOW = "\x1b[33m";
-const BLUE = "\x1b[34m";
-const MAGENTA = "\x1b[35m";
-const CYAN = "\x1b[36m";
-const WHITE = "\x1b[37m";
-const DIM_GRAY = "\x1b[90m";
-const BRIGHT_BLUE = "\x1b[94m";
-const BRIGHT_MAGENTA = "\x1b[95m";
 
 export function getStateColors(): Record<string, string> {
   if (colorScheme === "light") {

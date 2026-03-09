@@ -31,28 +31,21 @@ Tests reassign `globalThis.fetch` directly. If a test fails before `afterEach` r
 
 ## Duplicated Code
 
-### 1. ANSI escape constants duplicated across 6+ files
-The constants `RESET`, `BOLD`, `DIM`, `RED`, `GREEN`, `YELLOW`, `BLUE`, `CYAN`, `WHITE`, `BG_RED`, `BG_YELLOW`, etc. are independently defined in:
-- `src/tui/dashboard.ts` (lines ~30-42)
-- `src/tui/agent-actions.ts` (lines ~10-22)
-- `src/tui/agent-tree.ts` (lines ~7-18)
-- `src/tui/pane-manager.ts` (lines ~8-20)
-- `src/tui/dialog-handler.ts` (lines ~10-22)
-- `src/tui/color-scheme.ts` (lines ~3-10)
+### 1. ANSI escape constants duplicated across 5 files
+The constants `RESET`, `BOLD`, `DIM`, `RED`, `GREEN`, etc. are independently defined in:
+- `src/tui/agent-actions.ts` (lines ~31-34)
+- `src/tui/agent-tree.ts` (lines ~11-15)
+- `src/tui/pane-manager.ts` (lines ~16-23)
+- `src/tui/dialog-handler.ts` (lines ~12-17)
+- `src/tui/color-scheme.ts` (lines ~10-18)
 
-**Recommendation:** Extract to a shared `src/tui/colors.ts` module. This is the single largest source of duplication in the codebase.
+Each file defines the subset it needs, but the overlap is substantial. **Recommendation:** Extract to a shared `src/tui/colors.ts` module.
 
 ### 2. `MIN_LEFT_WIDTH` / `MAX_LEFT_WIDTH` constants duplicated
 - `src/tui/dashboard.ts` (lines ~25-26)
 - `src/tui/agent-actions.ts` (lines ~5-6)
 
-Both define `MIN_LEFT_WIDTH = 30` and `MAX_LEFT_WIDTH = 70`. These should live in one place (e.g., dashboard exports them, or a shared constants file).
-
-### 3. State-to-color mapping duplicated
-- `src/tui/agent-tree.ts:formatAgentRow` — maps agent state to ANSI color
-- `src/tui/pane-manager.ts` — similar state-to-color logic for the status line
-
-Both independently map `running` → green, `waiting` → yellow, `complete` → cyan, etc. A shared `stateColor(state)` helper would DRY this up.
+Both define `MIN_LEFT_WIDTH = 40` and `MAX_LEFT_WIDTH = 160`. These should live in one place (e.g., dashboard exports them, or a shared constants file).
 
 ---
 
@@ -62,40 +55,21 @@ Both independently map `running` → green, `waiting` → yellow, `complete` →
 **File:** `src/tui/wrap.test.ts`
 Tests cover ASCII and ANSI sequences but never test emoji, CJK characters, or surrogate pairs — exactly the edge case that's broken (see Critical Issue #1).
 
-### 2. No integration test for `AgentWatcher` lifecycle
-**File:** `src/watcher.test.ts`
-The watcher tests mock `readAllAgents` and `detectAgentStates` but never test the actual `start()`/`stop()` lifecycle with `fs.watch`, timers, or debouncing. The `debounceRefresh` and `pollStates` methods are untested.
-
-### 3. No tests for `readAccessToken` keychain fallback
+### 2. No tests for `readAccessToken` keychain fallback
 **File:** `src/usage.ts:83-121`
 `readAccessToken()` has two code paths: credentials file and macOS Keychain (`security find-generic-password`). Only the credentials-file path is tested. The keychain path is untested and involves parsing JSON from a subprocess — a likely source of bugs.
 
-### 4. `dashboard.test.ts` uses `as any` extensively for mocking
+### 3. `dashboard.test.ts` uses `as any` extensively for mocking
 **File:** `src/tui/dashboard.test.ts` (throughout)
 The mock `tui` object is cast with `as any`, which means the tests won't catch if `DashboardComponent` starts depending on new TUI methods. A typed mock or interface would be more robust.
 
-### 5. No test for `captureTmuxOutput` error handling
-**File:** `src/tmux-poller.ts`
-`captureTmuxOutput()` spawns `tmux capture-pane` and handles exit codes, but the test file (`tmux-poller.test.ts`) doesn't test what happens when `Bun.spawn` throws (e.g., tmux not installed).
-
-### 6. No tests for `color-scheme.ts`
+### 4. No tests for `color-scheme.ts`
 **File:** `src/tui/color-scheme.ts`
 The OSC 11 query and Ghostty mode 2031 detection have zero test coverage.
 
-### 7. Folder browser: no test for permission errors
+### 5. Folder browser: no test for permission errors
 **File:** `src/tui/folder-browser.test.ts`
 Tests cover normal operation but never test what happens when `readdir` fails due to permissions. `buildFolderItems` catches errors and returns an empty children list, but this path is untested.
-
----
-
-## Dead Code
-
-### 1. `computeStateFromContent` may be unused at runtime
-**File:** `src/agents.ts`
-This function is exported and tested, but I could not find any call site outside of tests. `detectAgentStates()` calls `parseState()` directly from `parse-state.ts`. If `computeStateFromContent` was an earlier iteration, it may be dead code.
-
-### 2. Unused `repoDisplayName` import in some files
-Verify whether all imports of `repoDisplayName` from `registry.ts` are actually used — the function is imported in `watcher.ts` and used, but a grep across all files should confirm no stale imports exist.
 
 ---
 
@@ -114,7 +88,7 @@ The codebase should pick one pattern and use it consistently. The `setRunner`/`r
 - `watcher.ts:139`: `err instanceof Error ? err : new Error(String(err))` — correct pattern
 - `agents.ts` in several places: catches `unknown` but doesn't always wrap
 - `ib-commands.ts`: Returns `{ ok, exitCode, stdout, stderr }` — structured, consistent
-- Some error paths swallow silently (e.g., `ghostty.ts:25` catches without logging)
+- `ghostty.ts:30` catches errors but returns `{ ok: false, message }` — structured but no logging
 
 ### 3. Timer cleanup asymmetry
 **File:** `src/watcher.ts:93-111`

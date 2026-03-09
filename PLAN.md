@@ -573,31 +573,31 @@ Files: `src/tui/dashboard.ts`, `src/tui/agent-actions.ts`, `src/tui/dialog-handl
 
 ---
 
-### Phase 12B: Setup Dialog — Config Editing (Tabs 1 & 2)
+### Phase 12B: Setup Dialog — Config Editing (Tabs 1 & 2) -- COMPLETE
 **Checkpoint:** Setup dialog has three tabs: Setup (Tab 0 from 12A), Project Settings, User Settings. Config values can be viewed and edited.
 
 Files: `src/tui/dashboard.ts`, `src/config.ts`.
 
 **`src/config.ts` module:**
-- [ ] `readConfig(repoPath)` — read `.ittybitty.json` from repo, merge with `~/.ittybitty.json` (user), apply defaults. Return `{ value, source: "project" | "user" | "default" }` for each key.
-- [ ] `writeConfig(filePath, key, value)` — read JSON, set key (supports dot-notation like `hooks.injectStatus`), write back.
-- [ ] Config key definitions with types: `{ key: string, type: "number" | "boolean" | "string" | "string[]", default: any }`. Full list: `maxAgents` (number, 10), `model` (string, "sonnet"), `fps` (number, 10), `createPullRequests` (boolean, false), `allowAgentQuestions` (boolean, true), `autoCompactThreshold` (number, none), `diffTool` (string, none), `hooks.injectStatus` (boolean, true), `hooks.statusVisible` (boolean, true), `permissions.manager.allow` (string[], []), `permissions.manager.deny` (string[], []), `permissions.worker.allow` (string[], []), `permissions.worker.deny` (string[], []).
+- [x] `readConfig(repoPath)` — read `.ittybitty.json` from repo, merge with `~/.ittybitty.json` (user), apply defaults. Return `{ value, source: "project" | "user" | "default" }` for each key.
+- [x] `writeConfig(filePath, key, value)` — read JSON, set key (supports dot-notation like `hooks.injectStatus`), write back.
+- [x] Config key definitions with types: `{ key: string, type: "number" | "boolean" | "string" | "string[]", default: any }`. Full list: `maxAgents` (number, 10), `model` (string, "sonnet"), `fps` (number, 10), `createPullRequests` (boolean, false), `allowAgentQuestions` (boolean, true), `autoCompactThreshold` (number, none), `externalDiffTool` (string, none), `hooks.injectStatus` (boolean, true), `hooks.statusVisible` (boolean, true), `permissions.manager.allow` (string[], []), `permissions.manager.deny` (string[], []), `permissions.worker.allow` (string[], []), `permissions.worker.deny` (string[], []).
 
 **Tab switching:**
-- [ ] Add tab bar at top of setup dialog: `[Setup] [Project] [User]`. Active tab is highlighted.
-- [ ] Switch tabs via `1`/`2`/`3` number keys. Left/right arrows also cycle tabs (these keys are free inside the dialog since dialogs capture all input).
+- [x] Add tab bar at top of setup dialog: `[Setup] [Project] [User]`. Active tab is highlighted.
+- [x] Switch tabs via `1`/`2`/`3` number keys. Left/right arrows also cycle tabs (these keys are free inside the dialog since dialogs capture all input).
 
 **Tab 1 — Project Settings** (`.ittybitty.json`):
-- [ ] Render config keys as a select list. Each row: `key: value (source)`.
-- [ ] `Enter` on a row opens the appropriate editor based on type:
+- [x] Render config keys as a select list. Each row: `key: value (source)`.
+- [x] `Enter` on a row opens the appropriate editor based on type:
   - `number` → existing `input` dialog, validate numeric input
   - `boolean` → toggle immediately (no sub-dialog), re-render
   - `string` → existing `input` dialog
   - `string[]` → existing `select` dialog with options: "Add item" (opens `input`), "Remove item" (shows items as select list), "Back"
-- [ ] Write changes via `writeConfig()`.
+- [x] Write changes via `writeConfig()`.
 
 **Tab 2 — User Settings** (`~/.ittybitty.json`):
-- [ ] Same rendering and editing as Tab 1, but reads/writes `~/.ittybitty.json`.
+- [x] Same rendering and editing as Tab 1, but reads/writes `~/.ittybitty.json`.
 
 ---
 

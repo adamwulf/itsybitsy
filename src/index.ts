@@ -167,7 +167,7 @@ async function main() {
           if (entry.kind === "repo-header") {
             if (!isFirst) console.log(""); // blank line between repos
             isFirst = false;
-            console.log(`${BOLD}${entry.repoName}${RESET}`);
+            console.log(`${BOLD}${entry.repoName}${RESET}  ${DIM}→  ${entry.repoPath}${RESET}`);
             if (!entry.hasAgents) {
               console.log(`  ${DIM}(no agents)${RESET}`);
             }

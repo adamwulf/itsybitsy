@@ -7,10 +7,36 @@
  * each time. This means a new app appears in the Dock per session — accepted limitation.
  */
 
+type WhichFn = (cmd: string) => string | null;
+type GhosttySpawnFn = (cmd: string[], opts?: object) => { unref(): void };
+
+let whichFn: WhichFn = Bun.which as WhichFn;
+let spawnFn: GhosttySpawnFn = Bun.spawn as GhosttySpawnFn;
+
+/** Override Bun.which for testing. */
+export function setWhich(fn: WhichFn): void {
+  whichFn = fn;
+}
+
+/** Reset Bun.which to default. */
+export function resetWhich(): void {
+  whichFn = Bun.which as WhichFn;
+}
+
+/** Override Bun.spawn for testing. */
+export function setSpawn(fn: GhosttySpawnFn): void {
+  spawnFn = fn;
+}
+
+/** Reset Bun.spawn to default. */
+export function resetSpawn(): void {
+  spawnFn = Bun.spawn as GhosttySpawnFn;
+}
+
 export async function openInGhostty(
   tmuxSession: string
 ): Promise<{ ok: boolean; message: string }> {
-  if (!Bun.which("ghostty")) {
+  if (!whichFn("ghostty")) {
     return { ok: false, message: "Ghostty not found on PATH" };
   }
   try {
@@ -22,7 +48,7 @@ export async function openInGhostty(
     // Set window-size to 'latest' so tmux resizes to Ghostty's dimensions when attaching.
     // Sessions are created at 60 cols by ib and don't auto-resize on re-attach without this.
     // Pass session name as a positional parameter ($1) to avoid shell interpolation
-    const proc = Bun.spawn(["ghostty", `--command=bash -c 'tmux set-option -t "$1" window-size latest && tmux attach -t "$1"' -- ${tmuxSession}`], {
+    const proc = spawnFn(["ghostty", `--command=bash -c 'tmux set-option -t "$1" window-size latest && tmux attach -t "$1"' -- ${tmuxSession}`], {
       stdio: ["ignore", "ignore", "ignore"],
     });
     proc.unref();

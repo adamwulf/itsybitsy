@@ -5,25 +5,19 @@
  */
 
 import { stripAnsi } from "./parse-state";
+import type { SpawnFn } from "./types";
 
 /** Pluggable spawn runner — defaults to Bun.spawn, overridable for tests */
-export type SpawnResult = {
-  stdout: ReadableStream<Uint8Array> | null;
-  stderr: ReadableStream<Uint8Array> | null;
-  exited: Promise<number>;
-};
-export type SpawnRunner = (cmd: string[], opts?: { stdout: "pipe"; stderr: "pipe" }) => SpawnResult;
-
-let spawnRunner: SpawnRunner = Bun.spawn as SpawnRunner;
+let spawnRunner: SpawnFn = Bun.spawn as SpawnFn;
 
 /** Override the spawn runner (for testing) */
-export function setSpawnRunner(runner: SpawnRunner): void {
+export function setSpawnRunner(runner: SpawnFn): void {
   spawnRunner = runner;
 }
 
 /** Reset to the default Bun.spawn runner */
 export function resetSpawnRunner(): void {
-  spawnRunner = Bun.spawn as SpawnRunner;
+  spawnRunner = Bun.spawn as SpawnFn;
 }
 
 export interface TmuxPollerEvents {

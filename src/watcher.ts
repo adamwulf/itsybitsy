@@ -121,7 +121,7 @@ export class AgentWatcher {
   /** Poll states for all known agents without re-reading from disk */
   private async pollStates(): Promise<void> {
     const agents = this.lastAgents;
-    if (agents.length === 0 || this.polling) return;
+    if (agents.length === 0 || this.polling || this.refreshing) return;
     this.polling = true;
     try {
       await detectAgentStates(agents);
@@ -134,6 +134,7 @@ export class AgentWatcher {
         this.repos.map((r) => readPendingQuestions(r.path))
       );
       const questions = questionResults.flat();
+      if (!this.running) return;
       this.events.onUpdate(agents, flatList, questions, this.lastOrphanedSessions);
     } catch (err) {
       this.events.onError?.(err instanceof Error ? err : new Error(String(err)));
@@ -175,6 +176,7 @@ export class AgentWatcher {
       );
       const questions = questionResults.flat();
 
+      if (!this.running) return;
       this.events.onUpdate(agents, flatList, questions, orphanedTmuxSessions);
     } catch (err) {
       this.events.onError?.(err instanceof Error ? err : new Error(String(err)));

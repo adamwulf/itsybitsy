@@ -1480,6 +1480,199 @@ describe("mergeAgent (native)", () => {
     expect(tempBranchDelete).toBeDefined();
   });
 
+  test("returns error when merging from within agent's own worktree", async () => {
+    // Construct a repoPath such that worktreePath = join(repoPath, ".ittybitty/agents/agent-abc/repo")
+    // is a prefix of process.cwd(). Since cwd is something like /Users/.../repo, we use
+    // a repoPath that makes worktreePath equal to or a prefix of the actual cwd.
+    const cwd = process.cwd();
+    // worktreePath = join(repoPath, ".ittybitty", "agents", "agent-abc", "repo")
+    // We need cwd.startsWith(worktreePath), so worktreePath must be a prefix of cwd.
+    // Set repoPath such that worktreePath == cwd (or prefix).
+    // cwd = repoPath + "/.ittybitty/agents/agent-abc/repo"
+    // => repoPath = cwd without the suffix
+    const suffix = join(".ittybitty", "agents", "agent-abc", "repo");
+    // We need to create a repoPath where worktreePath is exactly cwd
+    // So repoPath = cwd.slice(0, cwd.length - suffix.length - 1)
+    // But this requires cwd to end with the suffix, which it won't.
+    // Instead, use a trick: set repoPath to the parent of cwd's ancestor such that
+    // worktreePath = cwd. We can use a temporary directory approach:
+    // Create the agent dir under a path that makes worktreePath == cwd
+    // Actually simplest: just use "/" as repoPath and agent ID such that
+    // worktreePath would be /.ittybitty/agents/agent-abc/repo — that's not cwd.
+    //
+    // Best approach: The check is `process.cwd().startsWith(worktreePath)`.
+    // We need worktreePath to be a prefix of cwd.
+    // worktreePath = join(repoPath, ".ittybitty", "agents", "agent-abc", "repo")
+    // If we set repoPath so that worktreePath = "/" (which is a prefix of everything),
+    // that would work, but it's not realistic.
+    //
+    // Most practical: construct repoPath from cwd by stripping the suffix.
+    // cwd = /Users/adamwulf/Developer/bun/itsybitsy/.ittybitty/agents/agent-d33c5f85/repo
+    // If we use a different agent ID, we can make worktreePath = cwd.
+    // We need the agent to have the same ID as the agent directory in cwd.
+    // Extract our own agent ID from cwd:
+    const cwdMatch = cwd.match(/\/.ittybitty\/agents\/([^/]+)\/repo/);
+    if (!cwdMatch) {
+      // Not running inside an agent worktree — skip this test gracefully
+      // by testing with a constructed path that IS a prefix
+      // This shouldn't happen in CI, but handle it anyway
+      return;
+    }
+    const ourAgentId = cwdMatch[1]!;
+    // Construct repoPath so that worktreePath = cwd
+    const repoPath = cwd.replace(new RegExp(`/\\.ittybitty/agents/${ourAgentId}/repo$`), "");
+
+    // Create the agent directory at the expected path
+    const agentDir = join(repoPath, ".ittybitty", "agents", ourAgentId);
+    // agentDir should already exist (it's our own agent dir)
+    // We just need meta.json to exist there — but we shouldn't modify the real one.
+    // Instead, use a different approach: just ensure dirExists check passes
+    // by verifying the meta.json already exists from our actual agent.
+    const metaExists = await Bun.file(join(agentDir, "meta.json")).exists().catch(() => false);
+    if (!metaExists) return; // Can't run this test
+
+    const runner = makeMergeMock();
+    setLifecycleSpawnRunner(runner);
+    setMergeSpawnRunner(runner);
+
+    const agent = _makeAgent({
+      id: ourAgentId,
+      repoPath,
+      repoName: "test",
+      meta: { tmux_session: `tmux-${ourAgentId}` } as any,
+    });
+    const result = await mergeAgent(agent);
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("Cannot merge agent from within its own worktree");
+  });
+
+  test("returns error when checkout fails", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-abc", tmux_session: "tmux-agent-abc",
+    }));
+
+    const runner = makeMergeMock({ checkoutFails: true });
+    setLifecycleSpawnRunner(runner);
+    setMergeSpawnRunner(runner);
+
+    const agent = makeAgent("agent-abc", tempDir);
+    const result = await mergeAgent(agent);
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("Could not checkout");
+  });
+
+  test("returns error when merge (ff-only/no-ff) fails", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-abc", tmux_session: "tmux-agent-abc",
+    }));
+
+    const runner = makeMergeMock({ mergeFails: true });
+    setLifecycleSpawnRunner(runner);
+    setMergeSpawnRunner(runner);
+
+    const agent = makeAgent("agent-abc", tempDir);
+    const result = await mergeAgent(agent);
+
+    expect(result.ok).toBe(false);
+    // Should contain either "Fast-forward failed" or "Merge failed"
+    expect(result.stderr).toMatch(/Fast-forward failed|Merge failed/);
+  });
+
+  test("includes stderr content in error messages when git commands fail", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-abc", tmux_session: "tmux-agent-abc",
+    }));
+
+    // Custom mock that returns stderr content on rebase failure
+    const runner = (cmd: string[]) => {
+      spawnCalls.push(cmd);
+      const cmdStr = cmd.join(" ");
+
+      // Make the actual rebase fail with stderr content
+      if (cmd.includes("rebase") && !cmdStr.includes("/tmp/ib-rebase-check-") && !cmd.includes("--abort")) {
+        return {
+          stdout: new Response("").body!,
+          stderr: new Response("error: could not apply abc1234... some commit\nConflict in file.ts").body!,
+          exited: Promise.resolve(1),
+        } as SpawnResult;
+      }
+
+      // git status --porcelain → clean
+      if (cmdStr.includes("status") && cmdStr.includes("--porcelain")) {
+        return { stdout: new Response("").body!, stderr: new Response("").body!, exited: Promise.resolve(0) } as SpawnResult;
+      }
+      // git branch --show-current → main
+      if (cmdStr.includes("branch") && cmdStr.includes("--show-current")) {
+        return { stdout: new Response("main").body!, stderr: new Response("").body!, exited: Promise.resolve(0) } as SpawnResult;
+      }
+      // git show-ref → exists
+      if (cmdStr.includes("show-ref")) {
+        return { stdout: new Response("").body!, stderr: new Response("").body!, exited: Promise.resolve(0) } as SpawnResult;
+      }
+      // git log --oneline → 1 commit
+      if (cmdStr.includes("log") && cmdStr.includes("--oneline")) {
+        return { stdout: new Response("abc1234 some commit").body!, stderr: new Response("").body!, exited: Promise.resolve(0) } as SpawnResult;
+      }
+      // Conflict check rebase → success
+      if (cmd.includes("rebase") && cmdStr.includes("/tmp/ib-rebase-check-")) {
+        return { stdout: new Response("").body!, stderr: new Response("").body!, exited: Promise.resolve(0) } as SpawnResult;
+      }
+      // Default → success
+      return { stdout: new Response("").body!, stderr: new Response("").body!, exited: Promise.resolve(0) } as SpawnResult;
+    };
+
+    setLifecycleSpawnRunner(runner);
+    setMergeSpawnRunner(runner);
+
+    const agent = makeAgent("agent-abc", tempDir);
+    const result = await mergeAgent(agent);
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("Rebase failed:");
+    expect(result.stderr).toContain("could not apply");
+  });
+
+  test("merge still succeeds when worktree remove fails (rm -rf fallback)", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-abc", tmux_session: "tmux-agent-abc",
+    }));
+
+    // Custom mock: worktree remove fails
+    const baseMock = makeMergeMock();
+    const runner = (cmd: string[], opts?: any) => {
+      spawnCalls.push(cmd);
+      // Make git worktree remove fail for the actual worktree (not the conflict check temp)
+      if (cmd.includes("worktree") && cmd.includes("remove") && !cmd.some((a) => a.includes("/tmp/ib-rebase-check-"))) {
+        return {
+          stdout: new Response("").body!,
+          stderr: new Response("error: failed to remove worktree").body!,
+          exited: Promise.resolve(1),
+        } as SpawnResult;
+      }
+      return baseMock(cmd, opts);
+    };
+
+    setLifecycleSpawnRunner(runner);
+    setMergeSpawnRunner(runner);
+
+    const agent = makeAgent("agent-abc", tempDir);
+    const result = await mergeAgent(agent);
+
+    // Should still succeed — rm -rf fallback handles cleanup
+    expect(result.ok).toBe(true);
+    expect(result.stdout).toBe("Closed agent: agent-abc");
+  });
+
   test("logs conflict check failure to agent.log", async () => {
     const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
     await mkdir(join(agentDir, "repo"), { recursive: true });

@@ -3,6 +3,7 @@
  * Each function takes a context object that provides access to dashboard state.
  */
 
+import { existsSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { agentWorktreePath } from "../agents";
 import type { Agent, FlatEntry, PendingQuestion } from "../agents";
@@ -504,6 +505,11 @@ export function handleOpenDiffTool(ctx: ActionCtx) {
   const tool = ctx.diffTool;
 
   const cwd = agentWorktreePath(agent);
+
+  if (!existsSync(cwd)) {
+    ctx.setNotice("Worktree no longer exists — agent may have been merged");
+    return;
+  }
 
   // Run diff tool in the worktree, showing changes since merge-base with main.
   // Tool string is unquoted so multi-word tools (e.g. "git webdiff") are word-split correctly.

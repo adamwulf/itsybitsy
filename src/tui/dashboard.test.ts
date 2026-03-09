@@ -10,6 +10,7 @@ import { TmuxPaneComponent, RightPaneComponent, DashboardComponent, AgentTreeCom
 import { visibleWidth } from "@mariozechner/pi-tui";
 import { setRunner, resetRunner } from "../ib-commands";
 import { PANE_MODES } from "./pane-manager";
+import { assertDialog } from "./test-helpers";
 
 function makeAgent(id: string, repoPath: string, archived = false): Agent {
   return _makeAgent({ id, repoPath, archived });
@@ -319,11 +320,11 @@ describe("DashboardComponent dialog and action handlers", () => {
     setupDashboardWithAgent();
     dashboard.handleInput("x");
     expect(dashboard.dialog).not.toBeNull();
-    expect(dashboard.dialog!.type).toBe("confirm");
-    expect((dashboard.dialog as any).prompt).toContain("Kill agent");
-    expect((dashboard.dialog as any).prompt).toContain("agent-test");
-    expect((dashboard.dialog as any).confirmLabel).toBe("Kill");
-    expect((dashboard.dialog as any).focusedButton).toBe("cancel");
+    const d = assertDialog(dashboard.dialog, 'confirm');
+    expect(d.prompt).toContain("Kill agent");
+    expect(d.prompt).toContain("agent-test");
+    expect(d.confirmLabel).toBe("Kill");
+    expect(d.focusedButton).toBe("cancel");
   });
 
   test("kill confirm dialog: Enter on Kill button executes kill", async () => {
@@ -331,7 +332,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     dashboard.handleInput("x");
     // focusedButton defaults to "cancel", Tab to Kill, then press Enter
     dashboard.handleInput("\t");
-    expect((dashboard.dialog as any).focusedButton).toBe("confirm");
+    expect(assertDialog(dashboard.dialog, 'confirm').focusedButton).toBe("confirm");
     dashboard.handleInput("\r");
     // Wait for async execution
     await Bun.sleep(10);
@@ -343,7 +344,7 @@ describe("DashboardComponent dialog and action handlers", () => {
   test("kill confirm dialog: Enter on default Cancel dismisses", () => {
     setupDashboardWithAgent();
     dashboard.handleInput("x");
-    expect((dashboard.dialog as any).focusedButton).toBe("cancel");
+    expect(assertDialog(dashboard.dialog, 'confirm').focusedButton).toBe("cancel");
     dashboard.handleInput("\r");
     expect(dashboard.dialog).toBeNull();
     expect(lastIbCall).toBeNull();
@@ -352,11 +353,12 @@ describe("DashboardComponent dialog and action handlers", () => {
   test("kill confirm dialog: Tab cycles between buttons", () => {
     setupDashboardWithAgent();
     dashboard.handleInput("x");
-    expect((dashboard.dialog as any).focusedButton).toBe("cancel");
+    const d = assertDialog(dashboard.dialog, 'confirm');
+    expect(d.focusedButton).toBe("cancel");
     dashboard.handleInput("\t");
-    expect((dashboard.dialog as any).focusedButton).toBe("confirm");
+    expect(d.focusedButton).toBe("confirm");
     dashboard.handleInput("\t");
-    expect((dashboard.dialog as any).focusedButton).toBe("cancel");
+    expect(d.focusedButton).toBe("cancel");
   });
 
   test("kill confirm dialog: Escape cancels", () => {
@@ -371,9 +373,9 @@ describe("DashboardComponent dialog and action handlers", () => {
     setupDashboardWithAgent();
     dashboard.handleInput("!");
     expect(dashboard.dialog).not.toBeNull();
-    expect(dashboard.dialog!.type).toBe("confirm");
-    expect((dashboard.dialog as any).prompt).toContain("FORCE KILL");
-    expect((dashboard.dialog as any).confirmLabel).toBe("Nuke");
+    const d = assertDialog(dashboard.dialog, 'confirm');
+    expect(d.prompt).toContain("FORCE KILL");
+    expect(d.confirmLabel).toBe("Nuke");
   });
 
   test("nuke confirm: Enter on Nuke button executes nuke --force", async () => {
@@ -397,10 +399,10 @@ describe("DashboardComponent dialog and action handlers", () => {
     dashboard.onUpdate([], [], []);
     dashboard.handleInput("!");
     expect(dashboard.dialog).not.toBeNull();
-    expect(dashboard.dialog!.type).toBe("confirm");
-    expect((dashboard.dialog as any).prompt).toContain("NUKE ALL");
-    expect((dashboard.dialog as any).confirmLabel).toBe("Nuke All");
-    expect((dashboard.dialog as any).focusedButton).toBe("cancel");
+    const d = assertDialog(dashboard.dialog, 'confirm');
+    expect(d.prompt).toContain("NUKE ALL");
+    expect(d.confirmLabel).toBe("Nuke All");
+    expect(d.focusedButton).toBe("cancel");
   });
 
   test("nuke-all confirm executes nuke --force with no agent ID", async () => {
@@ -435,8 +437,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     dashboard.onUpdate([], [], []);
     dashboard.handleInput("!");
     expect(dashboard.dialog).not.toBeNull();
-    expect(dashboard.dialog!.type).toBe("select");
-    expect((dashboard.dialog as any).prompt).toContain("Nuke ALL");
+    expect(assertDialog(dashboard.dialog, 'select').prompt).toContain("Nuke ALL");
   });
 
   test("R key resumes stopped agents", async () => {
@@ -459,10 +460,10 @@ describe("DashboardComponent dialog and action handlers", () => {
     setupDashboardWithAgent("running");
     dashboard.handleInput("P");
     expect(dashboard.dialog).not.toBeNull();
-    expect(dashboard.dialog!.type).toBe("confirm");
-    expect((dashboard.dialog as any).prompt).toContain("Pause agent");
-    expect((dashboard.dialog as any).confirmLabel).toBe("Pause");
-    expect((dashboard.dialog as any).focusedButton).toBe("cancel");
+    const d = assertDialog(dashboard.dialog, 'confirm');
+    expect(d.prompt).toContain("Pause agent");
+    expect(d.confirmLabel).toBe("Pause");
+    expect(d.focusedButton).toBe("cancel");
   });
 
   test("P key pause confirm executes pause command", async () => {
@@ -500,15 +501,14 @@ describe("DashboardComponent dialog and action handlers", () => {
   test("r key opens reassign fuzzy select dialog", () => {
     setupDashboardWithAgent();
     dashboard.handleInput("r");
-    expect(dashboard.dialog!.type).toBe("fuzzy");
-    expect((dashboard.dialog as any).prompt).toContain("Reassign");
+    expect(assertDialog(dashboard.dialog, 'fuzzy').prompt).toContain("Reassign");
   });
 
   test("reassign fuzzy: shows '(No parent - make root)' as first option", () => {
     setupDashboardWithAgent();
     dashboard.handleInput("r");
-    const items = (dashboard.dialog as any).allItems as string[];
-    expect(items[0]).toBe("(No parent - make root)");
+    const d = assertDialog(dashboard.dialog, 'fuzzy');
+    expect(d.allItems[0]).toBe("(No parent - make root)");
   });
 
   test("reassign fuzzy: selecting 'No parent' calls reassign with --none", async () => {
@@ -540,8 +540,8 @@ describe("DashboardComponent dialog and action handlers", () => {
     dashboard.onUpdate([agent1, agent2], flatList, []);
 
     dashboard.handleInput("r");
-    const items = (dashboard.dialog as any).allItems as string[];
-    expect(items).toContain("agent-manager");
+    const d = assertDialog(dashboard.dialog, 'fuzzy');
+    expect(d.allItems).toContain("agent-manager");
     // Move down to agent-manager (index 1) and select — use arrow key, not j (which is a search char in fuzzy)
     dashboard.handleInput("\x1b[B");
     dashboard.handleInput("\r");
@@ -569,10 +569,10 @@ describe("DashboardComponent dialog and action handlers", () => {
     dashboard.onUpdate([agent1, worker], flatList, []);
 
     dashboard.handleInput("r");
-    const items = (dashboard.dialog as any).allItems as string[];
-    expect(items).not.toContain("agent-test");  // self excluded
-    expect(items).not.toContain("agent-worker");  // worker excluded
-    expect(items).toEqual(["(No parent - make root)"]);
+    const d = assertDialog(dashboard.dialog, 'fuzzy');
+    expect(d.allItems).not.toContain("agent-test");  // self excluded
+    expect(d.allItems).not.toContain("agent-worker");  // worker excluded
+    expect(d.allItems).toEqual(["(No parent - make root)"]);
   });
 
   test("reassign fuzzy: excludes descendants to prevent circular dependency", () => {
@@ -606,13 +606,13 @@ describe("DashboardComponent dialog and action handlers", () => {
 
     // Select parent and reassign
     dashboard.handleInput("r");
-    const items = (dashboard.dialog as any).allItems as string[];
+    const d = assertDialog(dashboard.dialog, 'fuzzy');
     // Should not include child or grandchild (descendants of parent)
-    expect(items).not.toContain("agent-child");
-    expect(items).not.toContain("agent-grandchild");
+    expect(d.allItems).not.toContain("agent-child");
+    expect(d.allItems).not.toContain("agent-grandchild");
     // Should include sibling
-    expect(items).toContain("agent-sibling");
-    expect(items).toContain("(No parent - make root)");
+    expect(d.allItems).toContain("agent-sibling");
+    expect(d.allItems).toContain("(No parent - make root)");
   });
 
   test("reassign fuzzy: excludes agents from other repos", () => {
@@ -634,15 +634,14 @@ describe("DashboardComponent dialog and action handlers", () => {
     dashboard.onUpdate([agent1, otherRepo], flatList, []);
 
     dashboard.handleInput("r");
-    const items = (dashboard.dialog as any).allItems as string[];
-    expect(items).not.toContain("agent-other");
+    const d = assertDialog(dashboard.dialog, 'fuzzy');
+    expect(d.allItems).not.toContain("agent-other");
   });
 
   test("s key opens send textarea dialog", () => {
     setupDashboardWithAgent();
     dashboard.handleInput("s");
-    expect(dashboard.dialog!.type).toBe("textarea");
-    expect((dashboard.dialog as any).prompt).toContain("Send message");
+    expect(assertDialog(dashboard.dialog, 'textarea').prompt).toContain("Send message");
   });
 
   test("send textarea: typing, backspace, and submitting", async () => {
@@ -651,7 +650,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     for (const ch of "hellx") dashboard.handleInput(ch);
     dashboard.handleInput("\x7f"); // backspace
     for (const ch of "o") dashboard.handleInput(ch);
-    expect((dashboard.dialog as any).lines.join("\n")).toBe("hello");
+    expect(assertDialog(dashboard.dialog, 'textarea').lines.join("\n")).toBe("hello");
     // Tab to cancel, then tab to send button, then Enter to submit
     dashboard.handleInput("\t");
     dashboard.handleInput("\t");
@@ -663,74 +662,79 @@ describe("DashboardComponent dialog and action handlers", () => {
   test("send textarea: Tab cycles forward through text → cancel → send → text", () => {
     setupDashboardWithAgent();
     dashboard.handleInput("s");
-    expect((dashboard.dialog as any).focusedButton).toBe("text");
+    const d = assertDialog(dashboard.dialog, 'textarea');
+    expect(d.focusedButton).toBe("text");
     dashboard.handleInput("\t");
-    expect((dashboard.dialog as any).focusedButton).toBe("cancel");
+    expect(d.focusedButton).toBe("cancel");
     dashboard.handleInput("\t");
-    expect((dashboard.dialog as any).focusedButton).toBe("send");
+    expect(d.focusedButton).toBe("send");
     dashboard.handleInput("\t");
-    expect((dashboard.dialog as any).focusedButton).toBe("text");
+    expect(d.focusedButton).toBe("text");
   });
 
   test("send textarea: Shift+Tab cycles backward through text → send → cancel → text", () => {
     setupDashboardWithAgent();
     dashboard.handleInput("s");
-    expect((dashboard.dialog as any).focusedButton).toBe("text");
+    const d = assertDialog(dashboard.dialog, 'textarea');
+    expect(d.focusedButton).toBe("text");
     // Legacy Shift+Tab sequence
     dashboard.handleInput("\x1b[Z");
-    expect((dashboard.dialog as any).focusedButton).toBe("send");
+    expect(d.focusedButton).toBe("send");
     dashboard.handleInput("\x1b[Z");
-    expect((dashboard.dialog as any).focusedButton).toBe("cancel");
+    expect(d.focusedButton).toBe("cancel");
     dashboard.handleInput("\x1b[Z");
-    expect((dashboard.dialog as any).focusedButton).toBe("text");
+    expect(d.focusedButton).toBe("text");
   });
 
   test("send textarea: Kitty protocol Shift+Tab cycles backward", () => {
     setupDashboardWithAgent();
     dashboard.handleInput("s");
-    expect((dashboard.dialog as any).focusedButton).toBe("text");
+    const d = assertDialog(dashboard.dialog, 'textarea');
+    expect(d.focusedButton).toBe("text");
     // Kitty protocol Shift+Tab: CSI 9;2u (tab=9, shift modifier=2)
     dashboard.handleInput("\x1b[9;2u");
-    expect((dashboard.dialog as any).focusedButton).toBe("send");
+    expect(d.focusedButton).toBe("send");
     dashboard.handleInput("\x1b[9;2u");
-    expect((dashboard.dialog as any).focusedButton).toBe("cancel");
+    expect(d.focusedButton).toBe("cancel");
     dashboard.handleInput("\x1b[9;2u");
-    expect((dashboard.dialog as any).focusedButton).toBe("text");
+    expect(d.focusedButton).toBe("text");
   });
 
   test("send textarea: sendAll defaults to false", () => {
     setupDashboardWithAgent();
     dashboard.handleInput("s");
-    expect((dashboard.dialog as any).sendAll).toBe(false);
+    expect(assertDialog(dashboard.dialog, 'textarea').sendAll).toBe(false);
   });
 
   test("send textarea: Ctrl+A toggles sendAll", () => {
     setupDashboardWithAgent();
     dashboard.handleInput("s");
-    expect((dashboard.dialog as any).sendAll).toBe(false);
+    const d = assertDialog(dashboard.dialog, 'textarea');
+    expect(d.sendAll).toBe(false);
     dashboard.handleInput("\x01"); // Ctrl+A
-    expect((dashboard.dialog as any).sendAll).toBe(true);
+    expect(d.sendAll).toBe(true);
     dashboard.handleInput("\x01"); // Ctrl+A again
-    expect((dashboard.dialog as any).sendAll).toBe(false);
+    expect(d.sendAll).toBe(false);
   });
 
   test("send textarea: Ctrl+A works from any focus position", () => {
     setupDashboardWithAgent();
     dashboard.handleInput("s");
     // Start in text focus
-    expect((dashboard.dialog as any).focusedButton).toBe("text");
+    const d = assertDialog(dashboard.dialog, 'textarea');
+    expect(d.focusedButton).toBe("text");
     dashboard.handleInput("\x01");
-    expect((dashboard.dialog as any).sendAll).toBe(true);
+    expect(d.sendAll).toBe(true);
     // Tab to cancel
     dashboard.handleInput("\t");
-    expect((dashboard.dialog as any).focusedButton).toBe("cancel");
+    expect(d.focusedButton).toBe("cancel");
     dashboard.handleInput("\x01");
-    expect((dashboard.dialog as any).sendAll).toBe(false);
+    expect(d.sendAll).toBe(false);
     // Tab to send
     dashboard.handleInput("\t");
-    expect((dashboard.dialog as any).focusedButton).toBe("send");
+    expect(d.focusedButton).toBe("send");
     dashboard.handleInput("\x01");
-    expect((dashboard.dialog as any).sendAll).toBe(true);
+    expect(d.sendAll).toBe(true);
   });
 
   test("send textarea: sendAll sends to all active non-archived agents", async () => {
@@ -759,7 +763,7 @@ describe("DashboardComponent dialog and action handlers", () => {
 
     dashboard.handleInput("s");
     dashboard.handleInput("\x01"); // Ctrl+A to toggle sendAll
-    expect((dashboard.dialog as any).sendAll).toBe(true);
+    expect(assertDialog(dashboard.dialog, 'textarea').sendAll).toBe(true);
     for (const ch of "hi") dashboard.handleInput(ch);
     // Tab to cancel, tab to send, enter to submit
     dashboard.handleInput("\t");
@@ -792,7 +796,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     dashboard.onUpdate([agent1, agent2], flatList, []);
 
     dashboard.handleInput("s");
-    expect((dashboard.dialog as any).sendAll).toBe(false);
+    expect(assertDialog(dashboard.dialog, 'textarea').sendAll).toBe(false);
     for (const ch of "hi") dashboard.handleInput(ch);
     dashboard.handleInput("\t");
     dashboard.handleInput("\t");
@@ -807,12 +811,13 @@ describe("DashboardComponent dialog and action handlers", () => {
     setupDashboardWithAgent();
     dashboard.handleInput("s");
     // sendAll starts as false
-    expect((dashboard.dialog as any).sendAll).toBe(false);
+    const d = assertDialog(dashboard.dialog, 'textarea');
+    expect(d.sendAll).toBe(false);
     // Toggle sendAll on
     dashboard.handleInput("\x01");
-    expect((dashboard.dialog as any).sendAll).toBe(true);
+    expect(d.sendAll).toBe(true);
     // Dialog prompt remains the same (title unchanged)
-    expect((dashboard.dialog as any).prompt).toContain("Send message");
+    expect(d.prompt).toContain("Send message");
   });
 
   test("send textarea: answer question dialog does NOT have sendAll", () => {
@@ -827,8 +832,8 @@ describe("DashboardComponent dialog and action handlers", () => {
     dashboard.onUpdate([agent], flatList, [question]);
     dashboard.jumpToMode("QUESTIONS");
     dashboard.handleInput("\r"); // Enter to answer
-    expect(dashboard.dialog!.type).toBe("textarea");
-    expect((dashboard.dialog as any).sendAll).toBeUndefined();
+    const d = assertDialog(dashboard.dialog, 'textarea');
+    expect(d.sendAll).toBeUndefined();
   });
 
   test("m key runs merge-check then shows confirm", async () => {
@@ -836,8 +841,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     dashboard.handleInput("m");
     // Wait for merge-check to complete
     await Bun.sleep(50);
-    expect(dashboard.dialog!.type).toBe("confirm");
-    expect((dashboard.dialog as any).prompt).toContain("Merge agent-test");
+    expect(assertDialog(dashboard.dialog, 'confirm').prompt).toContain("Merge agent-test");
   });
 
   test("merge: merge-check failure shows error message", async () => {
@@ -881,8 +885,7 @@ describe("DashboardComponent dialog and action handlers", () => {
 
     dashboard.handleInput("a");
     // Should be new-agent-form dialog, not select dialog (repo)
-    expect(dashboard.dialog!.type).toBe("new-agent-form");
-    expect((dashboard.dialog as any).repoName).toBe("only-repo");
+    expect(assertDialog(dashboard.dialog, 'new-agent-form').repoName).toBe("only-repo");
   });
 
   test("a key with multiple repos and no selection uses first repo", () => {
@@ -894,8 +897,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     lastIbCall = null;
 
     dashboard.handleInput("a");
-    expect(dashboard.dialog!.type).toBe("new-agent-form");
-    expect((dashboard.dialog as any).repoName).toBe("repo-one");
+    expect(assertDialog(dashboard.dialog, 'new-agent-form').repoName).toBe("repo-one");
   });
 
   test("new-agent form: Tab cycles focus through all fields", () => {
@@ -903,8 +905,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     dashboard.setRepos([{ path: "/repos/only", name: "only-repo" }]);
 
     dashboard.handleInput("a");
-    const d = dashboard.dialog as any;
-    expect(d.type).toBe("new-agent-form");
+    const d = assertDialog(dashboard.dialog, 'new-agent-form');
     expect(d.focused).toBe("name");
 
     dashboard.handleInput("\t"); // Tab to worker
@@ -934,7 +935,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     dashboard.setRepos([{ path: "/repos/only", name: "only-repo" }]);
 
     dashboard.handleInput("a");
-    const d = dashboard.dialog as any;
+    const d = assertDialog(dashboard.dialog, 'new-agent-form');
     expect(d.focused).toBe("name");
 
     // Shift+Tab should go to cancel (create skipped — prompt empty)
@@ -950,7 +951,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     dashboard.setRepos([{ path: "/repos/only", name: "only-repo" }]);
 
     dashboard.handleInput("a");
-    const d = dashboard.dialog as any;
+    const d = assertDialog(dashboard.dialog, 'new-agent-form');
     dashboard.handleInput("\t"); // focus worker
     expect(d.focused).toBe("worker");
     expect(d.worker).toBe(false);
@@ -1027,9 +1028,10 @@ describe("DashboardComponent dialog and action handlers", () => {
     dashboard.handleInput("\t"); // worker
     dashboard.handleInput("\t"); // prompt
     dashboard.handleInput("\t"); // cancel (create skipped)
-    expect((dashboard.dialog as any).focused).toBe("cancel");
+    const d = assertDialog(dashboard.dialog, 'new-agent-form');
+    expect(d.focused).toBe("cancel");
     dashboard.handleInput("\t"); // name (create still skipped — prompt still empty)
-    expect((dashboard.dialog as any).focused).toBe("name");
+    expect(d.focused).toBe("name");
     await Bun.sleep(10);
     // Should NOT have called newAgent
     expect(lastIbCall).toBeNull();
@@ -1047,7 +1049,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     dashboard.handleInput("\t"); // worker
     dashboard.handleInput("\t"); // prompt
     dashboard.handleInput("\t"); // cancel
-    expect((dashboard.dialog as any).focused).toBe("cancel");
+    expect(assertDialog(dashboard.dialog, 'new-agent-form').focused).toBe("cancel");
     dashboard.handleInput("\r");
     expect(dashboard.dialog).toBeNull();
   });
@@ -1060,7 +1062,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     // Tab to prompt
     dashboard.handleInput("\t");
     dashboard.handleInput("\t");
-    const d = dashboard.dialog as any;
+    const d = assertDialog(dashboard.dialog, 'new-agent-form');
     expect(d.focused).toBe("prompt");
     for (const ch of "line one") dashboard.handleInput(ch);
     dashboard.handleInput("\r"); // newline in prompt
@@ -1329,8 +1331,7 @@ describe("DashboardComponent right pane and navigation features", () => {
     dashboard.handleInput("q"); // jump to QUESTIONS
     dashboard.handleInput("\r"); // Enter to answer
     expect(dashboard.dialog).not.toBeNull();
-    expect(dashboard.dialog!.type).toBe("textarea");
-    expect((dashboard.dialog as any).prompt).toContain("Answer");
+    expect(assertDialog(dashboard.dialog, 'textarea').prompt).toContain("Answer");
   });
 
   test("answer question sends acknowledge then message", async () => {
@@ -2002,8 +2003,7 @@ describe("Orphaned tmux sessions (Phase 10)", () => {
     dashboard.handleInput("e"); // jump to ERRORS mode
     dashboard.handleInput("\r"); // Enter
     expect(dashboard.dialog).not.toBeNull();
-    expect(dashboard.dialog!.type).toBe("confirm");
-    expect((dashboard.dialog as any).prompt).toContain("ittybitty-orphan");
+    expect(assertDialog(dashboard.dialog, 'confirm').prompt).toContain("ittybitty-orphan");
     resetRunner();
   });
 
@@ -2016,9 +2016,9 @@ describe("Orphaned tmux sessions (Phase 10)", () => {
     dashboard.handleInput("e"); // jump to ERRORS mode
     dashboard.handleInput("\r"); // Enter
     expect(dashboard.dialog).not.toBeNull();
-    expect(dashboard.dialog!.type).toBe("select");
-    expect((dashboard.dialog as any).items).toContain("ittybitty-orphan1");
-    expect((dashboard.dialog as any).items).toContain("ittybitty-orphan2");
+    const d = assertDialog(dashboard.dialog, 'select');
+    expect(d.items).toContain("ittybitty-orphan1");
+    expect(d.items).toContain("ittybitty-orphan2");
     resetRunner();
   });
 
@@ -2159,8 +2159,7 @@ describe("Context-sensitive footer (repo header vs agent)", () => {
     expect(dashboard.agentTree.selectedRepoHeader).toBe("alpha");
     dashboard.handleInput("r");
     expect(dashboard.dialog).not.toBeNull();
-    expect(dashboard.dialog!.type).toBe("input");
-    expect((dashboard.dialog as any).prompt).toContain("Rename");
+    expect(assertDialog(dashboard.dialog, 'input').prompt).toContain("Rename");
   });
 
   test("r key on agent opens reassign dialog", () => {
@@ -2169,8 +2168,7 @@ describe("Context-sensitive footer (repo header vs agent)", () => {
     expect(dashboard.selectedAgent).not.toBeNull();
     dashboard.handleInput("r");
     expect(dashboard.dialog).not.toBeNull();
-    expect(dashboard.dialog!.type).toBe("fuzzy");
-    expect((dashboard.dialog as any).prompt).toContain("Reassign");
+    expect(assertDialog(dashboard.dialog, 'fuzzy').prompt).toContain("Reassign");
   });
 
   test("x key on repo header opens remove dialog instead of kill", () => {
@@ -2178,9 +2176,9 @@ describe("Context-sensitive footer (repo header vs agent)", () => {
     expect(dashboard.agentTree.selectedRepoHeader).toBe("alpha");
     dashboard.handleInput("x");
     expect(dashboard.dialog).not.toBeNull();
-    expect(dashboard.dialog!.type).toBe("confirm");
-    expect((dashboard.dialog as any).prompt).toContain("Remove");
-    expect((dashboard.dialog as any).prompt).toContain("alpha");
+    const d = assertDialog(dashboard.dialog, 'confirm');
+    expect(d.prompt).toContain("Remove");
+    expect(d.prompt).toContain("alpha");
   });
 
   test("x key on agent opens kill dialog", () => {
@@ -2189,8 +2187,7 @@ describe("Context-sensitive footer (repo header vs agent)", () => {
     expect(dashboard.selectedAgent).not.toBeNull();
     dashboard.handleInput("x");
     expect(dashboard.dialog).not.toBeNull();
-    expect(dashboard.dialog!.type).toBe("confirm");
-    expect((dashboard.dialog as any).prompt).toContain("Kill");
+    expect(assertDialog(dashboard.dialog, 'confirm').prompt).toContain("Kill");
   });
 });
 
@@ -2229,8 +2226,7 @@ describe("Repo nickname display in agent tree", () => {
     setRunner(async () => ({ ok: true, exitCode: 0, stdout: "", stderr: "" }));
     dashboard.setRepos([{ path: "/repos/myproject", name: "myproject", nickname: "myproj" }]);
     dashboard.handleInput("a");
-    expect(dashboard.dialog!.type).toBe("new-agent-form");
-    expect((dashboard.dialog as any).repoName).toBe("myproj");
+    expect(assertDialog(dashboard.dialog, 'new-agent-form').repoName).toBe("myproj");
     resetRunner();
   });
 });

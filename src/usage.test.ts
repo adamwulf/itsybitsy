@@ -347,14 +347,14 @@ describe("readAccessToken keychain fallback", () => {
 
   /** Create a mock spawn that simulates keychain output. */
   function mockSpawn(stdout: string, exitCode: number): void {
-    setTestSpawn((() => {
+    setTestSpawn(() => {
       const stdoutBlob = new Blob([stdout]);
       return {
         stdout: stdoutBlob.stream(),
         stderr: new Blob([]).stream(),
         exited: Promise.resolve(exitCode),
       };
-    }) as any);
+    });
   }
 
   test("uses keychain token when credentials file missing", async () => {
@@ -424,9 +424,9 @@ describe("readAccessToken keychain fallback", () => {
 
   test("returns null when spawn throws (keychain not available)", async () => {
     // No credentials file; spawn itself throws
-    setTestSpawn((() => {
+    setTestSpawn(() => {
       throw new Error("spawn failed");
-    }) as any);
+    });
 
     const result = await fetchUsage();
 
@@ -440,14 +440,14 @@ describe("readAccessToken keychain fallback", () => {
 
     // Keychain should NOT be called
     let spawnCalled = false;
-    setTestSpawn((() => {
+    setTestSpawn(() => {
       spawnCalled = true;
       return {
         stdout: new Blob([]).stream(),
         stderr: new Blob([]).stream(),
         exited: Promise.resolve(1),
       };
-    }) as any);
+    });
     mockFetch(apiResponse);
 
     const result = await fetchUsage();

@@ -23,11 +23,16 @@ export function resetTestFetch(): void {
   fetchFn = globalThis.fetch;
 }
 
-/** Spawn function type for keychain subprocess. */
-type SpawnFn = typeof Bun.spawn;
+/** Narrow types matching actual Bun.spawn usage in readAccessToken. */
+interface SpawnResult {
+  stdout: ReadableStream;
+  stderr: ReadableStream;
+  exited: Promise<number>;
+}
+type SpawnFn = (cmd: string[], opts: { stdout: "pipe"; stderr: "pipe" }) => SpawnResult;
 
 /** For test injection of Bun.spawn used in keychain lookup. */
-let spawnFn: SpawnFn = Bun.spawn as SpawnFn;
+let spawnFn: SpawnFn = Bun.spawn as unknown as SpawnFn;
 
 /** Override spawn for testing. */
 export function setTestSpawn(fn: SpawnFn): void {
@@ -36,7 +41,7 @@ export function setTestSpawn(fn: SpawnFn): void {
 
 /** Reset spawn to Bun.spawn. */
 export function resetTestSpawn(): void {
-  spawnFn = Bun.spawn as SpawnFn;
+  spawnFn = Bun.spawn as unknown as SpawnFn;
 }
 
 let ITSYBITSY_DIR = join(homedir(), ".itsybitsy");

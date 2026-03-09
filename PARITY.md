@@ -91,7 +91,7 @@ These are ib commands that itsybitsy doesn't expose as its own CLI subcommands. 
 
 ### What itsybitsy implements
 
-`ib-commands.ts:newAgent()` shells to `ib new-agent` with flags: `--name`, `--worker`, `--yolo`, `--model`, plus the prompt. Dashboard `a` key opens a dialog with repo picker → name → model → worker toggle → prompt.
+`ib-commands.ts:newAgent()` shells to `ib new-agent` with flags: `--name`, `--worker`, `--yolo`, `--model`, plus the prompt. Dashboard `a` key infers the repo from the current selection and opens a dialog with name → worker toggle → prompt.
 
 ### Gaps
 
@@ -492,8 +492,7 @@ ib watch is approximately **8,200 lines** of bash. It implements a full-screen T
 | `m` merge | Merge dialog with diff preview | Confirm dialog with merge-check | ib's is more elaborate |
 | `x` kill | Confirm dialog | Confirm dialog | Matching |
 | `!` nuke | Confirm dialog | Confirm dialog | See nuke gaps |
-| `a` new agent | Multi-step dialog | Multi-step dialog | Matching (itsybitsy has repo picker) |
-| `A` toggle archived | Shows/hides archived | Shows/hides archived | Matching |
+| `a` new agent | Multi-step dialog | Multi-step dialog | Matching (itsybitsy infers repo from selection) |
 | `r` reassign | Select list dialog | Text input dialog | itsybitsy should use select list |
 | `R` resume | Direct action | Direct action | itsybitsy adds this |
 | `G` Ghostty | Not in ib watch | Open in Ghostty | itsybitsy adds this |
@@ -705,7 +704,7 @@ Fully ported from bash. 43 tests. Minor ordering difference: checks active-runni
 5. Moves agent directory to `.ittybitty/archive/{timestamp}-{id}/`
 6. Removes git worktree and branch
 
-**itsybitsy:** Reads archived agents from `.ittybitty/archive/` directory. Shows/hides with `A` toggle. Archived agents always show as "stopped" state.
+**itsybitsy:** Reads archived agents from `.ittybitty/archive/` directory. Archived agents always show as "stopped" state.
 
 **Gap:** None — archiving is handled by `ib kill`/`ib merge`.
 

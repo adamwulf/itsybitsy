@@ -54,10 +54,15 @@ export type DialogState =
     }
   | {
       type: "setup";
+      tab: number; // 0=Setup, 1=Project, 2=User
       items: SetupItem[];
       selectedIndex: number;
       repoPath: string;
+      configItems?: ConfigDialogItem[];
+      configSelectedIndex?: number;
       onAction: (item: SetupItem) => void;
+      onTabChange: (tab: number) => void;
+      onConfigAction?: (item: ConfigDialogItem) => void;
     }
   | null;
 
@@ -66,6 +71,14 @@ export type SetupItem = {
   value: string;
   actionable: boolean;
   kind: "hook" | "info" | "difftool";
+};
+
+export type ConfigDialogItem = {
+  key: string;
+  type: "number" | "boolean" | "string" | "string[]";
+  value: unknown;
+  source: "project" | "user" | "default";
+  default: unknown;
 };
 
 /** Wrap logical textarea lines into visual lines using ANSI-aware wrapping.
@@ -433,6 +446,25 @@ function handleSetupDialog(
   d: Extract<NonNullable<DialogState>, { type: "setup" }>,
   data: string
 ): boolean {
+  // Tab switching: 1/2/3 number keys
+  if (data === "1" && d.tab !== 0) { d.onTabChange(0); return true; }
+  if (data === "2" && d.tab !== 1) { d.onTabChange(1); return true; }
+  if (data === "3" && d.tab !== 2) { d.onTabChange(2); return true; }
+
+  // Tab 0: existing setup behavior
+  if (d.tab === 0) {
+    return handleSetupTab0(ctx, d, data);
+  }
+
+  // Tab 1 & 2: config editing
+  return handleSetupConfigTab(ctx, d, data);
+}
+
+function handleSetupTab0(
+  ctx: DialogCtx,
+  d: Extract<NonNullable<DialogState>, { type: "setup" }>,
+  data: string
+): boolean {
   const actionableIndices = d.items.map((item, i) => item.actionable ? i : -1).filter((i) => i !== -1);
   if (actionableIndices.length === 0) return true;
 
@@ -465,6 +497,36 @@ function handleSetupDialog(
     const item = d.items[d.selectedIndex];
     if (item && item.actionable) {
       d.onAction(item);
+    }
+  }
+  return true;
+}
+
+function handleSetupConfigTab(
+  ctx: DialogCtx,
+  d: Extract<NonNullable<DialogState>, { type: "setup" }>,
+  data: string
+): boolean {
+  const items = d.configItems ?? [];
+  if (items.length === 0) return true;
+  const idx = d.configSelectedIndex ?? 0;
+
+  if (matchesKey(data, Key.down) || data === "j") {
+    d.configSelectedIndex = Math.min(items.length - 1, idx + 1);
+    ctx.tui?.requestRender();
+  } else if (matchesKey(data, Key.up) || data === "k") {
+    d.configSelectedIndex = Math.max(0, idx - 1);
+    ctx.tui?.requestRender();
+  } else if (matchesKey(data, Key.enter)) {
+    const item = items[idx];
+    if (item) {
+      if (item.type === "boolean") {
+        // Toggle immediately
+        d.onConfigAction?.(item);
+      } else {
+        // Open input dialog
+        d.onConfigAction?.(item);
+      }
     }
   }
   return true;
@@ -644,15 +706,46 @@ export function buildNewAgentFormContent(
   return { title: `New Agent (${dialog.repoName})`, contentLines: lines };
 }
 
+const SETUP_TAB_NAMES = ["Setup", "Project", "User"];
+
+/** Build the tab bar for the setup dialog */
+function buildTabBar(activeTab: number, innerWidth: number): string {
+  const parts: string[] = [];
+  for (let i = 0; i < SETUP_TAB_NAMES.length; i++) {
+    const name = SETUP_TAB_NAMES[i]!;
+    if (i === activeTab) {
+      parts.push(`${BOLD}${GREEN}[${name}]${RESET}`);
+    } else {
+      parts.push(`${DIM}[${name}]${RESET}`);
+    }
+  }
+  return truncateToWidth(parts.join("  "), innerWidth, "");
+}
+
 /** Build content for the setup dialog */
 export function buildSetupContent(
   dialog: Extract<NonNullable<DialogState>, { type: "setup" }>,
   innerWidth: number
 ): DialogContent {
   const lines: string[] = [];
-  lines.push(`${DIM}(j/k to navigate, Enter to toggle/edit, Esc to close)${RESET}`);
+  lines.push(buildTabBar(dialog.tab, innerWidth));
+  lines.push(`${DIM}(1/2/3: tabs, j/k: navigate, Enter: toggle/edit, Esc: close)${RESET}`);
   lines.push("");
 
+  if (dialog.tab === 0) {
+    buildSetupTab0Content(dialog, lines, innerWidth);
+  } else {
+    buildConfigTabContent(dialog, lines, innerWidth);
+  }
+
+  return { title: SETUP_TAB_NAMES[dialog.tab] ?? "Setup", contentLines: lines };
+}
+
+function buildSetupTab0Content(
+  dialog: Extract<NonNullable<DialogState>, { type: "setup" }>,
+  lines: string[],
+  innerWidth: number
+): void {
   for (let i = 0; i < dialog.items.length; i++) {
     const item = dialog.items[i]!;
     const isSelected = i === dialog.selectedIndex;
@@ -680,6 +773,49 @@ export function buildSetupContent(
       lines.push(truncateToWidth(`  ${DIM}${item.label}:${RESET} ${val}`, innerWidth, ""));
     }
   }
+}
 
-  return { title: "Setup", contentLines: lines };
+function buildConfigTabContent(
+  dialog: Extract<NonNullable<DialogState>, { type: "setup" }>,
+  lines: string[],
+  innerWidth: number
+): void {
+  const items = dialog.configItems ?? [];
+  const selectedIdx = dialog.configSelectedIndex ?? 0;
+  const isUserTab = dialog.tab === 2;
+
+  if (items.length === 0) {
+    lines.push(`${DIM}No configuration keys found${RESET}`);
+    return;
+  }
+
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i]!;
+    const isSelected = i === selectedIdx;
+
+    let valueStr: string;
+    if (item.value === undefined || item.value === null) {
+      valueStr = `${DIM}(not set)${RESET}`;
+    } else if (item.type === "boolean") {
+      valueStr = item.value ? `${GREEN}true${RESET}` : "false";
+    } else if (item.type === "string[]") {
+      const arr = item.value as string[];
+      valueStr = arr.length > 0 ? arr.join(", ") : `${DIM}[]${RESET}`;
+    } else {
+      valueStr = String(item.value);
+    }
+
+    const sourceStr = isUserTab && item.source === "project"
+      ? `${DIM}(project override)${RESET}`
+      : item.source !== "default"
+        ? `${DIM}(${item.source})${RESET}`
+        : `${DIM}(default)${RESET}`;
+
+    const label = `${item.key}: ${valueStr} ${sourceStr}`;
+    if (isSelected) {
+      lines.push(truncateToWidth(`${GREEN}> ${BOLD}${item.key}${RESET}: ${valueStr} ${sourceStr}`, innerWidth, ""));
+    } else {
+      lines.push(truncateToWidth(`  ${label}`, innerWidth, ""));
+    }
+  }
 }

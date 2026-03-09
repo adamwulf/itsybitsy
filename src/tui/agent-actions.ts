@@ -17,7 +17,9 @@ import { captureTmuxOutput, resizeTmuxWindow, killTmuxSession } from "../tmux-po
 import { parseState } from "../parse-state";
 import { openInGhostty } from "../ghostty";
 import { buildFolderItems } from "./folder-browser";
-import type { DialogState, SetupItem } from "./dialog-handler";
+import type { DialogState, SetupItem, ConfigDialogItem } from "./dialog-handler";
+import { readConfig, writeConfig, CONFIG_KEYS, projectConfigPath, defaultUserConfigPath } from "../config";
+import type { ConfigResult } from "../config";
 import { fuzzyFilterIndices } from "./dialog-handler";
 import { displayState, computeStateColWidth, AGE_COL_WIDTH } from "./agent-tree";
 import type { PaneMode } from "./pane-manager";
@@ -600,7 +602,7 @@ export function handleSetup(ctx: ActionCtx) {
   });
 }
 
-async function loadSetupDialog(ctx: ActionCtx, repoPath: string) {
+async function loadSetupDialog(ctx: ActionCtx, repoPath: string, initialTab = 0) {
   const items: SetupItem[] = [];
 
   // Fetch hooks status
@@ -658,51 +660,141 @@ async function loadSetupDialog(ctx: ActionCtx, repoPath: string) {
     kind: "difftool",
   });
 
+  // Load config for tabs 1 & 2
+  const config = await readConfig(repoPath);
+
   // Find first actionable index
   const firstActionable = items.findIndex((i) => i.actionable);
 
-  ctx.showDialog({
-    type: "setup",
-    items,
-    selectedIndex: firstActionable !== -1 ? firstActionable : 0,
-    repoPath,
-    onAction: (item: SetupItem) => {
-      if (item.kind === "hook") {
-        const shouldInstall = item.value !== "installed";
-        const fn = shouldInstall ? installHook : uninstallHook;
-        fn(repoPath, item.label).then((res) => {
-          if (res.ok) {
-            item.value = shouldInstall ? "installed" : "not installed";
-            ctx.setNotice(`${shouldInstall ? "Installed" : "Uninstalled"} ${item.label}`);
+  const buildConfigItems = (forTab: number): ConfigDialogItem[] => {
+    return CONFIG_KEYS.map((def) => {
+      const entry = config[def.key]!;
+      return {
+        key: def.key,
+        type: def.type,
+        value: entry.value,
+        source: entry.source,
+        default: def.default,
+      };
+    });
+  };
+
+  const showSetupDialogForTab = (tab: number) => {
+    ctx.showDialog({
+      type: "setup",
+      tab,
+      items,
+      selectedIndex: firstActionable !== -1 ? firstActionable : 0,
+      repoPath,
+      configItems: tab > 0 ? buildConfigItems(tab) : undefined,
+      configSelectedIndex: tab > 0 ? 0 : undefined,
+      onAction: handleSetupItemAction(ctx, repoPath),
+      onTabChange: (newTab: number) => {
+        showSetupDialogForTab(newTab);
+      },
+      onConfigAction: tab > 0 ? handleConfigItemAction(ctx, repoPath, tab, config, showSetupDialogForTab) : undefined,
+    });
+  };
+
+  showSetupDialogForTab(initialTab);
+}
+
+function handleSetupItemAction(ctx: ActionCtx, repoPath: string) {
+  return (item: SetupItem) => {
+    if (item.kind === "hook") {
+      const shouldInstall = item.value !== "installed";
+      const fn = shouldInstall ? installHook : uninstallHook;
+      fn(repoPath, item.label).then((res) => {
+        if (res.ok) {
+          item.value = shouldInstall ? "installed" : "not installed";
+          ctx.setNotice(`${shouldInstall ? "Installed" : "Uninstalled"} ${item.label}`);
+        } else {
+          ctx.setNotice(`Failed: ${res.stderr || res.stdout}`);
+        }
+        ctx.tui?.requestRender();
+      });
+    } else if (item.kind === "difftool") {
+      ctx.closeDialog();
+      ctx.showDialog({
+        type: "input",
+        prompt: "Diff tool command:",
+        value: ctx.diffTool ?? "",
+        onSubmit: (value: string) => {
+          ctx.closeDialog();
+          const newTool = value.trim() || undefined;
+          ctx.diffTool = newTool;
+          loadRegistry().then((reg) => {
+            reg.diffTool = newTool;
+            return saveRegistry(reg);
+          }).then(() => {
+            ctx.setNotice(newTool ? `Diff tool set to: ${newTool}` : "Diff tool cleared");
+          }).catch((err) => {
+            ctx.setNotice(`Failed to save: ${err}`);
+          });
+        },
+      });
+    }
+  };
+}
+
+function handleConfigItemAction(
+  ctx: ActionCtx,
+  repoPath: string,
+  tab: number,
+  config: ConfigResult,
+  showSetupDialogForTab: (tab: number) => void,
+) {
+  const configFilePath = tab === 1 ? projectConfigPath(repoPath) : defaultUserConfigPath();
+
+  return (item: ConfigDialogItem) => {
+    if (item.type === "boolean") {
+      // Toggle immediately
+      const newValue = !item.value;
+      writeConfig(configFilePath, item.key, newValue).then(() => {
+        // Update in-memory config and refresh dialog
+        config[item.key] = { value: newValue, source: tab === 1 ? "project" : "user" };
+        showSetupDialogForTab(tab);
+        ctx.setNotice(`${item.key} = ${newValue}`);
+      }).catch((err) => {
+        ctx.setNotice(`Failed to save: ${err}`);
+      });
+    } else {
+      // Open input dialog
+      const currentStr = item.type === "string[]"
+        ? (item.value as string[] ?? []).join(", ")
+        : String(item.value ?? "");
+      ctx.closeDialog();
+      ctx.showDialog({
+        type: "input",
+        prompt: `${item.key} (${item.type}):`,
+        value: currentStr === "undefined" ? "" : currentStr,
+        onSubmit: (value: string) => {
+          ctx.closeDialog();
+          let parsed: unknown;
+          if (item.type === "number") {
+            const num = Number(value);
+            if (value.trim() === "" || isNaN(num)) {
+              ctx.setNotice("Invalid number");
+              return;
+            }
+            parsed = num;
+          } else if (item.type === "string[]") {
+            parsed = value.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
           } else {
-            ctx.setNotice(`Failed: ${res.stderr || res.stdout}`);
+            parsed = value;
           }
-          ctx.tui?.requestRender();
-        });
-      } else if (item.kind === "difftool") {
-        ctx.closeDialog();
-        ctx.showDialog({
-          type: "input",
-          prompt: "Diff tool command:",
-          value: ctx.diffTool ?? "",
-          onSubmit: (value: string) => {
-            ctx.closeDialog();
-            const newTool = value.trim() || undefined;
-            ctx.diffTool = newTool;
-            // Save to registry
-            loadRegistry().then((reg) => {
-              reg.diffTool = newTool;
-              return saveRegistry(reg);
-            }).then(() => {
-              ctx.setNotice(newTool ? `Diff tool set to: ${newTool}` : "Diff tool cleared");
-            }).catch((err) => {
-              ctx.setNotice(`Failed to save: ${err}`);
-            });
-          },
-        });
-      }
-    },
-  });
+          writeConfig(configFilePath, item.key, parsed).then(() => {
+            config[item.key] = { value: parsed, source: tab === 1 ? "project" : "user" };
+            ctx.setNotice(`${item.key} updated`);
+            // Re-open setup dialog on the same tab
+            loadSetupDialog(ctx, repoPath, tab).catch((err) => ctx.setNotice(`Setup error: ${err}`));
+          }).catch((err) => {
+            ctx.setNotice(`Failed to save: ${err}`);
+          });
+        },
+      });
+    }
+  };
 }
 
 export function handleResizeLeft(ctx: ActionCtx, delta: number) {

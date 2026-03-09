@@ -207,22 +207,18 @@ async function cleanupOrphanedTmuxSessions(agentsDir: string): Promise<number> {
 export async function nukeAgent(agent: Agent): Promise<IbCommandResult> {
   const agentsDir = join(agent.repoPath, ".ittybitty", "agents");
 
-  // Check if this is a worker with no children — reject
-  if (agent.meta.worker) {
-    const descendants = await getDescendantsRecursive(agentsDir, agent.id);
-    // descendants includes the agent itself, so length 1 means no children
-    if (descendants.length <= 1) {
-      return {
-        ok: false,
-        exitCode: 1,
-        stdout: "",
-        stderr: `Error: '${agent.id}' is a worker agent with no descendants. Use 'ib kill ${agent.id}' instead.`,
-      };
-    }
-  }
-
   // Get all descendants (includes the agent itself)
   const descendants = await getDescendantsRecursive(agentsDir, agent.id);
+
+  // Check if this is a worker with no children — reject
+  if (agent.meta.worker && descendants.length <= 1) {
+    return {
+      ok: false,
+      exitCode: 1,
+      stdout: "",
+      stderr: `Error: '${agent.id}' is a worker agent with no descendants. Use 'ib kill ${agent.id}' instead.`,
+    };
+  }
 
   if (descendants.length === 0) {
     return { ok: true, exitCode: 0, stdout: "No agents found to kill.", stderr: "" };
@@ -461,9 +457,9 @@ ${absExitScript}
   }
 
   // Auto-accept workspace trust if not yolo (poll tmux for trust prompts)
+  // Must complete before sending nudge to avoid corrupting the permissions flow
   if (!yoloMode) {
-    // Run acceptance in background — poll for up to 15s
-    autoAcceptWorkspaceTrust(tmuxSession);
+    await autoAcceptWorkspaceTrust(tmuxSession);
   }
 
   // Send resume nudge after short delay

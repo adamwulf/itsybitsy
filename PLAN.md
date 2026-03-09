@@ -172,7 +172,7 @@ Also: `src/usage.ts` — fetches Claude API session+weekly utilization from `GET
 │       ├── exit-check.sh
 │       ├── repo            # Path to the worktree
 │       └── debug-logs/     # tmux captures from hooks
-├── archive/                # Closed agents (hidden by default in TUI; toggle with `A`)
+├── archive/                # Closed agents (hidden by default in TUI)
 ├── feedback.json
 ├── repo-id                 # Unique repo UUID (used in tmux session names)
 ├── reports/
@@ -307,9 +307,10 @@ Matching `ib watch` keybindings exactly where possible; new keys noted.
 - `m` — merge agent (runs merge-check first; confirm dialog)
 - `x` — kill agent (confirm dialog)
 - `!` — force-kill / nuke agent (confirm dialog)
-- `a` — new agent (dialog: repo, prompt, --worker/--yolo flags)
-- `A` — toggle archived agents visibility
+- `a` — new agent with repo picker (dialog: repo, prompt, --worker flags)
+- `A` — new agent in current repo (skips repo picker)
 - `r` — reassign agent's manager (dialog) ← matches `ib watch`
+- `P` — pause a running/waiting agent (confirm dialog) ← new, not in `ib watch`
 - `R` — resume a stopped agent ← new, not in `ib watch`
 - `G` — open agent's tmux session in Ghostty ← new, not in `ib watch` (`g` is taken by status)
 - `w` — open agent worktree in Finder (`open {worktree}`)
@@ -385,7 +386,7 @@ Each phase ends at a usable checkpoint — something that works and can be teste
 **Checkpoint:** `itsybitsy watch` launches a live TUI with agent tree, state updates via fs.watch + tmux, split pane layout, and keybindings.
 
 - [x] `src/tui/dashboard.ts` — agent tree at top (max 7 rows, scrolls with selection), split pane below (tmux left + cycling right pane)
-- [x] Agent tree: recursive manager/child indentation, workers `⚙` vs managers `◆`, state color-coded, `a` to toggle archived
+- [x] Agent tree: recursive manager/child indentation, workers `⚙` vs managers `◆`, state color-coded; archived agents always hidden
 - [x] Right pane modes 0–7; `p`/`n` to cycle, direct jump keys `d`/`g`/`e`/`q`; mode persists across agent selection changes
 - [x] Keyboard navigation: `j/k` or arrow keys; `;`/`l` scroll pane content
 - [x] Watcher events wired to `tui.requestRender()`; TmuxPoller integrated for live output
@@ -432,7 +433,7 @@ Note: `tmux-poller.ts` was implemented in Phase 2/3. Phase 4 focuses on renderin
 - [x] Right pane mode 6 — STATUS: `ib status {id}` output, loaded async when pane is active, cached until agent changes
 - [x] `g` — STATUS pane in normal context; go-to-agent in QUESTIONS pane (selects agent and jumps to AGENT LOG)
 - [x] `q` — QUESTIONS pane; `Enter` to answer (acknowledges + sends); `Escape` to acknowledge without answering
-- [x] `t` — cycle denials time filter (3 levels: all / last hour / last 10 min), only active in DENIALS pane
+- [x] `t` — cycle denials time filter (3 levels: all / 24h / 7d), only active in DENIALS pane
 
 ---
 
@@ -443,7 +444,7 @@ Note: `tmux-poller.ts` was implemented in Phase 2/3. Phase 4 focuses on renderin
 - [x] `/` — fuzzy jump to pane mode by name (pi-tui SelectList dialog overlay)
 - [x] `w` — open agent worktree in Finder: `Bun.$\`open ${agent.worktree}\``; show error if worktree doesn't exist
 - [x] `o` — open diff in external tool: write `diffAgent()` output to a temp file (`/tmp/itsybitsy-diff-{id}.txt`), run `{diffTool} {tempfile}`; show "No diff tool configured" message if `diffTool` not set in `~/.itsybitsy.json`
-- [x] `h` — read-only help dialog listing all keybindings; press any key to dismiss (use existing message dialog type)
+- [x] `?` — read-only help dialog listing all keybindings; press any key to dismiss (use existing message dialog type). Note: originally `h`, moved to `?` in Phase 12A when `h` was reassigned to setup dialog.
 - [x] `S` — snapshot for debugging: call `captureTmuxOutput(agent.meta.tmux_session)`, run `parseState()` on stripped output, write full capture + state to `.ittybitty/agents/{id}/debug-logs/snapshot-{timestamp}-{state}.txt`, show status message. **Not** an `ib` subcommand — implement directly.
 
 ---

@@ -230,13 +230,7 @@ describe("ib-commands", () => {
     });
   });
 
-  test("acknowledgeQuestion passes ['acknowledge', questionId] with repoPath as cwd", async () => {
-    await acknowledgeQuestion("/repos/myproject", "q-1");
-    expect(lastCall).toEqual({
-      args: ["acknowledge", "q-1"],
-      cwd: "/repos/myproject",
-    });
-  });
+  // acknowledgeQuestion passthrough test removed — now native
 
   // mergeAgent passthrough tests removed — now native
 });
@@ -2200,5 +2194,69 @@ describe("newAgent (native)", () => {
 
     const startSh = await Bun.file(join(agentsDir, "test-print", "start.sh")).text();
     expect(startSh).toContain("--print");
+  });
+});
+
+describe("acknowledgeQuestion (native)", () => {
+  let tempDir: string;
+  let questionsPath: string;
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "ack-test-"));
+    await mkdir(join(tempDir, ".ittybitty"), { recursive: true });
+    questionsPath = join(tempDir, ".ittybitty", "user-questions.json");
+  });
+
+  afterEach(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  test("happy path: marks question as acknowledged", async () => {
+    const data = {
+      questions: [
+        { id: "q-1", agent: "agent-abc", question: "What color?", status: "pending", timestamp: "2025-01-01T00:00:00Z" },
+        { id: "q-2", agent: "agent-def", question: "What size?", status: "pending", timestamp: "2025-01-01T00:01:00Z" },
+      ],
+    };
+    await Bun.write(questionsPath, JSON.stringify(data, null, 2));
+
+    const result = await acknowledgeQuestion(tempDir, "q-1");
+    expect(result.ok).toBe(true);
+    expect(result.stdout).toContain("Acknowledged question 'q-1'");
+    expect(result.stdout).toContain("agent-abc");
+
+    // Verify the file was updated
+    const updated = await Bun.file(questionsPath).json();
+    const q1 = updated.questions.find((q: any) => q.id === "q-1");
+    expect(q1.acknowledged).toBe(true);
+    expect(q1.status).toBe("acknowledged");
+    expect(q1.acknowledged_at).toBeTruthy();
+    // Other question untouched
+    const q2 = updated.questions.find((q: any) => q.id === "q-2");
+    expect(q2.status).toBe("pending");
+    expect(q2.acknowledged).toBeUndefined();
+  });
+
+  test("question not found returns error", async () => {
+    const data = { questions: [{ id: "q-1", agent: "agent-abc", question: "What?", status: "pending" }] };
+    await Bun.write(questionsPath, JSON.stringify(data));
+
+    const result = await acknowledgeQuestion(tempDir, "q-999");
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("Question 'q-999' not found");
+  });
+
+  test("malformed JSON returns error", async () => {
+    await Bun.write(questionsPath, '{"questions": "not-an-array"}');
+
+    const result = await acknowledgeQuestion(tempDir, "q-1");
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("Malformed questions file");
+  });
+
+  test("file doesn't exist returns error", async () => {
+    const result = await acknowledgeQuestion(tempDir, "q-1");
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("No questions file found");
   });
 });

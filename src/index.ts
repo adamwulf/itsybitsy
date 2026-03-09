@@ -28,16 +28,11 @@ async function findAgentById(id: string, repos: RepoEntry[]): Promise<Agent | nu
   return null;
 }
 
-/** Shell out to ib as a temporary passthrough. */
-async function runIb(ibArgs: string[], repoPath: string): Promise<void> {
-  const proc = Bun.spawn(["ib", ...ibArgs], {
-    cwd: repoPath,
-    stdin: "inherit",
-    stdout: "inherit",
-    stderr: "inherit",
-  });
-  const exitCode = await proc.exited;
-  process.exit(exitCode);
+/** Print an IbCommandResult and exit. */
+async function printAndExit(result: { ok: boolean; exitCode: number; stdout: string; stderr: string }): Promise<never> {
+  if (result.stdout) console.log(result.stdout);
+  if (result.stderr) console.error(result.stderr);
+  process.exit(result.ok ? 0 : 1);
 }
 
 /** Require an agent ID argument, find it, or exit with error. */
@@ -329,7 +324,6 @@ async function main() {
       process.exit(await statusProc.exited);
       break;
     }
-    // TODO: implement natively using tmux send-keys directly
     case "send": {
       const repos = await listRepos();
       const agent = await requireAgent(args[1], repos);
@@ -338,34 +332,31 @@ async function main() {
         console.error("Usage: itsybitsy send <agent-id> <message...>");
         process.exit(1);
       }
-      await runIb(["send", agent.id, message], agent.repoPath);
+      const { sendMessage } = await import("./ib-commands");
+      await printAndExit(await sendMessage(agent, message));
       break;
     }
-    // TODO: implement natively
     case "kill": {
       const repos = await listRepos();
       const agent = await requireAgent(args[1], repos);
-      const extraArgs = args.slice(2);
-      await runIb(["kill", agent.id, ...extraArgs], agent.repoPath);
+      const { killAgent } = await import("./ib-commands");
+      await printAndExit(await killAgent(agent));
       break;
     }
-    // TODO: implement natively
     case "merge": {
       const repos = await listRepos();
       const agent = await requireAgent(args[1], repos);
-      const extraArgs = args.slice(2);
-      await runIb(["merge", agent.id, ...extraArgs], agent.repoPath);
+      const { mergeAgent } = await import("./ib-commands");
+      await printAndExit(await mergeAgent(agent));
       break;
     }
-    // TODO: implement natively
     case "resume": {
       const repos = await listRepos();
       const agent = await requireAgent(args[1], repos);
-      const extraArgs = args.slice(2);
-      await runIb(["resume", agent.id, ...extraArgs], agent.repoPath);
+      const { resumeAgent } = await import("./ib-commands");
+      await printAndExit(await resumeAgent(agent));
       break;
     }
-    // TODO: implement natively
     case "new-agent":
     case "new": {
       const repos = await listRepos();
@@ -399,19 +390,38 @@ async function main() {
         }
       }
 
-      await runIb(["new-agent", ...ibArgs], repoPath);
+      const { newAgent } = await import("./ib-commands");
+
+      // Parse flags from ibArgs
+      const promptParts: string[] = [];
+      const opts: import("./ib-commands").NewAgentOptions = {};
+      for (let i = 0; i < ibArgs.length; i++) {
+        const arg = ibArgs[i]!;
+        if (arg === "--worker") { opts.worker = true; }
+        else if (arg === "--model" && ibArgs[i + 1]) { opts.model = ibArgs[++i]; }
+        else if (arg === "--name" && ibArgs[i + 1]) { opts.name = ibArgs[++i]; }
+        else if (arg === "--no-worktree") { opts.noWorktree = true; }
+        else if (arg === "--yolo") { opts.yolo = true; }
+        else if (arg === "--allow" && ibArgs[i + 1]) { opts.allowTools = ibArgs[++i]; }
+        else if (arg === "--deny" && ibArgs[i + 1]) { opts.denyTools = ibArgs[++i]; }
+        else { promptParts.push(arg); }
+      }
+      const prompt = promptParts.join(" ");
+      if (!prompt) {
+        console.error("Usage: itsybitsy new-agent [flags] <prompt...>");
+        process.exit(1);
+      }
+      await printAndExit(await newAgent(repoPath, prompt, opts));
       break;
     }
     case "acknowledge":
     case "ack": {
-      // ib acknowledge takes a question ID (e.g. "q-1"), not an agent ID.
-      // Pass all args through directly — ib resolves the question and repo.
       const questionId = args[1];
       if (!questionId) {
         console.error("Usage: itsybitsy ack <question-id>");
         process.exit(1);
       }
-      // Find which repo has this question so we can set cwd correctly
+      // Find which repo has this question
       const { readPendingQuestions } = await import("./agents");
       const repos = await listRepos();
       let repoPath: string | null = null;
@@ -423,14 +433,14 @@ async function main() {
         }
       }
       if (!repoPath) {
-        // Fall back to first repo — ib will handle the error if question doesn't exist
         if (repos.length === 0) {
           console.error("No repos registered.");
           process.exit(1);
         }
         repoPath = repos[0]!.path;
       }
-      await runIb(["acknowledge", questionId], repoPath);
+      const { acknowledgeQuestion } = await import("./ib-commands");
+      await printAndExit(await acknowledgeQuestion(repoPath, questionId));
       break;
     }
     default: {

@@ -1817,15 +1817,18 @@ describe("DashboardComponent right pane and navigation features", () => {
   });
 
   test("answer question sends acknowledge then message", async () => {
+    // Set up a temp dir with a questions file for native acknowledgeQuestion
+    const tempRepo = await mkdtemp(join(tmpdir(), "dash-ack-"));
+    await mkdir(join(tempRepo, ".ittybitty"), { recursive: true });
+    const questionsPath = join(tempRepo, ".ittybitty", "user-questions.json");
+    await Bun.write(questionsPath, JSON.stringify({
+      questions: [{ id: "q-1", agent: "agent-test", question: "Should I proceed?", status: "pending", timestamp: "2026-03-05T15:00:00Z" }],
+    }, null, 2));
+
     dashboard = makeDashboard();
-    const ibCalls: string[][] = [];
-    setRunner(async (args, cwd) => {
-      ibCalls.push(args);
-      return { ok: true, exitCode: 0, stdout: "", stderr: "" };
-    });
     setupSendMock();
 
-    const agent = makeAgent("agent-test", "/repos/test");
+    const agent = makeAgent("agent-test", tempRepo);
     const flatList: FlatEntry[] = [makeFlatAgent(agent)];
     const questions: PendingQuestion[] = [{
       id: "q-1",
@@ -1845,23 +1848,29 @@ describe("DashboardComponent right pane and navigation features", () => {
     dashboard.handleInput("\r"); // Submit
     await Bun.sleep(50);
 
-    // Should have called acknowledge (via ib runner)
-    expect(ibCalls.length).toBeGreaterThanOrEqual(1);
-    expect(ibCalls[0]).toEqual(["acknowledge", "q-1"]);
+    // Should have acknowledged natively (file updated)
+    const updated = await Bun.file(questionsPath).json();
+    expect(updated.questions[0].status).toBe("acknowledged");
+    expect(updated.questions[0].acknowledged).toBe(true);
     // And sent the message (via native send)
     expect(sentMessages.length).toBe(1);
     expect(sentMessages[0]!.message).toBe("yes");
+
+    await rm(tempRepo, { recursive: true, force: true });
   });
 
   test("Escape in QUESTIONS mode acknowledges question", async () => {
-    dashboard = makeDashboard();
-    const calls: string[][] = [];
-    setRunner(async (args, cwd) => {
-      calls.push(args);
-      return { ok: true, exitCode: 0, stdout: "", stderr: "" };
-    });
+    // Set up a temp dir with a questions file for native acknowledgeQuestion
+    const tempRepo = await mkdtemp(join(tmpdir(), "dash-esc-ack-"));
+    await mkdir(join(tempRepo, ".ittybitty"), { recursive: true });
+    const questionsPath = join(tempRepo, ".ittybitty", "user-questions.json");
+    await Bun.write(questionsPath, JSON.stringify({
+      questions: [{ id: "q-1", agent: "agent-test", question: "Should I proceed?", status: "pending", timestamp: "2026-03-05T15:00:00Z" }],
+    }, null, 2));
 
-    const agent = makeAgent("agent-test", "/repos/test");
+    dashboard = makeDashboard();
+
+    const agent = makeAgent("agent-test", tempRepo);
     const flatList: FlatEntry[] = [makeFlatAgent(agent)];
     const questions: PendingQuestion[] = [{
       id: "q-1",
@@ -1876,8 +1885,12 @@ describe("DashboardComponent right pane and navigation features", () => {
     dashboard.handleInput("\x1b"); // Escape to acknowledge
     await Bun.sleep(50);
 
-    expect(calls.length).toBeGreaterThanOrEqual(1);
-    expect(calls[0]).toEqual(["acknowledge", "q-1"]);
+    // Should have acknowledged natively (file updated)
+    const updated = await Bun.file(questionsPath).json();
+    expect(updated.questions[0].status).toBe("acknowledged");
+    expect(updated.questions[0].acknowledged).toBe(true);
+
+    await rm(tempRepo, { recursive: true, force: true });
   });
 
   test("j/k navigate questions in QUESTIONS mode when questions focused", () => {

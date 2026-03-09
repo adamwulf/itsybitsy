@@ -48,41 +48,7 @@ export class AgentWatcher {
     await this.refresh();
 
     // Set up fs.watch on each repo's .ittybitty/agents/, archive/, and user-questions.json
-    for (const repo of this.repos) {
-      const agentsDir = join(repo.path, ".ittybitty", "agents");
-      const archiveDir = join(repo.path, ".ittybitty", "archive");
-      const questionsFile = join(repo.path, ".ittybitty", "user-questions.json");
-
-      // Watch agents/ directory
-      try {
-        const watcher = watch(agentsDir, { recursive: true }, () => {
-          this.debounceRefresh();
-        });
-        this.watchers.push(watcher);
-      } catch (err) {
-        this.events.onError?.(new Error(`Failed to watch ${agentsDir}: ${err}`));
-      }
-
-      // Watch archive/ directory
-      try {
-        const watcher = watch(archiveDir, { recursive: true }, () => {
-          this.debounceRefresh();
-        });
-        this.watchers.push(watcher);
-      } catch (err) {
-        // archive/ may not exist yet — not an error
-      }
-
-      // Watch user-questions.json
-      try {
-        const watcher = watch(questionsFile, () => {
-          this.debounceRefresh();
-        });
-        this.watchers.push(watcher);
-      } catch (err) {
-        // user-questions.json may not exist yet — not an error
-      }
-    }
+    this.setupWatchers();
 
     // Fallback poll every 10s for FSEvents reliability
     this.pollTimer = setInterval(() => {
@@ -97,10 +63,7 @@ export class AgentWatcher {
 
   stop(): void {
     this.running = false;
-    for (const w of this.watchers) {
-      w.close();
-    }
-    this.watchers = [];
+    this.teardownWatchers();
     if (this.pollTimer) {
       clearInterval(this.pollTimer);
       this.pollTimer = null;
@@ -112,6 +75,57 @@ export class AgentWatcher {
     if (this.refreshTimer) {
       clearTimeout(this.refreshTimer);
       this.refreshTimer = null;
+    }
+  }
+
+  /** Replace the repos list and reset fs.watch watchers (poll timers keep running) */
+  updateRepos(repos: RepoEntry[]): void {
+    this.repos = repos;
+    this.teardownWatchers();
+    this.setupWatchers();
+  }
+
+  /** Close all fs.watch watchers */
+  private teardownWatchers(): void {
+    for (const w of this.watchers) {
+      w.close();
+    }
+    this.watchers = [];
+  }
+
+  /** Set up fs.watch on each repo's .ittybitty/agents/, archive/, and user-questions.json */
+  private setupWatchers(): void {
+    for (const repo of this.repos) {
+      const agentsDir = join(repo.path, ".ittybitty", "agents");
+      const archiveDir = join(repo.path, ".ittybitty", "archive");
+      const questionsFile = join(repo.path, ".ittybitty", "user-questions.json");
+
+      try {
+        const watcher = watch(agentsDir, { recursive: true }, () => {
+          this.debounceRefresh();
+        });
+        this.watchers.push(watcher);
+      } catch (err) {
+        this.events.onError?.(new Error(`Failed to watch ${agentsDir}: ${err}`));
+      }
+
+      try {
+        const watcher = watch(archiveDir, { recursive: true }, () => {
+          this.debounceRefresh();
+        });
+        this.watchers.push(watcher);
+      } catch (err) {
+        // archive/ may not exist yet — not an error
+      }
+
+      try {
+        const watcher = watch(questionsFile, () => {
+          this.debounceRefresh();
+        });
+        this.watchers.push(watcher);
+      } catch (err) {
+        // user-questions.json may not exist yet — not an error
+      }
     }
   }
 

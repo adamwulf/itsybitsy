@@ -1657,21 +1657,6 @@ describe("newAgent (native)", () => {
   let agentsDir: string;
   let spawnCalls: string[][];
 
-  /** Mock spawn runner that records calls and succeeds for all commands */
-  function makeNewAgentMock(overrides?: {
-    failTmuxSession?: boolean;
-    failTmuxNewSession?: boolean;
-    failWorktree?: boolean;
-    failTmuxServer?: boolean;
-    tmuxHasSessionExists?: boolean;
-    whichGhExists?: boolean;
-    hasRemote?: boolean;
-    resolveGitRoot?: string;
-  }): SpawnResult {
-    // This isn't used directly — we use a function mock
-    return null as unknown as SpawnResult;
-  }
-
   function mockSpawnRunner(overrides?: {
     failTmuxNewSession?: boolean;
     failWorktree?: boolean;
@@ -2164,5 +2149,56 @@ describe("newAgent (native)", () => {
     const settings = await Bun.file(settingsPath).json();
     expect(settings.permissions.allow).toContain("Bash(deploy:*)");
     expect(settings.permissions.deny).toContain("Bash(rm:*)");
+  });
+
+  test("allowTools flag is included in start.sh", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    await callNewAgent("task", { name: "test-allow", allowTools: "Read,Write" });
+
+    const startSh = await Bun.file(join(agentsDir, "test-allow", "start.sh")).text();
+    expect(startSh).toContain("--allowedTools Read,Write");
+  });
+
+  test("denyTools flag is included in start.sh", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    await callNewAgent("task", { name: "test-deny", denyTools: "Bash" });
+
+    const startSh = await Bun.file(join(agentsDir, "test-deny", "start.sh")).text();
+    expect(startSh).toContain("--disallowedTools Bash");
+  });
+
+  test("yolo escalation blocked when parent is not yolo", async () => {
+    // Create a non-yolo parent agent directory to simulate being inside it
+    const parentDir = join(tempDir, ".ittybitty", "agents", "parent-agent");
+    await mkdir(join(parentDir, "repo"), { recursive: true });
+    await Bun.write(join(parentDir, "meta.json"), JSON.stringify({ id: "parent-agent", yolo: false }));
+    await Bun.write(join(parentDir, "start.sh"), "#!/bin/bash\nclaude --session-id foo");
+
+    // Set cwd to be inside the parent agent's worktree (same repo)
+    const fakeCwd = join(parentDir, "repo", "subdir");
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await newAgent(tempDir, "yolo task", { yolo: true, _cwd: fakeCwd });
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("permission escalation");
+  });
+
+  test("yolo escalation allowed when parent is yolo", async () => {
+    // Create a yolo parent agent directory
+    const parentDir = join(tempDir, ".ittybitty", "agents", "yolo-parent");
+    await mkdir(join(parentDir, "repo"), { recursive: true });
+    await Bun.write(join(parentDir, "meta.json"), JSON.stringify({ id: "yolo-parent", yolo: true }));
+
+    const fakeCwd = join(parentDir, "repo");
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await newAgent(tempDir, "yolo task", { name: "yolo-child", yolo: true, _cwd: fakeCwd });
+    expect(result.ok).toBe(true);
+  });
+
+  test("print mode flag is included in start.sh", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    await callNewAgent("task", { name: "test-print", print: true });
+
+    const startSh = await Bun.file(join(agentsDir, "test-print", "start.sh")).text();
+    expect(startSh).toContain("--print");
   });
 });

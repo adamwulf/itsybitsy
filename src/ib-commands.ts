@@ -1123,28 +1123,22 @@ async function buildAgentSettings(
   const allAllow = [...new Set([...existingAllow, ...ibPerms, ...configAllow])];
   const allDeny = [...new Set([...existingDeny, ...blockedTools, ...configDeny])];
 
-  // Check if intercept hook should be added
+  // Check if intercept hook should be added (reuse already-parsed baseSettings)
   let addIntercept = false;
   if (agentType === "manager") {
-    try {
-      const settingsFile = Bun.file(join(repoPath, ".claude", "settings.local.json"));
-      if (await settingsFile.exists()) {
-        const settings = await settingsFile.json();
-        const preToolUse = settings?.hooks?.PreToolUse;
-        if (Array.isArray(preToolUse)) {
-          for (const entry of preToolUse) {
-            const hooks = entry?.hooks;
-            if (Array.isArray(hooks)) {
-              for (const h of hooks) {
-                if (typeof h?.command === "string" && h.command.includes("ib hooks intercept-task")) {
-                  addIntercept = true;
-                }
-              }
+    const preToolUse = (baseSettings as any)?.hooks?.PreToolUse;
+    if (Array.isArray(preToolUse)) {
+      for (const entry of preToolUse) {
+        const hooks = entry?.hooks;
+        if (Array.isArray(hooks)) {
+          for (const h of hooks) {
+            if (typeof h?.command === "string" && h.command.includes("ib hooks intercept-task")) {
+              addIntercept = true;
             }
           }
         }
       }
-    } catch { /* ignore */ }
+    }
   }
 
   const hookCmd = `ib hook-permission-denied ${agentId}`;
@@ -1238,7 +1232,7 @@ export async function newAgent(
     const cwd = opts?._cwd ?? process.cwd();
     const agentPattern = /\/.ittybitty\/agents\/([^/]+)\/repo/;
     const match = cwd.match(agentPattern);
-    if (match && cwd.startsWith(rootRepoPath)) {
+    if (match && (cwd === rootRepoPath || cwd.startsWith(rootRepoPath + "/"))) {
       const agentDirPath = cwd.replace(/(\/.ittybitty\/agents\/[^/]*)\/repo.*/, "$1");
       try {
         const metaFile = Bun.file(join(agentDirPath, "meta.json"));
@@ -1271,7 +1265,7 @@ export async function newAgent(
   // 5. Yolo escalation check (only if cwd is in the same repo)
   if (yoloMode) {
     const cwd = opts?._cwd ?? process.cwd();
-    if (/\/.ittybitty\/agents\/[^/]+\/repo/.test(cwd) && cwd.startsWith(rootRepoPath)) {
+    if (/\/.ittybitty\/agents\/[^/]+\/repo/.test(cwd) && (cwd === rootRepoPath || cwd.startsWith(rootRepoPath + "/"))) {
       const parentAgentDir = cwd.replace(/(\/.ittybitty\/agents\/[^/]*)\/repo.*/, "$1");
       let parentIsYolo = false;
 
@@ -1560,15 +1554,19 @@ ${absExitScript}
 
   // 17. Init agent.log (already done via logAgent above)
 
-  // 18. Ensure tmux server is running
-  const startServerResult = await newAgentRunCmd(["tmux", "start-server"]);
-  if (startServerResult.exitCode !== 0) {
-    // Cleanup on tmux failure
+  // Helper: clean up agent dir, worktree, and branch on failure
+  async function cleanupOnFailure() {
     await rm(agentDir, { recursive: true, force: true });
     if (useWorktree) {
       await newAgentRunCmd(["git", "-C", rootRepoPath, "worktree", "remove", join(agentDir, "repo"), "--force"]);
       await newAgentRunCmd(["git", "-C", rootRepoPath, "branch", "-D", branchName]);
     }
+  }
+
+  // 18. Ensure tmux server is running
+  const startServerResult = await newAgentRunCmd(["tmux", "start-server"]);
+  if (startServerResult.exitCode !== 0) {
+    await cleanupOnFailure();
     return { ok: false, exitCode: 1, stdout: "", stderr: "Error: could not start tmux server" };
   }
 
@@ -1578,22 +1576,14 @@ ${absExitScript}
     "tmux", "new-session", "-d", "-x", "60", "-s", tmuxSession, "-c", workPath, absStartScript,
   ]);
   if (tmuxResult.exitCode !== 0) {
-    await rm(agentDir, { recursive: true, force: true });
-    if (useWorktree) {
-      await newAgentRunCmd(["git", "-C", rootRepoPath, "worktree", "remove", join(agentDir, "repo"), "--force"]);
-      await newAgentRunCmd(["git", "-C", rootRepoPath, "branch", "-D", branchName]);
-    }
+    await cleanupOnFailure();
     return { ok: false, exitCode: 1, stdout: "", stderr: `Error: could not create tmux session '${tmuxSession}'` };
   }
 
   // 19. Verify tmux session created
   const verifyResult = await newAgentRunCmd(["tmux", "has-session", "-t", tmuxSession]);
   if (verifyResult.exitCode !== 0) {
-    await rm(agentDir, { recursive: true, force: true });
-    if (useWorktree) {
-      await newAgentRunCmd(["git", "-C", rootRepoPath, "worktree", "remove", join(agentDir, "repo"), "--force"]);
-      await newAgentRunCmd(["git", "-C", rootRepoPath, "branch", "-D", branchName]);
-    }
+    await cleanupOnFailure();
     return { ok: false, exitCode: 1, stdout: "", stderr: `Error: tmux session '${tmuxSession}' failed to start` };
   }
 

@@ -6,7 +6,7 @@
 
 import { join } from "path";
 import { addRepo, removeRepo, listRepos, type RepoEntry } from "./registry";
-import type { Agent, FlatAgent } from "./agents";
+import type { Agent, FlatEntry } from "./agents";
 
 const args = process.argv.slice(2);
 const command = args[0];
@@ -130,9 +130,10 @@ async function main() {
         const { BOLD, DIM, RESET } = await import("./tui/colors");
 
         // Collect real agent rows for column width computation
-        const rowByEntry = new Map<FlatAgent, { prefix: string; state: string; age: string; model: string }>();
+        type AgentEntry = Extract<FlatEntry, { kind: "agent" }>;
+        const rowByEntry = new Map<AgentEntry, { prefix: string; state: string; age: string; model: string }>();
         for (const entry of flat) {
-          if (entry.repoHeader) continue;
+          if (entry.kind !== "agent") continue;
           const orphanedPrefix = entry.agent.orphaned ? "⚠ " : "";
           const icon = entry.agent.meta.worker ? "⚙" : "◆";
           const prefix = `${entry.connector}${orphanedPrefix}${icon} ${entry.agent.id}`;
@@ -163,11 +164,11 @@ async function main() {
         const stateColors = getStateColors();
         let isFirst = true;
         for (const entry of flat) {
-          if (entry.repoHeader) {
+          if (entry.kind === "repo-header") {
             if (!isFirst) console.log(""); // blank line between repos
             isFirst = false;
-            console.log(`${BOLD}${entry.repoHeader}${RESET}`);
-            if (!entry.repoHasAgents) {
+            console.log(`${BOLD}${entry.repoName}${RESET}`);
+            if (!entry.hasAgents) {
               console.log(`  ${DIM}(no agents)${RESET}`);
             }
             continue;

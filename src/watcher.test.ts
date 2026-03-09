@@ -2,15 +2,15 @@ import { test, expect, describe, beforeEach, afterEach, jest, mock } from "bun:t
 import { join } from "path";
 import { mkdtemp, rm, mkdir, writeFile } from "fs/promises";
 import { tmpdir } from "os";
-import type { Agent, FlatAgent, PendingQuestion } from "./agents";
-import { makeAgent as _makeAgent } from "./test-utils";
+import type { Agent, FlatEntry, PendingQuestion } from "./agents";
+import { makeAgent as _makeAgent, makeFlatAgent } from "./test-utils";
 import type { RepoEntry } from "./registry";
 
 // --- Mock agents module ---
 const mockReadAllAgents = jest.fn<() => Promise<{ agents: Agent[]; errors: any[] }>>();
 const mockDetectAgentStates = jest.fn<(agents: Agent[]) => Promise<void>>();
 const mockBuildAgentTree = jest.fn<(agents: Agent[]) => Agent[]>();
-const mockFlattenAgentTree = jest.fn<(roots: Agent[]) => FlatAgent[]>();
+const mockFlattenAgentTree = jest.fn<(roots: Agent[]) => FlatEntry[]>();
 const mockReadPendingQuestions = jest.fn<(repoPath: string) => Promise<PendingQuestion[]>>();
 
 mock.module("./agents", () => ({
@@ -32,7 +32,7 @@ function setupDefaultMocks(agents: Agent[] = []) {
   mockReadAllAgents.mockResolvedValue({ agents, errors: [] });
   mockDetectAgentStates.mockResolvedValue(undefined);
   mockBuildAgentTree.mockReturnValue(agents);
-  mockFlattenAgentTree.mockReturnValue(agents.map((a) => ({ agent: a, depth: 0, connector: "" })));
+  mockFlattenAgentTree.mockReturnValue(agents.map((a) => makeFlatAgent(a)));
   mockReadPendingQuestions.mockResolvedValue([]);
 }
 
@@ -290,8 +290,8 @@ describe("AgentWatcher", () => {
       mockDetectAgentStates.mockResolvedValueOnce(undefined);
       mockBuildAgentTree.mockReturnValueOnce([agentA, agentB]);
       mockFlattenAgentTree.mockReturnValueOnce([
-        { agent: agentA, depth: 0, connector: "" },
-        { agent: agentB, depth: 0, connector: "" },
+        makeFlatAgent(agentA),
+        makeFlatAgent(agentB),
       ]);
       mockReadPendingQuestions.mockResolvedValue([]);
 
@@ -300,13 +300,13 @@ describe("AgentWatcher", () => {
       mockDetectAgentStates.mockResolvedValueOnce(undefined);
       mockBuildAgentTree.mockReturnValueOnce([agentA, agentB, agentC]);
       mockFlattenAgentTree.mockReturnValueOnce([
-        { agent: agentA, depth: 0, connector: "" },
-        { agent: agentB, depth: 0, connector: "" },
-        { agent: agentC, depth: 0, connector: "" },
+        makeFlatAgent(agentA),
+        makeFlatAgent(agentB),
+        makeFlatAgent(agentC),
       ]);
 
       const updates: Agent[][] = [];
-      const flatUpdates: FlatAgent[][] = [];
+      const flatUpdates: FlatEntry[][] = [];
       const watcher = new AgentWatcher(
         [{ path: tempDir, name: "test" }],
         { onUpdate: (agents, flat) => { updates.push([...agents]); flatUpdates.push([...flat]); } }
@@ -333,8 +333,8 @@ describe("AgentWatcher", () => {
       mockDetectAgentStates.mockResolvedValueOnce(undefined);
       mockBuildAgentTree.mockReturnValueOnce([agentA, agentB]);
       mockFlattenAgentTree.mockReturnValueOnce([
-        { agent: agentA, depth: 0, connector: "" },
-        { agent: agentB, depth: 0, connector: "" },
+        makeFlatAgent(agentA),
+        makeFlatAgent(agentB),
       ]);
       mockReadPendingQuestions.mockResolvedValue([]);
 
@@ -343,7 +343,7 @@ describe("AgentWatcher", () => {
       mockDetectAgentStates.mockResolvedValueOnce(undefined);
       mockBuildAgentTree.mockReturnValueOnce([agentA]);
       mockFlattenAgentTree.mockReturnValueOnce([
-        { agent: agentA, depth: 0, connector: "" },
+        makeFlatAgent(agentA),
       ]);
 
       const updates: Agent[][] = [];
@@ -370,8 +370,8 @@ describe("AgentWatcher", () => {
       mockDetectAgentStates.mockResolvedValueOnce(undefined);
       mockBuildAgentTree.mockReturnValueOnce([agentA, agentB]);
       mockFlattenAgentTree.mockReturnValueOnce([
-        { agent: agentA, depth: 0, connector: "" },
-        { agent: agentB, depth: 0, connector: "" },
+        makeFlatAgent(agentA),
+        makeFlatAgent(agentB),
       ]);
       mockReadPendingQuestions.mockResolvedValue([]);
 
@@ -380,8 +380,8 @@ describe("AgentWatcher", () => {
       mockDetectAgentStates.mockResolvedValueOnce(undefined);
       mockBuildAgentTree.mockReturnValueOnce([agentA, agentC]);
       mockFlattenAgentTree.mockReturnValueOnce([
-        { agent: agentA, depth: 0, connector: "" },
-        { agent: agentC, depth: 0, connector: "" },
+        makeFlatAgent(agentA),
+        makeFlatAgent(agentC),
       ]);
 
       const updates: Agent[][] = [];
@@ -411,7 +411,7 @@ describe("AgentWatcher", () => {
       });
       mockBuildAgentTree.mockImplementation((agents) => agents);
       mockFlattenAgentTree.mockImplementation((roots) =>
-        roots.map((a) => ({ agent: a, depth: 0, connector: "" }))
+        roots.map((a) => (makeFlatAgent(a)))
       );
       mockReadPendingQuestions.mockResolvedValue([]);
 
@@ -447,7 +447,7 @@ describe("AgentWatcher", () => {
       });
       mockBuildAgentTree.mockImplementation((agents) => agents);
       mockFlattenAgentTree.mockImplementation((roots) =>
-        roots.map((a) => ({ agent: a, depth: 0, connector: "" }))
+        roots.map((a) => (makeFlatAgent(a)))
       );
       mockReadPendingQuestions.mockResolvedValue([]);
 
@@ -479,7 +479,7 @@ describe("AgentWatcher", () => {
         return agents;
       });
       mockFlattenAgentTree.mockImplementation((roots) =>
-        roots.map((a) => ({ agent: a, depth: 0, connector: "" }))
+        roots.map((a) => (makeFlatAgent(a)))
       );
       mockReadPendingQuestions.mockResolvedValue([]);
 
@@ -795,7 +795,7 @@ describe("AgentWatcher", () => {
       });
       mockBuildAgentTree.mockImplementation((agents) => agents);
       mockFlattenAgentTree.mockImplementation((roots) =>
-        roots.map((a) => ({ agent: a, depth: 0, connector: "" }))
+        roots.map((a) => (makeFlatAgent(a)))
       );
 
       const states: string[] = [];

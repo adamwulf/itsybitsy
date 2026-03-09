@@ -100,7 +100,7 @@ itsybitsy
 │   ├── registry.ts           # Read/write ~/.itsybitsy.json
 │   ├── registry.test.ts      # Registry unit tests
 │   ├── agents.ts             # Read .ittybitty/agents/ + archive/ directly; types for Agent,
-│   │                         # AgentState, FlatAgent; tree building; detectAgentStates();
+│   │                         # AgentState, FlatEntry; tree building; detectAgentStates();
 │   │                         # reads user-questions.json; returns structured errors
 │   ├── agents.test.ts        # Agent data layer tests
 │   ├── parse-state.ts        # Port of ib's parse_state bash logic → TypeScript
@@ -375,7 +375,7 @@ Each phase ends at a usable checkpoint — something that works and can be teste
 ### Phase 2: Agent Data Layer -- COMPLETE
 **Checkpoint:** `itsybitsy agents` prints all agents across all registered repos with correct states (via tmux capture + parseState). Error handling in place.
 
-- [x] `src/agents.ts` — read `.ittybitty/agents/` and `archive/`; `Agent`, `AgentState`, `FlatAgent` types; `readPendingQuestions()`; `detectAgentStates()`; `computeAge()`; structured error reporting
+- [x] `src/agents.ts` — read `.ittybitty/agents/` and `archive/`; `Agent`, `AgentState`, `FlatEntry` types; `readPendingQuestions()`; `detectAgentStates()`; `computeAge()`; structured error reporting
 - [x] `src/parse-state.ts` — full port of `parse_state` bash logic; all state rules
 - [x] `src/watcher.ts` — `fs.watch({ recursive: true })` on `agents/`, `archive/`, `user-questions.json`; 200ms debounce; 10s fallback poll; calls `detectAgentStates()`
 - [x] `src/tmux-poller.ts` — polls selected agent at ~1s; `captureTmuxOutput()` for one-shot state detection; race-condition guard on agent switch
@@ -604,16 +604,16 @@ Files: `src/tui/dashboard.ts`, `src/config.ts`.
 ### Phase 13: Code Quality & Architecture Cleanup
 **Checkpoint:** Codebase is clean, internally consistent, and free of known architectural hacks identified in the code review.
 
-**FlatAgent discriminated union refactor:**
-- [ ] Replace the `__repo_<name>` dummy Agent hack with a proper discriminated union type:
+**FlatEntry discriminated union refactor:** *(completed)*
+- [x] Replace the `__repo_<name>` dummy Agent hack with a proper discriminated union type:
   ```ts
   type FlatEntry =
-    | { kind: "agent"; agent: Agent; depth: number; connector: string; repoHeader: string | null; repoHasAgents: boolean }
+    | { kind: "agent"; agent: Agent; depth: number; connector: string }
     | { kind: "repo-header"; repoName: string; repoPath: string; hasAgents: boolean }
   ```
-- [ ] Update `flattenAgentTree()` in `src/agents.ts` to return `FlatEntry[]` instead of `FlatAgent[]`
-- [ ] Update all consumers: `agent-tree.ts`, `pane-manager.ts`, `dashboard.ts`, `agent-actions.ts`, `index.ts` — branch on `kind` instead of checking `agent.id.startsWith("__repo_")`
-- [ ] Remove the dummy Agent construction in `flattenAgentTree` — no more fake meta.json fields
+- [x] Update `flattenAgentTree()` in `src/agents.ts` to return `FlatEntry[]`
+- [x] Update all consumers: `agent-tree.ts`, `pane-manager.ts`, `dashboard.ts`, `agent-actions.ts`, `index.ts` — branch on `kind` instead of checking `repoHeader`
+- [x] Remove the dummy Agent construction in `flattenAgentTree` — no more fake meta.json fields
 
 **Remaining review items:**
 - [ ] Add tests for `readAccessToken` keychain fallback path (`src/usage.ts`)

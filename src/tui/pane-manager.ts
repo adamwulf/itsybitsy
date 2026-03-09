@@ -5,7 +5,7 @@
 
 import type { Component } from "@mariozechner/pi-tui";
 import { truncateToWidth } from "@mariozechner/pi-tui";
-import type { Agent, FlatAgent, PendingQuestion, DenialEntry } from "../agents";
+import type { Agent, FlatEntry, PendingQuestion, DenialEntry } from "../agents";
 import { readAgentLog, readAgentPrompt, parseDenials } from "../agents";
 import { diffAgent, statusAgent } from "../ib-commands";
 import { wrapLines } from "./wrap";
@@ -60,7 +60,7 @@ export class RightPaneComponent implements Component {
   agent: Agent | null = null;
   selectedRepoHeader: string | null = null;
   questions: PendingQuestion[] = [];
-  allAgents: FlatAgent[] = [];
+  allAgents: FlatEntry[] = [];
   scrollOffset = 0;
   displayHeight = 20;
   agentLogContent: string[] | null = null;
@@ -94,15 +94,15 @@ export class RightPaneComponent implements Component {
   private buildRepoSummary(): string[] {
     const repoName = this.selectedRepoHeader!;
     const repoAgents = this.allAgents.filter(
-      (f) => !f.repoHeader && f.agent.repoName === repoName
+      (f): f is Extract<FlatEntry, { kind: "agent" }> => f.kind === "agent" && f.agent.repoName === repoName
     );
     const stateCounts = new Map<string, number>();
     for (const { agent } of repoAgents) {
       stateCounts.set(agent.state, (stateCounts.get(agent.state) ?? 0) + 1);
     }
     const lines: string[] = [];
-    const headerEntry = this.allAgents.find((f) => f.repoHeader === repoName);
-    const triangle = headerEntry?.repoHasAgents ? "▾" : "▸";
+    const headerEntry = this.allAgents.find((f): f is Extract<FlatEntry, { kind: "repo-header" }> => f.kind === "repo-header" && f.repoName === repoName);
+    const triangle = headerEntry?.hasAgents ? "▾" : "▸";
     lines.push(`${BOLD}${triangle} ${repoName}${RESET}`);
     lines.push("");
     if (repoAgents.length > 0) {
@@ -157,7 +157,7 @@ export class RightPaneComponent implements Component {
         break;
       case "TREE": {
         const treeStateColWidth = computeStateColWidth(this.allAgents);
-        this.content = this.allAgents.map(({ agent, connector }) => {
+        this.content = this.allAgents.filter((f): f is Extract<FlatEntry, { kind: "agent" }> => f.kind === "agent").map(({ agent, connector }) => {
           const icon = agent.meta.worker ? "⚙" : "◆";
           const state = displayState(agent.state);
           const stateColor = getStateColors()[state] ?? getStateColors().unknown;

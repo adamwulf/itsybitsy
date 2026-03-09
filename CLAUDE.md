@@ -137,7 +137,7 @@ pi-tui's `Box` is vertical-only. `SplitPane` renders two child components side-b
 
 ### Agent data (src/agents.ts)
 - `readAllAgents()` returns `{ agents, errors }` — always check errors
-- `FlatAgent` type lives here (not in watcher.ts) since `flattenAgentTree()` produces it
+- `FlatEntry` discriminated union type lives here (not in watcher.ts) since `flattenAgentTree()` produces it — kind: "agent" for agent rows, kind: "repo-header" for repo headers
 - `detectAgentStates()` is the single source of truth for state detection — both CLI and watcher use it
 - `buildAgentTree()` mutates `agent.children` in place; call it after state detection
 - `readAgentLog()`, `readAgentPrompt()`, `parseDenials()` — async helpers for right pane content

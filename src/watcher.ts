@@ -8,12 +8,12 @@
 import { watch, type FSWatcher } from "fs";
 import { join } from "path";
 import { readAllAgents, buildAgentTree, flattenAgentTree, readPendingQuestions, detectAgentStates } from "./agents";
-import type { Agent, FlatAgent, PendingQuestion } from "./agents";
+import type { Agent, FlatEntry, PendingQuestion } from "./agents";
 import { repoDisplayName } from "./registry";
 import type { RepoEntry } from "./registry";
 
 export interface WatcherEvents {
-  onUpdate: (agents: Agent[], flatList: FlatAgent[], questions: PendingQuestion[], orphanedTmuxSessions: string[]) => void;
+  onUpdate: (agents: Agent[], flatList: FlatEntry[], questions: PendingQuestion[], orphanedTmuxSessions: string[]) => void;
   onError?: (error: Error) => void;
 }
 

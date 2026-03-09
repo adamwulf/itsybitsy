@@ -4,7 +4,7 @@
  */
 
 import { stat } from "node:fs/promises";
-import type { Agent, FlatAgent, PendingQuestion } from "../agents";
+import type { Agent, FlatEntry, PendingQuestion } from "../agents";
 import type { RepoEntry } from "../registry";
 import { addRepo, loadRegistry, saveRegistry, renameRepo, removeRepo, repoDisplayName } from "../registry";
 import {
@@ -36,8 +36,8 @@ export interface ActionCtx {
   agentTree: {
     selectedAgent: Agent | null;
     selectedRepoHeader: string | null;
-    flatList: FlatAgent[];
-    visibleList: FlatAgent[];
+    flatList: FlatEntry[];
+    visibleList: FlatEntry[];
     selectAgentById(id: string): boolean;
   };
   rightPane: {
@@ -213,7 +213,8 @@ export function handleReassign(ctx: ActionCtx) {
   // - archived agents
   const descendantIds = getDescendantIds(agent);
   const candidates = ctx.agentTree.flatList
-    .filter((f) =>
+    .filter((f): f is Extract<FlatEntry, { kind: "agent" }> =>
+      f.kind === "agent" &&
       f.agent.repoPath === agent.repoPath &&
       f.agent.id !== agent.id &&
       !descendantIds.has(f.agent.id) &&
@@ -291,7 +292,7 @@ export function handleSend(ctx: ActionCtx) {
       if (dialog.sendAll) {
         // Send to all non-archived agents with active tmux sessions
         const targets = ctx.agentTree.flatList.filter(
-          (f) => !f.agent.archived && f.agent.meta.tmux_session
+          (f): f is Extract<FlatEntry, { kind: "agent" }> => f.kind === "agent" && !f.agent.archived && !!f.agent.meta.tmux_session
         );
         if (targets.length === 0) { ctx.setNotice("No active agents to send to"); return; }
         ctx.executeAndRefresh(async () => {
@@ -369,8 +370,8 @@ export function handleAnswerQuestion(ctx: ActionCtx) {
   const idx = ctx.rightPane.questionsSelectedIndex;
   if (idx < 0 || idx >= questions.length) return;
   const q = questions[idx]!;
-  const agentEntry = ctx.agentTree.flatList.find((f) => f.agent.id === q.agent);
-  if (!agentEntry) { ctx.setNotice(`Agent ${q.agent} not found`); return; }
+  const agentEntry = ctx.agentTree.flatList.find((f) => f.kind === "agent" && f.agent.id === q.agent);
+  if (!agentEntry || agentEntry.kind !== "agent") { ctx.setNotice(`Agent ${q.agent} not found`); return; }
   ctx.showDialog({
     type: "textarea",
     prompt: `Answer ${q.agent}'s question:`,
@@ -394,8 +395,8 @@ export function handleAcknowledgeQuestion(ctx: ActionCtx) {
   const idx = ctx.rightPane.questionsSelectedIndex;
   if (idx < 0 || idx >= questions.length) return;
   const q = questions[idx]!;
-  const agentEntry = ctx.agentTree.flatList.find((f) => f.agent.id === q.agent);
-  if (!agentEntry) { ctx.setNotice(`Agent ${q.agent} not found`); return; }
+  const agentEntry = ctx.agentTree.flatList.find((f) => f.kind === "agent" && f.agent.id === q.agent);
+  if (!agentEntry || agentEntry.kind !== "agent") { ctx.setNotice(`Agent ${q.agent} not found`); return; }
   ctx.executeAndRefresh(async () => {
     const result = await acknowledgeQuestion(agentEntry.agent.repoPath, q.id);
     ctx.setNotice(result.ok ? `Acknowledged ${q.id}` : `Acknowledge failed: ${result.stderr || result.stdout}`);
@@ -418,9 +419,10 @@ export function handleGoToQuestionAgent(ctx: ActionCtx) {
 
 export function handleFuzzyAgent(ctx: ActionCtx) {
   const visible = ctx.agentTree.visibleList;
-  if (visible.length === 0) { ctx.setNotice("No agents to search"); return; }
-  const fuzzyStateColWidth = computeStateColWidth(visible);
-  const allItems = visible.map((f) => {
+  const agentEntries = visible.filter((f): f is Extract<FlatEntry, { kind: "agent" }> => f.kind === "agent");
+  if (agentEntries.length === 0) { ctx.setNotice("No agents to search"); return; }
+  const fuzzyStateColWidth = computeStateColWidth(agentEntries);
+  const allItems = agentEntries.map((f) => {
     const promptText = f.agent.meta.prompt.replace(/\n/g, " ");
     const state = displayState(f.agent.state);
     return `${f.agent.repoName}/${f.agent.id}  ${state.padEnd(fuzzyStateColWidth)}  ${f.agent.age.padStart(AGE_COL_WIDTH)}  ${promptText}`;
@@ -435,7 +437,7 @@ export function handleFuzzyAgent(ctx: ActionCtx) {
     selectedIndex: 0,
     onSelect: (originalIndex: number) => {
       ctx.closeDialog();
-      const agent = visible[originalIndex]!;
+      const agent = agentEntries[originalIndex]!;
       ctx.agentTree.selectAgentById(agent.agent.id);
       ctx.syncSelectedAgent();
       ctx.jumpToMode("AGENT LOG");

@@ -4,7 +4,7 @@
 
 import type { Component } from "@mariozechner/pi-tui";
 import { truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
-import type { Agent, FlatAgent } from "../agents";
+import type { Agent, FlatEntry } from "../agents";
 import { getStateColors } from "./color-scheme";
 import { RESET, BOLD, DIM, REVERSE, RED } from "./colors";
 
@@ -18,10 +18,10 @@ export function displayState(state: string): string {
 }
 
 /** Compute state column width from the agents being displayed */
-export function computeStateColWidth(agents: FlatAgent[]): number {
+export function computeStateColWidth(agents: FlatEntry[]): number {
   let maxLen = MIN_STATE_COL_WIDTH;
   for (const f of agents) {
-    if (!f.repoHeader) {
+    if (f.kind === "agent") {
       maxLen = Math.max(maxLen, displayState(f.agent.state).length);
     }
   }
@@ -70,7 +70,7 @@ export function formatAgentRow(
 
 /** Agent tree component with height constraint and scrolling */
 export class AgentTreeComponent implements Component {
-  private _flatList: FlatAgent[] = [];
+  private _flatList: FlatEntry[] = [];
   private selectedIndex = 0;
   maxHeight = MAX_TREE_HEIGHT;
   private scrollOffset = 0;
@@ -78,24 +78,24 @@ export class AgentTreeComponent implements Component {
   questionAgentIds: Set<string> = new Set();
   suppressSelection = false;
 
-  get flatList(): FlatAgent[] {
+  get flatList(): FlatEntry[] {
     return this._flatList;
   }
 
-  setFlatList(list: FlatAgent[]) {
+  setFlatList(list: FlatEntry[]) {
     this._flatList = list;
     this.resolveSelection();
   }
 
-  get visibleList(): FlatAgent[] {
-    return this.flatList.filter((f) => !f.agent.archived);
+  get visibleList(): FlatEntry[] {
+    return this.flatList.filter((f) => f.kind === "repo-header" || !f.agent.archived);
   }
 
   get selectedAgent(): Agent | null {
     const visible = this.visibleList;
     if (this.selectedIndex >= 0 && this.selectedIndex < visible.length) {
       const item = visible[this.selectedIndex]!;
-      if (item.repoHeader) return null;
+      if (item.kind === "repo-header") return null;
       return item.agent;
     }
     return null;
@@ -104,7 +104,9 @@ export class AgentTreeComponent implements Component {
   get selectedRepoHeader(): string | null {
     const visible = this.visibleList;
     if (this.selectedIndex >= 0 && this.selectedIndex < visible.length) {
-      return visible[this.selectedIndex]!.repoHeader ?? null;
+      const item = visible[this.selectedIndex]!;
+      if (item.kind === "repo-header") return item.repoName;
+      return null;
     }
     return null;
   }
@@ -112,7 +114,7 @@ export class AgentTreeComponent implements Component {
   /** Select agent by ID. Returns true if found. */
   selectAgentById(agentId: string): boolean {
     const visible = this.visibleList;
-    const idx = visible.findIndex((f) => f.agent.id === agentId);
+    const idx = visible.findIndex((f) => f.kind === "agent" && f.agent.id === agentId);
     if (idx !== -1) {
       this.selectedIndex = idx;
       this.selectedId = agentId;
@@ -136,7 +138,7 @@ export class AgentTreeComponent implements Component {
     const visible = this.visibleList;
     if (this.selectedIndex >= 0 && this.selectedIndex < visible.length) {
       const item = visible[this.selectedIndex]!;
-      this.selectedId = item.repoHeader ? `repopath:${item.agent.repoPath}` : item.agent.id;
+      this.selectedId = item.kind === "repo-header" ? `repopath:${item.repoPath}` : item.agent.id;
     }
   }
 
@@ -154,7 +156,7 @@ export class AgentTreeComponent implements Component {
       return;
     }
     const idx = visible.findIndex((f) =>
-      f.repoHeader ? `repopath:${f.agent.repoPath}` === this.selectedId : f.agent.id === this.selectedId,
+      f.kind === "repo-header" ? `repopath:${f.repoPath}` === this.selectedId : f.agent.id === this.selectedId,
     );
     if (idx !== -1) {
       this.selectedIndex = idx;
@@ -224,7 +226,7 @@ export class AgentTreeComponent implements Component {
     // Compute max name prefix width and state column width across all visible agent rows
     let maxNameWidth = 0;
     for (const item of visible) {
-      if (!item.repoHeader) {
+      if (item.kind === "agent") {
         maxNameWidth = Math.max(maxNameWidth, agentNamePrefixWidth(item.agent, item.connector));
       }
     }
@@ -237,10 +239,10 @@ export class AgentTreeComponent implements Component {
 
     for (let i = start; i < end; i++) {
       const item = visible[i]!;
-      if (item.repoHeader) {
+      if (item.kind === "repo-header") {
         const selected = i === this.selectedIndex && !this.suppressSelection;
-        const triangle = item.repoHasAgents ? "▾" : "▸";
-        const truncated = truncateToWidth(`${BOLD}${triangle} ${item.repoHeader}${RESET}`, width, "");
+        const triangle = item.hasAgents ? "▾" : "▸";
+        const truncated = truncateToWidth(`${BOLD}${triangle} ${item.repoName}${RESET}`, width, "");
         if (selected) {
           const pad = Math.max(0, width - visibleWidth(truncated));
           const highlighted = truncated.replaceAll(RESET, RESET + REVERSE);

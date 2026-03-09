@@ -11,8 +11,20 @@ import {
   readAllAgents,
   computeStateFromContent,
 } from "./agents";
-import type { Agent, AgentMeta } from "./agents";
+import type { Agent, AgentMeta, FlatEntry } from "./agents";
 import { makeAgent } from "./test-utils";
+
+/** Narrow a FlatEntry to kind==="agent" or fail */
+function asAgent(entry: FlatEntry) {
+  if (entry.kind !== "agent") throw new Error(`Expected agent entry, got ${entry.kind}`);
+  return entry;
+}
+
+/** Narrow a FlatEntry to kind==="repo-header" or fail */
+function asRepoHeader(entry: FlatEntry) {
+  if (entry.kind !== "repo-header") throw new Error(`Expected repo-header entry, got ${entry.kind}`);
+  return entry;
+}
 
 describe("computeAge", () => {
   test("seconds", () => {
@@ -135,10 +147,10 @@ describe("flattenAgentTree", () => {
     const flat = flattenAgentTree(roots);
 
     expect(flat.length).toBe(2);
-    expect(flat[0]!.agent.id).toBe("root");
-    expect(flat[0]!.depth).toBe(0);
-    expect(flat[1]!.agent.id).toBe("child");
-    expect(flat[1]!.depth).toBe(1);
+    expect(asAgent(flat[0]!).agent.id).toBe("root");
+    expect(asAgent(flat[0]!).depth).toBe(0);
+    expect(asAgent(flat[1]!).agent.id).toBe("child");
+    expect(asAgent(flat[1]!).depth).toBe(1);
   });
 
   test("empty tree returns empty list", () => {
@@ -154,16 +166,16 @@ describe("flattenAgentTree", () => {
 
     const roots = buildAgentTree([root, mid, leaf]);
     const flat = flattenAgentTree(roots);
-    expect(flat[0]!.depth).toBe(0);
-    expect(flat[1]!.depth).toBe(1);
-    expect(flat[2]!.depth).toBe(2);
+    expect(asAgent(flat[0]!).depth).toBe(0);
+    expect(asAgent(flat[1]!).depth).toBe(1);
+    expect(asAgent(flat[2]!).depth).toBe(2);
   });
 
   test("single root has no connector", () => {
     const root = makeAgent({ id: "root" });
     const roots = buildAgentTree([root]);
     const flat = flattenAgentTree(roots);
-    expect(flat[0]!.connector).toBe("");
+    expect(asAgent(flat[0]!).connector).toBe("");
   });
 
   test("multiple roots get ├── and └── connectors", () => {
@@ -171,8 +183,8 @@ describe("flattenAgentTree", () => {
     const b = makeAgent({ id: "b" });
     const roots = buildAgentTree([a, b]);
     const flat = flattenAgentTree(roots);
-    expect(flat[0]!.connector).toBe("├── ");
-    expect(flat[1]!.connector).toBe("└── ");
+    expect(asAgent(flat[0]!).connector).toBe("├── ");
+    expect(asAgent(flat[1]!).connector).toBe("└── ");
   });
 
   test("child connectors use ├── and └──", () => {
@@ -184,9 +196,9 @@ describe("flattenAgentTree", () => {
 
     const roots = buildAgentTree([root, c1, c2]);
     const flat = flattenAgentTree(roots);
-    expect(flat[0]!.connector).toBe("");       // single root
-    expect(flat[1]!.connector).toBe("├── ");   // first child
-    expect(flat[2]!.connector).toBe("└── ");   // last child
+    expect(asAgent(flat[0]!).connector).toBe("");       // single root
+    expect(asAgent(flat[1]!).connector).toBe("├── ");   // first child
+    expect(asAgent(flat[2]!).connector).toBe("└── ");   // last child
   });
 
   test("nested children use │ continuation lines", () => {
@@ -201,13 +213,13 @@ describe("flattenAgentTree", () => {
     const roots = buildAgentTree([root, c1, c2, leaf]);
     const flat = flattenAgentTree(roots);
     // root (no connector, single root)
-    expect(flat[0]!.connector).toBe("");
+    expect(asAgent(flat[0]!).connector).toBe("");
     // c1 (first child of root, not last)
-    expect(flat[1]!.connector).toBe("├── ");
+    expect(asAgent(flat[1]!).connector).toBe("├── ");
     // leaf (child of c1, c1 is not last sibling so prefix has │)
-    expect(flat[2]!.connector).toBe("│   └── ");
+    expect(asAgent(flat[2]!).connector).toBe("│   └── ");
     // c2 (last child of root)
-    expect(flat[3]!.connector).toBe("└── ");
+    expect(asAgent(flat[3]!).connector).toBe("└── ");
   });
 
   test("deep nesting with mixed last-sibling flags", () => {
@@ -224,11 +236,11 @@ describe("flattenAgentTree", () => {
     const roots = buildAgentTree([root, a, b, a1, a1x]);
     const flat = flattenAgentTree(roots);
     // a1x is under a1 (last child of a), a is not last child of root
-    expect(flat[0]!.connector).toBe("");           // root
-    expect(flat[1]!.connector).toBe("├── ");       // a
-    expect(flat[2]!.connector).toBe("│   └── ");   // a1
-    expect(flat[3]!.connector).toBe("│       └── "); // a1x
-    expect(flat[4]!.connector).toBe("└── ");       // b
+    expect(asAgent(flat[0]!).connector).toBe("");           // root
+    expect(asAgent(flat[1]!).connector).toBe("├── ");       // a
+    expect(asAgent(flat[2]!).connector).toBe("│   └── ");   // a1
+    expect(asAgent(flat[3]!).connector).toBe("│       └── "); // a1x
+    expect(asAgent(flat[4]!).connector).toBe("└── ");       // b
   });
 
   test("multi-repo: groups agents under sorted repo headers", () => {
@@ -239,12 +251,12 @@ describe("flattenAgentTree", () => {
 
     // Should be sorted alphabetically: alpha-repo first, then zeta-repo
     expect(flat.length).toBe(4); // 2 headers + 2 agents
-    expect(flat[0]!.repoHeader).toBe("alpha-repo");
-    expect(flat[0]!.repoHasAgents).toBe(true);
-    expect(flat[1]!.agent.id).toBe("b1");
-    expect(flat[2]!.repoHeader).toBe("zeta-repo");
-    expect(flat[2]!.repoHasAgents).toBe(true);
-    expect(flat[3]!.agent.id).toBe("a1");
+    expect(asRepoHeader(flat[0]!).repoName).toBe("alpha-repo");
+    expect(asRepoHeader(flat[0]!).hasAgents).toBe(true);
+    expect(asAgent(flat[1]!).agent.id).toBe("b1");
+    expect(asRepoHeader(flat[2]!).repoName).toBe("zeta-repo");
+    expect(asRepoHeader(flat[2]!).hasAgents).toBe(true);
+    expect(asAgent(flat[3]!).agent.id).toBe("a1");
   });
 
   test("multi-repo: includes empty repos with repoHasAgents=false", () => {
@@ -254,22 +266,22 @@ describe("flattenAgentTree", () => {
 
     expect(flat.length).toBe(3); // 2 headers + 1 agent
     // Sorted: empty-repo, has-agents
-    expect(flat[0]!.repoHeader).toBe("empty-repo");
-    expect(flat[0]!.repoHasAgents).toBe(false);
-    expect(flat[1]!.repoHeader).toBe("has-agents");
-    expect(flat[1]!.repoHasAgents).toBe(true);
-    expect(flat[2]!.agent.id).toBe("a1");
+    expect(asRepoHeader(flat[0]!).repoName).toBe("empty-repo");
+    expect(asRepoHeader(flat[0]!).hasAgents).toBe(false);
+    expect(asRepoHeader(flat[1]!).repoName).toBe("has-agents");
+    expect(asRepoHeader(flat[1]!).hasAgents).toBe(true);
+    expect(asAgent(flat[2]!).agent.id).toBe("a1");
   });
 
   test("multi-repo: empty repos sorted alphabetically with populated repos", () => {
     const flat = flattenAgentTree([], ["charlie", "alpha", "bravo"]);
     expect(flat.length).toBe(3);
-    expect(flat[0]!.repoHeader).toBe("alpha");
-    expect(flat[0]!.repoHasAgents).toBe(false);
-    expect(flat[1]!.repoHeader).toBe("bravo");
-    expect(flat[1]!.repoHasAgents).toBe(false);
-    expect(flat[2]!.repoHeader).toBe("charlie");
-    expect(flat[2]!.repoHasAgents).toBe(false);
+    expect(asRepoHeader(flat[0]!).repoName).toBe("alpha");
+    expect(asRepoHeader(flat[0]!).hasAgents).toBe(false);
+    expect(asRepoHeader(flat[1]!).repoName).toBe("bravo");
+    expect(asRepoHeader(flat[1]!).hasAgents).toBe(false);
+    expect(asRepoHeader(flat[2]!).repoName).toBe("charlie");
+    expect(asRepoHeader(flat[2]!).hasAgents).toBe(false);
   });
 
   test("single repo: no headers when repoNames has 1 entry", () => {
@@ -277,8 +289,8 @@ describe("flattenAgentTree", () => {
     const roots = buildAgentTree([a]);
     const flat = flattenAgentTree(roots, ["test"]);
     expect(flat.length).toBe(1);
-    expect(flat[0]!.repoHeader).toBeUndefined();
-    expect(flat[0]!.agent.id).toBe("a1");
+    expect(flat[0]!.kind).toBe("agent");
+    expect(asAgent(flat[0]!).agent.id).toBe("a1");
   });
 });
 

@@ -3,9 +3,9 @@ import { join } from "path";
 import { mkdtemp, rm, mkdir } from "fs/promises";
 import { tmpdir } from "os";
 import { readAgentLog, readAgentPrompt, parseDenials } from "../agents";
-import type { Agent, AgentMeta, FlatAgent, PendingQuestion } from "../agents";
+import type { Agent, AgentMeta, FlatEntry, PendingQuestion } from "../agents";
 import { stripAnsi } from "../parse-state";
-import { makeAgent as _makeAgent } from "../test-utils";
+import { makeAgent as _makeAgent, makeFlatAgent, makeFlatRepoHeader } from "../test-utils";
 import { TmuxPaneComponent, RightPaneComponent, DashboardComponent, AgentTreeComponent, colorizeDiff, colorizeLog, formatAgentRow } from "./dashboard";
 import { visibleWidth } from "@mariozechner/pi-tui";
 import { setRunner, resetRunner } from "../ib-commands";
@@ -307,7 +307,7 @@ describe("DashboardComponent dialog and action handlers", () => {
 
     const agent = makeAgent("agent-test", "/repos/test");
     agent.state = state as any;
-    const flatList: FlatAgent[] = [{ agent, depth: 0, connector: "" }];
+    const flatList: FlatEntry[] = [makeFlatAgent(agent)];
     dashboard.onUpdate([agent], flatList, []);
   }
 
@@ -533,9 +533,9 @@ describe("DashboardComponent dialog and action handlers", () => {
     agent1.state = "running" as any;
     const agent2 = makeAgent("agent-manager", "/repos/test");
     agent2.state = "running" as any;
-    const flatList: FlatAgent[] = [
-      { agent: agent1, depth: 0, connector: "" },
-      { agent: agent2, depth: 0, connector: "" },
+    const flatList: FlatEntry[] = [
+      makeFlatAgent(agent1),
+      makeFlatAgent(agent2),
     ];
     dashboard.onUpdate([agent1, agent2], flatList, []);
 
@@ -562,9 +562,9 @@ describe("DashboardComponent dialog and action handlers", () => {
     const worker = makeAgent("agent-worker", "/repos/test");
     worker.state = "running" as any;
     worker.meta.worker = true;
-    const flatList: FlatAgent[] = [
-      { agent: agent1, depth: 0, connector: "" },
-      { agent: worker, depth: 0, connector: "" },
+    const flatList: FlatEntry[] = [
+      makeFlatAgent(agent1),
+      makeFlatAgent(worker),
     ];
     dashboard.onUpdate([agent1, worker], flatList, []);
 
@@ -596,11 +596,11 @@ describe("DashboardComponent dialog and action handlers", () => {
     child.children = [grandchild];
     const sibling = makeAgent("agent-sibling", "/repos/test");
     sibling.state = "running" as any;
-    const flatList: FlatAgent[] = [
-      { agent: parent, depth: 0, connector: "" },
-      { agent: child, depth: 1, connector: "├── " },
-      { agent: grandchild, depth: 2, connector: "│   └── " },
-      { agent: sibling, depth: 0, connector: "" },
+    const flatList: FlatEntry[] = [
+      makeFlatAgent(parent),
+      makeFlatAgent(child, { depth: 1, connector: "├── " }),
+      makeFlatAgent(grandchild, { depth: 2, connector: "│   └── " }),
+      makeFlatAgent(sibling),
     ];
     dashboard.onUpdate([parent, child, grandchild, sibling], flatList, []);
 
@@ -627,9 +627,9 @@ describe("DashboardComponent dialog and action handlers", () => {
     agent1.state = "running" as any;
     const otherRepo = makeAgent("agent-other", "/repos/other");
     otherRepo.state = "running" as any;
-    const flatList: FlatAgent[] = [
-      { agent: agent1, depth: 0, connector: "" },
-      { agent: otherRepo, depth: 0, connector: "" },
+    const flatList: FlatEntry[] = [
+      makeFlatAgent(agent1),
+      makeFlatAgent(otherRepo),
     ];
     dashboard.onUpdate([agent1, otherRepo], flatList, []);
 
@@ -749,11 +749,11 @@ describe("DashboardComponent dialog and action handlers", () => {
     agent3.archived = true; // should be skipped
     const agent4 = makeAgent("agent-d", "/repos/test");
     agent4.meta.tmux_session = ""; // no tmux session, should be skipped
-    const flatList: FlatAgent[] = [
-      { agent: agent1, depth: 0, connector: "" },
-      { agent: agent2, depth: 0, connector: "" },
-      { agent: agent3, depth: 0, connector: "" },
-      { agent: agent4, depth: 0, connector: "" },
+    const flatList: FlatEntry[] = [
+      makeFlatAgent(agent1),
+      makeFlatAgent(agent2),
+      makeFlatAgent(agent3),
+      makeFlatAgent(agent4),
     ];
     dashboard.onUpdate([agent1, agent2, agent3, agent4], flatList, []);
 
@@ -785,9 +785,9 @@ describe("DashboardComponent dialog and action handlers", () => {
     agent1.state = "running";
     const agent2 = makeAgent("agent-b", "/repos/test");
     agent2.state = "running";
-    const flatList: FlatAgent[] = [
-      { agent: agent1, depth: 0, connector: "" },
-      { agent: agent2, depth: 0, connector: "" },
+    const flatList: FlatEntry[] = [
+      makeFlatAgent(agent1),
+      makeFlatAgent(agent2),
     ];
     dashboard.onUpdate([agent1, agent2], flatList, []);
 
@@ -822,7 +822,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     });
     const agent = makeAgent("agent-test", "/repos/test");
     agent.state = "running";
-    const flatList: FlatAgent[] = [{ agent, depth: 0, connector: "" }];
+    const flatList: FlatEntry[] = [makeFlatAgent(agent)];
     const question = { id: "q1", agent: "agent-test", question: "What?", timestamp: "2026-03-05T00:00:00Z", status: "pending" as const, repoPath: "/repos/test" };
     dashboard.onUpdate([agent], flatList, [question]);
     dashboard.jumpToMode("QUESTIONS");
@@ -1071,8 +1071,8 @@ describe("DashboardComponent dialog and action handlers", () => {
   test("A key is not bound (removed)", () => {
     dashboard = makeDashboard();
     const agent1 = makeAgent("agent-active", "/repos/test");
-    const flatList: FlatAgent[] = [
-      { agent: agent1, depth: 0, connector: "└── " },
+    const flatList: FlatEntry[] = [
+      makeFlatAgent(agent1, { connector: "└── " }),
     ];
     dashboard.onUpdate([agent1], flatList, []);
     // A key should be a no-op (no crash)
@@ -1172,7 +1172,7 @@ describe("DashboardComponent right pane and navigation features", () => {
 
     const agent = makeAgent("agent-test", "/repos/test");
     agent.state = state as any;
-    const flatList: FlatAgent[] = [{ agent, depth: 0, connector: "" }];
+    const flatList: FlatEntry[] = [makeFlatAgent(agent)];
     dashboard.onUpdate([agent], flatList, []);
   }
 
@@ -1284,9 +1284,9 @@ describe("DashboardComponent right pane and navigation features", () => {
 
     const agent1 = makeAgent("agent-a", "/repos/test");
     const agent2 = makeAgent("agent-b", "/repos/test");
-    const flatList: FlatAgent[] = [
-      { agent: agent1, depth: 0, connector: "├── " },
-      { agent: agent2, depth: 0, connector: "└── " },
+    const flatList: FlatEntry[] = [
+      makeFlatAgent(agent1, { connector: "├── " }),
+      makeFlatAgent(agent2, { connector: "└── " }),
     ];
     const questions: PendingQuestion[] = [{
       id: "q-1",
@@ -1316,7 +1316,7 @@ describe("DashboardComponent right pane and navigation features", () => {
     });
 
     const agent = makeAgent("agent-test", "/repos/test");
-    const flatList: FlatAgent[] = [{ agent, depth: 0, connector: "" }];
+    const flatList: FlatEntry[] = [makeFlatAgent(agent)];
     const questions: PendingQuestion[] = [{
       id: "q-1",
       agent: "agent-test",
@@ -1342,7 +1342,7 @@ describe("DashboardComponent right pane and navigation features", () => {
     });
 
     const agent = makeAgent("agent-test", "/repos/test");
-    const flatList: FlatAgent[] = [{ agent, depth: 0, connector: "" }];
+    const flatList: FlatEntry[] = [makeFlatAgent(agent)];
     const questions: PendingQuestion[] = [{
       id: "q-1",
       agent: "agent-test",
@@ -1376,7 +1376,7 @@ describe("DashboardComponent right pane and navigation features", () => {
     });
 
     const agent = makeAgent("agent-test", "/repos/test");
-    const flatList: FlatAgent[] = [{ agent, depth: 0, connector: "" }];
+    const flatList: FlatEntry[] = [makeFlatAgent(agent)];
     const questions: PendingQuestion[] = [{
       id: "q-1",
       agent: "agent-test",
@@ -1397,8 +1397,8 @@ describe("DashboardComponent right pane and navigation features", () => {
   test("j/k navigate questions in QUESTIONS mode when questions focused", () => {
     dashboard = makeDashboard();
     const agent1 = makeAgent("agent-a", "/repos/test");
-    const flatList: FlatAgent[] = [
-      { agent: agent1, depth: 0, connector: "" },
+    const flatList: FlatEntry[] = [
+      makeFlatAgent(agent1),
     ];
     const questions: PendingQuestion[] = [
       { id: "q-1", agent: "agent-a", question: "Q1?", timestamp: "2026-03-05T15:00:00Z", status: "pending" },
@@ -1425,9 +1425,9 @@ describe("DashboardComponent right pane and navigation features", () => {
     dashboard = makeDashboard();
     const agent1 = makeAgent("agent-a", "/repos/test");
     const agent2 = makeAgent("agent-b", "/repos/test");
-    const flatList: FlatAgent[] = [
-      { agent: agent1, depth: 0, connector: "├── " },
-      { agent: agent2, depth: 0, connector: "└── " },
+    const flatList: FlatEntry[] = [
+      makeFlatAgent(agent1, { connector: "├── " }),
+      makeFlatAgent(agent2, { connector: "└── " }),
     ];
     const questions: PendingQuestion[] = [
       { id: "q-1", agent: "agent-a", question: "Q1?", timestamp: "2026-03-05T15:00:00Z", status: "pending" },
@@ -1445,7 +1445,7 @@ describe("DashboardComponent right pane and navigation features", () => {
   test("j/k in QUESTIONS mode clamps to bounds when questions focused", () => {
     dashboard = makeDashboard();
     const agent = makeAgent("agent-a", "/repos/test");
-    const flatList: FlatAgent[] = [{ agent, depth: 0, connector: "" }];
+    const flatList: FlatEntry[] = [makeFlatAgent(agent)];
     const questions: PendingQuestion[] = [
       { id: "q-1", agent: "agent-a", question: "Q1?", timestamp: "2026-03-05T15:00:00Z", status: "pending" },
     ];
@@ -1464,9 +1464,9 @@ describe("DashboardComponent right pane and navigation features", () => {
     dashboard = makeDashboard();
     const agent1 = makeAgent("agent-a", "/repos/test");
     const agent2 = makeAgent("agent-b", "/repos/test");
-    const flatList: FlatAgent[] = [
-      { agent: agent1, depth: 0, connector: "├── " },
-      { agent: agent2, depth: 0, connector: "└── " },
+    const flatList: FlatEntry[] = [
+      makeFlatAgent(agent1, { connector: "├── " }),
+      makeFlatAgent(agent2, { connector: "└── " }),
     ];
     const questions: PendingQuestion[] = [{
       id: "q-1",
@@ -1679,11 +1679,9 @@ describe("AgentTreeComponent scroll indicators", () => {
   function makeTree(agentCount: number, maxHeight: number, scrollOffset: number): AgentTreeComponent {
     const tree = new AgentTreeComponent();
     tree.maxHeight = maxHeight;
-    const flatList: FlatAgent[] = Array.from({ length: agentCount }, (_, i) => ({
-      agent: makeAgent(`agent-${i}`, "/repos/test"),
-      depth: 0,
-      connector: "",
-    }));
+    const flatList: FlatEntry[] = Array.from({ length: agentCount }, (_, i) =>
+      makeFlatAgent(makeAgent(`agent-${i}`, "/repos/test"))
+    );
     tree.setFlatList(flatList);
     // Override scrollOffset (private) via type assertion for testing
     (tree as any).scrollOffset = scrollOffset;
@@ -1905,14 +1903,14 @@ describe("Terminal title (G-10)", () => {
 
   test("emits terminal title with agent id on selection change", () => {
     const agent = makeAgent("agent-abc", "/repos/test");
-    const flatList: FlatAgent[] = [{ agent, depth: 0, connector: "" }];
+    const flatList: FlatEntry[] = [makeFlatAgent(agent)];
     dashboard.onUpdate([agent], flatList, []);
     expect(titles).toContain("itsybitsy: agent-abc");
   });
 
   test("emits generic title when no agent is selected", () => {
     const agent = makeAgent("agent-abc", "/repos/test");
-    const flatList: FlatAgent[] = [{ agent, depth: 0, connector: "" }];
+    const flatList: FlatEntry[] = [makeFlatAgent(agent)];
     dashboard.onUpdate([agent], flatList, []);
     titles = [];
 
@@ -1923,7 +1921,7 @@ describe("Terminal title (G-10)", () => {
 
   test("does not emit title when agent id has not changed", () => {
     const agent = makeAgent("agent-abc", "/repos/test");
-    const flatList: FlatAgent[] = [{ agent, depth: 0, connector: "" }];
+    const flatList: FlatEntry[] = [makeFlatAgent(agent)];
     dashboard.onUpdate([agent], flatList, []);
     titles = [];
 
@@ -1939,7 +1937,7 @@ describe("Orphaned tmux sessions (Phase 10)", () => {
   test("onUpdate stores orphaned sessions and updates error count", () => {
     dashboard = makeDashboard();
     const agent = makeAgent("agent-test", "/repos/test");
-    const flatList: FlatAgent[] = [{ agent, depth: 0, connector: "" }];
+    const flatList: FlatEntry[] = [makeFlatAgent(agent)];
     dashboard.onUpdate([agent], flatList, [], ["ittybitty-abc-orphan1", "ittybitty-abc-orphan2"]);
     expect(dashboard.rightPane.orphanedTmuxSessions).toEqual(["ittybitty-abc-orphan1", "ittybitty-abc-orphan2"]);
   });
@@ -1947,7 +1945,7 @@ describe("Orphaned tmux sessions (Phase 10)", () => {
   test("ERRORS pane shows orphaned tmux sessions", () => {
     dashboard = makeDashboard();
     const agent = makeAgent("agent-test", "/repos/test");
-    const flatList: FlatAgent[] = [{ agent, depth: 0, connector: "" }];
+    const flatList: FlatEntry[] = [makeFlatAgent(agent)];
     dashboard.onUpdate([agent], flatList, [], ["ittybitty-abc-orphan1"]);
     dashboard.jumpToMode("ERRORS");
     const lines = dashboard.rightPane.render(80);
@@ -1960,7 +1958,7 @@ describe("Orphaned tmux sessions (Phase 10)", () => {
   test("error count includes both errors and orphaned sessions", () => {
     dashboard = makeDashboard();
     const agent = makeAgent("agent-test", "/repos/test");
-    const flatList: FlatAgent[] = [{ agent, depth: 0, connector: "" }];
+    const flatList: FlatEntry[] = [makeFlatAgent(agent)];
     dashboard.onUpdate([agent], flatList, [], ["ittybitty-orphan"]);
     dashboard.addError("Some error");
     // Error badge should show 2 (1 error + 1 orphan)
@@ -1972,7 +1970,7 @@ describe("Orphaned tmux sessions (Phase 10)", () => {
   test("clearErrors clears errors but preserves orphaned sessions in count", () => {
     dashboard = makeDashboard();
     const agent = makeAgent("agent-test", "/repos/test");
-    const flatList: FlatAgent[] = [{ agent, depth: 0, connector: "" }];
+    const flatList: FlatEntry[] = [makeFlatAgent(agent)];
     dashboard.onUpdate([agent], flatList, [], ["ittybitty-orphan"]);
     dashboard.addError("Some error");
     dashboard.clearErrors();
@@ -1987,7 +1985,7 @@ describe("Orphaned tmux sessions (Phase 10)", () => {
   test("ERRORS pane shows Enter hint when orphans exist", () => {
     dashboard = makeDashboard();
     const agent = makeAgent("agent-test", "/repos/test");
-    const flatList: FlatAgent[] = [{ agent, depth: 0, connector: "" }];
+    const flatList: FlatEntry[] = [makeFlatAgent(agent)];
     dashboard.onUpdate([agent], flatList, [], ["ittybitty-orphan"]);
     dashboard.jumpToMode("ERRORS");
     const lines = dashboard.rightPane.render(80);
@@ -1999,7 +1997,7 @@ describe("Orphaned tmux sessions (Phase 10)", () => {
     dashboard = makeDashboard();
     setRunner(async () => ({ ok: true, exitCode: 0, stdout: "", stderr: "" }));
     const agent = makeAgent("agent-test", "/repos/test");
-    const flatList: FlatAgent[] = [{ agent, depth: 0, connector: "" }];
+    const flatList: FlatEntry[] = [makeFlatAgent(agent)];
     dashboard.onUpdate([agent], flatList, [], ["ittybitty-orphan"]);
     dashboard.handleInput("e"); // jump to ERRORS mode
     dashboard.handleInput("\r"); // Enter
@@ -2013,7 +2011,7 @@ describe("Orphaned tmux sessions (Phase 10)", () => {
     dashboard = makeDashboard();
     setRunner(async () => ({ ok: true, exitCode: 0, stdout: "", stderr: "" }));
     const agent = makeAgent("agent-test", "/repos/test");
-    const flatList: FlatAgent[] = [{ agent, depth: 0, connector: "" }];
+    const flatList: FlatEntry[] = [makeFlatAgent(agent)];
     dashboard.onUpdate([agent], flatList, [], ["ittybitty-orphan1", "ittybitty-orphan2"]);
     dashboard.handleInput("e"); // jump to ERRORS mode
     dashboard.handleInput("\r"); // Enter
@@ -2027,7 +2025,7 @@ describe("Orphaned tmux sessions (Phase 10)", () => {
   test("pane cycle does not skip ERRORS when orphaned sessions exist", () => {
     dashboard = makeDashboard();
     const agent = makeAgent("agent-test", "/repos/test");
-    const flatList: FlatAgent[] = [{ agent, depth: 0, connector: "" }];
+    const flatList: FlatEntry[] = [makeFlatAgent(agent)];
     // No regular errors, but orphans exist
     dashboard.onUpdate([agent], flatList, [], ["ittybitty-orphan"]);
     // Cycle through all modes — ERRORS should be reachable
@@ -2043,7 +2041,7 @@ describe("Orphaned tmux sessions (Phase 10)", () => {
   test("onUpdate with empty orphans clears previous orphans", () => {
     dashboard = makeDashboard();
     const agent = makeAgent("agent-test", "/repos/test");
-    const flatList: FlatAgent[] = [{ agent, depth: 0, connector: "" }];
+    const flatList: FlatEntry[] = [makeFlatAgent(agent)];
     dashboard.onUpdate([agent], flatList, [], ["ittybitty-orphan"]);
     expect(dashboard.rightPane.orphanedTmuxSessions.length).toBe(1);
     dashboard.onUpdate([agent], flatList, [], []);
@@ -2107,11 +2105,11 @@ describe("Context-sensitive footer (repo header vs agent)", () => {
     agent2.state = "running";
 
     // Simulate multi-repo flatList with repo headers
-    const flatList: FlatAgent[] = [
-      { agent: agent1, depth: 0, connector: "", repoHeader: "alpha", repoHasAgents: true },
-      { agent: agent1, depth: 0, connector: "└── " },
-      { agent: agent2, depth: 0, connector: "", repoHeader: "beta", repoHasAgents: true },
-      { agent: agent2, depth: 0, connector: "└── " },
+    const flatList: FlatEntry[] = [
+      makeFlatRepoHeader("alpha", "/repos/alpha", true),
+      makeFlatAgent(agent1, { connector: "└── " }),
+      makeFlatRepoHeader("beta", "/repos/beta", true),
+      makeFlatAgent(agent2, { connector: "└── " }),
     ];
     dashboard.setRepos([
       { path: "/repos/alpha", name: "alpha" },
@@ -2214,9 +2212,9 @@ describe("Repo nickname display in agent tree", () => {
     const agent = _makeAgent({ id: "agent-a", repoPath: "/repos/myproject", repoName: "myproj-nick" });
     agent.state = "running";
 
-    const flatList: FlatAgent[] = [
-      { agent, depth: 0, connector: "", repoHeader: "myproj-nick", repoHasAgents: true },
-      { agent, depth: 0, connector: "└── " },
+    const flatList: FlatEntry[] = [
+      makeFlatRepoHeader("myproj-nick", "/repos/myproject", true),
+      makeFlatAgent(agent, { connector: "└── " }),
     ];
     dashboard.setRepos([
       { path: "/repos/myproject", name: "myproject", nickname: "myproj-nick" },
@@ -2257,11 +2255,11 @@ describe("Repo header selection persistence", () => {
     const agent2 = _makeAgent({ id: "agent-b", repoPath: "/repos/beta", repoName: "beta" });
     agent2.state = "running";
 
-    const flatList: FlatAgent[] = [
-      { agent: agent1, depth: 0, connector: "", repoHeader: "alpha", repoHasAgents: true },
-      { agent: agent1, depth: 0, connector: "└── " },
-      { agent: agent2, depth: 0, connector: "", repoHeader: "beta", repoHasAgents: true },
-      { agent: agent2, depth: 0, connector: "└── " },
+    const flatList: FlatEntry[] = [
+      makeFlatRepoHeader("alpha", "/repos/alpha", true),
+      makeFlatAgent(agent1, { connector: "└── " }),
+      makeFlatRepoHeader("beta", "/repos/beta", true),
+      makeFlatAgent(agent2, { connector: "└── " }),
     ];
     dashboard.setRepos([
       { path: "/repos/alpha", name: "alpha" },
@@ -2279,11 +2277,11 @@ describe("Repo header selection persistence", () => {
     expect(dashboard.agentTree.selectedRepoHeader).toBe("beta");
 
     // Simulate a tree refresh with same data (e.g., after an agent state change)
-    const newFlatList: FlatAgent[] = [
-      { agent: agent1, depth: 0, connector: "", repoHeader: "alpha", repoHasAgents: true },
-      { agent: agent1, depth: 0, connector: "└── " },
-      { agent: agent2, depth: 0, connector: "", repoHeader: "beta", repoHasAgents: true },
-      { agent: agent2, depth: 0, connector: "└── " },
+    const newFlatList: FlatEntry[] = [
+      makeFlatRepoHeader("alpha", "/repos/alpha", true),
+      makeFlatAgent(agent1, { connector: "└── " }),
+      makeFlatRepoHeader("beta", "/repos/beta", true),
+      makeFlatAgent(agent2, { connector: "└── " }),
     ];
     dashboard.onUpdate([agent1, agent2], newFlatList, []);
 
@@ -2300,10 +2298,10 @@ describe("Repo header selection persistence", () => {
     expect(dashboard.agentTree.selectedRepoHeader).toBe("beta");
 
     // Simulate agent-a being removed (merged/killed) — beta header moves up
-    const newFlatList: FlatAgent[] = [
-      { agent: agent1, depth: 0, connector: "", repoHeader: "alpha", repoHasAgents: false },
-      { agent: agent2, depth: 0, connector: "", repoHeader: "beta", repoHasAgents: true },
-      { agent: agent2, depth: 0, connector: "└── " },
+    const newFlatList: FlatEntry[] = [
+      makeFlatRepoHeader("alpha", "/repos/alpha", false),
+      makeFlatRepoHeader("beta", "/repos/beta", true),
+      makeFlatAgent(agent2, { connector: "└── " }),
     ];
     dashboard.onUpdate([agent2], newFlatList, []);
 
@@ -2319,11 +2317,11 @@ describe("Repo header selection persistence", () => {
     // Simulate rename: alpha → "my-alpha" — repoPath stays the same
     const renamedAgent1 = _makeAgent({ id: "agent-a", repoPath: "/repos/alpha", repoName: "my-alpha" });
     renamedAgent1.state = "running";
-    const newFlatList: FlatAgent[] = [
-      { agent: agent2, depth: 0, connector: "", repoHeader: "beta", repoHasAgents: true },
-      { agent: agent2, depth: 0, connector: "└── " },
-      { agent: renamedAgent1, depth: 0, connector: "", repoHeader: "my-alpha", repoHasAgents: true },
-      { agent: renamedAgent1, depth: 0, connector: "└── " },
+    const newFlatList: FlatEntry[] = [
+      makeFlatRepoHeader("beta", "/repos/beta", true),
+      makeFlatAgent(agent2, { connector: "└── " }),
+      makeFlatRepoHeader("my-alpha", "/repos/alpha", true),
+      makeFlatAgent(renamedAgent1, { connector: "└── " }),
     ];
     dashboard.onUpdate([renamedAgent1, agent2], newFlatList, []);
 

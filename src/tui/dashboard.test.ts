@@ -8,7 +8,7 @@ import { stripAnsi } from "../parse-state";
 import { makeAgent as _makeAgent, makeFlatAgent, makeFlatRepoHeader } from "../test-utils";
 import { TmuxPaneComponent, RightPaneComponent, DashboardComponent, AgentTreeComponent, colorizeDiff, colorizeLog, formatAgentRow } from "./dashboard";
 import { visibleWidth } from "@mariozechner/pi-tui";
-import { setRunner, resetRunner, setSendSpawnRunner, resetSendSpawnRunner, setKillPauseSpawnRunner, resetKillPauseSpawnRunner } from "../ib-commands";
+import { setRunner, resetRunner, setSendSpawnRunner, resetSendSpawnRunner, setKillPauseSpawnRunner, resetKillPauseSpawnRunner, setNukeResumeSpawnRunner, resetNukeResumeSpawnRunner } from "../ib-commands";
 import { setSpawnRunner as setLifecycleSpawnRunner, resetSpawnRunner as resetLifecycleSpawnRunner } from "../agent-lifecycle";
 import type { SpawnResult } from "../types";
 import { PANE_MODES } from "./pane-manager";
@@ -425,6 +425,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     } as SpawnResult);
     setKillPauseSpawnRunner(noopSpawn);
     setLifecycleSpawnRunner(noopSpawn);
+    setNukeResumeSpawnRunner(noopSpawn);
 
     const agent = makeAgent("agent-test", actionTempDir);
     agent.state = state as any;
@@ -437,6 +438,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     resetSendSpawnRunner();
     resetKillPauseSpawnRunner();
     resetLifecycleSpawnRunner();
+    resetNukeResumeSpawnRunner();
     if (actionTempDir) {
       await rm(actionTempDir, { recursive: true, force: true });
       actionTempDir = null;
@@ -507,13 +509,17 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(d.confirmLabel).toBe("Nuke");
   });
 
-  test("nuke confirm: Enter on Nuke button executes nuke --force", async () => {
+  test("nuke confirm: Enter on Nuke button executes native nuke", async () => {
     await setupDashboardWithAgent();
     dashboard.handleInput("!");
     // focusedButton defaults to "confirm" (Nuke), press Enter
     dashboard.handleInput("\r");
     await Bun.sleep(10);
-    expect(lastIbCall!.args).toEqual(["nuke", "agent-test", "--force"]);
+    // Dialog should be dismissed after native nuke executes
+    expect(dashboard.dialog).toBeNull();
+    // Agent directory should be removed by native nuke teardown
+    const agentDir = join(actionTempDir!, ".ittybitty", "agents", "agent-test");
+    expect(await Bun.file(join(agentDir, "meta.json")).exists()).toBe(false);
   });
 
   test("! key with no agent selected opens nuke-all confirm dialog", () => {
@@ -534,22 +540,36 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(d.focusedButton).toBe("cancel");
   });
 
-  test("nuke-all confirm executes nuke --force with no agent ID", async () => {
+  test("nuke-all confirm executes native nuke-all", async () => {
     dashboard = makeDashboard();
     lastIbCall = null;
-    setRunner(async (args, cwd) => {
-      lastIbCall = { args, cwd };
-      return { ok: true, exitCode: 0, stdout: "ok", stderr: "" };
-    });
-    dashboard.setRepos([{ name: "test-repo", path: "/repos/test" }]);
+
+    // Create temp dir with agent for nukeAllAgents to find
+    actionTempDir = await mkdtemp(join(tmpdir(), "dashboard-nukeall-"));
+    const agentDir = join(actionTempDir, ".ittybitty", "agents", "agent-one");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-one",
+      tmux_session: "tmux-agent-one",
+    }));
+
+    const noopSpawn = (cmd: string[]) => ({
+      stdout: new Response("").body!,
+      stderr: new Response("").body!,
+      exited: Promise.resolve(cmd.includes("pgrep") || cmd.includes("list-sessions") ? 1 : 0),
+    } as SpawnResult);
+    setLifecycleSpawnRunner(noopSpawn);
+    setNukeResumeSpawnRunner(noopSpawn);
+
+    dashboard.setRepos([{ name: "test-repo", path: actionTempDir }]);
     dashboard.onUpdate([], [], []);
     dashboard.handleInput("!");
     // focusedButton is "cancel", Tab to move to confirm, then Enter
     dashboard.handleInput("\t");
     dashboard.handleInput("\r");
     await Bun.sleep(10);
-    expect(lastIbCall!.args).toEqual(["nuke", "--force"]);
-    expect(lastIbCall!.cwd).toBe("/repos/test");
+    // Agent directory should be removed by native nuke-all
+    expect(await Bun.file(join(agentDir, "meta.json")).exists()).toBe(false);
   });
 
   test("! key with no agent and multiple repos shows repo picker", () => {
@@ -573,7 +593,10 @@ describe("DashboardComponent dialog and action handlers", () => {
     await setupDashboardWithAgent("stopped");
     dashboard.handleInput("R");
     await Bun.sleep(10);
-    expect(lastIbCall!.args).toEqual(["resume", "agent-test"]);
+    // Native resume creates resume.sh and logs to agent.log
+    const agentDir = join(actionTempDir!, ".ittybitty", "agents", "agent-test");
+    const log = await Bun.file(join(agentDir, "agent.log")).text();
+    expect(log).toContain("Agent resumed");
   });
 
   test("R key does not resume running agents", async () => {

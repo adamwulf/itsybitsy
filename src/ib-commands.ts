@@ -1,10 +1,11 @@
 /**
  * Async wrappers for ib mutation commands.
  * Every command runs with cwd set to the agent's repoPath.
- * kill, pause, and sendMessage are implemented natively; others delegate to ib CLI.
+ * kill, pause, sendMessage, nuke, and resume are implemented natively; others delegate to ib CLI.
  */
 
 import { join } from "path";
+import { readdir, chmod } from "fs/promises";
 import type { Agent } from "./agents";
 import {
   logAgent,
@@ -12,6 +13,8 @@ import {
   killAgentProcess,
   teardownAgent,
   scanAndKillOrphans,
+  getDescendantsRecursive,
+  resolveGitRoot,
 } from "./agent-lifecycle";
 import type { SpawnFn } from "./types";
 
@@ -121,16 +124,443 @@ export async function killAgent(agent: Agent): Promise<IbCommandResult> {
   return { ok: true, exitCode: 0, stdout: `Closed agent: ${agent.id}`, stderr: "" };
 }
 
+/** Pluggable spawn runner for nuke/resume — defaults to Bun.spawn, overridable for tests */
+let nukeResumeSpawnRunner: SpawnFn = Bun.spawn as SpawnFn;
+/** Override delay for resume tests (null = use real delay) */
+let resumeDelayOverrideMs: number | null = null;
+
+/** Override the nuke/resume spawn runner (for testing). Sets delay to 0 by default. */
+export function setNukeResumeSpawnRunner(runner: SpawnFn): void {
+  nukeResumeSpawnRunner = runner;
+  resumeDelayOverrideMs = 0;
+}
+
+/** Reset the nuke/resume spawn runner */
+export function resetNukeResumeSpawnRunner(): void {
+  nukeResumeSpawnRunner = Bun.spawn as SpawnFn;
+  resumeDelayOverrideMs = null;
+}
+
+/**
+ * Helper: run a command via the nuke/resume spawn runner and return { stdout, exitCode }.
+ */
+async function nukeResumeRunCmd(cmd: string[]): Promise<{ stdout: string; exitCode: number }> {
+  const proc = nukeResumeSpawnRunner(cmd, { stdout: "pipe", stderr: "pipe" });
+  const stdout = await new Response(proc.stdout).text();
+  const exitCode = await proc.exited;
+  return { stdout: stdout.trim(), exitCode };
+}
+
+/**
+ * Clean up orphaned tmux sessions — sessions with the ittybitty- prefix
+ * that don't correspond to any remaining agent directory.
+ */
+async function cleanupOrphanedTmuxSessions(agentsDir: string): Promise<number> {
+  let cleaned = 0;
+
+  // Build list of remaining agent IDs
+  const knownIds: string[] = [];
+  try {
+    const entries = await readdir(agentsDir, { withFileTypes: true });
+    for (const e of entries) {
+      if (e.isDirectory()) knownIds.push(e.name);
+    }
+  } catch { /* agents dir may not exist */ }
+
+  // List tmux sessions
+  const listResult = await nukeResumeRunCmd(["tmux", "list-sessions", "-F", "#{session_name}"]);
+  if (listResult.exitCode !== 0 || !listResult.stdout) return 0;
+
+  const sessions = listResult.stdout.split("\n").filter((s) => s.trim());
+  for (const session of sessions) {
+    if (!session.startsWith("ittybitty-")) continue;
+
+    // Extract agent ID: strip prefix (ittybitty-<repoid>-<agentid>)
+    // The session format is: ittybitty-<8hex>-<agentid>
+    // We need to match the agent ID portion against known IDs
+    const parts = session.split("-");
+    // Session: "ittybitty-<repoid>-agent-<hex>" or "ittybitty-<repoid>-<name>"
+    // The repo ID is parts[1], agent ID is everything after "ittybitty-<repoid>-"
+    if (parts.length < 3) continue;
+    const agentId = parts.slice(2).join("-");
+
+    const isKnown = knownIds.includes(agentId);
+    if (!isKnown) {
+      const killResult = await nukeResumeRunCmd(["tmux", "kill-session", "-t", session]);
+      if (killResult.exitCode === 0) cleaned++;
+    }
+  }
+
+  return cleaned;
+}
+
+/**
+ * Native nuke implementation — replaces `ib nuke <id> --force`.
+ *
+ * Sequence (mirrors do_nuke in ib bash):
+ * 1. Check if target is a worker with no children → error
+ * 2. Get all descendants via getDescendantsRecursive()
+ * 3. For each: removeAgentQuestions() then teardownAgent()
+ * 4. Clean up orphaned tmux sessions
+ * 5. scanAndKillOrphans()
+ */
 export async function nukeAgent(agent: Agent): Promise<IbCommandResult> {
-  return runIb(["nuke", agent.id, "--force"], agent.repoPath);
+  const agentsDir = join(agent.repoPath, ".ittybitty", "agents");
+
+  // Check if this is a worker with no children — reject
+  if (agent.meta.worker) {
+    const descendants = await getDescendantsRecursive(agentsDir, agent.id);
+    // descendants includes the agent itself, so length 1 means no children
+    if (descendants.length <= 1) {
+      return {
+        ok: false,
+        exitCode: 1,
+        stdout: "",
+        stderr: `Error: '${agent.id}' is a worker agent with no descendants. Use 'ib kill ${agent.id}' instead.`,
+      };
+    }
+  }
+
+  // Get all descendants (includes the agent itself)
+  const descendants = await getDescendantsRecursive(agentsDir, agent.id);
+
+  if (descendants.length === 0) {
+    return { ok: true, exitCode: 0, stdout: "No agents found to kill.", stderr: "" };
+  }
+
+  let killed = 0;
+  let failed = 0;
+
+  for (const id of descendants) {
+    const agentDir = join(agentsDir, id);
+    // Skip if directory doesn't exist
+    try {
+      await readdir(agentDir);
+    } catch {
+      continue;
+    }
+
+    // Remove questions
+    await removeAgentQuestions(agent.repoPath, id);
+
+    // Read meta for teardown
+    let meta = { tmux_session: "", claude_pid: "" };
+    try {
+      const metaData = await Bun.file(join(agentDir, "meta.json")).json();
+      meta = {
+        tmux_session: metaData.tmux_session || "",
+        claude_pid: metaData.claude_pid || "",
+      };
+    } catch { /* ignore */ }
+
+    // Teardown
+    try {
+      await teardownAgent(agent.repoPath, id, agentDir, meta, "Agent nuked");
+      killed++;
+    } catch {
+      failed++;
+    }
+  }
+
+  // Clean up orphaned tmux sessions
+  const orphansKilled = await cleanupOrphanedTmuxSessions(agentsDir);
+
+  // Scan for orphaned Claude processes
+  if (killed > 0 || orphansKilled > 0) {
+    await scanAndKillOrphans(agentsDir);
+  }
+
+  if (failed > 0 && killed === 0) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `All ${failed} agent(s) failed to kill` };
+  }
+
+  let stdout = `Nuked ${killed} agent(s)`;
+  if (orphansKilled > 0) stdout += `, cleaned ${orphansKilled} orphaned session(s)`;
+  if (failed > 0) stdout += ` (${failed} failed)`;
+
+  return { ok: true, exitCode: 0, stdout, stderr: "" };
 }
 
+/**
+ * Native nuke-all implementation — replaces `ib nuke --force`.
+ *
+ * Kills ALL agents in the agents directory.
+ */
 export async function nukeAllAgents(repoPath: string): Promise<IbCommandResult> {
-  return runIb(["nuke", "--force"], repoPath);
+  const agentsDir = join(repoPath, ".ittybitty", "agents");
+
+  // Collect all agents with meta.json
+  const agentsToKill: string[] = [];
+  try {
+    const entries = await readdir(agentsDir, { withFileTypes: true });
+    for (const e of entries) {
+      if (!e.isDirectory()) continue;
+      const metaExists = await Bun.file(join(agentsDir, e.name, "meta.json")).exists().catch(() => false);
+      if (metaExists) agentsToKill.push(e.name);
+    }
+  } catch { /* agents dir may not exist */ }
+
+  let killed = 0;
+  let failed = 0;
+
+  for (const id of agentsToKill) {
+    const agentDir = join(agentsDir, id);
+
+    // Remove questions
+    await removeAgentQuestions(repoPath, id);
+
+    // Read meta for teardown
+    let meta = { tmux_session: "", claude_pid: "" };
+    try {
+      const metaData = await Bun.file(join(agentDir, "meta.json")).json();
+      meta = {
+        tmux_session: metaData.tmux_session || "",
+        claude_pid: metaData.claude_pid || "",
+      };
+    } catch { /* ignore */ }
+
+    // Teardown
+    try {
+      await teardownAgent(repoPath, id, agentDir, meta, "Agent nuked");
+      killed++;
+    } catch {
+      failed++;
+    }
+  }
+
+  // Clean up orphaned tmux sessions
+  const orphansKilled = await cleanupOrphanedTmuxSessions(agentsDir);
+
+  // Scan for orphaned Claude processes
+  if (killed > 0 || orphansKilled > 0) {
+    await scanAndKillOrphans(agentsDir);
+  }
+
+  if (failed > 0 && killed === 0 && agentsToKill.length > 0) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `All ${failed} agent(s) failed to kill` };
+  }
+
+  let stdout = `Nuked ${killed} agent(s)`;
+  if (orphansKilled > 0) stdout += `, cleaned ${orphansKilled} orphaned session(s)`;
+  if (failed > 0) stdout += ` (${failed} failed)`;
+
+  return { ok: true, exitCode: 0, stdout, stderr: "" };
 }
 
+/**
+ * Native resume implementation — replaces `ib resume <id>`.
+ *
+ * Sequence (mirrors cmd_resume in ib bash):
+ * 1. Read session_id, model from meta.json
+ * 2. Check yolo mode from start.sh
+ * 3. Create resume.sh script
+ * 4. Determine work dir
+ * 5. Start tmux session
+ * 6. Auto-accept workspace trust if not yolo
+ * 7. Send resume nudge
+ * 8. Log result
+ */
 export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
-  return runIb(["resume", agent.id], agent.repoPath);
+  const agentDir = join(agent.repoPath, ".ittybitty", "agents", agent.id);
+
+  // Check agent directory exists
+  const dirExists = await Bun.file(join(agentDir, "meta.json")).exists().catch(() => false);
+  if (!dirExists) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' not found` };
+  }
+
+  // Must be stopped
+  if (agent.state !== "stopped") {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' is not stopped (current state: ${agent.state})` };
+  }
+
+  // Read session_id from meta.json
+  const sessionId = agent.meta.session_id;
+  if (!sessionId || sessionId === "null") {
+    return { ok: false, exitCode: 1, stdout: "", stderr: "No session_id found in meta.json" };
+  }
+
+  // Read model
+  const model = agent.meta.model && agent.meta.model !== "null" ? agent.meta.model : "";
+
+  // Detect yolo mode from start.sh
+  let yoloMode = false;
+  try {
+    const startSh = await Bun.file(join(agentDir, "start.sh")).text();
+    if (startSh.includes("dangerously-skip-permissions")) {
+      yoloMode = true;
+    }
+  } catch { /* start.sh may not exist */ }
+
+  // Build claude args
+  let claudeArgs = "";
+  if (yoloMode) {
+    claudeArgs = "--dangerously-skip-permissions --permission-mode bypassPermissions";
+  }
+  if (model) {
+    claudeArgs = claudeArgs ? `${claudeArgs} --model ${model}` : `--model ${model}`;
+  }
+
+  // Get git root for PATH
+  const gitRoot = await resolveGitRoot(agent.repoPath) || agent.repoPath;
+
+  // Determine work dir
+  const repoDir = join(agentDir, "repo");
+  let workPath = repoDir;
+  try {
+    await readdir(repoDir);
+  } catch {
+    workPath = agent.repoPath;
+  }
+
+  // Build exit script path
+  const absExitScript = join(agentDir, "exit-check.sh");
+
+  // Write resume.sh
+  const resumeScript = join(agentDir, "resume.sh");
+  const resumeContent = `#!/bin/bash
+# Add git repo root to PATH so 'ib' is available
+export PATH="${gitRoot}:$PATH"
+
+# Clear Claude Code nesting detection so agents can start their own claude process
+unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT
+
+# Start Claude in background and capture PID
+claude --resume "${sessionId}" ${claudeArgs} &
+CLAUDE_PID=$!
+
+# Store PID in meta.json using sed (no jq dependency)
+# This adds claude_pid field to existing JSON
+if [[ -f "${agentDir}/meta.json" ]]; then
+    # Insert claude_pid before the closing brace
+    sed -i '' "s/}$/,\\n  \\"claude_pid\\": \\"$CLAUDE_PID\\"\\n}/" "${agentDir}/meta.json"
+fi
+
+# Wait for Claude to complete
+wait $CLAUDE_PID
+
+# Run exit check
+${absExitScript}
+`;
+  await Bun.write(resumeScript, resumeContent);
+  await chmod(resumeScript, 0o755);
+
+  // Ensure tmux server is running
+  const startServerResult = await nukeResumeRunCmd(["tmux", "start-server"]);
+  if (startServerResult.exitCode !== 0) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: "Could not start tmux server" };
+  }
+
+  // Start tmux session
+  const tmuxSession = agent.meta.tmux_session;
+  const tmuxResult = await nukeResumeRunCmd([
+    "tmux", "new-session", "-d", "-x", "60", "-s", tmuxSession, "-c", workPath, resumeScript,
+  ]);
+  if (tmuxResult.exitCode !== 0) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Could not create tmux session '${tmuxSession}'` };
+  }
+
+  // Auto-accept workspace trust if not yolo (poll tmux for trust prompts)
+  if (!yoloMode) {
+    // Run acceptance in background — poll for up to 15s
+    autoAcceptWorkspaceTrust(tmuxSession);
+  }
+
+  // Send resume nudge after short delay
+  const nudgeDelayMs = resumeDelayOverrideMs !== null ? resumeDelayOverrideMs : 100;
+  if (nudgeDelayMs > 0) await Bun.sleep(nudgeDelayMs);
+
+  const nudgePrompt = "Resume your work, or end with 'WAITING' or 'I HAVE COMPLETED THE GOAL' as your final line.";
+  await nukeResumeRunCmd(["tmux", "send-keys", "-t", tmuxSession, nudgePrompt]);
+
+  const nudgeSleepMs = resumeDelayOverrideMs !== null ? resumeDelayOverrideMs : 100;
+  if (nudgeSleepMs > 0) await Bun.sleep(nudgeSleepMs);
+
+  await nukeResumeRunCmd(["tmux", "send-keys", "-t", tmuxSession, "Enter"]);
+
+  // Log
+  await logAgent(agentDir, "Agent resumed");
+  await logAgent(agentDir, "Sent resume nudge");
+
+  return { ok: true, exitCode: 0, stdout: `Use 'ib look ${agent.id}' to view output`, stderr: "" };
+}
+
+/**
+ * Auto-accept workspace trust dialog by polling tmux output.
+ * Mirrors auto_accept_workspace_trust in ib bash.
+ * Runs asynchronously — does not block the caller.
+ */
+async function autoAcceptWorkspaceTrust(tmuxSession: string): Promise<void> {
+  const maxAttempts = 5;
+  const maxWaitHalfSecs = 30; // 15 seconds total for initial wait
+
+  // Wait for Claude to start (logo or permissions screen)
+  let startedWith = "";
+  for (let i = 0; i < maxWaitHalfSecs; i++) {
+    const delayMs = resumeDelayOverrideMs !== null ? resumeDelayOverrideMs : 500;
+    if (delayMs > 0) await Bun.sleep(delayMs);
+
+    const captureResult = await nukeResumeRunCmd([
+      "tmux", "capture-pane", "-t", tmuxSession, "-p", "-S", "-",
+    ]);
+    if (captureResult.exitCode !== 0) continue;
+
+    const output = captureResult.stdout;
+    // Check for logo or [USER TASK]
+    if (output.includes("Claude Code v") || output.includes("[USER TASK]")) {
+      startedWith = "logo";
+      break;
+    }
+    // Check for permissions screens
+    if (/enter to confirm/i.test(output)) {
+      if (/trust/i.test(output) || /Allow external CLAUDE\.md file imports/i.test(output)) {
+        startedWith = "permissions";
+        break;
+      }
+    }
+  }
+
+  // If logo appeared directly, no permissions needed
+  if (startedWith !== "permissions") return;
+
+  // Accept permissions (may need multiple Enter presses)
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    await nukeResumeRunCmd(["tmux", "send-keys", "-t", tmuxSession, "Enter"]);
+
+    const delayMs = resumeDelayOverrideMs !== null ? resumeDelayOverrideMs : 4000;
+    if (delayMs > 0) await Bun.sleep(delayMs);
+
+    const captureResult = await nukeResumeRunCmd([
+      "tmux", "capture-pane", "-t", tmuxSession, "-p", "-S", "-",
+    ]);
+    if (captureResult.exitCode !== 0) continue;
+
+    const recent = captureResult.stdout;
+
+    // Check if permissions prompt is still active
+    let hasPermissions = false;
+    if (/enter to confirm/i.test(recent)) {
+      if (/trust/i.test(recent) || /Allow external CLAUDE\.md file imports/i.test(recent)) {
+        hasPermissions = true;
+      }
+    }
+
+    if (!hasPermissions) {
+      // Wait for logo to confirm success
+      for (let j = 0; j < maxWaitHalfSecs; j++) {
+        const logoDelay = resumeDelayOverrideMs !== null ? resumeDelayOverrideMs : 500;
+        if (logoDelay > 0) await Bun.sleep(logoDelay);
+
+        const logoCapture = await nukeResumeRunCmd([
+          "tmux", "capture-pane", "-t", tmuxSession, "-p", "-S", "-",
+        ]);
+        if (logoCapture.exitCode !== 0) continue;
+        if (logoCapture.stdout.includes("Claude Code v") || logoCapture.stdout.includes("[USER TASK]")) {
+          return; // Success
+        }
+      }
+    }
+  }
 }
 
 export async function reassignAgent(agent: Agent, newManager: string | null): Promise<IbCommandResult> {

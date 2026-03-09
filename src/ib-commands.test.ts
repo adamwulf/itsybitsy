@@ -24,6 +24,8 @@ import {
   resetSendSpawnRunner,
   setKillPauseSpawnRunner,
   resetKillPauseSpawnRunner,
+  setNukeResumeSpawnRunner,
+  resetNukeResumeSpawnRunner,
 } from "./ib-commands";
 import {
   setSpawnRunner as setLifecycleSpawnRunner,
@@ -57,31 +59,7 @@ describe("ib-commands", () => {
     resetRunner();
   });
 
-  test("nukeAgent passes ['nuke', id, '--force']", async () => {
-    const agent = makeAgent("agent-abc", "/repos/myproject");
-    await nukeAgent(agent);
-    expect(lastCall).toEqual({
-      args: ["nuke", "agent-abc", "--force"],
-      cwd: "/repos/myproject",
-    });
-  });
-
-  test("nukeAllAgents passes ['nuke', '--force'] with repoPath as cwd", async () => {
-    await nukeAllAgents("/repos/myproject");
-    expect(lastCall).toEqual({
-      args: ["nuke", "--force"],
-      cwd: "/repos/myproject",
-    });
-  });
-
-  test("resumeAgent passes ['resume', id]", async () => {
-    const agent = makeAgent("agent-abc", "/repos/myproject");
-    await resumeAgent(agent);
-    expect(lastCall).toEqual({
-      args: ["resume", "agent-abc"],
-      cwd: "/repos/myproject",
-    });
-  });
+  // nukeAgent, nukeAllAgents, resumeAgent are now native — tested in dedicated describe blocks below
 
   test("reassignAgent passes ['reassign', id, newManager]", async () => {
     const agent = makeAgent("agent-abc", "/repos/myproject");
@@ -308,7 +286,7 @@ describe("ib-commands", () => {
     });
   });
 
-  test("IbRunner passthrough returns result from runner (nukeAgent)", async () => {
+  test("IbRunner passthrough returns result from runner (mergeAgent)", async () => {
     setRunner(async () => ({
       ok: false,
       exitCode: 1,
@@ -316,8 +294,7 @@ describe("ib-commands", () => {
       stderr: "something broke",
     }));
     const agent = makeAgent("agent-abc", "/repos/myproject");
-    // nukeAgent still uses IbRunner passthrough (not yet native)
-    const result = await nukeAgent(agent);
+    const result = await mergeAgent(agent);
     expect(result.ok).toBe(false);
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toBe("something broke");
@@ -325,9 +302,6 @@ describe("ib-commands", () => {
 
   test("cwd always matches agent.repoPath", async () => {
     const agent = makeAgent("agent-abc", "/some/deep/path/to/repo");
-
-    await resumeAgent(agent);
-    expect(lastCall!.cwd).toBe("/some/deep/path/to/repo");
 
     await mergeAgent(agent);
     expect(lastCall!.cwd).toBe("/some/deep/path/to/repo");
@@ -622,5 +596,390 @@ describe("pauseAgent (native)", () => {
     // Should log tmux session kill
     const log = await Bun.file(join(agentDir, "agent.log")).text();
     expect(log).toContain("Killed tmux session");
+  });
+});
+
+describe("nukeAgent (native)", () => {
+  let tempDir: string;
+  let spawnCalls: string[][];
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "nuke-test-"));
+    spawnCalls = [];
+    const runner = mockSpawnFnWithFailures(spawnCalls, (cmd) =>
+      cmd.includes("has-session") || cmd.includes("pgrep") || cmd.includes("list-sessions")
+    );
+    setLifecycleSpawnRunner(runner);
+    setNukeResumeSpawnRunner(runner);
+  });
+
+  afterEach(async () => {
+    resetLifecycleSpawnRunner();
+    resetNukeResumeSpawnRunner();
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  test("returns error when target is a worker with no children", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-worker");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-worker",
+      tmux_session: "tmux-agent-worker",
+      worker: true,
+    }));
+
+    const agent = _makeAgent({
+      id: "agent-worker",
+      repoPath: tempDir,
+      repoName: "test-repo",
+      meta: { worker: true } as any,
+    });
+    const result = await nukeAgent(agent);
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("worker agent");
+    expect(result.stderr).toContain("ib kill");
+  });
+
+  test("tears down the agent and its descendants", async () => {
+    // Create manager with a child
+    const managerDir = join(tempDir, ".ittybitty", "agents", "agent-mgr");
+    await mkdir(managerDir, { recursive: true });
+    await Bun.write(join(managerDir, "meta.json"), JSON.stringify({
+      id: "agent-mgr",
+      tmux_session: "tmux-agent-mgr",
+      worker: false,
+    }));
+
+    const childDir = join(tempDir, ".ittybitty", "agents", "agent-child");
+    await mkdir(childDir, { recursive: true });
+    await Bun.write(join(childDir, "meta.json"), JSON.stringify({
+      id: "agent-child",
+      tmux_session: "tmux-agent-child",
+      manager: "agent-mgr",
+      worker: true,
+    }));
+
+    const agent = makeAgent("agent-mgr", tempDir);
+    const result = await nukeAgent(agent);
+
+    expect(result.ok).toBe(true);
+    expect(result.stdout).toContain("Nuked 2 agent(s)");
+
+    // Both directories should be removed
+    const mgrExists = await Bun.file(join(managerDir, "meta.json")).exists().catch(() => false);
+    const childExists = await Bun.file(join(childDir, "meta.json")).exists().catch(() => false);
+    expect(mgrExists).toBe(false);
+    expect(childExists).toBe(false);
+  });
+
+  test("removes user-questions.json entries for nuked agents", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-mgr");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-mgr",
+      tmux_session: "tmux-agent-mgr",
+      worker: false,
+    }));
+
+    const questionsPath = join(tempDir, ".ittybitty", "user-questions.json");
+    await Bun.write(questionsPath, JSON.stringify({
+      questions: [
+        { agent: "agent-mgr", question: "Q1" },
+        { agent: "agent-other", question: "Q2" },
+      ],
+    }));
+
+    const agent = makeAgent("agent-mgr", tempDir);
+    await nukeAgent(agent);
+
+    const updated = await Bun.file(questionsPath).json();
+    expect(updated.questions).toEqual([{ agent: "agent-other", question: "Q2" }]);
+  });
+
+  test("succeeds even when no agents found to kill", async () => {
+    // Empty agents directory
+    await mkdir(join(tempDir, ".ittybitty", "agents"), { recursive: true });
+
+    const agent = makeAgent("agent-nonexistent", tempDir);
+    const result = await nukeAgent(agent);
+
+    expect(result.ok).toBe(true);
+    expect(result.stdout).toContain("Nuked 0 agent(s)");
+  });
+});
+
+describe("nukeAllAgents (native)", () => {
+  let tempDir: string;
+  let spawnCalls: string[][];
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "nukeall-test-"));
+    spawnCalls = [];
+    const runner = mockSpawnFnWithFailures(spawnCalls, (cmd) =>
+      cmd.includes("has-session") || cmd.includes("pgrep") || cmd.includes("list-sessions")
+    );
+    setLifecycleSpawnRunner(runner);
+    setNukeResumeSpawnRunner(runner);
+  });
+
+  afterEach(async () => {
+    resetLifecycleSpawnRunner();
+    resetNukeResumeSpawnRunner();
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  test("tears down all agents in the directory", async () => {
+    const agent1Dir = join(tempDir, ".ittybitty", "agents", "agent-one");
+    await mkdir(agent1Dir, { recursive: true });
+    await Bun.write(join(agent1Dir, "meta.json"), JSON.stringify({
+      id: "agent-one",
+      tmux_session: "tmux-agent-one",
+    }));
+
+    const agent2Dir = join(tempDir, ".ittybitty", "agents", "agent-two");
+    await mkdir(agent2Dir, { recursive: true });
+    await Bun.write(join(agent2Dir, "meta.json"), JSON.stringify({
+      id: "agent-two",
+      tmux_session: "tmux-agent-two",
+    }));
+
+    const result = await nukeAllAgents(tempDir);
+
+    expect(result.ok).toBe(true);
+    expect(result.stdout).toContain("Nuked 2 agent(s)");
+
+    // Both directories should be removed
+    const dir1Exists = await Bun.file(join(agent1Dir, "meta.json")).exists().catch(() => false);
+    const dir2Exists = await Bun.file(join(agent2Dir, "meta.json")).exists().catch(() => false);
+    expect(dir1Exists).toBe(false);
+    expect(dir2Exists).toBe(false);
+  });
+
+  test("succeeds with empty agents directory", async () => {
+    await mkdir(join(tempDir, ".ittybitty", "agents"), { recursive: true });
+
+    const result = await nukeAllAgents(tempDir);
+
+    expect(result.ok).toBe(true);
+    expect(result.stdout).toContain("Nuked 0 agent(s)");
+  });
+
+  test("skips directories without meta.json", async () => {
+    await mkdir(join(tempDir, ".ittybitty", "agents", "no-meta"), { recursive: true });
+
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-real");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-real",
+      tmux_session: "tmux-agent-real",
+    }));
+
+    const result = await nukeAllAgents(tempDir);
+
+    expect(result.ok).toBe(true);
+    expect(result.stdout).toContain("Nuked 1 agent(s)");
+  });
+});
+
+describe("resumeAgent (native)", () => {
+  let tempDir: string;
+  let spawnCalls: string[][];
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "resume-test-"));
+    spawnCalls = [];
+    const runner = mockSpawnFn(spawnCalls);
+    setLifecycleSpawnRunner(runner);
+    setNukeResumeSpawnRunner(runner);
+  });
+
+  afterEach(async () => {
+    resetLifecycleSpawnRunner();
+    resetNukeResumeSpawnRunner();
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  test("returns error when agent directory doesn't exist", async () => {
+    const agent = makeAgent("agent-abc", tempDir, "stopped");
+    const result = await resumeAgent(agent);
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("not found");
+  });
+
+  test("returns error when agent is not stopped", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-abc",
+      tmux_session: "tmux-agent-abc",
+      session_id: "sess-123",
+    }));
+
+    const agent = makeAgent("agent-abc", tempDir, "running");
+    const result = await resumeAgent(agent);
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("not stopped");
+    expect(result.stderr).toContain("running");
+  });
+
+  test("returns error when no session_id in meta.json", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-abc",
+      tmux_session: "tmux-agent-abc",
+    }));
+
+    const agent = _makeAgent({
+      id: "agent-abc",
+      repoPath: tempDir,
+      repoName: "test",
+      state: "stopped",
+      meta: { session_id: "", tmux_session: "tmux-agent-abc" } as any,
+    });
+    const result = await resumeAgent(agent);
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("session_id");
+  });
+
+  test("creates resume.sh and starts tmux session", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-abc",
+      tmux_session: "tmux-agent-abc",
+      session_id: "sess-123",
+      model: "opus",
+    }));
+
+    const agent = _makeAgent({
+      id: "agent-abc",
+      repoPath: tempDir,
+      repoName: "test",
+      state: "stopped",
+      meta: {
+        session_id: "sess-123",
+        tmux_session: "tmux-agent-abc",
+        model: "opus",
+      } as any,
+    });
+    const result = await resumeAgent(agent);
+
+    expect(result.ok).toBe(true);
+    expect(result.stdout).toContain("ib look agent-abc");
+
+    // resume.sh should be created
+    const resumeScript = await Bun.file(join(agentDir, "resume.sh")).text();
+    expect(resumeScript).toContain("claude --resume");
+    expect(resumeScript).toContain("sess-123");
+    expect(resumeScript).toContain("--model opus");
+
+    // tmux new-session should have been called
+    const newSessionCall = spawnCalls.find(
+      (c) => c[0] === "tmux" && c[1] === "new-session"
+    );
+    expect(newSessionCall).toBeDefined();
+    expect(newSessionCall).toContain("tmux-agent-abc");
+
+    // tmux send-keys for nudge should have been called
+    const nudgeCall = spawnCalls.find(
+      (c) => c[0] === "tmux" && c[1] === "send-keys" && c.length === 5 && c[4] !== "Enter"
+    );
+    expect(nudgeCall).toBeDefined();
+    expect(nudgeCall![4]).toContain("Resume your work");
+  });
+
+  test("detects yolo mode from start.sh", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-abc",
+      tmux_session: "tmux-agent-abc",
+      session_id: "sess-123",
+    }));
+    await Bun.write(join(agentDir, "start.sh"), "#!/bin/bash\nclaude --dangerously-skip-permissions &\n");
+
+    const agent = _makeAgent({
+      id: "agent-abc",
+      repoPath: tempDir,
+      repoName: "test",
+      state: "stopped",
+      meta: {
+        session_id: "sess-123",
+        tmux_session: "tmux-agent-abc",
+      } as any,
+    });
+    const result = await resumeAgent(agent);
+
+    expect(result.ok).toBe(true);
+
+    // resume.sh should contain yolo flags
+    const resumeScript = await Bun.file(join(agentDir, "resume.sh")).text();
+    expect(resumeScript).toContain("--dangerously-skip-permissions");
+    expect(resumeScript).toContain("--permission-mode bypassPermissions");
+  });
+
+  test("logs 'Agent resumed' and 'Sent resume nudge'", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-abc",
+      tmux_session: "tmux-agent-abc",
+      session_id: "sess-123",
+    }));
+
+    const agent = _makeAgent({
+      id: "agent-abc",
+      repoPath: tempDir,
+      repoName: "test",
+      state: "stopped",
+      meta: {
+        session_id: "sess-123",
+        tmux_session: "tmux-agent-abc",
+      } as any,
+    });
+    await resumeAgent(agent);
+
+    const log = await Bun.file(join(agentDir, "agent.log")).text();
+    expect(log).toContain("Agent resumed");
+    expect(log).toContain("Sent resume nudge");
+  });
+
+  test("uses repoPath when worktree repo dir doesn't exist", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(agentDir, { recursive: true });
+    // Don't create repo/ subdirectory
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-abc",
+      tmux_session: "tmux-agent-abc",
+      session_id: "sess-123",
+    }));
+
+    const agent = _makeAgent({
+      id: "agent-abc",
+      repoPath: tempDir,
+      repoName: "test",
+      state: "stopped",
+      meta: {
+        session_id: "sess-123",
+        tmux_session: "tmux-agent-abc",
+      } as any,
+    });
+    const result = await resumeAgent(agent);
+
+    expect(result.ok).toBe(true);
+
+    // The tmux new-session should use tempDir as workdir
+    const newSessionCall = spawnCalls.find(
+      (c) => c[0] === "tmux" && c[1] === "new-session"
+    );
+    expect(newSessionCall).toBeDefined();
+    // -c flag value should be tempDir (not the repo subdir)
+    const cFlagIdx = newSessionCall!.indexOf("-c");
+    expect(newSessionCall![cFlagIdx + 1]).toBe(tempDir);
   });
 });

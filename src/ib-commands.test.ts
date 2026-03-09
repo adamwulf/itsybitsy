@@ -118,7 +118,7 @@ describe("ib-commands", () => {
       // Should have: has-session, send-keys (message), send-keys (Enter)
       expect(spawnCalls.length).toBe(3);
       expect(spawnCalls[0]).toEqual(["tmux", "has-session", "-t", `tmux-agent-abc`]);
-      expect(spawnCalls[1]).toEqual(["tmux", "send-keys", "-t", `tmux-agent-abc`, "hello world"]);
+      expect(spawnCalls[1]).toEqual(["tmux", "send-keys", "-t", `tmux-agent-abc`, "-l", "hello world"]);
       expect(spawnCalls[2]).toEqual(["tmux", "send-keys", "-t", `tmux-agent-abc`, "Enter"]);
     });
 
@@ -155,10 +155,10 @@ describe("ib-commands", () => {
 
       // The send-keys call should have the prefixed message
       const sendKeysCall = spawnCalls.find(
-        (c) => c[0] === "tmux" && c[1] === "send-keys" && c.length === 5 && c[4] !== "Enter"
+        (c) => c[0] === "tmux" && c[1] === "send-keys" && c.length === 6 && c[4] === "-l"
       );
       expect(sendKeysCall).toBeDefined();
-      expect(sendKeysCall![4]).toBe("[sent by agent agent-sender]: hello");
+      expect(sendKeysCall![5]).toBe("[sent by agent agent-sender]: hello");
     });
 
     test("logs to recipient agent.log", async () => {

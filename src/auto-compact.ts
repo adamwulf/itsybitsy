@@ -45,6 +45,9 @@ export function contextSizeForModel(model: string): number {
   if (model.includes("4-5") || model.includes("4.5")) {
     return 1_000_000;
   }
+  if (model.includes("4-6") || model.includes("4.6")) {
+    return 200_000;
+  }
   return 200_000;
 }
 

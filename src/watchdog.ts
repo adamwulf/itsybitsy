@@ -389,9 +389,14 @@ export function startWatchdog(provider: AgentProvider): void {
 
   // Run the watchdog tick every POLL_INTERVAL_MS
   watchdogTimer = setInterval(async () => {
-    const agents = agentProvider?.() ?? [];
-    if (agents.length > 0) {
-      await tick(agents);
+    try {
+      const agents = agentProvider?.() ?? [];
+      if (agents.length > 0) {
+        await tick(agents);
+      }
+    } catch (err) {
+      // Log but don't crash — unhandled rejections in setInterval are fatal
+      console.error("[watchdog] tick error:", err);
     }
   }, POLL_INTERVAL_MS);
 }

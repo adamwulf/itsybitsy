@@ -10,6 +10,10 @@ import {
   calculateUsagePercent,
   getAgentContextUsage,
   checkAndCompact,
+  setCompactSpawnRunner,
+  resetCompactSpawnRunner,
+  setUsageReader,
+  resetUsageReader,
   type CompactState,
   type TranscriptUsage,
 } from "./auto-compact";
@@ -287,7 +291,7 @@ describe("getAgentContextUsage", () => {
   });
 
   test("reads transcript and returns usage percentage", async () => {
-    // Create a fake transcript file at the expected path
+    // Use tmpDir as a fake HOME to avoid writing to real ~/.claude/
     const agent = makeAgent({ repoPath: tmpDir, meta: { ...makeAgent().meta, worktree: false } });
     const encoded = encodeClaudeProjectPath(tmpDir);
     const home = process.env.HOME!;
@@ -302,30 +306,164 @@ describe("getAgentContextUsage", () => {
       const result = await getAgentContextUsage(agent);
       expect(result).toBe(50);
     } finally {
-      // Cleanup the transcript file we created
-      const { unlink } = await import("fs/promises");
-      try {
-        await unlink(transcriptFile);
-      } catch {}
-      // Try to remove the directory (only if empty)
-      try {
-        const { rmdir } = await import("fs/promises");
-        await rmdir(transcriptDir);
-      } catch {}
+      const { unlink, rmdir } = await import("fs/promises");
+      try { await unlink(transcriptFile); } catch {}
+      try { await rmdir(transcriptDir); } catch {}
     }
   });
 });
 
+describe("sendCompact (via runner injection)", () => {
+  afterEach(() => {
+    resetCompactSpawnRunner();
+  });
+
+  test("sends correct tmux command", async () => {
+    const { sendCompact } = await import("./auto-compact");
+    let capturedCmd: string[] = [];
+    setCompactSpawnRunner((cmd) => {
+      capturedCmd = cmd;
+      return { exited: Promise.resolve(0) };
+    });
+
+    const result = await sendCompact("ib_agent-abc123");
+    expect(result).toBe(true);
+    expect(capturedCmd).toEqual(["tmux", "send-keys", "-t", "ib_agent-abc123", "/compact", "Enter"]);
+  });
+
+  test("returns false on non-zero exit", async () => {
+    const { sendCompact } = await import("./auto-compact");
+    setCompactSpawnRunner(() => ({ exited: Promise.resolve(1) }));
+    expect(await sendCompact("bad-session")).toBe(false);
+  });
+
+  test("returns false on spawn error", async () => {
+    const { sendCompact } = await import("./auto-compact");
+    setCompactSpawnRunner(() => { throw new Error("tmux not found"); });
+    expect(await sendCompact("any-session")).toBe(false);
+  });
+});
+
 describe("checkAndCompact", () => {
-  test("clears compactSent when usage drops below threshold", async () => {
+  let spawnCalls: string[][] = [];
+
+  beforeEach(() => {
+    spawnCalls = [];
+    setCompactSpawnRunner((cmd) => {
+      spawnCalls.push(cmd);
+      return { exited: Promise.resolve(0) };
+    });
+  });
+
+  afterEach(() => {
+    resetCompactSpawnRunner();
+    resetUsageReader();
+  });
+
+  test("returns null when usage is unavailable", async () => {
+    setUsageReader(async () => null);
     const state: CompactState = { compactSent: true };
-    // We can't easily mock getAgentContextUsage here, so we test the logic
-    // indirectly through the state management behavior.
-    // When transcript doesn't exist, usagePct is null — no state change
-    const agent = makeAgent();
-    const result = await checkAndCompact(agent, 80, state);
-    // Transcript doesn't exist → null, no state change
+    const result = await checkAndCompact(makeAgent(), 80, state);
     expect(result).toBeNull();
-    expect(state.compactSent).toBe(true); // unchanged when null
+    expect(state.compactSent).toBe(true); // unchanged
+    expect(spawnCalls).toHaveLength(0);
+  });
+
+  test("clears compactSent when usage drops below threshold", async () => {
+    setUsageReader(async () => 50);
+    const state: CompactState = { compactSent: true };
+    const result = await checkAndCompact(makeAgent(), 80, state);
+    expect(result).toBe(50);
+    expect(state.compactSent).toBe(false);
+    expect(spawnCalls).toHaveLength(0);
+  });
+
+  test("sends /compact when usage exceeds threshold and agent is running", async () => {
+    setUsageReader(async () => 85);
+    const state: CompactState = { compactSent: false };
+    const agent = makeAgent({ state: "running" });
+    const result = await checkAndCompact(agent, 80, state);
+    expect(result).toBe(85);
+    expect(state.compactSent).toBe(true);
+    expect(spawnCalls).toHaveLength(1);
+    expect(spawnCalls[0]).toContain("ib_agent-abc123");
+  });
+
+  test("sends /compact when agent is waiting", async () => {
+    setUsageReader(async () => 90);
+    const state: CompactState = { compactSent: false };
+    const agent = makeAgent({ state: "waiting" });
+    await checkAndCompact(agent, 80, state);
+    expect(state.compactSent).toBe(true);
+    expect(spawnCalls).toHaveLength(1);
+  });
+
+  test("does NOT send /compact when agent is in unknown state", async () => {
+    setUsageReader(async () => 90);
+    const state: CompactState = { compactSent: false };
+    const agent = makeAgent({ state: "unknown" });
+    const result = await checkAndCompact(agent, 80, state);
+    expect(result).toBe(90);
+    expect(state.compactSent).toBe(false);
+    expect(spawnCalls).toHaveLength(0);
+  });
+
+  test("does NOT send /compact when agent is compacting", async () => {
+    setUsageReader(async () => 95);
+    const state: CompactState = { compactSent: false };
+    const agent = makeAgent({ state: "compacting" });
+    await checkAndCompact(agent, 80, state);
+    expect(state.compactSent).toBe(false);
+    expect(spawnCalls).toHaveLength(0);
+  });
+
+  test("does NOT send /compact when agent is stopped", async () => {
+    setUsageReader(async () => 95);
+    const state: CompactState = { compactSent: false };
+    const agent = makeAgent({ state: "stopped" });
+    await checkAndCompact(agent, 80, state);
+    expect(state.compactSent).toBe(false);
+    expect(spawnCalls).toHaveLength(0);
+  });
+
+  test("does NOT send /compact when agent is complete", async () => {
+    setUsageReader(async () => 95);
+    const state: CompactState = { compactSent: false };
+    const agent = makeAgent({ state: "complete" });
+    await checkAndCompact(agent, 80, state);
+    expect(state.compactSent).toBe(false);
+    expect(spawnCalls).toHaveLength(0);
+  });
+
+  test("does NOT re-send when compactSent is already true", async () => {
+    setUsageReader(async () => 90);
+    const state: CompactState = { compactSent: true };
+    const agent = makeAgent({ state: "running" });
+    const result = await checkAndCompact(agent, 80, state);
+    expect(result).toBe(90);
+    expect(state.compactSent).toBe(true);
+    expect(spawnCalls).toHaveLength(0); // no duplicate
+  });
+
+  test("re-sends after flag is cleared by dropping below threshold", async () => {
+    const state: CompactState = { compactSent: false };
+    const agent = makeAgent({ state: "running" });
+
+    // First: usage above threshold → sends compact
+    setUsageReader(async () => 85);
+    await checkAndCompact(agent, 80, state);
+    expect(state.compactSent).toBe(true);
+    expect(spawnCalls).toHaveLength(1);
+
+    // Second: usage drops below → clears flag
+    setUsageReader(async () => 50);
+    await checkAndCompact(agent, 80, state);
+    expect(state.compactSent).toBe(false);
+
+    // Third: usage rises above again → sends again
+    setUsageReader(async () => 90);
+    await checkAndCompact(agent, 80, state);
+    expect(state.compactSent).toBe(true);
+    expect(spawnCalls).toHaveLength(2);
   });
 });

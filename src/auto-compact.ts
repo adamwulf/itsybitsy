@@ -112,9 +112,37 @@ export async function getAgentContextUsage(agent: Agent): Promise<number | null>
   return calculateUsagePercent(usage, agent.meta.model);
 }
 
+/** Pluggable usage reader for checkAndCompact — allows test injection */
+type UsageReader = (agent: Agent) => Promise<number | null>;
+let usageReader: UsageReader = getAgentContextUsage;
+
+/** Override the usage reader (for testing) */
+export function setUsageReader(reader: UsageReader): void {
+  usageReader = reader;
+}
+
+/** Reset the usage reader */
+export function resetUsageReader(): void {
+  usageReader = getAgentContextUsage;
+}
+
 /** Per-agent tracking for compact sends */
 export interface CompactState {
   compactSent: boolean;
+}
+
+/** Pluggable spawn runner for sendCompact — defaults to Bun.spawn, overridable for tests */
+type CompactSpawnFn = (cmd: string[]) => { exited: Promise<number> };
+let compactSpawnRunner: CompactSpawnFn = (cmd) => Bun.spawn(cmd);
+
+/** Override the compact spawn runner (for testing) */
+export function setCompactSpawnRunner(runner: CompactSpawnFn): void {
+  compactSpawnRunner = runner;
+}
+
+/** Reset the compact spawn runner */
+export function resetCompactSpawnRunner(): void {
+  compactSpawnRunner = (cmd) => Bun.spawn(cmd);
 }
 
 /**
@@ -123,7 +151,7 @@ export interface CompactState {
  */
 export async function sendCompact(tmuxSession: string): Promise<boolean> {
   try {
-    const proc = Bun.spawn(["tmux", "send-keys", "-t", tmuxSession, "/compact", "Enter"]);
+    const proc = compactSpawnRunner(["tmux", "send-keys", "-t", tmuxSession, "/compact", "Enter"]);
     const exitCode = await proc.exited;
     return exitCode === 0;
   } catch {
@@ -144,7 +172,7 @@ export async function checkAndCompact(
   threshold: number,
   state: CompactState,
 ): Promise<number | null> {
-  const usagePct = await getAgentContextUsage(agent);
+  const usagePct = await usageReader(agent);
   if (usagePct === null) return null;
 
   if (usagePct < threshold) {
@@ -155,8 +183,8 @@ export async function checkAndCompact(
 
   // Usage exceeds threshold
   if (!state.compactSent) {
-    // Only send if agent is in a state where it can receive input
-    if (agent.state === "running" || agent.state === "waiting" || agent.state === "unknown") {
+    // Only send if agent is in a state where it can safely receive input
+    if (agent.state === "running" || agent.state === "waiting") {
       const sent = await sendCompact(agent.meta.tmux_session);
       if (sent) {
         state.compactSent = true;

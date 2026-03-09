@@ -929,7 +929,7 @@ export async function sendMessage(
 
   // Send via tmux send-keys
   const sendProc = sendSpawnRunner(
-    ["tmux", "send-keys", "-t", tmuxSession, fullMessage],
+    ["tmux", "send-keys", "-t", tmuxSession, "-l", fullMessage],
     { stdout: "pipe", stderr: "pipe" }
   );
   const sendStderr = await new Response(sendProc.stderr).text();

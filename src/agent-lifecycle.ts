@@ -5,7 +5,7 @@
  */
 
 import { join, dirname } from "path";
-import { readdir, mkdir, cp, rm, rename } from "fs/promises";
+import { readdir, mkdir, cp, rm, rename, appendFile } from "fs/promises";
 import type { SpawnFn } from "./types";
 
 /** Pluggable spawn runner — defaults to Bun.spawn, overridable for tests */
@@ -60,14 +60,7 @@ export async function logAgent(agentDir: string, message: string): Promise<void>
   try {
     const logFile = join(agentDir, "agent.log");
     const line = `[${formatTimestamp()}] ${message}\n`;
-    const file = Bun.file(logFile);
-    let existing = "";
-    try {
-      if (await file.exists()) {
-        existing = await file.text();
-      }
-    } catch { /* ignore */ }
-    await Bun.write(logFile, existing + line);
+    await appendFile(logFile, line);
   } catch { /* agent dir may not exist */ }
 }
 

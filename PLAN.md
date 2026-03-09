@@ -654,27 +654,27 @@ New file: `src/watchdog.ts`. This is the highest-complexity feature but also the
 **Coexistence with bash watchdog:** Agents spawned via `ib new-agent` (which itsybitsy uses) automatically get a bash watchdog (`ib watchdog {id}` in background). The two watchdogs will coexist — both send notifications to managers, and duplicate notifications are harmless (managers already handle repeated messages). Long-term, if ib adds a `--no-watchdog` flag to `ib new-agent`, itsybitsy should pass it. For now, accept the duplication. Update the "Explicit Non-Goals" section to remove the `ib watchdog` line and note that Phase 13 replaces it.
 
 **Core loop:**
-- [ ] Run every 5 seconds (matching ib's watchdog poll interval) via `setInterval`.
-- [ ] Track `previousState: Map<string, AgentState>` for all agents across all repos.
-- [ ] On state transition, trigger the appropriate handler (see below).
-- [ ] Consume agent state from `watcher.ts` (register a callback or read cached state) — no duplicate tmux captures.
+- [x] Run every 5 seconds (matching ib's watchdog poll interval) via `setInterval`.
+- [x] Track `previousState: Map<string, AgentState>` for all agents across all repos.
+- [x] On state transition, trigger the appropriate handler (see below).
+- [x] Consume agent state from `watcher.ts` (register a callback or read cached state) — no duplicate tmux captures.
 
 **State handlers:**
-- [ ] `waiting` / `unknown` → increment wait counter. After threshold, send notification to manager via `ib send {manager} "[watchdog]: Your subtask {id} recently started waiting for input"`. Use exponential backoff: 30s → 1m → 2m → 4m → 8m → 16m → 32m → 64m cap.
-- [ ] `complete` → send one-time notification to manager: `"[watchdog]: Your subtask {id} recently completed"`. Track `completionNotified` flag; clear on resume.
-- [ ] `running` / `creating` / `compacting` → reset wait counter and backoff interval. Clear completion flag if agent resumed.
-- [ ] `rate_limited` → bypass the rate limit dialog by sending Enter to the tmux session: `tmux send-keys -t {tmux_session} Enter`. Check usage API (already in `usage.ts`). When session usage drops below 10%, send nudge to agent via `ib send`.
-- [ ] `stopped` → reset counters, no notification.
+- [x] `waiting` / `unknown` → increment wait counter. After threshold, send notification to manager via `ib send {manager} "[watchdog]: Your subtask {id} recently started waiting for input"`. Use exponential backoff: 30s → 1m → 2m → 4m → 8m → 16m → 32m → 64m cap.
+- [x] `complete` → send one-time notification to manager: `"[watchdog]: Your subtask {id} recently completed"`. Track `completionNotified` flag; clear on resume.
+- [x] `running` / `creating` / `compacting` → reset wait counter and backoff interval. Clear completion flag if agent resumed.
+- [x] `rate_limited` → bypass the rate limit dialog by sending Enter to the tmux session: `tmux send-keys -t {tmux_session} Enter`. Check usage API (already in `usage.ts`). When session usage drops below 10%, send nudge to agent via `ib send`.
+- [x] `stopped` → reset counters, no notification.
 
 **Auto-compact:**
-- [ ] Read `autoCompactThreshold` from `.ittybitty.json` config (via `src/config.ts` from Phase 12B, or read directly if Phase 12B isn't done yet).
-- [ ] Read agent context usage % from the Claude transcript file. Path pattern: `~/.claude/projects/{path-hash}/transcript.jsonl` where `{path-hash}` is the agent's worktree path with `/` replaced by `-`. Each line is a JSON object; look for `"type": "summary"` entries with a `"contextPercentage"` or `"costSoFar"` field. Port the parsing logic from ib's `get_agent_context_usage()` function (around line ~3200 in ib) which reads the last summary entry.
-- [ ] When usage % exceeds threshold, send `/compact` to agent's tmux session via `tmux send-keys -t {session} "/compact" Enter`.
-- [ ] Track `compactSent` flag per agent to avoid duplicate sends; clear when context drops below threshold or agent resumes.
+- [x] Read `autoCompactThreshold` from `.ittybitty.json` config (via `src/config.ts` from Phase 12B, or read directly if Phase 12B isn't done yet).
+- [x] Read agent context usage % from the Claude transcript file. Path pattern: `~/.claude/projects/{path-hash}/transcript.jsonl` where `{path-hash}` is the agent's worktree path with `/` replaced by `-`. Each line is a JSON object; look for `"type": "summary"` entries with a `"contextPercentage"` or `"costSoFar"` field. Port the parsing logic from ib's `get_agent_context_usage()` function (around line ~3200 in ib) which reads the last summary entry.
+- [x] When usage % exceeds threshold, send `/compact` to agent's tmux session via `tmux send-keys -t {session} "/compact" Enter`.
+- [x] Track `compactSent` flag per agent to avoid duplicate sends; clear when context drops below threshold or agent resumes.
 
 **Dashboard integration:**
-- [ ] Watchdog starts automatically with `itsybitsy watch`.
-- [ ] Show `[watchdog]` indicator in footer when watchdog is active.
+- [x] Watchdog starts automatically with `itsybitsy watch`.
+- [x] Show `[watchdog]` indicator in footer when watchdog is active.
 
 ---
 

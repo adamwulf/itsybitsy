@@ -18,8 +18,6 @@ import {
   statusAgent,
   pauseAgent,
   acknowledgeQuestion,
-  setRunner,
-  resetRunner,
   setSendSpawnRunner,
   resetSendSpawnRunner,
   setKillPauseSpawnRunner,
@@ -30,12 +28,13 @@ import {
   resetMergeSpawnRunner,
   setNewAgentSpawnRunner,
   resetNewAgentSpawnRunner,
+  setDiffStatusSpawnRunner,
+  resetDiffStatusSpawnRunner,
 } from "./ib-commands";
 import {
   setSpawnRunner as setLifecycleSpawnRunner,
   resetSpawnRunner as resetLifecycleSpawnRunner,
 } from "./agent-lifecycle";
-import type { IbCommandResult } from "./ib-commands";
 import type { SpawnResult } from "./types";
 
 function makeAgent(id: string, repoPath: string, state = "running"): Agent {
@@ -43,46 +42,7 @@ function makeAgent(id: string, repoPath: string, state = "running"): Agent {
 }
 
 describe("ib-commands", () => {
-  let lastCall: { args: string[]; cwd: string } | null = null;
-  const successResult: IbCommandResult = {
-    ok: true,
-    exitCode: 0,
-    stdout: "ok",
-    stderr: "",
-  };
-
-  beforeEach(() => {
-    lastCall = null;
-    setRunner(async (args, cwd) => {
-      lastCall = { args, cwd };
-      return successResult;
-    });
-  });
-
-  afterEach(() => {
-    resetRunner();
-  });
-
   // nukeAgent, nukeAllAgents, resumeAgent are now native — tested in dedicated describe blocks below
-
-  test("reassignAgent passes ['reassign', id, newManager]", async () => {
-    const agent = makeAgent("agent-abc", "/repos/myproject");
-    await reassignAgent(agent, "agent-xyz");
-    expect(lastCall).toEqual({
-      args: ["reassign", "agent-abc", "agent-xyz"],
-      cwd: "/repos/myproject",
-    });
-  });
-
-  test("mergeCheckAgent passes ['merge-check', id]", async () => {
-    const agent = makeAgent("agent-abc", "/repos/myproject");
-    await mergeCheckAgent(agent);
-    expect(lastCall).toEqual({
-      args: ["merge-check", "agent-abc"],
-      cwd: "/repos/myproject",
-    });
-  });
-
   // mergeAgent is now native — tested in dedicated describe block below
 
   describe("sendMessage (native)", () => {
@@ -211,24 +171,6 @@ describe("ib-commands", () => {
   });
 
   // newAgent tests are in the dedicated "newAgent (native)" describe block below
-
-  test("diffAgent passes ['diff', id]", async () => {
-    const agent = makeAgent("agent-abc", "/repos/myproject");
-    await diffAgent(agent);
-    expect(lastCall).toEqual({
-      args: ["diff", "agent-abc"],
-      cwd: "/repos/myproject",
-    });
-  });
-
-  test("statusAgent passes ['status', id]", async () => {
-    const agent = makeAgent("agent-abc", "/repos/myproject");
-    await statusAgent(agent);
-    expect(lastCall).toEqual({
-      args: ["status", "agent-abc"],
-      cwd: "/repos/myproject",
-    });
-  });
 });
 
 // Helper: create a mock SpawnFn that records calls and returns success
@@ -1780,7 +1722,6 @@ describe("newAgent (native)", () => {
 
   afterEach(async () => {
     resetNewAgentSpawnRunner();
-    resetRunner();
     resetLifecycleSpawnRunner();
     await rm(tempDir, { recursive: true, force: true });
   });
@@ -2190,6 +2131,330 @@ describe("newAgent (native)", () => {
 
     const startSh = await Bun.file(join(agentsDir, "test-print", "start.sh")).text();
     expect(startSh).toContain("--print");
+  });
+});
+
+describe("reassignAgent (native)", () => {
+  let tempDir: string;
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "reassign-test-"));
+    // Mock send spawn runner so notifications don't actually send
+    setSendSpawnRunner((cmd: string[]) => ({
+      stdout: new Response("").body!,
+      stderr: new Response("").body!,
+      exited: Promise.resolve(cmd.includes("has-session") ? 1 : 0), // no tmux sessions
+    } as SpawnResult));
+  });
+
+  afterEach(async () => {
+    resetSendSpawnRunner();
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  test("reassign to new manager updates meta.json", async () => {
+    const agentsDir = join(tempDir, ".ittybitty", "agents");
+    const agentDir = join(agentsDir, "agent-abc");
+    const managerDir = join(agentsDir, "agent-mgr");
+    await mkdir(agentDir, { recursive: true });
+    await mkdir(managerDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id: "agent-abc", manager: "", tmux_session: "tmux-agent-abc" }));
+    await Bun.write(join(managerDir, "meta.json"), JSON.stringify({ id: "agent-mgr", tmux_session: "tmux-agent-mgr" }));
+
+    const agent = makeAgent("agent-abc", tempDir);
+    const result = await reassignAgent(agent, "agent-mgr");
+
+    expect(result.ok).toBe(true);
+    expect(result.stdout).toContain("agent-mgr");
+    const updatedMeta = await Bun.file(join(agentDir, "meta.json")).json();
+    expect(updatedMeta.manager).toBe("agent-mgr");
+  });
+
+  test("clear manager (null) sets manager to empty string", async () => {
+    const agentsDir = join(tempDir, ".ittybitty", "agents");
+    const agentDir = join(agentsDir, "agent-abc");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id: "agent-abc", manager: "agent-old", tmux_session: "tmux-agent-abc" }));
+
+    const agent = makeAgent("agent-abc", tempDir);
+    const result = await reassignAgent(agent, null);
+
+    expect(result.ok).toBe(true);
+    const updatedMeta = await Bun.file(join(agentDir, "meta.json")).json();
+    expect(updatedMeta.manager).toBe("");
+  });
+
+  test("circular dependency detected", async () => {
+    const agentsDir = join(tempDir, ".ittybitty", "agents");
+    const parentDir = join(agentsDir, "agent-parent");
+    const childDir = join(agentsDir, "agent-child");
+    await mkdir(parentDir, { recursive: true });
+    await mkdir(childDir, { recursive: true });
+    await Bun.write(join(parentDir, "meta.json"), JSON.stringify({ id: "agent-parent", manager: "", tmux_session: "t1" }));
+    await Bun.write(join(childDir, "meta.json"), JSON.stringify({ id: "agent-child", manager: "agent-parent", tmux_session: "t2" }));
+
+    const agent = makeAgent("agent-parent", tempDir);
+    const result = await reassignAgent(agent, "agent-child");
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("Circular dependency");
+  });
+
+  test("worker-as-parent rejected", async () => {
+    const agentsDir = join(tempDir, ".ittybitty", "agents");
+    const agentDir = join(agentsDir, "agent-abc");
+    const workerDir = join(agentsDir, "agent-worker");
+    await mkdir(agentDir, { recursive: true });
+    await mkdir(workerDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id: "agent-abc", manager: "", tmux_session: "t1" }));
+    await Bun.write(join(workerDir, "meta.json"), JSON.stringify({ id: "agent-worker", worker: true, tmux_session: "t2" }));
+
+    const agent = makeAgent("agent-abc", tempDir);
+    const result = await reassignAgent(agent, "agent-worker");
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("worker");
+  });
+
+  test("new manager not found", async () => {
+    const agentsDir = join(tempDir, ".ittybitty", "agents");
+    const agentDir = join(agentsDir, "agent-abc");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id: "agent-abc", manager: "", tmux_session: "t1" }));
+
+    const agent = makeAgent("agent-abc", tempDir);
+    const result = await reassignAgent(agent, "agent-nonexistent");
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("not found");
+  });
+
+  test("agent not found", async () => {
+    const agent = makeAgent("agent-missing", tempDir);
+    const result = await reassignAgent(agent, null);
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("not found");
+  });
+});
+
+describe("mergeCheckAgent (native)", () => {
+  let tempDir: string;
+  let spawnCalls: string[][];
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "mergecheck-test-"));
+    spawnCalls = [];
+  });
+
+  afterEach(async () => {
+    resetMergeSpawnRunner();
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  test("fails when worktree doesn't exist", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(agentDir, { recursive: true });
+    // No "repo" directory
+
+    const agent = makeAgent("agent-abc", tempDir);
+    const result = await mergeCheckAgent(agent);
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("no worktree");
+  });
+
+  test("fails with uncommitted changes", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+
+    setMergeSpawnRunner((cmd: string[]) => {
+      spawnCalls.push(cmd);
+      // git status --porcelain returns modified file
+      if (cmd.includes("--porcelain")) {
+        return {
+          stdout: new Response("M file.ts\n").body!,
+          stderr: new Response("").body!,
+          exited: Promise.resolve(0),
+        } as SpawnResult;
+      }
+      return {
+        stdout: new Response("").body!,
+        stderr: new Response("").body!,
+        exited: Promise.resolve(0),
+      } as SpawnResult;
+    });
+
+    const agent = makeAgent("agent-abc", tempDir);
+    const result = await mergeCheckAgent(agent);
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("uncommitted changes");
+  });
+
+  test("passes when clean", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+
+    setMergeSpawnRunner((cmd: string[]) => {
+      spawnCalls.push(cmd);
+      // git log returns one commit
+      if (cmd.includes("--oneline") && cmd.some(a => a.includes("main.."))) {
+        return {
+          stdout: new Response("abc1234 commit msg\n").body!,
+          stderr: new Response("").body!,
+          exited: Promise.resolve(0),
+        } as SpawnResult;
+      }
+      return {
+        stdout: new Response("").body!,
+        stderr: new Response("").body!,
+        exited: Promise.resolve(0),
+      } as SpawnResult;
+    });
+
+    const agent = makeAgent("agent-abc", tempDir);
+    const result = await mergeCheckAgent(agent);
+
+    expect(result.ok).toBe(true);
+    expect(result.stdout).toContain("1 commit");
+  });
+
+  test("fails when branch doesn't exist", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+
+    setMergeSpawnRunner((cmd: string[]) => {
+      spawnCalls.push(cmd);
+      // show-ref for agent branch fails
+      if (cmd.includes("show-ref") && cmd.some(a => a.includes("agent/agent-abc"))) {
+        return {
+          stdout: new Response("").body!,
+          stderr: new Response("").body!,
+          exited: Promise.resolve(1),
+        } as SpawnResult;
+      }
+      return {
+        stdout: new Response("").body!,
+        stderr: new Response("").body!,
+        exited: Promise.resolve(0),
+      } as SpawnResult;
+    });
+
+    const agent = makeAgent("agent-abc", tempDir);
+    const result = await mergeCheckAgent(agent);
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("does not exist");
+  });
+});
+
+describe("diffAgent (native)", () => {
+  let tempDir: string;
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "diff-test-"));
+  });
+
+  afterEach(async () => {
+    resetDiffStatusSpawnRunner();
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  test("returns diff output", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+
+    setDiffStatusSpawnRunner((cmd: string[]) => {
+      if (cmd.includes("merge-base")) {
+        return {
+          stdout: new Response("abc123\n").body!,
+          stderr: new Response("").body!,
+          exited: Promise.resolve(0),
+        } as SpawnResult;
+      }
+      if (cmd.includes("diff")) {
+        return {
+          stdout: new Response("+added line\n-removed line\n").body!,
+          stderr: new Response("").body!,
+          exited: Promise.resolve(0),
+        } as SpawnResult;
+      }
+      return {
+        stdout: new Response("").body!,
+        stderr: new Response("").body!,
+        exited: Promise.resolve(0),
+      } as SpawnResult;
+    });
+
+    const agent = makeAgent("agent-abc", tempDir);
+    const result = await diffAgent(agent);
+
+    expect(result.ok).toBe(true);
+    expect(result.stdout).toContain("+added line");
+  });
+
+  test("fails when worktree not found", async () => {
+    const agent = makeAgent("agent-abc", tempDir);
+    const result = await diffAgent(agent);
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("no worktree");
+  });
+});
+
+describe("statusAgent (native)", () => {
+  let tempDir: string;
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "status-test-"));
+  });
+
+  afterEach(async () => {
+    resetDiffStatusSpawnRunner();
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  test("returns combined log and status output", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+
+    setDiffStatusSpawnRunner((cmd: string[]) => {
+      if (cmd.includes("log")) {
+        return {
+          stdout: new Response("abc1234 first commit\ndef5678 second commit\n").body!,
+          stderr: new Response("").body!,
+          exited: Promise.resolve(0),
+        } as SpawnResult;
+      }
+      if (cmd.includes("status")) {
+        return {
+          stdout: new Response("M src/file.ts\n").body!,
+          stderr: new Response("").body!,
+          exited: Promise.resolve(0),
+        } as SpawnResult;
+      }
+      return {
+        stdout: new Response("").body!,
+        stderr: new Response("").body!,
+        exited: Promise.resolve(0),
+      } as SpawnResult;
+    });
+
+    const agent = makeAgent("agent-abc", tempDir);
+    const result = await statusAgent(agent);
+
+    expect(result.ok).toBe(true);
+    expect(result.stdout).toContain("first commit");
+    expect(result.stdout).toContain("M src/file.ts");
+  });
+
+  test("fails when worktree not found", async () => {
+    const agent = makeAgent("agent-abc", tempDir);
+    const result = await statusAgent(agent);
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("no worktree");
   });
 });
 

@@ -1,7 +1,7 @@
 /**
  * Async wrappers for ib mutation commands.
  * Every command runs with cwd set to the agent's repoPath.
- * kill, pause, sendMessage, nuke, resume, merge, and newAgent are implemented natively; others delegate to ib CLI.
+ * All agent commands are implemented natively; only hooks commands delegate to ib CLI.
  */
 
 import { join } from "path";
@@ -29,43 +29,6 @@ export interface IbCommandResult {
   stderr: string;
 }
 
-/** Pluggable runner — defaults to Bun.spawn, overridable for tests */
-export type IbRunner = (args: string[], cwd: string) => Promise<IbCommandResult>;
-
-const defaultRunner: IbRunner = async (args, cwd) => {
-  const proc = Bun.spawn(["ib", ...args], {
-    cwd,
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const [stdout, stderr] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-  ]);
-  const exitCode = await proc.exited;
-  return {
-    ok: exitCode === 0,
-    exitCode,
-    stdout: stdout.trim(),
-    stderr: stderr.trim(),
-  };
-};
-
-let currentRunner: IbRunner = defaultRunner;
-
-/** Override the runner (for testing) */
-export function setRunner(runner: IbRunner) {
-  currentRunner = runner;
-}
-
-/** Reset to the default Bun.spawn runner */
-export function resetRunner() {
-  currentRunner = defaultRunner;
-}
-
-async function runIb(args: string[], cwd: string): Promise<IbCommandResult> {
-  return currentRunner(args, cwd);
-}
 
 /** Pluggable spawn runner for kill/pause — defaults to Bun.spawn, overridable for tests */
 let killPauseSpawnRunner: SpawnFn = Bun.spawn as SpawnFn;
@@ -559,15 +522,169 @@ async function autoAcceptWorkspaceTrust(tmuxSession: string): Promise<void> {
   }
 }
 
+/**
+ * Native reassign implementation — replaces `ib reassign <id> <new-manager>`.
+ *
+ * 1. Read agent's meta.json to get old manager
+ * 2. If newManager is null: clear manager field
+ * 3. If newManager provided: validate exists, not worker, not circular
+ * 4. Update agent's meta.json
+ * 5. Log the change
+ * 6. Send notifications (skip if tmux session doesn't exist)
+ */
 export async function reassignAgent(agent: Agent, newManager: string | null): Promise<IbCommandResult> {
-  if (newManager === null) {
-    return runIb(["reassign", agent.id, "--none"], agent.repoPath);
+  const agentsDir = join(agent.repoPath, ".ittybitty", "agents");
+  const agentDir = join(agentsDir, agent.id);
+  const metaPath = join(agentDir, "meta.json");
+
+  // Read agent's meta.json
+  let meta: Record<string, unknown>;
+  try {
+    const file = Bun.file(metaPath);
+    if (!(await file.exists())) {
+      return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' not found` };
+    }
+    meta = await file.json();
+  } catch {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Failed to read meta.json for '${agent.id}'` };
   }
-  return runIb(["reassign", agent.id, newManager], agent.repoPath);
+
+  const oldManager = (meta.manager as string) || "";
+
+  if (newManager !== null) {
+    // Validate new parent exists
+    const newManagerMetaPath = join(agentsDir, newManager, "meta.json");
+    try {
+      const file = Bun.file(newManagerMetaPath);
+      if (!(await file.exists())) {
+        return { ok: false, exitCode: 1, stdout: "", stderr: `New manager '${newManager}' not found` };
+      }
+      const parentMeta = await file.json();
+      // Validate not a worker
+      if (parentMeta.worker) {
+        return { ok: false, exitCode: 1, stdout: "", stderr: `Cannot reassign to worker agent '${newManager}'` };
+      }
+    } catch {
+      return { ok: false, exitCode: 1, stdout: "", stderr: `Failed to read meta.json for '${newManager}'` };
+    }
+
+    // Check circular: newManager must not be a descendant of agent
+    const descendants = await getDescendantsRecursive(agentsDir, agent.id);
+    if (descendants.includes(newManager)) {
+      return { ok: false, exitCode: 1, stdout: "", stderr: `Circular dependency: '${newManager}' is a descendant of '${agent.id}'` };
+    }
+  }
+
+  // Update meta.json
+  meta.manager = newManager ?? "";
+  try {
+    await Bun.write(metaPath, JSON.stringify(meta, null, 2) + "\n");
+  } catch (err) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Failed to write meta.json: ${err}` };
+  }
+
+  // Log change
+  const newLabel = newManager ?? "(none)";
+  const oldLabel = oldManager || "(none)";
+  await logAgent(agentDir, `Reassigned from ${oldLabel} to ${newLabel}`);
+
+  // Send notifications (skip if tmux session doesn't exist)
+  const notifyAgent = async (targetId: string, msg: string) => {
+    const targetMetaPath = join(agentsDir, targetId, "meta.json");
+    try {
+      const file = Bun.file(targetMetaPath);
+      if (!(await file.exists())) return;
+      const targetMeta = await file.json();
+      if (!targetMeta.tmux_session) return;
+      // Use sendMessage for notification — construct a minimal Agent-like object
+      const targetAgent: Agent = {
+        id: targetId,
+        repoPath: agent.repoPath,
+        repoName: agent.repoName,
+        meta: targetMeta as Agent["meta"],
+        state: "running",
+        age: "",
+        archived: false,
+        children: [],
+      };
+      await sendMessage(targetAgent, msg, { fromAgent: agent.id });
+    } catch { /* skip notification errors */ }
+  };
+
+  // Notify old parent
+  if (oldManager) {
+    await notifyAgent(oldManager, `Agent ${agent.id} has been reassigned away from you`);
+  }
+  // Notify new parent
+  if (newManager) {
+    await notifyAgent(newManager, `Agent ${agent.id} has been reassigned to you`);
+  }
+
+  return {
+    ok: true,
+    exitCode: 0,
+    stdout: `Reassigned ${agent.id} from ${oldLabel} to ${newLabel}`,
+    stderr: "",
+  };
 }
 
+/**
+ * Native merge-check implementation — replaces `ib merge-check <id>`.
+ *
+ * 1. Check worktree directory exists
+ * 2. Check no uncommitted changes in worktree
+ * 3. Check main branch exists
+ * 4. Check agent branch exists
+ * 5. Run checkRebaseConflicts for conflict detection
+ */
 export async function mergeCheckAgent(agent: Agent): Promise<IbCommandResult> {
-  return runIb(["merge-check", agent.id], agent.repoPath);
+  const agentDir = join(agent.repoPath, ".ittybitty", "agents", agent.id);
+  const worktreePath = join(agentDir, "repo");
+  const branchName = `agent/${agent.id}`;
+
+  // 1. Check worktree exists
+  try {
+    await readdir(worktreePath);
+  } catch {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' has no worktree` };
+  }
+
+  // 2. Check no uncommitted changes
+  const worktreeStatus = await mergeRunCmd(["git", "-C", worktreePath, "status", "--porcelain"]);
+  if (worktreeStatus.exitCode === 0 && worktreeStatus.stdout.trim()) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' has uncommitted changes` };
+  }
+
+  // 3. Check main branch exists
+  const mainRef = await mergeRunCmd(["git", "-C", agent.repoPath, "show-ref", "--verify", "refs/heads/main"]);
+  if (mainRef.exitCode !== 0) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: "Main branch not found" };
+  }
+
+  // 4. Check agent branch exists
+  const branchRef = await mergeRunCmd(["git", "-C", agent.repoPath, "show-ref", "--verify", `refs/heads/${branchName}`]);
+  if (branchRef.exitCode !== 0) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Branch '${branchName}' does not exist` };
+  }
+
+  // 5. Pre-rebase conflict check
+  const conflictResult = await checkRebaseConflicts(agent.repoPath, "main", branchName);
+  if (!conflictResult.ok) {
+    return {
+      ok: false, exitCode: 1, stdout: "",
+      stderr: `Rebase conflict detected between '${branchName}' and 'main'`,
+    };
+  }
+
+  // Count commits
+  const logResult = await mergeRunCmd(["git", "-C", agent.repoPath, "log", `main..${branchName}`, "--oneline"]);
+  const commitCount = logResult.stdout.trim() ? logResult.stdout.trim().split("\n").length : 0;
+
+  return {
+    ok: true, exitCode: 0,
+    stdout: `Merge check passed: ${commitCount} commit(s), no conflicts, no uncommitted changes`,
+    stderr: "",
+  };
 }
 
 /** Pluggable spawn runner for merge — defaults to Bun.spawn, overridable for tests */
@@ -1735,12 +1852,69 @@ async function resolveAgentId(agentsDir: string, partial: string): Promise<strin
   return null;
 }
 
-export async function diffAgent(agent: Agent): Promise<IbCommandResult> {
-  return runIb(["diff", agent.id], agent.repoPath);
+/** Pluggable spawn runner for diff/status — defaults to Bun.spawn, overridable for tests */
+let diffStatusSpawnRunner: SpawnFn = Bun.spawn as SpawnFn;
+
+/** Override the diff/status spawn runner (for testing) */
+export function setDiffStatusSpawnRunner(runner: SpawnFn): void {
+  diffStatusSpawnRunner = runner;
 }
 
+/** Reset the diff/status spawn runner */
+export function resetDiffStatusSpawnRunner(): void {
+  diffStatusSpawnRunner = Bun.spawn as SpawnFn;
+}
+
+/**
+ * Helper: run a command via the diff/status spawn runner and return { stdout, stderr, exitCode }.
+ */
+async function diffStatusRunCmd(cmd: string[]): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  const proc = diffStatusSpawnRunner(cmd, { stdout: "pipe", stderr: "pipe" });
+  const [stdout, stderr] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
+  const exitCode = await proc.exited;
+  return { stdout: stdout.trim(), stderr: stderr.trim(), exitCode };
+}
+
+/**
+ * Native diff implementation — replaces `ib diff <id>`.
+ * Runs git merge-base HEAD main, then git diff <merge-base> in the agent worktree.
+ */
+export async function diffAgent(agent: Agent): Promise<IbCommandResult> {
+  const worktreePath = join(agent.repoPath, ".ittybitty", "agents", agent.id, "repo");
+  try {
+    await readdir(worktreePath);
+  } catch {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' has no worktree` };
+  }
+
+  const mergeBase = await diffStatusRunCmd(["git", "-C", worktreePath, "merge-base", "HEAD", "main"]);
+  if (mergeBase.exitCode !== 0) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Failed to find merge-base with main: ${mergeBase.stderr}` };
+  }
+
+  const diff = await diffStatusRunCmd(["git", "-C", worktreePath, "diff", mergeBase.stdout]);
+  return { ok: diff.exitCode === 0, exitCode: diff.exitCode, stdout: diff.stdout, stderr: diff.stderr };
+}
+
+/**
+ * Native status implementation — replaces `ib status <id>`.
+ * Runs git log --oneline main..HEAD + git status --short in the agent worktree.
+ */
 export async function statusAgent(agent: Agent): Promise<IbCommandResult> {
-  return runIb(["status", agent.id], agent.repoPath);
+  const worktreePath = join(agent.repoPath, ".ittybitty", "agents", agent.id, "repo");
+  try {
+    await readdir(worktreePath);
+  } catch {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' has no worktree` };
+  }
+
+  const log = await diffStatusRunCmd(["git", "-C", worktreePath, "log", "--oneline", "main..HEAD"]);
+  const status = await diffStatusRunCmd(["git", "-C", worktreePath, "status", "--short"]);
+  const parts = [log.stdout, status.stdout].filter(Boolean);
+  return { ok: true, exitCode: 0, stdout: parts.join("\n"), stderr: "" };
 }
 
 /**
@@ -1804,6 +1978,10 @@ export async function pauseAgent(agent: Agent): Promise<IbCommandResult> {
   };
 }
 
+/**
+ * Native acknowledge implementation — replaces `ib acknowledge <questionId>`.
+ * Reads user-questions.json, marks the question as acknowledged, writes back.
+ */
 export async function acknowledgeQuestion(repoPath: string, questionId: string): Promise<IbCommandResult> {
   const questionsPath = join(repoPath, ".ittybitty", "user-questions.json");
 
@@ -1835,34 +2013,57 @@ export async function acknowledgeQuestion(repoPath: string, questionId: string):
   return { ok: true, exitCode: 0, stdout: `Acknowledged question '${questionId}' from agent '${question.agent}'`, stderr: "" };
 }
 
+/**
+ * Direct ib CLI call — used for hooks commands that don't have native implementations.
+ * Not mockable — these are thin CLI wrappers.
+ */
+async function runIbDirect(args: string[], cwd: string): Promise<IbCommandResult> {
+  const proc = Bun.spawn(["ib", ...args], {
+    cwd,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [stdout, stderr] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
+  const exitCode = await proc.exited;
+  return {
+    ok: exitCode === 0,
+    exitCode,
+    stdout: stdout.trim(),
+    stderr: stderr.trim(),
+  };
+}
+
 /** Returns "installed", "partial", or "not-installed" */
 export async function hooksStatus(repoPath: string): Promise<IbCommandResult> {
-  return runIb(["hooks", "status"], repoPath);
+  return runIbDirect(["hooks", "status"], repoPath);
 }
 
 /** Returns "installed" or "not-installed" for the intercept hook */
 export async function interceptHooksStatus(repoPath: string): Promise<IbCommandResult> {
-  return runIb(["hooks", "status", "--intercept"], repoPath);
+  return runIbDirect(["hooks", "status", "--intercept"], repoPath);
 }
 
 /** Install all safety hooks (path isolation + status injection + session-start) */
 export async function installSafetyHooks(repoPath: string): Promise<IbCommandResult> {
-  return runIb(["hooks", "install"], repoPath);
+  return runIbDirect(["hooks", "install"], repoPath);
 }
 
 /** Uninstall all safety hooks */
 export async function uninstallSafetyHooks(repoPath: string): Promise<IbCommandResult> {
-  return runIb(["hooks", "uninstall"], repoPath);
+  return runIbDirect(["hooks", "uninstall"], repoPath);
 }
 
 /** Install task interception hook */
 export async function installInterceptHook(repoPath: string): Promise<IbCommandResult> {
-  return runIb(["hooks", "install-intercept"], repoPath);
+  return runIbDirect(["hooks", "install-intercept"], repoPath);
 }
 
 /** Uninstall task interception hook */
 export async function uninstallInterceptHook(repoPath: string): Promise<IbCommandResult> {
-  return runIb(["hooks", "uninstall-intercept"], repoPath);
+  return runIbDirect(["hooks", "uninstall-intercept"], repoPath);
 }
 
 /** Check if .ittybitty is in .gitignore */

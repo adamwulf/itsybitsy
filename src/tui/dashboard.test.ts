@@ -8,7 +8,7 @@ import { stripAnsi } from "../parse-state";
 import { makeAgent as _makeAgent, makeFlatAgent, makeFlatRepoHeader } from "../test-utils";
 import { TmuxPaneComponent, RightPaneComponent, DashboardComponent, AgentTreeComponent, colorizeDiff, colorizeLog, formatAgentRow } from "./dashboard";
 import { visibleWidth } from "@mariozechner/pi-tui";
-import { setRunner, resetRunner, setSendSpawnRunner, resetSendSpawnRunner, setKillPauseSpawnRunner, resetKillPauseSpawnRunner, setNukeResumeSpawnRunner, resetNukeResumeSpawnRunner, setNewAgentSpawnRunner, resetNewAgentSpawnRunner } from "../ib-commands";
+import { setSendSpawnRunner, resetSendSpawnRunner, setKillPauseSpawnRunner, resetKillPauseSpawnRunner, setNukeResumeSpawnRunner, resetNukeResumeSpawnRunner, setNewAgentSpawnRunner, resetNewAgentSpawnRunner, setDiffStatusSpawnRunner, resetDiffStatusSpawnRunner, setMergeSpawnRunner, resetMergeSpawnRunner } from "../ib-commands";
 import { setSpawnRunner as setLifecycleSpawnRunner, resetSpawnRunner as resetLifecycleSpawnRunner } from "../agent-lifecycle";
 import type { SpawnResult } from "../types";
 import { PANE_MODES } from "./pane-manager";
@@ -411,10 +411,6 @@ describe("DashboardComponent dialog and action handlers", () => {
       tmux_session: "tmux-agent-test",
     }));
 
-    setRunner(async (args, cwd) => {
-      lastIbCall = { args, cwd };
-      return { ok: true, exitCode: 0, stdout: "ok", stderr: "" };
-    });
     setupSendMock();
 
     // Mock spawn runners for native kill/pause (all tmux/pgrep calls succeed with no-op)
@@ -426,6 +422,17 @@ describe("DashboardComponent dialog and action handlers", () => {
     setKillPauseSpawnRunner(noopSpawn);
     setLifecycleSpawnRunner(noopSpawn);
     setNukeResumeSpawnRunner(noopSpawn);
+    // Mock spawn runners for native diff/status and merge-check
+    setDiffStatusSpawnRunner((cmd: string[]) => ({
+      stdout: new Response("").body!,
+      stderr: new Response("").body!,
+      exited: Promise.resolve(0),
+    } as SpawnResult));
+    setMergeSpawnRunner((cmd: string[]) => ({
+      stdout: new Response("").body!,
+      stderr: new Response("").body!,
+      exited: Promise.resolve(0),
+    } as SpawnResult));
 
     const agent = makeAgent("agent-test", actionTempDir);
     agent.state = state as any;
@@ -434,11 +441,12 @@ describe("DashboardComponent dialog and action handlers", () => {
   }
 
   afterEach(async () => {
-    resetRunner();
     resetSendSpawnRunner();
     resetKillPauseSpawnRunner();
     resetLifecycleSpawnRunner();
     resetNukeResumeSpawnRunner();
+    resetDiffStatusSpawnRunner();
+    resetMergeSpawnRunner();
     if (actionTempDir) {
       await rm(actionTempDir, { recursive: true, force: true });
       actionTempDir = null;
@@ -524,11 +532,6 @@ describe("DashboardComponent dialog and action handlers", () => {
 
   test("! key with no agent selected opens nuke-all confirm dialog", () => {
     dashboard = makeDashboard();
-    lastIbCall = null;
-    setRunner(async (args, cwd) => {
-      lastIbCall = { args, cwd };
-      return { ok: true, exitCode: 0, stdout: "ok", stderr: "" };
-    });
     dashboard.setRepos([{ name: "test-repo", path: "/repos/test" }]);
     // No agents — so no agent is selected
     dashboard.onUpdate([], [], []);
@@ -574,11 +577,6 @@ describe("DashboardComponent dialog and action handlers", () => {
 
   test("! key with no agent and multiple repos shows repo picker", () => {
     dashboard = makeDashboard();
-    lastIbCall = null;
-    setRunner(async (args, cwd) => {
-      lastIbCall = { args, cwd };
-      return { ok: true, exitCode: 0, stdout: "ok", stderr: "" };
-    });
     dashboard.setRepos([
       { name: "repo-a", path: "/repos/a" },
       { name: "repo-b", path: "/repos/b" },
@@ -669,27 +667,45 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(d.allItems[0]).toBe("(No parent - make root)");
   });
 
-  test("reassign fuzzy: selecting 'No parent' calls reassign with --none", async () => {
+  test("reassign fuzzy: selecting 'No parent' clears manager in meta.json", async () => {
     await setupDashboardWithAgent();
+    // Write initial manager value
+    const metaPath = join(actionTempDir!, ".ittybitty", "agents", "agent-test", "meta.json");
+    const meta = await Bun.file(metaPath).json();
+    meta.manager = "agent-old";
+    await Bun.write(metaPath, JSON.stringify(meta));
+
     dashboard.handleInput("r");
     // First item is already selected (index 0 = No parent), press Enter
     dashboard.handleInput("\r");
     await Bun.sleep(10);
-    expect(lastIbCall!.args).toEqual(["reassign", "agent-test", "--none"]);
+    const updated = await Bun.file(metaPath).json();
+    expect(updated.manager).toBe("");
   });
 
-  test("reassign fuzzy: selecting a manager calls reassign with manager id", async () => {
-    // Set up with multiple agents so there's a candidate to select
+  test("reassign fuzzy: selecting a manager updates meta.json", async () => {
+    // Set up with multiple agents in a temp dir so meta.json exists
     dashboard = makeDashboard();
-    lastIbCall = null;
-    setRunner(async (args, cwd) => {
-      lastIbCall = { args, cwd };
-      return { ok: true, exitCode: 0, stdout: "ok", stderr: "" };
-    });
+    actionTempDir = await mkdtemp(join(tmpdir(), "dashboard-reassign-"));
+    const agentsDir = join(actionTempDir, ".ittybitty", "agents");
+    await mkdir(join(agentsDir, "agent-test"), { recursive: true });
+    await mkdir(join(agentsDir, "agent-manager"), { recursive: true });
+    await Bun.write(join(agentsDir, "agent-test", "meta.json"), JSON.stringify({
+      id: "agent-test", tmux_session: "tmux-agent-test", manager: "",
+    }));
+    await Bun.write(join(agentsDir, "agent-manager", "meta.json"), JSON.stringify({
+      id: "agent-manager", tmux_session: "tmux-agent-manager",
+    }));
+    // Mock send runner to prevent real tmux calls
+    setSendSpawnRunner((cmd: string[]) => ({
+      stdout: new Response("").body!,
+      stderr: new Response("").body!,
+      exited: Promise.resolve(cmd.includes("has-session") ? 1 : 0),
+    } as SpawnResult));
 
-    const agent1 = makeAgent("agent-test", "/repos/test");
+    const agent1 = makeAgent("agent-test", actionTempDir);
     agent1.state = "running" as any;
-    const agent2 = makeAgent("agent-manager", "/repos/test");
+    const agent2 = makeAgent("agent-manager", actionTempDir);
     agent2.state = "running" as any;
     const flatList: FlatEntry[] = [
       makeFlatAgent(agent1),
@@ -704,16 +720,12 @@ describe("DashboardComponent dialog and action handlers", () => {
     dashboard.handleInput("\x1b[B");
     dashboard.handleInput("\r");
     await Bun.sleep(10);
-    expect(lastIbCall!.args).toEqual(["reassign", "agent-test", "agent-manager"]);
+    const updated = await Bun.file(join(agentsDir, "agent-test", "meta.json")).json();
+    expect(updated.manager).toBe("agent-manager");
   });
 
   test("reassign fuzzy: excludes self and workers from candidates", () => {
     dashboard = makeDashboard();
-    lastIbCall = null;
-    setRunner(async (args, cwd) => {
-      lastIbCall = { args, cwd };
-      return { ok: true, exitCode: 0, stdout: "ok", stderr: "" };
-    });
 
     const agent1 = makeAgent("agent-test", "/repos/test");
     agent1.state = "running" as any;
@@ -735,11 +747,6 @@ describe("DashboardComponent dialog and action handlers", () => {
 
   test("reassign fuzzy: excludes descendants to prevent circular dependency", () => {
     dashboard = makeDashboard();
-    lastIbCall = null;
-    setRunner(async (args, cwd) => {
-      lastIbCall = { args, cwd };
-      return { ok: true, exitCode: 0, stdout: "ok", stderr: "" };
-    });
 
     const parent = makeAgent("agent-parent", "/repos/test");
     parent.state = "running" as any;
@@ -775,11 +782,6 @@ describe("DashboardComponent dialog and action handlers", () => {
 
   test("reassign fuzzy: excludes agents from other repos", () => {
     dashboard = makeDashboard();
-    lastIbCall = null;
-    setRunner(async (args, cwd) => {
-      lastIbCall = { args, cwd };
-      return { ok: true, exitCode: 0, stdout: "ok", stderr: "" };
-    });
 
     const agent1 = makeAgent("agent-test", "/repos/test");
     agent1.state = "running" as any;
@@ -971,9 +973,6 @@ describe("DashboardComponent dialog and action handlers", () => {
 
   test("send textarea: answer question dialog does NOT have sendAll", () => {
     dashboard = makeDashboard();
-    setRunner(async (args, cwd) => {
-      return { ok: true, exitCode: 0, stdout: "ok", stderr: "" };
-    });
     const agent = makeAgent("agent-test", "/repos/test");
     agent.state = "running";
     const flatList: FlatEntry[] = [makeFlatAgent(agent)];
@@ -987,6 +986,8 @@ describe("DashboardComponent dialog and action handlers", () => {
 
   test("m key runs merge-check then shows confirm", async () => {
     await setupDashboardWithAgent();
+    // Create worktree dir so mergeCheckAgent passes that check
+    await mkdir(join(actionTempDir!, ".ittybitty", "agents", "agent-test", "repo"), { recursive: true });
     dashboard.handleInput("m");
     // Wait for merge-check to complete
     await Bun.sleep(50);
@@ -995,12 +996,23 @@ describe("DashboardComponent dialog and action handlers", () => {
 
   test("merge: merge-check failure shows error message", async () => {
     await setupDashboardWithAgent();
-    setRunner(async () => ({
-      ok: false,
-      exitCode: 1,
-      stdout: "",
-      stderr: "not ready",
-    }));
+    // Create worktree dir so mergeCheckAgent passes that check
+    await mkdir(join(actionTempDir!, ".ittybitty", "agents", "agent-test", "repo"), { recursive: true });
+    // Mock mergeSpawnRunner to return dirty status
+    setMergeSpawnRunner((cmd: string[]) => {
+      if (cmd.includes("--porcelain")) {
+        return {
+          stdout: new Response("M dirty-file.ts\n").body!,
+          stderr: new Response("").body!,
+          exited: Promise.resolve(0),
+        } as SpawnResult;
+      }
+      return {
+        stdout: new Response("").body!,
+        stderr: new Response("").body!,
+        exited: Promise.resolve(0),
+      } as SpawnResult;
+    });
     dashboard.handleInput("m");
     await Bun.sleep(50);
     expect(dashboard.notice).toContain("Merge-check failed");
@@ -1017,11 +1029,6 @@ describe("DashboardComponent dialog and action handlers", () => {
 
   test("no dialog without selected agent", () => {
     dashboard = makeDashboard();
-    setRunner(async (args, cwd) => {
-      lastIbCall = { args, cwd };
-      return { ok: true, exitCode: 0, stdout: "", stderr: "" };
-    });
-    lastIbCall = null;
     // No agents loaded, so no agent selected
     dashboard.handleInput("x");
     expect(dashboard.dialog).toBeNull();
@@ -1259,11 +1266,6 @@ describe("DashboardComponent dialog and action handlers", () => {
   test("new-agent form: Create is no-op when prompt is empty", async () => {
     dashboard = makeDashboard();
     dashboard.setRepos([{ path: "/repos/only", name: "only-repo" }]);
-    lastIbCall = null;
-    setRunner(async (args, cwd) => {
-      lastIbCall = { args, cwd };
-      return { ok: true, exitCode: 0, stdout: "ok", stderr: "" };
-    });
 
     dashboard.handleInput("a");
     // Tab past name, worker, prompt (empty) — create is skipped, lands on cancel, wraps to name
@@ -1345,7 +1347,6 @@ describe("Cross-repo send (E key)", () => {
 
   afterEach(() => {
     resetSendSpawnRunner();
-    resetRunner();
   });
 
   test("E key no-op with single repo", () => {
@@ -1646,11 +1647,6 @@ describe("DashboardComponent right pane and navigation features", () => {
 
   function setupDashboard(state = "running") {
     dashboard = makeDashboard();
-    lastIbCall = null;
-    setRunner(async (args, cwd) => {
-      lastIbCall = { args, cwd };
-      return { ok: true, exitCode: 0, stdout: "ok", stderr: "" };
-    });
     setupSendMock();
 
     const agent = makeAgent("agent-test", "/repos/test");
@@ -1660,8 +1656,8 @@ describe("DashboardComponent right pane and navigation features", () => {
   }
 
   afterEach(() => {
-    resetRunner();
     resetSendSpawnRunner();
+    resetDiffStatusSpawnRunner();
   });
 
   test("addError adds timestamped error to errors list", () => {
@@ -1741,15 +1737,12 @@ describe("DashboardComponent right pane and navigation features", () => {
 
   test("d key triggers diff loading and jumps to DIFF mode", async () => {
     setupDashboard();
-    let diffCalled = false;
-    setRunner(async (args, cwd) => {
-      if (args[0] === "diff") diffCalled = true;
-      return { ok: true, exitCode: 0, stdout: "diff output", stderr: "" };
-    });
+    // diffAgent will fail (no worktree at /repos/test) but mode still switches
     dashboard.handleInput("d");
     expect(dashboard.currentMode).toBe("DIFF");
     await Bun.sleep(50);
-    expect(diffCalled).toBe(true);
+    // The diff content should contain error text about no worktree
+    expect(dashboard.rightPane.diffLoading).toBe(false);
   });
 
   test("g key jumps to STATUS mode", () => {
@@ -1761,10 +1754,6 @@ describe("DashboardComponent right pane and navigation features", () => {
 
   test("g key in QUESTIONS mode navigates to agent and switches mode", () => {
     dashboard = makeDashboard();
-    setRunner(async (args, cwd) => {
-      lastIbCall = { args, cwd };
-      return { ok: true, exitCode: 0, stdout: "", stderr: "" };
-    });
 
     const agent1 = makeAgent("agent-a", "/repos/test");
     const agent2 = makeAgent("agent-b", "/repos/test");
@@ -1794,10 +1783,6 @@ describe("DashboardComponent right pane and navigation features", () => {
 
   test("Enter in QUESTIONS mode opens answer dialog", () => {
     dashboard = makeDashboard();
-    setRunner(async (args, cwd) => {
-      lastIbCall = { args, cwd };
-      return { ok: true, exitCode: 0, stdout: "", stderr: "" };
-    });
 
     const agent = makeAgent("agent-test", "/repos/test");
     const flatList: FlatEntry[] = [makeFlatAgent(agent)];
@@ -2494,7 +2479,7 @@ describe("Orphaned tmux sessions (Phase 10)", () => {
 
   test("Enter in ERRORS mode with orphans opens kill dialog", () => {
     dashboard = makeDashboard();
-    setRunner(async () => ({ ok: true, exitCode: 0, stdout: "", stderr: "" }));
+
     const agent = makeAgent("agent-test", "/repos/test");
     const flatList: FlatEntry[] = [makeFlatAgent(agent)];
     dashboard.onUpdate([agent], flatList, [], ["ittybitty-orphan"]);
@@ -2502,12 +2487,12 @@ describe("Orphaned tmux sessions (Phase 10)", () => {
     dashboard.handleInput("\r"); // Enter
     expect(dashboard.dialog).not.toBeNull();
     expect(assertDialog(dashboard.dialog, 'confirm').prompt).toContain("ittybitty-orphan");
-    resetRunner();
+
   });
 
   test("Enter in ERRORS mode with multiple orphans shows select dialog", () => {
     dashboard = makeDashboard();
-    setRunner(async () => ({ ok: true, exitCode: 0, stdout: "", stderr: "" }));
+
     const agent = makeAgent("agent-test", "/repos/test");
     const flatList: FlatEntry[] = [makeFlatAgent(agent)];
     dashboard.onUpdate([agent], flatList, [], ["ittybitty-orphan1", "ittybitty-orphan2"]);
@@ -2517,7 +2502,7 @@ describe("Orphaned tmux sessions (Phase 10)", () => {
     const d = assertDialog(dashboard.dialog, 'select');
     expect(d.items).toContain("ittybitty-orphan1");
     expect(d.items).toContain("ittybitty-orphan2");
-    resetRunner();
+
   });
 
   test("pane cycle does not skip ERRORS when orphaned sessions exist", () => {
@@ -2533,7 +2518,7 @@ describe("Orphaned tmux sessions (Phase 10)", () => {
       dashboard.handleInput("p");
     }
     expect(modes).toContain("ERRORS");
-    resetRunner();
+
   });
 
   test("onUpdate with empty orphans clears previous orphans", () => {
@@ -2594,7 +2579,7 @@ describe("Context-sensitive footer (repo header vs agent)", () => {
 
   function setupMultiRepoWithRepoHeader() {
     dashboard = makeDashboard();
-    setRunner(async () => ({ ok: true, exitCode: 0, stdout: "", stderr: "" }));
+
     Object.defineProperty(process.stdout, "rows", { value: 40, writable: true, configurable: true });
 
     const agent1 = _makeAgent({ id: "agent-a", repoPath: "/repos/alpha", repoName: "alpha" });
@@ -2618,7 +2603,7 @@ describe("Context-sensitive footer (repo header vs agent)", () => {
   }
 
   afterEach(() => {
-    resetRunner();
+
   });
 
   test("footer shows repo actions when repo header is selected", () => {
@@ -2693,12 +2678,12 @@ describe("Repo nickname display in agent tree", () => {
   let dashboard: DashboardComponent;
 
   afterEach(() => {
-    resetRunner();
+
   });
 
   test("repo header shows nickname when set", () => {
     dashboard = makeDashboard();
-    setRunner(async () => ({ ok: true, exitCode: 0, stdout: "", stderr: "" }));
+
     Object.defineProperty(process.stdout, "rows", { value: 40, writable: true, configurable: true });
 
     const agent = _makeAgent({ id: "agent-a", repoPath: "/repos/myproject", repoName: "myproj-nick" });
@@ -2721,11 +2706,11 @@ describe("Repo nickname display in agent tree", () => {
 
   test("a key with nickname shows nickname in new agent form", () => {
     dashboard = makeDashboard();
-    setRunner(async () => ({ ok: true, exitCode: 0, stdout: "", stderr: "" }));
+
     dashboard.setRepos([{ path: "/repos/myproject", name: "myproject", nickname: "myproj" }]);
     dashboard.handleInput("a");
     expect(assertDialog(dashboard.dialog, 'new-agent-form').repoName).toBe("myproj");
-    resetRunner();
+
   });
 });
 
@@ -2733,12 +2718,12 @@ describe("Repo header selection persistence", () => {
   let dashboard: DashboardComponent;
 
   afterEach(() => {
-    resetRunner();
+
   });
 
   function setupMultiRepo() {
     dashboard = makeDashboard();
-    setRunner(async () => ({ ok: true, exitCode: 0, stdout: "", stderr: "" }));
+
     Object.defineProperty(process.stdout, "rows", { value: 40, writable: true, configurable: true });
 
     const agent1 = _makeAgent({ id: "agent-a", repoPath: "/repos/alpha", repoName: "alpha" });

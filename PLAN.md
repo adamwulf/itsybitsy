@@ -319,7 +319,8 @@ Matching `ib watch` keybindings exactly where possible; new keys noted.
 - `o` — open diff in external tool: write `ib diff {id}` output to a temp file, then run `{diffTool} {tempfile}` where `diffTool` comes from `~/.itsybitsy.json`; show message if not configured
 - `S` — capture tmux snapshot for debugging state detection: capture tmux output for selected agent, run `parseState` on it, write result to `.ittybitty/agents/{id}/debug-logs/snapshot-{timestamp}-{state}.txt`, show status message with filename. **Not** an `ib` subcommand — implement directly using `captureTmuxOutput()` + `parseState()`.
 - `c` — clear errors (only active in ERRORS pane)
-- `Enter` — answer selected question (only active in QUESTIONS pane)
+- `Enter` — answer selected question (QUESTIONS pane); kill orphaned tmux session (ERRORS pane)
+- `Escape` — acknowledge question without answering (only active in QUESTIONS pane)
 
 **App**
 - `?` — read-only help dialog showing all keybindings; press any key to dismiss

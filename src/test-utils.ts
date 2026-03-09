@@ -33,14 +33,12 @@ export function makeAgent(overrides: Partial<Agent> & { id: string }): Agent {
 }
 
 /** Create a FlatEntry of kind "agent" for tests */
-export function makeFlatAgent(agent: Agent, overrides?: { depth?: number; connector?: string; repoHeader?: string | null; repoHasAgents?: boolean }): Extract<FlatEntry, { kind: "agent" }> {
+export function makeFlatAgent(agent: Agent, overrides?: { depth?: number; connector?: string }): Extract<FlatEntry, { kind: "agent" }> {
   return {
     kind: "agent",
     agent,
     depth: overrides?.depth ?? 0,
     connector: overrides?.connector ?? "",
-    repoHeader: overrides?.repoHeader ?? null,
-    repoHasAgents: overrides?.repoHasAgents ?? false,
   };
 }
 

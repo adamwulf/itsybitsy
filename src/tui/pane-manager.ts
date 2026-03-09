@@ -101,8 +101,8 @@ export class RightPaneComponent implements Component {
       stateCounts.set(agent.state, (stateCounts.get(agent.state) ?? 0) + 1);
     }
     const lines: string[] = [];
-    const headerEntry = this.allAgents.find((f) => f.kind === "repo-header" && f.repoName === repoName);
-    const triangle = headerEntry && headerEntry.kind === "repo-header" && headerEntry.hasAgents ? "▾" : "▸";
+    const headerEntry = this.allAgents.find((f): f is Extract<FlatEntry, { kind: "repo-header" }> => f.kind === "repo-header" && f.repoName === repoName);
+    const triangle = headerEntry?.hasAgents ? "▾" : "▸";
     lines.push(`${BOLD}${triangle} ${repoName}${RESET}`);
     lines.push("");
     if (repoAgents.length > 0) {

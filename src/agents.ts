@@ -206,11 +206,8 @@ export function buildAgentTree(agents: Agent[]): Agent[] {
 }
 
 export type FlatEntry =
-  | { kind: "agent"; agent: Agent; depth: number; connector: string; repoHeader: string | null; repoHasAgents: boolean }
+  | { kind: "agent"; agent: Agent; depth: number; connector: string }
   | { kind: "repo-header"; repoName: string; repoPath: string; hasAgents: boolean };
-
-/** @deprecated Use FlatEntry instead */
-export type FlatAgent = FlatEntry;
 
 /**
  * Flatten agent tree into display order (depth-first), with indentation level.
@@ -244,7 +241,7 @@ export function flattenAgentTree(roots: Agent[], repos: string[] | { name: strin
       connector += ancestorIsLast[ancestorIsLast.length - 1] ? "└── " : "├── ";
     }
 
-    result.push({ kind: "agent", agent, depth, connector, repoHeader: null, repoHasAgents: false });
+    result.push({ kind: "agent", agent, depth, connector });
     const nonArchivedChildren = agent.children.filter((c) => !c.archived);
     for (let i = 0; i < nonArchivedChildren.length; i++) {
       const isLast = i === nonArchivedChildren.length - 1;

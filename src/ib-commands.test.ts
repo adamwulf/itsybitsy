@@ -230,7 +230,6 @@ describe("ib-commands", () => {
     });
   });
 
-  // acknowledgeQuestion passthrough test removed — now native
 
   // mergeAgent passthrough tests removed — now native
 });

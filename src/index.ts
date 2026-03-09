@@ -32,7 +32,7 @@ async function findAgentById(id: string, repos: RepoEntry[]): Promise<Agent | nu
 async function printAndExit(result: { ok: boolean; exitCode: number; stdout: string; stderr: string }): Promise<never> {
   if (result.stdout) console.log(result.stdout);
   if (result.stderr) console.error(result.stderr);
-  process.exit(result.ok ? 0 : 1);
+  process.exit(result.exitCode);
 }
 
 /** Require an agent ID argument, find it, or exit with error. */
@@ -398,12 +398,24 @@ async function main() {
       for (let i = 0; i < ibArgs.length; i++) {
         const arg = ibArgs[i]!;
         if (arg === "--worker") { opts.worker = true; }
-        else if (arg === "--model" && ibArgs[i + 1]) { opts.model = ibArgs[++i]; }
-        else if (arg === "--name" && ibArgs[i + 1]) { opts.name = ibArgs[++i]; }
+        else if (arg === "--model") {
+          if (!ibArgs[i + 1]) { console.error("Error: --model requires a value"); process.exit(1); }
+          opts.model = ibArgs[++i];
+        }
+        else if (arg === "--name") {
+          if (!ibArgs[i + 1]) { console.error("Error: --name requires a value"); process.exit(1); }
+          opts.name = ibArgs[++i];
+        }
         else if (arg === "--no-worktree") { opts.noWorktree = true; }
         else if (arg === "--yolo") { opts.yolo = true; }
-        else if (arg === "--allow" && ibArgs[i + 1]) { opts.allowTools = ibArgs[++i]; }
-        else if (arg === "--deny" && ibArgs[i + 1]) { opts.denyTools = ibArgs[++i]; }
+        else if (arg === "--allow") {
+          if (!ibArgs[i + 1]) { console.error("Error: --allow requires a value"); process.exit(1); }
+          opts.allowTools = ibArgs[++i];
+        }
+        else if (arg === "--deny") {
+          if (!ibArgs[i + 1]) { console.error("Error: --deny requires a value"); process.exit(1); }
+          opts.denyTools = ibArgs[++i];
+        }
         else { promptParts.push(arg); }
       }
       const prompt = promptParts.join(" ");

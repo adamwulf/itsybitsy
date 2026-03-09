@@ -95,4 +95,15 @@ describe("session-start", () => {
     expect(instructions).not.toContain("Asking the User Questions");
     expect(instructions).toContain("Your manager agent is: agent-parent00");
   });
+
+  test("manager: 'null' string treated as no manager", () => {
+    const cwd = "/Users/me/project/.ittybitty/agents/agent-abc12345/repo";
+    const ctx = detectRole(cwd, {
+      id: "agent-abc12345",
+      manager: "null" as unknown as string,
+      worker: false,
+    });
+    expect(ctx.agentManager).toBe("");
+    expect(ctx.parentBranch).toBe("main");
+  });
 });

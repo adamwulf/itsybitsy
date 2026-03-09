@@ -4,7 +4,7 @@
  * then takes appropriate action (nudge, notify manager, remind commit, etc.).
  */
 
-import { join } from "path";
+import { join, dirname } from "path";
 import { readdir, readFile, writeFile, mkdir } from "fs/promises";
 import { logAgent } from "../agent-lifecycle";
 import { parseState } from "../parse-state";
@@ -321,7 +321,7 @@ export async function hookStatus(agentId: string): Promise<void> {
   const agentMatch = cwd.match(/(.*\/.ittybitty\/agents\/[^/]+)/);
   if (agentMatch) {
     agentDir = agentMatch[1]!;
-    agentsDir = join(agentDir, "..");
+    agentsDir = dirname(agentDir);
   } else {
     // Construct from agentsDir pattern
     const ittybittyMatch = cwd.match(/(.*\/.ittybitty)/);

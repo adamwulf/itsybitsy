@@ -111,12 +111,7 @@ export async function processTaskIntercept(
   if (opts?.spawnAgent) {
     result = await opts.spawnAgent(repoPath, agentPrompt, spawnOpts);
   } else {
-    const ibResult: IbCommandResult = await newAgent(repoPath, agentPrompt, {
-      worker: callingAgentId ? true : undefined,
-      manager: callingAgentId,
-      model: model || undefined,
-    });
-    result = ibResult;
+    result = await newAgent(repoPath, agentPrompt, spawnOpts as Parameters<typeof newAgent>[2]);
   }
 
   // 10. Extract agent ID from stdout
@@ -162,11 +157,7 @@ export async function processTaskIntercept(
 }
 
 export async function hookInterceptTask(): Promise<void> {
-  const chunks: Uint8Array[] = [];
-  for await (const chunk of Bun.stdin.stream()) {
-    chunks.push(chunk);
-  }
-  const raw = Buffer.concat(chunks).toString("utf-8");
+  const raw = await new Response(Bun.stdin.stream()).text();
   const data = JSON.parse(raw);
 
   const result = await processTaskIntercept({

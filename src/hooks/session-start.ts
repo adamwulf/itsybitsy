@@ -287,11 +287,7 @@ These phrases MUST be the LAST thing you output. Put summaries or status updates
 }
 
 export async function hookSessionStart(): Promise<void> {
-  const chunks: Uint8Array[] = [];
-  for await (const chunk of Bun.stdin.stream()) {
-    chunks.push(chunk);
-  }
-  const raw = Buffer.concat(chunks).toString("utf-8");
+  const raw = await new Response(Bun.stdin.stream()).text();
   const data = JSON.parse(raw);
 
   const cwd: string = data.cwd ?? process.cwd();

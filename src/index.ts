@@ -7,6 +7,7 @@
 import { join } from "path";
 import { addRepo, removeRepo, listRepos, type RepoEntry } from "./registry";
 import type { Agent } from "./agents";
+import type { FlatAgent } from "./agents";
 
 const args = process.argv.slice(2);
 const command = args[0];
@@ -124,43 +125,34 @@ async function main() {
       if (flat.length === 0) {
         console.log("No agents found across registered repos.");
       } else {
+        const { visibleWidth } = await import("@mariozechner/pi-tui");
+        const { displayState } = await import("./tui/agent-tree");
+        const { getStateColors } = await import("./tui/color-scheme");
+        const { BOLD, DIM, RESET } = await import("./tui/colors");
+
         // Collect real agent rows for column width computation
-        const agentRows: { entry: typeof flat[0]; prefix: string; state: string; age: string; model: string }[] = [];
+        const rowByEntry = new Map<FlatAgent, { prefix: string; state: string; age: string; model: string }>();
         for (const entry of flat) {
-          if (entry.repoHeader && !entry.repoHasAgents) continue;
           if (entry.repoHeader) continue;
           const icon = entry.agent.meta.worker ? "⚙" : "◆";
           const prefix = `${entry.connector}${icon} ${entry.agent.id}`;
-          agentRows.push({
-            entry,
+          rowByEntry.set(entry, {
             prefix,
-            state: entry.agent.state,
+            state: displayState(entry.agent.state),
             age: entry.agent.age,
             model: entry.agent.meta.model,
           });
         }
 
-        // Compute max widths for alignment
+        // Compute max visible widths for alignment
         let maxPrefix = 0, maxState = 0, maxAge = 0, maxModel = 0;
-        for (const row of agentRows) {
-          if (row.prefix.length > maxPrefix) maxPrefix = row.prefix.length;
+        for (const row of rowByEntry.values()) {
+          const pw = visibleWidth(row.prefix);
+          if (pw > maxPrefix) maxPrefix = pw;
           if (row.state.length > maxState) maxState = row.state.length;
           if (row.age.length > maxAge) maxAge = row.age.length;
           if (row.model.length > maxModel) maxModel = row.model.length;
         }
-
-        // ANSI color helpers
-        const stateColor = (state: string, text: string): string => {
-          switch (state) {
-            case "running": return `\x1b[32m${text}\x1b[0m`;   // green
-            case "waiting": return `\x1b[33m${text}\x1b[0m`;   // yellow
-            case "rate_limited": return `\x1b[31m${text}\x1b[0m`; // red
-            case "complete":
-            case "stopped":
-            case "unknown":
-            default: return `\x1b[2m${text}\x1b[0m`;           // dim
-          }
-        };
 
         // Compute available width for prompt (terminal width minus fixed columns and gaps)
         const termWidth = process.stdout.columns || 120;
@@ -168,24 +160,29 @@ async function main() {
         const fixedWidth = maxPrefix + 2 + maxState + 2 + maxAge + 2 + maxModel + 2;
         const promptWidth = Math.max(20, termWidth - fixedWidth);
 
+        const stateColors = getStateColors();
         let isFirst = true;
         for (const entry of flat) {
           if (entry.repoHeader) {
             if (!isFirst) console.log(""); // blank line between repos
             isFirst = false;
-            console.log(`\x1b[1m${entry.repoHeader}\x1b[0m`); // bold
+            console.log(`${BOLD}${entry.repoHeader}${RESET}`);
             if (!entry.repoHasAgents) {
-              console.log("  \x1b[2m(no agents)\x1b[0m");
+              console.log(`  ${DIM}(no agents)${RESET}`);
             }
             continue;
           }
 
-          const row = agentRows.find((r) => r.entry === entry)!;
+          const row = rowByEntry.get(entry)!;
+          // Pad prefix using visibleWidth to account for box-drawing/icon chars
+          const prefixPad = maxPrefix - visibleWidth(row.prefix);
+          const paddedPrefix = row.prefix + " ".repeat(Math.max(0, prefixPad));
+          const colorCode = stateColors[entry.agent.state] ?? DIM;
           const prompt = entry.agent.meta.prompt.slice(0, promptWidth).replace(/\n/g, " ");
-          const archived = entry.agent.archived ? " \x1b[2m[archived]\x1b[0m" : "";
+          const archived = entry.agent.archived ? ` ${DIM}[archived]${RESET}` : "";
           const line = [
-            row.prefix.padEnd(maxPrefix),
-            stateColor(row.state, row.state.padEnd(maxState)),
+            paddedPrefix,
+            `${colorCode}${row.state.padEnd(maxState)}${RESET}`,
             row.age.padEnd(maxAge),
             row.model.padEnd(maxModel),
             prompt + archived,

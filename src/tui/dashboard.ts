@@ -29,6 +29,7 @@ import { SplitPane } from "./split-pane";
 import { wrapLines } from "./wrap";
 import { fetchUsage } from "../usage";
 import { startUpdateChecker, stopUpdateChecker } from "../update-check";
+import { startWatchdog, stopWatchdog, isWatchdogRunning } from "../watchdog";
 import type { UsageData } from "../usage";
 import { getStateColors, setupColorSchemeDetection } from "./color-scheme";
 import { AgentTreeComponent } from "./agent-tree";
@@ -204,7 +205,8 @@ class StatusBarComponent implements Component {
     const now = new Date();
     const timeStr = now.toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
     const versionStr = this.version ? `v${this.version}` : "";
-    const row2Right = `${DIM}${timeStr}  ${versionStr}${RESET}`;
+    const watchdogStr = isWatchdogRunning() ? "[watchdog]  " : "";
+    const row2Right = `${DIM}${watchdogStr}${timeStr}  ${versionStr}${RESET}`;
 
     let row1Left: string;
     let row2Left: string;
@@ -1075,6 +1077,7 @@ export async function launchDashboard(): Promise<void> {
   tui.addInputListener((data) => {
     if (matchesKey(data, Key.ctrl("c"))) {
       colorDetection.cleanup();
+      stopWatchdog();
       dashboard.stopPolling();
       watcher.stop();
       tui.stop();
@@ -1092,4 +1095,5 @@ export async function launchDashboard(): Promise<void> {
   colorDetection.queryColorScheme();
   dashboard.startPolling();
   await watcher.start();
+  startWatchdog(() => watcher.lastAgents);
 }

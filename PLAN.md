@@ -108,19 +108,33 @@ itsybitsy
 │   ├── usage.ts              # Fetches Claude API quota from Anthropic OAuth API;
 │   │                         # caches at ~/.claude/usage-cache.json (10s TTL)
 │   ├── usage.test.ts         # Usage fetch/parse tests
+│   ├── update-check.ts       # Background npm registry version checker (hourly)
+│   ├── update-check.test.ts  # Update checker tests
+│   ├── config.ts             # Config reading/writing for .ittybitty.json
+│   ├── config.test.ts        # Config tests
 │   ├── watcher.ts            # fs.watch({ recursive: true }) on agents/, archive/,
 │   │                         # user-questions.json; 10s fallback poll; debounced refresh;
 │   │                         # 2s stateTimer for between-refresh state polling
 │   ├── watcher.test.ts       # Watcher tests
 │   ├── tmux-poller.ts        # Polls tmux capture-pane for the selected agent (~1s, 500 lines);
-│   │                         # also exports captureTmuxOutput() for one-shot state detection (100 lines)
+│   │                         # also exports captureTmuxOutput() for one-shot state detection (500 lines)
 │   ├── tmux-poller.test.ts   # Tmux poller tests
 │   ├── ib-commands.ts        # Wrappers for ib mutations; cwd = repo root
 │   ├── ib-commands.test.ts   # ib-commands tests
 │   ├── ghostty.ts            # Open tmux sessions in Ghostty
+│   ├── ghostty.test.ts       # Ghostty tests
+│   ├── orphan-detection.test.ts # Orphaned tmux session detection tests
+│   ├── test-utils.ts         # Shared test helpers
 │   └── tui/
 │       ├── dashboard.ts      # Main TUI: agent tree + split pane + status bar + dialogs
 │       ├── dashboard.test.ts # Dashboard tests
+│       ├── agent-tree.ts     # AgentTreeComponent + formatAgentRow
+│       ├── agent-actions.ts  # Agent action handlers (kill, merge, send, etc.)
+│       ├── pane-manager.ts   # RightPaneComponent + pane mode cycling + async loading
+│       ├── dialog-handler.ts # DialogState type + dialog input routing
+│       ├── color-scheme.ts   # Terminal color scheme detection + getStateColors
+│       ├── folder-browser.ts # Folder browser for adding repos
+│       ├── folder-browser.test.ts # Folder browser tests
 │       ├── split-pane.ts     # Custom horizontal layout (pi-tui Box is vertical-only);
 │       │                     # fullWidth flag hides left pane for DIFF/DENIALS/TREE/ERRORS/QUESTIONS
 │       ├── split-pane.test.ts # Split pane tests
@@ -158,7 +172,7 @@ Also: `src/usage.ts` — fetches Claude API session+weekly utilization from `GET
 │       ├── exit-check.sh
 │       ├── repo            # Path to the worktree
 │       └── debug-logs/     # tmux captures from hooks
-├── archive/                # Closed agents (hidden by default in TUI; toggle with `a`)
+├── archive/                # Closed agents (hidden by default in TUI)
 ├── feedback.json
 ├── repo-id                 # Unique repo UUID (used in tmux session names)
 ├── reports/
@@ -287,25 +301,31 @@ Matching `ib watch` keybindings exactly where possible; new keys noted.
 - `t` — cycle denials time filter (only active in DENIALS pane, mode 2); 3 filter levels
 - `;` — scroll pane down (show older content)
 - `l` — scroll pane up (toward bottom / newer content)
+- `[` / `]` — resize left pane (decrease / increase width by 5)
+- `Tab` / `Shift-Tab` — toggle focus between agent tree and questions list (only in QUESTIONS pane)
 
 **Agent actions**
 - `s` — send message to selected agent (dialog)
 - `m` — merge agent (runs merge-check first; confirm dialog)
 - `x` — kill agent (confirm dialog)
 - `!` — force-kill / nuke agent (confirm dialog)
-- `a` — new agent (dialog: repo, prompt, --worker/--yolo flags)
-- `A` — toggle archived agents visibility
+- `a` — new agent with repo picker (dialog: repo, prompt, --worker flags)
+- `A` — new agent in current repo (skips repo picker)
 - `r` — reassign agent's manager (dialog) ← matches `ib watch`
+- `P` — pause a running/waiting agent (confirm dialog) ← new, not in `ib watch`
 - `R` — resume a stopped agent ← new, not in `ib watch`
 - `G` — open agent's tmux session in Ghostty ← new, not in `ib watch` (`g` is taken by status)
 - `w` — open agent worktree in Finder (`open {worktree}`)
 - `o` — open diff in external tool: write `ib diff {id}` output to a temp file, then run `{diffTool} {tempfile}` where `diffTool` comes from `~/.itsybitsy.json`; show message if not configured
 - `S` — capture tmux snapshot for debugging state detection: capture tmux output for selected agent, run `parseState` on it, write result to `.ittybitty/agents/{id}/debug-logs/snapshot-{timestamp}-{state}.txt`, show status message with filename. **Not** an `ib` subcommand — implement directly using `captureTmuxOutput()` + `parseState()`.
 - `c` — clear errors (only active in ERRORS pane)
-- `Enter` — answer selected question (only active in QUESTIONS pane)
+- `Enter` — answer selected question (QUESTIONS pane); kill orphaned tmux session (ERRORS pane)
+- `Escape` — acknowledge question without answering (only active in QUESTIONS pane)
 
 **App**
-- `h` — read-only help dialog showing all keybindings; press any key to dismiss. Not interactive settings.
+- `?` — read-only help dialog showing all keybindings; press any key to dismiss
+- `h` — setup dialog (hooks status, gitignore check, diff tool config)
+- `+` — add repo folder (folder browser dialog)
 - `Ctrl-C` — exit
 
 ## Ghostty Integration
@@ -370,7 +390,7 @@ Each phase ends at a usable checkpoint — something that works and can be teste
 **Checkpoint:** `itsybitsy watch` launches a live TUI with agent tree, state updates via fs.watch + tmux, split pane layout, and keybindings.
 
 - [x] `src/tui/dashboard.ts` — agent tree at top (max 7 rows, scrolls with selection), split pane below (tmux left + cycling right pane)
-- [x] Agent tree: recursive manager/child indentation, workers `⚙` vs managers `◆`, state color-coded, `a` to toggle archived
+- [x] Agent tree: recursive manager/child indentation, workers `⚙` vs managers `◆`, state color-coded; archived agents always hidden
 - [x] Right pane modes 0–7; `p`/`n` to cycle, direct jump keys `d`/`g`/`e`/`q`; mode persists across agent selection changes
 - [x] Keyboard navigation: `j/k` or arrow keys; `;`/`l` scroll pane content
 - [x] Watcher events wired to `tui.requestRender()`; TmuxPoller integrated for live output
@@ -397,12 +417,12 @@ Note: `tmux-poller.ts` was implemented in Phase 2/3. Phase 4 focuses on renderin
 
 - [x] `src/ib-commands.ts` — async wrappers for all `ib` mutations; **always sets `cwd` to the target repo root**; functions: `killAgent`, `nukeAgent`, `resumeAgent`, `reassignAgent`, `mergeAgent`, `mergeCheckAgent`, `sendMessage`, `newAgent`, `diffAgent`, `statusAgent`
 - [x] `x` — kill agent: confirm dialog showing agent ID, then `ib kill {id}`
-- [x] `!` — nuke/force-kill: confirm dialog, then `ib kill {id} --force`
+- [x] `!` — nuke/force-kill: confirm dialog, then `ib nuke {id} --force`
 - [x] `R` — resume stopped agent: `ib resume {id}` (only enabled when agent is stopped/complete)
 - [x] `r` — reassign agent's manager: text input dialog, then `ib reassign {id} {new-manager}`
 - [x] `m` — merge agent: run `ib merge-check {id}` first, show result in confirm dialog, then `ib merge {id} --force`
 - [x] `s` — send message: text input dialog, then `ib send {id} "message"`
-- [x] `a` — new agent: repo selector (from registry) → prompt input → optional flags (`--yolo`, `--worker`, `--model`); shells to `ib new-agent`
+- [x] `a` — new agent: repo selector (from registry) → prompt input → optional flags (`--worker`); shells to `ib new-agent`
 
 ---
 
@@ -417,7 +437,7 @@ Note: `tmux-poller.ts` was implemented in Phase 2/3. Phase 4 focuses on renderin
 - [x] Right pane mode 6 — STATUS: `ib status {id}` output, loaded async when pane is active, cached until agent changes
 - [x] `g` — STATUS pane in normal context; go-to-agent in QUESTIONS pane (selects agent and jumps to AGENT LOG)
 - [x] `q` — QUESTIONS pane; `Enter` to answer (acknowledges + sends); `Escape` to acknowledge without answering
-- [x] `t` — cycle denials time filter (3 levels: all / last hour / last 10 min), only active in DENIALS pane
+- [x] `t` — cycle denials time filter (3 levels: all / 24h / 7d), only active in DENIALS pane
 
 ---
 
@@ -428,7 +448,7 @@ Note: `tmux-poller.ts` was implemented in Phase 2/3. Phase 4 focuses on renderin
 - [x] `/` — fuzzy jump to pane mode by name (pi-tui SelectList dialog overlay)
 - [x] `w` — open agent worktree in Finder: `Bun.$\`open ${agent.worktree}\``; show error if worktree doesn't exist
 - [x] `o` — open diff in external tool: write `diffAgent()` output to a temp file (`/tmp/itsybitsy-diff-{id}.txt`), run `{diffTool} {tempfile}`; show "No diff tool configured" message if `diffTool` not set in `~/.itsybitsy.json`
-- [x] `h` — read-only help dialog listing all keybindings; press any key to dismiss (use existing message dialog type)
+- [x] `?` — read-only help dialog listing all keybindings; press any key to dismiss (use existing message dialog type). Note: originally `h`, moved to `?` in Phase 12A when `h` was reassigned to setup dialog.
 - [x] `S` — snapshot for debugging: call `captureTmuxOutput(agent.meta.tmux_session)`, run `parseState()` on stripped output, write full capture + state to `.ittybitty/agents/{id}/debug-logs/snapshot-{timestamp}-{state}.txt`, show status message. **Not** an `ib` subcommand — implement directly.
 
 ---
@@ -462,41 +482,41 @@ Deep analysis of `ib watch` (bash, ~8200 lines) vs itsybitsy (TypeScript) produc
 
 ---
 
-### Phase 8: Quick Wins — Commands & State Detection
+### Phase 8: Quick Wins — Commands & State Detection -- COMPLETE
 **Checkpoint:** `!` (nuke) correctly kills descendants, `a` (new-agent) wires up manager hierarchy, `P` pauses agents, dead-agent questions filtered, `creating` state detected more reliably, state detection capture depth matches ib.
 
 These are small, isolated changes — each is a few lines, low risk, and independently testable.
 
 **Command fixes:**
-- [ ] **Fix `nukeAgent()` to use `ib nuke`** (`src/ib-commands.ts`) — change from `ib kill {id} --force` to `ib nuke {id} --force` so that `!` recursively kills the agent AND all its descendants. Update tests.
-- [ ] **Add nuke-all capability** (`src/ib-commands.ts`, `src/tui/dashboard.ts`) — add `nukeAllAgents(repoPath)` that calls `ib nuke --force` (no ID = kill all agents in repo). In the dashboard, when `!` is pressed with no agent selected, show confirm dialog for nuke-all. This is the emergency stop feature.
-- [ ] **Add `--manager` flag to `newAgent()`** (`src/ib-commands.ts`, `src/tui/dashboard.ts`) — add `manager?: string` to `NewAgentOptions`. In the new-agent dialog, if an agent is currently selected and is a manager (not a worker), auto-pass `--manager {selected.id}` to `ib new-agent`. This is critical for correct agent hierarchy when spawning from the TUI.
-- [ ] **Dead-agent question filtering** (`src/agents.ts`) — in `readPendingQuestions()`, after reading `user-questions.json`, filter out questions whose `agent` ID does not exist in the current `.ittybitty/agents/` directory. Matches ib's `cmd_questions()` which skips dead agents.
-- [ ] **Pause agent (`P` key)** (`src/ib-commands.ts`, `src/tui/dashboard.ts`) — add `pauseAgent(repoPath, id)` that calls `ib pause {id}`. Add `P` keybinding in dashboard with confirm dialog. Only enabled for running/waiting agents (not already stopped). After pause, agent shows as "stopped" and can be resumed with `R`.
+- [x] **Fix `nukeAgent()` to use `ib nuke`** (`src/ib-commands.ts`) — change from `ib kill {id} --force` to `ib nuke {id} --force` so that `!` recursively kills the agent AND all its descendants. Update tests.
+- [x] **Add nuke-all capability** (`src/ib-commands.ts`, `src/tui/dashboard.ts`) — add `nukeAllAgents(repoPath)` that calls `ib nuke --force` (no ID = kill all agents in repo). In the dashboard, when `!` is pressed with no agent selected, show confirm dialog for nuke-all. This is the emergency stop feature.
+- [x] **Add `--manager` flag to `newAgent()`** (`src/ib-commands.ts`, `src/tui/dashboard.ts`) — add `manager?: string` to `NewAgentOptions`. In the new-agent dialog, if an agent is currently selected and is a manager (not a worker), auto-pass `--manager {selected.id}` to `ib new-agent`. This is critical for correct agent hierarchy when spawning from the TUI.
+- [x] **Dead-agent question filtering** (`src/agents.ts`) — in `readPendingQuestions()`, after reading `user-questions.json`, filter out questions whose `agent` ID does not exist in the current `.ittybitty/agents/` directory. Matches ib's `cmd_questions()` which skips dead agents.
+- [x] **Pause agent (`P` key)** (`src/ib-commands.ts`, `src/tui/dashboard.ts`) — add `pauseAgent(repoPath, id)` that calls `ib pause {id}`. Add `P` keybinding in dashboard with confirm dialog. Only enabled for running/waiting agents (not already stopped). After pause, agent shows as "stopped" and can be resumed with `R`.
 
 **State detection fixes:**
-- [ ] **Missing startup indicators** (`src/parse-state.ts`) — add `"╭─ Claude Code"` and `"[AGENT CONTEXT]"` to the creating-state startup check alongside `"Claude Code v"`. Worker agents inject `[AGENT CONTEXT]` before `Claude Code v` appears; `╭─ Claude Code` is the box-drawing header variant.
-- [ ] **State detection capture depth** (`src/tmux-poller.ts`) — increase `captureTmuxOutput()` default from 100 to 500 lines to match ib's capture depth for state detection. The display poller already uses 500 lines; this aligns the state-detection one-shot calls used by `detectAgentStates()`.
-- [ ] **`compute_state_from_content` pre-check** (`src/agents.ts`) — in `detectAgentStates()`, before calling `parseState()`, count non-empty lines in the captured output. If < 10 lines AND none of the startup markers (`"Claude Code v"`, `"╭─ Claude Code"`, `"[AGENT CONTEXT]"`) are found, return `"creating"` directly instead of delegating to `parseState()`. This matches ib's `compute_state_from_content()` wrapper.
+- [x] **Missing startup indicators** (`src/parse-state.ts`) — add `"╭─ Claude Code"` and `"[AGENT CONTEXT]"` to the creating-state startup check alongside `"Claude Code v"`. Worker agents inject `[AGENT CONTEXT]` before `Claude Code v` appears; `╭─ Claude Code` is the box-drawing header variant.
+- [x] **State detection capture depth** (`src/tmux-poller.ts`) — increase `captureTmuxOutput()` default from 100 to 500 lines to match ib's capture depth for state detection. The display poller already uses 500 lines; this aligns the state-detection one-shot calls used by `detectAgentStates()`.
+- [x] **`compute_state_from_content` pre-check** (`src/agents.ts`) — in `detectAgentStates()`, before calling `parseState()`, count non-empty lines in the captured output. If < 10 lines AND none of the startup markers (`"Claude Code v"`, `"╭─ Claude Code"`, `"[AGENT CONTEXT]"`) are found, return `"creating"` directly instead of delegating to `parseState()`. This matches ib's `compute_state_from_content()` wrapper.
 
 ---
 
-### Phase 9: Dashboard UX — Control Flow & Footer
+### Phase 9: Dashboard UX — Control Flow & Footer -- COMPLETE
 **Checkpoint:** Pane cycling skips empty panes, footer shows error count, terminal title updates, small terminals show a warning, update notifications appear.
 
 All changes in `src/tui/dashboard.ts` — control flow and status bar only, no rendering changes.
 
-- [ ] **Pane cycling skips empty panes (G-03)** — in `cyclePaneMode()`, after computing next mode: if ERRORS mode and `errors.length === 0`, skip; if QUESTIONS mode and `questions.length === 0`, skip. Handle wrap-around (don't infinite-loop if all skippable).
-- [ ] **Error count badge in footer (G-07)** — add `errorCount` to `StatusBarComponent`. Show red `[N errors]` badge next to the question badge when `errorCount > 0`. `addError()` increments, `clearErrors()` resets.
-- [ ] **Terminal title (G-10)** — emit `\x1b]0;itsybitsy: ${agentId}\x07` on agent selection change. Emit `\x1b]0;itsybitsy\x07` when no agent is selected or on exit.
-- [ ] **Minimum terminal size (G-11)** — at top of `render()`, if `process.stdout.rows < 20 || width < 80`, render a single warning line ("Terminal too small — need at least 80x20") and return early.
-- [ ] **Scroll step size (G-13)** — change scroll step constant from `5` to `10` lines to match ib watch. Extract as `const SCROLL_STEP = 10`.
-- [ ] **Denial filter intervals (G-14)** — change `DENIAL_FILTERS` from `["all", "1h", "10m"]` to `["all", "24h", "7d"]`. Update `filterDenials()` cutoff math accordingly.
-- [ ] **Update notification** (`src/update-check.ts`, `src/tui/dashboard.ts`) — new module: check for updates once per hour by reading the `version` field from `package.json` (current version) and comparing against the latest version from the npm registry (`https://registry.npmjs.org/itsybitsy/latest`). Show "Update available: vX.X.X" in the dashboard header row if newer version exists. Fetch in background via `setTimeout`, never delay startup or block rendering.
+- [x] **Pane cycling skips empty panes (G-03)** — in `cyclePaneMode()`, after computing next mode: if ERRORS mode and `errors.length === 0`, skip; if QUESTIONS mode and `questions.length === 0`, skip. Handle wrap-around (don't infinite-loop if all skippable).
+- [x] **Error count badge in footer (G-07)** — add `errorCount` to `StatusBarComponent`. Show red `[N errors]` badge next to the question badge when `errorCount > 0`. `addError()` increments, `clearErrors()` resets.
+- [x] **Terminal title (G-10)** — emit `\x1b]0;itsybitsy: ${agentId}\x07` on agent selection change. Emit `\x1b]0;itsybitsy\x07` when no agent is selected or on exit.
+- [x] **Minimum terminal size (G-11)** — at top of `render()`, if `process.stdout.rows < 20 || width < 80`, render a single warning line ("Terminal too small — need at least 80x20") and return early.
+- [x] **Scroll step size (G-13)** — change scroll step constant from `5` to `10` lines to match ib watch. Extract as `const SCROLL_STEP = 10`.
+- [x] **Denial filter intervals (G-14)** — change `DENIAL_FILTERS` from `["all", "1h", "10m"]` to `["all", "24h", "7d"]`. Update `filterDenials()` cutoff math accordingly.
+- [x] **Update notification** (`src/update-check.ts`, `src/tui/dashboard.ts`) — new module: check for updates once per hour by reading the `version` field from `package.json` (current version) and comparing against the latest version from the npm registry (`https://registry.npmjs.org/itsybitsy/latest`). Show "Update available: vX.X.X" in the dashboard header row if newer version exists. Fetch in background via `setTimeout`, never delay startup or block rendering.
 
 ---
 
-### Phase 10: Dashboard Rendering — Colorization & Layout
+### Phase 10: Dashboard Rendering — Colorization & Layout -- COMPLETE
 **Checkpoint:** Diff output is colorized, agent log has syntax highlighting, top-anchored panes scroll correctly, TREE shows prompts, orphaned agents and tmux sessions are detected and marked.
 
 Changes in `src/tui/dashboard.ts` render paths + `src/agents.ts` for orphan flags.
@@ -511,41 +531,41 @@ Changes in `src/tui/dashboard.ts` render paths + `src/agents.ts` for orphan flag
 - [x] **Orphan cleanup** (`src/tui/agent-actions.ts`) — when viewing ERRORS pane, Enter opens confirm dialog to kill the orphaned tmux session (runs `tmux kill-session -t {session}` via `killTmuxSession()`).
 
 **Colorization:**
-- [ ] **Diff colorization (G-04)** — post-process `diffContent` lines: `+` lines (not `+++`) get green `\x1b[32m`; `-` lines (not `---`) get red `\x1b[31m`; `@@`/`---`/`+++`/`diff ` lines get dim `\x1b[2m`. Reset `\x1b[0m` at end of each colored line.
-- [ ] **Agent log colorization (G-05)** — in `loadAgentLog()` post-processing, apply: dim `\x1b[2m` to ISO timestamp prefixes (`\d{4}-\d{2}-\d{2}T` or `[2026-` patterns); cyan `\x1b[36m` for `[bracket]` markers. Reset after each.
+- [x] **Diff colorization (G-04)** — post-process `diffContent` lines: `+` lines (not `+++`) get green `\x1b[32m`; `-` lines (not `---`) get red `\x1b[31m`; `@@`/`---`/`+++`/`diff ` lines get dim `\x1b[2m`. Reset `\x1b[0m` at end of each colored line.
+- [x] **Agent log colorization (G-05)** — in `loadAgentLog()` post-processing, apply: dim `\x1b[2m` to ISO timestamp prefixes (`\d{4}-\d{2}-\d{2}T` or `[2026-` patterns); cyan `\x1b[36m` for `[bracket]` markers. Reset after each.
 
 **Layout:**
-- [ ] **Scroll direction for top-anchored panes (G-08)** — define `TOP_ANCHORED_MODES = new Set(["DIFF", "ERRORS", "STATUS", "QUESTIONS"])`. In `RightPaneComponent.render()`, branch: top-anchored uses `scrollOffset` as start index from top (slice forward); bottom-anchored keeps existing scroll-back-from-bottom behavior.
-- [ ] **TREE pane prompt column (G-09)** — append truncated prompt to each TREE row: `agent.meta.prompt.replace(/\n/g, " ").slice(0, 40)`, respecting available width after agent ID, state, age, and model columns.
+- [x] **Scroll direction for top-anchored panes (G-08)** — define `TOP_ANCHORED_MODES = new Set(["DIFF", "ERRORS", "STATUS", "QUESTIONS"])`. In `RightPaneComponent.render()`, branch: top-anchored uses `scrollOffset` as start index from top (slice forward); bottom-anchored keeps existing scroll-back-from-bottom behavior.
+- [x] **TREE pane prompt column (G-09)** — append truncated prompt to each TREE row: `agent.meta.prompt.replace(/\n/g, " ").slice(0, 40)`, respecting available width after agent ID, state, age, and model columns.
 
 ---
 
-### Phase 11: Dialog Improvements
+### Phase 11: Dialog Improvements -- COMPLETE
 **Checkpoint:** Reassign uses a proper select list, send dialog supports broadcast to all agents.
 
 Changes in `src/tui/dashboard.ts` dialog handling.
 
-- [ ] **Reassign select list** — replace the free-text input dialog for `r` (reassign) with a select list showing all valid managers (non-worker agents) plus a "(No parent - make root)" option. Filter out the agent being reassigned and its descendants (circular dependency prevention). Use the existing fuzzy select dialog infrastructure.
-- [ ] **Send-to-all toggle** — in the `s` (send) dialog, add an `a` key toggle for "send to all alive agents." When toggled on, show `[ALL]` indicator in the dialog. On confirm, iterate all non-archived agents with active tmux sessions and call `sendMessage()` for each.
+- [x] **Reassign select list** — replace the free-text input dialog for `r` (reassign) with a select list showing all valid managers (non-worker agents) plus a "(No parent - make root)" option. Filter out the agent being reassigned and its descendants (circular dependency prevention). Use the existing fuzzy select dialog infrastructure.
+- [x] **Send-to-all toggle** — in the `s` (send) dialog, add a `Ctrl-A` key toggle for "send to all alive agents." When toggled on, show `[ALL]` indicator in the dialog. On confirm, iterate all non-archived agents with active tmux sessions and call `sendMessage()` for each.
 
 ---
 
-### Phase 12A: Setup Dialog — Hooks & Status (Tab 0)
+### Phase 12A: Setup Dialog — Hooks & Status (Tab 0) -- COMPLETE
 **Checkpoint:** `h` key opens a setup dialog showing hooks installation status with toggles. `?` key shows the read-only help overlay (moved from `h`).
 
 This is the first half of the setup dialog — Tab 0 only. Self-contained and simpler than config editing.
 
-Files: `src/tui/dashboard.ts`, new `src/config.ts` for config reading utilities.
+Files: `src/tui/dashboard.ts`, `src/tui/agent-actions.ts`, `src/tui/dialog-handler.ts`.
 
 **Prerequisites:**
 - Move the current `h` help overlay to `?` key. Update the help text and keybinding reference.
 - Reassign `h` to open the setup dialog.
 
 **Tab 0 — Setup:**
-- [ ] **Hooks status display** — call `ib hooks status` (returns lines like `safety-hooks: installed` or `safety-hooks: not installed`). Parse output by splitting on `:` to get hook name and status. Render as a select list of rows, each showing hook name + installed/not-installed badge.
-- [ ] **Hooks toggle** — `Enter` on a hook row calls `ib hooks install` / `ib hooks uninstall` (or `install-intercept` / `uninstall-intercept` for task interception). Refresh status after toggle.
-- [ ] **Status indicators** — show read-only status rows for: `.gitignore` contains `.ittybitty` (check via `Bun.file("{repo}/.gitignore").text()` and search for `.ittybitty`), `.ittybitty.json` exists (check via `Bun.file("{repo}/.ittybitty.json").exists()`), current `externalDiffTool` value.
-- [ ] **External diff tool editing** — `Enter` on the diff tool row opens a text input dialog (using existing `input` dialog type) to set/change the value. Write to `.ittybitty.json`.
+- [x] **Hooks status display** — call `ib hooks status` (returns lines like `safety-hooks: installed` or `safety-hooks: not installed`). Parse output by splitting on `:` to get hook name and status. Render as a select list of rows, each showing hook name + installed/not-installed badge.
+- [x] **Hooks toggle** — `Enter` on a hook row calls `ib hooks install` / `ib hooks uninstall` (or `install-intercept` / `uninstall-intercept` for task interception). Refresh status after toggle.
+- [x] **Status indicators** — show read-only status rows for: `.gitignore` contains `.ittybitty` (check via `Bun.file("{repo}/.gitignore").text()` and search for `.ittybitty`), `.itsybitsy.json` exists (check via `Bun.file("~/.itsybitsy.json").exists()`), current `diffTool` value.
+- [x] **External diff tool editing** — `Enter` on the diff tool row opens a text input dialog (using existing `input` dialog type) to set/change the value. Saves to `~/.itsybitsy.json` via registry.
 
 **Dialog behavior:**
 - Dialog captures all keyboard input while open (existing dialog infrastructure already does this — dialogs intercept `handleInput` before dashboard keys).
@@ -562,7 +582,7 @@ Files: `src/tui/dashboard.ts`, `src/config.ts`.
 **`src/config.ts` module:**
 - [ ] `readConfig(repoPath)` — read `.ittybitty.json` from repo, merge with `~/.ittybitty.json` (user), apply defaults. Return `{ value, source: "project" | "user" | "default" }` for each key.
 - [ ] `writeConfig(filePath, key, value)` — read JSON, set key (supports dot-notation like `hooks.injectStatus`), write back.
-- [ ] Config key definitions with types: `{ key: string, type: "number" | "boolean" | "string" | "string[]", default: any }`. Full list: `maxAgents` (number, 10), `model` (string, "sonnet"), `fps` (number, 10), `createPullRequests` (boolean, false), `allowAgentQuestions` (boolean, true), `autoCompactThreshold` (number, none), `externalDiffTool` (string, none), `hooks.injectStatus` (boolean, true), `hooks.statusVisible` (boolean, true), `permissions.manager.allow` (string[], []), `permissions.manager.deny` (string[], []), `permissions.worker.allow` (string[], []), `permissions.worker.deny` (string[], []).
+- [ ] Config key definitions with types: `{ key: string, type: "number" | "boolean" | "string" | "string[]", default: any }`. Full list: `maxAgents` (number, 10), `model` (string, "sonnet"), `fps` (number, 10), `createPullRequests` (boolean, false), `allowAgentQuestions` (boolean, true), `autoCompactThreshold` (number, none), `diffTool` (string, none), `hooks.injectStatus` (boolean, true), `hooks.statusVisible` (boolean, true), `permissions.manager.allow` (string[], []), `permissions.manager.deny` (string[], []), `permissions.worker.allow` (string[], []), `permissions.worker.deny` (string[], []).
 
 **Tab switching:**
 - [ ] Add tab bar at top of setup dialog: `[Setup] [Project] [User]`. Active tab is highlighted.

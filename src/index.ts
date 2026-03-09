@@ -4,8 +4,8 @@
  * CLI entrypoint
  */
 
-import { join } from "path";
 import { addRepo, removeRepo, listRepos, repoDisplayName, type RepoEntry } from "./registry";
+import { agentWorktreePath } from "./agents";
 import type { Agent, FlatEntry } from "./agents";
 
 const args = process.argv.slice(2);
@@ -38,13 +38,6 @@ async function runIb(ibArgs: string[], repoPath: string): Promise<void> {
   });
   const exitCode = await proc.exited;
   process.exit(exitCode);
-}
-
-/** Get the worktree path for an agent, or the repo root if worktree is false. */
-function agentWorktreePath(agent: Agent): string {
-  if (agent.meta.worktree === false) return agent.repoPath;
-  const dir = agent.archived ? "archive" : "agents";
-  return join(agent.repoPath, ".ittybitty", dir, agent.id, "repo");
 }
 
 /** Require an agent ID argument, find it, or exit with error. */

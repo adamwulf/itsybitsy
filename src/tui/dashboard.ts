@@ -183,10 +183,10 @@ class StatusBarComponent implements Component {
     let row2Left: string;
     if (this.repoHeaderSelected) {
       row1Left = `${DIM}j/k: select    ;/l: scroll    p/n: pane    ${qLabel}${errBadge}${RESET}`;
-      row2Left = `${DIM}@: jump    /: commands    a: new agent    ?: help    h: setup    r: rename repo    x: remove repo    +: add repo${RESET}`;
+      row2Left = `${DIM}@: jump    /: commands    a: new agent    ?: help    h: setup    +: add repo${RESET}`;
     } else {
       row1Left = `${DIM}j/k: select    ;/l: scroll    p/n: pane    ${qLabel}    s: send    m: merge${errBadge}${RESET}`;
-      row2Left = `${DIM}@: jump    /: commands    a: new agent    ?: help    h: setup    x: kill    R: resume    r: reassign    w: worktree${RESET}`;
+      row2Left = `${DIM}@: jump    /: commands    a: new agent    ?: help    h: setup    x: kill${RESET}`;
     }
 
     const row1 = this.composeLine(row1Left, usageStr, width);

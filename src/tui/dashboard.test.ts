@@ -2131,12 +2131,10 @@ describe("Context-sensitive footer (repo header vs agent)", () => {
 
     const lines = dashboard.render(120);
     const allText = lines.map(stripAnsi).join("\n");
-    expect(allText).toContain("r: rename repo");
-    expect(allText).toContain("x: remove repo");
+    expect(allText).toContain("+: add repo");
     // Should NOT show agent-specific actions
     expect(allText).not.toContain("s: send");
     expect(allText).not.toContain("m: merge");
-    expect(allText).not.toContain("R: resume");
     expect(allText).not.toContain("G: ghostty");
   });
 
@@ -2151,10 +2149,9 @@ describe("Context-sensitive footer (repo header vs agent)", () => {
     const allText = lines.map(stripAnsi).join("\n");
     expect(allText).toContain("s: send");
     expect(allText).toContain("m: merge");
-    expect(allText).toContain("r: reassign");
+    expect(allText).toContain("x: kill");
     // Should NOT show repo actions
-    expect(allText).not.toContain("r: rename repo");
-    expect(allText).not.toContain("x: remove repo");
+    expect(allText).not.toContain("+: add repo");
   });
 
   test("r key on repo header opens rename dialog instead of reassign", () => {

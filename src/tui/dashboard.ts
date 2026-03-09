@@ -36,6 +36,7 @@ import type { DialogState } from "./dialog-handler";
 import {
   wrapTextareaLines, TEXTAREA_VISIBLE_HEIGHT,
   handleDialogInput, renderTextareaBlock, buildFolderBrowserContent, buildNewAgentFormContent,
+  buildSetupContent,
 } from "./dialog-handler";
 import {
   RightPaneComponent, colorizeDiff, colorizeLog,
@@ -182,7 +183,7 @@ class StatusBarComponent implements Component {
       : "";
     const row1Left = `${DIM}j/k: select    ;/l: scroll    p/n: pane    ${qLabel}    s: send    m: merge${errBadge}${RESET}`;
     const usageStr = this.formatUsage();
-    const row2Left = `${DIM}@: jump    /: commands    a: new agent    h: help    x: kill    R: resume    r: reassign    w: worktree    G: ghostty${RESET}`;
+    const row2Left = `${DIM}@: jump    /: commands    a: new agent    ?: help    h: setup    x: kill    R: resume    r: reassign    w: worktree${RESET}`;
     const now = new Date();
     const timeStr = now.toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
     const versionStr = this.version ? `v${this.version}` : "";
@@ -322,6 +323,9 @@ class DialogOverlayComponent implements Component {
       }
       case "new-agent-form": {
         return buildNewAgentFormContent(dialog, innerWidth);
+      }
+      case "setup": {
+        return buildSetupContent(dialog, innerWidth);
       }
     }
   }
@@ -507,7 +511,7 @@ export class DashboardComponent implements Component {
   showDialog(dialog: NonNullable<DialogState>) {
     this._dialog = dialog;
     const width = dialog.type === "help" ? 72
-      : (dialog.type === "folder-browser" || dialog.type === "new-agent-form") ? 70
+      : (dialog.type === "folder-browser" || dialog.type === "new-agent-form" || dialog.type === "setup") ? 70
       : DIALOG_WIDTH;
     if (width !== DIALOG_WIDTH && this.overlayHandle) {
       this.overlayHandle.hide();
@@ -588,7 +592,8 @@ export class DashboardComponent implements Component {
       { label: "open in Ghostty — G", action: () => agentActions.handleOpenGhostty(this) },
       { label: "debug snapshot — S", action: () => agentActions.handleSnapshot(this) },
       { label: "fuzzy jump to agent — @", action: () => agentActions.handleFuzzyAgent(this) },
-      { label: "help — h", action: () => agentActions.handleHelp(this) },
+      { label: "help — ?", action: () => agentActions.handleHelp(this) },
+      { label: "setup — h", action: () => agentActions.handleSetup(this) },
       { label: "scroll up — ;", action: () => agentActions.handleScrollUp(this) },
       { label: "scroll down — l", action: () => agentActions.handleScrollDown(this) },
     ];
@@ -802,7 +807,9 @@ export class DashboardComponent implements Component {
     // Open diff in external tool
     else if (data === "o") { agentActions.handleOpenDiffTool(this); }
     // Help dialog
-    else if (data === "h") { agentActions.handleHelp(this); }
+    else if (data === "?") { agentActions.handleHelp(this); }
+    // Setup dialog
+    else if (data === "h") { agentActions.handleSetup(this); }
     // Ghostty
     else if (data === "G") { agentActions.handleOpenGhostty(this); }
     // Snapshot

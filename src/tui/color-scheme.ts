@@ -11,6 +11,19 @@ import {
 type ColorScheme = "dark" | "light";
 let colorScheme: ColorScheme = "dark";
 
+/* ── test injection ─────────────────────────────────────────────── */
+type Writer = (data: string) => boolean;
+let testWriter: Writer | null = null;
+export function setTestWriter(fn: Writer): void { testWriter = fn; }
+export function resetTestWriter(): void { testWriter = null; }
+export function resetColorScheme(): void { colorScheme = "dark"; }
+
+function writeStdout(data: string): void {
+  if (testWriter) { testWriter(data); return; }
+  process.stdout.write(data);
+}
+/* ─────────────────────────────────────────────────────────────── */
+
 export function getStateColors(): Record<string, string> {
   if (colorScheme === "light") {
     return {
@@ -31,7 +44,7 @@ const GHOSTTY_DARK = "\x1b[?2031;1m";
 const GHOSTTY_LIGHT = "\x1b[?2031;2m";
 
 /** Parse an OSC 11 response to extract normalized RGB (0-1). */
-function parseOSC11Response(data: string): { r: number; g: number; b: number } | null {
+export function parseOSC11Response(data: string): { r: number; g: number; b: number } | null {
   const match = data.match(/rgb:([0-9a-fA-F]+)\/([0-9a-fA-F]+)\/([0-9a-fA-F]+)/);
   if (!match) return null;
   function normalize(hex: string): number {
@@ -43,7 +56,7 @@ function parseOSC11Response(data: string): { r: number; g: number; b: number } |
 }
 
 /** Compute relative luminance (ITU-R BT.709). */
-function computeLuminance(r: number, g: number, b: number): number {
+export function computeLuminance(r: number, g: number, b: number): number {
   return 0.2126 * r + 0.7152 * g + 0.0722 * b;
 }
 
@@ -74,10 +87,10 @@ export function setupColorSchemeDetection(
         pendingDetection = false;
       }
     }, 500);
-    process.stdout.write("\x1b]11;?\x07");
+    writeStdout("\x1b]11;?\x07");
   }
 
-  process.stdout.write(GHOSTTY_ENABLE);
+  writeStdout(GHOSTTY_ENABLE);
 
   const inputFilter = (data: string): boolean => {
     // OSC 11 response
@@ -111,7 +124,7 @@ export function setupColorSchemeDetection(
     if (cleaned) return;
     cleaned = true;
     if (detectionTimer) clearTimeout(detectionTimer);
-    process.stdout.write(GHOSTTY_DISABLE);
+    writeStdout(GHOSTTY_DISABLE);
   };
 
   return { inputFilter, queryColorScheme, cleanup };

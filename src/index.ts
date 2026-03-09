@@ -4,7 +4,6 @@
  * CLI entrypoint
  */
 
-import { join } from "path";
 import { addRepo, removeRepo, listRepos, repoDisplayName, type RepoEntry } from "./registry";
 import { agentWorktreePath } from "./agents";
 import type { Agent, FlatEntry } from "./agents";

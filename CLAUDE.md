@@ -118,7 +118,7 @@ After any code changes, always run:
 
 ## itsybitsy Implementation Notes
 
-All 6 phases complete. 226 tests across 10 files.
+All 6 phases complete. 873 tests across 25 files.
 
 ### State detection flow
 1. `watcher.ts` calls `detectAgentStates()` (in `agents.ts`) on every refresh
@@ -165,9 +165,30 @@ Compacting (last 5) > Active running (last 5) > Tool waiting (last 15) > Rate li
 - Dialog system: confirm, text input, select list, fuzzy search, help overlay, timed message — renders in status bar area, variable height
 - `executeAndRefresh()` wraps all mutations: runs the action, catches errors, then triggers watcher refresh
 
+### Hooks (src/hooks/)
+Five native hook implementations run as Claude Code hook commands inside spawned agent sessions:
+- `hook-check-path <agentId>` maps to `agent-path.ts`: Path isolation — blocks agents from accessing other agents' worktrees or the main repo. Reads JSON from stdin, outputs allow/deny decision JSON.
+- `hook-status <agentId>` maps to `agent-status.ts`: Stop hook — detects stuck agents and sends nudge messages. Debounced via timestamp file.
+- `hook-permission-denied <agentId>` maps to `permission-denied.ts`: Logs permission denial events to agent.log.
+- `hooks intercept-task` maps to `intercept-task.ts`: PreToolUse hook — blocks disallowed models and unauthorized task spawning.
+- `hooks session-start` maps to `session-start.ts`: SessionStart hook — injects role-specific context at session start.
+
+All hooks read hook input JSON from stdin, write hook output JSON to stdout, exit 0 for allow/continue, exit 1 for deny/block.
+
+### Agent lifecycle (src/agent-lifecycle.ts)
+Shared agent lifecycle helpers used by multiple ib commands. Mirrors the ib bash script's teardown, archive, kill, and utility functions. Provides a pluggable `SpawnFn` runner (`setSpawnRunner()`/`resetSpawnRunner()`) for test injection. Handles formatting timestamps, archiving agent directories, and cleaning up tmux sessions and git worktrees.
+
+### Auto-compact (src/auto-compact.ts)
+Reads Claude transcript JSONL files to determine an agent's context window usage percentage, then sends `/compact` to agents that exceed a configured threshold. Matches ib's `get_agent_context_usage()` logic for transcript parsing. Encodes worktree paths into Claude's project directory naming scheme to locate the correct transcript file.
+
+### Config (src/config.ts)
+Layered configuration system with project, user, and default sources. Defines all config keys (`maxAgents`, `model`, `fps`, `createPullRequests`, `allowAgentQuestions`, `autoCompactThreshold`, `externalDiffTool`, hooks settings, and per-role permission allow/deny lists). Reads from `.ittybitty/config.json` (project) and `~/.ittybitty/config.json` (user), merging with typed defaults.
+
+### Folder browser (src/tui/folder-browser.ts)
+Builds the navigable item list for the add-repo folder browser dialog. Given a current path, produces a list of `FolderItem` entries: ancestors from root down to parent, the current folder, and sorted child directories. Each item includes depth, git-repo detection, and ancestor/current flags for rendering the tree-style UI.
+
 ### ib-commands (src/ib-commands.ts)
-- All mutations use `Bun.spawn(["ib", ...args], { cwd })` for safe argument passing (no word-splitting)
-- `setRunner()`/`resetRunner()` for test injection — mock the runner to verify args without executing ib
+- Mutations are implemented natively. `runIb()` and `IbRunner` have been deleted. `runIbDirect()` is used only for direct process spawning. `hooksStatus`, `installSafetyHooks`, `uninstallSafetyHooks`, `installInterceptHook`, `uninstallInterceptHook`, `interceptHooksStatus` are natively implemented — they read/write `.claude/settings.local.json` directly.
 - Always sets `cwd` to `agent.repoPath` — ib requires running from a git repo root
 - Commands: killAgent, nukeAgent, resumeAgent, reassignAgent, mergeCheckAgent, mergeAgent, sendMessage, newAgent, diffAgent, statusAgent, acknowledgeQuestion
 

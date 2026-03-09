@@ -66,11 +66,11 @@ async function readJsonFile(filePath: string): Promise<Record<string, unknown>> 
   }
 }
 
-function defaultUserConfigPath(): string {
+export function defaultUserConfigPath(): string {
   return join(process.env.HOME ?? homedir(), ".ittybitty.json");
 }
 
-function projectConfigPath(repoPath: string): string {
+export function projectConfigPath(repoPath: string): string {
   return join(repoPath, ".ittybitty.json");
 }
 

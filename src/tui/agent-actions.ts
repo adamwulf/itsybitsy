@@ -498,7 +498,7 @@ export function handleOpenWorktree(ctx: ActionCtx) {
   })();
 }
 
-export function handleOpenDiffTool(ctx: ActionCtx) {
+export async function handleOpenDiffTool(ctx: ActionCtx) {
   const agent = ctx.agentTree.selectedAgent;
   if (!agent) { ctx.setNotice("No agent selected"); return; }
   if (!ctx.diffTool) { ctx.setNotice("No diff tool configured — set diffTool in ~/.itsybitsy.json"); return; }
@@ -510,6 +510,15 @@ export function handleOpenDiffTool(ctx: ActionCtx) {
     ctx.setNotice("Worktree no longer exists — agent may have been merged");
     return;
   }
+
+  // Check for empty diff before launching tool
+  const mergeBaseProc = Bun.spawn(["git", "merge-base", "HEAD", "main"], { cwd, stdout: "pipe", stderr: "ignore" });
+  const mergeBase = (await new Response(mergeBaseProc.stdout).text()).trim();
+  if (!mergeBase) { ctx.setNotice("Could not determine merge-base with main"); return; }
+
+  const checkProc = Bun.spawn(["git", "diff", "--quiet", mergeBase], { cwd });
+  const checkCode = await checkProc.exited;
+  if (checkCode === 0) { ctx.setNotice("No changes to show — diff is empty"); return; }
 
   // Run diff tool in the worktree, showing changes since merge-base with main.
   // Tool string is unquoted so multi-word tools (e.g. "git webdiff") are word-split correctly.

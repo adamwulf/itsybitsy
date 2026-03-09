@@ -171,6 +171,7 @@ class StatusBarComponent implements Component {
   errorCount = 0;
   usage: UsageData | null = null;
   version = "";
+  repoHeaderSelected = false;
 
   invalidate(): void {}
 
@@ -181,13 +182,22 @@ class StatusBarComponent implements Component {
     const errBadge = this.errorCount > 0
       ? `  ${BOLD}${RED}[${this.errorCount} errors]${RESET}${DIM}`
       : "";
-    const row1Left = `${DIM}j/k: select    ;/l: scroll    p/n: pane    ${qLabel}    s: send    m: merge${errBadge}${RESET}`;
     const usageStr = this.formatUsage();
-    const row2Left = `${DIM}@: jump    /: commands    a: new agent    ?: help    h: setup    x: kill    R: resume    r: reassign    w: worktree${RESET}`;
     const now = new Date();
     const timeStr = now.toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
     const versionStr = this.version ? `v${this.version}` : "";
     const row2Right = `${DIM}${timeStr}  ${versionStr}${RESET}`;
+
+    let row1Left: string;
+    let row2Left: string;
+    if (this.repoHeaderSelected) {
+      row1Left = `${DIM}j/k: select    ;/l: scroll    p/n: pane    ${qLabel}${errBadge}${RESET}`;
+      row2Left = `${DIM}@: jump    /: commands    a: new agent    ?: help    h: setup    r: rename repo    x: remove repo    +: add repo${RESET}`;
+    } else {
+      row1Left = `${DIM}j/k: select    ;/l: scroll    p/n: pane    ${qLabel}    s: send    m: merge${errBadge}${RESET}`;
+      row2Left = `${DIM}@: jump    /: commands    a: new agent    ?: help    h: setup    x: kill    R: resume    r: reassign    w: worktree${RESET}`;
+    }
+
     const row1 = this.composeLine(row1Left, usageStr, width);
     const row2 = this.composeLine(row2Left, row2Right, width);
     // Row 3: Ctrl-C hint centered at the bottom
@@ -658,6 +668,7 @@ export class DashboardComponent implements Component {
     this.rightPane.agent = selected;
     this.rightPane.selectedRepoHeader = this.agentTree.selectedRepoHeader;
     this.tmuxPane.agent = selected;
+    this.statusBar.repoHeaderSelected = !selected && this.agentTree.selectedRepoHeader !== null;
 
     const newId = selected?.id ?? null;
     if (newId !== this.currentAgentId) {
@@ -787,12 +798,24 @@ export class DashboardComponent implements Component {
     // Scroll
     else if (data === ";") { agentActions.handleScrollUp(this); }
     else if (data === "l") { agentActions.handleScrollDown(this); }
-    // Agent actions
-    else if (data === "x") { agentActions.handleKill(this); }
+    // Agent/repo actions — context-sensitive on whether a repo header is selected
+    else if (data === "x") {
+      if (!this.agentTree.selectedAgent && this.agentTree.selectedRepoHeader) {
+        agentActions.handleRemoveRepo(this);
+      } else {
+        agentActions.handleKill(this);
+      }
+    }
     else if (data === "!") { agentActions.handleNuke(this); }
     else if (data === "R") { agentActions.handleResume(this); }
     else if (data === "P") { agentActions.handlePause(this); }
-    else if (data === "r") { agentActions.handleReassign(this); }
+    else if (data === "r") {
+      if (!this.agentTree.selectedAgent && this.agentTree.selectedRepoHeader) {
+        agentActions.handleRenameRepo(this);
+      } else {
+        agentActions.handleReassign(this);
+      }
+    }
     else if (data === "m") { agentActions.handleMerge(this); }
     else if (data === "s") { agentActions.handleSend(this); }
     // New agent

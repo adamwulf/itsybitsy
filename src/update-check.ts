@@ -8,7 +8,7 @@ const CHECK_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
 const FETCH_TIMEOUT_MS = 5_000; // 5s timeout
 const REGISTRY_URL = "https://registry.npmjs.org/itsybitsy/latest";
 
-type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+import type { FetchLike } from "./types";
 
 /** For test injection */
 let fetchFn: FetchLike = globalThis.fetch;

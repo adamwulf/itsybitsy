@@ -8,7 +8,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { rename, mkdir, stat, writeFile, unlink } from "node:fs/promises";
 
-type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+import type { FetchLike, SpawnFn } from "./types";
 
 /** For test injection — avoids monkey-patching globalThis.fetch */
 let fetchFn: FetchLike = globalThis.fetch;
@@ -22,14 +22,6 @@ export function setTestFetch(fn: FetchLike): void {
 export function resetTestFetch(): void {
   fetchFn = globalThis.fetch;
 }
-
-/** Narrow types matching actual Bun.spawn usage in readAccessToken. */
-interface SpawnResult {
-  stdout: ReadableStream<Uint8Array> | null;
-  stderr: ReadableStream<Uint8Array> | null;
-  exited: Promise<number>;
-}
-type SpawnFn = (cmd: string[], opts?: { stdout: "pipe"; stderr: "pipe" }) => SpawnResult;
 
 /** For test injection of Bun.spawn used in keychain lookup. */
 let spawnFn: SpawnFn = Bun.spawn as SpawnFn;

@@ -5,16 +5,14 @@
  */
 
 import { stripAnsi } from "./parse-state";
+import type { SpawnFn } from "./types";
+
+/** @deprecated Use SpawnFn from ./types instead */
+export type SpawnResult = import("./types").SpawnResult;
+export type SpawnRunner = SpawnFn;
 
 /** Pluggable spawn runner — defaults to Bun.spawn, overridable for tests */
-export type SpawnResult = {
-  stdout: ReadableStream<Uint8Array> | null;
-  stderr: ReadableStream<Uint8Array> | null;
-  exited: Promise<number>;
-};
-export type SpawnRunner = (cmd: string[], opts?: { stdout: "pipe"; stderr: "pipe" }) => SpawnResult;
-
-let spawnRunner: SpawnRunner = Bun.spawn as SpawnRunner;
+let spawnRunner: SpawnFn = Bun.spawn as SpawnFn;
 
 /** Override the spawn runner (for testing) */
 export function setSpawnRunner(runner: SpawnRunner): void {

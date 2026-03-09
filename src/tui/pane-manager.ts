@@ -21,6 +21,7 @@ export type PaneMode = (typeof PANE_MODES)[number];
 
 export const FULL_WIDTH_MODES: Set<PaneMode> = new Set(["DENIALS", "ERRORS", "DIFF", "QUESTIONS"]);
 export const TOP_ANCHORED_MODES: Set<PaneMode> = new Set(["DIFF", "ERRORS", "STATUS", "QUESTIONS"]);
+const AGENT_SPECIFIC_MODES: Set<PaneMode> = new Set(["AGENT LOG", "INITIAL PROMPT", "DENIALS", "DIFF", "STATUS"]);
 
 // Denials time filter levels
 export const DENIAL_FILTERS = ["all", "24h", "7d"] as const;
@@ -122,8 +123,7 @@ export class RightPaneComponent implements Component {
   updateContent() {
     // When a repo header is selected, show repo summary for agent-specific modes
     if (this.selectedRepoHeader && !this.agent) {
-      const agentSpecificModes: Set<PaneMode> = new Set(["AGENT LOG", "INITIAL PROMPT", "DENIALS", "DIFF", "STATUS"]);
-      if (agentSpecificModes.has(this.mode)) {
+      if (AGENT_SPECIFIC_MODES.has(this.mode)) {
         this.content = this.buildRepoSummary();
         return;
       }

@@ -1,13 +1,64 @@
 #!/usr/bin/env bun
 /**
  * itsybitsy — Cross-repo agent management dashboard
- * CLI entrypoint: add/remove/list/watch subcommands
+ * CLI entrypoint
  */
 
-import { addRepo, removeRepo, listRepos } from "./registry";
+import { join } from "path";
+import { addRepo, removeRepo, listRepos, type RepoEntry } from "./registry";
+import type { Agent } from "./agents";
 
 const args = process.argv.slice(2);
 const command = args[0];
+
+/** Find an agent by ID (prefix match) across all registered repos. */
+async function findAgentById(id: string, repos: RepoEntry[]): Promise<Agent | null> {
+  const { readAllAgents } = await import("./agents");
+  const { agents } = await readAllAgents(repos);
+  // Exact match first
+  const exact = agents.find((a) => a.id === id);
+  if (exact) return exact;
+  // Prefix match
+  const matches = agents.filter((a) => a.id.startsWith(id));
+  if (matches.length === 1) return matches[0]!;
+  if (matches.length > 1) {
+    console.error(`Ambiguous ID "${id}" matches: ${matches.map((a) => a.id).join(", ")}`);
+    process.exit(1);
+  }
+  return null;
+}
+
+/** Shell out to ib as a temporary passthrough. */
+async function runIb(ibArgs: string[], repoPath: string): Promise<void> {
+  const proc = Bun.spawn(["ib", ...ibArgs], {
+    cwd: repoPath,
+    stdin: "inherit",
+    stdout: "inherit",
+    stderr: "inherit",
+  });
+  const exitCode = await proc.exited;
+  process.exit(exitCode);
+}
+
+/** Get the worktree path for an agent, or the repo root if worktree is false. */
+function agentWorktreePath(agent: Agent): string {
+  if (agent.meta.worktree === false) return agent.repoPath;
+  return join(agent.repoPath, ".ittybitty", "agents", agent.id, "repo");
+}
+
+/** Require an agent ID argument, find it, or exit with error. */
+async function requireAgent(idArg: string | undefined, repos: RepoEntry[]): Promise<Agent> {
+  if (!idArg) {
+    console.error("Usage: itsybitsy <command> <agent-id>");
+    process.exit(1);
+  }
+  const agent = await findAgentById(idArg, repos);
+  if (!agent) {
+    console.error(`Agent not found: ${idArg}`);
+    process.exit(1);
+  }
+  return agent;
+}
 
 async function main() {
   switch (command) {
@@ -29,7 +80,8 @@ async function main() {
       process.exit(result.ok ? 0 : 1);
       break;
     }
-    case "list": {
+    case "list":
+    case "ls": {
       const repos = await listRepos();
       if (repos.length === 0) {
         console.log("No repos registered. Use 'itsybitsy add <path>' to add one.");
@@ -53,8 +105,8 @@ async function main() {
       await launchDashboard();
       break;
     }
-    case "agents": {
-      // Debug command: print all agents across all repos with states
+    case "agents":
+    case "tree": {
       const { readAllAgents, buildAgentTree, flattenAgentTree, detectAgentStates } = await import("./agents");
       const repos = await listRepos();
       if (repos.length === 0) {
@@ -82,15 +134,229 @@ async function main() {
       }
       break;
     }
+    case "look": {
+      const repos = await listRepos();
+      const agent = await requireAgent(args[1], repos);
+      const hasAll = args.includes("--all");
+      const linesIdx = args.indexOf("--lines");
+      const lines = hasAll ? 10000 : linesIdx !== -1 ? parseInt(args[linesIdx + 1]!, 10) || 100 : 100;
+
+      const { captureTmuxOutput } = await import("./tmux-poller");
+      const tmuxSession = agent.meta.tmux_session;
+
+      if (tmuxSession) {
+        const output = await captureTmuxOutput(tmuxSession, lines);
+        if (output !== null) {
+          process.stdout.write(output);
+          break;
+        }
+      }
+
+      // No tmux session or session not found — fall back to agent.log
+      const { readAgentLog } = await import("./agents");
+      const logLines = await readAgentLog(agent);
+      console.log(logLines.join("\n"));
+      break;
+    }
+    case "info": {
+      const repos = await listRepos();
+      const agent = await requireAgent(args[1], repos);
+      const m = agent.meta;
+      console.log(`Agent:        ${agent.id}`);
+      console.log(`Repo:         ${agent.repoName} (${agent.repoPath})`);
+      console.log(`State:        ${agent.state}`);
+      console.log(`Model:        ${m.model}`);
+      console.log(`Worker:       ${m.worker}`);
+      console.log(`Manager:      ${m.manager ?? "none"}`);
+      console.log(`Created:      ${m.created}`);
+      console.log(`Age:          ${agent.age}`);
+      console.log(`Tmux session: ${m.tmux_session || "none"}`);
+      console.log(`Worktree:     ${m.worktree}`);
+      console.log(`Archived:     ${agent.archived}`);
+      console.log(`Prompt:       ${m.prompt.slice(0, 200).replace(/\n/g, " ")}`);
+      break;
+    }
+    case "questions":
+    case "q": {
+      const { readPendingQuestions } = await import("./agents");
+      const repos = await listRepos();
+      if (repos.length === 0) {
+        console.log("No repos registered.");
+        break;
+      }
+      let found = false;
+      for (const repo of repos) {
+        const questions = await readPendingQuestions(repo.path);
+        for (const q of questions) {
+          found = true;
+          console.log(`[${repo.name}] ${q.agent}`);
+          console.log(`  ${q.question}`);
+          console.log(`  ${q.timestamp}`);
+          console.log("");
+        }
+      }
+      if (!found) {
+        console.log("No pending questions");
+      }
+      break;
+    }
+    case "diff": {
+      const repos = await listRepos();
+      const agent = await requireAgent(args[1], repos);
+      const cwd = agentWorktreePath(agent);
+
+      // Get merge-base
+      const mergeBaseProc = Bun.spawn(["git", "merge-base", "HEAD", "main"], {
+        cwd,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const mergeBase = (await new Response(mergeBaseProc.stdout).text()).trim();
+      const mbExit = await mergeBaseProc.exited;
+      if (mbExit !== 0) {
+        console.error("Failed to find merge-base with main");
+        process.exit(1);
+      }
+
+      const diffProc = Bun.spawn(["git", "diff", mergeBase], {
+        cwd,
+        stdin: "inherit",
+        stdout: "inherit",
+        stderr: "inherit",
+      });
+      process.exit(await diffProc.exited);
+      break;
+    }
+    case "status": {
+      const repos = await listRepos();
+      const agent = await requireAgent(args[1], repos);
+      const cwd = agentWorktreePath(agent);
+
+      const logProc = Bun.spawn(["git", "log", "--oneline", "main..HEAD"], {
+        cwd,
+        stdin: "inherit",
+        stdout: "inherit",
+        stderr: "inherit",
+      });
+      await logProc.exited;
+
+      const statusProc = Bun.spawn(["git", "status", "--short"], {
+        cwd,
+        stdin: "inherit",
+        stdout: "inherit",
+        stderr: "inherit",
+      });
+      process.exit(await statusProc.exited);
+      break;
+    }
+    // TODO: implement natively using tmux send-keys directly
+    case "send": {
+      const repos = await listRepos();
+      const agent = await requireAgent(args[1], repos);
+      const message = args.slice(2).join(" ");
+      if (!message) {
+        console.error("Usage: itsybitsy send <agent-id> <message...>");
+        process.exit(1);
+      }
+      await runIb(["send", agent.id, message], agent.repoPath);
+      break;
+    }
+    // TODO: implement natively
+    case "kill": {
+      const repos = await listRepos();
+      const agent = await requireAgent(args[1], repos);
+      const extraArgs = args.slice(2);
+      await runIb(["kill", agent.id, ...extraArgs], agent.repoPath);
+      break;
+    }
+    // TODO: implement natively
+    case "merge": {
+      const repos = await listRepos();
+      const agent = await requireAgent(args[1], repos);
+      const extraArgs = args.slice(2);
+      await runIb(["merge", agent.id, "--force", ...extraArgs], agent.repoPath);
+      break;
+    }
+    // TODO: implement natively
+    case "resume": {
+      const repos = await listRepos();
+      const agent = await requireAgent(args[1], repos);
+      const extraArgs = args.slice(2);
+      await runIb(["resume", agent.id, ...extraArgs], agent.repoPath);
+      break;
+    }
+    // TODO: implement natively
+    case "new-agent":
+    case "new": {
+      const repos = await listRepos();
+
+      // Determine target repo: --repo flag > cwd match > single registered repo > error
+      let repoPath: string | null = null;
+      const repoFlagIdx = args.indexOf("--repo");
+      const ibArgs = args.slice(1); // strip "new-agent"/"new"
+
+      if (repoFlagIdx !== -1 && args[repoFlagIdx + 1]) {
+        const repoArg = args[repoFlagIdx + 1]!;
+        const match = repos.find((r) => r.name === repoArg || r.path === repoArg);
+        if (!match) {
+          console.error(`Repo not found: ${repoArg}`);
+          process.exit(1);
+        }
+        repoPath = match.path;
+        // Strip --repo and its value from ibArgs
+        const flagIdxInIb = ibArgs.indexOf("--repo");
+        if (flagIdxInIb !== -1) ibArgs.splice(flagIdxInIb, 2);
+      } else {
+        const cwd = process.cwd();
+        const cwdMatch = repos.find((r) => cwd.startsWith(r.path));
+        if (cwdMatch) {
+          repoPath = cwdMatch.path;
+        } else if (repos.length === 1) {
+          repoPath = repos[0]!.path;
+        } else {
+          console.error("Cannot determine target repo. Use --repo <name|path> or run from within a registered repo.");
+          process.exit(1);
+        }
+      }
+
+      await runIb(["new-agent", ...ibArgs], repoPath);
+      break;
+    }
+    case "acknowledge":
+    case "ack": {
+      // Passthrough to ib for now
+      const repos = await listRepos();
+      const agent = await requireAgent(args[1], repos);
+      const extraArgs = args.slice(2);
+      await runIb(["acknowledge", agent.id, ...extraArgs], agent.repoPath);
+      break;
+    }
     default: {
       console.log("itsybitsy — Cross-repo agent dashboard");
       console.log("");
-      console.log("Commands:");
-      console.log("  add [path]     Register a repo (default: cwd)");
-      console.log("  remove <path>  Unregister a repo");
-      console.log("  list           List registered repos");
-      console.log("  watch          Launch TUI dashboard");
-      console.log("  agents         Debug: list all agents");
+      console.log("Registry:");
+      console.log("  add [path]          Register a repo (default: cwd)");
+      console.log("  remove <path>       Unregister a repo");
+      console.log("  list, ls            List registered repos");
+      console.log("");
+      console.log("Monitoring:");
+      console.log("  watch               Launch TUI dashboard");
+      console.log("  agents, tree        List all agents with states");
+      console.log("  look <id>           Show agent's live tmux output");
+      console.log("  status <id>         Show agent's git log and status");
+      console.log("  diff <id>           Show agent's git diff from main");
+      console.log("  info <id>           Show agent's metadata");
+      console.log("");
+      console.log("Communication:");
+      console.log("  send <id> <msg>     Send a message to an agent");
+      console.log("  questions, q        Show pending agent questions");
+      console.log("  acknowledge <id>    Acknowledge an agent's question");
+      console.log("");
+      console.log("Agent Lifecycle:");
+      console.log("  new-agent, new      Spawn a new agent");
+      console.log("  kill <id>           Stop an agent without merging");
+      console.log("  merge <id>          Merge agent's work and close it");
+      console.log("  resume <id>         Resume a stopped agent");
       break;
     }
   }

@@ -267,16 +267,12 @@ export async function archiveAgent(
     }
   }
 
-  // debug-logs/ — copy recursive
+  // debug-logs/ — copy recursive (use readdir to check existence; Bun.file().exists() doesn't work on dirs)
   try {
     const debugLogsDir = join(agentDir, "debug-logs");
-    const debugExists = await Bun.file(debugLogsDir).exists().catch(() => false);
-    // Bun.file().exists() doesn't work on dirs; check via readdir
-    try {
-      await readdir(debugLogsDir);
-      await cp(debugLogsDir, join(archiveFolder, "debug-logs"), { recursive: true });
-    } catch { /* dir doesn't exist */ }
-  } catch { /* ignore */ }
+    await readdir(debugLogsDir);
+    await cp(debugLogsDir, join(archiveFolder, "debug-logs"), { recursive: true });
+  } catch { /* dir doesn't exist or copy failed */ }
 
   return archiveFolder;
 }
@@ -319,12 +315,16 @@ export async function teardownAgent(
   }
 
   // 3. Kill Claude process
-  await killAgentProcess(tmuxSession, meta);
+  const killed = await killAgentProcess(tmuxSession, meta);
+  if (killed) {
+    await logAgent(agentDir, "Terminated Claude process");
+  }
 
   // 4. Kill tmux session
   const hasSession2 = await runCmd(["tmux", "has-session", "-t", tmuxSession]);
   if (hasSession2.exitCode === 0) {
     await runCmd(["tmux", "kill-session", "-t", tmuxSession]);
+    await logAgent(agentDir, "Killed tmux session");
   }
 
   // 5. Copy settings.local.json before removing worktree
@@ -348,7 +348,10 @@ export async function teardownAgent(
         await rm(repoDir, { recursive: true, force: true });
       }
       // 7. Delete git branch
-      await runCmd(["git", "-C", repoPath, "branch", "-D", `agent/${agentId}`]);
+      const branchResult = await runCmd(["git", "-C", repoPath, "branch", "-D", `agent/${agentId}`]);
+      if (branchResult.exitCode === 0) {
+        await logAgent(agentDir, `Deleted branch agent/${agentId}`);
+      }
     }
   } catch { /* ignore */ }
 

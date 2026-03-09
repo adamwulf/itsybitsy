@@ -6,8 +6,7 @@
 
 import { join } from "path";
 import { addRepo, removeRepo, listRepos, type RepoEntry } from "./registry";
-import type { Agent } from "./agents";
-import type { FlatAgent } from "./agents";
+import type { Agent, FlatAgent } from "./agents";
 
 const args = process.argv.slice(2);
 const command = args[0];
@@ -126,7 +125,7 @@ async function main() {
         console.log("No agents found across registered repos.");
       } else {
         const { visibleWidth } = await import("@mariozechner/pi-tui");
-        const { displayState } = await import("./tui/agent-tree");
+        const { displayState, computeStateColWidth } = await import("./tui/agent-tree");
         const { getStateColors } = await import("./tui/color-scheme");
         const { BOLD, DIM, RESET } = await import("./tui/colors");
 
@@ -134,8 +133,9 @@ async function main() {
         const rowByEntry = new Map<FlatAgent, { prefix: string; state: string; age: string; model: string }>();
         for (const entry of flat) {
           if (entry.repoHeader) continue;
+          const orphanedPrefix = entry.agent.orphaned ? "⚠ " : "";
           const icon = entry.agent.meta.worker ? "⚙" : "◆";
-          const prefix = `${entry.connector}${icon} ${entry.agent.id}`;
+          const prefix = `${entry.connector}${orphanedPrefix}${icon} ${entry.agent.id}`;
           rowByEntry.set(entry, {
             prefix,
             state: displayState(entry.agent.state),
@@ -145,11 +145,11 @@ async function main() {
         }
 
         // Compute max visible widths for alignment
-        let maxPrefix = 0, maxState = 0, maxAge = 0, maxModel = 0;
+        const maxState = computeStateColWidth(flat);
+        let maxPrefix = 0, maxAge = 0, maxModel = 0;
         for (const row of rowByEntry.values()) {
           const pw = visibleWidth(row.prefix);
           if (pw > maxPrefix) maxPrefix = pw;
-          if (row.state.length > maxState) maxState = row.state.length;
           if (row.age.length > maxAge) maxAge = row.age.length;
           if (row.model.length > maxModel) maxModel = row.model.length;
         }
@@ -177,7 +177,7 @@ async function main() {
           // Pad prefix using visibleWidth to account for box-drawing/icon chars
           const prefixPad = maxPrefix - visibleWidth(row.prefix);
           const paddedPrefix = row.prefix + " ".repeat(Math.max(0, prefixPad));
-          const colorCode = stateColors[entry.agent.state] ?? DIM;
+          const colorCode = stateColors[row.state] ?? DIM;
           const prompt = entry.agent.meta.prompt.slice(0, promptWidth).replace(/\n/g, " ");
           const archived = entry.agent.archived ? ` ${DIM}[archived]${RESET}` : "";
           const line = [

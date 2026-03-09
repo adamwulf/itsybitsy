@@ -910,6 +910,8 @@ export class DashboardComponent implements Component {
     else if (data === "h") { agentActions.handleSetup(this); }
     // Ghostty
     else if (data === "G") { agentActions.handleOpenGhostty(this); }
+    // Cross-repo send
+    else if (data === "E") { agentActions.handleCrossRepoSend(this); }
     // Snapshot
     else if (data === "S") { agentActions.handleSnapshot(this); }
     // Resize left pane

@@ -554,6 +554,7 @@ export function handleHelp(ctx: ActionCtx) {
       "",
       header("Actions"),
       row("s", "send message"),
+      row("E", "cross-repo send"),
       row("m", "merge"),
       row("x / !", "kill / nuke (all if none selected)"),
       row("R", "resume"),
@@ -904,6 +905,79 @@ export function handleKillOrphanedSession(ctx: ActionCtx, session: string) {
       ctx.executeAndRefresh(async () => {
         const ok = await killTmuxSession(session);
         ctx.setNotice(ok ? `Killed session: ${session}` : `Failed to kill session: ${session}`);
+      });
+    },
+  });
+}
+
+export function handleCrossRepoSend(ctx: ActionCtx) {
+  // Collect repos that have at least one non-archived agent
+  const reposWithAgents = ctx.repos.filter((repo) =>
+    ctx.agentTree.flatList.some(
+      (f) => f.kind === "agent" && f.agent.repoPath === repo.path && !f.agent.archived
+    )
+  );
+
+  // Need at least 2 repos with agents for cross-repo to make sense
+  if (reposWithAgents.length < 2) {
+    ctx.setNotice("Cross-repo send requires 2+ repos with active agents");
+    return;
+  }
+
+  // Exclude the selected agent's own repo if there are other options
+  const selectedAgent = ctx.agentTree.selectedAgent;
+  const otherRepos = selectedAgent
+    ? reposWithAgents.filter((r) => r.path !== selectedAgent.repoPath)
+    : reposWithAgents;
+  const candidateRepos = otherRepos.length > 0 ? otherRepos : reposWithAgents;
+
+  const showAgentSelect = (repo: RepoEntry) => {
+    const agents = ctx.agentTree.flatList
+      .filter((f): f is Extract<FlatEntry, { kind: "agent" }> =>
+        f.kind === "agent" && f.agent.repoPath === repo.path && !f.agent.archived
+      )
+      .map((f) => f.agent);
+    if (agents.length === 0) { ctx.setNotice("No active agents in that repo"); return; }
+    const items = agents.map((a) => `${a.id}  (${a.state})`);
+    ctx.showDialog({
+      type: "select",
+      prompt: `Send to agent in ${repoDisplayName(repo)}:`,
+      items,
+      selectedIndex: 0,
+      onSelect: (agentIndex: number) => {
+        const destAgent = agents[agentIndex]!;
+        showMessageInput(ctx, repo, destAgent);
+      },
+    });
+  };
+
+  // Step 1: repo select (skip if only 1 candidate)
+  if (candidateRepos.length === 1) {
+    showAgentSelect(candidateRepos[0]!);
+  } else {
+    ctx.showDialog({
+      type: "select",
+      prompt: "Send to agent in which repo?",
+      items: candidateRepos.map((r) => `${repoDisplayName(r)} (${r.path})`),
+      selectedIndex: 0,
+      onSelect: (repoIndex: number) => {
+        showAgentSelect(candidateRepos[repoIndex]!);
+      },
+    });
+  }
+}
+
+function showMessageInput(ctx: ActionCtx, repo: RepoEntry, destAgent: Agent) {
+  ctx.showDialog({
+    type: "input",
+    prompt: `Send message to ${destAgent.id}:`,
+    value: "",
+    onSubmit: (message: string) => {
+      ctx.closeDialog();
+      if (!message.trim()) { ctx.setNotice("Send cancelled"); return; }
+      ctx.executeAndRefresh(async () => {
+        const result = await sendMessage(destAgent, message.trim(), { cwd: "/" });
+        ctx.setNotice(result.ok ? `Sent to ${destAgent.id} in ${repoDisplayName(repo)}` : `Send failed: ${result.stderr || result.stdout}`);
       });
     },
   });

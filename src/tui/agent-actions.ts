@@ -7,7 +7,7 @@ import { stat } from "node:fs/promises";
 import { agentWorktreePath } from "../agents";
 import type { Agent, FlatEntry, PendingQuestion } from "../agents";
 import type { RepoEntry } from "../registry";
-import { addRepo, loadRegistry, saveRegistry, renameRepo, removeRepo, repoDisplayName } from "../registry";
+import { addRepo, listRepos, loadRegistry, saveRegistry, renameRepo, removeRepo, repoDisplayName } from "../registry";
 import {
   killAgent, nukeAgent, nukeAllAgents, resumeAgent, pauseAgent, reassignAgent,
   mergeCheckAgent, mergeAgent, sendMessage, newAgent,
@@ -54,7 +54,7 @@ export interface ActionCtx {
   splitPane: { getLeftWidth(): number; setLeftWidth(w: number): void };
   tui: { requestRender(): void } | null;
   repos: RepoEntry[];
-  watcher: { refresh(): void } | null;
+  watcher: { refresh(): void; updateRepos(repos: RepoEntry[]): void } | null;
   diffTool: string | undefined;
   pendingSelectNewestInRepo: string | null;
   showDialog(dialog: NonNullable<DialogState>): void;
@@ -1031,6 +1031,7 @@ export function handleRemoveRepo(ctx: ActionCtx) {
           // Remove from in-memory repos so the UI reflects the change immediately
           const idx = ctx.repos.findIndex((r) => r.path === repo.path);
           if (idx !== -1) { ctx.repos.splice(idx, 1); }
+          ctx.watcher?.updateRepos(ctx.repos);
           ctx.watcher?.refresh();
         }
       }).catch((err) => {
@@ -1052,9 +1053,15 @@ export async function handleFolderBrowser(ctx: ActionCtx) {
     focused: "list",
     scrollOffset: Math.max(0, (currentIdx !== -1 ? currentIdx : 0) - 7),
     onSelect: (path: string) => {
-      addRepo(path).then((result) => {
+      addRepo(path).then(async (result) => {
         ctx.setNotice(result.message);
-        if (result.ok) { ctx.watcher?.refresh(); }
+        if (result.ok) {
+          const freshRepos = await listRepos();
+          ctx.repos.length = 0;
+          ctx.repos.push(...freshRepos);
+          ctx.watcher?.updateRepos(ctx.repos);
+          ctx.watcher?.refresh();
+        }
       }).catch((err) => {
         ctx.setNotice(`Error adding repo: ${err}`);
       });

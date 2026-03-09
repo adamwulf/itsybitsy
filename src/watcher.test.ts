@@ -870,4 +870,188 @@ describe("AgentWatcher", () => {
       expect(watchErrors.length).toBe(0);
     });
   });
+
+  describe("updateRepos", () => {
+    test("refresh uses new repos list after updateRepos", async () => {
+      setupDefaultMocks();
+
+      const watcher = new AgentWatcher(
+        [{ path: tempDir, name: "repo1" }],
+        { onUpdate: () => {} }
+      );
+
+      await watcher.start();
+
+      // Verify internal repos has repo1
+      expect((watcher as any).repos).toEqual([{ path: tempDir, name: "repo1" }]);
+
+      // Create a second temp dir for the new repo
+      const tempDir2 = await mkdtemp(join(tmpdir(), "itsybitsy-watcher-test2-"));
+      await mkdir(join(tempDir2, ".ittybitty", "agents"), { recursive: true });
+
+      // Update repos to include both
+      const newRepos = [
+        { path: tempDir, name: "repo1" },
+        { path: tempDir2, name: "repo2" },
+      ];
+      watcher.updateRepos(newRepos);
+
+      // Verify internal repos was updated
+      expect((watcher as any).repos).toEqual(newRepos);
+
+      // readPendingQuestions is called per-repo during refresh — use call count to verify
+      mockReadPendingQuestions.mockReset();
+      mockReadPendingQuestions.mockResolvedValue([]);
+
+      await watcher.refresh();
+      watcher.stop();
+
+      // readPendingQuestions should have been called for both repos
+      expect(mockReadPendingQuestions.mock.calls.length).toBe(2);
+
+      await rm(tempDir2, { recursive: true, force: true });
+    });
+
+    test("updateRepos tears down old watchers and sets up new ones", async () => {
+      setupDefaultMocks();
+
+      const watcher = new AgentWatcher(
+        [{ path: tempDir, name: "repo1" }],
+        { onUpdate: () => {} }
+      );
+
+      await watcher.start();
+      // Should have watchers for repo1
+      const watchersAfterStart = (watcher as any).watchers.length;
+      expect(watchersAfterStart).toBeGreaterThan(0);
+
+      // Create second temp dir
+      const tempDir2 = await mkdtemp(join(tmpdir(), "itsybitsy-watcher-test2-"));
+      await mkdir(join(tempDir2, ".ittybitty", "agents"), { recursive: true });
+
+      watcher.updateRepos([
+        { path: tempDir, name: "repo1" },
+        { path: tempDir2, name: "repo2" },
+      ]);
+
+      // After updateRepos, watchers should exist for both repos
+      const watchersAfterUpdate = (watcher as any).watchers.length;
+      expect(watchersAfterUpdate).toBeGreaterThan(watchersAfterStart);
+
+      watcher.stop();
+      await rm(tempDir2, { recursive: true, force: true });
+    });
+
+    test("updateRepos to empty list clears all watchers", async () => {
+      setupDefaultMocks();
+
+      const watcher = new AgentWatcher(
+        [{ path: tempDir, name: "repo1" }],
+        { onUpdate: () => {} }
+      );
+
+      await watcher.start();
+      expect((watcher as any).watchers.length).toBeGreaterThan(0);
+
+      watcher.updateRepos([]);
+      expect((watcher as any).watchers.length).toBe(0);
+
+      watcher.stop();
+    });
+
+    test("updateRepos does not affect poll timers", async () => {
+      setupDefaultMocks();
+
+      const watcher = new AgentWatcher(
+        [{ path: tempDir, name: "repo1" }],
+        { onUpdate: () => {} }
+      );
+
+      jest.useFakeTimers();
+      try {
+        await watcher.start();
+        const pollTimer = (watcher as any).pollTimer;
+        const stateTimer = (watcher as any).stateTimer;
+        expect(pollTimer).not.toBeNull();
+        expect(stateTimer).not.toBeNull();
+
+        watcher.updateRepos([{ path: tempDir, name: "repo1-renamed" }]);
+
+        // Poll timers should be unchanged
+        expect((watcher as any).pollTimer).toBe(pollTimer);
+        expect((watcher as any).stateTimer).toBe(stateTimer);
+
+        watcher.stop();
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    test("fs.watch on original repo still triggers refresh after updateRepos", async () => {
+      setupDefaultMocks();
+      let updateCount = 0;
+      const watcher = new AgentWatcher(
+        [{ path: tempDir, name: "repo1" }],
+        { onUpdate: () => { updateCount++; } }
+      );
+
+      await watcher.start();
+
+      // updateRepos with the same repo (re-creates watchers)
+      watcher.updateRepos([{ path: tempDir, name: "repo1" }]);
+      const afterUpdate = updateCount;
+
+      // Write to the original agents dir — the new watcher should pick it up
+      const newAgentDir = join(agentsDir, "agent-new");
+      await mkdir(newAgentDir, { recursive: true });
+      await writeFile(join(newAgentDir, "meta.json"), '{"id":"agent-new"}');
+
+      // Poll until the debounced refresh fires
+      const deadline = Date.now() + 5000;
+      while (updateCount <= afterUpdate && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+
+      expect(updateCount).toBeGreaterThan(afterUpdate);
+
+      watcher.stop();
+    }, 10_000);
+
+    test("removed repo fs.watch does not trigger refresh after updateRepos", async () => {
+      setupDefaultMocks();
+
+      // Create a second temp dir
+      const tempDir2 = await mkdtemp(join(tmpdir(), "itsybitsy-watcher-test2-"));
+      const agentsDir2 = join(tempDir2, ".ittybitsy", "agents");
+      await mkdir(agentsDir2, { recursive: true });
+
+      let updateCount = 0;
+      const watcher = new AgentWatcher(
+        [
+          { path: tempDir, name: "repo1" },
+          { path: tempDir2, name: "repo2" },
+        ],
+        { onUpdate: () => { updateCount++; } }
+      );
+
+      await watcher.start();
+
+      // Remove repo2 from the watcher
+      watcher.updateRepos([{ path: tempDir, name: "repo1" }]);
+      const afterUpdate = updateCount;
+
+      // Write to the removed repo's agents dir — should NOT trigger refresh
+      // since the old watcher was torn down
+      const newAgentDir = join(agentsDir2, "agent-new");
+      await mkdir(newAgentDir, { recursive: true });
+      await writeFile(join(newAgentDir, "meta.json"), '{"id":"agent-new"}');
+
+      // Wait a bit to verify no refresh fires
+      await new Promise((r) => setTimeout(r, 500));
+      expect(updateCount).toBe(afterUpdate);
+
+      watcher.stop();
+      await rm(tempDir2, { recursive: true, force: true });
+    }, 10_000);
+  });
 });

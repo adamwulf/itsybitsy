@@ -115,6 +115,51 @@ export class AgentWatcher {
     }
   }
 
+  /** Replace the repos list and reset fs.watch watchers (poll timers keep running) */
+  updateRepos(repos: RepoEntry[]): void {
+    this.repos = repos;
+
+    // Tear down existing fs.watch watchers
+    for (const w of this.watchers) {
+      w.close();
+    }
+    this.watchers = [];
+
+    // Set up new fs.watch watchers for all repos (same logic as start())
+    for (const repo of this.repos) {
+      const agentsDir = join(repo.path, ".ittybitty", "agents");
+      const archiveDir = join(repo.path, ".ittybitty", "archive");
+      const questionsFile = join(repo.path, ".ittybitty", "user-questions.json");
+
+      try {
+        const watcher = watch(agentsDir, { recursive: true }, () => {
+          this.debounceRefresh();
+        });
+        this.watchers.push(watcher);
+      } catch (err) {
+        this.events.onError?.(new Error(`Failed to watch ${agentsDir}: ${err}`));
+      }
+
+      try {
+        const watcher = watch(archiveDir, { recursive: true }, () => {
+          this.debounceRefresh();
+        });
+        this.watchers.push(watcher);
+      } catch (err) {
+        // archive/ may not exist yet — not an error
+      }
+
+      try {
+        const watcher = watch(questionsFile, () => {
+          this.debounceRefresh();
+        });
+        this.watchers.push(watcher);
+      } catch (err) {
+        // user-questions.json may not exist yet — not an error
+      }
+    }
+  }
+
   /** Debounce refresh to avoid rapid successive updates */
   private debounceRefresh(): void {
     if (this.refreshTimer) clearTimeout(this.refreshTimer);

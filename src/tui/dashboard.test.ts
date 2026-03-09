@@ -2810,17 +2810,30 @@ describe("Repo header selection persistence", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Watchdog dashboard integration
+// Watchdog dashboard integration (Phase 20: lock-file based)
 // ---------------------------------------------------------------------------
-import { startWatchdog, stopWatchdog, isWatchdogRunning, clearTrackers } from "../watchdog";
+import { mkdirSync, writeFileSync, unlinkSync } from "fs";
+import { isWatchdogRunning, acquireWatchdogLock, releaseWatchdogLock, setLockFilePath, resetLockFilePath, clearTrackers, stopWatchdog } from "../watchdog";
 
 describe("watchdog dashboard integration", () => {
+  let tmpLockFile: string;
+
+  beforeEach(() => {
+    const tmpDir = join(tmpdir(), `dashboard-watchdog-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    mkdirSync(tmpDir, { recursive: true });
+    tmpLockFile = join(tmpDir, "watchdog.lock");
+    setLockFilePath(tmpLockFile);
+  });
+
   afterEach(() => {
+    releaseWatchdogLock();
+    try { unlinkSync(tmpLockFile); } catch { /* ok */ }
+    resetLockFilePath();
     stopWatchdog();
     clearTrackers();
   });
 
-  test("StatusBarComponent shows [watchdog] when watchdog is running", () => {
+  test("StatusBarComponent shows [watchdog] when lock file has live PID", () => {
     const dashboard = makeDashboard();
     const agent = makeAgent("agent-1", "/repos/a");
     const flatList: FlatEntry[] = [
@@ -2829,21 +2842,21 @@ describe("watchdog dashboard integration", () => {
     ];
     dashboard.onUpdate([agent], flatList, []);
 
-    // Before starting watchdog — no indicator
+    // Before acquiring lock — no indicator
     const linesBefore = dashboard.render(120);
     const footerBefore = linesBefore.map(l => stripAnsi(l)).join("\n");
     expect(footerBefore).not.toContain("[watchdog]");
 
-    // Start watchdog
-    startWatchdog(() => [agent]);
+    // Acquire lock (simulates a running watchdog)
+    acquireWatchdogLock();
 
-    // After starting watchdog — indicator present
+    // After acquiring lock — indicator present
     const linesAfter = dashboard.render(120);
     const footerAfter = linesAfter.map(l => stripAnsi(l)).join("\n");
     expect(footerAfter).toContain("[watchdog]");
   });
 
-  test("StatusBarComponent hides [watchdog] after stopWatchdog()", () => {
+  test("StatusBarComponent hides [watchdog] after lock is released", () => {
     const dashboard = makeDashboard();
     const agent = makeAgent("agent-1", "/repos/a");
     const flatList: FlatEntry[] = [
@@ -2852,10 +2865,10 @@ describe("watchdog dashboard integration", () => {
     ];
     dashboard.onUpdate([agent], flatList, []);
 
-    startWatchdog(() => [agent]);
+    acquireWatchdogLock();
     expect(isWatchdogRunning()).toBe(true);
 
-    stopWatchdog();
+    releaseWatchdogLock();
     expect(isWatchdogRunning()).toBe(false);
 
     const lines = dashboard.render(120);
@@ -2863,36 +2876,32 @@ describe("watchdog dashboard integration", () => {
     expect(footer).not.toContain("[watchdog]");
   });
 
-  test("isWatchdogRunning() reflects start/stop state", () => {
+  test("isWatchdogRunning() reads lock file (not module state)", () => {
     expect(isWatchdogRunning()).toBe(false);
-    startWatchdog(() => []);
+    acquireWatchdogLock();
     expect(isWatchdogRunning()).toBe(true);
-    stopWatchdog();
+    releaseWatchdogLock();
     expect(isWatchdogRunning()).toBe(false);
   });
 
-  test("startPolling() starts watchdog when watcher is set", () => {
+  test("isWatchdogRunning() returns false for dead PID in lock", () => {
+    writeFileSync(tmpLockFile, "999999999", "utf-8");
+    expect(isWatchdogRunning()).toBe(false);
+  });
+
+  test("stopPolling() does NOT stop the watchdog", () => {
     const dashboard = makeDashboard();
     const watcher = { lastAgents: [] } as any;
     dashboard.setWatcher(watcher);
 
-    expect(isWatchdogRunning()).toBe(false);
-    dashboard.startPolling();
+    // Simulate a running watchdog via lock
+    acquireWatchdogLock();
     expect(isWatchdogRunning()).toBe(true);
 
-    dashboard.stopPolling();
-    expect(isWatchdogRunning()).toBe(false);
-  });
-
-  test("stopPolling() stops watchdog", () => {
-    const dashboard = makeDashboard();
-    const watcher = { lastAgents: [] } as any;
-    dashboard.setWatcher(watcher);
-
     dashboard.startPolling();
-    expect(isWatchdogRunning()).toBe(true);
-
     dashboard.stopPolling();
-    expect(isWatchdogRunning()).toBe(false);
+
+    // Watchdog should still be "running" (lock still held)
+    expect(isWatchdogRunning()).toBe(true);
   });
 });

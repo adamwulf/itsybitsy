@@ -1623,11 +1623,11 @@ ${absExitScript}
     autoAcceptWorkspaceTrustForNewAgent(tmuxSession).catch(() => {});
   }
 
-  // 23. Auto-spawn watchdog (if has manager)
+  // 23. Auto-spawn watchdog (global, not per-agent — self-exits if already running)
   if (manager) {
     try {
       const watchdogLog = join(agentDir, "watchdog.log");
-      const watchdogProc = Bun.spawn(["ib", "watchdog", id], {
+      const watchdogProc = Bun.spawn(["itsybitsy", "watchdog"], {
         cwd: rootRepoPath,
         stdout: Bun.file(watchdogLog),
         stderr: Bun.file(watchdogLog),

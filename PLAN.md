@@ -1111,6 +1111,22 @@ Phase 24 ──── final validation (depends on all)
 
 ---
 
+### Phase 25 (future): Rename .ittybitty/ to .ittybitsy/
+
+**Status:** Aspirational — blocked on ib compatibility.
+
+**Goal:** Rename the agent data directory from `.ittybitty/` (the ib bash project's convention) to `.ittybitsy/` (itsybitsy's own namespace). All source files currently use `.ittybitty` to stay compatible with existing agent directories created by `ib`.
+
+**What changes:**
+- All `join(..., ".ittybitty", ...)` calls across `src/` → `join(..., ".ittybitsy", ...)`
+- All hooks that reference `.ittybitty/agents/` paths (agent-path.ts, agent-status.ts, etc.)
+- Watchdog lock file path and any other hardcoded `.ittybitty` references
+- Migration: either rename existing directories on first run, or support both names during a transition period
+
+**Prerequisite:** Only safe once itsybitsy is the sole tool managing agent directories (i.e., `ib` is no longer used alongside itsybitsy). Running both tools simultaneously against the same repo would break if they use different directory names.
+
+---
+
 ### Phase 17 (future): Decoupled Agent Storage
 
 **Status:** Aspirational / longer-term architectural change. Not yet planned for implementation.

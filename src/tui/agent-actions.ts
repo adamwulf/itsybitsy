@@ -464,7 +464,22 @@ export function handleScrollDown(ctx: ActionCtx) {
 
 export function handleOpenWorktree(ctx: ActionCtx) {
   const agent = ctx.agentTree.selectedAgent;
-  if (!agent) { ctx.setNotice("No agent selected"); return; }
+  if (!agent) {
+    const repo = findRepoByHeader(ctx);
+    if (repo) {
+      (async () => {
+        try {
+          await Bun.$`open ${repo.path}`.quiet();
+          ctx.setNotice(`Opened ${repo.path}`);
+        } catch (err) {
+          ctx.setNotice(`Failed to open repo: ${err}`);
+        }
+      })();
+    } else {
+      ctx.setNotice("No agent selected");
+    }
+    return;
+  }
   const dir = agent.archived ? "archive" : "agents";
   let worktreePath: string;
   if (agent.meta.worktree === false) {

@@ -1325,6 +1325,229 @@ describe("DashboardComponent dialog and action handlers", () => {
 
 });
 
+describe("Cross-repo send (E key)", () => {
+  let dashboard: DashboardComponent;
+  let sentMessages: { target: string; message: string }[] = [];
+
+  function setupSendMock() {
+    sentMessages = [];
+    setSendSpawnRunner((cmd: string[]) => {
+      if (cmd[0] === "tmux" && cmd[1] === "send-keys" && cmd.length === 6 && cmd[4] === "-l") {
+        sentMessages.push({ target: cmd[3]!, message: cmd[5]! });
+      }
+      return {
+        stdout: new Response("").body!,
+        stderr: new Response("").body!,
+        exited: Promise.resolve(0),
+      } as SpawnResult;
+    });
+  }
+
+  afterEach(() => {
+    resetSendSpawnRunner();
+    resetRunner();
+  });
+
+  test("E key no-op with single repo", () => {
+    dashboard = makeDashboard();
+    setupSendMock();
+    const agent = makeAgent("agent-a", "/repos/alpha");
+    agent.state = "running" as any;
+    dashboard.setRepos([{ path: "/repos/alpha", name: "alpha" }]);
+    dashboard.onUpdate([agent], [makeFlatAgent(agent)], []);
+    dashboard.handleInput("E");
+    // Should show notice, not a dialog
+    expect(dashboard.dialog).toBeNull();
+  });
+
+  test("E key shows repo select with 2+ repos", () => {
+    dashboard = makeDashboard();
+    setupSendMock();
+    const agentA = makeAgent("agent-a", "/repos/alpha");
+    agentA.state = "running" as any;
+    agentA.repoName = "alpha";
+    const agentB = makeAgent("agent-b", "/repos/beta");
+    agentB.state = "running" as any;
+    agentB.repoName = "beta";
+    dashboard.setRepos([
+      { path: "/repos/alpha", name: "alpha" },
+      { path: "/repos/beta", name: "beta" },
+    ]);
+    dashboard.onUpdate([agentA, agentB], [makeFlatAgent(agentA), makeFlatAgent(agentB)], []);
+
+    dashboard.handleInput("E");
+    // Should exclude current agent's repo — only 1 candidate, so skip to agent select
+    const d = assertDialog(dashboard.dialog, 'select');
+    expect(d.prompt).toContain("Send to agent in");
+    // Should show agent-b since we're in alpha's repo
+    expect(d.items.length).toBe(1);
+    expect(d.items[0]).toContain("agent-b");
+  });
+
+  test("E key shows repo picker when both repos have agents and no agent selected", () => {
+    dashboard = makeDashboard();
+    setupSendMock();
+    const agentA = makeAgent("agent-a", "/repos/alpha");
+    agentA.state = "running" as any;
+    agentA.repoName = "alpha";
+    const agentB = makeAgent("agent-b", "/repos/beta");
+    agentB.state = "running" as any;
+    agentB.repoName = "beta";
+    dashboard.setRepos([
+      { path: "/repos/alpha", name: "alpha" },
+      { path: "/repos/beta", name: "beta" },
+    ]);
+    dashboard.onUpdate(
+      [agentA, agentB],
+      [makeFlatRepoHeader("alpha", "/repos/alpha", true), makeFlatAgent(agentA), makeFlatRepoHeader("beta", "/repos/beta", true), makeFlatAgent(agentB)],
+      []
+    );
+    // Select a repo header so no agent is selected
+    dashboard.agentTree.moveSelection(-10); // go to top
+    dashboard.syncSelectedAgent();
+
+    dashboard.handleInput("E");
+    const d = assertDialog(dashboard.dialog, 'select');
+    expect(d.prompt).toContain("which repo");
+    expect(d.items.length).toBe(2);
+  });
+
+  test("E key step 2 shows agent select after repo select", () => {
+    dashboard = makeDashboard();
+    setupSendMock();
+    const agentA = makeAgent("agent-a", "/repos/alpha");
+    agentA.state = "running" as any;
+    agentA.repoName = "alpha";
+    const agentB1 = makeAgent("agent-b1", "/repos/beta");
+    agentB1.state = "running" as any;
+    agentB1.repoName = "beta";
+    const agentB2 = makeAgent("agent-b2", "/repos/beta");
+    agentB2.state = "waiting" as any;
+    agentB2.repoName = "beta";
+    dashboard.setRepos([
+      { path: "/repos/alpha", name: "alpha" },
+      { path: "/repos/beta", name: "beta" },
+    ]);
+    dashboard.onUpdate(
+      [agentA, agentB1, agentB2],
+      [makeFlatAgent(agentA), makeFlatAgent(agentB1), makeFlatAgent(agentB2)],
+      []
+    );
+
+    dashboard.handleInput("E");
+    // Only 1 other repo — skips to agent select directly
+    const d = assertDialog(dashboard.dialog, 'select');
+    expect(d.prompt).toContain("Send to agent in");
+    expect(d.items.length).toBe(2);
+    expect(d.items[0]).toContain("agent-b1");
+    expect(d.items[1]).toContain("agent-b2");
+  });
+
+  test("E key step 3 shows message input after agent select", () => {
+    dashboard = makeDashboard();
+    setupSendMock();
+    const agentA = makeAgent("agent-a", "/repos/alpha");
+    agentA.state = "running" as any;
+    agentA.repoName = "alpha";
+    const agentB = makeAgent("agent-b", "/repos/beta");
+    agentB.state = "running" as any;
+    agentB.repoName = "beta";
+    dashboard.setRepos([
+      { path: "/repos/alpha", name: "alpha" },
+      { path: "/repos/beta", name: "beta" },
+    ]);
+    dashboard.onUpdate([agentA, agentB], [makeFlatAgent(agentA), makeFlatAgent(agentB)], []);
+
+    dashboard.handleInput("E");
+    // Step 2: agent select (repo was auto-skipped)
+    const selectDialog = assertDialog(dashboard.dialog, 'select');
+    selectDialog.onSelect(0); // select agent-b
+
+    // Step 3: message input
+    const inputDialog = assertDialog(dashboard.dialog, 'input');
+    expect(inputDialog.prompt).toContain("agent-b");
+  });
+
+  test("E key full flow calls sendMessage with correct args", async () => {
+    dashboard = makeDashboard();
+    setupSendMock();
+    const agentA = makeAgent("agent-a", "/repos/alpha");
+    agentA.state = "running" as any;
+    agentA.repoName = "alpha";
+    const agentB = makeAgent("agent-b", "/repos/beta");
+    agentB.state = "running" as any;
+    agentB.repoName = "beta";
+    dashboard.setRepos([
+      { path: "/repos/alpha", name: "alpha" },
+      { path: "/repos/beta", name: "beta" },
+    ]);
+    dashboard.onUpdate([agentA, agentB], [makeFlatAgent(agentA), makeFlatAgent(agentB)], []);
+
+    dashboard.handleInput("E");
+    // Agent select (repo auto-skipped)
+    assertDialog(dashboard.dialog, 'select').onSelect(0);
+    // Message input
+    const inputDialog = assertDialog(dashboard.dialog, 'input');
+    inputDialog.onSubmit("hello cross-repo");
+    await Bun.sleep(10);
+
+    // Verify message was sent to agent-b's tmux session
+    expect(sentMessages.length).toBeGreaterThanOrEqual(1);
+    const msg = sentMessages.find((m) => m.target === "tmux-agent-b");
+    expect(msg).toBeDefined();
+    expect(msg!.message).toContain("hello cross-repo");
+  });
+
+  test("E key excludes archived agents from selection", () => {
+    dashboard = makeDashboard();
+    setupSendMock();
+    const agentA = makeAgent("agent-a", "/repos/alpha");
+    agentA.state = "running" as any;
+    agentA.repoName = "alpha";
+    const agentB = makeAgent("agent-b", "/repos/beta");
+    agentB.state = "running" as any;
+    agentB.repoName = "beta";
+    const agentC = makeAgent("agent-c", "/repos/beta");
+    agentC.state = "stopped" as any;
+    agentC.archived = true;
+    agentC.repoName = "beta";
+    dashboard.setRepos([
+      { path: "/repos/alpha", name: "alpha" },
+      { path: "/repos/beta", name: "beta" },
+    ]);
+    dashboard.onUpdate([agentA, agentB, agentC], [makeFlatAgent(agentA), makeFlatAgent(agentB), makeFlatAgent(agentC)], []);
+
+    dashboard.handleInput("E");
+    const d = assertDialog(dashboard.dialog, 'select');
+    // Only agent-b should be in the list (agent-c is archived)
+    expect(d.items.length).toBe(1);
+    expect(d.items[0]).toContain("agent-b");
+  });
+
+  test("E key empty message cancels send", async () => {
+    dashboard = makeDashboard();
+    setupSendMock();
+    const agentA = makeAgent("agent-a", "/repos/alpha");
+    agentA.state = "running" as any;
+    agentA.repoName = "alpha";
+    const agentB = makeAgent("agent-b", "/repos/beta");
+    agentB.state = "running" as any;
+    agentB.repoName = "beta";
+    dashboard.setRepos([
+      { path: "/repos/alpha", name: "alpha" },
+      { path: "/repos/beta", name: "beta" },
+    ]);
+    dashboard.onUpdate([agentA, agentB], [makeFlatAgent(agentA), makeFlatAgent(agentB)], []);
+
+    dashboard.handleInput("E");
+    assertDialog(dashboard.dialog, 'select').onSelect(0);
+    assertDialog(dashboard.dialog, 'input').onSubmit("  ");
+    await Bun.sleep(10);
+
+    expect(sentMessages.length).toBe(0);
+  });
+});
+
 describe("parseDenials", () => {
   test("parses PreToolUse denial lines", () => {
     const lines = [

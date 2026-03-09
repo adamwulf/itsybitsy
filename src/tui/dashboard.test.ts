@@ -465,6 +465,9 @@ describe("DashboardComponent dialog and action handlers", () => {
     await Bun.sleep(10);
     // Dialog should be dismissed after native kill executes
     expect(dashboard.dialog).toBeNull();
+    // Agent directory should be removed by teardown
+    const agentDir = join(actionTempDir!, ".ittybitty", "agents", "agent-test");
+    expect(await Bun.file(join(agentDir, "meta.json")).exists()).toBe(false);
   });
 
   test("kill confirm dialog: Enter on default Cancel dismisses", async () => {
@@ -601,6 +604,12 @@ describe("DashboardComponent dialog and action handlers", () => {
     await Bun.sleep(10);
     // Dialog should be dismissed after native pause executes
     expect(dashboard.dialog).toBeNull();
+    // Agent directory should be preserved (pause does NOT remove it)
+    const agentDir = join(actionTempDir!, ".ittybitty", "agents", "agent-test");
+    expect(await Bun.file(join(agentDir, "meta.json")).exists()).toBe(true);
+    // Agent.log should contain "Agent paused"
+    const log = await Bun.file(join(agentDir, "agent.log")).text();
+    expect(log).toContain("Agent paused");
   });
 
   test("P key works for waiting agents", async () => {

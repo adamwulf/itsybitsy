@@ -317,6 +317,11 @@ export async function pauseAgent(agent: Agent): Promise<IbCommandResult> {
     return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' not found` };
   }
 
+  // Check if agent is already stopped (mirrors bash cmd_pause validation)
+  if (agent.state === "stopped") {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' is already stopped` };
+  }
+
   // Kill Claude process
   const killed = await killAgentProcess(tmuxSession, { claude_pid: agent.meta.claude_pid });
   if (killed) {

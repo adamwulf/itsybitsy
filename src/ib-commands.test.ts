@@ -308,7 +308,7 @@ describe("ib-commands", () => {
     });
   });
 
-  test("returns result from runner", async () => {
+  test("IbRunner passthrough returns result from runner (nukeAgent)", async () => {
     setRunner(async () => ({
       ok: false,
       exitCode: 1,
@@ -316,6 +316,7 @@ describe("ib-commands", () => {
       stderr: "something broke",
     }));
     const agent = makeAgent("agent-abc", "/repos/myproject");
+    // nukeAgent still uses IbRunner passthrough (not yet native)
     const result = await nukeAgent(agent);
     expect(result.ok).toBe(false);
     expect(result.exitCode).toBe(1);
@@ -510,6 +511,21 @@ describe("pauseAgent (native)", () => {
 
     expect(result.ok).toBe(false);
     expect(result.stderr).toContain("not found");
+  });
+
+  test("returns error when agent is already stopped", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-abc",
+      tmux_session: "tmux-agent-abc",
+    }));
+
+    const agent = makeAgent("agent-abc", tempDir, "stopped");
+    const result = await pauseAgent(agent);
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("already stopped");
   });
 
   test("succeeds and returns pause message when agent directory exists", async () => {

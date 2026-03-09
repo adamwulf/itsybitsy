@@ -1,6 +1,6 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { join } from "path";
-import { mkdtemp, rm, mkdir } from "fs/promises";
+import { mkdtemp, rm, mkdir, chmod } from "fs/promises";
 import { tmpdir } from "os";
 import { buildFolderItems } from "./folder-browser";
 
@@ -94,5 +94,48 @@ describe("buildFolderItems", () => {
     const items = await buildFolderItems(tmpDir);
     const current = items.find((i) => i.isCurrent)!;
     expect(current.isGit).toBe(true);
+  });
+
+  test("readdir EACCES returns ancestors and current but no children", async () => {
+    await mkdir(join(tmpDir, "restricted"));
+    await mkdir(join(tmpDir, "restricted", "child"));
+    const restricted = join(tmpDir, "restricted");
+    // Remove read permission so readdir fails with EACCES
+    await chmod(restricted, 0o000);
+
+    try {
+      const items = await buildFolderItems(restricted);
+      // Should not throw
+      const current = items.find((i) => i.isCurrent);
+      expect(current).toBeDefined();
+      expect(current!.path).toBe(restricted);
+      // No children since readdir failed
+      const children = items.filter((i) => !i.isAncestor && !i.isCurrent);
+      expect(children.length).toBe(0);
+      // Ancestors should still be present
+      const ancestors = items.filter((i) => i.isAncestor);
+      expect(ancestors.length).toBeGreaterThan(0);
+    } finally {
+      // Restore permissions for cleanup
+      await chmod(restricted, 0o755);
+    }
+  });
+
+  test("readdir ENOENT returns ancestors and current but no children", async () => {
+    const nonexistent = join(tmpDir, "does-not-exist");
+    // Don't create the directory — readdir will fail with ENOENT
+
+    const items = await buildFolderItems(nonexistent);
+    // Should not throw
+    const current = items.find((i) => i.isCurrent);
+    expect(current).toBeDefined();
+    expect(current!.path).toBe(nonexistent);
+    expect(current!.isCurrent).toBe(true);
+    // No children since the directory doesn't exist
+    const children = items.filter((i) => !i.isAncestor && !i.isCurrent);
+    expect(children.length).toBe(0);
+    // Ancestors should still be present (they're built from the path string)
+    const ancestors = items.filter((i) => i.isAncestor);
+    expect(ancestors.length).toBeGreaterThan(0);
   });
 });

@@ -1,7 +1,7 @@
 /**
  * Async wrappers for ib mutation commands.
  * Every command runs with cwd set to the agent's repoPath.
- * All agent commands are implemented natively; only hooks commands delegate to ib CLI.
+ * All commands are implemented natively — no ib CLI dependency.
  */
 
 import { join } from "path";
@@ -2011,57 +2011,268 @@ export async function acknowledgeQuestion(repoPath: string, questionId: string):
   return { ok: true, exitCode: 0, stdout: `Acknowledged question '${questionId}' from agent '${question.agent}'`, stderr: "" };
 }
 
-/**
- * Direct ib CLI call — used for hooks commands that don't have native implementations.
- * Not mockable — these are thin CLI wrappers.
- */
-async function runIbDirect(args: string[], cwd: string): Promise<IbCommandResult> {
-  const proc = Bun.spawn(["ib", ...args], {
-    cwd,
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const [stdout, stderr] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-  ]);
-  const exitCode = await proc.exited;
-  return {
-    ok: exitCode === 0,
-    exitCode,
-    stdout: stdout.trim(),
-    stderr: stderr.trim(),
-  };
+// ── Settings JSON helpers for hooks management ─────────────────────────────
+
+/** Read and parse {repoPath}/.claude/settings.local.json, returning {} on missing/invalid */
+async function readSettingsJson(repoPath: string): Promise<Record<string, unknown>> {
+  try {
+    const file = Bun.file(join(repoPath, ".claude", "settings.local.json"));
+    if (await file.exists()) {
+      return await file.json();
+    }
+  } catch { /* ignore */ }
+  return {};
 }
 
-/** Returns "installed", "partial", or "not-installed" */
+/** Write settings JSON back to {repoPath}/.claude/settings.local.json */
+async function writeSettingsJson(repoPath: string, settings: Record<string, unknown>): Promise<void> {
+  const claudeDir = join(repoPath, ".claude");
+  await mkdir(claudeDir, { recursive: true });
+  await Bun.write(join(claudeDir, "settings.local.json"), JSON.stringify(settings, null, 2) + "\n");
+}
+
+/** Check if a hook array contains an entry whose command includes the given substring */
+function hookArrayHasCommand(hookArray: unknown, substring: string): boolean {
+  if (!Array.isArray(hookArray)) return false;
+  for (const entry of hookArray) {
+    const hooks = (entry as Record<string, unknown>)?.hooks;
+    if (!Array.isArray(hooks)) continue;
+    for (const h of hooks) {
+      const cmd = (h as Record<string, unknown>)?.command;
+      if (typeof cmd === "string" && cmd.includes(substring)) return true;
+    }
+  }
+  return false;
+}
+
+/** Filter a hook array to remove entries whose command contains any of the given substrings */
+function filterHookArray(hookArray: unknown, substrings: string[]): unknown[] {
+  if (!Array.isArray(hookArray)) return [];
+  return hookArray.filter((entry: unknown) => {
+    const hooks = (entry as Record<string, unknown>)?.hooks;
+    if (!Array.isArray(hooks)) return true;
+    // Keep entry only if NONE of its hooks match any substring
+    return hooks.every((h: unknown) => {
+      const cmd = (h as Record<string, unknown>)?.command;
+      if (typeof cmd !== "string") return true;
+      return !substrings.some((sub) => cmd.includes(sub));
+    });
+  });
+}
+
+/** Remove empty hook arrays and empty hooks object from settings */
+function cleanupHooksObject(settings: Record<string, unknown>): void {
+  const hooks = settings.hooks as Record<string, unknown> | undefined;
+  if (!hooks) return;
+  for (const key of Object.keys(hooks)) {
+    if (Array.isArray(hooks[key]) && (hooks[key] as unknown[]).length === 0) {
+      delete hooks[key];
+    }
+  }
+  if (Object.keys(hooks).length === 0) {
+    delete settings.hooks;
+  }
+}
+
+// ── Hook detection predicates ───────────────────────────────────────────────
+
+/** Check for main-path PreToolUse hook (matches both "ib" and "itsybitsy" prefixes) */
+function hasMainPathHook(settings: Record<string, unknown>): boolean {
+  const hooks = settings.hooks as Record<string, unknown> | undefined;
+  return hookArrayHasCommand(hooks?.PreToolUse, "hooks main-path");
+}
+
+/** Check for status injection hooks (UserPromptSubmit + PostToolUse, both must be present) */
+function hasStatusHooks(settings: Record<string, unknown>): boolean {
+  const hooks = settings.hooks as Record<string, unknown> | undefined;
+  if (!hooks) return false;
+  return (
+    hookArrayHasCommand(hooks.UserPromptSubmit, "hooks inject-status") &&
+    hookArrayHasCommand(hooks.PostToolUse, "hooks inject-status")
+  );
+}
+
+/** Check for session-start hook */
+function hasSessionStartHook(settings: Record<string, unknown>): boolean {
+  const hooks = settings.hooks as Record<string, unknown> | undefined;
+  return hookArrayHasCommand(hooks?.SessionStart, "hooks session-start");
+}
+
+/** Check for intercept-task hook */
+function hasInterceptHook(settings: Record<string, unknown>): boolean {
+  const hooks = settings.hooks as Record<string, unknown> | undefined;
+  return hookArrayHasCommand(hooks?.PreToolUse, "hooks intercept-task");
+}
+
+// ── Exported hooks management functions ─────────────────────────────────────
+
+/** Returns "installed", "partial", or "not-installed" for safety hooks */
 export async function hooksStatus(repoPath: string): Promise<IbCommandResult> {
-  return runIbDirect(["hooks", "status"], repoPath);
+  const settings = await readSettingsJson(repoPath);
+  const hasMain = hasMainPathHook(settings);
+  const hasStatus = hasStatusHooks(settings);
+  const hasSession = hasSessionStartHook(settings);
+
+  let status: string;
+  if (hasMain && hasStatus && hasSession) {
+    status = "installed";
+  } else if (hasMain || hasStatus || hasSession) {
+    status = "partial";
+  } else {
+    status = "not-installed";
+  }
+  return { ok: true, exitCode: 0, stdout: status, stderr: "" };
 }
 
 /** Returns "installed" or "not-installed" for the intercept hook */
 export async function interceptHooksStatus(repoPath: string): Promise<IbCommandResult> {
-  return runIbDirect(["hooks", "status", "--intercept"], repoPath);
+  const settings = await readSettingsJson(repoPath);
+  const status = hasInterceptHook(settings) ? "installed" : "not-installed";
+  return { ok: true, exitCode: 0, stdout: status, stderr: "" };
 }
 
-/** Install all safety hooks (path isolation + status injection + session-start) */
+/** Install all safety hooks (path isolation + status injection + session-start). Idempotent. */
 export async function installSafetyHooks(repoPath: string): Promise<IbCommandResult> {
-  return runIbDirect(["hooks", "install"], repoPath);
+  const settings = await readSettingsJson(repoPath);
+  const hooks = ((settings.hooks as Record<string, unknown>) ?? {}) as Record<string, unknown>;
+  settings.hooks = hooks;
+
+  let installed = false;
+
+  // Add main-path hook if not present
+  if (!hasMainPathHook(settings)) {
+    if (!Array.isArray(hooks.PreToolUse)) hooks.PreToolUse = [];
+    (hooks.PreToolUse as unknown[]).push({
+      matcher: "Bash",
+      hooks: [{ type: "command", command: "itsybitsy hooks main-path" }],
+    });
+    installed = true;
+  }
+
+  // Add status hooks if not present
+  if (!hasStatusHooks(settings)) {
+    if (!Array.isArray(hooks.UserPromptSubmit)) hooks.UserPromptSubmit = [];
+    if (!Array.isArray(hooks.PostToolUse)) hooks.PostToolUse = [];
+    (hooks.UserPromptSubmit as unknown[]).push({
+      hooks: [{ type: "command", command: "itsybitsy hooks inject-status --full --visible" }],
+    });
+    (hooks.PostToolUse as unknown[]).push({
+      matcher: "Bash|Task",
+      hooks: [{ type: "command", command: "itsybitsy hooks inject-status --if-changed --visible" }],
+    });
+    installed = true;
+  }
+
+  // Add session-start hook if not present
+  if (!hasSessionStartHook(settings)) {
+    if (!Array.isArray(hooks.SessionStart)) hooks.SessionStart = [];
+    (hooks.SessionStart as unknown[]).push({
+      hooks: [{ type: "command", command: "itsybitsy hooks session-start" }],
+    });
+    installed = true;
+  }
+
+  if (!installed) {
+    return { ok: true, exitCode: 0, stdout: "Hooks already installed", stderr: "" };
+  }
+
+  await writeSettingsJson(repoPath, settings);
+  return { ok: true, exitCode: 0, stdout: "Hooks installed to .claude/settings.local.json", stderr: "" };
 }
 
-/** Uninstall all safety hooks */
+/** Uninstall all safety hooks (removes both ib and itsybitsy hook entries). Idempotent. */
 export async function uninstallSafetyHooks(repoPath: string): Promise<IbCommandResult> {
-  return runIbDirect(["hooks", "uninstall"], repoPath);
+  const settingsPath = join(repoPath, ".claude", "settings.local.json");
+  const file = Bun.file(settingsPath);
+  if (!(await file.exists().catch(() => false))) {
+    return { ok: true, exitCode: 0, stdout: "No settings file found, nothing to uninstall", stderr: "" };
+  }
+
+  let settings: Record<string, unknown>;
+  try {
+    settings = await file.json();
+  } catch {
+    return { ok: true, exitCode: 0, stdout: "No settings file found, nothing to uninstall", stderr: "" };
+  }
+
+  const hooks = settings.hooks as Record<string, unknown> | undefined;
+  if (hooks) {
+    // Remove main-path from PreToolUse
+    if (hooks.PreToolUse) {
+      hooks.PreToolUse = filterHookArray(hooks.PreToolUse, ["hooks main-path"]);
+    }
+    // Remove inject-status from UserPromptSubmit and PostToolUse
+    if (hooks.UserPromptSubmit) {
+      hooks.UserPromptSubmit = filterHookArray(hooks.UserPromptSubmit, ["hooks inject-status"]);
+    }
+    if (hooks.PostToolUse) {
+      hooks.PostToolUse = filterHookArray(hooks.PostToolUse, ["hooks inject-status"]);
+    }
+    // Remove session-start from SessionStart
+    if (hooks.SessionStart) {
+      hooks.SessionStart = filterHookArray(hooks.SessionStart, ["hooks session-start"]);
+    }
+    cleanupHooksObject(settings);
+  }
+
+  // Delete file if settings is now empty, otherwise write back
+  if (Object.keys(settings).length === 0) {
+    await rm(settingsPath).catch(() => {});
+    return { ok: true, exitCode: 0, stdout: "Hooks uninstalled, removed empty settings file", stderr: "" };
+  }
+
+  await writeSettingsJson(repoPath, settings);
+  return { ok: true, exitCode: 0, stdout: "Hooks uninstalled from .claude/settings.local.json", stderr: "" };
 }
 
-/** Install task interception hook */
+/** Install task interception hook. Idempotent. */
 export async function installInterceptHook(repoPath: string): Promise<IbCommandResult> {
-  return runIbDirect(["hooks", "install-intercept"], repoPath);
+  const settings = await readSettingsJson(repoPath);
+
+  if (hasInterceptHook(settings)) {
+    return { ok: true, exitCode: 0, stdout: "Task interception hook already installed", stderr: "" };
+  }
+
+  const hooks = ((settings.hooks as Record<string, unknown>) ?? {}) as Record<string, unknown>;
+  settings.hooks = hooks;
+  if (!Array.isArray(hooks.PreToolUse)) hooks.PreToolUse = [];
+  (hooks.PreToolUse as unknown[]).push({
+    matcher: "Task",
+    hooks: [{ type: "command", command: "itsybitsy hooks intercept-task" }],
+  });
+
+  await writeSettingsJson(repoPath, settings);
+  return { ok: true, exitCode: 0, stdout: "Task interception hook installed to .claude/settings.local.json", stderr: "" };
 }
 
-/** Uninstall task interception hook */
+/** Uninstall task interception hook. Idempotent. */
 export async function uninstallInterceptHook(repoPath: string): Promise<IbCommandResult> {
-  return runIbDirect(["hooks", "uninstall-intercept"], repoPath);
+  const settingsPath = join(repoPath, ".claude", "settings.local.json");
+  const file = Bun.file(settingsPath);
+  if (!(await file.exists().catch(() => false))) {
+    return { ok: true, exitCode: 0, stdout: "No settings file found, nothing to uninstall", stderr: "" };
+  }
+
+  let settings: Record<string, unknown>;
+  try {
+    settings = await file.json();
+  } catch {
+    return { ok: true, exitCode: 0, stdout: "No settings file found, nothing to uninstall", stderr: "" };
+  }
+
+  const hooks = settings.hooks as Record<string, unknown> | undefined;
+  if (hooks && hooks.PreToolUse) {
+    hooks.PreToolUse = filterHookArray(hooks.PreToolUse, ["hooks intercept-task"]);
+    cleanupHooksObject(settings);
+  }
+
+  if (Object.keys(settings).length === 0) {
+    await rm(settingsPath).catch(() => {});
+    return { ok: true, exitCode: 0, stdout: "Task interception hook uninstalled, removed empty settings file", stderr: "" };
+  }
+
+  await writeSettingsJson(repoPath, settings);
+  return { ok: true, exitCode: 0, stdout: "Task interception hook uninstalled from .claude/settings.local.json", stderr: "" };
 }
 
 /** Check if .ittybitty is in .gitignore */

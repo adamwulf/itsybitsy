@@ -9,6 +9,7 @@ import { watch, type FSWatcher } from "fs";
 import { join } from "path";
 import { readAllAgents, buildAgentTree, flattenAgentTree, readPendingQuestions, detectAgentStates } from "./agents";
 import type { Agent, FlatAgent, PendingQuestion } from "./agents";
+import { repoDisplayName } from "./registry";
 import type { RepoEntry } from "./registry";
 
 export interface WatcherEvents {
@@ -127,7 +128,7 @@ export class AgentWatcher {
       // If refresh() swapped lastAgents while we were awaiting, discard stale results
       if (agents !== this.lastAgents) return;
       const roots = buildAgentTree(agents);
-      const flatList = flattenAgentTree(roots, this.repos.map((r) => r.name));
+      const flatList = flattenAgentTree(roots, this.repos.map((r) => repoDisplayName(r)));
       const questionResults = await Promise.all(
         this.repos.map((r) => readPendingQuestions(r.path))
       );
@@ -148,7 +149,8 @@ export class AgentWatcher {
     }
     this.refreshing = true;
     try {
-      const { agents, errors, orphanedTmuxSessions } = await readAllAgents(this.repos);
+      const reposWithDisplayNames = this.repos.map((r) => ({ path: r.path, name: repoDisplayName(r) }));
+      const { agents, errors, orphanedTmuxSessions } = await readAllAgents(reposWithDisplayNames);
 
       // Report any read errors
       for (const err of errors) {
@@ -163,7 +165,7 @@ export class AgentWatcher {
       await detectAgentStates(agents);
 
       const roots = buildAgentTree(agents);
-      const flatList = flattenAgentTree(roots, this.repos.map((r) => r.name));
+      const flatList = flattenAgentTree(roots, this.repos.map((r) => repoDisplayName(r)));
 
       // Read pending questions from all repos
       const questionResults = await Promise.all(

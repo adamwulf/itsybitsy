@@ -6,7 +6,7 @@
 import { stat } from "node:fs/promises";
 import type { Agent, FlatAgent, PendingQuestion } from "../agents";
 import type { RepoEntry } from "../registry";
-import { addRepo, loadRegistry, saveRegistry } from "../registry";
+import { addRepo, loadRegistry, saveRegistry, renameRepo, removeRepo, repoDisplayName } from "../registry";
 import {
   killAgent, nukeAgent, nukeAllAgents, resumeAgent, pauseAgent, reassignAgent,
   mergeCheckAgent, mergeAgent, sendMessage, newAgent, diffAgent,
@@ -113,7 +113,7 @@ export function handleNukeAll(ctx: ActionCtx) {
     const repo = ctx.repos[0]!;
     ctx.showDialog({
       type: "confirm",
-      prompt: `${RED}NUKE ALL agents in ${repo.name}? This cannot be undone.${RESET}`,
+      prompt: `${RED}NUKE ALL agents in ${repoDisplayName(repo)}? This cannot be undone.${RESET}`,
       confirmLabel: "Nuke All",
       focusedButton: "cancel",
       confirmColor: RED,
@@ -121,7 +121,7 @@ export function handleNukeAll(ctx: ActionCtx) {
         ctx.closeDialog();
         ctx.executeAndRefresh(async () => {
           const result = await nukeAllAgents(repo.path);
-          ctx.setNotice(result.ok ? `Nuked all agents in ${repo.name}` : `Nuke-all failed: ${result.stderr || result.stdout}`);
+          ctx.setNotice(result.ok ? `Nuked all agents in ${repoDisplayName(repo)}` : `Nuke-all failed: ${result.stderr || result.stdout}`);
         });
       },
     });
@@ -131,13 +131,13 @@ export function handleNukeAll(ctx: ActionCtx) {
   ctx.showDialog({
     type: "select",
     prompt: "Nuke ALL agents in which repo?",
-    items: ctx.repos.map((r) => `${r.name} (${r.path})`),
+    items: ctx.repos.map((r) => `${repoDisplayName(r)} (${r.path})`),
     selectedIndex: 0,
     onSelect: (repoIndex: number) => {
       const repo = ctx.repos[repoIndex]!;
       ctx.showDialog({
         type: "confirm",
-        prompt: `${RED}NUKE ALL agents in ${repo.name}? This cannot be undone.${RESET}`,
+        prompt: `${RED}NUKE ALL agents in ${repoDisplayName(repo)}? This cannot be undone.${RESET}`,
         confirmLabel: "Nuke All",
         focusedButton: "cancel",
         confirmColor: RED,
@@ -145,7 +145,7 @@ export function handleNukeAll(ctx: ActionCtx) {
           ctx.closeDialog();
           ctx.executeAndRefresh(async () => {
             const result = await nukeAllAgents(repo.path);
-            ctx.setNotice(result.ok ? `Nuked all agents in ${repo.name}` : `Nuke-all failed: ${result.stderr || result.stdout}`);
+            ctx.setNotice(result.ok ? `Nuked all agents in ${repoDisplayName(repo)}` : `Nuke-all failed: ${result.stderr || result.stdout}`);
           });
         },
       });
@@ -335,7 +335,7 @@ export function handleNewAgentInCurrentRepo(ctx: ActionCtx) {
     const repo = ctx.repos.find((r) => r.path === selectedAgent.repoPath);
     if (repo) { showNewAgentFormDialog(ctx, repo); return; }
   } else if (selectedRepoHeader) {
-    const repo = ctx.repos.find((r) => r.name === selectedRepoHeader);
+    const repo = ctx.repos.find((r) => repoDisplayName(r) === selectedRepoHeader);
     if (repo) { showNewAgentFormDialog(ctx, repo); return; }
   }
   showRepoPicker(ctx);
@@ -345,7 +345,7 @@ function showRepoPicker(ctx: ActionCtx) {
   ctx.showDialog({
     type: "select",
     prompt: "Select repo for new agent:",
-    items: ctx.repos.map((r) => `${r.name} (${r.path})`),
+    items: ctx.repos.map((r) => `${repoDisplayName(r)} (${r.path})`),
     selectedIndex: 0,
     onSelect: (repoIndex: number) => {
       showNewAgentFormDialog(ctx, ctx.repos[repoIndex]!);
@@ -359,7 +359,7 @@ function showNewAgentFormDialog(ctx: ActionCtx, repo: RepoEntry) {
   const managerId = selected && selected.repoPath === repo.path ? selected.id : undefined;
   ctx.showDialog({
     type: "new-agent-form",
-    repoName: repo.name,
+    repoName: repoDisplayName(repo),
     name: "",
     worker: false,
     lines: [""],
@@ -374,7 +374,7 @@ function showNewAgentFormDialog(ctx: ActionCtx, repo: RepoEntry) {
         const result = await newAgent(repo.path, prompt, opts);
         if (result.ok) {
           ctx.pendingSelectNewestInRepo = repo.path;
-          ctx.setNotice(`Created new agent in ${repo.name}`);
+          ctx.setNotice(`Created new agent in ${repoDisplayName(repo)}`);
         } else {
           ctx.setNotice(`New agent failed: ${result.stderr || result.stdout}`);
         }
@@ -878,6 +878,53 @@ export function handleKillOrphanedSession(ctx: ActionCtx, session: string) {
       ctx.executeAndRefresh(async () => {
         const ok = await killTmuxSession(session);
         ctx.setNotice(ok ? `Killed session: ${session}` : `Failed to kill session: ${session}`);
+      });
+    },
+  });
+}
+
+/** Find the repo matching the currently selected repo header */
+function findRepoByHeader(ctx: ActionCtx): RepoEntry | null {
+  const header = ctx.agentTree.selectedRepoHeader;
+  if (!header) return null;
+  return ctx.repos.find((r) => repoDisplayName(r) === header) ?? null;
+}
+
+export function handleRenameRepo(ctx: ActionCtx) {
+  const repo = findRepoByHeader(ctx);
+  if (!repo) { ctx.setNotice("No repo selected"); return; }
+  ctx.showDialog({
+    type: "input",
+    prompt: `Rename ${repoDisplayName(repo)}:`,
+    value: repo.nickname ?? "",
+    onSubmit: (value: string) => {
+      ctx.closeDialog();
+      renameRepo(repo.path, value).then((result) => {
+        ctx.setNotice(result.message);
+        if (result.ok) { ctx.watcher?.refresh(); }
+      }).catch((err) => {
+        ctx.setNotice(`Error renaming: ${err}`);
+      });
+    },
+  });
+}
+
+export function handleRemoveRepo(ctx: ActionCtx) {
+  const repo = findRepoByHeader(ctx);
+  if (!repo) { ctx.setNotice("No repo selected"); return; }
+  ctx.showDialog({
+    type: "confirm",
+    prompt: `Remove ${repoDisplayName(repo)} from registry?\n(${repo.path})`,
+    confirmLabel: "Remove",
+    focusedButton: "cancel",
+    confirmColor: RED,
+    onYes: () => {
+      ctx.closeDialog();
+      removeRepo(repo.path).then((result) => {
+        ctx.setNotice(result.message);
+        if (result.ok) { ctx.watcher?.refresh(); }
+      }).catch((err) => {
+        ctx.setNotice(`Error removing: ${err}`);
       });
     },
   });

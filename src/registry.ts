@@ -4,6 +4,12 @@ import { homedir } from "os";
 export interface RepoEntry {
   path: string;
   name: string;
+  nickname?: string;
+}
+
+/** Returns nickname if set, otherwise name (basename). */
+export function repoDisplayName(repo: RepoEntry): string {
+  return repo.nickname ?? repo.name;
 }
 
 export interface RegistryData {
@@ -67,6 +73,23 @@ export async function removeRepo(repoPath: string): Promise<{ ok: boolean; messa
 
   await saveRegistry(registry);
   return { ok: true, message: `Removed: ${resolved}` };
+}
+
+export async function renameRepo(repoPath: string, nickname: string): Promise<{ ok: boolean; message: string }> {
+  const resolved = resolve(repoPath);
+  const registry = await loadRegistry();
+  const entry = registry.repos.find((r) => r.path === resolved);
+  if (!entry) {
+    return { ok: false, message: `Not found: ${resolved}` };
+  }
+  const trimmed = nickname.trim();
+  if (trimmed) {
+    entry.nickname = trimmed;
+  } else {
+    delete entry.nickname;
+  }
+  await saveRegistry(registry);
+  return { ok: true, message: `Renamed ${entry.name} → ${trimmed || entry.name}` };
 }
 
 export async function listRepos(): Promise<RepoEntry[]> {

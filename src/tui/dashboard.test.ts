@@ -2097,3 +2097,150 @@ describe("Minimum terminal size (G-11)", () => {
     expect(stripAnsi(lines[0]!)).toContain("itsybitsy");
   });
 });
+
+describe("Context-sensitive footer (repo header vs agent)", () => {
+  let dashboard: DashboardComponent;
+
+  function setupMultiRepoWithRepoHeader() {
+    dashboard = makeDashboard();
+    setRunner(async () => ({ ok: true, exitCode: 0, stdout: "", stderr: "" }));
+    Object.defineProperty(process.stdout, "rows", { value: 40, writable: true, configurable: true });
+
+    const agent1 = _makeAgent({ id: "agent-a", repoPath: "/repos/alpha", repoName: "alpha" });
+    agent1.state = "running";
+    const agent2 = _makeAgent({ id: "agent-b", repoPath: "/repos/beta", repoName: "beta" });
+    agent2.state = "running";
+
+    // Simulate multi-repo flatList with repo headers
+    const flatList: FlatAgent[] = [
+      { agent: agent1, depth: 0, connector: "", repoHeader: "alpha", repoHasAgents: true },
+      { agent: agent1, depth: 0, connector: "└── " },
+      { agent: agent2, depth: 0, connector: "", repoHeader: "beta", repoHasAgents: true },
+      { agent: agent2, depth: 0, connector: "└── " },
+    ];
+    dashboard.setRepos([
+      { path: "/repos/alpha", name: "alpha" },
+      { path: "/repos/beta", name: "beta" },
+    ]);
+    dashboard.onUpdate([agent1, agent2], flatList, []);
+    return { agent1, agent2 };
+  }
+
+  afterEach(() => {
+    resetRunner();
+  });
+
+  test("footer shows repo actions when repo header is selected", () => {
+    setupMultiRepoWithRepoHeader();
+    // First row is repo header "alpha" — selectedIndex=0 is repo header
+    expect(dashboard.agentTree.selectedRepoHeader).toBe("alpha");
+    expect(dashboard.selectedAgent).toBeNull();
+
+    const lines = dashboard.render(120);
+    const allText = lines.map(stripAnsi).join("\n");
+    expect(allText).toContain("r: rename repo");
+    expect(allText).toContain("x: remove repo");
+    // Should NOT show agent-specific actions
+    expect(allText).not.toContain("s: send");
+    expect(allText).not.toContain("m: merge");
+    expect(allText).not.toContain("R: resume");
+    expect(allText).not.toContain("G: ghostty");
+  });
+
+  test("footer shows agent actions when agent is selected", () => {
+    setupMultiRepoWithRepoHeader();
+    // Navigate down to agent-a (index 1)
+    dashboard.handleInput("j");
+    expect(dashboard.selectedAgent?.id).toBe("agent-a");
+    expect(dashboard.agentTree.selectedRepoHeader).toBeNull();
+
+    const lines = dashboard.render(120);
+    const allText = lines.map(stripAnsi).join("\n");
+    expect(allText).toContain("s: send");
+    expect(allText).toContain("m: merge");
+    expect(allText).toContain("r: reassign");
+    // Should NOT show repo actions
+    expect(allText).not.toContain("r: rename repo");
+    expect(allText).not.toContain("x: remove repo");
+  });
+
+  test("r key on repo header opens rename dialog instead of reassign", () => {
+    setupMultiRepoWithRepoHeader();
+    expect(dashboard.agentTree.selectedRepoHeader).toBe("alpha");
+    dashboard.handleInput("r");
+    expect(dashboard.dialog).not.toBeNull();
+    expect(dashboard.dialog!.type).toBe("input");
+    expect((dashboard.dialog as any).prompt).toContain("Rename");
+  });
+
+  test("r key on agent opens reassign dialog", () => {
+    setupMultiRepoWithRepoHeader();
+    dashboard.handleInput("j"); // move to agent
+    expect(dashboard.selectedAgent).not.toBeNull();
+    dashboard.handleInput("r");
+    expect(dashboard.dialog).not.toBeNull();
+    expect(dashboard.dialog!.type).toBe("fuzzy");
+    expect((dashboard.dialog as any).prompt).toContain("Reassign");
+  });
+
+  test("x key on repo header opens remove dialog instead of kill", () => {
+    setupMultiRepoWithRepoHeader();
+    expect(dashboard.agentTree.selectedRepoHeader).toBe("alpha");
+    dashboard.handleInput("x");
+    expect(dashboard.dialog).not.toBeNull();
+    expect(dashboard.dialog!.type).toBe("confirm");
+    expect((dashboard.dialog as any).prompt).toContain("Remove");
+    expect((dashboard.dialog as any).prompt).toContain("alpha");
+  });
+
+  test("x key on agent opens kill dialog", () => {
+    setupMultiRepoWithRepoHeader();
+    dashboard.handleInput("j");
+    expect(dashboard.selectedAgent).not.toBeNull();
+    dashboard.handleInput("x");
+    expect(dashboard.dialog).not.toBeNull();
+    expect(dashboard.dialog!.type).toBe("confirm");
+    expect((dashboard.dialog as any).prompt).toContain("Kill");
+  });
+});
+
+describe("Repo nickname display in agent tree", () => {
+  let dashboard: DashboardComponent;
+
+  afterEach(() => {
+    resetRunner();
+  });
+
+  test("repo header shows nickname when set", () => {
+    dashboard = makeDashboard();
+    setRunner(async () => ({ ok: true, exitCode: 0, stdout: "", stderr: "" }));
+    Object.defineProperty(process.stdout, "rows", { value: 40, writable: true, configurable: true });
+
+    const agent = _makeAgent({ id: "agent-a", repoPath: "/repos/myproject", repoName: "myproj-nick" });
+    agent.state = "running";
+
+    const flatList: FlatAgent[] = [
+      { agent, depth: 0, connector: "", repoHeader: "myproj-nick", repoHasAgents: true },
+      { agent, depth: 0, connector: "└── " },
+    ];
+    dashboard.setRepos([
+      { path: "/repos/myproject", name: "myproject", nickname: "myproj-nick" },
+      { path: "/repos/other", name: "other" },
+    ]);
+    dashboard.onUpdate([agent], flatList, []);
+
+    const lines = dashboard.render(120);
+    const allText = lines.map(stripAnsi).join("\n");
+    expect(allText).toContain("myproj-nick");
+  });
+
+  test("a key with nickname shows nickname in new agent form", () => {
+    dashboard = makeDashboard();
+    setRunner(async () => ({ ok: true, exitCode: 0, stdout: "", stderr: "" }));
+    dashboard.setRepos([{ path: "/repos/myproject", name: "myproject", nickname: "myproj" }]);
+    dashboard.handleInput("a");
+    expect(dashboard.dialog!.type).toBe("new-agent-form");
+    expect((dashboard.dialog as any).repoName).toBe("myproj");
+    resetRunner();
+  });
+});

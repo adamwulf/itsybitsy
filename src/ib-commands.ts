@@ -1,11 +1,11 @@
 /**
  * Async wrappers for ib mutation commands.
  * Every command runs with cwd set to the agent's repoPath.
- * kill, pause, sendMessage, nuke, resume, and merge are implemented natively; others delegate to ib CLI.
+ * kill, pause, sendMessage, nuke, resume, merge, and newAgent are implemented natively; others delegate to ib CLI.
  */
 
 import { join } from "path";
-import { readdir, chmod, rm } from "fs/promises";
+import { readdir, chmod, rm, mkdir } from "fs/promises";
 import type { Agent } from "./agents";
 import {
   logAgent,
@@ -19,6 +19,7 @@ import {
   captureTmuxOutputToFile,
   isRunningAsAgent,
 } from "./agent-lifecycle";
+import { readConfig } from "./config";
 import type { SpawnFn } from "./types";
 
 export interface IbCommandResult {
@@ -973,21 +974,775 @@ export interface NewAgentOptions {
   yolo?: boolean;
   model?: string;
   manager?: string;
+  noWorktree?: boolean;
+  allowTools?: string;
+  denyTools?: string;
+  print?: boolean;
+  /** Override cwd for auto-detect manager (used in tests). */
+  _cwd?: string;
 }
 
+/** Pluggable spawn runner for newAgent — defaults to Bun.spawn, overridable for tests */
+let newAgentSpawnRunner: SpawnFn = Bun.spawn as SpawnFn;
+/** Override delay for newAgent tests (null = use real delay) */
+let newAgentDelayOverrideMs: number | null = null;
+
+/** Override the newAgent spawn runner (for testing). Sets delay to 0 by default. */
+export function setNewAgentSpawnRunner(runner: SpawnFn): void {
+  newAgentSpawnRunner = runner;
+  newAgentDelayOverrideMs = 0;
+}
+
+/** Reset the newAgent spawn runner */
+export function resetNewAgentSpawnRunner(): void {
+  newAgentSpawnRunner = Bun.spawn as SpawnFn;
+  newAgentDelayOverrideMs = null;
+}
+
+/**
+ * Helper: run a command via the newAgent spawn runner and return { stdout, exitCode }.
+ */
+async function newAgentRunCmd(cmd: string[]): Promise<{ stdout: string; exitCode: number }> {
+  const proc = newAgentSpawnRunner(cmd, { stdout: "pipe", stderr: "pipe" });
+  const stdout = await new Response(proc.stdout).text();
+  await new Response(proc.stderr).text(); // drain stderr
+  const exitCode = await proc.exited;
+  return { stdout: stdout.trim(), exitCode };
+}
+
+/**
+ * Read custom prompts from .ittybitty/prompts/ directory.
+ * Mirrors load_custom_prompts() in ib bash.
+ */
+async function loadCustomPrompts(repoPath: string): Promise<{
+  all: string;
+  manager: string;
+  worker: string;
+}> {
+  const promptsDir = join(repoPath, ".ittybitty", "prompts");
+  const result = { all: "", manager: "", worker: "" };
+
+  for (const [key, filename] of [
+    ["all", "all.md"],
+    ["manager", "manager.md"],
+    ["worker", "worker.md"],
+  ] as const) {
+    try {
+      const file = Bun.file(join(promptsDir, filename));
+      if (await file.exists()) {
+        result[key] = await file.text();
+      }
+    } catch { /* ignore */ }
+  }
+
+  return result;
+}
+
+/**
+ * Count active agents (directories with meta.json in agents dir).
+ * Mirrors count_agents() in ib bash.
+ */
+async function countAgents(agentsDir: string): Promise<number> {
+  let count = 0;
+  try {
+    const entries = await readdir(agentsDir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const metaExists = await Bun.file(join(agentsDir, entry.name, "meta.json")).exists().catch(() => false);
+      if (metaExists) count++;
+    }
+  } catch { /* directory may not exist */ }
+  return count;
+}
+
+/**
+ * Read the repo-id from .ittybitty/repo-id (or create one).
+ * Mirrors get_repo_id() in ib bash.
+ */
+async function getRepoId(repoPath: string): Promise<string> {
+  const repoIdFile = join(repoPath, ".ittybitty", "repo-id");
+  try {
+    const file = Bun.file(repoIdFile);
+    if (await file.exists()) {
+      const id = (await file.text()).trim();
+      if (id) return id;
+    }
+  } catch { /* ignore */ }
+
+  // Generate new 8 hex char ID
+  const bytes = new Uint8Array(4);
+  crypto.getRandomValues(bytes);
+  const newId = Array.from(bytes).map(b => b.toString(16).padStart(2, "0")).join("");
+  await mkdir(join(repoPath, ".ittybitty"), { recursive: true });
+  await Bun.write(repoIdFile, newId + "\n");
+  return newId;
+}
+
+/**
+ * Build settings.local.json content for an agent worktree.
+ * Mirrors build_agent_settings() + build_settings_json() in ib bash.
+ */
+async function buildAgentSettings(
+  repoPath: string,
+  agentType: "manager" | "worker",
+  agentId: string,
+  configAllow: string[],
+  configDeny: string[]
+): Promise<string> {
+  // Start with existing settings if available
+  let baseSettings: Record<string, unknown> = {};
+  try {
+    const settingsFile = Bun.file(join(repoPath, ".claude", "settings.local.json"));
+    if (await settingsFile.exists()) {
+      baseSettings = await settingsFile.json();
+    }
+  } catch { /* ignore */ }
+
+  // Mandatory permissions that are always added
+  const ibPerms = [
+    "Bash(ib:*)", "Bash(./ib:*)",
+    "Bash(git status:*)", "Bash(git add:*)", "Bash(git commit:*)",
+    "Bash(git diff:*)", "Bash(git show:*)", "Bash(git log:*)",
+    "Bash(git ls-files:*)", "Bash(git grep:*)", "Bash(git rm:*)",
+    "Bash(git merge:*)", "Bash(git rebase:*)", "Bash(git checkout:*)",
+    "Bash(git restore:*)", "Bash(git reset:*)",
+    "Bash(pwd:*)", "Bash(ls:*)", "Bash(head:*)", "Bash(tail:*)",
+    "Bash(cat:*)", "Bash(grep:*)",
+    "Read", "Write", "Edit", "MultiEdit", "Glob", "Grep", "LS",
+    "TodoWrite", "Task", "TaskOutput", "KillShell", "NotebookEdit",
+    "WebFetch", "WebSearch", "AskUserQuestion",
+  ];
+  const blockedTools = ["EnterPlanMode", "ExitPlanMode"];
+
+  // Initialize permissions
+  const perms = (baseSettings.permissions ?? {}) as Record<string, unknown>;
+  const existingAllow = Array.isArray(perms.allow) ? (perms.allow as string[]) : [];
+  const existingDeny = Array.isArray(perms.deny) ? (perms.deny as string[]) : [];
+
+  // Merge and deduplicate
+  const allAllow = [...new Set([...existingAllow, ...ibPerms, ...configAllow])];
+  const allDeny = [...new Set([...existingDeny, ...blockedTools, ...configDeny])];
+
+  // Check if intercept hook should be added
+  let addIntercept = false;
+  if (agentType === "manager") {
+    try {
+      const settingsFile = Bun.file(join(repoPath, ".claude", "settings.local.json"));
+      if (await settingsFile.exists()) {
+        const settings = await settingsFile.json();
+        const preToolUse = settings?.hooks?.PreToolUse;
+        if (Array.isArray(preToolUse)) {
+          for (const entry of preToolUse) {
+            const hooks = entry?.hooks;
+            if (Array.isArray(hooks)) {
+              for (const h of hooks) {
+                if (typeof h?.command === "string" && h.command.includes("ib hooks intercept-task")) {
+                  addIntercept = true;
+                }
+              }
+            }
+          }
+        }
+      }
+    } catch { /* ignore */ }
+  }
+
+  const hookCmd = `ib hook-permission-denied ${agentId}`;
+
+  // Build PreToolUse hooks
+  const preToolUseHooks: unknown[] = [
+    { matcher: "*", hooks: [{ type: "command", command: `ib hook-check-path ${agentId}` }] },
+  ];
+  if (addIntercept) {
+    preToolUseHooks.push(
+      { matcher: "Task", hooks: [{ type: "command", command: "ib hooks intercept-task" }] }
+    );
+  }
+
+  const result = {
+    ...baseSettings,
+    permissions: {
+      allow: allAllow,
+      deny: allDeny,
+    },
+    hooks: {
+      Stop: [{ matcher: "*", hooks: [{ type: "command", command: `ib hook-status ${agentId}` }] }],
+      PermissionRequest: [{ matcher: "*", hooks: [{ type: "command", command: hookCmd }] }],
+      PreToolUse: preToolUseHooks,
+      SessionStart: [{ hooks: [{ type: "command", command: "ib hooks session-start" }] }],
+    },
+  };
+
+  return JSON.stringify(result, null, 2);
+}
+
+/**
+ * Native newAgent implementation — replaces `ib new-agent`.
+ *
+ * Sequence (mirrors cmd_new_agent in ib bash):
+ * 1.  Validate prompt (required)
+ * 2.  Ensure .ittybitty/agents/ and .ittybitty/archive/ dirs exist
+ * 3.  Auto-detect manager from cwd if not provided
+ * 4.  Validate manager (resolve partial ID, check not a worker)
+ * 5.  Yolo escalation check
+ * 6.  Load config for model, maxAgents, permissions, prompts
+ * 7.  Model fallback: --model > config.model > 'sonnet'
+ * 8.  Max agents check
+ * 9.  Generate agent ID (--name or agent-<8 hex chars>)
+ * 10. Uniqueness check (dir + tmux session)
+ * 11. Create agent directory
+ * 12. Create git worktree + branch (if worktree mode)
+ * 13. Write settings.local.json in worktree
+ * 14. Write meta.json
+ * 15. Write prompt.txt
+ * 16. Write start.sh + exit-check.sh
+ * 17. Init agent.log
+ * 18. Start tmux session
+ * 19. Verify tmux session created
+ * 20. Output agent ID
+ * 21. Post-create-agent hook
+ * 22. Auto-accept workspace trust (if not yolo)
+ * 23. Auto-spawn watchdog (if has manager)
+ */
 export async function newAgent(
   repoPath: string,
   prompt: string,
   opts?: NewAgentOptions
 ): Promise<IbCommandResult> {
-  const args = ["new-agent"];
-  if (opts?.name) args.push("--name", opts.name);
-  if (opts?.worker) args.push("--worker");
-  if (opts?.yolo) args.push("--yolo");
-  if (opts?.model) args.push("--model", opts.model);
-  if (opts?.manager) args.push("--manager", opts.manager);
-  args.push(prompt);
-  return runIb(args, repoPath);
+  // 1. Validate prompt
+  if (!prompt || !prompt.trim()) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: "Error: prompt required" };
+  }
+
+  // Resolve the root repo path (handles worktrees)
+  const rootRepoPath = (await resolveGitRoot(repoPath)) || repoPath;
+
+  const agentsDir = join(rootRepoPath, ".ittybitty", "agents");
+  const archiveDir = join(rootRepoPath, ".ittybitty", "archive");
+
+  // 2. Ensure dirs exist
+  await mkdir(agentsDir, { recursive: true });
+  await mkdir(archiveDir, { recursive: true });
+
+  // Configuration
+  const useWorktree = opts?.noWorktree !== true;
+  const workerMode = opts?.worker === true;
+  const yoloMode = opts?.yolo === true;
+  const printMode = opts?.print === true;
+  const allowTools = opts?.allowTools ?? "";
+  const denyTools = opts?.denyTools ?? "";
+  let manager = opts?.manager ?? "";
+
+  // 3. Auto-detect manager from cwd (only if cwd is in the same repo)
+  if (!manager) {
+    const cwd = opts?._cwd ?? process.cwd();
+    const agentPattern = /\/.ittybitty\/agents\/([^/]+)\/repo/;
+    const match = cwd.match(agentPattern);
+    if (match && cwd.startsWith(rootRepoPath)) {
+      const agentDirPath = cwd.replace(/(\/.ittybitty\/agents\/[^/]*)\/repo.*/, "$1");
+      try {
+        const metaFile = Bun.file(join(agentDirPath, "meta.json"));
+        if (await metaFile.exists()) {
+          const meta = await metaFile.json();
+          if (meta.id) manager = meta.id;
+        }
+      } catch { /* ignore */ }
+    }
+  }
+
+  // 4. Validate manager
+  if (manager) {
+    // Resolve partial ID
+    const resolved = await resolveAgentId(agentsDir, manager);
+    if (!resolved) {
+      return { ok: false, exitCode: 1, stdout: "", stderr: `Error: Manager agent '${manager}' not found` };
+    }
+    manager = resolved;
+
+    // Check manager is not a worker
+    try {
+      const managerMeta = await Bun.file(join(agentsDir, manager, "meta.json")).json();
+      if (managerMeta.worker === true) {
+        return { ok: false, exitCode: 1, stdout: "", stderr: `Error: '${manager}' is a worker agent and cannot manage sub-agents` };
+      }
+    } catch { /* ignore */ }
+  }
+
+  // 5. Yolo escalation check (only if cwd is in the same repo)
+  if (yoloMode) {
+    const cwd = opts?._cwd ?? process.cwd();
+    if (/\/.ittybitty\/agents\/[^/]+\/repo/.test(cwd) && cwd.startsWith(rootRepoPath)) {
+      const parentAgentDir = cwd.replace(/(\/.ittybitty\/agents\/[^/]*)\/repo.*/, "$1");
+      let parentIsYolo = false;
+
+      try {
+        const parentMeta = await Bun.file(join(parentAgentDir, "meta.json")).json();
+        if (parentMeta.yolo === true) parentIsYolo = true;
+      } catch { /* ignore */ }
+
+      if (!parentIsYolo) {
+        try {
+          const startSh = await Bun.file(join(parentAgentDir, "start.sh")).text();
+          if (startSh.includes("dangerously-skip-permissions")) parentIsYolo = true;
+        } catch { /* ignore */ }
+      }
+
+      if (!parentIsYolo) {
+        return { ok: false, exitCode: 1, stdout: "", stderr: "Error: Yolo mode denied - permission escalation not allowed" };
+      }
+    }
+  }
+
+  // 6. Load config
+  const config = await readConfig(rootRepoPath);
+  const customPrompts = await loadCustomPrompts(rootRepoPath);
+
+  // 7. Model fallback: --model > config.model > 'sonnet'
+  let model = opts?.model ?? "";
+  if (!model) {
+    const configModel = config.model?.value as string | undefined;
+    if (configModel) model = configModel;
+  }
+  if (!model) model = "sonnet";
+
+  // Config permissions
+  const agentType = workerMode ? "worker" : "manager";
+  const configAllow = (config[`permissions.${agentType}.allow`]?.value as string[] | undefined) ?? [];
+  const configDeny = (config[`permissions.${agentType}.deny`]?.value as string[] | undefined) ?? [];
+
+  // 8. Max agents check
+  const maxAgents = (config.maxAgents?.value as number | undefined) ?? 10;
+  const currentCount = await countAgents(agentsDir);
+  if (currentCount >= maxAgents) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Error: Maximum agent limit reached (${currentCount}/${maxAgents} agents)` };
+  }
+
+  // 9. Generate agent ID
+  let id: string;
+  if (opts?.name) {
+    id = opts.name;
+  } else {
+    const bytes = new Uint8Array(4);
+    crypto.getRandomValues(bytes);
+    id = `agent-${Array.from(bytes).map(b => b.toString(16).padStart(2, "0")).join("")}`;
+  }
+
+  // Get repo-id for session naming
+  const repoId = await getRepoId(rootRepoPath);
+  const tmuxSession = `ittybitty-${repoId}-${id}`;
+
+  // 10. Uniqueness check
+  const agentDir = join(agentsDir, id);
+  const dirExists = await Bun.file(join(agentDir, "meta.json")).exists().catch(() => false);
+  if (dirExists) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Error: agent '${id}' already exists` };
+  }
+  // Check tmux session
+  const hasSessionResult = await newAgentRunCmd(["tmux", "has-session", "-t", tmuxSession]);
+  if (hasSessionResult.exitCode === 0) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Error: agent '${id}' already exists` };
+  }
+
+  // 11. Create agent directory
+  await mkdir(agentDir, { recursive: true });
+
+  // Working directory defaults to root repo
+  let workPath = rootRepoPath;
+
+  // 12. Create git worktree if requested
+  const branchName = `agent/${id}`;
+  if (useWorktree) {
+    const baseRef = manager ? `agent/${manager}` : "HEAD";
+    const worktreeResult = await newAgentRunCmd([
+      "git", "-C", rootRepoPath, "worktree", "add", join(agentDir, "repo"), "-b", branchName, baseRef,
+    ]);
+    if (worktreeResult.exitCode !== 0) {
+      await rm(agentDir, { recursive: true, force: true });
+      return { ok: false, exitCode: 1, stdout: "", stderr: "Error: could not create worktree" };
+    }
+    workPath = join(agentDir, "repo");
+
+    // 13. Write settings.local.json
+    await mkdir(join(agentDir, "repo", ".claude"), { recursive: true });
+    const settingsContent = await buildAgentSettings(rootRepoPath, agentType, id, configAllow, configDeny);
+    await Bun.write(join(agentDir, "repo", ".claude", "settings.local.json"), settingsContent);
+  } else {
+    // Non-worktree mode: ensure ib permissions in root repo settings
+    const rootSettingsPath = join(rootRepoPath, ".claude", "settings.local.json");
+    try {
+      const rootSettingsFile = Bun.file(rootSettingsPath);
+      if (await rootSettingsFile.exists()) {
+        const settings = await rootSettingsFile.json();
+        const allow = (settings?.permissions?.allow as string[]) ?? [];
+        let needsUpdate = false;
+        if (!allow.includes("Bash(ib:*)")) needsUpdate = true;
+        if (!allow.includes("Bash(./ib:*)")) needsUpdate = true;
+        if (needsUpdate) {
+          if (!allow.includes("Bash(ib:*)")) allow.push("Bash(ib:*)");
+          if (!allow.includes("Bash(./ib:*)")) allow.push("Bash(./ib:*)");
+          settings.permissions = { ...settings.permissions, allow };
+          await Bun.write(rootSettingsPath, JSON.stringify(settings, null, 2));
+        }
+      } else {
+        await mkdir(join(rootRepoPath, ".claude"), { recursive: true });
+        await Bun.write(rootSettingsPath, JSON.stringify({ permissions: { allow: ["Bash(ib:*)", "Bash(./ib:*)"] } }));
+      }
+    } catch { /* ignore */ }
+  }
+
+  // Generate UUID for Claude session
+  const sessionUuid = crypto.randomUUID();
+
+  // 14. Write meta.json
+  const now = new Date();
+  const metaJson = {
+    id,
+    session_id: sessionUuid,
+    tmux_session: tmuxSession,
+    prompt,
+    manager: manager || null,
+    created: now.toISOString(),
+    created_epoch: Math.floor(now.getTime() / 1000),
+    worktree: useWorktree,
+    worker: workerMode,
+    yolo: yoloMode,
+    model: model || null,
+  };
+  await Bun.write(join(agentDir, "meta.json"), JSON.stringify(metaJson, null, 2) + "\n");
+
+  // Log agent creation
+  if (manager) {
+    await logAgent(agentDir, `Agent created (manager: ${manager}, prompt: ${prompt})`);
+    const managerDir = join(agentsDir, manager);
+    const typeLabel = workerMode ? "worker" : "manager";
+    await logAgent(managerDir, `Spawned ${typeLabel} subagent: ${id} (prompt: ${prompt})`);
+  } else {
+    await logAgent(agentDir, `Agent created (prompt: ${prompt})`);
+  }
+
+  // 15. Build prompt.txt
+  const createPRs = config.createPullRequests?.value === true;
+  let completionInstructions = "";
+
+  if (useWorktree && !workerMode) {
+    // Check for gh and remote
+    const hasGhResult = await newAgentRunCmd(["which", "gh"]);
+    const hasGh = hasGhResult.exitCode === 0;
+    const hasRemoteResult = await newAgentRunCmd(["git", "-C", rootRepoPath, "remote"]);
+    const hasRemote = hasRemoteResult.stdout.trim().length > 0;
+
+    if (createPRs && hasGh && hasRemote) {
+      completionInstructions = `\nWhen completing: after merging all sub-agents, create a pull request with \`gh pr create --title "<title>" --body "<description>"\`.`;
+    }
+  } else if (!useWorktree) {
+    completionInstructions = `You are running as agent ${id} in the main repository (no worktree).
+When your task is complete:
+1. Commit any changes you made (git add && git commit)
+2. Exit normally`;
+  }
+
+  // Custom prompts
+  let customAllPrompt = "";
+  if (customPrompts.all) {
+    customAllPrompt = `[CUSTOM INSTRUCTIONS]\n${customPrompts.all}\n\n`;
+  }
+
+  let customRolePrompt = "";
+  if (workerMode && customPrompts.worker) {
+    customRolePrompt = `[CUSTOM WORKER INSTRUCTIONS]\n${customPrompts.worker}\n\n`;
+  } else if (!workerMode && customPrompts.manager) {
+    customRolePrompt = `[CUSTOM MANAGER INSTRUCTIONS]\n${customPrompts.manager}\n\n`;
+  }
+
+  const promptPrefix = `${completionInstructions ? completionInstructions + "\n" : ""}${customAllPrompt}${customRolePrompt}${prompt}`;
+
+  const promptFile = join(agentDir, "prompt.txt");
+  await Bun.write(promptFile, promptPrefix);
+
+  // Build claude args
+  let claudeArgs = "";
+  if (yoloMode) {
+    claudeArgs = "--dangerously-skip-permissions --permission-mode bypassPermissions";
+  }
+  if (printMode) {
+    claudeArgs = claudeArgs ? `${claudeArgs} --print` : "--print";
+  }
+  if (allowTools) {
+    claudeArgs = claudeArgs ? `${claudeArgs} --allowedTools ${allowTools}` : `--allowedTools ${allowTools}`;
+  }
+  if (denyTools) {
+    claudeArgs = claudeArgs ? `${claudeArgs} --disallowedTools ${denyTools}` : `--disallowedTools ${denyTools}`;
+  }
+  if (model) {
+    claudeArgs = claudeArgs ? `${claudeArgs} --model ${model}` : `--model ${model}`;
+  }
+
+  // 16. Write exit-check.sh
+  const exitScript = join(agentDir, "exit-check.sh");
+  const exitCheckContent = `#!/bin/bash
+echo ""
+echo "═══════════════════════════════════════════════════════════"
+echo "  Agent session ended - checking for uncommitted work..."
+echo "═══════════════════════════════════════════════════════════"
+
+# Check for uncommitted changes
+if [[ -n $(git status --porcelain 2>/dev/null) ]]; then
+    echo ""
+    echo "⚠️  UNCOMMITTED CHANGES DETECTED"
+    echo ""
+    git status --short
+    echo ""
+    read -p "Commit these changes? [y/N] " commit_confirm
+    if [[ "$commit_confirm" == [yY] || "$commit_confirm" == [yY][eE][sS] ]]; then
+        read -p "Commit message: " commit_msg
+        if [[ -n "$commit_msg" ]]; then
+            git add -A && git commit -m "$commit_msg"
+        else
+            echo "No message provided, skipping commit."
+        fi
+    fi
+fi
+
+# Check for unpushed commits (only if remote exists)
+if git remote | grep -q .; then
+    local_commits=$(git log @{u}..HEAD --oneline 2>/dev/null | wc -l | tr -d ' ')
+    if [[ "$local_commits" -gt 0 ]]; then
+        echo ""
+        echo "⚠️  UNPUSHED COMMITS: $local_commits commit(s) not pushed to remote"
+        echo ""
+        git log @{u}..HEAD --oneline
+        echo ""
+        read -p "Push to remote? [y/N] " push_confirm
+        if [[ "$push_confirm" == [yY] || "$push_confirm" == [yY][eE][sS] ]]; then
+            git push
+        fi
+    fi
+fi
+
+echo ""
+echo "Agent session complete. Branch: $(git branch --show-current)"
+echo "To merge this work: git checkout main && git merge $(git branch --show-current)"
+echo ""
+`;
+  await Bun.write(exitScript, exitCheckContent);
+  await chmod(exitScript, 0o755);
+
+  // Write start.sh
+  const absPromptFile = join(agentDir, "prompt.txt");
+  const absExitScript = join(agentDir, "exit-check.sh");
+  const startScript = join(agentDir, "start.sh");
+  const startContent = `#!/bin/bash
+# Add git repo root to PATH so 'ib' is available
+export PATH="${rootRepoPath}:$PATH"
+
+# Clear Claude Code nesting detection so agents can start their own claude process
+unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT
+
+# Start Claude in background and capture PID
+claude --session-id "${sessionUuid}" ${claudeArgs} "$(cat '${absPromptFile}')" &
+CLAUDE_PID=$!
+
+# Store PID in meta.json using sed (no jq dependency)
+# This adds claude_pid field to existing JSON
+if [[ -f "${agentDir}/meta.json" ]]; then
+    # Insert claude_pid before the closing brace
+    sed -i '' "s/}$/,\\n  \\"claude_pid\\": \\"$CLAUDE_PID\\"\\n}/" "${agentDir}/meta.json"
+fi
+
+# Wait for Claude to complete
+wait $CLAUDE_PID
+
+# Run exit check
+${absExitScript}
+`;
+  await Bun.write(startScript, startContent);
+  await chmod(startScript, 0o755);
+
+  // 17. Init agent.log (already done via logAgent above)
+
+  // 18. Ensure tmux server is running
+  const startServerResult = await newAgentRunCmd(["tmux", "start-server"]);
+  if (startServerResult.exitCode !== 0) {
+    // Cleanup on tmux failure
+    await rm(agentDir, { recursive: true, force: true });
+    if (useWorktree) {
+      await newAgentRunCmd(["git", "-C", rootRepoPath, "worktree", "remove", join(agentDir, "repo"), "--force"]);
+      await newAgentRunCmd(["git", "-C", rootRepoPath, "branch", "-D", branchName]);
+    }
+    return { ok: false, exitCode: 1, stdout: "", stderr: "Error: could not start tmux server" };
+  }
+
+  // Start tmux session
+  const absStartScript = join(agentDir, "start.sh");
+  const tmuxResult = await newAgentRunCmd([
+    "tmux", "new-session", "-d", "-x", "60", "-s", tmuxSession, "-c", workPath, absStartScript,
+  ]);
+  if (tmuxResult.exitCode !== 0) {
+    await rm(agentDir, { recursive: true, force: true });
+    if (useWorktree) {
+      await newAgentRunCmd(["git", "-C", rootRepoPath, "worktree", "remove", join(agentDir, "repo"), "--force"]);
+      await newAgentRunCmd(["git", "-C", rootRepoPath, "branch", "-D", branchName]);
+    }
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Error: could not create tmux session '${tmuxSession}'` };
+  }
+
+  // 19. Verify tmux session created
+  const verifyResult = await newAgentRunCmd(["tmux", "has-session", "-t", tmuxSession]);
+  if (verifyResult.exitCode !== 0) {
+    await rm(agentDir, { recursive: true, force: true });
+    if (useWorktree) {
+      await newAgentRunCmd(["git", "-C", rootRepoPath, "worktree", "remove", join(agentDir, "repo"), "--force"]);
+      await newAgentRunCmd(["git", "-C", rootRepoPath, "branch", "-D", branchName]);
+    }
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Error: tmux session '${tmuxSession}' failed to start` };
+  }
+
+  // 20. Output agent ID
+  const stdout = id;
+
+  // 21. Post-create-agent hook (run in background — fire and forget)
+  const hookPath = join(rootRepoPath, ".ittybitty", "hooks", "post-create-agent");
+  try {
+    const hookFile = Bun.file(hookPath);
+    if (await hookFile.exists()) {
+      const hookEnv = {
+        ...process.env,
+        IB_AGENT_ID: id,
+        IB_AGENT_TYPE: workerMode ? "worker" : "manager",
+        IB_AGENT_DIR: agentDir,
+        IB_AGENT_BRANCH: branchName,
+        IB_AGENT_MANAGER: manager || "",
+        IB_AGENT_PROMPT: prompt,
+        IB_AGENT_MODEL: model,
+      };
+      try {
+        const hookProc = Bun.spawn([hookPath], {
+          cwd: rootRepoPath,
+          env: hookEnv,
+          stdout: "ignore",
+          stderr: "ignore",
+        });
+        hookProc.unref();
+      } catch { /* ignore hook failures */ }
+    }
+  } catch { /* ignore */ }
+
+  // 22. Auto-accept workspace trust (if not yolo) — in background
+  if (!yoloMode) {
+    // Run async without awaiting — fire and forget
+    autoAcceptWorkspaceTrustForNewAgent(tmuxSession).catch(() => {});
+  }
+
+  // 23. Auto-spawn watchdog (if has manager)
+  if (manager) {
+    try {
+      const watchdogLog = join(agentDir, "watchdog.log");
+      const watchdogProc = Bun.spawn(["ib", "watchdog", id], {
+        cwd: rootRepoPath,
+        stdout: Bun.file(watchdogLog),
+        stderr: Bun.file(watchdogLog),
+      });
+      watchdogProc.unref();
+    } catch { /* ignore */ }
+  }
+
+  return { ok: true, exitCode: 0, stdout, stderr: "" };
+}
+
+/**
+ * Auto-accept workspace trust for newly created agents.
+ * Uses the newAgent spawn runner for testability.
+ */
+async function autoAcceptWorkspaceTrustForNewAgent(tmuxSession: string): Promise<void> {
+  const maxAttempts = 5;
+  const maxWaitHalfSecs = 30;
+
+  let startedWith = "";
+  for (let i = 0; i < maxWaitHalfSecs; i++) {
+    const delayMs = newAgentDelayOverrideMs !== null ? newAgentDelayOverrideMs : 500;
+    if (delayMs > 0) await Bun.sleep(delayMs);
+
+    const captureResult = await newAgentRunCmd([
+      "tmux", "capture-pane", "-t", tmuxSession, "-p", "-S", "-",
+    ]);
+    if (captureResult.exitCode !== 0) continue;
+
+    const output = captureResult.stdout;
+    if (output.includes("Claude Code v") || output.includes("[USER TASK]")) {
+      startedWith = "logo";
+      break;
+    }
+    if (/enter to confirm/i.test(output)) {
+      if (/trust/i.test(output) || /Allow external CLAUDE\.md file imports/i.test(output)) {
+        startedWith = "permissions";
+        break;
+      }
+    }
+  }
+
+  if (startedWith !== "permissions") return;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    await newAgentRunCmd(["tmux", "send-keys", "-t", tmuxSession, "Enter"]);
+
+    const delayMs = newAgentDelayOverrideMs !== null ? newAgentDelayOverrideMs : 4000;
+    if (delayMs > 0) await Bun.sleep(delayMs);
+
+    const captureResult = await newAgentRunCmd([
+      "tmux", "capture-pane", "-t", tmuxSession, "-p", "-S", "-",
+    ]);
+    if (captureResult.exitCode !== 0) continue;
+
+    const recent = captureResult.stdout;
+    let hasPermissions = false;
+    if (/enter to confirm/i.test(recent)) {
+      if (/trust/i.test(recent) || /Allow external CLAUDE\.md file imports/i.test(recent)) {
+        hasPermissions = true;
+      }
+    }
+
+    if (!hasPermissions) {
+      for (let j = 0; j < maxWaitHalfSecs; j++) {
+        const logoDelay = newAgentDelayOverrideMs !== null ? newAgentDelayOverrideMs : 500;
+        if (logoDelay > 0) await Bun.sleep(logoDelay);
+
+        const logoCapture = await newAgentRunCmd([
+          "tmux", "capture-pane", "-t", tmuxSession, "-p", "-S", "-",
+        ]);
+        if (logoCapture.exitCode !== 0) continue;
+        if (logoCapture.stdout.includes("Claude Code v") || logoCapture.stdout.includes("[USER TASK]")) {
+          return;
+        }
+      }
+    }
+  }
+}
+
+/**
+ * Resolve a partial agent ID to a full ID.
+ * Mirrors resolve_agent_id() in ib bash.
+ */
+async function resolveAgentId(agentsDir: string, partial: string): Promise<string | null> {
+  // Exact match: check directory
+  const exactDir = join(agentsDir, partial);
+  if (await Bun.file(join(exactDir, "meta.json")).exists().catch(() => false)) {
+    return partial;
+  }
+
+  // Partial match: scan directories
+  const matches: string[] = [];
+  try {
+    const entries = await readdir(agentsDir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      if (entry.name.includes(partial)) {
+        matches.push(entry.name);
+      }
+    }
+  } catch { /* ignore */ }
+
+  if (matches.length === 1) return matches[0]!;
+  return null;
 }
 
 export async function diffAgent(agent: Agent): Promise<IbCommandResult> {

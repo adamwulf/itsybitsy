@@ -28,6 +28,8 @@ import {
   resetNukeResumeSpawnRunner,
   setMergeSpawnRunner,
   resetMergeSpawnRunner,
+  setNewAgentSpawnRunner,
+  resetNewAgentSpawnRunner,
 } from "./ib-commands";
 import {
   setSpawnRunner as setLifecycleSpawnRunner,
@@ -208,52 +210,7 @@ describe("ib-commands", () => {
     });
   });
 
-  test("newAgent passes ['new-agent', prompt] with repoPath as cwd", async () => {
-    await newAgent("/repos/myproject", "build a widget");
-    expect(lastCall).toEqual({
-      args: ["new-agent", "build a widget"],
-      cwd: "/repos/myproject",
-    });
-  });
-
-  test("newAgent with --worker flag", async () => {
-    await newAgent("/repos/myproject", "build it", { worker: true });
-    expect(lastCall!.args).toEqual(["new-agent", "--worker", "build it"]);
-  });
-
-  test("newAgent with --yolo flag", async () => {
-    await newAgent("/repos/myproject", "build it", { yolo: true });
-    expect(lastCall!.args).toEqual(["new-agent", "--yolo", "build it"]);
-  });
-
-  test("newAgent with --model flag", async () => {
-    await newAgent("/repos/myproject", "build it", { model: "opus" });
-    expect(lastCall!.args).toEqual(["new-agent", "--model", "opus", "build it"]);
-  });
-
-  test("newAgent with --manager flag", async () => {
-    await newAgent("/repos/myproject", "build it", { manager: "agent-mgr" });
-    expect(lastCall!.args).toEqual(["new-agent", "--manager", "agent-mgr", "build it"]);
-  });
-
-  test("newAgent with all options", async () => {
-    await newAgent("/repos/myproject", "build it", {
-      worker: true,
-      yolo: true,
-      model: "opus",
-      manager: "agent-mgr",
-    });
-    expect(lastCall!.args).toEqual([
-      "new-agent",
-      "--worker",
-      "--yolo",
-      "--model",
-      "opus",
-      "--manager",
-      "agent-mgr",
-      "build it",
-    ]);
-  });
+  // newAgent tests are in the dedicated "newAgent (native)" describe block below
 
   test("diffAgent passes ['diff', id]", async () => {
     const agent = makeAgent("agent-abc", "/repos/myproject");
@@ -1690,5 +1647,522 @@ describe("mergeAgent (native)", () => {
     // Agent dir should still exist since merge failed before cleanup
     const log = await Bun.file(join(agentDir, "agent.log")).text();
     expect(log).toContain("Pre-rebase conflict check failed");
+  });
+});
+
+// ── newAgent (native) tests ──────────────────────────────────────────────────
+
+describe("newAgent (native)", () => {
+  let tempDir: string;
+  let agentsDir: string;
+  let spawnCalls: string[][];
+
+  /** Mock spawn runner that records calls and succeeds for all commands */
+  function makeNewAgentMock(overrides?: {
+    failTmuxSession?: boolean;
+    failTmuxNewSession?: boolean;
+    failWorktree?: boolean;
+    failTmuxServer?: boolean;
+    tmuxHasSessionExists?: boolean;
+    whichGhExists?: boolean;
+    hasRemote?: boolean;
+    resolveGitRoot?: string;
+  }): SpawnResult {
+    // This isn't used directly — we use a function mock
+    return null as unknown as SpawnResult;
+  }
+
+  function mockSpawnRunner(overrides?: {
+    failTmuxNewSession?: boolean;
+    failWorktree?: boolean;
+    failTmuxServer?: boolean;
+    tmuxHasSessionExists?: boolean;
+    whichGhExists?: boolean;
+    hasRemote?: boolean;
+  }) {
+    return (cmd: string[], _opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
+      spawnCalls.push(cmd);
+      const cmdStr = cmd.join(" ");
+
+      // tmux has-session — should fail (agent doesn't exist yet) by default
+      if (cmdStr.includes("tmux has-session")) {
+        if (overrides?.tmuxHasSessionExists) {
+          return makeSpawnResult("", 0);
+        }
+        // After new-session, the verify call should succeed
+        const newSessionCalled = spawnCalls.some(c => c.join(" ").includes("tmux new-session"));
+        return makeSpawnResult("", newSessionCalled ? 0 : 1);
+      }
+
+      // tmux start-server
+      if (cmdStr.includes("tmux start-server")) {
+        return makeSpawnResult("", overrides?.failTmuxServer ? 1 : 0);
+      }
+
+      // tmux new-session
+      if (cmdStr.includes("tmux new-session")) {
+        return makeSpawnResult("", overrides?.failTmuxNewSession ? 1 : 0);
+      }
+
+      // git worktree add
+      if (cmdStr.includes("worktree add")) {
+        if (overrides?.failWorktree) {
+          return makeSpawnResult("", 1);
+        }
+        // Create the repo dir to simulate worktree creation
+        const repoIdx = cmd.indexOf("add") + 1;
+        if (repoIdx > 0 && repoIdx < cmd.length) {
+          const repoDir = cmd[repoIdx]!;
+          require("fs").mkdirSync(repoDir, { recursive: true });
+        }
+        return makeSpawnResult("", 0);
+      }
+
+      // git worktree remove (cleanup)
+      if (cmdStr.includes("worktree remove")) {
+        return makeSpawnResult("", 0);
+      }
+
+      // git branch -D (cleanup)
+      if (cmdStr.includes("branch -D")) {
+        return makeSpawnResult("", 0);
+      }
+
+      // git rev-parse --git-common-dir (resolveGitRoot)
+      if (cmdStr.includes("--git-common-dir")) {
+        return makeSpawnResult(".git", 0);
+      }
+
+      // git rev-parse --show-toplevel (resolveGitRoot)
+      if (cmdStr.includes("--show-toplevel")) {
+        return makeSpawnResult(tempDir, 0);
+      }
+
+      // git rev-parse --git-dir
+      if (cmdStr.includes("--git-dir")) {
+        return makeSpawnResult(".git", 0);
+      }
+
+      // which gh
+      if (cmdStr.includes("which gh")) {
+        return makeSpawnResult(overrides?.whichGhExists ? "/usr/local/bin/gh" : "", overrides?.whichGhExists ? 0 : 1);
+      }
+
+      // git remote
+      if (cmdStr.includes("git") && cmd[cmd.length - 1] === "remote") {
+        return makeSpawnResult(overrides?.hasRemote ? "origin" : "", 0);
+      }
+
+      // tmux capture-pane (for auto_accept — return logo immediately)
+      if (cmdStr.includes("capture-pane")) {
+        return makeSpawnResult("Claude Code v1.0", 0);
+      }
+
+      // Default: succeed
+      return makeSpawnResult("", 0);
+    };
+  }
+
+  function makeSpawnResult(stdout: string, exitCode: number): SpawnResult {
+    return {
+      stdout: new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(stdout));
+          controller.close();
+        },
+      }),
+      stderr: new ReadableStream({
+        start(controller) {
+          controller.close();
+        },
+      }),
+      exited: Promise.resolve(exitCode),
+    };
+  }
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "ib-newagent-test-"));
+    agentsDir = join(tempDir, ".ittybitty", "agents");
+    spawnCalls = [];
+
+    // Create .ittybitty/repo-id
+    await mkdir(join(tempDir, ".ittybitty"), { recursive: true });
+    await Bun.write(join(tempDir, ".ittybitty", "repo-id"), "abcd1234\n");
+
+    // Create project config to override user-level config (e.g., ~/.ittybitty.json model setting)
+    // This ensures tests don't inherit model/permissions from the user's real config
+    await Bun.write(join(tempDir, ".ittybitty.json"), JSON.stringify({ model: "sonnet" }, null, 2));
+
+    // Also set the lifecycle spawn runner (used by resolveGitRoot)
+    setLifecycleSpawnRunner((cmd: string[], _opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
+      const cmdStr = cmd.join(" ");
+      if (cmdStr.includes("--git-common-dir")) return makeSpawnResult(".git", 0);
+      if (cmdStr.includes("--show-toplevel")) return makeSpawnResult(tempDir, 0);
+      if (cmdStr.includes("--git-dir")) return makeSpawnResult(".git", 0);
+      return makeSpawnResult("", 0);
+    });
+  });
+
+  afterEach(async () => {
+    resetNewAgentSpawnRunner();
+    resetRunner();
+    resetLifecycleSpawnRunner();
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  /** Wrapper that always passes _cwd to prevent auto-detect manager from our own worktree */
+  async function callNewAgent(prompt: string, opts?: import("./ib-commands").NewAgentOptions) {
+    return newAgent(tempDir, prompt, { ...opts, _cwd: tempDir });
+  }
+
+  test("rejects empty prompt", async () => {
+    const result = await callNewAgent("");
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("prompt required");
+  });
+
+  test("creates agent with correct ID format when no name given", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("do something");
+    expect(result.ok).toBe(true);
+    expect(result.stdout).toMatch(/^agent-[0-9a-f]{8}$/);
+  });
+
+  test("creates agent with custom name", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("do something", { name: "my-agent" });
+    expect(result.ok).toBe(true);
+    expect(result.stdout).toBe("my-agent");
+  });
+
+  test("creates meta.json with correct fields", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("test prompt", { name: "test-meta" });
+    expect(result.ok).toBe(true);
+
+    const meta = await Bun.file(join(agentsDir, "test-meta", "meta.json")).json();
+    expect(meta.id).toBe("test-meta");
+    expect(meta.tmux_session).toBe("ittybitty-abcd1234-test-meta");
+    expect(meta.prompt).toBe("test prompt");
+    expect(meta.manager).toBeNull();
+    expect(meta.worktree).toBe(true);
+    expect(meta.worker).toBe(false);
+    expect(meta.yolo).toBe(false);
+    expect(meta.model).toBe("sonnet"); // default model
+    expect(meta.session_id).toMatch(/^[0-9a-f-]+$/);
+    expect(typeof meta.created_epoch).toBe("number");
+  });
+
+  test("creates prompt.txt with prompt content", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    await callNewAgent("build a widget", { name: "test-prompt" });
+
+    const promptContent = await Bun.file(join(agentsDir, "test-prompt", "prompt.txt")).text();
+    expect(promptContent).toContain("build a widget");
+  });
+
+  test("creates start.sh with correct content", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    await callNewAgent("do work", { name: "test-start" });
+
+    const startSh = await Bun.file(join(agentsDir, "test-start", "start.sh")).text();
+    expect(startSh).toContain("#!/bin/bash");
+    expect(startSh).toContain("claude --session-id");
+    expect(startSh).toContain("CLAUDE_PID=$!");
+    expect(startSh).toContain("unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT");
+    expect(startSh).toContain(`export PATH="${tempDir}:$PATH"`);
+  });
+
+  test("creates exit-check.sh", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    await callNewAgent("do work", { name: "test-exit" });
+
+    const exitSh = await Bun.file(join(agentsDir, "test-exit", "exit-check.sh")).text();
+    expect(exitSh).toContain("#!/bin/bash");
+    expect(exitSh).toContain("UNCOMMITTED CHANGES DETECTED");
+  });
+
+  test("initializes agent.log", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    await callNewAgent("do work", { name: "test-log" });
+
+    const log = await Bun.file(join(agentsDir, "test-log", "agent.log")).text();
+    expect(log).toContain("Agent created");
+    expect(log).toContain("do work");
+  });
+
+  test("spawns tmux session with correct args", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    await callNewAgent("do work", { name: "test-tmux" });
+
+    const tmuxNewSession = spawnCalls.find(c => c.includes("new-session"));
+    expect(tmuxNewSession).toBeDefined();
+    expect(tmuxNewSession).toContain("-d");
+    expect(tmuxNewSession).toContain("-x");
+    expect(tmuxNewSession).toContain("60");
+    expect(tmuxNewSession).toContain("-s");
+    expect(tmuxNewSession).toContain("ittybitty-abcd1234-test-tmux");
+  });
+
+  test("creates git worktree by default", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    await callNewAgent("do work", { name: "test-wt" });
+
+    const worktreeCall = spawnCalls.find(c => c.includes("worktree") && c.includes("add"));
+    expect(worktreeCall).toBeDefined();
+    expect(worktreeCall).toContain("-b");
+    expect(worktreeCall).toContain("agent/test-wt");
+    expect(worktreeCall).toContain("HEAD");
+  });
+
+  test("worktree branches from manager when specified", async () => {
+    // Create a manager agent directory so resolution works
+    const mgrDir = join(agentsDir, "agent-mgr");
+    await mkdir(mgrDir, { recursive: true });
+    await Bun.write(join(mgrDir, "meta.json"), JSON.stringify({ id: "agent-mgr", worker: false }));
+
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    await callNewAgent("sub-task", { name: "test-child", manager: "agent-mgr" });
+
+    const worktreeCall = spawnCalls.find(c => c.includes("worktree") && c.includes("add"));
+    expect(worktreeCall).toBeDefined();
+    expect(worktreeCall).toContain("agent/agent-mgr"); // base ref
+  });
+
+  test("logs manager spawn to manager's agent.log", async () => {
+    const mgrDir = join(agentsDir, "agent-mgr");
+    await mkdir(mgrDir, { recursive: true });
+    await Bun.write(join(mgrDir, "meta.json"), JSON.stringify({ id: "agent-mgr", worker: false }));
+
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    await callNewAgent("sub-task", { name: "test-child", manager: "agent-mgr" });
+
+    const mgrLog = await Bun.file(join(mgrDir, "agent.log")).text();
+    expect(mgrLog).toContain("Spawned manager subagent: test-child");
+  });
+
+  test("rejects worker as manager", async () => {
+    const workerDir = join(agentsDir, "agent-worker");
+    await mkdir(workerDir, { recursive: true });
+    await Bun.write(join(workerDir, "meta.json"), JSON.stringify({ id: "agent-worker", worker: true }));
+
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("task", { manager: "agent-worker" });
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("worker agent");
+  });
+
+  test("rejects when max agents reached", async () => {
+    // Create .ittybitty.json with maxAgents: 1
+    await Bun.write(join(tempDir, ".ittybitty.json"), JSON.stringify({ maxAgents: 1 }));
+
+    // Create an existing agent
+    const existingDir = join(agentsDir, "agent-existing");
+    await mkdir(existingDir, { recursive: true });
+    await Bun.write(join(existingDir, "meta.json"), JSON.stringify({ id: "agent-existing" }));
+
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("task", { name: "agent-new" });
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("Maximum agent limit reached");
+  });
+
+  test("rejects duplicate agent ID", async () => {
+    // Create an existing agent with same name
+    const existingDir = join(agentsDir, "dup-agent");
+    await mkdir(existingDir, { recursive: true });
+    await Bun.write(join(existingDir, "meta.json"), JSON.stringify({ id: "dup-agent" }));
+
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("task", { name: "dup-agent" });
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("already exists");
+  });
+
+  test("uses custom model from opts", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    await callNewAgent("task", { name: "test-model", model: "opus" });
+
+    const meta = await Bun.file(join(agentsDir, "test-model", "meta.json")).json();
+    expect(meta.model).toBe("opus");
+
+    const startSh = await Bun.file(join(agentsDir, "test-model", "start.sh")).text();
+    expect(startSh).toContain("--model opus");
+  });
+
+  test("uses model from config when not specified", async () => {
+    await Bun.write(join(tempDir, ".ittybitty.json"), JSON.stringify({ model: "haiku" }));
+
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    await callNewAgent("task", { name: "test-cfg-model" });
+
+    const meta = await Bun.file(join(agentsDir, "test-cfg-model", "meta.json")).json();
+    expect(meta.model).toBe("haiku");
+  });
+
+  test("defaults model to sonnet when neither opts nor config specify", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    await callNewAgent("task", { name: "test-default-model" });
+
+    const meta = await Bun.file(join(agentsDir, "test-default-model", "meta.json")).json();
+    expect(meta.model).toBe("sonnet");
+  });
+
+  test("worker mode sets meta.worker and start.sh doesn't have yolo flags", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    await callNewAgent("task", { name: "test-worker", worker: true });
+
+    const meta = await Bun.file(join(agentsDir, "test-worker", "meta.json")).json();
+    expect(meta.worker).toBe(true);
+
+    const startSh = await Bun.file(join(agentsDir, "test-worker", "start.sh")).text();
+    expect(startSh).not.toContain("dangerously-skip-permissions");
+  });
+
+  test("yolo mode sets meta.yolo and start.sh has yolo flags", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    await callNewAgent("task", { name: "test-yolo", yolo: true });
+
+    const meta = await Bun.file(join(agentsDir, "test-yolo", "meta.json")).json();
+    expect(meta.yolo).toBe(true);
+
+    const startSh = await Bun.file(join(agentsDir, "test-yolo", "start.sh")).text();
+    expect(startSh).toContain("--dangerously-skip-permissions");
+    expect(startSh).toContain("--permission-mode bypassPermissions");
+  });
+
+  test("cleans up on worktree creation failure", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner({ failWorktree: true }));
+    const result = await callNewAgent("task", { name: "test-fail-wt" });
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("worktree");
+
+    // Agent dir should be cleaned up
+    const exists = await Bun.file(join(agentsDir, "test-fail-wt", "meta.json")).exists().catch(() => false);
+    expect(exists).toBe(false);
+  });
+
+  test("cleans up on tmux new-session failure", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner({ failTmuxNewSession: true }));
+    const result = await callNewAgent("task", { name: "test-fail-tmux" });
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("tmux session");
+
+    // Cleanup should have run
+    const worktreeRemove = spawnCalls.find(c => c.includes("worktree") && c.includes("remove"));
+    expect(worktreeRemove).toBeDefined();
+    const branchDelete = spawnCalls.find(c => c.includes("branch") && c.includes("-D"));
+    expect(branchDelete).toBeDefined();
+  });
+
+  test("cleans up on tmux server start failure", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner({ failTmuxServer: true }));
+    const result = await callNewAgent("task", { name: "test-fail-server" });
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("tmux server");
+  });
+
+  test("custom prompts are included in prompt.txt", async () => {
+    const promptsDir = join(tempDir, ".ittybitty", "prompts");
+    await mkdir(promptsDir, { recursive: true });
+    await Bun.write(join(promptsDir, "all.md"), "Always be thorough.");
+    await Bun.write(join(promptsDir, "manager.md"), "Coordinate sub-agents.");
+
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    await callNewAgent("main task", { name: "test-prompts" });
+
+    const promptContent = await Bun.file(join(agentsDir, "test-prompts", "prompt.txt")).text();
+    expect(promptContent).toContain("[CUSTOM INSTRUCTIONS]");
+    expect(promptContent).toContain("Always be thorough.");
+    expect(promptContent).toContain("[CUSTOM MANAGER INSTRUCTIONS]");
+    expect(promptContent).toContain("Coordinate sub-agents.");
+    expect(promptContent).toContain("main task");
+  });
+
+  test("worker prompts use worker-specific custom prompt", async () => {
+    const promptsDir = join(tempDir, ".ittybitty", "prompts");
+    await mkdir(promptsDir, { recursive: true });
+    await Bun.write(join(promptsDir, "worker.md"), "Focus on task.");
+    await Bun.write(join(promptsDir, "manager.md"), "Coordinate sub-agents.");
+
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    await callNewAgent("work task", { name: "test-worker-prompts", worker: true });
+
+    const promptContent = await Bun.file(join(agentsDir, "test-worker-prompts", "prompt.txt")).text();
+    expect(promptContent).toContain("[CUSTOM WORKER INSTRUCTIONS]");
+    expect(promptContent).toContain("Focus on task.");
+    expect(promptContent).not.toContain("Coordinate sub-agents.");
+  });
+
+  test("creates settings.local.json in worktree with permissions", async () => {
+    // Create base settings
+    await mkdir(join(tempDir, ".claude"), { recursive: true });
+    await Bun.write(join(tempDir, ".claude", "settings.local.json"), JSON.stringify({
+      permissions: { allow: ["CustomTool"] },
+    }));
+
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    await callNewAgent("task", { name: "test-settings" });
+
+    const settingsPath = join(agentsDir, "test-settings", "repo", ".claude", "settings.local.json");
+    const settingsExists = await Bun.file(settingsPath).exists().catch(() => false);
+    expect(settingsExists).toBe(true);
+
+    const settings = await Bun.file(settingsPath).json();
+    expect(settings.permissions.allow).toContain("Bash(ib:*)");
+    expect(settings.permissions.allow).toContain("Read");
+    expect(settings.permissions.allow).toContain("CustomTool"); // merged from base
+    expect(settings.permissions.deny).toContain("EnterPlanMode");
+    expect(settings.hooks).toBeDefined();
+    expect(settings.hooks.SessionStart).toBeDefined();
+    expect(settings.hooks.PreToolUse).toBeDefined();
+  });
+
+  test("writes .claude dir in worktree even without base settings", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    await callNewAgent("task", { name: "test-no-base" });
+
+    const settingsPath = join(agentsDir, "test-no-base", "repo", ".claude", "settings.local.json");
+    const settingsExists = await Bun.file(settingsPath).exists().catch(() => false);
+    expect(settingsExists).toBe(true);
+
+    const settings = await Bun.file(settingsPath).json();
+    expect(settings.permissions.allow).toContain("Bash(ib:*)");
+  });
+
+  test("rejects unknown manager", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("task", { manager: "nonexistent" });
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("not found");
+  });
+
+  test("noWorktree mode skips worktree creation", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("task", { name: "test-no-wt", noWorktree: true });
+    expect(result.ok).toBe(true);
+
+    const meta = await Bun.file(join(agentsDir, "test-no-wt", "meta.json")).json();
+    expect(meta.worktree).toBe(false);
+
+    // No worktree add call
+    const worktreeCall = spawnCalls.find(c => c.includes("worktree") && c.includes("add"));
+    expect(worktreeCall).toBeUndefined();
+  });
+
+  test("config permissions are merged into settings", async () => {
+    await Bun.write(join(tempDir, ".ittybitty.json"), JSON.stringify({
+      permissions: {
+        manager: { allow: ["Bash(deploy:*)"], deny: ["Bash(rm:*)"] },
+      },
+    }));
+
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    await callNewAgent("task", { name: "test-cfg-perms" });
+
+    const settingsPath = join(agentsDir, "test-cfg-perms", "repo", ".claude", "settings.local.json");
+    const settings = await Bun.file(settingsPath).json();
+    expect(settings.permissions.allow).toContain("Bash(deploy:*)");
+    expect(settings.permissions.deny).toContain("Bash(rm:*)");
   });
 });

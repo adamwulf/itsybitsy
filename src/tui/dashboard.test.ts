@@ -8,7 +8,7 @@ import { stripAnsi } from "../parse-state";
 import { makeAgent as _makeAgent, makeFlatAgent, makeFlatRepoHeader } from "../test-utils";
 import { TmuxPaneComponent, RightPaneComponent, DashboardComponent, AgentTreeComponent, colorizeDiff, colorizeLog, formatAgentRow } from "./dashboard";
 import { visibleWidth } from "@mariozechner/pi-tui";
-import { setRunner, resetRunner, setSendSpawnRunner, resetSendSpawnRunner, setKillPauseSpawnRunner, resetKillPauseSpawnRunner, setNukeResumeSpawnRunner, resetNukeResumeSpawnRunner } from "../ib-commands";
+import { setRunner, resetRunner, setSendSpawnRunner, resetSendSpawnRunner, setKillPauseSpawnRunner, resetKillPauseSpawnRunner, setNukeResumeSpawnRunner, resetNukeResumeSpawnRunner, setNewAgentSpawnRunner, resetNewAgentSpawnRunner } from "../ib-commands";
 import { setSpawnRunner as setLifecycleSpawnRunner, resetSpawnRunner as resetLifecycleSpawnRunner } from "../agent-lifecycle";
 import type { SpawnResult } from "../types";
 import { PANE_MODES } from "./pane-manager";
@@ -1116,51 +1116,144 @@ describe("DashboardComponent dialog and action handlers", () => {
   });
 
   test("new-agent form: Worker flag sets --worker", async () => {
+    const newAgentTempDir = await mkdtemp(join(tmpdir(), "ib-na-test-"));
+    await mkdir(join(newAgentTempDir, ".ittybitty"), { recursive: true });
+    await Bun.write(join(newAgentTempDir, ".ittybitty", "repo-id"), "abcd1234\n");
+    await Bun.write(join(newAgentTempDir, ".ittybitty.json"), JSON.stringify({ model: "sonnet" }));
+
+    const spawnCalls: string[] = [];
+    const mockSpawn = (cmd: string[]): SpawnResult => {
+      const cmdStr = cmd.join(" ");
+      spawnCalls.push(cmdStr);
+      const makeResult = (s: string, c: number) => ({
+        stdout: new ReadableStream({ start(ctrl) { ctrl.enqueue(new TextEncoder().encode(s)); ctrl.close(); } }),
+        stderr: new ReadableStream({ start(ctrl) { ctrl.close(); } }),
+        exited: Promise.resolve(c),
+      });
+      if (cmdStr.includes("tmux has-session")) {
+        const afterNew = spawnCalls.some(c => c.includes("tmux new-session"));
+        return makeResult("", afterNew ? 0 : 1);
+      }
+      if (cmdStr.includes("tmux start-server")) return makeResult("", 0);
+      if (cmdStr.includes("tmux new-session")) return makeResult("", 0);
+      if (cmdStr.includes("worktree add")) {
+        const repoIdx = cmd.indexOf("add") + 1;
+        if (repoIdx > 0 && repoIdx < cmd.length) require("fs").mkdirSync(cmd[repoIdx]!, { recursive: true });
+        return makeResult("", 0);
+      }
+      if (cmdStr.includes("--git-common-dir")) return makeResult(".git", 0);
+      if (cmdStr.includes("--show-toplevel")) return makeResult(newAgentTempDir, 0);
+      if (cmdStr.includes("--git-dir")) return makeResult(".git", 0);
+      if (cmdStr.includes("which gh")) return makeResult("", 1);
+      if (cmd[cmd.length-1] === "remote") return makeResult("", 0);
+      if (cmdStr.includes("capture-pane")) return makeResult("Claude Code v1.0", 0);
+      return makeResult("", 0);
+    };
+    setNewAgentSpawnRunner(mockSpawn);
+    setLifecycleSpawnRunner(mockSpawn);
+
     dashboard = makeDashboard();
-    dashboard.setRepos([{ path: "/repos/only", name: "only-repo" }]);
-    lastIbCall = null;
-    setRunner(async (args, cwd) => {
-      lastIbCall = { args, cwd };
-      return { ok: true, exitCode: 0, stdout: "ok", stderr: "" };
-    });
+    dashboard.setRepos([{ path: newAgentTempDir, name: "only-repo" }]);
 
     dashboard.handleInput("a");
-    // Tab to worker, toggle on
     dashboard.handleInput("\t");
     dashboard.handleInput(" ");
-    // Tab to prompt, type text
     dashboard.handleInput("\t");
     for (const ch of "do stuff") dashboard.handleInput(ch);
-    // Tab to cancel, Tab to create, press Enter
     dashboard.handleInput("\t");
     dashboard.handleInput("\t");
     dashboard.handleInput("\r");
-    await Bun.sleep(10);
-    expect(lastIbCall!.args).toEqual(["new-agent", "--worker", "do stuff"]);
+
+    // Wait for async executeAndRefresh to complete
+    for (let i = 0; i < 20; i++) {
+      await Bun.sleep(20);
+      const agentsDir = join(newAgentTempDir, ".ittybitty", "agents");
+      try {
+        const { readdir: rd } = await import("fs/promises");
+        const entries = await rd(agentsDir, { withFileTypes: true });
+        if (entries.filter(e => e.isDirectory()).length > 0) break;
+      } catch { /* not yet */ }
+    }
+
+    // Find the created agent's meta.json
+    const agentsDir = join(newAgentTempDir, ".ittybitty", "agents");
+    const { readdir: rd } = await import("fs/promises");
+    const entries = await rd(agentsDir, { withFileTypes: true });
+    const agentDirs = entries.filter(e => e.isDirectory());
+    expect(agentDirs.length).toBe(1);
+    const meta = await Bun.file(join(agentsDir, agentDirs[0]!.name, "meta.json")).json();
+    expect(meta.worker).toBe(true);
+    expect(meta.prompt).toBe("do stuff");
+
+    resetNewAgentSpawnRunner();
+    resetLifecycleSpawnRunner();
+    await rm(newAgentTempDir, { recursive: true, force: true });
   });
 
   test("new-agent form: Name field passes --name flag", async () => {
+    const newAgentTempDir = await mkdtemp(join(tmpdir(), "ib-na-test-"));
+    await mkdir(join(newAgentTempDir, ".ittybitty"), { recursive: true });
+    await Bun.write(join(newAgentTempDir, ".ittybitty", "repo-id"), "abcd1234\n");
+    await Bun.write(join(newAgentTempDir, ".ittybitty.json"), JSON.stringify({ model: "sonnet" }));
+
+    const spawnCalls: string[] = [];
+    const mockSpawn = (cmd: string[]): SpawnResult => {
+      const cmdStr = cmd.join(" ");
+      spawnCalls.push(cmdStr);
+      const makeResult = (s: string, c: number) => ({
+        stdout: new ReadableStream({ start(ctrl) { ctrl.enqueue(new TextEncoder().encode(s)); ctrl.close(); } }),
+        stderr: new ReadableStream({ start(ctrl) { ctrl.close(); } }),
+        exited: Promise.resolve(c),
+      });
+      if (cmdStr.includes("tmux has-session")) {
+        const afterNew = spawnCalls.some(c => c.includes("tmux new-session"));
+        return makeResult("", afterNew ? 0 : 1);
+      }
+      if (cmdStr.includes("tmux start-server")) return makeResult("", 0);
+      if (cmdStr.includes("tmux new-session")) return makeResult("", 0);
+      if (cmdStr.includes("worktree add")) {
+        const repoIdx = cmd.indexOf("add") + 1;
+        if (repoIdx > 0 && repoIdx < cmd.length) require("fs").mkdirSync(cmd[repoIdx]!, { recursive: true });
+        return makeResult("", 0);
+      }
+      if (cmdStr.includes("--git-common-dir")) return makeResult(".git", 0);
+      if (cmdStr.includes("--show-toplevel")) return makeResult(newAgentTempDir, 0);
+      if (cmdStr.includes("--git-dir")) return makeResult(".git", 0);
+      if (cmdStr.includes("which gh")) return makeResult("", 1);
+      if (cmd[cmd.length-1] === "remote") return makeResult("", 0);
+      if (cmdStr.includes("capture-pane")) return makeResult("Claude Code v1.0", 0);
+      return makeResult("", 0);
+    };
+    setNewAgentSpawnRunner(mockSpawn);
+    setLifecycleSpawnRunner(mockSpawn);
+
     dashboard = makeDashboard();
-    dashboard.setRepos([{ path: "/repos/only", name: "only-repo" }]);
-    lastIbCall = null;
-    setRunner(async (args, cwd) => {
-      lastIbCall = { args, cwd };
-      return { ok: true, exitCode: 0, stdout: "ok", stderr: "" };
-    });
+    dashboard.setRepos([{ path: newAgentTempDir, name: "only-repo" }]);
 
     dashboard.handleInput("a");
-    // Type name
     for (const ch of "my-agent") dashboard.handleInput(ch);
-    // Tab to worker (skip), Tab to prompt
     dashboard.handleInput("\t");
     dashboard.handleInput("\t");
     for (const ch of "do stuff") dashboard.handleInput(ch);
-    // Tab to cancel, Tab to create, press Enter
     dashboard.handleInput("\t");
     dashboard.handleInput("\t");
     dashboard.handleInput("\r");
-    await Bun.sleep(10);
-    expect(lastIbCall!.args).toEqual(["new-agent", "--name", "my-agent", "do stuff"]);
+
+    // Wait for async executeAndRefresh to complete
+    for (let i = 0; i < 20; i++) {
+      await Bun.sleep(20);
+      try {
+        if (await Bun.file(join(newAgentTempDir, ".ittybitty", "agents", "my-agent", "meta.json")).exists()) break;
+      } catch { /* not yet */ }
+    }
+
+    const meta = await Bun.file(join(newAgentTempDir, ".ittybitty", "agents", "my-agent", "meta.json")).json();
+    expect(meta.id).toBe("my-agent");
+    expect(meta.prompt).toBe("do stuff");
+
+    resetNewAgentSpawnRunner();
+    resetLifecycleSpawnRunner();
+    await rm(newAgentTempDir, { recursive: true, force: true });
   });
 
   test("new-agent form: Create is no-op when prompt is empty", async () => {

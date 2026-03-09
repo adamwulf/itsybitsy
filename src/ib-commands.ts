@@ -1,12 +1,18 @@
 /**
  * Async wrappers for ib mutation commands.
  * Every command runs with cwd set to the agent's repoPath.
- * sendMessage is implemented natively; all others delegate to the ib CLI.
+ * kill, pause, and sendMessage are implemented natively; others delegate to ib CLI.
  */
 
 import { join } from "path";
 import type { Agent } from "./agents";
-import { logAgent } from "./agent-lifecycle";
+import {
+  logAgent,
+  removeAgentQuestions,
+  killAgentProcess,
+  teardownAgent,
+  scanAndKillOrphans,
+} from "./agent-lifecycle";
 import type { SpawnFn } from "./types";
 
 export interface IbCommandResult {
@@ -54,8 +60,65 @@ async function runIb(args: string[], cwd: string): Promise<IbCommandResult> {
   return currentRunner(args, cwd);
 }
 
+/** Pluggable spawn runner for kill/pause — defaults to Bun.spawn, overridable for tests */
+let killPauseSpawnRunner: SpawnFn = Bun.spawn as SpawnFn;
+
+/** Override the kill/pause spawn runner (for testing) */
+export function setKillPauseSpawnRunner(runner: SpawnFn): void {
+  killPauseSpawnRunner = runner;
+}
+
+/** Reset the kill/pause spawn runner */
+export function resetKillPauseSpawnRunner(): void {
+  killPauseSpawnRunner = Bun.spawn as SpawnFn;
+}
+
+/**
+ * Native kill implementation — replaces `ib kill <id> --force`.
+ *
+ * Sequence (mirrors do_kill in ib bash):
+ * 1. Verify agent exists (directory or tmux session)
+ * 2. Remove questions from user-questions.json
+ * 3. teardownAgent() — log, capture tmux, kill claude, kill tmux, copy settings,
+ *    remove worktree, delete branch, archive, remove dir
+ * 4. scanAndKillOrphans()
+ */
 export async function killAgent(agent: Agent): Promise<IbCommandResult> {
-  return runIb(["kill", agent.id, "--force"], agent.repoPath);
+  const agentDir = join(agent.repoPath, ".ittybitty", "agents", agent.id);
+  const agentsDir = join(agent.repoPath, ".ittybitty", "agents");
+  const tmuxSession = agent.meta.tmux_session;
+
+  // Check if agent exists (directory or tmux session)
+  const dirExists = await Bun.file(join(agentDir, "meta.json")).exists().catch(() => false);
+  let sessionExists = false;
+  if (tmuxSession) {
+    try {
+      const proc = killPauseSpawnRunner(
+        ["tmux", "has-session", "-t", tmuxSession],
+        { stdout: "pipe", stderr: "pipe" }
+      );
+      await new Response(proc.stderr).text(); // drain
+      sessionExists = (await proc.exited) === 0;
+    } catch { /* ignore */ }
+  }
+
+  if (!dirExists && !sessionExists) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' not found` };
+  }
+
+  // Remove questions
+  await removeAgentQuestions(agent.repoPath, agent.id);
+
+  // Teardown (log, capture, kill process, kill tmux, worktree, branch, archive, remove)
+  await teardownAgent(agent.repoPath, agent.id, agentDir, {
+    tmux_session: tmuxSession,
+    claude_pid: agent.meta.claude_pid,
+  }, "Agent killed");
+
+  // Scan for orphaned Claude processes
+  await scanAndKillOrphans(agentsDir);
+
+  return { ok: true, exitCode: 0, stdout: `Closed agent: ${agent.id}`, stderr: "" };
 }
 
 export async function nukeAgent(agent: Agent): Promise<IbCommandResult> {
@@ -234,8 +297,60 @@ export async function statusAgent(agent: Agent): Promise<IbCommandResult> {
   return runIb(["status", agent.id], agent.repoPath);
 }
 
+/**
+ * Native pause implementation — replaces `ib pause <id>`.
+ *
+ * Sequence (mirrors cmd_pause in ib bash):
+ * 1. Verify agent directory exists
+ * 2. Kill Claude process (killAgentProcess)
+ * 3. Kill tmux session
+ * 4. Log 'Agent paused' to agent.log
+ * Does NOT archive, remove worktree, or delete directory.
+ */
 export async function pauseAgent(agent: Agent): Promise<IbCommandResult> {
-  return runIb(["pause", agent.id], agent.repoPath);
+  const agentDir = join(agent.repoPath, ".ittybitty", "agents", agent.id);
+  const tmuxSession = agent.meta.tmux_session;
+
+  // Check if agent directory exists
+  const dirExists = await Bun.file(join(agentDir, "meta.json")).exists().catch(() => false);
+  if (!dirExists) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' not found` };
+  }
+
+  // Kill Claude process
+  const killed = await killAgentProcess(tmuxSession, { claude_pid: agent.meta.claude_pid });
+  if (killed) {
+    await logAgent(agentDir, "Terminated Claude process");
+  }
+
+  // Kill tmux session
+  if (tmuxSession) {
+    const proc = killPauseSpawnRunner(
+      ["tmux", "has-session", "-t", tmuxSession],
+      { stdout: "pipe", stderr: "pipe" }
+    );
+    await new Response(proc.stderr).text(); // drain
+    const hasSession = (await proc.exited) === 0;
+    if (hasSession) {
+      const killProc = killPauseSpawnRunner(
+        ["tmux", "kill-session", "-t", tmuxSession],
+        { stdout: "pipe", stderr: "pipe" }
+      );
+      await new Response(killProc.stderr).text(); // drain
+      await killProc.exited;
+      await logAgent(agentDir, "Killed tmux session");
+    }
+  }
+
+  // Log the pause
+  await logAgent(agentDir, "Agent paused");
+
+  return {
+    ok: true,
+    exitCode: 0,
+    stdout: `Agent paused. Use 'ib resume ${agent.id}' to continue.`,
+    stderr: "",
+  };
 }
 
 export async function acknowledgeQuestion(repoPath: string, questionId: string): Promise<IbCommandResult> {

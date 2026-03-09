@@ -8,7 +8,8 @@ import { stripAnsi } from "../parse-state";
 import { makeAgent as _makeAgent, makeFlatAgent, makeFlatRepoHeader } from "../test-utils";
 import { TmuxPaneComponent, RightPaneComponent, DashboardComponent, AgentTreeComponent, colorizeDiff, colorizeLog, formatAgentRow } from "./dashboard";
 import { visibleWidth } from "@mariozechner/pi-tui";
-import { setRunner, resetRunner, setSendSpawnRunner, resetSendSpawnRunner } from "../ib-commands";
+import { setRunner, resetRunner, setSendSpawnRunner, resetSendSpawnRunner, setKillPauseSpawnRunner, resetKillPauseSpawnRunner } from "../ib-commands";
+import { setSpawnRunner as setLifecycleSpawnRunner, resetSpawnRunner as resetLifecycleSpawnRunner } from "../agent-lifecycle";
 import type { SpawnResult } from "../types";
 import { PANE_MODES } from "./pane-manager";
 import { assertDialog } from "./test-helpers";
@@ -395,28 +396,55 @@ describe("DashboardComponent dialog and action handlers", () => {
     });
   }
 
-  function setupDashboardWithAgent(state = "running") {
+  let actionTempDir: string | null = null;
+
+  async function setupDashboardWithAgent(state = "running") {
     dashboard = makeDashboard();
     lastIbCall = null;
+
+    // Create temp dir for native kill/pause operations
+    actionTempDir = await mkdtemp(join(tmpdir(), "dashboard-action-"));
+    const agentDir = join(actionTempDir, ".ittybitty", "agents", "agent-test");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-test",
+      tmux_session: "tmux-agent-test",
+    }));
+
     setRunner(async (args, cwd) => {
       lastIbCall = { args, cwd };
       return { ok: true, exitCode: 0, stdout: "ok", stderr: "" };
     });
     setupSendMock();
 
-    const agent = makeAgent("agent-test", "/repos/test");
+    // Mock spawn runners for native kill/pause (all tmux/pgrep calls succeed with no-op)
+    const noopSpawn = (cmd: string[]) => ({
+      stdout: new Response("").body!,
+      stderr: new Response("").body!,
+      exited: Promise.resolve(cmd.includes("pgrep") ? 1 : 0),
+    } as SpawnResult);
+    setKillPauseSpawnRunner(noopSpawn);
+    setLifecycleSpawnRunner(noopSpawn);
+
+    const agent = makeAgent("agent-test", actionTempDir);
     agent.state = state as any;
     const flatList: FlatEntry[] = [makeFlatAgent(agent)];
     dashboard.onUpdate([agent], flatList, []);
   }
 
-  afterEach(() => {
+  afterEach(async () => {
     resetRunner();
     resetSendSpawnRunner();
+    resetKillPauseSpawnRunner();
+    resetLifecycleSpawnRunner();
+    if (actionTempDir) {
+      await rm(actionTempDir, { recursive: true, force: true });
+      actionTempDir = null;
+    }
   });
 
-  test("x key opens kill confirm dialog with button UI", () => {
-    setupDashboardWithAgent();
+  test("x key opens kill confirm dialog with button UI", async () => {
+    await setupDashboardWithAgent();
     dashboard.handleInput("x");
     expect(dashboard.dialog).not.toBeNull();
     const d = assertDialog(dashboard.dialog, 'confirm');
@@ -427,7 +455,7 @@ describe("DashboardComponent dialog and action handlers", () => {
   });
 
   test("kill confirm dialog: Enter on Kill button executes kill", async () => {
-    setupDashboardWithAgent();
+    await setupDashboardWithAgent();
     dashboard.handleInput("x");
     // focusedButton defaults to "cancel", Tab to Kill, then press Enter
     dashboard.handleInput("\t");
@@ -435,13 +463,12 @@ describe("DashboardComponent dialog and action handlers", () => {
     dashboard.handleInput("\r");
     // Wait for async execution
     await Bun.sleep(10);
-    expect(lastIbCall).not.toBeNull();
-    expect(lastIbCall!.args).toEqual(["kill", "agent-test", "--force"]);
-    expect(lastIbCall!.cwd).toBe("/repos/test");
+    // Dialog should be dismissed after native kill executes
+    expect(dashboard.dialog).toBeNull();
   });
 
-  test("kill confirm dialog: Enter on default Cancel dismisses", () => {
-    setupDashboardWithAgent();
+  test("kill confirm dialog: Enter on default Cancel dismisses", async () => {
+    await setupDashboardWithAgent();
     dashboard.handleInput("x");
     expect(assertDialog(dashboard.dialog, 'confirm').focusedButton).toBe("cancel");
     dashboard.handleInput("\r");
@@ -449,8 +476,8 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(lastIbCall).toBeNull();
   });
 
-  test("kill confirm dialog: Tab cycles between buttons", () => {
-    setupDashboardWithAgent();
+  test("kill confirm dialog: Tab cycles between buttons", async () => {
+    await setupDashboardWithAgent();
     dashboard.handleInput("x");
     const d = assertDialog(dashboard.dialog, 'confirm');
     expect(d.focusedButton).toBe("cancel");
@@ -460,16 +487,16 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(d.focusedButton).toBe("cancel");
   });
 
-  test("kill confirm dialog: Escape cancels", () => {
-    setupDashboardWithAgent();
+  test("kill confirm dialog: Escape cancels", async () => {
+    await setupDashboardWithAgent();
     dashboard.handleInput("x");
     dashboard.handleInput("\x1b");
     expect(dashboard.dialog).toBeNull();
     expect(lastIbCall).toBeNull();
   });
 
-  test("! key opens nuke confirm dialog", () => {
-    setupDashboardWithAgent();
+  test("! key opens nuke confirm dialog", async () => {
+    await setupDashboardWithAgent();
     dashboard.handleInput("!");
     expect(dashboard.dialog).not.toBeNull();
     const d = assertDialog(dashboard.dialog, 'confirm');
@@ -478,7 +505,7 @@ describe("DashboardComponent dialog and action handlers", () => {
   });
 
   test("nuke confirm: Enter on Nuke button executes nuke --force", async () => {
-    setupDashboardWithAgent();
+    await setupDashboardWithAgent();
     dashboard.handleInput("!");
     // focusedButton defaults to "confirm" (Nuke), press Enter
     dashboard.handleInput("\r");
@@ -540,14 +567,14 @@ describe("DashboardComponent dialog and action handlers", () => {
   });
 
   test("R key resumes stopped agents", async () => {
-    setupDashboardWithAgent("stopped");
+    await setupDashboardWithAgent("stopped");
     dashboard.handleInput("R");
     await Bun.sleep(10);
     expect(lastIbCall!.args).toEqual(["resume", "agent-test"]);
   });
 
   test("R key does not resume running agents", async () => {
-    setupDashboardWithAgent("running");
+    await setupDashboardWithAgent("running");
     dashboard.handleInput("R");
     await Bun.sleep(10);
     expect(lastIbCall).toBeNull();
@@ -555,8 +582,8 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(dashboard.notice).not.toBeNull();
   });
 
-  test("P key opens pause confirm dialog for running agents", () => {
-    setupDashboardWithAgent("running");
+  test("P key opens pause confirm dialog for running agents", async () => {
+    await setupDashboardWithAgent("running");
     dashboard.handleInput("P");
     expect(dashboard.dialog).not.toBeNull();
     const d = assertDialog(dashboard.dialog, 'confirm');
@@ -566,52 +593,52 @@ describe("DashboardComponent dialog and action handlers", () => {
   });
 
   test("P key pause confirm executes pause command", async () => {
-    setupDashboardWithAgent("running");
+    await setupDashboardWithAgent("running");
     dashboard.handleInput("P");
     // Tab to confirm, then Enter
     dashboard.handleInput("\t");
     dashboard.handleInput("\r");
     await Bun.sleep(10);
-    expect(lastIbCall).not.toBeNull();
-    expect(lastIbCall!.args).toEqual(["pause", "agent-test"]);
+    // Dialog should be dismissed after native pause executes
+    expect(dashboard.dialog).toBeNull();
   });
 
-  test("P key works for waiting agents", () => {
-    setupDashboardWithAgent("waiting");
+  test("P key works for waiting agents", async () => {
+    await setupDashboardWithAgent("waiting");
     dashboard.handleInput("P");
     expect(dashboard.dialog).not.toBeNull();
     expect(dashboard.dialog!.type).toBe("confirm");
   });
 
-  test("P key does not pause stopped agents", () => {
-    setupDashboardWithAgent("stopped");
+  test("P key does not pause stopped agents", async () => {
+    await setupDashboardWithAgent("stopped");
     dashboard.handleInput("P");
     expect(dashboard.dialog).toBeNull();
     expect(dashboard.notice).not.toBeNull();
   });
 
-  test("P key does not pause complete agents", () => {
-    setupDashboardWithAgent("complete");
+  test("P key does not pause complete agents", async () => {
+    await setupDashboardWithAgent("complete");
     dashboard.handleInput("P");
     expect(dashboard.dialog).toBeNull();
     expect(dashboard.notice).not.toBeNull();
   });
 
-  test("r key opens reassign fuzzy select dialog", () => {
-    setupDashboardWithAgent();
+  test("r key opens reassign fuzzy select dialog", async () => {
+    await setupDashboardWithAgent();
     dashboard.handleInput("r");
     expect(assertDialog(dashboard.dialog, 'fuzzy').prompt).toContain("Reassign");
   });
 
-  test("reassign fuzzy: shows '(No parent - make root)' as first option", () => {
-    setupDashboardWithAgent();
+  test("reassign fuzzy: shows '(No parent - make root)' as first option", async () => {
+    await setupDashboardWithAgent();
     dashboard.handleInput("r");
     const d = assertDialog(dashboard.dialog, 'fuzzy');
     expect(d.allItems[0]).toBe("(No parent - make root)");
   });
 
   test("reassign fuzzy: selecting 'No parent' calls reassign with --none", async () => {
-    setupDashboardWithAgent();
+    await setupDashboardWithAgent();
     dashboard.handleInput("r");
     // First item is already selected (index 0 = No parent), press Enter
     dashboard.handleInput("\r");
@@ -737,14 +764,14 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(d.allItems).not.toContain("agent-other");
   });
 
-  test("s key opens send textarea dialog", () => {
-    setupDashboardWithAgent();
+  test("s key opens send textarea dialog", async () => {
+    await setupDashboardWithAgent();
     dashboard.handleInput("s");
     expect(assertDialog(dashboard.dialog, 'textarea').prompt).toContain("Send message");
   });
 
   test("send textarea: typing, backspace, and submitting", async () => {
-    setupDashboardWithAgent();
+    await setupDashboardWithAgent();
     dashboard.handleInput("s");
     for (const ch of "hellx") dashboard.handleInput(ch);
     dashboard.handleInput("\x7f"); // backspace
@@ -759,8 +786,8 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(sentMessages[0]!.message).toBe("hello");
   });
 
-  test("send textarea: Tab cycles forward through text → cancel → send → text", () => {
-    setupDashboardWithAgent();
+  test("send textarea: Tab cycles forward through text → cancel → send → text", async () => {
+    await setupDashboardWithAgent();
     dashboard.handleInput("s");
     const d = assertDialog(dashboard.dialog, 'textarea');
     expect(d.focusedButton).toBe("text");
@@ -772,8 +799,8 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(d.focusedButton).toBe("text");
   });
 
-  test("send textarea: Shift+Tab cycles backward through text → send → cancel → text", () => {
-    setupDashboardWithAgent();
+  test("send textarea: Shift+Tab cycles backward through text → send → cancel → text", async () => {
+    await setupDashboardWithAgent();
     dashboard.handleInput("s");
     const d = assertDialog(dashboard.dialog, 'textarea');
     expect(d.focusedButton).toBe("text");
@@ -786,8 +813,8 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(d.focusedButton).toBe("text");
   });
 
-  test("send textarea: Kitty protocol Shift+Tab cycles backward", () => {
-    setupDashboardWithAgent();
+  test("send textarea: Kitty protocol Shift+Tab cycles backward", async () => {
+    await setupDashboardWithAgent();
     dashboard.handleInput("s");
     const d = assertDialog(dashboard.dialog, 'textarea');
     expect(d.focusedButton).toBe("text");
@@ -800,14 +827,14 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(d.focusedButton).toBe("text");
   });
 
-  test("send textarea: sendAll defaults to false", () => {
-    setupDashboardWithAgent();
+  test("send textarea: sendAll defaults to false", async () => {
+    await setupDashboardWithAgent();
     dashboard.handleInput("s");
     expect(assertDialog(dashboard.dialog, 'textarea').sendAll).toBe(false);
   });
 
-  test("send textarea: Ctrl+A toggles sendAll", () => {
-    setupDashboardWithAgent();
+  test("send textarea: Ctrl+A toggles sendAll", async () => {
+    await setupDashboardWithAgent();
     dashboard.handleInput("s");
     const d = assertDialog(dashboard.dialog, 'textarea');
     expect(d.sendAll).toBe(false);
@@ -817,8 +844,8 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(d.sendAll).toBe(false);
   });
 
-  test("send textarea: Ctrl+A works from any focus position", () => {
-    setupDashboardWithAgent();
+  test("send textarea: Ctrl+A works from any focus position", async () => {
+    await setupDashboardWithAgent();
     dashboard.handleInput("s");
     // Start in text focus
     const d = assertDialog(dashboard.dialog, 'textarea');
@@ -897,8 +924,8 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(sentMessages[0]!.message).toBe("hi");
   });
 
-  test("send textarea: sendAll state is reflected in dialog", () => {
-    setupDashboardWithAgent();
+  test("send textarea: sendAll state is reflected in dialog", async () => {
+    await setupDashboardWithAgent();
     dashboard.handleInput("s");
     // sendAll starts as false
     const d = assertDialog(dashboard.dialog, 'textarea');
@@ -927,7 +954,7 @@ describe("DashboardComponent dialog and action handlers", () => {
   });
 
   test("m key runs merge-check then shows confirm", async () => {
-    setupDashboardWithAgent();
+    await setupDashboardWithAgent();
     dashboard.handleInput("m");
     // Wait for merge-check to complete
     await Bun.sleep(50);
@@ -935,7 +962,7 @@ describe("DashboardComponent dialog and action handlers", () => {
   });
 
   test("merge: merge-check failure shows error message", async () => {
-    setupDashboardWithAgent();
+    await setupDashboardWithAgent();
     setRunner(async () => ({
       ok: false,
       exitCode: 1,
@@ -947,8 +974,8 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(dashboard.notice).toContain("Merge-check failed");
   });
 
-  test("dialog intercepts all input when active", () => {
-    setupDashboardWithAgent();
+  test("dialog intercepts all input when active", async () => {
+    await setupDashboardWithAgent();
     dashboard.handleInput("x"); // opens confirm
     // Navigation keys should not change selection
     dashboard.handleInput("j");

@@ -22,7 +22,13 @@ import {
   resetRunner,
   setSendSpawnRunner,
   resetSendSpawnRunner,
+  setKillPauseSpawnRunner,
+  resetKillPauseSpawnRunner,
 } from "./ib-commands";
+import {
+  setSpawnRunner as setLifecycleSpawnRunner,
+  resetSpawnRunner as resetLifecycleSpawnRunner,
+} from "./agent-lifecycle";
 import type { IbCommandResult } from "./ib-commands";
 import type { SpawnResult } from "./types";
 
@@ -49,15 +55,6 @@ describe("ib-commands", () => {
 
   afterEach(() => {
     resetRunner();
-  });
-
-  test("killAgent passes ['kill', id, '--force'] with agent's repoPath", async () => {
-    const agent = makeAgent("agent-abc", "/repos/myproject");
-    await killAgent(agent);
-    expect(lastCall).toEqual({
-      args: ["kill", "agent-abc", "--force"],
-      cwd: "/repos/myproject",
-    });
   });
 
   test("nukeAgent passes ['nuke', id, '--force']", async () => {
@@ -303,15 +300,6 @@ describe("ib-commands", () => {
     });
   });
 
-  test("pauseAgent passes ['pause', id] with agent's repoPath", async () => {
-    const agent = makeAgent("agent-abc", "/repos/myproject");
-    await pauseAgent(agent);
-    expect(lastCall).toEqual({
-      args: ["pause", "agent-abc"],
-      cwd: "/repos/myproject",
-    });
-  });
-
   test("acknowledgeQuestion passes ['acknowledge', questionId] with repoPath as cwd", async () => {
     await acknowledgeQuestion("/repos/myproject", "q-1");
     expect(lastCall).toEqual({
@@ -328,7 +316,7 @@ describe("ib-commands", () => {
       stderr: "something broke",
     }));
     const agent = makeAgent("agent-abc", "/repos/myproject");
-    const result = await killAgent(agent);
+    const result = await nukeAgent(agent);
     expect(result.ok).toBe(false);
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toBe("something broke");
@@ -336,13 +324,287 @@ describe("ib-commands", () => {
 
   test("cwd always matches agent.repoPath", async () => {
     const agent = makeAgent("agent-abc", "/some/deep/path/to/repo");
-    await killAgent(agent);
-    expect(lastCall!.cwd).toBe("/some/deep/path/to/repo");
 
     await resumeAgent(agent);
     expect(lastCall!.cwd).toBe("/some/deep/path/to/repo");
 
     await mergeAgent(agent);
     expect(lastCall!.cwd).toBe("/some/deep/path/to/repo");
+  });
+});
+
+// Helper: create a mock SpawnFn that records calls and returns success
+function mockSpawnFn(calls: string[][]): (cmd: string[], opts?: any) => SpawnResult {
+  return (cmd: string[]) => {
+    calls.push(cmd);
+    return {
+      stdout: new Response("").body!,
+      stderr: new Response("").body!,
+      exited: Promise.resolve(0),
+    } as SpawnResult;
+  };
+}
+
+// Helper: create a mock SpawnFn that returns failure for specific commands
+function mockSpawnFnWithFailures(
+  calls: string[][],
+  failCommands: (cmd: string[]) => boolean
+): (cmd: string[], opts?: any) => SpawnResult {
+  return (cmd: string[]) => {
+    calls.push(cmd);
+    const exitCode = failCommands(cmd) ? 1 : 0;
+    return {
+      stdout: new Response("").body!,
+      stderr: new Response("").body!,
+      exited: Promise.resolve(exitCode),
+    } as SpawnResult;
+  };
+}
+
+describe("killAgent (native)", () => {
+  let tempDir: string;
+  let spawnCalls: string[][];
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "kill-test-"));
+    spawnCalls = [];
+    // Mock both the lifecycle spawn runner and the kill/pause spawn runner
+    const runner = mockSpawnFn(spawnCalls);
+    setLifecycleSpawnRunner(runner);
+    setKillPauseSpawnRunner(runner);
+  });
+
+  afterEach(async () => {
+    resetLifecycleSpawnRunner();
+    resetKillPauseSpawnRunner();
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  test("returns error when agent directory and tmux session don't exist", async () => {
+    // No meta.json + tmux has-session fails
+    const runner = mockSpawnFnWithFailures(spawnCalls, (cmd) => cmd.includes("has-session"));
+    setLifecycleSpawnRunner(runner);
+    setKillPauseSpawnRunner(runner);
+
+    const agent = makeAgent("agent-abc", tempDir);
+    const result = await killAgent(agent);
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("not found");
+  });
+
+  test("succeeds and returns 'Closed agent: <id>' when agent directory exists", async () => {
+    // Create agent directory with meta.json
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-abc",
+      tmux_session: "tmux-agent-abc",
+      claude_pid: "99999",
+    }));
+
+    // All tmux commands fail (no session) — that's fine, teardown handles it
+    const runner = mockSpawnFnWithFailures(spawnCalls, (cmd) =>
+      cmd.includes("has-session") || cmd.includes("pgrep")
+    );
+    setLifecycleSpawnRunner(runner);
+    setKillPauseSpawnRunner(runner);
+
+    const agent = makeAgent("agent-abc", tempDir);
+    const result = await killAgent(agent);
+
+    expect(result.ok).toBe(true);
+    expect(result.stdout).toBe("Closed agent: agent-abc");
+  });
+
+  test("removes agent directory after teardown", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-abc",
+      tmux_session: "tmux-agent-abc",
+    }));
+
+    const runner = mockSpawnFnWithFailures(spawnCalls, (cmd) =>
+      cmd.includes("has-session") || cmd.includes("pgrep")
+    );
+    setLifecycleSpawnRunner(runner);
+    setKillPauseSpawnRunner(runner);
+
+    const agent = makeAgent("agent-abc", tempDir);
+    await killAgent(agent);
+
+    // Agent directory should be removed after teardown
+    const exists = await Bun.file(join(agentDir, "meta.json")).exists();
+    expect(exists).toBe(false);
+  });
+
+  test("removes user-questions.json entries for killed agent", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-abc",
+      tmux_session: "tmux-agent-abc",
+    }));
+
+    // Write a questions file with entries for the agent
+    const questionsPath = join(tempDir, ".ittybitty", "user-questions.json");
+    await Bun.write(questionsPath, JSON.stringify({
+      questions: [
+        { agent: "agent-abc", question: "Q1" },
+        { agent: "agent-xyz", question: "Q2" },
+      ],
+    }));
+
+    const runner = mockSpawnFnWithFailures(spawnCalls, (cmd) =>
+      cmd.includes("has-session") || cmd.includes("pgrep")
+    );
+    setLifecycleSpawnRunner(runner);
+    setKillPauseSpawnRunner(runner);
+
+    const agent = makeAgent("agent-abc", tempDir);
+    await killAgent(agent);
+
+    // Questions for agent-abc should be removed, agent-xyz kept
+    const updated = await Bun.file(questionsPath).json();
+    expect(updated.questions).toEqual([{ agent: "agent-xyz", question: "Q2" }]);
+  });
+
+  test("succeeds when tmux session exists but directory doesn't", async () => {
+    // tmux has-session succeeds (agent exists via tmux only)
+    const runner = mockSpawnFnWithFailures(spawnCalls, (cmd) =>
+      cmd.includes("pgrep")
+    );
+    setLifecycleSpawnRunner(runner);
+    setKillPauseSpawnRunner(runner);
+
+    const agent = makeAgent("agent-abc", tempDir);
+    const result = await killAgent(agent);
+
+    expect(result.ok).toBe(true);
+    expect(result.stdout).toBe("Closed agent: agent-abc");
+  });
+});
+
+describe("pauseAgent (native)", () => {
+  let tempDir: string;
+  let spawnCalls: string[][];
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "pause-test-"));
+    spawnCalls = [];
+    const runner = mockSpawnFn(spawnCalls);
+    setLifecycleSpawnRunner(runner);
+    setKillPauseSpawnRunner(runner);
+  });
+
+  afterEach(async () => {
+    resetLifecycleSpawnRunner();
+    resetKillPauseSpawnRunner();
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  test("returns error when agent directory doesn't exist", async () => {
+    const agent = makeAgent("agent-abc", tempDir);
+    const result = await pauseAgent(agent);
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("not found");
+  });
+
+  test("succeeds and returns pause message when agent directory exists", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-abc",
+      tmux_session: "tmux-agent-abc",
+    }));
+
+    // All tmux/pgrep commands fail — no running process
+    const runner = mockSpawnFnWithFailures(spawnCalls, (cmd) =>
+      cmd.includes("has-session") || cmd.includes("pgrep")
+    );
+    setLifecycleSpawnRunner(runner);
+    setKillPauseSpawnRunner(runner);
+
+    const agent = makeAgent("agent-abc", tempDir);
+    const result = await pauseAgent(agent);
+
+    expect(result.ok).toBe(true);
+    expect(result.stdout).toContain("Agent paused");
+    expect(result.stdout).toContain("ib resume agent-abc");
+  });
+
+  test("preserves agent directory and meta.json after pause", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-abc",
+      tmux_session: "tmux-agent-abc",
+    }));
+
+    const runner = mockSpawnFnWithFailures(spawnCalls, (cmd) =>
+      cmd.includes("has-session") || cmd.includes("pgrep")
+    );
+    setLifecycleSpawnRunner(runner);
+    setKillPauseSpawnRunner(runner);
+
+    const agent = makeAgent("agent-abc", tempDir);
+    await pauseAgent(agent);
+
+    // Directory and meta.json should still exist
+    const exists = await Bun.file(join(agentDir, "meta.json")).exists();
+    expect(exists).toBe(true);
+  });
+
+  test("logs 'Agent paused' to agent.log", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-abc",
+      tmux_session: "tmux-agent-abc",
+    }));
+
+    const runner = mockSpawnFnWithFailures(spawnCalls, (cmd) =>
+      cmd.includes("has-session") || cmd.includes("pgrep")
+    );
+    setLifecycleSpawnRunner(runner);
+    setKillPauseSpawnRunner(runner);
+
+    const agent = makeAgent("agent-abc", tempDir);
+    await pauseAgent(agent);
+
+    const log = await Bun.file(join(agentDir, "agent.log")).text();
+    expect(log).toContain("Agent paused");
+  });
+
+  test("kills tmux session when it exists", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-abc",
+      tmux_session: "tmux-agent-abc",
+    }));
+
+    // has-session succeeds for the kill/pause runner, everything else fails
+    const runner = mockSpawnFnWithFailures(spawnCalls, (cmd) =>
+      cmd.includes("pgrep")
+    );
+    setLifecycleSpawnRunner(runner);
+    setKillPauseSpawnRunner(runner);
+
+    const agent = makeAgent("agent-abc", tempDir);
+    await pauseAgent(agent);
+
+    // Should have called tmux kill-session
+    const killSessionCall = spawnCalls.find(
+      (c) => c[0] === "tmux" && c[1] === "kill-session"
+    );
+    expect(killSessionCall).toBeDefined();
+    expect(killSessionCall![3]).toBe("tmux-agent-abc");
+
+    // Should log tmux session kill
+    const log = await Bun.file(join(agentDir, "agent.log")).text();
+    expect(log).toContain("Killed tmux session");
   });
 });

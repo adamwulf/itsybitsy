@@ -686,11 +686,11 @@ New file: `src/watchdog.ts`. This is the highest-complexity feature but also the
 No new file format needed — reuses existing `ib send` infrastructure.
 
 **Dialog flow for `E` key:**
-- [ ] Step 1: Select destination repo (select list from registry, exclude current repo if only one agent)
-- [ ] Step 2: Select destination agent (select list of non-archived agents in chosen repo)
-- [ ] Step 3: Enter message (text input dialog)
-- [ ] Execute: call `sendMessage()` with the destination repo's path
-- [ ] No changes required to `ib` itself
+- [x] Step 1: Select destination repo (select list from registry, exclude current repo if only one agent)
+- [x] Step 2: Select destination agent (select list of non-archived agents in chosen repo)
+- [x] Step 3: Enter message (text input dialog)
+- [x] Execute: call `sendMessage()` with the destination repo's path
+- [x] No changes required to `ib` itself
 
 ---
 

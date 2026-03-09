@@ -628,6 +628,7 @@ Files: `src/tui/dashboard.ts`, `src/config.ts`.
 Currently shelling to `ib` as temporary placeholders (marked TODO in code):
 - [ ] **`send <id> <message>`** — use `tmux send-keys -t {tmux_session} "{message}" Enter` directly via Bun.spawn
 - [ ] **`kill <id>`** — kill tmux session, move agent dir to `.ittybitty/archive/`, update any parent manager references
+- [ ] **`pause <id>`** — stop Claude process and tmux session, preserve agent dir/worktree/log for later resume (mirrors `ib pause`)
 - [ ] **`resume <id>`** — restart tmux session with claude, update agent state files
 - [ ] **`merge <id>`** — git rebase worktree onto main, fast-forward main, delete worktree, archive agent dir
 - [ ] **`new-agent <prompt>`** — create git worktree + branch, start tmux session, launch claude with correct flags, write meta.json, optionally start watchdog

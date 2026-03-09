@@ -220,10 +220,6 @@ export async function nukeAgent(agent: Agent): Promise<IbCommandResult> {
     };
   }
 
-  if (descendants.length === 0) {
-    return { ok: true, exitCode: 0, stdout: "No agents found to kill.", stderr: "" };
-  }
-
   let killed = 0;
   let failed = 0;
 

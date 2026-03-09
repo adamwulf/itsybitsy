@@ -103,6 +103,45 @@ describe("registry", () => {
     expect(result.ok).toBe(false);
   });
 
+  test("renameRepo rejects nickname that collides with another repo's display name", async () => {
+    const repo1 = join(tempDir, "repo1");
+    const repo2 = join(tempDir, "repo2");
+    await mkdir(repo1, { recursive: true });
+    await mkdir(repo2, { recursive: true });
+    await addRepo(repo1);
+    await addRepo(repo2);
+    // repo2's display name is "repo2" (basename). Setting repo1's nickname to "repo2" should fail.
+    const result = await renameRepo(repo1, "repo2");
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("already used");
+  });
+
+  test("renameRepo rejects nickname that collides with another repo's basename even if it has a nickname", async () => {
+    const repo1 = join(tempDir, "repo1");
+    const repo2 = join(tempDir, "repo2");
+    await mkdir(repo1, { recursive: true });
+    await mkdir(repo2, { recursive: true });
+    await addRepo(repo1);
+    await addRepo(repo2);
+    // Give repo2 a nickname so its display name differs from its basename
+    await renameRepo(repo2, "custom-nick");
+    // Setting repo1's nickname to "repo2" (repo2's basename) should still fail
+    const result = await renameRepo(repo1, "repo2");
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("already used");
+  });
+
+  test("renameRepo allows nickname that doesn't collide", async () => {
+    const repo1 = join(tempDir, "repo1");
+    const repo2 = join(tempDir, "repo2");
+    await mkdir(repo1, { recursive: true });
+    await mkdir(repo2, { recursive: true });
+    await addRepo(repo1);
+    await addRepo(repo2);
+    const result = await renameRepo(repo1, "unique-name");
+    expect(result.ok).toBe(true);
+  });
+
   test("repoDisplayName returns nickname when set", () => {
     expect(repoDisplayName({ path: "/tmp/test", name: "test", nickname: "nick" })).toBe("nick");
   });

@@ -901,7 +901,12 @@ export function handleRenameRepo(ctx: ActionCtx) {
       ctx.closeDialog();
       renameRepo(repo.path, value).then((result) => {
         ctx.setNotice(result.message);
-        if (result.ok) { ctx.watcher?.refresh(); }
+        if (result.ok) {
+          // Update in-memory state so the UI reflects the change immediately
+          const trimmed = value.trim();
+          if (trimmed) { repo.nickname = trimmed; } else { delete repo.nickname; }
+          ctx.watcher?.refresh();
+        }
       }).catch((err) => {
         ctx.setNotice(`Error renaming: ${err}`);
       });
@@ -922,7 +927,12 @@ export function handleRemoveRepo(ctx: ActionCtx) {
       ctx.closeDialog();
       removeRepo(repo.path).then((result) => {
         ctx.setNotice(result.message);
-        if (result.ok) { ctx.watcher?.refresh(); }
+        if (result.ok) {
+          // Remove from in-memory repos so the UI reflects the change immediately
+          const idx = ctx.repos.findIndex((r) => r.path === repo.path);
+          if (idx !== -1) { ctx.repos.splice(idx, 1); }
+          ctx.watcher?.refresh();
+        }
       }).catch((err) => {
         ctx.setNotice(`Error removing: ${err}`);
       });

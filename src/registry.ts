@@ -84,6 +84,13 @@ export async function renameRepo(repoPath: string, nickname: string): Promise<{ 
   }
   const trimmed = nickname.trim();
   if (trimmed) {
+    // Reject nicknames that collide with another repo's display name or basename
+    const collision = registry.repos.find((r) =>
+      r.path !== resolved && (repoDisplayName(r) === trimmed || r.name === trimmed)
+    );
+    if (collision) {
+      return { ok: false, message: `Name "${trimmed}" already used by ${collision.path}` };
+    }
     entry.nickname = trimmed;
   } else {
     delete entry.nickname;

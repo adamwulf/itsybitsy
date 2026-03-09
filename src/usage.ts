@@ -25,14 +25,14 @@ export function resetTestFetch(): void {
 
 /** Narrow types matching actual Bun.spawn usage in readAccessToken. */
 interface SpawnResult {
-  stdout: ReadableStream;
-  stderr: ReadableStream;
+  stdout: ReadableStream<Uint8Array> | null;
+  stderr: ReadableStream<Uint8Array> | null;
   exited: Promise<number>;
 }
-type SpawnFn = (cmd: string[], opts: { stdout: "pipe"; stderr: "pipe" }) => SpawnResult;
+type SpawnFn = (cmd: string[], opts?: { stdout: "pipe"; stderr: "pipe" }) => SpawnResult;
 
 /** For test injection of Bun.spawn used in keychain lookup. */
-let spawnFn: SpawnFn = Bun.spawn as unknown as SpawnFn;
+let spawnFn: SpawnFn = Bun.spawn as SpawnFn;
 
 /** Override spawn for testing. */
 export function setTestSpawn(fn: SpawnFn): void {
@@ -41,7 +41,7 @@ export function setTestSpawn(fn: SpawnFn): void {
 
 /** Reset spawn to Bun.spawn. */
 export function resetTestSpawn(): void {
-  spawnFn = Bun.spawn as unknown as SpawnFn;
+  spawnFn = Bun.spawn as SpawnFn;
 }
 
 let ITSYBITSY_DIR = join(homedir(), ".itsybitsy");

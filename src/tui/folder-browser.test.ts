@@ -1,6 +1,6 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { join } from "path";
-import { mkdtemp, rm, mkdir } from "fs/promises";
+import { mkdtemp, rm, mkdir, chmod } from "fs/promises";
 import { tmpdir } from "os";
 import { buildFolderItems } from "./folder-browser";
 
@@ -101,7 +101,6 @@ describe("buildFolderItems", () => {
     await mkdir(join(tmpDir, "restricted", "child"));
     const restricted = join(tmpDir, "restricted");
     // Remove read permission so readdir fails with EACCES
-    const { chmod } = await import("fs/promises");
     await chmod(restricted, 0o000);
 
     try {

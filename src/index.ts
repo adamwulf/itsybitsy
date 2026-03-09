@@ -159,8 +159,10 @@ async function main() {
       break;
     }
     case "info": {
+      const { detectAgentStates } = await import("./agents");
       const repos = await listRepos();
       const agent = await requireAgent(args[1], repos);
+      await detectAgentStates([agent]);
       const m = agent.meta;
       console.log(`Agent:        ${agent.id}`);
       console.log(`Repo:         ${agent.repoName} (${agent.repoPath})`);
@@ -274,7 +276,7 @@ async function main() {
       const repos = await listRepos();
       const agent = await requireAgent(args[1], repos);
       const extraArgs = args.slice(2);
-      await runIb(["merge", agent.id, "--force", ...extraArgs], agent.repoPath);
+      await runIb(["merge", agent.id, ...extraArgs], agent.repoPath);
       break;
     }
     // TODO: implement natively
@@ -308,7 +310,7 @@ async function main() {
         if (flagIdxInIb !== -1) ibArgs.splice(flagIdxInIb, 2);
       } else {
         const cwd = process.cwd();
-        const cwdMatch = repos.find((r) => cwd.startsWith(r.path));
+        const cwdMatch = repos.find((r) => cwd === r.path || cwd.startsWith(r.path + "/"));
         if (cwdMatch) {
           repoPath = cwdMatch.path;
         } else if (repos.length === 1) {
@@ -342,7 +344,7 @@ async function main() {
       console.log("Monitoring:");
       console.log("  watch               Launch TUI dashboard");
       console.log("  agents, tree        List all agents with states");
-      console.log("  look <id>           Show agent's live tmux output");
+      console.log("  look <id>           Show agent's live tmux output (--lines N, --all)");
       console.log("  status <id>         Show agent's git log and status");
       console.log("  diff <id>           Show agent's git diff from main");
       console.log("  info <id>           Show agent's metadata");
@@ -350,7 +352,7 @@ async function main() {
       console.log("Communication:");
       console.log("  send <id> <msg>     Send a message to an agent");
       console.log("  questions, q        Show pending agent questions");
-      console.log("  acknowledge <id>    Acknowledge an agent's question");
+      console.log("  ack, acknowledge    Acknowledge an agent's question");
       console.log("");
       console.log("Agent Lifecycle:");
       console.log("  new-agent, new      Spawn a new agent");

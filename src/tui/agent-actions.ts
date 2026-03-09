@@ -508,7 +508,7 @@ export function handleOpenDiffTool(ctx: ActionCtx) {
   // Run diff tool in the worktree, showing changes since merge-base with main.
   // Tool string is unquoted so multi-word tools (e.g. "git webdiff") are word-split correctly.
   const proc = Bun.spawn(
-    ["bash", "-c", '$1 $(git merge-base HEAD main)', "--", tool],
+    ["/bin/bash", "-c", '$1 $(git merge-base HEAD main)', "--", tool],
     { cwd, stdout: "ignore", stderr: "pipe" },
   );
   ctx.setNotice(`Opened diff in ${tool}`);

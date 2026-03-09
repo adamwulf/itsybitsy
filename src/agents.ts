@@ -218,10 +218,20 @@ export interface FlatAgent {
 /**
  * Flatten agent tree into display order (depth-first), with indentation level.
  * Computes box-drawing connector strings (├──, └──, │) for tree display.
- * When repoNames has > 1 entry, inserts repo header rows and groups agents under them.
- * Empty repos (in repoNames but with no agents) get a header with repoHasAgents=false.
+ * When repos has > 1 entry, inserts repo header rows and groups agents under them.
+ * Empty repos (in repos but with no agents) get a header with repoHasAgents=false.
+ *
+ * Accepts either string[] (display names, legacy) or {name, path}[] (with paths for selection persistence).
  */
-export function flattenAgentTree(roots: Agent[], repoNames: string[] = []): FlatAgent[] {
+export function flattenAgentTree(roots: Agent[], repos: string[] | { name: string; path: string }[] = []): FlatAgent[] {
+  // Normalize to {name, path} format
+  const repoInfos: { name: string; path: string }[] = repos.map((r) =>
+    typeof r === "string" ? { name: r, path: "" } : r
+  );
+  const repoNames = repoInfos.map((r) => r.name);
+  // Build a map from name → path for dummy agents
+  const repoPathByName = new Map<string, string>();
+  for (const r of repoInfos) repoPathByName.set(r.name, r.path);
   const result: FlatAgent[] = [];
 
   function walk(agent: Agent, depth: number, ancestorIsLast: boolean[]) {
@@ -276,7 +286,7 @@ export function flattenAgentTree(roots: Agent[], repoNames: string[] = []): Flat
         // Empty repo — create a minimal dummy agent for the header
         const dummyAgent: Agent = {
           id: `__repo_${repoName}`,
-          repoPath: "",
+          repoPath: repoPathByName.get(repoName) ?? "",
           repoName,
           meta: { id: "", session_id: "", tmux_session: "", prompt: "", model: "", worker: false, manager: "", created_epoch: 0, created: "", worktree: false, yolo: false, claude_pid: "" },
           state: "unknown",

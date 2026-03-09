@@ -205,15 +205,12 @@ export function buildAgentTree(agents: Agent[]): Agent[] {
   return roots;
 }
 
-export interface FlatAgent {
-  agent: Agent;
-  depth: number;
-  connector: string;
-  /** When set, this row is a repo header (shown only in multi-repo mode) */
-  repoHeader?: string;
-  /** Whether this repo header has agents under it */
-  repoHasAgents?: boolean;
-}
+export type FlatEntry =
+  | { kind: "agent"; agent: Agent; depth: number; connector: string; repoHeader: string | null; repoHasAgents: boolean }
+  | { kind: "repo-header"; repoName: string; repoPath: string; hasAgents: boolean };
+
+/** @deprecated Use FlatEntry instead */
+export type FlatAgent = FlatEntry;
 
 /**
  * Flatten agent tree into display order (depth-first), with indentation level.
@@ -223,16 +220,16 @@ export interface FlatAgent {
  *
  * Accepts either string[] (display names, legacy) or {name, path}[] (with paths for selection persistence).
  */
-export function flattenAgentTree(roots: Agent[], repos: string[] | { name: string; path: string }[] = []): FlatAgent[] {
+export function flattenAgentTree(roots: Agent[], repos: string[] | { name: string; path: string }[] = []): FlatEntry[] {
   // Normalize to {name, path} format
   const repoInfos: { name: string; path: string }[] = repos.map((r) =>
     typeof r === "string" ? { name: r, path: "" } : r
   );
   const repoNames = repoInfos.map((r) => r.name);
-  // Build a map from name → path for dummy agents
+  // Build a map from name → path for repo headers
   const repoPathByName = new Map<string, string>();
   for (const r of repoInfos) repoPathByName.set(r.name, r.path);
-  const result: FlatAgent[] = [];
+  const result: FlatEntry[] = [];
 
   function walk(agent: Agent, depth: number, ancestorIsLast: boolean[]) {
     if (agent.archived) return;
@@ -247,7 +244,7 @@ export function flattenAgentTree(roots: Agent[], repos: string[] | { name: strin
       connector += ancestorIsLast[ancestorIsLast.length - 1] ? "└── " : "├── ";
     }
 
-    result.push({ agent, depth, connector });
+    result.push({ kind: "agent", agent, depth, connector, repoHeader: null, repoHasAgents: false });
     const nonArchivedChildren = agent.children.filter((c) => !c.archived);
     for (let i = 0; i < nonArchivedChildren.length; i++) {
       const isLast = i === nonArchivedChildren.length - 1;
@@ -276,26 +273,15 @@ export function flattenAgentTree(roots: Agent[], repos: string[] | { name: strin
     for (const repoName of sortedNames) {
       const agents = repoGroups.get(repoName);
       if (agents && agents.length > 0) {
-        // Repo with agents — use first agent as placeholder
-        result.push({ agent: agents[0]!, depth: 0, connector: "", repoHeader: repoName, repoHasAgents: true });
+        // Repo with agents — emit repo header then walk agents
+        result.push({ kind: "repo-header", repoName, repoPath: repoPathByName.get(repoName) ?? "", hasAgents: true });
         for (let i = 0; i < agents.length; i++) {
           const isLast = i === agents.length - 1;
           walk(agents[i]!, 0, [isLast]);
         }
       } else {
-        // Empty repo — create a minimal dummy agent for the header
-        const dummyAgent: Agent = {
-          id: `__repo_${repoName}`,
-          repoPath: repoPathByName.get(repoName) ?? "",
-          repoName,
-          meta: { id: "", session_id: "", tmux_session: "", prompt: "", model: "", worker: false, manager: "", created_epoch: 0, created: "", worktree: false, yolo: false, claude_pid: "" },
-          state: "unknown",
-          age: "",
-          children: [],
-          archived: false,
-          orphaned: false,
-        };
-        result.push({ agent: dummyAgent, depth: 0, connector: "", repoHeader: repoName, repoHasAgents: false });
+        // Empty repo — just a header
+        result.push({ kind: "repo-header", repoName, repoPath: repoPathByName.get(repoName) ?? "", hasAgents: false });
       }
     }
   } else {

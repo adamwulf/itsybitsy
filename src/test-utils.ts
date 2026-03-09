@@ -2,7 +2,7 @@
  * Shared test utilities for itsybitsy tests.
  */
 
-import type { Agent, AgentMeta } from "./agents";
+import type { Agent, AgentMeta, FlatEntry } from "./agents";
 
 /** Create a test Agent with sensible defaults. All fields can be overridden. */
 export function makeAgent(overrides: Partial<Agent> & { id: string }): Agent {
@@ -30,4 +30,21 @@ export function makeAgent(overrides: Partial<Agent> & { id: string }): Agent {
     } as AgentMeta,
     ...overrides,
   };
+}
+
+/** Create a FlatEntry of kind "agent" for tests */
+export function makeFlatAgent(agent: Agent, overrides?: { depth?: number; connector?: string; repoHeader?: string | null; repoHasAgents?: boolean }): Extract<FlatEntry, { kind: "agent" }> {
+  return {
+    kind: "agent",
+    agent,
+    depth: overrides?.depth ?? 0,
+    connector: overrides?.connector ?? "",
+    repoHeader: overrides?.repoHeader ?? null,
+    repoHasAgents: overrides?.repoHasAgents ?? false,
+  };
+}
+
+/** Create a FlatEntry of kind "repo-header" for tests */
+export function makeFlatRepoHeader(repoName: string, repoPath: string = "", hasAgents: boolean = false): Extract<FlatEntry, { kind: "repo-header" }> {
+  return { kind: "repo-header", repoName, repoPath, hasAgents };
 }

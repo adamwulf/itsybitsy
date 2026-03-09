@@ -24,7 +24,7 @@ import { loadRegistry } from "../registry";
 import type { RepoEntry } from "../registry";
 import { AgentWatcher } from "../watcher";
 import { TmuxPoller } from "../tmux-poller";
-import type { Agent, FlatAgent, PendingQuestion } from "../agents";
+import type { Agent, FlatEntry, PendingQuestion } from "../agents";
 import { SplitPane } from "./split-pane";
 import { wrapLines } from "./wrap";
 import { fetchUsage } from "../usage";
@@ -617,7 +617,7 @@ export class DashboardComponent implements Component {
 
   // --- Data update + agent sync ---
 
-  onUpdate(agents: Agent[], flatList: FlatAgent[], questions: PendingQuestion[], orphanedTmuxSessions: string[] = []) {
+  onUpdate(agents: Agent[], flatList: FlatEntry[], questions: PendingQuestion[], orphanedTmuxSessions: string[] = []) {
     this.agentTree.setFlatList(flatList);
     this.rightPane.questions = questions;
     this.rightPane.allAgents = flatList;
@@ -638,12 +638,11 @@ export class DashboardComponent implements Component {
     if (this.pendingSelectNewestInRepo) {
       const repoPath = this.pendingSelectNewestInRepo;
       this.pendingSelectNewestInRepo = null;
-      const newest = flatList
-        .filter((f) => f.agent.repoPath === repoPath)
-        .reduce<FlatAgent | null>((best, f) => {
-          if (!best || f.agent.meta.created_epoch > best.agent.meta.created_epoch) return f;
-          return best;
-        }, null);
+      const agentEntries = flatList.filter((f): f is Extract<FlatEntry, { kind: "agent" }> => f.kind === "agent" && f.agent.repoPath === repoPath);
+      const newest = agentEntries.reduce<Extract<FlatEntry, { kind: "agent" }> | null>((best, f) => {
+        if (!best || f.agent.meta.created_epoch > best.agent.meta.created_epoch) return f;
+        return best;
+      }, null);
       if (newest) {
         this.agentTree.selectAgentById(newest.agent.id);
       }
@@ -972,7 +971,7 @@ export async function launchDashboard(): Promise<void> {
   tui.addChild(dashboard);
 
   const watcher = new AgentWatcher(repos, {
-    onUpdate: (agents, flatList, questions, orphanedTmuxSessions) => {
+    onUpdate: (agents: Agent[], flatList: FlatEntry[], questions: PendingQuestion[], orphanedTmuxSessions: string[]) => {
       dashboard.onUpdate(agents, flatList, questions, orphanedTmuxSessions);
     },
     onError: (err) => {

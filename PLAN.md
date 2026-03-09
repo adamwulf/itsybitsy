@@ -421,7 +421,7 @@ Note: `tmux-poller.ts` was implemented in Phase 2/3. Phase 4 focuses on renderin
 - [x] `r` — reassign agent's manager: text input dialog, then `ib reassign {id} {new-manager}`
 - [x] `m` — merge agent: run `ib merge-check {id}` first, show result in confirm dialog, then `ib merge {id} --force`
 - [x] `s` — send message: text input dialog, then `ib send {id} "message"`
-- [x] `a` — new agent: repo selector (from registry) → prompt input → optional flags (`--worker`); shells to `ib new-agent`
+- [x] `a` — new agent: infers repo from selection → name → worker toggle → prompt; shells to `ib new-agent`
 
 ---
 

@@ -885,7 +885,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect((dashboard.dialog as any).repoName).toBe("only-repo");
   });
 
-  test("a key with multiple repos shows repo select first", () => {
+  test("a key with multiple repos and no selection uses first repo", () => {
     dashboard = makeDashboard();
     dashboard.setRepos([
       { path: "/repos/one", name: "repo-one" },
@@ -894,8 +894,8 @@ describe("DashboardComponent dialog and action handlers", () => {
     lastIbCall = null;
 
     dashboard.handleInput("a");
-    expect(dashboard.dialog!.type).toBe("select");
-    expect((dashboard.dialog as any).prompt).toContain("Select repo");
+    expect(dashboard.dialog!.type).toBe("new-agent-form");
+    expect((dashboard.dialog as any).repoName).toBe("repo-one");
   });
 
   test("new-agent form: Tab cycles focus through all fields", () => {
@@ -1068,20 +1068,15 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(d.lines).toEqual(["line one", "line two"]);
   });
 
-  test("A key toggles archived agents", () => {
+  test("A key is not bound (removed)", () => {
     dashboard = makeDashboard();
     const agent1 = makeAgent("agent-active", "/repos/test");
-    const agent2 = makeAgent("agent-old", "/repos/test", true);
     const flatList: FlatAgent[] = [
-      { agent: agent1, depth: 0, connector: "├── " },
-      { agent: agent2, depth: 0, connector: "└── " },
+      { agent: agent1, depth: 0, connector: "└── " },
     ];
-    dashboard.onUpdate([agent1, agent2], flatList, []);
-    // Initially archived agents are hidden
+    dashboard.onUpdate([agent1], flatList, []);
+    // A key should be a no-op (no crash)
     dashboard.handleInput("A");
-    // After toggle, archived agents should be visible (we just verify no crash)
-    dashboard.handleInput("A");
-    // Toggle back
   });
 
 });

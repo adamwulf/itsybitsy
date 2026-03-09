@@ -10,7 +10,7 @@ import { TmuxPaneComponent, RightPaneComponent, DashboardComponent, AgentTreeCom
 import { visibleWidth } from "@mariozechner/pi-tui";
 import { setRunner, resetRunner } from "../ib-commands";
 import { PANE_MODES } from "./pane-manager";
-import { assertDialog } from "./dialog-handler";
+import { assertDialog } from "./test-helpers";
 
 function makeAgent(id: string, repoPath: string, archived = false): Agent {
   return _makeAgent({ id, repoPath, archived });

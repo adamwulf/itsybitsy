@@ -28,7 +28,6 @@ import type { Agent, FlatEntry, PendingQuestion } from "../agents";
 import { SplitPane } from "./split-pane";
 import { wrapLines } from "./wrap";
 import { fetchUsage } from "../usage";
-import { startUpdateChecker, stopUpdateChecker } from "../update-check";
 import { startWatchdog, stopWatchdog, isWatchdogRunning } from "../watchdog";
 import type { UsageData } from "../usage";
 import { getStateColors, setupColorSchemeDetection } from "./color-scheme";
@@ -378,7 +377,6 @@ export class DashboardComponent implements Component {
   private usageTimer: ReturnType<typeof setInterval> | null = null;
   pendingSelectNewestInRepo: string | null = null;
   private _questionsFocused = false;
-  updateAvailable: string | null = null;
   /** Cache of which agents have an attached tmux client */
   private _clientAttached: Map<string, boolean> = new Map();
   private clientCheckTimer: ReturnType<typeof setInterval> | null = null;
@@ -472,10 +470,6 @@ export class DashboardComponent implements Component {
     this.tmuxPoller.start();
     this.refreshUsage();
     this.usageTimer = setInterval(() => this.refreshUsage(), 60_000);
-    startUpdateChecker(this.statusBar.version, (version) => {
-      this.updateAvailable = version;
-      this.tui?.requestRender();
-    });
     if (this.watcher) {
       const watcher = this.watcher;
       startWatchdog(() => watcher.lastAgents);
@@ -492,7 +486,6 @@ export class DashboardComponent implements Component {
       clearInterval(this.clientCheckTimer);
       this.clientCheckTimer = null;
     }
-    stopUpdateChecker();
     stopWatchdog();
   }
 
@@ -976,13 +969,10 @@ export class DashboardComponent implements Component {
     const isTreeMode = this.rightPane.mode === "TREE";
 
     // Header
-    const updateTag = this.updateAvailable
-      ? ` ${GREEN}Update available: ${this.updateAvailable}${RESET}`
-      : "";
     const subtitle = this.lastSentNotice
       ? `${DIM}—${RESET} ${YELLOW}${this.lastSentNotice}${RESET}`
       : `${DIM}— agent dashboard${RESET}`;
-    lines.push(truncateToWidth(`${BOLD}itsybitsy${RESET} ${subtitle}${updateTag}`, width, ""));
+    lines.push(truncateToWidth(`${BOLD}itsybitsy${RESET} ${subtitle}`, width, ""));
 
     if (isTreeMode) {
       // title(1) + separator(1) + separator(1) + statusBar(3) = 6 lines of chrome

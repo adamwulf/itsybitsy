@@ -108,8 +108,6 @@ itsybitsy
 │   ├── usage.ts              # Fetches Claude API quota from Anthropic OAuth API;
 │   │                         # caches at ~/.claude/usage-cache.json (10s TTL)
 │   ├── usage.test.ts         # Usage fetch/parse tests
-│   ├── update-check.ts       # Background npm registry version checker (hourly)
-│   ├── update-check.test.ts  # Update checker tests
 │   ├── config.ts             # Config reading/writing for .ittybitty.json
 │   ├── config.test.ts        # Config tests
 │   ├── watcher.ts            # fs.watch({ recursive: true }) on agents/, archive/,
@@ -511,7 +509,7 @@ All changes in `src/tui/dashboard.ts` — control flow and status bar only, no r
 - [x] **Minimum terminal size (G-11)** — at top of `render()`, if `process.stdout.rows < 20 || width < 80`, render a single warning line ("Terminal too small — need at least 80x20") and return early.
 - [x] **Scroll step size (G-13)** — change scroll step constant from `5` to `10` lines to match ib watch. Extract as `const SCROLL_STEP = 10`.
 - [x] **Denial filter intervals (G-14)** — change `DENIAL_FILTERS` from `["all", "1h", "10m"]` to `["all", "24h", "7d"]`. Update `filterDenials()` cutoff math accordingly.
-- [x] **Update notification** (`src/update-check.ts`, `src/tui/dashboard.ts`) — new module: check for updates once per hour by reading the `version` field from `package.json` (current version) and comparing against the latest version from the npm registry (`https://registry.npmjs.org/itsybitsy/latest`). Show "Update available: vX.X.X" in the dashboard header row if newer version exists. Fetch in background via `setTimeout`, never delay startup or block rendering.
+- [x] ~~**Update notification**~~ — Removed. The npm registry checker returned false positives from an unrelated package. A GitHub releases checker will replace it in a future phase.
 
 ---
 

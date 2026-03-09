@@ -134,6 +134,7 @@ export class AgentWatcher {
         this.repos.map((r) => readPendingQuestions(r.path))
       );
       const questions = questionResults.flat();
+      if (!this.running) return;
       this.events.onUpdate(agents, flatList, questions, this.lastOrphanedSessions);
     } catch (err) {
       this.events.onError?.(err instanceof Error ? err : new Error(String(err)));

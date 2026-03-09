@@ -380,10 +380,9 @@ describe("readAccessToken keychain fallback", () => {
     expect(result!.sessionPct).toBe(42);
   });
 
-  test("returns null when keychain returns malformed JSON", async () => {
-    // No credentials file; keychain returns invalid JSON that is not a plain token
-    // Actually, malformed JSON falls through to "not JSON — use raw value as token"
-    // so it will use the raw string as token
+  test("uses raw keychain value as token when JSON is malformed", async () => {
+    // No credentials file; keychain returns invalid JSON — falls through to
+    // "not JSON — use raw value as token" path
     mockSpawn("{invalid json", 0);
     mockFetch(apiResponse);
 

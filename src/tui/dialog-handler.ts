@@ -496,7 +496,6 @@ function handleSetupTab0(
   return true;
 }
 
-
 function handleSetupConfigTab(
   ctx: DialogCtx,
   d: Extract<NonNullable<DialogState>, { type: "setup" }>,

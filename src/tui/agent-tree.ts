@@ -6,13 +6,7 @@ import type { Component } from "@mariozechner/pi-tui";
 import { truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 import type { Agent, FlatAgent } from "../agents";
 import { getStateColors } from "./color-scheme";
-
-// ANSI escape constants
-const RESET = "\x1b[0m";
-const BOLD = "\x1b[1m";
-const DIM = "\x1b[2m";
-const REVERSE = "\x1b[7m";
-const RED = "\x1b[31m";
+import { RESET, BOLD, DIM, REVERSE, RED } from "./colors";
 
 export const MAX_TREE_HEIGHT = 7;
 const MIN_STATE_COL_WIDTH = 8; // minimum: length of "complete"

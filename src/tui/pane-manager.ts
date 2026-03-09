@@ -11,16 +11,7 @@ import { diffAgent, statusAgent } from "../ib-commands";
 import { wrapLines } from "./wrap";
 import { getStateColors } from "./color-scheme";
 import { displayState, computeStateColWidth, AGE_COL_WIDTH } from "./agent-tree";
-
-// ANSI escape constants
-const RESET = "\x1b[0m";
-const BOLD = "\x1b[1m";
-const DIM = "\x1b[2m";
-const RED = "\x1b[31m";
-const GREEN = "\x1b[32m";
-const CYAN = "\x1b[36m";
-const REVERSE = "\x1b[7m";
-const DIM_GRAY = "\x1b[90m";
+import { RESET, BOLD, DIM, RED, GREEN, CYAN, REVERSE, DIM_GRAY } from "./colors";
 
 // Right pane modes
 export const PANE_MODES = [

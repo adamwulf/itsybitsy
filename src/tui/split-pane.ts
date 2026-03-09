@@ -5,6 +5,7 @@
 
 import { truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 import type { Component } from "@mariozechner/pi-tui";
+import { RESET } from "./colors";
 
 export class SplitPane implements Component {
   private left: Component;
@@ -49,11 +50,13 @@ export class SplitPane implements Component {
       const ll: string = i < leftLines.length ? leftLines[i]! : "";
       const rl: string = i < rightLines.length ? rightLines[i]! : "";
 
-      // Pad left to exact width
+      // Pad left to exact width; insert RESET before padding so styled content
+      // from the last left-pane character doesn't bleed into the separator.
       const leftVisible = visibleWidth(ll);
+      const needsReset = ll.includes("\x1b[");
       const leftPadded = leftVisible >= lw
         ? truncateToWidth(ll, lw, "")
-        : ll + " ".repeat(lw - leftVisible);
+        : ll + (needsReset ? RESET : "") + " ".repeat(lw - leftVisible);
 
       // Truncate right to fit
       const rightTruncated = truncateToWidth(rl, rw, "");

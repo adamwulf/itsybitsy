@@ -26,12 +26,7 @@ import type { ConfigResult } from "../config";
 import { fuzzyFilterIndices } from "./dialog-handler";
 import { displayState, computeStateColWidth, AGE_COL_WIDTH } from "./agent-tree";
 import type { PaneMode } from "./pane-manager";
-
-// ANSI escape constants
-const RESET = "\x1b[0m";
-const BOLD = "\x1b[1m";
-const DIM = "\x1b[2m";
-const RED = "\x1b[31m";
+import { RESET, BOLD, DIM, RED, MIN_LEFT_WIDTH, MAX_LEFT_WIDTH } from "./colors";
 
 const SCROLL_STEP = 10;
 
@@ -840,8 +835,6 @@ function handleConfigItemAction(
 }
 
 export function handleResizeLeft(ctx: ActionCtx, delta: number) {
-  const MIN_LEFT_WIDTH = 40;
-  const MAX_LEFT_WIDTH = 160;
   const current = ctx.splitPane.getLeftWidth();
   const newWidth = Math.max(MIN_LEFT_WIDTH, Math.min(MAX_LEFT_WIDTH, current + delta));
   if (newWidth === current) return;

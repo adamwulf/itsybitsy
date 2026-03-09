@@ -362,19 +362,22 @@ export async function hookStatus(agentId: string): Promise<void> {
   } else if (result.action === "notify_manager" && result.message) {
     const managerId = meta?.manager as string | undefined;
     if (managerId) {
-      const managerSession = `ib-${managerId}`;
-      const proc = Bun.spawn(
-        [
-          "tmux",
-          "send-keys",
-          "-t",
-          managerSession,
-          result.message,
-          "Enter",
-        ],
-        { stdout: "pipe", stderr: "pipe" },
-      );
-      await proc.exited;
+      const managerMeta = await readMeta(join(agentsDir, managerId));
+      const managerSession = managerMeta?.tmux_session;
+      if (managerSession) {
+        const proc = Bun.spawn(
+          [
+            "tmux",
+            "send-keys",
+            "-t",
+            managerSession,
+            result.message,
+            "Enter",
+          ],
+          { stdout: "pipe", stderr: "pipe" },
+        );
+        await proc.exited;
+      }
     }
   }
 

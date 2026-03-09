@@ -162,6 +162,60 @@ async function cleanupOrphanedTmuxSessions(agentsDir: string): Promise<number> {
 }
 
 /**
+ * Shared teardown loop for nukeAgent and nukeAllAgents.
+ * Iterates agent IDs, tears each down, then cleans up orphans.
+ */
+async function nukeAgentList(
+  repoPath: string,
+  agentsDir: string,
+  agentIds: string[],
+): Promise<{ killed: number; failed: number; orphansKilled: number }> {
+  let killed = 0;
+  let failed = 0;
+
+  for (const id of agentIds) {
+    const agentDir = join(agentsDir, id);
+    // Skip if directory doesn't exist
+    try {
+      await readdir(agentDir);
+    } catch {
+      continue;
+    }
+
+    // Remove questions
+    await removeAgentQuestions(repoPath, id);
+
+    // Read meta for teardown
+    let meta = { tmux_session: "", claude_pid: "" };
+    try {
+      const metaData = await Bun.file(join(agentDir, "meta.json")).json();
+      meta = {
+        tmux_session: metaData.tmux_session || "",
+        claude_pid: metaData.claude_pid || "",
+      };
+    } catch { /* ignore */ }
+
+    // Teardown
+    try {
+      await teardownAgent(repoPath, id, agentDir, meta, "Agent nuked");
+      killed++;
+    } catch {
+      failed++;
+    }
+  }
+
+  // Clean up orphaned tmux sessions
+  const orphansKilled = await cleanupOrphanedTmuxSessions(agentsDir);
+
+  // Scan for orphaned Claude processes
+  if (killed > 0 || orphansKilled > 0) {
+    await scanAndKillOrphans(agentsDir);
+  }
+
+  return { killed, failed, orphansKilled };
+}
+
+/**
  * Native nuke implementation — replaces `ib nuke <id> --force`.
  *
  * Sequence (mirrors do_nuke in ib bash):
@@ -187,47 +241,7 @@ export async function nukeAgent(agent: Agent): Promise<IbCommandResult> {
     };
   }
 
-  let killed = 0;
-  let failed = 0;
-
-  for (const id of descendants) {
-    const agentDir = join(agentsDir, id);
-    // Skip if directory doesn't exist
-    try {
-      await readdir(agentDir);
-    } catch {
-      continue;
-    }
-
-    // Remove questions
-    await removeAgentQuestions(agent.repoPath, id);
-
-    // Read meta for teardown
-    let meta = { tmux_session: "", claude_pid: "" };
-    try {
-      const metaData = await Bun.file(join(agentDir, "meta.json")).json();
-      meta = {
-        tmux_session: metaData.tmux_session || "",
-        claude_pid: metaData.claude_pid || "",
-      };
-    } catch { /* ignore */ }
-
-    // Teardown
-    try {
-      await teardownAgent(agent.repoPath, id, agentDir, meta, "Agent nuked");
-      killed++;
-    } catch {
-      failed++;
-    }
-  }
-
-  // Clean up orphaned tmux sessions
-  const orphansKilled = await cleanupOrphanedTmuxSessions(agentsDir);
-
-  // Scan for orphaned Claude processes
-  if (killed > 0 || orphansKilled > 0) {
-    await scanAndKillOrphans(agentsDir);
-  }
+  const { killed, failed, orphansKilled } = await nukeAgentList(agent.repoPath, agentsDir, descendants);
 
   if (failed > 0 && killed === 0) {
     return { ok: false, exitCode: 1, stdout: "", stderr: `All ${failed} agent(s) failed to kill` };
@@ -259,41 +273,7 @@ export async function nukeAllAgents(repoPath: string): Promise<IbCommandResult> 
     }
   } catch { /* agents dir may not exist */ }
 
-  let killed = 0;
-  let failed = 0;
-
-  for (const id of agentsToKill) {
-    const agentDir = join(agentsDir, id);
-
-    // Remove questions
-    await removeAgentQuestions(repoPath, id);
-
-    // Read meta for teardown
-    let meta = { tmux_session: "", claude_pid: "" };
-    try {
-      const metaData = await Bun.file(join(agentDir, "meta.json")).json();
-      meta = {
-        tmux_session: metaData.tmux_session || "",
-        claude_pid: metaData.claude_pid || "",
-      };
-    } catch { /* ignore */ }
-
-    // Teardown
-    try {
-      await teardownAgent(repoPath, id, agentDir, meta, "Agent nuked");
-      killed++;
-    } catch {
-      failed++;
-    }
-  }
-
-  // Clean up orphaned tmux sessions
-  const orphansKilled = await cleanupOrphanedTmuxSessions(agentsDir);
-
-  // Scan for orphaned Claude processes
-  if (killed > 0 || orphansKilled > 0) {
-    await scanAndKillOrphans(agentsDir);
-  }
+  const { killed, failed, orphansKilled } = await nukeAgentList(repoPath, agentsDir, agentsToKill);
 
   if (failed > 0 && killed === 0 && agentsToKill.length > 0) {
     return { ok: false, exitCode: 1, stdout: "", stderr: `All ${failed} agent(s) failed to kill` };
@@ -1431,6 +1411,9 @@ export async function newAgent(
   // 9. Generate agent ID
   let id: string;
   if (opts?.name) {
+    if (!/^[a-zA-Z0-9_\-]+$/.test(opts.name)) {
+      return { ok: false, exitCode: 1, stdout: "", stderr: "Error: agent name may only contain letters, digits, hyphens, and underscores" };
+    }
     id = opts.name;
   } else {
     const bytes = new Uint8Array(4);

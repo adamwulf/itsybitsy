@@ -1431,6 +1431,9 @@ export async function newAgent(
   // 9. Generate agent ID
   let id: string;
   if (opts?.name) {
+    if (!/^[a-zA-Z0-9_\-]+$/.test(opts.name)) {
+      return { ok: false, exitCode: 1, stdout: "", stderr: "Error: agent name may only contain letters, digits, hyphens, and underscores" };
+    }
     id = opts.name;
   } else {
     const bytes = new Uint8Array(4);

@@ -2131,6 +2131,22 @@ describe("newAgent (native)", () => {
     expect(result.ok).toBe(true);
   });
 
+  test("rejects name with shell metacharacters", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const badNames = ["foo;bar", "a`whoami`", "$(rm -rf /)", "hello world", "name&cmd", "a|b", "test'quote"];
+    for (const name of badNames) {
+      const result = await callNewAgent("task", { name });
+      expect(result.ok).toBe(false);
+      expect(result.stderr).toContain("agent name may only contain");
+    }
+  });
+
+  test("accepts valid name characters", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("task", { name: "valid-Agent_Name123" });
+    expect(result.ok).toBe(true);
+  });
+
   test("print mode flag is included in start.sh", async () => {
     setNewAgentSpawnRunner(mockSpawnRunner());
     await callNewAgent("task", { name: "test-print", print: true });

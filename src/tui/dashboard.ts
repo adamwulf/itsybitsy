@@ -23,7 +23,7 @@ import type { Component, OverlayHandle } from "@mariozechner/pi-tui";
 import { loadRegistry } from "../registry";
 import type { RepoEntry } from "../registry";
 import { AgentWatcher } from "../watcher";
-import { TmuxPoller } from "../tmux-poller";
+import { TmuxPoller, hasAttachedClient } from "../tmux-poller";
 import type { Agent, FlatEntry, PendingQuestion } from "../agents";
 import { SplitPane } from "./split-pane";
 import { wrapLines } from "./wrap";
@@ -71,6 +71,8 @@ export class TmuxPaneComponent implements Component {
   scrollBack = 0;
   /** Available display height, set by dashboard before render */
   displayHeight = 20;
+  /** Whether the agent's tmux session has an attached external client */
+  clientAttached = false;
 
   invalidate(): void {}
 
@@ -79,6 +81,7 @@ export class TmuxPaneComponent implements Component {
     this.rawOutput = "";
     this.hasPolled = false;
     this.scrollBack = 0;
+    this.clientAttached = false;
   }
 
   scrollUp(amount = 1) {
@@ -92,6 +95,30 @@ export class TmuxPaneComponent implements Component {
   render(width: number): string[] {
     if (!this.agent) {
       return padLines([truncateToWidth(`${DIM}No agent selected${RESET}`, width, "")], this.displayHeight);
+    }
+
+    // Show centered message when agent's tmux session is opened in an external terminal
+    if (this.clientAttached) {
+      const lines: string[] = [];
+      const midLine = Math.floor(this.displayHeight / 2);
+      const idText = `${DIM}${this.agent.id}${RESET}`;
+      const sessionText = `${DIM}${this.agent.meta.tmux_session}${RESET}`;
+      const msgText = `${DIM}[opened in terminal]${RESET}`;
+      for (let i = 0; i < this.displayHeight; i++) {
+        if (i === midLine - 1) {
+          const pad = Math.max(0, Math.floor((width - visibleWidth(idText)) / 2));
+          lines.push(truncateToWidth(" ".repeat(pad) + idText, width, ""));
+        } else if (i === midLine) {
+          const pad = Math.max(0, Math.floor((width - visibleWidth(sessionText)) / 2));
+          lines.push(truncateToWidth(" ".repeat(pad) + sessionText, width, ""));
+        } else if (i === midLine + 1) {
+          const pad = Math.max(0, Math.floor((width - visibleWidth(msgText)) / 2));
+          lines.push(truncateToWidth(" ".repeat(pad) + msgText, width, ""));
+        } else {
+          lines.push("");
+        }
+      }
+      return lines;
     }
 
     // Graceful display for stopped/orphaned agents (no tmux session)
@@ -350,6 +377,9 @@ export class DashboardComponent implements Component {
   pendingSelectNewestInRepo: string | null = null;
   private _questionsFocused = false;
   updateAvailable: string | null = null;
+  /** Cache of which agents have an attached tmux client */
+  private _clientAttached: Map<string, boolean> = new Map();
+  private clientCheckTimer: ReturnType<typeof setInterval> | null = null;
 
   /** Read-only access to whether questions list has focus (for testing) */
   get questionsFocused(): boolean {
@@ -395,6 +425,11 @@ export class DashboardComponent implements Component {
   /** Read-only access to selected agent (for testing) */
   get selectedAgent(): Agent | null {
     return this.agentTree.selectedAgent;
+  }
+
+  /** Read-only access to client-attached cache (for testing) */
+  get clientAttachedCache(): Map<string, boolean> {
+    return this._clientAttached;
   }
 
   constructor() {
@@ -446,6 +481,10 @@ export class DashboardComponent implements Component {
     if (this.usageTimer) {
       clearInterval(this.usageTimer);
       this.usageTimer = null;
+    }
+    if (this.clientCheckTimer) {
+      clearInterval(this.clientCheckTimer);
+      this.clientCheckTimer = null;
     }
     stopUpdateChecker();
   }
@@ -675,11 +714,64 @@ export class DashboardComponent implements Component {
         loadAgentLog(this, selected);
         loadAgentPrompt(this, selected);
       }
+
+      // Client detection: clear previous timer, check new agent
+      if (this.clientCheckTimer) {
+        clearInterval(this.clientCheckTimer);
+        this.clientCheckTimer = null;
+      }
+      if (selected?.meta.tmux_session) {
+        this.checkClientAttached(selected);
+      }
     }
 
     this.rightPane.updateContent();
     triggerAsyncLoadIfNeeded(this);
     this.tmuxPoller.setAgent(selected?.meta.tmux_session ?? null);
+  }
+
+  /** Check if the selected agent's tmux session has an attached client, start/stop polling accordingly */
+  private checkClientAttached(agent: Agent) {
+    const agentId = agent.id;
+    const session = agent.meta.tmux_session;
+
+    const doCheck = async () => {
+      const attached = await hasAttachedClient(session);
+
+      // Discard result if the agent changed while we were awaiting
+      const current = this.agentTree.selectedAgent;
+      if (!current || current.id !== agentId) return;
+
+      const wasAttached = this._clientAttached.get(agentId) ?? false;
+      this._clientAttached.set(agentId, attached);
+
+      if (attached && !this.clientCheckTimer) {
+        // Start polling every 3s to detect disconnect
+        this.clientCheckTimer = setInterval(() => {
+          const sel = this.agentTree.selectedAgent;
+          if (!sel || sel.id !== agentId) {
+            // Agent switched away, stop polling
+            if (this.clientCheckTimer) {
+              clearInterval(this.clientCheckTimer);
+              this.clientCheckTimer = null;
+            }
+            return;
+          }
+          doCheck();
+        }, 3000);
+      } else if (!attached && this.clientCheckTimer) {
+        // Client disconnected, stop polling
+        clearInterval(this.clientCheckTimer);
+        this.clientCheckTimer = null;
+      }
+
+      if (attached !== wasAttached) {
+        this.tmuxPane.clientAttached = attached;
+        this.tui?.requestRender();
+      }
+    };
+
+    doCheck();
   }
 
   // --- Input handling ---

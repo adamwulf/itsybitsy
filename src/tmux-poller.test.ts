@@ -1,5 +1,5 @@
 import { test, expect, describe, afterEach } from "bun:test";
-import { TmuxPoller, captureTmuxOutput, setSpawnRunner, resetSpawnRunner } from "./tmux-poller";
+import { TmuxPoller, captureTmuxOutput, hasAttachedClient, setSpawnRunner, resetSpawnRunner } from "./tmux-poller";
 
 function mockSpawn(stdout: string, exitCode: number, delay = 0) {
   setSpawnRunner((_cmd: string[], _opts?: any) => {
@@ -200,5 +200,34 @@ describe("TmuxPoller", () => {
     poller.setAgent("session");
     await Bun.sleep(50);
     expect(callCount).toBe(0);
+  });
+});
+
+// -------------------------------------------------------------------
+// hasAttachedClient
+// -------------------------------------------------------------------
+describe("hasAttachedClient", () => {
+  test("returns true when clients are attached", async () => {
+    mockSpawn("/dev/ttys001\n/dev/ttys002\n", 0);
+    const result = await hasAttachedClient("my-session");
+    expect(result).toBe(true);
+  });
+
+  test("returns false when no clients attached (empty output)", async () => {
+    mockSpawn("", 0);
+    const result = await hasAttachedClient("my-session");
+    expect(result).toBe(false);
+  });
+
+  test("returns false when tmux exits non-zero (session not found)", async () => {
+    mockSpawn("", 1);
+    const result = await hasAttachedClient("nonexistent-session");
+    expect(result).toBe(false);
+  });
+
+  test("returns false when spawn throws", async () => {
+    setSpawnRunner(() => { throw new Error("tmux not found"); });
+    const result = await hasAttachedClient("my-session");
+    expect(result).toBe(false);
   });
 });

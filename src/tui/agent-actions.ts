@@ -523,7 +523,7 @@ export function handleOpenDiffTool(ctx: ActionCtx) {
   // Tool string is unquoted so multi-word tools (e.g. "git webdiff") are word-split correctly.
   const proc = Bun.spawn(
     ["bash", "-c", '$1 $(git merge-base HEAD main)', "--", tool],
-    { cwd, stdout: "pipe", stderr: "pipe" },
+    { cwd, stdout: "ignore", stderr: "pipe" },
   );
   ctx.setNotice(`Opened diff in ${tool}`);
 

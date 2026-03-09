@@ -121,6 +121,24 @@ describe("buildFolderItems", () => {
     }
   });
 
+  test("checkIsGit permission error treats directory as non-git", async () => {
+    // Create a dir with a .git subdirectory, then restrict the parent so stat(.git) fails
+    const restricted = join(tmpDir, "restricted-git");
+    await mkdir(join(restricted, ".git"), { recursive: true });
+    // Remove execute permission so stat on children fails with EACCES
+    await chmod(restricted, 0o644);
+
+    try {
+      const items = await buildFolderItems(tmpDir);
+      const child = items.find((i) => i.name === "restricted-git");
+      // Should not throw — checkIsGit catches the error and returns false
+      expect(child).toBeDefined();
+      expect(child!.isGit).toBe(false);
+    } finally {
+      await chmod(restricted, 0o755);
+    }
+  });
+
   test("readdir ENOENT returns ancestors and current but no children", async () => {
     const nonexistent = join(tmpDir, "does-not-exist");
     // Don't create the directory — readdir will fail with ENOENT

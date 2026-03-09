@@ -618,7 +618,7 @@ Files: `src/tui/dashboard.ts`, `src/config.ts`.
 **Remaining review items:**
 - [ ] Add tests for `readAccessToken` keychain fallback path (`src/usage.ts`)
 - [ ] Add tests for `color-scheme.ts` OSC 11 query and Ghostty mode 2031 detection
-- [ ] Add tests for `folder-browser.ts` permission error path
+- [x] Add tests for `folder-browser.ts` permission error path
 
 ---
 

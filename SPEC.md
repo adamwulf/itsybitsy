@@ -143,7 +143,7 @@ Resume (`ib resume <id>`) restarts a stopped agent:
 4. Start new tmux session running `resume.sh`
 5. Auto-accept workspace trust (if not yolo)
 6. Send resume nudge message: "Resume your work, or end with 'WAITING' or 'I HAVE COMPLETED THE GOAL' as your final line."
-7. ~~Auto-spawn watchdog~~ [^needs review]: The bash `cmd_resume()` does NOT auto-spawn a watchdog. Only `cmd_new_agent()` spawns a watchdog for agents with a manager. This step should be removed or marked as a potential future enhancement.
+7. **Auto-spawn watchdog**: If the agent has a manager, `ib watchdog <id>` is spawned in the background. [^callout] The bash `cmd_resume()` does not currently do this (bug — the watchdog from `cmd_new_agent()` is lost after pause/resume). The TypeScript implementation should include this step.
 
 ### 1.7 Archiving
 

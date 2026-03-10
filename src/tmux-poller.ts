@@ -5,19 +5,20 @@
  */
 
 import { stripAnsi } from "./parse-state";
+import { SpawnContext } from "./types";
 import type { SpawnFn } from "./types";
 
-/** Pluggable spawn runner — defaults to Bun.spawn, overridable for tests */
-let spawnRunner: SpawnFn = Bun.spawn as SpawnFn;
+/** Spawn context for tmux poller operations */
+export const spawnCtx = new SpawnContext();
 
 /** Override the spawn runner (for testing) */
 export function setSpawnRunner(runner: SpawnFn): void {
-  spawnRunner = runner;
+  spawnCtx.set(runner);
 }
 
 /** Reset to the default Bun.spawn runner */
 export function resetSpawnRunner(): void {
-  spawnRunner = Bun.spawn as SpawnFn;
+  spawnCtx.reset();
 }
 
 export interface TmuxPollerEvents {
@@ -71,7 +72,7 @@ export class TmuxPoller {
     if (!targetSession) return;
 
     try {
-      const proc = spawnRunner(
+      const proc = spawnCtx.runner(
         ["tmux", "capture-pane", "-t", targetSession, "-p", `-S`, `-${this.lines}`, "-E", "-"],
         { stdout: "pipe", stderr: "pipe" }
       );
@@ -111,7 +112,7 @@ export class TmuxPoller {
 /** Get the width of a tmux window for a session */
 export async function getTmuxWindowWidth(tmuxSession: string): Promise<number | null> {
   try {
-    const proc = spawnRunner(
+    const proc = spawnCtx.runner(
       ["tmux", "display-message", "-t", tmuxSession, "-p", "#{window_width}"],
       { stdout: "pipe", stderr: "pipe" }
     );
@@ -120,7 +121,7 @@ export async function getTmuxWindowWidth(tmuxSession: string): Promise<number | 
     if (exitCode !== 0) return null;
     const width = parseInt(raw.trim(), 10);
     return isNaN(width) ? null : width;
-  } catch {
+  } catch { /* expected: tmux not running or session gone */
     return null;
   }
 }
@@ -128,13 +129,13 @@ export async function getTmuxWindowWidth(tmuxSession: string): Promise<number | 
 /** Resize a tmux window to a given width */
 export async function resizeTmuxWindow(tmuxSession: string, width: number): Promise<boolean> {
   try {
-    const proc = spawnRunner(
+    const proc = spawnCtx.runner(
       ["tmux", "resize-window", "-t", tmuxSession, "-x", String(width)],
       { stdout: "pipe", stderr: "pipe" }
     );
     const exitCode = await proc.exited;
     return exitCode === 0;
-  } catch {
+  } catch { /* expected: tmux not running or session gone */
     return false;
   }
 }
@@ -147,13 +148,13 @@ export async function resizeTmuxWindow(tmuxSession: string, width: number): Prom
  */
 export async function clearTmuxWindowSizeOverride(tmuxSession: string): Promise<boolean> {
   try {
-    const proc = spawnRunner(
+    const proc = spawnCtx.runner(
       ["tmux", "resize-window", "-A", "-t", tmuxSession],
       { stdout: "pipe", stderr: "pipe" }
     );
     const exitCode = await proc.exited;
     return exitCode === 0;
-  } catch {
+  } catch { /* expected: tmux not running or session gone */
     return false;
   }
 }
@@ -163,7 +164,7 @@ export async function clearTmuxWindowSizeOverride(tmuxSession: string): Promise<
  */
 export async function listTmuxSessions(): Promise<string[]> {
   try {
-    const proc = spawnRunner(
+    const proc = spawnCtx.runner(
       ["tmux", "list-sessions", "-F", "#{session_name}"],
       { stdout: "pipe", stderr: "pipe" }
     );
@@ -171,7 +172,7 @@ export async function listTmuxSessions(): Promise<string[]> {
     const exitCode = await proc.exited;
     if (exitCode !== 0) return [];
     return raw.trim().split("\n").filter((s) => s.length > 0);
-  } catch {
+  } catch { /* expected: tmux server not running */
     return [];
   }
 }
@@ -181,13 +182,13 @@ export async function listTmuxSessions(): Promise<string[]> {
  */
 export async function killTmuxSession(sessionName: string): Promise<boolean> {
   try {
-    const proc = spawnRunner(
+    const proc = spawnCtx.runner(
       ["tmux", "kill-session", "-t", sessionName],
       { stdout: "pipe", stderr: "pipe" }
     );
     const exitCode = await proc.exited;
     return exitCode === 0;
-  } catch {
+  } catch { /* expected: tmux not running or session already gone */
     return false;
   }
 }
@@ -198,7 +199,7 @@ export async function killTmuxSession(sessionName: string): Promise<boolean> {
  */
 export async function hasAttachedClient(tmuxSession: string): Promise<boolean> {
   try {
-    const proc = spawnRunner(
+    const proc = spawnCtx.runner(
       ["tmux", "list-clients", "-t", tmuxSession, "-F", "#{client_name}"],
       { stdout: "pipe", stderr: "pipe" }
     );
@@ -206,7 +207,7 @@ export async function hasAttachedClient(tmuxSession: string): Promise<boolean> {
     const exitCode = await proc.exited;
     if (exitCode !== 0) return false;
     return raw.trim().split("\n").some((s) => s.length > 0);
-  } catch {
+  } catch { /* expected: tmux not running or session gone */
     return false;
   }
 }
@@ -217,7 +218,7 @@ export async function hasAttachedClient(tmuxSession: string): Promise<boolean> {
  */
 export async function captureTmuxOutput(tmuxSession: string, lines = 500): Promise<string | null> {
   try {
-    const proc = spawnRunner(
+    const proc = spawnCtx.runner(
       ["tmux", "capture-pane", "-t", tmuxSession, "-p", `-S`, `-${lines}`, "-E", "-"],
       { stdout: "pipe", stderr: "pipe" }
     );
@@ -226,7 +227,7 @@ export async function captureTmuxOutput(tmuxSession: string, lines = 500): Promi
 
     if (exitCode !== 0) return null; // session doesn't exist
     return stripAnsi(raw);
-  } catch {
+  } catch { /* expected: tmux not running or session gone */
     return null;
   }
 }

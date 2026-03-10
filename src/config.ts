@@ -74,7 +74,7 @@ async function readJsonFile(filePath: string): Promise<Record<string, unknown>> 
     const file = Bun.file(filePath);
     if (!(await file.exists())) return {};
     return (await file.json()) as Record<string, unknown>;
-  } catch {
+  } catch { /* expected: file missing or malformed JSON */
     return {};
   }
 }

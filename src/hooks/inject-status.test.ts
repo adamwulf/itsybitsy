@@ -7,7 +7,7 @@ import {
   countPendingQuestions,
   checkAndUpdateHash,
 } from "./inject-status";
-import type { AgentProvider } from "./inject-status";
+import type { AgentDataSource } from "./inject-status";
 import type { RepoEntry } from "../registry";
 import type { Agent, AgentMeta } from "../agents";
 import { unlink } from "node:fs/promises";
@@ -412,7 +412,7 @@ describe("checkAndUpdateHash", () => {
 
 describe("buildStatusText", () => {
   test("returns empty result when no repos registered", async () => {
-    const provider: AgentProvider = {
+    const provider: AgentDataSource = {
       getRepos: async () => [],
       getAgents: async () => ({ agents: [] }),
       detectStates: async () => {},
@@ -435,7 +435,7 @@ describe("buildStatusText", () => {
       }),
     ];
 
-    const provider: AgentProvider = {
+    const provider: AgentDataSource = {
       getRepos: async () => repos,
       getAgents: async () => ({ agents }),
       detectStates: async () => {},
@@ -461,7 +461,7 @@ describe("buildStatusText", () => {
       mockAgent({ id: "agent-2", repoPath: "/repo-b", repoName: "repo-b" }),
     ];
 
-    const provider: AgentProvider = {
+    const provider: AgentDataSource = {
       getRepos: async () => repos,
       getAgents: async () => ({ agents }),
       detectStates: async () => {},
@@ -477,7 +477,7 @@ describe("buildStatusText", () => {
   test("repo with no agents shows (no agents)", async () => {
     const repos: RepoEntry[] = [{ path: "/empty", name: "empty-repo" }];
 
-    const provider: AgentProvider = {
+    const provider: AgentDataSource = {
       getRepos: async () => repos,
       getAgents: async () => ({ agents: [] }),
       detectStates: async () => {},

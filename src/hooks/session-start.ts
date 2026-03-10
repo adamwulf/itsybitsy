@@ -3,6 +3,7 @@
  */
 
 import { join } from "path";
+import { AGENT_CWD_PATTERN } from "./shared";
 
 export type SessionRole = "primary" | "manager" | "worker";
 
@@ -14,8 +15,6 @@ export interface SessionContext {
   worktreePath: string;
   rootRepoPath: string;
 }
-
-const AGENT_CWD_PATTERN = /\.ittybitty\/agents\/([^/]+)\/repo(\/|$)/;
 
 export function detectRole(
   cwd: string,
@@ -293,7 +292,7 @@ export async function hookSessionStart(): Promise<void> {
   const cwd: string = data.cwd ?? process.cwd();
 
   // Detect role - read meta.json from filesystem if in an agent directory
-  const match = /\.ittybitty\/agents\/([^/]+)\/repo(\/|$)/.exec(cwd);
+  const match = AGENT_CWD_PATTERN.exec(cwd);
   let metaJson: { id?: string; manager?: string | null; worker?: boolean } | undefined;
 
   if (match) {

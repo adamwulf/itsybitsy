@@ -21,6 +21,7 @@ import {
   isRunningAsAgent,
 } from "./agent-lifecycle";
 import { readConfig } from "./config";
+import { SpawnContext } from "./types";
 import type { SpawnFn } from "./types";
 import { isValidModel, isValidToolList, isValidTmuxSession, isValidSessionId } from "./validation";
 
@@ -32,17 +33,17 @@ export interface IbCommandResult {
 }
 
 
-/** Pluggable spawn runner for kill/pause — defaults to Bun.spawn, overridable for tests */
-let killPauseSpawnRunner: SpawnFn = Bun.spawn as SpawnFn;
+/** Spawn context for kill/pause operations */
+export const killPauseSpawnCtx = new SpawnContext();
 
 /** Override the kill/pause spawn runner (for testing) */
 export function setKillPauseSpawnRunner(runner: SpawnFn): void {
-  killPauseSpawnRunner = runner;
+  killPauseSpawnCtx.set(runner);
 }
 
 /** Reset the kill/pause spawn runner */
 export function resetKillPauseSpawnRunner(): void {
-  killPauseSpawnRunner = Bun.spawn as SpawnFn;
+  killPauseSpawnCtx.reset();
 }
 
 /**
@@ -65,7 +66,7 @@ export async function killAgent(agent: Agent): Promise<IbCommandResult> {
   let sessionExists = false;
   if (tmuxSession) {
     try {
-      const proc = killPauseSpawnRunner(
+      const proc = killPauseSpawnCtx.runner(
         ["tmux", "has-session", "-t", tmuxSession],
         { stdout: "pipe", stderr: "pipe" }
       );
@@ -93,20 +94,20 @@ export async function killAgent(agent: Agent): Promise<IbCommandResult> {
   return { ok: true, exitCode: 0, stdout: `Closed agent: ${agent.id}`, stderr: "" };
 }
 
-/** Pluggable spawn runner for nuke/resume — defaults to Bun.spawn, overridable for tests */
-let nukeResumeSpawnRunner: SpawnFn = Bun.spawn as SpawnFn;
+/** Spawn context for nuke/resume operations */
+export const nukeResumeSpawnCtx = new SpawnContext();
 /** Override delay for resume tests (null = use real delay) */
 let resumeDelayOverrideMs: number | null = null;
 
 /** Override the nuke/resume spawn runner (for testing). Sets delay to 0 by default. */
 export function setNukeResumeSpawnRunner(runner: SpawnFn): void {
-  nukeResumeSpawnRunner = runner;
+  nukeResumeSpawnCtx.set(runner);
   resumeDelayOverrideMs = 0;
 }
 
 /** Reset the nuke/resume spawn runner */
 export function resetNukeResumeSpawnRunner(): void {
-  nukeResumeSpawnRunner = Bun.spawn as SpawnFn;
+  nukeResumeSpawnCtx.reset();
   resumeDelayOverrideMs = null;
 }
 
@@ -114,10 +115,7 @@ export function resetNukeResumeSpawnRunner(): void {
  * Helper: run a command via the nuke/resume spawn runner and return { stdout, exitCode }.
  */
 async function nukeResumeRunCmd(cmd: string[]): Promise<{ stdout: string; exitCode: number }> {
-  const proc = nukeResumeSpawnRunner(cmd, { stdout: "pipe", stderr: "pipe" });
-  const stdout = await new Response(proc.stdout).text();
-  const exitCode = await proc.exited;
-  return { stdout: stdout.trim(), exitCode };
+  return nukeResumeSpawnCtx.run(cmd);
 }
 
 /**
@@ -180,7 +178,7 @@ async function nukeAgentList(
     // Skip if directory doesn't exist
     try {
       await readdir(agentDir);
-    } catch {
+    } catch { /* expected: agent dir already removed */
       continue;
     }
 
@@ -201,7 +199,7 @@ async function nukeAgentList(
     try {
       await teardownAgent(repoPath, id, agentDir, meta, "Agent nuked");
       killed++;
-    } catch {
+    } catch { /* teardown error — count as failure */
       failed++;
     }
   }
@@ -387,11 +385,9 @@ unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT
 claude --resume "${sessionId}" ${claudeArgs} &
 CLAUDE_PID=$!
 
-# Store PID in meta.json using sed (no jq dependency)
-# This adds claude_pid field to existing JSON
+# Store PID in meta.json
 if [[ -f "${agentDir}/meta.json" ]]; then
-    # Insert claude_pid before the closing brace
-    sed -i '' "s/}$/,\\n  \\"claude_pid\\": \\"$CLAUDE_PID\\"\\n}/" "${agentDir}/meta.json"
+    bun -e "const f='${agentDir}/meta.json';const m=JSON.parse(require('fs').readFileSync(f,'utf8'));m.claude_pid=String(process.argv[1]);require('fs').writeFileSync(f,JSON.stringify(m,null,2))" "$CLAUDE_PID"
 fi
 
 # Wait for Claude to complete
@@ -697,30 +693,24 @@ export async function mergeCheckAgent(agent: Agent): Promise<IbCommandResult> {
 }
 
 /** Pluggable spawn runner for merge — defaults to Bun.spawn, overridable for tests */
-let mergeSpawnRunner: SpawnFn = Bun.spawn as SpawnFn;
+/** Spawn context for merge operations */
+export const mergeSpawnCtx = new SpawnContext();
 
 /** Override the merge spawn runner (for testing) */
 export function setMergeSpawnRunner(runner: SpawnFn): void {
-  mergeSpawnRunner = runner;
+  mergeSpawnCtx.set(runner);
 }
 
 /** Reset the merge spawn runner */
 export function resetMergeSpawnRunner(): void {
-  mergeSpawnRunner = Bun.spawn as SpawnFn;
+  mergeSpawnCtx.reset();
 }
 
 /**
  * Helper: run a command via the merge spawn runner and return { stdout, stderr, exitCode }.
- * Drains both stdout and stderr to avoid buffer deadlocks.
  */
 async function mergeRunCmd(cmd: string[]): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  const proc = mergeSpawnRunner(cmd, { stdout: "pipe", stderr: "pipe" });
-  const [stdout, stderr] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-  ]);
-  const exitCode = await proc.exited;
-  return { stdout: stdout.trim(), stderr: stderr.trim(), exitCode };
+  return mergeSpawnCtx.run(cmd);
 }
 
 /**
@@ -976,20 +966,20 @@ export async function mergeAgent(agent: Agent): Promise<IbCommandResult> {
   return { ok: true, exitCode: 0, stdout: `Closed agent: ${agent.id}`, stderr: "" };
 }
 
-/** Pluggable spawn runner for send — defaults to Bun.spawn, overridable for tests */
-let sendSpawnRunner: SpawnFn = Bun.spawn as SpawnFn;
+/** Spawn context for send operations */
+export const sendSpawnCtx = new SpawnContext();
 /** Override delay for tests (null = use calculated delay) */
 let sendDelayOverrideMs: number | null = null;
 
 /** Override the send spawn runner (for testing). Sets delay to 0 by default. */
 export function setSendSpawnRunner(runner: SpawnFn): void {
-  sendSpawnRunner = runner;
+  sendSpawnCtx.set(runner);
   sendDelayOverrideMs = 0;
 }
 
 /** Reset the send spawn runner */
 export function resetSendSpawnRunner(): void {
-  sendSpawnRunner = Bun.spawn as SpawnFn;
+  sendSpawnCtx.reset();
   sendDelayOverrideMs = null;
 }
 
@@ -1016,7 +1006,7 @@ export async function sendMessage(
   }
 
   // Verify session exists
-  const hasSessionProc = sendSpawnRunner(
+  const hasSessionProc = sendSpawnCtx.runner(
     ["tmux", "has-session", "-t", tmuxSession],
     { stdout: "pipe", stderr: "pipe" }
   );
@@ -1054,7 +1044,7 @@ export async function sendMessage(
   if (delay > 3.0) delay = 3.0;
 
   // Send via tmux send-keys
-  const sendProc = sendSpawnRunner(
+  const sendProc = sendSpawnCtx.runner(
     ["tmux", "send-keys", "-t", tmuxSession, "-l", fullMessage],
     { stdout: "pipe", stderr: "pipe" }
   );
@@ -1069,7 +1059,7 @@ export async function sendMessage(
   if (actualDelayMs > 0) await Bun.sleep(actualDelayMs);
 
   // Send Enter
-  const enterProc = sendSpawnRunner(
+  const enterProc = sendSpawnCtx.runner(
     ["tmux", "send-keys", "-t", tmuxSession, "Enter"],
     { stdout: "pipe", stderr: "pipe" }
   );
@@ -1108,20 +1098,20 @@ export interface NewAgentOptions {
   _cwd?: string;
 }
 
-/** Pluggable spawn runner for newAgent — defaults to Bun.spawn, overridable for tests */
-let newAgentSpawnRunner: SpawnFn = Bun.spawn as SpawnFn;
+/** Spawn context for newAgent operations */
+export const newAgentSpawnCtx = new SpawnContext();
 /** Override delay for newAgent tests (null = use real delay) */
 let newAgentDelayOverrideMs: number | null = null;
 
 /** Override the newAgent spawn runner (for testing). Sets delay to 0 by default. */
 export function setNewAgentSpawnRunner(runner: SpawnFn): void {
-  newAgentSpawnRunner = runner;
+  newAgentSpawnCtx.set(runner);
   newAgentDelayOverrideMs = 0;
 }
 
 /** Reset the newAgent spawn runner */
 export function resetNewAgentSpawnRunner(): void {
-  newAgentSpawnRunner = Bun.spawn as SpawnFn;
+  newAgentSpawnCtx.reset();
   newAgentDelayOverrideMs = null;
 }
 
@@ -1129,11 +1119,7 @@ export function resetNewAgentSpawnRunner(): void {
  * Helper: run a command via the newAgent spawn runner and return { stdout, exitCode }.
  */
 async function newAgentRunCmd(cmd: string[]): Promise<{ stdout: string; exitCode: number }> {
-  const proc = newAgentSpawnRunner(cmd, { stdout: "pipe", stderr: "pipe" });
-  const stdout = await new Response(proc.stdout).text();
-  await new Response(proc.stderr).text(); // drain stderr
-  const exitCode = await proc.exited;
-  return { stdout: stdout.trim(), exitCode };
+  return newAgentSpawnCtx.run(cmd);
 }
 
 /**
@@ -1252,7 +1238,8 @@ async function buildAgentSettings(
   // Check if intercept hook should be added (reuse already-parsed baseSettings)
   let addIntercept = false;
   if (agentType === "manager") {
-    const preToolUse = (baseSettings as any)?.hooks?.PreToolUse;
+    const hooksObj = baseSettings.hooks as Record<string, unknown> | undefined;
+    const preToolUse = hooksObj?.PreToolUse;
     if (Array.isArray(preToolUse)) {
       for (const entry of preToolUse) {
         const hooks = entry?.hooks;
@@ -1677,11 +1664,9 @@ unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT
 claude --session-id "${sessionUuid}" ${claudeArgs} "$(cat '${absPromptFile}')" &
 CLAUDE_PID=$!
 
-# Store PID in meta.json using sed (no jq dependency)
-# This adds claude_pid field to existing JSON
+# Store PID in meta.json
 if [[ -f "${agentDir}/meta.json" ]]; then
-    # Insert claude_pid before the closing brace
-    sed -i '' "s/}$/,\\n  \\"claude_pid\\": \\"$CLAUDE_PID\\"\\n}/" "${agentDir}/meta.json"
+    bun -e "const f='${agentDir}/meta.json';const m=JSON.parse(require('fs').readFileSync(f,'utf8'));m.claude_pid=String(process.argv[1]);require('fs').writeFileSync(f,JSON.stringify(m,null,2))" "$CLAUDE_PID"
 fi
 
 # Wait for Claude to complete
@@ -1875,29 +1860,24 @@ async function resolveAgentId(agentsDir: string, partial: string): Promise<strin
 }
 
 /** Pluggable spawn runner for diff/status — defaults to Bun.spawn, overridable for tests */
-let diffStatusSpawnRunner: SpawnFn = Bun.spawn as SpawnFn;
+/** Spawn context for diff/status operations */
+export const diffStatusSpawnCtx = new SpawnContext();
 
 /** Override the diff/status spawn runner (for testing) */
 export function setDiffStatusSpawnRunner(runner: SpawnFn): void {
-  diffStatusSpawnRunner = runner;
+  diffStatusSpawnCtx.set(runner);
 }
 
 /** Reset the diff/status spawn runner */
 export function resetDiffStatusSpawnRunner(): void {
-  diffStatusSpawnRunner = Bun.spawn as SpawnFn;
+  diffStatusSpawnCtx.reset();
 }
 
 /**
  * Helper: run a command via the diff/status spawn runner and return { stdout, stderr, exitCode }.
  */
 async function diffStatusRunCmd(cmd: string[]): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  const proc = diffStatusSpawnRunner(cmd, { stdout: "pipe", stderr: "pipe" });
-  const [stdout, stderr] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-  ]);
-  const exitCode = await proc.exited;
-  return { stdout: stdout.trim(), stderr: stderr.trim(), exitCode };
+  return diffStatusSpawnCtx.run(cmd);
 }
 
 /**
@@ -1972,14 +1952,14 @@ export async function pauseAgent(agent: Agent): Promise<IbCommandResult> {
 
   // Kill tmux session
   if (tmuxSession) {
-    const proc = killPauseSpawnRunner(
+    const proc = killPauseSpawnCtx.runner(
       ["tmux", "has-session", "-t", tmuxSession],
       { stdout: "pipe", stderr: "pipe" }
     );
     await new Response(proc.stderr).text(); // drain
     const hasSession = (await proc.exited) === 0;
     if (hasSession) {
-      const killProc = killPauseSpawnRunner(
+      const killProc = killPauseSpawnCtx.runner(
         ["tmux", "kill-session", "-t", tmuxSession],
         { stdout: "pipe", stderr: "pipe" }
       );

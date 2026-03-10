@@ -14,6 +14,7 @@ import { listRepos, repoDisplayName } from "../registry";
 import type { RepoEntry } from "../registry";
 import type { Agent } from "../agents";
 import { readConfig } from "../config";
+import { AGENT_CWD_PATTERN } from "./shared";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -33,9 +34,6 @@ export interface BuildStatusResult {
   agents: Agent[];
   repos: RepoEntry[];
 }
-// ── Pattern ──────────────────────────────────────────────────────────────────
-
-const AGENT_CWD_PATTERN = /\.ittybitty\/agents\/[^/]+\/repo(\/|$)/;
 
 // ── Pure decision logic ──────────────────────────────────────────────────────
 
@@ -155,7 +153,7 @@ export async function countPendingQuestions(
 
 // ── Load agents helper ───────────────────────────────────────────────────────
 
-export interface AgentProvider {
+export interface AgentDataSource {
   getRepos(): Promise<RepoEntry[]>;
   getAgents(repos: RepoEntry[]): Promise<{ agents: Agent[] }>;
   detectStates(agents: Agent[]): Promise<void>;
@@ -164,7 +162,7 @@ export interface AgentProvider {
 /**
  * Default agent provider that reads from disk.
  */
-export function createDiskAgentProvider(): AgentProvider {
+export function createDiskAgentProvider(): AgentDataSource {
   return {
     async getRepos() {
       return listRepos();
@@ -185,7 +183,7 @@ export function createDiskAgentProvider(): AgentProvider {
  * Build the full status text using the given provider.
  * Also returns the flat agents list for brief summary generation.
  */
-export async function buildStatusText(provider: AgentProvider): Promise<BuildStatusResult> {
+export async function buildStatusText(provider: AgentDataSource): Promise<BuildStatusResult> {
   const repos = await provider.getRepos();
   if (repos.length === 0) return { text: "", agents: [], repos: [] };
 

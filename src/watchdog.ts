@@ -22,6 +22,7 @@ import type { AgentState } from "./parse-state";
 import { sendMessage } from "./ib-commands";
 import { fetchUsage } from "./usage";
 import type { UsageData, UsageResult } from "./usage";
+import { SpawnContext } from "./types";
 import type { SpawnFn } from "./types";
 import type { RepoEntry } from "./registry";
 import { checkAndCompact } from "./auto-compact";
@@ -77,16 +78,17 @@ export function registerStateHandler(state: AgentState, handler: StateHandler): 
 // Test injection
 // ---------------------------------------------------------------------------
 
-let spawnRunner: SpawnFn = Bun.spawn as SpawnFn;
+/** Spawn context for watchdog operations */
+export const spawnCtx = new SpawnContext();
 
 /** Override spawn runner for testing (used by rate limit bypass). */
 export function setWatchdogSpawnRunner(runner: SpawnFn): void {
-  spawnRunner = runner;
+  spawnCtx.set(runner);
 }
 
 /** Reset spawn runner to default. */
 export function resetWatchdogSpawnRunner(): void {
-  spawnRunner = Bun.spawn as SpawnFn;
+  spawnCtx.reset();
 }
 
 /** Overridable fetchUsage for testing. */
@@ -208,13 +210,13 @@ export async function notifyManager(
 /** Send Enter to a tmux session to dismiss a dialog. */
 async function sendTmuxEnter(tmuxSession: string): Promise<boolean> {
   try {
-    const proc = spawnRunner(
+    const proc = spawnCtx.runner(
       ["tmux", "send-keys", "-t", tmuxSession, "Enter"],
       { stdout: "pipe", stderr: "pipe" },
     );
     const exitCode = await proc.exited;
     return exitCode === 0;
-  } catch {
+  } catch { /* expected: tmux not running or session gone */
     return false;
   }
 }
@@ -413,7 +415,7 @@ function isPidAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;
-  } catch {
+  } catch { /* expected: process is dead */
     return false;
   }
 }

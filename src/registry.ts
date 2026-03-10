@@ -32,7 +32,7 @@ export async function loadRegistry(): Promise<RegistryData> {
       return { repos: [] };
     }
     return data as RegistryData;
-  } catch {
+  } catch { /* expected: file missing or malformed JSON */
     return { repos: [] };
   }
 }

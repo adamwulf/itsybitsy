@@ -472,13 +472,6 @@ async function main() {
       await printAndExit(await mergeAgent(agent));
       break;
     }
-    case "merge-check": {
-      const repos = await listRepos();
-      const agent = await requireAgent(args[1], repos);
-      const { mergeCheckAgent } = await import("./ib-commands");
-      await printAndExit(await mergeCheckAgent(agent));
-      break;
-    }
     case "resume": {
       const repos = await listRepos();
       const agent = await requireAgent(args[1], repos);

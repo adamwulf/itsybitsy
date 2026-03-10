@@ -166,7 +166,7 @@ export interface CompactState {
 }
 
 /** Pluggable spawn runner for sendCompact — defaults to Bun.spawn, overridable for tests */
-type CompactSpawnFn = (cmd: string[]) => { exited: Promise<number> };
+export type CompactSpawnFn = (cmd: string[]) => { exited: Promise<number> };
 let compactSpawnRunner: CompactSpawnFn = (cmd) => Bun.spawn(cmd);
 
 /** Override the compact spawn runner (for testing) */

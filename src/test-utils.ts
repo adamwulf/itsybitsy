@@ -3,6 +3,8 @@
  */
 
 import type { Agent, AgentMeta, FlatEntry } from "./agents";
+import type { AgentState } from "./parse-state";
+import type { SpawnResult, FetchLike } from "./types";
 
 /** Create a test Agent with sensible defaults. All fields can be overridden. */
 export function makeAgent(overrides: Partial<Agent> & { id: string }): Agent {
@@ -45,4 +47,36 @@ export function makeFlatAgent(agent: Agent, overrides?: { depth?: number; connec
 /** Create a FlatEntry of kind "repo-header" for tests */
 export function makeFlatRepoHeader(repoName: string, repoPath: string = "", hasAgents: boolean = false): Extract<FlatEntry, { kind: "repo-header" }> {
   return { kind: "repo-header", repoName, repoPath, hasAgents };
+}
+
+/**
+ * Set an agent's state field. Centralizes the type assertion needed because
+ * AgentState is a string-literal union but tests often assign arbitrary state strings.
+ */
+export function setAgentState(agent: Agent, state: string): void {
+  agent.state = state as AgentState;
+}
+
+/**
+ * Create a SpawnResult that resolves with the given exit code and optional stdout/stderr content.
+ * Eliminates repetitive `{ stdout: new Response("").body!, stderr: ... } as SpawnResult` in tests.
+ */
+export function makeSpawnResult(exitCode = 0, stdout = "", stderr = ""): SpawnResult {
+  return {
+    stdout: new Response(stdout).body,
+    stderr: new Response(stderr).body,
+    exited: Promise.resolve(exitCode),
+  };
+}
+
+/**
+ * Create a mock FetchLike function that returns the given response data.
+ * Eliminates `(async () => ({ ok, json: async () => data })) as any` casts.
+ */
+export function mockFetch(data: unknown, ok = true, status = 200): FetchLike {
+  return (async () => ({
+    ok,
+    status,
+    json: async () => data,
+  })) as unknown as FetchLike;
 }

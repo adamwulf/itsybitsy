@@ -3,7 +3,7 @@ import { join } from "path";
 import { mkdtemp, rm, mkdir } from "fs/promises";
 import { tmpdir } from "os";
 import type { Agent, AgentMeta } from "./agents";
-import { makeAgent as _makeAgent } from "./test-utils";
+import { makeAgent as _makeAgent, makeSpawnResult } from "./test-utils";
 import {
   killAgent,
   nukeAgent,
@@ -41,10 +41,11 @@ import {
   setSpawnRunner as setLifecycleSpawnRunner,
   resetSpawnRunner as resetLifecycleSpawnRunner,
 } from "./agent-lifecycle";
+import type { AgentState } from "./parse-state";
 import type { SpawnResult } from "./types";
 
-function makeAgent(id: string, repoPath: string, state = "running"): Agent {
-  return _makeAgent({ id, repoPath, repoName: "test-repo", state: state as any });
+function makeAgent(id: string, repoPath: string, state: string = "running"): Agent {
+  return _makeAgent({ id, repoPath, repoName: "test-repo", state: state as AgentState });
 }
 
 describe("ib-commands", () => {
@@ -63,11 +64,7 @@ describe("ib-commands", () => {
 
       setSendSpawnRunner((cmd: string[]) => {
         spawnCalls.push(cmd);
-        return {
-          stdout: new Response("").body!,
-          stderr: new Response("").body!,
-          exited: Promise.resolve(0),
-        } as SpawnResult;
+        return makeSpawnResult();
       });
     });
 
@@ -92,17 +89,9 @@ describe("ib-commands", () => {
       setSendSpawnRunner((cmd: string[]) => {
         spawnCalls.push(cmd);
         if (cmd.includes("has-session")) {
-          return {
-            stdout: new Response("").body!,
-            stderr: new Response("session not found").body!,
-            exited: Promise.resolve(1),
-          } as SpawnResult;
+          return makeSpawnResult(1, "", "session not found");
         }
-        return {
-          stdout: new Response("").body!,
-          stderr: new Response("").body!,
-          exited: Promise.resolve(0),
-        } as SpawnResult;
+        return makeSpawnResult();
       });
 
       const agent = makeAgent("agent-abc", tempDir);
@@ -183,11 +172,7 @@ describe("ib-commands", () => {
 function mockSpawnFn(calls: string[][]): (cmd: string[], opts?: any) => SpawnResult {
   return (cmd: string[]) => {
     calls.push(cmd);
-    return {
-      stdout: new Response("").body!,
-      stderr: new Response("").body!,
-      exited: Promise.resolve(0),
-    } as SpawnResult;
+    return makeSpawnResult();
   };
 }
 
@@ -198,12 +183,7 @@ function mockSpawnFnWithFailures(
 ): (cmd: string[], opts?: any) => SpawnResult {
   return (cmd: string[]) => {
     calls.push(cmd);
-    const exitCode = failCommands(cmd) ? 1 : 0;
-    return {
-      stdout: new Response("").body!,
-      stderr: new Response("").body!,
-      exited: Promise.resolve(exitCode),
-    } as SpawnResult;
+    return makeSpawnResult(failCommands(cmd) ? 1 : 0);
   };
 }
 
@@ -969,101 +949,60 @@ describe("mergeAgent (native)", () => {
       if (cmdStr.includes("status") && cmdStr.includes("--porcelain")) {
         const isWorktree = cmd.some((c) => c.includes("/repo"));
         const hasChanges = isWorktree ? opts.worktreeHasChanges : opts.repoHasChanges;
-        return {
-          stdout: new Response(hasChanges ? "M file.ts\n" : "").body!,
-          stderr: new Response("").body!,
-          exited: Promise.resolve(0),
-        } as SpawnResult;
+        return makeSpawnResult(0, hasChanges ? "M file.ts\n" : "");
       }
 
       // git branch --show-current
       if (cmdStr.includes("branch") && cmdStr.includes("--show-current")) {
-        return {
-          stdout: new Response(opts.currentBranch).body!,
-          stderr: new Response("").body!,
-          exited: Promise.resolve(0),
-        } as SpawnResult;
+        return makeSpawnResult(0, opts.currentBranch);
       }
 
       // git show-ref --verify
       if (cmdStr.includes("show-ref") && cmdStr.includes("--verify")) {
-        return {
-          stdout: new Response("").body!,
-          stderr: new Response("").body!,
-          exited: Promise.resolve(opts.branchExists ? 0 : 1),
-        } as SpawnResult;
+        return makeSpawnResult(opts.branchExists ? 0 : 1);
       }
 
       // git log ... --oneline (commit count)
       if (cmdStr.includes("log") && cmdStr.includes("--oneline")) {
         const lines = Array.from({ length: opts.commitCount }, (_, i) => `abc${i} commit ${i}`);
-        return {
-          stdout: new Response(opts.commitCount > 0 ? lines.join("\n") : "").body!,
-          stderr: new Response("").body!,
-          exited: Promise.resolve(0),
-        } as SpawnResult;
+        return makeSpawnResult(0, opts.commitCount > 0 ? lines.join("\n") : "");
       }
 
       // Conflict check: git rebase in temp dir
       if (cmd.includes("rebase") && cmdStr.includes("/tmp/ib-rebase-check-")) {
-        return {
-          stdout: new Response(opts.conflictCheckFails ? "CONFLICT (content): Merge conflict in file.ts" : "").body!,
-          stderr: new Response("").body!,
-          exited: Promise.resolve(opts.conflictCheckFails ? 1 : 0),
-        } as SpawnResult;
+        return makeSpawnResult(
+          opts.conflictCheckFails ? 1 : 0,
+          opts.conflictCheckFails ? "CONFLICT (content): Merge conflict in file.ts" : "",
+        );
       }
 
       // Actual rebase in worktree
       if (cmd.includes("rebase") && !cmdStr.includes("/tmp/ib-rebase-check-") && !cmd.includes("--abort")) {
-        return {
-          stdout: new Response(opts.rebaseFails ? "CONFLICT" : "").body!,
-          stderr: new Response("").body!,
-          exited: Promise.resolve(opts.rebaseFails ? 1 : 0),
-        } as SpawnResult;
+        return makeSpawnResult(opts.rebaseFails ? 1 : 0, opts.rebaseFails ? "CONFLICT" : "");
       }
 
       // git checkout
       if (cmd.includes("checkout")) {
-        return {
-          stdout: new Response("").body!,
-          stderr: new Response("").body!,
-          exited: Promise.resolve(opts.checkoutFails ? 1 : 0),
-        } as SpawnResult;
+        return makeSpawnResult(opts.checkoutFails ? 1 : 0);
       }
 
       // git merge (but not merge in "merge-check")
       if (cmd.includes("merge") && (cmd.includes("--ff-only") || cmd.includes("--no-ff"))) {
-        return {
-          stdout: new Response(opts.mergeFails ? "Merge conflict" : "").body!,
-          stderr: new Response("").body!,
-          exited: Promise.resolve(opts.mergeFails ? 1 : 0),
-        } as SpawnResult;
+        return makeSpawnResult(opts.mergeFails ? 1 : 0, opts.mergeFails ? "Merge conflict" : "");
       }
 
       // tmux has-session → failure (no active session)
       if (cmdStr.includes("has-session")) {
-        return {
-          stdout: new Response("").body!,
-          stderr: new Response("").body!,
-          exited: Promise.resolve(1),
-        } as SpawnResult;
+        return makeSpawnResult(1);
       }
 
       // pgrep → failure (no processes)
       if (cmd[0] === "pgrep") {
-        return {
-          stdout: new Response("").body!,
-          stderr: new Response("").body!,
-          exited: Promise.resolve(1),
-        } as SpawnResult;
+        return makeSpawnResult(1);
       }
 
       // Default: success
-      return {
-        stdout: new Response("").body!,
-        stderr: new Response("").body!,
-        exited: Promise.resolve(0),
-      } as SpawnResult;
+      return makeSpawnResult();
     };
   }
 
@@ -1557,35 +1496,31 @@ describe("mergeAgent (native)", () => {
 
       // Make the actual rebase fail with stderr content
       if (cmd.includes("rebase") && !cmdStr.includes("/tmp/ib-rebase-check-") && !cmd.includes("--abort")) {
-        return {
-          stdout: new Response("").body!,
-          stderr: new Response("error: could not apply abc1234... some commit\nConflict in file.ts").body!,
-          exited: Promise.resolve(1),
-        } as SpawnResult;
+        return makeSpawnResult(1, "", "error: could not apply abc1234... some commit\nConflict in file.ts");
       }
 
       // git status --porcelain → clean
       if (cmdStr.includes("status") && cmdStr.includes("--porcelain")) {
-        return { stdout: new Response("").body!, stderr: new Response("").body!, exited: Promise.resolve(0) } as SpawnResult;
+        return makeSpawnResult();
       }
       // git branch --show-current → main
       if (cmdStr.includes("branch") && cmdStr.includes("--show-current")) {
-        return { stdout: new Response("main").body!, stderr: new Response("").body!, exited: Promise.resolve(0) } as SpawnResult;
+        return makeSpawnResult(0, "main");
       }
       // git show-ref → exists
       if (cmdStr.includes("show-ref")) {
-        return { stdout: new Response("").body!, stderr: new Response("").body!, exited: Promise.resolve(0) } as SpawnResult;
+        return makeSpawnResult();
       }
       // git log --oneline → 1 commit
       if (cmdStr.includes("log") && cmdStr.includes("--oneline")) {
-        return { stdout: new Response("abc1234 some commit").body!, stderr: new Response("").body!, exited: Promise.resolve(0) } as SpawnResult;
+        return makeSpawnResult(0, "abc1234 some commit");
       }
       // Conflict check rebase → success
       if (cmd.includes("rebase") && cmdStr.includes("/tmp/ib-rebase-check-")) {
-        return { stdout: new Response("").body!, stderr: new Response("").body!, exited: Promise.resolve(0) } as SpawnResult;
+        return makeSpawnResult();
       }
       // Default → success
-      return { stdout: new Response("").body!, stderr: new Response("").body!, exited: Promise.resolve(0) } as SpawnResult;
+      return makeSpawnResult();
     };
 
     setLifecycleSpawnRunner(runner);
@@ -1612,11 +1547,7 @@ describe("mergeAgent (native)", () => {
       spawnCalls.push(cmd);
       // Make git worktree remove fail for the actual worktree (not the conflict check temp)
       if (cmd.includes("worktree") && cmd.includes("remove") && !cmd.some((a) => a.includes("/tmp/ib-rebase-check-"))) {
-        return {
-          stdout: new Response("").body!,
-          stderr: new Response("error: failed to remove worktree").body!,
-          exited: Promise.resolve(1),
-        } as SpawnResult;
+        return makeSpawnResult(1, "", "error: failed to remove worktree");
       }
       return baseMock(cmd, opts);
     };
@@ -2390,17 +2321,9 @@ describe("mergeCheckAgent (native)", () => {
       spawnCalls.push(cmd);
       // git status --porcelain returns modified file
       if (cmd.includes("--porcelain")) {
-        return {
-          stdout: new Response("M file.ts\n").body!,
-          stderr: new Response("").body!,
-          exited: Promise.resolve(0),
-        } as SpawnResult;
+        return makeSpawnResult(0, "M file.ts\n");
       }
-      return {
-        stdout: new Response("").body!,
-        stderr: new Response("").body!,
-        exited: Promise.resolve(0),
-      } as SpawnResult;
+      return makeSpawnResult();
     });
 
     const agent = makeAgent("agent-abc", tempDir);
@@ -2418,17 +2341,9 @@ describe("mergeCheckAgent (native)", () => {
       spawnCalls.push(cmd);
       // git log returns one commit
       if (cmd.includes("--oneline") && cmd.some(a => a.includes("main.."))) {
-        return {
-          stdout: new Response("abc1234 commit msg\n").body!,
-          stderr: new Response("").body!,
-          exited: Promise.resolve(0),
-        } as SpawnResult;
+        return makeSpawnResult(0, "abc1234 commit msg\n");
       }
-      return {
-        stdout: new Response("").body!,
-        stderr: new Response("").body!,
-        exited: Promise.resolve(0),
-      } as SpawnResult;
+      return makeSpawnResult();
     });
 
     const agent = makeAgent("agent-abc", tempDir);
@@ -2446,17 +2361,9 @@ describe("mergeCheckAgent (native)", () => {
       spawnCalls.push(cmd);
       // show-ref for agent branch fails
       if (cmd.includes("show-ref") && cmd.some(a => a.includes("agent/agent-abc"))) {
-        return {
-          stdout: new Response("").body!,
-          stderr: new Response("").body!,
-          exited: Promise.resolve(1),
-        } as SpawnResult;
+        return makeSpawnResult(1);
       }
-      return {
-        stdout: new Response("").body!,
-        stderr: new Response("").body!,
-        exited: Promise.resolve(0),
-      } as SpawnResult;
+      return makeSpawnResult();
     });
 
     const agent = makeAgent("agent-abc", tempDir);
@@ -2485,24 +2392,12 @@ describe("diffAgent (native)", () => {
 
     setDiffStatusSpawnRunner((cmd: string[]) => {
       if (cmd.includes("merge-base")) {
-        return {
-          stdout: new Response("abc123\n").body!,
-          stderr: new Response("").body!,
-          exited: Promise.resolve(0),
-        } as SpawnResult;
+        return makeSpawnResult(0, "abc123\n");
       }
       if (cmd.includes("diff")) {
-        return {
-          stdout: new Response("+added line\n-removed line\n").body!,
-          stderr: new Response("").body!,
-          exited: Promise.resolve(0),
-        } as SpawnResult;
+        return makeSpawnResult(0, "+added line\n-removed line\n");
       }
-      return {
-        stdout: new Response("").body!,
-        stderr: new Response("").body!,
-        exited: Promise.resolve(0),
-      } as SpawnResult;
+      return makeSpawnResult();
     });
 
     const agent = makeAgent("agent-abc", tempDir);
@@ -2539,24 +2434,12 @@ describe("statusAgent (native)", () => {
 
     setDiffStatusSpawnRunner((cmd: string[]) => {
       if (cmd.includes("log")) {
-        return {
-          stdout: new Response("abc1234 first commit\ndef5678 second commit\n").body!,
-          stderr: new Response("").body!,
-          exited: Promise.resolve(0),
-        } as SpawnResult;
+        return makeSpawnResult(0, "abc1234 first commit\ndef5678 second commit\n");
       }
       if (cmd.includes("status")) {
-        return {
-          stdout: new Response("M src/file.ts\n").body!,
-          stderr: new Response("").body!,
-          exited: Promise.resolve(0),
-        } as SpawnResult;
+        return makeSpawnResult(0, "M src/file.ts\n");
       }
-      return {
-        stdout: new Response("").body!,
-        stderr: new Response("").body!,
-        exited: Promise.resolve(0),
-      } as SpawnResult;
+      return makeSpawnResult();
     });
 
     const agent = makeAgent("agent-abc", tempDir);

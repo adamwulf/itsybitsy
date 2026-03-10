@@ -478,7 +478,7 @@ export class DashboardComponent implements Component {
     // Spawn standalone watchdog as background process if not already running
     if (!isWatchdogRunning()) {
       try {
-        const proc = Bun.spawn(["itsybitsy", "watchdog"], {
+        const proc = Bun.spawn(["ib", "watchdog"], {
           stdout: "ignore",
           stderr: "ignore",
         });
@@ -1046,7 +1046,7 @@ export async function launchDashboard(): Promise<void> {
   const registry = await loadRegistry();
   const repos = registry.repos;
   if (repos.length === 0) {
-    console.log("No repos registered. Use 'itsybitsy add <path>' to add one.");
+    console.log("No repos registered. Use 'ib add <path>' to add one.");
     process.exit(1);
   }
 

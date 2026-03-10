@@ -28,7 +28,7 @@ describe("isValidToolList", () => {
     expect(isValidToolList("Bash,Read,Write")).toBe(true);
     expect(isValidToolList("Bash(git:*)")).toBe(true);
     expect(isValidToolList("mcp__server__tool")).toBe(true);
-    expect(isValidToolList("Bash(itsybitsy:*), Read")).toBe(true);
+    expect(isValidToolList("Bash(ib:*), Read")).toBe(true);
     expect(isValidToolList("Tool-Name")).toBe(true);
   });
 

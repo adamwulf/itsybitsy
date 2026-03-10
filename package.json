@@ -11,7 +11,7 @@
     "typescript": "^5"
   },
   "scripts": {
-    "build": "bun build --compile --minify src/index.ts --outfile itsybitsy"
+    "build": "bun build --compile --minify src/index.ts --outfile ib"
   },
   "dependencies": {
     "@mariozechner/pi-tui": "^0.56.0"

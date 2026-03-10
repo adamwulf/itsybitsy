@@ -376,7 +376,7 @@ export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
   // Write resume.sh
   const resumeScript = join(agentDir, "resume.sh");
   const resumeContent = `#!/bin/bash
-# Add git repo root to PATH so 'itsybitsy' is available
+# Add git repo root to PATH so 'ib' is available
 export PATH="${gitRoot}:$PATH"
 
 # Clear Claude Code nesting detection so agents can start their own claude process
@@ -1214,7 +1214,7 @@ async function buildAgentSettings(
 
   // Mandatory permissions that are always added
   const ibPerms = [
-    "Bash(itsybitsy:*)",
+    "Bash(ib:*)",
     "Bash(git status:*)", "Bash(git add:*)", "Bash(git commit:*)",
     "Bash(git diff:*)", "Bash(git show:*)", "Bash(git log:*)",
     "Bash(git ls-files:*)", "Bash(git grep:*)", "Bash(git rm:*)",
@@ -1500,15 +1500,15 @@ export async function newAgent(
         const settings = await rootSettingsFile.json();
         const allow = (settings?.permissions?.allow as string[]) ?? [];
         let needsUpdate = false;
-        if (!allow.includes("Bash(itsybitsy:*)")) needsUpdate = true;
+        if (!allow.includes("Bash(ib:*)")) needsUpdate = true;
         if (needsUpdate) {
-          if (!allow.includes("Bash(itsybitsy:*)")) allow.push("Bash(itsybitsy:*)");
+          if (!allow.includes("Bash(ib:*)")) allow.push("Bash(ib:*)");
           settings.permissions = { ...settings.permissions, allow };
           await Bun.write(rootSettingsPath, JSON.stringify(settings, null, 2));
         }
       } else {
         await mkdir(join(rootRepoPath, ".claude"), { recursive: true });
-        await Bun.write(rootSettingsPath, JSON.stringify({ permissions: { allow: ["Bash(itsybitsy:*)"] } }));
+        await Bun.write(rootSettingsPath, JSON.stringify({ permissions: { allow: ["Bash(ib:*)"] } }));
       }
     } catch { /* ignore */ }
   }
@@ -1655,7 +1655,7 @@ echo ""
   const absExitScript = join(agentDir, "exit-check.sh");
   const startScript = join(agentDir, "start.sh");
   const startContent = `#!/bin/bash
-# Add git repo root to PATH so 'itsybitsy' is available
+# Add git repo root to PATH so 'ib' is available
 export PATH="${rootRepoPath}:$PATH"
 
 # Clear Claude Code nesting detection so agents can start their own claude process
@@ -1756,7 +1756,7 @@ ${absExitScript}
   if (manager) {
     try {
       const watchdogLog = join(agentDir, "watchdog.log");
-      const watchdogProc = Bun.spawn(["itsybitsy", "watchdog"], {
+      const watchdogProc = Bun.spawn(["ib", "watchdog"], {
         cwd: rootRepoPath,
         stdout: Bun.file(watchdogLog),
         stderr: Bun.file(watchdogLog),
@@ -2096,7 +2096,7 @@ function cleanupHooksObject(settings: Record<string, unknown>): void {
 
 // ── Hook detection predicates ───────────────────────────────────────────────
 
-/** Check for main-path PreToolUse hook (itsybitsy only — ib hooks are not counted as installed) */
+/** Check for main-path PreToolUse hook */
 function hasMainPathHook(settings: Record<string, unknown>): boolean {
   const hooks = settings.hooks as Record<string, unknown> | undefined;
   return hookArrayHasCommand(hooks?.PreToolUse, "ib hooks main-path");
@@ -2200,7 +2200,7 @@ export async function installSafetyHooks(_repoPath: string, settingsPath?: strin
   return { ok: true, exitCode: 0, stdout: "Hooks installed to ~/.claude/settings.json", stderr: "" };
 }
 
-/** Uninstall all safety hooks (removes both ib and itsybitsy hook entries). Idempotent. */
+/** Uninstall all safety hooks (removes entries matching hook substrings regardless of prefix). Idempotent. */
 export async function uninstallSafetyHooks(_repoPath: string, settingsPath?: string): Promise<IbCommandResult> {
   const resolvedPath = settingsPath ?? defaultSettingsPath();
   const file = Bun.file(resolvedPath);

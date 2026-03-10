@@ -3,7 +3,7 @@
  * Monitors all agents across all repos, detects state transitions,
  * and notifies managers when agents need attention.
  *
- * Runs as a standalone background process (`itsybitsy watchdog`).
+ * Runs as a standalone background process (`ib watchdog`).
  * Uses a PID lock file at ~/.itsybitsy/watchdog.lock for single-instance.
  *
  * Phase 15-A: Core loop + waiting/unknown handler with exponential backoff.

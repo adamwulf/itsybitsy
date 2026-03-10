@@ -78,13 +78,13 @@ State detection follows this flow:
 
 2. **Missing tmux session** → `stopped`.
 
-3. **Pre-parseState check**: If the tmux output has fewer than 10 non-empty lines AND no startup markers (`"Claude Code v"`, `"[USER TASK]"`, `"╭─ Claude Code"`, `"[AGENT CONTEXT]"`), the state is `creating`. This handles the early startup case before enough output exists for pattern matching. Priority 1 below handles the case where there ARE enough lines but startup markers are still absent (e.g., a workspace trust prompt is showing on a fresh screen).
+3. **Pre-parseState check**: If the tmux output has fewer than 10 lines AND no startup markers (`"Claude Code v"`, `"[USER TASK]"`, `"╭─ Claude Code"`, `"[AGENT CONTEXT]"`), the state is `creating`. This handles the early startup case before enough output exists for pattern matching. Priority 1 below handles the case where there ARE enough lines but startup markers are still absent (e.g., a workspace trust prompt is showing on a fresh screen). [^callout]: The bash reference counts total lines (newlines + 1). The TypeScript reimplementation counts non-empty lines (`line.trim() !== ""`), which is stricter — blank lines from tmux padding are excluded.
 
 4. **parseState priority order** (checked top-to-bottom, first match wins):
 
    | Priority | Window | Pattern | State |
    |----------|--------|---------|-------|
-   | 1 | Full input | Workspace trust/import prompts ("Do you trust the files", "trust this folder", "Allow external CLAUDE.md") present AND no startup markers found anywhere in output | `creating` |
+   | 1 | Full input | Workspace trust/import prompts ("Do you trust the files", "trust this folder", "Allow external CLAUDE.md") present AND no startup markers found anywhere in output | `creating` | [^callout]: The bash `parse_state()` only checks 2 startup markers here: `"Claude Code v"` and `"[USER TASK]"`. The other 2 (`"╭─ Claude Code"`, `"[AGENT CONTEXT]"`) are checked in the pre-parseState logic (`get_state()`/`compute_state_from_content()`) but not inside `parse_state()` itself. The TypeScript `parseState()` checks all 4 via the shared `STARTUP_MARKERS` constant.
    | 2 | Last 5 lines | "Compacting conversation" | `compacting` |
    | 3 | Last 5 lines | `(Esc to interrupt`, `(ctrl+c to interrupt`, `⎿  Running` | `running` |
    | 4 | Last 15 lines | `⎿  Waiting` (tool waiting) | `waiting` |
@@ -143,7 +143,7 @@ Resume (`ib resume <id>`) restarts a stopped agent:
 4. Start new tmux session running `resume.sh`
 5. Auto-accept workspace trust (if not yolo)
 6. Send resume nudge message: "Resume your work, or end with 'WAITING' or 'I HAVE COMPLETED THE GOAL' as your final line."
-7. Auto-spawn watchdog
+7. ~~Auto-spawn watchdog~~ [^needs review]: The bash `cmd_resume()` does NOT auto-spawn a watchdog. Only `cmd_new_agent()` spawns a watchdog for agents with a manager. This step should be removed or marked as a potential future enhancement.
 
 ### 1.7 Archiving
 

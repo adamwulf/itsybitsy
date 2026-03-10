@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * itsybitsy — Cross-repo agent management dashboard
+ * ib — Cross-repo agent management dashboard
  * CLI entrypoint
  */
 
@@ -39,7 +39,7 @@ async function printAndExit(result: { ok: boolean; exitCode: number; stdout: str
 /** Require an agent ID argument, find it, or exit with error. */
 async function requireAgent(idArg: string | undefined, repos: RepoEntry[]): Promise<Agent> {
   if (!idArg) {
-    console.error("Usage: itsybitsy <command> <agent-id>");
+    console.error("Usage: ib <command> <agent-id>");
     process.exit(1);
   }
   const agent = await findAgentById(idArg, repos);
@@ -62,7 +62,7 @@ async function main() {
     case "remove": {
       const target = args[1];
       if (!target) {
-        console.error("Usage: itsybitsy remove <path|name>");
+        console.error("Usage: ib remove <path|name>");
         process.exit(1);
       }
       const result = await removeRepo(target);
@@ -74,7 +74,7 @@ async function main() {
     case "ls": {
       const repos = await listRepos();
       if (repos.length === 0) {
-        console.log("No repos registered. Use 'itsybitsy add <path>' to add one.");
+        console.log("No repos registered. Use 'ib add <path>' to add one.");
       } else {
         for (const r of repos) {
           console.log(`  ${r.name}  →  ${r.path}`);
@@ -122,7 +122,7 @@ async function main() {
       const { readAllAgents, buildAgentTree, flattenAgentTree, detectAgentStates } = await import("./agents");
       const repos = await listRepos();
       if (repos.length === 0) {
-        console.log("No repos registered. Use 'itsybitsy add <path>' to add one.");
+        console.log("No repos registered. Use 'ib add <path>' to add one.");
         break;
       }
       const { agents, errors } = await readAllAgents(repos);
@@ -326,7 +326,7 @@ async function main() {
       const agent = await requireAgent(args[1], repos);
       const message = args.slice(2).join(" ");
       if (!message) {
-        console.error("Usage: itsybitsy send <agent-id> <message...>");
+        console.error("Usage: ib send <agent-id> <message...>");
         process.exit(1);
       }
       const { sendMessage } = await import("./ib-commands");
@@ -450,7 +450,7 @@ async function main() {
       }
       const prompt = promptParts.join(" ");
       if (!prompt) {
-        console.error("Usage: itsybitsy new-agent [flags] <prompt...>");
+        console.error("Usage: ib new-agent [flags] <prompt...>");
         process.exit(1);
       }
       await printAndExit(await newAgent(repoPath, prompt, opts));
@@ -460,7 +460,7 @@ async function main() {
     case "ack": {
       const questionId = args[1];
       if (!questionId) {
-        console.error("Usage: itsybitsy acknowledge <question-id>");
+        console.error("Usage: ib ack <question-id>");
         process.exit(1);
       }
       // Find which repo has this question
@@ -488,7 +488,7 @@ async function main() {
     // ── Hook subcommands (called by Claude Code's hook system) ──
     case "hook-check-path": {
       const id = args[1];
-      if (!id) { console.error("Usage: itsybitsy hook-check-path <agent-id>"); process.exit(1); }
+      if (!id) { console.error("Usage: ib hook-check-path <agent-id>"); process.exit(1); }
       if (!isValidAgentId(id)) { console.error("Invalid agent ID"); process.exit(1); }
       const { hookCheckPath } = await import("./hooks/agent-path");
       await hookCheckPath(id);
@@ -496,7 +496,7 @@ async function main() {
     }
     case "hook-status": {
       const id = args[1];
-      if (!id) { console.error("Usage: itsybitsy hook-status <agent-id>"); process.exit(1); }
+      if (!id) { console.error("Usage: ib hook-status <agent-id>"); process.exit(1); }
       if (!isValidAgentId(id)) { console.error("Invalid agent ID"); process.exit(1); }
       const { hookStatus } = await import("./hooks/agent-status");
       await hookStatus(id);
@@ -504,7 +504,7 @@ async function main() {
     }
     case "hook-permission-denied": {
       const id = args[1];
-      if (!id) { console.error("Usage: itsybitsy hook-permission-denied <agent-id>"); process.exit(1); }
+      if (!id) { console.error("Usage: ib hook-permission-denied <agent-id>"); process.exit(1); }
       if (!isValidAgentId(id)) { console.error("Invalid agent ID"); process.exit(1); }
       const { hookPermissionDenied } = await import("./hooks/permission-denied");
       await hookPermissionDenied(id);
@@ -578,7 +578,7 @@ async function main() {
       break;
     }
     default: {
-      console.log("itsybitsy — Cross-repo agent dashboard");
+      console.log("ib — Cross-repo agent dashboard");
       console.log("");
       console.log("Registry:");
       console.log("  add [path]          Register a repo (default: cwd)");

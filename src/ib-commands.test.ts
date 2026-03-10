@@ -2095,7 +2095,7 @@ describe("newAgent (native)", () => {
     expect(settingsExists).toBe(true);
 
     const settings = await Bun.file(settingsPath).json();
-    expect(settings.permissions.allow).toContain("Bash(itsybitsy:*)");
+    expect(settings.permissions.allow).toContain("Bash(ib:*)");
     expect(settings.permissions.allow).toContain("Read");
     expect(settings.permissions.allow).toContain("CustomTool"); // merged from base
     expect(settings.permissions.deny).toContain("EnterPlanMode");
@@ -2113,7 +2113,7 @@ describe("newAgent (native)", () => {
     expect(settingsExists).toBe(true);
 
     const settings = await Bun.file(settingsPath).json();
-    expect(settings.permissions.allow).toContain("Bash(itsybitsy:*)");
+    expect(settings.permissions.allow).toContain("Bash(ib:*)");
   });
 
   test("rejects unknown manager", async () => {
@@ -2693,6 +2693,20 @@ describe("hooksStatus", () => {
     expect(result.stdout).toBe("partial");
   });
 
+  test("does not detect itsybitsy-prefixed hooks as installed", async () => {
+    await mkdir(join(tempDir, ".claude"), { recursive: true });
+    await Bun.write(join(tempDir, ".claude", "settings.local.json"), JSON.stringify({
+      hooks: {
+        PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "itsybitsy hooks main-path" }] }],
+        UserPromptSubmit: [{ hooks: [{ type: "command", command: "itsybitsy hooks inject-status --full --visible" }] }],
+        PostToolUse: [{ matcher: "Bash|Task", hooks: [{ type: "command", command: "itsybitsy hooks inject-status --if-changed --visible" }] }],
+        SessionStart: [{ hooks: [{ type: "command", command: "itsybitsy hooks session-start" }] }],
+      },
+    }));
+    const result = await hooksStatus(tempDir);
+    expect(result.stdout).toBe("not-installed");
+  });
+
   test("returns partial when only session-start present", async () => {
     await mkdir(join(tempDir, ".claude"), { recursive: true });
     await Bun.write(settingsFile, JSON.stringify({
@@ -2746,6 +2760,17 @@ describe("interceptHooksStatus", () => {
     }));
     const result = await interceptHooksStatus(tempDir, settingsFile);
     expect(result.stdout).toBe("installed");
+  });
+
+  test("does not detect itsybitsy-prefixed intercept hook as installed", async () => {
+    await mkdir(join(tempDir, ".claude"), { recursive: true });
+    await Bun.write(join(tempDir, ".claude", "settings.local.json"), JSON.stringify({
+      hooks: {
+        PreToolUse: [{ matcher: "Task", hooks: [{ type: "command", command: "itsybitsy hooks intercept-task" }] }],
+      },
+    }));
+    const result = await interceptHooksStatus(tempDir);
+    expect(result.stdout).toBe("not-installed");
   });
 
 
@@ -3124,5 +3149,37 @@ describe("hooks round-trip", () => {
 
     const interceptStatus = await interceptHooksStatus(tempDir, settingsFile);
     expect(interceptStatus.stdout).toBe("not-installed");
+  });
+
+  test("uninstallSafetyHooks removes legacy itsybitsy-prefixed hooks", async () => {
+    await mkdir(join(tempDir, ".claude"), { recursive: true });
+    await Bun.write(settingsFile, JSON.stringify({
+      hooks: {
+        PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "itsybitsy hooks main-path" }] }],
+        UserPromptSubmit: [{ hooks: [{ type: "command", command: "itsybitsy hooks inject-status --full --visible" }] }],
+        PostToolUse: [{ matcher: "Bash|Task", hooks: [{ type: "command", command: "itsybitsy hooks inject-status --if-changed --visible" }] }],
+        SessionStart: [{ hooks: [{ type: "command", command: "itsybitsy hooks session-start" }] }],
+      },
+    }));
+
+    await uninstallSafetyHooks(tempDir, settingsFile);
+
+    // Verify hooks were removed (settings file should be deleted since it's now empty)
+    const exists = await Bun.file(settingsFile).exists();
+    expect(exists).toBe(false);
+  });
+
+  test("uninstallInterceptHook removes legacy itsybitsy-prefixed intercept hook", async () => {
+    await mkdir(join(tempDir, ".claude"), { recursive: true });
+    await Bun.write(settingsFile, JSON.stringify({
+      hooks: {
+        PreToolUse: [{ matcher: "Task", hooks: [{ type: "command", command: "itsybitsy hooks intercept-task" }] }],
+      },
+    }));
+
+    await uninstallInterceptHook(tempDir, settingsFile);
+
+    const exists = await Bun.file(settingsFile).exists();
+    expect(exists).toBe(false);
   });
 });

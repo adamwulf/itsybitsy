@@ -2141,7 +2141,15 @@ export async function interceptHooksStatus(_repoPath: string, settingsPath?: str
   return { ok: true, exitCode: 0, stdout: status, stderr: "" };
 }
 
-/** Install all safety hooks (path isolation + status injection + session-start). Idempotent. */
+/**
+ * Install all safety hooks (path isolation + status injection + session-start). Idempotent.
+ *
+ * NOTE: Intentional divergence from bash `ib` — bash writes hooks to
+ * `.claude/settings.local.json` (project-local), while this implementation
+ * writes to `~/.claude/settings.json` (global). This was a deliberate change
+ * in Phase 26c so itsybitsy's safety hooks apply to ALL Claude sessions,
+ * not just ones launched from the itsybitsy project directory.
+ */
 export async function installSafetyHooks(_repoPath: string, settingsPath?: string): Promise<IbCommandResult> {
   const settings = await readSettingsJson(settingsPath);
   const hooks = ((settings.hooks as Record<string, unknown>) ?? {}) as Record<string, unknown>;

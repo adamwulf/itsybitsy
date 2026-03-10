@@ -130,6 +130,7 @@ async function main() {
       // Filter by --manager flag if provided
       const managerIdx = args.indexOf("--manager");
       const managerFilter = managerIdx !== -1 ? args[managerIdx + 1] : null;
+      const jsonOutput = args.includes("--json");
 
       const { agents, errors } = await readAllAgents(repos);
       for (const err of errors) {
@@ -137,6 +138,46 @@ async function main() {
       }
       await detectAgentStates(agents);
       const roots = buildAgentTree(agents);
+
+      if (jsonOutput) {
+        // Collect agents matching the manager filter
+        const filtered: Agent[] = [];
+        function collectForJson(agent: Agent) {
+          if (agent.archived) return;
+          if (managerFilter && agent.meta.manager !== managerFilter && agent.id !== managerFilter) return;
+          filtered.push(agent);
+          for (const child of agent.children) collectForJson(child);
+        }
+        for (const root of roots) {
+          if (managerFilter) {
+            // Walk tree looking for the manager's children
+            function findManagerJson(a: Agent): void {
+              if (a.id === managerFilter) {
+                for (const child of a.children) collectForJson(child);
+              } else {
+                for (const child of a.children) findManagerJson(child);
+              }
+            }
+            findManagerJson(root);
+          } else {
+            collectForJson(root);
+          }
+        }
+        const jsonData = filtered.map((a) => ({
+          id: a.id,
+          state: a.state,
+          age: a.age,
+          model: a.meta.model,
+          worker: a.meta.worker,
+          manager: a.meta.manager ?? null,
+          repo: a.repoName,
+          repoPath: a.repoPath,
+          prompt: a.meta.prompt,
+          orphaned: a.orphaned ?? false,
+        }));
+        console.log(JSON.stringify(jsonData, null, 2));
+        break;
+      }
 
       const { BOLD, DIM, RESET } = await import("./tui/colors");
       const { displayState } = await import("./tui/agent-tree");
@@ -311,11 +352,28 @@ async function main() {
       const repos = await listRepos();
       const agent = await requireAgent(args[1], repos);
       const hasAll = args.includes("--all");
+      const hasFollow = args.includes("--follow");
       const linesIdx = args.indexOf("--lines");
       const lines = hasAll ? 10000 : linesIdx !== -1 ? parseInt(args[linesIdx + 1]!, 10) || 100 : 100;
 
-      const { captureTmuxOutput } = await import("./tmux-poller");
       const tmuxSession = agent.meta.tmux_session;
+
+      if (hasFollow) {
+        if (!tmuxSession) {
+          console.error("Agent has no tmux session");
+          process.exit(1);
+        }
+        console.error(`Attaching to ${agent.id} (Ctrl+b d to detach)...`);
+        const attachProc = Bun.spawn(["tmux", "attach", "-t", tmuxSession, "-r"], {
+          stdin: "inherit",
+          stdout: "inherit",
+          stderr: "inherit",
+        });
+        process.exit(await attachProc.exited);
+        break;
+      }
+
+      const { captureTmuxOutput } = await import("./tmux-poller");
 
       if (tmuxSession) {
         const output = await captureTmuxOutput(tmuxSession, lines);
@@ -353,35 +411,44 @@ async function main() {
     }
     case "questions":
     case "q": {
-      const { readPendingQuestions } = await import("./agents");
+      const { readPendingQuestions, readAllQuestions } = await import("./agents");
       const repos = await listRepos();
+      const showAll = args.includes("--all") || args.includes("-a");
       if (repos.length === 0) {
         console.log("No repos registered.");
         break;
       }
       let found = false;
       for (const repo of repos) {
-        const questions = await readPendingQuestions(repo.path);
+        const questions = showAll
+          ? await readAllQuestions(repo.path)
+          : await readPendingQuestions(repo.path);
         for (const q of questions) {
           found = true;
-          console.log(`[${repo.name}] ${q.agent}`);
+          const statusTag = showAll && q.status === "acknowledged" ? " [acknowledged]" : "";
+          console.log(`[${repo.name}] ${q.agent}${statusTag}`);
           console.log(`  ${q.question}`);
           console.log(`  ${q.timestamp}`);
           console.log("");
         }
       }
       if (!found) {
-        console.log("No pending questions");
+        console.log(showAll ? "No questions yet." : "No pending questions");
       }
       break;
     }
     case "diff": {
       const repos = await listRepos();
       const agent = await requireAgent(args[1], repos);
+      const statOnly = args.includes("--stat");
       const cwd = agentWorktreePath(agent);
 
-      // Get merge-base
-      const mergeBaseProc = Bun.spawn(["git", "merge-base", "HEAD", "main"], {
+      // Determine parent branch: agent/<manager-id> if manager exists, otherwise main
+      const parentBranch = agent.meta.manager ? `agent/${agent.meta.manager}` : "main";
+      const agentBranch = `agent/${agent.id}`;
+
+      // Get merge-base between parent branch and agent branch
+      const mergeBaseProc = Bun.spawn(["git", "merge-base", parentBranch, agentBranch], {
         cwd,
         stdout: "pipe",
         stderr: "pipe",
@@ -389,11 +456,14 @@ async function main() {
       const mergeBase = (await new Response(mergeBaseProc.stdout).text()).trim();
       const mbExit = await mergeBaseProc.exited;
       if (mbExit !== 0) {
-        console.error("Failed to find merge-base with main");
+        console.error(`Failed to find merge-base between ${parentBranch} and ${agentBranch}`);
         process.exit(1);
       }
 
-      const diffProc = Bun.spawn(["git", "diff", mergeBase], {
+      const diffArgs = statOnly
+        ? ["git", "diff", "--stat", `${mergeBase}..${agentBranch}`]
+        : ["git", "diff", `${mergeBase}..${agentBranch}`];
+      const diffProc = Bun.spawn(diffArgs, {
         cwd,
         stdin: "inherit",
         stdout: "inherit",
@@ -406,34 +476,117 @@ async function main() {
       const repos = await listRepos();
       const agent = await requireAgent(args[1], repos);
       const cwd = agentWorktreePath(agent);
+      const agentBranch = `agent/${agent.id}`;
 
-      const logProc = Bun.spawn(["git", "log", "--oneline", "main..HEAD"], {
-        cwd,
-        stdin: "inherit",
-        stdout: "inherit",
-        stderr: "inherit",
-      });
-      await logProc.exited;
+      // Determine parent branch: agent/<manager-id> if manager exists, otherwise main
+      const parentBranch = agent.meta.manager ? `agent/${agent.meta.manager}` : "main";
 
-      const statusProc = Bun.spawn(["git", "status", "--short"], {
+      // Header
+      console.log(`Agent: ${agent.id}`);
+      console.log(`Branch: ${agentBranch}`);
+      console.log(`Worktree: ${cwd}`);
+      console.log("");
+
+      // Get merge-base
+      const mergeBaseProc = Bun.spawn(["git", "merge-base", parentBranch, agentBranch], {
         cwd,
-        stdin: "inherit",
-        stdout: "inherit",
-        stderr: "inherit",
+        stdout: "pipe",
+        stderr: "pipe",
       });
-      process.exit(await statusProc.exited);
+      const mergeBase = (await new Response(mergeBaseProc.stdout).text()).trim();
+      const mbExit = await mergeBaseProc.exited;
+
+      if (mbExit === 0 && mergeBase) {
+        // Count commits
+        const countProc = Bun.spawn(["git", "log", "--oneline", `${mergeBase}..${agentBranch}`], {
+          cwd,
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        const countOutput = (await new Response(countProc.stdout).text()).trim();
+        await countProc.exited;
+        const commitLines = countOutput ? countOutput.split("\n") : [];
+        const commitCount = commitLines.length;
+
+        if (commitCount > 0) {
+          console.log(`═══ Commits (${commitCount}) vs ${parentBranch} ═══`);
+          const logProc = Bun.spawn(["git", "log", "--format=  %h %s", `${mergeBase}..${agentBranch}`], {
+            cwd,
+            stdin: "inherit",
+            stdout: "inherit",
+            stderr: "inherit",
+          });
+          await logProc.exited;
+          console.log("");
+        } else {
+          console.log(`═══ No commits vs ${parentBranch} ═══`);
+          console.log("");
+        }
+      }
+
+      // Show uncommitted changes
+      const statusProc = Bun.spawn(["git", "status", "--porcelain"], {
+        cwd,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const statusOutput = (await new Response(statusProc.stdout).text()).trim();
+      await statusProc.exited;
+
+      if (statusOutput) {
+        console.log("═══ Uncommitted Changes ═══");
+        const shortProc = Bun.spawn(["git", "status", "--short"], {
+          cwd,
+          stdin: "inherit",
+          stdout: "inherit",
+          stderr: "inherit",
+        });
+        await shortProc.exited;
+        console.log("");
+      }
+
+      // Show file change summary (git diff --stat)
+      if (mbExit === 0 && mergeBase) {
+        const statProc = Bun.spawn(["git", "diff", "--stat", `${mergeBase}..${agentBranch}`], {
+          cwd,
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        const statOutput = (await new Response(statProc.stdout).text()).trim();
+        await statProc.exited;
+        // The last line of --stat output is the summary
+        if (statOutput) {
+          const statLines = statOutput.split("\n");
+          const summaryLine = statLines[statLines.length - 1]!.trim();
+          if (summaryLine && !summaryLine.includes("0 files changed")) {
+            console.log("═══ Files Changed ═══");
+            console.log(`  ${summaryLine}`);
+          }
+        }
+      }
       break;
     }
     case "send": {
       const repos = await listRepos();
-      const agent = await requireAgent(args[1], repos);
-      const message = args.slice(2).join(" ");
+      // Parse --from flag before determining agent and message
+      const sendArgs = args.slice(1);
+      let fromAgent: string | undefined;
+      const filteredSendArgs: string[] = [];
+      for (let i = 0; i < sendArgs.length; i++) {
+        if (sendArgs[i] === "--from") {
+          fromAgent = sendArgs[++i];
+        } else {
+          filteredSendArgs.push(sendArgs[i]!);
+        }
+      }
+      const agent = await requireAgent(filteredSendArgs[0], repos);
+      const message = filteredSendArgs.slice(1).join(" ");
       if (!message) {
-        console.error("Usage: ib send <agent-id> <message...>");
+        console.error("Usage: ib send [--from <id>] <agent-id> <message...>");
         process.exit(1);
       }
       const { sendMessage } = await import("./ib-commands");
-      await printAndExit(await sendMessage(agent, message));
+      await printAndExit(await sendMessage(agent, message, fromAgent ? { fromAgent } : undefined));
       break;
     }
     case "kill": {
@@ -532,6 +685,13 @@ async function main() {
           if (!ibArgs[i + 1]) { console.error("Error: --name requires a value"); process.exit(1); }
           opts.name = ibArgs[++i];
         }
+        else if (arg === "--prompt-file") {
+          if (!ibArgs[i + 1]) { console.error("Error: --prompt-file requires a value"); process.exit(1); }
+          const promptFilePath = ibArgs[++i]!;
+          const promptFile = Bun.file(promptFilePath);
+          if (!(await promptFile.exists())) { console.error(`Error: prompt file not found: ${promptFilePath}`); process.exit(1); }
+          promptParts.push(await promptFile.text());
+        }
         else if (arg === "--no-worktree") { opts.noWorktree = true; }
         else if (arg === "--yolo") { opts.yolo = true; }
         else if (arg === "--allow") {
@@ -579,6 +739,97 @@ async function main() {
       }
       const { acknowledgeQuestion } = await import("./ib-commands");
       await printAndExit(await acknowledgeQuestion(repoPath, questionId));
+      break;
+    }
+    case "log": {
+      const repos = await listRepos();
+      // Parse --id and --quiet flags
+      const logArgs = args.slice(1);
+      let logAgentId: string | undefined;
+      let logQuiet = false;
+      let logMessage = "";
+      for (let i = 0; i < logArgs.length; i++) {
+        const arg = logArgs[i]!;
+        if (arg === "--id") {
+          logAgentId = logArgs[++i];
+        } else if (arg === "--quiet" || arg === "-q") {
+          logQuiet = true;
+        } else {
+          logMessage = arg;
+        }
+      }
+
+      // Auto-detect agent ID from cwd if not specified
+      if (!logAgentId) {
+        const cwd = process.cwd();
+        const worktreeMatch = cwd.match(/\/.ittybitty\/agents\/([^/]+)\/repo/);
+        if (worktreeMatch) {
+          logAgentId = worktreeMatch[1];
+        }
+      }
+
+      if (!logAgentId) {
+        console.error("Error: Could not detect agent ID. Run from an agent worktree or use --id.");
+        process.exit(1);
+      }
+      if (!logMessage) {
+        console.error('Usage: ib log [--id <agent-id>] [--quiet] "message"');
+        process.exit(1);
+      }
+
+      const agent = await findAgentById(logAgentId, repos);
+      if (!agent) {
+        console.error(`Agent not found: ${logAgentId}`);
+        process.exit(1);
+      }
+
+      const { join } = await import("path");
+      const { logAgent } = await import("./agent-lifecycle");
+      const agentDir = join(agent.repoPath, ".ittybitty", agent.archived ? "archive" : "agents", agent.id);
+      await logAgent(agentDir, logMessage);
+
+      if (!logQuiet) {
+        console.log(logMessage);
+      }
+      break;
+    }
+    case "parse-state": {
+      const { parseState } = await import("./parse-state");
+      const psArgs = args.slice(1);
+      let verbose = false;
+      let inputFile: string | undefined;
+      for (const arg of psArgs) {
+        if (arg === "-v" || arg === "--verbose") verbose = true;
+        else if (!arg.startsWith("-")) inputFile = arg;
+      }
+
+      let input: string;
+      if (inputFile) {
+        const file = Bun.file(inputFile);
+        if (!(await file.exists())) {
+          console.error(`Error: file not found: ${inputFile}`);
+          process.exit(1);
+        }
+        input = await file.text();
+      } else if (process.stdin.isTTY) {
+        console.error("Error: no input provided. Use a file argument or pipe input.");
+        console.error("Usage: ib parse-state [file] or echo 'text' | ib parse-state");
+        process.exit(1);
+      } else {
+        // Read from stdin
+        const chunks: string[] = [];
+        for await (const chunk of process.stdin) {
+          chunks.push(typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk));
+        }
+        input = chunks.join("");
+      }
+
+      const result = parseState(input);
+      if (verbose) {
+        console.log(`${result.state} (matched: ${result.reason})`);
+      } else {
+        console.log(result.state);
+      }
       break;
     }
     // ── Hook subcommands (called by Claude Code's hook system) ──
@@ -682,20 +933,22 @@ async function main() {
       console.log("Registry:");
       console.log("  add [path]          Register a repo (default: cwd)");
       console.log("  remove <path>       Unregister a repo");
-      console.log("  list, ls            List repos and their agents (--manager <id> to filter)");
+      console.log("  list, ls            List repos and their agents (--manager <id>, --json)");
       console.log("");
       console.log("Monitoring:");
       console.log("  watch               Launch TUI dashboard");
       console.log("  watchdog            Run watchdog as background process");
       console.log("  agents, tree        List all agents with states");
-      console.log("  look <id>           Show agent's live tmux output (--lines N, --all)");
+      console.log("  look <id>           Show agent's live tmux output (--lines N, --all, --follow)");
       console.log("  status <id>         Show agent's git log and status");
-      console.log("  diff <id>           Show agent's git diff from main");
+      console.log("  diff <id>           Show agent's git diff from parent (--stat)");
+      console.log("  log <msg>           Write to agent log (--id <id>, --quiet)");
+      console.log("  parse-state [file]  Parse agent state from text (-v for verbose)");
       console.log("  info <id>           Show agent's metadata");
       console.log("");
       console.log("Communication:");
-      console.log("  send <id> <msg>     Send a message to an agent");
-      console.log("  questions, q        Show pending agent questions");
+      console.log("  send <id> <msg>     Send a message to an agent (--from <id>)");
+      console.log("  questions, q        Show pending agent questions (--all)");
       console.log("  acknowledge <qid>   Acknowledge a pending question (alias: ack)");
       console.log("");
       console.log("Agent Lifecycle:");

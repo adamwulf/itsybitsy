@@ -194,6 +194,39 @@ export async function readPendingQuestions(repoPath: string): Promise<PendingQue
   }
 }
 
+/** Read all questions (pending + acknowledged) for a repo, filtering out questions from non-existent agents */
+export async function readAllQuestions(repoPath: string): Promise<PendingQuestion[]> {
+  try {
+    const questionsPath = join(repoPath, ".ittybitsy", "user-questions.json");
+    const file = Bun.file(questionsPath);
+    if (!(await file.exists())) return [];
+    const data = await file.json();
+    if (!data || !Array.isArray(data.questions)) return [];
+
+    // Read active agent IDs from the agents directory
+    const agentsDir = join(repoPath, ".ittybitsy", "agents");
+    let activeAgentIds: Set<string>;
+    try {
+      const entries = await readdir(agentsDir, { withFileTypes: true });
+      activeAgentIds = new Set(entries.filter((e) => e.isDirectory()).map((e) => e.name));
+    } catch (err: unknown) {
+      if (err instanceof Error && "code" in err && (err as NodeJS.ErrnoException).code !== "ENOENT") {
+        process.stderr.write(`Warning: failed to read agents directory: ${(err as Error).message}\n`);
+      }
+      activeAgentIds = new Set();
+    }
+
+    return data.questions.filter(
+      (q: PendingQuestion) => activeAgentIds.has(q.agent)
+    );
+  } catch (err: unknown) {
+    if (err instanceof Error && "code" in err && (err as NodeJS.ErrnoException).code !== "ENOENT") {
+      process.stderr.write(`Warning: failed to read questions: ${(err as Error).message}\n`);
+    }
+    return [];
+  }
+}
+
 /**
  * Build agent tree: set children arrays based on manager field.
  * Returns only root agents (those with no manager, or whose manager isn't in the list).

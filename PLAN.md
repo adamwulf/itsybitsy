@@ -1153,6 +1153,30 @@ The following commands existed in `ib-commands.ts` but were NOT wired as CLI cas
 
 ---
 
+### Phase 27 (future): Path Allowlist in Hook Sandbox
+
+**Status:** Aspirational.
+
+**Goal:** Extend `checkPathAccess()` in `src/hooks/agent-path.ts` to support an explicit path allowlist in addition to the existing tool allowlist. Today the hook allows all paths that aren't agent worktrees or the main repo. This phase adds the ability to define per-agent allowed paths, enabling a stricter "deny by default, allow specific paths" sandbox.
+
+**Motivation:**
+- Today `/tmp`, `~/.claude`, system paths etc. are all implicitly allowed. Fine for now but not auditable.
+- Config-driven path grants (e.g. `allowPaths: ["/tmp", "~/.ssh"]`) let repo admins tighten or loosen agent sandboxing.
+- Pairs naturally with the existing `allowTools` / `denyTools` config pattern in `src/config.ts`.
+
+**Design:**
+- `PathCheckContext` already has `allowList: string[]` for tools — add `allowPaths: string[]` alongside it.
+- Path patterns support prefix matching (`/tmp/**`) and home-relative paths (`~/.claude/**`).
+- Default `allowPaths` (when unset): the current implicit behavior — agent worktree + own log + system paths.
+- Read from agent's `settings.local.json` or from `.ittybitsy.json` config (`allowPaths` key).
+- `checkFilePath()` checks explicit `allowPaths` before falling through to the current logic.
+
+**What stays the same:**
+- Agent worktree is always allowed (not gated by allowPaths).
+- Other agents' directories are always denied (not overrideable by allowPaths).
+
+---
+
 ### Phase 25 (future): Rename .ittybitty/ to .ittybitsy/
 
 **Status:** Aspirational — blocked on ib compatibility.

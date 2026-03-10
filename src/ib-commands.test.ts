@@ -1581,6 +1581,105 @@ describe("mergeAgent (native)", () => {
     const log = await Bun.file(join(agentDir, "agent.log")).text();
     expect(log).toContain("Pre-rebase conflict check failed");
   });
+
+  test("detects target branch from CWD, not agent.repoPath", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-abc", tmux_session: "tmux-agent-abc",
+    }));
+
+    // Mock returns "feature-branch" for branch --show-current
+    const runner = makeMergeMock({ currentBranch: "feature-branch" });
+    setLifecycleSpawnRunner(runner);
+    setMergeSpawnRunner(runner);
+
+    const agent = makeAgent("agent-abc", tempDir);
+    await mergeAgent(agent);
+
+    // The branch detection call must NOT have -C flag (should run in CWD)
+    const branchCall = spawnCalls.find(
+      (c) => c.includes("branch") && c.includes("--show-current")
+    );
+    expect(branchCall).toBeDefined();
+    expect(branchCall).not.toContain("-C");
+
+    // Checkout should target feature-branch, not main
+    const checkoutCall = spawnCalls.find((c) => c.includes("checkout"));
+    expect(checkoutCall).toBeDefined();
+    expect(checkoutCall).toContain("feature-branch");
+  });
+
+  test("checkout and merge commands run in CWD, not via -C agent.repoPath", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-abc", tmux_session: "tmux-agent-abc",
+    }));
+
+    const runner = makeMergeMock();
+    setLifecycleSpawnRunner(runner);
+    setMergeSpawnRunner(runner);
+
+    const agent = makeAgent("agent-abc", tempDir);
+    await mergeAgent(agent);
+
+    // checkout must NOT have -C flag
+    const checkoutCall = spawnCalls.find((c) => c.includes("checkout") && c.includes("main"));
+    expect(checkoutCall).toBeDefined();
+    expect(checkoutCall).not.toContain("-C");
+
+    // merge must NOT have -C flag
+    const mergeCall = spawnCalls.find(
+      (c) => c.includes("merge") && (c.includes("--ff-only") || c.includes("--no-ff"))
+    );
+    expect(mergeCall).toBeDefined();
+    expect(mergeCall).not.toContain("-C");
+
+    // CWD status check must NOT have -C flag
+    const statusCalls = spawnCalls.filter(
+      (c) => c.includes("status") && c.includes("--porcelain")
+    );
+    // First status call is for worktree (has -C), second is for CWD (no -C)
+    const cwdStatusCall = statusCalls.find((c) => !c.some((a) => a.includes("/repo")));
+    expect(cwdStatusCall).toBeDefined();
+    expect(cwdStatusCall).not.toContain("-C");
+  });
+
+  test("merges into manager branch when called from manager worktree", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-abc", tmux_session: "tmux-agent-abc",
+    }));
+
+    // Simulate calling from a manager worktree — manager is on agent/agent-manager branch
+    const runner = makeMergeMock({ currentBranch: "agent/agent-manager" });
+    setLifecycleSpawnRunner(runner);
+    setMergeSpawnRunner(runner);
+
+    const agent = makeAgent("agent-abc", tempDir);
+    await mergeAgent(agent);
+
+    // Rebase should target the manager's branch
+    const rebaseCall = spawnCalls.find(
+      (c) => c.includes("rebase") && !c.some((a) => a.includes("/tmp/ib-rebase-check-")) && !c.includes("--abort")
+    );
+    expect(rebaseCall).toBeDefined();
+    expect(rebaseCall).toContain("agent/agent-manager");
+
+    // Checkout should target manager's branch
+    const checkoutCall = spawnCalls.find((c) => c.includes("checkout"));
+    expect(checkoutCall).toBeDefined();
+    expect(checkoutCall).toContain("agent/agent-manager");
+
+    // Merge into manager's branch
+    const mergeCall = spawnCalls.find(
+      (c) => c.includes("merge") && (c.includes("--ff-only") || c.includes("--no-ff"))
+    );
+    expect(mergeCall).toBeDefined();
+    expect(mergeCall).toContain("agent/agent-abc");
+  });
 });
 
 // ── newAgent (native) tests ──────────────────────────────────────────────────

@@ -818,18 +818,19 @@ export async function mergeAgent(agent: Agent): Promise<IbCommandResult> {
     return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' has uncommitted changes` };
   }
 
-  // 4. Detect target branch
+  // 4. Detect target branch — use CWD (no -C) so manager worktrees merge into
+  //    their own branch, not the main repo's checked-out branch (matches bash ib)
   let targetBranch = "";
-  const currentBranch = await mergeRunCmd(["git", "-C", agent.repoPath, "branch", "--show-current"]);
+  const currentBranch = await mergeRunCmd(["git", "branch", "--show-current"]);
   if (currentBranch.exitCode === 0 && currentBranch.stdout.trim()) {
     targetBranch = currentBranch.stdout.trim();
   }
   if (!targetBranch) {
-    const mainRef = await mergeRunCmd(["git", "-C", agent.repoPath, "show-ref", "--verify", "refs/heads/main"]);
+    const mainRef = await mergeRunCmd(["git", "show-ref", "--verify", "refs/heads/main"]);
     if (mainRef.exitCode === 0) {
       targetBranch = "main";
     } else {
-      const masterRef = await mergeRunCmd(["git", "-C", agent.repoPath, "show-ref", "--verify", "refs/heads/master"]);
+      const masterRef = await mergeRunCmd(["git", "show-ref", "--verify", "refs/heads/master"]);
       if (masterRef.exitCode === 0) {
         targetBranch = "master";
       } else {
@@ -844,8 +845,8 @@ export async function mergeAgent(agent: Agent): Promise<IbCommandResult> {
     return { ok: false, exitCode: 1, stdout: "", stderr: `Branch '${branchName}' does not exist` };
   }
 
-  // 6. Current dir must have no uncommitted changes
-  const repoStatus = await mergeRunCmd(["git", "-C", agent.repoPath, "status", "--porcelain"]);
+  // 6. Current dir must have no uncommitted changes (CWD, not agent.repoPath)
+  const repoStatus = await mergeRunCmd(["git", "status", "--porcelain"]);
   if (repoStatus.exitCode === 0 && repoStatus.stdout.trim()) {
     return { ok: false, exitCode: 1, stdout: "", stderr: "Current directory has uncommitted changes" };
   }
@@ -875,9 +876,9 @@ export async function mergeAgent(agent: Agent): Promise<IbCommandResult> {
     }
     await logAgent(agentDir, "Rebase completed successfully");
 
-    // 9. Checkout target branch
+    // 9. Checkout target branch (in CWD — the caller's worktree)
     await logAgent(agentDir, `Checking out ${targetBranch}...`);
-    const checkoutResult = await mergeRunCmd(["git", "-C", agent.repoPath, "checkout", targetBranch]);
+    const checkoutResult = await mergeRunCmd(["git", "checkout", targetBranch]);
     if (checkoutResult.exitCode !== 0) {
       return { ok: false, exitCode: 1, stdout: "", stderr: `Could not checkout ${targetBranch}: ${checkoutResult.stderr || checkoutResult.stdout}` };
     }
@@ -886,14 +887,14 @@ export async function mergeAgent(agent: Agent): Promise<IbCommandResult> {
     const runningAsAgent = await isRunningAsAgent();
     if (runningAsAgent) {
       await logAgent(agentDir, `Fast-forwarding ${targetBranch} to ${branchName}...`);
-      const ffResult = await mergeRunCmd(["git", "-C", agent.repoPath, "merge", "--ff-only", branchName]);
+      const ffResult = await mergeRunCmd(["git", "merge", "--ff-only", branchName]);
       if (ffResult.exitCode !== 0) {
         return { ok: false, exitCode: 1, stdout: "", stderr: `Fast-forward failed: ${ffResult.stderr || ffResult.stdout}` };
       }
       await logAgent(agentDir, "Fast-forward merge completed successfully");
     } else {
       await logAgent(agentDir, `Merging ${branchName} with --no-ff...`);
-      const noFFResult = await mergeRunCmd(["git", "-C", agent.repoPath, "merge", "--no-ff", branchName, "-m", `Merge agent ${agent.id} work`]);
+      const noFFResult = await mergeRunCmd(["git", "merge", "--no-ff", branchName, "-m", `Merge agent ${agent.id} work`]);
       if (noFFResult.exitCode !== 0) {
         return { ok: false, exitCode: 1, stdout: "", stderr: `Merge failed: ${noFFResult.stderr || noFFResult.stdout}` };
       }

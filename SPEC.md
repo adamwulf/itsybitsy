@@ -2,6 +2,11 @@
 
 This document is the definitive behavioral specification for itsybitsy, a multi-agent orchestration system for Claude Code. It uses tmux sessions, git worktrees, and a hook system to manage isolated, concurrent Claude agents.
 
+**Annotations used in this document:**
+
+- **[^callout]** — Marks an intentional divergence between the bash reference implementation and the TypeScript reimplementation. The description explains what differs and why.
+- **[^needs review]** — Marks a claim that could not be fully verified against the source, or where the correct behavior is ambiguous and needs a decision.
+
 ---
 
 ## 1. Agent Lifecycle

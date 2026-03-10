@@ -1111,7 +1111,7 @@ The hook is installed in two places in `~/.claude/settings.json`:
 
 **Goal:** Fix behavioral divergences between bash `ib` and TypeScript `ib` in hooks and agent lifecycle. These are bugs or missing logic that can cause agents to get stuck or behave differently than expected.
 
-**Complexity:** Medium — mostly localized changes in hook files and ib-commands.ts.
+**Complexity:** Medium — mostly localized changes in hook files.
 
 #### 31a: Delayed nudge recheck in stop hook (must-fix)
 
@@ -1124,7 +1124,7 @@ Bash schedules `( sleep 5 && ib hooks agent-status )` when debouncing nudges, en
 
 #### 31b: Stop hook tmux send-keys timing (must-fix)
 
-**File:** `src/hooks/agent-status.ts:356-358,369-376`
+**File:** `src/hooks/agent-status.ts:356-360,369-376`
 
 Bash sends message then waits 0.1s before Enter. TS sends message+Enter in one call, which may fail for long messages.
 
@@ -1193,7 +1193,7 @@ Bash saves tmux capture output + `last_assistant_message` + parse_state reason i
 Bash writes hooks to `.claude/settings.local.json` (project-local). TS writes to `~/.claude/settings.json` (global). This was an **intentional** change in Phase 26c (not a bug). Global hooks mean itsybitsy's safety hooks apply to all Claude sessions, not just the itsybitsy project.
 
 - [ ] Document this intentional divergence in a comment in `ib-commands.ts` so future developers understand the choice
-- [ ] Optionally consider adding a `--local` flag to allow project-scoped installation if desired
+- [ ] Consider adding a `--local` flag to allow project-scoped installation if desired
 
 #### 32b: `ib list --json` (nice-to-have)
 
@@ -1211,7 +1211,7 @@ Bash writes hooks to `.claude/settings.local.json` (project-local). TS writes to
 
 **File:** `src/index.ts` (diff command)
 
-- [ ] Add `--stat` flag that runs `git diff --stat` instead of full diff
+- [ ] Add `--stat` flag that runs `git diff --stat "$MERGE_BASE..$BRANCH"` (stat of merge-base range, matching bash behavior) instead of full diff
 
 #### 32e: `ib status` improvements (should-fix)
 
@@ -1220,8 +1220,8 @@ Bash writes hooks to `.claude/settings.local.json` (project-local). TS writes to
 Bash shows agent ID, branch, worktree path, structured section headers with counts, and `git diff --stat` summary. TS just shows plain git output.
 
 - [ ] Add header with agent ID, branch name, worktree path
-- [ ] Use `git merge-base` with the parent branch (from `meta.json` or default to `main`) rather than hardcoding `main` — bash determines this from the caller's current HEAD, so when called from main it's equivalent, but this is more correct
-- [ ] Add section headers (e.g., `═══ Commits (N) vs main ═══`)
+- [ ] Use `git merge-base` with the parent branch (derived from `meta.json`'s `manager` field: if manager exists use `agent/<manager-id>`, otherwise default to `main`) rather than hardcoding `main` — bash determines this from the caller's current HEAD, so when called from main it's equivalent, but this is more correct
+- [ ] Add section headers (e.g., `═══ Commits (N) vs <parent-branch> ═══`)
 - [ ] Add `git diff --stat` summary
 
 #### 32f: `ib send --from` (should-fix)
@@ -1241,7 +1241,7 @@ Bash supports `--from <id>` to auto-prefix messages with sender identity. Note: 
 - [ ] `ib new-agent --prompt-file <path>` — read prompt from file
 - [ ] `ib parse-state` — debug command for state parsing
 - [ ] `ib questions --all` — show acknowledged questions
-- [ ] `ib status --json` — bash supports JSON output for status (nice-to-have, same as `ib list --json`)
+- [ ] `ib status --json` — bash supports JSON output for status (nice-to-have, analogous to `ib list --json`)
 - [ ] `ib diff` — already uses `git merge-base HEAD main` (so merge-base logic exists), but needs to use the parent branch instead of hardcoding `main` — distinct from 32e where status uses `main..HEAD` range with no merge-base at all; fix together
 
 ---
@@ -1293,7 +1293,7 @@ The `merge-check` case appears twice in the main switch statement. The second oc
 
 **Files:** `src/ib-commands.ts`, `src/agent-lifecycle.ts`, `src/watchdog.ts`, `src/tmux-poller.ts`, `src/usage.ts`, `src/auto-compact.ts`, `src/ghostty.ts`
 
-12 separate module-level mutable spawn runners with near-identical `set*/reset*` boilerplate. This is error-prone (test leaks) and hard to maintain.
+12 separate module-level mutable spawn runners with `set*/reset*` boilerplate. 10 of them use the same `SpawnFn` type and are near-identical; `src/usage.ts` (`setTestSpawn`) and `src/ghostty.ts` (`setSpawn`) use different type signatures (`FetchLike` and `GhosttySpawnFn` respectively) but follow the same pattern. This is error-prone (test leaks) and hard to maintain.
 
 - [ ] Design a single DI pattern — either a context object threaded through functions, or a centralized spawn registry
 - [ ] Consolidate all spawn runners into the shared pattern
@@ -1357,11 +1357,11 @@ Both functions pipe stderr but never drain it. If a command produces enough stde
 
 #### 34i: Use `sed` alternative for JSON modification in start.sh/resume.sh (low priority)
 
-**File:** `src/ib-commands.ts:392-395`
+**Files:** `src/ib-commands.ts:392-395` (start script heredoc), `src/ib-commands.ts:1682-1685` (resume script heredoc)
 
-Using `sed` to insert `claude_pid` into `meta.json` is brittle.
+Using `sed` to insert `claude_pid` into `meta.json` is brittle — assumes single-line JSON ending with `}` on the last line; breaks with nested objects or formatted JSON. Both the start script and the resume script contain the same pattern.
 
-- [ ] Replace with a bun one-liner or restructure to avoid in-script JSON manipulation
+- [ ] Replace both occurrences with a bun one-liner or restructure to avoid in-script JSON manipulation
 
 ---
 
@@ -1399,16 +1399,16 @@ No dedicated test files for these modules.
 
 **Files:** Various test files
 
-Heavy `as any` usage (80+ occurrences across 7 test files) for mock creation.
+Heavy `as any` usage (81 occurrences across 7 test files) for mock creation.
 
 - [ ] Create shared mock factory in `test-utils.ts` that produces properly-typed Agent objects
 - [ ] Use consistently across all test files
 
 #### 35d: Validate `readAgentMeta` more thoroughly (medium priority)
 
-**File:** `src/agents.ts:84`
+**File:** `src/agents.ts:70-84` (`readAgentMeta` function)
 
-Only `id` and `tmux_session` are type-checked. Other fields (`created_epoch`, `worker`, `model`) are cast without validation.
+Only `id` (line 77) and `tmux_session` (line 81, with string default) are type-checked. Other fields (`created_epoch`, `worker`, `model`, `branch`, etc.) are cast without validation via `data as AgentMeta` at line 84.
 
 - [ ] Add type guards for all required `AgentMeta` fields
 - [ ] Test: pass meta.json with wrong-typed fields, verify graceful error

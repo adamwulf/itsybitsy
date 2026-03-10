@@ -129,10 +129,9 @@ Kill (`ib kill <id>`) permanently destroys an agent:
 Pause (`ib pause <id>`) stops the agent but preserves all state:
 
 1. Kill the Claude process (SIGTERM → SIGKILL)
-2. Kill the tmux session
-3. Kill the watchdog process (if running) to prevent duplicate watchdogs on resume [^callout] Bash `cmd_pause()` does not kill the watchdog (bug). The watchdog loop condition (`while [[ -d "$AGENT_DIR/repo" ]]`) keeps it alive since pause preserves the worktree. Without killing it, `pause → resume` would result in two concurrent watchdogs.
-4. Agent directory, meta.json, worktree, branch, and logs are all preserved
-5. The agent can be resumed with `ib resume <id>`
+2. Kill the tmux session (the watchdog will self-exit when it detects the tmux session is gone — see §8.5)
+3. Agent directory, meta.json, worktree, branch, and logs are all preserved
+4. The agent can be resumed with `ib resume <id>`
 
 ### 1.6 Resuming an Agent
 
@@ -648,7 +647,9 @@ Reads Claude transcript JSONL files to determine context window usage percentage
 
 ### 8.5 Watchdog
 
-`ib watchdog <id>` runs as a background loop for agents with a manager, polling agent state every 5 seconds. It continues running while the agent's worktree directory exists.
+`ib watchdog <id>` runs as a background loop for agents with a manager, polling agent state every 5 seconds. It continues running while the agent's worktree directory exists and the agent's tmux session is active.
+
+**Self-exit on tmux disappearance**: The watchdog ignores tmux session checks for the first 5 seconds after startup (grace period while the agent initializes). After that, if the tmux session no longer exists (`tmux has-session` fails), the watchdog exits. This ensures the watchdog self-cleans on pause or crash without requiring callers to explicitly kill it. On resume, a new watchdog is spawned (§1.6 step 7). [^callout] Bash's watchdog loop condition is `while [[ -d "$AGENT_DIR/repo" ]]` (worktree only, no tmux check), so it survives pause and must be manually killed. The self-exit behavior described here is the intended design for the TS implementation.
 
 **Monitoring behaviors by state:**
 

@@ -115,16 +115,16 @@ For more information, read the Bun API docs in `node_modules/bun-types/docs/**.m
 To compile itsybitsy into a standalone executable:
 
 ```sh
-bun build --compile --minify --sourcemap index.ts --outfile itsybitsy
+bun build --compile --minify --sourcemap index.ts --outfile ib
 ```
 
-This produces a single `itsybitsy` binary with no runtime dependencies. To install system-wide:
+This produces a single `ib` binary with no runtime dependencies. To install system-wide:
 
 ```sh
-sudo cp itsybitsy /usr/local/bin/itsybitsy
+sudo cp ib /usr/local/bin/ib
 ```
 
-The binary can then be used as `itsybitsy` instead of `bun index.ts`. Hook commands like `itsybitsy hooks main-path` reference this binary by name.
+The binary can then be used as `ib` instead of `bun index.ts`. Hook commands like `itsybitsy hooks main-path` reference the binary by its installed name.
 
 ## Code Quality Requirements
 

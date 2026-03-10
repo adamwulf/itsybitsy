@@ -344,6 +344,20 @@ async function main() {
       await printAndExit(await killAgent(agent));
       break;
     }
+    case "nuke": {
+      const repos = await listRepos();
+      const agent = await requireAgent(args[1], repos);
+      const { nukeAgent } = await import("./ib-commands");
+      await printAndExit(await nukeAgent(agent));
+      break;
+    }
+    case "merge-check": {
+      const repos = await listRepos();
+      const agent = await requireAgent(args[1], repos);
+      const { mergeCheckAgent } = await import("./ib-commands");
+      await printAndExit(await mergeCheckAgent(agent));
+      break;
+    }
     case "merge": {
       const repos = await listRepos();
       const agent = await requireAgent(args[1], repos);
@@ -439,7 +453,7 @@ async function main() {
     case "ack": {
       const questionId = args[1];
       if (!questionId) {
-        console.error("Usage: itsybitsy ack <question-id>");
+        console.error("Usage: itsybitsy acknowledge <question-id>");
         process.exit(1);
       }
       // Find which repo has this question
@@ -503,9 +517,55 @@ async function main() {
           await hookSessionStart();
           break;
         }
+        case "main-path": {
+          const agentId = process.env.IB_AGENT_ID;
+          if (!agentId) process.exit(0);
+          if (!isValidAgentId(agentId)) { console.error("Invalid agent ID"); process.exit(1); }
+          const { hookCheckPath } = await import("./hooks/agent-path");
+          await hookCheckPath(agentId);
+          break;
+        }
+        case "inject-status": {
+          const agentId = process.env.IB_AGENT_ID;
+          if (!agentId) process.exit(0);
+          if (!isValidAgentId(agentId)) { console.error("Invalid agent ID"); process.exit(1); }
+          const { hookStatus } = await import("./hooks/agent-status");
+          await hookStatus(agentId);
+          break;
+        }
+        case "install": {
+          const { installSafetyHooks } = await import("./ib-commands");
+          await printAndExit(await installSafetyHooks(process.cwd()));
+          break;
+        }
+        case "uninstall": {
+          const { uninstallSafetyHooks } = await import("./ib-commands");
+          await printAndExit(await uninstallSafetyHooks(process.cwd()));
+          break;
+        }
+        case "status": {
+          const { hooksStatus } = await import("./ib-commands");
+          await printAndExit(await hooksStatus(process.cwd()));
+          break;
+        }
+        case "intercept-install": {
+          const { installInterceptHook } = await import("./ib-commands");
+          await printAndExit(await installInterceptHook(process.cwd()));
+          break;
+        }
+        case "intercept-uninstall": {
+          const { uninstallInterceptHook } = await import("./ib-commands");
+          await printAndExit(await uninstallInterceptHook(process.cwd()));
+          break;
+        }
+        case "intercept-status": {
+          const { interceptHooksStatus } = await import("./ib-commands");
+          await printAndExit(await interceptHooksStatus(process.cwd()));
+          break;
+        }
         default:
           console.error(`Unknown hooks subcommand: ${subcommand}`);
-          console.error("Available: intercept-task, session-start");
+          console.error("Available: intercept-task, session-start, main-path, inject-status, install, uninstall, status, intercept-install, intercept-uninstall, intercept-status");
           process.exit(1);
       }
       break;
@@ -530,13 +590,23 @@ async function main() {
       console.log("Communication:");
       console.log("  send <id> <msg>     Send a message to an agent");
       console.log("  questions, q        Show pending agent questions");
-      console.log("  ack <question-id>   Acknowledge a pending question");
+      console.log("  acknowledge, ack <question-id>  Acknowledge a pending question");
       console.log("");
       console.log("Agent Lifecycle:");
       console.log("  new-agent, new      Spawn a new agent");
       console.log("  kill <id>           Stop an agent without merging");
+      console.log("  nuke <id>           Kill and archive an agent");
       console.log("  merge <id>          Merge agent's work and close it");
+      console.log("  merge-check <id>    Check if agent is ready to merge");
       console.log("  resume <id>         Resume a stopped agent");
+      console.log("");
+      console.log("Hooks:");
+      console.log("  hooks install       Install safety hooks");
+      console.log("  hooks uninstall     Uninstall safety hooks");
+      console.log("  hooks status        Show hook installation status");
+      console.log("  hooks intercept-install    Install intercept hook");
+      console.log("  hooks intercept-uninstall  Uninstall intercept hook");
+      console.log("  hooks intercept-status     Show intercept hook status");
       break;
     }
   }

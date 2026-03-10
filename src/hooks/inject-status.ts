@@ -17,11 +17,6 @@ export interface InjectStatusInput {
   cwd: string;
 }
 
-export interface InjectStatusResult {
-  action: "skip" | "inject";
-  statusText?: string;
-}
-
 // ── Pattern ──────────────────────────────────────────────────────────────────
 
 const AGENT_CWD_PATTERN = /\.ittybitty\/agents\/[^/]+\/repo(\/|$)/;

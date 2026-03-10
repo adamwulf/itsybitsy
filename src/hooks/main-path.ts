@@ -23,7 +23,7 @@ export interface MainPathResult {
 
 // ── Pattern ──────────────────────────────────────────────────────────────────
 
-const AGENT_WORKTREE_PATTERN = /\/.ittybitty\/agents\/[^/]+\/repo(\/|$)/;
+const AGENT_WORKTREE_PATTERN = /\.ittybitty\/agents\/[^/]+\/repo(\/|$)/;
 
 // ── Pure decision logic ──────────────────────────────────────────────────────
 
@@ -50,7 +50,6 @@ export function checkMainPath(input: MainPathInput): MainPathResult {
   let cdTarget = command.slice(3).trim();
 
   // Strip compound command suffixes: && || ; |
-  // Match the first occurrence of these operators (but not inside quotes)
   const compoundMatch = cdTarget.match(/^([^&|;]*?)(\s*&&|\s*\|\||\s*;\s*|\s*\|)/);
   if (compoundMatch) {
     cdTarget = compoundMatch[1]!.trim();
@@ -120,7 +119,7 @@ export async function hookMainPath(): Promise<void> {
         permissionDecisionReason: result.reason,
       },
     };
-    console.log(JSON.stringify(output));
+    process.stdout.write(JSON.stringify(output));
     process.exit(2);
   }
 

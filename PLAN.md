@@ -1111,6 +1111,48 @@ Phase 24 ──── final validation (depends on all)
 
 ---
 
+### Phase 26: Binary Distribution & Hook Wiring Fixes
+
+**Status:** In progress (agents running as of 2026-03-09)
+
+**Goal:** Make `ib` (the compiled bun binary) a complete drop-in replacement for the bash `ib` script. Discovered during initial binary testing that several hook subcommands were missing, making hooks non-functional in the binary.
+
+#### 26a: Compile to Binary (complete)
+- [x] `bun build --compile --minify --sourcemap index.ts --outfile ib` produces standalone binary
+- [x] Added `ib` and `index.js.map` to `.gitignore`
+- [x] Updated CLAUDE.md build instructions (outfile: `ib`, not `itsybitsy`)
+- [x] PATH set to project directory in `~/.bash_profile`
+
+#### 26b: Missing CLI Commands (agent-b403bd1f)
+The following commands existed in `ib-commands.ts` but were NOT wired as CLI cases in `index.ts`:
+- [ ] `ib hooks main-path` — PreToolUse path isolation hook (reads `IB_AGENT_ID` from env)
+- [ ] `ib hooks inject-status [--full] [--if-changed] [--visible]` — status injection hook (reads `IB_AGENT_ID` from env)
+- [ ] `ib hooks install` / `uninstall` / `status` — safety hook management
+- [ ] `ib hooks intercept-install` / `intercept-uninstall` / `intercept-status` — intercept hook management
+- [ ] `ib nuke <id>` — kill + archive agent
+- [ ] `ib merge-check <id>` — check for merge conflicts
+- [ ] `ib acknowledge` (rename from `ib ack` as primary)
+
+**Root cause of permission prompts:** When hooks fired `ib hooks main-path` against the bun binary, it exited 1 ("Unknown hooks subcommand"), causing Claude Code to fall back to prompting.
+
+**Key finding from bash ib audit:** `cmd_hooks_main_path` in bash ib does NOT use `IB_AGENT_ID` — it only blocks `cd` into `.ittybitty/agents/*/repo` paths. Our bun version is more comprehensive (full per-agent path isolation). For the `IB_AGENT_ID` undefined case (primary Claude session), bun version should exit 0 and allow default behavior.
+
+#### 26c: Global Hook Installation (agent-a0294830)
+- [ ] Change `installSafetyHooks`, `uninstallSafetyHooks`, `hooksStatus`, `installInterceptHook`, `uninstallInterceptHook`, `interceptHooksStatus` to write to `~/.claude/settings.json` instead of `<repoPath>/.claude/settings.local.json`
+- [ ] Add optional `settingsPath` parameter for test overrides
+- [ ] Hooks installed globally apply to all Claude sessions for the user
+
+#### 26d: Documentation & Messaging (agents -4abedf68, -a10d59a8, -7f7187de)
+- [ ] README.md: add build/install section, use `ib [command]` throughout
+- [ ] CLAUDE.md: fix all `bun index.ts` / `itsybitsy [command]` references to `ib [command]`
+- [ ] Fix remaining user/agent-facing messages that say `itsybitsy` when they should say `ib`
+
+#### 26e: Hook Detection Fixes (complete)
+- [x] `hooksStatus()` now requires `itsybitsy` prefix — `ib`-prefixed hooks no longer counted as installed
+- [x] Tests updated to reflect new behavior (ib-prefixed hooks → not-installed)
+
+---
+
 ### Phase 25 (future): Rename .ittybitty/ to .ittybitsy/
 
 **Status:** Aspirational — blocked on ib compatibility.

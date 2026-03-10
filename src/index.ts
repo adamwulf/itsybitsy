@@ -72,12 +72,91 @@ async function main() {
     }
     case "list":
     case "ls": {
+      const { readAllAgents, buildAgentTree, detectAgentStates } = await import("./agents");
       const repos = await listRepos();
       if (repos.length === 0) {
         console.log("No repos registered. Use 'ib add <path>' to add one.");
-      } else {
-        for (const r of repos) {
-          console.log(`  ${r.name}  →  ${r.path}`);
+        break;
+      }
+
+      // Filter by --manager flag if provided
+      const managerIdx = args.indexOf("--manager");
+      const managerFilter = managerIdx !== -1 ? args[managerIdx + 1] : null;
+
+      const { agents, errors } = await readAllAgents(repos);
+      for (const err of errors) {
+        console.error(`Warning: ${err.error}`);
+      }
+      await detectAgentStates(agents);
+      const roots = buildAgentTree(agents);
+
+      const { BOLD, DIM, RESET } = await import("./tui/colors");
+      const { displayState } = await import("./tui/agent-tree");
+      const { getStateColors } = await import("./tui/color-scheme");
+      const stateColors = getStateColors();
+
+      let isFirst = true;
+      for (const repo of repos) {
+        const name = repoDisplayName(repo);
+        // Find root agents for this repo
+        const repoRoots = roots.filter((a) => a.repoName === name && !a.archived);
+
+        if (!isFirst) console.log("");
+        isFirst = false;
+        console.log(`${BOLD}${name}${RESET}  ${DIM}→  ${repo.path}${RESET}`);
+
+        // Collect agents to display (flat list with indentation for children)
+        const agentsToShow: { agent: Agent; depth: number }[] = [];
+        function collect(agent: Agent, depth: number) {
+          if (agent.archived) return;
+          if (managerFilter) {
+            // Show only agents whose manager matches the filter
+            if (agent.meta.manager !== managerFilter && agent.id !== managerFilter) return;
+          }
+          agentsToShow.push({ agent, depth });
+          for (const child of agent.children) {
+            collect(child, depth + 1);
+          }
+        }
+        for (const root of repoRoots) {
+          if (managerFilter) {
+            // When filtering by manager, show direct children of the manager
+            if (root.id === managerFilter) {
+              // Show children of this manager
+              for (const child of root.children) {
+                collect(child, 1);
+              }
+            } else {
+              // Walk tree looking for the manager
+              function findManager(agent: Agent): void {
+                if (agent.id === managerFilter) {
+                  for (const child of agent.children) {
+                    collect(child, 1);
+                  }
+                } else {
+                  for (const child of agent.children) {
+                    findManager(child);
+                  }
+                }
+              }
+              findManager(root);
+            }
+          } else {
+            collect(root, 1);
+          }
+        }
+
+        if (agentsToShow.length === 0) {
+          console.log(`  ${DIM}(no agents)${RESET}`);
+        } else {
+          for (const { agent, depth } of agentsToShow) {
+            const indent = "  ".repeat(depth);
+            const icon = agent.meta.worker ? "⚙" : "◆";
+            const state = displayState(agent.state);
+            const colorCode = stateColors[state] ?? DIM;
+            const orphanMark = agent.orphaned ? "⚠ " : "";
+            console.log(`${indent}${orphanMark}${icon} ${agent.id}  ${colorCode}${state}${RESET}  ${agent.age}  ${DIM}${agent.meta.model}${RESET}`);
+          }
         }
       }
       break;
@@ -583,7 +662,7 @@ async function main() {
       console.log("Registry:");
       console.log("  add [path]          Register a repo (default: cwd)");
       console.log("  remove <path>       Unregister a repo");
-      console.log("  list, ls            List registered repos");
+      console.log("  list, ls            List repos and their agents (--manager <id> to filter)");
       console.log("");
       console.log("Monitoring:");
       console.log("  watch               Launch TUI dashboard");

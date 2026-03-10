@@ -88,10 +88,8 @@ State detection follows this flow:
    | 2 | Last 5 lines | "Compacting conversation" | `compacting` |
    | 3 | Last 5 lines | `(Esc to interrupt`, `(ctrl+c to interrupt`, `⎿  Running` | `running` |
    | 4 | Last 15 lines | `⎿  Waiting` (tool waiting) | `waiting` |
-
-   > **Note**: The bash reference implementation checks tool waiting (priority 4) before active running (priority 3). The TypeScript reimplementation intentionally reverses this order so that active execution indicators in very recent output (last 5 lines) take precedence over tool waiting in the broader window (last 15 lines). Both orderings are valid; implementers should document which they choose.
    | 5 | Last 15 lines | `rate_limit_error` or usage limit phrases (case-insensitive) | `rate_limited` |
-   | 6 | Last 15 lines | Unquoted `I HAVE COMPLETED THE GOAL` | `complete` |
+   | 6 | Last 15 lines | `I HAVE COMPLETED THE GOAL` (excluding single-quoted instances) | `complete` |
    | 7 | Last 15 lines | Standalone `WAITING` on its own line (unless ⏺ appears after it = stale) | `waiting` |
    | 8 | Last 15 lines | `ctrl+b ctrl+b` or `thinking)` | `running` |
    | 9 | Last 15 lines | Thinking spinners (✽✶✢·✻✳) at line start (excluding hook spinners, completion timers) | `running` |
@@ -100,6 +98,8 @@ State detection follows this flow:
    | 12 | Last 15 lines | Background tasks pattern (`⏵⏵.*·\s\d+\s`) | `running` |
    | 13 | Last 15 lines | "running stop hook" without ⏺ (race condition) | `creating` |
    | 14 | — | No patterns matched | `unknown` |
+
+   **Priority 3/4 ordering note**: The bash reference implementation checks tool waiting (priority 4) before active running (priority 3). The TypeScript reimplementation intentionally reverses this order so that active execution indicators in very recent output (last 5 lines) take precedence over tool waiting in the broader window (last 15 lines). Both orderings are valid; implementers should document which they choose.
 
    **Hook spinner filtering**: Lines beginning with a spinner character (✽✶✢·✻✳) that also contain the word "hook" are excluded before spinner checks.
 

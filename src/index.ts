@@ -369,6 +369,13 @@ async function main() {
       await printAndExit(await mergeAgent(agent));
       break;
     }
+    case "merge-check": {
+      const repos = await listRepos();
+      const agent = await requireAgent(args[1], repos);
+      const { mergeCheckAgent } = await import("./ib-commands");
+      await printAndExit(await mergeCheckAgent(agent));
+      break;
+    }
     case "resume": {
       const repos = await listRepos();
       const agent = await requireAgent(args[1], repos);
@@ -590,7 +597,7 @@ async function main() {
       console.log("Communication:");
       console.log("  send <id> <msg>     Send a message to an agent");
       console.log("  questions, q        Show pending agent questions");
-      console.log("  acknowledge, ack <question-id>  Acknowledge a pending question");
+      console.log("  acknowledge <qid>   Acknowledge a pending question (alias: ack)");
       console.log("");
       console.log("Agent Lifecycle:");
       console.log("  new-agent, new      Spawn a new agent");

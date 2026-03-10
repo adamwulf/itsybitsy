@@ -617,12 +617,18 @@ Agent IDs can be specified as partial strings. Resolution:
 2. **Substring match** — scan all agent directories and tmux sessions for the pattern
 3. If 0 matches → error. If 1 match → use it. If 2+ matches → error listing all matches.
 
+> [^callout] TS `resolveAgentId()` only checks agent directories for both exact and substring matches (no tmux session scanning). It returns `null` for 0 or 2+ matches instead of listing ambiguous matches.
+
 ### 8.2 Agent Logging
 
 All agent events are logged to `<agent-dir>/agent.log` with format:
 ```
 [YYYY-MM-DD HH:MM:SS] message
 ```
+
+In bash, `log_agent()` also echoes the message to stdout unless called with `--quiet`. The TS `logAgent()` only writes to the file (no stdout echo).
+
+> [^callout] TS `logAgent()` is write-only — no stdout echo. Callers that need visible output handle it separately.
 
 ### 8.3 Orphan Detection and Cleanup
 
@@ -635,7 +641,9 @@ After kills/nukes, the system scans for orphaned Claude processes:
 
 ### 8.4 Auto-Compact
 
-Reads Claude transcript JSONL files to determine context window usage percentage. When an agent exceeds the configured threshold (`autoCompactThreshold`), sends `/compact` to the agent's tmux session.
+Reads Claude transcript JSONL files to determine context window usage percentage. When an agent exceeds the configured threshold (`autoCompactThreshold`), sends `/compact` to the agent's tmux session. In bash, `/compact` is sent in any state except `compacting` (and only if not already sent). A `compactSent` flag prevents duplicate sends; the flag resets when the agent transitions out of `compacting` state.
+
+> [^callout] TS restricts auto-compact sends to `running` or `waiting` states only (stricter than bash). TS resets the `compactSent` flag when usage drops below the threshold rather than on state transition out of `compacting`. TS also has a 60-second per-agent cooldown between usage checks (`COMPACT_CHECK_COOLDOWN_MS`); bash checks on every 5-second watchdog poll.
 
 ### 8.5 Watchdog
 
@@ -646,17 +654,19 @@ Reads Claude transcript JSONL files to determine context window usage percentage
 | State | Action |
 |-------|--------|
 | `waiting` | Increment waiting counter. When counter reaches the notification threshold, notify manager: "[watchdog]: Your subtask <id> recently started waiting for input". Uses exponential backoff: initial threshold 30s (6 polls), doubles after each notification, capped at 64 minutes. |
-| `complete` | Notify manager once: "[watchdog]: Your subtask <id> recently completed". Sets a flag to prevent duplicate notifications. Flag resets if agent returns to `running`. |
+| `complete` | Reset waiting counter and notification interval. Notify manager once: "[watchdog]: Your subtask <id> recently completed". Sets a flag to prevent duplicate notifications. Flag resets if agent returns to `running`. |
 | `unknown` | Treat like `waiting` — increment counter with same exponential backoff. Also saves a debug capture of tmux output to `debug-logs/watchdog-<epoch>-unknown.txt`. |
-| `rate_limited` | Attempt to bypass the rate limit dialog. Then poll Claude's usage API; when session usage drops below 5%, send nudge: "[watchdog]: Usage has refreshed (<pct>%). Please continue your task." |
+| `rate_limited` | Attempt to bypass the rate limit dialog (bash uses a 3-attempt retry loop with 2s sleeps between attempts; checks `parse_state` after each Enter). Then poll Claude's usage API; when session usage drops below 5%, send nudge: "[watchdog]: Usage has refreshed (<pct>%). Please continue your task." Reset waiting counter and notification interval. |
 | `running` | Reset waiting counter and notification interval. Clear completion flag if previously set. |
 | `creating` | Treat as running — reset counters. |
-| `compacting` | No action — wait for completion. |
-| `stopped` | Reset counters. |
+| `compacting` | Reset waiting counter and notification interval. Wait for completion. |
+| `stopped` | Reset waiting counter and notification interval. |
 
 **Auto-compact**: If `autoCompactThreshold` is configured, the watchdog also checks the agent's context window usage on each poll. When usage exceeds the threshold and the agent is not currently compacting, sends `/compact` to the agent's tmux session. The compact flag resets when compacting completes.
 
 **Quiet mode** (`--quiet`): Allows monitoring agents without managers. All notifications are logged but not sent.
+
+> [^callout] The TS watchdog is a single global loop that monitors ALL agents across all repos simultaneously (using an `AgentProvider`), rather than bash's per-agent `ib watchdog <id>` process. It uses a PID lock file at `~/.itsybitsy/watchdog.lock` for single-instance enforcement. TS has no `--quiet` mode; agents without managers simply receive no notifications (the `notifyManager` helper no-ops when `meta.manager` is unset).
 
 ### 8.6 Root Repo Resolution
 
@@ -665,3 +675,45 @@ When running from a worktree, the root repository is found via:
 1. `git rev-parse --git-common-dir` to find the shared `.git` directory
 2. If the result is `.git` or matches `--git-dir`, we're in the main repo → use `--show-toplevel`
 3. Otherwise, go up one directory from the common dir to find the root
+
+### 8.7 Reassign Command
+
+`ib reassign <agent-id> <new-parent-id>` or `ib reassign <agent-id> --none`
+
+Reassigns an agent to a different parent manager (or makes it a root manager with `--none`).
+
+**Validation:**
+
+1. Resolve both agent ID and new parent ID (partial ID resolution)
+2. Agent must exist
+3. Cannot reassign an agent to itself
+4. New parent must exist (unless `--none`)
+5. New parent cannot be a worker
+6. New parent cannot be a descendant of the agent (circular dependency check)
+7. No-op if agent already has the requested parent
+
+**On success:**
+
+1. Update `meta.json` — set `manager` to the new parent ID (or `null` for `--none`)
+2. Log the change to the agent's `agent.log`
+3. Notify the old parent: `"[watchdog for <id>]: Agent reassigned to manager '<new>'"`
+4. Notify the new parent: `"[watchdog for <id>]: Agent reassigned to you (was under <old>)"`
+5. Notify the agent itself: `"[watchdog]: You've been reassigned from <old> to <new>"`
+
+Notifications are sent via `ib send` (bash) / `sendMessage` (TS) and suppressed if the target agent doesn't exist or isn't running.
+
+### 8.8 Post-Create-Agent Hook
+
+After agent creation, the system runs `.ittybitty/hooks/post-create-agent` if it exists and is executable. The hook runs **in the background** (fire-and-forget) so it does not block agent creation. Its stdout/stderr is appended to the agent's `agent.log`.
+
+**Environment variables provided to the hook:**
+
+| Variable | Description |
+|----------|-------------|
+| `IB_AGENT_ID` | The new agent's ID |
+| `IB_AGENT_TYPE` | `"worker"` or `"manager"` |
+| `IB_AGENT_DIR` | Path to the agent's directory |
+| `IB_AGENT_BRANCH` | Git branch name (e.g., `agent/<id>`) |
+| `IB_AGENT_MANAGER` | Manager agent ID (empty if root) |
+| `IB_AGENT_PROMPT` | The prompt given to the agent |
+| `IB_AGENT_MODEL` | The model specified for the agent |

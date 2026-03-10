@@ -12,32 +12,80 @@ import { isValidAgentId } from "./validation";
 const args = process.argv.slice(2);
 const command = args[0];
 
+/**
+ * Collect non-archived agents for display, optionally filtered by manager.
+ * Recursively walks children, pushing { agent, depth } into the result array.
+ */
+export function collectAgents(
+  agent: Agent,
+  depth: number,
+  managerFilter: string | null,
+  result: { agent: Agent; depth: number }[],
+): void {
+  if (agent.archived) return;
+  if (managerFilter) {
+    if (agent.meta.manager !== managerFilter && agent.id !== managerFilter) return;
+  }
+  result.push({ agent, depth });
+  for (const child of agent.children) {
+    collectAgents(child, depth + 1, managerFilter, result);
+  }
+}
+
+/**
+ * Recursively search for a manager by ID in the agent tree.
+ * When found, collects that manager's children using collectAgents.
+ */
+export function findManagerInTree(
+  agent: Agent,
+  managerId: string,
+  result: { agent: Agent; depth: number }[],
+): void {
+  if (agent.id === managerId) {
+    for (const child of agent.children) {
+      collectAgents(child, 1, null, result);
+    }
+  } else {
+    for (const child of agent.children) {
+      findManagerInTree(child, managerId, result);
+    }
+  }
+}
+
+/**
+ * Match an agent by ID from a pre-loaded list. Exact match first, then prefix.
+ * Returns { match, ambiguous } — ambiguous is set when multiple prefix matches exist.
+ */
+export function matchAgentById(id: string, agents: Agent[]): { match: Agent | null; ambiguous: string[] } {
+  const exact = agents.find((a) => a.id === id);
+  if (exact) return { match: exact, ambiguous: [] };
+  const matches = agents.filter((a) => a.id.startsWith(id));
+  if (matches.length === 1) return { match: matches[0]!, ambiguous: [] };
+  if (matches.length > 1) return { match: null, ambiguous: matches.map((a) => a.id) };
+  return { match: null, ambiguous: [] };
+}
+
 /** Find an agent by ID (prefix match) across all registered repos. */
-async function findAgentById(id: string, repos: RepoEntry[]): Promise<Agent | null> {
+export async function findAgentById(id: string, repos: RepoEntry[]): Promise<Agent | null> {
   const { readAllAgents } = await import("./agents");
   const { agents } = await readAllAgents(repos);
-  // Exact match first
-  const exact = agents.find((a) => a.id === id);
-  if (exact) return exact;
-  // Prefix match
-  const matches = agents.filter((a) => a.id.startsWith(id));
-  if (matches.length === 1) return matches[0]!;
-  if (matches.length > 1) {
-    console.error(`Ambiguous ID "${id}" matches: ${matches.map((a) => a.id).join(", ")}`);
+  const { match, ambiguous } = matchAgentById(id, agents);
+  if (ambiguous.length > 0) {
+    console.error(`Ambiguous ID "${id}" matches: ${ambiguous.join(", ")}`);
     process.exit(1);
   }
-  return null;
+  return match;
 }
 
 /** Print an IbCommandResult and exit. */
-async function printAndExit(result: { ok: boolean; exitCode: number; stdout: string; stderr: string }): Promise<never> {
+export async function printAndExit(result: { ok: boolean; exitCode: number; stdout: string; stderr: string }): Promise<never> {
   if (result.stdout) console.log(result.stdout);
   if (result.stderr) console.error(result.stderr);
   process.exit(result.exitCode);
 }
 
 /** Require an agent ID argument, find it, or exit with error. */
-async function requireAgent(idArg: string | undefined, repos: RepoEntry[]): Promise<Agent> {
+export async function requireAgent(idArg: string | undefined, repos: RepoEntry[]): Promise<Agent> {
   if (!idArg) {
     console.error("Usage: ib <command> <agent-id>");
     process.exit(1);
@@ -107,42 +155,18 @@ async function main() {
 
         // Collect agents to display (flat list with indentation for children)
         const agentsToShow: { agent: Agent; depth: number }[] = [];
-        function collect(agent: Agent, depth: number) {
-          if (agent.archived) return;
-          if (managerFilter) {
-            // Show only agents whose manager matches the filter
-            if (agent.meta.manager !== managerFilter && agent.id !== managerFilter) return;
-          }
-          agentsToShow.push({ agent, depth });
-          for (const child of agent.children) {
-            collect(child, depth + 1);
-          }
-        }
         for (const root of repoRoots) {
           if (managerFilter) {
             // When filtering by manager, show direct children of the manager
             if (root.id === managerFilter) {
-              // Show children of this manager
               for (const child of root.children) {
-                collect(child, 1);
+                collectAgents(child, 1, null, agentsToShow);
               }
             } else {
-              // Walk tree looking for the manager
-              function findManager(agent: Agent): void {
-                if (agent.id === managerFilter) {
-                  for (const child of agent.children) {
-                    collect(child, 1);
-                  }
-                } else {
-                  for (const child of agent.children) {
-                    findManager(child);
-                  }
-                }
-              }
-              findManager(root);
+              findManagerInTree(root, managerFilter, agentsToShow);
             }
           } else {
-            collect(root, 0);
+            collectAgents(root, 0, null, agentsToShow);
           }
         }
 

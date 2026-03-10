@@ -4,7 +4,7 @@
  * All commands are implemented natively — no ib CLI dependency.
  */
 
-import { join } from "path";
+import { join, dirname } from "path";
 import { readdir, chmod, rm, mkdir } from "fs/promises";
 import { homedir } from "node:os";
 import type { Agent } from "./agents";
@@ -2047,8 +2047,7 @@ async function readSettingsJson(settingsPath?: string): Promise<Record<string, u
 /** Write settings JSON back to the given path (or global default) */
 async function writeSettingsJson(settings: Record<string, unknown>, settingsPath?: string): Promise<void> {
   const p = settingsPath ?? defaultSettingsPath();
-  const dir = join(p, "..");
-  await mkdir(dir, { recursive: true });
+  await mkdir(dirname(p), { recursive: true });
   await Bun.write(p, JSON.stringify(settings, null, 2) + "\n");
 }
 

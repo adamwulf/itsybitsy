@@ -1,5 +1,5 @@
 import { test, expect, beforeEach, afterEach, describe } from "bun:test";
-import { readConfig, writeConfig, CONFIG_KEYS } from "./config";
+import { readConfig, writeConfig, CONFIG_KEYS, validateConfigValue } from "./config";
 import { join } from "path";
 import { mkdtemp, rm } from "fs/promises";
 import { tmpdir } from "os";
@@ -159,6 +159,105 @@ describe("writeConfig", () => {
 
     const data = await Bun.file(filePath).json();
     expect(data.permissions.manager.allow).toEqual(["Edit", "Read"]);
+  });
+});
+
+describe("validateConfigValue", () => {
+  test("validates number type", () => {
+    expect(validateConfigValue(10, "number")).toBe(true);
+    expect(validateConfigValue(0, "number")).toBe(true);
+    expect(validateConfigValue("ten", "number")).toBe(false);
+    expect(validateConfigValue(NaN, "number")).toBe(false);
+    expect(validateConfigValue(true, "number")).toBe(false);
+  });
+
+  test("validates boolean type", () => {
+    expect(validateConfigValue(true, "boolean")).toBe(true);
+    expect(validateConfigValue(false, "boolean")).toBe(true);
+    expect(validateConfigValue("yes", "boolean")).toBe(false);
+    expect(validateConfigValue(1, "boolean")).toBe(false);
+  });
+
+  test("validates string type", () => {
+    expect(validateConfigValue("opus", "string")).toBe(true);
+    expect(validateConfigValue("", "string")).toBe(true);
+    expect(validateConfigValue(123, "string")).toBe(false);
+    expect(validateConfigValue(null, "string")).toBe(false);
+  });
+
+  test("validates string[] type", () => {
+    expect(validateConfigValue(["Edit", "Read"], "string[]")).toBe(true);
+    expect(validateConfigValue([], "string[]")).toBe(true);
+    expect(validateConfigValue("not-an-array", "string[]")).toBe(false);
+    expect(validateConfigValue([1, 2], "string[]")).toBe(false);
+    expect(validateConfigValue(["ok", 3], "string[]")).toBe(false);
+  });
+});
+
+describe("config type validation in readConfig", () => {
+  test("maxAgents: string falls back to default", async () => {
+    const projectPath = join(tmpDir, ".ittybitty.json");
+    await Bun.write(projectPath, JSON.stringify({ maxAgents: "ten" }));
+
+    const result = await readConfig(tmpDir, opts());
+    expect(result["maxAgents"]).toEqual({ value: 10, source: "default" });
+  });
+
+  test("model: number falls back to default", async () => {
+    const projectPath = join(tmpDir, ".ittybitty.json");
+    await Bun.write(projectPath, JSON.stringify({ model: 123 }));
+
+    const result = await readConfig(tmpDir, opts());
+    expect(result["model"]).toEqual({ value: "sonnet", source: "default" });
+  });
+
+  test("createPullRequests: string falls back to default", async () => {
+    const projectPath = join(tmpDir, ".ittybitty.json");
+    await Bun.write(projectPath, JSON.stringify({ createPullRequests: "yes" }));
+
+    const result = await readConfig(tmpDir, opts());
+    expect(result["createPullRequests"]).toEqual({ value: false, source: "default" });
+  });
+
+  test("permissions.manager.allow: string falls back to default", async () => {
+    const projectPath = join(tmpDir, ".ittybitty.json");
+    await Bun.write(
+      projectPath,
+      JSON.stringify({ permissions: { manager: { allow: "not-an-array" } } })
+    );
+
+    const result = await readConfig(tmpDir, opts());
+    expect(result["permissions.manager.allow"]).toEqual({ value: [], source: "default" });
+  });
+
+  test("correctly typed values still work", async () => {
+    const projectPath = join(tmpDir, ".ittybitty.json");
+    await Bun.write(
+      projectPath,
+      JSON.stringify({ maxAgents: 5, model: "opus", createPullRequests: true })
+    );
+
+    const result = await readConfig(tmpDir, opts());
+    expect(result["maxAgents"]).toEqual({ value: 5, source: "project" });
+    expect(result["model"]).toEqual({ value: "opus", source: "project" });
+    expect(result["createPullRequests"]).toEqual({ value: true, source: "project" });
+  });
+
+  test("user config values with wrong types fall through to default", async () => {
+    await Bun.write(userCfgPath, JSON.stringify({ maxAgents: "eight", model: 999 }));
+
+    const result = await readConfig(tmpDir, opts());
+    expect(result["maxAgents"]).toEqual({ value: 10, source: "default" });
+    expect(result["model"]).toEqual({ value: "sonnet", source: "default" });
+  });
+
+  test("wrong-typed project value falls through to valid user value", async () => {
+    const projectPath = join(tmpDir, ".ittybitty.json");
+    await Bun.write(projectPath, JSON.stringify({ maxAgents: "bad" }));
+    await Bun.write(userCfgPath, JSON.stringify({ maxAgents: 7 }));
+
+    const result = await readConfig(tmpDir, opts());
+    expect(result["maxAgents"]).toEqual({ value: 7, source: "user" });
   });
 });
 

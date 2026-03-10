@@ -56,6 +56,19 @@ function setNestedValue(obj: Record<string, unknown>, dotKey: string, value: unk
   current[parts[parts.length - 1]!] = value;
 }
 
+export function validateConfigValue(value: unknown, type: ConfigType): boolean {
+  switch (type) {
+    case "number":
+      return typeof value === "number" && !isNaN(value);
+    case "boolean":
+      return typeof value === "boolean";
+    case "string":
+      return typeof value === "string";
+    case "string[]":
+      return Array.isArray(value) && value.every((v: unknown) => typeof v === "string");
+  }
+}
+
 async function readJsonFile(filePath: string): Promise<Record<string, unknown>> {
   try {
     const file = Bun.file(filePath);
@@ -87,13 +100,13 @@ export async function readConfig(repoPath: string, options?: ReadConfigOptions):
 
   for (const def of CONFIG_KEYS) {
     const projectVal = getNestedValue(projectData, def.key);
-    if (projectVal !== undefined) {
+    if (projectVal !== undefined && validateConfigValue(projectVal, def.type)) {
       result[def.key] = { value: projectVal, source: "project" };
       continue;
     }
 
     const userVal = getNestedValue(userData, def.key);
-    if (userVal !== undefined) {
+    if (userVal !== undefined && validateConfigValue(userVal, def.type)) {
       result[def.key] = { value: userVal, source: "user" };
       continue;
     }

@@ -2,6 +2,11 @@
 
 This document is the definitive behavioral specification for itsybitsy, a multi-agent orchestration system for Claude Code. It uses tmux sessions, git worktrees, and a hook system to manage isolated, concurrent Claude agents.
 
+**Annotations used in this document:**
+
+- **[^callout]** — Marks an intentional divergence between the bash reference implementation and the TypeScript reimplementation. The description explains what differs and why.
+- **[^needs review]** — Marks a claim that could not be fully verified against the source, or where the correct behavior is ambiguous and needs a decision.
+
 ---
 
 ## 1. Agent Lifecycle
@@ -78,13 +83,13 @@ State detection follows this flow:
 
 2. **Missing tmux session** → `stopped`.
 
-3. **Pre-parseState check**: If the tmux output has fewer than 10 non-empty lines AND no startup markers (`"Claude Code v"`, `"[USER TASK]"`, `"╭─ Claude Code"`, `"[AGENT CONTEXT]"`), the state is `creating`. This handles the early startup case before enough output exists for pattern matching. Priority 1 below handles the case where there ARE enough lines but startup markers are still absent (e.g., a workspace trust prompt is showing on a fresh screen).
+3. **Pre-parseState check**: If the tmux output has fewer than 10 lines AND no startup markers (`"Claude Code v"`, `"[USER TASK]"`, `"╭─ Claude Code"`, `"[AGENT CONTEXT]"`), the state is `creating`. This handles the early startup case before enough output exists for pattern matching. Priority 1 below handles the case where there ARE enough lines but startup markers are still absent (e.g., a workspace trust prompt is showing on a fresh screen). [^callout]: The bash reference counts total lines (newlines + 1). The TypeScript reimplementation counts non-empty lines (`line.trim() !== ""`), which is stricter — blank lines from tmux padding are excluded.
 
 4. **parseState priority order** (checked top-to-bottom, first match wins):
 
    | Priority | Window | Pattern | State |
    |----------|--------|---------|-------|
-   | 1 | Full input | Workspace trust/import prompts ("Do you trust the files", "trust this folder", "Allow external CLAUDE.md") present AND no startup markers found anywhere in output | `creating` |
+   | 1 | Full input | Workspace trust/import prompts ("Do you trust the files", "trust this folder", "Allow external CLAUDE.md") present AND no startup markers found anywhere in output | `creating` | [^callout]: The bash `parse_state()` only checks 2 startup markers here: `"Claude Code v"` and `"[USER TASK]"`. The other 2 (`"╭─ Claude Code"`, `"[AGENT CONTEXT]"`) are checked in the pre-parseState logic (`get_state()`/`compute_state_from_content()`) but not inside `parse_state()` itself. The TypeScript `parseState()` checks all 4 via the shared `STARTUP_MARKERS` constant.
    | 2 | Last 5 lines | "Compacting conversation" | `compacting` |
    | 3 | Last 5 lines | `(Esc to interrupt`, `(ctrl+c to interrupt`, `⎿  Running` | `running` |
    | 4 | Last 15 lines | `⎿  Waiting` (tool waiting) | `waiting` |
@@ -129,7 +134,7 @@ Kill (`ib kill <id>`) permanently destroys an agent:
 Pause (`ib pause <id>`) stops the agent but preserves all state:
 
 1. Kill the Claude process (SIGTERM → SIGKILL)
-2. Kill the tmux session
+2. Kill the tmux session (the watchdog will self-exit when it detects the tmux session is gone — see §8.5)
 3. Agent directory, meta.json, worktree, branch, and logs are all preserved
 4. The agent can be resumed with `ib resume <id>`
 
@@ -143,7 +148,7 @@ Resume (`ib resume <id>`) restarts a stopped agent:
 4. Start new tmux session running `resume.sh`
 5. Auto-accept workspace trust (if not yolo)
 6. Send resume nudge message: "Resume your work, or end with 'WAITING' or 'I HAVE COMPLETED THE GOAL' as your final line."
-7. Auto-spawn watchdog
+7. **Auto-spawn watchdog**: If the agent has a manager, `ib watchdog <id>` is spawned in the background. [^callout] The bash `cmd_resume()` does not currently do this (bug — the watchdog from `cmd_new_agent()` is lost after pause/resume). The TypeScript implementation should include this step.
 
 ### 1.7 Archiving
 
@@ -162,12 +167,12 @@ Archive moves agent artifacts to `.ittybitty/archive/<YYYYMMDD-HHMMSS>-<agent-id
 Nuke (`ib nuke <id>`) recursively kills a manager and all its descendants:
 
 1. Collect all descendant agent IDs via depth-first traversal of manager relationships
-2. Worker agents cannot be nuked (use `kill` instead) — only managers with descendants are nuke targets
+2. Worker agents with no descendants cannot be nuked (use `kill` instead) — but workers that have spawned sub-agents can be nuked
 3. For each descendant: remove questions, teardown (same sequence as kill)
 4. Clean up orphaned tmux sessions (sessions with `ittybitty-` prefix that don't match any remaining agent)
 5. Scan and kill orphaned Claude processes
 
-Nuke-all (`ib nuke --force`) kills all agents in the repository.
+Nuke-all (`ib nuke` with no agent ID) kills all agents in the repository. The `--force` flag skips confirmation but does not change what gets nuked.
 
 ---
 
@@ -181,19 +186,19 @@ The `--worker` flag at creation time determines the agent's role:
 |----------|---------|--------|
 | `meta.json` `worker` field | `false` | `true` |
 | Can spawn sub-agents | Yes (via `ib new-agent --worker`) | No |
-| Can use Task tool | Intercepted → spawns ib agents | Blocked by path hook |
+| Can use Task tool | Intercepted → spawns ib agents | Native Task allowed (intercept hook skips workers) |
 | Can ask user questions | Only if top-level (no manager) | No |
 | Permissions source | `permissions.manager.allow/deny` | `permissions.worker.allow/deny` |
 | Session-start instructions | Manager template (with sub-agent commands) | Worker template (with send/diff/status only) |
 | TaskCreate | Blocked with "Use ib new-agent --worker" message | Blocked with "Workers cannot create tasks" message |
 
-### 2.2 Manager Permissions
+### 2.2 Agent Permissions
 
 When building `settings.local.json` for an agent, permissions come from three sources, merged and deduplicated:
 
 1. **Existing base settings**: From the root repo's `.claude/settings.local.json`
 2. **Mandatory permissions** (always added for all agents):
-   - `Bash(ib:*)`, `Bash(./ib:*)` — ib commands (both forms to handle PATH vs relative invocation)
+   - `Bash(ib:*)`, `Bash(./ib:*)` — ib commands (both forms to handle PATH vs relative invocation) [^callout]: The TS implementation only includes `Bash(ib:*)`. The `Bash(./ib:*)` form is bash-only, since the TS `ib` binary is always expected to be on PATH.
    - `Bash(git status:*)`, `Bash(git add:*)`, `Bash(git commit:*)`, `Bash(git diff:*)`, `Bash(git show:*)`, `Bash(git log:*)`, `Bash(git ls-files:*)`, `Bash(git grep:*)`, `Bash(git rm:*)`, `Bash(git merge:*)`, `Bash(git rebase:*)`, `Bash(git checkout:*)`, `Bash(git restore:*)`, `Bash(git reset:*)` — git operations
    - `Bash(pwd:*)`, `Bash(ls:*)`, `Bash(head:*)`, `Bash(tail:*)`, `Bash(cat:*)`, `Bash(grep:*)` — filesystem inspection
    - `Read`, `Write`, `Edit`, `MultiEdit`, `Glob`, `Grep`, `LS`, `TodoWrite`, `Task`, `TaskOutput`, `KillShell`, `NotebookEdit`, `WebFetch`, `WebSearch`, `AskUserQuestion` — Claude Code tools
@@ -226,17 +231,18 @@ If either check matches, the caller is considered an agent.
 
 Before merging, the following are verified:
 
-1. Agent directory exists with `meta.json`
+1. Agent directory exists (bash checks directory only; TS also verifies `meta.json` exists)
 2. Agent has a worktree directory (`<agent-dir>/repo`)
 3. Caller is not inside the agent's own worktree
 4. Agent worktree has no uncommitted changes
-5. Current directory (caller's repo) has no uncommitted changes
+5. Target branch detection (see §3.3)
 6. Agent branch (`agent/<id>`) exists
-7. Pre-rebase conflict check passes (creates a temp branch/worktree, attempts rebase, cleans up)
+7. Current directory (caller's CWD) has no uncommitted changes
+8. Pre-rebase conflict check passes (creates a temp branch/worktree, attempts rebase, cleans up)
 
 ### 3.3 Target Branch Detection
 
-The target branch is determined from the caller's context:
+The target branch is determined from the caller's context (unless overridden with `--into BRANCH` in bash):
 
 1. `git branch --show-current` — the caller's current branch
 2. Fallback to `main` if it exists
@@ -245,10 +251,12 @@ The target branch is determined from the caller's context:
 
 **Critical**: The target is the current branch in the CWD, not necessarily `main`. When a manager merges a worker, the target is the manager's branch (`agent/<manager-id>`).
 
+The TS `mergeAgent` always uses auto-detection (no `--into` equivalent) since it runs from the dashboard where CWD context is sufficient.
+
 ### 3.4 Merge Execution
 
 1. **Rebase**: `git -C <worktree-path> rebase <target-branch>` — rebase the agent's branch onto the target in the agent's worktree
-2. **Checkout**: `git -C <repo-path> checkout <target-branch>` — switch to target branch in the caller's repo
+2. **Checkout**: `git checkout <target-branch>` — switch to target branch in the caller's CWD (no `-C`; when a manager merges, CWD is the manager's worktree, not the root repo)
 3. **Merge** (strategy depends on caller):
    - **Agent caller (manager merging sub-agent)**: `git merge --ff-only <agent-branch>` — fast-forward only
    - **User caller (top-level merge)**: `git merge --no-ff <agent-branch> -m "Merge agent <id> work"` — always creates a merge commit
@@ -260,13 +268,15 @@ After successful merge:
 1. Capture tmux output to `output.log`
 2. Kill Claude process
 3. Kill tmux session
-4. Copy `settings.local.json` from worktree to agent dir
+4. Copy `settings.local.json` from worktree to agent dir [^callout: bash `do_merge` does NOT do this step — it only exists in `teardown_agent` (kill/nuke path). The TS `mergeAgent` added this to preserve hook/permission config in archives.]
 5. Remove git worktree
 6. Delete git branch
 7. Archive artifacts
 8. Remove questions for this agent
 9. Remove agent directory
 10. Scan for orphaned Claude processes
+
+**Note on `mergeCheckAgent`**: The TS implementation hardcodes `"main"` as the target branch for conflict checks and commit counting, rather than using the dynamic detection (current branch → main → master) that bash `cmd_merge_check` uses. [^callout: intentional simplification in TS — the dashboard always runs merge-check from the root repo context where `main` is the expected target.]
 
 ---
 
@@ -278,21 +288,23 @@ After successful merge:
 
 1. **Resolve target**: Partial ID matching is supported (prefix/substring match against agent directories and tmux sessions). Must resolve to exactly one agent.
 2. **Verify running**: The target's tmux session must exist.
-3. **Auto-detect sender**: If called from within an agent worktree, the sender's agent ID is read from `meta.json`.
+3. **Auto-detect sender**: If called from within an agent worktree, the sender's agent ID is read from `meta.json`. An explicit `--from <sender-id>` flag can also be passed to override auto-detection.
 4. **Format message**: If a sender is detected, the message is prefixed: `[sent by agent <sender-id>]: <message>`
-5. **Send via tmux**: `tmux send-keys -t <session> -l "<message>"` (literal flag prevents key interpretation), then after a calculated delay, `tmux send-keys -t <session> Enter` separately.
-6. **Delay calculation**: `0.1 + (message_length / 100) * 0.5` seconds, clamped to [0.2, 3.0]. Longer messages need more time for the paste to complete in tmux.
-7. **Logging**: Both sender and recipient get entries in their `agent.log`.
+5. **Send via tmux**: `tmux send-keys -t <session> "<message>"` (no `-l` literal flag), then after a calculated delay, `tmux send-keys -t <session> Enter` separately. [^callout] The TypeScript implementation uses `-l` (literal flag) to prevent key interpretation of special characters; the bash version relies on tmux's default key handling without `-l`.
+6. **Delay calculation**: `0.1 + (message_length / 100) * 0.5` seconds, clamped to [0.2, 3.0]. Longer messages need more time for the paste to complete in tmux. The `message_length` here is the length of the full formatted message (including the `[sent by agent ...]` prefix if present).
+7. **Logging**: Both sender and recipient get entries in their `agent.log`. Recipient log entries are written with `--quiet` (no stdout echo); sender log entries echo to stdout. [^callout] The `--quiet` distinction is bash-specific. The TypeScript `logAgent()` is always write-only (appends to `agent.log` without echoing to stdout) for both sender and recipient.
+8. **Stdin piping**: Messages can also be provided via stdin (`echo "msg" | ib send <id>` or `ib send <id> < file.txt`) when no positional message argument is given.
 
 ### 4.2 ib ask
 
 `ib ask "question"` allows top-level managers to ask the user questions:
 
-1. **Auto-detect agent ID** from CWD if in an agent worktree
+1. **Auto-detect agent ID** from CWD if in an agent worktree (or specify `--id <agent-id>` explicitly)
 2. **Top-level check**: Only agents with no manager (or whose manager has been merged/killed) can ask. Others are told to use `ib send` to communicate with their manager.
 3. **Config check**: `allowAgentQuestions` must be `true` (default)
-4. **Question storage**: Questions are appended to `.ittybitty/user-questions.json`
-5. **Question ID format**: `q-<unix-epoch>-<6-char-hash>`
+4. **Question storage**: Stale questions from agents whose directories no longer exist are cleaned up. New questions are appended to `.ittybitty/user-questions.json`
+5. **Question ID format**: `q-<unix-epoch>-<6-char-hash>` where the hash is the first 6 hex characters of `md5("$AGENT_ID-$QUESTION")`
+6. **Logging**: The question is logged to the asking agent's `agent.log`.
 
 ### 4.3 user-questions.json Structure
 
@@ -319,11 +331,15 @@ Fields:
 - `status`: `"pending"` or `"acknowledged"`
 - `acknowledged_at`: Set when `ib acknowledge <id>` is called
 
+**[^callout]** The TypeScript `acknowledgeQuestion` also sets an `acknowledged: true` boolean field on the question object, in addition to `status` and `acknowledged_at`. The bash version only sets `status` and `acknowledged_at`.
+
 Questions from agents that no longer exist (no directory in `.ittybitty/agents/`) are filtered out when reading.
 
 ### 4.4 ib acknowledge
 
-`ib acknowledge <question-id>` marks a question as handled. Only the primary (user-level) Claude can acknowledge — agents are blocked via `is_running_as_agent()` check.
+`ib acknowledge <question-id>` marks a question as handled. Only the primary (user-level) Claude can acknowledge — agents are blocked via `is_running_as_agent()` check. The command finds the question by ID, sets `status` to `"acknowledged"` and records `acknowledged_at` with the current ISO 8601 UTC timestamp. On success, it prints a hint to use `ib send <agent-id> "answer"` to respond. [^callout] The "hint to use `ib send`" output is bash-specific. The TypeScript `acknowledgeQuestion` returns a generic success message without the send hint.
+
+**[^callout]** The TypeScript `acknowledgeQuestion` is only called from the TUI dashboard (always user-level), so it omits the `is_running_as_agent()` guard. It also sets an extra `acknowledged: true` boolean (see §4.3 callout).
 
 ---
 
@@ -344,13 +360,16 @@ Questions from agents that no longer exist (no directory in `.ittybitty/agents/`
         start.sh                     # Tmux startup script
         exit-check.sh                # Post-session interactive check
         resume.sh                    # Resume startup script (created on resume)
-        settings.local.json          # Copied from worktree on kill/merge
+        settings.local.json          # Copied from worktree on kill/nuke (bash teardown_agent only; not copied during merge — see §3.5 callout)
         output.log                   # Captured tmux output (on kill/merge)
         last-nudge                   # Unix timestamp of last nudge (stop hook debounce)
         nudge-recheck                # Marker file for delayed recheck scheduling
         watchdog.log                 # Watchdog process output
-        debug-logs/                  # Debug captures from stop hook
-          stop-<epoch>-<state>.txt
+        debug-logs/                  # Debug captures from hooks/watchdog/snapshot
+          stop-<epoch>-<state>.txt     # Stop hook triggers
+          nudge-<epoch>-<state>.txt    # Nudge recheck captures
+          watchdog-<epoch>-<state>.txt # Watchdog unknown-state captures
+          snapshot-<epoch>-<state>.txt # Manual snapshot from `ib watch`
         repo/                        # Git worktree
           .claude/
             settings.local.json      # Agent-specific settings with hooks
@@ -382,8 +401,8 @@ Questions from agents that no longer exist (no directory in `.ittybitty/agents/`
   "worktree": true,
   "worker": false,
   "yolo": false,
-  "model": "sonnet",
-  "claude_pid": "12345"
+  "model": "sonnet",              // bash defaults to "sonnet"; legacy agents may have null
+  "claude_pid": "12345"           // appended after Claude starts (not in initial write)
 }
 ```
 
@@ -399,15 +418,15 @@ Questions from agents that no longer exist (no directory in `.ittybitty/agents/`
 | `worktree` | boolean | Whether agent has an isolated git worktree |
 | `worker` | boolean | `true` for worker agents, `false` for managers |
 | `yolo` | boolean | Whether `--yolo` (skip permissions) was used |
-| `model` | string | Claude model name (e.g., "sonnet", "opus", "haiku") |
-| `claude_pid` | string | PID of the Claude process (added after start.sh launches Claude) |
+| `model` | string \| null | Claude model name (e.g., "sonnet", "opus", "haiku"), or `null` for legacy agents | [^callout]: Bash defaults `MODEL` to config value then `"sonnet"` before writing meta.json (the null branch in the template is unreachable dead code). TS normalizes null/missing to `"unknown"`. The `string \| null` type is retained because legacy agents may have null values, and display code (bash `ib list`) handles this defensively.
+| `claude_pid` | string | PID of the Claude process (appended to meta.json via `sed` after start.sh launches Claude — not present in the initial write) |
 
 ### 5.3 Worktree ↔ Branch Relationship
 
 Each agent's worktree is linked to a git branch named `agent/<agent-id>`:
 
-- Top-level agents branch from `HEAD` of the main repo
-- Worker/sub-agents branch from `agent/<manager-id>`
+- Top-level agents (no `--manager`) branch from `HEAD` of the main repo
+- Sub-agents (any agent with `--manager`) branch from `agent/<manager-id>` regardless of worker/manager role
 - All branches are local (no remote tracking)
 - The worktree is at `.ittybitty/agents/<id>/repo`
 - On merge or kill, both the worktree and branch are removed
@@ -420,7 +439,7 @@ Archives are stored at `.ittybitty/archive/<YYYYMMDD-HHMMSS>-<agent-id>/` using 
 
 ## 6. Hooks
 
-itsybitsy installs five hooks into each agent's `settings.local.json`, plus optional global hooks in `~/.claude/settings.json`.
+itsybitsy installs hooks into each agent's `settings.local.json`, plus optional global hooks in `~/.claude/settings.json`. Managers get five hooks (path isolation, stop, session-start, permission-denied, and intercept-task); workers get four (no intercept-task).
 
 ### 6.1 Path Isolation Hook (PreToolUse)
 
@@ -433,11 +452,15 @@ itsybitsy installs five hooks into each agent's `settings.local.json`, plus opti
 1. **TaskCreate always denied**: Workers get "Workers cannot create tasks." Managers get "Use ib new-agent --worker."
 2. **Allow list check**: Tool must match at least one pattern from `settings.local.json` `permissions.allow`. Patterns are either exact tool names (`"Read"`) or bash prefix patterns (`"Bash(git status:*)"` — matches Bash tool where command starts with `git status`).
 3. **Bash cd commands**: If the tool is Bash and the command starts with `cd`, the target path is checked against the allowed paths.
-4. **Bash command scanning**: Non-cd bash commands are scanned for path references to:
+4. **Bash command scanning** [^ts-only-bash-scan]: Non-cd bash commands are scanned for path references to:
    - Other agents' directories (`.ittybitty/agents/<other-id>/`)
    - The main repo root (when it differs from the worktree)
    Only paths at word boundaries (preceded by space, quote, `=`, or start of string) are checked.
-5. **File path extraction**: For non-Bash tools, `file_path`, `path`, or `notebook_path` from `tool_input` is checked.
+
+[^ts-only-bash-scan]: **TS-only behavior.** The bash `ib` immediately allows all non-cd Bash commands after the allow-list check — it does not scan command strings for path references. The TS implementation added `checkBashCommandPaths()` as an extra safeguard that catches commands like `cat /repo/.ittybitty/agents/other-agent/...`.
+5. **File path extraction** [^ts-only-notebook-path]: For non-Bash tools, `file_path`, `path`, or `notebook_path` from `tool_input` is checked.
+
+[^ts-only-notebook-path]: **TS-only behavior.** The bash `ib` only extracts `file_path` and `path` from `tool_input`. The TS implementation additionally checks `notebook_path` to cover Jupyter notebook tools.
 
 **Allowed paths**:
 - Agent's own worktree (`<agent-dir>/repo/...`)
@@ -512,7 +535,7 @@ Intercepts Claude Code's Task tool and redirects it to spawn ib agents instead:
    - When called from primary Claude: spawns a manager (no `--worker`)
 5. **Output**: Rewrites the Task invocation to a `claude-code-guide` subagent that simply reports the spawned agent ID
 
-This hook is only installed for manager agents (not workers), and only when the main repo's settings already have the intercept hook installed. Workers' Task calls are instead blocked by the path hook's TaskCreate denial (§6.1).
+This hook is only installed for manager agents (not workers), and only when the main repo's settings already have the intercept hook installed. Workers skip the intercept hook entirely and use the native Task tool directly (see §2.1). Note that `TaskCreate` (a separate tool from `Task`) is blocked for all agents by the path hook (§6.1).
 
 ### 6.5 Permission Denied Hook (PermissionRequest)
 
@@ -531,7 +554,9 @@ These are optional hooks that the user installs globally:
 - **Status injection hooks** (`ib hooks inject-status`): UserPromptSubmit and PostToolUse hooks that inject agent status information into the primary Claude's context
 - **Session-start hook** (`ib hooks session-start`): SessionStart hook that injects ittybitty context
 
-Install/uninstall commands modify `~/.claude/settings.json` directly.
+Install/uninstall commands modify `~/.claude/settings.json` directly. [^hooks-install-location]
+
+[^hooks-install-location]: **Bash/TS divergence.** The bash `ib hooks install` and `ib hooks install-intercept` write to `.claude/settings.local.json` (per-repo, relative to CWD). The TS implementation writes to `~/.claude/settings.json` (global) — a deliberate change so itsybitsy's safety hooks apply to all Claude sessions, not just ones launched from the project directory.
 
 ---
 
@@ -572,7 +597,7 @@ For a given agent type (manager or worker):
 1. Start with the base settings from `.claude/settings.local.json` in the repo root
 2. Add mandatory permissions (§2.2)
 3. Add config-defined permissions for the agent's role
-4. If worker-specific permissions are empty, fall through to manager permissions
+4. If worker-specific permissions are empty, fall through to manager permissions [^callout]: The TS implementation (`ib-commands.ts:1431–1433`) reads permissions directly for the agent's role without this fallback — workers with empty `permissions.worker.allow` get no extra config permissions rather than inheriting manager permissions. The bash fallback (`ib:3565–3571`) checks only the `allow` list: if worker `allow` is empty/`[]`, both `allow` and `deny` fall through to manager config.
 5. Deduplicate all allow/deny lists
 
 ### 7.4 Custom Prompts
@@ -597,12 +622,18 @@ Agent IDs can be specified as partial strings. Resolution:
 2. **Substring match** — scan all agent directories and tmux sessions for the pattern
 3. If 0 matches → error. If 1 match → use it. If 2+ matches → error listing all matches.
 
+> [^callout] TS `resolveAgentId()` only checks agent directories for both exact and substring matches (no tmux session scanning). It returns `null` for 0 or 2+ matches instead of listing ambiguous matches.
+
 ### 8.2 Agent Logging
 
 All agent events are logged to `<agent-dir>/agent.log` with format:
 ```
 [YYYY-MM-DD HH:MM:SS] message
 ```
+
+In bash, `log_agent()` also echoes the message to stdout unless called with `--quiet`. The TS `logAgent()` only writes to the file (no stdout echo).
+
+> [^callout] TS `logAgent()` is write-only — no stdout echo. Callers that need visible output handle it separately.
 
 ### 8.3 Orphan Detection and Cleanup
 
@@ -615,28 +646,34 @@ After kills/nukes, the system scans for orphaned Claude processes:
 
 ### 8.4 Auto-Compact
 
-Reads Claude transcript JSONL files to determine context window usage percentage. When an agent exceeds the configured threshold (`autoCompactThreshold`), sends `/compact` to the agent's tmux session.
+Reads Claude transcript JSONL files to determine context window usage percentage. When an agent exceeds the configured threshold (`autoCompactThreshold`), sends `/compact` to the agent's tmux session. In bash, `/compact` is sent in any state except `compacting` (and only if not already sent). A `compactSent` flag prevents duplicate sends; the flag resets when the agent transitions out of `compacting` state.
+
+> [^callout] TS restricts auto-compact sends to `running` or `waiting` states only (stricter than bash). TS resets the `compactSent` flag when usage drops below the threshold rather than on state transition out of `compacting`. TS also has a 60-second per-agent cooldown between usage checks (`COMPACT_CHECK_COOLDOWN_MS`); bash checks on every 5-second watchdog poll.
 
 ### 8.5 Watchdog
 
-`ib watchdog <id>` runs as a background loop for agents with a manager, polling agent state every 5 seconds. It continues running while the agent's worktree directory exists.
+`ib watchdog <id>` runs as a background loop for agents with a manager, polling agent state every 5 seconds. It continues running while the agent's worktree directory exists and the agent's tmux session is active.
+
+**Self-exit on tmux disappearance**: The watchdog ignores tmux session checks for the first 5 seconds after startup (grace period while the agent initializes). After that, if the tmux session no longer exists (`tmux has-session` fails), the watchdog exits. This ensures the watchdog self-cleans on pause or crash without requiring callers to explicitly kill it. On resume, a new watchdog is spawned (§1.6 step 7). [^callout] Bash's watchdog loop condition is `while [[ -d "$AGENT_DIR/repo" ]]` (worktree only, no tmux check), so it survives pause and must be manually killed. The self-exit behavior described here is the intended design for the TS implementation.
 
 **Monitoring behaviors by state:**
 
 | State | Action |
 |-------|--------|
 | `waiting` | Increment waiting counter. When counter reaches the notification threshold, notify manager: "[watchdog]: Your subtask <id> recently started waiting for input". Uses exponential backoff: initial threshold 30s (6 polls), doubles after each notification, capped at 64 minutes. |
-| `complete` | Notify manager once: "[watchdog]: Your subtask <id> recently completed". Sets a flag to prevent duplicate notifications. Flag resets if agent returns to `running`. |
+| `complete` | Reset waiting counter and notification interval. Notify manager once: "[watchdog]: Your subtask <id> recently completed". Sets a flag to prevent duplicate notifications. Flag resets if agent returns to `running`. |
 | `unknown` | Treat like `waiting` — increment counter with same exponential backoff. Also saves a debug capture of tmux output to `debug-logs/watchdog-<epoch>-unknown.txt`. |
-| `rate_limited` | Attempt to bypass the rate limit dialog. Then poll Claude's usage API; when session usage drops below 5%, send nudge: "[watchdog]: Usage has refreshed (<pct>%). Please continue your task." |
+| `rate_limited` | Attempt to bypass the rate limit dialog (bash uses a 3-attempt retry loop with 2s sleeps between attempts; checks `parse_state` after each Enter). Then poll Claude's usage API; when session usage drops below 5%, send nudge: "[watchdog]: Usage has refreshed (<pct>%). Please continue your task." Reset waiting counter and notification interval. |
 | `running` | Reset waiting counter and notification interval. Clear completion flag if previously set. |
 | `creating` | Treat as running — reset counters. |
-| `compacting` | No action — wait for completion. |
-| `stopped` | Reset counters. |
+| `compacting` | Reset waiting counter and notification interval. Wait for completion. |
+| `stopped` | Reset waiting counter and notification interval. |
 
 **Auto-compact**: If `autoCompactThreshold` is configured, the watchdog also checks the agent's context window usage on each poll. When usage exceeds the threshold and the agent is not currently compacting, sends `/compact` to the agent's tmux session. The compact flag resets when compacting completes.
 
 **Quiet mode** (`--quiet`): Allows monitoring agents without managers. All notifications are logged but not sent.
+
+> [^callout] The TS watchdog is a single global loop that monitors ALL agents across all repos simultaneously (using an `AgentProvider`), rather than bash's per-agent `ib watchdog <id>` process. It uses a PID lock file at `~/.itsybitsy/watchdog.lock` for single-instance enforcement. TS has no `--quiet` mode; agents without managers simply receive no notifications (the `notifyManager` helper no-ops when `meta.manager` is unset).
 
 ### 8.6 Root Repo Resolution
 
@@ -645,3 +682,45 @@ When running from a worktree, the root repository is found via:
 1. `git rev-parse --git-common-dir` to find the shared `.git` directory
 2. If the result is `.git` or matches `--git-dir`, we're in the main repo → use `--show-toplevel`
 3. Otherwise, go up one directory from the common dir to find the root
+
+### 8.7 Reassign Command
+
+`ib reassign <agent-id> <new-parent-id>` or `ib reassign <agent-id> --none`
+
+Reassigns an agent to a different parent manager (or makes it a root manager with `--none`).
+
+**Validation:**
+
+1. Resolve both agent ID and new parent ID (partial ID resolution)
+2. Agent must exist
+3. Cannot reassign an agent to itself
+4. New parent must exist (unless `--none`)
+5. New parent cannot be a worker
+6. New parent cannot be a descendant of the agent (circular dependency check)
+7. No-op if agent already has the requested parent
+
+**On success:**
+
+1. Update `meta.json` — set `manager` to the new parent ID (or `null` for `--none`)
+2. Log the change to the agent's `agent.log`
+3. Notify the old parent: `"[watchdog for <id>]: Agent reassigned to manager '<new>'"`
+4. Notify the new parent: `"[watchdog for <id>]: Agent reassigned to you (was under <old>)"`
+5. Notify the agent itself: `"[watchdog]: You've been reassigned from <old> to <new>"`
+
+Notifications are sent via `ib send` (bash) / `sendMessage` (TS) and suppressed if the target agent doesn't exist or isn't running.
+
+### 8.8 Post-Create-Agent Hook
+
+After agent creation, the system runs `.ittybitty/hooks/post-create-agent` if it exists and is executable. The hook runs **in the background** (fire-and-forget) so it does not block agent creation. Its stdout/stderr is appended to the agent's `agent.log`.
+
+**Environment variables provided to the hook:**
+
+| Variable | Description |
+|----------|-------------|
+| `IB_AGENT_ID` | The new agent's ID |
+| `IB_AGENT_TYPE` | `"worker"` or `"manager"` |
+| `IB_AGENT_DIR` | Path to the agent's directory |
+| `IB_AGENT_BRANCH` | Git branch name (e.g., `agent/<id>`) |
+| `IB_AGENT_MANAGER` | Manager agent ID (empty if root) |
+| `IB_AGENT_PROMPT` | The prompt given to the agent |
+| `IB_AGENT_MODEL` | The model specified for the agent |

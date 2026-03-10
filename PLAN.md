@@ -1119,17 +1119,18 @@ The hook is installed in two places in `~/.claude/settings.json`:
 
 Bash schedules `( sleep 5 && ib hooks agent-status )` when debouncing nudges, ensuring a follow-up check even if no further tool calls occur. TS lacks this — debounced agents could get stuck without follow-up.
 
-- [ ] After writing the nudge debounce timestamp, schedule a delayed recheck (e.g., `setTimeout` or `Bun.spawn` a background `ib hooks agent-status` after 5s)
+- [ ] After writing the nudge debounce timestamp, schedule a delayed recheck using `Bun.spawn` to run a background `ib hooks agent-status` after 5s — **note:** `setTimeout` won't work here because `agent-status.ts` is a CLI entry point that exits after outputting the state; only a detached background process survives.
 - [ ] Test: verify a second check fires ~5s after a debounced nudge
 
 #### 31b: Stop hook tmux send-keys timing (must-fix)
 
 **File:** `src/hooks/agent-status.ts:356-360,369-376`
 
-Bash sends message then waits 0.1s before Enter. TS sends message+Enter in one call, which may fail for long messages.
+Bash sends message then waits 0.1s before Enter. TS sends message+Enter in one call with no `-l` flag, which has two problems: (1) tmux interprets special characters (`$`, `!`, etc.) as key bindings instead of literal text when `-l` is omitted, and (2) long messages may not be fully received before Enter is pressed when combined in one call.
 
+- [ ] Add `-l` (literal) flag to the `send-keys` call so tmux treats the message as literal text
 - [ ] Split into two `send-keys` calls: first the message with `-l`, then a separate Enter after a short delay
-- [ ] Match the pattern already used in `sendMessage()` in `ib-commands.ts`
+- [ ] Match the pattern already used in `sendMessage()` in `ib-commands.ts:1058`
 
 #### 31c: Complete + unfinished children message (should-fix)
 
@@ -1262,11 +1263,10 @@ Bash supports `--from <id>` to auto-prefix messages with sender identity. Note: 
 
 **File:** `src/tui/dashboard.ts`, `src/tui/dialog-handler.ts`
 
-Bash has a full settings editor with tabs for project/user settings and a permissions allow/deny list editor.
+Bash has a full settings editor including a permissions allow/deny list editor. The TS setup dialog already has three tabs ("Setup", "Project", "User") implemented in `dialog-handler.ts`, and tabs 1 and 2 already show and support editing config values via `buildConfigTabContent`/`handleSetupConfigTab`. What's missing is only the permissions editor for allow/deny tool lists.
 
-- [ ] Add settings tabs to setup dialog (project settings, user settings)
-- [ ] Add permissions editor (allow/deny tool lists)
-- [ ] Add number/string input dialogs for config values
+- [ ] Add permissions editor (allow/deny tool lists) to the setup dialog
+- [ ] Add number/string input dialogs for config values if not already present
 
 ---
 
@@ -1293,7 +1293,7 @@ The `merge-check` case appears twice in the main switch statement. The second oc
 
 **Files:** `src/ib-commands.ts`, `src/agent-lifecycle.ts`, `src/watchdog.ts`, `src/tmux-poller.ts`, `src/usage.ts`, `src/auto-compact.ts`, `src/ghostty.ts`
 
-12 separate module-level mutable spawn runners with `set*/reset*` boilerplate. 10 of them use the same `SpawnFn` type and are near-identical; `src/usage.ts` (`setTestSpawn`) and `src/ghostty.ts` (`setSpawn`) use different type signatures (`FetchLike` and `GhosttySpawnFn` respectively) but follow the same pattern. This is error-prone (test leaks) and hard to maintain.
+14 separate module-level mutable injection variables with `set*/reset*` boilerplate. 10 of them use the same `SpawnFn` type (tmux-poller, agent-lifecycle, watchdog, and 6 in ib-commands); `src/usage.ts` has two injection points — `setTestFetch` uses `FetchLike` and `setTestSpawn` uses `SpawnFn`; `src/auto-compact.ts` uses `CompactSpawnFn` (a simpler type); `src/ghostty.ts` has two — `setSpawn` uses `GhosttySpawnFn` and `setWhich` uses `WhichFn`. This is error-prone (test leaks) and hard to maintain.
 
 - [ ] Design a single DI pattern — either a context object threaded through functions, or a centralized spawn registry
 - [ ] Consolidate all spawn runners into the shared pattern
@@ -1355,6 +1355,8 @@ Both functions pipe stderr but never drain it. If a command produces enough stde
 
 - [ ] Drain both stdout and stderr with `Promise.all` in both `nukeResumeRunCmd` and `agent-lifecycle.ts:runCmd`, matching `mergeRunCmd` pattern
 
+**Note:** 34h overlaps with 34c — if 34c (consolidate all 5 variants into a shared helper) is completed first, 34h is automatically resolved. If doing a targeted fix only, 34h can be applied independently to just the 2 deadlock-risk variants.
+
 #### 34i: Use `sed` alternative for JSON modification in start.sh/resume.sh (low priority)
 
 **Files:** `src/ib-commands.ts:392-395` (start script heredoc), `src/ib-commands.ts:1682-1685` (resume script heredoc)
@@ -1399,10 +1401,10 @@ No dedicated test files for these modules.
 
 **Files:** Various test files
 
-Heavy `as any` usage (81 occurrences across 7 test files) for mock creation.
+Heavy `as any` usage (81 occurrences across 7 test files). Note: `test-utils.ts` already exists with `makeAgent()`, `makeFlatAgent()`, and `makeFlatRepoHeader()` factories used by 5 test files. The `as any` casts are not just for Agent mock creation — the breakdown includes: state-type narrowing (`agent.state = "running" as any` — 45 in dashboard.test.ts), spawn runner mocks (ib-commands.test.ts), fetch function mocks (usage.test.ts), and watcher dependency mocks.
 
-- [ ] Create shared mock factory in `test-utils.ts` that produces properly-typed Agent objects
-- [ ] Use consistently across all test files
+- [ ] Extend `test-utils.ts` with typed helpers for spawn runners, fetch mocks, and agent state assignment (don't create — it already exists)
+- [ ] Adopt the extended helpers consistently to reduce `as any` casts across all 7 test files
 
 #### 35d: Validate `readAgentMeta` more thoroughly (medium priority)
 
@@ -1440,9 +1442,9 @@ Values from `.ittybitsy.json` are stored without type checking against `ConfigKe
 
 TOCTOU race: read lock → check PID → write PID. Two processes could acquire simultaneously.
 
-- [ ] Use `O_EXCL` flag for atomic lock file creation
-- [ ] Or use advisory file locking
-- [ ] Also migrate from `require("fs")` sync APIs to `Bun.file()`/`Bun.write()` for consistency (L1 from CODE_REVIEW.md)
+- [ ] Use `O_EXCL` flag for atomic lock file creation (requires `node:fs` `openSync` with `O_CREAT | O_EXCL` flags — note this means `acquireWatchdogLock` may need to keep `node:fs` even after the migration below)
+- [ ] Or use advisory file locking as an alternative
+- [ ] Migrate `releaseWatchdogLock` and `isWatchdogLockHeld` from `require("fs")` sync APIs to `Bun.file()`/`Bun.write()` for consistency (L1 from CODE_REVIEW.md) — these two functions don't need `O_EXCL` and can be fully migrated
 
 #### 36b: Watchdog debug logs on unknown state (nice-to-have)
 
@@ -1461,6 +1463,7 @@ Bash watchdog saves tmux output to `debug-logs/watchdog-<timestamp>-unknown.txt`
 
 - [ ] Log a warning when falling back to default for an unknown model
 - [ ] Consider moving context sizes to a named lookup table for easier maintenance
+- **Note:** The explicit Claude 4.6 branch (lines 48-49) returns 200K — the same as the default. It is effectively redundant code but serves as documentation that 4.6 was explicitly considered.
 
 ---
 

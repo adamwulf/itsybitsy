@@ -599,7 +599,7 @@ Files: `src/tui/dashboard.ts`, `src/config.ts`.
 
 ---
 
-### Phase 13: Code Quality & Architecture Cleanup
+### Phase 13: Code Quality & Architecture Cleanup -- COMPLETE
 **Checkpoint:** Codebase is clean, internally consistent, and free of known architectural hacks identified in the code review.
 
 **FlatEntry discriminated union refactor:** *(completed)*
@@ -614,8 +614,8 @@ Files: `src/tui/dashboard.ts`, `src/config.ts`.
 - [x] Remove the dummy Agent construction in `flattenAgentTree` — no more fake meta.json fields
 
 **Remaining review items:**
-- [ ] Add tests for `readAccessToken` keychain fallback path (`src/usage.ts`)
-- [ ] Add tests for `color-scheme.ts` OSC 11 query and Ghostty mode 2031 detection
+- [x] Add tests for `readAccessToken` keychain fallback path (`src/usage.ts`)
+- [x] Add tests for `color-scheme.ts` OSC 11 query and Ghostty mode 2031 detection
 - [x] Add tests for `folder-browser.ts` permission error path
 
 ---

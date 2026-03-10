@@ -186,8 +186,8 @@ The `--worker` flag at creation time determines the agent's role:
 |----------|---------|--------|
 | `meta.json` `worker` field | `false` | `true` |
 | Can spawn sub-agents | Yes (via `ib new-agent --worker`) | No |
-| Can use Task tool | Intercepted → spawns ib agents | Native Task allowed (intercept hook skips workers) |
-| Can ask user questions | Only if top-level (no manager) | No |
+| Can use Task tool | Intercepted → spawns ib agents (only when intercept hook is installed in parent repo settings) | Native Task allowed (intercept hook skips workers) |
+| Can ask user questions | Only if top-level (no manager); bash also allows if manager was merged/killed | No |
 | Permissions source | `permissions.manager.allow/deny` | `permissions.worker.allow/deny` |
 | Session-start instructions | Manager template (with sub-agent commands) | Worker template (with send/diff/status only) |
 | TaskCreate | Blocked with "Use ib new-agent --worker" message | Blocked with "Workers cannot create tasks" message |
@@ -208,11 +208,13 @@ When building `settings.local.json` for an agent, permissions come from three so
 
 ### 2.3 Manager Sub-Agent Spawning
 
-Managers spawn workers with `ib new-agent --worker "task"`. The manager's agent ID is automatically set as the `--manager` for the child. The child's branch forks from `agent/<manager-id>`.
+Managers spawn workers either explicitly with `ib new-agent --worker "task"` or implicitly via the Task tool (which the intercept hook converts into `ib new-agent --worker`). In both cases, the manager's agent ID is automatically set as the `--manager` for the child. The child's branch forks from `agent/<manager-id>`. When invoked from the primary Claude session (no agent context), the intercept hook spawns a manager instead of a worker.
 
 ### 2.4 Unfinished Children Check
 
-When a top-level manager (no manager of its own) signals completion, the stop hook checks for unfinished children — agents in `.ittybitty/agents/` whose `meta.json` `manager` field matches the completing agent's ID. If any exist, the agent receives a nudge message listing them and instructing it to merge or kill each one before completing.
+When a top-level manager (no manager of its own) signals completion, the stop hook checks for unfinished children. [^callout]: Bash determines "unfinished" by checking actual tmux state (creating, running, waiting, or complete — but NOT stopped/unknown). TS determines "unfinished" by checking only that the agent directory exists and `meta.archived` is not true, without polling tmux state.
+
+Specifically, it looks for children — agents in `.ittybitty/agents/` whose `meta.json` `manager` field matches the completing agent's ID. If any exist, the agent receives a nudge message listing them and instructing it to merge or kill each one before completing.
 
 ---
 

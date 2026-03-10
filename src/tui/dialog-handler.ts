@@ -57,6 +57,19 @@ export type DialogState =
       onTabChange: (tab: number) => void;
       onConfigAction?: (item: ConfigDialogItem) => void;
     }
+  | {
+      type: "permissions-editor";
+      roleKey: string; // e.g., "permissions.manager"
+      tab: 0 | 1; // 0=Allow, 1=Deny
+      allowList: string[];
+      denyList: string[];
+      focus: number; // index in current list; list.length = Add btn; list.length+1 = Done
+      inputMode: boolean;
+      inputValue: string;
+      scrollOffset: number;
+      configFilePath: string;
+      onSave: (allowList: string[], denyList: string[]) => void;
+    }
   | null;
 
 export type SetupItem = {
@@ -163,6 +176,14 @@ export function handleDialogInput(ctx: DialogCtx, data: string): boolean {
     return true;
   }
 
+  // Escape: permissions-editor in input mode exits input mode first
+  if (matchesKey(data, Key.escape) && dialog.type === "permissions-editor" && dialog.inputMode) {
+    dialog.inputMode = false;
+    dialog.inputValue = "";
+    ctx.tui?.requestRender();
+    return true;
+  }
+
   // Escape cancels any dialog
   if (matchesKey(data, Key.escape)) {
     ctx.closeDialog();
@@ -230,6 +251,10 @@ export function handleDialogInput(ctx: DialogCtx, data: string): boolean {
 
   if (dialog.type === "setup") {
     return handleSetupDialog(ctx, dialog, data);
+  }
+
+  if (dialog.type === "permissions-editor") {
+    return handlePermissionsEditorDialog(ctx, dialog, data);
   }
 
   return false;
@@ -562,6 +587,98 @@ function handleFuzzyDialog(
   return true;
 }
 
+// --- Permissions editor dialog ---
+
+const PERMS_VISIBLE_ROWS = 8;
+
+function handlePermissionsEditorDialog(
+  ctx: DialogCtx,
+  d: Extract<NonNullable<DialogState>, { type: "permissions-editor" }>,
+  data: string
+): boolean {
+  const currentList = d.tab === 0 ? d.allowList : d.denyList;
+  const listCount = currentList.length;
+  const maxFocus = listCount + 1; // items + Add + Done
+
+  if (d.inputMode) {
+    // Input mode: typing a new tool name
+    if (matchesKey(data, Key.enter)) {
+      if (d.inputValue.trim()) {
+        currentList.push(d.inputValue.trim());
+        d.inputValue = "";
+      }
+      d.inputMode = false;
+      ctx.tui?.requestRender();
+    } else if (matchesKey(data, Key.alt("backspace"))) {
+      d.inputValue = deleteWord(d.inputValue);
+      ctx.tui?.requestRender();
+    } else if (matchesKey(data, Key.backspace) || data === "\x7f") {
+      d.inputValue = d.inputValue.slice(0, -1);
+      ctx.tui?.requestRender();
+    } else if (data.length === 1 && data >= " ") {
+      d.inputValue += data;
+      ctx.tui?.requestRender();
+    }
+    return true;
+  }
+
+  // List/navigation mode
+  if (matchesKey(data, Key.left)) {
+    // Switch to Allow tab
+    if (d.tab !== 0) {
+      d.tab = 0;
+      d.focus = 0;
+      d.scrollOffset = 0;
+      ctx.tui?.requestRender();
+    }
+  } else if (matchesKey(data, Key.right)) {
+    // Switch to Deny tab
+    if (d.tab !== 1) {
+      d.tab = 1;
+      d.focus = 0;
+      d.scrollOffset = 0;
+      ctx.tui?.requestRender();
+    }
+  } else if (matchesKey(data, Key.down) || data === "j") {
+    d.focus = Math.min(maxFocus, d.focus + 1);
+    // Scroll if needed
+    if (d.focus < listCount && d.focus >= d.scrollOffset + PERMS_VISIBLE_ROWS) {
+      d.scrollOffset = d.focus - PERMS_VISIBLE_ROWS + 1;
+    }
+    ctx.tui?.requestRender();
+  } else if (matchesKey(data, Key.up) || data === "k") {
+    d.focus = Math.max(0, d.focus - 1);
+    if (d.focus < d.scrollOffset) {
+      d.scrollOffset = d.focus;
+    }
+    ctx.tui?.requestRender();
+  } else if (matchesKey(data, Key.enter)) {
+    if (d.focus < listCount) {
+      // Delete item
+      currentList.splice(d.focus, 1);
+      if (d.focus > 0 && d.focus >= currentList.length) {
+        d.focus = Math.max(0, d.focus - 1);
+      }
+      ctx.tui?.requestRender();
+    } else if (d.focus === listCount) {
+      // Add button — switch to input mode
+      d.inputMode = true;
+      d.inputValue = "";
+      ctx.tui?.requestRender();
+    } else {
+      // Done button — save and close
+      d.onSave(d.allowList, d.denyList);
+    }
+  } else if (matchesKey(data, Key.tab)) {
+    d.focus = (d.focus + 1) % (maxFocus + 1);
+    ctx.tui?.requestRender();
+  } else if (matchesKey(data, Key.shift("tab"))) {
+    d.focus = (d.focus - 1 + maxFocus + 1) % (maxFocus + 1);
+    ctx.tui?.requestRender();
+  }
+  return true;
+}
+
 // --- Dialog rendering helpers (used by DialogOverlayComponent) ---
 
 type DialogContent = { title: string; contentLines: string[] };
@@ -812,4 +929,75 @@ function buildConfigTabContent(
       lines.push(truncateToWidth(`  ${label}`, innerWidth, ""));
     }
   }
+}
+
+/** Build content for the permissions editor dialog */
+export function buildPermissionsEditorContent(
+  dialog: Extract<NonNullable<DialogState>, { type: "permissions-editor" }>,
+  innerWidth: number
+): DialogContent {
+  const lines: string[] = [];
+
+  // Title from roleKey: "permissions.manager" → "Manager Permissions"
+  const roleName = dialog.roleKey.split(".").pop() ?? "";
+  const title = `${roleName.charAt(0).toUpperCase()}${roleName.slice(1)} Permissions`;
+
+  // Tab bar: Allow / Deny
+  const allowTab = dialog.tab === 0
+    ? `${BOLD}${GREEN}[Allow]${RESET}`
+    : `${DIM}[Allow]${RESET}`;
+  const denyTab = dialog.tab === 1
+    ? `${BOLD}${GREEN}[Deny]${RESET}`
+    : `${DIM}[Deny]${RESET}`;
+  lines.push(truncateToWidth(`  ${allowTab}    ${denyTab}    ${DIM}(←/→: switch)${RESET}`, innerWidth, ""));
+  lines.push(`${DIM}${"─".repeat(innerWidth)}${RESET}`);
+
+  const currentList = dialog.tab === 0 ? dialog.allowList : dialog.denyList;
+  const listCount = currentList.length;
+
+  // Visible window of list items
+  let start = dialog.scrollOffset;
+  const end = Math.min(listCount, start + PERMS_VISIBLE_ROWS);
+
+  for (let i = start; i < end; i++) {
+    const item = currentList[i]!;
+    const isFocused = !dialog.inputMode && dialog.focus === i;
+    const maxItemWidth = innerWidth - 8;
+    const displayItem = item.length > maxItemWidth ? item.slice(0, maxItemWidth - 2) + ".." : item;
+    const pad = Math.max(0, innerWidth - displayItem.length - 10);
+    if (isFocused) {
+      lines.push(truncateToWidth(`${GREEN}> ${BOLD}${displayItem}${RESET}${" ".repeat(pad)}${DIM}[Del]${RESET}`, innerWidth, ""));
+    } else {
+      lines.push(truncateToWidth(`  ${displayItem}${" ".repeat(pad + 2)}${DIM}[Del]${RESET}`, innerWidth, ""));
+    }
+  }
+
+  // Pad empty rows
+  for (let i = end - start; i < PERMS_VISIBLE_ROWS; i++) {
+    lines.push("");
+  }
+
+  // Add input field
+  const addFocused = !dialog.inputMode && dialog.focus === listCount;
+  if (dialog.inputMode) {
+    const displayInput = `${dialog.inputValue}█`;
+    lines.push(truncateToWidth(`  Add: ${BOLD}${displayInput}${RESET}`, innerWidth, ""));
+  } else {
+    const addLabel = addFocused
+      ? `${GREEN}> ${BOLD}Add:${RESET} ${DIM}(press Enter to type)${RESET}  ${GREEN}${BOLD}[+]${RESET}`
+      : `  Add: ${DIM}(press Enter to type)${RESET}  [+]`;
+    lines.push(truncateToWidth(addLabel, innerWidth, ""));
+  }
+
+  lines.push("");
+
+  // Done button
+  const doneFocused = !dialog.inputMode && dialog.focus === listCount + 1;
+  const doneLabel = doneFocused
+    ? `${BOLD}${GREEN}[ Done ]${RESET}`
+    : `[ Done ]`;
+  const donePad = Math.max(0, Math.floor((innerWidth - 8) / 2));
+  lines.push(`${" ".repeat(donePad)}${doneLabel}`);
+
+  return { title, contentLines: lines };
 }

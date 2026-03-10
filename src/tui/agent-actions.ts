@@ -802,8 +802,49 @@ function handleConfigItemAction(
       }).catch((err) => {
         ctx.setNotice(`Failed to save: ${err}`);
       });
+    } else if (item.type === "string[]" && item.key.startsWith("permissions.")) {
+      // Open permissions editor for allow/deny lists
+      // Derive the role key (e.g., "permissions.manager") from "permissions.manager.allow"
+      const parts = item.key.split(".");
+      const roleKey = parts.slice(0, 2).join("."); // "permissions.manager" or "permissions.worker"
+      const allowKey = `${roleKey}.allow`;
+      const denyKey = `${roleKey}.deny`;
+      const allowEntry = config[allowKey];
+      const denyEntry = config[denyKey];
+      const allowList = Array.isArray(allowEntry?.value) ? [...(allowEntry.value as string[])] : [];
+      const denyList = Array.isArray(denyEntry?.value) ? [...(denyEntry.value as string[])] : [];
+      const initialTab = item.key.endsWith(".deny") ? 1 : 0;
+
+      ctx.closeDialog();
+      ctx.showDialog({
+        type: "permissions-editor",
+        roleKey,
+        tab: initialTab as 0 | 1,
+        allowList,
+        denyList,
+        focus: 0,
+        inputMode: false,
+        inputValue: "",
+        scrollOffset: 0,
+        configFilePath,
+        onSave: (newAllow: string[], newDeny: string[]) => {
+          ctx.closeDialog();
+          Promise.all([
+            writeConfig(configFilePath, allowKey, newAllow),
+            writeConfig(configFilePath, denyKey, newDeny),
+          ]).then(() => {
+            const source = tab === 1 ? "project" as const : "user" as const;
+            config[allowKey] = { value: newAllow, source };
+            config[denyKey] = { value: newDeny, source };
+            ctx.setNotice(`${roleKey} permissions updated`);
+            loadSetupDialog(ctx, repoPath, tab).catch((err) => ctx.setNotice(`Setup error: ${err}`));
+          }).catch((err) => {
+            ctx.setNotice(`Failed to save: ${err}`);
+          });
+        },
+      });
     } else {
-      // Open input dialog
+      // Open input dialog for number, string, or non-permission string[]
       const currentStr = item.type === "string[]"
         ? (item.value as string[] ?? []).join(", ")
         : String(item.value ?? "");

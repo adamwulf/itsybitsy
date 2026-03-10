@@ -36,7 +36,7 @@ import type { DialogState } from "./dialog-handler";
 import {
   wrapTextareaLines, TEXTAREA_VISIBLE_HEIGHT,
   handleDialogInput, renderTextareaBlock, buildFolderBrowserContent, buildNewAgentFormContent,
-  buildSetupContent,
+  buildSetupContent, buildPermissionsEditorContent,
 } from "./dialog-handler";
 import {
   RightPaneComponent, colorizeDiff, colorizeLog,
@@ -356,6 +356,9 @@ class DialogOverlayComponent implements Component {
       case "setup": {
         return buildSetupContent(dialog, innerWidth);
       }
+      case "permissions-editor": {
+        return buildPermissionsEditorContent(dialog, innerWidth);
+      }
     }
   }
 }
@@ -559,7 +562,7 @@ export class DashboardComponent implements Component {
   showDialog(dialog: NonNullable<DialogState>) {
     this._dialog = dialog;
     const width = dialog.type === "help" ? 72
-      : (dialog.type === "folder-browser" || dialog.type === "new-agent-form" || dialog.type === "setup") ? 70
+      : (dialog.type === "folder-browser" || dialog.type === "new-agent-form" || dialog.type === "setup" || dialog.type === "permissions-editor") ? 70
       : DIALOG_WIDTH;
     if (width !== DIALOG_WIDTH && this.overlayHandle) {
       this.overlayHandle.hide();

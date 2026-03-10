@@ -1169,11 +1169,11 @@ The following commands existed in `ib-commands.ts` but were NOT wired as CLI cas
 
 ---
 
-### Phase 29 (future): inject-status Flag Support
+### Phase 29: inject-status Flag Support
 
-**Status:** Aspirational.
+**Status:** Not started.
 
-**Goal:** Complete the `ib hooks inject-status` implementation to match bash `ib` behavior for `--full`, `--if-changed`, and `--visible` flags.
+**Goal:** Achieve exact parity with bash `ib hooks inject-status`. The current implementation always outputs full status and ignores all flags. Bash `ib` has three modes controlled by flags, a hash-based change cache, a `systemMessage` for the status bar, and reads `hook_event_name` from stdin.
 
 **Background:**
 The hook is installed in two places in `~/.claude/settings.json`:

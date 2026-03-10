@@ -2903,3 +2903,79 @@ describe("watchdog dashboard integration", () => {
     expect(isWatchdogRunning()).toBe(true);
   });
 });
+
+describe("usage error indicator", () => {
+  test("shows warning prefix when usage fetch had an error with stale data", () => {
+    const dashboard = makeDashboard();
+    const agent = makeAgent("agent-1", "/repos/a");
+    const flatList: FlatEntry[] = [
+      makeFlatRepoHeader("a", "/repos/a", true),
+      makeFlatAgent(agent, { connector: "└── " }),
+    ];
+    dashboard.onUpdate([agent], flatList, []);
+
+    // Simulate an error fetch that returned stale data
+    // Access the private statusBar via the dashboard's render
+    (dashboard as any).statusBar.usage = { sessionPct: 57, weeklyPct: 35, sessionReset: "44m", weeklyReset: "2d 7h" };
+    (dashboard as any).statusBar.usageError = true;
+
+    const lines = dashboard.render(120);
+    const footer = lines.map(l => stripAnsi(l)).join("\n");
+    expect(footer).toContain("⚠️");
+    expect(footer).toContain("session:57%");
+  });
+
+  test("shows 'usage unavailable' when error with no data", () => {
+    const dashboard = makeDashboard();
+    const agent = makeAgent("agent-1", "/repos/a");
+    const flatList: FlatEntry[] = [
+      makeFlatRepoHeader("a", "/repos/a", true),
+      makeFlatAgent(agent, { connector: "└── " }),
+    ];
+    dashboard.onUpdate([agent], flatList, []);
+
+    (dashboard as any).statusBar.usage = null;
+    (dashboard as any).statusBar.usageError = true;
+
+    const lines = dashboard.render(120);
+    const footer = lines.map(l => stripAnsi(l)).join("\n");
+    expect(footer).toContain("⚠️  usage unavailable");
+  });
+
+  test("no warning when fetch succeeds", () => {
+    const dashboard = makeDashboard();
+    const agent = makeAgent("agent-1", "/repos/a");
+    const flatList: FlatEntry[] = [
+      makeFlatRepoHeader("a", "/repos/a", true),
+      makeFlatAgent(agent, { connector: "└── " }),
+    ];
+    dashboard.onUpdate([agent], flatList, []);
+
+    (dashboard as any).statusBar.usage = { sessionPct: 57, weeklyPct: 35, sessionReset: "44m", weeklyReset: "2d 7h" };
+    (dashboard as any).statusBar.usageError = false;
+
+    const lines = dashboard.render(120);
+    const footer = lines.map(l => stripAnsi(l)).join("\n");
+    expect(footer).not.toContain("⚠️");
+    expect(footer).toContain("session:57%");
+  });
+
+  test("no warning and no usage text when no data and no error", () => {
+    const dashboard = makeDashboard();
+    const agent = makeAgent("agent-1", "/repos/a");
+    const flatList: FlatEntry[] = [
+      makeFlatRepoHeader("a", "/repos/a", true),
+      makeFlatAgent(agent, { connector: "└── " }),
+    ];
+    dashboard.onUpdate([agent], flatList, []);
+
+    (dashboard as any).statusBar.usage = null;
+    (dashboard as any).statusBar.usageError = false;
+
+    const lines = dashboard.render(120);
+    const footer = lines.map(l => stripAnsi(l)).join("\n");
+    expect(footer).not.toContain("⚠️");
+    expect(footer).not.toContain("usage unavailable");
+    expect(footer).not.toContain("session:");
+  });
+});

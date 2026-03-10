@@ -1,6 +1,6 @@
 /**
  * Claude API usage tracking — fetches session/weekly utilization from Anthropic API.
- * Caches at ~/.itsybitsy/usage-cache.json with 1-minute TTL.
+ * Caches at ~/.itsybitsy/usage-cache.json with 3-minute TTL.
  * Uses a lock file to rate-limit API calls to once per 30s across processes.
  */
 
@@ -40,7 +40,7 @@ let ITSYBITSY_DIR = join(homedir(), ".itsybitsy");
 let CACHE_PATH = join(ITSYBITSY_DIR, "usage-cache.json");
 let LOCK_PATH = join(ITSYBITSY_DIR, "usage.lock");
 let CREDENTIALS_PATH = join(homedir(), ".claude", ".credentials.json");
-const CACHE_TTL_MS = 60_000; // 1 minute normal refresh
+const CACHE_TTL_MS = 180_000; // 3 minute normal refresh
 const LOCK_MAX_AGE_MS = 30_000; // only one API attempt per 30s across processes
 const API_TIMEOUT_MS = 5_000; // 5s fetch timeout
 const MAX_BACKOFF_MS = 10 * 60_000; // 10 minutes max backoff on failures
@@ -66,6 +66,11 @@ export interface UsageData {
   weeklyPct: number | null;
   sessionReset: string | null;
   weeklyReset: string | null;
+}
+
+export interface UsageResult {
+  data: UsageData | null;
+  error: boolean;
 }
 
 interface ApiResponse {
@@ -191,34 +196,34 @@ async function releaseLock(): Promise<void> {
 }
 
 /** Handle API failure: apply exponential backoff on cached response, or return null. */
-async function handleFailure(cache: CacheFile | null, now: number): Promise<UsageData | null> {
+async function handleFailure(cache: CacheFile | null, now: number): Promise<UsageResult> {
   await releaseLock();
   if (cache) {
     const backoffMs = Math.min(cache.nextBackoffMs ?? 60_000, MAX_BACKOFF_MS);
     const nextBackoffMs = Math.min(backoffMs + 60_000, MAX_BACKOFF_MS);
     const retryTimestamp = Math.floor((now + backoffMs - CACHE_TTL_MS) / 1000);
     await writeCache({ timestamp: retryTimestamp, response: cache.response, nextBackoffMs });
-    return parseUsageResponse(cache.response);
+    return { data: parseUsageResponse(cache.response), error: true };
   }
-  return null;
+  return { data: null, error: true };
 }
 
-export async function fetchUsage(): Promise<UsageData | null> {
+export async function fetchUsage(): Promise<UsageResult> {
   await mkdir(ITSYBITSY_DIR, { recursive: true });
   // Check cache
   const cache = await readCache();
   const now = Date.now();
   if (cache && now - cache.timestamp * 1000 < CACHE_TTL_MS) {
-    return parseUsageResponse(cache.response);
+    return { data: parseUsageResponse(cache.response), error: false };
   }
 
   const token = await readAccessToken();
-  if (!token) return null;
+  if (!token) return { data: null, error: true };
 
   // Rate limit: only one API attempt per 30s across all processes
   if (await isLocked()) {
-    if (cache) return parseUsageResponse(cache.response);
-    return null;
+    if (cache) return { data: parseUsageResponse(cache.response), error: false };
+    return { data: null, error: true };
   }
 
   await acquireLock();
@@ -244,11 +249,11 @@ export async function fetchUsage(): Promise<UsageData | null> {
     // Success — write cache with no backoff, release lock
     await writeCache({ timestamp: Math.floor(now / 1000), response: body, nextBackoffMs: 60_000 });
     await releaseLock();
-    return parseUsageResponse(body);
+    return { data: parseUsageResponse(body), error: false };
   } catch {
     // Network error or timeout — use stale cache if available
     await releaseLock();
-    if (cache) return parseUsageResponse(cache.response);
-    return null;
+    if (cache) return { data: parseUsageResponse(cache.response), error: true };
+    return { data: null, error: true };
   }
 }

@@ -18,7 +18,7 @@ import type { Agent } from "./agents";
 import type { AgentState } from "./parse-state";
 import { sendMessage } from "./ib-commands";
 import { fetchUsage } from "./usage";
-import type { UsageData } from "./usage";
+import type { UsageData, UsageResult } from "./usage";
 import type { SpawnFn } from "./types";
 import type { RepoEntry } from "./registry";
 
@@ -79,10 +79,10 @@ export function resetWatchdogSpawnRunner(): void {
 }
 
 /** Overridable fetchUsage for testing. */
-let fetchUsageFn: () => Promise<UsageData | null> = fetchUsage;
+let fetchUsageFn: () => Promise<UsageResult> = fetchUsage;
 
 /** Override fetchUsage for testing. */
-export function setWatchdogFetchUsage(fn: () => Promise<UsageData | null>): void {
+export function setWatchdogFetchUsage(fn: () => Promise<UsageResult>): void {
   fetchUsageFn = fn;
 }
 
@@ -287,7 +287,8 @@ async function handleRateLimited(agent: Agent, tracker: AgentTracker, _allAgents
   }
 
   // Check usage API to see if usage has dropped enough to resume
-  const usage = await fetchUsageFn();
+  const usageResult = await fetchUsageFn();
+  const usage = usageResult.data;
   if (usage && usage.sessionPct !== null && usage.sessionPct < RATE_LIMIT_RECOVERY_THRESHOLD) {
     await sendMessage(
       agent,

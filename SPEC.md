@@ -360,8 +360,11 @@ Questions from agents that no longer exist (no directory in `.ittybitty/agents/`
         last-nudge                   # Unix timestamp of last nudge (stop hook debounce)
         nudge-recheck                # Marker file for delayed recheck scheduling
         watchdog.log                 # Watchdog process output
-        debug-logs/                  # Debug captures from stop hook
-          stop-<epoch>-<state>.txt
+        debug-logs/                  # Debug captures from hooks/watchdog/snapshot
+          stop-<epoch>-<state>.txt     # Stop hook triggers
+          nudge-<epoch>-<state>.txt    # Nudge recheck captures
+          watchdog-<epoch>-<state>.txt # Watchdog unknown-state captures
+          snapshot-<epoch>-<state>.txt # Manual snapshot from `ib watch`
         repo/                        # Git worktree
           .claude/
             settings.local.json      # Agent-specific settings with hooks
@@ -394,7 +397,7 @@ Questions from agents that no longer exist (no directory in `.ittybitty/agents/`
   "worker": false,
   "yolo": false,
   "model": "sonnet",
-  "claude_pid": "12345"
+  "claude_pid": "12345"           // appended after Claude starts (not in initial write)
 }
 ```
 
@@ -411,14 +414,14 @@ Questions from agents that no longer exist (no directory in `.ittybitty/agents/`
 | `worker` | boolean | `true` for worker agents, `false` for managers |
 | `yolo` | boolean | Whether `--yolo` (skip permissions) was used |
 | `model` | string | Claude model name (e.g., "sonnet", "opus", "haiku") |
-| `claude_pid` | string | PID of the Claude process (added after start.sh launches Claude) |
+| `claude_pid` | string | PID of the Claude process (appended to meta.json via `sed` after start.sh launches Claude — not present in the initial write) |
 
 ### 5.3 Worktree ↔ Branch Relationship
 
 Each agent's worktree is linked to a git branch named `agent/<agent-id>`:
 
-- Top-level agents branch from `HEAD` of the main repo
-- Worker/sub-agents branch from `agent/<manager-id>`
+- Top-level agents (no `--manager`) branch from `HEAD` of the main repo
+- Sub-agents (any agent with `--manager`) branch from `agent/<manager-id>` regardless of worker/manager role
 - All branches are local (no remote tracking)
 - The worktree is at `.ittybitty/agents/<id>/repo`
 - On merge or kill, both the worktree and branch are removed

@@ -360,7 +360,7 @@ Questions from agents that no longer exist (no directory in `.ittybitty/agents/`
         start.sh                     # Tmux startup script
         exit-check.sh                # Post-session interactive check
         resume.sh                    # Resume startup script (created on resume)
-        settings.local.json          # Copied from worktree on kill/nuke (bash teardown_agent only; not copied during merge — see §3.5 callout)
+        settings.local.json          # Copied from worktree on kill/nuke; bash skips this during merge but TS copies it (see §3.5 callout)
         output.log                   # Captured tmux output (on kill/merge)
         last-nudge                   # Unix timestamp of last nudge (stop hook debounce)
         nudge-recheck                # Marker file for delayed recheck scheduling

@@ -300,6 +300,7 @@ export async function nukeAllAgents(repoPath: string): Promise<IbCommandResult> 
  * 6. Auto-accept workspace trust if not yolo
  * 7. Send resume nudge
  * 8. Log result
+ * 9. Auto-spawn watchdog
  */
 export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
   const agentDir = join(agent.repoPath, ".ittybitty", "agents", agent.id);
@@ -437,6 +438,17 @@ ${absExitScript}
   // Log
   await logAgent(agentDir, "Agent resumed");
   await logAgent(agentDir, "Sent resume nudge");
+
+  // Auto-spawn watchdog (self-exits if already running)
+  try {
+    const watchdogLog = join(agentDir, "watchdog.log");
+    const watchdogProc = Bun.spawn(["ib", "watchdog"], {
+      cwd: agent.repoPath,
+      stdout: Bun.file(watchdogLog),
+      stderr: Bun.file(watchdogLog),
+    });
+    watchdogProc.unref();
+  } catch { /* ignore */ }
 
   return { ok: true, exitCode: 0, stdout: `Use 'ib look ${agent.id}' to view output`, stderr: "" };
 }
@@ -1310,7 +1322,7 @@ async function buildAgentSettings(
  * 20. Output agent ID
  * 21. Post-create-agent hook
  * 22. Auto-accept workspace trust (if not yolo)
- * 23. Auto-spawn watchdog (if has manager)
+ * 23. Auto-spawn watchdog
  */
 export async function newAgent(
   repoPath: string,
@@ -1753,17 +1765,15 @@ ${absExitScript}
   }
 
   // 23. Auto-spawn watchdog (global, not per-agent — self-exits if already running)
-  if (manager) {
-    try {
-      const watchdogLog = join(agentDir, "watchdog.log");
-      const watchdogProc = Bun.spawn(["ib", "watchdog"], {
-        cwd: rootRepoPath,
-        stdout: Bun.file(watchdogLog),
-        stderr: Bun.file(watchdogLog),
-      });
-      watchdogProc.unref();
-    } catch { /* ignore */ }
-  }
+  try {
+    const watchdogLog = join(agentDir, "watchdog.log");
+    const watchdogProc = Bun.spawn(["ib", "watchdog"], {
+      cwd: rootRepoPath,
+      stdout: Bun.file(watchdogLog),
+      stderr: Bun.file(watchdogLog),
+    });
+    watchdogProc.unref();
+  } catch { /* ignore */ }
 
   return { ok: true, exitCode: 0, stdout, stderr: "" };
 }

@@ -23,3 +23,8 @@ export function isValidAgentId(value: string): boolean {
 export function isValidTmuxSession(value: string): boolean {
   return /^[a-zA-Z0-9_-]+$/.test(value);
 }
+
+/** Validate a Claude session ID (UUID format): hex digits and hyphens only. */
+export function isValidSessionId(value: string): boolean {
+  return /^[a-fA-F0-9-]+$/.test(value);
+}

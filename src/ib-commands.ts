@@ -21,7 +21,7 @@ import {
 } from "./agent-lifecycle";
 import { readConfig } from "./config";
 import type { SpawnFn } from "./types";
-import { isValidModel, isValidToolList, isValidTmuxSession } from "./validation";
+import { isValidModel, isValidToolList, isValidTmuxSession, isValidSessionId } from "./validation";
 
 export interface IbCommandResult {
   ok: boolean;
@@ -318,6 +318,11 @@ export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
   const sessionId = agent.meta.session_id;
   if (!sessionId || sessionId === "null") {
     return { ok: false, exitCode: 1, stdout: "", stderr: "No session_id found in meta.json" };
+  }
+
+  // Validate session_id before shell interpolation
+  if (!isValidSessionId(sessionId)) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Invalid session ID: ${sessionId}` };
   }
 
   // Read model

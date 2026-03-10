@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { isValidModel, isValidToolList, isValidAgentId, isValidTmuxSession } from "./validation";
+import { isValidModel, isValidToolList, isValidAgentId, isValidTmuxSession, isValidSessionId } from "./validation";
 
 describe("isValidModel", () => {
   test("accepts typical model names", () => {
@@ -70,5 +70,21 @@ describe("isValidTmuxSession", () => {
     expect(isValidTmuxSession("session;ls")).toBe(false);
     expect(isValidTmuxSession("")).toBe(false);
     expect(isValidTmuxSession("session name")).toBe(false);
+  });
+});
+
+describe("isValidSessionId", () => {
+  test("accepts UUID-format session IDs", () => {
+    expect(isValidSessionId("550e8400-e29b-41d4-a716-446655440000")).toBe(true);
+    expect(isValidSessionId("abcdef1234567890")).toBe(true);
+    expect(isValidSessionId("a1b2-c3d4")).toBe(true);
+  });
+
+  test("rejects shell injection attempts", () => {
+    expect(isValidSessionId("$(whoami)")).toBe(false);
+    expect(isValidSessionId("`id`")).toBe(false);
+    expect(isValidSessionId('"; rm -rf /')).toBe(false);
+    expect(isValidSessionId("")).toBe(false);
+    expect(isValidSessionId("uuid with spaces")).toBe(false);
   });
 });

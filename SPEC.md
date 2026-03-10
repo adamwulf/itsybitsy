@@ -226,17 +226,18 @@ If either check matches, the caller is considered an agent.
 
 Before merging, the following are verified:
 
-1. Agent directory exists with `meta.json`
+1. Agent directory exists (bash checks directory only; TS also verifies `meta.json` exists)
 2. Agent has a worktree directory (`<agent-dir>/repo`)
 3. Caller is not inside the agent's own worktree
 4. Agent worktree has no uncommitted changes
-5. Current directory (caller's repo) has no uncommitted changes
+5. Target branch detection (see §3.3)
 6. Agent branch (`agent/<id>`) exists
-7. Pre-rebase conflict check passes (creates a temp branch/worktree, attempts rebase, cleans up)
+7. Current directory (caller's CWD) has no uncommitted changes
+8. Pre-rebase conflict check passes (creates a temp branch/worktree, attempts rebase, cleans up)
 
 ### 3.3 Target Branch Detection
 
-The target branch is determined from the caller's context:
+The target branch is determined from the caller's context (unless overridden with `--into BRANCH` in bash):
 
 1. `git branch --show-current` — the caller's current branch
 2. Fallback to `main` if it exists
@@ -245,10 +246,12 @@ The target branch is determined from the caller's context:
 
 **Critical**: The target is the current branch in the CWD, not necessarily `main`. When a manager merges a worker, the target is the manager's branch (`agent/<manager-id>`).
 
+The TS `mergeAgent` always uses auto-detection (no `--into` equivalent) since it runs from the dashboard where CWD context is sufficient.
+
 ### 3.4 Merge Execution
 
 1. **Rebase**: `git -C <worktree-path> rebase <target-branch>` — rebase the agent's branch onto the target in the agent's worktree
-2. **Checkout**: `git -C <repo-path> checkout <target-branch>` — switch to target branch in the caller's repo
+2. **Checkout**: `git checkout <target-branch>` — switch to target branch in the caller's CWD (no `-C`; when a manager merges, CWD is the manager's worktree, not the root repo)
 3. **Merge** (strategy depends on caller):
    - **Agent caller (manager merging sub-agent)**: `git merge --ff-only <agent-branch>` — fast-forward only
    - **User caller (top-level merge)**: `git merge --no-ff <agent-branch> -m "Merge agent <id> work"` — always creates a merge commit
@@ -260,13 +263,15 @@ After successful merge:
 1. Capture tmux output to `output.log`
 2. Kill Claude process
 3. Kill tmux session
-4. Copy `settings.local.json` from worktree to agent dir
+4. Copy `settings.local.json` from worktree to agent dir [^callout: bash `do_merge` does NOT do this step — it only exists in `teardown_agent` (kill/nuke path). The TS `mergeAgent` added this to preserve hook/permission config in archives.]
 5. Remove git worktree
 6. Delete git branch
 7. Archive artifacts
 8. Remove questions for this agent
 9. Remove agent directory
 10. Scan for orphaned Claude processes
+
+**Note on `mergeCheckAgent`**: The TS implementation hardcodes `"main"` as the target branch for conflict checks and commit counting, rather than using the dynamic detection (current branch → main → master) that bash `cmd_merge_check` uses. [^callout: intentional simplification in TS — the dashboard always runs merge-check from the root repo context where `main` is the expected target.]
 
 ---
 

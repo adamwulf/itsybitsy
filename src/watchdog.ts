@@ -287,7 +287,7 @@ async function saveUnknownDebugLog(agent: Agent): Promise<void> {
     const debugDir = join(agentDir, "debug-logs");
     mkdirSync(debugDir, { recursive: true });
 
-    const timestamp = Math.floor(Date.now() / 1000);
+    const timestamp = Math.floor(nowFn() / 1000);
     const debugFile = join(debugDir, `watchdog-${timestamp}-unknown.txt`);
     await Bun.write(debugFile, output);
 

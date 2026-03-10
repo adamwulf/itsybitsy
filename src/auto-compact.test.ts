@@ -112,8 +112,15 @@ describe("transcriptPath", () => {
 });
 
 describe("contextSizeForModel", () => {
+  let errorSpy: ReturnType<typeof spyOn>;
+
   beforeEach(() => {
     resetWarnedModels();
+    errorSpy = spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    errorSpy.mockRestore();
   });
 
   test("returns 200K for sonnet", () => {
@@ -137,26 +144,22 @@ describe("contextSizeForModel", () => {
   });
 
   test("logs warning once per unknown model", () => {
-    const spy = spyOn(console, "error").mockImplementation(() => {});
     contextSizeForModel("unknown-model");
-    expect(spy).toHaveBeenCalledTimes(1);
-    expect(spy.mock.calls[0]![0]).toContain("Unknown model");
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    expect(errorSpy.mock.calls[0]![0]).toContain("Unknown model");
     // Second call with same model should not warn again
     contextSizeForModel("unknown-model");
-    expect(spy).toHaveBeenCalledTimes(1);
+    expect(errorSpy).toHaveBeenCalledTimes(1);
     // Different unknown model should warn
     contextSizeForModel("another-unknown");
-    expect(spy).toHaveBeenCalledTimes(2);
-    spy.mockRestore();
+    expect(errorSpy).toHaveBeenCalledTimes(2);
   });
 
   test("does not warn for known models", () => {
-    const spy = spyOn(console, "error").mockImplementation(() => {});
     contextSizeForModel("claude-sonnet-4.5");
     contextSizeForModel("claude-opus-4-5-20250514");
     contextSizeForModel("claude-opus-4-6");
-    expect(spy).not.toHaveBeenCalled();
-    spy.mockRestore();
+    expect(errorSpy).not.toHaveBeenCalled();
   });
 });
 
@@ -253,6 +256,17 @@ describe("parseTranscriptUsage", () => {
 });
 
 describe("calculateUsagePercent", () => {
+  let errorSpy: ReturnType<typeof spyOn>;
+
+  beforeEach(() => {
+    resetWarnedModels();
+    errorSpy = spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    errorSpy.mockRestore();
+  });
+
   test("calculates percentage for 200K context", () => {
     const usage: TranscriptUsage = {
       input_tokens: 100_000,

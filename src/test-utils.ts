@@ -15,7 +15,7 @@ export function makeAgent(overrides: Partial<Agent> & { id: string }): Agent {
     children: [],
     meta: {
       id: overrides.id,
-      session_id: "sess-1",
+      session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
       tmux_session: `tmux-${overrides.id}`,
       prompt: "test prompt",
       manager: null,

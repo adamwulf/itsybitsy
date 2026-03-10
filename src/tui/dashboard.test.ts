@@ -2057,7 +2057,7 @@ describe("formatAgentRow full-width highlight", () => {
       children: [],
       meta: {
         id: "agent-abc",
-        session_id: "sess-1",
+        session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
         tmux_session: "tmux-agent-abc",
         prompt: "do stuff",
         manager: null,

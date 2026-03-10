@@ -685,7 +685,7 @@ describe("resumeAgent (native)", () => {
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-abc",
       tmux_session: "tmux-agent-abc",
-      session_id: "sess-123",
+      session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
     }));
 
     const agent = makeAgent("agent-abc", tempDir, "running");
@@ -723,7 +723,7 @@ describe("resumeAgent (native)", () => {
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-abc",
       tmux_session: "tmux-agent-abc",
-      session_id: "sess-123",
+      session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
       model: "opus",
     }));
 
@@ -733,7 +733,7 @@ describe("resumeAgent (native)", () => {
       repoName: "test",
       state: "stopped",
       meta: {
-        session_id: "sess-123",
+        session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
         tmux_session: "tmux-agent-abc",
         model: "opus",
       } as any,
@@ -746,7 +746,7 @@ describe("resumeAgent (native)", () => {
     // resume.sh should be created
     const resumeScript = await Bun.file(join(agentDir, "resume.sh")).text();
     expect(resumeScript).toContain("claude --resume");
-    expect(resumeScript).toContain("sess-123");
+    expect(resumeScript).toContain("a1b2c3d4-e5f6-7890-abcd-ef1234567890");
     expect(resumeScript).toContain("--model opus");
 
     // tmux new-session should have been called
@@ -770,7 +770,7 @@ describe("resumeAgent (native)", () => {
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-abc",
       tmux_session: "tmux-agent-abc",
-      session_id: "sess-123",
+      session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
     }));
     await Bun.write(join(agentDir, "start.sh"), "#!/bin/bash\nclaude --dangerously-skip-permissions &\n");
 
@@ -780,7 +780,7 @@ describe("resumeAgent (native)", () => {
       repoName: "test",
       state: "stopped",
       meta: {
-        session_id: "sess-123",
+        session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
         tmux_session: "tmux-agent-abc",
       } as any,
     });
@@ -800,7 +800,7 @@ describe("resumeAgent (native)", () => {
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-abc",
       tmux_session: "tmux-agent-abc",
-      session_id: "sess-123",
+      session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
     }));
 
     const agent = _makeAgent({
@@ -809,7 +809,7 @@ describe("resumeAgent (native)", () => {
       repoName: "test",
       state: "stopped",
       meta: {
-        session_id: "sess-123",
+        session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
         tmux_session: "tmux-agent-abc",
       } as any,
     });
@@ -827,7 +827,7 @@ describe("resumeAgent (native)", () => {
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-abc",
       tmux_session: "tmux-agent-abc",
-      session_id: "sess-123",
+      session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
     }));
 
     const agent = _makeAgent({
@@ -836,7 +836,7 @@ describe("resumeAgent (native)", () => {
       repoName: "test",
       state: "stopped",
       meta: {
-        session_id: "sess-123",
+        session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
         tmux_session: "tmux-agent-abc",
       } as any,
     });
@@ -852,6 +852,70 @@ describe("resumeAgent (native)", () => {
     // -c flag value should be tempDir (not the repo subdir)
     const cFlagIdx = newSessionCall!.indexOf("-c");
     expect(newSessionCall![cFlagIdx + 1]).toBe(tempDir);
+  });
+
+  test("rejects model with shell injection characters", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-abc",
+      tmux_session: "tmux-agent-abc",
+      session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      model: 'opus$(whoami)',
+    }));
+
+    const agent = _makeAgent({
+      id: "agent-abc",
+      repoPath: tempDir,
+      repoName: "test",
+      state: "stopped",
+      meta: { session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890", tmux_session: "tmux-agent-abc", model: 'opus$(whoami)' } as any,
+    });
+    const result = await resumeAgent(agent);
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("Invalid model name");
+  });
+
+  test("rejects session_id with shell injection characters", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-abc",
+      tmux_session: "tmux-agent-abc",
+      session_id: '$(whoami)',
+    }));
+
+    const agent = _makeAgent({
+      id: "agent-abc",
+      repoPath: tempDir,
+      repoName: "test",
+      state: "stopped",
+      meta: { session_id: '$(whoami)', tmux_session: "tmux-agent-abc" } as any,
+    });
+    const result = await resumeAgent(agent);
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("Invalid session ID");
+  });
+
+  test("rejects tmux session with shell injection characters", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-abc",
+      tmux_session: 'session$(whoami)',
+      session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    }));
+
+    const agent = _makeAgent({
+      id: "agent-abc",
+      repoPath: tempDir,
+      repoName: "test",
+      state: "stopped",
+      meta: { session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890", tmux_session: 'session$(whoami)' } as any,
+    });
+    const result = await resumeAgent(agent);
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("Invalid tmux session name");
   });
 });
 
@@ -2153,6 +2217,38 @@ describe("newAgent (native)", () => {
 
     const startSh = await Bun.file(join(agentsDir, "test-print", "start.sh")).text();
     expect(startSh).toContain("--print");
+  });
+
+  test("rejects model with shell injection characters", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("task", { name: "test-bad-model", model: 'opus$(whoami)' });
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("Invalid model name");
+  });
+
+  test("rejects allowTools with shell injection characters", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("task", { name: "test-bad-allow", allowTools: 'Bash$(whoami)' });
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("Invalid --allow tools value");
+  });
+
+  test("rejects denyTools with shell injection characters", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("task", { name: "test-bad-deny", denyTools: 'Tool`id`' });
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("Invalid --deny tools value");
+  });
+
+  test("accepts valid model, allowTools, and denyTools", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("task", {
+      name: "test-valid-tools",
+      model: "claude-sonnet-4-6",
+      allowTools: "Bash(git:*),Read",
+      denyTools: "Write",
+    });
+    expect(result.ok).toBe(true);
   });
 });
 

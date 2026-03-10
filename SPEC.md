@@ -577,7 +577,7 @@ For each config key, the first valid value found (project → user → default) 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `maxAgents` | number | `10` | Maximum concurrent agents per repo |
-| `model` | string | `"sonnet"` | Default Claude model for new agents |
+| `model` | string | `"sonnet"` | Default Claude model for new agents [^callout]: The TS `config.ts` defaults `model` to `"sonnet"` at the config layer, so `readConfig()` always returns `"sonnet"` if unset. The bash `load_config()` defaults `CONFIG_MODEL` to `""` (empty), and falls back to `"sonnet"` at spawn time (`ib:6800–6803`). Effective behavior is identical — the divergence is only in which layer provides the fallback. |
 | `fps` | number | `10` | Target frame rate for `ib watch` TUI |
 | `createPullRequests` | boolean | `false` | Instruct agents to create PRs on completion |
 | `allowAgentQuestions` | boolean | `true` | Allow top-level managers to ask user questions via `ib ask` |

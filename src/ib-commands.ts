@@ -1912,7 +1912,7 @@ export async function diffAgent(agent: Agent, opts?: { stat?: boolean }): Promis
  * Shows header, commits vs parent branch, uncommitted changes, and file change summary.
  */
 export async function statusAgent(agent: Agent): Promise<IbCommandResult> {
-  const worktreePath = join(agent.repoPath, ".ittybitsy", "agents", agent.id, "repo");
+  const worktreePath = join(agent.repoPath, ".ittybitty", "agents", agent.id, "repo");
   try {
     await readdir(worktreePath);
   } catch {

@@ -5,6 +5,7 @@
 import { join } from "path";
 import { newAgent } from "../ib-commands";
 import type { IbCommandResult } from "../ib-commands";
+import { AGENT_CWD_PATTERN } from "./shared";
 
 export interface InterceptResult {
   action: "skip" | "intercept";
@@ -21,8 +22,6 @@ const SKIP_SUBAGENT_TYPES = [
 ];
 
 const VALID_MODELS = new Set(["sonnet", "opus", "haiku", ""]);
-
-const AGENT_CWD_PATTERN = /\.ittybitty\/agents\/([^/]+)\/repo(\/|$)/;
 
 export async function processTaskIntercept(
   input: {

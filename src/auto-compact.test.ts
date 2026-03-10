@@ -1,4 +1,4 @@
-import { test, expect, describe, beforeEach, afterEach } from "bun:test";
+import { test, expect, describe, beforeEach, afterEach, spyOn } from "bun:test";
 import { join } from "path";
 import {
   encodeClaudeProjectPath,
@@ -13,6 +13,7 @@ import {
   resetCompactSpawnRunner,
   setUsageReader,
   resetUsageReader,
+  resetWarnedModels,
   type CompactState,
   type TranscriptUsage,
 } from "./auto-compact";
@@ -111,6 +112,17 @@ describe("transcriptPath", () => {
 });
 
 describe("contextSizeForModel", () => {
+  let errorSpy: ReturnType<typeof spyOn>;
+
+  beforeEach(() => {
+    resetWarnedModels();
+    errorSpy = spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    errorSpy.mockRestore();
+  });
+
   test("returns 200K for sonnet", () => {
     expect(contextSizeForModel("sonnet")).toBe(200_000);
   });
@@ -129,6 +141,28 @@ describe("contextSizeForModel", () => {
 
   test("returns 200K for haiku", () => {
     expect(contextSizeForModel("haiku")).toBe(200_000);
+  });
+
+  test("logs warning once per unknown model", () => {
+    contextSizeForModel("unknown-model");
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    expect(errorSpy.mock.calls[0]![0]).toContain("Unknown model");
+    // Second call with same model should not warn again
+    contextSizeForModel("unknown-model");
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    // Different unknown model should warn
+    contextSizeForModel("another-unknown");
+    expect(errorSpy).toHaveBeenCalledTimes(2);
+  });
+
+  test("does not warn for known models", () => {
+    contextSizeForModel("claude-sonnet-4.5");
+    contextSizeForModel("claude-opus-4-5-20250514");
+    contextSizeForModel("claude-opus-4-6");
+    contextSizeForModel("sonnet");
+    contextSizeForModel("opus");
+    contextSizeForModel("haiku");
+    expect(errorSpy).not.toHaveBeenCalled();
   });
 });
 
@@ -225,6 +259,17 @@ describe("parseTranscriptUsage", () => {
 });
 
 describe("calculateUsagePercent", () => {
+  let errorSpy: ReturnType<typeof spyOn>;
+
+  beforeEach(() => {
+    resetWarnedModels();
+    errorSpy = spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    errorSpy.mockRestore();
+  });
+
   test("calculates percentage for 200K context", () => {
     const usage: TranscriptUsage = {
       input_tokens: 100_000,

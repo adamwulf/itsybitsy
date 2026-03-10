@@ -55,6 +55,12 @@ export function checkMainPath(input: MainPathInput): MainPathResult {
     cdTarget = compoundMatch[1]!.trim();
   }
 
+  // Strip shell comments (# ...)
+  const commentMatch = cdTarget.match(/^(.*?)\s+#/);
+  if (commentMatch) {
+    cdTarget = commentMatch[1]!.trim();
+  }
+
   // Remove surrounding quotes if present
   if (
     (cdTarget.startsWith('"') && cdTarget.endsWith('"')) ||

@@ -3,6 +3,7 @@ import { formatResetTime, parseUsageResponse, fetchUsage, setTestDir, resetTestD
 import { join } from "path";
 import { mkdtemp, rm, writeFile } from "fs/promises";
 import { tmpdir } from "os";
+import { mockFetch as createMockFetch } from "./test-utils";
 
 describe("formatResetTime", () => {
   const now = new Date("2025-12-12T16:15:00Z");
@@ -131,12 +132,8 @@ describe("fetchUsage", () => {
     await Bun.write(cachePath, JSON.stringify(cache));
   }
 
-  function mockFetch(response: any, ok = true, status = 200): void {
-    setTestFetch((async () => ({
-      ok,
-      status,
-      json: async () => response,
-    })) as any);
+  function mockFetch(response: unknown, ok = true, status = 200): void {
+    setTestFetch(createMockFetch(response, ok, status));
   }
 
   test("returns cached response when cache is fresh", async () => {
@@ -363,12 +360,8 @@ describe("readAccessToken keychain fallback", () => {
     await rm(tmpDir, { recursive: true, force: true });
   });
 
-  function mockFetch(response: any, ok = true): void {
-    setTestFetch((async () => ({
-      ok,
-      status: ok ? 200 : 500,
-      json: async () => response,
-    })) as any);
+  function mockFetch(response: unknown, ok = true): void {
+    setTestFetch(createMockFetch(response, ok, ok ? 200 : 500));
   }
 
   /** Create a mock spawn that simulates keychain output. */

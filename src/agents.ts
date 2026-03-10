@@ -66,8 +66,9 @@ export interface AgentReadError {
   error: string;
 }
 
-/** Read a single agent's meta.json. Returns meta or an error description. */
-async function readAgentMeta(agentDir: string): Promise<{ meta: AgentMeta | null; error?: string }> {
+/** Read a single agent's meta.json. Returns meta or an error description.
+ * Exported as _readAgentMeta for testing only. */
+export async function readAgentMeta(agentDir: string): Promise<{ meta: AgentMeta | null; error?: string }> {
   try {
     const metaPath = join(agentDir, "meta.json");
     const file = Bun.file(metaPath);
@@ -77,10 +78,18 @@ async function readAgentMeta(agentDir: string): Promise<{ meta: AgentMeta | null
     if (!data || typeof data.id !== "string") {
       return { meta: null, error: `Malformed ${metaPath}: missing or invalid 'id'` };
     }
-    // Default tmux_session to empty string if missing
-    if (typeof data.tmux_session !== "string") {
-      data.tmux_session = "";
-    }
+    // Apply sensible defaults for all fields with wrong types
+    if (typeof data.session_id !== "string") data.session_id = "";
+    if (typeof data.tmux_session !== "string") data.tmux_session = "";
+    if (typeof data.prompt !== "string") data.prompt = "";
+    if (data.manager !== null && typeof data.manager !== "string") data.manager = null;
+    if (typeof data.created !== "string") data.created = "";
+    if (typeof data.created_epoch !== "number") data.created_epoch = 0;
+    if (typeof data.worktree !== "boolean") data.worktree = true;
+    if (typeof data.worker !== "boolean") data.worker = false;
+    if (typeof data.yolo !== "boolean") data.yolo = false;
+    if (typeof data.model !== "string") data.model = "unknown";
+    if (typeof data.claude_pid !== "string") data.claude_pid = "";
     return { meta: data as AgentMeta };
   } catch (err) {
     return { meta: null, error: `Failed to read ${join(agentDir, "meta.json")}: ${err}` };
@@ -150,8 +159,8 @@ export async function readRepoAgents(repoPath: string, repoName: string): Promis
   };
 }
 
-/** Read pending questions for a repo, filtering out questions from non-existent agents */
-export async function readPendingQuestions(repoPath: string): Promise<PendingQuestion[]> {
+/** Internal helper: read questions for a repo, optionally filtering to pending-only */
+async function readQuestionsInternal(repoPath: string, pendingOnly: boolean): Promise<PendingQuestion[]> {
   try {
     const questionsPath = join(repoPath, ".ittybitty", "user-questions.json");
     const file = Bun.file(questionsPath);
@@ -173,16 +182,26 @@ export async function readPendingQuestions(repoPath: string): Promise<PendingQue
       activeAgentIds = new Set();
     }
 
-    return data.questions.filter(
-      (q: PendingQuestion) => q.status === "pending" && activeAgentIds.has(q.agent)
+    return data.questions.filter((q: PendingQuestion) =>
+      activeAgentIds.has(q.agent) && (!pendingOnly || q.status === "pending")
     );
   } catch (err: unknown) {
     // Expected: file missing (ENOENT), malformed JSON, etc. — silently return empty
     if (err instanceof Error && "code" in err && (err as NodeJS.ErrnoException).code !== "ENOENT") {
-      process.stderr.write(`Warning: failed to read pending questions: ${(err as Error).message}\n`);
+      process.stderr.write(`Warning: failed to read questions: ${(err as Error).message}\n`);
     }
     return [];
   }
+}
+
+/** Read pending questions for a repo, filtering out questions from non-existent agents */
+export async function readPendingQuestions(repoPath: string): Promise<PendingQuestion[]> {
+  return readQuestionsInternal(repoPath, true);
+}
+
+/** Read all questions (pending + acknowledged) for a repo, filtering out questions from non-existent agents */
+export async function readAllQuestions(repoPath: string): Promise<PendingQuestion[]> {
+  return readQuestionsInternal(repoPath, false);
 }
 
 /**

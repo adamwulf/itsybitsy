@@ -6,19 +6,20 @@
 
 import { join, dirname } from "path";
 import { readdir, mkdir, cp, rm, rename, appendFile } from "fs/promises";
+import { SpawnContext } from "./types";
 import type { SpawnFn } from "./types";
 
-/** Pluggable spawn runner — defaults to Bun.spawn, overridable for tests */
-let spawnRunner: SpawnFn = Bun.spawn as SpawnFn;
+/** Spawn context for agent lifecycle operations */
+export const spawnCtx = new SpawnContext();
 
 /** Override the spawn runner (for testing) */
 export function setSpawnRunner(runner: SpawnFn): void {
-  spawnRunner = runner;
+  spawnCtx.set(runner);
 }
 
 /** Reset to the default Bun.spawn runner */
 export function resetSpawnRunner(): void {
-  spawnRunner = Bun.spawn as SpawnFn;
+  spawnCtx.reset();
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -43,10 +44,7 @@ function formatArchiveTimestamp(date: Date = new Date()): string {
 
 /** Run a spawned command and return { stdout, exitCode } */
 async function runCmd(cmd: string[]): Promise<{ stdout: string; exitCode: number }> {
-  const proc = spawnRunner(cmd, { stdout: "pipe", stderr: "pipe" });
-  const stdout = await new Response(proc.stdout).text();
-  const exitCode = await proc.exited;
-  return { stdout: stdout.trim(), exitCode };
+  return spawnCtx.run(cmd);
 }
 
 // ── logAgent ─────────────────────────────────────────────────────────────────
@@ -141,7 +139,7 @@ export async function killAgentProcess(
   // SIGTERM
   try {
     process.kill(numPid, "SIGTERM");
-  } catch {
+  } catch { /* expected: process already dead or no permission */
     return false;
   }
 
@@ -165,7 +163,7 @@ export async function killAgentProcess(
   try {
     process.kill(numPid, 0);
     return false; // Still alive somehow
-  } catch {
+  } catch { /* expected: process is dead after SIGKILL */
     return true;
   }
 }
@@ -181,7 +179,7 @@ export async function captureTmuxOutputToFile(
   outputPath: string
 ): Promise<boolean> {
   try {
-    const proc = spawnRunner(
+    const proc = spawnCtx.runner(
       ["tmux", "capture-pane", "-t", tmuxSession, "-p", "-S", "-"],
       { stdout: "pipe", stderr: "pipe" }
     );
@@ -190,7 +188,7 @@ export async function captureTmuxOutputToFile(
     if (exitCode !== 0) return false;
     await Bun.write(outputPath, raw);
     return true;
-  } catch {
+  } catch { /* expected: tmux session doesn't exist or permission error */
     return false;
   }
 }

@@ -5,39 +5,86 @@
  */
 
 import { addRepo, removeRepo, listRepos, repoDisplayName, type RepoEntry } from "./registry";
-import { agentWorktreePath } from "./agents";
 import type { Agent, FlatEntry } from "./agents";
 import { isValidAgentId } from "./validation";
 
 const args = process.argv.slice(2);
 const command = args[0];
 
+/**
+ * Collect non-archived agents for display, optionally filtered by manager.
+ * Recursively walks children, pushing { agent, depth } into the result array.
+ */
+export function collectAgents(
+  agent: Agent,
+  depth: number,
+  managerFilter: string | null,
+  result: { agent: Agent; depth: number }[],
+): void {
+  if (agent.archived) return;
+  if (managerFilter) {
+    if (agent.meta.manager !== managerFilter && agent.id !== managerFilter) return;
+  }
+  result.push({ agent, depth });
+  for (const child of agent.children) {
+    collectAgents(child, depth + 1, managerFilter, result);
+  }
+}
+
+/**
+ * Recursively search for a manager by ID in the agent tree.
+ * When found, collects that manager's children using collectAgents.
+ */
+export function findManagerInTree(
+  agent: Agent,
+  managerId: string,
+  result: { agent: Agent; depth: number }[],
+): void {
+  if (agent.id === managerId) {
+    for (const child of agent.children) {
+      collectAgents(child, 1, null, result);
+    }
+  } else {
+    for (const child of agent.children) {
+      findManagerInTree(child, managerId, result);
+    }
+  }
+}
+
+/**
+ * Match an agent by ID from a pre-loaded list. Exact match first, then prefix.
+ * Returns { match, ambiguous } — ambiguous is set when multiple prefix matches exist.
+ */
+export function matchAgentById(id: string, agents: Agent[]): { match: Agent | null; ambiguous: string[] } {
+  const exact = agents.find((a) => a.id === id);
+  if (exact) return { match: exact, ambiguous: [] };
+  const matches = agents.filter((a) => a.id.startsWith(id));
+  if (matches.length === 1) return { match: matches[0]!, ambiguous: [] };
+  if (matches.length > 1) return { match: null, ambiguous: matches.map((a) => a.id) };
+  return { match: null, ambiguous: [] };
+}
+
 /** Find an agent by ID (prefix match) across all registered repos. */
-async function findAgentById(id: string, repos: RepoEntry[]): Promise<Agent | null> {
+export async function findAgentById(id: string, repos: RepoEntry[]): Promise<Agent | null> {
   const { readAllAgents } = await import("./agents");
   const { agents } = await readAllAgents(repos);
-  // Exact match first
-  const exact = agents.find((a) => a.id === id);
-  if (exact) return exact;
-  // Prefix match
-  const matches = agents.filter((a) => a.id.startsWith(id));
-  if (matches.length === 1) return matches[0]!;
-  if (matches.length > 1) {
-    console.error(`Ambiguous ID "${id}" matches: ${matches.map((a) => a.id).join(", ")}`);
+  const { match, ambiguous } = matchAgentById(id, agents);
+  if (ambiguous.length > 0) {
+    console.error(`Ambiguous ID "${id}" matches: ${ambiguous.join(", ")}`);
     process.exit(1);
   }
-  return null;
+  return match;
 }
 
 /** Print an IbCommandResult and exit. */
-async function printAndExit(result: { ok: boolean; exitCode: number; stdout: string; stderr: string }): Promise<never> {
+export async function printAndExit(result: { ok: boolean; exitCode: number; stdout: string; stderr: string }): Promise<never> {
   if (result.stdout) console.log(result.stdout);
   if (result.stderr) console.error(result.stderr);
   process.exit(result.exitCode);
 }
 
 /** Require an agent ID argument, find it, or exit with error. */
-async function requireAgent(idArg: string | undefined, repos: RepoEntry[]): Promise<Agent> {
+export async function requireAgent(idArg: string | undefined, repos: RepoEntry[]): Promise<Agent> {
   if (!idArg) {
     console.error("Usage: ib <command> <agent-id>");
     process.exit(1);
@@ -82,6 +129,7 @@ async function main() {
       // Filter by --manager flag if provided
       const managerIdx = args.indexOf("--manager");
       const managerFilter = managerIdx !== -1 ? args[managerIdx + 1] : null;
+      const jsonOutput = args.includes("--json");
 
       const { agents, errors } = await readAllAgents(repos);
       for (const err of errors) {
@@ -89,6 +137,38 @@ async function main() {
       }
       await detectAgentStates(agents);
       const roots = buildAgentTree(agents);
+
+      if (jsonOutput) {
+        // Collect agents matching the manager filter (reuse extracted helpers)
+        const agentsToShow: { agent: Agent; depth: number }[] = [];
+        for (const root of roots) {
+          if (managerFilter) {
+            if (root.id === managerFilter) {
+              for (const child of root.children) {
+                collectAgents(child, 1, null, agentsToShow);
+              }
+            } else {
+              findManagerInTree(root, managerFilter, agentsToShow);
+            }
+          } else {
+            collectAgents(root, 0, null, agentsToShow);
+          }
+        }
+        const jsonData = agentsToShow.map(({ agent: a }) => ({
+          id: a.id,
+          state: a.state,
+          age: a.age,
+          model: a.meta.model,
+          worker: a.meta.worker,
+          manager: a.meta.manager ?? null,
+          repo: a.repoName,
+          repoPath: a.repoPath,
+          prompt: a.meta.prompt,
+          orphaned: a.orphaned ?? false,
+        }));
+        console.log(JSON.stringify(jsonData, null, 2));
+        break;
+      }
 
       const { BOLD, DIM, RESET } = await import("./tui/colors");
       const { displayState } = await import("./tui/agent-tree");
@@ -107,42 +187,18 @@ async function main() {
 
         // Collect agents to display (flat list with indentation for children)
         const agentsToShow: { agent: Agent; depth: number }[] = [];
-        function collect(agent: Agent, depth: number) {
-          if (agent.archived) return;
-          if (managerFilter) {
-            // Show only agents whose manager matches the filter
-            if (agent.meta.manager !== managerFilter && agent.id !== managerFilter) return;
-          }
-          agentsToShow.push({ agent, depth });
-          for (const child of agent.children) {
-            collect(child, depth + 1);
-          }
-        }
         for (const root of repoRoots) {
           if (managerFilter) {
             // When filtering by manager, show direct children of the manager
             if (root.id === managerFilter) {
-              // Show children of this manager
               for (const child of root.children) {
-                collect(child, 1);
+                collectAgents(child, 1, null, agentsToShow);
               }
             } else {
-              // Walk tree looking for the manager
-              function findManager(agent: Agent): void {
-                if (agent.id === managerFilter) {
-                  for (const child of agent.children) {
-                    collect(child, 1);
-                  }
-                } else {
-                  for (const child of agent.children) {
-                    findManager(child);
-                  }
-                }
-              }
-              findManager(root);
+              findManagerInTree(root, managerFilter, agentsToShow);
             }
           } else {
-            collect(root, 0);
+            collectAgents(root, 0, null, agentsToShow);
           }
         }
 
@@ -287,11 +343,28 @@ async function main() {
       const repos = await listRepos();
       const agent = await requireAgent(args[1], repos);
       const hasAll = args.includes("--all");
+      const hasFollow = args.includes("--follow");
       const linesIdx = args.indexOf("--lines");
       const lines = hasAll ? 10000 : linesIdx !== -1 ? parseInt(args[linesIdx + 1]!, 10) || 100 : 100;
 
-      const { captureTmuxOutput } = await import("./tmux-poller");
       const tmuxSession = agent.meta.tmux_session;
+
+      if (hasFollow) {
+        if (!tmuxSession) {
+          console.error("Agent has no tmux session");
+          process.exit(1);
+        }
+        console.error(`Attaching to ${agent.id} (Ctrl+b d to detach)...`);
+        const attachProc = Bun.spawn(["tmux", "attach", "-t", tmuxSession, "-r"], {
+          stdin: "inherit",
+          stdout: "inherit",
+          stderr: "inherit",
+        });
+        process.exit(await attachProc.exited);
+        break;
+      }
+
+      const { captureTmuxOutput } = await import("./tmux-poller");
 
       if (tmuxSession) {
         const output = await captureTmuxOutput(tmuxSession, lines);
@@ -329,87 +402,69 @@ async function main() {
     }
     case "questions":
     case "q": {
-      const { readPendingQuestions } = await import("./agents");
+      const { readPendingQuestions, readAllQuestions } = await import("./agents");
       const repos = await listRepos();
+      const showAll = args.includes("--all") || args.includes("-a");
       if (repos.length === 0) {
         console.log("No repos registered.");
         break;
       }
       let found = false;
       for (const repo of repos) {
-        const questions = await readPendingQuestions(repo.path);
+        const questions = showAll
+          ? await readAllQuestions(repo.path)
+          : await readPendingQuestions(repo.path);
         for (const q of questions) {
           found = true;
-          console.log(`[${repo.name}] ${q.agent}`);
+          const statusTag = showAll && q.status === "acknowledged" ? " [acknowledged]" : "";
+          console.log(`[${repo.name}] ${q.agent}${statusTag}`);
           console.log(`  ${q.question}`);
           console.log(`  ${q.timestamp}`);
           console.log("");
         }
       }
       if (!found) {
-        console.log("No pending questions");
+        console.log(showAll ? "No questions yet." : "No pending questions");
       }
       break;
     }
     case "diff": {
       const repos = await listRepos();
       const agent = await requireAgent(args[1], repos);
-      const cwd = agentWorktreePath(agent);
-
-      // Get merge-base
-      const mergeBaseProc = Bun.spawn(["git", "merge-base", "HEAD", "main"], {
-        cwd,
-        stdout: "pipe",
-        stderr: "pipe",
-      });
-      const mergeBase = (await new Response(mergeBaseProc.stdout).text()).trim();
-      const mbExit = await mergeBaseProc.exited;
-      if (mbExit !== 0) {
-        console.error("Failed to find merge-base with main");
-        process.exit(1);
-      }
-
-      const diffProc = Bun.spawn(["git", "diff", mergeBase], {
-        cwd,
-        stdin: "inherit",
-        stdout: "inherit",
-        stderr: "inherit",
-      });
-      process.exit(await diffProc.exited);
+      const statOnly = args.includes("--stat");
+      const { diffAgent } = await import("./ib-commands");
+      await printAndExit(await diffAgent(agent, { stat: statOnly }));
       break;
     }
     case "status": {
       const repos = await listRepos();
       const agent = await requireAgent(args[1], repos);
-      const cwd = agentWorktreePath(agent);
-
-      const logProc = Bun.spawn(["git", "log", "--oneline", "main..HEAD"], {
-        cwd,
-        stdin: "inherit",
-        stdout: "inherit",
-        stderr: "inherit",
-      });
-      await logProc.exited;
-
-      const statusProc = Bun.spawn(["git", "status", "--short"], {
-        cwd,
-        stdin: "inherit",
-        stdout: "inherit",
-        stderr: "inherit",
-      });
-      process.exit(await statusProc.exited);
+      const { statusAgent } = await import("./ib-commands");
+      await printAndExit(await statusAgent(agent));
       break;
     }
     case "send": {
       const repos = await listRepos();
-      const agent = await requireAgent(args[1], repos);
-      const message = args.slice(2).join(" ");
+      // Parse --from flag before determining agent and message
+      const sendArgs = args.slice(1);
+      let fromAgent: string | undefined;
+      const filteredSendArgs: string[] = [];
+      for (let i = 0; i < sendArgs.length; i++) {
+        if (sendArgs[i] === "--from") {
+          if (!sendArgs[i + 1]) { console.error("Error: --from requires a value"); process.exit(1); }
+          fromAgent = sendArgs[++i];
+        } else {
+          filteredSendArgs.push(sendArgs[i]!);
+        }
+      }
+      const agent = await requireAgent(filteredSendArgs[0], repos);
+      const message = filteredSendArgs.slice(1).join(" ");
       if (!message) {
-        console.error("Usage: ib send <agent-id> <message...>");
+        console.error("Usage: ib send [--from <id>] <agent-id> <message...>");
         process.exit(1);
       }
       const { sendMessage } = await import("./ib-commands");
-      await printAndExit(await sendMessage(agent, message));
+      await printAndExit(await sendMessage(agent, message, fromAgent ? { fromAgent } : undefined));
       break;
     }
     case "kill": {
@@ -446,13 +501,6 @@ async function main() {
       }
       const { mergeAgent } = await import("./ib-commands");
       await printAndExit(await mergeAgent(agent));
-      break;
-    }
-    case "merge-check": {
-      const repos = await listRepos();
-      const agent = await requireAgent(args[1], repos);
-      const { mergeCheckAgent } = await import("./ib-commands");
-      await printAndExit(await mergeCheckAgent(agent));
       break;
     }
     case "resume": {
@@ -515,6 +563,13 @@ async function main() {
           if (!ibArgs[i + 1]) { console.error("Error: --name requires a value"); process.exit(1); }
           opts.name = ibArgs[++i];
         }
+        else if (arg === "--prompt-file") {
+          if (!ibArgs[i + 1]) { console.error("Error: --prompt-file requires a value"); process.exit(1); }
+          const promptFilePath = ibArgs[++i]!;
+          const promptFile = Bun.file(promptFilePath);
+          if (!(await promptFile.exists())) { console.error(`Error: prompt file not found: ${promptFilePath}`); process.exit(1); }
+          promptParts.push(await promptFile.text());
+        }
         else if (arg === "--no-worktree") { opts.noWorktree = true; }
         else if (arg === "--yolo") { opts.yolo = true; }
         else if (arg === "--allow") {
@@ -562,6 +617,98 @@ async function main() {
       }
       const { acknowledgeQuestion } = await import("./ib-commands");
       await printAndExit(await acknowledgeQuestion(repoPath, questionId));
+      break;
+    }
+    case "log": {
+      const repos = await listRepos();
+      // Parse --id and --quiet flags
+      const logArgs = args.slice(1);
+      let logAgentId: string | undefined;
+      let logQuiet = false;
+      const logMessageParts: string[] = [];
+      for (let i = 0; i < logArgs.length; i++) {
+        const arg = logArgs[i]!;
+        if (arg === "--id") {
+          logAgentId = logArgs[++i];
+        } else if (arg === "--quiet" || arg === "-q") {
+          logQuiet = true;
+        } else {
+          logMessageParts.push(arg);
+        }
+      }
+      const logMessage = logMessageParts.join(" ");
+
+      // Auto-detect agent ID from cwd if not specified
+      if (!logAgentId) {
+        const cwd = process.cwd();
+        const worktreeMatch = cwd.match(/\/.ittybitty\/agents\/([^/]+)\/repo/);
+        if (worktreeMatch) {
+          logAgentId = worktreeMatch[1];
+        }
+      }
+
+      if (!logAgentId) {
+        console.error("Error: Could not detect agent ID. Run from an agent worktree or use --id.");
+        process.exit(1);
+      }
+      if (!logMessage) {
+        console.error('Usage: ib log [--id <agent-id>] [--quiet] "message"');
+        process.exit(1);
+      }
+
+      const agent = await findAgentById(logAgentId, repos);
+      if (!agent) {
+        console.error(`Agent not found: ${logAgentId}`);
+        process.exit(1);
+      }
+
+      const { join } = await import("path");
+      const { logAgent } = await import("./agent-lifecycle");
+      const agentDir = join(agent.repoPath, ".ittybitty", agent.archived ? "archive" : "agents", agent.id);
+      await logAgent(agentDir, logMessage);
+
+      if (!logQuiet) {
+        console.log(logMessage);
+      }
+      break;
+    }
+    case "parse-state": {
+      const { parseState } = await import("./parse-state");
+      const psArgs = args.slice(1);
+      let verbose = false;
+      let inputFile: string | undefined;
+      for (const arg of psArgs) {
+        if (arg === "-v" || arg === "--verbose") verbose = true;
+        else if (!arg.startsWith("-")) inputFile = arg;
+      }
+
+      let input: string;
+      if (inputFile) {
+        const file = Bun.file(inputFile);
+        if (!(await file.exists())) {
+          console.error(`Error: file not found: ${inputFile}`);
+          process.exit(1);
+        }
+        input = await file.text();
+      } else if (process.stdin.isTTY) {
+        console.error("Error: no input provided. Use a file argument or pipe input.");
+        console.error("Usage: ib parse-state [file] or echo 'text' | ib parse-state");
+        process.exit(1);
+      } else {
+        // Read from stdin
+        const chunks: string[] = [];
+        for await (const chunk of process.stdin) {
+          chunks.push(typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk));
+        }
+        input = chunks.join("");
+      }
+
+      const result = parseState(input);
+      if (verbose) {
+        console.log(`${result.state} (matched: ${result.reason})`);
+      } else {
+        console.log(result.state);
+      }
       break;
     }
     // ── Hook subcommands (called by Claude Code's hook system) ──
@@ -665,20 +812,22 @@ async function main() {
       console.log("Registry:");
       console.log("  add [path]          Register a repo (default: cwd)");
       console.log("  remove <path>       Unregister a repo");
-      console.log("  list, ls            List repos and their agents (--manager <id> to filter)");
+      console.log("  list, ls            List repos and their agents (--manager <id>, --json)");
       console.log("");
       console.log("Monitoring:");
       console.log("  watch               Launch TUI dashboard");
       console.log("  watchdog            Run watchdog as background process");
       console.log("  agents, tree        List all agents with states");
-      console.log("  look <id>           Show agent's live tmux output (--lines N, --all)");
+      console.log("  look <id>           Show agent's live tmux output (--lines N, --all, --follow)");
       console.log("  status <id>         Show agent's git log and status");
-      console.log("  diff <id>           Show agent's git diff from main");
+      console.log("  diff <id>           Show agent's git diff from parent (--stat)");
+      console.log("  log <msg>           Write to agent log (--id <id>, --quiet)");
+      console.log("  parse-state [file]  Parse agent state from text (-v for verbose)");
       console.log("  info <id>           Show agent's metadata");
       console.log("");
       console.log("Communication:");
-      console.log("  send <id> <msg>     Send a message to an agent");
-      console.log("  questions, q        Show pending agent questions");
+      console.log("  send <id> <msg>     Send a message to an agent (--from <id>)");
+      console.log("  questions, q        Show pending agent questions (--all)");
       console.log("  acknowledge <qid>   Acknowledge a pending question (alias: ack)");
       console.log("");
       console.log("Agent Lifecycle:");

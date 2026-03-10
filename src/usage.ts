@@ -8,6 +8,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { rename, mkdir, stat, writeFile, unlink } from "node:fs/promises";
 
+import { SpawnContext } from "./types";
 import type { FetchLike, SpawnFn } from "./types";
 
 /** For test injection — avoids monkey-patching globalThis.fetch */
@@ -23,17 +24,17 @@ export function resetTestFetch(): void {
   fetchFn = globalThis.fetch;
 }
 
-/** For test injection of Bun.spawn used in keychain lookup. */
-let spawnFn: SpawnFn = Bun.spawn as SpawnFn;
+/** Spawn context for usage keychain lookup */
+export const spawnCtx = new SpawnContext();
 
 /** Override spawn for testing. */
 export function setTestSpawn(fn: SpawnFn): void {
-  spawnFn = fn;
+  spawnCtx.set(fn);
 }
 
 /** Reset spawn to Bun.spawn. */
 export function resetTestSpawn(): void {
-  spawnFn = Bun.spawn as SpawnFn;
+  spawnCtx.reset();
 }
 
 let ITSYBITSY_DIR = join(homedir(), ".itsybitsy");
@@ -126,7 +127,7 @@ async function readAccessToken(): Promise<string | null> {
 
   // Try macOS Keychain
   try {
-    const proc = spawnFn(
+    const proc = spawnCtx.runner(
       ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
       { stdout: "pipe", stderr: "pipe" },
     );

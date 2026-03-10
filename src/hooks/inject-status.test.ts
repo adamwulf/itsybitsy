@@ -4,9 +4,10 @@ import {
   formatAgentStatus,
   buildStatusText,
   briefSummary,
+  countPendingQuestions,
   checkAndUpdateHash,
 } from "./inject-status";
-import type { AgentProvider } from "./inject-status";
+import type { AgentDataSource } from "./inject-status";
 import type { RepoEntry } from "../registry";
 import type { Agent, AgentMeta } from "../agents";
 import { unlink } from "node:fs/promises";
@@ -251,6 +252,130 @@ describe("briefSummary", () => {
   });
 });
 
+// ── briefSummary with questionCount ───────────────────────────────────────
+
+describe("briefSummary with questionCount", () => {
+  test("questionCount=0 does not include questions", () => {
+    const agents = [mockAgent({ id: "a1", state: "running" })];
+    expect(briefSummary(agents, 0)).toBe("1 running");
+  });
+
+  test("questionCount=2 includes '2 questions'", () => {
+    const agents = [mockAgent({ id: "a1", state: "running" })];
+    expect(briefSummary(agents, 2)).toBe("1 running, 2 questions");
+  });
+
+  test("questionCount=1 includes '1 question' (singular)", () => {
+    const agents = [mockAgent({ id: "a1", state: "waiting" })];
+    expect(briefSummary(agents, 1)).toBe("1 waiting, 1 question");
+  });
+
+  test("questions with multiple states", () => {
+    const agents = [
+      mockAgent({ id: "a1", state: "running" }),
+      mockAgent({ id: "a2", state: "complete" }),
+    ];
+    expect(briefSummary(agents, 3)).toBe("1 running, 1 complete, 3 questions");
+  });
+
+  test("questions only (no active agents) still returns 'no agents'", () => {
+    // questionCount is irrelevant when no active agents exist
+    expect(briefSummary([], 5)).toBe("no agents");
+  });
+});
+
+// ── countPendingQuestions ─────────────────────────────────────────────────
+
+describe("countPendingQuestions", () => {
+  const tmpDir = "/tmp/ib-test-questions-" + Date.now();
+
+  afterEach(async () => {
+    try {
+      const { rm } = await import("node:fs/promises");
+      await rm(tmpDir, { recursive: true, force: true });
+    } catch {
+      // ignore
+    }
+  });
+
+  test("returns 0 when no questions file exists", async () => {
+    const repos: RepoEntry[] = [{ path: tmpDir, name: "test" }];
+    const agents = [mockAgent({ id: "a1", state: "running" })];
+    const count = await countPendingQuestions(repos, agents);
+    expect(count).toBe(0);
+  });
+
+  test("counts pending questions from active agents", async () => {
+    const { mkdir, writeFile } = await import("node:fs/promises");
+    const { join } = await import("node:path");
+    const questionsDir = join(tmpDir, ".ittybitty");
+    await mkdir(questionsDir, { recursive: true });
+    await writeFile(
+      join(questionsDir, "user-questions.json"),
+      JSON.stringify({
+        questions: [
+          { agent: "a1", status: "pending", question: "q1" },
+          { agent: "a2", status: "pending", question: "q2" },
+          { agent: "a1", status: "answered", question: "q3" },
+        ],
+      })
+    );
+
+    const repos: RepoEntry[] = [{ path: tmpDir, name: "test" }];
+    const agents = [
+      mockAgent({ id: "a1", state: "running" }),
+      mockAgent({ id: "a2", state: "waiting" }),
+    ];
+    const count = await countPendingQuestions(repos, agents);
+    expect(count).toBe(2);
+  });
+
+  test("filters out questions from archived agents", async () => {
+    const { mkdir, writeFile } = await import("node:fs/promises");
+    const { join } = await import("node:path");
+    const questionsDir = join(tmpDir, ".ittybitty");
+    await mkdir(questionsDir, { recursive: true });
+    await writeFile(
+      join(questionsDir, "user-questions.json"),
+      JSON.stringify({
+        questions: [
+          { agent: "a1", status: "pending", question: "q1" },
+          { agent: "a2", status: "pending", question: "q2" },
+        ],
+      })
+    );
+
+    const repos: RepoEntry[] = [{ path: tmpDir, name: "test" }];
+    const agents = [
+      mockAgent({ id: "a1", state: "running", archived: false }),
+      mockAgent({ id: "a2", state: "stopped", archived: true }),
+    ];
+    const count = await countPendingQuestions(repos, agents);
+    expect(count).toBe(1);
+  });
+
+  test("filters out questions from unknown agents", async () => {
+    const { mkdir, writeFile } = await import("node:fs/promises");
+    const { join } = await import("node:path");
+    const questionsDir = join(tmpDir, ".ittybitty");
+    await mkdir(questionsDir, { recursive: true });
+    await writeFile(
+      join(questionsDir, "user-questions.json"),
+      JSON.stringify({
+        questions: [
+          { agent: "a1", status: "pending", question: "q1" },
+          { agent: "unknown-agent", status: "pending", question: "q2" },
+        ],
+      })
+    );
+
+    const repos: RepoEntry[] = [{ path: tmpDir, name: "test" }];
+    const agents = [mockAgent({ id: "a1", state: "running" })];
+    const count = await countPendingQuestions(repos, agents);
+    expect(count).toBe(1);
+  });
+});
+
 // ── checkAndUpdateHash ────────────────────────────────────────────────────
 
 describe("checkAndUpdateHash", () => {
@@ -287,7 +412,7 @@ describe("checkAndUpdateHash", () => {
 
 describe("buildStatusText", () => {
   test("returns empty result when no repos registered", async () => {
-    const provider: AgentProvider = {
+    const provider: AgentDataSource = {
       getRepos: async () => [],
       getAgents: async () => ({ agents: [] }),
       detectStates: async () => {},
@@ -310,7 +435,7 @@ describe("buildStatusText", () => {
       }),
     ];
 
-    const provider: AgentProvider = {
+    const provider: AgentDataSource = {
       getRepos: async () => repos,
       getAgents: async () => ({ agents }),
       detectStates: async () => {},
@@ -336,7 +461,7 @@ describe("buildStatusText", () => {
       mockAgent({ id: "agent-2", repoPath: "/repo-b", repoName: "repo-b" }),
     ];
 
-    const provider: AgentProvider = {
+    const provider: AgentDataSource = {
       getRepos: async () => repos,
       getAgents: async () => ({ agents }),
       detectStates: async () => {},
@@ -352,7 +477,7 @@ describe("buildStatusText", () => {
   test("repo with no agents shows (no agents)", async () => {
     const repos: RepoEntry[] = [{ path: "/empty", name: "empty-repo" }];
 
-    const provider: AgentProvider = {
+    const provider: AgentDataSource = {
       getRepos: async () => repos,
       getAgents: async () => ({ agents: [] }),
       detectStates: async () => {},

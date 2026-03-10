@@ -5,7 +5,7 @@ import { tmpdir } from "os";
 import { readAgentLog, readAgentPrompt, parseDenials } from "../agents";
 import type { Agent, AgentMeta, FlatEntry, PendingQuestion } from "../agents";
 import { stripAnsi } from "../parse-state";
-import { makeAgent as _makeAgent, makeFlatAgent, makeFlatRepoHeader } from "../test-utils";
+import { makeAgent as _makeAgent, makeFlatAgent, makeFlatRepoHeader, setAgentState, makeSpawnResult } from "../test-utils";
 import { TmuxPaneComponent, RightPaneComponent, DashboardComponent, AgentTreeComponent, colorizeDiff, colorizeLog, formatAgentRow } from "./dashboard";
 import { visibleWidth } from "@mariozechner/pi-tui";
 import { setSendSpawnRunner, resetSendSpawnRunner, setKillPauseSpawnRunner, resetKillPauseSpawnRunner, setNukeResumeSpawnRunner, resetNukeResumeSpawnRunner, setNewAgentSpawnRunner, resetNewAgentSpawnRunner, setDiffStatusSpawnRunner, resetDiffStatusSpawnRunner, setMergeSpawnRunner, resetMergeSpawnRunner } from "../ib-commands";
@@ -22,11 +22,7 @@ function mockSendSpawnRunner(calls: { args: string[]; cwd: string }[]) {
       // This is the actual message send — extract message
       calls.push({ args: ["send", "TARGET", cmd[5]!], cwd: "" });
     }
-    return {
-      stdout: new Response("").body!,
-      stderr: new Response("").body!,
-      exited: Promise.resolve(0),
-    } as SpawnResult;
+    return makeSpawnResult();
   });
 }
 
@@ -388,11 +384,7 @@ describe("DashboardComponent dialog and action handlers", () => {
         const target = cmd[3]!;
         sentMessages.push({ target, message: cmd[5]! });
       }
-      return {
-        stdout: new Response("").body!,
-        stderr: new Response("").body!,
-        exited: Promise.resolve(0),
-      } as SpawnResult;
+      return makeSpawnResult();
     });
   }
 
@@ -423,19 +415,11 @@ describe("DashboardComponent dialog and action handlers", () => {
     setLifecycleSpawnRunner(noopSpawn);
     setNukeResumeSpawnRunner(noopSpawn);
     // Mock spawn runners for native diff/status and merge-check
-    setDiffStatusSpawnRunner((cmd: string[]) => ({
-      stdout: new Response("").body!,
-      stderr: new Response("").body!,
-      exited: Promise.resolve(0),
-    } as SpawnResult));
-    setMergeSpawnRunner((cmd: string[]) => ({
-      stdout: new Response("").body!,
-      stderr: new Response("").body!,
-      exited: Promise.resolve(0),
-    } as SpawnResult));
+    setDiffStatusSpawnRunner(() => makeSpawnResult());
+    setMergeSpawnRunner(() => makeSpawnResult());
 
     const agent = makeAgent("agent-test", actionTempDir);
-    agent.state = state as any;
+    setAgentState(agent, state);
     const flatList: FlatEntry[] = [makeFlatAgent(agent)];
     dashboard.onUpdate([agent], flatList, []);
   }
@@ -704,9 +688,9 @@ describe("DashboardComponent dialog and action handlers", () => {
     } as SpawnResult));
 
     const agent1 = makeAgent("agent-test", actionTempDir);
-    agent1.state = "running" as any;
+    setAgentState(agent1, "running");
     const agent2 = makeAgent("agent-manager", actionTempDir);
-    agent2.state = "running" as any;
+    setAgentState(agent2, "running");
     const flatList: FlatEntry[] = [
       makeFlatAgent(agent1),
       makeFlatAgent(agent2),
@@ -728,9 +712,9 @@ describe("DashboardComponent dialog and action handlers", () => {
     dashboard = makeDashboard();
 
     const agent1 = makeAgent("agent-test", "/repos/test");
-    agent1.state = "running" as any;
+    setAgentState(agent1, "running");
     const worker = makeAgent("agent-worker", "/repos/test");
-    worker.state = "running" as any;
+    setAgentState(worker, "running");
     worker.meta.worker = true;
     const flatList: FlatEntry[] = [
       makeFlatAgent(agent1),
@@ -749,18 +733,18 @@ describe("DashboardComponent dialog and action handlers", () => {
     dashboard = makeDashboard();
 
     const parent = makeAgent("agent-parent", "/repos/test");
-    parent.state = "running" as any;
+    setAgentState(parent, "running");
     const child = makeAgent("agent-child", "/repos/test");
-    child.state = "running" as any;
+    setAgentState(child, "running");
     child.meta.manager = "agent-parent";
     const grandchild = makeAgent("agent-grandchild", "/repos/test");
-    grandchild.state = "running" as any;
+    setAgentState(grandchild, "running");
     grandchild.meta.manager = "agent-child";
     // Build tree
     parent.children = [child];
     child.children = [grandchild];
     const sibling = makeAgent("agent-sibling", "/repos/test");
-    sibling.state = "running" as any;
+    setAgentState(sibling, "running");
     const flatList: FlatEntry[] = [
       makeFlatAgent(parent),
       makeFlatAgent(child, { depth: 1, connector: "├── " }),
@@ -784,9 +768,9 @@ describe("DashboardComponent dialog and action handlers", () => {
     dashboard = makeDashboard();
 
     const agent1 = makeAgent("agent-test", "/repos/test");
-    agent1.state = "running" as any;
+    setAgentState(agent1, "running");
     const otherRepo = makeAgent("agent-other", "/repos/other");
-    otherRepo.state = "running" as any;
+    setAgentState(otherRepo, "running");
     const flatList: FlatEntry[] = [
       makeFlatAgent(agent1),
       makeFlatAgent(otherRepo),
@@ -1001,17 +985,9 @@ describe("DashboardComponent dialog and action handlers", () => {
     // Mock mergeSpawnRunner to return dirty status
     setMergeSpawnRunner((cmd: string[]) => {
       if (cmd.includes("--porcelain")) {
-        return {
-          stdout: new Response("M dirty-file.ts\n").body!,
-          stderr: new Response("").body!,
-          exited: Promise.resolve(0),
-        } as SpawnResult;
+        return makeSpawnResult(0, "M dirty-file.ts\n");
       }
-      return {
-        stdout: new Response("").body!,
-        stderr: new Response("").body!,
-        exited: Promise.resolve(0),
-      } as SpawnResult;
+      return makeSpawnResult();
     });
     dashboard.handleInput("m");
     await Bun.sleep(50);
@@ -1337,11 +1313,7 @@ describe("Cross-repo send (E key)", () => {
       if (cmd[0] === "tmux" && cmd[1] === "send-keys" && cmd.length === 6 && cmd[4] === "-l") {
         sentMessages.push({ target: cmd[3]!, message: cmd[5]! });
       }
-      return {
-        stdout: new Response("").body!,
-        stderr: new Response("").body!,
-        exited: Promise.resolve(0),
-      } as SpawnResult;
+      return makeSpawnResult();
     });
   }
 
@@ -1353,7 +1325,7 @@ describe("Cross-repo send (E key)", () => {
     dashboard = makeDashboard();
     setupSendMock();
     const agent = makeAgent("agent-a", "/repos/alpha");
-    agent.state = "running" as any;
+    setAgentState(agent, "running");
     dashboard.setRepos([{ path: "/repos/alpha", name: "alpha" }]);
     dashboard.onUpdate([agent], [makeFlatAgent(agent)], []);
     dashboard.handleInput("E");
@@ -1365,10 +1337,10 @@ describe("Cross-repo send (E key)", () => {
     dashboard = makeDashboard();
     setupSendMock();
     const agentA = makeAgent("agent-a", "/repos/alpha");
-    agentA.state = "running" as any;
+    setAgentState(agentA, "running");
     agentA.repoName = "alpha";
     const agentB = makeAgent("agent-b", "/repos/beta");
-    agentB.state = "running" as any;
+    setAgentState(agentB, "running");
     agentB.repoName = "beta";
     dashboard.setRepos([
       { path: "/repos/alpha", name: "alpha" },
@@ -1389,10 +1361,10 @@ describe("Cross-repo send (E key)", () => {
     dashboard = makeDashboard();
     setupSendMock();
     const agentA = makeAgent("agent-a", "/repos/alpha");
-    agentA.state = "running" as any;
+    setAgentState(agentA, "running");
     agentA.repoName = "alpha";
     const agentB = makeAgent("agent-b", "/repos/beta");
-    agentB.state = "running" as any;
+    setAgentState(agentB, "running");
     agentB.repoName = "beta";
     dashboard.setRepos([
       { path: "/repos/alpha", name: "alpha" },
@@ -1417,13 +1389,13 @@ describe("Cross-repo send (E key)", () => {
     dashboard = makeDashboard();
     setupSendMock();
     const agentA = makeAgent("agent-a", "/repos/alpha");
-    agentA.state = "running" as any;
+    setAgentState(agentA, "running");
     agentA.repoName = "alpha";
     const agentB1 = makeAgent("agent-b1", "/repos/beta");
-    agentB1.state = "running" as any;
+    setAgentState(agentB1, "running");
     agentB1.repoName = "beta";
     const agentB2 = makeAgent("agent-b2", "/repos/beta");
-    agentB2.state = "waiting" as any;
+    setAgentState(agentB2, "waiting");
     agentB2.repoName = "beta";
     dashboard.setRepos([
       { path: "/repos/alpha", name: "alpha" },
@@ -1448,10 +1420,10 @@ describe("Cross-repo send (E key)", () => {
     dashboard = makeDashboard();
     setupSendMock();
     const agentA = makeAgent("agent-a", "/repos/alpha");
-    agentA.state = "running" as any;
+    setAgentState(agentA, "running");
     agentA.repoName = "alpha";
     const agentB = makeAgent("agent-b", "/repos/beta");
-    agentB.state = "running" as any;
+    setAgentState(agentB, "running");
     agentB.repoName = "beta";
     dashboard.setRepos([
       { path: "/repos/alpha", name: "alpha" },
@@ -1473,10 +1445,10 @@ describe("Cross-repo send (E key)", () => {
     dashboard = makeDashboard();
     setupSendMock();
     const agentA = makeAgent("agent-a", "/repos/alpha");
-    agentA.state = "running" as any;
+    setAgentState(agentA, "running");
     agentA.repoName = "alpha";
     const agentB = makeAgent("agent-b", "/repos/beta");
-    agentB.state = "running" as any;
+    setAgentState(agentB, "running");
     agentB.repoName = "beta";
     dashboard.setRepos([
       { path: "/repos/alpha", name: "alpha" },
@@ -1503,13 +1475,13 @@ describe("Cross-repo send (E key)", () => {
     dashboard = makeDashboard();
     setupSendMock();
     const agentA = makeAgent("agent-a", "/repos/alpha");
-    agentA.state = "running" as any;
+    setAgentState(agentA, "running");
     agentA.repoName = "alpha";
     const agentB = makeAgent("agent-b", "/repos/beta");
-    agentB.state = "running" as any;
+    setAgentState(agentB, "running");
     agentB.repoName = "beta";
     const agentC = makeAgent("agent-c", "/repos/beta");
-    agentC.state = "stopped" as any;
+    setAgentState(agentC, "stopped");
     agentC.archived = true;
     agentC.repoName = "beta";
     dashboard.setRepos([
@@ -1529,10 +1501,10 @@ describe("Cross-repo send (E key)", () => {
     dashboard = makeDashboard();
     setupSendMock();
     const agentA = makeAgent("agent-a", "/repos/alpha");
-    agentA.state = "running" as any;
+    setAgentState(agentA, "running");
     agentA.repoName = "alpha";
     const agentB = makeAgent("agent-b", "/repos/beta");
-    agentB.state = "running" as any;
+    setAgentState(agentB, "running");
     agentB.repoName = "beta";
     dashboard.setRepos([
       { path: "/repos/alpha", name: "alpha" },
@@ -1637,11 +1609,7 @@ describe("DashboardComponent right pane and navigation features", () => {
       if (cmd[0] === "tmux" && cmd[1] === "send-keys" && cmd.length === 6 && cmd[4] === "-l") {
         sentMessages.push({ target: cmd[3]!, message: cmd[5]! });
       }
-      return {
-        stdout: new Response("").body!,
-        stderr: new Response("").body!,
-        exited: Promise.resolve(0),
-      } as SpawnResult;
+      return makeSpawnResult();
     });
   }
 
@@ -1650,7 +1618,7 @@ describe("DashboardComponent right pane and navigation features", () => {
     setupSendMock();
 
     const agent = makeAgent("agent-test", "/repos/test");
-    agent.state = state as any;
+    setAgentState(agent, state);
     const flatList: FlatEntry[] = [makeFlatAgent(agent)];
     dashboard.onUpdate([agent], flatList, []);
   }

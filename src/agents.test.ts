@@ -10,6 +10,7 @@ import {
   readPendingQuestions,
   readAllAgents,
   computeStateFromContent,
+  readAgentMeta,
 } from "./agents";
 import type { Agent, AgentMeta, FlatEntry } from "./agents";
 import { makeAgent } from "./test-utils";
@@ -401,6 +402,115 @@ describe("readRepoAgents", () => {
     const { agents, errors } = await readRepoAgents(tempDir, "test-repo");
     expect(agents.length).toBe(0);
     expect(errors.length).toBe(0);
+  });
+});
+
+describe("readAgentMeta", () => {
+  let tempDir: string;
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "itsybitsy-meta-test-"));
+  });
+
+  afterEach(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  test("meta.json with all correct fields works", async () => {
+    await Bun.write(
+      join(tempDir, "meta.json"),
+      JSON.stringify({
+        id: "agent-abc",
+        session_id: "sess-1",
+        tmux_session: "tmux-abc",
+        prompt: "do stuff",
+        manager: null,
+        created: "2026-03-05T00:00:00Z",
+        created_epoch: 1000,
+        worktree: true,
+        worker: false,
+        yolo: false,
+        model: "sonnet",
+        claude_pid: "999",
+      })
+    );
+
+    const { meta, error } = await readAgentMeta(tempDir);
+    expect(error).toBeUndefined();
+    expect(meta).not.toBeNull();
+    expect(meta!.id).toBe("agent-abc");
+    expect(meta!.session_id).toBe("sess-1");
+    expect(meta!.tmux_session).toBe("tmux-abc");
+    expect(meta!.prompt).toBe("do stuff");
+    expect(meta!.manager).toBeNull();
+    expect(meta!.created).toBe("2026-03-05T00:00:00Z");
+    expect(meta!.created_epoch).toBe(1000);
+    expect(meta!.worktree).toBe(true);
+    expect(meta!.worker).toBe(false);
+    expect(meta!.yolo).toBe(false);
+    expect(meta!.model).toBe("sonnet");
+    expect(meta!.claude_pid).toBe("999");
+  });
+
+  test("meta.json with wrong-typed fields gets defaults applied", async () => {
+    await Bun.write(
+      join(tempDir, "meta.json"),
+      JSON.stringify({
+        id: "agent-typed",
+        session_id: 123,
+        tmux_session: false,
+        prompt: 42,
+        manager: 99,
+        created: true,
+        created_epoch: "not-a-number",
+        worktree: "yes",
+        worker: "no",
+        yolo: 1,
+        model: 777,
+        claude_pid: 0,
+      })
+    );
+
+    const { meta, error } = await readAgentMeta(tempDir);
+    expect(error).toBeUndefined();
+    expect(meta).not.toBeNull();
+    expect(meta!.id).toBe("agent-typed");
+    expect(meta!.session_id).toBe("");
+    expect(meta!.tmux_session).toBe("");
+    expect(meta!.prompt).toBe("");
+    expect(meta!.manager).toBeNull();
+    expect(meta!.created).toBe("");
+    expect(meta!.created_epoch).toBe(0);
+    expect(meta!.worktree).toBe(true);
+    expect(meta!.worker).toBe(false);
+    expect(meta!.yolo).toBe(false);
+    expect(meta!.model).toBe("unknown");
+    expect(meta!.claude_pid).toBe("");
+  });
+
+  test("meta.json with missing fields gets defaults applied", async () => {
+    await Bun.write(
+      join(tempDir, "meta.json"),
+      JSON.stringify({
+        id: "agent-minimal",
+      })
+    );
+
+    const { meta, error } = await readAgentMeta(tempDir);
+    expect(error).toBeUndefined();
+    expect(meta).not.toBeNull();
+    expect(meta!.id).toBe("agent-minimal");
+    expect(meta!.session_id).toBe("");
+    expect(meta!.tmux_session).toBe("");
+    expect(meta!.prompt).toBe("");
+    expect(meta!.manager).toBeNull();
+    expect(meta!.created).toBe("");
+    expect(meta!.created_epoch).toBe(0);
+    expect(meta!.worktree).toBe(true);
+    expect(meta!.worker).toBe(false);
+    expect(meta!.yolo).toBe(false);
+    expect(meta!.model).toBe("unknown");
+    expect(meta!.claude_pid).toBe("");
   });
 });
 

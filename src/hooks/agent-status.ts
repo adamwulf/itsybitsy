@@ -5,10 +5,11 @@
  */
 
 import { join, dirname } from "path";
-import { readdir, readFile, writeFile, mkdir } from "fs/promises";
+import { readdir, readFile, writeFile, mkdir, access } from "fs/promises";
 import { logAgent } from "../agent-lifecycle";
 import { parseState } from "../parse-state";
 import { captureTmuxOutput } from "../tmux-poller";
+import { isValidAgentId } from "../validation";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -71,6 +72,7 @@ export async function processStopHook(
   // 2. If empty, fall back to tmux
   // Keep tmuxOutput around for background task check later
   let tmuxOutput: string | null = null;
+  let parseReason: string | undefined;
   if (!state) {
     if (opts?.captureOutput) {
       tmuxOutput = await opts.captureOutput();
@@ -91,18 +93,29 @@ export async function processStopHook(
     if (tmuxOutput) {
       const result = parseState(tmuxOutput);
       state = result.state;
+      parseReason = result.reason;
     } else {
       state = "unknown";
     }
   }
 
-  // 3. Save debug capture
+  // 3. Save debug capture — include tmux output, parse-state reason, and last_assistant_message
   try {
     const debugDir = join(agentDir, "debug-logs");
     await mkdir(debugDir, { recursive: true });
     const timestamp = Math.floor(Date.now() / 1000);
     const debugPath = join(debugDir, `stop-${timestamp}-${state}.txt`);
-    await writeFile(debugPath, lastMessage || "(no message)");
+    const debugParts: string[] = [];
+    if (tmuxOutput) {
+      debugParts.push(tmuxOutput);
+      debugParts.push("");
+      debugParts.push("--- parse-state -v output ---");
+      debugParts.push(`${state} (matched: ${parseReason ?? "n/a"})`);
+      debugParts.push("");
+    }
+    debugParts.push("--- last_assistant_message ---");
+    debugParts.push(lastMessage || "(no message)");
+    await writeFile(debugPath, debugParts.join("\n"));
   } catch {
     /* ignore debug write failures */
   }
@@ -188,10 +201,12 @@ export async function processStopHook(
       agentId,
     );
     if (unfinishedChildren.length > 0) {
+      const childCount = unfinishedChildren.length;
+      const childList = unfinishedChildren.join(", ");
       return {
         state,
         action: "remind_children",
-        message: `You have unfinished child agents: ${unfinishedChildren.join(", ")}. Check on them before completing.`,
+        message: `You have ${childCount} unfinished sub-agent(s) that need attention: ${childList}. Before you can complete, you must merge or kill each sub-agent using 'ib merge <id>' or 'ib kill <id>'. Use 'ib list' to check their status, 'ib look <id>' to see their output, 'ib status <id>' for their commits, and 'ib diff <id>' to review their changes.`,
       };
     }
 
@@ -253,7 +268,7 @@ async function handleNudge(
     state,
     action: "nudge",
     message:
-      "Resume your work, or end with WAITING or I HAVE COMPLETED THE GOAL as your final line.",
+      "Resume your work, or end with 'WAITING' or 'I HAVE COMPLETED THE GOAL' as your final line.",
   };
 }
 
@@ -342,6 +357,34 @@ export async function hookStatus(agentId: string): Promise<void> {
     agentsDir,
   );
 
+  // Schedule delayed recheck if debounced (31a)
+  if (result.action === "debounced" && isValidAgentId(agentId)) {
+    const recheckFile = join(agentDir, "nudge-recheck");
+    let recheckExists = false;
+    try {
+      await access(recheckFile);
+      recheckExists = true;
+    } catch {
+      /* doesn't exist */
+    }
+    if (!recheckExists) {
+      try {
+        await writeFile(recheckFile, "1");
+        const proc = Bun.spawn(
+          [
+            "bash",
+            "-c",
+            `sleep 5 && rm -f "${recheckFile}" && ib hooks agent-status "${agentId}"`,
+          ],
+          { stdout: "ignore", stderr: "ignore", stdin: "ignore" },
+        );
+        proc.unref();
+      } catch {
+        /* ignore spawn failures */
+      }
+    }
+  }
+
   // Execute tmux actions
   const meta = await readMeta(agentDir);
   const tmuxSession = meta?.tmux_session as string | undefined;
@@ -353,11 +396,17 @@ export async function hookStatus(agentId: string): Promise<void> {
       result.action === "remind_children")
   ) {
     if (tmuxSession) {
-      const proc = Bun.spawn(
-        ["tmux", "send-keys", "-t", tmuxSession, result.message, "Enter"],
+      const sendProc = Bun.spawn(
+        ["tmux", "send-keys", "-t", tmuxSession, "-l", result.message],
         { stdout: "pipe", stderr: "pipe" },
       );
-      await proc.exited;
+      await sendProc.exited;
+      await Bun.sleep(100);
+      const enterProc = Bun.spawn(
+        ["tmux", "send-keys", "-t", tmuxSession, "Enter"],
+        { stdout: "pipe", stderr: "pipe" },
+      );
+      await enterProc.exited;
     }
   } else if (result.action === "notify_manager" && result.message) {
     const managerId = meta?.manager as string | undefined;
@@ -365,18 +414,17 @@ export async function hookStatus(agentId: string): Promise<void> {
       const managerMeta = await readMeta(join(agentsDir, managerId));
       const managerSession = managerMeta?.tmux_session;
       if (managerSession) {
-        const proc = Bun.spawn(
-          [
-            "tmux",
-            "send-keys",
-            "-t",
-            managerSession,
-            result.message,
-            "Enter",
-          ],
+        const sendProc = Bun.spawn(
+          ["tmux", "send-keys", "-t", managerSession, "-l", result.message],
           { stdout: "pipe", stderr: "pipe" },
         );
-        await proc.exited;
+        await sendProc.exited;
+        await Bun.sleep(100);
+        const enterProc = Bun.spawn(
+          ["tmux", "send-keys", "-t", managerSession, "Enter"],
+          { stdout: "pipe", stderr: "pipe" },
+        );
+        await enterProc.exited;
       }
     }
   }

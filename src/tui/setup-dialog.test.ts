@@ -6,6 +6,7 @@ import { stripAnsi } from "../parse-state";
 import {
   handleDialogInput,
   buildSetupContent,
+  buildPermissionsEditorContent,
   type DialogState,
   type DialogCtx,
   type SetupItem,
@@ -490,5 +491,284 @@ describe("config write integration", () => {
     const content = await Bun.file(configPath).json();
     expect(content.maxAgents).toBe(5);
     expect(content.model).toBe("opus");
+  });
+});
+
+// --- Permissions editor dialog tests ---
+
+function makePermsDialog(overrides?: Partial<Extract<NonNullable<DialogState>, { type: "permissions-editor" }>>): Extract<NonNullable<DialogState>, { type: "permissions-editor" }> {
+  return {
+    type: "permissions-editor",
+    roleKey: "permissions.manager",
+    tab: 0,
+    allowList: ["Edit", "Write"],
+    denyList: ["Bash"],
+    focus: 0,
+    inputMode: false,
+    inputValue: "",
+    scrollOffset: 0,
+    onSave: () => {},
+    ...overrides,
+  };
+}
+
+describe("permissions editor rendering", () => {
+  test("renders title with role name", () => {
+    const dialog = makePermsDialog();
+    const result = buildPermissionsEditorContent(dialog, 60);
+    expect(result.title).toBe("Manager Permissions");
+  });
+
+  test("renders title for worker role", () => {
+    const dialog = makePermsDialog({ roleKey: "permissions.worker" });
+    const result = buildPermissionsEditorContent(dialog, 60);
+    expect(result.title).toBe("Worker Permissions");
+  });
+
+  test("renders tab bar with Allow and Deny", () => {
+    const dialog = makePermsDialog();
+    const result = buildPermissionsEditorContent(dialog, 60);
+    const stripped = result.contentLines.map((l) => stripAnsi(l));
+    expect(stripped[0]).toContain("[Allow]");
+    expect(stripped[0]).toContain("[Deny]");
+  });
+
+  test("renders allow list items on allow tab", () => {
+    const dialog = makePermsDialog();
+    const result = buildPermissionsEditorContent(dialog, 60);
+    const stripped = result.contentLines.map((l) => stripAnsi(l));
+    expect(stripped.some((l) => l.includes("Edit") && l.includes("[Del]"))).toBe(true);
+    expect(stripped.some((l) => l.includes("Write") && l.includes("[Del]"))).toBe(true);
+  });
+
+  test("renders deny list items on deny tab", () => {
+    const dialog = makePermsDialog({ tab: 1 });
+    const result = buildPermissionsEditorContent(dialog, 60);
+    const stripped = result.contentLines.map((l) => stripAnsi(l));
+    expect(stripped.some((l) => l.includes("Bash") && l.includes("[Del]"))).toBe(true);
+  });
+
+  test("renders Add field", () => {
+    const dialog = makePermsDialog();
+    const result = buildPermissionsEditorContent(dialog, 60);
+    const stripped = result.contentLines.map((l) => stripAnsi(l));
+    expect(stripped.some((l) => l.includes("Add:"))).toBe(true);
+  });
+
+  test("renders Done button", () => {
+    const dialog = makePermsDialog();
+    const result = buildPermissionsEditorContent(dialog, 60);
+    const stripped = result.contentLines.map((l) => stripAnsi(l));
+    expect(stripped.some((l) => l.includes("[ Done ]"))).toBe(true);
+  });
+
+  test("shows cursor in input mode", () => {
+    const dialog = makePermsDialog({ inputMode: true, inputValue: "Read" });
+    const result = buildPermissionsEditorContent(dialog, 60);
+    const stripped = result.contentLines.map((l) => stripAnsi(l));
+    expect(stripped.some((l) => l.includes("Add: Read"))).toBe(true);
+  });
+
+  test("empty list shows only Add and Done", () => {
+    const dialog = makePermsDialog({ allowList: [], denyList: [] });
+    const result = buildPermissionsEditorContent(dialog, 60);
+    const stripped = result.contentLines.map((l) => stripAnsi(l));
+    expect(stripped.some((l) => l.includes("[Del]"))).toBe(false);
+    expect(stripped.some((l) => l.includes("Add:"))).toBe(true);
+    expect(stripped.some((l) => l.includes("[ Done ]"))).toBe(true);
+  });
+});
+
+describe("permissions editor navigation", () => {
+  test("j moves focus down", () => {
+    const ctx = makeCtx();
+    const dialog = makePermsDialog();
+    ctx._dialog = dialog;
+    handleDialogInput(ctx, "j");
+    expect(dialog.focus).toBe(1);
+  });
+
+  test("k moves focus up", () => {
+    const ctx = makeCtx();
+    const dialog = makePermsDialog({ focus: 1 });
+    ctx._dialog = dialog;
+    handleDialogInput(ctx, "k");
+    expect(dialog.focus).toBe(0);
+  });
+
+  test("focus clamps at 0", () => {
+    const ctx = makeCtx();
+    const dialog = makePermsDialog({ focus: 0 });
+    ctx._dialog = dialog;
+    handleDialogInput(ctx, "k");
+    expect(dialog.focus).toBe(0);
+  });
+
+  test("focus can reach Add and Done", () => {
+    const ctx = makeCtx();
+    const dialog = makePermsDialog({ focus: 1 }); // last item (Write)
+    ctx._dialog = dialog;
+    handleDialogInput(ctx, "j"); // focus = 2 = Add (list has 2 items)
+    expect(dialog.focus).toBe(2);
+    handleDialogInput(ctx, "j"); // focus = 3 = Done
+    expect(dialog.focus).toBe(3);
+  });
+
+  test("left arrow switches to Allow tab", () => {
+    const ctx = makeCtx();
+    const dialog = makePermsDialog({ tab: 1 });
+    ctx._dialog = dialog;
+    handleDialogInput(ctx, "\x1b[D"); // left arrow
+    expect(dialog.tab).toBe(0);
+    expect(dialog.focus).toBe(0);
+  });
+
+  test("right arrow switches to Deny tab", () => {
+    const ctx = makeCtx();
+    const dialog = makePermsDialog({ tab: 0 });
+    ctx._dialog = dialog;
+    handleDialogInput(ctx, "\x1b[C"); // right arrow
+    expect(dialog.tab).toBe(1);
+    expect(dialog.focus).toBe(0);
+  });
+
+  test("escape closes dialog", () => {
+    const ctx = makeCtx();
+    const dialog = makePermsDialog();
+    ctx._dialog = dialog;
+    handleDialogInput(ctx, "\x1b"); // escape
+    expect(ctx._dialog).toBeNull();
+  });
+});
+
+describe("permissions editor add/delete", () => {
+  test("enter on Add activates input mode", () => {
+    const ctx = makeCtx();
+    const dialog = makePermsDialog({ focus: 2 }); // focus on Add (2 items in allow)
+    ctx._dialog = dialog;
+    handleDialogInput(ctx, "\r");
+    expect(dialog.inputMode).toBe(true);
+    expect(dialog.inputValue).toBe("");
+  });
+
+  test("typing in input mode appends characters", () => {
+    const ctx = makeCtx();
+    const dialog = makePermsDialog({ inputMode: true, inputValue: "" });
+    ctx._dialog = dialog;
+    handleDialogInput(ctx, "R");
+    handleDialogInput(ctx, "e");
+    handleDialogInput(ctx, "a");
+    handleDialogInput(ctx, "d");
+    expect(dialog.inputValue).toBe("Read");
+  });
+
+  test("enter in input mode adds item to current list", () => {
+    const ctx = makeCtx();
+    const dialog = makePermsDialog({ inputMode: true, inputValue: "Read" });
+    ctx._dialog = dialog;
+    handleDialogInput(ctx, "\r");
+    expect(dialog.allowList).toEqual(["Edit", "Write", "Read"]);
+    expect(dialog.inputMode).toBe(false);
+    expect(dialog.inputValue).toBe("");
+  });
+
+  test("enter in input mode adds to deny list when on deny tab", () => {
+    const ctx = makeCtx();
+    const dialog = makePermsDialog({ tab: 1, inputMode: true, inputValue: "WebFetch" });
+    ctx._dialog = dialog;
+    handleDialogInput(ctx, "\r");
+    expect(dialog.denyList).toEqual(["Bash", "WebFetch"]);
+    expect(dialog.inputMode).toBe(false);
+  });
+
+  test("enter on list item deletes it", () => {
+    const ctx = makeCtx();
+    const dialog = makePermsDialog({ focus: 0 }); // focus on "Edit"
+    ctx._dialog = dialog;
+    handleDialogInput(ctx, "\r");
+    expect(dialog.allowList).toEqual(["Write"]);
+  });
+
+  test("enter on second item deletes it", () => {
+    const ctx = makeCtx();
+    const dialog = makePermsDialog({ focus: 1 }); // focus on "Write"
+    ctx._dialog = dialog;
+    handleDialogInput(ctx, "\r");
+    expect(dialog.allowList).toEqual(["Edit"]);
+  });
+
+  test("backspace in input mode removes last character", () => {
+    const ctx = makeCtx();
+    const dialog = makePermsDialog({ inputMode: true, inputValue: "Read" });
+    ctx._dialog = dialog;
+    handleDialogInput(ctx, "\x7f"); // backspace
+    expect(dialog.inputValue).toBe("Rea");
+  });
+
+  test("escape in input mode exits input mode", () => {
+    const ctx = makeCtx();
+    const dialog = makePermsDialog({ inputMode: true, inputValue: "partial" });
+    ctx._dialog = dialog;
+    handleDialogInput(ctx, "\x1b"); // escape
+    expect(dialog.inputMode).toBe(false);
+    expect(dialog.inputValue).toBe("");
+  });
+
+  test("empty input on enter does not add item", () => {
+    const ctx = makeCtx();
+    const dialog = makePermsDialog({ inputMode: true, inputValue: "   " });
+    ctx._dialog = dialog;
+    handleDialogInput(ctx, "\r");
+    // Whitespace-only should be trimmed and not added
+    expect(dialog.allowList).toEqual(["Edit", "Write"]);
+    expect(dialog.inputMode).toBe(false);
+  });
+});
+
+describe("permissions editor save", () => {
+  test("enter on Done calls onSave with both lists", () => {
+    let savedAllow: string[] = [];
+    let savedDeny: string[] = [];
+    let saveCalled = false;
+    const ctx = makeCtx();
+    const dialog = makePermsDialog({
+      focus: 3, // Done button (2 items + Add + Done)
+      onSave: (allow, deny) => { savedAllow = allow; savedDeny = deny; saveCalled = true; },
+    });
+    ctx._dialog = dialog;
+    handleDialogInput(ctx, "\r");
+    expect(saveCalled).toBe(true);
+    expect(savedAllow).toEqual(["Edit", "Write"]);
+    expect(savedDeny).toEqual(["Bash"]);
+  });
+
+  test("save reflects modifications to lists", () => {
+    let savedAllow: string[] = [];
+    let savedDeny: string[] = [];
+    let saveCalled = false;
+    const ctx = makeCtx();
+    const dialog = makePermsDialog({
+      onSave: (allow, deny) => { savedAllow = allow; savedDeny = deny; saveCalled = true; },
+    });
+    ctx._dialog = dialog;
+
+    // Delete first allow item
+    dialog.focus = 0;
+    handleDialogInput(ctx, "\r"); // deletes "Edit"
+    expect(dialog.allowList).toEqual(["Write"]);
+
+    // Add a new item
+    dialog.focus = 1; // Add button (1 item remaining)
+    handleDialogInput(ctx, "\r"); // enter input mode
+    dialog.inputValue = "Read";
+    handleDialogInput(ctx, "\r"); // add it
+    expect(dialog.allowList).toEqual(["Write", "Read"]);
+
+    // Save
+    dialog.focus = 3; // Done (2 items + Add + Done)
+    handleDialogInput(ctx, "\r");
+    expect(saveCalled).toBe(true);
+    expect(savedAllow).toEqual(["Write", "Read"]);
+    expect(savedDeny).toEqual(["Bash"]);
   });
 });

@@ -110,6 +110,22 @@ bun --hot ./index.ts
 
 For more information, read the Bun API docs in `node_modules/bun-types/docs/**.mdx`.
 
+## Building a Binary
+
+To compile itsybitsy into a standalone executable:
+
+```sh
+bun build --compile --minify --sourcemap index.ts --outfile itsybitsy
+```
+
+This produces a single `itsybitsy` binary with no runtime dependencies. To install system-wide:
+
+```sh
+sudo cp itsybitsy /usr/local/bin/itsybitsy
+```
+
+The binary can then be used as `itsybitsy` instead of `bun index.ts`. Hook commands like `itsybitsy hooks main-path` reference this binary by name.
+
 ## Code Quality Requirements
 
 After any code changes, always run:

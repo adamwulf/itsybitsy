@@ -853,6 +853,49 @@ describe("resumeAgent (native)", () => {
     const cFlagIdx = newSessionCall!.indexOf("-c");
     expect(newSessionCall![cFlagIdx + 1]).toBe(tempDir);
   });
+
+  test("rejects model with shell injection characters", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-abc",
+      tmux_session: "tmux-agent-abc",
+      session_id: "sess-123",
+      model: 'opus$(whoami)',
+    }));
+
+    const agent = _makeAgent({
+      id: "agent-abc",
+      repoPath: tempDir,
+      repoName: "test",
+      state: "stopped",
+      meta: { session_id: "sess-123", tmux_session: "tmux-agent-abc", model: 'opus$(whoami)' } as any,
+    });
+    const result = await resumeAgent(agent);
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("Invalid model name");
+  });
+
+  test("rejects tmux session with shell injection characters", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-abc",
+      tmux_session: 'session$(whoami)',
+      session_id: "sess-123",
+    }));
+
+    const agent = _makeAgent({
+      id: "agent-abc",
+      repoPath: tempDir,
+      repoName: "test",
+      state: "stopped",
+      meta: { session_id: "sess-123", tmux_session: 'session$(whoami)' } as any,
+    });
+    const result = await resumeAgent(agent);
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("Invalid tmux session name");
+  });
 });
 
 describe("mergeAgent (native)", () => {
@@ -2153,6 +2196,38 @@ describe("newAgent (native)", () => {
 
     const startSh = await Bun.file(join(agentsDir, "test-print", "start.sh")).text();
     expect(startSh).toContain("--print");
+  });
+
+  test("rejects model with shell injection characters", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("task", { name: "test-bad-model", model: 'opus$(whoami)' });
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("Invalid model name");
+  });
+
+  test("rejects allowTools with shell injection characters", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("task", { name: "test-bad-allow", allowTools: 'Bash$(whoami)' });
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("Invalid --allow tools value");
+  });
+
+  test("rejects denyTools with shell injection characters", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("task", { name: "test-bad-deny", denyTools: 'Tool`id`' });
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("Invalid --deny tools value");
+  });
+
+  test("accepts valid model, allowTools, and denyTools", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("task", {
+      name: "test-valid-tools",
+      model: "claude-sonnet-4-6",
+      allowTools: "Bash(git:*),Read",
+      denyTools: "Write",
+    });
+    expect(result.ok).toBe(true);
   });
 });
 

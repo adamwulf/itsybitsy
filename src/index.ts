@@ -467,6 +467,7 @@ async function main() {
     case "hook-check-path": {
       const id = args[1];
       if (!id) { console.error("Usage: itsybitsy hook-check-path <agent-id>"); process.exit(1); }
+      if (!/^[a-zA-Z0-9_-]+$/.test(id)) { console.error("Invalid agent ID"); process.exit(1); }
       const { hookCheckPath } = await import("./hooks/agent-path");
       await hookCheckPath(id);
       break;
@@ -474,6 +475,7 @@ async function main() {
     case "hook-status": {
       const id = args[1];
       if (!id) { console.error("Usage: itsybitsy hook-status <agent-id>"); process.exit(1); }
+      if (!/^[a-zA-Z0-9_-]+$/.test(id)) { console.error("Invalid agent ID"); process.exit(1); }
       const { hookStatus } = await import("./hooks/agent-status");
       await hookStatus(id);
       break;
@@ -481,6 +483,7 @@ async function main() {
     case "hook-permission-denied": {
       const id = args[1];
       if (!id) { console.error("Usage: itsybitsy hook-permission-denied <agent-id>"); process.exit(1); }
+      if (!/^[a-zA-Z0-9_-]+$/.test(id)) { console.error("Invalid agent ID"); process.exit(1); }
       const { hookPermissionDenied } = await import("./hooks/permission-denied");
       await hookPermissionDenied(id);
       break;

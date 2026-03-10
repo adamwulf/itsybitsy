@@ -21,6 +21,7 @@ import {
 } from "./agent-lifecycle";
 import { readConfig } from "./config";
 import type { SpawnFn } from "./types";
+import { isValidModel, isValidToolList, isValidTmuxSession } from "./validation";
 
 export interface IbCommandResult {
   ok: boolean;
@@ -322,6 +323,17 @@ export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
   // Read model
   const model = agent.meta.model && agent.meta.model !== "null" ? agent.meta.model : "";
 
+  // Validate model if present
+  if (model && !isValidModel(model)) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Invalid model name: ${model}` };
+  }
+
+  // Validate tmux session ID
+  const tmuxSession = agent.meta.tmux_session;
+  if (tmuxSession && !isValidTmuxSession(tmuxSession)) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Invalid tmux session name: ${tmuxSession}` };
+  }
+
   // Detect yolo mode from start.sh
   let yoloMode = false;
   try {
@@ -391,7 +403,6 @@ ${absExitScript}
   }
 
   // Start tmux session
-  const tmuxSession = agent.meta.tmux_session;
   const tmuxResult = await nukeResumeRunCmd([
     "tmux", "new-session", "-d", "-x", "60", "-s", tmuxSession, "-c", workPath, resumeScript,
   ]);
@@ -1322,6 +1333,15 @@ export async function newAgent(
   const printMode = opts?.print === true;
   const allowTools = opts?.allowTools ?? "";
   const denyTools = opts?.denyTools ?? "";
+
+  // Validate CLI-originated values before bash interpolation
+  if (allowTools && !isValidToolList(allowTools)) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Invalid --allow tools value: ${allowTools}` };
+  }
+  if (denyTools && !isValidToolList(denyTools)) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Invalid --deny tools value: ${denyTools}` };
+  }
+
   let manager = opts?.manager ?? "";
 
   // 3. Auto-detect manager from cwd (only if cwd is in the same repo)
@@ -1395,6 +1415,11 @@ export async function newAgent(
     if (configModel) model = configModel;
   }
   if (!model) model = "sonnet";
+
+  // Validate model name before bash interpolation
+  if (!isValidModel(model)) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Invalid model name: ${model}` };
+  }
 
   // Config permissions
   const agentType = workerMode ? "worker" : "manager";

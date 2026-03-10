@@ -1,4 +1,4 @@
-import { test, expect, describe, beforeEach, afterEach } from "bun:test";
+import { test, expect, describe, beforeEach, afterEach, spyOn } from "bun:test";
 import { join } from "path";
 import {
   encodeClaudeProjectPath,
@@ -13,6 +13,7 @@ import {
   resetCompactSpawnRunner,
   setUsageReader,
   resetUsageReader,
+  resetWarnedModels,
   type CompactState,
   type TranscriptUsage,
 } from "./auto-compact";
@@ -111,6 +112,10 @@ describe("transcriptPath", () => {
 });
 
 describe("contextSizeForModel", () => {
+  beforeEach(() => {
+    resetWarnedModels();
+  });
+
   test("returns 200K for sonnet", () => {
     expect(contextSizeForModel("sonnet")).toBe(200_000);
   });
@@ -129,6 +134,29 @@ describe("contextSizeForModel", () => {
 
   test("returns 200K for haiku", () => {
     expect(contextSizeForModel("haiku")).toBe(200_000);
+  });
+
+  test("logs warning once per unknown model", () => {
+    const spy = spyOn(console, "error").mockImplementation(() => {});
+    contextSizeForModel("unknown-model");
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy.mock.calls[0]![0]).toContain("Unknown model");
+    // Second call with same model should not warn again
+    contextSizeForModel("unknown-model");
+    expect(spy).toHaveBeenCalledTimes(1);
+    // Different unknown model should warn
+    contextSizeForModel("another-unknown");
+    expect(spy).toHaveBeenCalledTimes(2);
+    spy.mockRestore();
+  });
+
+  test("does not warn for known models", () => {
+    const spy = spyOn(console, "error").mockImplementation(() => {});
+    contextSizeForModel("claude-sonnet-4.5");
+    contextSizeForModel("claude-opus-4-5-20250514");
+    contextSizeForModel("claude-opus-4-6");
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
   });
 });
 

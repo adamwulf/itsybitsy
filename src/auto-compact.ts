@@ -36,19 +36,47 @@ export interface TranscriptUsage {
   output_tokens: number;
 }
 
+/** Default context window size for unknown models */
+const DEFAULT_CONTEXT_SIZE = 200_000;
+
+/**
+ * Model context size lookup table.
+ * Each entry: [substring to match in model name, context size in tokens].
+ * Checked in order — first match wins.
+ */
+const MODEL_CONTEXT_SIZES: Array<[string, number]> = [
+  ["4-5", 1_000_000],  // Sonnet 4.5 / Opus 4.5 — 1M context
+  ["4.5", 1_000_000],
+  ["4-6", 200_000],    // Claude 4.6 — explicitly 200K (same as default, documented for clarity)
+  ["4.6", 200_000],
+];
+
+/** Set of model substrings we've already warned about */
+const warnedModels = new Set<string>();
+
 /**
  * Determine context window size based on model name.
  * Sonnet 4.5 / Opus 4.5 have 1M context; others have 200K.
  * Matches ib's logic: check for "4-5" or "4.5" in model string.
+ * Logs a warning (once per model) when falling back to default for an unknown model.
  */
 export function contextSizeForModel(model: string): number {
-  if (model.includes("4-5") || model.includes("4.5")) {
-    return 1_000_000;
+  for (const [substring, size] of MODEL_CONTEXT_SIZES) {
+    if (model.includes(substring)) {
+      return size;
+    }
   }
-  if (model.includes("4-6") || model.includes("4.6")) {
-    return 200_000;
+  // Unknown model — log warning once per unique model string
+  if (!warnedModels.has(model)) {
+    warnedModels.add(model);
+    console.error(`[auto-compact] Unknown model "${model}" — using default context size ${DEFAULT_CONTEXT_SIZE}`);
   }
-  return 200_000;
+  return DEFAULT_CONTEXT_SIZE;
+}
+
+/** Clear warned models set (for testing) */
+export function resetWarnedModels(): void {
+  warnedModels.clear();
 }
 
 /**

@@ -13,8 +13,11 @@
 
 import { join } from "path";
 import { homedir } from "os";
+import { readFileSync, unlinkSync, mkdirSync, openSync, closeSync, writeSync, constants as fsConstants } from "fs";
 import { readAllAgents, detectAgentStates } from "./agents";
 import type { Agent } from "./agents";
+import { captureTmuxOutput } from "./tmux-poller";
+import { logAgent } from "./agent-lifecycle";
 import type { AgentState } from "./parse-state";
 import { sendMessage } from "./ib-commands";
 import { fetchUsage } from "./usage";
@@ -244,8 +247,14 @@ async function handleWaiting(agent: Agent, tracker: AgentTracker, allAgents: Age
 /**
  * Handler for "unknown" state.
  * Same exponential backoff as waiting — agent may need attention.
+ * On first transition into unknown, saves tmux output to debug-logs/ (matches bash watchdog).
  */
 async function handleUnknown(agent: Agent, tracker: AgentTracker, allAgents: Agent[]): Promise<void> {
+  // Save debug log on transition into unknown state (not on every tick)
+  if (tracker.previousState !== "unknown") {
+    await saveUnknownDebugLog(agent);
+  }
+
   tracker.waitCounter++;
 
   if (tracker.waitCounter >= tracker.notifyInterval) {
@@ -259,6 +268,31 @@ async function handleUnknown(agent: Agent, tracker: AgentTracker, allAgents: Age
     tracker.waitCounter = 0;
     tracker.notifyInterval = Math.min(tracker.notifyInterval * 2, MAX_NOTIFY_TICKS);
   }
+}
+
+/**
+ * Save tmux output to a debug log file when an agent transitions to unknown state.
+ * Matches bash behavior: saves to `debug-logs/watchdog-<timestamp>-unknown.txt`
+ * in the agent's directory.
+ */
+async function saveUnknownDebugLog(agent: Agent): Promise<void> {
+  const tmuxSession = agent.meta.tmux_session;
+  if (!tmuxSession) return;
+
+  try {
+    const output = await captureTmuxOutput(tmuxSession);
+    if (output === null) return;
+
+    const agentDir = join(agent.repoPath, ".ittybitsy", "agents", agent.id);
+    const debugDir = join(agentDir, "debug-logs");
+    mkdirSync(debugDir, { recursive: true });
+
+    const timestamp = Math.floor(Date.now() / 1000);
+    const debugFile = join(debugDir, `watchdog-${timestamp}-unknown.txt`);
+    await Bun.write(debugFile, output);
+
+    await logAgent(agentDir, `[watchdog] Debug log saved: debug-logs/watchdog-${timestamp}-unknown.txt`);
+  } catch { /* best-effort — don't crash watchdog */ }
 }
 
 /**
@@ -388,26 +422,46 @@ function isPidAlive(pid: number): boolean {
  * Acquire the watchdog lock file.
  * Writes current PID to ~/.itsybitsy/watchdog.lock.
  * Returns true if acquired (no lock, or stale PID). False if another watchdog is running.
+ *
+ * Uses O_EXCL for atomic lock creation to prevent TOCTOU races where two
+ * processes could both read "no lock" and then both write their PID.
  */
+/**
+ * Atomically create the lock file with O_EXCL and write our PID.
+ * Returns true if the file was created, false if it already existed.
+ */
+function atomicCreateLock(): boolean {
+  try {
+    const fd = openSync(lockFilePath, fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY);
+    writeSync(fd, Buffer.from(String(process.pid), "utf-8"));
+    closeSync(fd);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function acquireWatchdogLock(): boolean {
-  const { mkdirSync, writeFileSync, readFileSync } = require("fs");
   const dir = join(lockFilePath, "..");
   try {
     mkdirSync(dir, { recursive: true });
   } catch { /* dir exists */ }
 
-  // Check existing lock
+  // Try atomic creation first — O_CREAT | O_EXCL | O_WRONLY fails if file exists
+  if (atomicCreateLock()) return true;
+
+  // Lock file exists — check for stale PID
   try {
     const content = readFileSync(lockFilePath, "utf-8").trim();
     const pid = parseInt(content, 10);
     if (!isNaN(pid) && isPidAlive(pid)) {
       return false; // Another live watchdog holds the lock
     }
-  } catch { /* no lock file or unreadable — proceed */ }
+  } catch { /* Can't read lock file — treat as stale */ }
 
-  // Write our PID
-  writeFileSync(lockFilePath, String(process.pid), "utf-8");
-  return true;
+  // Stale lock — remove and try atomic creation again
+  try { unlinkSync(lockFilePath); } catch { /* race with another process */ }
+  return atomicCreateLock();
 }
 
 /**
@@ -415,7 +469,6 @@ export function acquireWatchdogLock(): boolean {
  * Only removes the file if it contains our PID.
  */
 export function releaseWatchdogLock(): void {
-  const { readFileSync, unlinkSync } = require("fs");
   try {
     const content = readFileSync(lockFilePath, "utf-8").trim();
     const pid = parseInt(content, 10);
@@ -429,7 +482,6 @@ export function releaseWatchdogLock(): void {
  * Read the PID from the lock file, or null if no valid lock exists.
  */
 export function readLockPid(): number | null {
-  const { readFileSync } = require("fs");
   try {
     const content = readFileSync(lockFilePath, "utf-8").trim();
     const pid = parseInt(content, 10);

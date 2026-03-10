@@ -51,6 +51,10 @@ import {
   setCompactSpawnRunner,
   resetCompactSpawnRunner,
 } from "./auto-compact";
+import {
+  setSpawnRunner as setTmuxPollerSpawnRunner,
+  resetSpawnRunner as resetTmuxPollerSpawnRunner,
+} from "./tmux-poller";
 import type { SpawnResult } from "./types";
 import type { ConfigResult } from "./config";
 
@@ -114,6 +118,7 @@ describe("watchdog", () => {
     stopWatchdog();
     resetSendSpawnRunner();
     resetWatchdogSpawnRunner();
+    resetTmuxPollerSpawnRunner();
     resetWatchdogFetchUsage();
     resetWatchdogReadConfig();
     resetWatchdogNow();
@@ -339,6 +344,65 @@ describe("watchdog", () => {
         await tick(agents);
       }
       expect(getTracker("a1").notifyInterval).toBe(INITIAL_NOTIFY_TICKS * 2);
+    });
+
+    test("saves debug log on first transition to unknown state", async () => {
+      const tmpDir = join(tmpdir(), `watchdog-debug-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+      mkdirSync(tmpDir, { recursive: true });
+
+      // Create agent with repoPath pointing to our temp dir
+      const a1 = agent("a1", "unknown", "mgr");
+      a1.repoPath = tmpDir;
+      const mgr = agent("mgr", "running");
+
+      // Mock tmux-poller to return fake output
+      const tmuxMock = mockSpawnRunner();
+      // Override the stdout to return tmux output
+      const origRunner = tmuxMock.runner;
+      const tmuxRunner = (args: any[], opts?: any): any => {
+        const result = origRunner(args, opts);
+        if (args[0] === "tmux" && args[1] === "capture-pane") {
+          return {
+            ...result,
+            stdout: new ReadableStream({
+              start(controller) {
+                controller.enqueue(new TextEncoder().encode("fake tmux output for debug"));
+                controller.close();
+              },
+            }),
+          };
+        }
+        return result;
+      };
+      setTmuxPollerSpawnRunner(tmuxRunner as any);
+
+      // First tick: transition from null to unknown — should save debug log
+      await tick([mgr, a1]);
+
+      const debugDir = join(tmpDir, ".ittybitsy", "agents", "a1", "debug-logs");
+      const files = await Array.fromAsync(new Bun.Glob("watchdog-*-unknown.txt").scan(debugDir));
+      expect(files.length).toBe(1);
+
+      const content = await Bun.file(join(debugDir, files[0]!)).text();
+      expect(content).toContain("fake tmux output for debug");
+
+      // Second tick: still unknown — should NOT create another debug file
+      await tick([mgr, a1]);
+      const files2 = await Array.fromAsync(new Bun.Glob("watchdog-*-unknown.txt").scan(debugDir));
+      expect(files2.length).toBe(1);
+
+      // Clean up
+      const { rmSync } = require("fs");
+      rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    test("does not save debug log when no tmux session", async () => {
+      const a1 = agent("a1", "unknown", "mgr");
+      a1.meta.tmux_session = "";
+      const mgr = agent("mgr", "running");
+
+      // Should not throw even without tmux session
+      await tick([mgr, a1]);
     });
   });
 

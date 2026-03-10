@@ -159,6 +159,9 @@ describe("contextSizeForModel", () => {
     contextSizeForModel("claude-sonnet-4.5");
     contextSizeForModel("claude-opus-4-5-20250514");
     contextSizeForModel("claude-opus-4-6");
+    contextSizeForModel("sonnet");
+    contextSizeForModel("opus");
+    contextSizeForModel("haiku");
     expect(errorSpy).not.toHaveBeenCalled();
   });
 });

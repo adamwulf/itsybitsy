@@ -49,6 +49,9 @@ const MODEL_CONTEXT_SIZES: Array<[string, number]> = [
   ["4.5", 1_000_000],
   ["4-6", 200_000],    // Claude 4.6 — explicitly 200K (same as default, documented for clarity)
   ["4.6", 200_000],
+  ["sonnet", 200_000],  // Common shorthands used by Claude Code — all 200K
+  ["opus", 200_000],
+  ["haiku", 200_000],
 ];
 
 /** Set of model substrings we've already warned about */

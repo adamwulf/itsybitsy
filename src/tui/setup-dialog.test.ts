@@ -507,7 +507,6 @@ function makePermsDialog(overrides?: Partial<Extract<NonNullable<DialogState>, {
     inputMode: false,
     inputValue: "",
     scrollOffset: 0,
-    configFilePath: "/tmp/test.json",
     onSave: () => {},
     ...overrides,
   };

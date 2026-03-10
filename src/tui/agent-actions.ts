@@ -826,7 +826,6 @@ function handleConfigItemAction(
         inputMode: false,
         inputValue: "",
         scrollOffset: 0,
-        configFilePath,
         onSave: (newAllow: string[], newDeny: string[]) => {
           ctx.closeDialog();
           Promise.all([

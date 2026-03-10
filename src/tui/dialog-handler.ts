@@ -67,7 +67,6 @@ export type DialogState =
       inputMode: boolean;
       inputValue: string;
       scrollOffset: number;
-      configFilePath: string;
       onSave: (allowList: string[], denyList: string[]) => void;
     }
   | null;
@@ -659,6 +658,8 @@ function handlePermissionsEditorDialog(
       if (d.focus > 0 && d.focus >= currentList.length) {
         d.focus = Math.max(0, d.focus - 1);
       }
+      // Clamp scroll offset after deletion
+      d.scrollOffset = Math.min(d.scrollOffset, Math.max(0, currentList.length - PERMS_VISIBLE_ROWS));
       ctx.tui?.requestRender();
     } else if (d.focus === listCount) {
       // Add button — switch to input mode

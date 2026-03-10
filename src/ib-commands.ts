@@ -2089,10 +2089,10 @@ function cleanupHooksObject(settings: Record<string, unknown>): void {
 
 // ── Hook detection predicates ───────────────────────────────────────────────
 
-/** Check for main-path PreToolUse hook (matches both "ib" and "itsybitsy" prefixes) */
+/** Check for main-path PreToolUse hook (itsybitsy only — ib hooks are not counted as installed) */
 function hasMainPathHook(settings: Record<string, unknown>): boolean {
   const hooks = settings.hooks as Record<string, unknown> | undefined;
-  return hookArrayHasCommand(hooks?.PreToolUse, "hooks main-path");
+  return hookArrayHasCommand(hooks?.PreToolUse, "itsybitsy hooks main-path");
 }
 
 /** Check for status injection hooks (UserPromptSubmit + PostToolUse, both must be present) */
@@ -2100,21 +2100,21 @@ function hasStatusHooks(settings: Record<string, unknown>): boolean {
   const hooks = settings.hooks as Record<string, unknown> | undefined;
   if (!hooks) return false;
   return (
-    hookArrayHasCommand(hooks.UserPromptSubmit, "hooks inject-status") &&
-    hookArrayHasCommand(hooks.PostToolUse, "hooks inject-status")
+    hookArrayHasCommand(hooks.UserPromptSubmit, "itsybitsy hooks inject-status") &&
+    hookArrayHasCommand(hooks.PostToolUse, "itsybitsy hooks inject-status")
   );
 }
 
 /** Check for session-start hook */
 function hasSessionStartHook(settings: Record<string, unknown>): boolean {
   const hooks = settings.hooks as Record<string, unknown> | undefined;
-  return hookArrayHasCommand(hooks?.SessionStart, "hooks session-start");
+  return hookArrayHasCommand(hooks?.SessionStart, "itsybitsy hooks session-start");
 }
 
 /** Check for intercept-task hook */
 function hasInterceptHook(settings: Record<string, unknown>): boolean {
   const hooks = settings.hooks as Record<string, unknown> | undefined;
-  return hookArrayHasCommand(hooks?.PreToolUse, "hooks intercept-task");
+  return hookArrayHasCommand(hooks?.PreToolUse, "itsybitsy hooks intercept-task");
 }
 
 // ── Exported hooks management functions ─────────────────────────────────────

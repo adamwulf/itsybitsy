@@ -355,7 +355,7 @@ Questions from agents that no longer exist (no directory in `.ittybitty/agents/`
         start.sh                     # Tmux startup script
         exit-check.sh                # Post-session interactive check
         resume.sh                    # Resume startup script (created on resume)
-        settings.local.json          # Copied from worktree on kill/merge
+        settings.local.json          # Copied from worktree on kill/nuke (bash teardown_agent only; not copied during merge — see §3.5 callout)
         output.log                   # Captured tmux output (on kill/merge)
         last-nudge                   # Unix timestamp of last nudge (stop hook debounce)
         nudge-recheck                # Marker file for delayed recheck scheduling
@@ -396,7 +396,7 @@ Questions from agents that no longer exist (no directory in `.ittybitty/agents/`
   "worktree": true,
   "worker": false,
   "yolo": false,
-  "model": "sonnet",
+  "model": "sonnet",              // or null if not specified
   "claude_pid": "12345"           // appended after Claude starts (not in initial write)
 }
 ```
@@ -413,7 +413,7 @@ Questions from agents that no longer exist (no directory in `.ittybitty/agents/`
 | `worktree` | boolean | Whether agent has an isolated git worktree |
 | `worker` | boolean | `true` for worker agents, `false` for managers |
 | `yolo` | boolean | Whether `--yolo` (skip permissions) was used |
-| `model` | string | Claude model name (e.g., "sonnet", "opus", "haiku") |
+| `model` | string \| null | Claude model name (e.g., "sonnet", "opus", "haiku"), or `null` if not specified | [^callout]: The TS `AgentMeta` interface types `model` as `string` (not nullable). In practice, bash writes `null` when no `--model` flag is passed; TS always provides a default model string.
 | `claude_pid` | string | PID of the Claude process (appended to meta.json via `sed` after start.sh launches Claude — not present in the initial write) |
 
 ### 5.3 Worktree ↔ Branch Relationship

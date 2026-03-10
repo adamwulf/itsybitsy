@@ -296,32 +296,16 @@ describe("CLI arg parsing", () => {
   });
 });
 
-// ─── Duplicate merge-check case ─────────────────────────────────────────────
+// ─── merge-check case ───────────────────────────────────────────────────────
 
-describe("duplicate merge-check case", () => {
-  test("documents that merge-check appears twice in the switch (lines ~473 and ~491)", () => {
-    // In JavaScript, duplicate case labels in a switch statement cause the
-    // FIRST matching case to execute. The second `case "merge-check"` block
-    // (lines ~491-497) is dead code — it is never reached.
-    // This test documents the behavior: `merge-check` always hits the first case.
-    //
-    // The first case (around line 473):
-    //   const repos = await listRepos();
-    //   const agent = await requireAgent(args[1], repos);
-    //   const { mergeCheckAgent } = await import("./ib-commands");
-    //   await printAndExit(await mergeCheckAgent(agent));
-    //
-    // The second case (around line 491) has identical logic but is unreachable.
-    // Both cases do the same thing, so it's harmless — but the duplicate should
-    // eventually be removed.
-
-    // Verify by reading the source and confirming duplicate exists
+describe("merge-check case", () => {
+  test("merge-check case appears exactly once in the switch", () => {
     const source = require("fs").readFileSync(
       require("path").join(import.meta.dir, "index.ts"),
       "utf-8",
     );
     const matches = source.match(/case "merge-check":/g);
     expect(matches).not.toBeNull();
-    expect(matches!.length).toBe(2); // Two case labels for merge-check
+    expect(matches!.length).toBe(1);
   });
 });

@@ -1153,6 +1153,22 @@ The following commands existed in `ib-commands.ts` but were NOT wired as CLI cas
 
 ---
 
+### Phase 28: Watchdog Spawning Fixes
+
+**Status:** In progress (agent-1b89b460)
+
+**Goal:** Make watchdog behavior match the bash `ib` — every agent gets a watchdog, and the TUI has no watchdog logic.
+
+**Fixes:**
+- [ ] Remove `if (manager)` guard in `newAgent()` — all agents (managers + workers) spawn a watchdog on creation
+- [ ] Add watchdog spawn to `resumeAgent()` — same as `newAgent()`, after tmux session starts. Watchdog is singleton so harmless if already running.
+- [ ] Remove any watchdog logic from `src/watcher.ts` — TUI should not run watchdog behavior; that's per-agent
+
+**Also noted (future):**
+- Auto-compact not wired into watchdog — `src/auto-compact.ts` exists but watchdog never calls it. Bash watchdog proactively sends `/compact` when context usage exceeds threshold.
+
+---
+
 ### Phase 27 (future): Path Allowlist in Hook Sandbox
 
 **Status:** Aspirational.

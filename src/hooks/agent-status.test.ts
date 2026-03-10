@@ -396,4 +396,43 @@ describe("debug log", () => {
     expect(files.length).toBeGreaterThanOrEqual(1);
     expect(files.some((f) => f.startsWith("stop-") && f.includes("waiting"))).toBe(true);
   });
+
+  test("debug file includes last_assistant_message", async () => {
+    await processStopHook(
+      ctx.agentId,
+      "test message\nWAITING",
+      ctx.agentDir,
+      ctx.agentsDir,
+    );
+
+    const debugDir = join(ctx.agentDir, "debug-logs");
+    const { readdir: rd } = await import("fs/promises");
+    const files = await rd(debugDir);
+    const debugFile = files.find((f) => f.startsWith("stop-"))!;
+    const content = await readFile(join(debugDir, debugFile), "utf-8");
+    expect(content).toContain("--- last_assistant_message ---");
+    expect(content).toContain("test message");
+  });
+
+  test("debug file includes tmux output and parse-state reason when tmux fallback used", async () => {
+    await processStopHook(
+      ctx.agentId,
+      "",
+      ctx.agentDir,
+      ctx.agentsDir,
+      {
+        captureOutput: async () => "some tmux output\nI HAVE COMPLETED THE GOAL\n",
+        checkGitStatus: async () => "",
+      },
+    );
+
+    const debugDir = join(ctx.agentDir, "debug-logs");
+    const { readdir: rd } = await import("fs/promises");
+    const files = await rd(debugDir);
+    const debugFile = files.find((f) => f.startsWith("stop-") && f.includes("complete"))!;
+    const content = await readFile(join(debugDir, debugFile), "utf-8");
+    expect(content).toContain("some tmux output");
+    expect(content).toContain("--- parse-state -v output ---");
+    expect(content).toContain("--- last_assistant_message ---");
+  });
 });

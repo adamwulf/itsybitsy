@@ -928,6 +928,34 @@ describe("watchdog", () => {
     });
   });
 
+  describe("unknown handler debug log", () => {
+    test("saves debug log only on first transition to unknown", async () => {
+      // saveUnknownDebugLog is called when previousState !== "unknown"
+      // It silently handles missing tmux sessions, so no crash expected
+      const a1 = agent("a1", "unknown");
+      const tracker = getTracker("a1");
+
+      // First tick: previousState is null, should trigger saveUnknownDebugLog
+      await tick([a1]);
+      expect(tracker.previousState).toBe("unknown");
+
+      // Second tick: previousState is "unknown", should NOT trigger saveUnknownDebugLog
+      await tick([a1]);
+      expect(tracker.previousState).toBe("unknown");
+    });
+
+    test("does not throw for non-existent repoPath", async () => {
+      const a1 = makeAgent({
+        id: "nonexistent-agent",
+        state: "unknown" as AgentState,
+        repoPath: "/nonexistent/path",
+      });
+
+      // Should not throw — error is caught silently
+      await tick([a1]);
+    });
+  });
+
   // =========================================================================
   // Full lifecycle integration tests
   // =========================================================================

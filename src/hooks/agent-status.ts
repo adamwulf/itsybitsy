@@ -72,6 +72,7 @@ export async function processStopHook(
   // 2. If empty, fall back to tmux
   // Keep tmuxOutput around for background task check later
   let tmuxOutput: string | null = null;
+  let parseReason: string | undefined;
   if (!state) {
     if (opts?.captureOutput) {
       tmuxOutput = await opts.captureOutput();
@@ -92,18 +93,29 @@ export async function processStopHook(
     if (tmuxOutput) {
       const result = parseState(tmuxOutput);
       state = result.state;
+      parseReason = result.reason;
     } else {
       state = "unknown";
     }
   }
 
-  // 3. Save debug capture
+  // 3. Save debug capture — include tmux output, parse-state reason, and last_assistant_message
   try {
     const debugDir = join(agentDir, "debug-logs");
     await mkdir(debugDir, { recursive: true });
     const timestamp = Math.floor(Date.now() / 1000);
     const debugPath = join(debugDir, `stop-${timestamp}-${state}.txt`);
-    await writeFile(debugPath, lastMessage || "(no message)");
+    const debugParts: string[] = [];
+    if (tmuxOutput) {
+      debugParts.push(tmuxOutput);
+      debugParts.push("");
+      debugParts.push("--- parse-state -v output ---");
+      debugParts.push(`${state} (matched: ${parseReason ?? "message"})`);
+    }
+    debugParts.push("");
+    debugParts.push("--- last_assistant_message ---");
+    debugParts.push(lastMessage || "(no message)");
+    await writeFile(debugPath, debugParts.join("\n"));
   } catch {
     /* ignore debug write failures */
   }

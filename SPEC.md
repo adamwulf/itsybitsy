@@ -652,9 +652,11 @@ Reads Claude transcript JSONL files to determine context window usage percentage
 
 ### 8.5 Watchdog
 
-`ib watchdog <id>` runs as a background loop for agents with a manager, polling agent state every 5 seconds. It continues running while the agent's worktree directory exists and the agent's tmux session is active.
+`ib watchdog <id>` runs as a background loop for agents with a manager, polling agent state every 5 seconds.
 
-**Self-exit on tmux disappearance**: The watchdog ignores tmux session checks for the first 5 seconds after startup (grace period while the agent initializes). After that, if the tmux session no longer exists (`tmux has-session` fails), the watchdog exits. This ensures the watchdog self-cleans on pause or crash without requiring callers to explicitly kill it. On resume, a new watchdog is spawned (§1.6 step 7). [^callout] Bash's watchdog loop condition is `while [[ -d "$AGENT_DIR/repo" ]]` (worktree only, no tmux check), so it survives pause and must be manually killed. The self-exit behavior described here is the intended design for the TS implementation.
+**Exit condition**: The bash watchdog exits when the agent's worktree directory is removed (`while [[ -d "$AGENT_DIR/repo" ]]`), which happens on kill/merge/nuke. It does **not** check tmux session existence, so it survives pause and must be exited by worktree removal. On resume, a new watchdog is spawned (§1.6 step 7).
+
+> [^callout] The TS watchdog is a global loop (see callout below) that monitors all agents — it doesn't exit per-agent. Stale per-agent trackers are pruned when an agent disappears from the provider. There is no per-agent worktree or tmux-based exit condition in TS.
 
 **Monitoring behaviors by state:**
 
@@ -662,14 +664,16 @@ Reads Claude transcript JSONL files to determine context window usage percentage
 |-------|--------|
 | `waiting` | Increment waiting counter. When counter reaches the notification threshold, notify manager: "[watchdog]: Your subtask <id> recently started waiting for input". Uses exponential backoff: initial threshold 30s (6 polls), doubles after each notification, capped at 64 minutes. |
 | `complete` | Reset waiting counter and notification interval. Notify manager once: "[watchdog]: Your subtask <id> recently completed". Sets a flag to prevent duplicate notifications. Flag resets if agent returns to `running`. |
-| `unknown` | Treat like `waiting` — increment counter with same exponential backoff. Also saves a debug capture of tmux output to `debug-logs/watchdog-<epoch>-unknown.txt`. |
-| `rate_limited` | Attempt to bypass the rate limit dialog (bash uses a 3-attempt retry loop with 2s sleeps between attempts; checks `parse_state` after each Enter). Then poll Claude's usage API; when session usage drops below 5%, send nudge: "[watchdog]: Usage has refreshed (<pct>%). Please continue your task." Reset waiting counter and notification interval. |
+| `unknown` | Treat like `waiting` — increment counter with same exponential backoff. On first transition into unknown, saves a debug capture of tmux output to `debug-logs/watchdog-<epoch>-unknown.txt` (not repeated on subsequent ticks). |
+| `rate_limited` | Attempt to bypass the rate limit dialog (bash uses a 3-attempt retry loop with 2s sleeps between attempts; checks `parse_state` after each Enter to verify dismissal). Then poll Claude's usage API; when session usage drops below 5%, send nudge: "[watchdog]: Usage has refreshed (<pct>%). Please continue your task." Reset waiting counter and notification interval. [^callout] TS sends a single Enter on first detection (`rateLimitBypassed` flag) and relies on the 5s poll cycle for retry, rather than bash's synchronous 3-attempt loop. |
 | `running` | Reset waiting counter and notification interval. Clear completion flag if previously set. |
 | `creating` | Treat as running — reset counters. |
 | `compacting` | Reset waiting counter and notification interval. Wait for completion. |
 | `stopped` | Reset waiting counter and notification interval. |
 
-**Auto-compact**: If `autoCompactThreshold` is configured, the watchdog also checks the agent's context window usage on each poll. When usage exceeds the threshold and the agent is not currently compacting, sends `/compact` to the agent's tmux session. The compact flag resets when compacting completes.
+**Auto-compact**: If `autoCompactThreshold` is configured, the watchdog also checks the agent's context window usage on each poll. When usage exceeds the threshold and the agent is not currently compacting, sends `/compact` to the agent's tmux session. The compact flag resets when the agent transitions out of `compacting` state.
+
+> [^callout] TS watchdog auto-compact only runs for agents in `running` or `waiting` states (not any non-compacting state) and enforces a 60-second per-agent cooldown between checks (`COMPACT_CHECK_COOLDOWN_MS`). The compact flag reset behavior differs: TS resets when usage drops below threshold (in `checkAndCompact`), not on state transition out of compacting. See also §8.4 callout.
 
 **Quiet mode** (`--quiet`): Allows monitoring agents without managers. All notifications are logged but not sent.
 
@@ -682,6 +686,8 @@ When running from a worktree, the root repository is found via:
 1. `git rev-parse --git-common-dir` to find the shared `.git` directory
 2. If the result is `.git` or matches `--git-dir`, we're in the main repo → use `--show-toplevel`
 3. Otherwise, go up one directory from the common dir to find the root
+
+Bash resolves relative `common_dir` paths to absolute via `cd "$root_path" && pwd`. [^needs review] TS uses `dirname(commonDir)` directly, which could return a relative path if `--git-common-dir` outputs a relative path. In practice this may work because callers typically provide absolute `repoPath` to `git -C`, but it hasn't been verified for all worktree layouts.
 
 ### 8.7 Reassign Command
 
@@ -699,6 +705,8 @@ Reassigns an agent to a different parent manager (or makes it a root manager wit
 6. New parent cannot be a descendant of the agent (circular dependency check)
 7. No-op if agent already has the requested parent
 
+> [^callout] TS `reassignAgent()` is missing validations #3 (self-reassign) and #7 (no-op same parent). These cases will silently succeed and write a redundant meta.json update.
+
 **On success:**
 
 1. Update `meta.json` — set `manager` to the new parent ID (or `null` for `--none`)
@@ -708,6 +716,8 @@ Reassigns an agent to a different parent manager (or makes it a root manager wit
 5. Notify the agent itself: `"[watchdog]: You've been reassigned from <old> to <new>"`
 
 Notifications are sent via `ib send` (bash) / `sendMessage` (TS) and suppressed if the target agent doesn't exist or isn't running.
+
+> [^callout] TS diverges in several ways: (a) Sets `meta.manager` to `""` (empty string) for `--none` instead of `null`. (b) Uses different notification messages — old parent gets `"Agent <id> has been reassigned away from you"`, new parent gets `"Agent <id> has been reassigned to you"` (no watchdog prefix, no details about old/new parent). (c) Does not notify the agent itself (step 5 is skipped).
 
 ### 8.8 Post-Create-Agent Hook
 
@@ -724,3 +734,5 @@ After agent creation, the system runs `.ittybitty/hooks/post-create-agent` if it
 | `IB_AGENT_MANAGER` | Manager agent ID (empty if root) |
 | `IB_AGENT_PROMPT` | The prompt given to the agent |
 | `IB_AGENT_MODEL` | The model specified for the agent |
+
+> [^callout] TS runs the post-create hook with `stdout: "ignore", stderr: "ignore"`, so hook output is discarded rather than appended to `agent.log` as in bash.

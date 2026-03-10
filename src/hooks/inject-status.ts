@@ -9,6 +9,7 @@
  * Supports flags: --full (default), --if-changed, --brief, --visible
  */
 
+import { join } from "node:path";
 import { listRepos, repoDisplayName } from "../registry";
 import type { RepoEntry } from "../registry";
 import type { Agent } from "../agents";
@@ -92,7 +93,7 @@ export function formatAgentStatus(
  * Format: '2 running, 1 waiting' (skip states with 0 count).
  * Returns 'no agents' if no active agents.
  */
-export function briefSummary(agents: Agent[]): string {
+export function briefSummary(agents: Agent[], questionCount?: number): string {
   const active = agents.filter((a) => !a.archived);
   if (active.length === 0) return "no agents";
 
@@ -112,7 +113,44 @@ export function briefSummary(agents: Agent[]): string {
     if (n && n > 0) parts.push(`${n} ${s}`);
   }
 
+  if (questionCount && questionCount > 0) {
+    parts.push(`${questionCount} question${questionCount > 1 ? "s" : ""}`);
+  }
+
   return parts.length > 0 ? parts.join(", ") : "no agents";
+}
+
+// ── Pending question count ────────────────────────────────────────────────────
+
+/**
+ * Count pending questions across all repos, filtering out questions from
+ * dead/archived agents.
+ */
+export async function countPendingQuestions(
+  repos: RepoEntry[],
+  agents: Agent[]
+): Promise<number> {
+  const activeAgentIds = new Set(
+    agents.filter((a) => !a.archived).map((a) => a.id)
+  );
+  let count = 0;
+  for (const repo of repos) {
+    const questionsPath = join(repo.path, ".ittybitty", "user-questions.json");
+    try {
+      const file = Bun.file(questionsPath);
+      if (!(await file.exists())) continue;
+      const data = JSON.parse(await file.text());
+      const questions = data.questions ?? [];
+      for (const q of questions) {
+        if (q.status === "pending" && activeAgentIds.has(q.agent)) {
+          count++;
+        }
+      }
+    } catch {
+      // ignore missing or malformed files
+    }
+  }
+  return count;
 }
 
 // ── Load agents helper ───────────────────────────────────────────────────────
@@ -235,14 +273,15 @@ export async function hookInjectStatus(
 
   // Build status text
   const provider = createDiskAgentProvider();
-  const { text: statusText, agents } = await buildStatusText(provider);
+  const { text: statusText, agents, repos } = await buildStatusText(provider);
 
   if (!statusText) {
     process.exit(0);
     return;
   }
 
-  const brief = briefSummary(agents);
+  const questionCount = await countPendingQuestions(repos, agents);
+  const brief = briefSummary(agents, questionCount);
   let outputContent: string;
 
   if (options.mode === "brief") {

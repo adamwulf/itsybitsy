@@ -195,6 +195,26 @@ describe("checkMainPath", () => {
       expect(checkMainPath(input)).toEqual({ action: "allow" });
     });
 
+    test("cd with shell comment is allowed for normal path", () => {
+      const input: MainPathInput = {
+        tool_name: "Bash",
+        tool_input: { command: "cd /foo # some comment" },
+        cwd: "/some/path",
+      };
+      expect(checkMainPath(input)).toEqual({ action: "allow" });
+    });
+
+    test("cd with shell comment to agent worktree is blocked", () => {
+      const input: MainPathInput = {
+        tool_name: "Bash",
+        tool_input: { command: "cd /Users/dev/project/.ittybitty/agents/test-agent/repo # checkout" },
+        cwd: "/Users/dev/project",
+      };
+      const result = checkMainPath(input);
+      expect(result.action).toBe("block");
+      expect(result.reason).toContain("agent worktree");
+    });
+
     test("missing command field defaults to empty string, allowed", () => {
       const input: MainPathInput = {
         tool_name: "Bash",

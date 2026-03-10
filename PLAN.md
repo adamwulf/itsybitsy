@@ -1241,7 +1241,8 @@ Bash supports `--from <id>` to auto-prefix messages with sender identity. Note: 
 - [ ] `ib new-agent --prompt-file <path>` — read prompt from file
 - [ ] `ib parse-state` — debug command for state parsing
 - [ ] `ib questions --all` — show acknowledged questions
-- [ ] `ib diff` — use `git merge-base` with parent branch (not hardcoded `main`) — same root cause as 32e, fix together
+- [ ] `ib status --json` — bash supports JSON output for status (nice-to-have, same as `ib list --json`)
+- [ ] `ib diff` — already uses `git merge-base HEAD main` (so merge-base logic exists), but needs to use the parent branch instead of hardcoding `main` — distinct from 32e where status uses `main..HEAD` range with no merge-base at all; fix together
 
 ---
 
@@ -1302,10 +1303,15 @@ The `merge-check` case appears twice in the main switch statement. The second oc
 
 **Files:** `src/ib-commands.ts` (4 variants: `nukeResumeRunCmd`, `mergeRunCmd`, `newAgentRunCmd`, `diffStatusRunCmd`), `src/agent-lifecycle.ts` (1 variant)
 
-5 near-identical `runCmd` wrappers that spawn → read stdout → await exit. They differ in stderr handling — some drain it, some don't. Note: `src/tmux-poller.ts` does NOT have a runCmd variant.
+5 near-identical `runCmd` wrappers that spawn → read stdout → await exit. They fall into three stderr patterns:
+- **Deadlock risk** — pipe stderr but never drain: `nukeResumeRunCmd` (ib-commands:116), `agent-lifecycle.ts:runCmd` (line 45)
+- **Sequential drain** — reads stderr after stdout, safe but not parallel: `newAgentRunCmd` (ib-commands:1131)
+- **Correct** — drains both with `Promise.all`: `mergeRunCmd` (ib-commands:716), `diffStatusRunCmd` (ib-commands:1893)
+
+Note: `src/tmux-poller.ts` does NOT have a runCmd variant.
 
 - [ ] Extract a shared `runCmd` helper that drains both stdout and stderr via `Promise.all`
-- [ ] Replace all variants with calls to the shared helper
+- [ ] Replace all 5 variants with calls to the shared helper (including `newAgentRunCmd` which currently drains sequentially)
 
 #### 34d: Extract shared constants (low priority)
 
@@ -1371,7 +1377,7 @@ Using `sed` to insert `claude_pid` into `meta.json` is brittle.
 
 #### 35a: CLI entrypoint tests (high priority)
 
-**File:** `src/index.ts` (708 lines, no test file)
+**File:** `src/index.ts` (707 lines, no test file)
 
 The main CLI switch has no tests, including the duplicate `merge-check` case.
 

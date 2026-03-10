@@ -118,7 +118,7 @@ After any code changes, always run:
 
 ## itsybitsy Implementation Notes
 
-All 6 phases complete. 881 tests across 25 files.
+All 6 phases complete. 898 tests across 26 files.
 
 ### State detection flow
 1. `watcher.ts` calls `detectAgentStates()` (in `agents.ts`) on every refresh
@@ -210,6 +210,9 @@ When running parallel agents, start a 2-minute cron loop to auto-merge completed
 3. When all target agents are merged, cancel: `CronDelete` with that job ID
 
 The loop handles: checking completion, enforcing review cycles, merging approved agents, nudging agents that skipped review, and freeing agent slots when sub-reviewers complete.
+
+### Validation (src/validation.ts)
+Input validation helpers that enforce strict character allowlists to prevent shell injection in script templates. Exports: `isValidModel()` (alphanumeric, dots, hyphens, underscores), `isValidToolList()` (alphanumeric, underscores, hyphens, asterisks, parens, colons, dots, spaces, commas), `isValidAgentId()` and `isValidTmuxSession()` (alphanumeric, hyphens, underscores), `isValidSessionId()` (hex digits and hyphens). Used wherever user-supplied values are interpolated into shell commands.
 
 ### Ghostty (src/ghostty.ts)
 - `openInGhostty(tmuxSession)` spawns `ghostty --command='bash -c "tmux attach -t {session}"'` detached via `proc.unref()` — bash -c wrapper prevents Ghostty's login shell flags from being passed to tmux. Note: `+new-window` (reuse existing instance) is GTK-only and not available on macOS, so each call spawns a new Ghostty app.

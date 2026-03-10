@@ -122,7 +122,7 @@ This produces a single `ib` binary with no runtime dependencies. To add it to yo
 
 ```sh
 # Option 1: Add the project directory to your PATH (in ~/.bash_profile or ~/.zshrc)
-export PATH=$PATH:$HOME/Developer/bun/itsybitsy
+export PATH=$PATH:/path/to/itsybitsy
 
 # Option 2: Install system-wide
 sudo cp ib /usr/local/bin/ib

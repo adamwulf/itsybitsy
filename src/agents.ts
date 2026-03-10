@@ -159,8 +159,8 @@ export async function readRepoAgents(repoPath: string, repoName: string): Promis
   };
 }
 
-/** Read pending questions for a repo, filtering out questions from non-existent agents */
-export async function readPendingQuestions(repoPath: string): Promise<PendingQuestion[]> {
+/** Internal helper: read questions for a repo, optionally filtering to pending-only */
+async function readQuestionsInternal(repoPath: string, pendingOnly: boolean): Promise<PendingQuestion[]> {
   try {
     const questionsPath = join(repoPath, ".ittybitty", "user-questions.json");
     const file = Bun.file(questionsPath);
@@ -182,49 +182,26 @@ export async function readPendingQuestions(repoPath: string): Promise<PendingQue
       activeAgentIds = new Set();
     }
 
-    return data.questions.filter(
-      (q: PendingQuestion) => q.status === "pending" && activeAgentIds.has(q.agent)
+    return data.questions.filter((q: PendingQuestion) =>
+      activeAgentIds.has(q.agent) && (!pendingOnly || q.status === "pending")
     );
   } catch (err: unknown) {
     // Expected: file missing (ENOENT), malformed JSON, etc. — silently return empty
-    if (err instanceof Error && "code" in err && (err as NodeJS.ErrnoException).code !== "ENOENT") {
-      process.stderr.write(`Warning: failed to read pending questions: ${(err as Error).message}\n`);
-    }
-    return [];
-  }
-}
-
-/** Read all questions (pending + acknowledged) for a repo, filtering out questions from non-existent agents */
-export async function readAllQuestions(repoPath: string): Promise<PendingQuestion[]> {
-  try {
-    const questionsPath = join(repoPath, ".ittybitsy", "user-questions.json");
-    const file = Bun.file(questionsPath);
-    if (!(await file.exists())) return [];
-    const data = await file.json();
-    if (!data || !Array.isArray(data.questions)) return [];
-
-    // Read active agent IDs from the agents directory
-    const agentsDir = join(repoPath, ".ittybitsy", "agents");
-    let activeAgentIds: Set<string>;
-    try {
-      const entries = await readdir(agentsDir, { withFileTypes: true });
-      activeAgentIds = new Set(entries.filter((e) => e.isDirectory()).map((e) => e.name));
-    } catch (err: unknown) {
-      if (err instanceof Error && "code" in err && (err as NodeJS.ErrnoException).code !== "ENOENT") {
-        process.stderr.write(`Warning: failed to read agents directory: ${(err as Error).message}\n`);
-      }
-      activeAgentIds = new Set();
-    }
-
-    return data.questions.filter(
-      (q: PendingQuestion) => activeAgentIds.has(q.agent)
-    );
-  } catch (err: unknown) {
     if (err instanceof Error && "code" in err && (err as NodeJS.ErrnoException).code !== "ENOENT") {
       process.stderr.write(`Warning: failed to read questions: ${(err as Error).message}\n`);
     }
     return [];
   }
+}
+
+/** Read pending questions for a repo, filtering out questions from non-existent agents */
+export async function readPendingQuestions(repoPath: string): Promise<PendingQuestion[]> {
+  return readQuestionsInternal(repoPath, true);
+}
+
+/** Read all questions (pending + acknowledged) for a repo, filtering out questions from non-existent agents */
+export async function readAllQuestions(repoPath: string): Promise<PendingQuestion[]> {
+  return readQuestionsInternal(repoPath, false);
 }
 
 /**

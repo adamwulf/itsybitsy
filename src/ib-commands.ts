@@ -1884,7 +1884,7 @@ async function diffStatusRunCmd(cmd: string[]): Promise<{ stdout: string; stderr
  * Native diff implementation — replaces `ib diff <id>`.
  * Runs git merge-base HEAD main, then git diff <merge-base> in the agent worktree.
  */
-export async function diffAgent(agent: Agent): Promise<IbCommandResult> {
+export async function diffAgent(agent: Agent, opts?: { stat?: boolean }): Promise<IbCommandResult> {
   const worktreePath = join(agent.repoPath, ".ittybitty", "agents", agent.id, "repo");
   try {
     await readdir(worktreePath);
@@ -1892,30 +1892,83 @@ export async function diffAgent(agent: Agent): Promise<IbCommandResult> {
     return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' has no worktree` };
   }
 
-  const mergeBase = await diffStatusRunCmd(["git", "-C", worktreePath, "merge-base", "HEAD", "main"]);
+  const parentBranch = agent.meta.manager ? `agent/${agent.meta.manager}` : "main";
+  const agentBranch = `agent/${agent.id}`;
+
+  const mergeBase = await diffStatusRunCmd(["git", "-C", worktreePath, "merge-base", parentBranch, agentBranch]);
   if (mergeBase.exitCode !== 0) {
-    return { ok: false, exitCode: 1, stdout: "", stderr: `Failed to find merge-base with main: ${mergeBase.stderr}` };
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Failed to find merge-base between ${parentBranch} and ${agentBranch}: ${mergeBase.stderr}` };
   }
 
-  const diff = await diffStatusRunCmd(["git", "-C", worktreePath, "diff", mergeBase.stdout]);
+  const diffCmd = opts?.stat
+    ? ["git", "-C", worktreePath, "diff", "--stat", `${mergeBase.stdout}..${agentBranch}`]
+    : ["git", "-C", worktreePath, "diff", `${mergeBase.stdout}..${agentBranch}`];
+  const diff = await diffStatusRunCmd(diffCmd);
   return { ok: diff.exitCode === 0, exitCode: diff.exitCode, stdout: diff.stdout, stderr: diff.stderr };
 }
 
 /**
  * Native status implementation — replaces `ib status <id>`.
- * Runs git log --oneline main..HEAD + git status --short in the agent worktree.
+ * Shows header, commits vs parent branch, uncommitted changes, and file change summary.
  */
 export async function statusAgent(agent: Agent): Promise<IbCommandResult> {
-  const worktreePath = join(agent.repoPath, ".ittybitty", "agents", agent.id, "repo");
+  const worktreePath = join(agent.repoPath, ".ittybitsy", "agents", agent.id, "repo");
   try {
     await readdir(worktreePath);
   } catch {
     return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' has no worktree` };
   }
 
-  const log = await diffStatusRunCmd(["git", "-C", worktreePath, "log", "--oneline", "main..HEAD"]);
-  const status = await diffStatusRunCmd(["git", "-C", worktreePath, "status", "--short"]);
-  const parts = [log.stdout, status.stdout].filter(Boolean);
+  const agentBranch = `agent/${agent.id}`;
+  const parentBranch = agent.meta.manager ? `agent/${agent.meta.manager}` : "main";
+  const parts: string[] = [];
+
+  // Header
+  parts.push(`Agent: ${agent.id}`);
+  parts.push(`Branch: ${agentBranch}`);
+  parts.push(`Worktree: ${worktreePath}`);
+  parts.push("");
+
+  // Get merge-base
+  const mb = await diffStatusRunCmd(["git", "-C", worktreePath, "merge-base", parentBranch, agentBranch]);
+  if (mb.exitCode === 0 && mb.stdout) {
+    // Commits
+    const log = await diffStatusRunCmd(["git", "-C", worktreePath, "log", "--oneline", `${mb.stdout}..${agentBranch}`]);
+    const commitLines = log.stdout ? log.stdout.split("\n") : [];
+    const commitCount = commitLines.length;
+    if (commitCount > 0) {
+      parts.push(`═══ Commits (${commitCount}) vs ${parentBranch} ═══`);
+      const formatted = await diffStatusRunCmd(["git", "-C", worktreePath, "log", "--format=  %h %s", `${mb.stdout}..${agentBranch}`]);
+      if (formatted.stdout) parts.push(formatted.stdout);
+      parts.push("");
+    } else {
+      parts.push(`═══ No commits vs ${parentBranch} ═══`);
+      parts.push("");
+    }
+  }
+
+  // Uncommitted changes
+  const porcelain = await diffStatusRunCmd(["git", "-C", worktreePath, "status", "--porcelain"]);
+  if (porcelain.stdout) {
+    parts.push("═══ Uncommitted Changes ═══");
+    const short = await diffStatusRunCmd(["git", "-C", worktreePath, "status", "--short"]);
+    if (short.stdout) parts.push(short.stdout);
+    parts.push("");
+  }
+
+  // File change summary
+  if (mb.exitCode === 0 && mb.stdout) {
+    const stat = await diffStatusRunCmd(["git", "-C", worktreePath, "diff", "--stat", `${mb.stdout}..${agentBranch}`]);
+    if (stat.stdout) {
+      const statLines = stat.stdout.split("\n");
+      const summaryLine = statLines[statLines.length - 1]?.trim() ?? "";
+      if (summaryLine && !summaryLine.includes("0 files changed")) {
+        parts.push("═══ Files Changed ═══");
+        parts.push(`  ${summaryLine}`);
+      }
+    }
+  }
+
   return { ok: true, exitCode: 0, stdout: parts.join("\n"), stderr: "" };
 }
 

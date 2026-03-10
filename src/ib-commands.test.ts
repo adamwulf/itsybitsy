@@ -1,6 +1,6 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { join } from "path";
-import { mkdtemp, rm, mkdir } from "fs/promises";
+import { mkdtemp, rm, mkdir, readdir } from "fs/promises";
 import { tmpdir } from "os";
 import type { Agent, AgentMeta } from "./agents";
 import { makeAgent as _makeAgent, makeSpawnResult } from "./test-utils";
@@ -2430,14 +2430,29 @@ describe("statusAgent (native)", () => {
 
   test("returns combined log and status output", async () => {
     const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
-    await mkdir(join(agentDir, "repo"), { recursive: true });
+    const repoDir = join(agentDir, "repo");
+    await mkdir(repoDir, { recursive: true });
+    // Ensure directory is visible (Bun async fs timing workaround)
+    await readdir(repoDir);
 
     setDiffStatusSpawnRunner((cmd: string[]) => {
-      if (cmd.includes("log")) {
+      if (cmd.includes("merge-base")) {
+        return makeSpawnResult(0, "deadbeef123456\n");
+      }
+      if (cmd.includes("log") && cmd.includes("--oneline")) {
         return makeSpawnResult(0, "abc1234 first commit\ndef5678 second commit\n");
       }
-      if (cmd.includes("status")) {
+      if (cmd.includes("log") && cmd.some((c) => c.includes("--format"))) {
+        return makeSpawnResult(0, "  abc1234 first commit\n  def5678 second commit\n");
+      }
+      if (cmd.includes("--porcelain")) {
         return makeSpawnResult(0, "M src/file.ts\n");
+      }
+      if (cmd.includes("status") && cmd.includes("--short")) {
+        return makeSpawnResult(0, "M src/file.ts\n");
+      }
+      if (cmd.includes("diff") && cmd.includes("--stat")) {
+        return makeSpawnResult(0, " src/file.ts | 10 +++++++---\n 1 file changed, 7 insertions(+), 3 deletions(-)\n");
       }
       return makeSpawnResult();
     });

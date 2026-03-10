@@ -5,7 +5,6 @@
  */
 
 import { addRepo, removeRepo, listRepos, repoDisplayName, type RepoEntry } from "./registry";
-import { agentWorktreePath } from "./agents";
 import type { Agent, FlatEntry } from "./agents";
 import { isValidAgentId } from "./validation";
 
@@ -140,30 +139,22 @@ async function main() {
       const roots = buildAgentTree(agents);
 
       if (jsonOutput) {
-        // Collect agents matching the manager filter
-        const filtered: Agent[] = [];
-        function collectForJson(agent: Agent) {
-          if (agent.archived) return;
-          if (managerFilter && agent.meta.manager !== managerFilter && agent.id !== managerFilter) return;
-          filtered.push(agent);
-          for (const child of agent.children) collectForJson(child);
-        }
+        // Collect agents matching the manager filter (reuse extracted helpers)
+        const agentsToShow: { agent: Agent; depth: number }[] = [];
         for (const root of roots) {
           if (managerFilter) {
-            // Walk tree looking for the manager's children
-            function findManagerJson(a: Agent): void {
-              if (a.id === managerFilter) {
-                for (const child of a.children) collectForJson(child);
-              } else {
-                for (const child of a.children) findManagerJson(child);
+            if (root.id === managerFilter) {
+              for (const child of root.children) {
+                collectAgents(child, 1, null, agentsToShow);
               }
+            } else {
+              findManagerInTree(root, managerFilter, agentsToShow);
             }
-            findManagerJson(root);
           } else {
-            collectForJson(root);
+            collectAgents(root, 0, null, agentsToShow);
           }
         }
-        const jsonData = filtered.map((a) => ({
+        const jsonData = agentsToShow.map(({ agent: a }) => ({
           id: a.id,
           state: a.state,
           age: a.age,
@@ -441,129 +432,15 @@ async function main() {
       const repos = await listRepos();
       const agent = await requireAgent(args[1], repos);
       const statOnly = args.includes("--stat");
-      const cwd = agentWorktreePath(agent);
-
-      // Determine parent branch: agent/<manager-id> if manager exists, otherwise main
-      const parentBranch = agent.meta.manager ? `agent/${agent.meta.manager}` : "main";
-      const agentBranch = `agent/${agent.id}`;
-
-      // Get merge-base between parent branch and agent branch
-      const mergeBaseProc = Bun.spawn(["git", "merge-base", parentBranch, agentBranch], {
-        cwd,
-        stdout: "pipe",
-        stderr: "pipe",
-      });
-      const mergeBase = (await new Response(mergeBaseProc.stdout).text()).trim();
-      const mbExit = await mergeBaseProc.exited;
-      if (mbExit !== 0) {
-        console.error(`Failed to find merge-base between ${parentBranch} and ${agentBranch}`);
-        process.exit(1);
-      }
-
-      const diffArgs = statOnly
-        ? ["git", "diff", "--stat", `${mergeBase}..${agentBranch}`]
-        : ["git", "diff", `${mergeBase}..${agentBranch}`];
-      const diffProc = Bun.spawn(diffArgs, {
-        cwd,
-        stdin: "inherit",
-        stdout: "inherit",
-        stderr: "inherit",
-      });
-      process.exit(await diffProc.exited);
+      const { diffAgent } = await import("./ib-commands");
+      await printAndExit(await diffAgent(agent, { stat: statOnly }));
       break;
     }
     case "status": {
       const repos = await listRepos();
       const agent = await requireAgent(args[1], repos);
-      const cwd = agentWorktreePath(agent);
-      const agentBranch = `agent/${agent.id}`;
-
-      // Determine parent branch: agent/<manager-id> if manager exists, otherwise main
-      const parentBranch = agent.meta.manager ? `agent/${agent.meta.manager}` : "main";
-
-      // Header
-      console.log(`Agent: ${agent.id}`);
-      console.log(`Branch: ${agentBranch}`);
-      console.log(`Worktree: ${cwd}`);
-      console.log("");
-
-      // Get merge-base
-      const mergeBaseProc = Bun.spawn(["git", "merge-base", parentBranch, agentBranch], {
-        cwd,
-        stdout: "pipe",
-        stderr: "pipe",
-      });
-      const mergeBase = (await new Response(mergeBaseProc.stdout).text()).trim();
-      const mbExit = await mergeBaseProc.exited;
-
-      if (mbExit === 0 && mergeBase) {
-        // Count commits
-        const countProc = Bun.spawn(["git", "log", "--oneline", `${mergeBase}..${agentBranch}`], {
-          cwd,
-          stdout: "pipe",
-          stderr: "pipe",
-        });
-        const countOutput = (await new Response(countProc.stdout).text()).trim();
-        await countProc.exited;
-        const commitLines = countOutput ? countOutput.split("\n") : [];
-        const commitCount = commitLines.length;
-
-        if (commitCount > 0) {
-          console.log(`═══ Commits (${commitCount}) vs ${parentBranch} ═══`);
-          const logProc = Bun.spawn(["git", "log", "--format=  %h %s", `${mergeBase}..${agentBranch}`], {
-            cwd,
-            stdin: "inherit",
-            stdout: "inherit",
-            stderr: "inherit",
-          });
-          await logProc.exited;
-          console.log("");
-        } else {
-          console.log(`═══ No commits vs ${parentBranch} ═══`);
-          console.log("");
-        }
-      }
-
-      // Show uncommitted changes
-      const statusProc = Bun.spawn(["git", "status", "--porcelain"], {
-        cwd,
-        stdout: "pipe",
-        stderr: "pipe",
-      });
-      const statusOutput = (await new Response(statusProc.stdout).text()).trim();
-      await statusProc.exited;
-
-      if (statusOutput) {
-        console.log("═══ Uncommitted Changes ═══");
-        const shortProc = Bun.spawn(["git", "status", "--short"], {
-          cwd,
-          stdin: "inherit",
-          stdout: "inherit",
-          stderr: "inherit",
-        });
-        await shortProc.exited;
-        console.log("");
-      }
-
-      // Show file change summary (git diff --stat)
-      if (mbExit === 0 && mergeBase) {
-        const statProc = Bun.spawn(["git", "diff", "--stat", `${mergeBase}..${agentBranch}`], {
-          cwd,
-          stdout: "pipe",
-          stderr: "pipe",
-        });
-        const statOutput = (await new Response(statProc.stdout).text()).trim();
-        await statProc.exited;
-        // The last line of --stat output is the summary
-        if (statOutput) {
-          const statLines = statOutput.split("\n");
-          const summaryLine = statLines[statLines.length - 1]!.trim();
-          if (summaryLine && !summaryLine.includes("0 files changed")) {
-            console.log("═══ Files Changed ═══");
-            console.log(`  ${summaryLine}`);
-          }
-        }
-      }
+      const { statusAgent } = await import("./ib-commands");
+      await printAndExit(await statusAgent(agent));
       break;
     }
     case "send": {
@@ -574,6 +451,7 @@ async function main() {
       const filteredSendArgs: string[] = [];
       for (let i = 0; i < sendArgs.length; i++) {
         if (sendArgs[i] === "--from") {
+          if (!sendArgs[i + 1]) { console.error("Error: --from requires a value"); process.exit(1); }
           fromAgent = sendArgs[++i];
         } else {
           filteredSendArgs.push(sendArgs[i]!);
@@ -747,7 +625,7 @@ async function main() {
       const logArgs = args.slice(1);
       let logAgentId: string | undefined;
       let logQuiet = false;
-      let logMessage = "";
+      const logMessageParts: string[] = [];
       for (let i = 0; i < logArgs.length; i++) {
         const arg = logArgs[i]!;
         if (arg === "--id") {
@@ -755,9 +633,10 @@ async function main() {
         } else if (arg === "--quiet" || arg === "-q") {
           logQuiet = true;
         } else {
-          logMessage = arg;
+          logMessageParts.push(arg);
         }
       }
+      const logMessage = logMessageParts.join(" ");
 
       // Auto-detect agent ID from cwd if not specified
       if (!logAgentId) {

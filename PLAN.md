@@ -1113,7 +1113,7 @@ Phase 24 ──── final validation (depends on all)
 
 ### Phase 26: Binary Distribution & Hook Wiring Fixes
 
-**Status:** In progress (agents running as of 2026-03-09)
+**Status:** Complete
 
 **Goal:** Make `ib` (the compiled bun binary) a complete drop-in replacement for the bash `ib` script. Discovered during initial binary testing that several hook subcommands were missing, making hooks non-functional in the binary.
 
@@ -1123,29 +1123,29 @@ Phase 24 ──── final validation (depends on all)
 - [x] Updated CLAUDE.md build instructions (outfile: `ib`, not `itsybitsy`)
 - [x] PATH set to project directory in `~/.bash_profile`
 
-#### 26b: Missing CLI Commands (agent-b403bd1f)
+#### 26b: Missing CLI Commands (complete)
 The following commands existed in `ib-commands.ts` but were NOT wired as CLI cases in `index.ts`:
-- [ ] `ib hooks main-path` — PreToolUse path isolation hook (reads `IB_AGENT_ID` from env)
-- [ ] `ib hooks inject-status [--full] [--if-changed] [--visible]` — status injection hook (reads `IB_AGENT_ID` from env)
-- [ ] `ib hooks install` / `uninstall` / `status` — safety hook management
-- [ ] `ib hooks intercept-install` / `intercept-uninstall` / `intercept-status` — intercept hook management
-- [ ] `ib nuke <id>` — kill + archive agent
-- [ ] `ib merge-check <id>` — check for merge conflicts
-- [ ] `ib acknowledge` (rename from `ib ack` as primary)
+- [x] `ib hooks main-path` — PreToolUse path isolation hook (reads `IB_AGENT_ID` from env)
+- [x] `ib hooks inject-status [--full] [--if-changed] [--visible]` — status injection hook (reads `IB_AGENT_ID` from env)
+- [x] `ib hooks install` / `uninstall` / `status` — safety hook management
+- [x] `ib hooks intercept-install` / `intercept-uninstall` / `intercept-status` — intercept hook management
+- [x] `ib nuke <id>` — kill + archive agent
+- [x] `ib merge-check <id>` — check for merge conflicts
+- [x] `ib acknowledge` (rename from `ib ack` as primary)
 
 **Root cause of permission prompts:** When hooks fired `ib hooks main-path` against the bun binary, it exited 1 ("Unknown hooks subcommand"), causing Claude Code to fall back to prompting.
 
 **Key finding from bash ib audit:** `cmd_hooks_main_path` in bash ib does NOT use `IB_AGENT_ID` — it only blocks `cd` into `.ittybitty/agents/*/repo` paths. Our bun version is more comprehensive (full per-agent path isolation). For the `IB_AGENT_ID` undefined case (primary Claude session), bun version should exit 0 and allow default behavior.
 
-#### 26c: Global Hook Installation (agent-a0294830)
-- [ ] Change `installSafetyHooks`, `uninstallSafetyHooks`, `hooksStatus`, `installInterceptHook`, `uninstallInterceptHook`, `interceptHooksStatus` to write to `~/.claude/settings.json` instead of `<repoPath>/.claude/settings.local.json`
-- [ ] Add optional `settingsPath` parameter for test overrides
-- [ ] Hooks installed globally apply to all Claude sessions for the user
+#### 26c: Global Hook Installation (complete)
+- [x] Change `installSafetyHooks`, `uninstallSafetyHooks`, `hooksStatus`, `installInterceptHook`, `uninstallInterceptHook`, `interceptHooksStatus` to write to `~/.claude/settings.json` instead of `<repoPath>/.claude/settings.local.json`
+- [x] Add optional `settingsPath` parameter for test overrides
+- [x] Hooks installed globally apply to all Claude sessions for the user
 
-#### 26d: Documentation & Messaging (agents -4abedf68, -a10d59a8, -7f7187de)
-- [ ] README.md: add build/install section, use `ib [command]` throughout
-- [ ] CLAUDE.md: fix all `bun index.ts` / `itsybitsy [command]` references to `ib [command]`
-- [ ] Fix remaining user/agent-facing messages that say `itsybitsy` when they should say `ib`
+#### 26d: Documentation & Messaging (complete)
+- [x] README.md: build/install section already present, uses `ib [command]` throughout
+- [x] CLAUDE.md: updated test count to 956/28, fixed settings.local.json → settings.json reference
+- [x] Dashboard terminal title and header changed from `itsybitsy` to `ib`
 
 #### 26e: Hook Detection Fixes (complete)
 - [x] `hooksStatus()` now requires `itsybitsy` prefix — `ib`-prefixed hooks no longer counted as installed

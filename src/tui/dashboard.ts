@@ -709,7 +709,7 @@ export class DashboardComponent implements Component {
     const newId = selected?.id ?? null;
     if (newId !== this.currentAgentId) {
       this.currentAgentId = newId;
-      this.setTerminalTitle(newId ? `itsybitsy: ${newId}` : "itsybitsy");
+      this.setTerminalTitle(newId ? `ib: ${newId}` : "ib");
       this.tmuxPane.resetForAgent();
       this.rightPane.agentLogContent = null;
       this.rightPane.promptContent = null;
@@ -987,7 +987,7 @@ export class DashboardComponent implements Component {
     const subtitle = this.lastSentNotice
       ? `${DIM}—${RESET} ${YELLOW}${this.lastSentNotice}${RESET}`
       : `${DIM}— agent dashboard${RESET}`;
-    lines.push(truncateToWidth(`${BOLD}itsybitsy${RESET} ${subtitle}`, width, ""));
+    lines.push(truncateToWidth(`${BOLD}ib${RESET} ${subtitle}`, width, ""));
 
     if (isTreeMode) {
       // title(1) + separator(1) + separator(1) + statusBar(3) = 6 lines of chrome

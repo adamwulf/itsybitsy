@@ -2389,7 +2389,7 @@ describe("Terminal title (G-10)", () => {
     const agent = makeAgent("agent-abc", "/repos/test");
     const flatList: FlatEntry[] = [makeFlatAgent(agent)];
     dashboard.onUpdate([agent], flatList, []);
-    expect(titles).toContain("itsybitsy: agent-abc");
+    expect(titles).toContain("ib: agent-abc");
   });
 
   test("emits generic title when no agent is selected", () => {
@@ -2400,7 +2400,7 @@ describe("Terminal title (G-10)", () => {
 
     // Clear the list — no agents means no selection
     dashboard.onUpdate([], [], []);
-    expect(titles).toContain("itsybitsy");
+    expect(titles).toContain("ib");
   });
 
   test("does not emit title when agent id has not changed", () => {
@@ -2563,14 +2563,14 @@ describe("Minimum terminal size (G-11)", () => {
     Object.defineProperty(process.stdout, "rows", { value: 20, writable: true, configurable: true });
     const lines = dashboard.render(80);
     expect(lines.length).toBeGreaterThan(1);
-    expect(stripAnsi(lines[0]!)).toContain("itsybitsy");
+    expect(stripAnsi(lines[0]!)).toContain("ib");
   });
 
   test("renders normally when terminal is large enough", () => {
     Object.defineProperty(process.stdout, "rows", { value: 30, writable: true, configurable: true });
     const lines = dashboard.render(100);
     expect(lines.length).toBeGreaterThan(1);
-    expect(stripAnsi(lines[0]!)).toContain("itsybitsy");
+    expect(stripAnsi(lines[0]!)).toContain("ib");
   });
 });
 

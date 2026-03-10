@@ -2670,24 +2670,10 @@ describe("hooksStatus", () => {
     await mkdir(join(tempDir, ".claude"), { recursive: true });
     await Bun.write(join(tempDir, ".claude", "settings.local.json"), JSON.stringify({
       hooks: {
-        PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "itsybitsy hooks main-path" }] }],
-        UserPromptSubmit: [{ hooks: [{ type: "command", command: "itsybitsy hooks inject-status --full --visible" }] }],
-        PostToolUse: [{ matcher: "Bash|Task", hooks: [{ type: "command", command: "itsybitsy hooks inject-status --if-changed --visible" }] }],
-        SessionStart: [{ hooks: [{ type: "command", command: "itsybitsy hooks session-start" }] }],
-      },
-    }));
-    const result = await hooksStatus(tempDir);
-    expect(result.stdout).toBe("installed");
-  });
-
-  test("returns installed with itsybitsy prefix", async () => {
-    await mkdir(join(tempDir, ".claude"), { recursive: true });
-    await Bun.write(join(tempDir, ".claude", "settings.local.json"), JSON.stringify({
-      hooks: {
-        PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "itsybitsy hooks main-path" }] }],
-        UserPromptSubmit: [{ hooks: [{ type: "command", command: "itsybitsy hooks inject-status --full --visible" }] }],
-        PostToolUse: [{ matcher: "Bash|Task", hooks: [{ type: "command", command: "itsybitsy hooks inject-status --if-changed --visible" }] }],
-        SessionStart: [{ hooks: [{ type: "command", command: "itsybitsy hooks session-start" }] }],
+        PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "ib hooks main-path" }] }],
+        UserPromptSubmit: [{ hooks: [{ type: "command", command: "ib hooks inject-status --full --visible" }] }],
+        PostToolUse: [{ matcher: "Bash|Task", hooks: [{ type: "command", command: "ib hooks inject-status --if-changed --visible" }] }],
+        SessionStart: [{ hooks: [{ type: "command", command: "ib hooks session-start" }] }],
       },
     }));
     const result = await hooksStatus(tempDir);
@@ -2698,32 +2684,18 @@ describe("hooksStatus", () => {
     await mkdir(join(tempDir, ".claude"), { recursive: true });
     await Bun.write(join(tempDir, ".claude", "settings.local.json"), JSON.stringify({
       hooks: {
-        PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "itsybitsy hooks main-path" }] }],
+        PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "ib hooks main-path" }] }],
       },
     }));
     const result = await hooksStatus(tempDir);
     expect(result.stdout).toBe("partial");
   });
 
-  test("does not detect ib-prefixed hooks as installed", async () => {
-    await mkdir(join(tempDir, ".claude"), { recursive: true });
-    await Bun.write(join(tempDir, ".claude", "settings.local.json"), JSON.stringify({
-      hooks: {
-        PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "ib hooks main-path" }] }],
-        UserPromptSubmit: [{ hooks: [{ type: "command", command: "ib hooks inject-status --full --visible" }] }],
-        PostToolUse: [{ matcher: "Bash|Task", hooks: [{ type: "command", command: "ib hooks inject-status --if-changed --visible" }] }],
-        SessionStart: [{ hooks: [{ type: "command", command: "ib hooks session-start" }] }],
-      },
-    }));
-    const result = await hooksStatus(tempDir);
-    expect(result.stdout).toBe("not-installed");
-  });
-
   test("returns partial when only session-start present", async () => {
     await mkdir(join(tempDir, ".claude"), { recursive: true });
     await Bun.write(join(tempDir, ".claude", "settings.local.json"), JSON.stringify({
       hooks: {
-        SessionStart: [{ hooks: [{ type: "command", command: "itsybitsy hooks session-start" }] }],
+        SessionStart: [{ hooks: [{ type: "command", command: "ib hooks session-start" }] }],
       },
     }));
     const result = await hooksStatus(tempDir);
@@ -2765,34 +2737,13 @@ describe("interceptHooksStatus", () => {
     await mkdir(join(tempDir, ".claude"), { recursive: true });
     await Bun.write(join(tempDir, ".claude", "settings.local.json"), JSON.stringify({
       hooks: {
-        PreToolUse: [{ matcher: "Task", hooks: [{ type: "command", command: "itsybitsy hooks intercept-task" }] }],
-      },
-    }));
-    const result = await interceptHooksStatus(tempDir);
-    expect(result.stdout).toBe("installed");
-  });
-
-  test("does not detect ib-prefixed intercept hook as installed", async () => {
-    await mkdir(join(tempDir, ".claude"), { recursive: true });
-    await Bun.write(join(tempDir, ".claude", "settings.local.json"), JSON.stringify({
-      hooks: {
         PreToolUse: [{ matcher: "Task", hooks: [{ type: "command", command: "ib hooks intercept-task" }] }],
       },
     }));
     const result = await interceptHooksStatus(tempDir);
-    expect(result.stdout).toBe("not-installed");
-  });
-
-  test("returns installed with itsybitsy prefix", async () => {
-    await mkdir(join(tempDir, ".claude"), { recursive: true });
-    await Bun.write(join(tempDir, ".claude", "settings.local.json"), JSON.stringify({
-      hooks: {
-        PreToolUse: [{ matcher: "Task", hooks: [{ type: "command", command: "itsybitsy hooks intercept-task" }] }],
-      },
-    }));
-    const result = await interceptHooksStatus(tempDir);
     expect(result.stdout).toBe("installed");
   });
+
 
   test("returns not-installed when PreToolUse has other hooks but not intercept", async () => {
     await mkdir(join(tempDir, ".claude"), { recursive: true });
@@ -2824,13 +2775,13 @@ describe("installSafetyHooks", () => {
 
     const settings = await Bun.file(join(tempDir, ".claude", "settings.local.json")).json();
     expect(settings.hooks.PreToolUse).toHaveLength(1);
-    expect(settings.hooks.PreToolUse[0].hooks[0].command).toBe("itsybitsy hooks main-path");
+    expect(settings.hooks.PreToolUse[0].hooks[0].command).toBe("ib hooks main-path");
     expect(settings.hooks.UserPromptSubmit).toHaveLength(1);
     expect(settings.hooks.UserPromptSubmit[0].hooks[0].command).toContain("inject-status --full");
     expect(settings.hooks.PostToolUse).toHaveLength(1);
     expect(settings.hooks.PostToolUse[0].hooks[0].command).toContain("inject-status --if-changed");
     expect(settings.hooks.SessionStart).toHaveLength(1);
-    expect(settings.hooks.SessionStart[0].hooks[0].command).toBe("itsybitsy hooks session-start");
+    expect(settings.hooks.SessionStart[0].hooks[0].command).toBe("ib hooks session-start");
   });
 
   test("is idempotent — second call returns already installed", async () => {
@@ -2849,7 +2800,7 @@ describe("installSafetyHooks", () => {
     await Bun.write(join(tempDir, ".claude", "settings.local.json"), JSON.stringify({
       permissions: { allow: ["Read"] },
       hooks: {
-        PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "itsybitsy hooks main-path" }] }],
+        PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "ib hooks main-path" }] }],
       },
     }));
 
@@ -2868,7 +2819,7 @@ describe("installSafetyHooks", () => {
     expect(settings.hooks.SessionStart).toHaveLength(1);
   });
 
-  test("does not detect ib-prefixed hooks as already installed (adds itsybitsy hooks)", async () => {
+  test("detects ib-prefixed hooks as already installed", async () => {
     await mkdir(join(tempDir, ".claude"), { recursive: true });
     await Bun.write(join(tempDir, ".claude", "settings.local.json"), JSON.stringify({
       hooks: {
@@ -2880,8 +2831,7 @@ describe("installSafetyHooks", () => {
     }));
 
     const result = await installSafetyHooks(tempDir);
-    // ib-prefixed hooks are not itsybitsy hooks — install proceeds
-    expect(result.stdout).toContain("Hooks installed");
+    expect(result.stdout).toBe("Hooks already installed");
   });
 });
 
@@ -2908,12 +2858,12 @@ describe("uninstallSafetyHooks", () => {
       permissions: { allow: ["Read"] },
       hooks: {
         PreToolUse: [
-          { matcher: "Bash", hooks: [{ type: "command", command: "itsybitsy hooks main-path" }] },
-          { matcher: "Task", hooks: [{ type: "command", command: "itsybitsy hooks intercept-task" }] },
+          { matcher: "Bash", hooks: [{ type: "command", command: "ib hooks main-path" }] },
+          { matcher: "Task", hooks: [{ type: "command", command: "ib hooks intercept-task" }] },
         ],
-        UserPromptSubmit: [{ hooks: [{ type: "command", command: "itsybitsy hooks inject-status --full --visible" }] }],
-        PostToolUse: [{ matcher: "Bash|Task", hooks: [{ type: "command", command: "itsybitsy hooks inject-status --if-changed --visible" }] }],
-        SessionStart: [{ hooks: [{ type: "command", command: "itsybitsy hooks session-start" }] }],
+        UserPromptSubmit: [{ hooks: [{ type: "command", command: "ib hooks inject-status --full --visible" }] }],
+        PostToolUse: [{ matcher: "Bash|Task", hooks: [{ type: "command", command: "ib hooks inject-status --if-changed --visible" }] }],
+        SessionStart: [{ hooks: [{ type: "command", command: "ib hooks session-start" }] }],
       },
     }));
 
@@ -2955,10 +2905,10 @@ describe("uninstallSafetyHooks", () => {
     await mkdir(join(tempDir, ".claude"), { recursive: true });
     await Bun.write(join(tempDir, ".claude", "settings.local.json"), JSON.stringify({
       hooks: {
-        PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "itsybitsy hooks main-path" }] }],
-        UserPromptSubmit: [{ hooks: [{ type: "command", command: "itsybitsy hooks inject-status --full --visible" }] }],
-        PostToolUse: [{ matcher: "Bash|Task", hooks: [{ type: "command", command: "itsybitsy hooks inject-status --if-changed --visible" }] }],
-        SessionStart: [{ hooks: [{ type: "command", command: "itsybitsy hooks session-start" }] }],
+        PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "ib hooks main-path" }] }],
+        UserPromptSubmit: [{ hooks: [{ type: "command", command: "ib hooks inject-status --full --visible" }] }],
+        PostToolUse: [{ matcher: "Bash|Task", hooks: [{ type: "command", command: "ib hooks inject-status --if-changed --visible" }] }],
+        SessionStart: [{ hooks: [{ type: "command", command: "ib hooks session-start" }] }],
       },
     }));
 
@@ -2996,7 +2946,7 @@ describe("installInterceptHook", () => {
     const settings = await Bun.file(join(tempDir, ".claude", "settings.local.json")).json();
     expect(settings.hooks.PreToolUse).toHaveLength(1);
     expect(settings.hooks.PreToolUse[0].matcher).toBe("Task");
-    expect(settings.hooks.PreToolUse[0].hooks[0].command).toBe("itsybitsy hooks intercept-task");
+    expect(settings.hooks.PreToolUse[0].hooks[0].command).toBe("ib hooks intercept-task");
   });
 
   test("is idempotent", async () => {
@@ -3012,7 +2962,7 @@ describe("installInterceptHook", () => {
     await mkdir(join(tempDir, ".claude"), { recursive: true });
     await Bun.write(join(tempDir, ".claude", "settings.local.json"), JSON.stringify({
       hooks: {
-        PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "itsybitsy hooks main-path" }] }],
+        PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "ib hooks main-path" }] }],
       },
     }));
 
@@ -3022,7 +2972,7 @@ describe("installInterceptHook", () => {
     expect(settings.hooks.PreToolUse).toHaveLength(2);
   });
 
-  test("does not detect ib-prefixed intercept as already installed (adds itsybitsy hook)", async () => {
+  test("detects ib-prefixed intercept as already installed", async () => {
     await mkdir(join(tempDir, ".claude"), { recursive: true });
     await Bun.write(join(tempDir, ".claude", "settings.local.json"), JSON.stringify({
       hooks: {
@@ -3031,8 +2981,7 @@ describe("installInterceptHook", () => {
     }));
 
     const result = await installInterceptHook(tempDir);
-    // ib-prefixed hooks are not itsybitsy hooks — install proceeds
-    expect(result.stdout).toContain("Task interception hook installed");
+    expect(result.stdout).toContain("already installed");
   });
 });
 
@@ -3058,8 +3007,8 @@ describe("uninstallInterceptHook", () => {
     await Bun.write(join(tempDir, ".claude", "settings.local.json"), JSON.stringify({
       hooks: {
         PreToolUse: [
-          { matcher: "Bash", hooks: [{ type: "command", command: "itsybitsy hooks main-path" }] },
-          { matcher: "Task", hooks: [{ type: "command", command: "itsybitsy hooks intercept-task" }] },
+          { matcher: "Bash", hooks: [{ type: "command", command: "ib hooks main-path" }] },
+          { matcher: "Task", hooks: [{ type: "command", command: "ib hooks intercept-task" }] },
         ],
       },
     }));
@@ -3089,7 +3038,7 @@ describe("uninstallInterceptHook", () => {
     await mkdir(join(tempDir, ".claude"), { recursive: true });
     await Bun.write(join(tempDir, ".claude", "settings.local.json"), JSON.stringify({
       hooks: {
-        PreToolUse: [{ matcher: "Task", hooks: [{ type: "command", command: "itsybitsy hooks intercept-task" }] }],
+        PreToolUse: [{ matcher: "Task", hooks: [{ type: "command", command: "ib hooks intercept-task" }] }],
       },
     }));
 

@@ -1245,7 +1245,7 @@ async function buildAgentSettings(
         const hooks = entry?.hooks;
         if (Array.isArray(hooks)) {
           for (const h of hooks) {
-            if (typeof h?.command === "string" && h.command.includes("itsybitsy hooks intercept-task")) {
+            if (typeof h?.command === "string" && h.command.includes("ib hooks intercept-task")) {
               addIntercept = true;
             }
           }
@@ -1262,7 +1262,7 @@ async function buildAgentSettings(
   ];
   if (addIntercept) {
     preToolUseHooks.push(
-      { matcher: "Task", hooks: [{ type: "command", command: "itsybitsy hooks intercept-task" }] }
+      { matcher: "Task", hooks: [{ type: "command", command: "ib hooks intercept-task" }] }
     );
   }
 
@@ -1276,7 +1276,7 @@ async function buildAgentSettings(
       Stop: [{ matcher: "*", hooks: [{ type: "command", command: `itsybitsy hook-status ${agentId}` }] }],
       PermissionRequest: [{ matcher: "*", hooks: [{ type: "command", command: hookCmd }] }],
       PreToolUse: preToolUseHooks,
-      SessionStart: [{ hooks: [{ type: "command", command: "itsybitsy hooks session-start" }] }],
+      SessionStart: [{ hooks: [{ type: "command", command: "ib hooks session-start" }] }],
     },
   };
 
@@ -2092,7 +2092,7 @@ function cleanupHooksObject(settings: Record<string, unknown>): void {
 /** Check for main-path PreToolUse hook (itsybitsy only — ib hooks are not counted as installed) */
 function hasMainPathHook(settings: Record<string, unknown>): boolean {
   const hooks = settings.hooks as Record<string, unknown> | undefined;
-  return hookArrayHasCommand(hooks?.PreToolUse, "itsybitsy hooks main-path");
+  return hookArrayHasCommand(hooks?.PreToolUse, "ib hooks main-path");
 }
 
 /** Check for status injection hooks (UserPromptSubmit + PostToolUse, both must be present) */
@@ -2100,21 +2100,21 @@ function hasStatusHooks(settings: Record<string, unknown>): boolean {
   const hooks = settings.hooks as Record<string, unknown> | undefined;
   if (!hooks) return false;
   return (
-    hookArrayHasCommand(hooks.UserPromptSubmit, "itsybitsy hooks inject-status") &&
-    hookArrayHasCommand(hooks.PostToolUse, "itsybitsy hooks inject-status")
+    hookArrayHasCommand(hooks.UserPromptSubmit, "ib hooks inject-status") &&
+    hookArrayHasCommand(hooks.PostToolUse, "ib hooks inject-status")
   );
 }
 
 /** Check for session-start hook */
 function hasSessionStartHook(settings: Record<string, unknown>): boolean {
   const hooks = settings.hooks as Record<string, unknown> | undefined;
-  return hookArrayHasCommand(hooks?.SessionStart, "itsybitsy hooks session-start");
+  return hookArrayHasCommand(hooks?.SessionStart, "ib hooks session-start");
 }
 
 /** Check for intercept-task hook */
 function hasInterceptHook(settings: Record<string, unknown>): boolean {
   const hooks = settings.hooks as Record<string, unknown> | undefined;
-  return hookArrayHasCommand(hooks?.PreToolUse, "itsybitsy hooks intercept-task");
+  return hookArrayHasCommand(hooks?.PreToolUse, "ib hooks intercept-task");
 }
 
 // ── Exported hooks management functions ─────────────────────────────────────
@@ -2157,7 +2157,7 @@ export async function installSafetyHooks(repoPath: string): Promise<IbCommandRes
     if (!Array.isArray(hooks.PreToolUse)) hooks.PreToolUse = [];
     (hooks.PreToolUse as unknown[]).push({
       matcher: "Bash",
-      hooks: [{ type: "command", command: "itsybitsy hooks main-path" }],
+      hooks: [{ type: "command", command: "ib hooks main-path" }],
     });
     installed = true;
   }
@@ -2167,11 +2167,11 @@ export async function installSafetyHooks(repoPath: string): Promise<IbCommandRes
     if (!Array.isArray(hooks.UserPromptSubmit)) hooks.UserPromptSubmit = [];
     if (!Array.isArray(hooks.PostToolUse)) hooks.PostToolUse = [];
     (hooks.UserPromptSubmit as unknown[]).push({
-      hooks: [{ type: "command", command: "itsybitsy hooks inject-status --full --visible" }],
+      hooks: [{ type: "command", command: "ib hooks inject-status --full --visible" }],
     });
     (hooks.PostToolUse as unknown[]).push({
       matcher: "Bash|Task",
-      hooks: [{ type: "command", command: "itsybitsy hooks inject-status --if-changed --visible" }],
+      hooks: [{ type: "command", command: "ib hooks inject-status --if-changed --visible" }],
     });
     installed = true;
   }
@@ -2180,7 +2180,7 @@ export async function installSafetyHooks(repoPath: string): Promise<IbCommandRes
   if (!hasSessionStartHook(settings)) {
     if (!Array.isArray(hooks.SessionStart)) hooks.SessionStart = [];
     (hooks.SessionStart as unknown[]).push({
-      hooks: [{ type: "command", command: "itsybitsy hooks session-start" }],
+      hooks: [{ type: "command", command: "ib hooks session-start" }],
     });
     installed = true;
   }
@@ -2251,7 +2251,7 @@ export async function installInterceptHook(repoPath: string): Promise<IbCommandR
   if (!Array.isArray(hooks.PreToolUse)) hooks.PreToolUse = [];
   (hooks.PreToolUse as unknown[]).push({
     matcher: "Task",
-    hooks: [{ type: "command", command: "itsybitsy hooks intercept-task" }],
+    hooks: [{ type: "command", command: "ib hooks intercept-task" }],
   });
 
   await writeSettingsJson(repoPath, settings);

@@ -162,12 +162,12 @@ Archive moves agent artifacts to `.ittybitty/archive/<YYYYMMDD-HHMMSS>-<agent-id
 Nuke (`ib nuke <id>`) recursively kills a manager and all its descendants:
 
 1. Collect all descendant agent IDs via depth-first traversal of manager relationships
-2. Worker agents cannot be nuked (use `kill` instead) — only managers with descendants are nuke targets
+2. Worker agents with no descendants cannot be nuked (use `kill` instead) — but workers that have spawned sub-agents can be nuked
 3. For each descendant: remove questions, teardown (same sequence as kill)
 4. Clean up orphaned tmux sessions (sessions with `ittybitty-` prefix that don't match any remaining agent)
 5. Scan and kill orphaned Claude processes
 
-Nuke-all (`ib nuke --force`) kills all agents in the repository.
+Nuke-all (`ib nuke` with no agent ID) kills all agents in the repository. The `--force` flag skips confirmation but does not change what gets nuked.
 
 ---
 

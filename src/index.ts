@@ -610,7 +610,16 @@ async function main() {
         }
         case "inject-status": {
           const { hookInjectStatus } = await import("./hooks/inject-status");
-          await hookInjectStatus();
+          const statusFlags = args.slice(2);
+          let mode: "full" | "if-changed" | "brief" = "full";
+          let visible = false;
+          for (const flag of statusFlags) {
+            if (flag === "--full") mode = "full";
+            else if (flag === "--if-changed") mode = "if-changed";
+            else if (flag === "--brief") mode = "brief";
+            else if (flag === "--visible") visible = true;
+          }
+          await hookInjectStatus({ mode, visible });
           break;
         }
         case "install": {

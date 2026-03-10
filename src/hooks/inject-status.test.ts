@@ -1,12 +1,15 @@
-import { test, expect, describe } from "bun:test";
+import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import {
   shouldInjectStatus,
   formatAgentStatus,
   buildStatusText,
+  briefSummary,
+  checkAndUpdateHash,
 } from "./inject-status";
 import type { AgentProvider } from "./inject-status";
 import type { RepoEntry } from "../registry";
 import type { Agent, AgentMeta } from "../agents";
+import { unlink } from "node:fs/promises";
 
 // ── Helper to create mock agents ──────────────────────────────────────────
 
@@ -41,14 +44,14 @@ function mockAgent(overrides: Partial<Agent> & { id: string }): Agent {
 describe("shouldInjectStatus", () => {
   test("skip-agent-worktree: cwd inside agent repo returns false", () => {
     expect(
-      shouldInjectStatus({ cwd: "/Users/test/project/.ittybitty/agents/abc123/repo" })
+      shouldInjectStatus({ cwd: "/Users/test/project/.ittybitsy/agents/abc123/repo" })
     ).toBe(false);
   });
 
   test("skip-agent-subdir: cwd inside agent repo subdir returns false", () => {
     expect(
       shouldInjectStatus({
-        cwd: "/Users/test/project/.ittybitty/agents/hook-filter/repo/src/components",
+        cwd: "/Users/test/project/.ittybitsy/agents/hook-filter/repo/src/components",
       })
     ).toBe(false);
   });
@@ -59,7 +62,7 @@ describe("shouldInjectStatus", () => {
 
   test("inject-ittybitty-dir-not-repo: cwd at agent dir (not /repo) returns true", () => {
     expect(
-      shouldInjectStatus({ cwd: "/Users/test/project/.ittybitty/agents/abc123" })
+      shouldInjectStatus({ cwd: "/Users/test/project/.ittybitsy/agents/abc123" })
     ).toBe(true);
   });
 
@@ -177,6 +180,111 @@ describe("formatAgentStatus", () => {
   });
 });
 
+// ── briefSummary ──────────────────────────────────────────────────────────
+
+describe("briefSummary", () => {
+  test("returns 'no agents' for empty list", () => {
+    expect(briefSummary([])).toBe("no agents");
+  });
+
+  test("returns 'no agents' when all agents are archived", () => {
+    const agents = [
+      mockAgent({ id: "a1", state: "running", archived: true }),
+      mockAgent({ id: "a2", state: "complete", archived: true }),
+    ];
+    expect(briefSummary(agents)).toBe("no agents");
+  });
+
+  test("counts single state correctly", () => {
+    const agents = [
+      mockAgent({ id: "a1", state: "running" }),
+      mockAgent({ id: "a2", state: "running" }),
+    ];
+    expect(briefSummary(agents)).toBe("2 running");
+  });
+
+  test("counts multiple states in correct order", () => {
+    const agents = [
+      mockAgent({ id: "a1", state: "complete" }),
+      mockAgent({ id: "a2", state: "running" }),
+      mockAgent({ id: "a3", state: "waiting" }),
+      mockAgent({ id: "a4", state: "running" }),
+    ];
+    expect(briefSummary(agents)).toBe("2 running, 1 waiting, 1 complete");
+  });
+
+  test("maps unknown state to running", () => {
+    const agents = [
+      mockAgent({ id: "a1", state: "unknown" }),
+    ];
+    expect(briefSummary(agents)).toBe("1 running");
+  });
+
+  test("maps compacting state to running", () => {
+    const agents = [
+      mockAgent({ id: "a1", state: "compacting" }),
+      mockAgent({ id: "a2", state: "running" }),
+    ];
+    expect(briefSummary(agents)).toBe("2 running");
+  });
+
+  test("includes rate_limited and stopped", () => {
+    const agents = [
+      mockAgent({ id: "a1", state: "rate_limited" }),
+      mockAgent({ id: "a2", state: "stopped" }),
+    ];
+    expect(briefSummary(agents)).toBe("1 rate_limited, 1 stopped");
+  });
+
+  test("skips archived agents", () => {
+    const agents = [
+      mockAgent({ id: "a1", state: "running", archived: false }),
+      mockAgent({ id: "a2", state: "running", archived: true }),
+    ];
+    expect(briefSummary(agents)).toBe("1 running");
+  });
+
+  test("includes creating state", () => {
+    const agents = [
+      mockAgent({ id: "a1", state: "creating" }),
+      mockAgent({ id: "a2", state: "running" }),
+    ];
+    expect(briefSummary(agents)).toBe("1 running, 1 creating");
+  });
+});
+
+// ── checkAndUpdateHash ────────────────────────────────────────────────────
+
+describe("checkAndUpdateHash", () => {
+  const testCwd = "/tmp/ib-test-hash-check";
+  const cachePath = `/tmp/ib-status-hash--tmp-ib-test-hash-check`;
+
+  afterEach(async () => {
+    try {
+      await unlink(cachePath);
+    } catch {
+      // ignore
+    }
+  });
+
+  test("returns true on first call (no cache)", async () => {
+    const result = await checkAndUpdateHash("some content", testCwd);
+    expect(result).toBe(true);
+  });
+
+  test("returns false on second identical call", async () => {
+    await checkAndUpdateHash("same content", testCwd);
+    const result = await checkAndUpdateHash("same content", testCwd);
+    expect(result).toBe(false);
+  });
+
+  test("returns true when content changes", async () => {
+    await checkAndUpdateHash("content v1", testCwd);
+    const result = await checkAndUpdateHash("content v2", testCwd);
+    expect(result).toBe(true);
+  });
+});
+
 // ── buildStatusText with mock provider ────────────────────────────────────
 
 describe("buildStatusText", () => {
@@ -186,8 +294,8 @@ describe("buildStatusText", () => {
       getAgents: async () => ({ agents: [] }),
       detectStates: async () => {},
     };
-    const result = await buildStatusText(provider);
-    expect(result).toBe("");
+    const { text } = await buildStatusText(provider);
+    expect(text).toBe("");
   });
 
   test("returns formatted status with agents", async () => {
@@ -205,17 +313,16 @@ describe("buildStatusText", () => {
     const provider: AgentProvider = {
       getRepos: async () => repos,
       getAgents: async () => ({ agents }),
-      detectStates: async () => {
-        // States already set in mockAgent
-      },
+      detectStates: async () => {},
     };
 
-    const result = await buildStatusText(provider);
-    expect(result).toContain("<ittybitty-status>");
-    expect(result).toContain("project:");
-    expect(result).toContain("m agent-aaa [running] 3m");
-    expect(result).toContain("w agent-bbb [waiting] 10m");
-    expect(result).toContain("</ittybitty-status>");
+    const { text, agents: returnedAgents } = await buildStatusText(provider);
+    expect(text).toContain("<ittybitty-status>");
+    expect(text).toContain("project:");
+    expect(text).toContain("m agent-aaa [running] 3m");
+    expect(text).toContain("w agent-bbb [waiting] 10m");
+    expect(text).toContain("</ittybitty-status>");
+    expect(returnedAgents).toHaveLength(2);
   });
 
   test("groups agents by repo correctly", async () => {
@@ -234,11 +341,11 @@ describe("buildStatusText", () => {
       detectStates: async () => {},
     };
 
-    const result = await buildStatusText(provider);
-    expect(result).toContain("repo-a:");
-    expect(result).toContain("agent-1");
-    expect(result).toContain("repo-b:");
-    expect(result).toContain("agent-2");
+    const { text } = await buildStatusText(provider);
+    expect(text).toContain("repo-a:");
+    expect(text).toContain("agent-1");
+    expect(text).toContain("repo-b:");
+    expect(text).toContain("agent-2");
   });
 
   test("repo with no agents shows (no agents)", async () => {
@@ -250,8 +357,8 @@ describe("buildStatusText", () => {
       detectStates: async () => {},
     };
 
-    const result = await buildStatusText(provider);
-    expect(result).toContain("empty-repo: (no agents)");
+    const { text } = await buildStatusText(provider);
+    expect(text).toContain("empty-repo: (no agents)");
   });
 
   test("inject-no-cwd: falls through to inject when cwd is absent", () => {

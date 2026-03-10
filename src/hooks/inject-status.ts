@@ -5,6 +5,8 @@
  * Reads stdin JSON from Claude Code (cwd, etc.), and if cwd is NOT inside
  * an agent worktree (i.e., this is primary Claude), outputs a status summary
  * of all registered repos and their agents.
+ *
+ * Supports flags: --full (default), --if-changed, --brief, --visible
  */
 
 import { listRepos, repoDisplayName } from "../registry";
@@ -17,9 +19,16 @@ export interface InjectStatusInput {
   cwd: string;
 }
 
+export type InjectStatusMode = "full" | "if-changed" | "brief";
+
+export interface InjectStatusOptions {
+  mode: InjectStatusMode;
+  visible: boolean;
+}
+
 // ── Pattern ──────────────────────────────────────────────────────────────────
 
-const AGENT_CWD_PATTERN = /\.ittybitty\/agents\/[^/]+\/repo(\/|$)/;
+const AGENT_CWD_PATTERN = /\.ittybitsy\/agents\/[^/]+\/repo(\/|$)/;
 
 // ── Pure decision logic ──────────────────────────────────────────────────────
 
@@ -70,6 +79,36 @@ export function formatAgentStatus(
   return lines.join("\n");
 }
 
+// ── Brief summary ───────────────────────────────────────────────────────────
+
+/**
+ * Produce a brief one-liner summary of agent states.
+ * Format: '2 running, 1 waiting' (skip states with 0 count).
+ * Returns 'no agents' if no active agents.
+ */
+export function briefSummary(agents: Agent[]): string {
+  const active = agents.filter((a) => !a.archived);
+  if (active.length === 0) return "no agents";
+
+  const counts = new Map<string, number>();
+  for (const agent of active) {
+    // Map compacting to running, unknown to running (same as formatAgentStatus)
+    let state: string = agent.state;
+    if (state === "compacting" || state === "unknown") state = "running";
+    counts.set(state, (counts.get(state) ?? 0) + 1);
+  }
+
+  // Ordered state display
+  const order: string[] = ["running", "waiting", "complete", "rate_limited", "stopped", "creating"];
+  const parts: string[] = [];
+  for (const s of order) {
+    const n = counts.get(s);
+    if (n && n > 0) parts.push(`${n} ${s}`);
+  }
+
+  return parts.length > 0 ? parts.join(", ") : "no agents";
+}
+
 // ── Load agents helper ───────────────────────────────────────────────────────
 
 export interface AgentProvider {
@@ -100,10 +139,13 @@ export function createDiskAgentProvider(): AgentProvider {
 
 /**
  * Build the full status text using the given provider.
+ * Also returns the flat agents list for brief summary generation.
  */
-export async function buildStatusText(provider: AgentProvider): Promise<string> {
+export async function buildStatusText(
+  provider: AgentProvider
+): Promise<{ text: string; agents: Agent[]; repos: RepoEntry[] }> {
   const repos = await provider.getRepos();
-  if (repos.length === 0) return "";
+  if (repos.length === 0) return { text: "", agents: [], repos: [] };
 
   const { agents } = await provider.getAgents(repos);
   await provider.detectStates(agents);
@@ -116,7 +158,41 @@ export async function buildStatusText(provider: AgentProvider): Promise<string> 
     agentsByRepo.set(agent.repoPath, list);
   }
 
-  return formatAgentStatus(repos, agentsByRepo);
+  const text = formatAgentStatus(repos, agentsByRepo);
+  return { text, agents, repos };
+}
+
+// ── Hash cache for --if-changed ──────────────────────────────────────────────
+
+function safeRepoId(cwd: string): string {
+  return cwd.replace(/[^a-zA-Z0-9]/g, "-");
+}
+
+function hashCachePath(cwd: string): string {
+  return `/tmp/ib-status-hash-${safeRepoId(cwd)}`;
+}
+
+export async function checkAndUpdateHash(
+  content: string,
+  cwd: string
+): Promise<boolean> {
+  const currentHash = new Bun.CryptoHasher("sha256")
+    .update(content)
+    .digest("hex");
+  const cachePath = hashCachePath(cwd);
+
+  try {
+    const file = Bun.file(cachePath);
+    if (await file.exists()) {
+      const cached = (await file.text()).trim();
+      if (cached === currentHash) return false; // unchanged
+    }
+  } catch {
+    // No cache file or read error — treat as changed
+  }
+
+  await Bun.write(cachePath, currentHash);
+  return true; // changed
 }
 
 // ── CLI entry point ──────────────────────────────────────────────────────────
@@ -125,7 +201,9 @@ export async function buildStatusText(provider: AgentProvider): Promise<string> 
  * CLI entry point for `ib hooks inject-status`.
  * Reads stdin JSON, checks cwd, and outputs agent status if primary Claude.
  */
-export async function hookInjectStatus(): Promise<void> {
+export async function hookInjectStatus(
+  options: InjectStatusOptions = { mode: "full", visible: false }
+): Promise<void> {
   const raw = await new Response(Bun.stdin.stream()).text();
   let data: Record<string, unknown>;
   try {
@@ -136,6 +214,7 @@ export async function hookInjectStatus(): Promise<void> {
   }
 
   const cwd = String(data.cwd ?? process.cwd());
+  const hookEventName = String(data.hook_event_name ?? "UserPromptSubmit");
 
   // If this is an agent's Claude, skip injection
   if (!shouldInjectStatus({ cwd })) {
@@ -143,20 +222,54 @@ export async function hookInjectStatus(): Promise<void> {
     return;
   }
 
+  // Check config: hooks.injectStatus
+  const { readConfig } = await import("../config");
+  const config = await readConfig(cwd);
+  if (config["hooks.injectStatus"]?.value === false) {
+    process.exit(0);
+    return;
+  }
+
   // Build status text
   const provider = createDiskAgentProvider();
-  const statusText = await buildStatusText(provider);
+  const { text: statusText, agents } = await buildStatusText(provider);
 
   if (!statusText) {
     process.exit(0);
     return;
   }
 
-  const output = {
+  const brief = briefSummary(agents);
+  let outputContent: string;
+
+  if (options.mode === "brief") {
+    outputContent = `Agents: ${brief}`;
+  } else if (options.mode === "if-changed") {
+    const changed = await checkAndUpdateHash(statusText, cwd);
+    if (!changed) {
+      process.exit(0);
+      return;
+    }
+    outputContent = `Agents: ${brief}`;
+  } else {
+    // full mode
+    outputContent = statusText;
+  }
+
+  const output: Record<string, unknown> = {
     hookSpecificOutput: {
-      hookEventName: "UserPromptSubmit",
-      additionalContext: statusText,
+      hookEventName,
+      additionalContext: outputContent,
     },
   };
+
+  // --visible: add systemMessage if config allows
+  if (options.visible) {
+    const statusVisible = config["hooks.statusVisible"]?.value !== false;
+    if (statusVisible && brief !== "no agents") {
+      output.systemMessage = `[ib] Agents: ${brief}`;
+    }
+  }
+
   process.stdout.write(JSON.stringify(output));
 }

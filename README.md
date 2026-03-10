@@ -20,7 +20,7 @@ Then add it to your PATH:
 
 ```sh
 # Option 1: Add the project directory to your PATH (in ~/.bash_profile or ~/.zshrc)
-export PATH=$PATH:$HOME/Developer/bun/itsybitsy
+export PATH=$PATH:/path/to/itsybitsy
 
 # Option 2: Install system-wide
 sudo cp ib /usr/local/bin/ib

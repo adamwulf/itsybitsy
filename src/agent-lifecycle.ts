@@ -4,7 +4,7 @@
  * kill, and utility functions.
  */
 
-import { join, dirname } from "path";
+import { join, dirname, resolve } from "path";
 import { readdir, mkdir, cp, rm, rename, appendFile } from "fs/promises";
 import { SpawnContext } from "./types";
 import type { SpawnFn } from "./types";
@@ -526,8 +526,8 @@ export async function resolveGitRoot(repoPath: string): Promise<string | null> {
       return topResult.exitCode === 0 ? topResult.stdout : null;
     }
 
-    // common_dir points to the shared .git directory — go up one level
-    return dirname(commonDir);
+    // common_dir points to the shared .git directory — resolve to absolute, then go up one level
+    return dirname(resolve(repoPath, commonDir));
   } catch {
     return null;
   }

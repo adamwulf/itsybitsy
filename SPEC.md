@@ -696,7 +696,7 @@ When running from a worktree, the root repository is found via:
 2. If the result is `.git` or matches `--git-dir`, we're in the main repo → use `--show-toplevel`
 3. Otherwise, go up one directory from the common dir to find the root
 
-Bash resolves relative `common_dir` paths to absolute via `cd "$root_path" && pwd`. [^needs review] TS uses `dirname(commonDir)` directly, which could return a relative path if `--git-common-dir` outputs a relative path. In practice this may work because callers typically provide absolute `repoPath` to `git -C`, but it hasn't been verified for all worktree layouts.
+Both bash and TS resolve relative `common_dir` paths to absolute before taking the parent directory. Bash uses `cd "$root_path" && pwd`; TS uses `resolve(repoPath, commonDir)` then `dirname()`. This ensures a correct absolute path regardless of worktree layout or relative `--git-common-dir` output.
 
 ### 8.7 Reassign Command
 

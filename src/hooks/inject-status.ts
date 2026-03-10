@@ -28,7 +28,7 @@ export interface InjectStatusOptions {
 
 // ── Pattern ──────────────────────────────────────────────────────────────────
 
-const AGENT_CWD_PATTERN = /\.ittybitsy\/agents\/[^/]+\/repo(\/|$)/;
+const AGENT_CWD_PATTERN = /\.ittybitty\/agents\/[^/]+\/repo(\/|$)/;
 
 // ── Pure decision logic ──────────────────────────────────────────────────────
 

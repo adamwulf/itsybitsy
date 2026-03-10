@@ -44,14 +44,14 @@ function mockAgent(overrides: Partial<Agent> & { id: string }): Agent {
 describe("shouldInjectStatus", () => {
   test("skip-agent-worktree: cwd inside agent repo returns false", () => {
     expect(
-      shouldInjectStatus({ cwd: "/Users/test/project/.ittybitsy/agents/abc123/repo" })
+      shouldInjectStatus({ cwd: "/Users/test/project/.ittybitty/agents/abc123/repo" })
     ).toBe(false);
   });
 
   test("skip-agent-subdir: cwd inside agent repo subdir returns false", () => {
     expect(
       shouldInjectStatus({
-        cwd: "/Users/test/project/.ittybitsy/agents/hook-filter/repo/src/components",
+        cwd: "/Users/test/project/.ittybitty/agents/hook-filter/repo/src/components",
       })
     ).toBe(false);
   });
@@ -62,7 +62,7 @@ describe("shouldInjectStatus", () => {
 
   test("inject-ittybitty-dir-not-repo: cwd at agent dir (not /repo) returns true", () => {
     expect(
-      shouldInjectStatus({ cwd: "/Users/test/project/.ittybitsy/agents/abc123" })
+      shouldInjectStatus({ cwd: "/Users/test/project/.ittybitty/agents/abc123" })
     ).toBe(true);
   });
 

@@ -1,4 +1,4 @@
-import { test, expect, describe, beforeEach, afterEach } from "bun:test";
+import { test, expect, describe, afterEach } from "bun:test";
 import {
   shouldInjectStatus,
   formatAgentStatus,
@@ -214,9 +214,7 @@ describe("briefSummary", () => {
   });
 
   test("maps unknown state to running", () => {
-    const agents = [
-      mockAgent({ id: "a1", state: "unknown" }),
-    ];
+    const agents = [mockAgent({ id: "a1", state: "unknown" })];
     expect(briefSummary(agents)).toBe("1 running");
   });
 
@@ -288,14 +286,16 @@ describe("checkAndUpdateHash", () => {
 // ── buildStatusText with mock provider ────────────────────────────────────
 
 describe("buildStatusText", () => {
-  test("returns empty string when no repos registered", async () => {
+  test("returns empty result when no repos registered", async () => {
     const provider: AgentProvider = {
       getRepos: async () => [],
       getAgents: async () => ({ agents: [] }),
       detectStates: async () => {},
     };
-    const { text } = await buildStatusText(provider);
+    const { text, agents, repos } = await buildStatusText(provider);
     expect(text).toBe("");
+    expect(agents).toEqual([]);
+    expect(repos).toEqual([]);
   });
 
   test("returns formatted status with agents", async () => {
@@ -316,13 +316,14 @@ describe("buildStatusText", () => {
       detectStates: async () => {},
     };
 
-    const { text, agents: returnedAgents } = await buildStatusText(provider);
+    const { text, agents: returnedAgents, repos: returnedRepos } = await buildStatusText(provider);
     expect(text).toContain("<ittybitty-status>");
     expect(text).toContain("project:");
     expect(text).toContain("m agent-aaa [running] 3m");
     expect(text).toContain("w agent-bbb [waiting] 10m");
     expect(text).toContain("</ittybitty-status>");
     expect(returnedAgents).toHaveLength(2);
+    expect(returnedRepos).toEqual(repos);
   });
 
   test("groups agents by repo correctly", async () => {

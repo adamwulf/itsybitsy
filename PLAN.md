@@ -1066,7 +1066,7 @@ The following commands existed in `ib-commands.ts` but were NOT wired as CLI cas
 
 ### Phase 29: inject-status Flag Support -- COMPLETE
 
-**Status:** Implemented. `hookInjectStatus()` in `src/hooks/inject-status.ts` supports `--full`, `--if-changed`, `--brief`, and `--visible` flags. `hookEventName` is read from stdin JSON.
+**Status:** Complete. `hookInjectStatus()` in `src/hooks/inject-status.ts` supports `--full`, `--if-changed`, `--brief`, and `--visible` flags. `hookEventName` is read from stdin JSON.
 
 **Goal:** Achieve exact parity with bash `ib hooks inject-status`. The current implementation always outputs full status and ignores all flags. Bash `ib` has three modes controlled by flags, a hash-based change cache, a `systemMessage` for the status bar, and reads `hook_event_name` from stdin.
 

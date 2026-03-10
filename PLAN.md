@@ -1103,6 +1103,386 @@ The hook is installed in two places in `~/.claude/settings.json`:
 
 ---
 
+### Phase 31: Parity Fixes — Hooks & Agent Status
+
+**Status:** Not started.
+
+**Source:** PARITY_HOOKS_TUI.md, PARITY_LIFECYCLE.md
+
+**Goal:** Fix behavioral divergences between bash `ib` and TypeScript `ib` in hooks and agent lifecycle. These are bugs or missing logic that can cause agents to get stuck or behave differently than expected.
+
+**Complexity:** Medium — mostly localized changes in hook files and ib-commands.ts.
+
+#### 31a: Delayed nudge recheck in stop hook (must-fix)
+
+**File:** `src/hooks/agent-status.ts`
+
+Bash schedules `( sleep 5 && ib hooks agent-status )` when debouncing nudges, ensuring a follow-up check even if no further tool calls occur. TS lacks this — debounced agents could get stuck without follow-up.
+
+- [ ] After writing the nudge debounce timestamp, schedule a delayed recheck (e.g., `setTimeout` or `Bun.spawn` a background `ib hooks agent-status` after 5s)
+- [ ] Test: verify a second check fires ~5s after a debounced nudge
+
+#### 31b: Stop hook tmux send-keys timing (must-fix)
+
+**File:** `src/hooks/agent-status.ts:356-358,369-376`
+
+Bash sends message then waits 0.1s before Enter. TS sends message+Enter in one call, which may fail for long messages.
+
+- [ ] Split into two `send-keys` calls: first the message with `-l`, then a separate Enter after a short delay
+- [ ] Match the pattern already used in `sendMessage()` in `ib-commands.ts`
+
+#### 31c: Complete + unfinished children message (should-fix)
+
+**File:** `src/hooks/agent-status.ts`
+
+TS sends a shorter message than bash when an agent completes but has unfinished children. Bash includes specific command suggestions (`ib merge`, `ib kill`, `ib list`, `ib look`, `ib status`, `ib diff`).
+
+- [ ] Match bash message format — include command suggestions for the manager
+
+#### 31d: Nudge message formatting (cosmetic)
+
+**File:** `src/hooks/agent-status.ts`
+
+Bash: `'WAITING'` and `'I HAVE COMPLETED THE GOAL'` (with quotes). TS omits the quotes.
+
+- [ ] Add single-quotes around the phrases in the nudge message to match bash
+
+#### 31e: main-path comment stripping (should-fix)
+
+**File:** `src/hooks/main-path.ts`
+
+Bash strips `#` comments from compound `cd` commands. TS regex doesn't handle this.
+
+- [ ] Add `#` to the compound command stripping regex
+- [ ] Test: `cd /foo # some comment` should extract `/foo`
+
+#### 31f: inject-status question counts (should-fix)
+
+**File:** `src/hooks/inject-status.ts`
+
+Bash includes pending question count in the brief status summary. TS doesn't.
+
+- [ ] Read `user-questions.json` for each repo and include count in brief summary (e.g., `"2 running, 1 waiting, 1 question"`)
+- [ ] Filter out questions from dead/archived agents (match bash behavior)
+
+#### 31g: Debug file content in stop hook (nice-to-have)
+
+**File:** `src/hooks/agent-status.ts`
+
+Bash saves tmux capture output + `last_assistant_message` + parse_state reason in debug files. TS only saves `lastMessage`.
+
+- [ ] Include tmux capture output and parse_state reason in debug file content
+- [ ] Also add debug log saving on `unknown` state in watchdog (bash does this, TS doesn't — see `src/watchdog.ts`)
+
+---
+
+### Phase 32: Parity Fixes — CLI Commands
+
+**Status:** Not started.
+
+**Source:** PARITY_HOOKS_TUI.md (sections 2.1–2.8)
+
+**Goal:** Add missing CLI flags and commands to achieve feature parity with bash `ib`.
+
+**Complexity:** Low-Medium per item — each is a self-contained addition.
+
+#### 32a: Settings file location (critical)
+
+**File:** `src/ib-commands.ts` (`installSafetyHooks`, `uninstallSafetyHooks`)
+
+Bash writes hooks to `.claude/settings.local.json` (project-local). TS writes to `~/.claude/settings.json` (global). This means TS hooks affect ALL Claude sessions. **Note:** Phase 26c intentionally changed this to global — verify whether this is the desired behavior or needs to be project-local.
+
+- [ ] Evaluate whether global hook installation is correct (it was intentional in Phase 26c, but the parity review flags it as critical)
+- [ ] If global is intentional, document the rationale clearly; if not, revert to project-local
+
+#### 32b: `ib list --json` (nice-to-have)
+
+**File:** `src/index.ts` (list command)
+
+- [ ] Add `--json` flag that outputs agent data as a JSON array for scripting
+
+#### 32c: `ib look --follow` (should-fix)
+
+**File:** `src/index.ts` (look command)
+
+- [ ] Add `--follow` flag that runs `tmux attach -r -t <session>` for live read-only view
+
+#### 32d: `ib diff --stat` (nice-to-have)
+
+**File:** `src/index.ts` (diff command)
+
+- [ ] Add `--stat` flag that runs `git diff --stat` instead of full diff
+
+#### 32e: `ib status` improvements (should-fix)
+
+**File:** `src/index.ts` (status command)
+
+Bash shows agent ID, branch, worktree path, structured section headers with counts, and `git diff --stat` summary. TS just shows plain git output.
+
+- [ ] Add header with agent ID, branch name, worktree path
+- [ ] Use `git merge-base` with the agent's actual parent branch (not hardcoded `main`)
+- [ ] Add section headers (e.g., `═══ Commits (N) vs main ═══`)
+- [ ] Add `git diff --stat` summary
+
+#### 32f: `ib send --from` (should-fix)
+
+**File:** `src/ib-commands.ts`, `src/index.ts`
+
+Bash supports `--from <id>` to auto-prefix messages with sender identity.
+
+- [ ] Add `--from` flag to `sendMessage()` that prefixes the message with `[from <id>]:` or equivalent
+- [ ] Wire in CLI arg parsing in `index.ts`
+
+#### 32g: Other missing CLI commands (nice-to-have)
+
+**File:** `src/index.ts`
+
+- [ ] `ib log <message>` — write to agent log from CLI
+- [ ] `ib new-agent --prompt-file <path>` — read prompt from file
+- [ ] `ib parse-state` — debug command for state parsing
+- [ ] `ib questions --all` — show acknowledged questions
+- [ ] `ib diff` — use `git merge-base` with actual parent branch, not hardcoded `main`
+
+---
+
+### Phase 33: Parity Fixes — TUI Watch Features
+
+**Status:** Not started.
+
+**Source:** PARITY_HOOKS_TUI.md (section 3)
+
+**Goal:** Add missing TUI keybindings and features to match bash `ib watch`.
+
+**Complexity:** Medium — each keybinding requires UI flow integration in dashboard.ts.
+
+#### 33a: Missing keybindings (should-fix)
+
+**File:** `src/tui/dashboard.ts`, `src/tui/agent-actions.ts`
+
+- [ ] `t` — toggle time filter for denials pane (cycle through filter intervals)
+- [ ] `w` — open selected agent's worktree in Finder (`open <worktree-path>`)
+- [ ] `o` — open external diff tool (read from `externalDiffTool` config)
+- [ ] `c` — clear errors when in errors pane
+- [ ] `Enter` — open answer dialog when in questions pane
+
+#### 33b: Usage tracking in dashboard (nice-to-have)
+
+**File:** `src/tui/dashboard.ts`
+
+Bash dashboard shows session usage % and weekly usage % in the status bar, polled every 30s.
+
+- [ ] Add usage polling (reuse `src/usage.ts` module)
+- [ ] Display in status bar or header
+
+#### 33c: Settings/permissions editor (nice-to-have)
+
+**File:** `src/tui/dashboard.ts`, `src/tui/dialog-handler.ts`
+
+Bash has a full settings editor with tabs for project/user settings and a permissions allow/deny list editor.
+
+- [ ] Add settings tabs to setup dialog (project settings, user settings)
+- [ ] Add permissions editor (allow/deny tool lists)
+- [ ] Add number/string input dialogs for config values
+
+---
+
+### Phase 34: Code Quality & Dead Code Cleanup
+
+**Status:** Not started.
+
+**Source:** CODE_REVIEW.md
+
+**Goal:** Address code quality issues, remove dead code, improve type safety, and reduce code duplication.
+
+**Complexity:** Low-Medium — mostly mechanical refactoring.
+
+#### 34a: Fix duplicate `merge-check` case in CLI (high priority)
+
+**File:** `src/index.ts:433,451`
+
+The `merge-check` case appears twice in the main switch statement. The second occurrence is dead code.
+
+- [ ] Remove the dead duplicate case
+- [ ] Verify the remaining case has the correct implementation
+
+#### 34b: Consolidate spawn runner injection (medium priority)
+
+**Files:** `src/ib-commands.ts`, `src/agent-lifecycle.ts`, `src/watchdog.ts`, `src/tmux-poller.ts`, `src/usage.ts`, `src/auto-compact.ts`
+
+10+ separate module-level mutable spawn runners with near-identical `set*/reset*` boilerplate. This is error-prone (test leaks) and hard to maintain.
+
+- [ ] Design a single DI pattern — either a context object threaded through functions, or a centralized spawn registry
+- [ ] Consolidate all spawn runners into the shared pattern
+- [ ] Update all tests to use the unified pattern
+
+#### 34c: Consolidate `runCmd` helpers (low priority)
+
+**Files:** `src/ib-commands.ts` (3 variants), `src/agent-lifecycle.ts`, `src/tmux-poller.ts`
+
+5 near-identical `runCmd` wrappers that spawn → read stdout → await exit. They differ in stderr handling.
+
+- [ ] Extract a shared `runCmd` helper that drains both stdout and stderr via `Promise.all`
+- [ ] Replace all variants with calls to the shared helper
+
+#### 34d: Extract shared constants (low priority)
+
+**Files:** `src/hooks/intercept-task.ts:25`, `src/hooks/inject-status.ts:37`, `src/hooks/session-start.ts:18`
+
+`AGENT_CWD_PATTERN` regex duplicated across 3 hook files.
+
+- [ ] Extract to `src/hooks/shared.ts` or `src/constants.ts`
+
+#### 34e: Fix `as any` in production code (medium priority)
+
+**File:** `src/ib-commands.ts:1255`
+
+`(baseSettings as any)?.hooks?.PreToolUse` bypasses type safety.
+
+- [ ] Define a proper interface for the settings file structure
+- [ ] Replace `as any` with typed access
+
+#### 34f: Rename conflicting `AgentProvider` type (low priority)
+
+**Files:** `src/watchdog.ts:30`, `src/hooks/inject-status.ts:120-124`
+
+Two completely different `AgentProvider` types with the same name.
+
+- [ ] Rename one (e.g., `AgentDataSource` for inject-status) to avoid confusion
+
+#### 34g: Annotate empty catch blocks (low priority)
+
+**Files:** Multiple — 128 empty catch blocks across 23 files
+
+- [ ] Add categorized comments to significant catch blocks: `/* expected: file may not exist */` vs `/* todo: should log */`
+- [ ] Consider logging unexpected errors (not ENOENT) to stderr or agent.log
+
+#### 34h: Fix `nukeResumeRunCmd` stderr deadlock (medium priority)
+
+**File:** `src/ib-commands.ts:116-121`
+
+Stderr is piped but never drained. If a command produces enough stderr to fill the pipe buffer, the process deadlocks.
+
+- [ ] Drain both stdout and stderr with `Promise.all`, matching `mergeRunCmd` pattern
+
+#### 34i: Use `sed` alternative for JSON modification in start.sh/resume.sh (low priority)
+
+**File:** `src/ib-commands.ts:392-395`
+
+Using `sed` to insert `claude_pid` into `meta.json` is brittle.
+
+- [ ] Replace with a bun one-liner or restructure to avoid in-script JSON manipulation
+
+---
+
+### Phase 35: Test Coverage Improvements
+
+**Status:** Not started.
+
+**Source:** CODE_REVIEW.md (M5, M6, I1)
+
+**Goal:** Add tests for untested modules and improve test infrastructure.
+
+**Complexity:** Medium-High — several modules need test scaffolding.
+
+#### 35a: CLI entrypoint tests (high priority)
+
+**File:** `src/index.ts` (708 lines, no test file)
+
+The main CLI switch has no tests, including the duplicate `merge-check` case.
+
+- [ ] Extract CLI logic into testable functions (e.g., `collect()` and `findManager()` from inline closures)
+- [ ] Add integration tests for: `list`, `look`, `diff`, `status`, `tree`, `merge-check`, `questions`, `acknowledge`
+- [ ] Verify arg parsing for all commands
+
+#### 35b: TUI module tests (medium priority)
+
+**Files:** `src/tui/agent-actions.ts`, `src/tui/pane-manager.ts`, `src/tui/dialog-handler.ts`
+
+No dedicated test files for these modules.
+
+- [ ] `agent-actions.test.ts` — test each action handler (kill, merge, send, etc.)
+- [ ] `pane-manager.test.ts` — test pane mode cycling, content loading
+- [ ] `dialog-handler.test.ts` — test dialog state machine transitions
+
+#### 35c: Test infrastructure improvements (low priority)
+
+**Files:** Various test files
+
+Heavy `as any` usage (70+ occurrences) for mock creation.
+
+- [ ] Create shared mock factory in `test-utils.ts` that produces properly-typed Agent objects
+- [ ] Use consistently across all test files
+
+#### 35d: Validate `readAgentMeta` more thoroughly (medium priority)
+
+**File:** `src/agents.ts:84`
+
+Only `id` and `tmux_session` are type-checked. Other fields (`created_epoch`, `worker`, `model`) are cast without validation.
+
+- [ ] Add type guards for all required `AgentMeta` fields
+- [ ] Test: pass meta.json with wrong-typed fields, verify graceful error
+
+#### 35e: Config type validation (low priority)
+
+**File:** `src/config.ts:88-106`
+
+Values from `.ittybitsy.json` are stored without type checking against `ConfigKeyDef.type`.
+
+- [ ] Add runtime type validation (e.g., `"maxAgents": "ten"` should be rejected)
+- [ ] Test: pass wrong-typed config values, verify they're rejected or fall back to defaults
+
+---
+
+### Phase 36: Watchdog & Lifecycle Improvements
+
+**Status:** Not started.
+
+**Source:** PARITY_LIFECYCLE.md, CODE_REVIEW.md
+
+**Goal:** Address watchdog correctness issues and lifecycle gaps.
+
+**Complexity:** Low-Medium.
+
+#### 36a: Watchdog lock file atomicity (medium priority)
+
+**File:** `src/watchdog.ts:392-411`
+
+TOCTOU race: read lock → check PID → write PID. Two processes could acquire simultaneously.
+
+- [ ] Use `O_EXCL` flag for atomic lock file creation
+- [ ] Or use advisory file locking
+- [ ] Also migrate from `require("fs")` sync APIs to `Bun.file()`/`Bun.write()` for consistency (L1 from CODE_REVIEW.md)
+
+#### 36b: Watchdog debug logs on unknown state (nice-to-have)
+
+**File:** `src/watchdog.ts`
+
+Bash watchdog saves tmux output to `debug-logs/watchdog-<timestamp>-unknown.txt` on unknown state. TS doesn't.
+
+- [ ] Save debug log on unknown state entry (tmux capture + parse_state reason)
+- [ ] Use same `debug-logs/` directory pattern as bash
+
+#### 36c: Auto-compact wiring in watchdog
+
+**File:** `src/watchdog.ts`
+
+Phase 28 noted: `src/auto-compact.ts` exists but watchdog never calls it.
+
+- [ ] Wire auto-compact check into the watchdog poll loop
+- [ ] Respect `autoCompactThreshold` config
+- [ ] Respect the 60s per-agent cooldown already in auto-compact.ts
+
+#### 36d: Model context size configuration (low priority)
+
+**File:** `src/auto-compact.ts:44-52`
+
+Hardcoded model context sizes with substring matching. New models silently get 200K default.
+
+- [ ] Move context sizes to config or a more maintainable lookup table
+- [ ] Log a warning when falling back to default for unknown models
+
+---
+
 ### Phase 27 (future): Path Allowlist in Hook Sandbox
 
 **Status:** Aspirational.

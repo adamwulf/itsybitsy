@@ -292,18 +292,18 @@ After successful merge:
 4. **Format message**: If a sender is detected, the message is prefixed: `[sent by agent <sender-id>]: <message>`
 5. **Send via tmux**: `tmux send-keys -t <session> "<message>"` (no `-l` literal flag), then after a calculated delay, `tmux send-keys -t <session> Enter` separately. [^callout] The TypeScript implementation uses `-l` (literal flag) to prevent key interpretation of special characters; the bash version relies on tmux's default key handling without `-l`.
 6. **Delay calculation**: `0.1 + (message_length / 100) * 0.5` seconds, clamped to [0.2, 3.0]. Longer messages need more time for the paste to complete in tmux. The `message_length` here is the length of the full formatted message (including the `[sent by agent ...]` prefix if present).
-7. **Logging**: Both sender and recipient get entries in their `agent.log`. Recipient log entries are written with `--quiet` (no stdout echo); sender log entries echo to stdout. [^callout] The `--quiet` distinction is bash-specific. The TypeScript `logAgent()` is always write-only (appends to `agent.log` without echoing to stdout) for both sender and recipient.
-8. **Stdin piping**: Messages can also be provided via stdin (`echo "msg" | ib send <id>` or `ib send <id> < file.txt`) when no positional message argument is given.
+7. **Logging**: Both sender and recipient get entries in their `agent.log`. Recipient log entries are written with `--quiet` (no stdout echo); sender log entries echo to stdout. [^callout] The `--quiet` distinction is bash-specific. The TypeScript `logAgent()` is always write-only (appends to `agent.log` without echoing to stdout) for both sender and recipient. Additionally, in bash when `fromId` is set, the sender's log message ("Sent message to ...") is echoed to stdout; in TypeScript, `stdout` is returned as an empty string when `fromId` is set (only returning `"Sent to <id>"` when there is no sender).
+8. **Stdin piping**: Messages can also be provided via stdin (`echo "msg" | ib send <id>` or `ib send <id> < file.txt`) when no positional message argument is given. [^callout] Stdin piping is bash-only. The TypeScript CLI requires the message as positional arguments and errors if none are provided.
 
 ### 4.2 ib ask
 
-`ib ask "question"` allows top-level managers to ask the user questions:
+`ib ask "question"` allows top-level managers to ask the user questions. [^callout] `ib ask` is only implemented in the bash version. The TypeScript CLI does not have an `ask` command; agents running under the TS orchestrator use the bash `ib ask` directly (which is always available on `$PATH`).
 
 1. **Auto-detect agent ID** from CWD if in an agent worktree (or specify `--id <agent-id>` explicitly)
 2. **Top-level check**: Only agents with no manager (or whose manager has been merged/killed) can ask. Others are told to use `ib send` to communicate with their manager.
 3. **Config check**: `allowAgentQuestions` must be `true` (default)
 4. **Question storage**: Stale questions from agents whose directories no longer exist are cleaned up. New questions are appended to `.ittybitty/user-questions.json`
-5. **Question ID format**: `q-<unix-epoch>-<6-char-hash>` where the hash is the first 6 hex characters of `md5("$AGENT_ID-$QUESTION")`
+5. **Question ID format**: `q-<unix-epoch>-<6-char-hash>` where the hash is the first 6 hex characters of `md5("$AGENT_ID-$QUESTION\n")` (note: bash `echo` appends a trailing newline to the hash input)
 6. **Logging**: The question is logged to the asking agent's `agent.log`.
 
 ### 4.3 user-questions.json Structure
@@ -316,7 +316,7 @@ After successful merge:
       "agent": "agent-a1b2c3d4",
       "question": "Should I proceed with the refactoring?",
       "timestamp": "2024-01-09T20:00:00Z",
-      "status": "pending",
+      "status": "acknowledged",
       "acknowledged_at": "2024-01-09T20:05:00Z"
     }
   ]

@@ -283,21 +283,23 @@ After successful merge:
 
 1. **Resolve target**: Partial ID matching is supported (prefix/substring match against agent directories and tmux sessions). Must resolve to exactly one agent.
 2. **Verify running**: The target's tmux session must exist.
-3. **Auto-detect sender**: If called from within an agent worktree, the sender's agent ID is read from `meta.json`.
+3. **Auto-detect sender**: If called from within an agent worktree, the sender's agent ID is read from `meta.json`. An explicit `--from <sender-id>` flag can also be passed to override auto-detection.
 4. **Format message**: If a sender is detected, the message is prefixed: `[sent by agent <sender-id>]: <message>`
-5. **Send via tmux**: `tmux send-keys -t <session> -l "<message>"` (literal flag prevents key interpretation), then after a calculated delay, `tmux send-keys -t <session> Enter` separately.
-6. **Delay calculation**: `0.1 + (message_length / 100) * 0.5` seconds, clamped to [0.2, 3.0]. Longer messages need more time for the paste to complete in tmux.
-7. **Logging**: Both sender and recipient get entries in their `agent.log`.
+5. **Send via tmux**: `tmux send-keys -t <session> "<message>"` (no `-l` literal flag), then after a calculated delay, `tmux send-keys -t <session> Enter` separately. [^callout] The TypeScript implementation uses `-l` (literal flag) to prevent key interpretation of special characters; the bash version relies on tmux's default key handling without `-l`.
+6. **Delay calculation**: `0.1 + (message_length / 100) * 0.5` seconds, clamped to [0.2, 3.0]. Longer messages need more time for the paste to complete in tmux. The `message_length` here is the length of the full formatted message (including the `[sent by agent ...]` prefix if present).
+7. **Logging**: Both sender and recipient get entries in their `agent.log`. Recipient log entries are written with `--quiet` (no stdout echo); sender log entries echo to stdout.
+8. **Stdin piping**: Messages can also be provided via stdin (`echo "msg" | ib send <id>` or `ib send <id> < file.txt`) when no positional message argument is given.
 
 ### 4.2 ib ask
 
 `ib ask "question"` allows top-level managers to ask the user questions:
 
-1. **Auto-detect agent ID** from CWD if in an agent worktree
+1. **Auto-detect agent ID** from CWD if in an agent worktree (or specify `--id <agent-id>` explicitly)
 2. **Top-level check**: Only agents with no manager (or whose manager has been merged/killed) can ask. Others are told to use `ib send` to communicate with their manager.
 3. **Config check**: `allowAgentQuestions` must be `true` (default)
-4. **Question storage**: Questions are appended to `.ittybitty/user-questions.json`
-5. **Question ID format**: `q-<unix-epoch>-<6-char-hash>`
+4. **Question storage**: Stale questions from agents whose directories no longer exist are cleaned up. New questions are appended to `.ittybitty/user-questions.json`
+5. **Question ID format**: `q-<unix-epoch>-<6-char-hash>` where the hash is the first 6 hex characters of `md5("$AGENT_ID-$QUESTION")`
+6. **Logging**: The question is logged to the asking agent's `agent.log`.
 
 ### 4.3 user-questions.json Structure
 
@@ -324,11 +326,15 @@ Fields:
 - `status`: `"pending"` or `"acknowledged"`
 - `acknowledged_at`: Set when `ib acknowledge <id>` is called
 
+**[^callout]** The TypeScript `acknowledgeQuestion` also sets an `acknowledged: true` boolean field on the question object, in addition to `status` and `acknowledged_at`. The bash version only sets `status` and `acknowledged_at`.
+
 Questions from agents that no longer exist (no directory in `.ittybitty/agents/`) are filtered out when reading.
 
 ### 4.4 ib acknowledge
 
-`ib acknowledge <question-id>` marks a question as handled. Only the primary (user-level) Claude can acknowledge — agents are blocked via `is_running_as_agent()` check.
+`ib acknowledge <question-id>` marks a question as handled. Only the primary (user-level) Claude can acknowledge — agents are blocked via `is_running_as_agent()` check. The command finds the question by ID, sets `status` to `"acknowledged"` and records `acknowledged_at` with the current ISO 8601 UTC timestamp. On success, it prints a hint to use `ib send <agent-id> "answer"` to respond.
+
+**[^callout]** The TypeScript `acknowledgeQuestion` is only called from the TUI dashboard (always user-level), so it omits the `is_running_as_agent()` guard. It also sets an extra `acknowledged: true` boolean (see §4.3 callout).
 
 ---
 

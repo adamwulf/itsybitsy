@@ -181,13 +181,13 @@ The `--worker` flag at creation time determines the agent's role:
 |----------|---------|--------|
 | `meta.json` `worker` field | `false` | `true` |
 | Can spawn sub-agents | Yes (via `ib new-agent --worker`) | No |
-| Can use Task tool | Intercepted → spawns ib agents | Blocked by path hook |
+| Can use Task tool | Intercepted → spawns ib agents | Native Task allowed (intercept hook skips workers) |
 | Can ask user questions | Only if top-level (no manager) | No |
 | Permissions source | `permissions.manager.allow/deny` | `permissions.worker.allow/deny` |
 | Session-start instructions | Manager template (with sub-agent commands) | Worker template (with send/diff/status only) |
 | TaskCreate | Blocked with "Use ib new-agent --worker" message | Blocked with "Workers cannot create tasks" message |
 
-### 2.2 Manager Permissions
+### 2.2 Agent Permissions
 
 When building `settings.local.json` for an agent, permissions come from three sources, merged and deduplicated:
 

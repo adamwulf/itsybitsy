@@ -1127,6 +1127,86 @@ The hook is installed in two places in `~/.claude/settings.json`:
 
 ---
 
+### Phase 30: Security Hardening
+
+**Status:** Not started.
+
+**Source:** SECURITY_REVIEW.md (2026-03-10 audit)
+
+**Goal:** Fix all High and Medium security findings. Low findings are addressed where trivial.
+
+---
+
+#### 30a: HIGH-1 — tmux send-keys injection hardening
+
+**Files:** `src/ib-commands.ts`, `src/hooks/agent-status.ts`
+
+- Add `-l` (literal) flag to all `tmux send-keys` calls that include variable content so tmux key names are never interpreted
+- Send `Enter` as a separate `send-keys` call (matching `sendMessage()` pattern) rather than appending it inline
+- Validate `managerSession` with `isValidTmuxSession()` in `agent-status.ts` before use in `Bun.spawn`
+- Validate `managerId` with `isValidAgentId()` before path-joining in stop hook
+
+**Tests:** Verify `-l` flag is present in all tmux send-keys spawn args that carry variable content.
+
+---
+
+#### 30b: HIGH-2 — Shell script path interpolation hardening
+
+**Files:** `src/ib-commands.ts` (`newAgent()`, `resumeAgent()`)
+
+Generated `start.sh` and `resume.sh` interpolate `rootRepoPath`, `agentDir`, `absPromptFile` into shell code without quoting. Fix:
+- Wrap all path interpolations in single-quotes with proper escaping: `'${path.replace(/'/g, "'\\''")}'`
+- Or migrate away from generated shell scripts entirely — use `Bun.spawn` arrays directly for launching Claude inside tmux (lower risk, removes an entire class of issues)
+- At minimum: validate that `rootRepoPath` doesn't contain characters that would break shell scripts, and fail-fast with a clear error if it does
+
+**Tests:** Generate scripts with paths containing spaces and single-quotes; verify they execute correctly.
+
+---
+
+#### 30c: MEDIUM-1 — Validate tmux sessions read from meta.json
+
+**Files:** `src/hooks/agent-status.ts`, `src/agent-lifecycle.ts`, `src/auto-compact.ts`, `src/watchdog.ts`
+
+`isValidTmuxSession()` is only called in `resumeAgent()`. Everywhere else, tmux session names from `meta.json` go directly to `Bun.spawn` args. Fix:
+- Add `isValidTmuxSession()` check at each site where `meta.tmux_session` is read from disk
+- Return early with a logged error on invalid sessions (don't silently skip or crash)
+
+**Tests:** Pass an invalid session name through each code path; verify it's rejected gracefully.
+
+---
+
+#### 30d: MEDIUM-2 — Ghostty command quoting
+
+**File:** `src/ghostty.ts`
+
+The tmux session is appended unquoted after `--` in the Ghostty `--command` string. Current regex mitigates, but the pattern is fragile. Fix:
+- The session string is already validated with `/^[\w-]+$/` — add a comment noting this is load-bearing
+- Or restructure to avoid interpolation: pass session as a positional arg via `bash -c '...' -- "$1"` pattern already used, but ensure the `$1` substitution actually covers the case
+
+---
+
+#### 30e: MEDIUM-5 — Hook stdin schema validation
+
+**Files:** `src/hooks/agent-path.ts`, `src/hooks/intercept-task.ts`, `src/hooks/session-start.ts`, `src/hooks/agent-status.ts`, `src/hooks/main-path.ts`, `src/hooks/inject-status.ts`
+
+All hooks parse stdin JSON with minimal type checking. A malformed input could crash a hook (causing Claude Code to either block the tool or proceed without the hook decision). Fix:
+- Add basic type guards at each hook entry point: verify `tool_name` is a string, `tool_input` is a non-null object, `cwd` is a string
+- On schema violation: log to stderr and exit 0 (allow) — never crash in a hook, as that could break the user's Claude session
+
+**Tests:** Pass each hook `null`, `[]`, `{}`, and string values for required fields; verify it exits 0 gracefully.
+
+---
+
+#### 30f: LOW-3 — Manager ID/session validation in stop hook
+
+**File:** `src/hooks/agent-status.ts`
+
+`meta.manager` is used to path-join and read another agent's `meta.json`, then that agent's `tmux_session` is used in `Bun.spawn`. Add:
+- `isValidAgentId(managerId)` check before `join(agentsDir, managerId)`
+- `isValidTmuxSession(managerSession)` check before spawning
+
+---
+
 ### Phase 25 (future): Rename .ittybitty/ to .ittybitsy/
 
 **Status:** Aspirational — blocked on ib compatibility.

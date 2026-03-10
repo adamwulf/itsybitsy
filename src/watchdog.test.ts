@@ -1032,12 +1032,9 @@ describe("watchdog", () => {
 
   describe("auto-compact integration", () => {
     function mockConfig(threshold: number | undefined): ConfigResult {
-      const result: ConfigResult = {};
-      for (const key of ["maxAgents", "model", "fps", "createPullRequests", "allowAgentQuestions", "externalDiffTool"]) {
-        result[key] = { value: undefined, source: "default" };
-      }
-      result["autoCompactThreshold"] = { value: threshold, source: threshold != null ? "project" : "default" };
-      return result;
+      return {
+        autoCompactThreshold: { value: threshold, source: threshold != null ? "project" : "default" },
+      };
     }
 
     let compactCalls: Array<{ args: any[] }>;

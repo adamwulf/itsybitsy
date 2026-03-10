@@ -101,6 +101,8 @@ describe("nudge debouncing", () => {
     );
     expect(result.action).toBe("nudge");
     expect(result.message).toContain("Resume your work");
+    expect(result.message).toContain("'WAITING'");
+    expect(result.message).toContain("'I HAVE COMPLETED THE GOAL'");
   });
 
   test("within 5s → debounced", async () => {
@@ -287,6 +289,11 @@ describe("remind children", () => {
     expect(result.state).toBe("complete");
     expect(result.action).toBe("remind_children");
     expect(result.message).toContain("child-001");
+    expect(result.message).toContain("1 unfinished sub-agent(s)");
+    expect(result.message).toContain("ib merge <id>");
+    expect(result.message).toContain("ib kill <id>");
+    expect(result.message).toContain("ib list");
+    expect(result.message).toContain("ib diff <id>");
   });
 });
 

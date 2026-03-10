@@ -142,7 +142,7 @@ async function main() {
               findManager(root);
             }
           } else {
-            collect(root, 1);
+            collect(root, 0);
           }
         }
 

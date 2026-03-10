@@ -474,7 +474,7 @@ export class DashboardComponent implements Component {
   startPolling() {
     this.tmuxPoller.start();
     this.refreshUsage();
-    this.usageTimer = setInterval(() => this.refreshUsage(), 180_000);
+    this.usageTimer = setInterval(() => this.refreshUsage(), 240_000);
     // Spawn standalone watchdog as background process if not already running
     if (!isWatchdogRunning()) {
       try {

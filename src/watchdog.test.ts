@@ -19,10 +19,15 @@ import {
   INITIAL_NOTIFY_TICKS,
   MAX_NOTIFY_TICKS,
   POLL_INTERVAL_MS,
+  COMPACT_CHECK_COOLDOWN_MS,
   setWatchdogSpawnRunner,
   resetWatchdogSpawnRunner,
   setWatchdogFetchUsage,
   resetWatchdogFetchUsage,
+  setWatchdogReadConfig,
+  resetWatchdogReadConfig,
+  setWatchdogNow,
+  resetWatchdogNow,
   acquireWatchdogLock,
   releaseWatchdogLock,
   readLockPid,
@@ -40,7 +45,14 @@ import {
   setSendSpawnRunner,
   resetSendSpawnRunner,
 } from "./ib-commands";
+import {
+  setUsageReader,
+  resetUsageReader,
+  setCompactSpawnRunner,
+  resetCompactSpawnRunner,
+} from "./auto-compact";
 import type { SpawnResult } from "./types";
+import type { ConfigResult } from "./config";
 
 /** Create a mock spawn runner that records calls and succeeds */
 function mockSpawnRunner() {
@@ -103,6 +115,10 @@ describe("watchdog", () => {
     resetSendSpawnRunner();
     resetWatchdogSpawnRunner();
     resetWatchdogFetchUsage();
+    resetWatchdogReadConfig();
+    resetWatchdogNow();
+    resetUsageReader();
+    resetCompactSpawnRunner();
     clearTrackers();
   });
 
@@ -1007,6 +1023,194 @@ describe("watchdog", () => {
       const provider = createDiskAgentProvider([{ path: "/repos/test", name: "test" }]);
       await provider();
       expect(detectCalled).toBe(false);
+    });
+  });
+
+  // =========================================================================
+  // Auto-compact integration
+  // =========================================================================
+
+  describe("auto-compact integration", () => {
+    function mockConfig(threshold: number | undefined): ConfigResult {
+      return {
+        autoCompactThreshold: { value: threshold, source: threshold != null ? "project" : "default" },
+      };
+    }
+
+    let compactCalls: Array<{ args: any[] }>;
+
+    beforeEach(() => {
+      compactCalls = [];
+      setCompactSpawnRunner((cmd) => {
+        compactCalls.push({ args: [...cmd] });
+        return { exited: Promise.resolve(0) };
+      });
+      // Set time to a large value so cooldown is satisfied on first tick
+      setWatchdogNow(() => 100_000);
+    });
+
+    afterEach(() => {
+      resetCompactSpawnRunner();
+      resetUsageReader();
+      resetWatchdogReadConfig();
+      resetWatchdogNow();
+    });
+
+    test("sends /compact when usage exceeds threshold for running agent", async () => {
+      setUsageReader(async () => 85);
+      setWatchdogReadConfig(async () => mockConfig(80));
+
+      const a1 = agent("a1", "running");
+      await tick([a1]);
+
+      const compactSendKeys = compactCalls.filter((c) =>
+        c.args.includes("/compact")
+      );
+      expect(compactSendKeys.length).toBe(1);
+      expect(getTracker("a1").compactState.compactSent).toBe(true);
+    });
+
+    test("sends /compact when usage exceeds threshold for waiting agent", async () => {
+      setUsageReader(async () => 90);
+      setWatchdogReadConfig(async () => mockConfig(80));
+
+      const a1 = agent("a1", "waiting");
+      await tick([a1]);
+
+      const compactSendKeys = compactCalls.filter((c) =>
+        c.args.includes("/compact")
+      );
+      expect(compactSendKeys.length).toBe(1);
+    });
+
+    test("does not send /compact when usage is below threshold", async () => {
+      setUsageReader(async () => 50);
+      setWatchdogReadConfig(async () => mockConfig(80));
+
+      const a1 = agent("a1", "running");
+      await tick([a1]);
+
+      const compactSendKeys = compactCalls.filter((c) =>
+        c.args.includes("/compact")
+      );
+      expect(compactSendKeys.length).toBe(0);
+      expect(getTracker("a1").compactState.compactSent).toBe(false);
+    });
+
+    test("does not check when autoCompactThreshold is undefined", async () => {
+      let usageChecked = false;
+      setUsageReader(async () => {
+        usageChecked = true;
+        return 90;
+      });
+      setWatchdogReadConfig(async () => mockConfig(undefined));
+
+      const a1 = agent("a1", "running");
+      await tick([a1]);
+
+      expect(usageChecked).toBe(false);
+    });
+
+    test("does not check for non-running/non-waiting states", async () => {
+      let usageChecked = false;
+      setUsageReader(async () => {
+        usageChecked = true;
+        return 90;
+      });
+      setWatchdogReadConfig(async () => mockConfig(80));
+
+      for (const state of ["complete", "stopped", "creating", "compacting"] as const) {
+        usageChecked = false;
+        clearTrackers();
+        const a1 = agent("a1", state);
+        await tick([a1]);
+        expect(usageChecked).toBe(false);
+      }
+    });
+
+    test("respects per-agent cooldown — skips check within cooldown period", async () => {
+      let usageCheckCount = 0;
+      setUsageReader(async () => {
+        usageCheckCount++;
+        return 50;
+      });
+      setWatchdogReadConfig(async () => mockConfig(80));
+
+      let currentTime = 100_000;
+      setWatchdogNow(() => currentTime);
+
+      const a1 = agent("a1", "running");
+      await tick([a1]);
+      expect(usageCheckCount).toBe(1);
+
+      // Second tick 5s later — should be within cooldown
+      currentTime += 5_000;
+      await tick([a1]);
+      expect(usageCheckCount).toBe(1);
+
+      // Third tick 60s after first — cooldown expired
+      currentTime = 100_000 + COMPACT_CHECK_COOLDOWN_MS;
+      await tick([a1]);
+      expect(usageCheckCount).toBe(2);
+    });
+
+    test("does not re-send /compact once compactSent is true", async () => {
+      setUsageReader(async () => 90);
+      setWatchdogReadConfig(async () => mockConfig(80));
+
+      let currentTime = 100_000;
+      setWatchdogNow(() => currentTime);
+
+      const a1 = agent("a1", "running");
+      await tick([a1]);
+      expect(compactCalls.filter((c) => c.args.includes("/compact")).length).toBe(1);
+
+      // Advance past cooldown
+      currentTime += COMPACT_CHECK_COOLDOWN_MS;
+      await tick([a1]);
+      // checkAndCompact should not send again because compactSent is true
+      expect(compactCalls.filter((c) => c.args.includes("/compact")).length).toBe(1);
+    });
+
+    test("resets compactSent when usage drops below threshold", async () => {
+      let usagePct = 90;
+      setUsageReader(async () => usagePct);
+      setWatchdogReadConfig(async () => mockConfig(80));
+
+      let currentTime = 100_000;
+      setWatchdogNow(() => currentTime);
+
+      const a1 = agent("a1", "running");
+      await tick([a1]);
+      expect(getTracker("a1").compactState.compactSent).toBe(true);
+
+      // Usage drops
+      usagePct = 50;
+      currentTime += COMPACT_CHECK_COOLDOWN_MS;
+      await tick([a1]);
+      expect(getTracker("a1").compactState.compactSent).toBe(false);
+    });
+
+    test("COMPACT_CHECK_COOLDOWN_MS is 60 seconds", () => {
+      expect(COMPACT_CHECK_COOLDOWN_MS).toBe(60_000);
+    });
+
+    test("tracker initializes with compactState and lastCompactCheckMs", () => {
+      const tracker = createTracker();
+      expect(tracker.compactState).toEqual({ compactSent: false });
+      expect(tracker.lastCompactCheckMs).toBe(0);
+    });
+
+    test("gracefully handles config read errors", async () => {
+      setUsageReader(async () => 90);
+      setWatchdogReadConfig(async () => {
+        throw new Error("config read failed");
+      });
+
+      const a1 = agent("a1", "running");
+      // Should not throw
+      await tick([a1]);
+      expect(compactCalls.length).toBe(0);
     });
   });
 });

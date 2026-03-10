@@ -21,6 +21,9 @@ import { fetchUsage } from "./usage";
 import type { UsageData, UsageResult } from "./usage";
 import type { SpawnFn } from "./types";
 import type { RepoEntry } from "./registry";
+import { checkAndCompact } from "./auto-compact";
+import type { CompactState } from "./auto-compact";
+import { readConfig } from "./config";
 
 /** Function that returns the current list of agents. Used by the watchdog loop.
  * Can be sync (TUI watcher cache) or async (disk-based standalone watchdog). */
@@ -33,10 +36,15 @@ export interface AgentTracker {
   notifyInterval: number; // in ticks (each tick = POLL_INTERVAL_MS)
   completionNotified: boolean;
   rateLimitBypassed: boolean;
+  compactState: CompactState;
+  lastCompactCheckMs: number;
 }
 
 /** How often the watchdog polls, in milliseconds */
 export const POLL_INTERVAL_MS = 5_000;
+
+/** Minimum interval between auto-compact checks per agent, in milliseconds (60s) */
+export const COMPACT_CHECK_COOLDOWN_MS = 60_000;
 
 /** Initial notification threshold in ticks (6 ticks * 5s = 30s) */
 export const INITIAL_NOTIFY_TICKS = 6;
@@ -91,6 +99,33 @@ export function resetWatchdogFetchUsage(): void {
   fetchUsageFn = fetchUsage;
 }
 
+/** Overridable readConfig for testing. */
+type ReadConfigFn = typeof readConfig;
+let readConfigFn: ReadConfigFn = readConfig;
+
+/** Override readConfig for testing. */
+export function setWatchdogReadConfig(fn: ReadConfigFn): void {
+  readConfigFn = fn;
+}
+
+/** Reset readConfig to default. */
+export function resetWatchdogReadConfig(): void {
+  readConfigFn = readConfig;
+}
+
+/** Overridable Date.now for testing. */
+let nowFn: () => number = () => Date.now();
+
+/** Override Date.now for testing. */
+export function setWatchdogNow(fn: () => number): void {
+  nowFn = fn;
+}
+
+/** Reset Date.now to default. */
+export function resetWatchdogNow(): void {
+  nowFn = () => Date.now();
+}
+
 // ---------------------------------------------------------------------------
 // Tracker management
 // ---------------------------------------------------------------------------
@@ -103,6 +138,8 @@ export function createTracker(): AgentTracker {
     notifyInterval: INITIAL_NOTIFY_TICKS,
     completionNotified: false,
     rateLimitBypassed: false,
+    compactState: { compactSent: false },
+    lastCompactCheckMs: 0,
   };
 }
 
@@ -506,6 +543,24 @@ async function processAgents(agents: Agent[], allAgents: Agent[]): Promise<void>
 
     // Update previous state after handler runs
     tracker.previousState = agent.state;
+
+    // Auto-compact check with per-agent cooldown
+    if (agent.state === "running" || agent.state === "waiting") {
+      const now = nowFn();
+      if (now - tracker.lastCompactCheckMs >= COMPACT_CHECK_COOLDOWN_MS) {
+        tracker.lastCompactCheckMs = now;
+        try {
+          const config = await readConfigFn(agent.repoPath);
+          const thresholdEntry = config["autoCompactThreshold"];
+          const threshold = thresholdEntry?.value as number | undefined;
+          if (threshold != null && threshold > 0) {
+            await checkAndCompact(agent, threshold, tracker.compactState);
+          }
+        } catch {
+          // Config read or compact check failed — skip silently
+        }
+      }
+    }
 
     // Process children
     await processAgents(agent.children, allAgents);

@@ -4,8 +4,9 @@
  * All commands are implemented natively — no ib CLI dependency.
  */
 
-import { join } from "path";
+import { join, dirname } from "path";
 import { readdir, chmod, rm, mkdir } from "fs/promises";
+import { homedir } from "node:os";
 import type { Agent } from "./agents";
 import {
   logAgent,
@@ -2026,10 +2027,16 @@ export async function acknowledgeQuestion(repoPath: string, questionId: string):
 
 // ── Settings JSON helpers for hooks management ─────────────────────────────
 
-/** Read and parse {repoPath}/.claude/settings.local.json, returning {} on missing/invalid */
-async function readSettingsJson(repoPath: string): Promise<Record<string, unknown>> {
+/** Default global settings path: ~/.claude/settings.json */
+function defaultSettingsPath(): string {
+  return join(homedir(), ".claude", "settings.json");
+}
+
+/** Read and parse settings JSON, returning {} on missing/invalid */
+async function readSettingsJson(settingsPath?: string): Promise<Record<string, unknown>> {
+  const p = settingsPath ?? defaultSettingsPath();
   try {
-    const file = Bun.file(join(repoPath, ".claude", "settings.local.json"));
+    const file = Bun.file(p);
     if (await file.exists()) {
       return await file.json();
     }
@@ -2037,11 +2044,11 @@ async function readSettingsJson(repoPath: string): Promise<Record<string, unknow
   return {};
 }
 
-/** Write settings JSON back to {repoPath}/.claude/settings.local.json */
-async function writeSettingsJson(repoPath: string, settings: Record<string, unknown>): Promise<void> {
-  const claudeDir = join(repoPath, ".claude");
-  await mkdir(claudeDir, { recursive: true });
-  await Bun.write(join(claudeDir, "settings.local.json"), JSON.stringify(settings, null, 2) + "\n");
+/** Write settings JSON back to the given path (or global default) */
+async function writeSettingsJson(settings: Record<string, unknown>, settingsPath?: string): Promise<void> {
+  const p = settingsPath ?? defaultSettingsPath();
+  await mkdir(dirname(p), { recursive: true });
+  await Bun.write(p, JSON.stringify(settings, null, 2) + "\n");
 }
 
 /** Check if a hook array contains an entry whose command includes the given substring */
@@ -2120,8 +2127,8 @@ function hasInterceptHook(settings: Record<string, unknown>): boolean {
 // ── Exported hooks management functions ─────────────────────────────────────
 
 /** Returns "installed", "partial", or "not-installed" for safety hooks */
-export async function hooksStatus(repoPath: string): Promise<IbCommandResult> {
-  const settings = await readSettingsJson(repoPath);
+export async function hooksStatus(_repoPath: string, settingsPath?: string): Promise<IbCommandResult> {
+  const settings = await readSettingsJson(settingsPath);
   const hasMain = hasMainPathHook(settings);
   const hasStatus = hasStatusHooks(settings);
   const hasSession = hasSessionStartHook(settings);
@@ -2138,15 +2145,15 @@ export async function hooksStatus(repoPath: string): Promise<IbCommandResult> {
 }
 
 /** Returns "installed" or "not-installed" for the intercept hook */
-export async function interceptHooksStatus(repoPath: string): Promise<IbCommandResult> {
-  const settings = await readSettingsJson(repoPath);
+export async function interceptHooksStatus(_repoPath: string, settingsPath?: string): Promise<IbCommandResult> {
+  const settings = await readSettingsJson(settingsPath);
   const status = hasInterceptHook(settings) ? "installed" : "not-installed";
   return { ok: true, exitCode: 0, stdout: status, stderr: "" };
 }
 
 /** Install all safety hooks (path isolation + status injection + session-start). Idempotent. */
-export async function installSafetyHooks(repoPath: string): Promise<IbCommandResult> {
-  const settings = await readSettingsJson(repoPath);
+export async function installSafetyHooks(_repoPath: string, settingsPath?: string): Promise<IbCommandResult> {
+  const settings = await readSettingsJson(settingsPath);
   const hooks = ((settings.hooks as Record<string, unknown>) ?? {}) as Record<string, unknown>;
   settings.hooks = hooks;
 
@@ -2189,14 +2196,14 @@ export async function installSafetyHooks(repoPath: string): Promise<IbCommandRes
     return { ok: true, exitCode: 0, stdout: "Hooks already installed", stderr: "" };
   }
 
-  await writeSettingsJson(repoPath, settings);
-  return { ok: true, exitCode: 0, stdout: "Hooks installed to .claude/settings.local.json", stderr: "" };
+  await writeSettingsJson(settings, settingsPath);
+  return { ok: true, exitCode: 0, stdout: "Hooks installed to ~/.claude/settings.json", stderr: "" };
 }
 
 /** Uninstall all safety hooks (removes both ib and itsybitsy hook entries). Idempotent. */
-export async function uninstallSafetyHooks(repoPath: string): Promise<IbCommandResult> {
-  const settingsPath = join(repoPath, ".claude", "settings.local.json");
-  const file = Bun.file(settingsPath);
+export async function uninstallSafetyHooks(_repoPath: string, settingsPath?: string): Promise<IbCommandResult> {
+  const resolvedPath = settingsPath ?? defaultSettingsPath();
+  const file = Bun.file(resolvedPath);
   if (!(await file.exists().catch(() => false))) {
     return { ok: true, exitCode: 0, stdout: "No settings file found, nothing to uninstall", stderr: "" };
   }
@@ -2230,17 +2237,17 @@ export async function uninstallSafetyHooks(repoPath: string): Promise<IbCommandR
 
   // Delete file if settings is now empty, otherwise write back
   if (Object.keys(settings).length === 0) {
-    await rm(settingsPath).catch(() => {});
+    await rm(resolvedPath).catch(() => {});
     return { ok: true, exitCode: 0, stdout: "Hooks uninstalled, removed empty settings file", stderr: "" };
   }
 
-  await writeSettingsJson(repoPath, settings);
-  return { ok: true, exitCode: 0, stdout: "Hooks uninstalled from .claude/settings.local.json", stderr: "" };
+  await writeSettingsJson(settings, settingsPath);
+  return { ok: true, exitCode: 0, stdout: "Hooks uninstalled from ~/.claude/settings.json", stderr: "" };
 }
 
 /** Install task interception hook. Idempotent. */
-export async function installInterceptHook(repoPath: string): Promise<IbCommandResult> {
-  const settings = await readSettingsJson(repoPath);
+export async function installInterceptHook(_repoPath: string, settingsPath?: string): Promise<IbCommandResult> {
+  const settings = await readSettingsJson(settingsPath);
 
   if (hasInterceptHook(settings)) {
     return { ok: true, exitCode: 0, stdout: "Task interception hook already installed", stderr: "" };
@@ -2254,14 +2261,14 @@ export async function installInterceptHook(repoPath: string): Promise<IbCommandR
     hooks: [{ type: "command", command: "ib hooks intercept-task" }],
   });
 
-  await writeSettingsJson(repoPath, settings);
-  return { ok: true, exitCode: 0, stdout: "Task interception hook installed to .claude/settings.local.json", stderr: "" };
+  await writeSettingsJson(settings, settingsPath);
+  return { ok: true, exitCode: 0, stdout: "Task interception hook installed to ~/.claude/settings.json", stderr: "" };
 }
 
 /** Uninstall task interception hook. Idempotent. */
-export async function uninstallInterceptHook(repoPath: string): Promise<IbCommandResult> {
-  const settingsPath = join(repoPath, ".claude", "settings.local.json");
-  const file = Bun.file(settingsPath);
+export async function uninstallInterceptHook(_repoPath: string, settingsPath?: string): Promise<IbCommandResult> {
+  const resolvedPath = settingsPath ?? defaultSettingsPath();
+  const file = Bun.file(resolvedPath);
   if (!(await file.exists().catch(() => false))) {
     return { ok: true, exitCode: 0, stdout: "No settings file found, nothing to uninstall", stderr: "" };
   }
@@ -2280,12 +2287,12 @@ export async function uninstallInterceptHook(repoPath: string): Promise<IbComman
   }
 
   if (Object.keys(settings).length === 0) {
-    await rm(settingsPath).catch(() => {});
+    await rm(resolvedPath).catch(() => {});
     return { ok: true, exitCode: 0, stdout: "Task interception hook uninstalled, removed empty settings file", stderr: "" };
   }
 
-  await writeSettingsJson(repoPath, settings);
-  return { ok: true, exitCode: 0, stdout: "Task interception hook uninstalled from .claude/settings.local.json", stderr: "" };
+  await writeSettingsJson(settings, settingsPath);
+  return { ok: true, exitCode: 0, stdout: "Task interception hook uninstalled from ~/.claude/settings.json", stderr: "" };
 }
 
 /** Check if .ittybitty is in .gitignore */

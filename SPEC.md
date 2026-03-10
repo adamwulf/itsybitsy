@@ -493,22 +493,26 @@ itsybitsy installs hooks into each agent's `settings.local.json`, plus optional 
 | State | Action |
 |-------|--------|
 | `rate_limited` | No action (rate limiter handles itself) |
-| `running` with background tasks | No action (agent is still working) |
+| `running` with background tasks | No action (agent is still working). Detected by checking last 15 lines of tmux output for `⏵⏵.*· <digit>` pattern (Claude Code's background task footer). |
 | `unknown` or `running` (no bg tasks) | **Nudge** — debounced (5s), sends "Resume your work, or end with 'WAITING' or 'I HAVE COMPLETED THE GOAL'" via tmux |
 | `complete` with uncommitted changes | **Remind commit** — sends message telling agent to commit |
-| `complete` with manager | **Notify manager** — sends "[hook]: Your subtask <id> just completed" to manager's tmux |
+| `complete` with manager | **Notify manager** — sends "[hook]: Your subtask <id> just completed" to manager's tmux [^notify-mechanism] |
 | `complete` without manager, with unfinished children | **Remind children** — tells agent to merge/kill all sub-agents |
 | `complete` without manager, no children | No action |
 | `waiting` with manager | **Notify manager** — sends "[hook]: Your subtask <id> is now waiting for input" |
 | `waiting` without manager | No action |
 
-**Debounce mechanism**: A `last-nudge` file stores the unix timestamp of the last nudge. If less than 5 seconds have passed, the nudge is suppressed. When debounced, a delayed recheck is scheduled (5s later) via a background `bash -c "sleep 5 && ib hooks agent-status <id>"` process, using a `nudge-recheck` marker file to prevent duplicate rechecks.
+**Debounce mechanism**: A `last-nudge` file stores the unix timestamp of the last nudge. If less than 5 seconds have passed, the nudge is suppressed. When debounced, a delayed recheck is scheduled (5s later) via a background `bash -c "sleep 5 && rm -f <recheck-file> && ib hooks agent-status <id>"` process, using a `nudge-recheck` marker file to prevent duplicate rechecks. The marker file is removed just before the recheck call so subsequent debounces can schedule new rechecks.
+
+[^notify-mechanism]: **Bash/TS divergence.** The bash `ib` notifies managers via `ib send "$manager" "message"`, which resolves the manager's tmux session internally. The TS implementation reads the manager's `meta.json` directly to get `tmux_session` and sends via `tmux send-keys` without going through `ib send`. Same end result (tmux input to manager), different mechanism.
 
 ### 6.3 Session Start Hook
 
 **Command**: `ib hooks session-start`
 **Matcher**: (none — fires on SessionStart)
 **Hook type**: SessionStart
+
+**Input**: JSON from stdin with `cwd` field (falls back to `process.cwd()` if absent).
 
 **Role detection** based on CWD:
 - If CWD does not match `/.ittybitty/agents/<id>/repo` → **primary** (user-level Claude)
@@ -529,13 +533,14 @@ itsybitsy installs hooks into each agent's `settings.local.json`, plus optional 
 
 Intercepts Claude Code's Task tool and redirects it to spawn ib agents instead:
 
-1. **Only intercepts `Task` tool** — all other tools pass through
-2. **Skip for certain subagent_types**: `Bash`, `statusline-setup`, `claude-code-guide`, `meta-agent`, `ib-merge` pass through unintercepted
-3. **Model validation**: Only `sonnet`, `opus`, `haiku`, or empty string are allowed
-4. **Spawn behavior**:
+1. **Worker skip**: If called from a worker agent (detected via CWD + `meta.json`), passes through without interception — workers use native Task
+2. **Only intercepts `Task` tool** — all other tools pass through
+3. **Skip for certain subagent_types**: `Bash`, `statusline-setup`, `claude-code-guide`, `meta-agent`, `ib-merge` pass through unintercepted
+4. **Model validation**: Only `sonnet`, `opus`, `haiku`, or empty string are allowed
+5. **Spawn behavior**:
    - When called from an agent context: spawns a `--worker` with the calling agent as `--manager`
    - When called from primary Claude: spawns a manager (no `--worker`)
-5. **Output**: Rewrites the Task invocation to a `claude-code-guide` subagent that simply reports the spawned agent ID
+6. **Output**: Rewrites the Task invocation to a `claude-code-guide` subagent that simply reports the spawned agent ID
 
 This hook is only installed for manager agents (not workers), and only when the main repo's settings already have the intercept hook installed. Workers skip the intercept hook entirely and use the native Task tool directly (see §2.1). Note that `TaskCreate` (a separate tool from `Task`) is blocked for all agents by the path hook (§6.1).
 
@@ -545,15 +550,17 @@ This hook is only installed for manager agents (not workers), and only when the 
 **Matcher**: `*`
 **Hook type**: PermissionRequest
 
-Fires when Claude requests permission for a tool that isn't auto-allowed. Simply logs `[PermissionRequest] Tool denied: <tool-name>` to `agent.log`. Cannot override permissions — PermissionRequest hooks are informational only. Always exits 0 with no stdout output.
+Fires when Claude requests permission for a tool that isn't auto-allowed. Simply logs `[PermissionRequest] Tool denied: <tool-name>` to `agent.log`. Cannot override permissions — PermissionRequest hooks are informational only. Always exits 0 with no stdout output. [^callout-permission-denied]
+
+[^callout-permission-denied]: **Bash/TS divergence.** The bash `ib` does not have a handler for the `hook-permission-denied` subcommand — the command hits the "Unknown command" default case and exits 1 with an error to stderr. Since PermissionRequest hooks are informational only and Claude Code ignores non-zero exits from them, this means the bash version silently fails to log permission denials. The TS implementation properly handles the command and logs to `agent.log`.
 
 ### 6.6 Global Hooks (installed in ~/.claude/settings.json)
 
 These are optional hooks that the user installs globally:
 
-- **Main-path hook** (`ib hooks main-path`): PreToolUse hook on Bash matcher that prevents agents from operating outside their designated paths
-- **Intercept-task hook** (`ib hooks intercept-task`): PreToolUse hook on Task matcher (global version, enables task interception for all repos)
-- **Status injection hooks** (`ib hooks inject-status`): UserPromptSubmit and PostToolUse hooks that inject agent status information into the primary Claude's context
+- **Main-path hook** (`ib hooks main-path`): PreToolUse hook on `Bash` matcher that prevents the primary Claude from `cd`-ing into agent worktrees. Only checks Bash `cd` commands — allows Read/Write/Edit to worktree paths. Resolves relative paths via `cwd` from stdin JSON. Exits 0 (allow) or 2 (deny with JSON + stderr message).
+- **Intercept-task hook** (`ib hooks intercept-task`): PreToolUse hook on `Task` matcher (global version, enables task interception for all repos)
+- **Status injection hooks** (`ib hooks inject-status`): Two hooks — a UserPromptSubmit hook (no matcher, `--full --visible`) and a PostToolUse hook (`Bash|Task` matcher, `--if-changed --visible`). Skips injection when CWD is inside an agent worktree. Supports modes: `--full` (complete agent tree), `--brief` (one-liner summary), `--if-changed` (hash-compared, outputs brief only when changed). `--visible` adds a `systemMessage` field for user-visible status line.
 - **Session-start hook** (`ib hooks session-start`): SessionStart hook that injects ittybitty context
 
 Install/uninstall commands modify `~/.claude/settings.json` directly. [^hooks-install-location]

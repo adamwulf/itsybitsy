@@ -10,7 +10,8 @@
         "Skill",
         "Bash(wc:*)",
         "Bash(git blame:*)",
-        "Bash(git log:*)"
+        "Bash(git log:*)",
+        "Bash(which:*)"
       ],
       "deny": []
     },

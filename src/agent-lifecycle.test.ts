@@ -285,6 +285,48 @@ describe("agent-lifecycle", () => {
       expect(result).toBe("/repos/myproject");
     });
 
+    test("resolves worktree with relative commonDir to absolute root", async () => {
+      setSpawnRunner((cmd: string[]) => {
+        const cmdStr = cmd.join(" ");
+        let stdout = "";
+        if (cmdStr.includes("--git-common-dir")) {
+          // Worktree: commonDir is relative path back to main repo's .git
+          stdout = "../../.git";
+        } else if (cmdStr.includes("--git-dir")) {
+          stdout = "/repos/myproject/.git/worktrees/my-worktree";
+        }
+        return {
+          stdout: new Response(stdout).body!,
+          stderr: new Response("").body!,
+          exited: Promise.resolve(0),
+        } as SpawnResult;
+      });
+
+      // repoPath is the worktree; "../../.git" resolves relative to it
+      const result = await resolveGitRoot("/repos/myproject/worktrees/my-worktree");
+      expect(result).toBe("/repos/myproject");
+    });
+
+    test("resolves worktree with absolute commonDir", async () => {
+      setSpawnRunner((cmd: string[]) => {
+        const cmdStr = cmd.join(" ");
+        let stdout = "";
+        if (cmdStr.includes("--git-common-dir")) {
+          stdout = "/repos/myproject/.git";
+        } else if (cmdStr.includes("--git-dir")) {
+          stdout = "/repos/myproject/.git/worktrees/my-worktree";
+        }
+        return {
+          stdout: new Response(stdout).body!,
+          stderr: new Response("").body!,
+          exited: Promise.resolve(0),
+        } as SpawnResult;
+      });
+
+      const result = await resolveGitRoot("/some/worktree/path");
+      expect(result).toBe("/repos/myproject");
+    });
+
     test("returns null for non-git directory", async () => {
       setSpawnRunner(() => ({
         stdout: new Response("").body!,

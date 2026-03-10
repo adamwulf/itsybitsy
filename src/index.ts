@@ -604,19 +604,13 @@ async function main() {
           break;
         }
         case "main-path": {
-          const agentId = process.env.IB_AGENT_ID;
-          if (!agentId) process.exit(0);
-          if (!isValidAgentId(agentId)) { console.error("Invalid agent ID"); process.exit(1); }
-          const { hookCheckPath } = await import("./hooks/agent-path");
-          await hookCheckPath(agentId);
+          const { hookMainPath } = await import("./hooks/main-path");
+          await hookMainPath();
           break;
         }
         case "inject-status": {
-          const agentId = process.env.IB_AGENT_ID;
-          if (!agentId) process.exit(0);
-          if (!isValidAgentId(agentId)) { console.error("Invalid agent ID"); process.exit(1); }
-          const { hookStatus } = await import("./hooks/agent-status");
-          await hookStatus(agentId);
+          const { hookInjectStatus } = await import("./hooks/inject-status");
+          await hookInjectStatus();
           break;
         }
         case "install": {

@@ -118,7 +118,7 @@ After any code changes, always run:
 
 ## itsybitsy Implementation Notes
 
-All 6 phases complete. 873 tests across 25 files.
+All 6 phases complete. 881 tests across 25 files.
 
 ### State detection flow
 1. `watcher.ts` calls `detectAgentStates()` (in `agents.ts`) on every refresh
@@ -190,7 +190,9 @@ Builds the navigable item list for the add-repo folder browser dialog. Given a c
 ### ib-commands (src/ib-commands.ts)
 - Mutations are implemented natively. `runIb()` and `IbRunner` have been deleted. `hooksStatus`, `installSafetyHooks`, `uninstallSafetyHooks`, `installInterceptHook`, `uninstallInterceptHook`, `interceptHooksStatus` are natively implemented — they read/write `.claude/settings.local.json` directly.
 - Always sets `cwd` to `agent.repoPath` — ib requires running from a git repo root
-- Commands: killAgent, nukeAgent, resumeAgent, reassignAgent, mergeCheckAgent, mergeAgent, sendMessage, newAgent, diffAgent, statusAgent, acknowledgeQuestion
+- Commands: killAgent, nukeAgent, nukeAllAgents, pauseAgent, resumeAgent, reassignAgent, mergeCheckAgent, mergeAgent, sendMessage, newAgent, diffAgent, statusAgent, acknowledgeQuestion
+- `nukeAllAgents(repoPath)` — kills and archives all agents in a repo, plus cleans orphaned tmux sessions
+- `pauseAgent(agent)` — stops a running agent by killing its Claude process and tmux session without archiving
 
 ### Dialog system (in dashboard.ts)
 - 6 dialog types: `confirm`, `input`, `select`, `message`, `fuzzy`, `help`

@@ -1254,11 +1254,11 @@ async function buildAgentSettings(
     }
   }
 
-  const hookCmd = `itsybitsy hook-permission-denied ${agentId}`;
+  const hookCmd = `ib hook-permission-denied ${agentId}`;
 
   // Build PreToolUse hooks
   const preToolUseHooks: unknown[] = [
-    { matcher: "*", hooks: [{ type: "command", command: `itsybitsy hook-check-path ${agentId}` }] },
+    { matcher: "*", hooks: [{ type: "command", command: `ib hook-check-path ${agentId}` }] },
   ];
   if (addIntercept) {
     preToolUseHooks.push(
@@ -1273,7 +1273,7 @@ async function buildAgentSettings(
       deny: allDeny,
     },
     hooks: {
-      Stop: [{ matcher: "*", hooks: [{ type: "command", command: `itsybitsy hook-status ${agentId}` }] }],
+      Stop: [{ matcher: "*", hooks: [{ type: "command", command: `ib hook-status ${agentId}` }] }],
       PermissionRequest: [{ matcher: "*", hooks: [{ type: "command", command: hookCmd }] }],
       PreToolUse: preToolUseHooks,
       SessionStart: [{ hooks: [{ type: "command", command: "ib hooks session-start" }] }],

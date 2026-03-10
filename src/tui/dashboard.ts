@@ -188,6 +188,7 @@ class StatusBarComponent implements Component {
   pendingQuestions = 0;
   errorCount = 0;
   usage: UsageData | null = null;
+  usageError = false;
   version = "";
   repoHeaderSelected = false;
 
@@ -232,7 +233,10 @@ class StatusBarComponent implements Component {
   }
 
   private formatUsage(): string {
-    if (!this.usage) return "";
+    const prefix = this.usageError ? "⚠️  " : "";
+    if (!this.usage) {
+      return this.usageError ? `${YELLOW}⚠️  usage unavailable${RESET}` : "";
+    }
     const parts: string[] = [];
     if (this.usage.sessionPct !== null) {
       const pct = this.usage.sessionPct;
@@ -246,7 +250,8 @@ class StatusBarComponent implements Component {
       const reset = this.usage.weeklyReset ? ` (${this.usage.weeklyReset})` : "";
       parts.push(`${color}weekly:${pct}%${reset}${RESET}`);
     }
-    return parts.length > 0 ? parts.join("  ") : "";
+    if (parts.length === 0) return "";
+    return prefix + parts.join("  ");
   }
 }
 
@@ -469,7 +474,7 @@ export class DashboardComponent implements Component {
   startPolling() {
     this.tmuxPoller.start();
     this.refreshUsage();
-    this.usageTimer = setInterval(() => this.refreshUsage(), 60_000);
+    this.usageTimer = setInterval(() => this.refreshUsage(), 180_000);
     // Spawn standalone watchdog as background process if not already running
     if (!isWatchdogRunning()) {
       try {
@@ -497,12 +502,14 @@ export class DashboardComponent implements Component {
 
   private refreshUsage() {
     fetchUsage()
-      .then((data) => {
-        this.statusBar.usage = data;
+      .then((result) => {
+        this.statusBar.usage = result.data;
+        this.statusBar.usageError = result.error;
         this.tui?.requestRender();
       })
       .catch(() => {
-        // Silently ignore usage fetch errors
+        this.statusBar.usageError = true;
+        this.tui?.requestRender();
       });
   }
 

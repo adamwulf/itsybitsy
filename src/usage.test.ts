@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { formatResetTime, parseUsageResponse, fetchUsage, setTestDir, resetTestDir, setTestFetch, resetTestFetch, setTestSpawn, resetTestSpawn } from "./usage";
+import { formatResetTime, parseUsageResponse, fetchUsage, setTestDir, resetTestDir, setTestFetch, resetTestFetch, setTestSpawn, resetTestSpawn, type UsageResult } from "./usage";
 import { join } from "path";
 import { mkdtemp, rm, writeFile } from "fs/promises";
 import { tmpdir } from "os";
@@ -149,14 +149,30 @@ describe("fetchUsage", () => {
     const result = await fetchUsage();
 
     expect(fetchCalled).toBe(false);
-    expect(result).not.toBeNull();
-    expect(result!.sessionPct).toBe(42);
-    expect(result!.weeklyPct).toBe(25);
+    expect(result.error).toBe(false);
+    expect(result.data).not.toBeNull();
+    expect(result.data!.sessionPct).toBe(42);
+    expect(result.data!.weeklyPct).toBe(25);
+  });
+
+  test("cache is still fresh at 2 minutes (within 3-minute TTL)", async () => {
+    // Cache timestamp 2 minutes ago — should still be fresh with 180s TTL
+    const twoMinAgo = Math.floor(Date.now() / 1000) - 120;
+    await writeTestCache(twoMinAgo, apiResponse);
+    let fetchCalled = false;
+    setTestFetch((async () => { fetchCalled = true; return { ok: true, json: async () => ({}) }; }) as any);
+
+    const result = await fetchUsage();
+
+    expect(fetchCalled).toBe(false);
+    expect(result.error).toBe(false);
+    expect(result.data).not.toBeNull();
+    expect(result.data!.sessionPct).toBe(42);
   });
 
   test("fetches from API when cache is stale", async () => {
-    // Cache timestamp 2 minutes ago (stale, since TTL is 60s)
-    const staleSec = Math.floor(Date.now() / 1000) - 120;
+    // Cache timestamp 4 minutes ago (stale, since TTL is 180s)
+    const staleSec = Math.floor(Date.now() / 1000) - 240;
     await writeTestCache(staleSec, apiResponse);
     await writeCredentials();
 
@@ -168,21 +184,23 @@ describe("fetchUsage", () => {
 
     const result = await fetchUsage();
 
-    expect(result).not.toBeNull();
-    expect(result!.sessionPct).toBe(80);
-    expect(result!.weeklyPct).toBe(50);
+    expect(result.error).toBe(false);
+    expect(result.data).not.toBeNull();
+    expect(result.data!.sessionPct).toBe(80);
+    expect(result.data!.weeklyPct).toBe(50);
   });
 
-  test("returns null when no token available and no cache", async () => {
+  test("returns error when no token available and no cache", async () => {
     // No credentials file, no cache
     setTestFetch((async () => { throw new Error("should not be called"); }) as any);
 
     const result = await fetchUsage();
-    expect(result).toBeNull();
+    expect(result.data).toBeNull();
+    expect(result.error).toBe(true);
   });
 
   test("returns stale cache when locked", async () => {
-    const staleSec = Math.floor(Date.now() / 1000) - 120;
+    const staleSec = Math.floor(Date.now() / 1000) - 240;
     await writeTestCache(staleSec, apiResponse);
     await writeCredentials();
     // Create a fresh lock file
@@ -194,29 +212,32 @@ describe("fetchUsage", () => {
     const result = await fetchUsage();
 
     expect(fetchCalled).toBe(false);
-    expect(result).not.toBeNull();
-    expect(result!.sessionPct).toBe(42);
+    expect(result.error).toBe(false);
+    expect(result.data).not.toBeNull();
+    expect(result.data!.sessionPct).toBe(42);
   });
 
-  test("returns null when locked and no cache", async () => {
+  test("returns error when locked and no cache", async () => {
     await writeCredentials();
     await writeFile(join(tmpDir, "usage.lock"), "");
 
     const result = await fetchUsage();
-    expect(result).toBeNull();
+    expect(result.data).toBeNull();
+    expect(result.error).toBe(true);
   });
 
   test("handles non-ok response with existing cache (backoff)", async () => {
-    const staleSec = Math.floor(Date.now() / 1000) - 120;
+    const staleSec = Math.floor(Date.now() / 1000) - 240;
     await writeTestCache(staleSec, apiResponse);
     await writeCredentials();
     mockFetch({}, false, 500);
 
     const result = await fetchUsage();
 
-    // Should return stale cache data
-    expect(result).not.toBeNull();
-    expect(result!.sessionPct).toBe(42);
+    // Should return stale cache data with error flag
+    expect(result.error).toBe(true);
+    expect(result.data).not.toBeNull();
+    expect(result.data!.sessionPct).toBe(42);
 
     // Verify cache was rewritten with backoff timestamp
     const cacheFile = Bun.file(join(tmpDir, "usage-cache.json"));
@@ -226,45 +247,49 @@ describe("fetchUsage", () => {
     expect(updatedCache.timestamp).toBeGreaterThan(staleSec);
   });
 
-  test("returns null on non-ok response with no cache", async () => {
+  test("returns error on non-ok response with no cache", async () => {
     await writeCredentials();
     mockFetch({}, false, 500);
 
     const result = await fetchUsage();
-    expect(result).toBeNull();
+    expect(result.data).toBeNull();
+    expect(result.error).toBe(true);
   });
 
   test("handles API error field in response body", async () => {
-    const staleSec = Math.floor(Date.now() / 1000) - 120;
+    const staleSec = Math.floor(Date.now() / 1000) - 240;
     await writeTestCache(staleSec, apiResponse);
     await writeCredentials();
     mockFetch({ error: "something went wrong" });
 
     const result = await fetchUsage();
 
-    // Should return stale cache
-    expect(result).not.toBeNull();
-    expect(result!.sessionPct).toBe(42);
+    // Should return stale cache with error flag
+    expect(result.error).toBe(true);
+    expect(result.data).not.toBeNull();
+    expect(result.data!.sessionPct).toBe(42);
   });
 
   test("handles network error with stale cache", async () => {
-    const staleSec = Math.floor(Date.now() / 1000) - 120;
+    const staleSec = Math.floor(Date.now() / 1000) - 240;
     await writeTestCache(staleSec, apiResponse);
     await writeCredentials();
     setTestFetch((async () => { throw new Error("network error"); }) as any);
 
     const result = await fetchUsage();
 
-    expect(result).not.toBeNull();
-    expect(result!.sessionPct).toBe(42);
+    expect(result.error).toBe(true);
+    expect(result.data).not.toBeNull();
+    expect(result.data!.sessionPct).toBe(42);
   });
 
-  test("returns null on network error with no cache", async () => {
+  test("returns error on network error with no cache", async () => {
     await writeCredentials();
     setTestFetch((async () => { throw new Error("network error"); }) as any);
 
     const result = await fetchUsage();
-    expect(result).toBeNull();
+    expect(result.data).toBeNull();
+    expect(result.error).toBe(true);
   });
 
   test("successful fetch writes cache and cleans up lock", async () => {
@@ -273,8 +298,9 @@ describe("fetchUsage", () => {
 
     const result = await fetchUsage();
 
-    expect(result).not.toBeNull();
-    expect(result!.sessionPct).toBe(42);
+    expect(result.error).toBe(false);
+    expect(result.data).not.toBeNull();
+    expect(result.data!.sessionPct).toBe(42);
 
     // Cache should exist
     const cacheFile = Bun.file(join(tmpDir, "usage-cache.json"));
@@ -289,7 +315,7 @@ describe("fetchUsage", () => {
   });
 
   test("backoff increases on repeated errors", async () => {
-    const staleSec = Math.floor(Date.now() / 1000) - 120;
+    const staleSec = Math.floor(Date.now() / 1000) - 240;
     // Simulate prior backoff of 120s
     await writeTestCache(staleSec, apiResponse, 120_000);
     await writeCredentials();
@@ -303,7 +329,7 @@ describe("fetchUsage", () => {
   });
 
   test("backoff caps at MAX_BACKOFF_MS (10 minutes)", async () => {
-    const staleSec = Math.floor(Date.now() / 1000) - 120;
+    const staleSec = Math.floor(Date.now() / 1000) - 240;
     // Already at max backoff
     await writeTestCache(staleSec, apiResponse, 600_000);
     await writeCredentials();
@@ -365,8 +391,8 @@ describe("readAccessToken keychain fallback", () => {
 
     const result = await fetchUsage();
 
-    expect(result).not.toBeNull();
-    expect(result!.sessionPct).toBe(42);
+    expect(result.data).not.toBeNull();
+    expect(result.data!.sessionPct).toBe(42);
   });
 
   test("uses raw keychain value as token when not JSON", async () => {
@@ -376,8 +402,8 @@ describe("readAccessToken keychain fallback", () => {
 
     const result = await fetchUsage();
 
-    expect(result).not.toBeNull();
-    expect(result!.sessionPct).toBe(42);
+    expect(result.data).not.toBeNull();
+    expect(result.data!.sessionPct).toBe(42);
   });
 
   test("uses raw keychain value as token when JSON is malformed", async () => {
@@ -389,8 +415,8 @@ describe("readAccessToken keychain fallback", () => {
     const result = await fetchUsage();
 
     // The raw string "{invalid json" is used as token, so API call proceeds
-    expect(result).not.toBeNull();
-    expect(result!.sessionPct).toBe(42);
+    expect(result.data).not.toBeNull();
+    expect(result.data!.sessionPct).toBe(42);
   });
 
   test("returns null when keychain command fails (non-zero exit)", async () => {
@@ -399,7 +425,7 @@ describe("readAccessToken keychain fallback", () => {
 
     const result = await fetchUsage();
 
-    expect(result).toBeNull();
+    expect(result.data).toBeNull();
   });
 
   test("returns null when keychain returns JSON without token field", async () => {
@@ -410,7 +436,7 @@ describe("readAccessToken keychain fallback", () => {
     const result = await fetchUsage();
 
     // JSON parsed OK but no claudeAiOauth.accessToken, so token is undefined → null
-    expect(result).toBeNull();
+    expect(result.data).toBeNull();
   });
 
   test("returns null when keychain returns empty output", async () => {
@@ -419,7 +445,7 @@ describe("readAccessToken keychain fallback", () => {
 
     const result = await fetchUsage();
 
-    expect(result).toBeNull();
+    expect(result.data).toBeNull();
   });
 
   test("returns null when spawn throws (keychain not available)", async () => {
@@ -430,7 +456,7 @@ describe("readAccessToken keychain fallback", () => {
 
     const result = await fetchUsage();
 
-    expect(result).toBeNull();
+    expect(result.data).toBeNull();
   });
 
   test("prefers credentials file over keychain", async () => {
@@ -453,8 +479,8 @@ describe("readAccessToken keychain fallback", () => {
     const result = await fetchUsage();
 
     expect(spawnCalled).toBe(false);
-    expect(result).not.toBeNull();
-    expect(result!.sessionPct).toBe(42);
+    expect(result.data).not.toBeNull();
+    expect(result.data!.sessionPct).toBe(42);
   });
 
   test("falls through to keychain when credentials file has empty token", async () => {
@@ -468,8 +494,8 @@ describe("readAccessToken keychain fallback", () => {
 
     const result = await fetchUsage();
 
-    expect(result).not.toBeNull();
-    expect(result!.sessionPct).toBe(42);
+    expect(result.data).not.toBeNull();
+    expect(result.data!.sessionPct).toBe(42);
   });
 
   test("falls through to keychain when credentials file has no claudeAiOauth field", async () => {
@@ -483,8 +509,8 @@ describe("readAccessToken keychain fallback", () => {
 
     const result = await fetchUsage();
 
-    expect(result).not.toBeNull();
-    expect(result!.sessionPct).toBe(42);
+    expect(result.data).not.toBeNull();
+    expect(result.data!.sessionPct).toBe(42);
   });
 
   test("falls through to keychain when credentials file has non-string accessToken", async () => {
@@ -498,8 +524,8 @@ describe("readAccessToken keychain fallback", () => {
 
     const result = await fetchUsage();
 
-    expect(result).not.toBeNull();
-    expect(result!.sessionPct).toBe(42);
+    expect(result.data).not.toBeNull();
+    expect(result.data!.sessionPct).toBe(42);
   });
 
   test("returns null when keychain returns JSON with empty accessToken", async () => {
@@ -509,7 +535,7 @@ describe("readAccessToken keychain fallback", () => {
 
     const result = await fetchUsage();
 
-    expect(result).toBeNull();
+    expect(result.data).toBeNull();
   });
 
   test("returns null when keychain returns whitespace-only output", async () => {
@@ -518,6 +544,6 @@ describe("readAccessToken keychain fallback", () => {
 
     const result = await fetchUsage();
 
-    expect(result).toBeNull();
+    expect(result.data).toBeNull();
   });
 });

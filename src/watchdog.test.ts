@@ -376,7 +376,7 @@ describe("watchdog", () => {
         setSendSpawnRunner(spawnMock.runner);
         setWatchdogSpawnRunner(spawnMock.runner);
         // For rate_limited, provide a mock fetchUsage that returns high usage
-        setWatchdogFetchUsage(async () => ({ sessionPct: 80, weeklyPct: 50, sessionReset: "1h", weeklyReset: "2d" }));
+        setWatchdogFetchUsage(async () => ({ data: { sessionPct: 80, weeklyPct: 50, sessionReset: "1h", weeklyReset: "2d" }, error: false }));
 
         const tracker = getTracker("a1");
         tracker.waitCounter = 10;
@@ -734,7 +734,7 @@ describe("watchdog", () => {
 
   describe("rate_limited handler", () => {
     test("sends Enter to tmux on first detection", async () => {
-      setWatchdogFetchUsage(async () => ({ sessionPct: 80, weeklyPct: 50, sessionReset: "1h", weeklyReset: "2d" }));
+      setWatchdogFetchUsage(async () => ({ data: { sessionPct: 80, weeklyPct: 50, sessionReset: "1h", weeklyReset: "2d" }, error: false }));
 
       const a1 = agent("a1", "rate_limited");
       await tick([a1]);
@@ -747,7 +747,7 @@ describe("watchdog", () => {
     });
 
     test("does not re-send Enter on subsequent ticks", async () => {
-      setWatchdogFetchUsage(async () => ({ sessionPct: 80, weeklyPct: 50, sessionReset: "1h", weeklyReset: "2d" }));
+      setWatchdogFetchUsage(async () => ({ data: { sessionPct: 80, weeklyPct: 50, sessionReset: "1h", weeklyReset: "2d" }, error: false }));
 
       const a1 = agent("a1", "rate_limited");
       await tick([a1]);
@@ -764,7 +764,7 @@ describe("watchdog", () => {
     });
 
     test("nudges agent when usage drops below 5% threshold", async () => {
-      setWatchdogFetchUsage(async () => ({ sessionPct: 3, weeklyPct: 30, sessionReset: "now", weeklyReset: "2d" }));
+      setWatchdogFetchUsage(async () => ({ data: { sessionPct: 3, weeklyPct: 30, sessionReset: "now", weeklyReset: "2d" }, error: false }));
 
       const a1 = agent("a1", "rate_limited");
       await tick([a1]);
@@ -778,7 +778,7 @@ describe("watchdog", () => {
     });
 
     test("does not nudge when usage is still high", async () => {
-      setWatchdogFetchUsage(async () => ({ sessionPct: 50, weeklyPct: 30, sessionReset: "1h", weeklyReset: "2d" }));
+      setWatchdogFetchUsage(async () => ({ data: { sessionPct: 50, weeklyPct: 30, sessionReset: "1h", weeklyReset: "2d" }, error: false }));
 
       const a1 = agent("a1", "rate_limited");
       const tracker = getTracker("a1");
@@ -794,7 +794,7 @@ describe("watchdog", () => {
     });
 
     test("handles null usage gracefully", async () => {
-      setWatchdogFetchUsage(async () => null);
+      setWatchdogFetchUsage(async () => ({ data: null, error: true }));
 
       const a1 = agent("a1", "rate_limited");
       const tracker = getTracker("a1");
@@ -810,7 +810,7 @@ describe("watchdog", () => {
     });
 
     test("resets wait counters", async () => {
-      setWatchdogFetchUsage(async () => ({ sessionPct: 80, weeklyPct: 50, sessionReset: "1h", weeklyReset: "2d" }));
+      setWatchdogFetchUsage(async () => ({ data: { sessionPct: 80, weeklyPct: 50, sessionReset: "1h", weeklyReset: "2d" }, error: false }));
 
       const a1 = agent("a1", "rate_limited");
       const tracker = getTracker("a1");

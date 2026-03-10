@@ -63,8 +63,8 @@ Agents can be in one of 8 states:
 |-------|-------------|
 | `creating` | Claude is initializing — permission screens showing, or tmux output has too few lines and no startup markers |
 | `running` | Actively executing — tool calls, thinking spinners, or interrupt markers visible |
-| `waiting` | Idle — explicit `WAITING` keyword, or tool-level "⎿ Waiting" indicator |
-| `complete` | Agent output contains `I HAVE COMPLETED THE GOAL` (unquoted) in last 15 lines |
+| `waiting` | Idle — explicit `WAITING` keyword, or tool-level "⎿ Waiting" indicator. Note: these are semantically different (agent idle vs tool executing) but intentionally map to the same state. |
+| `complete` | Agent output contains `I HAVE COMPLETED THE GOAL` not inside single-quoted strings, in last 15 lines |
 | `compacting` | Context window compaction in progress ("Compacting conversation" in last 5 lines) |
 | `rate_limited` | Hit API rate limits — "rate_limit_error", "usage limit reached", "hit your limit", etc. |
 | `stopped` | Tmux session does not exist, or agent is archived |
@@ -78,16 +78,18 @@ State detection follows this flow:
 
 2. **Missing tmux session** → `stopped`.
 
-3. **Pre-parseState check**: If the tmux output has fewer than 10 non-empty lines AND no startup markers (`"Claude Code v"`, `"[USER TASK]"`, `"╭─ Claude Code"`, `"[AGENT CONTEXT]"`), the state is `creating`.
+3. **Pre-parseState check**: If the tmux output has fewer than 10 non-empty lines AND no startup markers (`"Claude Code v"`, `"[USER TASK]"`, `"╭─ Claude Code"`, `"[AGENT CONTEXT]"`), the state is `creating`. This handles the early startup case before enough output exists for pattern matching. Priority 1 below handles the case where there ARE enough lines but startup markers are still absent (e.g., a workspace trust prompt is showing on a fresh screen).
 
 4. **parseState priority order** (checked top-to-bottom, first match wins):
 
    | Priority | Window | Pattern | State |
    |----------|--------|---------|-------|
-   | 1 | Full input | Permission prompt without startup markers | `creating` |
+   | 1 | Full input | Workspace trust/import prompts ("Do you trust the files", "trust this folder", "Allow external CLAUDE.md") present AND no startup markers found anywhere in output | `creating` |
    | 2 | Last 5 lines | "Compacting conversation" | `compacting` |
    | 3 | Last 5 lines | `(Esc to interrupt`, `(ctrl+c to interrupt`, `⎿  Running` | `running` |
    | 4 | Last 15 lines | `⎿  Waiting` (tool waiting) | `waiting` |
+
+   > **Note**: The bash reference implementation checks tool waiting (priority 4) before active running (priority 3). The TypeScript reimplementation intentionally reverses this order so that active execution indicators in very recent output (last 5 lines) take precedence over tool waiting in the broader window (last 15 lines). Both orderings are valid; implementers should document which they choose.
    | 5 | Last 15 lines | `rate_limit_error` or usage limit phrases (case-insensitive) | `rate_limited` |
    | 6 | Last 15 lines | Unquoted `I HAVE COMPLETED THE GOAL` | `complete` |
    | 7 | Last 15 lines | Standalone `WAITING` on its own line (unless ⏺ appears after it = stale) | `waiting` |
@@ -160,7 +162,7 @@ Archive moves agent artifacts to `.ittybitty/archive/<YYYYMMDD-HHMMSS>-<agent-id
 Nuke (`ib nuke <id>`) recursively kills a manager and all its descendants:
 
 1. Collect all descendant agent IDs via depth-first traversal of manager relationships
-2. Worker agents with no children cannot be nuked (use `kill` instead)
+2. Worker agents cannot be nuked (use `kill` instead) — only managers with descendants are nuke targets
 3. For each descendant: remove questions, teardown (same sequence as kill)
 4. Clean up orphaned tmux sessions (sessions with `ittybitty-` prefix that don't match any remaining agent)
 5. Scan and kill orphaned Claude processes
@@ -191,7 +193,7 @@ When building `settings.local.json` for an agent, permissions come from three so
 
 1. **Existing base settings**: From the root repo's `.claude/settings.local.json`
 2. **Mandatory permissions** (always added for all agents):
-   - `Bash(ib:*)` — ib commands
+   - `Bash(ib:*)`, `Bash(./ib:*)` — ib commands (both forms to handle PATH vs relative invocation)
    - `Bash(git status:*)`, `Bash(git add:*)`, `Bash(git commit:*)`, `Bash(git diff:*)`, `Bash(git show:*)`, `Bash(git log:*)`, `Bash(git ls-files:*)`, `Bash(git grep:*)`, `Bash(git rm:*)`, `Bash(git merge:*)`, `Bash(git rebase:*)`, `Bash(git checkout:*)`, `Bash(git restore:*)`, `Bash(git reset:*)` — git operations
    - `Bash(pwd:*)`, `Bash(ls:*)`, `Bash(head:*)`, `Bash(tail:*)`, `Bash(cat:*)`, `Bash(grep:*)` — filesystem inspection
    - `Read`, `Write`, `Edit`, `MultiEdit`, `Glob`, `Grep`, `LS`, `TodoWrite`, `Task`, `TaskOutput`, `KillShell`, `NotebookEdit`, `WebFetch`, `WebSearch`, `AskUserQuestion` — Claude Code tools
@@ -503,15 +505,14 @@ itsybitsy installs five hooks into each agent's `settings.local.json`, plus opti
 Intercepts Claude Code's Task tool and redirects it to spawn ib agents instead:
 
 1. **Only intercepts `Task` tool** — all other tools pass through
-2. **Skip for workers** — worker agents' Task calls are not intercepted (they're blocked by the path hook's TaskCreate denial instead)
-3. **Skip for certain subagent_types**: `Bash`, `statusline-setup`, `claude-code-guide`, `meta-agent`, `ib-merge` pass through unintercepted
-4. **Model validation**: Only `sonnet`, `opus`, `haiku`, or empty string are allowed
-5. **Spawn behavior**:
+2. **Skip for certain subagent_types**: `Bash`, `statusline-setup`, `claude-code-guide`, `meta-agent`, `ib-merge` pass through unintercepted
+3. **Model validation**: Only `sonnet`, `opus`, `haiku`, or empty string are allowed
+4. **Spawn behavior**:
    - When called from an agent context: spawns a `--worker` with the calling agent as `--manager`
    - When called from primary Claude: spawns a manager (no `--worker`)
-6. **Output**: Rewrites the Task invocation to a `claude-code-guide` subagent that simply reports the spawned agent ID
+5. **Output**: Rewrites the Task invocation to a `claude-code-guide` subagent that simply reports the spawned agent ID
 
-This hook is only installed for manager agents, and only when the main repo's settings already have the intercept hook installed.
+This hook is only installed for manager agents (not workers), and only when the main repo's settings already have the intercept hook installed. Workers' Task calls are instead blocked by the path hook's TaskCreate denial (§6.1).
 
 ### 6.5 Permission Denied Hook (PermissionRequest)
 
@@ -618,7 +619,24 @@ Reads Claude transcript JSONL files to determine context window usage percentage
 
 ### 8.5 Watchdog
 
-`ib watchdog <id>` runs in the background for agents with a manager. It monitors the agent for issues (rate limits, context compaction needs) and takes corrective action.
+`ib watchdog <id>` runs as a background loop for agents with a manager, polling agent state every 5 seconds. It continues running while the agent's worktree directory exists.
+
+**Monitoring behaviors by state:**
+
+| State | Action |
+|-------|--------|
+| `waiting` | Increment waiting counter. When counter reaches the notification threshold, notify manager: "[watchdog]: Your subtask <id> recently started waiting for input". Uses exponential backoff: initial threshold 30s (6 polls), doubles after each notification, capped at 64 minutes. |
+| `complete` | Notify manager once: "[watchdog]: Your subtask <id> recently completed". Sets a flag to prevent duplicate notifications. Flag resets if agent returns to `running`. |
+| `unknown` | Treat like `waiting` — increment counter with same exponential backoff. Also saves a debug capture of tmux output to `debug-logs/watchdog-<epoch>-unknown.txt`. |
+| `rate_limited` | Attempt to bypass the rate limit dialog. Then poll Claude's usage API; when session usage drops below 5%, send nudge: "[watchdog]: Usage has refreshed (<pct>%). Please continue your task." |
+| `running` | Reset waiting counter and notification interval. Clear completion flag if previously set. |
+| `creating` | Treat as running — reset counters. |
+| `compacting` | No action — wait for completion. |
+| `stopped` | Reset counters. |
+
+**Auto-compact**: If `autoCompactThreshold` is configured, the watchdog also checks the agent's context window usage on each poll. When usage exceeds the threshold and the agent is not currently compacting, sends `/compact` to the agent's tmux session. The compact flag resets when compacting completes.
+
+**Quiet mode** (`--quiet`): Allows monitoring agents without managers. All notifications are logged but not sent.
 
 ### 8.6 Root Repo Resolution
 

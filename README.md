@@ -13,25 +13,34 @@ A cross-repo agent management dashboard for [ittybitty (`ib`)](https://github.co
 ```sh
 git clone <repo-url> && cd itsybitsy
 bun install
-bun run build
-cp itsybitsy /usr/local/bin/  # or anywhere on your PATH
+bun build --compile --minify --sourcemap index.ts --outfile ib
+```
+
+Then add it to your PATH:
+
+```sh
+# Option 1: Add the project directory to your PATH (in ~/.bash_profile or ~/.zshrc)
+export PATH=$PATH:$HOME/Developer/bun/itsybitsy
+
+# Option 2: Install system-wide
+sudo cp ib /usr/local/bin/ib
 ```
 
 ## Usage
 
 ```sh
 # Register repos to monitor
-itsybitsy add /path/to/project
-itsybitsy add                  # adds current directory
+ib add /path/to/project
+ib add                  # adds current directory
 
 # List registered repos
-itsybitsy list
+ib list
 
 # Unregister a repo
-itsybitsy remove /path/to/project
+ib remove /path/to/project
 
 # Launch the dashboard
-itsybitsy watch
+ib watch
 ```
 
 ## Architecture

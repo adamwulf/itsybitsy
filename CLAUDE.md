@@ -118,13 +118,17 @@ To compile itsybitsy into a standalone executable:
 bun build --compile --minify --sourcemap index.ts --outfile ib
 ```
 
-This produces a single `ib` binary with no runtime dependencies. To install system-wide:
+This produces a single `ib` binary with no runtime dependencies. To add it to your PATH:
 
 ```sh
+# Option 1: Add the project directory to your PATH (in ~/.bash_profile or ~/.zshrc)
+export PATH=$PATH:$HOME/Developer/bun/itsybitsy
+
+# Option 2: Install system-wide
 sudo cp ib /usr/local/bin/ib
 ```
 
-The binary can then be used as `ib` instead of `bun index.ts`. Hook commands like `itsybitsy hooks main-path` reference the binary by its installed name.
+The binary can then be used as `ib` instead of `bun index.ts`. Hook commands like `ib hooks main-path` reference the binary by its installed name.
 
 ## Code Quality Requirements
 

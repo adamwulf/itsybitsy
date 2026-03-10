@@ -3153,7 +3153,7 @@ describe("hooks round-trip", () => {
 
   test("uninstallSafetyHooks removes legacy itsybitsy-prefixed hooks", async () => {
     await mkdir(join(tempDir, ".claude"), { recursive: true });
-    await Bun.write(join(tempDir, ".claude", "settings.local.json"), JSON.stringify({
+    await Bun.write(settingsFile, JSON.stringify({
       hooks: {
         PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "itsybitsy hooks main-path" }] }],
         UserPromptSubmit: [{ hooks: [{ type: "command", command: "itsybitsy hooks inject-status --full --visible" }] }],
@@ -3162,24 +3162,24 @@ describe("hooks round-trip", () => {
       },
     }));
 
-    await uninstallSafetyHooks(tempDir);
+    await uninstallSafetyHooks(tempDir, settingsFile);
 
     // Verify hooks were removed (settings file should be deleted since it's now empty)
-    const exists = await Bun.file(join(tempDir, ".claude", "settings.local.json")).exists();
+    const exists = await Bun.file(settingsFile).exists();
     expect(exists).toBe(false);
   });
 
   test("uninstallInterceptHook removes legacy itsybitsy-prefixed intercept hook", async () => {
     await mkdir(join(tempDir, ".claude"), { recursive: true });
-    await Bun.write(join(tempDir, ".claude", "settings.local.json"), JSON.stringify({
+    await Bun.write(settingsFile, JSON.stringify({
       hooks: {
         PreToolUse: [{ matcher: "Task", hooks: [{ type: "command", command: "itsybitsy hooks intercept-task" }] }],
       },
     }));
 
-    await uninstallInterceptHook(tempDir);
+    await uninstallInterceptHook(tempDir, settingsFile);
 
-    const exists = await Bun.file(join(tempDir, ".claude", "settings.local.json")).exists();
+    const exists = await Bun.file(settingsFile).exists();
     expect(exists).toBe(false);
   });
 });

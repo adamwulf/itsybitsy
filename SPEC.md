@@ -396,7 +396,7 @@ Questions from agents that no longer exist (no directory in `.ittybitty/agents/`
   "worktree": true,
   "worker": false,
   "yolo": false,
-  "model": "sonnet",              // or null if not specified
+  "model": "sonnet",              // bash defaults to "sonnet"; legacy agents may have null
   "claude_pid": "12345"           // appended after Claude starts (not in initial write)
 }
 ```
@@ -413,7 +413,7 @@ Questions from agents that no longer exist (no directory in `.ittybitty/agents/`
 | `worktree` | boolean | Whether agent has an isolated git worktree |
 | `worker` | boolean | `true` for worker agents, `false` for managers |
 | `yolo` | boolean | Whether `--yolo` (skip permissions) was used |
-| `model` | string \| null | Claude model name (e.g., "sonnet", "opus", "haiku"), or `null` if not specified | [^callout]: The TS `AgentMeta` interface types `model` as `string` (not nullable). In practice, bash writes `null` when no `--model` flag is passed; TS always provides a default model string.
+| `model` | string \| null | Claude model name (e.g., "sonnet", "opus", "haiku"), or `null` for legacy agents | [^callout]: Bash defaults `MODEL` to config value then `"sonnet"` before writing meta.json (the null branch in the template is unreachable dead code). TS normalizes null/missing to `"unknown"`. The `string \| null` type is retained because legacy agents may have null values, and display code (bash `ib list`) handles this defensively.
 | `claude_pid` | string | PID of the Claude process (appended to meta.json via `sed` after start.sh launches Claude — not present in the initial write) |
 
 ### 5.3 Worktree ↔ Branch Relationship

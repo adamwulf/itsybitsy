@@ -447,11 +447,15 @@ itsybitsy installs five hooks into each agent's `settings.local.json`, plus opti
 1. **TaskCreate always denied**: Workers get "Workers cannot create tasks." Managers get "Use ib new-agent --worker."
 2. **Allow list check**: Tool must match at least one pattern from `settings.local.json` `permissions.allow`. Patterns are either exact tool names (`"Read"`) or bash prefix patterns (`"Bash(git status:*)"` — matches Bash tool where command starts with `git status`).
 3. **Bash cd commands**: If the tool is Bash and the command starts with `cd`, the target path is checked against the allowed paths.
-4. **Bash command scanning**: Non-cd bash commands are scanned for path references to:
+4. **Bash command scanning** [^ts-only-bash-scan]: Non-cd bash commands are scanned for path references to:
    - Other agents' directories (`.ittybitty/agents/<other-id>/`)
    - The main repo root (when it differs from the worktree)
    Only paths at word boundaries (preceded by space, quote, `=`, or start of string) are checked.
-5. **File path extraction**: For non-Bash tools, `file_path`, `path`, or `notebook_path` from `tool_input` is checked.
+
+[^ts-only-bash-scan]: **TS-only behavior.** The bash `ib` immediately allows all non-cd Bash commands after the allow-list check — it does not scan command strings for path references. The TS implementation added `checkBashCommandPaths()` as an extra safeguard that catches commands like `cat /repo/.ittybitty/agents/other-agent/...`.
+5. **File path extraction** [^ts-only-notebook-path]: For non-Bash tools, `file_path`, `path`, or `notebook_path` from `tool_input` is checked.
+
+[^ts-only-notebook-path]: **TS-only behavior.** The bash `ib` only extracts `file_path` and `path` from `tool_input`. The TS implementation additionally checks `notebook_path` to cover Jupyter notebook tools.
 
 **Allowed paths**:
 - Agent's own worktree (`<agent-dir>/repo/...`)
@@ -545,7 +549,9 @@ These are optional hooks that the user installs globally:
 - **Status injection hooks** (`ib hooks inject-status`): UserPromptSubmit and PostToolUse hooks that inject agent status information into the primary Claude's context
 - **Session-start hook** (`ib hooks session-start`): SessionStart hook that injects ittybitty context
 
-Install/uninstall commands modify `~/.claude/settings.json` directly.
+Install/uninstall commands modify `~/.claude/settings.json` directly. [^hooks-install-location]
+
+[^hooks-install-location]: **Bash/TS divergence.** The bash `ib hooks install` and `ib hooks install-intercept` write to `.claude/settings.local.json` (per-repo, relative to CWD). The TS implementation writes to `~/.claude/settings.json` (global) — a deliberate change so itsybitsy's safety hooks apply to all Claude sessions, not just ones launched from the project directory.
 
 ---
 

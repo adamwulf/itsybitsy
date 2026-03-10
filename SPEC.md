@@ -56,7 +56,7 @@ When a new agent is created (`ib new-agent "prompt"`):
 
 15. **Auto-accept workspace trust**: For non-yolo agents, a background process polls tmux output for permission prompts ("Do you trust the files", "trust this folder", "Allow external CLAUDE.md file imports") and sends Enter to accept them. Runs up to 5 attempts with 4-second waits between each.
 
-16. **Auto-spawn watchdog**: If the agent has a manager, `ib watchdog <id>` is spawned in the background.
+16. **Auto-spawn watchdog**: If the agent has a manager, `ib watchdog <id>` is spawned in the background with output redirected to `<agent-dir>/watchdog.log`.
 
 17. **Output**: The agent ID is printed to stdout immediately after tmux session creation.
 
@@ -81,15 +81,15 @@ State detection follows this flow:
 
 1. **Archived agents** are always `stopped` (no tmux capture attempted).
 
-2. **Missing tmux session** → `stopped`.
+2. **Missing tmux session** → `stopped`. [^callout]: The bash `get_state()` has an additional grace period: if the tmux output is empty/missing AND the agent was created less than 6 seconds ago (`is_agent_recently_created()`), it returns `creating` instead of `stopped`. The TypeScript implementation does not have this grace period — a missing tmux session is always `stopped`.
 
-3. **Pre-parseState check**: If the tmux output has fewer than 10 lines AND no startup markers (`"Claude Code v"`, `"[USER TASK]"`, `"╭─ Claude Code"`, `"[AGENT CONTEXT]"`), the state is `creating`. This handles the early startup case before enough output exists for pattern matching. Priority 1 below handles the case where there ARE enough lines but startup markers are still absent (e.g., a workspace trust prompt is showing on a fresh screen). [^callout]: The bash reference counts total lines (newlines + 1). The TypeScript reimplementation counts non-empty lines (`line.trim() !== ""`), which is stricter — blank lines from tmux padding are excluded.
+3. **Pre-parseState check**: If the tmux output has fewer than 10 lines AND no startup markers (`"Claude Code v"`, `"[USER TASK]"`, `"╭─ Claude Code"`, `"[AGENT CONTEXT]"`), the state is `creating`. This handles the early startup case before enough output exists for pattern matching. Priority 1 below handles the case where there ARE enough lines but startup markers are still absent (e.g., a workspace trust prompt is showing on a fresh screen). [^callout]: The bash reference counts total lines (newlines + 1) over the first 100 lines of output. The TypeScript reimplementation counts non-empty lines (`line.trim() !== ""`) over the full output, which is stricter — blank lines from tmux padding are excluded.
 
 4. **parseState priority order** (checked top-to-bottom, first match wins):
 
    | Priority | Window | Pattern | State |
    |----------|--------|---------|-------|
-   | 1 | Full input | Workspace trust/import prompts ("Do you trust the files", "trust this folder", "Allow external CLAUDE.md") present AND no startup markers found anywhere in output | `creating` | [^callout]: The bash `parse_state()` only checks 2 startup markers here: `"Claude Code v"` and `"[USER TASK]"`. The other 2 (`"╭─ Claude Code"`, `"[AGENT CONTEXT]"`) are checked in the pre-parseState logic (`get_state()`/`compute_state_from_content()`) but not inside `parse_state()` itself. The TypeScript `parseState()` checks all 4 via the shared `STARTUP_MARKERS` constant.
+   | 1 | Full input | Workspace trust/import prompts ("Do you trust the files", "trust this folder", "Allow external CLAUDE.md") present AND no startup markers found anywhere in output | `creating` | [^callout]: The bash `parse_state()` only checks 2 startup markers here: `"Claude Code v"` and `"[USER TASK]"`. The other 2 (`"╭─ Claude Code"`, `"[AGENT CONTEXT]"`) are checked in the pre-parseState logic (`get_state()`/`compute_state_from_content()`) but not inside `parse_state()` itself. The TypeScript `parseState()` checks all 4 via the shared `STARTUP_MARKERS` constant. Additionally, the bash `get_state()` passes only the last 20 lines to `parse_state()`, so Priority 1's "full input" check operates on a limited window; `compute_state_from_content()` (used by the background monitor) passes the full output. The TypeScript `parseState()` always receives the full output.
    | 2 | Last 5 lines | "Compacting conversation" | `compacting` |
    | 3 | Last 5 lines | `(Esc to interrupt`, `(ctrl+c to interrupt`, `⎿  Running` | `running` |
    | 4 | Last 15 lines | `⎿  Waiting` (tool waiting) | `waiting` |
@@ -169,7 +169,7 @@ Nuke (`ib nuke <id>`) recursively kills a manager and all its descendants:
 1. Collect all descendant agent IDs via depth-first traversal of manager relationships
 2. Worker agents with no descendants cannot be nuked (use `kill` instead) — but workers that have spawned sub-agents can be nuked
 3. For each descendant: remove questions, teardown (same sequence as kill)
-4. Clean up orphaned tmux sessions (sessions with `ittybitty-` prefix that don't match any remaining agent)
+4. Clean up orphaned tmux sessions (sessions with `ittybitty-<repo-id>-` prefix that don't match any remaining agent in the same repository) [^callout]: The bash reference checks only sessions matching the current repo's prefix (`ittybitty-<repo-id>-`). The TypeScript `cleanupOrphanedTmuxSessions` checks all sessions starting with `ittybitty-`, which may clean up sessions from other repos. The agent ID extraction logic (stripping the prefix) still works correctly cross-repo.
 5. Scan and kill orphaned Claude processes
 
 Nuke-all (`ib nuke` with no agent ID) kills all agents in the repository. The `--force` flag skips confirmation but does not change what gets nuked.

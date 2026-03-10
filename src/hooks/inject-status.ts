@@ -12,6 +12,7 @@
 import { listRepos, repoDisplayName } from "../registry";
 import type { RepoEntry } from "../registry";
 import type { Agent } from "../agents";
+import { readConfig } from "../config";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -26,6 +27,11 @@ export interface InjectStatusOptions {
   visible: boolean;
 }
 
+export interface BuildStatusResult {
+  text: string;
+  agents: Agent[];
+  repos: RepoEntry[];
+}
 // ── Pattern ──────────────────────────────────────────────────────────────────
 
 const AGENT_CWD_PATTERN = /\.ittybitty\/agents\/[^/]+\/repo(\/|$)/;
@@ -92,14 +98,14 @@ export function briefSummary(agents: Agent[]): string {
 
   const counts = new Map<string, number>();
   for (const agent of active) {
-    // Map compacting to running, unknown to running (same as formatAgentStatus)
+    // Map compacting and unknown to running (same as formatAgentStatus)
     let state: string = agent.state;
     if (state === "compacting" || state === "unknown") state = "running";
     counts.set(state, (counts.get(state) ?? 0) + 1);
   }
 
   // Ordered state display
-  const order: string[] = ["running", "waiting", "complete", "rate_limited", "stopped", "creating"];
+  const order = ["running", "waiting", "complete", "rate_limited", "stopped", "creating"];
   const parts: string[] = [];
   for (const s of order) {
     const n = counts.get(s);
@@ -141,9 +147,7 @@ export function createDiskAgentProvider(): AgentProvider {
  * Build the full status text using the given provider.
  * Also returns the flat agents list for brief summary generation.
  */
-export async function buildStatusText(
-  provider: AgentProvider
-): Promise<{ text: string; agents: Agent[]; repos: RepoEntry[] }> {
+export async function buildStatusText(provider: AgentProvider): Promise<BuildStatusResult> {
   const repos = await provider.getRepos();
   if (repos.length === 0) return { text: "", agents: [], repos: [] };
 
@@ -223,7 +227,6 @@ export async function hookInjectStatus(
   }
 
   // Check config: hooks.injectStatus
-  const { readConfig } = await import("../config");
   const config = await readConfig(cwd);
   if (config["hooks.injectStatus"]?.value === false) {
     process.exit(0);

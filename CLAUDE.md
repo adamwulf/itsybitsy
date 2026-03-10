@@ -138,7 +138,7 @@ After any code changes, always run:
 
 ## itsybitsy Implementation Notes
 
-All 6 phases complete. 956 tests across 28 files.
+All 6 phases complete. 968 tests across 28 files.
 
 ### State detection flow
 1. `watcher.ts` calls `detectAgentStates()` (in `agents.ts`) on every refresh

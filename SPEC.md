@@ -130,8 +130,9 @@ Pause (`ib pause <id>`) stops the agent but preserves all state:
 
 1. Kill the Claude process (SIGTERM → SIGKILL)
 2. Kill the tmux session
-3. Agent directory, meta.json, worktree, branch, and logs are all preserved
-4. The agent can be resumed with `ib resume <id>`
+3. Kill the watchdog process (if running) to prevent duplicate watchdogs on resume [^callout] Bash `cmd_pause()` does not kill the watchdog (bug). The watchdog loop condition (`while [[ -d "$AGENT_DIR/repo" ]]`) keeps it alive since pause preserves the worktree. Without killing it, `pause → resume` would result in two concurrent watchdogs.
+4. Agent directory, meta.json, worktree, branch, and logs are all preserved
+5. The agent can be resumed with `ib resume <id>`
 
 ### 1.6 Resuming an Agent
 

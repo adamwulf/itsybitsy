@@ -2644,9 +2644,11 @@ describe("acknowledgeQuestion (native)", () => {
 
 describe("hooksStatus", () => {
   let tempDir: string;
+  let settingsFile: string;
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "hooks-status-"));
+    settingsFile = join(tempDir, ".claude", "settings.json");
   });
 
   afterEach(async () => {
@@ -2654,21 +2656,21 @@ describe("hooksStatus", () => {
   });
 
   test("returns not-installed when no settings file exists", async () => {
-    const result = await hooksStatus(tempDir);
+    const result = await hooksStatus(tempDir, settingsFile);
     expect(result.ok).toBe(true);
     expect(result.stdout).toBe("not-installed");
   });
 
   test("returns not-installed when settings has no hooks", async () => {
     await mkdir(join(tempDir, ".claude"), { recursive: true });
-    await Bun.write(join(tempDir, ".claude", "settings.local.json"), JSON.stringify({ permissions: {} }));
-    const result = await hooksStatus(tempDir);
+    await Bun.write(settingsFile, JSON.stringify({ permissions: {} }));
+    const result = await hooksStatus(tempDir, settingsFile);
     expect(result.stdout).toBe("not-installed");
   });
 
   test("returns installed when all three hook types present", async () => {
     await mkdir(join(tempDir, ".claude"), { recursive: true });
-    await Bun.write(join(tempDir, ".claude", "settings.local.json"), JSON.stringify({
+    await Bun.write(settingsFile, JSON.stringify({
       hooks: {
         PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "ib hooks main-path" }] }],
         UserPromptSubmit: [{ hooks: [{ type: "command", command: "ib hooks inject-status --full --visible" }] }],
@@ -2676,35 +2678,35 @@ describe("hooksStatus", () => {
         SessionStart: [{ hooks: [{ type: "command", command: "ib hooks session-start" }] }],
       },
     }));
-    const result = await hooksStatus(tempDir);
+    const result = await hooksStatus(tempDir, settingsFile);
     expect(result.stdout).toBe("installed");
   });
 
   test("returns partial when only main-path present", async () => {
     await mkdir(join(tempDir, ".claude"), { recursive: true });
-    await Bun.write(join(tempDir, ".claude", "settings.local.json"), JSON.stringify({
+    await Bun.write(settingsFile, JSON.stringify({
       hooks: {
         PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "ib hooks main-path" }] }],
       },
     }));
-    const result = await hooksStatus(tempDir);
+    const result = await hooksStatus(tempDir, settingsFile);
     expect(result.stdout).toBe("partial");
   });
 
   test("returns partial when only session-start present", async () => {
     await mkdir(join(tempDir, ".claude"), { recursive: true });
-    await Bun.write(join(tempDir, ".claude", "settings.local.json"), JSON.stringify({
+    await Bun.write(settingsFile, JSON.stringify({
       hooks: {
         SessionStart: [{ hooks: [{ type: "command", command: "ib hooks session-start" }] }],
       },
     }));
-    const result = await hooksStatus(tempDir);
+    const result = await hooksStatus(tempDir, settingsFile);
     expect(result.stdout).toBe("partial");
   });
 
   test("returns partial when status hooks only have UserPromptSubmit (missing PostToolUse)", async () => {
     await mkdir(join(tempDir, ".claude"), { recursive: true });
-    await Bun.write(join(tempDir, ".claude", "settings.local.json"), JSON.stringify({
+    await Bun.write(settingsFile, JSON.stringify({
       hooks: {
         UserPromptSubmit: [{ hooks: [{ type: "command", command: "ib hooks inject-status --full --visible" }] }],
       },
@@ -2712,16 +2714,18 @@ describe("hooksStatus", () => {
     // Only UserPromptSubmit without PostToolUse means status hooks are NOT detected as present
     // But UserPromptSubmit exists in the hooks object, so partial? No — hasStatusHooks returns false
     // because it requires BOTH. So this should be not-installed.
-    const result = await hooksStatus(tempDir);
+    const result = await hooksStatus(tempDir, settingsFile);
     expect(result.stdout).toBe("not-installed");
   });
 });
 
 describe("interceptHooksStatus", () => {
   let tempDir: string;
+  let settingsFile: string;
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "intercept-status-"));
+    settingsFile = join(tempDir, ".claude", "settings.json");
   });
 
   afterEach(async () => {
@@ -2729,39 +2733,41 @@ describe("interceptHooksStatus", () => {
   });
 
   test("returns not-installed when no settings file", async () => {
-    const result = await interceptHooksStatus(tempDir);
+    const result = await interceptHooksStatus(tempDir, settingsFile);
     expect(result.stdout).toBe("not-installed");
   });
 
   test("returns installed when intercept hook present", async () => {
     await mkdir(join(tempDir, ".claude"), { recursive: true });
-    await Bun.write(join(tempDir, ".claude", "settings.local.json"), JSON.stringify({
+    await Bun.write(settingsFile, JSON.stringify({
       hooks: {
         PreToolUse: [{ matcher: "Task", hooks: [{ type: "command", command: "ib hooks intercept-task" }] }],
       },
     }));
-    const result = await interceptHooksStatus(tempDir);
+    const result = await interceptHooksStatus(tempDir, settingsFile);
     expect(result.stdout).toBe("installed");
   });
 
 
   test("returns not-installed when PreToolUse has other hooks but not intercept", async () => {
     await mkdir(join(tempDir, ".claude"), { recursive: true });
-    await Bun.write(join(tempDir, ".claude", "settings.local.json"), JSON.stringify({
+    await Bun.write(settingsFile, JSON.stringify({
       hooks: {
         PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "ib hooks main-path" }] }],
       },
     }));
-    const result = await interceptHooksStatus(tempDir);
+    const result = await interceptHooksStatus(tempDir, settingsFile);
     expect(result.stdout).toBe("not-installed");
   });
 });
 
 describe("installSafetyHooks", () => {
   let tempDir: string;
+  let settingsFile: string;
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "install-hooks-"));
+    settingsFile = join(tempDir, ".claude", "settings.json");
   });
 
   afterEach(async () => {
@@ -2769,11 +2775,11 @@ describe("installSafetyHooks", () => {
   });
 
   test("creates settings file and installs all hooks from scratch", async () => {
-    const result = await installSafetyHooks(tempDir);
+    const result = await installSafetyHooks(tempDir, settingsFile);
     expect(result.ok).toBe(true);
     expect(result.stdout).toContain("Hooks installed");
 
-    const settings = await Bun.file(join(tempDir, ".claude", "settings.local.json")).json();
+    const settings = await Bun.file(settingsFile).json();
     expect(settings.hooks.PreToolUse).toHaveLength(1);
     expect(settings.hooks.PreToolUse[0].hooks[0].command).toBe("ib hooks main-path");
     expect(settings.hooks.UserPromptSubmit).toHaveLength(1);
@@ -2785,33 +2791,33 @@ describe("installSafetyHooks", () => {
   });
 
   test("is idempotent — second call returns already installed", async () => {
-    await installSafetyHooks(tempDir);
-    const result = await installSafetyHooks(tempDir);
+    await installSafetyHooks(tempDir, settingsFile);
+    const result = await installSafetyHooks(tempDir, settingsFile);
     expect(result.stdout).toBe("Hooks already installed");
 
     // Verify no duplicates
-    const settings = await Bun.file(join(tempDir, ".claude", "settings.local.json")).json();
+    const settings = await Bun.file(settingsFile).json();
     expect(settings.hooks.PreToolUse).toHaveLength(1);
     expect(settings.hooks.SessionStart).toHaveLength(1);
   });
 
   test("preserves existing settings and adds missing hooks", async () => {
     await mkdir(join(tempDir, ".claude"), { recursive: true });
-    await Bun.write(join(tempDir, ".claude", "settings.local.json"), JSON.stringify({
+    await Bun.write(settingsFile, JSON.stringify({
       permissions: { allow: ["Read"] },
       hooks: {
         PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "ib hooks main-path" }] }],
       },
     }));
 
-    const result = await installSafetyHooks(tempDir);
+    const result = await installSafetyHooks(tempDir, settingsFile);
     expect(result.ok).toBe(true);
     expect(result.stdout).toContain("Hooks installed");
 
-    const settings = await Bun.file(join(tempDir, ".claude", "settings.local.json")).json();
+    const settings = await Bun.file(settingsFile).json();
     // Original permissions preserved
     expect(settings.permissions.allow).toContain("Read");
-    // Original main-path hook preserved, no new one added (already itsybitsy-prefixed)
+    // Original main-path hook preserved, no new one added
     expect(settings.hooks.PreToolUse).toHaveLength(1);
     // New status and session hooks added
     expect(settings.hooks.UserPromptSubmit).toHaveLength(1);
@@ -2821,7 +2827,7 @@ describe("installSafetyHooks", () => {
 
   test("detects ib-prefixed hooks as already installed", async () => {
     await mkdir(join(tempDir, ".claude"), { recursive: true });
-    await Bun.write(join(tempDir, ".claude", "settings.local.json"), JSON.stringify({
+    await Bun.write(settingsFile, JSON.stringify({
       hooks: {
         PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "ib hooks main-path" }] }],
         UserPromptSubmit: [{ hooks: [{ type: "command", command: "ib hooks inject-status --full --visible" }] }],
@@ -2830,16 +2836,18 @@ describe("installSafetyHooks", () => {
       },
     }));
 
-    const result = await installSafetyHooks(tempDir);
+    const result = await installSafetyHooks(tempDir, settingsFile);
     expect(result.stdout).toBe("Hooks already installed");
   });
 });
 
 describe("uninstallSafetyHooks", () => {
   let tempDir: string;
+  let settingsFile: string;
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "uninstall-hooks-"));
+    settingsFile = join(tempDir, ".claude", "settings.json");
   });
 
   afterEach(async () => {
@@ -2847,14 +2855,14 @@ describe("uninstallSafetyHooks", () => {
   });
 
   test("returns message when no settings file exists", async () => {
-    const result = await uninstallSafetyHooks(tempDir);
+    const result = await uninstallSafetyHooks(tempDir, settingsFile);
     expect(result.ok).toBe(true);
     expect(result.stdout).toContain("nothing to uninstall");
   });
 
   test("removes all safety hooks and preserves other settings", async () => {
     await mkdir(join(tempDir, ".claude"), { recursive: true });
-    await Bun.write(join(tempDir, ".claude", "settings.local.json"), JSON.stringify({
+    await Bun.write(settingsFile, JSON.stringify({
       permissions: { allow: ["Read"] },
       hooks: {
         PreToolUse: [
@@ -2867,11 +2875,11 @@ describe("uninstallSafetyHooks", () => {
       },
     }));
 
-    const result = await uninstallSafetyHooks(tempDir);
+    const result = await uninstallSafetyHooks(tempDir, settingsFile);
     expect(result.ok).toBe(true);
     expect(result.stdout).toContain("Hooks uninstalled");
 
-    const settings = await Bun.file(join(tempDir, ".claude", "settings.local.json")).json();
+    const settings = await Bun.file(settingsFile).json();
     // Permissions preserved
     expect(settings.permissions.allow).toContain("Read");
     // Intercept hook preserved, safety hooks removed
@@ -2885,7 +2893,7 @@ describe("uninstallSafetyHooks", () => {
 
   test("removes ib-prefixed hooks too", async () => {
     await mkdir(join(tempDir, ".claude"), { recursive: true });
-    await Bun.write(join(tempDir, ".claude", "settings.local.json"), JSON.stringify({
+    await Bun.write(settingsFile, JSON.stringify({
       hooks: {
         PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "ib hooks main-path" }] }],
         UserPromptSubmit: [{ hooks: [{ type: "command", command: "ib hooks inject-status --full --visible" }] }],
@@ -2894,16 +2902,16 @@ describe("uninstallSafetyHooks", () => {
       },
     }));
 
-    const result = await uninstallSafetyHooks(tempDir);
+    const result = await uninstallSafetyHooks(tempDir, settingsFile);
     // All hooks removed — file should be deleted since settings is now empty
     expect(result.stdout).toContain("removed empty settings file");
-    const exists = await Bun.file(join(tempDir, ".claude", "settings.local.json")).exists();
+    const exists = await Bun.file(settingsFile).exists();
     expect(exists).toBe(false);
   });
 
   test("deletes empty settings file", async () => {
     await mkdir(join(tempDir, ".claude"), { recursive: true });
-    await Bun.write(join(tempDir, ".claude", "settings.local.json"), JSON.stringify({
+    await Bun.write(settingsFile, JSON.stringify({
       hooks: {
         PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "ib hooks main-path" }] }],
         UserPromptSubmit: [{ hooks: [{ type: "command", command: "ib hooks inject-status --full --visible" }] }],
@@ -2912,26 +2920,28 @@ describe("uninstallSafetyHooks", () => {
       },
     }));
 
-    const result = await uninstallSafetyHooks(tempDir);
+    const result = await uninstallSafetyHooks(tempDir, settingsFile);
     expect(result.stdout).toContain("removed empty settings file");
 
-    const exists = await Bun.file(join(tempDir, ".claude", "settings.local.json")).exists();
+    const exists = await Bun.file(settingsFile).exists();
     expect(exists).toBe(false);
   });
 
   test("is idempotent", async () => {
-    const result1 = await uninstallSafetyHooks(tempDir);
+    const result1 = await uninstallSafetyHooks(tempDir, settingsFile);
     expect(result1.ok).toBe(true);
-    const result2 = await uninstallSafetyHooks(tempDir);
+    const result2 = await uninstallSafetyHooks(tempDir, settingsFile);
     expect(result2.ok).toBe(true);
   });
 });
 
 describe("installInterceptHook", () => {
   let tempDir: string;
+  let settingsFile: string;
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "install-intercept-"));
+    settingsFile = join(tempDir, ".claude", "settings.json");
   });
 
   afterEach(async () => {
@@ -2939,57 +2949,59 @@ describe("installInterceptHook", () => {
   });
 
   test("installs intercept hook from scratch", async () => {
-    const result = await installInterceptHook(tempDir);
+    const result = await installInterceptHook(tempDir, settingsFile);
     expect(result.ok).toBe(true);
     expect(result.stdout).toContain("installed");
 
-    const settings = await Bun.file(join(tempDir, ".claude", "settings.local.json")).json();
+    const settings = await Bun.file(settingsFile).json();
     expect(settings.hooks.PreToolUse).toHaveLength(1);
     expect(settings.hooks.PreToolUse[0].matcher).toBe("Task");
     expect(settings.hooks.PreToolUse[0].hooks[0].command).toBe("ib hooks intercept-task");
   });
 
   test("is idempotent", async () => {
-    await installInterceptHook(tempDir);
-    const result = await installInterceptHook(tempDir);
+    await installInterceptHook(tempDir, settingsFile);
+    const result = await installInterceptHook(tempDir, settingsFile);
     expect(result.stdout).toContain("already installed");
 
-    const settings = await Bun.file(join(tempDir, ".claude", "settings.local.json")).json();
+    const settings = await Bun.file(settingsFile).json();
     expect(settings.hooks.PreToolUse).toHaveLength(1);
   });
 
   test("preserves existing hooks", async () => {
     await mkdir(join(tempDir, ".claude"), { recursive: true });
-    await Bun.write(join(tempDir, ".claude", "settings.local.json"), JSON.stringify({
+    await Bun.write(settingsFile, JSON.stringify({
       hooks: {
         PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "ib hooks main-path" }] }],
       },
     }));
 
-    await installInterceptHook(tempDir);
+    await installInterceptHook(tempDir, settingsFile);
 
-    const settings = await Bun.file(join(tempDir, ".claude", "settings.local.json")).json();
+    const settings = await Bun.file(settingsFile).json();
     expect(settings.hooks.PreToolUse).toHaveLength(2);
   });
 
   test("detects ib-prefixed intercept as already installed", async () => {
     await mkdir(join(tempDir, ".claude"), { recursive: true });
-    await Bun.write(join(tempDir, ".claude", "settings.local.json"), JSON.stringify({
+    await Bun.write(settingsFile, JSON.stringify({
       hooks: {
         PreToolUse: [{ matcher: "Task", hooks: [{ type: "command", command: "ib hooks intercept-task" }] }],
       },
     }));
 
-    const result = await installInterceptHook(tempDir);
+    const result = await installInterceptHook(tempDir, settingsFile);
     expect(result.stdout).toContain("already installed");
   });
 });
 
 describe("uninstallInterceptHook", () => {
   let tempDir: string;
+  let settingsFile: string;
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "uninstall-intercept-"));
+    settingsFile = join(tempDir, ".claude", "settings.json");
   });
 
   afterEach(async () => {
@@ -2997,14 +3009,14 @@ describe("uninstallInterceptHook", () => {
   });
 
   test("returns message when no settings file", async () => {
-    const result = await uninstallInterceptHook(tempDir);
+    const result = await uninstallInterceptHook(tempDir, settingsFile);
     expect(result.ok).toBe(true);
     expect(result.stdout).toContain("nothing to uninstall");
   });
 
   test("removes intercept hook and preserves others", async () => {
     await mkdir(join(tempDir, ".claude"), { recursive: true });
-    await Bun.write(join(tempDir, ".claude", "settings.local.json"), JSON.stringify({
+    await Bun.write(settingsFile, JSON.stringify({
       hooks: {
         PreToolUse: [
           { matcher: "Bash", hooks: [{ type: "command", command: "ib hooks main-path" }] },
@@ -3013,53 +3025,55 @@ describe("uninstallInterceptHook", () => {
       },
     }));
 
-    await uninstallInterceptHook(tempDir);
+    await uninstallInterceptHook(tempDir, settingsFile);
 
-    const settings = await Bun.file(join(tempDir, ".claude", "settings.local.json")).json();
+    const settings = await Bun.file(settingsFile).json();
     expect(settings.hooks.PreToolUse).toHaveLength(1);
     expect(settings.hooks.PreToolUse[0].hooks[0].command).toContain("main-path");
   });
 
   test("removes ib-prefixed intercept hook", async () => {
     await mkdir(join(tempDir, ".claude"), { recursive: true });
-    await Bun.write(join(tempDir, ".claude", "settings.local.json"), JSON.stringify({
+    await Bun.write(settingsFile, JSON.stringify({
       hooks: {
         PreToolUse: [{ matcher: "Task", hooks: [{ type: "command", command: "ib hooks intercept-task" }] }],
       },
     }));
 
-    const result = await uninstallInterceptHook(tempDir);
+    const result = await uninstallInterceptHook(tempDir, settingsFile);
     expect(result.stdout).toContain("removed empty settings file");
-    const exists = await Bun.file(join(tempDir, ".claude", "settings.local.json")).exists();
+    const exists = await Bun.file(settingsFile).exists();
     expect(exists).toBe(false);
   });
 
   test("deletes empty settings file", async () => {
     await mkdir(join(tempDir, ".claude"), { recursive: true });
-    await Bun.write(join(tempDir, ".claude", "settings.local.json"), JSON.stringify({
+    await Bun.write(settingsFile, JSON.stringify({
       hooks: {
         PreToolUse: [{ matcher: "Task", hooks: [{ type: "command", command: "ib hooks intercept-task" }] }],
       },
     }));
 
-    const result = await uninstallInterceptHook(tempDir);
+    const result = await uninstallInterceptHook(tempDir, settingsFile);
     expect(result.stdout).toContain("removed empty settings file");
 
-    const exists = await Bun.file(join(tempDir, ".claude", "settings.local.json")).exists();
+    const exists = await Bun.file(settingsFile).exists();
     expect(exists).toBe(false);
   });
 
   test("is idempotent", async () => {
-    const result = await uninstallInterceptHook(tempDir);
+    const result = await uninstallInterceptHook(tempDir, settingsFile);
     expect(result.ok).toBe(true);
   });
 });
 
 describe("hooks round-trip", () => {
   let tempDir: string;
+  let settingsFile: string;
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "hooks-roundtrip-"));
+    settingsFile = join(tempDir, ".claude", "settings.json");
   });
 
   afterEach(async () => {
@@ -3067,48 +3081,48 @@ describe("hooks round-trip", () => {
   });
 
   test("install then uninstall safety hooks leaves clean state", async () => {
-    await installSafetyHooks(tempDir);
-    let status = await hooksStatus(tempDir);
+    await installSafetyHooks(tempDir, settingsFile);
+    let status = await hooksStatus(tempDir, settingsFile);
     expect(status.stdout).toBe("installed");
 
-    await uninstallSafetyHooks(tempDir);
-    status = await hooksStatus(tempDir);
+    await uninstallSafetyHooks(tempDir, settingsFile);
+    status = await hooksStatus(tempDir, settingsFile);
     expect(status.stdout).toBe("not-installed");
   });
 
   test("install then uninstall intercept hook leaves clean state", async () => {
-    await installInterceptHook(tempDir);
-    let status = await interceptHooksStatus(tempDir);
+    await installInterceptHook(tempDir, settingsFile);
+    let status = await interceptHooksStatus(tempDir, settingsFile);
     expect(status.stdout).toBe("installed");
 
-    await uninstallInterceptHook(tempDir);
-    status = await interceptHooksStatus(tempDir);
+    await uninstallInterceptHook(tempDir, settingsFile);
+    status = await interceptHooksStatus(tempDir, settingsFile);
     expect(status.stdout).toBe("not-installed");
   });
 
   test("install both, uninstall safety only, intercept remains", async () => {
-    await installSafetyHooks(tempDir);
-    await installInterceptHook(tempDir);
+    await installSafetyHooks(tempDir, settingsFile);
+    await installInterceptHook(tempDir, settingsFile);
 
-    await uninstallSafetyHooks(tempDir);
+    await uninstallSafetyHooks(tempDir, settingsFile);
 
-    const safetyStatus = await hooksStatus(tempDir);
+    const safetyStatus = await hooksStatus(tempDir, settingsFile);
     expect(safetyStatus.stdout).toBe("not-installed");
 
-    const interceptStatus = await interceptHooksStatus(tempDir);
+    const interceptStatus = await interceptHooksStatus(tempDir, settingsFile);
     expect(interceptStatus.stdout).toBe("installed");
   });
 
   test("install both, uninstall intercept only, safety remains", async () => {
-    await installSafetyHooks(tempDir);
-    await installInterceptHook(tempDir);
+    await installSafetyHooks(tempDir, settingsFile);
+    await installInterceptHook(tempDir, settingsFile);
 
-    await uninstallInterceptHook(tempDir);
+    await uninstallInterceptHook(tempDir, settingsFile);
 
-    const safetyStatus = await hooksStatus(tempDir);
+    const safetyStatus = await hooksStatus(tempDir, settingsFile);
     expect(safetyStatus.stdout).toBe("installed");
 
-    const interceptStatus = await interceptHooksStatus(tempDir);
+    const interceptStatus = await interceptHooksStatus(tempDir, settingsFile);
     expect(interceptStatus.stdout).toBe("not-installed");
   });
 });

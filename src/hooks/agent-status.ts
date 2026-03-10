@@ -110,9 +110,9 @@ export async function processStopHook(
       debugParts.push(tmuxOutput);
       debugParts.push("");
       debugParts.push("--- parse-state -v output ---");
-      debugParts.push(`${state} (matched: ${parseReason ?? "message"})`);
+      debugParts.push(`${state} (matched: ${parseReason ?? "n/a"})`);
+      debugParts.push("");
     }
-    debugParts.push("");
     debugParts.push("--- last_assistant_message ---");
     debugParts.push(lastMessage || "(no message)");
     await writeFile(debugPath, debugParts.join("\n"));

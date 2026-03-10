@@ -1246,7 +1246,7 @@ async function buildAgentSettings(
         const hooks = entry?.hooks;
         if (Array.isArray(hooks)) {
           for (const h of hooks) {
-            if (typeof h?.command === "string" && h.command.includes("ib hooks intercept-task")) {
+            if (typeof h?.command === "string" && h.command.includes("hooks intercept-task")) {
               addIntercept = true;
             }
           }

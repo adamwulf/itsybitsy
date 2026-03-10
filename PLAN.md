@@ -1169,6 +1169,45 @@ The following commands existed in `ib-commands.ts` but were NOT wired as CLI cas
 
 ---
 
+### Phase 29 (future): inject-status Flag Support
+
+**Status:** Aspirational.
+
+**Goal:** Complete the `ib hooks inject-status` implementation to match bash `ib` behavior for `--full`, `--if-changed`, and `--visible` flags.
+
+**Background:**
+The hook is installed in two places in `~/.claude/settings.json`:
+- `UserPromptSubmit`: `ib hooks inject-status --full --visible` — every new message gets the full agent tree
+- `PostToolUse (Bash|Task)`: `ib hooks inject-status --if-changed --visible` — after each tool, only inject if state changed
+
+**Flags to implement:**
+
+`--full` (already default — just make it explicit):
+- Output the complete agent tree with states, ages, and prompt previews
+- Already implemented as the default behavior
+
+`--if-changed`:
+- Generate full content, hash it (SHA256), compare against cached hash in `/tmp/ib-status-hash-<repo-id>`
+- If unchanged → output nothing (exit 0)
+- If changed → update cache and output a **brief one-liner** (`"2 running, 1 waiting"`) not the full tree
+- This avoids flooding Claude's context with the full table after every Bash/Task tool use
+
+`--visible`:
+- Also emit a `systemMessage` field alongside `hookSpecificOutput`
+- This makes the summary appear in Claude Code's status bar (visible to the user)
+- Gated by both the `--visible` flag and a `hooks.statusVisible` config value (default: true)
+- Brief format: `[ib] 2 running, 1 waiting` in the system message
+
+**Also fix:**
+- Read `hook_event_name` from stdin JSON and use it as `hookEventName` in the output (currently hardcoded to `"UserPromptSubmit"`)
+
+**Tests to add:**
+- `--if-changed` with hash cache: first call outputs, second call (same state) outputs nothing, third call after state change outputs brief
+- `--visible` adds `systemMessage` field
+- `hookEventName` is read from stdin not hardcoded
+
+---
+
 ### Phase 27 (future): Path Allowlist in Hook Sandbox
 
 **Status:** Aspirational.

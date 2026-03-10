@@ -434,7 +434,7 @@ Archives are stored at `.ittybitty/archive/<YYYYMMDD-HHMMSS>-<agent-id>/` using 
 
 ## 6. Hooks
 
-itsybitsy installs five hooks into each agent's `settings.local.json`, plus optional global hooks in `~/.claude/settings.json`.
+itsybitsy installs hooks into each agent's `settings.local.json`, plus optional global hooks in `~/.claude/settings.json`. Managers get five hooks (path isolation, stop, session-start, permission-denied, and intercept-task); workers get four (no intercept-task).
 
 ### 6.1 Path Isolation Hook (PreToolUse)
 
@@ -530,7 +530,7 @@ Intercepts Claude Code's Task tool and redirects it to spawn ib agents instead:
    - When called from primary Claude: spawns a manager (no `--worker`)
 5. **Output**: Rewrites the Task invocation to a `claude-code-guide` subagent that simply reports the spawned agent ID
 
-This hook is only installed for manager agents (not workers), and only when the main repo's settings already have the intercept hook installed. Workers' Task calls are instead blocked by the path hook's TaskCreate denial (§6.1).
+This hook is only installed for manager agents (not workers), and only when the main repo's settings already have the intercept hook installed. Workers skip the intercept hook entirely and use the native Task tool directly (see §2.1). Note that `TaskCreate` (a separate tool from `Task`) is blocked for all agents by the path hook (§6.1).
 
 ### 6.5 Permission Denied Hook (PermissionRequest)
 

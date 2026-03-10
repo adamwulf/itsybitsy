@@ -838,9 +838,9 @@ describe("AgentWatcher", () => {
       await mkdir(newAgentDir, { recursive: true });
       await writeFile(join(newAgentDir, "meta.json"), '{"id":"agent-new"}');
 
-      // Poll until the debounced refresh fires (50ms intervals, up to 5s)
-      // macOS fs.watch + 200ms debounce can be slow under load
-      const deadline = Date.now() + 5000;
+      // Poll until the debounced refresh fires (50ms intervals, up to 8s)
+      // macOS fs.watch + 200ms debounce can be very slow under load
+      const deadline = Date.now() + 8000;
       while (updateCount <= initial && Date.now() < deadline) {
         await new Promise((r) => setTimeout(r, 50));
       }
@@ -848,7 +848,7 @@ describe("AgentWatcher", () => {
       expect(updateCount).toBeGreaterThan(initial);
 
       watcher.stop();
-    }, 10_000);
+    }, 15_000);
 
     test("archive dir watch does not error if archive missing", async () => {
       setupDefaultMocks();

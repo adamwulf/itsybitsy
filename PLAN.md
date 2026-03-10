@@ -634,13 +634,10 @@ All commands now implemented natively in `src/ib-commands.ts` with shared helper
 
 658 tests across 19 files. Injectable spawn runners for testability (SpawnFn pattern).
 
-### Phase 14.1: Fix Flaky Test
+### Phase 14.1: Fix Flaky Test -- COMPLETE
 **Checkpoint:** All tests are deterministic with zero flaky failures.
 
-- [ ] Investigate intermittent test failure: 657 pass / 1 fail (observed ~1 in 6 runs). The failure shows in the summary line but the specific failing test name is not captured in output. Likely a timing-sensitive test in the new Phase 14 native implementations — possibly related to `Bun.sleep` delays, temp directory cleanup races, or mock spawn runner state leaking between tests. Steps:
-  1. Run `bun test` in a loop (10+ iterations) to reliably reproduce
-  2. Identify the specific test that fails
-  3. Fix the root cause (likely needs test isolation improvement or removing timing dependency)
+- [x] Investigate intermittent test failure: identified as `AgentWatcher > fs.watch integration > file change in agents dir triggers refresh` in `src/watcher.test.ts`. Root cause: macOS `fs.watch` event delivery can exceed 5s under parallel test load. Fix: increased polling deadline from 5s to 8s and test timeout from 10s to 15s. Verified with 10 consecutive passing runs.
 
 ---
 

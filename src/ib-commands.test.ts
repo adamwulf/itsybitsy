@@ -1698,6 +1698,8 @@ describe("newAgent (native)", () => {
     tmuxHasSessionExists?: boolean;
     whichGhExists?: boolean;
     hasRemote?: boolean;
+    claudeSummary?: string;
+    claudeSummaryFail?: boolean;
   }) {
     return (cmd: string[], _opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
       spawnCalls.push(cmd);
@@ -1775,6 +1777,14 @@ describe("newAgent (native)", () => {
       // tmux capture-pane (for auto_accept — return logo immediately)
       if (cmdStr.includes("capture-pane")) {
         return makeSpawnResult("Claude Code v1.0", 0);
+      }
+
+      // claude -p (prompt summary generation)
+      if (cmd[0] === "claude" && cmd[1] === "-p") {
+        if (overrides?.claudeSummaryFail) {
+          return makeSpawnResult("", 1);
+        }
+        return makeSpawnResult(overrides?.claudeSummary ?? "", 0);
       }
 
       // Default: succeed
@@ -2281,6 +2291,49 @@ describe("newAgent (native)", () => {
       denyTools: "Write",
     });
     expect(result.ok).toBe(true);
+  });
+
+  test("generates prompt summary in background on success", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner({
+      claudeSummary: "A short summary of the task",
+    }));
+    const result = await callNewAgent("implement feature X with tests", { name: "test-summary" });
+    expect(result.ok).toBe(true);
+
+    // Wait for the background summary generation to complete
+    await Bun.sleep(50);
+
+    const metaPath = join(agentsDir, "test-summary", "meta.json");
+    const meta = await Bun.file(metaPath).json();
+    expect(meta.summary).toBe("A short summary of the task");
+  });
+
+  test("skips summary when claude -p fails", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner({
+      claudeSummaryFail: true,
+    }));
+    const result = await callNewAgent("implement feature Y", { name: "test-summary-fail" });
+    expect(result.ok).toBe(true);
+
+    await Bun.sleep(50);
+
+    const metaPath = join(agentsDir, "test-summary-fail", "meta.json");
+    const meta = await Bun.file(metaPath).json();
+    expect(meta.summary).toBeUndefined();
+  });
+
+  test("skips summary when claude -p returns empty output", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner({
+      claudeSummary: "",
+    }));
+    const result = await callNewAgent("implement feature Z", { name: "test-summary-empty" });
+    expect(result.ok).toBe(true);
+
+    await Bun.sleep(50);
+
+    const metaPath = join(agentsDir, "test-summary-empty", "meta.json");
+    const meta = await Bun.file(metaPath).json();
+    expect(meta.summary).toBeUndefined();
   });
 });
 

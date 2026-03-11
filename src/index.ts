@@ -165,6 +165,7 @@ async function main() {
           repo: a.repoName,
           repoPath: a.repoPath,
           prompt: a.meta.prompt,
+          summary: a.meta.summary ?? null,
           orphaned: a.orphaned ?? false,
         }));
         console.log(JSON.stringify(jsonData, null, 2));
@@ -354,7 +355,7 @@ async function main() {
           const prefixPad = maxPrefix - visibleWidth(row.prefix);
           const paddedPrefix = row.prefix + " ".repeat(Math.max(0, prefixPad));
           const colorCode = stateColors[row.state] ?? DIM;
-          const prompt = entry.agent.meta.prompt.slice(0, promptWidth).replace(/\n/g, " ");
+          const prompt = (entry.agent.meta.summary ?? entry.agent.meta.prompt).slice(0, promptWidth).replace(/\n/g, " ");
           const archived = entry.agent.archived ? ` ${DIM}[archived]${RESET}` : "";
           const line = [
             paddedPrefix,

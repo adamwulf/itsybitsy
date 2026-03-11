@@ -513,6 +513,35 @@ describe("readAgentMeta", () => {
     expect(meta!.yolo).toBe(false);
     expect(meta!.model).toBe("unknown");
     expect(meta!.claude_pid).toBe("");
+    expect(meta!.summary).toBeUndefined();
+  });
+
+  test("reads summary field from meta.json when present", async () => {
+    await Bun.write(
+      join(tempDir, "meta.json"),
+      JSON.stringify({
+        id: "agent-with-summary",
+        summary: "A short task summary",
+      })
+    );
+
+    const { meta } = await readAgentMeta(tempDir);
+    expect(meta).not.toBeNull();
+    expect(meta!.summary).toBe("A short task summary");
+  });
+
+  test("strips non-string summary values", async () => {
+    await Bun.write(
+      join(tempDir, "meta.json"),
+      JSON.stringify({
+        id: "agent-bad-summary",
+        summary: 123,
+      })
+    );
+
+    const { meta } = await readAgentMeta(tempDir);
+    expect(meta).not.toBeNull();
+    expect(meta!.summary).toBeUndefined();
   });
 });
 

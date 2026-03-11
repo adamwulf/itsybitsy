@@ -54,7 +54,7 @@ export function formatAgentRow(
   const nameEnd = hasQuestion ? RESET : "";
   const namePrefix = `${connector}${orphanedPrefix}${icon} ${nameColor}${agent.id}${nameEnd}`;
   const namePad = Math.max(0, nameColWidth - visibleWidth(namePrefix));
-  const promptText = agent.meta.prompt.replace(/\n/g, " ");
+  const promptText = (agent.meta.summary ?? agent.meta.prompt).replace(/\n/g, " ");
   const coloredState = `${stateColor}${state}${RESET}${" ".repeat(Math.max(0, stateColWidth - state.length))}`;
   const paddedAge = agent.age.padStart(AGE_COL_WIDTH);
   const line = `${namePrefix}${" ".repeat(namePad)}  ${coloredState}  ${paddedAge}  ${agent.meta.model}  ${promptText}`;

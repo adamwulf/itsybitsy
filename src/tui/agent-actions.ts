@@ -425,7 +425,7 @@ export function handleFuzzyAgent(ctx: ActionCtx) {
   if (agentEntries.length === 0) { ctx.setNotice("No agents to search"); return; }
   const fuzzyStateColWidth = computeStateColWidth(agentEntries);
   const allItems = agentEntries.map((f) => {
-    const promptText = f.agent.meta.prompt.replace(/\n/g, " ");
+    const promptText = (f.agent.meta.summary ?? f.agent.meta.prompt).replace(/\n/g, " ");
     const state = displayState(f.agent.state);
     return `${f.agent.repoName}/${f.agent.id}  ${state.padEnd(fuzzyStateColWidth)}  ${f.agent.age.padStart(AGE_COL_WIDTH)}  ${promptText}`;
   });

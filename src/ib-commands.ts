@@ -1744,7 +1744,33 @@ ${absExitScript}
     } catch { /* ignore */ }
   }
 
+  // 23. Generate prompt summary in background (fire-and-forget)
+  generatePromptSummary(prompt, agentDir).catch(() => {});
+
   return { ok: true, exitCode: 0, stdout, stderr: "" };
+}
+
+/**
+ * Generate a short summary of an agent's prompt using claude -p with Haiku.
+ * Runs in the background — does not block agent creation.
+ * On success, merges `summary` field into meta.json. On failure, silently skips.
+ */
+async function generatePromptSummary(prompt: string, agentDir: string): Promise<void> {
+  const summaryPrompt = `Summarize the following agent task in 30-40 words:\n\n${prompt}`;
+  const result = await newAgentRunCmd(["claude", "-p", summaryPrompt, "--model", "claude-haiku-4-5-20251001"]);
+  if (result.exitCode !== 0) return;
+  const summary = result.stdout.trim();
+  if (!summary) return;
+
+  // Read current meta.json, merge summary, write back
+  const metaPath = join(agentDir, "meta.json");
+  try {
+    const metaFile = Bun.file(metaPath);
+    if (!(await metaFile.exists())) return;
+    const meta = await metaFile.json();
+    meta.summary = summary;
+    await Bun.write(metaPath, JSON.stringify(meta, null, 2) + "\n");
+  } catch { /* ignore */ }
 }
 
 /**

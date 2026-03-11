@@ -40,15 +40,17 @@ export async function openInGhostty(
     return { ok: false, message: "Ghostty not found on PATH" };
   }
   try {
-    // Validate session name contains only safe characters (alphanumeric, hyphens, underscores)
+    // SECURITY: This /^[\w-]+$/ validation is load-bearing — it is the primary
+    // defense against shell injection via tmux session names. Do not weaken or remove.
     if (!/^[\w-]+$/.test(tmuxSession)) {
       return { ok: false, message: "Invalid tmux session name" };
     }
     // Wrap in bash -c so Ghostty's login shell flags (--posix --login) go to bash, not tmux.
     // Set window-size to 'latest' so tmux resizes to Ghostty's dimensions when attaching.
     // Sessions are created at 60 cols by ib and don't auto-resize on re-attach without this.
-    // Pass session name as a positional parameter ($1) to avoid shell interpolation
-    const proc = spawnFn(["ghostty", `--command=bash -c 'tmux set-option -t "$1" window-size latest && tmux attach -t "$1"' -- ${tmuxSession}`], {
+    // Session name is passed as a separate argument (positional $1) — never interpolated
+    // into the shell code string — so it cannot break out of the quoting context.
+    const proc = spawnFn(["ghostty", "--command", "bash", "-c", 'tmux set-option -t "$1" window-size latest && tmux attach -t "$1"', "_", tmuxSession], {
       stdio: ["ignore", "ignore", "ignore"],
     });
     proc.unref();

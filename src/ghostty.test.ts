@@ -85,10 +85,34 @@ describe("openInGhostty", () => {
 
       const cmdArray = spawnArgs[0] as string[];
       expect(cmdArray[0]).toBe("ghostty");
-      expect(cmdArray[1]).toContain("tmux attach -t");
-      expect(cmdArray[1]).toContain("tmux set-option -t");
-      // Session name passed as positional param after --
-      expect(cmdArray[1]).toContain("-- test-session");
+      expect(cmdArray[1]).toBe("--command");
+      expect(cmdArray[2]).toBe("bash");
+      expect(cmdArray[3]).toBe("-c");
+      // Shell code uses $1 — session name must NOT appear in the script string
+      expect(cmdArray[4]).toContain('tmux attach -t "$1"');
+      expect(cmdArray[4]).toContain('tmux set-option -t "$1"');
+      expect(cmdArray[4]).not.toContain("test-session");
+      // Positional placeholder and session name are separate array elements
+      expect(cmdArray[5]).toBe("_");
+      expect(cmdArray[6]).toBe("test-session");
+    });
+
+    test("session name is never interpolated into shell code", async () => {
+      setWhich(() => "/usr/bin/ghostty");
+      let spawnArgs: any[] = [];
+      setSpawn((...args: any[]) => {
+        spawnArgs = args;
+        return { unref: () => {} };
+      });
+
+      await openInGhostty("agent-abc_123");
+
+      const cmdArray = spawnArgs[0] as string[];
+      const shellCode = cmdArray[4];
+      // The shell script must only reference $1, never the actual session name
+      expect(shellCode).not.toContain("agent-abc_123");
+      // The session name must be passed as a separate positional argument
+      expect(cmdArray[6]).toBe("agent-abc_123");
     });
 
     test("spawns with stdio ignored", async () => {

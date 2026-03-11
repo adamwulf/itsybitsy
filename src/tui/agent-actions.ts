@@ -1074,22 +1074,22 @@ export function handleRenameRepo(ctx: ActionCtx) {
   });
 }
 
-export function handleRemoveRepo(ctx: ActionCtx) {
-  const repo = findRepoByHeader(ctx);
-  if (!repo) { ctx.setNotice("No repo selected"); return; }
+function handleRemoveRepo(ctx: ActionCtx, repo?: RepoEntry) {
+  const resolved = repo ?? findRepoByHeader(ctx);
+  if (!resolved) { ctx.setNotice("No repo selected"); return; }
   ctx.showDialog({
     type: "confirm",
-    prompt: `Remove ${repoDisplayName(repo)} from registry?\n(${repo.path})`,
+    prompt: `Remove ${repoDisplayName(resolved)} from registry?\n(${resolved.path})`,
     confirmLabel: "Remove",
     focusedButton: "cancel",
     confirmColor: RED,
     onYes: () => {
       ctx.closeDialog();
-      removeRepo(repo.path).then((result) => {
+      removeRepo(resolved.path).then((result) => {
         ctx.setNotice(result.message);
         if (result.ok) {
           // Remove from in-memory repos so the UI reflects the change immediately
-          const idx = ctx.repos.findIndex((r) => r.path === repo.path);
+          const idx = ctx.repos.findIndex((r) => r.path === resolved.path);
           if (idx !== -1) { ctx.repos.splice(idx, 1); }
           ctx.watcher?.updateRepos(ctx.repos);
           ctx.watcher?.refresh();
@@ -1136,7 +1136,7 @@ export async function handleRemoveRepoSafe(ctx: ActionCtx) {
     return;
   }
 
-  handleRemoveRepo(ctx);
+  handleRemoveRepo(ctx, repo);
 }
 
 export async function handleFolderBrowser(ctx: ActionCtx) {

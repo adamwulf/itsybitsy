@@ -161,7 +161,7 @@ export class RightPaneComponent implements Component {
           const icon = agent.meta.worker ? "⚙" : "◆";
           const state = displayState(agent.state);
           const stateColor = getStateColors()[state] ?? getStateColors().unknown;
-          const promptText = agent.meta.prompt.replace(/\n/g, " ");
+          const promptText = (agent.meta.summary ?? agent.meta.prompt).replace(/\n/g, " ");
           const coloredState = `${stateColor}${state}${RESET}${" ".repeat(Math.max(0, treeStateColWidth - state.length))}`;
           const paddedAge = agent.age.padStart(AGE_COL_WIDTH);
           return `${connector}${icon} ${agent.id}  ${coloredState}  ${paddedAge}  ${agent.meta.model}  ${promptText}`;

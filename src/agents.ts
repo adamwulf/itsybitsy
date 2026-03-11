@@ -22,6 +22,7 @@ export interface AgentMeta {
   yolo: boolean;
   model: string;
   claude_pid: string;
+  summary?: string;
 }
 
 export interface Agent {
@@ -101,6 +102,7 @@ export async function readAgentMeta(agentDir: string): Promise<{ meta: AgentMeta
     if (typeof data.yolo !== "boolean") data.yolo = false;
     if (typeof data.model !== "string") data.model = "unknown";
     if (typeof data.claude_pid !== "string") data.claude_pid = "";
+    if (data.summary !== undefined && typeof data.summary !== "string") delete data.summary;
     return { meta: data as AgentMeta };
   } catch (err) {
     return { meta: null, error: `Failed to read ${join(agentDir, "meta.json")}: ${err}` };

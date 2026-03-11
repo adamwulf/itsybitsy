@@ -112,7 +112,6 @@ export function resetNukeResumeSpawnRunner(): void {
   resumeDelayOverrideMs = null;
 }
 
-
 /**
  * Clean up orphaned tmux sessions — sessions with the ittybitty- prefix
  * that don't correspond to any remaining agent directory.
@@ -738,7 +737,6 @@ export function resetMergeSpawnRunner(): void {
   mergeSpawnCtx.reset();
 }
 
-
 /**
  * Pre-rebase conflict check: creates a temp branch/worktree, attempts rebase,
  * and cleans up. Returns { ok: true } if no conflicts, { ok: false, output } if conflicts.
@@ -1141,7 +1139,6 @@ export function resetNewAgentSpawnRunner(): void {
   newAgentSpawnCtx.reset();
   newAgentDelayOverrideMs = null;
 }
-
 
 /**
  * Read custom prompts from .ittybitty/prompts/ directory.
@@ -1948,7 +1945,6 @@ export function setDiffStatusSpawnRunner(runner: SpawnFn): void {
 export function resetDiffStatusSpawnRunner(): void {
   diffStatusSpawnCtx.reset();
 }
-
 
 /**
  * Native diff implementation — replaces `ib diff <id>`.

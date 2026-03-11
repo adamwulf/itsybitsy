@@ -1268,7 +1268,7 @@ Bash has a full settings editor including a permissions allow/deny list editor. 
 
 ### Phase 34: Code Quality & Dead Code Cleanup
 
-**Status:** Not started.
+**Status:** Partially complete (4 of 9 sub-phases done; 2 partially done; 3 not started).
 
 **Source:** CODE_REVIEW.md
 
@@ -1276,90 +1276,83 @@ Bash has a full settings editor including a permissions allow/deny list editor. 
 
 **Complexity:** Low-Medium — mostly mechanical refactoring.
 
-#### 34a: Fix duplicate `merge-check` case in CLI (high priority)
+#### 34a: Fix duplicate `merge-check` case in CLI (high priority) ✅
 
-**File:** `src/index.ts:433,451`
+**File:** `src/index.ts`
 
-The `merge-check` case appears twice in the main switch statement. The second occurrence is dead code.
+The duplicate `merge-check` case has been removed. Only one instance remains at line 528.
 
-- [ ] Remove the dead duplicate case
-- [ ] Verify the remaining case has the correct implementation
+- [x] Remove the dead duplicate case
+- [x] Verify the remaining case has the correct implementation
 
-#### 34b: Consolidate spawn runner injection (medium priority)
+#### 34b: Consolidate spawn runner injection (medium priority) — Partially complete
 
 **Files:** `src/ib-commands.ts`, `src/agent-lifecycle.ts`, `src/watchdog.ts`, `src/tmux-poller.ts`, `src/usage.ts`, `src/auto-compact.ts`, `src/ghostty.ts`
 
-14 separate module-level mutable injection variables with `set*/reset*` boilerplate. 10 of them use the same `SpawnFn` type (tmux-poller, agent-lifecycle, watchdog, and 6 in ib-commands); `src/usage.ts` has two injection points — `setTestFetch` uses `FetchLike` and `setTestSpawn` uses `SpawnFn`; `src/auto-compact.ts` uses `CompactSpawnFn` (a simpler type); `src/ghostty.ts` has two — `setSpawn` uses `GhosttySpawnFn` and `setWhich` uses `WhichFn`. This is error-prone (test leaks) and hard to maintain.
+A `SpawnContext` class was introduced in `src/types.ts` with a shared `runCmd()` helper that drains both stdout and stderr via `Promise.all`. `ib-commands.ts` now uses 5 named `SpawnContext` instances (`killPauseSpawnCtx`, `nukeResumeSpawnCtx`, `mergeSpawnCtx`, `sendSpawnCtx`, `newAgentSpawnCtx`, `diffStatusSpawnCtx`). However, `tmux-poller.ts`, `agent-lifecycle.ts`, `usage.ts`, `ghostty.ts`, and `tui/color-scheme.ts` still use the old module-level `set*/reset*` pattern with bare variables.
 
-- [ ] Design a single DI pattern — either a context object threaded through functions, or a centralized spawn registry
-- [ ] Consolidate all spawn runners into the shared pattern
+- [x] Design a single DI pattern — `SpawnContext` class in `src/types.ts`
+- [ ] Consolidate all spawn runners into the shared pattern — `ib-commands.ts` migrated; `tmux-poller.ts`, `agent-lifecycle.ts`, `usage.ts`, `ghostty.ts`, `color-scheme.ts` still use old pattern
 - [ ] Update all tests to use the unified pattern
 
-#### 34c: Consolidate `runCmd` helpers (low priority)
+#### 34c: Consolidate `runCmd` helpers (low priority) — Partially complete
 
 **Files:** `src/ib-commands.ts` (4 variants: `nukeResumeRunCmd`, `mergeRunCmd`, `newAgentRunCmd`, `diffStatusRunCmd`), `src/agent-lifecycle.ts` (1 variant)
 
-5 near-identical `runCmd` wrappers that spawn → read stdout → await exit. They fall into three stderr patterns:
-- **Deadlock risk** — pipe stderr but never drain: `nukeResumeRunCmd` (ib-commands:116), `agent-lifecycle.ts:runCmd` (line 45)
-- **Sequential drain** — reads stderr after stdout, safe but not parallel: `newAgentRunCmd` (ib-commands:1131)
-- **Correct** — drains both with `Promise.all`: `mergeRunCmd` (ib-commands:716), `diffStatusRunCmd` (ib-commands:1893)
+A shared `runCmd()` was extracted to `src/types.ts` and all 5 wrappers now delegate to `SpawnContext.run()` which calls that shared helper. The wrappers still exist as thin one-liners (e.g., `nukeResumeRunCmd` → `nukeResumeSpawnCtx.run(cmd)`), but the core drain logic is unified. The deadlock risk is eliminated since the shared helper uses `Promise.all`.
 
-Note: `src/tmux-poller.ts` does NOT have a runCmd variant.
+- [x] Extract a shared `runCmd` helper that drains both stdout and stderr via `Promise.all`
+- [ ] Replace all 5 variants with calls to the shared helper — wrappers still exist as thin delegates; could be inlined but functional correctness is achieved
 
-- [ ] Extract a shared `runCmd` helper that drains both stdout and stderr via `Promise.all`
-- [ ] Replace all 5 variants with calls to the shared helper (including `newAgentRunCmd` which currently drains sequentially)
+#### 34d: Extract shared constants (low priority) ✅
 
-#### 34d: Extract shared constants (low priority)
+**File:** `src/hooks/shared.ts`
 
-**Files:** `src/hooks/intercept-task.ts:25`, `src/hooks/inject-status.ts:37`, `src/hooks/session-start.ts:18`
+`AGENT_CWD_PATTERN` has been extracted to `src/hooks/shared.ts` with the capturing-group version. All three hook files (`intercept-task.ts`, `inject-status.ts`, `session-start.ts`) now import from `shared.ts`.
 
-`AGENT_CWD_PATTERN` regex appears in 3 hook files but is **not identical**: `intercept-task.ts` and `session-start.ts` use `([^/]+)` (capturing group for agent ID), while `inject-status.ts` uses `[^/]+` (non-capturing, since it doesn't need the agent ID).
+- [x] Extract to `src/hooks/shared.ts` — canonical capturing-group version, all consumers updated
 
-- [ ] Extract to `src/hooks/shared.ts` or `src/constants.ts` — use the capturing-group version as canonical, and update `inject-status.ts` to use a non-capturing wrapper or just use the same pattern (the capture group is harmless if unused)
+#### 34e: Fix `as any` in production code (medium priority) ✅
 
-#### 34e: Fix `as any` in production code (medium priority)
+**File:** `src/ib-commands.ts`
 
-**File:** `src/ib-commands.ts:1255`
+No `as any` casts remain in `src/ib-commands.ts`. The settings access has been rewritten with typed access.
 
-`(baseSettings as any)?.hooks?.PreToolUse` bypasses type safety.
+- [x] Define a proper interface for the settings file structure
+- [x] Replace `as any` with typed access
 
-- [ ] Define a proper interface for the settings file structure
-- [ ] Replace `as any` with typed access
+#### 34f: Rename conflicting `AgentProvider` type (low priority) ✅
 
-#### 34f: Rename conflicting `AgentProvider` type (low priority)
+**Files:** `src/watchdog.ts`, `src/hooks/inject-status.ts`
 
-**Files:** `src/watchdog.ts:30`, `src/hooks/inject-status.ts:120-124`
+`inject-status.ts` now uses `AgentDataSource` (exported at line 156). `watchdog.ts` retains `AgentProvider` (line 35). No name conflict remains.
 
-Two completely different `AgentProvider` types with the same name.
+- [x] Rename one — `inject-status.ts` now uses `AgentDataSource`
 
-- [ ] Rename one (e.g., `AgentDataSource` for inject-status) to avoid confusion
+#### 34g: Audit catch blocks without error binding (low priority) — Not started
 
-#### 34g: Audit catch blocks without error binding (low priority)
-
-**Files:** Multiple — 128 `catch {` blocks (without error variable) across 23 files
+**Files:** Multiple — 142 `catch {` blocks (without error variable) across 23 files (up from 128 at time of review)
 
 Note: these are NOT empty — most have meaningful bodies (`return`, `continue`, comments). The issue is that they don't capture the error, making it impossible to distinguish expected errors (ENOENT) from unexpected ones. Many already have explanatory comments; the gap is the ones that silently swallow unexpected errors.
 
 - [ ] Audit `catch {` blocks that have no explanatory comment — add `/* expected: ... */` or `/* todo: log */`
 - [ ] Consider logging non-ENOENT errors to stderr or agent.log in critical paths
 
-#### 34h: Fix stderr deadlock in runCmd variants (medium priority)
+#### 34h: Fix stderr deadlock in runCmd variants (medium priority) ✅
 
-**Files:** `src/ib-commands.ts:116-121` (`nukeResumeRunCmd`), `src/agent-lifecycle.ts:45-50` (`runCmd`)
+**Files:** `src/ib-commands.ts`, `src/agent-lifecycle.ts`
 
-Both functions pipe stderr but never drain it. If a command produces enough stderr to fill the pipe buffer, the process deadlocks. `mergeRunCmd` already does this correctly with `Promise.all`.
+All `runCmd` variants now delegate to `SpawnContext.run()` (or the shared `runCmd()` in `types.ts`), which drains both stdout and stderr via `Promise.all`. The deadlock risk is eliminated. Resolved as a side effect of the `SpawnContext` migration in 34b/34c.
 
-- [ ] Drain both stdout and stderr with `Promise.all` in both `nukeResumeRunCmd` and `agent-lifecycle.ts:runCmd`, matching `mergeRunCmd` pattern
+- [x] Drain both stdout and stderr with `Promise.all` in all runCmd variants
 
-**Note:** 34h overlaps with 34c — if 34c (consolidate all 5 variants into a shared helper) is completed first, 34h is automatically resolved. If doing a targeted fix only, 34h can be applied independently to just the 2 deadlock-risk variants.
+#### 34i: Use `sed` alternative for JSON modification in start.sh/resume.sh (low priority) ✅
 
-#### 34i: Use `sed` alternative for JSON modification in start.sh/resume.sh (low priority)
+**Files:** `src/ib-commands.ts:391` (start script heredoc), `src/ib-commands.ts:1696` (resume script heredoc)
 
-**Files:** `src/ib-commands.ts:392-395` (start script heredoc), `src/ib-commands.ts:1682-1685` (resume script heredoc)
+Both occurrences now use `bun -e` one-liners that properly parse, modify, and rewrite `meta.json` with `JSON.parse`/`JSON.stringify` instead of `sed`. This handles nested objects and formatted JSON correctly.
 
-Using `sed` to insert `claude_pid` into `meta.json` is brittle — assumes single-line JSON ending with `}` on the last line; breaks with nested objects or formatted JSON. Both the start script and the resume script contain the same pattern.
-
-- [ ] Replace both occurrences with a bun one-liner or restructure to avoid in-script JSON manipulation
+- [x] Replace both occurrences with a bun one-liner — done
 
 ---
 

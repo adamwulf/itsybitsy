@@ -112,12 +112,6 @@ export function resetNukeResumeSpawnRunner(): void {
   resumeDelayOverrideMs = null;
 }
 
-/**
- * Helper: run a command via the nuke/resume spawn runner and return { stdout, exitCode }.
- */
-async function nukeResumeRunCmd(cmd: string[]): Promise<{ stdout: string; exitCode: number }> {
-  return nukeResumeSpawnCtx.run(cmd);
-}
 
 /**
  * Clean up orphaned tmux sessions — sessions with the ittybitty- prefix
@@ -136,7 +130,7 @@ async function cleanupOrphanedTmuxSessions(agentsDir: string): Promise<number> {
   } catch { /* agents dir may not exist */ }
 
   // List tmux sessions
-  const listResult = await nukeResumeRunCmd(["tmux", "list-sessions", "-F", "#{session_name}"]);
+  const listResult = await nukeResumeSpawnCtx.run(["tmux", "list-sessions", "-F", "#{session_name}"]);
   if (listResult.exitCode !== 0 || !listResult.stdout) return 0;
 
   const sessions = listResult.stdout.split("\n").filter((s) => s.trim());
@@ -154,7 +148,7 @@ async function cleanupOrphanedTmuxSessions(agentsDir: string): Promise<number> {
 
     const isKnown = knownIds.includes(agentId);
     if (!isKnown) {
-      const killResult = await nukeResumeRunCmd(["tmux", "kill-session", "-t", session]);
+      const killResult = await nukeResumeSpawnCtx.run(["tmux", "kill-session", "-t", session]);
       if (killResult.exitCode === 0) cleaned++;
     }
   }
@@ -416,13 +410,13 @@ ${qAbsExitScript}
   await chmod(resumeScript, 0o755);
 
   // Ensure tmux server is running
-  const startServerResult = await nukeResumeRunCmd(["tmux", "start-server"]);
+  const startServerResult = await nukeResumeSpawnCtx.run(["tmux", "start-server"]);
   if (startServerResult.exitCode !== 0) {
     return { ok: false, exitCode: 1, stdout: "", stderr: "Could not start tmux server" };
   }
 
   // Start tmux session
-  const tmuxResult = await nukeResumeRunCmd([
+  const tmuxResult = await nukeResumeSpawnCtx.run([
     "tmux", "new-session", "-d", "-x", "60", "-s", tmuxSession, "-c", workPath, resumeScript,
   ]);
   if (tmuxResult.exitCode !== 0) {
@@ -440,12 +434,12 @@ ${qAbsExitScript}
   if (nudgeDelayMs > 0) await Bun.sleep(nudgeDelayMs);
 
   const nudgePrompt = "Resume your work, or end with 'WAITING' or 'I HAVE COMPLETED THE GOAL' as your final line.";
-  await nukeResumeRunCmd(["tmux", "send-keys", "-t", tmuxSession, "-l", nudgePrompt]);
+  await nukeResumeSpawnCtx.run(["tmux", "send-keys", "-t", tmuxSession, "-l", nudgePrompt]);
 
   const nudgeSleepMs = resumeDelayOverrideMs !== null ? resumeDelayOverrideMs : 100;
   if (nudgeSleepMs > 0) await Bun.sleep(nudgeSleepMs);
 
-  await nukeResumeRunCmd(["tmux", "send-keys", "-t", tmuxSession, "Enter"]);
+  await nukeResumeSpawnCtx.run(["tmux", "send-keys", "-t", tmuxSession, "Enter"]);
 
   // Log
   await logAgent(agentDir, "Agent resumed");
@@ -483,7 +477,7 @@ async function autoAcceptWorkspaceTrust(tmuxSession: string): Promise<void> {
     const delayMs = resumeDelayOverrideMs !== null ? resumeDelayOverrideMs : 500;
     if (delayMs > 0) await Bun.sleep(delayMs);
 
-    const captureResult = await nukeResumeRunCmd([
+    const captureResult = await nukeResumeSpawnCtx.run([
       "tmux", "capture-pane", "-t", tmuxSession, "-p", "-S", "-",
     ]);
     if (captureResult.exitCode !== 0) continue;
@@ -508,12 +502,12 @@ async function autoAcceptWorkspaceTrust(tmuxSession: string): Promise<void> {
 
   // Accept permissions (may need multiple Enter presses)
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    await nukeResumeRunCmd(["tmux", "send-keys", "-t", tmuxSession, "Enter"]);
+    await nukeResumeSpawnCtx.run(["tmux", "send-keys", "-t", tmuxSession, "Enter"]);
 
     const delayMs = resumeDelayOverrideMs !== null ? resumeDelayOverrideMs : 4000;
     if (delayMs > 0) await Bun.sleep(delayMs);
 
-    const captureResult = await nukeResumeRunCmd([
+    const captureResult = await nukeResumeSpawnCtx.run([
       "tmux", "capture-pane", "-t", tmuxSession, "-p", "-S", "-",
     ]);
     if (captureResult.exitCode !== 0) continue;
@@ -534,7 +528,7 @@ async function autoAcceptWorkspaceTrust(tmuxSession: string): Promise<void> {
         const logoDelay = resumeDelayOverrideMs !== null ? resumeDelayOverrideMs : 500;
         if (logoDelay > 0) await Bun.sleep(logoDelay);
 
-        const logoCapture = await nukeResumeRunCmd([
+        const logoCapture = await nukeResumeSpawnCtx.run([
           "tmux", "capture-pane", "-t", tmuxSession, "-p", "-S", "-",
         ]);
         if (logoCapture.exitCode !== 0) continue;
@@ -693,19 +687,19 @@ export async function mergeCheckAgent(agent: Agent): Promise<IbCommandResult> {
   }
 
   // 2. Check no uncommitted changes
-  const worktreeStatus = await mergeRunCmd(["git", "-C", worktreePath, "status", "--porcelain"]);
+  const worktreeStatus = await mergeSpawnCtx.run(["git", "-C", worktreePath, "status", "--porcelain"]);
   if (worktreeStatus.exitCode === 0 && worktreeStatus.stdout.trim()) {
     return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' has uncommitted changes` };
   }
 
   // 3. Check main branch exists
-  const mainRef = await mergeRunCmd(["git", "-C", agent.repoPath, "show-ref", "--verify", "refs/heads/main"]);
+  const mainRef = await mergeSpawnCtx.run(["git", "-C", agent.repoPath, "show-ref", "--verify", "refs/heads/main"]);
   if (mainRef.exitCode !== 0) {
     return { ok: false, exitCode: 1, stdout: "", stderr: "Main branch not found" };
   }
 
   // 4. Check agent branch exists
-  const branchRef = await mergeRunCmd(["git", "-C", agent.repoPath, "show-ref", "--verify", `refs/heads/${branchName}`]);
+  const branchRef = await mergeSpawnCtx.run(["git", "-C", agent.repoPath, "show-ref", "--verify", `refs/heads/${branchName}`]);
   if (branchRef.exitCode !== 0) {
     return { ok: false, exitCode: 1, stdout: "", stderr: `Branch '${branchName}' does not exist` };
   }
@@ -720,7 +714,7 @@ export async function mergeCheckAgent(agent: Agent): Promise<IbCommandResult> {
   }
 
   // Count commits
-  const logResult = await mergeRunCmd(["git", "-C", agent.repoPath, "log", `main..${branchName}`, "--oneline"]);
+  const logResult = await mergeSpawnCtx.run(["git", "-C", agent.repoPath, "log", `main..${branchName}`, "--oneline"]);
   const commitCount = logResult.stdout.trim() ? logResult.stdout.trim().split("\n").length : 0;
 
   return {
@@ -744,12 +738,6 @@ export function resetMergeSpawnRunner(): void {
   mergeSpawnCtx.reset();
 }
 
-/**
- * Helper: run a command via the merge spawn runner and return { stdout, stderr, exitCode }.
- */
-async function mergeRunCmd(cmd: string[]): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  return mergeSpawnCtx.run(cmd);
-}
 
 /**
  * Pre-rebase conflict check: creates a temp branch/worktree, attempts rebase,
@@ -765,36 +753,36 @@ async function checkRebaseConflicts(
   const tempDir = `/tmp/ib-rebase-check-${tempBranch}`;
 
   // Create temp branch from source
-  const createBranch = await mergeRunCmd(["git", "-C", repoPath, "branch", tempBranch, sourceBranch]);
+  const createBranch = await mergeSpawnCtx.run(["git", "-C", repoPath, "branch", tempBranch, sourceBranch]);
   if (createBranch.exitCode !== 0) {
     return { ok: false, output: "Could not create temp branch for conflict check" };
   }
 
   // Create temp worktree
-  const createWorktree = await mergeRunCmd(["git", "-C", repoPath, "worktree", "add", tempDir, tempBranch, "--quiet"]);
+  const createWorktree = await mergeSpawnCtx.run(["git", "-C", repoPath, "worktree", "add", tempDir, tempBranch, "--quiet"]);
   if (createWorktree.exitCode !== 0) {
-    await mergeRunCmd(["git", "-C", repoPath, "branch", "-D", tempBranch]);
+    await mergeSpawnCtx.run(["git", "-C", repoPath, "branch", "-D", tempBranch]);
     return { ok: false, output: "Could not create temp worktree for conflict check" };
   }
 
   // Attempt rebase in temp worktree
-  const rebaseResult = await mergeRunCmd(["git", "-C", tempDir, "rebase", targetBranch]);
+  const rebaseResult = await mergeSpawnCtx.run(["git", "-C", tempDir, "rebase", targetBranch]);
   let result: { ok: boolean; output: string };
 
   if (rebaseResult.exitCode !== 0) {
     // Abort the failed rebase
-    await mergeRunCmd(["git", "-C", tempDir, "rebase", "--abort"]);
+    await mergeSpawnCtx.run(["git", "-C", tempDir, "rebase", "--abort"]);
     result = { ok: false, output: rebaseResult.stdout };
   } else {
     result = { ok: true, output: "" };
   }
 
   // Clean up: remove temp worktree and branch (with rm -rf fallback)
-  const worktreeRemove = await mergeRunCmd(["git", "-C", repoPath, "worktree", "remove", tempDir, "--force"]);
+  const worktreeRemove = await mergeSpawnCtx.run(["git", "-C", repoPath, "worktree", "remove", tempDir, "--force"]);
   if (worktreeRemove.exitCode !== 0) {
     try { await rm(tempDir, { recursive: true, force: true }); } catch { /* ignore */ }
   }
-  await mergeRunCmd(["git", "-C", repoPath, "branch", "-D", tempBranch]);
+  await mergeSpawnCtx.run(["git", "-C", repoPath, "branch", "-D", tempBranch]);
 
   return result;
 }
@@ -851,7 +839,7 @@ export async function mergeAgent(agent: Agent): Promise<IbCommandResult> {
   }
 
   // 3. Agent worktree must have no uncommitted changes
-  const worktreeStatus = await mergeRunCmd(["git", "-C", worktreePath, "status", "--porcelain"]);
+  const worktreeStatus = await mergeSpawnCtx.run(["git", "-C", worktreePath, "status", "--porcelain"]);
   if (worktreeStatus.exitCode === 0 && worktreeStatus.stdout.trim()) {
     return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' has uncommitted changes` };
   }
@@ -859,16 +847,16 @@ export async function mergeAgent(agent: Agent): Promise<IbCommandResult> {
   // 4. Detect target branch — use CWD (no -C) so manager worktrees merge into
   //    their own branch, not the main repo's checked-out branch (matches bash ib)
   let targetBranch = "";
-  const currentBranch = await mergeRunCmd(["git", "branch", "--show-current"]);
+  const currentBranch = await mergeSpawnCtx.run(["git", "branch", "--show-current"]);
   if (currentBranch.exitCode === 0 && currentBranch.stdout.trim()) {
     targetBranch = currentBranch.stdout.trim();
   }
   if (!targetBranch) {
-    const mainRef = await mergeRunCmd(["git", "show-ref", "--verify", "refs/heads/main"]);
+    const mainRef = await mergeSpawnCtx.run(["git", "show-ref", "--verify", "refs/heads/main"]);
     if (mainRef.exitCode === 0) {
       targetBranch = "main";
     } else {
-      const masterRef = await mergeRunCmd(["git", "show-ref", "--verify", "refs/heads/master"]);
+      const masterRef = await mergeSpawnCtx.run(["git", "show-ref", "--verify", "refs/heads/master"]);
       if (masterRef.exitCode === 0) {
         targetBranch = "master";
       } else {
@@ -878,13 +866,13 @@ export async function mergeAgent(agent: Agent): Promise<IbCommandResult> {
   }
 
   // 5. Agent branch must exist
-  const branchRef = await mergeRunCmd(["git", "-C", agent.repoPath, "show-ref", "--verify", `refs/heads/${branchName}`]);
+  const branchRef = await mergeSpawnCtx.run(["git", "-C", agent.repoPath, "show-ref", "--verify", `refs/heads/${branchName}`]);
   if (branchRef.exitCode !== 0) {
     return { ok: false, exitCode: 1, stdout: "", stderr: `Branch '${branchName}' does not exist` };
   }
 
   // 6. Current dir must have no uncommitted changes (CWD, not agent.repoPath)
-  const repoStatus = await mergeRunCmd(["git", "status", "--porcelain"]);
+  const repoStatus = await mergeSpawnCtx.run(["git", "status", "--porcelain"]);
   if (repoStatus.exitCode === 0 && repoStatus.stdout.trim()) {
     return { ok: false, exitCode: 1, stdout: "", stderr: "Current directory has uncommitted changes" };
   }
@@ -900,7 +888,7 @@ export async function mergeAgent(agent: Agent): Promise<IbCommandResult> {
   }
 
   // Count commits to merge
-  const logResult = await mergeRunCmd(["git", "-C", agent.repoPath, "log", `${targetBranch}..${branchName}`, "--oneline"]);
+  const logResult = await mergeSpawnCtx.run(["git", "-C", agent.repoPath, "log", `${targetBranch}..${branchName}`, "--oneline"]);
   const commitCount = logResult.stdout.trim() ? logResult.stdout.trim().split("\n").length : 0;
 
   await logAgent(agentDir, `Starting rebase of ${branchName} onto ${targetBranch} (${commitCount} commits)`);
@@ -908,7 +896,7 @@ export async function mergeAgent(agent: Agent): Promise<IbCommandResult> {
   if (commitCount > 0) {
     // 8. Rebase agent branch onto target (in agent's worktree)
     await logAgent(agentDir, `Rebasing ${branchName} onto ${targetBranch}...`);
-    const rebaseResult = await mergeRunCmd(["git", "-C", worktreePath, "rebase", targetBranch]);
+    const rebaseResult = await mergeSpawnCtx.run(["git", "-C", worktreePath, "rebase", targetBranch]);
     if (rebaseResult.exitCode !== 0) {
       return { ok: false, exitCode: 1, stdout: "", stderr: `Rebase failed: ${rebaseResult.stderr || rebaseResult.stdout}` };
     }
@@ -916,7 +904,7 @@ export async function mergeAgent(agent: Agent): Promise<IbCommandResult> {
 
     // 9. Checkout target branch (in CWD — the caller's worktree)
     await logAgent(agentDir, `Checking out ${targetBranch}...`);
-    const checkoutResult = await mergeRunCmd(["git", "checkout", targetBranch]);
+    const checkoutResult = await mergeSpawnCtx.run(["git", "checkout", targetBranch]);
     if (checkoutResult.exitCode !== 0) {
       return { ok: false, exitCode: 1, stdout: "", stderr: `Could not checkout ${targetBranch}: ${checkoutResult.stderr || checkoutResult.stdout}` };
     }
@@ -925,14 +913,14 @@ export async function mergeAgent(agent: Agent): Promise<IbCommandResult> {
     const runningAsAgent = await isRunningAsAgent();
     if (runningAsAgent) {
       await logAgent(agentDir, `Fast-forwarding ${targetBranch} to ${branchName}...`);
-      const ffResult = await mergeRunCmd(["git", "merge", "--ff-only", branchName]);
+      const ffResult = await mergeSpawnCtx.run(["git", "merge", "--ff-only", branchName]);
       if (ffResult.exitCode !== 0) {
         return { ok: false, exitCode: 1, stdout: "", stderr: `Fast-forward failed: ${ffResult.stderr || ffResult.stdout}` };
       }
       await logAgent(agentDir, "Fast-forward merge completed successfully");
     } else {
       await logAgent(agentDir, `Merging ${branchName} with --no-ff...`);
-      const noFFResult = await mergeRunCmd(["git", "merge", "--no-ff", branchName, "-m", `Merge agent ${agent.id} work`]);
+      const noFFResult = await mergeSpawnCtx.run(["git", "merge", "--no-ff", branchName, "-m", `Merge agent ${agent.id} work`]);
       if (noFFResult.exitCode !== 0) {
         return { ok: false, exitCode: 1, stdout: "", stderr: `Merge failed: ${noFFResult.stderr || noFFResult.stdout}` };
       }
@@ -943,7 +931,7 @@ export async function mergeAgent(agent: Agent): Promise<IbCommandResult> {
   // 11. Capture tmux output before killing
   await logAgent(agentDir, "Capturing tmux output...");
   if (tmuxSession) {
-    const hasSession = await mergeRunCmd(["tmux", "has-session", "-t", tmuxSession]);
+    const hasSession = await mergeSpawnCtx.run(["tmux", "has-session", "-t", tmuxSession]);
     if (hasSession.exitCode === 0) {
       await captureTmuxOutputToFile(tmuxSession, join(agentDir, "output.log"));
     }
@@ -958,9 +946,9 @@ export async function mergeAgent(agent: Agent): Promise<IbCommandResult> {
 
   // 13. Kill tmux session
   if (tmuxSession) {
-    const hasSession2 = await mergeRunCmd(["tmux", "has-session", "-t", tmuxSession]);
+    const hasSession2 = await mergeSpawnCtx.run(["tmux", "has-session", "-t", tmuxSession]);
     if (hasSession2.exitCode === 0) {
-      await mergeRunCmd(["tmux", "kill-session", "-t", tmuxSession]);
+      await mergeSpawnCtx.run(["tmux", "kill-session", "-t", tmuxSession]);
       await logAgent(agentDir, "Tmux session stopped");
     }
   }
@@ -976,7 +964,7 @@ export async function mergeAgent(agent: Agent): Promise<IbCommandResult> {
 
   // 15. Remove worktree
   await logAgent(agentDir, "Removing worktree...");
-  const removeResult = await mergeRunCmd(["git", "-C", agent.repoPath, "worktree", "remove", worktreePath, "--force"]);
+  const removeResult = await mergeSpawnCtx.run(["git", "-C", agent.repoPath, "worktree", "remove", worktreePath, "--force"]);
   if (removeResult.exitCode !== 0) {
     try { await rm(worktreePath, { recursive: true, force: true }); } catch { /* ignore */ }
   }
@@ -984,7 +972,7 @@ export async function mergeAgent(agent: Agent): Promise<IbCommandResult> {
 
   // 16. Delete branch
   await logAgent(agentDir, `Deleting branch ${branchName}...`);
-  const deleteBranch = await mergeRunCmd(["git", "-C", agent.repoPath, "branch", "-D", branchName]);
+  const deleteBranch = await mergeSpawnCtx.run(["git", "-C", agent.repoPath, "branch", "-D", branchName]);
   if (deleteBranch.exitCode === 0) {
     await logAgent(agentDir, `Branch deleted: ${branchName}`);
   }
@@ -1154,12 +1142,6 @@ export function resetNewAgentSpawnRunner(): void {
   newAgentDelayOverrideMs = null;
 }
 
-/**
- * Helper: run a command via the newAgent spawn runner and return { stdout, exitCode }.
- */
-async function newAgentRunCmd(cmd: string[]): Promise<{ stdout: string; exitCode: number }> {
-  return newAgentSpawnCtx.run(cmd);
-}
 
 /**
  * Read custom prompts from .ittybitty/prompts/ directory.
@@ -1509,7 +1491,7 @@ export async function newAgent(
     return { ok: false, exitCode: 1, stdout: "", stderr: `Error: agent '${id}' already exists` };
   }
   // Check tmux session
-  const hasSessionResult = await newAgentRunCmd(["tmux", "has-session", "-t", tmuxSession]);
+  const hasSessionResult = await newAgentSpawnCtx.run(["tmux", "has-session", "-t", tmuxSession]);
   if (hasSessionResult.exitCode === 0) {
     return { ok: false, exitCode: 1, stdout: "", stderr: `Error: agent '${id}' already exists` };
   }
@@ -1524,7 +1506,7 @@ export async function newAgent(
   const branchName = `agent/${id}`;
   if (useWorktree) {
     const baseRef = manager ? `agent/${manager}` : "HEAD";
-    const worktreeResult = await newAgentRunCmd([
+    const worktreeResult = await newAgentSpawnCtx.run([
       "git", "-C", rootRepoPath, "worktree", "add", join(agentDir, "repo"), "-b", branchName, baseRef,
     ]);
     if (worktreeResult.exitCode !== 0) {
@@ -1595,9 +1577,9 @@ export async function newAgent(
 
   if (useWorktree && !workerMode) {
     // Check for gh and remote
-    const hasGhResult = await newAgentRunCmd(["which", "gh"]);
+    const hasGhResult = await newAgentSpawnCtx.run(["which", "gh"]);
     const hasGh = hasGhResult.exitCode === 0;
-    const hasRemoteResult = await newAgentRunCmd(["git", "-C", rootRepoPath, "remote"]);
+    const hasRemoteResult = await newAgentSpawnCtx.run(["git", "-C", rootRepoPath, "remote"]);
     const hasRemote = hasRemoteResult.stdout.trim().length > 0;
 
     if (createPRs && hasGh && hasRemote) {
@@ -1736,13 +1718,13 @@ ${qStartExitScript}
   async function cleanupOnFailure() {
     await rm(agentDir, { recursive: true, force: true });
     if (useWorktree) {
-      await newAgentRunCmd(["git", "-C", rootRepoPath, "worktree", "remove", join(agentDir, "repo"), "--force"]);
-      await newAgentRunCmd(["git", "-C", rootRepoPath, "branch", "-D", branchName]);
+      await newAgentSpawnCtx.run(["git", "-C", rootRepoPath, "worktree", "remove", join(agentDir, "repo"), "--force"]);
+      await newAgentSpawnCtx.run(["git", "-C", rootRepoPath, "branch", "-D", branchName]);
     }
   }
 
   // 18. Ensure tmux server is running
-  const startServerResult = await newAgentRunCmd(["tmux", "start-server"]);
+  const startServerResult = await newAgentSpawnCtx.run(["tmux", "start-server"]);
   if (startServerResult.exitCode !== 0) {
     await cleanupOnFailure();
     return { ok: false, exitCode: 1, stdout: "", stderr: "Error: could not start tmux server" };
@@ -1750,7 +1732,7 @@ ${qStartExitScript}
 
   // Start tmux session
   const absStartScript = join(agentDir, "start.sh");
-  const tmuxResult = await newAgentRunCmd([
+  const tmuxResult = await newAgentSpawnCtx.run([
     "tmux", "new-session", "-d", "-x", "60", "-s", tmuxSession, "-c", workPath, absStartScript,
   ]);
   if (tmuxResult.exitCode !== 0) {
@@ -1759,7 +1741,7 @@ ${qStartExitScript}
   }
 
   // 19. Verify tmux session created
-  const verifyResult = await newAgentRunCmd(["tmux", "has-session", "-t", tmuxSession]);
+  const verifyResult = await newAgentSpawnCtx.run(["tmux", "has-session", "-t", tmuxSession]);
   if (verifyResult.exitCode !== 0) {
     await cleanupOnFailure();
     return { ok: false, exitCode: 1, stdout: "", stderr: `Error: tmux session '${tmuxSession}' failed to start` };
@@ -1801,7 +1783,7 @@ ${qStartExitScript}
  */
 async function generatePromptSummary(prompt: string, agentDir: string): Promise<void> {
   const summaryPrompt = `Summarize the following agent task in at most 30 words:\n\n${prompt}`;
-  const result = await newAgentRunCmd(["claude", "-p", summaryPrompt, "--model", "claude-haiku-4-5-20251001"]);
+  const result = await newAgentSpawnCtx.run(["claude", "-p", summaryPrompt, "--model", "claude-haiku-4-5-20251001"]);
   if (result.exitCode !== 0) return;
   const summary = result.stdout.trim();
   if (!summary) return;
@@ -1830,7 +1812,7 @@ async function autoAcceptWorkspaceTrustForNewAgent(tmuxSession: string): Promise
     const delayMs = newAgentDelayOverrideMs !== null ? newAgentDelayOverrideMs : 500;
     if (delayMs > 0) await Bun.sleep(delayMs);
 
-    const captureResult = await newAgentRunCmd([
+    const captureResult = await newAgentSpawnCtx.run([
       "tmux", "capture-pane", "-t", tmuxSession, "-p", "-S", "-",
     ]);
     if (captureResult.exitCode !== 0) continue;
@@ -1851,12 +1833,12 @@ async function autoAcceptWorkspaceTrustForNewAgent(tmuxSession: string): Promise
   if (startedWith !== "permissions") return;
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    await newAgentRunCmd(["tmux", "send-keys", "-t", tmuxSession, "Enter"]);
+    await newAgentSpawnCtx.run(["tmux", "send-keys", "-t", tmuxSession, "Enter"]);
 
     const delayMs = newAgentDelayOverrideMs !== null ? newAgentDelayOverrideMs : 4000;
     if (delayMs > 0) await Bun.sleep(delayMs);
 
-    const captureResult = await newAgentRunCmd([
+    const captureResult = await newAgentSpawnCtx.run([
       "tmux", "capture-pane", "-t", tmuxSession, "-p", "-S", "-",
     ]);
     if (captureResult.exitCode !== 0) continue;
@@ -1874,7 +1856,7 @@ async function autoAcceptWorkspaceTrustForNewAgent(tmuxSession: string): Promise
         const logoDelay = newAgentDelayOverrideMs !== null ? newAgentDelayOverrideMs : 500;
         if (logoDelay > 0) await Bun.sleep(logoDelay);
 
-        const logoCapture = await newAgentRunCmd([
+        const logoCapture = await newAgentSpawnCtx.run([
           "tmux", "capture-pane", "-t", tmuxSession, "-p", "-S", "-",
         ]);
         if (logoCapture.exitCode !== 0) continue;
@@ -1967,12 +1949,6 @@ export function resetDiffStatusSpawnRunner(): void {
   diffStatusSpawnCtx.reset();
 }
 
-/**
- * Helper: run a command via the diff/status spawn runner and return { stdout, stderr, exitCode }.
- */
-async function diffStatusRunCmd(cmd: string[]): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  return diffStatusSpawnCtx.run(cmd);
-}
 
 /**
  * Native diff implementation — replaces `ib diff <id>`.
@@ -1989,7 +1965,7 @@ export async function diffAgent(agent: Agent, opts?: { stat?: boolean }): Promis
   const parentBranch = agent.meta.manager ? `agent/${agent.meta.manager}` : "main";
   const agentBranch = `agent/${agent.id}`;
 
-  const mergeBase = await diffStatusRunCmd(["git", "-C", worktreePath, "merge-base", parentBranch, agentBranch]);
+  const mergeBase = await diffStatusSpawnCtx.run(["git", "-C", worktreePath, "merge-base", parentBranch, agentBranch]);
   if (mergeBase.exitCode !== 0) {
     return { ok: false, exitCode: 1, stdout: "", stderr: `Failed to find merge-base between ${parentBranch} and ${agentBranch}: ${mergeBase.stderr}` };
   }
@@ -1997,7 +1973,7 @@ export async function diffAgent(agent: Agent, opts?: { stat?: boolean }): Promis
   const diffCmd = opts?.stat
     ? ["git", "-C", worktreePath, "diff", "--stat", `${mergeBase.stdout}..${agentBranch}`]
     : ["git", "-C", worktreePath, "diff", `${mergeBase.stdout}..${agentBranch}`];
-  const diff = await diffStatusRunCmd(diffCmd);
+  const diff = await diffStatusSpawnCtx.run(diffCmd);
   return { ok: diff.exitCode === 0, exitCode: diff.exitCode, stdout: diff.stdout, stderr: diff.stderr };
 }
 
@@ -2024,15 +2000,15 @@ export async function statusAgent(agent: Agent): Promise<IbCommandResult> {
   parts.push("");
 
   // Get merge-base
-  const mb = await diffStatusRunCmd(["git", "-C", worktreePath, "merge-base", parentBranch, agentBranch]);
+  const mb = await diffStatusSpawnCtx.run(["git", "-C", worktreePath, "merge-base", parentBranch, agentBranch]);
   if (mb.exitCode === 0 && mb.stdout) {
     // Commits
-    const log = await diffStatusRunCmd(["git", "-C", worktreePath, "log", "--oneline", `${mb.stdout}..${agentBranch}`]);
+    const log = await diffStatusSpawnCtx.run(["git", "-C", worktreePath, "log", "--oneline", `${mb.stdout}..${agentBranch}`]);
     const commitLines = log.stdout ? log.stdout.split("\n") : [];
     const commitCount = commitLines.length;
     if (commitCount > 0) {
       parts.push(`═══ Commits (${commitCount}) vs ${parentBranch} ═══`);
-      const formatted = await diffStatusRunCmd(["git", "-C", worktreePath, "log", "--format=  %h %s", `${mb.stdout}..${agentBranch}`]);
+      const formatted = await diffStatusSpawnCtx.run(["git", "-C", worktreePath, "log", "--format=  %h %s", `${mb.stdout}..${agentBranch}`]);
       if (formatted.stdout) parts.push(formatted.stdout);
       parts.push("");
     } else {
@@ -2042,17 +2018,17 @@ export async function statusAgent(agent: Agent): Promise<IbCommandResult> {
   }
 
   // Uncommitted changes
-  const porcelain = await diffStatusRunCmd(["git", "-C", worktreePath, "status", "--porcelain"]);
+  const porcelain = await diffStatusSpawnCtx.run(["git", "-C", worktreePath, "status", "--porcelain"]);
   if (porcelain.stdout) {
     parts.push("═══ Uncommitted Changes ═══");
-    const short = await diffStatusRunCmd(["git", "-C", worktreePath, "status", "--short"]);
+    const short = await diffStatusSpawnCtx.run(["git", "-C", worktreePath, "status", "--short"]);
     if (short.stdout) parts.push(short.stdout);
     parts.push("");
   }
 
   // File change summary
   if (mb.exitCode === 0 && mb.stdout) {
-    const stat = await diffStatusRunCmd(["git", "-C", worktreePath, "diff", "--stat", `${mb.stdout}..${agentBranch}`]);
+    const stat = await diffStatusSpawnCtx.run(["git", "-C", worktreePath, "diff", "--stat", `${mb.stdout}..${agentBranch}`]);
     if (stat.stdout) {
       const statLines = stat.stdout.split("\n");
       const summaryLine = statLines[statLines.length - 1]?.trim() ?? "";

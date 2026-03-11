@@ -1478,7 +1478,7 @@ Bash watchdog saves tmux output to `debug-logs/watchdog-<timestamp>-unknown.txt`
 
 ### Phase 38: Message Passing & Question Parity Fixes
 
-**Status:** Not started.
+**Status:** Complete.
 
 **Source:** SPEC.md callouts #8, #11, #12, #13, #14 (bash/TS divergences to be resolved).
 
@@ -1494,10 +1494,10 @@ Bash watchdog saves tmux output to `debug-logs/watchdog-<timestamp>-unknown.txt`
 
 Bash determines "unfinished" children by checking their actual tmux state — only `creating`, `running`, `waiting`, or `complete` count as unfinished. `stopped` and `unknown` are excluded. TS currently checks only that the child agent directory exists and `meta.archived` is not true, which incorrectly flags stopped/unknown agents as unfinished.
 
-- [ ] In the stop hook's children check, call `detectAgentStates()` (or equivalent) to get tmux state for each child
-- [ ] Only treat children with state `creating | running | waiting | complete` as unfinished — skip `stopped` and `unknown`
-- [ ] Add tests for the boundary: stopped child → not flagged, running child → flagged
-- [ ] Update SPEC.md §2.4 to remove `[^callout]`, describe both bash and TS as using tmux state
+- [x] In the stop hook's children check, call `detectAgentStates()` (or equivalent) to get tmux state for each child — `findUnfinishedChildren()` uses `captureTmuxOutput()` + `parseState()` per child
+- [x] Only treat children with state `creating | running | waiting | complete` as unfinished — skip `stopped` and `unknown` — `UNFINISHED_STATES` set at `agent-status.ts:290`
+- [x] Add tests for the boundary: stopped child → not flagged, running child → flagged — tests in `agent-status.test.ts:541+`
+- [x] Update SPEC.md §2.4 to remove `[^callout]`, describe both bash and TS as using tmux state — done
 
 #### 38b: `ib send` accepts stdin when no positional message given
 
@@ -1507,11 +1507,11 @@ Bash determines "unfinished" children by checking their actual tmux state — on
 
 Bash supports `echo "msg" | ib send <id>` and `ib send <id> < file.txt`. TS requires the message as a positional CLI argument and errors if none is provided.
 
-- [ ] In the CLI `send` command handler, if no positional message argument is given, attempt to read from `process.stdin` (detect if stdin is a pipe/file with `Bun.stdin.ref()` or check `process.stdin.isTTY`)
-- [ ] If stdin is a TTY (interactive), keep the current error behavior (message is required)
-- [ ] If stdin is a pipe/file, read all bytes and use as the message
-- [ ] Add tests covering stdin input
-- [ ] Update SPEC.md §4.1 item 8 to remove `[^callout]`
+- [x] In the CLI `send` command handler, if no positional message argument is given, attempt to read from `process.stdin` — `index.ts:492-500` checks `process.stdin.isTTY`
+- [x] If stdin is a TTY (interactive), keep the current error behavior (message is required)
+- [x] If stdin is a pipe/file, read all bytes and use as the message
+- [x] Add tests covering stdin input — stdin piping tested via CLI integration
+- [x] Update SPEC.md §4.1 item 8 to remove `[^callout]` — §4.1 now documents both bash and TS supporting stdin
 
 #### 38c: Add `ib ask` command to TS CLI
 
@@ -1529,10 +1529,10 @@ Behavior (per SPEC.md §4.2):
 5. Append new question to `.ittybitty/user-questions.json` with ID format `q-<unix-epoch>-<6-char-hash>` (hash = first 6 hex chars of MD5 of `"<agentId>-<question>\n"`)
 6. Log question to asking agent's `agent.log`
 
-- [ ] Implement `askQuestion(agentId, question)` in `src/ib-commands.ts`
-- [ ] Add `ask` subcommand to CLI
-- [ ] Add tests
-- [ ] Update SPEC.md §4.2 to remove `[^callout]`
+- [x] Implement `askQuestion(agentId, question)` in `src/ib-commands.ts` — line 2109
+- [x] Add `ask` subcommand to CLI — `index.ts:662`
+- [x] Add tests — `ib-commands.test.ts:2831+`
+- [x] Update SPEC.md §4.2 to remove `[^callout]` — §4.2 now documents both bash and TS
 
 #### 38d: Remove redundant `acknowledged: true` field from TS
 
@@ -1542,10 +1542,10 @@ Behavior (per SPEC.md §4.2):
 
 TS sets `acknowledged: true` in addition to `status: "acknowledged"` and `acknowledged_at`. This is redundant — callers can check `acknowledged_at != null` or `status === "acknowledged"`. Bash only sets `status` and `acknowledged_at`.
 
-- [ ] Remove the `acknowledged: true` field from `acknowledgeQuestion`
-- [ ] Remove it from any TypeScript types/interfaces that declare it
-- [ ] Verify no code reads `question.acknowledged` (use grep) — update any such reads to check `status` or `acknowledged_at` instead
-- [ ] Update SPEC.md §4.3 to remove the `[^callout]`
+- [x] Remove the `acknowledged: true` field from `acknowledgeQuestion` — only sets `acknowledged_at` and `status` (line 2222-2223)
+- [x] Remove it from any TypeScript types/interfaces that declare it — no type declares `acknowledged: boolean`
+- [x] Verify no code reads `question.acknowledged` — test at line 2798 explicitly asserts `acknowledged` is undefined
+- [x] Update SPEC.md §4.3 to remove the `[^callout]` — §4.3 structure omits the `acknowledged` boolean field
 
 #### 38e: `ib acknowledge` success output matches bash hint
 
@@ -1555,8 +1555,8 @@ TS sets `acknowledged: true` in addition to `status: "acknowledged"` and `acknow
 
 Bash prints: `"Question acknowledged. Use 'ib send <agent-id> \"answer\"' to respond."` TS returns a generic success message without the send hint.
 
-- [ ] Update `acknowledgeQuestion` to return/print the same hint as bash
-- [ ] Update SPEC.md §4.4 to remove the `[^callout]` for the hint
+- [x] Update `acknowledgeQuestion` to return/print the same hint as bash — line 2227 returns matching hint
+- [x] Update SPEC.md §4.4 to remove the `[^callout]` for the hint — §4.4 now documents both as printing the hint
 
 ---
 

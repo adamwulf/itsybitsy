@@ -1657,7 +1657,7 @@ Migrate TS to the same model:
 
 ### Phase 40: Rate Limit, Reassign, and Post-Create Hook Parity
 
-**Status:** Not started.
+**Status:** Complete.
 
 **Source:** SPEC.md callouts #22, #24, #25, #26.
 

@@ -48,6 +48,12 @@ import {
   resetPerAgentReadMeta,
   setPerAgentSleep,
   resetPerAgentSleep,
+  setWatchdogSleep,
+  resetWatchdogSleep,
+  setWatchdogCaptureTmux,
+  resetWatchdogCaptureTmux,
+  RATE_LIMIT_MAX_RETRIES,
+  RATE_LIMIT_RETRY_DELAY_MS,
   type AgentTracker,
   type StateHandler,
 } from "./watchdog";
@@ -134,6 +140,8 @@ describe("watchdog", () => {
     resetWatchdogNow();
     resetUsageReader();
     resetCompactSpawnRunner();
+    resetWatchdogSleep();
+    resetWatchdogCaptureTmux();
     clearTrackers();
   });
 
@@ -467,6 +475,9 @@ describe("watchdog", () => {
         setWatchdogSpawnRunner(spawnMock.runner);
         // For rate_limited, provide a mock fetchUsage that returns high usage
         setWatchdogFetchUsage(async () => ({ data: { sessionPct: 80, weeklyPct: 50, sessionReset: "1h", weeklyReset: "2d" }, error: false }));
+        // For rate_limited retry loop
+        setWatchdogSleep(async () => {});
+        setWatchdogCaptureTmux(async () => "running some task (Esc to interrupt)");
 
         const tracker = getTracker("a1");
         tracker.waitCounter = 10;
@@ -823,8 +834,16 @@ describe("watchdog", () => {
   });
 
   describe("rate_limited handler", () => {
-    test("sends Enter to tmux on first detection", async () => {
+    test("sends Enter to tmux on first detection with retry loop", async () => {
       setWatchdogFetchUsage(async () => ({ data: { sessionPct: 80, weeklyPct: 50, sessionReset: "1h", weeklyReset: "2d" }, error: false }));
+      setWatchdogSleep(async () => {});
+      // After first Enter, still rate limited; after second, resolved
+      let captureCount = 0;
+      setWatchdogCaptureTmux(async () => {
+        captureCount++;
+        if (captureCount === 1) return "rate_limit_error: usage limit reached";
+        return "running some task (Esc to interrupt)";
+      });
 
       const a1 = agent("a1", "rate_limited");
       await tick([a1]);
@@ -832,12 +851,63 @@ describe("watchdog", () => {
       const enterCalls = spawnMock.calls.filter((c) =>
         c.args.includes("send-keys") && c.args.includes("Enter") && c.args.includes("tmux-a1")
       );
+      // Should have sent Enter twice (first attempt still rate limited, second resolves)
+      expect(enterCalls.length).toBe(2);
+      expect(getTracker("a1").rateLimitBypassed).toBe(true);
+    });
+
+    test("retries up to 3 times if still rate limited", async () => {
+      setWatchdogFetchUsage(async () => ({ data: { sessionPct: 80, weeklyPct: 50, sessionReset: "1h", weeklyReset: "2d" }, error: false }));
+      setWatchdogSleep(async () => {});
+      // Always return rate limited
+      setWatchdogCaptureTmux(async () => "rate_limit_error: usage limit reached");
+
+      const a1 = agent("a1", "rate_limited");
+      await tick([a1]);
+
+      const enterCalls = spawnMock.calls.filter((c) =>
+        c.args.includes("send-keys") && c.args.includes("Enter") && c.args.includes("tmux-a1")
+      );
+      expect(enterCalls.length).toBe(RATE_LIMIT_MAX_RETRIES);
+      expect(getTracker("a1").rateLimitBypassed).toBe(true);
+    });
+
+    test("breaks retry loop early when state clears", async () => {
+      setWatchdogFetchUsage(async () => ({ data: { sessionPct: 80, weeklyPct: 50, sessionReset: "1h", weeklyReset: "2d" }, error: false }));
+      setWatchdogSleep(async () => {});
+      // First capture: resolved immediately
+      setWatchdogCaptureTmux(async () => "running some task (Esc to interrupt)");
+
+      const a1 = agent("a1", "rate_limited");
+      await tick([a1]);
+
+      const enterCalls = spawnMock.calls.filter((c) =>
+        c.args.includes("send-keys") && c.args.includes("Enter") && c.args.includes("tmux-a1")
+      );
+      // Only 1 Enter — first attempt resolved it
       expect(enterCalls.length).toBe(1);
       expect(getTracker("a1").rateLimitBypassed).toBe(true);
     });
 
+    test("waits 2s between retry attempts", async () => {
+      setWatchdogFetchUsage(async () => ({ data: { sessionPct: 80, weeklyPct: 50, sessionReset: "1h", weeklyReset: "2d" }, error: false }));
+      const sleepCalls: number[] = [];
+      setWatchdogSleep(async (ms) => { sleepCalls.push(ms); });
+      setWatchdogCaptureTmux(async () => "rate_limit_error: usage limit reached");
+
+      const a1 = agent("a1", "rate_limited");
+      await tick([a1]);
+
+      expect(sleepCalls.length).toBe(RATE_LIMIT_MAX_RETRIES);
+      for (const ms of sleepCalls) {
+        expect(ms).toBe(RATE_LIMIT_RETRY_DELAY_MS);
+      }
+    });
+
     test("does not re-send Enter on subsequent ticks", async () => {
       setWatchdogFetchUsage(async () => ({ data: { sessionPct: 80, weeklyPct: 50, sessionReset: "1h", weeklyReset: "2d" }, error: false }));
+      setWatchdogSleep(async () => {});
+      setWatchdogCaptureTmux(async () => "running some task (Esc to interrupt)");
 
       const a1 = agent("a1", "rate_limited");
       await tick([a1]);
@@ -855,6 +925,8 @@ describe("watchdog", () => {
 
     test("nudges agent when usage drops below 5% threshold", async () => {
       setWatchdogFetchUsage(async () => ({ data: { sessionPct: 3, weeklyPct: 30, sessionReset: "now", weeklyReset: "2d" }, error: false }));
+      setWatchdogSleep(async () => {});
+      setWatchdogCaptureTmux(async () => "running some task (Esc to interrupt)");
 
       const a1 = agent("a1", "rate_limited");
       await tick([a1]);
@@ -901,6 +973,8 @@ describe("watchdog", () => {
 
     test("resets wait counters", async () => {
       setWatchdogFetchUsage(async () => ({ data: { sessionPct: 80, weeklyPct: 50, sessionReset: "1h", weeklyReset: "2d" }, error: false }));
+      setWatchdogSleep(async () => {});
+      setWatchdogCaptureTmux(async () => "running some task (Esc to interrupt)");
 
       const a1 = agent("a1", "rate_limited");
       const tracker = getTracker("a1");

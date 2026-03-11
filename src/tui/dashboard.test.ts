@@ -664,7 +664,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     dashboard.handleInput("\r");
     await Bun.sleep(10);
     const updated = await Bun.file(metaPath).json();
-    expect(updated.manager).toBe("");
+    expect(updated.manager).toBeNull();
   });
 
   test("reassign fuzzy: selecting a manager updates meta.json", async () => {

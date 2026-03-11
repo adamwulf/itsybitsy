@@ -546,6 +546,11 @@ export async function reassignAgent(agent: Agent, newManager: string | null): Pr
   const agentDir = join(agentsDir, agent.id);
   const metaPath = join(agentDir, "meta.json");
 
+  // Self-reassign check (before reading meta — just compare IDs)
+  if (newManager === agent.id) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: "Cannot reassign agent to itself" };
+  }
+
   // Read agent's meta.json
   let meta: Record<string, unknown>;
   try {
@@ -558,7 +563,17 @@ export async function reassignAgent(agent: Agent, newManager: string | null): Pr
     return { ok: false, exitCode: 1, stdout: "", stderr: `Failed to read meta.json for '${agent.id}'` };
   }
 
-  const oldManager = (meta.manager as string) || "";
+  const oldManager = (meta.manager as string | null) ?? "";
+
+  // Same-parent check: no-op if already has the requested parent
+  const oldManagerNorm = oldManager || null;
+  const newManagerNorm = newManager || null;
+  if (oldManagerNorm === newManagerNorm) {
+    if (newManager) {
+      return { ok: false, exitCode: 1, stdout: "", stderr: "Agent already has this manager" };
+    }
+    return { ok: false, exitCode: 1, stdout: "", stderr: "Agent is already top-level" };
+  }
 
   if (newManager !== null) {
     // Validate new parent exists
@@ -585,7 +600,7 @@ export async function reassignAgent(agent: Agent, newManager: string | null): Pr
   }
 
   // Update meta.json
-  meta.manager = newManager ?? "";
+  meta.manager = newManager ?? null;
   try {
     await Bun.write(metaPath, JSON.stringify(meta, null, 2) + "\n");
   } catch (err) {
@@ -622,12 +637,16 @@ export async function reassignAgent(agent: Agent, newManager: string | null): Pr
 
   // Notify old parent
   if (oldManager) {
-    await notifyAgent(oldManager, `Agent ${agent.id} has been reassigned away from you`);
+    const toLabel = newManager ? `to manager '${newManager}'` : "to top-level";
+    await notifyAgent(oldManager, `[watchdog for ${agent.id}]: Agent reassigned ${toLabel}`);
   }
   // Notify new parent
   if (newManager) {
-    await notifyAgent(newManager, `Agent ${agent.id} has been reassigned to you`);
+    const fromLabel = oldManager ? `was under ${oldManager}` : "was top-level";
+    await notifyAgent(newManager, `[watchdog for ${agent.id}]: Agent reassigned to you (${fromLabel})`);
   }
+  // Notify the agent itself
+  await notifyAgent(agent.id, `[watchdog]: You've been reassigned from ${oldLabel} to ${newLabel}`);
 
   return {
     ok: true,

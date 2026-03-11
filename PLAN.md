@@ -1105,7 +1105,7 @@ The hook is installed in two places in `~/.claude/settings.json`:
 
 ### Phase 31: Parity Fixes — Hooks & Agent Status
 
-**Status:** Not started.
+**Status:** Complete.
 
 **Source:** PARITY_HOOKS_TUI.md, PARITY_LIFECYCLE.md
 
@@ -1119,67 +1119,67 @@ The hook is installed in two places in `~/.claude/settings.json`:
 
 Bash schedules `( sleep 5 && ib hooks agent-status )` when debouncing nudges, ensuring a follow-up check even if no further tool calls occur. TS lacks this — debounced agents could get stuck without follow-up.
 
-- [ ] After writing the nudge debounce timestamp, schedule a delayed recheck using `Bun.spawn` to run a background `ib hooks agent-status` after 5s — **note:** `setTimeout` won't work here because `agent-status.ts` is a CLI entry point that exits after outputting the state; only a detached background process survives.
-- [ ] Test: verify a second check fires ~5s after a debounced nudge
+- [x] After writing the nudge debounce timestamp, schedule a delayed recheck using `Bun.spawn` to run a background `ib hooks agent-status` after 5s — **note:** `setTimeout` won't work here because `agent-status.ts` is a CLI entry point that exits after outputting the state; only a detached background process survives. *(Implemented at agent-status.ts:383-409 — uses `nudge-recheck` marker file to prevent duplicates, spawns detached `bash -c "sleep 5 && rm -f <recheck> && ib hooks agent-status <id>"`.)*
+- [x] Test: verify a second check fires ~5s after a debounced nudge
 
 #### 31b: Stop hook tmux send-keys timing (must-fix)
 
-**File:** `src/hooks/agent-status.ts:356-360,369-376`
+**File:** `src/hooks/agent-status.ts:422-433,440-451`
 
 Bash sends message then waits 0.1s before Enter. TS sends message+Enter in one call with no `-l` flag, which has two problems: (1) tmux interprets special characters (`$`, `!`, etc.) as key bindings instead of literal text when `-l` is omitted, and (2) long messages may not be fully received before Enter is pressed when combined in one call.
 
-- [ ] Add `-l` (literal) flag to the `send-keys` call so tmux treats the message as literal text
-- [ ] Split into two `send-keys` calls: first the message with `-l`, then a separate Enter after a short delay
-- [ ] Match the pattern already used in `sendMessage()` in `ib-commands.ts:1058`
+- [x] Add `-l` (literal) flag to the `send-keys` call so tmux treats the message as literal text *(Done — both nudge and manager notification paths use `-l`.)*
+- [x] Split into two `send-keys` calls: first the message with `-l`, then a separate Enter after a short delay *(Done — 100ms `Bun.sleep` between message and Enter.)*
+- [x] Match the pattern already used in `sendMessage()` in `ib-commands.ts:1058`
 
 #### 31c: Complete + unfinished children message (should-fix)
 
-**File:** `src/hooks/agent-status.ts`
+**File:** `src/hooks/agent-status.ts:206-212`
 
 TS sends a shorter message than bash when an agent completes but has unfinished children. Bash includes specific command suggestions (`ib merge`, `ib kill`, `ib list`, `ib look`, `ib status`, `ib diff`).
 
-- [ ] Match bash message format — include command suggestions for the manager
+- [x] Match bash message format — include command suggestions for the manager *(Done — message includes `ib merge`, `ib kill`, `ib list`, `ib look`, `ib status`, `ib diff`.)*
 
 #### 31d: Nudge message formatting (should-fix)
 
-**File:** `src/hooks/agent-status.ts`
+**File:** `src/hooks/agent-status.ts:273`
 
 Bash: `'WAITING'` and `'I HAVE COMPLETED THE GOAL'` (with quotes). TS omits the quotes. This is more than cosmetic — `parse_state` in bash strips quoted occurrences of `'I HAVE COMPLETED THE GOAL'` before checking for the completion signal, specifically to prevent the nudge message text itself from being mistakenly detected as a completion signal in tmux output. Without the quotes in TS, the nudge prompt could trigger a false positive completion detection.
 
-- [ ] Add single-quotes around the phrases in the nudge message to match bash and prevent false completion detection in parse_state
+- [x] Add single-quotes around the phrases in the nudge message to match bash and prevent false completion detection in parse_state *(Done — message reads `'WAITING' or 'I HAVE COMPLETED THE GOAL'` with single quotes.)*
 
 #### 31e: main-path comment stripping (should-fix)
 
-**File:** `src/hooks/main-path.ts`
+**File:** `src/hooks/main-path.ts:58-62`
 
 Bash strips `#` comments from compound `cd` commands. TS regex doesn't handle this.
 
-- [ ] Add `#` to the compound command stripping regex
-- [ ] Test: `cd /foo # some comment` should extract `/foo`
+- [x] Add `#` to the compound command stripping regex *(Done — separate comment-stripping regex at lines 59-62.)*
+- [x] Test: `cd /foo # some comment` should extract `/foo` *(Test exists at main-path.test.ts:198-207.)*
 
 #### 31f: inject-status question counts (should-fix)
 
-**File:** `src/hooks/inject-status.ts`
+**File:** `src/hooks/inject-status.ts:94,127-152,281-282`
 
 Bash includes pending question count in the brief status summary. TS doesn't.
 
-- [ ] Read `user-questions.json` for each repo and include count in brief summary (e.g., `"2 running, 1 waiting, 1 question"`)
-- [ ] Filter out questions from dead/archived agents (match bash behavior)
+- [x] Read `user-questions.json` for each repo and include count in brief summary (e.g., `"2 running, 1 waiting, 1 question"`) *(Done — `countPendingQuestions()` reads questions, `briefSummary()` accepts `questionCount` param, CLI wires them together.)*
+- [x] Filter out questions from dead/archived agents (match bash behavior) *(Done — filters by active agent IDs at line 143.)*
 
 #### 31g: Debug file content in stop hook (nice-to-have)
 
-**File:** `src/hooks/agent-status.ts`
+**File:** `src/hooks/agent-status.ts:103-122`, `src/watchdog.ts:255-299`
 
 Bash saves tmux capture output + `last_assistant_message` + parse_state reason in debug files. TS only saves `lastMessage`.
 
-- [ ] Include tmux capture output and parse_state reason in debug file content
-- [ ] Also add debug log saving on `unknown` state in watchdog (bash does this, TS doesn't — see `src/watchdog.ts`)
+- [x] Include tmux capture output and parse_state reason in debug file content *(Done — debug file includes tmux output, parse-state reason, and last_assistant_message at agent-status.ts:103-122.)*
+- [x] Also add debug log saving on `unknown` state in watchdog (bash does this, TS doesn't — see `src/watchdog.ts`) *(Done — `saveUnknownDebugLog()` at watchdog.ts:281-299 saves tmux output on transition to unknown.)*
 
 ---
 
 ### Phase 32: Parity Fixes — CLI Commands
 
-**Status:** Not started.
+**Status:** Complete (all should-fix items done; one nice-to-have remains).
 
 **Source:** PARITY_HOOKS_TUI.md (sections 2.1–2.8)
 
@@ -1193,63 +1193,59 @@ Bash saves tmux capture output + `last_assistant_message` + parse_state reason i
 
 Bash writes hooks to `.claude/settings.local.json` (project-local). TS writes to `~/.claude/settings.json` (global). This was an **intentional** change in Phase 26c (not a bug). Global hooks mean itsybitsy's safety hooks apply to all Claude sessions, not just the itsybitsy project.
 
-- [ ] Document this intentional divergence in a comment in `ib-commands.ts` so future developers understand the choice
-- [ ] Consider adding a `--local` flag to allow project-scoped installation if desired
+- [x] Document this intentional divergence in a comment in `ib-commands.ts` so future developers understand the choice — done at `src/ib-commands.ts:2356-2363`
+- [ ] Consider adding a `--local` flag to allow project-scoped installation if desired — nice-to-have, not implemented
 
 #### 32b: `ib list --json` (nice-to-have)
 
 **File:** `src/index.ts` (list command)
 
-- [ ] Add `--json` flag that outputs agent data as a JSON array for scripting
+- [x] Add `--json` flag that outputs agent data as a JSON array for scripting — done at `src/index.ts:133,142-173`
 
 #### 32c: `ib look --follow` (should-fix)
 
 **File:** `src/index.ts` (look command)
 
-- [ ] Add `--follow` flag that runs `tmux attach -r -t <session>` for live read-only view
+- [x] Add `--follow` flag that runs `tmux attach -r -t <session>` for live read-only view — done at `src/index.ts:376,382-395`
 
 #### 32d: `ib diff --stat` (nice-to-have)
 
 **File:** `src/index.ts` (diff command)
 
-- [ ] Add `--stat` flag that runs `git diff --stat "$MERGE_BASE..$BRANCH"` (stat of merge-base range, matching bash behavior) instead of full diff
+- [x] Add `--stat` flag that runs `git diff --stat "$MERGE_BASE..$BRANCH"` (stat of merge-base range, matching bash behavior) instead of full diff — done at `src/index.ts:464` and `src/ib-commands.ts:1972-1974`
 
 #### 32e: `ib status` improvements (should-fix)
 
-**File:** `src/index.ts` (status command)
+**File:** `src/ib-commands.ts` (`statusAgent`)
 
-Bash shows agent ID, branch, worktree path, structured section headers with counts, and `git diff --stat` summary. TS just shows plain git output.
-
-- [ ] Add header with agent ID, branch name, worktree path
-- [ ] Use `git merge-base` with the parent branch (derived from `meta.json`'s `manager` field: if manager exists use `agent/<manager-id>`, otherwise default to `main`) rather than hardcoding `main` — bash determines this from the caller's current HEAD, so when called from main it's equivalent, but this is more correct
-- [ ] Add section headers (e.g., `═══ Commits (N) vs <parent-branch> ═══`)
-- [ ] Add `git diff --stat` summary
+- [x] Add header with agent ID, branch name, worktree path — done at `src/ib-commands.ts:1996-1999`
+- [x] Use `git merge-base` with the parent branch (derived from `meta.json`'s `manager` field) — done at `src/ib-commands.ts:1992,2002`
+- [x] Add section headers (e.g., `═══ Commits (N) vs <parent-branch> ═══`) — done at `src/ib-commands.ts:2009,2014`
+- [x] Add `git diff --stat` summary — done at `src/ib-commands.ts:2029-2033`
 
 #### 32f: `ib send --from` (should-fix)
 
 **File:** `src/index.ts`
 
-Bash supports `--from <id>` to auto-prefix messages with sender identity. Note: `sendMessage()` in `ib-commands.ts` already supports this via `opts.fromAgent` and auto-detects the sender from cwd — only the CLI argument parsing is missing.
-
-- [ ] Add `--from <id>` flag parsing in the `send` case in `index.ts`
-- [ ] Pass the parsed value to the existing `sendMessage(agent, message, { fromAgent })` parameter
+- [x] Add `--from <id>` flag parsing in the `send` case in `index.ts` — done at `src/index.ts:479-489`
+- [x] Pass the parsed value to the existing `sendMessage(agent, message, { fromAgent })` parameter — done at `src/index.ts:507`
 
 #### 32g: Other missing CLI commands (nice-to-have)
 
 **File:** `src/index.ts`
 
-- [ ] `ib log <message>` — write to agent log from CLI
-- [ ] `ib new-agent --prompt-file <path>` — read prompt from file
-- [ ] `ib parse-state` — debug command for state parsing
-- [ ] `ib questions --all` — show acknowledged questions
-- [ ] `ib status --json` — bash supports JSON output for status (nice-to-have, analogous to `ib list --json`)
-- [ ] `ib diff` — already uses `git merge-base HEAD main` (so merge-base logic exists), but needs to use the parent branch instead of hardcoding `main` — distinct from 32e where status uses `main..HEAD` range with no merge-base at all; fix together
+- [x] `ib log <message>` — write to agent log from CLI — done at `src/index.ts:707-758`
+- [x] `ib new-agent --prompt-file <path>` — read prompt from file — done at `src/index.ts:606-612`
+- [x] `ib parse-state` — debug command for state parsing — done at `src/index.ts:760-797`
+- [x] `ib questions --all` — show acknowledged questions — done at `src/index.ts:437,444-446`
+- [ ] `ib status --json` — bash supports JSON output for status (nice-to-have, analogous to `ib list --json`) [^needs review] Not implemented; SPEC.md does not mention `--json` for `ib status` either, so this is a bash-only feature gap
+- [x] `ib diff` — uses parent branch from `meta.json` manager field instead of hardcoding `main` — done at `src/ib-commands.ts:1964`
 
 ---
 
 ### Phase 33: Parity Fixes — TUI Watch Features
 
-**Status:** Not started.
+**Status:** Complete.
 
 **Source:** PARITY_HOOKS_TUI.md (section 3)
 
@@ -1257,22 +1253,22 @@ Bash supports `--from <id>` to auto-prefix messages with sender identity. Note: 
 
 **Complexity:** Medium.
 
-**Note:** 33a and 33b were removed after code review confirmed they are already implemented. All five keybindings (`t`, `w`, `o`, `c`, `Enter`) exist in `dashboard.ts`. Usage tracking is fully implemented via `src/usage.ts` with status bar display and polling timer.
+**Note:** 33a and 33b were removed after code review confirmed they are already implemented. All five keybindings (`t`, `w`, `o`, `c`, `Enter`) exist in `dashboard.ts`. Usage tracking is fully implemented via `src/usage.ts` with status bar display and polling timer. 33a (below) was also confirmed implemented during audit.
 
 #### 33a: Settings/permissions editor (nice-to-have)
 
-**File:** `src/tui/dashboard.ts`, `src/tui/dialog-handler.ts`
+**File:** `src/tui/dashboard.ts`, `src/tui/dialog-handler.ts`, `src/tui/agent-actions.ts`
 
-Bash has a full settings editor including a permissions allow/deny list editor. The TS setup dialog already has three tabs ("Setup", "Project", "User") implemented in `dialog-handler.ts`, and tabs 1 and 2 already show and support editing config values via `buildConfigTabContent`/`handleSetupConfigTab`. What's missing is only the permissions editor for allow/deny tool lists.
+Bash has a full settings editor including a permissions allow/deny list editor. The TS setup dialog has three tabs ("Setup", "Project", "User") implemented in `dialog-handler.ts`, and tabs 1 and 2 show and support editing config values via `buildConfigTabContent`/`handleSetupConfigTab`. The permissions editor is fully implemented as a dedicated `permissions-editor` dialog type with Allow/Deny tab switching, add/delete/navigate items, input mode, and save callback. Tests in `setup-dialog.test.ts` (lines 497–765). Note: SPEC.md does not describe a TUI permissions editor — the permissions section (§2.2) covers only `settings.local.json` generation, not a TUI editing UI. This is an implementation-only feature with no spec coverage.
 
-- [ ] Add permissions editor (allow/deny tool lists) to the setup dialog
-- [ ] Add number/string input dialogs for config values if not already present
+- [x] Add permissions editor (allow/deny tool lists) to the setup dialog
+- [x] Add number/string input dialogs for config values if not already present
 
 ---
 
 ### Phase 34: Code Quality & Dead Code Cleanup
 
-**Status:** Not started.
+**Status:** Partially complete (4 of 9 sub-phases done; 2 partially done; 3 not started).
 
 **Source:** CODE_REVIEW.md
 
@@ -1280,96 +1276,89 @@ Bash has a full settings editor including a permissions allow/deny list editor. 
 
 **Complexity:** Low-Medium — mostly mechanical refactoring.
 
-#### 34a: Fix duplicate `merge-check` case in CLI (high priority)
+#### 34a: Fix duplicate `merge-check` case in CLI (high priority) ✅
 
-**File:** `src/index.ts:433,451`
+**File:** `src/index.ts`
 
-The `merge-check` case appears twice in the main switch statement. The second occurrence is dead code.
+The duplicate `merge-check` case has been removed. Only one instance remains at line 528.
 
-- [ ] Remove the dead duplicate case
-- [ ] Verify the remaining case has the correct implementation
+- [x] Remove the dead duplicate case
+- [x] Verify the remaining case has the correct implementation
 
-#### 34b: Consolidate spawn runner injection (medium priority)
+#### 34b: Consolidate spawn runner injection (medium priority) — Partially complete
 
 **Files:** `src/ib-commands.ts`, `src/agent-lifecycle.ts`, `src/watchdog.ts`, `src/tmux-poller.ts`, `src/usage.ts`, `src/auto-compact.ts`, `src/ghostty.ts`
 
-14 separate module-level mutable injection variables with `set*/reset*` boilerplate. 10 of them use the same `SpawnFn` type (tmux-poller, agent-lifecycle, watchdog, and 6 in ib-commands); `src/usage.ts` has two injection points — `setTestFetch` uses `FetchLike` and `setTestSpawn` uses `SpawnFn`; `src/auto-compact.ts` uses `CompactSpawnFn` (a simpler type); `src/ghostty.ts` has two — `setSpawn` uses `GhosttySpawnFn` and `setWhich` uses `WhichFn`. This is error-prone (test leaks) and hard to maintain.
+A `SpawnContext` class was introduced in `src/types.ts` with a shared `runCmd()` helper that drains both stdout and stderr via `Promise.all`. `ib-commands.ts` now uses 5 named `SpawnContext` instances (`killPauseSpawnCtx`, `nukeResumeSpawnCtx`, `mergeSpawnCtx`, `sendSpawnCtx`, `newAgentSpawnCtx`, `diffStatusSpawnCtx`). However, `tmux-poller.ts`, `agent-lifecycle.ts`, `usage.ts`, `ghostty.ts`, and `tui/color-scheme.ts` still use the old module-level `set*/reset*` pattern with bare variables.
 
-- [ ] Design a single DI pattern — either a context object threaded through functions, or a centralized spawn registry
-- [ ] Consolidate all spawn runners into the shared pattern
+- [x] Design a single DI pattern — `SpawnContext` class in `src/types.ts`
+- [ ] Consolidate all spawn runners into the shared pattern — `ib-commands.ts` migrated; `tmux-poller.ts`, `agent-lifecycle.ts`, `usage.ts`, `ghostty.ts`, `color-scheme.ts` still use old pattern
 - [ ] Update all tests to use the unified pattern
 
-#### 34c: Consolidate `runCmd` helpers (low priority)
+#### 34c: Consolidate `runCmd` helpers (low priority) — Partially complete
 
 **Files:** `src/ib-commands.ts` (4 variants: `nukeResumeRunCmd`, `mergeRunCmd`, `newAgentRunCmd`, `diffStatusRunCmd`), `src/agent-lifecycle.ts` (1 variant)
 
-5 near-identical `runCmd` wrappers that spawn → read stdout → await exit. They fall into three stderr patterns:
-- **Deadlock risk** — pipe stderr but never drain: `nukeResumeRunCmd` (ib-commands:116), `agent-lifecycle.ts:runCmd` (line 45)
-- **Sequential drain** — reads stderr after stdout, safe but not parallel: `newAgentRunCmd` (ib-commands:1131)
-- **Correct** — drains both with `Promise.all`: `mergeRunCmd` (ib-commands:716), `diffStatusRunCmd` (ib-commands:1893)
+A shared `runCmd()` was extracted to `src/types.ts` and all 5 wrappers now delegate to `SpawnContext.run()` which calls that shared helper. The wrappers still exist as thin one-liners (e.g., `nukeResumeRunCmd` → `nukeResumeSpawnCtx.run(cmd)`), but the core drain logic is unified. The deadlock risk is eliminated since the shared helper uses `Promise.all`.
 
-Note: `src/tmux-poller.ts` does NOT have a runCmd variant.
+- [x] Extract a shared `runCmd` helper that drains both stdout and stderr via `Promise.all`
+- [ ] Replace all 5 variants with calls to the shared helper — wrappers still exist as thin delegates; could be inlined but functional correctness is achieved
 
-- [ ] Extract a shared `runCmd` helper that drains both stdout and stderr via `Promise.all`
-- [ ] Replace all 5 variants with calls to the shared helper (including `newAgentRunCmd` which currently drains sequentially)
+#### 34d: Extract shared constants (low priority) ✅
 
-#### 34d: Extract shared constants (low priority)
+**File:** `src/hooks/shared.ts`
 
-**Files:** `src/hooks/intercept-task.ts:25`, `src/hooks/inject-status.ts:37`, `src/hooks/session-start.ts:18`
+`AGENT_CWD_PATTERN` has been extracted to `src/hooks/shared.ts` with the capturing-group version. All three hook files (`intercept-task.ts`, `inject-status.ts`, `session-start.ts`) now import from `shared.ts`.
 
-`AGENT_CWD_PATTERN` regex appears in 3 hook files but is **not identical**: `intercept-task.ts` and `session-start.ts` use `([^/]+)` (capturing group for agent ID), while `inject-status.ts` uses `[^/]+` (non-capturing, since it doesn't need the agent ID).
+- [x] Extract to `src/hooks/shared.ts` — canonical capturing-group version, all consumers updated
 
-- [ ] Extract to `src/hooks/shared.ts` or `src/constants.ts` — use the capturing-group version as canonical, and update `inject-status.ts` to use a non-capturing wrapper or just use the same pattern (the capture group is harmless if unused)
+#### 34e: Fix `as any` in production code (medium priority) ✅
 
-#### 34e: Fix `as any` in production code (medium priority)
+**File:** `src/ib-commands.ts`
 
-**File:** `src/ib-commands.ts:1255`
+No `as any` casts remain in `src/ib-commands.ts`. The settings access has been rewritten with typed access.
 
-`(baseSettings as any)?.hooks?.PreToolUse` bypasses type safety.
+- [x] Define a proper interface for the settings file structure
+- [x] Replace `as any` with typed access
 
-- [ ] Define a proper interface for the settings file structure
-- [ ] Replace `as any` with typed access
+#### 34f: Rename conflicting `AgentProvider` type (low priority) ✅
 
-#### 34f: Rename conflicting `AgentProvider` type (low priority)
+**Files:** `src/watchdog.ts`, `src/hooks/inject-status.ts`
 
-**Files:** `src/watchdog.ts:30`, `src/hooks/inject-status.ts:120-124`
+`inject-status.ts` now uses `AgentDataSource` (exported at line 156). `watchdog.ts` retains `AgentProvider` (line 35). No name conflict remains.
 
-Two completely different `AgentProvider` types with the same name.
+- [x] Rename one — `inject-status.ts` now uses `AgentDataSource`
 
-- [ ] Rename one (e.g., `AgentDataSource` for inject-status) to avoid confusion
+#### 34g: Audit catch blocks without error binding (low priority) — Not started
 
-#### 34g: Audit catch blocks without error binding (low priority)
-
-**Files:** Multiple — 128 `catch {` blocks (without error variable) across 23 files
+**Files:** Multiple — 142 `catch {` blocks (without error variable) across 23 files (up from 128 at time of review)
 
 Note: these are NOT empty — most have meaningful bodies (`return`, `continue`, comments). The issue is that they don't capture the error, making it impossible to distinguish expected errors (ENOENT) from unexpected ones. Many already have explanatory comments; the gap is the ones that silently swallow unexpected errors.
 
 - [ ] Audit `catch {` blocks that have no explanatory comment — add `/* expected: ... */` or `/* todo: log */`
 - [ ] Consider logging non-ENOENT errors to stderr or agent.log in critical paths
 
-#### 34h: Fix stderr deadlock in runCmd variants (medium priority)
+#### 34h: Fix stderr deadlock in runCmd variants (medium priority) ✅
 
-**Files:** `src/ib-commands.ts:116-121` (`nukeResumeRunCmd`), `src/agent-lifecycle.ts:45-50` (`runCmd`)
+**Files:** `src/ib-commands.ts`, `src/agent-lifecycle.ts`
 
-Both functions pipe stderr but never drain it. If a command produces enough stderr to fill the pipe buffer, the process deadlocks. `mergeRunCmd` already does this correctly with `Promise.all`.
+All `runCmd` variants now delegate to `SpawnContext.run()` (or the shared `runCmd()` in `types.ts`), which drains both stdout and stderr via `Promise.all`. The deadlock risk is eliminated. Resolved as a side effect of the `SpawnContext` migration in 34b/34c.
 
-- [ ] Drain both stdout and stderr with `Promise.all` in both `nukeResumeRunCmd` and `agent-lifecycle.ts:runCmd`, matching `mergeRunCmd` pattern
+- [x] Drain both stdout and stderr with `Promise.all` in all runCmd variants
 
-**Note:** 34h overlaps with 34c — if 34c (consolidate all 5 variants into a shared helper) is completed first, 34h is automatically resolved. If doing a targeted fix only, 34h can be applied independently to just the 2 deadlock-risk variants.
+#### 34i: Use `sed` alternative for JSON modification in start.sh/resume.sh (low priority) ✅
 
-#### 34i: Use `sed` alternative for JSON modification in start.sh/resume.sh (low priority)
+**Files:** `src/ib-commands.ts:391` (start script heredoc), `src/ib-commands.ts:1696` (resume script heredoc)
 
-**Files:** `src/ib-commands.ts:392-395` (start script heredoc), `src/ib-commands.ts:1682-1685` (resume script heredoc)
+Both occurrences now use `bun -e` one-liners that properly parse, modify, and rewrite `meta.json` with `JSON.parse`/`JSON.stringify` instead of `sed`. This handles nested objects and formatted JSON correctly.
 
-Using `sed` to insert `claude_pid` into `meta.json` is brittle — assumes single-line JSON ending with `}` on the last line; breaks with nested objects or formatted JSON. Both the start script and the resume script contain the same pattern.
-
-- [ ] Replace both occurrences with a bun one-liner or restructure to avoid in-script JSON manipulation
+- [x] Replace both occurrences with a bun one-liner — done
 
 ---
 
-### Phase 35: Test Coverage Improvements
+### Phase 35: Test Coverage Improvements -- COMPLETE
 
-**Status:** Not started.
+**Status:** Complete.
 
 **Source:** CODE_REVIEW.md (M5, M6, I1)
 
@@ -1379,56 +1368,47 @@ Using `sed` to insert `claude_pid` into `meta.json` is brittle — assumes singl
 
 #### 35a: CLI entrypoint tests (high priority)
 
-**File:** `src/index.ts` (707 lines, no test file)
+**File:** `src/index.ts`
 
-The main CLI switch has no tests, including the duplicate `merge-check` case.
-
-- [ ] Extract CLI logic into testable functions (e.g., `collect()` and `findManager()` from inline closures)
-- [ ] Add integration tests for: `list`, `look`, `diff`, `status`, `tree`, `merge-check`, `questions`, `acknowledge`
-- [ ] Verify arg parsing for all commands
+- [x] Extract CLI logic into testable functions — `collectAgents()`, `findManagerInTree()`, and `matchAgentById()` are exported from `src/index.ts` and tested in `src/index.test.ts`
+- [x] Add integration tests for CLI commands — `src/index.test.ts` has subprocess-based tests for `list`, `look`, `send`, `kill`, `merge`, `resume`, `new-agent`, `hook-check-path`, `hook-status`, `hook-permission-denied`, `hooks`, `acknowledge` (`ack`), and `questions` (`q`). Also verifies no-command and unknown-command show help.
+- [x] Verify arg parsing for all commands — arg parsing verified via subprocess tests (e.g., `--force` stripping, missing-agent-id usage errors)
+- [x] Duplicate `merge-check` case verified — test asserts exactly one `case "merge-check":` in source
 
 #### 35b: TUI module tests (medium priority)
 
 **Files:** `src/tui/agent-actions.ts`, `src/tui/pane-manager.ts`, `src/tui/dialog-handler.ts`
 
-No dedicated test files for these modules.
-
-- [ ] `agent-actions.test.ts` — test each action handler (kill, merge, send, etc.)
-- [ ] `pane-manager.test.ts` — test pane mode cycling, content loading
-- [ ] `dialog-handler.test.ts` — test dialog state machine transitions
+- [x] `agent-actions.test.ts` — tests kill, nuke, nukeAll, resume, pause, send, newAgent, scrollUp/Down, help, resizeLeft action handlers (411 lines)
+- [x] `pane-manager.test.ts` — tests pane mode cycling, jumpToMode, triggerAsyncLoadIfNeeded, RightPaneComponent rendering, colorizeDiff, colorizeLog (273 lines)
+- [x] `dialog-handler.test.ts` — tests all dialog types (help, confirm, input, select, fuzzy, textarea), state transitions, escape handling, fuzzyFilterIndices, wrapTextareaLines, deleteWord, handleTextEdit (372 lines)
 
 #### 35c: Test infrastructure improvements (low priority)
 
 **Files:** Various test files
 
-Heavy `as any` usage (81 occurrences across 7 test files). Note: `test-utils.ts` already exists with `makeAgent()`, `makeFlatAgent()`, and `makeFlatRepoHeader()` factories used by 5 test files. The `as any` casts are not just for Agent mock creation — the breakdown includes: state-type narrowing (`agent.state = "running" as any` — 45 in dashboard.test.ts), spawn runner mocks (ib-commands.test.ts), fetch function mocks (usage.test.ts), and watcher dependency mocks.
-
-- [ ] Extend `test-utils.ts` with typed helpers for spawn runners, fetch mocks, and agent state assignment (don't create — it already exists)
-- [ ] Adopt the extended helpers consistently to reduce `as any` casts across all 7 test files
+- [x] Extend `test-utils.ts` with typed helpers — added `setAgentState()`, `makeSpawnResult()`, and `mockFetch()` helpers alongside existing `makeAgent()`, `makeFlatAgent()`, `makeFlatRepoHeader()`
+- [x] Adopt the extended helpers — `setAgentState` used in dashboard.test.ts, `makeSpawnResult` used in ib-commands.test.ts and dashboard.test.ts, `mockFetch` used in usage.test.ts. `as any` count reduced from 81 to 74 across 9 test files (was 7 files, now 9 due to new test files). Remaining `as any` casts are mostly in dialog-handler.test.ts (20) for dialog field access, dashboard.test.ts (16) for state narrowing, and watcher.test.ts (14) for mock dependencies — further reduction would require deeper type refactoring.
 
 #### 35d: Validate `readAgentMeta` more thoroughly (medium priority)
 
-**File:** `src/agents.ts:70-84` (`readAgentMeta` function)
+**File:** `src/agents.ts:83-110` (`readAgentMeta` function)
 
-Only `id` (line 77) and `tmux_session` (line 81, with string default) are type-checked. Other fields (`created_epoch`, `worker`, `model`, `branch`, etc.) are cast without validation via `data as AgentMeta` at line 84.
-
-- [ ] Add type guards for all required `AgentMeta` fields
-- [ ] Test: pass meta.json with wrong-typed fields, verify graceful error
+- [x] Add type guards for all required `AgentMeta` fields — `readAgentMeta` now validates and applies defaults for all fields: `id` (required string), `session_id`, `tmux_session`, `prompt`, `created` (string defaults), `manager` (nullable string), `created_epoch` (number default 0), `worktree`, `worker`, `yolo` (boolean defaults), `model` (string default "unknown"), `claude_pid` (string default ""), `summary` (optional, deleted if wrong type)
+- [x] Test: pass meta.json with wrong-typed fields, verify graceful handling — `agents.test.ts` has dedicated `readAgentMeta` tests including "wrong-typed fields gets defaults applied" test case
 
 #### 35e: Config type validation (low priority)
 
-**File:** `src/config.ts:88-106`
+**File:** `src/config.ts:59-70` (`validateConfigValue` function)
 
-Values from `.ittybitsy.json` are stored without type checking against `ConfigKeyDef.type`.
-
-- [ ] Add runtime type validation (e.g., `"maxAgents": "ten"` should be rejected)
-- [ ] Test: pass wrong-typed config values, verify they're rejected or fall back to defaults
+- [x] Add runtime type validation — `validateConfigValue()` validates number (rejects NaN), boolean, string, and string[] types. `readConfig()` calls it for each config key and falls back to default on validation failure.
+- [x] Test: pass wrong-typed config values, verify they're rejected or fall back to defaults — `config.test.ts` has comprehensive tests: `validateConfigValue` unit tests for all 4 types, plus integration tests for wrong-typed values (`maxAgents: "ten"`, `model: 123`, `createPullRequests: "yes"`, `permissions.manager.allow: "string"`) all falling back to defaults. Also tests wrong-typed project value falling through to valid user value.
 
 ---
 
-### Phase 36: Watchdog & Lifecycle Improvements
+### Phase 36: Watchdog & Lifecycle Improvements -- PARTIALLY COMPLETE
 
-**Status:** Not started.
+**Status:** 36a partial, 36b complete, 36c complete.
 
 **Source:** PARITY_LIFECYCLE.md, CODE_REVIEW.md
 
@@ -1436,34 +1416,34 @@ Values from `.ittybitsy.json` are stored without type checking against `ConfigKe
 
 **Complexity:** Low-Medium.
 
-#### 36a: Watchdog lock file atomicity (medium priority)
+#### 36a: Watchdog lock file atomicity (medium priority) -- PARTIALLY COMPLETE
 
-**File:** `src/watchdog.ts:392-411`
+**File:** `src/watchdog.ts:453-511`
 
 TOCTOU race: read lock → check PID → write PID. Two processes could acquire simultaneously.
 
-- [ ] Use `O_EXCL` flag for atomic lock file creation (requires `node:fs` `openSync` with `O_CREAT | O_EXCL` flags — note this means `acquireWatchdogLock` may need to keep `node:fs` even after the migration below)
-- [ ] Or use advisory file locking as an alternative
-- [ ] Migrate `releaseWatchdogLock` and `isWatchdogLockHeld` from `require("fs")` sync APIs to `Bun.file()`/`Bun.write()` for consistency (L1 from CODE_REVIEW.md) — these two functions don't need `O_EXCL` and can be fully migrated
+- [x] Use `O_EXCL` flag for atomic lock file creation (`atomicCreateLock()` at L453 uses `O_CREAT | O_EXCL | O_WRONLY`; `acquireWatchdogLock()` at L464 calls it, falling back to stale-PID check + retry)
+- [x] ~~Or use advisory file locking as an alternative~~ (O_EXCL approach chosen)
+- [ ] Migrate `releaseWatchdogLock` and `readLockPid` from `node:fs` sync APIs (`readFileSync`, `unlinkSync`) to `Bun.file()`/`Bun.write()` for consistency (L1 from CODE_REVIEW.md) — these two functions don't need `O_EXCL` and can be fully migrated. Note: `isWatchdogLockHeld` was renamed to `readLockPid` during implementation. [^needs review] Still uses `readFileSync`/`unlinkSync` from `node:fs` at L491-510; not a correctness issue but a consistency gap vs project convention of preferring Bun APIs.
 
-#### 36b: Watchdog debug logs on unknown state (nice-to-have)
+#### 36b: Watchdog debug logs on unknown state (nice-to-have) -- COMPLETE
 
-**File:** `src/watchdog.ts`
+**File:** `src/watchdog.ts:255-299`
 
-Bash watchdog saves tmux output to `debug-logs/watchdog-<timestamp>-unknown.txt` on unknown state. TS doesn't. Note: bash only saves on the *transition into* unknown state (not on every tick), so the debug file captures the moment the state became unclear.
+Bash watchdog saves tmux output to `debug-logs/watchdog-<timestamp>-unknown.txt` on unknown state. TS now matches.
 
-- [ ] Save debug log on first transition to unknown state (tmux capture + parse_state reason)
-- [ ] Use same `debug-logs/` directory pattern as bash
+- [x] Save debug log on first transition to unknown state (`handleUnknown` at L255 checks `tracker.previousState !== "unknown"`, calls `saveUnknownDebugLog` which captures tmux output)
+- [x] Use same `debug-logs/` directory pattern as bash (`debug-logs/watchdog-<timestamp>-unknown.txt` at L290-294)
 
-#### 36c: Model context size configuration (low priority)
+#### 36c: Model context size configuration (low priority) -- COMPLETE
 
-**File:** `src/auto-compact.ts:44-52`
+**File:** `src/auto-compact.ts:39-78`
 
-**Note:** This is a code quality improvement, not a parity issue — bash uses the same substring matching approach. Hardcoded model context sizes with substring matching. New models silently get 200K default with no warning.
+**Note:** This is a code quality improvement, not a parity issue — bash uses the same substring matching approach.
 
-- [ ] Log a warning when falling back to default for an unknown model
-- [ ] Consider moving context sizes to a named lookup table for easier maintenance
-- **Note:** The explicit Claude 4.6 branch (lines 48-49) returns 200K — the same as the default. It is effectively redundant code but serves as documentation that 4.6 was explicitly considered.
+- [x] Log a warning when falling back to default for an unknown model (L72-76: logs once per model via `warnedModels` Set, `resetWarnedModels()` exported for testing)
+- [x] Context sizes moved to a named lookup table `MODEL_CONTEXT_SIZES` (L47-55) for easier maintenance
+- **Note:** The explicit Claude 4.6 branches (L50-51) return 200K — the same as the default. Effectively redundant but serves as documentation that 4.6 was explicitly considered.
 
 ---
 
@@ -1498,7 +1478,7 @@ Bash watchdog saves tmux output to `debug-logs/watchdog-<timestamp>-unknown.txt`
 
 ### Phase 38: Message Passing & Question Parity Fixes
 
-**Status:** Not started.
+**Status:** Complete.
 
 **Source:** SPEC.md callouts #8, #11, #12, #13, #14 (bash/TS divergences to be resolved).
 
@@ -1514,10 +1494,10 @@ Bash watchdog saves tmux output to `debug-logs/watchdog-<timestamp>-unknown.txt`
 
 Bash determines "unfinished" children by checking their actual tmux state — only `creating`, `running`, `waiting`, or `complete` count as unfinished. `stopped` and `unknown` are excluded. TS currently checks only that the child agent directory exists and `meta.archived` is not true, which incorrectly flags stopped/unknown agents as unfinished.
 
-- [ ] In the stop hook's children check, call `detectAgentStates()` (or equivalent) to get tmux state for each child
-- [ ] Only treat children with state `creating | running | waiting | complete` as unfinished — skip `stopped` and `unknown`
-- [ ] Add tests for the boundary: stopped child → not flagged, running child → flagged
-- [ ] Update SPEC.md §2.4 to remove `[^callout]`, describe both bash and TS as using tmux state
+- [x] In the stop hook's children check, call `detectAgentStates()` (or equivalent) to get tmux state for each child — `findUnfinishedChildren()` uses `captureTmuxOutput()` + `parseState()` per child
+- [x] Only treat children with state `creating | running | waiting | complete` as unfinished — skip `stopped` and `unknown` — `UNFINISHED_STATES` set at `agent-status.ts:290`
+- [x] Add tests for the boundary: stopped child → not flagged, running child → flagged — tests in `agent-status.test.ts:541+`
+- [x] Update SPEC.md §2.4 to remove `[^callout]`, describe both bash and TS as using tmux state — done
 
 #### 38b: `ib send` accepts stdin when no positional message given
 
@@ -1527,11 +1507,11 @@ Bash determines "unfinished" children by checking their actual tmux state — on
 
 Bash supports `echo "msg" | ib send <id>` and `ib send <id> < file.txt`. TS requires the message as a positional CLI argument and errors if none is provided.
 
-- [ ] In the CLI `send` command handler, if no positional message argument is given, attempt to read from `process.stdin` (detect if stdin is a pipe/file with `Bun.stdin.ref()` or check `process.stdin.isTTY`)
-- [ ] If stdin is a TTY (interactive), keep the current error behavior (message is required)
-- [ ] If stdin is a pipe/file, read all bytes and use as the message
-- [ ] Add tests covering stdin input
-- [ ] Update SPEC.md §4.1 item 8 to remove `[^callout]`
+- [x] In the CLI `send` command handler, if no positional message argument is given, attempt to read from `process.stdin` — `index.ts:492-500` checks `process.stdin.isTTY`
+- [x] If stdin is a TTY (interactive), keep the current error behavior (message is required)
+- [x] If stdin is a pipe/file, read all bytes and use as the message
+- [x] Add tests covering stdin input — stdin piping tested via CLI integration
+- [x] Update SPEC.md §4.1 item 8 to remove `[^callout]` — §4.1 now documents both bash and TS supporting stdin
 
 #### 38c: Add `ib ask` command to TS CLI
 
@@ -1549,10 +1529,10 @@ Behavior (per SPEC.md §4.2):
 5. Append new question to `.ittybitty/user-questions.json` with ID format `q-<unix-epoch>-<6-char-hash>` (hash = first 6 hex chars of MD5 of `"<agentId>-<question>\n"`)
 6. Log question to asking agent's `agent.log`
 
-- [ ] Implement `askQuestion(agentId, question)` in `src/ib-commands.ts`
-- [ ] Add `ask` subcommand to CLI
-- [ ] Add tests
-- [ ] Update SPEC.md §4.2 to remove `[^callout]`
+- [x] Implement `askQuestion(agentId, question)` in `src/ib-commands.ts` — line 2109
+- [x] Add `ask` subcommand to CLI — `index.ts:662`
+- [x] Add tests — `ib-commands.test.ts:2831+`
+- [x] Update SPEC.md §4.2 to remove `[^callout]` — §4.2 now documents both bash and TS
 
 #### 38d: Remove redundant `acknowledged: true` field from TS
 
@@ -1562,10 +1542,10 @@ Behavior (per SPEC.md §4.2):
 
 TS sets `acknowledged: true` in addition to `status: "acknowledged"` and `acknowledged_at`. This is redundant — callers can check `acknowledged_at != null` or `status === "acknowledged"`. Bash only sets `status` and `acknowledged_at`.
 
-- [ ] Remove the `acknowledged: true` field from `acknowledgeQuestion`
-- [ ] Remove it from any TypeScript types/interfaces that declare it
-- [ ] Verify no code reads `question.acknowledged` (use grep) — update any such reads to check `status` or `acknowledged_at` instead
-- [ ] Update SPEC.md §4.3 to remove the `[^callout]`
+- [x] Remove the `acknowledged: true` field from `acknowledgeQuestion` — only sets `acknowledged_at` and `status` (line 2222-2223)
+- [x] Remove it from any TypeScript types/interfaces that declare it — no type declares `acknowledged: boolean`
+- [x] Verify no code reads `question.acknowledged` — test at line 2798 explicitly asserts `acknowledged` is undefined
+- [x] Update SPEC.md §4.3 to remove the `[^callout]` — §4.3 structure omits the `acknowledged` boolean field
 
 #### 38e: `ib acknowledge` success output matches bash hint
 
@@ -1575,8 +1555,8 @@ TS sets `acknowledged: true` in addition to `status: "acknowledged"` and `acknow
 
 Bash prints: `"Question acknowledged. Use 'ib send <agent-id> \"answer\"' to respond."` TS returns a generic success message without the send hint.
 
-- [ ] Update `acknowledgeQuestion` to return/print the same hint as bash
-- [ ] Update SPEC.md §4.4 to remove the `[^callout]` for the hint
+- [x] Update `acknowledgeQuestion` to return/print the same hint as bash — line 2227 returns matching hint
+- [x] Update SPEC.md §4.4 to remove the `[^callout]` for the hint — §4.4 now documents both as printing the hint
 
 ---
 
@@ -1720,7 +1700,7 @@ Three divergences to fix:
 
 ### Phase 41: Agent Prompt Summary Generation
 
-**Status:** Not started.
+**Status:** Complete.
 
 **Source:** New itsybitsy feature — no bash equivalent.
 
@@ -1732,21 +1712,22 @@ Three divergences to fix:
 
 **Files:** `src/ib-commands.ts` (`newAgent`), `src/agents.ts` (Agent type)
 
-- [ ] After the tmux session is started in `newAgent()`, fire a background process — do not await, do not block:
+- [x] After the tmux session is started in `newAgent()`, fire a background process — do not await, do not block:
   ```
-  claude -p "Summarize the following agent task in 30-40 words:\n\n{prompt}" --model claude-haiku-4-5-20251001
+  claude -p "Summarize the following agent task in at most 30 words:\n\n{prompt}" --model claude-haiku-4-5-20251001
   ```
-- [ ] On success: trim output, read `meta.json`, merge in `summary` field, write back
-- [ ] On failure (non-zero exit, timeout, exception): silently skip — leave `summary` unset
-- [ ] Add `summary?: string` to the `Agent` type in `src/agents.ts` and include it when reading `meta.json` in `readAllAgents()`
-- [ ] Add tests using the existing mock spawn runner for the claude subprocess
+  Note: implementation uses "at most 30 words" instead of SPEC's "30-40 words" — intentionally tighter.
+- [x] On success: trim output, read `meta.json`, merge in `summary` field, write back
+- [x] On failure (non-zero exit, timeout, exception): silently skip — leave `summary` unset
+- [x] Add `summary?: string` to the `Agent` type in `src/agents.ts` and include it when reading `meta.json` in `readAllAgents()`
+- [x] Add tests using the existing mock spawn runner for the claude subprocess
 
 #### 41b: Display summary in TUI agent list
 
-**File:** `src/tui/dashboard.ts` (agent list rendering)
+**File:** `src/tui/agent-tree.ts` (agent list rendering)
 
-- [ ] Where the agent prompt is currently shown in the agent list, use `agent.summary ?? agent.prompt` instead
-- [ ] No other display changes needed
+- [x] Where the agent prompt is currently shown in the agent list, use `agent.summary ?? agent.prompt` instead (in `agent-tree.ts:57`, not `dashboard.ts`)
+- [x] No other display changes needed
 
 ---
 
@@ -1776,7 +1757,7 @@ Three divergences to fix:
 
 ### Phase 30: Security Hardening
 
-**Status:** Not started.
+**Status:** Partial. Some items addressed organically; most remain unimplemented.
 
 **Source:** SECURITY_REVIEW.md (2026-03-10 audit)
 
@@ -1786,71 +1767,101 @@ Three divergences to fix:
 
 #### 30a: HIGH-1 — tmux send-keys injection hardening
 
+**Status:** Partial.
+
 **Files:** `src/ib-commands.ts`, `src/hooks/agent-status.ts`
 
-- Add `-l` (literal) flag to all `tmux send-keys` calls that include variable content so tmux key names are never interpreted
-- Send `Enter` as a separate `send-keys` call (matching `sendMessage()` pattern) rather than appending it inline
-- Validate `managerSession` with `isValidTmuxSession()` in `agent-status.ts` before use in `Bun.spawn`
-- Validate `managerId` with `isValidAgentId()` before path-joining in stop hook
+- [x] Add `-l` (literal) flag to all `tmux send-keys` calls that include variable content so tmux key names are never interpreted — **Mostly done.** `sendMessage()` (ib-commands.ts:1072) and `agent-status.ts` (lines 423, 441) use `-l`. **However, `resumeAgent()` (ib-commands.ts:428) sends `nudgePrompt` without `-l`.** [^needs review]
+- [x] Send `Enter` as a separate `send-keys` call (matching `sendMessage()` pattern) rather than appending it inline — **Done.** All sites send Enter separately. Note: `auto-compact.ts:188` sends `/compact` + `Enter` together without `-l`, but `/compact` is a hardcoded literal, not variable content.
+- [ ] Validate `managerSession` with `isValidTmuxSession()` in `agent-status.ts` before use in `Bun.spawn` — **Not done.** `managerSession` (line 438) goes directly to `Bun.spawn` without validation. [^needs review]
+- [ ] Validate `managerId` with `isValidAgentId()` before path-joining in stop hook — **Not done.** `managerId` (line 435) is used in `join(agentsDir, managerId)` without validation. (Overlaps with 30f.) [^needs review]
 
-**Tests:** Verify `-l` flag is present in all tmux send-keys spawn args that carry variable content.
+**Tests:** Existing tests verify `-l` flag in `sendMessage` path. No tests for the `resumeAgent` nudge gap.
 
 ---
 
 #### 30b: HIGH-2 — Shell script path interpolation hardening
 
+**Status:** Not implemented.
+
 **Files:** `src/ib-commands.ts` (`newAgent()`, `resumeAgent()`)
 
-Generated `start.sh` and `resume.sh` interpolate `rootRepoPath`, `agentDir`, `absPromptFile` into shell code without quoting. Fix:
-- Wrap all path interpolations in single-quotes with proper escaping: `'${path.replace(/'/g, "'\\''")}'`
-- Or migrate away from generated shell scripts entirely — use `Bun.spawn` arrays directly for launching Claude inside tmux (lower risk, removes an entire class of issues)
-- At minimum: validate that `rootRepoPath` doesn't contain characters that would break shell scripts, and fail-fast with a clear error if it does
+Generated `start.sh` (ib-commands.ts:1683–1697) and `resume.sh` (ib-commands.ts:378–392) interpolate `rootRepoPath`, `agentDir`, `absPromptFile` into shell code using JS template literals inside double-quoted shell strings. No escaping is applied. Fix:
+- [ ] Wrap all path interpolations in single-quotes with proper escaping: `'${path.replace(/'/g, "'\\''")}'` [^needs review]
+- [ ] Or migrate away from generated shell scripts entirely — use `Bun.spawn` arrays directly for launching Claude inside tmux (lower risk, removes an entire class of issues)
+- [ ] At minimum: validate that `rootRepoPath` doesn't contain characters that would break shell scripts, and fail-fast with a clear error if it does [^needs review]
 
-**Tests:** Generate scripts with paths containing spaces and single-quotes; verify they execute correctly.
+**Tests:** No tests exist for paths with spaces or special characters in generated scripts.
 
 ---
 
 #### 30c: MEDIUM-1 — Validate tmux sessions read from meta.json
 
+**Status:** Not implemented.
+
 **Files:** `src/hooks/agent-status.ts`, `src/agent-lifecycle.ts`, `src/auto-compact.ts`, `src/watchdog.ts`
 
-`isValidTmuxSession()` is only called in `resumeAgent()`. Everywhere else, tmux session names from `meta.json` go directly to `Bun.spawn` args. Fix:
-- Add `isValidTmuxSession()` check at each site where `meta.tmux_session` is read from disk
-- Return early with a logged error on invalid sessions (don't silently skip or crash)
+`isValidTmuxSession()` is only called in `resumeAgent()` (ib-commands.ts:339). Everywhere else, tmux session names from `meta.json` go directly to `Bun.spawn` args:
+- `agent-lifecycle.ts`: lines 106, 109, 183, 297, 303, 305, 309, 315, 317 — no validation [^needs review]
+- `auto-compact.ts`: line 188 (`sendCompact`) and line 222 — no validation [^needs review]
+- `watchdog.ts`: lines 215, 282–286, 358–369, 805–822 — no validation [^needs review]
+- `agent-status.ts`: lines 87, 146, 413, 421–432 — no validation [^needs review]
 
-**Tests:** Pass an invalid session name through each code path; verify it's rejected gracefully.
+- [ ] Add `isValidTmuxSession()` check at each site where `meta.tmux_session` is read from disk
+- [ ] Return early with a logged error on invalid sessions (don't silently skip or crash)
+
+**Tests:** No tests exist for invalid session name rejection.
 
 ---
 
 #### 30d: MEDIUM-2 — Ghostty command quoting
 
+**Status:** Partial — mitigated but not fully addressed.
+
 **File:** `src/ghostty.ts`
 
-The tmux session is appended unquoted after `--` in the Ghostty `--command` string. Current regex mitigates, but the pattern is fragile. Fix:
-- The session string is already validated with `/^[\w-]+$/` — add a comment noting this is load-bearing
-- Or restructure to avoid interpolation: pass session as a positional arg via `bash -c '...' -- "$1"` pattern already used, but ensure the `$1` substitution actually covers the case
+The session is validated with `/^[\w-]+$/` (ghostty.ts:44) before interpolation into the `--command` string (line 51). However, the session is still interpolated directly (`-- ${tmuxSession}`) rather than passed as a properly quoted positional arg:
+- [x] The session string is already validated with `/^[\w-]+$/` — existing, with early-return on invalid names
+- [ ] Add a comment noting this validation is load-bearing for security [^needs review]
+- [ ] Or restructure to avoid interpolation: use proper `$1` positional arg substitution (currently `$1` is used for the session inside `bash -c`, but `${tmuxSession}` is appended directly after `--` without shell quoting — the `$1` pattern is incomplete) [^needs review]
 
 ---
 
 #### 30e: MEDIUM-5 — Hook stdin schema validation
 
+**Status:** Partial — 3 of 6 hooks have try/catch around JSON.parse; none have type guards.
+
 **Files:** `src/hooks/agent-path.ts`, `src/hooks/intercept-task.ts`, `src/hooks/session-start.ts`, `src/hooks/agent-status.ts`, `src/hooks/main-path.ts`, `src/hooks/inject-status.ts`
 
-All hooks parse stdin JSON with minimal type checking. A malformed input could crash a hook (causing Claude Code to either block the tool or proceed without the hook decision). Fix:
-- Add basic type guards at each hook entry point: verify `tool_name` is a string, `tool_input` is a non-null object, `cwd` is a string
-- On schema violation: log to stderr and exit 0 (allow) — never crash in a hook, as that could break the user's Claude session
+Current state of JSON.parse error handling:
+- `agent-status.ts` (line 348): ✅ Has try/catch, falls back to empty string
+- `main-path.ts` (line 105): ✅ Has try/catch, exits 0
+- `inject-status.ts` (line 250): ✅ Has try/catch, exits 0
+- `agent-path.ts` (line 259): ❌ No try/catch — will crash on malformed JSON [^needs review]
+- `intercept-task.ts` (line 160): ❌ No try/catch — will crash on malformed JSON [^needs review]
+- `session-start.ts` (line 290): ❌ No try/catch — will crash on malformed JSON [^needs review]
 
-**Tests:** Pass each hook `null`, `[]`, `{}`, and string values for required fields; verify it exits 0 gracefully.
+No hooks have type guards verifying `tool_name` is a string, `tool_input` is a non-null object, etc.
+
+- [ ] Add try/catch around JSON.parse in agent-path.ts, intercept-task.ts, session-start.ts
+- [ ] Add basic type guards at each hook entry point
+- [ ] On schema violation: log to stderr and exit 0 (allow)
+
+**Tests:** No tests exist for malformed stdin input to hooks.
 
 ---
 
 #### 30f: LOW-3 — Manager ID/session validation in stop hook
 
+**Status:** Not implemented.
+
 **File:** `src/hooks/agent-status.ts`
 
-`meta.manager` is used to path-join and read another agent's `meta.json`, then that agent's `tmux_session` is used in `Bun.spawn`. Add:
-- `isValidAgentId(managerId)` check before `join(agentsDir, managerId)`
-- `isValidTmuxSession(managerSession)` check before spawning
+`meta.manager` (line 435) is used to path-join and read another agent's `meta.json`, then that agent's `tmux_session` (line 438) is used in `Bun.spawn`. Neither is validated:
+- [ ] `isValidAgentId(managerId)` check before `join(agentsDir, managerId)` [^needs review]
+- [ ] `isValidTmuxSession(managerSession)` check before spawning [^needs review]
+
+Note: `isValidAgentId()` IS imported and used in agent-status.ts (line 384), but only for the debounce recheck path — not for the `notify_manager` path.
 
 ---
 

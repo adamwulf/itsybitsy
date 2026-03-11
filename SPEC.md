@@ -728,18 +728,4 @@ Notifications are sent via `ib send` (bash) / `sendMessage` (TS) and suppressed 
 
 ### 8.8 Post-Create-Agent Hook
 
-After agent creation, the system runs `.ittybitty/hooks/post-create-agent` if it exists and is executable. The hook runs **in the background** (fire-and-forget) so it does not block agent creation. Its stdout/stderr is appended to the agent's `agent.log`.
-
-**Environment variables provided to the hook:**
-
-| Variable | Description |
-|----------|-------------|
-| `IB_AGENT_ID` | The new agent's ID |
-| `IB_AGENT_TYPE` | `"worker"` or `"manager"` |
-| `IB_AGENT_DIR` | Path to the agent's directory |
-| `IB_AGENT_BRANCH` | Git branch name (e.g., `agent/<id>`) |
-| `IB_AGENT_MANAGER` | Manager agent ID (empty if root) |
-| `IB_AGENT_PROMPT` | The prompt given to the agent |
-| `IB_AGENT_MODEL` | The model specified for the agent |
-
-> [^note] The post-create-agent hook is not actively used by itsybitsy. TS runs it with `stdout: "ignore", stderr: "ignore"` (output discarded); bash appends stdout/stderr to `agent.log`. This divergence is not a priority to fix since the hook is unused.
+Bash runs `.ittybitty/hooks/post-create-agent` in the background after agent creation, appending its stdout/stderr to `agent.log`. itsybitsy does not implement this hook — it is considered legacy and unused.

@@ -1720,34 +1720,7 @@ ${absExitScript}
   // 20. Output agent ID
   const stdout = id;
 
-  // 21. Post-create-agent hook (run in background — fire and forget)
-  const hookPath = join(rootRepoPath, ".ittybitty", "hooks", "post-create-agent");
-  try {
-    const hookFile = Bun.file(hookPath);
-    if (await hookFile.exists()) {
-      const hookEnv = {
-        ...process.env,
-        IB_AGENT_ID: id,
-        IB_AGENT_TYPE: workerMode ? "worker" : "manager",
-        IB_AGENT_DIR: agentDir,
-        IB_AGENT_BRANCH: branchName,
-        IB_AGENT_MANAGER: manager || "",
-        IB_AGENT_PROMPT: prompt,
-        IB_AGENT_MODEL: model,
-      };
-      try {
-        const hookProc = Bun.spawn([hookPath], {
-          cwd: rootRepoPath,
-          env: hookEnv,
-          stdout: "ignore",
-          stderr: "ignore",
-        });
-        hookProc.unref();
-      } catch { /* ignore hook failures */ }
-    }
-  } catch { /* ignore */ }
-
-  // 22. Auto-accept workspace trust (if not yolo) — in background
+  // 21. Auto-accept workspace trust (if not yolo) — in background
   if (!yoloMode) {
     // Run async without awaiting — fire and forget
     autoAcceptWorkspaceTrustForNewAgent(tmuxSession).catch(() => {});

@@ -32,11 +32,6 @@ function formatArchiveTimestamp(date: Date = new Date()): string {
   );
 }
 
-/** Run a spawned command and return { stdout, exitCode } */
-async function runCmd(cmd: string[]): Promise<{ stdout: string; exitCode: number }> {
-  return spawnCtx.run(cmd);
-}
-
 // ── logAgent ─────────────────────────────────────────────────────────────────
 
 /**
@@ -98,15 +93,15 @@ export async function killAgentProcess(
   let pid: string | null = null;
 
   // Strategy 1: Dynamic lookup from tmux
-  const hasSession = await runCmd(["tmux", "has-session", "-t", tmuxSession]);
+  const hasSession = await spawnCtx.run(["tmux", "has-session", "-t", tmuxSession]);
   if (hasSession.exitCode === 0) {
-    const paneResult = await runCmd([
+    const paneResult = await spawnCtx.run([
       "tmux", "list-panes", "-t", tmuxSession, "-F", "#{pane_pid}",
     ]);
     if (paneResult.exitCode === 0 && paneResult.stdout) {
       const panePid = paneResult.stdout.split("\n")[0]!.trim();
       if (panePid) {
-        const pgrepResult = await runCmd(["pgrep", "-P", panePid, "-f", "claude"]);
+        const pgrepResult = await spawnCtx.run(["pgrep", "-P", panePid, "-f", "claude"]);
         if (pgrepResult.exitCode === 0 && pgrepResult.stdout) {
           pid = pgrepResult.stdout.split("\n")[0]!.trim();
         }
@@ -304,7 +299,7 @@ export async function teardownAgent(
   await logAgent(agentDir, logMsg);
 
   // 2. Capture tmux output
-  const hasSession = await runCmd(["tmux", "has-session", "-t", tmuxSession]);
+  const hasSession = await spawnCtx.run(["tmux", "has-session", "-t", tmuxSession]);
   if (hasSession.exitCode === 0) {
     await captureTmuxOutputToFile(tmuxSession, join(agentDir, "output.log"));
   }
@@ -316,9 +311,9 @@ export async function teardownAgent(
   }
 
   // 4. Kill tmux session
-  const hasSession2 = await runCmd(["tmux", "has-session", "-t", tmuxSession]);
+  const hasSession2 = await spawnCtx.run(["tmux", "has-session", "-t", tmuxSession]);
   if (hasSession2.exitCode === 0) {
-    await runCmd(["tmux", "kill-session", "-t", tmuxSession]);
+    await spawnCtx.run(["tmux", "kill-session", "-t", tmuxSession]);
     await logAgent(agentDir, "Killed tmux session");
   }
 
@@ -336,14 +331,14 @@ export async function teardownAgent(
   try {
     const entries = await readdir(repoDir).catch(() => null);
     if (entries !== null) {
-      const result = await runCmd([
+      const result = await spawnCtx.run([
         "git", "-C", repoPath, "worktree", "remove", repoDir, "--force",
       ]);
       if (result.exitCode !== 0) {
         await rm(repoDir, { recursive: true, force: true });
       }
       // 7. Delete git branch
-      const branchResult = await runCmd(["git", "-C", repoPath, "branch", "-D", `agent/${agentId}`]);
+      const branchResult = await spawnCtx.run(["git", "-C", repoPath, "branch", "-D", `agent/${agentId}`]);
       if (branchResult.exitCode === 0) {
         await logAgent(agentDir, `Deleted branch agent/${agentId}`);
       }
@@ -373,7 +368,7 @@ export async function scanAndKillOrphans(agentsDir: string): Promise<number> {
   let killedCount = 0;
 
   // Get all Claude PIDs
-  const pgrepResult = await runCmd(["pgrep", "-f", "claude"]);
+  const pgrepResult = await spawnCtx.run(["pgrep", "-f", "claude"]);
   if (pgrepResult.exitCode !== 0 || !pgrepResult.stdout) return 0;
 
   const pids = pgrepResult.stdout.split("\n").filter((p) => p.trim());
@@ -385,7 +380,7 @@ export async function scanAndKillOrphans(agentsDir: string): Promise<number> {
     // Get process cwd (macOS)
     let procCwd = "";
     if (process.platform === "darwin") {
-      const lsofResult = await runCmd(["lsof", "-a", "-d", "cwd", "-p", String(pid), "-Fn"]);
+      const lsofResult = await spawnCtx.run(["lsof", "-a", "-d", "cwd", "-p", String(pid), "-Fn"]);
       if (lsofResult.exitCode === 0) {
         const nLine = lsofResult.stdout.split("\n").find((l) => l.startsWith("n"));
         if (nLine) procCwd = nLine.slice(1);
@@ -494,7 +489,7 @@ export async function isRunningAsAgent(cwd?: string): Promise<boolean> {
   // Secondary check: ib-spawned tmux session name
   if (process.env.TMUX) {
     try {
-      const result = await runCmd(["tmux", "display-message", "-p", "#{session_name}"]);
+      const result = await spawnCtx.run(["tmux", "display-message", "-p", "#{session_name}"]);
       if (result.exitCode === 0 && result.stdout.startsWith("ittybitty-")) {
         return true;
       }
@@ -514,19 +509,19 @@ export async function isRunningAsAgent(cwd?: string): Promise<boolean> {
 export async function resolveGitRoot(repoPath: string): Promise<string | null> {
   try {
     // Get the common git directory (shared across all worktrees)
-    const commonResult = await runCmd(["git", "-C", repoPath, "rev-parse", "--git-common-dir"]);
+    const commonResult = await spawnCtx.run(["git", "-C", repoPath, "rev-parse", "--git-common-dir"]);
     if (commonResult.exitCode !== 0) {
       // Fallback
-      const topResult = await runCmd(["git", "-C", repoPath, "rev-parse", "--show-toplevel"]);
+      const topResult = await spawnCtx.run(["git", "-C", repoPath, "rev-parse", "--show-toplevel"]);
       return topResult.exitCode === 0 ? topResult.stdout : null;
     }
 
     const commonDir = commonResult.stdout;
-    const gitDirResult = await runCmd(["git", "-C", repoPath, "rev-parse", "--git-dir"]);
+    const gitDirResult = await spawnCtx.run(["git", "-C", repoPath, "rev-parse", "--git-dir"]);
 
     // If common_dir is ".git" or matches --git-dir, we're in the main repo
     if (commonDir === ".git" || commonDir === gitDirResult.stdout) {
-      const topResult = await runCmd(["git", "-C", repoPath, "rev-parse", "--show-toplevel"]);
+      const topResult = await spawnCtx.run(["git", "-C", repoPath, "rev-parse", "--show-toplevel"]);
       return topResult.exitCode === 0 ? topResult.stdout : null;
     }
 

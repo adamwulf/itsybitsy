@@ -1580,6 +1580,81 @@ Bash prints: `"Question acknowledged. Use 'ib send <agent-id> \"answer\"' to res
 
 ---
 
+### Phase 39: Config, ID Resolution, Spec Clarification & Per-Process Watchdog
+
+**Status:** Not started.
+
+**Source:** SPEC.md callouts #16, #17, #18, #21.
+
+**Goal:** Fix config default logic, ID resolution, reframe the §7.3 permission spec to reflect correct intended behavior, and migrate the TS watchdog from a global loop to per-agent processes that mirror bash.
+
+**Complexity:** Medium (39d is the most complex).
+
+#### 39a: Config model default matches bash order
+
+**File:** `src/config.ts`
+
+**SPEC.md:** §7.2, line ~589
+
+Bash `load_config()` defaults `CONFIG_MODEL` to `""` (empty string) at load time and falls back to `"sonnet"` at spawn time. TS `readConfig()` defaults `model` to `"sonnet"` at the config layer, so it's always `"sonnet"` even when not set.
+
+While the effective behavior is the same, the logic should match:
+- [ ] Default `model` to `""` (empty string) in the config defaults/schema
+- [ ] In `newAgent()` (or wherever model is passed to claude), fall back to `"sonnet"` if model is empty
+- [ ] Update SPEC.md §7.2 to remove the `[^callout]`, describe both bash and TS as defaulting at spawn time
+
+#### 39b: §7.3 Permission resolution — correct intended behavior (spec update only)
+
+**File:** `SPEC.md` only
+
+**SPEC.md:** §7.3, line ~609
+
+The current spec documents bash's fallthrough behavior as-if it is intended design. It is not — bash falls through from worker to manager permissions when `CONFIG_WORKER_ALLOW` is empty (confirmed at `ib:3565–3571`), but this is a bash quirk the user did not intend.
+
+Intended behavior: manager and worker permissions are loaded strictly from their own config keys. There is no fallthrough between types.
+
+- [ ] Rewrite §7.3 step 4 to describe the correct intended behavior: "Workers use `permissions.worker.allow/deny`; managers use `permissions.manager.allow/deny`. There is no fallthrough between types."
+- [ ] Add a `[^callout]` noting that bash has a quirk: if `CONFIG_WORKER_ALLOW` is empty, it falls through to `CONFIG_MANAGER_ALLOW`. TS intentionally does not replicate this.
+
+#### 39c: `resolveAgentId` scans tmux sessions and lists ambiguous matches
+
+**File:** `src/agents.ts` (`resolveAgentId` or equivalent)
+
+**SPEC.md:** §8.1, line ~634
+
+Bash resolution:
+1. Exact match — check agent directory AND tmux session
+2. Substring match — scan all agent directories AND tmux sessions
+3. 0 matches → error. 1 match → use it. 2+ matches → error listing all matching IDs.
+
+TS currently only scans agent directories and returns `null` for 0 or 2+ matches without listing what matched.
+
+- [ ] Extend resolution to also scan active tmux sessions (names starting with `ittybitty-`) for both exact and substring matches
+- [ ] On 2+ matches, return/throw an error that lists all matching IDs (same as bash output)
+- [ ] Add tests for the tmux-session-only match case and ambiguous match listing
+- [ ] Update SPEC.md §8.1 to remove the `[^callout]`
+
+#### 39d: Per-process watchdog (one process per agent)
+
+**Files:** `src/watchdog.ts`, `src/ib-commands.ts`, `src/watcher.ts`
+
+**SPEC.md:** §8.5, line ~668
+
+Currently TS runs a single global watchdog loop monitoring all agents. Bash spawns a separate `ib watchdog <id>` process per agent — that process runs its own loop and exits when the agent's worktree is removed or tmux session disappears.
+
+Migrate TS to the same model:
+- [ ] `ib watchdog <id>` (already the CLI entry point) should run a self-contained loop for a single agent and exit cleanly when:
+  - The agent's worktree directory no longer exists, OR
+  - The agent's tmux session has been missing for >10 consecutive seconds (grace period)
+- [ ] `newAgent()` spawns `ib watchdog <id>` as a detached background process (already does this via `Bun.spawn` — verify it's correct)
+- [ ] `resumeAgent()` likewise spawns `ib watchdog <id>` detached after restarting the session (Phase 37b already added this — verify it calls the per-agent form correctly)
+- [ ] Remove the global watchdog loop from `watcher.ts` (or wherever the current polling loop lives) — state detection for the dashboard should come from `detectAgentStates()` alone, not from a separate global watchdog loop
+- [ ] The watchdog process should NOT be started for top-level agents (no manager) — a human is watching those
+- [ ] Add tests for watchdog exit on worktree removal and missing tmux session
+- [ ] Update SPEC.md §8.5 to remove the `[^callout]`, describe both bash and TS as using per-agent watchdog processes
+
+---
+
 ### Phase 27 (future): Path Allowlist in Hook Sandbox
 
 **Status:** Aspirational.

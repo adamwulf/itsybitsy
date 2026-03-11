@@ -212,7 +212,7 @@ class StatusBarComponent implements Component {
     let row2Left: string;
     if (this.repoHeaderSelected) {
       row1Left = `${DIM}j/k: select    ;/l: scroll    p/n: pane    ${qLabel}${errBadge}${RESET}`;
-      row2Left = `${DIM}@: jump    /: commands    a: new agent    ?: help    h: setup    +: add repo${RESET}`;
+      row2Left = `${DIM}@: jump    /: commands    a: new agent    ?: help    h: setup    A: add repo    D: remove repo${RESET}`;
     } else {
       row1Left = `${DIM}j/k: select    ;/l: scroll    p/n: pane    ${qLabel}    s: send    m: merge${errBadge}${RESET}`;
       row2Left = `${DIM}@: jump    /: commands    a: new agent    ?: help    h: setup    x: kill${RESET}`;
@@ -936,7 +936,7 @@ export class DashboardComponent implements Component {
     else if (data === "[") { agentActions.handleResizeLeft(this, -LEFT_WIDTH_STEP); }
     else if (data === "]") { agentActions.handleResizeLeft(this, LEFT_WIDTH_STEP); }
     // Folder browser / add repo
-    else if (data === "+" || data === "A") { agentActions.handleAddRepo(this); }
+    else if (data === "A") { agentActions.handleAddRepo(this); }
     // Remove repo (safe — requires repo header selected and zero agents)
     else if (data === "D") { agentActions.handleRemoveRepoSafe(this); }
   }

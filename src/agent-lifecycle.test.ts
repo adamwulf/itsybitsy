@@ -11,8 +11,7 @@ import {
   resolveGitRoot,
   _formatTimestamp,
   _formatArchiveTimestamp,
-  setSpawnRunner,
-  resetSpawnRunner,
+  spawnCtx,
   killAgentProcess,
   captureTmuxOutputToFile,
   teardownAgent,
@@ -26,7 +25,7 @@ async function makeTempDir(): Promise<string> {
 
 describe("agent-lifecycle", () => {
   afterEach(() => {
-    resetSpawnRunner();
+    spawnCtx.reset();
   });
 
   // ── logAgent ───────────────────────────────────────────────────────────
@@ -266,7 +265,7 @@ describe("agent-lifecycle", () => {
     test("resolves a valid git repo root", async () => {
       // Use the current repo as test target
       const calls: string[][] = [];
-      setSpawnRunner((cmd: string[]) => {
+      spawnCtx.set((cmd: string[]) => {
         calls.push(cmd);
         const cmdStr = cmd.join(" ");
         let stdout = "";
@@ -289,7 +288,7 @@ describe("agent-lifecycle", () => {
     });
 
     test("resolves worktree with relative commonDir to absolute root", async () => {
-      setSpawnRunner((cmd: string[]) => {
+      spawnCtx.set((cmd: string[]) => {
         const cmdStr = cmd.join(" ");
         let stdout = "";
         if (cmdStr.includes("--git-common-dir")) {
@@ -311,7 +310,7 @@ describe("agent-lifecycle", () => {
     });
 
     test("resolves worktree with absolute commonDir", async () => {
-      setSpawnRunner((cmd: string[]) => {
+      spawnCtx.set((cmd: string[]) => {
         const cmdStr = cmd.join(" ");
         let stdout = "";
         if (cmdStr.includes("--git-common-dir")) {
@@ -331,7 +330,7 @@ describe("agent-lifecycle", () => {
     });
 
     test("returns null for non-git directory", async () => {
-      setSpawnRunner(() => ({
+      spawnCtx.set(() => ({
         stdout: new Response("").body!,
         stderr: new Response("fatal: not a git repository").body!,
         exited: Promise.resolve(128),

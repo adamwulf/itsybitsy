@@ -39,10 +39,7 @@ import {
   uninstallInterceptHook,
   resolveAgentId,
 } from "./ib-commands";
-import {
-  setSpawnRunner as setLifecycleSpawnRunner,
-  resetSpawnRunner as resetLifecycleSpawnRunner,
-} from "./agent-lifecycle";
+import { spawnCtx as lifecycleSpawnCtx } from "./agent-lifecycle";
 import type { AgentState } from "./parse-state";
 import type { SpawnResult } from "./types";
 
@@ -198,12 +195,12 @@ describe("killAgent (native)", () => {
     spawnCalls = [];
     // Mock both the lifecycle spawn runner and the kill/pause spawn runner
     const runner = mockSpawnFn(spawnCalls);
-    setLifecycleSpawnRunner(runner);
+    lifecycleSpawnCtx.set(runner);
     setKillPauseSpawnRunner(runner);
   });
 
   afterEach(async () => {
-    resetLifecycleSpawnRunner();
+    lifecycleSpawnCtx.reset();
     resetKillPauseSpawnRunner();
     await rm(tempDir, { recursive: true, force: true });
   });
@@ -211,7 +208,7 @@ describe("killAgent (native)", () => {
   test("returns error when agent directory and tmux session don't exist", async () => {
     // No meta.json + tmux has-session fails
     const runner = mockSpawnFnWithFailures(spawnCalls, (cmd) => cmd.includes("has-session"));
-    setLifecycleSpawnRunner(runner);
+    lifecycleSpawnCtx.set(runner);
     setKillPauseSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
@@ -235,7 +232,7 @@ describe("killAgent (native)", () => {
     const runner = mockSpawnFnWithFailures(spawnCalls, (cmd) =>
       cmd.includes("has-session") || cmd.includes("pgrep")
     );
-    setLifecycleSpawnRunner(runner);
+    lifecycleSpawnCtx.set(runner);
     setKillPauseSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
@@ -256,7 +253,7 @@ describe("killAgent (native)", () => {
     const runner = mockSpawnFnWithFailures(spawnCalls, (cmd) =>
       cmd.includes("has-session") || cmd.includes("pgrep")
     );
-    setLifecycleSpawnRunner(runner);
+    lifecycleSpawnCtx.set(runner);
     setKillPauseSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
@@ -287,7 +284,7 @@ describe("killAgent (native)", () => {
     const runner = mockSpawnFnWithFailures(spawnCalls, (cmd) =>
       cmd.includes("has-session") || cmd.includes("pgrep")
     );
-    setLifecycleSpawnRunner(runner);
+    lifecycleSpawnCtx.set(runner);
     setKillPauseSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
@@ -303,7 +300,7 @@ describe("killAgent (native)", () => {
     const runner = mockSpawnFnWithFailures(spawnCalls, (cmd) =>
       cmd.includes("pgrep")
     );
-    setLifecycleSpawnRunner(runner);
+    lifecycleSpawnCtx.set(runner);
     setKillPauseSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
@@ -322,12 +319,12 @@ describe("pauseAgent (native)", () => {
     tempDir = await mkdtemp(join(tmpdir(), "pause-test-"));
     spawnCalls = [];
     const runner = mockSpawnFn(spawnCalls);
-    setLifecycleSpawnRunner(runner);
+    lifecycleSpawnCtx.set(runner);
     setKillPauseSpawnRunner(runner);
   });
 
   afterEach(async () => {
-    resetLifecycleSpawnRunner();
+    lifecycleSpawnCtx.reset();
     resetKillPauseSpawnRunner();
     await rm(tempDir, { recursive: true, force: true });
   });
@@ -367,7 +364,7 @@ describe("pauseAgent (native)", () => {
     const runner = mockSpawnFnWithFailures(spawnCalls, (cmd) =>
       cmd.includes("has-session") || cmd.includes("pgrep")
     );
-    setLifecycleSpawnRunner(runner);
+    lifecycleSpawnCtx.set(runner);
     setKillPauseSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
@@ -389,7 +386,7 @@ describe("pauseAgent (native)", () => {
     const runner = mockSpawnFnWithFailures(spawnCalls, (cmd) =>
       cmd.includes("has-session") || cmd.includes("pgrep")
     );
-    setLifecycleSpawnRunner(runner);
+    lifecycleSpawnCtx.set(runner);
     setKillPauseSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
@@ -411,7 +408,7 @@ describe("pauseAgent (native)", () => {
     const runner = mockSpawnFnWithFailures(spawnCalls, (cmd) =>
       cmd.includes("has-session") || cmd.includes("pgrep")
     );
-    setLifecycleSpawnRunner(runner);
+    lifecycleSpawnCtx.set(runner);
     setKillPauseSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
@@ -433,7 +430,7 @@ describe("pauseAgent (native)", () => {
     const runner = mockSpawnFnWithFailures(spawnCalls, (cmd) =>
       cmd.includes("pgrep")
     );
-    setLifecycleSpawnRunner(runner);
+    lifecycleSpawnCtx.set(runner);
     setKillPauseSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
@@ -462,12 +459,12 @@ describe("nukeAgent (native)", () => {
     const runner = mockSpawnFnWithFailures(spawnCalls, (cmd) =>
       cmd.includes("has-session") || cmd.includes("pgrep") || cmd.includes("list-sessions")
     );
-    setLifecycleSpawnRunner(runner);
+    lifecycleSpawnCtx.set(runner);
     setNukeResumeSpawnRunner(runner);
   });
 
   afterEach(async () => {
-    resetLifecycleSpawnRunner();
+    lifecycleSpawnCtx.reset();
     resetNukeResumeSpawnRunner();
     await rm(tempDir, { recursive: true, force: true });
   });
@@ -572,12 +569,12 @@ describe("nukeAllAgents (native)", () => {
     const runner = mockSpawnFnWithFailures(spawnCalls, (cmd) =>
       cmd.includes("has-session") || cmd.includes("pgrep") || cmd.includes("list-sessions")
     );
-    setLifecycleSpawnRunner(runner);
+    lifecycleSpawnCtx.set(runner);
     setNukeResumeSpawnRunner(runner);
   });
 
   afterEach(async () => {
-    resetLifecycleSpawnRunner();
+    lifecycleSpawnCtx.reset();
     resetNukeResumeSpawnRunner();
     await rm(tempDir, { recursive: true, force: true });
   });
@@ -643,12 +640,12 @@ describe("resumeAgent (native)", () => {
     tempDir = await mkdtemp(join(tmpdir(), "resume-test-"));
     spawnCalls = [];
     const runner = mockSpawnFn(spawnCalls);
-    setLifecycleSpawnRunner(runner);
+    lifecycleSpawnCtx.set(runner);
     setNukeResumeSpawnRunner(runner);
   });
 
   afterEach(async () => {
-    resetLifecycleSpawnRunner();
+    lifecycleSpawnCtx.reset();
     resetNukeResumeSpawnRunner();
     await rm(tempDir, { recursive: true, force: true });
   });
@@ -1050,14 +1047,14 @@ describe("mergeAgent (native)", () => {
   });
 
   afterEach(async () => {
-    resetLifecycleSpawnRunner();
+    lifecycleSpawnCtx.reset();
     resetMergeSpawnRunner();
     await rm(tempDir, { recursive: true, force: true });
   });
 
   test("returns error when agent directory doesn't exist", async () => {
     const runner = makeMergeMock();
-    setLifecycleSpawnRunner(runner);
+    lifecycleSpawnCtx.set(runner);
     setMergeSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
@@ -1076,7 +1073,7 @@ describe("mergeAgent (native)", () => {
     // Don't create repo/ subdirectory
 
     const runner = makeMergeMock();
-    setLifecycleSpawnRunner(runner);
+    lifecycleSpawnCtx.set(runner);
     setMergeSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
@@ -1094,7 +1091,7 @@ describe("mergeAgent (native)", () => {
     }));
 
     const runner = makeMergeMock({ worktreeHasChanges: true });
-    setLifecycleSpawnRunner(runner);
+    lifecycleSpawnCtx.set(runner);
     setMergeSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
@@ -1112,7 +1109,7 @@ describe("mergeAgent (native)", () => {
     }));
 
     const runner = makeMergeMock({ repoHasChanges: true });
-    setLifecycleSpawnRunner(runner);
+    lifecycleSpawnCtx.set(runner);
     setMergeSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
@@ -1130,7 +1127,7 @@ describe("mergeAgent (native)", () => {
     }));
 
     const runner = makeMergeMock({ branchExists: false });
-    setLifecycleSpawnRunner(runner);
+    lifecycleSpawnCtx.set(runner);
     setMergeSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
@@ -1148,7 +1145,7 @@ describe("mergeAgent (native)", () => {
     }));
 
     const runner = makeMergeMock({ conflictCheckFails: true });
-    setLifecycleSpawnRunner(runner);
+    lifecycleSpawnCtx.set(runner);
     setMergeSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
@@ -1166,7 +1163,7 @@ describe("mergeAgent (native)", () => {
     }));
 
     const runner = makeMergeMock({ rebaseFails: true });
-    setLifecycleSpawnRunner(runner);
+    lifecycleSpawnCtx.set(runner);
     setMergeSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
@@ -1184,7 +1181,7 @@ describe("mergeAgent (native)", () => {
     }));
 
     const runner = makeMergeMock();
-    setLifecycleSpawnRunner(runner);
+    lifecycleSpawnCtx.set(runner);
     setMergeSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
@@ -1202,7 +1199,7 @@ describe("mergeAgent (native)", () => {
     }));
 
     const runner = makeMergeMock();
-    setLifecycleSpawnRunner(runner);
+    lifecycleSpawnCtx.set(runner);
     setMergeSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
@@ -1242,7 +1239,7 @@ describe("mergeAgent (native)", () => {
     }));
 
     const runner = makeMergeMock();
-    setLifecycleSpawnRunner(runner);
+    lifecycleSpawnCtx.set(runner);
     setMergeSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
@@ -1269,7 +1266,7 @@ describe("mergeAgent (native)", () => {
     );
 
     const runner = makeMergeMock();
-    setLifecycleSpawnRunner(runner);
+    lifecycleSpawnCtx.set(runner);
     setMergeSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
@@ -1287,7 +1284,7 @@ describe("mergeAgent (native)", () => {
     }));
 
     const runner = makeMergeMock({ commitCount: 0 });
-    setLifecycleSpawnRunner(runner);
+    lifecycleSpawnCtx.set(runner);
     setMergeSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
@@ -1316,7 +1313,7 @@ describe("mergeAgent (native)", () => {
     }));
 
     const runner = makeMergeMock();
-    setLifecycleSpawnRunner(runner);
+    lifecycleSpawnCtx.set(runner);
     setMergeSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
@@ -1351,7 +1348,7 @@ describe("mergeAgent (native)", () => {
     }));
 
     const runner = makeMergeMock();
-    setLifecycleSpawnRunner(runner);
+    lifecycleSpawnCtx.set(runner);
     setMergeSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
@@ -1371,7 +1368,7 @@ describe("mergeAgent (native)", () => {
     }));
 
     const runner = makeMergeMock();
-    setLifecycleSpawnRunner(runner);
+    lifecycleSpawnCtx.set(runner);
     setMergeSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
@@ -1391,7 +1388,7 @@ describe("mergeAgent (native)", () => {
     }));
 
     const runner = makeMergeMock();
-    setLifecycleSpawnRunner(runner);
+    lifecycleSpawnCtx.set(runner);
     setMergeSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
@@ -1468,7 +1465,7 @@ describe("mergeAgent (native)", () => {
     if (!metaExists) return; // Can't run this test
 
     const runner = makeMergeMock();
-    setLifecycleSpawnRunner(runner);
+    lifecycleSpawnCtx.set(runner);
     setMergeSpawnRunner(runner);
 
     const agent = _makeAgent({
@@ -1491,7 +1488,7 @@ describe("mergeAgent (native)", () => {
     }));
 
     const runner = makeMergeMock({ checkoutFails: true });
-    setLifecycleSpawnRunner(runner);
+    lifecycleSpawnCtx.set(runner);
     setMergeSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
@@ -1509,7 +1506,7 @@ describe("mergeAgent (native)", () => {
     }));
 
     const runner = makeMergeMock({ mergeFails: true });
-    setLifecycleSpawnRunner(runner);
+    lifecycleSpawnCtx.set(runner);
     setMergeSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
@@ -1561,7 +1558,7 @@ describe("mergeAgent (native)", () => {
       return makeSpawnResult();
     };
 
-    setLifecycleSpawnRunner(runner);
+    lifecycleSpawnCtx.set(runner);
     setMergeSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
@@ -1590,7 +1587,7 @@ describe("mergeAgent (native)", () => {
       return baseMock(cmd, opts);
     };
 
-    setLifecycleSpawnRunner(runner);
+    lifecycleSpawnCtx.set(runner);
     setMergeSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
@@ -1609,7 +1606,7 @@ describe("mergeAgent (native)", () => {
     }));
 
     const runner = makeMergeMock({ conflictCheckFails: true });
-    setLifecycleSpawnRunner(runner);
+    lifecycleSpawnCtx.set(runner);
     setMergeSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
@@ -1629,7 +1626,7 @@ describe("mergeAgent (native)", () => {
 
     // Mock returns "feature-branch" for branch --show-current
     const runner = makeMergeMock({ currentBranch: "feature-branch" });
-    setLifecycleSpawnRunner(runner);
+    lifecycleSpawnCtx.set(runner);
     setMergeSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
@@ -1656,7 +1653,7 @@ describe("mergeAgent (native)", () => {
     }));
 
     const runner = makeMergeMock();
-    setLifecycleSpawnRunner(runner);
+    lifecycleSpawnCtx.set(runner);
     setMergeSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
@@ -1693,7 +1690,7 @@ describe("mergeAgent (native)", () => {
 
     // Simulate calling from a manager worktree — manager is on agent/agent-manager branch
     const runner = makeMergeMock({ currentBranch: "agent/agent-manager" });
-    setLifecycleSpawnRunner(runner);
+    lifecycleSpawnCtx.set(runner);
     setMergeSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
@@ -1859,7 +1856,7 @@ describe("newAgent (native)", () => {
     await Bun.write(join(tempDir, ".ittybitty.json"), JSON.stringify({ model: "sonnet" }, null, 2));
 
     // Also set the lifecycle spawn runner (used by resolveGitRoot)
-    setLifecycleSpawnRunner((cmd: string[], _opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
+    lifecycleSpawnCtx.set((cmd: string[], _opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
       const cmdStr = cmd.join(" ");
       if (cmdStr.includes("--git-common-dir")) return makeSpawnResult(".git", 0);
       if (cmdStr.includes("--show-toplevel")) return makeSpawnResult(tempDir, 0);
@@ -1870,7 +1867,7 @@ describe("newAgent (native)", () => {
 
   afterEach(async () => {
     resetNewAgentSpawnRunner();
-    resetLifecycleSpawnRunner();
+    lifecycleSpawnCtx.reset();
     await rm(tempDir, { recursive: true, force: true });
   });
 

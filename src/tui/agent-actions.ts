@@ -557,7 +557,6 @@ export function handleHelp(ctx: ActionCtx) {
       row("j / k / ↑↓", "select agent"),
       row("@", "fuzzy jump to agent"),
       row("/", "fuzzy mode picker"),
-      row("+", "add repo folder"),
       "",
       header("Panes"),
       row("p / n / ←→", "cycle pane left/right"),
@@ -579,8 +578,8 @@ export function handleHelp(ctx: ActionCtx) {
       row("a", "new agent"),
       "",
       header("Repo"),
-      row("A", "add repo"),
-      row("D", "remove repo (safe)"),
+      row("+ / A", "add repo"),
+      row("x / D", "remove repo (on header)"),
       row("r", "rename repo (on header)"),
       "",
       header("Open"),
@@ -1107,50 +1106,37 @@ export async function handleAddRepo(ctx: ActionCtx) {
   return handleFolderBrowser(ctx);
 }
 
-/** 'D' — remove repo with safety check: must have zero agent directories */
-export async function handleRemoveRepoSafe(ctx: ActionCtx) {
-  const repo = findRepoByHeader(ctx);
-  if (!repo) { ctx.setNotice("Select a repo header to remove"); return; }
-
-  // Check both agents/ and archive/ directories for any agent subdirectories
-  const agentsDir = join(repo.path, ".ittybitsy", "agents");
-  const archiveDir = join(repo.path, ".ittybitsy", "archive");
-  let agentCount = 0;
-  for (const dir of [agentsDir, archiveDir]) {
+/** Count agent directories under .ittybitsy/agents/ and .ittybitsy/archive/ */
+async function countAgentDirs(repoPath: string): Promise<{ count: number; error?: string }> {
+  let count = 0;
+  for (const sub of ["agents", "archive"]) {
+    const dir = join(repoPath, ".ittybitsy", sub);
     try {
       const entries = await readdir(dir, { withFileTypes: true });
-      agentCount += entries.filter((e) => e.isDirectory()).length;
-    } catch {
-      // ENOENT expected — directory may not exist
+      count += entries.filter((e) => e.isDirectory()).length;
+    } catch (err: unknown) {
+      if (err instanceof Error && "code" in err && (err as NodeJS.ErrnoException).code === "ENOENT") {
+        continue;
+      }
+      return { count: 0, error: `Cannot read ${dir}: ${(err as Error).message}` };
     }
   }
+  return { count };
+}
 
-  if (agentCount > 0) {
-    ctx.setNotice(`Cannot remove: ${agentCount} agent dir${agentCount > 1 ? "s" : ""} still exist in ${repoDisplayName(repo)}`);
+/** 'D' / 'x' on repo header — remove repo with safety check: must have zero agent directories */
+export async function handleRemoveRepoSafe(ctx: ActionCtx) {
+  const repo = findRepoByHeader(ctx);
+  if (!repo) { ctx.setNotice("No repo selected"); return; }
+
+  const { count, error } = await countAgentDirs(repo.path);
+  if (error) { ctx.setNotice(error); return; }
+  if (count > 0) {
+    ctx.setNotice(`Cannot remove: ${count} agent dir${count > 1 ? "s" : ""} still exist in ${repoDisplayName(repo)}`);
     return;
   }
 
-  ctx.showDialog({
-    type: "confirm",
-    prompt: `Remove ${repoDisplayName(repo)} from registry?\n(${repo.path})`,
-    confirmLabel: "Remove",
-    focusedButton: "cancel",
-    confirmColor: RED,
-    onYes: () => {
-      ctx.closeDialog();
-      removeRepo(repo.path).then((result) => {
-        ctx.setNotice(result.message);
-        if (result.ok) {
-          const idx = ctx.repos.findIndex((r) => r.path === repo.path);
-          if (idx !== -1) { ctx.repos.splice(idx, 1); }
-          ctx.watcher?.updateRepos(ctx.repos);
-          ctx.watcher?.refresh();
-        }
-      }).catch((err) => {
-        ctx.setNotice(`Error removing: ${err}`);
-      });
-    },
-  });
+  handleRemoveRepo(ctx);
 }
 
 export async function handleFolderBrowser(ctx: ActionCtx) {

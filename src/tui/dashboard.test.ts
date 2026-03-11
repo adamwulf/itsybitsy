@@ -2622,10 +2622,12 @@ describe("Context-sensitive footer (repo header vs agent)", () => {
     expect(assertDialog(dashboard.dialog, 'fuzzy').prompt).toContain("Reassign");
   });
 
-  test("x key on repo header opens remove dialog instead of kill", () => {
+  test("x key on repo header opens remove dialog instead of kill", async () => {
     setupMultiRepoWithRepoHeader();
     expect(dashboard.agentTree.selectedRepoHeader).toBe("alpha");
     dashboard.handleInput("x");
+    // handleRemoveRepoSafe is async (checks agent dirs), wait for it
+    await new Promise((r) => setTimeout(r, 10));
     expect(dashboard.dialog).not.toBeNull();
     const d = assertDialog(dashboard.dialog, 'confirm');
     expect(d.prompt).toContain("Remove");

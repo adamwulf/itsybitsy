@@ -895,7 +895,7 @@ export class DashboardComponent implements Component {
     // Agent/repo actions — context-sensitive on whether a repo header is selected
     else if (data === "x") {
       if (!this.agentTree.selectedAgent && this.agentTree.selectedRepoHeader) {
-        agentActions.handleRemoveRepo(this);
+        agentActions.handleRemoveRepoSafe(this);
       } else {
         agentActions.handleKill(this);
       }

@@ -1249,7 +1249,7 @@ Bash supports `--from <id>` to auto-prefix messages with sender identity. Note: 
 
 ### Phase 33: Parity Fixes — TUI Watch Features
 
-**Status:** Not started.
+**Status:** Complete.
 
 **Source:** PARITY_HOOKS_TUI.md (section 3)
 
@@ -1257,16 +1257,16 @@ Bash supports `--from <id>` to auto-prefix messages with sender identity. Note: 
 
 **Complexity:** Medium.
 
-**Note:** 33a and 33b were removed after code review confirmed they are already implemented. All five keybindings (`t`, `w`, `o`, `c`, `Enter`) exist in `dashboard.ts`. Usage tracking is fully implemented via `src/usage.ts` with status bar display and polling timer.
+**Note:** 33a and 33b were removed after code review confirmed they are already implemented. All five keybindings (`t`, `w`, `o`, `c`, `Enter`) exist in `dashboard.ts`. Usage tracking is fully implemented via `src/usage.ts` with status bar display and polling timer. 33a (below) was also confirmed implemented during audit.
 
 #### 33a: Settings/permissions editor (nice-to-have)
 
-**File:** `src/tui/dashboard.ts`, `src/tui/dialog-handler.ts`
+**File:** `src/tui/dashboard.ts`, `src/tui/dialog-handler.ts`, `src/tui/agent-actions.ts`
 
-Bash has a full settings editor including a permissions allow/deny list editor. The TS setup dialog already has three tabs ("Setup", "Project", "User") implemented in `dialog-handler.ts`, and tabs 1 and 2 already show and support editing config values via `buildConfigTabContent`/`handleSetupConfigTab`. What's missing is only the permissions editor for allow/deny tool lists.
+Bash has a full settings editor including a permissions allow/deny list editor. The TS setup dialog has three tabs ("Setup", "Project", "User") implemented in `dialog-handler.ts`, and tabs 1 and 2 show and support editing config values via `buildConfigTabContent`/`handleSetupConfigTab`. The permissions editor is fully implemented as a dedicated `permissions-editor` dialog type with Allow/Deny tab switching, add/delete/navigate items, input mode, and save callback. Tests in `setup-dialog.test.ts` (lines 497–765). Note: SPEC.md does not describe a TUI permissions editor — the permissions section (§2.2) covers only `settings.local.json` generation, not a TUI editing UI. This is an implementation-only feature with no spec coverage.
 
-- [ ] Add permissions editor (allow/deny tool lists) to the setup dialog
-- [ ] Add number/string input dialogs for config values if not already present
+- [x] Add permissions editor (allow/deny tool lists) to the setup dialog
+- [x] Add number/string input dialogs for config values if not already present
 
 ---
 

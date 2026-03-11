@@ -1757,7 +1757,7 @@ Three divergences to fix:
 
 ### Phase 30: Security Hardening
 
-**Status:** Not started.
+**Status:** Partial. Some items addressed organically; most remain unimplemented.
 
 **Source:** SECURITY_REVIEW.md (2026-03-10 audit)
 
@@ -1767,71 +1767,101 @@ Three divergences to fix:
 
 #### 30a: HIGH-1 — tmux send-keys injection hardening
 
+**Status:** Partial.
+
 **Files:** `src/ib-commands.ts`, `src/hooks/agent-status.ts`
 
-- Add `-l` (literal) flag to all `tmux send-keys` calls that include variable content so tmux key names are never interpreted
-- Send `Enter` as a separate `send-keys` call (matching `sendMessage()` pattern) rather than appending it inline
-- Validate `managerSession` with `isValidTmuxSession()` in `agent-status.ts` before use in `Bun.spawn`
-- Validate `managerId` with `isValidAgentId()` before path-joining in stop hook
+- [x] Add `-l` (literal) flag to all `tmux send-keys` calls that include variable content so tmux key names are never interpreted — **Mostly done.** `sendMessage()` (ib-commands.ts:1072) and `agent-status.ts` (lines 423, 441) use `-l`. **However, `resumeAgent()` (ib-commands.ts:428) sends `nudgePrompt` without `-l`.** [^needs review]
+- [x] Send `Enter` as a separate `send-keys` call (matching `sendMessage()` pattern) rather than appending it inline — **Done.** All sites send Enter separately. Note: `auto-compact.ts:188` sends `/compact` + `Enter` together without `-l`, but `/compact` is a hardcoded literal, not variable content.
+- [ ] Validate `managerSession` with `isValidTmuxSession()` in `agent-status.ts` before use in `Bun.spawn` — **Not done.** `managerSession` (line 438) goes directly to `Bun.spawn` without validation. [^needs review]
+- [ ] Validate `managerId` with `isValidAgentId()` before path-joining in stop hook — **Not done.** `managerId` (line 435) is used in `join(agentsDir, managerId)` without validation. (Overlaps with 30f.) [^needs review]
 
-**Tests:** Verify `-l` flag is present in all tmux send-keys spawn args that carry variable content.
+**Tests:** Existing tests verify `-l` flag in `sendMessage` path. No tests for the `resumeAgent` nudge gap.
 
 ---
 
 #### 30b: HIGH-2 — Shell script path interpolation hardening
 
+**Status:** Not implemented.
+
 **Files:** `src/ib-commands.ts` (`newAgent()`, `resumeAgent()`)
 
-Generated `start.sh` and `resume.sh` interpolate `rootRepoPath`, `agentDir`, `absPromptFile` into shell code without quoting. Fix:
-- Wrap all path interpolations in single-quotes with proper escaping: `'${path.replace(/'/g, "'\\''")}'`
-- Or migrate away from generated shell scripts entirely — use `Bun.spawn` arrays directly for launching Claude inside tmux (lower risk, removes an entire class of issues)
-- At minimum: validate that `rootRepoPath` doesn't contain characters that would break shell scripts, and fail-fast with a clear error if it does
+Generated `start.sh` (ib-commands.ts:1683–1697) and `resume.sh` (ib-commands.ts:378–392) interpolate `rootRepoPath`, `agentDir`, `absPromptFile` into shell code using JS template literals inside double-quoted shell strings. No escaping is applied. Fix:
+- [ ] Wrap all path interpolations in single-quotes with proper escaping: `'${path.replace(/'/g, "'\\''")}'` [^needs review]
+- [ ] Or migrate away from generated shell scripts entirely — use `Bun.spawn` arrays directly for launching Claude inside tmux (lower risk, removes an entire class of issues)
+- [ ] At minimum: validate that `rootRepoPath` doesn't contain characters that would break shell scripts, and fail-fast with a clear error if it does [^needs review]
 
-**Tests:** Generate scripts with paths containing spaces and single-quotes; verify they execute correctly.
+**Tests:** No tests exist for paths with spaces or special characters in generated scripts.
 
 ---
 
 #### 30c: MEDIUM-1 — Validate tmux sessions read from meta.json
 
+**Status:** Not implemented.
+
 **Files:** `src/hooks/agent-status.ts`, `src/agent-lifecycle.ts`, `src/auto-compact.ts`, `src/watchdog.ts`
 
-`isValidTmuxSession()` is only called in `resumeAgent()`. Everywhere else, tmux session names from `meta.json` go directly to `Bun.spawn` args. Fix:
-- Add `isValidTmuxSession()` check at each site where `meta.tmux_session` is read from disk
-- Return early with a logged error on invalid sessions (don't silently skip or crash)
+`isValidTmuxSession()` is only called in `resumeAgent()` (ib-commands.ts:339). Everywhere else, tmux session names from `meta.json` go directly to `Bun.spawn` args:
+- `agent-lifecycle.ts`: lines 106, 109, 183, 297, 303, 305, 309, 315, 317 — no validation [^needs review]
+- `auto-compact.ts`: line 188 (`sendCompact`) and line 222 — no validation [^needs review]
+- `watchdog.ts`: lines 215, 282–286, 358–369, 805–822 — no validation [^needs review]
+- `agent-status.ts`: lines 87, 146, 413, 421–432 — no validation [^needs review]
 
-**Tests:** Pass an invalid session name through each code path; verify it's rejected gracefully.
+- [ ] Add `isValidTmuxSession()` check at each site where `meta.tmux_session` is read from disk
+- [ ] Return early with a logged error on invalid sessions (don't silently skip or crash)
+
+**Tests:** No tests exist for invalid session name rejection.
 
 ---
 
 #### 30d: MEDIUM-2 — Ghostty command quoting
 
+**Status:** Partial — mitigated but not fully addressed.
+
 **File:** `src/ghostty.ts`
 
-The tmux session is appended unquoted after `--` in the Ghostty `--command` string. Current regex mitigates, but the pattern is fragile. Fix:
-- The session string is already validated with `/^[\w-]+$/` — add a comment noting this is load-bearing
-- Or restructure to avoid interpolation: pass session as a positional arg via `bash -c '...' -- "$1"` pattern already used, but ensure the `$1` substitution actually covers the case
+The session is validated with `/^[\w-]+$/` (ghostty.ts:44) before interpolation into the `--command` string (line 51). However, the session is still interpolated directly (`-- ${tmuxSession}`) rather than passed as a properly quoted positional arg:
+- [x] The session string is already validated with `/^[\w-]+$/` — existing, with early-return on invalid names
+- [ ] Add a comment noting this validation is load-bearing for security [^needs review]
+- [ ] Or restructure to avoid interpolation: use proper `$1` positional arg substitution (currently `$1` is used for the session inside `bash -c`, but `${tmuxSession}` is appended directly after `--` without shell quoting — the `$1` pattern is incomplete) [^needs review]
 
 ---
 
 #### 30e: MEDIUM-5 — Hook stdin schema validation
 
+**Status:** Partial — 3 of 6 hooks have try/catch around JSON.parse; none have type guards.
+
 **Files:** `src/hooks/agent-path.ts`, `src/hooks/intercept-task.ts`, `src/hooks/session-start.ts`, `src/hooks/agent-status.ts`, `src/hooks/main-path.ts`, `src/hooks/inject-status.ts`
 
-All hooks parse stdin JSON with minimal type checking. A malformed input could crash a hook (causing Claude Code to either block the tool or proceed without the hook decision). Fix:
-- Add basic type guards at each hook entry point: verify `tool_name` is a string, `tool_input` is a non-null object, `cwd` is a string
-- On schema violation: log to stderr and exit 0 (allow) — never crash in a hook, as that could break the user's Claude session
+Current state of JSON.parse error handling:
+- `agent-status.ts` (line 348): ✅ Has try/catch, falls back to empty string
+- `main-path.ts` (line 105): ✅ Has try/catch, exits 0
+- `inject-status.ts` (line 250): ✅ Has try/catch, exits 0
+- `agent-path.ts` (line 259): ❌ No try/catch — will crash on malformed JSON [^needs review]
+- `intercept-task.ts` (line 160): ❌ No try/catch — will crash on malformed JSON [^needs review]
+- `session-start.ts` (line 290): ❌ No try/catch — will crash on malformed JSON [^needs review]
 
-**Tests:** Pass each hook `null`, `[]`, `{}`, and string values for required fields; verify it exits 0 gracefully.
+No hooks have type guards verifying `tool_name` is a string, `tool_input` is a non-null object, etc.
+
+- [ ] Add try/catch around JSON.parse in agent-path.ts, intercept-task.ts, session-start.ts
+- [ ] Add basic type guards at each hook entry point
+- [ ] On schema violation: log to stderr and exit 0 (allow)
+
+**Tests:** No tests exist for malformed stdin input to hooks.
 
 ---
 
 #### 30f: LOW-3 — Manager ID/session validation in stop hook
 
+**Status:** Not implemented.
+
 **File:** `src/hooks/agent-status.ts`
 
-`meta.manager` is used to path-join and read another agent's `meta.json`, then that agent's `tmux_session` is used in `Bun.spawn`. Add:
-- `isValidAgentId(managerId)` check before `join(agentsDir, managerId)`
-- `isValidTmuxSession(managerSession)` check before spawning
+`meta.manager` (line 435) is used to path-join and read another agent's `meta.json`, then that agent's `tmux_session` (line 438) is used in `Bun.spawn`. Neither is validated:
+- [ ] `isValidAgentId(managerId)` check before `join(agentsDir, managerId)` [^needs review]
+- [ ] `isValidTmuxSession(managerSession)` check before spawning [^needs review]
+
+Note: `isValidAgentId()` IS imported and used in agent-status.ts (line 384), but only for the debounce recheck path — not for the `notify_manager` path.
 
 ---
 

@@ -4,7 +4,8 @@
  */
 
 import { existsSync } from "node:fs";
-import { stat } from "node:fs/promises";
+import { stat, readdir } from "node:fs/promises";
+import { join } from "node:path";
 import { agentWorktreePath } from "../agents";
 import type { Agent, FlatEntry, PendingQuestion } from "../agents";
 import type { RepoEntry } from "../registry";
@@ -556,7 +557,6 @@ export function handleHelp(ctx: ActionCtx) {
       row("j / k / ↑↓", "select agent"),
       row("@", "fuzzy jump to agent"),
       row("/", "fuzzy mode picker"),
-      row("+", "add repo folder"),
       "",
       header("Panes"),
       row("p / n / ←→", "cycle pane left/right"),
@@ -576,6 +576,11 @@ export function handleHelp(ctx: ActionCtx) {
       row("P", "pause"),
       row("r", "reassign"),
       row("a", "new agent"),
+      "",
+      header("Repo"),
+      row("+ / A", "add repo"),
+      row("x / D", "remove repo (on header)"),
+      row("r", "rename repo (on header)"),
       "",
       header("Open"),
       row("w", "worktree"),
@@ -1069,22 +1074,22 @@ export function handleRenameRepo(ctx: ActionCtx) {
   });
 }
 
-export function handleRemoveRepo(ctx: ActionCtx) {
-  const repo = findRepoByHeader(ctx);
-  if (!repo) { ctx.setNotice("No repo selected"); return; }
+function handleRemoveRepo(ctx: ActionCtx, repo?: RepoEntry) {
+  const resolved = repo ?? findRepoByHeader(ctx);
+  if (!resolved) { ctx.setNotice("No repo selected"); return; }
   ctx.showDialog({
     type: "confirm",
-    prompt: `Remove ${repoDisplayName(repo)} from registry?\n(${repo.path})`,
+    prompt: `Remove ${repoDisplayName(resolved)} from registry?\n(${resolved.path})`,
     confirmLabel: "Remove",
     focusedButton: "cancel",
     confirmColor: RED,
     onYes: () => {
       ctx.closeDialog();
-      removeRepo(repo.path).then((result) => {
+      removeRepo(resolved.path).then((result) => {
         ctx.setNotice(result.message);
         if (result.ok) {
           // Remove from in-memory repos so the UI reflects the change immediately
-          const idx = ctx.repos.findIndex((r) => r.path === repo.path);
+          const idx = ctx.repos.findIndex((r) => r.path === resolved.path);
           if (idx !== -1) { ctx.repos.splice(idx, 1); }
           ctx.watcher?.updateRepos(ctx.repos);
           ctx.watcher?.refresh();
@@ -1094,6 +1099,44 @@ export function handleRemoveRepo(ctx: ActionCtx) {
       });
     },
   });
+}
+
+/** 'A' — add repo via folder browser (alias for handleFolderBrowser) */
+export async function handleAddRepo(ctx: ActionCtx) {
+  return handleFolderBrowser(ctx);
+}
+
+/** Count agent directories under .ittybitsy/agents/ and .ittybitsy/archive/ */
+async function countAgentDirs(repoPath: string): Promise<{ count: number; error?: string }> {
+  let count = 0;
+  for (const sub of ["agents", "archive"]) {
+    const dir = join(repoPath, ".ittybitsy", sub);
+    try {
+      const entries = await readdir(dir, { withFileTypes: true });
+      count += entries.filter((e) => e.isDirectory()).length;
+    } catch (err: unknown) {
+      if (err instanceof Error && "code" in err && (err as NodeJS.ErrnoException).code === "ENOENT") {
+        continue;
+      }
+      return { count: 0, error: `Cannot read ${dir}: ${(err as Error).message}` };
+    }
+  }
+  return { count };
+}
+
+/** 'D' / 'x' on repo header — remove repo with safety check: must have zero agent directories */
+export async function handleRemoveRepoSafe(ctx: ActionCtx) {
+  const repo = findRepoByHeader(ctx);
+  if (!repo) { ctx.setNotice("No repo selected"); return; }
+
+  const { count, error } = await countAgentDirs(repo.path);
+  if (error) { ctx.setNotice(error); return; }
+  if (count > 0) {
+    ctx.setNotice(`Cannot remove: ${count} agent dir${count > 1 ? "s" : ""} still exist in ${repoDisplayName(repo)}`);
+    return;
+  }
+
+  handleRemoveRepo(ctx, repo);
 }
 
 export async function handleFolderBrowser(ctx: ActionCtx) {

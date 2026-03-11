@@ -5,6 +5,7 @@ import { tmpdir } from "os";
 import {
   detectStateFromMessage,
   processStopHook,
+  findUnfinishedChildren,
 } from "./agent-status";
 
 // ── Helper to create temp agent dirs ─────────────────────────────────────────
@@ -265,7 +266,7 @@ describe("remind children", () => {
     await ctx.cleanup();
   });
 
-  test("complete + no manager + unfinished children → remind_children", async () => {
+  test("complete + no manager + running child → remind_children", async () => {
     // Parent has no manager
     await writeMeta(ctx.agentDir, { tmux_session: "ib-test" });
 
@@ -284,6 +285,7 @@ describe("remind children", () => {
       ctx.agentsDir,
       {
         checkGitStatus: async () => "",
+        getChildState: async () => "running",
       },
     );
     expect(result.state).toBe("complete");
@@ -294,6 +296,103 @@ describe("remind children", () => {
     expect(result.message).toContain("ib kill <id>");
     expect(result.message).toContain("ib list");
     expect(result.message).toContain("ib diff <id>");
+  });
+
+  test("complete + no manager + stopped child → no remind (stopped is not unfinished)", async () => {
+    await writeMeta(ctx.agentDir, { tmux_session: "ib-test" });
+
+    const childDir = join(ctx.agentsDir, "child-002");
+    await mkdir(childDir, { recursive: true });
+    await writeMeta(childDir, {
+      tmux_session: "ib-child2",
+      manager: ctx.agentId,
+    });
+
+    const result = await processStopHook(
+      ctx.agentId,
+      "done\nI HAVE COMPLETED THE GOAL",
+      ctx.agentDir,
+      ctx.agentsDir,
+      {
+        checkGitStatus: async () => "",
+        getChildState: async () => "stopped",
+      },
+    );
+    expect(result.state).toBe("complete");
+    expect(result.action).toBe("none");
+  });
+
+  test("complete + no manager + unknown child → no remind (unknown is not unfinished)", async () => {
+    await writeMeta(ctx.agentDir, { tmux_session: "ib-test" });
+
+    const childDir = join(ctx.agentsDir, "child-003");
+    await mkdir(childDir, { recursive: true });
+    await writeMeta(childDir, {
+      tmux_session: "ib-child3",
+      manager: ctx.agentId,
+    });
+
+    const result = await processStopHook(
+      ctx.agentId,
+      "done\nI HAVE COMPLETED THE GOAL",
+      ctx.agentDir,
+      ctx.agentsDir,
+      {
+        checkGitStatus: async () => "",
+        getChildState: async () => "unknown",
+      },
+    );
+    expect(result.state).toBe("complete");
+    expect(result.action).toBe("none");
+  });
+
+  test("complete + no manager + waiting child → remind_children", async () => {
+    await writeMeta(ctx.agentDir, { tmux_session: "ib-test" });
+
+    const childDir = join(ctx.agentsDir, "child-004");
+    await mkdir(childDir, { recursive: true });
+    await writeMeta(childDir, {
+      tmux_session: "ib-child4",
+      manager: ctx.agentId,
+    });
+
+    const result = await processStopHook(
+      ctx.agentId,
+      "done\nI HAVE COMPLETED THE GOAL",
+      ctx.agentDir,
+      ctx.agentsDir,
+      {
+        checkGitStatus: async () => "",
+        getChildState: async () => "waiting",
+      },
+    );
+    expect(result.state).toBe("complete");
+    expect(result.action).toBe("remind_children");
+    expect(result.message).toContain("child-004");
+  });
+
+  test("complete + no manager + complete child → remind_children", async () => {
+    await writeMeta(ctx.agentDir, { tmux_session: "ib-test" });
+
+    const childDir = join(ctx.agentsDir, "child-005");
+    await mkdir(childDir, { recursive: true });
+    await writeMeta(childDir, {
+      tmux_session: "ib-child5",
+      manager: ctx.agentId,
+    });
+
+    const result = await processStopHook(
+      ctx.agentId,
+      "done\nI HAVE COMPLETED THE GOAL",
+      ctx.agentDir,
+      ctx.agentsDir,
+      {
+        checkGitStatus: async () => "",
+        getChildState: async () => "complete",
+      },
+    );
+    expect(result.state).toBe("complete");
+    expect(result.action).toBe("remind_children");
   });
 });
 
@@ -434,5 +533,107 @@ describe("debug log", () => {
     expect(content).toContain("some tmux output");
     expect(content).toContain("--- parse-state -v output ---");
     expect(content).toContain("--- last_assistant_message ---");
+  });
+});
+
+// ── findUnfinishedChildren unit tests ──────────────────────────────────────────
+
+describe("findUnfinishedChildren", () => {
+  let ctx: Awaited<ReturnType<typeof createTempAgentDir>>;
+
+  beforeEach(async () => {
+    ctx = await createTempAgentDir();
+  });
+
+  afterEach(async () => {
+    await ctx.cleanup();
+  });
+
+  test("running child is flagged as unfinished", async () => {
+    const childDir = join(ctx.agentsDir, "child-run");
+    await mkdir(childDir, { recursive: true });
+    await writeMeta(childDir, { tmux_session: "ib-child-run", manager: ctx.agentId });
+
+    const result = await findUnfinishedChildren(ctx.agentsDir, ctx.agentId, {
+      getChildState: async () => "running",
+    });
+    expect(result).toEqual(["child-run"]);
+  });
+
+  test("stopped child is NOT flagged as unfinished", async () => {
+    const childDir = join(ctx.agentsDir, "child-stop");
+    await mkdir(childDir, { recursive: true });
+    await writeMeta(childDir, { tmux_session: "ib-child-stop", manager: ctx.agentId });
+
+    const result = await findUnfinishedChildren(ctx.agentsDir, ctx.agentId, {
+      getChildState: async () => "stopped",
+    });
+    expect(result).toEqual([]);
+  });
+
+  test("unknown child is NOT flagged as unfinished", async () => {
+    const childDir = join(ctx.agentsDir, "child-unk");
+    await mkdir(childDir, { recursive: true });
+    await writeMeta(childDir, { tmux_session: "ib-child-unk", manager: ctx.agentId });
+
+    const result = await findUnfinishedChildren(ctx.agentsDir, ctx.agentId, {
+      getChildState: async () => "unknown",
+    });
+    expect(result).toEqual([]);
+  });
+
+  test("creating child is flagged as unfinished", async () => {
+    const childDir = join(ctx.agentsDir, "child-create");
+    await mkdir(childDir, { recursive: true });
+    await writeMeta(childDir, { tmux_session: "ib-child-create", manager: ctx.agentId });
+
+    const result = await findUnfinishedChildren(ctx.agentsDir, ctx.agentId, {
+      getChildState: async () => "creating",
+    });
+    expect(result).toEqual(["child-create"]);
+  });
+
+  test("waiting child is flagged as unfinished", async () => {
+    const childDir = join(ctx.agentsDir, "child-wait");
+    await mkdir(childDir, { recursive: true });
+    await writeMeta(childDir, { tmux_session: "ib-child-wait", manager: ctx.agentId });
+
+    const result = await findUnfinishedChildren(ctx.agentsDir, ctx.agentId, {
+      getChildState: async () => "waiting",
+    });
+    expect(result).toEqual(["child-wait"]);
+  });
+
+  test("archived child is skipped", async () => {
+    const childDir = join(ctx.agentsDir, "child-arch");
+    await mkdir(childDir, { recursive: true });
+    await writeMeta(childDir, { tmux_session: "ib-child-arch", manager: ctx.agentId, archived: true });
+
+    const result = await findUnfinishedChildren(ctx.agentsDir, ctx.agentId, {
+      getChildState: async () => "running",
+    });
+    expect(result).toEqual([]);
+  });
+
+  test("child with no tmux session is treated as unknown (not unfinished)", async () => {
+    const childDir = join(ctx.agentsDir, "child-notmux");
+    await mkdir(childDir, { recursive: true });
+    await writeMeta(childDir, { manager: ctx.agentId });
+
+    const result = await findUnfinishedChildren(ctx.agentsDir, ctx.agentId, {
+      getChildState: async () => "running", // should not be called since no tmux_session
+    });
+    expect(result).toEqual([]);
+  });
+
+  test("child with different manager is skipped", async () => {
+    const childDir = join(ctx.agentsDir, "child-other");
+    await mkdir(childDir, { recursive: true });
+    await writeMeta(childDir, { tmux_session: "ib-child-other", manager: "other-parent" });
+
+    const result = await findUnfinishedChildren(ctx.agentsDir, ctx.agentId, {
+      getChildState: async () => "running",
+    });
+    expect(result).toEqual([]);
   });
 });

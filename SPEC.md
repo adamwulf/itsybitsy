@@ -212,7 +212,7 @@ Managers spawn workers either explicitly with `ib new-agent --worker "task"` or 
 
 ### 2.4 Unfinished Children Check
 
-When a top-level manager (no manager of its own) signals completion, the stop hook checks for unfinished children. [^callout]: Bash determines "unfinished" by checking actual tmux state (creating, running, waiting, or complete — but NOT stopped/unknown). TS determines "unfinished" by checking only that the agent directory exists and `meta.archived` is not true, without polling tmux state.
+When a top-level manager (no manager of its own) signals completion, the stop hook checks for unfinished children. Both bash and TS determine "unfinished" by checking actual tmux state (creating, running, waiting, or complete — but NOT stopped/unknown).
 
 Specifically, it looks for children — agents in `.ittybitty/agents/` whose `meta.json` `manager` field matches the completing agent's ID. If any exist, the agent receives a nudge message listing them and instructing it to merge or kill each one before completing.
 
@@ -295,11 +295,11 @@ After successful merge:
 5. **Send via tmux**: `tmux send-keys -t <session> "<message>"` (no `-l` literal flag), then after a calculated delay, `tmux send-keys -t <session> Enter` separately. [^note] The TypeScript implementation uses `-l` (literal flag) to prevent key interpretation of special characters; the bash version relies on tmux's default key handling without `-l`.
 6. **Delay calculation**: `0.1 + (message_length / 100) * 0.5` seconds, clamped to [0.2, 3.0]. Longer messages need more time for the paste to complete in tmux. The `message_length` here is the length of the full formatted message (including the `[sent by agent ...]` prefix if present).
 7. **Logging**: Both sender and recipient get entries in their `agent.log`. Recipient log entries are written with `--quiet` (no stdout echo); sender log entries echo to stdout. [^note] The `--quiet` distinction is bash-specific. The TypeScript `logAgent()` is always write-only (appends to `agent.log` without echoing to stdout) for both sender and recipient. Additionally, in bash when `fromId` is set, the sender's log message ("Sent message to ...") is echoed to stdout; in TypeScript, `stdout` is returned as an empty string when `fromId` is set (only returning `"Sent to <id>"` when there is no sender).
-8. **Stdin piping**: Messages can also be provided via stdin (`echo "msg" | ib send <id>` or `ib send <id> < file.txt`) when no positional message argument is given. [^callout] Stdin piping is bash-only. The TypeScript CLI requires the message as positional arguments and errors if none are provided.
+8. **Stdin piping**: Messages can also be provided via stdin (`echo "msg" | ib send <id>` or `ib send <id> < file.txt`) when no positional message argument is given. Both bash and TypeScript support stdin piping when no positional message is provided and stdin is not a TTY.
 
 ### 4.2 ib ask
 
-`ib ask "question"` allows top-level managers to ask the user questions. [^callout] `ib ask` is only implemented in the bash version. The TypeScript CLI does not have an `ask` command; agents running under the TS orchestrator use the bash `ib ask` directly (which is always available on `$PATH`).
+`ib ask "question"` allows top-level managers to ask the user questions. Both bash and TypeScript implement this command.
 
 1. **Auto-detect agent ID** from CWD if in an agent worktree (or specify `--id <agent-id>` explicitly)
 2. **Top-level check**: Only agents with no manager (or whose manager has been merged/killed) can ask. Others are told to use `ib send` to communicate with their manager.
@@ -333,15 +333,13 @@ Fields:
 - `status`: `"pending"` or `"acknowledged"`
 - `acknowledged_at`: Set when `ib acknowledge <id>` is called
 
-**[^callout]** The TypeScript `acknowledgeQuestion` also sets an `acknowledged: true` boolean field on the question object, in addition to `status` and `acknowledged_at`. The bash version only sets `status` and `acknowledged_at`.
-
 Questions from agents that no longer exist (no directory in `.ittybitty/agents/`) are filtered out when reading.
 
 ### 4.4 ib acknowledge
 
-`ib acknowledge <question-id>` marks a question as handled. Only the primary (user-level) Claude can acknowledge — agents are blocked via `is_running_as_agent()` check. The command finds the question by ID, sets `status` to `"acknowledged"` and records `acknowledged_at` with the current ISO 8601 UTC timestamp. On success, it prints a hint to use `ib send <agent-id> "answer"` to respond. [^callout] The "hint to use `ib send`" output is bash-specific. The TypeScript `acknowledgeQuestion` returns a generic success message without the send hint.
+`ib acknowledge <question-id>` marks a question as handled. Only the primary (user-level) Claude can acknowledge — agents are blocked via `is_running_as_agent()` check. The command finds the question by ID, sets `status` to `"acknowledged"` and records `acknowledged_at` with the current ISO 8601 UTC timestamp. On success, both bash and TypeScript print a hint: "Question acknowledged. Use 'ib send <agent-id> "answer"' to respond."
 
-**[^callout]** The TypeScript `acknowledgeQuestion` is only called from the TUI dashboard (always user-level), so it omits the `is_running_as_agent()` guard. It also sets an extra `acknowledged: true` boolean (see §4.3 callout).
+**[^note]** The TypeScript `acknowledgeQuestion` is only called from the TUI dashboard (always user-level), so it omits the `is_running_as_agent()` guard.
 
 ---
 

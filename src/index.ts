@@ -458,10 +458,20 @@ async function main() {
         }
       }
       const agent = await requireAgent(filteredSendArgs[0], repos);
-      const message = filteredSendArgs.slice(1).join(" ");
+      let message = filteredSendArgs.slice(1).join(" ");
       if (!message) {
-        console.error("Usage: ib send [--from <id>] <agent-id> <message...>");
-        process.exit(1);
+        // If stdin is piped (not TTY), read message from stdin
+        if (!process.stdin.isTTY) {
+          const chunks: string[] = [];
+          for await (const chunk of process.stdin) {
+            chunks.push(typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk));
+          }
+          message = chunks.join("").trim();
+        }
+        if (!message) {
+          console.error("Usage: ib send [--from <id>] <agent-id> <message...>");
+          process.exit(1);
+        }
       }
       const { sendMessage } = await import("./ib-commands");
       await printAndExit(await sendMessage(agent, message, fromAgent ? { fromAgent } : undefined));
@@ -617,6 +627,51 @@ async function main() {
       }
       const { acknowledgeQuestion } = await import("./ib-commands");
       await printAndExit(await acknowledgeQuestion(repoPath, questionId));
+      break;
+    }
+    case "ask": {
+      const repos = await listRepos();
+      // Parse --id flag or auto-detect from CWD
+      const askArgs = args.slice(1);
+      let askAgentId: string | undefined;
+      const askQuestionParts: string[] = [];
+      for (let i = 0; i < askArgs.length; i++) {
+        const arg = askArgs[i]!;
+        if (arg === "--id") {
+          askAgentId = askArgs[++i];
+        } else {
+          askQuestionParts.push(arg);
+        }
+      }
+      const askQuestionText = askQuestionParts.join(" ");
+
+      // Auto-detect agent ID from CWD
+      if (!askAgentId) {
+        const cwd = process.cwd();
+        const worktreeMatch = cwd.match(/\/.ittybitty\/agents\/([^/]+)\/repo/);
+        if (worktreeMatch) {
+          askAgentId = worktreeMatch[1];
+        }
+      }
+
+      if (!askAgentId) {
+        console.error("Error: Could not detect agent ID. Run from an agent worktree or use --id <agent-id>.");
+        process.exit(1);
+      }
+      if (!askQuestionText) {
+        console.error('Usage: ib ask [--id <agent-id>] "question"');
+        process.exit(1);
+      }
+
+      // Determine repo path from agent
+      const askAgent = await findAgentById(askAgentId, repos);
+      if (!askAgent) {
+        console.error(`Agent not found: ${askAgentId}`);
+        process.exit(1);
+      }
+
+      const { askQuestion } = await import("./ib-commands");
+      await printAndExit(await askQuestion(askAgent.repoPath, askAgentId, askQuestionText));
       break;
     }
     case "log": {
@@ -826,7 +881,8 @@ async function main() {
       console.log("  info <id>           Show agent's metadata");
       console.log("");
       console.log("Communication:");
-      console.log("  send <id> <msg>     Send a message to an agent (--from <id>)");
+      console.log("  send <id> <msg>     Send a message to an agent (--from <id>, stdin)");
+      console.log("  ask <question>      Ask user a question (--id <agent-id>)");
       console.log("  questions, q        Show pending agent questions (--all)");
       console.log("  acknowledge <qid>   Acknowledge a pending question (alias: ack)");
       console.log("");

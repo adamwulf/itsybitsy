@@ -4,7 +4,8 @@
  */
 
 import { existsSync } from "node:fs";
-import { stat } from "node:fs/promises";
+import { stat, readdir } from "node:fs/promises";
+import { join } from "node:path";
 import { agentWorktreePath } from "../agents";
 import type { Agent, FlatEntry, PendingQuestion } from "../agents";
 import type { RepoEntry } from "../registry";
@@ -577,6 +578,11 @@ export function handleHelp(ctx: ActionCtx) {
       row("r", "reassign"),
       row("a", "new agent"),
       "",
+      header("Repo"),
+      row("A", "add repo"),
+      row("D", "remove repo (safe)"),
+      row("r", "rename repo (on header)"),
+      "",
       header("Open"),
       row("w", "worktree"),
       row("o", "diff tool"),
@@ -1084,6 +1090,57 @@ export function handleRemoveRepo(ctx: ActionCtx) {
         ctx.setNotice(result.message);
         if (result.ok) {
           // Remove from in-memory repos so the UI reflects the change immediately
+          const idx = ctx.repos.findIndex((r) => r.path === repo.path);
+          if (idx !== -1) { ctx.repos.splice(idx, 1); }
+          ctx.watcher?.updateRepos(ctx.repos);
+          ctx.watcher?.refresh();
+        }
+      }).catch((err) => {
+        ctx.setNotice(`Error removing: ${err}`);
+      });
+    },
+  });
+}
+
+/** 'A' — add repo via folder browser (alias for handleFolderBrowser) */
+export async function handleAddRepo(ctx: ActionCtx) {
+  return handleFolderBrowser(ctx);
+}
+
+/** 'D' — remove repo with safety check: must have zero agent directories */
+export async function handleRemoveRepoSafe(ctx: ActionCtx) {
+  const repo = findRepoByHeader(ctx);
+  if (!repo) { ctx.setNotice("Select a repo header to remove"); return; }
+
+  // Check both agents/ and archive/ directories for any agent subdirectories
+  const agentsDir = join(repo.path, ".ittybitsy", "agents");
+  const archiveDir = join(repo.path, ".ittybitsy", "archive");
+  let agentCount = 0;
+  for (const dir of [agentsDir, archiveDir]) {
+    try {
+      const entries = await readdir(dir, { withFileTypes: true });
+      agentCount += entries.filter((e) => e.isDirectory()).length;
+    } catch {
+      // ENOENT expected — directory may not exist
+    }
+  }
+
+  if (agentCount > 0) {
+    ctx.setNotice(`Cannot remove: ${agentCount} agent dir${agentCount > 1 ? "s" : ""} still exist in ${repoDisplayName(repo)}`);
+    return;
+  }
+
+  ctx.showDialog({
+    type: "confirm",
+    prompt: `Remove ${repoDisplayName(repo)} from registry?\n(${repo.path})`,
+    confirmLabel: "Remove",
+    focusedButton: "cancel",
+    confirmColor: RED,
+    onYes: () => {
+      ctx.closeDialog();
+      removeRepo(repo.path).then((result) => {
+        ctx.setNotice(result.message);
+        if (result.ok) {
           const idx = ctx.repos.findIndex((r) => r.path === repo.path);
           if (idx !== -1) { ctx.repos.splice(idx, 1); }
           ctx.watcher?.updateRepos(ctx.repos);

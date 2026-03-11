@@ -642,6 +642,8 @@ export class DashboardComponent implements Component {
       { label: "open in Ghostty — G", action: () => agentActions.handleOpenGhostty(this) },
       { label: "debug snapshot — S", action: () => agentActions.handleSnapshot(this) },
       { label: "fuzzy jump to agent — @", action: () => agentActions.handleFuzzyAgent(this) },
+      { label: "add repo — A", action: () => agentActions.handleAddRepo(this) },
+      { label: "remove repo — D", action: () => agentActions.handleRemoveRepoSafe(this) },
       { label: "help — ?", action: () => agentActions.handleHelp(this) },
       { label: "setup — h", action: () => agentActions.handleSetup(this) },
       { label: "scroll up — ;", action: () => agentActions.handleScrollUp(this) },
@@ -933,8 +935,10 @@ export class DashboardComponent implements Component {
     // Resize left pane
     else if (data === "[") { agentActions.handleResizeLeft(this, -LEFT_WIDTH_STEP); }
     else if (data === "]") { agentActions.handleResizeLeft(this, LEFT_WIDTH_STEP); }
-    // Folder browser
-    else if (data === "+") { agentActions.handleFolderBrowser(this); }
+    // Folder browser / add repo
+    else if (data === "+" || data === "A") { agentActions.handleAddRepo(this); }
+    // Remove repo (safe — requires repo header selected and zero agents)
+    else if (data === "D") { agentActions.handleRemoveRepoSafe(this); }
   }
 
   // --- Rendering ---

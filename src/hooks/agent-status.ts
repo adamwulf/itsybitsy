@@ -9,7 +9,7 @@ import { readdir, readFile, writeFile, mkdir, access } from "fs/promises";
 import { logAgent } from "../agent-lifecycle";
 import { parseState } from "../parse-state";
 import { captureTmuxOutput } from "../tmux-poller";
-import { isValidAgentId } from "../validation";
+import { isValidAgentId, isValidTmuxSession } from "../validation";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -408,7 +408,20 @@ export async function hookStatus(agentId: string): Promise<void> {
     }
   }
 
-  // Execute tmux actions
+  // Execute tmux actions and print state
+  await executeResultActions(result, agentDir, agentsDir);
+}
+
+/**
+ * Execute tmux actions based on the stop hook result.
+ * Extracted from hookStatus for testability.
+ * Returns "ok" on success, or an error string if validation fails.
+ */
+export async function executeResultActions(
+  result: StopHookResult,
+  agentDir: string,
+  agentsDir: string,
+): Promise<string> {
   const meta = await readMeta(agentDir);
   const tmuxSession = meta?.tmux_session as string | undefined;
 
@@ -434,9 +447,19 @@ export async function hookStatus(agentId: string): Promise<void> {
   } else if (result.action === "notify_manager" && result.message) {
     const managerId = meta?.manager as string | undefined;
     if (managerId) {
+      if (!isValidAgentId(managerId)) {
+        console.error(`Invalid manager agent ID: ${managerId}`);
+        console.log(result.state);
+        return `invalid_manager_id`;
+      }
       const managerMeta = await readMeta(join(agentsDir, managerId));
       const managerSession = managerMeta?.tmux_session;
       if (managerSession) {
+        if (!isValidTmuxSession(managerSession)) {
+          console.error(`Invalid manager tmux session: ${managerSession}`);
+          console.log(result.state);
+          return `invalid_manager_session`;
+        }
         const sendProc = Bun.spawn(
           ["tmux", "send-keys", "-t", managerSession, "-l", result.message],
           { stdout: "pipe", stderr: "pipe" },
@@ -454,4 +477,5 @@ export async function hookStatus(agentId: string): Promise<void> {
 
   // Print state to stdout
   console.log(result.state);
+  return "ok";
 }

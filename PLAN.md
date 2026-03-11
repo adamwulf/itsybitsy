@@ -1718,6 +1718,38 @@ Three divergences to fix:
 
 ---
 
+### Phase 41: Agent Prompt Summary Generation
+
+**Status:** Not started.
+
+**Source:** New itsybitsy feature — no bash equivalent.
+
+**Goal:** After agent creation, generate a short (~30-40 word) summary of the agent's prompt using `claude -p` with Haiku. Store in `meta.json` as `summary`. Display in TUI agent list instead of raw prompt.
+
+**Complexity:** Low.
+
+#### 41a: Generate summary on agent creation
+
+**Files:** `src/ib-commands.ts` (`newAgent`), `src/agents.ts` (Agent type)
+
+- [ ] After the tmux session is started in `newAgent()`, fire a background process — do not await, do not block:
+  ```
+  claude -p "Summarize the following agent task in 30-40 words:\n\n{prompt}" --model claude-haiku-4-5-20251001
+  ```
+- [ ] On success: trim output, read `meta.json`, merge in `summary` field, write back
+- [ ] On failure (non-zero exit, timeout, exception): silently skip — leave `summary` unset
+- [ ] Add `summary?: string` to the `Agent` type in `src/agents.ts` and include it when reading `meta.json` in `readAllAgents()`
+- [ ] Add tests using the existing mock spawn runner for the claude subprocess
+
+#### 41b: Display summary in TUI agent list
+
+**File:** `src/tui/dashboard.ts` (agent list rendering)
+
+- [ ] Where the agent prompt is currently shown in the agent list, use `agent.summary ?? agent.prompt` instead
+- [ ] No other display changes needed
+
+---
+
 ### Phase 27 (future): Path Allowlist in Hook Sandbox
 
 **Status:** Aspirational.

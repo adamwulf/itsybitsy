@@ -729,3 +729,19 @@ Notifications are sent via `ib send` (bash) / `sendMessage` (TS) and suppressed 
 ### 8.8 Post-Create-Agent Hook
 
 Bash runs `.ittybitty/hooks/post-create-agent` in the background after agent creation, appending its stdout/stderr to `agent.log`. itsybitsy does not implement this hook — it is considered legacy and unused.
+
+### 8.9 Agent Prompt Summary
+
+When a new agent is created, itsybitsy generates a short summary of the agent's prompt using `claude -p` with the `claude-haiku-4-5` model. This runs in the background (fire-and-forget) immediately after agent creation and does not block the creation flow.
+
+**Generation:**
+- Command: `claude -p "Summarize the following agent task in 30-40 words:\n\n{prompt}" --model claude-haiku-4-5-20251001`
+- Output is trimmed and stored in `meta.json` as `summary`
+- If generation fails (claude not on PATH, API error, timeout), `summary` is left unset — no error is surfaced
+
+**Storage:** `meta.json` gains a new optional field:
+```json
+{ "summary": "Short human-readable description of the agent's task (~30-40 words)" }
+```
+
+**Display:** The TUI dashboard (`ib watch`) shows `summary` in the agent list instead of the raw prompt. If `summary` is not yet set (generation still in progress or failed), the prompt is used as fallback. This is an itsybitsy-only feature — bash `ib` has no equivalent.

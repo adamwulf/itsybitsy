@@ -28,6 +28,7 @@ export interface StopHookResult {
 export interface ProcessStopHookOpts {
   captureOutput?: () => Promise<string | null>;
   checkGitStatus?: () => Promise<string>;
+  getChildState?: (tmuxSession: string) => Promise<string>;
   now?: number;
 }
 
@@ -199,6 +200,7 @@ export async function processStopHook(
     const unfinishedChildren = await findUnfinishedChildren(
       agentsDir,
       agentId,
+      opts?.getChildState ? { getChildState: opts.getChildState } : undefined,
     );
     if (unfinishedChildren.length > 0) {
       const childCount = unfinishedChildren.length;
@@ -284,9 +286,13 @@ async function readMeta(
   }
 }
 
-async function findUnfinishedChildren(
+/** States that count as "unfinished" — these children need attention before parent can complete */
+const UNFINISHED_STATES = new Set(["creating", "running", "waiting", "complete"]);
+
+export async function findUnfinishedChildren(
   agentsDir: string,
   parentId: string,
+  opts?: { getChildState?: (tmuxSession: string) => Promise<string> },
 ): Promise<string[]> {
   const unfinished: string[] = [];
   try {
@@ -298,9 +304,26 @@ async function findUnfinishedChildren(
         const raw = await readFile(metaPath, "utf-8");
         const meta = JSON.parse(raw);
         if (meta.manager !== parentId) continue;
-        // Check if archived
         if (meta.archived) continue;
-        unfinished.push(entry.name);
+
+        // Determine the child's actual state via tmux
+        let childState = "unknown";
+        const tmuxSession = meta.tmux_session;
+        if (tmuxSession) {
+          if (opts?.getChildState) {
+            childState = await opts.getChildState(tmuxSession);
+          } else {
+            const output = await captureTmuxOutput(tmuxSession);
+            if (output) {
+              childState = parseState(output).state;
+            }
+            // output === null means no tmux session → stopped/unknown
+          }
+        }
+
+        if (UNFINISHED_STATES.has(childState)) {
+          unfinished.push(entry.name);
+        }
       } catch {
         /* skip malformed meta */
       }

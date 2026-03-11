@@ -2041,6 +2041,97 @@ export async function pauseAgent(agent: Agent): Promise<IbCommandResult> {
 }
 
 /**
+ * Native ask implementation — replaces `ib ask "question"`.
+ * Top-level agents (no manager, or manager merged/killed) can ask the user a question.
+ */
+export async function askQuestion(repoPath: string, agentId: string, question: string): Promise<IbCommandResult> {
+  // Verify agent exists
+  const agentsDir = join(repoPath, ".ittybitty", "agents");
+  const agentDir = join(agentsDir, agentId);
+  const metaPath = join(agentDir, "meta.json");
+
+  let meta: Record<string, unknown>;
+  try {
+    const file = Bun.file(metaPath);
+    if (!(await file.exists())) {
+      return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agentId}' not found` };
+    }
+    meta = await file.json();
+  } catch {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Failed to read agent metadata` };
+  }
+
+  // Top-level check: only agents with no manager (or whose manager is gone) may ask
+  const managerId = meta.manager as string | undefined;
+  if (managerId) {
+    // Check if the manager's directory still exists (non-archived)
+    const managerDir = join(agentsDir, managerId);
+    const managerMetaFile = Bun.file(join(managerDir, "meta.json"));
+    if (await managerMetaFile.exists()) {
+      return {
+        ok: false,
+        exitCode: 1,
+        stdout: "",
+        stderr: `Agent has a manager (${managerId}). Use 'ib send ${managerId} "message"' to communicate with your manager.`,
+      };
+    }
+    // Manager dir doesn't exist → merged/killed/archived, allow asking
+  }
+
+  // Config check: allowAgentQuestions must be true
+  const config = await readConfig(repoPath);
+  const allowQuestions = config.allowAgentQuestions?.value as boolean | undefined;
+  if (allowQuestions === false) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: "Agent questions are disabled (allowAgentQuestions=false)" };
+  }
+
+  // Read or initialize user-questions.json
+  const questionsPath = join(repoPath, ".ittybitty", "user-questions.json");
+  let data: { questions: any[] } = { questions: [] };
+  try {
+    const file = Bun.file(questionsPath);
+    if (await file.exists()) {
+      const parsed = await file.json();
+      if (parsed && Array.isArray(parsed.questions)) {
+        data = parsed;
+      }
+    }
+  } catch { /* start fresh */ }
+
+  // Clean up stale questions (agents whose directories no longer exist)
+  try {
+    const agentEntries = await readdir(agentsDir, { withFileTypes: true });
+    const activeIds = new Set(agentEntries.filter(e => e.isDirectory()).map(e => e.name));
+    data.questions = data.questions.filter((q: any) => activeIds.has(q.agent));
+  } catch { /* ignore readdir failure */ }
+
+  // Generate question ID: q-<unix-epoch>-<6-char-hash>
+  const epoch = Math.floor(Date.now() / 1000);
+  const hashInput = `${agentId}-${question}\n`;
+  const hasher = new Bun.CryptoHasher("md5");
+  hasher.update(hashInput);
+  const hashHex = hasher.digest("hex");
+  const questionId = `q-${epoch}-${hashHex.slice(0, 6)}`;
+
+  // Append question
+  data.questions.push({
+    id: questionId,
+    agent: agentId,
+    question,
+    timestamp: new Date().toISOString(),
+    status: "pending",
+  });
+
+  await mkdir(join(repoPath, ".ittybitty"), { recursive: true });
+  await Bun.write(questionsPath, JSON.stringify(data, null, 2) + "\n");
+
+  // Log to agent's log
+  await logAgent(agentDir, `Asked question: ${question} (${questionId})`);
+
+  return { ok: true, exitCode: 0, stdout: `Question submitted (${questionId})`, stderr: "" };
+}
+
+/**
  * Native acknowledge implementation — replaces `ib acknowledge <questionId>`.
  * Reads user-questions.json, marks the question as acknowledged, writes back.
  */
@@ -2066,13 +2157,12 @@ export async function acknowledgeQuestion(repoPath: string, questionId: string):
     return { ok: false, exitCode: 1, stdout: "", stderr: `Question '${questionId}' not found` };
   }
 
-  question.acknowledged = true;
   question.acknowledged_at = new Date().toISOString();
   question.status = "acknowledged";
 
   await Bun.write(questionsPath, JSON.stringify(data, null, 2) + "\n");
 
-  return { ok: true, exitCode: 0, stdout: `Acknowledged question '${questionId}' from agent '${question.agent}'`, stderr: "" };
+  return { ok: true, exitCode: 0, stdout: `Question acknowledged. Use 'ib send ${question.agent} "answer"' to respond.`, stderr: "" };
 }
 
 // ── Settings JSON helpers for hooks management ─────────────────────────────

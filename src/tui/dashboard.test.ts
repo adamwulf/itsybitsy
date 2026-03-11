@@ -1804,7 +1804,7 @@ describe("DashboardComponent right pane and navigation features", () => {
     // Should have acknowledged natively (file updated)
     const updated = await Bun.file(questionsPath).json();
     expect(updated.questions[0].status).toBe("acknowledged");
-    expect(updated.questions[0].acknowledged).toBe(true);
+    expect(updated.questions[0].acknowledged_at).toBeTruthy();
     // And sent the message (via native send)
     expect(sentMessages.length).toBe(1);
     expect(sentMessages[0]!.message).toBe("yes");
@@ -1841,7 +1841,7 @@ describe("DashboardComponent right pane and navigation features", () => {
     // Should have acknowledged natively (file updated)
     const updated = await Bun.file(questionsPath).json();
     expect(updated.questions[0].status).toBe("acknowledged");
-    expect(updated.questions[0].acknowledged).toBe(true);
+    expect(updated.questions[0].acknowledged_at).toBeTruthy();
 
     await rm(tempRepo, { recursive: true, force: true });
   });

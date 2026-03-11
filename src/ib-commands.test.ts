@@ -18,6 +18,7 @@ import {
   statusAgent,
   pauseAgent,
   acknowledgeQuestion,
+  askQuestion,
   setSendSpawnRunner,
   resetSendSpawnRunner,
   setKillPauseSpawnRunner,
@@ -2598,19 +2599,19 @@ describe("acknowledgeQuestion (native)", () => {
 
     const result = await acknowledgeQuestion(tempDir, "q-1");
     expect(result.ok).toBe(true);
-    expect(result.stdout).toContain("Acknowledged question 'q-1'");
-    expect(result.stdout).toContain("agent-abc");
+    expect(result.stdout).toContain("Question acknowledged");
+    expect(result.stdout).toContain("ib send agent-abc");
 
     // Verify the file was updated
     const updated = await Bun.file(questionsPath).json();
     const q1 = updated.questions.find((q: any) => q.id === "q-1");
-    expect(q1.acknowledged).toBe(true);
+    expect(q1.acknowledged).toBeUndefined();
     expect(q1.status).toBe("acknowledged");
     expect(q1.acknowledged_at).toBeTruthy();
     // Other question untouched
     const q2 = updated.questions.find((q: any) => q.id === "q-2");
     expect(q2.status).toBe("pending");
-    expect(q2.acknowledged).toBeUndefined();
+    expect(q2.acknowledged_at).toBeUndefined();
   });
 
   test("question not found returns error", async () => {
@@ -2634,6 +2635,113 @@ describe("acknowledgeQuestion (native)", () => {
     const result = await acknowledgeQuestion(tempDir, "q-1");
     expect(result.ok).toBe(false);
     expect(result.stderr).toContain("No questions file found");
+  });
+});
+
+// ── askQuestion tests ─────────────────────────────────────────────────────────
+
+describe("askQuestion (native)", () => {
+  let tempDir: string;
+  let agentsDir: string;
+  let agentId: string;
+  let agentDir: string;
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "ask-test-"));
+    agentsDir = join(tempDir, ".ittybitty", "agents");
+    agentId = "agent-ask-test";
+    agentDir = join(agentsDir, agentId);
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id: agentId }));
+  });
+
+  afterEach(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  test("happy path: creates question in user-questions.json", async () => {
+    const result = await askQuestion(tempDir, agentId, "Should I proceed?");
+    expect(result.ok).toBe(true);
+    expect(result.stdout).toContain("Question submitted");
+
+    const data = await Bun.file(join(tempDir, ".ittybitty", "user-questions.json")).json();
+    expect(data.questions).toHaveLength(1);
+    expect(data.questions[0].agent).toBe(agentId);
+    expect(data.questions[0].question).toBe("Should I proceed?");
+    expect(data.questions[0].status).toBe("pending");
+    expect(data.questions[0].id).toMatch(/^q-\d+-[0-9a-f]{6}$/);
+  });
+
+  test("agent with active manager is rejected", async () => {
+    const managerId = "agent-manager-1";
+    const managerDir = join(agentsDir, managerId);
+    await mkdir(managerDir, { recursive: true });
+    await Bun.write(join(managerDir, "meta.json"), JSON.stringify({ id: managerId }));
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id: agentId, manager: managerId }));
+
+    const result = await askQuestion(tempDir, agentId, "Can I ask?");
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("has a manager");
+    expect(result.stderr).toContain("ib send");
+  });
+
+  test("agent with gone manager can ask", async () => {
+    // Manager set but directory doesn't exist
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id: agentId, manager: "agent-gone" }));
+
+    const result = await askQuestion(tempDir, agentId, "Manager is gone, can I ask?");
+    expect(result.ok).toBe(true);
+  });
+
+  test("agent not found returns error", async () => {
+    const result = await askQuestion(tempDir, "nonexistent", "Hello?");
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("not found");
+  });
+
+  test("allowAgentQuestions=false rejects", async () => {
+    // Write config that disables questions
+    await Bun.write(join(tempDir, ".ittybitty.json"), JSON.stringify({ allowAgentQuestions: false }));
+
+    const result = await askQuestion(tempDir, agentId, "Can I ask?");
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("disabled");
+  });
+
+  test("cleans up stale questions from non-existent agents", async () => {
+    // Pre-populate with a stale question
+    await Bun.write(
+      join(tempDir, ".ittybitty", "user-questions.json"),
+      JSON.stringify({ questions: [
+        { id: "q-old", agent: "agent-gone", question: "old", status: "pending", timestamp: "2025-01-01T00:00:00Z" },
+      ] }),
+    );
+
+    const result = await askQuestion(tempDir, agentId, "New question");
+    expect(result.ok).toBe(true);
+
+    const data = await Bun.file(join(tempDir, ".ittybitty", "user-questions.json")).json();
+    // Stale question should be removed, only the new one remains
+    expect(data.questions).toHaveLength(1);
+    expect(data.questions[0].agent).toBe(agentId);
+  });
+
+  test("logs question to agent.log", async () => {
+    await askQuestion(tempDir, agentId, "Test question");
+
+    const logFile = Bun.file(join(agentDir, "agent.log"));
+    const logContent = await logFile.text();
+    expect(logContent).toContain("Asked question: Test question");
+  });
+
+  test("question ID uses md5 hash", async () => {
+    const result = await askQuestion(tempDir, agentId, "Hash test");
+    expect(result.ok).toBe(true);
+
+    const data = await Bun.file(join(tempDir, ".ittybitty", "user-questions.json")).json();
+    const qId = data.questions[0].id;
+    // ID format: q-<epoch>-<6hex>
+    expect(qId).toMatch(/^q-\d+-[0-9a-f]{6}$/);
   });
 });
 

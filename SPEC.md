@@ -741,3 +741,14 @@ When a new agent is created, itsybitsy generates a short summary of the agent's 
 ```
 
 **Display:** The TUI dashboard (`ib watch`) shows `summary` in the agent list instead of the raw prompt. If `summary` is not yet set (generation still in progress or failed), the prompt is used as fallback. This is an itsybitsy-only feature — bash `ib` has no equivalent.
+
+### 8.10 TUI Dashboard Navigation
+
+The `ib watch` TUI supports the following keyboard navigation for the agent tree:
+
+**Row-by-row navigation (`j`/`k` or arrow keys):** Moves one entry at a time through the flat list (repo headers and agents alike).
+
+**Repo-jump navigation (`J`/`K` — Shift+j/k):** Jumps to the next or previous repo boundary. Behavior depends on what is currently selected:
+
+- **Repo header selected**: `J` moves to the next repo header; `K` moves to the previous repo header. Wraps around.
+- **Agent selected**: `J` jumps to the first agent of the next repo that has agents, skipping any repos with no agents. `K` jumps to the last agent of the previous repo that has agents, skipping any repos with no agents. The selection always stays on an agent — repos with no visible agents are skipped entirely. Wraps around.

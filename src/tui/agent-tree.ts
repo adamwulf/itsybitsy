@@ -133,6 +133,73 @@ export class AgentTreeComponent implements Component {
     this.ensureSelectedVisible();
   }
 
+  /**
+   * Jump to next (delta=1) or previous (delta=-1) repo.
+   *
+   * If a repo-header is selected: move to the next/prev repo-header.
+   * If an agent is selected: skip repos with no agents, always land on an agent.
+   *   - next (delta=1): first agent of the next repo that has agents.
+   *   - prev (delta=-1): last agent of the previous repo that has agents.
+   */
+  moveToRepo(delta: 1 | -1) {
+    const visible = this.visibleList;
+    if (visible.length === 0) return;
+
+    const current = visible[this.selectedIndex];
+    const isRepoHeader = current?.kind === "repo-header";
+
+    // Find all repo-header indices
+    const repoIndices = visible.map((f, i) => (f.kind === "repo-header" ? i : -1)).filter((i) => i !== -1);
+    if (repoIndices.length === 0) return;
+
+    // Helper: get agent indices for repo at repoIndices[ri]
+    const agentsForRepo = (ri: number): number[] => {
+      const headerPos = repoIndices[ri]!;
+      const nextHeaderPos = repoIndices[ri + 1] ?? visible.length;
+      const result: number[] = [];
+      for (let i = headerPos + 1; i < nextHeaderPos; i++) {
+        if (visible[i]?.kind === "agent") result.push(i);
+      }
+      return result;
+    };
+
+    // Find which repo we are currently in
+    let currentRepoIdx: number;
+    if (isRepoHeader) {
+      currentRepoIdx = repoIndices.indexOf(this.selectedIndex);
+      if (currentRepoIdx === -1) currentRepoIdx = 0;
+    } else {
+      let found = -1;
+      for (let i = repoIndices.length - 1; i >= 0; i--) {
+        if (repoIndices[i]! <= this.selectedIndex) {
+          found = i;
+          break;
+        }
+      }
+      currentRepoIdx = found === -1 ? 0 : found;
+    }
+
+    if (isRepoHeader) {
+      // Repo-header selected: simply move to the next/prev repo-header
+      const targetRepoIdx = ((currentRepoIdx + delta) % repoIndices.length + repoIndices.length) % repoIndices.length;
+      this.selectedIndex = repoIndices[targetRepoIdx]!;
+    } else {
+      // Agent selected: scan for the next/prev repo that has agents, skipping empty ones
+      let targetRepoIdx = currentRepoIdx;
+      for (let step = 0; step < repoIndices.length; step++) {
+        targetRepoIdx = ((targetRepoIdx + delta) % repoIndices.length + repoIndices.length) % repoIndices.length;
+        const agents = agentsForRepo(targetRepoIdx);
+        if (agents.length > 0) {
+          this.selectedIndex = delta === 1 ? agents[0]! : agents[agents.length - 1]!;
+          break;
+        }
+      }
+    }
+
+    this.updateSelectedId();
+    this.ensureSelectedVisible();
+  }
+
   /** Update selectedId from current selectedIndex */
   private updateSelectedId() {
     const visible = this.visibleList;

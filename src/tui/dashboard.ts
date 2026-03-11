@@ -211,10 +211,10 @@ class StatusBarComponent implements Component {
     let row1Left: string;
     let row2Left: string;
     if (this.repoHeaderSelected) {
-      row1Left = `${DIM}j/k: select    ;/l: scroll    p/n: pane    ${qLabel}${errBadge}${RESET}`;
+      row1Left = `${DIM}j/k: select    J/K: repo    ;/l: scroll    p/n: pane    ${qLabel}${errBadge}${RESET}`;
       row2Left = `${DIM}@: jump    /: commands    a: new agent    ?: help    h: setup    A: add repo    D: remove repo${RESET}`;
     } else {
-      row1Left = `${DIM}j/k: select    ;/l: scroll    p/n: pane    ${qLabel}    s: send    m: merge${errBadge}${RESET}`;
+      row1Left = `${DIM}j/k: select    J/K: repo    ;/l: scroll    p/n: pane    ${qLabel}    s: send    m: merge${errBadge}${RESET}`;
       row2Left = `${DIM}@: jump    /: commands    a: new agent    ?: help    h: setup    x: kill${RESET}`;
     }
 
@@ -809,7 +809,15 @@ export class DashboardComponent implements Component {
     }
 
     // Navigation
-    if (matchesKey(data, Key.down) || data === "j") {
+    if (data === "J") {
+      this.agentTree.moveToRepo(1);
+      this.syncSelectedAgent();
+      this.tui?.requestRender();
+    } else if (data === "K") {
+      this.agentTree.moveToRepo(-1);
+      this.syncSelectedAgent();
+      this.tui?.requestRender();
+    } else if (matchesKey(data, Key.down) || data === "j") {
       if (this.rightPane.mode === "QUESTIONS" && this._questionsFocused && this.rightPane.filteredQuestions.length > 0) {
         this.rightPane.questionsSelectedIndex = Math.min(
           this.rightPane.filteredQuestions.length - 1,

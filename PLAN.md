@@ -1467,9 +1467,7 @@ Bash watchdog saves tmux output to `debug-logs/watchdog-<timestamp>-unknown.txt`
 
 ---
 
-### Phase 37: State Detection & Watchdog Parity Fixes
-
-**Status:** Not started.
+### Phase 37: State Detection & Watchdog Parity Fixes -- COMPLETE
 
 **Source:** SPEC.md callouts #1 and #4 (bash/TS divergences to be resolved).
 
@@ -1479,34 +1477,22 @@ Bash watchdog saves tmux output to `debug-logs/watchdog-<timestamp>-unknown.txt`
 
 #### 37a: Grace period for `creating` state on missing tmux session
 
-**File:** `src/agents.ts` (or wherever `detectAgentStates` handles missing tmux output)
+**File:** `src/agents.ts`
 
-**SPEC.md:** §1.2, line ~84
-
-Bash `get_state()` returns `creating` (not `stopped`) when tmux output is empty/missing AND the agent was created less than 6 seconds ago (`is_agent_recently_created()` checks `meta.json` `created_at`). TS always returns `stopped` for a missing tmux session.
-
-- [ ] Read `created_at` from `meta.json` in the state detection path
-- [ ] If tmux output is empty/missing AND `Date.now() - created_at < 6000`, return `creating` instead of `stopped`
-- [ ] Add tests covering the grace period boundary (just created → `creating`, old agent → `stopped`)
-- [ ] Update SPEC.md §1.2 to remove `[^callout]`, describe both bash and TS as having the 6-second grace period
+- [x] Added `isRecentlyCreated()` helper and `CREATING_GRACE_PERIOD_MS` constant (6s)
+- [x] `detectAgentStates()` now checks `created_epoch` when tmux output is null — returns `creating` if within grace period
+- [x] Tests for boundary conditions (recent, old, exactly 6s, zero, NaN)
+- [x] Updated SPEC.md §1.3 step 2 to remove `[^callout]`, describe aligned behavior
 
 #### 37b: Auto-spawn watchdog on resume; watchdog exits when tmux disappears
 
-**File:** `src/ib-commands.ts` (`resumeAgent`), `src/watchdog.ts`
+**File:** `src/ib-commands.ts` (`resumeAgent`)
 
-**SPEC.md:** §1.6, line ~151
+1. **Resume watchdog spawn**: `resumeAgent()` already spawned watchdog; added manager check so only agents with a manager get a watchdog (top-level agents have a human watching).
+   - [x] Added `agent.meta.manager` guard around watchdog spawn
+   - [x] Updated SPEC.md §1.6 step 7 to remove `[^callout]`, describe aligned behavior
 
-Two related fixes:
-
-1. **Resume should re-spawn watchdog**: `resumeAgent()` does not currently spawn `ib watchdog <id>` after restarting the agent. Bash `cmd_resume()` also omits this (it's a bash bug), but TS should do the right thing.
-   - [ ] After successfully restarting the tmux session in `resumeAgent()`, spawn `ib watchdog <id>` detached (same pattern as `newAgent()`)
-   - [ ] Only spawn if the agent has a manager (top-level agents don't need a watchdog — they have a human watching)
-
-2. **Watchdog exits when tmux session disappears**: When an agent is paused (tmux session killed), the watchdog process should detect the missing session and exit cleanly. This ensures the watchdog is alive only as long as the agent is alive.
-   - [ ] In the watchdog loop, if the tmux session is not found (capture returns empty/error), exit after a short grace period (e.g. 10 seconds of consecutive missing sessions) rather than looping indefinitely
-   - [ ] Add tests for watchdog exit on missing tmux session
-
-- [ ] Update SPEC.md §1.6 to remove `[^callout]`, describe both bash and TS resume as spawning the watchdog
+2. **Watchdog tmux exit**: Not applicable for TS architecture. The TS watchdog is a global loop that monitors all agents; stale per-agent trackers are pruned automatically. The bash watchdog is per-agent and exits on worktree removal. SPEC.md §8.5 already documents this architectural difference accurately.
 
 ---
 

@@ -81,7 +81,7 @@ State detection follows this flow:
 
 1. **Archived agents** are always `stopped` (no tmux capture attempted).
 
-2. **Missing tmux session** → `stopped`. [^callout]: The bash `get_state()` has an additional grace period: if the tmux output is empty/missing AND the agent was created less than 6 seconds ago (`is_agent_recently_created()`), it returns `creating` instead of `stopped`. The TypeScript implementation does not have this grace period — a missing tmux session is always `stopped`.
+2. **Missing tmux session** → `stopped`, unless the agent was created less than 6 seconds ago (`created_epoch` in `meta.json`), in which case the state is `creating`. This grace period avoids treating a brand-new agent as stopped before its tmux session has had time to start. Both bash (`is_agent_recently_created()`) and TypeScript (`isRecentlyCreated()`) implement this check.
 
 3. **Pre-parseState check**: If the tmux output has fewer than 10 lines AND no startup markers (`"Claude Code v"`, `"[USER TASK]"`, `"╭─ Claude Code"`, `"[AGENT CONTEXT]"`), the state is `creating`. This handles the early startup case before enough output exists for pattern matching. Priority 1 below handles the case where there ARE enough lines but startup markers are still absent (e.g., a workspace trust prompt is showing on a fresh screen). [^callout]: The bash reference counts total lines (newlines + 1) over the first 100 lines of output. The TypeScript reimplementation counts non-empty lines (`line.trim() !== ""`) over the full output, which is stricter — blank lines from tmux padding are excluded.
 
@@ -148,7 +148,7 @@ Resume (`ib resume <id>`) restarts a stopped agent:
 4. Start new tmux session running `resume.sh`
 5. Auto-accept workspace trust (if not yolo)
 6. Send resume nudge message: "Resume your work, or end with 'WAITING' or 'I HAVE COMPLETED THE GOAL' as your final line."
-7. **Auto-spawn watchdog**: If the agent has a manager, `ib watchdog <id>` is spawned in the background. [^callout] The bash `cmd_resume()` does not currently do this (bug — the watchdog from `cmd_new_agent()` is lost after pause/resume). The TypeScript implementation should include this step.
+7. **Auto-spawn watchdog**: If the agent has a manager, `ib watchdog` is spawned in the background. Top-level agents (no manager) do not get a watchdog since a human is watching them. The TypeScript implementation includes this step; the bash `cmd_resume()` does not (known bug — the per-agent watchdog from `cmd_new_agent()` is lost after pause/resume).
 
 ### 1.7 Archiving
 

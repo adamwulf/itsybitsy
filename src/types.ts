@@ -33,32 +33,47 @@ export async function runCmd(
 }
 
 /**
- * Injectable spawn context — holds a spawn runner with set/reset methods.
- * Centralizes the DI pattern used across all modules that need test injection.
+ * Generic injection context for dependency injection in tests.
+ * Holds a function (or value) with set/reset methods.
  */
-export class SpawnContext {
-  private _runner: SpawnFn;
-  private readonly _default: SpawnFn;
+export class InjectionContext<T> {
+  private _value: T;
+  private readonly _default: T;
 
-  constructor(defaultRunner: SpawnFn = Bun.spawn as SpawnFn) {
-    this._default = defaultRunner;
-    this._runner = defaultRunner;
+  constructor(defaultValue: T) {
+    this._default = defaultValue;
+    this._value = defaultValue;
   }
 
-  get runner(): SpawnFn {
-    return this._runner;
+  get fn(): T {
+    return this._value;
   }
 
-  set(runner: SpawnFn): void {
-    this._runner = runner;
+  set(value: T): void {
+    this._value = value;
   }
 
   reset(): void {
-    this._runner = this._default;
+    this._value = this._default;
+  }
+}
+
+/**
+ * Injectable spawn context — extends InjectionContext with a `runner` alias
+ * and a convenience `run()` method that drains stdout/stderr via Promise.all.
+ */
+export class SpawnContext extends InjectionContext<SpawnFn> {
+  constructor(defaultRunner: SpawnFn = Bun.spawn as SpawnFn) {
+    super(defaultRunner);
+  }
+
+  /** Alias for `fn` — kept for backwards compatibility with existing call sites. */
+  get runner(): SpawnFn {
+    return this.fn;
   }
 
   /** Convenience: run a command using this context's spawn runner. */
   async run(cmd: string[]): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-    return runCmd(this._runner, cmd);
+    return runCmd(this.fn, cmd);
   }
 }

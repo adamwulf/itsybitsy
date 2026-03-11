@@ -4,8 +4,7 @@ import {
   setupColorSchemeDetection,
   parseOSC11Response,
   computeLuminance,
-  setTestWriter,
-  resetTestWriter,
+  writerCtx,
   resetColorScheme,
 } from "./color-scheme";
 import { BRIGHT_BLUE, BRIGHT_MAGENTA, BLUE, MAGENTA } from "./colors";
@@ -15,18 +14,18 @@ import { BRIGHT_BLUE, BRIGHT_MAGENTA, BLUE, MAGENTA } from "./colors";
 /** Collect all stdout writes during setup & interactions. */
 function withCapture(fn: (writes: string[]) => void): string[] {
   const writes: string[] = [];
-  setTestWriter((d) => { writes.push(d); return true; });
+  writerCtx.set((d) => { writes.push(d); return true; });
   fn(writes);
   return writes;
 }
 
 beforeEach(() => {
   resetColorScheme();
-  setTestWriter(() => true); // suppress stdout by default
+  writerCtx.set(() => true); // suppress stdout by default
 });
 
 afterEach(() => {
-  resetTestWriter();
+  writerCtx.reset();
   resetColorScheme();
 });
 
@@ -120,7 +119,7 @@ describe("setupColorSchemeDetection", () => {
 
   test("queryColorScheme writes OSC 11 query", () => {
     const writes: string[] = [];
-    setTestWriter((d) => { writes.push(d); return true; });
+    writerCtx.set((d) => { writes.push(d); return true; });
     const { queryColorScheme } = setupColorSchemeDetection(() => {});
     writes.length = 0; // clear setup writes
     queryColorScheme();
@@ -129,7 +128,7 @@ describe("setupColorSchemeDetection", () => {
 
   test("cleanup writes Ghostty disable and is idempotent", () => {
     const writes: string[] = [];
-    setTestWriter((d) => { writes.push(d); return true; });
+    writerCtx.set((d) => { writes.push(d); return true; });
     const { cleanup } = setupColorSchemeDetection(() => {});
     writes.length = 0;
     cleanup();
@@ -265,7 +264,7 @@ describe("queryColorScheme timer", () => {
 
   test("each call writes OSC 11 query", () => {
     const writes: string[] = [];
-    setTestWriter((d) => { writes.push(d); return true; });
+    writerCtx.set((d) => { writes.push(d); return true; });
     const { queryColorScheme } = setupColorSchemeDetection(() => {});
     writes.length = 0;
     queryColorScheme();

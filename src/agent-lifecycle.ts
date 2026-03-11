@@ -7,21 +7,10 @@
 import { join, dirname, resolve } from "path";
 import { readdir, mkdir, cp, rm, rename, appendFile } from "fs/promises";
 import { SpawnContext } from "./types";
-import type { SpawnFn } from "./types";
 import { isValidTmuxSession } from "./validation";
 
 /** Spawn context for agent lifecycle operations */
 export const spawnCtx = new SpawnContext();
-
-/** Override the spawn runner (for testing) */
-export function setSpawnRunner(runner: SpawnFn): void {
-  spawnCtx.set(runner);
-}
-
-/** Reset to the default Bun.spawn runner */
-export function resetSpawnRunner(): void {
-  spawnCtx.reset();
-}
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 

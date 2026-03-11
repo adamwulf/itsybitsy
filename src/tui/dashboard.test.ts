@@ -9,7 +9,7 @@ import { makeAgent as _makeAgent, makeFlatAgent, makeFlatRepoHeader, setAgentSta
 import { TmuxPaneComponent, RightPaneComponent, DashboardComponent, AgentTreeComponent, colorizeDiff, colorizeLog, formatAgentRow } from "./dashboard";
 import { visibleWidth } from "@mariozechner/pi-tui";
 import { setSendSpawnRunner, resetSendSpawnRunner, setKillPauseSpawnRunner, resetKillPauseSpawnRunner, setNukeResumeSpawnRunner, resetNukeResumeSpawnRunner, setNewAgentSpawnRunner, resetNewAgentSpawnRunner, setDiffStatusSpawnRunner, resetDiffStatusSpawnRunner, setMergeSpawnRunner, resetMergeSpawnRunner } from "../ib-commands";
-import { setSpawnRunner as setLifecycleSpawnRunner, resetSpawnRunner as resetLifecycleSpawnRunner } from "../agent-lifecycle";
+import { spawnCtx as lifecycleSpawnCtx } from "../agent-lifecycle";
 import type { SpawnResult } from "../types";
 import { PANE_MODES } from "./pane-manager";
 import { assertDialog } from "./test-helpers";
@@ -412,7 +412,7 @@ describe("DashboardComponent dialog and action handlers", () => {
       exited: Promise.resolve(cmd.includes("pgrep") ? 1 : 0),
     } as SpawnResult);
     setKillPauseSpawnRunner(noopSpawn);
-    setLifecycleSpawnRunner(noopSpawn);
+    lifecycleSpawnCtx.set(noopSpawn);
     setNukeResumeSpawnRunner(noopSpawn);
     // Mock spawn runners for native diff/status and merge-check
     setDiffStatusSpawnRunner(() => makeSpawnResult());
@@ -427,7 +427,7 @@ describe("DashboardComponent dialog and action handlers", () => {
   afterEach(async () => {
     resetSendSpawnRunner();
     resetKillPauseSpawnRunner();
-    resetLifecycleSpawnRunner();
+    lifecycleSpawnCtx.reset();
     resetNukeResumeSpawnRunner();
     resetDiffStatusSpawnRunner();
     resetMergeSpawnRunner();
@@ -545,7 +545,7 @@ describe("DashboardComponent dialog and action handlers", () => {
       stderr: new Response("").body!,
       exited: Promise.resolve(cmd.includes("pgrep") || cmd.includes("list-sessions") ? 1 : 0),
     } as SpawnResult);
-    setLifecycleSpawnRunner(noopSpawn);
+    lifecycleSpawnCtx.set(noopSpawn);
     setNukeResumeSpawnRunner(noopSpawn);
 
     dashboard.setRepos([{ name: "test-repo", path: actionTempDir }]);
@@ -1133,7 +1133,7 @@ describe("DashboardComponent dialog and action handlers", () => {
       return makeResult("", 0);
     };
     setNewAgentSpawnRunner(mockSpawn);
-    setLifecycleSpawnRunner(mockSpawn);
+    lifecycleSpawnCtx.set(mockSpawn);
 
     dashboard = makeDashboard();
     dashboard.setRepos([{ path: newAgentTempDir, name: "only-repo" }]);
@@ -1169,7 +1169,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(meta.prompt).toBe("do stuff");
 
     resetNewAgentSpawnRunner();
-    resetLifecycleSpawnRunner();
+    lifecycleSpawnCtx.reset();
     await rm(newAgentTempDir, { recursive: true, force: true });
   });
 
@@ -1208,7 +1208,7 @@ describe("DashboardComponent dialog and action handlers", () => {
       return makeResult("", 0);
     };
     setNewAgentSpawnRunner(mockSpawn);
-    setLifecycleSpawnRunner(mockSpawn);
+    lifecycleSpawnCtx.set(mockSpawn);
 
     dashboard = makeDashboard();
     dashboard.setRepos([{ path: newAgentTempDir, name: "only-repo" }]);
@@ -1235,7 +1235,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(meta.prompt).toBe("do stuff");
 
     resetNewAgentSpawnRunner();
-    resetLifecycleSpawnRunner();
+    lifecycleSpawnCtx.reset();
     await rm(newAgentTempDir, { recursive: true, force: true });
   });
 

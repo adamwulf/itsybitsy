@@ -6,20 +6,9 @@
 
 import { stripAnsi } from "./parse-state";
 import { SpawnContext } from "./types";
-import type { SpawnFn } from "./types";
 
 /** Spawn context for tmux poller operations */
 export const spawnCtx = new SpawnContext();
-
-/** Override the spawn runner (for testing) */
-export function setSpawnRunner(runner: SpawnFn): void {
-  spawnCtx.set(runner);
-}
-
-/** Reset to the default Bun.spawn runner */
-export function resetSpawnRunner(): void {
-  spawnCtx.reset();
-}
 
 export interface TmuxPollerEvents {
   /** Raw tmux output (with ANSI) for display */

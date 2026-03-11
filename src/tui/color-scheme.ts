@@ -7,19 +7,18 @@ import {
   RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN, WHITE,
   DIM_GRAY, BRIGHT_BLUE, BRIGHT_MAGENTA,
 } from "./colors";
+import { InjectionContext } from "../types";
 
 type ColorScheme = "dark" | "light";
 let colorScheme: ColorScheme = "dark";
 
 /* ── test injection ─────────────────────────────────────────────── */
 type Writer = (data: string) => boolean;
-let testWriter: Writer | null = null;
-export function setTestWriter(fn: Writer): void { testWriter = fn; }
-export function resetTestWriter(): void { testWriter = null; }
+export const writerCtx = new InjectionContext<Writer | null>(null);
 export function resetColorScheme(): void { colorScheme = "dark"; }
 
 function writeStdout(data: string): void {
-  if (testWriter) { testWriter(data); return; }
+  if (writerCtx.fn) { writerCtx.fn(data); return; }
   process.stdout.write(data);
 }
 /* ─────────────────────────────────────────────────────────────── */

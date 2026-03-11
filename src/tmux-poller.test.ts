@@ -1,8 +1,8 @@
 import { test, expect, describe, afterEach } from "bun:test";
-import { TmuxPoller, captureTmuxOutput, hasAttachedClient, setSpawnRunner, resetSpawnRunner } from "./tmux-poller";
+import { TmuxPoller, captureTmuxOutput, hasAttachedClient, spawnCtx } from "./tmux-poller";
 
 function mockSpawn(stdout: string, exitCode: number, delay = 0) {
-  setSpawnRunner((_cmd: string[], _opts?: any) => {
+  spawnCtx.set((_cmd: string[], _opts?: any) => {
     const encoder = new TextEncoder();
     const stream = new ReadableStream({
       start(controller) {
@@ -21,7 +21,7 @@ function mockSpawn(stdout: string, exitCode: number, delay = 0) {
 }
 
 afterEach(() => {
-  resetSpawnRunner();
+  spawnCtx.reset();
 });
 
 // -------------------------------------------------------------------
@@ -41,14 +41,14 @@ describe("captureTmuxOutput", () => {
   });
 
   test("returns null when spawn throws", async () => {
-    setSpawnRunner(() => { throw new Error("spawn failed"); });
+    spawnCtx.set(() => { throw new Error("spawn failed"); });
     const result = await captureTmuxOutput("my-session");
     expect(result).toBeNull();
   });
 
   test("passes lines parameter to tmux command", async () => {
     let capturedCmd: string[] = [];
-    setSpawnRunner((cmd: string[], _opts?: any) => {
+    spawnCtx.set((cmd: string[], _opts?: any) => {
       capturedCmd = cmd;
       const stream = new ReadableStream({ start(c) { c.close(); } });
       return {
@@ -163,7 +163,7 @@ describe("TmuxPoller", () => {
   });
 
   test("onError called when spawn throws", async () => {
-    setSpawnRunner(() => { throw new Error("tmux not found"); });
+    spawnCtx.set(() => { throw new Error("tmux not found"); });
     let errorMsg: string | undefined;
     poller = new TmuxPoller({
       onOutput() {},
@@ -226,7 +226,7 @@ describe("hasAttachedClient", () => {
   });
 
   test("returns false when spawn throws", async () => {
-    setSpawnRunner(() => { throw new Error("tmux not found"); });
+    spawnCtx.set(() => { throw new Error("tmux not found"); });
     const result = await hasAttachedClient("my-session");
     expect(result).toBe(false);
   });

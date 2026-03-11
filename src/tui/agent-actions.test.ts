@@ -18,7 +18,7 @@ import {
   setSendSpawnRunner, resetSendSpawnRunner,
   setNewAgentSpawnRunner, resetNewAgentSpawnRunner,
 } from "../ib-commands";
-import { setSpawnRunner as setLifecycleSpawnRunner, resetSpawnRunner as resetLifecycleSpawnRunner } from "../agent-lifecycle";
+import { spawnCtx as lifecycleSpawnCtx } from "../agent-lifecycle";
 import type { SpawnResult } from "../types";
 
 /** Noop spawn runner that always succeeds */
@@ -102,7 +102,7 @@ beforeEach(() => {
   setNukeResumeSpawnRunner(noopSpawnRunner);
   setSendSpawnRunner(noopSpawnRunner);
   setNewAgentSpawnRunner(noopSpawnRunner);
-  setLifecycleSpawnRunner(noopSpawnRunner);
+  lifecycleSpawnCtx.set(noopSpawnRunner);
 });
 
 afterEach(() => {
@@ -110,7 +110,7 @@ afterEach(() => {
   resetNukeResumeSpawnRunner();
   resetSendSpawnRunner();
   resetNewAgentSpawnRunner();
-  resetLifecycleSpawnRunner();
+  lifecycleSpawnCtx.reset();
 });
 
 describe("handleKill", () => {

@@ -68,8 +68,7 @@ import {
   resetCompactSpawnRunner,
 } from "./auto-compact";
 import {
-  setSpawnRunner as setTmuxPollerSpawnRunner,
-  resetSpawnRunner as resetTmuxPollerSpawnRunner,
+  spawnCtx as tmuxPollerSpawnCtx,
 } from "./tmux-poller";
 import type { SpawnResult } from "./types";
 import type { ConfigResult } from "./config";
@@ -134,7 +133,7 @@ describe("watchdog", () => {
     stopWatchdog();
     resetSendSpawnRunner();
     resetWatchdogSpawnRunner();
-    resetTmuxPollerSpawnRunner();
+    tmuxPollerSpawnCtx.reset();
     resetWatchdogFetchUsage();
     resetWatchdogReadConfig();
     resetWatchdogNow();
@@ -392,7 +391,7 @@ describe("watchdog", () => {
         }
         return result;
       };
-      setTmuxPollerSpawnRunner(tmuxRunner as any);
+      tmuxPollerSpawnCtx.set(tmuxRunner as any);
 
       // First tick: transition from null to unknown — should save debug log
       await tick([mgr, a1]);

@@ -1,53 +1,53 @@
 import { test, expect, describe, afterEach } from "bun:test";
-import { openInGhostty, setWhich, resetWhich, setSpawn, resetSpawn } from "./ghostty";
+import { openInGhostty, whichCtx, spawnCtx } from "./ghostty";
 
 describe("openInGhostty", () => {
   afterEach(() => {
-    resetWhich();
-    resetSpawn();
+    whichCtx.reset();
+    spawnCtx.reset();
   });
 
   describe("session name validation", () => {
     test("rejects session name with spaces", async () => {
-      setWhich(() => "/usr/bin/ghostty");
+      whichCtx.set(() => "/usr/bin/ghostty");
       const result = await openInGhostty("bad session");
       expect(result).toEqual({ ok: false, message: "Invalid tmux session name" });
     });
 
     test("rejects session name with semicolons", async () => {
-      setWhich(() => "/usr/bin/ghostty");
+      whichCtx.set(() => "/usr/bin/ghostty");
       const result = await openInGhostty("session;rm -rf /");
       expect(result).toEqual({ ok: false, message: "Invalid tmux session name" });
     });
 
     test("rejects session name with quotes", async () => {
-      setWhich(() => "/usr/bin/ghostty");
+      whichCtx.set(() => "/usr/bin/ghostty");
       const result = await openInGhostty('session"name');
       expect(result).toEqual({ ok: false, message: "Invalid tmux session name" });
     });
 
     test("rejects session name with backticks", async () => {
-      setWhich(() => "/usr/bin/ghostty");
+      whichCtx.set(() => "/usr/bin/ghostty");
       const result = await openInGhostty("session`whoami`");
       expect(result).toEqual({ ok: false, message: "Invalid tmux session name" });
     });
 
     test("rejects empty session name", async () => {
-      setWhich(() => "/usr/bin/ghostty");
+      whichCtx.set(() => "/usr/bin/ghostty");
       const result = await openInGhostty("");
       expect(result).toEqual({ ok: false, message: "Invalid tmux session name" });
     });
 
     test("accepts alphanumeric session name", async () => {
-      setWhich(() => "/usr/bin/ghostty");
-      setSpawn((...args: any[]) => ({ unref: () => {} }));
+      whichCtx.set(() => "/usr/bin/ghostty");
+      spawnCtx.set((...args: any[]) => ({ unref: () => {} }));
       const result = await openInGhostty("agent123");
       expect(result.ok).toBe(true);
     });
 
     test("accepts session name with hyphens and underscores", async () => {
-      setWhich(() => "/usr/bin/ghostty");
-      setSpawn((...args: any[]) => ({ unref: () => {} }));
+      whichCtx.set(() => "/usr/bin/ghostty");
+      spawnCtx.set((...args: any[]) => ({ unref: () => {} }));
       const result = await openInGhostty("agent-abc_123");
       expect(result.ok).toBe(true);
     });
@@ -55,15 +55,15 @@ describe("openInGhostty", () => {
 
   describe("Ghostty availability check", () => {
     test("returns error when ghostty is not found on PATH", async () => {
-      setWhich(() => null);
+      whichCtx.set(() => null);
       const result = await openInGhostty("my-session");
       expect(result).toEqual({ ok: false, message: "Ghostty not found on PATH" });
     });
 
     test("does not spawn when ghostty is not found", async () => {
-      setWhich(() => null);
+      whichCtx.set(() => null);
       let spawned = false;
-      setSpawn((...args: any[]) => {
+      spawnCtx.set((...args: any[]) => {
         spawned = true;
         return { unref: () => {} };
       });
@@ -74,9 +74,9 @@ describe("openInGhostty", () => {
 
   describe("spawn behavior", () => {
     test("spawns ghostty with correct command args", async () => {
-      setWhich(() => "/usr/bin/ghostty");
+      whichCtx.set(() => "/usr/bin/ghostty");
       let spawnArgs: any[] = [];
-      setSpawn((...args: any[]) => {
+      spawnCtx.set((...args: any[]) => {
         spawnArgs = args;
         return { unref: () => {} };
       });
@@ -98,9 +98,9 @@ describe("openInGhostty", () => {
     });
 
     test("session name is never interpolated into shell code", async () => {
-      setWhich(() => "/usr/bin/ghostty");
+      whichCtx.set(() => "/usr/bin/ghostty");
       let spawnArgs: any[] = [];
-      setSpawn((...args: any[]) => {
+      spawnCtx.set((...args: any[]) => {
         spawnArgs = args;
         return { unref: () => {} };
       });
@@ -116,9 +116,9 @@ describe("openInGhostty", () => {
     });
 
     test("spawns with stdio ignored", async () => {
-      setWhich(() => "/usr/bin/ghostty");
+      whichCtx.set(() => "/usr/bin/ghostty");
       let spawnOpts: any = null;
-      setSpawn((...args: any[]) => {
+      spawnCtx.set((...args: any[]) => {
         spawnOpts = args[1];
         return { unref: () => {} };
       });
@@ -129,9 +129,9 @@ describe("openInGhostty", () => {
     });
 
     test("calls unref on spawned process", async () => {
-      setWhich(() => "/usr/bin/ghostty");
+      whichCtx.set(() => "/usr/bin/ghostty");
       let unrefCalled = false;
-      setSpawn((...args: any[]) => ({
+      spawnCtx.set((...args: any[]) => ({
         unref: () => { unrefCalled = true; },
       }));
 
@@ -141,8 +141,8 @@ describe("openInGhostty", () => {
     });
 
     test("returns success result on successful spawn", async () => {
-      setWhich(() => "/usr/bin/ghostty");
-      setSpawn((...args: any[]) => ({ unref: () => {} }));
+      whichCtx.set(() => "/usr/bin/ghostty");
+      spawnCtx.set((...args: any[]) => ({ unref: () => {} }));
 
       const result = await openInGhostty("test-session");
 
@@ -150,8 +150,8 @@ describe("openInGhostty", () => {
     });
 
     test("returns error result when spawn throws", async () => {
-      setWhich(() => "/usr/bin/ghostty");
-      setSpawn((...args: any[]) => {
+      whichCtx.set(() => "/usr/bin/ghostty");
+      spawnCtx.set((...args: any[]) => {
         throw new Error("spawn failed");
       });
 

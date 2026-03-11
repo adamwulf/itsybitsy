@@ -627,11 +627,9 @@ Custom prompt files in `.ittybitsy/prompts/`:
 
 Agent IDs can be specified as partial strings. Resolution:
 
-1. **Exact match** — check tmux session and agent directory
-2. **Substring match** — scan all agent directories and tmux sessions for the pattern
+1. **Exact match** — check agent directory, then tmux sessions (`ittybitty-*-<partial>`)
+2. **Substring match** — scan all agent directories and tmux sessions for the pattern, extracting agent IDs from session names (format: `ittybitty-<repoid>-<agentid>`)
 3. If 0 matches → error. If 1 match → use it. If 2+ matches → error listing all matches.
-
-> [^callout] TS `resolveAgentId()` only checks agent directories for both exact and substring matches (no tmux session scanning). It returns `null` for 0 or 2+ matches instead of listing ambiguous matches.
 
 ### 8.2 Agent Logging
 

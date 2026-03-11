@@ -37,6 +37,7 @@ import {
   uninstallSafetyHooks,
   installInterceptHook,
   uninstallInterceptHook,
+  resolveAgentId,
 } from "./ib-commands";
 import {
   setSpawnRunner as setLifecycleSpawnRunner,
@@ -2151,7 +2152,7 @@ describe("newAgent (native)", () => {
     setNewAgentSpawnRunner(mockSpawnRunner());
     const result = await callNewAgent("task", { manager: "nonexistent" });
     expect(result.ok).toBe(false);
-    expect(result.stderr).toContain("not found");
+    expect(result.stderr).toContain("No matching agent found");
   });
 
   test("noWorktree mode skips worktree creation", async () => {
@@ -3286,5 +3287,111 @@ describe("hooks round-trip", () => {
 
     const exists = await Bun.file(settingsFile).exists();
     expect(exists).toBe(false);
+  });
+});
+
+describe("resolveAgentId", () => {
+  let tempDir: string;
+  let agentsDir: string;
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "resolve-test-"));
+    agentsDir = join(tempDir, "agents");
+    await mkdir(agentsDir, { recursive: true });
+  });
+
+  afterEach(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  test("exact match via directory", async () => {
+    const agentDir = join(agentsDir, "agent-abc123");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), "{}");
+
+    const result = await resolveAgentId(agentsDir, "agent-abc123", async () => []);
+    expect(result).toEqual({ resolved: "agent-abc123" });
+  });
+
+  test("exact match via tmux session only (no directory)", async () => {
+    const result = await resolveAgentId(agentsDir, "agent-abc123", async () => [
+      "ittybitty-myrepo-agent-abc123",
+    ]);
+    expect(result).toEqual({ resolved: "agent-abc123" });
+  });
+
+  test("substring match via directory", async () => {
+    const agentDir = join(agentsDir, "agent-abc123");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), "{}");
+
+    const result = await resolveAgentId(agentsDir, "abc123", async () => []);
+    expect(result).toEqual({ resolved: "agent-abc123" });
+  });
+
+  test("substring match via tmux session only (no directory)", async () => {
+    const result = await resolveAgentId(agentsDir, "abc123", async () => [
+      "ittybitty-myrepo-agent-abc123",
+    ]);
+    expect(result).toEqual({ resolved: "agent-abc123" });
+  });
+
+  test("ambiguous match returns error with sorted matches", async () => {
+    // Create two agent dirs that both contain "abc"
+    for (const id of ["agent-abc111", "agent-abc222"]) {
+      const dir = join(agentsDir, id);
+      await mkdir(dir, { recursive: true });
+      await Bun.write(join(dir, "meta.json"), "{}");
+    }
+
+    const result = await resolveAgentId(agentsDir, "abc", async () => []);
+    expect(result).toEqual({
+      error: "Ambiguous agent ID — multiple matches",
+      matches: ["agent-abc111", "agent-abc222"],
+    });
+  });
+
+  test("ambiguous match across directory and tmux session", async () => {
+    // One agent in directory
+    const dir = join(agentsDir, "agent-abc111");
+    await mkdir(dir, { recursive: true });
+    await Bun.write(join(dir, "meta.json"), "{}");
+
+    // Another agent only in tmux
+    const result = await resolveAgentId(agentsDir, "abc", async () => [
+      "ittybitty-repo-agent-abc222",
+    ]);
+    expect(result).toEqual({
+      error: "Ambiguous agent ID — multiple matches",
+      matches: ["agent-abc111", "agent-abc222"],
+    });
+  });
+
+  test("no match returns error with empty matches", async () => {
+    const result = await resolveAgentId(agentsDir, "nonexistent", async () => []);
+    expect(result).toEqual({
+      error: "No matching agent found",
+      matches: [],
+    });
+  });
+
+  test("deduplicates matches found in both directory and tmux", async () => {
+    const dir = join(agentsDir, "agent-abc123");
+    await mkdir(dir, { recursive: true });
+    await Bun.write(join(dir, "meta.json"), "{}");
+
+    // Same agent also in tmux — should still be a single unique match
+    const result = await resolveAgentId(agentsDir, "abc123", async () => [
+      "ittybitty-repo-agent-abc123",
+    ]);
+    expect(result).toEqual({ resolved: "agent-abc123" });
+  });
+
+  test("ignores non-ittybitty tmux sessions", async () => {
+    const result = await resolveAgentId(agentsDir, "abc123", async () => [
+      "my-other-session",
+      "random-session-agent-abc123",
+    ]);
+    expect(result).toEqual({ error: "No matching agent found", matches: [] });
   });
 });

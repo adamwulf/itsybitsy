@@ -440,7 +440,7 @@ ${qAbsExitScript}
   if (nudgeDelayMs > 0) await Bun.sleep(nudgeDelayMs);
 
   const nudgePrompt = "Resume your work, or end with 'WAITING' or 'I HAVE COMPLETED THE GOAL' as your final line.";
-  await nukeResumeRunCmd(["tmux", "send-keys", "-t", tmuxSession, nudgePrompt]);
+  await nukeResumeRunCmd(["tmux", "send-keys", "-t", tmuxSession, "-l", nudgePrompt]);
 
   const nudgeSleepMs = resumeDelayOverrideMs !== null ? resumeDelayOverrideMs : 100;
   if (nudgeSleepMs > 0) await Bun.sleep(nudgeSleepMs);

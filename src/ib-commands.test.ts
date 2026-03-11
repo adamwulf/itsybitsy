@@ -738,12 +738,12 @@ describe("resumeAgent (native)", () => {
     expect(newSessionCall).toBeDefined();
     expect(newSessionCall).toContain("tmux-agent-abc");
 
-    // tmux send-keys for nudge should have been called
+    // tmux send-keys for nudge should have been called with -l flag
     const nudgeCall = spawnCalls.find(
-      (c) => c[0] === "tmux" && c[1] === "send-keys" && c.length === 5 && c[4] !== "Enter"
+      (c) => c[0] === "tmux" && c[1] === "send-keys" && c.includes("-l") && c.some(a => a.includes("Resume your work"))
     );
     expect(nudgeCall).toBeDefined();
-    expect(nudgeCall![4]).toContain("Resume your work");
+    expect(nudgeCall).toContain("-l");
   });
 
   test("detects yolo mode from start.sh", async () => {

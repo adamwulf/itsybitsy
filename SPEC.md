@@ -584,7 +584,7 @@ For each config key, the first valid value found (project → user → default) 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `maxAgents` | number | `10` | Maximum concurrent agents per repo |
-| `model` | string | `"sonnet"` | Default Claude model for new agents [^callout]: The TS `config.ts` defaults `model` to `"sonnet"` at the config layer, so `readConfig()` always returns `"sonnet"` if unset. The bash `load_config()` defaults `CONFIG_MODEL` to `""` (empty), and falls back to `"sonnet"` at spawn time (`ib:6800–6803`). Effective behavior is identical — the divergence is only in which layer provides the fallback. |
+| `model` | string | `""` | Default Claude model for new agents. Both bash and TS default to empty at the config layer and fall back to `"sonnet"` at spawn time in `newAgent()`. |
 | `fps` | number | `10` | Target frame rate for `ib watch` TUI |
 | `createPullRequests` | boolean | `false` | Instruct agents to create PRs on completion |
 | `allowAgentQuestions` | boolean | `true` | Allow top-level managers to ask user questions via `ib ask` |
@@ -604,8 +604,10 @@ For a given agent type (manager or worker):
 1. Start with the base settings from `.claude/settings.local.json` in the repo root
 2. Add mandatory permissions (§2.2)
 3. Add config-defined permissions for the agent's role
-4. If worker-specific permissions are empty, fall through to manager permissions [^callout]: The TS implementation (`ib-commands.ts:1431–1433`) reads permissions directly for the agent's role without this fallback — workers with empty `permissions.worker.allow` get no extra config permissions rather than inheriting manager permissions. The bash fallback (`ib:3565–3571`) checks only the `allow` list: if worker `allow` is empty/`[]`, both `allow` and `deny` fall through to manager config.
+4. Workers use `permissions.worker.allow`/`deny`; managers use `permissions.manager.allow`/`deny`. There is no fallthrough between types [^perm-quirk]
 5. Deduplicate all allow/deny lists
+
+[^perm-quirk]: The bash implementation has a quirk: if `CONFIG_WORKER_ALLOW` is empty, it falls through to `CONFIG_MANAGER_ALLOW` (and `deny` follows suit). The TS implementation intentionally does not replicate this — workers with empty `permissions.worker.allow` get no extra config permissions rather than inheriting manager permissions.
 
 ### 7.4 Custom Prompts
 
@@ -625,11 +627,9 @@ Custom prompt files in `.ittybitsy/prompts/`:
 
 Agent IDs can be specified as partial strings. Resolution:
 
-1. **Exact match** — check tmux session and agent directory
-2. **Substring match** — scan all agent directories and tmux sessions for the pattern
+1. **Exact match** — check agent directory, then tmux sessions (`ittybitty-*-<partial>`)
+2. **Substring match** — scan all agent directories and tmux sessions for the pattern, extracting agent IDs from session names (format: `ittybitty-<repoid>-<agentid>`)
 3. If 0 matches → error. If 1 match → use it. If 2+ matches → error listing all matches.
-
-> [^callout] TS `resolveAgentId()` only checks agent directories for both exact and substring matches (no tmux session scanning). It returns `null` for 0 or 2+ matches instead of listing ambiguous matches.
 
 ### 8.2 Agent Logging
 
@@ -659,11 +659,11 @@ Reads Claude transcript JSONL files to determine context window usage percentage
 
 ### 8.5 Watchdog
 
-`ib watchdog <id>` runs as a background loop for agents with a manager, polling agent state every 5 seconds.
+`ib watchdog <id>` runs as a background loop for a single agent with a manager, polling agent state every 5 seconds. Both bash and TS use per-agent watchdog processes when spawned via CLI.
 
-**Exit condition**: The bash watchdog exits when the agent's worktree directory is removed (`while [[ -d "$AGENT_DIR/repo" ]]`), which happens on kill/merge/nuke. It does **not** check tmux session existence, so it survives pause and must be exited by worktree removal. On resume, a new watchdog is spawned (§1.6 step 7).
+**Exit conditions**: The watchdog exits when: (a) the agent's worktree directory is removed (`while [[ -d "$AGENT_DIR/repo" ]]`), which happens on kill/merge/nuke, or (b) in TS, the agent's tmux session has been missing for >10 consecutive seconds (grace period). Bash does **not** check tmux session existence, so it survives pause and must be exited by worktree removal only. On resume, a new watchdog is spawned (§1.6 step 7).
 
-> [^callout] The TS watchdog is a global loop (see callout below) that monitors all agents — it doesn't exit per-agent. Stale per-agent trackers are pruned when an agent disappears from the provider. There is no per-agent worktree or tmux-based exit condition in TS.
+The TUI dashboard uses a global watchdog loop internally (`startWatchdog`/`stopWatchdog`) that monitors all agents via an `AgentProvider`, with a PID lock file at `~/.itsybitsy/watchdog.lock` for single-instance enforcement. The global watchdog can also be run standalone via `ib watchdog` (no agent ID). Per-agent watchdogs spawned by `newAgent`/`resumeAgent` do not use lock files.
 
 **Monitoring behaviors by state:**
 
@@ -684,7 +684,7 @@ Reads Claude transcript JSONL files to determine context window usage percentage
 
 **Quiet mode** (`--quiet`): Allows monitoring agents without managers. All notifications are logged but not sent.
 
-> [^callout] The TS watchdog is a single global loop that monitors ALL agents across all repos simultaneously (using an `AgentProvider`), rather than bash's per-agent `ib watchdog <id>` process. It uses a PID lock file at `~/.itsybitsy/watchdog.lock` for single-instance enforcement. TS has no `--quiet` mode; agents without managers simply receive no notifications (the `notifyManager` helper no-ops when `meta.manager` is unset).
+> [^callout] TS has no `--quiet` mode; agents without managers simply receive no notifications (the `notifyManager` helper no-ops when `meta.manager` is unset). The per-agent TS watchdog adds a tmux session grace period (10s) as an additional exit condition not present in bash.
 
 ### 8.6 Root Repo Resolution
 

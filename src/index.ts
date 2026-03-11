@@ -4,6 +4,7 @@
  * CLI entrypoint
  */
 
+import { join } from "path";
 import { addRepo, removeRepo, listRepos, repoDisplayName, type RepoEntry } from "./registry";
 import type { Agent, FlatEntry } from "./agents";
 import { isValidAgentId } from "./validation";
@@ -218,29 +219,57 @@ async function main() {
       break;
     }
     case "watchdog": {
-      const { acquireWatchdogLock, releaseWatchdogLock, readLockPid, createDiskAgentProvider, stopWatchdog } = await import("./watchdog");
-      const { startWatchdog } = await import("./watchdog");
+      const watchdogAgentId = args[1];
 
-      if (!acquireWatchdogLock()) {
-        const pid = readLockPid();
-        console.log(`watchdog already running (pid: ${pid})`);
-        process.exit(0);
+      if (watchdogAgentId) {
+        // Per-agent watchdog: `ib watchdog <id>`
+        if (!isValidAgentId(watchdogAgentId)) {
+          console.error(`Invalid agent ID: ${watchdogAgentId}`);
+          process.exit(1);
+        }
+        const { runPerAgentWatchdog } = await import("./watchdog");
+        const repos = await listRepos();
+        if (repos.length === 0) {
+          console.error("No repos registered.");
+          process.exit(1);
+        }
+        // Find the repo containing this agent
+        const { existsSync } = await import("fs");
+        const agentRepo = repos.find((r) =>
+          existsSync(join(r.path, ".ittybitsy", "agents", watchdogAgentId, "meta.json"))
+        );
+        if (!agentRepo) {
+          console.error(`Agent ${watchdogAgentId} not found in any registered repo.`);
+          process.exit(1);
+        }
+        await runPerAgentWatchdog(watchdogAgentId, agentRepo.path);
+      } else {
+        // Global watchdog: `ib watchdog` (no agent ID)
+        const { acquireWatchdogLock, releaseWatchdogLock, readLockPid, createDiskAgentProvider, stopWatchdog } = await import("./watchdog");
+        const { startWatchdog } = await import("./watchdog");
+
+        if (!acquireWatchdogLock()) {
+          const pid = readLockPid();
+          console.log(`watchdog already running (pid: ${pid})`);
+          process.exit(0);
+        }
+
+        const repos = await listRepos();
+        startWatchdog(createDiskAgentProvider(repos));
+
+        // Clean shutdown on signals
+        const cleanup = () => {
+          stopWatchdog();
+          releaseWatchdogLock();
+          process.exit(0);
+        };
+        process.on("SIGTERM", cleanup);
+        process.on("SIGINT", cleanup);
+        process.on("exit", () => releaseWatchdogLock());
       }
 
-      const repos = await listRepos();
-      startWatchdog(createDiskAgentProvider(repos));
-
-      // Clean shutdown on signals
-      const cleanup = () => {
-        stopWatchdog();
-        releaseWatchdogLock();
-        process.exit(0);
-      };
-      process.on("SIGTERM", cleanup);
-      process.on("SIGINT", cleanup);
-      process.on("exit", () => releaseWatchdogLock());
-
-      // Keep process alive — setInterval in startWatchdog holds the event loop
+      // Per-agent: runPerAgentWatchdog blocks until exit conditions are met
+      // Global: setInterval in startWatchdog holds the event loop
       break;
     }
     case "watch": {
@@ -871,7 +900,7 @@ async function main() {
       console.log("");
       console.log("Monitoring:");
       console.log("  watch               Launch TUI dashboard");
-      console.log("  watchdog            Run watchdog as background process");
+      console.log("  watchdog [id]       Run watchdog (per-agent with id, or global without)");
       console.log("  agents, tree        List all agents with states");
       console.log("  look <id>           Show agent's live tmux output (--lines N, --all, --follow)");
       console.log("  status <id>         Show agent's git log and status");

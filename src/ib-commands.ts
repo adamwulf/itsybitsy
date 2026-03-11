@@ -21,6 +21,7 @@ import {
   isRunningAsAgent,
 } from "./agent-lifecycle";
 import { readConfig } from "./config";
+import { listTmuxSessions } from "./tmux-poller";
 import { SpawnContext } from "./types";
 import type { SpawnFn } from "./types";
 import { isValidModel, isValidToolList, isValidTmuxSession, isValidSessionId } from "./validation";
@@ -440,7 +441,7 @@ ${absExitScript}
   if (agent.meta.manager) {
     try {
       const watchdogLog = join(agentDir, "watchdog.log");
-      const watchdogProc = Bun.spawn(["ib", "watchdog"], {
+      const watchdogProc = Bun.spawn(["ib", "watchdog", agent.id], {
         cwd: agent.repoPath,
         stdout: Bun.file(watchdogLog),
         stderr: Bun.file(watchdogLog),
@@ -1373,11 +1374,14 @@ export async function newAgent(
   // 4. Validate manager
   if (manager) {
     // Resolve partial ID
-    const resolved = await resolveAgentId(agentsDir, manager);
-    if (!resolved) {
-      return { ok: false, exitCode: 1, stdout: "", stderr: `Error: Manager agent '${manager}' not found` };
+    const resolveResult = await resolveAgentId(agentsDir, manager);
+    if ("error" in resolveResult) {
+      const suffix = resolveResult.matches.length > 0
+        ? `: ${resolveResult.matches.join(", ")}`
+        : "";
+      return { ok: false, exitCode: 1, stdout: "", stderr: `Error: ${resolveResult.error} for '${manager}'${suffix}` };
     }
-    manager = resolved;
+    manager = resolveResult.resolved;
 
     // Check manager is not a worker
     try {
@@ -1731,7 +1735,7 @@ ${absExitScript}
   if (manager) {
     try {
       const watchdogLog = join(agentDir, "watchdog.log");
-      const watchdogProc = Bun.spawn(["ib", "watchdog"], {
+      const watchdogProc = Bun.spawn(["ib", "watchdog", id], {
         cwd: rootRepoPath,
         stdout: Bun.file(watchdogLog),
         stderr: Bun.file(watchdogLog),
@@ -1812,31 +1816,71 @@ async function autoAcceptWorkspaceTrustForNewAgent(tmuxSession: string): Promise
   }
 }
 
+/** Result of resolveAgentId */
+export type ResolveAgentResult =
+  | { resolved: string }
+  | { error: string; matches: string[] };
+
+/** Extract agent ID from a tmux session name (format: ittybitty-<repoid>-<agentid>) */
+function extractAgentIdFromTmuxSession(sessionName: string): string | null {
+  if (!sessionName.startsWith("ittybitty-")) return null;
+  // Format: ittybitty-<repoid>-<agentid>
+  // repoid and agentid both contain hyphens, but agentid always starts with "agent-"
+  const agentMatch = sessionName.match(/-(agent-[a-f0-9]+)$/);
+  return agentMatch ? agentMatch[1]! : null;
+}
+
 /**
  * Resolve a partial agent ID to a full ID.
  * Mirrors resolve_agent_id() in ib bash.
+ * Scans both agent directories and tmux sessions.
+ *
+ * @param tmuxLister - injectable for testing; defaults to listTmuxSessions
  */
-async function resolveAgentId(agentsDir: string, partial: string): Promise<string | null> {
+export async function resolveAgentId(
+  agentsDir: string,
+  partial: string,
+  tmuxLister: () => Promise<string[]> = listTmuxSessions,
+): Promise<ResolveAgentResult> {
   // Exact match: check directory
   const exactDir = join(agentsDir, partial);
   if (await Bun.file(join(exactDir, "meta.json")).exists().catch(() => false)) {
-    return partial;
+    return { resolved: partial };
   }
 
-  // Partial match: scan directories
-  const matches: string[] = [];
+  // Exact match: check tmux sessions for ittybitty-*-<partial>
+  const sessions = await tmuxLister();
+  for (const session of sessions) {
+    const agentId = extractAgentIdFromTmuxSession(session);
+    if (agentId === partial) {
+      return { resolved: partial };
+    }
+  }
+
+  // Partial/substring match: scan directories
+  const matches = new Set<string>();
   try {
     const entries = await readdir(agentsDir, { withFileTypes: true });
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
       if (entry.name.includes(partial)) {
-        matches.push(entry.name);
+        matches.add(entry.name);
       }
     }
   } catch { /* ignore */ }
 
-  if (matches.length === 1) return matches[0]!;
-  return null;
+  // Partial/substring match: scan tmux sessions
+  for (const session of sessions) {
+    if (!session.startsWith("ittybitty-")) continue;
+    const agentId = extractAgentIdFromTmuxSession(session);
+    if (agentId && agentId.includes(partial)) {
+      matches.add(agentId);
+    }
+  }
+
+  if (matches.size === 1) return { resolved: [...matches][0]! };
+  if (matches.size === 0) return { error: "No matching agent found", matches: [] };
+  return { error: "Ambiguous agent ID — multiple matches", matches: [...matches].sort() };
 }
 
 /** Pluggable spawn runner for diff/status — defaults to Bun.spawn, overridable for tests */

@@ -11,6 +11,8 @@ import {
   readAllAgents,
   computeStateFromContent,
   readAgentMeta,
+  isRecentlyCreated,
+  CREATING_GRACE_PERIOD_MS,
 } from "./agents";
 import type { Agent, AgentMeta, FlatEntry } from "./agents";
 import { makeAgent } from "./test-utils";
@@ -679,5 +681,35 @@ describe("readAllAgents", () => {
     ]);
     // orphanedTmuxSessions should be an array (may be empty depending on system state)
     expect(Array.isArray(orphanedTmuxSessions)).toBe(true);
+  });
+});
+
+describe("isRecentlyCreated", () => {
+  test("returns true for agent created less than 6 seconds ago", () => {
+    const nowEpoch = Math.floor(Date.now() / 1000);
+    expect(isRecentlyCreated(nowEpoch)).toBe(true);
+    expect(isRecentlyCreated(nowEpoch - 2)).toBe(true);
+    expect(isRecentlyCreated(nowEpoch - 5)).toBe(true);
+  });
+
+  test("returns false for agent created more than 6 seconds ago", () => {
+    const nowEpoch = Math.floor(Date.now() / 1000);
+    expect(isRecentlyCreated(nowEpoch - 7)).toBe(false);
+    expect(isRecentlyCreated(nowEpoch - 60)).toBe(false);
+    expect(isRecentlyCreated(nowEpoch - 3600)).toBe(false);
+  });
+
+  test("returns false at exactly 6 seconds (boundary)", () => {
+    const nowEpoch = Math.floor(Date.now() / 1000);
+    expect(isRecentlyCreated(nowEpoch - 6)).toBe(false);
+  });
+
+  test("returns false for zero epoch", () => {
+    expect(isRecentlyCreated(0)).toBe(false);
+  });
+
+  test("returns false for undefined/NaN epoch", () => {
+    expect(isRecentlyCreated(NaN)).toBe(false);
+    expect(isRecentlyCreated(undefined as unknown as number)).toBe(false);
   });
 });

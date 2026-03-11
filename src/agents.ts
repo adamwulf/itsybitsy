@@ -44,6 +44,17 @@ export interface PendingQuestion {
   status: "pending" | "acknowledged";
 }
 
+/** Grace period for newly created agents before treating missing tmux as "stopped" (ms) */
+export const CREATING_GRACE_PERIOD_MS = 6_000;
+
+/** Check if an agent was created recently (within the grace period).
+ * Uses created_epoch (seconds since epoch) from meta.json. */
+export function isRecentlyCreated(createdEpoch: number): boolean {
+  if (!createdEpoch) return false;
+  const ageMs = Date.now() - createdEpoch * 1000;
+  return ageMs < CREATING_GRACE_PERIOD_MS;
+}
+
 /** Get the worktree path for an agent, or the repo root if worktree is false. */
 export function agentWorktreePath(agent: Agent): string {
   if (agent.meta.worktree === false) return agent.repoPath;
@@ -380,7 +391,13 @@ export async function detectAgentStates(agents: Agent[]): Promise<void> {
       }
       const output = await captureTmuxOutput(tmuxSession);
       if (output === null) {
-        agent.state = "stopped";
+        // Grace period: if agent was created less than 6 seconds ago,
+        // return "creating" instead of "stopped" (matches bash get_state)
+        if (isRecentlyCreated(agent.meta.created_epoch)) {
+          agent.state = "creating";
+        } else {
+          agent.state = "stopped";
+        }
         return;
       }
       const preCheck = computeStateFromContent(output);

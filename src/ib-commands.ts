@@ -435,16 +435,19 @@ ${absExitScript}
   await logAgent(agentDir, "Agent resumed");
   await logAgent(agentDir, "Sent resume nudge");
 
-  // Auto-spawn watchdog (self-exits if already running)
-  try {
-    const watchdogLog = join(agentDir, "watchdog.log");
-    const watchdogProc = Bun.spawn(["ib", "watchdog"], {
-      cwd: agent.repoPath,
-      stdout: Bun.file(watchdogLog),
-      stderr: Bun.file(watchdogLog),
-    });
-    watchdogProc.unref();
-  } catch { /* ignore */ }
+  // Auto-spawn watchdog if agent has a manager
+  // (top-level agents don't need a watchdog — they have a human watching)
+  if (agent.meta.manager) {
+    try {
+      const watchdogLog = join(agentDir, "watchdog.log");
+      const watchdogProc = Bun.spawn(["ib", "watchdog"], {
+        cwd: agent.repoPath,
+        stdout: Bun.file(watchdogLog),
+        stderr: Bun.file(watchdogLog),
+      });
+      watchdogProc.unref();
+    } catch { /* ignore */ }
+  }
 
   return { ok: true, exitCode: 0, stdout: `Use 'ib look ${agent.id}' to view output`, stderr: "" };
 }

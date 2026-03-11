@@ -1105,7 +1105,7 @@ The hook is installed in two places in `~/.claude/settings.json`:
 
 ### Phase 31: Parity Fixes — Hooks & Agent Status
 
-**Status:** Not started.
+**Status:** Complete.
 
 **Source:** PARITY_HOOKS_TUI.md, PARITY_LIFECYCLE.md
 
@@ -1119,61 +1119,61 @@ The hook is installed in two places in `~/.claude/settings.json`:
 
 Bash schedules `( sleep 5 && ib hooks agent-status )` when debouncing nudges, ensuring a follow-up check even if no further tool calls occur. TS lacks this — debounced agents could get stuck without follow-up.
 
-- [ ] After writing the nudge debounce timestamp, schedule a delayed recheck using `Bun.spawn` to run a background `ib hooks agent-status` after 5s — **note:** `setTimeout` won't work here because `agent-status.ts` is a CLI entry point that exits after outputting the state; only a detached background process survives.
-- [ ] Test: verify a second check fires ~5s after a debounced nudge
+- [x] After writing the nudge debounce timestamp, schedule a delayed recheck using `Bun.spawn` to run a background `ib hooks agent-status` after 5s — **note:** `setTimeout` won't work here because `agent-status.ts` is a CLI entry point that exits after outputting the state; only a detached background process survives. *(Implemented at agent-status.ts:383-409 — uses `nudge-recheck` marker file to prevent duplicates, spawns detached `bash -c "sleep 5 && rm -f <recheck> && ib hooks agent-status <id>"`.)*
+- [x] Test: verify a second check fires ~5s after a debounced nudge
 
 #### 31b: Stop hook tmux send-keys timing (must-fix)
 
-**File:** `src/hooks/agent-status.ts:356-360,369-376`
+**File:** `src/hooks/agent-status.ts:422-433,440-451`
 
 Bash sends message then waits 0.1s before Enter. TS sends message+Enter in one call with no `-l` flag, which has two problems: (1) tmux interprets special characters (`$`, `!`, etc.) as key bindings instead of literal text when `-l` is omitted, and (2) long messages may not be fully received before Enter is pressed when combined in one call.
 
-- [ ] Add `-l` (literal) flag to the `send-keys` call so tmux treats the message as literal text
-- [ ] Split into two `send-keys` calls: first the message with `-l`, then a separate Enter after a short delay
-- [ ] Match the pattern already used in `sendMessage()` in `ib-commands.ts:1058`
+- [x] Add `-l` (literal) flag to the `send-keys` call so tmux treats the message as literal text *(Done — both nudge and manager notification paths use `-l`.)*
+- [x] Split into two `send-keys` calls: first the message with `-l`, then a separate Enter after a short delay *(Done — 100ms `Bun.sleep` between message and Enter.)*
+- [x] Match the pattern already used in `sendMessage()` in `ib-commands.ts:1058`
 
 #### 31c: Complete + unfinished children message (should-fix)
 
-**File:** `src/hooks/agent-status.ts`
+**File:** `src/hooks/agent-status.ts:206-212`
 
 TS sends a shorter message than bash when an agent completes but has unfinished children. Bash includes specific command suggestions (`ib merge`, `ib kill`, `ib list`, `ib look`, `ib status`, `ib diff`).
 
-- [ ] Match bash message format — include command suggestions for the manager
+- [x] Match bash message format — include command suggestions for the manager *(Done — message includes `ib merge`, `ib kill`, `ib list`, `ib look`, `ib status`, `ib diff`.)*
 
 #### 31d: Nudge message formatting (should-fix)
 
-**File:** `src/hooks/agent-status.ts`
+**File:** `src/hooks/agent-status.ts:273`
 
 Bash: `'WAITING'` and `'I HAVE COMPLETED THE GOAL'` (with quotes). TS omits the quotes. This is more than cosmetic — `parse_state` in bash strips quoted occurrences of `'I HAVE COMPLETED THE GOAL'` before checking for the completion signal, specifically to prevent the nudge message text itself from being mistakenly detected as a completion signal in tmux output. Without the quotes in TS, the nudge prompt could trigger a false positive completion detection.
 
-- [ ] Add single-quotes around the phrases in the nudge message to match bash and prevent false completion detection in parse_state
+- [x] Add single-quotes around the phrases in the nudge message to match bash and prevent false completion detection in parse_state *(Done — message reads `'WAITING' or 'I HAVE COMPLETED THE GOAL'` with single quotes.)*
 
 #### 31e: main-path comment stripping (should-fix)
 
-**File:** `src/hooks/main-path.ts`
+**File:** `src/hooks/main-path.ts:58-62`
 
 Bash strips `#` comments from compound `cd` commands. TS regex doesn't handle this.
 
-- [ ] Add `#` to the compound command stripping regex
-- [ ] Test: `cd /foo # some comment` should extract `/foo`
+- [x] Add `#` to the compound command stripping regex *(Done — separate comment-stripping regex at lines 59-62.)*
+- [x] Test: `cd /foo # some comment` should extract `/foo` *(Test exists at main-path.test.ts:198-207.)*
 
 #### 31f: inject-status question counts (should-fix)
 
-**File:** `src/hooks/inject-status.ts`
+**File:** `src/hooks/inject-status.ts:94,127-152,281-282`
 
 Bash includes pending question count in the brief status summary. TS doesn't.
 
-- [ ] Read `user-questions.json` for each repo and include count in brief summary (e.g., `"2 running, 1 waiting, 1 question"`)
-- [ ] Filter out questions from dead/archived agents (match bash behavior)
+- [x] Read `user-questions.json` for each repo and include count in brief summary (e.g., `"2 running, 1 waiting, 1 question"`) *(Done — `countPendingQuestions()` reads questions, `briefSummary()` accepts `questionCount` param, CLI wires them together.)*
+- [x] Filter out questions from dead/archived agents (match bash behavior) *(Done — filters by active agent IDs at line 143.)*
 
 #### 31g: Debug file content in stop hook (nice-to-have)
 
-**File:** `src/hooks/agent-status.ts`
+**File:** `src/hooks/agent-status.ts:103-122`, `src/watchdog.ts:255-299`
 
 Bash saves tmux capture output + `last_assistant_message` + parse_state reason in debug files. TS only saves `lastMessage`.
 
-- [ ] Include tmux capture output and parse_state reason in debug file content
-- [ ] Also add debug log saving on `unknown` state in watchdog (bash does this, TS doesn't — see `src/watchdog.ts`)
+- [x] Include tmux capture output and parse_state reason in debug file content *(Done — debug file includes tmux output, parse-state reason, and last_assistant_message at agent-status.ts:103-122.)*
+- [x] Also add debug log saving on `unknown` state in watchdog (bash does this, TS doesn't — see `src/watchdog.ts`) *(Done — `saveUnknownDebugLog()` at watchdog.ts:281-299 saves tmux output on transition to unknown.)*
 
 ---
 

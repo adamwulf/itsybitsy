@@ -343,20 +343,37 @@ async function handleCompacting(_agent: Agent, tracker: AgentTracker, _allAgents
   tracker.rateLimitBypassed = false;
 }
 
+/** Maximum number of retry attempts for rate limit bypass */
+export const RATE_LIMIT_MAX_RETRIES = 3;
+
+/** Delay between retry attempts in milliseconds */
+export const RATE_LIMIT_RETRY_DELAY_MS = 2_000;
+
 /**
  * Handler for "rate_limited" state.
- * - Send Enter to dismiss the rate limit dialog (once per rate-limit episode)
+ * - 3-attempt retry loop: send Enter, wait 2s, check state, repeat if still rate_limited
  * - Check usage API; when session usage drops below threshold, nudge agent
  */
 async function handleRateLimited(agent: Agent, tracker: AgentTracker, _allAgents: Agent[]): Promise<void> {
   const tmuxSession = agent.meta.tmux_session;
 
-  // Bypass rate limit dialog on first detection.
-  // TODO: ib bash uses a 3-attempt retry loop with 2s sleeps between attempts
-  // (bypass_rate_limit). Single Enter suffices since the watchdog re-checks every 5s,
-  // but a retry loop would be more robust for edge cases.
+  // Bypass rate limit dialog on first detection with a 3-attempt retry loop
+  // matching bash's bypass_rate_limit: send Enter, wait 2s, capture output,
+  // check state via parseState, repeat if still rate_limited.
   if (!tracker.rateLimitBypassed && tmuxSession) {
-    await sendTmuxEnter(tmuxSession);
+    for (let attempt = 0; attempt < RATE_LIMIT_MAX_RETRIES; attempt++) {
+      await sendTmuxEnter(tmuxSession);
+      await watchdogSleepFn(RATE_LIMIT_RETRY_DELAY_MS);
+
+      // Capture tmux output and check if still rate limited
+      const output = await watchdogCaptureTmuxFn(tmuxSession);
+      if (output !== null) {
+        const result = parseState(output);
+        if (result.state !== "rate_limited") {
+          break; // Successfully dismissed
+        }
+      }
+    }
     tracker.rateLimitBypassed = true;
   }
 
@@ -694,17 +711,43 @@ export function resetPerAgentExistsSync(): void {
   };
 }
 
-/** Injectable sleep for testing */
+/** Injectable sleep for testing (per-agent watchdog) */
 let sleepFn: (ms: number) => Promise<void> = (ms) => Bun.sleep(ms);
 
-/** Override sleep for testing */
+/** Override sleep for testing (per-agent watchdog) */
 export function setPerAgentSleep(fn: (ms: number) => Promise<void>): void {
   sleepFn = fn;
 }
 
-/** Reset sleep to default */
+/** Reset sleep to default (per-agent watchdog) */
 export function resetPerAgentSleep(): void {
   sleepFn = (ms) => Bun.sleep(ms);
+}
+
+/** Injectable sleep for global watchdog testing */
+let watchdogSleepFn: (ms: number) => Promise<void> = (ms) => Bun.sleep(ms);
+
+/** Override sleep for global watchdog testing */
+export function setWatchdogSleep(fn: (ms: number) => Promise<void>): void {
+  watchdogSleepFn = fn;
+}
+
+/** Reset sleep to default for global watchdog */
+export function resetWatchdogSleep(): void {
+  watchdogSleepFn = (ms) => Bun.sleep(ms);
+}
+
+/** Injectable captureTmuxOutput for global watchdog testing */
+let watchdogCaptureTmuxFn: (session: string) => Promise<string | null> = captureTmuxOutput;
+
+/** Override captureTmuxOutput for global watchdog testing */
+export function setWatchdogCaptureTmux(fn: (session: string) => Promise<string | null>): void {
+  watchdogCaptureTmuxFn = fn;
+}
+
+/** Reset captureTmuxOutput to default for global watchdog */
+export function resetWatchdogCaptureTmux(): void {
+  watchdogCaptureTmuxFn = captureTmuxOutput;
 }
 
 /** Injectable captureTmuxOutput for testing */

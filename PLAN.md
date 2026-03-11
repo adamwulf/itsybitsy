@@ -673,7 +673,7 @@ New file: `src/watchdog.ts`. This is the highest-complexity feature but also the
 
 ---
 
-### Phase 16 (v2): Cross-Repo Messaging
+### Phase 16: Cross-Repo Messaging -- COMPLETE
 **Checkpoint:** An agent in repo A can send a message to an agent in repo B from within itsybitsy.
 
 **Protocol:** itsybitsy acts as a message broker. To send a message from agent A (repo X) to agent B (repo Y):
@@ -1728,6 +1728,12 @@ Three divergences to fix:
 
 - [x] Where the agent prompt is currently shown in the agent list, use `agent.summary ?? agent.prompt` instead (in `agent-tree.ts:57`, not `dashboard.ts`)
 - [x] No other display changes needed
+
+---
+
+## Future Work
+
+The following phases are aspirational — not yet planned for implementation. They represent longer-term architectural improvements or ideas that depend on prerequisite work being completed first.
 
 ---
 

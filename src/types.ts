@@ -33,6 +33,32 @@ export async function runCmd(
 }
 
 /**
+ * Generic injection context for dependency injection in tests.
+ * Holds a function (or value) with set/reset methods.
+ */
+export class InjectionContext<T> {
+  private _value: T;
+  private readonly _default: T;
+
+  constructor(defaultValue: T) {
+    this._default = defaultValue;
+    this._value = defaultValue;
+  }
+
+  get fn(): T {
+    return this._value;
+  }
+
+  set(value: T): void {
+    this._value = value;
+  }
+
+  reset(): void {
+    this._value = this._default;
+  }
+}
+
+/**
  * Injectable spawn context — holds a spawn runner with set/reset methods.
  * Centralizes the DI pattern used across all modules that need test injection.
  */

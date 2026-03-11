@@ -7,36 +7,18 @@
  * each time. This means a new app appears in the Dock per session — accepted limitation.
  */
 
+import { InjectionContext } from "./types";
+
 type WhichFn = (cmd: string) => string | null;
 type GhosttySpawnFn = (cmd: string[], opts?: object) => { unref(): void };
 
-let whichFn: WhichFn = Bun.which as WhichFn;
-let spawnFn: GhosttySpawnFn = Bun.spawn as GhosttySpawnFn;
-
-/** Override Bun.which for testing. */
-export function setWhich(fn: WhichFn): void {
-  whichFn = fn;
-}
-
-/** Reset Bun.which to default. */
-export function resetWhich(): void {
-  whichFn = Bun.which as WhichFn;
-}
-
-/** Override Bun.spawn for testing. */
-export function setSpawn(fn: GhosttySpawnFn): void {
-  spawnFn = fn;
-}
-
-/** Reset Bun.spawn to default. */
-export function resetSpawn(): void {
-  spawnFn = Bun.spawn as GhosttySpawnFn;
-}
+export const spawnCtx = new InjectionContext<GhosttySpawnFn>(Bun.spawn as GhosttySpawnFn);
+export const whichCtx = new InjectionContext<WhichFn>(Bun.which as WhichFn);
 
 export async function openInGhostty(
   tmuxSession: string
 ): Promise<{ ok: boolean; message: string }> {
-  if (!whichFn("ghostty")) {
+  if (!whichCtx.fn("ghostty")) {
     return { ok: false, message: "Ghostty not found on PATH" };
   }
   try {
@@ -50,7 +32,7 @@ export async function openInGhostty(
     // Sessions are created at 60 cols by ib and don't auto-resize on re-attach without this.
     // Session name is passed as a separate argument (positional $1) — never interpolated
     // into the shell code string — so it cannot break out of the quoting context.
-    const proc = spawnFn(["ghostty", "--command", "bash", "-c", 'tmux set-option -t "$1" window-size latest && tmux attach -t "$1"', "_", tmuxSession], {
+    const proc = spawnCtx.fn(["ghostty", "--command", "bash", "-c", 'tmux set-option -t "$1" window-size latest && tmux attach -t "$1"', "_", tmuxSession], {
       stdio: ["ignore", "ignore", "ignore"],
     });
     proc.unref();

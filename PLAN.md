@@ -1422,9 +1422,9 @@ Values from `.ittybitsy.json` are stored without type checking against `ConfigKe
 
 ---
 
-### Phase 36: Watchdog & Lifecycle Improvements
+### Phase 36: Watchdog & Lifecycle Improvements -- PARTIALLY COMPLETE
 
-**Status:** Not started.
+**Status:** 36a partial, 36b complete, 36c complete.
 
 **Source:** PARITY_LIFECYCLE.md, CODE_REVIEW.md
 
@@ -1432,34 +1432,34 @@ Values from `.ittybitsy.json` are stored without type checking against `ConfigKe
 
 **Complexity:** Low-Medium.
 
-#### 36a: Watchdog lock file atomicity (medium priority)
+#### 36a: Watchdog lock file atomicity (medium priority) -- PARTIALLY COMPLETE
 
-**File:** `src/watchdog.ts:392-411`
+**File:** `src/watchdog.ts:453-511`
 
 TOCTOU race: read lock → check PID → write PID. Two processes could acquire simultaneously.
 
-- [ ] Use `O_EXCL` flag for atomic lock file creation (requires `node:fs` `openSync` with `O_CREAT | O_EXCL` flags — note this means `acquireWatchdogLock` may need to keep `node:fs` even after the migration below)
-- [ ] Or use advisory file locking as an alternative
-- [ ] Migrate `releaseWatchdogLock` and `isWatchdogLockHeld` from `require("fs")` sync APIs to `Bun.file()`/`Bun.write()` for consistency (L1 from CODE_REVIEW.md) — these two functions don't need `O_EXCL` and can be fully migrated
+- [x] Use `O_EXCL` flag for atomic lock file creation (`atomicCreateLock()` at L453 uses `O_CREAT | O_EXCL | O_WRONLY`; `acquireWatchdogLock()` at L464 calls it, falling back to stale-PID check + retry)
+- [x] ~~Or use advisory file locking as an alternative~~ (O_EXCL approach chosen)
+- [ ] Migrate `releaseWatchdogLock` and `readLockPid` from `node:fs` sync APIs (`readFileSync`, `unlinkSync`) to `Bun.file()`/`Bun.write()` for consistency (L1 from CODE_REVIEW.md) — these two functions don't need `O_EXCL` and can be fully migrated. Note: `isWatchdogLockHeld` was renamed to `readLockPid` during implementation. [^needs review] Still uses `readFileSync`/`unlinkSync` from `node:fs` at L491-510; not a correctness issue but a consistency gap vs project convention of preferring Bun APIs.
 
-#### 36b: Watchdog debug logs on unknown state (nice-to-have)
+#### 36b: Watchdog debug logs on unknown state (nice-to-have) -- COMPLETE
 
-**File:** `src/watchdog.ts`
+**File:** `src/watchdog.ts:255-299`
 
-Bash watchdog saves tmux output to `debug-logs/watchdog-<timestamp>-unknown.txt` on unknown state. TS doesn't. Note: bash only saves on the *transition into* unknown state (not on every tick), so the debug file captures the moment the state became unclear.
+Bash watchdog saves tmux output to `debug-logs/watchdog-<timestamp>-unknown.txt` on unknown state. TS now matches.
 
-- [ ] Save debug log on first transition to unknown state (tmux capture + parse_state reason)
-- [ ] Use same `debug-logs/` directory pattern as bash
+- [x] Save debug log on first transition to unknown state (`handleUnknown` at L255 checks `tracker.previousState !== "unknown"`, calls `saveUnknownDebugLog` which captures tmux output)
+- [x] Use same `debug-logs/` directory pattern as bash (`debug-logs/watchdog-<timestamp>-unknown.txt` at L290-294)
 
-#### 36c: Model context size configuration (low priority)
+#### 36c: Model context size configuration (low priority) -- COMPLETE
 
-**File:** `src/auto-compact.ts:44-52`
+**File:** `src/auto-compact.ts:39-78`
 
-**Note:** This is a code quality improvement, not a parity issue — bash uses the same substring matching approach. Hardcoded model context sizes with substring matching. New models silently get 200K default with no warning.
+**Note:** This is a code quality improvement, not a parity issue — bash uses the same substring matching approach.
 
-- [ ] Log a warning when falling back to default for an unknown model
-- [ ] Consider moving context sizes to a named lookup table for easier maintenance
-- **Note:** The explicit Claude 4.6 branch (lines 48-49) returns 200K — the same as the default. It is effectively redundant code but serves as documentation that 4.6 was explicitly considered.
+- [x] Log a warning when falling back to default for an unknown model (L72-76: logs once per model via `warnedModels` Set, `resetWarnedModels()` exported for testing)
+- [x] Context sizes moved to a named lookup table `MODEL_CONTEXT_SIZES` (L47-55) for easier maintenance
+- **Note:** The explicit Claude 4.6 branches (L50-51) return 200K — the same as the default. Effectively redundant but serves as documentation that 4.6 was explicitly considered.
 
 ---
 

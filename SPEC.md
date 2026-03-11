@@ -672,7 +672,7 @@ The TUI dashboard uses a global watchdog loop internally (`startWatchdog`/`stopW
 | `waiting` | Increment waiting counter. When counter reaches the notification threshold, notify manager: "[watchdog]: Your subtask <id> recently started waiting for input". Uses exponential backoff: initial threshold 30s (6 polls), doubles after each notification, capped at 64 minutes. |
 | `complete` | Reset waiting counter and notification interval. Notify manager once: "[watchdog]: Your subtask <id> recently completed". Sets a flag to prevent duplicate notifications. Flag resets if agent returns to `running`. |
 | `unknown` | Treat like `waiting` — increment counter with same exponential backoff. On first transition into unknown, saves a debug capture of tmux output to `debug-logs/watchdog-<epoch>-unknown.txt` (not repeated on subsequent ticks). |
-| `rate_limited` | Attempt to bypass the rate limit dialog (bash uses a 3-attempt retry loop with 2s sleeps between attempts; checks `parse_state` after each Enter to verify dismissal). Then poll Claude's usage API; when session usage drops below 5%, send nudge: "[watchdog]: Usage has refreshed (<pct>%). Please continue your task." Reset waiting counter and notification interval. [^callout] TS sends a single Enter on first detection (`rateLimitBypassed` flag) and relies on the 5s poll cycle for retry, rather than bash's synchronous 3-attempt loop. |
+| `rate_limited` | Attempt to bypass the rate limit dialog (bash uses a 3-attempt retry loop with 2s sleeps between attempts; checks `parse_state` after each Enter to verify dismissal). Then poll Claude's usage API; when session usage drops below 5%, send nudge: "[watchdog]: Usage has refreshed (<pct>%). Please continue your task." Reset waiting counter and notification interval. |
 | `running` | Reset waiting counter and notification interval. Clear completion flag if previously set. |
 | `creating` | Treat as running — reset counters. |
 | `compacting` | Reset waiting counter and notification interval. Wait for completion. |
@@ -712,8 +712,6 @@ Reassigns an agent to a different parent manager (or makes it a root manager wit
 6. New parent cannot be a descendant of the agent (circular dependency check)
 7. No-op if agent already has the requested parent
 
-> [^callout] TS `reassignAgent()` is missing validations #3 (self-reassign) and #7 (no-op same parent). These cases will silently succeed and write a redundant meta.json update.
-
 **On success:**
 
 1. Update `meta.json` — set `manager` to the new parent ID (or `null` for `--none`)
@@ -723,8 +721,6 @@ Reassigns an agent to a different parent manager (or makes it a root manager wit
 5. Notify the agent itself: `"[watchdog]: You've been reassigned from <old> to <new>"`
 
 Notifications are sent via `ib send` (bash) / `sendMessage` (TS) and suppressed if the target agent doesn't exist or isn't running.
-
-> [^callout] TS diverges in several ways: (a) Sets `meta.manager` to `""` (empty string) for `--none` instead of `null`. (b) Uses different notification messages — old parent gets `"Agent <id> has been reassigned away from you"`, new parent gets `"Agent <id> has been reassigned to you"` (no watchdog prefix, no details about old/new parent). (c) Does not notify the agent itself (step 5 is skipped).
 
 ### 8.8 Post-Create-Agent Hook
 

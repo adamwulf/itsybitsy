@@ -2373,7 +2373,7 @@ describe("reassignAgent (native)", () => {
     expect(updatedMeta.manager).toBe("agent-mgr");
   });
 
-  test("clear manager (null) sets manager to empty string", async () => {
+  test("clear manager (null) sets manager to null", async () => {
     const agentsDir = join(tempDir, ".ittybitty", "agents");
     const agentDir = join(agentsDir, "agent-abc");
     await mkdir(agentDir, { recursive: true });
@@ -2384,7 +2384,7 @@ describe("reassignAgent (native)", () => {
 
     expect(result.ok).toBe(true);
     const updatedMeta = await Bun.file(join(agentDir, "meta.json")).json();
-    expect(updatedMeta.manager).toBe("");
+    expect(updatedMeta.manager).toBeNull();
   });
 
   test("circular dependency detected", async () => {
@@ -2446,6 +2446,134 @@ describe("reassignAgent (native)", () => {
 
     expect(result.ok).toBe(false);
     expect(result.stderr).toContain("Cannot reassign agent to itself");
+  });
+
+  test("notification messages match bash format", async () => {
+    const spawnCalls: string[][] = [];
+    setSendSpawnRunner((cmd: string[]) => {
+      spawnCalls.push(cmd);
+      return {
+        stdout: new Response("").body!,
+        stderr: new Response("").body!,
+        exited: Promise.resolve(0), // tmux sessions exist
+      } as SpawnResult;
+    });
+
+    const agentsDir = join(tempDir, ".ittybitty", "agents");
+    const agentDir = join(agentsDir, "agent-abc");
+    const oldMgrDir = join(agentsDir, "agent-old");
+    const newMgrDir = join(agentsDir, "agent-new");
+    await mkdir(agentDir, { recursive: true });
+    await mkdir(oldMgrDir, { recursive: true });
+    await mkdir(newMgrDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id: "agent-abc", manager: "agent-old", tmux_session: "tmux-abc" }));
+    await Bun.write(join(oldMgrDir, "meta.json"), JSON.stringify({ id: "agent-old", tmux_session: "tmux-old" }));
+    await Bun.write(join(newMgrDir, "meta.json"), JSON.stringify({ id: "agent-new", tmux_session: "tmux-new" }));
+
+    const agent = makeAgent("agent-abc", tempDir);
+    const result = await reassignAgent(agent, "agent-new");
+
+    expect(result.ok).toBe(true);
+
+    // Extract send-keys messages (skip has-session calls and Enter calls)
+    const messages = spawnCalls
+      .filter(c => c[0] === "tmux" && c[1] === "send-keys" && c.includes("-l"))
+      .map(c => c[c.length - 1]!);
+
+    // Old manager notification
+    const oldMgrMsg = messages.find(m => m.includes("to manager"));
+    expect(oldMgrMsg).toBeDefined();
+    expect(oldMgrMsg!).toContain("[watchdog for agent-abc]");
+    expect(oldMgrMsg!).toContain("Agent reassigned to manager 'agent-new'");
+
+    // New manager notification
+    const newMgrMsg = messages.find(m => m.includes("reassigned to you"));
+    expect(newMgrMsg).toBeDefined();
+    expect(newMgrMsg!).toContain("[watchdog for agent-abc]");
+    expect(newMgrMsg!).toContain("was under agent-old");
+
+    // Agent self-notification
+    const selfMsg = messages.find(m => m.includes("You've been reassigned"));
+    expect(selfMsg).toBeDefined();
+    expect(selfMsg!).toContain("[watchdog]");
+    expect(selfMsg!).toContain("from agent-old to agent-new");
+  });
+
+  test("notification uses top-level labels when no manager", async () => {
+    const spawnCalls: string[][] = [];
+    setSendSpawnRunner((cmd: string[]) => {
+      spawnCalls.push(cmd);
+      return {
+        stdout: new Response("").body!,
+        stderr: new Response("").body!,
+        exited: Promise.resolve(0),
+      } as SpawnResult;
+    });
+
+    const agentsDir = join(tempDir, ".ittybitty", "agents");
+    const agentDir = join(agentsDir, "agent-abc");
+    const newMgrDir = join(agentsDir, "agent-new");
+    await mkdir(agentDir, { recursive: true });
+    await mkdir(newMgrDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id: "agent-abc", manager: null, tmux_session: "tmux-abc" }));
+    await Bun.write(join(newMgrDir, "meta.json"), JSON.stringify({ id: "agent-new", tmux_session: "tmux-new" }));
+
+    const agent = makeAgent("agent-abc", tempDir);
+    const result = await reassignAgent(agent, "agent-new");
+
+    expect(result.ok).toBe(true);
+
+    const messages = spawnCalls
+      .filter(c => c[0] === "tmux" && c[1] === "send-keys" && c.includes("-l"))
+      .map(c => c[c.length - 1]!);
+
+    // New manager should say "was top-level"
+    const newMgrMsg = messages.find(m => m.includes("reassigned to you"));
+    expect(newMgrMsg).toBeDefined();
+    expect(newMgrMsg!).toContain("was top-level");
+
+    // Agent self-notification should say from (none) to agent-new
+    const selfMsg = messages.find(m => m.includes("You've been reassigned"));
+    expect(selfMsg).toBeDefined();
+    expect(selfMsg!).toContain("from (none) to agent-new");
+  });
+
+  test("agent self-notification sent on reassign to top-level", async () => {
+    const spawnCalls: string[][] = [];
+    setSendSpawnRunner((cmd: string[]) => {
+      spawnCalls.push(cmd);
+      return {
+        stdout: new Response("").body!,
+        stderr: new Response("").body!,
+        exited: Promise.resolve(0),
+      } as SpawnResult;
+    });
+
+    const agentsDir = join(tempDir, ".ittybitty", "agents");
+    const agentDir = join(agentsDir, "agent-abc");
+    const oldMgrDir = join(agentsDir, "agent-old");
+    await mkdir(agentDir, { recursive: true });
+    await mkdir(oldMgrDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id: "agent-abc", manager: "agent-old", tmux_session: "tmux-abc" }));
+    await Bun.write(join(oldMgrDir, "meta.json"), JSON.stringify({ id: "agent-old", tmux_session: "tmux-old" }));
+
+    const agent = makeAgent("agent-abc", tempDir);
+    const result = await reassignAgent(agent, null);
+
+    expect(result.ok).toBe(true);
+
+    const messages = spawnCalls
+      .filter(c => c[0] === "tmux" && c[1] === "send-keys" && c.includes("-l"))
+      .map(c => c[c.length - 1]!);
+
+    // Old manager should say "to top-level"
+    const oldMgrMsg = messages.find(m => m.includes("reassigned to top-level"));
+    expect(oldMgrMsg).toBeDefined();
+
+    // Agent self-notification
+    const selfMsg = messages.find(m => m.includes("You've been reassigned"));
+    expect(selfMsg).toBeDefined();
+    expect(selfMsg!).toContain("from agent-old to (none)");
   });
 });
 

@@ -600,7 +600,7 @@ export async function reassignAgent(agent: Agent, newManager: string | null): Pr
   }
 
   // Update meta.json
-  meta.manager = newManager ?? "";
+  meta.manager = newManager ?? null;
   try {
     await Bun.write(metaPath, JSON.stringify(meta, null, 2) + "\n");
   } catch (err) {
@@ -637,12 +637,16 @@ export async function reassignAgent(agent: Agent, newManager: string | null): Pr
 
   // Notify old parent
   if (oldManager) {
-    await notifyAgent(oldManager, `Agent ${agent.id} has been reassigned away from you`);
+    const toLabel = newManager ? `to manager '${newManager}'` : "to top-level";
+    await notifyAgent(oldManager, `[watchdog for ${agent.id}]: Agent reassigned ${toLabel}`);
   }
   // Notify new parent
   if (newManager) {
-    await notifyAgent(newManager, `Agent ${agent.id} has been reassigned to you`);
+    const fromLabel = oldManager ? `was under ${oldManager}` : "was top-level";
+    await notifyAgent(newManager, `[watchdog for ${agent.id}]: Agent reassigned to you (${fromLabel})`);
   }
+  // Notify the agent itself
+  await notifyAgent(agent.id, `[watchdog]: You've been reassigned from ${oldLabel} to ${newLabel}`);
 
   return {
     ok: true,

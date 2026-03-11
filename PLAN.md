@@ -1582,7 +1582,7 @@ Bash prints: `"Question acknowledged. Use 'ib send <agent-id> \"answer\"' to res
 
 ### Phase 39: Config, ID Resolution, Spec Clarification & Per-Process Watchdog
 
-**Status:** Not started.
+**Status:** Complete.
 
 **Source:** SPEC.md callouts #16, #17, #18, #21.
 

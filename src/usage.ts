@@ -8,21 +8,11 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { rename, mkdir, stat, writeFile, unlink } from "node:fs/promises";
 
-import { SpawnContext } from "./types";
+import { InjectionContext, SpawnContext } from "./types";
 import type { FetchLike } from "./types";
 
-/** For test injection — avoids monkey-patching globalThis.fetch */
-let fetchFn: FetchLike = globalThis.fetch;
-
-/** Override fetch for testing. */
-export function setTestFetch(fn: FetchLike): void {
-  fetchFn = fn;
-}
-
-/** Reset fetch to globalThis.fetch. */
-export function resetTestFetch(): void {
-  fetchFn = globalThis.fetch;
-}
+/** Injection context for fetch — avoids monkey-patching globalThis.fetch */
+export const fetchCtx = new InjectionContext<FetchLike>(globalThis.fetch);
 
 /** Spawn context for usage keychain lookup */
 export const spawnCtx = new SpawnContext();
@@ -219,7 +209,7 @@ export async function fetchUsage(): Promise<UsageResult> {
 
   await acquireLock();
   try {
-    const resp = await fetchFn("https://api.anthropic.com/api/oauth/usage", {
+    const resp = await fetchCtx.fn("https://api.anthropic.com/api/oauth/usage", {
       headers: {
         Authorization: `Bearer ${token}`,
         "anthropic-beta": "oauth-2025-04-20",

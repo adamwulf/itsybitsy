@@ -59,32 +59,21 @@ export class InjectionContext<T> {
 }
 
 /**
- * Injectable spawn context — holds a spawn runner with set/reset methods.
- * Centralizes the DI pattern used across all modules that need test injection.
+ * Injectable spawn context — extends InjectionContext with a `runner` alias
+ * and a convenience `run()` method that drains stdout/stderr via Promise.all.
  */
-export class SpawnContext {
-  private _runner: SpawnFn;
-  private readonly _default: SpawnFn;
-
+export class SpawnContext extends InjectionContext<SpawnFn> {
   constructor(defaultRunner: SpawnFn = Bun.spawn as SpawnFn) {
-    this._default = defaultRunner;
-    this._runner = defaultRunner;
+    super(defaultRunner);
   }
 
+  /** Alias for `fn` — kept for backwards compatibility with existing call sites. */
   get runner(): SpawnFn {
-    return this._runner;
-  }
-
-  set(runner: SpawnFn): void {
-    this._runner = runner;
-  }
-
-  reset(): void {
-    this._runner = this._default;
+    return this.fn;
   }
 
   /** Convenience: run a command using this context's spawn runner. */
   async run(cmd: string[]): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-    return runCmd(this._runner, cmd);
+    return runCmd(this.fn, cmd);
   }
 }

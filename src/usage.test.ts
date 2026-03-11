@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { formatResetTime, parseUsageResponse, fetchUsage, setTestDir, resetTestDir, setTestFetch, resetTestFetch, spawnCtx, type UsageResult } from "./usage";
+import { formatResetTime, parseUsageResponse, fetchUsage, setTestDir, resetTestDir, fetchCtx, spawnCtx, type UsageResult } from "./usage";
 import { join } from "path";
 import { mkdtemp, rm, writeFile } from "fs/promises";
 import { tmpdir } from "os";
@@ -114,7 +114,7 @@ describe("fetchUsage", () => {
 
   afterEach(async () => {
     resetTestDir();
-    resetTestFetch();
+    fetchCtx.reset();
     await rm(tmpDir, { recursive: true, force: true });
   });
 
@@ -133,7 +133,7 @@ describe("fetchUsage", () => {
   }
 
   function mockFetch(response: unknown, ok = true, status = 200): void {
-    setTestFetch(createMockFetch(response, ok, status));
+    fetchCtx.set(createMockFetch(response, ok, status));
   }
 
   test("returns cached response when cache is fresh", async () => {
@@ -141,7 +141,7 @@ describe("fetchUsage", () => {
     await writeTestCache(nowSec, apiResponse);
     // No credentials needed — should return from cache without API call
     let fetchCalled = false;
-    setTestFetch((async () => { fetchCalled = true; return { ok: true, json: async () => ({}) }; }) as any);
+    fetchCtx.set((async () => { fetchCalled = true; return { ok: true, json: async () => ({}) }; }) as any);
 
     const result = await fetchUsage();
 
@@ -157,7 +157,7 @@ describe("fetchUsage", () => {
     const twoMinAgo = Math.floor(Date.now() / 1000) - 120;
     await writeTestCache(twoMinAgo, apiResponse);
     let fetchCalled = false;
-    setTestFetch((async () => { fetchCalled = true; return { ok: true, json: async () => ({}) }; }) as any);
+    fetchCtx.set((async () => { fetchCalled = true; return { ok: true, json: async () => ({}) }; }) as any);
 
     const result = await fetchUsage();
 
@@ -189,7 +189,7 @@ describe("fetchUsage", () => {
 
   test("returns error when no token available and no cache", async () => {
     // No credentials file, no cache
-    setTestFetch((async () => { throw new Error("should not be called"); }) as any);
+    fetchCtx.set((async () => { throw new Error("should not be called"); }) as any);
 
     const result = await fetchUsage();
     expect(result.data).toBeNull();
@@ -204,7 +204,7 @@ describe("fetchUsage", () => {
     await writeFile(join(tmpDir, "usage.lock"), "");
 
     let fetchCalled = false;
-    setTestFetch((async () => { fetchCalled = true; return { ok: true, json: async () => ({}) }; }) as any);
+    fetchCtx.set((async () => { fetchCalled = true; return { ok: true, json: async () => ({}) }; }) as any);
 
     const result = await fetchUsage();
 
@@ -271,7 +271,7 @@ describe("fetchUsage", () => {
     const staleSec = Math.floor(Date.now() / 1000) - 240;
     await writeTestCache(staleSec, apiResponse);
     await writeCredentials();
-    setTestFetch((async () => { throw new Error("network error"); }) as any);
+    fetchCtx.set((async () => { throw new Error("network error"); }) as any);
 
     const result = await fetchUsage();
 
@@ -282,7 +282,7 @@ describe("fetchUsage", () => {
 
   test("returns error on network error with no cache", async () => {
     await writeCredentials();
-    setTestFetch((async () => { throw new Error("network error"); }) as any);
+    fetchCtx.set((async () => { throw new Error("network error"); }) as any);
 
     const result = await fetchUsage();
     expect(result.data).toBeNull();
@@ -355,13 +355,13 @@ describe("readAccessToken keychain fallback", () => {
 
   afterEach(async () => {
     resetTestDir();
-    resetTestFetch();
+    fetchCtx.reset();
     spawnCtx.reset();
     await rm(tmpDir, { recursive: true, force: true });
   });
 
   function mockFetch(response: unknown, ok = true): void {
-    setTestFetch(createMockFetch(response, ok, ok ? 200 : 500));
+    fetchCtx.set(createMockFetch(response, ok, ok ? 200 : 500));
   }
 
   /** Create a mock spawn that simulates keychain output. */

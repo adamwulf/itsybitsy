@@ -75,7 +75,7 @@ export function formatAgentStatus(
     for (const agent of active) {
       const state = agent.state === "unknown" ? "running" : agent.state;
       const icon = agent.meta.worker ? "w" : "m";
-      const prompt = agent.meta.prompt.slice(0, 80).replace(/\n/g, " ");
+      const prompt = (agent.meta.summary ?? agent.meta.prompt).slice(0, 80).replace(/\n/g, " ");
       lines.push(`  ${icon} ${agent.id} [${state}] ${agent.age} — ${prompt}`);
     }
   }

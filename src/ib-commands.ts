@@ -1756,7 +1756,7 @@ ${absExitScript}
  * On success, merges `summary` field into meta.json. On failure, silently skips.
  */
 async function generatePromptSummary(prompt: string, agentDir: string): Promise<void> {
-  const summaryPrompt = `Summarize the following agent task in 30-40 words:\n\n${prompt}`;
+  const summaryPrompt = `Summarize the following agent task in 30 words or fewer:\n\n${prompt}`;
   const result = await newAgentRunCmd(["claude", "-p", summaryPrompt, "--model", "claude-haiku-4-5-20251001"]);
   if (result.exitCode !== 0) return;
   const summary = result.stdout.trim();

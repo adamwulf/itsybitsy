@@ -84,7 +84,11 @@ export async function processStopHook(
         const metaRaw = await readFile(metaPath, "utf-8");
         const meta = JSON.parse(metaRaw);
         if (meta.tmux_session) {
-          tmuxOutput = await captureTmuxOutput(meta.tmux_session);
+          if (!isValidTmuxSession(meta.tmux_session)) {
+            console.error(`[agent-status] Invalid tmux session name: ${meta.tmux_session}`);
+          } else {
+            tmuxOutput = await captureTmuxOutput(meta.tmux_session);
+          }
         }
       } catch {
         /* meta.json may not exist */
@@ -143,7 +147,11 @@ export async function processStopHook(
         const metaRaw = await readFile(metaPath, "utf-8");
         const meta = JSON.parse(metaRaw);
         if (meta.tmux_session) {
-          bgOutput = await captureTmuxOutput(meta.tmux_session, 15);
+          if (!isValidTmuxSession(meta.tmux_session)) {
+            console.error(`[agent-status] Invalid tmux session name: ${meta.tmux_session}`);
+          } else {
+            bgOutput = await captureTmuxOutput(meta.tmux_session, 15);
+          }
         }
       } catch { /* ignore */ }
     }
@@ -309,7 +317,7 @@ export async function findUnfinishedChildren(
         // Determine the child's actual state via tmux
         let childState = "unknown";
         const tmuxSession = meta.tmux_session;
-        if (tmuxSession) {
+        if (tmuxSession && isValidTmuxSession(tmuxSession)) {
           if (opts?.getChildState) {
             childState = await opts.getChildState(tmuxSession);
           } else {
@@ -425,6 +433,12 @@ export async function executeResultActions(
   const meta = await readMeta(agentDir);
   const tmuxSession = meta?.tmux_session as string | undefined;
 
+  if (tmuxSession && !isValidTmuxSession(tmuxSession)) {
+    console.error(`[agent-status] Invalid tmux session name: ${tmuxSession}`);
+    console.log(result.state);
+    return "invalid_session";
+  }
+
   if (
     result.message &&
     (result.action === "nudge" ||
@@ -453,7 +467,7 @@ export async function executeResultActions(
         return `invalid_manager_id`;
       }
       const managerMeta = await readMeta(join(agentsDir, managerId));
-      const managerSession = managerMeta?.tmux_session;
+      const managerSession = managerMeta?.tmux_session as string | undefined;
       if (managerSession) {
         if (!isValidTmuxSession(managerSession)) {
           console.error(`Invalid manager tmux session: ${managerSession}`);

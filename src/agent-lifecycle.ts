@@ -8,6 +8,7 @@ import { join, dirname, resolve } from "path";
 import { readdir, mkdir, cp, rm, rename, appendFile } from "fs/promises";
 import { SpawnContext } from "./types";
 import type { SpawnFn } from "./types";
+import { isValidTmuxSession } from "./validation";
 
 /** Spawn context for agent lifecycle operations */
 export const spawnCtx = new SpawnContext();
@@ -100,6 +101,11 @@ export async function killAgentProcess(
   tmuxSession: string,
   meta: KillAgentMeta
 ): Promise<boolean> {
+  if (!isValidTmuxSession(tmuxSession)) {
+    console.error(`[agent-lifecycle] Invalid tmux session name: ${tmuxSession}`);
+    return false;
+  }
+
   let pid: string | null = null;
 
   // Strategy 1: Dynamic lookup from tmux
@@ -178,6 +184,10 @@ export async function captureTmuxOutputToFile(
   tmuxSession: string,
   outputPath: string
 ): Promise<boolean> {
+  if (!isValidTmuxSession(tmuxSession)) {
+    console.error(`[agent-lifecycle] Invalid tmux session name: ${tmuxSession}`);
+    return false;
+  }
   try {
     const proc = spawnCtx.runner(
       ["tmux", "capture-pane", "-t", tmuxSession, "-p", "-S", "-"],
@@ -295,6 +305,11 @@ export async function teardownAgent(
   logMsg: string = "Agent killed"
 ): Promise<boolean> {
   const tmuxSession = meta.tmux_session;
+
+  if (!isValidTmuxSession(tmuxSession)) {
+    console.error(`[agent-lifecycle] Invalid tmux session name in meta for agent ${agentId}: ${tmuxSession}`);
+    return false;
+  }
 
   // 1. Log
   await logAgent(agentDir, logMsg);

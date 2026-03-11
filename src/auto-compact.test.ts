@@ -505,3 +505,22 @@ describe("checkAndCompact", () => {
     expect(spawnCalls).toHaveLength(2);
   });
 });
+
+// ── tmux session validation ─────────────────────────────────────────────
+
+describe("sendCompact — invalid tmux session", () => {
+  test("returns false for session with shell metacharacters", async () => {
+    const result = await sendCompact("bad;rm -rf /");
+    expect(result).toBe(false);
+  });
+
+  test("returns false for empty session name", async () => {
+    const result = await sendCompact("");
+    expect(result).toBe(false);
+  });
+
+  test("returns false for session with backticks", async () => {
+    const result = await sendCompact("`whoami`");
+    expect(result).toBe(false);
+  });
+});

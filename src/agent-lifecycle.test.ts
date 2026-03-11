@@ -13,6 +13,9 @@ import {
   _formatArchiveTimestamp,
   setSpawnRunner,
   resetSpawnRunner,
+  killAgentProcess,
+  captureTmuxOutputToFile,
+  teardownAgent,
 } from "./agent-lifecycle";
 import type { SpawnFn, SpawnResult } from "./types";
 
@@ -352,6 +355,55 @@ describe("agent-lifecycle", () => {
     test("formats date as YYYYMMDD-HHMMSS", () => {
       const ts = _formatArchiveTimestamp(new Date(2026, 2, 8, 14, 30, 45));
       expect(ts).toBe("20260308-143045");
+    });
+  });
+
+  // ── tmux session validation ─────────────────────────────────────────────
+
+  describe("killAgentProcess — invalid tmux session", () => {
+    test("returns false for session with shell metacharacters", async () => {
+      const result = await killAgentProcess("bad;rm -rf /", {});
+      expect(result).toBe(false);
+    });
+
+    test("returns false for session with spaces", async () => {
+      const result = await killAgentProcess("bad session", {});
+      expect(result).toBe(false);
+    });
+
+    test("returns false for empty session name", async () => {
+      const result = await killAgentProcess("", {});
+      expect(result).toBe(false);
+    });
+  });
+
+  describe("captureTmuxOutputToFile — invalid tmux session", () => {
+    test("returns false for session with shell metacharacters", async () => {
+      const result = await captureTmuxOutputToFile("$(whoami)", "/tmp/test-output.log");
+      expect(result).toBe(false);
+    });
+
+    test("returns false for session with backticks", async () => {
+      const result = await captureTmuxOutputToFile("`id`", "/tmp/test-output.log");
+      expect(result).toBe(false);
+    });
+  });
+
+  describe("teardownAgent — invalid tmux session", () => {
+    test("returns false for meta with invalid tmux session", async () => {
+      const tmpDir = await makeTempDir();
+      const agentDir = join(tmpDir, "agents", "test-agent");
+      await mkdir(agentDir, { recursive: true });
+
+      const result = await teardownAgent(
+        tmpDir,
+        "test-agent",
+        agentDir,
+        { tmux_session: "bad;inject" },
+      );
+      expect(result).toBe(false);
+
+      await rm(tmpDir, { recursive: true, force: true });
     });
   });
 });

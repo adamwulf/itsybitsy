@@ -668,3 +668,198 @@ export function isWatchdogRunning(): boolean {
   if (pid === null) return false;
   return isPidAlive(pid);
 }
+
+// ---------------------------------------------------------------------------
+// Per-agent watchdog (CLI: `ib watchdog <id>`)
+// ---------------------------------------------------------------------------
+
+/** Grace period for missing tmux session before exit (milliseconds) */
+export const TMUX_GONE_GRACE_MS = 10_000;
+
+/** Injectable existsSync for testing */
+let existsSyncFn: (path: string) => boolean = (p) => {
+  try { return require("fs").existsSync(p); } catch { return false; }
+};
+
+/** Override existsSync for testing */
+export function setPerAgentExistsSync(fn: (path: string) => boolean): void {
+  existsSyncFn = fn;
+}
+
+/** Reset existsSync to default */
+export function resetPerAgentExistsSync(): void {
+  existsSyncFn = (p) => {
+    try { return require("fs").existsSync(p); } catch { return false; }
+  };
+}
+
+/** Injectable sleep for testing */
+let sleepFn: (ms: number) => Promise<void> = (ms) => Bun.sleep(ms);
+
+/** Override sleep for testing */
+export function setPerAgentSleep(fn: (ms: number) => Promise<void>): void {
+  sleepFn = fn;
+}
+
+/** Reset sleep to default */
+export function resetPerAgentSleep(): void {
+  sleepFn = (ms) => Bun.sleep(ms);
+}
+
+/** Injectable captureTmuxOutput for testing */
+let captureTmuxFn: (session: string) => Promise<string | null> = captureTmuxOutput;
+
+/** Override captureTmuxOutput for testing */
+export function setPerAgentCaptureTmux(fn: (session: string) => Promise<string | null>): void {
+  captureTmuxFn = fn;
+}
+
+/** Reset captureTmuxOutput to default */
+export function resetPerAgentCaptureTmux(): void {
+  captureTmuxFn = captureTmuxOutput;
+}
+
+/** Injectable readAgentMeta for testing */
+let readAgentMetaFn: (agentDir: string) => Promise<{ meta: import("./agents").AgentMeta | null; error?: string }> = async (dir) => {
+  const { readAgentMeta } = await import("./agents");
+  return readAgentMeta(dir);
+};
+
+/** Override readAgentMeta for testing */
+export function setPerAgentReadMeta(fn: typeof readAgentMetaFn): void {
+  readAgentMetaFn = fn;
+}
+
+/** Reset readAgentMeta to default */
+export function resetPerAgentReadMeta(): void {
+  readAgentMetaFn = async (dir) => {
+    const { readAgentMeta } = await import("./agents");
+    return readAgentMeta(dir);
+  };
+}
+
+/**
+ * Run a self-contained watchdog loop for a single agent.
+ * Exits cleanly when:
+ *   (a) the agent's worktree directory no longer exists, OR
+ *   (b) the agent's tmux session has been missing for >10 consecutive seconds.
+ *
+ * This is the per-agent CLI entry point (`ib watchdog <id>`), matching
+ * the bash watchdog's per-agent model. Does NOT use lock files.
+ */
+export async function runPerAgentWatchdog(agentId: string, repoPath: string): Promise<void> {
+  const agentDir = join(repoPath, ".ittybitsy", "agents", agentId);
+  const worktreeDir = join(agentDir, "repo");
+
+  // Read agent meta to get tmux session
+  const { meta } = await readAgentMetaFn(agentDir);
+  if (!meta) {
+    console.error(`[watchdog] Cannot read meta for agent ${agentId}`);
+    return;
+  }
+
+  const tmuxSession = meta.tmux_session;
+  if (!tmuxSession) {
+    console.error(`[watchdog] No tmux session for agent ${agentId}`);
+    return;
+  }
+
+  const tracker = createTracker();
+  let tmuxGoneSince: number | null = null;
+
+  // Poll loop
+  while (true) {
+    // Exit condition (a): worktree directory removed (kill/merge/nuke)
+    if (!existsSyncFn(worktreeDir)) {
+      break;
+    }
+
+    // Check tmux session
+    const output = await captureTmuxFn(tmuxSession);
+
+    if (output === null) {
+      // Tmux session missing — start or continue grace period
+      if (tmuxGoneSince === null) {
+        tmuxGoneSince = nowFn();
+      } else if (nowFn() - tmuxGoneSince >= TMUX_GONE_GRACE_MS) {
+        // Exit condition (b): tmux gone for >10s
+        break;
+      }
+    } else {
+      // Tmux session exists — reset grace period
+      tmuxGoneSince = null;
+
+      // Build an Agent object for state detection
+      const { parseState, stripAnsi } = await import("./parse-state");
+      const stripped = stripAnsi(output);
+      const result = parseState(stripped);
+
+      const agent: Agent = {
+        id: agentId,
+        repoPath,
+        repoName: "",
+        meta,
+        state: result.state,
+        age: "",
+        archived: false,
+        children: [],
+      };
+
+      // Run state handler
+      const handler = stateHandlers.get(result.state);
+      if (handler) {
+        try {
+          // For notifyManager, we need allAgents — but per-agent watchdog
+          // only knows about this agent. Read siblings from disk.
+          const allAgents = await loadAllAgentsForNotification(repoPath);
+          await handler(agent, tracker, allAgents);
+        } catch { /* don't crash */ }
+      }
+
+      // Reset backoff for non-backoff states
+      if (!BACKOFF_STATES.has(result.state)) {
+        tracker.waitCounter = 0;
+        tracker.notifyInterval = INITIAL_NOTIFY_TICKS;
+      }
+
+      tracker.previousState = result.state;
+
+      // Auto-compact check
+      if (result.state === "running" || result.state === "waiting") {
+        const now = nowFn();
+        if (now - tracker.lastCompactCheckMs >= COMPACT_CHECK_COOLDOWN_MS) {
+          tracker.lastCompactCheckMs = now;
+          try {
+            const config = await readConfigFn(repoPath);
+            const thresholdEntry = config["autoCompactThreshold"];
+            const threshold = thresholdEntry?.value as number | undefined;
+            if (threshold != null && threshold > 0) {
+              await checkAndCompact(agent, threshold, tracker.compactState);
+            }
+          } catch { /* skip */ }
+        }
+      }
+    }
+
+    // Sleep before next poll
+    await sleepFn(POLL_INTERVAL_MS);
+  }
+}
+
+/**
+ * Load all agents from disk for notification purposes (finding the manager).
+ * Best-effort — returns empty array on failure.
+ */
+async function loadAllAgentsForNotification(repoPath: string): Promise<Agent[]> {
+  try {
+    const { readRepoAgents, detectAgentStates } = await import("./agents");
+    const repoName = repoPath.split("/").pop() ?? "";
+    const { agents } = await readRepoAgents(repoPath, repoName);
+    if (agents.length > 0) {
+      await detectAgentStates(agents);
+    }
+    return agents;
+  } catch {
+    return [];
+  }
+}

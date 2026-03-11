@@ -659,11 +659,11 @@ Reads Claude transcript JSONL files to determine context window usage percentage
 
 ### 8.5 Watchdog
 
-`ib watchdog <id>` runs as a background loop for agents with a manager, polling agent state every 5 seconds.
+`ib watchdog <id>` runs as a background loop for a single agent with a manager, polling agent state every 5 seconds. Both bash and TS use per-agent watchdog processes when spawned via CLI.
 
-**Exit condition**: The bash watchdog exits when the agent's worktree directory is removed (`while [[ -d "$AGENT_DIR/repo" ]]`), which happens on kill/merge/nuke. It does **not** check tmux session existence, so it survives pause and must be exited by worktree removal. On resume, a new watchdog is spawned (§1.6 step 7).
+**Exit conditions**: The watchdog exits when: (a) the agent's worktree directory is removed (`while [[ -d "$AGENT_DIR/repo" ]]`), which happens on kill/merge/nuke, or (b) in TS, the agent's tmux session has been missing for >10 consecutive seconds (grace period). Bash does **not** check tmux session existence, so it survives pause and must be exited by worktree removal only. On resume, a new watchdog is spawned (§1.6 step 7).
 
-> [^callout] The TS watchdog is a global loop (see callout below) that monitors all agents — it doesn't exit per-agent. Stale per-agent trackers are pruned when an agent disappears from the provider. There is no per-agent worktree or tmux-based exit condition in TS.
+The TUI dashboard uses a global watchdog loop internally (`startWatchdog`/`stopWatchdog`) that monitors all agents via an `AgentProvider`, with a PID lock file at `~/.itsybitsy/watchdog.lock` for single-instance enforcement. The global watchdog can also be run standalone via `ib watchdog` (no agent ID). Per-agent watchdogs spawned by `newAgent`/`resumeAgent` do not use lock files.
 
 **Monitoring behaviors by state:**
 
@@ -684,7 +684,7 @@ Reads Claude transcript JSONL files to determine context window usage percentage
 
 **Quiet mode** (`--quiet`): Allows monitoring agents without managers. All notifications are logged but not sent.
 
-> [^callout] The TS watchdog is a single global loop that monitors ALL agents across all repos simultaneously (using an `AgentProvider`), rather than bash's per-agent `ib watchdog <id>` process. It uses a PID lock file at `~/.itsybitsy/watchdog.lock` for single-instance enforcement. TS has no `--quiet` mode; agents without managers simply receive no notifications (the `notifyManager` helper no-ops when `meta.manager` is unset).
+> [^callout] TS has no `--quiet` mode; agents without managers simply receive no notifications (the `notifyManager` helper no-ops when `meta.manager` is unset). The per-agent TS watchdog adds a tmux session grace period (10s) as an additional exit condition not present in bash.
 
 ### 8.6 Root Repo Resolution
 

@@ -441,7 +441,7 @@ ${absExitScript}
   if (agent.meta.manager) {
     try {
       const watchdogLog = join(agentDir, "watchdog.log");
-      const watchdogProc = Bun.spawn(["ib", "watchdog"], {
+      const watchdogProc = Bun.spawn(["ib", "watchdog", agent.id], {
         cwd: agent.repoPath,
         stdout: Bun.file(watchdogLog),
         stderr: Bun.file(watchdogLog),
@@ -1735,7 +1735,7 @@ ${absExitScript}
   if (manager) {
     try {
       const watchdogLog = join(agentDir, "watchdog.log");
-      const watchdogProc = Bun.spawn(["ib", "watchdog"], {
+      const watchdogProc = Bun.spawn(["ib", "watchdog", id], {
         cwd: rootRepoPath,
         stdout: Bun.file(watchdogLog),
         stderr: Bun.file(watchdogLog),

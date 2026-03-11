@@ -20,6 +20,7 @@ import {
   MAX_NOTIFY_TICKS,
   POLL_INTERVAL_MS,
   COMPACT_CHECK_COOLDOWN_MS,
+  TMUX_GONE_GRACE_MS,
   setWatchdogSpawnRunner,
   resetWatchdogSpawnRunner,
   setWatchdogFetchUsage,
@@ -38,6 +39,15 @@ import {
   resetDiskProviderReadAllAgents,
   setDiskProviderDetectAgentStates,
   resetDiskProviderDetectAgentStates,
+  runPerAgentWatchdog,
+  setPerAgentExistsSync,
+  resetPerAgentExistsSync,
+  setPerAgentCaptureTmux,
+  resetPerAgentCaptureTmux,
+  setPerAgentReadMeta,
+  resetPerAgentReadMeta,
+  setPerAgentSleep,
+  resetPerAgentSleep,
   type AgentTracker,
   type StateHandler,
 } from "./watchdog";
@@ -1304,5 +1314,162 @@ describe("watchdog", () => {
       await tick([a1]);
       expect(compactCalls.length).toBe(0);
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Per-agent watchdog tests
+// ---------------------------------------------------------------------------
+
+describe("runPerAgentWatchdog", () => {
+  let worktreeExists: boolean;
+  let tmuxOutput: string | null;
+  let pollCount: number;
+  let currentTime: number;
+
+  // Use a real Bun.sleep override by controlling when the loop exits
+  // via worktreeExists and tmuxOutput
+
+  beforeEach(() => {
+    worktreeExists = true;
+    tmuxOutput = "I HAVE COMPLETED THE GOAL"; // default: complete state
+    pollCount = 0;
+    currentTime = 1000000;
+
+    setPerAgentExistsSync((_path: string) => worktreeExists);
+    setPerAgentCaptureTmux(async (_session: string) => {
+      pollCount++;
+      return tmuxOutput;
+    });
+    setPerAgentReadMeta(async (_dir: string) => ({
+      meta: {
+        id: "agent-test1",
+        session_id: "sid-123",
+        tmux_session: "tmux-test1",
+        prompt: "test",
+        manager: "agent-mgr",
+        created: "2026-03-05T00:00:00Z",
+        created_epoch: 1000,
+        worktree: true,
+        worker: false,
+        yolo: false,
+        model: "sonnet",
+        claude_pid: "999",
+      },
+    }));
+    setWatchdogNow(() => currentTime);
+    // No-op sleep for fast tests
+    setPerAgentSleep(async () => {});
+    // Stub sendMessage spawn runner to no-op
+    setSendSpawnRunner(() => ({ stdout: "", exitCode: 0 }) as any);
+    // Disable auto-compact
+    setWatchdogReadConfig(async () => ({} as any));
+  });
+
+  afterEach(() => {
+    resetPerAgentExistsSync();
+    resetPerAgentCaptureTmux();
+    resetPerAgentReadMeta();
+    resetPerAgentSleep();
+    resetWatchdogNow();
+    resetSendSpawnRunner();
+    resetWatchdogReadConfig();
+  });
+
+  test("exits when worktree directory is removed", async () => {
+    // After first poll, remove worktree
+    const origExists = (_path: string) => worktreeExists;
+    let checkCount = 0;
+    setPerAgentExistsSync((_path: string) => {
+      checkCount++;
+      // Let first check pass, then fail
+      return checkCount <= 1;
+    });
+
+    await runPerAgentWatchdog("agent-test1", "/tmp/test");
+    // Should have exited after first poll when worktree was "removed"
+    expect(checkCount).toBe(2);
+  });
+
+  test("exits when tmux session missing for >10s grace period", async () => {
+    // Tmux session is gone from the start
+    tmuxOutput = null;
+
+    let existsChecks = 0;
+    setPerAgentExistsSync((_path: string) => {
+      existsChecks++;
+      return true; // worktree always exists
+    });
+
+    // Advance time past grace period on second check
+    let captureCalls = 0;
+    setPerAgentCaptureTmux(async (_session: string) => {
+      captureCalls++;
+      if (captureCalls >= 2) {
+        currentTime += TMUX_GONE_GRACE_MS + 1;
+      }
+      return null; // tmux always gone
+    });
+
+    await runPerAgentWatchdog("agent-test1", "/tmp/test");
+    // Should have polled at least twice (first sets goneSince, second exceeds grace)
+    expect(captureCalls).toBeGreaterThanOrEqual(2);
+  });
+
+  test("resets tmux grace period when session reappears", async () => {
+    let captureCalls = 0;
+    setPerAgentCaptureTmux(async (_session: string) => {
+      captureCalls++;
+      if (captureCalls === 1) return null; // first: gone
+      if (captureCalls === 2) return "I HAVE COMPLETED THE GOAL"; // second: back
+      if (captureCalls === 3) return null; // third: gone again
+      // fourth: advance time past grace and still gone → should exit
+      currentTime += TMUX_GONE_GRACE_MS + 1;
+      return null;
+    });
+
+    let existsChecks = 0;
+    setPerAgentExistsSync((_path: string) => {
+      existsChecks++;
+      return true;
+    });
+
+    await runPerAgentWatchdog("agent-test1", "/tmp/test");
+    // Grace period was reset when session reappeared, so we need 4+ captures
+    expect(captureCalls).toBeGreaterThanOrEqual(4);
+  });
+
+  test("exits immediately when meta cannot be read", async () => {
+    setPerAgentReadMeta(async (_dir: string) => ({ meta: null, error: "not found" }));
+
+    // Should return without entering the loop
+    await runPerAgentWatchdog("agent-test1", "/tmp/test");
+    expect(pollCount).toBe(0);
+  });
+
+  test("exits immediately when no tmux session in meta", async () => {
+    setPerAgentReadMeta(async (_dir: string) => ({
+      meta: {
+        id: "agent-test1",
+        session_id: "sid-123",
+        tmux_session: "", // empty
+        prompt: "test",
+        manager: null,
+        created: "2026-03-05T00:00:00Z",
+        created_epoch: 1000,
+        worktree: true,
+        worker: false,
+        yolo: false,
+        model: "sonnet",
+        claude_pid: "999",
+      },
+    }));
+
+    await runPerAgentWatchdog("agent-test1", "/tmp/test");
+    expect(pollCount).toBe(0);
+  });
+
+  test("TMUX_GONE_GRACE_MS is 10 seconds", () => {
+    expect(TMUX_GONE_GRACE_MS).toBe(10_000);
   });
 });

@@ -256,11 +256,40 @@ function checkFilePath(
 export async function hookCheckPath(agentId: string): Promise<void> {
   // Read JSON from stdin
   const raw = await new Response(Bun.stdin.stream()).text();
-  const json = JSON.parse(raw);
+  let json: unknown;
+  try {
+    json = JSON.parse(raw);
+  } catch {
+    process.stderr.write(`hook-check-path: failed to parse stdin JSON: ${raw.slice(0, 200)}\n`);
+    console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow", permissionDecisionReason: "Failed to parse stdin" } }));
+    return;
+  }
 
-  const toolName: string = json.tool_name ?? "";
-  const toolInput: Record<string, unknown> = json.tool_input ?? {};
-  const cwd: string = json.cwd ?? process.cwd();
+  if (typeof json !== "object" || json === null || Array.isArray(json)) {
+    process.stderr.write(`hook-check-path: stdin is not a JSON object\n`);
+    console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow", permissionDecisionReason: "Invalid stdin schema" } }));
+    return;
+  }
+
+  const data = json as Record<string, unknown>;
+
+  // Validate tool_name is a string
+  if (data.tool_name !== undefined && typeof data.tool_name !== "string") {
+    process.stderr.write(`hook-check-path: tool_name is not a string\n`);
+    console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow", permissionDecisionReason: "Invalid stdin schema" } }));
+    return;
+  }
+
+  // Validate tool_input is a non-null object
+  if (data.tool_input !== undefined && (typeof data.tool_input !== "object" || data.tool_input === null)) {
+    process.stderr.write(`hook-check-path: tool_input is not an object\n`);
+    console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow", permissionDecisionReason: "Invalid stdin schema" } }));
+    return;
+  }
+
+  const toolName: string = (data.tool_name as string) ?? "";
+  const toolInput: Record<string, unknown> = (data.tool_input as Record<string, unknown>) ?? {};
+  const cwd: string = (data.cwd as string) ?? process.cwd();
 
   // Resolve agent directory from cwd pattern
   // cwd is typically: .../.ittybitty/agents/{id}/repo/...

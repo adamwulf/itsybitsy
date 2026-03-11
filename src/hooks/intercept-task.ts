@@ -157,12 +157,41 @@ export async function processTaskIntercept(
 
 export async function hookInterceptTask(): Promise<void> {
   const raw = await new Response(Bun.stdin.stream()).text();
-  const data = JSON.parse(raw);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    process.stderr.write(`intercept-task: failed to parse stdin JSON: ${raw.slice(0, 200)}\n`);
+    process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow", permissionDecisionReason: "Failed to parse stdin" } }));
+    return;
+  }
+
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    process.stderr.write(`intercept-task: stdin is not a JSON object\n`);
+    process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow", permissionDecisionReason: "Invalid stdin schema" } }));
+    return;
+  }
+
+  const data = parsed as Record<string, unknown>;
+
+  // Validate tool_name is a string
+  if (data.tool_name !== undefined && typeof data.tool_name !== "string") {
+    process.stderr.write(`intercept-task: tool_name is not a string\n`);
+    process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow", permissionDecisionReason: "Invalid stdin schema" } }));
+    return;
+  }
+
+  // Validate tool_input is a non-null object
+  if (data.tool_input !== undefined && (typeof data.tool_input !== "object" || data.tool_input === null)) {
+    process.stderr.write(`intercept-task: tool_input is not an object\n`);
+    process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow", permissionDecisionReason: "Invalid stdin schema" } }));
+    return;
+  }
 
   const result = await processTaskIntercept({
-    tool_name: data.tool_name ?? "",
-    tool_input: data.tool_input ?? {},
-    cwd: data.cwd ?? process.cwd(),
+    tool_name: (data.tool_name as string) ?? "",
+    tool_input: (data.tool_input as Record<string, unknown>) ?? {},
+    cwd: (data.cwd as string) ?? process.cwd(),
   });
 
   if (result.action === "skip") {

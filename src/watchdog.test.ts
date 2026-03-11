@@ -1546,4 +1546,28 @@ describe("runPerAgentWatchdog", () => {
   test("TMUX_GONE_GRACE_MS is 10 seconds", () => {
     expect(TMUX_GONE_GRACE_MS).toBe(10_000);
   });
+
+  test("exits early when meta has invalid tmux session name", async () => {
+    setPerAgentReadMeta(async (_dir: string) => ({
+      meta: {
+        id: "agent-test1",
+        session_id: "sid-123",
+        tmux_session: "bad;inject",
+        prompt: "test",
+        manager: "",
+        created: "2026-03-05T00:00:00Z",
+        created_epoch: 1000,
+        worktree: true,
+        worker: false,
+        yolo: false,
+        claude_pid: "",
+        model: "opus",
+        role: "worker",
+        permissions: { allow: [], deny: [] },
+      },
+    }));
+
+    await runPerAgentWatchdog("agent-test1", "/tmp/test");
+    expect(pollCount).toBe(0);
+  });
 });

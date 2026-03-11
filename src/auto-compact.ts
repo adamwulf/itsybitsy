@@ -9,6 +9,7 @@ import { join } from "path";
 import { homedir } from "os";
 import type { Agent } from "./agents";
 import { agentWorktreePath } from "./agents";
+import { isValidTmuxSession } from "./validation";
 
 /**
  * Encode a worktree path into Claude's project directory name.
@@ -184,6 +185,10 @@ export function resetCompactSpawnRunner(): void {
  * Returns true if the command was sent successfully.
  */
 export async function sendCompact(tmuxSession: string): Promise<boolean> {
+  if (!isValidTmuxSession(tmuxSession)) {
+    console.error(`[auto-compact] Invalid tmux session name: ${tmuxSession}`);
+    return false;
+  }
   try {
     const proc = compactSpawnRunner(["tmux", "send-keys", "-t", tmuxSession, "/compact", "Enter"]);
     const exitCode = await proc.exited;

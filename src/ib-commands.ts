@@ -24,7 +24,7 @@ import { readConfig } from "./config";
 import { listTmuxSessions } from "./tmux-poller";
 import { SpawnContext } from "./types";
 import type { SpawnFn } from "./types";
-import { isValidModel, isValidToolList, isValidTmuxSession, isValidSessionId } from "./validation";
+import { isValidModel, isValidToolList, isValidTmuxSession, isValidSessionId, isValidShellPath, shellQuote } from "./validation";
 
 export interface IbCommandResult {
   ok: boolean;
@@ -361,6 +361,14 @@ export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
   // Get git root for PATH
   const gitRoot = await resolveGitRoot(agent.repoPath) || agent.repoPath;
 
+  // Validate paths for shell script interpolation
+  if (!isValidShellPath(gitRoot)) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Git root path contains characters unsafe for shell scripts: ${gitRoot}` };
+  }
+  if (!isValidShellPath(agentDir)) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Agent directory path contains characters unsafe for shell scripts: ${agentDir}` };
+  }
+
   // Determine work dir
   const repoDir = join(agentDir, "repo");
   let workPath = repoDir;
@@ -373,11 +381,17 @@ export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
   // Build exit script path
   const absExitScript = join(agentDir, "exit-check.sh");
 
+  // Shell-quote all paths for safe interpolation
+  const qGitRoot = shellQuote(gitRoot);
+  const qAgentDir = shellQuote(agentDir);
+  const qAbsExitScript = shellQuote(absExitScript);
+
   // Write resume.sh
   const resumeScript = join(agentDir, "resume.sh");
+  const qMetaJson = shellQuote(join(agentDir, "meta.json"));
   const resumeContent = `#!/bin/bash
 # Add git repo root to PATH so 'ib' is available
-export PATH="${gitRoot}:$PATH"
+export PATH=${qGitRoot}":$PATH"
 
 # Clear Claude Code nesting detection so agents can start their own claude process
 unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT
@@ -387,15 +401,16 @@ claude --resume "${sessionId}" ${claudeArgs} &
 CLAUDE_PID=$!
 
 # Store PID in meta.json
-if [[ -f "${agentDir}/meta.json" ]]; then
-    bun -e "const f='${agentDir}/meta.json';const m=JSON.parse(require('fs').readFileSync(f,'utf8'));m.claude_pid=String(process.argv[1]);require('fs').writeFileSync(f,JSON.stringify(m,null,2))" "$CLAUDE_PID"
+META_JSON=${qMetaJson}
+if [[ -f "$META_JSON" ]]; then
+    bun -e "const f=process.argv[1];const m=JSON.parse(require('fs').readFileSync(f,'utf8'));m.claude_pid=String(process.argv[2]);require('fs').writeFileSync(f,JSON.stringify(m,null,2))" "$META_JSON" "$CLAUDE_PID"
 fi
 
 # Wait for Claude to complete
 wait $CLAUDE_PID
 
 # Run exit check
-${absExitScript}
+${qAbsExitScript}
 `;
   await Bun.write(resumeScript, resumeContent);
   await chmod(resumeScript, 0o755);
@@ -425,7 +440,7 @@ ${absExitScript}
   if (nudgeDelayMs > 0) await Bun.sleep(nudgeDelayMs);
 
   const nudgePrompt = "Resume your work, or end with 'WAITING' or 'I HAVE COMPLETED THE GOAL' as your final line.";
-  await nukeResumeRunCmd(["tmux", "send-keys", "-t", tmuxSession, nudgePrompt]);
+  await nukeResumeRunCmd(["tmux", "send-keys", "-t", tmuxSession, "-l", nudgePrompt]);
 
   const nudgeSleepMs = resumeDelayOverrideMs !== null ? resumeDelayOverrideMs : 100;
   if (nudgeSleepMs > 0) await Bun.sleep(nudgeSleepMs);
@@ -1348,6 +1363,11 @@ export async function newAgent(
   // Resolve the root repo path (handles worktrees)
   const rootRepoPath = (await resolveGitRoot(repoPath)) || repoPath;
 
+  // Validate path for shell script interpolation
+  if (!isValidShellPath(rootRepoPath)) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Repository path contains characters unsafe for shell scripts (null bytes or newlines): ${rootRepoPath}` };
+  }
+
   const agentsDir = join(rootRepoPath, ".ittybitty", "agents");
   const archiveDir = join(rootRepoPath, ".ittybitty", "archive");
 
@@ -1680,27 +1700,32 @@ echo ""
   const absPromptFile = join(agentDir, "prompt.txt");
   const absExitScript = join(agentDir, "exit-check.sh");
   const startScript = join(agentDir, "start.sh");
+  const qRootRepoPath = shellQuote(rootRepoPath);
+  const qAbsPromptFile = shellQuote(absPromptFile);
+  const qStartMetaJson = shellQuote(join(agentDir, "meta.json"));
+  const qStartExitScript = shellQuote(absExitScript);
   const startContent = `#!/bin/bash
 # Add git repo root to PATH so 'ib' is available
-export PATH="${rootRepoPath}:$PATH"
+export PATH=${qRootRepoPath}":$PATH"
 
 # Clear Claude Code nesting detection so agents can start their own claude process
 unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT
 
 # Start Claude in background and capture PID
-claude --session-id "${sessionUuid}" ${claudeArgs} "$(cat '${absPromptFile}')" &
+claude --session-id "${sessionUuid}" ${claudeArgs} "$(cat ${qAbsPromptFile})" &
 CLAUDE_PID=$!
 
 # Store PID in meta.json
-if [[ -f "${agentDir}/meta.json" ]]; then
-    bun -e "const f='${agentDir}/meta.json';const m=JSON.parse(require('fs').readFileSync(f,'utf8'));m.claude_pid=String(process.argv[1]);require('fs').writeFileSync(f,JSON.stringify(m,null,2))" "$CLAUDE_PID"
+META_JSON=${qStartMetaJson}
+if [[ -f "$META_JSON" ]]; then
+    bun -e "const f=process.argv[1];const m=JSON.parse(require('fs').readFileSync(f,'utf8'));m.claude_pid=String(process.argv[2]);require('fs').writeFileSync(f,JSON.stringify(m,null,2))" "$META_JSON" "$CLAUDE_PID"
 fi
 
 # Wait for Claude to complete
 wait $CLAUDE_PID
 
 # Run exit check
-${absExitScript}
+${qStartExitScript}
 `;
   await Bun.write(startScript, startContent);
   await chmod(startScript, 0o755);

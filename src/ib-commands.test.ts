@@ -738,12 +738,12 @@ describe("resumeAgent (native)", () => {
     expect(newSessionCall).toBeDefined();
     expect(newSessionCall).toContain("tmux-agent-abc");
 
-    // tmux send-keys for nudge should have been called
+    // tmux send-keys for nudge should have been called with -l flag
     const nudgeCall = spawnCalls.find(
-      (c) => c[0] === "tmux" && c[1] === "send-keys" && c.length === 5 && c[4] !== "Enter"
+      (c) => c[0] === "tmux" && c[1] === "send-keys" && c.includes("-l") && c.some(a => a.includes("Resume your work"))
     );
     expect(nudgeCall).toBeDefined();
-    expect(nudgeCall![4]).toContain("Resume your work");
+    expect(nudgeCall).toContain("-l");
   });
 
   test("detects yolo mode from start.sh", async () => {
@@ -899,6 +899,42 @@ describe("resumeAgent (native)", () => {
     expect(result.ok).toBe(false);
     expect(result.stderr).toContain("Invalid tmux session name");
   });
+
+  test("resume.sh shell-quotes paths for safety", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-abc",
+      tmux_session: "tmux-agent-abc",
+      session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    }));
+
+    const agent = _makeAgent({
+      id: "agent-abc",
+      repoPath: tempDir,
+      repoName: "test",
+      state: "stopped",
+      meta: {
+        session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        tmux_session: "tmux-agent-abc",
+      } as any,
+    });
+    const result = await resumeAgent(agent);
+    expect(result.ok).toBe(true);
+
+    const resumeScript = await Bun.file(join(agentDir, "resume.sh")).text();
+    // PATH export should use single-quoted path
+    expect(resumeScript).toContain(`export PATH='${tempDir}'":$PATH"`);
+    // meta.json should be passed as process.argv, not embedded in JS
+    expect(resumeScript).toContain(`META_JSON='${join(agentDir, "meta.json")}'`);
+    expect(resumeScript).toContain('bun -e "const f=process.argv[1]');
+    expect(resumeScript).toContain('"$META_JSON" "$CLAUDE_PID"');
+    // exit-check.sh should be single-quoted
+    expect(resumeScript).toContain(`'${join(agentDir, "exit-check.sh")}'`);
+    // Should NOT have old pattern of embedding path in JS string
+    expect(resumeScript).not.toContain("const f='/");
+  });
+
 });
 
 describe("mergeAgent (native)", () => {
@@ -1898,7 +1934,7 @@ describe("newAgent (native)", () => {
     expect(startSh).toContain("claude --session-id");
     expect(startSh).toContain("CLAUDE_PID=$!");
     expect(startSh).toContain("unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT");
-    expect(startSh).toContain(`export PATH="${tempDir}:$PATH"`);
+    expect(startSh).toContain(`export PATH='${tempDir}'":$PATH"`);
   });
 
   test("creates exit-check.sh", async () => {
@@ -2334,6 +2370,33 @@ describe("newAgent (native)", () => {
     const metaPath = join(agentsDir, "test-summary-empty", "meta.json");
     const meta = await Bun.file(metaPath).json();
     expect(meta.summary).toBeUndefined();
+  });
+
+  test("start.sh shell-quotes paths to handle spaces and special chars", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    await callNewAgent("do work", { name: "test-quotes" });
+
+    const startSh = await Bun.file(join(agentsDir, "test-quotes", "start.sh")).text();
+    // PATH export should use single-quoted path
+    expect(startSh).toContain(`export PATH='${tempDir}'":$PATH"`);
+    // prompt.txt path should be single-quoted
+    const agentDir = join(agentsDir, "test-quotes");
+    expect(startSh).toContain(`$(cat '${join(agentDir, "prompt.txt")}')`);
+    // meta.json should be passed as argument, not embedded in JS
+    expect(startSh).toContain(`META_JSON='${join(agentDir, "meta.json")}'`);
+    expect(startSh).toContain('bun -e "const f=process.argv[1]');
+    expect(startSh).toContain('"$META_JSON" "$CLAUDE_PID"');
+    // exit-check.sh should be single-quoted
+    expect(startSh).toContain(`'${join(agentDir, "exit-check.sh")}'`);
+  });
+
+  test("start.sh does not embed paths directly in JS code", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    await callNewAgent("do work", { name: "test-no-embed" });
+
+    const startSh = await Bun.file(join(agentsDir, "test-no-embed", "start.sh")).text();
+    // Should NOT have the old pattern of embedding path in JS string
+    expect(startSh).not.toContain("const f='/" );
   });
 });
 

@@ -5,6 +5,7 @@ import { tmpdir } from "os";
 import {
   detectStateFromMessage,
   processStopHook,
+  executeResultActions,
   findUnfinishedChildren,
 } from "./agent-status";
 
@@ -634,6 +635,167 @@ describe("findUnfinishedChildren", () => {
     const result = await findUnfinishedChildren(ctx.agentsDir, ctx.agentId, {
       getChildState: async () => "running",
     });
+    expect(result).toEqual([]);
+  });
+});
+
+// ── executeResultActions: manager validation ────────────────────────────────
+
+describe("manager ID/session validation in executeResultActions", () => {
+  let ctx: Awaited<ReturnType<typeof createTempAgentDir>>;
+
+  beforeEach(async () => {
+    ctx = await createTempAgentDir();
+  });
+
+  afterEach(async () => {
+    await ctx.cleanup();
+  });
+
+  test("rejects invalid manager agent ID", async () => {
+    // Write meta with a manager ID containing path traversal characters
+    await writeMeta(ctx.agentDir, {
+      tmux_session: "ib-test",
+      manager: "../../../etc/passwd",
+    });
+
+    const result = await executeResultActions(
+      {
+        state: "complete",
+        action: "notify_manager",
+        message: "agent just completed",
+      },
+      ctx.agentDir,
+      ctx.agentsDir,
+    );
+    expect(result).toBe("invalid_manager_id");
+  });
+
+  test("rejects manager ID with shell metacharacters", async () => {
+    await writeMeta(ctx.agentDir, {
+      tmux_session: "ib-test",
+      manager: "agent; rm -rf /",
+    });
+
+    const result = await executeResultActions(
+      {
+        state: "complete",
+        action: "notify_manager",
+        message: "agent just completed",
+      },
+      ctx.agentDir,
+      ctx.agentsDir,
+    );
+    expect(result).toBe("invalid_manager_id");
+  });
+
+  test("rejects invalid manager tmux session", async () => {
+    // Create valid manager dir with invalid tmux session name
+    const managerDir = join(ctx.agentsDir, "manager-001");
+    await mkdir(managerDir, { recursive: true });
+    await writeMeta(managerDir, {
+      tmux_session: "session; evil-command",
+    });
+
+    // Worker meta points to the manager
+    await writeMeta(ctx.agentDir, {
+      tmux_session: "ib-test",
+      manager: "manager-001",
+    });
+
+    const result = await executeResultActions(
+      {
+        state: "complete",
+        action: "notify_manager",
+        message: "agent just completed",
+      },
+      ctx.agentDir,
+      ctx.agentsDir,
+    );
+    expect(result).toBe("invalid_manager_session");
+  });
+
+  test("accepts valid manager ID and session", async () => {
+    // Create valid manager dir with valid tmux session
+    const managerDir = join(ctx.agentsDir, "manager-001");
+    await mkdir(managerDir, { recursive: true });
+    await writeMeta(managerDir, {
+      tmux_session: "ib-manager-001",
+    });
+
+    await writeMeta(ctx.agentDir, {
+      tmux_session: "ib-test",
+      manager: "manager-001",
+    });
+
+    // This will try to send to tmux (which won't exist), but won't fail validation
+    const result = await executeResultActions(
+      {
+        state: "complete",
+        action: "notify_manager",
+        message: "agent just completed",
+      },
+      ctx.agentDir,
+      ctx.agentsDir,
+    );
+    expect(result).toBe("ok");
+  });
+});
+
+// ── tmux session validation ─────────────────────────────────────────────
+
+describe("processStopHook — invalid tmux session in meta.json", () => {
+  let ctx: Awaited<ReturnType<typeof createTempAgentDir>>;
+
+  beforeEach(async () => {
+    ctx = await createTempAgentDir();
+  });
+
+  afterEach(async () => {
+    await ctx.cleanup();
+  });
+
+  test("falls through to unknown state when meta has invalid tmux session", async () => {
+    // Write meta.json with an invalid tmux_session
+    await writeFile(
+      join(ctx.agentDir, "meta.json"),
+      JSON.stringify({ tmux_session: "bad;inject" }),
+    );
+
+    const result = await processStopHook(
+      ctx.agentId,
+      "",  // empty last message
+      ctx.agentDir,
+      ctx.agentsDir,
+    );
+
+    // Should fall through to unknown since the tmux session is invalid and can't be captured
+    expect(result.state).toBe("unknown");
+  });
+});
+
+describe("findUnfinishedChildren — invalid tmux session", () => {
+  let ctx: Awaited<ReturnType<typeof createTempAgentDir>>;
+
+  beforeEach(async () => {
+    ctx = await createTempAgentDir();
+  });
+
+  afterEach(async () => {
+    await ctx.cleanup();
+  });
+
+  test("treats child with invalid tmux session as unknown (not unfinished)", async () => {
+    const childDir = join(ctx.agentsDir, "child-bad");
+    await mkdir(childDir, { recursive: true });
+    await writeFile(
+      join(childDir, "meta.json"),
+      JSON.stringify({ tmux_session: "$(evil)", manager: ctx.agentId }),
+    );
+
+    const result = await findUnfinishedChildren(ctx.agentsDir, ctx.agentId);
+    // Invalid tmux session → can't capture → childState stays "unknown"
+    // "unknown" is not in UNFINISHED_STATES, so child should not be listed
     expect(result).toEqual([]);
   });
 });

@@ -29,6 +29,7 @@ import type { RepoEntry } from "./registry";
 import { checkAndCompact } from "./auto-compact";
 import type { CompactState } from "./auto-compact";
 import { readConfig } from "./config";
+import { isValidTmuxSession } from "./validation";
 
 /** Function that returns the current list of agents. Used by the watchdog loop.
  * Can be sync (TUI watcher cache) or async (disk-based standalone watchdog). */
@@ -210,6 +211,10 @@ export async function notifyManager(
 
 /** Send Enter to a tmux session to dismiss a dialog. */
 async function sendTmuxEnter(tmuxSession: string): Promise<boolean> {
+  if (!isValidTmuxSession(tmuxSession)) {
+    console.error(`[watchdog] Invalid tmux session name: ${tmuxSession}`);
+    return false;
+  }
   try {
     const proc = spawnCtx.runner(
       ["tmux", "send-keys", "-t", tmuxSession, "Enter"],
@@ -281,6 +286,10 @@ async function handleUnknown(agent: Agent, tracker: AgentTracker, allAgents: Age
 async function saveUnknownDebugLog(agent: Agent): Promise<void> {
   const tmuxSession = agent.meta.tmux_session;
   if (!tmuxSession) return;
+  if (!isValidTmuxSession(tmuxSession)) {
+    console.error(`[watchdog] Invalid tmux session name for agent ${agent.id}: ${tmuxSession}`);
+    return;
+  }
 
   try {
     const output = await captureTmuxOutput(tmuxSession);
@@ -356,6 +365,11 @@ export const RATE_LIMIT_RETRY_DELAY_MS = 2_000;
  */
 async function handleRateLimited(agent: Agent, tracker: AgentTracker, _allAgents: Agent[]): Promise<void> {
   const tmuxSession = agent.meta.tmux_session;
+
+  if (tmuxSession && !isValidTmuxSession(tmuxSession)) {
+    console.error(`[watchdog] Invalid tmux session name for agent ${agent.id}: ${tmuxSession}`);
+    return;
+  }
 
   // Bypass rate limit dialog on first detection with a 3-attempt retry loop
   // matching bash's bypass_rate_limit: send Enter, wait 2s, capture output,
@@ -805,6 +819,10 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
   const tmuxSession = meta.tmux_session;
   if (!tmuxSession) {
     console.error(`[watchdog] No tmux session for agent ${agentId}`);
+    return;
+  }
+  if (!isValidTmuxSession(tmuxSession)) {
+    console.error(`[watchdog] Invalid tmux session name for agent ${agentId}: ${tmuxSession}`);
     return;
   }
 

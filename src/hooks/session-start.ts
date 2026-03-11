@@ -287,9 +287,24 @@ These phrases MUST be the LAST thing you output. Put summaries or status updates
 
 export async function hookSessionStart(): Promise<void> {
   const raw = await new Response(Bun.stdin.stream()).text();
-  const data = JSON.parse(raw);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    process.stderr.write(`session-start: failed to parse stdin JSON: ${raw.slice(0, 200)}\n`);
+    process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: "" } }));
+    return;
+  }
 
-  const cwd: string = data.cwd ?? process.cwd();
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    process.stderr.write(`session-start: stdin is not a JSON object\n`);
+    process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: "" } }));
+    return;
+  }
+
+  const data = parsed as Record<string, unknown>;
+
+  const cwd: string = (data.cwd as string) ?? process.cwd();
 
   // Detect role - read meta.json from filesystem if in an agent directory
   const match = AGENT_CWD_PATTERN.exec(cwd);

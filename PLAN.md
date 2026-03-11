@@ -1655,6 +1655,69 @@ Migrate TS to the same model:
 
 ---
 
+### Phase 40: Rate Limit, Reassign, and Post-Create Hook Parity
+
+**Status:** Not started.
+
+**Source:** SPEC.md callouts #22, #24, #25, #26.
+
+**Goal:** Fix rate-limit bypass retry logic, reassign validation and notification gaps, meta.manager null handling, and post-create hook output capture. After each fix, update SPEC.md to remove the `[^callout]`.
+
+**Complexity:** Low–Medium.
+
+#### 40a: Rate limit bypass matches bash 3-attempt retry loop
+
+**File:** `src/watchdog.ts`
+
+**SPEC.md:** §8.5 Watchdog table, `rate_limited` row
+
+Bash uses a synchronous 3-attempt retry loop: sends Enter, waits 2s, checks `parse_state`, repeats up to 3 times. TS sends a single Enter on first detection (`rateLimitBypassed` flag) and relies on the 5s poll cycle for retry.
+
+- [ ] Implement a 3-attempt retry loop: send Enter, wait 2s, capture tmux output, check state via `parseState`, repeat if still `rate_limited`
+- [ ] Only set `rateLimitBypassed` (or equivalent cooldown flag) after the loop completes
+- [ ] Add tests covering the retry behavior
+- [ ] Update SPEC.md §8.5 rate_limited row to remove the `[^callout]`
+
+#### 40b: `reassignAgent` missing validations
+
+**File:** `src/ib-commands.ts` (`reassignAgent`)
+
+**SPEC.md:** §8.6 (or wherever reassign is documented)
+
+TS is missing:
+- Validation #3: self-reassign check (agent reassigned to itself as manager) → error
+- Validation #7: no-op same-parent check (new manager == current manager) → error
+
+- [ ] Add self-reassign check: if `newManagerId === agentId`, return error
+- [ ] Add same-parent check: if `newManagerId === agent.manager`, return error
+- [ ] Add tests for both rejected cases
+- [ ] Update SPEC.md to remove the `[^callout]`
+
+#### 40c: `reassignAgent` meta.manager and notification parity
+
+**File:** `src/ib-commands.ts` (`reassignAgent`), and anywhere `meta.manager` is read
+
+**SPEC.md:** §8.6
+
+Three divergences to fix:
+
+1. **`meta.manager` null vs `""`**: When reassigning with `--none` (top-level), bash sets `meta.manager` to `null`. TS sets it to `""` (empty string). Fix TS to use `null`. Then audit all TS code that reads `meta.manager` and ensure it handles both `null` and `""` defensively (for backwards compat with existing agent files that may have `""`).
+
+2. **Notification messages**: Update TS notification messages to match bash:
+   - Old manager: `"[watchdog]: Agent <id> has been reassigned away from you to <new-manager-id>"` (or `"to top-level"` if no new manager)
+   - New manager: `"[watchdog]: Agent <id> has been reassigned to you from <old-manager-id>"` (or `"from top-level"`)
+
+3. **Agent self-notification**: After reassignment, send a message to the reassigned agent itself notifying it of the change (step 5 in bash — currently skipped in TS).
+
+- [ ] Fix `meta.manager` to write `null` instead of `""`
+- [ ] Audit all reads of `meta.manager` in the codebase — handle `null | "" | undefined` consistently
+- [ ] Update notification messages to match bash format
+- [ ] Add agent self-notification step
+- [ ] Add tests
+- [ ] Update SPEC.md §8.6 to remove the `[^callout]`
+
+---
+
 ### Phase 27 (future): Path Allowlist in Hook Sandbox
 
 **Status:** Aspirational.

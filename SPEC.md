@@ -655,7 +655,7 @@ After kills/nukes, the system scans for orphaned Claude processes:
 
 Reads Claude transcript JSONL files to determine context window usage percentage. When an agent exceeds the configured threshold (`autoCompactThreshold`), sends `/compact` to the agent's tmux session. In bash, `/compact` is sent in any state except `compacting` (and only if not already sent). A `compactSent` flag prevents duplicate sends; the flag resets when the agent transitions out of `compacting` state.
 
-> [^callout] TS restricts auto-compact sends to `running` or `waiting` states only (stricter than bash). TS resets the `compactSent` flag when usage drops below the threshold rather than on state transition out of `compacting`. TS also has a 60-second per-agent cooldown between usage checks (`COMPACT_CHECK_COOLDOWN_MS`); bash checks on every 5-second watchdog poll.
+> [^note] TS restricts auto-compact sends to `running` or `waiting` states only (stricter than bash). TS resets the `compactSent` flag when usage drops below the threshold rather than on state transition out of `compacting`. TS also has a 60-second per-agent cooldown between usage checks (`COMPACT_CHECK_COOLDOWN_MS`); bash checks on every 5-second watchdog poll. See also §8.5 Watchdog for related auto-compact behavior in the watchdog loop.
 
 ### 8.5 Watchdog
 
@@ -742,4 +742,4 @@ After agent creation, the system runs `.ittybitty/hooks/post-create-agent` if it
 | `IB_AGENT_PROMPT` | The prompt given to the agent |
 | `IB_AGENT_MODEL` | The model specified for the agent |
 
-> [^callout] TS runs the post-create hook with `stdout: "ignore", stderr: "ignore"`, so hook output is discarded rather than appended to `agent.log` as in bash.
+> [^note] The post-create-agent hook is not actively used by itsybitsy. TS runs it with `stdout: "ignore", stderr: "ignore"` (output discarded); bash appends stdout/stderr to `agent.log`. This divergence is not a priority to fix since the hook is unused.

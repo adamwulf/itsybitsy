@@ -1510,6 +1510,90 @@ Two related fixes:
 
 ---
 
+### Phase 38: Message Passing & Question Parity Fixes
+
+**Status:** Not started.
+
+**Source:** SPEC.md callouts #8, #11, #12, #13, #14 (bash/TS divergences to be resolved).
+
+**Goal:** Align TS message passing, `ib ask`, and question acknowledgement behavior with bash. After each fix, update SPEC.md to remove the `[^callout]` and replace with accurate description (or remove it entirely if the behavior is now identical).
+
+**Complexity:** Low.
+
+#### 38a: Unfinished children check uses tmux state (not dir existence)
+
+**File:** `src/hooks/agent-status.ts` (stop hook unfinished-children check)
+
+**SPEC.md:** §2.4, line ~215
+
+Bash determines "unfinished" children by checking their actual tmux state — only `creating`, `running`, `waiting`, or `complete` count as unfinished. `stopped` and `unknown` are excluded. TS currently checks only that the child agent directory exists and `meta.archived` is not true, which incorrectly flags stopped/unknown agents as unfinished.
+
+- [ ] In the stop hook's children check, call `detectAgentStates()` (or equivalent) to get tmux state for each child
+- [ ] Only treat children with state `creating | running | waiting | complete` as unfinished — skip `stopped` and `unknown`
+- [ ] Add tests for the boundary: stopped child → not flagged, running child → flagged
+- [ ] Update SPEC.md §2.4 to remove `[^callout]`, describe both bash and TS as using tmux state
+
+#### 38b: `ib send` accepts stdin when no positional message given
+
+**File:** `src/ib-commands.ts` (`sendMessage`) and CLI argument parsing
+
+**SPEC.md:** §4.1 item 8, line ~298
+
+Bash supports `echo "msg" | ib send <id>` and `ib send <id> < file.txt`. TS requires the message as a positional CLI argument and errors if none is provided.
+
+- [ ] In the CLI `send` command handler, if no positional message argument is given, attempt to read from `process.stdin` (detect if stdin is a pipe/file with `Bun.stdin.ref()` or check `process.stdin.isTTY`)
+- [ ] If stdin is a TTY (interactive), keep the current error behavior (message is required)
+- [ ] If stdin is a pipe/file, read all bytes and use as the message
+- [ ] Add tests covering stdin input
+- [ ] Update SPEC.md §4.1 item 8 to remove `[^callout]`
+
+#### 38c: Add `ib ask` command to TS CLI
+
+**File:** `src/ib-commands.ts`, CLI entry point
+
+**SPEC.md:** §4.2, line ~302
+
+`ib ask` is bash-only today. When itsybitsy's `ib` binary replaces the bash `ib` on `$PATH`, agents will call the TS `ib ask`. It must be implemented.
+
+Behavior (per SPEC.md §4.2):
+1. Auto-detect agent ID from CWD (`/.ittybitty/agents/<id>/repo`), or accept `--id <agent-id>`
+2. Top-level check: only agents with no manager (or whose manager is merged/killed) may ask; others get "use `ib send` to communicate with your manager"
+3. Config check: `allowAgentQuestions` must be `true`
+4. Clean up stale questions (agents whose directories no longer exist)
+5. Append new question to `.ittybitty/user-questions.json` with ID format `q-<unix-epoch>-<6-char-hash>` (hash = first 6 hex chars of MD5 of `"<agentId>-<question>\n"`)
+6. Log question to asking agent's `agent.log`
+
+- [ ] Implement `askQuestion(agentId, question)` in `src/ib-commands.ts`
+- [ ] Add `ask` subcommand to CLI
+- [ ] Add tests
+- [ ] Update SPEC.md §4.2 to remove `[^callout]`
+
+#### 38d: Remove redundant `acknowledged: true` field from TS
+
+**File:** `src/ib-commands.ts` (`acknowledgeQuestion`)
+
+**SPEC.md:** §4.3 callout, line ~336
+
+TS sets `acknowledged: true` in addition to `status: "acknowledged"` and `acknowledged_at`. This is redundant — callers can check `acknowledged_at != null` or `status === "acknowledged"`. Bash only sets `status` and `acknowledged_at`.
+
+- [ ] Remove the `acknowledged: true` field from `acknowledgeQuestion`
+- [ ] Remove it from any TypeScript types/interfaces that declare it
+- [ ] Verify no code reads `question.acknowledged` (use grep) — update any such reads to check `status` or `acknowledged_at` instead
+- [ ] Update SPEC.md §4.3 to remove the `[^callout]`
+
+#### 38e: `ib acknowledge` success output matches bash hint
+
+**File:** `src/ib-commands.ts` (`acknowledgeQuestion`)
+
+**SPEC.md:** §4.4, line ~342
+
+Bash prints: `"Question acknowledged. Use 'ib send <agent-id> \"answer\"' to respond."` TS returns a generic success message without the send hint.
+
+- [ ] Update `acknowledgeQuestion` to return/print the same hint as bash
+- [ ] Update SPEC.md §4.4 to remove the `[^callout]` for the hint
+
+---
+
 ### Phase 27 (future): Path Allowlist in Hook Sandbox
 
 **Status:** Aspirational.

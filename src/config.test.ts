@@ -23,7 +23,7 @@ describe("readConfig", () => {
     const result = await readConfig(tmpDir, opts());
 
     expect(result["maxAgents"]).toEqual({ value: 10, source: "default" });
-    expect(result["model"]).toEqual({ value: "sonnet", source: "default" });
+    expect(result["model"]).toEqual({ value: "", source: "default" });
     expect(result["fps"]).toEqual({ value: 10, source: "default" });
     expect(result["createPullRequests"]).toEqual({ value: false, source: "default" });
     expect(result["allowAgentQuestions"]).toEqual({ value: true, source: "default" });
@@ -208,7 +208,7 @@ describe("config type validation in readConfig", () => {
     await Bun.write(projectPath, JSON.stringify({ model: 123 }));
 
     const result = await readConfig(tmpDir, opts());
-    expect(result["model"]).toEqual({ value: "sonnet", source: "default" });
+    expect(result["model"]).toEqual({ value: "", source: "default" });
   });
 
   test("createPullRequests: string falls back to default", async () => {
@@ -248,7 +248,7 @@ describe("config type validation in readConfig", () => {
 
     const result = await readConfig(tmpDir, opts());
     expect(result["maxAgents"]).toEqual({ value: 10, source: "default" });
-    expect(result["model"]).toEqual({ value: "sonnet", source: "default" });
+    expect(result["model"]).toEqual({ value: "", source: "default" });
   });
 
   test("wrong-typed project value falls through to valid user value", async () => {

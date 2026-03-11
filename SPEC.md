@@ -604,8 +604,10 @@ For a given agent type (manager or worker):
 1. Start with the base settings from `.claude/settings.local.json` in the repo root
 2. Add mandatory permissions (§2.2)
 3. Add config-defined permissions for the agent's role
-4. If worker-specific permissions are empty, fall through to manager permissions [^callout]: The TS implementation (`ib-commands.ts:1431–1433`) reads permissions directly for the agent's role without this fallback — workers with empty `permissions.worker.allow` get no extra config permissions rather than inheriting manager permissions. The bash fallback (`ib:3565–3571`) checks only the `allow` list: if worker `allow` is empty/`[]`, both `allow` and `deny` fall through to manager config.
+4. Workers use `permissions.worker.allow`/`deny`; managers use `permissions.manager.allow`/`deny`. There is no fallthrough between types [^perm-quirk]
 5. Deduplicate all allow/deny lists
+
+[^perm-quirk]: The bash implementation has a quirk: if `CONFIG_WORKER_ALLOW` is empty, it falls through to `CONFIG_MANAGER_ALLOW` (and `deny` follows suit). The TS implementation intentionally does not replicate this — workers with empty `permissions.worker.allow` get no extra config permissions rather than inheriting manager permissions.
 
 ### 7.4 Custom Prompts
 

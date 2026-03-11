@@ -221,6 +221,16 @@ Builds the navigable item list for the add-repo folder browser dialog. Given a c
 - `executeAndRefresh(fn)` wraps simple mutations (try/catch + watcher refresh)
 - Multi-step flows (merge, diff-tool, snapshot) use `.then().catch()` because they need intermediate UI or skip refresh
 
+### Manager/coordinator agent workflow
+
+When a manager spawns sub-agents to do work, the manager's role is to **review and integrate** — never to re-implement what a sub-agent already did:
+
+- **If the sub-agent's work is correct**: merge it with `ib merge <id> --force`
+- **If the work has fixable issues**: send feedback with `ib send <id> "..."` and let the agent fix it
+- **If the work is unsalvageable or no longer needed**: kill it with `ib kill <id> --force`
+
+A manager should never duplicate a sub-agent's work by re-implementing it directly. Trust the sub-agent's output, review it, and act accordingly.
+
 ### Agent monitoring loop
 
 When running parallel agents, start a 2-minute cron loop to auto-merge completed agents:

@@ -1179,7 +1179,7 @@ Bash saves tmux capture output + `last_assistant_message` + parse_state reason i
 
 ### Phase 32: Parity Fixes — CLI Commands
 
-**Status:** Not started.
+**Status:** Complete (all should-fix items done; one nice-to-have remains).
 
 **Source:** PARITY_HOOKS_TUI.md (sections 2.1–2.8)
 
@@ -1193,57 +1193,53 @@ Bash saves tmux capture output + `last_assistant_message` + parse_state reason i
 
 Bash writes hooks to `.claude/settings.local.json` (project-local). TS writes to `~/.claude/settings.json` (global). This was an **intentional** change in Phase 26c (not a bug). Global hooks mean itsybitsy's safety hooks apply to all Claude sessions, not just the itsybitsy project.
 
-- [ ] Document this intentional divergence in a comment in `ib-commands.ts` so future developers understand the choice
-- [ ] Consider adding a `--local` flag to allow project-scoped installation if desired
+- [x] Document this intentional divergence in a comment in `ib-commands.ts` so future developers understand the choice — done at `src/ib-commands.ts:2356-2363`
+- [ ] Consider adding a `--local` flag to allow project-scoped installation if desired — nice-to-have, not implemented
 
 #### 32b: `ib list --json` (nice-to-have)
 
 **File:** `src/index.ts` (list command)
 
-- [ ] Add `--json` flag that outputs agent data as a JSON array for scripting
+- [x] Add `--json` flag that outputs agent data as a JSON array for scripting — done at `src/index.ts:133,142-173`
 
 #### 32c: `ib look --follow` (should-fix)
 
 **File:** `src/index.ts` (look command)
 
-- [ ] Add `--follow` flag that runs `tmux attach -r -t <session>` for live read-only view
+- [x] Add `--follow` flag that runs `tmux attach -r -t <session>` for live read-only view — done at `src/index.ts:376,382-395`
 
 #### 32d: `ib diff --stat` (nice-to-have)
 
 **File:** `src/index.ts` (diff command)
 
-- [ ] Add `--stat` flag that runs `git diff --stat "$MERGE_BASE..$BRANCH"` (stat of merge-base range, matching bash behavior) instead of full diff
+- [x] Add `--stat` flag that runs `git diff --stat "$MERGE_BASE..$BRANCH"` (stat of merge-base range, matching bash behavior) instead of full diff — done at `src/index.ts:464` and `src/ib-commands.ts:1972-1974`
 
 #### 32e: `ib status` improvements (should-fix)
 
-**File:** `src/index.ts` (status command)
+**File:** `src/ib-commands.ts` (`statusAgent`)
 
-Bash shows agent ID, branch, worktree path, structured section headers with counts, and `git diff --stat` summary. TS just shows plain git output.
-
-- [ ] Add header with agent ID, branch name, worktree path
-- [ ] Use `git merge-base` with the parent branch (derived from `meta.json`'s `manager` field: if manager exists use `agent/<manager-id>`, otherwise default to `main`) rather than hardcoding `main` — bash determines this from the caller's current HEAD, so when called from main it's equivalent, but this is more correct
-- [ ] Add section headers (e.g., `═══ Commits (N) vs <parent-branch> ═══`)
-- [ ] Add `git diff --stat` summary
+- [x] Add header with agent ID, branch name, worktree path — done at `src/ib-commands.ts:1996-1999`
+- [x] Use `git merge-base` with the parent branch (derived from `meta.json`'s `manager` field) — done at `src/ib-commands.ts:1992,2002`
+- [x] Add section headers (e.g., `═══ Commits (N) vs <parent-branch> ═══`) — done at `src/ib-commands.ts:2009,2014`
+- [x] Add `git diff --stat` summary — done at `src/ib-commands.ts:2029-2033`
 
 #### 32f: `ib send --from` (should-fix)
 
 **File:** `src/index.ts`
 
-Bash supports `--from <id>` to auto-prefix messages with sender identity. Note: `sendMessage()` in `ib-commands.ts` already supports this via `opts.fromAgent` and auto-detects the sender from cwd — only the CLI argument parsing is missing.
-
-- [ ] Add `--from <id>` flag parsing in the `send` case in `index.ts`
-- [ ] Pass the parsed value to the existing `sendMessage(agent, message, { fromAgent })` parameter
+- [x] Add `--from <id>` flag parsing in the `send` case in `index.ts` — done at `src/index.ts:479-489`
+- [x] Pass the parsed value to the existing `sendMessage(agent, message, { fromAgent })` parameter — done at `src/index.ts:507`
 
 #### 32g: Other missing CLI commands (nice-to-have)
 
 **File:** `src/index.ts`
 
-- [ ] `ib log <message>` — write to agent log from CLI
-- [ ] `ib new-agent --prompt-file <path>` — read prompt from file
-- [ ] `ib parse-state` — debug command for state parsing
-- [ ] `ib questions --all` — show acknowledged questions
-- [ ] `ib status --json` — bash supports JSON output for status (nice-to-have, analogous to `ib list --json`)
-- [ ] `ib diff` — already uses `git merge-base HEAD main` (so merge-base logic exists), but needs to use the parent branch instead of hardcoding `main` — distinct from 32e where status uses `main..HEAD` range with no merge-base at all; fix together
+- [x] `ib log <message>` — write to agent log from CLI — done at `src/index.ts:707-758`
+- [x] `ib new-agent --prompt-file <path>` — read prompt from file — done at `src/index.ts:606-612`
+- [x] `ib parse-state` — debug command for state parsing — done at `src/index.ts:760-797`
+- [x] `ib questions --all` — show acknowledged questions — done at `src/index.ts:437,444-446`
+- [ ] `ib status --json` — bash supports JSON output for status (nice-to-have, analogous to `ib list --json`) [^needs review] Not implemented; SPEC.md does not mention `--json` for `ib status` either, so this is a bash-only feature gap
+- [x] `ib diff` — uses parent branch from `meta.json` manager field instead of hardcoding `main` — done at `src/ib-commands.ts:1964`
 
 ---
 

@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { isValidModel, isValidToolList, isValidAgentId, isValidTmuxSession, isValidSessionId } from "./validation";
+import { isValidModel, isValidToolList, isValidAgentId, isValidTmuxSession, isValidSessionId, isValidShellPath, shellQuote } from "./validation";
 
 describe("isValidModel", () => {
   test("accepts typical model names", () => {
@@ -86,5 +86,57 @@ describe("isValidSessionId", () => {
     expect(isValidSessionId('"; rm -rf /')).toBe(false);
     expect(isValidSessionId("")).toBe(false);
     expect(isValidSessionId("uuid with spaces")).toBe(false);
+  });
+});
+
+describe("isValidShellPath", () => {
+  test("accepts normal paths", () => {
+    expect(isValidShellPath("/usr/local/bin")).toBe(true);
+    expect(isValidShellPath("/home/user/my project")).toBe(true);
+    expect(isValidShellPath("/tmp/it's a test")).toBe(true);
+    expect(isValidShellPath("/path/with spaces/and (parens)")).toBe(true);
+    expect(isValidShellPath("/path/with-special_chars.v2")).toBe(true);
+    expect(isValidShellPath("/path/$HOME/stuff")).toBe(true);
+  });
+
+  test("rejects empty string", () => {
+    expect(isValidShellPath("")).toBe(false);
+  });
+
+  test("rejects paths with null bytes", () => {
+    expect(isValidShellPath("/path/with\x00null")).toBe(false);
+  });
+
+  test("rejects paths with newlines", () => {
+    expect(isValidShellPath("/path/with\nnewline")).toBe(false);
+    expect(isValidShellPath("/path/with\r\nnewline")).toBe(false);
+  });
+});
+
+describe("shellQuote", () => {
+  test("quotes simple paths", () => {
+    expect(shellQuote("/usr/local/bin")).toBe("'/usr/local/bin'");
+  });
+
+  test("quotes paths with spaces", () => {
+    expect(shellQuote("/my project/path")).toBe("'/my project/path'");
+  });
+
+  test("escapes single quotes", () => {
+    expect(shellQuote("/it's a path")).toBe("'/it'\\''s a path'");
+  });
+
+  test("handles multiple single quotes", () => {
+    expect(shellQuote("it's got it's quotes")).toBe("'it'\\''s got it'\\''s quotes'");
+  });
+
+  test("neutralizes dollar signs and backticks", () => {
+    const quoted = shellQuote("/path/$HOME/`whoami`");
+    expect(quoted).toBe("'/path/$HOME/`whoami`'");
+  });
+
+  test("neutralizes double quotes and semicolons", () => {
+    const quoted = shellQuote('/path"; rm -rf /');
+    expect(quoted).toBe("'/path\"; rm -rf /'");
   });
 });

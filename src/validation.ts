@@ -28,3 +28,21 @@ export function isValidTmuxSession(value: string): boolean {
 export function isValidSessionId(value: string): boolean {
   return /^[a-fA-F0-9-]+$/.test(value);
 }
+
+/**
+ * Validate a filesystem path for shell script interpolation.
+ * Rejects null bytes and newlines which can't be safely quoted in shell scripts.
+ */
+export function isValidShellPath(value: string): boolean {
+  if (!value) return false;
+  // Null bytes and newlines cannot be safely handled in shell scripts
+  return !/[\x00\n\r]/.test(value);
+}
+
+/**
+ * Single-quote a string for safe interpolation into bash scripts.
+ * Uses the standard shell quoting idiom: replace each ' with '\'' then wrap in single quotes.
+ */
+export function shellQuote(value: string): string {
+  return "'" + value.replace(/'/g, "'\\''") + "'";
+}

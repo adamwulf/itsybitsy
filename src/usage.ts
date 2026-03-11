@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { rename, mkdir, stat, writeFile, unlink } from "node:fs/promises";
 
 import { SpawnContext } from "./types";
-import type { FetchLike, SpawnFn } from "./types";
+import type { FetchLike } from "./types";
 
 /** For test injection — avoids monkey-patching globalThis.fetch */
 let fetchFn: FetchLike = globalThis.fetch;
@@ -26,16 +26,6 @@ export function resetTestFetch(): void {
 
 /** Spawn context for usage keychain lookup */
 export const spawnCtx = new SpawnContext();
-
-/** Override spawn for testing. */
-export function setTestSpawn(fn: SpawnFn): void {
-  spawnCtx.set(fn);
-}
-
-/** Reset spawn to Bun.spawn. */
-export function resetTestSpawn(): void {
-  spawnCtx.reset();
-}
 
 let ITSYBITSY_DIR = join(homedir(), ".itsybitsy");
 let CACHE_PATH = join(ITSYBITSY_DIR, "usage-cache.json");

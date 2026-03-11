@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { formatResetTime, parseUsageResponse, fetchUsage, setTestDir, resetTestDir, setTestFetch, resetTestFetch, setTestSpawn, resetTestSpawn, type UsageResult } from "./usage";
+import { formatResetTime, parseUsageResponse, fetchUsage, setTestDir, resetTestDir, setTestFetch, resetTestFetch, spawnCtx, type UsageResult } from "./usage";
 import { join } from "path";
 import { mkdtemp, rm, writeFile } from "fs/promises";
 import { tmpdir } from "os";
@@ -356,7 +356,7 @@ describe("readAccessToken keychain fallback", () => {
   afterEach(async () => {
     resetTestDir();
     resetTestFetch();
-    resetTestSpawn();
+    spawnCtx.reset();
     await rm(tmpDir, { recursive: true, force: true });
   });
 
@@ -366,7 +366,7 @@ describe("readAccessToken keychain fallback", () => {
 
   /** Create a mock spawn that simulates keychain output. */
   function mockSpawn(stdout: string, exitCode: number): void {
-    setTestSpawn(() => {
+    spawnCtx.set(() => {
       const stdoutBlob = new Blob([stdout]);
       return {
         stdout: stdoutBlob.stream(),
@@ -443,7 +443,7 @@ describe("readAccessToken keychain fallback", () => {
 
   test("returns null when spawn throws (keychain not available)", async () => {
     // No credentials file; spawn itself throws
-    setTestSpawn(() => {
+    spawnCtx.set(() => {
       throw new Error("spawn failed");
     });
 
@@ -459,7 +459,7 @@ describe("readAccessToken keychain fallback", () => {
 
     // Keychain should NOT be called
     let spawnCalled = false;
-    setTestSpawn(() => {
+    spawnCtx.set(() => {
       spawnCalled = true;
       return {
         stdout: new Blob([]).stream(),

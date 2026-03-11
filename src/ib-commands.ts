@@ -546,6 +546,11 @@ export async function reassignAgent(agent: Agent, newManager: string | null): Pr
   const agentDir = join(agentsDir, agent.id);
   const metaPath = join(agentDir, "meta.json");
 
+  // Self-reassign check (before reading meta — just compare IDs)
+  if (newManager === agent.id) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: "Cannot reassign agent to itself" };
+  }
+
   // Read agent's meta.json
   let meta: Record<string, unknown>;
   try {
@@ -558,7 +563,17 @@ export async function reassignAgent(agent: Agent, newManager: string | null): Pr
     return { ok: false, exitCode: 1, stdout: "", stderr: `Failed to read meta.json for '${agent.id}'` };
   }
 
-  const oldManager = (meta.manager as string) || "";
+  const oldManager = (meta.manager as string | null) ?? "";
+
+  // Same-parent check: no-op if already has the requested parent
+  const oldManagerNorm = oldManager || null;
+  const newManagerNorm = newManager || null;
+  if (oldManagerNorm === newManagerNorm) {
+    if (newManager) {
+      return { ok: false, exitCode: 1, stdout: "", stderr: "Agent already has this manager" };
+    }
+    return { ok: false, exitCode: 1, stdout: "", stderr: "Agent is already top-level" };
+  }
 
   if (newManager !== null) {
     // Validate new parent exists

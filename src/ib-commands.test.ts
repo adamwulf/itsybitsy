@@ -2439,6 +2439,14 @@ describe("reassignAgent (native)", () => {
     expect(result.ok).toBe(false);
     expect(result.stderr).toContain("not found");
   });
+
+  test("self-reassign rejected", async () => {
+    const agent = makeAgent("agent-abc", tempDir);
+    const result = await reassignAgent(agent, "agent-abc");
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("Cannot reassign agent to itself");
+  });
 });
 
 describe("mergeCheckAgent (native)", () => {

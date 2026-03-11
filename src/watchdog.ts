@@ -14,10 +14,11 @@
 import { join } from "path";
 import { homedir } from "os";
 import { readFileSync, unlinkSync, mkdirSync, openSync, closeSync, writeSync, constants as fsConstants } from "fs";
-import { readAllAgents, detectAgentStates } from "./agents";
+import { readAllAgents, readRepoAgents, detectAgentStates } from "./agents";
 import type { Agent } from "./agents";
 import { captureTmuxOutput } from "./tmux-poller";
 import { logAgent } from "./agent-lifecycle";
+import { parseState } from "./parse-state";
 import type { AgentState } from "./parse-state";
 import { sendMessage } from "./ib-commands";
 import { fetchUsage } from "./usage";
@@ -790,9 +791,8 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
       tmuxGoneSince = null;
 
       // Build an Agent object for state detection
-      const { parseState, stripAnsi } = await import("./parse-state");
-      const stripped = stripAnsi(output);
-      const result = parseState(stripped);
+      // captureTmuxOutput already returns ANSI-stripped text
+      const result = parseState(output);
 
       const agent: Agent = {
         id: agentId,
@@ -852,7 +852,6 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
  */
 async function loadAllAgentsForNotification(repoPath: string): Promise<Agent[]> {
   try {
-    const { readRepoAgents, detectAgentStates } = await import("./agents");
     const repoName = repoPath.split("/").pop() ?? "";
     const { agents } = await readRepoAgents(repoPath, repoName);
     if (agents.length > 0) {

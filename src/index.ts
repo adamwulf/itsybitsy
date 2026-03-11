@@ -268,7 +268,8 @@ async function main() {
         process.on("exit", () => releaseWatchdogLock());
       }
 
-      // Keep process alive — setInterval in startWatchdog holds the event loop
+      // Per-agent: runPerAgentWatchdog blocks until exit conditions are met
+      // Global: setInterval in startWatchdog holds the event loop
       break;
     }
     case "watch": {

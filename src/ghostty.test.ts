@@ -1,5 +1,5 @@
 import { test, expect, describe, afterEach } from "bun:test";
-import { openInGhostty, whichCtx, spawnCtx } from "./ghostty";
+import { openInGhostty, openPathInGhostty, whichCtx, spawnCtx } from "./ghostty";
 
 describe("openInGhostty", () => {
   afterEach(() => {
@@ -156,6 +156,132 @@ describe("openInGhostty", () => {
       });
 
       const result = await openInGhostty("test-session");
+
+      expect(result.ok).toBe(false);
+      expect(result.message).toContain("spawn failed");
+    });
+  });
+});
+
+describe("openPathInGhostty", () => {
+  afterEach(() => {
+    whichCtx.reset();
+    spawnCtx.reset();
+  });
+
+  describe("path validation", () => {
+    test("rejects empty path", async () => {
+      whichCtx.set(() => "/usr/bin/ghostty");
+      const result = await openPathInGhostty("");
+      expect(result).toEqual({ ok: false, message: "Invalid directory path" });
+    });
+
+    test("rejects path with null bytes", async () => {
+      whichCtx.set(() => "/usr/bin/ghostty");
+      const result = await openPathInGhostty("/tmp/foo\x00bar");
+      expect(result).toEqual({ ok: false, message: "Invalid directory path" });
+    });
+
+    test("rejects path with control characters", async () => {
+      whichCtx.set(() => "/usr/bin/ghostty");
+      const result = await openPathInGhostty("/tmp/foo\nbar");
+      expect(result).toEqual({ ok: false, message: "Invalid directory path" });
+    });
+
+    test("accepts valid absolute path", async () => {
+      whichCtx.set(() => "/usr/bin/ghostty");
+      spawnCtx.set((...args: any[]) => ({ unref: () => {} }));
+      const result = await openPathInGhostty("/Users/test/project");
+      expect(result.ok).toBe(true);
+    });
+
+    test("accepts path with spaces", async () => {
+      whichCtx.set(() => "/usr/bin/ghostty");
+      spawnCtx.set((...args: any[]) => ({ unref: () => {} }));
+      const result = await openPathInGhostty("/Users/test/my project");
+      expect(result.ok).toBe(true);
+    });
+  });
+
+  describe("Ghostty availability check", () => {
+    test("returns error when ghostty is not found on PATH", async () => {
+      whichCtx.set(() => null);
+      const result = await openPathInGhostty("/tmp/test");
+      expect(result).toEqual({ ok: false, message: "Ghostty not found on PATH" });
+    });
+  });
+
+  describe("spawn behavior", () => {
+    test("spawns ghostty with --working-directory flag", async () => {
+      whichCtx.set(() => "/usr/bin/ghostty");
+      let spawnArgs: any[] = [];
+      spawnCtx.set((...args: any[]) => {
+        spawnArgs = args;
+        return { unref: () => {} };
+      });
+
+      await openPathInGhostty("/Users/test/project");
+
+      const cmdArray = spawnArgs[0] as string[];
+      expect(cmdArray[0]).toBe("ghostty");
+      expect(cmdArray[1]).toBe("--working-directory=/Users/test/project");
+    });
+
+    test("does not use --command flag", async () => {
+      whichCtx.set(() => "/usr/bin/ghostty");
+      let spawnArgs: any[] = [];
+      spawnCtx.set((...args: any[]) => {
+        spawnArgs = args;
+        return { unref: () => {} };
+      });
+
+      await openPathInGhostty("/Users/test/project");
+
+      const cmdArray = spawnArgs[0] as string[];
+      expect(cmdArray).not.toContain("--command");
+    });
+
+    test("spawns with stdio ignored", async () => {
+      whichCtx.set(() => "/usr/bin/ghostty");
+      let spawnOpts: any = null;
+      spawnCtx.set((...args: any[]) => {
+        spawnOpts = args[1];
+        return { unref: () => {} };
+      });
+
+      await openPathInGhostty("/Users/test/project");
+
+      expect(spawnOpts.stdio).toEqual(["ignore", "ignore", "ignore"]);
+    });
+
+    test("calls unref on spawned process", async () => {
+      whichCtx.set(() => "/usr/bin/ghostty");
+      let unrefCalled = false;
+      spawnCtx.set((...args: any[]) => ({
+        unref: () => { unrefCalled = true; },
+      }));
+
+      await openPathInGhostty("/Users/test/project");
+
+      expect(unrefCalled).toBe(true);
+    });
+
+    test("returns success result on successful spawn", async () => {
+      whichCtx.set(() => "/usr/bin/ghostty");
+      spawnCtx.set((...args: any[]) => ({ unref: () => {} }));
+
+      const result = await openPathInGhostty("/Users/test/project");
+
+      expect(result).toEqual({ ok: true, message: "Opened in Ghostty" });
+    });
+
+    test("returns error result when spawn throws", async () => {
+      whichCtx.set(() => "/usr/bin/ghostty");
+      spawnCtx.set((...args: any[]) => {
+        throw new Error("spawn failed");
+      });
+
+      const result = await openPathInGhostty("/Users/test/project");
 
       expect(result.ok).toBe(false);
       expect(result.message).toContain("spawn failed");

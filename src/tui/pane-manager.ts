@@ -106,8 +106,10 @@ export class RightPaneComponent implements Component {
     const triangle = headerEntry?.hasAgents ? "▾" : "▸";
     lines.push(`${BOLD}${triangle} ${repoName}${RESET}`);
     lines.push("");
-    if (repoAgents.length > 0) {
-      lines.push(`${DIM}Path:${RESET} ${repoAgents[0]!.agent.repoPath}`);
+    const repoPath = headerEntry?.repoPath ?? repoAgents[0]?.agent.repoPath ?? "";
+    if (repoPath) {
+      const hyperlink = `\x1b]8;;file://${repoPath}\x07${repoPath}\x1b]8;;\x07`;
+      lines.push(`${DIM}Path:${RESET} ${hyperlink}`);
       lines.push("");
     }
     lines.push(`${BOLD}Agents: ${repoAgents.length}${RESET}`);

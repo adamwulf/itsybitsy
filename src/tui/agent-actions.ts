@@ -21,7 +21,7 @@ import {
 import type { NewAgentOptions, IbCommandResult } from "../ib-commands";
 import { captureTmuxOutput, resizeTmuxWindow, killTmuxSession } from "../tmux-poller";
 import { parseState } from "../parse-state";
-import { openInGhostty } from "../ghostty";
+import { openInGhostty, openPathInGhostty } from "../ghostty";
 import { buildFolderItems } from "./folder-browser";
 import type { DialogState, SetupItem, ConfigDialogItem } from "./dialog-handler";
 import { readConfig, writeConfig, CONFIG_KEYS, projectConfigPath, defaultUserConfigPath } from "../config";
@@ -900,14 +900,32 @@ export function handleResizeLeft(ctx: ActionCtx, delta: number) {
 
 export function handleOpenGhostty(ctx: ActionCtx) {
   const agent = ctx.agentTree.selectedAgent;
-  if (!agent) { ctx.setNotice("No agent selected"); return; }
-  if (!agent.meta.tmux_session) { ctx.setNotice("No active tmux session"); return; }
-  const session = agent.meta.tmux_session;
-  openInGhostty(session).then((result) => {
-    ctx.setNotice(result.message);
-  }).catch((err) => {
-    ctx.setNotice(`Ghostty error: ${err}`);
-  });
+  if (agent) {
+    if (!agent.meta.tmux_session) { ctx.setNotice("No active tmux session"); return; }
+    const session = agent.meta.tmux_session;
+    openInGhostty(session).then((result) => {
+      ctx.setNotice(result.message);
+    }).catch((err) => {
+      ctx.setNotice(`Ghostty error: ${err}`);
+    });
+    return;
+  }
+  // No agent selected — check for repo header
+  const repoHeader = ctx.agentTree.selectedRepoHeader;
+  if (repoHeader) {
+    const headerEntry = ctx.agentTree.flatList.find(
+      (f): f is Extract<FlatEntry, { kind: "repo-header" }> => f.kind === "repo-header" && f.repoName === repoHeader
+    );
+    if (headerEntry) {
+      openPathInGhostty(headerEntry.repoPath).then((result) => {
+        ctx.setNotice(result.message);
+      }).catch((err) => {
+        ctx.setNotice(`Ghostty error: ${err}`);
+      });
+      return;
+    }
+  }
+  ctx.setNotice("No agent or repo selected");
 }
 
 export function handleSnapshot(ctx: ActionCtx) {

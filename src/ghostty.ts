@@ -30,9 +30,7 @@ export async function openPathInGhostty(
     // is one string value that Ghostty splits with shell-like parsing.
     // Escape single quotes in the path so it survives single-quoting.
     const escapedPath = dirPath.replace(/'/g, "'\\''");
-    // --window-save-state=never prevents Ghostty from restoring all previously
-    // saved windows when this programmatic instance launches.
-    const proc = spawnCtx.fn(["ghostty", "--window-save-state=never", `--command=bash -c 'cd ${escapedPath} && exec bash -l'`], {
+    const proc = spawnCtx.fn(["ghostty", `--command=bash -c 'cd ${escapedPath} && exec bash -l'`], {
       stdio: ["ignore", "ignore", "ignore"],
     });
     proc.unref();
@@ -58,9 +56,7 @@ export async function openInGhostty(
     // is one string value that Ghostty splits with shell-like parsing.
     // tmuxSession is validated to /^[\w-]+$/ so it is safe to interpolate directly.
     // Set window-size to 'latest' so tmux resizes to Ghostty's dimensions when attaching.
-    // --window-save-state=never prevents Ghostty from restoring all previously
-    // saved windows when this programmatic instance launches.
-    const proc = spawnCtx.fn(["ghostty", "--window-save-state=never", `--command=bash -c 'tmux set-option -t ${tmuxSession} window-size latest && tmux attach -t ${tmuxSession}'`], {
+    const proc = spawnCtx.fn(["ghostty", `--command=bash -c 'tmux set-option -t ${tmuxSession} window-size latest && tmux attach -t ${tmuxSession}'`], {
       stdio: ["ignore", "ignore", "ignore"],
     });
     proc.unref();

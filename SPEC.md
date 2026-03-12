@@ -752,3 +752,27 @@ The `ib watch` TUI supports the following keyboard navigation for the agent tree
 
 - **Repo header selected**: `J` moves to the next repo header; `K` moves to the previous repo header. Wraps around.
 - **Agent selected**: `J` jumps to the first agent of the next repo that has agents, skipping any repos with no agents. `K` jumps to the last agent of the previous repo that has agents, skipping any repos with no agents. The selection always stays on an agent — repos with no visible agents are skipped entirely. Wraps around.
+
+### 8.11 Repo Info Panel
+
+When a repo header is selected and the current pane mode is agent-specific (AGENT LOG, INITIAL PROMPT, DENIALS, DIFF, STATUS), the right pane displays a repo info summary instead of showing "No agent selected".
+
+The summary always includes:
+
+- **Repo name** with a disclosure triangle (▾ if it has agents, ▸ if empty)
+- **Path** — always shown, even when the repo has no agents. The path is rendered as a terminal **OSC 8 hyperlink** using the `file://` scheme (e.g., `\x1b]8;;file:///Users/me/project\x07/Users/me/project\x1b]8;;\x07`), making it clickable in terminals that support OSC 8 (Ghostty, iTerm2, etc.). Clicking opens the path in Finder. Special characters in the path (`%`, space, `#`, `?`) are percent-encoded in the URI portion; the display text shows the raw path.
+- **Agent count** and per-state breakdown (e.g., `running: 2`, `waiting: 1`)
+
+The path is sourced from the `repoPath` field on the `repo-header` FlatEntry, which is always available regardless of whether agents exist.
+
+**OSC 8 truncation safety:** Because `truncateToWidth` may drop the closing OSC 8 sequence when truncating long lines, all lines in the non-wrapping render branch pass through `closeOsc8()`, which detects unclosed hyperlinks and either appends the close tag or strips partial OSC sequences left by mid-URI truncation. The wrapping render branch (AGENT LOG, QUESTIONS, etc.) also applies this fix.
+
+### 8.12 Ghostty Integration
+
+The `G` keybinding opens a new Ghostty terminal window. Behavior depends on what is currently selected:
+
+- **Agent selected**: Opens Ghostty attached to the agent's tmux session (using `--command` with `tmux attach -t <session>`). The tmux `window-size` option is set to `latest` so the pane resizes to match Ghostty's dimensions. Requires the agent to have an active tmux session.
+- **Repo header selected (no agent)**: Opens Ghostty with a fresh shell in the repo's directory (using `--working-directory=<path>`). No tmux session is involved.
+- **Nothing selected**: Shows a notice ("No agent or repo selected").
+
+Both paths validate their inputs (tmux session names against `/^[\w-]+$/`; directory paths against control characters and DEL) before spawning Ghostty. The spawn uses array-based `Bun.spawn` (no shell interpolation) with `stdio: ["ignore", "ignore", "ignore"]` and `proc.unref()` to detach from the parent process.

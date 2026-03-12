@@ -120,7 +120,7 @@ export class RightPaneComponent implements Component {
     lines.push("");
     const repoPath = headerEntry?.repoPath ?? repoAgents[0]?.agent.repoPath ?? "";
     if (repoPath) {
-      const encodedPath = repoPath.replace(/%/g, "%25").replace(/ /g, "%20").replace(/#/g, "%23");
+      const encodedPath = repoPath.replace(/%/g, "%25").replace(/ /g, "%20").replace(/#/g, "%23").replace(/\?/g, "%3F");
       const hyperlink = `\x1b]8;;file://${encodedPath}\x07${repoPath}\x1b]8;;\x07`;
       lines.push(`${DIM}Path:${RESET} ${hyperlink}`);
       lines.push("");

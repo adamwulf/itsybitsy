@@ -73,7 +73,7 @@ describe("openInGhostty", () => {
   });
 
   describe("spawn behavior", () => {
-    test("spawns ghostty with correct command args", async () => {
+    test("spawns ghostty with --command=value format", async () => {
       whichCtx.set(() => "/usr/bin/ghostty");
       let spawnArgs: any[] = [];
       spawnCtx.set((...args: any[]) => {
@@ -85,19 +85,15 @@ describe("openInGhostty", () => {
 
       const cmdArray = spawnArgs[0] as string[];
       expect(cmdArray[0]).toBe("ghostty");
-      expect(cmdArray[1]).toBe("--command");
-      expect(cmdArray[2]).toBe("bash");
-      expect(cmdArray[3]).toBe("-c");
-      // Shell code uses $1 — session name must NOT appear in the script string
-      expect(cmdArray[4]).toContain('tmux attach -t "$1"');
-      expect(cmdArray[4]).toContain('tmux set-option -t "$1"');
-      expect(cmdArray[4]).not.toContain("test-session");
-      // Positional placeholder and session name are separate array elements
-      expect(cmdArray[5]).toBe("_");
-      expect(cmdArray[6]).toBe("test-session");
+      // Ghostty requires --key=value format (not --key value)
+      expect(cmdArray[1]).toMatch(/^--command=/);
+      expect(cmdArray[1]).toContain("tmux attach -t test-session");
+      expect(cmdArray[1]).toContain("tmux set-option -t test-session");
+      // Only two elements: ghostty and the --command=... flag
+      expect(cmdArray.length).toBe(2);
     });
 
-    test("session name is never interpolated into shell code", async () => {
+    test("session name is interpolated safely (validated to [\\w-]+)", async () => {
       whichCtx.set(() => "/usr/bin/ghostty");
       let spawnArgs: any[] = [];
       spawnCtx.set((...args: any[]) => {
@@ -108,11 +104,7 @@ describe("openInGhostty", () => {
       await openInGhostty("agent-abc_123");
 
       const cmdArray = spawnArgs[0] as string[];
-      const shellCode = cmdArray[4];
-      // The shell script must only reference $1, never the actual session name
-      expect(shellCode).not.toContain("agent-abc_123");
-      // The session name must be passed as a separate positional argument
-      expect(cmdArray[6]).toBe("agent-abc_123");
+      expect(cmdArray[1]).toContain("agent-abc_123");
     });
 
     test("spawns with stdio ignored", async () => {
@@ -218,7 +210,7 @@ describe("openPathInGhostty", () => {
   });
 
   describe("spawn behavior", () => {
-    test("spawns ghostty with --command bash -c cd pattern", async () => {
+    test("spawns ghostty with --command=value format", async () => {
       whichCtx.set(() => "/usr/bin/ghostty");
       let spawnArgs: any[] = [];
       spawnCtx.set((...args: any[]) => {
@@ -230,18 +222,15 @@ describe("openPathInGhostty", () => {
 
       const cmdArray = spawnArgs[0] as string[];
       expect(cmdArray[0]).toBe("ghostty");
-      expect(cmdArray[1]).toBe("--command");
-      expect(cmdArray[2]).toBe("bash");
-      expect(cmdArray[3]).toBe("-c");
-      // Shell code uses $1 — path must NOT appear in the script string
-      expect(cmdArray[4]).toContain('cd "$1"');
-      expect(cmdArray[4]).not.toContain("/Users/test/project");
-      // Positional placeholder and path are separate array elements
-      expect(cmdArray[5]).toBe("_");
-      expect(cmdArray[6]).toBe("/Users/test/project");
+      // Ghostty requires --key=value format (not --key value)
+      expect(cmdArray[1]).toMatch(/^--command=/);
+      expect(cmdArray[1]).toContain("cd");
+      expect(cmdArray[1]).toContain("/Users/test/project");
+      // Only two elements: ghostty and the --command=... flag
+      expect(cmdArray.length).toBe(2);
     });
 
-    test("path is never interpolated into shell code", async () => {
+    test("escapes single quotes in path", async () => {
       whichCtx.set(() => "/usr/bin/ghostty");
       let spawnArgs: any[] = [];
       spawnCtx.set((...args: any[]) => {
@@ -249,12 +238,13 @@ describe("openPathInGhostty", () => {
         return { unref: () => {} };
       });
 
-      await openPathInGhostty("/Users/test/my project");
+      await openPathInGhostty("/Users/test/it's a dir");
 
       const cmdArray = spawnArgs[0] as string[];
-      const shellCode = cmdArray[4];
-      expect(shellCode).not.toContain("/Users/test/my project");
-      expect(cmdArray[6]).toBe("/Users/test/my project");
+      // Single quote in path must be escaped as '\''
+      expect(cmdArray[1]).toContain("'\\''");
+      // Raw single quote should not appear unescaped inside quoted section
+      expect(cmdArray[1]).not.toContain("it's");
     });
 
     test("spawns with stdio ignored", async () => {

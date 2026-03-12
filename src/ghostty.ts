@@ -26,11 +26,11 @@ export async function openPathInGhostty(
     if (dirPath.length === 0 || /[\x00-\x1f\x7f]/.test(dirPath)) {
       return { ok: false, message: "Invalid directory path" };
     }
-    // Use --command to cd into the directory then exec a login shell.
-    // Passing the path as positional $1 avoids any shell injection risk.
-    // --working-directory is a config file key on macOS Ghostty, not a CLI flag,
-    // so we use the --command approach consistent with openInGhostty.
-    const proc = spawnCtx.fn(["ghostty", "--command", "bash", "-c", 'cd "$1" && exec bash -l', "_", dirPath], {
+    // Ghostty's CLI requires --key=value (with equals sign). The entire command
+    // is one string value that Ghostty splits with shell-like parsing.
+    // Escape single quotes in the path so it survives single-quoting.
+    const escapedPath = dirPath.replace(/'/g, "'\\''");
+    const proc = spawnCtx.fn(["ghostty", `--command=bash -c 'cd ${escapedPath} && exec bash -l'`], {
       stdio: ["ignore", "ignore", "ignore"],
     });
     proc.unref();
@@ -52,12 +52,11 @@ export async function openInGhostty(
     if (!/^[\w-]+$/.test(tmuxSession)) {
       return { ok: false, message: "Invalid tmux session name" };
     }
-    // Wrap in bash -c so Ghostty's login shell flags (--posix --login) go to bash, not tmux.
+    // Ghostty's CLI requires --key=value (with equals sign). The entire command
+    // is one string value that Ghostty splits with shell-like parsing.
+    // tmuxSession is validated to /^[\w-]+$/ so it is safe to interpolate directly.
     // Set window-size to 'latest' so tmux resizes to Ghostty's dimensions when attaching.
-    // Sessions are created at 60 cols by ib and don't auto-resize on re-attach without this.
-    // Session name is passed as a separate argument (positional $1) — never interpolated
-    // into the shell code string — so it cannot break out of the quoting context.
-    const proc = spawnCtx.fn(["ghostty", "--command", "bash", "-c", 'tmux set-option -t "$1" window-size latest && tmux attach -t "$1"', "_", tmuxSession], {
+    const proc = spawnCtx.fn(["ghostty", `--command=bash -c 'tmux set-option -t ${tmuxSession} window-size latest && tmux attach -t ${tmuxSession}'`], {
       stdio: ["ignore", "ignore", "ignore"],
     });
     proc.unref();

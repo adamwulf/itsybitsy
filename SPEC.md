@@ -772,7 +772,7 @@ The path is sourced from the `repoPath` field on the `repo-header` FlatEntry, wh
 The `G` keybinding opens a new Ghostty terminal window. Behavior depends on what is currently selected:
 
 - **Agent selected**: Opens Ghostty attached to the agent's tmux session (using `--command` with `tmux attach -t <session>`). The tmux `window-size` option is set to `latest` so the pane resizes to match Ghostty's dimensions. Requires the agent to have an active tmux session.
-- **Repo header selected (no agent)**: Opens Ghostty with a fresh shell in the repo's directory (using `--working-directory=<path>`). No tmux session is involved.
+- **Repo header selected (no agent)**: Opens Ghostty with a fresh login shell in the repo's directory (using `--command bash -c 'cd "$1" && exec bash -l' _ <path>`). The path is passed as a positional argument — never interpolated into the shell code. No tmux session is involved.
 - **Nothing selected**: Shows a notice ("No agent or repo selected").
 
 Both paths validate their inputs (tmux session names against `/^[\w-]+$/`; directory paths against control characters and DEL) before spawning Ghostty. The spawn uses array-based `Bun.spawn` (no shell interpolation) with `stdio: ["ignore", "ignore", "ignore"]` and `proc.unref()` to detach from the parent process.

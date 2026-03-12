@@ -26,7 +26,11 @@ export async function openPathInGhostty(
     if (dirPath.length === 0 || /[\x00-\x1f\x7f]/.test(dirPath)) {
       return { ok: false, message: "Invalid directory path" };
     }
-    const proc = spawnCtx.fn(["ghostty", `--working-directory=${dirPath}`], {
+    // Use --command to cd into the directory then exec a login shell.
+    // Passing the path as positional $1 avoids any shell injection risk.
+    // --working-directory is a config file key on macOS Ghostty, not a CLI flag,
+    // so we use the --command approach consistent with openInGhostty.
+    const proc = spawnCtx.fn(["ghostty", "--command", "bash", "-c", 'cd "$1" && exec bash -l', "_", dirPath], {
       stdio: ["ignore", "ignore", "ignore"],
     });
     proc.unref();

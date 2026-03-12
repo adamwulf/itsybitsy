@@ -218,7 +218,7 @@ describe("openPathInGhostty", () => {
   });
 
   describe("spawn behavior", () => {
-    test("spawns ghostty with --working-directory flag", async () => {
+    test("spawns ghostty with --command bash -c cd pattern", async () => {
       whichCtx.set(() => "/usr/bin/ghostty");
       let spawnArgs: any[] = [];
       spawnCtx.set((...args: any[]) => {
@@ -230,10 +230,18 @@ describe("openPathInGhostty", () => {
 
       const cmdArray = spawnArgs[0] as string[];
       expect(cmdArray[0]).toBe("ghostty");
-      expect(cmdArray[1]).toBe("--working-directory=/Users/test/project");
+      expect(cmdArray[1]).toBe("--command");
+      expect(cmdArray[2]).toBe("bash");
+      expect(cmdArray[3]).toBe("-c");
+      // Shell code uses $1 — path must NOT appear in the script string
+      expect(cmdArray[4]).toContain('cd "$1"');
+      expect(cmdArray[4]).not.toContain("/Users/test/project");
+      // Positional placeholder and path are separate array elements
+      expect(cmdArray[5]).toBe("_");
+      expect(cmdArray[6]).toBe("/Users/test/project");
     });
 
-    test("does not use --command flag", async () => {
+    test("path is never interpolated into shell code", async () => {
       whichCtx.set(() => "/usr/bin/ghostty");
       let spawnArgs: any[] = [];
       spawnCtx.set((...args: any[]) => {
@@ -241,10 +249,12 @@ describe("openPathInGhostty", () => {
         return { unref: () => {} };
       });
 
-      await openPathInGhostty("/Users/test/project");
+      await openPathInGhostty("/Users/test/my project");
 
       const cmdArray = spawnArgs[0] as string[];
-      expect(cmdArray).not.toContain("--command");
+      const shellCode = cmdArray[4];
+      expect(shellCode).not.toContain("/Users/test/my project");
+      expect(cmdArray[6]).toBe("/Users/test/my project");
     });
 
     test("spawns with stdio ignored", async () => {

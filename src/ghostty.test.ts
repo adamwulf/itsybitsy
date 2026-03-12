@@ -188,6 +188,12 @@ describe("openPathInGhostty", () => {
       expect(result).toEqual({ ok: false, message: "Invalid directory path" });
     });
 
+    test("rejects path with DEL character", async () => {
+      whichCtx.set(() => "/usr/bin/ghostty");
+      const result = await openPathInGhostty("/tmp/foo\x7fbar");
+      expect(result).toEqual({ ok: false, message: "Invalid directory path" });
+    });
+
     test("accepts valid absolute path", async () => {
       whichCtx.set(() => "/usr/bin/ghostty");
       spawnCtx.set((...args: any[]) => ({ unref: () => {} }));

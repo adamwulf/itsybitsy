@@ -22,8 +22,8 @@ export async function openPathInGhostty(
     return { ok: false, message: "Ghostty not found on PATH" };
   }
   try {
-    // SECURITY: Validate path contains no control characters or null bytes.
-    if (!/^[^\x00-\x1f]+$/.test(dirPath) || dirPath.length === 0) {
+    // SECURITY: Validate path contains no control characters (C0, DEL) or null bytes.
+    if (dirPath.length === 0 || /[\x00-\x1f\x7f]/.test(dirPath)) {
       return { ok: false, message: "Invalid directory path" };
     }
     const proc = spawnCtx.fn(["ghostty", `--working-directory=${dirPath}`], {

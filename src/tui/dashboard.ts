@@ -1026,7 +1026,7 @@ export class DashboardComponent implements Component {
       const splitAt = this.splitPane.getLeftWidth() + 1;
       lines.push(this.buildTitledSeparator(leftTitle, rightTitle, width, splitAt, FULL_WIDTH_MODES.has(this.rightPane.mode) ? "" : "┬"));
 
-      const bottomHeight = 3; // status bar is always 3 lines
+      const bottomHeight = 2; // status bar is always 2 lines
       const separatorHeight = 1;
       const usedHeight = lines.length + separatorHeight + bottomHeight;
       const availableHeight = Math.max(5, terminalRows - usedHeight);

@@ -85,12 +85,12 @@ describe("openInGhostty", () => {
 
       const cmdArray = spawnArgs[0] as string[];
       expect(cmdArray[0]).toBe("ghostty");
+      expect(cmdArray[1]).toBe("--window-save-state=never");
       // Ghostty requires --key=value format (not --key value)
-      expect(cmdArray[1]).toMatch(/^--command=/);
-      expect(cmdArray[1]).toContain("tmux attach -t test-session");
-      expect(cmdArray[1]).toContain("tmux set-option -t test-session");
-      // Only two elements: ghostty and the --command=... flag
-      expect(cmdArray.length).toBe(2);
+      expect(cmdArray[2]).toMatch(/^--command=/);
+      expect(cmdArray[2]).toContain("tmux attach -t test-session");
+      expect(cmdArray[2]).toContain("tmux set-option -t test-session");
+      expect(cmdArray.length).toBe(3);
     });
 
     test("session name is interpolated safely (validated to [\\w-]+)", async () => {
@@ -104,7 +104,7 @@ describe("openInGhostty", () => {
       await openInGhostty("agent-abc_123");
 
       const cmdArray = spawnArgs[0] as string[];
-      expect(cmdArray[1]).toContain("agent-abc_123");
+      expect(cmdArray[2]).toContain("agent-abc_123");
     });
 
     test("spawns with stdio ignored", async () => {
@@ -222,12 +222,12 @@ describe("openPathInGhostty", () => {
 
       const cmdArray = spawnArgs[0] as string[];
       expect(cmdArray[0]).toBe("ghostty");
+      expect(cmdArray[1]).toBe("--window-save-state=never");
       // Ghostty requires --key=value format (not --key value)
-      expect(cmdArray[1]).toMatch(/^--command=/);
-      expect(cmdArray[1]).toContain("cd");
-      expect(cmdArray[1]).toContain("/Users/test/project");
-      // Only two elements: ghostty and the --command=... flag
-      expect(cmdArray.length).toBe(2);
+      expect(cmdArray[2]).toMatch(/^--command=/);
+      expect(cmdArray[2]).toContain("cd");
+      expect(cmdArray[2]).toContain("/Users/test/project");
+      expect(cmdArray.length).toBe(3);
     });
 
     test("escapes single quotes in path", async () => {
@@ -242,9 +242,9 @@ describe("openPathInGhostty", () => {
 
       const cmdArray = spawnArgs[0] as string[];
       // Single quote in path must be escaped as '\''
-      expect(cmdArray[1]).toContain("'\\''");
+      expect(cmdArray[2]).toContain("'\\''");
       // Raw single quote should not appear unescaped inside quoted section
-      expect(cmdArray[1]).not.toContain("it's");
+      expect(cmdArray[2]).not.toContain("it's");
     });
 
     test("spawns with stdio ignored", async () => {

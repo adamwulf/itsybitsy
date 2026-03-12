@@ -32,16 +32,28 @@ function escapeForRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-const OSC8_OPEN = "\x1b]8;;";
-const OSC8_CLOSE = "\x1b]8;;\x07";
+export const OSC8_OPEN = "\x1b]8;;";
+export const OSC8_CLOSE = "\x1b]8;;\x07";
 
-/** Ensure any unclosed OSC 8 hyperlink is terminated after truncation. */
-function closeOsc8(line: string): string {
+/**
+ * Ensure any unclosed OSC 8 hyperlink is terminated after truncation.
+ * Also strips partial OSC sequences left by mid-sequence truncation
+ * (e.g. truncation cut between \x1b]8;; and the \x07 terminator).
+ */
+export function closeOsc8(line: string): string {
   if (!line.includes(OSC8_OPEN)) return line;
   const lastOpen = line.lastIndexOf(OSC8_OPEN);
   const lastClose = line.indexOf(OSC8_CLOSE, lastOpen);
-  if (lastClose === -1) return line + OSC8_CLOSE;
-  return line;
+  if (lastClose !== -1) return line;
+  // Check for partial OSC: open tag found but no BEL terminator after it
+  // means truncation cut inside the URI portion — strip the partial sequence
+  const belAfterOpen = line.indexOf("\x07", lastOpen);
+  if (belAfterOpen === -1) {
+    // Truncated mid-OSC — remove the partial sequence and close cleanly
+    return line.slice(0, lastOpen) + OSC8_CLOSE;
+  }
+  // BEL present means the open sequence completed (we're in display text) — just close it
+  return line + OSC8_CLOSE;
 }
 
 /** Colorize diff output lines */
@@ -277,9 +289,9 @@ export class RightPaneComponent implements Component {
         for (let wi = 0; wi < wrapped.length; wi++) {
           if (lines.length >= this.displayHeight) break;
           if (isQ && wi > 0) {
-            lines.push("   " + truncateToWidth(wrapped[wi]!, innerWidth - 2, ""));
+            lines.push(closeOsc8("   " + truncateToWidth(wrapped[wi]!, innerWidth - 2, "")));
           } else {
-            lines.push(" " + truncateToWidth(wrapped[wi]!, innerWidth, ""));
+            lines.push(closeOsc8(" " + truncateToWidth(wrapped[wi]!, innerWidth, "")));
           }
         }
       }

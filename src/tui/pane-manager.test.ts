@@ -5,6 +5,7 @@ import {
   RightPaneComponent, PANE_MODES, FULL_WIDTH_MODES,
   cyclePaneMode, jumpToMode, triggerAsyncLoadIfNeeded,
   colorizeDiff, colorizeLog,
+  closeOsc8, OSC8_OPEN, OSC8_CLOSE,
 } from "./pane-manager";
 import type { PaneCtx, PaneMode } from "./pane-manager";
 import { stripAnsi } from "../parse-state";
@@ -268,5 +269,53 @@ describe("colorizeLog", () => {
     const result = colorizeLog(["[2026-03-05 15:37:26] [PreToolUse] Permission denied"]);
     expect(result[0]).toContain("\x1b[36m");
     expect(stripAnsi(result[0]!)).toBe("[2026-03-05 15:37:26] [PreToolUse] Permission denied");
+  });
+});
+
+describe("closeOsc8", () => {
+  test("returns line unchanged when no OSC 8 present", () => {
+    expect(closeOsc8("hello world")).toBe("hello world");
+  });
+
+  test("returns line unchanged when OSC 8 is properly closed", () => {
+    const line = `${OSC8_OPEN}file:///tmp\x07click here${OSC8_CLOSE}`;
+    expect(closeOsc8(line)).toBe(line);
+  });
+
+  test("appends close tag when hyperlink text is truncated", () => {
+    // Simulates truncation after the BEL but before the close tag
+    const line = `${OSC8_OPEN}file:///tmp\x07click he`;
+    expect(closeOsc8(line)).toBe(line + OSC8_CLOSE);
+  });
+
+  test("strips partial OSC sequence when truncated mid-URI", () => {
+    // Simulates truncation inside the URI (no BEL terminator after open)
+    const line = `prefix ${OSC8_OPEN}file:///Us`;
+    expect(closeOsc8(line)).toBe(`prefix ${OSC8_CLOSE}`);
+  });
+
+  test("handles line with text before and after hyperlink", () => {
+    const line = `Path: ${OSC8_OPEN}file:///tmp\x07/tmp${OSC8_CLOSE} suffix`;
+    expect(closeOsc8(line)).toBe(line);
+  });
+
+  test("handles multiple hyperlinks with last one closed", () => {
+    const line = `${OSC8_OPEN}file:///a\x07a${OSC8_CLOSE} ${OSC8_OPEN}file:///b\x07b${OSC8_CLOSE}`;
+    expect(closeOsc8(line)).toBe(line);
+  });
+
+  test("handles multiple hyperlinks with last one truncated", () => {
+    const line = `${OSC8_OPEN}file:///a\x07a${OSC8_CLOSE} ${OSC8_OPEN}file:///b\x07b_trunc`;
+    expect(closeOsc8(line)).toBe(line + OSC8_CLOSE);
+  });
+
+  test("returns empty string with close tag when only partial OSC open", () => {
+    const line = OSC8_OPEN;
+    expect(closeOsc8(line)).toBe(OSC8_CLOSE);
+  });
+
+  test("handles ANSI SGR codes mixed with OSC 8", () => {
+    const line = `\x1b[2mPath:\x1b[0m ${OSC8_OPEN}file:///tmp\x07/tmp`;
+    expect(closeOsc8(line)).toBe(line + OSC8_CLOSE);
   });
 });

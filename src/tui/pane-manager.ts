@@ -32,6 +32,18 @@ function escapeForRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+const OSC8_OPEN = "\x1b]8;;";
+const OSC8_CLOSE = "\x1b]8;;\x07";
+
+/** Ensure any unclosed OSC 8 hyperlink is terminated after truncation. */
+function closeOsc8(line: string): string {
+  if (!line.includes(OSC8_OPEN)) return line;
+  const lastOpen = line.lastIndexOf(OSC8_OPEN);
+  const lastClose = line.indexOf(OSC8_CLOSE, lastOpen);
+  if (lastClose === -1) return line + OSC8_CLOSE;
+  return line;
+}
+
 /** Colorize diff output lines */
 export function colorizeDiff(lines: string[]): string[] {
   return lines.map((line) => {
@@ -273,7 +285,7 @@ export class RightPaneComponent implements Component {
       }
     } else {
       for (const line of visible) {
-        lines.push(" " + truncateToWidth(line, innerWidth, ""));
+        lines.push(closeOsc8(" " + truncateToWidth(line, innerWidth, "")));
       }
     }
     while (lines.length < this.displayHeight) { lines.push(" "); }

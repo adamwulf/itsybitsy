@@ -130,6 +130,10 @@ sudo cp ib /usr/local/bin/ib
 
 The binary can then be used as `ib` instead of `bun index.ts`. Hook commands like `ib hooks main-path` reference the binary by its installed name.
 
+## Behavioral Specification
+
+**SPEC.md** is the definitive behavioral specification for itsybitsy. Read it before implementing or modifying any agent lifecycle, hook, or orchestration behavior. It documents intentional divergences from the bash reference implementation and unresolved design decisions.
+
 ## Code Quality Requirements
 
 After any code changes, always run:

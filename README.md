@@ -43,6 +43,10 @@ ib remove /path/to/project
 ib watch
 ```
 
+## Specification
+
+The behavioral specification lives in [SPEC.md](./SPEC.md). It documents the definitive intended behavior for agent lifecycle, hooks, state detection, and orchestration — including intentional divergences from the bash reference implementation.
+
 ## Architecture
 
 itsybitsy reads agent data natively from disk for speed, but delegates all mutations to the `ib` CLI to avoid reimplementing write-side logic (kill, merge, send, new-agent, etc.). The data flow:

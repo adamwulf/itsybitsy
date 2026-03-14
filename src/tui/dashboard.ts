@@ -21,6 +21,7 @@ import {
 } from "@mariozechner/pi-tui";
 import type { Component, OverlayHandle } from "@mariozechner/pi-tui";
 import { loadRegistry } from "../registry";
+import { readConfig } from "../config";
 import type { RepoEntry } from "../registry";
 import { AgentWatcher } from "../watcher";
 import { TmuxPoller, hasAttachedClient } from "../tmux-poller";
@@ -1080,7 +1081,9 @@ export async function launchDashboard(): Promise<void> {
   const dashboard = new DashboardComponent();
   dashboard.setTui(tui);
   dashboard.setRepos(repos);
-  dashboard.setDiffTool(registry.diffTool);
+  const config = await readConfig();
+  const diffToolValue = config["externalDiffTool"]?.value;
+  dashboard.setDiffTool(typeof diffToolValue === "string" && diffToolValue ? diffToolValue : undefined);
   dashboard.setVersion(version);
   tui.addChild(dashboard);
 

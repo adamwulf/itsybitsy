@@ -16,7 +16,7 @@ import {
 function makeSetupItems(): SetupItem[] {
   return [
     { label: "Safety hooks", description: "Block cd into worktrees + inject status + session context", value: "installed", actionable: true, kind: "safety-hooks" },
-    { label: "Diff tool", description: "Command for 'o' key in diff view", value: "delta", actionable: true, kind: "difftool" },
+    { label: "Task interception", description: "Redirect Task tool calls to spawn ib agents", value: "not installed", actionable: true, kind: "intercept-hook" },
   ];
 }
 
@@ -53,7 +53,7 @@ describe("setup dialog tab bar", () => {
     };
     const result = buildSetupContent(dialog, 60);
     const stripped = result.contentLines.map((l) => stripAnsi(l));
-    expect(stripped[0]).toContain("[Setup]");
+    expect(stripped[0]).toContain("[Hooks]");
     expect(stripped[0]).toContain("[Config]");
   });
 
@@ -463,7 +463,7 @@ describe("setup dialog tab 0 still works", () => {
     };
     ctx._dialog = dialog;
     handleDialogInput(ctx, "j");
-    // Should go to difftool (index 1)
+    // Should go to intercept-hook (index 1)
     expect(dialog.selectedIndex).toBe(1);
   });
 

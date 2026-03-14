@@ -1810,23 +1810,55 @@ ${qStartExitScript}
  * Generate a short summary of an agent's prompt using claude -p with Haiku.
  * Runs in the background — does not block agent creation.
  * On success, merges `summary` field into meta.json. On failure, silently skips.
+ *
+ * In production, spawns a detached subprocess (via Bun.spawn + unref) so the
+ * summary generation survives even if the parent process exits immediately
+ * (e.g. `ib new-agent` calling process.exit() in printAndExit).
+ *
+ * In test mode (when the spawn runner is overridden), uses the awaited path
+ * so tests can verify the result synchronously.
  */
 async function generatePromptSummary(prompt: string, agentDir: string): Promise<void> {
   const summaryPrompt = `Summarize the following agent task in at most 30 words:\n\n${prompt}`;
-  const result = await newAgentSpawnCtx.run(["claude", "-p", summaryPrompt, "--model", "claude-haiku-4-5-20251001"]);
-  if (result.exitCode !== 0) return;
-  const summary = result.stdout.trim();
-  if (!summary) return;
-
-  // Read current meta.json, merge summary, write back
   const metaPath = join(agentDir, "meta.json");
-  try {
-    const metaFile = Bun.file(metaPath);
-    if (!(await metaFile.exists())) return;
-    const meta = await metaFile.json();
-    meta.summary = summary;
-    await Bun.write(metaPath, JSON.stringify(meta, null, 2) + "\n");
-  } catch { /* ignore */ }
+
+  // Test mode: use the mocked spawn runner so tests can verify behavior
+  if (newAgentSpawnCtx.isOverridden) {
+    const result = await newAgentSpawnCtx.run(["claude", "-p", summaryPrompt, "--model", "claude-haiku-4-5-20251001"]);
+    if (result.exitCode !== 0) return;
+    const summary = result.stdout.trim();
+    if (!summary) return;
+    try {
+      const metaFile = Bun.file(metaPath);
+      if (!(await metaFile.exists())) return;
+      const meta = await metaFile.json();
+      meta.summary = summary;
+      await Bun.write(metaPath, JSON.stringify(meta, null, 2) + "\n");
+    } catch { /* ignore */ }
+    return;
+  }
+
+  // Production: spawn a detached subprocess that survives parent exit.
+  // Uses env vars to pass prompt and path safely (no shell escaping needed).
+  const script = [
+    `const proc = Bun.spawn(["claude", "-p", process.env.IB_SUMMARY_PROMPT, "--model", "claude-haiku-4-5-20251001"], { stdout: "pipe", stderr: "ignore" });`,
+    `const text = await new Response(proc.stdout).text();`,
+    `const code = await proc.exited;`,
+    `if (code !== 0 || !text.trim()) process.exit(0);`,
+    `const metaPath = process.env.IB_META_PATH;`,
+    `try {`,
+    `  const meta = await Bun.file(metaPath).json();`,
+    `  meta.summary = text.trim();`,
+    `  await Bun.write(metaPath, JSON.stringify(meta, null, 2) + "\\n");`,
+    `} catch {}`,
+  ].join("\n");
+
+  const proc = Bun.spawn(["bun", "-e", script], {
+    env: { ...process.env, IB_SUMMARY_PROMPT: summaryPrompt, IB_META_PATH: metaPath },
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  proc.unref();
 }
 
 /**

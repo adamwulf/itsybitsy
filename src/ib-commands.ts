@@ -1334,7 +1334,7 @@ async function buildAgentSettings(
  * 4.  Validate manager (resolve partial ID, check not a worker)
  * 5.  Yolo escalation check
  * 6.  Load config for model, maxAgents, permissions, prompts
- * 7.  Model fallback: --model > config.model > 'sonnet'
+ * 7.  Model fallback: --model > config.model > 'opus'
  * 8.  Max agents check
  * 9.  Generate agent ID (--name or agent-<8 hex chars>)
  * 10. Uniqueness check (dir + tmux session)
@@ -1462,13 +1462,13 @@ export async function newAgent(
   const config = await readConfig();
   const customPrompts = await loadCustomPrompts(rootRepoPath);
 
-  // 7. Model fallback: --model > config.model > 'sonnet'
+  // 7. Model fallback: --model > config.model > 'opus'
   let model = opts?.model ?? "";
   if (!model) {
     const configModel = config.model?.value as string | undefined;
     if (configModel) model = configModel;
   }
-  if (!model) model = "sonnet";
+  if (!model) model = "opus";
 
   // Validate model name before bash interpolation
   if (!isValidModel(model)) {

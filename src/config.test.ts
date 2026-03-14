@@ -23,7 +23,7 @@ describe("readConfig", () => {
     const result = await readConfig(opts());
 
     expect(result["maxAgents"]).toEqual({ value: 10, source: "default" });
-    expect(result["model"]).toEqual({ value: "", source: "default" });
+    expect(result["model"]).toEqual({ value: "opus", source: "default" });
     expect(result["fps"]).toEqual({ value: 10, source: "default" });
     expect(result["createPullRequests"]).toEqual({ value: false, source: "default" });
     expect(result["allowAgentQuestions"]).toEqual({ value: true, source: "default" });
@@ -184,7 +184,7 @@ describe("config type validation in readConfig", () => {
     await Bun.write(userCfgPath, JSON.stringify({ model: 123 }));
 
     const result = await readConfig(opts());
-    expect(result["model"]).toEqual({ value: "", source: "default" });
+    expect(result["model"]).toEqual({ value: "opus", source: "default" });
   });
 
   test("createPullRequests: string falls back to default", async () => {
@@ -221,7 +221,7 @@ describe("config type validation in readConfig", () => {
 
     const result = await readConfig(opts());
     expect(result["maxAgents"]).toEqual({ value: 10, source: "default" });
-    expect(result["model"]).toEqual({ value: "", source: "default" });
+    expect(result["model"]).toEqual({ value: "opus", source: "default" });
   });
 });
 

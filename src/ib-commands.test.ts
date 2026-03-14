@@ -1904,7 +1904,7 @@ describe("newAgent (native)", () => {
     expect(meta.worktree).toBe(true);
     expect(meta.worker).toBe(false);
     expect(meta.yolo).toBe(false);
-    expect(meta.model).toBe("sonnet"); // default model
+    expect(meta.model).toBe("sonnet"); // model from test config
     expect(meta.session_id).toMatch(/^[0-9a-f-]+$/);
     expect(typeof meta.created_epoch).toBe("number");
   });
@@ -2056,12 +2056,14 @@ describe("newAgent (native)", () => {
     expect(meta.model).toBe("haiku");
   });
 
-  test("defaults model to sonnet when neither opts nor config specify", async () => {
+  test("defaults model to opus when neither opts nor config specify", async () => {
+    // Clear config so no model is set
+    await Bun.write(join(tempDir, "config.json"), JSON.stringify({}));
     setNewAgentSpawnRunner(mockSpawnRunner());
     await callNewAgent("task", { name: "test-default-model" });
 
     const meta = await Bun.file(join(agentsDir, "test-default-model", "meta.json")).json();
-    expect(meta.model).toBe("sonnet");
+    expect(meta.model).toBe("opus");
   });
 
   test("worker mode sets meta.worker and start.sh doesn't have yolo flags", async () => {

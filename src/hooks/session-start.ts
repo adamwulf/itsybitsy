@@ -204,14 +204,10 @@ These phrases MUST be the LAST thing you output. Put summaries or status updates
 ### Merging Worker Results
 
 - NEVER blindly accept one side (\`--ours\`/\`--theirs\`) - understand and merge the intent of both sides
-- Resolve manually, or spawn a worker to handle resolution
-- You can \`ib send\` messages to completed or stopped agents - they will restart and respond
-
-### Merge Conflicts
-
 - Do NOT attempt to rebase a sub-agent's worktree yourself
-- If \`ib merge <id> --force\` fails with a conflict, send the sub-agent a message: \`ib send <id> "Rebase your branch onto ${ctx.parentBranch} and resolve any conflicts, then signal completion again"\`
+- If \`ib merge <id> --force\` fails with a conflict, send the sub-agent a message: \`ib send <id> "Rebase your branch onto agent/${ctx.agentId} and resolve any conflicts, then signal completion again"\`
 - Once the sub-agent completes, re-attempt \`ib merge <id> --force\`
+- You can \`ib send\` messages to completed or stopped agents - they will restart and respond
 ${askSection}
 
 ### Agent States

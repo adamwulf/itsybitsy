@@ -2510,7 +2510,7 @@ export async function installInterceptHook(_repoPath: string, settingsPath?: str
   settings.hooks = hooks;
   if (!Array.isArray(hooks.PreToolUse)) hooks.PreToolUse = [];
   (hooks.PreToolUse as unknown[]).push({
-    matcher: "Task",
+    matcher: "Task|Agent",
     hooks: [{ type: "command", command: "ib hooks intercept-task" }],
   });
 

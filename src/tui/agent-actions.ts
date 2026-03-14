@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { agentWorktreePath } from "../agents";
 import type { Agent, FlatEntry, PendingQuestion } from "../agents";
 import type { RepoEntry } from "../registry";
-import { addRepo, listRepos, loadRegistry, saveRegistry, renameRepo, removeRepo, repoDisplayName } from "../registry";
+import { addRepo, listRepos, renameRepo, removeRepo, repoDisplayName } from "../registry";
 import {
   killAgent, nukeAgent, nukeAllAgents, resumeAgent, pauseAgent, reassignAgent,
   mergeCheckAgent, mergeAgent, sendMessage, newAgent,
@@ -501,7 +501,7 @@ export function handleOpenWorktree(ctx: ActionCtx) {
 export async function handleOpenDiffTool(ctx: ActionCtx) {
   const agent = ctx.agentTree.selectedAgent;
   if (!agent) { ctx.setNotice("No agent selected"); return; }
-  if (!ctx.diffTool) { ctx.setNotice("No diff tool configured — set diffTool in ~/.itsybitsy.json"); return; }
+  if (!ctx.diffTool) { ctx.setNotice("No diff tool configured — set externalDiffTool in ~/.itsybitsy/config.json"); return; }
   const tool = ctx.diffTool;
 
   const cwd = agentWorktreePath(agent);
@@ -633,13 +633,6 @@ async function loadSetupDialog(ctx: ActionCtx, initialTab = 0) {
       actionable: hooksActionable,
       kind: "intercept-hook",
     },
-    {
-      label: "Diff tool",
-      description: "Command for 'o' key in diff view",
-      value: ctx.diffTool ?? "",
-      actionable: true,
-      kind: "difftool",
-    },
   ];
 
   // Load config for setup dialog
@@ -705,26 +698,6 @@ function handleSetupItemAction(ctx: ActionCtx, repoPath: string) {
       toggleHook(ctx, item, repoPath, installSafetyHooks, uninstallSafetyHooks, "safety hooks");
     } else if (item.kind === "intercept-hook") {
       toggleHook(ctx, item, repoPath, installInterceptHook, uninstallInterceptHook, "task interception");
-    } else if (item.kind === "difftool") {
-      ctx.closeDialog();
-      ctx.showDialog({
-        type: "input",
-        prompt: "Diff tool command:",
-        value: ctx.diffTool ?? "",
-        onSubmit: (value: string) => {
-          ctx.closeDialog();
-          const newTool = value.trim() || undefined;
-          ctx.diffTool = newTool;
-          loadRegistry().then((reg) => {
-            reg.diffTool = newTool;
-            return saveRegistry(reg);
-          }).then(() => {
-            ctx.setNotice(newTool ? `Diff tool set to: ${newTool}` : "Diff tool cleared");
-          }).catch((err) => {
-            ctx.setNotice(`Failed to save: ${err}`);
-          });
-        },
-      });
     }
   };
 }
@@ -815,6 +788,9 @@ function handleConfigItemAction(
           }
           writeConfig(configFilePath, item.key, parsed).then(() => {
             config[item.key] = { value: parsed, source: "user" };
+            if (item.key === "externalDiffTool") {
+              ctx.diffTool = typeof parsed === "string" && parsed ? parsed : undefined;
+            }
             ctx.setNotice(`${item.key} updated`);
             // Re-open setup dialog on the same tab
             loadSetupDialog(ctx, tab).catch((err) => ctx.setNotice(`Setup error: ${err}`));

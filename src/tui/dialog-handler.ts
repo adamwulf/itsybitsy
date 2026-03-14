@@ -76,7 +76,7 @@ export type SetupItem = {
   description: string;
   value: string;
   actionable: boolean;
-  kind: "safety-hooks" | "intercept-hook" | "difftool";
+  kind: "safety-hooks" | "intercept-hook";
 };
 
 export type ConfigDialogItem = {
@@ -885,7 +885,7 @@ export function buildNewAgentFormContent(
   return { title: `New Agent (${dialog.repoName})`, contentLines: lines };
 }
 
-const SETUP_TAB_NAMES = ["Setup", "Config"];
+const SETUP_TAB_NAMES = ["Hooks", "Config"];
 
 /** Build the tab bar for the setup dialog */
 function buildTabBar(activeTab: number, innerWidth: number): string {
@@ -929,28 +929,17 @@ function buildSetupTab0Content(
     const item = dialog.items[i]!;
     const isSelected = i === dialog.selectedIndex;
 
-    if (item.kind === "difftool") {
-      const val = item.value || `${DIM}(not set)${RESET}`;
-      const label = `${item.label}: ${val}`;
-      if (isSelected) {
-        lines.push(truncateToWidth(`${GREEN}> ${BOLD}${label}${RESET}`, innerWidth, ""));
-      } else {
-        lines.push(truncateToWidth(`  ${label}`, innerWidth, ""));
-      }
-      lines.push(truncateToWidth(`  ${DIM}${item.description}${RESET}`, innerWidth, ""));
+    // Checkbox items (safety-hooks, intercept-hook)
+    const installed = item.value === "installed";
+    const partial = item.value === "partial";
+    const checkbox = installed ? "[x]" : partial ? "[~]" : "[ ]";
+    const label = `${checkbox} ${item.label}`;
+    if (isSelected) {
+      lines.push(truncateToWidth(`${GREEN}> ${BOLD}${label}${RESET}`, innerWidth, ""));
     } else {
-      // Checkbox items (safety-hooks, intercept-hook)
-      const installed = item.value === "installed";
-      const partial = item.value === "partial";
-      const checkbox = installed ? "[x]" : partial ? "[~]" : "[ ]";
-      const label = `${checkbox} ${item.label}`;
-      if (isSelected) {
-        lines.push(truncateToWidth(`${GREEN}> ${BOLD}${label}${RESET}`, innerWidth, ""));
-      } else {
-        lines.push(truncateToWidth(`  ${label}`, innerWidth, ""));
-      }
-      lines.push(truncateToWidth(`  ${DIM}${item.description}${RESET}`, innerWidth, ""));
+      lines.push(truncateToWidth(`  ${label}`, innerWidth, ""));
     }
+    lines.push(truncateToWidth(`  ${DIM}${item.description}${RESET}`, innerWidth, ""));
     lines.push("");
   }
 }

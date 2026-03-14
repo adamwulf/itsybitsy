@@ -14,7 +14,6 @@ export function repoDisplayName(repo: RepoEntry): string {
 
 export interface RegistryData {
   repos: RepoEntry[];
-  diffTool?: string;
 }
 
 function registryPath(): string {

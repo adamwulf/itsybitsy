@@ -588,10 +588,10 @@ All keys are read from `~/.itsybitsy/config.json`. If a key is absent or has an 
 | `model` | string | `"opus"` | Default Claude model for new agents. Resolution order at spawn time: `--model` CLI flag → config `model` → `"opus"`. |
 | `fps` | number | `10` | Target frame rate for the `ib watch` TUI. **Currently unused** — the TUI does not yet consume this value. |
 | `createPullRequests` | boolean | `false` | When `true`, agents are instructed (via their prompt) to create a pull request upon completing their work. |
-| `allowAgentQuestions` | boolean | `true` | When `false`, top-level manager agents are blocked from calling `ib ask` to pose questions to the user. The `acknowledgeQuestion` command checks this flag and returns an error if questions are disabled. |
+| `allowAgentQuestions` | boolean | `true` | When `false`, the `askQuestion` (`ib ask`) command returns an error, blocking top-level manager agents from posing questions to the user. (`acknowledgeQuestion` is the user-facing command to mark a question answered and does not check this flag.) |
 | `autoCompactThreshold` | number | (none) | Context window usage percentage (0–100) above which the watchdog automatically sends `/compact` to the agent's tmux session. When absent (the default), auto-compact is disabled. |
-| `externalDiffTool` | string | (none) | Command for an external diff viewer used by `ib diff`. Read from `~/.itsybitsy/config.json`. When absent, the built-in diff display is used. |
-| `hooks.injectStatus` | boolean | `true` | When `false`, the `inject-status` SessionStart/UserPromptSubmit hook exits immediately without injecting agent status into the Claude context. |
+| `externalDiffTool` | string | (none) | **Currently unused in production.** The key is defined in config but never read by any production code path. (The TUI's working diff tool is stored in the registry, not here.) |
+| `hooks.injectStatus` | boolean | `true` | When `false`, the `inject-status` UserPromptSubmit/PostToolUse hook exits immediately without injecting agent status into the Claude context. |
 | `hooks.statusVisible` | boolean | `true` | When `true` (and `hooks.injectStatus` is also `true`), the status injection hook also emits a `systemMessage` field so the injected summary appears visibly to the user in the Claude UI. When `false`, status is injected as silent `additionalContext` only. |
 | `permissions.manager.allow` | string[] | `[]` | Additional tool names added to the allow list for manager agents (merged with mandatory permissions at spawn time). |
 | `permissions.manager.deny` | string[] | `[]` | Additional tool names added to the deny list for manager agents. |

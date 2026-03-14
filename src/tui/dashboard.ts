@@ -1066,10 +1066,10 @@ export async function launchDashboard(): Promise<void> {
     // Ignore
   }
 
+  const config = await readConfig();
   const dashboard = new DashboardComponent();
   dashboard.setTui(tui);
   dashboard.setRepos(repos);
-  const config = await readConfig();
   const diffToolValue = config["externalDiffTool"]?.value;
   dashboard.setDiffTool(typeof diffToolValue === "string" && diffToolValue ? diffToolValue : undefined);
   dashboard.setVersion(version);

@@ -21,7 +21,7 @@ When a new agent is created (`ib new-agent "prompt"`):
 
 3. **Yolo escalation prevention**: A `--yolo` child cannot be spawned by a non-yolo parent. This prevents permission escalation where a constrained agent spawns an unconstrained one. The parent's yolo status is checked via `meta.json` or `start.sh`.
 
-4. **Configuration**: Config is loaded from `~/.itsybitsy/config.json` (user-wide). The model is determined by: `--model` flag > config `model` > `"sonnet"` (default).
+4. **Configuration**: Config is loaded from `~/.itsybitsy/config.json` (user-wide). The model is determined by: `--model` flag > config `model` > `"opus"` (default).
 
 5. **Max agents check**: The number of active agents (directories with `meta.json` in `.ittybitty/agents/`) must not exceed the `maxAgents` config value (default: 10).
 
@@ -580,21 +580,22 @@ For each config key, the first valid value found (user → default) is used. The
 
 ### 7.2 Config Keys
 
+All keys are read from `~/.itsybitsy/config.json`. If a key is absent or has an invalid type, the built-in default is used.
+
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `maxAgents` | number | `10` | Maximum concurrent agents per repo |
-| `model` | string | `""` | Default Claude model for new agents. Both bash and TS default to empty at the config layer and fall back to `"sonnet"` at spawn time in `newAgent()`. |
-| `fps` | number | `10` | Target frame rate for `ib watch` TUI |
-| `createPullRequests` | boolean | `false` | Instruct agents to create PRs on completion |
-| `allowAgentQuestions` | boolean | `true` | Allow top-level managers to ask user questions via `ib ask` |
-| `autoCompactThreshold` | number | (none) | Context usage % above which auto-compact triggers |
-| `externalDiffTool` | string | (none) | External diff tool command |
-| `hooks.injectStatus` | boolean | `true` | Enable status injection hooks |
-| `hooks.statusVisible` | boolean | `true` | Make status injection visible in output |
-| `permissions.manager.allow` | string[] | `[]` | Additional allowed tools for manager agents |
-| `permissions.manager.deny` | string[] | `[]` | Additional denied tools for manager agents |
-| `permissions.worker.allow` | string[] | `[]` | Additional allowed tools for worker agents |
-| `permissions.worker.deny` | string[] | `[]` | Additional denied tools for worker agents |
+| `maxAgents` | number | `10` | Maximum number of concurrently active agents. Checked at spawn time in `newAgent()` — the count of agent directories that contain a `meta.json` must not exceed this value. |
+| `model` | string | `"opus"` | Default Claude model for new agents. Resolution order at spawn time: `--model` CLI flag → config `model` → `"opus"`. |
+| `createPullRequests` | boolean | `false` | When `true`, agents are instructed (via their prompt) to create a pull request upon completing their work. |
+| `allowAgentQuestions` | boolean | `true` | When `false`, the `askQuestion` (`ib ask`) command returns an error, blocking top-level manager agents from posing questions to the user. (`acknowledgeQuestion` is the user-facing command to mark a question answered and does not check this flag.) |
+| `autoCompactThreshold` | number | (none) | Context window usage percentage (0–100) above which the watchdog automatically sends `/compact` to the agent's tmux session. When absent (the default), auto-compact is disabled. |
+| `externalDiffTool` | string | (none) | External diff viewer command used by the TUI (`ib watch`). Read from `~/.itsybitsy/config.json` at startup via `readConfig()`; written back via `writeConfig()` when changed in the settings dialog. When absent or empty, the diff action is disabled. |
+| `hooks.injectStatus` | boolean | `true` | When `false`, the `inject-status` UserPromptSubmit/PostToolUse hook exits immediately without injecting agent status into the Claude context. |
+| `hooks.statusVisible` | boolean | `true` | When `true` (and `hooks.injectStatus` is also `true`), the status injection hook also emits a `systemMessage` field so the injected summary appears visibly to the user in the Claude UI. When `false`, status is injected as silent `additionalContext` only. |
+| `permissions.manager.allow` | string[] | `[]` | Additional tool names added to the allow list for manager agents (merged with mandatory permissions at spawn time). |
+| `permissions.manager.deny` | string[] | `[]` | Additional tool names added to the deny list for manager agents. |
+| `permissions.worker.allow` | string[] | `[]` | Additional tool names added to the allow list for worker agents. |
+| `permissions.worker.deny` | string[] | `[]` | Additional tool names added to the deny list for worker agents. |
 
 ### 7.3 Permission Resolution
 

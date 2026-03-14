@@ -1,5 +1,6 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { loadRegistry, saveRegistry, addRepo, removeRepo, renameRepo, listRepos, repoDisplayName } from "./registry";
+import { readConfig, setUserConfigPath, resetUserConfigPath } from "./config";
 import { join } from "path";
 import { mkdtemp, rm, mkdir } from "fs/promises";
 import { tmpdir } from "os";
@@ -155,5 +156,87 @@ describe("registry", () => {
     await saveRegistry(data);
     const loaded = await loadRegistry();
     expect(loaded.repos[0]!.nickname).toBe("nick");
+  });
+
+  test("registry writes to ~/.itsybitsy/repos.json not ~/.itsybitsy.json", async () => {
+    await saveRegistry({ repos: [{ path: "/tmp/test", name: "test" }] });
+    const newFile = Bun.file(join(tempDir, ".itsybitsy", "repos.json"));
+    const oldFile = Bun.file(join(tempDir, ".itsybitsy.json"));
+    expect(await newFile.exists()).toBe(true);
+    expect(await oldFile.exists()).toBe(false);
+  });
+
+  describe("migration", () => {
+    beforeEach(() => {
+      setUserConfigPath(join(tempDir, ".itsybitsy", "config.json"));
+    });
+
+    afterEach(() => {
+      resetUserConfigPath();
+    });
+
+    test("migrates repos from ~/.itsybitsy.json to ~/.itsybitsy/repos.json", async () => {
+      const legacyData = { repos: [{ path: "/tmp/migrated", name: "migrated" }] };
+      await Bun.write(join(tempDir, ".itsybitsy.json"), JSON.stringify(legacyData));
+
+      const loaded = await loadRegistry();
+      expect(loaded.repos).toEqual(legacyData.repos);
+
+      const newFile = Bun.file(join(tempDir, ".itsybitsy", "repos.json"));
+      expect(await newFile.exists()).toBe(true);
+
+      const oldFile = Bun.file(join(tempDir, ".itsybitsy.json"));
+      expect(await oldFile.exists()).toBe(false);
+    });
+
+    test("migrates diffTool from legacy file to config as externalDiffTool", async () => {
+      const legacyData = { repos: [], diffTool: "my-diff-tool" };
+      await Bun.write(join(tempDir, ".itsybitsy.json"), JSON.stringify(legacyData));
+
+      await loadRegistry();
+
+      const config = await readConfig();
+      expect(config["externalDiffTool"]?.value).toBe("my-diff-tool");
+    });
+
+    test("migration does not overwrite existing repos.json when no legacy file", async () => {
+      // Create existing repos.json
+      await mkdir(join(tempDir, ".itsybitsy"), { recursive: true });
+      const existingData = { repos: [{ path: "/tmp/existing", name: "existing" }] };
+      await Bun.write(join(tempDir, ".itsybitsy", "repos.json"), JSON.stringify(existingData));
+
+      // No legacy file — no migration should occur
+      const loaded = await loadRegistry();
+      expect(loaded.repos[0]!.path).toBe("/tmp/existing");
+    });
+
+    test("migration does not overwrite repos.json when both files exist", async () => {
+      // Create existing repos.json with current data
+      await mkdir(join(tempDir, ".itsybitsy"), { recursive: true });
+      const existingData = { repos: [{ path: "/tmp/existing", name: "existing" }] };
+      await Bun.write(join(tempDir, ".itsybitsy", "repos.json"), JSON.stringify(existingData));
+
+      // Also create legacy file with different data
+      const legacyData = { repos: [{ path: "/tmp/legacy", name: "legacy" }] };
+      await Bun.write(join(tempDir, ".itsybitsy.json"), JSON.stringify(legacyData));
+
+      // Should keep repos.json data, not overwrite with legacy
+      const loaded = await loadRegistry();
+      expect(loaded.repos[0]!.path).toBe("/tmp/existing");
+
+      // Legacy file should be cleaned up
+      const oldFile = Bun.file(join(tempDir, ".itsybitsy.json"));
+      expect(await oldFile.exists()).toBe(false);
+    });
+
+    test("migration skips diffTool if not present in legacy file", async () => {
+      const legacyData = { repos: [{ path: "/tmp/test", name: "test" }] };
+      await Bun.write(join(tempDir, ".itsybitsy.json"), JSON.stringify(legacyData));
+
+      await loadRegistry();
+
+      const config = await readConfig();
+      expect(config["externalDiffTool"]?.source).toBe("default");
+    });
   });
 });

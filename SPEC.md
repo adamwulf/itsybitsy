@@ -520,7 +520,7 @@ itsybitsy installs hooks into each agent's `settings.local.json`, plus optional 
 **Output**: JSON with `hookSpecificOutput.additionalContext` containing role-appropriate instructions wrapped in `<ittybitty>` tags. Instructions include:
 
 - **Primary**: Available `ib` commands for spawning and managing agents
-- **Manager**: Agent identity, worktree path, git context, sub-agent commands, workflow guidance, state management (`WAITING`/`I HAVE COMPLETED THE GOAL`), ask capability (top-level only)
+- **Manager**: Agent identity, worktree path, git context, sub-agent commands, workflow guidance, merge conflict handling (delegate rebasing to sub-agents), state management (`WAITING`/`I HAVE COMPLETED THE GOAL`), ask capability (top-level only)
 - **Worker**: Agent identity, worktree path, git context, send/diff/status commands only, state management, communication with manager
 
 ### 6.4 Intercept Task Hook (PreToolUse)

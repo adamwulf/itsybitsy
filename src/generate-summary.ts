@@ -10,7 +10,18 @@
 
 import { join } from "path";
 
+/**
+ * Validate that agentDir looks like a legitimate .ittybitty/agents/ path.
+ * Prevents arbitrary file system access via the CLI subcommand.
+ */
+function isValidAgentDir(agentDir: string): boolean {
+  // Must be an absolute path containing the .ittybitty/agents/ structure
+  return agentDir.startsWith("/") && /\/.ittybitty\/agents\/[^/]+$/.test(agentDir);
+}
+
 export async function generateSummary(agentDir: string): Promise<void> {
+  if (!isValidAgentDir(agentDir)) return;
+
   const promptPath = join(agentDir, "prompt.txt");
   const metaPath = join(agentDir, "meta.json");
 
@@ -34,9 +45,11 @@ export async function generateSummary(agentDir: string): Promise<void> {
   if (!summary) return;
 
   // Read current meta.json, merge summary, write back
-  const metaFile = Bun.file(metaPath);
-  if (!(await metaFile.exists())) return;
-  const meta = await metaFile.json();
-  meta.summary = summary;
-  await Bun.write(metaPath, JSON.stringify(meta, null, 2) + "\n");
+  try {
+    const metaFile = Bun.file(metaPath);
+    if (!(await metaFile.exists())) return;
+    const meta = await metaFile.json();
+    meta.summary = summary;
+    await Bun.write(metaPath, JSON.stringify(meta, null, 2) + "\n");
+  } catch { /* ignore corrupt meta.json */ }
 }

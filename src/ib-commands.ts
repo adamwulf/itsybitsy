@@ -1801,7 +1801,7 @@ ${qStartExitScript}
   }
 
   // 23. Generate prompt summary in background (fire-and-forget)
-  generatePromptSummary(prompt, agentDir).catch(() => {});
+  generatePromptSummary(agentDir).catch(() => {});
 
   return { ok: true, exitCode: 0, stdout, stderr: "" };
 }
@@ -1814,7 +1814,7 @@ ${qStartExitScript}
  * In test mode, calls a test override directly so tests can verify behavior
  * without a real subprocess.
  */
-async function generatePromptSummary(_prompt: string, agentDir: string): Promise<void> {
+async function generatePromptSummary(agentDir: string): Promise<void> {
   // Test mode: call the override directly so tests can verify via mock
   if (summaryGeneratorOverride) {
     await summaryGeneratorOverride(agentDir);

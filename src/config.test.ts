@@ -24,7 +24,6 @@ describe("readConfig", () => {
 
     expect(result["maxAgents"]).toEqual({ value: 10, source: "default" });
     expect(result["model"]).toEqual({ value: "opus", source: "default" });
-    expect(result["fps"]).toEqual({ value: 10, source: "default" });
     expect(result["createPullRequests"]).toEqual({ value: false, source: "default" });
     expect(result["allowAgentQuestions"]).toEqual({ value: true, source: "default" });
     expect(result["autoCompactThreshold"]).toEqual({ value: undefined, source: "default" });
@@ -43,12 +42,12 @@ describe("readConfig", () => {
   });
 
   test("reads user config values", async () => {
-    await Bun.write(userCfgPath, JSON.stringify({ model: "opus", fps: 5 }));
+    await Bun.write(userCfgPath, JSON.stringify({ model: "opus", maxAgents: 5 }));
 
     const result = await readConfig(opts());
     expect(result["model"]).toEqual({ value: "opus", source: "user" });
-    expect(result["fps"]).toEqual({ value: 5, source: "user" });
-    expect(result["maxAgents"]).toEqual({ value: 10, source: "default" });
+    expect(result["maxAgents"]).toEqual({ value: 5, source: "user" });
+    expect(result["createPullRequests"]).toEqual({ value: false, source: "default" });
   });
 
   test("reads nested user config values", async () => {
@@ -95,13 +94,13 @@ describe("writeConfig", () => {
 
   test("preserves existing keys when writing", async () => {
     const filePath = join(tmpDir, "config.json");
-    await Bun.write(filePath, JSON.stringify({ model: "opus", fps: 5 }));
+    await Bun.write(filePath, JSON.stringify({ model: "opus", createPullRequests: true }));
 
     await writeConfig(filePath, "maxAgents", 20);
 
     const data = await Bun.file(filePath).json();
     expect(data.model).toBe("opus");
-    expect(data.fps).toBe(5);
+    expect(data.createPullRequests).toBe(true);
     expect(data.maxAgents).toBe(20);
   });
 

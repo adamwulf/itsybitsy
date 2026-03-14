@@ -60,6 +60,8 @@ When a new agent is created (`ib new-agent "prompt"`):
 
 17. **Output**: The agent ID is printed to stdout immediately after tmux session creation.
 
+18. **Prompt summary generation**: After the watchdog is spawned, `generatePromptSummary()` is called in the background (fire-and-forget) to produce a short human-readable summary of the agent's task. This does not block the creation flow. See §8.9 for details.
+
 ### 1.2 Agent States
 
 Agents can be in one of 8 states:
@@ -368,7 +370,7 @@ Questions from agents that no longer exist (no directory in `.ittybitty/agents/`
         debug-logs/                  # Debug captures from hooks/watchdog/snapshot
           stop-<epoch>-<state>.txt     # Stop hook triggers
           nudge-<epoch>-<state>.txt    # Nudge recheck captures
-          watchdog-<epoch>-<state>.txt # Watchdog unknown-state captures
+          watchdog-<epoch>-unknown.txt  # Watchdog unknown-state captures
           snapshot-<epoch>-<state>.txt # Manual snapshot from `ib watch`
         repo/                        # Git worktree
           .claude/
@@ -402,7 +404,8 @@ Questions from agents that no longer exist (no directory in `.ittybitty/agents/`
   "worker": false,
   "yolo": false,
   "model": "sonnet",              // bash defaults to "sonnet"; legacy agents may have null
-  "claude_pid": "12345"           // appended after Claude starts (not in initial write)
+  "claude_pid": "12345",          // appended after Claude starts (not in initial write)
+  "watchdog_pid": "12346"         // appended after watchdog spawns (see §8.5); not in initial write
 }
 ```
 
@@ -420,6 +423,7 @@ Questions from agents that no longer exist (no directory in `.ittybitty/agents/`
 | `yolo` | boolean | Whether `--yolo` (skip permissions) was used |
 | `model` | string \| null | Claude model name (e.g., "sonnet", "opus", "haiku"), or `null` for legacy agents | [^callout]: Bash defaults `MODEL` to config value then `"sonnet"` before writing meta.json (the null branch in the template is unreachable dead code). TS normalizes null/missing to `"unknown"`. The `string \| null` type is retained because legacy agents may have null values, and display code (bash `ib list`) handles this defensively.
 | `claude_pid` | string | PID of the Claude process (appended to meta.json via `sed` after start.sh launches Claude — not present in the initial write) |
+| `watchdog_pid` | string | PID of the watchdog process (appended to meta.json after watchdog spawns — not present in the initial write; see §8.5) |
 
 ### 5.3 Worktree ↔ Branch Relationship
 
@@ -483,7 +487,7 @@ itsybitsy installs hooks into each agent's `settings.local.json`, plus optional 
 
 **Detection flow**:
 1. Try to detect state from `last_assistant_message` (check last non-empty line for "WAITING" or "I HAVE COMPLETED THE GOAL")
-2. If no match, fall through to tmux capture + `parseState()`
+2. If no match, fall through to tmux capture + `parseState()`. The full pane output is captured; if that returns null, state is set to `unknown` immediately (no fallback capture).
 3. Save debug capture to `debug-logs/stop-<epoch>-<state>.txt`
 
 **Actions by state**:
@@ -526,13 +530,13 @@ itsybitsy installs hooks into each agent's `settings.local.json`, plus optional 
 ### 6.4 Intercept Task Hook (PreToolUse)
 
 **Command**: `ib hooks intercept-task`
-**Matcher**: `Task`
+**Matcher**: `Task|Agent`
 **Hook type**: PreToolUse
 
-Intercepts Claude Code's Task tool and redirects it to spawn ib agents instead:
+Intercepts Claude Code's Task and Agent tools and redirects them to spawn ib agents instead:
 
-1. **Worker skip**: If called from a worker agent (detected via CWD + `meta.json`), passes through without interception — workers use native Task
-2. **Only intercepts `Task` tool** — all other tools pass through
+1. **Worker skip**: If called from a worker agent (detected via CWD + `meta.json`), passes through without interception — workers use native Task/Agent
+2. **Only intercepts `Task` and `Agent` tools** — all other tools pass through
 3. **Skip for certain subagent_types**: `Bash`, `statusline-setup`, `claude-code-guide`, `meta-agent`, `ib-merge` pass through unintercepted
 4. **Model validation**: Only `sonnet`, `opus`, `haiku`, or empty string are allowed
 5. **Spawn behavior**:
@@ -556,8 +560,8 @@ Fires when Claude requests permission for a tool that isn't auto-allowed. Simply
 
 These are optional hooks that the user installs globally:
 
-- **Main-path hook** (`ib hooks main-path`): PreToolUse hook on `Bash` matcher that prevents the primary Claude from `cd`-ing into agent worktrees. Only checks Bash `cd` commands — allows Read/Write/Edit to worktree paths. Resolves relative paths via `cwd` from stdin JSON. Exits 0 (allow) or 2 (deny with JSON + stderr message).
-- **Intercept-task hook** (`ib hooks intercept-task`): PreToolUse hook on `Task` matcher (global version, enables task interception for all repos)
+- **Main-path hook** (`ib hooks main-path`): PreToolUse hook on `Bash` matcher that prevents the primary Claude from `cd`-ing into agent worktrees. Only checks Bash `cd` commands — allows Read/Write/Edit to worktree paths. Resolves relative paths via `cwd` from stdin JSON. Exits 0 (allow) or 2 (deny with JSON written to stdout).
+- **Intercept-task hook** (`ib hooks intercept-task`): PreToolUse hook on `Task|Agent` matcher (global version, enables task/agent interception for all repos; intercepts both Task and Agent tools)
 - **Status injection hooks** (`ib hooks inject-status`): Two hooks — a UserPromptSubmit hook (no matcher, `--full --visible`) and a PostToolUse hook (`Bash|Task` matcher, `--if-changed --visible`). Skips injection when CWD is inside an agent worktree. Supports modes: `--full` (complete agent tree), `--brief` (one-liner summary), `--if-changed` (hash-compared, outputs brief only when changed). `--visible` adds a `systemMessage` field for user-visible status line.
 - **Session-start hook** (`ib hooks session-start`): SessionStart hook that injects ittybitty context
 
@@ -673,9 +677,9 @@ Per-agent watchdogs do not use lock files. There is no global watchdog.
 | `complete` | Reset waiting counter and notification interval. Notify manager once: "[watchdog]: Your subtask <id> recently completed". Sets a flag to prevent duplicate notifications. Flag resets if agent returns to `running`. |
 | `unknown` | Treat like `waiting` — increment counter with same exponential backoff. On first transition into unknown, saves a debug capture of tmux output to `debug-logs/watchdog-<epoch>-unknown.txt` (not repeated on subsequent ticks). |
 | `rate_limited` | Attempt to bypass the rate limit dialog (bash uses a 3-attempt retry loop with 2s sleeps between attempts; checks `parse_state` after each Enter to verify dismissal). Then poll Claude's usage API; when session usage drops below 5%, send nudge: "[watchdog]: Usage has refreshed (<pct>%). Please continue your task." Reset waiting counter and notification interval. |
-| `running` | Reset waiting counter and notification interval. Clear completion flag if previously set. |
-| `creating` | Treat as running — reset counters. |
-| `compacting` | Reset waiting counter and notification interval. Wait for completion. |
+| `running` | Reset waiting counter, notification interval, and `rateLimitBypassed` flag. Clear completion flag if previously set. |
+| `creating` | Treat as running — reset waiting counter, notification interval, and `rateLimitBypassed` flag. |
+| `compacting` | Reset waiting counter, notification interval, and `rateLimitBypassed` flag. Wait for completion. |
 | `stopped` | Reset waiting counter and notification interval. |
 
 **Auto-compact**: If `autoCompactThreshold` is configured, the watchdog also checks the agent's context window usage on each poll. When usage exceeds the threshold and the agent is not currently compacting, sends `/compact` to the agent's tmux session. The compact flag resets when the agent transitions out of `compacting` state.
@@ -776,3 +780,59 @@ The `G` keybinding opens a new Ghostty terminal window. Behavior depends on what
 - **Nothing selected**: Shows a notice ("No agent or repo selected").
 
 Both paths validate their inputs (tmux session names against `/^[\w-]+$/`; directory paths against control characters and DEL) before spawning Ghostty. The spawn uses array-based `Bun.spawn` (no shell interpolation) with `stdio: ["ignore", "ignore", "ignore"]` and `proc.unref()` to detach from the parent process.
+
+---
+
+## 9. Multi-Repo Registry
+
+### 9.1 Registry File
+
+itsybitsy monitors multiple git repositories. The list of watched repos is stored in:
+
+```
+~/.itsybitsy/repos.json
+```
+
+This file is user-wide and persists across sessions. It is managed exclusively via `ib add` and `ib remove` — do not edit it manually.
+
+### 9.2 Registry Format
+
+```json
+{
+  "repos": [
+    { "path": "/Users/me/projects/my-app", "name": "my-app" },
+    { "path": "/Users/me/projects/other-repo", "name": "other-repo" }
+  ]
+}
+```
+
+Each entry is an object with `path` (absolute path to the git repository root), `name` (the repository basename), and an optional `nickname` field for a user-defined display name.
+
+### 9.3 Registry Commands
+
+| Command | Description |
+|---------|-------------|
+| `ib add [path]` | Add a repo to the registry. Defaults to `git rev-parse --show-toplevel` in the current directory if no path is given. Errors if the path is not a git repository or is already registered. |
+| `ib remove [path]` | Remove a repo from the registry. Defaults to CWD git root. Errors if the path is not currently registered. |
+| `ib list` | List all registered repos and their agents. |
+
+The `ib watch` TUI reads this registry at startup and monitors all registered repos simultaneously.
+
+---
+
+## 10. Setup/Hooks Dialog
+
+### 10.1 Dialog Structure
+
+The Setup dialog is accessible via the `h` keybinding in `ib watch`. It is a tabbed dialog with two tabs:
+
+| Tab Index | Tab Name | Description |
+|-----------|----------|-------------|
+| 0 | **Hooks** | Manage global hook installation. Shows two items: **Safety hooks** (path isolation + status injection + session-start context, grouped as one toggle) and **Task interception** (intercept-task hook). Per-agent hooks (path-check, stop) are installed automatically per agent and are not shown here. |
+| 1 | **Config** | Edit user-wide configuration keys from `~/.itsybitsy/config.json` (e.g., `externalDiffTool`, `autoCompactThreshold`). Changes are written back via `writeConfig()`. |
+
+Tab names are defined in `SETUP_TAB_NAMES = ['Hooks', 'Config']`. Switching between tabs updates the dialog content without closing it.
+
+### 10.2 Permissions Editor
+
+Within the Config tab, a **permissions editor** sub-dialog allows editing the `permissions.manager.allow`, `permissions.manager.deny`, `permissions.worker.allow`, and `permissions.worker.deny` lists in `~/.itsybitsy/config.json`. Each list is editable independently. Changes take effect for newly created agents (existing agents' `settings.local.json` is not modified retroactively).

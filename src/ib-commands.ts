@@ -1331,7 +1331,7 @@ async function buildAgentSettings(
   ];
   if (addIntercept) {
     preToolUseHooks.push(
-      { matcher: "Task", hooks: [{ type: "command", command: "ib hooks intercept-task" }] }
+      { matcher: "Task|Agent", hooks: [{ type: "command", command: "ib hooks intercept-task" }] }
     );
   }
 

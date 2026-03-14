@@ -48,7 +48,7 @@ export type DialogState =
     }
   | {
       type: "setup";
-      tab: number; // 0=Setup, 1=Config
+      tab: number; // 0=Hooks, 1=Config
       items: SetupItem[];
       selectedIndex: number;
       configItems?: ConfigDialogItem[];

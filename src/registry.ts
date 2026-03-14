@@ -1,7 +1,6 @@
 import { join, resolve, basename } from "path";
 import { homedir } from "os";
 import { mkdir } from "fs/promises";
-import { writeConfig, defaultUserConfigPath } from "./config";
 
 export interface RepoEntry {
   path: string;
@@ -26,49 +25,8 @@ function registryPath(): string {
   return join(itsybitsyDir(), "repos.json");
 }
 
-function legacyRegistryPath(): string {
-  return join(process.env.HOME ?? homedir(), ".itsybitsy.json");
-}
-
-/** Migrate from ~/.itsybitsy.json to ~/.itsybitsy/repos.json if the old file exists. */
-async function migrateIfNeeded(): Promise<void> {
-  const legacyPath = legacyRegistryPath();
-  const legacyFile = Bun.file(legacyPath);
-  if (!(await legacyFile.exists())) return;
-
-  // If repos.json already exists, just clean up the legacy file without overwriting
-  const newFile = Bun.file(registryPath());
-  if (await newFile.exists()) {
-    try {
-      const { unlink } = await import("fs/promises");
-      await unlink(legacyPath);
-    } catch { /* non-fatal */ }
-    return;
-  }
-
-  try {
-    const data = await legacyFile.json() as Record<string, unknown>;
-    const repos = Array.isArray(data.repos) ? data.repos : [];
-    const newData: RegistryData = { repos };
-
-    await mkdir(itsybitsyDir(), { recursive: true });
-    await Bun.write(registryPath(), JSON.stringify(newData, null, 2) + "\n");
-
-    // Migrate diffTool to config if present
-    if (typeof data.diffTool === "string" && data.diffTool) {
-      await writeConfig(defaultUserConfigPath(), "externalDiffTool", data.diffTool);
-    }
-
-    // Remove old file
-    const { unlink } = await import("fs/promises");
-    await unlink(legacyPath);
-  } catch {
-    // Migration failure is non-fatal — old file stays in place
-  }
-}
 
 export async function loadRegistry(): Promise<RegistryData> {
-  await migrateIfNeeded();
   try {
     const file = Bun.file(registryPath());
     if (!(await file.exists())) {

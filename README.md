@@ -52,7 +52,7 @@ The behavioral specification lives in [SPEC.md](./SPEC.md). It documents the def
 itsybitsy reads agent data natively from disk for speed, but delegates all mutations to the `ib` CLI to avoid reimplementing write-side logic (kill, merge, send, new-agent, etc.). The data flow:
 
 ```
-registry.ts        — Stores which repo paths to monitor (~/.itsybitsy.json)
+registry.ts        — Stores which repo paths to monitor (~/.itsybitsy/repos.json)
   ↓
 agents.ts          — Reads .ittybitty/agents/{id}/meta.json directly from each repo
   ↓
@@ -118,18 +118,18 @@ The TUI uses a custom `SplitPane` component to render two panes side-by-side, si
 
 | Key | Action |
 |-----|--------|
-| `h` | Show help dialog |
+| `h` | Open setup / hooks dialog |
+| `?` | Show help overlay |
 | `Ctrl-C` | Quit |
 
 ## Configuration
 
-Optional config in `~/.itsybitsy.json`:
+Optional config in `~/.itsybitsy/config.json`:
 
 ```json
 {
-  "repos": [],
-  "diffTool": "code --diff"
+  "externalDiffTool": "code --diff"
 }
 ```
 
-Set `diffTool` to enable the `o` keybinding for opening diffs in an external tool.
+Set `externalDiffTool` to enable the `o` keybinding for opening diffs in an external tool.

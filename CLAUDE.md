@@ -146,7 +146,7 @@ All 6 phases complete. 968 tests across 28 files.
 
 ### State detection flow
 1. `watcher.ts` calls `detectAgentStates()` (in `agents.ts`) on every refresh
-2. `detectAgentStates()` calls `captureTmuxOutput()` (in `tmux-poller.ts`) for each active agent, then feeds output through `parseState()` (in `parse-state.ts`)
+2. `detectAgentStates()` calls `captureTmuxOutput()` (in `tmux-poller.ts`) for each active agent, then calls `computeStateFromContent()` as a pre-check; only if it returns `null` does it call `parseState()` (in `parse-state.ts`)
 3. Archived agents are always set to `stopped` without tmux capture
 4. `parseState()` is pure string matching on ANSI-stripped tmux output — never call it on raw ANSI text
 
@@ -160,14 +160,14 @@ pi-tui's `Box` is vertical-only. `SplitPane` renders two child components side-b
 - `captureTmuxOutput()` is a separate one-shot export used by `detectAgentStates()` in the watcher
 
 ### Agent data (src/agents.ts)
-- `readAllAgents()` returns `{ agents, errors }` — always check errors
+- `readAllAgents()` returns `{ agents, errors, orphanedTmuxSessions }` — always check errors
 - `FlatEntry` discriminated union type lives here (not in watcher.ts) since `flattenAgentTree()` produces it — kind: "agent" for agent rows, kind: "repo-header" for repo headers
 - `detectAgentStates()` is the single source of truth for state detection — both CLI and watcher use it
 - `buildAgentTree()` mutates `agent.children` in place; call it after state detection
 - `readAgentLog()`, `readAgentPrompt()`, `parseDenials()` — async helpers for right pane content
 
 ### parse-state.ts priority order
-Compacting (last 5) > Active running (last 5) > Tool waiting (last 15) > Rate limited (last 15) > Complete (last 15) > WAITING (last 15) > Other running (last 15) > Spinners (last 15) > Permission prompts (last 15) > Broader spinners (last 20) > Background tasks (last 15) > Race condition hook > Unknown
+Creating (workspace trust prompt, full input) > Compacting (last 5) > Active running (last 5) > Tool waiting (last 15) > Rate limited (last 15) > Complete (last 15) > WAITING (last 15) > Other running (last 15) > Spinners (last 15) > Permission prompts (last 15) > Broader spinners (last 20) > Background tasks (last 15) > Race condition hook > Unknown
 
 ### Line wrapping (src/tui/wrap.ts)
 - `wrapSingleLine(line, width)` and `wrapLines(text, width)` — ANSI-aware hard wrapping
@@ -206,7 +206,7 @@ Shared agent lifecycle helpers used by multiple ib commands. Mirrors the ib bash
 Reads Claude transcript JSONL files to determine an agent's context window usage percentage, then sends `/compact` to agents that exceed a configured threshold. Matches ib's `get_agent_context_usage()` logic for transcript parsing. Encodes worktree paths into Claude's project directory naming scheme to locate the correct transcript file.
 
 ### Config (src/config.ts)
-User-wide configuration system with user and default sources. Defines all config keys (`maxAgents`, `model`, `fps`, `createPullRequests`, `allowAgentQuestions`, `autoCompactThreshold`, `externalDiffTool`, hooks settings, and per-role permission allow/deny lists). Reads from `~/.itsybitsy/config.json` (user home), merging with typed defaults. No per-repo configuration.
+User-wide configuration system with user and default sources. Defines all config keys (`maxAgents`, `model`, `createPullRequests`, `allowAgentQuestions`, `autoCompactThreshold`, `externalDiffTool`, hooks settings, and per-role permission allow/deny lists). Reads from `~/.itsybitsy/config.json` (user home), merging with typed defaults. No per-repo configuration.
 
 ### Folder browser (src/tui/folder-browser.ts)
 Builds the navigable item list for the add-repo folder browser dialog. Given a current path, produces a list of `FolderItem` entries: ancestors from root down to parent, the current folder, and sorted child directories. Each item includes depth, git-repo detection, and ancestor/current flags for rendering the tree-style UI.

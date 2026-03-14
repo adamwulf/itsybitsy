@@ -528,7 +528,7 @@ function handleSetupDialog(
     return handleSetupTab0(ctx, d, data);
   }
 
-  // Tab 1 & 2: config editing
+  // Tab 1: config editing
   return handleSetupConfigTab(ctx, d, data);
 }
 

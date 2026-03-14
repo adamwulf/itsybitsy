@@ -617,19 +617,20 @@ async function loadSetupDialog(ctx: ActionCtx, initialTab = 0) {
   const safetyPartial = safetyStatus === "partial";
   const interceptInstalled = interceptResult.ok && (interceptResult.stdout === "installed");
 
+  const hooksActionable = repoPath !== "";
   const items: SetupItem[] = [
     {
       label: "Safety hooks",
       description: "Block cd into worktrees + inject status + session context",
       value: safetyInstalled ? "installed" : safetyPartial ? "partial" : "not installed",
-      actionable: true,
+      actionable: hooksActionable,
       kind: "safety-hooks",
     },
     {
       label: "Task interception",
       description: "Redirect Task tool calls to spawn ib agents",
       value: interceptInstalled ? "installed" : "not installed",
-      actionable: true,
+      actionable: hooksActionable,
       kind: "intercept-hook",
     },
     {

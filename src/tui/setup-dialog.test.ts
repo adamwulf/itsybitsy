@@ -23,7 +23,7 @@ function makeSetupItems(): SetupItem[] {
 function makeConfigItems(): ConfigDialogItem[] {
   return [
     { key: "maxAgents", type: "number", value: 10, source: "default", default: 10 },
-    { key: "model", type: "string", value: "sonnet", source: "project", default: "sonnet" },
+    { key: "model", type: "string", value: "sonnet", source: "user", default: "sonnet" },
     { key: "createPullRequests", type: "boolean", value: false, source: "default", default: false },
     { key: "permissions.manager.allow", type: "string[]", value: ["Edit", "Write"], source: "user", default: [] },
   ];
@@ -239,7 +239,7 @@ describe("setup dialog config tab content", () => {
       selectedIndex: 0,
 
       configItems: [
-        { key: "createPullRequests", type: "boolean", value: true, source: "project", default: false },
+        { key: "createPullRequests", type: "boolean", value: true, source: "user", default: false },
       ],
       configSelectedIndex: 0,
       onAction: () => {},
@@ -341,9 +341,9 @@ describe("setup dialog config tab content", () => {
     const result = buildSetupContent(dialog, 70);
     const stripped = result.contentLines.map((l) => stripAnsi(l));
     expect(stripped.some((l) => l.includes("(default)"))).toBe(true);
-    expect(stripped.some((l) => l.includes("(project)"))).toBe(true);
     expect(stripped.some((l) => l.includes("(user)"))).toBe(true);
   });
+
 
 });
 
@@ -499,7 +499,7 @@ describe("config write integration", () => {
 
   test("writeConfig creates nested keys", async () => {
     const { writeConfig } = await import("../config");
-    const configPath = join(tmpDir, ".ittybitty.json");
+    const configPath = join(tmpDir, "config.json");
     await writeConfig(configPath, "hooks.injectStatus", true);
     const content = await Bun.file(configPath).json();
     expect(content.hooks.injectStatus).toBe(true);
@@ -507,7 +507,7 @@ describe("config write integration", () => {
 
   test("writeConfig updates existing file", async () => {
     const { writeConfig } = await import("../config");
-    const configPath = join(tmpDir, ".ittybitty.json");
+    const configPath = join(tmpDir, "config.json");
     await Bun.write(configPath, JSON.stringify({ maxAgents: 5 }, null, 2));
     await writeConfig(configPath, "model", "opus");
     const content = await Bun.file(configPath).json();

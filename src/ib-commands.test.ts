@@ -42,6 +42,7 @@ import {
   resetNewAgentSummaryGenerator,
 } from "./ib-commands";
 import { spawnCtx as lifecycleSpawnCtx } from "./agent-lifecycle";
+import { setUserConfigPath, resetUserConfigPath } from "./config";
 import type { AgentState } from "./parse-state";
 import type { SpawnResult } from "./types";
 
@@ -1842,9 +1843,10 @@ describe("newAgent (native)", () => {
     await mkdir(join(tempDir, ".ittybitty"), { recursive: true });
     await Bun.write(join(tempDir, ".ittybitty", "repo-id"), "abcd1234\n");
 
-    // Create project config to override user-level config (e.g., ~/.ittybitty.json model setting)
-    // This ensures tests don't inherit model/permissions from the user's real config
-    await Bun.write(join(tempDir, ".ittybitty.json"), JSON.stringify({ model: "sonnet" }, null, 2));
+    // Set user config path to temp dir so tests don't inherit the real user config
+    const userConfigPath = join(tempDir, "config.json");
+    setUserConfigPath(userConfigPath);
+    await Bun.write(userConfigPath, JSON.stringify({ model: "sonnet" }, null, 2));
 
     // Also set the lifecycle spawn runner (used by resolveGitRoot)
     lifecycleSpawnCtx.set((cmd: string[], _opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
@@ -1860,6 +1862,7 @@ describe("newAgent (native)", () => {
     resetNewAgentSpawnRunner();
     resetNewAgentSummaryGenerator();
     lifecycleSpawnCtx.reset();
+    resetUserConfigPath();
     await rm(tempDir, { recursive: true, force: true });
   });
 
@@ -2006,8 +2009,8 @@ describe("newAgent (native)", () => {
   });
 
   test("rejects when max agents reached", async () => {
-    // Create .ittybitty.json with maxAgents: 1
-    await Bun.write(join(tempDir, ".ittybitty.json"), JSON.stringify({ maxAgents: 1 }));
+    // Set config with maxAgents: 1
+    await Bun.write(join(tempDir, "config.json"), JSON.stringify({ maxAgents: 1 }));
 
     // Create an existing agent
     const existingDir = join(agentsDir, "agent-existing");
@@ -2044,7 +2047,7 @@ describe("newAgent (native)", () => {
   });
 
   test("uses model from config when not specified", async () => {
-    await Bun.write(join(tempDir, ".ittybitty.json"), JSON.stringify({ model: "haiku" }));
+    await Bun.write(join(tempDir, "config.json"), JSON.stringify({ model: "haiku" }));
 
     setNewAgentSpawnRunner(mockSpawnRunner());
     await callNewAgent("task", { name: "test-cfg-model" });
@@ -2204,7 +2207,7 @@ describe("newAgent (native)", () => {
   });
 
   test("config permissions are merged into settings", async () => {
-    await Bun.write(join(tempDir, ".ittybitty.json"), JSON.stringify({
+    await Bun.write(join(tempDir, "config.json"), JSON.stringify({
       permissions: {
         manager: { allow: ["Bash(deploy:*)"], deny: ["Bash(rm:*)"] },
       },
@@ -2900,9 +2903,11 @@ describe("askQuestion (native)", () => {
     agentDir = join(agentsDir, agentId);
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id: agentId }));
+    setUserConfigPath(join(tempDir, "config.json"));
   });
 
   afterEach(async () => {
+    resetUserConfigPath();
     await rm(tempDir, { recursive: true, force: true });
   });
 
@@ -2948,7 +2953,7 @@ describe("askQuestion (native)", () => {
 
   test("allowAgentQuestions=false rejects", async () => {
     // Write config that disables questions
-    await Bun.write(join(tempDir, ".ittybitty.json"), JSON.stringify({ allowAgentQuestions: false }));
+    await Bun.write(join(tempDir, "config.json"), JSON.stringify({ allowAgentQuestions: false }));
 
     const result = await askQuestion(tempDir, agentId, "Can I ask?");
     expect(result.ok).toBe(false);

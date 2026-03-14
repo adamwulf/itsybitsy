@@ -83,7 +83,7 @@ export type ConfigDialogItem = {
   key: string;
   type: "number" | "boolean" | "string" | "string[]";
   value: unknown;
-  source: "project" | "user" | "default";
+  source: "user" | "default";
   default: unknown;
 };
 

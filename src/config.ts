@@ -1,7 +1,7 @@
 import { join } from "path";
 import { homedir } from "os";
 
-export type ConfigSource = "project" | "user" | "default";
+export type ConfigSource = "user" | "default";
 export type ConfigType = "number" | "boolean" | "string" | "string[]";
 
 export interface ConfigKeyDef {
@@ -79,32 +79,31 @@ async function readJsonFile(filePath: string): Promise<Record<string, unknown>> 
   }
 }
 
-export function defaultUserConfigPath(): string {
-  return join(process.env.HOME ?? homedir(), ".ittybitty.json");
+let overrideUserConfigPath: string | undefined;
+
+export function setUserConfigPath(path: string): void {
+  overrideUserConfigPath = path;
 }
 
-export function projectConfigPath(repoPath: string): string {
-  return join(repoPath, ".ittybitty.json");
+export function resetUserConfigPath(): void {
+  overrideUserConfigPath = undefined;
+}
+
+export function defaultUserConfigPath(): string {
+  return overrideUserConfigPath ?? join(process.env.HOME ?? homedir(), ".ittybitty", "config.json");
 }
 
 export interface ReadConfigOptions {
   userConfigPath?: string;
 }
 
-export async function readConfig(repoPath: string, options?: ReadConfigOptions): Promise<ConfigResult> {
-  const projectData = await readJsonFile(projectConfigPath(repoPath));
+export async function readConfig(options?: ReadConfigOptions): Promise<ConfigResult> {
   const userPath = options?.userConfigPath ?? defaultUserConfigPath();
   const userData = await readJsonFile(userPath);
 
   const result: ConfigResult = {};
 
   for (const def of CONFIG_KEYS) {
-    const projectVal = getNestedValue(projectData, def.key);
-    if (projectVal !== undefined && validateConfigValue(projectVal, def.type)) {
-      result[def.key] = { value: projectVal, source: "project" };
-      continue;
-    }
-
     const userVal = getNestedValue(userData, def.key);
     if (userVal !== undefined && validateConfigValue(userVal, def.type)) {
       result[def.key] = { value: userVal, source: "user" };

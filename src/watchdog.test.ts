@@ -1208,7 +1208,7 @@ describe("watchdog", () => {
   describe("auto-compact integration", () => {
     function mockConfig(threshold: number | undefined): ConfigResult {
       return {
-        autoCompactThreshold: { value: threshold, source: threshold != null ? "project" : "default" },
+        autoCompactThreshold: { value: threshold, source: threshold != null ? "user" : "default" },
       };
     }
 

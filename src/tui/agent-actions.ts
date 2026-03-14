@@ -642,8 +642,8 @@ async function loadSetupDialog(ctx: ActionCtx, initialTab = 0) {
     },
   ];
 
-  // Load user-wide config
-  const config = await readConfig(repoPath);
+  // Load config for setup dialog
+  const config = await readConfig();
 
   const buildConfigItems = (): ConfigDialogItem[] => {
     return CONFIG_KEYS.map((def) => {

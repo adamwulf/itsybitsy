@@ -382,6 +382,7 @@ export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
   // Write resume.sh
   const resumeScript = join(agentDir, "resume.sh");
   const qMetaJson = shellQuote(join(agentDir, "meta.json"));
+  const qAgentLog = shellQuote(join(agentDir, "agent.log"));
   const resumeContent = `#!/bin/bash
 # Add git repo root to PATH so 'ib' is available
 export PATH=${qGitRoot}":$PATH"
@@ -389,9 +390,16 @@ export PATH=${qGitRoot}":$PATH"
 # Clear Claude Code nesting detection so agents can start their own claude process
 unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT
 
+AGENT_LOG=${qAgentLog}
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [resume.sh] $1" >> "$AGENT_LOG"; }
+
+log "Starting claude --resume ${sessionId} ${claudeArgs}"
+log "PWD=$(pwd) which_claude=$(which claude 2>&1)"
+
 # Start Claude in background and capture PID
 claude --resume "${sessionId}" ${claudeArgs} &
 CLAUDE_PID=$!
+log "Claude PID: $CLAUDE_PID"
 
 # Store PID in meta.json
 META_JSON=${qMetaJson}
@@ -401,6 +409,8 @@ fi
 
 # Wait for Claude to complete
 wait $CLAUDE_PID
+EXIT_CODE=$?
+log "Claude exited with code: $EXIT_CODE"
 
 # Run exit check
 ${qAbsExitScript}
@@ -414,18 +424,32 @@ ${qAbsExitScript}
     return { ok: false, exitCode: 1, stdout: "", stderr: "Could not start tmux server" };
   }
 
+  await logAgent(agentDir, `[resume] Creating tmux session '${tmuxSession}' in ${workPath}`);
+
   // Start tmux session
   const tmuxResult = await nukeResumeSpawnCtx.run([
     "tmux", "new-session", "-d", "-x", "60", "-s", tmuxSession, "-c", workPath, resumeScript,
   ]);
   if (tmuxResult.exitCode !== 0) {
+    await logAgent(agentDir, `[resume] tmux new-session failed: exit=${tmuxResult.exitCode} stderr=${tmuxResult.stderr}`);
     return { ok: false, exitCode: 1, stdout: "", stderr: `Could not create tmux session '${tmuxSession}'` };
   }
+
+  await logAgent(agentDir, "[resume] tmux session created, running autoAcceptWorkspaceTrust");
 
   // Auto-accept workspace trust if not yolo (poll tmux for trust prompts)
   // Must complete before sending nudge to avoid corrupting the permissions flow
   if (!yoloMode) {
     await autoAcceptWorkspaceTrust(tmuxSession);
+  }
+
+  await logAgent(agentDir, "[resume] autoAcceptWorkspaceTrust completed, sending nudge");
+
+  // Verify tmux session still exists before sending nudge
+  const verifyResult = await nukeResumeSpawnCtx.run(["tmux", "has-session", "-t", tmuxSession]);
+  if (verifyResult.exitCode !== 0) {
+    await logAgent(agentDir, "[resume] tmux session gone before nudge — Claude likely exited immediately");
+    return { ok: true, exitCode: 0, stdout: `Use 'ib look ${agent.id}' to view output`, stderr: "" };
   }
 
   // Send resume nudge after short delay
@@ -441,8 +465,7 @@ ${qAbsExitScript}
   await nukeResumeSpawnCtx.run(["tmux", "send-keys", "-t", tmuxSession, "Enter"]);
 
   // Log
-  await logAgent(agentDir, "Agent resumed");
-  await logAgent(agentDir, "Sent resume nudge");
+  await logAgent(agentDir, "[resume] Agent resumed, nudge sent");
 
   // Auto-spawn watchdog if agent has a manager
   // (top-level agents don't need a watchdog — they have a human watching)
@@ -1683,6 +1706,7 @@ echo ""
   const qAbsPromptFile = shellQuote(absPromptFile);
   const qStartMetaJson = shellQuote(join(agentDir, "meta.json"));
   const qStartExitScript = shellQuote(absExitScript);
+  const qStartAgentLog = shellQuote(join(agentDir, "agent.log"));
   const startContent = `#!/bin/bash
 # Add git repo root to PATH so 'ib' is available
 export PATH=${qRootRepoPath}":$PATH"
@@ -1690,9 +1714,16 @@ export PATH=${qRootRepoPath}":$PATH"
 # Clear Claude Code nesting detection so agents can start their own claude process
 unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT
 
+AGENT_LOG=${qStartAgentLog}
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [start.sh] $1" >> "$AGENT_LOG"; }
+
+log "Starting claude --session-id ${sessionUuid} ${claudeArgs}"
+log "PWD=$(pwd) which_claude=$(which claude 2>&1)"
+
 # Start Claude in background and capture PID
 claude --session-id "${sessionUuid}" ${claudeArgs} "$(cat ${qAbsPromptFile})" &
 CLAUDE_PID=$!
+log "Claude PID: $CLAUDE_PID"
 
 # Store PID in meta.json
 META_JSON=${qStartMetaJson}
@@ -1702,6 +1733,8 @@ fi
 
 # Wait for Claude to complete
 wait $CLAUDE_PID
+EXIT_CODE=$?
+log "Claude exited with code: $EXIT_CODE"
 
 # Run exit check
 ${qStartExitScript}

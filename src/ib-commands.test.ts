@@ -795,8 +795,7 @@ describe("resumeAgent (native)", () => {
     await resumeAgent(agent);
 
     const log = await Bun.file(join(agentDir, "agent.log")).text();
-    expect(log).toContain("Agent resumed");
-    expect(log).toContain("Sent resume nudge");
+    expect(log).toContain("Agent resumed, nudge sent");
   });
 
   test("uses repoPath when worktree repo dir doesn't exist", async () => {

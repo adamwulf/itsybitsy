@@ -47,6 +47,7 @@ import {
 } from "./pane-manager";
 import type { PaneMode, DenialFilter } from "./pane-manager";
 import * as agentActions from "./agent-actions";
+import { readConfig } from "../config";
 import { RESET, BOLD, DIM, RED, GREEN, YELLOW, DIM_GRAY } from "./colors";
 import { MIN_LEFT_WIDTH, MAX_LEFT_WIDTH } from "./split-pane";
 
@@ -1066,10 +1067,10 @@ export async function launchDashboard(): Promise<void> {
     // Ignore
   }
 
+  const config = await readConfig();
   const dashboard = new DashboardComponent();
   dashboard.setTui(tui);
   dashboard.setRepos(repos);
-  const config = await readConfig();
   const diffToolValue = config["externalDiffTool"]?.value;
   dashboard.setDiffTool(typeof diffToolValue === "string" && diffToolValue ? diffToolValue : undefined);
   dashboard.setVersion(version);

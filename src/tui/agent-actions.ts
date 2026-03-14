@@ -698,6 +698,23 @@ function handleSetupItemAction(ctx: ActionCtx, repoPath: string) {
       toggleHook(ctx, item, repoPath, installSafetyHooks, uninstallSafetyHooks, "safety hooks");
     } else if (item.kind === "intercept-hook") {
       toggleHook(ctx, item, repoPath, installInterceptHook, uninstallInterceptHook, "task interception");
+    } else if (item.kind === "difftool") {
+      ctx.closeDialog();
+      ctx.showDialog({
+        type: "input",
+        prompt: "Diff tool command:",
+        value: ctx.diffTool ?? "",
+        onSubmit: (value: string) => {
+          ctx.closeDialog();
+          const newTool = value.trim() || undefined;
+          ctx.diffTool = newTool;
+          writeConfig(defaultUserConfigPath(), "externalDiffTool", newTool).then(() => {
+            ctx.setNotice(newTool ? `Diff tool set to: ${newTool}` : "Diff tool cleared");
+          }).catch((err) => {
+            ctx.setNotice(`Failed to save: ${err}`);
+          });
+        },
+      });
     }
   };
 }

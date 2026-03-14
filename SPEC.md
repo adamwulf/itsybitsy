@@ -202,7 +202,7 @@ When building `settings.local.json` for an agent, permissions come from three so
    - `Bash(git status:*)`, `Bash(git add:*)`, `Bash(git commit:*)`, `Bash(git diff:*)`, `Bash(git show:*)`, `Bash(git log:*)`, `Bash(git ls-files:*)`, `Bash(git grep:*)`, `Bash(git rm:*)`, `Bash(git merge:*)`, `Bash(git rebase:*)`, `Bash(git checkout:*)`, `Bash(git restore:*)`, `Bash(git reset:*)` — git operations
    - `Bash(pwd:*)`, `Bash(ls:*)`, `Bash(head:*)`, `Bash(tail:*)`, `Bash(cat:*)`, `Bash(grep:*)` — filesystem inspection
    - `Read`, `Write`, `Edit`, `MultiEdit`, `Glob`, `Grep`, `LS`, `TodoWrite`, `Task`, `TaskOutput`, `KillShell`, `NotebookEdit`, `WebFetch`, `WebSearch`, `AskUserQuestion` — Claude Code tools
-3. **Config-defined permissions**: From `permissions.manager.allow/deny` or `permissions.worker.allow/deny` in `.ittybitsy.json`
+3. **Config-defined permissions**: From `permissions.manager.allow/deny` or `permissions.worker.allow/deny` in `.ittybitty.json`
 
 **Always denied** (for all agents): `EnterPlanMode`, `ExitPlanMode`
 
@@ -349,7 +349,7 @@ Questions from agents that no longer exist (no directory in `.ittybitty/agents/`
 
 ```
 <repo-root>/
-  .ittybitsy/
+  .ittybitty/
     repo-id                          # 8-char hex, unique per repo
     user-questions.json              # Pending agent questions
     agents/
@@ -573,8 +573,8 @@ Install/uninstall commands modify `~/.claude/settings.json` directly. [^hooks-in
 
 Configuration is read from two files, with project settings taking precedence:
 
-1. **Project config**: `.ittybitsy.json` in the repository root
-2. **User config**: `~/.ittybitsy.json` in the user's home directory
+1. **Project config**: `.ittybitty.json` in the repository root
+2. **User config**: `~/.ittybitty.json` in the user's home directory
 3. **Defaults**: Built-in defaults for each key
 
 For each config key, the first valid value found (project → user → default) is used.
@@ -611,7 +611,7 @@ For a given agent type (manager or worker):
 
 ### 7.4 Custom Prompts
 
-Custom prompt files in `.ittybitsy/prompts/`:
+Custom prompt files in `.ittybitty/prompts/`:
 
 | File | Injected into |
 |------|--------------|

@@ -396,7 +396,7 @@ describe("watchdog", () => {
       // First tick: transition from null to unknown — should save debug log
       await tick([mgr, a1]);
 
-      const debugDir = join(tmpDir, ".ittybitsy", "agents", "a1", "debug-logs");
+      const debugDir = join(tmpDir, ".ittybitty", "agents", "a1", "debug-logs");
       const files = await Array.fromAsync(new Bun.Glob("watchdog-*-unknown.txt").scan(debugDir));
       expect(files.length).toBe(1);
 

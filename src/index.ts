@@ -237,7 +237,7 @@ async function main() {
         // Find the repo containing this agent
         const { existsSync } = await import("fs");
         const agentRepo = repos.find((r) =>
-          existsSync(join(r.path, ".ittybitsy", "agents", watchdogAgentId, "meta.json"))
+          existsSync(join(r.path, ".ittybitty", "agents", watchdogAgentId, "meta.json"))
         );
         if (!agentRepo) {
           console.error(`Agent ${watchdogAgentId} not found in any registered repo.`);

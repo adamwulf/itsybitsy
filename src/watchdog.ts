@@ -295,7 +295,7 @@ async function saveUnknownDebugLog(agent: Agent): Promise<void> {
     const output = await captureTmuxOutput(tmuxSession);
     if (output === null) return;
 
-    const agentDir = join(agent.repoPath, ".ittybitsy", "agents", agent.id);
+    const agentDir = join(agent.repoPath, ".ittybitty", "agents", agent.id);
     const debugDir = join(agentDir, "debug-logs");
     mkdirSync(debugDir, { recursive: true });
 
@@ -806,7 +806,7 @@ export function resetPerAgentReadMeta(): void {
  * the bash watchdog's per-agent model. Does NOT use lock files.
  */
 export async function runPerAgentWatchdog(agentId: string, repoPath: string): Promise<void> {
-  const agentDir = join(repoPath, ".ittybitsy", "agents", agentId);
+  const agentDir = join(repoPath, ".ittybitty", "agents", agentId);
   const worktreeDir = join(agentDir, "repo");
 
   // Read agent meta to get tmux session

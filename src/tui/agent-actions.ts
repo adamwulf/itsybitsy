@@ -1124,11 +1124,11 @@ export async function handleAddRepo(ctx: ActionCtx) {
   return handleFolderBrowser(ctx);
 }
 
-/** Count agent directories under .ittybitsy/agents/ and .ittybitsy/archive/ */
+/** Count agent directories under .ittybitty/agents/ and .ittybitty/archive/ */
 async function countAgentDirs(repoPath: string): Promise<{ count: number; error?: string }> {
   let count = 0;
   for (const sub of ["agents", "archive"]) {
-    const dir = join(repoPath, ".ittybitsy", sub);
+    const dir = join(repoPath, ".ittybitty", sub);
     try {
       const entries = await readdir(dir, { withFileTypes: true });
       count += entries.filter((e) => e.isDirectory()).length;

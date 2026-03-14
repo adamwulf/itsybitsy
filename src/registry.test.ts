@@ -199,7 +199,7 @@ describe("registry", () => {
       expect(config["externalDiffTool"]?.value).toBe("my-diff-tool");
     });
 
-    test("migration does not overwrite existing repos.json", async () => {
+    test("migration does not overwrite existing repos.json when no legacy file", async () => {
       // Create existing repos.json
       await mkdir(join(tempDir, ".itsybitsy"), { recursive: true });
       const existingData = { repos: [{ path: "/tmp/existing", name: "existing" }] };
@@ -208,6 +208,25 @@ describe("registry", () => {
       // No legacy file — no migration should occur
       const loaded = await loadRegistry();
       expect(loaded.repos[0]!.path).toBe("/tmp/existing");
+    });
+
+    test("migration does not overwrite repos.json when both files exist", async () => {
+      // Create existing repos.json with current data
+      await mkdir(join(tempDir, ".itsybitsy"), { recursive: true });
+      const existingData = { repos: [{ path: "/tmp/existing", name: "existing" }] };
+      await Bun.write(join(tempDir, ".itsybitsy", "repos.json"), JSON.stringify(existingData));
+
+      // Also create legacy file with different data
+      const legacyData = { repos: [{ path: "/tmp/legacy", name: "legacy" }] };
+      await Bun.write(join(tempDir, ".itsybitsy.json"), JSON.stringify(legacyData));
+
+      // Should keep repos.json data, not overwrite with legacy
+      const loaded = await loadRegistry();
+      expect(loaded.repos[0]!.path).toBe("/tmp/existing");
+
+      // Legacy file should be cleaned up
+      const oldFile = Bun.file(join(tempDir, ".itsybitsy.json"));
+      expect(await oldFile.exists()).toBe(false);
     });
 
     test("migration skips diffTool if not present in legacy file", async () => {

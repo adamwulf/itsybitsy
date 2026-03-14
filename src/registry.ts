@@ -36,6 +36,16 @@ async function migrateIfNeeded(): Promise<void> {
   const legacyFile = Bun.file(legacyPath);
   if (!(await legacyFile.exists())) return;
 
+  // If repos.json already exists, just clean up the legacy file without overwriting
+  const newFile = Bun.file(registryPath());
+  if (await newFile.exists()) {
+    try {
+      const { unlink } = await import("fs/promises");
+      await unlink(legacyPath);
+    } catch { /* non-fatal */ }
+    return;
+  }
+
   try {
     const data = await legacyFile.json() as Record<string, unknown>;
     const repos = Array.isArray(data.repos) ? data.repos : [];

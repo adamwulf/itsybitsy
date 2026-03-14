@@ -2,13 +2,37 @@ import { test, expect, describe } from "bun:test";
 import { processTaskIntercept } from "./intercept-task";
 
 describe("intercept-task", () => {
-  test("skip non-Task tool", async () => {
+  test("skip non-Task/Agent tool", async () => {
     const result = await processTaskIntercept({
       tool_name: "Bash",
       tool_input: { command: "ls" },
       cwd: "/some/path",
     });
     expect(result.action).toBe("skip");
+  });
+
+  test("intercepts Agent tool like Task tool", async () => {
+    const result = await processTaskIntercept(
+      {
+        tool_name: "Agent",
+        tool_input: {
+          prompt: "implement feature X",
+          description: "feature X",
+          subagent_type: "general-purpose",
+        },
+        cwd: "/some/repo",
+      },
+      {
+        spawnAgent: async () => ({
+          ok: true,
+          stdout: "Created agent-deadbeef02 in worktree",
+          stderr: "",
+        }),
+      }
+    );
+
+    expect(result.action).toBe("intercept");
+    expect(result.spawnedAgentId).toBe("agent-deadbeef02");
   });
 
   test("skip worker agent", async () => {

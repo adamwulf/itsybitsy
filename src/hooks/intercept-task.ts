@@ -37,8 +37,8 @@ export async function processTaskIntercept(
     ) => Promise<{ ok: boolean; stdout: string; stderr: string }>;
   }
 ): Promise<InterceptResult> {
-  // 1. Only intercept Task tool
-  if (input.tool_name !== "Task") {
+  // 1. Only intercept Task and Agent tools
+  if (input.tool_name !== "Task" && input.tool_name !== "Agent") {
     return { action: "skip" };
   }
 

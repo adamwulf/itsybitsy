@@ -3337,7 +3337,7 @@ describe("installInterceptHook", () => {
 
     const settings = await Bun.file(settingsFile).json();
     expect(settings.hooks.PreToolUse).toHaveLength(1);
-    expect(settings.hooks.PreToolUse[0].matcher).toBe("Task");
+    expect(settings.hooks.PreToolUse[0].matcher).toBe("Task|Agent");
     expect(settings.hooks.PreToolUse[0].hooks[0].command).toBe("ib hooks intercept-task");
   });
 

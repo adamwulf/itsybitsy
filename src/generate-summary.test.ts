@@ -2,7 +2,30 @@ import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { join } from "path";
 import { mkdtemp, rm, mkdir } from "fs/promises";
 import { tmpdir } from "os";
-import { generateSummary } from "./generate-summary";
+import { generateSummary, isValidAgentDir } from "./generate-summary";
+
+describe("isValidAgentDir", () => {
+  test("rejects relative paths", () => {
+    expect(isValidAgentDir("relative/path")).toBe(false);
+    expect(isValidAgentDir(".ittybitty/agents/foo")).toBe(false);
+  });
+
+  test("rejects paths without .ittybitty/agents/ structure", () => {
+    expect(isValidAgentDir("/tmp/not-an-agent-dir")).toBe(false);
+    expect(isValidAgentDir("/tmp/.ittybitty/foo")).toBe(false);
+    expect(isValidAgentDir("/tmp/.ittybitty")).toBe(false);
+  });
+
+  test("rejects paths with trailing slash or extra segments", () => {
+    expect(isValidAgentDir("/tmp/.ittybitty/agents/foo/")).toBe(false);
+    expect(isValidAgentDir("/tmp/.ittybitty/agents/foo/bar")).toBe(false);
+  });
+
+  test("accepts valid agent directory paths", () => {
+    expect(isValidAgentDir("/tmp/.ittybitty/agents/agent-abc123")).toBe(true);
+    expect(isValidAgentDir("/Users/me/project/.ittybitty/agents/test-agent")).toBe(true);
+  });
+});
 
 describe("generateSummary", () => {
   let tempDir: string;
@@ -33,27 +56,15 @@ describe("generateSummary", () => {
     expect(meta.summary).toBeUndefined();
   });
 
-  test("rejects invalid agentDir paths", async () => {
-    // Relative path
+  test("returns silently for invalid agentDir paths", async () => {
+    // These should return early due to path validation, not throw
     await generateSummary("relative/path");
-    // Missing .ittybitty/agents/ structure
     await generateSummary("/tmp/not-an-agent-dir");
-    // Should not throw — just returns silently
   });
 
-  test("accepts valid agentDir paths", async () => {
-    // Valid path format but missing prompt.txt — should pass validation but return early
+  test("accepts valid agentDir and returns without error", async () => {
+    // Valid agentDir with missing prompt.txt — passes validation, returns early
     await generateSummary(agentDir);
-    // If it didn't throw, validation passed
-  });
-
-  test("handles corrupt meta.json gracefully", async () => {
-    await Bun.write(join(agentDir, "prompt.txt"), "some task");
-    await Bun.write(join(agentDir, "meta.json"), "not valid json {{{");
-    // generateSummary will try to run claude -p which won't be available in test,
-    // but the corrupt JSON handling is wrapped in try/catch, so if claude were
-    // available and returned a summary, the corrupt JSON would not crash
-    // This test verifies the function signature is stable and doesn't throw on setup
-    await generateSummary(agentDir);
+    // No crash = success; prompt.txt missing so no summary written
   });
 });

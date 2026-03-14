@@ -14,9 +14,9 @@ import { join } from "path";
  * Validate that agentDir looks like a legitimate .ittybitty/agents/ path.
  * Prevents arbitrary file system access via the CLI subcommand.
  */
-function isValidAgentDir(agentDir: string): boolean {
+export function isValidAgentDir(agentDir: string): boolean {
   // Must be an absolute path containing the .ittybitty/agents/ structure
-  return agentDir.startsWith("/") && /\/.ittybitty\/agents\/[^/]+$/.test(agentDir);
+  return agentDir.startsWith("/") && /\/\.ittybitty\/agents\/[^/]+$/.test(agentDir);
 }
 
 export async function generateSummary(agentDir: string): Promise<void> {

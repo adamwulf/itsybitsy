@@ -29,7 +29,6 @@ import type { Agent, FlatEntry, PendingQuestion } from "../agents";
 import { SplitPane } from "./split-pane";
 import { wrapLines } from "./wrap";
 import { fetchUsage } from "../usage";
-import { isWatchdogRunning } from "../watchdog";
 import type { UsageData } from "../usage";
 import { getStateColors, setupColorSchemeDetection } from "./color-scheme";
 import { AgentTreeComponent } from "./agent-tree";
@@ -206,8 +205,7 @@ class StatusBarComponent implements Component {
     const now = new Date();
     const timeStr = now.toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
     const versionStr = this.version ? `v${this.version}` : "";
-    const watchdogStr = isWatchdogRunning() ? "[watchdog]  " : "";
-    const row2Right = `${DIM}${watchdogStr}${timeStr}  ${versionStr}${RESET}`;
+    const row2Right = `${DIM}${timeStr}  ${versionStr}${RESET}`;
 
     let row1Left: string;
     let row2Left: string;
@@ -479,16 +477,6 @@ export class DashboardComponent implements Component {
     this.tmuxPoller.start();
     this.refreshUsage();
     this.usageTimer = setInterval(() => this.refreshUsage(), 240_000);
-    // Spawn standalone watchdog as background process if not already running
-    if (!isWatchdogRunning()) {
-      try {
-        const proc = Bun.spawn(["ib", "watchdog"], {
-          stdout: "ignore",
-          stderr: "ignore",
-        });
-        proc.unref();
-      } catch { /* ignore — watchdog is optional */ }
-    }
   }
 
   stopPolling() {

@@ -40,6 +40,8 @@ import {
   resolveAgentId,
   setNewAgentSummaryGenerator,
   resetNewAgentSummaryGenerator,
+  setWatchdogSpawnFn,
+  resetWatchdogSpawnFn,
 } from "./ib-commands";
 import { spawnCtx as lifecycleSpawnCtx } from "./agent-lifecycle";
 import { setUserConfigPath, resetUserConfigPath } from "./config";
@@ -932,6 +934,71 @@ describe("resumeAgent (native)", () => {
     expect(resumeScript).toContain(`'${join(agentDir, "exit-check.sh")}'`);
     // Should NOT have old pattern of embedding path in JS string
     expect(resumeScript).not.toContain("const f='/");
+  });
+
+  test("spawns watchdog for top-level agents (no manager)", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-abc",
+      tmux_session: "tmux-agent-abc",
+      session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    }));
+
+    let watchdogSpawned = false;
+    setWatchdogSpawnFn((_id, _repoPath, _logPath) => {
+      watchdogSpawned = true;
+      return { pid: 12345 };
+    });
+
+    const agent = _makeAgent({
+      id: "agent-abc",
+      repoPath: tempDir,
+      repoName: "test",
+      state: "stopped",
+      meta: {
+        session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        tmux_session: "tmux-agent-abc",
+        manager: null,
+      } as any,
+    });
+    const result = await resumeAgent(agent);
+
+    expect(result.ok).toBe(true);
+    expect(watchdogSpawned).toBe(true);
+    resetWatchdogSpawnFn();
+  });
+
+  test("saves watchdog_pid to meta.json after resumeAgent", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-abc",
+      tmux_session: "tmux-agent-abc",
+      session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    }));
+
+    const fakePid = 54321;
+    setWatchdogSpawnFn((_id, _repoPath, _logPath) => {
+      return { pid: fakePid };
+    });
+
+    const agent = _makeAgent({
+      id: "agent-abc",
+      repoPath: tempDir,
+      repoName: "test",
+      state: "stopped",
+      meta: {
+        session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        tmux_session: "tmux-agent-abc",
+        manager: null,
+      } as any,
+    });
+    await resumeAgent(agent);
+
+    const meta = await Bun.file(join(agentDir, "meta.json")).json();
+    expect(meta.watchdog_pid).toBe(fakePid);
+    resetWatchdogSpawnFn();
   });
 
 });
@@ -2396,6 +2463,40 @@ describe("newAgent (native)", () => {
     const startSh = await Bun.file(join(agentsDir, "test-no-embed", "start.sh")).text();
     // Should NOT have the old pattern of embedding path in JS string
     expect(startSh).not.toContain("const f='/" );
+  });
+
+  test("spawns watchdog for top-level agents (no manager)", async () => {
+    let watchdogSpawned = false;
+    let watchdogAgentId: string | undefined;
+    setWatchdogSpawnFn((id, _repoPath, _logPath) => {
+      watchdogSpawned = true;
+      watchdogAgentId = id;
+      return { pid: 99999 };
+    });
+
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("task", { name: "test-watchdog-toplevel" });
+
+    expect(result.ok).toBe(true);
+    expect(watchdogSpawned).toBe(true);
+    expect(watchdogAgentId).toBe("test-watchdog-toplevel");
+    resetWatchdogSpawnFn();
+  });
+
+  test("saves watchdog_pid to meta.json after newAgent", async () => {
+    const fakePid = 77777;
+    setWatchdogSpawnFn((_id, _repoPath, _logPath) => {
+      return { pid: fakePid };
+    });
+
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("task", { name: "test-watchdog-pid" });
+
+    expect(result.ok).toBe(true);
+    const agentDir = join(agentsDir, "test-watchdog-pid");
+    const meta = await Bun.file(join(agentDir, "meta.json")).json();
+    expect(meta.watchdog_pid).toBe(fakePid);
+    resetWatchdogSpawnFn();
   });
 });
 

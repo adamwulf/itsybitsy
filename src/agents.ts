@@ -23,6 +23,7 @@ export interface AgentMeta {
   model: string;
   claude_pid: string;
   summary?: string;
+  watchdog_pid?: number;
 }
 
 export interface Agent {

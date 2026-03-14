@@ -292,7 +292,7 @@ export async function nukeAllAgents(repoPath: string): Promise<IbCommandResult> 
  * 6. Auto-accept workspace trust if not yolo
  * 7. Send resume nudge
  * 8. Log result
- * 9. Auto-spawn watchdog
+ * 9. Auto-spawn per-agent watchdog
  */
 export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
   const agentDir = join(agent.repoPath, ".ittybitty", "agents", agent.id);
@@ -467,19 +467,33 @@ ${qAbsExitScript}
   // Log
   await logAgent(agentDir, "[resume] Agent resumed, nudge sent");
 
-  // Auto-spawn watchdog if agent has a manager
-  // (top-level agents don't need a watchdog — they have a human watching)
-  if (agent.meta.manager) {
-    try {
-      const watchdogLog = join(agentDir, "watchdog.log");
+  // Auto-spawn per-agent watchdog
+  try {
+    const watchdogLog = join(agentDir, "watchdog.log");
+    let watchdogPid: number | undefined;
+
+    if (watchdogSpawnOverride) {
+      const result = watchdogSpawnOverride(agent.id, agent.repoPath, watchdogLog);
+      watchdogPid = result?.pid;
+    } else {
       const watchdogProc = Bun.spawn(["ib", "watchdog", agent.id], {
         cwd: agent.repoPath,
         stdout: Bun.file(watchdogLog),
         stderr: Bun.file(watchdogLog),
       });
       watchdogProc.unref();
-    } catch { /* ignore */ }
-  }
+      watchdogPid = watchdogProc.pid;
+    }
+
+    if (watchdogPid !== undefined) {
+      const metaPath = join(agentDir, "meta.json");
+      const metaContent = await Bun.file(metaPath).json().catch(() => null);
+      if (metaContent) {
+        metaContent.watchdog_pid = watchdogPid;
+        await Bun.write(metaPath, JSON.stringify(metaContent, null, 2));
+      }
+    }
+  } catch { /* ignore */ }
 
   return { ok: true, exitCode: 0, stdout: `Use 'ib look ${agent.id}' to view output`, stderr: "" };
 }
@@ -1163,6 +1177,20 @@ export function resetNewAgentSpawnRunner(): void {
   newAgentDelayOverrideMs = null;
 }
 
+/** Injectable watchdog spawn for testing — returns PID or undefined */
+type WatchdogSpawnFn = (id: string, repoPath: string, logPath: string) => { pid?: number } | null;
+let watchdogSpawnOverride: WatchdogSpawnFn | null = null;
+
+/** Override watchdog spawn for testing */
+export function setWatchdogSpawnFn(fn: WatchdogSpawnFn): void {
+  watchdogSpawnOverride = fn;
+}
+
+/** Reset watchdog spawn to default */
+export function resetWatchdogSpawnFn(): void {
+  watchdogSpawnOverride = null;
+}
+
 /**
  * Read custom prompts from .ittybitty/prompts/ directory.
  * Mirrors load_custom_prompts() in ib bash.
@@ -1786,19 +1814,33 @@ ${qStartExitScript}
     autoAcceptWorkspaceTrustForNewAgent(tmuxSession).catch(() => {});
   }
 
-  // 22. Auto-spawn watchdog if agent has a manager
-  // (top-level agents don't need a watchdog — they have a human watching)
-  if (manager) {
-    try {
-      const watchdogLog = join(agentDir, "watchdog.log");
+  // 22. Auto-spawn per-agent watchdog
+  try {
+    const watchdogLog = join(agentDir, "watchdog.log");
+    let watchdogPid: number | undefined;
+
+    if (watchdogSpawnOverride) {
+      const result = watchdogSpawnOverride(id, rootRepoPath, watchdogLog);
+      watchdogPid = result?.pid;
+    } else {
       const watchdogProc = Bun.spawn(["ib", "watchdog", id], {
         cwd: rootRepoPath,
         stdout: Bun.file(watchdogLog),
         stderr: Bun.file(watchdogLog),
       });
       watchdogProc.unref();
-    } catch { /* ignore */ }
-  }
+      watchdogPid = watchdogProc.pid;
+    }
+
+    if (watchdogPid !== undefined) {
+      const metaPath = join(agentDir, "meta.json");
+      const metaContent = await Bun.file(metaPath).json().catch(() => null);
+      if (metaContent) {
+        metaContent.watchdog_pid = watchdogPid;
+        await Bun.write(metaPath, JSON.stringify(metaContent, null, 2));
+      }
+    }
+  } catch { /* ignore */ }
 
   // 23. Generate prompt summary in background (fire-and-forget)
   generatePromptSummary(agentDir).catch(() => {});

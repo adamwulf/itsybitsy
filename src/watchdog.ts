@@ -1,20 +1,17 @@
 /**
  * Built-in watchdog for itsybitsy.
- * Monitors all agents across all repos, detects state transitions,
- * and notifies managers when agents need attention.
+ * Monitors agents, detects state transitions, and notifies managers.
  *
- * Runs as a standalone background process (`ib watchdog`).
- * Uses a PID lock file at ~/.itsybitsy/watchdog.lock for single-instance.
+ * Per-agent watchdog: runs as a standalone background process (`ib watchdog <id>`).
+ * Each agent gets its own watchdog process — no global lock file needed.
  *
  * Phase 15-A: Core loop + waiting/unknown handler with exponential backoff.
  * Phase 15-B: complete/running/creating/compacting/stopped/rate_limited handlers.
- * Phase 20: Standalone watchdog process with lock file management.
  */
 
 import { join } from "path";
-import { homedir } from "os";
-import { readFileSync, unlinkSync, mkdirSync, openSync, closeSync, writeSync, constants as fsConstants } from "fs";
-import { readAllAgents, readRepoAgents, detectAgentStates } from "./agents";
+import { mkdirSync } from "fs";
+import { readRepoAgents, detectAgentStates } from "./agents";
 import type { Agent } from "./agents";
 import { captureTmuxOutput } from "./tmux-poller";
 import { logAgent } from "./agent-lifecycle";
@@ -22,18 +19,13 @@ import { parseState } from "./parse-state";
 import type { AgentState } from "./parse-state";
 import { sendMessage } from "./ib-commands";
 import { fetchUsage } from "./usage";
-import type { UsageData, UsageResult } from "./usage";
+import type { UsageResult } from "./usage";
 import { SpawnContext } from "./types";
 import type { SpawnFn } from "./types";
-import type { RepoEntry } from "./registry";
 import { checkAndCompact } from "./auto-compact";
 import type { CompactState } from "./auto-compact";
 import { readConfig } from "./config";
 import { isValidTmuxSession } from "./validation";
-
-/** Function that returns the current list of agents. Used by the watchdog loop.
- * Can be sync (TUI watcher cache) or async (disk-based standalone watchdog). */
-export type AgentProvider = () => Agent[] | Promise<Agent[]>;
 
 /** Per-agent tracking state managed by the watchdog */
 export interface AgentTracker {
@@ -422,181 +414,12 @@ registerStateHandler("compacting", handleCompacting);
 registerStateHandler("rate_limited", handleRateLimited);
 registerStateHandler("stopped", handleStopped);
 
-// ---------------------------------------------------------------------------
-// Lock file management
-// ---------------------------------------------------------------------------
-
-const LOCK_DIR = join(process.env.HOME ?? homedir(), ".itsybitsy");
-const LOCK_FILE = join(LOCK_DIR, "watchdog.lock");
-
-/** Override lock file path for testing */
-let lockFilePath = LOCK_FILE;
-
-/** Set lock file path (for testing) */
-export function setLockFilePath(path: string): void {
-  lockFilePath = path;
-}
-
-/** Reset lock file path to default */
-export function resetLockFilePath(): void {
-  lockFilePath = LOCK_FILE;
-}
-
-/** Check if a PID is alive */
-function isPidAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch { /* expected: process is dead */
-    return false;
-  }
-}
-
-/**
- * Acquire the watchdog lock file.
- * Writes current PID to ~/.itsybitsy/watchdog.lock.
- * Returns true if acquired (no lock, or stale PID). False if another watchdog is running.
- *
- * Uses O_EXCL for atomic lock creation to prevent TOCTOU races where two
- * processes could both read "no lock" and then both write their PID.
- */
-/**
- * Atomically create the lock file with O_EXCL and write our PID.
- * Returns true if the file was created, false if it already existed.
- */
-function atomicCreateLock(): boolean {
-  try {
-    const fd = openSync(lockFilePath, fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY);
-    writeSync(fd, Buffer.from(String(process.pid), "utf-8"));
-    closeSync(fd);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-export function acquireWatchdogLock(): boolean {
-  const dir = join(lockFilePath, "..");
-  try {
-    mkdirSync(dir, { recursive: true });
-  } catch { /* dir exists */ }
-
-  // Try atomic creation first — O_CREAT | O_EXCL | O_WRONLY fails if file exists
-  if (atomicCreateLock()) return true;
-
-  // Lock file exists — check for stale PID
-  try {
-    const content = readFileSync(lockFilePath, "utf-8").trim();
-    const pid = parseInt(content, 10);
-    if (!isNaN(pid) && isPidAlive(pid)) {
-      return false; // Another live watchdog holds the lock
-    }
-  } catch { /* Can't read lock file — treat as stale */ }
-
-  // Stale lock — remove and try atomic creation again
-  try { unlinkSync(lockFilePath); } catch { /* race with another process */ }
-  return atomicCreateLock();
-}
-
-/**
- * Release the watchdog lock file.
- * Only removes the file if it contains our PID.
- */
-export function releaseWatchdogLock(): void {
-  try {
-    const content = readFileSync(lockFilePath, "utf-8").trim();
-    const pid = parseInt(content, 10);
-    if (pid === process.pid) {
-      unlinkSync(lockFilePath);
-    }
-  } catch { /* lock file doesn't exist or already removed */ }
-}
-
-/**
- * Read the PID from the lock file, or null if no valid lock exists.
- */
-export function readLockPid(): number | null {
-  try {
-    const content = readFileSync(lockFilePath, "utf-8").trim();
-    const pid = parseInt(content, 10);
-    if (!isNaN(pid)) return pid;
-  } catch { /* no lock file */ }
-  return null;
-}
+/** States that use the wait counter / backoff system */
+const BACKOFF_STATES = new Set<AgentState>(["waiting", "unknown"]);
 
 // ---------------------------------------------------------------------------
-// Disk-based agent provider (for standalone watchdog)
+// Tick helper (used by state handler tests)
 // ---------------------------------------------------------------------------
-
-/** Injectable readAllAgents for testing */
-type ReadAllAgentsFn = typeof readAllAgents;
-let readAllAgentsFn: ReadAllAgentsFn = readAllAgents;
-
-/** Injectable detectAgentStates for testing */
-type DetectAgentStatesFn = typeof detectAgentStates;
-let detectAgentStatesFn: DetectAgentStatesFn = detectAgentStates;
-
-/** Override readAllAgents for testing */
-export function setDiskProviderReadAllAgents(fn: ReadAllAgentsFn): void {
-  readAllAgentsFn = fn;
-}
-
-/** Reset readAllAgents to default */
-export function resetDiskProviderReadAllAgents(): void {
-  readAllAgentsFn = readAllAgents;
-}
-
-/** Override detectAgentStates for testing */
-export function setDiskProviderDetectAgentStates(fn: DetectAgentStatesFn): void {
-  detectAgentStatesFn = fn;
-}
-
-/** Reset detectAgentStates to default */
-export function resetDiskProviderDetectAgentStates(): void {
-  detectAgentStatesFn = detectAgentStates;
-}
-
-/**
- * Create an AgentProvider that reads agents from disk on every call.
- * Uses readAllAgents() + detectAgentStates() to get fresh state each tick.
- * This is the standalone watchdog's provider — no TUI dependency.
- */
-export function createDiskAgentProvider(repos: RepoEntry[]): AgentProvider {
-  return async () => {
-    const { agents } = await readAllAgentsFn(repos);
-    if (agents.length > 0) {
-      await detectAgentStatesFn(agents);
-    }
-    return agents;
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Core watchdog loop
-// ---------------------------------------------------------------------------
-
-let watchdogTimer: ReturnType<typeof setInterval> | null = null;
-let agentProvider: AgentProvider | null = null;
-
-/**
- * Process a single tick of the watchdog loop.
- * Exported for testing — in production, called by setInterval.
- */
-export async function tick(agents: Agent[]): Promise<void> {
-  // Build a set of current agent IDs to prune stale trackers
-  const currentIds = new Set<string>();
-  collectIds(agents, currentIds);
-
-  // Prune trackers for agents that no longer exist
-  for (const id of trackers.keys()) {
-    if (!currentIds.has(id)) {
-      trackers.delete(id);
-    }
-  }
-
-  // Process each agent
-  await processAgents(agents, agents);
-}
 
 /** Recursively collect all agent IDs */
 function collectIds(agents: Agent[], ids: Set<string>): void {
@@ -605,9 +428,6 @@ function collectIds(agents: Agent[], ids: Set<string>): void {
     collectIds(agent.children, ids);
   }
 }
-
-/** States that use the wait counter / backoff system */
-const BACKOFF_STATES = new Set<AgentState>(["waiting", "unknown"]);
 
 /** Recursively process all agents through their state handlers */
 async function processAgents(agents: Agent[], allAgents: Agent[]): Promise<void> {
@@ -620,8 +440,6 @@ async function processAgents(agents: Agent[], allAgents: Agent[]): Promise<void>
     }
 
     // Reset wait counter and backoff when transitioning away from backoff states.
-    // Matches bash watchdog: running/creating/complete/stopped/compacting/rate_limited
-    // all reset waiting_counter=0 and notify_interval=6.
     if (!BACKOFF_STATES.has(agent.state)) {
       tracker.waitCounter = 0;
       tracker.notifyInterval = INITIAL_NOTIFY_TICKS;
@@ -654,51 +472,23 @@ async function processAgents(agents: Agent[], allAgents: Agent[]): Promise<void>
 }
 
 /**
- * Start the watchdog loop.
- * Accepts an AgentProvider function that returns the current agent list
- * on each tick. Typically, the caller passes a closure over the watcher's
- * cached agents (e.g., `() => watcher.lastAgents`).
+ * Process a single tick for a list of agents.
+ * Exported for testing — used by state handler tests.
  */
-export function startWatchdog(provider: AgentProvider): void {
-  if (watchdogTimer) return; // Already running
+export async function tick(agents: Agent[]): Promise<void> {
+  // Build a set of current agent IDs to prune stale trackers
+  const currentIds = new Set<string>();
+  collectIds(agents, currentIds);
 
-  agentProvider = provider;
-
-  // Run the watchdog tick every POLL_INTERVAL_MS
-  watchdogTimer = setInterval(async () => {
-    try {
-      const agents = await Promise.resolve(agentProvider?.() ?? []);
-      if (agents.length > 0) {
-        await tick(agents);
-      }
-    } catch (err) {
-      // Log but don't crash — unhandled rejections in setInterval are fatal
-      console.error("[watchdog] tick error:", err);
+  // Prune trackers for agents that no longer exist
+  for (const id of trackers.keys()) {
+    if (!currentIds.has(id)) {
+      trackers.delete(id);
     }
-  }, POLL_INTERVAL_MS);
-}
-
-/**
- * Stop the watchdog loop and clean up.
- */
-export function stopWatchdog(): void {
-  if (watchdogTimer) {
-    clearInterval(watchdogTimer);
-    watchdogTimer = null;
   }
-  agentProvider = null;
-  trackers.clear();
-}
 
-/**
- * Check if a watchdog is currently running.
- * Reads the lock file and checks if the PID is alive.
- * Works across processes — the TUI can detect a standalone watchdog.
- */
-export function isWatchdogRunning(): boolean {
-  const pid = readLockPid();
-  if (pid === null) return false;
-  return isPidAlive(pid);
+  // Process each agent
+  await processAgents(agents, agents);
 }
 
 // ---------------------------------------------------------------------------

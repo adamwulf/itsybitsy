@@ -56,7 +56,7 @@ When a new agent is created (`ib new-agent "prompt"`):
 
 15. **Auto-accept workspace trust**: For non-yolo agents, a background process polls tmux output for permission prompts ("Do you trust the files", "trust this folder", "Allow external CLAUDE.md file imports") and sends Enter to accept them. Runs up to 5 attempts with 4-second waits between each.
 
-16. **Auto-spawn watchdog**: If the agent has a manager, `ib watchdog <id>` is spawned in the background with output redirected to `<agent-dir>/watchdog.log`.
+16. **Auto-spawn watchdog**: `ib watchdog <id>` is spawned in the background for ALL agents (not just those with a manager), with output redirected to `<agent-dir>/watchdog.log`. The watchdog PID is saved to `meta.json` as `watchdog_pid`.
 
 17. **Output**: The agent ID is printed to stdout immediately after tmux session creation.
 
@@ -148,7 +148,7 @@ Resume (`ib resume <id>`) restarts a stopped agent:
 4. Start new tmux session running `resume.sh`
 5. Auto-accept workspace trust (if not yolo)
 6. Send resume nudge message: "Resume your work, or end with 'WAITING' or 'I HAVE COMPLETED THE GOAL' as your final line."
-7. **Auto-spawn watchdog**: If the agent has a manager, `ib watchdog` is spawned in the background. Top-level agents (no manager) do not get a watchdog since a human is watching them. The TypeScript implementation includes this step; the bash `cmd_resume()` does not (known bug — the per-agent watchdog from `cmd_new_agent()` is lost after pause/resume).
+7. **Auto-spawn watchdog**: `ib watchdog <id>` is spawned in the background for ALL agents (not just those with a manager). The watchdog PID is saved to `meta.json` as `watchdog_pid`. The bash `cmd_resume()` does not include this step (known divergence).
 
 ### 1.7 Archiving
 
@@ -658,11 +658,11 @@ Reads Claude transcript JSONL files to determine context window usage percentage
 
 ### 8.5 Watchdog
 
-`ib watchdog <id>` runs as a background loop for a single agent with a manager, polling agent state every 5 seconds. Both bash and TS use per-agent watchdog processes when spawned via CLI.
+`ib watchdog <id>` runs as a background loop for a single agent, polling agent state every 5 seconds. ALL agents get a per-agent watchdog — both top-level agents and sub-agents with a manager. The watchdog PID is saved to `meta.json` as `watchdog_pid`.
 
 **Exit conditions**: The watchdog exits when: (a) the agent's worktree directory is removed (`while [[ -d "$AGENT_DIR/repo" ]]`), which happens on kill/merge/nuke, or (b) in TS, the agent's tmux session has been missing for >10 consecutive seconds (grace period). Bash does **not** check tmux session existence, so it survives pause and must be exited by worktree removal only. On resume, a new watchdog is spawned (§1.6 step 7).
 
-The TUI dashboard uses a global watchdog loop internally (`startWatchdog`/`stopWatchdog`) that monitors all agents via an `AgentProvider`, with a PID lock file at `~/.itsybitsy/watchdog.lock` for single-instance enforcement. The global watchdog can also be run standalone via `ib watchdog` (no agent ID). Per-agent watchdogs spawned by `newAgent`/`resumeAgent` do not use lock files.
+Per-agent watchdogs do not use lock files. There is no global watchdog.
 
 **Monitoring behaviors by state:**
 

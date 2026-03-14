@@ -90,7 +90,7 @@ export function resetUserConfigPath(): void {
 }
 
 export function defaultUserConfigPath(): string {
-  return overrideUserConfigPath ?? join(process.env.HOME ?? homedir(), ".ittybitty", "config.json");
+  return overrideUserConfigPath ?? join(process.env.HOME ?? homedir(), ".itsybitsy", "config.json");
 }
 
 export interface ReadConfigOptions {

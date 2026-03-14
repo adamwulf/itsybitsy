@@ -3052,7 +3052,7 @@ describe("hooksStatus", () => {
 
   test("does not detect itsybitsy-prefixed hooks as installed", async () => {
     await mkdir(join(tempDir, ".claude"), { recursive: true });
-    await Bun.write(join(tempDir, ".claude", "settings.local.json"), JSON.stringify({
+    await Bun.write(settingsFile, JSON.stringify({
       hooks: {
         PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "itsybitsy hooks main-path" }] }],
         UserPromptSubmit: [{ hooks: [{ type: "command", command: "itsybitsy hooks inject-status --full --visible" }] }],
@@ -3060,7 +3060,7 @@ describe("hooksStatus", () => {
         SessionStart: [{ hooks: [{ type: "command", command: "itsybitsy hooks session-start" }] }],
       },
     }));
-    const result = await hooksStatus(tempDir);
+    const result = await hooksStatus(tempDir, settingsFile);
     expect(result.stdout).toBe("not-installed");
   });
 
@@ -3121,12 +3121,12 @@ describe("interceptHooksStatus", () => {
 
   test("does not detect itsybitsy-prefixed intercept hook as installed", async () => {
     await mkdir(join(tempDir, ".claude"), { recursive: true });
-    await Bun.write(join(tempDir, ".claude", "settings.local.json"), JSON.stringify({
+    await Bun.write(settingsFile, JSON.stringify({
       hooks: {
         PreToolUse: [{ matcher: "Task", hooks: [{ type: "command", command: "itsybitsy hooks intercept-task" }] }],
       },
     }));
-    const result = await interceptHooksStatus(tempDir);
+    const result = await interceptHooksStatus(tempDir, settingsFile);
     expect(result.stdout).toBe("not-installed");
   });
 

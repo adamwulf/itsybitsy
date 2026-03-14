@@ -665,8 +665,8 @@ New file: `src/watchdog.ts`. This is the highest-complexity feature but also the
 - [x] Track `compactSent` flag per agent to avoid duplicate sends; clear when context drops below threshold or agent resumes.
 
 **Dashboard integration:**
-- [x] Watchdog starts automatically with `itsybitsy watch`.
-- [x] Show `[watchdog]` indicator in footer when watchdog is active.
+- [x] ~~Watchdog starts automatically with `itsybitsy watch`.~~ (Removed: dashboard no longer manages watchdog)
+- [x] ~~Show `[watchdog]` indicator in footer when watchdog is active.~~ (Removed: per-agent watchdogs don't have a global indicator)
 
 ---
 
@@ -1051,10 +1051,11 @@ The following commands existed in `ib-commands.ts` but were NOT wired as CLI cas
 
 **Goal:** Make watchdog behavior match the bash `ib` — every agent gets a watchdog, and the TUI has no watchdog logic.
 
-**Fixes:**
-- [x] Remove `if (manager)` guard in `newAgent()` — all agents (managers + workers) spawn a watchdog on creation (no guard exists — watchdog spawns unconditionally)
-- [x] Add watchdog spawn to `resumeAgent()` — same as `newAgent()`, after tmux session starts. Watchdog is singleton so harmless if already running.
-- [x] Remove any watchdog logic from `src/watcher.ts` — TUI has no watchdog behavior; watcher.ts has zero watchdog references
+**Fixes (superseded by Phase 39d):**
+- [x] Remove `if (manager)` guard in `newAgent()` — all agents get a per-agent watchdog, PID saved to meta.json
+- [x] Add watchdog spawn to `resumeAgent()` — all agents get a per-agent watchdog, PID saved to meta.json
+- [x] Remove global watchdog loop and lock file management from `src/watchdog.ts`
+- [x] Remove `isWatchdogRunning()` and `[watchdog]` indicator from dashboard
 
 **Also noted (future):**
 - Auto-compact not wired into watchdog — `src/auto-compact.ts` exists but watchdog never calls it. Bash watchdog proactively sends `/compact` when context usage exceeds threshold.
@@ -1611,24 +1612,21 @@ TS currently only scans agent directories and returns `null` for 0 or 2+ matches
 - [ ] Add tests for the tmux-session-only match case and ambiguous match listing
 - [ ] Update SPEC.md §8.1 to remove the `[^callout]`
 
-#### 39d: Per-process watchdog (one process per agent)
+#### 39d: Per-process watchdog (one process per agent) -- COMPLETE
 
-**Files:** `src/watchdog.ts`, `src/ib-commands.ts`, `src/watcher.ts`
+**Files:** `src/watchdog.ts`, `src/ib-commands.ts`, `src/index.ts`, `src/tui/dashboard.ts`
 
-**SPEC.md:** §8.5, line ~668
+**SPEC.md:** §8.5
 
-Currently TS runs a single global watchdog loop monitoring all agents. Bash spawns a separate `ib watchdog <id>` process per agent — that process runs its own loop and exits when the agent's worktree is removed or tmux session disappears.
-
-Migrate TS to the same model:
-- [ ] `ib watchdog <id>` (already the CLI entry point) should run a self-contained loop for a single agent and exit cleanly when:
-  - The agent's worktree directory no longer exists, OR
-  - The agent's tmux session has been missing for >10 consecutive seconds (grace period)
-- [ ] `newAgent()` spawns `ib watchdog <id>` as a detached background process (already does this via `Bun.spawn` — verify it's correct)
-- [ ] `resumeAgent()` likewise spawns `ib watchdog <id>` detached after restarting the session (Phase 37b already added this — verify it calls the per-agent form correctly)
-- [ ] Remove the global watchdog loop from `watcher.ts` (or wherever the current polling loop lives) — state detection for the dashboard should come from `detectAgentStates()` alone, not from a separate global watchdog loop
-- [ ] The watchdog process should NOT be started for top-level agents (no manager) — a human is watching those
-- [ ] Add tests for watchdog exit on worktree removal and missing tmux session
-- [ ] Update SPEC.md §8.5 to remove the `[^callout]`, describe both bash and TS as using per-agent watchdog processes
+Migrated TS to per-agent watchdog model matching bash:
+- [x] `ib watchdog <id>` runs a self-contained loop for a single agent, exiting when worktree is removed or tmux gone >10s
+- [x] `newAgent()` spawns `ib watchdog <id>` for ALL agents (not just sub-agents) — watchdog PID saved to `meta.json`
+- [x] `resumeAgent()` likewise spawns `ib watchdog <id>` for ALL agents — watchdog PID saved to `meta.json`
+- [x] Removed global watchdog loop (`startWatchdog`/`stopWatchdog`/`tick`/`processAgents`/lock file) from `src/watchdog.ts`
+- [x] Removed `isWatchdogRunning()` and `[watchdog]` indicator from dashboard
+- [x] `ib watchdog` CLI now requires an agent ID (no global mode)
+- [x] Updated SPEC.md §8.5 to describe per-agent watchdog architecture
+- [x] Added `watchdog_pid` field to `AgentMeta`
 
 ---
 

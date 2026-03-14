@@ -583,7 +583,7 @@ Files: `src/tui/dashboard.ts`, `src/config.ts`.
 
 **Tab switching:**
 - [x] Add tab bar at top of setup dialog: `[Setup] [Config]`. Active tab is highlighted.
-- [x] Switch tabs via `1`/`2` number keys, Tab/Shift+Tab, or left/right arrows.
+- [x] Switch tabs via `1`/`2` number keys or Tab/Shift+Tab.
 
 **Tab 1 — Config** (`~/.ittybitty/config.json`):
 - [x] Render config keys as a select list. Each row: `key: value (source)`.

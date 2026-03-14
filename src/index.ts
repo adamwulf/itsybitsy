@@ -550,6 +550,8 @@ async function main() {
       if (extraArgs.length > 0) {
         console.error(`Warning: unknown arguments ignored: ${extraArgs.join(" ")}`);
       }
+      const { detectAgentStates } = await import("./agents");
+      await detectAgentStates([agent]);
       const { resumeAgent } = await import("./ib-commands");
       await printAndExit(await resumeAgent(agent));
       break;

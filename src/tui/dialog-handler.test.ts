@@ -356,6 +356,82 @@ describe("fuzzyFilterIndices", () => {
   });
 });
 
+// ─── paste support ──────────────────────────────────────
+
+describe("paste support in input dialog", () => {
+  function makeInput() {
+    let submitted = "";
+    const dialog: NonNullable<DialogState> = {
+      type: "input", prompt: "Enter value:", value: "",
+      onSubmit: (v: string) => { submitted = v; },
+    };
+    const ctx = makeDialogCtx(dialog);
+    return { ctx, dialog: dialog as Extract<NonNullable<DialogState>, { type: "input" }>, get submitted() { return submitted; } };
+  }
+
+  test("multi-char paste appends to value", () => {
+    const { ctx, dialog } = makeInput();
+    dialog.value = "hello";
+    handleDialogInput(ctx, " world");
+    expect(dialog.value).toBe("hello world");
+  });
+
+  test("multi-char paste replaces newlines with spaces", () => {
+    const { ctx, dialog } = makeInput();
+    handleDialogInput(ctx, "line1\nline2");
+    expect(dialog.value).toBe("line1 line2");
+  });
+
+  test("bracketed paste is handled in input dialog", () => {
+    const { ctx, dialog } = makeInput();
+    handleDialogInput(ctx, "\x1b[200~pasted text\x1b[201~");
+    expect(dialog.value).toBe("pasted text");
+  });
+});
+
+describe("paste support in handleTextEdit", () => {
+  test("multi-char paste inserts into lines", () => {
+    const lines = ["hello"];
+    const result = handleTextEdit("pasted text", lines);
+    expect(result).toBe(true);
+    expect(lines).toEqual(["hellopasted text"]);
+  });
+
+  test("multiline paste splits across lines", () => {
+    const lines = ["start"];
+    handleTextEdit("line1\nline2", lines);
+    expect(lines).toEqual(["startline1", "line2"]);
+  });
+
+  test("bracketed paste is handled", () => {
+    const lines = [""];
+    handleTextEdit("\x1b[200~hello world\x1b[201~", lines);
+    expect(lines).toEqual(["hello world"]);
+  });
+
+  test("Ctrl+V is consumed (returns true)", () => {
+    const lines = [""];
+    const result = handleTextEdit("\x16", lines);
+    expect(result).toBe(true);
+  });
+});
+
+describe("paste support in fuzzy dialog", () => {
+  test("multi-char paste appends to query", () => {
+    const allItems = ["apple", "banana"];
+    const dialog: NonNullable<DialogState> = {
+      type: "fuzzy", prompt: "Search:", query: "",
+      allItems, filteredIndices: [0, 1], filteredItems: [...allItems],
+      selectedIndex: 0,
+      onSelect: () => {},
+    };
+    const ctx = makeDialogCtx(dialog);
+    handleDialogInput(ctx, "app");
+    const d = dialog as Extract<NonNullable<DialogState>, { type: "fuzzy" }>;
+    expect(d.query).toBe("app");
+  });
+});
+
 // ─── null dialog returns false ──────────────────────────
 
 describe("handleDialogInput with null", () => {

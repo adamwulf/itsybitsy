@@ -8,6 +8,7 @@ import { wrapSingleLine } from "./wrap";
 import { buildFolderItems } from "./folder-browser";
 import type { FolderItem } from "./folder-browser";
 import { RESET, BOLD, DIM, REVERSE, GREEN, DIM_GRAY } from "./colors";
+import { readClipboard, isPasteData, extractBracketedPaste, insertTextIntoLines } from "./clipboard";
 
 export const TEXTAREA_VISIBLE_HEIGHT = 5;
 export const FOLDER_BROWSER_HEIGHT = 15;
@@ -122,7 +123,7 @@ export function fuzzyFilterIndices(items: string[], query: string): number[] {
  * Alt-backspace (word delete), and printable character input.
  * Returns true if the input was handled.
  */
-export function handleTextEdit(data: string, lines: string[]): boolean {
+export function handleTextEdit(data: string, lines: string[], ctx?: DialogCtx | null): boolean {
   if (matchesKey(data, Key.enter) || matchesKey(data, Key.shift("enter"))) {
     lines.push("");
     return true;
@@ -148,12 +149,48 @@ export function handleTextEdit(data: string, lines: string[]): boolean {
     }
     return true;
   }
+  // Paste support: Ctrl+V, bracketed paste, or multi-char printable data
+  const pasteApply = (text: string) => {
+    insertTextIntoLines(lines, text);
+    ctx?.tui?.requestRender();
+  };
+  const pasteText = resolvePasteText(data, pasteApply);
+  if (pasteText !== null) {
+    insertTextIntoLines(lines, pasteText);
+    return true;
+  }
+  // Ctrl+V returns null from resolvePasteText but triggers async paste
+  if (data === "\x16") return true;
+
   if (data.length === 1 && data >= " ") {
     const lastIdx = lines.length - 1;
     lines[lastIdx] = (lines[lastIdx] ?? "") + data;
     return true;
   }
   return false;
+}
+
+/** Resolve paste data from input.
+ *  Returns the text to insert synchronously (for bracketed paste / multi-char paste),
+ *  or null if the data is a Ctrl+V that triggers an async clipboard read.
+ *  For Ctrl+V, calls the callback asynchronously with the clipboard text. */
+function resolvePasteText(
+  data: string,
+  onAsyncPaste: (text: string) => void,
+): string | null {
+  // Ctrl+V (0x16) → async clipboard read
+  if (data === "\x16") {
+    readClipboard().then((text) => {
+      if (text) onAsyncPaste(text);
+    });
+    return null;
+  }
+  // Bracketed paste sequence
+  const bracketed = extractBracketedPaste(data);
+  if (bracketed !== null) return bracketed;
+  // Multi-character paste (printable text, not an escape sequence)
+  if (isPasteData(data)) return data;
+  return null;
 }
 
 /** Minimal context interface for dialog input handling */
@@ -212,9 +249,18 @@ export function handleDialogInput(ctx: DialogCtx, data: string): boolean {
     } else if (matchesKey(data, Key.backspace) || data === "\x7f") {
       dialog.value = dialog.value.slice(0, -1);
       ctx.tui?.requestRender();
-    } else if (data.length === 1 && data >= " ") {
-      dialog.value += data;
-      ctx.tui?.requestRender();
+    } else {
+      const pasteApply = (text: string) => {
+        dialog.value += text.replace(/[\r\n]/g, " ");
+        ctx.tui?.requestRender();
+      };
+      const pasteText = resolvePasteText(data, pasteApply);
+      if (pasteText !== null) {
+        pasteApply(pasteText);
+      } else if (data.length === 1 && data >= " ") {
+        dialog.value += data;
+        ctx.tui?.requestRender();
+      }
     }
     return true;
   }
@@ -280,7 +326,7 @@ function handleTextareaDialog(
     } else if (matchesKey(data, Key.shift("tab"))) {
       d.focusedButton = "send";
       ctx.tui?.requestRender();
-    } else if (handleTextEdit(data, d.lines)) {
+    } else if (handleTextEdit(data, d.lines, ctx)) {
       ctx.tui?.requestRender();
     }
   } else if (d.focusedButton === "send") {
@@ -292,9 +338,8 @@ function handleTextareaDialog(
     } else if (matchesKey(data, Key.shift("tab")) || matchesKey(data, Key.left)) {
       d.focusedButton = "cancel";
       ctx.tui?.requestRender();
-    } else if (data.length === 1 && data >= " ") {
+    } else if (handleTextEdit(data, d.lines, ctx)) {
       d.focusedButton = "text";
-      handleTextEdit(data, d.lines);
       ctx.tui?.requestRender();
     }
   } else if (d.focusedButton === "cancel") {
@@ -306,9 +351,8 @@ function handleTextareaDialog(
     } else if (matchesKey(data, Key.shift("tab")) || matchesKey(data, Key.left)) {
       d.focusedButton = "text";
       ctx.tui?.requestRender();
-    } else if (data.length === 1 && data >= " ") {
+    } else if (handleTextEdit(data, d.lines, ctx)) {
       d.focusedButton = "text";
-      handleTextEdit(data, d.lines);
       ctx.tui?.requestRender();
     }
   }
@@ -349,10 +393,21 @@ function handleNewAgentFormDialog(
     } else if (matchesKey(data, Key.backspace) || data === "\x7f") {
       d.name = d.name.slice(0, -1);
       ctx.tui?.requestRender();
-    } else if (data.length === 1 && data >= " ") {
-      // Allow only alphanumeric and '-'; replace anything else with '-'
-      d.name += /^[a-zA-Z0-9-]$/.test(data) ? data : "-";
-      ctx.tui?.requestRender();
+    } else {
+      // Paste support for name field: sanitize to alphanumeric and '-'
+      const sanitizeName = (text: string) => text.replace(/[^a-zA-Z0-9-]/g, "-");
+      const namePasteApply = (text: string) => {
+        d.name += sanitizeName(text.replace(/[\r\n]/g, "-"));
+        ctx.tui?.requestRender();
+      };
+      const namePaste = resolvePasteText(data, namePasteApply);
+      if (namePaste !== null) {
+        namePasteApply(namePaste);
+      } else if (data.length === 1 && data >= " ") {
+        // Allow only alphanumeric and '-'; replace anything else with '-'
+        d.name += /^[a-zA-Z0-9-]$/.test(data) ? data : "-";
+        ctx.tui?.requestRender();
+      }
     }
   } else if (d.focused === "worker") {
     if (matchesKey(data, Key.tab)) { nextFocus(); }
@@ -364,7 +419,7 @@ function handleNewAgentFormDialog(
   } else if (d.focused === "prompt") {
     if (matchesKey(data, Key.tab)) { nextFocus(); }
     else if (matchesKey(data, Key.shift("tab"))) { prevFocus(); }
-    else if (handleTextEdit(data, d.lines)) {
+    else if (handleTextEdit(data, d.lines, ctx)) {
       ctx.tui?.requestRender();
     }
   } else if (d.focused === "create") {
@@ -375,18 +430,16 @@ function handleNewAgentFormDialog(
       }
     } else if (matchesKey(data, Key.tab) || matchesKey(data, Key.right)) { nextFocus(); }
     else if (matchesKey(data, Key.shift("tab")) || matchesKey(data, Key.left)) { prevFocus(); }
-    else if (data.length === 1 && data >= " ") {
+    else if (handleTextEdit(data, d.lines, ctx)) {
       d.focused = "prompt";
-      handleTextEdit(data, d.lines);
       ctx.tui?.requestRender();
     }
   } else if (d.focused === "cancel") {
     if (matchesKey(data, Key.enter)) { ctx.closeDialog(); }
     else if (matchesKey(data, Key.tab) || matchesKey(data, Key.right)) { nextFocus(); }
     else if (matchesKey(data, Key.shift("tab")) || matchesKey(data, Key.left)) { prevFocus(); }
-    else if (data.length === 1 && data >= " ") {
+    else if (handleTextEdit(data, d.lines, ctx)) {
       d.focused = "prompt";
-      handleTextEdit(data, d.lines);
       ctx.tui?.requestRender();
     }
   }
@@ -578,10 +631,20 @@ function handleFuzzyDialog(
     d.query = d.query.slice(0, -1);
     refilter();
     ctx.tui?.requestRender();
-  } else if (data.length === 1 && data >= " ") {
-    d.query += data;
-    refilter();
-    ctx.tui?.requestRender();
+  } else {
+    const fuzzyPasteApply = (text: string) => {
+      d.query += text.replace(/[\r\n]/g, " ");
+      refilter();
+      ctx.tui?.requestRender();
+    };
+    const fuzzyPaste = resolvePasteText(data, fuzzyPasteApply);
+    if (fuzzyPaste !== null) {
+      fuzzyPasteApply(fuzzyPaste);
+    } else if (data.length === 1 && data >= " ") {
+      d.query += data;
+      refilter();
+      ctx.tui?.requestRender();
+    }
   }
   return true;
 }
@@ -614,9 +677,18 @@ function handlePermissionsEditorDialog(
     } else if (matchesKey(data, Key.backspace) || data === "\x7f") {
       d.inputValue = d.inputValue.slice(0, -1);
       ctx.tui?.requestRender();
-    } else if (data.length === 1 && data >= " ") {
-      d.inputValue += data;
-      ctx.tui?.requestRender();
+    } else {
+      const permPasteApply = (text: string) => {
+        d.inputValue += text.replace(/[\r\n]/g, " ");
+        ctx.tui?.requestRender();
+      };
+      const permPaste = resolvePasteText(data, permPasteApply);
+      if (permPaste !== null) {
+        permPasteApply(permPaste);
+      } else if (data.length === 1 && data >= " ") {
+        d.inputValue += data;
+        ctx.tui?.requestRender();
+      }
     }
     return true;
   }

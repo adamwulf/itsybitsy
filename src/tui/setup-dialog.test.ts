@@ -16,7 +16,6 @@ import {
 function makeSetupItems(): SetupItem[] {
   return [
     { label: "Safety hooks", description: "Block cd into worktrees + inject status + session context", value: "installed", actionable: true, kind: "safety-hooks" },
-    { label: "Config file", description: ".ittybitty.json exists", value: "installed", actionable: false, kind: "config-file" },
     { label: "Diff tool", description: "Command for 'o' key in diff view", value: "delta", actionable: true, kind: "difftool" },
   ];
 }
@@ -48,15 +47,14 @@ describe("setup dialog tab bar", () => {
       tab: 0,
       items: makeSetupItems(),
       selectedIndex: 0,
-      repoPath: "/tmp/test",
+
       onAction: () => {},
       onTabChange: () => {},
     };
     const result = buildSetupContent(dialog, 60);
     const stripped = result.contentLines.map((l) => stripAnsi(l));
     expect(stripped[0]).toContain("[Setup]");
-    expect(stripped[0]).toContain("[Project]");
-    expect(stripped[0]).toContain("[User]");
+    expect(stripped[0]).toContain("[Config]");
   });
 
   test("title changes based on active tab", () => {
@@ -65,30 +63,14 @@ describe("setup dialog tab bar", () => {
       tab: 1,
       items: makeSetupItems(),
       selectedIndex: 0,
-      repoPath: "/tmp/test",
-      configItems: makeConfigItems(),
-      configSelectedIndex: 0,
-      onAction: () => {},
-      onTabChange: () => {},
-    };
-    const result = buildSetupContent(dialog, 60);
-    expect(result.title).toBe("Project");
-  });
 
-  test("tab 2 title is User", () => {
-    const dialog: Extract<NonNullable<DialogState>, { type: "setup" }> = {
-      type: "setup",
-      tab: 2,
-      items: makeSetupItems(),
-      selectedIndex: 0,
-      repoPath: "/tmp/test",
       configItems: makeConfigItems(),
       configSelectedIndex: 0,
       onAction: () => {},
       onTabChange: () => {},
     };
     const result = buildSetupContent(dialog, 60);
-    expect(result.title).toBe("User");
+    expect(result.title).toBe("Config");
   });
 });
 
@@ -101,7 +83,7 @@ describe("setup dialog tab switching", () => {
       tab: 1,
       items: makeSetupItems(),
       selectedIndex: 0,
-      repoPath: "/tmp/test",
+
       configItems: makeConfigItems(),
       configSelectedIndex: 0,
       onAction: () => {},
@@ -121,7 +103,7 @@ describe("setup dialog tab switching", () => {
       tab: 0,
       items: makeSetupItems(),
       selectedIndex: 0,
-      repoPath: "/tmp/test",
+
       onAction: () => {},
       onTabChange: (t) => { switchedTo = t; },
     };
@@ -131,7 +113,7 @@ describe("setup dialog tab switching", () => {
     expect(switchedTo).toBe(1);
   });
 
-  test("pressing 3 switches to tab 2", () => {
+  test("Tab key cycles to next tab", () => {
     let switchedTo = -1;
     const ctx = makeCtx();
     const dialog: Extract<NonNullable<DialogState>, { type: "setup" }> = {
@@ -139,14 +121,72 @@ describe("setup dialog tab switching", () => {
       tab: 0,
       items: makeSetupItems(),
       selectedIndex: 0,
-      repoPath: "/tmp/test",
+
       onAction: () => {},
       onTabChange: (t) => { switchedTo = t; },
     };
     ctx._dialog = dialog;
-    const handled = handleDialogInput(ctx, "3");
+    const handled = handleDialogInput(ctx, "\t");
     expect(handled).toBe(true);
-    expect(switchedTo).toBe(2);
+    expect(switchedTo).toBe(1);
+  });
+
+  test("Tab key wraps from last tab to first", () => {
+    let switchedTo = -1;
+    const ctx = makeCtx();
+    const dialog: Extract<NonNullable<DialogState>, { type: "setup" }> = {
+      type: "setup",
+      tab: 1,
+      items: makeSetupItems(),
+      selectedIndex: 0,
+
+      configItems: makeConfigItems(),
+      configSelectedIndex: 0,
+      onAction: () => {},
+      onTabChange: (t) => { switchedTo = t; },
+    };
+    ctx._dialog = dialog;
+    const handled = handleDialogInput(ctx, "\t");
+    expect(handled).toBe(true);
+    expect(switchedTo).toBe(0);
+  });
+
+  test("Shift+Tab cycles to previous tab", () => {
+    let switchedTo = -1;
+    const ctx = makeCtx();
+    const dialog: Extract<NonNullable<DialogState>, { type: "setup" }> = {
+      type: "setup",
+      tab: 1,
+      items: makeSetupItems(),
+      selectedIndex: 0,
+
+      configItems: makeConfigItems(),
+      configSelectedIndex: 0,
+      onAction: () => {},
+      onTabChange: (t) => { switchedTo = t; },
+    };
+    ctx._dialog = dialog;
+    const handled = handleDialogInput(ctx, "\x1b[Z");
+    expect(handled).toBe(true);
+    expect(switchedTo).toBe(0);
+  });
+
+  test("Shift+Tab wraps from first tab to last", () => {
+    let switchedTo = -1;
+    const ctx = makeCtx();
+    const dialog: Extract<NonNullable<DialogState>, { type: "setup" }> = {
+      type: "setup",
+      tab: 0,
+      items: makeSetupItems(),
+      selectedIndex: 0,
+
+      onAction: () => {},
+      onTabChange: (t) => { switchedTo = t; },
+    };
+    ctx._dialog = dialog;
+    const handled = handleDialogInput(ctx, "\x1b[Z");
+    expect(handled).toBe(true);
+    expect(switchedTo).toBe(1);
   });
 
   test("pressing same tab number does nothing", () => {
@@ -157,7 +197,7 @@ describe("setup dialog tab switching", () => {
       tab: 0,
       items: makeSetupItems(),
       selectedIndex: 0,
-      repoPath: "/tmp/test",
+
       onAction: () => {},
       onTabChange: (t) => { switchedTo = t; },
     };
@@ -176,7 +216,7 @@ describe("setup dialog config tab content", () => {
       tab: 1,
       items: makeSetupItems(),
       selectedIndex: 0,
-      repoPath: "/tmp/test",
+
       configItems: makeConfigItems(),
       configSelectedIndex: 0,
       onAction: () => {},
@@ -197,7 +237,7 @@ describe("setup dialog config tab content", () => {
       tab: 1,
       items: makeSetupItems(),
       selectedIndex: 0,
-      repoPath: "/tmp/test",
+
       configItems: [
         { key: "createPullRequests", type: "boolean", value: true, source: "project", default: false },
       ],
@@ -216,7 +256,7 @@ describe("setup dialog config tab content", () => {
       tab: 1,
       items: makeSetupItems(),
       selectedIndex: 0,
-      repoPath: "/tmp/test",
+
       configItems: [
         { key: "permissions.manager.allow", type: "string[]", value: ["Edit", "Write"], source: "user", default: [] },
       ],
@@ -235,7 +275,7 @@ describe("setup dialog config tab content", () => {
       tab: 1,
       items: makeSetupItems(),
       selectedIndex: 0,
-      repoPath: "/tmp/test",
+
       configItems: [
         { key: "permissions.worker.allow", type: "string[]", value: [], source: "default", default: [] },
       ],
@@ -254,7 +294,7 @@ describe("setup dialog config tab content", () => {
       tab: 1,
       items: makeSetupItems(),
       selectedIndex: 0,
-      repoPath: "/tmp/test",
+
       configItems: [
         { key: "externalDiffTool", type: "string", value: undefined, source: "default", default: undefined },
       ],
@@ -273,7 +313,7 @@ describe("setup dialog config tab content", () => {
       tab: 1,
       items: makeSetupItems(),
       selectedIndex: 0,
-      repoPath: "/tmp/test",
+
       configItems: makeConfigItems(),
       configSelectedIndex: 1,
       onAction: () => {},
@@ -292,7 +332,7 @@ describe("setup dialog config tab content", () => {
       tab: 1,
       items: makeSetupItems(),
       selectedIndex: 0,
-      repoPath: "/tmp/test",
+
       configItems: makeConfigItems(),
       configSelectedIndex: 0,
       onAction: () => {},
@@ -305,24 +345,6 @@ describe("setup dialog config tab content", () => {
     expect(stripped.some((l) => l.includes("(user)"))).toBe(true);
   });
 
-  test("user tab shows (project override) for project-sourced values", () => {
-    const dialog: Extract<NonNullable<DialogState>, { type: "setup" }> = {
-      type: "setup",
-      tab: 2,
-      items: makeSetupItems(),
-      selectedIndex: 0,
-      repoPath: "/tmp/test",
-      configItems: [
-        { key: "model", type: "string", value: "sonnet", source: "project", default: "sonnet" },
-      ],
-      configSelectedIndex: 0,
-      onAction: () => {},
-      onTabChange: () => {},
-    };
-    const result = buildSetupContent(dialog, 70);
-    const stripped = result.contentLines.map((l) => stripAnsi(l));
-    expect(stripped.some((l) => l.includes("(project override)"))).toBe(true);
-  });
 });
 
 describe("setup dialog config navigation", () => {
@@ -333,7 +355,7 @@ describe("setup dialog config navigation", () => {
       tab: 1,
       items: makeSetupItems(),
       selectedIndex: 0,
-      repoPath: "/tmp/test",
+
       configItems: makeConfigItems(),
       configSelectedIndex: 0,
       onAction: () => {},
@@ -351,7 +373,7 @@ describe("setup dialog config navigation", () => {
       tab: 1,
       items: makeSetupItems(),
       selectedIndex: 0,
-      repoPath: "/tmp/test",
+
       configItems: makeConfigItems(),
       configSelectedIndex: 2,
       onAction: () => {},
@@ -369,7 +391,7 @@ describe("setup dialog config navigation", () => {
       tab: 1,
       items: makeSetupItems(),
       selectedIndex: 0,
-      repoPath: "/tmp/test",
+
       configItems: makeConfigItems(),
       configSelectedIndex: 0,
       onAction: () => {},
@@ -389,7 +411,7 @@ describe("setup dialog config navigation", () => {
       tab: 1,
       items: makeSetupItems(),
       selectedIndex: 0,
-      repoPath: "/tmp/test",
+
       configItems: items,
       configSelectedIndex: 2, // createPullRequests (boolean)
       onAction: () => {},
@@ -412,7 +434,7 @@ describe("setup dialog config navigation", () => {
       tab: 1,
       items: makeSetupItems(),
       selectedIndex: 0,
-      repoPath: "/tmp/test",
+
       configItems: items,
       configSelectedIndex: 1, // model (string)
       onAction: () => {},
@@ -435,14 +457,14 @@ describe("setup dialog tab 0 still works", () => {
       tab: 0,
       items: makeSetupItems(),
       selectedIndex: 0, // hook1 (actionable)
-      repoPath: "/tmp/test",
+
       onAction: () => {},
       onTabChange: () => {},
     };
     ctx._dialog = dialog;
     handleDialogInput(ctx, "j");
-    // Should skip info item and go to difftool (index 2)
-    expect(dialog.selectedIndex).toBe(2);
+    // Should go to difftool (index 1)
+    expect(dialog.selectedIndex).toBe(1);
   });
 
   test("enter on hook calls onAction", () => {
@@ -453,7 +475,7 @@ describe("setup dialog tab 0 still works", () => {
       tab: 0,
       items: makeSetupItems(),
       selectedIndex: 0,
-      repoPath: "/tmp/test",
+
       onAction: (item) => { actionedItem = item; },
       onTabChange: () => {},
     };

@@ -16,7 +16,6 @@ import {
   acknowledgeQuestion, hooksStatus, interceptHooksStatus,
   installSafetyHooks, uninstallSafetyHooks,
   installInterceptHook, uninstallInterceptHook,
-  checkGitignoreHasIttybitty, toggleGitignore, configFileExists, createDefaultConfigFile,
 } from "../ib-commands";
 import type { NewAgentOptions, IbCommandResult } from "../ib-commands";
 import { captureTmuxOutput, resizeTmuxWindow, killTmuxSession } from "../tmux-poller";
@@ -24,7 +23,7 @@ import { parseState } from "../parse-state";
 import { openInGhostty, openPathInGhostty } from "../ghostty";
 import { buildFolderItems } from "./folder-browser";
 import type { DialogState, SetupItem, ConfigDialogItem } from "./dialog-handler";
-import { readConfig, writeConfig, CONFIG_KEYS, projectConfigPath, defaultUserConfigPath } from "../config";
+import { readConfig, writeConfig, CONFIG_KEYS, defaultUserConfigPath } from "../config";
 import type { ConfigResult } from "../config";
 import { fuzzyFilterIndices } from "./dialog-handler";
 import { displayState, computeStateColWidth, AGE_COL_WIDTH } from "./agent-tree";
@@ -599,40 +598,17 @@ export function handleHelp(ctx: ActionCtx) {
 }
 
 export function handleSetup(ctx: ActionCtx) {
-  // Determine repo path: selected agent's repo, or single repo, or show picker
-  if (ctx.repos.length === 0) { ctx.setNotice("No repos registered"); return; }
-
-  if (ctx.repos.length === 1) {
-    loadSetupDialog(ctx, ctx.repos[0]!.path).catch((err) => ctx.setNotice(`Setup error: ${err}`));
-    return;
-  }
-
-  // Try to infer from selected agent
-  const selected = ctx.agentTree.selectedAgent;
-  if (selected) {
-    const repo = ctx.repos.find((r) => r.path === selected.repoPath);
-    if (repo) { loadSetupDialog(ctx, repo.path).catch((err) => ctx.setNotice(`Setup error: ${err}`)); return; }
-  }
-
-  // Show repo picker
-  ctx.showDialog({
-    type: "select",
-    prompt: "Setup for which repo?",
-    items: ctx.repos.map((r) => `${repoDisplayName(r)} (${r.path})`),
-    selectedIndex: 0,
-    onSelect: (repoIndex: number) => {
-      loadSetupDialog(ctx, ctx.repos[repoIndex]!.path).catch((err) => ctx.setNotice(`Setup error: ${err}`));
-    },
-  });
+  loadSetupDialog(ctx).catch((err) => ctx.setNotice(`Setup error: ${err}`));
 }
 
-async function loadSetupDialog(ctx: ActionCtx, repoPath: string, initialTab = 0) {
-  // Fetch all statuses in parallel
-  const [safetyResult, interceptResult, gitignoreInstalled, configExists] = await Promise.all([
-    hooksStatus(repoPath),
-    interceptHooksStatus(repoPath),
-    checkGitignoreHasIttybitty(repoPath),
-    configFileExists(repoPath),
+async function loadSetupDialog(ctx: ActionCtx, initialTab = 0) {
+  // Use any available repo path for hook operations (they modify ~/.claude/settings.json but reference repo paths)
+  const repoPath = ctx.repos[0]?.path ?? "";
+
+  // Fetch hook statuses in parallel
+  const [safetyResult, interceptResult] = await Promise.all([
+    repoPath ? hooksStatus(repoPath) : Promise.resolve({ ok: false, stdout: "", stderr: "" }),
+    repoPath ? interceptHooksStatus(repoPath) : Promise.resolve({ ok: false, stdout: "", stderr: "" }),
   ]);
 
   // "installed" or "partial" both have hooks present; only "not-installed" means fully absent
@@ -657,20 +633,6 @@ async function loadSetupDialog(ctx: ActionCtx, repoPath: string, initialTab = 0)
       kind: "intercept-hook",
     },
     {
-      label: "Gitignore",
-      description: "Add .ittybitty/ to .gitignore",
-      value: gitignoreInstalled ? "installed" : "not installed",
-      actionable: true,
-      kind: "gitignore",
-    },
-    {
-      label: "Config file",
-      description: configExists ? ".ittybitty.json exists" : "Create .ittybitty.json",
-      value: configExists ? "installed" : "not installed",
-      actionable: !configExists,
-      kind: "config-file",
-    },
-    {
       label: "Diff tool",
       description: "Command for 'o' key in diff view",
       value: ctx.diffTool ?? "",
@@ -679,7 +641,7 @@ async function loadSetupDialog(ctx: ActionCtx, repoPath: string, initialTab = 0)
     },
   ];
 
-  // Load config for tabs 1 & 2
+  // Load user-wide config
   const config = await readConfig(repoPath);
 
   const buildConfigItems = (): ConfigDialogItem[] => {
@@ -701,14 +663,13 @@ async function loadSetupDialog(ctx: ActionCtx, repoPath: string, initialTab = 0)
       tab,
       items,
       selectedIndex: 0,
-      repoPath,
       configItems: tab > 0 ? buildConfigItems() : undefined,
       configSelectedIndex: tab > 0 ? 0 : undefined,
       onAction: handleSetupItemAction(ctx, repoPath),
       onTabChange: (newTab: number) => {
         showSetupDialogForTab(newTab);
       },
-      onConfigAction: tab > 0 ? handleConfigItemAction(ctx, repoPath, tab, config, showSetupDialogForTab) : undefined,
+      onConfigAction: tab > 0 ? handleConfigItemAction(ctx, tab, config, showSetupDialogForTab) : undefined,
     });
   };
 
@@ -743,25 +704,6 @@ function handleSetupItemAction(ctx: ActionCtx, repoPath: string) {
       toggleHook(ctx, item, repoPath, installSafetyHooks, uninstallSafetyHooks, "safety hooks");
     } else if (item.kind === "intercept-hook") {
       toggleHook(ctx, item, repoPath, installInterceptHook, uninstallInterceptHook, "task interception");
-    } else if (item.kind === "gitignore") {
-      const isInstalled = item.value === "installed";
-      toggleGitignore(repoPath, isInstalled).then((result) => {
-        if (result.ok) {
-          item.value = isInstalled ? "not installed" : "installed";
-        }
-        ctx.setNotice(result.message);
-        ctx.tui?.requestRender();
-      });
-    } else if (item.kind === "config-file") {
-      createDefaultConfigFile(repoPath).then((result) => {
-        if (result.ok) {
-          item.value = "installed";
-          item.actionable = false;
-          item.description = ".ittybitty.json exists";
-        }
-        ctx.setNotice(result.message);
-        ctx.tui?.requestRender();
-      });
     } else if (item.kind === "difftool") {
       ctx.closeDialog();
       ctx.showDialog({
@@ -788,12 +730,11 @@ function handleSetupItemAction(ctx: ActionCtx, repoPath: string) {
 
 function handleConfigItemAction(
   ctx: ActionCtx,
-  repoPath: string,
   tab: number,
   config: ConfigResult,
   showSetupDialogForTab: (tab: number) => void,
 ) {
-  const configFilePath = tab === 1 ? projectConfigPath(repoPath) : defaultUserConfigPath();
+  const configFilePath = defaultUserConfigPath();
 
   return (item: ConfigDialogItem) => {
     if (item.type === "boolean") {
@@ -801,7 +742,7 @@ function handleConfigItemAction(
       const newValue = !item.value;
       writeConfig(configFilePath, item.key, newValue).then(() => {
         // Update in-memory config and refresh dialog
-        config[item.key] = { value: newValue, source: tab === 1 ? "project" : "user" };
+        config[item.key] = { value: newValue, source: "user" };
         showSetupDialogForTab(tab);
         ctx.setNotice(`${item.key} = ${newValue}`);
       }).catch((err) => {
@@ -837,11 +778,10 @@ function handleConfigItemAction(
             writeConfig(configFilePath, allowKey, newAllow),
             writeConfig(configFilePath, denyKey, newDeny),
           ]).then(() => {
-            const source = tab === 1 ? "project" as const : "user" as const;
-            config[allowKey] = { value: newAllow, source };
-            config[denyKey] = { value: newDeny, source };
+            config[allowKey] = { value: newAllow, source: "user" };
+            config[denyKey] = { value: newDeny, source: "user" };
             ctx.setNotice(`${roleKey} permissions updated`);
-            loadSetupDialog(ctx, repoPath, tab).catch((err) => ctx.setNotice(`Setup error: ${err}`));
+            loadSetupDialog(ctx, tab).catch((err) => ctx.setNotice(`Setup error: ${err}`));
           }).catch((err) => {
             ctx.setNotice(`Failed to save: ${err}`);
           });
@@ -873,10 +813,10 @@ function handleConfigItemAction(
             parsed = value;
           }
           writeConfig(configFilePath, item.key, parsed).then(() => {
-            config[item.key] = { value: parsed, source: tab === 1 ? "project" : "user" };
+            config[item.key] = { value: parsed, source: "user" };
             ctx.setNotice(`${item.key} updated`);
             // Re-open setup dialog on the same tab
-            loadSetupDialog(ctx, repoPath, tab).catch((err) => ctx.setNotice(`Setup error: ${err}`));
+            loadSetupDialog(ctx, tab).catch((err) => ctx.setNotice(`Setup error: ${err}`));
           }).catch((err) => {
             ctx.setNotice(`Failed to save: ${err}`);
           });

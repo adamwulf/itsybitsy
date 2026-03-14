@@ -19,7 +19,7 @@ export type ConfigResult = Record<string, ConfigEntry>;
 
 export const CONFIG_KEYS: ConfigKeyDef[] = [
   { key: "maxAgents", type: "number", default: 10 },
-  { key: "model", type: "string", default: "" },
+  { key: "model", type: "string", default: "opus" },
   { key: "fps", type: "number", default: 10 },
   { key: "createPullRequests", type: "boolean", default: false },
   { key: "allowAgentQuestions", type: "boolean", default: true },

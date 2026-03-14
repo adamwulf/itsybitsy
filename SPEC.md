@@ -487,7 +487,7 @@ itsybitsy installs hooks into each agent's `settings.local.json`, plus optional 
 
 **Detection flow**:
 1. Try to detect state from `last_assistant_message` (check last non-empty line for "WAITING" or "I HAVE COMPLETED THE GOAL")
-2. If no match, fall through to tmux capture + `parseState()`. The initial tmux capture uses the full pane output; if that returns null, a fallback capture of the last 15 lines is attempted before calling `parseState()`.
+2. If no match, fall through to tmux capture + `parseState()`. The full pane output is captured; if that returns null, state is set to `unknown` immediately (no fallback capture).
 3. Save debug capture to `debug-logs/stop-<epoch>-<state>.txt`
 
 **Actions by state**:
@@ -828,11 +828,11 @@ The Setup dialog is accessible via the `h` keybinding in `ib watch`. It is a tab
 
 | Tab Index | Tab Name | Description |
 |-----------|----------|-------------|
-| 0 | **Hooks** | Manage global and per-repo hook installation (path-check, stop, intercept-task, session-start, main-path). Displays current hook status and provides install/uninstall actions. |
+| 0 | **Hooks** | Manage global hook installation. Shows two items: **Safety hooks** (path isolation + status injection + session-start context, grouped as one toggle) and **Task interception** (intercept-task hook). Per-agent hooks (path-check, stop) are installed automatically per agent and are not shown here. |
 | 1 | **Config** | Edit user-wide configuration keys from `~/.itsybitsy/config.json` (e.g., `externalDiffTool`, `autoCompactThreshold`). Changes are written back via `writeConfig()`. |
 
 Tab names are defined in `SETUP_TAB_NAMES = ['Hooks', 'Config']`. Switching between tabs updates the dialog content without closing it.
 
 ### 10.2 Permissions Editor
 
-Within the Hooks tab, a **permissions editor** sub-dialog allows editing the `permissions.manager.allow`, `permissions.manager.deny`, `permissions.worker.allow`, and `permissions.worker.deny` lists in `~/.itsybitsy/config.json`. Each list is editable independently. Changes take effect for newly created agents (existing agents' `settings.local.json` is not modified retroactively).
+Within the Config tab, a **permissions editor** sub-dialog allows editing the `permissions.manager.allow`, `permissions.manager.deny`, `permissions.worker.allow`, and `permissions.worker.deny` lists in `~/.itsybitsy/config.json`. Each list is editable independently. Changes take effect for newly created agents (existing agents' `settings.local.json` is not modified retroactively).

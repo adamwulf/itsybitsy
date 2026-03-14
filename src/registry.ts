@@ -25,7 +25,6 @@ function registryPath(): string {
   return join(itsybitsyDir(), "repos.json");
 }
 
-
 export async function loadRegistry(): Promise<RegistryData> {
   try {
     const file = Bun.file(registryPath());

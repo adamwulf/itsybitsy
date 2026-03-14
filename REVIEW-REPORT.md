@@ -12,9 +12,9 @@
 |----------|-------|
 | SPEC.md inconsistencies (must fix — SPEC should be 100% accurate) | 10 |
 | CLAUDE.md inconsistencies | 4 |
-| README.md inconsistencies | 2 |
+| README.md inconsistencies | 3 |
 | Code comment inconsistencies | 1 |
-| **Total** | **17** |
+| **Total** | **18** |
 
 ---
 
@@ -111,7 +111,7 @@ These are the highest priority since SPEC.md is supposed to be 100% accurate.
 - **What code does:** Registry now writes to `~/.itsybitsy/repos.json` (`registry.ts:26`)
 - **Fix:** Update to `~/.itsybitsy/repos.json`
 
-### R2. Configuration section has three errors
+### R2. Configuration section has three errors (and wrong key name)
 - **Location:** README.md lines ~126–135
 - **What it says:**
   ```json
@@ -123,6 +123,12 @@ These are the highest priority since SPEC.md is supposed to be 100% accurate.
   2. **Wrong key name:** `diffTool` was renamed to `externalDiffTool` (`config.ts:26`)
   3. **Wrong location for `repos`:** `repos` lives in `~/.itsybitsy/repos.json`, not in the config file
 - **Fix:** Update path to `~/.itsybitsy/config.json`, rename `diffTool` → `externalDiffTool`, remove `repos` from the config example
+
+### R3. App keybindings table has `h` mapped to "Show help dialog" — actually opens Setup
+- **Location:** README.md App keybindings table
+- **What it says:** `h` = "Show help dialog"
+- **What code does:** `dashboard.ts` lines 214/217: `h` opens the Setup dialog; `?` opens the help overlay. README omits the `?` key entirely and misattributes its action to `h`.
+- **Fix:** Change `h` action to "Open setup / hooks dialog"; add a separate row for `?` → "Show help overlay"
 
 ---
 

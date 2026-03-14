@@ -50,7 +50,6 @@ async function migrateIfNeeded(): Promise<void> {
     }
 
     // Remove old file
-    await Bun.file(legacyPath).arrayBuffer(); // ensure readable, then delete
     const { unlink } = await import("fs/promises");
     await unlink(legacyPath);
   } catch {

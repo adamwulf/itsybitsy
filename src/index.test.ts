@@ -252,6 +252,54 @@ describe("CLI arg parsing", () => {
     expect(exitCode).not.toBe(0);
   });
 
+  test("new-agent --manager without value shows error", async () => {
+    const { stderr, exitCode } = await runCli(["new-agent", "--manager"]);
+    expect(stderr).toContain("--manager requires an agent ID");
+    expect(exitCode).toBe(1);
+  });
+
+  test("new-agent --model without value shows error", async () => {
+    const { stderr, exitCode } = await runCli(["new-agent", "--model"]);
+    expect(stderr).toContain("--model requires a value");
+    expect(exitCode).toBe(1);
+  });
+
+  test("new-agent --name without value shows error", async () => {
+    const { stderr, exitCode } = await runCli(["new-agent", "--name"]);
+    expect(stderr).toContain("--name requires a value");
+    expect(exitCode).toBe(1);
+  });
+
+  test("new-agent --allow without value shows error", async () => {
+    const { stderr, exitCode } = await runCli(["new-agent", "--allow"]);
+    expect(stderr).toContain("--allow requires a value");
+    expect(exitCode).toBe(1);
+  });
+
+  test("new-agent --deny without value shows error", async () => {
+    const { stderr, exitCode } = await runCli(["new-agent", "--deny"]);
+    expect(stderr).toContain("--deny requires a value");
+    expect(exitCode).toBe(1);
+  });
+
+  test("new-agent --prompt-file without value shows error", async () => {
+    const { stderr, exitCode } = await runCli(["new-agent", "--prompt-file"]);
+    expect(stderr).toContain("--prompt-file requires a value");
+    expect(exitCode).toBe(1);
+  });
+
+  test("new-agent with unknown flag shows error", async () => {
+    const { stderr, exitCode } = await runCli(["new-agent", "--bogus", "hello"]);
+    expect(stderr).toContain("unknown flag '--bogus'");
+    expect(exitCode).toBe(1);
+  });
+
+  test("new-agent rejects flag-like values that start with --", async () => {
+    const { stderr, exitCode } = await runCli(["new-agent", "--nonexistent-flag"]);
+    expect(stderr).toContain("unknown flag");
+    expect(exitCode).toBe(1);
+  });
+
   test("hook-check-path without agent-id shows usage", async () => {
     const { stderr, exitCode } = await runCli(["hook-check-path"]);
     expect(stderr).toContain("Usage:");

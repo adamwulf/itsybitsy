@@ -558,42 +558,12 @@ async function main() {
     }
     case "new-agent":
     case "new": {
-      const repos = await listRepos();
-
-      // Determine target repo: --repo flag > cwd match > single registered repo > error
-      let repoPath: string | null = null;
-      const repoFlagIdx = args.indexOf("--repo");
       const ibArgs = args.slice(1); // strip "new-agent"/"new"
 
-      if (repoFlagIdx !== -1 && args[repoFlagIdx + 1]) {
-        const repoArg = args[repoFlagIdx + 1]!;
-        const match = repos.find((r) => r.name === repoArg || r.path === repoArg);
-        if (!match) {
-          console.error(`Repo not found: ${repoArg}`);
-          process.exit(1);
-        }
-        repoPath = match.path;
-        // Strip --repo and its value from ibArgs
-        const flagIdxInIb = ibArgs.indexOf("--repo");
-        if (flagIdxInIb !== -1) ibArgs.splice(flagIdxInIb, 2);
-      } else {
-        const cwd = process.cwd();
-        const cwdMatch = repos.find((r) => cwd === r.path || cwd.startsWith(r.path + "/"));
-        if (cwdMatch) {
-          repoPath = cwdMatch.path;
-        } else if (repos.length === 1) {
-          repoPath = repos[0]!.path;
-        } else {
-          console.error("Cannot determine target repo. Use --repo <name|path> or run from within a registered repo.");
-          process.exit(1);
-        }
-      }
-
-      const { newAgent } = await import("./ib-commands");
-
-      // Parse flags from ibArgs
+      // Parse flags first (validates syntax before repo lookup)
       const promptParts: string[] = [];
       const opts: import("./ib-commands").NewAgentOptions = {};
+      let repoArg: string | undefined;
       for (let i = 0; i < ibArgs.length; i++) {
         const arg = ibArgs[i]!;
         if (arg === "--worker") { opts.worker = true; }
@@ -601,9 +571,17 @@ async function main() {
           if (!ibArgs[i + 1]) { console.error("Error: --model requires a value"); process.exit(1); }
           opts.model = ibArgs[++i];
         }
+        else if (arg === "--manager") {
+          if (!ibArgs[i + 1]) { console.error("Error: --manager requires an agent ID"); process.exit(1); }
+          opts.manager = ibArgs[++i];
+        }
         else if (arg === "--name") {
           if (!ibArgs[i + 1]) { console.error("Error: --name requires a value"); process.exit(1); }
           opts.name = ibArgs[++i];
+        }
+        else if (arg === "--repo") {
+          if (!ibArgs[i + 1]) { console.error("Error: --repo requires a value"); process.exit(1); }
+          repoArg = ibArgs[++i];
         }
         else if (arg === "--prompt-file") {
           if (!ibArgs[i + 1]) { console.error("Error: --prompt-file requires a value"); process.exit(1); }
@@ -622,6 +600,10 @@ async function main() {
           if (!ibArgs[i + 1]) { console.error("Error: --deny requires a value"); process.exit(1); }
           opts.denyTools = ibArgs[++i];
         }
+        else if (arg.startsWith("--")) {
+          console.error(`Error: unknown flag '${arg}'`);
+          process.exit(1);
+        }
         else { promptParts.push(arg); }
       }
       const prompt = promptParts.join(" ");
@@ -629,6 +611,32 @@ async function main() {
         console.error("Usage: ib new-agent [flags] <prompt...>");
         process.exit(1);
       }
+
+      // Determine target repo: --repo flag > cwd match > single registered repo > error
+      const repos = await listRepos();
+      let repoPath: string | null = null;
+
+      if (repoArg) {
+        const match = repos.find((r) => r.name === repoArg || r.path === repoArg);
+        if (!match) {
+          console.error(`Repo not found: ${repoArg}`);
+          process.exit(1);
+        }
+        repoPath = match.path;
+      } else {
+        const cwd = process.cwd();
+        const cwdMatch = repos.find((r) => cwd === r.path || cwd.startsWith(r.path + "/"));
+        if (cwdMatch) {
+          repoPath = cwdMatch.path;
+        } else if (repos.length === 1) {
+          repoPath = repos[0]!.path;
+        } else {
+          console.error("Cannot determine target repo. Use --repo <name|path> or run from within a registered repo.");
+          process.exit(1);
+        }
+      }
+
+      const { newAgent } = await import("./ib-commands");
       await printAndExit(await newAgent(repoPath, prompt, opts));
       break;
     }

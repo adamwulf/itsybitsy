@@ -10,6 +10,7 @@ import { TmuxPaneComponent, RightPaneComponent, DashboardComponent, AgentTreeCom
 import { visibleWidth } from "@mariozechner/pi-tui";
 import { setSendSpawnRunner, resetSendSpawnRunner, setKillPauseSpawnRunner, resetKillPauseSpawnRunner, setNukeResumeSpawnRunner, resetNukeResumeSpawnRunner, setNewAgentSpawnRunner, resetNewAgentSpawnRunner, setDiffStatusSpawnRunner, resetDiffStatusSpawnRunner, setMergeSpawnRunner, resetMergeSpawnRunner } from "../ib-commands";
 import { spawnCtx as lifecycleSpawnCtx } from "../agent-lifecycle";
+import { setUserConfigPath, resetUserConfigPath } from "../config";
 import type { SpawnResult } from "../types";
 import { PANE_MODES } from "./pane-manager";
 import { assertDialog } from "./test-helpers";
@@ -1102,7 +1103,8 @@ describe("DashboardComponent dialog and action handlers", () => {
     const newAgentTempDir = await mkdtemp(join(tmpdir(), "ib-na-test-"));
     await mkdir(join(newAgentTempDir, ".ittybitty"), { recursive: true });
     await Bun.write(join(newAgentTempDir, ".ittybitty", "repo-id"), "abcd1234\n");
-    await Bun.write(join(newAgentTempDir, ".ittybitty.json"), JSON.stringify({ model: "sonnet" }));
+    setUserConfigPath(join(newAgentTempDir, "config.json"));
+    await Bun.write(join(newAgentTempDir, "config.json"), JSON.stringify({ model: "sonnet" }));
 
     const spawnCalls: string[] = [];
     const mockSpawn = (cmd: string[]): SpawnResult => {
@@ -1170,6 +1172,7 @@ describe("DashboardComponent dialog and action handlers", () => {
 
     resetNewAgentSpawnRunner();
     lifecycleSpawnCtx.reset();
+    resetUserConfigPath();
     await rm(newAgentTempDir, { recursive: true, force: true });
   });
 
@@ -1177,7 +1180,8 @@ describe("DashboardComponent dialog and action handlers", () => {
     const newAgentTempDir = await mkdtemp(join(tmpdir(), "ib-na-test-"));
     await mkdir(join(newAgentTempDir, ".ittybitty"), { recursive: true });
     await Bun.write(join(newAgentTempDir, ".ittybitty", "repo-id"), "abcd1234\n");
-    await Bun.write(join(newAgentTempDir, ".ittybitty.json"), JSON.stringify({ model: "sonnet" }));
+    setUserConfigPath(join(newAgentTempDir, "config.json"));
+    await Bun.write(join(newAgentTempDir, "config.json"), JSON.stringify({ model: "sonnet" }));
 
     const spawnCalls: string[] = [];
     const mockSpawn = (cmd: string[]): SpawnResult => {
@@ -1236,6 +1240,7 @@ describe("DashboardComponent dialog and action handlers", () => {
 
     resetNewAgentSpawnRunner();
     lifecycleSpawnCtx.reset();
+    resetUserConfigPath();
     await rm(newAgentTempDir, { recursive: true, force: true });
   });
 

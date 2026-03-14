@@ -27,7 +27,7 @@ This is a **full daily-driver replacement for `ib watch`**, extended to span mul
 - `ib watchdog` — Phase 13 adds a built-in watchdog to itsybitsy. Until then, agents spawned via `ib new-agent` get their own bash watchdog automatically
 - `ib ask` — agents asking the user a question is surfaced via `user-questions.json`; no need to shell to `ib ask` directly from itsybitsy
 - `ib info` — meta.json is read directly; raw field inspection available as a debug view (`i` keybinding, low priority)
-- `ib config` — itsybitsy reads `.ittybitty.json` directly rather than shelling to `ib config`
+- `ib config` — itsybitsy reads `~/.ittybitty/config.json` directly rather than shelling to `ib config`
 
 ## Runtime & Dependencies
 
@@ -108,7 +108,7 @@ itsybitsy
 │   ├── usage.ts              # Fetches Claude API quota from Anthropic OAuth API;
 │   │                         # caches at ~/.claude/usage-cache.json (10s TTL)
 │   ├── usage.test.ts         # Usage fetch/parse tests
-│   ├── config.ts             # Config reading/writing for .ittybitty.json
+│   ├── config.ts             # Config reading/writing for ~/.ittybitty/config.json (user-wide)
 │   ├── config.test.ts        # Config tests
 │   ├── watcher.ts            # fs.watch({ recursive: true }) on agents/, archive/,
 │   │                         # user-questions.json; 10s fallback poll; debounced refresh;
@@ -219,7 +219,7 @@ Status values: `pending`, `acknowledged`. Show pending count as a badge in the T
 [{"id":"agent-1f5f04ce","state":"waiting","age":"1d","manager":"-","model":"sonnet","prompt":"..."}]
 ```
 
-Per-repo `.ittybitty.json` config (read `fps` field to inform polling rate):
+User-wide `~/.ittybitty/config.json` config (read `fps` field to inform polling rate):
 ```json
 { "fps": 10, "maxAgents": 10, "model": "sonnet" }
 ```
@@ -577,15 +577,15 @@ Files: `src/tui/dashboard.ts`, `src/tui/agent-actions.ts`, `src/tui/dialog-handl
 Files: `src/tui/dashboard.ts`, `src/config.ts`.
 
 **`src/config.ts` module:**
-- [x] `readConfig(repoPath)` — read `.ittybitty.json` from repo, merge with `~/.ittybitty.json` (user), apply defaults. Return `{ value, source: "project" | "user" | "default" }` for each key.
+- [x] `readConfig()` — read `~/.ittybitty/config.json` (user-wide), apply defaults. Return `{ value, source: "user" | "default" }` for each key. No per-repo config.
 - [x] `writeConfig(filePath, key, value)` — read JSON, set key (supports dot-notation like `hooks.injectStatus`), write back.
 - [x] Config key definitions with types: `{ key: string, type: "number" | "boolean" | "string" | "string[]", default: any }`. Full list: `maxAgents` (number, 10), `model` (string, "sonnet"), `fps` (number, 10), `createPullRequests` (boolean, false), `allowAgentQuestions` (boolean, true), `autoCompactThreshold` (number, none), `externalDiffTool` (string, none), `hooks.injectStatus` (boolean, true), `hooks.statusVisible` (boolean, true), `permissions.manager.allow` (string[], []), `permissions.manager.deny` (string[], []), `permissions.worker.allow` (string[], []), `permissions.worker.deny` (string[], []).
 
 **Tab switching:**
-- [x] Add tab bar at top of setup dialog: `[Setup] [Project] [User]`. Active tab is highlighted.
-- [x] Switch tabs via `1`/`2`/`3` number keys. Left/right arrows also cycle tabs (these keys are free inside the dialog since dialogs capture all input).
+- [x] Add tab bar at top of setup dialog: `[Setup] [Config]`. Active tab is highlighted.
+- [x] Switch tabs via `1`/`2` number keys or Tab/Shift+Tab.
 
-**Tab 1 — Project Settings** (`.ittybitty.json`):
+**Tab 1 — Config** (`~/.ittybitty/config.json`):
 - [x] Render config keys as a select list. Each row: `key: value (source)`.
 - [x] `Enter` on a row opens the appropriate editor based on type:
   - `number` → existing `input` dialog, validate numeric input
@@ -593,9 +593,6 @@ Files: `src/tui/dashboard.ts`, `src/config.ts`.
   - `string` → existing `input` dialog
   - `string[]` → existing `select` dialog with options: "Add item" (opens `input`), "Remove item" (shows items as select list), "Back"
 - [x] Write changes via `writeConfig()`.
-
-**Tab 2 — User Settings** (`~/.ittybitty.json`):
-- [x] Same rendering and editing as Tab 1, but reads/writes `~/.ittybitty.json`.
 
 ---
 
@@ -662,7 +659,7 @@ New file: `src/watchdog.ts`. This is the highest-complexity feature but also the
 - [x] `stopped` → reset counters, no notification.
 
 **Auto-compact:**
-- [x] Read `autoCompactThreshold` from `.ittybitty.json` config (via `src/config.ts` from Phase 12B, or read directly if Phase 12B isn't done yet).
+- [x] Read `autoCompactThreshold` from `~/.ittybitty/config.json` config (via `src/config.ts`).
 - [x] Read agent context usage % from the Claude transcript file. Path pattern: `~/.claude/projects/{path-hash}/transcript.jsonl` where `{path-hash}` is the agent's worktree path with `/` replaced by `-`. Each line is a JSON object; look for `"type": "summary"` entries with a `"contextPercentage"` or `"costSoFar"` field. Port the parsing logic from ib's `get_agent_context_usage()` function (around line ~3200 in ib) which reads the last summary entry.
 - [x] When usage % exceeds threshold, send `/compact` to agent's tmux session via `tmux send-keys -t {session} "/compact" Enter`.
 - [x] Track `compactSent` flag per agent to avoid duplicate sends; clear when context drops below threshold or agent resumes.

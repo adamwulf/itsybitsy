@@ -21,7 +21,7 @@ When a new agent is created (`ib new-agent "prompt"`):
 
 3. **Yolo escalation prevention**: A `--yolo` child cannot be spawned by a non-yolo parent. This prevents permission escalation where a constrained agent spawns an unconstrained one. The parent's yolo status is checked via `meta.json` or `start.sh`.
 
-4. **Configuration**: Config is loaded from `.ittybitty.json` (project) and `~/.ittybitty.json` (user). The model is determined by: `--model` flag > config `model` > `"sonnet"` (default).
+4. **Configuration**: Config is loaded from `~/.ittybitty/config.json` (user-wide). The model is determined by: `--model` flag > config `model` > `"sonnet"` (default).
 
 5. **Max agents check**: The number of active agents (directories with `meta.json` in `.ittybitty/agents/`) must not exceed the `maxAgents` config value (default: 10).
 
@@ -202,7 +202,7 @@ When building `settings.local.json` for an agent, permissions come from three so
    - `Bash(git status:*)`, `Bash(git add:*)`, `Bash(git commit:*)`, `Bash(git diff:*)`, `Bash(git show:*)`, `Bash(git log:*)`, `Bash(git ls-files:*)`, `Bash(git grep:*)`, `Bash(git rm:*)`, `Bash(git merge:*)`, `Bash(git rebase:*)`, `Bash(git checkout:*)`, `Bash(git restore:*)`, `Bash(git reset:*)` — git operations
    - `Bash(pwd:*)`, `Bash(ls:*)`, `Bash(head:*)`, `Bash(tail:*)`, `Bash(cat:*)`, `Bash(grep:*)` — filesystem inspection
    - `Read`, `Write`, `Edit`, `MultiEdit`, `Glob`, `Grep`, `LS`, `TodoWrite`, `Task`, `TaskOutput`, `KillShell`, `NotebookEdit`, `WebFetch`, `WebSearch`, `AskUserQuestion` — Claude Code tools
-3. **Config-defined permissions**: From `permissions.manager.allow/deny` or `permissions.worker.allow/deny` in `.ittybitty.json`
+3. **Config-defined permissions**: From `permissions.manager.allow/deny` or `permissions.worker.allow/deny` in `~/.ittybitty/config.json`
 
 **Always denied** (for all agents): `EnterPlanMode`, `ExitPlanMode`
 
@@ -571,13 +571,12 @@ Install/uninstall commands modify `~/.claude/settings.json` directly. [^hooks-in
 
 ### 7.1 Config File Layering
 
-Configuration is read from two files, with project settings taking precedence:
+Configuration is user-wide only, stored in a single file:
 
-1. **Project config**: `.ittybitty.json` in the repository root
-2. **User config**: `~/.ittybitty.json` in the user's home directory
-3. **Defaults**: Built-in defaults for each key
+1. **User config**: `~/.ittybitty/config.json` in the user's home directory
+2. **Defaults**: Built-in defaults for each key
 
-For each config key, the first valid value found (project → user → default) is used.
+For each config key, the first valid value found (user → default) is used. There is no per-repo configuration.
 
 ### 7.2 Config Keys
 

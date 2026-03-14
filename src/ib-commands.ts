@@ -1459,7 +1459,7 @@ export async function newAgent(
   }
 
   // 6. Load config
-  const config = await readConfig(rootRepoPath);
+  const config = await readConfig();
   const customPrompts = await loadCustomPrompts(rootRepoPath);
 
   // 7. Model fallback: --model > config.model > 'sonnet'
@@ -2184,7 +2184,7 @@ export async function askQuestion(repoPath: string, agentId: string, question: s
   }
 
   // Config check: allowAgentQuestions must be true
-  const config = await readConfig(repoPath);
+  const config = await readConfig();
   const allowQuestions = config.allowAgentQuestions?.value as boolean | undefined;
   if (allowQuestions === false) {
     return { ok: false, exitCode: 1, stdout: "", stderr: "Agent questions are disabled (allowAgentQuestions=false)" };
@@ -2548,80 +2548,4 @@ export async function uninstallInterceptHook(_repoPath: string, settingsPath?: s
   return { ok: true, exitCode: 0, stdout: "Task interception hook uninstalled from ~/.claude/settings.json", stderr: "" };
 }
 
-/** Check if .ittybitty is in .gitignore */
-export async function checkGitignoreHasIttybitty(repoPath: string): Promise<boolean> {
-  try {
-    const gitignoreFile = Bun.file(`${repoPath}/.gitignore`);
-    if (await gitignoreFile.exists()) {
-      const content = await gitignoreFile.text();
-      return content.split("\n").some((line) => {
-        const trimmed = line.trim();
-        return trimmed === ".ittybitty" || trimmed === ".ittybitty/" || trimmed === "/.ittybitty" || trimmed === "/.ittybitty/";
-      });
-    }
-  } catch { /* ignore */ }
-  return false;
-}
-
-/** Add or remove .ittybitty/ from .gitignore */
-export async function toggleGitignore(repoPath: string, currentlyInstalled: boolean): Promise<{ ok: boolean; message: string }> {
-  const gitignorePath = `${repoPath}/.gitignore`;
-  try {
-    if (currentlyInstalled) {
-      const file = Bun.file(gitignorePath);
-      if (await file.exists()) {
-        const content = await file.text();
-        const filtered = content.split("\n").filter((line) => {
-          const trimmed = line.trim();
-          return trimmed !== ".ittybitty" && trimmed !== ".ittybitty/" && trimmed !== "/.ittybitty" && trimmed !== "/.ittybitty/";
-        }).join("\n");
-        await Bun.write(gitignorePath, filtered);
-        return { ok: true, message: ".ittybitty removed from .gitignore" };
-      }
-      return { ok: true, message: ".gitignore not found" };
-    } else {
-      const file = Bun.file(gitignorePath);
-      let content = "";
-      if (await file.exists()) {
-        content = await file.text();
-        if (content.length > 0 && !content.endsWith("\n")) content += "\n";
-      }
-      content += ".ittybitty/\n";
-      await Bun.write(gitignorePath, content);
-      return { ok: true, message: ".ittybitty/ added to .gitignore" };
-    }
-  } catch (err) {
-    return { ok: false, message: `Failed: ${err}` };
-  }
-}
-
-/** Check if .ittybitty.json config file exists */
-export async function configFileExists(repoPath: string): Promise<boolean> {
-  try {
-    return await Bun.file(`${repoPath}/.ittybitty.json`).exists();
-  } catch {
-    return false;
-  }
-}
-
-/** Create default .ittybitty.json config file */
-export async function createDefaultConfigFile(repoPath: string): Promise<{ ok: boolean; message: string }> {
-  const configPath = `${repoPath}/.ittybitty.json`;
-  try {
-    const file = Bun.file(configPath);
-    if (await file.exists()) return { ok: true, message: ".ittybitty.json already exists" };
-    const defaultConfig = {
-      maxAgents: 10,
-      model: "sonnet",
-      permissions: {
-        manager: { allow: [], deny: [] },
-        worker: { allow: [], deny: [] },
-      },
-    };
-    await Bun.write(configPath, JSON.stringify(defaultConfig, null, 2) + "\n");
-    return { ok: true, message: "Created .ittybitty.json with default settings" };
-  } catch (err) {
-    return { ok: false, message: `Failed: ${err}` };
-  }
-}
 

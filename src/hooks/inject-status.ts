@@ -263,7 +263,7 @@ export async function hookInjectStatus(
   }
 
   // Check config: hooks.injectStatus
-  const config = await readConfig(cwd);
+  const config = await readConfig();
   if (config["hooks.injectStatus"]?.value === false) {
     process.exit(0);
     return;

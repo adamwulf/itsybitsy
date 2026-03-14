@@ -20,7 +20,7 @@ afterEach(async () => {
 
 describe("readConfig", () => {
   test("returns all defaults when no config files exist", async () => {
-    const result = await readConfig(tmpDir, opts());
+    const result = await readConfig(opts());
 
     expect(result["maxAgents"]).toEqual({ value: 10, source: "default" });
     expect(result["model"]).toEqual({ value: "", source: "default" });
@@ -36,72 +36,50 @@ describe("readConfig", () => {
   });
 
   test("has entries for all CONFIG_KEYS", async () => {
-    const result = await readConfig(tmpDir, opts());
+    const result = await readConfig(opts());
     for (const def of CONFIG_KEYS) {
       expect(result[def.key]).toBeDefined();
     }
   });
 
-  test("reads project config values", async () => {
-    const projectPath = join(tmpDir, ".ittybitty.json");
-    await Bun.write(projectPath, JSON.stringify({ maxAgents: 5, model: "opus" }));
+  test("reads user config values", async () => {
+    await Bun.write(userCfgPath, JSON.stringify({ model: "opus", fps: 5 }));
 
-    const result = await readConfig(tmpDir, opts());
-    expect(result["maxAgents"]).toEqual({ value: 5, source: "project" });
-    expect(result["model"]).toEqual({ value: "opus", source: "project" });
-    expect(result["fps"]).toEqual({ value: 10, source: "default" });
+    const result = await readConfig(opts());
+    expect(result["model"]).toEqual({ value: "opus", source: "user" });
+    expect(result["fps"]).toEqual({ value: 5, source: "user" });
+    expect(result["maxAgents"]).toEqual({ value: 10, source: "default" });
   });
 
-  test("reads nested project config values", async () => {
-    const projectPath = join(tmpDir, ".ittybitty.json");
+  test("reads nested user config values", async () => {
     await Bun.write(
-      projectPath,
+      userCfgPath,
       JSON.stringify({
         hooks: { injectStatus: false },
         permissions: { manager: { allow: ["Edit", "Read"] } },
       })
     );
 
-    const result = await readConfig(tmpDir, opts());
-    expect(result["hooks.injectStatus"]).toEqual({ value: false, source: "project" });
+    const result = await readConfig(opts());
+    expect(result["hooks.injectStatus"]).toEqual({ value: false, source: "user" });
     expect(result["hooks.statusVisible"]).toEqual({ value: true, source: "default" });
-    expect(result["permissions.manager.allow"]).toEqual({ value: ["Edit", "Read"], source: "project" });
+    expect(result["permissions.manager.allow"]).toEqual({ value: ["Edit", "Read"], source: "user" });
     expect(result["permissions.manager.deny"]).toEqual({ value: [], source: "default" });
   });
 
-  test("reads user config values when no project config", async () => {
-    await Bun.write(userCfgPath, JSON.stringify({ model: "opus", fps: 5 }));
-
-    const result = await readConfig(tmpDir, opts());
-    expect(result["model"]).toEqual({ value: "opus", source: "user" });
-    expect(result["fps"]).toEqual({ value: 5, source: "user" });
-    expect(result["maxAgents"]).toEqual({ value: 10, source: "default" });
-  });
-
-  test("project config overrides user config", async () => {
-    await Bun.write(userCfgPath, JSON.stringify({ maxAgents: 8, model: "opus" }));
-    const projectPath = join(tmpDir, ".ittybitty.json");
-    await Bun.write(projectPath, JSON.stringify({ maxAgents: 3 }));
-
-    const result = await readConfig(tmpDir, opts());
-    expect(result["maxAgents"]).toEqual({ value: 3, source: "project" });
-    expect(result["model"]).toEqual({ value: "opus", source: "user" });
-  });
-
   test("default arrays are independent across calls", async () => {
-    const result1 = await readConfig(tmpDir, opts());
+    const result1 = await readConfig(opts());
     const arr1 = result1["permissions.manager.allow"]!.value as string[];
     arr1.push("mutated");
 
-    const result2 = await readConfig(tmpDir, opts());
+    const result2 = await readConfig(opts());
     expect(result2["permissions.manager.allow"]!.value).toEqual([]);
   });
 
   test("handles malformed JSON gracefully", async () => {
-    const projectPath = join(tmpDir, ".ittybitty.json");
-    await Bun.write(projectPath, "not valid json {{{");
+    await Bun.write(userCfgPath, "not valid json {{{");
 
-    const result = await readConfig(tmpDir, opts());
+    const result = await readConfig(opts());
     expect(result["maxAgents"]).toEqual({ value: 10, source: "default" });
   });
 });
@@ -196,68 +174,54 @@ describe("validateConfigValue", () => {
 
 describe("config type validation in readConfig", () => {
   test("maxAgents: string falls back to default", async () => {
-    const projectPath = join(tmpDir, ".ittybitty.json");
-    await Bun.write(projectPath, JSON.stringify({ maxAgents: "ten" }));
+    await Bun.write(userCfgPath, JSON.stringify({ maxAgents: "ten" }));
 
-    const result = await readConfig(tmpDir, opts());
+    const result = await readConfig(opts());
     expect(result["maxAgents"]).toEqual({ value: 10, source: "default" });
   });
 
   test("model: number falls back to default", async () => {
-    const projectPath = join(tmpDir, ".ittybitty.json");
-    await Bun.write(projectPath, JSON.stringify({ model: 123 }));
+    await Bun.write(userCfgPath, JSON.stringify({ model: 123 }));
 
-    const result = await readConfig(tmpDir, opts());
+    const result = await readConfig(opts());
     expect(result["model"]).toEqual({ value: "", source: "default" });
   });
 
   test("createPullRequests: string falls back to default", async () => {
-    const projectPath = join(tmpDir, ".ittybitty.json");
-    await Bun.write(projectPath, JSON.stringify({ createPullRequests: "yes" }));
+    await Bun.write(userCfgPath, JSON.stringify({ createPullRequests: "yes" }));
 
-    const result = await readConfig(tmpDir, opts());
+    const result = await readConfig(opts());
     expect(result["createPullRequests"]).toEqual({ value: false, source: "default" });
   });
 
   test("permissions.manager.allow: string falls back to default", async () => {
-    const projectPath = join(tmpDir, ".ittybitty.json");
     await Bun.write(
-      projectPath,
+      userCfgPath,
       JSON.stringify({ permissions: { manager: { allow: "not-an-array" } } })
     );
 
-    const result = await readConfig(tmpDir, opts());
+    const result = await readConfig(opts());
     expect(result["permissions.manager.allow"]).toEqual({ value: [], source: "default" });
   });
 
   test("correctly typed values still work", async () => {
-    const projectPath = join(tmpDir, ".ittybitty.json");
     await Bun.write(
-      projectPath,
+      userCfgPath,
       JSON.stringify({ maxAgents: 5, model: "opus", createPullRequests: true })
     );
 
-    const result = await readConfig(tmpDir, opts());
-    expect(result["maxAgents"]).toEqual({ value: 5, source: "project" });
-    expect(result["model"]).toEqual({ value: "opus", source: "project" });
-    expect(result["createPullRequests"]).toEqual({ value: true, source: "project" });
+    const result = await readConfig(opts());
+    expect(result["maxAgents"]).toEqual({ value: 5, source: "user" });
+    expect(result["model"]).toEqual({ value: "opus", source: "user" });
+    expect(result["createPullRequests"]).toEqual({ value: true, source: "user" });
   });
 
   test("user config values with wrong types fall through to default", async () => {
     await Bun.write(userCfgPath, JSON.stringify({ maxAgents: "eight", model: 999 }));
 
-    const result = await readConfig(tmpDir, opts());
+    const result = await readConfig(opts());
     expect(result["maxAgents"]).toEqual({ value: 10, source: "default" });
     expect(result["model"]).toEqual({ value: "", source: "default" });
-  });
-
-  test("wrong-typed project value falls through to valid user value", async () => {
-    const projectPath = join(tmpDir, ".ittybitty.json");
-    await Bun.write(projectPath, JSON.stringify({ maxAgents: "bad" }));
-    await Bun.write(userCfgPath, JSON.stringify({ maxAgents: 7 }));
-
-    const result = await readConfig(tmpDir, opts());
-    expect(result["maxAgents"]).toEqual({ value: 7, source: "user" });
   });
 });
 
@@ -317,14 +281,13 @@ describe("dot-notation key handling", () => {
   });
 
   test("readConfig reads back what writeConfig wrote", async () => {
-    const projectPath = join(tmpDir, ".ittybitty.json");
-    await writeConfig(projectPath, "maxAgents", 7);
-    await writeConfig(projectPath, "hooks.injectStatus", false);
-    await writeConfig(projectPath, "permissions.worker.deny", ["Bash", "Write"]);
+    await writeConfig(userCfgPath, "maxAgents", 7);
+    await writeConfig(userCfgPath, "hooks.injectStatus", false);
+    await writeConfig(userCfgPath, "permissions.worker.deny", ["Bash", "Write"]);
 
-    const result = await readConfig(tmpDir, opts());
-    expect(result["maxAgents"]).toEqual({ value: 7, source: "project" });
-    expect(result["hooks.injectStatus"]).toEqual({ value: false, source: "project" });
-    expect(result["permissions.worker.deny"]).toEqual({ value: ["Bash", "Write"], source: "project" });
+    const result = await readConfig(opts());
+    expect(result["maxAgents"]).toEqual({ value: 7, source: "user" });
+    expect(result["hooks.injectStatus"]).toEqual({ value: false, source: "user" });
+    expect(result["permissions.worker.deny"]).toEqual({ value: ["Bash", "Write"], source: "user" });
   });
 });

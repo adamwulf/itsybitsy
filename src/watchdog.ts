@@ -636,7 +636,7 @@ async function processAgents(agents: Agent[], allAgents: Agent[]): Promise<void>
       if (now - tracker.lastCompactCheckMs >= COMPACT_CHECK_COOLDOWN_MS) {
         tracker.lastCompactCheckMs = now;
         try {
-          const config = await readConfigFn(agent.repoPath);
+          const config = await readConfigFn();
           const thresholdEntry = config["autoCompactThreshold"];
           const threshold = thresholdEntry?.value as number | undefined;
           if (threshold != null && threshold > 0) {
@@ -891,7 +891,7 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
         if (now - tracker.lastCompactCheckMs >= COMPACT_CHECK_COOLDOWN_MS) {
           tracker.lastCompactCheckMs = now;
           try {
-            const config = await readConfigFn(repoPath);
+            const config = await readConfigFn();
             const thresholdEntry = config["autoCompactThreshold"];
             const threshold = thresholdEntry?.value as number | undefined;
             if (threshold != null && threshold > 0) {

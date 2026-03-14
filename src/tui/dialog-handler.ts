@@ -48,10 +48,9 @@ export type DialogState =
     }
   | {
       type: "setup";
-      tab: number; // 0=Setup, 1=Project, 2=User
+      tab: number; // 0=Setup, 1=Config
       items: SetupItem[];
       selectedIndex: number;
-      repoPath: string;
       configItems?: ConfigDialogItem[];
       configSelectedIndex?: number;
       onAction: (item: SetupItem) => void;
@@ -77,14 +76,14 @@ export type SetupItem = {
   description: string;
   value: string;
   actionable: boolean;
-  kind: "safety-hooks" | "intercept-hook" | "gitignore" | "config-file" | "difftool";
+  kind: "safety-hooks" | "intercept-hook" | "difftool";
 };
 
 export type ConfigDialogItem = {
   key: string;
   type: "number" | "boolean" | "string" | "string[]";
   value: unknown;
-  source: "project" | "user" | "default";
+  source: "user" | "default";
   default: unknown;
 };
 
@@ -517,17 +516,19 @@ function handleSetupDialog(
   d: Extract<NonNullable<DialogState>, { type: "setup" }>,
   data: string
 ): boolean {
-  // Tab switching: 1/2/3 number keys
+  // Tab switching: 1/2 number keys, Tab/Shift+Tab
+  const TAB_COUNT = 2;
   if (data === "1" && d.tab !== 0) { d.onTabChange(0); return true; }
   if (data === "2" && d.tab !== 1) { d.onTabChange(1); return true; }
-  if (data === "3" && d.tab !== 2) { d.onTabChange(2); return true; }
+  if (data === "\t") { d.onTabChange((d.tab + 1) % TAB_COUNT); return true; }
+  if (data === "\x1b[Z") { d.onTabChange((d.tab - 1 + TAB_COUNT) % TAB_COUNT); return true; }
 
   // Tab 0: existing setup behavior
   if (d.tab === 0) {
     return handleSetupTab0(ctx, d, data);
   }
 
-  // Tab 1 & 2: config editing
+  // Tab 1: config editing
   return handleSetupConfigTab(ctx, d, data);
 }
 
@@ -884,7 +885,7 @@ export function buildNewAgentFormContent(
   return { title: `New Agent (${dialog.repoName})`, contentLines: lines };
 }
 
-const SETUP_TAB_NAMES = ["Setup", "Project", "User"];
+const SETUP_TAB_NAMES = ["Setup", "Config"];
 
 /** Build the tab bar for the setup dialog */
 function buildTabBar(activeTab: number, innerWidth: number): string {
@@ -907,7 +908,7 @@ export function buildSetupContent(
 ): DialogContent {
   const lines: string[] = [];
   lines.push(buildTabBar(dialog.tab, innerWidth));
-  lines.push(`${DIM}(1/2/3: tabs, j/k: navigate, Enter: toggle/edit, Esc: close)${RESET}`);
+  lines.push(`${DIM}(1/2/Tab: tabs, j/k: navigate, Enter: toggle/edit, Esc: close)${RESET}`);
   lines.push("");
 
   if (dialog.tab === 0) {
@@ -937,13 +938,8 @@ function buildSetupTab0Content(
         lines.push(truncateToWidth(`  ${label}`, innerWidth, ""));
       }
       lines.push(truncateToWidth(`  ${DIM}${item.description}${RESET}`, innerWidth, ""));
-    } else if (item.kind === "config-file" && item.value === "installed") {
-      // Config file exists — show as non-toggleable [+]
-      const checkbox = `${DIM}[+] ${item.label}${RESET}`;
-      lines.push(truncateToWidth(`  ${checkbox}`, innerWidth, ""));
-      lines.push(truncateToWidth(`  ${DIM}${item.description}${RESET}`, innerWidth, ""));
     } else {
-      // Checkbox items (safety-hooks, intercept-hook, gitignore, config-file when missing)
+      // Checkbox items (safety-hooks, intercept-hook)
       const installed = item.value === "installed";
       const partial = item.value === "partial";
       const checkbox = installed ? "[x]" : partial ? "[~]" : "[ ]";
@@ -966,7 +962,6 @@ function buildConfigTabContent(
 ): void {
   const items = dialog.configItems ?? [];
   const selectedIdx = dialog.configSelectedIndex ?? 0;
-  const isUserTab = dialog.tab === 2;
 
   if (items.length === 0) {
     lines.push(`${DIM}No configuration keys found${RESET}`);
@@ -989,11 +984,9 @@ function buildConfigTabContent(
       valueStr = String(item.value);
     }
 
-    const sourceStr = isUserTab && item.source === "project"
-      ? `${DIM}(project override)${RESET}`
-      : item.source !== "default"
-        ? `${DIM}(${item.source})${RESET}`
-        : `${DIM}(default)${RESET}`;
+    const sourceStr = item.source !== "default"
+      ? `${DIM}(${item.source})${RESET}`
+      : `${DIM}(default)${RESET}`;
 
     const label = `${item.key}: ${valueStr} ${sourceStr}`;
     if (isSelected) {

@@ -1801,32 +1801,45 @@ ${qStartExitScript}
   }
 
   // 23. Generate prompt summary in background (fire-and-forget)
-  generatePromptSummary(prompt, agentDir).catch(() => {});
+  generatePromptSummary(agentDir).catch(() => {});
 
   return { ok: true, exitCode: 0, stdout, stderr: "" };
 }
 
 /**
- * Generate a short summary of an agent's prompt using claude -p with Haiku.
- * Runs in the background — does not block agent creation.
- * On success, merges `summary` field into meta.json. On failure, silently skips.
+ * Spawn a detached subprocess to generate the prompt summary.
+ * Uses the same pattern as the watchdog spawn (line ~1794): `ib generate-summary`
+ * runs as a standalone subcommand so it survives after the parent calls process.exit().
+ *
+ * In test mode, calls a test override directly so tests can verify behavior
+ * without a real subprocess.
  */
-async function generatePromptSummary(prompt: string, agentDir: string): Promise<void> {
-  const summaryPrompt = `Summarize the following agent task in at most 30 words:\n\n${prompt}`;
-  const result = await newAgentSpawnCtx.run(["claude", "-p", summaryPrompt, "--model", "claude-haiku-4-5-20251001"]);
-  if (result.exitCode !== 0) return;
-  const summary = result.stdout.trim();
-  if (!summary) return;
+async function generatePromptSummary(agentDir: string): Promise<void> {
+  // Test mode: call the override directly so tests can verify via mock
+  if (summaryGeneratorOverride) {
+    await summaryGeneratorOverride(agentDir);
+    return;
+  }
 
-  // Read current meta.json, merge summary, write back
-  const metaPath = join(agentDir, "meta.json");
-  try {
-    const metaFile = Bun.file(metaPath);
-    if (!(await metaFile.exists())) return;
-    const meta = await metaFile.json();
-    meta.summary = summary;
-    await Bun.write(metaPath, JSON.stringify(meta, null, 2) + "\n");
-  } catch { /* ignore */ }
+  // Production: spawn detached subprocess (survives parent process.exit())
+  const proc = Bun.spawn(["ib", "generate-summary", agentDir], {
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  proc.unref();
+}
+
+/** Override for testing — set via setNewAgentSummaryGenerator / resetNewAgentSummaryGenerator */
+let summaryGeneratorOverride: ((agentDir: string) => Promise<void>) | null = null;
+
+/** Override the summary generator for testing. */
+export function setNewAgentSummaryGenerator(fn: (agentDir: string) => Promise<void>): void {
+  summaryGeneratorOverride = fn;
+}
+
+/** Reset the summary generator override. */
+export function resetNewAgentSummaryGenerator(): void {
+  summaryGeneratorOverride = null;
 }
 
 /**

@@ -800,13 +800,13 @@ This file is user-wide and persists across sessions. It is managed exclusively v
 ```json
 {
   "repos": [
-    "/Users/me/projects/my-app",
-    "/Users/me/projects/other-repo"
+    { "path": "/Users/me/projects/my-app", "name": "my-app" },
+    { "path": "/Users/me/projects/other-repo", "name": "other-repo" }
   ]
 }
 ```
 
-Each entry is an absolute path to a git repository root.
+Each entry is an object with `path` (absolute path to the git repository root), `name` (the repository basename), and an optional `nickname` field for a user-defined display name.
 
 ### 9.3 Registry Commands
 

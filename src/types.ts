@@ -56,11 +56,6 @@ export class InjectionContext<T> {
   reset(): void {
     this._value = this._default;
   }
-
-  /** Returns true if the value has been overridden from its default. */
-  get isOverridden(): boolean {
-    return this._value !== this._default;
-  }
 }
 
 /**

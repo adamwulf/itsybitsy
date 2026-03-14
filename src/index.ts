@@ -273,6 +273,18 @@ async function main() {
       // Global: setInterval in startWatchdog holds the event loop
       break;
     }
+    case "generate-summary": {
+      const agentDir = args[1];
+      if (!agentDir) {
+        console.error("Usage: ib generate-summary <agentDir>");
+        process.exit(1);
+      }
+      const { generateSummary } = await import("./generate-summary");
+      try {
+        await generateSummary(agentDir);
+      } catch { /* ignore — fire-and-forget subprocess */ }
+      break;
+    }
     case "watch": {
       if (!Bun.which("tmux")) {
         console.error("Error: 'tmux' not found on PATH. Install tmux: brew install tmux");

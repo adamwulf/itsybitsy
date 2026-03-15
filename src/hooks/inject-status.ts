@@ -169,7 +169,7 @@ export function createDiskAgentProvider(): AgentDataSource {
     },
     async getAgents(repos) {
       const { readAllAgents } = await import("../agents");
-      const { agents } = await readAllAgents(repos);
+      const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })));
       return { agents };
     },
     async detectStates(agents) {

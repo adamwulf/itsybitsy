@@ -145,6 +145,13 @@ After any code changes, always run:
 All 6 phases complete. 968 tests across 28 files.
 
 ### State detection flow
+**Deterministic model (Phase 42 — design complete, not yet implemented):**
+1. Stop hook (`ib hook-status`) writes `state` to `meta.json` when Claude goes idle (`waiting`, `complete`, or `running`)
+2. `ib send` and `ib resume` write `state: "running"` to `meta.json`
+3. `detectAgentStates()` reads state from meta.json with tmux overrides for compacting/rate_limited/stopped
+4. `creating` is derived from `created_epoch` (< 6s ago), never stored
+
+**Current (legacy) flow:**
 1. `watcher.ts` calls `detectAgentStates()` (in `agents.ts`) on every refresh
 2. `detectAgentStates()` calls `captureTmuxOutput()` (in `tmux-poller.ts`) for each active agent, then calls `computeStateFromContent()` as a pre-check; only if it returns `null` does it call `parseState()` (in `parse-state.ts`)
 3. Archived agents are always set to `stopped` without tmux capture

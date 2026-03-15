@@ -55,27 +55,25 @@ This is a **full daily-driver replacement for `ib watch`**, extended to span mul
 
 ### State detection
 
-Port `parse_state` from `ib` (bash → TypeScript). It pattern-matches the last 5–20 lines of
-tmux output (after stripping ANSI codes). States:
+**Deterministic model (Phase 42):** Agent state is written to `meta.json` by the stop hook when Claude goes idle. Consumers read state from meta.json with two tmux-based overrides for transient states. See SPEC.md §1.3 for the full specification.
 
-| State | Detection |
-|---|---|
-| `creating` | Permission prompt before Claude starts (`Enter to confirm` + trust/import text, no `Claude Code v` yet) |
-| `running` | `(Esc to interrupt`, `⎿  Running`, active spinners with interrupt marker or token arrows |
-| `waiting` | `WAITING` on its own line (and no `⏺` output after it), or `⎿  Waiting` |
-| `complete` | `I HAVE COMPLETED THE GOAL` in last 15 lines |
-| `compacting` | `Compacting conversation` in last 5 lines |
-| `rate_limited` | `rate_limit_error`, `usage limit reached`, `hit your limit`, etc. |
-| `stopped` | tmux session doesn't exist |
-| `unknown` | Empty tmux output or no match |
+| State | Source | Written to meta.json? |
+|---|---|---|
+| `creating` | Derived from `created_epoch` (< 6s ago) | No |
+| `running` | Written by stop hook (nudge case), `ib send`, `ib resume` | Yes |
+| `waiting` | Written by stop hook (`last_assistant_message` ends with `WAITING`) | Yes |
+| `complete` | Written by stop hook (`last_assistant_message` ends with `I HAVE COMPLETED THE GOAL`) | Yes |
+| `compacting` | Tmux output: "Compacting conversation" in last 5 lines (display-only override) | No |
+| `rate_limited` | Tmux output: rate limit patterns in last 15 lines (display-only override) | No |
+| `stopped` | No tmux session exists, or agent is archived | No |
 
-Key subtleties:
-- `compacting` checked before `running` (it also shows `(esc to interrupt)`)
-- Active running indicators in last 5 lines checked BEFORE `⎿  Waiting` in last 15 lines (prevents stale tool-waiting from overriding resumed running)
-- `⎿  Waiting` (tool waiting) treated as `waiting` not `running`
-- Stale `WAITING`: if `⏺` appears after `WAITING`, agent has resumed → `running`
-- Hook spinners filtered out before spinner detection
-- Broader 20-line window used as last resort for active spinners
+**State resolution order** (used by `detectAgentStates()`, `ib list`, `ib watch`, watchdog):
+1. Archived → `stopped`
+2. No tmux session → `stopped` (or `creating` if < 6s old)
+3. Tmux compacting/rate_limited patterns → override to transient state
+4. Read `state` from meta.json → use stored value (default `running` if absent)
+
+**Legacy `parseState()`** — the 14-priority tmux pattern matching system remains in the codebase for backward compatibility with the bash reference implementation. It is no longer used for primary state detection in TS. Two targeted helper functions (`isCompacting()`, `isRateLimited()`) extract the relevant patterns for the transient override checks.
 
 ### Tmux output capture
 
@@ -192,9 +190,13 @@ Also: `src/usage.ts` — fetches Claude API session+weekly utilization from `GET
   "worker": false,
   "yolo": false,
   "model": "sonnet",
-  "claude_pid": "31269"
+  "claude_pid": "31269",
+  "state": "running",
+  "state_updated_at": 1772579046
 }
 ```
+
+`state` is written by the stop hook, `ib send`, and `ib resume`. See SPEC.md §1.3.1. Absent on legacy agents (treated as `"running"` if agent is older than 6s).
 
 `worker: true` means the agent cannot spawn sub-agents. Display with a different icon in the tree (e.g., `⚙` vs `◆` for managers).
 
@@ -1723,6 +1725,129 @@ Three divergences to fix:
 
 - [x] Where the agent prompt is currently shown in the agent list, use `agent.summary ?? agent.prompt` instead (in `agent-tree.ts:57`, not `dashboard.ts`)
 - [x] No other display changes needed
+
+---
+
+### Phase 42: Deterministic Agent State Tracking
+
+**Status:** Design complete. Not yet implemented.
+
+**Source:** User request. Addresses fragility of tmux-based state detection (14-priority pattern matching in `parse-state.ts`).
+
+**Goal:** Make agent state deterministic by having the stop hook write authoritative state to `meta.json`. Eliminate tmux output parsing as the primary state source. Keep minimal tmux parsing only for two transient display states (`compacting`, `rate_limited`) and for `stopped` detection (no tmux session).
+
+**Complexity:** Medium-High. Touches stop hook, watchdog, state detection, watcher, dashboard, ib-commands (send/resume), and meta.json schema.
+
+**Key design decisions:**
+- Only `running`, `waiting`, `complete` are written to meta.json
+- `creating` is derived from `created_epoch` (< 6s ago), never stored
+- `compacting` and `rate_limited` are detected from tmux at read time, never stored
+- `stopped` is detected from tmux session absence, never stored
+- `unknown` state is eliminated — the stop hook always writes a definite state
+- `state_updated_at` (epoch seconds) accompanies every state write for debugging
+- Atomic meta.json writes (temp file + rename) prevent partial reads
+
+#### 42a: Add `writeAgentState()` helper and meta.json schema
+
+**Files:** `src/agents.ts`, `src/agents.test.ts`
+
+- [ ] Add `state` and `state_updated_at` fields to `AgentMeta` type (both optional for backward compat with legacy agents)
+- [ ] Implement `writeAgentState(agentDir: string, state: "running" | "waiting" | "complete"): Promise<void>` — reads meta.json, merges `state` + `state_updated_at`, writes atomically (write to `meta.json.tmp`, `rename()` over `meta.json`)
+- [ ] Handle edge cases: meta.json doesn't exist (no-op), concurrent writes (last-writer-wins via atomic rename)
+- [ ] Add `readAgentState(agentDir: string): Promise<string | undefined>` convenience helper
+- [ ] Tests: write state, read back; atomic write doesn't corrupt; missing meta.json is no-op; state field preserved across reads
+
+#### 42b: Stop hook writes state to meta.json
+
+**Files:** `src/hooks/agent-status.ts`, `src/hooks/agent-status.test.ts`
+
+- [ ] After determining state from `last_assistant_message`, call `writeAgentState()`:
+  - `"WAITING"` → write `"waiting"`
+  - `"I HAVE COMPLETED THE GOAL"` → write `"complete"`
+  - Neither → write `"running"` (then nudge as before)
+- [ ] Remove the tmux capture + `parseState()` fallback from `processStopHook()`. The stop hook no longer needs tmux for state detection — it uses `last_assistant_message` exclusively
+- [ ] Keep the existing action logic (nudge, notify manager, remind commit, remind children) unchanged — only the state source changes
+- [ ] Update debug capture to note "deterministic" state source instead of parse-state reason
+- [ ] Tests: verify state is written to meta.json for each case; verify tmux is not captured for state detection
+
+#### 42c: `ib send` writes `state: "running"` to meta.json
+
+**Files:** `src/ib-commands.ts`, `src/ib-commands.test.ts`
+
+- [ ] In `sendMessage()`, after successfully sending via tmux, call `writeAgentState(agentDir, "running")`
+- [ ] The agent directory is derived from `agent.repoPath` + `.ittybitty/agents/` + `agent.id`
+- [ ] Tests: verify meta.json state is set to "running" after send
+
+#### 42d: `ib resume` writes `state: "running"` to meta.json
+
+**Files:** `src/ib-commands.ts`, `src/ib-commands.test.ts`
+
+- [ ] In `resumeAgent()`, after starting the new tmux session (step 4), call `writeAgentState(agentDir, "running")`
+- [ ] Tests: verify meta.json state is set to "running" after resume
+
+#### 42e: New `detectAgentStates()` — read from meta.json with tmux overrides
+
+**Files:** `src/agents.ts`, `src/agents.test.ts`
+
+Replace the current `detectAgentStates()` (which captures tmux output and runs `parseState()` for every agent) with the new resolution order:
+
+- [ ] Step 1: Archived agents → `stopped`
+- [ ] Step 2: Check tmux session existence (use `captureTmuxOutput()`). If null:
+  - If `isRecentlyCreated(created_epoch)` → `creating`
+  - Else → `stopped`
+- [ ] Step 3: If tmux exists, check for transient overrides (minimal tmux parsing):
+  - "Compacting conversation" in last 5 lines → `compacting`
+  - Rate limit patterns in last 15 lines → `rate_limited`
+- [ ] Step 4: Read `state` from `agent.meta` (already loaded from meta.json). If present → use it. If absent (legacy/fresh agent, created > 6s ago) → `running`
+- [ ] Remove `computeStateFromContent()` — no longer needed (the pre-parseState check for <10 lines)
+- [ ] Remove full `parseState()` call from `detectAgentStates()` — only use the two targeted tmux checks
+- [ ] Tests: verify each resolution step; verify legacy agents without `state` field work; verify compacting/rate_limited override meta.json state
+
+#### 42f: Watchdog reads state from meta.json
+
+**Files:** `src/watchdog.ts`, `src/watchdog.test.ts`
+
+- [ ] In `runPerAgentWatchdog()`, replace the `parseState(output)` call with the same resolution order as 42e:
+  1. Check tmux (compacting/rate_limited overrides)
+  2. Read `state` from meta.json (already loaded in `meta`)
+  3. Fallback: `running` if no state field
+- [ ] Remove the `unknown` state handler — no longer possible. Existing `handleUnknown` and `saveUnknownDebugLog` become dead code
+- [ ] The rate limit handler still needs tmux to check if rate limit dialog was dismissed (the 3-attempt Enter retry loop checks tmux for `rate_limit_error` pattern after each Enter). Keep this minimal tmux parsing in the rate limit handler only
+- [ ] Update `tick()` / `processAgents()` similarly — read state from agent.meta instead of parsing tmux
+- [ ] Tests: verify watchdog uses meta.json state; verify no full parseState calls; verify rate limit bypass still checks tmux
+
+#### 42g: Update `findUnfinishedChildren()` to use meta.json state
+
+**Files:** `src/hooks/agent-status.ts`, `src/hooks/agent-status.test.ts`
+
+- [ ] `findUnfinishedChildren()` currently captures tmux output and calls `parseState()` for each child to check if it's unfinished. Replace with: read `state` from child's meta.json + check tmux session existence
+- [ ] Unfinished = meta.json state is `running`, `waiting`, or `complete`, AND tmux session exists (if no tmux session → stopped → not unfinished)
+- [ ] `creating` (derived from created_epoch) also counts as unfinished
+- [ ] Tests: verify children with state in meta.json are correctly classified
+
+#### 42h: Cleanup and migration
+
+**Files:** `src/parse-state.ts`, `src/agents.ts`, `CLAUDE.md`
+
+- [ ] Extract the compacting check (`"Compacting conversation"` in last 5 lines) and rate limit check (rate limit patterns in last 15 lines) into standalone helper functions in `parse-state.ts` (e.g., `isCompacting(tmuxOutput: string): boolean` and `isRateLimited(tmuxOutput: string): boolean`)
+- [ ] Keep `parseState()` intact but mark it as legacy with a JSDoc comment (still needed by bash ib reference)
+- [ ] Remove `computeStateFromContent()` export (no longer used)
+- [ ] Update `CLAUDE.md` implementation notes to reflect new state detection flow
+- [ ] Update PLAN.md state detection section in architecture overview
+- [ ] Verify all existing tests pass or are updated to reflect new behavior
+
+**Migration path for existing agents:**
+- Agents created before this change will not have a `state` field in meta.json
+- `detectAgentStates()` treats missing `state` as `"running"` (if agent is older than 6s and tmux session exists)
+- The next stop hook fire will write a `state` field, bringing the agent into the new system
+- No explicit migration step needed — agents self-migrate on next idle event
+
+**Edge cases and race conditions:**
+- **Stop hook fires twice quickly**: Last writer wins (atomic rename). Both writes are valid — the most recent state is correct.
+- **`ib send` races with stop hook**: If send comes after stop → agent IS running (received input) → send's `"running"` write is correct. If send comes before → stop hook fires later with the updated state → also correct. Last-writer-wins works in both cases.
+- **Agent paused between stop hook fire and meta.json write**: The hook process runs briefly (~ms). If the agent is killed/paused during this window, the state written is still valid (it was the last known state before kill). On resume, state is reset to `"running"`.
+- **Watchdog reads stale state**: The watchdog polls every 5s. Between polls, the stop hook may have updated state. This is acceptable — the watchdog will see the updated state on the next tick. The 5s latency matches current behavior.
+- **Rate limit detected by watchdog vs meta.json state**: The watchdog checks tmux for rate_limited on each tick (step 3 of resolution order). If meta.json says `"running"` but tmux shows rate_limited, the tmux override wins. This is correct — rate_limited is a transient condition visible only in the terminal.
 
 ---
 

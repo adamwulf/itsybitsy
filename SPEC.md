@@ -628,11 +628,9 @@ Custom prompt files in `.ittybitty/prompts/`:
 
 ### 7.5 ib config
 
-`ib config <subcommand> [options]` reads and writes configuration values in `.ittybitty.json` files. This is the CLI interface for managing the config keys described in §7.2.
+`ib config <subcommand> [options]` reads and writes configuration values in `.ittybitty.json` files. This is the CLI interface for managing the config keys described in §7.2. See the callout in §7.1 for how the TypeScript reimplementation diverges (single `~/.itsybitsy/config.json` file, no per-project config).
 
-**[^callout]** The bash reference implementation uses `.ittybitty.json` (project root) and `~/.ittybitty.json` (user home) as its config files, with a two-tier priority system (project > user > defaults). The TypeScript reimplementation uses a single `~/.itsybitsy/config.json` file with no per-project config. If `ib config` is implemented in TypeScript, it should read/write `~/.itsybitsy/config.json` and the two-tier layering does not apply.
-
-#### Config File Locations (bash reference)
+#### Config File Locations
 
 | Scope | File | Priority |
 |-------|------|----------|
@@ -667,6 +665,7 @@ Gets the effective value for a single config key.
 3. **With `--global`**: Reads only from the user config file, falling back to the built-in default.
 4. **Unknown keys** with no default: Exits with error `"Key '<key>' not found (no default value)"` and prints available keys.
 5. **Output**: Prints the value to stdout (no label, no formatting). For array values, outputs the JSON array representation.
+6. **Default values in `get`**: The defaults used by `config get` are the config-level defaults, which may differ from the effective runtime defaults described in §7.2. For example, `model` defaults to empty string in `config get` (meaning "not configured"), while the runtime resolution in §7.2 falls back to `"opus"` at spawn time. Similarly, `autoCompactThreshold` and `externalDiffTool` default to empty (unset).
 
 ##### `ib config set [--global] <key> <value>`
 
@@ -679,7 +678,7 @@ Sets a scalar config value.
    - `maxAgents`, `fps`: Must be a non-negative integer (`/^[0-9]+$/`). Error: `"'<key>' must be a number, got '<value>'"`.
    - `createPullRequests`: Must be `"true"` or `"false"`. Error: `"'<key>' must be true or false, got '<value>'"`.
    - `model`: Must be one of `"sonnet"`, `"opus"`, `"haiku"`. Error: `"'<key>' must be one of: sonnet, opus, haiku"`.
-5. **Value encoding**: Integers are stored as JSON numbers. `true`/`false` are stored as JSON booleans. All other values are stored as JSON strings.
+5. **Value encoding**: Integers are stored as JSON numbers. `true`/`false` are stored as JSON booleans. Object literals (values starting with `{` and ending with `}`) are stored as parsed JSON objects. All other values are stored as JSON strings.
 6. **Dot notation**: Keys use dot notation to access nested paths (e.g., `hooks.injectStatus` maps to `{"hooks": {"injectStatus": ...}}`).
 7. **Output**: On success, prints `"Set <key> = <value>"`.
 
@@ -705,7 +704,7 @@ Removes a value from an array config key.
 
 #### Help and Errors
 
-- `ib config` (no subcommand), `ib config --help`, or `ib config help` prints full usage with available subcommands, options, available keys, examples, and value type documentation.
+- `ib config` (no subcommand), `ib config -h`, `ib config --help`, or `ib config help` prints full usage with available subcommands, options, available keys, examples, and value type documentation.
 - Unknown subcommands produce: `"Error: Unknown subcommand '<name>'"` with a brief usage hint and pointer to `--help`.
 - All error output goes to stderr. All success output goes to stdout.
 

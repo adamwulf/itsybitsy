@@ -628,83 +628,90 @@ Custom prompt files in `.ittybitty/prompts/`:
 
 ### 7.5 ib config
 
-`ib config <subcommand> [options]` reads and writes configuration values in `.ittybitty.json` files. This is the CLI interface for managing the config keys described in §7.2. See the callout in §7.1 for how the TypeScript reimplementation diverges (single `~/.itsybitsy/config.json` file, no per-project config).
+`ib config <subcommand>` reads and writes configuration values in `~/.itsybitsy/config.json`. This is the CLI interface for managing the config keys described in §7.2.
 
-#### Config File Locations
+**[^callout]** The bash reference implementation supports `--global` / `-g` flag and per-project `.ittybitty.json` files. The TypeScript reimplementation has no per-project config — all operations target `~/.itsybitsy/config.json`. The `--global` flag is not supported.
 
-| Scope | File | Priority |
-|-------|------|----------|
-| Project | `.ittybitty.json` (repo root) | Highest — overrides user config |
-| User | `~/.ittybitty.json` | Lower — provides user-wide defaults |
+#### Config File
 
-Values not set in either file use built-in defaults (§7.2).
+All subcommands operate on the single user-wide config file:
 
-#### Global Flag
+| File | Description |
+|------|-------------|
+| `~/.itsybitsy/config.json` | User-wide configuration (only config source) |
 
-`-g` / `--global` — Operate on the user config (`~/.ittybitty.json`) instead of the project config. Applies to all subcommands. The flag can appear anywhere in the argument list (before or after the subcommand).
+Values not set in this file use built-in defaults (§7.2).
 
 #### Subcommands
 
-##### `ib config list [--global]`
+##### `ib config list`
 
 Lists all known config keys with their current values and sources.
 
-1. **Without `--global`**: Shows the merged view with precedence `project > user > default`. Each line shows the key, its effective value, and a source label: `(project)`, `(user)`, or `(default)`.
-2. **With `--global`**: Shows only the user config. Source labels are `(user)` or `(default)`.
-3. **Unset keys**: Keys with no value and no default display as `(unset)`.
-4. **All known keys are listed**, including those not present in any config file. The full key list includes: `maxAgents`, `model`, `fps`, `createPullRequests`, `allowAgentQuestions`, `autoCompactThreshold`, `externalDiffTool`, `hooks.injectStatus`, `hooks.statusVisible`, `permissions.manager.allow`, `permissions.manager.deny`, `permissions.worker.allow`, `permissions.worker.deny`.
-5. A legend line is printed after the list explaining the source labels.
-6. Aliases: `ib config ls` is accepted as an alias for `list`.
+1. Each line shows the key, its effective value, and a source label: `(user)` or `(default)`.
+2. **Unset keys**: Keys with no value and no default display as `(unset)`.
+3. **All known keys are listed**, including those not present in the config file. The full key list matches `CONFIG_KEYS` in `config.ts`: `maxAgents`, `model`, `createPullRequests`, `allowAgentQuestions`, `autoCompactThreshold`, `externalDiffTool`, `hooks.injectStatus`, `hooks.statusVisible`, `permissions.manager.allow`, `permissions.manager.deny`, `permissions.worker.allow`, `permissions.worker.deny`.
+4. A legend line is printed after the list explaining the source labels.
+5. Aliases: `ib config ls` is accepted as an alias for `list`.
 
-##### `ib config get [--global] <key>`
+##### `ib config get <key>`
 
 Gets the effective value for a single config key.
 
 1. **Key required**: Exits with error if no key is provided. Error output includes the list of available keys.
-2. **Without `--global`**: Resolves value using precedence: project config → user config → built-in default.
-3. **With `--global`**: Reads only from the user config file, falling back to the built-in default.
-4. **Unknown keys** with no default: Exits with error `"Key '<key>' not found (no default value)"` and prints available keys.
-5. **Output**: Prints the value to stdout (no label, no formatting). For array values, outputs the JSON array representation.
-6. **Default values in `get`**: The defaults used by `config get` are the config-level defaults, which may differ from the effective runtime defaults described in §7.2. For example, `model` defaults to empty string in `config get` (meaning "not configured"), while the runtime resolution in §7.2 falls back to `"opus"` at spawn time. Similarly, `autoCompactThreshold` and `externalDiffTool` default to empty (unset).
+2. Resolves value from user config file, falling back to built-in default.
+3. **Unknown keys**: Exits with error `"Unknown config key: '<key>'"` and prints available keys.
+4. **Output**: Prints the value to stdout (no label, no formatting). For array values, outputs the JSON array representation. For unset keys with no default, prints empty string.
 
-##### `ib config set [--global] <key> <value>`
+##### `ib config set <key> <value>`
 
 Sets a scalar config value.
 
 1. **Key and value required**: Exits with error if either is missing.
-2. **Config file creation**: If the target config file does not exist, it is created with `{}` as initial content.
-3. **Array keys rejected**: Keys matching `permissions.*.allow` or `permissions.*.deny` are rejected with an error directing the user to use `ib config add` / `ib config remove` instead. Array-looking values (starting with `[` and ending with `]`) are also rejected.
-4. **Type validation** for known keys:
-   - `maxAgents`, `fps`: Must be a non-negative integer (`/^[0-9]+$/`). Error: `"'<key>' must be a number, got '<value>'"`.
-   - `createPullRequests`: Must be `"true"` or `"false"`. Error: `"'<key>' must be true or false, got '<value>'"`.
+2. **Config file creation**: If `~/.itsybitsy/config.json` does not exist, the `~/.itsybitsy/` directory and file are created.
+3. **Unknown keys rejected**: Only keys defined in `CONFIG_KEYS` are accepted. Unknown keys produce error `"Unknown config key: '<key>'"`.
+4. **Array keys rejected**: Keys with type `string[]` (the `permissions.*` keys) are rejected with an error directing the user to use `ib config add` / `ib config remove` instead.
+5. **Type validation** for known keys:
+   - `number` type keys (`maxAgents`, `autoCompactThreshold`): Must be a non-negative integer (`/^[0-9]+$/`). Error: `"'<key>' must be a number, got '<value>'"`.
+   - `boolean` type keys (`createPullRequests`, `allowAgentQuestions`, `hooks.injectStatus`, `hooks.statusVisible`): Must be `"true"` or `"false"`. Error: `"'<key>' must be true or false, got '<value>'"`.
    - `model`: Must be one of `"sonnet"`, `"opus"`, `"haiku"`. Error: `"'<key>' must be one of: sonnet, opus, haiku"`.
-5. **Value encoding**: Integers are stored as JSON numbers. `true`/`false` are stored as JSON booleans. Object literals (values starting with `{` and ending with `}`) are stored as parsed JSON objects. All other values are stored as JSON strings.
-6. **Dot notation**: Keys use dot notation to access nested paths (e.g., `hooks.injectStatus` maps to `{"hooks": {"injectStatus": ...}}`).
-7. **Output**: On success, prints `"Set <key> = <value>"`.
+6. **Value encoding**: Integers are stored as JSON numbers. `true`/`false` are stored as JSON booleans. All other values are stored as JSON strings.
+7. **Dot notation**: Keys use dot notation to access nested paths (e.g., `hooks.injectStatus` maps to `{"hooks": {"injectStatus": ...}}`).
+8. **Output**: On success, prints `"Set <key> = <value>"`.
 
-##### `ib config add [--global] <key> <value>`
+##### `ib config add <key> <value>`
 
 Adds a value to an array config key, preventing duplicates.
 
 1. **Key and value required**: Exits with error if either is missing. Error output lists the valid array keys.
 2. **Array keys only**: Only `permissions.manager.allow`, `permissions.manager.deny`, `permissions.worker.allow`, and `permissions.worker.deny` are accepted. All other keys are rejected with an error.
-3. **Config file creation**: If the target config file does not exist, it is created with `{}`.
+3. **Config file creation**: If `~/.itsybitsy/config.json` does not exist, the directory and file are created.
 4. **Duplicate prevention**: If the value already exists in the array, prints `"Value '<value>' already exists in <key>"` and exits successfully (exit code 0).
 5. **Output**: On success, prints `"Added '<value>' to <key>"`.
 
-##### `ib config remove [--global] <key> <value>`
+##### `ib config remove <key> <value>`
 
 Removes a value from an array config key.
 
 1. **Key and value required**: Exits with error if either is missing. Error output lists the valid array keys.
 2. **Array keys only**: Same restriction as `add`.
-3. **Config file required**: If the config file does not exist, exits with error `"Config file not found: <path>"`.
+3. **Config file required**: If the config file does not exist, exits with error `"Config file not found: ~/.itsybitsy/config.json"`.
 4. **Missing value**: If the value is not in the array, prints `"Value '<value>' not found in <key>"` and exits successfully (exit code 0).
 5. **Output**: On success, prints `"Removed '<value>' from <key>"`.
 
+##### `ib config unset <key>`
+
+Removes a key from the config file, reverting it to its built-in default.
+
+1. **Key required**: Exits with error if no key is provided.
+2. **Unknown keys rejected**: Only keys defined in `CONFIG_KEYS` are accepted.
+3. **Config file required**: If the config file does not exist, exits with error.
+4. **Array keys**: For array keys, removes the entire array from the config file (equivalent to reverting to the default `[]`).
+5. **Output**: On success, prints `"Unset <key> (reverted to default)"`. If the key was not set, prints `"Key '<key>' is not set"` and exits successfully.
+
 #### Help and Errors
 
-- `ib config` (no subcommand), `ib config -h`, `ib config --help`, or `ib config help` prints full usage with available subcommands, options, available keys, examples, and value type documentation.
+- `ib config` (no subcommand), `ib config -h`, `ib config --help`, or `ib config help` prints full usage with available subcommands, available keys, examples, and value type documentation.
 - Unknown subcommands produce: `"Error: Unknown subcommand '<name>'"` with a brief usage hint and pointer to `--help`.
 - All error output goes to stderr. All success output goes to stdout.
 

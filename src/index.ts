@@ -437,7 +437,7 @@ async function main() {
         for (const q of questions) {
           found = true;
           const statusTag = showAll && q.status === "acknowledged" ? " [acknowledged]" : "";
-          console.log(`[${repo.name}] ${q.agent}${statusTag}`);
+          console.log(`[${repo.name}] ${q.agent} (${q.id})${statusTag}`);
           console.log(`  ${q.question}`);
           console.log(`  ${q.timestamp}`);
           console.log("");

@@ -2906,7 +2906,13 @@ describe("statusAgent (native)", () => {
         return makeSpawnResult(0, "M src/file.ts\n");
       }
       if (cmd.includes("diff") && cmd.includes("--stat")) {
-        return makeSpawnResult(0, " src/file.ts | 10 +++++++---\n 1 file changed, 7 insertions(+), 3 deletions(-)\n");
+        return makeSpawnResult(0, " src/file.ts | 10 +++++++---\n src/new.ts  |  5 +++++\n src/{old.ts => renamed.ts} | 2 +-\n src/removed.ts | 8 --------\n src/image.png | Bin 0 -> 1234 bytes\n 5 files changed, 14 insertions(+), 12 deletions(-)\n");
+      }
+      if (cmd.includes("diff") && cmd.includes("--numstat")) {
+        return makeSpawnResult(0, "7\t3\tsrc/file.ts\n5\t0\tsrc/new.ts\n1\t1\tsrc/{old.ts => renamed.ts}\n0\t8\tsrc/removed.ts\n-\t-\tsrc/image.png\n");
+      }
+      if (cmd.includes("diff") && cmd.includes("--name-status")) {
+        return makeSpawnResult(0, "M\tsrc/file.ts\nA\tsrc/new.ts\nR100\tsrc/old.ts\tsrc/renamed.ts\nD\tsrc/removed.ts\nA\tsrc/image.png\n");
       }
       return makeSpawnResult();
     });
@@ -2917,6 +2923,12 @@ describe("statusAgent (native)", () => {
     expect(result.ok).toBe(true);
     expect(result.stdout).toContain("first commit");
     expect(result.stdout).toContain("M src/file.ts");
+    // Per-file details
+    expect(result.stdout).toContain("modified src/file.ts (+7/-3)");
+    expect(result.stdout).toContain("added    src/new.ts (+5)");
+    expect(result.stdout).toContain("renamed  src/renamed.ts (+1/-1)");
+    expect(result.stdout).toContain("deleted  src/removed.ts (-8)");
+    expect(result.stdout).toContain("added    src/image.png");
   });
 
   test("fails when worktree not found", async () => {

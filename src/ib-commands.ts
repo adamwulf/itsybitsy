@@ -2126,6 +2126,61 @@ export async function statusAgent(agent: Agent): Promise<IbCommandResult> {
       if (summaryLine && !summaryLine.includes("0 files changed")) {
         parts.push("═══ Files Changed ═══");
         parts.push(`  ${summaryLine}`);
+
+        // Per-file details: numstat for line counts, name-status for status labels
+        // Use a single combined call isn't possible, so run both with consistent filters
+        const numstatResult = await diffStatusSpawnCtx.run(["git", "-C", worktreePath, "diff", "--numstat", "-M", `${mb.stdout}..${agentBranch}`]);
+        const fileStats = new Map<string, { added: string; deleted: string }>();
+        if (numstatResult.stdout) {
+          for (const line of numstatResult.stdout.split("\n")) {
+            if (!line.trim()) continue;
+            // numstat format: <added>\t<deleted>\t<file>
+            // For renames with -M: <added>\t<deleted>\t<old>{...=> ...}<new>
+            const match = line.match(/^(\d+|-)\t(\d+|-)\t(.+)$/);
+            if (match) {
+              let filename = match[3]!;
+              // Handle rename format: old/path/{old.ts => new.ts} or {old.ts => new.ts}
+              const renameMatch = filename.match(/^(.*?)\{.+ => (.+?)\}(.*)$/);
+              if (renameMatch) {
+                filename = renameMatch[1]! + renameMatch[2]! + renameMatch[3]!;
+              }
+              fileStats.set(filename, { added: match[1]!, deleted: match[2]! });
+            }
+          }
+        }
+
+        const nameStatusResult = await diffStatusSpawnCtx.run(["git", "-C", worktreePath, "diff", "--name-status", "-M", `${mb.stdout}..${agentBranch}`]);
+        const statusLabels = new Map<string, string>();
+        if (nameStatusResult.stdout) {
+          for (const line of nameStatusResult.stdout.split("\n")) {
+            if (!line.trim()) continue;
+            // name-status format: <code>[score]\t<file> or <code>[score]\t<old>\t<new>
+            const renameMatch = line.match(/^[RC]\d*\t.+?\t(.+)$/);
+            if (renameMatch) {
+              statusLabels.set(renameMatch[1]!, line[0] === "R" ? "renamed" : "copied");
+              continue;
+            }
+            const match = line.match(/^([ADMT])\d*\t(.+)$/);
+            if (match) {
+              const code = match[1]!;
+              const label = code === "A" ? "added" : code === "D" ? "deleted" : "modified";
+              statusLabels.set(match[2]!, label);
+            }
+          }
+        }
+
+        if (fileStats.size > 0) {
+          parts.push("");
+          const files = [...fileStats.keys()].sort();
+          for (const file of files) {
+            const nums = fileStats.get(file)!;
+            const label = statusLabels.get(file) ?? "modified";
+            const added = nums.added !== "-" && nums.added !== "0" ? `+${nums.added}` : "";
+            const deleted = nums.deleted !== "-" && nums.deleted !== "0" ? `-${nums.deleted}` : "";
+            const counts = [added, deleted].filter(Boolean).join("/");
+            parts.push(`  ${label.padEnd(8)} ${file}${counts ? ` (${counts})` : ""}`);
+          }
+        }
       }
     }
   }

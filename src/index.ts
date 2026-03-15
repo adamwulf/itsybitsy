@@ -68,7 +68,7 @@ export function matchAgentById(id: string, agents: Agent[]): { match: Agent | nu
 /** Find an agent by ID (prefix match) across all registered repos. */
 export async function findAgentById(id: string, repos: RepoEntry[]): Promise<Agent | null> {
   const { readAllAgents } = await import("./agents");
-  const { agents } = await readAllAgents(repos);
+  const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })));
   const { match, ambiguous } = matchAgentById(id, agents);
   if (ambiguous.length > 0) {
     console.error(`Ambiguous ID "${id}" matches: ${ambiguous.join(", ")}`);
@@ -132,7 +132,7 @@ async function main() {
       const managerFilter = managerIdx !== -1 ? args[managerIdx + 1] : null;
       const jsonOutput = args.includes("--json");
 
-      const { agents, errors } = await readAllAgents(repos);
+      const { agents, errors } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })));
       for (const err of errors) {
         console.error(`Warning: ${err.error}`);
       }
@@ -280,7 +280,7 @@ async function main() {
         console.log("No repos registered. Use 'ib add <path>' to add one.");
         break;
       }
-      const { agents, errors } = await readAllAgents(repos);
+      const { agents, errors } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })));
       for (const err of errors) {
         console.error(`Warning: ${err.error}`);
       }

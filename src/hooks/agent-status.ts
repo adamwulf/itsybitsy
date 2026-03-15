@@ -10,6 +10,8 @@ import { logAgent } from "../agent-lifecycle";
 import { parseState } from "../parse-state";
 import { captureTmuxOutput } from "../tmux-poller";
 import { isValidAgentId, isValidTmuxSession } from "../validation";
+import { writeAgentState, hasBackgroundTasks, isRecentlyCreated } from "../agents";
+import type { MetaState } from "../agents";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -59,6 +61,7 @@ export function detectStateFromMessage(lastMessage: string): string {
 
 /**
  * Core testable logic for the stop hook.
+ * Uses deterministic state from last_assistant_message exclusively — no tmux fallback.
  */
 export async function processStopHook(
   agentId: string,
@@ -67,57 +70,25 @@ export async function processStopHook(
   agentsDir: string,
   opts?: ProcessStopHookOpts,
 ): Promise<StopHookResult> {
-  // 1. Try detectStateFromMessage first
-  let state = detectStateFromMessage(lastMessage);
+  // 1. Determine state from last_assistant_message
+  const detected = detectStateFromMessage(lastMessage);
+  const state: MetaState = detected === "waiting" ? "waiting"
+    : detected === "complete" ? "complete"
+    : "running";
 
-  // 2. If empty, fall back to tmux
-  // Keep tmuxOutput around for background task check later
-  let tmuxOutput: string | null = null;
-  let parseReason: string | undefined;
-  if (!state) {
-    if (opts?.captureOutput) {
-      tmuxOutput = await opts.captureOutput();
-    } else {
-      // Read meta.json for tmux_session
-      try {
-        const metaPath = join(agentDir, "meta.json");
-        const metaRaw = await readFile(metaPath, "utf-8");
-        const meta = JSON.parse(metaRaw);
-        if (meta.tmux_session) {
-          if (!isValidTmuxSession(meta.tmux_session)) {
-            console.error(`[agent-status] Invalid tmux session name: ${meta.tmux_session}`);
-          } else {
-            tmuxOutput = await captureTmuxOutput(meta.tmux_session);
-          }
-        }
-      } catch {
-        /* meta.json may not exist */
-      }
-    }
+  // 2. Write state to meta.json (deterministic — always writes)
+  await writeAgentState(agentDir, state);
 
-    if (tmuxOutput) {
-      const result = parseState(tmuxOutput);
-      state = result.state;
-      parseReason = result.reason;
-    } else {
-      state = "unknown";
-    }
-  }
-
-  // 3. Save debug capture — include tmux output, parse-state reason, and last_assistant_message
+  // 3. Save debug capture
   try {
     const debugDir = join(agentDir, "debug-logs");
     await mkdir(debugDir, { recursive: true });
     const timestamp = Math.floor(Date.now() / 1000);
     const debugPath = join(debugDir, `stop-${timestamp}-${state}.txt`);
     const debugParts: string[] = [];
-    if (tmuxOutput) {
-      debugParts.push(tmuxOutput);
-      debugParts.push("");
-      debugParts.push("--- parse-state -v output ---");
-      debugParts.push(`${state} (matched: ${parseReason ?? "n/a"})`);
-      debugParts.push("");
-    }
+    debugParts.push("--- deterministic state ---");
+    debugParts.push(`${state} (from last_assistant_message)`);
+    debugParts.push("");
     debugParts.push("--- last_assistant_message ---");
     debugParts.push(lastMessage || "(no message)");
     await writeFile(debugPath, debugParts.join("\n"));
@@ -130,18 +101,12 @@ export async function processStopHook(
 
   // ── State actions ──────────────────────────────────────────────────────
 
-  if (state === "rate_limited") {
-    return { state, action: "none" };
-  }
-
   if (state === "running") {
     // Check for background tasks (⏵⏵ pattern in recent tmux output).
-    // The bash version checks for the full footer pattern: ⏵⏵.*·\s\d+\s
-    let bgOutput = tmuxOutput;
-    if (!bgOutput && opts?.captureOutput) {
+    let bgOutput: string | null = null;
+    if (opts?.captureOutput) {
       bgOutput = await opts.captureOutput();
-    } else if (!bgOutput) {
-      // Capture fresh for background task check
+    } else {
       try {
         const metaPath = join(agentDir, "meta.json");
         const metaRaw = await readFile(metaPath, "utf-8");
@@ -155,13 +120,13 @@ export async function processStopHook(
         }
       } catch { /* ignore */ }
     }
-    if (bgOutput && /⏵⏵.*·\s\d+\s/.test(bgOutput)) {
+    if (bgOutput && hasBackgroundTasks(bgOutput)) {
       return { state, action: "none" };
     }
-    // Fall through to unknown/running handling below
+    // Fall through to nudge handling below
   }
 
-  if (state === "unknown" || state === "running") {
+  if (state === "running") {
     return await handleNudge(agentId, agentDir, state, opts?.now);
   }
 
@@ -294,9 +259,15 @@ async function readMeta(
   }
 }
 
-/** States that count as "unfinished" — these children need attention before parent can complete */
-const UNFINISHED_STATES = new Set(["creating", "running", "waiting", "complete"]);
+/** States stored in meta.json that count as "unfinished" */
+const UNFINISHED_META_STATES = new Set(["running", "waiting", "complete"]);
 
+/**
+ * Find children of a parent agent that are still unfinished.
+ * Uses meta.json state + tmux session existence (no full tmux parsing).
+ * Unfinished = meta.json state is running/waiting/complete AND tmux session exists,
+ * OR agent is recently created (< 6s).
+ */
 export async function findUnfinishedChildren(
   agentsDir: string,
   parentId: string,
@@ -307,29 +278,51 @@ export async function findUnfinishedChildren(
     const entries = await readdir(agentsDir, { withFileTypes: true });
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
-      const metaPath = join(agentsDir, entry.name, "meta.json");
+      const childDir = join(agentsDir, entry.name);
+      const metaPath = join(childDir, "meta.json");
       try {
         const raw = await readFile(metaPath, "utf-8");
         const meta = JSON.parse(raw);
         if (meta.manager !== parentId) continue;
         if (meta.archived) continue;
 
-        // Determine the child's actual state via tmux
-        let childState = "unknown";
-        const tmuxSession = meta.tmux_session;
-        if (tmuxSession && isValidTmuxSession(tmuxSession)) {
-          if (opts?.getChildState) {
-            childState = await opts.getChildState(tmuxSession);
-          } else {
-            const output = await captureTmuxOutput(tmuxSession);
-            if (output) {
-              childState = parseState(output).state;
-            }
-            // output === null means no tmux session → stopped/unknown
-          }
+        // Check if recently created (< 6s) — always unfinished
+        if (isRecentlyCreated(meta.created_epoch)) {
+          unfinished.push(entry.name);
+          continue;
         }
 
-        if (UNFINISHED_STATES.has(childState)) {
+        // For test injection: use getChildState if provided
+        if (opts?.getChildState) {
+          const tmuxSession = meta.tmux_session;
+          if (tmuxSession && isValidTmuxSession(tmuxSession)) {
+            const childState = await opts.getChildState(tmuxSession);
+            if (UNFINISHED_META_STATES.has(childState) || childState === "creating") {
+              unfinished.push(entry.name);
+            }
+          }
+          continue;
+        }
+
+        // Check tmux session existence
+        const tmuxSession = meta.tmux_session;
+        if (!tmuxSession || !isValidTmuxSession(tmuxSession)) {
+          // No tmux session → stopped → not unfinished
+          continue;
+        }
+
+        const output = await captureTmuxOutput(tmuxSession);
+        if (output === null) {
+          // Tmux session doesn't exist → stopped → not unfinished
+          continue;
+        }
+
+        // Tmux exists — read state from meta.json
+        const metaState = meta.state;
+        if (metaState && UNFINISHED_META_STATES.has(metaState)) {
+          unfinished.push(entry.name);
+        } else if (!metaState) {
+          // Legacy: no state field, tmux exists → treat as running (unfinished)
           unfinished.push(entry.name);
         }
       } catch {

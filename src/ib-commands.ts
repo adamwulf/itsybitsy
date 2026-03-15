@@ -8,6 +8,7 @@ import { join, dirname } from "path";
 import { readdir, chmod, rm, mkdir } from "fs/promises";
 import { homedir } from "node:os";
 import type { Agent } from "./agents";
+import { writeAgentState } from "./agents";
 import {
   logAgent,
   removeAgentQuestions,
@@ -466,6 +467,9 @@ ${qAbsExitScript}
 
   // Log
   await logAgent(agentDir, "[resume] Agent resumed, nudge sent");
+
+  // Write state: "running" to meta.json
+  await writeAgentState(agentDir, "running");
 
   // Auto-spawn per-agent watchdog
   try {
@@ -1141,6 +1145,9 @@ export async function sendMessage(
     const senderDir = join(agent.repoPath, ".ittybitty", "agents", fromId);
     await logAgent(senderDir, `Sent message to ${agent.id}: ${message}`);
   }
+
+  // Write state: "running" to meta.json (agent just received input)
+  await writeAgentState(agentDir, "running");
 
   const stdout = fromId ? "" : `Sent to ${agent.id}`;
   return { ok: true, exitCode: 0, stdout, stderr: "" };

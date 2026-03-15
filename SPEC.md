@@ -64,34 +64,71 @@ When a new agent is created (`ib new-agent "prompt"`):
 
 ### 1.2 Agent States
 
-Agents can be in one of 8 states:
+Agents can be in one of 7 states:
 
 | State | Description |
 |-------|-------------|
-| `creating` | Claude is initializing — permission screens showing, or tmux output has too few lines and no startup markers |
-| `running` | Actively executing — tool calls, thinking spinners, or interrupt markers visible |
-| `waiting` | Idle — explicit `WAITING` keyword, or tool-level "⎿ Waiting" indicator. Note: these are semantically different (agent idle vs tool executing) but intentionally map to the same state. |
-| `complete` | Agent output contains `I HAVE COMPLETED THE GOAL` not inside single-quoted strings, in last 15 lines |
-| `compacting` | Context window compaction in progress ("Compacting conversation" in last 5 lines) |
-| `rate_limited` | Hit API rate limits — "rate_limit_error", "usage limit reached", "hit your limit", etc. |
-| `stopped` | Tmux session does not exist, or agent is archived |
-| `unknown` | No patterns matched, or empty/missing tmux output |
+| `creating` | Agent was created less than 6 seconds ago — derived from `created_epoch` at read time |
+| `running` | Agent is actively working — default state after creation grace period |
+| `waiting` | Agent is idle, signaled `WAITING` as its last line |
+| `complete` | Agent finished its task, signaled `I HAVE COMPLETED THE GOAL` as its last line |
+| `compacting` | Context window compaction in progress — detected from tmux output at read time |
+| `rate_limited` | Hit API rate limits — detected from tmux output at read time |
+| `stopped` | Tmux session does not exist, or agent is archived — detected at read time |
 
-### 1.3 State Detection
+**States stored in meta.json**: Only `running`, `waiting`, and `complete` are written to the `state` field in `meta.json`. The other states (`creating`, `compacting`, `rate_limited`, `stopped`) are derived at read time from timestamps, tmux session existence, or tmux output.
 
-State detection follows this flow:
+**`unknown` state removed**: The old `unknown` state (no patterns matched) is eliminated. In the new model, if the stop hook cannot determine a clear state from `last_assistant_message`, it nudges the agent and keeps the state as `running`.
 
-1. **Archived agents** are always `stopped` (no tmux capture attempted).
+### 1.3 Deterministic State Detection
 
-2. **Missing tmux session** → `stopped`, unless the agent was created less than 6 seconds ago (`created_epoch` in `meta.json`), in which case the state is `creating`. This grace period avoids treating a brand-new agent as stopped before its tmux session has had time to start. Both bash (`is_agent_recently_created()`) and TypeScript (`isRecentlyCreated()`) implement this check.
+State detection is deterministic — the stop hook writes authoritative state to `meta.json`, and consumers read it. Tmux output parsing is only used for two transient display states (`compacting`, `rate_limited`) and for `stopped` detection.
 
-3. **Pre-parseState check**: If the tmux output has fewer than 10 lines AND no startup markers (`"Claude Code v"`, `"[USER TASK]"`, `"╭─ Claude Code"`, `"[AGENT CONTEXT]"`), the state is `creating`. This handles the early startup case before enough output exists for pattern matching. Priority 1 below handles the case where there ARE enough lines but startup markers are still absent (e.g., a workspace trust prompt is showing on a fresh screen). [^callout]: The bash reference counts total lines (newlines + 1) over the first 100 lines of output. The TypeScript reimplementation counts non-empty lines (`line.trim() !== ""`) over the full output, which is stricter — blank lines from tmux padding are excluded.
+**State resolution order** (checked top-to-bottom by consumers like `ib list`, `ib watch`, `detectAgentStates()`):
 
-4. **parseState priority order** (checked top-to-bottom, first match wins):
+1. **Archived agents** → `stopped` (no further checks).
+
+2. **No tmux session** → `stopped`, unless `created_epoch` is less than 6 seconds ago → `creating`. The 6-second grace period (`CREATING_GRACE_PERIOD_MS`) is purely time-derived from `created_epoch` in meta.json — not written as a state value.
+
+3. **Tmux session exists — check transient overrides** (tmux output parsing, minimal):
+   - If "Compacting conversation" appears in last 5 lines of tmux output → `compacting`
+   - If `rate_limit_error`, "usage limit reached", "hit your limit", or "/upgrade to increase your usage limit" appears in last 15 lines → `rate_limited`
+
+4. **Read `state` from meta.json** → return the stored value (`running`, `waiting`, or `complete`). If `state` field is absent (legacy agent or freshly created agent before first stop hook fires): if `created_epoch` is less than 6 seconds ago → `creating`; otherwise → `running`.
+
+**ANSI stripping**: Tmux output used for compacting/rate_limited checks must have ANSI escape sequences stripped before pattern matching.
+
+### 1.3.1 State Writes
+
+State is written to `meta.json` by exactly three actors:
+
+| Actor | When | State written |
+|-------|------|---------------|
+| **Stop hook** (`ib hook-status`) | Claude becomes idle | `waiting`, `complete`, or `running` (nudge case) |
+| **`ib send`** | Message sent to agent | `running` |
+| **`ib resume`** | Agent resumed from stopped | `running` |
+
+The stop hook is the primary state authority. Its detection logic:
+
+1. Check `last_assistant_message` (from stdin JSON): if the last non-empty line is `"WAITING"` → write `waiting`. If `"I HAVE COMPLETED THE GOAL"` → write `complete`.
+2. If neither matched → write `running` and nudge the agent ("Resume your work, or end with 'WAITING' or 'I HAVE COMPLETED THE GOAL' as your final line.").
+
+The stop hook does NOT parse tmux output for state detection. Tmux parsing for `rate_limited` and `compacting` is done only by state consumers at read time.
+
+**Atomic writes**: State updates to meta.json use atomic write (write temp file, rename) to prevent partial reads. The `state` field is added alongside existing meta.json fields — all other fields remain unchanged.
+
+### 1.3.2 Legacy State Detection (parseState)
+
+The legacy `parseState()` function and its 14-priority tmux pattern matching system remain in the codebase but are no longer used for primary state detection. They are retained for:
+- **Compacting detection**: Checking "Compacting conversation" in last 5 lines of tmux output
+- **Rate limit detection**: Checking rate limit patterns in last 15 lines of tmux output
+- **Backward compatibility**: The bash `ib` reference implementation still uses tmux-based state detection
+
+The legacy parseState priority order is documented here for reference:
 
    | Priority | Window | Pattern | State |
    |----------|--------|---------|-------|
-   | 1 | Full input | Workspace trust/import prompts ("Do you trust the files", "trust this folder", "Allow external CLAUDE.md") present AND no startup markers found anywhere in output | `creating` | [^callout]: The bash `parse_state()` only checks 2 startup markers here: `"Claude Code v"` and `"[USER TASK]"`. The other 2 (`"╭─ Claude Code"`, `"[AGENT CONTEXT]"`) are checked in the pre-parseState logic (`get_state()`/`compute_state_from_content()`) but not inside `parse_state()` itself. The TypeScript `parseState()` checks all 4 via the shared `STARTUP_MARKERS` constant. Additionally, the bash `get_state()` passes only the last 20 lines to `parse_state()`, so Priority 1's "full input" check operates on a limited window; `compute_state_from_content()` (used by the background monitor) passes the full output. The TypeScript `parseState()` always receives the full output.
+   | 1 | Full input | Workspace trust/import prompts AND no startup markers | `creating` |
    | 2 | Last 5 lines | "Compacting conversation" | `compacting` |
    | 3 | Last 5 lines | `(Esc to interrupt`, `(ctrl+c to interrupt`, `⎿  Running` | `running` |
    | 4 | Last 15 lines | `⎿  Waiting` (tool waiting) | `waiting` |
@@ -105,14 +142,6 @@ State detection follows this flow:
    | 12 | Last 15 lines | Background tasks pattern (`⏵⏵.*·\s\d+\s`) | `running` |
    | 13 | Last 15 lines | "running stop hook" without ⏺ (race condition) | `creating` |
    | 14 | — | No patterns matched | `unknown` |
-
-   **Priority 3/4 ordering note**: The bash reference implementation checks tool waiting (priority 4) before active running (priority 3). The TypeScript reimplementation intentionally reverses this order so that active execution indicators in very recent output (last 5 lines) take precedence over tool waiting in the broader window (last 15 lines). Both orderings are valid; implementers should document which they choose.
-
-   **Hook spinner filtering**: Lines beginning with a spinner character (✽✶✢·✻✳) that also contain the word "hook" are excluded before spinner checks.
-
-   **Stale WAITING check**: If `⏺` (Claude's output marker) appears after the last `WAITING` in the window, the agent has resumed work → `running` instead of `waiting`.
-
-   **ANSI stripping**: All tmux output must have ANSI escape sequences stripped before pattern matching.
 
 ### 1.4 Killing an Agent
 
@@ -151,6 +180,7 @@ Resume (`ib resume <id>`) restarts a stopped agent:
 5. Auto-accept workspace trust (if not yolo)
 6. Send resume nudge message: "Resume your work, or end with 'WAITING' or 'I HAVE COMPLETED THE GOAL' as your final line."
 7. **Auto-spawn watchdog**: `ib watchdog <id>` is spawned in the background for ALL agents (not just those with a manager). The watchdog PID is saved to `meta.json` as `watchdog_pid`. The bash `cmd_resume()` does not include this step (known divergence).
+8. **State reset**: Write `state: "running"` and `state_updated_at` to `meta.json` (atomic merge write). See §1.3.1.
 
 ### 1.7 Archiving
 
@@ -298,6 +328,7 @@ After successful merge:
 6. **Delay calculation**: `0.1 + (message_length / 100) * 0.5` seconds, clamped to [0.2, 3.0]. Longer messages need more time for the paste to complete in tmux. The `message_length` here is the length of the full formatted message (including the `[sent by agent ...]` prefix if present).
 7. **Logging**: Both sender and recipient get entries in their `agent.log`. Recipient log entries are written with `--quiet` (no stdout echo); sender log entries echo to stdout. [^note] The `--quiet` distinction is bash-specific. The TypeScript `logAgent()` is always write-only (appends to `agent.log` without echoing to stdout) for both sender and recipient. Additionally, in bash when `fromId` is set, the sender's log message ("Sent message to ...") is echoed to stdout; in TypeScript, `stdout` is returned as an empty string when `fromId` is set (only returning `"Sent to <id>"` when there is no sender).
 8. **Stdin piping**: Messages can also be provided via stdin (`echo "msg" | ib send <id>` or `ib send <id> < file.txt`) when no positional message argument is given. Both bash and TypeScript support stdin piping when no positional message is provided and stdin is not a TTY.
+9. **State reset**: After sending the message, write `state: "running"` and `state_updated_at` to the target agent's `meta.json` (atomic merge write). This ensures that agents in `waiting` or `complete` state are immediately marked as `running` when they receive input. See §1.3.1.
 
 ### 4.2 ib ask
 
@@ -405,7 +436,9 @@ Questions from agents that no longer exist (no directory in `.ittybitty/agents/`
   "yolo": false,
   "model": "sonnet",              // bash defaults to "sonnet"; legacy agents may have null
   "claude_pid": "12345",          // appended after Claude starts (not in initial write)
-  "watchdog_pid": "12346"         // appended after watchdog spawns (see §8.5); not in initial write
+  "watchdog_pid": "12346",        // appended after watchdog spawns (see §8.5); not in initial write
+  "state": "running",             // written by stop hook, ib send, ib resume (see §1.3.1)
+  "state_updated_at": 1704825030  // epoch seconds when state was last written
 }
 ```
 
@@ -424,6 +457,8 @@ Questions from agents that no longer exist (no directory in `.ittybitty/agents/`
 | `model` | string \| null | Claude model name (e.g., "sonnet", "opus", "haiku"), or `null` for legacy agents | [^callout]: Bash defaults `MODEL` to config value then `"sonnet"` before writing meta.json (the null branch in the template is unreachable dead code). TS normalizes null/missing to `"unknown"`. The `string \| null` type is retained because legacy agents may have null values, and display code (bash `ib list`) handles this defensively.
 | `claude_pid` | string | PID of the Claude process (appended to meta.json via `sed` after start.sh launches Claude — not present in the initial write) |
 | `watchdog_pid` | string | PID of the watchdog process (appended to meta.json after watchdog spawns — not present in the initial write; see §8.5) |
+| `state` | string \| undefined | Deterministic agent state written by the stop hook, `ib send`, or `ib resume`. Values: `"running"`, `"waiting"`, `"complete"`. Absent on legacy agents or before the first stop hook fires (treated as `"running"` if agent is older than 6s). See §1.3.1. |
+| `state_updated_at` | number \| undefined | Unix epoch seconds when `state` was last written. Used for debugging. |
 
 ### 5.3 Worktree ↔ Branch Relationship
 
@@ -485,26 +520,34 @@ itsybitsy installs hooks into each agent's `settings.local.json`, plus optional 
 
 **Input**: JSON from stdin with `last_assistant_message` field.
 
-**Detection flow**:
-1. Try to detect state from `last_assistant_message` (check last non-empty line for "WAITING" or "I HAVE COMPLETED THE GOAL")
-2. If no match, fall through to tmux capture + `parseState()`. The full pane output is captured; if that returns null, state is set to `unknown` immediately (no fallback capture).
+**Detection and state write flow**:
+1. Check `last_assistant_message` (last non-empty line):
+   - `"WAITING"` → write `state: "waiting"` to meta.json
+   - `"I HAVE COMPLETED THE GOAL"` → write `state: "complete"` to meta.json
+   - Neither → write `state: "running"` to meta.json and nudge (see below)
+2. Write `state_updated_at` (epoch seconds) alongside `state` in meta.json
 3. Save debug capture to `debug-logs/stop-<epoch>-<state>.txt`
+
+The stop hook does **not** parse tmux output for state detection. It relies solely on `last_assistant_message` for determining state. Tmux-detected states (`compacting`, `rate_limited`) are handled by consumers at read time (see §1.3). However, when the determined state is `running`, the stop hook checks tmux for background tasks (`⏵⏵` pattern) to avoid nudging agents that are actively working via background tasks.
+
+**Rate-limited agents**: If the stop hook fires while a rate limit dialog is showing, `last_assistant_message` won't contain WAITING or COMPLETED, so the hook writes `running` and attempts to nudge. The nudge is debounced (5s) and the rate limit dialog will likely block the nudge from reaching Claude. The watchdog handles rate limit bypass separately (§8.5) by sending Enter and polling the usage API.
 
 **Actions by state**:
 
-| State | Action |
-|-------|--------|
-| `rate_limited` | No action (rate limiter handles itself) |
-| `running` with background tasks | No action (agent is still working). Detected by checking last 15 lines of tmux output for `⏵⏵.*· <digit>` pattern (Claude Code's background task footer). |
-| `unknown` or `running` (no bg tasks) | **Nudge** — debounced (5s), sends "Resume your work, or end with 'WAITING' or 'I HAVE COMPLETED THE GOAL'" via tmux |
-| `complete` with uncommitted changes | **Remind commit** — sends message telling agent to commit |
-| `complete` with manager | **Notify manager** — sends "[hook]: Your subtask <id> just completed" to manager's tmux [^notify-mechanism] |
-| `complete` without manager, with unfinished children | **Remind children** — tells agent to merge/kill all sub-agents |
-| `complete` without manager, no children | No action |
-| `waiting` with manager | **Notify manager** — sends "[hook]: Your subtask <id> is now waiting for input" |
-| `waiting` without manager | No action |
+| State written | Condition | Action |
+|---------------|-----------|--------|
+| `running` | Background tasks active (`⏵⏵.*·\s\d+\s` in last 15 lines of tmux) | No action (agent is working via background tasks) |
+| `running` | No background tasks | **Nudge** — debounced (5s), sends "Resume your work, or end with 'WAITING' or 'I HAVE COMPLETED THE GOAL'" via tmux |
+| `complete` | Uncommitted changes | **Remind commit** — sends message telling agent to commit |
+| `complete` | Has manager | **Notify manager** — sends "[hook]: Your subtask <id> just completed" to manager's tmux [^notify-mechanism] |
+| `complete` | No manager, unfinished children | **Remind children** — tells agent to merge/kill all sub-agents |
+| `complete` | No manager, no children | No action |
+| `waiting` | Has manager | **Notify manager** — sends "[hook]: Your subtask <id> is now waiting for input" |
+| `waiting` | No manager | No action |
 
 **Debounce mechanism**: A `last-nudge` file stores the unix timestamp of the last nudge. If less than 5 seconds have passed, the nudge is suppressed. When debounced, a delayed recheck is scheduled (5s later) via a background `bash -c "sleep 5 && rm -f <recheck-file> && ib hooks agent-status <id>"` process, using a `nudge-recheck` marker file to prevent duplicate rechecks. The marker file is removed just before the recheck call so subsequent debounces can schedule new rechecks.
+
+**meta.json write mechanism**: The stop hook reads the full meta.json, adds/updates the `state` and `state_updated_at` fields, and writes it back atomically (write to temp file, `rename()` over original). This preserves all other meta.json fields. The write is a merge, not a replacement.
 
 [^notify-mechanism]: **Bash/TS divergence.** The bash `ib` notifies managers via `ib send "$manager" "message"`, which resolves the manager's tmux session internally. The TS implementation reads the manager's `meta.json` directly to get `tmux_session` and sends via `tmux send-keys` without going through `ib send`. Same end result (tmux input to manager), different mechanism.
 
@@ -762,11 +805,19 @@ Reads Claude transcript JSONL files to determine context window usage percentage
 
 ### 8.5 Watchdog
 
-`ib watchdog <id>` runs as a background loop for a single agent, polling agent state every 5 seconds. ALL agents get a per-agent watchdog — both top-level agents and sub-agents with a manager. The watchdog PID is saved to `meta.json` as `watchdog_pid`.
+`ib watchdog <id>` runs as a background loop for a single agent, polling every 5 seconds. ALL agents get a per-agent watchdog — both top-level agents and sub-agents with a manager. The watchdog PID is saved to `meta.json` as `watchdog_pid`.
+
+**State source**: The watchdog reads `state` from `meta.json` (written by the stop hook — see §1.3.1 and §6.2). It does **not** use tmux for primary state detection. For `rate_limited` and `compacting`, the watchdog checks tmux output for those specific patterns only (same minimal tmux parsing that state consumers use — see §1.3 step 3). The rate limit handler also uses tmux to verify dialog dismissal after sending Enter.
 
 **Exit conditions**: The watchdog exits when: (a) the agent's worktree directory is removed (`while [[ -d "$AGENT_DIR/repo" ]]`), which happens on kill/merge/nuke, or (b) in TS, the agent's tmux session has been missing for >10 consecutive seconds (grace period). Bash does **not** check tmux session existence, so it survives pause and must be exited by worktree removal only. On resume, a new watchdog is spawned (§1.6 step 7).
 
 Per-agent watchdogs do not use lock files. There is no global watchdog.
+
+**State resolution per tick**: The watchdog resolves the agent's effective state on each 5-second tick using the same resolution order as consumers (§1.3):
+1. No tmux session → `stopped` (or `creating` if within grace period)
+2. Tmux "Compacting conversation" in last 5 lines → `compacting`
+3. Tmux rate limit patterns in last 15 lines → `rate_limited`
+4. Read `state` from meta.json → `running`, `waiting`, or `complete`
 
 **Monitoring behaviors by state:**
 
@@ -774,12 +825,13 @@ Per-agent watchdogs do not use lock files. There is no global watchdog.
 |-------|--------|
 | `waiting` | Increment waiting counter. When counter reaches the notification threshold, notify manager: "[watchdog]: Your subtask <id> recently started waiting for input". Uses exponential backoff: initial threshold 30s (6 polls), doubles after each notification, capped at 64 minutes. |
 | `complete` | Reset waiting counter and notification interval. Notify manager once: "[watchdog]: Your subtask <id> recently completed". Sets a flag to prevent duplicate notifications. Flag resets if agent returns to `running`. |
-| `unknown` | Treat like `waiting` — increment counter with same exponential backoff. On first transition into unknown, saves a debug capture of tmux output to `debug-logs/watchdog-<epoch>-unknown.txt` (not repeated on subsequent ticks). |
-| `rate_limited` | Attempt to bypass the rate limit dialog (bash uses a 3-attempt retry loop with 2s sleeps between attempts; checks `parse_state` after each Enter to verify dismissal). Then poll Claude's usage API; when session usage drops below 5%, send nudge: "[watchdog]: Usage has refreshed (<pct>%). Please continue your task." Reset waiting counter and notification interval. |
+| `rate_limited` | Attempt to bypass the rate limit dialog (3-attempt retry loop with 2s sleeps between attempts; checks tmux output for rate limit patterns after each Enter to verify dismissal). Then poll Claude's usage API; when session usage drops below 5%, send nudge: "[watchdog]: Usage has refreshed (<pct>%). Please continue your task." Reset waiting counter and notification interval. |
 | `running` | Reset waiting counter, notification interval, and `rateLimitBypassed` flag. Clear completion flag if previously set. |
 | `creating` | Treat as running — reset waiting counter, notification interval, and `rateLimitBypassed` flag. |
 | `compacting` | Reset waiting counter, notification interval, and `rateLimitBypassed` flag. Wait for completion. |
 | `stopped` | Reset waiting counter and notification interval. |
+
+> **`unknown` state removed**: The old `unknown` handler (exponential backoff + debug capture) is no longer needed. With deterministic state tracking, agents always have a known state. If meta.json has no `state` field (legacy agent), it is treated as `running`.
 
 **Auto-compact**: If `autoCompactThreshold` is configured, the watchdog also checks the agent's context window usage on each poll. When usage exceeds the threshold and the agent is not currently compacting, sends `/compact` to the agent's tmux session. The compact flag resets when the agent transitions out of `compacting` state.
 

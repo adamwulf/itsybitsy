@@ -145,10 +145,12 @@ After any code changes, always run:
 All 6 phases complete. 968 tests across 28 files.
 
 ### State detection flow
-1. `watcher.ts` calls `detectAgentStates()` (in `agents.ts`) on every refresh
-2. `detectAgentStates()` calls `captureTmuxOutput()` (in `tmux-poller.ts`) for each active agent, then calls `computeStateFromContent()` as a pre-check; only if it returns `null` does it call `parseState()` (in `parse-state.ts`)
-3. Archived agents are always set to `stopped` without tmux capture
-4. `parseState()` is pure string matching on ANSI-stripped tmux output — never call it on raw ANSI text
+**Deterministic model (Phase 42 — implemented):**
+1. Stop hook (`ib hook-status`) writes `state` to `meta.json` when Claude goes idle (`waiting`, `complete`, or `running`)
+2. `ib send` and `ib resume` write `state: "running"` to `meta.json`
+3. `detectAgentStates()` reads state from meta.json with tmux overrides for compacting/rate_limited/stopped
+4. `creating` is derived from `created_epoch` (< 6s ago), never stored
+5. `parseState()` is retained as legacy for the bash ib reference and the watchdog's rate limit bypass retry loop
 
 ### SplitPane (src/tui/split-pane.ts)
 pi-tui's `Box` is vertical-only. `SplitPane` renders two child components side-by-side by calling each child's `render(width)` independently, then merging lines: left is padded to exact width, separator char inserted, right is truncated. Left width is configurable.
@@ -162,11 +164,14 @@ pi-tui's `Box` is vertical-only. `SplitPane` renders two child components side-b
 ### Agent data (src/agents.ts)
 - `readAllAgents()` returns `{ agents, errors, orphanedTmuxSessions }` — always check errors
 - `FlatEntry` discriminated union type lives here (not in watcher.ts) since `flattenAgentTree()` produces it — kind: "agent" for agent rows, kind: "repo-header" for repo headers
-- `detectAgentStates()` is the single source of truth for state detection — both CLI and watcher use it
+- `detectAgentStates()` is the single source of truth for state detection — reads `state` from meta.json with tmux overrides for compacting/rate_limited/stopped
+- `writeAgentState()` atomically writes state to meta.json (used by stop hook, sendMessage, resumeAgent)
+- `isCompacting()`, `isRateLimited()`, `hasBackgroundTasks()` — targeted tmux output checks (no full parseState)
 - `buildAgentTree()` mutates `agent.children` in place; call it after state detection
 - `readAgentLog()`, `readAgentPrompt()`, `parseDenials()` — async helpers for right pane content
 
-### parse-state.ts priority order
+### parse-state.ts priority order (legacy)
+`parseState()` is deprecated — no longer used for primary state detection. Retained for backward compatibility with bash ib and the watchdog rate limit bypass. Priority order:
 Creating (workspace trust prompt, full input) > Compacting (last 5) > Active running (last 5) > Tool waiting (last 15) > Rate limited (last 15) > Complete (last 15) > WAITING (last 15) > Other running (last 15) > Spinners (last 15) > Permission prompts (last 15) > Broader spinners (last 20) > Background tasks (last 15) > Race condition hook > Unknown
 
 ### Line wrapping (src/tui/wrap.ts)

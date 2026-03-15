@@ -12,6 +12,11 @@ import {
   computeStateFromContent,
   readAgentMeta,
   isRecentlyCreated,
+  writeAgentState,
+  readAgentState,
+  isCompacting,
+  isRateLimited,
+  hasBackgroundTasks,
   CREATING_GRACE_PERIOD_MS,
 } from "./agents";
 import type { Agent, AgentMeta, FlatEntry } from "./agents";
@@ -740,5 +745,133 @@ describe("isRecentlyCreated", () => {
   test("returns false for undefined/NaN epoch", () => {
     expect(isRecentlyCreated(NaN)).toBe(false);
     expect(isRecentlyCreated(undefined as unknown as number)).toBe(false);
+  });
+});
+
+describe("writeAgentState / readAgentState", () => {
+  let tempDir: string;
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "agents-state-"));
+  });
+
+  afterEach(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  test("writes state and reads it back", async () => {
+    const metaPath = join(tempDir, "meta.json");
+    await Bun.write(metaPath, JSON.stringify({ id: "test-agent", prompt: "hello" }));
+
+    await writeAgentState(tempDir, "waiting");
+    const state = await readAgentState(tempDir);
+    expect(state).toBe("waiting");
+  });
+
+  test("writes state_updated_at alongside state", async () => {
+    const metaPath = join(tempDir, "meta.json");
+    await Bun.write(metaPath, JSON.stringify({ id: "test-agent" }));
+
+    const before = Math.floor(Date.now() / 1000);
+    await writeAgentState(tempDir, "complete");
+    const after = Math.floor(Date.now() / 1000);
+
+    const data = await Bun.file(metaPath).json();
+    expect(data.state).toBe("complete");
+    expect(data.state_updated_at).toBeGreaterThanOrEqual(before);
+    expect(data.state_updated_at).toBeLessThanOrEqual(after);
+  });
+
+  test("preserves existing meta.json fields", async () => {
+    const metaPath = join(tempDir, "meta.json");
+    await Bun.write(metaPath, JSON.stringify({ id: "test-agent", prompt: "do stuff", model: "opus" }));
+
+    await writeAgentState(tempDir, "running");
+    const data = await Bun.file(metaPath).json();
+    expect(data.id).toBe("test-agent");
+    expect(data.prompt).toBe("do stuff");
+    expect(data.model).toBe("opus");
+    expect(data.state).toBe("running");
+  });
+
+  test("no-op if meta.json doesn't exist", async () => {
+    // Should not throw
+    await writeAgentState(tempDir, "running");
+    const state = await readAgentState(tempDir);
+    expect(state).toBeUndefined();
+  });
+
+  test("readAgentState returns undefined if state field is absent", async () => {
+    const metaPath = join(tempDir, "meta.json");
+    await Bun.write(metaPath, JSON.stringify({ id: "test-agent" }));
+    const state = await readAgentState(tempDir);
+    expect(state).toBeUndefined();
+  });
+
+  test("overwrites previous state", async () => {
+    const metaPath = join(tempDir, "meta.json");
+    await Bun.write(metaPath, JSON.stringify({ id: "test-agent", state: "waiting" }));
+
+    await writeAgentState(tempDir, "complete");
+    const state = await readAgentState(tempDir);
+    expect(state).toBe("complete");
+  });
+});
+
+describe("isCompacting", () => {
+  test("detects compacting in last 5 lines", () => {
+    const output = "line1\nline2\nline3\nCompacting conversation\nline5";
+    expect(isCompacting(output)).toBe(true);
+  });
+
+  test("does not detect compacting beyond last 5 lines", () => {
+    const lines = Array.from({ length: 10 }, (_, i) => `line${i}`);
+    lines[0] = "Compacting conversation";
+    expect(isCompacting(lines.join("\n"))).toBe(false);
+  });
+
+  test("strips ANSI before checking", () => {
+    const output = "line1\nline2\nline3\n\x1b[32mCompacting conversation\x1b[0m\nline5";
+    expect(isCompacting(output)).toBe(true);
+  });
+});
+
+describe("isRateLimited", () => {
+  test("detects rate_limit_error", () => {
+    const lines = Array.from({ length: 14 }, (_, i) => `line${i}`);
+    lines.push("rate_limit_error");
+    expect(isRateLimited(lines.join("\n"))).toBe(true);
+  });
+
+  test("detects usage limit reached (case insensitive)", () => {
+    const output = "line1\nline2\nUsage Limit Reached\nline4";
+    expect(isRateLimited(output)).toBe(true);
+  });
+
+  test("detects hit your limit", () => {
+    const output = "line1\nhit your limit\nline3";
+    expect(isRateLimited(output)).toBe(true);
+  });
+
+  test("returns false when no rate limit patterns", () => {
+    const output = "line1\nline2\nline3";
+    expect(isRateLimited(output)).toBe(false);
+  });
+});
+
+describe("hasBackgroundTasks", () => {
+  test("detects background task pattern", () => {
+    const output = "line1\n⏵⏵ tasks · 3 running\nline3";
+    expect(hasBackgroundTasks(output)).toBe(true);
+  });
+
+  test("returns false without pattern", () => {
+    const output = "line1\nline2\nline3";
+    expect(hasBackgroundTasks(output)).toBe(false);
+  });
+
+  test("strips ANSI before checking", () => {
+    const output = "line1\n\x1b[33m⏵⏵ tasks · 2 running\x1b[0m\nline3";
+    expect(hasBackgroundTasks(output)).toBe(true);
   });
 });

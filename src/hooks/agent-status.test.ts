@@ -239,7 +239,9 @@ describe("rate_limited", () => {
     await ctx.cleanup();
   });
 
-  test("rate_limited → none", async () => {
+  test("rate_limited is no longer detected by stop hook (handled by consumers)", async () => {
+    // The stop hook no longer detects rate_limited from tmux — it only uses last_assistant_message.
+    // Rate limiting is detected at read time by consumers (detectAgentStates, watchdog).
     const result = await processStopHook(
       ctx.agentId,
       "some text",
@@ -247,10 +249,12 @@ describe("rate_limited", () => {
       ctx.agentsDir,
       {
         captureOutput: async () => "rate_limit_error\nPlease wait",
+        now: Math.floor(Date.now() / 1000) - 10,
       },
     );
-    expect(result.state).toBe("rate_limited");
-    expect(result.action).toBe("none");
+    // Empty last_assistant_message → running → nudge
+    expect(result.state).toBe("running");
+    expect(result.action).toBe("nudge");
   });
 });
 
@@ -423,21 +427,21 @@ describe("waiting without manager", () => {
   });
 });
 
-// ── processStopHook: tmux fallback ───────────────────────────────────────────
+// ── processStopHook: deterministic state (no tmux fallback) ──────────────────
 
-describe("tmux fallback", () => {
+describe("deterministic state", () => {
   let ctx: Awaited<ReturnType<typeof createTempAgentDir>>;
 
   beforeEach(async () => {
     ctx = await createTempAgentDir();
-    await writeMeta(ctx.agentDir, { tmux_session: "ib-test" });
+    await writeMeta(ctx.agentDir, { id: ctx.agentId, tmux_session: "ib-test" });
   });
 
   afterEach(async () => {
     await ctx.cleanup();
   });
 
-  test("empty message falls back to captureOutput", async () => {
+  test("empty message results in running state (no tmux fallback)", async () => {
     const result = await processStopHook(
       ctx.agentId,
       "",
@@ -446,10 +450,24 @@ describe("tmux fallback", () => {
       {
         captureOutput: async () =>
           "some output\nI HAVE COMPLETED THE GOAL\n",
-        checkGitStatus: async () => "",
+        now: Math.floor(Date.now() / 1000) - 10,
       },
     );
-    expect(result.state).toBe("complete");
+    // State is determined from last_assistant_message only, not tmux
+    expect(result.state).toBe("running");
+    expect(result.action).toBe("nudge");
+  });
+
+  test("writes state to meta.json", async () => {
+    await processStopHook(
+      ctx.agentId,
+      "some output\nWAITING",
+      ctx.agentDir,
+      ctx.agentsDir,
+    );
+    const meta = JSON.parse(await readFile(join(ctx.agentDir, "meta.json"), "utf-8"));
+    expect(meta.state).toBe("waiting");
+    expect(typeof meta.state_updated_at).toBe("number");
   });
 
   test("running with background tasks → none", async () => {
@@ -514,14 +532,13 @@ describe("debug log", () => {
     expect(content).toContain("test message");
   });
 
-  test("debug file includes tmux output and parse-state reason when tmux fallback used", async () => {
+  test("debug file includes deterministic state source (not tmux/parse-state)", async () => {
     await processStopHook(
       ctx.agentId,
-      "",
+      "test message\nI HAVE COMPLETED THE GOAL",
       ctx.agentDir,
       ctx.agentsDir,
       {
-        captureOutput: async () => "some tmux output\nI HAVE COMPLETED THE GOAL\n",
         checkGitStatus: async () => "",
       },
     );
@@ -531,8 +548,8 @@ describe("debug log", () => {
     const files = await rd(debugDir);
     const debugFile = files.find((f) => f.startsWith("stop-") && f.includes("complete"))!;
     const content = await readFile(join(debugDir, debugFile), "utf-8");
-    expect(content).toContain("some tmux output");
-    expect(content).toContain("--- parse-state -v output ---");
+    expect(content).toContain("--- deterministic state ---");
+    expect(content).toContain("from last_assistant_message");
     expect(content).toContain("--- last_assistant_message ---");
   });
 });
@@ -755,22 +772,23 @@ describe("processStopHook — invalid tmux session in meta.json", () => {
     await ctx.cleanup();
   });
 
-  test("falls through to unknown state when meta has invalid tmux session", async () => {
+  test("writes running state when meta has invalid tmux session (no tmux fallback needed)", async () => {
     // Write meta.json with an invalid tmux_session
     await writeFile(
       join(ctx.agentDir, "meta.json"),
-      JSON.stringify({ tmux_session: "bad;inject" }),
+      JSON.stringify({ id: ctx.agentId, tmux_session: "bad;inject" }),
     );
 
     const result = await processStopHook(
       ctx.agentId,
-      "",  // empty last message
+      "",  // empty last message → running
       ctx.agentDir,
       ctx.agentsDir,
+      { now: Math.floor(Date.now() / 1000) - 10 },
     );
 
-    // Should fall through to unknown since the tmux session is invalid and can't be captured
-    expect(result.state).toBe("unknown");
+    // State is determined from last_assistant_message, not tmux — so it's running
+    expect(result.state).toBe("running");
   });
 });
 

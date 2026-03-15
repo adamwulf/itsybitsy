@@ -530,7 +530,7 @@ async function main() {
         console.error(`Warning: unknown arguments ignored: ${extraArgs.join(" ")}`);
       }
       const { mergeAgent } = await import("./ib-commands");
-      await printAndExit(await mergeAgent(agent));
+      await printAndExit(await mergeAgent(agent, process.cwd()));
       break;
     }
     case "resume": {

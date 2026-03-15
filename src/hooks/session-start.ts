@@ -120,6 +120,14 @@ Always spawn **manager** agents (not \`--worker\`). Managers assess the task and
 | \`stopped\` | Session ended |
 | \`unknown\` | State unclear |
 
+### Bash Rules
+
+Each Bash tool call must run exactly ONE command. Multi-command calls will be blocked.
+- NO piping: \`cmd1 | cmd2\` is not allowed
+- NO chaining: \`cmd1 && cmd2\` and \`cmd1 ; cmd2\` are not allowed
+- NO subshells or command substitution that runs multiple commands
+- If you need to run two commands, make two separate Bash tool calls
+
 </ittybitty>`;
 }
 
@@ -147,6 +155,14 @@ You are running in a git worktree on branch \`agent/${ctx.agentId}\`, forked fro
 ${managerInfo}
 
 IMPORTANT: Always use \`ib\` (not \`./ib\`) to ensure you use the current version from PATH.
+
+### Bash Rules
+
+Each Bash tool call must run exactly ONE command. Multi-command calls will be blocked.
+- NO piping: \`cmd1 | cmd2\` is not allowed
+- NO chaining: \`cmd1 && cmd2\` and \`cmd1 ; cmd2\` are not allowed
+- NO subshells or command substitution that runs multiple commands
+- If you need to run two commands, make two separate Bash tool calls
 
 ### Path Isolation
 
@@ -235,6 +251,14 @@ You are running in a git worktree on branch \`agent/${ctx.agentId}\`, forked fro
 Your manager agent is: ${ctx.agentManager}
 
 IMPORTANT: Always use \`ib\` (not \`./ib\`) to ensure you use the current version from PATH.
+
+### Bash Rules
+
+Each Bash tool call must run exactly ONE command. Multi-command calls will be blocked.
+- NO piping: \`cmd1 | cmd2\` is not allowed
+- NO chaining: \`cmd1 && cmd2\` and \`cmd1 ; cmd2\` are not allowed
+- NO subshells or command substitution that runs multiple commands
+- If you need to run two commands, make two separate Bash tool calls
 
 ### Path Isolation
 

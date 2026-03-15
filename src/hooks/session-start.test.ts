@@ -45,6 +45,25 @@ describe("session-start", () => {
     expect(instructions).toContain("</ittybitty>");
   });
 
+  test("all roles include Bash Rules", () => {
+    const primaryCtx = detectRole("/Users/me/project");
+    const primaryInstructions = generateInstructions(primaryCtx);
+    expect(primaryInstructions).toContain("### Bash Rules");
+    expect(primaryInstructions).toContain("Each Bash tool call must run exactly ONE command");
+
+    const managerCwd = "/Users/me/project/.ittybitty/agents/agent-abc12345/repo";
+    const managerCtx = detectRole(managerCwd, { id: "agent-abc12345", manager: null, worker: false });
+    const managerInstructions = generateInstructions(managerCtx);
+    expect(managerInstructions).toContain("### Bash Rules");
+    expect(managerInstructions).toContain("Each Bash tool call must run exactly ONE command");
+
+    const workerCwd = "/Users/me/project/.ittybitty/agents/agent-def67890/repo";
+    const workerCtx = detectRole(workerCwd, { id: "agent-def67890", manager: "agent-abc12345", worker: true });
+    const workerInstructions = generateInstructions(workerCtx);
+    expect(workerInstructions).toContain("### Bash Rules");
+    expect(workerInstructions).toContain("Each Bash tool call must run exactly ONE command");
+  });
+
   test("generateInstructions manager contains agent ID", () => {
     const cwd = "/Users/me/project/.ittybitty/agents/agent-abc12345/repo";
     const ctx = detectRole(cwd, {

@@ -87,6 +87,14 @@ function generatePrimaryInstructions(): string {
 Spawn agents for complex/parallel tasks. Status updates appear automatically via hooks. User can also run \`ib watch\` for live monitoring.
 Always spawn **manager** agents (not \`--worker\`). Managers assess the task and spawn their own workers if needed.
 
+### Bash Rules
+
+Each Bash tool call must run exactly ONE command. Multi-command calls will be blocked.
+- NO piping: \`cmd1 | cmd2\` is not allowed
+- NO chaining: \`cmd1 && cmd2\` and \`cmd1 ; cmd2\` are not allowed
+- NO subshells or command substitution that runs multiple commands
+- If you need to run two commands, make two separate Bash tool calls
+
 **Agents start automatically** - each agent has a watchdog that handles initialization, permission prompts, and monitors for issues (rate limits, context compaction). Never send input to "help" an agent start. Just spawn with \`ib new-agent\` and monitor with \`ib look\` or \`ib list\`.
 
 | Command | Description |
@@ -147,6 +155,14 @@ You are running in a git worktree on branch \`agent/${ctx.agentId}\`, forked fro
 ${managerInfo}
 
 IMPORTANT: Always use \`ib\` (not \`./ib\`) to ensure you use the current version from PATH.
+
+### Bash Rules
+
+Each Bash tool call must run exactly ONE command. Multi-command calls will be blocked.
+- NO piping: \`cmd1 | cmd2\` is not allowed
+- NO chaining: \`cmd1 && cmd2\` and \`cmd1 ; cmd2\` are not allowed
+- NO subshells or command substitution that runs multiple commands
+- If you need to run two commands, make two separate Bash tool calls
 
 ### Path Isolation
 
@@ -235,6 +251,14 @@ You are running in a git worktree on branch \`agent/${ctx.agentId}\`, forked fro
 Your manager agent is: ${ctx.agentManager}
 
 IMPORTANT: Always use \`ib\` (not \`./ib\`) to ensure you use the current version from PATH.
+
+### Bash Rules
+
+Each Bash tool call must run exactly ONE command. Multi-command calls will be blocked.
+- NO piping: \`cmd1 | cmd2\` is not allowed
+- NO chaining: \`cmd1 && cmd2\` and \`cmd1 ; cmd2\` are not allowed
+- NO subshells or command substitution that runs multiple commands
+- If you need to run two commands, make two separate Bash tool calls
 
 ### Path Isolation
 

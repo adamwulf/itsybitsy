@@ -249,7 +249,7 @@ async function handleNudge(
 
 async function readMeta(
   agentDir: string,
-): Promise<{ manager?: string; tmux_session?: string } | null> {
+): Promise<{ manager?: string; tmux_session?: string; archived?: boolean } | null> {
   try {
     const metaPath = join(agentDir, "meta.json");
     const raw = await readFile(metaPath, "utf-8");
@@ -267,7 +267,7 @@ async function readMeta(
 async function isManagerActive(agentsDir: string, managerId: string): Promise<boolean> {
   const managerMeta = await readMeta(join(agentsDir, managerId));
   if (!managerMeta) return false;
-  if ((managerMeta as Record<string, unknown>).archived) return false;
+  if (managerMeta.archived) return false;
   return true;
 }
 
@@ -473,7 +473,7 @@ export async function executeResultActions(
       }
       const managerMeta = await readMeta(join(agentsDir, managerId));
       // Skip if manager is archived or missing
-      if (!managerMeta || (managerMeta as Record<string, unknown>).archived) {
+      if (!managerMeta || managerMeta.archived) {
         console.log(result.state);
         return "ok";
       }

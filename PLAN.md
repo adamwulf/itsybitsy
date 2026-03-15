@@ -277,7 +277,7 @@ Broadly matches `ib watch` layout and keybindings so existing users feel at home
 
 The agent tree at top shows all agents across all registered repos, grouped by repo, with recursive manager/child indentation. The bottom is split: tmux capture on the left (fixed width), cycling right pane on the right.
 
-### New Layout (Phase 42+)
+### New Layout (Phase 45+)
 
 ```
 ┌──────────────┬──────────────────┬──────────────────────┐
@@ -341,7 +341,7 @@ Matching `ib watch` keybindings exactly where possible; new keys noted.
 - `;` — scroll pane down (show older content)
 - `l` — scroll pane up (toward bottom / newer content)
 - `[` / `]` — resize left pane (decrease / increase width by 5)
-- `Tab` / `Shift-Tab` — cycle focus between agent tree, coordinator, and active agent pane (Phase 42+). Previously: toggle between agent tree and questions list in QUESTIONS pane.
+- `Tab` / `Shift-Tab` — cycle focus between agent tree, coordinator, and active agent pane (Phase 45+). Previously: toggle between agent tree and questions list in QUESTIONS pane.
 
 **Agent actions**
 - `s` — send message to selected agent (dialog)
@@ -915,7 +915,7 @@ Stop hook writes authoritative state (`running`/`waiting`/`complete`) to meta.js
 
 ---
 
-### Phase 42: Sidebar Layout & Compact Agent Tree
+### Phase 45: Sidebar Layout & Compact Agent Tree
 
 **Status:** Not started.
 
@@ -923,7 +923,7 @@ Stop hook writes authoritative state (`running`/`waiting`/`complete`) to meta.js
 
 **Complexity:** High — this is a significant restructuring of the dashboard component hierarchy and render pipeline.
 
-#### 42a: SidebarComponent
+#### 45a: SidebarComponent
 
 **Files:** `src/tui/sidebar.ts` (new), `src/tui/dashboard.ts`
 
@@ -935,7 +935,7 @@ Create a new `SidebarComponent` that renders three vertically stacked sections:
 - [ ] The sidebar is always exactly 60 columns wide
 - [ ] Height allocation: agent tree gets up to `MAX_TREE_HEIGHT` (7) rows; coordinator gets ~40% of remaining height (minimum 5 rows); info panel fills the rest
 
-#### 42b: Compact agent tree format
+#### 45b: Compact agent tree format
 
 **Files:** `src/tui/agent-tree.ts`
 
@@ -948,7 +948,7 @@ Modify `formatAgentRow()` to support a compact mode for sidebar rendering:
 - [ ] Update `computeStateColWidth()` and column width calculations for compact mode
 - [ ] Tests for compact format rendering at various widths, including orphaned agents
 
-#### 42c: InfoPanelComponent
+#### 45c: InfoPanelComponent
 
 **Files:** `src/tui/info-panel.ts` (new)
 
@@ -961,7 +961,7 @@ Create a new component that displays details for the currently selected agent or
 - [ ] No focus, no interactive elements — purely display
 - [ ] Tests for both agent and repo-header display modes, PID liveness edge cases
 
-#### 42d: Dashboard layout restructure
+#### 45d: Dashboard layout restructure
 
 **Files:** `src/tui/dashboard.ts`
 
@@ -978,7 +978,7 @@ Restructure `DashboardComponent.render()` to use the new sidebar layout:
 - [ ] Separator junction characters (┬, ┴, ┤, ├) at sidebar/main boundary
 - [ ] Tests for layout rendering at various terminal sizes
 
-#### 42e: Update keybindings for sidebar layout
+#### 45e: Update keybindings for sidebar layout
 
 **Files:** `src/tui/dashboard.ts`
 
@@ -991,17 +991,17 @@ Adjust keybindings affected by the layout change:
 
 ---
 
-### Phase 43: Focus System & Input Fields
+### Phase 46: Focus System & Input Fields
 
 **Status:** Not started.
 
 **Goal:** Add a focus cycling system with Tab/Shift+Tab and input fields for message composition. See SPEC.md §13 for full specification.
 
-**Depends on:** Phase 42 (sidebar layout must exist).
+**Depends on:** Phase 45 (sidebar layout must exist).
 
 **Complexity:** Medium-High — new input routing layer, careful keyboard handling.
 
-#### 43a: FocusManager
+#### 46a: FocusManager
 
 **Files:** `src/tui/focus.ts` (new), `src/tui/dashboard.ts`
 
@@ -1013,7 +1013,7 @@ Create a focus management system:
 - [ ] Default focus on startup: `agent-tree`
 - [ ] Tests for cycling forward/backward, wrapping
 
-#### 43b: InputFieldComponent
+#### 46b: InputFieldComponent
 
 **Files:** `src/tui/input-field.ts` (new)
 
@@ -1027,7 +1027,7 @@ Create an input field component for message composition:
 - [ ] `onCancel` callback: fires on Escape
 - [ ] Tests for text editing, submission, cancellation
 
-#### 43c: Focus-aware keyboard routing
+#### 46c: Focus-aware keyboard routing
 
 **Files:** `src/tui/dashboard.ts`
 
@@ -1039,7 +1039,7 @@ Restructure `handleInput()` to route based on focus state:
 - [ ] Focus visual indicator: highlight the focused panel's separator/header (bold or colored), dim unfocused panels
 - [ ] Tests for keyboard routing in each focus state
 
-#### 43d: Wire input field to tmux pane
+#### 46d: Wire input field to tmux pane
 
 **Files:** `src/tui/dashboard.ts`, `src/tui/split-pane.ts`
 
@@ -1051,7 +1051,7 @@ Integrate the input field into the tmux pane area:
 - [ ] When focus leaves `active-agent`: hide the input field, restore full tmux display height
 - [ ] Tests for input field visibility toggling, message submission
 
-#### 43e: Wire input field to coordinator panel
+#### 46e: Wire input field to coordinator panel
 
 **Files:** `src/tui/sidebar.ts`, `src/tui/dashboard.ts`
 
@@ -1065,17 +1065,17 @@ Integrate the input field into the coordinator section of the sidebar:
 
 ---
 
-### Phase 44: Coordinator Claude Session
+### Phase 47: Coordinator Claude Session
 
 **Status:** Not started.
 
 **Goal:** Auto-spawn and manage a system-wide coordinator Claude Code session. See SPEC.md §12 for full specification.
 
-**Depends on:** Phase 42 (sidebar with coordinator panel), Phase 43 (focus system with input field).
+**Depends on:** Phase 45 (sidebar with coordinator panel), Phase 46 (focus system with input field).
 
 **Complexity:** Medium — tmux session lifecycle management, permissions configuration, second TmuxPoller instance.
 
-#### 44a: Coordinator session lifecycle
+#### 47a: Coordinator session lifecycle
 
 **Files:** `src/coordinator.ts` (new)
 
@@ -1090,7 +1090,7 @@ Implement coordinator session spawn/teardown:
 - [ ] Session name constant: `IB_COORDINATOR_SESSION = "ib-coordinator"`
 - [ ] Tests for session creation, reuse, cleanup
 
-#### 44b: Coordinator TmuxPoller
+#### 47b: Coordinator TmuxPoller
 
 **Files:** `src/tui/dashboard.ts`, `src/tui/sidebar.ts`
 
@@ -1102,7 +1102,7 @@ Add a second TmuxPoller for the coordinator session:
 - [ ] Start polling on dashboard startup, stop on exit
 - [ ] The coordinator poller runs continuously (unlike the agent poller which switches targets on selection)
 
-#### 44c: Dashboard integration
+#### 47c: Dashboard integration
 
 **Files:** `src/tui/dashboard.ts`
 
@@ -1114,7 +1114,7 @@ Wire coordinator lifecycle into the dashboard:
 - [ ] Handle the case where the coordinator session dies mid-operation: show "Coordinator stopped" in the panel, offer to restart
 - [ ] Tests for startup/shutdown lifecycle
 
-#### 44d: Coordinator prompt and permissions
+#### 47d: Coordinator prompt and permissions
 
 **Files:** `src/coordinator.ts`
 
@@ -1129,21 +1129,21 @@ Define the coordinator's initial configuration:
 
 ---
 
-### Parallelism Notes for Phases 42–44
+### Parallelism Notes for Phases 45–47
 
-**Phase 42** must complete first — it establishes the sidebar layout that Phases 43 and 44 build upon.
+**Phase 45** must complete first — it establishes the sidebar layout that Phases 46 and 47 build upon.
 
-**Phase 43** (focus system) and **Phase 44** (coordinator) have a dependency: Phase 44c needs the focus system from Phase 43 to route input to the coordinator. However, 44a (session lifecycle) and 44b (poller) can start in parallel with Phase 43.
+**Phase 46** (focus system) and **Phase 47** (coordinator) have a dependency: Phase 47c needs the focus system from Phase 46 to route input to the coordinator. However, 47a (session lifecycle) and 47b (poller) can start in parallel with Phase 46.
 
 Recommended execution order:
 ```
-Phase 42 ──── (must complete first)
+Phase 45 ──── (must complete first)
                ↓
-Phase 43a-c ──┐
-Phase 44a-b ──┼── in parallel
+Phase 46a-c ──┐
+Phase 47a-b ──┼── in parallel
                ↓
-Phase 43d-e ──── (needs focus system + coordinator)
-Phase 44c-d ──── (needs focus system + coordinator poller)
+Phase 46d-e ──── (needs focus system + coordinator)
+Phase 47c-d ──── (needs focus system + coordinator poller)
 ```
 
 ---

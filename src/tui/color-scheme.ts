@@ -26,12 +26,12 @@ function writeStdout(data: string): void {
 export function getStateColors(): Record<string, string> {
   if (colorScheme === "light") {
     return {
-      creating: YELLOW, running: GREEN, waiting: CYAN, complete: BLUE,
+      creating: YELLOW, running: GREEN, waiting: YELLOW, complete: BLUE,
       compacting: MAGENTA, rate_limited: RED, stopped: DIM_GRAY, unknown: WHITE,
     };
   }
   return {
-    creating: YELLOW, running: GREEN, waiting: CYAN, complete: BRIGHT_BLUE,
+    creating: YELLOW, running: GREEN, waiting: YELLOW, complete: BRIGHT_BLUE,
     compacting: BRIGHT_MAGENTA, rate_limited: RED, stopped: DIM_GRAY, unknown: WHITE,
   };
 }

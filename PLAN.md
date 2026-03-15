@@ -362,818 +362,157 @@ Each phase ends at a usable checkpoint — something that works and can be teste
 ---
 
 ### Phase 1: CLI Foundation -- COMPLETE
-**Checkpoint:** `itsybitsy add/remove/list` works. pi-tui horizontal layout validated (Box is vertical-only; custom SplitPane created).
-
-- [x] `src/index.ts` — CLI entrypoint, parse `add/remove/list/watch/agents` subcommands
-- [x] `src/registry.ts` — read/write `~/.itsybitsy.json`; add, remove, list repos
-- [x] Wire up `itsybitsy add [path]`, `itsybitsy remove [path]`, `itsybitsy list`
-- [x] Unit tests for registry (7 tests)
-- [x] **Validated pi-tui horizontal Box layout** — Box is vertical-only, created custom `SplitPane` component
+CLI entrypoint with `add/remove/list/watch/agents` subcommands, registry module for `~/.itsybitsy.json`, and custom `SplitPane` component (pi-tui Box is vertical-only). 7 registry tests.
 
 ---
 
 ### Phase 2: Agent Data Layer -- COMPLETE
-**Checkpoint:** `itsybitsy agents` prints all agents across all registered repos with correct states (via tmux capture + parseState). Error handling in place.
-
-- [x] `src/agents.ts` — read `.ittybitty/agents/` and `archive/`; `Agent`, `AgentState`, `FlatEntry` types; `readPendingQuestions()`; `detectAgentStates()`; `computeAge()`; structured error reporting
-- [x] `src/parse-state.ts` — full port of `parse_state` bash logic; all state rules
-- [x] `src/watcher.ts` — `fs.watch({ recursive: true })` on `agents/`, `archive/`, `user-questions.json`; 200ms debounce; 10s fallback poll; calls `detectAgentStates()`
-- [x] `src/tmux-poller.ts` — polls selected agent at ~1s; `captureTmuxOutput()` for one-shot state detection; race-condition guard on agent switch
-- [x] Basic error handling: try/catch, graceful degradation for missing/malformed `meta.json`, structured `AgentReadError` reporting
-- [x] Unit tests: parse-state (43 tests), agents (23 tests)
-- [x] Orphan tmux session detection
+Agent data reading from `.ittybitty/agents/` and `archive/`, full port of `parse_state` bash logic, `fs.watch` watcher with debounce and fallback poll, tmux poller with race-condition guard, orphan detection, and structured error reporting. 66 tests across agents/parse-state.
 
 ---
 
 ### Phase 3: Basic TUI Dashboard -- COMPLETE
-**Checkpoint:** `itsybitsy watch` launches a live TUI with agent tree, state updates via fs.watch + tmux, split pane layout, and keybindings.
-
-- [x] `src/tui/dashboard.ts` — agent tree at top (max 7 rows, scrolls with selection), split pane below (tmux left + cycling right pane)
-- [x] Agent tree: recursive manager/child indentation, workers `⚙` vs managers `◆`, state color-coded; archived agents always hidden
-- [x] Right pane modes 0–7; `p`/`n` to cycle, direct jump keys `d`/`g`/`e`/`q`; mode persists across agent selection changes
-- [x] Keyboard navigation: `j/k` or arrow keys; `;`/`l` scroll pane content
-- [x] Watcher events wired to `tui.requestRender()`; TmuxPoller integrated for live output
-- [x] Status bar with pending question count badge and keybinding hints
-- [x] `Ctrl-C` to quit
-- [x] **ANSI passthrough validated** — 7 tests in `ansi-validation.test.ts`
+Live TUI with agent tree (max 7 rows, scroll, recursive indentation), split pane (tmux left + cycling right pane with 8 modes), keyboard navigation, watcher integration, status bar with question badge, and ANSI passthrough validation.
 
 ---
 
 ### Phase 4: Live Tmux Pane -- COMPLETE
-**Checkpoint:** Selecting an agent shows its live Claude session output in a right-hand pane, updating every ~1s.
-
-Note: `tmux-poller.ts` was implemented in Phase 2/3. Phase 4 focuses on rendering quality.
-
-- [x] `src/tmux-poller.ts` — already implemented: polls at ~1s, race-condition guard, integrated into dashboard
-- [x] Left pane: ANSI-aware line wrapping (`src/tui/wrap.ts`), scroll-back from bottom with `;`/`l`, auto-follow, display height computed from terminal size
-- [x] Right pane mode 0 (AGENT LOG): reads `agent.log` from disk (async loading, handles missing/empty files)
-- [x] Graceful display when tmux session doesn't exist: shows agent state, clear "No active tmux session" message for stopped/orphaned agents
+ANSI-aware line wrapping (`wrap.ts`), scroll-back from bottom, auto-follow, terminal-size-aware display height, and graceful handling of missing tmux sessions for stopped/orphaned agents.
 
 ---
 
 ### Phase 5.1: Core Agent Actions (Mutations) -- COMPLETE
-**Checkpoint:** Kill, resume, merge, send, and new-agent all work from the TUI with confirm dialogs.
-
-- [x] `src/ib-commands.ts` — async wrappers for all `ib` mutations; **always sets `cwd` to the target repo root**; functions: `killAgent`, `nukeAgent`, `resumeAgent`, `reassignAgent`, `mergeAgent`, `mergeCheckAgent`, `sendMessage`, `newAgent`, `diffAgent`, `statusAgent`
-- [x] `x` — kill agent: confirm dialog showing agent ID, then `ib kill {id}`
-- [x] `!` — nuke/force-kill: confirm dialog, then `ib nuke {id} --force`
-- [x] `R` — resume stopped agent: `ib resume {id}` (only enabled when agent is stopped/complete)
-- [x] `r` — reassign agent's manager: text input dialog, then `ib reassign {id} {new-manager}`
-- [x] `m` — merge agent: run `ib merge-check {id}` first, show result in confirm dialog, then `ib merge {id} --force`
-- [x] `s` — send message: text input dialog, then `ib send {id} "message"`
-- [x] `a` — new agent: infers repo from selection → name → worker toggle → prompt; shells to `ib new-agent`
+All TUI agent actions with confirm/input dialogs: kill (`x`), nuke (`!`), resume (`R`), reassign (`r`), merge with merge-check (`m`), send message (`s`), new agent (`a`). All backed by `ib-commands.ts` wrappers with `cwd` set to repo root.
 
 ---
 
 ### Phase 5.2: Right Pane Content -- COMPLETE
-**Checkpoint:** All right pane modes show real content.
-
-- [x] Right pane mode 1 — INITIAL PROMPT: reads `prompt.txt` from `.ittybitty/agents/{id}/prompt.txt`, falls back to `meta.prompt`
-- [x] Right pane mode 2 — DENIALS: parses `agent.log` for `[PreToolUse] Permission denied:` lines with timestamp-based time filter
-- [x] Right pane mode 3 — TREE: renders full cross-repo agent tree with age and model info
-- [x] Right pane mode 4 — ERRORS: async errors collected by watcher's `onError` callback; `c` to clear
-- [x] Right pane mode 5 — DIFF: `ib diff {id}` output, loaded async when pane is active, cached until agent changes
-- [x] Right pane mode 6 — STATUS: `ib status {id}` output, loaded async when pane is active, cached until agent changes
-- [x] `g` — STATUS pane in normal context; go-to-agent in QUESTIONS pane (selects agent and jumps to AGENT LOG)
-- [x] `q` — QUESTIONS pane; `Enter` to answer (acknowledges + sends); `Escape` to acknowledge without answering
-- [x] `t` — cycle denials time filter (3 levels: all / 24h / 7d), only active in DENIALS pane
+All 8 right pane modes showing real content: agent log, initial prompt, denials with time filter, full tree, errors, diff, status, and questions with answer/acknowledge workflow.
 
 ---
 
 ### Phase 5.3: Navigation & Remaining Keybindings -- COMPLETE
-**Checkpoint:** Fuzzy navigation, questions workflow, and all remaining keybindings work.
-
-- [x] `@` — fuzzy jump to agent by name (pi-tui SelectList dialog overlay)
-- [x] `/` — fuzzy jump to pane mode by name (pi-tui SelectList dialog overlay)
-- [x] `w` — open agent worktree in Finder: `Bun.$\`open ${agent.worktree}\``; show error if worktree doesn't exist
-- [x] `o` — open diff in external tool: write `diffAgent()` output to a temp file (`/tmp/itsybitsy-diff-{id}.txt`), run `{diffTool} {tempfile}`; show "No diff tool configured" message if `diffTool` not set in `~/.itsybitsy.json`
-- [x] `?` — read-only help dialog listing all keybindings; press any key to dismiss (use existing message dialog type). Note: originally `h`, moved to `?` in Phase 12A when `h` was reassigned to setup dialog.
-- [x] `S` — snapshot for debugging: call `captureTmuxOutput(agent.meta.tmux_session)`, run `parseState()` on stripped output, write full capture + state to `.ittybitty/agents/{id}/debug-logs/snapshot-{timestamp}-{state}.txt`, show status message. **Not** an `ib` subcommand — implement directly.
+Fuzzy jump to agent (`@`) and pane mode (`/`), open worktree in Finder (`w`), external diff tool (`o`), help overlay (`?`), and tmux snapshot for debugging (`S`).
 
 ---
 
 ### Phase 6: Ghostty Integration & Distribution -- COMPLETE
-**Checkpoint:** Production-ready single binary you can install and use daily.
-
-- [x] `src/ghostty.ts` — `ghostty --command="tmux attach -t {tmux_session}"`; detect if Ghostty is available; degrade gracefully
-- [x] `G` keybinding wired up — open selected agent's tmux session in Ghostty (`g` is reserved for STATUS pane / go-to-agent)
-- [x] `bun build --compile` produces a single self-contained binary
-- [x] README with install instructions and keybinding reference
-- [x] Polish error messages: missing `ib`/`tmux`, unreadable repos, malformed `meta.json`
+Ghostty integration (`G` key), `bun build --compile` binary, README, and polished error messages for missing dependencies.
 
 ---
 
 ---
 
 ### Phase 7: ib watch Parity — P0 -- COMPLETE
-
-Deep analysis of `ib watch` (bash, ~8200 lines) vs itsybitsy (TypeScript) produced a full gap inventory. See `research/` for the full analysis docs. P0 gaps are fixed.
-
-**Fixed in this phase:**
-- [x] **Tmux capture depth** — `captureTmuxOutput()` default 20→100 lines; `TmuxPoller` display 100→500 lines (matches ib's `-S -500`)
-- [x] **Full-width pane modes** — `SplitPane.fullWidth` flag; DIFF, DENIALS, TREE, ERRORS, QUESTIONS hide left pane and use full terminal width
-- [x] **All-agent state polling** — `watcher.ts` `stateTimer` (2s) calls `detectAgentStates()` on all agents between `fs.watch` events; keeps state fresh without re-reading disk
-- [x] **Claude API usage display** — `src/usage.ts` fetches session+weekly quota from Anthropic OAuth API; dashboard footer shows color-coded percentages (>80% yellow, >90% red) every 30s
-- [x] **Flaky fs.watch test** — poll-until-ready with 5s deadline + explicit 10s test timeout
-
-**Known intentional deviation from ib:**
-- `parseState()` checks active-running (last 5) before tool-waiting (last 15), opposite of ib's order. Rationale: if agent resumed (Esc visible in last 5), a stale `⎿ Waiting` at line 6–15 should not override. Documented in `research/parity-check-logic.md`.
+Fixed P0 parity gaps from deep `ib watch` analysis: tmux capture depth (500 lines), full-width pane modes, all-agent state polling (2s timer), Claude API usage display with color-coded footer, and flaky fs.watch test fix. Intentional deviation: `parseState()` checks active-running before tool-waiting (documented in `research/parity-check-logic.md`).
 
 ---
 
 ### Phase 8: Quick Wins — Commands & State Detection -- COMPLETE
-**Checkpoint:** `!` (nuke) correctly kills descendants, `a` (new-agent) wires up manager hierarchy, `P` pauses agents, dead-agent questions filtered, `creating` state detected more reliably, state detection capture depth matches ib.
-
-These are small, isolated changes — each is a few lines, low risk, and independently testable.
-
-**Command fixes:**
-- [x] **Fix `nukeAgent()` to use `ib nuke`** (`src/ib-commands.ts`) — change from `ib kill {id} --force` to `ib nuke {id} --force` so that `!` recursively kills the agent AND all its descendants. Update tests.
-- [x] **Add nuke-all capability** (`src/ib-commands.ts`, `src/tui/dashboard.ts`) — add `nukeAllAgents(repoPath)` that calls `ib nuke --force` (no ID = kill all agents in repo). In the dashboard, when `!` is pressed with no agent selected, show confirm dialog for nuke-all. This is the emergency stop feature.
-- [x] **Add `--manager` flag to `newAgent()`** (`src/ib-commands.ts`, `src/tui/dashboard.ts`) — add `manager?: string` to `NewAgentOptions`. In the new-agent dialog, if an agent is currently selected and is a manager (not a worker), auto-pass `--manager {selected.id}` to `ib new-agent`. This is critical for correct agent hierarchy when spawning from the TUI.
-- [x] **Dead-agent question filtering** (`src/agents.ts`) — in `readPendingQuestions()`, after reading `user-questions.json`, filter out questions whose `agent` ID does not exist in the current `.ittybitty/agents/` directory. Matches ib's `cmd_questions()` which skips dead agents.
-- [x] **Pause agent (`P` key)** (`src/ib-commands.ts`, `src/tui/dashboard.ts`) — add `pauseAgent(repoPath, id)` that calls `ib pause {id}`. Add `P` keybinding in dashboard with confirm dialog. Only enabled for running/waiting agents (not already stopped). After pause, agent shows as "stopped" and can be resumed with `R`.
-
-**State detection fixes:**
-- [x] **Missing startup indicators** (`src/parse-state.ts`) — add `"╭─ Claude Code"` and `"[AGENT CONTEXT]"` to the creating-state startup check alongside `"Claude Code v"`. Worker agents inject `[AGENT CONTEXT]` before `Claude Code v` appears; `╭─ Claude Code` is the box-drawing header variant.
-- [x] **State detection capture depth** (`src/tmux-poller.ts`) — increase `captureTmuxOutput()` default from 100 to 500 lines to match ib's capture depth for state detection. The display poller already uses 500 lines; this aligns the state-detection one-shot calls used by `detectAgentStates()`.
-- [x] **`compute_state_from_content` pre-check** (`src/agents.ts`) — in `detectAgentStates()`, before calling `parseState()`, count non-empty lines in the captured output. If < 10 lines AND none of the startup markers (`"Claude Code v"`, `"╭─ Claude Code"`, `"[AGENT CONTEXT]"`) are found, return `"creating"` directly instead of delegating to `parseState()`. This matches ib's `compute_state_from_content()` wrapper.
+Command fixes: nuke kills descendants, nuke-all emergency stop, `--manager` flag for agent hierarchy, dead-agent question filtering, pause agent (`P` key). State detection fixes: additional startup indicators, capture depth aligned to 500 lines, `compute_state_from_content` pre-check for creating state.
 
 ---
 
 ### Phase 9: Dashboard UX — Control Flow & Footer -- COMPLETE
-**Checkpoint:** Pane cycling skips empty panes, footer shows error count, terminal title updates, small terminals show a warning, update notifications appear.
-
-All changes in `src/tui/dashboard.ts` — control flow and status bar only, no rendering changes.
-
-- [x] **Pane cycling skips empty panes (G-03)** — in `cyclePaneMode()`, after computing next mode: if ERRORS mode and `errors.length === 0`, skip; if QUESTIONS mode and `questions.length === 0`, skip. Handle wrap-around (don't infinite-loop if all skippable).
-- [x] **Error count badge in footer (G-07)** — add `errorCount` to `StatusBarComponent`. Show red `[N errors]` badge next to the question badge when `errorCount > 0`. `addError()` increments, `clearErrors()` resets.
-- [x] **Terminal title (G-10)** — emit `\x1b]0;itsybitsy: ${agentId}\x07` on agent selection change. Emit `\x1b]0;itsybitsy\x07` when no agent is selected or on exit.
-- [x] **Minimum terminal size (G-11)** — at top of `render()`, if `process.stdout.rows < 20 || width < 80`, render a single warning line ("Terminal too small — need at least 80x20") and return early.
-- [x] **Scroll step size (G-13)** — change scroll step constant from `5` to `10` lines to match ib watch. Extract as `const SCROLL_STEP = 10`.
-- [x] **Denial filter intervals (G-14)** — change `DENIAL_FILTERS` from `["all", "1h", "10m"]` to `["all", "24h", "7d"]`. Update `filterDenials()` cutoff math accordingly.
-- [x] ~~**Update notification**~~ — Removed. The npm registry checker returned false positives from an unrelated package. A GitHub releases checker will replace it in a future phase.
+Pane cycling skips empty panes, error count badge in footer, terminal title updates on selection, minimum terminal size warning (80x20), scroll step 10 lines, denial filter intervals changed to all/24h/7d. Update notification removed (false positives).
 
 ---
 
 ### Phase 10: Dashboard Rendering — Colorization & Layout -- COMPLETE
-**Checkpoint:** Diff output is colorized, agent log has syntax highlighting, top-anchored panes scroll correctly, TREE shows prompts, orphaned agents and tmux sessions are detected and marked.
-
-Changes in `src/tui/dashboard.ts` render paths + `src/agents.ts` for orphan flags.
-
-**Orphan detection (agents with missing managers):**
-- [x] **Orphaned flag on Agent (G-06 part 1)** (`src/agents.ts`) — add `orphaned?: boolean` to `Agent` type. In `buildAgentTree()`, when `agent.meta.manager` is set but not found in `byId`, set `agent.orphaned = true`. Note: this is distinct from orphaned tmux sessions (below) — this flags agents whose parent manager was killed/archived.
-- [x] **Orphaned agent indicator (G-06 part 2)** (`src/tui/agent-tree.ts`) — in `formatAgentRow()`, prepend `⚠ ` when `agent.orphaned === true`.
-
-**Orphan tmux session detection:**
-- [x] **Detect orphaned tmux sessions** (`src/agents.ts` + `src/tmux-poller.ts`) — after reading all agents, run `tmux list-sessions -F "#{session_name}"` and filter for sessions matching `ittybitty-*`. Compare against known agent tmux session names. Sessions without matching agent data are stale orphans. Returned as `orphanedTmuxSessions` in `ReadAgentsResult`.
-- [x] **Display orphan tmux warnings** (`src/tui/pane-manager.ts`) — show orphaned tmux sessions in the ERRORS pane with a message like "⚠ {session_name} (no matching agent)". Count included in the error badge in footer.
-- [x] **Orphan cleanup** (`src/tui/agent-actions.ts`) — when viewing ERRORS pane, Enter opens confirm dialog to kill the orphaned tmux session (runs `tmux kill-session -t {session}` via `killTmuxSession()`).
-
-**Colorization:**
-- [x] **Diff colorization (G-04)** — post-process `diffContent` lines: `+` lines (not `+++`) get green `\x1b[32m`; `-` lines (not `---`) get red `\x1b[31m`; `@@`/`---`/`+++`/`diff ` lines get dim `\x1b[2m`. Reset `\x1b[0m` at end of each colored line.
-- [x] **Agent log colorization (G-05)** — in `loadAgentLog()` post-processing, apply: dim `\x1b[2m` to ISO timestamp prefixes (`\d{4}-\d{2}-\d{2}T` or `[2026-` patterns); cyan `\x1b[36m` for `[bracket]` markers. Reset after each.
-
-**Layout:**
-- [x] **Scroll direction for top-anchored panes (G-08)** — define `TOP_ANCHORED_MODES = new Set(["DIFF", "ERRORS", "STATUS", "QUESTIONS"])`. In `RightPaneComponent.render()`, branch: top-anchored uses `scrollOffset` as start index from top (slice forward); bottom-anchored keeps existing scroll-back-from-bottom behavior.
-- [x] **TREE pane prompt column (G-09)** — append truncated prompt to each TREE row: `agent.meta.prompt.replace(/\n/g, " ").slice(0, 40)`, respecting available width after agent ID, state, age, and model columns.
+Orphan detection for agents with missing managers (`⚠` indicator) and orphaned tmux sessions (displayed in ERRORS pane with cleanup via Enter). Diff colorization (green/red/dim), agent log syntax highlighting (timestamps dim, brackets cyan). Top-anchored scroll direction for DIFF/ERRORS/STATUS/QUESTIONS panes. TREE pane shows truncated prompts.
 
 ---
 
 ### Phase 11: Dialog Improvements -- COMPLETE
-**Checkpoint:** Reassign uses a proper select list, send dialog supports broadcast to all agents.
-
-Changes in `src/tui/dashboard.ts` dialog handling.
-
-- [x] **Reassign select list** — replace the free-text input dialog for `r` (reassign) with a select list showing all valid managers (non-worker agents) plus a "(No parent - make root)" option. Filter out the agent being reassigned and its descendants (circular dependency prevention). Use the existing fuzzy select dialog infrastructure.
-- [x] **Send-to-all toggle** — in the `s` (send) dialog, add a `Ctrl-A` key toggle for "send to all alive agents." When toggled on, show `[ALL]` indicator in the dialog. On confirm, iterate all non-archived agents with active tmux sessions and call `sendMessage()` for each.
+Reassign uses fuzzy select list (filters out self and descendants). Send dialog supports `Ctrl-A` broadcast to all alive agents.
 
 ---
 
 ### Phase 12A: Setup Dialog — Hooks & Status (Tab 0) -- COMPLETE
-**Checkpoint:** `h` key opens a setup dialog showing hooks installation status with toggles. `?` key shows the read-only help overlay (moved from `h`).
-
-This is the first half of the setup dialog — Tab 0 only. Self-contained and simpler than config editing.
-
-Files: `src/tui/dashboard.ts`, `src/tui/agent-actions.ts`, `src/tui/dialog-handler.ts`.
-
-**Prerequisites:**
-- Move the current `h` help overlay to `?` key. Update the help text and keybinding reference.
-- Reassign `h` to open the setup dialog.
-
-**Tab 0 — Setup:**
-- [x] **Hooks status display** — call `ib hooks status` (returns lines like `safety-hooks: installed` or `safety-hooks: not installed`). Parse output by splitting on `:` to get hook name and status. Render as a select list of rows, each showing hook name + installed/not-installed badge.
-- [x] **Hooks toggle** — `Enter` on a hook row calls `ib hooks install` / `ib hooks uninstall` (or `install-intercept` / `uninstall-intercept` for task interception). Refresh status after toggle.
-- [x] **Status indicators** — show read-only status rows for: `.gitignore` contains `.ittybitty` (check via `Bun.file("{repo}/.gitignore").text()` and search for `.ittybitty`), `.itsybitsy.json` exists (check via `Bun.file("~/.itsybitsy.json").exists()`), current `diffTool` value.
-- [x] **External diff tool editing** — `Enter` on the diff tool row opens a text input dialog (using existing `input` dialog type) to set/change the value. Saves to `~/.itsybitsy.json` via registry.
-
-**Dialog behavior:**
-- Dialog captures all keyboard input while open (existing dialog infrastructure already does this — dialogs intercept `handleInput` before dashboard keys).
-- `Escape` dismisses.
-- Tab 0 is the only tab in this phase — tab switching UI is added in Phase 12B.
+`h` opens setup dialog with hooks status display and toggles (install/uninstall safety and intercept hooks), `.gitignore` and registry status indicators, and external diff tool editing. Help overlay moved from `h` to `?`.
 
 ---
 
 ### Phase 12B: Setup Dialog — Config Editing (Tabs 1 & 2) -- COMPLETE
-**Checkpoint:** Setup dialog has three tabs: Setup (Tab 0 from 12A), Project Settings, User Settings. Config values can be viewed and edited.
-
-Files: `src/tui/dashboard.ts`, `src/config.ts`.
-
-**`src/config.ts` module:**
-- [x] `readConfig()` — read `~/.itsybitsy/config.json` (user-wide), apply defaults. Return `{ value, source: "user" | "default" }` for each key. No per-repo config.
-- [x] `writeConfig(filePath, key, value)` — read JSON, set key (supports dot-notation like `hooks.injectStatus`), write back.
-- [x] Config key definitions with types: `{ key: string, type: "number" | "boolean" | "string" | "string[]", default: any }`. Full list: `maxAgents` (number, 10), `model` (string, "sonnet"), `fps` (number, 10), `createPullRequests` (boolean, false), `allowAgentQuestions` (boolean, true), `autoCompactThreshold` (number, none), `externalDiffTool` (string, none), `hooks.injectStatus` (boolean, true), `hooks.statusVisible` (boolean, true), `permissions.manager.allow` (string[], []), `permissions.manager.deny` (string[], []), `permissions.worker.allow` (string[], []), `permissions.worker.deny` (string[], []).
-
-**Tab switching:**
-- [x] Add tab bar at top of setup dialog: `[Setup] [Config]`. Active tab is highlighted.
-- [x] Switch tabs via `1`/`2` number keys or Tab/Shift+Tab.
-
-**Tab 1 — Config** (`~/.itsybitsy/config.json`):
-- [x] Render config keys as a select list. Each row: `key: value (source)`.
-- [x] `Enter` on a row opens the appropriate editor based on type:
-  - `number` → existing `input` dialog, validate numeric input
-  - `boolean` → toggle immediately (no sub-dialog), re-render
-  - `string` → existing `input` dialog
-  - `string[]` → existing `select` dialog with options: "Add item" (opens `input`), "Remove item" (shows items as select list), "Back"
-- [x] Write changes via `writeConfig()`.
+`src/config.ts` module with `readConfig()`/`writeConfig()` for `~/.itsybitsy/config.json` (14 config keys with typed defaults). Setup dialog tab bar with Setup and Config tabs. Config tab renders editable select list with type-appropriate editors (number input, boolean toggle, string input, string[] add/remove).
 
 ---
 
 ### Phase 13: Code Quality & Architecture Cleanup -- COMPLETE
-**Checkpoint:** Codebase is clean, internally consistent, and free of known architectural hacks identified in the code review.
-
-**FlatEntry discriminated union refactor:** *(completed)*
-- [x] Replace the `__repo_<name>` dummy Agent hack with a proper discriminated union type:
-  ```ts
-  type FlatEntry =
-    | { kind: "agent"; agent: Agent; depth: number; connector: string }
-    | { kind: "repo-header"; repoName: string; repoPath: string; hasAgents: boolean }
-  ```
-- [x] Update `flattenAgentTree()` in `src/agents.ts` to return `FlatEntry[]`
-- [x] Update all consumers: `agent-tree.ts`, `pane-manager.ts`, `dashboard.ts`, `agent-actions.ts`, `index.ts` — branch on `kind` instead of checking `repoHeader`
-- [x] Remove the dummy Agent construction in `flattenAgentTree` — no more fake meta.json fields
-
-**Remaining review items:**
-- [x] Add tests for `readAccessToken` keychain fallback path (`src/usage.ts`)
-- [x] Add tests for `color-scheme.ts` OSC 11 query and Ghostty mode 2031 detection
-- [x] Add tests for `folder-browser.ts` permission error path
+Replaced `__repo_<name>` dummy Agent hack with proper `FlatEntry` discriminated union (`kind: "agent" | "repo-header"`). Updated all consumers to branch on `kind`. Added tests for keychain fallback, color-scheme detection, and folder-browser permissions.
 
 ---
 
 ### Phase 14: CLI Parity — Native Implementations -- COMPLETE
-**Checkpoint:** All `itsybitsy` CLI commands are implemented natively without shelling to `ib`. itsybitsy can fully replace `ib` for day-to-day agent management.
-
-All commands now implemented natively in `src/ib-commands.ts` with shared helpers in `src/agent-lifecycle.ts`:
-- [x] **`send <id> <message>`** — direct tmux send-keys with delay calculation, sender auto-detection, logging
-- [x] **`kill <id>`** — teardown sequence: kill process, kill tmux, copy settings, remove worktree/branch, archive, cleanup
-- [x] **`pause <id>`** — kill process + tmux, preserve agent dir/worktree for resume
-- [x] **`resume <id>`** — create resume.sh, spawn tmux session, auto-accept trust, send nudge
-- [x] **`nuke [id]`** — teardown agent + descendants (or all), cleanup orphaned sessions
-- [x] **`merge <id>`** — pre-rebase conflict check, rebase, merge (ff-only or no-ff), teardown
-- [x] **`new-agent <prompt>`** — full agent creation: worktree, meta.json, prompt.txt, start.sh, exit-check.sh, settings, tmux, hooks
-
-658 tests across 19 files. Injectable spawn runners for testability (SpawnFn pattern).
+All CLI commands implemented natively in `src/ib-commands.ts` with `src/agent-lifecycle.ts` helpers: send, kill, pause, resume, nuke, merge (with rebase conflict check), and new-agent (full creation flow). 658 tests across 19 files. Injectable SpawnFn pattern for testability.
 
 ### Phase 14.1: Fix Flaky Test -- COMPLETE
-**Checkpoint:** All tests are deterministic with zero flaky failures.
-
-- [x] Investigate intermittent test failure: identified as `AgentWatcher > fs.watch integration > file change in agents dir triggers refresh` in `src/watcher.test.ts`. Root cause: macOS `fs.watch` event delivery can exceed 5s under parallel test load. Fix: increased polling deadline from 5s to 8s and test timeout from 10s to 15s. Verified with 10 consecutive passing runs.
+Fixed intermittent `fs.watch` test failure by increasing polling deadline (5s→8s) and test timeout (10s→15s) to account for macOS FSEvents latency under parallel load.
 
 ---
 
 ### Phase 15: Built-in Watchdog -- COMPLETE
-**Checkpoint:** itsybitsy monitors all agents in-process, notifying managers of state changes, auto-compacting, and handling rate limits.
-
-New file: `src/watchdog.ts`. This is the highest-complexity feature but also the highest-value for multi-agent reliability.
-
-**Coexistence with bash watchdog:** Agents spawned via `ib new-agent` (which itsybitsy uses) automatically get a bash watchdog (`ib watchdog {id}` in background). The two watchdogs will coexist — both send notifications to managers, and duplicate notifications are harmless (managers already handle repeated messages). Long-term, if ib adds a `--no-watchdog` flag to `ib new-agent`, itsybitsy should pass it. For now, accept the duplication. Update the "Explicit Non-Goals" section to remove the `ib watchdog` line and note that Phase 13 replaces it.
-
-**Core loop:**
-- [x] Run every 5 seconds (matching ib's watchdog poll interval) via `setInterval`.
-- [x] Track `previousState: Map<string, AgentState>` for all agents across all repos.
-- [x] On state transition, trigger the appropriate handler (see below).
-- [x] Consume agent state from `watcher.ts` (register a callback or read cached state) — no duplicate tmux captures.
-
-**State handlers:**
-- [x] `waiting` / `unknown` → increment wait counter. After threshold, send notification to manager via `ib send {manager} "[watchdog]: Your subtask {id} recently started waiting for input"`. Use exponential backoff: 30s → 1m → 2m → 4m → 8m → 16m → 32m → 64m cap.
-- [x] `complete` → send one-time notification to manager: `"[watchdog]: Your subtask {id} recently completed"`. Track `completionNotified` flag; clear on resume.
-- [x] `running` / `creating` / `compacting` → reset wait counter and backoff interval. Clear completion flag if agent resumed.
-- [x] `rate_limited` → bypass the rate limit dialog by sending Enter to the tmux session: `tmux send-keys -t {tmux_session} Enter`. Check usage API (already in `usage.ts`). When session usage drops below 10%, send nudge to agent via `ib send`.
-- [x] `stopped` → reset counters, no notification.
-
-**Auto-compact:**
-- [x] Read `autoCompactThreshold` from `~/.itsybitsy/config.json` config (via `src/config.ts`).
-- [x] Read agent context usage % from the Claude transcript file. Path pattern: `~/.claude/projects/{path-hash}/transcript.jsonl` where `{path-hash}` is the agent's worktree path with `/` replaced by `-`. Each line is a JSON object; look for `"type": "summary"` entries with a `"contextPercentage"` or `"costSoFar"` field. Port the parsing logic from ib's `get_agent_context_usage()` function (around line ~3200 in ib) which reads the last summary entry.
-- [x] When usage % exceeds threshold, send `/compact` to agent's tmux session via `tmux send-keys -t {session} "/compact" Enter`.
-- [x] Track `compactSent` flag per agent to avoid duplicate sends; clear when context drops below threshold or agent resumes.
-
-**Dashboard integration:**
-- [x] ~~Watchdog starts automatically with `itsybitsy watch`.~~ (Removed: dashboard no longer manages watchdog)
-- [x] ~~Show `[watchdog]` indicator in footer when watchdog is active.~~ (Removed: per-agent watchdogs don't have a global indicator)
+`src/watchdog.ts` with 5s poll loop tracking state transitions across all agents. Handlers: waiting/unknown with exponential backoff notifications (30s→64m cap), complete one-time manager notification, rate limit bypass (Enter + usage API check), and auto-compact via transcript JSONL parsing with configurable threshold. Coexists with bash watchdog (duplicate notifications are harmless).
 
 ---
 
 ### Phase 16: Cross-Repo Messaging -- COMPLETE
-**Checkpoint:** An agent in repo A can send a message to an agent in repo B from within itsybitsy.
-
-**Protocol:** itsybitsy acts as a message broker. To send a message from agent A (repo X) to agent B (repo Y):
-1. Look up agent B's tmux session from its `meta.json`
-2. Call `sendMessage(repoY, agentB.id, message)` which shells to `ib send {id} "{message}"` with `cwd` set to repo Y
-
-No new file format needed — reuses existing `ib send` infrastructure.
-
-**Dialog flow for `E` key:**
-- [x] Step 1: Select destination repo (select list from registry, exclude current repo if only one agent)
-- [x] Step 2: Select destination agent (select list of non-archived agents in chosen repo)
-- [x] Step 3: Enter message (text input dialog)
-- [x] Execute: call `sendMessage()` with the destination repo's path
-- [x] No changes required to `ib` itself
+`E` key opens multi-step dialog to send messages between agents across repos. Reuses existing `sendMessage()` with destination repo's path as `cwd`. No new file format needed.
 
 ---
 
 ### Phase 18: Wire CLI Commands to Native Implementations -- COMPLETE
-**Checkpoint:** All `itsybitsy` CLI subcommands (send, kill, merge, resume, new-agent, acknowledge) call native TypeScript implementations instead of shelling to `ib`. The `runIb()` function in `index.ts` is deleted.
-
-This is the lowest-hanging fruit — native implementations already exist in `ib-commands.ts` for send, kill, merge, resume, and new-agent. Only `acknowledge` needs a new native implementation.
-
-**18a: Wire existing native implementations into CLI (items 12–16 from audit)**
-
-Files: `src/index.ts`, `src/ib-commands.ts`
-
-- [x] **`send` command** (index.ts:307–315) — replace `runIb(["send", ...])` with direct call to `sendMessage(agent, message)` from `ib-commands.ts`. Print result, exit with appropriate code.
-- [x] **`kill` command** (index.ts:318–323) — replace `runIb(["kill", ...])` with `killAgent(agent)`. Parse `--force` flag from `extraArgs`. Print result.
-- [x] **`merge` command** (index.ts:327–331) — replace `runIb(["merge", ...])` with `mergeAgent(agent, { force: extraArgs.includes("--force") })`. Print result.
-- [x] **`resume` command** (index.ts:335–339) — replace `runIb(["resume", ...])` with `resumeAgent(agent)`. Print result.
-- [x] **`new-agent` command** (index.ts:343–377) — replace `runIb(["new-agent", ...])` with `newAgent(repoPath, prompt, opts)`. Parse CLI args into `NewAgentOptions`: `--worker`, `--model`, `--name`, `--no-worktree`, `--yolo`, `--allow`, `--deny`. Print the returned agent ID.
-
-**18b: Native acknowledge implementation (item 17 from audit)**
-
-Files: `src/ib-commands.ts`, `src/index.ts`
-
-- [x] **`acknowledgeQuestion(repoPath, questionId)`** — implement natively:
-  1. Read `{repoPath}/.ittybitty/user-questions.json`
-  2. Find the question entry matching `questionId`
-  3. If not found, return error
-  4. Set `acknowledged: true` and `acknowledged_at: ISO timestamp` on the question entry
-  5. Write back the JSON file
-  6. Return `{ ok: true, agentId }` so the caller can suggest `itsybitsy send <agent> "answer"`
-- [x] Wire `acknowledge`/`ack` CLI command to call the native implementation instead of `runIb()`
-
-**18c: Remove `runIb()` from index.ts**
-
-- [x] Delete the `runIb()` function from `index.ts` — it should have zero callers after 18a+18b
-- [x] Verify no other imports of `runIb` exist in the codebase
-
-**Tests:**
-- [x] Unit tests for `acknowledgeQuestion()`: happy path, question-not-found, malformed JSON
-- [x] Integration-style tests verifying CLI argument parsing maps correctly to native function calls (mock the native functions, verify args)
+All CLI subcommands (send, kill, merge, resume, new-agent, acknowledge) wired to native TypeScript implementations. `runIb()` deleted from `index.ts`. Native `acknowledgeQuestion()` implemented with tests.
 
 ---
 
 ### Phase 19: Native TUI Wrappers — reassign, mergeCheck, diff, status, acknowledge -- COMPLETE
-**Checkpoint:** All TUI dashboard wrappers in `ib-commands.ts` call native TypeScript code instead of `runIb()`. The `defaultRunner` / `currentRunner` / `runIb` infrastructure in `ib-commands.ts` is deleted.
-
-**19a: Native `reassignAgent()` (item 1 from audit)**
-
-Files: `src/ib-commands.ts`, `src/agent-lifecycle.ts`
-
-The reassign logic (from ib bash `do_reassign`):
-1. Validate agent exists
-2. Validate new parent exists and is not a worker
-3. Check for circular dependency (new parent is not a descendant of agent)
-4. Check for no-op (already has this parent, or already root)
-5. Update `manager` field in `meta.json` (set to new parent ID, or `null` for --none)
-6. Log the change to `agent.log`
-7. Notify old parent, new parent, and agent itself via `sendMessage()`
-
-- [x] Implement `reassignAgent(agent, newManager)` natively in `ib-commands.ts`:
-  - Read meta.json to get old parent
-  - Validate new parent: resolve partial ID, check exists, check not worker, check not descendant (use `getDescendantsRecursive` from `agent-lifecycle.ts`)
-  - Update meta.json `manager` field using `Bun.write()`
-  - Log via `logAgent()`
-  - Send notifications to old parent, new parent, and agent via `sendMessage()`
-- [x] Remove the `runIb(["reassign", ...])` call
-
-**19b: Native `mergeCheckAgent()` (item 2 from audit)**
-
-Files: `src/ib-commands.ts`
-
-The merge-check logic (from ib bash `do_merge_check`):
-1. Determine target branch (current branch if agent context, else main/master)
-2. Check for uncommitted changes in current directory
-3. Check for uncommitted changes in agent's worktree
-4. Check if agent branch exists
-5. Run `checkRebaseConflicts()` (already implemented natively in ib-commands.ts!)
-
-- [x] Implement `mergeCheckAgent(agent)` natively:
-  - Determine target branch using git commands
-  - Check uncommitted changes via `git status --porcelain`
-  - Check agent branch exists via `git show-ref`
-  - Call existing `checkRebaseConflicts()` for conflict detection
-  - Return structured result: `{ status: "ok" | "main_uncommitted" | "agent_uncommitted" | "no_branch" | "conflicts", details?: string }`
-- [x] Remove the `runIb(["merge-check", ...])` call
-
-**19c: Native `diffAgent()` and `statusAgent()` (items 3–4 from audit)**
-
-Files: `src/ib-commands.ts`
-
-These are straightforward — the CLI already implements them natively in `index.ts:257` and `index.ts:284`. The TUI wrappers just need the same logic.
-
-- [x] **`diffAgent(agent)`** — implement natively:
-  1. Get agent worktree path via `agentWorktreePath(agent)`
-  2. Run `git merge-base HEAD main` in the worktree
-  3. Run `git diff {merge-base}` in the worktree
-  4. Return stdout as the diff content
-- [x] **`statusAgent(agent)`** — implement natively:
-  1. Get agent worktree path
-  2. Run `git log --oneline main..HEAD` in the worktree
-  3. Run `git status --short` in the worktree
-  4. Return combined stdout
-
-- [x] Remove the `runIb(["diff", ...])` and `runIb(["status", ...])` calls
-
-**19d: Remove `runIb` infrastructure from ib-commands.ts**
-
-- [x] Delete `defaultRunner`, `currentRunner`, `setRunner()`, `resetRunner()`, and the `runIb()` helper
-- [x] Update any remaining tests that mock `setRunner()` — they should mock the specific spawn runners instead
-- [x] Verify zero references to `runIb` remain in the codebase
-
-**Tests:**
-- [x] `reassignAgent()`: happy path, circular dependency detection, worker-as-parent rejection, same-parent no-op, agent-not-found
-- [x] `mergeCheckAgent()`: clean merge, uncommitted changes (both sides), conflict detection, missing branch
-- [x] `diffAgent()` / `statusAgent()`: basic output capture, worktree-not-found handling
+All TUI wrappers reimplemented natively: `reassignAgent()` with full validation (circular deps, worker check, notifications), `mergeCheckAgent()` with structured result types, `diffAgent()`/`statusAgent()` via git commands. `runIb` infrastructure deleted from `ib-commands.ts`.
 
 ---
 
 ### Phase 20: Standalone Watchdog — `itsybitsy watchdog` Background Process -- COMPLETE
-**Checkpoint:** Spawning an agent always launches a watchdog. `itsybitsy watchdog` runs as a standalone background process that reads agents directly from disk — no TUI required. `newAgent()` spawns `ib watchdog` (binary is named `ib`).
-
-Files: `src/ib-commands.ts`, `src/watchdog.ts`, `src/index.ts`
-
-**Architectural principle: `itsybitsy watch` is for humans, not for functionality.**
-
-`itsybitsy watch` (the TUI dashboard) is a UI for the human operator to observe and interact with agents. It is entirely optional — closing it does NOT stop agent monitoring. All functional work (watchdog, hooks, agent lifecycle) happens in background processes that run whether or not the TUI is open.
-
-The standalone `itsybitsy watchdog` process is the **only** watchdog. It reads agents directly from disk on every tick using `readAllAgents()` + `detectAgentStates()` — no TUI dependency. The TUI's only watchdog-related jobs are:
-1. Check the lock file and show the `[watchdog]` status indicator if one is running
-2. Optionally spawn `itsybitsy watchdog` as a convenience if none is running when the TUI opens
-
-Phase 15-D's TUI integration (`startWatchdog()`/`stopWatchdog()` inline in the TUI process) will be removed as part of this phase. `isWatchdogRunning()` will read the lock file instead of checking module-level state.
-
-**Design: Idempotency via lock file**
-
-Multiple `itsybitsy watchdog` processes (one spawned by each `newAgent()` call, plus one from the TUI) would be wasteful. Use a lock file at `~/.itsybitsy/watchdog.lock` containing the PID. On startup, check if the PID in the lock file is still alive — if so, exit immediately (already covered). If not, write own PID and proceed. On exit, remove the lock file.
-
-**20a: Standalone agent provider**
-
-Files: `src/watchdog.ts`
-
-- [x] Export `createDiskAgentProvider(registryPath: string): AgentProvider` — a function that, on each call, reads all repos from the registry, calls `readAllAgents()` on each, calls `detectAgentStates()` on the result, and returns the combined flat agent list. This is the standalone watchdog's provider.
-- [x] Add tests for `createDiskAgentProvider()` with mocked `readAllAgents` and `detectAgentStates`.
-
-**20b: Lock file management**
-
-Files: `src/watchdog.ts`
-
-- [x] Export `acquireWatchdogLock(): boolean` — writes `~/.itsybitsy/watchdog.lock` with current PID. Returns `true` if acquired (either no existing lock, or existing PID is dead). Returns `false` if another watchdog is already running.
-- [x] Export `releaseWatchdogLock(): void` — removes the lock file if it contains our PID.
-- [x] Add process exit handlers to call `releaseWatchdogLock()` on SIGTERM/SIGINT/exit.
-- [x] Add tests for lock acquire/release, stale PID handling.
-
-**20c: `ib watchdog` CLI command**
-
-Files: `src/index.ts`
-
-- [x] Add `watchdog` subcommand to the CLI switch statement.
-- [x] On invocation: call `acquireWatchdogLock()` — if returns `false`, print "watchdog already running" and exit 0.
-- [x] Read registry path, call `startWatchdog(createDiskAgentProvider(registryPath))`.
-- [x] Keep the process alive (no `process.exit()` — let the setInterval hold the event loop).
-- [x] Register cleanup: on SIGTERM/SIGINT, call `stopWatchdog()`, `releaseWatchdogLock()`, exit 0.
-
-**20d: Replace `ib watchdog` spawn in `newAgent()`**
-
-Files: `src/ib-commands.ts`
-
-- [x] Spawn `Bun.spawn(["ib", "watchdog"], ...)` — binary is named `ib`, no agent ID argument since watchdog is global.
-- [x] Call `.unref()` on the spawned process so it doesn't prevent the parent from exiting.
-- [x] The spawned process will self-terminate immediately if a watchdog is already running (lock file check in 20b).
-
-**Tests:**
-- [x] `newAgent()` spawns `ib watchdog` (binary is named `ib`)
-- [x] `acquireWatchdogLock()` returns false when lock is held by a live PID
-- [x] `acquireWatchdogLock()` returns true when lock PID is dead (stale lock)
-- [x] `ib watchdog` CLI exits cleanly if already running
-- [x] Existing watchdog tests still pass
+Standalone `ib watchdog` CLI process that reads agents from disk via `createDiskAgentProvider()` — no TUI dependency. Idempotent via `~/.itsybitsy/watchdog.lock` with PID-based stale detection. `newAgent()` spawns `ib watchdog` with `.unref()`. TUI inline watchdog removed.
 
 ---
 
 ### Phase 21: Native Agent Hooks — itsybitsy Subcommands -- COMPLETE
-**Checkpoint:** Agent settings reference `ib hook-*` commands (binary is named `ib`). Each hook is implemented as a CLI subcommand.
-
-All hooks implemented natively with full test coverage:
-
-**21a: `ib hook-check-path <agent-id>` (PreToolUse path isolation)**
-
-Files: `src/index.ts`, `src/hooks/agent-path.ts`
-
-- [x] Read JSON from stdin, resolve worktree/repo paths, decision logic, output JSON, log denials
-- [x] Wire as `hook-check-path` subcommand in `src/index.ts`
-
-**21b: `ib hook-status <agent-id>` (Stop hook — agent nudging)**
-
-Files: `src/index.ts`, `src/hooks/agent-status.ts`
-
-- [x] State detection from last_assistant_message and tmux fallback, state-specific actions, debouncing
-- [x] Wire as `hook-status` subcommand in `src/index.ts`
-
-**21c: `ib hook-permission-denied <agent-id>` (PermissionRequest logging)**
-
-Files: `src/index.ts`, `src/hooks/permission-denied.ts`
-
-- [x] Read PermissionRequest JSON, log to agent.log, exit 0
-- [x] Wire as `hook-permission-denied` subcommand in `src/index.ts`
-
-**21d: `ib hooks intercept-task` (PreToolUse Task interception)**
-
-Files: `src/index.ts`, `src/hooks/intercept-task.ts`
-
-- [x] Intercept Task tool calls, skip list, model validation, spawn agent, return updatedInput
-- [x] Wire as `hooks intercept-task` subcommand in `src/index.ts`
-
-**21e: `ib hooks session-start` (SessionStart context injection)**
-
-Files: `src/index.ts`, `src/hooks/session-start.ts`
-
-- [x] Role detection from cwd, generate role-specific instructions, output JSON
-- [x] Wire as `hooks session-start` subcommand in `src/index.ts`
-
-**Additional hooks (not in original plan):**
-- [x] `ib hooks main-path` — PreToolUse path isolation for primary Claude (`src/hooks/main-path.ts`)
-- [x] `ib hooks inject-status` — UserPromptSubmit status injection (`src/hooks/inject-status.ts`)
-
-**Tests:**
-- [x] `hook-check-path`: allow within worktree, block outside worktree, block other agents, allow system paths, cd command extraction, TaskCreate denial
-- [x] `hook-status`: state detection from message text, nudge debouncing, manager notification for complete/waiting, uncommitted changes reminder
-- [x] `hook-permission-denied`: basic logging, JSON parsing
-- [x] `intercept-task`: skip non-Task tools, skip workers, skip list bypass, agent spawning
-- [x] `session-start`: role detection (primary/manager/worker), correct output format
+Seven hooks implemented natively as CLI subcommands: `hook-check-path` (path isolation), `hook-status` (stop hook with nudging), `hook-permission-denied` (denial logging), `hooks intercept-task` (Task interception), `hooks session-start` (context injection), `hooks main-path` (primary Claude path isolation), `hooks inject-status` (status injection). Full test coverage.
 
 ---
 
 ### Phase 22: Update Agent Settings to Use itsybitsy Hooks -- COMPLETE (obsolete)
-**Checkpoint:** `buildAgentSettings()` writes `ib hook-*` commands into agent settings, and agent permissions include `Bash(ib:*)`. This phase was originally designed to rename commands from `ib` to `itsybitsy`, but Phase 26a changed the binary name to `ib`, making this phase unnecessary — the commands already use the correct binary name.
-
-**Status:** All hook commands in `buildAgentSettings()` correctly reference `ib hook-check-path`, `ib hook-status`, `ib hooks intercept-task`, `ib hooks session-start`, etc. Permissions include `Bash(ib:*)`. Both point to the bun binary (named `ib`), which is the correct behavior.
-
-- [x] Hook commands reference `ib` binary (correct — binary is named `ib`)
-- [x] Permissions include `Bash(ib:*)` (correct — binary is named `ib`)
-- [x] PATH exports in startup scripts reference `ib` (correct)
+Made obsolete by Phase 26a changing binary name to `ib`. Hook commands and permissions already reference `ib` correctly.
 
 ---
 
 ### Phase 23: Native Hooks Management -- COMPLETE
-**Checkpoint:** The TUI setup dialog manages hooks natively without shelling to `ib hooks`. The `ib` startup guard is removed.
-
-**23a: Native hooks management functions (items 6–11 from audit)**
-
-All functions implemented natively in `src/ib-commands.ts`, reading/writing `~/.claude/settings.json` (global):
-
-- [x] **`hooksStatus(repoPath)`** — checks for main-path, status, session-start hooks. Returns `"installed"`, `"partial"`, or `"not-installed"`.
-- [x] **`interceptHooksStatus(repoPath)`** — checks for intercept-task hook. Returns `"installed"` or `"not-installed"`.
-- [x] **`installSafetyHooks(repoPath)`** — reads settings JSON, adds missing hooks, writes back.
-- [x] **`uninstallSafetyHooks(repoPath)`** — removes all ib/itsybitsy hook entries.
-- [x] **`installInterceptHook(repoPath)`** — adds `intercept-task` PreToolUse entry.
-- [x] **`uninstallInterceptHook(repoPath)`** — removes `intercept-task` PreToolUse entry.
-
-**23b: Remove startup guard (item 26 from audit)**
-
-- [x] Remove `Bun.which("ib")` check — itsybitsy works without bash ib on PATH
-- [x] Keep the `Bun.which("tmux")` check — tmux is still required
-
-**Tests:**
-- [x] `hooksStatus()`: all installed, partial, none installed
-- [x] `installSafetyHooks()` / `uninstallSafetyHooks()`: adds/removes correct JSON entries, idempotent
-- [x] `installInterceptHook()` / `uninstallInterceptHook()`: adds/removes intercept-task entry
-- [x] Startup without ib on PATH succeeds
+Native hook management functions in `ib-commands.ts` reading/writing `~/.claude/settings.json`: `hooksStatus`, `interceptHooksStatus`, `installSafetyHooks`, `uninstallSafetyHooks`, `installInterceptHook`, `uninstallInterceptHook`. Removed `Bun.which("ib")` startup guard.
 
 ---
 
 ### Phase 24: Final Cleanup & Validation -- COMPLETE (superseded by Phase 26)
-**Checkpoint:** All runtime code uses `ib` as the binary name. Zero references to `runIb()`. All tests pass (956 tests, 0 failures).
-
-Phase 26a changed the binary name from `itsybitsy` to `ib`, which made most Phase 24 items moot — `Bun.spawn(["ib", ...])` for watchdog is correct since the binary IS named `ib`.
-
-**24a: Audit and remove all remaining `ib` references**
-
-- [x] Zero calls to `runIb()` exist anywhere
-- [x] `Bun.which("ib")` is not called anywhere
-- [x] Remaining `Bun.spawn(["ib", "watchdog"])` calls are correct (binary is named `ib`)
-
-**24b: Update documentation and comments**
-
-- [x] CLAUDE.md uses `ib [command]` for binary references
-- [x] Agent-facing text uses `ib` which is the correct binary name
-
-**24c: End-to-end validation**
-
-- [x] Full test suite: 956 tests pass, 0 failures
-- [x] Binary compiles and runs as `ib`
+Superseded by Phase 26a changing binary to `ib`. Zero `runIb()` references, all 956 tests passing, binary compiles correctly.
 
 ---
 
-### Parallelism Notes for Phases 18–24
-
-The following phases can run in parallel:
-- **Phase 18** (CLI wiring) and **Phase 19** (TUI wrappers) are independent — they touch different call sites
-- **Phase 20** (watchdog spawn) is independent of 18 and 19
-- **Phase 21** (hook implementations) is independent of 18, 19, 20 — it adds new CLI subcommands
-
-Sequential dependencies:
-- **Phase 22** depends on **Phase 21** (hooks must exist before settings reference them)
-- **Phase 23** depends on **Phase 19d** (runIb removal) but can start in parallel with Phase 22
-- **Phase 24** depends on all previous phases
-
-Recommended execution order:
-```
-Phase 18 ──┐
-Phase 19 ──┤
-Phase 20 ──┼── all in parallel
-Phase 21 ──┘
-               ↓
-Phase 22 ──┐
-Phase 23 ──┼── in parallel (22 depends on 21, 23 depends on 19d)
-               ↓
-Phase 24 ──── final validation (depends on all)
-```
-
----
-
-### Phase 26: Binary Distribution & Hook Wiring Fixes
-
-**Status:** Complete
-
-**Goal:** Make `ib` (the compiled bun binary) a complete drop-in replacement for the bash `ib` script. Discovered during initial binary testing that several hook subcommands were missing, making hooks non-functional in the binary.
-
-#### 26a: Compile to Binary (complete)
-- [x] `bun build --compile --minify --sourcemap index.ts --outfile ib` produces standalone binary
-- [x] Added `ib` and `index.js.map` to `.gitignore`
-- [x] Updated CLAUDE.md build instructions (outfile: `ib`, not `itsybitsy`)
-- [x] PATH set to project directory in `~/.bash_profile`
-
-#### 26b: Missing CLI Commands (complete)
-The following commands existed in `ib-commands.ts` but were NOT wired as CLI cases in `index.ts`:
-- [x] `ib hooks main-path` — PreToolUse path isolation hook (reads `IB_AGENT_ID` from env)
-- [x] `ib hooks inject-status [--full] [--if-changed] [--visible]` — status injection hook (reads `IB_AGENT_ID` from env)
-- [x] `ib hooks install` / `uninstall` / `status` — safety hook management
-- [x] `ib hooks intercept-install` / `intercept-uninstall` / `intercept-status` — intercept hook management
-- [x] `ib nuke <id>` — kill + archive agent
-- [x] `ib merge-check <id>` — check for merge conflicts
-- [x] `ib acknowledge` (rename from `ib ack` as primary)
-
-**Root cause of permission prompts:** When hooks fired `ib hooks main-path` against the bun binary, it exited 1 ("Unknown hooks subcommand"), causing Claude Code to fall back to prompting.
-
-**Key finding from bash ib audit:** `cmd_hooks_main_path` in bash ib does NOT use `IB_AGENT_ID` — it only blocks `cd` into `.ittybitty/agents/*/repo` paths. Our bun version is more comprehensive (full per-agent path isolation). For the `IB_AGENT_ID` undefined case (primary Claude session), bun version should exit 0 and allow default behavior.
-
-#### 26c: Global Hook Installation (complete)
-- [x] Change `installSafetyHooks`, `uninstallSafetyHooks`, `hooksStatus`, `installInterceptHook`, `uninstallInterceptHook`, `interceptHooksStatus` to write to `~/.claude/settings.json` instead of `<repoPath>/.claude/settings.local.json`
-- [x] Add optional `settingsPath` parameter for test overrides
-- [x] Hooks installed globally apply to all Claude sessions for the user
-
-#### 26d: Documentation & Messaging (complete)
-- [x] README.md: build/install section already present, uses `ib [command]` throughout
-- [x] CLAUDE.md: updated test count to 956/28, fixed settings.local.json → settings.json reference
-- [x] Dashboard terminal title and header changed from `itsybitsy` to `ib`
-
-#### 26e: Hook Detection Fixes (complete)
-- [x] `hooksStatus()` now requires `itsybitsy` prefix — `ib`-prefixed hooks no longer counted as installed
-- [x] Tests updated to reflect new behavior (ib-prefixed hooks → not-installed)
+### Phase 26: Binary Distribution & Hook Wiring Fixes -- COMPLETE
+Made `ib` binary a complete drop-in replacement for bash `ib`. Wired missing CLI commands (hooks main-path, inject-status, install/uninstall/status, nuke, merge-check, acknowledge). Moved hook installation from project-local to `~/.claude/settings.json` (global). Fixed hook detection to require `itsybitsy` prefix. Root cause of permission prompts was hooks exiting 1 on unrecognized subcommands.
 
 ---
 
 ### Phase 28: Watchdog Spawning Fixes -- COMPLETE
-
-**Goal:** Make watchdog behavior match the bash `ib` — every agent gets a watchdog, and the TUI has no watchdog logic.
-
-**Fixes (superseded by Phase 39d):**
-- [x] Remove `if (manager)` guard in `newAgent()` — all agents get a per-agent watchdog, PID saved to meta.json
-- [x] Add watchdog spawn to `resumeAgent()` — all agents get a per-agent watchdog, PID saved to meta.json
-- [x] Remove global watchdog loop and lock file management from `src/watchdog.ts`
-- [x] Remove `isWatchdogRunning()` and `[watchdog]` indicator from dashboard
-
-**Also noted (future):**
-- Auto-compact not wired into watchdog — `src/auto-compact.ts` exists but watchdog never calls it. Bash watchdog proactively sends `/compact` when context usage exceeds threshold.
+All agents get per-agent watchdogs (removed `if (manager)` guard). Watchdog spawn added to `resumeAgent()`. Global watchdog loop and dashboard indicator removed. (Superseded by Phase 39d for per-process architecture.)
 
 ---
 
 ### Phase 29: inject-status Flag Support -- COMPLETE
-
-**Status:** Complete. `hookInjectStatus()` in `src/hooks/inject-status.ts` supports `--full`, `--if-changed`, `--brief`, and `--visible` flags. `hookEventName` is read from stdin JSON.
-
-**Goal:** Achieve exact parity with bash `ib hooks inject-status`. The current implementation always outputs full status and ignores all flags. Bash `ib` has three modes controlled by flags, a hash-based change cache, a `systemMessage` for the status bar, and reads `hook_event_name` from stdin.
-
-**Background:**
-The hook is installed in two places in `~/.claude/settings.json`:
-- `UserPromptSubmit`: `ib hooks inject-status --full --visible` — every new message gets the full agent tree
-- `PostToolUse (Bash|Task)`: `ib hooks inject-status --if-changed --visible` — after each tool, only inject if state changed
-
-**Flags to implement:**
-
-`--full` (already default — just make it explicit):
-- Output the complete agent tree with states, ages, and prompt previews
-- Already implemented as the default behavior
-
-`--if-changed`:
-- Generate full content, hash it (SHA256), compare against cached hash in `/tmp/ib-status-hash-<repo-id>`
-- If unchanged → output nothing (exit 0)
-- If changed → update cache and output a **brief one-liner** (`"2 running, 1 waiting"`) not the full tree
-- This avoids flooding Claude's context with the full table after every Bash/Task tool use
-
-`--visible`:
-- Also emit a `systemMessage` field alongside `hookSpecificOutput`
-- This makes the summary appear in Claude Code's status bar (visible to the user)
-- Gated by both the `--visible` flag and a `hooks.statusVisible` config value (default: true)
-- Brief format: `[ib] 2 running, 1 waiting` in the system message
-
-**Also fix:**
-- Read `hook_event_name` from stdin JSON and use it as `hookEventName` in the output (currently hardcoded to `"UserPromptSubmit"`)
-
-**Tests to add:**
-- `--if-changed` with hash cache: first call outputs, second call (same state) outputs nothing, third call after state change outputs brief
-- `--visible` adds `systemMessage` field
-- `hookEventName` is read from stdin not hardcoded
+`hookInjectStatus()` supports `--full`, `--if-changed`, `--brief`, and `--visible` flags with SHA256 hash-based change detection cache. `--if-changed` outputs brief one-liner on state change, nothing if unchanged. `--visible` emits `systemMessage` for status bar. `hookEventName` read from stdin JSON.
 
 ---
 
-### Phase 31: Parity Fixes — Hooks & Agent Status
-
-**Status:** Complete.
-
-**Source:** PARITY_HOOKS_TUI.md, PARITY_LIFECYCLE.md
-
-**Goal:** Fix behavioral divergences between bash `ib` and TypeScript `ib` in hooks and agent lifecycle. These are bugs or missing logic that can cause agents to get stuck or behave differently than expected.
-
-**Complexity:** Medium — mostly localized changes in hook files.
-
-#### 31a: Delayed nudge recheck in stop hook (must-fix)
-
-**File:** `src/hooks/agent-status.ts`
-
-Bash schedules `( sleep 5 && ib hooks agent-status )` when debouncing nudges, ensuring a follow-up check even if no further tool calls occur. TS lacks this — debounced agents could get stuck without follow-up.
-
-- [x] After writing the nudge debounce timestamp, schedule a delayed recheck using `Bun.spawn` to run a background `ib hooks agent-status` after 5s — **note:** `setTimeout` won't work here because `agent-status.ts` is a CLI entry point that exits after outputting the state; only a detached background process survives. *(Implemented at agent-status.ts:383-409 — uses `nudge-recheck` marker file to prevent duplicates, spawns detached `bash -c "sleep 5 && rm -f <recheck> && ib hooks agent-status <id>"`.)*
-- [x] Test: verify a second check fires ~5s after a debounced nudge
-
-#### 31b: Stop hook tmux send-keys timing (must-fix)
-
-**File:** `src/hooks/agent-status.ts:422-433,440-451`
-
-Bash sends message then waits 0.1s before Enter. TS sends message+Enter in one call with no `-l` flag, which has two problems: (1) tmux interprets special characters (`$`, `!`, etc.) as key bindings instead of literal text when `-l` is omitted, and (2) long messages may not be fully received before Enter is pressed when combined in one call.
-
-- [x] Add `-l` (literal) flag to the `send-keys` call so tmux treats the message as literal text *(Done — both nudge and manager notification paths use `-l`.)*
-- [x] Split into two `send-keys` calls: first the message with `-l`, then a separate Enter after a short delay *(Done — 100ms `Bun.sleep` between message and Enter.)*
-- [x] Match the pattern already used in `sendMessage()` in `ib-commands.ts:1058`
-
-#### 31c: Complete + unfinished children message (should-fix)
-
-**File:** `src/hooks/agent-status.ts:206-212`
-
-TS sends a shorter message than bash when an agent completes but has unfinished children. Bash includes specific command suggestions (`ib merge`, `ib kill`, `ib list`, `ib look`, `ib status`, `ib diff`).
-
-- [x] Match bash message format — include command suggestions for the manager *(Done — message includes `ib merge`, `ib kill`, `ib list`, `ib look`, `ib status`, `ib diff`.)*
-
-#### 31d: Nudge message formatting (should-fix)
-
-**File:** `src/hooks/agent-status.ts:273`
-
-Bash: `'WAITING'` and `'I HAVE COMPLETED THE GOAL'` (with quotes). TS omits the quotes. This is more than cosmetic — `parse_state` in bash strips quoted occurrences of `'I HAVE COMPLETED THE GOAL'` before checking for the completion signal, specifically to prevent the nudge message text itself from being mistakenly detected as a completion signal in tmux output. Without the quotes in TS, the nudge prompt could trigger a false positive completion detection.
-
-- [x] Add single-quotes around the phrases in the nudge message to match bash and prevent false completion detection in parse_state *(Done — message reads `'WAITING' or 'I HAVE COMPLETED THE GOAL'` with single quotes.)*
-
-#### 31e: main-path comment stripping (should-fix)
-
-**File:** `src/hooks/main-path.ts:58-62`
-
-Bash strips `#` comments from compound `cd` commands. TS regex doesn't handle this.
-
-- [x] Add `#` to the compound command stripping regex *(Done — separate comment-stripping regex at lines 59-62.)*
-- [x] Test: `cd /foo # some comment` should extract `/foo` *(Test exists at main-path.test.ts:198-207.)*
-
-#### 31f: inject-status question counts (should-fix)
-
-**File:** `src/hooks/inject-status.ts:94,127-152,281-282`
-
-Bash includes pending question count in the brief status summary. TS doesn't.
-
-- [x] Read `user-questions.json` for each repo and include count in brief summary (e.g., `"2 running, 1 waiting, 1 question"`) *(Done — `countPendingQuestions()` reads questions, `briefSummary()` accepts `questionCount` param, CLI wires them together.)*
-- [x] Filter out questions from dead/archived agents (match bash behavior) *(Done — filters by active agent IDs at line 143.)*
-
-#### 31g: Debug file content in stop hook (nice-to-have)
-
-**File:** `src/hooks/agent-status.ts:103-122`, `src/watchdog.ts:255-299`
-
-Bash saves tmux capture output + `last_assistant_message` + parse_state reason in debug files. TS only saves `lastMessage`.
-
-- [x] Include tmux capture output and parse_state reason in debug file content *(Done — debug file includes tmux output, parse-state reason, and last_assistant_message at agent-status.ts:103-122.)*
-- [x] Also add debug log saving on `unknown` state in watchdog (bash does this, TS doesn't — see `src/watchdog.ts`) *(Done — `saveUnknownDebugLog()` at watchdog.ts:281-299 saves tmux output on transition to unknown.)*
+### Phase 31: Parity Fixes — Hooks & Agent Status -- COMPLETE
+Fixed hook divergences: delayed nudge recheck via detached `Bun.spawn`, tmux send-keys `-l` flag and split Enter, complete+unfinished children message with command suggestions, quoted `'WAITING'`/`'I HAVE COMPLETED THE GOAL'` in nudge messages, main-path comment stripping, inject-status question counts, and debug file content matching bash format.
 
 ---
 
@@ -1243,26 +582,8 @@ Bash writes hooks to `.claude/settings.local.json` (project-local). TS writes to
 
 ---
 
-### Phase 33: Parity Fixes — TUI Watch Features
-
-**Status:** Complete.
-
-**Source:** PARITY_HOOKS_TUI.md (section 3)
-
-**Goal:** Add missing TUI features to match bash `ib watch`.
-
-**Complexity:** Medium.
-
-**Note:** 33a and 33b were removed after code review confirmed they are already implemented. All five keybindings (`t`, `w`, `o`, `c`, `Enter`) exist in `dashboard.ts`. Usage tracking is fully implemented via `src/usage.ts` with status bar display and polling timer. 33a (below) was also confirmed implemented during audit.
-
-#### 33a: Settings/permissions editor (nice-to-have)
-
-**File:** `src/tui/dashboard.ts`, `src/tui/dialog-handler.ts`, `src/tui/agent-actions.ts`
-
-Bash has a full settings editor including a permissions allow/deny list editor. The TS setup dialog has three tabs ("Setup", "Project", "User") implemented in `dialog-handler.ts`, and tabs 1 and 2 show and support editing config values via `buildConfigTabContent`/`handleSetupConfigTab`. The permissions editor is fully implemented as a dedicated `permissions-editor` dialog type with Allow/Deny tab switching, add/delete/navigate items, input mode, and save callback. Tests in `setup-dialog.test.ts` (lines 497–765). Note: SPEC.md does not describe a TUI permissions editor — the permissions section (§2.2) covers only `settings.local.json` generation, not a TUI editing UI. This is an implementation-only feature with no spec coverage.
-
-- [x] Add permissions editor (allow/deny tool lists) to the setup dialog
-- [x] Add number/string input dialogs for config values if not already present
+### Phase 33: Parity Fixes — TUI Watch Features -- COMPLETE
+Permissions editor with Allow/Deny tab switching in setup dialog. All other items (keybindings, usage tracking) confirmed already implemented during audit.
 
 ---
 
@@ -1357,52 +678,7 @@ Both occurrences now use `bun -e` one-liners that properly parse, modify, and re
 ---
 
 ### Phase 35: Test Coverage Improvements -- COMPLETE
-
-**Status:** Complete.
-
-**Source:** CODE_REVIEW.md (M5, M6, I1)
-
-**Goal:** Add tests for untested modules and improve test infrastructure.
-
-**Complexity:** Medium-High — several modules need test scaffolding.
-
-#### 35a: CLI entrypoint tests (high priority)
-
-**File:** `src/index.ts`
-
-- [x] Extract CLI logic into testable functions — `collectAgents()`, `findManagerInTree()`, and `matchAgentById()` are exported from `src/index.ts` and tested in `src/index.test.ts`
-- [x] Add integration tests for CLI commands — `src/index.test.ts` has subprocess-based tests for `list`, `look`, `send`, `kill`, `merge`, `resume`, `new-agent`, `hook-check-path`, `hook-status`, `hook-permission-denied`, `hooks`, `acknowledge` (`ack`), and `questions` (`q`). Also verifies no-command and unknown-command show help.
-- [x] Verify arg parsing for all commands — arg parsing verified via subprocess tests (e.g., `--force` stripping, missing-agent-id usage errors)
-- [x] Duplicate `merge-check` case verified — test asserts exactly one `case "merge-check":` in source
-
-#### 35b: TUI module tests (medium priority)
-
-**Files:** `src/tui/agent-actions.ts`, `src/tui/pane-manager.ts`, `src/tui/dialog-handler.ts`
-
-- [x] `agent-actions.test.ts` — tests kill, nuke, nukeAll, resume, pause, send, newAgent, scrollUp/Down, help, resizeLeft action handlers (411 lines)
-- [x] `pane-manager.test.ts` — tests pane mode cycling, jumpToMode, triggerAsyncLoadIfNeeded, RightPaneComponent rendering, colorizeDiff, colorizeLog (273 lines)
-- [x] `dialog-handler.test.ts` — tests all dialog types (help, confirm, input, select, fuzzy, textarea), state transitions, escape handling, fuzzyFilterIndices, wrapTextareaLines, deleteWord, handleTextEdit (372 lines)
-
-#### 35c: Test infrastructure improvements (low priority)
-
-**Files:** Various test files
-
-- [x] Extend `test-utils.ts` with typed helpers — added `setAgentState()`, `makeSpawnResult()`, and `mockFetch()` helpers alongside existing `makeAgent()`, `makeFlatAgent()`, `makeFlatRepoHeader()`
-- [x] Adopt the extended helpers — `setAgentState` used in dashboard.test.ts, `makeSpawnResult` used in ib-commands.test.ts and dashboard.test.ts, `mockFetch` used in usage.test.ts. `as any` count reduced from 81 to 74 across 9 test files (was 7 files, now 9 due to new test files). Remaining `as any` casts are mostly in dialog-handler.test.ts (20) for dialog field access, dashboard.test.ts (16) for state narrowing, and watcher.test.ts (14) for mock dependencies — further reduction would require deeper type refactoring.
-
-#### 35d: Validate `readAgentMeta` more thoroughly (medium priority)
-
-**File:** `src/agents.ts:83-110` (`readAgentMeta` function)
-
-- [x] Add type guards for all required `AgentMeta` fields — `readAgentMeta` now validates and applies defaults for all fields: `id` (required string), `session_id`, `tmux_session`, `prompt`, `created` (string defaults), `manager` (nullable string), `created_epoch` (number default 0), `worktree`, `worker`, `yolo` (boolean defaults), `model` (string default "unknown"), `claude_pid` (string default ""), `summary` (optional, deleted if wrong type)
-- [x] Test: pass meta.json with wrong-typed fields, verify graceful handling — `agents.test.ts` has dedicated `readAgentMeta` tests including "wrong-typed fields gets defaults applied" test case
-
-#### 35e: Config type validation (low priority)
-
-**File:** `src/config.ts:59-70` (`validateConfigValue` function)
-
-- [x] Add runtime type validation — `validateConfigValue()` validates number (rejects NaN), boolean, string, and string[] types. `readConfig()` calls it for each config key and falls back to default on validation failure.
-- [x] Test: pass wrong-typed config values, verify they're rejected or fall back to defaults — `config.test.ts` has comprehensive tests: `validateConfigValue` unit tests for all 4 types, plus integration tests for wrong-typed values (`maxAgents: "ten"`, `model: 123`, `createPullRequests: "yes"`, `permissions.manager.allow: "string"`) all falling back to defaults. Also tests wrong-typed project value falling through to valid user value.
+CLI entrypoint tests (subprocess-based integration tests for all commands), TUI module tests (`agent-actions`, `pane-manager`, `dialog-handler`), test infrastructure improvements (`setAgentState`, `makeSpawnResult`, `mockFetch` helpers), thorough `readAgentMeta` validation with type guards and defaults, and `validateConfigValue` runtime type validation with fallback to defaults.
 
 ---
 
@@ -1448,115 +724,12 @@ Bash watchdog saves tmux output to `debug-logs/watchdog-<timestamp>-unknown.txt`
 ---
 
 ### Phase 37: State Detection & Watchdog Parity Fixes -- COMPLETE
-
-**Source:** SPEC.md callouts #1 and #4 (bash/TS divergences to be resolved).
-
-**Goal:** Align TS state detection and watchdog behavior with bash reference implementation. After each fix, update SPEC.md to remove the `[^callout]` and replace with accurate description.
-
-**Complexity:** Low.
-
-#### 37a: Grace period for `creating` state on missing tmux session
-
-**File:** `src/agents.ts`
-
-- [x] Added `isRecentlyCreated()` helper and `CREATING_GRACE_PERIOD_MS` constant (6s)
-- [x] `detectAgentStates()` now checks `created_epoch` when tmux output is null — returns `creating` if within grace period
-- [x] Tests for boundary conditions (recent, old, exactly 6s, zero, NaN)
-- [x] Updated SPEC.md §1.3 step 2 to remove `[^callout]`, describe aligned behavior
-
-#### 37b: Auto-spawn watchdog on resume; watchdog exits when tmux disappears
-
-**File:** `src/ib-commands.ts` (`resumeAgent`)
-
-1. **Resume watchdog spawn**: `resumeAgent()` already spawned watchdog; added manager check so only agents with a manager get a watchdog (top-level agents have a human watching).
-   - [x] Added `agent.meta.manager` guard around watchdog spawn
-   - [x] Updated SPEC.md §1.6 step 7 to remove `[^callout]`, describe aligned behavior
-
-2. **Watchdog tmux exit**: Not applicable for TS architecture. The TS watchdog is a global loop that monitors all agents; stale per-agent trackers are pruned automatically. The bash watchdog is per-agent and exits on worktree removal. SPEC.md §8.5 already documents this architectural difference accurately.
+Added `isRecentlyCreated()` helper with 6s grace period for `creating` state on missing tmux. Resume watchdog spawn guarded by manager check. SPEC.md callouts #1 and #4 resolved.
 
 ---
 
-### Phase 38: Message Passing & Question Parity Fixes
-
-**Status:** Complete.
-
-**Source:** SPEC.md callouts #8, #11, #12, #13, #14 (bash/TS divergences to be resolved).
-
-**Goal:** Align TS message passing, `ib ask`, and question acknowledgement behavior with bash. After each fix, update SPEC.md to remove the `[^callout]` and replace with accurate description (or remove it entirely if the behavior is now identical).
-
-**Complexity:** Low.
-
-#### 38a: Unfinished children check uses tmux state (not dir existence)
-
-**File:** `src/hooks/agent-status.ts` (stop hook unfinished-children check)
-
-**SPEC.md:** §2.4, line ~215
-
-Bash determines "unfinished" children by checking their actual tmux state — only `creating`, `running`, `waiting`, or `complete` count as unfinished. `stopped` and `unknown` are excluded. TS currently checks only that the child agent directory exists and `meta.archived` is not true, which incorrectly flags stopped/unknown agents as unfinished.
-
-- [x] In the stop hook's children check, call `detectAgentStates()` (or equivalent) to get tmux state for each child — `findUnfinishedChildren()` uses `captureTmuxOutput()` + `parseState()` per child
-- [x] Only treat children with state `creating | running | waiting | complete` as unfinished — skip `stopped` and `unknown` — `UNFINISHED_STATES` set at `agent-status.ts:290`
-- [x] Add tests for the boundary: stopped child → not flagged, running child → flagged — tests in `agent-status.test.ts:541+`
-- [x] Update SPEC.md §2.4 to remove `[^callout]`, describe both bash and TS as using tmux state — done
-
-#### 38b: `ib send` accepts stdin when no positional message given
-
-**File:** `src/ib-commands.ts` (`sendMessage`) and CLI argument parsing
-
-**SPEC.md:** §4.1 item 8, line ~298
-
-Bash supports `echo "msg" | ib send <id>` and `ib send <id> < file.txt`. TS requires the message as a positional CLI argument and errors if none is provided.
-
-- [x] In the CLI `send` command handler, if no positional message argument is given, attempt to read from `process.stdin` — `index.ts:492-500` checks `process.stdin.isTTY`
-- [x] If stdin is a TTY (interactive), keep the current error behavior (message is required)
-- [x] If stdin is a pipe/file, read all bytes and use as the message
-- [x] Add tests covering stdin input — stdin piping tested via CLI integration
-- [x] Update SPEC.md §4.1 item 8 to remove `[^callout]` — §4.1 now documents both bash and TS supporting stdin
-
-#### 38c: Add `ib ask` command to TS CLI
-
-**File:** `src/ib-commands.ts`, CLI entry point
-
-**SPEC.md:** §4.2, line ~302
-
-`ib ask` is bash-only today. When itsybitsy's `ib` binary replaces the bash `ib` on `$PATH`, agents will call the TS `ib ask`. It must be implemented.
-
-Behavior (per SPEC.md §4.2):
-1. Auto-detect agent ID from CWD (`/.ittybitty/agents/<id>/repo`), or accept `--id <agent-id>`
-2. Top-level check: only agents with no manager (or whose manager is merged/killed) may ask; others get "use `ib send` to communicate with your manager"
-3. Config check: `allowAgentQuestions` must be `true`
-4. Clean up stale questions (agents whose directories no longer exist)
-5. Append new question to `.ittybitty/user-questions.json` with ID format `q-<unix-epoch>-<6-char-hash>` (hash = first 6 hex chars of MD5 of `"<agentId>-<question>\n"`)
-6. Log question to asking agent's `agent.log`
-
-- [x] Implement `askQuestion(agentId, question)` in `src/ib-commands.ts` — line 2109
-- [x] Add `ask` subcommand to CLI — `index.ts:662`
-- [x] Add tests — `ib-commands.test.ts:2831+`
-- [x] Update SPEC.md §4.2 to remove `[^callout]` — §4.2 now documents both bash and TS
-
-#### 38d: Remove redundant `acknowledged: true` field from TS
-
-**File:** `src/ib-commands.ts` (`acknowledgeQuestion`)
-
-**SPEC.md:** §4.3 callout, line ~336
-
-TS sets `acknowledged: true` in addition to `status: "acknowledged"` and `acknowledged_at`. This is redundant — callers can check `acknowledged_at != null` or `status === "acknowledged"`. Bash only sets `status` and `acknowledged_at`.
-
-- [x] Remove the `acknowledged: true` field from `acknowledgeQuestion` — only sets `acknowledged_at` and `status` (line 2222-2223)
-- [x] Remove it from any TypeScript types/interfaces that declare it — no type declares `acknowledged: boolean`
-- [x] Verify no code reads `question.acknowledged` — test at line 2798 explicitly asserts `acknowledged` is undefined
-- [x] Update SPEC.md §4.3 to remove the `[^callout]` — §4.3 structure omits the `acknowledged` boolean field
-
-#### 38e: `ib acknowledge` success output matches bash hint
-
-**File:** `src/ib-commands.ts` (`acknowledgeQuestion`)
-
-**SPEC.md:** §4.4, line ~342
-
-Bash prints: `"Question acknowledged. Use 'ib send <agent-id> \"answer\"' to respond."` TS returns a generic success message without the send hint.
-
-- [x] Update `acknowledgeQuestion` to return/print the same hint as bash — line 2227 returns matching hint
-- [x] Update SPEC.md §4.4 to remove the `[^callout]` for the hint — §4.4 now documents both as printing the hint
+### Phase 38: Message Passing & Question Parity Fixes -- COMPLETE
+Unfinished children check uses tmux state (not dir existence). `ib send` accepts stdin piping. `ib ask` command implemented with top-level check, config check, stale cleanup, and question ID hashing. Removed redundant `acknowledged: true` field. Acknowledge output matches bash hint. SPEC.md callouts #8, #11–14 resolved.
 
 ---
 
@@ -1695,165 +868,13 @@ Three divergences to fix:
 
 ---
 
-### Phase 41: Agent Prompt Summary Generation
-
-**Status:** Complete.
-
-**Source:** New itsybitsy feature — no bash equivalent.
-
-**Goal:** After agent creation, generate a short (~30-40 word) summary of the agent's prompt using `claude -p` with Haiku. Store in `meta.json` as `summary`. Display in TUI agent list instead of raw prompt.
-
-**Complexity:** Low.
-
-#### 41a: Generate summary on agent creation
-
-**Files:** `src/ib-commands.ts` (`newAgent`), `src/agents.ts` (Agent type)
-
-- [x] After the tmux session is started in `newAgent()`, fire a background process — do not await, do not block:
-  ```
-  claude -p "Summarize the following agent task in at most 30 words:\n\n{prompt}" --model claude-haiku-4-5-20251001
-  ```
-  Note: implementation uses "at most 30 words" instead of SPEC's "30-40 words" — intentionally tighter.
-- [x] On success: trim output, read `meta.json`, merge in `summary` field, write back
-- [x] On failure (non-zero exit, timeout, exception): silently skip — leave `summary` unset
-- [x] Add `summary?: string` to the `Agent` type in `src/agents.ts` and include it when reading `meta.json` in `readAllAgents()`
-- [x] Add tests using the existing mock spawn runner for the claude subprocess
-
-#### 41b: Display summary in TUI agent list
-
-**File:** `src/tui/agent-tree.ts` (agent list rendering)
-
-- [x] Where the agent prompt is currently shown in the agent list, use `agent.summary ?? agent.prompt` instead (in `agent-tree.ts:57`, not `dashboard.ts`)
-- [x] No other display changes needed
+### Phase 41: Agent Prompt Summary Generation -- COMPLETE
+Background `claude -p` with Haiku generates ~30-word summary on agent creation, stored as `summary` in meta.json. TUI agent list displays `summary ?? prompt`. Silently skips on failure.
 
 ---
 
-### Phase 42: Deterministic Agent State Tracking
-
-**Status:** Implemented.
-
-**Source:** User request. Addresses fragility of tmux-based state detection (14-priority pattern matching in `parse-state.ts`).
-
-**Goal:** Make agent state deterministic by having the stop hook write authoritative state to `meta.json`. Eliminate tmux output parsing as the primary state source. Keep minimal tmux parsing only for two transient display states (`compacting`, `rate_limited`) and for `stopped` detection (no tmux session).
-
-**Complexity:** Medium-High. Touches stop hook, watchdog, state detection, watcher, dashboard, ib-commands (send/resume), and meta.json schema.
-
-**Key design decisions:**
-- Only `running`, `waiting`, `complete` are written to meta.json
-- `creating` is derived from `created_epoch` (< 6s ago), never stored
-- `compacting` and `rate_limited` are detected from tmux at read time, never stored
-- `stopped` is detected from tmux session absence, never stored
-- `unknown` state is eliminated — the stop hook always writes a definite state
-- `state_updated_at` (epoch seconds) accompanies every state write for debugging
-- Atomic meta.json writes (temp file + rename) prevent partial reads
-
-#### 42a: Add `writeAgentState()` helper, tmux state helpers, and meta.json schema
-
-**Files:** `src/agents.ts`, `src/agents.test.ts`, `src/parse-state.ts`, `src/parse-state.test.ts`
-
-- [x] Add `state` and `state_updated_at` fields to `AgentMeta` type (both optional for backward compat with legacy agents)
-- [x] Implement `writeAgentState(agentDir: string, state: "running" | "waiting" | "complete"): Promise<void>` — reads meta.json, merges `state` + `state_updated_at`, writes atomically (write to `meta.json.tmp`, `rename()` over `meta.json`)
-- [x] Handle edge cases: meta.json doesn't exist (no-op), concurrent writes (last-writer-wins via atomic rename)
-- [x] Add `readAgentState(agentDir: string): Promise<string | undefined>` convenience helper
-- [x] Extract `isCompacting(tmuxOutput: string): boolean` from `parseState()` — checks "Compacting conversation" in last 5 lines
-- [x] Extract `isRateLimited(tmuxOutput: string): boolean` from `parseState()` — checks rate limit patterns in last 15 lines
-- [x] Extract `hasBackgroundTasks(tmuxOutput: string): boolean` from agent-status.ts — checks `⏵⏵.*·\s\d+\s` in last 15 lines
-- [x] These helpers are prerequisites for 42b, 42e, and 42f
-- [x] Tests: write state, read back; atomic write doesn't corrupt; missing meta.json is no-op; state field preserved across reads; helper functions match parseState patterns
-
-#### 42b: Stop hook writes state to meta.json
-
-**Files:** `src/hooks/agent-status.ts`, `src/hooks/agent-status.test.ts`
-
-- [x] After determining state from `last_assistant_message`, call `writeAgentState()`:
-  - `"WAITING"` → write `"waiting"`
-  - `"I HAVE COMPLETED THE GOAL"` → write `"complete"`
-  - Neither → write `"running"` (then nudge as before)
-- [x] Remove the tmux capture + `parseState()` fallback from `processStopHook()` for state detection — use `last_assistant_message` exclusively
-- [x] Keep the background task check: when state is `running`, check tmux for `⏵⏵` pattern via `hasBackgroundTasks()` (from 42a) and suppress nudge if active
-- [x] Keep the existing action logic (nudge, notify manager, remind commit, remind children) unchanged — only the state source changes
-- [x] Update debug capture to note "deterministic" state source instead of parse-state reason
-- [x] Tests: verify state is written to meta.json for each case; verify tmux is not captured for state detection
-
-#### 42c: `ib send` writes `state: "running"` to meta.json
-
-**Files:** `src/ib-commands.ts`, `src/ib-commands.test.ts`
-
-- [x] In `sendMessage()`, after successfully sending via tmux, call `writeAgentState(agentDir, "running")`
-- [x] The agent directory is derived from `agent.repoPath` + `.ittybitty/agents/` + `agent.id`
-- [x] Tests: verify meta.json state is set to "running" after send
-
-#### 42d: `ib resume` writes `state: "running"` to meta.json
-
-**Files:** `src/ib-commands.ts`, `src/ib-commands.test.ts`
-
-- [x] In `resumeAgent()`, after starting the new tmux session (step 4), call `writeAgentState(agentDir, "running")`
-- [x] Tests: verify meta.json state is set to "running" after resume
-
-#### 42e: New `detectAgentStates()` — read from meta.json with tmux overrides
-
-**Files:** `src/agents.ts`, `src/agents.test.ts`
-
-Replace the current `detectAgentStates()` (which captures tmux output and runs `parseState()` for every agent) with the new resolution order:
-
-- [x] Step 1: Archived agents → `stopped`
-- [x] Step 2: Check tmux session existence (use `captureTmuxOutput()`). If null:
-  - If `isRecentlyCreated(created_epoch)` → `creating`
-  - Else → `stopped`
-- [x] Step 3: If tmux exists, check for transient overrides (minimal tmux parsing):
-  - "Compacting conversation" in last 5 lines → `compacting`
-  - Rate limit patterns in last 15 lines → `rate_limited`
-- [x] Step 4: Read `state` from `agent.meta` (already loaded from meta.json). If present → use it. If absent (legacy/fresh agent, created > 6s ago) → `running`
-- [x] Remove `computeStateFromContent()` — no longer needed (the pre-parseState check for <10 lines)
-- [x] Remove full `parseState()` call from `detectAgentStates()` — only use the two targeted tmux checks
-- [x] Tests: verify each resolution step; verify legacy agents without `state` field work; verify compacting/rate_limited override meta.json state
-
-#### 42f: Watchdog reads state from meta.json
-
-**Files:** `src/watchdog.ts`, `src/watchdog.test.ts`
-
-- [x] In `runPerAgentWatchdog()`, replace the `parseState(output)` call with the same resolution order as 42e:
-  1. Check tmux (compacting/rate_limited overrides)
-  2. Read `state` from meta.json (already loaded in `meta`)
-  3. Fallback: `running` if no state field
-- [x] Remove the `unknown` state handler — no longer possible. Existing `handleUnknown` and `saveUnknownDebugLog` become dead code
-- [x] The rate limit handler still needs tmux to check if rate limit dialog was dismissed (the 3-attempt Enter retry loop checks tmux for `rate_limit_error` pattern after each Enter). Keep this minimal tmux parsing in the rate limit handler only
-- [x] Update `tick()` / `processAgents()` similarly — read state from agent.meta instead of parsing tmux
-- [x] Tests: verify watchdog uses meta.json state; verify no full parseState calls; verify rate limit bypass still checks tmux
-
-#### 42g: Update `findUnfinishedChildren()` to use meta.json state
-
-**Files:** `src/hooks/agent-status.ts`, `src/hooks/agent-status.test.ts`
-
-- [x] `findUnfinishedChildren()` currently captures tmux output and calls `parseState()` for each child to check if it's unfinished. Replace with: read `state` from child's meta.json + check tmux session existence
-- [x] Unfinished = meta.json state is `running`, `waiting`, or `complete`, AND tmux session exists (if no tmux session → stopped → not unfinished)
-- [x] `creating` (derived from created_epoch) also counts as unfinished
-- [x] Tests: verify children with state in meta.json are correctly classified
-
-#### 42h: Cleanup and migration
-
-**Files:** `src/parse-state.ts`, `src/agents.ts`, `CLAUDE.md`
-
-- [x] Keep `parseState()` intact but mark it as legacy with a JSDoc comment (still needed by bash ib reference)
-- [x] Remove `computeStateFromContent()` export (no longer used — creating state is derived from `created_epoch`)
-- [x] Update `CLAUDE.md` implementation notes to reflect new state detection flow
-- [x] Update README.md Architecture section to reflect deterministic state from meta.json
-- [x] Update PLAN.md state detection section in architecture overview
-- [x] Verify all existing tests pass or are updated to reflect new behavior
-
-**Migration path for existing agents:**
-- Agents created before this change will not have a `state` field in meta.json
-- `detectAgentStates()` treats missing `state` as `"running"` (if agent is older than 6s and tmux session exists)
-- The next stop hook fire will write a `state` field, bringing the agent into the new system
-- No explicit migration step needed — agents self-migrate on next idle event
-- **Paused agents** (no tmux session, not archived) are handled by resolution step 2 (no tmux → `stopped`) and never need a `state` field. On `ib resume`, step 42d writes `state: "running"`, bringing them into the new system
-
-**Edge cases and race conditions:**
-- **Stop hook fires twice quickly**: Last writer wins (atomic rename). Both writes are valid — the most recent state is correct.
-- **`ib send` races with stop hook**: If send comes after stop → agent IS running (received input) → send's `"running"` write is correct. If send comes before → stop hook fires later with the updated state → also correct. Last-writer-wins works in both cases.
-- **Agent paused between stop hook fire and meta.json write**: The hook process runs briefly (~ms). If the agent is killed/paused during this window, the state written is still valid (it was the last known state before kill). On resume, state is reset to `"running"`.
-- **Watchdog reads stale state**: The watchdog polls every 5s. Between polls, the stop hook may have updated state. This is acceptable — the watchdog will see the updated state on the next tick. The 5s latency matches current behavior.
-- **Rate limit detected by watchdog vs meta.json state**: The watchdog checks tmux for rate_limited on each tick (step 3 of resolution order). If meta.json says `"running"` but tmux shows rate_limited, the tmux override wins. This is correct — rate_limited is a transient condition visible only in the terminal.
+### Phase 42: Deterministic Agent State Tracking -- COMPLETE
+Stop hook writes authoritative state (`running`/`waiting`/`complete`) to meta.json with atomic writes (temp+rename). `ib send` and `ib resume` write `state: "running"`. `detectAgentStates()` reads from meta.json with tmux overrides for `compacting`/`rate_limited` only. `creating` derived from `created_epoch`, `stopped` from tmux absence. `unknown` state eliminated. `parseState()` retained as legacy. Legacy agents self-migrate on next idle event. Watchdog and `findUnfinishedChildren()` updated to use meta.json state.
 
 ---
 

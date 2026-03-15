@@ -11,12 +11,13 @@
 
 import { join } from "path";
 import { mkdirSync } from "fs";
-import { readRepoAgents, detectAgentStates } from "./agents";
+import { readRepoAgents, detectAgentStates, isCompacting, isRateLimited, readAgentState } from "./agents";
 import type { Agent } from "./agents";
 import { captureTmuxOutput } from "./tmux-poller";
 import { logAgent } from "./agent-lifecycle";
 import { parseState } from "./parse-state";
 import type { AgentState } from "./parse-state";
+import type { MetaState } from "./agents";
 import { sendMessage } from "./ib-commands";
 import { fetchUsage } from "./usage";
 import type { UsageResult } from "./usage";
@@ -586,6 +587,34 @@ export function resetPerAgentReadMeta(): void {
   };
 }
 
+/** Injectable readAgentState for per-agent watchdog testing */
+let readAgentStateFn: (agentDir: string) => Promise<MetaState | undefined> = readAgentState;
+
+/** Override readAgentState for testing */
+export function setPerAgentReadState(fn: typeof readAgentStateFn): void {
+  readAgentStateFn = fn;
+}
+
+/** Reset readAgentState to default */
+export function resetPerAgentReadState(): void {
+  readAgentStateFn = readAgentState;
+}
+
+/**
+ * Resolve agent state for the per-agent watchdog using deterministic meta.json state
+ * with tmux overrides for transient states.
+ * Resolution: compacting/rate_limited from tmux → meta.json state → fallback to running.
+ */
+function resolveWatchdogState(tmuxOutput: string, metaState: MetaState | undefined): AgentState {
+  // Step 1: transient tmux overrides
+  if (isCompacting(tmuxOutput)) return "compacting";
+  if (isRateLimited(tmuxOutput)) return "rate_limited";
+  // Step 2: meta.json state
+  if (metaState) return metaState;
+  // Step 3: fallback
+  return "running";
+}
+
 /**
  * Run a self-contained watchdog loop for a single agent.
  * Exits cleanly when:
@@ -641,23 +670,23 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
       // Tmux session exists — reset grace period
       tmuxGoneSince = null;
 
-      // Build an Agent object for state detection
-      // captureTmuxOutput already returns ANSI-stripped text
-      const result = parseState(output);
+      // Resolve state from meta.json with tmux overrides
+      const metaState = await readAgentStateFn(agentDir);
+      const resolvedState = resolveWatchdogState(output, metaState);
 
       const agent: Agent = {
         id: agentId,
         repoPath,
         repoName: "",
         meta,
-        state: result.state,
+        state: resolvedState,
         age: "",
         archived: false,
         children: [],
       };
 
       // Run state handler
-      const handler = stateHandlers.get(result.state);
+      const handler = stateHandlers.get(resolvedState);
       if (handler) {
         try {
           // For notifyManager, we need allAgents — but per-agent watchdog
@@ -668,15 +697,15 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
       }
 
       // Reset backoff for non-backoff states
-      if (!BACKOFF_STATES.has(result.state)) {
+      if (!BACKOFF_STATES.has(resolvedState)) {
         tracker.waitCounter = 0;
         tracker.notifyInterval = INITIAL_NOTIFY_TICKS;
       }
 
-      tracker.previousState = result.state;
+      tracker.previousState = resolvedState;
 
       // Auto-compact check
-      if (result.state === "running" || result.state === "waiting") {
+      if (resolvedState === "running" || resolvedState === "waiting") {
         const now = nowFn();
         if (now - tracker.lastCompactCheckMs >= COMPACT_CHECK_COOLDOWN_MS) {
           tracker.lastCompactCheckMs = now;

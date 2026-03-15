@@ -4,10 +4,13 @@
  */
 
 import { join } from "path";
-import { readdir } from "fs/promises";
+import { readdir, rename } from "fs/promises";
 import type { AgentState } from "./parse-state";
-import { parseState, STARTUP_MARKERS } from "./parse-state";
+import { parseState, stripAnsi, STARTUP_MARKERS } from "./parse-state";
 import { captureTmuxOutput, listTmuxSessions } from "./tmux-poller";
+
+/** States that can be written to meta.json */
+export type MetaState = "running" | "waiting" | "complete";
 
 export interface AgentMeta {
   id: string;
@@ -24,6 +27,8 @@ export interface AgentMeta {
   claude_pid: string;
   summary?: string;
   watchdog_pid?: number;
+  state?: MetaState;
+  state_updated_at?: number;
 }
 
 export interface Agent {
@@ -55,6 +60,85 @@ export function isRecentlyCreated(createdEpoch: number): boolean {
   if (!createdEpoch) return false;
   const ageMs = Date.now() - createdEpoch * 1000;
   return ageMs < CREATING_GRACE_PERIOD_MS;
+}
+
+/**
+ * Write agent state to meta.json atomically (write .tmp, rename over original).
+ * Only "running", "waiting", or "complete" are valid values.
+ * No-op if meta.json doesn't exist.
+ */
+export async function writeAgentState(agentDir: string, state: MetaState): Promise<void> {
+  const metaPath = join(agentDir, "meta.json");
+  const file = Bun.file(metaPath);
+  if (!(await file.exists())) return;
+
+  try {
+    const data = await file.json();
+    data.state = state;
+    data.state_updated_at = Math.floor(Date.now() / 1000);
+    const tmpPath = metaPath + ".tmp";
+    await Bun.write(tmpPath, JSON.stringify(data, null, 2));
+    await rename(tmpPath, metaPath);
+  } catch {
+    /* best-effort — don't crash on write failures */
+  }
+}
+
+/**
+ * Read agent state from meta.json.
+ * Returns the state string or undefined if not present.
+ */
+export async function readAgentState(agentDir: string): Promise<MetaState | undefined> {
+  const metaPath = join(agentDir, "meta.json");
+  try {
+    const file = Bun.file(metaPath);
+    if (!(await file.exists())) return undefined;
+    const data = await file.json();
+    return data.state;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Check if tmux output indicates context compaction in progress.
+ * Checks for "Compacting conversation" in last 5 lines.
+ */
+export function isCompacting(tmuxOutput: string): boolean {
+  const stripped = stripAnsi(tmuxOutput);
+  const lines = stripped.split("\n");
+  const last5 = lines.slice(-5).join("\n");
+  return last5.includes("Compacting conversation");
+}
+
+/**
+ * Check if tmux output indicates rate limiting.
+ * Checks for rate limit patterns in last 15 lines.
+ */
+export function isRateLimited(tmuxOutput: string): boolean {
+  const stripped = stripAnsi(tmuxOutput);
+  const lines = stripped.split("\n");
+  const last15 = lines.slice(-15).join("\n");
+
+  if (last15.includes("rate_limit_error")) return true;
+  const lower = last15.toLowerCase();
+  return (
+    lower.includes("usage limit reached") ||
+    lower.includes("limit will reset at") ||
+    lower.includes("hit your limit") ||
+    lower.includes("/upgrade to increase your usage limit")
+  );
+}
+
+/**
+ * Check if tmux output indicates background tasks are running.
+ * Checks for ⏵⏵ pattern in last 15 lines.
+ */
+export function hasBackgroundTasks(tmuxOutput: string): boolean {
+  const stripped = stripAnsi(tmuxOutput);
+  const lines = stripped.split("\n");
+  const last15 = lines.slice(-15).join("\n");
+  return /⏵⏵.*·\s\d+\s/.test(last15);
 }
 
 /** Get the worktree path for an agent, or the repo root if worktree is false. */
@@ -369,6 +453,7 @@ export async function readAllAgents(
  * Claude startup markers, the agent is still being created (tmux session exists
  * but Claude hasn't rendered yet).
  * Returns "creating" or null (null = fall through to parseState).
+ * @deprecated Legacy — retained for backward compatibility. Not used by detectAgentStates().
  */
 export function computeStateFromContent(stripped: string): AgentState | null {
   const nonEmptyLines = stripped.split("\n").filter((l) => l.trim() !== "").length;
@@ -379,40 +464,61 @@ export function computeStateFromContent(stripped: string): AgentState | null {
 }
 
 /**
- * Detect agent state for each agent by capturing tmux output and running parseState().
- * Archived agents are set to "stopped". Mutates agent.state in place.
+ * Detect agent state for each agent using deterministic meta.json state
+ * with tmux overrides for transient states. Mutates agent.state in place.
+ *
+ * Resolution order:
+ * 1. Archived agents → stopped
+ * 2. No tmux session → creating (if < 6s old) or stopped
+ * 3. Tmux exists → check for compacting/rate_limited overrides
+ * 4. Read state from meta.json → return stored value or default to running
  */
 export async function detectAgentStates(agents: Agent[]): Promise<void> {
-  const active = agents.filter((a) => !a.archived);
-
-  await Promise.all(
-    active.map(async (agent) => {
-      const tmuxSession = agent.meta.tmux_session;
-      if (!tmuxSession) {
-        agent.state = "unknown";
-        return;
-      }
-      const output = await captureTmuxOutput(tmuxSession);
-      if (output === null) {
-        // Grace period: if agent was created less than 6 seconds ago,
-        // return "creating" instead of "stopped" (matches bash get_state)
-        if (isRecentlyCreated(agent.meta.created_epoch)) {
-          agent.state = "creating";
-        } else {
-          agent.state = "stopped";
-        }
-        return;
-      }
-      const preCheck = computeStateFromContent(output);
-      agent.state = preCheck ?? parseState(output).state;
-    })
-  );
-
+  // Step 1: archived agents
   for (const agent of agents) {
     if (agent.archived) {
       agent.state = "stopped";
     }
   }
+
+  const active = agents.filter((a) => !a.archived);
+
+  await Promise.all(
+    active.map(async (agent) => {
+      const tmuxSession = agent.meta.tmux_session;
+
+      // Step 2: check tmux session existence
+      if (!tmuxSession) {
+        agent.state = isRecentlyCreated(agent.meta.created_epoch) ? "creating" : "stopped";
+        return;
+      }
+      const output = await captureTmuxOutput(tmuxSession);
+      if (output === null) {
+        agent.state = isRecentlyCreated(agent.meta.created_epoch) ? "creating" : "stopped";
+        return;
+      }
+
+      // Step 3: tmux exists — check transient overrides
+      if (isCompacting(output)) {
+        agent.state = "compacting";
+        return;
+      }
+      if (isRateLimited(output)) {
+        agent.state = "rate_limited";
+        return;
+      }
+
+      // Step 4: read state from meta.json
+      const metaState = agent.meta.state;
+      if (metaState) {
+        agent.state = metaState;
+        return;
+      }
+
+      // Legacy: no state field — derive from created_epoch
+      agent.state = isRecentlyCreated(agent.meta.created_epoch) ? "creating" : "running";
+    })
+  );
 }
 
 /**

@@ -1730,7 +1730,7 @@ Three divergences to fix:
 
 ### Phase 42: Deterministic Agent State Tracking
 
-**Status:** Design complete. Not yet implemented.
+**Status:** Implemented.
 
 **Source:** User request. Addresses fragility of tmux-based state detection (14-priority pattern matching in `parse-state.ts`).
 

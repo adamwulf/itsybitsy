@@ -65,6 +65,11 @@ function filterHookSpinners(text: string): string {
  * Parse agent state from tmux output text.
  * This is a direct port of ib's parse_state() bash function.
  *
+ * @deprecated Legacy — no longer used for primary state detection. State is now determined
+ * deterministically by the stop hook writing to meta.json (Phase 42). This function is retained
+ * for backward compatibility with the bash ib reference implementation and for the rate limit
+ * bypass retry loop in the watchdog (which checks tmux output after sending Enter).
+ *
  * Note: "stopped" state is NOT detected here — the caller must check
  * whether the tmux session exists before calling parseState.
  */

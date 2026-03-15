@@ -56,8 +56,10 @@ registry.ts        — Stores which repo paths to monitor (~/.itsybitsy/repos.js
   ↓
 agents.ts          — Reads .ittybitty/agents/{id}/meta.json directly from each repo
   ↓
-parse-state.ts     — Classifies agent state (running/waiting/complete/stopped/…)
-                     from tmux capture-pane output via pure string matching
+agents.ts          — State detection: reads deterministic state from meta.json
+                     with tmux overrides for compacting/rate_limited/stopped
+parse-state.ts     — Legacy tmux-based state classification (deprecated, retained
+                     for bash ib compatibility and watchdog rate limit bypass)
   ↓
 watcher.ts         — Drives updates: fs.watch on .ittybitty/agents/ for instant
                      detection, plus ~1s tmux polling for the selected agent

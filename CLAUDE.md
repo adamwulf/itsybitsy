@@ -180,7 +180,11 @@ Creating (workspace trust prompt, full input) > Compacting (last 5) > Active run
 - ANSI codes at wrap boundaries stay in the current chunk (no state carryover to next line)
 
 ### Dashboard (src/tui/dashboard.ts)
-- Agent tree: max 7 visible rows with scroll indicators
+- **Layout (Phase 45+):** Three-column layout: fixed 60-col sidebar (agent tree + info panel + coordinator) | resizable tmux pane | cycling right pane. See SPEC.md §11–13 for full specification.
+- **Focus system (Phase 46+):** Tab/Shift+Tab cycles focus between agent-tree, coordinator, active-agent. Input fields appear when coordinator/active-agent has focus. See SPEC.md §13.
+- **Coordinator (Phase 47+):** Auto-spawned `ib-coordinator` tmux session with `Bash(ib:*)` only permissions. See SPEC.md §12.
+- Agent tree: max 7 visible rows with scroll indicators; compact format in sidebar (icon + id + state + age)
+- Info panel: stoplight indicators (● Claude, ● Watchdog — PID liveness via `process.kill(pid, 0)`), model, summary/prompt
 - Right pane mode is global state — persists across agent selection changes
 - `a` opens new-agent dialog (infers repo from selected agent/header, fallback to first repo)
 - Agent actions: `x` kill, `!` nuke, `R` resume, `r` reassign, `m` merge, `s` send, `a` new-agent

@@ -302,9 +302,15 @@ export async function readAllQuestions(repoPath: string): Promise<PendingQuestio
   return readQuestionsInternal(repoPath, false);
 }
 
+/** Compare agents by created_epoch (chronological — oldest first) */
+function byCreatedEpoch(a: Agent, b: Agent): number {
+  return a.meta.created_epoch - b.meta.created_epoch;
+}
+
 /**
  * Build agent tree: set children arrays based on manager field.
  * Returns only root agents (those with no manager, or whose manager isn't in the list).
+ * Siblings at each level are sorted by created_epoch (oldest first).
  */
 export function buildAgentTree(agents: Agent[]): Agent[] {
   const byId = new Map<string, Agent>();
@@ -326,6 +332,15 @@ export function buildAgentTree(agents: Agent[]): Agent[] {
       roots.push(agent);
     }
   }
+
+  // Sort siblings at each level by creation date (oldest first)
+  roots.sort(byCreatedEpoch);
+  for (const agent of agents) {
+    if (agent.children.length > 1) {
+      agent.children.sort(byCreatedEpoch);
+    }
+  }
+
   return roots;
 }
 

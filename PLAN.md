@@ -401,8 +401,6 @@ Ghostty integration (`G` key), `bun build --compile` binary, README, and polishe
 
 ---
 
----
-
 ### Phase 7: ib watch Parity — P0 -- COMPLETE
 Fixed P0 parity gaps from deep `ib watch` analysis: tmux capture depth (500 lines), full-width pane modes, all-agent state polling (2s timer), Claude API usage display with color-coded footer, and flaky fs.watch test fix. Intentional deviation: `parseState()` checks active-running before tool-waiting (documented in `research/parity-check-logic.md`).
 

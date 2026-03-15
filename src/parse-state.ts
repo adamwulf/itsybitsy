@@ -196,5 +196,11 @@ export function parseState(input: string): ParseStateResult {
     return { state: "creating", reason: "hook fired before terminal rendered response (race condition)" };
   }
 
+  // Idle at input prompt — bare ❯ line (no text after it) with status bar visible
+  // This means the agent finished its work and is sitting at the prompt waiting for input
+  if (/(^|\n)❯\s*($|\n)/.test(last15) && last15.includes("⏵⏵")) {
+    return { state: "waiting", reason: "idle at input prompt" };
+  }
+
   return { state: "unknown", reason: "no patterns matched" };
 }

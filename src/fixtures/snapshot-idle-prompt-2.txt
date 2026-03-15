@@ -1,6 +1,3 @@
-State: unknown
-Reason: no patterns matched
-
 ╭─ Claude Code ────────────────────────────────────────────╮
 │                                                          │
 │                    Welcome back Adam!                    │

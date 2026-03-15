@@ -2172,13 +2172,15 @@ export async function statusAgent(agent: Agent): Promise<IbCommandResult> {
         if (fileStats.size > 0) {
           parts.push("");
           const files = [...fileStats.keys()].sort();
+          const maxFileLen = Math.max(...files.map(f => f.length));
           for (const file of files) {
             const nums = fileStats.get(file)!;
             const label = statusLabels.get(file) ?? "modified";
             const added = nums.added !== "-" && nums.added !== "0" ? `+${nums.added}` : "";
             const deleted = nums.deleted !== "-" && nums.deleted !== "0" ? `-${nums.deleted}` : "";
             const counts = [added, deleted].filter(Boolean).join("/");
-            parts.push(`  ${label.padEnd(8)} ${file}${counts ? ` (${counts})` : ""}`);
+            const paddedFile = counts ? file.padEnd(maxFileLen) : file;
+            parts.push(`  ${label.padEnd(8)} ${paddedFile}${counts ? ` (${counts})` : ""}`);
           }
         }
       }

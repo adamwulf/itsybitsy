@@ -2924,8 +2924,8 @@ describe("statusAgent (native)", () => {
     expect(result.stdout).toContain("first commit");
     expect(result.stdout).toContain("M src/file.ts");
     // Per-file details
-    expect(result.stdout).toContain("modified src/file.ts (+7/-3)");
-    expect(result.stdout).toContain("added    src/new.ts (+5)");
+    expect(result.stdout).toContain("modified src/file.ts    (+7/-3)");
+    expect(result.stdout).toContain("added    src/new.ts     (+5)");
     expect(result.stdout).toContain("renamed  src/renamed.ts (+1/-1)");
     expect(result.stdout).toContain("deleted  src/removed.ts (-8)");
     expect(result.stdout).toContain("added    src/image.png");

@@ -1747,15 +1747,19 @@ Three divergences to fix:
 - `state_updated_at` (epoch seconds) accompanies every state write for debugging
 - Atomic meta.json writes (temp file + rename) prevent partial reads
 
-#### 42a: Add `writeAgentState()` helper and meta.json schema
+#### 42a: Add `writeAgentState()` helper, tmux state helpers, and meta.json schema
 
-**Files:** `src/agents.ts`, `src/agents.test.ts`
+**Files:** `src/agents.ts`, `src/agents.test.ts`, `src/parse-state.ts`, `src/parse-state.test.ts`
 
 - [ ] Add `state` and `state_updated_at` fields to `AgentMeta` type (both optional for backward compat with legacy agents)
 - [ ] Implement `writeAgentState(agentDir: string, state: "running" | "waiting" | "complete"): Promise<void>` — reads meta.json, merges `state` + `state_updated_at`, writes atomically (write to `meta.json.tmp`, `rename()` over `meta.json`)
 - [ ] Handle edge cases: meta.json doesn't exist (no-op), concurrent writes (last-writer-wins via atomic rename)
 - [ ] Add `readAgentState(agentDir: string): Promise<string | undefined>` convenience helper
-- [ ] Tests: write state, read back; atomic write doesn't corrupt; missing meta.json is no-op; state field preserved across reads
+- [ ] Extract `isCompacting(tmuxOutput: string): boolean` from `parseState()` — checks "Compacting conversation" in last 5 lines
+- [ ] Extract `isRateLimited(tmuxOutput: string): boolean` from `parseState()` — checks rate limit patterns in last 15 lines
+- [ ] Extract `hasBackgroundTasks(tmuxOutput: string): boolean` from agent-status.ts — checks `⏵⏵.*·\s\d+\s` in last 15 lines
+- [ ] These helpers are prerequisites for 42b, 42e, and 42f
+- [ ] Tests: write state, read back; atomic write doesn't corrupt; missing meta.json is no-op; state field preserved across reads; helper functions match parseState patterns
 
 #### 42b: Stop hook writes state to meta.json
 
@@ -1765,7 +1769,8 @@ Three divergences to fix:
   - `"WAITING"` → write `"waiting"`
   - `"I HAVE COMPLETED THE GOAL"` → write `"complete"`
   - Neither → write `"running"` (then nudge as before)
-- [ ] Remove the tmux capture + `parseState()` fallback from `processStopHook()`. The stop hook no longer needs tmux for state detection — it uses `last_assistant_message` exclusively
+- [ ] Remove the tmux capture + `parseState()` fallback from `processStopHook()` for state detection — use `last_assistant_message` exclusively
+- [ ] Keep the background task check: when state is `running`, check tmux for `⏵⏵` pattern via `hasBackgroundTasks()` (from 42a) and suppress nudge if active
 - [ ] Keep the existing action logic (nudge, notify manager, remind commit, remind children) unchanged — only the state source changes
 - [ ] Update debug capture to note "deterministic" state source instead of parse-state reason
 - [ ] Tests: verify state is written to meta.json for each case; verify tmux is not captured for state detection
@@ -1829,10 +1834,10 @@ Replace the current `detectAgentStates()` (which captures tmux output and runs `
 
 **Files:** `src/parse-state.ts`, `src/agents.ts`, `CLAUDE.md`
 
-- [ ] Extract the compacting check (`"Compacting conversation"` in last 5 lines) and rate limit check (rate limit patterns in last 15 lines) into standalone helper functions in `parse-state.ts` (e.g., `isCompacting(tmuxOutput: string): boolean` and `isRateLimited(tmuxOutput: string): boolean`)
 - [ ] Keep `parseState()` intact but mark it as legacy with a JSDoc comment (still needed by bash ib reference)
-- [ ] Remove `computeStateFromContent()` export (no longer used)
+- [ ] Remove `computeStateFromContent()` export (no longer used — creating state is derived from `created_epoch`)
 - [ ] Update `CLAUDE.md` implementation notes to reflect new state detection flow
+- [ ] Update README.md Architecture section to reflect deterministic state from meta.json
 - [ ] Update PLAN.md state detection section in architecture overview
 - [ ] Verify all existing tests pass or are updated to reflect new behavior
 
@@ -1841,6 +1846,7 @@ Replace the current `detectAgentStates()` (which captures tmux output and runs `
 - `detectAgentStates()` treats missing `state` as `"running"` (if agent is older than 6s and tmux session exists)
 - The next stop hook fire will write a `state` field, bringing the agent into the new system
 - No explicit migration step needed — agents self-migrate on next idle event
+- **Paused agents** (no tmux session, not archived) are handled by resolution step 2 (no tmux → `stopped`) and never need a `state` field. On `ib resume`, step 42d writes `state: "running"`, bringing them into the new system
 
 **Edge cases and race conditions:**
 - **Stop hook fires twice quickly**: Last writer wins (atomic rename). Both writes are valid — the most recent state is correct.

@@ -987,3 +987,206 @@ Tab names are defined in `SETUP_TAB_NAMES = ['Hooks', 'Config']`. Switching betw
 ### 10.2 Permissions Editor
 
 Within the Config tab, a **permissions editor** sub-dialog allows editing the `permissions.manager.allow`, `permissions.manager.deny`, `permissions.worker.allow`, and `permissions.worker.deny` lists in `~/.itsybitsy/config.json`. Each list is editable independently. Changes take effect for newly created agents (existing agents' `settings.local.json` is not modified retroactively).
+
+---
+
+## 11. Sidebar Layout
+
+### 11.1 Layout Structure
+
+The `ib watch` TUI uses a three-column layout:
+
+```
+┌──────────────┬──────────────────┬──────────────────────┐
+│  LEFT SIDEBAR│  tmux pane       │  right pane (cycling) │
+│  (60 cols)   │  (resizable)     │  modes: log / prompt /│
+│              │                  │  denials / tree /     │
+│  Agent Tree  │                  │  errors / diff /      │
+│  (compact)   │                  │  status / questions   │
+│──────────────│                  │                       │
+│  Info Panel  │                  │                       │
+│  (selected   │                  │                       │
+│   agent)     │                  │                       │
+│──────────────│                  │                       │
+│  Coordinator │                  │                       │
+│  Claude      │                  │                       │
+│  (tmux out)  │                  │                       │
+│              │──────────────────│                       │
+│              │  > input field█  │                       │
+│              │──────────────────│                       │
+└──────────────┴──────────────────┴──────────────────────┘
+  status bar (2 lines)
+```
+
+The left sidebar is a fixed 60-column vertical stack containing three sections: agent tree (top), info panel (middle), and coordinator Claude panel (bottom). The main area to the right of the sidebar retains the existing split-pane layout: tmux output on the left and cycling right pane on the right.
+
+### 11.2 Left Sidebar
+
+The sidebar is exactly 60 columns wide. It is not resizable. A vertical separator (`│`) divides the sidebar from the main area.
+
+The sidebar renders three vertically stacked sections, separated by horizontal rules:
+
+1. **Agent Tree** — compact agent list (see §11.3)
+2. **Info Panel** — details for the selected agent (see §11.4)
+3. **Coordinator Claude** — system-wide coordinator session (see §12)
+
+The relative heights of these sections are determined as follows:
+- The agent tree occupies up to 7 rows (same as the current `MAX_TREE_HEIGHT`), with scroll indicators if more rows exist.
+- The coordinator panel occupies a configurable portion of the remaining space (initially ~40% of available sidebar height, minimum 5 rows).
+- The info panel fills the remaining vertical space between the tree and coordinator.
+
+### 11.3 Compact Agent Tree
+
+In the sidebar layout, the agent tree uses a compact row format to fit within 60 columns:
+
+```
+icon agent-id          state      age
+```
+
+Each row shows:
+- **Icon**: `◆` (manager) or `⚙` (worker), with `⚠` prefix if orphaned
+- **Agent ID**: e.g., `agent-a1b2c3d4`
+- **State**: color-coded, right-aligned
+- **Age**: e.g., `2h`, `3d`
+
+**Omitted from tree rows** (moved to info panel): model name and prompt/summary text. These are displayed in the info panel (§11.4) for the currently selected agent.
+
+Repo headers remain as-is: `▾ repo-name` or `▸ repo-name` (bold).
+
+### 11.4 Info Panel
+
+The info panel displays details for the currently selected item. It has no keyboard focus — it is read-only and not part of the focus cycle.
+
+**When an agent is selected**, the info panel shows:
+
+1. **Stoplight indicators** (one per line):
+   - `● Claude` — green if `claude_pid` from `meta.json` refers to a running process (check via `kill -0`), red otherwise
+   - `● Watchdog` — green if `watchdog_pid` from `meta.json` refers to a running process, red otherwise
+2. **Model**: The agent's model name (e.g., `opus`, `sonnet`)
+3. **Summary/Prompt**: The agent's summary (if available) or the first few lines of the prompt, wrapped to sidebar width
+
+**When a repo header is selected**, the info panel shows:
+
+1. **Repo path**
+2. **Agent count** and per-state breakdown (e.g., `running: 2, waiting: 1`)
+
+**Process liveness check**: To determine if a PID is alive, use `process.kill(pid, 0)` (signal 0 checks existence without sending a signal). Wrap in try/catch — throws if the process doesn't exist or the user doesn't have permission. Check on each render cycle (the info panel re-renders when the watcher fires or the selection changes).
+
+---
+
+## 12. Coordinator Claude Session
+
+### 12.1 Purpose
+
+The coordinator Claude is a system-wide Claude Code session that runs from `~/.itsybitsy/` with restricted permissions. Its sole purpose is to coordinate agents using `ib` commands — it cannot read files, write code, or perform research directly. The user interacts with it via an input field in the TUI.
+
+### 12.2 Lifecycle
+
+**Auto-spawn on startup**: When `ib watch` launches, it checks for an existing coordinator tmux session. If none exists, it spawns one:
+
+1. Create a tmux session named `ib-coordinator` with working directory `~/.itsybitsy/`
+2. Start Claude Code inside the session with model `opus`
+3. Permissions: only `Bash(ib:*)` — no Read, Write, Edit, Glob, Grep, or any other tools
+
+**Shared across instances**: Multiple `ib watch` instances share the same `ib-coordinator` tmux session. On startup, check if the session already exists (`tmux has-session -t ib-coordinator`). If it does, just display its output — do not create a new one.
+
+**Auto-close on exit**: When `ib watch` exits (Ctrl-C), kill the coordinator tmux session **only if** no other `ib watch` instances are displaying it. If other instances are running, leave the session alive. Detection: check if the tmux session has other attached clients.
+
+### 12.3 Permissions
+
+The coordinator's `settings.local.json` contains a minimal allow list:
+
+```json
+{
+  "permissions": {
+    "allow": ["Bash(ib:*)"],
+    "deny": ["Read", "Write", "Edit", "MultiEdit", "Glob", "Grep", "LS", "NotebookEdit", "WebFetch", "WebSearch", "Task", "Agent"]
+  }
+}
+```
+
+This ensures the coordinator can only run `ib` commands (e.g., `ib list`, `ib send`, `ib merge`, `ib new-agent`, `ib kill`, `ib status`, `ib diff`). It cannot access files, browse the web, or spawn sub-agents directly.
+
+### 12.4 Display
+
+The coordinator panel occupies the bottom section of the left sidebar. It renders:
+
+1. A section header: `──── Coordinator ────`
+2. Tmux output from the `ib-coordinator` session, wrapped to sidebar width
+3. When the coordinator panel has focus (see §13): an input field between separators at the bottom
+
+The coordinator panel uses its own `TmuxPoller` instance (separate from the agent tmux poller) to capture output from the `ib-coordinator` session at ~1s intervals.
+
+### 12.5 Session Start Context
+
+The coordinator session does NOT use the standard session-start hook (§6.3). Instead, it receives a custom initial prompt explaining its role:
+
+> You are the itsybitsy coordinator. You manage agents across all registered repos using `ib` commands. You can list agents (`ib list`), send messages (`ib send`), merge (`ib merge`), kill (`ib kill`), create agents (`ib new-agent`), and check status (`ib status`, `ib diff`). You do NOT have access to Read, Write, Edit, or any file tools — only `ib` Bash commands.
+
+---
+
+## 13. Focus System
+
+### 13.1 Focus Targets
+
+The TUI has three focusable panels:
+
+| Target | Location | Behavior when focused |
+|--------|----------|----------------------|
+| `agent-tree` | Sidebar top | `j`/`k` navigate agents, action keys active |
+| `coordinator` | Sidebar bottom | Input field visible, text input captured |
+| `active-agent` | Main area (tmux pane) | Input field visible, text input captured |
+
+The info panel (§11.4) is NOT focusable — it is read-only.
+
+### 13.2 Focus Cycling
+
+- **Tab**: Cycle focus forward through the focus targets in order: `agent-tree` → `coordinator` → `active-agent` → `agent-tree` → ...
+- **Shift+Tab**: Cycle focus backward.
+
+Tab replaces the previous tree/questions toggle behavior. When in QUESTIONS pane mode, Tab now cycles focus rather than toggling between the tree and the questions list.
+
+### 13.3 Focus Indicators
+
+Each panel shows a visual indicator of its focus state:
+
+- **Focused panel**: Section header/separator is highlighted (bold or colored)
+- **Unfocused panels**: Section header/separator is dim
+
+### 13.4 Input Field
+
+When the `coordinator` or `active-agent` panel has focus, an input field appears at the bottom of that panel's tmux output area:
+
+```
+│ ...tmux output...       │
+│─────────────────────────│
+│ > user input here█      │
+│─────────────────────────│
+```
+
+The input field:
+- Captures all alphanumeric and symbol key input while focused
+- Shows a cursor indicator (`█`)
+- **Enter**: Submits the input text. For agents, uses `ib send <agent-id> "<message>"`. For the coordinator, uses `tmux send-keys -t ib-coordinator -l "<message>"` followed by a separate `tmux send-keys -t ib-coordinator Enter`.
+- **Escape**: Clears the input field and returns focus to `agent-tree`
+- Supports basic line editing: backspace, Ctrl-A (home), Ctrl-E (end), Ctrl-U (clear line)
+
+The input field takes 3 lines of vertical space: top separator, input line, bottom separator. These lines are subtracted from the tmux output display height.
+
+### 13.5 Keyboard Routing
+
+When a panel with an input field has focus:
+- Printable characters, backspace, and line-editing keys go to the input field
+- Tab/Shift+Tab still cycle focus
+- Escape returns focus to `agent-tree`
+- All other dashboard keybindings (j/k, p/n, action keys like s/m/x) are **suppressed** — they do not pass through to the dashboard
+
+When `agent-tree` has focus:
+- All existing keybindings work as before (j/k navigation, p/n pane cycling, action keys, dialog triggers)
+- This is the default focus state on startup
+
+### 13.6 Default Focus
+
+On startup, focus is set to `agent-tree`. This ensures all existing keybindings work immediately without any behavioral change for users who don't use Tab.
+
+---

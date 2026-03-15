@@ -97,7 +97,7 @@ export function handleNuke(ctx: ActionCtx) {
     type: "confirm",
     prompt: `${RED}FORCE KILL ${agent.id}? This cannot be undone.${RESET}`,
     confirmLabel: "Nuke",
-    focusedButton: "confirm",
+    focusedButton: "cancel",
     onYes: () => {
       ctx.closeDialog();
       ctx.executeAndRefresh(async () => {
@@ -264,7 +264,7 @@ export function handleMerge(ctx: ActionCtx) {
       type: "confirm",
       prompt: `Merge ${agent.id}?\n${checkOutput}`,
       confirmLabel: "Merge",
-      focusedButton: "confirm",
+      focusedButton: "cancel",
       onYes: () => {
         ctx.closeDialog();
         ctx.executeAndRefresh(async () => {

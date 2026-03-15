@@ -505,7 +505,8 @@ describe("DashboardComponent dialog and action handlers", () => {
   test("nuke confirm: Enter on Nuke button executes native nuke", async () => {
     await setupDashboardWithAgent();
     dashboard.handleInput("!");
-    // focusedButton defaults to "confirm" (Nuke), press Enter
+    // focusedButton defaults to "cancel", Tab to Nuke, then press Enter
+    dashboard.handleInput("\t");
     dashboard.handleInput("\r");
     await Bun.sleep(10);
     // Dialog should be dismissed after native nuke executes

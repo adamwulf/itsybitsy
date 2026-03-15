@@ -2906,7 +2906,13 @@ describe("statusAgent (native)", () => {
         return makeSpawnResult(0, "M src/file.ts\n");
       }
       if (cmd.includes("diff") && cmd.includes("--stat")) {
-        return makeSpawnResult(0, " src/file.ts | 10 +++++++---\n 1 file changed, 7 insertions(+), 3 deletions(-)\n");
+        return makeSpawnResult(0, " src/file.ts | 10 +++++++---\n src/new.ts  |  5 +++++\n 2 files changed, 12 insertions(+), 3 deletions(-)\n");
+      }
+      if (cmd.includes("diff") && cmd.includes("--numstat")) {
+        return makeSpawnResult(0, "7\t3\tsrc/file.ts\n5\t0\tsrc/new.ts\n");
+      }
+      if (cmd.includes("diff") && cmd.includes("--name-status")) {
+        return makeSpawnResult(0, "M\tsrc/file.ts\nA\tsrc/new.ts\n");
       }
       return makeSpawnResult();
     });
@@ -2917,6 +2923,9 @@ describe("statusAgent (native)", () => {
     expect(result.ok).toBe(true);
     expect(result.stdout).toContain("first commit");
     expect(result.stdout).toContain("M src/file.ts");
+    // Per-file details
+    expect(result.stdout).toContain("modified src/file.ts (+7/-3)");
+    expect(result.stdout).toContain("added    src/new.ts (+5)");
   });
 
   test("fails when worktree not found", async () => {

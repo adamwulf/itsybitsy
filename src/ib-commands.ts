@@ -2126,6 +2126,48 @@ export async function statusAgent(agent: Agent): Promise<IbCommandResult> {
       if (summaryLine && !summaryLine.includes("0 files changed")) {
         parts.push("═══ Files Changed ═══");
         parts.push(`  ${summaryLine}`);
+
+        // Per-file details: get name-status for added/modified/deleted labels
+        const nameStatus = await diffStatusSpawnCtx.run(["git", "-C", worktreePath, "diff", "--numstat", "--diff-filter=ADMRTC", `${mb.stdout}..${agentBranch}`]);
+        const statusMap = new Map<string, { added: string; deleted: string }>();
+        if (nameStatus.stdout) {
+          for (const line of nameStatus.stdout.split("\n")) {
+            if (!line.trim()) continue;
+            // numstat format: <added>\t<deleted>\t<file>
+            const match = line.match(/^(\d+|-)\t(\d+|-)\t(.+)$/);
+            if (match) {
+              statusMap.set(match[3]!, { added: match[1]!, deleted: match[2]! });
+            }
+          }
+        }
+
+        const nameStatusResult = await diffStatusSpawnCtx.run(["git", "-C", worktreePath, "diff", "--name-status", `${mb.stdout}..${agentBranch}`]);
+        const statusLabels = new Map<string, string>();
+        if (nameStatusResult.stdout) {
+          for (const line of nameStatusResult.stdout.split("\n")) {
+            if (!line.trim()) continue;
+            const match = line.match(/^([ADMRTC])\d*\t(.+?)(?:\t.*)?$/);
+            if (match) {
+              const code = match[1];
+              const label = code === "A" ? "added" : code === "D" ? "deleted" : code === "R" ? "renamed" : code === "C" ? "copied" : "modified";
+              statusLabels.set(match[2]!, label);
+            }
+          }
+        }
+
+        if (statusMap.size > 0) {
+          parts.push("");
+          // Sort files alphabetically
+          const files = [...statusMap.keys()].sort();
+          for (const file of files) {
+            const nums = statusMap.get(file)!;
+            const label = statusLabels.get(file) ?? "modified";
+            const added = nums.added !== "-" && nums.added !== "0" ? `+${nums.added}` : "";
+            const deleted = nums.deleted !== "-" && nums.deleted !== "0" ? `-${nums.deleted}` : "";
+            const counts = [added, deleted].filter(Boolean).join("/");
+            parts.push(`  ${label.padEnd(8)} ${file}${counts ? ` (${counts})` : ""}`);
+          }
+        }
       }
     }
   }

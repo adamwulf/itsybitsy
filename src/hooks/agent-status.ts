@@ -161,7 +161,7 @@ export async function processStopHook(
     // Read meta.json manager field
     const meta = await readMeta(agentDir);
 
-    if (meta?.manager) {
+    if (meta?.manager && await isManagerActive(agentsDir, meta.manager)) {
       return {
         state,
         action: "notify_manager",
@@ -169,7 +169,7 @@ export async function processStopHook(
       };
     }
 
-    // No manager — check for unfinished children
+    // No manager (or manager is archived/missing) — check for unfinished children
     const unfinishedChildren = await findUnfinishedChildren(
       agentsDir,
       agentId,
@@ -191,7 +191,7 @@ export async function processStopHook(
   if (state === "waiting") {
     const meta = await readMeta(agentDir);
 
-    if (meta?.manager) {
+    if (meta?.manager && await isManagerActive(agentsDir, meta.manager)) {
       return {
         state,
         action: "notify_manager",
@@ -249,7 +249,7 @@ async function handleNudge(
 
 async function readMeta(
   agentDir: string,
-): Promise<{ manager?: string; tmux_session?: string } | null> {
+): Promise<{ manager?: string; tmux_session?: string; archived?: boolean } | null> {
   try {
     const metaPath = join(agentDir, "meta.json");
     const raw = await readFile(metaPath, "utf-8");
@@ -257,6 +257,18 @@ async function readMeta(
   } catch {
     return null;
   }
+}
+
+/**
+ * Check if a manager agent exists and is not archived.
+ * Returns false if the manager's directory doesn't exist, meta.json is missing/malformed,
+ * or the manager has been archived.
+ */
+async function isManagerActive(agentsDir: string, managerId: string): Promise<boolean> {
+  const managerMeta = await readMeta(join(agentsDir, managerId));
+  if (!managerMeta) return false;
+  if (managerMeta.archived) return false;
+  return true;
 }
 
 /** States stored in meta.json that count as "unfinished" */
@@ -460,6 +472,11 @@ export async function executeResultActions(
         return `invalid_manager_id`;
       }
       const managerMeta = await readMeta(join(agentsDir, managerId));
+      // Skip if manager is archived or missing
+      if (!managerMeta || managerMeta.archived) {
+        console.log(result.state);
+        return "ok";
+      }
       const managerSession = managerMeta?.tmux_session as string | undefined;
       if (managerSession) {
         if (!isValidTmuxSession(managerSession)) {

@@ -160,6 +160,10 @@ describe("manager notification", () => {
       tmux_session: "ib-test",
       manager: "manager-001",
     });
+    // Create manager directory with valid meta so it's considered active
+    const managerDir = join(ctx.agentsDir, "manager-001");
+    await mkdir(managerDir, { recursive: true });
+    await writeMeta(managerDir, { tmux_session: "ib-manager" });
     // Create repo dir with clean git status
     await mkdir(join(ctx.agentDir, "repo"), { recursive: true });
 
@@ -182,6 +186,10 @@ describe("manager notification", () => {
       tmux_session: "ib-test",
       manager: "manager-001",
     });
+    // Create manager directory with valid meta so it's considered active
+    const managerDir = join(ctx.agentsDir, "manager-001");
+    await mkdir(managerDir, { recursive: true });
+    await writeMeta(managerDir, { tmux_session: "ib-manager" });
 
     const result = await processStopHook(
       ctx.agentId,
@@ -192,6 +200,82 @@ describe("manager notification", () => {
     expect(result.state).toBe("waiting");
     expect(result.action).toBe("notify_manager");
     expect(result.message).toContain("waiting for input");
+  });
+
+  test("worker complete with archived manager → skips notify, returns none", async () => {
+    await writeMeta(ctx.agentDir, {
+      tmux_session: "ib-test",
+      manager: "manager-archived",
+    });
+    // Create manager directory with archived meta
+    const managerDir = join(ctx.agentsDir, "manager-archived");
+    await mkdir(managerDir, { recursive: true });
+    await writeMeta(managerDir, { tmux_session: "ib-manager", archived: true });
+    await mkdir(join(ctx.agentDir, "repo"), { recursive: true });
+
+    const result = await processStopHook(
+      ctx.agentId,
+      "done\nI HAVE COMPLETED THE GOAL",
+      ctx.agentDir,
+      ctx.agentsDir,
+      { checkGitStatus: async () => "" },
+    );
+    expect(result.state).toBe("complete");
+    expect(result.action).toBe("none");
+  });
+
+  test("worker complete with missing manager dir → skips notify, returns none", async () => {
+    await writeMeta(ctx.agentDir, {
+      tmux_session: "ib-test",
+      manager: "manager-gone",
+    });
+    // Don't create manager directory — it was removed after archiving
+    await mkdir(join(ctx.agentDir, "repo"), { recursive: true });
+
+    const result = await processStopHook(
+      ctx.agentId,
+      "done\nI HAVE COMPLETED THE GOAL",
+      ctx.agentDir,
+      ctx.agentsDir,
+      { checkGitStatus: async () => "" },
+    );
+    expect(result.state).toBe("complete");
+    expect(result.action).toBe("none");
+  });
+
+  test("worker waiting with archived manager → skips notify, returns none", async () => {
+    await writeMeta(ctx.agentDir, {
+      tmux_session: "ib-test",
+      manager: "manager-archived",
+    });
+    const managerDir = join(ctx.agentsDir, "manager-archived");
+    await mkdir(managerDir, { recursive: true });
+    await writeMeta(managerDir, { tmux_session: "ib-manager", archived: true });
+
+    const result = await processStopHook(
+      ctx.agentId,
+      "need input\nWAITING",
+      ctx.agentDir,
+      ctx.agentsDir,
+    );
+    expect(result.state).toBe("waiting");
+    expect(result.action).toBe("none");
+  });
+
+  test("worker waiting with missing manager dir → skips notify, returns none", async () => {
+    await writeMeta(ctx.agentDir, {
+      tmux_session: "ib-test",
+      manager: "manager-gone",
+    });
+
+    const result = await processStopHook(
+      ctx.agentId,
+      "need input\nWAITING",
+      ctx.agentDir,
+      ctx.agentsDir,
+    );
+    expect(result.state).toBe("waiting");
+    expect(result.action).toBe("none");
   });
 });
 

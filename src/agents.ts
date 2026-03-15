@@ -169,7 +169,7 @@ export async function readAgentMeta(agentDir: string): Promise<{ meta: AgentMeta
   try {
     const metaPath = join(agentDir, "meta.json");
     const file = Bun.file(metaPath);
-    if (!(await file.exists())) return { meta: null };
+    if (!(await file.exists())) return { meta: null, error: `Missing ${metaPath}` };
     const data = await file.json();
     // Basic validation: id is required
     if (!data || typeof data.id !== "string") {
@@ -322,10 +322,11 @@ export function buildAgentTree(agents: Agent[]): Agent[] {
 
   const roots: Agent[] = [];
   for (const agent of agents) {
-    if (agent.meta.manager && byId.has(agent.meta.manager)) {
-      byId.get(agent.meta.manager)!.children.push(agent);
+    const manager = agent.meta.manager ? byId.get(agent.meta.manager) : undefined;
+    if (manager && !manager.archived) {
+      manager.children.push(agent);
     } else {
-      // If manager is set but not found in the agent list, mark as orphaned
+      // If manager is set but not found or is archived, mark as orphaned
       if (agent.meta.manager) {
         agent.orphaned = true;
       }

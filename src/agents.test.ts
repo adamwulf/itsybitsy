@@ -143,6 +143,32 @@ describe("buildAgentTree", () => {
     buildAgentTree([manager, agent]);
     expect(agent.orphaned).toBe(false);
   });
+
+  test("agent with archived manager becomes orphaned root", () => {
+    const manager = makeAgent({ id: "mgr", archived: true });
+    const worker = makeAgent({ id: "w1" });
+    worker.meta.manager = "mgr";
+    const roots = buildAgentTree([manager, worker]);
+    // Worker should be a root (not nested under archived manager)
+    expect(roots).toContainEqual(expect.objectContaining({ id: "w1" }));
+    expect(worker.orphaned).toBe(true);
+    // Archived manager should also be a root
+    expect(roots).toContainEqual(expect.objectContaining({ id: "mgr" }));
+    // Manager should have no children
+    expect(manager.children.length).toBe(0);
+  });
+
+  test("active agent with archived manager is visible in flattened tree", () => {
+    const manager = makeAgent({ id: "mgr", archived: true });
+    const worker = makeAgent({ id: "w1" });
+    worker.meta.manager = "mgr";
+    const roots = buildAgentTree([manager, worker]);
+    const flat = flattenAgentTree(roots);
+    // Worker should appear (archived manager is filtered out)
+    const agentEntries = flat.filter((e) => e.kind === "agent");
+    expect(agentEntries.length).toBe(1);
+    expect((agentEntries[0] as any).agent.id).toBe("w1");
+  });
 });
 
 describe("flattenAgentTree", () => {
@@ -408,7 +434,8 @@ describe("readRepoAgents", () => {
 
     const { agents, errors } = await readRepoAgents(tempDir, "test-repo");
     expect(agents.length).toBe(0);
-    expect(errors.length).toBe(0);
+    expect(errors.length).toBe(1);
+    expect(errors[0]!.error).toContain("Missing");
   });
 });
 

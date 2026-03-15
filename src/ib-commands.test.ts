@@ -1714,7 +1714,7 @@ describe("mergeAgent (native)", () => {
     expect(checkoutCall).toContain("feature-branch");
   });
 
-  test("checkout and merge commands run in CWD, not via -C agent.repoPath", async () => {
+  test("checkout, merge, and status commands use -C agent.repoPath", async () => {
     const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
@@ -1728,26 +1728,26 @@ describe("mergeAgent (native)", () => {
     const agent = makeAgent("agent-abc", tempDir);
     await mergeAgent(agent);
 
-    // checkout must NOT have -C flag
+    // checkout must have -C flag with agent.repoPath
     const checkoutCall = spawnCalls.find((c) => c.includes("checkout") && c.includes("main"));
     expect(checkoutCall).toBeDefined();
-    expect(checkoutCall).not.toContain("-C");
+    expect(checkoutCall).toContain("-C");
+    expect(checkoutCall).toContain(tempDir);
 
-    // merge must NOT have -C flag
+    // merge must have -C flag with agent.repoPath
     const mergeCall = spawnCalls.find(
       (c) => c.includes("merge") && (c.includes("--ff-only") || c.includes("--no-ff"))
     );
     expect(mergeCall).toBeDefined();
-    expect(mergeCall).not.toContain("-C");
+    expect(mergeCall).toContain("-C");
+    expect(mergeCall).toContain(tempDir);
 
-    // CWD status check must NOT have -C flag
+    // status --porcelain must have -C flag with agent.repoPath
     const statusCalls = spawnCalls.filter(
       (c) => c.includes("status") && c.includes("--porcelain")
     );
-    // First status call is for worktree (has -C), second is for CWD (no -C)
-    const cwdStatusCall = statusCalls.find((c) => !c.some((a) => a.includes("/repo")));
-    expect(cwdStatusCall).toBeDefined();
-    expect(cwdStatusCall).not.toContain("-C");
+    const repoStatusCall = statusCalls.find((c) => c.includes("-C") && c.includes(tempDir));
+    expect(repoStatusCall).toBeDefined();
   });
 
   test("merges into manager branch when called from manager worktree", async () => {

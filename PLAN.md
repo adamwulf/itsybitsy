@@ -1751,44 +1751,44 @@ Three divergences to fix:
 
 **Files:** `src/agents.ts`, `src/agents.test.ts`, `src/parse-state.ts`, `src/parse-state.test.ts`
 
-- [ ] Add `state` and `state_updated_at` fields to `AgentMeta` type (both optional for backward compat with legacy agents)
-- [ ] Implement `writeAgentState(agentDir: string, state: "running" | "waiting" | "complete"): Promise<void>` — reads meta.json, merges `state` + `state_updated_at`, writes atomically (write to `meta.json.tmp`, `rename()` over `meta.json`)
-- [ ] Handle edge cases: meta.json doesn't exist (no-op), concurrent writes (last-writer-wins via atomic rename)
-- [ ] Add `readAgentState(agentDir: string): Promise<string | undefined>` convenience helper
-- [ ] Extract `isCompacting(tmuxOutput: string): boolean` from `parseState()` — checks "Compacting conversation" in last 5 lines
-- [ ] Extract `isRateLimited(tmuxOutput: string): boolean` from `parseState()` — checks rate limit patterns in last 15 lines
-- [ ] Extract `hasBackgroundTasks(tmuxOutput: string): boolean` from agent-status.ts — checks `⏵⏵.*·\s\d+\s` in last 15 lines
-- [ ] These helpers are prerequisites for 42b, 42e, and 42f
-- [ ] Tests: write state, read back; atomic write doesn't corrupt; missing meta.json is no-op; state field preserved across reads; helper functions match parseState patterns
+- [x] Add `state` and `state_updated_at` fields to `AgentMeta` type (both optional for backward compat with legacy agents)
+- [x] Implement `writeAgentState(agentDir: string, state: "running" | "waiting" | "complete"): Promise<void>` — reads meta.json, merges `state` + `state_updated_at`, writes atomically (write to `meta.json.tmp`, `rename()` over `meta.json`)
+- [x] Handle edge cases: meta.json doesn't exist (no-op), concurrent writes (last-writer-wins via atomic rename)
+- [x] Add `readAgentState(agentDir: string): Promise<string | undefined>` convenience helper
+- [x] Extract `isCompacting(tmuxOutput: string): boolean` from `parseState()` — checks "Compacting conversation" in last 5 lines
+- [x] Extract `isRateLimited(tmuxOutput: string): boolean` from `parseState()` — checks rate limit patterns in last 15 lines
+- [x] Extract `hasBackgroundTasks(tmuxOutput: string): boolean` from agent-status.ts — checks `⏵⏵.*·\s\d+\s` in last 15 lines
+- [x] These helpers are prerequisites for 42b, 42e, and 42f
+- [x] Tests: write state, read back; atomic write doesn't corrupt; missing meta.json is no-op; state field preserved across reads; helper functions match parseState patterns
 
 #### 42b: Stop hook writes state to meta.json
 
 **Files:** `src/hooks/agent-status.ts`, `src/hooks/agent-status.test.ts`
 
-- [ ] After determining state from `last_assistant_message`, call `writeAgentState()`:
+- [x] After determining state from `last_assistant_message`, call `writeAgentState()`:
   - `"WAITING"` → write `"waiting"`
   - `"I HAVE COMPLETED THE GOAL"` → write `"complete"`
   - Neither → write `"running"` (then nudge as before)
-- [ ] Remove the tmux capture + `parseState()` fallback from `processStopHook()` for state detection — use `last_assistant_message` exclusively
-- [ ] Keep the background task check: when state is `running`, check tmux for `⏵⏵` pattern via `hasBackgroundTasks()` (from 42a) and suppress nudge if active
-- [ ] Keep the existing action logic (nudge, notify manager, remind commit, remind children) unchanged — only the state source changes
-- [ ] Update debug capture to note "deterministic" state source instead of parse-state reason
-- [ ] Tests: verify state is written to meta.json for each case; verify tmux is not captured for state detection
+- [x] Remove the tmux capture + `parseState()` fallback from `processStopHook()` for state detection — use `last_assistant_message` exclusively
+- [x] Keep the background task check: when state is `running`, check tmux for `⏵⏵` pattern via `hasBackgroundTasks()` (from 42a) and suppress nudge if active
+- [x] Keep the existing action logic (nudge, notify manager, remind commit, remind children) unchanged — only the state source changes
+- [x] Update debug capture to note "deterministic" state source instead of parse-state reason
+- [x] Tests: verify state is written to meta.json for each case; verify tmux is not captured for state detection
 
 #### 42c: `ib send` writes `state: "running"` to meta.json
 
 **Files:** `src/ib-commands.ts`, `src/ib-commands.test.ts`
 
-- [ ] In `sendMessage()`, after successfully sending via tmux, call `writeAgentState(agentDir, "running")`
-- [ ] The agent directory is derived from `agent.repoPath` + `.ittybitty/agents/` + `agent.id`
-- [ ] Tests: verify meta.json state is set to "running" after send
+- [x] In `sendMessage()`, after successfully sending via tmux, call `writeAgentState(agentDir, "running")`
+- [x] The agent directory is derived from `agent.repoPath` + `.ittybitty/agents/` + `agent.id`
+- [x] Tests: verify meta.json state is set to "running" after send
 
 #### 42d: `ib resume` writes `state: "running"` to meta.json
 
 **Files:** `src/ib-commands.ts`, `src/ib-commands.test.ts`
 
-- [ ] In `resumeAgent()`, after starting the new tmux session (step 4), call `writeAgentState(agentDir, "running")`
-- [ ] Tests: verify meta.json state is set to "running" after resume
+- [x] In `resumeAgent()`, after starting the new tmux session (step 4), call `writeAgentState(agentDir, "running")`
+- [x] Tests: verify meta.json state is set to "running" after resume
 
 #### 42e: New `detectAgentStates()` — read from meta.json with tmux overrides
 
@@ -1796,50 +1796,50 @@ Three divergences to fix:
 
 Replace the current `detectAgentStates()` (which captures tmux output and runs `parseState()` for every agent) with the new resolution order:
 
-- [ ] Step 1: Archived agents → `stopped`
-- [ ] Step 2: Check tmux session existence (use `captureTmuxOutput()`). If null:
+- [x] Step 1: Archived agents → `stopped`
+- [x] Step 2: Check tmux session existence (use `captureTmuxOutput()`). If null:
   - If `isRecentlyCreated(created_epoch)` → `creating`
   - Else → `stopped`
-- [ ] Step 3: If tmux exists, check for transient overrides (minimal tmux parsing):
+- [x] Step 3: If tmux exists, check for transient overrides (minimal tmux parsing):
   - "Compacting conversation" in last 5 lines → `compacting`
   - Rate limit patterns in last 15 lines → `rate_limited`
-- [ ] Step 4: Read `state` from `agent.meta` (already loaded from meta.json). If present → use it. If absent (legacy/fresh agent, created > 6s ago) → `running`
-- [ ] Remove `computeStateFromContent()` — no longer needed (the pre-parseState check for <10 lines)
-- [ ] Remove full `parseState()` call from `detectAgentStates()` — only use the two targeted tmux checks
-- [ ] Tests: verify each resolution step; verify legacy agents without `state` field work; verify compacting/rate_limited override meta.json state
+- [x] Step 4: Read `state` from `agent.meta` (already loaded from meta.json). If present → use it. If absent (legacy/fresh agent, created > 6s ago) → `running`
+- [x] Remove `computeStateFromContent()` — no longer needed (the pre-parseState check for <10 lines)
+- [x] Remove full `parseState()` call from `detectAgentStates()` — only use the two targeted tmux checks
+- [x] Tests: verify each resolution step; verify legacy agents without `state` field work; verify compacting/rate_limited override meta.json state
 
 #### 42f: Watchdog reads state from meta.json
 
 **Files:** `src/watchdog.ts`, `src/watchdog.test.ts`
 
-- [ ] In `runPerAgentWatchdog()`, replace the `parseState(output)` call with the same resolution order as 42e:
+- [x] In `runPerAgentWatchdog()`, replace the `parseState(output)` call with the same resolution order as 42e:
   1. Check tmux (compacting/rate_limited overrides)
   2. Read `state` from meta.json (already loaded in `meta`)
   3. Fallback: `running` if no state field
-- [ ] Remove the `unknown` state handler — no longer possible. Existing `handleUnknown` and `saveUnknownDebugLog` become dead code
-- [ ] The rate limit handler still needs tmux to check if rate limit dialog was dismissed (the 3-attempt Enter retry loop checks tmux for `rate_limit_error` pattern after each Enter). Keep this minimal tmux parsing in the rate limit handler only
-- [ ] Update `tick()` / `processAgents()` similarly — read state from agent.meta instead of parsing tmux
-- [ ] Tests: verify watchdog uses meta.json state; verify no full parseState calls; verify rate limit bypass still checks tmux
+- [x] Remove the `unknown` state handler — no longer possible. Existing `handleUnknown` and `saveUnknownDebugLog` become dead code
+- [x] The rate limit handler still needs tmux to check if rate limit dialog was dismissed (the 3-attempt Enter retry loop checks tmux for `rate_limit_error` pattern after each Enter). Keep this minimal tmux parsing in the rate limit handler only
+- [x] Update `tick()` / `processAgents()` similarly — read state from agent.meta instead of parsing tmux
+- [x] Tests: verify watchdog uses meta.json state; verify no full parseState calls; verify rate limit bypass still checks tmux
 
 #### 42g: Update `findUnfinishedChildren()` to use meta.json state
 
 **Files:** `src/hooks/agent-status.ts`, `src/hooks/agent-status.test.ts`
 
-- [ ] `findUnfinishedChildren()` currently captures tmux output and calls `parseState()` for each child to check if it's unfinished. Replace with: read `state` from child's meta.json + check tmux session existence
-- [ ] Unfinished = meta.json state is `running`, `waiting`, or `complete`, AND tmux session exists (if no tmux session → stopped → not unfinished)
-- [ ] `creating` (derived from created_epoch) also counts as unfinished
-- [ ] Tests: verify children with state in meta.json are correctly classified
+- [x] `findUnfinishedChildren()` currently captures tmux output and calls `parseState()` for each child to check if it's unfinished. Replace with: read `state` from child's meta.json + check tmux session existence
+- [x] Unfinished = meta.json state is `running`, `waiting`, or `complete`, AND tmux session exists (if no tmux session → stopped → not unfinished)
+- [x] `creating` (derived from created_epoch) also counts as unfinished
+- [x] Tests: verify children with state in meta.json are correctly classified
 
 #### 42h: Cleanup and migration
 
 **Files:** `src/parse-state.ts`, `src/agents.ts`, `CLAUDE.md`
 
-- [ ] Keep `parseState()` intact but mark it as legacy with a JSDoc comment (still needed by bash ib reference)
-- [ ] Remove `computeStateFromContent()` export (no longer used — creating state is derived from `created_epoch`)
-- [ ] Update `CLAUDE.md` implementation notes to reflect new state detection flow
-- [ ] Update README.md Architecture section to reflect deterministic state from meta.json
-- [ ] Update PLAN.md state detection section in architecture overview
-- [ ] Verify all existing tests pass or are updated to reflect new behavior
+- [x] Keep `parseState()` intact but mark it as legacy with a JSDoc comment (still needed by bash ib reference)
+- [x] Remove `computeStateFromContent()` export (no longer used — creating state is derived from `created_epoch`)
+- [x] Update `CLAUDE.md` implementation notes to reflect new state detection flow
+- [x] Update README.md Architecture section to reflect deterministic state from meta.json
+- [x] Update PLAN.md state detection section in architecture overview
+- [x] Verify all existing tests pass or are updated to reflect new behavior
 
 **Migration path for existing agents:**
 - Agents created before this change will not have a `state` field in meta.json

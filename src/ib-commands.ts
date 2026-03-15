@@ -937,9 +937,9 @@ export async function mergeAgent(agent: Agent): Promise<IbCommandResult> {
     }
     await logAgent(agentDir, "Rebase completed successfully");
 
-    // 9. Checkout target branch (in agent's repo)
+    // 9. Checkout target branch (in CWD — the caller's worktree)
     await logAgent(agentDir, `Checking out ${targetBranch}...`);
-    const checkoutResult = await mergeSpawnCtx.run(["git", "-C", agent.repoPath, "checkout", targetBranch]);
+    const checkoutResult = await mergeSpawnCtx.run(["git", "checkout", targetBranch]);
     if (checkoutResult.exitCode !== 0) {
       return { ok: false, exitCode: 1, stdout: "", stderr: `Could not checkout ${targetBranch}: ${checkoutResult.stderr || checkoutResult.stdout}` };
     }
@@ -948,14 +948,14 @@ export async function mergeAgent(agent: Agent): Promise<IbCommandResult> {
     const runningAsAgent = await isRunningAsAgent();
     if (runningAsAgent) {
       await logAgent(agentDir, `Fast-forwarding ${targetBranch} to ${branchName}...`);
-      const ffResult = await mergeSpawnCtx.run(["git", "-C", agent.repoPath, "merge", "--ff-only", branchName]);
+      const ffResult = await mergeSpawnCtx.run(["git", "merge", "--ff-only", branchName]);
       if (ffResult.exitCode !== 0) {
         return { ok: false, exitCode: 1, stdout: "", stderr: `Fast-forward failed: ${ffResult.stderr || ffResult.stdout}` };
       }
       await logAgent(agentDir, "Fast-forward merge completed successfully");
     } else {
       await logAgent(agentDir, `Merging ${branchName} with --no-ff...`);
-      const noFFResult = await mergeSpawnCtx.run(["git", "-C", agent.repoPath, "merge", "--no-ff", branchName, "-m", `Merge agent ${agent.id} work`]);
+      const noFFResult = await mergeSpawnCtx.run(["git", "merge", "--no-ff", branchName, "-m", `Merge agent ${agent.id} work`]);
       if (noFFResult.exitCode !== 0) {
         return { ok: false, exitCode: 1, stdout: "", stderr: `Merge failed: ${noFFResult.stderr || noFFResult.stdout}` };
       }

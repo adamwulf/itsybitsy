@@ -1714,7 +1714,7 @@ describe("mergeAgent (native)", () => {
     expect(checkoutCall).toContain("feature-branch");
   });
 
-  test("checkout, merge, and status commands use -C agent.repoPath", async () => {
+  test("status uses -C agent.repoPath; checkout and merge run in CWD", async () => {
     const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
@@ -1728,21 +1728,19 @@ describe("mergeAgent (native)", () => {
     const agent = makeAgent("agent-abc", tempDir);
     await mergeAgent(agent);
 
-    // checkout must have -C flag with agent.repoPath
+    // checkout must NOT have -C flag (runs in CWD for manager worktree support)
     const checkoutCall = spawnCalls.find((c) => c.includes("checkout") && c.includes("main"));
     expect(checkoutCall).toBeDefined();
-    expect(checkoutCall).toContain("-C");
-    expect(checkoutCall).toContain(tempDir);
+    expect(checkoutCall).not.toContain("-C");
 
-    // merge must have -C flag with agent.repoPath
+    // merge must NOT have -C flag (runs in CWD for manager worktree support)
     const mergeCall = spawnCalls.find(
       (c) => c.includes("merge") && (c.includes("--ff-only") || c.includes("--no-ff"))
     );
     expect(mergeCall).toBeDefined();
-    expect(mergeCall).toContain("-C");
-    expect(mergeCall).toContain(tempDir);
+    expect(mergeCall).not.toContain("-C");
 
-    // status --porcelain must have -C flag with agent.repoPath
+    // status --porcelain MUST have -C flag with agent.repoPath
     const statusCalls = spawnCalls.filter(
       (c) => c.includes("status") && c.includes("--porcelain")
     );

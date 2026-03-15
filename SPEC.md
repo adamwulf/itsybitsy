@@ -1033,9 +1033,26 @@ The sidebar renders three vertically stacked sections, separated by horizontal r
 3. **Coordinator Claude** — system-wide coordinator session (see §12)
 
 The relative heights of these sections are determined as follows:
-- The agent tree occupies up to 7 rows (same as the current `MAX_TREE_HEIGHT`), with scroll indicators if more rows exist.
-- The coordinator panel occupies a configurable portion of the remaining space (initially ~40% of available sidebar height, minimum 5 rows).
-- The info panel fills the remaining vertical space between the tree and coordinator.
+
+```
+available = terminal_rows - header(1) - separator(1) - status_bar(2)
+tree_height = min(MAX_TREE_HEIGHT, agent_count + repo_count)  // up to 7
+coordinator_height = max(5, floor((available - tree_height) * 0.4))
+info_height = max(1, available - tree_height - coordinator_height - separators(2))
+```
+
+- The agent tree occupies up to 7 rows (same as the current `MAX_TREE_HEIGHT`), with scroll indicators (`▲`/`▼`) if more rows exist.
+- The coordinator panel gets 40% of remaining height (minimum 5 rows).
+- The info panel fills the rest (minimum 1 row).
+- If the terminal is too short to fit all three sections, the coordinator panel shrinks first (down to 3 rows), then the info panel (down to 0 rows — hidden entirely).
+
+### 11.5 Terminal Size Requirements
+
+Minimum terminal size: **140 columns × 24 rows**.
+- Sidebar: 60 columns (fixed) + 1 separator
+- Main area: 79 columns minimum (same as current 80-column minimum for the split pane)
+
+Terminals narrower than 140 columns or shorter than 24 rows display a warning: `[Terminal too small — resize to at least 140×24]`.
 
 ### 11.3 Compact Agent Tree
 

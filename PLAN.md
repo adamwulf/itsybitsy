@@ -117,6 +117,7 @@ itsybitsy
 │   ├── tmux-poller.test.ts   # Tmux poller tests
 │   ├── ib-commands.ts        # Wrappers for ib mutations; cwd = repo root
 │   ├── ib-commands.test.ts   # ib-commands tests
+│   ├── coordinator.ts        # Coordinator Claude session lifecycle (spawn/teardown/ref counter)
 │   ├── ghostty.ts            # Open tmux sessions in Ghostty
 │   ├── ghostty.test.ts       # Ghostty tests
 │   ├── orphan-detection.test.ts # Orphaned tmux session detection tests
@@ -131,6 +132,10 @@ itsybitsy
 │       ├── color-scheme.ts   # Terminal color scheme detection + getStateColors
 │       ├── folder-browser.ts # Folder browser for adding repos
 │       ├── folder-browser.test.ts # Folder browser tests
+│       ├── sidebar.ts        # SidebarComponent — vertical stack: tree + info + coordinator
+│       ├── info-panel.ts     # InfoPanelComponent — stoplight indicators, agent details
+│       ├── focus.ts          # FocusManager — Tab/Shift+Tab cycling between panels
+│       ├── input-field.ts    # InputFieldComponent — text input between separators
 │       ├── split-pane.ts     # Custom horizontal layout (pi-tui Box is vertical-only);
 │       │                     # fullWidth flag hides left pane for DIFF/DENIALS/TREE/ERRORS/QUESTIONS
 │       ├── split-pane.test.ts # Split pane tests
@@ -937,10 +942,11 @@ Create a new `SidebarComponent` that renders three vertically stacked sections:
 Modify `formatAgentRow()` to support a compact mode for sidebar rendering:
 
 - [ ] New compact format: `icon agent-id  state  age` — omit model and prompt/summary columns
+- [ ] Orphaned agent `⚠` prefix renders correctly in compact mode (e.g., `⚠◆ agent-id  state  age`)
 - [ ] Compact mode activated when rendering width ≤ 60
 - [ ] Repo headers unchanged: `▾ repo-name` / `▸ repo-name`
 - [ ] Update `computeStateColWidth()` and column width calculations for compact mode
-- [ ] Tests for compact format rendering at various widths
+- [ ] Tests for compact format rendering at various widths, including orphaned agents
 
 #### 42c: InfoPanelComponent
 

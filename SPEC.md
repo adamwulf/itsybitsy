@@ -575,12 +575,14 @@ Install/uninstall commands modify `~/.claude/settings.json` directly. [^hooks-in
 
 ### 7.1 Config File Layering
 
-Configuration is user-wide only, stored in a single file:
+**[^callout]** The bash reference implementation supports two config files with layered priority: `.ittybitty.json` (project root, highest priority) → `~/.ittybitty.json` (user home) → built-in defaults. The TypeScript reimplementation uses a single `~/.itsybitsy/config.json` file with no per-project configuration.
+
+In the TypeScript implementation, configuration is user-wide only, stored in a single file:
 
 1. **User config**: `~/.itsybitsy/config.json` in the user's home directory
 2. **Defaults**: Built-in defaults for each key
 
-For each config key, the first valid value found (user → default) is used. There is no per-repo configuration.
+For each config key, the first valid value found (user → default) is used.
 
 ### 7.2 Config Keys
 
@@ -590,6 +592,7 @@ All keys are read from `~/.itsybitsy/config.json`. If a key is absent or has an 
 |-----|------|---------|-------------|
 | `maxAgents` | number | `10` | Maximum number of concurrently active agents. Checked at spawn time in `newAgent()` — the count of agent directories that contain a `meta.json` must not exceed this value. |
 | `model` | string | `"opus"` | Default Claude model for new agents. Resolution order at spawn time: `--model` CLI flag → config `model` → `"opus"`. |
+| `fps` | number | `10` | TUI screen refresh rate (frames per second) for `ib watch`. |
 | `createPullRequests` | boolean | `false` | When `true`, agents are instructed (via their prompt) to create a pull request upon completing their work. |
 | `allowAgentQuestions` | boolean | `true` | When `false`, the `askQuestion` (`ib ask`) command returns an error, blocking top-level manager agents from posing questions to the user. (`acknowledgeQuestion` is the user-facing command to mark a question answered and does not check this flag.) |
 | `autoCompactThreshold` | number | (none) | Context window usage percentage (0–100) above which the watchdog automatically sends `/compact` to the agent's tmux session. When absent (the default), auto-compact is disabled. |
@@ -622,6 +625,95 @@ Custom prompt files in `.ittybitty/prompts/`:
 | `all.md` | All agents (wrapped in `[CUSTOM INSTRUCTIONS]`) |
 | `manager.md` | Manager agents (wrapped in `[CUSTOM MANAGER INSTRUCTIONS]`) |
 | `worker.md` | Worker agents (wrapped in `[CUSTOM WORKER INSTRUCTIONS]`) |
+
+### 7.5 ib config
+
+`ib config <subcommand> [options]` reads and writes configuration values in `.ittybitty.json` files. This is the CLI interface for managing the config keys described in §7.2. See the callout in §7.1 for how the TypeScript reimplementation diverges (single `~/.itsybitsy/config.json` file, no per-project config).
+
+#### Config File Locations
+
+| Scope | File | Priority |
+|-------|------|----------|
+| Project | `.ittybitty.json` (repo root) | Highest — overrides user config |
+| User | `~/.ittybitty.json` | Lower — provides user-wide defaults |
+
+Values not set in either file use built-in defaults (§7.2).
+
+#### Global Flag
+
+`-g` / `--global` — Operate on the user config (`~/.ittybitty.json`) instead of the project config. Applies to all subcommands. The flag can appear anywhere in the argument list (before or after the subcommand).
+
+#### Subcommands
+
+##### `ib config list [--global]`
+
+Lists all known config keys with their current values and sources.
+
+1. **Without `--global`**: Shows the merged view with precedence `project > user > default`. Each line shows the key, its effective value, and a source label: `(project)`, `(user)`, or `(default)`.
+2. **With `--global`**: Shows only the user config. Source labels are `(user)` or `(default)`.
+3. **Unset keys**: Keys with no value and no default display as `(unset)`.
+4. **All known keys are listed**, including those not present in any config file. The full key list includes: `maxAgents`, `model`, `fps`, `createPullRequests`, `allowAgentQuestions`, `autoCompactThreshold`, `externalDiffTool`, `hooks.injectStatus`, `hooks.statusVisible`, `permissions.manager.allow`, `permissions.manager.deny`, `permissions.worker.allow`, `permissions.worker.deny`.
+5. A legend line is printed after the list explaining the source labels.
+6. Aliases: `ib config ls` is accepted as an alias for `list`.
+
+##### `ib config get [--global] <key>`
+
+Gets the effective value for a single config key.
+
+1. **Key required**: Exits with error if no key is provided. Error output includes the list of available keys.
+2. **Without `--global`**: Resolves value using precedence: project config → user config → built-in default.
+3. **With `--global`**: Reads only from the user config file, falling back to the built-in default.
+4. **Unknown keys** with no default: Exits with error `"Key '<key>' not found (no default value)"` and prints available keys.
+5. **Output**: Prints the value to stdout (no label, no formatting). For array values, outputs the JSON array representation.
+6. **Default values in `get`**: The defaults used by `config get` are the config-level defaults, which may differ from the effective runtime defaults described in §7.2. For example, `model` defaults to empty string in `config get` (meaning "not configured"), while the runtime resolution in §7.2 falls back to `"opus"` at spawn time. Similarly, `autoCompactThreshold` and `externalDiffTool` default to empty (unset).
+
+##### `ib config set [--global] <key> <value>`
+
+Sets a scalar config value.
+
+1. **Key and value required**: Exits with error if either is missing.
+2. **Config file creation**: If the target config file does not exist, it is created with `{}` as initial content.
+3. **Array keys rejected**: Keys matching `permissions.*.allow` or `permissions.*.deny` are rejected with an error directing the user to use `ib config add` / `ib config remove` instead. Array-looking values (starting with `[` and ending with `]`) are also rejected.
+4. **Type validation** for known keys:
+   - `maxAgents`, `fps`: Must be a non-negative integer (`/^[0-9]+$/`). Error: `"'<key>' must be a number, got '<value>'"`.
+   - `createPullRequests`: Must be `"true"` or `"false"`. Error: `"'<key>' must be true or false, got '<value>'"`.
+   - `model`: Must be one of `"sonnet"`, `"opus"`, `"haiku"`. Error: `"'<key>' must be one of: sonnet, opus, haiku"`.
+5. **Value encoding**: Integers are stored as JSON numbers. `true`/`false` are stored as JSON booleans. Object literals (values starting with `{` and ending with `}`) are stored as parsed JSON objects. All other values are stored as JSON strings.
+6. **Dot notation**: Keys use dot notation to access nested paths (e.g., `hooks.injectStatus` maps to `{"hooks": {"injectStatus": ...}}`).
+7. **Output**: On success, prints `"Set <key> = <value>"`.
+
+##### `ib config add [--global] <key> <value>`
+
+Adds a value to an array config key, preventing duplicates.
+
+1. **Key and value required**: Exits with error if either is missing. Error output lists the valid array keys.
+2. **Array keys only**: Only `permissions.manager.allow`, `permissions.manager.deny`, `permissions.worker.allow`, and `permissions.worker.deny` are accepted. All other keys are rejected with an error.
+3. **Config file creation**: If the target config file does not exist, it is created with `{}`.
+4. **Duplicate prevention**: If the value already exists in the array, prints `"Value '<value>' already exists in <key>"` and exits successfully (exit code 0).
+5. **Output**: On success, prints `"Added '<value>' to <key>"`.
+
+##### `ib config remove [--global] <key> <value>`
+
+Removes a value from an array config key.
+
+1. **Key and value required**: Exits with error if either is missing. Error output lists the valid array keys.
+2. **Array keys only**: Same restriction as `add`.
+3. **Config file required**: If the config file does not exist, exits with error `"Config file not found: <path>"`.
+4. **Missing value**: If the value is not in the array, prints `"Value '<value>' not found in <key>"` and exits successfully (exit code 0).
+5. **Output**: On success, prints `"Removed '<value>' from <key>"`.
+
+#### Help and Errors
+
+- `ib config` (no subcommand), `ib config -h`, `ib config --help`, or `ib config help` prints full usage with available subcommands, options, available keys, examples, and value type documentation.
+- Unknown subcommands produce: `"Error: Unknown subcommand '<name>'"` with a brief usage hint and pointer to `--help`.
+- All error output goes to stderr. All success output goes to stdout.
+
+#### Exit Codes
+
+| Code | Meaning |
+|------|---------|
+| `0` | Success (including idempotent cases like adding a duplicate or removing a missing value) |
+| `1` | Error (missing arguments, validation failure, unknown key, file I/O error) |
 
 ---
 

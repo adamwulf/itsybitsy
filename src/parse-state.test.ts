@@ -315,6 +315,50 @@ describe("parseState", () => {
     });
   });
 
+  describe("idle at prompt", () => {
+    test("bare ❯ prompt with status bar → waiting", () => {
+      const lines = Array(10).fill("some output");
+      lines.push("────────────────────────────────────");
+      lines.push("❯ ");
+      lines.push("────────────────────────────────────");
+      lines.push("  repo | Model: Son...");
+      lines.push("⏵⏵ accept edits on (shift+tab to cycle)");
+      expect(parseState(lines.join("\n")).state).toBe("waiting");
+      expect(parseState(lines.join("\n")).reason).toContain("idle at input prompt");
+    });
+
+    test("❯ with text after it is NOT idle prompt", () => {
+      const lines = Array(10).fill("some output");
+      lines.push("❯ what does HDA mean");
+      lines.push("────────────────────────────────────");
+      lines.push("⏵⏵ accept edits on (shift+tab to cycle)");
+      expect(parseState(lines.join("\n")).state).not.toBe("waiting");
+    });
+
+    test("bare ❯ without status bar is not detected as idle", () => {
+      const lines = Array(10).fill("some output");
+      lines.push("❯ ");
+      lines.push("some other text");
+      expect(parseState(lines.join("\n")).state).toBe("unknown");
+    });
+
+    test("fixture snapshot-idle-prompt-1 → waiting", async () => {
+      const fixture = await Bun.file(
+        new URL("fixtures/snapshot-idle-prompt-1.txt", import.meta.url),
+      ).text();
+      const result = parseState(fixture);
+      expect(result.state).toBe("waiting");
+    });
+
+    test("fixture snapshot-idle-prompt-2 → waiting", async () => {
+      const fixture = await Bun.file(
+        new URL("fixtures/snapshot-idle-prompt-2.txt", import.meta.url),
+      ).text();
+      const result = parseState(fixture);
+      expect(result.state).toBe("waiting");
+    });
+  });
+
   describe("priority", () => {
     test("compacting beats running", () => {
       const input = "line1\n(Esc to interrupt)\nCompacting conversation\nline4\nline5";

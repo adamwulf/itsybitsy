@@ -268,7 +268,7 @@ export function handleMerge(ctx: ActionCtx) {
       onYes: () => {
         ctx.closeDialog();
         ctx.executeAndRefresh(async () => {
-          const result = await mergeAgent(agent);
+          const result = await mergeAgent(agent, agent.repoPath);
           ctx.setNotice(result.ok ? `Merged ${agent.id}` : `Merge failed: ${result.stderr || result.stdout}`);
         });
       },

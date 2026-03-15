@@ -847,7 +847,7 @@ async function checkRebaseConflicts(
  * 19. Remove agent directory
  * 20. Scan for orphaned processes
  */
-export async function mergeAgent(agent: Agent): Promise<IbCommandResult> {
+export async function mergeAgent(agent: Agent, targetDir: string): Promise<IbCommandResult> {
   const agentDir = join(agent.repoPath, ".ittybitty", "agents", agent.id);
   const agentsDir = join(agent.repoPath, ".ittybitty", "agents");
   const branchName = `agent/${agent.id}`;
@@ -879,10 +879,10 @@ export async function mergeAgent(agent: Agent): Promise<IbCommandResult> {
     return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' has uncommitted changes` };
   }
 
-  // 4. Detect target branch — use CWD (no -C) so manager worktrees merge into
-  //    their own branch, not the main repo's checked-out branch (matches bash ib)
+  // 4. Detect target branch from targetDir — the caller decides where to merge:
+  //    CLI/agent passes CWD (manager worktree), dashboard passes agent.repoPath
   let targetBranch = "";
-  const currentBranch = await mergeSpawnCtx.run(["git", "branch", "--show-current"]);
+  const currentBranch = await mergeSpawnCtx.run(["git", "-C", targetDir, "branch", "--show-current"]);
   if (currentBranch.exitCode === 0 && currentBranch.stdout.trim()) {
     targetBranch = currentBranch.stdout.trim();
   }
@@ -906,10 +906,10 @@ export async function mergeAgent(agent: Agent): Promise<IbCommandResult> {
     return { ok: false, exitCode: 1, stdout: "", stderr: `Branch '${branchName}' does not exist` };
   }
 
-  // 6. Current dir must have no uncommitted changes (CWD, not agent.repoPath)
-  const repoStatus = await mergeSpawnCtx.run(["git", "status", "--porcelain"]);
+  // 6. Target directory must have no uncommitted changes
+  const repoStatus = await mergeSpawnCtx.run(["git", "-C", targetDir, "status", "--porcelain"]);
   if (repoStatus.exitCode === 0 && repoStatus.stdout.trim()) {
-    return { ok: false, exitCode: 1, stdout: "", stderr: "Current directory has uncommitted changes" };
+    return { ok: false, exitCode: 1, stdout: "", stderr: "Target directory has uncommitted changes" };
   }
 
   // 7. Pre-rebase conflict check
@@ -937,9 +937,9 @@ export async function mergeAgent(agent: Agent): Promise<IbCommandResult> {
     }
     await logAgent(agentDir, "Rebase completed successfully");
 
-    // 9. Checkout target branch (in CWD — the caller's worktree)
+    // 9. Checkout target branch (in targetDir)
     await logAgent(agentDir, `Checking out ${targetBranch}...`);
-    const checkoutResult = await mergeSpawnCtx.run(["git", "checkout", targetBranch]);
+    const checkoutResult = await mergeSpawnCtx.run(["git", "-C", targetDir, "checkout", targetBranch]);
     if (checkoutResult.exitCode !== 0) {
       return { ok: false, exitCode: 1, stdout: "", stderr: `Could not checkout ${targetBranch}: ${checkoutResult.stderr || checkoutResult.stdout}` };
     }
@@ -948,14 +948,14 @@ export async function mergeAgent(agent: Agent): Promise<IbCommandResult> {
     const runningAsAgent = await isRunningAsAgent();
     if (runningAsAgent) {
       await logAgent(agentDir, `Fast-forwarding ${targetBranch} to ${branchName}...`);
-      const ffResult = await mergeSpawnCtx.run(["git", "merge", "--ff-only", branchName]);
+      const ffResult = await mergeSpawnCtx.run(["git", "-C", targetDir, "merge", "--ff-only", branchName]);
       if (ffResult.exitCode !== 0) {
         return { ok: false, exitCode: 1, stdout: "", stderr: `Fast-forward failed: ${ffResult.stderr || ffResult.stdout}` };
       }
       await logAgent(agentDir, "Fast-forward merge completed successfully");
     } else {
       await logAgent(agentDir, `Merging ${branchName} with --no-ff...`);
-      const noFFResult = await mergeSpawnCtx.run(["git", "merge", "--no-ff", branchName, "-m", `Merge agent ${agent.id} work`]);
+      const noFFResult = await mergeSpawnCtx.run(["git", "-C", targetDir, "merge", "--no-ff", branchName, "-m", `Merge agent ${agent.id} work`]);
       if (noFFResult.exitCode !== 0) {
         return { ok: false, exitCode: 1, stdout: "", stderr: `Merge failed: ${noFFResult.stderr || noFFResult.stdout}` };
       }

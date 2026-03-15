@@ -1127,7 +1127,7 @@ describe("mergeAgent (native)", () => {
     setMergeSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
-    const result = await mergeAgent(agent);
+    const result = await mergeAgent(agent, tempDir);
 
     expect(result.ok).toBe(false);
     expect(result.stderr).toContain("not found");
@@ -1146,7 +1146,7 @@ describe("mergeAgent (native)", () => {
     setMergeSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
-    const result = await mergeAgent(agent);
+    const result = await mergeAgent(agent, tempDir);
 
     expect(result.ok).toBe(false);
     expect(result.stderr).toContain("no worktree");
@@ -1164,7 +1164,7 @@ describe("mergeAgent (native)", () => {
     setMergeSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
-    const result = await mergeAgent(agent);
+    const result = await mergeAgent(agent, tempDir);
 
     expect(result.ok).toBe(false);
     expect(result.stderr).toContain("uncommitted changes");
@@ -1182,7 +1182,7 @@ describe("mergeAgent (native)", () => {
     setMergeSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
-    const result = await mergeAgent(agent);
+    const result = await mergeAgent(agent, tempDir);
 
     expect(result.ok).toBe(false);
     expect(result.stderr).toContain("uncommitted changes");
@@ -1200,7 +1200,7 @@ describe("mergeAgent (native)", () => {
     setMergeSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
-    const result = await mergeAgent(agent);
+    const result = await mergeAgent(agent, tempDir);
 
     expect(result.ok).toBe(false);
     expect(result.stderr).toContain("does not exist");
@@ -1218,7 +1218,7 @@ describe("mergeAgent (native)", () => {
     setMergeSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
-    const result = await mergeAgent(agent);
+    const result = await mergeAgent(agent, tempDir);
 
     expect(result.ok).toBe(false);
     expect(result.stderr).toContain("Rebase conflict detected");
@@ -1236,7 +1236,7 @@ describe("mergeAgent (native)", () => {
     setMergeSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
-    const result = await mergeAgent(agent);
+    const result = await mergeAgent(agent, tempDir);
 
     expect(result.ok).toBe(false);
     expect(result.stderr).toContain("Rebase failed");
@@ -1254,7 +1254,7 @@ describe("mergeAgent (native)", () => {
     setMergeSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
-    const result = await mergeAgent(agent);
+    const result = await mergeAgent(agent, tempDir);
 
     expect(result.ok).toBe(true);
     expect(result.stdout).toBe("Closed agent: agent-abc");
@@ -1272,7 +1272,7 @@ describe("mergeAgent (native)", () => {
     setMergeSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
-    await mergeAgent(agent);
+    await mergeAgent(agent, tempDir);
 
     // Find the actual rebase (not the conflict check one)
     const rebaseCall = spawnCalls.find(
@@ -1312,7 +1312,7 @@ describe("mergeAgent (native)", () => {
     setMergeSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
-    await mergeAgent(agent);
+    await mergeAgent(agent, tempDir);
 
     const exists = await Bun.file(join(agentDir, "meta.json")).exists().catch(() => false);
     expect(exists).toBe(false);
@@ -1339,7 +1339,7 @@ describe("mergeAgent (native)", () => {
     setMergeSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
-    await mergeAgent(agent);
+    await mergeAgent(agent, tempDir);
 
     const updated = await Bun.file(join(tempDir, ".ittybitty", "user-questions.json")).json();
     expect(updated.questions).toEqual([{ agent: "agent-other", question: "Q2" }]);
@@ -1357,7 +1357,7 @@ describe("mergeAgent (native)", () => {
     setMergeSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
-    const result = await mergeAgent(agent);
+    const result = await mergeAgent(agent, tempDir);
 
     expect(result.ok).toBe(true);
 
@@ -1386,7 +1386,7 @@ describe("mergeAgent (native)", () => {
     setMergeSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
-    await mergeAgent(agent);
+    await mergeAgent(agent, tempDir);
 
     // agent.log gets archived, but archive creates a copy.
     // Since the dir gets removed at the end, we check archive instead.
@@ -1421,7 +1421,7 @@ describe("mergeAgent (native)", () => {
     setMergeSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
-    await mergeAgent(agent);
+    await mergeAgent(agent, tempDir);
 
     const branchDeleteCall = spawnCalls.find(
       (c) => c.includes("branch") && c.includes("-D") && c.includes("agent/agent-abc")
@@ -1441,7 +1441,7 @@ describe("mergeAgent (native)", () => {
     setMergeSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
-    await mergeAgent(agent);
+    await mergeAgent(agent, tempDir);
 
     const worktreeRemoveCall = spawnCalls.find(
       (c) => c.includes("worktree") && c.includes("remove") && c.includes("--force")
@@ -1461,7 +1461,7 @@ describe("mergeAgent (native)", () => {
     setMergeSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
-    await mergeAgent(agent);
+    await mergeAgent(agent, tempDir);
 
     // Should have created a temp branch
     const tempBranchCreate = spawnCalls.find(
@@ -1543,7 +1543,7 @@ describe("mergeAgent (native)", () => {
       repoName: "test",
       meta: { tmux_session: `tmux-${ourAgentId}` } as any,
     });
-    const result = await mergeAgent(agent);
+    const result = await mergeAgent(agent, tempDir);
 
     expect(result.ok).toBe(false);
     expect(result.stderr).toContain("Cannot merge agent from within its own worktree");
@@ -1561,7 +1561,7 @@ describe("mergeAgent (native)", () => {
     setMergeSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
-    const result = await mergeAgent(agent);
+    const result = await mergeAgent(agent, tempDir);
 
     expect(result.ok).toBe(false);
     expect(result.stderr).toContain("Could not checkout");
@@ -1579,7 +1579,7 @@ describe("mergeAgent (native)", () => {
     setMergeSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
-    const result = await mergeAgent(agent);
+    const result = await mergeAgent(agent, tempDir);
 
     expect(result.ok).toBe(false);
     // Should contain either "Fast-forward failed" or "Merge failed"
@@ -1631,7 +1631,7 @@ describe("mergeAgent (native)", () => {
     setMergeSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
-    const result = await mergeAgent(agent);
+    const result = await mergeAgent(agent, tempDir);
 
     expect(result.ok).toBe(false);
     expect(result.stderr).toContain("Rebase failed:");
@@ -1660,7 +1660,7 @@ describe("mergeAgent (native)", () => {
     setMergeSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
-    const result = await mergeAgent(agent);
+    const result = await mergeAgent(agent, tempDir);
 
     // Should still succeed — rm -rf fallback handles cleanup
     expect(result.ok).toBe(true);
@@ -1679,14 +1679,14 @@ describe("mergeAgent (native)", () => {
     setMergeSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
-    await mergeAgent(agent);
+    await mergeAgent(agent, tempDir);
 
     // Agent dir should still exist since merge failed before cleanup
     const log = await Bun.file(join(agentDir, "agent.log")).text();
     expect(log).toContain("Pre-rebase conflict check failed");
   });
 
-  test("detects target branch from CWD, not agent.repoPath", async () => {
+  test("detects target branch from targetDir via -C", async () => {
     const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
@@ -1699,14 +1699,15 @@ describe("mergeAgent (native)", () => {
     setMergeSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
-    await mergeAgent(agent);
+    await mergeAgent(agent, tempDir);
 
-    // The branch detection call must NOT have -C flag (should run in CWD)
+    // The branch detection call must have -C flag with targetDir
     const branchCall = spawnCalls.find(
       (c) => c.includes("branch") && c.includes("--show-current")
     );
     expect(branchCall).toBeDefined();
-    expect(branchCall).not.toContain("-C");
+    expect(branchCall).toContain("-C");
+    expect(branchCall).toContain(tempDir);
 
     // Checkout should target feature-branch, not main
     const checkoutCall = spawnCalls.find((c) => c.includes("checkout"));
@@ -1714,7 +1715,7 @@ describe("mergeAgent (native)", () => {
     expect(checkoutCall).toContain("feature-branch");
   });
 
-  test("checkout and merge commands run in CWD, not via -C agent.repoPath", async () => {
+  test("status, checkout, and merge all use -C targetDir", async () => {
     const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
@@ -1726,28 +1727,28 @@ describe("mergeAgent (native)", () => {
     setMergeSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
-    await mergeAgent(agent);
+    await mergeAgent(agent, tempDir);
 
-    // checkout must NOT have -C flag
+    // checkout must have -C flag with targetDir
     const checkoutCall = spawnCalls.find((c) => c.includes("checkout") && c.includes("main"));
     expect(checkoutCall).toBeDefined();
-    expect(checkoutCall).not.toContain("-C");
+    expect(checkoutCall).toContain("-C");
+    expect(checkoutCall).toContain(tempDir);
 
-    // merge must NOT have -C flag
+    // merge must have -C flag with targetDir
     const mergeCall = spawnCalls.find(
       (c) => c.includes("merge") && (c.includes("--ff-only") || c.includes("--no-ff"))
     );
     expect(mergeCall).toBeDefined();
-    expect(mergeCall).not.toContain("-C");
+    expect(mergeCall).toContain("-C");
+    expect(mergeCall).toContain(tempDir);
 
-    // CWD status check must NOT have -C flag
+    // status --porcelain must have -C flag with targetDir
     const statusCalls = spawnCalls.filter(
       (c) => c.includes("status") && c.includes("--porcelain")
     );
-    // First status call is for worktree (has -C), second is for CWD (no -C)
-    const cwdStatusCall = statusCalls.find((c) => !c.some((a) => a.includes("/repo")));
-    expect(cwdStatusCall).toBeDefined();
-    expect(cwdStatusCall).not.toContain("-C");
+    const targetDirStatusCall = statusCalls.find((c) => c.includes("-C") && c.includes(tempDir));
+    expect(targetDirStatusCall).toBeDefined();
   });
 
   test("merges into manager branch when called from manager worktree", async () => {
@@ -1763,7 +1764,7 @@ describe("mergeAgent (native)", () => {
     setMergeSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
-    await mergeAgent(agent);
+    await mergeAgent(agent, tempDir);
 
     // Rebase should target the manager's branch
     const rebaseCall = spawnCalls.find(

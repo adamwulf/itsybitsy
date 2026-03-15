@@ -924,7 +924,7 @@ Stop hook writes authoritative state (`running`/`waiting`/`complete`) to meta.js
 
 Create a new `SidebarComponent` that renders three vertically stacked sections:
 
-- [x] Define `SidebarComponent implements Component` with `render(width: number): string[]`
+- [ ] Define `SidebarComponent implements Component` with `render(width: number): string[]`
 - [ ] Render three sections separated by horizontal rules: agent tree (top), info panel (middle), placeholder for coordinator (bottom)
 - [ ] Each section has a header line (e.g., `──── Agents ────`, `──── Info ────`, `──── Coordinator ────`)
 - [ ] The sidebar is always exactly 60 columns wide
@@ -1075,10 +1075,12 @@ Integrate the input field into the coordinator section of the sidebar:
 
 Implement coordinator session spawn/teardown:
 
-- [ ] `ensureCoordinatorSession(): Promise<string>` — checks if `ib-coordinator` tmux session exists; if not, creates it with `tmux new-session -d -s ib-coordinator -c ~/.itsybitsy/`
-- [ ] Write a minimal `~/.itsybitsy/.claude/settings.local.json` with coordinator permissions (only `Bash(ib:*)`, deny everything else)
-- [ ] Start Claude Code inside the session: `tmux send-keys -t ib-coordinator 'claude --model opus "You are the itsybitsy coordinator..."' Enter`
-- [ ] `killCoordinatorSession(): Promise<void>` — checks if other `ib watch` instances are attached; if not, kills the session. Detection: `tmux list-clients -t ib-coordinator` to check for other attached clients (or use a simple reference counter file at `~/.itsybitsy/coordinator.clients`)
+- [ ] `ensureCoordinatorSession(): Promise<string>` — checks if `ib-coordinator` tmux session exists (`tmux has-session -t ib-coordinator`); if not, creates it with `tmux new-session -d -s ib-coordinator -c ~/.itsybitsy/`
+- [ ] Ensure `~/.itsybitsy/` exists and has a bare git repo (`git init`) so Claude Code can load `settings.local.json`
+- [ ] Write `~/.itsybitsy/.claude/settings.local.json` with coordinator permissions (only `Bash(ib:*)`, deny everything else)
+- [ ] Write coordinator prompt to a temp file and start Claude Code: `tmux send-keys -t ib-coordinator 'claude --model opus -p "$(cat /tmp/ib-coordinator-prompt.txt)"' Enter` — avoids shell quoting issues with inline prompts
+- [ ] Reference counter: increment `~/.itsybitsy/coordinator.refs` on spawn/attach (atomic read-increment-write)
+- [ ] `killCoordinatorSession(): Promise<void>` — decrement reference counter; if counter reaches 0, kill the tmux session
 - [ ] Session name constant: `IB_COORDINATOR_SESSION = "ib-coordinator"`
 - [ ] Tests for session creation, reuse, cleanup
 

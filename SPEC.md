@@ -1011,12 +1011,14 @@ The `ib watch` TUI uses a three-column layout:
 │  Coordinator │                  │                       │
 │  Claude      │                  │                       │
 │  (tmux out)  │                  │                       │
-│              │──────────────────│                       │
-│              │  > input field█  │                       │
-│              │──────────────────│                       │
+│──────────────│                  │                       │
+│ > input█     │                  │                       │
+│──────────────│                  │                       │
 └──────────────┴──────────────────┴──────────────────────┘
   status bar (2 lines)
 ```
+
+The input field location depends on which panel has focus: when the coordinator has focus, the input field appears at the bottom of the coordinator section in the sidebar; when the active agent pane has focus, it appears at the bottom of the tmux pane in the main area (see §13.4).
 
 The left sidebar is a fixed 60-column vertical stack containing three sections: agent tree (top), info panel (middle), and coordinator Claude panel (bottom). The main area to the right of the sidebar retains the existing split-pane layout: tmux output on the left and cycling right pane on the right.
 
@@ -1090,11 +1092,11 @@ The coordinator Claude is a system-wide Claude Code session that runs from `~/.i
 
 **Shared across instances**: Multiple `ib watch` instances share the same `ib-coordinator` tmux session. On startup, check if the session already exists (`tmux has-session -t ib-coordinator`). If it does, just display its output — do not create a new one.
 
-**Auto-close on exit**: When `ib watch` exits (Ctrl-C), kill the coordinator tmux session **only if** no other `ib watch` instances are displaying it. If other instances are running, leave the session alive. Detection: check if the tmux session has other attached clients.
+**Auto-close on exit**: When `ib watch` exits (Ctrl-C), kill the coordinator tmux session **only if** no other `ib watch` instances are displaying it. Detection uses a reference counter file at `~/.itsybitsy/coordinator.refs`: each `ib watch` instance increments the counter on startup and decrements on exit. When the counter reaches 0, the session is killed. This is necessary because `ib watch` does not *attach* to the coordinator session (it polls via `capture-pane`), so `tmux list-clients` cannot detect active viewers.
 
 ### 12.3 Permissions
 
-The coordinator's `settings.local.json` contains a minimal allow list:
+The coordinator runs from `~/.itsybitsy/`, which is not a git repository. Claude Code reads `settings.local.json` from `<cwd>/.claude/settings.local.json`. Therefore, the coordinator's permissions file is written to `~/.itsybitsy/.claude/settings.local.json` before spawning:
 
 ```json
 {
@@ -1104,6 +1106,8 @@ The coordinator's `settings.local.json` contains a minimal allow list:
   }
 }
 ```
+
+**Note**: Claude Code requires a project directory context to load `settings.local.json`. Since `~/.itsybitsy/` is not a git repo, the coordinator session must either: (a) initialize a bare git repo there (`git init`), or (b) pass permissions via `--allowedTools` CLI flags. The implementation should prefer (a) since it matches the existing settings pattern and is simpler to maintain.
 
 This ensures the coordinator can only run `ib` commands (e.g., `ib list`, `ib send`, `ib merge`, `ib new-agent`, `ib kill`, `ib status`, `ib diff`). It cannot access files, browse the web, or spawn sub-agents directly.
 

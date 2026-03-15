@@ -821,6 +821,11 @@ async function main() {
       await hookPermissionDenied(id);
       break;
     }
+    case "config": {
+      const { runConfigCommand } = await import("./config-command");
+      await runConfigCommand(args.slice(1));
+      break;
+    }
     case "hooks": {
       // Nested subcommands under "hooks"
       const subcommand = args[1];
@@ -923,6 +928,14 @@ async function main() {
       console.log("  merge <id>          Merge agent's work and close it");
       console.log("  merge-check <id>    Check if agent is ready to merge");
       console.log("  resume <id>         Resume a stopped agent");
+      console.log("");
+      console.log("Configuration:");
+      console.log("  config list         List all config keys with values");
+      console.log("  config get <key>    Get a config value");
+      console.log("  config set <k> <v>  Set a config value");
+      console.log("  config add <k> <v>  Add to array config key");
+      console.log("  config remove <k> <v> Remove from array config key");
+      console.log("  config unset <key>  Unset a config key (revert to default)");
       console.log("");
       console.log("Hooks:");
       console.log("  hooks install       Install safety hooks");

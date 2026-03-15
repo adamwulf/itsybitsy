@@ -10,7 +10,7 @@ import { logAgent } from "../agent-lifecycle";
 import { parseState } from "../parse-state";
 import { captureTmuxOutput } from "../tmux-poller";
 import { isValidAgentId, isValidTmuxSession } from "../validation";
-import { writeAgentState, hasBackgroundTasks } from "../agents";
+import { writeAgentState, hasBackgroundTasks, isRecentlyCreated } from "../agents";
 import type { MetaState } from "../agents";
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -287,7 +287,6 @@ export async function findUnfinishedChildren(
         if (meta.archived) continue;
 
         // Check if recently created (< 6s) — always unfinished
-        const { isRecentlyCreated } = await import("../agents");
         if (isRecentlyCreated(meta.created_epoch)) {
           unfinished.push(entry.name);
           continue;

@@ -57,6 +57,7 @@ import { loadLayout, saveLayoutDebounced, cancelPendingSave } from "./layout";
 import type { LayoutState } from "./layout";
 import { InputFieldComponent } from "./input-field";
 import { sendMessage } from "../ib-commands";
+import { stripAnsi } from "../parse-state";
 
 // Re-export for test compatibility
 export { AgentTreeComponent, formatAgentRow } from "./agent-tree";
@@ -86,6 +87,8 @@ export class TmuxPaneComponent implements Component {
   displayHeight = 20;
   /** Whether the agent's tmux session has an attached external client */
   clientAttached = false;
+  /** Whether to trim Claude's input separator from the bottom of output */
+  trimInputSeparator = false;
 
   invalidate(): void {}
 
@@ -159,7 +162,24 @@ export class TmuxPaneComponent implements Component {
     }
 
     // Wrap lines to pane width
-    const wrapped = wrapLines(this.rawOutput, width);
+    let wrapped = wrapLines(this.rawOutput, width);
+
+    // When showing our own input field, trim Claude's native input area.
+    // Claude's input area has separator lines made of ─ characters.
+    // Find the first such separator from the bottom and trim there.
+    if (this.trimInputSeparator) {
+      let trimIndex = wrapped.length;
+      for (let i = wrapped.length - 1; i >= 0; i--) {
+        const stripped = stripAnsi(wrapped[i]!).trim();
+        if (stripped.length > 0 && /^─+$/.test(stripped)) {
+          trimIndex = i;
+          break;
+        }
+      }
+      if (trimIndex < wrapped.length) {
+        wrapped = wrapped.slice(0, trimIndex);
+      }
+    }
 
     // Clamp scrollBack to valid range
     const maxScrollBack = Math.max(0, wrapped.length - this.displayHeight);
@@ -813,6 +833,7 @@ export class DashboardComponent implements Component {
       this.currentAgentId = newId;
       this.setTerminalTitle(newId ? `ib: ${newId}` : "ib");
       this.tmuxPane.resetForAgent();
+      this.inputField.switchAgent(newId);
       this.rightPane.agentLogContent = null;
       this.rightPane.promptContent = null;
       this.rightPane.denialsContent = null;
@@ -895,29 +916,39 @@ export class DashboardComponent implements Component {
     // Dialog input takes priority
     if (this._dialog && handleDialogInput(this, data)) return;
 
+    // When active-agent panel is focused, route input to the input field FIRST.
+    // The input field consumes most input. Tab/Shift-Tab pass through when the
+    // input field's internal focus allows panel cycling (Tab from [Send], Shift-Tab from text).
+    // All other dashboard keybindings are suppressed (SPEC §13.5).
+    if (this.focusManager.current() === "active-agent" && this.agentTree.selectedAgent) {
+      if (this.inputField.handleInput(data)) {
+        this.tui?.requestRender();
+        return;
+      }
+      // Input not consumed — check for Tab/Shift-Tab to cycle panels
+      if (data === "\t" || matchesKey(data, Key.tab)) {
+        this.focusManager.cycle(1);
+        this.tui?.requestRender();
+        return;
+      }
+      if (data === "\x1b[Z" || matchesKey(data, Key.shift("tab"))) {
+        this.focusManager.cycle(-1);
+        this.tui?.requestRender();
+        return;
+      }
+      return; // Suppress all other dashboard keybindings when active-agent is focused
+    }
+
     // Tab / Shift-Tab: cycle focus between panels
     if (data === "\t" || matchesKey(data, Key.tab)) {
-      if (this.focusManager.current() === "active-agent") this.inputField.clear();
       this.focusManager.cycle(1);
       this.tui?.requestRender();
       return;
     }
     if (data === "\x1b[Z" || matchesKey(data, Key.shift("tab"))) {
-      if (this.focusManager.current() === "active-agent") this.inputField.clear();
       this.focusManager.cycle(-1);
       this.tui?.requestRender();
       return;
-    }
-
-    // When active-agent panel is focused, route input to the input field.
-    // The input field consumes printable chars, backspace, Ctrl-A/E/U, Enter, Escape.
-    // It returns false for Tab/Shift-Tab (handled above) and unrecognized sequences.
-    // All other dashboard keybindings are suppressed (SPEC §13.5).
-    if (this.focusManager.current() === "active-agent" && this.agentTree.selectedAgent) {
-      if (this.inputField.handleInput(data)) {
-        this.tui?.requestRender();
-      }
-      return; // Suppress all dashboard keybindings when active-agent is focused
     }
 
     // Navigation
@@ -1193,14 +1224,16 @@ export class DashboardComponent implements Component {
       const showInputField = this.focusManager.current() === "active-agent"
         && this.agentTree.selectedAgent != null
         && !isFullWidth;
-      this.tmuxPane.displayHeight = showInputField ? availableHeight - 3 : availableHeight;
+      const inputFieldHeight = showInputField ? this.inputField.getHeight() : 0;
+      this.tmuxPane.trimInputSeparator = showInputField;
+      this.tmuxPane.displayHeight = showInputField ? availableHeight - inputFieldHeight : availableHeight;
       this.rightPane.displayHeight = availableHeight;
       this.splitPane.fullWidth = isFullWidth;
       const splitLines = this.splitPane.render(mainWidth);
 
       if (showInputField) {
-        // Replace the last 3 lines' left portion with input field content.
-        // The tmux pane rendered 3 fewer lines, so the split pane padded the
+        // Replace the last N lines' left portion with input field content.
+        // The tmux pane rendered N fewer lines, so the split pane padded the
         // left side with empty strings for those positions. We rebuild those
         // lines with input field content on the left + right pane content on
         // the right.
@@ -1208,14 +1241,14 @@ export class DashboardComponent implements Component {
         const leftW = Math.min(this.splitPane.getLeftWidth(), mainWidth - 2);
         const rw = mainWidth - leftW - 1;
         const inputLines = this.inputField.render(leftW);
-        // Re-render right pane at the correct width to get the last 3 lines
+        // Re-render right pane at the correct width to get the last N lines
         const rightLines = this.rightPane.render(rw);
 
-        for (let i = 0; i < 3; i++) {
-          const splitIdx = splitLines.length - 3 + i;
+        for (let i = 0; i < inputFieldHeight; i++) {
+          const splitIdx = splitLines.length - inputFieldHeight + i;
           if (splitIdx < 0) continue;
           const inputLine = inputLines[i] ?? "";
-          const rightIdx = availableHeight - 3 + i;
+          const rightIdx = availableHeight - inputFieldHeight + i;
           const rightLine = rightIdx >= 0 && rightIdx < rightLines.length
             ? truncateToWidth(rightLines[rightIdx]!, rw, "")
             : "";

@@ -1001,7 +1001,7 @@ Stop hook writes authoritative state (`running`/`waiting`/`complete`) to meta.js
 
 **Files:** `src/tui/input-field.ts` (planned)
 
-Deferred to Phase 47. Input fields for coordinator and active-agent panels will be implemented when the coordinator session is wired up.
+Deferred to Phase 49. Input fields for coordinator and active-agent panels will be implemented after the coordinator session is wired up.
 
 - [ ] `InputFieldComponent implements Component` with `render(width: number): string[]`
 - [ ] Renders 3 lines: top separator, input line (`> text█`), bottom separator
@@ -1018,7 +1018,7 @@ Deferred to Phase 47. Input fields for coordinator and active-agent panels will 
 
 #### 46d: Wire input field to tmux pane — NOT STARTED
 
-Deferred to Phase 47.
+Deferred to Phase 49.
 
 - [ ] When `active-agent` has focus and agent selected: render input field at bottom of tmux pane
 - [ ] On submit: `sendMessage()` to deliver message
@@ -1026,7 +1026,7 @@ Deferred to Phase 47.
 
 #### 46e: Wire input field to coordinator panel — NOT STARTED
 
-Deferred to Phase 47.
+Deferred to Phase 49.
 
 - [ ] When `coordinator` has focus: render input field at bottom of coordinator section
 - [ ] On submit: `tmux send-keys` to coordinator session
@@ -1051,7 +1051,7 @@ Deferred to Phase 47.
 
 **Goal:** Auto-spawn and manage a system-wide coordinator Claude Code session. See SPEC.md §12.1 for full specification.
 
-**Depends on:** Phase 45 (sidebar with coordinator panel), Phase 46 (focus system with input field).
+**Depends on:** Phase 45 (sidebar with coordinator panel), Phase 46 (focus system).
 
 **Complexity:** Medium-High — tmux session lifecycle, permissions, TmuxPoller, agent tree integration, full-width view mode.
 
@@ -1117,7 +1117,8 @@ Add the system coordinator as the first entry in the agent tree:
 - [ ] System coordinator selection sets selectedAgent to a synthetic Agent-like object (or a separate selection type)
 - [ ] System coordinator state detection uses tmux-only approach (SPEC.md §12.1.6)
 - [ ] **Blast radius audit**: Adding `kind: "system-coordinator"` to the `FlatEntry` union means ALL consumers need updating — every `flatList.filter()`, `Extract<FlatEntry, ...>`, and exhaustive switch. Files: `dashboard.ts`, `dashboard.test.ts`, `agent-actions.ts`, `pane-manager.ts`, `info-panel.ts`
-- [ ] Tests for tree rendering with system coordinator
+- [ ] **Action key suppression**: When system coordinator is selected, suppress action keys that don't apply: `x` (kill), `!` (nuke), `m` (merge), `r` (reassign), `s` (send — handled differently via sidebar input). `R` (resume/restart) is allowed (triggers restart). Update `agent-actions.ts` to check for `kind: "system-coordinator"`.
+- [ ] Tests for tree rendering with system coordinator, action key suppression
 
 #### 47e: Full-width coordinator view
 
@@ -1166,14 +1167,15 @@ Extend `newAgent()` to support the `--coordinator` flag:
 - [ ] New `--coordinator` flag for `ib new-agent`
 - [ ] Uses agent ID `coordinator` instead of generating random ID
 - [ ] Sets `coordinator: true` in meta.json (new field in `AgentMeta` interface)
-- [ ] One-per-repo constraint: if `.ittybitty/agents/coordinator/` already exists (and is not archived), fail with error
+- [ ] One-per-repo constraint: if `.ittybitty/agents/coordinator/` already exists (and is not archived), no-op (idempotent — matches SPEC §12.2.3)
 - [ ] No `--manager` flag — coordinators are always top-level
 - [ ] Cannot be `--worker` — coordinator and worker are mutually exclusive
 - [ ] Branch name: `agent/coordinator-<repo-id>` (includes repo-id to avoid collision across repos)
 - [ ] **Reserved name validation**: Reject `--name` values that are reserved: `coordinator`, `watchdog`, `manual`, and any registered repo basenames. Error: `"'<name>' is a reserved name"`
 - [ ] Per-repo coordinators count toward `maxAgents` limit (they are regular agents)
+- [ ] **Parenting behavior**: Agents spawned by a coordinator have `manager: "coordinator"` in meta.json. Verify `buildAgentTree()` correctly parents them under the coordinator. `ib nuke coordinator` recursively kills children via §1.8 traversal. `ib kill coordinator` kills only the coordinator (standard §1.4).
 - [ ] CLI flag parsing in `src/index.ts`
-- [ ] Tests for coordinator creation, one-per-repo constraint, mutual exclusivity, reserved names
+- [ ] Tests for coordinator creation, one-per-repo constraint, mutual exclusivity, reserved names, parenting
 
 #### 48b: Coordinator permissions
 
@@ -1206,9 +1208,11 @@ Modify watchdog for coordinator agents:
 - [ ] Detect `coordinator: true` in meta.json at watchdog startup
 - [ ] Coordinators are NOT nudged to complete — skip the `waiting` handler's exponential backoff nudge
 - [ ] Coordinators DO get rate-limit bypass, compacting detection, auto-compact
-- [ ] When a coordinator enters `waiting` with no active children: notify system coordinator (if running) instead of a manager
+- [ ] When a coordinator enters `waiting` with no active children: notify system coordinator instead of a manager
+- [ ] When a coordinator enters `complete`: notify system coordinator (completion notification goes to system coordinator instead of parent manager, since coordinators have no manager)
 - [ ] `notifySystemCoordinator(message)` — writes message file to `~/.itsybitsy/coordinator-inbox/` (file-based message queue — see SPEC.md §12.3.4). Avoids fragile `tmux send-keys` which can corrupt the session if coordinator is mid-response.
-- [ ] Tests for coordinator-specific watchdog behavior
+- [ ] **Fallback when system coordinator is not running**: `notifySystemCoordinator()` writes to inbox regardless of whether `ib-coordinator` tmux session exists. Messages are queued for processing when the system coordinator is restarted.
+- [ ] Tests for coordinator-specific watchdog behavior, fallback notification
 
 #### 48e: Agent tree — per-repo coordinator display
 
@@ -1251,7 +1255,7 @@ Support addressing coordinators by name:
 **Files:** `src/tui/dashboard.ts`, `src/coordinator.ts`
 
 - [ ] On `launchDashboard()` (after `ensureSystemCoordinator()`): auto-spawn a per-repo coordinator for each registered repo that doesn't already have one
-- [ ] On Ctrl-C exit: kill per-repo coordinators after stopping the TUI (unless another `ib watch` instance is running)
+- [ ] On Ctrl-C exit: pause per-repo coordinators after stopping the TUI, only when no live PIDs remain in `~/.itsybitsy/coordinator.refs` (same shared ref file used by system coordinator — see 47a)
 - [ ] Idempotent: if coordinator already exists for a repo, skip it
 - [ ] Tests for auto-spawn and auto-close lifecycle
 
@@ -1284,11 +1288,11 @@ Complete the input field component (may already be partially implemented):
 
 **Files:** `src/tui/dashboard.ts`
 
-- [ ] When `active-agent` has focus: render input field at bottom of tmux pane area
-- [ ] On submit: `ib send <agent-id> "<message>"` for regular agents and per-repo coordinators
-- [ ] On submit when system coordinator is selected: `tmux send-keys -t ib-coordinator`
+- [ ] When `active-agent` panel has focus: render input field at bottom of the main tmux pane area (this is the middle column, not the sidebar coordinator panel — that's 49c)
+- [ ] On submit for regular agents and per-repo coordinators: `ib send <agent-id> "<message>"`
+- [ ] On submit when system coordinator is selected and active-agent panel is focused: `tmux send-keys -t ib-coordinator -l "<message>"` followed by `tmux send-keys -t ib-coordinator Enter`
 - [ ] Subtract 3 lines from tmux display height when input field is visible
-- [ ] Tests for submit routing
+- [ ] Tests for submit routing (regular agent, per-repo coordinator, system coordinator)
 
 #### 49c: Wire input field to coordinator panel
 
@@ -1319,7 +1323,7 @@ Complete the input field component (may already be partially implemented):
 
 **Phase 47** (system coordinator) is next. Sub-phases 47a-47b are foundational (config, lifecycle, inbox). 47c-47f depend on 47a.
 
-**Phase 48** (per-repo coordinators) has significant parallelism with Phase 47. Sub-phases 48a-48c (agent creation, permissions, session-start) and 48e-48f (tree display, TUI actions) have **zero code dependencies** on Phase 47 — they extend existing agent infrastructure, not coordinator-specific infrastructure. Only 48d (watchdog notification to system coordinator), 48g (addressing resolution), and 48h (auto-spawn on watch) truly depend on Phase 47.
+**Phase 48** (per-repo coordinators) has significant parallelism with Phase 47. Sub-phases 48a (agent creation), 48c (session-start), 48e-48f (tree display, TUI actions) have **zero code dependencies** on Phase 47 — they extend existing agent infrastructure, not coordinator-specific infrastructure. 48b (permissions) has a soft dependency on 47a for the `permissions.coordinator.allow/deny` config keys, but the function itself is independent. Only 48d (watchdog notification to system coordinator), 48g (addressing resolution), and 48h (auto-spawn on watch) truly depend on Phase 47.
 
 **Phase 49** (input fields) has a soft dependency on Phase 47 (needs the coordinator session to send to), but 49a (input field component) and 49d (keyboard routing) are pure UI work that can proceed independently.
 
@@ -1327,8 +1331,9 @@ Complete the input field component (may already be partially implemented):
 Phase 47a-b ──── config, lifecycle, inbox (foundational)
 Phase 47c-f ──── TmuxPoller, tree entry, full-width view, dashboard integration
                  (depends on 47a)
-Phase 48a-c ──┐
+Phase 48a,c ──┐
 Phase 48e-f ──┤── per-repo coordinator agents (parallel with 47)
+Phase 48b ────┤── soft dep on 47a (config keys)
 Phase 48d,g,h ┘── depends on 47
 Phase 49a,d ──── input field component, keyboard routing (parallel with 47-48)
 Phase 49b-c ──── input field wiring (depends on 47 + 49a)

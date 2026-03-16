@@ -1025,7 +1025,7 @@ The `ib watch` TUI uses a three-column layout:
 
 The input field location depends on which panel has focus: when the coordinator has focus, the input field appears at the bottom of the coordinator section in the sidebar; when the active agent pane has focus, it appears at the bottom of the tmux pane in the main area (see §13.4).
 
-The left sidebar is a fixed 60-column vertical stack containing three sections: agent tree (top), info panel (middle), and coordinator Claude panel (bottom). The main area to the right of the sidebar retains the existing split-pane layout: tmux output on the left and cycling right pane on the right.
+The left sidebar defaults to 60 columns (resizable via `[`/`]` when a sidebar panel has focus, range 30–120). It is a vertical stack containing three sections: agent tree (top), info panel (middle), and coordinator Claude panel (bottom). The main area to the right of the sidebar retains the existing split-pane layout: tmux output on the left and cycling right pane on the right.
 
 ### 11.2 Left Sidebar
 
@@ -1050,14 +1050,6 @@ info_height = max(1, available - tree_height - coordinator_height - separators(2
 - The coordinator panel gets 40% of remaining height (minimum 5 rows).
 - The info panel fills the rest (minimum 1 row).
 - If the terminal is too short to fit all three sections, the coordinator panel shrinks first (down to 3 rows), then the info panel (down to 0 rows — hidden entirely).
-
-### 11.5 Terminal Size Requirements
-
-Minimum terminal size: **140 columns × 24 rows**.
-- Sidebar: 60 columns (fixed) + 1 separator
-- Main area: 79 columns minimum (same as current 80-column minimum for the split pane)
-
-Terminals narrower than 140 columns or shorter than 24 rows display a warning: `[Terminal too small — resize to at least 140×24]`.
 
 ### 11.3 Compact Agent Tree
 
@@ -1095,6 +1087,14 @@ The info panel displays details for the currently selected item. It is read-only
 2. **Agent count** and per-state breakdown (e.g., `running: 2, waiting: 1`)
 
 **Process liveness check**: To determine if a PID is alive, use `process.kill(pid, 0)` (signal 0 checks existence without sending a signal). Wrap in try/catch — throws if the process doesn't exist or the user doesn't have permission. Check on each render cycle (the info panel re-renders when the watcher fires or the selection changes).
+
+### 11.5 Terminal Size Requirements
+
+Minimum terminal size: **140 columns × 24 rows**.
+- Sidebar: 60 columns (default) + 1 separator
+- Main area: 79 columns minimum (same as current 80-column minimum for the split pane)
+
+Terminals narrower than 140 columns or shorter than 24 rows display a warning: `[Terminal too small — resize to at least 140×24]`.
 
 ---
 

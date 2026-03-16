@@ -926,7 +926,7 @@ Stop hook writes authoritative state (`running`/`waiting`/`complete`) to meta.js
 
 **Status:** Complete.
 
-**Goal:** Restructure the TUI from a top-tree / bottom-split layout to a sidebar / main-area layout. The sidebar is a fixed 60-column vertical stack. The main area retains the existing split-pane (tmux left + cycling right pane). See SPEC.md §11 for full specification.
+**Goal:** Restructure the TUI from a top-tree / bottom-split layout to a sidebar / main-area layout. The sidebar defaults to 60 columns (resizable, range 30–120). The main area retains the existing split-pane (tmux left + cycling right pane). See SPEC.md §11 for full specification.
 
 **Complexity:** High — this is a significant restructuring of the dashboard component hierarchy and render pipeline.
 

@@ -129,7 +129,6 @@ The TUI uses a custom `SplitPane` component to render two panes side-by-side, si
 |-----|--------|
 | `Tab` | Cycle focus: agent tree → info → coordinator → active agent → right pane |
 | `Shift+Tab` | Cycle focus backward |
-| `Escape` | Return focus to agent tree (when in input field) |
 
 ### App
 

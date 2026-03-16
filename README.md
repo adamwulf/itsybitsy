@@ -116,13 +116,19 @@ The TUI uses a custom `SplitPane` component to render two panes side-by-side, si
 | `G` | Open tmux session in Ghostty |
 | `S` | Save debug snapshot |
 
+### Resize
+
+| Key | Action |
+|-----|--------|
+| `[` / `]` | Resize focused panel width (sidebar or split pane) |
+| `{` / `}` | Resize focused sidebar panel height |
+
 ### Focus
 
 | Key | Action |
 |-----|--------|
-| `Tab` | Cycle focus: agent tree → coordinator → active agent |
+| `Tab` | Cycle focus: agent tree → info → coordinator → active agent → right pane |
 | `Shift+Tab` | Cycle focus backward |
-| `Escape` | Return focus to agent tree (when in input field) |
 
 ### App
 

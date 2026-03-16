@@ -932,6 +932,10 @@ The `G` keybinding opens a new Ghostty terminal window. Behavior depends on what
 
 Both paths validate their inputs (tmux session names against `/^[\w-]+$/`; directory paths against control characters and DEL) before spawning Ghostty. The spawn uses array-based `Bun.spawn` (no shell interpolation) with `stdio: ["ignore", "ignore", "ignore"]` and `proc.unref()` to detach from the parent process.
 
+### 8.13 REPO Pane Mode
+
+The REPO pane mode displays repo-level action hints — available `ib` commands for the selected repository. It is a full-width, top-anchored pane mode (like DIFF, ERRORS, QUESTIONS). REPO mode activates automatically when a repo header is selected in the agent tree, and restores the previous pane mode when an agent is selected. It is skipped during `p`/`n` pane cycling.
+
 ---
 
 ## 9. Multi-Repo Registry
@@ -1002,7 +1006,8 @@ The `ib watch` TUI uses a three-column layout:
 │  (60 cols)   │  (resizable)     │  modes: log / prompt /│
 │              │                  │  denials / tree /     │
 │  Agent Tree  │                  │  errors / diff /      │
-│  (compact)   │                  │  status / questions   │
+│  (compact)   │                  │  questions / status / │
+│              │                  │  repo                 │
 │──────────────│                  │                       │
 │  Info Panel  │                  │                       │
 │  (selected   │                  │                       │
@@ -1020,11 +1025,11 @@ The `ib watch` TUI uses a three-column layout:
 
 The input field location depends on which panel has focus: when the coordinator has focus, the input field appears at the bottom of the coordinator section in the sidebar; when the active agent pane has focus, it appears at the bottom of the tmux pane in the main area (see §13.4).
 
-The left sidebar is a fixed 60-column vertical stack containing three sections: agent tree (top), info panel (middle), and coordinator Claude panel (bottom). The main area to the right of the sidebar retains the existing split-pane layout: tmux output on the left and cycling right pane on the right.
+The left sidebar defaults to 60 columns (resizable via `[`/`]` when a sidebar panel has focus, range 30–120). It is a vertical stack containing three sections: agent tree (top), info panel (middle), and coordinator Claude panel (bottom). The main area to the right of the sidebar retains the existing split-pane layout: tmux output on the left and cycling right pane on the right.
 
 ### 11.2 Left Sidebar
 
-The sidebar is exactly 60 columns wide. It is not resizable. A vertical separator (`│`) divides the sidebar from the main area.
+The sidebar defaults to 60 columns wide, resizable via `[`/`]` when any sidebar panel has focus (range: 30–120 columns). A vertical separator (`│`) divides the sidebar from the main area.
 
 The sidebar renders three vertically stacked sections, separated by horizontal rules:
 
@@ -1046,14 +1051,6 @@ info_height = max(1, available - tree_height - coordinator_height - separators(2
 - The info panel fills the rest (minimum 1 row).
 - If the terminal is too short to fit all three sections, the coordinator panel shrinks first (down to 3 rows), then the info panel (down to 0 rows — hidden entirely).
 
-### 11.5 Terminal Size Requirements
-
-Minimum terminal size: **140 columns × 24 rows**.
-- Sidebar: 60 columns (fixed) + 1 separator
-- Main area: 79 columns minimum (same as current 80-column minimum for the split pane)
-
-Terminals narrower than 140 columns or shorter than 24 rows display a warning: `[Terminal too small — resize to at least 140×24]`.
-
 ### 11.3 Compact Agent Tree
 
 In the sidebar layout, the agent tree uses a compact row format to fit within 60 columns:
@@ -1074,7 +1071,7 @@ Repo headers remain as-is: `▾ repo-name` or `▸ repo-name` (bold).
 
 ### 11.4 Info Panel
 
-The info panel displays details for the currently selected item. It has no keyboard focus — it is read-only and not part of the focus cycle.
+The info panel displays details for the currently selected item. It is read-only (no interactive elements). When focused via Tab cycling (see §13), `{`/`}` resize its height and `[`/`]` resize the sidebar width.
 
 **When an agent is selected**, the info panel shows:
 
@@ -1090,6 +1087,14 @@ The info panel displays details for the currently selected item. It has no keybo
 2. **Agent count** and per-state breakdown (e.g., `running: 2, waiting: 1`)
 
 **Process liveness check**: To determine if a PID is alive, use `process.kill(pid, 0)` (signal 0 checks existence without sending a signal). Wrap in try/catch — throws if the process doesn't exist or the user doesn't have permission. Check on each render cycle (the info panel re-renders when the watcher fires or the selection changes).
+
+### 11.5 Terminal Size Requirements
+
+Minimum terminal size: **140 columns × 24 rows**.
+- Sidebar: 60 columns (default) + 1 separator
+- Main area: 79 columns minimum (same as current 80-column minimum for the split pane)
+
+Terminals narrower than 140 columns or shorter than 24 rows display a warning: `[Terminal too small — resize to at least 140×24]`.
 
 ---
 
@@ -1228,5 +1233,21 @@ When `agent-tree` has focus:
 ### 13.6 Default Focus
 
 On startup, focus is set to `agent-tree`. This ensures all existing keybindings work immediately without any behavioral change for users who don't use Tab.
+
+### 13.7 Layout Persistence
+
+Panel sizes are persisted across `ib watch` sessions via `~/.itsybitsy/layout.json`. The file stores:
+
+```json
+{
+  "sidebarWidth": 60,
+  "splitPaneLeftWidth": 80,
+  "heightOffsets": { "tree": 0, "info": 0, "coordinator": 0 }
+}
+```
+
+- **Save**: Debounced (500ms) write after any resize operation. The debounce prevents excessive disk writes during rapid resizing.
+- **Restore**: On startup, the saved layout is loaded and applied with validation: NaN and Infinity values are rejected, and all values are clamped to valid ranges (sidebar width [30, 120], etc.).
+- **Missing file**: If `layout.json` doesn't exist or is invalid, defaults are used (sidebar 60 cols, default split-pane position, zero height offsets).
 
 ---

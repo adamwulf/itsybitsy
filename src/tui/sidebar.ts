@@ -1,6 +1,6 @@
 /**
- * SidebarComponent — fixed 60-column vertical stack with three sections:
- * agent tree (top), info panel (middle), coordinator placeholder (bottom).
+ * SidebarComponent — resizable vertical stack (default 60 columns, range 30–120)
+ * with three sections: agent tree (top), info panel (middle), coordinator placeholder (bottom).
  */
 
 import type { Component } from "@mariozechner/pi-tui";

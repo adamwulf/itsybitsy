@@ -134,8 +134,11 @@ itsybitsy
 │       ├── folder-browser.test.ts # Folder browser tests
 │       ├── sidebar.ts        # SidebarComponent — vertical stack: tree + info + coordinator
 │       ├── info-panel.ts     # InfoPanelComponent — stoplight indicators, agent details
-│       ├── focus.ts          # FocusManager — Tab/Shift+Tab cycling between panels
-│       ├── input-field.ts    # InputFieldComponent — text input between separators
+│       ├── focus.ts          # FocusManager — Tab/Shift+Tab cycling between 5 panels;
+│       │                     # buildFocusSeparator() with reverse video for focused headers
+│       ├── layout.ts         # Layout persistence — save/restore panel sizes to
+│       │                     # ~/.itsybitsy/layout.json (sidebar width, split-pane, height offsets)
+│       ├── input-field.ts    # InputFieldComponent — text input between separators (planned)
 │       ├── split-pane.ts     # Custom horizontal layout (pi-tui Box is vertical-only);
 │       │                     # fullWidth flag hides left pane for DIFF/DENIALS/TREE/ERRORS/QUESTIONS
 │       ├── split-pane.test.ts # Split pane tests
@@ -300,14 +303,16 @@ The agent tree at top shows all agents across all registered repos, grouped by r
   status bar (2 lines)
 ```
 
-Three-column layout: fixed 60-col sidebar | resizable tmux pane | cycling right pane. The sidebar stacks: compact agent tree, info panel, coordinator Claude. See SPEC.md §11–13 for full specification.
+Three-column layout: resizable sidebar (default 60 cols, range 30–120) with agent tree + info panel + coordinator placeholder | resizable tmux pane | cycling right pane. See SPEC.md §11–13 for full specification.
 
 **Key differences from current layout:**
 - Agent tree moves from full-width top to sidebar; uses compact format (icon + id + state + age; model/prompt in info panel)
 - New info panel shows stoplight indicators (claude/watchdog process alive) and agent details
-- New coordinator Claude panel at sidebar bottom — system-wide Claude session with ib:* permissions only
-- Focus system: Tab/Shift+Tab cycles between agent-tree, coordinator, active-agent pane
-- Input fields: when coordinator or active-agent has focus, a text input area appears at the bottom of the tmux pane; submit sends via `ib send` (agents) or `tmux send-keys` (coordinator)
+- Coordinator placeholder at sidebar bottom — will be a system-wide Claude session (Phase 47)
+- Focus system: Tab/Shift+Tab cycles between 5 panels: agent-tree → info → coordinator → active-agent → right-pane
+- Panel resizing: `[`/`]` resize focused panel width, `{`/`}` resize focused sidebar panel height
+- Layout persistence: panel sizes saved to `~/.itsybitsy/layout.json`, restored on startup
+- Input fields: planned for Phase 47 — when coordinator or active-agent has focus, a text input area will appear
 
 ### Right Pane Modes (cycle with `p`/`n`)
 
@@ -319,8 +324,9 @@ Three-column layout: fixed 60-col sidebar | resizable tmux pane | cycling right 
 | 3 — TREE | Full agent tree (all repos) |
 | 4 — ERRORS | Agent creation/async errors |
 | 5 — DIFF | `ib diff` output |
-| 6 — STATUS | `ib status` output (commits + changes) |
-| 7 — QUESTIONS | Pending questions from `user-questions.json` |
+| 6 — QUESTIONS | Pending questions from `user-questions.json` |
+| 7 — STATUS | `ib status` output (commits + changes) |
+| 8 — REPO | Repo action hints (available `ib` commands for the selected repo) — full-width, top-anchored |
 
 ### Key Bindings
 
@@ -340,8 +346,9 @@ Matching `ib watch` keybindings exactly where possible; new keys noted.
 - `t` — cycle denials time filter (only active in DENIALS pane, mode 2); 3 filter levels
 - `;` — scroll pane down (show older content)
 - `l` — scroll pane up (toward bottom / newer content)
-- `[` / `]` — resize left pane (decrease / increase width by 5)
-- `Tab` / `Shift-Tab` — cycle focus between agent tree, coordinator, and active agent pane (Phase 45+). Previously: toggle between agent tree and questions list in QUESTIONS pane.
+- `[` / `]` — resize focused panel width (sidebar width when sidebar panel focused; split-pane position when agent/right-pane focused)
+- `{` / `}` — resize focused sidebar panel height (steals from neighbor below; coordinator steals from info pane above)
+- `Tab` / `Shift-Tab` — cycle focus: agent-tree → info → coordinator → active-agent → right-pane → (wrap). Previously: toggle between agent tree and questions list in QUESTIONS pane.
 
 **Agent actions**
 - `s` — send message to selected agent (dialog)
@@ -426,7 +433,7 @@ All TUI agent actions with confirm/input dialogs: kill (`x`), nuke (`!`), resume
 ---
 
 ### Phase 5.2: Right Pane Content -- COMPLETE
-All 8 right pane modes showing real content: agent log, initial prompt, denials with time filter, full tree, errors, diff, status, and questions with answer/acknowledge workflow.
+Right pane modes showing real content: agent log, initial prompt, denials with time filter, full tree, errors, diff, status, and questions with answer/acknowledge workflow. (REPO mode added later in Phase 45.)
 
 ---
 
@@ -915,171 +922,125 @@ Stop hook writes authoritative state (`running`/`waiting`/`complete`) to meta.js
 
 ---
 
-### Phase 45: Sidebar Layout & Compact Agent Tree
+### Phase 45: Sidebar Layout & Compact Agent Tree -- COMPLETE
 
-**Status:** Not started.
+**Status:** Complete.
 
-**Goal:** Restructure the TUI from a top-tree / bottom-split layout to a sidebar / main-area layout. The sidebar is a fixed 60-column vertical stack. The main area retains the existing split-pane (tmux left + cycling right pane). See SPEC.md §11 for full specification.
+**Goal:** Restructure the TUI from a top-tree / bottom-split layout to a sidebar / main-area layout. The sidebar defaults to 60 columns (resizable, range 30–120). The main area retains the existing split-pane (tmux left + cycling right pane). See SPEC.md §11 for full specification.
 
 **Complexity:** High — this is a significant restructuring of the dashboard component hierarchy and render pipeline.
 
-#### 45a: SidebarComponent
+#### 45a: SidebarComponent ✅
 
-**Files:** `src/tui/sidebar.ts` (new), `src/tui/dashboard.ts`
+**Files:** `src/tui/sidebar.ts`, `src/tui/dashboard.ts`
 
-Create a new `SidebarComponent` that renders three vertically stacked sections:
+- [x] `SidebarComponent implements Component` with `render(width: number): string[]`
+- [x] Three sections separated by focus-aware header lines: Agents (top), Info (middle), Coordinator (bottom)
+- [x] Default sidebar width of 60 columns (resizable via `[`/`]` when sidebar panel has focus)
+- [x] Height allocation per SPEC §11.2: tree up to `MAX_TREE_HEIGHT` (7); coordinator ~40% of remaining (min 5); info fills rest
+- [x] Height offsets for per-panel resizing via `{`/`}`
 
-- [ ] Define `SidebarComponent implements Component` with `render(width: number): string[]`
-- [ ] Render three sections separated by horizontal rules: agent tree (top), info panel (middle), placeholder for coordinator (bottom)
-- [ ] Each section has a header line (e.g., `──── Agents ────`, `──── Info ────`, `──── Coordinator ────`)
-- [ ] The sidebar is always exactly 60 columns wide
-- [ ] Height allocation: agent tree gets up to `MAX_TREE_HEIGHT` (7) rows; coordinator gets ~40% of remaining height (minimum 5 rows); info panel fills the rest
-
-#### 45b: Compact agent tree format
+#### 45b: Compact agent tree format ✅
 
 **Files:** `src/tui/agent-tree.ts`
 
-Modify `formatAgentRow()` to support a compact mode for sidebar rendering:
+- [x] Compact format: `icon agent-id  state  age` — omit model and prompt/summary columns
+- [x] Orphaned agent `⚠` prefix renders correctly in compact mode
+- [x] Compact mode activated when rendering width ≤ 60
+- [x] Repo headers unchanged: `▾ repo-name` / `▸ repo-name`
+- [x] Updated `computeStateColWidth()` and column width calculations for compact mode
 
-- [ ] New compact format: `icon agent-id  state  age` — omit model and prompt/summary columns
-- [ ] Orphaned agent `⚠` prefix renders correctly in compact mode (e.g., `⚠◆ agent-id  state  age`)
-- [ ] Compact mode activated when rendering width ≤ 60
-- [ ] Repo headers unchanged: `▾ repo-name` / `▸ repo-name`
-- [ ] Update `computeStateColWidth()` and column width calculations for compact mode
-- [ ] Tests for compact format rendering at various widths, including orphaned agents
+#### 45c: InfoPanelComponent ✅
 
-#### 45c: InfoPanelComponent
+**Files:** `src/tui/info-panel.ts`
 
-**Files:** `src/tui/info-panel.ts` (new)
+- [x] `InfoPanelComponent implements Component` with `render(width: number): string[]`
+- [x] Agent selected: stoplight indicators (● Claude: green/red, ● Watchdog: green/red), model name, summary or prompt wrapped to width
+- [x] Repo header selected: repo path, agent count, per-state breakdown with color-coded state counts
+- [x] Stoplight checks: `process.kill(pid, 0)` wrapped in try/catch for PID liveness
 
-Create a new component that displays details for the currently selected agent or repo:
-
-- [ ] `InfoPanelComponent implements Component` with `render(width: number): string[]`
-- [ ] Agent selected: show stoplight indicators (● Claude: green/red, ● Watchdog: green/red), model name, summary or prompt text wrapped to width
-- [ ] Repo header selected: show repo path, agent count, per-state breakdown
-- [ ] Stoplight checks: `process.kill(pid, 0)` wrapped in try/catch to determine PID liveness from `meta.json` `claude_pid` and `watchdog_pid` fields
-- [ ] No focus, no interactive elements — purely display
-- [ ] Tests for both agent and repo-header display modes, PID liveness edge cases
-
-#### 45d: Dashboard layout restructure
+#### 45d: Dashboard layout restructure ✅
 
 **Files:** `src/tui/dashboard.ts`
 
-Restructure `DashboardComponent.render()` to use the new sidebar layout:
+- [x] Three-column layout: sidebar | tmux pane | right pane
+- [x] Sidebar rendered via `SidebarComponent` with agent tree, info panel, coordinator placeholder
+- [x] Full-width pane modes (DIFF, DENIALS, ERRORS, QUESTIONS, REPO) span the entire main area
+- [x] TREE mode uses full-width tree in main area; sidebar still shows compact tree
 
-- [ ] Replace the current layout (header → tree → separator → split-pane → separator → status) with: header → outer-split-pane(sidebar | inner-split-pane(tmux | right-pane)) → status
-- [ ] The outer split pane has a fixed left width of 60 (sidebar) and the right side is the existing `this.splitPane` (tmux + right pane)
-- [ ] Wire `SidebarComponent` into the outer split pane's left side
-- [ ] Wire agent tree data flow to the sidebar's agent tree
-- [ ] Wire selected agent data to the info panel
-- [ ] Set `displayHeight` for all components based on terminal size minus header/status chrome
-- [ ] Full-width pane modes (DIFF, DENIALS, TREE, ERRORS, QUESTIONS) still hide the tmux pane but should span the entire main area (not the sidebar)
-- [ ] TREE mode: the full-width tree (not compact) uses the main area, while the sidebar still shows the compact tree
-- [ ] Separator junction characters (┬, ┴, ┤, ├) at sidebar/main boundary
-- [ ] Tests for layout rendering at various terminal sizes
-
-#### 45e: Update keybindings for sidebar layout
+#### 45e: Update keybindings for sidebar layout ✅
 
 **Files:** `src/tui/dashboard.ts`
 
-Adjust keybindings affected by the layout change:
-
-- [ ] `[`/`]` resize keys now resize the tmux/right-pane split within the main area (sidebar width is fixed)
-- [ ] Status bar hints updated to reflect any changed keybindings
-- [ ] Help dialog (`?`) updated with new layout description
-- [ ] Minimum terminal width check: increase from 80 to 140 columns (60 sidebar + 80 main area minimum)
+- [x] `[`/`]` resize is focus-aware: sidebar panels resize sidebar width; agent/right pane resize split position
+- [x] Minimum terminal width: 140 columns × 24 rows
 
 ---
 
-### Phase 46: Focus System & Input Fields
+### Phase 46: Focus System & Panel Resizing -- PARTIALLY COMPLETE
 
-**Status:** Not started.
+**Status:** Partially complete (46a, 46c, 46f done; 46b, 46d, 46e not started — input field component and wiring deferred to Phase 47).
 
-**Goal:** Add a focus cycling system with Tab/Shift+Tab and input fields for message composition. See SPEC.md §13 for full specification.
+**Goal:** Add a focus cycling system with Tab/Shift+Tab, panel resizing, and layout persistence. Input fields for message composition deferred until coordinator session is implemented. See SPEC.md §13 for full specification.
 
 **Depends on:** Phase 45 (sidebar layout must exist).
 
 **Complexity:** Medium-High — new input routing layer, careful keyboard handling.
 
-#### 46a: FocusManager
+#### 46a: FocusManager ✅
 
-**Files:** `src/tui/focus.ts` (new), `src/tui/dashboard.ts`
+**Files:** `src/tui/focus.ts`, `src/tui/dashboard.ts`
 
-Create a focus management system:
+- [x] `FocusTarget = "agent-tree" | "info" | "coordinator" | "active-agent" | "right-pane"` (5 panels)
+- [x] `FocusManager` class: tracks current focus, `cycle(delta: 1 | -1)`, `current()`, `setFocus(target)`
+- [x] Focus order: `agent-tree` → `info` → `coordinator` → `active-agent` → `right-pane` → (wrap)
+- [x] Default focus on startup: `agent-tree`
 
-- [ ] Define `FocusTarget = "agent-tree" | "coordinator" | "active-agent"`
-- [ ] `FocusManager` class: tracks current focus, exposes `cycle(delta: 1 | -1)`, `current()`, `setFocus(target)`
-- [ ] Focus order: `agent-tree` → `coordinator` → `active-agent` → (wrap)
-- [ ] Default focus on startup: `agent-tree`
-- [ ] Tests for cycling forward/backward, wrapping
+#### 46b: InputFieldComponent — NOT STARTED
 
-#### 46b: InputFieldComponent
+**Files:** `src/tui/input-field.ts` (planned)
 
-**Files:** `src/tui/input-field.ts` (new)
-
-Create an input field component for message composition:
+Deferred to Phase 47. Input fields for coordinator and active-agent panels will be implemented when the coordinator session is wired up.
 
 - [ ] `InputFieldComponent implements Component` with `render(width: number): string[]`
-- [ ] Renders 3 lines: top separator (`────────`), input line (`> text█`), bottom separator
-- [ ] `handleInput(data: string): boolean` — returns true if input was consumed
+- [ ] Renders 3 lines: top separator, input line (`> text█`), bottom separator
 - [ ] Supports: printable characters, backspace, Ctrl-A (home), Ctrl-E (end), Ctrl-U (clear line)
-- [ ] `onSubmit` callback: fires on Enter with the current text, then clears the field
-- [ ] `onCancel` callback: fires on Escape
-- [ ] Tests for text editing, submission, cancellation
+- [ ] `onSubmit` / `onCancel` callbacks
 
-#### 46c: Focus-aware keyboard routing
+#### 46c: Focus-aware keyboard routing ✅
 
 **Files:** `src/tui/dashboard.ts`
 
-Restructure `handleInput()` to route based on focus state:
+- [x] Tab → `focusManager.cycle(1)`, Shift+Tab → `focusManager.cycle(-1)`
+- [x] When focus is `agent-tree`: existing keybinding behavior (j/k, p/n, action keys)
+- [x] Focus visual indicators: `buildFocusSeparator()` renders focused headers in reverse video + bold; unfocused in dim
 
-- [ ] Tab → `focusManager.cycle(1)`, Shift+Tab → `focusManager.cycle(-1)` — replaces the old tree/questions toggle
-- [ ] When focus is `agent-tree`: existing keybinding behavior (j/k, p/n, action keys, etc.)
-- [ ] When focus is `coordinator` or `active-agent`: route printable/editing keys to the input field; suppress dashboard action keys (s, m, x, etc.); Tab/Shift+Tab still cycle; Escape returns focus to `agent-tree`
-- [ ] Focus visual indicator: render focused panel's separator/header in **reverse video**, dim unfocused panels
-- [ ] Tests for keyboard routing in each focus state
+#### 46d: Wire input field to tmux pane — NOT STARTED
 
-#### 46d: Wire input field to tmux pane
+Deferred to Phase 47.
 
-**Files:** `src/tui/dashboard.ts`, `src/tui/split-pane.ts`
-
-Integrate the input field into the tmux pane area:
-
-- [ ] When `active-agent` has focus and an agent is selected: render input field at the bottom of the tmux pane area (subtract 3 lines from `tmuxPane.displayHeight`)
-- [ ] On submit: call `sendMessage(repoPath, agentId, text)` to deliver the message via `ib send`
-- [ ] On cancel (Escape): clear input, return focus to `agent-tree`
-- [ ] When focus leaves `active-agent`: hide the input field, restore full tmux display height
-- [ ] Tests for input field visibility toggling, message submission
-
-#### 46e: Wire input field to coordinator panel
-
-**Files:** `src/tui/sidebar.ts`, `src/tui/dashboard.ts`
-
-Integrate the input field into the coordinator section of the sidebar:
-
-- [ ] When `coordinator` has focus: render input field at the bottom of the coordinator section (subtract 3 lines from coordinator display height)
-- [ ] On submit: send via `tmux send-keys -t ib-coordinator -l "<message>"` followed by a separate `tmux send-keys -t ib-coordinator Enter`
+- [ ] When `active-agent` has focus and agent selected: render input field at bottom of tmux pane
+- [ ] On submit: `sendMessage()` to deliver message
 - [ ] On cancel: clear input, return focus to `agent-tree`
-- [ ] When focus leaves `coordinator`: hide the input field, restore full coordinator display height
-- [ ] Tests for coordinator input submission
 
-#### 46f: Focus indicators and panel resizing
+#### 46e: Wire input field to coordinator panel — NOT STARTED
 
-**Files:** `src/tui/dashboard.ts`, `src/tui/sidebar.ts`, `src/tui/split-pane.ts`, `src/tui/focus.ts`
+Deferred to Phase 47.
 
-Focus indicator and panel resize keybindings (see SPEC §13.3 and §13.3.1):
+- [ ] When `coordinator` has focus: render input field at bottom of coordinator section
+- [ ] On submit: `tmux send-keys` to coordinator session
+- [ ] On cancel: clear input, return focus to `agent-tree`
 
-- [ ] Focused panel's section header/separator rendered in **reverse video**; unfocused panels rendered dim
-- [ ] `[` / `]` resize focused panel width:
-  - Sidebar focused: steal equally from agent pane and right pane (each shrinks by N/2)
-  - Agent pane focused: steal from right pane only
-  - Right pane focused: steal from agent pane only
-- [ ] `{` / `}` (Shift+[ / Shift+]) resize focused sidebar panel height:
-  - Growing one sidebar panel shrinks the panel(s) below it
-  - No-op if focused panel is bottom-most sidebar panel
-- [ ] Width/height values persisted across renders (stored in dashboard or focus manager state)
-- [ ] Minimum width/height constraints to prevent panels from collapsing to zero
-- [ ] Tests for reverse-video indicator on focused panel, resize keybindings, constraint enforcement
+#### 46f: Focus indicators, panel resizing, and layout persistence ✅
+
+**Files:** `src/tui/dashboard.ts`, `src/tui/sidebar.ts`, `src/tui/focus.ts`, `src/tui/layout.ts`
+
+- [x] Focused panel's section header rendered in **reverse video + bold**; unfocused rendered dim
+- [x] `[` / `]` resize focused panel width (sidebar width when sidebar focused; split-pane position when agent/right-pane focused)
+- [x] `{` / `}` resize focused sidebar panel height; growing one shrinks the neighbor below (coordinator steals from info pane above)
+- [x] Sidebar width bounded [30, 120]; height offsets clamped to prevent collapse
+- [x] Layout persistence via `~/.itsybitsy/layout.json` — saves sidebar width, split-pane left width, and height offsets; restored on startup with validation (rejects NaN/Infinity)
+- [x] Debounced save (500ms) to avoid excessive disk writes during rapid resizing
 
 ---
 
@@ -1149,19 +1110,14 @@ Define the coordinator's initial configuration:
 
 ### Parallelism Notes for Phases 45–47
 
-**Phase 45** must complete first — it establishes the sidebar layout that Phases 46 and 47 build upon.
+**Phase 45** is complete — sidebar layout established.
 
-**Phase 46** (focus system) and **Phase 47** (coordinator) have a dependency: Phase 47c needs the focus system from Phase 46 to route input to the coordinator. However, 47a (session lifecycle) and 47b (poller) can start in parallel with Phase 46.
+**Phase 46** is partially complete — FocusManager, focus-aware routing, panel resizing, and layout persistence are done. Input field components (46b, 46d, 46e) are deferred to Phase 47, since they require the coordinator session to be functional.
 
-Recommended execution order:
+**Phase 47** (coordinator) is next. Remaining work:
 ```
-Phase 45 ──── (must complete first)
-               ↓
-Phase 46a-c ──┐
-Phase 47a-b ──┼── in parallel
-               ↓
-Phase 46d-e ──── (needs focus system + coordinator)
-Phase 47c-d ──── (needs focus system + coordinator poller)
+Phase 47a-d ──── coordinator session lifecycle, poller, dashboard integration
+Phase 46b,d,e ── input field component and wiring (for both coordinator and active-agent)
 ```
 
 ---

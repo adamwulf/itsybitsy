@@ -1003,16 +1003,10 @@ export class DashboardComponent implements Component {
       : `${DIM}— agent dashboard${RESET}`;
     lines.push(truncateToWidth(`${BOLD}ib${RESET} ${subtitle}`, width, ""));
 
-    // Separator after header
-    lines.push(truncateToWidth(`${DIM_GRAY}${"─".repeat(width)}${RESET}`, width, ""));
-
     // Compute available height for the main content area.
-    // Chrome lines: header(1) + top separator(1) + main title separator(1) +
-    //               bottom separator(1) + status bar(2) = 6.
-    // SPEC §11.2 formula uses 4 (header + separator + status_bar) but we add a top separator
-    // between the header and the sidebar/main area, plus a titled separator at the top of the
-    // main area showing agent-id and pane-mode.
-    const chromeLines = 6;
+    // Chrome lines: header(1) + main title separator(1) +
+    //               bottom separator(1) + status bar(2) = 5.
+    const chromeLines = 5;
     const availableHeight = Math.max(5, terminalRows - chromeLines);
 
     const mainWidth = width - SIDEBAR_WIDTH - 1; // 1 for sidebar separator

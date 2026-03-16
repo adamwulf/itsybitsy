@@ -1107,7 +1107,7 @@ Add a second TmuxPoller for the system coordinator session:
 
 - [ ] Create a dedicated `TmuxPoller` instance targeting `ib-coordinator`
 - [ ] Poll at ~1s interval, same as the agent poller
-- [ ] Feed output to a `TmuxPaneComponent` embedded in the sidebar's coordinator section
+- [ ] Create a `TmuxPaneComponent` instance for the coordinator section — stored as a field on the sidebar or dashboard (e.g., `coordinatorPane: TmuxPaneComponent`). The poller feeds captured output into this component via its existing text-update API.
 - [ ] Start polling on dashboard startup, stop on exit
 - [ ] The coordinator poller runs continuously (unlike the agent poller which switches targets on selection)
 - [ ] Rename sidebar section header from "Coordinator" to "System Coordinator"
@@ -1126,7 +1126,7 @@ Add the system coordinator as the first entry in the agent tree:
 - [ ] System coordinator state detection uses tmux-only approach (SPEC.md §12.1.6)
 - [ ] **Blast radius audit**: Adding `kind: "system-coordinator"` to the `FlatEntry` union means ALL consumers need updating — every `flatList.filter()`, `Extract<FlatEntry, ...>`, and exhaustive switch. Files: `dashboard.ts`, `dashboard.test.ts`, `agent-actions.ts`, `pane-manager.ts`, `info-panel.ts`
 - [ ] **Action key suppression**: When system coordinator is selected, suppress action keys that don't apply: `x` (kill), `!` (nuke), `m` (merge), `r` (reassign). `s` (send) IS allowed — routes via `ib inbox write` per SPEC §12.3.1. `R` (resume/restart) is allowed (triggers restart). Update `agent-actions.ts` to check for `kind: "system-coordinator"`.
-- [ ] **`s` key routing**: When system coordinator is selected and user presses `s`, the standard send dialog opens but the message is delivered via `ib inbox write` instead of `tmux send-keys`. This matches SPEC §12.3.1 (messaging commands use inbox for system coordinator).
+- [ ] **`s` key routing**: When system coordinator is selected and user presses `s`, the standard send dialog opens and the message is delivered via `tmux send-keys -t ib-coordinator -l "<message>"` followed by `tmux send-keys -t ib-coordinator Enter` (same as the sidebar input field). This matches SPEC §12.3.3 — TUI interactions are user-interactive and use tmux send-keys directly. The `ib inbox write` path is only for programmatic/automated senders (watchdog, agents).
 - [ ] Tests for tree rendering with system coordinator, action key suppression
 
 #### 47e: Full-width coordinator view
@@ -1138,8 +1138,11 @@ When system coordinator is selected, switch to a special layout:
 - [ ] Dashboard detects when selection is `kind: "system-coordinator"`
 - [ ] **Sidebar layout switch**: Hide info panel, show only agent tree (top) + coordinator tmux output (bottom). Coordinator panel gets all remaining sidebar height (`available - tree_height - 1 separator`).
 - [ ] **Focus cycling**: When info panel is hidden, Tab skips `info` target — `agent-tree` → `coordinator` → `active-agent` → `right-pane`
-- [ ] **Main area**: Replace split-pane with a full-width **system dashboard** table (see SPEC.md §12.1.4 for column definitions: Repo, Agent, Role, State, Model, Age, Summary)
-- [ ] Scrolling (`;`/`l`) applies to the system dashboard view
+- [ ] **Main area**: Replace split-pane with a full-width **system dashboard** table. This is a significant rendering component with three sub-tasks:
+  - **Data gathering**: Collect all agents across all repos (from watcher state), map to table rows with repo grouping. Coordinators sort first within each repo group.
+  - **Table rendering**: 7 columns (Repo 15, Agent 20, Role 5, State 12, Model 8, Age 6, Summary remaining — see SPEC.md §12.1.4). Narrow-terminal fallback: <80 cols hides Summary, <60 cols also hides Model and Age.
+  - **Scrolling**: Track `scrollOffset` for the dashboard table, apply `;`/`l` keys. Rendered as simple formatted text lines (no pi-tui table component needed).
+- [ ] Consider placing the system dashboard renderer in a separate file (e.g., `src/tui/system-dashboard.ts`) if it exceeds ~100 lines
 - [ ] When selection moves to a regular agent or repo header, revert to normal layout (tree + info + coordinator sidebar, split-pane main area)
 
 #### 47f: Dashboard integration
@@ -1176,12 +1179,12 @@ Extend `newAgent()` to support the `--coordinator` flag:
 - [ ] New `--coordinator` flag for `ib new-agent`
 - [ ] Uses agent ID `coordinator` instead of generating random ID
 - [ ] Sets `coordinator: true` in meta.json (new field in `AgentMeta` interface)
-- [ ] One-per-repo constraint: if `.ittybitty/agents/coordinator/` already exists (and is not archived), no-op (idempotent — matches SPEC §12.2.3)
+- [ ] One-per-repo constraint: if `.ittybitty/agents/coordinator/` already exists with `coordinator: true` in meta.json, no-op (idempotent — matches SPEC §12.2.3). If it exists but without `coordinator: true` (pre-existing naming collision), exit with error: `"Agent 'coordinator' already exists but is not a coordinator — kill it first"`
 - [ ] No `--manager` flag — coordinators are always top-level
 - [ ] Cannot be `--worker` — coordinator and worker are mutually exclusive
 - [ ] Branch name: `agent/coordinator-<repo-id>` (includes repo-id to avoid collision across repos)
 - [ ] **Reserved name validation**: Reject `--name` values that are reserved: `coordinator`, `watchdog`, `manual`, and any registered repo basenames. Error: `"'<name>' is a reserved name"`
-- [ ] Per-repo coordinators count toward `maxAgents` limit (they are regular agents)
+- [ ] Per-repo coordinators bypass the `maxAgents` check (coordinators are infrastructure, not user tasks — see SPEC §12.4.3). Add bypass logic in `newAgent()` when `--coordinator` flag is set.
 - [ ] **Parenting behavior**: Agents spawned by a coordinator have `manager: "coordinator"` in meta.json. Verify `buildAgentTree()` correctly parents them under the coordinator. `ib nuke coordinator` recursively kills children via §1.8 traversal. `ib kill coordinator` kills only the coordinator (standard §1.4).
 - [ ] CLI flag parsing in `src/index.ts`
 - [ ] Tests for coordinator creation, one-per-repo constraint, mutual exclusivity, reserved names, parenting
@@ -1192,7 +1195,7 @@ Extend `newAgent()` to support the `--coordinator` flag:
 
 Add `buildCoordinatorSettings()` function:
 
-- [ ] New function in `src/coordinator.ts` parallel to `buildAgentSettings()` — produces restricted permissions (Read/Glob/Grep/LS yes, Write/Edit no, no Bash(cat/head/tail/grep:*) — see SPEC.md §12.2.4)
+- [ ] New function in `src/coordinator.ts` parallel to `buildAgentSettings()` — produces the complete permission set from SPEC.md §12.2.4 (allow list: Bash(ib:*), Bash(git status/log/diff/show/ls-files/grep:*), Bash(pwd:*), Bash(ls:*), Read, Glob, Grep, LS, TodoWrite, AskUserQuestion; deny list: Bash, Write, Edit, MultiEdit, NotebookEdit, WebFetch, WebSearch, Task, TaskOutput, Agent, KillShell, EnterPlanMode, ExitPlanMode)
 - [ ] Merges with config `permissions.coordinator.allow/deny` (config keys added in 47a)
 - [ ] Called by `newAgent()` when `--coordinator` flag is set
 - [ ] Tests for permission construction, config merging
@@ -1254,7 +1257,7 @@ Support addressing coordinators by name:
 
 - [ ] `ib send coordinator "message"` — always addresses the system coordinator (via `ib inbox write`)
 - [ ] `ib send <repo-name> "message"` — addresses the per-repo coordinator for that repo (using repo basename from `src/registry.ts` to look up the coordinator agent). This is how the system coordinator reaches per-repo coordinators.
-- [ ] `sendMessage()` function: detect `coordinator` as target → system coordinator; detect registered repo basename as target → per-repo coordinator. Resolution priority: literal `coordinator` → repo basename → standard agent ID matching (SPEC.md §12.3.1)
+- [ ] `sendMessage()` function: detect `coordinator` as target → system coordinator; detect registered repo basename as target → per-repo coordinator. Resolution priority: literal `coordinator` → repo basename → standard agent ID matching (SPEC.md §12.3.1). **Note**: repo basenames take priority over agent ID substring matching — if a repo is named `agent`, `ib send agent "msg"` addresses the repo coordinator, not `agent-a1b2c3d4`. Users can bypass with full agent IDs.
 - [ ] Error with clear message when repo exists but has no coordinator: "No coordinator for repo <name>"
 - [ ] Error with clear message when repo basename is ambiguous (two repos with same basename): "Ambiguous repo name <name> — use full path"
 - [ ] Tests for coordinator addressing resolution
@@ -1263,7 +1266,7 @@ Support addressing coordinators by name:
 
 **Files:** `src/tui/dashboard.ts`, `src/coordinator.ts`
 
-- [ ] On `launchDashboard()` (after `ensureSystemCoordinator()`): auto-spawn a per-repo coordinator for each registered repo that doesn't already have one
+- [ ] On `launchDashboard()` (after `ensureSystemCoordinator()`): auto-spawn a per-repo coordinator for each registered repo that doesn't already have one. Coordinators bypass the `maxAgents` check (SPEC §12.4.3).
 - [ ] On Ctrl-C exit: pause per-repo coordinators after stopping the TUI, only when no live PIDs remain in `~/.itsybitsy/coordinator.refs` (same shared ref file used by system coordinator — see 47a)
 - [ ] Idempotent: if coordinator already exists for a repo, skip it
 - [ ] Tests for auto-spawn and auto-close lifecycle

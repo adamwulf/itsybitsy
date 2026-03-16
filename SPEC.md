@@ -320,7 +320,7 @@ After successful merge:
 
 `ib send <target-id> "message"` sends text to an agent's tmux session:
 
-1. **Resolve target**: Partial ID matching is supported (prefix/substring match against agent directories and tmux sessions). Must resolve to exactly one agent.
+1. **Resolve target**: Partial ID matching is supported (prefix/substring match against agent directories and tmux sessions). Must resolve to exactly one agent. For coordinator addressing, see §12.3.1 — `coordinator` routes to the system coordinator (via inbox), repo basenames route to per-repo coordinators (via tmux send-keys).
 2. **Verify running**: The target's tmux session must exist.
 3. **Auto-detect sender**: If called from within an agent worktree, the sender's agent ID is read from `meta.json`. An explicit `--from <sender-id>` flag can also be passed to override auto-detection.
 4. **Format message**: If a sender is detected, the message is prefixed: `[sent by agent <sender-id>]: <message>`
@@ -1137,7 +1137,7 @@ The system coordinator is a Claude Code session that runs from `~/.itsybitsy/` w
 2. Write `~/.itsybitsy/.claude/settings.local.json` with system coordinator permissions (§12.1.3)
 3. Write the system coordinator prompt (§12.1.5) to `~/.itsybitsy/coordinator-prompt.txt`
 4. Create a tmux session named `ib-coordinator` with working directory `~/.itsybitsy/`
-5. Start Claude Code inside the session in interactive mode: `claude --model <coordinator.model>`, then after a brief delay send the initial prompt via `tmux send-keys -t ib-coordinator -l "$(cat ~/.itsybitsy/coordinator-prompt.txt)" && tmux send-keys -t ib-coordinator Enter`. **Note**: The `-p` flag is NOT used because it runs Claude in non-interactive print mode (exits after one response). The system coordinator must run as an interactive session to accept ongoing input.
+5. Start Claude Code inside the session in interactive mode: run `tmux send-keys -t ib-coordinator "claude --model <coordinator.model>" Enter` (via `Bun.spawn(["tmux", "send-keys", "-t", "ib-coordinator", "claude --model <model>", "Enter"])`). After a 3-second delay (for Claude to start and accept input), send the initial prompt via two separate `Bun.spawn` calls: first `Bun.spawn(["tmux", "send-keys", "-t", "ib-coordinator", "-l", promptText])`, then `Bun.spawn(["tmux", "send-keys", "-t", "ib-coordinator", "Enter"])`. All tmux interactions use `Bun.spawn` with array arguments — never shell strings. **Note**: The `-p` flag is NOT used because it runs Claude in non-interactive print mode (exits after one response). The system coordinator must run as an interactive session to accept ongoing input.
 
 **Shared across instances**: Multiple `ib watch` instances share the same `ib-coordinator` tmux session. On startup, check if the session already exists (`tmux has-session -t ib-coordinator`). If it does, just display its output — do not create a new one. **TOCTOU note**: There is a race window between the `has-session` check and `new-session` creation. If two `ib watch` instances start simultaneously, both may see no session and attempt to create. Mitigation: `tmux new-session` fails if the session already exists — catch the error and fall through to the "session already exists" path.
 
@@ -1196,6 +1196,8 @@ This ensures the system coordinator can only run `ib` commands (e.g., `ib list`,
 | Summary | remaining | First line of summary or prompt |
 
 Rows are grouped by repo (with repo header rows). Coordinators appear first within each repo group. The dashboard supports vertical scrolling via `;`/`l` keys.
+
+**Narrow-terminal fallback**: If the available width for the system dashboard is less than 80 columns, the Summary column is hidden. If less than 60 columns, the Model and Age columns are also hidden. Column widths are fixed — no proportional scaling.
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
@@ -1267,7 +1269,7 @@ Per-repo coordinators are stored in `.ittybitty/agents/` like regular agents, bu
 5. Does NOT set a `--manager` — coordinators are top-level agents
 6. Otherwise follows the standard agent creation flow (§1.1)
 
-**One-per-repo constraint**: If a coordinator already exists for the repo (active `coordinator` agent in `.ittybitty/agents/` with `coordinator: true` in meta.json), `ib new-agent --coordinator` prints `"Coordinator already exists for <repo-name>"` and exits 0 (idempotent no-op). If a non-coordinator agent named `coordinator` exists (pre-existing naming collision), the command exits with error: `"Agent 'coordinator' already exists but is not a coordinator — kill it first"`. There is exactly one coordinator per repo, never more.
+**One-per-repo constraint**: If a coordinator already exists for the repo (active `coordinator` agent directory in `.ittybitty/agents/` with `coordinator: true` in meta.json), `ib new-agent --coordinator` prints `"Coordinator already exists for <repo-name>"` and exits 0 (idempotent no-op). If a non-coordinator agent named `coordinator` exists (pre-existing naming collision), the command exits with error: `"Agent 'coordinator' already exists but is not a coordinator — kill it first"`. There is exactly one coordinator per repo, never more. Archived coordinators (in `.ittybitty/archive/`) do not block creation — only active agent directories are checked.
 
 **Auto-spawn on watch startup**: When `ib watch` launches, it auto-spawns a per-repo coordinator for each registered repo that doesn't already have one. This matches the system coordinator's auto-spawn behavior — both tiers start automatically.
 
@@ -1296,7 +1298,7 @@ Per-repo coordinators get a restricted permission set — they can read the code
       "TodoWrite", "AskUserQuestion"
     ],
     "deny": [
-      "Write", "Edit", "MultiEdit", "NotebookEdit",
+      "Bash", "Write", "Edit", "MultiEdit", "NotebookEdit",
       "WebFetch", "WebSearch", "Task", "TaskOutput", "Agent", "KillShell",
       "EnterPlanMode", "ExitPlanMode"
     ]
@@ -1306,6 +1308,7 @@ Per-repo coordinators get a restricted permission set — they can read the code
 
 Key differences from regular agents:
 - **No Write/Edit/MultiEdit** — coordinators cannot modify files
+- **Unqualified `Bash` denied** — prevents running arbitrary shell commands. Only the specific `Bash(ib:*)`, `Bash(git ...:*)`, `Bash(pwd:*)`, and `Bash(ls:*)` patterns in the allow list are permitted. Without the unqualified `Bash` deny, Claude could bypass the allow-list by running any command.
 - **No Bash(cat:*)/Bash(head:*)/Bash(tail:*)/Bash(grep:*)** — shell commands like `cat`, `head`, `tail`, `grep` can write files via shell redirection (e.g., `cat > file.txt`, `grep x file > output.txt`). Coordinators use `Read`, `Glob`, `Grep`, and `LS` for file inspection instead — these are Claude Code's built-in tools which cannot perform writes.
 - **Has Read/Glob/Grep/LS** — coordinators can read the codebase for context via Claude Code's built-in tools (which cannot perform writes)
 - **No Task/Agent** — coordinators spawn sub-agents only via `Bash(ib:*)`, not Claude's built-in Task/Agent tools. This ensures all agents are tracked through the ib system.
@@ -1353,7 +1356,7 @@ Per-repo coordinators use a modified watchdog behavior:
 
 - A watchdog process IS spawned (to detect rate limiting, compacting, etc.)
 - The watchdog does NOT nudge coordinators to complete — coordinators are expected to run indefinitely while they have active sub-agents
-- The watchdog DOES notify the system coordinator (if running) when a per-repo coordinator enters `waiting` state with no active children — this allows the system coordinator to decide whether to give it more work or let it idle. **Active children** are agents whose `meta.json` `manager` field matches `"coordinator"` and whose state is `creating`, `running`, `waiting`, or `compacting` (i.e., not `stopped` or `complete`). Notification uses the file-based message queue (§12.3.4) with `--source watchdog` (the watchdog runs from the coordinator's worktree, so CWD-based auto-detection would incorrectly set the source to the coordinator's agent ID).
+- The watchdog DOES notify the system coordinator (if running) when a per-repo coordinator enters `waiting` state with no active children — this allows the system coordinator to decide whether to give it more work or let it idle. **Active children** are agents whose `meta.json` `manager` field matches `"coordinator"` and whose state is `creating`, `running`, `waiting`, or `compacting` (i.e., not `stopped` or `complete`). Notification uses: `ib inbox write --source watchdog "[coordinator] Coordinator <repo-name> entered waiting with no active children"`. The `--source watchdog` flag is required because the watchdog runs from the coordinator's worktree, so CWD-based auto-detection would incorrectly set the source to the coordinator's agent ID.
 - Completion notification goes to the system coordinator instead of a parent manager (since coordinators have no manager)
 - **Fallback when system coordinator is not running**: If the system coordinator's tmux session does not exist, notifications are logged to `~/.itsybitsy/coordinator-inbox/` anyway (they will be processed when the system coordinator is restarted). This avoids losing notifications.
 
@@ -1382,7 +1385,7 @@ Examples:
 
 **Reserved names**: Certain names cannot be used as agent names (via `--name`): `coordinator` (system coordinator addressing + per-repo coordinator ID), `watchdog` (tmux process name collision), `manual` (inbox source field), and all registered repo basenames (per-repo coordinator addressing). `ib new-agent --name <reserved>` is rejected with error: `"'<name>' is a reserved name"`. The reserved name check is performed in `newAgent()` before any agent creation steps.
 
-Repo basenames take priority over agent ID substring matching in `ib send`, so if a repo is named `agent` and there's also an `agent-a1b2c3d4`, `ib send agent "message"` addresses the repo coordinator, not the agent. For management commands, standard agent ID resolution applies (no repo basename override).
+Repo basenames take priority over agent ID substring matching in `ib send`, so if a repo is named `agent` and there's also an `agent-a1b2c3d4`, `ib send agent "message"` addresses the repo coordinator, not the agent. To bypass repo-name resolution and target the regular agent, use the full agent ID: `ib send agent-a1b2c3d4 "message"`. For management commands, standard agent ID resolution applies (no repo basename override).
 
 **Error cases**:
 - `ib send coordinator "message"` when the system coordinator tmux session does not exist → the message is still queued via `ib inbox write` (not an error). The system coordinator will process it when restarted.
@@ -1499,9 +1502,9 @@ export type FlatEntry =
 
 #### 12.4.3 maxAgents
 
-Per-repo coordinators count toward the `maxAgents` limit (they are regular agents). The system coordinator does NOT count — it is not a regular agent and lives outside any repo.
+Per-repo coordinators bypass the `maxAgents` check during both auto-spawn (§12.2.3) and manual creation (`ib new-agent --coordinator`) — coordinators are infrastructure, not user tasks. They DO occupy agent slots in `.ittybitty/agents/` and appear in `ib list` output. The system coordinator does NOT count — it is not a regular agent and lives outside any repo.
 
-**Auto-spawn and maxAgents**: When `ib watch` auto-spawns per-repo coordinators on startup (§12.2.3), coordinators bypass the `maxAgents` check. This prevents the situation where registering many repos makes it impossible to create any regular agents. Manual coordinator creation via `ib new-agent --coordinator` also bypasses the limit — coordinators are infrastructure, not user tasks.
+**Auto-spawn and maxAgents**: When `ib watch` auto-spawns per-repo coordinators on startup (§12.2.3), coordinators bypass the `maxAgents` check. This prevents the situation where registering many repos makes it impossible to create any regular agents. Manual coordinator creation via `ib new-agent --coordinator` also bypasses the limit — coordinators are infrastructure, not user tasks. This bypass is unbounded — registering 50 repos creates 50 coordinators. This is acceptable because: (a) users control how many repos they register, (b) coordinators idle most of the time (low resource usage when waiting), and (c) the registry is a deliberate user action, not an automated process.
 
 ### 12.5 Coordinator-Specific Config
 

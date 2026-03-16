@@ -1334,13 +1334,18 @@ Per-repo coordinators use a modified watchdog behavior:
 
 #### 12.3.1 CLI Addressing
 
-Coordinators are addressed by name rather than agent ID:
+Coordinators are addressed by name rather than agent ID. The `ib send` target is resolved using this **priority order**:
 
-- **System coordinator**: `ib send coordinator "message"` — the bare name `coordinator` always addresses the system coordinator
-- **Per-repo coordinator**: `ib send <repo-name> "message"` — uses the repo basename (e.g., `ib send itsybitsy "message"`) to address the per-repo coordinator for that repo
-- **Regular agents**: `ib send <agent-id> "message"` — unchanged, uses standard agent ID
+1. **Literal `coordinator`** → always addresses the system coordinator (takes priority over per-repo coordinator agents whose agent ID is also `coordinator`)
+2. **Registered repo basename** → addresses the per-repo coordinator for that repo (e.g., `ib send itsybitsy "message"`)
+3. **Standard agent ID matching** → falls through to existing agent ID resolution (§4.1)
 
-This naming is simple and unambiguous — no CWD-scoped resolution needed. The system coordinator can reach per-repo coordinators via `ib send <repo-name>`, and per-repo coordinators can reach the system coordinator via `ib send coordinator`.
+Examples:
+- `ib send coordinator "message"` → system coordinator
+- `ib send itsybitsy "message"` → per-repo coordinator for the itsybitsy repo
+- `ib send agent-a1b2c3d4 "message"` → regular agent (unchanged)
+
+This priority order means `coordinator` is a reserved name — `ib new-agent --name coordinator` is rejected for non-coordinator agents. Repo basenames take priority over agent ID substring matching, so if a repo is named `agent` and there's also an `agent-a1b2c3d4`, `ib send agent "message"` addresses the repo coordinator, not the agent.
 
 #### 12.3.2 TUI Addressing
 
@@ -1448,7 +1453,7 @@ The coordinator system touches many modules. This section catalogs every file th
 | `src/hooks/session-start.ts` | Detect `coordinator: true` in meta.json. Inject coordinator-specific prompt (SPEC.md §12.2.6) instead of standard manager/worker prompt. |
 | `src/hooks/agent-path.ts` | No changes needed — per-repo coordinators use standard path isolation. System coordinator has no worktree to isolate. |
 | `src/hooks/agent-status.ts` | No changes needed — stop hook writes state normally. Coordinator-specific behavior is in the watchdog, not the hook. |
-| `src/config.ts` | New config keys: `coordinator.autoSpawnPerRepo` (boolean), `coordinator.model` (string), `permissions.coordinator.allow` (string[]), `permissions.coordinator.deny` (string[]). |
+| `src/config.ts` | New config keys: `coordinator.model` (string), `permissions.coordinator.allow` (string[]), `permissions.coordinator.deny` (string[]). |
 | `src/tui/dashboard.ts` | Detect system coordinator selection → switch to full-width view mode (no split-pane). System coordinator lifecycle on startup/shutdown. Coordinator restart on `R` key. Input field routing for coordinator vs agent. |
 | `src/tui/agent-tree.ts` | Render system coordinator as first entry with `◆` icon. Render per-repo coordinators with `◇` icon, sorted before regular agents. Handle selection of `kind: "system-coordinator"` entries. |
 | `src/tui/sidebar.ts` | Rename "Coordinator" header to "System Coordinator". No structural changes — sidebar coordinator panel still shows system coordinator tmux output. |

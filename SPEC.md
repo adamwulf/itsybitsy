@@ -1150,19 +1150,19 @@ The coordinator session does NOT use the standard session-start hook (§6.3). In
 
 ### 13.1 Focus Targets
 
-The TUI has three focusable panels:
+The TUI has five focusable panels:
 
 | Target | Location | Behavior when focused |
 |--------|----------|----------------------|
 | `agent-tree` | Sidebar top | `j`/`k` navigate agents, action keys active |
+| `info` | Sidebar middle | Read-only info panel; `[`/`]` resize sidebar, `{`/`}` resize height |
 | `coordinator` | Sidebar bottom | Input field visible, text input captured |
 | `active-agent` | Main area (tmux pane) | Input field visible, text input captured |
-
-The info panel (§11.4) is NOT focusable — it is read-only.
+| `right-pane` | Main area (right side) | `[`/`]` resize right pane width |
 
 ### 13.2 Focus Cycling
 
-- **Tab**: Cycle focus forward through the focus targets in order: `agent-tree` → `coordinator` → `active-agent` → `agent-tree` → ...
+- **Tab**: Cycle focus forward through the focus targets in order: `agent-tree` → `info` → `coordinator` → `active-agent` → `right-pane` → `agent-tree` → ...
 - **Shift+Tab**: Cycle focus backward.
 
 Tab replaces the previous tree/questions toggle behavior. When in QUESTIONS pane mode, Tab now cycles focus rather than toggling between the tree and the questions list.
@@ -1171,8 +1171,9 @@ Tab replaces the previous tree/questions toggle behavior. When in QUESTIONS pane
 
 Each panel shows a visual indicator of its focus state:
 
-- **Focused panel**: Section header/separator rendered in **reverse video** (appears selected)
+- **Focused panel**: Section header/separator title text rendered in **reverse video + bold**; dashes remain dim gray
 - **Unfocused panels**: Section header/separator is dim
+- **Main area separator**: Left title (agent ID) highlights when `active-agent` is focused; right title (pane mode) highlights when `right-pane` is focused. Dashes are never in reverse video.
 
 ### 13.3.1 Panel Resizing
 

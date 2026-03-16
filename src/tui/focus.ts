@@ -8,14 +8,16 @@
 import { truncateToWidth } from "@mariozechner/pi-tui";
 import { RESET, BOLD, DIM, DIM_GRAY, REVERSE } from "./colors";
 
-/** The three focusable panels in the dashboard. */
-export type FocusTarget = "agent-tree" | "coordinator" | "active-agent";
+/** The five focusable panels in the dashboard. */
+export type FocusTarget = "agent-tree" | "info" | "coordinator" | "active-agent" | "right-pane";
 
 /** Ordered list of focus targets for cycling. */
 const FOCUS_ORDER: readonly FocusTarget[] = [
   "agent-tree",
+  "info",
   "coordinator",
   "active-agent",
+  "right-pane",
 ] as const;
 
 /**
@@ -57,7 +59,7 @@ export class FocusManager {
  * Fixed 4-dash left pad, title, remaining dashes on the right, truncated
  * to width.
  *
- * - Focused: reverse video (SPEC §13.3)
+ * - Focused: title text in reverse+bold, dashes in dim gray (SPEC §13.3)
  * - Unfocused: dim
  */
 export function buildFocusSeparator(
@@ -71,7 +73,7 @@ export function buildFocusSeparator(
 
   if (focused) {
     return truncateToWidth(
-      `${REVERSE}${DIM_GRAY}${"─".repeat(leftPad)}${BOLD}${titleStr}${RESET}${REVERSE}${DIM_GRAY}${"─".repeat(rightPad)}${RESET}`,
+      `${DIM_GRAY}${"─".repeat(leftPad)}${RESET}${REVERSE}${BOLD}${titleStr}${RESET}${DIM_GRAY}${"─".repeat(rightPad)}${RESET}`,
       width,
       "",
     );

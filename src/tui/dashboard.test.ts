@@ -1947,24 +1947,32 @@ describe("DashboardComponent right pane and navigation features", () => {
 });
 
 describe("focus cycling", () => {
-  test("Tab cycles focus forward: agent-tree -> coordinator -> active-agent -> agent-tree", () => {
+  test("Tab cycles focus forward through all 5 targets", () => {
     const dashboard = makeDashboard();
     expect(dashboard.focus).toBe("agent-tree");
+    dashboard.handleInput("\t");
+    expect(dashboard.focus).toBe("info");
     dashboard.handleInput("\t");
     expect(dashboard.focus).toBe("coordinator");
     dashboard.handleInput("\t");
     expect(dashboard.focus).toBe("active-agent");
+    dashboard.handleInput("\t");
+    expect(dashboard.focus).toBe("right-pane");
     dashboard.handleInput("\t");
     expect(dashboard.focus).toBe("agent-tree");
   });
 
-  test("Shift+Tab cycles focus backward: agent-tree -> active-agent -> coordinator -> agent-tree", () => {
+  test("Shift+Tab cycles focus backward through all 5 targets", () => {
     const dashboard = makeDashboard();
     expect(dashboard.focus).toBe("agent-tree");
     dashboard.handleInput("\x1b[Z"); // Shift+Tab
+    expect(dashboard.focus).toBe("right-pane");
+    dashboard.handleInput("\x1b[Z");
     expect(dashboard.focus).toBe("active-agent");
     dashboard.handleInput("\x1b[Z");
     expect(dashboard.focus).toBe("coordinator");
+    dashboard.handleInput("\x1b[Z");
+    expect(dashboard.focus).toBe("info");
     dashboard.handleInput("\x1b[Z");
     expect(dashboard.focus).toBe("agent-tree");
   });
@@ -1993,7 +2001,8 @@ describe("focus cycling", () => {
       const mainPartDefault = titleLineDefault!.split("│").slice(1).join("│");
       expect(mainPartDefault).not.toContain("\x1b[7m"); // REVERSE
 
-      // Tab twice to active-agent
+      // Tab three times to active-agent (agent-tree -> info -> coordinator -> active-agent)
+      dashboard.handleInput("\t"); // info
       dashboard.handleInput("\t"); // coordinator
       dashboard.handleInput("\t"); // active-agent
       expect(dashboard.focus).toBe("active-agent");

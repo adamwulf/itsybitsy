@@ -103,7 +103,6 @@ export function wrapTextareaLines(lines: string[], width: number): string[] {
   return result;
 }
 
-
 /** Wraps items with original indices, filters via pi-tui fuzzyFilter, returns original indices */
 type IndexedItem = { text: string; index: number };
 export function fuzzyFilterIndices(items: string[], query: string): number[] {

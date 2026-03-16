@@ -257,6 +257,8 @@ export class RightPaneComponent implements Component {
             this.content.push(formatAgentRow(agent, connector, repoStateColWidth));
           }
         }
+        this.content.push("");
+        this.content.push(`${DIM}  w: open folder    G: open in terminal    D: remove repo${RESET}`);
         break;
       }
       case "QUESTIONS": {

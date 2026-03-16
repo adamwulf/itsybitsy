@@ -238,7 +238,7 @@ class StatusBarComponent implements Component {
     let row2Left: string;
     if (this.repoHeaderSelected) {
       row1Left = `${DIM}j/k: select    J/K: repo    ;/l: scroll    p/n: pane    ${qLabel}${errBadge}${RESET}`;
-      row2Left = `${DIM}@: jump    /: commands    a: new agent    ?: help    h: setup    A: add repo    D: remove repo${RESET}`;
+      row2Left = `${DIM}@: jump    /: commands    a: new agent    ?: help    h: setup    A: add repo${RESET}`;
     } else {
       row1Left = `${DIM}j/k: select    J/K: repo    ;/l: scroll    p/n: pane    ${qLabel}    s: send    m: merge${errBadge}${RESET}`;
       row2Left = `${DIM}@: jump    /: commands    a: new agent    ?: help    h: setup    x: kill${RESET}`;

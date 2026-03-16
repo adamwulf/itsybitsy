@@ -8,7 +8,7 @@
  * See SPEC.md §13.4.
  */
 
-import { truncateToWidth, matchesKey, Key, visibleWidth } from "@mariozechner/pi-tui";
+import { truncateToWidth, matchesKey, Key } from "@mariozechner/pi-tui";
 import type { Component } from "@mariozechner/pi-tui";
 import { DIM_GRAY, RESET, BOLD, GREEN, DIM } from "./colors";
 import { handleTextEdit } from "./dialog-handler";

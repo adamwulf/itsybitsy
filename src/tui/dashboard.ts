@@ -532,7 +532,7 @@ export class DashboardComponent implements Component {
       });
     };
     this.inputField.onCancel = () => {
-      this.inputField.clear();
+      // clear() already called by InputFieldComponent before firing onCancel
       this.focusManager.setFocus("agent-tree");
       this.tui?.requestRender();
     };

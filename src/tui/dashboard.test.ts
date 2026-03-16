@@ -796,7 +796,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     for (const ch of "hellx") dashboard.handleInput(ch);
     dashboard.handleInput("\x7f"); // backspace
     for (const ch of "o") dashboard.handleInput(ch);
-    expect(assertDialog(dashboard.dialog, 'textarea').lines.join("\n")).toBe("hello");
+    expect(assertDialog(dashboard.dialog, 'textarea').buffer.getText()).toBe("hello");
     // Tab to cancel, then tab to send button, then Enter to submit
     dashboard.handleInput("\t");
     dashboard.handleInput("\t");
@@ -1293,7 +1293,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     for (const ch of "line one") dashboard.handleInput(ch);
     dashboard.handleInput("\r"); // newline in prompt
     for (const ch of "line two") dashboard.handleInput(ch);
-    expect(d.lines).toEqual(["line one", "line two"]);
+    expect(d.buffer.getLines()).toEqual(["line one", "line two"]);
   });
 
   test("A key is not bound (removed)", () => {

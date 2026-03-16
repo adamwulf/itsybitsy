@@ -23,6 +23,7 @@ import { parseState } from "../parse-state";
 import { openInGhostty, openPathInGhostty } from "../ghostty";
 import { buildFolderItems } from "./folder-browser";
 import type { DialogState, SetupItem, ConfigDialogItem } from "./dialog-handler";
+import { TextBuffer } from "./text-buffer";
 import { readConfig, writeConfig, CONFIG_KEYS, defaultUserConfigPath } from "../config";
 import type { ConfigResult } from "../config";
 import { fuzzyFilterIndices } from "./dialog-handler";
@@ -284,7 +285,7 @@ export function handleSend(ctx: ActionCtx) {
   const dialog: Extract<NonNullable<DialogState>, { type: "textarea" }> = {
     type: "textarea",
     prompt: `Send message to ${agent.id}:`,
-    lines: [""],
+    buffer: new TextBuffer(),
     focusedButton: "text",
     sendAll: false,
     onSubmit: (message: string) => {
@@ -346,7 +347,7 @@ function showNewAgentFormDialog(ctx: ActionCtx, repo: RepoEntry) {
     repoName: repoDisplayName(repo),
     name: "",
     worker: false,
-    lines: [""],
+    buffer: new TextBuffer(),
     focused: "name",
     onSubmit: (name: string, worker: boolean, prompt: string) => {
       ctx.closeDialog();
@@ -377,7 +378,7 @@ export function handleAnswerQuestion(ctx: ActionCtx) {
   ctx.showDialog({
     type: "textarea",
     prompt: `Answer ${q.agent}'s question:`,
-    lines: [""],
+    buffer: new TextBuffer(),
     focusedButton: "text",
     onSubmit: (answer: string) => {
       ctx.closeDialog();

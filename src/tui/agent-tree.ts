@@ -35,7 +35,13 @@ function agentNamePrefixWidth(agent: Agent, connector: string): number {
   return visibleWidth(`${connector}${orphanedPrefix}${icon} ${agent.id}`);
 }
 
-/** Format agent row for the tree */
+/** Width threshold at or below which compact mode is used */
+export const COMPACT_WIDTH_THRESHOLD = 60;
+
+/** Format agent row for the tree.
+ *  Compact mode (width <= COMPACT_WIDTH_THRESHOLD): icon agent-id  state  age
+ *  Full mode: icon agent-id  state  age  model  prompt/summary
+ */
 export function formatAgentRow(
   agent: Agent,
   connector: string,
@@ -45,6 +51,7 @@ export function formatAgentRow(
   stateColWidth: number = MIN_STATE_COL_WIDTH,
   hasQuestion: boolean = false
 ): string {
+  const compact = width <= COMPACT_WIDTH_THRESHOLD;
   const orphanedPrefix = agent.orphaned ? "⚠ " : "";
   const icon = agent.meta.worker ? "⚙" : "◆";
   const state = displayState(agent.state);
@@ -54,10 +61,16 @@ export function formatAgentRow(
   const nameEnd = hasQuestion ? RESET : "";
   const namePrefix = `${connector}${orphanedPrefix}${icon} ${nameColor}${agent.id}${nameEnd}`;
   const namePad = Math.max(0, nameColWidth - visibleWidth(namePrefix));
-  const promptText = (agent.meta.summary ?? agent.meta.prompt).replace(/\n/g, " ");
   const coloredState = `${stateColor}${state}${RESET}${" ".repeat(Math.max(0, stateColWidth - state.length))}`;
   const paddedAge = agent.age.padStart(AGE_COL_WIDTH);
-  const line = `${namePrefix}${" ".repeat(namePad)}  ${coloredState}  ${paddedAge}  ${agent.meta.model}  ${promptText}`;
+
+  let line: string;
+  if (compact) {
+    line = `${namePrefix}${" ".repeat(namePad)}  ${coloredState}  ${paddedAge}`;
+  } else {
+    const promptText = (agent.meta.summary ?? agent.meta.prompt).replace(/\n/g, " ");
+    line = `${namePrefix}${" ".repeat(namePad)}  ${coloredState}  ${paddedAge}  ${agent.meta.model}  ${promptText}`;
+  }
 
   const truncated = truncateToWidth(line, width, "");
   if (selected) {
@@ -106,6 +119,16 @@ export class AgentTreeComponent implements Component {
     if (this.selectedIndex >= 0 && this.selectedIndex < visible.length) {
       const item = visible[this.selectedIndex]!;
       if (item.kind === "repo-header") return item.repoName;
+      return null;
+    }
+    return null;
+  }
+
+  get selectedRepoPath(): string | null {
+    const visible = this.visibleList;
+    if (this.selectedIndex >= 0 && this.selectedIndex < visible.length) {
+      const item = visible[this.selectedIndex]!;
+      if (item.kind === "repo-header") return item.repoPath;
       return null;
     }
     return null;

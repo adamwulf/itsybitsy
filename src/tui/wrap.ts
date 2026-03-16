@@ -80,3 +80,11 @@ export function wrapLines(text: string, width: number): string[] {
   }
   return result;
 }
+
+/** Pad or trim a lines array to an exact height by appending empty strings or slicing. */
+export function padLines(lines: string[], height: number): string[] {
+  while (lines.length < height) {
+    lines.push("");
+  }
+  return lines.slice(0, height);
+}

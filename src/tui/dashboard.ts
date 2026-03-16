@@ -27,11 +27,13 @@ import { AgentWatcher } from "../watcher";
 import { TmuxPoller, hasAttachedClient } from "../tmux-poller";
 import type { Agent, FlatEntry, PendingQuestion } from "../agents";
 import { SplitPane } from "./split-pane";
-import { wrapLines } from "./wrap";
+import { wrapLines, padLines } from "./wrap";
 import { fetchUsage } from "../usage";
 import type { UsageData } from "../usage";
 import { getStateColors, setupColorSchemeDetection } from "./color-scheme";
 import { AgentTreeComponent } from "./agent-tree";
+import { SidebarComponent, SIDEBAR_WIDTH } from "./sidebar";
+import { InfoPanelComponent } from "./info-panel";
 import type { DialogState } from "./dialog-handler";
 import {
   wrapTextareaLines, TEXTAREA_VISIBLE_HEIGHT,
@@ -53,6 +55,8 @@ import { MIN_LEFT_WIDTH, MAX_LEFT_WIDTH } from "./split-pane";
 // Re-export for test compatibility
 export { AgentTreeComponent, formatAgentRow } from "./agent-tree";
 export { RightPaneComponent, colorizeDiff, colorizeLog } from "./pane-manager";
+export { SidebarComponent, SIDEBAR_WIDTH } from "./sidebar";
+export { InfoPanelComponent } from "./info-panel";
 
 const DIALOG_WIDTH = 60;
 const DEFAULT_LEFT_WIDTH = 80;
@@ -175,12 +179,30 @@ export class TmuxPaneComponent implements Component {
   }
 }
 
-/** Pad lines array to exact height */
-function padLines(lines: string[], height: number): string[] {
-  while (lines.length < height) {
-    lines.push("");
+/** Merge sidebar lines and main area lines side by side with a separator */
+function mergeSidebarAndMain(
+  sidebarLines: string[],
+  mainLines: string[],
+  height: number,
+  mainWidth: number,
+): string[] {
+  const result: string[] = [];
+  const count = Math.max(sidebarLines.length, mainLines.length, height);
+  for (let i = 0; i < count; i++) {
+    const sl = i < sidebarLines.length ? sidebarLines[i]! : "";
+    const ml = i < mainLines.length ? mainLines[i]! : "";
+    const leftPadded = padToWidth(sl, SIDEBAR_WIDTH);
+    result.push(leftPadded + `${DIM_GRAY}│${RESET}` + truncateToWidth(ml, mainWidth, ""));
   }
-  return lines;
+  return result;
+}
+
+/** Pad a string to exact visible width, inserting RESET before padding if it has ANSI */
+function padToWidth(str: string, width: number): string {
+  const vw = visibleWidth(str);
+  if (vw >= width) return truncateToWidth(str, width, "");
+  const needsReset = str.includes("\x1b[");
+  return str + (needsReset ? RESET : "") + " ".repeat(width - vw);
 }
 
 /** Status bar component */
@@ -362,12 +384,19 @@ class DialogOverlayComponent implements Component {
   }
 }
 
+/** Minimum terminal width for sidebar layout */
+export const MIN_TERMINAL_WIDTH = 140;
+/** Minimum terminal height */
+export const MIN_TERMINAL_HEIGHT = 24;
+
 /** Main dashboard component that composes everything */
 export class DashboardComponent implements Component {
   agentTree: AgentTreeComponent;
   rightPane: RightPaneComponent;
   tmuxPane: TmuxPaneComponent;
   splitPane: SplitPane;
+  sidebar: SidebarComponent;
+  infoPanel: InfoPanelComponent;
   private statusBar: StatusBarComponent;
   tui: TUI | null = null;
   modeIndex = 0;
@@ -443,9 +472,11 @@ export class DashboardComponent implements Component {
     this.agentTree = new AgentTreeComponent();
     this.rightPane = new RightPaneComponent();
     this.tmuxPane = new TmuxPaneComponent();
+    this.infoPanel = new InfoPanelComponent();
     this.statusBar = new StatusBarComponent();
     this.dialogOverlay = new DialogOverlayComponent(() => this._dialog, () => new Set(this.repos.map((r) => r.path)));
 
+    this.sidebar = new SidebarComponent(this.agentTree, this.infoPanel);
     this.splitPane = new SplitPane(this.tmuxPane, this.rightPane, DEFAULT_LEFT_WIDTH, `${DIM_GRAY}│${RESET}`);
 
     this.tmuxPoller = new TmuxPoller({
@@ -700,6 +731,12 @@ export class DashboardComponent implements Component {
     this.tmuxPane.agent = selected;
     this.statusBar.repoHeaderSelected = !selected && this.agentTree.selectedRepoHeader !== null;
 
+    // Wire info panel
+    this.infoPanel.agent = selected;
+    this.infoPanel.selectedRepoHeader = this.agentTree.selectedRepoHeader;
+    this.infoPanel.selectedRepoPath = this.agentTree.selectedRepoPath;
+    this.infoPanel.allAgents = this.agentTree.flatList;
+
     const newId = selected?.id ?? null;
     if (newId !== this.currentAgentId) {
       this.currentAgentId = newId;
@@ -940,52 +977,25 @@ export class DashboardComponent implements Component {
 
   // --- Rendering ---
 
-  /**
-   * Build a separator line with optional titles.
-   */
-  private buildTitledSeparator(leftTitle: string, rightTitle: string, width: number, splitAt = 0, junctionChar = ""): string {
-    const leftPad = 3;
-    const rightPad = 3;
-
-    if (splitAt > 0 && rightTitle) {
-      const leftHalfDashes = Math.max(1, splitAt - leftPad - leftTitle.length);
-      const rightHalfDashes = Math.max(1, width - splitAt - rightTitle.length - rightPad);
-      let leftDashStr: string;
-      if (junctionChar && leftHalfDashes > 0) {
-        leftDashStr = "─".repeat(leftHalfDashes - 1) + junctionChar;
-      } else {
-        leftDashStr = "─".repeat(leftHalfDashes);
-      }
-      const sep =
-        `${DIM_GRAY}${"─".repeat(leftPad)}${RESET}${BOLD}${leftTitle}${RESET}` +
-        `${DIM_GRAY}${leftDashStr}${RESET}` +
-        `${BOLD}${rightTitle}${RESET}` +
-        `${DIM_GRAY}${"─".repeat(rightHalfDashes)}${"─".repeat(rightPad)}${RESET}`;
-      return truncateToWidth(sep, width, "");
-    }
-
-    const fixedChars = leftPad + leftTitle.length + rightPad + rightTitle.length;
-    const fillCount = Math.max(1, width - fixedChars);
-    const sep = `${DIM_GRAY}${"─".repeat(leftPad)}${RESET}${BOLD}${leftTitle}${RESET}${DIM_GRAY}${"─".repeat(fillCount)}${RESET}${BOLD}${rightTitle}${RESET}${DIM_GRAY}${"─".repeat(rightPad)}${RESET}`;
-    return truncateToWidth(sep, width, "");
-  }
 
   invalidate(): void {
     this.agentTree.invalidate();
     this.splitPane.invalidate();
+    this.sidebar.invalidate();
     this.statusBar.invalidate();
   }
 
   render(width: number): string[] {
     // Minimum terminal size check
     const termRows = process.stdout.rows || 24;
-    if (termRows < 20 || width < 80) {
-      return [`${BOLD}${YELLOW}[Terminal too small — resize to at least 80×20]${RESET}`];
+    if (termRows < MIN_TERMINAL_HEIGHT || width < MIN_TERMINAL_WIDTH) {
+      return [`${BOLD}${YELLOW}[Terminal too small — resize to at least ${MIN_TERMINAL_WIDTH}×${MIN_TERMINAL_HEIGHT}]${RESET}`];
     }
 
     const lines: string[] = [];
     const terminalRows = process.stdout.rows || 24;
     const isTreeMode = this.rightPane.mode === "TREE";
+    const isFullWidth = FULL_WIDTH_MODES.has(this.rightPane.mode);
 
     // Header
     const subtitle = this.lastSentNotice
@@ -993,56 +1003,102 @@ export class DashboardComponent implements Component {
       : `${DIM}— agent dashboard${RESET}`;
     lines.push(truncateToWidth(`${BOLD}ib${RESET} ${subtitle}`, width, ""));
 
+    // Separator after header
+    lines.push(truncateToWidth(`${DIM_GRAY}${"─".repeat(width)}${RESET}`, width, ""));
+
+    // Compute available height for the main content area.
+    // Chrome lines: header(1) + top separator(1) + main title separator(1) +
+    //               bottom separator(1) + status bar(2) = 6.
+    // SPEC §11.2 formula uses 4 (header + separator + status_bar) but we add a top separator
+    // between the header and the sidebar/main area, plus a titled separator at the top of the
+    // main area showing agent-id and pane-mode.
+    const chromeLines = 6;
+    const availableHeight = Math.max(5, terminalRows - chromeLines);
+
+    const mainWidth = width - SIDEBAR_WIDTH - 1; // 1 for sidebar separator
+    this.sidebar.displayHeight = availableHeight + 1; // sidebar gets the title separator row too
+
+    // Build main area title separator (agent-id left, pane-mode right)
+    const mainTitleSep = this.buildMainTitleSeparator(mainWidth, isTreeMode, isFullWidth);
+
+    let mainLines: string[];
     if (isTreeMode) {
-      // title(1) + separator(1) + separator(1) + statusBar(3) = 6 lines of chrome
-      const treeHeight = Math.max(5, terminalRows - 6);
-      this.agentTree.maxHeight = treeHeight;
-      lines.push(this.buildTitledSeparator(" TREE ", "", width));
-      const treeLines = this.agentTree.render(width);
-      lines.push(...treeLines);
-      const padNeeded = treeHeight - treeLines.length;
-      for (let i = 0; i < padNeeded; i++) { lines.push(""); }
+      // TREE mode: full-height tree in the main area.
+      // IMPORTANT: The sidebar renders the same AgentTreeComponent in compact mode.
+      // The main area render below runs FIRST to set maxHeight for the full tree,
+      // then the sidebar render (inside mergeSidebarAndMain) resets maxHeight for compact.
+      // This order is safe because sidebar.render() sets agentTree.maxHeight internally.
+      this.agentTree.maxHeight = availableHeight;
+      mainLines = [mainTitleSep, ...this.agentTree.render(mainWidth)];
     } else {
-      lines.push(truncateToWidth(`${DIM_GRAY}${"─".repeat(width)}${RESET}`, width, ""));
-      this.agentTree.maxHeight = 7;
-      const treeLines = this.agentTree.render(width);
-      lines.push(...treeLines);
-
-      const selAgent = this.agentTree.selectedAgent;
-      const leftTitle = selAgent ? ` ${selAgent.id} ` : "";
-      const repoHeader = this.agentTree.selectedRepoHeader;
-      const rightTitle = repoHeader ? ` ${repoHeader} ` : ` ${this.rightPane.mode} `;
-      const splitAt = this.splitPane.getLeftWidth() + 1;
-      lines.push(this.buildTitledSeparator(leftTitle, rightTitle, width, splitAt, FULL_WIDTH_MODES.has(this.rightPane.mode) ? "" : "┬"));
-
-      const bottomHeight = 2; // status bar is always 2 lines
-      const separatorHeight = 1;
-      const usedHeight = lines.length + separatorHeight + bottomHeight;
-      const availableHeight = Math.max(5, terminalRows - usedHeight);
-
+      // Normal/full-width mode: split-pane(tmux | right-pane)
       this.tmuxPane.displayHeight = availableHeight;
       this.rightPane.displayHeight = availableHeight;
-
-      this.splitPane.fullWidth = FULL_WIDTH_MODES.has(this.rightPane.mode);
-      const splitLines = this.splitPane.render(width);
-      lines.push(...splitLines);
+      this.splitPane.fullWidth = isFullWidth;
+      mainLines = [mainTitleSep, ...this.splitPane.render(mainWidth)];
     }
 
-    // Separator
-    const useBottomJunction = !isTreeMode && !FULL_WIDTH_MODES.has(this.rightPane.mode);
-    if (useBottomJunction) {
-      const jPos = this.splitPane.getLeftWidth();
-      const bottomSep = "─".repeat(jPos) + "┴" + "─".repeat(Math.max(0, width - jPos - 1));
-      lines.push(truncateToWidth(`${DIM_GRAY}${bottomSep}${RESET}`, width, ""));
-    } else {
-      lines.push(truncateToWidth(`${DIM_GRAY}${"─".repeat(width)}${RESET}`, width, ""));
-    }
+    // Render sidebar and merge with main area
+    const sidebarLines = this.sidebar.render(SIDEBAR_WIDTH);
+    lines.push(...mergeSidebarAndMain(sidebarLines, mainLines, availableHeight + 1, mainWidth));
+
+    // Bottom separator with junction characters
+    const bottomSep = this.buildBottomSeparator(width, isTreeMode, isFullWidth);
+    lines.push(truncateToWidth(`${DIM_GRAY}${bottomSep}${RESET}`, width, ""));
 
     // Status bar
     const statusLines = this.statusBar.render(width);
     lines.push(...statusLines);
 
     return lines;
+  }
+
+  /** Build titled separator at the top of the main area showing agent-id and pane-mode */
+  private buildMainTitleSeparator(mainWidth: number, isTreeMode: boolean, isFullWidth: boolean): string {
+    const selAgent = this.agentTree.selectedAgent;
+    const repoHeader = this.agentTree.selectedRepoHeader;
+    const leftTitle = selAgent ? ` ${selAgent.id} ` : "";
+    const rightTitle = isTreeMode ? " TREE "
+      : repoHeader ? ` ${repoHeader} `
+      : ` ${this.rightPane.mode} `;
+
+    const leftPad = 3;
+    const rightPad = 3;
+
+    if (!isTreeMode && !isFullWidth && leftTitle) {
+      // Show junction at inner split position
+      const splitAt = this.splitPane.getLeftWidth() + 1;
+      const leftHalfDashes = Math.max(1, splitAt - leftPad - leftTitle.length);
+      const rightHalfDashes = Math.max(1, mainWidth - splitAt - rightTitle.length - rightPad);
+      const leftDashStr = "─".repeat(Math.max(0, leftHalfDashes - 1)) + "┬";
+      const sep =
+        `${DIM_GRAY}${"─".repeat(leftPad)}${RESET}${BOLD}${leftTitle}${RESET}` +
+        `${DIM_GRAY}${leftDashStr}${RESET}` +
+        `${BOLD}${rightTitle}${RESET}` +
+        `${DIM_GRAY}${"─".repeat(rightHalfDashes)}${"─".repeat(rightPad)}${RESET}`;
+      return truncateToWidth(sep, mainWidth, "");
+    }
+
+    const fixedChars = leftPad + leftTitle.length + rightPad + rightTitle.length;
+    const fillCount = Math.max(1, mainWidth - fixedChars);
+    const sep = `${DIM_GRAY}${"─".repeat(leftPad)}${RESET}${BOLD}${leftTitle}${RESET}${DIM_GRAY}${"─".repeat(fillCount)}${RESET}${BOLD}${rightTitle}${RESET}${DIM_GRAY}${"─".repeat(rightPad)}${RESET}`;
+    return truncateToWidth(sep, mainWidth, "");
+  }
+
+  /** Build bottom separator with appropriate junction characters */
+  private buildBottomSeparator(width: number, isTreeMode: boolean, isFullWidth: boolean): string {
+    // Sidebar junction at position SIDEBAR_WIDTH
+    const sidebarJunction = "┴";
+    const leftPart = "─".repeat(SIDEBAR_WIDTH) + sidebarJunction;
+
+    if (!isTreeMode && !isFullWidth) {
+      // Also add inner split pane junction
+      const innerJPos = this.splitPane.getLeftWidth();
+      const innerSep = "─".repeat(innerJPos) + "┴" + "─".repeat(Math.max(0, width - SIDEBAR_WIDTH - 1 - innerJPos - 1));
+      return leftPart + innerSep;
+    }
+
+    return leftPart + "─".repeat(Math.max(0, width - SIDEBAR_WIDTH - 1));
   }
 }
 

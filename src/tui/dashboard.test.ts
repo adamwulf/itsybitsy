@@ -2132,6 +2132,83 @@ describe("formatAgentRow full-width highlight", () => {
   });
 });
 
+describe("formatAgentRow compact mode", () => {
+  function makeTestAgent(overrides: Partial<Agent> = {}): Agent {
+    return {
+      id: "agent-abc",
+      repoPath: "/repos/test",
+      repoName: "test",
+      state: "running",
+      age: "1m",
+      archived: false,
+      children: [],
+      meta: {
+        id: "agent-abc",
+        session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        tmux_session: "tmux-agent-abc",
+        prompt: "do stuff with long description",
+        manager: null,
+        created: "2026-03-05T00:00:00Z",
+        created_epoch: Math.floor(Date.now() / 1000) - 60,
+        worktree: true,
+        worker: false,
+        yolo: false,
+        model: "sonnet",
+        claude_pid: "12345",
+      } as AgentMeta,
+      ...overrides,
+    };
+  }
+
+  test("compact mode (width <= 60) omits model and prompt", () => {
+    const agent = makeTestAgent();
+    const row = formatAgentRow(agent, "", false, 60, 20);
+    const stripped = stripAnsi(row);
+    expect(stripped).toContain("agent-abc");
+    expect(stripped).not.toContain("sonnet");
+    expect(stripped).not.toContain("do stuff");
+  });
+
+  test("full mode (width > 60) includes model and prompt", () => {
+    const agent = makeTestAgent();
+    const row = formatAgentRow(agent, "", false, 100, 20);
+    const stripped = stripAnsi(row);
+    expect(stripped).toContain("agent-abc");
+    expect(stripped).toContain("sonnet");
+    expect(stripped).toContain("do stuff");
+  });
+
+  test("compact mode includes state and age", () => {
+    const agent = makeTestAgent();
+    const row = formatAgentRow(agent, "", false, 50, 20);
+    const stripped = stripAnsi(row);
+    expect(stripped).toContain("running");
+    expect(stripped).toContain("1m");
+  });
+
+  test("compact mode with orphaned agent renders correctly", () => {
+    const agent = makeTestAgent({ orphaned: true });
+    const row = formatAgentRow(agent, "", false, 60, 20);
+    const stripped = stripAnsi(row);
+    expect(stripped).toContain("⚠");
+    expect(stripped).toContain("agent-abc");
+    expect(stripped).not.toContain("sonnet");
+  });
+
+  test("compact mode selected row is full width", () => {
+    const agent = makeTestAgent();
+    const row = formatAgentRow(agent, "", true, 60, 20);
+    expect(visibleWidth(row)).toBe(60);
+  });
+
+  test("boundary: width 61 uses full mode", () => {
+    const agent = makeTestAgent();
+    const row = formatAgentRow(agent, "", false, 61, 20);
+    const stripped = stripAnsi(row);
+    expect(stripped).toContain("sonnet");
+  });
+});
+
 describe("AgentTreeComponent scroll indicators", () => {
   /** Build a tree component with N fake agents and the given maxHeight/scrollOffset. */
   function makeTree(agentCount: number, maxHeight: number, scrollOffset: number): AgentTreeComponent {
@@ -2420,7 +2497,7 @@ describe("Orphaned tmux sessions (Phase 10)", () => {
     dashboard.onUpdate([agent], flatList, [], ["ittybitty-orphan"]);
     dashboard.addError("Some error");
     // Error badge should show 2 (1 error + 1 orphan)
-    const rendered = dashboard.render(120);
+    const rendered = dashboard.render(160);
     const allText = rendered.map(stripAnsi).join("\n");
     expect(allText).toContain("[2 errors]");
   });
@@ -2519,30 +2596,30 @@ describe("Minimum terminal size (G-11)", () => {
     Object.defineProperty(process.stdout, "rows", { value: origRows, writable: true, configurable: true });
   });
 
-  test("renders warning when terminal height < 20", () => {
-    Object.defineProperty(process.stdout, "rows", { value: 15, writable: true, configurable: true });
+  test("renders warning when terminal height < 24", () => {
+    Object.defineProperty(process.stdout, "rows", { value: 20, writable: true, configurable: true });
+    const lines = dashboard.render(160);
+    expect(lines.length).toBe(1);
+    expect(stripAnsi(lines[0]!)).toContain("Terminal too small");
+  });
+
+  test("renders warning when terminal width < 140", () => {
+    Object.defineProperty(process.stdout, "rows", { value: 30, writable: true, configurable: true });
     const lines = dashboard.render(100);
     expect(lines.length).toBe(1);
     expect(stripAnsi(lines[0]!)).toContain("Terminal too small");
   });
 
-  test("renders warning when terminal width < 80", () => {
-    Object.defineProperty(process.stdout, "rows", { value: 30, writable: true, configurable: true });
-    const lines = dashboard.render(60);
-    expect(lines.length).toBe(1);
-    expect(stripAnsi(lines[0]!)).toContain("Terminal too small");
-  });
-
-  test("renders normally at exactly 80x20 (boundary)", () => {
-    Object.defineProperty(process.stdout, "rows", { value: 20, writable: true, configurable: true });
-    const lines = dashboard.render(80);
+  test("renders normally at exactly 140x24 (boundary)", () => {
+    Object.defineProperty(process.stdout, "rows", { value: 24, writable: true, configurable: true });
+    const lines = dashboard.render(140);
     expect(lines.length).toBeGreaterThan(1);
     expect(stripAnsi(lines[0]!)).toContain("ib");
   });
 
   test("renders normally when terminal is large enough", () => {
     Object.defineProperty(process.stdout, "rows", { value: 30, writable: true, configurable: true });
-    const lines = dashboard.render(100);
+    const lines = dashboard.render(160);
     expect(lines.length).toBeGreaterThan(1);
     expect(stripAnsi(lines[0]!)).toContain("ib");
   });
@@ -2586,7 +2663,7 @@ describe("Context-sensitive footer (repo header vs agent)", () => {
     expect(dashboard.agentTree.selectedRepoHeader).toBe("alpha");
     expect(dashboard.selectedAgent).toBeNull();
 
-    const lines = dashboard.render(120);
+    const lines = dashboard.render(160);
     const allText = lines.map(stripAnsi).join("\n");
     expect(allText).toContain("A: add repo");
     // Should NOT show agent-specific actions
@@ -2602,7 +2679,7 @@ describe("Context-sensitive footer (repo header vs agent)", () => {
     expect(dashboard.selectedAgent?.id).toBe("agent-a");
     expect(dashboard.agentTree.selectedRepoHeader).toBeNull();
 
-    const lines = dashboard.render(120);
+    const lines = dashboard.render(160);
     const allText = lines.map(stripAnsi).join("\n");
     expect(allText).toContain("s: send");
     expect(allText).toContain("m: merge");
@@ -2675,7 +2752,7 @@ describe("Repo nickname display in agent tree", () => {
     ]);
     dashboard.onUpdate([agent], flatList, []);
 
-    const lines = dashboard.render(120);
+    const lines = dashboard.render(160);
     const allText = lines.map(stripAnsi).join("\n");
     expect(allText).toContain("myproj-nick");
   });
@@ -2799,7 +2876,7 @@ describe("usage error indicator", () => {
     (dashboard as any).statusBar.usage = { sessionPct: 57, weeklyPct: 35, sessionReset: "44m", weeklyReset: "2d 7h" };
     (dashboard as any).statusBar.usageError = true;
 
-    const lines = dashboard.render(120);
+    const lines = dashboard.render(160);
     const footer = lines.map(l => stripAnsi(l)).join("\n");
     expect(footer).toContain("⚠️");
     expect(footer).toContain("session:57%");
@@ -2817,7 +2894,7 @@ describe("usage error indicator", () => {
     (dashboard as any).statusBar.usage = null;
     (dashboard as any).statusBar.usageError = true;
 
-    const lines = dashboard.render(120);
+    const lines = dashboard.render(160);
     const footer = lines.map(l => stripAnsi(l)).join("\n");
     expect(footer).toContain("⚠️  usage unavailable");
   });
@@ -2834,7 +2911,7 @@ describe("usage error indicator", () => {
     (dashboard as any).statusBar.usage = { sessionPct: 57, weeklyPct: 35, sessionReset: "44m", weeklyReset: "2d 7h" };
     (dashboard as any).statusBar.usageError = false;
 
-    const lines = dashboard.render(120);
+    const lines = dashboard.render(160);
     const footer = lines.map(l => stripAnsi(l)).join("\n");
     expect(footer).not.toContain("⚠️");
     expect(footer).toContain("session:57%");
@@ -2852,7 +2929,7 @@ describe("usage error indicator", () => {
     (dashboard as any).statusBar.usage = null;
     (dashboard as any).statusBar.usageError = false;
 
-    const lines = dashboard.render(120);
+    const lines = dashboard.render(160);
     const footer = lines.map(l => stripAnsi(l)).join("\n");
     expect(footer).not.toContain("⚠️");
     expect(footer).not.toContain("usage unavailable");

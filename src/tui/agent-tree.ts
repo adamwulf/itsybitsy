@@ -96,7 +96,14 @@ export class AgentTreeComponent implements Component {
   }
 
   setFlatList(list: FlatEntry[]) {
+    const wasEmpty = this._flatList.length === 0;
     this._flatList = list;
+    if (wasEmpty && list.length > 0) {
+      // First data load — ensure we start at the top
+      this.selectedIndex = 0;
+      this.scrollOffset = 0;
+      this.selectedId = null;
+    }
     this.resolveSelection();
   }
 

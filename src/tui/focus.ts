@@ -5,6 +5,7 @@
  * See SPEC.md §13 for the full specification.
  */
 
+import { truncateToWidth } from "@mariozechner/pi-tui";
 import { RESET, BOLD, DIM, DIM_GRAY, REVERSE } from "./colors";
 
 /** The three focusable panels in the dashboard. */
@@ -53,30 +54,33 @@ export class FocusManager {
 /**
  * Render a section separator line with focus-aware styling.
  *
- * - Focused: reverse video header text
- * - Unfocused: dim header text
+ * Layout matches `buildSectionSeparator` in sidebar.ts: fixed 4-dash left
+ * pad, title, remaining dashes on the right, truncated to width.
  *
- * The format matches the existing `buildSectionSeparator` in sidebar.ts:
- *   ──── Title ────
+ * - Focused: reverse video (SPEC §13.3)
+ * - Unfocused: dim
  */
 export function buildFocusSeparator(
   title: string,
   width: number,
   focused: boolean,
 ): string {
+  const leftPad = 4;
   const titleStr = ` ${title} `;
-  const totalDashes = Math.max(0, width - titleStr.length);
-  const leftPad = Math.floor(totalDashes / 2);
-  const rightPad = totalDashes - leftPad;
+  const rightPad = Math.max(1, width - leftPad - titleStr.length);
 
   if (focused) {
-    return (
-      `${REVERSE}${DIM_GRAY}${"─".repeat(leftPad)}${BOLD}${titleStr}${RESET}${REVERSE}${DIM_GRAY}${"─".repeat(rightPad)}${RESET}`
+    return truncateToWidth(
+      `${REVERSE}${DIM_GRAY}${"─".repeat(leftPad)}${BOLD}${titleStr}${RESET}${REVERSE}${DIM_GRAY}${"─".repeat(rightPad)}${RESET}`,
+      width,
+      "",
     );
   }
 
   // Unfocused: dim
-  return (
-    `${DIM}${DIM_GRAY}${"─".repeat(leftPad)}${RESET}${DIM}${titleStr}${RESET}${DIM}${DIM_GRAY}${"─".repeat(rightPad)}${RESET}`
+  return truncateToWidth(
+    `${DIM}${DIM_GRAY}${"─".repeat(leftPad)}${RESET}${DIM}${titleStr}${RESET}${DIM}${DIM_GRAY}${"─".repeat(rightPad)}${RESET}`,
+    width,
+    "",
   );
 }

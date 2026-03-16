@@ -107,16 +107,25 @@ describe("buildFocusSeparator", () => {
     expect(sep).toContain("─");
   });
 
-  test("separator handles width equal to title length", () => {
-    // " Title " = 7 chars, width = 7 means 0 dashes
-    const sep = buildFocusSeparator("Title", 7, false);
-    expect(sep).toContain("Title");
+  test("uses fixed 4-dash left pad like buildSectionSeparator", () => {
+    const sep = buildFocusSeparator("Agents", 40, false);
+    // Should start with DIM + DIM_GRAY + 4 dashes (left pad)
+    expect(sep).toContain("────");
+  });
+
+  test("right pad has at least 1 dash", () => {
+    // leftPad(4) + " Test "(6) + rightPad(1 min) = 11 minimum visible chars
+    // Use width=12 so truncateToWidth doesn't clip the title
+    const sep = buildFocusSeparator("Test", 12, false);
+    expect(sep).toContain("Test");
+    expect(sep).toContain("─");
   });
 
   test("separator handles width smaller than title", () => {
-    // Should not crash, just no dashes
+    // Should not crash — truncateToWidth will handle overflow
     const sep = buildFocusSeparator("Very Long Title", 5, false);
-    expect(sep).toContain("Very Long Title");
+    // truncateToWidth may truncate the content, but it shouldn't crash
+    expect(typeof sep).toBe("string");
   });
 
   test("focused and unfocused separators are visually distinct", () => {

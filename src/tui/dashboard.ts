@@ -165,18 +165,22 @@ export class TmuxPaneComponent implements Component {
     let wrapped = wrapLines(this.rawOutput, width);
 
     // When showing our own input field, trim Claude's native input area.
-    // Claude's input area has separator lines made of ─ characters.
-    // Find the first such separator from the bottom and trim there.
+    // Claude's input area has two separator lines made of ─ characters.
+    // Users can paste ─ lines into chat, so earlier separators may be content.
+    // Search from the bottom to find the last two ─ separators — those are
+    // Claude's UI chrome. Trim at the first of the two (the upper one).
     if (this.trimInputSeparator) {
+      let separatorCount = 0;
       let trimIndex = wrapped.length;
       for (let i = wrapped.length - 1; i >= 0; i--) {
         const stripped = stripAnsi(wrapped[i]!).trim();
         if (stripped.length > 0 && /^─+$/.test(stripped)) {
+          separatorCount++;
           trimIndex = i;
-          break;
+          if (separatorCount >= 2) break;
         }
       }
-      if (trimIndex < wrapped.length) {
+      if (separatorCount >= 2 && trimIndex < wrapped.length) {
         wrapped = wrapped.slice(0, trimIndex);
       }
     }

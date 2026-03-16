@@ -1044,7 +1044,20 @@ export class DashboardComponent implements Component {
         }
         this.tui?.requestRender();
       }
-      // coordinator is bottom-most — height resize is a no-op
+      else if (focus === "coordinator") {
+        // Coordinator: steal from info pane above (SPEC §13.3.1)
+        const base = computeSidebarHeights(this.sidebar.displayHeight, this.agentTree.visibleList.length);
+        const effectiveInfo = Math.max(0, base.infoHeight + this.sidebar.heightOffsets.info);
+        const effectiveCoord = Math.max(0, base.coordinatorHeight + this.sidebar.heightOffsets.coordinator);
+        if (delta > 0 && effectiveInfo > 0) {
+          this.sidebar.heightOffsets.coordinator += delta;
+          this.sidebar.heightOffsets.info -= delta;
+        } else if (delta < 0 && effectiveCoord > 0) {
+          this.sidebar.heightOffsets.coordinator += delta;
+          this.sidebar.heightOffsets.info -= delta;
+        }
+        this.tui?.requestRender();
+      }
     }
     // Folder browser / add repo
     else if (data === "A") { agentActions.handleAddRepo(this); }

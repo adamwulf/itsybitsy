@@ -241,6 +241,7 @@ export class AgentTreeComponent implements Component {
     }
     if (this.selectedId === null) {
       this.selectedIndex = 0;
+      this.scrollOffset = 0;
       this.updateSelectedId();
       this.ensureSelectedVisible();
       return;

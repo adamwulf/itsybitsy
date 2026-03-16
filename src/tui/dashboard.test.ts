@@ -3056,3 +3056,175 @@ describe("applyLayout", () => {
     expect(dashboard.splitPane.getLeftWidth()).toBe(160); // MAX_LEFT_WIDTH
   });
 });
+
+describe("input field integration", () => {
+  test("when active-agent focused with agent selected, tmux display height is reduced by 3", () => {
+    const dashboard = makeDashboard();
+    const agent = makeAgent("agent-a", "/repos/test");
+    const flatList: FlatEntry[] = [makeFlatAgent(agent)];
+    dashboard.onUpdate([agent], flatList, []);
+
+    const origRows = process.stdout.rows;
+    Object.defineProperty(process.stdout, "rows", { value: 30, writable: true, configurable: true });
+    try {
+      // Default focus: tmux gets full height
+      dashboard.render(160);
+      const fullHeight = dashboard.tmuxPane.displayHeight;
+
+      // Tab to active-agent
+      dashboard.handleInput("\t"); // info
+      dashboard.handleInput("\t"); // coordinator
+      dashboard.handleInput("\t"); // active-agent
+      expect(dashboard.focus).toBe("active-agent");
+
+      dashboard.render(160);
+      expect(dashboard.tmuxPane.displayHeight).toBe(fullHeight - 3);
+    } finally {
+      Object.defineProperty(process.stdout, "rows", { value: origRows, writable: true, configurable: true });
+    }
+  });
+
+  test("when active-agent focused, input field lines appear in render output", () => {
+    const dashboard = makeDashboard();
+    const agent = makeAgent("agent-a", "/repos/test");
+    const flatList: FlatEntry[] = [makeFlatAgent(agent)];
+    dashboard.onUpdate([agent], flatList, []);
+
+    const origRows = process.stdout.rows;
+    Object.defineProperty(process.stdout, "rows", { value: 30, writable: true, configurable: true });
+    try {
+      // Tab to active-agent
+      dashboard.handleInput("\t");
+      dashboard.handleInput("\t");
+      dashboard.handleInput("\t");
+      expect(dashboard.focus).toBe("active-agent");
+
+      // Type some text
+      dashboard.handleInput("h");
+      dashboard.handleInput("i");
+
+      const lines = dashboard.render(160);
+      const allText = lines.map(l => stripAnsi(l)).join("\n");
+      // Input field should show "> hi█" somewhere in the output
+      expect(allText).toContain("> hi█");
+    } finally {
+      Object.defineProperty(process.stdout, "rows", { value: origRows, writable: true, configurable: true });
+    }
+  });
+
+  test("when focus is not active-agent, no input field lines appear", () => {
+    const dashboard = makeDashboard();
+    const agent = makeAgent("agent-a", "/repos/test");
+    const flatList: FlatEntry[] = [makeFlatAgent(agent)];
+    dashboard.onUpdate([agent], flatList, []);
+
+    const origRows = process.stdout.rows;
+    Object.defineProperty(process.stdout, "rows", { value: 30, writable: true, configurable: true });
+    try {
+      expect(dashboard.focus).toBe("agent-tree");
+      const lines = dashboard.render(160);
+      const allText = lines.map(l => stripAnsi(l)).join("\n");
+      expect(allText).not.toContain("> █");
+    } finally {
+      Object.defineProperty(process.stdout, "rows", { value: origRows, writable: true, configurable: true });
+    }
+  });
+
+  test("message submission calls sendMessage on Enter", () => {
+    const calls: { args: string[]; cwd: string }[] = [];
+    mockSendSpawnRunner(calls);
+
+    const dashboard = makeDashboard();
+    const agent = makeAgent("agent-a", "/repos/test");
+    agent.meta.tmux_session = "agent-a-session";
+    const flatList: FlatEntry[] = [makeFlatAgent(agent)];
+    dashboard.onUpdate([agent], flatList, []);
+
+    // Tab to active-agent
+    dashboard.handleInput("\t");
+    dashboard.handleInput("\t");
+    dashboard.handleInput("\t");
+    expect(dashboard.focus).toBe("active-agent");
+
+    // Type message and press Enter
+    dashboard.handleInput("h");
+    dashboard.handleInput("e");
+    dashboard.handleInput("l");
+    dashboard.handleInput("l");
+    dashboard.handleInput("o");
+    dashboard.handleInput("\r"); // Enter
+
+    // sendMessage is async, so check that the input field was cleared
+    expect(dashboard.inputField.getText()).toBe("");
+
+    resetSendSpawnRunner();
+  });
+
+  test("Escape clears input and returns focus to agent-tree", () => {
+    const dashboard = makeDashboard();
+    const agent = makeAgent("agent-a", "/repos/test");
+    const flatList: FlatEntry[] = [makeFlatAgent(agent)];
+    dashboard.onUpdate([agent], flatList, []);
+
+    // Tab to active-agent
+    dashboard.handleInput("\t");
+    dashboard.handleInput("\t");
+    dashboard.handleInput("\t");
+    expect(dashboard.focus).toBe("active-agent");
+
+    // Type some text
+    dashboard.handleInput("h");
+    dashboard.handleInput("i");
+    expect(dashboard.inputField.getText()).toBe("hi");
+
+    // Press Escape
+    dashboard.handleInput("\x1b");
+    expect(dashboard.focus).toBe("agent-tree");
+    expect(dashboard.inputField.getText()).toBe("");
+  });
+
+  test("Tab away from active-agent clears input field", () => {
+    const dashboard = makeDashboard();
+    const agent = makeAgent("agent-a", "/repos/test");
+    const flatList: FlatEntry[] = [makeFlatAgent(agent)];
+    dashboard.onUpdate([agent], flatList, []);
+
+    // Tab to active-agent
+    dashboard.handleInput("\t");
+    dashboard.handleInput("\t");
+    dashboard.handleInput("\t");
+    expect(dashboard.focus).toBe("active-agent");
+
+    // Type some text
+    dashboard.handleInput("h");
+    dashboard.handleInput("i");
+    expect(dashboard.inputField.getText()).toBe("hi");
+
+    // Tab away
+    dashboard.handleInput("\t");
+    expect(dashboard.focus).toBe("right-pane");
+    expect(dashboard.inputField.getText()).toBe("");
+  });
+
+  test("dashboard keybindings are suppressed when active-agent focused", () => {
+    const dashboard = makeDashboard();
+    const agent = makeAgent("agent-a", "/repos/test");
+    const flatList: FlatEntry[] = [makeFlatAgent(agent)];
+    dashboard.onUpdate([agent], flatList, []);
+
+    // Tab to active-agent
+    dashboard.handleInput("\t");
+    dashboard.handleInput("\t");
+    dashboard.handleInput("\t");
+    expect(dashboard.focus).toBe("active-agent");
+
+    // Pressing 's' (which normally triggers send dialog) should type 's' into input field
+    dashboard.handleInput("s");
+    expect(dashboard.inputField.getText()).toBe("s");
+    expect(dashboard.dialog).toBeNull();
+
+    // Pressing 'j' (which normally navigates) should type 'j' into input field
+    dashboard.handleInput("j");
+    expect(dashboard.inputField.getText()).toBe("sj");
+  });
+});

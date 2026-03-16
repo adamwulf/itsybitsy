@@ -1188,7 +1188,7 @@ The system coordinator panel uses its own `TmuxPoller` instance (separate from t
 
 The system coordinator does NOT use the standard session-start hook (§6.3). Instead, it receives a custom initial prompt explaining its role:
 
-> You are the itsybitsy system coordinator. You manage agents across all registered repos using `ib` commands. You can list agents (`ib list`), send messages (`ib send`), merge (`ib merge`), kill (`ib kill`), create agents (`ib new-agent`), and check status (`ib status`, `ib diff`). You do NOT have access to Read, Write, Edit, or any file tools — only `ib` Bash commands. You coordinate work at the system level — for repo-specific coordination, delegate to per-repo coordinators.
+> You are the itsybitsy system coordinator. You manage agents across all registered repos using `ib` commands. You can list agents (`ib list`), send messages (`ib send`), merge (`ib merge`), kill (`ib kill`), create agents (`ib new-agent`), and check status (`ib status`, `ib diff`). You do NOT have access to Read, Write, Edit, or any file tools — only `ib` Bash commands. You coordinate work at the system level — for repo-specific coordination, delegate to per-repo coordinators. Periodically check `ib inbox count` for notifications from watchdogs and agents; process with `ib inbox list` / `ib inbox read` / `ib inbox ack`. To send messages to per-repo coordinators, use `ib send --repo <repo-name> coordinator "message"`.
 
 #### 12.1.6 Watchdog Behavior
 
@@ -1329,23 +1329,38 @@ This means agents running in a repo worktree (whose CWD is within the repo) will
 - **Per-repo coordinator**: Select in agent tree → `s` key to send message (same as any agent)
 - Both use the standard TUI input flow — no name resolution needed since selection is explicit
 
-#### 12.3.3 Internal Addressing
+#### 12.3.3 System Coordinator Messaging
 
-- **System coordinator**: `tmux send-keys -t ib-coordinator` (direct tmux access) — but see §12.3.4 for message queue alternative
-- **Per-repo coordinator**: standard `ib send coordinator "message"` from within the repo
+The system coordinator has two messaging paths, each for a different context:
 
-#### 12.3.4 System Coordinator Message Queue
+**User-interactive (TUI)**: When the user types in the coordinator sidebar input field or uses `s` with the system coordinator selected, `tmux send-keys -t ib-coordinator` is used directly. This is safe because the user controls timing and can see whether the coordinator is busy.
 
-Direct `tmux send-keys` to the system coordinator is fragile — if Claude is mid-response, injected text can corrupt the session. Instead, the system coordinator uses a **file-based message queue**:
+**Programmatic (watchdog, automated notifications)**: When the watchdog or other automated systems need to notify the system coordinator, they use the `ib inbox` command (see §12.3.4). This avoids the race condition of injecting text via `tmux send-keys` while the coordinator is mid-response.
 
-1. Messages are written as individual files to `~/.itsybitsy/coordinator-inbox/<timestamp>-<source>.msg`
-2. The system coordinator's session-start prompt instructs it to periodically check `~/.itsybitsy/coordinator-inbox/` for new messages
-3. After processing a message, the coordinator deletes the file
-4. The watchdog's `notifySystemCoordinator()` writes to this inbox rather than using `tmux send-keys`
+#### 12.3.4 `ib inbox` Command
 
-This avoids the race condition of injecting text mid-response and matches the pattern used by `ib send` for regular agents (which writes to the agent's message queue).
+The system coordinator cannot read files directly (it has only `Bash(ib:*)` permissions). To receive programmatic messages safely, a new `ib inbox` CLI command provides access to a file-based message queue:
 
-[^needs review] Whether the file-based inbox is the right approach, or whether the system coordinator should use `ib send` semantics directly. The inbox approach is simpler but requires the coordinator to poll; an alternative is to use Claude's `--resume` session ID + `ib send` if the system coordinator can be given an agent-like identity.
+**Writing messages** (used by watchdog, other agents):
+- `ib inbox write "message text"` — writes a message file to `~/.itsybitsy/coordinator-inbox/<timestamp>-<source>.msg`
+- Called by the watchdog's `notifySystemCoordinator()` and by any code that needs to notify the system coordinator programmatically
+
+**Reading messages** (used by the system coordinator itself):
+- `ib inbox list` — lists pending message files (returns filenames + preview)
+- `ib inbox read <filename>` — reads a specific message
+- `ib inbox ack <filename>` — acknowledges (deletes) a processed message
+- `ib inbox count` — returns the number of pending messages (useful for polling)
+
+The system coordinator's session-start prompt instructs it to periodically run `ib inbox count` and process messages with `ib inbox list` / `ib inbox read` / `ib inbox ack`. This keeps the system coordinator's permissions minimal (`Bash(ib:*)` covers `ib inbox *`) while giving it access to programmatic notifications.
+
+#### 12.3.5 System Coordinator → Per-Repo Coordinator Addressing
+
+The system coordinator's CWD is `~/.itsybitsy/`, which is outside any repo. CWD-scoped resolution (§12.3.1) would resolve `ib send coordinator` back to itself. To address per-repo coordinators, the system coordinator uses:
+
+- `ib send --repo <repo-name> coordinator "message"` — new `--repo` flag scopes `coordinator` resolution to the specified repo
+- The system coordinator discovers available repos and their coordinators via `ib list`, which shows per-repo coordinators in its output
+
+The `--repo` flag is only needed when addressing `coordinator` by name. Regular agent IDs (e.g., `agent-a1b2c3d4`) are globally unique and don't need repo scoping.
 
 ### 12.4 Coordinator Relationship to Regular Agents
 
@@ -1420,7 +1435,7 @@ The coordinator system touches many modules. This section catalogs every file th
 | `src/coordinator.ts` (new) | System coordinator lifecycle: `ensureSystemCoordinator()`, `releaseSystemCoordinator()`, `restartSystemCoordinator()`, reference counting, permissions template, prompt definition |
 | `src/agents.ts` | Add `coordinator?: boolean` to `AgentMeta` interface. Add `{ kind: "system-coordinator" }` to `FlatEntry` union. `flattenAgentTree()` prepends system coordinator entry. Sort per-repo coordinators before regular agents within each repo section. |
 | `src/agent-lifecycle.ts` | `buildCoordinatorSettings()` — new function producing coordinator-specific permissions (Read/Glob/Grep yes, Write/Edit no). `newAgent()` extended with `--coordinator` flag: uses fixed `coordinator` ID, sets `coordinator: true` in meta.json, one-per-repo validation, mutual exclusivity with `--worker`. |
-| `src/ib-commands.ts` | `newAgent()` CLI handler: `--coordinator` flag parsing. `sendMessage()`: resolve `coordinator` name to correct target (per-repo vs system). New `--system` flag for `ib send`. New config keys registered. |
+| `src/ib-commands.ts` | `newAgent()` CLI handler: `--coordinator` flag parsing. `sendMessage()`: resolve `coordinator` name to correct target (per-repo vs system). New `--system` and `--repo` flags for `ib send`. New `ib inbox` command (write/list/read/ack/count). New config keys registered. |
 | `src/watchdog.ts` | Detect `coordinator: true` in meta.json. Skip completion nudge for coordinators. `notifySystemCoordinator()` — send messages to system coordinator when per-repo coordinator enters waiting with no children. No watchdog spawned for system coordinator. |
 | `src/hooks/session-start.ts` | Detect `coordinator: true` in meta.json. Inject coordinator-specific prompt (SPEC.md §12.2.6) instead of standard manager/worker prompt. |
 | `src/hooks/agent-path.ts` | No changes needed — per-repo coordinators use standard path isolation. System coordinator has no worktree to isolate. |

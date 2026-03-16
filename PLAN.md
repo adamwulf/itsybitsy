@@ -1069,9 +1069,10 @@ Implement system coordinator session spawn/teardown:
 - [ ] `releaseSystemCoordinator(): Promise<void>` — decrement reference counter; if counter reaches 0, kill the tmux session
 - [ ] `restartSystemCoordinator(): Promise<void>` — kill tmux session + re-create
 - [ ] Create `~/.itsybitsy/coordinator-inbox/` directory for file-based message queue (see SPEC.md §12.3.4)
+- [ ] Implement `ib inbox` CLI command: `write`, `list`, `read <file>`, `ack <file>`, `count` — reads/writes `~/.itsybitsy/coordinator-inbox/` (see SPEC.md §12.3.4). This is how the system coordinator receives programmatic messages using only `Bash(ib:*)` permissions.
 - [ ] Session name constant: `IB_COORDINATOR_SESSION = "ib-coordinator"`
-- [ ] System coordinator prompt should instruct it to periodically check `~/.itsybitsy/coordinator-inbox/` for messages
-- [ ] Tests for session creation, reuse, cleanup, restart, message queue
+- [ ] System coordinator prompt should instruct it to periodically run `ib inbox count` and process messages via `ib inbox list/read/ack`
+- [ ] Tests for session creation, reuse, cleanup, restart, inbox command
 
 #### 47b: System coordinator TmuxPoller
 
@@ -1232,11 +1233,11 @@ Add ability to spawn per-repo coordinators from the TUI:
 
 Support addressing coordinators by name:
 
-- [ ] `ib send coordinator "message"` — when CWD is within a repo that has a per-repo coordinator, address the per-repo coordinator
-- [ ] `ib send coordinator "message"` — when CWD is NOT within a repo, or the repo has no coordinator, address the system coordinator (via tmux send-keys)
-- [ ] `ib send --system coordinator "message"` — always address the system coordinator
-- [ ] `sendMessage()` function: detect `coordinator` as agent ID, resolve to correct target
-- [ ] Tests for coordinator addressing resolution
+- [ ] `ib send coordinator "message"` — CWD-scoped resolution: CWD in repo with per-repo coordinator → per-repo; otherwise → system coordinator (via `ib inbox write`)
+- [ ] `ib send --system "message"` — always address the system coordinator (via `ib inbox write`)
+- [ ] `ib send --repo <repo-name> coordinator "message"` — address the per-repo coordinator in the specified repo (used by system coordinator to reach per-repo coordinators, since its CWD is outside any repo)
+- [ ] `sendMessage()` function: detect `coordinator` as agent ID, resolve to correct target based on flags and CWD
+- [ ] Tests for coordinator addressing resolution (CWD in repo, CWD outside repo, --system, --repo)
 
 ---
 

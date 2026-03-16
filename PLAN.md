@@ -433,7 +433,7 @@ All TUI agent actions with confirm/input dialogs: kill (`x`), nuke (`!`), resume
 ---
 
 ### Phase 5.2: Right Pane Content -- COMPLETE
-All 8 right pane modes showing real content: agent log, initial prompt, denials with time filter, full tree, errors, diff, status, and questions with answer/acknowledge workflow.
+Right pane modes showing real content: agent log, initial prompt, denials with time filter, full tree, errors, diff, status, and questions with answer/acknowledge workflow. (REPO mode added later in Phase 45.)
 
 ---
 

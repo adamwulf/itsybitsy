@@ -33,13 +33,6 @@ export class TextBuffer {
     return [...this.lines];
   }
 
-  /** Get a direct reference to the internal lines array (for rendering).
-   *  Warning: clear() and setLines() replace the internal array, so do not
-   *  hold this reference across mutations — use it only within a single render pass. */
-  getLinesRef(): readonly string[] {
-    return this.lines;
-  }
-
   /** Reset the buffer to empty. */
   clear(): void {
     this.lines = [""];

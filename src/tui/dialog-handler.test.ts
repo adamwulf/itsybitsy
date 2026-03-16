@@ -404,11 +404,10 @@ describe("TextBuffer API", () => {
     expect(buf.hasContent()).toBe(false);
   });
 
-  test("getText, getLines, getLinesRef return consistent views", () => {
+  test("getText and getLines return consistent views", () => {
     const buf = new TextBuffer(["a", "b"]);
     expect(buf.getText()).toBe("a\nb");
     expect(buf.getLines()).toEqual(["a", "b"]);
-    expect([...buf.getLinesRef()]).toEqual(["a", "b"]);
   });
 
   test("getLines returns a copy (mutation does not affect buffer)", () => {

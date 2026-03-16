@@ -19,8 +19,8 @@ const MAX_VISIBLE_LINES = 5;
 export class InputFieldComponent implements Component {
   private buffer = new TextBuffer();
   private focused: "text" | "send" = "text";
-  /** Per-agent input buffers: agentId → lines snapshot */
-  private agentBuffers = new Map<string, string[]>();
+  /** Per-agent input buffers: agentId → TextBuffer instance */
+  private agentBuffers = new Map<string, TextBuffer>();
   private currentAgentId: string | null = null;
   /** Whether the input field is active (focused panel). Controls cursor visibility. */
   active = true;
@@ -62,7 +62,7 @@ export class InputFieldComponent implements Component {
     // Save current buffer
     if (this.currentAgentId) {
       if (this.buffer.hasContent()) {
-        this.agentBuffers.set(this.currentAgentId, this.buffer.getLines());
+        this.agentBuffers.set(this.currentAgentId, this.buffer);
       } else {
         this.agentBuffers.delete(this.currentAgentId);
       }
@@ -70,12 +70,8 @@ export class InputFieldComponent implements Component {
 
     this.currentAgentId = agentId;
 
-    // Load target agent's buffer
-    if (agentId && this.agentBuffers.has(agentId)) {
-      this.buffer.setLines(this.agentBuffers.get(agentId)!);
-    } else {
-      this.buffer.clear();
-    }
+    // Load target agent's buffer or create fresh one
+    this.buffer = (agentId ? this.agentBuffers.get(agentId) : undefined) ?? new TextBuffer();
     this.focused = "text";
   }
 
@@ -216,7 +212,7 @@ export class InputFieldComponent implements Component {
   private computeWrappedLineCount(width: number): number {
     const textWidth = Math.max(1, width - 2); // 2-char prefix
     let count = 0;
-    for (const line of this.buffer.getLinesRef()) {
+    for (const line of this.buffer.getLines()) {
       count += Math.max(1, Math.ceil(line.length / textWidth) || 1);
     }
     return count;
@@ -228,7 +224,7 @@ export class InputFieldComponent implements Component {
    * '  ' for continuation lines.
    */
   private wrapAllLines(textWidth: number): Array<{ prefix: string; text: string }> {
-    const lines = this.buffer.getLinesRef();
+    const lines = this.buffer.getLines();
     const result: Array<{ prefix: string; text: string }> = [];
     for (let li = 0; li < lines.length; li++) {
       const lineText = lines[li] ?? "";
@@ -250,11 +246,11 @@ export class InputFieldComponent implements Component {
     return result;
   }
 
-  /** Save current lines to the per-agent buffer map. */
+  /** Save current buffer to the per-agent map. */
   private saveCurrentBuffer(): void {
     if (this.currentAgentId) {
       if (this.buffer.hasContent()) {
-        this.agentBuffers.set(this.currentAgentId, this.buffer.getLines());
+        this.agentBuffers.set(this.currentAgentId, this.buffer);
       } else {
         this.agentBuffers.delete(this.currentAgentId);
       }

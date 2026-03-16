@@ -53,6 +53,8 @@ import { RESET, BOLD, DIM, RED, GREEN, YELLOW, DIM_GRAY, REVERSE } from "./color
 import { MIN_LEFT_WIDTH, MAX_LEFT_WIDTH } from "./split-pane";
 import { FocusManager } from "./focus";
 import type { FocusTarget } from "./focus";
+import { loadLayout, saveLayoutDebounced, cancelPendingSave } from "./layout";
+import type { LayoutState } from "./layout";
 
 // Re-export for test compatibility
 export { AgentTreeComponent, formatAgentRow } from "./agent-tree";
@@ -513,6 +515,24 @@ export class DashboardComponent implements Component {
     this.tui = tui;
   }
 
+  /** Apply a saved layout state to restore panel sizes, clamping to valid ranges. */
+  applyLayout(layout: LayoutState) {
+    const MIN_SIDEBAR = 30;
+    const MAX_SIDEBAR = 120;
+    this.sidebarWidth = Math.max(MIN_SIDEBAR, Math.min(MAX_SIDEBAR, layout.sidebarWidth));
+    this.splitPane.setLeftWidth(Math.max(MIN_LEFT_WIDTH, Math.min(MAX_LEFT_WIDTH, layout.splitPaneLeftWidth)));
+    this.sidebar.heightOffsets = { ...layout.heightOffsets };
+  }
+
+  /** Persist current layout via debounced write. */
+  persistLayout() {
+    saveLayoutDebounced({
+      sidebarWidth: this.sidebarWidth,
+      splitPaneLeftWidth: this.splitPane.getLeftWidth(),
+      heightOffsets: { ...this.sidebar.heightOffsets },
+    });
+  }
+
   /** Set the terminal window title via OSC 0. Extracted for testability. */
   setTerminalTitle(title: string) {
     process.stdout.write(`\x1b]0;${title}\x07`);
@@ -526,6 +546,7 @@ export class DashboardComponent implements Component {
 
   stopPolling() {
     this.tmuxPoller.stop();
+    cancelPendingSave();
     if (this.usageTimer) {
       clearInterval(this.usageTimer);
       this.usageTimer = null;
@@ -1017,6 +1038,7 @@ export class DashboardComponent implements Component {
         // active-agent: ] grows middle (shrinks right) = positive delta
         agentActions.handleResizeLeft(this, delta);
       }
+      this.persistLayout();
     }
     // Height resize — sidebar panels only (SPEC §13.3.1)
     else if (data === "{" || data === "}") {
@@ -1077,6 +1099,7 @@ export class DashboardComponent implements Component {
         }
         this.tui?.requestRender();
       }
+      this.persistLayout();
     }
     // Folder browser / add repo
     else if (data === "A") { agentActions.handleAddRepo(this); }
@@ -1241,6 +1264,8 @@ export async function launchDashboard(): Promise<void> {
 
   const config = await readConfig();
   const dashboard = new DashboardComponent();
+  const savedLayout = await loadLayout();
+  if (savedLayout) dashboard.applyLayout(savedLayout);
   dashboard.setTui(tui);
   dashboard.setRepos(repos);
   const diffToolValue = config["externalDiffTool"]?.value;

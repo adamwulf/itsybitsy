@@ -1,0 +1,118 @@
+import { test, expect, describe, beforeEach, afterEach } from "bun:test";
+import { join } from "path";
+import { mkdtemp, rm } from "fs/promises";
+import { tmpdir } from "os";
+import {
+  loadLayout, saveLayout, saveLayoutDebounced, cancelPendingSave,
+  setLayoutPath, resetLayoutPath,
+} from "./layout";
+import type { LayoutState } from "./layout";
+
+const sampleLayout: LayoutState = {
+  sidebarWidth: 70,
+  splitPaneLeftWidth: 90,
+  heightOffsets: { tree: 2, info: -1, coordinator: -1 },
+};
+
+describe("layout persistence", () => {
+  let tmpDir: string;
+
+  beforeEach(async () => {
+    tmpDir = await mkdtemp(join(tmpdir(), "itsybitsy-layout-"));
+    setLayoutPath(join(tmpDir, "layout.json"));
+  });
+
+  afterEach(async () => {
+    cancelPendingSave();
+    resetLayoutPath();
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  test("loadLayout returns null when file does not exist", async () => {
+    expect(await loadLayout()).toBeNull();
+  });
+
+  test("saveLayout then loadLayout round-trips", async () => {
+    await saveLayout(sampleLayout);
+    const loaded = await loadLayout();
+    expect(loaded).toEqual(sampleLayout);
+  });
+
+  test("loadLayout returns null for invalid JSON", async () => {
+    await Bun.write(join(tmpDir, "layout.json"), "not json");
+    expect(await loadLayout()).toBeNull();
+  });
+
+  test("loadLayout returns null for missing fields", async () => {
+    await Bun.write(join(tmpDir, "layout.json"), JSON.stringify({ sidebarWidth: 60 }));
+    expect(await loadLayout()).toBeNull();
+  });
+
+  test("loadLayout returns null for wrong types", async () => {
+    await Bun.write(join(tmpDir, "layout.json"), JSON.stringify({
+      sidebarWidth: "not a number",
+      splitPaneLeftWidth: 80,
+      heightOffsets: { tree: 0, info: 0, coordinator: 0 },
+    }));
+    expect(await loadLayout()).toBeNull();
+  });
+
+  test("loadLayout returns null for NaN values", async () => {
+    await Bun.write(join(tmpDir, "layout.json"), JSON.stringify({
+      sidebarWidth: NaN,
+      splitPaneLeftWidth: 80,
+      heightOffsets: { tree: 0, info: 0, coordinator: 0 },
+    }));
+    expect(await loadLayout()).toBeNull();
+  });
+
+  test("loadLayout returns null for Infinity values", async () => {
+    await Bun.write(join(tmpDir, "layout.json"), JSON.stringify({
+      sidebarWidth: 60,
+      splitPaneLeftWidth: Infinity,
+      heightOffsets: { tree: 0, info: 0, coordinator: 0 },
+    }));
+    expect(await loadLayout()).toBeNull();
+  });
+
+  test("saveLayout creates parent directory if needed", async () => {
+    const nested = join(tmpDir, "sub", "dir", "layout.json");
+    setLayoutPath(nested);
+    await saveLayout(sampleLayout);
+    const loaded = await loadLayout();
+    expect(loaded).toEqual(sampleLayout);
+  });
+
+  test("saveLayoutDebounced writes after delay", async () => {
+    const path = join(tmpDir, "layout.json");
+    setLayoutPath(path);
+    saveLayoutDebounced(sampleLayout);
+    // Not written yet
+    const file = Bun.file(path);
+    expect(await file.exists()).toBe(false);
+    // Wait for debounce
+    await new Promise((r) => setTimeout(r, 600));
+    const loaded = await loadLayout();
+    expect(loaded).toEqual(sampleLayout);
+  });
+
+  test("saveLayoutDebounced coalesces multiple calls", async () => {
+    const path = join(tmpDir, "layout.json");
+    setLayoutPath(path);
+    saveLayoutDebounced({ ...sampleLayout, sidebarWidth: 50 });
+    saveLayoutDebounced({ ...sampleLayout, sidebarWidth: 55 });
+    saveLayoutDebounced({ ...sampleLayout, sidebarWidth: 60 });
+    await new Promise((r) => setTimeout(r, 600));
+    const loaded = await loadLayout();
+    expect(loaded!.sidebarWidth).toBe(60);
+  });
+
+  test("cancelPendingSave prevents write", async () => {
+    const path = join(tmpDir, "layout.json");
+    setLayoutPath(path);
+    saveLayoutDebounced(sampleLayout);
+    cancelPendingSave();
+    await new Promise((r) => setTimeout(r, 600));
+    expect(await Bun.file(path).exists()).toBe(false);
+  });
+});

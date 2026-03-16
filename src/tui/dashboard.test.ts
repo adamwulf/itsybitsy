@@ -3008,3 +3008,51 @@ describe("usage error indicator", () => {
     expect(footer).not.toContain("session:");
   });
 });
+
+describe("applyLayout", () => {
+  test("applies saved layout values", () => {
+    const dashboard = makeDashboard();
+    dashboard.applyLayout({
+      sidebarWidth: 75,
+      splitPaneLeftWidth: 100,
+      heightOffsets: { tree: 3, info: -2, coordinator: -1 },
+    });
+    expect(dashboard.sidebarWidth).toBe(75);
+    expect(dashboard.splitPane.getLeftWidth()).toBe(100);
+    expect(dashboard.sidebar.heightOffsets).toEqual({ tree: 3, info: -2, coordinator: -1 });
+  });
+
+  test("clamps sidebarWidth to valid range", () => {
+    const dashboard = makeDashboard();
+    dashboard.applyLayout({
+      sidebarWidth: 5,
+      splitPaneLeftWidth: 80,
+      heightOffsets: { tree: 0, info: 0, coordinator: 0 },
+    });
+    expect(dashboard.sidebarWidth).toBe(30); // MIN_SIDEBAR
+
+    dashboard.applyLayout({
+      sidebarWidth: 999,
+      splitPaneLeftWidth: 80,
+      heightOffsets: { tree: 0, info: 0, coordinator: 0 },
+    });
+    expect(dashboard.sidebarWidth).toBe(120); // MAX_SIDEBAR
+  });
+
+  test("clamps splitPaneLeftWidth to valid range", () => {
+    const dashboard = makeDashboard();
+    dashboard.applyLayout({
+      sidebarWidth: 60,
+      splitPaneLeftWidth: 10,
+      heightOffsets: { tree: 0, info: 0, coordinator: 0 },
+    });
+    expect(dashboard.splitPane.getLeftWidth()).toBe(40); // MIN_LEFT_WIDTH
+
+    dashboard.applyLayout({
+      sidebarWidth: 60,
+      splitPaneLeftWidth: 500,
+      heightOffsets: { tree: 0, info: 0, coordinator: 0 },
+    });
+    expect(dashboard.splitPane.getLeftWidth()).toBe(160); // MAX_LEFT_WIDTH
+  });
+});

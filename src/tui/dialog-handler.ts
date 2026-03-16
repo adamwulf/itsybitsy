@@ -684,7 +684,7 @@ type DialogContent = { title: string; contentLines: string[] };
 export function renderTextareaBlock(
   buffer: TextBuffer, innerWidth: number, showCursor: boolean
 ): { outputLines: string[]; hasScrollIndicator: boolean } {
-  const lines = [...buffer.getLinesRef()];
+  const lines = buffer.getLines();
   const visibleHeight = TEXTAREA_VISIBLE_HEIGHT;
   const textWidth = innerWidth - 2;
   const visualLines = wrapTextareaLines(lines, textWidth);

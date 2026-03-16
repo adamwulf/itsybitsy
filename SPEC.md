@@ -1171,8 +1171,26 @@ Tab replaces the previous tree/questions toggle behavior. When in QUESTIONS pane
 
 Each panel shows a visual indicator of its focus state:
 
-- **Focused panel**: Section header/separator is highlighted (bold or colored)
+- **Focused panel**: Section header/separator rendered in **reverse video** (appears selected)
 - **Unfocused panels**: Section header/separator is dim
+
+### 13.3.1 Panel Resizing
+
+When a panel has focus, `[` and `]` decrease/increase its **width**, and `Shift+[` (`{`) and `Shift+]` (`}`) decrease/increase its **height**.
+
+**Width resizing (`[` / `]`):**
+
+| Focused panel | Steals from |
+|---------------|-------------|
+| Sidebar (any sidebar panel focused) | Splits equally between agent pane and right pane |
+| Agent pane (middle) | Right pane only |
+| Right pane | Agent pane only |
+
+Width changes apply in increments (e.g., 2 columns per keypress). When the sidebar grows by N columns, each of the other two panes shrinks by N/2 columns (rounded).
+
+**Height resizing (`{` / `}`):**
+
+Only meaningful for sidebar panels (agent tree, info, coordinator). Growing one sidebar panel shrinks the panel(s) below it. If the focused panel is the bottom-most sidebar panel, height resize is a no-op (nothing below to steal from).
 
 ### 13.4 Input Field
 

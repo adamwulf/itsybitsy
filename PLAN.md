@@ -1036,7 +1036,7 @@ Restructure `handleInput()` to route based on focus state:
 - [ ] Tab → `focusManager.cycle(1)`, Shift+Tab → `focusManager.cycle(-1)` — replaces the old tree/questions toggle
 - [ ] When focus is `agent-tree`: existing keybinding behavior (j/k, p/n, action keys, etc.)
 - [ ] When focus is `coordinator` or `active-agent`: route printable/editing keys to the input field; suppress dashboard action keys (s, m, x, etc.); Tab/Shift+Tab still cycle; Escape returns focus to `agent-tree`
-- [ ] Focus visual indicator: highlight the focused panel's separator/header (bold or colored), dim unfocused panels
+- [ ] Focus visual indicator: render focused panel's separator/header in **reverse video**, dim unfocused panels
 - [ ] Tests for keyboard routing in each focus state
 
 #### 46d: Wire input field to tmux pane
@@ -1062,6 +1062,24 @@ Integrate the input field into the coordinator section of the sidebar:
 - [ ] On cancel: clear input, return focus to `agent-tree`
 - [ ] When focus leaves `coordinator`: hide the input field, restore full coordinator display height
 - [ ] Tests for coordinator input submission
+
+#### 46f: Focus indicators and panel resizing
+
+**Files:** `src/tui/dashboard.ts`, `src/tui/sidebar.ts`, `src/tui/split-pane.ts`, `src/tui/focus.ts`
+
+Focus indicator and panel resize keybindings (see SPEC §13.3 and §13.3.1):
+
+- [ ] Focused panel's section header/separator rendered in **reverse video**; unfocused panels rendered dim
+- [ ] `[` / `]` resize focused panel width:
+  - Sidebar focused: steal equally from agent pane and right pane (each shrinks by N/2)
+  - Agent pane focused: steal from right pane only
+  - Right pane focused: steal from agent pane only
+- [ ] `{` / `}` (Shift+[ / Shift+]) resize focused sidebar panel height:
+  - Growing one sidebar panel shrinks the panel(s) below it
+  - No-op if focused panel is bottom-most sidebar panel
+- [ ] Width/height values persisted across renders (stored in dashboard or focus manager state)
+- [ ] Minimum width/height constraints to prevent panels from collapsing to zero
+- [ ] Tests for reverse-video indicator on focused panel, resize keybindings, constraint enforcement
 
 ---
 

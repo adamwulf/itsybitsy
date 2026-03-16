@@ -3058,7 +3058,7 @@ describe("applyLayout", () => {
 });
 
 describe("input field integration", () => {
-  test("when active-agent focused with agent selected, tmux display height is reduced by 3", () => {
+  test("when agent selected, tmux display height is reduced by input field height", () => {
     const dashboard = makeDashboard();
     const agent = makeAgent("agent-a", "/repos/test");
     const flatList: FlatEntry[] = [makeFlatAgent(agent)];
@@ -3067,18 +3067,23 @@ describe("input field integration", () => {
     const origRows = process.stdout.rows;
     Object.defineProperty(process.stdout, "rows", { value: 30, writable: true, configurable: true });
     try {
-      // Default focus: tmux gets full height
+      // Input field is always shown when agent selected (not full-width)
       dashboard.render(160);
-      const fullHeight = dashboard.tmuxPane.displayHeight;
+      const displayH = dashboard.tmuxPane.displayHeight;
 
-      // Tab to active-agent
+      // Chrome: header(1) + title-sep(1) + bottom-sep(1) + status(2) = 5
+      const availableHeight = 30 - 5;
+      // Input field: top sep(1) + 1 content line + bottom sep(1) = 3
+      expect(displayH).toBe(availableHeight - 3);
+
+      // Tabbing to active-agent doesn't change the height (input field always shown)
       dashboard.handleInput("\t"); // info
       dashboard.handleInput("\t"); // coordinator
       dashboard.handleInput("\t"); // active-agent
       expect(dashboard.focus).toBe("active-agent");
 
       dashboard.render(160);
-      expect(dashboard.tmuxPane.displayHeight).toBe(fullHeight - 3);
+      expect(dashboard.tmuxPane.displayHeight).toBe(displayH);
     } finally {
       Object.defineProperty(process.stdout, "rows", { value: origRows, writable: true, configurable: true });
     }
@@ -3112,7 +3117,7 @@ describe("input field integration", () => {
     }
   });
 
-  test("when focus is not active-agent, no input field lines appear", () => {
+  test("when focus is not active-agent, input field appears without cursor", () => {
     const dashboard = makeDashboard();
     const agent = makeAgent("agent-a", "/repos/test");
     const flatList: FlatEntry[] = [makeFlatAgent(agent)];
@@ -3124,7 +3129,10 @@ describe("input field integration", () => {
       expect(dashboard.focus).toBe("agent-tree");
       const lines = dashboard.render(160);
       const allText = lines.map(l => stripAnsi(l)).join("\n");
-      expect(allText).not.toContain("> █");
+      // Input field is shown but without cursor block (not active)
+      expect(allText).toContain("> ");
+      expect(allText).toContain("[Send]");
+      expect(allText).not.toContain("█");
     } finally {
       Object.defineProperty(process.stdout, "rows", { value: origRows, writable: true, configurable: true });
     }

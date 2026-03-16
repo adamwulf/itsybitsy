@@ -73,6 +73,30 @@ const DEFAULT_LEFT_WIDTH = 80;
 const LEFT_WIDTH_STEP = 5;
 
 /**
+ * Find the last two ─ separator lines from the bottom of wrapped tmux output.
+ * Returns indices of the upper (first found going up) and lower (last found) separators.
+ * Both are -1 if fewer than two separators are found.
+ */
+function findLastTwoSeparators(wrapped: string[]): { upperIndex: number; lowerIndex: number } {
+  let separatorCount = 0;
+  let upperIndex = -1;
+  let lowerIndex = -1;
+  for (let i = wrapped.length - 1; i >= 0; i--) {
+    const stripped = stripAnsi(wrapped[i]!).trim();
+    if (stripped.length > 0 && /^─+$/.test(stripped)) {
+      separatorCount++;
+      if (separatorCount === 1) {
+        lowerIndex = i;
+      }
+      upperIndex = i;
+      if (separatorCount >= 2) break;
+    }
+  }
+  if (separatorCount < 2) return { upperIndex: -1, lowerIndex: -1 };
+  return { upperIndex, lowerIndex };
+}
+
+/**
  * Tmux output pane — shows live tmux capture for the selected agent.
  * Wraps long lines to pane width, supports scroll-back from bottom.
  */
@@ -89,6 +113,8 @@ export class TmuxPaneComponent implements Component {
   clientAttached = false;
   /** Whether to trim Claude's input separator from the bottom of output */
   trimInputSeparator = false;
+  /** Lines below the last separator (status line), populated by parseStatusLines() */
+  statusLines: string[] = [];
 
   invalidate(): void {}
 
@@ -106,6 +132,25 @@ export class TmuxPaneComponent implements Component {
 
   scrollDown(amount = 1) {
     this.scrollBack = Math.max(0, this.scrollBack - amount);
+  }
+
+  /**
+   * Pre-compute status lines from rawOutput without rendering.
+   * Extracts lines after the last ────────── separator in tmux output.
+   * Call before render() so the dashboard can account for statusLines height.
+   */
+  parseStatusLines(width: number): void {
+    this.statusLines = [];
+    if (!this.trimInputSeparator || !this.rawOutput) return;
+
+    const wrapped = wrapLines(this.rawOutput, width);
+    const { lowerIndex } = findLastTwoSeparators(wrapped);
+    // Extract lines after the lower separator
+    if (lowerIndex >= 0 && lowerIndex < wrapped.length - 1) {
+      this.statusLines = wrapped.slice(lowerIndex + 1).map(
+        (line) => truncateToWidth(line, width, "")
+      );
+    }
   }
 
   render(width: number): string[] {
@@ -170,18 +215,9 @@ export class TmuxPaneComponent implements Component {
     // Search from the bottom to find the last two ─ separators — those are
     // Claude's UI chrome. Trim at the first of the two (the upper one).
     if (this.trimInputSeparator) {
-      let separatorCount = 0;
-      let trimIndex = wrapped.length;
-      for (let i = wrapped.length - 1; i >= 0; i--) {
-        const stripped = stripAnsi(wrapped[i]!).trim();
-        if (stripped.length > 0 && /^─+$/.test(stripped)) {
-          separatorCount++;
-          trimIndex = i;
-          if (separatorCount >= 2) break;
-        }
-      }
-      if (separatorCount >= 2 && trimIndex < wrapped.length) {
-        wrapped = wrapped.slice(0, trimIndex);
+      const { upperIndex } = findLastTwoSeparators(wrapped);
+      if (upperIndex >= 0 && upperIndex < wrapped.length) {
+        wrapped = wrapped.slice(0, upperIndex);
       }
     }
 
@@ -1225,43 +1261,59 @@ export class DashboardComponent implements Component {
       mainLines = [mainTitleSep, ...this.agentTree.render(mainWidth)];
     } else {
       // Normal/full-width mode: split-pane(tmux | right-pane)
-      const showInputField = this.focusManager.current() === "active-agent"
-        && this.agentTree.selectedAgent != null
-        && !isFullWidth;
-      const inputFieldHeight = showInputField ? this.inputField.getHeight() : 0;
+      const showInputField = this.agentTree.selectedAgent != null && !isFullWidth;
+
+      // Compute leftW early — needed for input field height calculation
+      const leftW = Math.min(this.splitPane.getLeftWidth(), mainWidth - 2);
+
+      // Set active state on input field based on focus
+      this.inputField.active = this.focusManager.current() === "active-agent";
+
+      // Pre-compute status lines from tmux output before rendering
       this.tmuxPane.trimInputSeparator = showInputField;
+      if (showInputField) {
+        this.tmuxPane.parseStatusLines(leftW);
+      } else {
+        this.tmuxPane.statusLines = [];
+      }
+
+      const statusLinesCount = this.tmuxPane.statusLines.length;
+      const inputFieldHeight = showInputField ? this.inputField.getHeight(leftW) + statusLinesCount : 0;
       this.tmuxPane.displayHeight = showInputField ? availableHeight - inputFieldHeight : availableHeight;
       this.rightPane.displayHeight = availableHeight;
       this.splitPane.fullWidth = isFullWidth;
       const splitLines = this.splitPane.render(mainWidth);
 
       if (showInputField) {
-        // Replace the last N lines' left portion with input field content.
+        // Replace the last N lines' left portion with input field + status lines.
         // The tmux pane rendered N fewer lines, so the split pane padded the
         // left side with empty strings for those positions. We rebuild those
         // lines with input field content on the left + right pane content on
         // the right.
         const sepChar = `${DIM_GRAY}│${RESET}`;
-        const leftW = Math.min(this.splitPane.getLeftWidth(), mainWidth - 2);
         const rw = mainWidth - leftW - 1;
         const inputLines = this.inputField.render(leftW);
+        // Append status lines below the input field
+        const overlayLines = [...inputLines, ...this.tmuxPane.statusLines.map(
+          (line) => truncateToWidth(line, leftW, "")
+        )];
         // Re-render right pane at the correct width to get the last N lines
         const rightLines = this.rightPane.render(rw);
 
         for (let i = 0; i < inputFieldHeight; i++) {
           const splitIdx = splitLines.length - inputFieldHeight + i;
           if (splitIdx < 0) continue;
-          const inputLine = inputLines[i] ?? "";
+          const overlayLine = overlayLines[i] ?? "";
           const rightIdx = availableHeight - inputFieldHeight + i;
           const rightLine = rightIdx >= 0 && rightIdx < rightLines.length
             ? truncateToWidth(rightLines[rightIdx]!, rw, "")
             : "";
-          // Pad input field line to left width
-          const inputVW = visibleWidth(inputLine);
-          const needsReset = inputLine.includes("\x1b[");
-          const leftPadded = inputVW >= leftW
-            ? truncateToWidth(inputLine, leftW, "")
-            : inputLine + (needsReset ? RESET : "") + " ".repeat(leftW - inputVW);
+          // Pad overlay line to left width
+          const overlayVW = visibleWidth(overlayLine);
+          const needsReset = overlayLine.includes("\x1b[");
+          const leftPadded = overlayVW >= leftW
+            ? truncateToWidth(overlayLine, leftW, "")
+            : overlayLine + (needsReset ? RESET : "") + " ".repeat(leftW - overlayVW);
           splitLines[splitIdx] = leftPadded + sepChar + rightLine;
         }
       }

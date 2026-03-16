@@ -318,7 +318,7 @@ describe("InputFieldComponent", () => {
   describe("getHeight", () => {
     test("returns 3 for single-line input", () => {
       const field = makeField();
-      expect(field.getHeight()).toBe(3);
+      expect(field.getHeight(40)).toBe(3);
     });
 
     test("returns 4 for two-line input", () => {
@@ -326,7 +326,7 @@ describe("InputFieldComponent", () => {
       field.handleInput("a");
       field.handleInput("\r");
       field.handleInput("b");
-      expect(field.getHeight()).toBe(4);
+      expect(field.getHeight(40)).toBe(4);
     });
 
     test("caps at MAX_VISIBLE_LINES + 2", () => {
@@ -337,7 +337,7 @@ describe("InputFieldComponent", () => {
         field.handleInput("\r");
       }
       // MAX_VISIBLE_LINES = 5, so height = 5 + 2 = 7
-      expect(field.getHeight()).toBe(7);
+      expect(field.getHeight(40)).toBe(7);
     });
   });
 

@@ -32,7 +32,7 @@ import { fetchUsage } from "../usage";
 import type { UsageData } from "../usage";
 import { getStateColors, setupColorSchemeDetection } from "./color-scheme";
 import { AgentTreeComponent } from "./agent-tree";
-import { SidebarComponent, SIDEBAR_WIDTH } from "./sidebar";
+import { SidebarComponent, SIDEBAR_WIDTH, computeSidebarHeights } from "./sidebar";
 import { InfoPanelComponent } from "./info-panel";
 import type { DialogState } from "./dialog-handler";
 import {
@@ -189,13 +189,14 @@ function mergeSidebarAndMain(
   mainLines: string[],
   height: number,
   mainWidth: number,
+  sidebarWidth = SIDEBAR_WIDTH,
 ): string[] {
   const result: string[] = [];
   const count = Math.max(sidebarLines.length, mainLines.length, height);
   for (let i = 0; i < count; i++) {
     const sl = i < sidebarLines.length ? sidebarLines[i]! : "";
     const ml = i < mainLines.length ? mainLines[i]! : "";
-    const leftPadded = padToWidth(sl, SIDEBAR_WIDTH);
+    const leftPadded = padToWidth(sl, sidebarWidth);
     result.push(leftPadded + `${DIM_GRAY}│${RESET}` + truncateToWidth(ml, mainWidth, ""));
   }
   return result;
@@ -417,6 +418,8 @@ export class DashboardComponent implements Component {
   private usageTimer: ReturnType<typeof setInterval> | null = null;
   pendingSelectNewestInRepo: string | null = null;
   private focusManager = new FocusManager();
+  /** Dynamic sidebar width — adjustable via [ ] when sidebar panel is focused */
+  sidebarWidth = SIDEBAR_WIDTH;
   private _questionsFocused = false;
   /** Cache of which agents have an attached tmux client */
   private _clientAttached: Map<string, boolean> = new Map();
@@ -978,9 +981,71 @@ export class DashboardComponent implements Component {
     else if (data === "E") { agentActions.handleCrossRepoSend(this); }
     // Snapshot
     else if (data === "S") { agentActions.handleSnapshot(this); }
-    // Resize left pane
-    else if (data === "[") { agentActions.handleResizeLeft(this, -LEFT_WIDTH_STEP); }
-    else if (data === "]") { agentActions.handleResizeLeft(this, LEFT_WIDTH_STEP); }
+    // Width resize — focus-aware (SPEC §13.3.1)
+    else if (data === "[" || data === "]") {
+      const delta = data === "]" ? LEFT_WIDTH_STEP : -LEFT_WIDTH_STEP;
+      const focus = this.focusManager.current();
+      if (focus === "agent-tree" || focus === "info" || focus === "coordinator") {
+        // Sidebar panel focused: adjust sidebar width
+        const MIN_SIDEBAR = 30;
+        const MAX_SIDEBAR = 120;
+        this.sidebarWidth = Math.max(MIN_SIDEBAR, Math.min(MAX_SIDEBAR, this.sidebarWidth + delta));
+        this.tui?.requestRender();
+      } else if (focus === "right-pane") {
+        // Right pane focused: ] grows right (shrinks middle) = negative delta to handleResizeLeft
+        agentActions.handleResizeLeft(this, -delta);
+      } else {
+        // active-agent: ] grows middle (shrinks right) = positive delta
+        agentActions.handleResizeLeft(this, delta);
+      }
+    }
+    // Height resize — sidebar panels only (SPEC §13.3.1)
+    else if (data === "{" || data === "}") {
+      const delta = data === "}" ? 1 : -1;
+      const focus = this.focusManager.current();
+      if (focus === "agent-tree") {
+        // Grow tree, shrink info first; if info is exhausted, shrink coordinator
+        const base = computeSidebarHeights(this.sidebar.displayHeight, this.agentTree.visibleList.length);
+        const effectiveInfo = Math.max(0, base.infoHeight + this.sidebar.heightOffsets.info);
+        const effectiveCoord = Math.max(0, base.coordinatorHeight + this.sidebar.heightOffsets.coordinator);
+        if (delta > 0) {
+          // Growing tree: steal from info, or coordinator if info already 0
+          if (effectiveInfo > 0) {
+            this.sidebar.heightOffsets.tree += delta;
+            this.sidebar.heightOffsets.info -= delta;
+          } else if (effectiveCoord > 0) {
+            this.sidebar.heightOffsets.tree += delta;
+            this.sidebar.heightOffsets.coordinator -= delta;
+          }
+        } else {
+          // Shrinking tree: give back to info, or coordinator if info base is 0
+          const effectiveTree = Math.max(1, base.treeHeight + this.sidebar.heightOffsets.tree);
+          if (effectiveTree > 1) {
+            this.sidebar.heightOffsets.tree += delta;
+            if (base.infoHeight > 0) {
+              this.sidebar.heightOffsets.info -= delta;
+            } else {
+              this.sidebar.heightOffsets.coordinator -= delta;
+            }
+          }
+        }
+        this.tui?.requestRender();
+      } else if (focus === "info") {
+        // Grow info, shrink coordinator
+        const base = computeSidebarHeights(this.sidebar.displayHeight, this.agentTree.visibleList.length);
+        const effectiveCoord = Math.max(0, base.coordinatorHeight + this.sidebar.heightOffsets.coordinator);
+        const effectiveInfo = Math.max(0, base.infoHeight + this.sidebar.heightOffsets.info);
+        if (delta > 0 && effectiveCoord > 0) {
+          this.sidebar.heightOffsets.info += delta;
+          this.sidebar.heightOffsets.coordinator -= delta;
+        } else if (delta < 0 && effectiveInfo > 0) {
+          this.sidebar.heightOffsets.info += delta;
+          this.sidebar.heightOffsets.coordinator -= delta;
+        }
+        this.tui?.requestRender();
+      }
+      // coordinator is bottom-most — height resize is a no-op
+    }
     // Folder browser / add repo
     else if (data === "A") { agentActions.handleAddRepo(this); }
     // Remove repo (safe — requires repo header selected and zero agents)
@@ -1021,7 +1086,8 @@ export class DashboardComponent implements Component {
     const chromeLines = 5;
     const availableHeight = Math.max(5, terminalRows - chromeLines);
 
-    const mainWidth = width - SIDEBAR_WIDTH - 1; // 1 for sidebar separator
+    const sidebarW = this.sidebarWidth;
+    const mainWidth = width - sidebarW - 1; // 1 for sidebar separator
     this.sidebar.displayHeight = availableHeight + 1; // sidebar gets the title separator row too
 
     // Build main area title separator (agent-id left, pane-mode right)
@@ -1046,8 +1112,8 @@ export class DashboardComponent implements Component {
 
     // Render sidebar and merge with main area
     this.sidebar.focusTarget = this.focusManager.current();
-    const sidebarLines = this.sidebar.render(SIDEBAR_WIDTH);
-    lines.push(...mergeSidebarAndMain(sidebarLines, mainLines, availableHeight + 1, mainWidth));
+    const sidebarLines = this.sidebar.render(sidebarW);
+    lines.push(...mergeSidebarAndMain(sidebarLines, mainLines, availableHeight + 1, mainWidth, sidebarW));
 
     // Bottom separator with junction characters
     const bottomSep = this.buildBottomSeparator(width, isTreeMode, isFullWidth);
@@ -1071,11 +1137,15 @@ export class DashboardComponent implements Component {
 
     const leftPad = 3;
     const rightPad = 3;
-    const focused = this.focusManager.current() === "active-agent";
+    const currentFocus = this.focusManager.current();
+    const leftFocused = currentFocus === "active-agent";
+    const rightFocused = currentFocus === "right-pane";
 
-    // Color helpers: when active-agent is focused, use reverse video (SPEC §13.3)
-    const dashColor = focused ? `${REVERSE}${DIM_GRAY}` : DIM_GRAY;
-    const titleStyle = focused ? `${RESET}${REVERSE}${BOLD}` : BOLD;
+    // Dash color is always DIM_GRAY — never reverse (Bug 3)
+    const leftDashColor = DIM_GRAY;
+    const rightDashColor = DIM_GRAY;
+    const leftTitleStyle = leftFocused ? `${REVERSE}${BOLD}` : BOLD;
+    const rightTitleStyle = rightFocused ? `${REVERSE}${BOLD}` : BOLD;
 
     if (!isTreeMode && !isFullWidth && leftTitle) {
       // Show junction at inner split position
@@ -1084,33 +1154,34 @@ export class DashboardComponent implements Component {
       const rightHalfDashes = Math.max(1, mainWidth - splitAt - rightTitle.length - rightPad);
       const leftDashStr = "─".repeat(Math.max(0, leftHalfDashes - 1)) + "┬";
       const sep =
-        `${dashColor}${"─".repeat(leftPad)}${RESET}${titleStyle}${leftTitle}${RESET}` +
-        `${dashColor}${leftDashStr}${RESET}` +
-        `${titleStyle}${rightTitle}${RESET}` +
-        `${dashColor}${"─".repeat(rightHalfDashes)}${"─".repeat(rightPad)}${RESET}`;
+        `${leftDashColor}${"─".repeat(leftPad)}${RESET}${leftTitleStyle}${leftTitle}${RESET}` +
+        `${leftDashColor}${leftDashStr}${RESET}` +
+        `${rightTitleStyle}${rightTitle}${RESET}` +
+        `${rightDashColor}${"─".repeat(rightHalfDashes)}${"─".repeat(rightPad)}${RESET}`;
       return truncateToWidth(sep, mainWidth, "");
     }
 
     const fixedChars = leftPad + leftTitle.length + rightPad + rightTitle.length;
     const fillCount = Math.max(1, mainWidth - fixedChars);
-    const sep = `${dashColor}${"─".repeat(leftPad)}${RESET}${titleStyle}${leftTitle}${RESET}${dashColor}${"─".repeat(fillCount)}${RESET}${titleStyle}${rightTitle}${RESET}${dashColor}${"─".repeat(rightPad)}${RESET}`;
+    const sep = `${leftDashColor}${"─".repeat(leftPad)}${RESET}${leftTitleStyle}${leftTitle}${RESET}${leftDashColor}${"─".repeat(fillCount)}${RESET}${rightTitleStyle}${rightTitle}${RESET}${rightDashColor}${"─".repeat(rightPad)}${RESET}`;
     return truncateToWidth(sep, mainWidth, "");
   }
 
   /** Build bottom separator with appropriate junction characters */
   private buildBottomSeparator(width: number, isTreeMode: boolean, isFullWidth: boolean): string {
-    // Sidebar junction at position SIDEBAR_WIDTH
+    const sidebarW = this.sidebarWidth;
+    // Sidebar junction at position sidebarWidth
     const sidebarJunction = "┴";
-    const leftPart = "─".repeat(SIDEBAR_WIDTH) + sidebarJunction;
+    const leftPart = "─".repeat(sidebarW) + sidebarJunction;
 
     if (!isTreeMode && !isFullWidth) {
       // Also add inner split pane junction
       const innerJPos = this.splitPane.getLeftWidth();
-      const innerSep = "─".repeat(innerJPos) + "┴" + "─".repeat(Math.max(0, width - SIDEBAR_WIDTH - 1 - innerJPos - 1));
+      const innerSep = "─".repeat(innerJPos) + "┴" + "─".repeat(Math.max(0, width - sidebarW - 1 - innerJPos - 1));
       return leftPart + innerSep;
     }
 
-    return leftPart + "─".repeat(Math.max(0, width - SIDEBAR_WIDTH - 1));
+    return leftPart + "─".repeat(Math.max(0, width - sidebarW - 1));
   }
 }
 

@@ -69,6 +69,8 @@ export class SidebarComponent implements Component {
   displayHeight = 30;
   /** Which panel currently has focus (set by dashboard before render) */
   focusTarget: FocusTarget = "agent-tree";
+  /** Height offsets for sidebar panels — positive grows, negative shrinks */
+  heightOffsets: { tree: number; info: number; coordinator: number } = { tree: 0, info: 0, coordinator: 0 };
 
   constructor(agentTree: AgentTreeComponent, infoPanel: InfoPanelComponent) {
     this.agentTree = agentTree;
@@ -81,14 +83,35 @@ export class SidebarComponent implements Component {
   }
 
   render(width: number): string[] {
-    const w = Math.min(width, SIDEBAR_WIDTH);
+    const w = width;
     const lines: string[] = [];
 
     const itemCount = this.agentTree.visibleList.length;
-    const { treeHeight, infoHeight, coordinatorHeight } = computeSidebarHeights(
-      this.displayHeight,
-      itemCount,
-    );
+    const base = computeSidebarHeights(this.displayHeight, itemCount);
+    // Apply height offsets: grow focused panel, shrink panel below
+    let treeHeight = Math.max(1, base.treeHeight + this.heightOffsets.tree);
+    let infoHeight = Math.max(0, base.infoHeight + this.heightOffsets.info);
+    let coordinatorHeight = Math.max(0, base.coordinatorHeight + this.heightOffsets.coordinator);
+
+    // Clamp so total content + headers fits within displayHeight.
+    // Headers: 1 (Agents) + 1 (Info, if shown) + 1 (Coordinator, if shown)
+    const headerCount = 1 + (infoHeight > 0 ? 1 : 0) + (coordinatorHeight > 0 ? 1 : 0);
+    const budget = this.displayHeight - headerCount;
+    if (budget > 0 && treeHeight + infoHeight + coordinatorHeight > budget) {
+      // Shrink from bottom up: coordinator first, then info, then tree
+      const excess = treeHeight + infoHeight + coordinatorHeight - budget;
+      const coordShrink = Math.min(coordinatorHeight, excess);
+      coordinatorHeight -= coordShrink;
+      const remaining = excess - coordShrink;
+      if (remaining > 0) {
+        const infoShrink = Math.min(infoHeight, remaining);
+        infoHeight -= infoShrink;
+        const leftover = remaining - infoShrink;
+        if (leftover > 0) {
+          treeHeight = Math.max(1, treeHeight - leftover);
+        }
+      }
+    }
 
     // Agents section header + tree
     lines.push(buildFocusSeparator("Agents", w, this.focusTarget === "agent-tree"));
@@ -102,7 +125,7 @@ export class SidebarComponent implements Component {
 
     // Info separator + info panel
     if (infoHeight > 0) {
-      lines.push(buildFocusSeparator("Info", w, false));
+      lines.push(buildFocusSeparator("Info", w, this.focusTarget === "info"));
       this.infoPanel.displayHeight = infoHeight;
       const infoLines = this.infoPanel.render(w);
       lines.push(...infoLines);

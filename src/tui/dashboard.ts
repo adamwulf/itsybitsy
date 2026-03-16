@@ -405,6 +405,7 @@ export class DashboardComponent implements Component {
   private statusBar: StatusBarComponent;
   tui: TUI | null = null;
   modeIndex = 0;
+  savedModeIndex = 0;
   private tmuxPoller: TmuxPoller;
   currentAgentId: string | null = null;
   _dialog: DialogState = null;
@@ -749,6 +750,24 @@ export class DashboardComponent implements Component {
     this.infoPanel.selectedRepoHeader = this.agentTree.selectedRepoHeader;
     this.infoPanel.selectedRepoPath = this.agentTree.selectedRepoPath;
     this.infoPanel.allAgents = this.agentTree.flatList;
+
+    // Auto-switch to/from REPO mode based on selection
+    const currentMode = PANE_MODES[this.modeIndex];
+    if (!selected && this.agentTree.selectedRepoHeader) {
+      // Repo header selected — save current mode and switch to REPO
+      if (currentMode !== "REPO") {
+        this.savedModeIndex = this.modeIndex;
+      }
+      jumpToMode(this, "REPO");
+    } else if (selected && currentMode === "REPO") {
+      // Agent selected while in REPO mode — restore previous mode
+      // Fall back to AGENT LOG if saved mode would be empty (ERRORS/QUESTIONS with no content)
+      const savedMode = PANE_MODES[this.savedModeIndex]!;
+      const wouldSkip =
+        (savedMode === "ERRORS" && this.rightPane.errors.length === 0 && this.rightPane.orphanedTmuxSessions.length === 0) ||
+        (savedMode === "QUESTIONS" && this.rightPane.questions.length === 0);
+      jumpToMode(this, wouldSkip ? "AGENT LOG" : savedMode);
+    }
 
     const newId = selected?.id ?? null;
     if (newId !== this.currentAgentId) {
@@ -1143,8 +1162,10 @@ export class DashboardComponent implements Component {
   private buildMainTitleSeparator(mainWidth: number, isTreeMode: boolean, isFullWidth: boolean): string {
     const selAgent = this.agentTree.selectedAgent;
     const repoHeader = this.agentTree.selectedRepoHeader;
-    const leftTitle = selAgent ? ` ${selAgent.id} ` : "";
-    const rightTitle = isTreeMode ? " TREE "
+    const isRepoMode = this.rightPane.mode === "REPO";
+    const leftTitle = isRepoMode ? ` ${repoHeader ?? ""} ` : (selAgent ? ` ${selAgent.id} ` : "");
+    const rightTitle = isRepoMode ? " REPO "
+      : isTreeMode ? " TREE "
       : repoHeader ? ` ${repoHeader} `
       : ` ${this.rightPane.mode} `;
 

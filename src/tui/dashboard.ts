@@ -32,7 +32,7 @@ import { fetchUsage } from "../usage";
 import type { UsageData } from "../usage";
 import { getStateColors, setupColorSchemeDetection } from "./color-scheme";
 import { AgentTreeComponent } from "./agent-tree";
-import { SidebarComponent, SIDEBAR_WIDTH } from "./sidebar";
+import { SidebarComponent, SIDEBAR_WIDTH, computeSidebarHeights } from "./sidebar";
 import { InfoPanelComponent } from "./info-panel";
 import type { DialogState } from "./dialog-handler";
 import {
@@ -1004,14 +1004,40 @@ export class DashboardComponent implements Component {
       const delta = data === "}" ? 1 : -1;
       const focus = this.focusManager.current();
       if (focus === "agent-tree") {
-        // Grow tree, shrink info (or coordinator if info is 0)
-        this.sidebar.heightOffsets.tree += delta;
-        this.sidebar.heightOffsets.info -= delta;
+        // Grow tree, shrink info first; if info is exhausted, shrink coordinator
+        const base = computeSidebarHeights(this.sidebar.displayHeight, this.agentTree.visibleList.length);
+        const effectiveInfo = Math.max(0, base.infoHeight + this.sidebar.heightOffsets.info);
+        const effectiveCoord = Math.max(0, base.coordinatorHeight + this.sidebar.heightOffsets.coordinator);
+        if (delta > 0) {
+          // Growing tree: steal from info, or coordinator if info already 0
+          if (effectiveInfo > 0) {
+            this.sidebar.heightOffsets.tree += delta;
+            this.sidebar.heightOffsets.info -= delta;
+          } else if (effectiveCoord > 0) {
+            this.sidebar.heightOffsets.tree += delta;
+            this.sidebar.heightOffsets.coordinator -= delta;
+          }
+        } else {
+          // Shrinking tree: give back to info (or coordinator if info offset is already at base)
+          const effectiveTree = Math.max(1, base.treeHeight + this.sidebar.heightOffsets.tree);
+          if (effectiveTree > 1) {
+            this.sidebar.heightOffsets.tree += delta;
+            this.sidebar.heightOffsets.info -= delta;
+          }
+        }
         this.tui?.requestRender();
       } else if (focus === "info") {
         // Grow info, shrink coordinator
-        this.sidebar.heightOffsets.info += delta;
-        this.sidebar.heightOffsets.coordinator -= delta;
+        const base = computeSidebarHeights(this.sidebar.displayHeight, this.agentTree.visibleList.length);
+        const effectiveCoord = Math.max(0, base.coordinatorHeight + this.sidebar.heightOffsets.coordinator);
+        const effectiveInfo = Math.max(0, base.infoHeight + this.sidebar.heightOffsets.info);
+        if (delta > 0 && effectiveCoord > 0) {
+          this.sidebar.heightOffsets.info += delta;
+          this.sidebar.heightOffsets.coordinator -= delta;
+        } else if (delta < 0 && effectiveInfo > 0) {
+          this.sidebar.heightOffsets.info += delta;
+          this.sidebar.heightOffsets.coordinator -= delta;
+        }
         this.tui?.requestRender();
       }
       // coordinator is bottom-most — height resize is a no-op

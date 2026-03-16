@@ -83,7 +83,7 @@ export class SidebarComponent implements Component {
   }
 
   render(width: number): string[] {
-    const w = Math.min(width, SIDEBAR_WIDTH);
+    const w = width;
     const lines: string[] = [];
 
     const itemCount = this.agentTree.visibleList.length;

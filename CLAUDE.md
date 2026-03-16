@@ -142,7 +142,7 @@ After any code changes, always run:
 
 ## itsybitsy Implementation Notes
 
-All 6 phases complete. 968 tests across 28 files.
+1471 tests across 40 files.
 
 ### State detection flow
 **Deterministic model (Phase 42 — implemented):**
@@ -180,11 +180,13 @@ Creating (workspace trust prompt, full input) > Compacting (last 5) > Active run
 - ANSI codes at wrap boundaries stay in the current chunk (no state carryover to next line)
 
 ### Dashboard (src/tui/dashboard.ts)
-- **Layout (Phase 45+):** Three-column layout: fixed 60-col sidebar (agent tree + info panel + coordinator) | resizable tmux pane | cycling right pane. See SPEC.md §11–13 for full specification.
-- **Focus system (Phase 46+):** Tab/Shift+Tab cycles focus between agent-tree, coordinator, active-agent. Input fields appear when coordinator/active-agent has focus. See SPEC.md §13.
-- **Coordinator (Phase 47+):** Auto-spawned `ib-coordinator` tmux session with `Bash(ib:*)` only permissions. See SPEC.md §12.
+- **Layout (Phase 45 — complete):** Three-column layout: resizable sidebar (default 60 cols, range 30–120) with agent tree + info panel + coordinator placeholder | resizable tmux pane | cycling right pane. See SPEC.md §11–13 for full specification.
+- **Focus system (Phase 46 — partially complete):** 5 focusable panels: agent-tree, info, coordinator, active-agent, right-pane. Tab/Shift+Tab cycles focus. Focused panel headers render in reverse video + bold; unfocused render dim. `[`/`]` resize width (focus-aware), `{`/`}` resize sidebar panel height (steals from neighbor). Input fields not yet implemented (deferred to Phase 47).
+- **Layout persistence:** Panel sizes (sidebar width, split-pane left width, height offsets) saved to `~/.itsybitsy/layout.json` via debounced write (500ms). Restored on startup with validation (rejects NaN/Infinity, clamps to valid ranges).
+- **Coordinator (Phase 47 — not started):** Sidebar shows placeholder. Auto-spawned `ib-coordinator` tmux session planned. See SPEC.md §12.
 - Agent tree: max 7 visible rows with scroll indicators; compact format in sidebar (icon + id + state + age)
 - Info panel: stoplight indicators (● Claude, ● Watchdog — PID liveness via `process.kill(pid, 0)`), model, summary/prompt
+- Right pane modes: AGENT LOG, INITIAL PROMPT, DENIALS, TREE, ERRORS, DIFF, QUESTIONS, STATUS, REPO (9 modes)
 - Right pane mode is global state — persists across agent selection changes
 - `a` opens new-agent dialog (infers repo from selected agent/header, fallback to first repo)
 - Agent actions: `x` kill, `!` nuke, `R` resume, `r` reassign, `m` merge, `s` send, `a` new-agent

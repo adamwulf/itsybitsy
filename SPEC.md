@@ -922,6 +922,10 @@ The path is sourced from the `repoPath` field on the `repo-header` FlatEntry, wh
 
 **OSC 8 truncation safety:** Because `truncateToWidth` may drop the closing OSC 8 sequence when truncating long lines, all lines in the non-wrapping render branch pass through `closeOsc8()`, which detects unclosed hyperlinks and either appends the close tag or strips partial OSC sequences left by mid-URI truncation. The wrapping render branch (AGENT LOG, QUESTIONS, etc.) also applies this fix.
 
+### 8.13 REPO Pane Mode
+
+The REPO pane mode displays repo-level action hints — available `ib` commands for the selected repository. It is a full-width, top-anchored pane mode (like DIFF, ERRORS, QUESTIONS). When a repo header is selected, it shows the repo name, path, and action hints for managing agents in that repo. The REPO pane is accessible via `p`/`n` cycling through pane modes.
+
 ### 8.12 Ghostty Integration
 
 The `G` keybinding opens a new Ghostty terminal window. Behavior depends on what is currently selected:
@@ -1002,7 +1006,8 @@ The `ib watch` TUI uses a three-column layout:
 │  (60 cols)   │  (resizable)     │  modes: log / prompt /│
 │              │                  │  denials / tree /     │
 │  Agent Tree  │                  │  errors / diff /      │
-│  (compact)   │                  │  status / questions   │
+│  (compact)   │                  │  questions / status / │
+│              │                  │  repo                 │
 │──────────────│                  │                       │
 │  Info Panel  │                  │                       │
 │  (selected   │                  │                       │
@@ -1228,5 +1233,21 @@ When `agent-tree` has focus:
 ### 13.6 Default Focus
 
 On startup, focus is set to `agent-tree`. This ensures all existing keybindings work immediately without any behavioral change for users who don't use Tab.
+
+### 13.7 Layout Persistence
+
+Panel sizes are persisted across `ib watch` sessions via `~/.itsybitsy/layout.json`. The file stores:
+
+```json
+{
+  "sidebarWidth": 60,
+  "splitPaneLeftWidth": 80,
+  "heightOffsets": { "tree": 0, "info": 0, "coordinator": 0 }
+}
+```
+
+- **Save**: Debounced (500ms) write after any resize operation. The debounce prevents excessive disk writes during rapid resizing.
+- **Restore**: On startup, the saved layout is loaded and applied with validation: NaN and Infinity values are rejected, and all values are clamped to valid ranges (sidebar width [30, 120], etc.).
+- **Missing file**: If `layout.json` doesn't exist or is invalid, defaults are used (sidebar 60 cols, default split-pane position, zero height offsets).
 
 ---

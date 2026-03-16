@@ -123,7 +123,6 @@ export class SidebarComponent implements Component {
   }
 }
 
-
 /** Render coordinator placeholder (Phase 47 will replace this) */
 function renderCoordinatorPlaceholder(width: number, height: number): string[] {
   const lines: string[] = [];

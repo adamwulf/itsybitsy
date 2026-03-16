@@ -1076,7 +1076,6 @@ export class DashboardComponent implements Component {
     // Color helpers: when active-agent is focused, use reverse video (SPEC §13.3)
     const dashColor = focused ? `${REVERSE}${DIM_GRAY}` : DIM_GRAY;
     const titleStyle = focused ? `${RESET}${REVERSE}${BOLD}` : BOLD;
-    const resetDash = focused ? `${RESET}${REVERSE}${DIM_GRAY}` : DIM_GRAY;
 
     if (!isTreeMode && !isFullWidth && leftTitle) {
       // Show junction at inner split position

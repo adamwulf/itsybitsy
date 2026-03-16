@@ -54,8 +54,8 @@ export class FocusManager {
 /**
  * Render a section separator line with focus-aware styling.
  *
- * Layout matches `buildSectionSeparator` in sidebar.ts: fixed 4-dash left
- * pad, title, remaining dashes on the right, truncated to width.
+ * Fixed 4-dash left pad, title, remaining dashes on the right, truncated
+ * to width.
  *
  * - Focused: reverse video (SPEC §13.3)
  * - Unfocused: dim

@@ -22,6 +22,8 @@ export class InputFieldComponent implements Component {
   /** Per-agent input buffers: agentId → lines array */
   private agentBuffers = new Map<string, string[]>();
   private currentAgentId: string | null = null;
+  /** Whether the input field is active (focused panel). Controls cursor visibility. */
+  active = true;
   onSubmit: ((text: string) => void) | null = null;
   onCancel: (() => void) | null = null;
 
@@ -78,9 +80,10 @@ export class InputFieldComponent implements Component {
     this.focused = "text";
   }
 
-  /** Get the number of lines this component will render. */
-  getHeight(): number {
-    const contentLines = Math.min(Math.max(1, this.lines.length), MAX_VISIBLE_LINES);
+  /** Get the number of lines this component will render, accounting for text wrapping. */
+  getHeight(width: number): number {
+    const wrappedCount = this.computeWrappedLineCount(width);
+    const contentLines = Math.min(Math.max(1, wrappedCount), MAX_VISIBLE_LINES);
     return 2 + contentLines; // top separator + content + bottom separator
   }
 
@@ -167,23 +170,26 @@ export class InputFieldComponent implements Component {
   }
 
   render(width: number): string[] {
-    const sep = `${DIM_GRAY}${"─".repeat(width)}${RESET}`;
+    const sepStyle = this.active ? BOLD : DIM_GRAY;
+    const sep = `${sepStyle}${"─".repeat(width)}${RESET}`;
 
-    // Build content lines with scroll if needed
-    const totalLines = this.lines.length;
-    const visibleCount = Math.min(Math.max(1, totalLines), MAX_VISIBLE_LINES);
-    const scrollOffset = Math.max(0, totalLines - visibleCount);
+    // Build wrapped content lines with scroll if needed
+    const textWidth = Math.max(1, width - 2); // 2-char prefix
+    const allWrapped = this.wrapAllLines(textWidth);
+    const totalWrapped = allWrapped.length;
+    const visibleCount = Math.min(Math.max(1, totalWrapped), MAX_VISIBLE_LINES);
+    const scrollOffset = Math.max(0, totalWrapped - visibleCount);
 
+    const showCursor = this.active && this.focused === "text";
     const contentLines: string[] = [];
     for (let vi = 0; vi < visibleCount; vi++) {
-      const li = scrollOffset + vi;
-      const lineText = this.lines[li] ?? "";
-      const isLastLine = li === totalLines - 1;
-      const prefix = li === 0 ? "> " : "  ";
-      if (isLastLine && this.focused === "text") {
-        contentLines.push(truncateToWidth(`${prefix}${lineText}█`, width, ""));
+      const entry = allWrapped[scrollOffset + vi];
+      if (!entry) continue;
+      const isLast = (scrollOffset + vi) === totalWrapped - 1;
+      if (isLast && showCursor) {
+        contentLines.push(truncateToWidth(`${entry.prefix}${entry.text}█`, width, ""));
       } else {
-        contentLines.push(truncateToWidth(`${prefix}${lineText}`, width, ""));
+        contentLines.push(truncateToWidth(`${entry.prefix}${entry.text}`, width, ""));
       }
     }
 
@@ -199,9 +205,49 @@ export class InputFieldComponent implements Component {
     }
     const leftDashes = Math.max(1, Math.floor(dashesAvailable / 2));
     const rightDashes = Math.max(1, dashesAvailable - leftDashes);
-    const bottomSep = `${DIM_GRAY}${"─".repeat(leftDashes)}${RESET} ${sendLabel} ${DIM_GRAY}${"─".repeat(rightDashes)}${RESET}`;
+    const bottomSep = `${sepStyle}${"─".repeat(leftDashes)}${RESET} ${sendLabel} ${sepStyle}${"─".repeat(rightDashes)}${RESET}`;
 
     return [sep, ...contentLines, truncateToWidth(bottomSep, width, "")];
+  }
+
+  /**
+   * Compute the total number of wrapped physical lines across all logical lines.
+   * Input text is plain text (no ANSI), so string.length is used for width.
+   */
+  private computeWrappedLineCount(width: number): number {
+    const textWidth = Math.max(1, width - 2); // 2-char prefix
+    let count = 0;
+    for (const line of this.lines) {
+      count += Math.max(1, Math.ceil(line.length / textWidth) || 1);
+    }
+    return count;
+  }
+
+  /**
+   * Wrap all logical lines into physical line entries with prefix info.
+   * Each entry has { prefix, text } where prefix is '> ' for first logical line's first chunk,
+   * '  ' for continuation lines.
+   */
+  private wrapAllLines(textWidth: number): Array<{ prefix: string; text: string }> {
+    const result: Array<{ prefix: string; text: string }> = [];
+    for (let li = 0; li < this.lines.length; li++) {
+      const lineText = this.lines[li] ?? "";
+      const firstPrefix = li === 0 ? "> " : "  ";
+      if (lineText.length <= textWidth) {
+        result.push({ prefix: firstPrefix, text: lineText });
+      } else {
+        // Split into chunks of textWidth
+        for (let offset = 0; offset < lineText.length; offset += textWidth) {
+          const chunk = lineText.slice(offset, offset + textWidth);
+          const prefix = offset === 0 ? firstPrefix : "  ";
+          result.push({ prefix, text: chunk });
+        }
+      }
+    }
+    if (result.length === 0) {
+      result.push({ prefix: "> ", text: "" });
+    }
+    return result;
   }
 
   /** Save current lines to the per-agent buffer map. */

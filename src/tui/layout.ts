@@ -17,8 +17,7 @@ export interface LayoutState {
   };
 }
 
-const LAYOUT_DIR = join(homedir(), ".itsybitsy");
-const LAYOUT_PATH = join(LAYOUT_DIR, "layout.json");
+const LAYOUT_PATH = join(homedir(), ".itsybitsy", "layout.json");
 
 /** Overridable path for testing */
 let layoutPath = LAYOUT_PATH;

@@ -73,6 +73,30 @@ const DEFAULT_LEFT_WIDTH = 80;
 const LEFT_WIDTH_STEP = 5;
 
 /**
+ * Find the last two ─ separator lines from the bottom of wrapped tmux output.
+ * Returns indices of the upper (first found going up) and lower (last found) separators.
+ * Both are -1 if fewer than two separators are found.
+ */
+function findLastTwoSeparators(wrapped: string[]): { upperIndex: number; lowerIndex: number } {
+  let separatorCount = 0;
+  let upperIndex = -1;
+  let lowerIndex = -1;
+  for (let i = wrapped.length - 1; i >= 0; i--) {
+    const stripped = stripAnsi(wrapped[i]!).trim();
+    if (stripped.length > 0 && /^─+$/.test(stripped)) {
+      separatorCount++;
+      if (separatorCount === 1) {
+        lowerIndex = i;
+      }
+      upperIndex = i;
+      if (separatorCount >= 2) break;
+    }
+  }
+  if (separatorCount < 2) return { upperIndex: -1, lowerIndex: -1 };
+  return { upperIndex, lowerIndex };
+}
+
+/**
  * Tmux output pane — shows live tmux capture for the selected agent.
  * Wraps long lines to pane width, supports scroll-back from bottom.
  */
@@ -120,22 +144,10 @@ export class TmuxPaneComponent implements Component {
     if (!this.trimInputSeparator || !this.rawOutput) return;
 
     const wrapped = wrapLines(this.rawOutput, width);
-    // Find the last two separators from the bottom
-    let separatorCount = 0;
-    let lowerSepIndex = -1;
-    for (let i = wrapped.length - 1; i >= 0; i--) {
-      const stripped = stripAnsi(wrapped[i]!).trim();
-      if (stripped.length > 0 && /^─+$/.test(stripped)) {
-        separatorCount++;
-        if (separatorCount === 1) {
-          lowerSepIndex = i;
-        }
-        if (separatorCount >= 2) break;
-      }
-    }
+    const { lowerIndex } = findLastTwoSeparators(wrapped);
     // Extract lines after the lower separator
-    if (separatorCount >= 2 && lowerSepIndex >= 0 && lowerSepIndex < wrapped.length - 1) {
-      this.statusLines = wrapped.slice(lowerSepIndex + 1).map(
+    if (lowerIndex >= 0 && lowerIndex < wrapped.length - 1) {
+      this.statusLines = wrapped.slice(lowerIndex + 1).map(
         (line) => truncateToWidth(line, width, "")
       );
     }
@@ -203,18 +215,9 @@ export class TmuxPaneComponent implements Component {
     // Search from the bottom to find the last two ─ separators — those are
     // Claude's UI chrome. Trim at the first of the two (the upper one).
     if (this.trimInputSeparator) {
-      let separatorCount = 0;
-      let trimIndex = wrapped.length;
-      for (let i = wrapped.length - 1; i >= 0; i--) {
-        const stripped = stripAnsi(wrapped[i]!).trim();
-        if (stripped.length > 0 && /^─+$/.test(stripped)) {
-          separatorCount++;
-          trimIndex = i;
-          if (separatorCount >= 2) break;
-        }
-      }
-      if (separatorCount >= 2 && trimIndex < wrapped.length) {
-        wrapped = wrapped.slice(0, trimIndex);
+      const { upperIndex } = findLastTwoSeparators(wrapped);
+      if (upperIndex >= 0 && upperIndex < wrapped.length) {
+        wrapped = wrapped.slice(0, upperIndex);
       }
     }
 

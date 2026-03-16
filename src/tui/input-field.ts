@@ -170,7 +170,7 @@ export class InputFieldComponent implements Component {
   }
 
   render(width: number): string[] {
-    const sepStyle = this.active ? BOLD : DIM_GRAY;
+    const sepStyle = this.active ? BOLD : `${DIM}${DIM_GRAY}`;
     const sep = `${sepStyle}${"─".repeat(width)}${RESET}`;
 
     // Build wrapped content lines with scroll if needed

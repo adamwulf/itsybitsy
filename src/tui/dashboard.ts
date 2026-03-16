@@ -761,7 +761,12 @@ export class DashboardComponent implements Component {
       jumpToMode(this, "REPO");
     } else if (selected && currentMode === "REPO") {
       // Agent selected while in REPO mode — restore previous mode
-      jumpToMode(this, PANE_MODES[this.savedModeIndex]!);
+      // Fall back to AGENT LOG if saved mode would be empty (ERRORS/QUESTIONS with no content)
+      const savedMode = PANE_MODES[this.savedModeIndex]!;
+      const wouldSkip =
+        (savedMode === "ERRORS" && this.rightPane.errors.length === 0 && this.rightPane.orphanedTmuxSessions.length === 0) ||
+        (savedMode === "QUESTIONS" && this.rightPane.questions.length === 0);
+      jumpToMode(this, wouldSkip ? "AGENT LOG" : savedMode);
     }
 
     const newId = selected?.id ?? null;

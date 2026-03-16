@@ -79,6 +79,19 @@ export function colorizeLog(lines: string[]): string[] {
   });
 }
 
+/** Format a single agent row for TREE/REPO display */
+export function formatAgentRow(
+  agent: Agent, connector: string, stateColWidth: number,
+): string {
+  const icon = agent.meta.worker ? "⚙" : "◆";
+  const state = displayState(agent.state);
+  const stateColor = getStateColors()[state] ?? getStateColors().unknown;
+  const promptText = (agent.meta.summary ?? agent.meta.prompt).replace(/\n/g, " ");
+  const coloredState = `${stateColor}${state}${RESET}${" ".repeat(Math.max(0, stateColWidth - state.length))}`;
+  const paddedAge = agent.age.padStart(AGE_COL_WIDTH);
+  return `${connector}${icon} ${agent.id}  ${coloredState}  ${paddedAge}  ${agent.meta.model}  ${promptText}`;
+}
+
 /** Right pane content component */
 export class RightPaneComponent implements Component {
   mode: PaneMode = "AGENT LOG";
@@ -184,15 +197,9 @@ export class RightPaneComponent implements Component {
         break;
       case "TREE": {
         const treeStateColWidth = computeStateColWidth(this.allAgents);
-        this.content = this.allAgents.filter((f): f is Extract<FlatEntry, { kind: "agent" }> => f.kind === "agent").map(({ agent, connector }) => {
-          const icon = agent.meta.worker ? "⚙" : "◆";
-          const state = displayState(agent.state);
-          const stateColor = getStateColors()[state] ?? getStateColors().unknown;
-          const promptText = (agent.meta.summary ?? agent.meta.prompt).replace(/\n/g, " ");
-          const coloredState = `${stateColor}${state}${RESET}${" ".repeat(Math.max(0, treeStateColWidth - state.length))}`;
-          const paddedAge = agent.age.padStart(AGE_COL_WIDTH);
-          return `${connector}${icon} ${agent.id}  ${coloredState}  ${paddedAge}  ${agent.meta.model}  ${promptText}`;
-        });
+        this.content = this.allAgents
+          .filter((f): f is Extract<FlatEntry, { kind: "agent" }> => f.kind === "agent")
+          .map(({ agent, connector }) => formatAgentRow(agent, connector, treeStateColWidth));
         if (this.content.length === 0) this.content = [`${DIM}No agents${RESET}`];
         break;
       }
@@ -233,19 +240,13 @@ export class RightPaneComponent implements Component {
         const repoAgents = this.allAgents.filter(
           (f): f is Extract<FlatEntry, { kind: "agent" }> => f.kind === "agent" && f.agent.repoName === repoName
         );
-        const treeStateColWidth = computeStateColWidth(this.allAgents);
+        const repoStateColWidth = computeStateColWidth(this.allAgents);
         this.content = [`${BOLD}${repoName}${RESET}`, ""];
         if (repoAgents.length === 0) {
           this.content.push(`${DIM}No agents${RESET}`);
         } else {
           for (const { agent, connector } of repoAgents) {
-            const icon = agent.meta.worker ? "⚙" : "◆";
-            const state = displayState(agent.state);
-            const stateColor = getStateColors()[state] ?? getStateColors().unknown;
-            const promptText = (agent.meta.summary ?? agent.meta.prompt).replace(/\n/g, " ");
-            const coloredState = `${stateColor}${state}${RESET}${" ".repeat(Math.max(0, treeStateColWidth - state.length))}`;
-            const paddedAge = agent.age.padStart(AGE_COL_WIDTH);
-            this.content.push(`${connector}${icon} ${agent.id}  ${coloredState}  ${paddedAge}  ${agent.meta.model}  ${promptText}`);
+            this.content.push(formatAgentRow(agent, connector, repoStateColWidth));
           }
         }
         break;

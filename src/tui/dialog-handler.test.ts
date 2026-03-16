@@ -288,6 +288,18 @@ describe("deleteWord", () => {
   test("single word is deleted entirely", () => {
     expect(deleteWord("hello")).toBe("");
   });
+
+  test("only spaces are deleted entirely", () => {
+    expect(deleteWord("   ")).toBe("");
+  });
+
+  test("single character is deleted entirely", () => {
+    expect(deleteWord("a")).toBe("");
+  });
+
+  test("multiple spaces between words preserves leading spaces", () => {
+    expect(deleteWord("hello   world")).toBe("hello   ");
+  });
 });
 
 // ─── TextBuffer.handleInput ─────────────────────────────
@@ -328,6 +340,106 @@ describe("TextBuffer.handleInput", () => {
     const buf = new TextBuffer(["hi"]);
     const result = buf.handleInput("\x1b[A"); // up arrow
     expect(result).toBe(false);
+  });
+
+  test("backspace on empty single-line buffer is no-op", () => {
+    const buf = new TextBuffer([""]);
+    buf.handleInput("\x7f");
+    expect(buf.getLines()).toEqual([""]);
+  });
+
+  test("alt-backspace on empty single-line buffer is no-op", () => {
+    const buf = new TextBuffer([""]);
+    buf.handleInput("\x1b\x7f");
+    expect(buf.getLines()).toEqual([""]);
+  });
+
+  test("Enter on empty buffer adds new line", () => {
+    const buf = new TextBuffer([""]);
+    buf.handleInput("\r");
+    expect(buf.getLines()).toEqual(["", ""]);
+  });
+
+  test("type then backspace roundtrip returns to empty", () => {
+    const buf = new TextBuffer();
+    buf.handleInput("x");
+    expect(buf.getText()).toBe("x");
+    buf.handleInput("\x7f");
+    expect(buf.getText()).toBe("");
+    expect(buf.getLines()).toEqual([""]);
+  });
+});
+
+// ─── TextBuffer API ──────────────────────────────────────
+
+describe("TextBuffer API", () => {
+  test("default constructor creates empty buffer", () => {
+    const buf = new TextBuffer();
+    expect(buf.getText()).toBe("");
+    expect(buf.getLines()).toEqual([""]);
+    expect(buf.hasContent()).toBe(false);
+  });
+
+  test("constructor with initial lines copies them", () => {
+    const arr = ["a", "b"];
+    const buf = new TextBuffer(arr);
+    expect(buf.getLines()).toEqual(["a", "b"]);
+    // Mutating original array should not affect buffer
+    arr[0] = "mutated";
+    expect(buf.getLines()).toEqual(["a", "b"]);
+  });
+
+  test("hasContent returns true for non-empty content", () => {
+    expect(new TextBuffer(["a"]).hasContent()).toBe(true);
+  });
+
+  test("hasContent returns true for multi-line even if lines are empty", () => {
+    expect(new TextBuffer(["", ""]).hasContent()).toBe(true);
+  });
+
+  test("hasContent returns false after clear", () => {
+    const buf = new TextBuffer(["hello"]);
+    expect(buf.hasContent()).toBe(true);
+    buf.clear();
+    expect(buf.hasContent()).toBe(false);
+  });
+
+  test("getText, getLines, getLinesRef return consistent views", () => {
+    const buf = new TextBuffer(["a", "b"]);
+    expect(buf.getText()).toBe("a\nb");
+    expect(buf.getLines()).toEqual(["a", "b"]);
+    expect([...buf.getLinesRef()]).toEqual(["a", "b"]);
+  });
+
+  test("getLines returns a copy (mutation does not affect buffer)", () => {
+    const buf = new TextBuffer(["hello"]);
+    const lines = buf.getLines();
+    lines[0] = "mutated";
+    expect(buf.getText()).toBe("hello");
+  });
+
+  test("setLines replaces buffer and makes defensive copy", () => {
+    const buf = new TextBuffer();
+    const arr = ["foo", "bar"];
+    buf.setLines(arr);
+    expect(buf.getLines()).toEqual(["foo", "bar"]);
+    // Mutating original array should not affect buffer
+    arr[0] = "mutated";
+    expect(buf.getLines()).toEqual(["foo", "bar"]);
+  });
+
+  test("setLines then handleInput appends to last line", () => {
+    const buf = new TextBuffer();
+    buf.setLines(["foo", "bar"]);
+    buf.handleInput("!");
+    expect(buf.getLines()).toEqual(["foo", "bar!"]);
+  });
+
+  test("clear then handleInput works on fresh buffer", () => {
+    const buf = new TextBuffer(["hello"]);
+    buf.clear();
+    buf.handleInput("x");
+    expect(buf.getText()).toBe("x");
   });
 });
 

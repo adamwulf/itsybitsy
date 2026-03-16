@@ -3,7 +3,7 @@
  * across ib watch sessions via ~/.itsybitsy/layout.json.
  */
 
-import { join } from "path";
+import { join, dirname } from "path";
 import { homedir } from "os";
 import { mkdir } from "fs/promises";
 
@@ -44,15 +44,16 @@ export async function loadLayout(): Promise<LayoutState | null> {
     const file = Bun.file(layoutPath);
     if (!(await file.exists())) return null;
     const data = await file.json();
-    // Validate shape
+    // Validate shape and reject NaN/Infinity
+    const isFiniteNum = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
     if (
       typeof data !== "object" || data === null ||
-      typeof data.sidebarWidth !== "number" ||
-      typeof data.splitPaneLeftWidth !== "number" ||
+      !isFiniteNum(data.sidebarWidth) ||
+      !isFiniteNum(data.splitPaneLeftWidth) ||
       typeof data.heightOffsets !== "object" || data.heightOffsets === null ||
-      typeof data.heightOffsets.tree !== "number" ||
-      typeof data.heightOffsets.info !== "number" ||
-      typeof data.heightOffsets.coordinator !== "number"
+      !isFiniteNum(data.heightOffsets.tree) ||
+      !isFiniteNum(data.heightOffsets.info) ||
+      !isFiniteNum(data.heightOffsets.coordinator)
     ) {
       return null;
     }
@@ -75,8 +76,7 @@ export async function loadLayout(): Promise<LayoutState | null> {
  * Creates the directory if it doesn't exist.
  */
 export async function saveLayout(state: LayoutState): Promise<void> {
-  const dir = layoutPath.substring(0, layoutPath.lastIndexOf("/"));
-  await mkdir(dir, { recursive: true });
+  await mkdir(dirname(layoutPath), { recursive: true });
   await Bun.write(layoutPath, JSON.stringify(state, null, 2) + "\n");
 }
 

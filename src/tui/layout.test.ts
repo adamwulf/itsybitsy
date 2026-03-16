@@ -57,6 +57,24 @@ describe("layout persistence", () => {
     expect(await loadLayout()).toBeNull();
   });
 
+  test("loadLayout returns null for NaN values", async () => {
+    await Bun.write(join(tmpDir, "layout.json"), JSON.stringify({
+      sidebarWidth: NaN,
+      splitPaneLeftWidth: 80,
+      heightOffsets: { tree: 0, info: 0, coordinator: 0 },
+    }));
+    expect(await loadLayout()).toBeNull();
+  });
+
+  test("loadLayout returns null for Infinity values", async () => {
+    await Bun.write(join(tmpDir, "layout.json"), JSON.stringify({
+      sidebarWidth: 60,
+      splitPaneLeftWidth: Infinity,
+      heightOffsets: { tree: 0, info: 0, coordinator: 0 },
+    }));
+    expect(await loadLayout()).toBeNull();
+  });
+
   test("saveLayout creates parent directory if needed", async () => {
     const nested = join(tmpDir, "sub", "dir", "layout.json");
     setLayoutPath(nested);

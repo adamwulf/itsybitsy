@@ -515,10 +515,12 @@ export class DashboardComponent implements Component {
     this.tui = tui;
   }
 
-  /** Apply a saved layout state to restore panel sizes. */
+  /** Apply a saved layout state to restore panel sizes, clamping to valid ranges. */
   applyLayout(layout: LayoutState) {
-    this.sidebarWidth = layout.sidebarWidth;
-    this.splitPane.setLeftWidth(layout.splitPaneLeftWidth);
+    const MIN_SIDEBAR = 30;
+    const MAX_SIDEBAR = 120;
+    this.sidebarWidth = Math.max(MIN_SIDEBAR, Math.min(MAX_SIDEBAR, layout.sidebarWidth));
+    this.splitPane.setLeftWidth(Math.max(MIN_LEFT_WIDTH, Math.min(MAX_LEFT_WIDTH, layout.splitPaneLeftWidth)));
     this.sidebar.heightOffsets = { ...layout.heightOffsets };
   }
 

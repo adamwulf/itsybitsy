@@ -42,13 +42,12 @@ export function computeSidebarHeights(
 
   let coordinatorHeight = Math.max(MIN_COORDINATOR_HEIGHT, Math.floor(afterTree * 0.4));
 
-  // Info gets what's left after tree + coordinator + 2 separators
+  // Info gets what's left after tree + coordinator + 2 separators (min 1 row per spec)
   const separators = 2;
-  let infoHeight = Math.max(0, afterTree - coordinatorHeight - separators);
+  let infoHeight = Math.max(1, afterTree - coordinatorHeight - separators);
 
-  // If terminal is too short, shrink coordinator first (down to 3), then hide info
-  if (infoHeight <= 0) {
-    // Reclaim separator space when info is hidden (only 1 separator needed)
+  // If terminal is too short for info to fit, shrink coordinator first (down to 3), then hide info
+  if (afterTree - coordinatorHeight - separators < 1) {
     infoHeight = 0;
     coordinatorHeight = Math.max(COORDINATOR_SHRINK_MIN, afterTree - 1);
   }

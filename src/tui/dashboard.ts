@@ -1014,11 +1014,12 @@ export class DashboardComponent implements Component {
     // Separator after header
     lines.push(truncateToWidth(`${DIM_GRAY}${"─".repeat(width)}${RESET}`, width, ""));
 
-    // Compute available height for the main content area (between header+sep and bottom sep+status)
-    const bottomHeight = 2; // status bar
-    const separatorHeight = 1; // bottom separator
-    const headerHeight = 2; // header + top separator
-    const availableHeight = Math.max(5, terminalRows - headerHeight - separatorHeight - bottomHeight);
+    // Compute available height for the main content area.
+    // Chrome lines: header(1) + top separator(1) + bottom separator(1) + status bar(2) = 5.
+    // SPEC §11.2 formula uses 4 (header + separator + status_bar) but we add a top separator
+    // between the header and the sidebar/main area for visual clarity.
+    const chromeLines = 5;
+    const availableHeight = Math.max(5, terminalRows - chromeLines);
 
     const mainWidth = width - SIDEBAR_WIDTH - 1; // 1 for sidebar separator
     this.sidebar.displayHeight = availableHeight;

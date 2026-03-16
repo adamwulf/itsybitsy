@@ -1062,7 +1062,7 @@ Deferred to Phase 49.
 Define the system coordinator's configuration, prompt, and permissions templates:
 
 - [ ] Initial prompt text (see SPEC.md §12.1.5)
-- [ ] Settings template: permissions allow `Bash(ib:*)`, deny `Bash`, Read, Write, Edit, MultiEdit, Glob, Grep, LS, NotebookEdit, WebFetch, WebSearch, Task, Agent (note: unqualified `Bash` must be denied to prevent sandbox bypass)
+- [ ] Settings template: permissions allow `Bash(ib:*)`, deny `Bash`, Read, Write, Edit, MultiEdit, Glob, Grep, LS, NotebookEdit, WebFetch, WebSearch, Task, TaskOutput, Agent, KillShell, EnterPlanMode, ExitPlanMode (note: unqualified `Bash` must be denied to prevent sandbox bypass; deny list matches per-repo coordinator for defense-in-depth)
 - [ ] Model: configurable via `coordinator.model` config key, default `opus`
 - [ ] New config keys in `src/config.ts`: `coordinator.model` (string), `permissions.coordinator.allow` (string[]), `permissions.coordinator.deny` (string[])
 - [ ] Session name constant: `IB_COORDINATOR_SESSION = "ib-coordinator"`
@@ -1077,7 +1077,7 @@ Implement session spawn/teardown and state detection:
 - [ ] `ensureSystemCoordinator(): Promise<string>` — checks if `ib-coordinator` tmux session exists; if not, creates it. TOCTOU: catch `tmux new-session` failure and fall through to existing session path.
 - [ ] Ensure `~/.itsybitsy/` exists and is a git repo (`git init`, not `--bare`). Write `.gitignore` with `*` to prevent accidental commits.
 - [ ] Write `~/.itsybitsy/.claude/settings.local.json` with system coordinator permissions (from 47a-i template)
-- [ ] Write prompt to `~/.itsybitsy/coordinator-prompt.txt`. Start Claude in interactive mode: `claude --model <coordinator.model>`, then send initial prompt via `tmux send-keys -l`. **Note**: do NOT use `-p` flag (it runs non-interactively and exits after one response).
+- [ ] Write prompt to `~/.itsybitsy/coordinator-prompt.txt`. Start Claude in interactive mode: `claude --model <coordinator.model>` via `tmux send-keys`. After a **3-second delay** (for Claude to start and accept input), send the initial prompt via two separate `Bun.spawn` calls: `tmux send-keys -l <prompt>` then `tmux send-keys Enter`. **Note**: do NOT use `-p` flag (it runs non-interactively and exits after one response).
 - [ ] PID-based reference counting: `~/.itsybitsy/coordinator.refs` — append PID on startup, remove on exit. All ref file operations use atomic write (write temp → rename). Prune stale PIDs via `process.kill(pid, 0)` liveness check. Kill session when no live PIDs remain.
 - [ ] `releaseSystemCoordinator(): Promise<void>` — remove PID from refs; if no live PIDs remain, kill tmux session and pause all per-repo coordinators
 - [ ] `restartSystemCoordinator(): Promise<void>` — kill tmux session + re-create
@@ -1137,7 +1137,7 @@ When system coordinator is selected, switch to a special layout:
 
 - [ ] Dashboard detects when selection is `kind: "system-coordinator"`
 - [ ] **Sidebar layout switch**: Hide info panel, show only agent tree (top) + coordinator tmux output (bottom). Coordinator panel gets all remaining sidebar height (`available - tree_height - 1 separator`).
-- [ ] **Focus cycling**: When info panel is hidden, Tab skips `info` target — `agent-tree` → `coordinator` → `active-agent` → `right-pane`
+- [ ] **Focus cycling**: In full-width system dashboard mode, Tab skips `info`, `active-agent`, and `right-pane` targets (they have no rendered panels) — cycle is `agent-tree` → `coordinator` → `agent-tree`. The system dashboard table is read-only and scrolled via `;`/`l` keys regardless of focus.
 - [ ] **Main area**: Replace split-pane with a full-width **system dashboard** table. This is a significant rendering component with three sub-tasks:
   - **Data gathering**: Collect all agents across all repos (from watcher state), map to table rows with repo grouping. Coordinators sort first within each repo group.
   - **Table rendering**: 7 columns (Repo 15, Agent 20, Role 5, State 12, Model 8, Age 6, Summary remaining — see SPEC.md §12.1.4). Narrow-terminal fallback: <80 cols hides Summary, <60 cols also hides Model and Age.
@@ -1302,7 +1302,7 @@ Complete the input field component (may already be partially implemented):
 
 - [ ] When `active-agent` panel has focus: render input field at bottom of the main tmux pane area (this is the middle column, not the sidebar coordinator panel — that's 49c)
 - [ ] On submit for regular agents and per-repo coordinators: `ib send <agent-id> "<message>"`
-- [ ] On submit when system coordinator is selected and active-agent panel is focused: `tmux send-keys -t ib-coordinator -l "<message>"` followed by `tmux send-keys -t ib-coordinator Enter`
+- [ ] **Note**: When the system coordinator is selected, the active-agent panel is replaced by the full-width system dashboard (47e), so no input field appears in the main area. System coordinator input is handled exclusively by the sidebar coordinator panel (49c).
 - [ ] Subtract 3 lines from tmux display height when input field is visible
 - [ ] Tests for submit routing (regular agent, per-repo coordinator, system coordinator)
 
@@ -1311,7 +1311,7 @@ Complete the input field component (may already be partially implemented):
 **Files:** `src/tui/sidebar.ts`, `src/tui/dashboard.ts`
 
 - [ ] When `coordinator` panel has focus: render input field at bottom of coordinator section
-- [ ] On submit: `tmux send-keys -t ib-coordinator -l "<message>"` followed by `tmux send-keys -t ib-coordinator Enter`
+- [ ] On submit: strip newlines (`\n`, `\r`) from message text (prevents multi-line injection — see SPEC §12.3.3), then `tmux send-keys -t ib-coordinator -l "<message>"` followed by `tmux send-keys -t ib-coordinator Enter`
 - [ ] Subtract 3 lines from coordinator panel display height when input field is visible
 - [ ] Tests for submit routing
 

@@ -237,14 +237,22 @@ export class RightPaneComponent implements Component {
       case "REPO": {
         const repoName = this.selectedRepoHeader;
         if (!repoName) { this.content = [`${DIM}No repo selected${RESET}`]; break; }
+        const headerEntry = this.allAgents.find((f): f is Extract<FlatEntry, { kind: "repo-header" }> => f.kind === "repo-header" && f.repoName === repoName);
+        const repoPath = headerEntry?.repoPath ?? "";
+        this.content = [];
+        if (repoPath) {
+          const encodedPath = repoPath.replace(/%/g, "%25").replace(/ /g, "%20").replace(/#/g, "%23").replace(/\?/g, "%3F");
+          const hyperlink = `\x1b]8;;file://${encodedPath}\x07${repoPath}\x1b]8;;\x07`;
+          this.content.push(`${DIM}Path:${RESET} ${hyperlink}`);
+          this.content.push("");
+        }
         const repoAgents = this.allAgents.filter(
           (f): f is Extract<FlatEntry, { kind: "agent" }> => f.kind === "agent" && f.agent.repoName === repoName
         );
-        const repoStateColWidth = computeStateColWidth(this.allAgents);
-        this.content = [`${BOLD}${repoName}${RESET}`, ""];
         if (repoAgents.length === 0) {
           this.content.push(`${DIM}No agents${RESET}`);
         } else {
+          const repoStateColWidth = computeStateColWidth(this.allAgents);
           for (const { agent, connector } of repoAgents) {
             this.content.push(formatAgentRow(agent, connector, repoStateColWidth));
           }

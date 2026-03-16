@@ -572,7 +572,7 @@ export class DashboardComponent implements Component {
       this.focusManager.setFocus("agent-tree");
       this.tui?.requestRender();
     };
-    this.inputField.onRender = () => {
+    this.inputField.onAsyncRender = () => {
       this.tui?.requestRender();
     };
 

@@ -559,7 +559,7 @@ export function handleHelp(ctx: ActionCtx) {
       "",
       header("Panes"),
       row("p / n / ←→", "cycle pane left/right"),
-      row("[ / ]", "resize left pane"),
+      row("[ / ]", "resize tmux/right split"),
       row("d / g / e / q", "diff / status / errors / questions"),
       "",
       header("Scroll"),

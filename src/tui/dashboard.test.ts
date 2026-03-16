@@ -3146,13 +3146,14 @@ describe("input field integration", () => {
     dashboard.handleInput("\t");
     expect(dashboard.focus).toBe("active-agent");
 
-    // Type message and press Enter
+    // Type message, Tab to [Send], then press Enter to submit
     dashboard.handleInput("h");
     dashboard.handleInput("e");
     dashboard.handleInput("l");
     dashboard.handleInput("l");
     dashboard.handleInput("o");
-    dashboard.handleInput("\r"); // Enter
+    dashboard.handleInput("\t"); // Tab to [Send]
+    dashboard.handleInput("\r"); // Enter on [Send] submits
 
     // sendMessage is async, so check that the input field was cleared
     expect(dashboard.inputField.getText()).toBe("");
@@ -3183,7 +3184,7 @@ describe("input field integration", () => {
     expect(dashboard.inputField.getText()).toBe("");
   });
 
-  test("Tab away from active-agent clears input field", () => {
+  test("Tab away from active-agent preserves input field text (per-agent buffer)", () => {
     const dashboard = makeDashboard();
     const agent = makeAgent("agent-a", "/repos/test");
     const flatList: FlatEntry[] = [makeFlatAgent(agent)];
@@ -3200,10 +3201,12 @@ describe("input field integration", () => {
     dashboard.handleInput("i");
     expect(dashboard.inputField.getText()).toBe("hi");
 
-    // Tab away
-    dashboard.handleInput("\t");
+    // Tab goes to [Send] first, then second Tab cycles panels
+    dashboard.handleInput("\t"); // text → send
+    dashboard.handleInput("\t"); // send → cycle out
     expect(dashboard.focus).toBe("right-pane");
-    expect(dashboard.inputField.getText()).toBe("");
+    // Text is preserved (per-agent buffer)
+    expect(dashboard.inputField.getText()).toBe("hi");
   });
 
   test("dashboard keybindings are suppressed when active-agent focused", () => {

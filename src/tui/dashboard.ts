@@ -838,12 +838,12 @@ export class DashboardComponent implements Component {
     if (this._dialog && handleDialogInput(this, data)) return;
 
     // Tab / Shift-Tab: cycle focus between panels
-    if (data === "\t") {
+    if (data === "\t" || matchesKey(data, Key.tab)) {
       this.focusManager.cycle(1);
       this.tui?.requestRender();
       return;
     }
-    if (data === "\x1b[Z") {
+    if (data === "\x1b[Z" || matchesKey(data, Key.shift("tab"))) {
       this.focusManager.cycle(-1);
       this.tui?.requestRender();
       return;

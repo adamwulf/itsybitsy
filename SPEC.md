@@ -922,10 +922,6 @@ The path is sourced from the `repoPath` field on the `repo-header` FlatEntry, wh
 
 **OSC 8 truncation safety:** Because `truncateToWidth` may drop the closing OSC 8 sequence when truncating long lines, all lines in the non-wrapping render branch pass through `closeOsc8()`, which detects unclosed hyperlinks and either appends the close tag or strips partial OSC sequences left by mid-URI truncation. The wrapping render branch (AGENT LOG, QUESTIONS, etc.) also applies this fix.
 
-### 8.13 REPO Pane Mode
-
-The REPO pane mode displays repo-level action hints — available `ib` commands for the selected repository. It is a full-width, top-anchored pane mode (like DIFF, ERRORS, QUESTIONS). When a repo header is selected, it shows the repo name, path, and action hints for managing agents in that repo. The REPO pane is accessible via `p`/`n` cycling through pane modes.
-
 ### 8.12 Ghostty Integration
 
 The `G` keybinding opens a new Ghostty terminal window. Behavior depends on what is currently selected:
@@ -935,6 +931,10 @@ The `G` keybinding opens a new Ghostty terminal window. Behavior depends on what
 - **Nothing selected**: Shows a notice ("No agent or repo selected").
 
 Both paths validate their inputs (tmux session names against `/^[\w-]+$/`; directory paths against control characters and DEL) before spawning Ghostty. The spawn uses array-based `Bun.spawn` (no shell interpolation) with `stdio: ["ignore", "ignore", "ignore"]` and `proc.unref()` to detach from the parent process.
+
+### 8.13 REPO Pane Mode
+
+The REPO pane mode displays repo-level action hints — available `ib` commands for the selected repository. It is a full-width, top-anchored pane mode (like DIFF, ERRORS, QUESTIONS). REPO mode activates automatically when a repo header is selected in the agent tree, and restores the previous pane mode when an agent is selected. It is skipped during `p`/`n` pane cycling.
 
 ---
 
@@ -1029,7 +1029,7 @@ The left sidebar is a fixed 60-column vertical stack containing three sections: 
 
 ### 11.2 Left Sidebar
 
-The sidebar is exactly 60 columns wide. It is not resizable. A vertical separator (`│`) divides the sidebar from the main area.
+The sidebar defaults to 60 columns wide, resizable via `[`/`]` when any sidebar panel has focus (range: 30–120 columns). A vertical separator (`│`) divides the sidebar from the main area.
 
 The sidebar renders three vertically stacked sections, separated by horizontal rules:
 
@@ -1079,7 +1079,7 @@ Repo headers remain as-is: `▾ repo-name` or `▸ repo-name` (bold).
 
 ### 11.4 Info Panel
 
-The info panel displays details for the currently selected item. It has no keyboard focus — it is read-only and not part of the focus cycle.
+The info panel displays details for the currently selected item. It is read-only (no interactive elements). When focused via Tab cycling (see §13), `{`/`}` resize its height and `[`/`]` resize the sidebar width.
 
 **When an agent is selected**, the info panel shows:
 

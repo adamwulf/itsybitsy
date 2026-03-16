@@ -303,14 +303,16 @@ The agent tree at top shows all agents across all registered repos, grouped by r
   status bar (2 lines)
 ```
 
-Three-column layout: fixed 60-col sidebar | resizable tmux pane | cycling right pane. The sidebar stacks: compact agent tree, info panel, coordinator Claude. See SPEC.md §11–13 for full specification.
+Three-column layout: resizable sidebar (default 60 cols, range 30–120) with agent tree + info panel + coordinator placeholder | resizable tmux pane | cycling right pane. See SPEC.md §11–13 for full specification.
 
 **Key differences from current layout:**
 - Agent tree moves from full-width top to sidebar; uses compact format (icon + id + state + age; model/prompt in info panel)
 - New info panel shows stoplight indicators (claude/watchdog process alive) and agent details
-- New coordinator Claude panel at sidebar bottom — system-wide Claude session with ib:* permissions only
-- Focus system: Tab/Shift+Tab cycles between agent-tree, coordinator, active-agent pane
-- Input fields: when coordinator or active-agent has focus, a text input area appears at the bottom of the tmux pane; submit sends via `ib send` (agents) or `tmux send-keys` (coordinator)
+- Coordinator placeholder at sidebar bottom — will be a system-wide Claude session (Phase 47)
+- Focus system: Tab/Shift+Tab cycles between 5 panels: agent-tree → info → coordinator → active-agent → right-pane
+- Panel resizing: `[`/`]` resize focused panel width, `{`/`}` resize focused sidebar panel height
+- Layout persistence: panel sizes saved to `~/.itsybitsy/layout.json`, restored on startup
+- Input fields: planned for Phase 47 — when coordinator or active-agent has focus, a text input area will appear
 
 ### Right Pane Modes (cycle with `p`/`n`)
 

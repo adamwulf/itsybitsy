@@ -1191,7 +1191,7 @@ Width changes apply in increments (e.g., 5 columns per keypress). Sidebar width 
 
 **Height resizing (`{` / `}`):**
 
-Only meaningful for sidebar panels (agent tree, info, coordinator). Growing one sidebar panel shrinks the panel(s) below it. If the focused panel is the bottom-most sidebar panel, height resize is a no-op (nothing below to steal from).
+Only meaningful for sidebar panels (agent tree, info, coordinator). Growing one sidebar panel shrinks the panel(s) below it. The bottom-most panel (coordinator) steals height from its upper neighbor (info panel) instead.
 
 ### 13.4 Input Field
 

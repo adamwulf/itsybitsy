@@ -17,10 +17,6 @@ const MIN_COORDINATOR_HEIGHT = 5;
 const COORDINATOR_SHRINK_MIN = 3;
 
 /**
- * Compute the height allocation for the three sidebar sections.
- * Returns { treeHeight, infoHeight, coordinatorHeight }.
- */
-/**
  * Compute sidebar section heights per SPEC §11.2:
  *   coordinator_height = max(5, floor((available - tree_height) * 0.4))
  *   info_height = max(1, available - tree_height - coordinator_height - section_headers(3))

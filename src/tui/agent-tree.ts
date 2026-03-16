@@ -99,12 +99,16 @@ export class AgentTreeComponent implements Component {
     const wasEmpty = this._flatList.length === 0;
     this._flatList = list;
     if (wasEmpty && list.length > 0) {
-      // First data load — ensure we start at the top
       this.selectedIndex = 0;
       this.scrollOffset = 0;
       this.selectedId = null;
     }
     this.resolveSelection();
+    // Guard: if maxHeight hasn't been set yet (still default 1 from sidebar),
+    // ensureSelectedVisible may have computed a bogus scrollOffset. Reset it.
+    if (wasEmpty && list.length > 0) {
+      this.scrollOffset = 0;
+    }
   }
 
   get visibleList(): FlatEntry[] {

@@ -1161,34 +1161,51 @@ This ensures the system coordinator can only run `ib` commands (e.g., `ib list`,
 
 #### 12.1.4 Display
 
-**Sidebar**: The system coordinator occupies the bottom section of the left sidebar (unchanged from the existing coordinator panel position). It renders:
-
-1. A section header: `──── System Coordinator ────`
-2. Tmux output from the `ib-coordinator` session, wrapped to sidebar width
-3. When the coordinator panel has focus (see §13): an input field between separators at the bottom
-
-The system coordinator panel uses its own `TmuxPoller` instance (separate from the agent tmux poller) to capture output from the `ib-coordinator` session at ~1s intervals.
-
-**Agent tree**: The system coordinator appears as the **first entry** in the agent tree, before all repo headers. It uses a special icon (`⚡` or `◆`) and displays as:
+**Agent tree**: The system coordinator appears as the **first entry** in the agent tree, before all repo headers. It uses a special icon (`◆`) and displays as:
 
 ```
 ◆ coordinator  running  5m
 ▾ itsybitsy
-  ⚙ agent-a1b2c3d4  running  2m
-  ...
+  ◇ coordinator      running  3m
+  ⚙ agent-a1b2c3d4   running  2m
 ▾ muse-ios
-  ...
+  ◇ coordinator      running  1m
+  ⚙ agent-c9d0e1f2   complete  1h
 ```
 
-**Full-width view**: When the system coordinator is selected in the agent tree, the main area layout changes: the split-pane (middle tmux + right pane) is replaced with a **single full-width panel** spanning the entire main area width. This panel shows the system coordinator's tmux output (the same content shown in the sidebar, but at full width for readability). The sidebar coordinator section continues to show the same output simultaneously.
+**Layout when system coordinator is selected**: When the system coordinator is selected in the agent tree, the entire layout changes:
 
-[^needs review] Whether the full-width view should show additional system-level information (agent summary table, status overview) alongside the tmux output, or just the tmux output at full width.
+- **Sidebar** switches to a two-section layout: agent tree (top) + system coordinator tmux output and input field (bottom). The info panel is **hidden** — it is not relevant for the system coordinator.
+- **Main area** (middle + right panes) merge into a **single full-width system dashboard** showing the full agent tree across all repos with status overview. This is a dedicated system view, not the regular split-pane layout.
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│ ib — agent dashboard                                            │
+├──── Agents ──────────────────┬──── System Dashboard ────────────┤
+│ ◆ coordinator  running  5m  │                                   │
+│ ▾ itsybitsy                  │  Full agent tree across all repos │
+│   ◇ coordinator  running 3m │  with status, model, age, summary │
+│   ⚙ agent-a1b2  running 2m  │                                   │
+│ ▾ muse-ios                   │  (future: system status metrics,  │
+│   ◇ coordinator  running 1m │   rate limit overview, etc.)       │
+│   ⚙ agent-c9d0  complete 1h │                                   │
+├──── System Coordinator ──────│                                   │
+│ coordinator tmux output      │                                   │
+│ > input field█               │                                   │
+├──────────────────────────────┴───────────────────────────────────┤
+│ status bar                                                       │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+When any other agent or repo header is selected, the layout reverts to the normal three-section sidebar (tree + info + coordinator) with the standard split-pane main area.
+
+The system coordinator panel uses its own `TmuxPoller` instance (separate from the agent tmux poller) to capture output from the `ib-coordinator` session at ~1s intervals.
 
 #### 12.1.5 Session Start Context
 
 The system coordinator does NOT use the standard session-start hook (§6.3). Instead, it receives a custom initial prompt explaining its role:
 
-> You are the itsybitsy system coordinator. You manage agents across all registered repos using `ib` commands. You can list agents (`ib list`), send messages (`ib send`), merge (`ib merge`), kill (`ib kill`), create agents (`ib new-agent`), and check status (`ib status`, `ib diff`). You do NOT have access to Read, Write, Edit, or any file tools — only `ib` Bash commands. You coordinate work at the system level — for repo-specific coordination, delegate to per-repo coordinators. Periodically check `ib inbox count` for notifications from watchdogs and agents; process with `ib inbox list` / `ib inbox read` / `ib inbox ack`. To send messages to per-repo coordinators, use `ib send --repo <repo-name> coordinator "message"`.
+> You are the itsybitsy system coordinator. You manage agents across all registered repos using `ib` commands. You can list agents (`ib list`), send messages (`ib send`), merge (`ib merge`), kill (`ib kill`), create agents (`ib new-agent`), and check status (`ib status`, `ib diff`). You do NOT have access to Read, Write, Edit, or any file tools — only `ib` Bash commands. You coordinate work at the system level — for repo-specific coordination, delegate to per-repo coordinators. Periodically check `ib inbox count` for notifications from watchdogs and agents; process with `ib inbox list` / `ib inbox read` / `ib inbox ack`. To send messages to per-repo coordinators, use `ib send <repo-name> "message"` (e.g., `ib send itsybitsy "review the latest PR"`).
 
 #### 12.1.6 Watchdog Behavior
 
@@ -1226,9 +1243,11 @@ Per-repo coordinators are stored in `.ittybitty/agents/` like regular agents, bu
 5. Does NOT set a `--manager` — coordinators are top-level agents
 6. Otherwise follows the standard agent creation flow (§1.1)
 
-**One-per-repo constraint**: If a coordinator already exists for the repo (active `coordinator` agent in `.ittybitty/agents/`), `ib new-agent --coordinator` fails with an error message.
+**One-per-repo constraint**: If a coordinator already exists for the repo (active `coordinator` agent in `.ittybitty/agents/`), `ib new-agent --coordinator` is a no-op (idempotent). There is exactly one coordinator per repo, never more.
 
-**Spawning from TUI**: The `a` (new agent) action in the TUI offers an additional option: "New coordinator" when the selected repo does not already have one. The system coordinator can also spawn per-repo coordinators via `ib new-agent --coordinator` from within a repo directory.
+**Auto-spawn on watch startup**: When `ib watch` launches, it auto-spawns a per-repo coordinator for each registered repo that doesn't already have one. This matches the system coordinator's auto-spawn behavior — both tiers start automatically. On exit, per-repo coordinators are killed (their tmux sessions are stopped), unless another `ib watch` instance is running.
+
+**Manual spawning**: Per-repo coordinators can also be created manually via `ib new-agent --coordinator`. The `a` (new agent) action in the TUI offers an additional option: "New coordinator" when the selected repo does not already have one. The system coordinator can also spawn per-repo coordinators via `ib new-agent --coordinator` from within a repo directory.
 
 **Children**: Agents spawned by a per-repo coordinator (via `ib new-agent --worker` from within the coordinator's session) will have `manager: "coordinator"` in their meta.json. This means `buildAgentTree()` will correctly parent them under the coordinator, and `ib nuke coordinator` will recursively kill them.
 
@@ -1299,7 +1318,7 @@ When a per-repo coordinator is selected in the agent tree, it behaves like any o
 
 Per-repo coordinators use a custom session-start context (injected via the session-start hook, which detects the `coordinator: true` flag in meta.json):
 
-> You are a per-repo coordinator for the `<repo-name>` repository. You can read files and code in this repo using Read, Glob, Grep, and LS. You coordinate work by spawning and managing worker agents using `ib` commands. You do NOT write code directly — instead, spawn worker agents with `ib new-agent --worker "task"` to implement changes. Review their work with `ib diff <id>` and merge with `ib merge <id>`. Note: `ib send coordinator "message"` from within this repo addresses YOU (the per-repo coordinator). To address the system coordinator, use `ib send --system "message"`.
+> You are a per-repo coordinator for the `<repo-name>` repository. You can read files and code in this repo using Read, Glob, Grep, and LS. You coordinate work by spawning and managing worker agents using `ib` commands. You do NOT write code directly — instead, spawn worker agents with `ib new-agent --worker "task"` to implement changes. Review their work with `ib diff <id>` and merge with `ib merge <id>`. To send messages to the system coordinator, use `ib send coordinator "message"`.
 
 #### 12.2.7 Watchdog Behavior
 
@@ -1313,15 +1332,15 @@ Per-repo coordinators use a modified watchdog behavior:
 
 ### 12.3 Addressing Coordinators
 
-#### 12.3.1 CLI Addressing — `ib send coordinator`
+#### 12.3.1 CLI Addressing
 
-The name `coordinator` is resolved using **CWD-scoped resolution**:
+Coordinators are addressed by name rather than agent ID:
 
-1. If CWD is within a repo that has a per-repo coordinator → address the **per-repo coordinator** (via `ib send` to agent ID `coordinator` in that repo)
-2. If CWD is NOT within a repo, or the repo has no per-repo coordinator → address the **system coordinator** (via `tmux send-keys -t ib-coordinator`)
-3. `ib send --system "message"` — always addresses the system coordinator, regardless of CWD
+- **System coordinator**: `ib send coordinator "message"` — the bare name `coordinator` always addresses the system coordinator
+- **Per-repo coordinator**: `ib send <repo-name> "message"` — uses the repo basename (e.g., `ib send itsybitsy "message"`) to address the per-repo coordinator for that repo
+- **Regular agents**: `ib send <agent-id> "message"` — unchanged, uses standard agent ID
 
-This means agents running in a repo worktree (whose CWD is within the repo) will naturally address their repo's coordinator when they call `ib send coordinator`. The `--system` flag provides an escape hatch when the system coordinator is explicitly needed.
+This naming is simple and unambiguous — no CWD-scoped resolution needed. The system coordinator can reach per-repo coordinators via `ib send <repo-name>`, and per-repo coordinators can reach the system coordinator via `ib send coordinator`.
 
 #### 12.3.2 TUI Addressing
 
@@ -1352,15 +1371,6 @@ The system coordinator cannot read files directly (it has only `Bash(ib:*)` perm
 - `ib inbox count` — returns the number of pending messages (useful for polling)
 
 The system coordinator's session-start prompt instructs it to periodically run `ib inbox count` and process messages with `ib inbox list` / `ib inbox read` / `ib inbox ack`. This keeps the system coordinator's permissions minimal (`Bash(ib:*)` covers `ib inbox *`) while giving it access to programmatic notifications.
-
-#### 12.3.5 System Coordinator → Per-Repo Coordinator Addressing
-
-The system coordinator's CWD is `~/.itsybitsy/`, which is outside any repo. CWD-scoped resolution (§12.3.1) would resolve `ib send coordinator` back to itself. To address per-repo coordinators, the system coordinator uses:
-
-- `ib send --repo <repo-name> coordinator "message"` — new `--repo` flag scopes `coordinator` resolution to the specified repo
-- The system coordinator discovers available repos and their coordinators via `ib list`, which shows per-repo coordinators in its output
-
-The `--repo` flag is only needed when addressing `coordinator` by name. Regular agent IDs (e.g., `agent-a1b2c3d4`) are globally unique and don't need repo scoping.
 
 ### 12.4 Coordinator Relationship to Regular Agents
 
@@ -1407,7 +1417,6 @@ New config keys in `~/.itsybitsy/config.json`:
 ```json
 {
   "coordinator": {
-    "autoSpawnPerRepo": false,
     "model": "opus"
   },
   "permissions": {
@@ -1421,7 +1430,6 @@ New config keys in `~/.itsybitsy/config.json`:
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `coordinator.autoSpawnPerRepo` | boolean | `false` | If true, auto-spawn a per-repo coordinator when a repo is added |
 | `coordinator.model` | string | `"opus"` | Model for both system and per-repo coordinators. A single key is used because both tiers perform the same kind of work (orchestration via `ib` commands). If different models are needed, per-repo coordinators can be spawned with `--model <model>` to override. |
 | `permissions.coordinator.allow` | string[] | `[]` | Additional permissions for per-repo coordinators |
 | `permissions.coordinator.deny` | string[] | `[]` | Additional deny rules for per-repo coordinators |
@@ -1435,7 +1443,7 @@ The coordinator system touches many modules. This section catalogs every file th
 | `src/coordinator.ts` (new) | System coordinator lifecycle: `ensureSystemCoordinator()`, `releaseSystemCoordinator()`, `restartSystemCoordinator()`, reference counting, permissions template, prompt definition |
 | `src/agents.ts` | Add `coordinator?: boolean` to `AgentMeta` interface. Add `{ kind: "system-coordinator" }` to `FlatEntry` union. `flattenAgentTree()` prepends system coordinator entry. Sort per-repo coordinators before regular agents within each repo section. |
 | `src/agent-lifecycle.ts` | `buildCoordinatorSettings()` — new function producing coordinator-specific permissions (Read/Glob/Grep yes, Write/Edit no). `newAgent()` extended with `--coordinator` flag: uses fixed `coordinator` ID, sets `coordinator: true` in meta.json, one-per-repo validation, mutual exclusivity with `--worker`. |
-| `src/ib-commands.ts` | `newAgent()` CLI handler: `--coordinator` flag parsing. `sendMessage()`: resolve `coordinator` name to correct target (per-repo vs system). New `--system` and `--repo` flags for `ib send`. New `ib inbox` command (write/list/read/ack/count). New config keys registered. |
+| `src/ib-commands.ts` | `newAgent()` CLI handler: `--coordinator` flag parsing. `sendMessage()`: resolve `coordinator` → system coordinator, `<repo-name>` → per-repo coordinator. New `ib inbox` command (write/list/read/ack/count). New config keys registered. |
 | `src/watchdog.ts` | Detect `coordinator: true` in meta.json. Skip completion nudge for coordinators. `notifySystemCoordinator()` — send messages to system coordinator when per-repo coordinator enters waiting with no children. No watchdog spawned for system coordinator. |
 | `src/hooks/session-start.ts` | Detect `coordinator: true` in meta.json. Inject coordinator-specific prompt (SPEC.md §12.2.6) instead of standard manager/worker prompt. |
 | `src/hooks/agent-path.ts` | No changes needed — per-repo coordinators use standard path isolation. System coordinator has no worktree to isolate. |

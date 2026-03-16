@@ -1106,14 +1106,14 @@ Add the system coordinator as the first entry in the agent tree:
 
 **Files:** `src/tui/dashboard.ts`, `src/tui/split-pane.ts`
 
-When system coordinator is selected, replace the split-pane with a full-width view:
+When system coordinator is selected, switch to a special layout:
 
 - [ ] Dashboard detects when selection is `kind: "system-coordinator"`
-- [ ] Instead of rendering `SplitPane`, render a single full-width `TmuxPaneComponent` spanning the entire main area
-- [ ] The full-width pane shows the same `ib-coordinator` tmux output as the sidebar panel, but wider
-- [ ] Scrolling (`;`/`l`) applies to the full-width view
-- [ ] When selection moves to a regular agent, revert to the normal split-pane layout
-- [ ] Input field behavior: when `active-agent` has focus and system coordinator is selected, input sends to the system coordinator via `tmux send-keys`
+- [ ] **Sidebar layout switch**: Hide info panel, show only agent tree (top) + coordinator tmux output & input field (bottom)
+- [ ] **Main area**: Replace split-pane with a full-width **system dashboard** showing the full agent tree across all repos with status, model, age, and summary
+- [ ] Scrolling (`;`/`l`) applies to the system dashboard view
+- [ ] When selection moves to a regular agent or repo header, revert to normal layout (tree + info + coordinator sidebar, split-pane main area)
+- [ ] Input field in sidebar coordinator section sends to system coordinator via `tmux send-keys`
 
 #### 47e: Dashboard integration
 
@@ -1121,8 +1121,8 @@ When system coordinator is selected, replace the split-pane with a full-width vi
 
 Wire system coordinator lifecycle into the dashboard:
 
-- [ ] On `launchDashboard()`: call `ensureSystemCoordinator()` before starting the TUI
-- [ ] On Ctrl-C exit: call `releaseSystemCoordinator()` after stopping the TUI
+- [ ] On `launchDashboard()`: call `ensureSystemCoordinator()` and auto-spawn per-repo coordinators for all registered repos before starting the TUI
+- [ ] On Ctrl-C exit: call `releaseSystemCoordinator()` and kill per-repo coordinators after stopping the TUI (unless another `ib watch` instance is running)
 - [ ] Pass coordinator tmux output to the sidebar for rendering
 - [ ] Handle the case where the coordinator session dies mid-operation: show "System coordinator stopped — press Enter to restart" in the panel
 - [ ] `R` (resume) key when system coordinator is selected triggers restart
@@ -1227,17 +1227,16 @@ Add ability to spawn per-repo coordinators from the TUI:
 - [ ] Selecting "Coordinator" calls `newAgent()` with `--coordinator` flag
 - [ ] Tests for dialog options and coordinator creation via TUI
 
-#### 48g: Addressing — `ib send coordinator`
+#### 48g: Addressing — coordinator name resolution
 
 **Files:** `src/ib-commands.ts`
 
 Support addressing coordinators by name:
 
-- [ ] `ib send coordinator "message"` — CWD-scoped resolution: CWD in repo with per-repo coordinator → per-repo; otherwise → system coordinator (via `ib inbox write`)
-- [ ] `ib send --system "message"` — always address the system coordinator (via `ib inbox write`)
-- [ ] `ib send --repo <repo-name> coordinator "message"` — address the per-repo coordinator in the specified repo (used by system coordinator to reach per-repo coordinators, since its CWD is outside any repo)
-- [ ] `sendMessage()` function: detect `coordinator` as agent ID, resolve to correct target based on flags and CWD
-- [ ] Tests for coordinator addressing resolution (CWD in repo, CWD outside repo, --system, --repo)
+- [ ] `ib send coordinator "message"` — always addresses the system coordinator (via `ib inbox write`)
+- [ ] `ib send <repo-name> "message"` — addresses the per-repo coordinator for that repo (using repo basename to look up the coordinator agent). This is how the system coordinator reaches per-repo coordinators.
+- [ ] `sendMessage()` function: detect `coordinator` as target → system coordinator; detect registered repo basename as target → per-repo coordinator
+- [ ] Tests for coordinator addressing resolution
 
 ---
 

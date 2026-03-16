@@ -1121,8 +1121,8 @@ When system coordinator is selected, switch to a special layout:
 
 Wire system coordinator lifecycle into the dashboard:
 
-- [ ] On `launchDashboard()`: call `ensureSystemCoordinator()` and auto-spawn per-repo coordinators for all registered repos before starting the TUI
-- [ ] On Ctrl-C exit: call `releaseSystemCoordinator()` and kill per-repo coordinators after stopping the TUI (unless another `ib watch` instance is running)
+- [ ] On `launchDashboard()`: call `ensureSystemCoordinator()` before starting the TUI
+- [ ] On Ctrl-C exit: call `releaseSystemCoordinator()` after stopping the TUI
 - [ ] Pass coordinator tmux output to the sidebar for rendering
 - [ ] Handle the case where the coordinator session dies mid-operation: show "System coordinator stopped — press Enter to restart" in the panel
 - [ ] `R` (resume) key when system coordinator is selected triggers restart
@@ -1236,7 +1236,18 @@ Support addressing coordinators by name:
 - [ ] `ib send coordinator "message"` — always addresses the system coordinator (via `ib inbox write`)
 - [ ] `ib send <repo-name> "message"` — addresses the per-repo coordinator for that repo (using repo basename to look up the coordinator agent). This is how the system coordinator reaches per-repo coordinators.
 - [ ] `sendMessage()` function: detect `coordinator` as target → system coordinator; detect registered repo basename as target → per-repo coordinator
+- [ ] Error with clear message when repo exists but has no coordinator: "No coordinator for repo <name>"
+- [ ] Error with clear message when repo basename is ambiguous (two repos with same basename): "Ambiguous repo name <name> — use full path"
 - [ ] Tests for coordinator addressing resolution
+
+#### 48h: Auto-spawn per-repo coordinators on watch startup
+
+**Files:** `src/tui/dashboard.ts`, `src/coordinator.ts`
+
+- [ ] On `launchDashboard()` (after `ensureSystemCoordinator()`): auto-spawn a per-repo coordinator for each registered repo that doesn't already have one
+- [ ] On Ctrl-C exit: kill per-repo coordinators after stopping the TUI (unless another `ib watch` instance is running)
+- [ ] Idempotent: if coordinator already exists for a repo, skip it
+- [ ] Tests for auto-spawn and auto-close lifecycle
 
 ---
 

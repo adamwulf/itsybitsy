@@ -1347,6 +1347,11 @@ Examples:
 
 This priority order means `coordinator` is a reserved name — `ib new-agent --name coordinator` is rejected for non-coordinator agents. Repo basenames take priority over agent ID substring matching, so if a repo is named `agent` and there's also an `agent-a1b2c3d4`, `ib send agent "message"` addresses the repo coordinator, not the agent.
 
+**Error cases**:
+- `ib send <repo-name> "message"` when the repo exists but has no coordinator → error: `"No coordinator for repo <name>"`
+- `ib send <name> "message"` when multiple registered repos share the same basename → error: `"Ambiguous repo name <name> — use full path"`
+- The `<source>` field in inbox message filenames (`<timestamp>-<source>.msg`) is the calling agent ID, `"watchdog"`, or `"manual"` depending on the caller
+
 #### 12.3.2 TUI Addressing
 
 - **System coordinator**: Select in agent tree → `s` key to send message, or focus coordinator sidebar panel → type in input field

@@ -8,7 +8,7 @@ import { truncateToWidth } from "@mariozechner/pi-tui";
 import type { Agent, FlatEntry } from "../agents";
 import { getStateColors } from "./color-scheme";
 import { displayState } from "./agent-tree";
-import { wrapLines } from "./wrap";
+import { wrapLines, padLines } from "./wrap";
 import { RESET, BOLD, DIM, GREEN, RED } from "./colors";
 
 /** Check if a PID refers to a running process */
@@ -106,10 +106,3 @@ export class InfoPanelComponent implements Component {
   }
 }
 
-/** Pad lines array to exact height */
-function padLines(lines: string[], height: number): string[] {
-  while (lines.length < height) {
-    lines.push("");
-  }
-  return lines.slice(0, height);
-}

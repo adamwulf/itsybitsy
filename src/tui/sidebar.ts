@@ -36,23 +36,29 @@ export function computeSidebarHeights(
 ): { treeHeight: number; infoHeight: number; coordinatorHeight: number } {
   const treeHeight = Math.min(MAX_TREE_HEIGHT, Math.max(1, itemCount));
 
-  // Coordinator gets 40% of (available - tree_height), per spec
-  const afterTree = available - treeHeight;
-  if (afterTree <= 0) {
-    return { treeHeight: Math.max(1, available), infoHeight: 0, coordinatorHeight: 0 };
+  // Budget remaining after Agents header (always present) and tree content.
+  // NOTE: SPEC §11.2 uses separators(2) but the implementation has 3 section header lines
+  // (Agents, Info, Coordinator) per PLAN §45a which specifies a header for each section.
+  const agentsHeaderLine = 1;
+  const remaining = available - agentsHeaderLine - treeHeight;
+  if (remaining <= 0) {
+    return { treeHeight: Math.max(1, available - agentsHeaderLine), infoHeight: 0, coordinatorHeight: 0 };
   }
 
-  let coordinatorHeight = Math.max(MIN_COORDINATOR_HEIGHT, Math.floor(afterTree * 0.4));
+  // Coordinator gets 40% of (available - tree_height) per spec, accounting for its header
+  const coordinatorHeaderLine = 1;
+  let coordinatorHeight = Math.max(MIN_COORDINATOR_HEIGHT, Math.floor(remaining * 0.4));
 
-  // Info gets what's left after tree + coordinator + 3 section headers (min 1 row per spec)
-  const sectionHeaders = 3; // Agents, Info, Coordinator
-  let infoHeight = Math.max(1, afterTree - coordinatorHeight - sectionHeaders);
+  // Info gets what's left, minus its own header line and the coordinator header line
+  const infoHeaderLine = 1;
+  const infoAvailable = remaining - coordinatorHeight - coordinatorHeaderLine - infoHeaderLine;
+  let infoHeight = Math.max(1, infoAvailable);
 
-  // If terminal is too short for info to fit, shrink coordinator first (down to 3), then hide info
-  if (afterTree - coordinatorHeight - sectionHeaders < 1) {
+  // If terminal is too short for info to fit (< 1 row), hide info panel entirely
+  if (infoAvailable < 1) {
     infoHeight = 0;
-    // Only 2 headers when info is hidden (Agents + Coordinator)
-    coordinatorHeight = Math.max(COORDINATOR_SHRINK_MIN, afterTree - 2);
+    // Reclaim info header space; coordinator gets remaining minus its own header
+    coordinatorHeight = Math.max(COORDINATOR_SHRINK_MIN, remaining - coordinatorHeaderLine);
   }
 
   return { treeHeight, infoHeight, coordinatorHeight };

@@ -16,11 +16,13 @@ describe("computeSidebarHeights", () => {
   test("allocates tree, info, and coordinator with standard available height", () => {
     const { treeHeight, infoHeight, coordinatorHeight } = computeSidebarHeights(30, 5);
     expect(treeHeight).toBe(5);
-    // afterTree = 30 - 5 = 25
-    // coordinator = max(5, floor(25*0.4)) = max(5, 10) = 10
-    // info = 25 - 10 - 3(section headers: Agents, Info, Coordinator) = 12
-    expect(coordinatorHeight).toBe(10);
-    expect(infoHeight).toBe(12);
+    // remaining = 30 - 1(Agents header) - 5 = 24
+    // coordinator = max(5, floor(24*0.4)) = max(5, 9) = 9
+    // info = 24 - 9 - 1(Coordinator header) - 1(Info header) = 13
+    expect(coordinatorHeight).toBe(9);
+    expect(infoHeight).toBe(13);
+    // Total with headers: 1 + 5 + 1 + 13 + 1 + 9 = 30
+    expect(1 + treeHeight + 1 + infoHeight + 1 + coordinatorHeight).toBe(30);
   });
 
   test("caps tree at MAX_TREE_HEIGHT (7)", () => {
@@ -36,8 +38,9 @@ describe("computeSidebarHeights", () => {
   test("handles very small available height", () => {
     const { treeHeight, infoHeight, coordinatorHeight } = computeSidebarHeights(5, 10);
     expect(treeHeight).toBeGreaterThanOrEqual(1);
-    // May not have room for info or coordinator
-    expect(treeHeight + infoHeight + coordinatorHeight).toBeLessThanOrEqual(5 + 2); // +2 for separators
+    // Content + section headers must fit within available height
+    const headers = infoHeight > 0 ? 3 : (coordinatorHeight > 0 ? 2 : 1);
+    expect(treeHeight + infoHeight + coordinatorHeight + headers).toBeLessThanOrEqual(5);
   });
 
   test("minimum coordinator height is 5", () => {

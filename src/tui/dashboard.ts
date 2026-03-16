@@ -27,7 +27,7 @@ import { AgentWatcher } from "../watcher";
 import { TmuxPoller, hasAttachedClient } from "../tmux-poller";
 import type { Agent, FlatEntry, PendingQuestion } from "../agents";
 import { SplitPane } from "./split-pane";
-import { wrapLines } from "./wrap";
+import { wrapLines, padLines } from "./wrap";
 import { fetchUsage } from "../usage";
 import type { UsageData } from "../usage";
 import { getStateColors, setupColorSchemeDetection } from "./color-scheme";
@@ -177,14 +177,6 @@ export class TmuxPaneComponent implements Component {
 
     return padLines(lines, this.displayHeight);
   }
-}
-
-/** Pad lines array to exact height */
-function padLines(lines: string[], height: number): string[] {
-  while (lines.length < height) {
-    lines.push("");
-  }
-  return lines;
 }
 
 /** Merge sidebar lines and main area lines side by side with a separator */

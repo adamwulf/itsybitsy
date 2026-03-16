@@ -1192,11 +1192,13 @@ The system coordinator does NOT use the standard session-start hook (§6.3). Ins
 
 #### 12.1.6 Watchdog Behavior
 
-The system coordinator does **not** have a standard watchdog. It should stay running indefinitely and is never nudged to complete. Instead:
+The system coordinator does **not** have a standard watchdog or stop hook. It is not a regular agent — it has no agent directory, no meta.json, and no agent ID in the ib system. Instead:
 
 - No watchdog process is spawned for the system coordinator
-- The stop hook still runs (to detect `waiting`/`complete` state), but the state is not used for nudging
+- No stop hook is installed — the system coordinator's state is detected purely from tmux session existence and output parsing (similar to how `compacting` and `rate_limited` are detected for regular agents)
+- State detection: tmux session exists → `running`; tmux session gone → `stopped`; rate limit patterns in output → `rate_limited`; compacting pattern → `compacting`
 - If the system coordinator session dies unexpectedly, the sidebar panel shows "System coordinator stopped — press Enter to restart" and `ib watch` can restart it on demand
+- The system coordinator is expected to run indefinitely — it is never nudged to complete
 
 ### 12.2 Per-Repo Coordinators
 
@@ -1211,7 +1213,7 @@ Per-repo coordinators are stored in `.ittybitty/agents/` like regular agents, bu
 - **Agent ID**: `coordinator` (not the random `agent-<hex>` format). Only one coordinator per repo.
 - **meta.json flag**: `"coordinator": true` — marks this agent as a coordinator
 - **Tmux session naming**: Standard convention: `ittybitty-<repo-id>-coordinator`
-- **Branch name**: `agent/coordinator` (standard agent branch naming)
+- **Branch name**: `agent/coordinator-<repo-id>` (includes repo-id to avoid collision across repos sharing the same git remote — each repo has a unique 8-char hex repo-id in `.ittybitty/repo-id`)
 
 #### 12.2.3 Lifecycle
 
@@ -1228,7 +1230,9 @@ Per-repo coordinators are stored in `.ittybitty/agents/` like regular agents, bu
 
 **Spawning from TUI**: The `a` (new agent) action in the TUI offers an additional option: "New coordinator" when the selected repo does not already have one. The system coordinator can also spawn per-repo coordinators via `ib new-agent --coordinator` from within a repo directory.
 
-**Killing/Archiving**: Per-repo coordinators follow the standard kill/archive flow (§1.4, §1.7). Killing a coordinator also kills all its children if it has any (same as nuking a manager).
+**Children**: Agents spawned by a per-repo coordinator (via `ib new-agent --worker` from within the coordinator's session) will have `manager: "coordinator"` in their meta.json. This means `buildAgentTree()` will correctly parent them under the coordinator, and `ib nuke coordinator` will recursively kill them.
+
+**Killing/Archiving**: Per-repo coordinators follow the standard kill/archive flow (§1.4, §1.7). Killing a coordinator also kills all its children if it has any (same as nuking a manager — the `manager: "coordinator"` field links children to it).
 
 **Resuming**: Standard resume flow (§1.6). Per-repo coordinators can be paused and resumed like any agent.
 
@@ -1244,11 +1248,12 @@ Per-repo coordinators get a restricted permission set — they can read the code
       "Bash(git show:*)", "Bash(git ls-files:*)", "Bash(git grep:*)",
       "Bash(pwd:*)", "Bash(ls:*)", "Bash(head:*)", "Bash(tail:*)", "Bash(cat:*)", "Bash(grep:*)",
       "Read", "Glob", "Grep", "LS",
-      "TodoWrite", "Task", "TaskOutput", "KillShell", "AskUserQuestion"
+      "TodoWrite", "AskUserQuestion"
     ],
     "deny": [
       "Write", "Edit", "MultiEdit", "NotebookEdit",
-      "WebFetch", "WebSearch", "EnterPlanMode", "ExitPlanMode"
+      "WebFetch", "WebSearch", "Task", "TaskOutput", "Agent", "KillShell",
+      "EnterPlanMode", "ExitPlanMode"
     ]
   }
 }
@@ -1257,8 +1262,9 @@ Per-repo coordinators get a restricted permission set — they can read the code
 Key differences from regular agents:
 - **No Write/Edit/MultiEdit** — coordinators cannot modify files
 - **Has Read/Glob/Grep/LS** — coordinators can read the codebase for context
-- **Has Task** — coordinators can spawn sub-agents via ib commands
+- **No Task/Agent** — coordinators spawn sub-agents only via `Bash(ib:*)`, not Claude's built-in Task/Agent tools. This ensures all agents are tracked through the ib system.
 - **No WebFetch/WebSearch** — coordinators don't need internet access
+- **No KillShell** — coordinators don't run long-lived shell processes
 
 These permissions are constructed by a new `buildCoordinatorSettings()` function (parallel to the existing `buildAgentSettings()`). Per-repo coordinator permissions are also configurable via config:
 
@@ -1293,7 +1299,7 @@ When a per-repo coordinator is selected in the agent tree, it behaves like any o
 
 Per-repo coordinators use a custom session-start context (injected via the session-start hook, which detects the `coordinator: true` flag in meta.json):
 
-> You are a per-repo coordinator for the `<repo-name>` repository. You can read files and code in this repo using Read, Glob, Grep, and LS. You coordinate work by spawning and managing worker agents using `ib` commands. You do NOT write code directly — instead, spawn worker agents with `ib new-agent --worker "task"` to implement changes. Review their work with `ib diff <id>` and merge with `ib merge <id>`.
+> You are a per-repo coordinator for the `<repo-name>` repository. You can read files and code in this repo using Read, Glob, Grep, and LS. You coordinate work by spawning and managing worker agents using `ib` commands. You do NOT write code directly — instead, spawn worker agents with `ib new-agent --worker "task"` to implement changes. Review their work with `ib diff <id>` and merge with `ib merge <id>`. Note: `ib send coordinator "message"` from within this repo addresses YOU (the per-repo coordinator). To address the system coordinator, use `ib send --system "message"`.
 
 #### 12.2.7 Watchdog Behavior
 
@@ -1301,28 +1307,45 @@ Per-repo coordinators use a modified watchdog behavior:
 
 - A watchdog process IS spawned (to detect rate limiting, compacting, etc.)
 - The watchdog does NOT nudge coordinators to complete — coordinators are expected to run indefinitely while they have active sub-agents
-- The watchdog DOES notify the system coordinator (if running) when a per-repo coordinator enters `waiting` state with no active children — this allows the system coordinator to decide whether to give it more work or let it idle
+- The watchdog DOES notify the system coordinator (if running) when a per-repo coordinator enters `waiting` state with no active children — this allows the system coordinator to decide whether to give it more work or let it idle. Notification uses the file-based message queue (§12.3.4).
 - Completion notification goes to the system coordinator instead of a parent manager (since coordinators have no manager)
+- **Fallback when system coordinator is not running**: If the system coordinator's tmux session does not exist, notifications are logged to `~/.itsybitsy/coordinator-inbox/` anyway (they will be processed when the system coordinator is restarted). This avoids losing notifications.
 
 ### 12.3 Addressing Coordinators
 
-#### 12.3.1 System Coordinator
+#### 12.3.1 CLI Addressing — `ib send coordinator`
 
-The system coordinator can be addressed via:
+The name `coordinator` is resolved using **CWD-scoped resolution**:
 
-- **TUI**: Select in agent tree → `s` key to send message, or focus coordinator panel → type in input field
-- **CLI**: `ib send coordinator "message"` — the bare name `coordinator` (without repo context) always addresses the system coordinator
-- **Internal**: `tmux send-keys -t ib-coordinator` (direct tmux access)
+1. If CWD is within a repo that has a per-repo coordinator → address the **per-repo coordinator** (via `ib send` to agent ID `coordinator` in that repo)
+2. If CWD is NOT within a repo, or the repo has no per-repo coordinator → address the **system coordinator** (via `tmux send-keys -t ib-coordinator`)
+3. `ib send --system "message"` — always addresses the system coordinator, regardless of CWD
 
-#### 12.3.2 Per-Repo Coordinators
+This means agents running in a repo worktree (whose CWD is within the repo) will naturally address their repo's coordinator when they call `ib send coordinator`. The `--system` flag provides an escape hatch when the system coordinator is explicitly needed.
 
-Per-repo coordinators can be addressed via:
+#### 12.3.2 TUI Addressing
 
-- **TUI**: Select in agent tree → `s` key to send message (same as any agent)
-- **CLI**: `ib send coordinator "message"` when CWD is within the repo — if a per-repo coordinator exists for the repo, it takes precedence over the system coordinator. To force addressing the system coordinator from within a repo, use `ib send --system coordinator "message"`.
-- **By agent ID**: `ib send coordinator "message"` — since the agent ID is literally `coordinator`, this works with the existing agent addressing system when the CWD resolves to the correct repo
+- **System coordinator**: Select in agent tree → `s` key to send message, or focus coordinator sidebar panel → type in input field
+- **Per-repo coordinator**: Select in agent tree → `s` key to send message (same as any agent)
+- Both use the standard TUI input flow — no name resolution needed since selection is explicit
 
-[^needs review] Whether `ib send coordinator` from a repo with a per-repo coordinator should address the per-repo coordinator (closer scope) or the system coordinator (system-level name). The proposed resolution is: per-repo takes precedence within its repo's CWD.
+#### 12.3.3 Internal Addressing
+
+- **System coordinator**: `tmux send-keys -t ib-coordinator` (direct tmux access) — but see §12.3.4 for message queue alternative
+- **Per-repo coordinator**: standard `ib send coordinator "message"` from within the repo
+
+#### 12.3.4 System Coordinator Message Queue
+
+Direct `tmux send-keys` to the system coordinator is fragile — if Claude is mid-response, injected text can corrupt the session. Instead, the system coordinator uses a **file-based message queue**:
+
+1. Messages are written as individual files to `~/.itsybitsy/coordinator-inbox/<timestamp>-<source>.msg`
+2. The system coordinator's session-start prompt instructs it to periodically check `~/.itsybitsy/coordinator-inbox/` for new messages
+3. After processing a message, the coordinator deletes the file
+4. The watchdog's `notifySystemCoordinator()` writes to this inbox rather than using `tmux send-keys`
+
+This avoids the race condition of injecting text mid-response and matches the pattern used by `ib send` for regular agents (which writes to the agent's message queue).
+
+[^needs review] Whether the file-based inbox is the right approach, or whether the system coordinator should use `ib send` semantics directly. The inbox approach is simpler but requires the coordinator to poll; an alternative is to use Claude's `--resume` session ID + `ib send` if the system coordinator can be given an agent-like identity.
 
 ### 12.4 Coordinator Relationship to Regular Agents
 
@@ -1384,7 +1407,7 @@ New config keys in `~/.itsybitsy/config.json`:
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `coordinator.autoSpawnPerRepo` | boolean | `false` | If true, auto-spawn a per-repo coordinator when a repo is added |
-| `coordinator.model` | string | `"opus"` | Model for both system and per-repo coordinators |
+| `coordinator.model` | string | `"opus"` | Model for both system and per-repo coordinators. A single key is used because both tiers perform the same kind of work (orchestration via `ib` commands). If different models are needed, per-repo coordinators can be spawned with `--model <model>` to override. |
 | `permissions.coordinator.allow` | string[] | `[]` | Additional permissions for per-repo coordinators |
 | `permissions.coordinator.deny` | string[] | `[]` | Additional deny rules for per-repo coordinators |
 
@@ -1415,6 +1438,7 @@ The coordinator system touches many modules. This section catalogs every file th
 | `src/tui/layout.ts` | No changes needed — existing layout persistence covers coordinator panel sizing. |
 | `src/index.ts` | CLI: `ib new-agent --coordinator` flag handling. |
 | `src/watcher.ts` | No changes needed — per-repo coordinators are regular agents detected by fs.watch. System coordinator state is polled via its TmuxPoller. |
+| `src/auto-compact.ts` | No changes needed — auto-compact works generically for all agents via the watchdog. Per-repo coordinators are regular agents and get auto-compact automatically. The system coordinator has no watchdog and no auto-compact (it doesn't use the standard agent lifecycle). |
 
 ---
 

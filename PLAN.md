@@ -1064,12 +1064,14 @@ Implement system coordinator session spawn/teardown:
 - [ ] `ensureSystemCoordinator(): Promise<string>` — checks if `ib-coordinator` tmux session exists (`tmux has-session -t ib-coordinator`); if not, creates it
 - [ ] Ensure `~/.itsybitsy/` exists and has a bare git repo (`git init`) so Claude Code can load `settings.local.json`
 - [ ] Write `~/.itsybitsy/.claude/settings.local.json` with system coordinator permissions (only `Bash(ib:*)`, deny everything else — see SPEC.md §12.1.3)
-- [ ] Write system coordinator prompt to a temp file and start Claude Code: `tmux send-keys -t ib-coordinator 'claude --model opus -p "$(cat /tmp/ib-coordinator-prompt.txt)"' Enter`
+- [ ] Write system coordinator prompt to a user-specific path (`~/.itsybitsy/coordinator-prompt.txt`) and start Claude Code: `tmux send-keys -t ib-coordinator 'claude --model opus -p "$(cat ~/.itsybitsy/coordinator-prompt.txt)"' Enter` (avoids predictable path in world-writable `/tmp`)
 - [ ] Reference counter: increment `~/.itsybitsy/coordinator.refs` on spawn/attach (atomic read-increment-write)
 - [ ] `releaseSystemCoordinator(): Promise<void>` — decrement reference counter; if counter reaches 0, kill the tmux session
 - [ ] `restartSystemCoordinator(): Promise<void>` — kill tmux session + re-create
+- [ ] Create `~/.itsybitsy/coordinator-inbox/` directory for file-based message queue (see SPEC.md §12.3.4)
 - [ ] Session name constant: `IB_COORDINATOR_SESSION = "ib-coordinator"`
-- [ ] Tests for session creation, reuse, cleanup, restart
+- [ ] System coordinator prompt should instruct it to periodically check `~/.itsybitsy/coordinator-inbox/` for messages
+- [ ] Tests for session creation, reuse, cleanup, restart, message queue
 
 #### 47b: System coordinator TmuxPoller
 
@@ -1096,6 +1098,7 @@ Add the system coordinator as the first entry in the agent tree:
 - [ ] System coordinator is selectable via j/k navigation
 - [ ] System coordinator selection sets selectedAgent to a synthetic Agent-like object (or a separate selection type)
 - [ ] Detect system coordinator state from tmux session: running (session exists + Claude active), stopped (no session), waiting/complete (from tmux output parsing)
+- [ ] **Blast radius audit**: Adding `kind: "system-coordinator"` to the `FlatEntry` union means ALL consumers of `FlatEntry` need updating — every `flatList.filter()`, `Extract<FlatEntry, ...>`, and exhaustive switch. Audit: `dashboard.ts`, `dashboard.test.ts`, `agent-actions.ts`, `pane-manager.ts`, `info-panel.ts`, and any other files that destructure or filter `FlatEntry`
 - [ ] Tests for tree rendering with system coordinator
 
 #### 47d: Full-width coordinator view
@@ -1161,7 +1164,7 @@ Extend `newAgent()` to support the `--coordinator` flag:
 - [ ] One-per-repo constraint: if `.ittybitty/agents/coordinator/` already exists (and is not archived), fail with error
 - [ ] No `--manager` flag — coordinators are always top-level
 - [ ] Cannot be `--worker` — coordinator and worker are mutually exclusive
-- [ ] Branch name: `agent/coordinator`
+- [ ] Branch name: `agent/coordinator-<repo-id>` (includes repo-id to avoid collision across repos)
 - [ ] Tests for coordinator creation, one-per-repo constraint, mutual exclusivity
 
 #### 48b: Coordinator permissions
@@ -1197,7 +1200,7 @@ Modify watchdog for coordinator agents:
 - [ ] Coordinators are NOT nudged to complete — skip the `waiting` handler's exponential backoff nudge
 - [ ] Coordinators DO get rate-limit bypass, compacting detection, auto-compact
 - [ ] When a coordinator enters `waiting` with no active children: notify system coordinator (if running) instead of a manager
-- [ ] `notifySystemCoordinator(message)` — sends message to system coordinator via `tmux send-keys -t ib-coordinator`
+- [ ] `notifySystemCoordinator(message)` — writes message file to `~/.itsybitsy/coordinator-inbox/` (file-based message queue — see SPEC.md §12.3.4). Avoids fragile `tmux send-keys` which can corrupt the session if coordinator is mid-response.
 - [ ] Tests for coordinator-specific watchdog behavior
 
 #### 48e: Agent tree — per-repo coordinator display

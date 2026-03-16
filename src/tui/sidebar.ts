@@ -20,35 +20,37 @@ const COORDINATOR_SHRINK_MIN = 3;
  * Compute the height allocation for the three sidebar sections.
  * Returns { treeHeight, infoHeight, coordinatorHeight }.
  */
+/**
+ * Compute sidebar section heights per SPEC §11.2:
+ *   coordinator_height = max(5, floor((available - tree_height) * 0.4))
+ *   info_height = max(1, available - tree_height - coordinator_height - separators(2))
+ *
+ * @param available - total rows available for the sidebar content
+ * @param itemCount - number of visible items in the agent tree (agents + repo headers)
+ */
 export function computeSidebarHeights(
   available: number,
-  agentCount: number,
+  itemCount: number,
 ): { treeHeight: number; infoHeight: number; coordinatorHeight: number } {
-  // Tree height: min of MAX_TREE_HEIGHT and actual item count
-  const treeHeight = Math.min(MAX_TREE_HEIGHT, Math.max(1, agentCount));
+  const treeHeight = Math.min(MAX_TREE_HEIGHT, Math.max(1, itemCount));
 
-  // 2 separators between sections
-  const separators = 2;
-  const remaining = available - treeHeight - separators;
-
-  if (remaining <= 0) {
+  // Coordinator gets 40% of (available - tree_height), per spec
+  const afterTree = available - treeHeight;
+  if (afterTree <= 0) {
     return { treeHeight: Math.max(1, available), infoHeight: 0, coordinatorHeight: 0 };
   }
 
-  // Coordinator gets 40% of remaining, minimum 5
-  let coordinatorHeight = Math.max(MIN_COORDINATOR_HEIGHT, Math.floor(remaining * 0.4));
-  let infoHeight = Math.max(1, remaining - coordinatorHeight);
+  let coordinatorHeight = Math.max(MIN_COORDINATOR_HEIGHT, Math.floor(afterTree * 0.4));
 
-  // If not enough space, shrink coordinator first
-  if (coordinatorHeight + infoHeight > remaining) {
-    coordinatorHeight = Math.max(COORDINATOR_SHRINK_MIN, remaining - 1);
-    infoHeight = Math.max(0, remaining - coordinatorHeight);
-  }
+  // Info gets what's left after tree + coordinator + 2 separators
+  const separators = 2;
+  let infoHeight = Math.max(0, afterTree - coordinatorHeight - separators);
 
-  // If still too tight, remove info panel
+  // If terminal is too short, shrink coordinator first (down to 3), then hide info
   if (infoHeight <= 0) {
+    // Reclaim separator space when info is hidden (only 1 separator needed)
     infoHeight = 0;
-    coordinatorHeight = Math.min(coordinatorHeight, remaining);
+    coordinatorHeight = Math.max(COORDINATOR_SHRINK_MIN, afterTree - 1);
   }
 
   return { treeHeight, infoHeight, coordinatorHeight };
@@ -74,10 +76,10 @@ export class SidebarComponent implements Component {
     const w = Math.min(width, SIDEBAR_WIDTH);
     const lines: string[] = [];
 
-    const agentCount = this.agentTree.visibleList.length;
+    const itemCount = this.agentTree.visibleList.length;
     const { treeHeight, infoHeight, coordinatorHeight } = computeSidebarHeights(
       this.displayHeight,
-      agentCount,
+      itemCount,
     );
 
     // Agent tree section

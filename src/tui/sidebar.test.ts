@@ -16,11 +16,11 @@ describe("computeSidebarHeights", () => {
   test("allocates tree, info, and coordinator with standard available height", () => {
     const { treeHeight, infoHeight, coordinatorHeight } = computeSidebarHeights(30, 5);
     expect(treeHeight).toBe(5);
-    // 2 separators, remaining = 30 - 5 - 2 = 23
-    // coordinator = max(5, floor(23*0.4)) = max(5, 9) = 9
-    // info = 23 - 9 = 14
-    expect(coordinatorHeight).toBe(9);
-    expect(infoHeight).toBe(14);
+    // afterTree = 30 - 5 = 25
+    // coordinator = max(5, floor(25*0.4)) = max(5, 10) = 10
+    // info = 25 - 10 - 2(separators) = 13
+    expect(coordinatorHeight).toBe(10);
+    expect(infoHeight).toBe(13);
   });
 
   test("caps tree at MAX_TREE_HEIGHT (7)", () => {

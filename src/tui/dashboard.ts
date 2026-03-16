@@ -187,6 +187,24 @@ function padLines(lines: string[], height: number): string[] {
   return lines;
 }
 
+/** Merge sidebar lines and main area lines side by side with a separator */
+function mergeSidebarAndMain(
+  sidebarLines: string[],
+  mainLines: string[],
+  height: number,
+  mainWidth: number,
+): string[] {
+  const result: string[] = [];
+  const count = Math.max(sidebarLines.length, mainLines.length, height);
+  for (let i = 0; i < count; i++) {
+    const sl = i < sidebarLines.length ? sidebarLines[i]! : "";
+    const ml = i < mainLines.length ? mainLines[i]! : "";
+    const leftPadded = padToWidth(sl, SIDEBAR_WIDTH);
+    result.push(leftPadded + `${DIM_GRAY}│${RESET}` + truncateToWidth(ml, mainWidth, ""));
+  }
+  return result;
+}
+
 /** Pad a string to exact visible width, inserting RESET before padding if it has ANSI */
 function padToWidth(str: string, width: number): string {
   const vw = visibleWidth(str);
@@ -387,7 +405,6 @@ export class DashboardComponent implements Component {
   splitPane: SplitPane;
   sidebar: SidebarComponent;
   infoPanel: InfoPanelComponent;
-  private outerSplitPane: SplitPane;
   private statusBar: StatusBarComponent;
   tui: TUI | null = null;
   modeIndex = 0;
@@ -469,7 +486,6 @@ export class DashboardComponent implements Component {
 
     this.sidebar = new SidebarComponent(this.agentTree, this.infoPanel);
     this.splitPane = new SplitPane(this.tmuxPane, this.rightPane, DEFAULT_LEFT_WIDTH, `${DIM_GRAY}│${RESET}`);
-    this.outerSplitPane = new SplitPane(this.sidebar, this.splitPane, SIDEBAR_WIDTH, `${DIM_GRAY}│${RESET}`);
 
     this.tmuxPoller = new TmuxPoller({
       onOutput: (raw, _stripped) => {
@@ -1004,68 +1020,29 @@ export class DashboardComponent implements Component {
     const headerHeight = 2; // header + top separator
     const availableHeight = Math.max(5, terminalRows - headerHeight - separatorHeight - bottomHeight);
 
+    const mainWidth = width - SIDEBAR_WIDTH - 1; // 1 for sidebar separator
+    this.sidebar.displayHeight = availableHeight;
+
+    let mainLines: string[];
     if (isTreeMode) {
-      // TREE mode: sidebar + full-width tree in the main area
-      // Sidebar on the left, full tree on the right
-      this.sidebar.displayHeight = availableHeight;
-      this.agentTree.maxHeight = availableHeight; // full height tree in right pane
-      const mainTreeLines = this.agentTree.render(width - SIDEBAR_WIDTH - 1);
-      // Pad main tree to available height
-      while (mainTreeLines.length < availableHeight) mainTreeLines.push("");
-
-      // Render sidebar (which has its own compact agent tree)
-      const sidebarLines = this.sidebar.render(SIDEBAR_WIDTH);
-
-      // Merge sidebar and main tree side by side
-      for (let i = 0; i < availableHeight; i++) {
-        const sl = i < sidebarLines.length ? sidebarLines[i]! : "";
-        const ml = i < mainTreeLines.length ? mainTreeLines[i]! : "";
-        const leftPadded = padToWidth(sl, SIDEBAR_WIDTH);
-        lines.push(leftPadded + `${DIM_GRAY}│${RESET}` + truncateToWidth(ml, width - SIDEBAR_WIDTH - 1, ""));
-      }
+      // TREE mode: full-height tree in the main area.
+      // IMPORTANT: The sidebar renders the same AgentTreeComponent in compact mode.
+      // The main area render below runs FIRST to set maxHeight for the full tree,
+      // then the sidebar render (inside mergeSidebarAndMain) resets maxHeight for compact.
+      // This order is safe because sidebar.render() sets agentTree.maxHeight internally.
+      this.agentTree.maxHeight = availableHeight;
+      mainLines = this.agentTree.render(mainWidth);
     } else {
-      // Normal mode: sidebar | split-pane(tmux | right-pane)
-      this.sidebar.displayHeight = availableHeight;
+      // Normal/full-width mode: split-pane(tmux | right-pane)
       this.tmuxPane.displayHeight = availableHeight;
       this.rightPane.displayHeight = availableHeight;
-
-      // The main area (right of sidebar) width
-      const mainWidth = width - SIDEBAR_WIDTH - 1; // 1 for sidebar separator
-
-      if (isFullWidth) {
-        // Full-width modes: right pane spans entire main area
-        this.splitPane.fullWidth = true;
-        const mainLines = this.splitPane.render(mainWidth);
-
-        // Render sidebar
-        const sidebarLines = this.sidebar.render(SIDEBAR_WIDTH);
-
-        // Merge
-        const maxLines = Math.max(sidebarLines.length, mainLines.length, availableHeight);
-        for (let i = 0; i < maxLines; i++) {
-          const sl = i < sidebarLines.length ? sidebarLines[i]! : "";
-          const ml = i < mainLines.length ? mainLines[i]! : "";
-          const leftPadded = padToWidth(sl, SIDEBAR_WIDTH);
-          lines.push(leftPadded + `${DIM_GRAY}│${RESET}` + truncateToWidth(ml, mainWidth, ""));
-        }
-      } else {
-        // Split mode: tmux | right pane within the main area
-        this.splitPane.fullWidth = false;
-        const mainLines = this.splitPane.render(mainWidth);
-
-        // Render sidebar
-        const sidebarLines = this.sidebar.render(SIDEBAR_WIDTH);
-
-        // Merge
-        const maxLines = Math.max(sidebarLines.length, mainLines.length, availableHeight);
-        for (let i = 0; i < maxLines; i++) {
-          const sl = i < sidebarLines.length ? sidebarLines[i]! : "";
-          const ml = i < mainLines.length ? mainLines[i]! : "";
-          const leftPadded = padToWidth(sl, SIDEBAR_WIDTH);
-          lines.push(leftPadded + `${DIM_GRAY}│${RESET}` + truncateToWidth(ml, mainWidth, ""));
-        }
-      }
+      this.splitPane.fullWidth = isFullWidth;
+      mainLines = this.splitPane.render(mainWidth);
     }
+
+    // Render sidebar and merge with main area
+    const sidebarLines = this.sidebar.render(SIDEBAR_WIDTH);
+    lines.push(...mergeSidebarAndMain(sidebarLines, mainLines, availableHeight, mainWidth));
 
     // Bottom separator with junction characters
     const bottomSep = this.buildBottomSeparator(width, isTreeMode, isFullWidth);

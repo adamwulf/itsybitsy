@@ -26,6 +26,7 @@ export class InputFieldComponent implements Component {
   active = true;
   onSubmit: ((text: string) => void) | null = null;
   onCancel: (() => void) | null = null;
+  onRender: (() => void) | null = null;
 
   invalidate(): void {}
 
@@ -122,7 +123,7 @@ export class InputFieldComponent implements Component {
       }
 
       // Delegate to TextBuffer for text editing
-      if (this.buffer.handleInput(data)) {
+      if (this.buffer.handleInput(data, this.onRender ?? undefined)) {
         this.saveCurrentBuffer();
         return true;
       }
@@ -155,7 +156,7 @@ export class InputFieldComponent implements Component {
     }
 
     // If user starts typing while on Send, switch back to text mode
-    if (this.buffer.handleInput(data)) {
+    if (this.buffer.handleInput(data, this.onRender ?? undefined)) {
       this.focused = "text";
       this.saveCurrentBuffer();
       return true;

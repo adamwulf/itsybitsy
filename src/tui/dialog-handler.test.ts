@@ -417,23 +417,6 @@ describe("TextBuffer API", () => {
     expect(buf.getText()).toBe("hello");
   });
 
-  test("setLines replaces buffer and makes defensive copy", () => {
-    const buf = new TextBuffer();
-    const arr = ["foo", "bar"];
-    buf.setLines(arr);
-    expect(buf.getLines()).toEqual(["foo", "bar"]);
-    // Mutating original array should not affect buffer
-    arr[0] = "mutated";
-    expect(buf.getLines()).toEqual(["foo", "bar"]);
-  });
-
-  test("setLines then handleInput appends to last line", () => {
-    const buf = new TextBuffer();
-    buf.setLines(["foo", "bar"]);
-    buf.handleInput("!");
-    expect(buf.getLines()).toEqual(["foo", "bar!"]);
-  });
-
   test("clear then handleInput works on fresh buffer", () => {
     const buf = new TextBuffer(["hello"]);
     buf.clear();

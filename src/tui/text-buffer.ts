@@ -38,11 +38,6 @@ export class TextBuffer {
     this.lines = [""];
   }
 
-  /** Replace the buffer contents with the given lines. */
-  setLines(lines: string[]): void {
-    this.lines = [...lines];
-  }
-
   /** Check if the buffer has any content. */
   hasContent(): boolean {
     return this.lines.length > 1 || this.lines[0] !== "";

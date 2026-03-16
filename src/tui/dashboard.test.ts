@@ -1868,8 +1868,8 @@ describe("DashboardComponent right pane and navigation features", () => {
     expect(dashboard.questionsSelectedIndex).toBe(0);
     // j/k navigate agents by default (not questions)
     expect(dashboard.questionsFocused).toBe(false);
-    // Tab to focus questions list
-    dashboard.handleInput("\t");
+    // Focus questions list directly (Tab now cycles panels, not questions)
+    dashboard.setQuestionsFocused(true);
     expect(dashboard.questionsFocused).toBe(true);
     dashboard.handleInput("j"); // move down in questions
     expect(dashboard.questionsSelectedIndex).toBe(1);
@@ -1910,7 +1910,7 @@ describe("DashboardComponent right pane and navigation features", () => {
     dashboard.onUpdate([agent], flatList, questions);
 
     dashboard.handleInput("q");
-    dashboard.handleInput("\t"); // focus questions
+    dashboard.setQuestionsFocused(true); // focus questions (Tab now cycles panels)
     expect(dashboard.questionsSelectedIndex).toBe(0);
     dashboard.handleInput("j"); // try to go past end
     expect(dashboard.questionsSelectedIndex).toBe(0); // clamped
@@ -1943,6 +1943,69 @@ describe("DashboardComponent right pane and navigation features", () => {
     dashboard.handleInput("g"); // go to agent-b (already selected, switches to AGENT LOG)
     expect(dashboard.selectedAgent?.id).toBe("agent-b");
     expect(dashboard.currentMode).toBe("AGENT LOG");
+  });
+});
+
+describe("focus cycling", () => {
+  test("Tab cycles focus forward: agent-tree -> coordinator -> active-agent -> agent-tree", () => {
+    const dashboard = makeDashboard();
+    expect(dashboard.focus).toBe("agent-tree");
+    dashboard.handleInput("\t");
+    expect(dashboard.focus).toBe("coordinator");
+    dashboard.handleInput("\t");
+    expect(dashboard.focus).toBe("active-agent");
+    dashboard.handleInput("\t");
+    expect(dashboard.focus).toBe("agent-tree");
+  });
+
+  test("Shift+Tab cycles focus backward: agent-tree -> active-agent -> coordinator -> agent-tree", () => {
+    const dashboard = makeDashboard();
+    expect(dashboard.focus).toBe("agent-tree");
+    dashboard.handleInput("\x1b[Z"); // Shift+Tab
+    expect(dashboard.focus).toBe("active-agent");
+    dashboard.handleInput("\x1b[Z");
+    expect(dashboard.focus).toBe("coordinator");
+    dashboard.handleInput("\x1b[Z");
+    expect(dashboard.focus).toBe("agent-tree");
+  });
+
+  test("default focus is agent-tree on startup", () => {
+    const dashboard = makeDashboard();
+    expect(dashboard.focus).toBe("agent-tree");
+  });
+
+  test("main title separator uses REVERSE when active-agent is focused", () => {
+    const dashboard = makeDashboard();
+    const agent = makeAgent("agent-a", "/repos/test");
+    const flatList: FlatEntry[] = [makeFlatAgent(agent)];
+    dashboard.onUpdate([agent], flatList, []);
+
+    // Set terminal size for render
+    const origRows = process.stdout.rows;
+    Object.defineProperty(process.stdout, "rows", { value: 30, writable: true, configurable: true });
+    try {
+      // Default focus (agent-tree): main title separator should NOT have REVERSE
+      const linesDefault = dashboard.render(160);
+      // The merged line contains sidebar│main — extract the main part (after sidebar separator │)
+      const titleLineDefault = linesDefault.find(l => stripAnsi(l).includes("agent-a"));
+      expect(titleLineDefault).toBeDefined();
+      // Split at the │ separator to get just the main area portion
+      const mainPartDefault = titleLineDefault!.split("│").slice(1).join("│");
+      expect(mainPartDefault).not.toContain("\x1b[7m"); // REVERSE
+
+      // Tab twice to active-agent
+      dashboard.handleInput("\t"); // coordinator
+      dashboard.handleInput("\t"); // active-agent
+      expect(dashboard.focus).toBe("active-agent");
+
+      const linesFocused = dashboard.render(160);
+      const titleLineFocused = linesFocused.find(l => stripAnsi(l).includes("agent-a"));
+      expect(titleLineFocused).toBeDefined();
+      const mainPartFocused = titleLineFocused!.split("│").slice(1).join("│");
+      expect(mainPartFocused).toContain("\x1b[7m"); // REVERSE
+    } finally {
+      Object.defineProperty(process.stdout, "rows", { value: origRows, writable: true, configurable: true });
+    }
   });
 });
 

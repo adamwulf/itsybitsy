@@ -49,14 +49,18 @@ import {
 } from "./pane-manager";
 import type { PaneMode, DenialFilter } from "./pane-manager";
 import * as agentActions from "./agent-actions";
-import { RESET, BOLD, DIM, RED, GREEN, YELLOW, DIM_GRAY } from "./colors";
+import { RESET, BOLD, DIM, RED, GREEN, YELLOW, DIM_GRAY, REVERSE } from "./colors";
 import { MIN_LEFT_WIDTH, MAX_LEFT_WIDTH } from "./split-pane";
+import { FocusManager } from "./focus";
+import type { FocusTarget } from "./focus";
 
 // Re-export for test compatibility
 export { AgentTreeComponent, formatAgentRow } from "./agent-tree";
 export { RightPaneComponent, colorizeDiff, colorizeLog } from "./pane-manager";
 export { SidebarComponent, SIDEBAR_WIDTH } from "./sidebar";
 export { InfoPanelComponent } from "./info-panel";
+export { FocusManager } from "./focus";
+export type { FocusTarget } from "./focus";
 
 const DIALOG_WIDTH = 60;
 const DEFAULT_LEFT_WIDTH = 80;
@@ -412,10 +416,16 @@ export class DashboardComponent implements Component {
   private lastSentNotice: string | null = null;
   private usageTimer: ReturnType<typeof setInterval> | null = null;
   pendingSelectNewestInRepo: string | null = null;
+  private focusManager = new FocusManager();
   private _questionsFocused = false;
   /** Cache of which agents have an attached tmux client */
   private _clientAttached: Map<string, boolean> = new Map();
   private clientCheckTimer: ReturnType<typeof setInterval> | null = null;
+
+  /** Read-only access to current focus target (for testing) */
+  get focus(): FocusTarget {
+    return this.focusManager.current();
+  }
 
   /** Read-only access to whether questions list has focus (for testing) */
   get questionsFocused(): boolean {
@@ -824,14 +834,16 @@ export class DashboardComponent implements Component {
     // Dialog input takes priority
     if (this._dialog && handleDialogInput(this, data)) return;
 
-    // Tab / Shift-Tab: toggle focus between tree and questions list
-    if (data === "\t" || data === "\x1b[Z") {
-      if (this.rightPane.mode === "QUESTIONS" && this.rightPane.filteredQuestions.length > 0) {
-        this.setQuestionsFocused(!this._questionsFocused);
-        this.rightPane.updateContent();
-        this.tui?.requestRender();
-        return;
-      }
+    // Tab / Shift-Tab: cycle focus between panels
+    if (data === "\t") {
+      this.focusManager.cycle(1);
+      this.tui?.requestRender();
+      return;
+    }
+    if (data === "\x1b[Z") {
+      this.focusManager.cycle(-1);
+      this.tui?.requestRender();
+      return;
     }
 
     // Navigation
@@ -1033,6 +1045,7 @@ export class DashboardComponent implements Component {
     }
 
     // Render sidebar and merge with main area
+    this.sidebar.focusTarget = this.focusManager.current();
     const sidebarLines = this.sidebar.render(SIDEBAR_WIDTH);
     lines.push(...mergeSidebarAndMain(sidebarLines, mainLines, availableHeight + 1, mainWidth));
 
@@ -1058,6 +1071,11 @@ export class DashboardComponent implements Component {
 
     const leftPad = 3;
     const rightPad = 3;
+    const focused = this.focusManager.current() === "active-agent";
+
+    // Color helpers: when active-agent is focused, use reverse video (SPEC §13.3)
+    const dashColor = focused ? `${REVERSE}${DIM_GRAY}` : DIM_GRAY;
+    const titleStyle = focused ? `${RESET}${REVERSE}${BOLD}` : BOLD;
 
     if (!isTreeMode && !isFullWidth && leftTitle) {
       // Show junction at inner split position
@@ -1066,16 +1084,16 @@ export class DashboardComponent implements Component {
       const rightHalfDashes = Math.max(1, mainWidth - splitAt - rightTitle.length - rightPad);
       const leftDashStr = "─".repeat(Math.max(0, leftHalfDashes - 1)) + "┬";
       const sep =
-        `${DIM_GRAY}${"─".repeat(leftPad)}${RESET}${BOLD}${leftTitle}${RESET}` +
-        `${DIM_GRAY}${leftDashStr}${RESET}` +
-        `${BOLD}${rightTitle}${RESET}` +
-        `${DIM_GRAY}${"─".repeat(rightHalfDashes)}${"─".repeat(rightPad)}${RESET}`;
+        `${dashColor}${"─".repeat(leftPad)}${RESET}${titleStyle}${leftTitle}${RESET}` +
+        `${dashColor}${leftDashStr}${RESET}` +
+        `${titleStyle}${rightTitle}${RESET}` +
+        `${dashColor}${"─".repeat(rightHalfDashes)}${"─".repeat(rightPad)}${RESET}`;
       return truncateToWidth(sep, mainWidth, "");
     }
 
     const fixedChars = leftPad + leftTitle.length + rightPad + rightTitle.length;
     const fillCount = Math.max(1, mainWidth - fixedChars);
-    const sep = `${DIM_GRAY}${"─".repeat(leftPad)}${RESET}${BOLD}${leftTitle}${RESET}${DIM_GRAY}${"─".repeat(fillCount)}${RESET}${BOLD}${rightTitle}${RESET}${DIM_GRAY}${"─".repeat(rightPad)}${RESET}`;
+    const sep = `${dashColor}${"─".repeat(leftPad)}${RESET}${titleStyle}${leftTitle}${RESET}${dashColor}${"─".repeat(fillCount)}${RESET}${titleStyle}${rightTitle}${RESET}${dashColor}${"─".repeat(rightPad)}${RESET}`;
     return truncateToWidth(sep, mainWidth, "");
   }
 

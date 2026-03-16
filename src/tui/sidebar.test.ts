@@ -5,6 +5,7 @@ import { InfoPanelComponent } from "./info-panel";
 import { makeAgent, makeFlatAgent, makeFlatRepoHeader } from "../test-utils";
 import { stripAnsi } from "../parse-state";
 import type { FlatEntry } from "../agents";
+import { REVERSE, DIM } from "./colors";
 
 function makeSidebar(): SidebarComponent {
   const tree = new AgentTreeComponent();
@@ -125,5 +126,61 @@ describe("SidebarComponent", () => {
     const text = lines.map(stripAnsi).join("\n");
     expect(text).toContain("opus");
     expect(text).toContain("doing work");
+  });
+
+  test("Agents separator is focused when focusTarget is agent-tree", () => {
+    const sidebar = makeSidebar();
+    sidebar.displayHeight = 25;
+    sidebar.focusTarget = "agent-tree";
+    sidebar.agentTree.setFlatList([]);
+
+    const lines = sidebar.render(SIDEBAR_WIDTH);
+    // First line is the Agents separator — should contain REVERSE (focused)
+    expect(lines[0]).toContain(REVERSE);
+  });
+
+  test("Agents separator is unfocused when focusTarget is coordinator", () => {
+    const sidebar = makeSidebar();
+    sidebar.displayHeight = 25;
+    sidebar.focusTarget = "coordinator";
+    sidebar.agentTree.setFlatList([]);
+
+    const lines = sidebar.render(SIDEBAR_WIDTH);
+    // First line is the Agents separator — should NOT contain REVERSE
+    expect(lines[0]).not.toContain(REVERSE);
+    expect(lines[0]).toContain(DIM);
+  });
+
+  test("Coordinator separator is focused when focusTarget is coordinator", () => {
+    const sidebar = makeSidebar();
+    sidebar.displayHeight = 25;
+    sidebar.focusTarget = "coordinator";
+    sidebar.agentTree.setFlatList([]);
+
+    const lines = sidebar.render(SIDEBAR_WIDTH);
+    const text = lines.join("\n");
+    // Find the Coordinator separator line
+    const coordLine = lines.find(l => stripAnsi(l).includes("Coordinator"));
+    expect(coordLine).toBeDefined();
+    expect(coordLine!).toContain(REVERSE);
+  });
+
+  test("Info separator is never focused regardless of focusTarget", () => {
+    for (const target of ["agent-tree", "coordinator", "active-agent"] as const) {
+      const sidebar = makeSidebar();
+      sidebar.displayHeight = 25;
+      sidebar.focusTarget = target;
+      sidebar.agentTree.setFlatList([]);
+
+      const lines = sidebar.render(SIDEBAR_WIDTH);
+      const infoLine = lines.find(l => stripAnsi(l).includes("Info"));
+      expect(infoLine).toBeDefined();
+      expect(infoLine!).not.toContain(REVERSE);
+    }
+  });
+
+  test("focusTarget defaults to agent-tree", () => {
+    const sidebar = makeSidebar();
+    expect(sidebar.focusTarget).toBe("agent-tree");
   });
 });

@@ -8,9 +8,8 @@ import { wrapSingleLine } from "./wrap";
 import { buildFolderItems } from "./folder-browser";
 import type { FolderItem } from "./folder-browser";
 import { RESET, BOLD, DIM, REVERSE, GREEN, DIM_GRAY } from "./colors";
-import { readClipboard, isPasteData, extractBracketedPaste } from "./clipboard";
+import { resolvePasteText } from "./clipboard";
 import { TextBuffer, deleteWord } from "./text-buffer";
-export { TextBuffer, deleteWord };
 
 export const TEXTAREA_VISIBLE_HEIGHT = 5;
 export const FOLDER_BROWSER_HEIGHT = 15;
@@ -112,43 +111,6 @@ export function fuzzyFilterIndices(items: string[], query: string): number[] {
   const indexed: IndexedItem[] = items.map((text, index) => ({ text, index }));
   const filtered = fuzzyFilter(indexed, query, (item) => item.text);
   return filtered.map((item) => item.index);
-}
-
-/**
- * Shared text-editing handler for multiline textarea-like inputs.
- * Delegates to a temporary TextBuffer to mutate the lines array in place.
- * Retained for backward compatibility with tests that import it from this module.
- */
-export function handleTextEdit(data: string, lines: string[], ctx?: DialogCtx | null): boolean {
-  const buf = new TextBuffer(lines);
-  const handled = buf.handleInput(data, () => ctx?.tui?.requestRender());
-  if (handled) {
-    // Sync TextBuffer state back into the original lines array
-    const newLines = buf.getLines();
-    lines.length = 0;
-    for (const l of newLines) lines.push(l);
-  }
-  return handled;
-}
-
-/** Resolve paste data from input — kept as private helper for non-textarea paste handling. */
-function resolvePasteText(
-  data: string,
-  onAsyncPaste: (text: string) => void,
-): string | null {
-  // Ctrl+V (0x16) → async clipboard read
-  if (data === "\x16") {
-    readClipboard().then((text) => {
-      if (text) onAsyncPaste(text);
-    });
-    return null;
-  }
-  // Bracketed paste sequence
-  const bracketed = extractBracketedPaste(data);
-  if (bracketed !== null) return bracketed;
-  // Multi-character paste (printable text, not an escape sequence)
-  if (isPasteData(data)) return data;
-  return null;
 }
 
 /** Minimal context interface for dialog input handling */
@@ -719,12 +681,11 @@ function handlePermissionsEditorDialog(
 
 type DialogContent = { title: string; contentLines: string[] };
 
-/** Render the textarea portion shared by textarea and new-agent-form dialogs.
- *  Accepts either a TextBuffer or a plain string[] for backward compatibility. */
+/** Render the textarea portion shared by textarea and new-agent-form dialogs. */
 export function renderTextareaBlock(
-  linesOrBuffer: TextBuffer | string[], innerWidth: number, showCursor: boolean
+  buffer: TextBuffer, innerWidth: number, showCursor: boolean
 ): { outputLines: string[]; hasScrollIndicator: boolean } {
-  const lines = linesOrBuffer instanceof TextBuffer ? [...linesOrBuffer.getLinesRef()] : linesOrBuffer;
+  const lines = [...buffer.getLinesRef()];
   const visibleHeight = TEXTAREA_VISIBLE_HEIGHT;
   const textWidth = innerWidth - 2;
   const visualLines = wrapTextareaLines(lines, textWidth);

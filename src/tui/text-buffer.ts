@@ -9,34 +9,11 @@
  */
 
 import { matchesKey, Key } from "@mariozechner/pi-tui";
-import { readClipboard, isPasteData, extractBracketedPaste, insertTextIntoLines } from "./clipboard";
+import { resolvePasteText, insertTextIntoLines } from "./clipboard";
 
 /** Delete the last word (or trailing whitespace) from a string. */
 export function deleteWord(s: string): string {
   return s.replace(/(?:\s+|\S+)\s*$/, "");
-}
-
-/** Resolve paste data from input.
- *  Returns the text to insert synchronously (for bracketed paste / multi-char paste),
- *  or null if the data is a Ctrl+V that triggers an async clipboard read.
- *  For Ctrl+V, calls the callback asynchronously with the clipboard text. */
-function resolvePasteText(
-  data: string,
-  onAsyncPaste: (text: string) => void,
-): string | null {
-  // Ctrl+V (0x16) → async clipboard read
-  if (data === "\x16") {
-    readClipboard().then((text) => {
-      if (text) onAsyncPaste(text);
-    });
-    return null;
-  }
-  // Bracketed paste sequence
-  const bracketed = extractBracketedPaste(data);
-  if (bracketed !== null) return bracketed;
-  // Multi-character paste (printable text, not an escape sequence)
-  if (isPasteData(data)) return data;
-  return null;
 }
 
 export class TextBuffer {

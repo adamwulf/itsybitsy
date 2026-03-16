@@ -2,8 +2,8 @@ import { test, expect, describe } from "bun:test";
 import type { DialogState, DialogCtx } from "./dialog-handler";
 import {
   handleDialogInput, fuzzyFilterIndices, wrapTextareaLines,
-  deleteWord, handleTextEdit,
 } from "./dialog-handler";
+import { TextBuffer, deleteWord } from "./text-buffer";
 import { assertDialog } from "./test-helpers";
 
 /** Build a mock DialogCtx */
@@ -290,43 +290,43 @@ describe("deleteWord", () => {
   });
 });
 
-// ─── handleTextEdit ─────────────────────────────────────
+// ─── TextBuffer.handleInput ─────────────────────────────
 
-describe("handleTextEdit", () => {
+describe("TextBuffer.handleInput", () => {
   test("Enter adds new line", () => {
-    const lines = ["hello"];
-    const result = handleTextEdit("\r", lines);
+    const buf = new TextBuffer(["hello"]);
+    const result = buf.handleInput("\r");
     expect(result).toBe(true);
-    expect(lines).toEqual(["hello", ""]);
+    expect(buf.getLines()).toEqual(["hello", ""]);
   });
 
   test("backspace removes last char", () => {
-    const lines = ["hello"];
-    handleTextEdit("\x7f", lines);
-    expect(lines).toEqual(["hell"]);
+    const buf = new TextBuffer(["hello"]);
+    buf.handleInput("\x7f");
+    expect(buf.getLines()).toEqual(["hell"]);
   });
 
   test("backspace on empty line joins with previous", () => {
-    const lines = ["hello", ""];
-    handleTextEdit("\x7f", lines);
-    expect(lines).toEqual(["hello"]);
+    const buf = new TextBuffer(["hello", ""]);
+    buf.handleInput("\x7f");
+    expect(buf.getLines()).toEqual(["hello"]);
   });
 
   test("alt-backspace deletes word", () => {
-    const lines = ["hello world"];
-    handleTextEdit("\x1b\x7f", lines); // alt+backspace
-    expect(lines).toEqual(["hello "]);
+    const buf = new TextBuffer(["hello world"]);
+    buf.handleInput("\x1b\x7f"); // alt+backspace
+    expect(buf.getLines()).toEqual(["hello "]);
   });
 
   test("printable char appends", () => {
-    const lines = ["hi"];
-    handleTextEdit("!", lines);
-    expect(lines).toEqual(["hi!"]);
+    const buf = new TextBuffer(["hi"]);
+    buf.handleInput("!");
+    expect(buf.getLines()).toEqual(["hi!"]);
   });
 
   test("returns false for unhandled input", () => {
-    const lines = ["hi"];
-    const result = handleTextEdit("\x1b[A", lines); // up arrow
+    const buf = new TextBuffer(["hi"]);
+    const result = buf.handleInput("\x1b[A"); // up arrow
     expect(result).toBe(false);
   });
 });
@@ -389,29 +389,29 @@ describe("paste support in input dialog", () => {
   });
 });
 
-describe("paste support in handleTextEdit", () => {
+describe("paste support in TextBuffer", () => {
   test("multi-char paste inserts into lines", () => {
-    const lines = ["hello"];
-    const result = handleTextEdit("pasted text", lines);
+    const buf = new TextBuffer(["hello"]);
+    const result = buf.handleInput("pasted text");
     expect(result).toBe(true);
-    expect(lines).toEqual(["hellopasted text"]);
+    expect(buf.getLines()).toEqual(["hellopasted text"]);
   });
 
   test("multiline paste splits across lines", () => {
-    const lines = ["start"];
-    handleTextEdit("line1\nline2", lines);
-    expect(lines).toEqual(["startline1", "line2"]);
+    const buf = new TextBuffer(["start"]);
+    buf.handleInput("line1\nline2");
+    expect(buf.getLines()).toEqual(["startline1", "line2"]);
   });
 
   test("bracketed paste is handled", () => {
-    const lines = [""];
-    handleTextEdit("\x1b[200~hello world\x1b[201~", lines);
-    expect(lines).toEqual(["hello world"]);
+    const buf = new TextBuffer([""]);
+    buf.handleInput("\x1b[200~hello world\x1b[201~");
+    expect(buf.getLines()).toEqual(["hello world"]);
   });
 
   test("Ctrl+V is consumed (returns true)", () => {
-    const lines = [""];
-    const result = handleTextEdit("\x16", lines);
+    const buf = new TextBuffer([""]);
+    const result = buf.handleInput("\x16");
     expect(result).toBe(true);
   });
 });

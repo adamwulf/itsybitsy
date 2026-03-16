@@ -2,7 +2,7 @@
  * Multi-line input field component for message composition.
  *
  * Renders: top separator, content lines with cursor, bottom separator with [Send] button.
- * Uses handleTextEdit() for text editing (Enter = new line, Alt+Backspace = word delete, paste support).
+ * Uses TextBuffer for text editing (Enter = new line, Alt+Backspace = word delete, paste support).
  * Tab moves focus to [Send] button; Enter on [Send] submits. Escape clears and defocuses.
  * Per-agent input buffers: each agent's typed text is preserved when switching agents.
  * See SPEC.md §13.4.

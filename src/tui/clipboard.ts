@@ -39,6 +39,29 @@ export function extractBracketedPaste(data: string): string | null {
   return data.slice(startMarker.length);
 }
 
+/** Resolve paste data from input.
+ *  Returns the text to insert synchronously (for bracketed paste / multi-char paste),
+ *  or null if the data is a Ctrl+V that triggers an async clipboard read.
+ *  For Ctrl+V, calls the callback asynchronously with the clipboard text. */
+export function resolvePasteText(
+  data: string,
+  onAsyncPaste: (text: string) => void,
+): string | null {
+  // Ctrl+V (0x16) → async clipboard read
+  if (data === "\x16") {
+    readClipboard().then((text) => {
+      if (text) onAsyncPaste(text);
+    });
+    return null;
+  }
+  // Bracketed paste sequence
+  const bracketed = extractBracketedPaste(data);
+  if (bracketed !== null) return bracketed;
+  // Multi-character paste (printable text, not an escape sequence)
+  if (isPasteData(data)) return data;
+  return null;
+}
+
 /** Insert pasted text into a textarea-style lines array.
  *  Appends to the last line, then splits on newlines for multiline paste. */
 export function insertTextIntoLines(lines: string[], text: string): void {

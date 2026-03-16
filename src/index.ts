@@ -132,9 +132,12 @@ async function main() {
       const managerFilter = managerIdx !== -1 ? args[managerIdx + 1] : null;
       const jsonOutput = args.includes("--json");
 
+      const verbose = args.includes("--verbose") || args.includes("-v");
       const { agents, errors } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })));
-      for (const err of errors) {
-        console.error(`Warning: ${err.error}`);
+      if (verbose) {
+        for (const err of errors) {
+          console.error(`Warning: ${err.error}`);
+        }
       }
       await detectAgentStates(agents);
       const roots = buildAgentTree(agents);
@@ -280,9 +283,12 @@ async function main() {
         console.log("No repos registered. Use 'ib add <path>' to add one.");
         break;
       }
+      const verbose = args.includes("--verbose") || args.includes("-v");
       const { agents, errors } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })));
-      for (const err of errors) {
-        console.error(`Warning: ${err.error}`);
+      if (verbose) {
+        for (const err of errors) {
+          console.error(`Warning: ${err.error}`);
+        }
       }
       await detectAgentStates(agents);
       const roots = buildAgentTree(agents);

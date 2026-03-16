@@ -99,7 +99,7 @@ export class TextBuffer {
       insertTextIntoLines(this.lines, pasteText);
       return true;
     }
-    // Ctrl+V returns null from resolvePasteText but triggers async paste
+    // Ctrl+V: resolvePasteText already dispatched async clipboard read above; consume the input
     if (data === "\x16") return true;
 
     if (data.length === 1 && data >= " ") {

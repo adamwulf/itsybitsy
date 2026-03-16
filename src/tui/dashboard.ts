@@ -1018,11 +1018,15 @@ export class DashboardComponent implements Component {
             this.sidebar.heightOffsets.coordinator -= delta;
           }
         } else {
-          // Shrinking tree: give back to info (or coordinator if info offset is already at base)
+          // Shrinking tree: give back to info, or coordinator if info base is 0
           const effectiveTree = Math.max(1, base.treeHeight + this.sidebar.heightOffsets.tree);
           if (effectiveTree > 1) {
             this.sidebar.heightOffsets.tree += delta;
-            this.sidebar.heightOffsets.info -= delta;
+            if (base.infoHeight > 0) {
+              this.sidebar.heightOffsets.info -= delta;
+            } else {
+              this.sidebar.heightOffsets.coordinator -= delta;
+            }
           }
         }
         this.tui?.requestRender();

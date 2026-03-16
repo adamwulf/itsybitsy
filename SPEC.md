@@ -1183,11 +1183,11 @@ When a panel has focus, `[` and `]` decrease/increase its **width**, and `Shift+
 
 | Focused panel | Steals from |
 |---------------|-------------|
-| Sidebar (any sidebar panel focused) | Splits equally between agent pane and right pane |
+| Sidebar (any sidebar panel focused) | Main area shrinks (split pane position is fixed, so the right pane absorbs the change) |
 | Agent pane (middle) | Right pane only |
 | Right pane | Agent pane only |
 
-Width changes apply in increments (e.g., 2 columns per keypress). When the sidebar grows by N columns, each of the other two panes shrinks by N/2 columns (rounded).
+Width changes apply in increments (e.g., 5 columns per keypress). Sidebar width is bounded between 30 and 120 columns.
 
 **Height resizing (`{` / `}`):**
 

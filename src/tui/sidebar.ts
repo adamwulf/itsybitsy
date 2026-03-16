@@ -93,6 +93,26 @@ export class SidebarComponent implements Component {
     let infoHeight = Math.max(0, base.infoHeight + this.heightOffsets.info);
     let coordinatorHeight = Math.max(0, base.coordinatorHeight + this.heightOffsets.coordinator);
 
+    // Clamp so total content + headers fits within displayHeight.
+    // Headers: 1 (Agents) + 1 (Info, if shown) + 1 (Coordinator, if shown)
+    const headerCount = 1 + (infoHeight > 0 ? 1 : 0) + (coordinatorHeight > 0 ? 1 : 0);
+    const budget = this.displayHeight - headerCount;
+    if (budget > 0 && treeHeight + infoHeight + coordinatorHeight > budget) {
+      // Shrink from bottom up: coordinator first, then info, then tree
+      const excess = treeHeight + infoHeight + coordinatorHeight - budget;
+      const coordShrink = Math.min(coordinatorHeight, excess);
+      coordinatorHeight -= coordShrink;
+      const remaining = excess - coordShrink;
+      if (remaining > 0) {
+        const infoShrink = Math.min(infoHeight, remaining);
+        infoHeight -= infoShrink;
+        const leftover = remaining - infoShrink;
+        if (leftover > 0) {
+          treeHeight = Math.max(1, treeHeight - leftover);
+        }
+      }
+    }
+
     // Agents section header + tree
     lines.push(buildFocusSeparator("Agents", w, this.focusTarget === "agent-tree"));
     this.agentTree.maxHeight = treeHeight;

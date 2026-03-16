@@ -55,6 +55,8 @@ import { FocusManager } from "./focus";
 import type { FocusTarget } from "./focus";
 import { loadLayout, saveLayoutDebounced, cancelPendingSave } from "./layout";
 import type { LayoutState } from "./layout";
+import { InputFieldComponent } from "./input-field";
+import { sendMessage } from "../ib-commands";
 
 // Re-export for test compatibility
 export { AgentTreeComponent, formatAgentRow } from "./agent-tree";
@@ -63,6 +65,7 @@ export { SidebarComponent, SIDEBAR_WIDTH } from "./sidebar";
 export { InfoPanelComponent } from "./info-panel";
 export { FocusManager } from "./focus";
 export type { FocusTarget } from "./focus";
+export { InputFieldComponent } from "./input-field";
 
 const DIALOG_WIDTH = 60;
 const DEFAULT_LEFT_WIDTH = 80;
@@ -421,6 +424,7 @@ export class DashboardComponent implements Component {
   private usageTimer: ReturnType<typeof setInterval> | null = null;
   pendingSelectNewestInRepo: string | null = null;
   private focusManager = new FocusManager();
+  inputField: InputFieldComponent;
   /** Dynamic sidebar width — adjustable via [ ] when sidebar panel is focused */
   sidebarWidth = SIDEBAR_WIDTH;
   private _questionsFocused = false;
@@ -494,6 +498,20 @@ export class DashboardComponent implements Component {
 
     this.sidebar = new SidebarComponent(this.agentTree, this.infoPanel);
     this.splitPane = new SplitPane(this.tmuxPane, this.rightPane, DEFAULT_LEFT_WIDTH, `${DIM_GRAY}│${RESET}`);
+    this.inputField = new InputFieldComponent();
+    this.inputField.onSubmit = (text: string) => {
+      const agent = this.agentTree.selectedAgent;
+      if (!agent || !text.trim()) return;
+      this.executeAndRefresh(async () => {
+        const result = await sendMessage(agent, text.trim(), { cwd: "/" });
+        this.setNotice(result.ok ? `Sent to ${agent.id}` : `Send failed: ${result.stderr || result.stdout}`);
+      });
+    };
+    this.inputField.onCancel = () => {
+      this.inputField.clear();
+      this.focusManager.setFocus("agent-tree");
+      this.tui?.requestRender();
+    };
 
     this.tmuxPoller = new TmuxPoller({
       onOutput: (raw, _stripped) => {
@@ -879,14 +897,27 @@ export class DashboardComponent implements Component {
 
     // Tab / Shift-Tab: cycle focus between panels
     if (data === "\t" || matchesKey(data, Key.tab)) {
+      if (this.focusManager.current() === "active-agent") this.inputField.clear();
       this.focusManager.cycle(1);
       this.tui?.requestRender();
       return;
     }
     if (data === "\x1b[Z" || matchesKey(data, Key.shift("tab"))) {
+      if (this.focusManager.current() === "active-agent") this.inputField.clear();
       this.focusManager.cycle(-1);
       this.tui?.requestRender();
       return;
+    }
+
+    // When active-agent panel is focused, route input to the input field.
+    // The input field consumes printable chars, backspace, Ctrl-A/E/U, Enter, Escape.
+    // It returns false for Tab/Shift-Tab (handled above) and unrecognized sequences.
+    // All other dashboard keybindings are suppressed (SPEC §13.5).
+    if (this.focusManager.current() === "active-agent" && this.agentTree.selectedAgent) {
+      if (this.inputField.handleInput(data)) {
+        this.tui?.requestRender();
+      }
+      return; // Suppress all dashboard keybindings when active-agent is focused
     }
 
     // Navigation
@@ -1159,10 +1190,46 @@ export class DashboardComponent implements Component {
       mainLines = [mainTitleSep, ...this.agentTree.render(mainWidth)];
     } else {
       // Normal/full-width mode: split-pane(tmux | right-pane)
-      this.tmuxPane.displayHeight = availableHeight;
+      const showInputField = this.focusManager.current() === "active-agent"
+        && this.agentTree.selectedAgent != null
+        && !isFullWidth;
+      this.tmuxPane.displayHeight = showInputField ? availableHeight - 3 : availableHeight;
       this.rightPane.displayHeight = availableHeight;
       this.splitPane.fullWidth = isFullWidth;
-      mainLines = [mainTitleSep, ...this.splitPane.render(mainWidth)];
+      const splitLines = this.splitPane.render(mainWidth);
+
+      if (showInputField) {
+        // Replace the last 3 lines' left portion with input field content.
+        // The tmux pane rendered 3 fewer lines, so the split pane padded the
+        // left side with empty strings for those positions. We rebuild those
+        // lines with input field content on the left + right pane content on
+        // the right.
+        const sepChar = `${DIM_GRAY}│${RESET}`;
+        const leftW = Math.min(this.splitPane.getLeftWidth(), mainWidth - 2);
+        const rw = mainWidth - leftW - 1;
+        const inputLines = this.inputField.render(leftW);
+        // Re-render right pane at the correct width to get the last 3 lines
+        const rightLines = this.rightPane.render(rw);
+
+        for (let i = 0; i < 3; i++) {
+          const splitIdx = splitLines.length - 3 + i;
+          if (splitIdx < 0) continue;
+          const inputLine = inputLines[i] ?? "";
+          const rightIdx = availableHeight - 3 + i;
+          const rightLine = rightIdx >= 0 && rightIdx < rightLines.length
+            ? truncateToWidth(rightLines[rightIdx]!, rw, "")
+            : "";
+          // Pad input field line to left width
+          const inputVW = visibleWidth(inputLine);
+          const needsReset = inputLine.includes("\x1b[");
+          const leftPadded = inputVW >= leftW
+            ? truncateToWidth(inputLine, leftW, "")
+            : inputLine + (needsReset ? RESET : "") + " ".repeat(leftW - inputVW);
+          splitLines[splitIdx] = leftPadded + sepChar + rightLine;
+        }
+      }
+
+      mainLines = [mainTitleSep, ...splitLines];
     }
 
     // Render sidebar and merge with main area

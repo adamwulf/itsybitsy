@@ -27,6 +27,7 @@ function makePaneCtx(overrides?: {
     agentTree: { selectedAgent: overrides?.agent ?? null },
     splitPane: { fullWidth: false },
     modeIndex: 0,
+    savedModeIndex: 0,
     currentAgentId: overrides?.agent?.id ?? null,
     tui: { requestRender: () => renderCalls.push(1) },
     setQuestionsFocused: () => {},

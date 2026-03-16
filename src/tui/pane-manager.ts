@@ -15,12 +15,12 @@ import { RESET, BOLD, DIM, RED, GREEN, CYAN, REVERSE, DIM_GRAY } from "./colors"
 
 // Right pane modes
 export const PANE_MODES = [
-  "AGENT LOG", "INITIAL PROMPT", "DENIALS", "TREE", "ERRORS", "DIFF", "QUESTIONS", "STATUS",
+  "AGENT LOG", "INITIAL PROMPT", "DENIALS", "TREE", "ERRORS", "DIFF", "QUESTIONS", "STATUS", "REPO",
 ] as const;
 export type PaneMode = (typeof PANE_MODES)[number];
 
-export const FULL_WIDTH_MODES: Set<PaneMode> = new Set(["DENIALS", "ERRORS", "DIFF", "QUESTIONS"]);
-export const TOP_ANCHORED_MODES: Set<PaneMode> = new Set(["DIFF", "ERRORS", "STATUS", "QUESTIONS"]);
+export const FULL_WIDTH_MODES: Set<PaneMode> = new Set(["DENIALS", "ERRORS", "DIFF", "QUESTIONS", "REPO"]);
+export const TOP_ANCHORED_MODES: Set<PaneMode> = new Set(["DIFF", "ERRORS", "STATUS", "QUESTIONS", "REPO"]);
 const AGENT_SPECIFIC_MODES: Set<PaneMode> = new Set(["AGENT LOG", "INITIAL PROMPT", "DENIALS", "DIFF", "STATUS"]);
 
 // Denials time filter levels
@@ -227,6 +227,29 @@ export class RightPaneComponent implements Component {
         else if (this.statusContent) { this.content = this.statusContent; }
         else { this.content = [`${DIM}Loading status...${RESET}`]; }
         break;
+      case "REPO": {
+        const repoName = this.selectedRepoHeader;
+        if (!repoName) { this.content = [`${DIM}No repo selected${RESET}`]; break; }
+        const repoAgents = this.allAgents.filter(
+          (f): f is Extract<FlatEntry, { kind: "agent" }> => f.kind === "agent" && f.agent.repoName === repoName
+        );
+        const treeStateColWidth = computeStateColWidth(this.allAgents);
+        this.content = [`${BOLD}${repoName}${RESET}`, ""];
+        if (repoAgents.length === 0) {
+          this.content.push(`${DIM}No agents${RESET}`);
+        } else {
+          for (const { agent, connector } of repoAgents) {
+            const icon = agent.meta.worker ? "⚙" : "◆";
+            const state = displayState(agent.state);
+            const stateColor = getStateColors()[state] ?? getStateColors().unknown;
+            const promptText = (agent.meta.summary ?? agent.meta.prompt).replace(/\n/g, " ");
+            const coloredState = `${stateColor}${state}${RESET}${" ".repeat(Math.max(0, treeStateColWidth - state.length))}`;
+            const paddedAge = agent.age.padStart(AGE_COL_WIDTH);
+            this.content.push(`${connector}${icon} ${agent.id}  ${coloredState}  ${paddedAge}  ${agent.meta.model}  ${promptText}`);
+          }
+        }
+        break;
+      }
       case "QUESTIONS": {
         const filtered = this.filteredQuestions;
         if (filtered.length === 0) {
@@ -313,6 +336,7 @@ export interface PaneCtx {
   agentTree: { selectedAgent: Agent | null };
   splitPane: { fullWidth: boolean };
   modeIndex: number;
+  savedModeIndex: number;
   currentAgentId: string | null;
   tui: { requestRender(): void } | null;
   setQuestionsFocused(value: boolean): void;
@@ -326,6 +350,7 @@ export function cyclePaneMode(ctx: PaneCtx, delta: number) {
   for (let i = 0; i < maxSteps; i++) {
     const candidate = PANE_MODES[nextIndex]!;
     const skip =
+      candidate === "REPO" ||
       (candidate === "ERRORS" && ctx.rightPane.errors.length === 0 && ctx.rightPane.orphanedTmuxSessions.length === 0) ||
       (candidate === "QUESTIONS" && ctx.rightPane.questions.length === 0);
     if (!skip || nextIndex === startIndex) break;

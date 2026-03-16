@@ -78,10 +78,10 @@ export class InfoPanelComponent implements Component {
     const repoPath = this.selectedRepoPath ?? this.selectedRepoHeader ?? "";
     lines.push(truncateToWidth(`${DIM}Path:${RESET} ${repoPath}`, width, ""));
 
-    // Count agents and state breakdown
+    // Count active (non-archived) agents and state breakdown
     const agentsInRepo = this.allAgents.filter(
       (f): f is Extract<FlatEntry, { kind: "agent" }> =>
-        f.kind === "agent" && f.agent.repoName === this.selectedRepoHeader
+        f.kind === "agent" && f.agent.repoName === this.selectedRepoHeader && !f.agent.archived
     );
     lines.push(truncateToWidth(`${DIM}Agents:${RESET} ${agentsInRepo.length}`, width, ""));
 

@@ -18,9 +18,9 @@ describe("computeSidebarHeights", () => {
     expect(treeHeight).toBe(5);
     // afterTree = 30 - 5 = 25
     // coordinator = max(5, floor(25*0.4)) = max(5, 10) = 10
-    // info = 25 - 10 - 2(separators) = 13
+    // info = 25 - 10 - 3(section headers: Agents, Info, Coordinator) = 12
     expect(coordinatorHeight).toBe(10);
-    expect(infoHeight).toBe(13);
+    expect(infoHeight).toBe(12);
   });
 
   test("caps tree at MAX_TREE_HEIGHT (7)", () => {
@@ -47,7 +47,7 @@ describe("computeSidebarHeights", () => {
 });
 
 describe("SidebarComponent", () => {
-  test("renders three sections with separators", () => {
+  test("renders three sections with headers", () => {
     const sidebar = makeSidebar();
     sidebar.displayHeight = 25;
 
@@ -59,6 +59,7 @@ describe("SidebarComponent", () => {
     expect(lines.length).toBe(25);
 
     const text = lines.map(stripAnsi).join("\n");
+    expect(text).toContain("Agents");
     expect(text).toContain("Info");
     expect(text).toContain("Coordinator");
   });

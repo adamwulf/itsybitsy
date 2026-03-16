@@ -1015,14 +1015,19 @@ export class DashboardComponent implements Component {
     lines.push(truncateToWidth(`${DIM_GRAY}${"─".repeat(width)}${RESET}`, width, ""));
 
     // Compute available height for the main content area.
-    // Chrome lines: header(1) + top separator(1) + bottom separator(1) + status bar(2) = 5.
+    // Chrome lines: header(1) + top separator(1) + main title separator(1) +
+    //               bottom separator(1) + status bar(2) = 6.
     // SPEC §11.2 formula uses 4 (header + separator + status_bar) but we add a top separator
-    // between the header and the sidebar/main area for visual clarity.
-    const chromeLines = 5;
+    // between the header and the sidebar/main area, plus a titled separator at the top of the
+    // main area showing agent-id and pane-mode.
+    const chromeLines = 6;
     const availableHeight = Math.max(5, terminalRows - chromeLines);
 
     const mainWidth = width - SIDEBAR_WIDTH - 1; // 1 for sidebar separator
-    this.sidebar.displayHeight = availableHeight;
+    this.sidebar.displayHeight = availableHeight + 1; // sidebar gets the title separator row too
+
+    // Build main area title separator (agent-id left, pane-mode right)
+    const mainTitleSep = this.buildMainTitleSeparator(mainWidth, isTreeMode, isFullWidth);
 
     let mainLines: string[];
     if (isTreeMode) {
@@ -1032,18 +1037,18 @@ export class DashboardComponent implements Component {
       // then the sidebar render (inside mergeSidebarAndMain) resets maxHeight for compact.
       // This order is safe because sidebar.render() sets agentTree.maxHeight internally.
       this.agentTree.maxHeight = availableHeight;
-      mainLines = this.agentTree.render(mainWidth);
+      mainLines = [mainTitleSep, ...this.agentTree.render(mainWidth)];
     } else {
       // Normal/full-width mode: split-pane(tmux | right-pane)
       this.tmuxPane.displayHeight = availableHeight;
       this.rightPane.displayHeight = availableHeight;
       this.splitPane.fullWidth = isFullWidth;
-      mainLines = this.splitPane.render(mainWidth);
+      mainLines = [mainTitleSep, ...this.splitPane.render(mainWidth)];
     }
 
     // Render sidebar and merge with main area
     const sidebarLines = this.sidebar.render(SIDEBAR_WIDTH);
-    lines.push(...mergeSidebarAndMain(sidebarLines, mainLines, availableHeight, mainWidth));
+    lines.push(...mergeSidebarAndMain(sidebarLines, mainLines, availableHeight + 1, mainWidth));
 
     // Bottom separator with junction characters
     const bottomSep = this.buildBottomSeparator(width, isTreeMode, isFullWidth);
@@ -1054,6 +1059,38 @@ export class DashboardComponent implements Component {
     lines.push(...statusLines);
 
     return lines;
+  }
+
+  /** Build titled separator at the top of the main area showing agent-id and pane-mode */
+  private buildMainTitleSeparator(mainWidth: number, isTreeMode: boolean, isFullWidth: boolean): string {
+    const selAgent = this.agentTree.selectedAgent;
+    const repoHeader = this.agentTree.selectedRepoHeader;
+    const leftTitle = selAgent ? ` ${selAgent.id} ` : "";
+    const rightTitle = isTreeMode ? " TREE "
+      : repoHeader ? ` ${repoHeader} `
+      : ` ${this.rightPane.mode} `;
+
+    const leftPad = 3;
+    const rightPad = 3;
+
+    if (!isTreeMode && !isFullWidth && leftTitle) {
+      // Show junction at inner split position
+      const splitAt = this.splitPane.getLeftWidth() + 1;
+      const leftHalfDashes = Math.max(1, splitAt - leftPad - leftTitle.length);
+      const rightHalfDashes = Math.max(1, mainWidth - splitAt - rightTitle.length - rightPad);
+      const leftDashStr = "─".repeat(Math.max(0, leftHalfDashes - 1)) + "┬";
+      const sep =
+        `${DIM_GRAY}${"─".repeat(leftPad)}${RESET}${BOLD}${leftTitle}${RESET}` +
+        `${DIM_GRAY}${leftDashStr}${RESET}` +
+        `${BOLD}${rightTitle}${RESET}` +
+        `${DIM_GRAY}${"─".repeat(rightHalfDashes)}${"─".repeat(rightPad)}${RESET}`;
+      return truncateToWidth(sep, mainWidth, "");
+    }
+
+    const fixedChars = leftPad + leftTitle.length + rightPad + rightTitle.length;
+    const fillCount = Math.max(1, mainWidth - fixedChars);
+    const sep = `${DIM_GRAY}${"─".repeat(leftPad)}${RESET}${BOLD}${leftTitle}${RESET}${DIM_GRAY}${"─".repeat(fillCount)}${RESET}${BOLD}${rightTitle}${RESET}${DIM_GRAY}${"─".repeat(rightPad)}${RESET}`;
+    return truncateToWidth(sep, mainWidth, "");
   }
 
   /** Build bottom separator with appropriate junction characters */

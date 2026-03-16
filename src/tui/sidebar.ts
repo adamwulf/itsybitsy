@@ -23,7 +23,9 @@ const COORDINATOR_SHRINK_MIN = 3;
 /**
  * Compute sidebar section heights per SPEC §11.2:
  *   coordinator_height = max(5, floor((available - tree_height) * 0.4))
- *   info_height = max(1, available - tree_height - coordinator_height - separators(2))
+ *   info_height = max(1, available - tree_height - coordinator_height - section_headers(3))
+ *
+ * Section headers: "Agents" (top), "Info" (middle), "Coordinator" (bottom) = 3 lines.
  *
  * @param available - total rows available for the sidebar content
  * @param itemCount - number of visible items in the agent tree (agents + repo headers)
@@ -42,14 +44,15 @@ export function computeSidebarHeights(
 
   let coordinatorHeight = Math.max(MIN_COORDINATOR_HEIGHT, Math.floor(afterTree * 0.4));
 
-  // Info gets what's left after tree + coordinator + 2 separators (min 1 row per spec)
-  const separators = 2;
-  let infoHeight = Math.max(1, afterTree - coordinatorHeight - separators);
+  // Info gets what's left after tree + coordinator + 3 section headers (min 1 row per spec)
+  const sectionHeaders = 3; // Agents, Info, Coordinator
+  let infoHeight = Math.max(1, afterTree - coordinatorHeight - sectionHeaders);
 
   // If terminal is too short for info to fit, shrink coordinator first (down to 3), then hide info
-  if (afterTree - coordinatorHeight - separators < 1) {
+  if (afterTree - coordinatorHeight - sectionHeaders < 1) {
     infoHeight = 0;
-    coordinatorHeight = Math.max(COORDINATOR_SHRINK_MIN, afterTree - 1);
+    // Only 2 headers when info is hidden (Agents + Coordinator)
+    coordinatorHeight = Math.max(COORDINATOR_SHRINK_MIN, afterTree - 2);
   }
 
   return { treeHeight, infoHeight, coordinatorHeight };
@@ -81,12 +84,13 @@ export class SidebarComponent implements Component {
       itemCount,
     );
 
-    // Agent tree section
+    // Agents section header + tree
+    lines.push(buildSectionSeparator("Agents", w));
     this.agentTree.maxHeight = treeHeight;
     const treeLines = this.agentTree.render(w);
     lines.push(...treeLines);
-    // Pad tree to exact height
-    while (lines.length < treeHeight) {
+    // Pad tree to exact height (header + treeHeight)
+    while (lines.length < treeHeight + 1) {
       lines.push("");
     }
 

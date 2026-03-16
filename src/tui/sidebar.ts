@@ -8,6 +8,8 @@ import { truncateToWidth } from "@mariozechner/pi-tui";
 import { AgentTreeComponent, MAX_TREE_HEIGHT } from "./agent-tree";
 import { InfoPanelComponent } from "./info-panel";
 import { RESET, BOLD, DIM, DIM_GRAY } from "./colors";
+import { buildFocusSeparator } from "./focus";
+import type { FocusTarget } from "./focus";
 
 export const SIDEBAR_WIDTH = 60;
 
@@ -65,6 +67,8 @@ export class SidebarComponent implements Component {
   infoPanel: InfoPanelComponent;
   /** Total available height for the sidebar (set by dashboard before render) */
   displayHeight = 30;
+  /** Which panel currently has focus (set by dashboard before render) */
+  focusTarget: FocusTarget = "agent-tree";
 
   constructor(agentTree: AgentTreeComponent, infoPanel: InfoPanelComponent) {
     this.agentTree = agentTree;
@@ -87,7 +91,7 @@ export class SidebarComponent implements Component {
     );
 
     // Agents section header + tree
-    lines.push(buildSectionSeparator("Agents", w));
+    lines.push(buildFocusSeparator("Agents", w, this.focusTarget === "agent-tree"));
     this.agentTree.maxHeight = treeHeight;
     const treeLines = this.agentTree.render(w);
     lines.push(...treeLines);
@@ -98,7 +102,7 @@ export class SidebarComponent implements Component {
 
     // Info separator + info panel
     if (infoHeight > 0) {
-      lines.push(buildSectionSeparator("Info", w));
+      lines.push(buildFocusSeparator("Info", w, false));
       this.infoPanel.displayHeight = infoHeight;
       const infoLines = this.infoPanel.render(w);
       lines.push(...infoLines);
@@ -106,7 +110,7 @@ export class SidebarComponent implements Component {
 
     // Coordinator separator + placeholder
     if (coordinatorHeight > 0) {
-      lines.push(buildSectionSeparator("Coordinator", w));
+      lines.push(buildFocusSeparator("Coordinator", w, this.focusTarget === "coordinator"));
       const coordLines = renderCoordinatorPlaceholder(w, coordinatorHeight);
       lines.push(...coordLines);
     }
@@ -119,17 +123,6 @@ export class SidebarComponent implements Component {
   }
 }
 
-/** Build a section separator: ──── Title ──── */
-function buildSectionSeparator(title: string, width: number): string {
-  const leftPad = 4;
-  const titleStr = ` ${title} `;
-  const rightPad = Math.max(1, width - leftPad - titleStr.length);
-  return truncateToWidth(
-    `${DIM_GRAY}${"─".repeat(leftPad)}${RESET}${BOLD}${titleStr}${RESET}${DIM_GRAY}${"─".repeat(rightPad)}${RESET}`,
-    width,
-    "",
-  );
-}
 
 /** Render coordinator placeholder (Phase 47 will replace this) */
 function renderCoordinatorPlaceholder(width: number, height: number): string[] {

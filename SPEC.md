@@ -1178,7 +1178,7 @@ This ensures the system coordinator can only run `ib` commands (e.g., `ib list`,
 
 **Layout when system coordinator is selected**: When the system coordinator is selected in the agent tree, the entire layout changes:
 
-- **Sidebar** switches to a two-section layout: agent tree (top) + system coordinator tmux output and input field (bottom). The info panel is **hidden** — it is not relevant for the system coordinator.
+- **Sidebar** switches to a two-section layout: agent tree (top) + system coordinator tmux output (bottom, with input field when focused — see §13.4). The info panel is **hidden** — it is not relevant for the system coordinator.
 - **Sidebar height allocation**: With info panel hidden, the agent tree retains its normal height (up to `MAX_TREE_HEIGHT`), and the system coordinator panel gets all remaining sidebar height (`available - tree_height - 1 separator`).
 - **Focus cycling**: In full-width mode, Tab skips `info`, `active-agent`, and `right-pane` targets (they have no rendered panels) — cycling goes `agent-tree` → `coordinator` → `agent-tree`. The system dashboard table is read-only and scrolled via `;`/`l` keys regardless of focus.
 - **Main area** (middle + right panes) merge into a **single full-width system dashboard** showing a detailed agent overview. This is a dedicated system view, not the regular split-pane layout.
@@ -1253,7 +1253,7 @@ Per-repo coordinators are Claude Code agents that coordinate work within a singl
 
 Per-repo coordinators are stored in `.ittybitty/agents/` like regular agents, but with distinguishing characteristics:
 
-- **Agent ID**: `coordinator` (not the random `agent-<hex>` format). Only one coordinator per repo.
+- **Agent ID**: `coordinator` (not the random `agent-<hex>` format). Only one coordinator per repo. See §12.3.1 for how this name resolves differently in messaging vs management commands.
 - **meta.json flag**: `"coordinator": true` — marks this agent as a coordinator
 - **Tmux session naming**: Standard convention: `ittybitty-<repo-id>-coordinator`
 - **Branch name**: `agent/coordinator-<repo-id>` (includes repo-id to avoid collision across repos sharing the same git remote — each repo has a unique 8-char hex repo-id in `.ittybitty/repo-id`)
@@ -1293,7 +1293,7 @@ Per-repo coordinators get a restricted permission set — they can read the code
   "permissions": {
     "allow": [
       "Bash(ib:*)", "Bash(git status:*)", "Bash(git log:*)", "Bash(git diff:*)",
-      "Bash(git show:*)", "Bash(git ls-files:*)", "Bash(git grep:*)",
+      "Bash(git show:*)", "Bash(git ls-files:*)",
       "Bash(pwd:*)", "Bash(ls:*)",
       "Read", "Glob", "Grep", "LS",
       "TodoWrite", "AskUserQuestion"
@@ -1309,16 +1309,16 @@ Per-repo coordinators get a restricted permission set — they can read the code
 
 Key differences from regular agents:
 - **No Write/Edit/MultiEdit** — coordinators cannot modify files
-- **Unqualified `Bash` denied** — prevents running arbitrary shell commands. Only the specific `Bash(ib:*)`, `Bash(git ...:*)`, `Bash(pwd:*)`, and `Bash(ls:*)` patterns in the allow list are permitted. Without the unqualified `Bash` deny, Claude could bypass the allow-list by running any command.
-- **No Bash(cat:*)/Bash(head:*)/Bash(tail:*)/Bash(grep:*)** — shell commands like `cat`, `head`, `tail`, `grep` can write files via shell redirection (e.g., `cat > file.txt`, `grep x file > output.txt`). Coordinators use `Read`, `Glob`, `Grep`, and `LS` for file inspection instead — these are Claude Code's built-in tools which cannot perform writes.
+- **Unqualified `Bash` denied** — prevents running arbitrary shell commands. Only the specific `Bash(ib:*)`, `Bash(git status/log/diff/show/ls-files:*)`, `Bash(pwd:*)`, and `Bash(ls:*)` patterns in the allow list are permitted. Without the unqualified `Bash` deny, Claude could bypass the allow-list by running any command.
+- **No Bash(cat:*)/Bash(head:*)/Bash(tail:*)/Bash(grep:*)/Bash(git grep:*)** — shell commands like `cat`, `head`, `tail`, `grep` can write files via shell redirection (e.g., `cat > file.txt`, `grep x file > output.txt`). `git grep` is excluded because its `--open-files-in-pager` flag allows arbitrary command execution (e.g., `git grep --open-files-in-pager=malicious-cmd pattern`). Coordinators use `Read`, `Glob`, `Grep`, and `LS` for file inspection instead — these are Claude Code's built-in tools which cannot perform writes.
 - **Has Read/Glob/Grep/LS** — coordinators can read the codebase for context via Claude Code's built-in tools (which cannot perform writes)
 - **No Task/Agent** — coordinators spawn sub-agents only via `Bash(ib:*)`, not Claude's built-in Task/Agent tools. This ensures all agents are tracked through the ib system.
 
-**Bash permission pattern and shell metacharacters**: Claude Code's `Bash(<command>:*)` permission patterns match based on command prefix — `Bash(ib:*)` allows any command starting with `ib`. This means a chained command like `ib list && cat secret.txt` would match `Bash(ib:*)` because the full string starts with `ib`. **Mitigation**: The coordinator's session-start hook and itsybitsy's `intercept-task` hook (§6) can reject Bash tool calls containing shell metacharacters (`;`, `&&`, `||`, `|`, `>`, `>>`, `<`, `` ` ``, `$(`) before they reach Claude Code's permission check. This is implemented as a PreToolUse hook that inspects the Bash command string and blocks it if metacharacters are found after the initial command. This is a defense-in-depth layer on top of Claude Code's prefix matching — the primary trust boundary is that coordinators are Claude agents following instructions, and the hooks catch edge cases where the agent might attempt to circumvent its role.
+**Bash permission pattern and shell metacharacters**: Claude Code's `Bash(<command>:*)` permission patterns match based on command prefix — `Bash(ib:*)` allows any command starting with `ib`. This means a chained command like `ib list && cat secret.txt` would match `Bash(ib:*)` because the full string starts with `ib`. **Mitigation**: The existing `intercept-task` hook (§6) is extended to reject Bash tool calls from coordinator sessions that contain shell metacharacters (`;`, `&&`, `||`, `|`, `>`, `>>`, `<`, `` ` ``, `$(`) anywhere in the raw command string. The hook inspects the `command` field from the Bash tool's input JSON — this is the unquoted, uninterpreted command string that Claude generated. The check is a simple regex scan for metacharacters; it does not attempt to parse shell quoting (a false positive on `ib send agent "hello; world"` is acceptable — the coordinator can use `ib inbox write` instead). This is a defense-in-depth layer on top of Claude Code's prefix matching — the primary trust boundary is that coordinators are Claude agents following instructions, and the hooks catch edge cases where the agent might attempt to circumvent its role.
 - **No WebFetch/WebSearch** — coordinators don't need internet access
 - **No KillShell** — coordinators don't run long-lived shell processes
 
-These permissions are constructed by a new `buildCoordinatorSettings()` function (parallel to the existing `buildAgentSettings()`). Per-repo coordinator permissions are also configurable via config:
+These permissions are constructed by a new `buildCoordinatorSettings()` function (parallel to the existing `buildAgentSettings()`). Per-repo coordinator permissions are also configurable via config. **Merge semantics**: Config `allow` entries are appended to the hardcoded allow list. Config `deny` entries are appended to the hardcoded deny list. The hardcoded deny list always takes precedence — adding `"Write"` to `permissions.coordinator.allow` does NOT override the hardcoded deny entry for `Write`. This prevents users from accidentally granting write access to coordinators via config:
 
 ```json
 {
@@ -1342,6 +1342,7 @@ Per-repo coordinators appear in the agent tree as the **first entry** under thei
   ⚙ agent-a1b2c3d4   running  2m
   ⚙ agent-e5f6a7b8   waiting  10m
 ▾ muse-ios
+  ◇ coordinator      stopped   1h
   ⚙ agent-c9d0e1f2   complete  1h
 ```
 
@@ -1406,7 +1407,7 @@ Repo basenames take priority over agent ID substring matching in `ib send`, so i
 
 The system coordinator has two messaging paths, each for a different context:
 
-**User-interactive (TUI)**: When the user types in the coordinator sidebar input field or uses `s` with the system coordinator selected, `tmux send-keys -t ib-coordinator -l "<message>"` followed by a separate `tmux send-keys -t ib-coordinator Enter` is used. The `-l` (literal) flag prevents tmux from interpreting special key sequences in the message text. **Control character sanitization**: Before sending, all non-printable characters must be stripped: newlines (`\n`, `\r`) to prevent injecting multiple inputs, `\x03` (Ctrl-C) to prevent killing the Claude process, `\x04` (Ctrl-D, EOF), `\x1a` (Ctrl-Z, suspend), and `\x1b` (Escape, which could corrupt terminal state or trigger escape sequences). In practice, strip all characters with code points below `0x20` except space (`0x20`). The `-l` flag on `tmux send-keys` prevents tmux from interpreting special key names, but the receiving Claude process would still see control characters in its stdin. This is safe because the user controls timing and can see whether the coordinator is busy.
+**User-interactive (TUI)**: When the user types in the coordinator sidebar input field or uses `s` with the system coordinator selected, `tmux send-keys -t ib-coordinator -l "<message>"` followed by a separate `tmux send-keys -t ib-coordinator Enter` is used. The `-l` (literal) flag prevents tmux from interpreting special key sequences in the message text. **Control character sanitization**: Before sending, all non-printable characters must be stripped: newlines (`\n`, `\r`) to prevent injecting multiple inputs, `\x03` (Ctrl-C) to prevent killing the Claude process, `\x04` (Ctrl-D, EOF), `\x1a` (Ctrl-Z, suspend), and `\x1b` (Escape, which could corrupt terminal state or trigger escape sequences). In practice, strip all characters with code points below `0x20` (this includes tab `0x09`, which is intentionally stripped to prevent unexpected whitespace in messages). The `-l` flag on `tmux send-keys` prevents tmux from interpreting special key names, but the receiving Claude process would still see control characters in its stdin. This is safe because the user controls timing and can see whether the coordinator is busy.
 
 **Programmatic (watchdog, automated notifications)**: When the watchdog or other automated systems need to notify the system coordinator, they use the `ib inbox` command (see §12.3.4). This avoids the race condition of injecting text via `tmux send-keys` while the coordinator is mid-response.
 

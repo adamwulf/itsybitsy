@@ -1187,6 +1187,7 @@ Extend `newAgent()` to support the `--coordinator` flag:
 - [ ] Branch name: `agent/coordinator-<repo-id>` (includes repo-id to avoid collision across repos)
 - [ ] **Reserved name validation**: Reject `--name` values that are reserved: `coordinator`, `watchdog`, `manual`, and any registered repo basenames. Error: `"'<name>' is a reserved name"`
 - [ ] Per-repo coordinators bypass the `maxAgents` check (coordinators are infrastructure, not user tasks — see SPEC §12.4.3). Add bypass logic in `newAgent()` when `--coordinator` flag is set.
+- [ ] Modify the `maxAgents` check for ALL agent creation: exclude coordinators (`coordinator: true` in meta.json) from the active agent count. This ensures coordinators don't consume regular agent slots (SPEC §12.4.3: "excluded from the agent count when checking maxAgents for regular agent creation").
 - [ ] **Parenting behavior**: Agents spawned by a coordinator have `manager: "coordinator"` in meta.json. Verify `buildAgentTree()` correctly parents them under the coordinator. `ib nuke coordinator` recursively kills children via §1.8 traversal. `ib kill coordinator` kills only the coordinator (standard §1.4).
 - [ ] CLI flag parsing in `src/index.ts`
 - [ ] Tests for coordinator creation, one-per-repo constraint, mutual exclusivity, reserved names, parenting
@@ -1197,10 +1198,11 @@ Extend `newAgent()` to support the `--coordinator` flag:
 
 Add `buildCoordinatorSettings()` function:
 
-- [ ] New function in `src/coordinator.ts` parallel to `buildAgentSettings()` — produces the complete permission set from SPEC.md §12.2.4 (allow list: Bash(ib:*), Bash(git status/log/diff/show/ls-files/grep:*), Bash(pwd:*), Bash(ls:*), Read, Glob, Grep, LS, TodoWrite, AskUserQuestion; deny list: Bash, Write, Edit, MultiEdit, NotebookEdit, WebFetch, WebSearch, Task, TaskOutput, Agent, KillShell, EnterPlanMode, ExitPlanMode)
-- [ ] Merges with config `permissions.coordinator.allow/deny` (config keys added in 47a)
+- [ ] New function in `src/coordinator.ts` parallel to `buildAgentSettings()` — produces the complete permission set from SPEC.md §12.2.4 (allow list: Bash(ib:*), Bash(git status/log/diff/show/ls-files:*), Bash(pwd:*), Bash(ls:*), Read, Glob, Grep, LS, TodoWrite, AskUserQuestion; deny list: Bash, Write, Edit, MultiEdit, NotebookEdit, WebFetch, WebSearch, Task, TaskOutput, Agent, KillShell, EnterPlanMode, ExitPlanMode). Note: Bash(git grep:*) is intentionally excluded — `--open-files-in-pager` allows arbitrary execution; coordinators use the Grep tool instead.
+- [ ] Merges with config `permissions.coordinator.allow/deny` (config keys added in 47a). **Merge semantics**: config entries are appended; hardcoded deny list always takes precedence over user-configured allow (SPEC §12.2.4).
 - [ ] Called by `newAgent()` when `--coordinator` flag is set
-- [ ] Tests for permission construction, config merging
+- [ ] Extend `intercept-task` hook to block Bash tool calls from coordinator sessions that contain shell metacharacters (`;`, `&&`, `||`, `|`, `>`, `>>`, `<`, `` ` ``, `$(`). Detect coordinator sessions via `coordinator: true` in meta.json. This is the defense-in-depth layer described in SPEC §12.2.4.
+- [ ] Tests for permission construction, config merging, metacharacter blocking
 
 #### 48c: Session start context for coordinators
 
@@ -1257,7 +1259,7 @@ Add ability to spawn per-repo coordinators from the TUI:
 
 Support addressing coordinators by name:
 
-- [ ] `ib send coordinator "message"` — always addresses the system coordinator. `sendMessage()` calls the inbox write function from `src/coordinator.ts` directly (not shelling out to `ib inbox write`) for cleaner error handling and avoiding subprocess overhead.
+- [ ] `ib send coordinator "message"` — always addresses the system coordinator. `sendMessage()` calls the inbox write function from `src/coordinator.ts` directly (not shelling out to `ib inbox write`) for cleaner error handling and avoiding subprocess overhead. **Graceful queueing**: if the `ib-coordinator` tmux session doesn't exist, the message is still queued to the inbox (not an error) — it will be processed when the system coordinator restarts (SPEC §12.3.1).
 - [ ] `ib send <repo-name> "message"` — addresses the per-repo coordinator for that repo (using repo basename from `src/registry.ts` to look up the coordinator agent). This is how the system coordinator reaches per-repo coordinators.
 - [ ] `sendMessage()` function: detect `coordinator` as target → system coordinator; detect registered repo basename as target → per-repo coordinator. Resolution priority: literal `coordinator` → repo basename → standard agent ID matching (SPEC.md §12.3.1). **Note**: repo basenames take priority over agent ID substring matching — if a repo is named `agent`, `ib send agent "msg"` addresses the repo coordinator, not `agent-a1b2c3d4`. Users can bypass with full agent IDs.
 - [ ] Error with clear message when repo exists but has no coordinator: "No coordinator for repo <name>"

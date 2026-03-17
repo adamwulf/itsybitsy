@@ -1394,14 +1394,14 @@ Add Remote Control config keys:
 Modify `ensureSystemCoordinator()` to support Remote Control:
 
 - [ ] Read `remoteControl.enabled` from config
-- [ ] When enabled, add `--remote-control` flag to the `claude` command launched in the tmux session: `claude --remote-control "itsybitsy coordinator" --model <model>` (the `--remote-control` flag accepts an optional session name argument)
+- [ ] When enabled, add `--remote-control "<sessionName>"` to the `claude` command launched in the tmux session: `claude --remote-control "<sessionName>" --model <model>` (interactive mode's `--remote-control` flag accepts an optional session name as a positional argument)
 - [ ] When disabled, launch as before (`claude --model <model>`)
 - [ ] `restartSystemCoordinator()` re-reads config on restart — toggling remote control takes effect after restart
 - [ ] Tests for launch command construction with and without remote control
 
 #### 50c: TUI — setup dialog toggle
 
-**Files:** `src/tui/setup-dialog.ts`
+**Files:** `src/tui/dialog-handler.ts`, `src/tui/dashboard.ts`
 
 Add Remote Control toggle to the setup dialog:
 
@@ -1415,10 +1415,9 @@ Add Remote Control toggle to the setup dialog:
 
 **Files:** `src/tui/sidebar.ts`, `src/tui/dashboard.ts`
 
-Show Remote Control status in the TUI:
+Show Remote Control status in the TUI (note: info panel is hidden when system coordinator is selected per §12.1.4):
 
-- [ ] Info panel: when system coordinator is selected, show `Remote: 🟢 enabled` or `Remote: off` (dim)
-- [ ] Dashboard status bar: append `(remote control enabled)` when active
+- [ ] Coordinator panel header: show `──── System Coordinator (remote) ────` when enabled, standard header when disabled
 - [ ] System dashboard header: `"ib — agent dashboard (remote control enabled)"` when active
 - [ ] Tests for indicator rendering
 

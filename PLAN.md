@@ -1304,3 +1304,27 @@ Note: `isValidAgentId()` IS imported and used in agent-status.ts (line 384), but
 **Prerequisite:** This change only makes sense after itsybitsy has its own built-in watchdog (Phase 15) and no longer depends on ib's watchdog. Even then, it requires coordination with ib's codebase.
 
 **Recommendation:** Keep using `{repo}/.ittybitty/agents/` for now. Revisit after Phases 15–16 are complete and itsybitsy has proven itself as a standalone daily driver. If pursued, start with a read-only mirror (`~/.itsybitsy/{repo}/` as a cache/index of `.ittybitty/agents/`) before attempting a full migration, but be aware of cache invalidation challenges.
+
+---
+
+### Phase 48 (future): Diagnose and Fix Flaky Test
+
+**Status:** Not started — documented for a future agent to pick up.
+
+**Problem:** An intermittent test failure has been observed across multiple test runs. The failing test varies between runs but is typically in `dashboard.test.ts` or `watcher.test.ts`, often related to kill confirm dialog or agent teardown flows. The failure does not reproduce consistently — tests pass on retry without any code changes.
+
+**Symptoms observed:**
+- Test passes most of the time but occasionally fails during CI or local batch runs
+- Failure appears in different tests across runs, suggesting a shared root cause (likely timing or cleanup)
+- No correlation with specific code changes — observed during pure review cycles with no new code
+
+**Likely root causes to investigate:**
+- Shared mutable state between tests (e.g., singleton instances, global event listeners not cleaned up)
+- Timer/setTimeout interactions that are sensitive to test execution order or speed
+- Async operations that complete after test teardown
+- `fs.watch` or tmux polling side effects leaking between tests
+
+**Success criteria:**
+- Identify the root cause of the flaky behavior
+- Fix it so `bun test` passes reliably across 10+ consecutive runs
+- No regressions — all existing tests continue to pass

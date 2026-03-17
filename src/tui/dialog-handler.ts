@@ -8,7 +8,8 @@ import { wrapSingleLine } from "./wrap";
 import { buildFolderItems } from "./folder-browser";
 import type { FolderItem } from "./folder-browser";
 import { RESET, BOLD, DIM, REVERSE, GREEN, DIM_GRAY } from "./colors";
-import { readClipboard, isPasteData, extractBracketedPaste, insertTextIntoLines } from "./clipboard";
+import { resolvePasteText } from "./clipboard";
+import { TextBuffer, deleteWord } from "./text-buffer";
 
 export const TEXTAREA_VISIBLE_HEIGHT = 5;
 export const FOLDER_BROWSER_HEIGHT = 15;
@@ -23,7 +24,7 @@ export type DialogState =
   | {
       type: "textarea";
       prompt: string;
-      lines: string[];
+      buffer: TextBuffer;
       focusedButton: "text" | "send" | "cancel";
       sendAll?: boolean;
       onSubmit: (value: string) => void;
@@ -42,7 +43,7 @@ export type DialogState =
       repoName: string;
       name: string;
       worker: boolean;
-      lines: string[];
+      buffer: TextBuffer;
       focused: "name" | "worker" | "prompt" | "create" | "cancel";
       onSubmit: (name: string, worker: boolean, prompt: string) => void;
     }
@@ -102,11 +103,6 @@ export function wrapTextareaLines(lines: string[], width: number): string[] {
   return result;
 }
 
-/** Delete the last word (or trailing whitespace) from a string. */
-export function deleteWord(s: string): string {
-  return s.replace(/(?:\s+|\S+)\s*$/, "");
-}
-
 /** Wraps items with original indices, filters via pi-tui fuzzyFilter, returns original indices */
 type IndexedItem = { text: string; index: number };
 export function fuzzyFilterIndices(items: string[], query: string): number[] {
@@ -114,82 +110,6 @@ export function fuzzyFilterIndices(items: string[], query: string): number[] {
   const indexed: IndexedItem[] = items.map((text, index) => ({ text, index }));
   const filtered = fuzzyFilter(indexed, query, (item) => item.text);
   return filtered.map((item) => item.index);
-}
-
-/**
- * Shared text-editing handler for multiline textarea-like inputs.
- * Handles Enter (new line), backspace (delete char or join lines),
- * Alt-backspace (word delete), and printable character input.
- * Returns true if the input was handled.
- */
-export function handleTextEdit(data: string, lines: string[], ctx?: DialogCtx | null): boolean {
-  if (matchesKey(data, Key.enter) || matchesKey(data, Key.shift("enter"))) {
-    lines.push("");
-    return true;
-  }
-  if (matchesKey(data, Key.alt("backspace"))) {
-    const lastIdx = lines.length - 1;
-    const lastLine = lines[lastIdx] ?? "";
-    const trimmed = deleteWord(lastLine);
-    if (trimmed.length < lastLine.length) {
-      lines[lastIdx] = trimmed;
-    } else if (lastIdx > 0) {
-      lines.pop();
-    }
-    return true;
-  }
-  if (matchesKey(data, Key.backspace) || data === "\x7f") {
-    const lastIdx = lines.length - 1;
-    const lastLine = lines[lastIdx] ?? "";
-    if (lastLine.length > 0) {
-      lines[lastIdx] = lastLine.slice(0, -1);
-    } else if (lastIdx > 0) {
-      lines.pop();
-    }
-    return true;
-  }
-  // Paste support: Ctrl+V, bracketed paste, or multi-char printable data
-  const pasteApply = (text: string) => {
-    insertTextIntoLines(lines, text);
-    ctx?.tui?.requestRender();
-  };
-  const pasteText = resolvePasteText(data, pasteApply);
-  if (pasteText !== null) {
-    insertTextIntoLines(lines, pasteText);
-    return true;
-  }
-  // Ctrl+V returns null from resolvePasteText but triggers async paste
-  if (data === "\x16") return true;
-
-  if (data.length === 1 && data >= " ") {
-    const lastIdx = lines.length - 1;
-    lines[lastIdx] = (lines[lastIdx] ?? "") + data;
-    return true;
-  }
-  return false;
-}
-
-/** Resolve paste data from input.
- *  Returns the text to insert synchronously (for bracketed paste / multi-char paste),
- *  or null if the data is a Ctrl+V that triggers an async clipboard read.
- *  For Ctrl+V, calls the callback asynchronously with the clipboard text. */
-function resolvePasteText(
-  data: string,
-  onAsyncPaste: (text: string) => void,
-): string | null {
-  // Ctrl+V (0x16) → async clipboard read
-  if (data === "\x16") {
-    readClipboard().then((text) => {
-      if (text) onAsyncPaste(text);
-    });
-    return null;
-  }
-  // Bracketed paste sequence
-  const bracketed = extractBracketedPaste(data);
-  if (bracketed !== null) return bracketed;
-  // Multi-character paste (printable text, not an escape sequence)
-  if (isPasteData(data)) return data;
-  return null;
 }
 
 /** Minimal context interface for dialog input handling */
@@ -318,6 +238,8 @@ function handleTextareaDialog(
     return true;
   }
 
+  const onAsyncRender = () => ctx.tui?.requestRender();
+
   if (d.focusedButton === "text") {
     if (matchesKey(data, Key.tab)) {
       d.focusedButton = "cancel";
@@ -325,19 +247,19 @@ function handleTextareaDialog(
     } else if (matchesKey(data, Key.shift("tab"))) {
       d.focusedButton = "send";
       ctx.tui?.requestRender();
-    } else if (handleTextEdit(data, d.lines, ctx)) {
+    } else if (d.buffer.handleInput(data, onAsyncRender)) {
       ctx.tui?.requestRender();
     }
   } else if (d.focusedButton === "send") {
     if (matchesKey(data, Key.enter)) {
-      d.onSubmit(d.lines.join("\n"));
+      d.onSubmit(d.buffer.getText());
     } else if (matchesKey(data, Key.tab) || matchesKey(data, Key.right)) {
       d.focusedButton = "text";
       ctx.tui?.requestRender();
     } else if (matchesKey(data, Key.shift("tab")) || matchesKey(data, Key.left)) {
       d.focusedButton = "cancel";
       ctx.tui?.requestRender();
-    } else if (handleTextEdit(data, d.lines, ctx)) {
+    } else if (d.buffer.handleInput(data, onAsyncRender)) {
       d.focusedButton = "text";
       ctx.tui?.requestRender();
     }
@@ -350,7 +272,7 @@ function handleTextareaDialog(
     } else if (matchesKey(data, Key.shift("tab")) || matchesKey(data, Key.left)) {
       d.focusedButton = "text";
       ctx.tui?.requestRender();
-    } else if (handleTextEdit(data, d.lines, ctx)) {
+    } else if (d.buffer.handleInput(data, onAsyncRender)) {
       d.focusedButton = "text";
       ctx.tui?.requestRender();
     }
@@ -366,7 +288,8 @@ function handleNewAgentFormDialog(
   data: string
 ): boolean {
   const focusOrder: Array<typeof d.focused> = ["name", "worker", "prompt", "cancel", "create"];
-  const promptEmpty = () => d.lines.join("\n").trim().length === 0;
+  const promptEmpty = () => d.buffer.getText().trim().length === 0;
+  const onAsyncRender = () => ctx.tui?.requestRender();
   const nextFocus = () => {
     const idx = focusOrder.indexOf(d.focused);
     let next = (idx + 1) % focusOrder.length;
@@ -418,18 +341,18 @@ function handleNewAgentFormDialog(
   } else if (d.focused === "prompt") {
     if (matchesKey(data, Key.tab)) { nextFocus(); }
     else if (matchesKey(data, Key.shift("tab"))) { prevFocus(); }
-    else if (handleTextEdit(data, d.lines, ctx)) {
+    else if (d.buffer.handleInput(data, onAsyncRender)) {
       ctx.tui?.requestRender();
     }
   } else if (d.focused === "create") {
     if (matchesKey(data, Key.enter)) {
-      const promptText = d.lines.join("\n").trim();
+      const promptText = d.buffer.getText().trim();
       if (promptText.length > 0) {
         d.onSubmit(d.name, d.worker, promptText);
       }
     } else if (matchesKey(data, Key.tab) || matchesKey(data, Key.right)) { nextFocus(); }
     else if (matchesKey(data, Key.shift("tab")) || matchesKey(data, Key.left)) { prevFocus(); }
-    else if (handleTextEdit(data, d.lines, ctx)) {
+    else if (d.buffer.handleInput(data, onAsyncRender)) {
       d.focused = "prompt";
       ctx.tui?.requestRender();
     }
@@ -437,7 +360,7 @@ function handleNewAgentFormDialog(
     if (matchesKey(data, Key.enter)) { ctx.closeDialog(); }
     else if (matchesKey(data, Key.tab) || matchesKey(data, Key.right)) { nextFocus(); }
     else if (matchesKey(data, Key.shift("tab")) || matchesKey(data, Key.left)) { prevFocus(); }
-    else if (handleTextEdit(data, d.lines, ctx)) {
+    else if (d.buffer.handleInput(data, onAsyncRender)) {
       d.focused = "prompt";
       ctx.tui?.requestRender();
     }
@@ -757,10 +680,11 @@ function handlePermissionsEditorDialog(
 
 type DialogContent = { title: string; contentLines: string[] };
 
-/** Render the textarea portion shared by textarea and new-agent-form dialogs */
+/** Render the textarea portion shared by textarea and new-agent-form dialogs. */
 export function renderTextareaBlock(
-  lines: string[], innerWidth: number, showCursor: boolean
+  buffer: TextBuffer, innerWidth: number, showCursor: boolean
 ): { outputLines: string[]; hasScrollIndicator: boolean } {
+  const lines = buffer.getLines();
   const visibleHeight = TEXTAREA_VISIBLE_HEIGHT;
   const textWidth = innerWidth - 2;
   const visualLines = wrapTextareaLines(lines, textWidth);
@@ -870,11 +794,11 @@ export function buildNewAgentFormContent(
   const promptLabel = dialog.focused === "prompt" ? `${BOLD}Prompt:${RESET} ${DIM}(required)${RESET}` : `${DIM}Prompt: (required)${RESET}`;
   lines.push(promptLabel);
 
-  const { outputLines, hasScrollIndicator } = renderTextareaBlock(dialog.lines, innerWidth, dialog.focused === "prompt");
+  const { outputLines, hasScrollIndicator } = renderTextareaBlock(dialog.buffer, innerWidth, dialog.focused === "prompt");
   lines.push(...outputLines);
   if (hasScrollIndicator) { lines.push(`${DIM}↑${RESET}`); }
 
-  const promptText = dialog.lines.join("\n").trim();
+  const promptText = dialog.buffer.getText().trim();
   const createEnabled = promptText.length > 0;
   const createLabel = dialog.focused === "create"
     ? (createEnabled ? `${BOLD}${GREEN}[ Create ]${RESET}` : `${BOLD}${DIM}[ Create ]${RESET}`)

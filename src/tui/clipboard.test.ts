@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { isPasteData, extractBracketedPaste, insertTextIntoLines } from "./clipboard";
+import { isPasteData, extractBracketedPaste, insertTextIntoLines, resolvePasteText } from "./clipboard";
 
 describe("isPasteData", () => {
   test("single character is not paste", () => {
@@ -57,6 +57,36 @@ describe("extractBracketedPaste", () => {
 
   test("extracts multiline paste", () => {
     expect(extractBracketedPaste("\x1b[200~line1\nline2\x1b[201~")).toBe("line1\nline2");
+  });
+});
+
+describe("resolvePasteText", () => {
+  test("bracketed paste returns extracted text", () => {
+    const cb = () => {};
+    expect(resolvePasteText("\x1b[200~hello\x1b[201~", cb)).toBe("hello");
+  });
+
+  test("multi-char printable text returns the data", () => {
+    const cb = () => {};
+    expect(resolvePasteText("pasted text", cb)).toBe("pasted text");
+  });
+
+  test("single printable char returns null (not paste)", () => {
+    const cb = () => {};
+    expect(resolvePasteText("a", cb)).toBeNull();
+  });
+
+  test("escape sequence returns null", () => {
+    const cb = () => {};
+    expect(resolvePasteText("\x1b[A", cb)).toBeNull();
+  });
+
+  test("Ctrl+V returns null and triggers async callback", () => {
+    let called = false;
+    const cb = () => { called = true; };
+    const result = resolvePasteText("\x16", cb);
+    expect(result).toBeNull();
+    // Async callback is triggered via readClipboard().then() — can't easily assert synchronously
   });
 });
 

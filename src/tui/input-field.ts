@@ -2,7 +2,7 @@
  * Multi-line input field component for message composition.
  *
  * Renders: top separator, content lines with cursor, bottom separator with [Send] button.
- * Uses handleTextEdit() for text editing (Enter = new line, Alt+Backspace = word delete, paste support).
+ * Uses TextBuffer for text editing (Enter = new line, Alt+Backspace = word delete, paste support).
  * Tab moves focus to [Send] button; Enter on [Send] submits. Escape clears and defocuses.
  * Per-agent input buffers: each agent's typed text is preserved when switching agents.
  * See SPEC.md §13.4.
@@ -11,32 +11,33 @@
 import { truncateToWidth, matchesKey, Key } from "@mariozechner/pi-tui";
 import type { Component } from "@mariozechner/pi-tui";
 import { DIM_GRAY, RESET, BOLD, GREEN, DIM } from "./colors";
-import { handleTextEdit } from "./dialog-handler";
+import { TextBuffer } from "./text-buffer";
 
 /** Maximum number of visible content lines before scrolling */
 const MAX_VISIBLE_LINES = 5;
 
 export class InputFieldComponent implements Component {
-  private lines: string[] = [""];
+  private buffer = new TextBuffer();
   private focused: "text" | "send" = "text";
-  /** Per-agent input buffers: agentId → lines array */
-  private agentBuffers = new Map<string, string[]>();
+  /** Per-agent input buffers: agentId → TextBuffer instance */
+  private agentBuffers = new Map<string, TextBuffer>();
   private currentAgentId: string | null = null;
   /** Whether the input field is active (focused panel). Controls cursor visibility. */
   active = true;
   onSubmit: ((text: string) => void) | null = null;
   onCancel: (() => void) | null = null;
+  onAsyncRender?: () => void;
 
   invalidate(): void {}
 
   /** Get the current input text (for testing). */
   getText(): string {
-    return this.lines.join("\n");
+    return this.buffer.getText();
   }
 
   /** Get the lines array (for testing). */
   getLines(): string[] {
-    return [...this.lines];
+    return this.buffer.getLines();
   }
 
   /** Get the current focus target (for testing). */
@@ -46,7 +47,7 @@ export class InputFieldComponent implements Component {
 
   /** Clear the input field text and reset to default state. */
   clear(): void {
-    this.lines = [""];
+    this.buffer.clear();
     this.focused = "text";
     // Also clear from per-agent buffer
     if (this.currentAgentId) {
@@ -61,9 +62,8 @@ export class InputFieldComponent implements Component {
   switchAgent(agentId: string | null): void {
     // Save current buffer
     if (this.currentAgentId) {
-      const hasContent = this.lines.length > 1 || this.lines[0] !== "";
-      if (hasContent) {
-        this.agentBuffers.set(this.currentAgentId, [...this.lines]);
+      if (this.buffer.hasContent()) {
+        this.agentBuffers.set(this.currentAgentId, this.buffer);
       } else {
         this.agentBuffers.delete(this.currentAgentId);
       }
@@ -71,12 +71,8 @@ export class InputFieldComponent implements Component {
 
     this.currentAgentId = agentId;
 
-    // Load target agent's buffer
-    if (agentId && this.agentBuffers.has(agentId)) {
-      this.lines = [...this.agentBuffers.get(agentId)!];
-    } else {
-      this.lines = [""];
-    }
+    // Load target agent's buffer or create fresh one
+    this.buffer = (agentId ? this.agentBuffers.get(agentId) : undefined) ?? new TextBuffer();
     this.focused = "text";
   }
 
@@ -112,7 +108,7 @@ export class InputFieldComponent implements Component {
 
       // Ctrl-U: clear all lines
       if (data === "\x15") {
-        this.lines = [""];
+        this.buffer.clear();
         return true;
       }
 
@@ -126,8 +122,8 @@ export class InputFieldComponent implements Component {
         return true;
       }
 
-      // Delegate to handleTextEdit for text editing
-      if (handleTextEdit(data, this.lines)) {
+      // Delegate to TextBuffer for text editing
+      if (this.buffer.handleInput(data, this.onAsyncRender)) {
         this.saveCurrentBuffer();
         return true;
       }
@@ -137,8 +133,8 @@ export class InputFieldComponent implements Component {
 
     // focused === "send"
     if (matchesKey(data, Key.enter) || data === "\r" || data === "\n") {
-      const text = this.lines.join("\n");
-      this.lines = [""];
+      const text = this.buffer.getText();
+      this.buffer.clear();
       this.focused = "text";
       // Clear per-agent buffer on submit
       if (this.currentAgentId) {
@@ -160,7 +156,7 @@ export class InputFieldComponent implements Component {
     }
 
     // If user starts typing while on Send, switch back to text mode
-    if (handleTextEdit(data, this.lines)) {
+    if (this.buffer.handleInput(data, this.onAsyncRender)) {
       this.focused = "text";
       this.saveCurrentBuffer();
       return true;
@@ -217,7 +213,7 @@ export class InputFieldComponent implements Component {
   private computeWrappedLineCount(width: number): number {
     const textWidth = Math.max(1, width - 2); // 2-char prefix
     let count = 0;
-    for (const line of this.lines) {
+    for (const line of this.buffer.getLines()) {
       count += Math.max(1, Math.ceil(line.length / textWidth) || 1);
     }
     return count;
@@ -229,9 +225,10 @@ export class InputFieldComponent implements Component {
    * '  ' for continuation lines.
    */
   private wrapAllLines(textWidth: number): Array<{ prefix: string; text: string }> {
+    const lines = this.buffer.getLines();
     const result: Array<{ prefix: string; text: string }> = [];
-    for (let li = 0; li < this.lines.length; li++) {
-      const lineText = this.lines[li] ?? "";
+    for (let li = 0; li < lines.length; li++) {
+      const lineText = lines[li] ?? "";
       const firstPrefix = li === 0 ? "> " : "  ";
       if (lineText.length <= textWidth) {
         result.push({ prefix: firstPrefix, text: lineText });
@@ -250,12 +247,11 @@ export class InputFieldComponent implements Component {
     return result;
   }
 
-  /** Save current lines to the per-agent buffer map. */
+  /** Save current buffer to the per-agent map. */
   private saveCurrentBuffer(): void {
     if (this.currentAgentId) {
-      const hasContent = this.lines.length > 1 || this.lines[0] !== "";
-      if (hasContent) {
-        this.agentBuffers.set(this.currentAgentId, [...this.lines]);
+      if (this.buffer.hasContent()) {
+        this.agentBuffers.set(this.currentAgentId, this.buffer);
       } else {
         this.agentBuffers.delete(this.currentAgentId);
       }

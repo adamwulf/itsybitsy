@@ -37,6 +37,8 @@ export class AgentWatcher {
   healthReports: Map<string, RepoHealthReport> = new Map();
   /** Global health warnings (e.g. missing hooks in ~/.claude/settings.json) */
   globalHealthWarnings: RepoHealthWarning[] = [];
+  /** Timestamp of last health check run (for cooldown) */
+  private lastHealthCheckAt = 0;
 
   /** Public read-only access to the most recently loaded agents list */
   get lastAgents(): Agent[] {
@@ -71,8 +73,15 @@ export class AgentWatcher {
     }, 2_000);
   }
 
-  /** Run health checks for all repos and global config, then trigger onUpdate */
-  private async runHealthChecks(): Promise<void> {
+  /** Cooldown period for health checks (30s) — avoids re-running on every fs.watch event */
+  static readonly HEALTH_CHECK_COOLDOWN_MS = 30_000;
+
+  /** Run health checks for all repos and global config.
+   *  Skips if the last check was within the cooldown period (unless force=true). */
+  private async runHealthChecks(force = false): Promise<void> {
+    const now = Date.now();
+    if (!force && now - this.lastHealthCheckAt < AgentWatcher.HEALTH_CHECK_COOLDOWN_MS) return;
+    this.lastHealthCheckAt = now;
     try {
       const [repoResults, globalWarnings] = await Promise.all([
         Promise.all(this.repos.map((r) => checkRepoHealth(r.path))),
@@ -89,7 +98,7 @@ export class AgentWatcher {
 
   /** Re-run all health checks and refresh the UI (called on demand via H keybinding) */
   async recheckHealth(): Promise<void> {
-    await this.runHealthChecks();
+    await this.runHealthChecks(true);
     // Trigger a full refresh so the UI picks up new health data
     if (this.running) {
       this.refresh();

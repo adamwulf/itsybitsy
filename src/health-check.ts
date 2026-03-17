@@ -298,8 +298,8 @@ export async function checkOrphanedWorktrees(repoPath: string): Promise<RepoHeal
   /** Check the current worktree entry and emit a warning if orphaned */
   const checkEntry = async () => {
     if (!currentBranch || !currentWorktreePath) return;
-    const agentId = currentBranch.startsWith("agent-") ? currentBranch : `agent-${currentBranch}`;
-    const agentDirForId = join(repoPath, ".ittybitty", "agents", agentId);
+    // currentBranch is the capture from refs/heads/agent/(.+), e.g., "agent-a1b2c3d4"
+    const agentDirForId = join(repoPath, ".ittybitty", "agents", currentBranch);
 
     let exists = false;
     try {
@@ -500,7 +500,7 @@ export async function checkAgentHookIds(repoPath: string): Promise<RepoHealthWar
 // ── Public API ──────────────────────────────────────────────────────────────
 
 /** Check a single repo for configuration health issues */
-export async function checkRepoHealth(repoPath: string, _spawnCtx?: SpawnContext): Promise<RepoHealthReport> {
+export async function checkRepoHealth(repoPath: string): Promise<RepoHealthReport> {
   // Run all per-repo checks in parallel
   const [leaked, agentDirs, worktrees, branches, staleRefs, hookIds] = await Promise.all([
     checkLeakedAgentHooks(repoPath),

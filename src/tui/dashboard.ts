@@ -27,7 +27,7 @@ import { AgentWatcher } from "../watcher";
 import { TmuxPoller, hasAttachedClient } from "../tmux-poller";
 import type { Agent, FlatEntry, PendingQuestion } from "../agents";
 import { SplitPane } from "./split-pane";
-import { wrapLines, padLines } from "./wrap";
+import { wrapLines, wordWrapLines, padLines } from "./wrap";
 import { fetchUsage } from "../usage";
 import type { UsageData } from "../usage";
 import { getStateColors, setupColorSchemeDetection } from "./color-scheme";
@@ -69,7 +69,7 @@ export { FocusManager } from "./focus";
 export type { FocusTarget } from "./focus";
 export { InputFieldComponent } from "./input-field";
 
-const DIALOG_WIDTH = 60;
+const DIALOG_WIDTH = 80;
 const DEFAULT_LEFT_WIDTH = 80;
 const LEFT_WIDTH_STEP = 5;
 
@@ -385,7 +385,7 @@ class DialogOverlayComponent implements Component {
   private buildContent(dialog: NonNullable<DialogState>, innerWidth: number): { title: string; contentLines: string[] } {
     switch (dialog.type) {
       case "confirm": {
-        const wrapped = wrapLines(dialog.prompt, innerWidth);
+        const wrapped = wordWrapLines(dialog.prompt, innerWidth);
         const btnColor = dialog.confirmColor ?? GREEN;
         const confirmBtn = dialog.focusedButton === "confirm" ? `${BOLD}${btnColor}[ ${dialog.confirmLabel} ]${RESET}` : `[ ${dialog.confirmLabel} ]`;
         const cancelBtn = dialog.focusedButton === "cancel" ? `${BOLD}${GREEN}[ Cancel ]${RESET}` : `[ Cancel ]`;

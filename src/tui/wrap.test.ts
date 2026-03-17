@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { wrapSingleLine, wrapLines } from "./wrap";
+import { wrapSingleLine, wrapLines, wordWrapSingleLine, wordWrapLines } from "./wrap";
 import { visibleWidth } from "@mariozechner/pi-tui";
 
 describe("wrapSingleLine", () => {
@@ -182,5 +182,88 @@ describe("wrapLines", () => {
     expect(result.length).toBe(2);
     expect(result[0]).toContain("\x1b[31m");
     expect(result[1]).toContain("\x1b[32m");
+  });
+});
+
+describe("wordWrapSingleLine", () => {
+  test("returns short line unchanged", () => {
+    expect(wordWrapSingleLine("hello world", 20)).toEqual(["hello world"]);
+  });
+
+  test("wraps at word boundary", () => {
+    const result = wordWrapSingleLine("hello world foo", 11);
+    expect(result).toEqual(["hello world", "foo"]);
+  });
+
+  test("wraps long text at spaces", () => {
+    const result = wordWrapSingleLine("one two three four five", 10);
+    expect(result).toEqual(["one two", "three four", "five"]);
+  });
+
+  test("hard-wraps words longer than width", () => {
+    const result = wordWrapSingleLine("abcdefghij short", 6);
+    expect(result).toEqual(["abcdef", "ghij", "short"]);
+  });
+
+  test("handles empty string", () => {
+    expect(wordWrapSingleLine("", 10)).toEqual([""]);
+  });
+
+  test("does not leave trailing spaces at wrap point", () => {
+    const result = wordWrapSingleLine("hello world", 5);
+    expect(result).toEqual(["hello", "world"]);
+  });
+
+  test("does not start new line with spaces", () => {
+    const result = wordWrapSingleLine("ab   cd", 4);
+    // "ab" fits, spaces are consumed at wrap point, "cd" on next line
+    expect(result[0]).toBe("ab");
+    expect(result[1]).toBe("cd");
+  });
+
+  test("handles width 0", () => {
+    expect(wordWrapSingleLine("hello", 0)).toEqual(["hello"]);
+  });
+
+  test("preserves ANSI codes", () => {
+    const line = "\x1b[31mhello world\x1b[0m";
+    const result = wordWrapSingleLine(line, 7);
+    expect(result.length).toBe(2);
+    expect(result[0]).toContain("\x1b[31m");
+  });
+
+  test("handles long path-like strings without spaces", () => {
+    const path = "/Users/adam/Developer/bun/itsybitsy/.ittybitty/agents/agent-abc123/repo";
+    const result = wordWrapSingleLine(path, 40);
+    // No spaces, so falls back to character-level wrapping
+    expect(result.length).toBe(2);
+    expect(visibleWidth(result[0]!)).toBe(40);
+  });
+
+  test("wraps emoji-prefixed lines at word boundary", () => {
+    const line = "⚠️ Remove stale directory and archive it";
+    const result = wordWrapSingleLine(line, 25);
+    expect(result.length).toBeGreaterThanOrEqual(2);
+    // Every line should fit within width
+    for (const segment of result) {
+      expect(visibleWidth(segment)).toBeLessThanOrEqual(25);
+    }
+    // Lines should rejoin to original content (spaces consumed at break points)
+    expect(result.join(" ")).toBe(line);
+  });
+});
+
+describe("wordWrapLines", () => {
+  test("splits on newlines then word-wraps", () => {
+    const text = "short line\nthis is a longer line that should wrap";
+    const result = wordWrapLines(text, 20);
+    expect(result[0]).toBe("short line");
+    expect(result.length).toBeGreaterThan(2);
+  });
+
+  test("preserves empty lines", () => {
+    const text = "hello\n\nworld";
+    const result = wordWrapLines(text, 20);
+    expect(result).toEqual(["hello", "", "world"]);
   });
 });

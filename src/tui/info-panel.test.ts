@@ -105,6 +105,50 @@ describe("InfoPanelComponent", () => {
     expect(lines[0]!).toContain("\x1b[32m");
   });
 
+  test("shows orphan warning with 'not found' when manager missing", () => {
+    const panel = new InfoPanelComponent();
+    panel.displayHeight = 10;
+    const agent = makeAgent({ id: "agent-orphan" });
+    agent.orphaned = true;
+    agent.meta.manager = "agent-gone";
+    panel.agent = agent;
+    panel.allAgents = [makeFlatAgent(agent)];
+
+    const lines = panel.render(60);
+    const text = lines.map(stripAnsi).join("\n");
+    expect(text).toContain("Manager not found: agent-gone");
+  });
+
+  test("shows orphan warning with 'archived' when manager is archived", () => {
+    const panel = new InfoPanelComponent();
+    panel.displayHeight = 10;
+    const agent = makeAgent({ id: "agent-orphan2" });
+    agent.orphaned = true;
+    agent.meta.manager = "agent-old-mgr";
+    const archivedManager = makeAgent({ id: "agent-old-mgr" });
+    archivedManager.archived = true;
+    panel.agent = agent;
+    panel.allAgents = [makeFlatAgent(agent), makeFlatAgent(archivedManager)];
+
+    const lines = panel.render(60);
+    const text = lines.map(stripAnsi).join("\n");
+    expect(text).toContain("Manager archived: agent-old-mgr");
+  });
+
+  test("no orphan warning for non-orphaned agent", () => {
+    const panel = new InfoPanelComponent();
+    panel.displayHeight = 10;
+    const agent = makeAgent({ id: "agent-ok" });
+    agent.orphaned = false;
+    agent.meta.manager = "agent-mgr";
+    panel.agent = agent;
+
+    const lines = panel.render(60);
+    const text = lines.map(stripAnsi).join("\n");
+    expect(text).not.toContain("Manager not found");
+    expect(text).not.toContain("Manager archived");
+  });
+
   test("claude PID dead shows red indicator", () => {
     const panel = new InfoPanelComponent();
     panel.displayHeight = 5;

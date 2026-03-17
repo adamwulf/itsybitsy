@@ -9,7 +9,7 @@ import type { Agent, FlatEntry } from "../agents";
 import { getStateColors } from "./color-scheme";
 import { displayState } from "./agent-tree";
 import { wrapLines, padLines } from "./wrap";
-import { RESET, BOLD, DIM, GREEN, RED } from "./colors";
+import { RESET, BOLD, DIM, GREEN, RED, YELLOW } from "./colors";
 
 /** Check if a PID refers to a running process */
 function isPidAlive(pid: number): boolean {
@@ -54,6 +54,19 @@ export class InfoPanelComponent implements Component {
     const watchdogAlive = typeof watchdogPid === "number" && isPidAlive(watchdogPid);
     const watchdogColor = watchdogAlive ? GREEN : RED;
     lines.push(truncateToWidth(`${watchdogColor}●${RESET} Watchdog`, width, ""));
+
+    // Orphan warning
+    if (agent.orphaned && agent.meta.manager) {
+      const managerId = agent.meta.manager;
+      const managerEntry = this.allAgents.find(
+        (f) => f.kind === "agent" && f.agent.id === managerId
+      );
+      const reason =
+        managerEntry && managerEntry.kind === "agent" && managerEntry.agent.archived
+          ? "archived"
+          : "not found";
+      lines.push(truncateToWidth(`${YELLOW}⚠ Manager ${reason}: ${managerId}${RESET}`, width, ""));
+    }
 
     // Model
     lines.push(truncateToWidth(`${DIM}Model:${RESET} ${agent.meta.model}`, width, ""));

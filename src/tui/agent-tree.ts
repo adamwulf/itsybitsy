@@ -5,6 +5,7 @@
 import type { Component } from "@mariozechner/pi-tui";
 import { truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 import type { Agent, FlatEntry } from "../agents";
+import type { RepoHealthReport } from "../health-check";
 import { getStateColors } from "./color-scheme";
 import { RESET, BOLD, DIM, REVERSE, RED } from "./colors";
 
@@ -89,6 +90,7 @@ export class AgentTreeComponent implements Component {
   private scrollOffset = 0;
   private selectedId: string | null = null;
   questionAgentIds: Set<string> = new Set();
+  healthReports: Map<string, RepoHealthReport> = new Map();
   suppressSelection = false;
 
   get flatList(): FlatEntry[] {
@@ -344,7 +346,14 @@ export class AgentTreeComponent implements Component {
       if (item.kind === "repo-header") {
         const selected = i === this.selectedIndex && !this.suppressSelection;
         const triangle = item.hasAgents ? "▾" : "▸";
-        const truncated = truncateToWidth(`${BOLD}${triangle} ${item.repoName}${RESET}`, width, "");
+        // Append health indicator based on highest severity
+        let healthIndicator = "";
+        const report = this.healthReports.get(item.repoPath);
+        if (report && report.warnings.length > 0) {
+          const hasError = report.warnings.some((w) => w.severity === "error");
+          healthIndicator = hasError ? " 🔴" : " ⚠️";
+        }
+        const truncated = truncateToWidth(`${BOLD}${triangle} ${item.repoName}${healthIndicator}${RESET}`, width, "");
         if (selected) {
           const pad = Math.max(0, width - visibleWidth(truncated));
           const highlighted = truncated.replaceAll(RESET, RESET + REVERSE);

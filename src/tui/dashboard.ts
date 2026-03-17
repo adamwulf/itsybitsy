@@ -813,6 +813,11 @@ export class DashboardComponent implements Component {
     this.statusBar.pendingQuestions = questions.length;
     this.statusBar.errorCount = this.rightPane.errors.length + orphanedTmuxSessions.length;
 
+    // Wire health reports to agent tree
+    if (this.watcher) {
+      this.agentTree.healthReports = this.watcher.healthReports;
+    }
+
     const qIds = new Set<string>();
     for (const q of questions) qIds.add(q.agent);
     this.agentTree.questionAgentIds = qIds;
@@ -852,6 +857,12 @@ export class DashboardComponent implements Component {
     this.infoPanel.selectedRepoHeader = this.agentTree.selectedRepoHeader;
     this.infoPanel.selectedRepoPath = this.agentTree.selectedRepoPath;
     this.infoPanel.allAgents = this.agentTree.flatList;
+
+    // Wire health data to info panel and right pane
+    const selectedRepoPath = this.agentTree.selectedRepoPath ?? (selected?.repoPath ?? null);
+    const healthReport = selectedRepoPath && this.watcher ? this.watcher.healthReports.get(selectedRepoPath) : undefined;
+    this.infoPanel.healthReport = healthReport;
+    this.rightPane.healthReport = healthReport;
 
     // Auto-switch to/from REPO mode based on selection
     const currentMode = PANE_MODES[this.modeIndex];
@@ -1120,6 +1131,11 @@ export class DashboardComponent implements Component {
     else if (data === "?") { agentActions.handleHelp(this); }
     // Setup dialog
     else if (data === "h") { agentActions.handleSetup(this); }
+    // Re-check repo health
+    else if (data === "H") {
+      this.setNotice("Re-checking repo health...");
+      this.watcher?.recheckHealth();
+    }
     // Ghostty
     else if (data === "G") { agentActions.handleOpenGhostty(this); }
     // Cross-repo send

@@ -6,6 +6,7 @@
 import type { Component } from "@mariozechner/pi-tui";
 import { truncateToWidth } from "@mariozechner/pi-tui";
 import type { Agent, FlatEntry } from "../agents";
+import type { RepoHealthReport } from "../health-check";
 import { getStateColors } from "./color-scheme";
 import { displayState } from "./agent-tree";
 import { wrapLines, padLines } from "./wrap";
@@ -26,6 +27,7 @@ export class InfoPanelComponent implements Component {
   selectedRepoHeader: string | null = null;
   selectedRepoPath: string | null = null;
   allAgents: FlatEntry[] = [];
+  healthReport: RepoHealthReport | undefined = undefined;
   displayHeight = 5;
 
   invalidate(): void {}
@@ -113,6 +115,25 @@ export class InfoPanelComponent implements Component {
       }
       const breakdownStr = parts.join(", ");
       lines.push(truncateToWidth(breakdownStr, width, ""));
+    }
+
+    // Health summary
+    if (this.healthReport) {
+      const warnings = this.healthReport.warnings;
+      if (warnings.length === 0) {
+        lines.push(truncateToWidth(`${DIM}Health:${RESET} ✅ OK`, width, ""));
+      } else {
+        const errorCount = warnings.filter((w) => w.severity === "error").length;
+        const warnCount = warnings.filter((w) => w.severity === "warning").length;
+        const parts: string[] = [];
+        if (errorCount > 0) parts.push(`🔴 ${errorCount} error${errorCount !== 1 ? "s" : ""}`);
+        if (warnCount > 0) parts.push(`⚠️  ${warnCount} warning${warnCount !== 1 ? "s" : ""}`);
+        if (parts.length === 0) {
+          const infoCount = warnings.length;
+          parts.push(`ℹ️  ${infoCount} info`);
+        }
+        lines.push(truncateToWidth(`${DIM}Health:${RESET} ${parts.join(", ")}`, width, ""));
+      }
     }
 
     return padLines(lines, this.displayHeight);

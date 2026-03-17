@@ -6,6 +6,7 @@
 import type { Component } from "@mariozechner/pi-tui";
 import { truncateToWidth } from "@mariozechner/pi-tui";
 import type { Agent, FlatEntry, PendingQuestion, DenialEntry } from "../agents";
+import type { RepoHealthReport } from "../health-check";
 import { readAgentLog, readAgentPrompt, parseDenials } from "../agents";
 import { diffAgent, statusAgent } from "../ib-commands";
 import { wrapLines } from "./wrap";
@@ -107,6 +108,7 @@ export class RightPaneComponent implements Component {
   denialFilter: DenialFilter = "all";
   errors: string[] = [];
   orphanedTmuxSessions: string[] = [];
+  healthReport: RepoHealthReport | undefined = undefined;
   diffContent: string[] | null = null;
   diffLoading = false;
   statusContent: string[] | null = null;
@@ -256,6 +258,25 @@ export class RightPaneComponent implements Component {
           for (const { agent, connector } of repoAgents) {
             this.content.push(formatAgentRow(agent, connector, repoStateColWidth));
           }
+        }
+        // Health check section
+        this.content.push("");
+        this.content.push(`${DIM}─── Health ───${RESET}`);
+        if (this.healthReport && this.healthReport.warnings.length > 0) {
+          // Sort: errors first, then warnings, then info
+          const severityOrder: Record<string, number> = { error: 0, warning: 1, info: 2 };
+          const sorted = [...this.healthReport.warnings].sort(
+            (a, b) => (severityOrder[a.severity] ?? 3) - (severityOrder[b.severity] ?? 3)
+          );
+          for (const w of sorted) {
+            const icon = w.severity === "error" ? "🔴" : w.severity === "warning" ? "⚠️" : "ℹ️";
+            this.content.push(`${icon} ${w.message}`);
+            if (w.fix) {
+              this.content.push(`${DIM}   Fix: ${w.fix}${RESET}`);
+            }
+          }
+        } else {
+          this.content.push("✅ No configuration issues detected");
         }
         this.content.push("");
         this.content.push(`${DIM}  w: open folder    G: open in terminal    D: remove repo${RESET}`);

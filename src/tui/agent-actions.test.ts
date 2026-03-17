@@ -83,7 +83,7 @@ function makeMockCtx(overrides?: {
     },
     tui: { requestRender: () => {} },
     repos: overrides?.repos ?? [],
-    watcher: { refresh: () => refreshCalls.push(1), updateRepos: () => {} },
+    watcher: { refresh: () => refreshCalls.push(1), updateRepos: () => {}, recheckHealth: () => {} },
     diffTool: undefined,
     pendingSelectNewestInRepo: null,
     showDialog: (d: NonNullable<DialogState>) => { dialogs.push(d); },
@@ -93,6 +93,7 @@ function makeMockCtx(overrides?: {
     syncSelectedAgent: () => {},
     jumpToMode: () => {},
     setQuestionsFocused: () => {},
+    healthReport: undefined,
   };
   return { ctx, dialogs, notices, refreshCalls, scrollUpCalls, scrollDownCalls };
 }

@@ -7,6 +7,7 @@ import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { join } from "path";
 import { mkdtemp, rm, mkdir, writeFile } from "fs/promises";
 import { tmpdir } from "os";
+import { readFile } from "fs/promises";
 import {
   checkLeakedAgentHooks,
   checkMissingGlobalHooks,
@@ -18,7 +19,10 @@ import {
   checkRepoHealth,
   checkGlobalHealth,
   healthSpawnCtx,
+  getResolvableWarnings,
+  resolveHealthWarnings,
 } from "./health-check";
+import type { RepoHealthWarning } from "./health-check";
 
 let tmpDir: string;
 
@@ -558,5 +562,237 @@ describe("checkGlobalHealth", () => {
   test("returns array of warnings", async () => {
     const warnings = await checkGlobalHealth();
     expect(Array.isArray(warnings)).toBe(true);
+  });
+});
+
+// ── §14.8 — Auto-Resolve ───────────────────────────────────────────────────
+
+describe("getResolvableWarnings", () => {
+  test("filters to only resolvable categories", () => {
+    const warnings: RepoHealthWarning[] = [
+      { repoPath: "/r", severity: "error", category: "leaked-hooks", message: "leaked" },
+      { repoPath: "/r", severity: "warning", category: "missing-global-hooks", message: "missing" },
+      { repoPath: "/r", severity: "warning", category: "orphaned-dir", message: "stale directory" },
+      { repoPath: "/r", severity: "error", category: "malformed-meta", message: "malformed" },
+      { repoPath: "/r", severity: "warning", category: "orphaned-worktree", message: "orphaned wt" },
+      { repoPath: "/r", severity: "info", category: "orphaned-branch", message: "orphaned br" },
+      { repoPath: "/r", severity: "warning", category: "stale-manager-ref", message: "stale ref" },
+      { repoPath: "/r", severity: "warning", category: "wrong-agent-hooks", message: "wrong hooks" },
+    ];
+    const resolvable = getResolvableWarnings(warnings);
+    const categories = resolvable.map((w) => w.category);
+    expect(categories).toContain("leaked-hooks");
+    expect(categories).toContain("orphaned-dir");
+    expect(categories).toContain("orphaned-worktree");
+    expect(categories).toContain("orphaned-branch");
+    expect(categories).toContain("stale-manager-ref");
+    expect(categories).not.toContain("missing-global-hooks");
+    expect(categories).not.toContain("malformed-meta");
+    expect(categories).not.toContain("wrong-agent-hooks");
+    expect(resolvable.length).toBe(5);
+  });
+
+  test("excludes error-severity orphaned-dir (missing meta variant)", () => {
+    const warnings: RepoHealthWarning[] = [
+      { repoPath: "/r", severity: "error", category: "orphaned-dir", message: "no valid meta.json" },
+      { repoPath: "/r", severity: "warning", category: "orphaned-dir", message: "stale directory" },
+    ];
+    const resolvable = getResolvableWarnings(warnings);
+    expect(resolvable.length).toBe(1);
+    expect(resolvable[0]!.severity).toBe("warning");
+  });
+
+  test("returns empty for no resolvable warnings", () => {
+    const warnings: RepoHealthWarning[] = [
+      { repoPath: "/r", severity: "warning", category: "missing-global-hooks", message: "missing" },
+      { repoPath: "/r", severity: "error", category: "malformed-meta", message: "malformed" },
+    ];
+    expect(getResolvableWarnings(warnings).length).toBe(0);
+  });
+});
+
+describe("resolveHealthWarnings", () => {
+  test("resolves leaked-hooks by removing entries from settings.local.json", async () => {
+    const settingsDir = join(tmpDir, ".claude");
+    await mkdir(settingsDir, { recursive: true });
+    const settingsPath = join(settingsDir, "settings.local.json");
+    await writeFile(settingsPath, JSON.stringify({
+      hooks: {
+        PreToolUse: [{
+          hooks: [{ type: "command", command: "ib hook-check-path agent-leaked1" }],
+        }],
+        Stop: [{
+          hooks: [{ type: "command", command: "ib hook-status agent-leaked1" }],
+        }],
+      },
+      other: "preserved",
+    }));
+
+    const warnings: RepoHealthWarning[] = [{
+      repoPath: tmpDir,
+      severity: "error",
+      category: "leaked-hooks",
+      message: "Leaked agent hook",
+      agentId: "agent-leaked1",
+    }];
+
+    const result = await resolveHealthWarnings(warnings);
+    expect(result.resolved).toBe(1);
+    expect(result.failed).toBe(0);
+
+    const updated = JSON.parse(await readFile(settingsPath, "utf8"));
+    expect(updated.other).toBe("preserved");
+    // hooks should be cleaned up
+    expect(updated.hooks).toBeUndefined();
+  });
+
+  test("resolves orphaned-dir by removing directory", async () => {
+    const agentDir = join(tmpDir, ".ittybitty", "agents", "agent-stale2");
+    await mkdir(agentDir, { recursive: true });
+    await writeFile(join(agentDir, "meta.json"), JSON.stringify({ id: "agent-stale2" }));
+
+    const warnings: RepoHealthWarning[] = [{
+      repoPath: tmpDir,
+      severity: "warning",
+      category: "orphaned-dir",
+      message: "Agent agent-stale2 has no tmux session and no worktree — stale directory",
+      agentId: "agent-stale2",
+    }];
+
+    const result = await resolveHealthWarnings(warnings);
+    expect(result.resolved).toBe(1);
+
+    const exists = await Bun.file(join(agentDir, "meta.json")).exists();
+    expect(exists).toBe(false);
+  });
+
+  test("resolves orphaned-worktree by calling git worktree remove", async () => {
+    const commands: string[][] = [];
+    healthSpawnCtx.set((cmd: string[]) => {
+      commands.push(cmd);
+      return mockResult("", 0);
+    });
+
+    const warnings: RepoHealthWarning[] = [{
+      repoPath: tmpDir,
+      severity: "warning",
+      category: "orphaned-worktree",
+      message: "Orphaned git worktree for agent/agent-wt1",
+      fix: "git worktree remove /tmp/agent-wt1/repo",
+    }];
+
+    const result = await resolveHealthWarnings(warnings);
+    expect(result.resolved).toBe(1);
+
+    const worktreeCmd = commands.find((c) => c.includes("worktree") && c.includes("remove"));
+    expect(worktreeCmd).toBeDefined();
+    expect(worktreeCmd).toContain("/tmp/agent-wt1/repo");
+    expect(worktreeCmd).toContain("--force");
+  });
+
+  test("resolves orphaned-branch by calling git branch -D", async () => {
+    const commands: string[][] = [];
+    healthSpawnCtx.set((cmd: string[]) => {
+      commands.push(cmd);
+      return mockResult("", 0);
+    });
+
+    const warnings: RepoHealthWarning[] = [{
+      repoPath: tmpDir,
+      severity: "info",
+      category: "orphaned-branch",
+      message: "Orphaned git branch: agent/agent-br1 — no agent or worktree exists",
+    }];
+
+    const result = await resolveHealthWarnings(warnings);
+    expect(result.resolved).toBe(1);
+
+    const branchCmd = commands.find((c) => c.includes("branch") && c.includes("-D"));
+    expect(branchCmd).toBeDefined();
+    expect(branchCmd).toContain("agent/agent-br1");
+  });
+
+  test("resolves stale-manager-ref by removing manager field from meta.json", async () => {
+    const agentDir = join(tmpDir, ".ittybitty", "agents", "agent-child3");
+    await mkdir(agentDir, { recursive: true });
+    const metaPath = join(agentDir, "meta.json");
+    await writeFile(metaPath, JSON.stringify({
+      id: "agent-child3",
+      tmux_session: "ib-agent-child3",
+      created_epoch: 1000,
+      manager: "agent-gone",
+    }));
+
+    const warnings: RepoHealthWarning[] = [{
+      repoPath: tmpDir,
+      severity: "warning",
+      category: "stale-manager-ref",
+      message: "Agent agent-child3 references non-existent manager agent-gone",
+      agentId: "agent-child3",
+    }];
+
+    const result = await resolveHealthWarnings(warnings);
+    expect(result.resolved).toBe(1);
+
+    const updated = JSON.parse(await readFile(metaPath, "utf8"));
+    expect(updated.id).toBe("agent-child3");
+    expect(updated.manager).toBeUndefined();
+    expect(updated.tmux_session).toBe("ib-agent-child3");
+  });
+
+  test("skips non-resolvable categories", async () => {
+    const warnings: RepoHealthWarning[] = [
+      { repoPath: tmpDir, severity: "warning", category: "missing-global-hooks", message: "missing" },
+      { repoPath: tmpDir, severity: "error", category: "malformed-meta", message: "malformed" },
+      { repoPath: tmpDir, severity: "warning", category: "wrong-agent-hooks", message: "wrong" },
+    ];
+
+    const result = await resolveHealthWarnings(warnings);
+    expect(result.resolved).toBe(0);
+    expect(result.failed).toBe(0);
+    expect(result.details.length).toBe(0);
+  });
+
+  test("handles partial failures gracefully", async () => {
+    // Set up one resolvable (stale-manager-ref) and one that will fail (orphaned-worktree with bad git)
+    const agentDir = join(tmpDir, ".ittybitty", "agents", "agent-ok1");
+    await mkdir(agentDir, { recursive: true });
+    const metaPath = join(agentDir, "meta.json");
+    await writeFile(metaPath, JSON.stringify({
+      id: "agent-ok1",
+      manager: "agent-gone",
+    }));
+
+    healthSpawnCtx.set(() => mockResult("error: not a worktree", 128));
+
+    const warnings: RepoHealthWarning[] = [
+      {
+        repoPath: tmpDir,
+        severity: "warning",
+        category: "orphaned-worktree",
+        message: "Orphaned git worktree",
+        fix: "git worktree remove /nonexistent/path",
+      },
+      {
+        repoPath: tmpDir,
+        severity: "warning",
+        category: "stale-manager-ref",
+        message: "Agent agent-ok1 references non-existent manager agent-gone",
+        agentId: "agent-ok1",
+      },
+    ];
+
+    const result = await resolveHealthWarnings(warnings);
+    expect(result.resolved).toBe(1);
+    expect(result.failed).toBe(1);
+    expect(result.details.length).toBe(2);
+
+    const failedDetail = result.details.find((d) => !d.success);
+    expect(failedDetail).toBeDefined();
+    expect(failedDetail!.error).toBeDefined();
+
+    const successDetail = result.details.find((d) => d.success);
+    expect(successDetail).toBeDefined();
+    expect(successDetail!.warning.category).toBe("stale-manager-ref");
   });
 });

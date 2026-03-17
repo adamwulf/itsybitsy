@@ -1867,4 +1867,33 @@ The `H` keybinding (Shift+h, distinct from `h` for setup dialog) triggers a re-r
 - Health checks must not modify any files — they are strictly read-only and diagnostic.
 - The `readAllAgents()` pipeline already reads `meta.json` for every agent — health checks for §14.3.3, §14.3.4, and §14.3.7 can piggyback on this data rather than re-reading.
 
+### 14.8 Auto-Resolve
+
+Some health check categories can be automatically resolved. The `f` keybinding (active only in REPO mode when resolvable warnings exist) triggers auto-resolution after a confirmation dialog.
+
+#### 14.8.1 Resolvable Categories
+
+| Category | Action |
+|----------|--------|
+| `leaked-hooks` (§14.3.1) | Remove the matching hook entries from `.claude/settings.local.json` |
+| `orphaned-dir` (§14.3.3, stale variant only) | Remove the agent directory (`rm -rf`) — only the "stale directory" variant (warning severity, has valid meta but no tmux/worktree), NOT the "no valid meta.json" variant (error severity) |
+| `orphaned-worktree` (§14.3.5) | Run `git worktree remove <path> --force` |
+| `orphaned-branch` (§14.3.6) | Run `git branch -D <branch>` |
+| `stale-manager-ref` (§14.3.7) | Remove the `manager` field from the agent's `meta.json` |
+
+#### 14.8.2 Non-Resolvable Categories
+
+| Category | Reason |
+|----------|--------|
+| `missing-global-hooks` (§14.3.2) | Requires running setup (`h` key) — too complex for a single auto-fix |
+| `malformed-meta` (§14.3.4) | Risk of data loss — malformed files need manual inspection |
+| `orphaned-dir` (§14.3.3, missing-meta variant) | Error severity orphaned dirs (no valid meta.json) could contain important data — requires manual cleanup |
+| `wrong-agent-hooks` (§14.3.8) | Modifying a potentially running agent's settings is risky |
+
+#### 14.8.3 User Interaction
+
+1. **Keybinding**: `f` — only active when in REPO mode with at least one resolvable warning. Shown in the REPO pane hint line and status bar when applicable.
+2. **Confirmation dialog**: Lists each resolution action (one line per warning with severity icon). Defaults to Cancel.
+3. **Post-resolve**: After resolution completes, a timed notice shows the result count (e.g., "Fixed 3 issue(s)"). Health checks are automatically re-run to update the display.
+
 ---

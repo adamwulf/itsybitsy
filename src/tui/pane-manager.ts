@@ -7,6 +7,7 @@ import type { Component } from "@mariozechner/pi-tui";
 import { truncateToWidth } from "@mariozechner/pi-tui";
 import type { Agent, FlatEntry, PendingQuestion, DenialEntry } from "../agents";
 import type { RepoHealthReport } from "../health-check";
+import { getResolvableWarnings } from "../health-check";
 import { readAgentLog, readAgentPrompt, parseDenials } from "../agents";
 import { diffAgent, statusAgent } from "../ib-commands";
 import { wrapLines } from "./wrap";
@@ -279,7 +280,8 @@ export class RightPaneComponent implements Component {
           this.content.push("✅ No configuration issues detected");
         }
         this.content.push("");
-        this.content.push(`${DIM}  w: open folder    G: open in terminal    D: remove repo${RESET}`);
+        const fixHint = this.healthReport && getResolvableWarnings(this.healthReport.warnings).length > 0 ? "    f: fix" : "";
+        this.content.push(`${DIM}  w: open folder    G: open in terminal    D: remove repo${fixHint}${RESET}`);
         break;
       }
       case "QUESTIONS": {

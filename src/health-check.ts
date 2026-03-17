@@ -522,3 +522,177 @@ export async function checkRepoHealth(repoPath: string): Promise<RepoHealthRepor
 export async function checkGlobalHealth(): Promise<RepoHealthWarning[]> {
   return checkMissingGlobalHooks();
 }
+
+// ── Auto-resolve ────────────────────────────────────────────────────────────
+
+const RESOLVABLE_CATEGORIES = new Set([
+  "leaked-hooks",
+  "orphaned-dir",
+  "orphaned-worktree",
+  "orphaned-branch",
+  "stale-manager-ref",
+]);
+
+/** Filter warnings to only those that can be auto-resolved. */
+export function getResolvableWarnings(warnings: RepoHealthWarning[]): RepoHealthWarning[] {
+  return warnings.filter((w) => {
+    if (!RESOLVABLE_CATEGORIES.has(w.category)) return false;
+    // orphaned-dir: only the "stale directory" variant (has valid meta but no tmux/worktree),
+    // not the "no valid meta.json" variant (error severity, missing-meta)
+    if (w.category === "orphaned-dir" && w.severity === "error") return false;
+    return true;
+  });
+}
+
+export interface ResolveDetail {
+  warning: RepoHealthWarning;
+  success: boolean;
+  error?: string;
+}
+
+export interface ResolveResult {
+  resolved: number;
+  failed: number;
+  details: ResolveDetail[];
+}
+
+/** Auto-resolve the given warnings. Only processes resolvable categories. */
+export async function resolveHealthWarnings(warnings: RepoHealthWarning[]): Promise<ResolveResult> {
+  const details: ResolveDetail[] = [];
+  let resolved = 0;
+  let failed = 0;
+
+  for (const w of warnings) {
+    if (!RESOLVABLE_CATEGORIES.has(w.category) || (w.category === "orphaned-dir" && w.severity === "error")) {
+      // Skip non-resolvable
+      continue;
+    }
+    try {
+      await resolveOne(w);
+      details.push({ warning: w, success: true });
+      resolved++;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      details.push({ warning: w, success: false, error: msg });
+      failed++;
+    }
+  }
+
+  return { resolved, failed, details };
+}
+
+async function resolveOne(w: RepoHealthWarning): Promise<void> {
+  switch (w.category) {
+    case "leaked-hooks":
+      await resolveLeakedHooks(w);
+      break;
+    case "orphaned-dir":
+      await resolveOrphanedDir(w);
+      break;
+    case "orphaned-worktree":
+      await resolveOrphanedWorktree(w);
+      break;
+    case "orphaned-branch":
+      await resolveOrphanedBranch(w);
+      break;
+    case "stale-manager-ref":
+      await resolveStaleManagerRef(w);
+      break;
+  }
+}
+
+/** Remove leaked agent hook entries from .claude/settings.local.json */
+async function resolveLeakedHooks(w: RepoHealthWarning): Promise<void> {
+  const settingsPath = join(w.repoPath, ".claude", "settings.local.json");
+  const settings = await readJsonFile(settingsPath);
+  if (!settings || typeof settings !== "object") return;
+
+  const s = settings as Record<string, unknown>;
+  const hooks = s.hooks;
+  if (!hooks || typeof hooks !== "object") return;
+
+  let modified = false;
+  const hooksObj = hooks as Record<string, unknown>;
+
+  for (const hookType of Object.keys(hooksObj)) {
+    const hookArray = hooksObj[hookType];
+    if (!Array.isArray(hookArray)) continue;
+
+    const filtered = hookArray.filter((entry: unknown) => {
+      const entryHooks = (entry as Record<string, unknown>)?.hooks;
+      if (!Array.isArray(entryHooks)) return true;
+      // Remove entry if ANY of its hooks match an agent-specific pattern with this warning's agentId
+      const hasLeaked = entryHooks.some((h: unknown) => {
+        const cmd = (h as Record<string, unknown>)?.command;
+        if (typeof cmd !== "string") return false;
+        return AGENT_HOOK_PATTERNS.some((pattern) => {
+          const match = cmd.match(pattern);
+          return match && (!w.agentId || match[1] === w.agentId);
+        });
+      });
+      return !hasLeaked;
+    });
+
+    if (filtered.length !== hookArray.length) {
+      modified = true;
+      if (filtered.length === 0) {
+        delete hooksObj[hookType];
+      } else {
+        hooksObj[hookType] = filtered;
+      }
+    }
+  }
+
+  // Clean up empty hooks object
+  if (Object.keys(hooksObj).length === 0) {
+    delete s.hooks;
+  }
+
+  if (modified) {
+    await Bun.write(settingsPath, JSON.stringify(s, null, 2) + "\n");
+  }
+}
+
+/** Remove a stale agent directory */
+async function resolveOrphanedDir(w: RepoHealthWarning): Promise<void> {
+  if (!w.agentId) return;
+  const agentDir = join(w.repoPath, ".ittybitty", "agents", w.agentId);
+  const { rm } = await import("fs/promises");
+  await rm(agentDir, { recursive: true, force: true });
+}
+
+/** Remove an orphaned git worktree */
+async function resolveOrphanedWorktree(w: RepoHealthWarning): Promise<void> {
+  // Extract worktree path from the fix field
+  const match = w.fix?.match(/git worktree remove (.+)/);
+  if (!match) return;
+  const worktreePath = match[1]!;
+  const result = await healthSpawnCtx.run(["git", "-C", w.repoPath, "worktree", "remove", worktreePath, "--force"]);
+  if (result.exitCode !== 0) {
+    throw new Error(`git worktree remove failed: ${result.stderr}`);
+  }
+}
+
+/** Delete an orphaned git branch */
+async function resolveOrphanedBranch(w: RepoHealthWarning): Promise<void> {
+  // Extract branch name from message
+  const match = w.message.match(/Orphaned git branch: (agent\/\S+)/);
+  if (!match) return;
+  const branchName = match[1]!;
+  const result = await healthSpawnCtx.run(["git", "-C", w.repoPath, "branch", "-D", branchName]);
+  if (result.exitCode !== 0) {
+    throw new Error(`git branch -D failed: ${result.stderr}`);
+  }
+}
+
+/** Remove stale manager field from meta.json */
+async function resolveStaleManagerRef(w: RepoHealthWarning): Promise<void> {
+  if (!w.agentId) return;
+  const metaPath = join(w.repoPath, ".ittybitty", "agents", w.agentId, "meta.json");
+  const meta = await readJsonFile(metaPath);
+  if (!meta || typeof meta !== "object") return;
+
+  const m = meta as Record<string, unknown>;
+  delete m.manager;
+  await Bun.write(metaPath, JSON.stringify(m, null, 2) + "\n");
+}

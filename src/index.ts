@@ -216,7 +216,8 @@ async function main() {
             const state = displayState(agent.state);
             const colorCode = stateColors[state] ?? DIM;
             const orphanMark = agent.orphaned ? "⚠ " : "";
-            console.log(`${indent}${orphanMark}${icon} ${agent.id}  ${colorCode}${state}${RESET}  ${agent.age}  ${DIM}${agent.meta.model}${RESET}`);
+            const mgr = agent.meta.manager ? `  ${DIM}mgr:${agent.meta.manager.slice(-8)}${RESET}` : "";
+            console.log(`${indent}${orphanMark}${icon} ${agent.id}  ${colorCode}${state}${RESET}  ${agent.age}  ${DIM}${agent.meta.model}${RESET}${mgr}`);
           }
         }
       }

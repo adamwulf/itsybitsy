@@ -1077,7 +1077,7 @@ Implement session spawn/teardown and state detection:
 - [ ] `ensureSystemCoordinator(): Promise<string>` — checks if `ib-coordinator` tmux session exists; if not, creates it. TOCTOU: catch `tmux new-session` failure and fall through to existing session path.
 - [ ] Ensure `~/.itsybitsy/` exists and is a git repo (`git init`, not `--bare`). Write `.gitignore` with `*` to prevent accidental commits.
 - [ ] Write `~/.itsybitsy/.claude/settings.local.json` with system coordinator permissions (from 47a-i template)
-- [ ] Write prompt to `~/.itsybitsy/coordinator-prompt.txt`. Start Claude in interactive mode: `claude --model <coordinator.model>` via `tmux send-keys`. After a **3-second delay** (for Claude to start and accept input), send the initial prompt via two separate `Bun.spawn` calls: `tmux send-keys -l <prompt>` then `tmux send-keys Enter`. **Note**: do NOT use `-p` flag (it runs non-interactively and exits after one response).
+- [ ] Write prompt to `~/.itsybitsy/coordinator-prompt.txt`. Start Claude in interactive mode: `claude --model <coordinator.model>` via `tmux send-keys`. After a **3-second delay** (for Claude to start and accept input), send the initial prompt via two separate `Bun.spawn` calls: `tmux send-keys -l <prompt>` then `tmux send-keys Enter`. **Note**: do NOT use `-p` flag (it runs non-interactively and exits after one response). **Failure mode**: If Claude takes longer than 3s to start, the prompt may be lost. The user can restart with `R` key. A future improvement could poll tmux output for a readiness indicator, but the fixed delay is sufficient for initial implementation.
 - [ ] PID-based reference counting: `~/.itsybitsy/coordinator.refs` — append PID on startup, remove on exit. All ref file operations use atomic write (write temp → rename). Prune stale PIDs via `process.kill(pid, 0)` liveness check. Kill session when no live PIDs remain.
 - [ ] `releaseSystemCoordinator(): Promise<void>` — remove PID from refs; if no live PIDs remain, kill tmux session. Per-repo coordinator pausing is a no-op in this phase (coordinators don't exist yet) — 48h wires in the actual pause logic via a callback or by extending this function.
 - [ ] `restartSystemCoordinator(): Promise<void>` — kill tmux session + re-create
@@ -1124,6 +1124,7 @@ Add the system coordinator as the first entry in the agent tree:
 - [ ] System coordinator is selectable via j/k navigation
 - [ ] System coordinator selection sets selectedAgent to a synthetic Agent-like object (or a separate selection type)
 - [ ] System coordinator state detection uses tmux-only approach (SPEC.md §12.1.6)
+- [ ] Update `info-panel.ts` to handle `kind: "system-coordinator"` — render empty/no-op (info panel is hidden in full-width mode, but the code must handle this kind without crashing)
 - [ ] **Blast radius audit**: Adding `kind: "system-coordinator"` to the `FlatEntry` union means ALL consumers need updating — every `flatList.filter()`, `Extract<FlatEntry, ...>`, and exhaustive switch. Files: `dashboard.ts`, `dashboard.test.ts`, `agent-actions.ts`, `pane-manager.ts`, `info-panel.ts`
 - [ ] **Action key suppression**: When system coordinator is selected, suppress action keys that don't apply: `x` (kill), `!` (nuke), `m` (merge), `r` (reassign). `s` (send) IS allowed — routes via `tmux send-keys` per SPEC §12.3.3 (TUI uses user-interactive path, not inbox). `R` (resume/restart) is allowed (triggers restart). Update `agent-actions.ts` to check for `kind: "system-coordinator"`.
 - [ ] **`s` key routing**: When system coordinator is selected and user presses `s`, the standard send dialog opens and the message is delivered via `tmux send-keys -t ib-coordinator -l "<message>"` followed by `tmux send-keys -t ib-coordinator Enter` (same as the sidebar input field). This matches SPEC §12.3.3 — TUI interactions are user-interactive and use tmux send-keys directly. The `ib inbox write` path is only for programmatic/automated senders (watchdog, agents).
@@ -1221,7 +1222,7 @@ Modify watchdog for coordinator agents:
 - [ ] Detect `coordinator: true` in meta.json at watchdog startup
 - [ ] Coordinators are NOT nudged to complete — skip the `waiting` handler's exponential backoff nudge
 - [ ] Coordinators DO get rate-limit bypass, compacting detection, auto-compact
-- [ ] When a coordinator enters `waiting` with no active children: notify system coordinator instead of a manager
+- [ ] When a coordinator enters `waiting` with no active children: notify system coordinator instead of a manager. **Active children check**: read all agents in the repo, filter by `meta.json` `manager === "coordinator"`, check state against active set (`creating`, `running`, `waiting`, `compacting`). This check runs in the watchdog's poll loop whenever the coordinator's state transitions to `waiting`.
 - [ ] When a coordinator enters `complete`: notify system coordinator (completion notification goes to system coordinator instead of parent manager, since coordinators have no manager)
 - [ ] `notifySystemCoordinator(message)` — writes message file to `~/.itsybitsy/coordinator-inbox/` with `--source watchdog` (the watchdog runs from the coordinator's worktree, so CWD-based auto-detection would incorrectly set source to coordinator's agent ID). Uses file-based message queue (SPEC.md §12.3.4). Avoids fragile `tmux send-keys` which can corrupt the session if coordinator is mid-response.
 - [ ] **Fallback when system coordinator is not running**: `notifySystemCoordinator()` writes to inbox regardless of whether `ib-coordinator` tmux session exists. Messages are queued for processing when the system coordinator is restarted.
@@ -1256,7 +1257,7 @@ Add ability to spawn per-repo coordinators from the TUI:
 
 Support addressing coordinators by name:
 
-- [ ] `ib send coordinator "message"` — always addresses the system coordinator (via `ib inbox write`)
+- [ ] `ib send coordinator "message"` — always addresses the system coordinator. `sendMessage()` calls the inbox write function from `src/coordinator.ts` directly (not shelling out to `ib inbox write`) for cleaner error handling and avoiding subprocess overhead.
 - [ ] `ib send <repo-name> "message"` — addresses the per-repo coordinator for that repo (using repo basename from `src/registry.ts` to look up the coordinator agent). This is how the system coordinator reaches per-repo coordinators.
 - [ ] `sendMessage()` function: detect `coordinator` as target → system coordinator; detect registered repo basename as target → per-repo coordinator. Resolution priority: literal `coordinator` → repo basename → standard agent ID matching (SPEC.md §12.3.1). **Note**: repo basenames take priority over agent ID substring matching — if a repo is named `agent`, `ib send agent "msg"` addresses the repo coordinator, not `agent-a1b2c3d4`. Users can bypass with full agent IDs.
 - [ ] Error with clear message when repo exists but has no coordinator: "No coordinator for repo <name>"
@@ -1312,7 +1313,7 @@ Complete the input field component (may already be partially implemented):
 **Files:** `src/tui/sidebar.ts`, `src/tui/dashboard.ts`
 
 - [ ] When `coordinator` panel has focus: render input field at bottom of coordinator section
-- [ ] On submit: strip newlines (`\n`, `\r`) from message text (prevents multi-line injection — see SPEC §12.3.3), then `tmux send-keys -t ib-coordinator -l "<message>"` followed by `tmux send-keys -t ib-coordinator Enter`
+- [ ] On submit: strip all control characters (code points < 0x20 except space) from message text — prevents Ctrl-C/D/Escape injection and multi-line injection (see SPEC §12.3.3). Then `tmux send-keys -t ib-coordinator -l "<message>"` followed by `tmux send-keys -t ib-coordinator Enter`
 - [ ] Subtract 3 lines from coordinator panel display height when input field is visible
 - [ ] Tests for submit routing
 

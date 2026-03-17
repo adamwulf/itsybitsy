@@ -1240,7 +1240,7 @@ The system coordinator does **not** have a standard watchdog or stop hook. It is
   3. Rate limit patterns in last 15 lines of tmux output → `rate_limited`
   4. Otherwise → `running`
 - The system coordinator has no `waiting` or `complete` states — it runs indefinitely. There is no meta.json to store state, so tmux is the sole source of truth.
-- If the system coordinator session dies unexpectedly, the sidebar panel shows "System coordinator stopped — press Enter to restart" and `ib watch` can restart it on demand
+- If the system coordinator session dies unexpectedly, the sidebar panel shows "System coordinator stopped — press R to restart". The `R` key (same as agent resume) triggers `restartSystemCoordinator()` when the system coordinator is selected.
 - The system coordinator is expected to run indefinitely — it is never nudged to complete
 
 ### 12.2 Per-Repo Coordinators
@@ -1314,7 +1314,7 @@ Key differences from regular agents:
 - **Has Read/Glob/Grep/LS** — coordinators can read the codebase for context via Claude Code's built-in tools (which cannot perform writes)
 - **No Task/Agent** — coordinators spawn sub-agents only via `Bash(ib:*)`, not Claude's built-in Task/Agent tools. This ensures all agents are tracked through the ib system.
 
-**Bash permission pattern assumption [^needs review]**: The `Bash(<command>:*)` permission patterns (e.g., `Bash(ib:*)`, `Bash(git status:*)`) rely on Claude Code's permission system matching the command prefix, not the full shell pipeline. Claude Code presents each Bash tool call as a single command string — the permission check matches the command prefix against the pattern. Shell metacharacters (`&&`, `;`, `|`, `>`) within a single Bash tool call are part of the command string that Claude generates, and Claude Code's permission system evaluates the entire command. The unqualified `Bash` deny entry ensures that any command not matching an explicit allow pattern is denied. This defense-in-depth approach means even if a coordinator attempted to chain commands (e.g., `ib list && cat secret.txt`), the command would need to match an allow pattern to execute.
+**Bash permission pattern and shell metacharacters**: Claude Code's `Bash(<command>:*)` permission patterns match based on command prefix — `Bash(ib:*)` allows any command starting with `ib`. This means a chained command like `ib list && cat secret.txt` would match `Bash(ib:*)` because the full string starts with `ib`. **Mitigation**: The coordinator's session-start hook and itsybitsy's `intercept-task` hook (§6) can reject Bash tool calls containing shell metacharacters (`;`, `&&`, `||`, `|`, `>`, `>>`, `<`, `` ` ``, `$(`) before they reach Claude Code's permission check. This is implemented as a PreToolUse hook that inspects the Bash command string and blocks it if metacharacters are found after the initial command. This is a defense-in-depth layer on top of Claude Code's prefix matching — the primary trust boundary is that coordinators are Claude agents following instructions, and the hooks catch edge cases where the agent might attempt to circumvent its role.
 - **No WebFetch/WebSearch** — coordinators don't need internet access
 - **No KillShell** — coordinators don't run long-lived shell processes
 
@@ -1383,7 +1383,7 @@ Examples:
 - `ib send coordinator "message"` → system coordinator (via `ib inbox write`)
 - `ib send itsybitsy "message"` → per-repo coordinator for the itsybitsy repo (via `tmux send-keys`)
 - `ib send agent-a1b2c3d4 "message"` → regular agent (unchanged)
-- `ib kill coordinator` → per-repo coordinator (standard agent ID resolution)
+- `ib kill coordinator` → per-repo coordinator for the current repo (standard agent ID resolution uses CWD to determine which repo's `.ittybitty/agents/` to search)
 - `ib nuke coordinator` → per-repo coordinator + all its children (§1.8)
 - `ib send itsybitsy "message"` → per-repo coordinator for itsybitsy (the only way to message a per-repo coordinator directly, since `ib send coordinator` routes to the system coordinator)
 
@@ -1406,7 +1406,7 @@ Repo basenames take priority over agent ID substring matching in `ib send`, so i
 
 The system coordinator has two messaging paths, each for a different context:
 
-**User-interactive (TUI)**: When the user types in the coordinator sidebar input field or uses `s` with the system coordinator selected, `tmux send-keys -t ib-coordinator -l "<message>"` followed by a separate `tmux send-keys -t ib-coordinator Enter` is used. The `-l` (literal) flag prevents tmux from interpreting special key sequences in the message text. **Newline sanitization**: Before sending, newline characters (`\n`, `\r`) must be stripped or replaced with spaces to prevent injecting multiple inputs into the coordinator's Claude session. A multi-line message sent via `tmux send-keys` would cause the first line to be submitted immediately (when the newline is encountered), with remaining lines injected as separate inputs. This is safe because the user controls timing and can see whether the coordinator is busy.
+**User-interactive (TUI)**: When the user types in the coordinator sidebar input field or uses `s` with the system coordinator selected, `tmux send-keys -t ib-coordinator -l "<message>"` followed by a separate `tmux send-keys -t ib-coordinator Enter` is used. The `-l` (literal) flag prevents tmux from interpreting special key sequences in the message text. **Control character sanitization**: Before sending, all non-printable characters must be stripped: newlines (`\n`, `\r`) to prevent injecting multiple inputs, `\x03` (Ctrl-C) to prevent killing the Claude process, `\x04` (Ctrl-D, EOF), `\x1a` (Ctrl-Z, suspend), and `\x1b` (Escape, which could corrupt terminal state or trigger escape sequences). In practice, strip all characters with code points below `0x20` except space (`0x20`). The `-l` flag on `tmux send-keys` prevents tmux from interpreting special key names, but the receiving Claude process would still see control characters in its stdin. This is safe because the user controls timing and can see whether the coordinator is busy.
 
 **Programmatic (watchdog, automated notifications)**: When the watchdog or other automated systems need to notify the system coordinator, they use the `ib inbox` command (see §12.3.4). This avoids the race condition of injecting text via `tmux send-keys` while the coordinator is mid-response.
 

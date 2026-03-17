@@ -31,6 +31,8 @@ import { displayState, computeStateColWidth, AGE_COL_WIDTH } from "./agent-tree"
 import type { PaneMode } from "./pane-manager";
 import { RESET, BOLD, DIM, RED } from "./colors";
 import { MIN_LEFT_WIDTH, MAX_LEFT_WIDTH } from "./split-pane";
+import type { RepoHealthReport } from "../health-check";
+import { getResolvableWarnings, resolveHealthWarnings } from "../health-check";
 
 const SCROLL_STEP = 10;
 
@@ -56,7 +58,7 @@ export interface ActionCtx {
   splitPane: { getLeftWidth(): number; setLeftWidth(w: number): void };
   tui: { requestRender(): void } | null;
   repos: RepoEntry[];
-  watcher: { refresh(): void; updateRepos(repos: RepoEntry[]): void } | null;
+  watcher: { refresh(): void; updateRepos(repos: RepoEntry[]): void; recheckHealth(): void } | null;
   diffTool: string | undefined;
   pendingSelectNewestInRepo: string | null;
   showDialog(dialog: NonNullable<DialogState>): void;
@@ -66,6 +68,7 @@ export interface ActionCtx {
   syncSelectedAgent(): void;
   jumpToMode(mode: PaneMode, forceRefresh?: boolean): void;
   setQuestionsFocused(value: boolean): void;
+  healthReport: RepoHealthReport | undefined;
 }
 
 export function handleKill(ctx: ActionCtx) {
@@ -581,6 +584,7 @@ export function handleHelp(ctx: ActionCtx) {
       row("+ / A", "add repo"),
       row("x / D", "remove repo (on header)"),
       row("r", "rename repo (on header)"),
+      row("f", "fix resolvable health warnings"),
       "",
       header("Open"),
       row("w", "worktree"),
@@ -1115,6 +1119,46 @@ export async function handleFolderBrowser(ctx: ActionCtx) {
         }
       }).catch((err) => {
         ctx.setNotice(`Error adding repo: ${err}`);
+      });
+    },
+  });
+}
+
+export function handleResolveHealth(ctx: ActionCtx) {
+  if (ctx.rightPane.mode !== "REPO" || !ctx.agentTree.selectedRepoHeader) {
+    ctx.setNotice("Fix is only available in REPO mode");
+    return;
+  }
+  const report = ctx.healthReport;
+  if (!report || report.warnings.length === 0) {
+    ctx.setNotice("No health issues to fix");
+    return;
+  }
+  const resolvable = getResolvableWarnings(report.warnings);
+  if (resolvable.length === 0) {
+    ctx.setNotice("No auto-resolvable issues");
+    return;
+  }
+
+  const lines = resolvable.map((w) => {
+    const icon = w.severity === "error" ? "🔴" : w.severity === "warning" ? "⚠️" : "ℹ️";
+    return `${icon} ${w.fix || w.message}`;
+  });
+
+  ctx.showDialog({
+    type: "confirm",
+    prompt: `Auto-fix ${resolvable.length} issue(s)?\n${lines.join("\n")}`,
+    confirmLabel: "Fix",
+    focusedButton: "cancel",
+    onYes: () => {
+      ctx.closeDialog();
+      ctx.executeAndRefresh(async () => {
+        const result = await resolveHealthWarnings(resolvable);
+        const msg = result.failed > 0
+          ? `Fixed ${result.resolved}, failed ${result.failed}`
+          : `Fixed ${result.resolved} issue(s)`;
+        ctx.setNotice(msg);
+        ctx.watcher?.recheckHealth();
       });
     },
   });

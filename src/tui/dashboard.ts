@@ -58,6 +58,7 @@ import type { LayoutState } from "./layout";
 import { InputFieldComponent } from "./input-field";
 import { sendMessage } from "../ib-commands";
 import { stripAnsi } from "../parse-state";
+import { getResolvableWarnings } from "../health-check";
 
 // Re-export for test compatibility
 export { AgentTreeComponent, formatAgentRow } from "./agent-tree";
@@ -283,6 +284,7 @@ class StatusBarComponent implements Component {
   usageError = false;
   version = "";
   repoHeaderSelected = false;
+  hasResolvableWarnings = false;
 
   invalidate(): void {}
 
@@ -302,8 +304,9 @@ class StatusBarComponent implements Component {
     let row1Left: string;
     let row2Left: string;
     if (this.repoHeaderSelected) {
+      const fixHint = this.hasResolvableWarnings ? "    f: fix" : "";
       row1Left = `${DIM}j/k: select    J/K: repo    ;/l: scroll    p/n: pane    ${qLabel}${errBadge}${RESET}`;
-      row2Left = `${DIM}@: jump    /: commands    a: new agent    ?: help    h: setup    A: add repo${RESET}`;
+      row2Left = `${DIM}@: jump    /: commands    a: new agent    ?: help    h: setup    A: add repo${fixHint}${RESET}`;
     } else {
       row1Left = `${DIM}j/k: select    J/K: repo    ;/l: scroll    p/n: pane    ${qLabel}    s: send    m: merge${errBadge}${RESET}`;
       row2Left = `${DIM}@: jump    /: commands    a: new agent    ?: help    h: setup    x: kill${RESET}`;
@@ -480,6 +483,11 @@ export class DashboardComponent implements Component {
   repos: RepoEntry[] = [];
   private noticeCounter = 0;
   diffTool: string | undefined;
+  /** Health report for the currently selected repo — used by ActionCtx */
+  get healthReport(): import("../health-check").RepoHealthReport | undefined {
+    const repoPath = this.agentTree.selectedRepoPath ?? (this.agentTree.selectedAgent?.repoPath ?? null);
+    return repoPath && this.watcher ? this.watcher.healthReports.get(repoPath) : undefined;
+  }
   private lastSentNotice: string | null = null;
   private usageTimer: ReturnType<typeof setInterval> | null = null;
   pendingSelectNewestInRepo: string | null = null;
@@ -863,6 +871,7 @@ export class DashboardComponent implements Component {
     const healthReport = selectedRepoPath && this.watcher ? this.watcher.healthReports.get(selectedRepoPath) : undefined;
     this.infoPanel.healthReport = healthReport;
     this.rightPane.healthReport = healthReport;
+    this.statusBar.hasResolvableWarnings = !!(healthReport && getResolvableWarnings(healthReport.warnings).length > 0);
 
     // Auto-switch to/from REPO mode based on selection
     const currentMode = PANE_MODES[this.modeIndex];
@@ -1136,6 +1145,8 @@ export class DashboardComponent implements Component {
       this.setNotice("Re-checking repo health...");
       this.watcher?.recheckHealth();
     }
+    // Fix resolvable health warnings (REPO mode only)
+    else if (data === "f") { agentActions.handleResolveHealth(this); }
     // Ghostty
     else if (data === "G") { agentActions.handleOpenGhostty(this); }
     // Cross-repo send

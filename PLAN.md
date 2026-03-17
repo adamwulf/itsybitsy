@@ -117,8 +117,9 @@ itsybitsy
 │   ├── tmux-poller.test.ts   # Tmux poller tests
 │   ├── ib-commands.ts        # Wrappers for ib mutations; cwd = repo root
 │   ├── ib-commands.test.ts   # ib-commands tests
-│   ├── coordinator.ts        # System coordinator lifecycle (spawn/teardown/ref counter);
-│   │                         # per-repo coordinator settings builder (buildCoordinatorSettings)
+│   ├── coordinator.ts        # System coordinator lifecycle (spawn/teardown/ref counter)
+│   ├── coordinator-settings.ts # Per-repo coordinator settings builder (buildCoordinatorSettings)
+│   ├── inbox.ts              # File-based message queue for system coordinator (ib inbox)
 │   ├── ghostty.ts            # Open tmux sessions in Ghostty
 │   ├── ghostty.test.ts       # Ghostty tests
 │   ├── orphan-detection.test.ts # Orphaned tmux session detection tests
@@ -1122,7 +1123,7 @@ Add the system coordinator as the first entry in the agent tree:
 - [ ] `flattenAgentTree()` prepends system coordinator entry before all repo headers
 - [ ] `AgentTreeComponent` renders system coordinator row: `◆ coordinator  <state>  <age>`. Age is derived from the tmux session creation time (`tmux display-message -t ib-coordinator -p '#{session_created}'`), since the system coordinator has no meta.json with `created_epoch`.
 - [ ] System coordinator is selectable via j/k navigation
-- [ ] System coordinator selection sets selectedAgent to a synthetic Agent-like object (or a separate selection type)
+- [ ] System coordinator selection: introduce a `Selection` discriminated union type: `type Selection = { kind: "agent"; agent: Agent } | { kind: "system-coordinator" } | { kind: "repo-header"; repoName: string; repoPath: string } | null`. Replace `selectedAgent: Agent | null` with `selection: Selection`. This is a high-blast-radius change (all consumers of selectedAgent must update), but it's the correct approach — a synthetic Agent with sentinel values would cause bugs when code assumes agent directory existence
 - [ ] System coordinator state detection uses tmux-only approach (SPEC.md §12.1.6)
 - [ ] Update `info-panel.ts` to handle `kind: "system-coordinator"` — render empty/no-op (info panel is hidden in full-width mode, but the code must handle this kind without crashing). For per-repo coordinators (`kind: "agent"` with `coordinator: true`), show a coordinator type indicator (this is handled in 48e, not here)
 - [ ] **Blast radius audit**: Adding `kind: "system-coordinator"` to the `FlatEntry` union means ALL consumers need updating — every `flatList.filter()`, `Extract<FlatEntry, ...>`, and exhaustive switch. Files: `agent-tree.ts` (densest FlatEntry usage — ~9 pattern matches), `dashboard.ts`, `dashboard.test.ts`, `agent-actions.ts`, `pane-manager.ts`, `info-panel.ts`, `sidebar.test.ts`
@@ -1137,7 +1138,7 @@ Add the system coordinator as the first entry in the agent tree:
 When system coordinator is selected, switch to a special layout:
 
 - [ ] Dashboard detects when selection is `kind: "system-coordinator"`
-- [ ] **Sidebar layout switch**: Hide info panel, show only agent tree (top) + coordinator tmux output (bottom). Coordinator panel gets all remaining sidebar height (`available - tree_height - 1 separator`). **Note**: The coordinator panel renders WITHOUT the input field in this phase — input fields are added in Phase 49c.
+- [ ] **Sidebar layout switch**: Hide info panel, show only agent tree (top) + coordinator tmux output (bottom). Coordinator panel gets all remaining sidebar height (`available - tree_height - 1 separator`). **Note**: The coordinator panel renders WITHOUT the input field in this phase — input fields are added in Phase 49c. SPEC §12.1.4 describes the final state (with input field) but this phase delivers the view without it; the SPEC reference to §13.4 applies after Phase 49 is complete.
 - [ ] **Focus cycling**: In full-width system dashboard mode, Tab skips `info`, `active-agent`, and `right-pane` targets (they have no rendered panels) — cycle is `agent-tree` → `coordinator` → `agent-tree`. The system dashboard table is read-only and scrolled via `;`/`l` keys regardless of focus.
 - [ ] **Main area**: Replace split-pane with a full-width **system dashboard** table. This is a significant rendering component with three sub-tasks:
   - **Data gathering**: Collect all agents across all repos (from watcher state), map to table rows with repo grouping. Coordinators sort first within each repo group.
@@ -1261,7 +1262,7 @@ Add ability to spawn per-repo coordinators from the TUI:
 
 Support addressing coordinators by name:
 
-- [ ] `ib send coordinator "message"` — always addresses the system coordinator. **Note**: The current `sendMessage()` takes an `Agent` object, not a string target. Add a new `resolveAndSendMessage(target: string, message: string, repoPath: string)` wrapper that performs name resolution (coordinator → inbox, repo-name → per-repo coordinator agent, agent-id → standard), then calls `sendMessage()` for agent targets or `writeInboxMessage()` for the system coordinator. The `ib send` CLI handler in `src/index.ts` calls this wrapper instead of `sendMessage()` directly. **Graceful queueing**: if the `ib-coordinator` tmux session doesn't exist, the message is still queued to the inbox (not an error) — it will be processed when the system coordinator restarts (SPEC §12.3.1).
+- [ ] `ib send coordinator "message"` — always addresses the system coordinator. **Note**: The current `sendMessage()` takes an `Agent` object, not a string target. Add a new `resolveAndSendMessage(target: string, message: string, repoPath: string)` wrapper that performs name resolution (coordinator → inbox, repo-name → per-repo coordinator agent, agent-id → standard), then calls `sendMessage()` for agent targets or `writeInboxMessage()` for the system coordinator. The `ib send` CLI handler in `src/index.ts` calls this wrapper instead of `sendMessage()` directly. The wrapper imports `writeInboxMessage()` from `src/inbox.ts` (created in 47b) for the system coordinator path. **Graceful queueing**: if the `ib-coordinator` tmux session doesn't exist, the message is still queued to the inbox (not an error) — it will be processed when the system coordinator restarts (SPEC §12.3.1).
 - [ ] `ib send <repo-name> "message"` — addresses the per-repo coordinator for that repo (using repo basename from `src/registry.ts` to look up the coordinator agent). This is how the system coordinator reaches per-repo coordinators.
 - [ ] `sendMessage()` function: detect `coordinator` as target → system coordinator; detect registered repo basename as target → per-repo coordinator. Resolution priority: literal `coordinator` → repo basename → standard agent ID matching (SPEC.md §12.3.1). **Note**: repo basenames take priority over agent ID substring matching — if a repo is named `agent`, `ib send agent "msg"` addresses the repo coordinator, not `agent-a1b2c3d4`. Users can bypass with full agent IDs. **Backward compatibility**: existing callers pass agent IDs directly (e.g., `agent-a1b2c3d4`) — these will fall through to standard agent ID matching unchanged. The new resolution paths only activate for the literal string `coordinator` or strings matching registered repo basenames.
 - [ ] Error with clear message when repo exists but has no coordinator: "No coordinator for repo <name>"
@@ -1273,7 +1274,8 @@ Support addressing coordinators by name:
 **Files:** `src/tui/dashboard.ts`, `src/coordinator.ts`
 
 - [ ] On `launchDashboard()` (after `ensureSystemCoordinator()`): auto-spawn a per-repo coordinator for each registered repo that doesn't already have one. Coordinators bypass the `maxAgents` check (SPEC §12.4.3).
-- [ ] On Ctrl-C exit: pass an `onLastRef` callback to `releaseSystemCoordinator()` (from 47a-ii) that iterates all registered repos (from `~/.itsybitsy/repos.json`), finds each repo's coordinator agent (`.ittybitty/agents/coordinator/`), and calls `pauseAgent()` on it. `pauseAgent()` from `src/ib-commands.ts` kills Claude process + tmux session, preserves worktree/meta.json/branch — verify it handles coordinator agents correctly. On next startup, paused coordinators are resumed via `ib resume coordinator` (standard §1.6 flow).
+- [ ] On Ctrl-C exit: pass an `onLastRef` callback to `releaseSystemCoordinator()` (from 47a-ii) that iterates all registered repos (from `~/.itsybitsy/repos.json`), finds each repo's coordinator agent (`.ittybitty/agents/coordinator/`), and calls `pauseAgent()` on it.
+- [ ] **Verify pauseAgent() handles coordinator agents**: `pauseAgent()` in `src/ib-commands.ts` uses `agent.id` to find tmux session and directory. Verify it works with `id: "coordinator"` (non-standard format — not `agent-<hex>`). If it assumes ID format (e.g., regex match), add coordinator support. On next startup, paused coordinators are resumed via `ib resume coordinator` (standard §1.6 flow).
 - [ ] Idempotent: if coordinator already exists for a repo, skip it
 - [ ] Tests for auto-spawn and auto-close lifecycle
 
@@ -1355,7 +1357,8 @@ Phase 48e-f ──┤── per-repo coordinator agents (functionally parallel w
 Phase 48b ────┤── file-level dep on 47a (src/coordinator.ts)
               │   NOTE: shared file conflicts exist — 48a modifies agents.ts (AgentMeta)
               │   and 47d modifies agents.ts (FlatEntry); 47d and 48f both touch
-              │   agent-actions.ts. Plan merge ordering or assign to same agent.
+              │   agent-actions.ts; 47b and 48a both modify index.ts (routing).
+              │   Plan merge ordering or assign to same agent.
 Phase 48d,g,h ┘── depends on 47
 Phase 49a,d ──── input field component, keyboard routing (parallel with 47-48)
 Phase 49b-c ──── input field wiring (depends on 47 + 49a)

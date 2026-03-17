@@ -11,6 +11,8 @@ import { readAllAgents, buildAgentTree, flattenAgentTree, readPendingQuestions, 
 import type { Agent, FlatEntry, PendingQuestion } from "./agents";
 import { repoDisplayName } from "./registry";
 import type { RepoEntry } from "./registry";
+import { checkRepoHealth, checkGlobalHealth } from "./health-check";
+import type { RepoHealthReport, RepoHealthWarning } from "./health-check";
 
 export interface WatcherEvents {
   onUpdate: (agents: Agent[], flatList: FlatEntry[], questions: PendingQuestion[], orphanedTmuxSessions: string[]) => void;
@@ -31,6 +33,13 @@ export class AgentWatcher {
   private _lastAgents: Agent[] = [];
   private lastOrphanedSessions: string[] = [];
 
+  /** Health check results per repo path */
+  healthReports: Map<string, RepoHealthReport> = new Map();
+  /** Global health warnings (e.g. missing hooks in ~/.claude/settings.json) */
+  globalHealthWarnings: RepoHealthWarning[] = [];
+  /** Timestamp of last health check run (for cooldown) */
+  private lastHealthCheckAt = 0;
+
   /** Public read-only access to the most recently loaded agents list */
   get lastAgents(): Agent[] {
     return this._lastAgents;
@@ -47,6 +56,9 @@ export class AgentWatcher {
     // Initial load
     await this.refresh();
 
+    // Run health checks asynchronously (non-blocking — don't delay first render)
+    this.runHealthChecks();
+
     // Set up fs.watch on each repo's .ittybitty/agents/, archive/, and user-questions.json
     this.setupWatchers();
 
@@ -59,6 +71,38 @@ export class AgentWatcher {
     this.stateTimer = setInterval(() => {
       if (this.running) this.pollStates();
     }, 2_000);
+  }
+
+  /** Cooldown period for health checks (30s) — avoids re-running on every fs.watch event */
+  static readonly HEALTH_CHECK_COOLDOWN_MS = 30_000;
+
+  /** Run health checks for all repos and global config.
+   *  Skips if the last check was within the cooldown period (unless force=true). */
+  private async runHealthChecks(force = false): Promise<void> {
+    const now = Date.now();
+    if (!force && now - this.lastHealthCheckAt < AgentWatcher.HEALTH_CHECK_COOLDOWN_MS) return;
+    this.lastHealthCheckAt = now;
+    try {
+      const [repoResults, globalWarnings] = await Promise.all([
+        Promise.all(this.repos.map((r) => checkRepoHealth(r.path))),
+        checkGlobalHealth(),
+      ]);
+      for (const report of repoResults) {
+        this.healthReports.set(report.repoPath, report);
+      }
+      this.globalHealthWarnings = globalWarnings;
+    } catch {
+      // Health checks are non-critical — silently ignore errors
+    }
+  }
+
+  /** Re-run all health checks and refresh the UI (called on demand via H keybinding) */
+  async recheckHealth(): Promise<void> {
+    await this.runHealthChecks(true);
+    // Trigger a full refresh so the UI picks up new health data
+    if (this.running) {
+      this.refresh();
+    }
   }
 
   stop(): void {
@@ -83,6 +127,8 @@ export class AgentWatcher {
     this.repos = repos;
     this.teardownWatchers();
     this.setupWatchers();
+    // Force health checks for new/changed repos (bypass cooldown)
+    this.runHealthChecks(true);
   }
 
   /** Close all fs.watch watchers */
@@ -194,6 +240,9 @@ export class AgentWatcher {
         this.repos.map((r) => readPendingQuestions(r.path))
       );
       const questions = questionResults.flat();
+
+      // Run health checks (fire-and-forget — results available on next update)
+      this.runHealthChecks();
 
       if (!this.running) return;
       this.events.onUpdate(agents, flatList, questions, orphanedTmuxSessions);

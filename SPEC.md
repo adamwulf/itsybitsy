@@ -1121,7 +1121,7 @@ Terminals narrower than 140 columns or shorter than 24 rows display a warning: `
 
 ## 12. Coordinator System
 
-The coordinator system has two tiers: one **system coordinator** that manages work across all repos, and optional **per-repo coordinators** that manage work within a single repo. Together they form a coordination hierarchy: user → system coordinator → per-repo coordinators → agents.
+The coordinator system has two tiers: one **system coordinator** that manages work across all repos, and **per-repo coordinators** that manage work within a single repo. Both tiers are auto-spawned when `ib watch` launches (§12.1.2, §12.2.3). Per-repo coordinators can also be killed and manually re-created as needed. Together they form a coordination hierarchy: user → system coordinator → per-repo coordinators → agents.
 
 ### 12.1 System Coordinator
 
@@ -1267,7 +1267,8 @@ Per-repo coordinators are stored in `.ittybitty/agents/` like regular agents, bu
 3. Uses coordinator-specific permissions (§12.2.4)
 4. Uses coordinator-specific session start context (§12.2.6)
 5. Does NOT set a `--manager` — coordinators are top-level agents
-6. Otherwise follows the standard agent creation flow (§1.1)
+6. `--no-worktree` is NOT allowed with `--coordinator` — coordinators always use git worktrees (they need branch isolation for their read-only code access)
+7. Otherwise follows the standard agent creation flow (§1.1)
 
 **One-per-repo constraint**: If a coordinator already exists for the repo (active `coordinator` agent directory in `.ittybitty/agents/` with `coordinator: true` in meta.json), `ib new-agent --coordinator` prints `"Coordinator already exists for <repo-name>"` and exits 0 (idempotent no-op). If a non-coordinator agent named `coordinator` exists (pre-existing naming collision), the command exits with error: `"Agent 'coordinator' already exists but is not a coordinator — kill it first"`. There is exactly one coordinator per repo, never more. Archived coordinators (in `.ittybitty/archive/`) do not block creation — only active agent directories are checked.
 
@@ -1313,7 +1314,7 @@ Key differences from regular agents:
 - **Has Read/Glob/Grep/LS** — coordinators can read the codebase for context via Claude Code's built-in tools (which cannot perform writes)
 - **No Task/Agent** — coordinators spawn sub-agents only via `Bash(ib:*)`, not Claude's built-in Task/Agent tools. This ensures all agents are tracked through the ib system.
 
-**Bash permission pattern assumption**: The `Bash(<command>:*)` permission patterns (e.g., `Bash(ib:*)`, `Bash(git status:*)`) rely on Claude Code's permission system matching the command prefix, not the full shell pipeline. Claude Code presents each Bash tool call as a single command string — the permission check matches the command prefix against the pattern. Shell metacharacters (`&&`, `;`, `|`, `>`) within a single Bash tool call are part of the command string that Claude generates, and Claude Code's permission system evaluates the entire command. The unqualified `Bash` deny entry ensures that any command not matching an explicit allow pattern is denied. This defense-in-depth approach means even if a coordinator attempted to chain commands (e.g., `ib list && cat secret.txt`), the command would need to match an allow pattern to execute.
+**Bash permission pattern assumption [^needs review]**: The `Bash(<command>:*)` permission patterns (e.g., `Bash(ib:*)`, `Bash(git status:*)`) rely on Claude Code's permission system matching the command prefix, not the full shell pipeline. Claude Code presents each Bash tool call as a single command string — the permission check matches the command prefix against the pattern. Shell metacharacters (`&&`, `;`, `|`, `>`) within a single Bash tool call are part of the command string that Claude generates, and Claude Code's permission system evaluates the entire command. The unqualified `Bash` deny entry ensures that any command not matching an explicit allow pattern is denied. This defense-in-depth approach means even if a coordinator attempted to chain commands (e.g., `ib list && cat secret.txt`), the command would need to match an allow pattern to execute.
 - **No WebFetch/WebSearch** — coordinators don't need internet access
 - **No KillShell** — coordinators don't run long-lived shell processes
 
@@ -1386,9 +1387,9 @@ Examples:
 - `ib nuke coordinator` → per-repo coordinator + all its children (§1.8)
 - `ib send itsybitsy "message"` → per-repo coordinator for itsybitsy (the only way to message a per-repo coordinator directly, since `ib send coordinator` routes to the system coordinator)
 
-**Reserved names**: Certain names cannot be used as agent names (via `--name`): `coordinator` (system coordinator addressing + per-repo coordinator ID), `watchdog` (tmux process name collision), `manual` (inbox source field), and all registered repo basenames (per-repo coordinator addressing). `ib new-agent --name <reserved>` is rejected with error: `"'<name>' is a reserved name"`. The reserved name check is performed in `newAgent()` before any agent creation steps.
+**Reserved names**: Certain names cannot be used as agent names (via `--name`): `coordinator` (system coordinator addressing + per-repo coordinator ID), `watchdog` (tmux process name collision), `manual` (inbox source field), and all registered repo basenames (per-repo coordinator addressing). `ib new-agent --name <reserved>` is rejected with error: `"'<name>' is a reserved name"`. The reserved name check is performed in `newAgent()` before any agent creation steps. This is a creation-time check only — existing agents are not affected if a repo with a colliding basename is registered later.
 
-Repo basenames take priority over agent ID substring matching in `ib send`, so if a repo is named `agent` and there's also an `agent-a1b2c3d4`, `ib send agent "message"` addresses the repo coordinator, not the agent. To bypass repo-name resolution and target the regular agent, use the full agent ID: `ib send agent-a1b2c3d4 "message"`. For management commands, standard agent ID resolution applies (no repo basename override).
+Repo basenames take priority over agent ID substring matching in `ib send`, so if a repo is named `agent` and there's also an `agent-a1b2c3d4`, `ib send agent "message"` addresses the repo coordinator, not the agent. To bypass repo-name resolution and target the regular agent, use the full agent ID: `ib send agent-a1b2c3d4 "message"`. For management commands (`ib kill`, `ib status`, etc.), only standard agent ID resolution applies — repo basenames are never checked. `ib kill agent` would match `agent-a1b2c3d4` via prefix matching, not the repo coordinator.
 
 **Error cases**:
 - `ib send coordinator "message"` when the system coordinator tmux session does not exist → the message is still queued via `ib inbox write` (not an error). The system coordinator will process it when restarted.
@@ -1505,7 +1506,7 @@ export type FlatEntry =
 
 #### 12.4.3 maxAgents
 
-Per-repo coordinators bypass the `maxAgents` check during both auto-spawn (§12.2.3) and manual creation (`ib new-agent --coordinator`) — coordinators are infrastructure, not user tasks. They DO occupy agent slots in `.ittybitty/agents/` and appear in `ib list` output. The system coordinator does NOT count — it is not a regular agent and lives outside any repo.
+Per-repo coordinators bypass the `maxAgents` check during both auto-spawn (§12.2.3) and manual creation (`ib new-agent --coordinator`) — coordinators are infrastructure, not user tasks. They DO occupy agent directories in `.ittybitty/agents/` and appear in `ib list` output, but they are **excluded from the agent count** when checking `maxAgents` for regular agent creation. Example: if `maxAgents=10` and there are 3 coordinators, you can still create 10 regular agents (not 7). The system coordinator does NOT count — it is not a regular agent and lives outside any repo.
 
 **Auto-spawn and maxAgents**: When `ib watch` auto-spawns per-repo coordinators on startup (§12.2.3), coordinators bypass the `maxAgents` check. This prevents the situation where registering many repos makes it impossible to create any regular agents. Manual coordinator creation via `ib new-agent --coordinator` also bypasses the limit — coordinators are infrastructure, not user tasks. This bypass is unbounded — registering 50 repos creates 50 coordinators. This is acceptable because: (a) users control how many repos they register, (b) coordinators idle most of the time (low resource usage when waiting), and (c) the registry is a deliberate user action, not an automated process.
 
@@ -1529,7 +1530,7 @@ New config keys in `~/.itsybitsy/config.json`:
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `coordinator.model` | string | `"opus"` | Model for both system and per-repo coordinators. A single key is used because both tiers perform the same kind of work (orchestration via `ib` commands). If different models are needed, per-repo coordinators can be spawned with `--model <model>` to override. |
+| `coordinator.model` | string | `"opus"` | Model for both system and per-repo coordinators. A single key is used because both tiers perform the same kind of work (orchestration via `ib` commands). If different models are needed, per-repo coordinators can be spawned with `--model <model>` to override. Changing the system coordinator's model requires restarting it (`R` key in TUI when selected, or kill + re-launch `ib watch`) — the config is read at spawn time. |
 | `permissions.coordinator.allow` | string[] | `[]` | Additional permissions for per-repo coordinators |
 | `permissions.coordinator.deny` | string[] | `[]` | Additional deny rules for per-repo coordinators |
 

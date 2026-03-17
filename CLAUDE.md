@@ -217,7 +217,7 @@ Shared agent lifecycle helpers used by multiple ib commands. Mirrors the ib bash
 Reads Claude transcript JSONL files to determine an agent's context window usage percentage, then sends `/compact` to agents that exceed a configured threshold. Matches ib's `get_agent_context_usage()` logic for transcript parsing. Encodes worktree paths into Claude's project directory naming scheme to locate the correct transcript file.
 
 ### Config (src/config.ts)
-User-wide configuration system with user and default sources. Defines all config keys (`maxAgents`, `model`, `createPullRequests`, `allowAgentQuestions`, `autoCompactThreshold`, `externalDiffTool`, hooks settings, and per-role permission allow/deny lists). Reads from `~/.itsybitsy/config.json` (user home), merging with typed defaults. No per-repo configuration.
+User-wide configuration system with user and default sources. Defines all config keys (`maxAgents`, `model`, `createPullRequests`, `allowAgentQuestions`, `autoCompactThreshold`, `externalDiffTool`, hooks settings, per-role permission allow/deny lists, and coordinator config: `coordinator.model`, `permissions.coordinator.allow/deny`). Reads from `~/.itsybitsy/config.json` (user home), merging with typed defaults. No per-repo configuration.
 
 ### Folder browser (src/tui/folder-browser.ts)
 Builds the navigable item list for the add-repo folder browser dialog. Given a current path, produces a list of `FolderItem` entries: ancestors from root down to parent, the current folder, and sorted child directories. Each item includes depth, git-repo detection, and ancestor/current flags for rendering the tree-style UI.

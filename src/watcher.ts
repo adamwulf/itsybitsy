@@ -127,6 +127,8 @@ export class AgentWatcher {
     this.repos = repos;
     this.teardownWatchers();
     this.setupWatchers();
+    // Force health checks for new/changed repos (bypass cooldown)
+    this.runHealthChecks(true);
   }
 
   /** Close all fs.watch watchers */

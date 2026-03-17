@@ -5,9 +5,8 @@
 
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { join } from "path";
-import { mkdtemp, rm, mkdir, writeFile } from "fs/promises";
+import { mkdtemp, rm, mkdir, writeFile, readFile } from "fs/promises";
 import { tmpdir } from "os";
-import { readFile } from "fs/promises";
 import {
   checkLeakedAgentHooks,
   checkMissingGlobalHooks,
@@ -702,6 +701,7 @@ describe("resolveHealthWarnings", () => {
       severity: "info",
       category: "orphaned-branch",
       message: "Orphaned git branch: agent/agent-br1 — no agent or worktree exists",
+      fix: "git branch -D agent/agent-br1",
     }];
 
     const result = await resolveHealthWarnings(warnings);

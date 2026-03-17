@@ -15,7 +15,7 @@
 
 import { join, basename } from "path";
 import { homedir } from "os";
-import { readdir } from "fs/promises";
+import { readdir, rm } from "fs/promises";
 import { SpawnContext } from "./types";
 import { isValidAgentId } from "./validation";
 
@@ -394,6 +394,7 @@ export async function checkOrphanedBranches(repoPath: string): Promise<RepoHealt
         severity: "info",
         category: "orphaned-branch",
         message: `Orphaned git branch: ${branchName} — no agent or worktree exists`,
+        fix: `git branch -D ${branchName}`,
       });
     }
   }
@@ -627,7 +628,7 @@ async function resolveLeakedHooks(w: RepoHealthWarning): Promise<void> {
         if (typeof cmd !== "string") return false;
         return AGENT_HOOK_PATTERNS.some((pattern) => {
           const match = cmd.match(pattern);
-          return match && (!w.agentId || match[1] === w.agentId);
+          return match && w.agentId && match[1] === w.agentId;
         });
       });
       return !hasLeaked;
@@ -657,7 +658,6 @@ async function resolveLeakedHooks(w: RepoHealthWarning): Promise<void> {
 async function resolveOrphanedDir(w: RepoHealthWarning): Promise<void> {
   if (!w.agentId) return;
   const agentDir = join(w.repoPath, ".ittybitty", "agents", w.agentId);
-  const { rm } = await import("fs/promises");
   await rm(agentDir, { recursive: true, force: true });
 }
 
@@ -675,8 +675,8 @@ async function resolveOrphanedWorktree(w: RepoHealthWarning): Promise<void> {
 
 /** Delete an orphaned git branch */
 async function resolveOrphanedBranch(w: RepoHealthWarning): Promise<void> {
-  // Extract branch name from message
-  const match = w.message.match(/Orphaned git branch: (agent\/\S+)/);
+  // Extract branch name from fix field
+  const match = w.fix?.match(/git branch -D (agent\/\S+)/);
   if (!match) return;
   const branchName = match[1]!;
   const result = await healthSpawnCtx.run(["git", "-C", w.repoPath, "branch", "-D", branchName]);

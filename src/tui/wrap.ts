@@ -137,7 +137,7 @@ export function wordWrapSingleLine(line: string, width: number): string[] {
     lineStr += token;
     lineWidth += tokenW;
   }
-  if (lineStr || chunks.length === 0) chunks.push(lineStr);
+  if (lineStr || chunks.length === 0) chunks.push(lineStr.trimEnd());
   return chunks;
 }
 

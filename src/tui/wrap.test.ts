@@ -243,9 +243,13 @@ describe("wordWrapSingleLine", () => {
   test("wraps emoji-prefixed lines at word boundary", () => {
     const line = "⚠️ Remove stale directory and archive it";
     const result = wordWrapSingleLine(line, 25);
-    expect(result.length).toBe(2);
-    // Should break at a word boundary, not mid-word
-    expect(result[0]!.endsWith("and")).toBeFalsy();
+    expect(result.length).toBeGreaterThanOrEqual(2);
+    // Every line should fit within width
+    for (const segment of result) {
+      expect(visibleWidth(segment)).toBeLessThanOrEqual(25);
+    }
+    // Lines should rejoin to original content (spaces consumed at break points)
+    expect(result.join(" ")).toBe(line);
   });
 });
 

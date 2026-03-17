@@ -1428,9 +1428,9 @@ Show Remote Control status in the TUI (note: info panel is hidden when system co
 Add prerequisite checks when Remote Control is enabled:
 
 - [ ] Check Claude Code version >= 2.1.51 (parse `claude --version` output)
-- [ ] Check for `ANTHROPIC_API_KEY` env var — if set, warn that Remote Control requires claude.ai login
-- [ ] Only run these checks when `remoteControl.enabled` is `true`
-- [ ] Tests for version check and auth detection
+- [ ] Only run this check when `remoteControl.enabled` is `true`
+- [ ] Auth is NOT checked here — no reliable programmatic detection exists (see SPEC §15.7.1). The setup dialog shows a reminder instead.
+- [ ] Tests for version check
 
 #### 50 dependency graph
 

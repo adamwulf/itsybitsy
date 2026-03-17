@@ -1377,9 +1377,9 @@ export class DashboardComponent implements Component {
       return truncateToWidth(sep, mainWidth, "");
     }
 
-    const fixedChars = leftPad + leftTitle.length + rightPad + rightTitle.length;
+    const fixedChars = leftPad + leftTitle.length + rightTitle.length + rightPad;
     const fillCount = Math.max(1, mainWidth - fixedChars);
-    const sep = `${leftDashColor}${"─".repeat(leftPad)}${RESET}${leftTitleStyle}${leftTitle}${RESET}${leftDashColor}${"─".repeat(fillCount)}${RESET}${rightTitleStyle}${rightTitle}${RESET}${rightDashColor}${"─".repeat(rightPad)}${RESET}`;
+    const sep = `${leftDashColor}${"─".repeat(leftPad)}${RESET}${leftTitleStyle}${leftTitle}${RESET}${rightTitleStyle}${rightTitle}${RESET}${leftDashColor}${"─".repeat(fillCount)}${RESET}${rightDashColor}${"─".repeat(rightPad)}${RESET}`;
     return truncateToWidth(sep, mainWidth, "");
   }
 

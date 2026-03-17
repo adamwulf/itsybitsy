@@ -117,6 +117,9 @@ describe("InfoPanelComponent", () => {
     const lines = panel.render(60);
     const text = lines.map(stripAnsi).join("\n");
     expect(text).toContain("Manager not found: agent-gone");
+    // Verify YELLOW ANSI color is used for the warning
+    const rawText = lines.join("\n");
+    expect(rawText).toContain("\x1b[33m");
   });
 
   test("shows orphan warning with 'archived' when manager is archived", () => {
@@ -147,6 +150,22 @@ describe("InfoPanelComponent", () => {
     const text = lines.map(stripAnsi).join("\n");
     expect(text).not.toContain("Manager not found");
     expect(text).not.toContain("Manager archived");
+  });
+
+  test("orphan warning truncates gracefully at narrow width", () => {
+    const panel = new InfoPanelComponent();
+    panel.displayHeight = 10;
+    const agent = makeAgent({ id: "agent-narrow" });
+    agent.orphaned = true;
+    agent.meta.manager = "agent-long-manager-id";
+    panel.agent = agent;
+    panel.allAgents = [];
+
+    const lines = panel.render(15);
+    const text = lines.map(stripAnsi).join("\n");
+    // Warning should be present but truncated — no crash
+    expect(text).toContain("Manager");
+    expect(lines.length).toBe(10);
   });
 
   test("claude PID dead shows red indicator", () => {

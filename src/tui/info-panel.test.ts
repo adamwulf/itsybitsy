@@ -136,6 +136,9 @@ describe("InfoPanelComponent", () => {
     const lines = panel.render(60);
     const text = lines.map(stripAnsi).join("\n");
     expect(text).toContain("Manager archived: agent-old-mgr");
+    // Verify YELLOW ANSI color is used for the warning
+    const rawText = lines.join("\n");
+    expect(rawText).toContain("\x1b[33m");
   });
 
   test("no orphan warning for non-orphaned agent", () => {
@@ -162,10 +165,14 @@ describe("InfoPanelComponent", () => {
     panel.allAgents = [];
 
     const lines = panel.render(15);
-    const text = lines.map(stripAnsi).join("\n");
+    const stripped = lines.map(stripAnsi);
     // Warning should be present but truncated — no crash
-    expect(text).toContain("Manager");
+    expect(stripped.join("\n")).toContain("Manager");
     expect(lines.length).toBe(10);
+    // Every visible line must fit within the requested width
+    for (const line of stripped) {
+      expect(line.length).toBeLessThanOrEqual(15);
+    }
   });
 
   test("claude PID dead shows red indicator", () => {

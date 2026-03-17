@@ -105,6 +105,76 @@ describe("InfoPanelComponent", () => {
     expect(lines[0]!).toContain("\x1b[32m");
   });
 
+  test("shows orphan warning with 'not found' when manager missing", () => {
+    const panel = new InfoPanelComponent();
+    panel.displayHeight = 10;
+    const agent = makeAgent({ id: "agent-orphan" });
+    agent.orphaned = true;
+    agent.meta.manager = "agent-gone";
+    panel.agent = agent;
+    panel.allAgents = [makeFlatAgent(agent)];
+
+    const lines = panel.render(60);
+    const text = lines.map(stripAnsi).join("\n");
+    expect(text).toContain("Manager not found: agent-gone");
+    // Verify YELLOW ANSI color is used for the warning
+    const rawText = lines.join("\n");
+    expect(rawText).toContain("\x1b[33m");
+  });
+
+  test("shows orphan warning with 'archived' when manager is archived", () => {
+    const panel = new InfoPanelComponent();
+    panel.displayHeight = 10;
+    const agent = makeAgent({ id: "agent-orphan2" });
+    agent.orphaned = true;
+    agent.meta.manager = "agent-old-mgr";
+    const archivedManager = makeAgent({ id: "agent-old-mgr" });
+    archivedManager.archived = true;
+    panel.agent = agent;
+    panel.allAgents = [makeFlatAgent(agent), makeFlatAgent(archivedManager)];
+
+    const lines = panel.render(60);
+    const text = lines.map(stripAnsi).join("\n");
+    expect(text).toContain("Manager archived: agent-old-mgr");
+    // Verify YELLOW ANSI color is used for the warning
+    const rawText = lines.join("\n");
+    expect(rawText).toContain("\x1b[33m");
+  });
+
+  test("no orphan warning for non-orphaned agent", () => {
+    const panel = new InfoPanelComponent();
+    panel.displayHeight = 10;
+    const agent = makeAgent({ id: "agent-ok" });
+    agent.orphaned = false;
+    agent.meta.manager = "agent-mgr";
+    panel.agent = agent;
+
+    const lines = panel.render(60);
+    const text = lines.map(stripAnsi).join("\n");
+    expect(text).not.toContain("Manager not found");
+    expect(text).not.toContain("Manager archived");
+  });
+
+  test("orphan warning truncates gracefully at narrow width", () => {
+    const panel = new InfoPanelComponent();
+    panel.displayHeight = 10;
+    const agent = makeAgent({ id: "agent-narrow" });
+    agent.orphaned = true;
+    agent.meta.manager = "agent-long-manager-id";
+    panel.agent = agent;
+    panel.allAgents = [];
+
+    const lines = panel.render(15);
+    const stripped = lines.map(stripAnsi);
+    // Warning should be present but truncated — no crash
+    expect(stripped.join("\n")).toContain("Manager");
+    expect(lines.length).toBe(10);
+    // Every visible line must fit within the requested width
+    for (const line of stripped) {
+      expect(line.length).toBeLessThanOrEqual(15);
+    }
+  });
+
   test("claude PID dead shows red indicator", () => {
     const panel = new InfoPanelComponent();
     panel.displayHeight = 5;

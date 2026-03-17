@@ -81,6 +81,78 @@ export function wrapLines(text: string, width: number): string[] {
   return result;
 }
 
+/**
+ * Word-wrap a single line to the given width, breaking at spaces when possible.
+ * Falls back to character-level wrapping for words longer than width.
+ * ANSI-aware: escape sequences don't count toward visible width.
+ */
+export function wordWrapSingleLine(line: string, width: number): string[] {
+  if (width <= 0) return [line];
+  if (visibleWidth(line) <= width) return [line];
+
+  const chunks: string[] = [];
+  // Split into tokens: sequences of non-space chars and individual spaces
+  const tokens: string[] = [];
+  let current = "";
+  for (const ch of Array.from(line)) {
+    if (ch === " ") {
+      if (current) { tokens.push(current); current = ""; }
+      tokens.push(" ");
+    } else {
+      current += ch;
+    }
+  }
+  if (current) tokens.push(current);
+
+  let lineStr = "";
+  let lineWidth = 0;
+
+  for (const token of tokens) {
+    const tokenW = visibleWidth(token);
+
+    // Skip spaces at the start of a new line
+    if (token === " " && lineWidth === 0) continue;
+
+    // If adding this token would exceed width
+    if (lineWidth + tokenW > width) {
+      // If this is a space, just skip it (acts as the break point)
+      if (token === " ") {
+        if (lineStr) { chunks.push(lineStr.trimEnd()); lineStr = ""; lineWidth = 0; }
+        continue;
+      }
+      // Flush current line if it has content
+      if (lineStr) { chunks.push(lineStr.trimEnd()); lineStr = ""; lineWidth = 0; }
+      // If the word itself is wider than width, hard-wrap it
+      if (tokenW > width) {
+        const hardWrapped = wrapSingleLine(token, width);
+        for (let i = 0; i < hardWrapped.length - 1; i++) {
+          chunks.push(hardWrapped[i]!);
+        }
+        lineStr = hardWrapped[hardWrapped.length - 1]!;
+        lineWidth = visibleWidth(lineStr);
+        continue;
+      }
+    }
+
+    lineStr += token;
+    lineWidth += tokenW;
+  }
+  if (lineStr || chunks.length === 0) chunks.push(lineStr);
+  return chunks;
+}
+
+/**
+ * Word-wrap all lines in a multi-line string.
+ * Splits on newlines first, then word-wraps each line.
+ */
+export function wordWrapLines(text: string, width: number): string[] {
+  const result: string[] = [];
+  for (const line of text.split("\n")) {
+    result.push(...wordWrapSingleLine(line, width));
+  }
+  return result;
+}
+
 /** Pad or trim a lines array to an exact height by appending empty strings or slicing. */
 export function padLines(lines: string[], height: number): string[] {
   while (lines.length < height) {

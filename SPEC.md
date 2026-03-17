@@ -1270,3 +1270,196 @@ Panel sizes are persisted across `ib watch` sessions via `~/.itsybitsy/layout.js
 - **Missing file**: If `layout.json` doesn't exist or is invalid, defaults are used (sidebar 60 cols, default split-pane position, zero height offsets).
 
 ---
+
+## 14. Repo Configuration Health Check
+
+### 14.1 Purpose
+
+itsybitsy manages complex configuration across multiple locations: global hooks in `~/.claude/settings.json`, per-repo base settings in `<repo>/.claude/settings.local.json`, per-agent settings in agent worktrees, and `meta.json` files for each agent. Configuration can become inconsistent through crashes, partial cleanup, or bugs in the kill/merge/nuke lifecycle. The health check detects these inconsistencies and surfaces them in the TUI so the user can fix them before they cause hard-to-diagnose failures.
+
+**Motivating example**: An agent's `hook-check-path` hook was left in a repo's `.claude/settings.local.json` after the agent was killed. This caused the hook to fire in the user's direct Claude session, blocking all tool calls because the agent ID referenced a non-existent agent. The health check catches this class of issue proactively.
+
+### 14.2 When Health Checks Run
+
+Health checks run automatically at two points:
+
+1. **Dashboard startup**: When `ib watch` launches, all registered repos are checked before the first render.
+2. **Add-repo**: When a repo is added (via `ib add` or the `a` keybinding folder browser), the new repo is checked immediately.
+3. **On-demand**: The user can manually re-run health checks via a keybinding in the TUI (see §14.6).
+
+Health checks are non-blocking — the dashboard renders immediately and health check results are populated asynchronously. A repo shows no warning indicator until its check completes.
+
+### 14.3 Health Check Categories
+
+Each check produces zero or more **warnings**. Warnings have a severity level and a human-readable message.
+
+| Severity | Display | Meaning |
+|----------|---------|---------|
+| `error` | `🔴` | Broken configuration that will cause agent failures or block the user |
+| `warning` | `⚠️` | Suspicious state that may indicate a problem |
+| `info` | `ℹ️` | Non-critical observation |
+
+#### 14.3.1 Leaked Agent Hooks in Repo Settings (error)
+
+**What**: The repo's `.claude/settings.local.json` contains hooks that reference a specific agent ID (e.g., `ib hook-check-path agent-a1b2c3d4` or `ib hook-status agent-a1b2c3d4`).
+
+**Why it's a problem**: Agent-specific hooks should only exist inside an agent's worktree at `<agent-dir>/repo/.claude/settings.local.json`. If they appear in the repo root's settings, they fire for the user's direct Claude session, where the referenced agent may not exist — causing hook failures that block tool calls.
+
+**Detection**: Parse `<repo>/.claude/settings.local.json`. Scan all hook commands (across all hook types: `PreToolUse`, `Stop`, `PermissionRequest`, `SessionStart`) for patterns matching `ib hook-check-path <id>`, `ib hook-status <id>`, or `ib hook-permission-denied <id>` where `<id>` matches the agent ID format (`agent-[0-9a-f]+` or any string matching `isValidAgentId()`). The `ib hooks intercept-task` and `ib hooks session-start` commands (without agent IDs) are legitimate global/repo hooks and should NOT be flagged.
+
+**Message**: `"Leaked agent hook in .claude/settings.local.json: <command> — this will block tool calls in your Claude session. Remove the hook entry or restore settings from version control."`
+
+#### 14.3.2 Missing Global Hooks (warning)
+
+**What**: The global `~/.claude/settings.json` is missing expected itsybitsy hooks (safety hooks or intercept-task hook).
+
+**Why it's a problem**: Without global safety hooks, agents can access each other's worktrees or the main repo, and task interception won't redirect Task/Agent tool calls to `ib new-agent`.
+
+**Detection**: Read `~/.claude/settings.json` and check for the presence of:
+- **Safety hooks** (checked as a group): `ib hooks main-path` (PreToolUse), `ib hooks session-start` (SessionStart), and at least one `ib hooks inject-status` hook (UserPromptSubmit or PostToolUse). If ANY of these are missing, warn.
+- **Intercept-task hook**: `ib hooks intercept-task` in PreToolUse with `Task|Agent` matcher. Checked separately since it's an optional but recommended hook.
+
+**Message**: `"Missing global safety hooks in ~/.claude/settings.json — run setup (h) to install"` or `"Missing intercept-task hook in ~/.claude/settings.json — run setup (h) to install"`
+
+#### 14.3.3 Orphaned Agent Directories (warning)
+
+**What**: An agent directory exists in `.ittybitty/agents/<id>/` but has no corresponding tmux session AND no valid `meta.json`, or has a `meta.json` that references a tmux session that doesn't exist and the agent is older than 30 seconds (past the creating grace period).
+
+**Why it's a problem**: Orphaned directories consume the `maxAgents` count and clutter the agent tree. They may indicate a failed kill/nuke that left artifacts behind.
+
+**Detection**: For each agent directory in `.ittybitty/agents/`:
+1. Check if `meta.json` exists and is valid JSON with required fields (`id`, `tmux_session`)
+2. If `meta.json` is missing or malformed → orphaned (error severity)
+3. If `meta.json` is valid but the tmux session doesn't exist and `created_epoch` is older than 30s → check if the agent has a worktree (`<agent-dir>/repo` exists). If no worktree, it's a stale directory (warning). If the worktree exists, it's a stopped agent — not flagged (normal state).
+
+**Message**: `"Orphaned agent directory: <id> — no valid meta.json"` or `"Agent <id> has no tmux session and no worktree — stale directory"`
+
+#### 14.3.4 Malformed meta.json (error)
+
+**What**: An agent's `meta.json` exists but contains invalid JSON or is missing required fields.
+
+**Why it's a problem**: Most itsybitsy operations depend on reading `meta.json`. A malformed file will cause crashes or silent failures in the watcher, hooks, and commands.
+
+**Detection**: For each agent directory, attempt to parse `meta.json` and validate:
+- Valid JSON
+- Has `id` (string)
+- Has `tmux_session` (string)
+- Has `created_epoch` (number)
+- `id` matches the directory name
+
+**Message**: `"Malformed meta.json for agent <id>: <specific issue>"`
+
+#### 14.3.5 Orphaned Git Worktrees (warning)
+
+**What**: Git worktrees exist for agent branches (`agent/<id>`) that no longer have a corresponding agent directory in `.ittybitty/agents/`.
+
+**Why it's a problem**: Orphaned worktrees consume disk space and may cause branch conflicts when creating new agents.
+
+**Detection**: Run `git worktree list --porcelain` in the repo root. For each worktree whose branch matches `agent/<id>`, check if `.ittybitty/agents/<id>/` exists. If the directory is gone, the worktree is orphaned.
+
+**Message**: `"Orphaned git worktree for agent/<id> — no agent directory exists. Clean up with: git worktree remove <path>"`
+
+#### 14.3.6 Orphaned Git Branches (info)
+
+**What**: Local git branches matching `agent/<id>` exist but have no corresponding agent directory or worktree.
+
+**Why it's a problem**: Low severity — branches are cheap, but many orphaned branches clutter `git branch` output and may indicate incomplete cleanup.
+
+**Detection**: Run `git branch --list 'agent/*'` in the repo root. For each branch `agent/<id>`, check if `.ittybitty/agents/<id>/` exists OR if a worktree is checked out on that branch. If neither, the branch is orphaned.
+
+**Message**: `"Orphaned git branch: agent/<id> — no agent or worktree exists"`
+
+#### 14.3.7 Stale Agent References in meta.json (warning)
+
+**What**: An agent's `meta.json` has a `manager` field pointing to an agent ID that no longer exists (directory removed, not just stopped).
+
+**Why it's a problem**: The stop hook and watchdog attempt to notify the manager agent. If the manager doesn't exist, notifications silently fail. More importantly, the agent tree will show broken parent-child relationships.
+
+**Detection**: For each agent, if `meta.json.manager` is set, check if `.ittybitty/agents/<manager-id>/` exists.
+
+**Message**: `"Agent <id> references non-existent manager <manager-id>"`
+
+#### 14.3.8 Agent Hook Referencing Wrong Agent (warning)
+
+**What**: An agent's worktree `settings.local.json` contains hooks that reference a different agent's ID.
+
+**Why it's a problem**: Hooks like `hook-check-path` and `hook-status` use the agent ID to locate the correct `meta.json` and enforce path isolation. If the ID is wrong, the hook will either fail (agent not found) or enforce the wrong agent's boundaries.
+
+**Detection**: For each active agent, read `<agent-dir>/repo/.claude/settings.local.json` and extract agent IDs from hook commands. Verify each ID matches the agent's own ID from its directory name.
+
+**Message**: `"Agent <id> has hooks referencing wrong agent <other-id> in settings.local.json"`
+
+### 14.4 Warning Data Structure
+
+```typescript
+interface RepoHealthWarning {
+  repoPath: string;
+  severity: "error" | "warning" | "info";
+  category: string;       // e.g., "leaked-hooks", "missing-global-hooks", "orphaned-dir"
+  message: string;        // Human-readable description
+  agentId?: string;       // If the warning is about a specific agent
+  fix?: string;           // Optional suggested fix command
+}
+
+interface RepoHealthReport {
+  repoPath: string;
+  checkedAt: number;      // epoch ms
+  warnings: RepoHealthWarning[];
+}
+```
+
+### 14.5 TUI Display
+
+#### 14.5.1 Repo Header Warning Indicator
+
+When a repo has health warnings, the repo header in the agent tree shows a warning indicator:
+
+```
+▾ my-app 🔴          ← has error-severity warnings
+▾ other-repo ⚠️       ← has warning-severity warnings (no errors)
+▸ clean-repo          ← no warnings (no indicator)
+```
+
+The indicator shows the highest severity across all warnings for that repo: `🔴` if any errors exist, `⚠️` if only warnings/info, nothing if clean.
+
+#### 14.5.2 REPO Pane Mode Details
+
+When a repo header is selected and the pane mode is REPO, the health warnings are displayed below the existing repo info content:
+
+```
+─── Health ───
+🔴 Leaked agent hook in .claude/settings.local.json: ib hook-check-path agent-a1b2c3d4
+   Fix: Remove the hook entry from .claude/settings.local.json
+⚠️ Missing global safety hooks — run setup (h) to install
+⚠️ Orphaned git worktree for agent/agent-deadbeef
+   Fix: git worktree remove .ittybitty/agents/agent-deadbeef/repo
+ℹ️ Orphaned git branch: agent/agent-cafebabe
+```
+
+If no warnings exist, the health section shows: `✅ No configuration issues detected`
+
+#### 14.5.3 Info Panel Summary
+
+When a repo header is selected, the info panel (§11.4) includes a one-line health summary after the agent count:
+
+```
+Path: /Users/me/projects/my-app
+Agents: 3 (running: 2, waiting: 1)
+Health: 🔴 1 error, ⚠️ 2 warnings
+```
+
+Or: `Health: ✅ OK`
+
+### 14.6 Manual Re-check
+
+The `H` keybinding (Shift+h, distinct from `h` for setup dialog) triggers a re-run of health checks for all repos. A timed message "Re-checking repo health..." is shown in the status bar. Results replace any previous warnings.
+
+### 14.7 Implementation Notes
+
+- Health checks should complete in <100ms per repo for typical repos (a few agents, standard git setup). Git operations (`worktree list`, `branch --list`) are the most expensive and should be batched.
+- The global hooks check (`~/.claude/settings.json`) runs once at startup, not per-repo.
+- Results are cached in memory as a `Map<repoPath, RepoHealthReport>`. The cache is invalidated on manual re-check or when the watcher detects changes in `.ittybitty/agents/`.
+- Health checks must not modify any files — they are strictly read-only and diagnostic.
+- The `readAllAgents()` pipeline already reads `meta.json` for every agent — health checks for §14.3.3, §14.3.4, and §14.3.7 can piggyback on this data rather than re-reading.
+
+---

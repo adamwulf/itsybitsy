@@ -1367,6 +1367,85 @@ NOTE: 48b intercept-task extension is a security gate — must deploy before any
 
 ---
 
+### Phase 50: Remote Control Integration
+
+**Status:** Not started.
+
+**Goal:** Enable Claude Code's Remote Control feature on the system coordinator so users can interact with the coordinator from claude.ai/code or the Claude mobile app. See SPEC.md §15 for full specification.
+
+**Depends on:** Phase 47 (system coordinator — must exist before Remote Control can be added).
+
+**Complexity:** Low-Medium — config additions, coordinator launch flag, TUI indicators. No new subsystems.
+
+#### 50a: Configuration
+
+**Files:** `src/config.ts`
+
+Add Remote Control config keys:
+
+- [ ] `remoteControl.enabled` (boolean, default `false`) — enables `--remote-control` flag on system coordinator
+- [ ] `remoteControl.sessionName` (string, default `"itsybitsy coordinator"`) — session name visible in claude.ai/code session list
+- [ ] Tests for config defaults and validation
+
+#### 50b: Coordinator launch integration
+
+**Files:** `src/coordinator.ts`
+
+Modify `ensureSystemCoordinator()` to support Remote Control:
+
+- [ ] Read `remoteControl.enabled` from config
+- [ ] When enabled, add `--remote-control` flag to the `claude` command launched in the tmux session: `claude --remote-control "itsybitsy coordinator" --model <model>` (the `--remote-control` flag accepts an optional session name argument)
+- [ ] When disabled, launch as before (`claude --model <model>`)
+- [ ] `restartSystemCoordinator()` re-reads config on restart — toggling remote control takes effect after restart
+- [ ] Tests for launch command construction with and without remote control
+
+#### 50c: TUI — setup dialog toggle
+
+**Files:** `src/tui/setup-dialog.ts`
+
+Add Remote Control toggle to the setup dialog:
+
+- [ ] New toggle row: `Remote Control: [OFF]` / `Remote Control: [ON]`
+- [ ] On toggle ON: show confirmation dialog `"Remote Control requires claude.ai login. The system coordinator will restart with remote access enabled. Continue?"`
+- [ ] On confirm: write `remoteControl.enabled: true` to config, call `restartSystemCoordinator()`
+- [ ] On toggle OFF: write config, restart coordinator without flag
+- [ ] Tests for toggle flow and config persistence
+
+#### 50d: TUI — status indicators
+
+**Files:** `src/tui/sidebar.ts`, `src/tui/dashboard.ts`
+
+Show Remote Control status in the TUI:
+
+- [ ] Info panel: when system coordinator is selected, show `Remote: 🟢 enabled` or `Remote: off` (dim)
+- [ ] Dashboard status bar: append `(remote control enabled)` when active
+- [ ] System dashboard header: `"ib — agent dashboard (remote control enabled)"` when active
+- [ ] Tests for indicator rendering
+
+#### 50e: Health check — Remote Control prerequisites
+
+**Files:** `src/health-check.ts`
+
+Add prerequisite checks when Remote Control is enabled:
+
+- [ ] Check Claude Code version >= 2.1.51 (parse `claude --version` output)
+- [ ] Check for `ANTHROPIC_API_KEY` env var — if set, warn that Remote Control requires claude.ai login
+- [ ] Only run these checks when `remoteControl.enabled` is `true`
+- [ ] Tests for version check and auth detection
+
+#### 50 dependency graph
+
+```
+Phase 47 (system coordinator) ─── prerequisite
+Phase 50a (config) ──────────┐
+Phase 50b (coordinator) ─────┤── can parallelize (no file conflicts)
+Phase 50c (setup dialog) ────┤── depends on 50a (config keys)
+Phase 50d (TUI indicators) ──┤── depends on 50a (config keys)
+Phase 50e (health check) ────┘── depends on 50a (config keys)
+```
+
+---
+
 ## Future Work
 
 The following phases are aspirational — not yet planned for implementation. They represent longer-term architectural improvements or ideas that depend on prerequisite work being completed first.

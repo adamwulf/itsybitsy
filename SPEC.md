@@ -1897,3 +1897,219 @@ Some health check categories can be automatically resolved. The `f` keybinding (
 3. **Post-resolve**: After resolution completes, a timed notice shows the result count (e.g., "Fixed 3 issue(s)"). Health checks are automatically re-run to update the display.
 
 ---
+
+## 15. Remote Control Integration
+
+### 15.1 Overview
+
+Claude Code's [Remote Control](https://code.claude.com/docs/en/remote-control) feature allows a local Claude Code session to be controlled from claude.ai/code or the Claude mobile app (iOS/Android). The local session makes outbound HTTPS requests to the Anthropic API — no inbound ports are opened. Remote clients connect through the Anthropic API, which routes messages between the web/mobile interface and the local session. All traffic uses TLS.
+
+Remote Control is relevant to itsybitsy because it enables users to interact with coordinator sessions from a phone, tablet, or any browser — sending messages, reviewing agent output, and orchestrating work without being at the terminal running `ib watch`.
+
+### 15.2 How Remote Control Works
+
+Key characteristics:
+
+- **Outbound-only networking**: The local Claude process polls the Anthropic API. No firewall changes or port forwarding needed.
+- **Two modes**: Server mode (`claude remote-control`) runs headlessly waiting for remote connections. Interactive mode (`claude --remote-control` or `/remote-control`) enables remote access alongside local terminal interaction.
+- **Session persistence**: If the laptop sleeps or network drops, the session reconnects automatically when the machine comes back online. Extended outages (>10 minutes) cause the session to time out and exit.
+- **Authentication**: Requires claude.ai login (`/login`). API keys are not supported for Remote Control.
+- **Plan requirements**: Available on Pro, Max, Team, and Enterprise plans. Team/Enterprise admins must enable Claude Code in admin settings.
+- **Version requirement**: Claude Code v2.1.51 or later.
+- **Server mode features**: `--name` for session title, `--spawn <mode>` for concurrent sessions (`same-dir` or `worktree`), `--capacity <N>` for max concurrent sessions (default 32), `--verbose` for detailed logs, `--sandbox`/`--no-sandbox` for filesystem isolation.
+- **Security**: Uses multiple short-lived credentials, each scoped to a single purpose and expiring independently. Same transport security as any Claude Code session.
+
+### 15.3 Integration Design
+
+#### 15.3.1 Scope: System Coordinator Only
+
+Remote Control is enabled **only for the system coordinator** — not for per-repo coordinators or regular agents. Rationale:
+
+1. **The system coordinator is the user-facing orchestration layer.** It is the single entry point for directing work across all repos. Remote control of this one session gives the user full control over the entire itsybitsy fleet.
+2. **Per-repo coordinators are internal infrastructure.** They receive direction from the system coordinator, not the user directly. Exposing them via Remote Control would create a confusing multi-session experience on the mobile app (one session per registered repo).
+3. **Regular agents should never be user-controlled remotely.** They follow instructions from their manager/coordinator and have no user-facing interaction model.
+4. **Resource efficiency.** Each Remote Control session maintains a persistent polling connection. One connection for the system coordinator is lightweight; one per agent would not scale.
+
+The system coordinator already accepts user input via `tmux send-keys` (§12.3.3). Remote Control provides an additional, more ergonomic input path — the user types in the claude.ai/code interface, and the system coordinator receives it as if typed locally.
+
+#### 15.3.2 Launch Mode: Server Mode
+
+The system coordinator uses **server mode** (`claude remote-control`) rather than interactive mode. Rationale:
+
+- The system coordinator already runs in a tmux session with no local interactive user. Server mode is designed for this headless use case.
+- Server mode supports `--name` for a recognizable session title in the claude.ai session list (e.g., `"itsybitsy coordinator"`).
+- The `--spawn same-dir` mode (default) is appropriate — the coordinator runs from `~/.itsybitsy/` and concurrent remote sessions share that directory. `--spawn worktree` is unnecessary since the coordinator has no codebase.
+- `--capacity 1` is appropriate — only one user should control the coordinator at a time. Multiple devices can connect to the same session.
+
+**However**, there is a fundamental constraint: `claude remote-control` (server mode) runs as a standalone process that waits for remote connections — it does not accept a prompt or run in tandem with interactive use. This means the system coordinator **cannot** use both server mode and the current tmux-based interactive approach simultaneously. Two options:
+
+**Option A: Replace tmux with Remote Control** (recommended). When remote control is enabled, the system coordinator runs as `claude remote-control --name "itsybitsy coordinator" --model <model> --capacity 1` instead of the current `claude --model <model>` interactive session inside tmux. The user interacts exclusively via claude.ai/code or the Claude app. The TUI sidebar shows the coordinator's status (polled via tmux capture, since the process still runs inside a tmux session for lifecycle management) but the sidebar input field sends messages through `tmux send-keys` as before — the server mode process still has stdin. **Key limitation**: The initial prompt (§12.1.5) cannot be sent via `tmux send-keys` in server mode — the session waits for a remote client to connect before accepting input. Instead, the coordinator prompt must be provided via a `CLAUDE.md` file at `~/.itsybitsy/CLAUDE.md` (which Claude Code loads automatically when the CWD is a git repo). This changes the prompt delivery mechanism but not the content.
+
+**Option B: Interactive mode with `--remote-control` flag**. The system coordinator launches as `claude --remote-control --model <model>` inside the tmux session. This preserves the current prompt delivery via `tmux send-keys` (§12.1.2) while also enabling remote access. The session is accessible both locally (via tmux) and remotely (via claude.ai/code). **Advantage**: No changes to the existing prompt delivery or tmux interaction model. **Disadvantage**: Requires the initial prompt to be sent via `tmux send-keys` with the existing 3-second delay, which may race with remote control setup.
+
+**Decision: Option B (interactive mode with `--remote-control`).** This is the simpler integration — it adds remote access as an overlay on the existing system coordinator lifecycle without changing the prompt delivery mechanism. The existing `tmux send-keys` flow for initial prompt and TUI input continues to work. Remote clients see the same session and can send messages that interleave with local tmux input.
+
+#### 15.3.3 Authentication Requirement
+
+Remote Control requires claude.ai authentication (`/login`), not API keys. This means:
+
+- Users must have run `claude` and completed `/login` at least once before enabling remote control.
+- The health check (§14) should verify login status when remote control is enabled — add a new check category (§15.7).
+- If the user's Claude Code installation uses an API key instead of claude.ai auth, remote control cannot be enabled. The config toggle should warn about this.
+
+#### 15.3.4 Session Naming
+
+The Remote Control session is named `"itsybitsy coordinator"` by default, configurable via config (`remoteControl.sessionName`). This name appears in the claude.ai/code session list and the Claude mobile app, making it easy to find among other sessions.
+
+### 15.4 Configuration
+
+New config keys in `~/.itsybitsy/config.json`:
+
+```json
+{
+  "remoteControl": {
+    "enabled": false,
+    "sessionName": "itsybitsy coordinator"
+  }
+}
+```
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `remoteControl.enabled` | boolean | `false` | Enable Remote Control for the system coordinator. When `true`, the system coordinator launches with `--remote-control` flag. Requires claude.ai authentication. |
+| `remoteControl.sessionName` | string | `"itsybitsy coordinator"` | Session name visible in claude.ai/code and the Claude mobile app session list. |
+
+**Default off**: Remote Control is disabled by default. The TUI coordinator experience is sufficient for most users. Remote Control is opt-in for users who want mobile/browser access to the coordinator.
+
+### 15.5 TUI Integration
+
+#### 15.5.1 Setup Dialog (h key)
+
+The setup dialog (§10) gains a new toggle in the configuration tab:
+
+```
+Remote Control: [OFF]     (toggle with Enter)
+```
+
+When toggled ON, the dialog shows a confirmation: `"Remote Control requires claude.ai login. The system coordinator will restart with remote access enabled. Continue?"`. On confirmation:
+
+1. Write `remoteControl.enabled: true` to config
+2. Restart the system coordinator (`restartSystemCoordinator()`)
+
+When toggled OFF: write config, restart coordinator without the flag.
+
+**Note**: Changing this setting requires restarting the system coordinator because the `--remote-control` flag must be present at launch time — it cannot be toggled on a running session.
+
+#### 15.5.2 Status Indicator
+
+When Remote Control is enabled, the sidebar info panel (§11.4) shows a status indicator when the system coordinator is selected:
+
+```
+◆ System Coordinator
+State: running  |  Age: 5m
+Remote: 🟢 enabled
+```
+
+When disabled: `Remote: off` (dim text, no icon).
+
+The system dashboard (§12.1.4) header also shows remote control status: `"ib — agent dashboard (remote control enabled)"`.
+
+#### 15.5.3 Session URL Display
+
+When the system coordinator is selected and Remote Control is enabled, the right pane STATUS mode includes the session URL and a note about mobile access:
+
+```
+─── Remote Control ───
+Status: Connected
+Session: itsybitsy coordinator
+Access: Open claude.ai/code or Claude mobile app
+        Session appears in your session list with 🖥️ icon
+```
+
+**Note**: The actual session URL is displayed in the tmux output of the coordinator (visible in the coordinator sidebar panel). itsybitsy does not need to parse or extract it — the user can read it directly from the coordinator's tmux output or find the session in their claude.ai session list by name.
+
+### 15.6 CLI Integration
+
+No new `ib` commands are needed. Remote Control is managed through:
+
+1. **Config**: `remoteControl.enabled` and `remoteControl.sessionName` in `~/.itsybitsy/config.json`
+2. **Setup dialog**: Toggle in the TUI (§15.5.1)
+3. **System coordinator lifecycle**: `ensureSystemCoordinator()` reads config and adds `--remote-control` flag when enabled
+
+The existing `ib` command pattern (`ib hooks install/uninstall`) is not appropriate here because Remote Control is not a hook — it's a launch flag on the coordinator process. Config + restart is the correct pattern.
+
+### 15.7 Health Check Integration
+
+A new health check category is added to §14.3:
+
+#### 15.7.1 Remote Control Prerequisites (warning)
+
+**What**: Remote Control is enabled in config but prerequisites are not met.
+
+**Detection**: When `remoteControl.enabled` is `true`:
+1. Check Claude Code version is >= 2.1.51 (parse output of `claude --version`)
+2. Check that claude.ai authentication is configured (not API key auth) — this can be inferred from the absence of `ANTHROPIC_API_KEY` in the environment, though a definitive check would require inspecting Claude Code's auth state
+
+**Message**: `"Remote Control enabled but Claude Code version is <version> (requires >= 2.1.51)"` or `"Remote Control enabled but using API key auth — requires claude.ai login"`
+
+### 15.8 Security Considerations
+
+#### 15.8.1 Permission Model
+
+Remote Control does not change the system coordinator's permissions. The coordinator still has only `Bash(ib:*)` — it can run `ib` commands and nothing else. A remote user has exactly the same capabilities as someone typing in the TUI's coordinator input field:
+
+- List agents (`ib list`)
+- Send messages to agents (`ib send`)
+- Merge/kill/create agents
+- Check status and diffs
+
+The deny list (Read, Write, Edit, etc.) is enforced by Claude Code's `settings.local.json` regardless of whether input comes from tmux, the TUI, or a remote client. Remote Control is just another input surface — it does not bypass permission enforcement.
+
+#### 15.8.2 Authentication Boundary
+
+Remote Control sessions are tied to the user's claude.ai account. Only the authenticated user can connect to the session. There is no shared-access or team-access model — the user who started `ib watch` is the only one who can control the coordinator remotely.
+
+#### 15.8.3 Network Exposure
+
+The system coordinator makes outbound HTTPS connections only. No inbound ports are opened on the user's machine. The Anthropic API acts as a relay — the remote client and local session never communicate directly. This means:
+
+- No firewall configuration is needed
+- The machine is not exposed to incoming connections
+- Network security posture is unchanged from a standard Claude Code session
+
+#### 15.8.4 Session Lifetime
+
+The Remote Control session lives as long as the system coordinator's tmux session. When `ib watch` exits and the last reference is released (§12.1.2), the coordinator is killed and the Remote Control session ends. The session also times out after ~10 minutes of network unavailability.
+
+**Risk**: If a user enables Remote Control, starts a task from their phone, then closes their laptop, the coordinator continues running (tmux persists across terminal closures). The task completes and agents may be waiting for review. When the user reopens their laptop, the session reconnects and they can continue. This is the intended behavior — Remote Control is designed to survive interruptions.
+
+#### 15.8.5 Risks and Mitigations
+
+| Risk | Severity | Mitigation |
+|------|----------|------------|
+| Unauthorized remote access | Low | Tied to claude.ai account auth; same security as any Claude Code session |
+| Coordinator permission bypass via remote input | None | Permissions enforced by `settings.local.json`, not input source |
+| Persistent session after `ib watch` exit | Low | Session killed with coordinator tmux session; timeout after 10min network loss |
+| Stale session in claude.ai session list | Low | Session shows offline status when coordinator is not running |
+| Remote user sends conflicting commands while TUI user is active | Low | Same session — messages interleave naturally; coordinator processes them sequentially |
+
+### 15.9 Affected Files and Modules
+
+| Module | Changes needed |
+|--------|---------------|
+| `src/config.ts` | New config keys: `remoteControl.enabled` (boolean, default `false`), `remoteControl.sessionName` (string, default `"itsybitsy coordinator"`) |
+| `src/coordinator.ts` | `ensureSystemCoordinator()` reads `remoteControl.enabled` from config; if true, adds `--remote-control` and `--name <sessionName>` flags to the `claude` command in the tmux session |
+| `src/tui/dashboard.ts` | Status bar shows "(remote control enabled)" when active. System dashboard header updated. |
+| `src/tui/sidebar.ts` | Info panel shows `Remote: 🟢 enabled` or `Remote: off` when system coordinator is selected |
+| `src/tui/setup-dialog.ts` | New toggle for Remote Control with restart confirmation |
+| `src/health-check.ts` | New check: remote control prerequisites (version, auth) |
+
+### 15.10 Limitations and Future Work
+
+- **Per-repo coordinators**: Remote Control is not enabled for per-repo coordinators in this design. If users need direct remote access to a specific repo's coordinator, they can send commands through the system coordinator (e.g., `ib send itsybitsy "review the latest PR"`). A future enhancement could allow per-repo remote control sessions, but the UX of multiple remote sessions needs careful design.
+- **Multi-user access**: Remote Control is single-user (tied to claude.ai account). Team scenarios where multiple users control the same itsybitsy instance are not supported. This would require a different architecture (e.g., a shared web UI).
+- **Session recovery**: If the coordinator process crashes, the Remote Control session is lost. The user must restart via the TUI (`R` key). A future enhancement could auto-restart the coordinator with Remote Control re-enabled.
+- **Notification forwarding**: Remote Control does not provide push notifications. The user must actively check the session to see coordinator output. Integration with the Claude mobile app's notification system would be a valuable future enhancement.
+- **`--spawn worktree` mode**: Not used because the system coordinator has no codebase. If per-repo coordinators gain Remote Control in the future, `--spawn worktree` could be relevant for isolating concurrent sessions.
+
+---

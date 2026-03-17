@@ -1124,10 +1124,10 @@ Add the system coordinator as the first entry in the agent tree:
 - [ ] System coordinator is selectable via j/k navigation
 - [ ] System coordinator selection sets selectedAgent to a synthetic Agent-like object (or a separate selection type)
 - [ ] System coordinator state detection uses tmux-only approach (SPEC.md §12.1.6)
-- [ ] Update `info-panel.ts` to handle `kind: "system-coordinator"` — render empty/no-op (info panel is hidden in full-width mode, but the code must handle this kind without crashing)
+- [ ] Update `info-panel.ts` to handle `kind: "system-coordinator"` — render empty/no-op (info panel is hidden in full-width mode, but the code must handle this kind without crashing). For per-repo coordinators (`kind: "agent"` with `coordinator: true`), show a coordinator type indicator (this is handled in 48e, not here)
 - [ ] **Blast radius audit**: Adding `kind: "system-coordinator"` to the `FlatEntry` union means ALL consumers need updating — every `flatList.filter()`, `Extract<FlatEntry, ...>`, and exhaustive switch. Files: `dashboard.ts`, `dashboard.test.ts`, `agent-actions.ts`, `pane-manager.ts`, `info-panel.ts`
 - [ ] **Action key suppression**: When system coordinator is selected, suppress action keys that don't apply: `x` (kill), `!` (nuke), `m` (merge), `r` (reassign). `s` (send) IS allowed — routes via `tmux send-keys` per SPEC §12.3.3 (TUI uses user-interactive path, not inbox). `R` (resume/restart) is allowed (triggers restart). Update `agent-actions.ts` to check for `kind: "system-coordinator"`.
-- [ ] **`s` key routing**: When system coordinator is selected and user presses `s`, the standard send dialog opens and the message is delivered via `tmux send-keys -t ib-coordinator -l "<message>"` followed by `tmux send-keys -t ib-coordinator Enter` (same as the sidebar input field). This matches SPEC §12.3.3 — TUI interactions are user-interactive and use tmux send-keys directly. The `ib inbox write` path is only for programmatic/automated senders (watchdog, agents).
+- [ ] **`s` key routing**: When system coordinator is selected and user presses `s`, the standard send dialog opens and the message is delivered via `tmux send-keys -t ib-coordinator -l "<message>"` followed by `tmux send-keys -t ib-coordinator Enter` (same as the sidebar input field). This matches SPEC §12.3.3 — TUI interactions are user-interactive and use tmux send-keys directly. The `ib inbox write` path is only for programmatic/automated senders (watchdog, agents). **Control character sanitization**: Before sending, strip all characters with code points below `0x20` and `0x7F` (DEL) from the message text (SPEC §12.3.3). This prevents Ctrl-C/D/Escape injection. Apply the same sanitization here as in Phase 49c — the sanitization function should be shared.
 - [ ] Tests for tree rendering with system coordinator, action key suppression
 
 #### 47e: Full-width coordinator view
@@ -1155,7 +1155,7 @@ Wire system coordinator lifecycle into the dashboard:
 - [ ] On `launchDashboard()`: call `ensureSystemCoordinator()` before starting the TUI
 - [ ] On Ctrl-C exit: call `releaseSystemCoordinator()` after stopping the TUI
 - [ ] Pass coordinator tmux output to the sidebar for rendering
-- [ ] Handle the case where the coordinator session dies mid-operation: show "System coordinator stopped — press Enter to restart" in the panel
+- [ ] Handle the case where the coordinator session dies mid-operation: show "System coordinator stopped — press R to restart" in the panel
 - [ ] `R` (resume) key when system coordinator is selected triggers restart
 - [ ] Tests for startup/shutdown lifecycle
 
@@ -1173,7 +1173,7 @@ Wire system coordinator lifecycle into the dashboard:
 
 #### 48a: Agent creation — `--coordinator` flag
 
-**Files:** `src/ib-commands.ts`, `src/agent-lifecycle.ts`, `src/index.ts`
+**Files:** `src/ib-commands.ts`, `src/agent-lifecycle.ts` (coordinator-specific teardown — ensure `archiveAgent()` and `killAgent()` handle coordinator directories correctly; no `newAgent()` changes here since that lives in `ib-commands.ts`), `src/index.ts`
 
 Extend `newAgent()` to support the `--coordinator` flag:
 
@@ -1194,14 +1194,14 @@ Extend `newAgent()` to support the `--coordinator` flag:
 
 #### 48b: Coordinator permissions
 
-**Files:** `src/coordinator.ts`, `src/config.ts`
+**Files:** `src/coordinator.ts`, `src/config.ts`, `src/hooks/intercept-task.ts`
 
 Add `buildCoordinatorSettings()` function:
 
 - [ ] New function in `src/coordinator.ts` parallel to `buildAgentSettings()` — produces the complete permission set from SPEC.md §12.2.4 (allow list: Bash(ib:*), Bash(git status/log/diff/show/ls-files:*), Bash(pwd:*), Bash(ls:*), Read, Glob, Grep, LS, TodoWrite, AskUserQuestion; deny list: Bash, Write, Edit, MultiEdit, NotebookEdit, WebFetch, WebSearch, Task, TaskOutput, Agent, KillShell, EnterPlanMode, ExitPlanMode). Note: Bash(git grep:*) is intentionally excluded — `--open-files-in-pager` allows arbitrary execution; coordinators use the Grep tool instead.
 - [ ] Merges with config `permissions.coordinator.allow/deny` (config keys added in 47a). **Merge semantics**: config entries are appended; hardcoded deny list always takes precedence over user-configured allow (SPEC §12.2.4).
 - [ ] Called by `newAgent()` when `--coordinator` flag is set
-- [ ] Extend `intercept-task` hook to block Bash tool calls from coordinator sessions that contain shell metacharacters (`;`, `&&`, `||`, `|`, `>`, `>>`, `<`, `` ` ``, `$(`). Detect coordinator sessions via `coordinator: true` in meta.json. This is the defense-in-depth layer described in SPEC §12.2.4.
+- [ ] Extend `intercept-task` hook to block Bash tool calls from coordinator sessions that contain shell metacharacters (`;`, `&&`, `||`, `|`, `>`, `>>`, `<`, `` ` ``, `$(`, `${`). Detect coordinator sessions via `coordinator: true` in meta.json. This is the defense-in-depth layer described in SPEC §12.2.4. **Security gate**: This MUST be implemented and deployed before any coordinator goes live — without it, `Bash(ib:*)` has a known bypass.
 - [ ] Tests for permission construction, config merging, metacharacter blocking
 
 #### 48c: Session start context for coordinators
@@ -1271,7 +1271,7 @@ Support addressing coordinators by name:
 **Files:** `src/tui/dashboard.ts`, `src/coordinator.ts`
 
 - [ ] On `launchDashboard()` (after `ensureSystemCoordinator()`): auto-spawn a per-repo coordinator for each registered repo that doesn't already have one. Coordinators bypass the `maxAgents` check (SPEC §12.4.3).
-- [ ] On Ctrl-C exit: pause per-repo coordinators after stopping the TUI, only when no live PIDs remain in `~/.itsybitsy/coordinator.refs` (same shared ref file used by system coordinator — see 47a)
+- [ ] On Ctrl-C exit: pause per-repo coordinators after stopping the TUI, only when no live PIDs remain in `~/.itsybitsy/coordinator.refs` (same shared ref file used by system coordinator — see 47a). Uses `pauseAgent()` from `src/ib-commands.ts` — verify it handles coordinator agents correctly (kills Claude process + tmux session, preserves worktree/meta.json/branch). On next startup, paused coordinators are resumed via `ib resume coordinator` (standard §1.6 flow).
 - [ ] Idempotent: if coordinator already exists for a repo, skip it
 - [ ] Tests for auto-spawn and auto-close lifecycle
 
@@ -1315,7 +1315,7 @@ Complete the input field component (may already be partially implemented):
 **Files:** `src/tui/sidebar.ts`, `src/tui/dashboard.ts`
 
 - [ ] When `coordinator` panel has focus: render input field at bottom of coordinator section
-- [ ] On submit: strip all control characters (code points < 0x20 except space) from message text — prevents Ctrl-C/D/Escape injection and multi-line injection (see SPEC §12.3.3). Then `tmux send-keys -t ib-coordinator -l "<message>"` followed by `tmux send-keys -t ib-coordinator Enter`
+- [ ] On submit: strip all control characters (code points < 0x20, plus `0x7F` DEL) from message text — prevents Ctrl-C/D/Escape injection and multi-line injection (see SPEC §12.3.3). Uses the same sanitization function as Phase 47d's `s` key routing. Then `tmux send-keys -t ib-coordinator -l "<message>"` followed by `tmux send-keys -t ib-coordinator Enter`
 - [ ] Subtract 3 lines from coordinator panel display height when input field is visible
 - [ ] Tests for submit routing
 
@@ -1337,22 +1337,24 @@ Complete the input field component (may already be partially implemented):
 
 **Phase 46** is partially complete — FocusManager, focus-aware routing, panel resizing, and layout persistence are done. Input field components are deferred to Phase 49.
 
-**Phase 47** (system coordinator) is next. Sub-phases 47a-i (config/templates) and 47a-ii (lifecycle) are foundational. 47b (inbox) can parallel with 47a-ii. 47c-47f depend on 47a.
+**Phase 47** (system coordinator) is next. Sub-phases 47a-i (config/templates) and 47a-ii (lifecycle) are foundational. 47b (inbox) shares `src/coordinator.ts` with 47a-ii, so they should be done by the same agent or sequentially to avoid merge conflicts — extract inbox into `src/inbox.ts` if parallel agents are desired. 47c-47f depend on 47a.
 
-**Phase 48** (per-repo coordinators) has significant parallelism with Phase 47. Sub-phases 48a (agent creation), 48c (session-start), 48e-48f (tree display, TUI actions) have **zero code dependencies** on Phase 47 — they extend existing agent infrastructure, not coordinator-specific infrastructure. 48b (permissions) has a soft dependency on 47a for the `permissions.coordinator.allow/deny` config keys, but the function itself is independent. Only 48d (watchdog notification to system coordinator), 48g (addressing resolution), and 48h (auto-spawn on watch) truly depend on Phase 47.
+**Phase 48** (per-repo coordinators) has partial parallelism with Phase 47. Sub-phases 48a (agent creation), 48c (session-start), 48e-48f (tree display, TUI actions) have **zero functional dependencies** on Phase 47 — they extend existing agent infrastructure, not coordinator-specific infrastructure. However, 48b's `buildCoordinatorSettings()` targets `src/coordinator.ts` (created in 47a), creating a **file-level dependency** — either 48b must follow 47a or the function should go in a separate file. 48d (watchdog notification), 48g (addressing resolution), and 48h (auto-spawn) truly depend on Phase 47. When parallelizing, assign agents to avoid shared file conflicts.
 
 **Phase 49** (input fields) has a soft dependency on Phase 47 (needs the coordinator session to send to), but 49a (input field component) and 49d (keyboard routing) are pure UI work that can proceed independently.
 
 ```
-Phase 47a ────── config/templates (47a-i) + lifecycle (47a-ii) + inbox (47b)
+Phase 47a ────── config/templates (47a-i) + lifecycle (47a-ii)
+Phase 47b ────── inbox (same agent as 47a, or extract to src/inbox.ts for parallelism)
 Phase 47c-f ──── TmuxPoller, tree entry, full-width view, dashboard integration
                  (depends on 47a)
 Phase 48a,c ──┐
-Phase 48e-f ──┤── per-repo coordinator agents (parallel with 47)
-Phase 48b ────┤── soft dep on 47a (config keys)
+Phase 48e-f ──┤── per-repo coordinator agents (parallel with 47, different files)
+Phase 48b ────┤── file-level dep on 47a (src/coordinator.ts)
 Phase 48d,g,h ┘── depends on 47
 Phase 49a,d ──── input field component, keyboard routing (parallel with 47-48)
 Phase 49b-c ──── input field wiring (depends on 47 + 49a)
+NOTE: 48b intercept-task extension is a security gate — must deploy before any coordinator
 ```
 
 ---

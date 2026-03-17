@@ -181,9 +181,9 @@ Creating (workspace trust prompt, full input) > Compacting (last 5) > Active run
 
 ### Dashboard (src/tui/dashboard.ts)
 - **Layout (Phase 45 — complete):** Three-column layout: resizable sidebar (default 60 cols, range 30–120) with agent tree + info panel + coordinator placeholder | resizable tmux pane | cycling right pane. See SPEC.md §11–13 for full specification.
-- **Focus system (Phase 46 — partially complete):** 5 focusable panels: agent-tree, info, coordinator, active-agent, right-pane. Tab/Shift+Tab cycles focus. Focused panel headers render in reverse video + bold; unfocused render dim. `[`/`]` resize width (focus-aware), `{`/`}` resize sidebar panel height (steals from neighbor). Input fields not yet implemented (deferred to Phase 47).
+- **Focus system (Phase 46 — partially complete):** 5 focusable panels: agent-tree, info, coordinator, active-agent, right-pane. Tab/Shift+Tab cycles focus. Focused panel headers render in reverse video + bold; unfocused render dim. `[`/`]` resize width (focus-aware), `{`/`}` resize sidebar panel height (steals from neighbor). Input fields not yet implemented (deferred to Phase 49).
 - **Layout persistence:** Panel sizes (sidebar width, split-pane left width, height offsets) saved to `~/.itsybitsy/layout.json` via debounced write (500ms). Restored on startup with validation (rejects NaN/Infinity, clamps to valid ranges).
-- **Coordinator (Phase 47 — not started):** Sidebar shows placeholder. Auto-spawned `ib-coordinator` tmux session planned. See SPEC.md §12.
+- **Coordinator System (Phases 47–49 — not started):** Two-tier system: system coordinator (`ib-coordinator` tmux session, `~/.itsybitsy/`, Bash(ib:*) only) + per-repo coordinators (special agents with `coordinator: true` in meta.json, Read/Glob/Grep/LS + ib:*, no Write/Edit, unqualified Bash denied). System coordinator shown in sidebar + full-width view when selected. Per-repo coordinators are first entry under their repo in agent tree. See SPEC.md §12.
 - Agent tree: max 7 visible rows with scroll indicators; compact format in sidebar (icon + id + state + age)
 - Info panel: stoplight indicators (● Claude, ● Watchdog — PID liveness via `process.kill(pid, 0)`), model, summary/prompt
 - Right pane modes: AGENT LOG, INITIAL PROMPT, DENIALS, TREE, ERRORS, DIFF, QUESTIONS, STATUS, REPO (9 modes)
@@ -217,7 +217,7 @@ Shared agent lifecycle helpers used by multiple ib commands. Mirrors the ib bash
 Reads Claude transcript JSONL files to determine an agent's context window usage percentage, then sends `/compact` to agents that exceed a configured threshold. Matches ib's `get_agent_context_usage()` logic for transcript parsing. Encodes worktree paths into Claude's project directory naming scheme to locate the correct transcript file.
 
 ### Config (src/config.ts)
-User-wide configuration system with user and default sources. Defines all config keys (`maxAgents`, `model`, `createPullRequests`, `allowAgentQuestions`, `autoCompactThreshold`, `externalDiffTool`, hooks settings, and per-role permission allow/deny lists). Reads from `~/.itsybitsy/config.json` (user home), merging with typed defaults. No per-repo configuration.
+User-wide configuration system with user and default sources. Defines all config keys (`maxAgents`, `model`, `createPullRequests`, `allowAgentQuestions`, `autoCompactThreshold`, `externalDiffTool`, hooks settings, per-role permission allow/deny lists, and coordinator config: `coordinator.model`, `permissions.coordinator.allow/deny`). Reads from `~/.itsybitsy/config.json` (user home), merging with typed defaults. No per-repo configuration.
 
 ### Folder browser (src/tui/folder-browser.ts)
 Builds the navigable item list for the add-repo folder browser dialog. Given a current path, produces a list of `FolderItem` entries: ancestors from root down to parent, the current folder, and sorted child directories. Each item includes depth, git-repo detection, and ancestor/current flags for rendering the tree-style UI.

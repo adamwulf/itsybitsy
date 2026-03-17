@@ -1328,3 +1328,77 @@ Note: `isValidAgentId()` IS imported and used in agent-status.ts (line 384), but
 - Identify the root cause of the flaky behavior
 - Fix it so `bun test` passes reliably across 10+ consecutive runs
 - No regressions — all existing tests continue to pass
+
+---
+
+### Phase 49 (future): Repo Configuration Health Check
+
+**Status:** Not started — spec written in SPEC.md §14.
+
+**Problem:** Configuration can become inconsistent through crashes, partial cleanup, or bugs in the kill/merge/nuke lifecycle. The most severe case: agent-specific hooks (e.g., `ib hook-check-path agent-xxx`) leaked into a repo's `.claude/settings.local.json` after an agent was killed, blocking all tool calls in the user's direct Claude session. There is currently no way to detect these issues until they cause failures.
+
+**Goal:** A startup/add-repo health check that runs automatically and surfaces ⚠️/🔴 warning indicators next to repo names in the TUI when issues are detected.
+
+**Implementation steps:**
+
+1. **Create `src/health-check.ts`** — Core health check logic:
+   - `checkRepoHealth(repoPath): Promise<RepoHealthReport>` — runs all per-repo checks
+   - `checkGlobalHealth(): Promise<RepoHealthWarning[]>` — checks `~/.claude/settings.json` for missing hooks
+   - Individual check functions for each category (§14.3.1–14.3.8):
+     - `checkLeakedAgentHooks(repoPath)` — parse `.claude/settings.local.json` for agent-specific hook commands
+     - `checkMissingGlobalHooks()` — verify safety hooks and intercept-task in global settings
+     - `checkOrphanedAgentDirs(repoPath, agents)` — agent dirs with no meta.json or no tmux session
+     - `checkMalformedMetaJson(repoPath, agents)` — validate required fields in meta.json
+     - `checkOrphanedWorktrees(repoPath, agents)` — `git worktree list` vs agent directories
+     - `checkOrphanedBranches(repoPath, agents)` — `git branch --list 'agent/*'` vs agents/worktrees
+     - `checkStaleManagerRefs(agents)` — manager field pointing to non-existent agent
+     - `checkAgentHookIds(repoPath, agents)` — agent settings.local.json hooks referencing wrong ID
+   - Export `RepoHealthWarning` and `RepoHealthReport` types
+
+2. **Integrate into watcher** (`src/watcher.ts`):
+   - Add `healthReports: Map<string, RepoHealthReport>` to watcher state
+   - Run `checkRepoHealth()` for each repo on startup (async, non-blocking)
+   - Run `checkGlobalHealth()` once on startup
+   - Invalidate and re-check when watcher detects `.ittybitty/agents/` changes
+   - Expose health data to dashboard via watcher's public API
+
+3. **Update agent tree rendering** (`src/tui/dashboard.ts`):
+   - Modify repo header rows in the agent tree to append 🔴 or ⚠️ based on the highest severity warning for that repo
+   - Use `repoHealthReports` from watcher state
+
+4. **Update info panel** (`src/tui/dashboard.ts`):
+   - When a repo header is selected, add a `Health:` line to the info panel showing summary (`🔴 N errors, ⚠️ M warnings` or `✅ OK`)
+
+5. **Update REPO pane mode** (`src/tui/dashboard.ts`):
+   - When a repo header is selected in REPO mode, append a `─── Health ───` section below existing repo info
+   - List all warnings with severity icons, messages, and optional fix suggestions
+   - Show `✅ No configuration issues detected` if clean
+
+6. **Add `H` keybinding** for manual re-check:
+   - Trigger `checkRepoHealth()` for all repos
+   - Show timed message "Re-checking repo health..."
+   - Update watcher state with new results
+
+7. **Write tests** (`src/health-check.test.ts`):
+   - Unit tests for each check function with mocked filesystem/git state
+   - Test leaked hooks detection (the primary motivating case)
+   - Test that clean repos produce no warnings
+   - Test severity ordering (error > warning > info)
+   - Integration test: create an agent dir with malformed meta.json, verify detection
+
+**Files to create:**
+- `src/health-check.ts`
+- `src/health-check.test.ts`
+
+**Files to modify:**
+- `src/watcher.ts` — add health report state and trigger checks
+- `src/tui/dashboard.ts` — repo header indicators, info panel summary, REPO pane health section, `H` keybinding
+
+**Success criteria:**
+- `checkLeakedAgentHooks()` correctly detects agent-specific hooks in repo settings.local.json
+- All 8 check categories implemented and tested
+- Warning indicators appear in the TUI agent tree next to affected repos
+- REPO pane shows full health details when a repo header is selected
+- Health checks complete in <100ms per repo (no expensive operations)
+- `H` keybinding re-runs all checks
+- All existing tests continue to pass

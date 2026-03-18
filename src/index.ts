@@ -839,7 +839,14 @@ async function main() {
             process.exit(1);
           }
           const sourceIdx = args.indexOf("--source");
-          const source = sourceIdx !== -1 ? args[sourceIdx + 1] : undefined;
+          let source: string | undefined;
+          if (sourceIdx !== -1) {
+            source = args[sourceIdx + 1];
+            if (!source) {
+              console.error("Usage: ib inbox write --source <name>");
+              process.exit(1);
+            }
+          }
           await printAndExit(await inboxWrite(message, { source }));
           break;
         }
@@ -868,7 +875,11 @@ async function main() {
           await printAndExit(await inboxCount());
           break;
         default:
-          console.error(`Unknown inbox subcommand: ${inboxSub}`);
+          if (!inboxSub) {
+            console.error("Usage: ib inbox <write|list|read|ack|count>");
+          } else {
+            console.error(`Unknown inbox subcommand: ${inboxSub}`);
+          }
           console.error("Available: write, list, read, ack, count");
           process.exit(1);
       }

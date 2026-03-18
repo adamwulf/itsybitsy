@@ -7,11 +7,11 @@
 import { join } from "path";
 import { homedir } from "os";
 import { readdir, unlink, mkdir } from "fs/promises";
+import type { IbCommandResult } from "./ib-commands";
+import { isValidSource, isValidInboxFilename } from "./validation";
 
 const DEFAULT_INBOX_DIR = join(homedir(), ".itsybitsy", "coordinator-inbox");
 const MAX_MESSAGES = 100;
-const FILENAME_PATTERN = /^\d+-[0-9a-f]{4}-[\w-]+\.msg$/;
-const SOURCE_PATTERN = /^[\w-]+$/;
 
 let _inboxDirOverride: string | undefined;
 
@@ -25,13 +25,6 @@ export function setInboxDir(dir: string | undefined): void {
   _inboxDirOverride = dir;
 }
 
-export type InboxResult = {
-  ok: boolean;
-  exitCode: number;
-  stdout: string;
-  stderr: string;
-};
-
 /** Ensure the inbox directory exists. */
 async function ensureInboxDir(): Promise<void> {
   await mkdir(getInboxDir(), { recursive: true });
@@ -41,7 +34,7 @@ async function ensureInboxDir(): Promise<void> {
 async function listMessageFiles(): Promise<string[]> {
   try {
     const files = await readdir(getInboxDir());
-    return files.filter((f) => FILENAME_PATTERN.test(f)).sort();
+    return files.filter((f) => isValidInboxFilename(f)).sort();
   } catch {
     return [];
   }
@@ -52,7 +45,7 @@ async function listMessageFiles(): Promise<string[]> {
  * Returns the agent ID if CWD matches the agent worktree path pattern, otherwise undefined.
  */
 export function detectAgentIdFromCwd(cwd: string): string | undefined {
-  const match = cwd.match(/\/.ittybitty\/agents\/([^/]+)\/repo/);
+  const match = cwd.match(/\/\.ittybitty\/agents\/([^/]+)\/repo/);
   return match ? match[1] : undefined;
 }
 
@@ -63,7 +56,7 @@ export function detectAgentIdFromCwd(cwd: string): string | undefined {
 export async function inboxWrite(
   message: string,
   options?: { source?: string; cwd?: string },
-): Promise<InboxResult> {
+): Promise<IbCommandResult> {
   // Determine source
   let source = options?.source;
   if (source === undefined) {
@@ -72,7 +65,7 @@ export async function inboxWrite(
   }
 
   // Validate source
-  if (!SOURCE_PATTERN.test(source)) {
+  if (!isValidSource(source)) {
     return {
       ok: false,
       exitCode: 1,
@@ -114,7 +107,7 @@ export async function inboxWrite(
 }
 
 /** List pending messages, newest first. Tab-separated: <filename>\t<source>\t<first-80-chars>. */
-export async function inboxList(): Promise<InboxResult> {
+export async function inboxList(): Promise<IbCommandResult> {
   try {
     const inboxDir = getInboxDir();
     const files = await listMessageFiles();
@@ -143,8 +136,8 @@ export async function inboxList(): Promise<InboxResult> {
 }
 
 /** Read the full content of a message by filename. */
-export async function inboxRead(filename: string): Promise<InboxResult> {
-  if (!FILENAME_PATTERN.test(filename)) {
+export async function inboxRead(filename: string): Promise<IbCommandResult> {
+  if (!isValidInboxFilename(filename)) {
     return {
       ok: false,
       exitCode: 1,
@@ -178,8 +171,8 @@ export async function inboxRead(filename: string): Promise<InboxResult> {
 }
 
 /** Acknowledge (delete) a processed message. Idempotent: missing file returns success. */
-export async function inboxAck(filename: string): Promise<InboxResult> {
-  if (!FILENAME_PATTERN.test(filename)) {
+export async function inboxAck(filename: string): Promise<IbCommandResult> {
+  if (!isValidInboxFilename(filename)) {
     return {
       ok: false,
       exitCode: 1,
@@ -211,7 +204,7 @@ export async function inboxAck(filename: string): Promise<InboxResult> {
 }
 
 /** Count pending messages. */
-export async function inboxCount(): Promise<InboxResult> {
+export async function inboxCount(): Promise<IbCommandResult> {
   const files = await listMessageFiles();
   return {
     ok: true,

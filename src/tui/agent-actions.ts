@@ -1150,6 +1150,7 @@ export function handleResolveHealth(ctx: ActionCtx) {
     prompt: `Auto-fix ${resolvable.length} issue(s)?\n${lines.join("\n")}`,
     confirmLabel: "Fix",
     focusedButton: "cancel",
+    width: 80,
     onYes: () => {
       ctx.closeDialog();
       ctx.executeAndRefresh(async () => {

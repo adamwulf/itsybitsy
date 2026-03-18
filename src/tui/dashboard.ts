@@ -705,9 +705,10 @@ export class DashboardComponent implements Component {
 
   showDialog(dialog: NonNullable<DialogState>) {
     this._dialog = dialog;
-    const width = dialog.type === "help" ? 72
-      : (dialog.type === "folder-browser" || dialog.type === "new-agent-form" || dialog.type === "setup" || dialog.type === "permissions-editor") ? 70
-      : DIALOG_WIDTH;
+    const width = dialog.width
+      ?? (dialog.type === "help" ? 72
+        : (dialog.type === "folder-browser" || dialog.type === "new-agent-form" || dialog.type === "setup" || dialog.type === "permissions-editor") ? 70
+        : DIALOG_WIDTH);
     if (width !== DIALOG_WIDTH && this.overlayHandle) {
       this.overlayHandle.hide();
       this.overlayHandle = null;

@@ -14,22 +14,25 @@ import { TextBuffer, deleteWord } from "./text-buffer";
 export const TEXTAREA_VISIBLE_HEIGHT = 5;
 export const FOLDER_BROWSER_HEIGHT = 15;
 
+// Common optional properties shared across all dialog types
+type DialogCommon = { width?: number };
+
 // Dialog types for agent actions
 export type DialogState =
-  | { type: "confirm"; prompt: string; confirmLabel: string; focusedButton: "confirm" | "cancel"; confirmColor?: string; onYes: () => void }
-  | { type: "input"; prompt: string; value: string; onSubmit: (value: string) => void }
-  | { type: "select"; prompt: string; items: string[]; selectedIndex: number; onSelect: (index: number) => void }
-  | { type: "fuzzy"; prompt: string; query: string; allItems: string[]; filteredIndices: number[]; filteredItems: string[]; selectedIndex: number; onSelect: (originalIndex: number) => void }
-  | { type: "help"; lines: string[] }
-  | {
+  | ({ type: "confirm"; prompt: string; confirmLabel: string; focusedButton: "confirm" | "cancel"; confirmColor?: string; onYes: () => void } & DialogCommon)
+  | ({ type: "input"; prompt: string; value: string; onSubmit: (value: string) => void } & DialogCommon)
+  | ({ type: "select"; prompt: string; items: string[]; selectedIndex: number; onSelect: (index: number) => void } & DialogCommon)
+  | ({ type: "fuzzy"; prompt: string; query: string; allItems: string[]; filteredIndices: number[]; filteredItems: string[]; selectedIndex: number; onSelect: (originalIndex: number) => void } & DialogCommon)
+  | ({ type: "help"; lines: string[] } & DialogCommon)
+  | ({
       type: "textarea";
       prompt: string;
       buffer: TextBuffer;
       focusedButton: "text" | "send" | "cancel";
       sendAll?: boolean;
       onSubmit: (value: string) => void;
-    }
-  | {
+    } & DialogCommon)
+  | ({
       type: "folder-browser";
       currentPath: string;
       items: FolderItem[];
@@ -37,8 +40,8 @@ export type DialogState =
       focused: "list" | "add" | "cancel";
       scrollOffset: number;
       onSelect: (path: string) => void;
-    }
-  | {
+    } & DialogCommon)
+  | ({
       type: "new-agent-form";
       repoName: string;
       name: string;
@@ -46,8 +49,8 @@ export type DialogState =
       buffer: TextBuffer;
       focused: "name" | "worker" | "prompt" | "create" | "cancel";
       onSubmit: (name: string, worker: boolean, prompt: string) => void;
-    }
-  | {
+    } & DialogCommon)
+  | ({
       type: "setup";
       tab: number; // 0=Hooks, 1=Config
       items: SetupItem[];
@@ -57,8 +60,8 @@ export type DialogState =
       onAction: (item: SetupItem) => void;
       onTabChange: (tab: number) => void;
       onConfigAction?: (item: ConfigDialogItem) => void;
-    }
-  | {
+    } & DialogCommon)
+  | ({
       type: "permissions-editor";
       roleKey: string; // e.g., "permissions.manager"
       tab: 0 | 1; // 0=Allow, 1=Deny
@@ -69,7 +72,7 @@ export type DialogState =
       inputValue: string;
       scrollOffset: number;
       onSave: (allowList: string[], denyList: string[]) => void;
-    }
+    } & DialogCommon)
   | null;
 
 export type SetupItem = {

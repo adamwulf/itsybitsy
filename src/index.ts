@@ -833,19 +833,25 @@ async function main() {
       const inboxSub = args[1];
       switch (inboxSub) {
         case "write": {
-          const message = args[2];
-          if (!message) {
-            console.error('Usage: ib inbox write "message"');
-            process.exit(1);
-          }
-          const sourceIdx = args.indexOf("--source");
+          // Parse --source flag before extracting message (flag may appear before or after message)
+          const writeArgs = args.slice(2);
           let source: string | undefined;
-          if (sourceIdx !== -1) {
-            source = args[sourceIdx + 1];
-            if (!source) {
-              console.error("Usage: ib inbox write --source <name>");
-              process.exit(1);
+          const positionalArgs: string[] = [];
+          for (let i = 0; i < writeArgs.length; i++) {
+            if (writeArgs[i] === "--source") {
+              if (!writeArgs[i + 1]) {
+                console.error('Usage: ib inbox write [--source <name>] "message"');
+                process.exit(1);
+              }
+              source = writeArgs[++i];
+            } else {
+              positionalArgs.push(writeArgs[i]!);
             }
+          }
+          const message = positionalArgs[0];
+          if (!message) {
+            console.error('Usage: ib inbox write [--source <name>] "message"');
+            process.exit(1);
           }
           await printAndExit(await inboxWrite(message, { source }));
           break;

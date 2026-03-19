@@ -49,6 +49,11 @@ export function makeFlatRepoHeader(repoName: string, repoPath: string = "", hasA
   return { kind: "repo-header", repoName, repoPath, hasAgents };
 }
 
+/** Create a FlatEntry of kind "system-coordinator" for tests */
+export function makeFlatSystemCoordinator(state = "running", age = "5m"): Extract<FlatEntry, { kind: "system-coordinator" }> {
+  return { kind: "system-coordinator", state, age };
+}
+
 /**
  * Set an agent's state field. Centralizes the type assertion needed because
  * AgentState is a string-literal union but tests often assign arbitrary state strings.

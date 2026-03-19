@@ -18,7 +18,7 @@ import {
   installInterceptHook, uninstallInterceptHook,
 } from "../ib-commands";
 import type { NewAgentOptions, IbCommandResult } from "../ib-commands";
-import { captureTmuxOutput, resizeTmuxWindow, killTmuxSession } from "../tmux-poller";
+import { captureTmuxOutput, resizeTmuxWindow, killTmuxSession, sendTmuxKeys } from "../tmux-poller";
 import { parseState } from "../parse-state";
 import { openInGhostty, openPathInGhostty } from "../ghostty";
 import { buildFolderItems } from "./folder-browser";
@@ -33,6 +33,7 @@ import { RESET, BOLD, DIM, RED } from "./colors";
 import { MIN_LEFT_WIDTH, MAX_LEFT_WIDTH } from "./split-pane";
 import type { RepoHealthReport } from "../health-check";
 import { getResolvableWarnings, resolveHealthWarnings } from "../health-check";
+import { IB_COORDINATOR_SESSION, sanitizeTmuxInput, restartSystemCoordinator } from "../coordinator";
 
 const SCROLL_STEP = 10;
 
@@ -41,6 +42,7 @@ export interface ActionCtx {
   agentTree: {
     selectedAgent: Agent | null;
     selectedRepoHeader: string | null;
+    isSystemCoordinatorSelected: boolean;
     flatList: FlatEntry[];
     visibleList: FlatEntry[];
     selectAgentById(id: string): boolean;
@@ -72,6 +74,7 @@ export interface ActionCtx {
 }
 
 export function handleKill(ctx: ActionCtx) {
+  if (ctx.agentTree.isSystemCoordinatorSelected) return;
   const agent = ctx.agentTree.selectedAgent;
   if (!agent) return;
   ctx.showDialog({
@@ -91,6 +94,7 @@ export function handleKill(ctx: ActionCtx) {
 }
 
 export function handleNuke(ctx: ActionCtx) {
+  if (ctx.agentTree.isSystemCoordinatorSelected) return;
   const agent = ctx.agentTree.selectedAgent;
   if (!agent) {
     // No agent selected — offer nuke-all (emergency stop for entire repo)
@@ -159,6 +163,14 @@ export function handleNukeAll(ctx: ActionCtx) {
 }
 
 export function handleResume(ctx: ActionCtx) {
+  // System coordinator: R restarts the coordinator
+  if (ctx.agentTree.isSystemCoordinatorSelected) {
+    ctx.executeAndRefresh(async () => {
+      await restartSystemCoordinator();
+      ctx.setNotice("Restarted system coordinator");
+    });
+    return;
+  }
   const agent = ctx.agentTree.selectedAgent;
   if (!agent) return;
   if (agent.state !== "stopped" && agent.state !== "complete") {
@@ -209,6 +221,7 @@ function getDescendantIds(agent: Agent): Set<string> {
 const NO_PARENT_LABEL = "(No parent - make root)";
 
 export function handleReassign(ctx: ActionCtx) {
+  if (ctx.agentTree.isSystemCoordinatorSelected) return;
   const agent = ctx.agentTree.selectedAgent;
   if (!agent) return;
 
@@ -255,6 +268,7 @@ export function handleReassign(ctx: ActionCtx) {
 }
 
 export function handleMerge(ctx: ActionCtx) {
+  if (ctx.agentTree.isSystemCoordinatorSelected) return;
   const agent = ctx.agentTree.selectedAgent;
   if (!agent) return;
   ctx.setNotice(`Running merge-check for ${agent.id}...`);
@@ -283,6 +297,11 @@ export function handleMerge(ctx: ActionCtx) {
 }
 
 export function handleSend(ctx: ActionCtx) {
+  // System coordinator: send via tmux send-keys with sanitizeTmuxInput
+  if (ctx.agentTree.isSystemCoordinatorSelected) {
+    handleSendToCoordinator(ctx);
+    return;
+  }
   const agent = ctx.agentTree.selectedAgent;
   if (!agent) return;
   const dialog: Extract<NonNullable<DialogState>, { type: "textarea" }> = {
@@ -322,6 +341,24 @@ export function handleSend(ctx: ActionCtx) {
     },
   };
   ctx.showDialog(dialog);
+}
+
+function handleSendToCoordinator(ctx: ActionCtx) {
+  ctx.showDialog({
+    type: "textarea",
+    prompt: "Send message to coordinator:",
+    buffer: new TextBuffer(),
+    focusedButton: "text",
+    onSubmit: (message: string) => {
+      ctx.closeDialog();
+      if (!message.trim()) { ctx.setNotice("Send cancelled"); return; }
+      const sanitized = sanitizeTmuxInput(message.trim());
+      ctx.executeAndRefresh(async () => {
+        const sendResult = await sendTmuxKeys(IB_COORDINATOR_SESSION, sanitized);
+        ctx.setNotice(sendResult ? "Sent to coordinator" : "Failed to send to coordinator");
+      });
+    },
+  });
 }
 
 /** 'a' — infer repo from current selection, fallback to first repo */

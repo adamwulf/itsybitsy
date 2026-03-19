@@ -220,3 +220,27 @@ export async function captureTmuxOutput(tmuxSession: string, lines = 500): Promi
     return null;
   }
 }
+
+/**
+ * Send literal text to a tmux session via send-keys -l, followed by Enter.
+ * Returns true on success.
+ */
+export async function sendTmuxKeys(tmuxSession: string, text: string): Promise<boolean> {
+  try {
+    const sendProc = spawnCtx.runner(
+      ["tmux", "send-keys", "-t", tmuxSession, "-l", text],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    const sendExit = await sendProc.exited;
+    if (sendExit !== 0) return false;
+
+    const enterProc = spawnCtx.runner(
+      ["tmux", "send-keys", "-t", tmuxSession, "Enter"],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    const enterExit = await enterProc.exited;
+    return enterExit === 0;
+  } catch {
+    return false;
+  }
+}

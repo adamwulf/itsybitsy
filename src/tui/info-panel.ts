@@ -24,6 +24,7 @@ function isPidAlive(pid: number): boolean {
 
 export class InfoPanelComponent implements Component {
   agent: Agent | null = null;
+  isSystemCoordinatorSelected = false;
   selectedRepoHeader: string | null = null;
   selectedRepoPath: string | null = null;
   allAgents: FlatEntry[] = [];
@@ -35,6 +36,10 @@ export class InfoPanelComponent implements Component {
   render(width: number): string[] {
     if (this.agent) {
       return this.renderAgentInfo(width);
+    }
+    if (this.isSystemCoordinatorSelected) {
+      // System coordinator uses full-width mode; info panel renders empty/minimal
+      return padLines([truncateToWidth(`${DIM}System Coordinator${RESET}`, width, "")], this.displayHeight);
     }
     if (this.selectedRepoHeader) {
       return this.renderRepoInfo(width);

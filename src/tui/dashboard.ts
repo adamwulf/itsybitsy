@@ -66,6 +66,7 @@ import { InputFieldComponent } from "./input-field";
 import { sendMessage } from "../ib-commands";
 import { stripAnsi } from "../parse-state";
 import { getResolvableWarnings } from "../health-check";
+import { IB_COORDINATOR_SESSION } from "../coordinator";
 
 // Re-export for test compatibility
 export { AgentTreeComponent, formatAgentRow } from "./agent-tree";
@@ -75,6 +76,7 @@ export { InfoPanelComponent } from "./info-panel";
 export { FocusManager } from "./focus";
 export type { FocusTarget } from "./focus";
 export { InputFieldComponent } from "./input-field";
+export type { Selection } from "./selection";
 
 const DIALOG_WIDTH = 80;
 const DEFAULT_LEFT_WIDTH = 80;
@@ -879,13 +881,15 @@ export class DashboardComponent implements Component {
 
   syncSelectedAgent() {
     const selected = this.agentTree.selectedAgent;
+    const isCoordinator = this.agentTree.isSystemCoordinatorSelected;
     this.rightPane.agent = selected;
     this.rightPane.selectedRepoHeader = this.agentTree.selectedRepoHeader;
     this.tmuxPane.agent = selected;
-    this.statusBar.repoHeaderSelected = !selected && this.agentTree.selectedRepoHeader !== null;
+    this.statusBar.repoHeaderSelected = !selected && !isCoordinator && this.agentTree.selectedRepoHeader !== null;
 
     // Wire info panel
     this.infoPanel.agent = selected;
+    this.infoPanel.isSystemCoordinatorSelected = isCoordinator;
     this.infoPanel.selectedRepoHeader = this.agentTree.selectedRepoHeader;
     this.infoPanel.selectedRepoPath = this.agentTree.selectedRepoPath;
     this.infoPanel.allAgents = this.agentTree.flatList;
@@ -899,14 +903,14 @@ export class DashboardComponent implements Component {
 
     // Auto-switch to/from REPO mode based on selection
     const currentMode = PANE_MODES[this.modeIndex];
-    if (!selected && this.agentTree.selectedRepoHeader) {
+    if (!selected && !isCoordinator && this.agentTree.selectedRepoHeader) {
       // Repo header selected — save current mode and switch to REPO
       if (currentMode !== "REPO") {
         this.savedModeIndex = this.modeIndex;
       }
       jumpToMode(this, "REPO");
-    } else if (selected && currentMode === "REPO") {
-      // Agent selected while in REPO mode — restore previous mode
+    } else if ((selected || isCoordinator) && currentMode === "REPO") {
+      // Agent or coordinator selected while in REPO mode — restore previous mode
       // Fall back to AGENT LOG if saved mode would be empty (ERRORS/QUESTIONS with no content)
       const savedMode = PANE_MODES[this.savedModeIndex]!;
       const wouldSkip =
@@ -915,10 +919,11 @@ export class DashboardComponent implements Component {
       jumpToMode(this, wouldSkip ? "AGENT LOG" : savedMode);
     }
 
-    const newId = selected?.id ?? null;
+    // Determine the effective ID for change detection
+    const newId = isCoordinator ? "__coordinator__" : (selected?.id ?? null);
     if (newId !== this.currentAgentId) {
       this.currentAgentId = newId;
-      this.setTerminalTitle(newId ? `ib: ${newId}` : "ib");
+      this.setTerminalTitle(isCoordinator ? "ib: coordinator" : (selected ? `ib: ${selected.id}` : "ib"));
       this.tmuxPane.resetForAgent();
       this.inputField.switchAgent(newId);
       this.rightPane.agentLogContent = null;
@@ -950,7 +955,11 @@ export class DashboardComponent implements Component {
 
     this.rightPane.updateContent();
     triggerAsyncLoadIfNeeded(this);
-    this.tmuxPoller.setAgent(selected?.meta.tmux_session ?? null);
+    // Route tmux poller: system coordinator uses IB_COORDINATOR_SESSION
+    const tmuxSession = isCoordinator
+      ? IB_COORDINATOR_SESSION
+      : (selected?.meta.tmux_session ?? null);
+    this.tmuxPoller.setAgent(tmuxSession);
   }
 
   /** Check if the selected agent's tmux session has an attached client, start/stop polling accordingly */

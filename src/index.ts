@@ -337,6 +337,7 @@ async function main() {
         const stateColors = getStateColors();
         let isFirst = true;
         for (const entry of flat) {
+          if (entry.kind === "system-coordinator") continue; // CLI list doesn't show coordinator
           if (entry.kind === "repo-header") {
             if (!isFirst) console.log(""); // blank line between repos
             isFirst = false;

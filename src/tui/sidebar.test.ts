@@ -211,15 +211,44 @@ describe("SidebarComponent", () => {
     const coordPane = new TmuxPaneComponent();
     coordPane.rawOutput = "coordinator output line 1\ncoordinator output line 2";
     coordPane.hasPolled = true;
-    // TmuxPaneComponent needs an agent to render output, but for coordinator
-    // we use it without an agent — it shows "No agent selected" placeholder.
-    // The dashboard will set a fake agent for the coordinator pane.
     sidebar.coordinatorPane = coordPane;
 
     const lines = sidebar.render(SIDEBAR_WIDTH);
     const text = lines.map(stripAnsi).join("\n");
-    // Without an agent set, it shows "No agent selected"
-    expect(text).toContain("No agent selected");
+    // Sidebar renders coordinator output directly (bypasses TmuxPaneComponent agent check)
+    expect(text).toContain("coordinator output line 1");
+    expect(text).toContain("coordinator output line 2");
+  });
+
+  test("renders stopped message when coordinator has polled but no output", () => {
+    const sidebar = makeSidebar();
+    sidebar.displayHeight = 25;
+    sidebar.agentTree.setFlatList([]);
+
+    const coordPane = new TmuxPaneComponent();
+    coordPane.hasPolled = true;
+    coordPane.rawOutput = "";
+    sidebar.coordinatorPane = coordPane;
+
+    const lines = sidebar.render(SIDEBAR_WIDTH);
+    const text = lines.map(stripAnsi).join("\n");
+    expect(text).toContain("System coordinator stopped");
+    expect(text).toContain("Press R to restart");
+  });
+
+  test("renders loading message when coordinator has not polled yet", () => {
+    const sidebar = makeSidebar();
+    sidebar.displayHeight = 25;
+    sidebar.agentTree.setFlatList([]);
+
+    const coordPane = new TmuxPaneComponent();
+    coordPane.hasPolled = false;
+    coordPane.rawOutput = "";
+    sidebar.coordinatorPane = coordPane;
+
+    const lines = sidebar.render(SIDEBAR_WIDTH);
+    const text = lines.map(stripAnsi).join("\n");
+    expect(text).toContain("Starting system coordinator");
   });
 
   test("renders placeholder when coordinatorPane is null", () => {

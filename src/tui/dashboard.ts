@@ -25,7 +25,13 @@ import { readConfig } from "../config";
 import type { RepoEntry } from "../registry";
 import { AgentWatcher } from "../watcher";
 import { TmuxPoller, hasAttachedClient } from "../tmux-poller";
-import { IB_COORDINATOR_SESSION } from "../coordinator";
+import {
+  IB_COORDINATOR_SESSION,
+  acquireSystemCoordinator,
+  ensureSystemCoordinator,
+  releaseSystemCoordinator,
+  restartSystemCoordinator,
+} from "../coordinator";
 import type { Agent, FlatEntry, PendingQuestion } from "../agents";
 import { SplitPane } from "./split-pane";
 import { wrapLines, wordWrapLines, padLines } from "./wrap";
@@ -1133,7 +1139,17 @@ export class DashboardComponent implements Component {
       }
     }
     else if (data === "!") { agentActions.handleNuke(this); }
-    else if (data === "R") { agentActions.handleResume(this); }
+    else if (data === "R") {
+      if (this.focusManager.current() === "coordinator") {
+        this.executeAndRefresh(async () => {
+          await restartSystemCoordinator();
+          this.coordinatorPane.resetForAgent();
+          this.setNotice("System coordinator restarted");
+        });
+      } else {
+        agentActions.handleResume(this);
+      }
+    }
     else if (data === "P") { agentActions.handlePause(this); }
     else if (data === "r") {
       if (!this.agentTree.selectedAgent && this.agentTree.selectedRepoHeader) {
@@ -1466,6 +1482,10 @@ export async function launchDashboard(): Promise<void> {
     // Ignore
   }
 
+  // Acquire coordinator ref and ensure session before starting TUI
+  await acquireSystemCoordinator();
+  await ensureSystemCoordinator();
+
   const config = await readConfig();
   const dashboard = new DashboardComponent();
   const savedLayout = await loadLayout();
@@ -1500,7 +1520,13 @@ export async function launchDashboard(): Promise<void> {
       tui.stop();
       dashboard.setTerminalTitle("");
       process.stdout.write("\x1b[2J\x1b[H");
-      process.exit(0);
+      // Release coordinator ref — if last ref, kills the tmux session
+      releaseSystemCoordinator(async () => {
+        // onLastRef no-op — Phase 48h will add per-repo coordinator pausing
+      }).finally(() => {
+        process.exit(0);
+      });
+      return undefined;
     }
     if (colorDetection.inputFilter(data)) return undefined;
     if (isKeyRelease(data)) return undefined;

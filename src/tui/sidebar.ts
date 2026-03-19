@@ -8,7 +8,8 @@ import { truncateToWidth } from "@mariozechner/pi-tui";
 import { AgentTreeComponent, MAX_TREE_HEIGHT } from "./agent-tree";
 import { InfoPanelComponent } from "./info-panel";
 import type { TmuxPaneComponent } from "./dashboard";
-import { RESET, BOLD, DIM, DIM_GRAY } from "./colors";
+import { RESET, BOLD, DIM, DIM_GRAY, YELLOW } from "./colors";
+import { wrapLines } from "./wrap";
 import { buildFocusSeparator } from "./focus";
 import type { FocusTarget } from "./focus";
 
@@ -138,9 +139,22 @@ export class SidebarComponent implements Component {
     if (coordinatorHeight > 0) {
       lines.push(buildFocusSeparator("System Coordinator", w, this.focusTarget === "coordinator"));
       if (this.coordinatorPane) {
-        this.coordinatorPane.displayHeight = coordinatorHeight;
-        const coordLines = this.coordinatorPane.render(w);
-        lines.push(...coordLines);
+        if (this.coordinatorPane.hasPolled && !this.coordinatorPane.rawOutput) {
+          // Session died or hasn't started — show stopped message
+          const stoppedLines = renderCoordinatorStopped(w, coordinatorHeight);
+          lines.push(...stoppedLines);
+        } else if (!this.coordinatorPane.hasPolled) {
+          // First poll hasn't completed yet — show loading
+          const loadingLines: string[] = [];
+          loadingLines.push(truncateToWidth(`${DIM}Starting system coordinator...${RESET}`, w, ""));
+          while (loadingLines.length < coordinatorHeight) loadingLines.push("");
+          lines.push(...loadingLines);
+        } else {
+          // Has output — render directly (no agent needed, just wrap the raw output)
+          this.coordinatorPane.displayHeight = coordinatorHeight;
+          const coordLines = renderCoordinatorOutput(this.coordinatorPane.rawOutput, w, coordinatorHeight);
+          lines.push(...coordLines);
+        }
       } else {
         const coordLines = renderCoordinatorPlaceholder(w, coordinatorHeight);
         lines.push(...coordLines);
@@ -159,6 +173,30 @@ export class SidebarComponent implements Component {
 function renderCoordinatorPlaceholder(width: number, height: number): string[] {
   const lines: string[] = [];
   lines.push(truncateToWidth(`${DIM}[coordinator — not yet active]${RESET}`, width, ""));
+  while (lines.length < height) {
+    lines.push("");
+  }
+  return lines;
+}
+
+/** Render coordinator stopped message with restart hint */
+function renderCoordinatorStopped(width: number, height: number): string[] {
+  const lines: string[] = [];
+  lines.push(truncateToWidth(`${YELLOW}System coordinator stopped${RESET}`, width, ""));
+  lines.push(truncateToWidth(`${DIM}Press R to restart${RESET}`, width, ""));
+  while (lines.length < height) {
+    lines.push("");
+  }
+  return lines;
+}
+
+/** Render coordinator output directly (bypasses TmuxPaneComponent's agent check) */
+function renderCoordinatorOutput(rawOutput: string, width: number, height: number): string[] {
+  const wrapped = wrapLines(rawOutput, width);
+  // Show the last `height` lines (follow newest output)
+  const start = Math.max(0, wrapped.length - height);
+  const visible = wrapped.slice(start, start + height);
+  const lines = visible.map((line) => truncateToWidth(line, width, ""));
   while (lines.length < height) {
     lines.push("");
   }

@@ -60,6 +60,7 @@ import { RESET, BOLD, DIM, RED, GREEN, YELLOW, DIM_GRAY, REVERSE } from "./color
 import { MIN_LEFT_WIDTH, MAX_LEFT_WIDTH } from "./split-pane";
 import { FocusManager } from "./focus";
 import type { FocusTarget } from "./focus";
+import { SystemDashboardComponent } from "./system-dashboard";
 import { loadLayout, saveLayoutDebounced, cancelPendingSave } from "./layout";
 import type { LayoutState } from "./layout";
 import { InputFieldComponent } from "./input-field";
@@ -75,6 +76,7 @@ export { InfoPanelComponent } from "./info-panel";
 export { FocusManager } from "./focus";
 export type { FocusTarget } from "./focus";
 export { InputFieldComponent } from "./input-field";
+export { SystemDashboardComponent } from "./system-dashboard";
 export type { Selection } from "./selection";
 
 const DIALOG_WIDTH = 80;
@@ -503,6 +505,7 @@ export class DashboardComponent implements Component {
   pendingSelectNewestInRepo: string | null = null;
   private focusManager = new FocusManager();
   inputField: InputFieldComponent;
+  systemDashboard: SystemDashboardComponent;
   /** Dynamic sidebar width — adjustable via [ ] when sidebar panel is focused */
   sidebarWidth = SIDEBAR_WIDTH;
   private _questionsFocused = false;
@@ -575,6 +578,7 @@ export class DashboardComponent implements Component {
     this.dialogOverlay = new DialogOverlayComponent(() => this._dialog, () => new Set(this.repos.map((r) => r.path)));
 
     this.coordinatorPane = new TmuxPaneComponent();
+    this.systemDashboard = new SystemDashboardComponent();
     this.sidebar = new SidebarComponent(this.agentTree, this.infoPanel);
     this.sidebar.coordinatorPane = this.coordinatorPane;
     this.splitPane = new SplitPane(this.tmuxPane, this.rightPane, DEFAULT_LEFT_WIDTH, `${DIM_GRAY}│${RESET}`);
@@ -840,6 +844,7 @@ export class DashboardComponent implements Component {
 
   onUpdate(agents: Agent[], flatList: FlatEntry[], questions: PendingQuestion[], orphanedTmuxSessions: string[] = []) {
     this.agentTree.setFlatList(flatList);
+    this.systemDashboard.flatList = flatList;
     this.rightPane.questions = questions;
     this.rightPane.allAgents = flatList;
     this.rightPane.orphanedTmuxSessions = orphanedTmuxSessions;
@@ -881,6 +886,19 @@ export class DashboardComponent implements Component {
   syncSelectedAgent() {
     const selected = this.agentTree.selectedAgent;
     const isCoordinator = this.agentTree.isSystemCoordinatorSelected;
+
+    // Update focus cycling and sidebar layout for coordinator mode
+    this.focusManager.coordinatorMode = isCoordinator;
+    this.sidebar.coordinatorFullWidth = isCoordinator;
+
+    // When entering coordinator mode, ensure focus is on a valid target
+    if (isCoordinator) {
+      const focus = this.focusManager.current();
+      if (focus !== "agent-tree" && focus !== "coordinator") {
+        this.focusManager.setFocus("agent-tree");
+      }
+    }
+
     this.rightPane.agent = selected;
     this.rightPane.selectedRepoHeader = this.agentTree.selectedRepoHeader;
     this.tmuxPane.agent = selected;
@@ -1300,8 +1318,9 @@ export class DashboardComponent implements Component {
 
     const lines: string[] = [];
     const terminalRows = process.stdout.rows || 24;
+    const isCoordinatorView = this.agentTree.isSystemCoordinatorSelected;
     const isTreeMode = this.rightPane.mode === "TREE";
-    const isFullWidth = FULL_WIDTH_MODES.has(this.rightPane.mode);
+    const isFullWidth = isCoordinatorView || FULL_WIDTH_MODES.has(this.rightPane.mode);
 
     // Header
     const subtitle = this.lastSentNotice
@@ -1320,10 +1339,16 @@ export class DashboardComponent implements Component {
     this.sidebar.displayHeight = availableHeight + 1; // sidebar gets the title separator row too
 
     // Build main area title separator (agent-id left, pane-mode right)
-    const mainTitleSep = this.buildMainTitleSeparator(mainWidth, isTreeMode, isFullWidth);
+    const mainTitleSep = isCoordinatorView
+      ? this.buildCoordinatorTitleSeparator(mainWidth)
+      : this.buildMainTitleSeparator(mainWidth, isTreeMode, isFullWidth);
 
     let mainLines: string[];
-    if (isTreeMode) {
+    if (isCoordinatorView) {
+      // System coordinator selected: full-width system dashboard table
+      this.systemDashboard.displayHeight = availableHeight;
+      mainLines = [mainTitleSep, ...this.systemDashboard.render(mainWidth)];
+    } else if (isTreeMode) {
       // TREE mode: full-height tree in the main area.
       // IMPORTANT: The sidebar renders the same AgentTreeComponent in compact mode.
       // The main area render below runs FIRST to set maxHeight for the full tree,
@@ -1450,6 +1475,19 @@ export class DashboardComponent implements Component {
     const fillCount = Math.max(1, mainWidth - fixedChars);
     const sep = `${leftDashColor}${"─".repeat(leftPad)}${RESET}${leftTitleStyle}${leftTitle}${RESET}${rightTitleStyle}${rightTitle}${RESET}${leftDashColor}${"─".repeat(fillCount)}${RESET}${rightDashColor}${"─".repeat(rightPad)}${RESET}`;
     return truncateToWidth(sep, mainWidth, "");
+  }
+
+  /** Build title separator for system coordinator full-width view */
+  private buildCoordinatorTitleSeparator(mainWidth: number): string {
+    const title = " System Dashboard ";
+    const leftPad = 3;
+    const rightPad = 3;
+    const fillCount = Math.max(1, mainWidth - leftPad - title.length - rightPad);
+    return truncateToWidth(
+      `${DIM_GRAY}${"─".repeat(leftPad)}${RESET}${BOLD}${title}${RESET}${DIM_GRAY}${"─".repeat(fillCount)}${"─".repeat(rightPad)}${RESET}`,
+      mainWidth,
+      "",
+    );
   }
 
   /** Build bottom separator with appropriate junction characters */

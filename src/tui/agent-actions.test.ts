@@ -78,6 +78,10 @@ function makeMockCtx(overrides?: {
       scrollUp: (n?: number) => scrollUpCalls.push(n ?? 10),
       scrollDown: (n?: number) => scrollDownCalls.push(n ?? 10),
     },
+    systemDashboard: {
+      scrollUp: () => {},
+      scrollDown: () => {},
+    },
     splitPane: {
       getLeftWidth: () => leftWidth,
       setLeftWidth: (w: number) => { leftWidth = w; },

@@ -75,6 +75,8 @@ export class SidebarComponent implements Component {
   focusTarget: FocusTarget = "agent-tree";
   /** Height offsets for sidebar panels — positive grows, negative shrinks */
   heightOffsets: { tree: number; info: number; coordinator: number } = { tree: 0, info: 0, coordinator: 0 };
+  /** When true, hide info panel and give coordinator all remaining space */
+  coordinatorFullWidth = false;
 
   constructor(agentTree: AgentTreeComponent, infoPanel: InfoPanelComponent) {
     this.agentTree = agentTree;
@@ -87,6 +89,14 @@ export class SidebarComponent implements Component {
   }
 
   render(width: number): string[] {
+    if (this.coordinatorFullWidth) {
+      return this.renderCoordinatorLayout(width);
+    }
+    return this.renderNormalLayout(width);
+  }
+
+  /** Normal three-section layout: tree + info + coordinator */
+  private renderNormalLayout(width: number): string[] {
     const w = width;
     const lines: string[] = [];
 
@@ -138,27 +148,7 @@ export class SidebarComponent implements Component {
     // System Coordinator separator + content
     if (coordinatorHeight > 0) {
       lines.push(buildFocusSeparator("System Coordinator", w, this.focusTarget === "coordinator"));
-      if (this.coordinatorPane) {
-        if (this.coordinatorPane.hasPolled && !this.coordinatorPane.rawOutput) {
-          // Session died or hasn't started — show stopped message
-          const stoppedLines = renderCoordinatorStopped(w, coordinatorHeight);
-          lines.push(...stoppedLines);
-        } else if (!this.coordinatorPane.hasPolled) {
-          // First poll hasn't completed yet — show loading
-          const loadingLines: string[] = [];
-          loadingLines.push(truncateToWidth(`${DIM}Starting system coordinator...${RESET}`, w, ""));
-          while (loadingLines.length < coordinatorHeight) loadingLines.push("");
-          lines.push(...loadingLines);
-        } else {
-          // Has output — render directly (no agent needed, just wrap the raw output)
-          this.coordinatorPane.displayHeight = coordinatorHeight;
-          const coordLines = renderCoordinatorOutput(this.coordinatorPane.rawOutput, w, coordinatorHeight);
-          lines.push(...coordLines);
-        }
-      } else {
-        const coordLines = renderCoordinatorPlaceholder(w, coordinatorHeight);
-        lines.push(...coordLines);
-      }
+      this.renderCoordinatorContent(lines, w, coordinatorHeight);
     }
 
     // Ensure total output matches displayHeight
@@ -166,6 +156,63 @@ export class SidebarComponent implements Component {
       lines.push("");
     }
     return lines.slice(0, this.displayHeight);
+  }
+
+  /**
+   * Two-section layout when system coordinator is selected:
+   * tree (top) + coordinator tmux output (bottom, all remaining space).
+   * Info panel is hidden.
+   */
+  private renderCoordinatorLayout(width: number): string[] {
+    const w = width;
+    const lines: string[] = [];
+
+    const itemCount = this.agentTree.visibleList.length;
+    const treeHeight = Math.min(MAX_TREE_HEIGHT, Math.max(1, itemCount));
+
+    // Agents section header + tree
+    lines.push(buildFocusSeparator("Agents", w, this.focusTarget === "agent-tree"));
+    this.agentTree.maxHeight = treeHeight;
+    const treeLines = this.agentTree.render(w);
+    lines.push(...treeLines);
+    // Pad tree to exact height (header + treeHeight)
+    while (lines.length < treeHeight + 1) {
+      lines.push("");
+    }
+
+    // Coordinator gets all remaining space: available - tree_height - 1 (tree header) - 1 (coordinator header)
+    const coordinatorHeight = Math.max(1, this.displayHeight - treeHeight - 2);
+
+    lines.push(buildFocusSeparator("System Coordinator", w, this.focusTarget === "coordinator"));
+    this.renderCoordinatorContent(lines, w, coordinatorHeight);
+
+    // Ensure total output matches displayHeight
+    while (lines.length < this.displayHeight) {
+      lines.push("");
+    }
+    return lines.slice(0, this.displayHeight);
+  }
+
+  /** Render coordinator content (shared by both layouts) */
+  private renderCoordinatorContent(lines: string[], w: number, height: number): void {
+    if (this.coordinatorPane) {
+      if (this.coordinatorPane.hasPolled && !this.coordinatorPane.rawOutput) {
+        const stoppedLines = renderCoordinatorStopped(w, height);
+        lines.push(...stoppedLines);
+      } else if (!this.coordinatorPane.hasPolled) {
+        const loadingLines: string[] = [];
+        loadingLines.push(truncateToWidth(`${DIM}Starting system coordinator...${RESET}`, w, ""));
+        while (loadingLines.length < height) loadingLines.push("");
+        lines.push(...loadingLines);
+      } else {
+        this.coordinatorPane.displayHeight = height;
+        const coordLines = renderCoordinatorOutput(this.coordinatorPane.rawOutput, w, height);
+        lines.push(...coordLines);
+      }
+    } else {
+      const coordLines = renderCoordinatorPlaceholder(w, height);
+      lines.push(...coordLines);
+    }
   }
 }
 

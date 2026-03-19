@@ -472,7 +472,18 @@ Each agent's worktree is linked to a git branch named `agent/<agent-id>`:
 - The worktree is at `.ittybitty/agents/<id>/repo`
 - On merge or kill, both the worktree and branch are removed
 
-### 5.4 Archive Structure
+### 5.4 Diff and Status — Parent Branch Resolution
+
+`ib diff <id>` and `ib status <id>` compare an agent's branch against its parent using `git merge-base`:
+
+- **Sub-agents** (has `manager` in meta.json): diff against `agent/<manager-id>`
+- **Top-level agents** (no manager): diff against `main`
+
+**Current limitation**: Top-level agents always diff against `main`, even if the agent was created from a non-main branch (e.g., `fix/my-feature`). This means the diff includes commits that are already on the source branch but not yet on `main`. The correct behavior would be to record the base branch at creation time in `meta.json` (e.g., `base_branch: "fix/my-feature"`) and diff against that instead. Until this is implemented, agents created from non-main branches will show inflated diffs.
+
+The external diff tool (launched via the `d` keybinding in the TUI) has the same limitation — it hardcodes `git merge-base HEAD main` regardless of the agent's actual base branch.
+
+### 5.5 Archive Structure
 
 Archives are stored at `.ittybitty/archive/<YYYYMMDD-HHMMSS>-<agent-id>/` using the local time of archival. The same files as listed in §1.7 are preserved.
 

@@ -37,12 +37,12 @@ export function resetCoordinatorHome(): void {
   overrideHome = undefined;
 }
 
-function itsybitsynHome(): string {
+function itsybitsyHome(): string {
   return overrideHome ?? join(process.env.HOME ?? homedir(), ".itsybitsy");
 }
 
 function refsPath(): string {
-  return join(itsybitsynHome(), "coordinator.refs");
+  return join(itsybitsyHome(), "coordinator.refs");
 }
 
 /**
@@ -127,7 +127,7 @@ async function tmuxSessionExists(): Promise<boolean> {
  * Creates directory, runs git init, writes .gitignore with '*'.
  */
 async function ensureHomeRepo(): Promise<void> {
-  const home = itsybitsynHome();
+  const home = itsybitsyHome();
   const { mkdir } = await import("fs/promises");
   await mkdir(home, { recursive: true });
 
@@ -148,7 +148,7 @@ async function ensureHomeRepo(): Promise<void> {
  * Write settings.local.json and coordinator-prompt.txt to ~/.itsybitsy/.
  */
 async function writeCoordinatorFiles(): Promise<void> {
-  const home = itsybitsynHome();
+  const home = itsybitsyHome();
   const { mkdir } = await import("fs/promises");
 
   // Write .claude/settings.local.json
@@ -178,7 +178,7 @@ export async function ensureSystemCoordinator(): Promise<string> {
     return IB_COORDINATOR_SESSION;
   }
 
-  const home = itsybitsynHome();
+  const home = itsybitsyHome();
 
   // Set up the directory and files
   await ensureHomeRepo();

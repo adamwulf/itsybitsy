@@ -7,6 +7,7 @@ import type { Component } from "@mariozechner/pi-tui";
 import { truncateToWidth } from "@mariozechner/pi-tui";
 import { AgentTreeComponent, MAX_TREE_HEIGHT } from "./agent-tree";
 import { InfoPanelComponent } from "./info-panel";
+import type { TmuxPaneComponent } from "./dashboard";
 import { RESET, BOLD, DIM, DIM_GRAY } from "./colors";
 import { buildFocusSeparator } from "./focus";
 import type { FocusTarget } from "./focus";
@@ -65,6 +66,8 @@ export function computeSidebarHeights(
 export class SidebarComponent implements Component {
   agentTree: AgentTreeComponent;
   infoPanel: InfoPanelComponent;
+  /** Coordinator tmux pane component — renders live coordinator output in the sidebar */
+  coordinatorPane: TmuxPaneComponent | null = null;
   /** Total available height for the sidebar (set by dashboard before render) */
   displayHeight = 30;
   /** Which panel currently has focus (set by dashboard before render) */
@@ -131,11 +134,17 @@ export class SidebarComponent implements Component {
       lines.push(...infoLines);
     }
 
-    // Coordinator separator + placeholder
+    // System Coordinator separator + content
     if (coordinatorHeight > 0) {
-      lines.push(buildFocusSeparator("Coordinator", w, this.focusTarget === "coordinator"));
-      const coordLines = renderCoordinatorPlaceholder(w, coordinatorHeight);
-      lines.push(...coordLines);
+      lines.push(buildFocusSeparator("System Coordinator", w, this.focusTarget === "coordinator"));
+      if (this.coordinatorPane) {
+        this.coordinatorPane.displayHeight = coordinatorHeight;
+        const coordLines = this.coordinatorPane.render(w);
+        lines.push(...coordLines);
+      } else {
+        const coordLines = renderCoordinatorPlaceholder(w, coordinatorHeight);
+        lines.push(...coordLines);
+      }
     }
 
     // Ensure total output matches displayHeight

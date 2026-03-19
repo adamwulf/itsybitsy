@@ -3239,3 +3239,47 @@ describe("input field integration", () => {
     expect(dashboard.inputField.getText()).toBe("sj");
   });
 });
+
+describe("coordinator TmuxPoller (Phase 47c)", () => {
+  test("dashboard has coordinatorPane field", () => {
+    const dashboard = makeDashboard();
+    expect(dashboard.coordinatorPane).toBeDefined();
+    expect(dashboard.coordinatorPane).toBeInstanceOf(TmuxPaneComponent);
+  });
+
+  test("coordinatorPane is wired to sidebar", () => {
+    const dashboard = makeDashboard();
+    expect(dashboard.sidebar.coordinatorPane).toBe(dashboard.coordinatorPane);
+  });
+
+  test("startPolling and stopPolling manage coordinator poller lifecycle", () => {
+    const dashboard = makeDashboard();
+    // Before startPolling, coordinator pane has no output
+    expect(dashboard.coordinatorPane.hasPolled).toBe(false);
+    expect(dashboard.coordinatorPane.rawOutput).toBe("");
+
+    // startPolling should not throw
+    dashboard.startPolling();
+    // stopPolling should clean up without error
+    dashboard.stopPolling();
+  });
+
+  test("coordinator pane renders in sidebar when it has output", () => {
+    const dashboard = makeDashboard();
+    // Simulate coordinator poller delivering output
+    dashboard.coordinatorPane.rawOutput = "Hello from coordinator\nLine 2";
+    dashboard.coordinatorPane.hasPolled = true;
+    // coordinatorPane has no agent set, so it shows "No agent selected"
+    // (Phase 47d will add a synthetic agent for the coordinator)
+
+    const origRows = process.stdout.rows;
+    Object.defineProperty(process.stdout, "rows", { value: 30, writable: true, configurable: true });
+    try {
+      const lines = dashboard.render(160);
+      const text = lines.map(l => stripAnsi(l)).join("\n");
+      expect(text).toContain("System Coordinator");
+    } finally {
+      Object.defineProperty(process.stdout, "rows", { value: origRows, writable: true, configurable: true });
+    }
+  });
+});

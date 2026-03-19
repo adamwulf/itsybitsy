@@ -2,6 +2,7 @@ import { test, expect, describe } from "bun:test";
 import { SidebarComponent, SIDEBAR_WIDTH, computeSidebarHeights } from "./sidebar";
 import { AgentTreeComponent } from "./agent-tree";
 import { InfoPanelComponent } from "./info-panel";
+import { TmuxPaneComponent } from "./dashboard";
 import { makeAgent, makeFlatAgent, makeFlatRepoHeader } from "../test-utils";
 import { stripAnsi } from "../parse-state";
 import type { FlatEntry } from "../agents";
@@ -182,5 +183,54 @@ describe("SidebarComponent", () => {
   test("focusTarget defaults to agent-tree", () => {
     const sidebar = makeSidebar();
     expect(sidebar.focusTarget).toBe("agent-tree");
+  });
+
+  test("section header says 'System Coordinator' not 'Coordinator'", () => {
+    const sidebar = makeSidebar();
+    sidebar.displayHeight = 25;
+    sidebar.agentTree.setFlatList([]);
+
+    const lines = sidebar.render(SIDEBAR_WIDTH);
+    const text = lines.map(stripAnsi).join("\n");
+    expect(text).toContain("System Coordinator");
+    // Should NOT have bare "Coordinator" without "System" prefix
+    // (other than as part of "System Coordinator")
+    const bare = lines.filter(l => {
+      const s = stripAnsi(l);
+      return s.includes("Coordinator") && !s.includes("System Coordinator");
+    });
+    expect(bare.length).toBe(0);
+  });
+
+  test("renders coordinator pane content when coordinatorPane is set", () => {
+    const sidebar = makeSidebar();
+    sidebar.displayHeight = 25;
+    sidebar.agentTree.setFlatList([]);
+
+    // Create a coordinator pane with some output
+    const coordPane = new TmuxPaneComponent();
+    coordPane.rawOutput = "coordinator output line 1\ncoordinator output line 2";
+    coordPane.hasPolled = true;
+    // TmuxPaneComponent needs an agent to render output, but for coordinator
+    // we use it without an agent — it shows "No agent selected" placeholder.
+    // The dashboard will set a fake agent for the coordinator pane.
+    sidebar.coordinatorPane = coordPane;
+
+    const lines = sidebar.render(SIDEBAR_WIDTH);
+    const text = lines.map(stripAnsi).join("\n");
+    // Without an agent set, it shows "No agent selected"
+    expect(text).toContain("No agent selected");
+  });
+
+  test("renders placeholder when coordinatorPane is null", () => {
+    const sidebar = makeSidebar();
+    sidebar.displayHeight = 25;
+    sidebar.agentTree.setFlatList([]);
+    sidebar.coordinatorPane = null;
+
+    const lines = sidebar.render(SIDEBAR_WIDTH);
+    const text = lines.map(stripAnsi).join("\n");
+    expect(text).toContain("coordinator");
+    expect(text).toContain("not yet active");
   });
 });

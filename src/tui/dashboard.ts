@@ -25,6 +25,7 @@ import { readConfig } from "../config";
 import type { RepoEntry } from "../registry";
 import { AgentWatcher } from "../watcher";
 import { TmuxPoller, hasAttachedClient } from "../tmux-poller";
+import { IB_COORDINATOR_SESSION } from "../coordinator";
 import type { Agent, FlatEntry, PendingQuestion } from "../agents";
 import { SplitPane } from "./split-pane";
 import { wrapLines, wordWrapLines, padLines } from "./wrap";
@@ -475,6 +476,8 @@ export class DashboardComponent implements Component {
   modeIndex = 0;
   savedModeIndex = 0;
   private tmuxPoller: TmuxPoller;
+  coordinatorPane: TmuxPaneComponent;
+  private coordinatorPoller: TmuxPoller;
   currentAgentId: string | null = null;
   _dialog: DialogState = null;
   private overlayHandle: OverlayHandle | null = null;
@@ -564,7 +567,9 @@ export class DashboardComponent implements Component {
     this.statusBar = new StatusBarComponent();
     this.dialogOverlay = new DialogOverlayComponent(() => this._dialog, () => new Set(this.repos.map((r) => r.path)));
 
+    this.coordinatorPane = new TmuxPaneComponent();
     this.sidebar = new SidebarComponent(this.agentTree, this.infoPanel);
+    this.sidebar.coordinatorPane = this.coordinatorPane;
     this.splitPane = new SplitPane(this.tmuxPane, this.rightPane, DEFAULT_LEFT_WIDTH, `${DIM_GRAY}│${RESET}`);
     this.inputField = new InputFieldComponent();
     this.inputField.onSubmit = (text: string) => {
@@ -598,6 +603,16 @@ export class DashboardComponent implements Component {
         }
       },
     });
+
+    // System coordinator poller — continuously polls the ib-coordinator tmux session
+    this.coordinatorPoller = new TmuxPoller({
+      onOutput: (raw, _stripped) => {
+        this.coordinatorPane.rawOutput = raw;
+        this.coordinatorPane.hasPolled = true;
+        this.tui?.requestRender();
+      },
+    });
+    this.coordinatorPoller.setAgent(IB_COORDINATOR_SESSION);
   }
 
   setTui(tui: TUI) {
@@ -629,12 +644,14 @@ export class DashboardComponent implements Component {
 
   startPolling() {
     this.tmuxPoller.start();
+    this.coordinatorPoller.start();
     this.refreshUsage();
     this.usageTimer = setInterval(() => this.refreshUsage(), 240_000);
   }
 
   stopPolling() {
     this.tmuxPoller.stop();
+    this.coordinatorPoller.stop();
     cancelPendingSave();
     if (this.usageTimer) {
       clearInterval(this.usageTimer);

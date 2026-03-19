@@ -25,6 +25,13 @@ import { readConfig } from "../config";
 import type { RepoEntry } from "../registry";
 import { AgentWatcher } from "../watcher";
 import { TmuxPoller, hasAttachedClient } from "../tmux-poller";
+import {
+  IB_COORDINATOR_SESSION,
+  acquireSystemCoordinator,
+  ensureSystemCoordinator,
+  releaseSystemCoordinator,
+  restartSystemCoordinator,
+} from "../coordinator";
 import type { Agent, FlatEntry, PendingQuestion } from "../agents";
 import { SplitPane } from "./split-pane";
 import { wrapLines, wordWrapLines, padLines } from "./wrap";
@@ -53,6 +60,7 @@ import { RESET, BOLD, DIM, RED, GREEN, YELLOW, DIM_GRAY, REVERSE } from "./color
 import { MIN_LEFT_WIDTH, MAX_LEFT_WIDTH } from "./split-pane";
 import { FocusManager } from "./focus";
 import type { FocusTarget } from "./focus";
+import { SystemDashboardComponent } from "./system-dashboard";
 import { loadLayout, saveLayoutDebounced, cancelPendingSave } from "./layout";
 import type { LayoutState } from "./layout";
 import { InputFieldComponent } from "./input-field";
@@ -68,6 +76,8 @@ export { InfoPanelComponent } from "./info-panel";
 export { FocusManager } from "./focus";
 export type { FocusTarget } from "./focus";
 export { InputFieldComponent } from "./input-field";
+export { SystemDashboardComponent } from "./system-dashboard";
+export type { Selection } from "./selection";
 
 const DIALOG_WIDTH = 80;
 const DEFAULT_LEFT_WIDTH = 80;
@@ -475,6 +485,8 @@ export class DashboardComponent implements Component {
   modeIndex = 0;
   savedModeIndex = 0;
   private tmuxPoller: TmuxPoller;
+  coordinatorPane: TmuxPaneComponent;
+  private coordinatorPoller: TmuxPoller;
   currentAgentId: string | null = null;
   _dialog: DialogState = null;
   private overlayHandle: OverlayHandle | null = null;
@@ -493,6 +505,7 @@ export class DashboardComponent implements Component {
   pendingSelectNewestInRepo: string | null = null;
   private focusManager = new FocusManager();
   inputField: InputFieldComponent;
+  systemDashboard: SystemDashboardComponent;
   /** Dynamic sidebar width — adjustable via [ ] when sidebar panel is focused */
   sidebarWidth = SIDEBAR_WIDTH;
   private _questionsFocused = false;
@@ -564,7 +577,10 @@ export class DashboardComponent implements Component {
     this.statusBar = new StatusBarComponent();
     this.dialogOverlay = new DialogOverlayComponent(() => this._dialog, () => new Set(this.repos.map((r) => r.path)));
 
+    this.coordinatorPane = new TmuxPaneComponent();
+    this.systemDashboard = new SystemDashboardComponent();
     this.sidebar = new SidebarComponent(this.agentTree, this.infoPanel);
+    this.sidebar.coordinatorPane = this.coordinatorPane;
     this.splitPane = new SplitPane(this.tmuxPane, this.rightPane, DEFAULT_LEFT_WIDTH, `${DIM_GRAY}│${RESET}`);
     this.inputField = new InputFieldComponent();
     this.inputField.onSubmit = (text: string) => {
@@ -598,6 +614,16 @@ export class DashboardComponent implements Component {
         }
       },
     });
+
+    // System coordinator poller — continuously polls the ib-coordinator tmux session
+    this.coordinatorPoller = new TmuxPoller({
+      onOutput: (raw, _stripped) => {
+        this.coordinatorPane.rawOutput = raw;
+        this.coordinatorPane.hasPolled = true;
+        this.tui?.requestRender();
+      },
+    });
+    this.coordinatorPoller.setAgent(IB_COORDINATOR_SESSION);
   }
 
   setTui(tui: TUI) {
@@ -629,12 +655,14 @@ export class DashboardComponent implements Component {
 
   startPolling() {
     this.tmuxPoller.start();
+    this.coordinatorPoller.start();
     this.refreshUsage();
     this.usageTimer = setInterval(() => this.refreshUsage(), 240_000);
   }
 
   stopPolling() {
     this.tmuxPoller.stop();
+    this.coordinatorPoller.stop();
     cancelPendingSave();
     if (this.usageTimer) {
       clearInterval(this.usageTimer);
@@ -816,6 +844,7 @@ export class DashboardComponent implements Component {
 
   onUpdate(agents: Agent[], flatList: FlatEntry[], questions: PendingQuestion[], orphanedTmuxSessions: string[] = []) {
     this.agentTree.setFlatList(flatList);
+    this.systemDashboard.flatList = flatList;
     this.rightPane.questions = questions;
     this.rightPane.allAgents = flatList;
     this.rightPane.orphanedTmuxSessions = orphanedTmuxSessions;
@@ -856,13 +885,28 @@ export class DashboardComponent implements Component {
 
   syncSelectedAgent() {
     const selected = this.agentTree.selectedAgent;
+    const isCoordinator = this.agentTree.isSystemCoordinatorSelected;
+
+    // Update focus cycling and sidebar layout for coordinator mode
+    this.focusManager.coordinatorMode = isCoordinator;
+    this.sidebar.coordinatorFullWidth = isCoordinator;
+
+    // When entering coordinator mode, ensure focus is on a valid target
+    if (isCoordinator) {
+      const focus = this.focusManager.current();
+      if (focus !== "agent-tree" && focus !== "coordinator") {
+        this.focusManager.setFocus("agent-tree");
+      }
+    }
+
     this.rightPane.agent = selected;
     this.rightPane.selectedRepoHeader = this.agentTree.selectedRepoHeader;
     this.tmuxPane.agent = selected;
-    this.statusBar.repoHeaderSelected = !selected && this.agentTree.selectedRepoHeader !== null;
+    this.statusBar.repoHeaderSelected = !selected && !isCoordinator && this.agentTree.selectedRepoHeader !== null;
 
     // Wire info panel
     this.infoPanel.agent = selected;
+    this.infoPanel.isSystemCoordinatorSelected = isCoordinator;
     this.infoPanel.selectedRepoHeader = this.agentTree.selectedRepoHeader;
     this.infoPanel.selectedRepoPath = this.agentTree.selectedRepoPath;
     this.infoPanel.allAgents = this.agentTree.flatList;
@@ -876,14 +920,14 @@ export class DashboardComponent implements Component {
 
     // Auto-switch to/from REPO mode based on selection
     const currentMode = PANE_MODES[this.modeIndex];
-    if (!selected && this.agentTree.selectedRepoHeader) {
+    if (!selected && !isCoordinator && this.agentTree.selectedRepoHeader) {
       // Repo header selected — save current mode and switch to REPO
       if (currentMode !== "REPO") {
         this.savedModeIndex = this.modeIndex;
       }
       jumpToMode(this, "REPO");
-    } else if (selected && currentMode === "REPO") {
-      // Agent selected while in REPO mode — restore previous mode
+    } else if ((selected || isCoordinator) && currentMode === "REPO") {
+      // Agent or coordinator selected while in REPO mode — restore previous mode
       // Fall back to AGENT LOG if saved mode would be empty (ERRORS/QUESTIONS with no content)
       const savedMode = PANE_MODES[this.savedModeIndex]!;
       const wouldSkip =
@@ -892,10 +936,11 @@ export class DashboardComponent implements Component {
       jumpToMode(this, wouldSkip ? "AGENT LOG" : savedMode);
     }
 
-    const newId = selected?.id ?? null;
+    // Determine the effective ID for change detection
+    const newId = isCoordinator ? "__coordinator__" : (selected?.id ?? null);
     if (newId !== this.currentAgentId) {
       this.currentAgentId = newId;
-      this.setTerminalTitle(newId ? `ib: ${newId}` : "ib");
+      this.setTerminalTitle(isCoordinator ? "ib: coordinator" : (selected ? `ib: ${selected.id}` : "ib"));
       this.tmuxPane.resetForAgent();
       this.inputField.switchAgent(newId);
       this.rightPane.agentLogContent = null;
@@ -927,7 +972,11 @@ export class DashboardComponent implements Component {
 
     this.rightPane.updateContent();
     triggerAsyncLoadIfNeeded(this);
-    this.tmuxPoller.setAgent(selected?.meta.tmux_session ?? null);
+    // Route tmux poller: system coordinator uses IB_COORDINATOR_SESSION
+    const tmuxSession = isCoordinator
+      ? IB_COORDINATOR_SESSION
+      : (selected?.meta.tmux_session ?? null);
+    this.tmuxPoller.setAgent(tmuxSession);
   }
 
   /** Check if the selected agent's tmux session has an attached client, start/stop polling accordingly */
@@ -1116,7 +1165,17 @@ export class DashboardComponent implements Component {
       }
     }
     else if (data === "!") { agentActions.handleNuke(this); }
-    else if (data === "R") { agentActions.handleResume(this); }
+    else if (data === "R") {
+      if (this.focusManager.current() === "coordinator") {
+        this.executeAndRefresh(async () => {
+          await restartSystemCoordinator();
+          this.coordinatorPane.resetForAgent();
+          this.setNotice("System coordinator restarted");
+        });
+      } else {
+        agentActions.handleResume(this);
+      }
+    }
     else if (data === "P") { agentActions.handlePause(this); }
     else if (data === "r") {
       if (!this.agentTree.selectedAgent && this.agentTree.selectedRepoHeader) {
@@ -1259,8 +1318,9 @@ export class DashboardComponent implements Component {
 
     const lines: string[] = [];
     const terminalRows = process.stdout.rows || 24;
+    const isCoordinatorView = this.agentTree.isSystemCoordinatorSelected;
     const isTreeMode = this.rightPane.mode === "TREE";
-    const isFullWidth = FULL_WIDTH_MODES.has(this.rightPane.mode);
+    const isFullWidth = isCoordinatorView || FULL_WIDTH_MODES.has(this.rightPane.mode);
 
     // Header
     const subtitle = this.lastSentNotice
@@ -1279,10 +1339,16 @@ export class DashboardComponent implements Component {
     this.sidebar.displayHeight = availableHeight + 1; // sidebar gets the title separator row too
 
     // Build main area title separator (agent-id left, pane-mode right)
-    const mainTitleSep = this.buildMainTitleSeparator(mainWidth, isTreeMode, isFullWidth);
+    const mainTitleSep = isCoordinatorView
+      ? this.buildCoordinatorTitleSeparator(mainWidth)
+      : this.buildMainTitleSeparator(mainWidth, isTreeMode, isFullWidth);
 
     let mainLines: string[];
-    if (isTreeMode) {
+    if (isCoordinatorView) {
+      // System coordinator selected: full-width system dashboard table
+      this.systemDashboard.displayHeight = availableHeight;
+      mainLines = [mainTitleSep, ...this.systemDashboard.render(mainWidth)];
+    } else if (isTreeMode) {
       // TREE mode: full-height tree in the main area.
       // IMPORTANT: The sidebar renders the same AgentTreeComponent in compact mode.
       // The main area render below runs FIRST to set maxHeight for the full tree,
@@ -1411,6 +1477,19 @@ export class DashboardComponent implements Component {
     return truncateToWidth(sep, mainWidth, "");
   }
 
+  /** Build title separator for system coordinator full-width view */
+  private buildCoordinatorTitleSeparator(mainWidth: number): string {
+    const title = " System Dashboard ";
+    const leftPad = 3;
+    const rightPad = 3;
+    const fillCount = Math.max(1, mainWidth - leftPad - title.length - rightPad);
+    return truncateToWidth(
+      `${DIM_GRAY}${"─".repeat(leftPad)}${RESET}${BOLD}${title}${RESET}${DIM_GRAY}${"─".repeat(fillCount)}${"─".repeat(rightPad)}${RESET}`,
+      mainWidth,
+      "",
+    );
+  }
+
   /** Build bottom separator with appropriate junction characters */
   private buildBottomSeparator(width: number, isTreeMode: boolean, isFullWidth: boolean): string {
     const sidebarW = this.sidebarWidth;
@@ -1449,6 +1528,10 @@ export async function launchDashboard(): Promise<void> {
     // Ignore
   }
 
+  // Acquire coordinator ref and ensure session before starting TUI
+  await acquireSystemCoordinator();
+  await ensureSystemCoordinator();
+
   const config = await readConfig();
   const dashboard = new DashboardComponent();
   const savedLayout = await loadLayout();
@@ -1483,7 +1566,13 @@ export async function launchDashboard(): Promise<void> {
       tui.stop();
       dashboard.setTerminalTitle("");
       process.stdout.write("\x1b[2J\x1b[H");
-      process.exit(0);
+      // Release coordinator ref — if last ref, kills the tmux session
+      releaseSystemCoordinator(async () => {
+        // onLastRef no-op — Phase 48h will add per-repo coordinator pausing
+      }).finally(() => {
+        process.exit(0);
+      });
+      return undefined;
     }
     if (colorDetection.inputFilter(data)) return undefined;
     if (isKeyRelease(data)) return undefined;

@@ -337,6 +337,7 @@ async function main() {
         const stateColors = getStateColors();
         let isFirst = true;
         for (const entry of flat) {
+          if (entry.kind === "system-coordinator") continue; // CLI list doesn't show coordinator
           if (entry.kind === "repo-header") {
             if (!isFirst) console.log(""); // blank line between repos
             isFirst = false;
@@ -828,6 +829,69 @@ async function main() {
       await hookPermissionDenied(id);
       break;
     }
+    case "inbox": {
+      const { inboxWrite, inboxList, inboxRead, inboxAck, inboxCount } = await import("./inbox");
+      const inboxSub = args[1];
+      switch (inboxSub) {
+        case "write": {
+          // Parse --source flag before extracting message (flag may appear before or after message)
+          const writeArgs = args.slice(2);
+          let source: string | undefined;
+          const positionalArgs: string[] = [];
+          for (let i = 0; i < writeArgs.length; i++) {
+            if (writeArgs[i] === "--source") {
+              if (!writeArgs[i + 1]) {
+                console.error('Usage: ib inbox write [--source <name>] "message"');
+                process.exit(1);
+              }
+              source = writeArgs[++i];
+            } else {
+              positionalArgs.push(writeArgs[i]!);
+            }
+          }
+          const message = positionalArgs[0];
+          if (!message) {
+            console.error('Usage: ib inbox write [--source <name>] "message"');
+            process.exit(1);
+          }
+          await printAndExit(await inboxWrite(message, { source }));
+          break;
+        }
+        case "list":
+          await printAndExit(await inboxList());
+          break;
+        case "read": {
+          const filename = args[2];
+          if (!filename) {
+            console.error("Usage: ib inbox read <filename>");
+            process.exit(1);
+          }
+          await printAndExit(await inboxRead(filename));
+          break;
+        }
+        case "ack": {
+          const filename = args[2];
+          if (!filename) {
+            console.error("Usage: ib inbox ack <filename>");
+            process.exit(1);
+          }
+          await printAndExit(await inboxAck(filename));
+          break;
+        }
+        case "count":
+          await printAndExit(await inboxCount());
+          break;
+        default:
+          if (!inboxSub) {
+            console.error("Usage: ib inbox <write|list|read|ack|count>");
+          } else {
+            console.error(`Unknown inbox subcommand: ${inboxSub}`);
+          }
+          console.error("Available: write, list, read, ack, count");
+          process.exit(1);
+      }
+      break;
+    }
     case "config": {
       const { runConfigCommand } = await import("./config-command");
       await runConfigCommand(args.slice(1));
@@ -951,6 +1015,13 @@ async function main() {
       console.log("  hooks intercept-install    Install intercept hook");
       console.log("  hooks intercept-uninstall  Uninstall intercept hook");
       console.log("  hooks intercept-status     Show intercept hook status");
+      console.log("");
+      console.log("Inbox (system coordinator message queue):");
+      console.log('  inbox write "msg"   Write a message (--source <name>)');
+      console.log("  inbox list          List pending messages");
+      console.log("  inbox read <file>   Read a message");
+      console.log("  inbox ack <file>    Acknowledge (delete) a message");
+      console.log("  inbox count         Count pending messages");
       break;
     }
   }

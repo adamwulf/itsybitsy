@@ -7,12 +7,14 @@
 
 import { watch, type FSWatcher } from "fs";
 import { join } from "path";
-import { readAllAgents, buildAgentTree, flattenAgentTree, readPendingQuestions, detectAgentStates } from "./agents";
+import { readAllAgents, buildAgentTree, flattenAgentTree, readPendingQuestions, detectAgentStates, computeAge } from "./agents";
 import type { Agent, FlatEntry, PendingQuestion } from "./agents";
 import { repoDisplayName } from "./registry";
 import type { RepoEntry } from "./registry";
 import { checkRepoHealth, checkGlobalHealth } from "./health-check";
 import type { RepoHealthReport, RepoHealthWarning } from "./health-check";
+import { detectSystemCoordinatorState, IB_COORDINATOR_SESSION } from "./coordinator";
+import { spawnCtx as tmuxSpawnCtx } from "./tmux-poller";
 
 export interface WatcherEvents {
   onUpdate: (agents: Agent[], flatList: FlatEntry[], questions: PendingQuestion[], orphanedTmuxSessions: string[]) => void;
@@ -183,18 +185,44 @@ export class AgentWatcher {
     }, 200);
   }
 
+  /** Get coordinator info for flattenAgentTree: state + age from tmux session creation time */
+  private async getCoordinatorInfo(): Promise<{ state: string; age: string } | undefined> {
+    try {
+      const state = await detectSystemCoordinatorState();
+      if (state === "stopped") return { state, age: "" };
+
+      // Get session creation time via tmux display-message
+      const proc = tmuxSpawnCtx.runner(
+        ["tmux", "display-message", "-t", IB_COORDINATOR_SESSION, "-p", "#{session_created}"],
+        { stdout: "pipe", stderr: "pipe" },
+      );
+      const output = (await new Response(proc.stdout).text()).trim();
+      const exitCode = await proc.exited;
+      if (exitCode !== 0 || !output) return { state, age: "" };
+
+      const epoch = parseInt(output, 10);
+      if (isNaN(epoch)) return { state, age: "" };
+      return { state, age: computeAge(epoch) };
+    } catch {
+      return undefined;
+    }
+  }
+
   /** Poll states for all known agents without re-reading from disk */
   private async pollStates(): Promise<void> {
     const agents = this._lastAgents;
     if (agents.length === 0 || this.polling || this.refreshing) return;
     this.polling = true;
     try {
-      await detectAgentStates(agents);
+      const [, coordinatorInfo] = await Promise.all([
+        detectAgentStates(agents),
+        this.getCoordinatorInfo(),
+      ]);
       // If refresh() swapped lastAgents while we were awaiting, discard stale results
       if (agents !== this._lastAgents) return;
       const roots = buildAgentTree(agents);
       const repoInfos = this.repos.map((r) => ({ name: repoDisplayName(r), path: r.path }));
-      const flatList = flattenAgentTree(roots, repoInfos);
+      const flatList = flattenAgentTree(roots, repoInfos, coordinatorInfo);
       const questionResults = await Promise.all(
         this.repos.map((r) => readPendingQuestions(r.path))
       );
@@ -228,12 +256,15 @@ export class AgentWatcher {
       this._lastAgents = agents;
       this.lastOrphanedSessions = orphanedTmuxSessions;
 
-      // Detect state for each agent via tmux capture + parseState
-      await detectAgentStates(agents);
+      // Detect state for each agent via tmux capture + parseState, and get coordinator info
+      const [, coordinatorInfo] = await Promise.all([
+        detectAgentStates(agents),
+        this.getCoordinatorInfo(),
+      ]);
 
       const roots = buildAgentTree(agents);
       const repoInfos = this.repos.map((r) => ({ name: repoDisplayName(r), path: r.path }));
-      const flatList = flattenAgentTree(roots, repoInfos);
+      const flatList = flattenAgentTree(roots, repoInfos, coordinatorInfo);
 
       // Read pending questions from all repos
       const questionResults = await Promise.all(

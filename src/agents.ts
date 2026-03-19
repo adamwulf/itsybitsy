@@ -351,7 +351,8 @@ export function buildAgentTree(agents: Agent[]): Agent[] {
 
 export type FlatEntry =
   | { kind: "agent"; agent: Agent; depth: number; connector: string }
-  | { kind: "repo-header"; repoName: string; repoPath: string; hasAgents: boolean };
+  | { kind: "repo-header"; repoName: string; repoPath: string; hasAgents: boolean }
+  | { kind: "system-coordinator"; state: string; age: string };
 
 /**
  * Flatten agent tree into display order (depth-first), with indentation level.
@@ -361,7 +362,11 @@ export type FlatEntry =
  *
  * Accepts either string[] (display names, legacy) or {name, path}[] (with paths for selection persistence).
  */
-export function flattenAgentTree(roots: Agent[], repos: string[] | { name: string; path: string }[] = []): FlatEntry[] {
+export function flattenAgentTree(
+  roots: Agent[],
+  repos: string[] | { name: string; path: string }[] = [],
+  coordinator?: { state: string; age: string },
+): FlatEntry[] {
   // Normalize to {name, path} format
   const repoInfos: { name: string; path: string }[] = repos.map((r) =>
     typeof r === "string" ? { name: r, path: "" } : r
@@ -371,6 +376,11 @@ export function flattenAgentTree(roots: Agent[], repos: string[] | { name: strin
   const repoPathByName = new Map<string, string>();
   for (const r of repoInfos) repoPathByName.set(r.name, r.path);
   const result: FlatEntry[] = [];
+
+  // Prepend system coordinator entry before all repo headers
+  if (coordinator) {
+    result.push({ kind: "system-coordinator", state: coordinator.state, age: coordinator.age });
+  }
 
   function walk(agent: Agent, depth: number, ancestorIsLast: boolean[]) {
     if (agent.archived) return;

@@ -7,7 +7,9 @@ import type { Component } from "@mariozechner/pi-tui";
 import { truncateToWidth } from "@mariozechner/pi-tui";
 import { AgentTreeComponent, MAX_TREE_HEIGHT } from "./agent-tree";
 import { InfoPanelComponent } from "./info-panel";
-import { RESET, BOLD, DIM, DIM_GRAY } from "./colors";
+import type { TmuxPaneComponent } from "./dashboard";
+import { RESET, BOLD, DIM, DIM_GRAY, YELLOW } from "./colors";
+import { wrapLines } from "./wrap";
 import { buildFocusSeparator } from "./focus";
 import type { FocusTarget } from "./focus";
 
@@ -65,12 +67,16 @@ export function computeSidebarHeights(
 export class SidebarComponent implements Component {
   agentTree: AgentTreeComponent;
   infoPanel: InfoPanelComponent;
+  /** Coordinator tmux pane component — renders live coordinator output in the sidebar */
+  coordinatorPane: TmuxPaneComponent | null = null;
   /** Total available height for the sidebar (set by dashboard before render) */
   displayHeight = 30;
   /** Which panel currently has focus (set by dashboard before render) */
   focusTarget: FocusTarget = "agent-tree";
   /** Height offsets for sidebar panels — positive grows, negative shrinks */
   heightOffsets: { tree: number; info: number; coordinator: number } = { tree: 0, info: 0, coordinator: 0 };
+  /** When true, hide info panel and give coordinator all remaining space */
+  coordinatorFullWidth = false;
 
   constructor(agentTree: AgentTreeComponent, infoPanel: InfoPanelComponent) {
     this.agentTree = agentTree;
@@ -83,6 +89,14 @@ export class SidebarComponent implements Component {
   }
 
   render(width: number): string[] {
+    if (this.coordinatorFullWidth) {
+      return this.renderCoordinatorLayout(width);
+    }
+    return this.renderNormalLayout(width);
+  }
+
+  /** Normal three-section layout: tree + info + coordinator */
+  private renderNormalLayout(width: number): string[] {
     const w = width;
     const lines: string[] = [];
 
@@ -131,11 +145,10 @@ export class SidebarComponent implements Component {
       lines.push(...infoLines);
     }
 
-    // Coordinator separator + placeholder
+    // System Coordinator separator + content
     if (coordinatorHeight > 0) {
-      lines.push(buildFocusSeparator("Coordinator", w, this.focusTarget === "coordinator"));
-      const coordLines = renderCoordinatorPlaceholder(w, coordinatorHeight);
-      lines.push(...coordLines);
+      lines.push(buildFocusSeparator("System Coordinator", w, this.focusTarget === "coordinator"));
+      this.renderCoordinatorContent(lines, w, coordinatorHeight);
     }
 
     // Ensure total output matches displayHeight
@@ -144,12 +157,93 @@ export class SidebarComponent implements Component {
     }
     return lines.slice(0, this.displayHeight);
   }
+
+  /**
+   * Two-section layout when system coordinator is selected:
+   * tree (top) + coordinator tmux output (bottom, all remaining space).
+   * Info panel is hidden.
+   */
+  private renderCoordinatorLayout(width: number): string[] {
+    const w = width;
+    const lines: string[] = [];
+
+    const itemCount = this.agentTree.visibleList.length;
+    const treeHeight = Math.min(MAX_TREE_HEIGHT, Math.max(1, itemCount));
+
+    // Agents section header + tree
+    lines.push(buildFocusSeparator("Agents", w, this.focusTarget === "agent-tree"));
+    this.agentTree.maxHeight = treeHeight;
+    const treeLines = this.agentTree.render(w);
+    lines.push(...treeLines);
+    // Pad tree to exact height (header + treeHeight)
+    while (lines.length < treeHeight + 1) {
+      lines.push("");
+    }
+
+    // Coordinator gets all remaining space: available - tree_height - 1 (tree header) - 1 (coordinator header)
+    const coordinatorHeight = Math.max(1, this.displayHeight - treeHeight - 2);
+
+    lines.push(buildFocusSeparator("System Coordinator", w, this.focusTarget === "coordinator"));
+    this.renderCoordinatorContent(lines, w, coordinatorHeight);
+
+    // Ensure total output matches displayHeight
+    while (lines.length < this.displayHeight) {
+      lines.push("");
+    }
+    return lines.slice(0, this.displayHeight);
+  }
+
+  /** Render coordinator content (shared by both layouts) */
+  private renderCoordinatorContent(lines: string[], w: number, height: number): void {
+    if (this.coordinatorPane) {
+      if (this.coordinatorPane.hasPolled && !this.coordinatorPane.rawOutput) {
+        const stoppedLines = renderCoordinatorStopped(w, height);
+        lines.push(...stoppedLines);
+      } else if (!this.coordinatorPane.hasPolled) {
+        const loadingLines: string[] = [];
+        loadingLines.push(truncateToWidth(`${DIM}Starting system coordinator...${RESET}`, w, ""));
+        while (loadingLines.length < height) loadingLines.push("");
+        lines.push(...loadingLines);
+      } else {
+        this.coordinatorPane.displayHeight = height;
+        const coordLines = renderCoordinatorOutput(this.coordinatorPane.rawOutput, w, height);
+        lines.push(...coordLines);
+      }
+    } else {
+      const coordLines = renderCoordinatorPlaceholder(w, height);
+      lines.push(...coordLines);
+    }
+  }
 }
 
 /** Render coordinator placeholder (Phase 47 will replace this) */
 function renderCoordinatorPlaceholder(width: number, height: number): string[] {
   const lines: string[] = [];
   lines.push(truncateToWidth(`${DIM}[coordinator — not yet active]${RESET}`, width, ""));
+  while (lines.length < height) {
+    lines.push("");
+  }
+  return lines;
+}
+
+/** Render coordinator stopped message with restart hint */
+function renderCoordinatorStopped(width: number, height: number): string[] {
+  const lines: string[] = [];
+  lines.push(truncateToWidth(`${YELLOW}System coordinator stopped${RESET}`, width, ""));
+  lines.push(truncateToWidth(`${DIM}Press R to restart${RESET}`, width, ""));
+  while (lines.length < height) {
+    lines.push("");
+  }
+  return lines;
+}
+
+/** Render coordinator output directly (bypasses TmuxPaneComponent's agent check) */
+function renderCoordinatorOutput(rawOutput: string, width: number, height: number): string[] {
+  const wrapped = wrapLines(rawOutput, width);
+  // Show the last `height` lines (follow newest output)
+  const start = Math.max(0, wrapped.length - height);
+  const visible = wrapped.slice(start, start + height);
+  const lines = visible.map((line) => truncateToWidth(line, width, ""));
   while (lines.length < height) {
     lines.push("");
   }

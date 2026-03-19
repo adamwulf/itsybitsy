@@ -39,6 +39,16 @@ export function isValidShellPath(value: string): boolean {
   return !/[\x00\n\r]/.test(value);
 }
 
+/** Validate an inbox message source: alphanumeric, hyphens, underscores only. */
+export function isValidSource(value: string): boolean {
+  return /^[\w-]+$/.test(value);
+}
+
+/** Validate an inbox message filename: <epoch_ms>-<hex4>-<source>.msg format. */
+export function isValidInboxFilename(value: string): boolean {
+  return /^\d+-[0-9a-f]{4}-[\w-]+\.msg$/.test(value);
+}
+
 /**
  * Single-quote a string for safe interpolation into bash scripts.
  * Uses the standard shell quoting idiom: replace each ' with '\'' then wrap in single quotes.

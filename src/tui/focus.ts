@@ -11,13 +11,19 @@ import { RESET, BOLD, DIM, DIM_GRAY, REVERSE } from "./colors";
 /** The five focusable panels in the dashboard. */
 export type FocusTarget = "agent-tree" | "info" | "coordinator" | "active-agent" | "right-pane";
 
-/** Ordered list of focus targets for cycling. */
+/** Ordered list of focus targets for cycling (normal mode). */
 const FOCUS_ORDER: readonly FocusTarget[] = [
   "agent-tree",
   "info",
   "coordinator",
   "active-agent",
   "right-pane",
+] as const;
+
+/** Restricted focus order for full-width system coordinator mode. */
+const COORDINATOR_FOCUS_ORDER: readonly FocusTarget[] = [
+  "agent-tree",
+  "coordinator",
 ] as const;
 
 /**
@@ -30,6 +36,8 @@ const FOCUS_ORDER: readonly FocusTarget[] = [
  */
 export class FocusManager {
   private focus: FocusTarget;
+  /** When true, only cycle between agent-tree and coordinator */
+  coordinatorMode = false;
 
   constructor(initial: FocusTarget = "agent-tree") {
     this.focus = initial;
@@ -42,9 +50,12 @@ export class FocusManager {
 
   /** Cycle focus forward (+1) or backward (-1), wrapping around. */
   cycle(delta: 1 | -1): void {
-    const idx = FOCUS_ORDER.indexOf(this.focus);
-    const next = (idx + delta + FOCUS_ORDER.length) % FOCUS_ORDER.length;
-    this.focus = FOCUS_ORDER[next]!;
+    const order = this.coordinatorMode ? COORDINATOR_FOCUS_ORDER : FOCUS_ORDER;
+    const idx = order.indexOf(this.focus);
+    // If current focus is not in the active order, reset to first
+    const currentIdx = idx === -1 ? 0 : idx;
+    const next = (currentIdx + delta + order.length) % order.length;
+    this.focus = order[next]!;
   }
 
   /** Set focus directly to a specific panel. */

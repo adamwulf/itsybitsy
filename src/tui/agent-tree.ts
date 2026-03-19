@@ -6,6 +6,7 @@ import type { Component } from "@mariozechner/pi-tui";
 import { truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 import type { Agent, FlatEntry } from "../agents";
 import type { RepoHealthReport } from "../health-check";
+import type { Selection } from "./selection";
 import { getStateColors } from "./color-scheme";
 import { RESET, BOLD, DIM, REVERSE, RED } from "./colors";
 
@@ -24,6 +25,8 @@ export function computeStateColWidth(agents: FlatEntry[]): number {
   for (const f of agents) {
     if (f.kind === "agent") {
       maxLen = Math.max(maxLen, displayState(f.agent.state).length);
+    } else if (f.kind === "system-coordinator") {
+      maxLen = Math.max(maxLen, displayState(f.state).length);
     }
   }
   return maxLen;
@@ -82,6 +85,35 @@ export function formatAgentRow(
   return truncated;
 }
 
+/** Format system coordinator row for the tree */
+export function formatCoordinatorRow(
+  state: string,
+  age: string,
+  selected: boolean,
+  width: number,
+  nameColWidth: number,
+  stateColWidth: number = MIN_STATE_COL_WIDTH,
+): string {
+  const displayedState = displayState(state);
+  const stateColor = getStateColors()[displayedState] ?? getStateColors().unknown;
+  const namePrefix = "◆ coordinator";
+  const namePad = Math.max(0, nameColWidth - visibleWidth(namePrefix));
+  const coloredState = `${stateColor}${displayedState}${RESET}${" ".repeat(Math.max(0, stateColWidth - displayedState.length))}`;
+  const paddedAge = age.padStart(AGE_COL_WIDTH);
+
+  const line = `${namePrefix}${" ".repeat(namePad)}  ${coloredState}  ${paddedAge}`;
+  const truncated = truncateToWidth(line, width, "");
+  if (selected) {
+    const pad = Math.max(0, width - visibleWidth(truncated));
+    const highlighted = truncated.replaceAll(RESET, RESET + REVERSE);
+    return `${REVERSE}${highlighted}${" ".repeat(pad)}${RESET}`;
+  }
+  return truncated;
+}
+
+/** Sentinel ID used to persist selection on the system coordinator */
+const SYSTEM_COORDINATOR_ID = "__system-coordinator__";
+
 /** Agent tree component with height constraint and scrolling */
 export class AgentTreeComponent implements Component {
   private _flatList: FlatEntry[] = [];
@@ -114,37 +146,40 @@ export class AgentTreeComponent implements Component {
   }
 
   get visibleList(): FlatEntry[] {
-    return this.flatList.filter((f) => f.kind === "repo-header" || !f.agent.archived);
+    return this.flatList.filter((f) =>
+      f.kind === "repo-header" || f.kind === "system-coordinator" || !f.agent.archived
+    );
+  }
+
+  /** Discriminated union selection — the canonical way to query what is selected */
+  get selection(): Selection {
+    const visible = this.visibleList;
+    if (this.selectedIndex >= 0 && this.selectedIndex < visible.length) {
+      const item = visible[this.selectedIndex]!;
+      if (item.kind === "system-coordinator") return { kind: "system-coordinator" };
+      if (item.kind === "repo-header") return { kind: "repo-header", repoName: item.repoName, repoPath: item.repoPath };
+      return { kind: "agent", agent: item.agent };
+    }
+    return null;
   }
 
   get selectedAgent(): Agent | null {
-    const visible = this.visibleList;
-    if (this.selectedIndex >= 0 && this.selectedIndex < visible.length) {
-      const item = visible[this.selectedIndex]!;
-      if (item.kind === "repo-header") return null;
-      return item.agent;
-    }
-    return null;
+    const sel = this.selection;
+    return sel?.kind === "agent" ? sel.agent : null;
   }
 
   get selectedRepoHeader(): string | null {
-    const visible = this.visibleList;
-    if (this.selectedIndex >= 0 && this.selectedIndex < visible.length) {
-      const item = visible[this.selectedIndex]!;
-      if (item.kind === "repo-header") return item.repoName;
-      return null;
-    }
-    return null;
+    const sel = this.selection;
+    return sel?.kind === "repo-header" ? sel.repoName : null;
   }
 
   get selectedRepoPath(): string | null {
-    const visible = this.visibleList;
-    if (this.selectedIndex >= 0 && this.selectedIndex < visible.length) {
-      const item = visible[this.selectedIndex]!;
-      if (item.kind === "repo-header") return item.repoPath;
-      return null;
-    }
-    return null;
+    const sel = this.selection;
+    return sel?.kind === "repo-header" ? sel.repoPath : null;
+  }
+
+  get isSystemCoordinatorSelected(): boolean {
+    return this.selection?.kind === "system-coordinator";
   }
 
   /** Select agent by ID. Returns true if found. */
@@ -174,8 +209,7 @@ export class AgentTreeComponent implements Component {
    *
    * If a repo-header is selected: move to the next/prev repo-header.
    * If an agent is selected: skip repos with no agents, always land on an agent.
-   *   - next (delta=1): first agent of the next repo that has agents.
-   *   - prev (delta=-1): last agent of the previous repo that has agents.
+   * If system-coordinator is selected: treat as before first repo (J goes to first repo header/agent).
    */
   moveToRepo(delta: 1 | -1) {
     const visible = this.visibleList;
@@ -183,10 +217,23 @@ export class AgentTreeComponent implements Component {
 
     const current = visible[this.selectedIndex];
     const isRepoHeader = current?.kind === "repo-header";
+    const isCoordinator = current?.kind === "system-coordinator";
 
     // Find all repo-header indices
     const repoIndices = visible.map((f, i) => (f.kind === "repo-header" ? i : -1)).filter((i) => i !== -1);
     if (repoIndices.length === 0) return;
+
+    // System coordinator: J goes to first repo header, K wraps to last
+    if (isCoordinator) {
+      if (delta === 1) {
+        this.selectedIndex = repoIndices[0]!;
+      } else {
+        this.selectedIndex = repoIndices[repoIndices.length - 1]!;
+      }
+      this.updateSelectedId();
+      this.ensureSelectedVisible();
+      return;
+    }
 
     // Helper: get agent indices for repo at repoIndices[ri]
     const agentsForRepo = (ri: number): number[] => {
@@ -241,7 +288,13 @@ export class AgentTreeComponent implements Component {
     const visible = this.visibleList;
     if (this.selectedIndex >= 0 && this.selectedIndex < visible.length) {
       const item = visible[this.selectedIndex]!;
-      this.selectedId = item.kind === "repo-header" ? `repopath:${item.repoPath}` : item.agent.id;
+      if (item.kind === "system-coordinator") {
+        this.selectedId = SYSTEM_COORDINATOR_ID;
+      } else if (item.kind === "repo-header") {
+        this.selectedId = `repopath:${item.repoPath}`;
+      } else {
+        this.selectedId = item.agent.id;
+      }
     }
   }
 
@@ -259,9 +312,11 @@ export class AgentTreeComponent implements Component {
       this.ensureSelectedVisible();
       return;
     }
-    const idx = visible.findIndex((f) =>
-      f.kind === "repo-header" ? `repopath:${f.repoPath}` === this.selectedId : f.agent.id === this.selectedId,
-    );
+    const idx = visible.findIndex((f) => {
+      if (f.kind === "system-coordinator") return this.selectedId === SYSTEM_COORDINATOR_ID;
+      if (f.kind === "repo-header") return `repopath:${f.repoPath}` === this.selectedId;
+      return f.agent.id === this.selectedId;
+    });
     if (idx !== -1) {
       this.selectedIndex = idx;
     } else {
@@ -332,6 +387,8 @@ export class AgentTreeComponent implements Component {
     for (const item of visible) {
       if (item.kind === "agent") {
         maxNameWidth = Math.max(maxNameWidth, agentNamePrefixWidth(item.agent, item.connector));
+      } else if (item.kind === "system-coordinator") {
+        maxNameWidth = Math.max(maxNameWidth, visibleWidth("◆ coordinator"));
       }
     }
     const stateColWidth = computeStateColWidth(visible);
@@ -343,7 +400,13 @@ export class AgentTreeComponent implements Component {
 
     for (let i = start; i < end; i++) {
       const item = visible[i]!;
-      if (item.kind === "repo-header") {
+      if (item.kind === "system-coordinator") {
+        lines.push(formatCoordinatorRow(
+          item.state, item.age,
+          i === this.selectedIndex && !this.suppressSelection,
+          width, maxNameWidth, stateColWidth,
+        ));
+      } else if (item.kind === "repo-header") {
         const selected = i === this.selectedIndex && !this.suppressSelection;
         const triangle = item.hasAgents ? "▾" : "▸";
         // Append health indicator based on highest severity

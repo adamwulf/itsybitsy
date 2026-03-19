@@ -60,6 +60,7 @@ function makeMockCtx(overrides?: {
     agentTree: {
       selectedAgent: overrides?.agent ?? null,
       selectedRepoHeader: overrides?.repoHeader ?? null,
+      isSystemCoordinatorSelected: false,
       flatList: overrides?.flatList ?? [],
       visibleList: overrides?.flatList ?? [],
       selectAgentById: () => true,
@@ -76,6 +77,10 @@ function makeMockCtx(overrides?: {
     tmuxPane: {
       scrollUp: (n?: number) => scrollUpCalls.push(n ?? 10),
       scrollDown: (n?: number) => scrollDownCalls.push(n ?? 10),
+    },
+    systemDashboard: {
+      scrollUp: () => {},
+      scrollDown: () => {},
     },
     splitPane: {
       getLeftWidth: () => leftWidth,

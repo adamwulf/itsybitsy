@@ -2,6 +2,7 @@ import { test, expect, describe } from "bun:test";
 import { SidebarComponent, SIDEBAR_WIDTH, computeSidebarHeights } from "./sidebar";
 import { AgentTreeComponent } from "./agent-tree";
 import { InfoPanelComponent } from "./info-panel";
+import { TmuxPaneComponent } from "./dashboard";
 import { makeAgent, makeFlatAgent, makeFlatRepoHeader } from "../test-utils";
 import { stripAnsi } from "../parse-state";
 import type { FlatEntry } from "../agents";
@@ -182,5 +183,83 @@ describe("SidebarComponent", () => {
   test("focusTarget defaults to agent-tree", () => {
     const sidebar = makeSidebar();
     expect(sidebar.focusTarget).toBe("agent-tree");
+  });
+
+  test("section header says 'System Coordinator' not 'Coordinator'", () => {
+    const sidebar = makeSidebar();
+    sidebar.displayHeight = 25;
+    sidebar.agentTree.setFlatList([]);
+
+    const lines = sidebar.render(SIDEBAR_WIDTH);
+    const text = lines.map(stripAnsi).join("\n");
+    expect(text).toContain("System Coordinator");
+    // Should NOT have bare "Coordinator" without "System" prefix
+    // (other than as part of "System Coordinator")
+    const bare = lines.filter(l => {
+      const s = stripAnsi(l);
+      return s.includes("Coordinator") && !s.includes("System Coordinator");
+    });
+    expect(bare.length).toBe(0);
+  });
+
+  test("renders coordinator pane content when coordinatorPane is set", () => {
+    const sidebar = makeSidebar();
+    sidebar.displayHeight = 25;
+    sidebar.agentTree.setFlatList([]);
+
+    // Create a coordinator pane with some output
+    const coordPane = new TmuxPaneComponent();
+    coordPane.rawOutput = "coordinator output line 1\ncoordinator output line 2";
+    coordPane.hasPolled = true;
+    sidebar.coordinatorPane = coordPane;
+
+    const lines = sidebar.render(SIDEBAR_WIDTH);
+    const text = lines.map(stripAnsi).join("\n");
+    // Sidebar renders coordinator output directly (bypasses TmuxPaneComponent agent check)
+    expect(text).toContain("coordinator output line 1");
+    expect(text).toContain("coordinator output line 2");
+  });
+
+  test("renders stopped message when coordinator has polled but no output", () => {
+    const sidebar = makeSidebar();
+    sidebar.displayHeight = 25;
+    sidebar.agentTree.setFlatList([]);
+
+    const coordPane = new TmuxPaneComponent();
+    coordPane.hasPolled = true;
+    coordPane.rawOutput = "";
+    sidebar.coordinatorPane = coordPane;
+
+    const lines = sidebar.render(SIDEBAR_WIDTH);
+    const text = lines.map(stripAnsi).join("\n");
+    expect(text).toContain("System coordinator stopped");
+    expect(text).toContain("Press R to restart");
+  });
+
+  test("renders loading message when coordinator has not polled yet", () => {
+    const sidebar = makeSidebar();
+    sidebar.displayHeight = 25;
+    sidebar.agentTree.setFlatList([]);
+
+    const coordPane = new TmuxPaneComponent();
+    coordPane.hasPolled = false;
+    coordPane.rawOutput = "";
+    sidebar.coordinatorPane = coordPane;
+
+    const lines = sidebar.render(SIDEBAR_WIDTH);
+    const text = lines.map(stripAnsi).join("\n");
+    expect(text).toContain("Starting system coordinator");
+  });
+
+  test("renders placeholder when coordinatorPane is null", () => {
+    const sidebar = makeSidebar();
+    sidebar.displayHeight = 25;
+    sidebar.agentTree.setFlatList([]);
+    sidebar.coordinatorPane = null;
+
+    const lines = sidebar.render(SIDEBAR_WIDTH);
+    const text = lines.map(stripAnsi).join("\n");
+    expect(text).toContain("coordinator");
+    expect(text).toContain("not yet active");
   });
 });

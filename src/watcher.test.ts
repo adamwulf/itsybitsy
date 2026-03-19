@@ -19,10 +19,24 @@ mock.module("./agents", () => ({
   buildAgentTree: mockBuildAgentTree,
   flattenAgentTree: mockFlattenAgentTree,
   readPendingQuestions: mockReadPendingQuestions,
+  computeAge: (epoch: number) => `${Math.floor((Date.now() / 1000 - epoch) / 60)}m`,
+  isCompacting: (output: string) => {
+    const lines = output.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "").split("\n");
+    return lines.slice(-5).join("\n").includes("Compacting conversation");
+  },
+  isRateLimited: (output: string) => {
+    const text = output.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "").split("\n").slice(-15).join("\n");
+    if (text.includes("rate_limit_error")) return true;
+    const lower = text.toLowerCase();
+    return lower.includes("usage limit reached") || lower.includes("limit will reset at") ||
+      lower.includes("hit your limit") || lower.includes("rate limit");
+  },
 }));
 
-// Import after mocking
+// Import after mocking agents module
 const { AgentWatcher } = await import("./watcher");
+// Import coordinatorSpawnCtx to inject noop (prevents real tmux calls in getCoordinatorInfo)
+const { coordinatorSpawnCtx } = await import("./coordinator");
 
 function makeAgent(id: string, archived = false): Agent {
   return _makeAgent({ id, archived });
@@ -53,10 +67,17 @@ describe("AgentWatcher", () => {
     agentsDir = join(tempDir, ".ittybitty", "agents");
     await mkdir(agentsDir, { recursive: true });
     resetMocks();
+    // Prevent real tmux calls from coordinatorSpawnCtx (exit code 1 → "stopped")
+    coordinatorSpawnCtx.set(() => ({
+      stdout: new Response("").body!,
+      stderr: new Response("").body!,
+      exited: Promise.resolve(1),
+    }) as any);
   });
 
   afterEach(async () => {
     await rm(tempDir, { recursive: true, force: true });
+    coordinatorSpawnCtx.reset();
   });
 
   describe("start/stop lifecycle", () => {
@@ -237,15 +258,13 @@ describe("AgentWatcher", () => {
 
         // Advance to exactly 10s
         jest.advanceTimersByTime(1);
-        await Promise.resolve();
-        await Promise.resolve();
+        for (let i = 0; i < 10; i++) await Promise.resolve();
 
         expect(mockReadAllAgents.mock.calls.length).toBe(callsAfterStart + 1);
 
         // Advance another 10s — second poll fires
         jest.advanceTimersByTime(10_000);
-        await Promise.resolve();
-        await Promise.resolve();
+        for (let i = 0; i < 10; i++) await Promise.resolve();
 
         expect(mockReadAllAgents.mock.calls.length).toBe(callsAfterStart + 2);
 
@@ -707,7 +726,8 @@ describe("AgentWatcher", () => {
         // Advance 2s — state poll fires
         jest.advanceTimersByTime(2_000);
         // Flush multiple microtask ticks for the async pollStates chain
-        for (let i = 0; i < 10; i++) await Promise.resolve();
+        // (extra ticks needed for coordinator info detection)
+        for (let i = 0; i < 30; i++) await Promise.resolve();
 
         expect(updateCount).toBe(afterStart + 1);
         // readAllAgents should NOT have been called again (state poll skips disk read)
@@ -717,7 +737,7 @@ describe("AgentWatcher", () => {
 
         // Advance another 2s — second state poll
         jest.advanceTimersByTime(2_000);
-        for (let i = 0; i < 10; i++) await Promise.resolve();
+        for (let i = 0; i < 30; i++) await Promise.resolve();
 
         expect(updateCount).toBe(afterStart + 2);
         expect(mockDetectAgentStates.mock.calls.length).toBe(3);
@@ -810,7 +830,7 @@ describe("AgentWatcher", () => {
 
         // Advance 2s — state poll fires, callNum=2 → complete
         jest.advanceTimersByTime(2_000);
-        for (let i = 0; i < 10; i++) await Promise.resolve();
+        for (let i = 0; i < 30; i++) await Promise.resolve();
 
         expect(states).toEqual(["running", "complete"]);
 

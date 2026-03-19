@@ -66,7 +66,6 @@ import { InputFieldComponent } from "./input-field";
 import { sendMessage } from "../ib-commands";
 import { stripAnsi } from "../parse-state";
 import { getResolvableWarnings } from "../health-check";
-import { IB_COORDINATOR_SESSION } from "../coordinator";
 
 // Re-export for test compatibility
 export { AgentTreeComponent, formatAgentRow } from "./agent-tree";

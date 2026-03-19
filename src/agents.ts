@@ -317,7 +317,11 @@ export function buildAgentTree(agents: Agent[]): Agent[] {
   for (const agent of agents) {
     agent.children = [];
     agent.orphaned = false;
-    byId.set(agent.id, agent);
+    // Non-archived agents take priority over archived ones with the same ID
+    const existing = byId.get(agent.id);
+    if (!existing || existing.archived) {
+      byId.set(agent.id, agent);
+    }
   }
 
   const roots: Agent[] = [];

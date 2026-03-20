@@ -31,6 +31,7 @@ import {
   ensureSystemCoordinator,
   releaseSystemCoordinator,
   restartSystemCoordinator,
+  resizeCoordinatorTmux,
 } from "../coordinator";
 import type { Agent, FlatEntry, PendingQuestion } from "../agents";
 import { SplitPane } from "./split-pane";
@@ -635,6 +636,7 @@ export class DashboardComponent implements Component {
     const MIN_SIDEBAR = 30;
     const MAX_SIDEBAR = 120;
     this.sidebarWidth = Math.max(MIN_SIDEBAR, Math.min(MAX_SIDEBAR, layout.sidebarWidth));
+    resizeCoordinatorTmux(this.sidebarWidth);
     this.splitPane.setLeftWidth(Math.max(MIN_LEFT_WIDTH, Math.min(MAX_LEFT_WIDTH, layout.splitPaneLeftWidth)));
     this.sidebar.heightOffsets = { ...layout.heightOffsets };
   }
@@ -1222,6 +1224,7 @@ export class DashboardComponent implements Component {
         const MIN_SIDEBAR = 30;
         const MAX_SIDEBAR = 120;
         this.sidebarWidth = Math.max(MIN_SIDEBAR, Math.min(MAX_SIDEBAR, this.sidebarWidth + delta));
+        resizeCoordinatorTmux(this.sidebarWidth);
         this.tui?.requestRender();
       } else if (focus === "right-pane") {
         // Right pane focused: ] grows right (shrinks middle) = negative delta to handleResizeLeft

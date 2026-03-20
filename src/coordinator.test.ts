@@ -75,9 +75,9 @@ describe("buildSystemCoordinatorSettings", () => {
     expect(settings.permissions).toHaveProperty("deny");
   });
 
-  test("allows only Bash(ib:*)", () => {
+  test("allows Bash(ib:*) and ToolSearch", () => {
     const settings = buildSystemCoordinatorSettings();
-    expect(settings.permissions.allow).toEqual(["Bash(ib:*)"]);
+    expect(settings.permissions.allow).toEqual(["Bash(ib:*)", "ToolSearch"]);
   });
 
   test("denies unqualified Bash", () => {
@@ -301,7 +301,7 @@ describe("ensureSystemCoordinator", () => {
     const settingsPath = join(tmpDir, ".claude", "settings.local.json");
     const content = await readFile(settingsPath, "utf-8");
     const settings = JSON.parse(content);
-    expect(settings.permissions.allow).toEqual(["Bash(ib:*)"]);
+    expect(settings.permissions.allow).toEqual(["Bash(ib:*)", "ToolSearch"]);
     expect(settings.permissions.deny).toContain("Bash");
   });
 

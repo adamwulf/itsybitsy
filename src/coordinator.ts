@@ -6,7 +6,7 @@
 import { join } from "path";
 import { homedir } from "os";
 import { readConfig } from "./config";
-import { captureTmuxOutput } from "./tmux-poller";
+import { captureTmuxOutput, resizeTmuxWindow } from "./tmux-poller";
 import { isCompacting, isRateLimited } from "./agents";
 import { SpawnContext } from "./types";
 
@@ -53,9 +53,9 @@ export const SYSTEM_COORDINATOR_PROMPT = `You are the itsybitsy system coordinat
 
 /**
  * Hardcoded allow list for the system coordinator.
- * Only ib commands are permitted.
+ * Only ib commands and ToolSearch are permitted.
  */
-const SYSTEM_COORDINATOR_ALLOW = ["Bash(ib:*)"];
+const SYSTEM_COORDINATOR_ALLOW = ["Bash(ib:*)", "ToolSearch"];
 
 /**
  * Hardcoded deny list for the system coordinator.
@@ -186,7 +186,7 @@ export async function ensureSystemCoordinator(): Promise<string> {
 
   // Create tmux session — may fail if another instance raced us
   const { exitCode } = await coordinatorSpawnCtx.run([
-    "tmux", "new-session", "-d", "-s", IB_COORDINATOR_SESSION, "-c", home,
+    "tmux", "new-session", "-d", "-x", "60", "-s", IB_COORDINATOR_SESSION, "-c", home,
   ]);
 
   if (exitCode !== 0) {
@@ -342,4 +342,13 @@ export async function detectSystemCoordinatorState(): Promise<CoordinatorState> 
   }
 
   return "running";
+}
+
+/**
+ * Resize the system coordinator's tmux window to the given width.
+ * Called when the sidebar width changes so the coordinator output
+ * wraps at the correct column count.
+ */
+export async function resizeCoordinatorTmux(width: number): Promise<void> {
+  await resizeTmuxWindow(IB_COORDINATOR_SESSION, width);
 }

@@ -1164,7 +1164,7 @@ The system coordinator runs from `~/.itsybitsy/`, which is not initially a git r
 {
   "permissions": {
     "allow": ["Bash(ib:*)", "ToolSearch"],
-    "deny": ["Bash", "Read", "Write", "Edit", "MultiEdit", "Glob", "Grep", "LS", "NotebookEdit", "WebFetch", "WebSearch", "Task", "TaskOutput", "Agent", "KillShell", "EnterPlanMode", "ExitPlanMode"]
+    "deny": ["Read", "Write", "Edit", "MultiEdit", "Glob", "Grep", "LS", "NotebookEdit", "WebFetch", "WebSearch", "Task", "TaskOutput", "Agent", "KillShell", "EnterPlanMode", "ExitPlanMode"]
   }
 }
 ```
@@ -1313,7 +1313,7 @@ Per-repo coordinators get a restricted permission set — they can read the code
       "TodoWrite", "AskUserQuestion"
     ],
     "deny": [
-      "Bash", "Write", "Edit", "MultiEdit", "NotebookEdit",
+      "Write", "Edit", "MultiEdit", "NotebookEdit",
       "WebFetch", "WebSearch", "Task", "TaskOutput", "Agent", "KillShell",
       "EnterPlanMode", "ExitPlanMode"
     ]
@@ -1323,7 +1323,7 @@ Per-repo coordinators get a restricted permission set — they can read the code
 
 Key differences from regular agents:
 - **No Write/Edit/MultiEdit** — coordinators cannot modify files
-- **Unqualified `Bash` denied** — prevents running arbitrary shell commands. Only the specific `Bash(ib:*)`, `Bash(git status/log/diff/show/ls-files:*)`, `Bash(pwd:*)`, and `Bash(ls:*)` patterns in the allow list are permitted. Without the unqualified `Bash` deny, Claude could bypass the allow-list by running any command.
+- **Unqualified `Bash` NOT denied** — Claude Code's permission resolution removes the entire Bash tool when unqualified `Bash` appears in the deny list, which prevents qualified allow patterns like `Bash(ib:*)` from working. Instead, only specific Bash patterns are in the allow list — non-matching commands require manual approval (effectively blocking them in unattended sessions).
 - **No Bash(cat:*)/Bash(head:*)/Bash(tail:*)/Bash(grep:*)/Bash(git grep:*)** — shell commands like `cat`, `head`, `tail`, `grep` can write files via shell redirection (e.g., `cat > file.txt`, `grep x file > output.txt`). `git grep` is excluded because its `--open-files-in-pager` flag allows arbitrary command execution (e.g., `git grep --open-files-in-pager=malicious-cmd pattern`). Coordinators use `Read`, `Glob`, `Grep`, and `LS` for file inspection instead — these are Claude Code's built-in tools which cannot perform writes.
 - **Has Read/Glob/Grep/LS** — coordinators can read the codebase for context via Claude Code's built-in tools (which cannot perform writes)
 - **No Task/Agent** — coordinators spawn sub-agents only via `Bash(ib:*)`, not Claude's built-in Task/Agent tools. This ensures all agents are tracked through the ib system.

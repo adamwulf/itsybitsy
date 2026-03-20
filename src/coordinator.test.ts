@@ -80,9 +80,9 @@ describe("buildSystemCoordinatorSettings", () => {
     expect(settings.permissions.allow).toEqual(["Bash(ib:*)", "ToolSearch"]);
   });
 
-  test("denies unqualified Bash", () => {
+  test("does not deny unqualified Bash (would remove tool entirely)", () => {
     const settings = buildSystemCoordinatorSettings();
-    expect(settings.permissions.deny).toContain("Bash");
+    expect(settings.permissions.deny).not.toContain("Bash");
   });
 
   test("denies all file access tools", () => {
@@ -123,7 +123,7 @@ describe("buildSystemCoordinatorSettings", () => {
 
   test("deny list has exactly 17 entries", () => {
     const settings = buildSystemCoordinatorSettings();
-    expect(settings.permissions.deny).toHaveLength(17);
+    expect(settings.permissions.deny).toHaveLength(16);
   });
 
   test("returns fresh arrays on each call (no shared mutation)", () => {
@@ -302,7 +302,7 @@ describe("ensureSystemCoordinator", () => {
     const content = await readFile(settingsPath, "utf-8");
     const settings = JSON.parse(content);
     expect(settings.permissions.allow).toEqual(["Bash(ib:*)", "ToolSearch"]);
-    expect(settings.permissions.deny).toContain("Bash");
+    expect(settings.permissions.deny).not.toContain("Bash");
   });
 
   test("writes coordinator-prompt.txt during creation", async () => {

@@ -60,10 +60,13 @@ const SYSTEM_COORDINATOR_ALLOW = ["Bash(ib:*)", "ToolSearch"];
 /**
  * Hardcoded deny list for the system coordinator.
  * Blocks all file access, web access, and agent spawning tools.
- * Unqualified Bash is denied to prevent sandbox bypass.
+ * Note: unqualified "Bash" is NOT denied here — Claude Code's permission
+ * resolution removes the entire Bash tool when "Bash" appears in deny,
+ * which prevents the qualified "Bash(ib:*)" allow from working. Instead,
+ * only Bash(ib:*) is in the allow list, so non-ib commands require manual
+ * approval (which effectively blocks them in the unattended tmux session).
  */
 const SYSTEM_COORDINATOR_DENY = [
-  "Bash",
   "Read",
   "Write",
   "Edit",

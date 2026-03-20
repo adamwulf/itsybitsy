@@ -1163,7 +1163,7 @@ The system coordinator runs from `~/.itsybitsy/`, which is not initially a git r
 ```json
 {
   "permissions": {
-    "allow": ["Bash(ib:*)"],
+    "allow": ["Bash(ib:*)", "ToolSearch"],
     "deny": ["Bash", "Read", "Write", "Edit", "MultiEdit", "Glob", "Grep", "LS", "NotebookEdit", "WebFetch", "WebSearch", "Task", "TaskOutput", "Agent", "KillShell", "EnterPlanMode", "ExitPlanMode"]
   }
 }
@@ -1171,7 +1171,7 @@ The system coordinator runs from `~/.itsybitsy/`, which is not initially a git r
 
 **Note**: Claude Code requires a project directory context to load `settings.local.json`. Since `~/.itsybitsy/` is not initially a git repo, the coordinator startup must run `git init` there (a standard repo, not `--bare`). This matches the existing settings pattern and is simpler than passing permissions via `--allowedTools` CLI flags.
 
-This ensures the system coordinator can only run `ib` commands (e.g., `ib list`, `ib send`, `ib merge`, `ib new-agent`, `ib kill`, `ib status`, `ib diff`). It cannot access files, browse the web, or spawn sub-agents directly.
+This ensures the system coordinator can only run `ib` commands (e.g., `ib list`, `ib send`, `ib merge`, `ib new-agent`, `ib kill`, `ib status`, `ib diff`) and use `ToolSearch` to discover available deferred tools. It cannot access files, browse the web, or spawn sub-agents directly.
 
 #### 12.1.4 Display
 

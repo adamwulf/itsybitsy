@@ -429,7 +429,7 @@ ${qAbsExitScript}
 
   // Start tmux session
   const tmuxResult = await nukeResumeSpawnCtx.run([
-    "tmux", "new-session", "-d", "-x", "60", "-s", tmuxSession, "-c", workPath, resumeScript,
+    "tmux", "new-session", "-d", "-x", "60", "-s", tmuxSession, "-c", workPath, shellQuote(resumeScript),
   ]);
   if (tmuxResult.exitCode !== 0) {
     await logAgent(agentDir, `[resume] tmux new-session failed: exit=${tmuxResult.exitCode} stderr=${tmuxResult.stderr}`);
@@ -1798,7 +1798,7 @@ ${qStartExitScript}
   // Start tmux session
   const absStartScript = join(agentDir, "start.sh");
   const tmuxResult = await newAgentSpawnCtx.run([
-    "tmux", "new-session", "-d", "-x", "60", "-s", tmuxSession, "-c", workPath, absStartScript,
+    "tmux", "new-session", "-d", "-x", "60", "-s", tmuxSession, "-c", workPath, shellQuote(absStartScript),
   ]);
   if (tmuxResult.exitCode !== 0) {
     await cleanupOnFailure();

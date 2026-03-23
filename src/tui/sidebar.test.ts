@@ -402,6 +402,39 @@ describe("SidebarComponent", () => {
     expect(lineOneIdx).toBe(lineTwoIdx - 1);
   });
 
+  test("coordinator status lines trim trailing blanks from tmux padding", () => {
+    const sidebar = makeSidebar();
+    sidebar.displayHeight = 30;
+    sidebar.agentTree.setFlatList([]);
+
+    const coordPane = new TmuxPaneComponent();
+    const sep = "─".repeat(SIDEBAR_WIDTH);
+    // Simulate tmux capture-pane output: status text followed by many trailing blank lines
+    coordPane.rawOutput = `some output\n${sep}\nmiddle\n${sep}\nstatus\n\n\n\n\n\n\n\n\n\n`;
+    coordPane.hasPolled = true;
+    sidebar.coordinatorPane = coordPane;
+
+    const inputField = new InputFieldComponent();
+    inputField.active = true;
+    sidebar.coordinatorInputField = inputField;
+
+    const lines = sidebar.render(SIDEBAR_WIDTH);
+    const stripped = lines.map(stripAnsi);
+    const text = stripped.join("\n");
+
+    // Status line should appear but trailing blanks should not inflate the layout
+    expect(text).toContain("status");
+    expect(text).toContain("[Send]");
+    expect(text).toContain("some output");
+
+    // "status" should be the last non-empty line (trailing blanks trimmed)
+    const statusIdx = stripped.findLastIndex((l) => l.includes("status"));
+    expect(statusIdx).toBeGreaterThan(-1);
+    // No non-empty lines after "status" in the rendered output (except padding)
+    const linesAfterStatus = stripped.slice(statusIdx + 1).filter((l) => l.trim() !== "");
+    expect(linesAfterStatus.length).toBe(0);
+  });
+
   test("coordinator input field renders in full-width coordinator layout", () => {
     const sidebar = makeSidebar();
     sidebar.displayHeight = 25;

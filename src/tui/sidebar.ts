@@ -234,7 +234,7 @@ export class SidebarComponent implements Component {
     if (showInputField) {
       const inputLines = this.coordinatorInputField!.render(w);
       lines.push(...inputLines);
-      lines.push(...statusLines.map((line) => truncateToWidth(line, w, "")));
+      lines.push(...statusLines);
     }
   }
 }
@@ -270,7 +270,12 @@ function extractCoordinatorStatusLines(rawOutput: string, width: number): string
   const wrapped = wrapLines(rawOutput, width);
   const { lowerIndex } = findLastTwoSeparators(wrapped);
   if (lowerIndex >= 0 && lowerIndex < wrapped.length - 1) {
-    return wrapped.slice(lowerIndex + 1).map((line) => truncateToWidth(line, width, ""));
+    const result = wrapped.slice(lowerIndex + 1).map((line) => truncateToWidth(line, width, ""));
+    // Trim trailing blank lines — tmux capture-pane pads output to fill the pane height
+    while (result.length > 0 && result[result.length - 1]!.trim() === "") {
+      result.pop();
+    }
+    return result;
   }
   return [];
 }

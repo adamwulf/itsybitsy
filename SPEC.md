@@ -1887,7 +1887,7 @@ Some health check categories can be automatically resolved. The `f` keybinding (
 | Category | Action |
 |----------|--------|
 | `leaked-hooks` (§14.3.1) | Remove the matching hook entries from `.claude/settings.local.json` |
-| `orphaned-dir` (§14.3.3, stale variant only) | Remove the agent directory (`rm -rf`) — only the "stale directory" variant (warning severity, has valid meta but no tmux/worktree), NOT the "no valid meta.json" variant (error severity) |
+| `orphaned-dir` (§14.3.3, all variants) | Remove the agent directory (`rm -rf`) — both the "stale directory" variant (warning severity, valid meta but no tmux/worktree) and the "no valid meta.json" variant (error severity). Directories inside `.ittybitty/agents/` with no valid meta.json are clearly abandoned and safe to remove; agent IDs are validated to prevent path traversal. |
 | `orphaned-worktree` (§14.3.5) | Run `git worktree remove <path> --force` |
 | `orphaned-branch` (§14.3.6) | Run `git branch -D <branch>` |
 | `stale-manager-ref` (§14.3.7) | Remove the `manager` field from the agent's `meta.json` |
@@ -1898,7 +1898,6 @@ Some health check categories can be automatically resolved. The `f` keybinding (
 |----------|--------|
 | `missing-global-hooks` (§14.3.2) | Requires running setup (`h` key) — too complex for a single auto-fix |
 | `malformed-meta` (§14.3.4) | Risk of data loss — malformed files need manual inspection |
-| `orphaned-dir` (§14.3.3, missing-meta variant) | Error severity orphaned dirs (no valid meta.json) could contain important data — requires manual cleanup |
 | `wrong-agent-hooks` (§14.3.8) | Modifying a potentially running agent's settings is risky |
 
 #### 14.8.3 User Interaction

@@ -24,7 +24,7 @@ import { loadRegistry } from "../registry";
 import { readConfig } from "../config";
 import type { RepoEntry } from "../registry";
 import { AgentWatcher } from "../watcher";
-import { TmuxPoller, hasAttachedClient, sendTmuxKeys } from "../tmux-poller";
+import { TmuxPoller, hasAttachedClient, sendTmuxKeys, resizeTmuxWindow } from "../tmux-poller";
 import {
   IB_COORDINATOR_SESSION,
   acquireSystemCoordinator,
@@ -990,6 +990,8 @@ export class DashboardComponent implements Component {
       }
       if (selected?.meta.tmux_session) {
         this.checkClientAttached(selected);
+        // Resize the newly selected agent's tmux to match the current split pane width
+        resizeTmuxWindow(selected.meta.tmux_session, this.splitPane.getLeftWidth());
       }
     }
 

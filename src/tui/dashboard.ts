@@ -24,7 +24,7 @@ import { loadRegistry } from "../registry";
 import { readConfig } from "../config";
 import type { RepoEntry } from "../registry";
 import { AgentWatcher } from "../watcher";
-import { TmuxPoller, hasAttachedClient } from "../tmux-poller";
+import { TmuxPoller, hasAttachedClient, sendTmuxKeys } from "../tmux-poller";
 import {
   IB_COORDINATOR_SESSION,
   acquireSystemCoordinator,
@@ -32,6 +32,7 @@ import {
   releaseSystemCoordinator,
   restartSystemCoordinator,
   resizeCoordinatorTmux,
+  sanitizeTmuxInput,
 } from "../coordinator";
 import type { Agent, FlatEntry, PendingQuestion } from "../agents";
 import { SplitPane } from "./split-pane";
@@ -506,6 +507,7 @@ export class DashboardComponent implements Component {
   pendingSelectNewestInRepo: string | null = null;
   private focusManager = new FocusManager();
   inputField: InputFieldComponent;
+  coordinatorInputField: InputFieldComponent;
   systemDashboard: SystemDashboardComponent;
   /** Dynamic sidebar width — adjustable via [ ] when sidebar panel is focused */
   sidebarWidth = SIDEBAR_WIDTH;
@@ -600,6 +602,24 @@ export class DashboardComponent implements Component {
     this.inputField.onAsyncRender = () => {
       this.tui?.requestRender();
     };
+
+    this.coordinatorInputField = new InputFieldComponent();
+    this.coordinatorInputField.onSubmit = (text: string) => {
+      if (!text.trim()) return;
+      const sanitized = sanitizeTmuxInput(text.trim());
+      this.executeAndRefresh(async () => {
+        const sendResult = await sendTmuxKeys(IB_COORDINATOR_SESSION, sanitized);
+        this.setNotice(sendResult ? "Sent to coordinator" : "Failed to send to coordinator");
+      });
+    };
+    this.coordinatorInputField.onCancel = () => {
+      this.focusManager.setFocus("agent-tree");
+      this.tui?.requestRender();
+    };
+    this.coordinatorInputField.onAsyncRender = () => {
+      this.tui?.requestRender();
+    };
+    this.sidebar.coordinatorInputField = this.coordinatorInputField;
 
     this.tmuxPoller = new TmuxPoller({
       onOutput: (raw, _stripped) => {
@@ -945,6 +965,7 @@ export class DashboardComponent implements Component {
       this.setTerminalTitle(isCoordinator ? "ib: coordinator" : (selected ? `ib: ${selected.id}` : "ib"));
       this.tmuxPane.resetForAgent();
       this.inputField.switchAgent(newId);
+      this.coordinatorInputField.switchAgent(isCoordinator ? "__coordinator__" : null);
       this.rightPane.agentLogContent = null;
       this.rightPane.promptContent = null;
       this.rightPane.denialsContent = null;
@@ -1052,6 +1073,27 @@ export class DashboardComponent implements Component {
         return;
       }
       return; // Suppress all other dashboard keybindings when active-agent is focused
+    }
+
+    // When coordinator panel is focused, route input to the coordinator input field FIRST.
+    // Same pattern as active-agent focus routing above.
+    if (this.focusManager.current() === "coordinator" && this.agentTree.isSystemCoordinatorSelected) {
+      if (this.coordinatorInputField.handleInput(data)) {
+        this.tui?.requestRender();
+        return;
+      }
+      // Input not consumed — check for Tab/Shift-Tab to cycle panels
+      if (data === "\t" || matchesKey(data, Key.tab)) {
+        this.focusManager.cycle(1);
+        this.tui?.requestRender();
+        return;
+      }
+      if (data === "\x1b[Z" || matchesKey(data, Key.shift("tab"))) {
+        this.focusManager.cycle(-1);
+        this.tui?.requestRender();
+        return;
+      }
+      return; // Suppress all other dashboard keybindings when coordinator is focused
     }
 
     // Tab / Shift-Tab: cycle focus between panels
@@ -1423,6 +1465,7 @@ export class DashboardComponent implements Component {
 
     // Render sidebar and merge with main area
     this.sidebar.focusTarget = this.focusManager.current();
+    this.coordinatorInputField.active = this.focusManager.current() === "coordinator";
     const sidebarLines = this.sidebar.render(sidebarW);
     lines.push(...mergeSidebarAndMain(sidebarLines, mainLines, availableHeight + 1, mainWidth, sidebarW));
 

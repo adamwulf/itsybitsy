@@ -2,6 +2,7 @@ import { test, expect, describe } from "bun:test";
 import { SidebarComponent, SIDEBAR_WIDTH, computeSidebarHeights } from "./sidebar";
 import { AgentTreeComponent } from "./agent-tree";
 import { InfoPanelComponent } from "./info-panel";
+import { InputFieldComponent } from "./input-field";
 import { TmuxPaneComponent } from "./dashboard";
 import { makeAgent, makeFlatAgent, makeFlatRepoHeader } from "../test-utils";
 import { stripAnsi } from "../parse-state";
@@ -261,5 +262,104 @@ describe("SidebarComponent", () => {
     const text = lines.map(stripAnsi).join("\n");
     expect(text).toContain("coordinator");
     expect(text).toContain("not yet active");
+  });
+
+  test("renders coordinator input field when active", () => {
+    const sidebar = makeSidebar();
+    sidebar.displayHeight = 25;
+    sidebar.agentTree.setFlatList([]);
+
+    const coordPane = new TmuxPaneComponent();
+    coordPane.rawOutput = "coordinator output";
+    coordPane.hasPolled = true;
+    sidebar.coordinatorPane = coordPane;
+
+    const inputField = new InputFieldComponent();
+    inputField.active = true;
+    sidebar.coordinatorInputField = inputField;
+
+    // Type text into input field
+    inputField.handleInput("h");
+    inputField.handleInput("i");
+
+    const lines = sidebar.render(SIDEBAR_WIDTH);
+    const text = lines.map(stripAnsi).join("\n");
+    expect(text).toContain("> hi█");
+    expect(text).toContain("[Send]");
+    expect(text).toContain("coordinator output");
+  });
+
+  test("does not render coordinator input field when not active", () => {
+    const sidebar = makeSidebar();
+    sidebar.displayHeight = 25;
+    sidebar.agentTree.setFlatList([]);
+
+    const coordPane = new TmuxPaneComponent();
+    coordPane.rawOutput = "coordinator output";
+    coordPane.hasPolled = true;
+    sidebar.coordinatorPane = coordPane;
+
+    const inputField = new InputFieldComponent();
+    inputField.active = false;
+    sidebar.coordinatorInputField = inputField;
+
+    const lines = sidebar.render(SIDEBAR_WIDTH);
+    const text = lines.map(stripAnsi).join("\n");
+    expect(text).not.toContain("[Send]");
+    expect(text).not.toContain("█");
+    expect(text).toContain("coordinator output");
+  });
+
+  test("coordinator input field reduces coordinator output height", () => {
+    const sidebar = makeSidebar();
+    sidebar.displayHeight = 25;
+    sidebar.agentTree.setFlatList([]);
+
+    const coordPane = new TmuxPaneComponent();
+    coordPane.rawOutput = "line\n".repeat(50);
+    coordPane.hasPolled = true;
+    sidebar.coordinatorPane = coordPane;
+
+    // Render without input field
+    const inputField = new InputFieldComponent();
+    inputField.active = false;
+    sidebar.coordinatorInputField = inputField;
+    const linesWithout = sidebar.render(SIDEBAR_WIDTH);
+
+    // Render with input field active
+    inputField.active = true;
+    const linesWith = sidebar.render(SIDEBAR_WIDTH);
+
+    // Total height should be the same (displayHeight)
+    expect(linesWith.length).toBe(linesWithout.length);
+    // But input field lines should appear at the bottom of the coordinator section
+    const textWith = linesWith.map(stripAnsi).join("\n");
+    expect(textWith).toContain("[Send]");
+  });
+
+  test("coordinator input field renders in full-width coordinator layout", () => {
+    const sidebar = makeSidebar();
+    sidebar.displayHeight = 25;
+    sidebar.coordinatorFullWidth = true;
+    sidebar.agentTree.setFlatList([]);
+
+    const coordPane = new TmuxPaneComponent();
+    coordPane.rawOutput = "coordinator output";
+    coordPane.hasPolled = true;
+    sidebar.coordinatorPane = coordPane;
+
+    const inputField = new InputFieldComponent();
+    inputField.active = true;
+    sidebar.coordinatorInputField = inputField;
+    inputField.handleInput("t");
+    inputField.handleInput("e");
+    inputField.handleInput("s");
+    inputField.handleInput("t");
+
+    const lines = sidebar.render(SIDEBAR_WIDTH);
+    const text = lines.map(stripAnsi).join("\n");
+    expect(text).toContain("> test█");
+    expect(text).toContain("[Send]");
+    expect(text).toContain("coordinator output");
   });
 });

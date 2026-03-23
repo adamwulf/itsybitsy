@@ -5,7 +5,7 @@
 
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { join } from "path";
-import { mkdtemp, rm, mkdir, writeFile, readFile } from "fs/promises";
+import { mkdtemp, rm, mkdir, writeFile, readFile, readdir } from "fs/promises";
 import { tmpdir } from "os";
 import {
   checkLeakedAgentHooks,
@@ -591,14 +591,14 @@ describe("getResolvableWarnings", () => {
     expect(resolvable.length).toBe(5);
   });
 
-  test("excludes error-severity orphaned-dir (missing meta variant)", () => {
+  test("includes both orphaned-dir variants (missing meta and stale directory)", () => {
     const warnings: RepoHealthWarning[] = [
       { repoPath: "/r", severity: "error", category: "orphaned-dir", message: "no valid meta.json" },
       { repoPath: "/r", severity: "warning", category: "orphaned-dir", message: "stale directory" },
     ];
     const resolvable = getResolvableWarnings(warnings);
-    expect(resolvable.length).toBe(1);
-    expect(resolvable[0]!.severity).toBe("warning");
+    expect(resolvable.length).toBe(2);
+    expect(resolvable.map((w) => w.severity).sort()).toEqual(["error", "warning"]);
   });
 
   test("returns empty for no resolvable warnings", () => {
@@ -663,6 +663,29 @@ describe("resolveHealthWarnings", () => {
 
     const exists = await Bun.file(join(agentDir, "meta.json")).exists();
     expect(exists).toBe(false);
+  });
+
+  test("resolves orphaned-dir with missing meta.json (error severity)", async () => {
+    const agentDir = join(tmpDir, ".ittybitty", "agents", "agent-nometa1");
+    await mkdir(agentDir, { recursive: true });
+    // No meta.json — simulates the missing-meta variant
+
+    const warnings: RepoHealthWarning[] = [{
+      repoPath: tmpDir,
+      severity: "error",
+      category: "orphaned-dir",
+      message: "Orphaned agent directory: agent-nometa1 — no valid meta.json",
+      agentId: "agent-nometa1",
+    }];
+
+    const result = await resolveHealthWarnings(warnings);
+    expect(result.resolved).toBe(1);
+
+    const dirExists = await Bun.file(join(agentDir, "meta.json")).exists();
+    expect(dirExists).toBe(false);
+    // Verify the entire directory was removed
+    const agentDirExists = await (async () => { try { await readdir(agentDir); return true; } catch { return false; } })();
+    expect(agentDirExists).toBe(false);
   });
 
   test("resolves orphaned-worktree by calling git worktree remove", async () => {

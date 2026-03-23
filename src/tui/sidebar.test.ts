@@ -337,6 +337,71 @@ describe("SidebarComponent", () => {
     expect(textWith).toContain("[Send]");
   });
 
+  test("coordinator status lines appear after input field when focused", () => {
+    const sidebar = makeSidebar();
+    sidebar.displayHeight = 25;
+    sidebar.agentTree.setFlatList([]);
+
+    const coordPane = new TmuxPaneComponent();
+    // Simulate tmux output with two separators and status text after the lower one
+    const sep = "─".repeat(SIDEBAR_WIDTH);
+    coordPane.rawOutput = `some output\n${sep}\nmiddle text\n${sep}\nstatus info`;
+    coordPane.hasPolled = true;
+    sidebar.coordinatorPane = coordPane;
+
+    const inputField = new InputFieldComponent();
+    inputField.active = true;
+    sidebar.coordinatorInputField = inputField;
+    inputField.handleInput("h");
+    inputField.handleInput("i");
+
+    const lines = sidebar.render(SIDEBAR_WIDTH);
+    const text = lines.map(stripAnsi).join("\n");
+
+    // Input field should be present
+    expect(text).toContain("> hi█");
+    expect(text).toContain("[Send]");
+    // Status info (after lower separator) should appear after the input field
+    expect(text).toContain("status info");
+    // The output above the upper separator should still be visible
+    expect(text).toContain("some output");
+    // The "middle text" between separators should be trimmed (it's between upper and lower)
+    expect(text).not.toContain("middle text");
+
+    // Verify order: status info comes after [Send]
+    const sendIdx = text.indexOf("[Send]");
+    const statusIdx = text.indexOf("status info");
+    expect(statusIdx).toBeGreaterThan(sendIdx);
+  });
+
+  test("coordinator output trims trailing blank lines for bottom-pin", () => {
+    const sidebar = makeSidebar();
+    sidebar.displayHeight = 25;
+    sidebar.agentTree.setFlatList([]);
+
+    const coordPane = new TmuxPaneComponent();
+    coordPane.rawOutput = "line one\nline two\n\n\n\n";
+    coordPane.hasPolled = true;
+    sidebar.coordinatorPane = coordPane;
+
+    const inputField = new InputFieldComponent();
+    inputField.active = false;
+    sidebar.coordinatorInputField = inputField;
+
+    const lines = sidebar.render(SIDEBAR_WIDTH);
+    const stripped = lines.map(stripAnsi);
+
+    // "line two" should be the last non-empty line in the coordinator section
+    // Find where "line two" appears
+    const lineTwoIdx = stripped.findIndex((l) => l.includes("line two"));
+    expect(lineTwoIdx).toBeGreaterThan(-1);
+    // All lines after "line two" within the coordinator section should be empty
+    // (the next non-empty content would be the status bar or end of render)
+    // The point is that blank lines from the tmux output don't push content up
+    const lineOneIdx = stripped.findIndex((l) => l.includes("line one"));
+    expect(lineOneIdx).toBe(lineTwoIdx - 1);
+  });
+
   test("coordinator input field renders in full-width coordinator layout", () => {
     const sidebar = makeSidebar();
     sidebar.displayHeight = 25;

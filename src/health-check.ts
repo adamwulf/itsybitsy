@@ -663,7 +663,11 @@ async function resolveOrphanedWorktree(w: RepoHealthWarning): Promise<void> {
   const worktreePath = match[1]!;
   const result = await healthSpawnCtx.run(["git", "-C", w.repoPath, "worktree", "remove", worktreePath, "--force"]);
   if (result.exitCode !== 0) {
-    throw new Error(`git worktree remove failed: ${result.stderr}`);
+    // Worktree directory may already be gone — prune stale worktree metadata
+    const pruneResult = await healthSpawnCtx.run(["git", "-C", w.repoPath, "worktree", "prune"]);
+    if (pruneResult.exitCode !== 0) {
+      throw new Error(`git worktree remove failed (${result.stderr.trim()}), prune also failed: ${pruneResult.stderr}`);
+    }
   }
 }
 

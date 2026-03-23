@@ -712,6 +712,55 @@ describe("resolveHealthWarnings", () => {
     expect(worktreeCmd).toContain("--force");
   });
 
+  test("resolves orphaned-worktree by falling back to prune when remove fails", async () => {
+    const commands: string[][] = [];
+    healthSpawnCtx.set((cmd: string[]) => {
+      commands.push(cmd);
+      // Fail worktree remove (simulates missing directory), succeed on prune
+      if (cmd.includes("remove")) return mockResult("fatal: '/tmp/agent-wt2/repo' is not a working tree", 128);
+      return mockResult("", 0);
+    });
+
+    const warnings: RepoHealthWarning[] = [{
+      repoPath: tmpDir,
+      severity: "warning",
+      category: "orphaned-worktree",
+      message: "Orphaned git worktree for agent/agent-wt2",
+      fix: "git worktree remove /tmp/agent-wt2/repo",
+    }];
+
+    const result = await resolveHealthWarnings(warnings);
+    expect(result.resolved).toBe(1);
+    expect(result.failed).toBe(0);
+
+    const removeCmd = commands.find((c) => c.includes("worktree") && c.includes("remove"));
+    expect(removeCmd).toBeDefined();
+
+    const pruneCmd = commands.find((c) => c.includes("worktree") && c.includes("prune"));
+    expect(pruneCmd).toBeDefined();
+    expect(pruneCmd).toContain("-C");
+    expect(pruneCmd).toContain(tmpDir);
+  });
+
+  test("resolves orphaned-worktree fails when both remove and prune fail", async () => {
+    healthSpawnCtx.set((cmd: string[]) => {
+      return mockResult("fatal: error", 128);
+    });
+
+    const warnings: RepoHealthWarning[] = [{
+      repoPath: tmpDir,
+      severity: "warning",
+      category: "orphaned-worktree",
+      message: "Orphaned git worktree for agent/agent-wt3",
+      fix: "git worktree remove /tmp/agent-wt3/repo",
+    }];
+
+    const result = await resolveHealthWarnings(warnings);
+    expect(result.resolved).toBe(0);
+    expect(result.failed).toBe(1);
+    expect(result.details[0]!.error).toContain("prune also failed");
+  });
+
   test("resolves orphaned-branch by calling git branch -D", async () => {
     const commands: string[][] = [];
     healthSpawnCtx.set((cmd: string[]) => {

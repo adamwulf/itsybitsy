@@ -8,6 +8,7 @@ import { truncateToWidth } from "@mariozechner/pi-tui";
 import { AgentTreeComponent, MAX_TREE_HEIGHT } from "./agent-tree";
 import { InfoPanelComponent } from "./info-panel";
 import type { TmuxPaneComponent } from "./dashboard";
+import type { InputFieldComponent } from "./input-field";
 import { RESET, BOLD, DIM, DIM_GRAY, YELLOW } from "./colors";
 import { wrapLines } from "./wrap";
 import { buildFocusSeparator } from "./focus";
@@ -69,6 +70,8 @@ export class SidebarComponent implements Component {
   infoPanel: InfoPanelComponent;
   /** Coordinator tmux pane component — renders live coordinator output in the sidebar */
   coordinatorPane: TmuxPaneComponent | null = null;
+  /** Coordinator input field — shown at bottom of coordinator section when focused */
+  coordinatorInputField: InputFieldComponent | null = null;
   /** Total available height for the sidebar (set by dashboard before render) */
   displayHeight = 30;
   /** Which panel currently has focus (set by dashboard before render) */
@@ -195,23 +198,34 @@ export class SidebarComponent implements Component {
 
   /** Render coordinator content (shared by both layouts) */
   private renderCoordinatorContent(lines: string[], w: number, height: number): void {
+    // Compute input field height when active
+    const showInputField = this.coordinatorInputField?.active === true;
+    const inputFieldHeight = showInputField ? this.coordinatorInputField!.getHeight(w) : 0;
+    const outputHeight = Math.max(1, height - inputFieldHeight);
+
     if (this.coordinatorPane) {
       if (this.coordinatorPane.hasPolled && !this.coordinatorPane.rawOutput) {
-        const stoppedLines = renderCoordinatorStopped(w, height);
+        const stoppedLines = renderCoordinatorStopped(w, outputHeight);
         lines.push(...stoppedLines);
       } else if (!this.coordinatorPane.hasPolled) {
         const loadingLines: string[] = [];
         loadingLines.push(truncateToWidth(`${DIM}Starting system coordinator...${RESET}`, w, ""));
-        while (loadingLines.length < height) loadingLines.push("");
+        while (loadingLines.length < outputHeight) loadingLines.push("");
         lines.push(...loadingLines);
       } else {
-        this.coordinatorPane.displayHeight = height;
-        const coordLines = renderCoordinatorOutput(this.coordinatorPane.rawOutput, w, height);
+        this.coordinatorPane.displayHeight = outputHeight;
+        const coordLines = renderCoordinatorOutput(this.coordinatorPane.rawOutput, w, outputHeight);
         lines.push(...coordLines);
       }
     } else {
-      const coordLines = renderCoordinatorPlaceholder(w, height);
+      const coordLines = renderCoordinatorPlaceholder(w, outputHeight);
       lines.push(...coordLines);
+    }
+
+    // Append input field at the bottom when active
+    if (showInputField) {
+      const inputLines = this.coordinatorInputField!.render(w);
+      lines.push(...inputLines);
     }
   }
 }

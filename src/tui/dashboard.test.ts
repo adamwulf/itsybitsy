@@ -5,7 +5,7 @@ import { tmpdir } from "os";
 import { readAgentLog, readAgentPrompt, parseDenials } from "../agents";
 import type { Agent, AgentMeta, FlatEntry, PendingQuestion } from "../agents";
 import { stripAnsi } from "../parse-state";
-import { makeAgent as _makeAgent, makeFlatAgent, makeFlatRepoHeader, setAgentState, makeSpawnResult } from "../test-utils";
+import { makeAgent as _makeAgent, makeFlatAgent, makeFlatRepoHeader, makeFlatSystemCoordinator, setAgentState, makeSpawnResult } from "../test-utils";
 import { TmuxPaneComponent, RightPaneComponent, DashboardComponent, AgentTreeComponent, colorizeDiff, colorizeLog, formatAgentRow } from "./dashboard";
 import { visibleWidth } from "@mariozechner/pi-tui";
 import { setSendSpawnRunner, resetSendSpawnRunner, setKillPauseSpawnRunner, resetKillPauseSpawnRunner, setNukeResumeSpawnRunner, resetNukeResumeSpawnRunner, setNewAgentSpawnRunner, resetNewAgentSpawnRunner, setDiffStatusSpawnRunner, resetDiffStatusSpawnRunner, setMergeSpawnRunner, resetMergeSpawnRunner } from "../ib-commands";
@@ -3343,5 +3343,168 @@ describe("coordinator lifecycle (Phase 47f)", () => {
     } finally {
       Object.defineProperty(process.stdout, "rows", { value: origRows, writable: true, configurable: true });
     }
+  });
+});
+
+describe("coordinator input field (Phase 49)", () => {
+  /** Helper to set up a dashboard with system coordinator selected */
+  function setupCoordinatorDashboard() {
+    const dashboard = makeDashboard();
+    const flatList: FlatEntry[] = [makeFlatSystemCoordinator()];
+    dashboard.onUpdate([], flatList, []);
+    // selectedIndex 0 is the system-coordinator entry
+    expect(dashboard.agentTree.isSystemCoordinatorSelected).toBe(true);
+    // coordinatorMode limits focus to agent-tree and coordinator
+    dashboard.coordinatorPane.rawOutput = "Coordinator output";
+    dashboard.coordinatorPane.hasPolled = true;
+    return dashboard;
+  }
+
+  test("coordinator input field is a separate instance from agent input field", () => {
+    const dashboard = makeDashboard();
+    expect(dashboard.coordinatorInputField).not.toBe(dashboard.inputField);
+    expect(dashboard.coordinatorInputField).toBeInstanceOf(Object);
+  });
+
+  test("when coordinator panel is focused, input routes to coordinator input field", () => {
+    const dashboard = setupCoordinatorDashboard();
+    // Tab to coordinator
+    dashboard.handleInput("\t"); // coordinator (coordinatorMode: agent-tree -> coordinator)
+    expect(dashboard.focus).toBe("coordinator");
+
+    // Type some text — should go to coordinator input field
+    dashboard.handleInput("h");
+    dashboard.handleInput("i");
+    expect(dashboard.coordinatorInputField.getText()).toBe("hi");
+    // Agent input field should remain empty
+    expect(dashboard.inputField.getText()).toBe("");
+  });
+
+  test("Escape clears coordinator input and returns focus to agent-tree", () => {
+    const dashboard = setupCoordinatorDashboard();
+    dashboard.handleInput("\t"); // coordinator
+    expect(dashboard.focus).toBe("coordinator");
+
+    dashboard.handleInput("h");
+    dashboard.handleInput("i");
+    expect(dashboard.coordinatorInputField.getText()).toBe("hi");
+
+    dashboard.handleInput("\x1b"); // Escape
+    expect(dashboard.focus).toBe("agent-tree");
+    expect(dashboard.coordinatorInputField.getText()).toBe("");
+  });
+
+  test("Tab from coordinator input field [Send] cycles focus normally", () => {
+    const dashboard = setupCoordinatorDashboard();
+    dashboard.handleInput("\t"); // coordinator
+    expect(dashboard.focus).toBe("coordinator");
+
+    // Tab to [Send] button within input field
+    dashboard.handleInput("\t"); // internal tab to [Send]
+    expect(dashboard.coordinatorInputField.getFocus()).toBe("send");
+
+    // Tab again — not consumed by input field, should cycle to agent-tree
+    dashboard.handleInput("\t");
+    expect(dashboard.focus).toBe("agent-tree");
+  });
+
+  test("Shift-Tab from coordinator input text cycles focus backwards", () => {
+    const dashboard = setupCoordinatorDashboard();
+    dashboard.handleInput("\t"); // coordinator
+    expect(dashboard.focus).toBe("coordinator");
+
+    // Shift-Tab from text — not consumed by input field, cycles backward
+    dashboard.handleInput("\x1b[Z");
+    expect(dashboard.focus).toBe("agent-tree");
+  });
+
+  test("coordinator input field renders in sidebar when focused", () => {
+    const dashboard = setupCoordinatorDashboard();
+    dashboard.handleInput("\t"); // coordinator
+    expect(dashboard.focus).toBe("coordinator");
+
+    const origRows = process.stdout.rows;
+    Object.defineProperty(process.stdout, "rows", { value: 30, writable: true, configurable: true });
+    try {
+      dashboard.handleInput("t");
+      dashboard.handleInput("e");
+      dashboard.handleInput("s");
+      dashboard.handleInput("t");
+
+      const lines = dashboard.render(160);
+      const text = lines.map(l => stripAnsi(l)).join("\n");
+      // Input field should show the typed text with cursor
+      expect(text).toContain("> test█");
+      expect(text).toContain("[Send]");
+    } finally {
+      Object.defineProperty(process.stdout, "rows", { value: origRows, writable: true, configurable: true });
+    }
+  });
+
+  test("coordinator input field not shown when coordinator panel not focused", () => {
+    const dashboard = setupCoordinatorDashboard();
+    // Focus stays on agent-tree
+    expect(dashboard.focus).toBe("agent-tree");
+
+    const origRows = process.stdout.rows;
+    Object.defineProperty(process.stdout, "rows", { value: 30, writable: true, configurable: true });
+    try {
+      const lines = dashboard.render(160);
+      const text = lines.map(l => stripAnsi(l)).join("\n");
+      // Coordinator output should appear but no cursor block in coordinator section
+      expect(text).toContain("Coordinator output");
+    } finally {
+      Object.defineProperty(process.stdout, "rows", { value: origRows, writable: true, configurable: true });
+    }
+  });
+
+  test("other dashboard keybindings are suppressed when coordinator is focused", () => {
+    const dashboard = setupCoordinatorDashboard();
+    dashboard.handleInput("\t"); // coordinator
+    expect(dashboard.focus).toBe("coordinator");
+
+    // 'p' should be consumed as text input, not cycle pane modes
+    const modeBefore = dashboard.currentMode;
+    dashboard.handleInput("p");
+    expect(dashboard.currentMode).toBe(modeBefore);
+    expect(dashboard.coordinatorInputField.getText()).toBe("p");
+  });
+
+  test("coordinator submit calls sendTmuxKeys", () => {
+    const dashboard = setupCoordinatorDashboard();
+    dashboard.handleInput("\t"); // coordinator
+    expect(dashboard.focus).toBe("coordinator");
+
+    // Type message
+    dashboard.handleInput("h");
+    dashboard.handleInput("i");
+
+    // Tab to [Send], press Enter
+    dashboard.handleInput("\t");
+    dashboard.handleInput("\r");
+
+    // Input should be cleared after submit
+    expect(dashboard.coordinatorInputField.getText()).toBe("");
+  });
+
+  test("syncSelectedAgent switches coordinator input field buffer", () => {
+    const dashboard = setupCoordinatorDashboard();
+
+    // Tab to coordinator and type
+    dashboard.handleInput("\t");
+    dashboard.handleInput("a");
+    dashboard.handleInput("b");
+    expect(dashboard.coordinatorInputField.getText()).toBe("ab");
+
+    // Switch to a non-coordinator selection
+    const agent = makeAgent("agent-a", "/repos/test");
+    const flatList: FlatEntry[] = [makeFlatSystemCoordinator(), makeFlatAgent(agent)];
+    dashboard.onUpdate([agent], flatList, []);
+    // Move selection to the agent
+    dashboard.handleInput("\x1b[B"); // down arrow
+
+    // Coordinator input buffer should be saved; switching back should restore it
+    dashboard.handleInput("\x1b[A"); // up arrow to coordinator
+    expect(dashboard.coordinatorInputField.getText()).toBe("ab");
   });
 });

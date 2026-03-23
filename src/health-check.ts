@@ -659,11 +659,15 @@ async function resolveOrphanedDir(w: RepoHealthWarning): Promise<void> {
 async function resolveOrphanedWorktree(w: RepoHealthWarning): Promise<void> {
   // Extract worktree path from the fix field
   const match = w.fix?.match(/git worktree remove (.+)/);
-  if (!match) return;
+  if (!match) throw new Error("orphaned-worktree warning missing valid fix field");
   const worktreePath = match[1]!;
   const result = await healthSpawnCtx.run(["git", "-C", w.repoPath, "worktree", "remove", worktreePath, "--force"]);
   if (result.exitCode !== 0) {
-    throw new Error(`git worktree remove failed: ${result.stderr}`);
+    // Worktree directory may already be gone — prune stale worktree metadata
+    const pruneResult = await healthSpawnCtx.run(["git", "-C", w.repoPath, "worktree", "prune"]);
+    if (pruneResult.exitCode !== 0) {
+      throw new Error(`git worktree remove failed (${result.stderr}), prune also failed: ${pruneResult.stderr}`);
+    }
   }
 }
 
@@ -671,7 +675,7 @@ async function resolveOrphanedWorktree(w: RepoHealthWarning): Promise<void> {
 async function resolveOrphanedBranch(w: RepoHealthWarning): Promise<void> {
   // Extract branch name from fix field
   const match = w.fix?.match(/git branch -D (agent\/\S+)/);
-  if (!match) return;
+  if (!match) throw new Error("orphaned-branch warning missing valid fix field");
   const branchName = match[1]!;
   const result = await healthSpawnCtx.run(["git", "-C", w.repoPath, "branch", "-D", branchName]);
   if (result.exitCode !== 0) {

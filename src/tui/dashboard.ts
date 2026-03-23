@@ -141,6 +141,10 @@ export class TmuxPaneComponent implements Component {
       this.statusLines = wrapped.slice(lowerIndex + 1).map(
         (line) => truncateToWidth(line, width, "")
       );
+      // Trim trailing blank lines — tmux capture-pane pads output to fill the pane height
+      while (this.statusLines.length > 0 && this.statusLines[this.statusLines.length - 1]!.trim() === "") {
+        this.statusLines.pop();
+      }
     }
   }
 
@@ -1416,9 +1420,7 @@ export class DashboardComponent implements Component {
         const rw = mainWidth - leftW - 1;
         const inputLines = this.inputField.render(leftW);
         // Append status lines below the input field
-        const overlayLines = [...inputLines, ...this.tmuxPane.statusLines.map(
-          (line) => truncateToWidth(line, leftW, "")
-        )];
+        const overlayLines = [...inputLines, ...this.tmuxPane.statusLines];
         // Re-render right pane at the correct width to get the last N lines
         const rightLines = this.rightPane.render(rw);
 

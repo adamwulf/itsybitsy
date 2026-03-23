@@ -200,7 +200,14 @@ export class SidebarComponent implements Component {
   private renderCoordinatorContent(lines: string[], w: number, height: number): void {
     // Compute input field height when active
     const showInputField = this.coordinatorInputField?.active === true;
-    const inputFieldHeight = showInputField ? this.coordinatorInputField!.getHeight(w) : 0;
+
+    // Extract status lines (after the lower separator) when showing input field
+    let statusLines: string[] = [];
+    if (showInputField && this.coordinatorPane?.rawOutput) {
+      statusLines = extractCoordinatorStatusLines(this.coordinatorPane.rawOutput, w);
+    }
+
+    const inputFieldHeight = showInputField ? this.coordinatorInputField!.getHeight(w) + statusLines.length : 0;
     const outputHeight = Math.max(1, height - inputFieldHeight);
 
     if (this.coordinatorPane) {
@@ -223,10 +230,11 @@ export class SidebarComponent implements Component {
       lines.push(...coordLines);
     }
 
-    // Append input field at the bottom when active
+    // Append input field at the bottom when active, followed by status lines
     if (showInputField) {
       const inputLines = this.coordinatorInputField!.render(w);
       lines.push(...inputLines);
+      lines.push(...statusLines);
     }
   }
 }
@@ -254,6 +262,24 @@ function renderCoordinatorStopped(width: number, height: number): string[] {
   return lines;
 }
 
+/**
+ * Extract lines after the lower separator (status lines) from coordinator tmux output.
+ * These are shown below the input field when focused.
+ */
+function extractCoordinatorStatusLines(rawOutput: string, width: number): string[] {
+  const wrapped = wrapLines(rawOutput, width);
+  const { lowerIndex } = findLastTwoSeparators(wrapped);
+  if (lowerIndex >= 0 && lowerIndex < wrapped.length - 1) {
+    const result = wrapped.slice(lowerIndex + 1).map((line) => truncateToWidth(line, width, ""));
+    // Trim trailing blank lines — tmux capture-pane pads output to fill the pane height
+    while (result.length > 0 && result[result.length - 1]!.trim() === "") {
+      result.pop();
+    }
+    return result;
+  }
+  return [];
+}
+
 /** Render coordinator output directly (bypasses TmuxPaneComponent's agent check) */
 function renderCoordinatorOutput(rawOutput: string, width: number, height: number, trimInput: boolean = false): string[] {
   let wrapped = wrapLines(rawOutput, width);
@@ -265,6 +291,11 @@ function renderCoordinatorOutput(rawOutput: string, width: number, height: numbe
     if (upperIndex >= 0 && upperIndex < wrapped.length) {
       wrapped = wrapped.slice(0, upperIndex);
     }
+  }
+
+  // Trim trailing blank lines so content bottom-pins cleanly
+  while (wrapped.length > 0 && wrapped[wrapped.length - 1]!.trim() === "") {
+    wrapped.pop();
   }
 
   // Show the last `height` lines (follow newest output)

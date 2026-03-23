@@ -10,7 +10,7 @@ import { InfoPanelComponent } from "./info-panel";
 import type { TmuxPaneComponent } from "./dashboard";
 import type { InputFieldComponent } from "./input-field";
 import { RESET, BOLD, DIM, DIM_GRAY, YELLOW } from "./colors";
-import { wrapLines } from "./wrap";
+import { wrapLines, findLastTwoSeparators } from "./wrap";
 import { buildFocusSeparator } from "./focus";
 import type { FocusTarget } from "./focus";
 
@@ -209,12 +209,13 @@ export class SidebarComponent implements Component {
         lines.push(...stoppedLines);
       } else if (!this.coordinatorPane.hasPolled) {
         const loadingLines: string[] = [];
+        // Bottom-pin loading message
+        while (loadingLines.length < outputHeight - 1) loadingLines.push("");
         loadingLines.push(truncateToWidth(`${DIM}Starting system coordinator...${RESET}`, w, ""));
-        while (loadingLines.length < outputHeight) loadingLines.push("");
         lines.push(...loadingLines);
       } else {
         this.coordinatorPane.displayHeight = outputHeight;
-        const coordLines = renderCoordinatorOutput(this.coordinatorPane.rawOutput, w, outputHeight);
+        const coordLines = renderCoordinatorOutput(this.coordinatorPane.rawOutput, w, outputHeight, showInputField);
         lines.push(...coordLines);
       }
     } else {
@@ -232,34 +233,49 @@ export class SidebarComponent implements Component {
 
 /** Render coordinator placeholder (Phase 47 will replace this) */
 function renderCoordinatorPlaceholder(width: number, height: number): string[] {
+  // Bottom-pin: pad at top so content sticks to bottom
   const lines: string[] = [];
+  while (lines.length < height - 1) lines.push("");
   lines.push(truncateToWidth(`${DIM}[coordinator — not yet active]${RESET}`, width, ""));
-  while (lines.length < height) {
-    lines.push("");
-  }
   return lines;
 }
 
 /** Render coordinator stopped message with restart hint */
 function renderCoordinatorStopped(width: number, height: number): string[] {
+  // Bottom-pin: pad at top so content sticks to bottom
+  const contentLines = [
+    truncateToWidth(`${YELLOW}System coordinator stopped${RESET}`, width, ""),
+    truncateToWidth(`${DIM}Press R to restart${RESET}`, width, ""),
+  ];
   const lines: string[] = [];
-  lines.push(truncateToWidth(`${YELLOW}System coordinator stopped${RESET}`, width, ""));
-  lines.push(truncateToWidth(`${DIM}Press R to restart${RESET}`, width, ""));
-  while (lines.length < height) {
-    lines.push("");
-  }
+  const padCount = Math.max(0, height - contentLines.length);
+  for (let i = 0; i < padCount; i++) lines.push("");
+  lines.push(...contentLines);
   return lines;
 }
 
 /** Render coordinator output directly (bypasses TmuxPaneComponent's agent check) */
-function renderCoordinatorOutput(rawOutput: string, width: number, height: number): string[] {
-  const wrapped = wrapLines(rawOutput, width);
+function renderCoordinatorOutput(rawOutput: string, width: number, height: number, trimInput: boolean = false): string[] {
+  let wrapped = wrapLines(rawOutput, width);
+
+  // When showing our own input field, trim Claude's native input area.
+  // Same logic as TmuxPaneComponent: find the last two ─ separators and trim at the upper one.
+  if (trimInput) {
+    const { upperIndex } = findLastTwoSeparators(wrapped);
+    if (upperIndex >= 0 && upperIndex < wrapped.length) {
+      wrapped = wrapped.slice(0, upperIndex);
+    }
+  }
+
   // Show the last `height` lines (follow newest output)
   const start = Math.max(0, wrapped.length - height);
   const visible = wrapped.slice(start, start + height);
-  const lines = visible.map((line) => truncateToWidth(line, width, ""));
-  while (lines.length < height) {
-    lines.push("");
-  }
+  const contentLines = visible.map((line) => truncateToWidth(line, width, ""));
+
+  // Bottom-pin: pad at the top so content sticks to the bottom
+  const padCount = Math.max(0, height - contentLines.length);
+  const lines: string[] = [];
+  for (let i = 0; i < padCount; i++) lines.push("");
+  lines.push(...contentLines);
   return lines;
 }

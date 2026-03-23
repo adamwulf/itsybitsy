@@ -36,7 +36,7 @@ import {
 } from "../coordinator";
 import type { Agent, FlatEntry, PendingQuestion } from "../agents";
 import { SplitPane } from "./split-pane";
-import { wrapLines, wordWrapLines, padLines } from "./wrap";
+import { wrapLines, wordWrapLines, padLines, findLastTwoSeparators } from "./wrap";
 import { fetchUsage } from "../usage";
 import type { UsageData } from "../usage";
 import { getStateColors, setupColorSchemeDetection } from "./color-scheme";
@@ -67,7 +67,6 @@ import { loadLayout, saveLayoutDebounced, cancelPendingSave } from "./layout";
 import type { LayoutState } from "./layout";
 import { InputFieldComponent } from "./input-field";
 import { sendMessage } from "../ib-commands";
-import { stripAnsi } from "../parse-state";
 import { getResolvableWarnings } from "../health-check";
 
 // Re-export for test compatibility
@@ -85,29 +84,8 @@ const DIALOG_WIDTH = 80;
 const DEFAULT_LEFT_WIDTH = 80;
 const LEFT_WIDTH_STEP = 5;
 
-/**
- * Find the last two ─ separator lines from the bottom of wrapped tmux output.
- * Returns indices of the upper (first found going up) and lower (last found) separators.
- * Both are -1 if fewer than two separators are found.
- */
-function findLastTwoSeparators(wrapped: string[]): { upperIndex: number; lowerIndex: number } {
-  let separatorCount = 0;
-  let upperIndex = -1;
-  let lowerIndex = -1;
-  for (let i = wrapped.length - 1; i >= 0; i--) {
-    const stripped = stripAnsi(wrapped[i]!).trim();
-    if (stripped.length > 0 && /^─+$/.test(stripped)) {
-      separatorCount++;
-      if (separatorCount === 1) {
-        lowerIndex = i;
-      }
-      upperIndex = i;
-      if (separatorCount >= 2) break;
-    }
-  }
-  if (separatorCount < 2) return { upperIndex: -1, lowerIndex: -1 };
-  return { upperIndex, lowerIndex };
-}
+// findLastTwoSeparators moved to wrap.ts — re-exported for external consumers
+export { findLastTwoSeparators } from "./wrap";
 
 /**
  * Tmux output pane — shows live tmux capture for the selected agent.

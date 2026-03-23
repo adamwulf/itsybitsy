@@ -4,6 +4,7 @@
  */
 
 import { visibleWidth } from "@mariozechner/pi-tui";
+import { stripAnsi } from "../parse-state";
 
 /**
  * Check if a byte is a CSI sequence terminator (0x40-0x7E per ECMA-48).
@@ -151,6 +152,30 @@ export function wordWrapLines(text: string, width: number): string[] {
     result.push(...wordWrapSingleLine(line, width));
   }
   return result;
+}
+
+/**
+ * Find the last two ─ separator lines from the bottom of wrapped tmux output.
+ * Returns indices of the upper (first found going up) and lower (last found) separators.
+ * Both are -1 if fewer than two separators are found.
+ */
+export function findLastTwoSeparators(wrapped: string[]): { upperIndex: number; lowerIndex: number } {
+  let separatorCount = 0;
+  let upperIndex = -1;
+  let lowerIndex = -1;
+  for (let i = wrapped.length - 1; i >= 0; i--) {
+    const stripped = stripAnsi(wrapped[i]!).trim();
+    if (stripped.length > 0 && /^─+$/.test(stripped)) {
+      separatorCount++;
+      if (separatorCount === 1) {
+        lowerIndex = i;
+      }
+      upperIndex = i;
+      if (separatorCount >= 2) break;
+    }
+  }
+  if (separatorCount < 2) return { upperIndex: -1, lowerIndex: -1 };
+  return { upperIndex, lowerIndex };
 }
 
 /** Pad or trim a lines array to an exact height by appending empty strings or slicing. */

@@ -536,13 +536,7 @@ const RESOLVABLE_CATEGORIES = new Set([
 
 /** Filter warnings to only those that can be auto-resolved. */
 export function getResolvableWarnings(warnings: RepoHealthWarning[]): RepoHealthWarning[] {
-  return warnings.filter((w) => {
-    if (!RESOLVABLE_CATEGORIES.has(w.category)) return false;
-    // orphaned-dir: only the "stale directory" variant (has valid meta but no tmux/worktree),
-    // not the "no valid meta.json" variant (error severity, missing-meta)
-    if (w.category === "orphaned-dir" && w.severity === "error") return false;
-    return true;
-  });
+  return warnings.filter((w) => RESOLVABLE_CATEGORIES.has(w.category));
 }
 
 export interface ResolveDetail {
@@ -564,7 +558,7 @@ export async function resolveHealthWarnings(warnings: RepoHealthWarning[]): Prom
   let failed = 0;
 
   for (const w of warnings) {
-    if (!RESOLVABLE_CATEGORIES.has(w.category) || (w.category === "orphaned-dir" && w.severity === "error")) {
+    if (!RESOLVABLE_CATEGORIES.has(w.category)) {
       // Skip non-resolvable
       continue;
     }

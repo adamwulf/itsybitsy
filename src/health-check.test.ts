@@ -591,14 +591,13 @@ describe("getResolvableWarnings", () => {
     expect(resolvable.length).toBe(5);
   });
 
-  test("excludes error-severity orphaned-dir (missing meta variant)", () => {
+  test("includes both orphaned-dir variants (missing meta and stale directory)", () => {
     const warnings: RepoHealthWarning[] = [
       { repoPath: "/r", severity: "error", category: "orphaned-dir", message: "no valid meta.json" },
       { repoPath: "/r", severity: "warning", category: "orphaned-dir", message: "stale directory" },
     ];
     const resolvable = getResolvableWarnings(warnings);
-    expect(resolvable.length).toBe(1);
-    expect(resolvable[0]!.severity).toBe("warning");
+    expect(resolvable.length).toBe(2);
   });
 
   test("returns empty for no resolvable warnings", () => {

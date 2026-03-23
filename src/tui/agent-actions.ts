@@ -870,9 +870,11 @@ export function handleResizeLeft(ctx: ActionCtx, delta: number) {
   const newWidth = Math.max(MIN_LEFT_WIDTH, Math.min(MAX_LEFT_WIDTH, current + delta));
   if (newWidth === current) return;
   ctx.splitPane.setLeftWidth(newWidth);
-  const agent = ctx.agentTree.selectedAgent;
-  if (agent?.meta.tmux_session) {
-    resizeTmuxWindow(agent.meta.tmux_session, newWidth);
+  // Resize ALL agents' tmux sessions so the width is consistent across agents
+  for (const entry of ctx.agentTree.flatList) {
+    if (entry.kind === "agent" && entry.agent.meta.tmux_session) {
+      resizeTmuxWindow(entry.agent.meta.tmux_session, newWidth);
+    }
   }
   ctx.tui?.requestRender();
 }

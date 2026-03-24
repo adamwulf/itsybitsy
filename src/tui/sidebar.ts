@@ -163,15 +163,33 @@ export class SidebarComponent implements Component {
 
   /**
    * Two-section layout when system coordinator is selected:
-   * tree (top) + coordinator tmux output (bottom, all remaining space).
-   * Info panel is hidden.
+   * tree (top) + coordinator tmux output (bottom).
+   * Info panel is hidden; coordinator takes info's height, tree absorbs old coordinator space.
    */
   private renderCoordinatorLayout(width: number): string[] {
     const w = width;
     const lines: string[] = [];
 
+    // Use the same base computation as normal layout so tree height stays consistent
     const itemCount = this.agentTree.visibleList.length;
-    const treeHeight = Math.min(MAX_TREE_HEIGHT, Math.max(1, itemCount));
+    const base = computeSidebarHeights(this.displayHeight, itemCount);
+    let treeHeight = Math.max(1, base.treeHeight + this.heightOffsets.tree);
+    let infoHeight = Math.max(0, base.infoHeight + this.heightOffsets.info);
+    let coordinatorHeight = Math.max(0, base.coordinatorHeight + this.heightOffsets.coordinator);
+
+    // Tree absorbs the old coordinator space (+ 1 saved header line since we have 2 headers instead of 3)
+    const savedHeader = (base.coordinatorHeight > 0 && base.infoHeight > 0) ? 1 : 0;
+    treeHeight += coordinatorHeight + savedHeader;
+    // Coordinator panel replaces the info panel position with info's height
+    coordinatorHeight = infoHeight;
+
+    // Clamp so total content + headers fits within displayHeight (2 headers: Agents + Coordinator)
+    const headerCount = 1 + (coordinatorHeight > 0 ? 1 : 0);
+    const budget = this.displayHeight - headerCount;
+    if (budget > 0 && treeHeight + coordinatorHeight > budget) {
+      const excess = treeHeight + coordinatorHeight - budget;
+      treeHeight = Math.max(1, treeHeight - excess);
+    }
 
     // Agents section header + tree
     lines.push(buildFocusSeparator("Agents", w, this.focusTarget === "agent-tree"));
@@ -183,11 +201,11 @@ export class SidebarComponent implements Component {
       lines.push("");
     }
 
-    // Coordinator gets all remaining space: available - tree_height - 1 (tree header) - 1 (coordinator header)
-    const coordinatorHeight = Math.max(1, this.displayHeight - treeHeight - 2);
-
-    lines.push(buildFocusSeparator("System Coordinator", w, this.focusTarget === "coordinator"));
-    this.renderCoordinatorContent(lines, w, coordinatorHeight);
+    // Coordinator section
+    if (coordinatorHeight > 0) {
+      lines.push(buildFocusSeparator("System Coordinator", w, this.focusTarget === "coordinator"));
+      this.renderCoordinatorContent(lines, w, coordinatorHeight);
+    }
 
     // Ensure total output matches displayHeight
     while (lines.length < this.displayHeight) {

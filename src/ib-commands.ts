@@ -1346,6 +1346,7 @@ async function buildAgentSettings(
 
   const result = {
     ...baseSettings,
+    spinnerTipsEnabled: false,
     permissions: {
       allow: allAllow,
       deny: allDeny,

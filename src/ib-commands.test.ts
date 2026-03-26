@@ -2246,6 +2246,7 @@ describe("newAgent (native)", () => {
     expect(settings.hooks).toBeDefined();
     expect(settings.hooks.SessionStart).toBeDefined();
     expect(settings.hooks.PreToolUse).toBeDefined();
+    expect(settings.spinnerTipsEnabled).toBe(false);
   });
 
   test("writes .claude dir in worktree even without base settings", async () => {
@@ -2258,6 +2259,7 @@ describe("newAgent (native)", () => {
 
     const settings = await Bun.file(settingsPath).json();
     expect(settings.permissions.allow).toContain("Bash(ib:*)");
+    expect(settings.spinnerTipsEnabled).toBe(false);
   });
 
   test("rejects unknown manager", async () => {

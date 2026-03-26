@@ -45,6 +45,11 @@ export class InputFieldComponent implements Component {
     return this.focused;
   }
 
+  /** Set the internal focus state for rendering control (text or send). */
+  setFocusState(state: "text" | "send"): void {
+    this.focused = state;
+  }
+
   /** Clear the input field text and reset to default state. */
   clear(): void {
     this.buffer.clear();

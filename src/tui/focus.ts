@@ -11,6 +11,9 @@ import { RESET, BOLD, DIM, DIM_GRAY, REVERSE } from "./colors";
 /** The five focusable panels in the dashboard. */
 export type FocusTarget = "agent-tree" | "info" | "coordinator" | "active-agent" | "right-pane";
 
+/** Sub-focus states for panels with input fields (active-agent, coordinator). */
+export type SubFocus = "pane" | "input" | "send";
+
 /** Ordered list of focus targets for cycling (normal mode). */
 const FOCUS_ORDER: readonly FocusTarget[] = [
   "agent-tree",
@@ -36,6 +39,8 @@ const COORDINATOR_FOCUS_ORDER: readonly FocusTarget[] = [
  */
 export class FocusManager {
   private focus: FocusTarget;
+  /** Sub-focus state for panels with input fields. */
+  subFocus: SubFocus = "pane";
   /** When true, only cycle between agent-tree and coordinator */
   coordinatorMode = false;
 
@@ -48,6 +53,16 @@ export class FocusManager {
     return this.focus;
   }
 
+  /** Returns true if the given panel has an input field (supports sub-focus). */
+  static panelHasInput(target: FocusTarget): boolean {
+    return target === "active-agent" || target === "coordinator";
+  }
+
+  /** Set the sub-focus state (pane, input, or send). */
+  setSubFocus(sf: SubFocus): void {
+    this.subFocus = sf;
+  }
+
   /** Cycle focus forward (+1) or backward (-1), wrapping around. */
   cycle(delta: 1 | -1): void {
     const order = this.coordinatorMode ? COORDINATOR_FOCUS_ORDER : FOCUS_ORDER;
@@ -56,11 +71,13 @@ export class FocusManager {
     const currentIdx = idx === -1 ? 0 : idx;
     const next = (currentIdx + delta + order.length) % order.length;
     this.focus = order[next]!;
+    this.subFocus = "pane";
   }
 
   /** Set focus directly to a specific panel. */
   setFocus(target: FocusTarget): void {
     this.focus = target;
+    this.subFocus = "pane";
   }
 }
 

@@ -1,6 +1,6 @@
 import { test, expect, describe } from "bun:test";
 import { FocusManager, buildFocusSeparator } from "./focus";
-import type { FocusTarget } from "./focus";
+import type { FocusTarget, SubFocus } from "./focus";
 import { RESET, BOLD, DIM, DIM_GRAY, REVERSE } from "./colors";
 
 describe("FocusManager", () => {
@@ -96,6 +96,46 @@ describe("FocusManager", () => {
     for (let i = 0; i < 100; i++) fm.cycle(1);
     // 100 % 5 = 0, so should be at index 0 = agent-tree
     expect(fm.current()).toBe("agent-tree");
+  });
+
+  test("subFocus defaults to 'pane'", () => {
+    const fm = new FocusManager();
+    expect(fm.subFocus).toBe("pane");
+  });
+
+  test("setSubFocus changes sub-focus state", () => {
+    const fm = new FocusManager();
+    fm.setSubFocus("input");
+    expect(fm.subFocus).toBe("input");
+    fm.setSubFocus("send");
+    expect(fm.subFocus).toBe("send");
+    fm.setSubFocus("pane");
+    expect(fm.subFocus).toBe("pane");
+  });
+
+  test("cycle() resets subFocus to 'pane'", () => {
+    const fm = new FocusManager("active-agent");
+    fm.setSubFocus("input");
+    fm.cycle(1); // move to right-pane
+    expect(fm.subFocus).toBe("pane");
+  });
+
+  test("setFocus() resets subFocus to 'pane'", () => {
+    const fm = new FocusManager("agent-tree");
+    fm.setSubFocus("send");
+    fm.setFocus("coordinator");
+    expect(fm.subFocus).toBe("pane");
+  });
+
+  test("panelHasInput returns true for active-agent and coordinator", () => {
+    expect(FocusManager.panelHasInput("active-agent")).toBe(true);
+    expect(FocusManager.panelHasInput("coordinator")).toBe(true);
+  });
+
+  test("panelHasInput returns false for other panels", () => {
+    expect(FocusManager.panelHasInput("agent-tree")).toBe(false);
+    expect(FocusManager.panelHasInput("info")).toBe(false);
+    expect(FocusManager.panelHasInput("right-pane")).toBe(false);
   });
 });
 

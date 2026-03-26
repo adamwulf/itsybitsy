@@ -2023,7 +2023,11 @@ describe("newAgent (native)", () => {
     expect(tmuxNewSession).toBeDefined();
     expect(tmuxNewSession).toContain("-d");
     expect(tmuxNewSession).toContain("-x");
-    expect(tmuxNewSession).toContain("60");
+    // Width comes from saved layout.json (or DEFAULT_TMUX_WIDTH if none)
+    const xIndex = tmuxNewSession!.indexOf("-x");
+    expect(xIndex).toBeGreaterThan(-1);
+    const widthStr = tmuxNewSession![xIndex + 1];
+    expect(Number(widthStr)).toBeGreaterThanOrEqual(40);
     expect(tmuxNewSession).toContain("-s");
     expect(tmuxNewSession).toContain("ittybitty-abcd1234-test-tmux");
   });

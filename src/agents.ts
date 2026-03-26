@@ -4,10 +4,11 @@
  */
 
 import { join } from "path";
-import { readdir, rename } from "fs/promises";
+import { readdir, rename, stat } from "fs/promises";
 import type { AgentState } from "./parse-state";
 import { parseState, stripAnsi, STARTUP_MARKERS } from "./parse-state";
 import { captureTmuxOutput, listTmuxSessions } from "./tmux-poller";
+import { InjectionContext } from "./types";
 
 /** States that can be written to meta.json */
 export type MetaState = "running" | "waiting" | "complete";
@@ -61,6 +62,25 @@ export function isRecentlyCreated(createdEpoch: number): boolean {
   const ageMs = Date.now() - createdEpoch * 1000;
   return ageMs < CREATING_GRACE_PERIOD_MS;
 }
+
+/**
+ * Check if an agent directory was recently created (within the grace period).
+ * Uses the directory's filesystem birthtime. Used to suppress read errors for
+ * directories that are still being set up by `ib new-agent`.
+ *
+ * Injectable via `isRecentlyCreatedDirCtx` for testing.
+ */
+async function _isRecentlyCreatedDir(dirPath: string): Promise<boolean> {
+  try {
+    const dirStat = await stat(dirPath);
+    const ageMs = Date.now() - dirStat.birthtimeMs;
+    return ageMs < CREATING_GRACE_PERIOD_MS;
+  } catch {
+    return false;
+  }
+}
+
+export const isRecentlyCreatedDirCtx = new InjectionContext<(dirPath: string) => Promise<boolean>>(_isRecentlyCreatedDir);
 
 /**
  * Write agent state to meta.json atomically (write .tmp, rename over original).
@@ -216,7 +236,12 @@ async function readAgentsFromDir(
       const agentDir = join(dir, entry.name);
       const { meta, error } = await readAgentMeta(agentDir);
       if (error) {
-        errors.push({ agentDir, error });
+        // Suppress errors for newly-created agent directories — during creation,
+        // the directory exists but meta.json may not be written yet.
+        const isNewDir = await isRecentlyCreatedDirCtx.fn(agentDir);
+        if (!isNewDir) {
+          errors.push({ agentDir, error });
+        }
       }
       if (!meta) continue;
 

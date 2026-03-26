@@ -18,6 +18,7 @@ import {
   isRateLimited,
   hasBackgroundTasks,
   CREATING_GRACE_PERIOD_MS,
+  isRecentlyCreatedDirCtx,
 } from "./agents";
 import type { Agent, AgentMeta, FlatEntry } from "./agents";
 import { makeAgent } from "./test-utils";
@@ -336,6 +337,7 @@ describe("readRepoAgents", () => {
   });
 
   afterEach(async () => {
+    isRecentlyCreatedDirCtx.reset();
     await rm(tempDir, { recursive: true, force: true });
   });
 
@@ -405,7 +407,9 @@ describe("readRepoAgents", () => {
     expect(errors.length).toBe(0);
   });
 
-  test("reports error for malformed meta.json", async () => {
+  test("reports error for malformed meta.json (non-recent dir)", async () => {
+    // Override to simulate a directory that's past the grace period
+    isRecentlyCreatedDirCtx.set(async () => false);
     const agentDir = join(tempDir, ".ittybitty", "agents", "agent-bad");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), '{"not_valid": true}');
@@ -416,7 +420,8 @@ describe("readRepoAgents", () => {
     expect(errors[0]!.error).toContain("missing or invalid");
   });
 
-  test("reports error for unparseable meta.json", async () => {
+  test("reports error for unparseable meta.json (non-recent dir)", async () => {
+    isRecentlyCreatedDirCtx.set(async () => false);
     const agentDir = join(tempDir, ".ittybitty", "agents", "agent-corrupt");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), "not json at all");
@@ -427,7 +432,8 @@ describe("readRepoAgents", () => {
     expect(errors[0]!.error).toContain("Failed to read");
   });
 
-  test("skips directories without meta.json", async () => {
+  test("skips directories without meta.json (non-recent dir)", async () => {
+    isRecentlyCreatedDirCtx.set(async () => false);
     const agentDir = join(tempDir, ".ittybitty", "agents", "agent-empty");
     await mkdir(agentDir, { recursive: true });
     // No meta.json written
@@ -436,6 +442,27 @@ describe("readRepoAgents", () => {
     expect(agents.length).toBe(0);
     expect(errors.length).toBe(1);
     expect(errors[0]!.error).toContain("Missing");
+  });
+
+  test("suppresses errors for recently-created agent directories", async () => {
+    // Default isRecentlyCreatedDirCtx uses real birthtime — dirs just created are < 6s old
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-new");
+    await mkdir(agentDir, { recursive: true });
+    // No meta.json — simulates agent still being set up
+
+    const { agents, errors } = await readRepoAgents(tempDir, "test-repo");
+    expect(agents.length).toBe(0);
+    expect(errors.length).toBe(0); // Error suppressed during grace period
+  });
+
+  test("suppresses errors for malformed meta.json in recently-created dirs", async () => {
+    const agentDir = join(tempDir, ".ittybitsy", "agents", "agent-new2");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), '{"not_valid": true}');
+
+    const { agents, errors } = await readRepoAgents(tempDir, "test-repo");
+    expect(agents.length).toBe(0);
+    expect(errors.length).toBe(0); // Error suppressed during grace period
   });
 });
 

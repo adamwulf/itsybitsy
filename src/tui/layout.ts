@@ -101,3 +101,15 @@ export function cancelPendingSave(): void {
     debounceTimer = null;
   }
 }
+
+/** Default tmux width when no layout has been saved. */
+export const DEFAULT_TMUX_WIDTH = 80;
+
+/**
+ * Read the saved tmux pane width from layout.json.
+ * Returns DEFAULT_TMUX_WIDTH if no layout is saved or the value is invalid.
+ */
+export async function getSavedTmuxWidth(): Promise<number> {
+  const layout = await loadLayout();
+  return layout?.splitPaneLeftWidth ?? DEFAULT_TMUX_WIDTH;
+}

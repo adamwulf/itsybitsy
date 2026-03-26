@@ -26,6 +26,7 @@ import { listTmuxSessions } from "./tmux-poller";
 import { SpawnContext } from "./types";
 import type { SpawnFn } from "./types";
 import { isValidModel, isValidToolList, isValidTmuxSession, isValidSessionId, isValidShellPath, shellQuote } from "./validation";
+import { getSavedTmuxWidth } from "./tui/layout";
 
 export interface IbCommandResult {
   ok: boolean;
@@ -427,9 +428,10 @@ ${qAbsExitScript}
 
   await logAgent(agentDir, `[resume] Creating tmux session '${tmuxSession}' in ${workPath}`);
 
-  // Start tmux session
+  // Start tmux session — use saved layout width so it matches the dashboard pane
+  const resumeTmuxWidth = await getSavedTmuxWidth();
   const tmuxResult = await nukeResumeSpawnCtx.run([
-    "tmux", "new-session", "-d", "-x", "60", "-s", tmuxSession, "-c", workPath, shellQuote(resumeScript),
+    "tmux", "new-session", "-d", "-x", String(resumeTmuxWidth), "-s", tmuxSession, "-c", workPath, shellQuote(resumeScript),
   ]);
   if (tmuxResult.exitCode !== 0) {
     await logAgent(agentDir, `[resume] tmux new-session failed: exit=${tmuxResult.exitCode} stderr=${tmuxResult.stderr}`);
@@ -1795,10 +1797,11 @@ ${qStartExitScript}
     return { ok: false, exitCode: 1, stdout: "", stderr: "Error: could not start tmux server" };
   }
 
-  // Start tmux session
+  // Start tmux session — use saved layout width so it matches the dashboard pane
   const absStartScript = join(agentDir, "start.sh");
+  const newTmuxWidth = await getSavedTmuxWidth();
   const tmuxResult = await newAgentSpawnCtx.run([
-    "tmux", "new-session", "-d", "-x", "60", "-s", tmuxSession, "-c", workPath, shellQuote(absStartScript),
+    "tmux", "new-session", "-d", "-x", String(newTmuxWidth), "-s", tmuxSession, "-c", workPath, shellQuote(absStartScript),
   ]);
   if (tmuxResult.exitCode !== 0) {
     await cleanupOnFailure();

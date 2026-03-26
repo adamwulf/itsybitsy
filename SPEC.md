@@ -1596,8 +1596,8 @@ The TUI has five focusable panels:
 |--------|----------|----------------------|
 | `agent-tree` | Sidebar top | `j`/`k` navigate agents, action keys active |
 | `info` | Sidebar middle | Read-only info panel; `[`/`]` resize sidebar, `{`/`}` resize height |
-| `coordinator` | Sidebar bottom | Input field visible, text input captured (sends to system coordinator) |
-| `active-agent` | Main area (tmux pane) | Input field visible, text input captured |
+| `coordinator` | Sidebar bottom | Input field visible; uses three-level sub-focus (pane → input → send). Dashboard shortcuts work in pane/send sub-focus. |
+| `active-agent` | Main area (tmux pane) | Input field visible; uses three-level sub-focus (pane → input → send). Dashboard shortcuts work in pane/send sub-focus. |
 | `right-pane` | Main area (right side) | `[`/`]` resize right pane width |
 
 ### 13.2 Focus Cycling
@@ -1644,22 +1644,42 @@ When the `coordinator` or `active-agent` panel has focus, an input field appears
 │─────────────────────────│
 ```
 
-The input field:
-- Captures all alphanumeric and symbol key input while focused
-- Shows a cursor indicator (`█`)
-- **Enter**: Submits the input text. For agents (including per-repo coordinators), uses `ib send <agent-id> "<message>"`. For the system coordinator, uses `tmux send-keys -t ib-coordinator -l "<message>"` followed by a separate `tmux send-keys -t ib-coordinator Enter`.
-- **Escape**: Clears the input field and returns focus to `agent-tree`
-- Supports basic line editing: backspace, Ctrl-A (home), Ctrl-E (end), Ctrl-U (clear line)
+#### Sub-Focus States
+
+Panels with input fields (`active-agent`, `coordinator`) use a three-level sub-focus system. When Tab moves focus to one of these panels, it enters **pane** sub-focus first — the input field is visible but inactive (no cursor), and all dashboard shortcuts work normally.
+
+| Sub-focus | Input field state | Keyboard routing | Tab action | Shift-Tab action |
+|-----------|-------------------|------------------|------------|------------------|
+| **pane** | Visible, cursor hidden (`active=false`) | Dashboard shortcuts work normally (`[`/`]` resize, `j`/`k` navigate, action keys) | → **input** | → previous panel |
+| **input** | Active, cursor shown (`█`) | All input captured by text field (typing, backspace, Ctrl-A/E/U) | → **send** | → **pane** |
+| **send** | Active, `[Send]` highlighted | Enter submits; Escape → **pane**; all other keys fall through to dashboard | → next panel | → **input** |
+
+- **Escape** in **input** sub-focus: clears the input field and returns to **pane** sub-focus (stays on the same panel, does NOT jump to `agent-tree`).
+- **Escape** in **send** sub-focus: returns to **pane** sub-focus without clearing input.
+- **Enter** in **send** sub-focus: submits the input text. For agents, uses `ib send <agent-id> "<message>"`. For the system coordinator, uses `tmux send-keys -t ib-coordinator -l "<message>"` followed by a separate `tmux send-keys -t ib-coordinator Enter`.
+- Supports basic line editing in **input** sub-focus: backspace, Ctrl-A (home), Ctrl-E (end), Ctrl-U (clear line)
 
 The input field takes 3 lines of vertical space: top separator, input line, bottom separator. These lines are subtracted from the tmux output display height.
 
 ### 13.5 Keyboard Routing
 
-When a panel with an input field has focus:
+When a panel with an input field has focus, routing depends on the sub-focus state:
+
+**pane sub-focus** (default when panel receives focus):
+- All dashboard keybindings work normally (`[`/`]` resize, `j`/`k` navigate, `p`/`n` cycle pane modes, action keys)
+- Tab enters **input** sub-focus; Shift+Tab moves to the previous panel
+
+**input sub-focus**:
 - Printable characters, backspace, and line-editing keys go to the input field
-- Tab/Shift+Tab still cycle focus
-- Escape returns focus to `agent-tree`
-- All other dashboard keybindings (j/k, p/n, action keys like s/m/x) are **suppressed** — they do not pass through to the dashboard
+- Tab moves to **send** sub-focus; Shift+Tab returns to **pane** sub-focus
+- Escape clears input and returns to **pane** sub-focus
+- All other dashboard keybindings are **suppressed** — they do not pass through
+
+**send sub-focus**:
+- Enter submits the input text
+- Escape returns to **pane** sub-focus
+- Tab cycles to the next panel; Shift+Tab returns to **input** sub-focus
+- All other keys (including `[`/`]` for resize) **fall through** to normal dashboard handling
 
 When `agent-tree` has focus:
 - All existing keybindings work as before (j/k navigation, p/n pane cycling, action keys, dialog triggers)

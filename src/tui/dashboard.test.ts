@@ -3098,11 +3098,12 @@ describe("input field integration", () => {
     const origRows = process.stdout.rows;
     Object.defineProperty(process.stdout, "rows", { value: 30, writable: true, configurable: true });
     try {
-      // Tab to active-agent
+      // Tab to active-agent, then Tab again to enter input sub-focus
       dashboard.handleInput("\t");
       dashboard.handleInput("\t");
       dashboard.handleInput("\t");
       expect(dashboard.focus).toBe("active-agent");
+      dashboard.handleInput("\t"); // pane → input sub-focus
 
       // Type some text
       dashboard.handleInput("h");
@@ -3148,11 +3149,12 @@ describe("input field integration", () => {
     const flatList: FlatEntry[] = [makeFlatAgent(agent)];
     dashboard.onUpdate([agent], flatList, []);
 
-    // Tab to active-agent
+    // Tab to active-agent, then Tab to input sub-focus
     dashboard.handleInput("\t");
     dashboard.handleInput("\t");
     dashboard.handleInput("\t");
     expect(dashboard.focus).toBe("active-agent");
+    dashboard.handleInput("\t"); // pane → input sub-focus
 
     // Type message, Tab to [Send], then press Enter to submit
     dashboard.handleInput("h");
@@ -3160,7 +3162,7 @@ describe("input field integration", () => {
     dashboard.handleInput("l");
     dashboard.handleInput("l");
     dashboard.handleInput("o");
-    dashboard.handleInput("\t"); // Tab to [Send]
+    dashboard.handleInput("\t"); // input → send sub-focus
     dashboard.handleInput("\r"); // Enter on [Send] submits
 
     // sendMessage is async, so check that the input field was cleared
@@ -3169,26 +3171,28 @@ describe("input field integration", () => {
     resetSendSpawnRunner();
   });
 
-  test("Escape clears input and returns focus to agent-tree", () => {
+  test("Escape from input sub-focus clears input and returns to pane sub-focus", () => {
     const dashboard = makeDashboard();
     const agent = makeAgent("agent-a", "/repos/test");
     const flatList: FlatEntry[] = [makeFlatAgent(agent)];
     dashboard.onUpdate([agent], flatList, []);
 
-    // Tab to active-agent
+    // Tab to active-agent, then Tab to input sub-focus
     dashboard.handleInput("\t");
     dashboard.handleInput("\t");
     dashboard.handleInput("\t");
     expect(dashboard.focus).toBe("active-agent");
+    dashboard.handleInput("\t"); // pane → input sub-focus
 
     // Type some text
     dashboard.handleInput("h");
     dashboard.handleInput("i");
     expect(dashboard.inputField.getText()).toBe("hi");
 
-    // Press Escape
+    // Press Escape — returns to pane sub-focus, NOT agent-tree
     dashboard.handleInput("\x1b");
-    expect(dashboard.focus).toBe("agent-tree");
+    expect(dashboard.focus).toBe("active-agent");
+    expect(dashboard.subFocus).toBe("pane");
     expect(dashboard.inputField.getText()).toBe("");
   });
 
@@ -3198,36 +3202,38 @@ describe("input field integration", () => {
     const flatList: FlatEntry[] = [makeFlatAgent(agent)];
     dashboard.onUpdate([agent], flatList, []);
 
-    // Tab to active-agent
+    // Tab to active-agent, then Tab to input sub-focus
     dashboard.handleInput("\t");
     dashboard.handleInput("\t");
     dashboard.handleInput("\t");
     expect(dashboard.focus).toBe("active-agent");
+    dashboard.handleInput("\t"); // pane → input sub-focus
 
     // Type some text
     dashboard.handleInput("h");
     dashboard.handleInput("i");
     expect(dashboard.inputField.getText()).toBe("hi");
 
-    // Tab goes to [Send] first, then second Tab cycles panels
-    dashboard.handleInput("\t"); // text → send
+    // Tab goes to send, then Tab cycles out
+    dashboard.handleInput("\t"); // input → send
     dashboard.handleInput("\t"); // send → cycle out
     expect(dashboard.focus).toBe("right-pane");
     // Text is preserved (per-agent buffer)
     expect(dashboard.inputField.getText()).toBe("hi");
   });
 
-  test("dashboard keybindings are suppressed when active-agent focused", () => {
+  test("dashboard keybindings are suppressed when in input sub-focus", () => {
     const dashboard = makeDashboard();
     const agent = makeAgent("agent-a", "/repos/test");
     const flatList: FlatEntry[] = [makeFlatAgent(agent)];
     dashboard.onUpdate([agent], flatList, []);
 
-    // Tab to active-agent
+    // Tab to active-agent, then Tab to input sub-focus
     dashboard.handleInput("\t");
     dashboard.handleInput("\t");
     dashboard.handleInput("\t");
     expect(dashboard.focus).toBe("active-agent");
+    dashboard.handleInput("\t"); // pane → input sub-focus
 
     // Pressing 's' (which normally triggers send dialog) should type 's' into input field
     dashboard.handleInput("s");
@@ -3237,6 +3243,155 @@ describe("input field integration", () => {
     // Pressing 'j' (which normally navigates) should type 'j' into input field
     dashboard.handleInput("j");
     expect(dashboard.inputField.getText()).toBe("sj");
+  });
+
+  test("dashboard keybindings work in pane sub-focus (not captured by input)", () => {
+    const dashboard = makeDashboard();
+    const agent = makeAgent("agent-a", "/repos/test");
+    const flatList: FlatEntry[] = [makeFlatAgent(agent)];
+    dashboard.onUpdate([agent], flatList, []);
+
+    // Tab to active-agent — stays in pane sub-focus
+    dashboard.handleInput("\t");
+    dashboard.handleInput("\t");
+    dashboard.handleInput("\t");
+    expect(dashboard.focus).toBe("active-agent");
+    expect(dashboard.subFocus).toBe("pane");
+
+    // 'p' should cycle pane mode (not captured by input)
+    const modeBefore = dashboard.currentMode;
+    dashboard.handleInput("p");
+    expect(dashboard.currentMode).not.toBe(modeBefore);
+    expect(dashboard.inputField.getText()).toBe("");
+  });
+
+  test("Tab on active-agent pane sub-focus → input sub-focus", () => {
+    const dashboard = makeDashboard();
+    const agent = makeAgent("agent-a", "/repos/test");
+    const flatList: FlatEntry[] = [makeFlatAgent(agent)];
+    dashboard.onUpdate([agent], flatList, []);
+
+    dashboard.handleInput("\t"); // info
+    dashboard.handleInput("\t"); // coordinator
+    dashboard.handleInput("\t"); // active-agent (pane)
+    expect(dashboard.focus).toBe("active-agent");
+    expect(dashboard.subFocus).toBe("pane");
+
+    dashboard.handleInput("\t"); // pane → input
+    expect(dashboard.focus).toBe("active-agent");
+    expect(dashboard.subFocus).toBe("input");
+  });
+
+  test("Tab on active-agent input sub-focus → send sub-focus", () => {
+    const dashboard = makeDashboard();
+    const agent = makeAgent("agent-a", "/repos/test");
+    const flatList: FlatEntry[] = [makeFlatAgent(agent)];
+    dashboard.onUpdate([agent], flatList, []);
+
+    dashboard.handleInput("\t"); // info
+    dashboard.handleInput("\t"); // coordinator
+    dashboard.handleInput("\t"); // active-agent (pane)
+    dashboard.handleInput("\t"); // pane → input
+    dashboard.handleInput("\t"); // input → send
+    expect(dashboard.focus).toBe("active-agent");
+    expect(dashboard.subFocus).toBe("send");
+  });
+
+  test("Tab on active-agent send sub-focus → next panel", () => {
+    const dashboard = makeDashboard();
+    const agent = makeAgent("agent-a", "/repos/test");
+    const flatList: FlatEntry[] = [makeFlatAgent(agent)];
+    dashboard.onUpdate([agent], flatList, []);
+
+    dashboard.handleInput("\t"); // info
+    dashboard.handleInput("\t"); // coordinator
+    dashboard.handleInput("\t"); // active-agent (pane)
+    dashboard.handleInput("\t"); // pane → input
+    dashboard.handleInput("\t"); // input → send
+    dashboard.handleInput("\t"); // send → right-pane
+    expect(dashboard.focus).toBe("right-pane");
+    expect(dashboard.subFocus).toBe("pane");
+  });
+
+  test("Shift-Tab reversal through active-agent sub-focus", () => {
+    const dashboard = makeDashboard();
+    const agent = makeAgent("agent-a", "/repos/test");
+    const flatList: FlatEntry[] = [makeFlatAgent(agent)];
+    dashboard.onUpdate([agent], flatList, []);
+
+    // Get to send sub-focus
+    dashboard.handleInput("\t"); // info
+    dashboard.handleInput("\t"); // coordinator
+    dashboard.handleInput("\t"); // active-agent (pane)
+    dashboard.handleInput("\t"); // pane → input
+    dashboard.handleInput("\t"); // input → send
+    expect(dashboard.subFocus).toBe("send");
+
+    // Shift-Tab back through sub-focus
+    dashboard.handleInput("\x1b[Z"); // send → input
+    expect(dashboard.focus).toBe("active-agent");
+    expect(dashboard.subFocus).toBe("input");
+
+    dashboard.handleInput("\x1b[Z"); // input → pane
+    expect(dashboard.focus).toBe("active-agent");
+    expect(dashboard.subFocus).toBe("pane");
+
+    dashboard.handleInput("\x1b[Z"); // pane → prev panel (coordinator)
+    expect(dashboard.focus).toBe("coordinator");
+  });
+
+  test("[/] keys work in send sub-focus (resize, not captured)", () => {
+    const dashboard = makeDashboard();
+    const agent = makeAgent("agent-a", "/repos/test");
+    const flatList: FlatEntry[] = [makeFlatAgent(agent)];
+    dashboard.onUpdate([agent], flatList, []);
+
+    // Get to send sub-focus
+    dashboard.handleInput("\t"); // info
+    dashboard.handleInput("\t"); // coordinator
+    dashboard.handleInput("\t"); // active-agent (pane)
+    dashboard.handleInput("\t"); // pane → input
+    dashboard.handleInput("\t"); // input → send
+
+    // Store the split pane left width before resize
+    const widthBefore = dashboard.splitPane.getLeftWidth();
+    dashboard.handleInput("["); // resize should work
+    expect(dashboard.splitPane.getLeftWidth()).not.toBe(widthBefore);
+  });
+
+  test("[/] keys captured as text in input sub-focus", () => {
+    const dashboard = makeDashboard();
+    const agent = makeAgent("agent-a", "/repos/test");
+    const flatList: FlatEntry[] = [makeFlatAgent(agent)];
+    dashboard.onUpdate([agent], flatList, []);
+
+    // Get to input sub-focus
+    dashboard.handleInput("\t"); // info
+    dashboard.handleInput("\t"); // coordinator
+    dashboard.handleInput("\t"); // active-agent (pane)
+    dashboard.handleInput("\t"); // pane → input
+
+    dashboard.handleInput("[");
+    // Should be captured as text, not resize
+    expect(dashboard.inputField.getText()).toBe("[");
+  });
+
+  test("Escape from send sub-focus returns to pane sub-focus", () => {
+    const dashboard = makeDashboard();
+    const agent = makeAgent("agent-a", "/repos/test");
+    const flatList: FlatEntry[] = [makeFlatAgent(agent)];
+    dashboard.onUpdate([agent], flatList, []);
+
+    // Get to send sub-focus
+    dashboard.handleInput("\t"); // info
+    dashboard.handleInput("\t"); // coordinator
+    dashboard.handleInput("\t"); // active-agent (pane)
+    dashboard.handleInput("\t"); // pane → input
+    dashboard.handleInput("\t"); // input → send
+
+    dashboard.handleInput("\x1b"); // Escape
+    expect(dashboard.focus).toBe("active-agent");
+    expect(dashboard.subFocus).toBe("pane");
   });
 });
 
@@ -3366,11 +3521,12 @@ describe("coordinator input field (Phase 49)", () => {
     expect(dashboard.coordinatorInputField).toBeInstanceOf(Object);
   });
 
-  test("when coordinator panel is focused, input routes to coordinator input field", () => {
+  test("when coordinator panel is focused, input routes to coordinator input field in input sub-focus", () => {
     const dashboard = setupCoordinatorDashboard();
     // Tab to coordinator
     dashboard.handleInput("\t"); // coordinator (coordinatorMode: agent-tree -> coordinator)
     expect(dashboard.focus).toBe("coordinator");
+    dashboard.handleInput("\t"); // pane → input sub-focus
 
     // Type some text — should go to coordinator input field
     dashboard.handleInput("h");
@@ -3380,48 +3536,53 @@ describe("coordinator input field (Phase 49)", () => {
     expect(dashboard.inputField.getText()).toBe("");
   });
 
-  test("Escape clears coordinator input and returns focus to agent-tree", () => {
+  test("Escape from coordinator input sub-focus clears input and returns to pane sub-focus", () => {
     const dashboard = setupCoordinatorDashboard();
     dashboard.handleInput("\t"); // coordinator
     expect(dashboard.focus).toBe("coordinator");
+    dashboard.handleInput("\t"); // pane → input sub-focus
 
     dashboard.handleInput("h");
     dashboard.handleInput("i");
     expect(dashboard.coordinatorInputField.getText()).toBe("hi");
 
-    dashboard.handleInput("\x1b"); // Escape
-    expect(dashboard.focus).toBe("agent-tree");
+    dashboard.handleInput("\x1b"); // Escape — returns to pane sub-focus, NOT agent-tree
+    expect(dashboard.focus).toBe("coordinator");
+    expect(dashboard.subFocus).toBe("pane");
     expect(dashboard.coordinatorInputField.getText()).toBe("");
   });
 
-  test("Tab from coordinator input field [Send] cycles focus normally", () => {
+  test("Tab from coordinator send sub-focus cycles focus normally", () => {
     const dashboard = setupCoordinatorDashboard();
     dashboard.handleInput("\t"); // coordinator
     expect(dashboard.focus).toBe("coordinator");
 
-    // Tab to [Send] button within input field
-    dashboard.handleInput("\t"); // internal tab to [Send]
-    expect(dashboard.coordinatorInputField.getFocus()).toBe("send");
+    // Tab through sub-focus states: pane → input → send
+    dashboard.handleInput("\t"); // pane → input
+    dashboard.handleInput("\t"); // input → send
+    expect(dashboard.subFocus).toBe("send");
 
-    // Tab again — not consumed by input field, should cycle to agent-tree
+    // Tab again — should cycle to agent-tree
     dashboard.handleInput("\t");
     expect(dashboard.focus).toBe("agent-tree");
   });
 
-  test("Shift-Tab from coordinator input text cycles focus backwards", () => {
+  test("Shift-Tab from coordinator pane sub-focus cycles focus backwards", () => {
     const dashboard = setupCoordinatorDashboard();
     dashboard.handleInput("\t"); // coordinator
     expect(dashboard.focus).toBe("coordinator");
+    expect(dashboard.subFocus).toBe("pane");
 
-    // Shift-Tab from text — not consumed by input field, cycles backward
+    // Shift-Tab from pane sub-focus — cycles backward to agent-tree
     dashboard.handleInput("\x1b[Z");
     expect(dashboard.focus).toBe("agent-tree");
   });
 
-  test("coordinator input field renders in sidebar when focused", () => {
+  test("coordinator input field renders in sidebar when in input sub-focus", () => {
     const dashboard = setupCoordinatorDashboard();
     dashboard.handleInput("\t"); // coordinator
     expect(dashboard.focus).toBe("coordinator");
+    dashboard.handleInput("\t"); // pane → input sub-focus
 
     const origRows = process.stdout.rows;
     Object.defineProperty(process.stdout, "rows", { value: 30, writable: true, configurable: true });
@@ -3458,10 +3619,11 @@ describe("coordinator input field (Phase 49)", () => {
     }
   });
 
-  test("other dashboard keybindings are suppressed when coordinator is focused", () => {
+  test("dashboard keybindings are suppressed in coordinator input sub-focus", () => {
     const dashboard = setupCoordinatorDashboard();
     dashboard.handleInput("\t"); // coordinator
     expect(dashboard.focus).toBe("coordinator");
+    dashboard.handleInput("\t"); // pane → input sub-focus
 
     // 'p' should be consumed as text input, not cycle pane modes
     const modeBefore = dashboard.currentMode;
@@ -3474,13 +3636,14 @@ describe("coordinator input field (Phase 49)", () => {
     const dashboard = setupCoordinatorDashboard();
     dashboard.handleInput("\t"); // coordinator
     expect(dashboard.focus).toBe("coordinator");
+    dashboard.handleInput("\t"); // pane → input sub-focus
 
     // Type message
     dashboard.handleInput("h");
     dashboard.handleInput("i");
 
-    // Tab to [Send], press Enter
-    dashboard.handleInput("\t");
+    // Tab to send sub-focus, press Enter
+    dashboard.handleInput("\t"); // input → send
     dashboard.handleInput("\r");
 
     // Input should be cleared after submit
@@ -3490,8 +3653,9 @@ describe("coordinator input field (Phase 49)", () => {
   test("syncSelectedAgent switches coordinator input field buffer", () => {
     const dashboard = setupCoordinatorDashboard();
 
-    // Tab to coordinator and type
-    dashboard.handleInput("\t");
+    // Tab to coordinator, then Tab to input sub-focus and type
+    dashboard.handleInput("\t"); // coordinator
+    dashboard.handleInput("\t"); // pane → input sub-focus
     dashboard.handleInput("a");
     dashboard.handleInput("b");
     expect(dashboard.coordinatorInputField.getText()).toBe("ab");

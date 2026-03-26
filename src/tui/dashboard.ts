@@ -61,7 +61,7 @@ import * as agentActions from "./agent-actions";
 import { RESET, BOLD, DIM, RED, GREEN, YELLOW, DIM_GRAY, REVERSE } from "./colors";
 import { MIN_LEFT_WIDTH, MAX_LEFT_WIDTH } from "./split-pane";
 import { FocusManager } from "./focus";
-import type { FocusTarget } from "./focus";
+import type { FocusTarget, SubFocus } from "./focus";
 import { SystemDashboardComponent } from "./system-dashboard";
 import { loadLayout, saveLayoutDebounced, cancelPendingSave } from "./layout";
 import type { LayoutState } from "./layout";
@@ -501,6 +501,11 @@ export class DashboardComponent implements Component {
   /** Read-only access to current focus target (for testing) */
   get focus(): FocusTarget {
     return this.focusManager.current();
+  }
+
+  /** Read-only access to current sub-focus state (for testing) */
+  get subFocus(): SubFocus {
+    return this.focusManager.subFocus;
   }
 
   /** Read-only access to whether questions list has focus (for testing) */
@@ -1036,48 +1041,118 @@ export class DashboardComponent implements Component {
     // Dialog input takes priority
     if (this._dialog && handleDialogInput(this, data)) return;
 
-    // When active-agent panel is focused, route input to the input field FIRST.
-    // The input field consumes most input. Tab/Shift-Tab pass through when the
-    // input field's internal focus allows panel cycling (Tab from [Send], Shift-Tab from text).
-    // All other dashboard keybindings are suppressed (SPEC §13.5).
+    // When active-agent panel is focused, use three-level sub-focus: pane → input → send.
+    // In 'pane' sub-focus, dashboard shortcuts work normally. In 'input', the input field
+    // captures all input. In 'send', Enter submits and other keys fall through. (SPEC §13.4)
     if (this.focusManager.current() === "active-agent" && this.agentTree.selectedAgent) {
-      if (this.inputField.handleInput(data)) {
-        this.tui?.requestRender();
-        return;
-      }
-      // Input not consumed — check for Tab/Shift-Tab to cycle panels
+      const sf = this.focusManager.subFocus;
+
+      // Tab navigation through sub-focus states
       if (data === "\t" || matchesKey(data, Key.tab)) {
-        this.focusManager.cycle(1);
+        if (sf === "pane") { this.focusManager.setSubFocus("input"); }
+        else if (sf === "input") { this.focusManager.setSubFocus("send"); }
+        else { this.focusManager.cycle(1); } // send → next panel
         this.tui?.requestRender();
         return;
       }
       if (data === "\x1b[Z" || matchesKey(data, Key.shift("tab"))) {
-        this.focusManager.cycle(-1);
+        if (sf === "send") { this.focusManager.setSubFocus("input"); }
+        else if (sf === "input") { this.focusManager.setSubFocus("pane"); }
+        else { this.focusManager.cycle(-1); } // pane → prev panel
         this.tui?.requestRender();
         return;
       }
-      return; // Suppress all other dashboard keybindings when active-agent is focused
+
+      // Input sub-focus: capture everything
+      if (sf === "input") {
+        if (matchesKey(data, Key.escape) || data === "\x1b") {
+          this.inputField.clear();
+          this.focusManager.setSubFocus("pane");
+          this.tui?.requestRender();
+          return;
+        }
+        this.inputField.handleInput(data);
+        this.tui?.requestRender();
+        return;
+      }
+
+      // Send sub-focus: Enter submits
+      if (sf === "send") {
+        if (matchesKey(data, Key.enter) || data === "\r" || data === "\n") {
+          const text = this.inputField.getText();
+          if (text.trim()) {
+            this.inputField.clear();
+            this.focusManager.setSubFocus("pane");
+            this.inputField.onSubmit?.(text);
+          }
+          this.tui?.requestRender();
+          return;
+        }
+        if (matchesKey(data, Key.escape) || data === "\x1b") {
+          this.focusManager.setSubFocus("pane");
+          this.tui?.requestRender();
+          return;
+        }
+        // Fall through to normal dashboard handling (resize, scroll, etc.)
+      }
+
+      // Pane sub-focus and Send sub-focus: fall through to normal dashboard key handling
     }
 
-    // When coordinator panel is focused, route input to the coordinator input field FIRST.
-    // Same pattern as active-agent focus routing above.
+    // When coordinator panel is focused, use same three-level sub-focus as active-agent.
     if (this.focusManager.current() === "coordinator" && this.agentTree.isSystemCoordinatorSelected) {
-      if (this.coordinatorInputField.handleInput(data)) {
-        this.tui?.requestRender();
-        return;
-      }
-      // Input not consumed — check for Tab/Shift-Tab to cycle panels
+      const sf = this.focusManager.subFocus;
+
+      // Tab navigation through sub-focus states
       if (data === "\t" || matchesKey(data, Key.tab)) {
-        this.focusManager.cycle(1);
+        if (sf === "pane") { this.focusManager.setSubFocus("input"); }
+        else if (sf === "input") { this.focusManager.setSubFocus("send"); }
+        else { this.focusManager.cycle(1); } // send → next panel
         this.tui?.requestRender();
         return;
       }
       if (data === "\x1b[Z" || matchesKey(data, Key.shift("tab"))) {
-        this.focusManager.cycle(-1);
+        if (sf === "send") { this.focusManager.setSubFocus("input"); }
+        else if (sf === "input") { this.focusManager.setSubFocus("pane"); }
+        else { this.focusManager.cycle(-1); } // pane → prev panel
         this.tui?.requestRender();
         return;
       }
-      return; // Suppress all other dashboard keybindings when coordinator is focused
+
+      // Input sub-focus: capture everything
+      if (sf === "input") {
+        if (matchesKey(data, Key.escape) || data === "\x1b") {
+          this.coordinatorInputField.clear();
+          this.focusManager.setSubFocus("pane");
+          this.tui?.requestRender();
+          return;
+        }
+        this.coordinatorInputField.handleInput(data);
+        this.tui?.requestRender();
+        return;
+      }
+
+      // Send sub-focus: Enter submits
+      if (sf === "send") {
+        if (matchesKey(data, Key.enter) || data === "\r" || data === "\n") {
+          const text = this.coordinatorInputField.getText();
+          if (text.trim()) {
+            this.coordinatorInputField.clear();
+            this.focusManager.setSubFocus("pane");
+            this.coordinatorInputField.onSubmit?.(text);
+          }
+          this.tui?.requestRender();
+          return;
+        }
+        if (matchesKey(data, Key.escape) || data === "\x1b") {
+          this.focusManager.setSubFocus("pane");
+          this.tui?.requestRender();
+          return;
+        }
+        // Fall through to normal dashboard handling
+      }
+
+      // Pane sub-focus and Send sub-focus: fall through to normal dashboard key handling
     }
 
     // Tab / Shift-Tab: cycle focus between panels
@@ -1392,8 +1467,13 @@ export class DashboardComponent implements Component {
       // Compute leftW early — needed for input field height calculation
       const leftW = Math.min(this.splitPane.getLeftWidth(), mainWidth - 2);
 
-      // Set active state on input field based on focus
-      this.inputField.active = this.focusManager.current() === "active-agent";
+      // Set active state on input field based on focus and sub-focus
+      const isAgentFocused = this.focusManager.current() === "active-agent";
+      const agentSf = this.focusManager.subFocus;
+      this.inputField.active = isAgentFocused && agentSf !== "pane";
+      if (isAgentFocused) {
+        this.inputField.setFocusState(agentSf === "send" ? "send" : "text");
+      }
 
       // Pre-compute status lines from tmux output before rendering
       this.tmuxPane.trimInputSeparator = showInputField;
@@ -1447,7 +1527,12 @@ export class DashboardComponent implements Component {
 
     // Render sidebar and merge with main area
     this.sidebar.focusTarget = this.focusManager.current();
-    this.coordinatorInputField.active = this.focusManager.current() === "coordinator";
+    const isCoordFocused = this.focusManager.current() === "coordinator";
+    const coordSf = this.focusManager.subFocus;
+    this.coordinatorInputField.active = isCoordFocused && coordSf !== "pane";
+    if (isCoordFocused) {
+      this.coordinatorInputField.setFocusState(coordSf === "send" ? "send" : "text");
+    }
     const sidebarLines = this.sidebar.render(sidebarW);
     lines.push(...mergeSidebarAndMain(sidebarLines, mainLines, availableHeight + 1, mainWidth, sidebarW));
 

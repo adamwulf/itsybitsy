@@ -80,14 +80,17 @@ export async function saveLayout(state: LayoutState): Promise<void> {
 }
 
 let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+let pendingState: LayoutState | null = null;
 
 /**
  * Debounced save — waits 500ms after the last call before writing.
  */
 export function saveLayoutDebounced(state: LayoutState): void {
+  pendingState = state;
   if (debounceTimer) clearTimeout(debounceTimer);
   debounceTimer = setTimeout(() => {
     debounceTimer = null;
+    pendingState = null;
     saveLayout(state).catch(() => {
       // Silently ignore write errors
     });
@@ -99,6 +102,24 @@ export function cancelPendingSave(): void {
   if (debounceTimer) {
     clearTimeout(debounceTimer);
     debounceTimer = null;
+  }
+  pendingState = null;
+}
+
+/**
+ * Flush any pending debounced save immediately (synchronous cancel + async write).
+ * Returns a promise that resolves when the write completes.
+ * Used on exit to ensure the last layout change is persisted.
+ */
+export async function flushPendingSave(): Promise<void> {
+  if (debounceTimer) {
+    clearTimeout(debounceTimer);
+    debounceTimer = null;
+  }
+  if (pendingState) {
+    const state = pendingState;
+    pendingState = null;
+    await saveLayout(state);
   }
 }
 

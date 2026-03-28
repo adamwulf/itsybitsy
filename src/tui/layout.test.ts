@@ -3,7 +3,7 @@ import { join } from "path";
 import { mkdtemp, rm } from "fs/promises";
 import { tmpdir } from "os";
 import {
-  loadLayout, saveLayout, saveLayoutDebounced, cancelPendingSave,
+  loadLayout, saveLayout, saveLayoutDebounced, cancelPendingSave, flushPendingSave,
   setLayoutPath, resetLayoutPath,
 } from "./layout";
 import type { LayoutState } from "./layout";
@@ -113,6 +113,34 @@ describe("layout persistence", () => {
     saveLayoutDebounced(sampleLayout);
     cancelPendingSave();
     await new Promise((r) => setTimeout(r, 600));
+    expect(await Bun.file(path).exists()).toBe(false);
+  });
+
+  test("flushPendingSave writes immediately without waiting for debounce", async () => {
+    const path = join(tmpDir, "layout.json");
+    setLayoutPath(path);
+    saveLayoutDebounced(sampleLayout);
+    // Flush immediately — should write without waiting 500ms
+    await flushPendingSave();
+    const loaded = await loadLayout();
+    expect(loaded).toEqual(sampleLayout);
+  });
+
+  test("flushPendingSave writes the latest state when multiple debounced calls", async () => {
+    const path = join(tmpDir, "layout.json");
+    setLayoutPath(path);
+    saveLayoutDebounced({ ...sampleLayout, sidebarWidth: 50 });
+    saveLayoutDebounced({ ...sampleLayout, sidebarWidth: 75 });
+    await flushPendingSave();
+    const loaded = await loadLayout();
+    expect(loaded!.sidebarWidth).toBe(75);
+  });
+
+  test("flushPendingSave is a no-op when nothing is pending", async () => {
+    const path = join(tmpDir, "layout.json");
+    setLayoutPath(path);
+    // No saveLayoutDebounced call — flush should do nothing
+    await flushPendingSave();
     expect(await Bun.file(path).exists()).toBe(false);
   });
 });

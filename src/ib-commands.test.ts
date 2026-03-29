@@ -2250,6 +2250,15 @@ describe("newAgent (native)", () => {
     expect(settings.spinnerTipsEnabled).toBe(false);
   });
 
+  test("includes Agent in permissions allow list so intercept hook can fire", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    await callNewAgent("task", { name: "test-agent-perm" });
+
+    const settingsPath = join(agentsDir, "test-agent-perm", "repo", ".claude", "settings.local.json");
+    const settings = await Bun.file(settingsPath).json();
+    expect(settings.permissions.allow).toContain("Agent");
+  });
+
   test("writes .claude dir in worktree even without base settings", async () => {
     setNewAgentSpawnRunner(mockSpawnRunner());
     await callNewAgent("task", { name: "test-no-base" });

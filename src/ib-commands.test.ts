@@ -2241,6 +2241,7 @@ describe("newAgent (native)", () => {
     const settings = await Bun.file(settingsPath).json();
     expect(settings.permissions.allow).toContain("Bash(ib:*)");
     expect(settings.permissions.allow).toContain("Read");
+    expect(settings.permissions.allow).toContain("Agent");
     expect(settings.permissions.allow).toContain("CustomTool"); // merged from base
     expect(settings.permissions.deny).toContain("EnterPlanMode");
     expect(settings.hooks).toBeDefined();

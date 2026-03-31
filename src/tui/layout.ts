@@ -15,6 +15,8 @@ export interface LayoutState {
     info: number;
     coordinator: number;
   };
+  /** Height offset for the repo coordinator split in REPO right pane mode */
+  repoCoordinatorHeightOffset?: number;
 }
 
 const LAYOUT_PATH = join(homedir(), ".itsybitsy", "layout.json");
@@ -56,6 +58,8 @@ export async function loadLayout(): Promise<LayoutState | null> {
     ) {
       return null;
     }
+    // Optional: repoCoordinatorHeightOffset (added later, may not be in saved file)
+    const repoCoordOffset = isFiniteNum(data.repoCoordinatorHeightOffset) ? data.repoCoordinatorHeightOffset : 0;
     return {
       sidebarWidth: data.sidebarWidth,
       splitPaneLeftWidth: data.splitPaneLeftWidth,
@@ -64,6 +68,7 @@ export async function loadLayout(): Promise<LayoutState | null> {
         info: data.heightOffsets.info,
         coordinator: data.heightOffsets.coordinator,
       },
+      repoCoordinatorHeightOffset: repoCoordOffset,
     };
   } catch {
     return null;

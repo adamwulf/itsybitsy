@@ -13,7 +13,8 @@ import { diffAgent, statusAgent } from "../ib-commands";
 import { wrapLines } from "./wrap";
 import { getStateColors } from "./color-scheme";
 import { displayState, computeStateColWidth, AGE_COL_WIDTH } from "./agent-tree";
-import { RESET, BOLD, DIM, RED, GREEN, CYAN, REVERSE, DIM_GRAY } from "./colors";
+import { buildFocusSeparator } from "./focus";
+import { RESET, BOLD, DIM, RED, GREEN, CYAN, REVERSE, DIM_GRAY, YELLOW } from "./colors";
 
 // Right pane modes
 export const PANE_MODES = [
@@ -85,7 +86,7 @@ export function colorizeLog(lines: string[]): string[] {
 export function formatAgentRow(
   agent: Agent, connector: string, stateColWidth: number,
 ): string {
-  const icon = agent.meta.worker ? "⚙" : "◆";
+  const icon = agent.meta.coordinator ? "◇" : (agent.meta.worker ? "⚙" : "◆");
   const state = displayState(agent.state);
   const stateColor = getStateColors()[state] ?? getStateColors().unknown;
   const promptText = (agent.meta.summary ?? agent.meta.prompt).replace(/\n/g, " ");
@@ -116,6 +117,14 @@ export class RightPaneComponent implements Component {
   statusLoading = false;
   questionsSelectedIndex = 0;
   questionsFocused = false;
+  /** Per-repo coordinator tmux output (raw) for REPO mode */
+  repoCoordinatorOutput: string | null = null;
+  /** Whether the repo coordinator poller has completed at least one poll */
+  repoCoordinatorHasPolled = false;
+  /** Height offset for the coordinator split in REPO mode (positive = more coordinator) */
+  repoCoordinatorHeightOffset = 0;
+  /** The coordinator agent for the selected repo (if any) */
+  repoCoordinatorAgent: Agent | null = null;
   private content: string[] = [];
 
   /** Return questions filtered by the currently selected agent. If no agent, return all. */
@@ -325,7 +334,88 @@ export class RightPaneComponent implements Component {
     return denials.filter((d) => d.epoch >= cutoff);
   }
 
+  /**
+   * Render the coordinator section for REPO mode split pane.
+   * Returns lines for the coordinator pane portion.
+   */
+  renderRepoCoordinatorSection(width: number, height: number, coordinatorFocused: boolean): string[] {
+    const lines: string[] = [];
+    // Separator
+    lines.push(buildFocusSeparator("Coordinator", width, coordinatorFocused));
+
+    const contentHeight = height - 1; // subtract separator line
+    if (contentHeight <= 0) return lines;
+
+    if (!this.repoCoordinatorAgent) {
+      // No coordinator for this repo
+      const padLines: string[] = [];
+      while (padLines.length < contentHeight - 1) padLines.push(" ");
+      padLines.push(truncateToWidth(` ${DIM}No coordinator for this repo${RESET}`, width, ""));
+      lines.push(...padLines);
+      return lines;
+    }
+
+    if (!this.repoCoordinatorHasPolled) {
+      const padLines: string[] = [];
+      while (padLines.length < contentHeight - 1) padLines.push(" ");
+      padLines.push(truncateToWidth(` ${DIM}Starting coordinator...${RESET}`, width, ""));
+      lines.push(...padLines);
+      return lines;
+    }
+
+    if (this.repoCoordinatorHasPolled && !this.repoCoordinatorOutput) {
+      // Coordinator stopped
+      const contentLines = [
+        truncateToWidth(` ${YELLOW}Coordinator stopped${RESET}`, width, ""),
+        truncateToWidth(` ${DIM}Press R to resume${RESET}`, width, ""),
+      ];
+      const padLines: string[] = [];
+      const padCount = Math.max(0, contentHeight - contentLines.length);
+      for (let i = 0; i < padCount; i++) padLines.push(" ");
+      padLines.push(...contentLines);
+      lines.push(...padLines);
+      return lines;
+    }
+
+    // Render coordinator tmux output (bottom-pinned, following newest output)
+    const wrapped = wrapLines(this.repoCoordinatorOutput!, width);
+    // Trim trailing blank lines
+    while (wrapped.length > 0 && wrapped[wrapped.length - 1]!.trim() === "") {
+      wrapped.pop();
+    }
+    const start = Math.max(0, wrapped.length - contentHeight);
+    const visible = wrapped.slice(start, start + contentHeight);
+    const contentLines = visible.map((line) => truncateToWidth(line, width, ""));
+
+    // Bottom-pin: pad at the top so content sticks to the bottom
+    const padCount = Math.max(0, contentHeight - contentLines.length);
+    for (let i = 0; i < padCount; i++) lines.push(" ");
+    lines.push(...contentLines);
+    return lines;
+  }
+
+  /**
+   * Compute the height split for REPO mode with coordinator.
+   * Returns { repoHeight, coordinatorHeight } where coordinatorHeight includes the separator line.
+   */
+  computeRepoCoordinatorSplit(): { repoHeight: number; coordinatorHeight: number } {
+    const available = Math.max(1, this.displayHeight);
+    if (!this.repoCoordinatorAgent) {
+      return { repoHeight: available, coordinatorHeight: 0 };
+    }
+    // Default: 60% repo, 40% coordinator
+    const baseCoordinatorHeight = Math.max(5, Math.floor(available * 0.4));
+    const coordinatorHeight = Math.max(3, Math.min(available - 3, baseCoordinatorHeight + this.repoCoordinatorHeightOffset));
+    const repoHeight = available - coordinatorHeight;
+    return { repoHeight, coordinatorHeight };
+  }
+
   render(width: number): string[] {
+    // In REPO mode with a coordinator, render a split view
+    if (this.mode === "REPO" && this.repoCoordinatorAgent) {
+      return this.renderRepoWithCoordinator(width);
+    }
+
     const lines: string[] = [];
     const innerWidth = width - 1;
     const available = Math.max(1, this.displayHeight);
@@ -359,6 +449,32 @@ export class RightPaneComponent implements Component {
     }
     while (lines.length < this.displayHeight) { lines.push(" "); }
     return lines;
+  }
+
+  /** Render REPO mode with coordinator split: repo info on top, coordinator tmux on bottom */
+  private renderRepoWithCoordinator(width: number): string[] {
+    const { repoHeight, coordinatorHeight } = this.computeRepoCoordinatorSplit();
+    const innerWidth = width - 1;
+    const lines: string[] = [];
+
+    // Top section: repo info (using this.content from updateContent)
+    const maxOffset = Math.max(0, this.content.length - repoHeight);
+    if (this.scrollOffset > maxOffset) { this.scrollOffset = maxOffset; }
+    const start = this.scrollOffset;
+    const visible = this.content.slice(start, start + repoHeight);
+    for (const line of visible) {
+      lines.push(closeOsc8(" " + truncateToWidth(line, innerWidth, "")));
+    }
+    while (lines.length < repoHeight) { lines.push(" "); }
+
+    // Bottom section: coordinator tmux output
+    if (coordinatorHeight > 0) {
+      const coordLines = this.renderRepoCoordinatorSection(width, coordinatorHeight, false);
+      lines.push(...coordLines);
+    }
+
+    while (lines.length < this.displayHeight) { lines.push(" "); }
+    return lines.slice(0, this.displayHeight);
   }
 }
 

@@ -32,10 +32,17 @@ export function computeStateColWidth(agents: FlatEntry[]): number {
   return maxLen;
 }
 
+/** Get the icon for an agent based on its role */
+function agentIcon(agent: Agent): string {
+  if (agent.meta.coordinator) return "◇";
+  if (agent.meta.worker) return "⚙";
+  return "◆";
+}
+
 /** Compute the visible width of the name prefix (connector + icon + repo/id) for an agent row */
 function agentNamePrefixWidth(agent: Agent, connector: string): number {
   const orphanedPrefix = agent.orphaned ? "⚠ " : "";
-  const icon = agent.meta.worker ? "⚙" : "◆";
+  const icon = agentIcon(agent);
   return visibleWidth(`${connector}${orphanedPrefix}${icon} ${agent.id}`);
 }
 
@@ -57,7 +64,7 @@ export function formatAgentRow(
 ): string {
   const compact = width <= COMPACT_WIDTH_THRESHOLD;
   const orphanedPrefix = agent.orphaned ? "⚠ " : "";
-  const icon = agent.meta.worker ? "⚙" : "◆";
+  const icon = agentIcon(agent);
   const state = displayState(agent.state);
   const stateColor = getStateColors()[state] ?? getStateColors().unknown;
 

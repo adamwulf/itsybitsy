@@ -30,6 +30,7 @@ export interface AgentMeta {
   watchdog_pid?: number;
   state?: MetaState;
   state_updated_at?: number;
+  coordinator?: boolean;
 }
 
 export interface Agent {
@@ -208,6 +209,7 @@ export async function readAgentMeta(agentDir: string): Promise<{ meta: AgentMeta
     if (typeof data.model !== "string") data.model = "unknown";
     if (typeof data.claude_pid !== "string") data.claude_pid = "";
     if (data.summary !== undefined && typeof data.summary !== "string") delete data.summary;
+    if (data.coordinator !== undefined && typeof data.coordinator !== "boolean") delete data.coordinator;
     return { meta: data as AgentMeta };
   } catch (err) {
     return { meta: null, error: `Failed to read ${join(agentDir, "meta.json")}: ${err}` };
@@ -449,6 +451,13 @@ export function flattenAgentTree(
     for (const repoName of sortedNames) {
       const agents = repoGroups.get(repoName);
       if (agents && agents.length > 0) {
+        // Sort coordinators first under their repo header
+        agents.sort((a, b) => {
+          const aCoord = a.meta.coordinator ? 1 : 0;
+          const bCoord = b.meta.coordinator ? 1 : 0;
+          if (aCoord !== bCoord) return bCoord - aCoord; // coordinators first
+          return 0; // preserve existing order (byCreatedEpoch) for non-coordinators
+        });
         // Repo with agents — emit repo header then walk agents
         result.push({ kind: "repo-header", repoName, repoPath: repoPathByName.get(repoName) ?? "", hasAgents: true });
         for (let i = 0; i < agents.length; i++) {

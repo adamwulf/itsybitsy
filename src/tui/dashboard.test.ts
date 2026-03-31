@@ -2279,6 +2279,30 @@ describe("formatAgentRow compact mode", () => {
     const stripped = stripAnsi(row);
     expect(stripped).toContain("sonnet");
   });
+
+  test("coordinator agent uses ◇ icon", () => {
+    const agent = makeTestAgent({ meta: { ...makeTestAgent().meta, coordinator: true } });
+    const row = formatAgentRow(agent, "", false, 80, 20);
+    const stripped = stripAnsi(row);
+    expect(stripped).toContain("◇");
+    expect(stripped).not.toContain("◆");
+  });
+
+  test("regular agent uses ◆ icon", () => {
+    const agent = makeTestAgent();
+    const row = formatAgentRow(agent, "", false, 80, 20);
+    const stripped = stripAnsi(row);
+    expect(stripped).toContain("◆");
+    expect(stripped).not.toContain("◇");
+  });
+
+  test("worker agent uses ⚙ icon (not overridden by coordinator)", () => {
+    const agent = makeTestAgent({ meta: { ...makeTestAgent().meta, worker: true } });
+    const row = formatAgentRow(agent, "", false, 80, 20);
+    const stripped = stripAnsi(row);
+    expect(stripped).toContain("⚙");
+    expect(stripped).not.toContain("◇");
+  });
 });
 
 describe("AgentTreeComponent scroll indicators", () => {

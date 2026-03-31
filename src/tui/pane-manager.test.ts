@@ -273,6 +273,121 @@ describe("colorizeLog", () => {
   });
 });
 
+describe("REPO mode with coordinator", () => {
+  test("computeRepoCoordinatorSplit returns full height for repo when no coordinator", () => {
+    const rp = new RightPaneComponent();
+    rp.displayHeight = 30;
+    rp.repoCoordinatorAgent = null;
+    const { repoHeight, coordinatorHeight } = rp.computeRepoCoordinatorSplit();
+    expect(repoHeight).toBe(30);
+    expect(coordinatorHeight).toBe(0);
+  });
+
+  test("computeRepoCoordinatorSplit splits height when coordinator exists", () => {
+    const rp = new RightPaneComponent();
+    rp.displayHeight = 30;
+    rp.repoCoordinatorAgent = makeAgent({ id: "coord-1", meta: { coordinator: true } as any });
+    const { repoHeight, coordinatorHeight } = rp.computeRepoCoordinatorSplit();
+    expect(repoHeight + coordinatorHeight).toBe(30);
+    expect(coordinatorHeight).toBeGreaterThanOrEqual(5);
+    expect(repoHeight).toBeGreaterThanOrEqual(3);
+  });
+
+  test("computeRepoCoordinatorSplit respects height offset", () => {
+    const rp = new RightPaneComponent();
+    rp.displayHeight = 30;
+    rp.repoCoordinatorAgent = makeAgent({ id: "coord-1", meta: { coordinator: true } as any });
+    rp.repoCoordinatorHeightOffset = 3;
+    const { repoHeight: rh1, coordinatorHeight: ch1 } = rp.computeRepoCoordinatorSplit();
+
+    rp.repoCoordinatorHeightOffset = 0;
+    const { repoHeight: rh2, coordinatorHeight: ch2 } = rp.computeRepoCoordinatorSplit();
+
+    // With positive offset, coordinator should be larger
+    expect(ch1).toBeGreaterThan(ch2);
+    expect(rh1).toBeLessThan(rh2);
+  });
+
+  test("renderRepoCoordinatorSection shows 'No coordinator' when no coordinator agent", () => {
+    const rp = new RightPaneComponent();
+    rp.repoCoordinatorAgent = null;
+    const lines = rp.renderRepoCoordinatorSection(40, 10, false);
+    const text = lines.map(stripAnsi).join("\n");
+    expect(text).toContain("No coordinator for this repo");
+  });
+
+  test("renderRepoCoordinatorSection shows stopped message when polled with no output", () => {
+    const rp = new RightPaneComponent();
+    rp.repoCoordinatorAgent = makeAgent({ id: "coord-1", meta: { coordinator: true } as any });
+    rp.repoCoordinatorHasPolled = true;
+    rp.repoCoordinatorOutput = null;
+    const lines = rp.renderRepoCoordinatorSection(40, 10, false);
+    const text = lines.map(stripAnsi).join("\n");
+    expect(text).toContain("Coordinator stopped");
+    expect(text).toContain("Press R to resume");
+  });
+
+  test("renderRepoCoordinatorSection shows loading when not yet polled", () => {
+    const rp = new RightPaneComponent();
+    rp.repoCoordinatorAgent = makeAgent({ id: "coord-1", meta: { coordinator: true } as any });
+    rp.repoCoordinatorHasPolled = false;
+    const lines = rp.renderRepoCoordinatorSection(40, 10, false);
+    const text = lines.map(stripAnsi).join("\n");
+    expect(text).toContain("Starting coordinator");
+  });
+
+  test("renderRepoCoordinatorSection shows tmux output when available", () => {
+    const rp = new RightPaneComponent();
+    rp.repoCoordinatorAgent = makeAgent({ id: "coord-1", meta: { coordinator: true } as any });
+    rp.repoCoordinatorHasPolled = true;
+    rp.repoCoordinatorOutput = "coordinator output line 1\ncoordinator output line 2";
+    const lines = rp.renderRepoCoordinatorSection(60, 10, false);
+    const text = lines.map(stripAnsi).join("\n");
+    expect(text).toContain("coordinator output line 1");
+    expect(text).toContain("coordinator output line 2");
+  });
+
+  test("REPO mode renders split view when coordinator exists", () => {
+    const rp = new RightPaneComponent();
+    rp.displayHeight = 20;
+    rp.selectedRepoHeader = "my-repo";
+    rp.repoCoordinatorAgent = makeAgent({ id: "coord-1", repoName: "my-repo", meta: { coordinator: true } as any });
+    rp.repoCoordinatorHasPolled = true;
+    rp.repoCoordinatorOutput = "coordinator output";
+    rp.allAgents = [];
+    rp.setMode("REPO");
+    const lines = rp.render(60);
+    expect(lines).toHaveLength(20);
+    const text = lines.map(stripAnsi).join("\n");
+    // Should contain both repo info and coordinator section
+    expect(text).toContain("Coordinator");
+    expect(text).toContain("coordinator output");
+  });
+});
+
+describe("formatAgentRow uses coordinator icon", () => {
+  const { formatAgentRow: pmFormatAgentRow } = require("./pane-manager");
+  test("coordinator agent gets ◇ icon", () => {
+    const agent = makeAgent({ id: "coord-1" });
+    agent.meta.coordinator = true;
+    const row = pmFormatAgentRow(agent, "", 8);
+    expect(row).toContain("◇");
+  });
+
+  test("regular agent gets ◆ icon", () => {
+    const agent = makeAgent({ id: "regular-1" });
+    const row = pmFormatAgentRow(agent, "", 8);
+    expect(row).toContain("◆");
+  });
+
+  test("worker agent gets ⚙ icon", () => {
+    const agent = makeAgent({ id: "worker-1" });
+    agent.meta.worker = true;
+    const row = pmFormatAgentRow(agent, "", 8);
+    expect(row).toContain("⚙");
+  });
+});
+
 describe("closeOsc8", () => {
   test("returns line unchanged when no OSC 8 present", () => {
     expect(closeOsc8("hello world")).toBe("hello world");

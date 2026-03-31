@@ -63,7 +63,7 @@ import { MIN_LEFT_WIDTH, MAX_LEFT_WIDTH } from "./split-pane";
 import { FocusManager } from "./focus";
 import type { FocusTarget, SubFocus } from "./focus";
 import { SystemDashboardComponent } from "./system-dashboard";
-import { loadLayout, saveLayoutDebounced, cancelPendingSave } from "./layout";
+import { loadLayout, saveLayoutDebounced, cancelPendingSave, flushPendingSave } from "./layout";
 import type { LayoutState } from "./layout";
 import { InputFieldComponent } from "./input-field";
 import { sendMessage } from "../ib-commands";
@@ -493,6 +493,8 @@ export class DashboardComponent implements Component {
   systemDashboard: SystemDashboardComponent;
   /** Dynamic sidebar width — adjustable via [ ] when sidebar panel is focused */
   sidebarWidth = SIDEBAR_WIDTH;
+  /** When true, saved layout was applied — suppress onWidth overrides from tmux poller */
+  private layoutRestored = false;
   private _questionsFocused = false;
   /** Cache of which agents have an attached tmux client */
   private _clientAttached: Map<string, boolean> = new Map();
@@ -615,6 +617,10 @@ export class DashboardComponent implements Component {
         this.tui?.requestRender();
       },
       onWidth: (width) => {
+        // When a saved layout was restored, the dashboard width is authoritative.
+        // Skip tmux-reported width to avoid overriding the saved value during the
+        // race window before resizeTmuxWindow takes effect on the agent's session.
+        if (this.layoutRestored) return;
         const clamped = Math.max(MIN_LEFT_WIDTH, Math.min(MAX_LEFT_WIDTH, width));
         if (clamped !== this.splitPane.getLeftWidth()) {
           this.splitPane.setLeftWidth(clamped);
@@ -646,6 +652,7 @@ export class DashboardComponent implements Component {
     resizeCoordinatorTmux(this.sidebarWidth);
     this.splitPane.setLeftWidth(Math.max(MIN_LEFT_WIDTH, Math.min(MAX_LEFT_WIDTH, layout.splitPaneLeftWidth)));
     this.sidebar.heightOffsets = { ...layout.heightOffsets };
+    this.layoutRestored = true;
   }
 
   /** Persist current layout via debounced write. */
@@ -672,7 +679,8 @@ export class DashboardComponent implements Component {
   stopPolling() {
     this.tmuxPoller.stop();
     this.coordinatorPoller.stop();
-    cancelPendingSave();
+    // Flush any pending layout save to disk before exiting
+    flushPendingSave().catch(() => { /* ignore write errors on exit */ });
     if (this.usageTimer) {
       clearInterval(this.usageTimer);
       this.usageTimer = null;

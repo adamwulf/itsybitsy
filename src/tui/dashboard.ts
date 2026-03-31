@@ -1108,7 +1108,10 @@ export class DashboardComponent implements Component {
     }
 
     // When coordinator panel is focused, use same three-level sub-focus as active-agent.
-    if (this.focusManager.current() === "coordinator" && this.agentTree.isSystemCoordinatorSelected) {
+    // Only requires the coordinator to have polled (session is running), not that it's
+    // selected in the agent tree — the sidebar coordinator panel should accept input
+    // regardless of which agent is selected.
+    if (this.focusManager.current() === "coordinator" && this.coordinatorPane.hasPolled) {
       const sf = this.focusManager.subFocus;
 
       // Tab navigation through sub-focus states

@@ -1299,7 +1299,7 @@ async function buildAgentSettings(
     "Bash(pwd:*)", "Bash(ls:*)", "Bash(head:*)", "Bash(tail:*)",
     "Bash(cat:*)", "Bash(grep:*)",
     "Read", "Write", "Edit", "MultiEdit", "Glob", "Grep", "LS",
-    "TodoWrite", "Task", "TaskOutput", "KillShell", "NotebookEdit",
+    "TodoWrite", "Task", "Agent", "TaskOutput", "KillShell", "NotebookEdit",
     "WebFetch", "WebSearch", "AskUserQuestion", "ToolSearch",
   ];
   const blockedTools = ["EnterPlanMode", "ExitPlanMode"];

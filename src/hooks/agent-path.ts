@@ -10,6 +10,7 @@ import { join, resolve, dirname, basename } from "path";
 import { realpath, stat } from "fs/promises";
 import { realpathSync } from "fs";
 import { logAgent } from "../agent-lifecycle";
+import { isValidAgentId } from "../validation";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -247,6 +248,96 @@ function checkFilePath(
   return { decision: "allow", reason: "Tool in allow list" };
 }
 
+// ── ib command manager access check ─────────────────────────────────────────
+
+/**
+ * ib subcommands that require manager relationship (calling agent must be the
+ * target agent's manager). Read-only / communication commands (send, look,
+ * diff, status) are intentionally excluded and remain unrestricted.
+ */
+const IB_MANAGER_ONLY_COMMANDS = new Set([
+  "kill",
+  "nuke",
+  "merge",
+  "merge-check",
+  "resume",
+  "pause",
+  "reassign",
+]);
+
+/**
+ * Parse an `ib <subcommand> <agent-id> [flags...]` command string.
+ * Returns { subcommand, targetId } when parsed, or null if not an ib command
+ * that targets a specific agent.
+ */
+export function parseIbCommand(command: string): { subcommand: string; targetId: string } | null {
+  // Must start with "ib " or be exactly "ib"
+  if (command !== "ib" && !command.startsWith("ib ")) return null;
+
+  const parts = command.trim().split(/\s+/);
+  // parts[0] = "ib", parts[1] = subcommand, parts[2] = agent-id (possibly)
+  if (parts.length < 3) return null;
+
+  const subcommand = parts[1]!;
+  // Find first non-flag argument as the target ID
+  const targetId = parts.slice(2).find((p) => !p.startsWith("-"));
+  if (!targetId) return null;
+  if (!isValidAgentId(targetId)) return null;
+
+  return { subcommand, targetId };
+}
+
+/**
+ * Check whether a Bash `ib <cmd> <target>` call is permitted for the calling
+ * agent. Manager-only commands (kill, merge, nuke, etc.) require that the
+ * calling agent is listed as the target's manager in meta.json.
+ *
+ * Returns a deny decision if the check fails, or null to continue normally.
+ */
+export async function checkIbCommandAccess(
+  command: string,
+  callingAgentId: string,
+  agentsDir: string
+): Promise<HookDecision | null> {
+  const parsed = parseIbCommand(command);
+  if (!parsed) return null;
+  if (!IB_MANAGER_ONLY_COMMANDS.has(parsed.subcommand)) return null;
+
+  const targetId = parsed.targetId;
+  const targetMetaPath = join(agentsDir, targetId, "meta.json");
+
+  let targetManager: string | undefined;
+  try {
+    const metaFile = Bun.file(targetMetaPath);
+    if (await metaFile.exists()) {
+      const meta = await metaFile.json();
+      targetManager = typeof meta.manager === "string" ? meta.manager : undefined;
+    } else {
+      // Target agent directory not found in this repo's agents dir.
+      // Could be a different repo — deny to prevent cross-repo control.
+      return {
+        decision: "deny",
+        reason: `Access denied: agent '${targetId}' not found in this repo`,
+      };
+    }
+  } catch {
+    // Can't read meta — deny to be safe
+    return {
+      decision: "deny",
+      reason: `Access denied: cannot read meta for agent '${targetId}'`,
+    };
+  }
+
+  if (targetManager !== callingAgentId) {
+    return {
+      decision: "deny",
+      reason: `Access denied: only the manager of '${targetId}' can run 'ib ${parsed.subcommand}'`,
+    };
+  }
+
+  return null;
+}
+
 // ── CLI entry point ──────────────────────────────────────────────────────────
 
 /**
@@ -346,10 +437,25 @@ export async function hookCheckPath(agentId: string, rawStdin?: string): Promise
     }
   } catch { /* ignore */ }
 
-  const decision = checkPathAccess(
-    { toolName, toolInput, cwd },
-    { agentId, agentDir, worktreePath, agentsDir, rootRepo, isWorker, allowList }
-  );
+  // Check ib manager-only command access before path checks
+  let decision: HookDecision;
+  if (toolName === "Bash") {
+    const command = String(toolInput.command ?? "");
+    const ibDenial = await checkIbCommandAccess(command, agentId, agentsDir);
+    if (ibDenial) {
+      decision = ibDenial;
+    } else {
+      decision = checkPathAccess(
+        { toolName, toolInput, cwd },
+        { agentId, agentDir, worktreePath, agentsDir, rootRepo, isWorker, allowList }
+      );
+    }
+  } else {
+    decision = checkPathAccess(
+      { toolName, toolInput, cwd },
+      { agentId, agentDir, worktreePath, agentsDir, rootRepo, isWorker, allowList }
+    );
+  }
 
   // Log denials
   if (decision.decision === "deny") {

@@ -1584,10 +1584,12 @@ export class DashboardComponent implements Component {
       mainLines = [mainTitleSep, ...tmuxLines.slice(0, availableHeight)];
     } else if (isCoordinatorView) {
       // System coordinator DASHBOARD view: full-width agent overview table
+      this.coordinatorPane.agentless = false;
       this.coordinatorInputField.active = false;
       this.systemDashboard.displayHeight = availableHeight;
       mainLines = [mainTitleSep, ...this.systemDashboard.render(mainWidth)];
     } else if (isTreeMode) {
+      this.coordinatorPane.agentless = false;
       // TREE mode: full-height tree in the main area.
       // IMPORTANT: The sidebar renders the same AgentTreeComponent in compact mode.
       // The main area render below runs FIRST to set maxHeight for the full tree,
@@ -1596,6 +1598,7 @@ export class DashboardComponent implements Component {
       this.agentTree.maxHeight = availableHeight;
       mainLines = [mainTitleSep, ...this.agentTree.render(mainWidth)];
     } else {
+      this.coordinatorPane.agentless = false;
       // Normal/full-width mode: split-pane(tmux | right-pane)
       const showInputField = this.agentTree.selectedAgent != null && !isFullWidth;
 

@@ -57,6 +57,7 @@ export interface ActionCtx {
     updateContent(): void;
   };
   tmuxPane: { scrollUp(n?: number): void; scrollDown(n?: number): void };
+  coordinatorPane: { scrollUp(n?: number): void; scrollDown(n?: number): void };
   systemDashboard: { scrollUp(n?: number): void; scrollDown(n?: number): void };
   splitPane: { getLeftWidth(): number; setLeftWidth(w: number): void };
   tui: { requestRender(): void } | null;
@@ -523,6 +524,7 @@ export function handleFuzzyAgent(ctx: ActionCtx) {
 
 export function handleScrollUp(ctx: ActionCtx) {
   ctx.tmuxPane.scrollUp(SCROLL_STEP);
+  ctx.coordinatorPane.scrollUp(SCROLL_STEP);
   ctx.rightPane.scrollOffset += SCROLL_STEP;
   ctx.systemDashboard.scrollUp(SCROLL_STEP);
   ctx.rightPane.updateContent();
@@ -531,6 +533,7 @@ export function handleScrollUp(ctx: ActionCtx) {
 
 export function handleScrollDown(ctx: ActionCtx) {
   ctx.tmuxPane.scrollDown(SCROLL_STEP);
+  ctx.coordinatorPane.scrollDown(SCROLL_STEP);
   ctx.rightPane.scrollOffset = Math.max(0, ctx.rightPane.scrollOffset - SCROLL_STEP);
   ctx.systemDashboard.scrollDown(SCROLL_STEP);
   ctx.rightPane.updateContent();

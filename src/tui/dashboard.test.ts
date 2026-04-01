@@ -3533,10 +3533,20 @@ describe("coordinator input field (Phase 49)", () => {
     dashboard.onUpdate([], flatList, []);
     // selectedIndex 0 is the system-coordinator entry
     expect(dashboard.agentTree.isSystemCoordinatorSelected).toBe(true);
-    // coordinatorMode limits focus to agent-tree and coordinator
+    // coordinatorMode limits focus to agent-tree, info, and coordinator
+    // Set coordinatorPane output — coordinator TMUX view uses coordinatorPane in main area
+    // (tmuxPane is for regular agents; coordinatorPane has its own poller)
+    dashboard.tmuxPane.rawOutput = "Coordinator output";
+    dashboard.tmuxPane.hasPolled = true;
     dashboard.coordinatorPane.rawOutput = "Coordinator output";
     dashboard.coordinatorPane.hasPolled = true;
     return dashboard;
+  }
+
+  /** Tab from agent-tree to coordinator (skipping info in between) */
+  function tabToCoordinator(dashboard: ReturnType<typeof setupCoordinatorDashboard>) {
+    dashboard.handleInput("\t"); // agent-tree → info
+    dashboard.handleInput("\t"); // info → coordinator
   }
 
   test("coordinator input field is a separate instance from agent input field", () => {
@@ -3547,8 +3557,8 @@ describe("coordinator input field (Phase 49)", () => {
 
   test("when coordinator panel is focused, input routes to coordinator input field in input sub-focus", () => {
     const dashboard = setupCoordinatorDashboard();
-    // Tab to coordinator
-    dashboard.handleInput("\t"); // coordinator (coordinatorMode: agent-tree -> coordinator)
+    // Tab to coordinator (agent-tree → info → coordinator)
+    tabToCoordinator(dashboard);
     expect(dashboard.focus).toBe("coordinator");
     dashboard.handleInput("\t"); // pane → input sub-focus
 
@@ -3562,7 +3572,7 @@ describe("coordinator input field (Phase 49)", () => {
 
   test("Escape from coordinator input sub-focus clears input and returns to pane sub-focus", () => {
     const dashboard = setupCoordinatorDashboard();
-    dashboard.handleInput("\t"); // coordinator
+    tabToCoordinator(dashboard);
     expect(dashboard.focus).toBe("coordinator");
     dashboard.handleInput("\t"); // pane → input sub-focus
 
@@ -3578,7 +3588,7 @@ describe("coordinator input field (Phase 49)", () => {
 
   test("Tab from coordinator send sub-focus cycles focus normally", () => {
     const dashboard = setupCoordinatorDashboard();
-    dashboard.handleInput("\t"); // coordinator
+    tabToCoordinator(dashboard);
     expect(dashboard.focus).toBe("coordinator");
 
     // Tab through sub-focus states: pane → input → send
@@ -3593,18 +3603,18 @@ describe("coordinator input field (Phase 49)", () => {
 
   test("Shift-Tab from coordinator pane sub-focus cycles focus backwards", () => {
     const dashboard = setupCoordinatorDashboard();
-    dashboard.handleInput("\t"); // coordinator
+    tabToCoordinator(dashboard);
     expect(dashboard.focus).toBe("coordinator");
     expect(dashboard.subFocus).toBe("pane");
 
-    // Shift-Tab from pane sub-focus — cycles backward to agent-tree
+    // Shift-Tab from pane sub-focus — cycles backward to info
     dashboard.handleInput("\x1b[Z");
-    expect(dashboard.focus).toBe("agent-tree");
+    expect(dashboard.focus).toBe("info");
   });
 
-  test("coordinator input field renders in sidebar when in input sub-focus", () => {
+  test("coordinator input field renders in main area when in input sub-focus", () => {
     const dashboard = setupCoordinatorDashboard();
-    dashboard.handleInput("\t"); // coordinator
+    tabToCoordinator(dashboard);
     expect(dashboard.focus).toBe("coordinator");
     dashboard.handleInput("\t"); // pane → input sub-focus
 
@@ -3618,7 +3628,7 @@ describe("coordinator input field (Phase 49)", () => {
 
       const lines = dashboard.render(160);
       const text = lines.map(l => stripAnsi(l)).join("\n");
-      // Input field should show the typed text with cursor
+      // Input field should show the typed text with cursor in main area
       expect(text).toContain("> test█");
       expect(text).toContain("[Send]");
     } finally {
@@ -3626,7 +3636,7 @@ describe("coordinator input field (Phase 49)", () => {
     }
   });
 
-  test("coordinator input field not shown when coordinator panel not focused", () => {
+  test("coordinator tmux output shown in main area when coordinator selected", () => {
     const dashboard = setupCoordinatorDashboard();
     // Focus stays on agent-tree
     expect(dashboard.focus).toBe("agent-tree");
@@ -3636,8 +3646,10 @@ describe("coordinator input field (Phase 49)", () => {
     try {
       const lines = dashboard.render(160);
       const text = lines.map(l => stripAnsi(l)).join("\n");
-      // Coordinator output should appear but no cursor block in coordinator section
+      // Coordinator tmux output should appear in the main area
       expect(text).toContain("Coordinator output");
+      // Sidebar should not have coordinator section
+      expect(text).not.toContain("System Coordinator\n");
     } finally {
       Object.defineProperty(process.stdout, "rows", { value: origRows, writable: true, configurable: true });
     }
@@ -3645,7 +3657,7 @@ describe("coordinator input field (Phase 49)", () => {
 
   test("dashboard keybindings are suppressed in coordinator input sub-focus", () => {
     const dashboard = setupCoordinatorDashboard();
-    dashboard.handleInput("\t"); // coordinator
+    tabToCoordinator(dashboard);
     expect(dashboard.focus).toBe("coordinator");
     dashboard.handleInput("\t"); // pane → input sub-focus
 
@@ -3658,7 +3670,7 @@ describe("coordinator input field (Phase 49)", () => {
 
   test("coordinator submit calls sendTmuxKeys", () => {
     const dashboard = setupCoordinatorDashboard();
-    dashboard.handleInput("\t"); // coordinator
+    tabToCoordinator(dashboard);
     expect(dashboard.focus).toBe("coordinator");
     dashboard.handleInput("\t"); // pane → input sub-focus
 
@@ -3678,7 +3690,7 @@ describe("coordinator input field (Phase 49)", () => {
     const dashboard = setupCoordinatorDashboard();
 
     // Tab to coordinator, then Tab to input sub-focus and type
-    dashboard.handleInput("\t"); // coordinator
+    tabToCoordinator(dashboard);
     dashboard.handleInput("\t"); // pane → input sub-focus
     dashboard.handleInput("a");
     dashboard.handleInput("b");
@@ -3694,5 +3706,126 @@ describe("coordinator input field (Phase 49)", () => {
     // Coordinator input buffer should be saved; switching back should restore it
     dashboard.handleInput("\x1b[A"); // up arrow to coordinator
     expect(dashboard.coordinatorInputField.getText()).toBe("ab");
+  });
+});
+
+describe("coordinator view mode toggling (n/p)", () => {
+  function setupCoordinatorDashboard() {
+    const dashboard = makeDashboard();
+    const flatList: FlatEntry[] = [makeFlatSystemCoordinator()];
+    dashboard.onUpdate([], flatList, []);
+    expect(dashboard.agentTree.isSystemCoordinatorSelected).toBe(true);
+    dashboard.tmuxPane.rawOutput = "Coordinator tmux output";
+    dashboard.tmuxPane.hasPolled = true;
+    dashboard.coordinatorPane.rawOutput = "Coordinator tmux output";
+    dashboard.coordinatorPane.hasPolled = true;
+    return dashboard;
+  }
+
+  test("default coordinator view mode is TMUX", () => {
+    const dashboard = setupCoordinatorDashboard();
+    expect(dashboard.coordinatorViewMode).toBe("TMUX");
+  });
+
+  test("p key toggles coordinator view mode from TMUX to DASHBOARD", () => {
+    const dashboard = setupCoordinatorDashboard();
+    expect(dashboard.coordinatorViewMode).toBe("TMUX");
+    dashboard.handleInput("p");
+    expect(dashboard.coordinatorViewMode).toBe("DASHBOARD");
+  });
+
+  test("n key toggles coordinator view mode from TMUX to DASHBOARD", () => {
+    const dashboard = setupCoordinatorDashboard();
+    expect(dashboard.coordinatorViewMode).toBe("TMUX");
+    dashboard.handleInput("n");
+    expect(dashboard.coordinatorViewMode).toBe("DASHBOARD");
+  });
+
+  test("p key toggles back from DASHBOARD to TMUX", () => {
+    const dashboard = setupCoordinatorDashboard();
+    dashboard.handleInput("p"); // TMUX → DASHBOARD
+    expect(dashboard.coordinatorViewMode).toBe("DASHBOARD");
+    dashboard.handleInput("p"); // DASHBOARD → TMUX
+    expect(dashboard.coordinatorViewMode).toBe("TMUX");
+  });
+
+  test("n/p does not cycle right-pane modes when coordinator is selected", () => {
+    const dashboard = setupCoordinatorDashboard();
+    const modeBefore = dashboard.currentMode;
+    dashboard.handleInput("p");
+    // Right pane mode should not change — p toggles coordinator view instead
+    expect(dashboard.currentMode).toBe(modeBefore);
+  });
+
+  test("n/p cycles right-pane modes normally when coordinator is NOT selected", () => {
+    const dashboard = makeDashboard();
+    const agent = makeAgent("agent-a", "/repos/test");
+    const flatList: FlatEntry[] = [makeFlatAgent(agent)];
+    dashboard.onUpdate([agent], flatList, []);
+    const modeBefore = dashboard.currentMode;
+    dashboard.handleInput("p");
+    // Right pane mode should change for normal agents
+    expect(dashboard.currentMode).not.toBe(modeBefore);
+  });
+
+  test("TMUX view renders coordinator output in main area", () => {
+    const dashboard = setupCoordinatorDashboard();
+    const origRows = process.stdout.rows;
+    Object.defineProperty(process.stdout, "rows", { value: 30, writable: true, configurable: true });
+    try {
+      const lines = dashboard.render(160);
+      const text = lines.map(l => stripAnsi(l)).join("\n");
+      expect(text).toContain("Coordinator tmux output");
+      expect(text).toContain("TMUX");
+    } finally {
+      Object.defineProperty(process.stdout, "rows", { value: origRows, writable: true, configurable: true });
+    }
+  });
+
+  test("DASHBOARD view renders system dashboard table in main area", () => {
+    const dashboard = setupCoordinatorDashboard();
+    dashboard.handleInput("p"); // switch to DASHBOARD
+    const origRows = process.stdout.rows;
+    Object.defineProperty(process.stdout, "rows", { value: 30, writable: true, configurable: true });
+    try {
+      const lines = dashboard.render(160);
+      const text = lines.map(l => stripAnsi(l)).join("\n");
+      expect(text).toContain("DASHBOARD");
+      // Should NOT contain tmux output in main area
+      expect(text).not.toContain("Coordinator tmux output");
+    } finally {
+      Object.defineProperty(process.stdout, "rows", { value: origRows, writable: true, configurable: true });
+    }
+  });
+
+  test("coordinator view mode resets to TMUX when re-entering coordinator selection", () => {
+    const dashboard = setupCoordinatorDashboard();
+    dashboard.handleInput("p"); // switch to DASHBOARD
+    expect(dashboard.coordinatorViewMode).toBe("DASHBOARD");
+
+    // Add an agent and select it
+    const agent = makeAgent("agent-a", "/repos/test");
+    const flatList: FlatEntry[] = [makeFlatSystemCoordinator(), makeFlatAgent(agent)];
+    dashboard.onUpdate([agent], flatList, []);
+    dashboard.handleInput("\x1b[B"); // down arrow to agent
+    expect(dashboard.agentTree.isSystemCoordinatorSelected).toBe(false);
+
+    // Return to coordinator
+    dashboard.handleInput("\x1b[A"); // up arrow to coordinator
+    expect(dashboard.agentTree.isSystemCoordinatorSelected).toBe(true);
+    expect(dashboard.coordinatorViewMode).toBe("TMUX"); // reset on re-entry
+  });
+
+  test("coordinator view mode persists across watcher ticks", () => {
+    const dashboard = setupCoordinatorDashboard();
+    dashboard.handleInput("p"); // switch to DASHBOARD
+    expect(dashboard.coordinatorViewMode).toBe("DASHBOARD");
+
+    // Simulate watcher tick (onUpdate with same data)
+    const flatList: FlatEntry[] = [makeFlatSystemCoordinator()];
+    dashboard.onUpdate([], flatList, []);
+
+    // View mode should persist — not be reset
+    expect(dashboard.coordinatorViewMode).toBe("DASHBOARD");
   });
 });

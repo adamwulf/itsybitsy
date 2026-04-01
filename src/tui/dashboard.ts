@@ -106,6 +106,8 @@ export class TmuxPaneComponent implements Component {
   trimInputSeparator = false;
   /** Lines below the last separator (status line), populated by parseStatusLines() */
   statusLines: string[] = [];
+  /** When true, render output without requiring an agent (used for coordinator) */
+  agentless = false;
 
   invalidate(): void {}
 
@@ -149,12 +151,28 @@ export class TmuxPaneComponent implements Component {
   }
 
   render(width: number): string[] {
-    if (!this.agent) {
+    if (!this.agent && !this.agentless) {
       return padLines([truncateToWidth(`${DIM}No agent selected${RESET}`, width, "")], this.displayHeight);
     }
 
+    // Agentless mode: simplified state handling (no clientAttached/stopped display)
+    if (this.agentless) {
+      if (!this.hasPolled) {
+        return padLines([
+          truncateToWidth(`${DIM}Waiting for output...${RESET}`, width, ""),
+        ], this.displayHeight);
+      }
+      if (!this.rawOutput) {
+        return padLines([
+          truncateToWidth(`${YELLOW}Session stopped${RESET}`, width, ""),
+          truncateToWidth(`${DIM}Press R to restart${RESET}`, width, ""),
+        ], this.displayHeight);
+      }
+      // Fall through to normal output rendering below
+    }
+
     // Show centered message when agent's tmux session is opened in an external terminal
-    if (this.clientAttached) {
+    if (this.clientAttached && this.agent) {
       const lines: string[] = [];
       const midLine = Math.floor(this.displayHeight / 2);
       const idText = `${DIM}${this.agent.id}${RESET}`;
@@ -178,7 +196,7 @@ export class TmuxPaneComponent implements Component {
     }
 
     // Graceful display for stopped/orphaned agents (no tmux session)
-    if (this.hasPolled && !this.rawOutput) {
+    if (this.hasPolled && !this.rawOutput && this.agent) {
       const stateColor = getStateColors()[this.agent.state] ?? getStateColors().unknown;
       const lines = [
         truncateToWidth(`${BOLD}${this.agent.id}${RESET}`, width, ""),
@@ -194,7 +212,7 @@ export class TmuxPaneComponent implements Component {
       return padLines(lines, this.displayHeight);
     }
 
-    if (!this.rawOutput) {
+    if (!this.rawOutput && this.agent) {
       return padLines([
         truncateToWidth(`${BOLD}${this.agent.id}${RESET} ${DIM}(${this.agent.meta.tmux_session})${RESET}`, width, ""),
         truncateToWidth(`${DIM}Waiting for tmux output...${RESET}`, width, ""),
@@ -495,6 +513,8 @@ export class DashboardComponent implements Component {
   inputField: InputFieldComponent;
   coordinatorInputField: InputFieldComponent;
   systemDashboard: SystemDashboardComponent;
+  /** Which view to show in the main area when coordinator is selected */
+  coordinatorViewMode: "TMUX" | "DASHBOARD" = "TMUX";
   /** Dynamic sidebar width — adjustable via [ ] when sidebar panel is focused */
   sidebarWidth = SIDEBAR_WIDTH;
   /** When true, saved layout was applied — suppress onWidth overrides from tmux poller */
@@ -925,12 +945,14 @@ export class DashboardComponent implements Component {
 
     // Update focus cycling and sidebar layout for coordinator mode
     this.focusManager.coordinatorMode = isCoordinator;
-    this.sidebar.coordinatorFullWidth = isCoordinator;
+    this.sidebar.hideCoordinator = isCoordinator;
 
-    // When entering coordinator mode, ensure focus is on a valid target
-    if (isCoordinator) {
+    // When entering coordinator mode (transition, not every tick), reset view and focus
+    const wasCoordinator = this.currentAgentId === "__coordinator__";
+    if (isCoordinator && !wasCoordinator) {
+      this.coordinatorViewMode = "TMUX";
       const focus = this.focusManager.current();
-      if (focus !== "agent-tree" && focus !== "coordinator") {
+      if (focus !== "agent-tree" && focus !== "info" && focus !== "coordinator") {
         this.focusManager.setFocus("agent-tree");
       }
     }
@@ -1259,10 +1281,18 @@ export class DashboardComponent implements Component {
     }
     // Right pane cycling
     else if (data === "p" || matchesKey(data, Key.left)) {
-      this.cyclePaneMode(1);
+      if (this.agentTree.isSystemCoordinatorSelected) {
+        this.coordinatorViewMode = this.coordinatorViewMode === "TMUX" ? "DASHBOARD" : "TMUX";
+      } else {
+        this.cyclePaneMode(1);
+      }
       this.tui?.requestRender();
     } else if (data === "n" || matchesKey(data, Key.right)) {
-      this.cyclePaneMode(-1);
+      if (this.agentTree.isSystemCoordinatorSelected) {
+        this.coordinatorViewMode = this.coordinatorViewMode === "TMUX" ? "DASHBOARD" : "TMUX";
+      } else {
+        this.cyclePaneMode(-1);
+      }
       this.tui?.requestRender();
     }
     // Direct pane jumps
@@ -1515,8 +1545,48 @@ export class DashboardComponent implements Component {
       : this.buildMainTitleSeparator(mainWidth, isTreeMode, isFullWidth);
 
     let mainLines: string[];
-    if (isCoordinatorView) {
-      // System coordinator selected: full-width system dashboard table
+    // Reset agentless before branching; only the TMUX branch sets it true
+    this.coordinatorPane.agentless = false;
+    if (isCoordinatorView && this.coordinatorViewMode === "TMUX") {
+      // System coordinator TMUX view: full-width coordinator tmux output in main area.
+      // Reuses coordinatorPane (agentless TmuxPaneComponent) for rendering.
+      const isCoordFocused = this.focusManager.current() === "coordinator";
+      const coordSf = this.focusManager.subFocus;
+      const showCoordInput = isCoordFocused && coordSf !== "pane";
+
+      // Set coordinator input field state for main area rendering
+      this.coordinatorInputField.active = showCoordInput;
+      if (isCoordFocused) {
+        this.coordinatorInputField.setFocusState(coordSf === "send" ? "send" : "text");
+      }
+
+      // Configure coordinatorPane for main area rendering
+      this.coordinatorPane.agentless = true;
+      this.coordinatorPane.trimInputSeparator = showCoordInput;
+      if (showCoordInput) {
+        this.coordinatorPane.parseStatusLines(mainWidth);
+      } else {
+        this.coordinatorPane.statusLines = [];
+      }
+
+      const statusLinesCount = this.coordinatorPane.statusLines.length;
+      const inputFieldHeight = showCoordInput ? this.coordinatorInputField.getHeight(mainWidth) + statusLinesCount : 0;
+      this.coordinatorPane.displayHeight = Math.max(0, availableHeight - inputFieldHeight);
+
+      const tmuxLines = this.coordinatorPane.render(mainWidth);
+
+      if (showCoordInput) {
+        const inputLines = this.coordinatorInputField.render(mainWidth);
+        tmuxLines.push(...inputLines, ...this.coordinatorPane.statusLines);
+      }
+
+      // Pad to available height
+      while (tmuxLines.length < availableHeight) tmuxLines.push("");
+
+      mainLines = [mainTitleSep, ...tmuxLines.slice(0, availableHeight)];
+    } else if (isCoordinatorView) {
+      // System coordinator DASHBOARD view: full-width agent overview table
+      this.coordinatorInputField.active = false;
       this.systemDashboard.displayHeight = availableHeight;
       mainLines = [mainTitleSep, ...this.systemDashboard.render(mainWidth)];
     } else if (isTreeMode) {
@@ -1594,11 +1664,16 @@ export class DashboardComponent implements Component {
 
     // Render sidebar and merge with main area
     this.sidebar.focusTarget = this.focusManager.current();
-    const isCoordFocused = this.focusManager.current() === "coordinator";
-    const coordSf = this.focusManager.subFocus;
-    this.coordinatorInputField.active = isCoordFocused && coordSf !== "pane";
-    if (isCoordFocused) {
-      this.coordinatorInputField.setFocusState(coordSf === "send" ? "send" : "text");
+    // Coordinator input field activation is handled in the TMUX render branch above
+    // when coordinator is in the main area. For sidebar rendering, only activate when
+    // coordinator is NOT selected (i.e., shown in sidebar's coordinator section).
+    if (!isCoordinatorView) {
+      const isCoordFocused = this.focusManager.current() === "coordinator";
+      const coordSf = this.focusManager.subFocus;
+      this.coordinatorInputField.active = isCoordFocused && coordSf !== "pane";
+      if (isCoordFocused) {
+        this.coordinatorInputField.setFocusState(coordSf === "send" ? "send" : "text");
+      }
     }
     const sidebarLines = this.sidebar.render(sidebarW);
     lines.push(...mergeSidebarAndMain(sidebarLines, mainLines, availableHeight + 1, mainWidth, sidebarW));
@@ -1659,12 +1734,18 @@ export class DashboardComponent implements Component {
 
   /** Build title separator for system coordinator full-width view */
   private buildCoordinatorTitleSeparator(mainWidth: number): string {
-    const title = " System Dashboard ";
+    const leftTitle = " System Coordinator ";
+    const rightTitle = this.coordinatorViewMode === "TMUX" ? " TMUX " : " DASHBOARD ";
     const leftPad = 3;
     const rightPad = 3;
-    const fillCount = Math.max(1, mainWidth - leftPad - title.length - rightPad);
+    const currentFocus = this.focusManager.current();
+    const coordFocused = currentFocus === "coordinator";
+    const leftTitleStyle = coordFocused ? `${REVERSE}${BOLD}` : BOLD;
+    const fillCount = Math.max(1, mainWidth - leftPad - leftTitle.length - rightTitle.length - rightPad);
     return truncateToWidth(
-      `${DIM_GRAY}${"─".repeat(leftPad)}${RESET}${BOLD}${title}${RESET}${DIM_GRAY}${"─".repeat(fillCount)}${"─".repeat(rightPad)}${RESET}`,
+      `${DIM_GRAY}${"─".repeat(leftPad)}${RESET}${leftTitleStyle}${leftTitle}${RESET}` +
+      `${BOLD}${rightTitle}${RESET}` +
+      `${DIM_GRAY}${"─".repeat(fillCount)}${"─".repeat(rightPad)}${RESET}`,
       mainWidth,
       "",
     );

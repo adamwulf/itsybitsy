@@ -435,10 +435,10 @@ describe("SidebarComponent", () => {
     expect(linesAfterStatus.length).toBe(0);
   });
 
-  test("coordinator input field renders in full-width coordinator layout", () => {
+  test("hideCoordinator hides coordinator section and gives space to info", () => {
     const sidebar = makeSidebar();
     sidebar.displayHeight = 25;
-    sidebar.coordinatorFullWidth = true;
+    sidebar.hideCoordinator = true;
     sidebar.agentTree.setFlatList([]);
 
     const coordPane = new TmuxPaneComponent();
@@ -446,18 +446,12 @@ describe("SidebarComponent", () => {
     coordPane.hasPolled = true;
     sidebar.coordinatorPane = coordPane;
 
-    const inputField = new InputFieldComponent();
-    inputField.active = true;
-    sidebar.coordinatorInputField = inputField;
-    inputField.handleInput("t");
-    inputField.handleInput("e");
-    inputField.handleInput("s");
-    inputField.handleInput("t");
-
     const lines = sidebar.render(SIDEBAR_WIDTH);
     const text = lines.map(stripAnsi).join("\n");
-    expect(text).toContain("> test█");
-    expect(text).toContain("[Send]");
-    expect(text).toContain("coordinator output");
+    // Coordinator section should not appear
+    expect(text).not.toContain("System Coordinator");
+    expect(text).not.toContain("coordinator output");
+    // Info section should still be present
+    expect(text).toContain("Info");
   });
 });

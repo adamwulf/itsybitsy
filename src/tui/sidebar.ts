@@ -78,8 +78,8 @@ export class SidebarComponent implements Component {
   focusTarget: FocusTarget = "agent-tree";
   /** Height offsets for sidebar panels — positive grows, negative shrinks */
   heightOffsets: { tree: number; info: number; coordinator: number } = { tree: 0, info: 0, coordinator: 0 };
-  /** When true, hide info panel and give coordinator all remaining space */
-  coordinatorFullWidth = false;
+  /** When true, hide coordinator section (it's shown in the main area instead) */
+  hideCoordinator = false;
 
   constructor(agentTree: AgentTreeComponent, infoPanel: InfoPanelComponent) {
     this.agentTree = agentTree;
@@ -92,9 +92,6 @@ export class SidebarComponent implements Component {
   }
 
   render(width: number): string[] {
-    if (this.coordinatorFullWidth) {
-      return this.renderCoordinatorLayout(width);
-    }
     return this.renderNormalLayout(width);
   }
 
@@ -109,6 +106,12 @@ export class SidebarComponent implements Component {
     let treeHeight = Math.max(1, base.treeHeight + this.heightOffsets.tree);
     let infoHeight = Math.max(0, base.infoHeight + this.heightOffsets.info);
     let coordinatorHeight = Math.max(0, base.coordinatorHeight + this.heightOffsets.coordinator);
+
+    // When coordinator is hidden (shown in main area), give its space to info
+    if (this.hideCoordinator) {
+      infoHeight += coordinatorHeight;
+      coordinatorHeight = 0;
+    }
 
     // Clamp so total content + headers fits within displayHeight.
     // Headers: 1 (Agents) + 1 (Info, if shown) + 1 (Coordinator, if shown)
@@ -161,60 +164,7 @@ export class SidebarComponent implements Component {
     return lines.slice(0, this.displayHeight);
   }
 
-  /**
-   * Two-section layout when system coordinator is selected:
-   * tree (top) + coordinator tmux output (bottom).
-   * Info panel is hidden; coordinator takes info's height, tree absorbs old coordinator space.
-   */
-  private renderCoordinatorLayout(width: number): string[] {
-    const w = width;
-    const lines: string[] = [];
-
-    // Use the same base computation as normal layout so tree height stays consistent
-    const itemCount = this.agentTree.visibleList.length;
-    const base = computeSidebarHeights(this.displayHeight, itemCount);
-    let treeHeight = Math.max(1, base.treeHeight + this.heightOffsets.tree);
-    let infoHeight = Math.max(0, base.infoHeight + this.heightOffsets.info);
-    let coordinatorHeight = Math.max(0, base.coordinatorHeight + this.heightOffsets.coordinator);
-
-    // Tree absorbs the old coordinator space (+ 1 saved header line since we have 2 headers instead of 3)
-    const savedHeader = (base.coordinatorHeight > 0 && base.infoHeight > 0) ? 1 : 0;
-    treeHeight += coordinatorHeight + savedHeader;
-    // Coordinator panel replaces the info panel position with info's height
-    coordinatorHeight = infoHeight;
-
-    // Clamp so total content + headers fits within displayHeight (2 headers: Agents + Coordinator)
-    const headerCount = 1 + (coordinatorHeight > 0 ? 1 : 0);
-    const budget = this.displayHeight - headerCount;
-    if (budget > 0 && treeHeight + coordinatorHeight > budget) {
-      const excess = treeHeight + coordinatorHeight - budget;
-      treeHeight = Math.max(1, treeHeight - excess);
-    }
-
-    // Agents section header + tree
-    lines.push(buildFocusSeparator("Agents", w, this.focusTarget === "agent-tree"));
-    this.agentTree.maxHeight = treeHeight;
-    const treeLines = this.agentTree.render(w);
-    lines.push(...treeLines);
-    // Pad tree to exact height (header + treeHeight)
-    while (lines.length < treeHeight + 1) {
-      lines.push("");
-    }
-
-    // Coordinator section
-    if (coordinatorHeight > 0) {
-      lines.push(buildFocusSeparator("System Coordinator", w, this.focusTarget === "coordinator"));
-      this.renderCoordinatorContent(lines, w, coordinatorHeight);
-    }
-
-    // Ensure total output matches displayHeight
-    while (lines.length < this.displayHeight) {
-      lines.push("");
-    }
-    return lines.slice(0, this.displayHeight);
-  }
-
-  /** Render coordinator content (shared by both layouts) */
+  /** Render coordinator content (used by normal layout) */
   private renderCoordinatorContent(lines: string[], w: number, height: number): void {
     // Compute input field height when active
     const showInputField = this.coordinatorInputField?.active === true;

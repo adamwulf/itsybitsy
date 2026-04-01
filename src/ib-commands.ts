@@ -438,6 +438,7 @@ ${qAbsExitScript}
     await logAgent(agentDir, `[resume] tmux new-session failed: exit=${tmuxResult.exitCode} stderr=${tmuxResult.stderr}`);
     return { ok: false, exitCode: 1, stdout: "", stderr: `Could not create tmux session '${tmuxSession}'` };
   }
+  await nukeResumeSpawnCtx.run(["tmux", "set-option", "-w", "-t", tmuxSession, "history-limit", "50000"]);
 
   await logAgent(agentDir, "[resume] tmux session created, running autoAcceptWorkspaceTrust");
 
@@ -1877,6 +1878,7 @@ ${qStartExitScript}
     await cleanupOnFailure();
     return { ok: false, exitCode: 1, stdout: "", stderr: `Error: could not create tmux session '${tmuxSession}'` };
   }
+  await newAgentSpawnCtx.run(["tmux", "set-option", "-w", "-t", tmuxSession, "history-limit", "50000"]);
 
   // 19. Verify tmux session created
   const verifyResult = await newAgentSpawnCtx.run(["tmux", "has-session", "-t", tmuxSession]);

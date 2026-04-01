@@ -553,7 +553,7 @@ export async function detectAgentStates(agents: Agent[]): Promise<void> {
         agent.state = isRecentlyCreated(agent.meta.created_epoch) ? "creating" : "stopped";
         return;
       }
-      const output = await captureTmuxOutput(tmuxSession);
+      const output = await captureTmuxOutput(tmuxSession, 50);
       if (output === null) {
         agent.state = isRecentlyCreated(agent.meta.created_epoch) ? "creating" : "stopped";
         return;

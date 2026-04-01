@@ -866,15 +866,23 @@ describe("perRepoCoordinatorPrompt", () => {
 });
 
 describe("buildPerRepoCoordinatorSettings", () => {
-  test("includes Read, Write, Edit, MultiEdit, Glob, Grep, LS in allow list", async () => {
+  test("includes read-only tools in allow list", async () => {
     const settings = await buildPerRepoCoordinatorSettings();
     expect(settings.permissions.allow).toContain("Read");
-    expect(settings.permissions.allow).toContain("Write");
-    expect(settings.permissions.allow).toContain("Edit");
-    expect(settings.permissions.allow).toContain("MultiEdit");
     expect(settings.permissions.allow).toContain("Glob");
     expect(settings.permissions.allow).toContain("Grep");
     expect(settings.permissions.allow).toContain("LS");
+    expect(settings.permissions.allow).toContain("TodoWrite");
+    expect(settings.permissions.allow).toContain("AskUserQuestion");
+    expect(settings.permissions.allow).toContain("ToolSearch");
+  });
+
+  test("does not allow write tools", async () => {
+    const settings = await buildPerRepoCoordinatorSettings();
+    expect(settings.permissions.allow).not.toContain("Write");
+    expect(settings.permissions.allow).not.toContain("Edit");
+    expect(settings.permissions.allow).not.toContain("MultiEdit");
+    expect(settings.permissions.allow).not.toContain("NotebookEdit");
   });
 
   test("includes Bash(ib:*) in allow list", async () => {
@@ -882,42 +890,52 @@ describe("buildPerRepoCoordinatorSettings", () => {
     expect(settings.permissions.allow).toContain("Bash(ib:*)");
   });
 
-  test("includes git read and write commands in allow list", async () => {
+  test("includes read-only git commands but not write git commands", async () => {
     const settings = await buildPerRepoCoordinatorSettings();
+    // Read-only git commands allowed
     expect(settings.permissions.allow).toContain("Bash(git status:*)");
     expect(settings.permissions.allow).toContain("Bash(git log:*)");
     expect(settings.permissions.allow).toContain("Bash(git diff:*)");
     expect(settings.permissions.allow).toContain("Bash(git show:*)");
     expect(settings.permissions.allow).toContain("Bash(git ls-files:*)");
-    expect(settings.permissions.allow).toContain("Bash(git add:*)");
-    expect(settings.permissions.allow).toContain("Bash(git commit:*)");
-    expect(settings.permissions.allow).toContain("Bash(git merge:*)");
-    expect(settings.permissions.allow).toContain("Bash(git rebase:*)");
+    // Write git commands not allowed
+    expect(settings.permissions.allow).not.toContain("Bash(git add:*)");
+    expect(settings.permissions.allow).not.toContain("Bash(git commit:*)");
+    expect(settings.permissions.allow).not.toContain("Bash(git merge:*)");
+    expect(settings.permissions.allow).not.toContain("Bash(git rebase:*)");
   });
 
-  test("includes Task, Agent, WebFetch, WebSearch in allow list", async () => {
+  test("does not allow Task, Agent, WebFetch, WebSearch, KillShell", async () => {
     const settings = await buildPerRepoCoordinatorSettings();
-    expect(settings.permissions.allow).toContain("Task");
-    expect(settings.permissions.allow).toContain("Agent");
-    expect(settings.permissions.allow).toContain("WebFetch");
-    expect(settings.permissions.allow).toContain("WebSearch");
-    expect(settings.permissions.allow).toContain("TaskOutput");
-    expect(settings.permissions.allow).toContain("KillShell");
-    expect(settings.permissions.allow).toContain("NotebookEdit");
-    expect(settings.permissions.allow).toContain("ToolSearch");
+    expect(settings.permissions.allow).not.toContain("Task");
+    expect(settings.permissions.allow).not.toContain("Agent");
+    expect(settings.permissions.allow).not.toContain("WebFetch");
+    expect(settings.permissions.allow).not.toContain("WebSearch");
+    expect(settings.permissions.allow).not.toContain("TaskOutput");
+    expect(settings.permissions.allow).not.toContain("KillShell");
   });
 
-  test("includes cat, head, tail, grep bash commands", async () => {
+  test("does not allow shell commands that can write via redirection", async () => {
     const settings = await buildPerRepoCoordinatorSettings();
-    expect(settings.permissions.allow).toContain("Bash(cat:*)");
-    expect(settings.permissions.allow).toContain("Bash(head:*)");
-    expect(settings.permissions.allow).toContain("Bash(tail:*)");
-    expect(settings.permissions.allow).toContain("Bash(grep:*)");
-    expect(settings.permissions.allow).toContain("Bash(git grep:*)");
+    expect(settings.permissions.allow).not.toContain("Bash(cat:*)");
+    expect(settings.permissions.allow).not.toContain("Bash(head:*)");
+    expect(settings.permissions.allow).not.toContain("Bash(tail:*)");
+    expect(settings.permissions.allow).not.toContain("Bash(grep:*)");
+    expect(settings.permissions.allow).not.toContain("Bash(git grep:*)");
   });
 
-  test("denies EnterPlanMode and ExitPlanMode", async () => {
+  test("denies write tools, web tools, and plan mode", async () => {
     const settings = await buildPerRepoCoordinatorSettings();
+    expect(settings.permissions.deny).toContain("Write");
+    expect(settings.permissions.deny).toContain("Edit");
+    expect(settings.permissions.deny).toContain("MultiEdit");
+    expect(settings.permissions.deny).toContain("NotebookEdit");
+    expect(settings.permissions.deny).toContain("WebFetch");
+    expect(settings.permissions.deny).toContain("WebSearch");
+    expect(settings.permissions.deny).toContain("Task");
+    expect(settings.permissions.deny).toContain("TaskOutput");
+    expect(settings.permissions.deny).toContain("Agent");
+    expect(settings.permissions.deny).toContain("KillShell");
     expect(settings.permissions.deny).toContain("EnterPlanMode");
     expect(settings.permissions.deny).toContain("ExitPlanMode");
   });
@@ -925,6 +943,13 @@ describe("buildPerRepoCoordinatorSettings", () => {
   test("does not deny unqualified Bash", async () => {
     const settings = await buildPerRepoCoordinatorSettings();
     expect(settings.permissions.deny).not.toContain("Bash");
+  });
+
+  test("silently drops config allow entries that conflict with hardcoded deny", async () => {
+    // Write is in hardcoded deny, so adding it to config allow should be dropped
+    const settings = await buildPerRepoCoordinatorSettings();
+    expect(settings.permissions.deny).toContain("Write");
+    expect(settings.permissions.allow).not.toContain("Write");
   });
 });
 

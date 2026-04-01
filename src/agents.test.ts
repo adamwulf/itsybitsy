@@ -328,7 +328,7 @@ describe("flattenAgentTree", () => {
     expect(asAgent(flat[0]!).agent.id).toBe("a1");
   });
 
-  test("multi-repo: coordinators sorted first under their repo header", () => {
+  test("multi-repo: coordinator agents are excluded from flat list", () => {
     const now = Math.floor(Date.now() / 1000);
     const regular = makeAgent({ id: "regular-1", repoName: "my-repo", meta: { created_epoch: now - 100 } as any });
     const coord = makeAgent({ id: "coord-1", repoName: "my-repo", meta: { coordinator: true, created_epoch: now - 50 } as any });
@@ -337,13 +337,12 @@ describe("flattenAgentTree", () => {
     // Need 2+ repos for headers to appear
     const flat = flattenAgentTree(roots, ["my-repo", "other-repo"]);
 
-    // Should have: repo-headers + agents, with coord-1 first under my-repo
-    expect(asRepoHeader(flat[0]!).repoName).toBe("my-repo");
-    expect(asAgent(flat[1]!).agent.id).toBe("coord-1");
-    expect(asAgent(flat[1]!).agent.meta.coordinator).toBe(true);
-    // other two agents follow
-    expect(asAgent(flat[2]!).agent.meta.coordinator).toBeFalsy();
-    expect(asAgent(flat[3]!).agent.meta.coordinator).toBeFalsy();
+    // Coordinator should be excluded entirely — only regular agents appear
+    const agentEntries = flat.filter((f): f is Extract<typeof f, { kind: "agent" }> => f.kind === "agent");
+    expect(agentEntries.length).toBe(2);
+    expect(agentEntries.every(e => !e.agent.meta.coordinator)).toBe(true);
+    expect(agentEntries[0]!.agent.id).toBe("regular-2");
+    expect(agentEntries[1]!.agent.id).toBe("regular-1");
   });
 });
 

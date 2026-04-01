@@ -451,18 +451,13 @@ export function flattenAgentTree(
     for (const repoName of sortedNames) {
       const agents = repoGroups.get(repoName);
       if (agents && agents.length > 0) {
-        // Sort coordinators first under their repo header
-        agents.sort((a, b) => {
-          const aCoord = a.meta.coordinator ? 1 : 0;
-          const bCoord = b.meta.coordinator ? 1 : 0;
-          if (aCoord !== bCoord) return bCoord - aCoord; // coordinators first
-          return 0; // preserve existing order (byCreatedEpoch) for non-coordinators
-        });
+        // Filter out per-repo coordinators — they don't appear in the agent tree
+        const nonCoordinators = agents.filter(a => !a.meta.coordinator);
         // Repo with agents — emit repo header then walk agents
-        result.push({ kind: "repo-header", repoName, repoPath: repoPathByName.get(repoName) ?? "", hasAgents: true });
-        for (let i = 0; i < agents.length; i++) {
-          const isLast = i === agents.length - 1;
-          walk(agents[i]!, 0, [isLast]);
+        result.push({ kind: "repo-header", repoName, repoPath: repoPathByName.get(repoName) ?? "", hasAgents: nonCoordinators.length > 0 });
+        for (let i = 0; i < nonCoordinators.length; i++) {
+          const isLast = i === nonCoordinators.length - 1;
+          walk(nonCoordinators[i]!, 0, [isLast]);
         }
       } else {
         // Empty repo — just a header
@@ -470,10 +465,12 @@ export function flattenAgentTree(
       }
     }
   } else {
-    const multiRoot = nonArchivedRoots.length > 1;
-    for (let ri = 0; ri < nonArchivedRoots.length; ri++) {
-      const isLast = ri === nonArchivedRoots.length - 1;
-      walk(nonArchivedRoots[ri]!, 0, multiRoot ? [isLast] : []);
+    // Filter out per-repo coordinators — they don't appear in the agent tree
+    const nonCoordRoots = nonArchivedRoots.filter(a => !a.meta.coordinator);
+    const multiRoot = nonCoordRoots.length > 1;
+    for (let ri = 0; ri < nonCoordRoots.length; ri++) {
+      const isLast = ri === nonCoordRoots.length - 1;
+      walk(nonCoordRoots[ri]!, 0, multiRoot ? [isLast] : []);
     }
   }
   return result;

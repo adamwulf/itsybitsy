@@ -979,13 +979,13 @@ export class DashboardComponent implements Component {
     // Find and wire per-repo coordinator for the selected repo
     const repoPathForCoordinator = this.agentTree.selectedRepoPath;
     if (repoPathForCoordinator && !selected && !isCoordinator) {
-      // Repo header is selected — find coordinator agent
-      const coordAgent = this.agentTree.flatList.find(
-        (f): f is Extract<FlatEntry, { kind: "agent" }> =>
-          f.kind === "agent" && f.agent.repoPath === repoPathForCoordinator && !!f.agent.meta.coordinator
+      // Repo header is selected — find coordinator agent from the full agent list
+      // (coordinators are filtered out of flatList, so search lastAgents directly)
+      const coordAgent = this.watcher?.lastAgents.find(
+        a => a.repoPath === repoPathForCoordinator && !!a.meta.coordinator
       );
-      this.rightPane.repoCoordinatorAgent = coordAgent?.agent ?? null;
-      const tmuxSession = coordAgent?.agent.meta.tmux_session ?? null;
+      this.rightPane.repoCoordinatorAgent = coordAgent ?? null;
+      const tmuxSession = coordAgent?.meta.tmux_session ?? null;
       if (tmuxSession !== this.repoCoordinatorSession) {
         this.repoCoordinatorSession = tmuxSession;
         this.rightPane.repoCoordinatorOutput = null;

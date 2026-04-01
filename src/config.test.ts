@@ -32,6 +32,8 @@ describe("readConfig", () => {
     expect(result["hooks.statusVisible"]).toEqual({ value: true, source: "default" });
     expect(result["permissions.manager.allow"]).toEqual({ value: [], source: "default" });
     expect(result["permissions.worker.deny"]).toEqual({ value: [], source: "default" });
+    expect(result["permissions.all.allow"]).toEqual({ value: [], source: "default" });
+    expect(result["permissions.all.deny"]).toEqual({ value: [], source: "default" });
   });
 
   test("has entries for all CONFIG_KEYS", async () => {

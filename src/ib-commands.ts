@@ -1515,8 +1515,12 @@ export async function newAgent(
 
   // Config permissions
   const agentType = workerMode ? "worker" : "manager";
-  const configAllow = (config[`permissions.${agentType}.allow`]?.value as string[] | undefined) ?? [];
-  const configDeny = (config[`permissions.${agentType}.deny`]?.value as string[] | undefined) ?? [];
+  const roleAllow = (config[`permissions.${agentType}.allow`]?.value as string[] | undefined) ?? [];
+  const roleDeny = (config[`permissions.${agentType}.deny`]?.value as string[] | undefined) ?? [];
+  const allAllow = (config["permissions.all.allow"]?.value as string[] | undefined) ?? [];
+  const allDeny = (config["permissions.all.deny"]?.value as string[] | undefined) ?? [];
+  const configAllow = [...new Set([...roleAllow, ...allAllow])];
+  const configDeny = [...new Set([...roleDeny, ...allDeny])];
 
   // 8. Max agents check
   const maxAgents = (config.maxAgents?.value as number | undefined) ?? 10;

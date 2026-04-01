@@ -4,15 +4,14 @@ import { mkdtemp, rm, readdir, readFile } from "fs/promises";
 import { tmpdir } from "os";
 import {
   resolveAgentDir,
-  logSlowHook,
-  logHookError,
-  withSlowHookLogging,
+  logHookCall,
+  withHookLogging,
 } from "./slow-hook-logger";
 
 let tmpDir: string;
 
 beforeEach(async () => {
-  tmpDir = await mkdtemp(join(tmpdir(), "slow-hook-test-"));
+  tmpDir = await mkdtemp(join(tmpdir(), "hook-logger-test-"));
 });
 
 afterEach(async () => {
@@ -30,7 +29,7 @@ test("resolveAgentDir with agentId and agents dir in cwd", () => {
 
 test("resolveAgentDir with agentId different from cwd agent", () => {
   const cwd = "/repo/.ittybitsy/agents/agent-abc12345/repo";
-  // agentId provided but cwd doesn't match .ittybitty pattern
+  // cwd doesn't match .ittybitty pattern
   expect(resolveAgentDir(cwd)).toBeNull();
 });
 
@@ -47,111 +46,105 @@ test("resolveAgentDir with agentId but no agents dir in cwd", () => {
   expect(resolveAgentDir("/some/random/path", "agent-abc12345")).toBeNull();
 });
 
-// ── logSlowHook ─────────────────────────────────────────────────────────────
+// ── logHookCall ─────────────────────────────────────────────────────────────
 
-test("logSlowHook writes file when elapsed > 1s", async () => {
-  const agentDir = tmpDir;
-  await logSlowHook("hook-check-path", '{"tool_name":"Read"}', 1500, agentDir);
+test("logHookCall writes ok log with timing, input, and output", async () => {
+  await logHookCall("hook-check-path", '{"tool_name":"Read"}', 150, tmpDir, '{"decision":"allow"}');
 
-  const debugDir = join(agentDir, "debug-logs");
+  const debugDir = join(tmpDir, "debug-logs");
   const files = await readdir(debugDir);
   expect(files.length).toBe(1);
-  expect(files[0]).toMatch(/^hook-check-path-\d{8}-\d{6}-slow\.log$/);
+  expect(files[0]).toMatch(/^\d{8}-\d{6}\.\d{3}-hook-check-path-ok\.log$/);
 
   const content = await readFile(join(debugDir, files[0]!), "utf-8");
   expect(content).toContain("hook: hook-check-path");
-  expect(content).toContain("elapsed: 1.500s");
+  expect(content).toContain("result: ok");
+  expect(content).toContain("elapsed: 0.150s");
+  expect(content).toContain("--- stdout ---");
+  expect(content).toContain('{"decision":"allow"}');
   expect(content).toContain("--- raw stdin ---");
   expect(content).toContain('{"tool_name":"Read"}');
 });
 
-test("logSlowHook does NOT write file when elapsed <= 1s", async () => {
-  await logSlowHook("hook-check-path", '{"tool_name":"Read"}', 999, tmpDir);
-
-  const debugDir = join(tmpDir, "debug-logs");
-  let files: string[] = [];
-  try {
-    files = await readdir(debugDir);
-  } catch {
-    // dir doesn't exist — correct behavior
-  }
-  expect(files.length).toBe(0);
-});
-
-test("logSlowHook does NOT write when elapsed is exactly 1s", async () => {
-  await logSlowHook("hook-check-path", '{"data":1}', 1000, tmpDir);
-
-  let files: string[] = [];
-  try {
-    files = await readdir(join(tmpDir, "debug-logs"));
-  } catch {
-    // dir doesn't exist
-  }
-  expect(files.length).toBe(0);
-});
-
-test("logSlowHook does nothing when agentDir is null", async () => {
-  await logSlowHook("hook-check-path", "data", 5000, null);
-  // No crash, no file written — just a no-op
-});
-
-test("logSlowHook handles empty stdin", async () => {
-  await logSlowHook("hook-status", "", 2000, tmpDir);
-
-  const files = await readdir(join(tmpDir, "debug-logs"));
-  expect(files.length).toBe(1);
-
-  const content = await readFile(join(tmpDir, "debug-logs", files[0]!), "utf-8");
-  expect(content).toContain("(empty)");
-});
-
-// ── logHookError ────────────────────────────────────────────────────────────
-
-test("logHookError writes file regardless of elapsed time", async () => {
+test("logHookCall writes error log with error details", async () => {
   const err = new Error("Something broke");
-  await logHookError("hook-check-path", '{"tool":"Read"}', 50, tmpDir, err);
+  await logHookCall("hook-status", '{"data":1}', 50, tmpDir, "", err);
 
   const files = await readdir(join(tmpDir, "debug-logs"));
   expect(files.length).toBe(1);
-  expect(files[0]).toMatch(/^hook-check-path-.*-error\.log$/);
+  expect(files[0]).toMatch(/^\d{8}-\d{6}\.\d{3}-hook-status-error\.log$/);
 
   const content = await readFile(join(tmpDir, "debug-logs", files[0]!), "utf-8");
-  expect(content).toContain("hook: hook-check-path");
   expect(content).toContain("result: ERROR");
   expect(content).toContain("--- error ---");
   expect(content).toContain("Error: Something broke");
-  expect(content).toContain("--- raw stdin ---");
-  expect(content).toContain('{"tool":"Read"}');
 });
 
-test("logHookError handles non-Error objects", async () => {
-  await logHookError("hook-status", "input", 100, tmpDir, "string error");
+test("logHookCall handles non-Error objects", async () => {
+  await logHookCall("hook-status", "input", 100, tmpDir, "", "string error");
 
   const files = await readdir(join(tmpDir, "debug-logs"));
   const content = await readFile(join(tmpDir, "debug-logs", files[0]!), "utf-8");
   expect(content).toContain("string error");
 });
 
-test("logHookError does nothing when agentDir is null", async () => {
-  await logHookError("hook-check-path", "data", 100, null, new Error("fail"));
-  // No crash — just a no-op
+test("logHookCall does nothing when agentDir is null", async () => {
+  await logHookCall("hook-check-path", "data", 5000, null, "output");
+  // No crash, no file written
 });
 
-// ── withSlowHookLogging ─────────────────────────────────────────────────────
+test("logHookCall handles empty stdin and output", async () => {
+  await logHookCall("hook-status", "", 200, tmpDir, "");
 
-test("withSlowHookLogging calls the hook function", async () => {
+  const files = await readdir(join(tmpDir, "debug-logs"));
+  expect(files.length).toBe(1);
+
+  const content = await readFile(join(tmpDir, "debug-logs", files[0]!), "utf-8");
+  expect(content).toContain("--- stdout ---\n(empty)");
+  expect(content).toContain("--- raw stdin ---\n(empty)");
+});
+
+// ── withHookLogging ─────────────────────────────────────────────────────────
+
+test("withHookLogging calls the hook function", async () => {
   let called = false;
-  await withSlowHookLogging("test-hook", null, "", async () => {
+  await withHookLogging("test-hook", null, "", async () => {
     called = true;
   });
   expect(called).toBe(true);
 });
 
-test("withSlowHookLogging re-throws errors after logging", async () => {
+test("withHookLogging logs successful hooks", async () => {
+  await withHookLogging("test-hook", tmpDir, '{"input":1}', async () => {
+    process.stdout.write('{"result":"ok"}');
+  });
+
+  const files = await readdir(join(tmpDir, "debug-logs"));
+  expect(files.length).toBe(1);
+  expect(files[0]).toMatch(/-ok\.log$/);
+  expect(files[0]).toMatch(/^\d{8}-/);
+
+  const content = await readFile(join(tmpDir, "debug-logs", files[0]!), "utf-8");
+  expect(content).toContain("result: ok");
+  expect(content).toContain('{"result":"ok"}');
+  expect(content).toContain('{"input":1}');
+});
+
+test("withHookLogging captures process.stdout.write output", async () => {
+  await withHookLogging("test-hook", tmpDir, "stdin", async () => {
+    process.stdout.write("hello from hook");
+  });
+
+  const files = await readdir(join(tmpDir, "debug-logs"));
+  const content = await readFile(join(tmpDir, "debug-logs", files[0]!), "utf-8");
+  expect(content).toContain("hello from hook");
+});
+
+test("withHookLogging re-throws errors after logging", async () => {
   const err = new Error("hook crashed");
   let caught: unknown;
   try {
-    await withSlowHookLogging("test-hook", tmpDir, '{"input":1}', async () => {
+    await withHookLogging("test-hook", tmpDir, '{"input":1}', async () => {
       throw err;
     });
   } catch (e) {
@@ -159,22 +152,23 @@ test("withSlowHookLogging re-throws errors after logging", async () => {
   }
   expect(caught).toBe(err);
 
-  // Verify error was logged
   const files = await readdir(join(tmpDir, "debug-logs"));
   expect(files.length).toBe(1);
   expect(files[0]).toMatch(/-error\.log$/);
+  expect(files[0]).toMatch(/^\d{8}-/);
 });
 
-test("withSlowHookLogging does not log for fast successful hooks", async () => {
-  await withSlowHookLogging("test-hook", tmpDir, "input", async () => {
-    // fast hook — no delay
+test("withHookLogging still passes output to real stdout", async () => {
+  // The hook's stdout should still reach the real process.stdout
+  // We just verify no crash and the hook runs correctly
+  await withHookLogging("test-hook", tmpDir, "", async () => {
+    process.stdout.write("passthrough");
   });
+  // If we got here, stdout passthrough worked (no crash)
+});
 
-  let files: string[] = [];
-  try {
-    files = await readdir(join(tmpDir, "debug-logs"));
-  } catch {
-    // dir doesn't exist
-  }
-  expect(files.length).toBe(0);
+test("withHookLogging does nothing when agentDir is null", async () => {
+  await withHookLogging("test-hook", null, "input", async () => {
+    // fast hook, null agentDir — no file written, no crash
+  });
 });

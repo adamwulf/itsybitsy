@@ -1,15 +1,14 @@
 /**
- * Logs slow hook executions (>1s) to the agent's debug-logs directory.
+ * Logs every hook execution to the agent's debug-logs directory.
  *
- * Writes: debug-logs/<hookName>-<datetime>.log
- * Contains: raw stdin input + total elapsed time.
+ * Writes: debug-logs/<hookName>-<datetime>-<ok|error>.log
+ * Contains: raw stdin input, captured stdout output, and total elapsed time.
+ *
+ * TODO: In the future, only log hooks that take >1s or error.
  */
 
 import { join } from "path";
 import { mkdir, writeFile } from "fs/promises";
-
-/** Threshold in milliseconds — only log hooks slower than this. */
-const SLOW_THRESHOLD_MS = 1000;
 
 /**
  * Derive the agent directory from an explicit agentId or from the cwd.
@@ -35,18 +34,20 @@ export function resolveAgentDir(
 }
 
 /**
- * Format a timestamp as YYYYMMDD-HHmmss for filenames.
+ * Format a timestamp as YYYYMMDD-HHmmss.mmm for filenames (includes milliseconds).
  */
 function formatTimestamp(date: Date): string {
   const pad = (n: number) => String(n).padStart(2, "0");
+  const padMs = (n: number) => String(n).padStart(3, "0");
   return (
     `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}` +
-    `-${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`
+    `-${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}` +
+    `.${padMs(date.getMilliseconds())}`
   );
 }
 
 /**
- * Write a debug log for a slow hook or a hook error.
+ * Write a hook debug log file.
  * Failures are silently ignored — debug logging must never break a hook.
  */
 async function writeHookDebugLog(
@@ -54,6 +55,7 @@ async function writeHookDebugLog(
   rawStdin: string,
   elapsedMs: number,
   agentDir: string,
+  capturedOutput: string,
   error?: unknown,
 ): Promise<void> {
   try {
@@ -61,17 +63,15 @@ async function writeHookDebugLog(
     await mkdir(debugDir, { recursive: true });
 
     const timestamp = formatTimestamp(new Date());
-    const suffix = error ? "error" : "slow";
-    const filename = `${hookName}-${timestamp}-${suffix}.log`;
+    const suffix = error ? "error" : "ok";
+    const filename = `${timestamp}-${hookName}-${suffix}.log`;
     const logPath = join(debugDir, filename);
 
     const lines: string[] = [];
     lines.push(`hook: ${hookName}`);
+    lines.push(`result: ${error ? "ERROR" : "ok"}`);
     lines.push(`elapsed: ${(elapsedMs / 1000).toFixed(3)}s`);
     lines.push(`timestamp: ${new Date().toISOString()}`);
-    if (error) {
-      lines.push(`result: ERROR`);
-    }
     lines.push("");
     if (error) {
       lines.push("--- error ---");
@@ -85,6 +85,9 @@ async function writeHookDebugLog(
       }
       lines.push("");
     }
+    lines.push("--- stdout ---");
+    lines.push(capturedOutput || "(empty)");
+    lines.push("");
     lines.push("--- raw stdin ---");
     lines.push(rawStdin || "(empty)");
 
@@ -95,55 +98,66 @@ async function writeHookDebugLog(
 }
 
 /**
- * If elapsed > threshold, write a debug log file.
- * Failures are silently ignored — debug logging must never break a hook.
+ * Intercept process.stdout.write to capture hook output.
+ * Returns a restore function and a getter for the captured text.
+ * The original stdout still receives the data so hook behavior is unchanged.
  */
-export async function logSlowHook(
+function interceptStdout(): { restore: () => void; getCaptured: () => string } {
+  const chunks: string[] = [];
+  const originalWrite = process.stdout.write.bind(process.stdout);
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  process.stdout.write = function (chunk: any, ...rest: any[]): boolean {
+    const text = typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk);
+    chunks.push(text);
+    return originalWrite(chunk, ...rest);
+  } as typeof process.stdout.write;
+
+  return {
+    restore: () => { process.stdout.write = originalWrite; },
+    getCaptured: () => chunks.join(""),
+  };
+}
+
+/**
+ * Log a hook execution (success or error) to the agent's debug-logs.
+ */
+export async function logHookCall(
   hookName: string,
   rawStdin: string,
   elapsedMs: number,
   agentDir: string | null,
+  capturedOutput: string,
+  error?: unknown,
 ): Promise<void> {
-  if (elapsedMs <= SLOW_THRESHOLD_MS) return;
   if (!agentDir) return;
-  await writeHookDebugLog(hookName, rawStdin, elapsedMs, agentDir);
+  await writeHookDebugLog(hookName, rawStdin, elapsedMs, agentDir, capturedOutput, error);
 }
 
 /**
- * Log a hook error unconditionally (regardless of timing threshold).
- */
-export async function logHookError(
-  hookName: string,
-  rawStdin: string,
-  elapsedMs: number,
-  agentDir: string | null,
-  error: unknown,
-): Promise<void> {
-  if (!agentDir) return;
-  await writeHookDebugLog(hookName, rawStdin, elapsedMs, agentDir, error);
-}
-
-/**
- * Wrap a hook execution with timing, slow-hook logging, and error logging.
+ * Wrap a hook execution with timing, stdout capture, and debug logging.
  *
- * - If the hook takes >1s, writes a slow-hook debug log.
- * - If the hook throws, writes an error debug log (always, regardless of timing).
- * - Errors are re-thrown after logging so the hook's exit behavior is preserved.
+ * - Captures all stdout written by the hook.
+ * - Logs every call with timing, input, and output.
+ * - On error: logs the error, then re-throws so hook exit behavior is preserved.
  */
-export async function withSlowHookLogging(
+export async function withHookLogging(
   hookName: string,
   agentDir: string | null,
   rawStdin: string,
   hookFn: () => Promise<void>,
 ): Promise<void> {
+  const { restore, getCaptured } = interceptStdout();
   const start = performance.now();
   try {
     await hookFn();
     const elapsed = performance.now() - start;
-    await logSlowHook(hookName, rawStdin, elapsed, agentDir);
+    restore();
+    await logHookCall(hookName, rawStdin, elapsed, agentDir, getCaptured());
   } catch (error) {
     const elapsed = performance.now() - start;
-    await logHookError(hookName, rawStdin, elapsed, agentDir, error);
+    restore();
+    await logHookCall(hookName, rawStdin, elapsed, agentDir, getCaptured(), error);
     throw error;
   }
 }

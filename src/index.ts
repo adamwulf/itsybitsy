@@ -809,33 +809,33 @@ async function main() {
       const id = args[1];
       if (!id) { console.error("Usage: ib hook-check-path <agent-id>"); process.exit(1); }
       if (!isValidAgentId(id)) { console.error("Invalid agent ID"); process.exit(1); }
-      const { resolveAgentDir, withSlowHookLogging } = await import("./hooks/slow-hook-logger");
+      const { resolveAgentDir, withHookLogging } = await import("./hooks/slow-hook-logger");
       const { hookCheckPath } = await import("./hooks/agent-path");
       const stdin = await new Response(Bun.stdin.stream()).text();
       const agentDir = resolveAgentDir(process.cwd(), id);
-      await withSlowHookLogging("hook-check-path", agentDir, stdin, () => hookCheckPath(id, stdin));
+      await withHookLogging("hook-check-path", agentDir, stdin, () => hookCheckPath(id, stdin));
       break;
     }
     case "hook-status": {
       const id = args[1];
       if (!id) { console.error("Usage: ib hook-status <agent-id>"); process.exit(1); }
       if (!isValidAgentId(id)) { console.error("Invalid agent ID"); process.exit(1); }
-      const { resolveAgentDir, withSlowHookLogging } = await import("./hooks/slow-hook-logger");
+      const { resolveAgentDir, withHookLogging } = await import("./hooks/slow-hook-logger");
       const { hookStatus } = await import("./hooks/agent-status");
       const stdin = await new Response(Bun.stdin.stream()).text();
       const agentDir = resolveAgentDir(process.cwd(), id);
-      await withSlowHookLogging("hook-status", agentDir, stdin, () => hookStatus(id, stdin));
+      await withHookLogging("hook-status", agentDir, stdin, () => hookStatus(id, stdin));
       break;
     }
     case "hook-permission-denied": {
       const id = args[1];
       if (!id) { console.error("Usage: ib hook-permission-denied <agent-id>"); process.exit(1); }
       if (!isValidAgentId(id)) { console.error("Invalid agent ID"); process.exit(1); }
-      const { resolveAgentDir, withSlowHookLogging } = await import("./hooks/slow-hook-logger");
+      const { resolveAgentDir, withHookLogging } = await import("./hooks/slow-hook-logger");
       const { hookPermissionDenied } = await import("./hooks/permission-denied");
       const stdin = await new Response(Bun.stdin.stream()).text();
       const agentDir = resolveAgentDir(process.cwd(), id);
-      await withSlowHookLogging("hook-permission-denied", agentDir, stdin, () => hookPermissionDenied(id, stdin));
+      await withHookLogging("hook-permission-denied", agentDir, stdin, () => hookPermissionDenied(id, stdin));
       break;
     }
     case "inbox": {
@@ -911,31 +911,31 @@ async function main() {
       const subcommand = args[1];
       switch (subcommand) {
         case "intercept-task": {
-          const { resolveAgentDir, withSlowHookLogging } = await import("./hooks/slow-hook-logger");
+          const { resolveAgentDir, withHookLogging } = await import("./hooks/slow-hook-logger");
           const { hookInterceptTask } = await import("./hooks/intercept-task");
           const stdin = await new Response(Bun.stdin.stream()).text();
           const agentDir = resolveAgentDir(process.cwd());
-          await withSlowHookLogging("intercept-task", agentDir, stdin, () => hookInterceptTask(stdin));
+          await withHookLogging("intercept-task", agentDir, stdin, () => hookInterceptTask(stdin));
           break;
         }
         case "session-start": {
-          const { resolveAgentDir, withSlowHookLogging } = await import("./hooks/slow-hook-logger");
+          const { resolveAgentDir, withHookLogging } = await import("./hooks/slow-hook-logger");
           const { hookSessionStart } = await import("./hooks/session-start");
           const stdin = await new Response(Bun.stdin.stream()).text();
           const agentDir = resolveAgentDir(process.cwd());
-          await withSlowHookLogging("session-start", agentDir, stdin, () => hookSessionStart(stdin));
+          await withHookLogging("session-start", agentDir, stdin, () => hookSessionStart(stdin));
           break;
         }
         case "main-path": {
-          const { resolveAgentDir, withSlowHookLogging } = await import("./hooks/slow-hook-logger");
+          const { resolveAgentDir, withHookLogging } = await import("./hooks/slow-hook-logger");
           const { hookMainPath } = await import("./hooks/main-path");
           const stdin = await new Response(Bun.stdin.stream()).text();
           const agentDir = resolveAgentDir(process.cwd());
-          await withSlowHookLogging("main-path", agentDir, stdin, () => hookMainPath(stdin));
+          await withHookLogging("main-path", agentDir, stdin, () => hookMainPath(stdin));
           break;
         }
         case "inject-status": {
-          const { resolveAgentDir, withSlowHookLogging } = await import("./hooks/slow-hook-logger");
+          const { resolveAgentDir, withHookLogging } = await import("./hooks/slow-hook-logger");
           const { hookInjectStatus } = await import("./hooks/inject-status");
           const stdin = await new Response(Bun.stdin.stream()).text();
           const agentDir = resolveAgentDir(process.cwd());
@@ -948,7 +948,7 @@ async function main() {
             else if (flag === "--brief") mode = "brief";
             else if (flag === "--visible") visible = true;
           }
-          await withSlowHookLogging("inject-status", agentDir, stdin, () => hookInjectStatus({ mode, visible }, stdin));
+          await withHookLogging("inject-status", agentDir, stdin, () => hookInjectStatus({ mode, visible }, stdin));
           break;
         }
         case "install": {

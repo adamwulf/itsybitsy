@@ -616,6 +616,51 @@ function resolveWatchdogState(tmuxOutput: string, metaState: MetaState | undefin
 }
 
 /**
+ * Capture output from a dead tmux pane (remain-on-exit) and write it to debug-logs/.
+ * Called on first detection of a missing tmux session to preserve exit context.
+ */
+async function captureAndLogDeadPane(agentId: string, agentDir: string, tmuxSession: string): Promise<void> {
+  if (!isValidTmuxSession(tmuxSession)) return;
+  try {
+    // Check if the pane is dead (remain-on-exit kept it)
+    const deadCheck = spawnCtx.runner(
+      ["tmux", "display-message", "-p", "-t", tmuxSession, "#{pane_dead}"],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    const deadExitCode = await deadCheck.exited;
+    if (deadExitCode !== 0) return;
+    const deadOutput = await new Response(deadCheck.stdout).text();
+    if (deadOutput.trim() !== "1") return;
+
+    // Capture the last screen content
+    const captureProc = spawnCtx.runner(
+      ["tmux", "capture-pane", "-p", "-t", tmuxSession, "-e"],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    const captureExitCode = await captureProc.exited;
+    if (captureExitCode !== 0) return;
+    const captureOutput = await new Response(captureProc.stdout).text();
+
+    // Write to debug-logs/
+    const debugLogsDir = join(agentDir, "debug-logs");
+    mkdirSync(debugLogsDir, { recursive: true });
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const outFile = join(debugLogsDir, `watchdog-${timestamp}-exit.txt`);
+    await Bun.write(outFile, captureOutput);
+
+    const relPath = `debug-logs/watchdog-${timestamp}-exit.txt`;
+    await logAgent(agentDir, `[watchdog] Captured dead pane output → ${relPath}`);
+
+    // Kill the dead pane so cleanup proceeds normally
+    const killProc = spawnCtx.runner(
+      ["tmux", "kill-pane", "-t", tmuxSession],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    await killProc.exited;
+  } catch { /* don't crash the watchdog */ }
+}
+
+/**
  * Run a self-contained watchdog loop for a single agent.
  * Exits cleanly when:
  *   (a) the agent's worktree directory no longer exists, OR
@@ -661,6 +706,7 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
     if (output === null) {
       // Tmux session missing — start or continue grace period
       if (tmuxGoneSince === null) {
+        await captureAndLogDeadPane(agentId, agentDir, tmuxSession);
         tmuxGoneSince = nowFn();
       } else if (nowFn() - tmuxGoneSince >= TMUX_GONE_GRACE_MS) {
         // Exit condition (b): tmux gone for >10s

@@ -6,8 +6,7 @@ import { join } from "path";
 import { newAgent } from "../ib-commands";
 import type { IbCommandResult } from "../ib-commands";
 import { AGENT_CWD_PATTERN } from "./shared";
-import { canSpawnChildren as checkCanSpawnChildren } from "../agents";
-import type { AgentMeta } from "../agents";
+import { loadAgentType } from "../agent-types";
 
 export interface InterceptResult {
   action: "skip" | "intercept";
@@ -117,12 +116,12 @@ export async function processTaskIntercept(
   const coordBlock = await checkCoordinatorBashRestrictions(input);
   if (coordBlock) return coordBlock;
 
-  // 1. Only intercept Task, Agent, and TaskCreate tools
-  if (input.tool_name !== "Task" && input.tool_name !== "Agent" && input.tool_name !== "TaskCreate") {
+  // 1. Only intercept Task and Agent tools
+  if (input.tool_name !== "Task" && input.tool_name !== "Agent") {
     return { action: "skip" };
   }
 
-  // 2. Check if calling from a worker agent — workers cannot spawn sub-agents
+  // 2. Check if calling from a worker agent or from an agent type that can't spawn children
   const cwdMatch = AGENT_CWD_PATTERN.exec(input.cwd);
   if (cwdMatch) {
     const agentId = cwdMatch[1]!;
@@ -135,20 +134,19 @@ export async function processTaskIntercept(
     try {
       const metaFile = Bun.file(join(agentDir, "meta.json"));
       if (await metaFile.exists()) {
-        const meta = await metaFile.json() as AgentMeta;
-        // Check if this agent type can spawn children
-        const canSpawn = await checkCanSpawnChildren(meta);
-        if (!canSpawn) {
-          return {
-            action: "intercept",
-            output: {
-              hookSpecificOutput: {
-                hookEventName: "PreToolUse",
-                permissionDecision: "deny",
-                permissionDecisionReason: "Workers cannot create tasks or spawn sub-agents. Only manager agents can spawn workers.",
-              },
-            },
-          };
+        const meta = await metaFile.json() as Record<string, unknown>;
+
+        // Check if meta.worker === true (backward compat)
+        if (meta.worker === true) {
+          return { action: "skip" };
+        }
+
+        // Check if agentType has canSpawnChildren === false
+        if (meta.agentType && typeof meta.agentType === "string") {
+          const agentType = await loadAgentType(meta.agentType);
+          if (!agentType.canSpawnChildren) {
+            return { action: "skip" };
+          }
         }
       }
     } catch {

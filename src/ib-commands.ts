@@ -8,8 +8,7 @@ import { join, dirname } from "path";
 import { readdir, chmod, rm, mkdir } from "fs/promises";
 import { homedir } from "node:os";
 import type { Agent } from "./agents";
-import { writeAgentState, isWorkerLike, getAgentType, canSpawnChildren } from "./agents";
-import { resolveAgentType } from "./agent-types";
+import { writeAgentState } from "./agents";
 import {
   logAgent,
   removeAgentQuestions,
@@ -29,6 +28,7 @@ import type { SpawnFn } from "./types";
 import { isValidModel, isValidToolList, isValidTmuxSession, isValidSessionId, isValidShellPath, shellQuote } from "./validation";
 import { getSavedTmuxWidth } from "./tui/layout";
 import { buildPerRepoCoordinatorSettings, checkCoordinatorExists, getCoordinatorAgentId } from "./coordinator";
+import { loadAgentType } from "./agent-types";
 
 export interface IbCommandResult {
   ok: boolean;
@@ -229,8 +229,8 @@ export async function nukeAgent(agent: Agent): Promise<IbCommandResult> {
   // Get all descendants (includes the agent itself)
   const descendants = await getDescendantsRecursive(agentsDir, agent.id);
 
-  // Check if this is a worker-like agent with no children — reject
-  if (isWorkerLike(agent.meta) && descendants.length <= 1) {
+  // Check if this is a worker with no children — reject
+  if (agent.meta.worker && descendants.length <= 1) {
     return {
       ok: false,
       exitCode: 1,
@@ -643,8 +643,8 @@ export async function reassignAgent(agent: Agent, newManager: string | null): Pr
         return { ok: false, exitCode: 1, stdout: "", stderr: `New manager '${newManager}' not found` };
       }
       const parentMeta = await file.json();
-      // Validate not a worker-like agent
-      if (isWorkerLike(parentMeta)) {
+      // Validate not a worker
+      if (parentMeta.worker) {
         return { ok: false, exitCode: 1, stdout: "", stderr: `Cannot reassign to worker agent '${newManager}'` };
       }
     } catch {
@@ -1284,11 +1284,10 @@ async function getRepoId(repoPath: string): Promise<string> {
  */
 async function buildAgentSettings(
   repoPath: string,
-  agentType: string,
+  agentType: "manager" | "worker",
   agentId: string,
   configAllow: string[],
-  configDeny: string[],
-  canSpawnChildrenOverride?: boolean
+  configDeny: string[]
 ): Promise<string> {
   // Start with existing settings if available
   let baseSettings: Record<string, unknown> = {};
@@ -1310,7 +1309,7 @@ async function buildAgentSettings(
     "Bash(pwd:*)", "Bash(ls:*)", "Bash(head:*)", "Bash(tail:*)",
     "Bash(cat:*)", "Bash(grep:*)",
     "Read", "Write", "Edit", "MultiEdit", "Glob", "Grep", "LS",
-    "TodoWrite", "Task", "TaskCreate", "Agent", "TaskOutput", "KillShell", "NotebookEdit",
+    "TodoWrite", "Task", "Agent", "TaskOutput", "KillShell", "NotebookEdit",
     "WebFetch", "WebSearch", "AskUserQuestion", "ToolSearch",
   ];
   const blockedTools = ["EnterPlanMode", "ExitPlanMode"];
@@ -1325,12 +1324,8 @@ async function buildAgentSettings(
   const allDeny = [...new Set([...existingDeny, ...blockedTools, ...configDeny])];
 
   // Check if intercept hook should be added (reuse already-parsed baseSettings)
-  // Managers and custom types with canSpawnChildren get the intercept hook
-  const shouldCheckIntercept = canSpawnChildrenOverride !== undefined
-    ? canSpawnChildrenOverride
-    : agentType === "manager";
   let addIntercept = false;
-  if (shouldCheckIntercept) {
+  if (agentType === "manager") {
     const hooksObj = baseSettings.hooks as Record<string, unknown> | undefined;
     const preToolUse = hooksObj?.PreToolUse;
     if (Array.isArray(preToolUse)) {
@@ -1355,7 +1350,7 @@ async function buildAgentSettings(
   ];
   if (addIntercept) {
     preToolUseHooks.push(
-      { matcher: "Task|Agent|TaskCreate", hooks: [{ type: "command", command: "ib hooks intercept-task" }] }
+      { matcher: "Task|Agent", hooks: [{ type: "command", command: "ib hooks intercept-task" }] }
     );
   }
 
@@ -1435,29 +1430,10 @@ export async function newAgent(
   const workerMode = opts?.worker === true;
   const coordinatorMode = opts?.coordinator === true;
   const yoloMode = opts?.yolo === true;
-  const customType = opts?.type;
 
   // Coordinator mutual exclusivity checks
   if (coordinatorMode && workerMode) {
     return { ok: false, exitCode: 1, stdout: "", stderr: "Error: --coordinator and --worker are mutually exclusive" };
-  }
-
-  // Type mutual exclusivity checks
-  if (customType && workerMode) {
-    return { ok: false, exitCode: 1, stdout: "", stderr: "Error: --type and --worker are mutually exclusive" };
-  }
-  if (customType && coordinatorMode) {
-    return { ok: false, exitCode: 1, stdout: "", stderr: "Error: --type and --coordinator are mutually exclusive" };
-  }
-
-  // Resolve custom type if specified
-  let resolvedType: import("./agent-types").AgentTypeDefinition | undefined;
-  if (customType) {
-    try {
-      resolvedType = await resolveAgentType(customType);
-    } catch (err) {
-      return { ok: false, exitCode: 1, stdout: "", stderr: `Error: ${(err as Error).message}` };
-    }
   }
   if (coordinatorMode && !useWorktree) {
     return { ok: false, exitCode: 1, stdout: "", stderr: "Error: --no-worktree is not allowed with --coordinator" };
@@ -1519,7 +1495,7 @@ export async function newAgent(
     // Check manager is not a worker
     try {
       const managerMeta = await Bun.file(join(agentsDir, manager, "meta.json")).json();
-      if (isWorkerLike(managerMeta)) {
+      if (managerMeta.worker === true) {
         return { ok: false, exitCode: 1, stdout: "", stderr: `Error: '${manager}' is a worker agent and cannot manage sub-agents` };
       }
     } catch { /* ignore */ }
@@ -1554,11 +1530,34 @@ export async function newAgent(
   const config = await readConfig();
   const customPrompts = await loadCustomPrompts(rootRepoPath);
 
+  // Resolve agent type: --type > --worker/--coordinator flags > default to manager
+  let resolvedTypeName = opts?.type ?? "";
+  if (!resolvedTypeName) {
+    if (workerMode) {
+      resolvedTypeName = "worker";
+    } else if (coordinatorMode) {
+      resolvedTypeName = "coordinator";
+    } else {
+      resolvedTypeName = "manager";
+    }
+  }
+
+  // Load the agent type definition
+  const agentTypeDef = await loadAgentType(resolvedTypeName);
+
+  // Validate that type's canSpawnChildren matches mode flags
+  if (agentTypeDef.canSpawnChildren && workerMode) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Error: agent type '${resolvedTypeName}' has canSpawnChildren=true but --worker was specified` };
+  }
+
+  // Update workerMode based on agent type
+  const finalWorkerMode = !agentTypeDef.canSpawnChildren;
+
   // 7. Model fallback: --model > type.model > config.model > 'opus'
-  //    For coordinators: --model > coordinator.model > 'opus'
+  //    For coordinators: --model > type.model > coordinator.model > 'opus'
   let model = opts?.model ?? "";
-  if (!model && resolvedType?.model) {
-    model = resolvedType.model;
+  if (!model && agentTypeDef.model) {
+    model = agentTypeDef.model;
   }
   if (!model) {
     if (coordinatorMode) {
@@ -1577,18 +1576,16 @@ export async function newAgent(
   }
 
   // Config permissions
-  // Determine the effective agent type name for permission lookup
-  const agentType = customType ?? (workerMode ? "worker" : "manager");
-  const roleAllow = (config[`permissions.${agentType}.allow`]?.value as string[] | undefined) ?? [];
-  const roleDeny = (config[`permissions.${agentType}.deny`]?.value as string[] | undefined) ?? [];
+  const roleAllow = (config[`permissions.${resolvedTypeName}.allow`]?.value as string[] | undefined) ?? [];
+  const roleDeny = (config[`permissions.${resolvedTypeName}.deny`]?.value as string[] | undefined) ?? [];
   const allAllow = (config["permissions.all.allow"]?.value as string[] | undefined) ?? [];
   const allDeny = (config["permissions.all.deny"]?.value as string[] | undefined) ?? [];
 
-  // Permission resolution order: type frontmatter > config role > config all
-  const typeAllow = resolvedType?.permissions.allow ?? [];
-  const typeDeny = resolvedType?.permissions.deny ?? [];
-  const configAllow = [...new Set([...typeAllow, ...roleAllow, ...allAllow])];
-  const configDeny = [...new Set([...typeDeny, ...roleDeny, ...allDeny])];
+  // Merge type definition permissions with config permissions
+  const typeAllow = agentTypeDef.permissions?.allow ?? [];
+  const typeDeny = agentTypeDef.permissions?.deny ?? [];
+  const configAllow = [...new Set([...roleAllow, ...allAllow, ...typeAllow])];
+  const configDeny = [...new Set([...roleDeny, ...allDeny, ...typeDeny])];
 
   // 8. Max agents check — coordinators bypass this (SPEC §12.4.3)
   if (!coordinatorMode) {
@@ -1673,14 +1670,16 @@ export async function newAgent(
           PermissionRequest: [{ matcher: "*", hooks: [{ type: "command", command: hookCmd }] }],
           PreToolUse: [
             { matcher: "*", hooks: [{ type: "command", command: `ib hook-check-path ${id}` }] },
-            { matcher: "Task|Agent|TaskCreate|Bash", hooks: [{ type: "command", command: "ib hooks intercept-task" }] },
+            { matcher: "Task|Agent|Bash", hooks: [{ type: "command", command: "ib hooks intercept-task" }] },
           ],
           SessionStart: [{ hooks: [{ type: "command", command: "ib hooks session-start" }] }],
         },
       };
       settingsContent = JSON.stringify(coordSettingsObj, null, 2);
     } else {
-      settingsContent = await buildAgentSettings(rootRepoPath, agentType, id, configAllow, configDeny, resolvedType?.canSpawnChildren);
+      // Map agent type to manager/worker for buildAgentSettings
+      const managerOrWorker: "manager" | "worker" = finalWorkerMode ? "worker" : "manager";
+      settingsContent = await buildAgentSettings(rootRepoPath, managerOrWorker, id, configAllow, configDeny);
     }
     await Bun.write(join(agentDir, "repo", ".claude", "settings.local.json"), settingsContent);
   } else {
@@ -1719,13 +1718,11 @@ export async function newAgent(
     created: now.toISOString(),
     created_epoch: Math.floor(now.getTime() / 1000),
     worktree: useWorktree,
-    worker: customType ? (customType === "worker") : workerMode,
+    worker: finalWorkerMode,
+    agentType: resolvedTypeName,
     yolo: yoloMode,
     model: model || null,
   };
-  if (customType) {
-    metaJson.type = customType;
-  }
   if (coordinatorMode) {
     metaJson.coordinator = true;
   }
@@ -1735,7 +1732,7 @@ export async function newAgent(
   if (manager) {
     await logAgent(agentDir, `Agent created (manager: ${manager}, prompt: ${prompt})`);
     const managerDir = join(agentsDir, manager);
-    const typeLabel = customType ?? (workerMode ? "worker" : "manager");
+    const typeLabel = finalWorkerMode ? "worker" : "manager";
     await logAgent(managerDir, `Spawned ${typeLabel} subagent: ${id} (prompt: ${prompt})`);
   } else {
     await logAgent(agentDir, `Agent created (prompt: ${prompt})`);
@@ -1745,8 +1742,7 @@ export async function newAgent(
   const createPRs = config.createPullRequests?.value === true;
   let completionInstructions = "";
 
-  const effectiveWorkerMode = workerMode || (customType !== undefined && customType !== "manager" && !resolvedType?.canSpawnChildren);
-  if (useWorktree && !effectiveWorkerMode) {
+  if (useWorktree && !finalWorkerMode) {
     // Check for gh and remote
     const hasGhResult = await newAgentSpawnCtx.run(["which", "gh"]);
     const hasGh = hasGhResult.exitCode === 0;
@@ -1770,9 +1766,9 @@ When your task is complete:
   }
 
   let customRolePrompt = "";
-  if ((workerMode || customType === "worker") && customPrompts.worker) {
+  if (finalWorkerMode && customPrompts.worker) {
     customRolePrompt = `[CUSTOM WORKER INSTRUCTIONS]\n${customPrompts.worker}\n\n`;
-  } else if (!workerMode && !customType && customPrompts.manager) {
+  } else if (!finalWorkerMode && customPrompts.manager) {
     customRolePrompt = `[CUSTOM MANAGER INSTRUCTIONS]\n${customPrompts.manager}\n\n`;
   }
 
@@ -2746,7 +2742,7 @@ export async function installInterceptHook(_repoPath: string, settingsPath?: str
   settings.hooks = hooks;
   if (!Array.isArray(hooks.PreToolUse)) hooks.PreToolUse = [];
   (hooks.PreToolUse as unknown[]).push({
-    matcher: "Task|Agent|TaskCreate",
+    matcher: "Task|Agent",
     hooks: [{ type: "command", command: "ib hooks intercept-task" }],
   });
 

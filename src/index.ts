@@ -7,7 +7,6 @@
 import { join } from "path";
 import { addRepo, removeRepo, listRepos, repoDisplayName, type RepoEntry } from "./registry";
 import type { Agent, FlatEntry } from "./agents";
-import { isWorkerLike, getAgentType } from "./agents";
 import { isValidAgentId } from "./validation";
 
 const args = process.argv.slice(2);
@@ -164,7 +163,6 @@ async function main() {
           state: a.state,
           age: a.age,
           model: a.meta.model,
-          type: getAgentType(a.meta),
           worker: a.meta.worker,
           manager: a.meta.manager ?? null,
           repo: a.repoName,
@@ -214,7 +212,7 @@ async function main() {
         } else {
           for (const { agent, depth } of agentsToShow) {
             const indent = "  ".repeat(depth);
-            const icon = isWorkerLike(agent.meta) ? "⚙" : "◆";
+            const icon = agent.meta.worker ? "⚙" : "◆";
             const state = displayState(agent.state);
             const colorCode = stateColors[state] ?? DIM;
             const orphanMark = agent.orphaned ? "⚠ " : "";
@@ -310,7 +308,7 @@ async function main() {
         for (const entry of flat) {
           if (entry.kind !== "agent") continue;
           const orphanedPrefix = entry.agent.orphaned ? "⚠ " : "";
-          const icon = isWorkerLike(entry.agent.meta) ? "⚙" : "◆";
+          const icon = entry.agent.meta.worker ? "⚙" : "◆";
           const prefix = `${entry.connector}${orphanedPrefix}${icon} ${entry.agent.id}`;
           rowByEntry.set(entry, {
             prefix,
@@ -420,7 +418,6 @@ async function main() {
       console.log(`Repo:         ${agent.repoName} (${agent.repoPath})`);
       console.log(`State:        ${agent.state}`);
       console.log(`Model:        ${m.model}`);
-      console.log(`Type:         ${getAgentType(m)}`);
       console.log(`Worker:       ${m.worker}`);
       console.log(`Manager:      ${m.manager ?? "none"}`);
       console.log(`Created:      ${m.created}`);
@@ -568,6 +565,7 @@ async function main() {
       for (let i = 0; i < ibArgs.length; i++) {
         const arg = ibArgs[i]!;
         if (arg === "--worker") { opts.worker = true; }
+        else if (arg === "--coordinator") { opts.coordinator = true; }
         else if (arg === "--type") {
           if (!ibArgs[i + 1]) { console.error("Error: --type requires a value"); process.exit(1); }
           opts.type = ibArgs[++i];
@@ -610,6 +608,16 @@ async function main() {
           process.exit(1);
         }
         else { promptParts.push(arg); }
+      }
+
+      // Check --type / --worker / --coordinator mutual exclusivity
+      if (opts.type && opts.worker) {
+        console.error("Error: --type and --worker are mutually exclusive");
+        process.exit(1);
+      }
+      if (opts.type && opts.coordinator) {
+        console.error("Error: --type and --coordinator are mutually exclusive");
+        process.exit(1);
       }
       const prompt = promptParts.join(" ");
       if (!prompt) {

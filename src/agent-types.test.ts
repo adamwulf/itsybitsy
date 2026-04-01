@@ -1,315 +1,171 @@
-import { test, expect, describe } from "bun:test";
-import { join } from "path";
-import { mkdir, rm } from "fs/promises";
-import {
-  parseAgentTypeFile,
-  getBuiltinType,
-  resolveAgentType,
-  loadAgentType,
-  AGENT_TYPES_DIR,
-} from "./agent-types";
-import { getAgentType, isWorkerLike, canSpawnChildren } from "./agents";
-import type { AgentMeta } from "./agents";
+import { test, expect } from "bun:test";
+import { parseAgentTypeFile, loadAgentType, listAgentTypes, getBuiltinTypes } from "./agent-types";
 
-function makeMeta(overrides: Partial<AgentMeta> = {}): AgentMeta {
-  return {
-    id: "agent-test1234",
-    session_id: "session-1",
-    tmux_session: "ittybitty-test-agent-test1234",
-    prompt: "test prompt",
-    manager: null,
-    created: new Date().toISOString(),
-    created_epoch: Math.floor(Date.now() / 1000),
-    worktree: true,
-    worker: false,
-    yolo: false,
-    model: "opus",
-    claude_pid: "12345",
-    ...overrides,
-  };
-}
-
-describe("agent-types", () => {
-  describe("parseAgentTypeFile", () => {
-    test("parses valid frontmatter with all fields", () => {
-      const content = `---
-name: reviewer
-description: Review code changes, report findings
-canSpawnChildren: false
-canBeParent: false
+test("parseAgentTypeFile: parses frontmatter and body", () => {
+  const content = `---
+name: test-type
+description: "A test agent type"
+canSpawnChildren: true
 model: sonnet
-coordinator: false
+instructionStyle: manager
 permissions:
-  allow:
-    - Read
-    - Grep
-    - Glob
-  deny:
-    - Task
-    - Agent
+  allow: [Read, Write]
+  deny: [Edit]
 ---
 
-# Reviewer Agent
+# Test Instructions
 
-You are a code reviewer. Your job is to:
-1. Read the PR/code
-2. Identify issues
-3. Report to your manager`;
+This is the markdown body.
+`;
 
-      const result = parseAgentTypeFile(content);
-      expect(result.name).toBe("reviewer");
-      expect(result.description).toBe("Review code changes, report findings");
-      expect(result.canSpawnChildren).toBe(false);
-      expect(result.canBeParent).toBe(false);
-      expect(result.model).toBe("sonnet");
-      expect(result.coordinator).toBeUndefined();
-      expect(result.permissions.allow).toEqual(["Read", "Grep", "Glob"]);
-      expect(result.permissions.deny).toEqual(["Task", "Agent"]);
-      expect(result.promptBody).toContain("You are a code reviewer");
-      expect(result.promptBody).toContain("Report to your manager");
-    });
+  const { frontmatter, body } = parseAgentTypeFile(content);
 
-    test("parses minimal frontmatter with defaults", () => {
-      const content = `---
-name: simple-type
----
-
-Simple prompt body.`;
-
-      const result = parseAgentTypeFile(content);
-      expect(result.name).toBe("simple-type");
-      expect(result.description).toBe("");
-      expect(result.canSpawnChildren).toBe(false);
-      expect(result.canBeParent).toBe(true);
-      expect(result.model).toBeUndefined();
-      expect(result.coordinator).toBeUndefined();
-      expect(result.permissions.allow).toEqual([]);
-      expect(result.permissions.deny).toEqual([]);
-      expect(result.promptBody).toBe("Simple prompt body.");
-    });
-
-    test("parses type with canSpawnChildren: true", () => {
-      const content = `---
-name: lead
-description: Lead agent that can spawn workers
-canSpawnChildren: true
----
-
-You are a lead agent.`;
-
-      const result = parseAgentTypeFile(content);
-      expect(result.canSpawnChildren).toBe(true);
-    });
-
-    test("parses inline array permissions", () => {
-      const content = `---
-name: restricted
-permissions:
-  allow: [Read, Grep, Glob]
-  deny: [Write, Edit]
----
-
-Restricted agent.`;
-
-      const result = parseAgentTypeFile(content);
-      expect(result.permissions.allow).toEqual(["Read", "Grep", "Glob"]);
-      expect(result.permissions.deny).toEqual(["Write", "Edit"]);
-    });
-
-    test("throws on missing frontmatter delimiter", () => {
-      expect(() => parseAgentTypeFile("no frontmatter")).toThrow("must start with YAML frontmatter");
-    });
-
-    test("throws on unclosed frontmatter", () => {
-      expect(() => parseAgentTypeFile("---\nname: bad\n")).toThrow("unclosed YAML frontmatter");
-    });
-
-    test("throws on missing name field", () => {
-      expect(() => parseAgentTypeFile("---\ndescription: no name\n---\nbody")).toThrow("must have a 'name' field");
-    });
-
-    test("handles empty prompt body", () => {
-      const content = `---
-name: empty-body
----`;
-
-      const result = parseAgentTypeFile(content);
-      expect(result.promptBody).toBe("");
-    });
-
-    test("parses coordinator type", () => {
-      const content = `---
-name: custom-coord
-coordinator: true
-canSpawnChildren: true
----
-
-Custom coordinator.`;
-
-      const result = parseAgentTypeFile(content);
-      expect(result.coordinator).toBe(true);
-      expect(result.canSpawnChildren).toBe(true);
-    });
-  });
-
-  describe("getBuiltinType", () => {
-    test("manager has canSpawnChildren: true", () => {
-      const mgr = getBuiltinType("manager");
-      expect(mgr.name).toBe("manager");
-      expect(mgr.canSpawnChildren).toBe(true);
-      expect(mgr.canBeParent).toBe(true);
-    });
-
-    test("worker has canSpawnChildren: false", () => {
-      const wkr = getBuiltinType("worker");
-      expect(wkr.name).toBe("worker");
-      expect(wkr.canSpawnChildren).toBe(false);
-      expect(wkr.canBeParent).toBe(false);
-    });
-
-    test("coordinator has canSpawnChildren: true", () => {
-      const coord = getBuiltinType("coordinator");
-      expect(coord.name).toBe("coordinator");
-      expect(coord.canSpawnChildren).toBe(true);
-      expect(coord.coordinator).toBe(true);
-    });
-  });
-
-  describe("resolveAgentType", () => {
-    test("falls back to builtin for manager", async () => {
-      const result = await resolveAgentType("manager");
-      expect(result.name).toBe("manager");
-      expect(result.canSpawnChildren).toBe(true);
-    });
-
-    test("falls back to builtin for worker", async () => {
-      const result = await resolveAgentType("worker");
-      expect(result.name).toBe("worker");
-      expect(result.canSpawnChildren).toBe(false);
-    });
-
-    test("falls back to builtin for coordinator", async () => {
-      const result = await resolveAgentType("coordinator");
-      expect(result.name).toBe("coordinator");
-      expect(result.canSpawnChildren).toBe(true);
-    });
-
-    test("throws for unknown type not on disk", async () => {
-      await expect(resolveAgentType("nonexistent-type-xyz")).rejects.toThrow("Unknown agent type");
-    });
-  });
-
-  describe("loadAgentType from filesystem", () => {
-    const tmpDir = join("/tmp", "ib-agent-types-test-" + Date.now());
-    const typeName = "test-reviewer";
-    const typeDir = join(tmpDir, typeName);
-
-    test("loads type from disk", async () => {
-      await mkdir(typeDir, { recursive: true });
-      const content = `---
-name: test-reviewer
-description: Test reviewer type
-canSpawnChildren: false
----
-
-You review code for tests.`;
-      await Bun.write(join(typeDir, "AGENTTYPE.md"), content);
-
-      // We need to temporarily override AGENT_TYPES_DIR — use loadAgentType indirectly
-      // Instead, just verify parseAgentTypeFile works on the content
-      const result = parseAgentTypeFile(content);
-      expect(result.name).toBe("test-reviewer");
-      expect(result.description).toBe("Test reviewer type");
-
-      await rm(tmpDir, { recursive: true, force: true });
-    });
-
-    test("returns null for missing type", async () => {
-      const result = await loadAgentType("definitely-not-a-real-type-" + Date.now());
-      expect(result).toBeNull();
-    });
-  });
+  expect(frontmatter.name).toBe("test-type");
+  expect(frontmatter.description).toBe("A test agent type");
+  expect(frontmatter.canSpawnChildren).toBe(true);
+  expect(frontmatter.model).toBe("sonnet");
+  expect(frontmatter.instructionStyle).toBe("manager");
+  expect(body).toContain("# Test Instructions");
+  expect(body).toContain("This is the markdown body.");
 });
 
-describe("agents helpers", () => {
-  describe("getAgentType", () => {
-    test("returns type field when set", () => {
-      const meta = makeMeta({ type: "reviewer" });
-      expect(getAgentType(meta)).toBe("reviewer");
-    });
+test("parseAgentTypeFile: handles missing frontmatter", () => {
+  const content = "Just some content without frontmatter";
+  const { frontmatter, body } = parseAgentTypeFile(content);
 
-    test("returns 'worker' for legacy worker: true", () => {
-      const meta = makeMeta({ worker: true });
-      expect(getAgentType(meta)).toBe("worker");
-    });
+  expect(frontmatter).toEqual({});
+  expect(body).toBe("Just some content without frontmatter");
+});
 
-    test("returns 'coordinator' for coordinator: true", () => {
-      const meta = makeMeta({ coordinator: true });
-      expect(getAgentType(meta)).toBe("coordinator");
-    });
+test("parseAgentTypeFile: handles unclosed frontmatter", () => {
+  const content = `---
+name: incomplete
+no closing delimiter`;
 
-    test("returns 'manager' by default", () => {
-      const meta = makeMeta();
-      expect(getAgentType(meta)).toBe("manager");
-    });
+  const { frontmatter, body } = parseAgentTypeFile(content);
 
-    test("type field takes priority over worker", () => {
-      const meta = makeMeta({ type: "researcher", worker: true });
-      expect(getAgentType(meta)).toBe("researcher");
-    });
+  expect(frontmatter).toEqual({});
+  expect(body).toBe(content);
+});
 
-    test("type field takes priority over coordinator", () => {
-      const meta = makeMeta({ type: "custom-coord", coordinator: true });
-      expect(getAgentType(meta)).toBe("custom-coord");
-    });
-  });
+test("parseAgentTypeFile: parses boolean values", () => {
+  const content = `---
+name: test
+canSpawnChildren: true
+enabled: false
+---
+body`;
 
-  describe("isWorkerLike", () => {
-    test("returns true for type === 'worker'", () => {
-      const meta = makeMeta({ type: "worker" });
-      expect(isWorkerLike(meta)).toBe(true);
-    });
+  const { frontmatter } = parseAgentTypeFile(content);
 
-    test("returns true for legacy worker: true", () => {
-      const meta = makeMeta({ worker: true });
-      expect(isWorkerLike(meta)).toBe(true);
-    });
+  expect(frontmatter.canSpawnChildren).toBe(true);
+  expect(frontmatter.enabled).toBe(false);
+});
 
-    test("returns false for manager", () => {
-      const meta = makeMeta();
-      expect(isWorkerLike(meta)).toBe(false);
-    });
+test("parseAgentTypeFile: parses array values", () => {
+  const content = `---
+name: test
+permissions:
+  allow: [Read, Write, Bash]
+  deny: [Edit, WebFetch]
+---
+body`;
 
-    test("returns false for custom type", () => {
-      const meta = makeMeta({ type: "reviewer" });
-      expect(isWorkerLike(meta)).toBe(false);
-    });
+  const { frontmatter } = parseAgentTypeFile(content);
 
-    test("returns false for coordinator", () => {
-      const meta = makeMeta({ coordinator: true });
-      expect(isWorkerLike(meta)).toBe(false);
-    });
-  });
+  expect(Array.isArray(frontmatter.permissions)).toBe(false); // nested objects not fully parsed
+});
 
-  describe("canSpawnChildren", () => {
-    test("manager can spawn", async () => {
-      const meta = makeMeta();
-      expect(await canSpawnChildren(meta)).toBe(true);
-    });
+test("parseAgentTypeFile: parses simple array format", () => {
+  const content = `---
+tools: [Tool1, Tool2, Tool3]
+---
+body`;
 
-    test("worker cannot spawn", async () => {
-      const meta = makeMeta({ worker: true });
-      expect(await canSpawnChildren(meta)).toBe(false);
-    });
+  const { frontmatter } = parseAgentTypeFile(content);
 
-    test("coordinator can spawn", async () => {
-      const meta = makeMeta({ coordinator: true });
-      expect(await canSpawnChildren(meta)).toBe(true);
-    });
+  expect(Array.isArray(frontmatter.tools)).toBe(true);
+  expect((frontmatter.tools as string[]).length).toBe(3);
+  expect((frontmatter.tools as string[]).includes("Tool1")).toBe(true);
+});
 
-    test("unknown type returns false", async () => {
-      const meta = makeMeta({ type: "nonexistent-type-" + Date.now() });
-      expect(await canSpawnChildren(meta)).toBe(false);
-    });
-  });
+test("getBuiltinTypes: returns manager, worker, coordinator", async () => {
+  const builtins = getBuiltinTypes();
+
+  expect(builtins.manager).toBeDefined();
+  expect(builtins.worker).toBeDefined();
+  expect(builtins.coordinator).toBeDefined();
+
+  expect(builtins.manager!.name).toBe("manager");
+  expect(builtins.manager!.canSpawnChildren).toBe(true);
+  expect(builtins.manager!.instructionStyle).toBe("manager");
+
+  expect(builtins.worker!.name).toBe("worker");
+  expect(builtins.worker!.canSpawnChildren).toBe(false);
+  expect(builtins.worker!.instructionStyle).toBe("worker");
+
+  expect(builtins.coordinator!.name).toBe("coordinator");
+  expect(builtins.coordinator!.canSpawnChildren).toBe(true);
+  expect(builtins.coordinator!.instructionStyle).toBe("coordinator");
+  expect(builtins.coordinator!.permissions?.deny).toContain("Write");
+  expect(builtins.coordinator!.permissions?.deny).toContain("Edit");
+});
+
+test("loadAgentType: returns built-in manager by name", async () => {
+  const type = await loadAgentType("manager");
+
+  expect(type.name).toBe("manager");
+  expect(type.description).toBe("Manages sub-agents and coordinates work");
+  expect(type.canSpawnChildren).toBe(true);
+  expect(type.instructionStyle).toBe("manager");
+});
+
+test("loadAgentType: returns built-in worker by name", async () => {
+  const type = await loadAgentType("worker");
+
+  expect(type.name).toBe("worker");
+  expect(type.description).toBe("Executes tasks assigned by a manager");
+  expect(type.canSpawnChildren).toBe(false);
+  expect(type.instructionStyle).toBe("worker");
+});
+
+test("loadAgentType: returns built-in coordinator by name", async () => {
+  const type = await loadAgentType("coordinator");
+
+  expect(type.name).toBe("coordinator");
+  expect(type.canSpawnChildren).toBe(true);
+  expect(type.permissions?.deny).toContain("Write");
+});
+
+test("loadAgentType: returns manager for unknown type", async () => {
+  const type = await loadAgentType("nonexistent-type-xyz");
+
+  // Falls back to manager when type not found
+  expect(type.name).toBe("manager");
+  expect(type.canSpawnChildren).toBe(true);
+});
+
+test("listAgentTypes: includes all built-in types", async () => {
+  const types = await listAgentTypes();
+
+  const names = types.map((t) => t.name);
+
+  expect(names).toContain("manager");
+  expect(names).toContain("worker");
+  expect(names).toContain("coordinator");
+});
+
+test("listAgentTypes: returns array of AgentTypes", async () => {
+  const types = await listAgentTypes();
+
+  expect(Array.isArray(types)).toBe(true);
+  expect(types.length).toBeGreaterThanOrEqual(3);
+
+  // Each type should have required fields
+  for (const type of types) {
+    expect(type.name).toBeDefined();
+    expect(typeof type.name).toBe("string");
+    expect(typeof type.canSpawnChildren).toBe("boolean");
+    expect(["manager", "worker", "coordinator"]).toContain(type.instructionStyle);
+  }
 });

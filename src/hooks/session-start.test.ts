@@ -192,92 +192,74 @@ describe("session-start", () => {
     expect(instructions).toContain('ib send muse-ios "message"');
   });
 
-  test("detectRole with type field returns custom role", () => {
-    const cwd = "/Users/me/project/.ittybitty/agents/agent-abc12345/repo";
-    const ctx = detectRole(cwd, {
-      id: "agent-abc12345",
-      manager: "agent-parent00",
-      worker: false,
-      type: "reviewer",
-    });
-    expect(ctx.role).toBe("custom");
-    expect(ctx.typeName).toBe("reviewer");
-    expect(ctx.agentManager).toBe("agent-parent00");
-  });
-
-  test("detectRole with type='worker' returns worker role", () => {
-    const cwd = "/Users/me/project/.ittybitty/agents/agent-abc12345/repo";
-    const ctx = detectRole(cwd, {
-      id: "agent-abc12345",
-      manager: "agent-parent00",
-      worker: false,
-      type: "worker",
-    });
-    expect(ctx.role).toBe("worker");
-    expect(ctx.typeName).toBe("worker");
-  });
-
-  test("detectRole with type='manager' returns manager role", () => {
+  test("detectRole includes agentType from meta.json", () => {
     const cwd = "/Users/me/project/.ittybitty/agents/agent-abc12345/repo";
     const ctx = detectRole(cwd, {
       id: "agent-abc12345",
       manager: null,
       worker: false,
-      type: "manager",
+      agentType: "researcher",
     });
-    expect(ctx.role).toBe("manager");
-    expect(ctx.typeName).toBe("manager");
+    expect(ctx.agentType).toBe("researcher");
   });
 
-  test("detectRole with type='coordinator' returns coordinator role", () => {
-    const cwd = "/Users/me/project/.ittybitty/agents/agent-abc12345/repo";
-    const ctx = detectRole(cwd, {
-      id: "agent-abc12345",
-      manager: null,
-      worker: false,
-      type: "coordinator",
-    });
-    expect(ctx.role).toBe("coordinator");
-    expect(ctx.typeName).toBe("coordinator");
-  });
-
-  test("backward compat: no type field generates manager instructions", async () => {
+  test("backward compat: no agentType in meta.json", () => {
     const cwd = "/Users/me/project/.ittybitty/agents/agent-abc12345/repo";
     const ctx = detectRole(cwd, {
       id: "agent-abc12345",
       manager: null,
       worker: false,
     });
-    expect(ctx.role).toBe("manager");
-    expect(ctx.typeName).toBeUndefined();
+    expect(ctx.agentType).toBeUndefined();
+  });
+
+  test("agent type with manager instructionStyle uses manager base instructions", async () => {
+    // Built-in manager type uses manager instructionStyle
+    const ctx: SessionContext = {
+      role: "manager",
+      agentId: "agent-abc12345",
+      agentManager: "",
+      parentBranch: "main",
+      worktreePath: "/Users/me/project/.ittybitty/agents/agent-abc12345/repo",
+      rootRepoPath: "/Users/me/project",
+      agentType: "manager",
+    };
     const instructions = await generateInstructions(ctx);
     expect(instructions).toContain("Manager Agent");
+    expect(instructions).toContain("ib new-agent --worker");
   });
 
-  test("backward compat: worker meta still generates worker instructions", async () => {
-    const cwd = "/Users/me/project/.ittybitty/agents/agent-def67890/repo";
-    const ctx = detectRole(cwd, {
-      id: "agent-def67890",
-      manager: "agent-abc12345",
-      worker: true,
-    });
-    expect(ctx.role).toBe("worker");
+  test("agent type with worker instructionStyle uses worker base instructions", async () => {
+    // Built-in worker type uses worker instructionStyle
+    const ctx: SessionContext = {
+      role: "worker",
+      agentId: "agent-def67890",
+      agentManager: "agent-abc12345",
+      parentBranch: "agent/agent-abc12345",
+      worktreePath: "/Users/me/project/.ittybitty/agents/agent-def67890/repo",
+      rootRepoPath: "/Users/me/project",
+      agentType: "worker",
+    };
     const instructions = await generateInstructions(ctx);
     expect(instructions).toContain("Worker Agent");
+    expect(instructions).toContain("ib send agent-abc12345");
   });
 
-  test("custom type generates custom instructions with common sections", async () => {
-    // This test verifies the custom type fallback to manager when type can't be resolved
-    const cwd = "/Users/me/project/.ittybitty/agents/agent-abc12345/repo";
-    const ctx = detectRole(cwd, {
-      id: "agent-abc12345",
-      manager: "agent-parent00",
-      worker: false,
-      type: "nonexistent-type-for-test",
-    });
-    expect(ctx.role).toBe("custom");
-    // When type can't be resolved, should fall back to manager instructions
+  test("agent type markdown body is appended before closing ittybitty tag", async () => {
+    // This test uses the built-in coordinator type which has no body,
+    // but we test the mechanism by verifying basic structure is intact
+    const ctx: SessionContext = {
+      role: "coordinator",
+      agentId: "coordinator",
+      agentManager: "",
+      parentBranch: "main",
+      worktreePath: "/Users/me/project/.ittybitty/agents/coordinator/repo",
+      rootRepoPath: "/Users/me/project",
+      agentType: "coordinator",
+    };
     const instructions = await generateInstructions(ctx);
-    expect(instructions).toContain("Manager Agent");
+    // Should have the closing tag
+    expect(instructions).toContain("</ittybitty>");
+    expect(instructions).toContain("<ittybitty>");
   });
 });

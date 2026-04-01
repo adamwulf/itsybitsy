@@ -1,272 +1,196 @@
 /**
- * Agent type definitions: load, parse, and resolve agent types from
- * ~/.itsybitsy/agent-types/<name>/AGENTTYPE.md files.
- *
- * Each file uses YAML frontmatter + markdown body (similar to Claude Code skills).
+ * Agent types system: load and parse agent type definitions from ~/.itsybitsy/agent-types/
  */
 
 import { join } from "path";
-import { homedir } from "os";
+import { Glob } from "bun";
 
-export const AGENT_TYPES_DIR = join(process.env.HOME ?? homedir(), ".itsybitsy", "agent-types");
-
-export interface AgentTypeDefinition {
+export interface AgentType {
   name: string;
   description: string;
   canSpawnChildren: boolean;
-  canBeParent: boolean;
-  permissions: {
-    allow: string[];
-    deny: string[];
-  };
   model?: string;
-  coordinator?: boolean;
-  promptBody: string;
+  permissions?: {
+    allow?: string[];
+    deny?: string[];
+  };
+  instructionStyle: "manager" | "worker" | "coordinator";
+  markdownBody?: string;
 }
 
 /**
- * Parse YAML frontmatter + markdown body from an agent type file.
- * Expects `---` delimiters around YAML frontmatter.
+ * Parse YAML front matter from a markdown file and extract metadata + body.
+ * Front matter is between --- delimiters at the start of the file.
  */
-export function parseAgentTypeFile(content: string): AgentTypeDefinition {
-  const trimmed = content.trim();
-  if (!trimmed.startsWith("---")) {
-    throw new Error("Agent type file must start with YAML frontmatter (---)");
+export function parseAgentTypeFile(content: string): {
+  frontmatter: Record<string, unknown>;
+  body: string;
+} {
+  const lines = content.split("\n");
+
+  // Check if starts with ---
+  if (lines[0] !== "---") {
+    return { frontmatter: {}, body: content };
   }
 
-  const endIdx = trimmed.indexOf("---", 3);
+  // Find closing ---
+  let endIdx = -1;
+  for (let i = 1; i < lines.length; i++) {
+    if (lines[i] === "---") {
+      endIdx = i;
+      break;
+    }
+  }
+
   if (endIdx === -1) {
-    throw new Error("Agent type file has unclosed YAML frontmatter");
+    return { frontmatter: {}, body: content };
   }
 
-  const frontmatterStr = trimmed.substring(3, endIdx).trim();
-  const body = trimmed.substring(endIdx + 3).trim();
+  // Parse YAML-like front matter (simple key: value parsing)
+  const fmLines = lines.slice(1, endIdx);
+  const frontmatter: Record<string, unknown> = {};
 
-  // Simple YAML parser for the subset we need
-  const frontmatter = parseSimpleYaml(frontmatterStr);
+  for (const line of fmLines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
 
-  const name = typeof frontmatter.name === "string" ? frontmatter.name : "";
-  if (!name) {
-    throw new Error("Agent type file must have a 'name' field in frontmatter");
+    const colonIdx = trimmed.indexOf(":");
+    if (colonIdx === -1) continue;
+
+    const key = trimmed.substring(0, colonIdx).trim();
+    const valueStr = trimmed.substring(colonIdx + 1).trim();
+
+    // Simple value parsing: booleans, numbers, strings, arrays
+    if (valueStr === "true") {
+      frontmatter[key] = true;
+    } else if (valueStr === "false") {
+      frontmatter[key] = false;
+    } else if (!isNaN(Number(valueStr))) {
+      frontmatter[key] = Number(valueStr);
+    } else if (valueStr.startsWith("[") && valueStr.endsWith("]")) {
+      // Simple array parsing: [item1, item2]
+      const itemsStr = valueStr.substring(1, valueStr.length - 1);
+      frontmatter[key] = itemsStr
+        .split(",")
+        .map((s) => s.trim().replace(/^["']|["']$/g, ""));
+    } else {
+      // String value
+      frontmatter[key] = valueStr.replace(/^["']|["']$/g, "");
+    }
   }
 
-  const description = typeof frontmatter.description === "string" ? frontmatter.description : "";
-  const canSpawnChildren = frontmatter.canSpawnChildren === true;
-  const canBeParent = frontmatter.canBeParent !== undefined ? frontmatter.canBeParent === true : true;
-  const model = typeof frontmatter.model === "string" ? frontmatter.model : undefined;
-  const coordinator = frontmatter.coordinator === true ? true : undefined;
+  const body = lines.slice(endIdx + 1).join("\n").trim();
 
-  // Parse permissions
-  const permsRaw = frontmatter.permissions as Record<string, unknown> | undefined;
-  const allow = parseStringArray(permsRaw?.allow);
-  const deny = parseStringArray(permsRaw?.deny);
+  return { frontmatter, body };
+}
 
+/**
+ * Get the built-in default types.
+ */
+export function getBuiltinTypes(): Record<string, AgentType> {
   return {
-    name,
-    description,
-    canSpawnChildren,
-    canBeParent,
-    permissions: { allow, deny },
-    model,
-    coordinator,
-    promptBody: body,
+    manager: {
+      name: "manager",
+      description: "Manages sub-agents and coordinates work",
+      canSpawnChildren: true,
+      instructionStyle: "manager",
+    },
+    worker: {
+      name: "worker",
+      description: "Executes tasks assigned by a manager",
+      canSpawnChildren: false,
+      instructionStyle: "worker",
+    },
+    coordinator: {
+      name: "coordinator",
+      description: "Read-only coordinator that manages agents without writing code",
+      canSpawnChildren: true,
+      instructionStyle: "coordinator",
+      permissions: {
+        deny: ["Write", "Edit", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch"],
+      },
+    },
   };
 }
 
-/** Parse a value that should be a string array (from YAML list) */
-function parseStringArray(value: unknown): string[] {
-  if (Array.isArray(value)) {
-    return value.filter((v): v is string => typeof v === "string");
-  }
-  return [];
-}
-
 /**
- * Simple YAML parser that handles the subset we need:
- * - Top-level scalar keys (string, boolean, number)
- * - Top-level object with one level of nesting (permissions.allow/deny)
- * - YAML lists (sequences)
+ * Load an agent type definition from ~/.itsybitsy/agent-types/<name>.md
+ * Falls back to built-in defaults if the file doesn't exist.
  */
-function parseSimpleYaml(yaml: string): Record<string, unknown> {
-  const result: Record<string, unknown> = {};
-  const lines = yaml.split("\n");
-  let currentKey = "";
-  let currentObj: Record<string, unknown> | null = null;
-  let currentList: string[] | null = null;
-  let currentListKey = "";
+export async function loadAgentType(name: string): Promise<AgentType> {
+  const builtins = getBuiltinTypes();
 
-  for (const line of lines) {
-    // Skip empty lines and comments
-    if (!line.trim() || line.trim().startsWith("#")) continue;
-
-    // List item (indented with -)
-    const listMatch = /^\s+-\s+(.+)$/.exec(line);
-    if (listMatch && currentList !== null) {
-      currentList.push(listMatch[1]!.trim());
-      continue;
-    }
-
-    // If we were building a list, save it
-    if (currentList !== null) {
-      if (currentObj && currentListKey) {
-        currentObj[currentListKey] = currentList;
-      } else {
-        result[currentListKey] = currentList;
-      }
-      currentList = null;
-      currentListKey = "";
-    }
-
-    // Nested key (indented, part of an object)
-    const nestedMatch = /^(\s{2,})(\w+):\s*(.*)$/.exec(line);
-    if (nestedMatch && currentKey && currentObj) {
-      const nestedKey = nestedMatch[2]!;
-      const nestedVal = nestedMatch[3]!.trim();
-      if (nestedVal === "") {
-        // Start of a list
-        currentList = [];
-        currentListKey = nestedKey;
-      } else if (nestedVal.startsWith("[")) {
-        currentObj[nestedKey] = parseInlineArray(nestedVal);
-      } else {
-        currentObj[nestedKey] = parseScalar(nestedVal);
-      }
-      continue;
-    }
-
-    // If we were building an object and hit a non-nested line, save it
-    if (currentObj) {
-      result[currentKey] = currentObj;
-      currentObj = null;
-      currentKey = "";
-    }
-
-    // Top-level key: value
-    const topMatch = /^(\w+):\s*(.*)$/.exec(line);
-    if (topMatch) {
-      const key = topMatch[1]!;
-      const val = topMatch[2]!.trim();
-      if (val === "") {
-        // Could be an object or list — start collecting
-        currentKey = key;
-        currentObj = {};
-      } else if (val.startsWith("[")) {
-        // Inline array: [item1, item2]
-        result[key] = parseInlineArray(val);
-      } else {
-        result[key] = parseScalar(val);
-      }
-    }
+  if (builtins[name]) {
+    return builtins[name]!;
   }
 
-  // Flush any remaining list
-  if (currentList !== null) {
-    if (currentObj && currentListKey) {
-      currentObj[currentListKey] = currentList;
-    } else {
-      result[currentListKey] = currentList;
-    }
-  }
+  // Try to load from file
+  const home = process.env.HOME || require("os").homedir();
+  const typeFile = join(home, ".itsybitsy", "agent-types", `${name}.md`);
 
-  // Flush any remaining object
-  if (currentObj && currentKey) {
-    result[currentKey] = currentObj;
-  }
-
-  return result;
-}
-
-function parseScalar(val: string): string | boolean | number {
-  if (val === "true") return true;
-  if (val === "false") return false;
-  const num = Number(val);
-  if (!isNaN(num) && val !== "") return num;
-  // Strip surrounding quotes
-  if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
-    return val.slice(1, -1);
-  }
-  return val;
-}
-
-function parseInlineArray(val: string): string[] {
-  // Parse [item1, item2, item3]
-  const inner = val.slice(1, -1).trim();
-  if (!inner) return [];
-  return inner.split(",").map((s) => {
-    const trimmed = s.trim();
-    if ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
-      return trimmed.slice(1, -1);
-    }
-    return trimmed;
-  });
-}
-
-/**
- * Load an agent type definition from disk.
- * Looks in ~/.itsybitsy/agent-types/<name>/AGENTTYPE.md
- */
-export async function loadAgentType(typeName: string): Promise<AgentTypeDefinition | null> {
-  const filePath = join(AGENT_TYPES_DIR, typeName, "AGENTTYPE.md");
   try {
-    const file = Bun.file(filePath);
-    if (!(await file.exists())) return null;
-    const content = await file.text();
-    return parseAgentTypeFile(content);
+    const file = Bun.file(typeFile);
+    if (await file.exists()) {
+      const content = await file.text();
+      const { frontmatter, body } = parseAgentTypeFile(content);
+
+      return {
+        name: (frontmatter.name as string) || name,
+        description: (frontmatter.description as string) || "",
+        canSpawnChildren: (frontmatter.canSpawnChildren as boolean) ?? false,
+        model: (frontmatter.model as string) || undefined,
+        permissions: (frontmatter.permissions as AgentType["permissions"]) || undefined,
+        instructionStyle: (frontmatter.instructionStyle as AgentType["instructionStyle"]) || "worker",
+        markdownBody: body || undefined,
+      };
+    }
   } catch {
-    return null;
+    // File doesn't exist or can't be read
   }
+
+  // Return default manager if not found
+  return builtins.manager!;
 }
 
 /**
- * Return a built-in agent type definition for the three legacy types.
+ * List all available agent types (built-in + user-defined in ~/.itsybitsy/agent-types/).
  */
-export function getBuiltinType(typeName: "manager" | "worker" | "coordinator"): AgentTypeDefinition {
-  switch (typeName) {
-    case "manager":
-      return {
-        name: "manager",
-        description: "Manager agent that can spawn and coordinate sub-agents",
-        canSpawnChildren: true,
-        canBeParent: true,
-        permissions: { allow: [], deny: [] },
-        promptBody: "",
-      };
-    case "worker":
-      return {
-        name: "worker",
-        description: "Worker agent that executes tasks assigned by a manager",
-        canSpawnChildren: false,
-        canBeParent: false,
-        permissions: { allow: [], deny: [] },
-        promptBody: "",
-      };
-    case "coordinator":
-      return {
-        name: "coordinator",
-        description: "Per-repo coordinator that manages agents via ib commands",
-        canSpawnChildren: true,
-        canBeParent: true,
-        coordinator: true,
-        permissions: { allow: [], deny: [] },
-        promptBody: "",
-      };
-  }
-}
+export async function listAgentTypes(): Promise<AgentType[]> {
+  const types: Map<string, AgentType> = new Map();
+  const builtins = getBuiltinTypes();
 
-/**
- * Resolve an agent type by name. Tries loading from disk first,
- * then falls back to built-in types for manager/worker/coordinator.
- * Throws for unknown types that aren't found on disk.
- */
-export async function resolveAgentType(typeName: string): Promise<AgentTypeDefinition> {
-  // Try disk first
-  const fromDisk = await loadAgentType(typeName);
-  if (fromDisk) return fromDisk;
-
-  // Fall back to built-in types
-  if (typeName === "manager" || typeName === "worker" || typeName === "coordinator") {
-    return getBuiltinType(typeName);
+  // Add built-ins
+  for (const [name, type] of Object.entries(builtins)) {
+    types.set(name, type);
   }
 
-  throw new Error(`Unknown agent type: '${typeName}'. Create it at ${join(AGENT_TYPES_DIR, typeName, "AGENTTYPE.md")}`);
+  // Add user-defined types from ~/.itsybitsy/agent-types/
+  const home = process.env.HOME || require("os").homedir();
+  const typesDir = join(home, ".itsybitsy", "agent-types");
+
+  try {
+    const dir = Bun.file(typesDir);
+    const isDir = await dir.exists().catch(() => false);
+    if (isDir) {
+      try {
+        // List .md files in the directory using Glob
+        const glob = new Glob("*.md");
+        for await (const file of glob.scan(typesDir)) {
+          const name = file.replace(/\.md$/, "");
+          try {
+            const type = await loadAgentType(name);
+            types.set(name, type);
+          } catch {
+            // Skip files that can't be parsed
+          }
+        }
+      } catch {
+        // glob failed, try with readdir alternative
+      }
+    }
+  } catch {
+    // Types directory doesn't exist
+  }
+
+  return Array.from(types.values());
 }

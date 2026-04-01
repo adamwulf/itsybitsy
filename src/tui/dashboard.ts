@@ -508,6 +508,8 @@ export class DashboardComponent implements Component {
   }
   private lastSentNotice: string | null = null;
   private usageTimer: ReturnType<typeof setInterval> | null = null;
+  /** Tracks in-flight executeAndRefresh promises — used by tests to await completion */
+  private _pendingActions: Set<Promise<void>> = new Set();
   pendingSelectNewestInRepo: string | null = null;
   private focusManager = new FocusManager();
   inputField: InputFieldComponent;
@@ -852,12 +854,24 @@ export class DashboardComponent implements Component {
   }
 
   async executeAndRefresh(fn: () => Promise<void>) {
-    try {
-      await fn();
-    } catch (err) {
-      this.setNotice(`Error: ${err}`);
+    const p = (async () => {
+      try {
+        await fn();
+      } catch (err) {
+        this.setNotice(`Error: ${err}`);
+      }
+      this.watcher?.refresh();
+    })();
+    this._pendingActions.add(p);
+    p.finally(() => this._pendingActions.delete(p));
+    await p;
+  }
+
+  /** Wait for all in-flight executeAndRefresh calls to complete. For use in tests. */
+  async flushPendingActions(): Promise<void> {
+    while (this._pendingActions.size > 0) {
+      await Promise.allSettled(this._pendingActions);
     }
-    this.watcher?.refresh();
   }
 
   // --- Pane management (delegates to pane-manager.ts) ---
@@ -897,7 +911,7 @@ export class DashboardComponent implements Component {
       { label: "debug snapshot — S", action: () => agentActions.handleSnapshot(this) },
       { label: "fuzzy jump to agent — @", action: () => agentActions.handleFuzzyAgent(this) },
       { label: "add repo — A", action: () => agentActions.handleAddRepo(this) },
-      { label: "remove repo — D", action: () => agentActions.handleRemoveRepoSafe(this) },
+      { label: "remove repo — D", action: () => this.executeAndRefresh(() => agentActions.handleRemoveRepoSafe(this)) },
       { label: "help — ?", action: () => agentActions.handleHelp(this) },
       { label: "setup — h", action: () => agentActions.handleSetup(this) },
       { label: "scroll up — ;", action: () => agentActions.handleScrollUp(this) },
@@ -1463,7 +1477,7 @@ export class DashboardComponent implements Component {
     // Agent/repo actions — context-sensitive on whether a repo header is selected
     else if (data === "x") {
       if (!this.agentTree.selectedAgent && this.agentTree.selectedRepoHeader) {
-        agentActions.handleRemoveRepoSafe(this);
+        this.executeAndRefresh(() => agentActions.handleRemoveRepoSafe(this));
       } else {
         agentActions.handleKill(this);
       }
@@ -1616,7 +1630,7 @@ export class DashboardComponent implements Component {
     // Folder browser / add repo
     else if (data === "A") { agentActions.handleAddRepo(this); }
     // Remove repo (safe — requires repo header selected and zero agents)
-    else if (data === "D") { agentActions.handleRemoveRepoSafe(this); }
+    else if (data === "D") { this.executeAndRefresh(() => agentActions.handleRemoveRepoSafe(this)); }
   }
 
   // --- Rendering ---

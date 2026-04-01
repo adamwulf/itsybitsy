@@ -23,9 +23,11 @@ const FOCUS_ORDER: readonly FocusTarget[] = [
   "right-pane",
 ] as const;
 
-/** Restricted focus order for full-width system coordinator mode. */
+/** Restricted focus order when system coordinator is selected.
+ *  Includes info (sidebar) and coordinator (main area tmux pane). */
 const COORDINATOR_FOCUS_ORDER: readonly FocusTarget[] = [
   "agent-tree",
+  "info",
   "coordinator",
 ] as const;
 

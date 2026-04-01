@@ -3533,10 +3533,20 @@ describe("coordinator input field (Phase 49)", () => {
     dashboard.onUpdate([], flatList, []);
     // selectedIndex 0 is the system-coordinator entry
     expect(dashboard.agentTree.isSystemCoordinatorSelected).toBe(true);
-    // coordinatorMode limits focus to agent-tree and coordinator
+    // coordinatorMode limits focus to agent-tree, info, and coordinator
+    // Set tmuxPane output — coordinator TMUX view uses tmuxPane in main area
+    dashboard.tmuxPane.rawOutput = "Coordinator output";
+    dashboard.tmuxPane.hasPolled = true;
+    // Also set coordinatorPane for sidebar (when coordinator is not selected)
     dashboard.coordinatorPane.rawOutput = "Coordinator output";
     dashboard.coordinatorPane.hasPolled = true;
     return dashboard;
+  }
+
+  /** Tab from agent-tree to coordinator (skipping info in between) */
+  function tabToCoordinator(dashboard: ReturnType<typeof setupCoordinatorDashboard>) {
+    dashboard.handleInput("\t"); // agent-tree → info
+    dashboard.handleInput("\t"); // info → coordinator
   }
 
   test("coordinator input field is a separate instance from agent input field", () => {
@@ -3547,8 +3557,8 @@ describe("coordinator input field (Phase 49)", () => {
 
   test("when coordinator panel is focused, input routes to coordinator input field in input sub-focus", () => {
     const dashboard = setupCoordinatorDashboard();
-    // Tab to coordinator
-    dashboard.handleInput("\t"); // coordinator (coordinatorMode: agent-tree -> coordinator)
+    // Tab to coordinator (agent-tree → info → coordinator)
+    tabToCoordinator(dashboard);
     expect(dashboard.focus).toBe("coordinator");
     dashboard.handleInput("\t"); // pane → input sub-focus
 
@@ -3562,7 +3572,7 @@ describe("coordinator input field (Phase 49)", () => {
 
   test("Escape from coordinator input sub-focus clears input and returns to pane sub-focus", () => {
     const dashboard = setupCoordinatorDashboard();
-    dashboard.handleInput("\t"); // coordinator
+    tabToCoordinator(dashboard);
     expect(dashboard.focus).toBe("coordinator");
     dashboard.handleInput("\t"); // pane → input sub-focus
 
@@ -3578,7 +3588,7 @@ describe("coordinator input field (Phase 49)", () => {
 
   test("Tab from coordinator send sub-focus cycles focus normally", () => {
     const dashboard = setupCoordinatorDashboard();
-    dashboard.handleInput("\t"); // coordinator
+    tabToCoordinator(dashboard);
     expect(dashboard.focus).toBe("coordinator");
 
     // Tab through sub-focus states: pane → input → send
@@ -3593,18 +3603,18 @@ describe("coordinator input field (Phase 49)", () => {
 
   test("Shift-Tab from coordinator pane sub-focus cycles focus backwards", () => {
     const dashboard = setupCoordinatorDashboard();
-    dashboard.handleInput("\t"); // coordinator
+    tabToCoordinator(dashboard);
     expect(dashboard.focus).toBe("coordinator");
     expect(dashboard.subFocus).toBe("pane");
 
-    // Shift-Tab from pane sub-focus — cycles backward to agent-tree
+    // Shift-Tab from pane sub-focus — cycles backward to info
     dashboard.handleInput("\x1b[Z");
-    expect(dashboard.focus).toBe("agent-tree");
+    expect(dashboard.focus).toBe("info");
   });
 
-  test("coordinator input field renders in sidebar when in input sub-focus", () => {
+  test("coordinator input field renders in main area when in input sub-focus", () => {
     const dashboard = setupCoordinatorDashboard();
-    dashboard.handleInput("\t"); // coordinator
+    tabToCoordinator(dashboard);
     expect(dashboard.focus).toBe("coordinator");
     dashboard.handleInput("\t"); // pane → input sub-focus
 
@@ -3618,7 +3628,7 @@ describe("coordinator input field (Phase 49)", () => {
 
       const lines = dashboard.render(160);
       const text = lines.map(l => stripAnsi(l)).join("\n");
-      // Input field should show the typed text with cursor
+      // Input field should show the typed text with cursor in main area
       expect(text).toContain("> test█");
       expect(text).toContain("[Send]");
     } finally {
@@ -3626,7 +3636,7 @@ describe("coordinator input field (Phase 49)", () => {
     }
   });
 
-  test("coordinator input field not shown when coordinator panel not focused", () => {
+  test("coordinator tmux output shown in main area when coordinator selected", () => {
     const dashboard = setupCoordinatorDashboard();
     // Focus stays on agent-tree
     expect(dashboard.focus).toBe("agent-tree");
@@ -3636,8 +3646,10 @@ describe("coordinator input field (Phase 49)", () => {
     try {
       const lines = dashboard.render(160);
       const text = lines.map(l => stripAnsi(l)).join("\n");
-      // Coordinator output should appear but no cursor block in coordinator section
+      // Coordinator tmux output should appear in the main area
       expect(text).toContain("Coordinator output");
+      // Sidebar should not have coordinator section
+      expect(text).not.toContain("System Coordinator\n");
     } finally {
       Object.defineProperty(process.stdout, "rows", { value: origRows, writable: true, configurable: true });
     }
@@ -3645,7 +3657,7 @@ describe("coordinator input field (Phase 49)", () => {
 
   test("dashboard keybindings are suppressed in coordinator input sub-focus", () => {
     const dashboard = setupCoordinatorDashboard();
-    dashboard.handleInput("\t"); // coordinator
+    tabToCoordinator(dashboard);
     expect(dashboard.focus).toBe("coordinator");
     dashboard.handleInput("\t"); // pane → input sub-focus
 
@@ -3658,7 +3670,7 @@ describe("coordinator input field (Phase 49)", () => {
 
   test("coordinator submit calls sendTmuxKeys", () => {
     const dashboard = setupCoordinatorDashboard();
-    dashboard.handleInput("\t"); // coordinator
+    tabToCoordinator(dashboard);
     expect(dashboard.focus).toBe("coordinator");
     dashboard.handleInput("\t"); // pane → input sub-focus
 
@@ -3678,7 +3690,7 @@ describe("coordinator input field (Phase 49)", () => {
     const dashboard = setupCoordinatorDashboard();
 
     // Tab to coordinator, then Tab to input sub-focus and type
-    dashboard.handleInput("\t"); // coordinator
+    tabToCoordinator(dashboard);
     dashboard.handleInput("\t"); // pane → input sub-focus
     dashboard.handleInput("a");
     dashboard.handleInput("b");

@@ -495,6 +495,8 @@ export class DashboardComponent implements Component {
   inputField: InputFieldComponent;
   coordinatorInputField: InputFieldComponent;
   systemDashboard: SystemDashboardComponent;
+  /** Which view to show in the main area when coordinator is selected */
+  coordinatorViewMode: "TMUX" | "DASHBOARD" = "TMUX";
   /** Dynamic sidebar width — adjustable via [ ] when sidebar panel is focused */
   sidebarWidth = SIDEBAR_WIDTH;
   /** When true, saved layout was applied — suppress onWidth overrides from tmux poller */
@@ -925,12 +927,13 @@ export class DashboardComponent implements Component {
 
     // Update focus cycling and sidebar layout for coordinator mode
     this.focusManager.coordinatorMode = isCoordinator;
-    this.sidebar.coordinatorFullWidth = isCoordinator;
+    this.sidebar.hideCoordinator = isCoordinator;
 
-    // When entering coordinator mode, ensure focus is on a valid target
+    // When entering coordinator mode, ensure focus is on a valid target and reset view
     if (isCoordinator) {
+      this.coordinatorViewMode = "TMUX";
       const focus = this.focusManager.current();
-      if (focus !== "agent-tree" && focus !== "coordinator") {
+      if (focus !== "agent-tree" && focus !== "info" && focus !== "coordinator") {
         this.focusManager.setFocus("agent-tree");
       }
     }
@@ -1259,10 +1262,18 @@ export class DashboardComponent implements Component {
     }
     // Right pane cycling
     else if (data === "p" || matchesKey(data, Key.left)) {
-      this.cyclePaneMode(1);
+      if (this.agentTree.isSystemCoordinatorSelected) {
+        this.coordinatorViewMode = this.coordinatorViewMode === "TMUX" ? "DASHBOARD" : "TMUX";
+      } else {
+        this.cyclePaneMode(1);
+      }
       this.tui?.requestRender();
     } else if (data === "n" || matchesKey(data, Key.right)) {
-      this.cyclePaneMode(-1);
+      if (this.agentTree.isSystemCoordinatorSelected) {
+        this.coordinatorViewMode = this.coordinatorViewMode === "TMUX" ? "DASHBOARD" : "TMUX";
+      } else {
+        this.cyclePaneMode(-1);
+      }
       this.tui?.requestRender();
     }
     // Direct pane jumps
@@ -1515,8 +1526,92 @@ export class DashboardComponent implements Component {
       : this.buildMainTitleSeparator(mainWidth, isTreeMode, isFullWidth);
 
     let mainLines: string[];
-    if (isCoordinatorView) {
-      // System coordinator selected: full-width system dashboard table
+    if (isCoordinatorView && this.coordinatorViewMode === "TMUX") {
+      // System coordinator TMUX view: full-width coordinator tmux output in main area.
+      // Uses coordinatorPane (always-on poller) since tmuxPane.render() requires an agent.
+      const isCoordFocused = this.focusManager.current() === "coordinator";
+      const coordSf = this.focusManager.subFocus;
+      const showCoordInput = isCoordFocused && coordSf !== "pane";
+
+      // Set coordinator input field state for main area rendering
+      this.coordinatorInputField.active = showCoordInput;
+      if (isCoordFocused) {
+        this.coordinatorInputField.setFocusState(coordSf === "send" ? "send" : "text");
+      }
+
+      // Compute input field height
+      let statusLines: string[] = [];
+      if (showCoordInput && this.coordinatorPane.rawOutput) {
+        const wrapped = wrapLines(this.coordinatorPane.rawOutput, mainWidth);
+        const { lowerIndex } = findLastTwoSeparators(wrapped);
+        if (lowerIndex >= 0 && lowerIndex < wrapped.length - 1) {
+          statusLines = wrapped.slice(lowerIndex + 1).map(
+            (line) => truncateToWidth(line, mainWidth, "")
+          );
+          while (statusLines.length > 0 && statusLines[statusLines.length - 1]!.trim() === "") {
+            statusLines.pop();
+          }
+        }
+      }
+      const inputFieldHeight = showCoordInput ? this.coordinatorInputField.getHeight(mainWidth) + statusLines.length : 0;
+      const outputHeight = availableHeight - inputFieldHeight;
+
+      // Render coordinator tmux output
+      const rawOutput = this.coordinatorPane.rawOutput;
+      let tmuxLines: string[];
+      if (!this.coordinatorPane.hasPolled) {
+        tmuxLines = padLines([
+          truncateToWidth(`${DIM}Waiting for coordinator output...${RESET}`, mainWidth, ""),
+        ], outputHeight);
+      } else if (!rawOutput) {
+        tmuxLines = padLines([
+          truncateToWidth(`${YELLOW}System coordinator stopped${RESET}`, mainWidth, ""),
+          truncateToWidth(`${DIM}Press R to restart${RESET}`, mainWidth, ""),
+        ], outputHeight);
+      } else {
+        let wrapped = wrapLines(rawOutput, mainWidth);
+
+        // Trim Claude's input area when showing our own input field
+        if (showCoordInput) {
+          const { upperIndex } = findLastTwoSeparators(wrapped);
+          if (upperIndex >= 0 && upperIndex < wrapped.length) {
+            wrapped = wrapped.slice(0, upperIndex);
+          }
+        }
+
+        // Scroll support via coordinatorPane.scrollBack
+        const maxScrollBack = Math.max(0, wrapped.length - outputHeight);
+        if (this.coordinatorPane.scrollBack > maxScrollBack) {
+          this.coordinatorPane.scrollBack = maxScrollBack;
+        }
+        const contentHeight = this.coordinatorPane.scrollBack > 0 ? outputHeight - 1 : outputHeight;
+        const end = wrapped.length - this.coordinatorPane.scrollBack;
+        const start = Math.max(0, end - contentHeight);
+        const visible = wrapped.slice(start, end);
+        tmuxLines = visible.map((line) => truncateToWidth(line, mainWidth, ""));
+
+        if (this.coordinatorPane.scrollBack > 0) {
+          tmuxLines.push(truncateToWidth(
+            `${DIM}── ↓ ${this.coordinatorPane.scrollBack} lines below ──${RESET}`,
+            mainWidth,
+            ""
+          ));
+        }
+
+        tmuxLines = padLines(tmuxLines, outputHeight);
+      }
+
+      if (showCoordInput) {
+        const inputLines = this.coordinatorInputField.render(mainWidth);
+        tmuxLines.push(...inputLines, ...statusLines);
+      }
+
+      // Pad to available height
+      while (tmuxLines.length < availableHeight) tmuxLines.push("");
+
+      mainLines = [mainTitleSep, ...tmuxLines.slice(0, availableHeight)];
+    } else if (isCoordinatorView) {
+      // System coordinator DASHBOARD view: full-width agent overview table
       this.systemDashboard.displayHeight = availableHeight;
       mainLines = [mainTitleSep, ...this.systemDashboard.render(mainWidth)];
     } else if (isTreeMode) {
@@ -1594,11 +1689,16 @@ export class DashboardComponent implements Component {
 
     // Render sidebar and merge with main area
     this.sidebar.focusTarget = this.focusManager.current();
-    const isCoordFocused = this.focusManager.current() === "coordinator";
-    const coordSf = this.focusManager.subFocus;
-    this.coordinatorInputField.active = isCoordFocused && coordSf !== "pane";
-    if (isCoordFocused) {
-      this.coordinatorInputField.setFocusState(coordSf === "send" ? "send" : "text");
+    // Coordinator input field activation is handled in the TMUX render branch above
+    // when coordinator is in the main area. For sidebar rendering, only activate when
+    // coordinator is NOT selected (i.e., shown in sidebar's coordinator section).
+    if (!isCoordinatorView) {
+      const isCoordFocused = this.focusManager.current() === "coordinator";
+      const coordSf = this.focusManager.subFocus;
+      this.coordinatorInputField.active = isCoordFocused && coordSf !== "pane";
+      if (isCoordFocused) {
+        this.coordinatorInputField.setFocusState(coordSf === "send" ? "send" : "text");
+      }
     }
     const sidebarLines = this.sidebar.render(sidebarW);
     lines.push(...mergeSidebarAndMain(sidebarLines, mainLines, availableHeight + 1, mainWidth, sidebarW));
@@ -1659,12 +1759,18 @@ export class DashboardComponent implements Component {
 
   /** Build title separator for system coordinator full-width view */
   private buildCoordinatorTitleSeparator(mainWidth: number): string {
-    const title = " System Dashboard ";
+    const leftTitle = " System Coordinator ";
+    const rightTitle = this.coordinatorViewMode === "TMUX" ? " TMUX " : " DASHBOARD ";
     const leftPad = 3;
     const rightPad = 3;
-    const fillCount = Math.max(1, mainWidth - leftPad - title.length - rightPad);
+    const currentFocus = this.focusManager.current();
+    const coordFocused = currentFocus === "coordinator";
+    const leftTitleStyle = coordFocused ? `${REVERSE}${BOLD}` : BOLD;
+    const fillCount = Math.max(1, mainWidth - leftPad - leftTitle.length - rightTitle.length - rightPad);
     return truncateToWidth(
-      `${DIM_GRAY}${"─".repeat(leftPad)}${RESET}${BOLD}${title}${RESET}${DIM_GRAY}${"─".repeat(fillCount)}${"─".repeat(rightPad)}${RESET}`,
+      `${DIM_GRAY}${"─".repeat(leftPad)}${RESET}${leftTitleStyle}${leftTitle}${RESET}` +
+      `${BOLD}${rightTitle}${RESET}` +
+      `${DIM_GRAY}${"─".repeat(fillCount)}${"─".repeat(rightPad)}${RESET}`,
       mainWidth,
       "",
     );

@@ -218,11 +218,11 @@ The `--worker` flag at creation time determines the agent's role:
 |----------|---------|--------|
 | `meta.json` `worker` field | `false` | `true` |
 | Can spawn sub-agents | Yes (via `ib new-agent --worker`) | No |
-| Can use Task tool | Intercepted → spawns ib agents (only when intercept hook is installed in parent repo settings) | Native Task allowed (intercept hook skips workers) |
+| Can use Task tool | Intercepted → spawns ib agents (only when intercept hook is installed in parent repo settings) | Denied by intercept hook ("Workers cannot create tasks or spawn sub-agents") |
 | Can ask user questions | Only if top-level (no manager); bash also allows if manager was merged/killed | No |
 | Permissions source | `permissions.manager.allow/deny` | `permissions.worker.allow/deny` |
 | Session-start instructions | Manager template (with sub-agent commands) | Worker template (with send/diff/status only) |
-| TaskCreate | Blocked with "Use ib new-agent --worker" message | Blocked with "Workers cannot create tasks" message |
+| TaskCreate | Intercepted → spawns ib worker (same as Task/Agent interception) | Denied by intercept hook ("Workers cannot create tasks or spawn sub-agents") |
 
 ### 2.2 Agent Permissions
 
@@ -520,16 +520,15 @@ itsybitsy installs hooks into each agent's `settings.local.json`, plus optional 
 
 **Decision logic** (checked in order):
 
-1. **TaskCreate always denied**: Workers get "Workers cannot create tasks." Managers get "Use ib new-agent --worker."
-2. **Allow list check**: Tool must match at least one pattern from `settings.local.json` `permissions.allow`. Patterns are either exact tool names (`"Read"`) or bash prefix patterns (`"Bash(git status:*)"` — matches Bash tool where command starts with `git status`).
-3. **Bash cd commands**: If the tool is Bash and the command starts with `cd`, the target path is checked against the allowed paths.
-4. **Bash command scanning** [^ts-only-bash-scan]: Non-cd bash commands are scanned for path references to:
+1. **Allow list check**: Tool must match at least one pattern from `settings.local.json` `permissions.allow`. Patterns are either exact tool names (`"Read"`) or bash prefix patterns (`"Bash(git status:*)"` — matches Bash tool where command starts with `git status`).
+2. **Bash cd commands**: If the tool is Bash and the command starts with `cd`, the target path is checked against the allowed paths.
+3. **Bash command scanning** [^ts-only-bash-scan]: Non-cd bash commands are scanned for path references to:
    - Other agents' directories (`.ittybitty/agents/<other-id>/`)
    - The main repo root (when it differs from the worktree)
    Only paths at word boundaries (preceded by space, quote, `=`, or start of string) are checked.
 
 [^ts-only-bash-scan]: **TS-only behavior.** The bash `ib` immediately allows all non-cd Bash commands after the allow-list check — it does not scan command strings for path references. The TS implementation added `checkBashCommandPaths()` as an extra safeguard that catches commands like `cat /repo/.ittybitty/agents/other-agent/...`.
-5. **File path extraction** [^ts-only-notebook-path]: For non-Bash tools, `file_path`, `path`, or `notebook_path` from `tool_input` is checked.
+4. **File path extraction** [^ts-only-notebook-path]: For non-Bash tools, `file_path`, `path`, or `notebook_path` from `tool_input` is checked.
 
 [^ts-only-notebook-path]: **TS-only behavior.** The bash `ib` only extracts `file_path` and `path` from `tool_input`. The TS implementation additionally checks `notebook_path` to cover Jupyter notebook tools.
 
@@ -619,7 +618,7 @@ Intercepts Claude Code's Task and Agent tools and redirects them to spawn ib age
    - When called from primary Claude: spawns a manager (no `--worker`)
 6. **Output**: Rewrites the Task invocation to a `claude-code-guide` subagent that simply reports the spawned agent ID
 
-This hook is only installed for manager agents (not workers), and only when the main repo's settings already have the intercept hook installed. Workers skip the intercept hook entirely and use the native Task tool directly (see §2.1). Note that `TaskCreate` (a separate tool from `Task`) is blocked for all agents by the path hook (§6.1).
+This hook is installed for manager agents (not workers), and only when the main repo's settings already have the intercept hook installed. The hook intercepts `Task`, `Agent`, and `TaskCreate` tool calls. For managers, all three are intercepted and spawn ib workers. For workers, all three are denied with "Workers cannot create tasks or spawn sub-agents." The hook matcher includes `TaskCreate` so it fires for that tool in addition to `Task` and `Agent` (see §2.1).
 
 ### 6.5 Permission Denied Hook (PermissionRequest)
 

@@ -522,6 +522,8 @@ export class DashboardComponent implements Component {
   sidebarWidth = SIDEBAR_WIDTH;
   /** When true, saved layout was applied — suppress onWidth overrides from tmux poller */
   private layoutRestored = false;
+  /** Skip the next N tmux width reports to handle round-trip latency after resize */
+  private skipWidthReports = 0;
   /** When true, resize all agent tmux sessions on next onUpdate (after layout restore) */
   private pendingTmuxResize = false;
   private _questionsFocused = false;
@@ -669,6 +671,11 @@ export class DashboardComponent implements Component {
         this.tui?.requestRender();
       },
       onWidth: (width) => {
+        // Skip stale width reports during tmux resize round-trip
+        if (this.skipWidthReports > 0) {
+          this.skipWidthReports--;
+          return;
+        }
         // When a saved layout was restored, the dashboard width is authoritative.
         // Skip tmux-reported width to avoid overriding the saved value during the
         // race window before resizeTmuxWindow takes effect on the agent's session.
@@ -977,12 +984,24 @@ export class DashboardComponent implements Component {
     // After layout restore, resize all agent tmux sessions to match the restored splitPaneLeftWidth
     if (this.pendingTmuxResize && flatList.length > 0) {
       this.pendingTmuxResize = false;
-      const width = this.splitPane.getLeftWidth();
+      // Re-validate splitPaneLeftWidth against current terminal width to ensure agents aren't
+      // resized to a width wider than the available space.
+      const terminalWidth = process.stdout.columns;
+      const availableWidth = terminalWidth - this.sidebarWidth - 2; // 2 for separators
+      const validWidth = Math.max(MIN_LEFT_WIDTH, Math.min(MAX_LEFT_WIDTH, Math.min(this.splitPane.getLeftWidth(), availableWidth)));
+      if (validWidth !== this.splitPane.getLeftWidth()) {
+        this.splitPane.setLeftWidth(validWidth);
+      }
+      const width = validWidth;
       for (const entry of flatList) {
         if (entry.kind === "agent" && entry.agent.meta.tmux_session) {
           resizeTmuxWindow(entry.agent.meta.tmux_session, width);
         }
       }
+      // Clear layoutRestored after resize is issued. Skip the next 2 width reports to handle
+      // round-trip latency: one may catch the pre-resize width, the next catches post-resize.
+      this.layoutRestored = false;
+      this.skipWidthReports = 2;
     }
 
     this.syncSelectedAgent();
@@ -1920,9 +1939,13 @@ export async function launchDashboard(): Promise<void> {
   const config = await readConfig();
   const dashboard = new DashboardComponent();
   const savedLayout = await loadLayout();
-  if (savedLayout) dashboard.applyLayout(savedLayout);
-  // Always resize coordinator tmux to match sidebar width, even when no saved layout exists
-  resizeCoordinatorTmux(dashboard.sidebarWidth);
+  if (savedLayout) {
+    dashboard.applyLayout(savedLayout);
+  } else {
+    // Resize coordinator tmux to match sidebar width when no saved layout exists
+    // (applyLayout handles this internally when a layout is restored)
+    resizeCoordinatorTmux(dashboard.sidebarWidth);
+  }
   dashboard.setTui(tui);
   dashboard.setRepos(repos);
   const diffToolValue = config["externalDiffTool"]?.value;

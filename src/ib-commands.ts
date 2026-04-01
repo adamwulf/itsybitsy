@@ -413,7 +413,8 @@ fi
 # Wait for Claude to complete
 wait $CLAUDE_PID
 EXIT_CODE=$?
-log "Claude exited with code: $EXIT_CODE"
+SIGNAL=$(kill -l $EXIT_CODE 2>/dev/null || echo "none")
+log "Claude exited: code=$EXIT_CODE signal=$SIGNAL"
 
 # Run exit check
 ${qAbsExitScript}
@@ -439,6 +440,7 @@ ${qAbsExitScript}
     return { ok: false, exitCode: 1, stdout: "", stderr: `Could not create tmux session '${tmuxSession}'` };
   }
   await nukeResumeSpawnCtx.run(["tmux", "set-option", "-w", "-t", tmuxSession, "history-limit", "50000"]);
+  await nukeResumeSpawnCtx.run(["tmux", "set-option", "-w", "-t", tmuxSession, "remain-on-exit", "on"]);
 
   await logAgent(agentDir, "[resume] tmux session created, running autoAcceptWorkspaceTrust");
 
@@ -1842,7 +1844,8 @@ fi
 # Wait for Claude to complete
 wait $CLAUDE_PID
 EXIT_CODE=$?
-log "Claude exited with code: $EXIT_CODE"
+SIGNAL=$(kill -l $EXIT_CODE 2>/dev/null || echo "none")
+log "Claude exited: code=$EXIT_CODE signal=$SIGNAL"
 
 # Run exit check
 ${qStartExitScript}
@@ -1879,6 +1882,7 @@ ${qStartExitScript}
     return { ok: false, exitCode: 1, stdout: "", stderr: `Error: could not create tmux session '${tmuxSession}'` };
   }
   await newAgentSpawnCtx.run(["tmux", "set-option", "-w", "-t", tmuxSession, "history-limit", "50000"]);
+  await newAgentSpawnCtx.run(["tmux", "set-option", "-w", "-t", tmuxSession, "remain-on-exit", "on"]);
 
   // 19. Verify tmux session created
   const verifyResult = await newAgentSpawnCtx.run(["tmux", "has-session", "-t", tmuxSession]);

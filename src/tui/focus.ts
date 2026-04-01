@@ -8,8 +8,8 @@
 import { truncateToWidth } from "@mariozechner/pi-tui";
 import { RESET, BOLD, DIM, DIM_GRAY, REVERSE } from "./colors";
 
-/** The five focusable panels in the dashboard. */
-export type FocusTarget = "agent-tree" | "info" | "coordinator" | "active-agent" | "right-pane";
+/** The six focusable panels in the dashboard. */
+export type FocusTarget = "agent-tree" | "info" | "coordinator" | "active-agent" | "right-pane" | "repo-coordinator";
 
 /** Sub-focus states for panels with input fields (active-agent, coordinator). */
 export type SubFocus = "pane" | "input" | "send";
@@ -21,6 +21,7 @@ const FOCUS_ORDER: readonly FocusTarget[] = [
   "coordinator",
   "active-agent",
   "right-pane",
+  "repo-coordinator",
 ] as const;
 
 /** Restricted focus order when system coordinator is selected.
@@ -45,6 +46,8 @@ export class FocusManager {
   subFocus: SubFocus = "pane";
   /** When true, only cycle between agent-tree and coordinator */
   coordinatorMode = false;
+  /** Targets to skip when cycling (e.g., repo-coordinator when not in REPO mode) */
+  skipTargets: Set<FocusTarget> = new Set(["repo-coordinator"]);
 
   constructor(initial: FocusTarget = "agent-tree") {
     this.focus = initial;
@@ -57,7 +60,7 @@ export class FocusManager {
 
   /** Returns true if the given panel has an input field (supports sub-focus). */
   static panelHasInput(target: FocusTarget): boolean {
-    return target === "active-agent" || target === "coordinator";
+    return target === "active-agent" || target === "coordinator" || target === "repo-coordinator";
   }
 
   /** Set the sub-focus state (pane, input, or send). */
@@ -65,13 +68,18 @@ export class FocusManager {
     this.subFocus = sf;
   }
 
-  /** Cycle focus forward (+1) or backward (-1), wrapping around. */
+  /** Cycle focus forward (+1) or backward (-1), wrapping around. Skips targets in skipTargets. */
   cycle(delta: 1 | -1): void {
     const order = this.coordinatorMode ? COORDINATOR_FOCUS_ORDER : FOCUS_ORDER;
     const idx = order.indexOf(this.focus);
     // If current focus is not in the active order, reset to first
     const currentIdx = idx === -1 ? 0 : idx;
-    const next = (currentIdx + delta + order.length) % order.length;
+    let next = (currentIdx + delta + order.length) % order.length;
+    // Skip targets that are in the skip set (guard against infinite loop)
+    for (let i = 0; i < order.length; i++) {
+      if (!this.skipTargets.has(order[next]!)) break;
+      next = (next + delta + order.length) % order.length;
+    }
     this.focus = order[next]!;
     this.subFocus = "pane";
   }

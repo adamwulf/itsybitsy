@@ -127,15 +127,84 @@ describe("FocusManager", () => {
     expect(fm.subFocus).toBe("pane");
   });
 
-  test("panelHasInput returns true for active-agent and coordinator", () => {
+  test("panelHasInput returns true for active-agent, coordinator, and repo-coordinator", () => {
     expect(FocusManager.panelHasInput("active-agent")).toBe(true);
     expect(FocusManager.panelHasInput("coordinator")).toBe(true);
+    expect(FocusManager.panelHasInput("repo-coordinator")).toBe(true);
   });
 
   test("panelHasInput returns false for other panels", () => {
     expect(FocusManager.panelHasInput("agent-tree")).toBe(false);
     expect(FocusManager.panelHasInput("info")).toBe(false);
     expect(FocusManager.panelHasInput("right-pane")).toBe(false);
+  });
+
+  test("repo-coordinator is skipped by default", () => {
+    const fm = new FocusManager("right-pane");
+    fm.cycle(1);
+    expect(fm.current()).toBe("agent-tree");
+  });
+
+  test("repo-coordinator is included when removed from skipTargets", () => {
+    const fm = new FocusManager("right-pane");
+    fm.skipTargets.delete("repo-coordinator");
+    fm.cycle(1);
+    expect(fm.current()).toBe("repo-coordinator");
+  });
+
+  test("cycle forward through all targets including repo-coordinator", () => {
+    const fm = new FocusManager("agent-tree");
+    fm.skipTargets.delete("repo-coordinator");
+    fm.cycle(1); // info
+    expect(fm.current()).toBe("info");
+    fm.cycle(1); // coordinator
+    expect(fm.current()).toBe("coordinator");
+    fm.cycle(1); // active-agent
+    expect(fm.current()).toBe("active-agent");
+    fm.cycle(1); // right-pane
+    expect(fm.current()).toBe("right-pane");
+    fm.cycle(1); // repo-coordinator
+    expect(fm.current()).toBe("repo-coordinator");
+    fm.cycle(1); // agent-tree (wrap)
+    expect(fm.current()).toBe("agent-tree");
+  });
+
+  test("cycle backward through all targets including repo-coordinator", () => {
+    const fm = new FocusManager("agent-tree");
+    fm.skipTargets.delete("repo-coordinator");
+    fm.cycle(-1); // repo-coordinator
+    expect(fm.current()).toBe("repo-coordinator");
+    fm.cycle(-1); // right-pane
+    expect(fm.current()).toBe("right-pane");
+    fm.cycle(-1); // active-agent
+    expect(fm.current()).toBe("active-agent");
+    fm.cycle(-1); // coordinator
+    expect(fm.current()).toBe("coordinator");
+    fm.cycle(-1); // info
+    expect(fm.current()).toBe("info");
+    fm.cycle(-1); // agent-tree (wrap)
+    expect(fm.current()).toBe("agent-tree");
+  });
+
+  test("skipTargets can skip multiple targets", () => {
+    const fm = new FocusManager("agent-tree");
+    fm.skipTargets.delete("repo-coordinator");
+    fm.skipTargets.add("info");
+    fm.skipTargets.add("coordinator");
+    fm.cycle(1); // skips info and coordinator
+    expect(fm.current()).toBe("active-agent");
+  });
+
+  test("cycle does not infinite loop when all targets are skipped", () => {
+    const fm = new FocusManager("agent-tree");
+    fm.skipTargets.add("info");
+    fm.skipTargets.add("coordinator");
+    fm.skipTargets.add("active-agent");
+    fm.skipTargets.add("right-pane");
+    // repo-coordinator already skipped by default
+    fm.cycle(1);
+    // Should land on agent-tree (the only non-skipped target)
+    expect(fm.current()).toBe("agent-tree");
   });
 });
 

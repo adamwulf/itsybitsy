@@ -1,297 +1,272 @@
 /**
- * Agent type system — load and parse agent type definitions from .md files.
- * Agent types define role-specific behavior: prompts, permissions, spawn rules, model.
+ * Agent type definitions: load, parse, and resolve agent types from
+ * ~/.itsybitsy/agent-types/<name>/AGENTTYPE.md files.
+ *
+ * Each file uses YAML frontmatter + markdown body (similar to Claude Code skills).
  */
 
 import { join } from "path";
-import { homedir } from "node:os";
+import { homedir } from "os";
+
+export const AGENT_TYPES_DIR = join(process.env.HOME ?? homedir(), ".itsybitsy", "agent-types");
+
+export interface AgentTypeDefinition {
+  name: string;
+  description: string;
+  canSpawnChildren: boolean;
+  canBeParent: boolean;
+  permissions: {
+    allow: string[];
+    deny: string[];
+  };
+  model?: string;
+  coordinator?: boolean;
+  promptBody: string;
+}
 
 /**
- * Agent type frontmatter extracted from .md file.
- * Defines permissions, spawn capability, model, and other role-specific behavior.
+ * Parse YAML frontmatter + markdown body from an agent type file.
+ * Expects `---` delimiters around YAML frontmatter.
  */
-export interface AgentTypeFrontmatter {
-  name: string; // Unique type identifier (e.g., "manager", "worker", "reviewer")
-  description: string; // Purpose/intent
-  canSpawnChildren: boolean; // Can this type spawn sub-agents?
-  canBeParent?: boolean; // Can this type have children? (default: same as canSpawnChildren)
-  model?: string; // Preferred model: "sonnet", "opus", "haiku"
-  coordinator?: boolean; // Special coordinator role
-  permissions?: {
-    allow?: string[]; // Allowed tools (e.g., ["Read", "Grep", "Glob"])
-    deny?: string[]; // Denied tools
+export function parseAgentTypeFile(content: string): AgentTypeDefinition {
+  const trimmed = content.trim();
+  if (!trimmed.startsWith("---")) {
+    throw new Error("Agent type file must start with YAML frontmatter (---)");
+  }
+
+  const endIdx = trimmed.indexOf("---", 3);
+  if (endIdx === -1) {
+    throw new Error("Agent type file has unclosed YAML frontmatter");
+  }
+
+  const frontmatterStr = trimmed.substring(3, endIdx).trim();
+  const body = trimmed.substring(endIdx + 3).trim();
+
+  // Simple YAML parser for the subset we need
+  const frontmatter = parseSimpleYaml(frontmatterStr);
+
+  const name = typeof frontmatter.name === "string" ? frontmatter.name : "";
+  if (!name) {
+    throw new Error("Agent type file must have a 'name' field in frontmatter");
+  }
+
+  const description = typeof frontmatter.description === "string" ? frontmatter.description : "";
+  const canSpawnChildren = frontmatter.canSpawnChildren === true;
+  const canBeParent = frontmatter.canBeParent !== undefined ? frontmatter.canBeParent === true : true;
+  const model = typeof frontmatter.model === "string" ? frontmatter.model : undefined;
+  const coordinator = frontmatter.coordinator === true ? true : undefined;
+
+  // Parse permissions
+  const permsRaw = frontmatter.permissions as Record<string, unknown> | undefined;
+  const allow = parseStringArray(permsRaw?.allow);
+  const deny = parseStringArray(permsRaw?.deny);
+
+  return {
+    name,
+    description,
+    canSpawnChildren,
+    canBeParent,
+    permissions: { allow, deny },
+    model,
+    coordinator,
+    promptBody: body,
   };
 }
 
-/**
- * Complete agent type definition: frontmatter + prompt body.
- * The body is injected into session-start context.
- */
-export interface AgentType {
-  frontmatter: AgentTypeFrontmatter;
-  body: string; // Markdown body to inject as session-start instructions
+/** Parse a value that should be a string array (from YAML list) */
+function parseStringArray(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value.filter((v): v is string => typeof v === "string");
+  }
+  return [];
 }
 
 /**
- * Load an agent type by name from ~/.itsybitsy/agent-types/<name>/AGENTTYPE.md.
- * Returns null if not found (caller should use fallback/default).
+ * Simple YAML parser that handles the subset we need:
+ * - Top-level scalar keys (string, boolean, number)
+ * - Top-level object with one level of nesting (permissions.allow/deny)
+ * - YAML lists (sequences)
  */
-export async function loadAgentType(typeName: string): Promise<AgentType | null> {
-  const typeDir = join(homedir(), ".itsybitty", "agent-types", typeName);
-  const typeFile = Bun.file(join(typeDir, "AGENTTYPE.md"));
+function parseSimpleYaml(yaml: string): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  const lines = yaml.split("\n");
+  let currentKey = "";
+  let currentObj: Record<string, unknown> | null = null;
+  let currentList: string[] | null = null;
+  let currentListKey = "";
 
-  try {
-    if (!(await typeFile.exists())) {
-      return null;
+  for (const line of lines) {
+    // Skip empty lines and comments
+    if (!line.trim() || line.trim().startsWith("#")) continue;
+
+    // List item (indented with -)
+    const listMatch = /^\s+-\s+(.+)$/.exec(line);
+    if (listMatch && currentList !== null) {
+      currentList.push(listMatch[1]!.trim());
+      continue;
     }
 
-    const content = await typeFile.text();
-    const parsed = parseAgentTypeMarkdown(content);
-    if (!parsed) return null;
+    // If we were building a list, save it
+    if (currentList !== null) {
+      if (currentObj && currentListKey) {
+        currentObj[currentListKey] = currentList;
+      } else {
+        result[currentListKey] = currentList;
+      }
+      currentList = null;
+      currentListKey = "";
+    }
 
-    return parsed;
+    // Nested key (indented, part of an object)
+    const nestedMatch = /^(\s{2,})(\w+):\s*(.*)$/.exec(line);
+    if (nestedMatch && currentKey && currentObj) {
+      const nestedKey = nestedMatch[2]!;
+      const nestedVal = nestedMatch[3]!.trim();
+      if (nestedVal === "") {
+        // Start of a list
+        currentList = [];
+        currentListKey = nestedKey;
+      } else if (nestedVal.startsWith("[")) {
+        currentObj[nestedKey] = parseInlineArray(nestedVal);
+      } else {
+        currentObj[nestedKey] = parseScalar(nestedVal);
+      }
+      continue;
+    }
+
+    // If we were building an object and hit a non-nested line, save it
+    if (currentObj) {
+      result[currentKey] = currentObj;
+      currentObj = null;
+      currentKey = "";
+    }
+
+    // Top-level key: value
+    const topMatch = /^(\w+):\s*(.*)$/.exec(line);
+    if (topMatch) {
+      const key = topMatch[1]!;
+      const val = topMatch[2]!.trim();
+      if (val === "") {
+        // Could be an object or list — start collecting
+        currentKey = key;
+        currentObj = {};
+      } else if (val.startsWith("[")) {
+        // Inline array: [item1, item2]
+        result[key] = parseInlineArray(val);
+      } else {
+        result[key] = parseScalar(val);
+      }
+    }
+  }
+
+  // Flush any remaining list
+  if (currentList !== null) {
+    if (currentObj && currentListKey) {
+      currentObj[currentListKey] = currentList;
+    } else {
+      result[currentListKey] = currentList;
+    }
+  }
+
+  // Flush any remaining object
+  if (currentObj && currentKey) {
+    result[currentKey] = currentObj;
+  }
+
+  return result;
+}
+
+function parseScalar(val: string): string | boolean | number {
+  if (val === "true") return true;
+  if (val === "false") return false;
+  const num = Number(val);
+  if (!isNaN(num) && val !== "") return num;
+  // Strip surrounding quotes
+  if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+    return val.slice(1, -1);
+  }
+  return val;
+}
+
+function parseInlineArray(val: string): string[] {
+  // Parse [item1, item2, item3]
+  const inner = val.slice(1, -1).trim();
+  if (!inner) return [];
+  return inner.split(",").map((s) => {
+    const trimmed = s.trim();
+    if ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
+      return trimmed.slice(1, -1);
+    }
+    return trimmed;
+  });
+}
+
+/**
+ * Load an agent type definition from disk.
+ * Looks in ~/.itsybitsy/agent-types/<name>/AGENTTYPE.md
+ */
+export async function loadAgentType(typeName: string): Promise<AgentTypeDefinition | null> {
+  const filePath = join(AGENT_TYPES_DIR, typeName, "AGENTTYPE.md");
+  try {
+    const file = Bun.file(filePath);
+    if (!(await file.exists())) return null;
+    const content = await file.text();
+    return parseAgentTypeFile(content);
   } catch {
     return null;
   }
 }
 
 /**
- * Parse agent type markdown file with YAML frontmatter + body.
- * Format:
- * ---
- * name: identifier
- * description: purpose
- * canSpawnChildren: true|false
- * [optional other fields]
- * ---
- * # Markdown body
+ * Return a built-in agent type definition for the three legacy types.
  */
-export function parseAgentTypeMarkdown(content: string): AgentType | null {
-  // Extract frontmatter (between --- delimiters)
-  const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
-  if (!frontmatterMatch) {
-    return null;
-  }
-
-  const frontmatterText = frontmatterMatch[1]!;
-  const body = frontmatterMatch[2]!.trim();
-
-  // Parse YAML-like frontmatter (simple line-based parsing, not full YAML)
-  const frontmatter = parseFrontmatter(frontmatterText);
-  if (!frontmatter || !frontmatter.name || !frontmatter.description) {
-    return null;
-  }
-
-  return {
-    frontmatter: frontmatter as AgentTypeFrontmatter,
-    body,
-  };
-}
-
-/**
- * Parse simple YAML-like frontmatter (line-based, not full YAML parser).
- * Supports: key: value, key: [item1, item2], key: {nested: value}.
- */
-function parseFrontmatter(text: string): Partial<AgentTypeFrontmatter> | null {
-  const result: Record<string, unknown> = {};
-
-  const lines = text.split("\n");
-  let currentKey = "";
-  let inArray = false;
-  let inObject = false;
-  let arrayItems: string[] = [];
-  let objectStr = "";
-
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-
-    // Check for simple key: value
-    const colonMatch = trimmed.match(/^([a-zA-Z_.]+):\s*(.*)$/);
-    if (colonMatch) {
-      currentKey = colonMatch[1]!;
-      const value = colonMatch[2]!.trim();
-
-      // Check for array start
-      if (value.startsWith("[")) {
-        inArray = true;
-        arrayItems = [];
-        if (value === "[") {
-          // Multi-line array
-        } else if (value.endsWith("]")) {
-          // Single-line array: [item1, item2]
-          inArray = false;
-          const itemsStr = value.slice(1, -1);
-          arrayItems = itemsStr
-            .split(",")
-            .map((s) => s.trim().replace(/^["']|["']$/g, ""));
-          result[currentKey] = arrayItems;
-        } else {
-          // Array starts here: [item1,
-          const itemsStr = value.slice(1);
-          arrayItems = [itemsStr.replace(/,\s*$/, "")];
-        }
-        continue;
-      }
-
-      // Check for object start
-      if (value.startsWith("{")) {
-        inObject = true;
-        objectStr = value;
-        if (value.endsWith("}")) {
-          // Single-line object
-          inObject = false;
-          result[currentKey] = parseObjectValue(value);
-        }
-        continue;
-      }
-
-      // Simple value: string, number, boolean
-      result[currentKey] = parseSimpleValue(value);
-      continue;
-    }
-
-    // Continue multi-line array
-    if (inArray) {
-      if (trimmed.endsWith("]")) {
-        inArray = false;
-        const item = trimmed.slice(0, -1).trim();
-        if (item) {
-          arrayItems.push(item.replace(/^["']|["']$/g, "").replace(/,\s*$/, ""));
-        }
-        result[currentKey] = arrayItems;
-      } else if (trimmed.endsWith(",")) {
-        arrayItems.push(trimmed.slice(0, -1).trim().replace(/^["']|["']$/g, ""));
-      } else {
-        arrayItems.push(trimmed.replace(/^["']|["']$/g, ""));
-      }
-      continue;
-    }
-
-    // Continue multi-line object
-    if (inObject) {
-      objectStr += "\n" + line;
-      if (trimmed.endsWith("}")) {
-        inObject = false;
-        result[currentKey] = parseObjectValue(objectStr);
-      }
-      continue;
-    }
-  }
-
-  return result as Partial<AgentTypeFrontmatter>;
-}
-
-/**
- * Parse a simple YAML value: string, number, boolean, null.
- */
-function parseSimpleValue(value: string): unknown {
-  if (value === "true") return true;
-  if (value === "false") return false;
-  if (value === "null" || value === "") return null;
-  if (/^\d+$/.test(value)) return parseInt(value, 10);
-  if (/^[\d.]+$/.test(value)) return parseFloat(value);
-  // Remove quotes if present
-  if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
-    return value.slice(1, -1);
-  }
-  return value;
-}
-
-/**
- * Parse a simple YAML object: {key: value, ...}.
- * Supports only simple nested values (strings, numbers, booleans).
- */
-function parseObjectValue(value: string): Record<string, unknown> {
-  const result: Record<string, unknown> = {};
-
-  // Remove outer braces and split by comma (naive; doesn't handle nested braces)
-  const inner = value.replace(/^{/, "").replace(/}$/, "").trim();
-  if (!inner) return result;
-
-  // Split by comma and parse key: value pairs
-  const pairs = inner.split(",");
-  for (const pair of pairs) {
-    const match = pair.match(/^\s*([a-zA-Z_]+)\s*:\s*(.+)$/);
-    if (match) {
-      const key = match[1]!;
-      const val = match[2]!.trim();
-      result[key] = parseSimpleValue(val);
-    }
-  }
-
-  return result;
-}
-
-/**
- * Get the effective canSpawnChildren flag for an agent type.
- * For coordinator type or undefined type, coordinators always spawn.
- */
-export function canAgentTypeSpawnChildren(agentType: AgentType | null): boolean {
-  if (!agentType) return false;
-  if (agentType.frontmatter.coordinator === true) return true;
-  return agentType.frontmatter.canSpawnChildren === true;
-}
-
-/**
- * Get built-in fallback instructions for legacy "manager" and "worker" types.
- * Used when no .md file is found (backward compatibility).
- */
-export function getBuiltInType(typeName: string): AgentType | null {
-  if (typeName === "manager") {
-    return {
-      frontmatter: {
+export function getBuiltinType(typeName: "manager" | "worker" | "coordinator"): AgentTypeDefinition {
+  switch (typeName) {
+    case "manager":
+      return {
         name: "manager",
         description: "Manager agent that can spawn and coordinate sub-agents",
         canSpawnChildren: true,
-        model: "opus",
-      },
-      body: "", // Session-start will inject hardcoded manager instructions
-    };
-  }
-
-  if (typeName === "worker") {
-    return {
-      frontmatter: {
+        canBeParent: true,
+        permissions: { allow: [], deny: [] },
+        promptBody: "",
+      };
+    case "worker":
+      return {
         name: "worker",
-        description: "Worker agent that executes assigned tasks",
+        description: "Worker agent that executes tasks assigned by a manager",
         canSpawnChildren: false,
-        model: "opus",
-      },
-      body: "", // Session-start will inject hardcoded worker instructions
-    };
+        canBeParent: false,
+        permissions: { allow: [], deny: [] },
+        promptBody: "",
+      };
+    case "coordinator":
+      return {
+        name: "coordinator",
+        description: "Per-repo coordinator that manages agents via ib commands",
+        canSpawnChildren: true,
+        canBeParent: true,
+        coordinator: true,
+        permissions: { allow: [], deny: [] },
+        promptBody: "",
+      };
   }
-
-  return null;
 }
 
 /**
- * Resolve an agent type: try to load from .md, fall back to built-in, return null if not found.
- * Also supports migration: if type looks like a boolean ("manager"/"worker"), map it.
+ * Resolve an agent type by name. Tries loading from disk first,
+ * then falls back to built-in types for manager/worker/coordinator.
+ * Throws for unknown types that aren't found on disk.
  */
-export async function resolveAgentType(typeName: string): Promise<AgentType | null> {
-  // Try to load from disk first
-  const custom = await loadAgentType(typeName);
-  if (custom) return custom;
+export async function resolveAgentType(typeName: string): Promise<AgentTypeDefinition> {
+  // Try disk first
+  const fromDisk = await loadAgentType(typeName);
+  if (fromDisk) return fromDisk;
 
   // Fall back to built-in types
-  const builtin = getBuiltInType(typeName);
-  if (builtin) return builtin;
+  if (typeName === "manager" || typeName === "worker" || typeName === "coordinator") {
+    return getBuiltinType(typeName);
+  }
 
-  return null;
-}
-
-/**
- * Convert legacy meta.json with worker:boolean to type:string.
- * Returns type name for agents that have only worker field.
- */
-export function migrateWorkerToType(meta: { worker?: boolean; type?: string }): string {
-  // Already migrated
-  if (meta.type) return meta.type;
-
-  // Legacy worker field
-  if (meta.worker === true) return "worker";
-
-  // Default to manager
-  return "manager";
+  throw new Error(`Unknown agent type: '${typeName}'. Create it at ${join(AGENT_TYPES_DIR, typeName, "AGENTTYPE.md")}`);
 }

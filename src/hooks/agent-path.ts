@@ -404,13 +404,13 @@ export async function hookCheckPath(agentId: string, rawStdin?: string): Promise
     // Keep the constructed path if realpath fails
   }
 
-  // Read meta.json for worker flag
+  // Read meta.json for worker flag (or type === "worker")
   let isWorker = false;
   try {
     const metaFile = Bun.file(join(agentDir, "meta.json"));
     if (await metaFile.exists()) {
       const meta = await metaFile.json();
-      isWorker = meta.worker === true;
+      isWorker = meta.worker === true || meta.type === "worker";
     }
   } catch { /* ignore */ }
 

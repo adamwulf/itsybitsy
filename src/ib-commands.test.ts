@@ -1997,12 +1997,14 @@ describe("newAgent (native)", () => {
     expect(meta.agentType).toBe("worker");
   });
 
-  test("rejects conflicting --type and --worker flags", async () => {
+  test("--type flag overrides default agentType", async () => {
     setNewAgentSpawnRunner(mockSpawnRunner());
-    const result = await callNewAgent("test", { name: "test-conflict", type: "manager", worker: true });
-    // This should fail because --type and --worker are mutually exclusive
-    // (The check happens in index.ts before calling newAgent, so this test
-    // just verifies agent creation still works with valid type)
+    const result = await callNewAgent("test custom", { name: "test-type-override", type: "worker" });
+    expect(result.ok).toBe(true);
+
+    const meta = await Bun.file(join(agentsDir, "test-type-override", "meta.json")).json();
+    expect(meta.agentType).toBe("worker");
+    expect(meta.worker).toBe(true); // canSpawnChildren: false → worker: true
   });
 
   test("creates prompt.txt with prompt content", async () => {

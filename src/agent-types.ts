@@ -3,6 +3,7 @@
  */
 
 import { join } from "path";
+import { homedir } from "os";
 import { Glob } from "bun";
 
 export interface AgentType {
@@ -21,6 +22,7 @@ export interface AgentType {
 /**
  * Parse YAML front matter from a markdown file and extract metadata + body.
  * Front matter is between --- delimiters at the start of the file.
+ * Supports nested objects (one level deep) and YAML arrays.
  */
 export function parseAgentTypeFile(content: string): {
   frontmatter: Record<string, unknown>;
@@ -46,42 +48,91 @@ export function parseAgentTypeFile(content: string): {
     return { frontmatter: {}, body: content };
   }
 
-  // Parse YAML-like front matter (simple key: value parsing)
+  // Parse YAML-like front matter with support for nested objects
   const fmLines = lines.slice(1, endIdx);
   const frontmatter: Record<string, unknown> = {};
 
-  for (const line of fmLines) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) continue;
+  let currentParent: string | null = null;
+  let currentObj: Record<string, unknown> | null = null;
 
+  for (const line of fmLines) {
+    // Skip blank lines and comments
+    if (!line.trim() || line.trim().startsWith("#")) {
+      continue;
+    }
+
+    // Check if this is an indented child line (part of a nested object)
+    const indentMatch = line.match(/^(\s+)(\S.*)/);
+    if (indentMatch && currentParent && currentObj) {
+      const childLine = indentMatch[2]!.trim();
+      const colonIdx = childLine.indexOf(":");
+      if (colonIdx !== -1) {
+        const key = childLine.substring(0, colonIdx).trim();
+        const valueStr = childLine.substring(colonIdx + 1).trim();
+        if (valueStr.startsWith("- ")) {
+          // YAML list item as value of parent.key — treat as single-item array start
+          currentObj[key] = [valueStr.substring(2).trim().replace(/^["']|["']$/g, "")];
+        } else {
+          currentObj[key] = parseSimpleValue(valueStr);
+        }
+        continue;
+      }
+      // Could be a YAML list item (- value) under a key
+      if (childLine.startsWith("- ")) {
+        // Append to the last key in currentObj
+        const lastKey = Object.keys(currentObj).pop();
+        if (lastKey && Array.isArray(currentObj[lastKey])) {
+          (currentObj[lastKey] as unknown[]).push(childLine.substring(2).trim().replace(/^["']|["']$/g, ""));
+        }
+        continue;
+      }
+    }
+
+    // Top-level key
+    const trimmed = line.trim();
     const colonIdx = trimmed.indexOf(":");
     if (colonIdx === -1) continue;
 
     const key = trimmed.substring(0, colonIdx).trim();
     const valueStr = trimmed.substring(colonIdx + 1).trim();
 
-    // Simple value parsing: booleans, numbers, strings, arrays
-    if (valueStr === "true") {
-      frontmatter[key] = true;
-    } else if (valueStr === "false") {
-      frontmatter[key] = false;
-    } else if (!isNaN(Number(valueStr))) {
-      frontmatter[key] = Number(valueStr);
-    } else if (valueStr.startsWith("[") && valueStr.endsWith("]")) {
-      // Simple array parsing: [item1, item2]
-      const itemsStr = valueStr.substring(1, valueStr.length - 1);
-      frontmatter[key] = itemsStr
-        .split(",")
-        .map((s) => s.trim().replace(/^["']|["']$/g, ""));
+    // If value is empty, this starts a nested object
+    if (valueStr === "") {
+      currentParent = key;
+      currentObj = {};
+      frontmatter[key] = currentObj;
     } else {
-      // String value
-      frontmatter[key] = valueStr.replace(/^["']|["']$/g, "");
+      // Close any open nested object
+      currentParent = null;
+      currentObj = null;
+      frontmatter[key] = parseSimpleValue(valueStr);
     }
   }
 
   const body = lines.slice(endIdx + 1).join("\n").trim();
 
   return { frontmatter, body };
+}
+
+/**
+ * Parse a simple YAML value: booleans, numbers, strings, inline arrays.
+ */
+function parseSimpleValue(valueStr: string): unknown {
+  if (valueStr === "true") return true;
+  if (valueStr === "false") return false;
+  // Only parse as number if it's a non-empty string that looks like a number
+  if (valueStr !== "" && !isNaN(Number(valueStr)) && valueStr.trim() !== "") {
+    return Number(valueStr);
+  }
+  if (valueStr.startsWith("[") && valueStr.endsWith("]")) {
+    const itemsStr = valueStr.substring(1, valueStr.length - 1);
+    if (itemsStr.trim() === "") return [];
+    return itemsStr
+      .split(",")
+      .map((s) => s.trim().replace(/^["']|["']$/g, ""));
+  }
+  // String value — strip surrounding quotes
+  return valueStr.replace(/^["']|["']$/g, "");
 }
 
 /**
@@ -115,17 +166,14 @@ export function getBuiltinTypes(): Record<string, AgentType> {
 
 /**
  * Load an agent type definition from ~/.itsybitsy/agent-types/<name>.md
- * Falls back to built-in defaults if the file doesn't exist.
+ * User-defined files override built-in defaults. Falls back to built-in manager
+ * if the type is not found anywhere.
  */
 export async function loadAgentType(name: string): Promise<AgentType> {
   const builtins = getBuiltinTypes();
 
-  if (builtins[name]) {
-    return builtins[name]!;
-  }
-
-  // Try to load from file
-  const home = process.env.HOME || require("os").homedir();
+  // Try user-defined file first (allows overriding built-ins)
+  const home = process.env.HOME || homedir();
   const typeFile = join(home, ".itsybitsy", "agent-types", `${name}.md`);
 
   try {
@@ -134,62 +182,63 @@ export async function loadAgentType(name: string): Promise<AgentType> {
       const content = await file.text();
       const { frontmatter, body } = parseAgentTypeFile(content);
 
+      const permissions = frontmatter.permissions as Record<string, unknown> | undefined;
       return {
         name: (frontmatter.name as string) || name,
         description: (frontmatter.description as string) || "",
         canSpawnChildren: (frontmatter.canSpawnChildren as boolean) ?? false,
         model: (frontmatter.model as string) || undefined,
-        permissions: (frontmatter.permissions as AgentType["permissions"]) || undefined,
+        permissions: permissions ? {
+          allow: Array.isArray(permissions.allow) ? permissions.allow as string[] : undefined,
+          deny: Array.isArray(permissions.deny) ? permissions.deny as string[] : undefined,
+        } : undefined,
         instructionStyle: (frontmatter.instructionStyle as AgentType["instructionStyle"]) || "worker",
         markdownBody: body || undefined,
       };
     }
   } catch {
-    // File doesn't exist or can't be read
+    // File doesn't exist or can't be read — fall through to built-in
   }
 
-  // Return default manager if not found
+  // Fall back to built-in
+  if (builtins[name]) {
+    return builtins[name]!;
+  }
+
+  // Unknown type — return manager default
   return builtins.manager!;
 }
 
 /**
  * List all available agent types (built-in + user-defined in ~/.itsybitsy/agent-types/).
+ * User-defined types with the same name as built-ins override them.
  */
 export async function listAgentTypes(): Promise<AgentType[]> {
   const types: Map<string, AgentType> = new Map();
   const builtins = getBuiltinTypes();
 
-  // Add built-ins
+  // Add built-ins first
   for (const [name, type] of Object.entries(builtins)) {
     types.set(name, type);
   }
 
-  // Add user-defined types from ~/.itsybitsy/agent-types/
-  const home = process.env.HOME || require("os").homedir();
+  // Add/override with user-defined types from ~/.itsybitsy/agent-types/
+  const home = process.env.HOME || homedir();
   const typesDir = join(home, ".itsybitsy", "agent-types");
 
   try {
-    const dir = Bun.file(typesDir);
-    const isDir = await dir.exists().catch(() => false);
-    if (isDir) {
+    const glob = new Glob("*.md");
+    for await (const file of glob.scan(typesDir)) {
+      const name = file.replace(/\.md$/, "");
       try {
-        // List .md files in the directory using Glob
-        const glob = new Glob("*.md");
-        for await (const file of glob.scan(typesDir)) {
-          const name = file.replace(/\.md$/, "");
-          try {
-            const type = await loadAgentType(name);
-            types.set(name, type);
-          } catch {
-            // Skip files that can't be parsed
-          }
-        }
+        const type = await loadAgentType(name);
+        types.set(name, type);
       } catch {
-        // glob failed, try with readdir alternative
+        // Skip files that can't be parsed
       }
     }
   } catch {
-    // Types directory doesn't exist
+    // Types directory doesn't exist or can't be read
   }
 
   return Array.from(types.values());

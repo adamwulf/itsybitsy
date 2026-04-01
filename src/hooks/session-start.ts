@@ -87,7 +87,7 @@ export async function generateInstructions(ctx: SessionContext): Promise<string>
         baseInstructions = generateCoordinatorInstructions(ctx);
         break;
       default:
-        baseInstructions = generatePrimaryInstructions();
+        baseInstructions = generateWorkerInstructions(ctx);
     }
 
     // Append the markdown body if it exists

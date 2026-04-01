@@ -8,9 +8,6 @@ description: "A test agent type"
 canSpawnChildren: true
 model: sonnet
 instructionStyle: manager
-permissions:
-  allow: [Read, Write]
-  deny: [Edit]
 ---
 
 # Test Instructions
@@ -62,18 +59,24 @@ body`;
   expect(frontmatter.enabled).toBe(false);
 });
 
-test("parseAgentTypeFile: parses array values", () => {
+test("parseAgentTypeFile: parses nested permissions object", () => {
   const content = `---
-name: test
+name: researcher
 permissions:
-  allow: [Read, Write, Bash]
-  deny: [Edit, WebFetch]
+  allow: [Read, Grep, Glob]
+  deny: [Write, Edit]
 ---
 body`;
 
   const { frontmatter } = parseAgentTypeFile(content);
 
-  expect(Array.isArray(frontmatter.permissions)).toBe(false); // nested objects not fully parsed
+  const perms = frontmatter.permissions as Record<string, unknown>;
+  expect(perms).toBeDefined();
+  expect(typeof perms).toBe("object");
+  expect(Array.isArray(perms.allow)).toBe(true);
+  expect(perms.allow).toEqual(["Read", "Grep", "Glob"]);
+  expect(Array.isArray(perms.deny)).toBe(true);
+  expect(perms.deny).toEqual(["Write", "Edit"]);
 });
 
 test("parseAgentTypeFile: parses simple array format", () => {
@@ -87,6 +90,76 @@ body`;
   expect(Array.isArray(frontmatter.tools)).toBe(true);
   expect((frontmatter.tools as string[]).length).toBe(3);
   expect((frontmatter.tools as string[]).includes("Tool1")).toBe(true);
+});
+
+test("parseAgentTypeFile: handles empty string values correctly", () => {
+  const content = `---
+name: test
+description:
+model:
+---
+body`;
+
+  const { frontmatter } = parseAgentTypeFile(content);
+
+  // Empty values should start nested objects or remain as empty objects, not become 0
+  expect(frontmatter.name).toBe("test");
+  // description with no value starts a nested object
+  expect(typeof frontmatter.description).toBe("object");
+  expect(typeof frontmatter.model).toBe("object");
+});
+
+test("parseAgentTypeFile: handles empty inline array", () => {
+  const content = `---
+tools: []
+---
+body`;
+
+  const { frontmatter } = parseAgentTypeFile(content);
+
+  expect(Array.isArray(frontmatter.tools)).toBe(true);
+  expect((frontmatter.tools as string[]).length).toBe(0);
+});
+
+test("parseAgentTypeFile: handles quoted string values", () => {
+  const content = `---
+name: "quoted name"
+description: 'single quoted'
+---
+body`;
+
+  const { frontmatter } = parseAgentTypeFile(content);
+
+  expect(frontmatter.name).toBe("quoted name");
+  expect(frontmatter.description).toBe("single quoted");
+});
+
+test("parseAgentTypeFile: handles numeric values", () => {
+  const content = `---
+maxTurns: 50
+priority: 1.5
+---
+body`;
+
+  const { frontmatter } = parseAgentTypeFile(content);
+
+  expect(frontmatter.maxTurns).toBe(50);
+  expect(frontmatter.priority).toBe(1.5);
+});
+
+test("parseAgentTypeFile: skips comments", () => {
+  const content = `---
+name: test
+# This is a comment
+canSpawnChildren: true
+---
+body`;
+
+  const { frontmatter } = parseAgentTypeFile(content);
+
+  expect(frontmatter.name).toBe("test");
+  expect(frontmatter.canSpawnChildren).toBe(true);
+  expect(Object.keys(frontmatter).length).toBe(2);
 });
 
 test("getBuiltinTypes: returns manager, worker, coordinator", async () => {

@@ -1550,8 +1550,8 @@ export async function newAgent(
     return { ok: false, exitCode: 1, stdout: "", stderr: `Error: agent type '${resolvedTypeName}' has canSpawnChildren=true but --worker was specified` };
   }
 
-  // Update workerMode based on agent type
-  const finalWorkerMode = !agentTypeDef.canSpawnChildren;
+  // Leaf agents can't spawn children (worker-like behavior)
+  const isLeafAgent = !agentTypeDef.canSpawnChildren;
 
   // 7. Model fallback: --model > type.model > config.model > 'opus'
   //    For coordinators: --model > type.model > coordinator.model > 'opus'
@@ -1678,7 +1678,7 @@ export async function newAgent(
       settingsContent = JSON.stringify(coordSettingsObj, null, 2);
     } else {
       // Map agent type to manager/worker for buildAgentSettings
-      const managerOrWorker: "manager" | "worker" = finalWorkerMode ? "worker" : "manager";
+      const managerOrWorker: "manager" | "worker" = isLeafAgent ? "worker" : "manager";
       settingsContent = await buildAgentSettings(rootRepoPath, managerOrWorker, id, configAllow, configDeny);
     }
     await Bun.write(join(agentDir, "repo", ".claude", "settings.local.json"), settingsContent);
@@ -1718,7 +1718,7 @@ export async function newAgent(
     created: now.toISOString(),
     created_epoch: Math.floor(now.getTime() / 1000),
     worktree: useWorktree,
-    worker: finalWorkerMode,
+    worker: isLeafAgent,
     agentType: resolvedTypeName,
     yolo: yoloMode,
     model: model || null,
@@ -1732,7 +1732,7 @@ export async function newAgent(
   if (manager) {
     await logAgent(agentDir, `Agent created (manager: ${manager}, prompt: ${prompt})`);
     const managerDir = join(agentsDir, manager);
-    const typeLabel = finalWorkerMode ? "worker" : "manager";
+    const typeLabel = isLeafAgent ? "worker" : "manager";
     await logAgent(managerDir, `Spawned ${typeLabel} subagent: ${id} (prompt: ${prompt})`);
   } else {
     await logAgent(agentDir, `Agent created (prompt: ${prompt})`);
@@ -1742,7 +1742,7 @@ export async function newAgent(
   const createPRs = config.createPullRequests?.value === true;
   let completionInstructions = "";
 
-  if (useWorktree && !finalWorkerMode) {
+  if (useWorktree && !isLeafAgent) {
     // Check for gh and remote
     const hasGhResult = await newAgentSpawnCtx.run(["which", "gh"]);
     const hasGh = hasGhResult.exitCode === 0;
@@ -1766,9 +1766,9 @@ When your task is complete:
   }
 
   let customRolePrompt = "";
-  if (finalWorkerMode && customPrompts.worker) {
+  if (isLeafAgent && customPrompts.worker) {
     customRolePrompt = `[CUSTOM WORKER INSTRUCTIONS]\n${customPrompts.worker}\n\n`;
-  } else if (!finalWorkerMode && customPrompts.manager) {
+  } else if (!isLeafAgent && customPrompts.manager) {
     customRolePrompt = `[CUSTOM MANAGER INSTRUCTIONS]\n${customPrompts.manager}\n\n`;
   }
 

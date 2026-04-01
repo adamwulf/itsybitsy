@@ -723,6 +723,21 @@ export class DashboardComponent implements Component {
     if (layout.repoCoordinatorHeightOffset !== undefined) {
       this.rightPane.repoCoordinatorHeightOffset = layout.repoCoordinatorHeightOffset;
     }
+    // §7.7 load-time safety net: use process.stdout.rows as a proxy for displayHeight to
+    // reject grossly invalid offsets from corrupted or oversized-terminal layout files.
+    // computeSidebarHeights needs actual displayHeight, but we don't have it yet, so use
+    // terminal rows as an approximation (slightly higher than actual displayHeight).
+    const approxHeight = process.stdout.rows ?? 24;
+    const approxBase = computeSidebarHeights(approxHeight, 1);
+    if (approxBase.treeHeight + this.sidebar.heightOffsets.tree < 1) {
+      this.sidebar.heightOffsets.tree = 1 - approxBase.treeHeight;
+    }
+    if (approxBase.infoHeight > 0 && approxBase.infoHeight + this.sidebar.heightOffsets.info < 1) {
+      this.sidebar.heightOffsets.info = 1 - approxBase.infoHeight;
+    }
+    if (approxBase.coordinatorHeight > 0 && approxBase.coordinatorHeight + this.sidebar.heightOffsets.coordinator < 1) {
+      this.sidebar.heightOffsets.coordinator = 1 - approxBase.coordinatorHeight;
+    }
     this.layoutRestored = true;
     this.pendingTmuxResize = true;
   }
@@ -1583,8 +1598,8 @@ export class DashboardComponent implements Component {
         const base = computeSidebarHeights(this.sidebar.displayHeight, this.agentTree.visibleList.length);
         const effectiveInfo = Math.max(0, base.infoHeight + this.sidebar.heightOffsets.info);
         if (delta > 0) {
-          // Growing tree: steal from info
-          if (effectiveInfo > 0) {
+          // Growing tree: steal from info (§7.7 guard: donor must stay ≥ 1)
+          if (effectiveInfo > 1) {
             this.sidebar.heightOffsets.tree += delta;
             this.sidebar.heightOffsets.info -= delta;
           }
@@ -1598,14 +1613,14 @@ export class DashboardComponent implements Component {
         }
         this.tui?.requestRender();
       } else if (focus === "info") {
-        // Grow info, shrink tree; give back to tree when shrinking
+        // Grow info, shrink tree; give back to tree when shrinking (§7.7 guard: donor must stay ≥ 1)
         const base = computeSidebarHeights(this.sidebar.displayHeight, this.agentTree.visibleList.length);
         const effectiveInfo = Math.max(0, base.infoHeight + this.sidebar.heightOffsets.info);
         const effectiveTree = Math.max(1, base.treeHeight + this.sidebar.heightOffsets.tree);
         if (delta > 0 && effectiveTree > 1) {
           this.sidebar.heightOffsets.info += delta;
           this.sidebar.heightOffsets.tree -= delta;
-        } else if (delta < 0 && effectiveInfo > 0) {
+        } else if (delta < 0 && effectiveInfo > 1) {
           this.sidebar.heightOffsets.info += delta;
           this.sidebar.heightOffsets.tree -= delta;
         }

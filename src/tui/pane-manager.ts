@@ -411,6 +411,9 @@ export class RightPaneComponent implements Component {
     // Default: 60% repo, 40% coordinator
     const baseCoordinatorHeight = Math.max(5, Math.floor(available * 0.4));
     const coordinatorHeight = Math.max(3, Math.min(available - 3, baseCoordinatorHeight + this.repoCoordinatorHeightOffset));
+    // BUG-10 render-path clamping: normalize offset so it stays valid for the current terminal
+    // size (mirrors BUG-3 fix in sidebar.ts).
+    this.repoCoordinatorHeightOffset = coordinatorHeight - baseCoordinatorHeight;
     const repoHeight = available - coordinatorHeight;
     return { repoHeight, coordinatorHeight };
   }

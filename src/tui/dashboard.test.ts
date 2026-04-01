@@ -13,6 +13,7 @@ import { spawnCtx as lifecycleSpawnCtx } from "../agent-lifecycle";
 import { setUserConfigPath, resetUserConfigPath } from "../config";
 import type { SpawnResult } from "../types";
 import { PANE_MODES } from "./pane-manager";
+import { computeSidebarHeights } from "./sidebar";
 import { assertDialog } from "./test-helpers";
 
 /** Helper: create a mock send spawn runner that records calls as {args, cwd}-style entries */
@@ -3101,13 +3102,13 @@ describe("sidebar height resize ({/} keys)", () => {
     expect(dashboard.sidebar.heightOffsets.tree).toBe(before.tree + 1);
   });
 
-  test("} when agent-tree focused does nothing if info height is 0", () => {
+  test("} when agent-tree focused does nothing if info height is at minimum", () => {
     const dashboard = makeDashboard();
-    // Force info to 0 by shrinking it completely
-    dashboard.sidebar.heightOffsets.info = -999; // force effective info to 0
+    // Force info to 1 (minimum) by shrinking it
+    dashboard.sidebar.heightOffsets.info = -999; // force effective info to ≤ 1
     const before = { ...dashboard.sidebar.heightOffsets };
     dashboard.handleInput("}");
-    // tree should not grow since there's nothing to steal from
+    // tree should not grow since info is at minimum (§7.7 guard: donor must stay ≥ 1)
     expect(dashboard.sidebar.heightOffsets.tree).toBe(before.tree);
   });
 
@@ -3136,6 +3137,49 @@ describe("sidebar height resize ({/} keys)", () => {
     dashboard.handleInput("}");
     dashboard.handleInput("{");
     expect(dashboard.sidebar.heightOffsets).toEqual(before);
+  });
+
+  test("{/} keys: info panel cannot be reduced below 1 row when agent-tree focused", () => {
+    const dashboard = makeDashboard();
+    dashboard.sidebar.displayHeight = 30;
+    // Focus is already agent-tree by default; grow tree (shrinks info) many times
+    expect(dashboard.focus).toBe("agent-tree");
+    for (let i = 0; i < 100; i++) {
+      dashboard.handleInput("}");
+    }
+    const base = computeSidebarHeights(30, dashboard.agentTree.visibleList.length);
+    const effectiveInfo = base.infoHeight + dashboard.sidebar.heightOffsets.info;
+    expect(effectiveInfo).toBeGreaterThanOrEqual(1);
+  });
+
+  test("{/} keys: tree panel cannot be reduced below 1 row when info focused", () => {
+    const dashboard = makeDashboard();
+    dashboard.sidebar.displayHeight = 30;
+    // Tab to info focus
+    dashboard.handleInput("\t");
+    expect(dashboard.focus).toBe("info");
+    // Grow info (shrink tree) as many times as possible
+    for (let i = 0; i < 100; i++) {
+      dashboard.handleInput("}");
+    }
+    const base = computeSidebarHeights(30, dashboard.agentTree.visibleList.length);
+    const effectiveTree = base.treeHeight + dashboard.sidebar.heightOffsets.tree;
+    expect(effectiveTree).toBeGreaterThanOrEqual(1);
+  });
+
+  test("{/} keys: info panel cannot be reduced below 1 row when shrinking via info focus", () => {
+    const dashboard = makeDashboard();
+    dashboard.sidebar.displayHeight = 30;
+    // Tab to info focus
+    dashboard.handleInput("\t");
+    expect(dashboard.focus).toBe("info");
+    // Shrink info as many times as possible
+    for (let i = 0; i < 100; i++) {
+      dashboard.handleInput("{");
+    }
+    const base = computeSidebarHeights(30, dashboard.agentTree.visibleList.length);
+    const effectiveInfo = base.infoHeight + dashboard.sidebar.heightOffsets.info;
+    expect(effectiveInfo).toBeGreaterThanOrEqual(1);
   });
 });
 

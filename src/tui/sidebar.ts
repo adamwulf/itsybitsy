@@ -75,7 +75,15 @@ export class SidebarComponent implements Component {
 
     const itemCount = this.agentTree.visibleList.length;
     const base = computeSidebarHeights(this.displayHeight, itemCount);
-    // Apply height offsets: grow focused panel, shrink the other
+    // Apply height offsets: grow focused panel, shrink the other.
+    // Render-path clamping (BUG-3/§7.7): enforce minimum effective height of 1 per panel
+    // and normalize offsets so they stay valid for the current terminal size and agent count.
+    if (base.treeHeight + this.heightOffsets.tree < 1) {
+      this.heightOffsets.tree = 1 - base.treeHeight;
+    }
+    if (base.infoHeight > 0 && base.infoHeight + this.heightOffsets.info < 1) {
+      this.heightOffsets.info = 1 - base.infoHeight;
+    }
     let treeHeight = Math.max(1, base.treeHeight + this.heightOffsets.tree);
     let infoHeight = Math.max(0, base.infoHeight + this.heightOffsets.info);
 

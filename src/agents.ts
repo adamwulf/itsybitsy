@@ -31,7 +31,6 @@ export interface AgentMeta {
   coordinator?: boolean;
   state?: MetaState;
   state_updated_at?: number;
-  coordinator?: boolean;
 }
 
 export interface Agent {

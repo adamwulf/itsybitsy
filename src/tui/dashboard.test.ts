@@ -3058,6 +3058,60 @@ describe("applyLayout", () => {
   });
 });
 
+describe("sidebar height resize ({/} keys)", () => {
+  test("} when agent-tree focused grows tree by stealing from info", () => {
+    const dashboard = makeDashboard();
+    const before = { ...dashboard.sidebar.heightOffsets };
+    dashboard.handleInput("}");
+    expect(dashboard.sidebar.heightOffsets.tree).toBe(before.tree + 1);
+    expect(dashboard.sidebar.heightOffsets.info).toBe(before.info - 1);
+  });
+
+  test("{ when agent-tree focused shrinks tree and gives back to info", () => {
+    const dashboard = makeDashboard();
+    // First grow tree so we have room to shrink
+    dashboard.handleInput("}");
+    const before = { ...dashboard.sidebar.heightOffsets };
+    dashboard.handleInput("{");
+    expect(dashboard.sidebar.heightOffsets.tree).toBe(before.tree - 1);
+    expect(dashboard.sidebar.heightOffsets.info).toBe(before.info + 1);
+  });
+
+  test("} when info focused grows info by stealing from tree", () => {
+    const dashboard = makeDashboard();
+    // Give tree some extra height so it can be stolen from (tree min is 1)
+    dashboard.sidebar.heightOffsets.tree = 3;
+    dashboard.handleInput("\t"); // move to info
+    expect(dashboard.focus).toBe("info");
+    const before = { ...dashboard.sidebar.heightOffsets };
+    dashboard.handleInput("}");
+    expect(dashboard.sidebar.heightOffsets.info).toBe(before.info + 1);
+    expect(dashboard.sidebar.heightOffsets.tree).toBe(before.tree - 1);
+  });
+
+  test("{ when info focused shrinks info and gives back to tree", () => {
+    const dashboard = makeDashboard();
+    // Give tree some extra height, then grow info to have room to shrink
+    dashboard.sidebar.heightOffsets.tree = 3;
+    dashboard.handleInput("\t"); // move to info
+    dashboard.handleInput("}"); // grow info, steal from tree
+    const before = { ...dashboard.sidebar.heightOffsets };
+    dashboard.handleInput("{");
+    expect(dashboard.sidebar.heightOffsets.info).toBe(before.info - 1);
+    expect(dashboard.sidebar.heightOffsets.tree).toBe(before.tree + 1);
+  });
+
+  test("} when agent-tree focused does nothing if info height is 0", () => {
+    const dashboard = makeDashboard();
+    // Force info to 0 by shrinking it completely
+    dashboard.sidebar.heightOffsets.info = -999; // force effective info to 0
+    const before = { ...dashboard.sidebar.heightOffsets };
+    dashboard.handleInput("}");
+    // tree should not grow since there's nothing to steal from
+    expect(dashboard.sidebar.heightOffsets.tree).toBe(before.tree);
+  });
+});
+
 describe("input field integration", () => {
   test("when agent selected, tmux display height is reduced by input field height", () => {
     const dashboard = makeDashboard();

@@ -678,6 +678,7 @@ export class DashboardComponent implements Component {
         // When a saved layout was restored, the dashboard width is authoritative.
         // Skip tmux-reported width to avoid overriding the saved value during the
         // race window before resizeTmuxWindow takes effect on the agent's session.
+        if (this.skipWidthReports > 0) { this.skipWidthReports--; return; }
         if (this.layoutRestored) return;
         const clamped = Math.max(MIN_LEFT_WIDTH, Math.min(MAX_LEFT_WIDTH, width));
         if (clamped !== this.splitPane.getLeftWidth()) {

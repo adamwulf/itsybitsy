@@ -182,17 +182,22 @@ export async function loadAgentType(name: string): Promise<AgentType> {
       const content = await file.text();
       const { frontmatter, body } = parseAgentTypeFile(content);
 
-      const permissions = frontmatter.permissions as Record<string, unknown> | undefined;
+      const permissions = typeof frontmatter.permissions === "object" && frontmatter.permissions !== null
+        ? frontmatter.permissions as Record<string, unknown>
+        : undefined;
+      const getString = (val: unknown, fallback: string): string =>
+        typeof val === "string" ? val : fallback;
+
       return {
-        name: (frontmatter.name as string) || name,
-        description: (frontmatter.description as string) || "",
-        canSpawnChildren: (frontmatter.canSpawnChildren as boolean) ?? false,
-        model: (frontmatter.model as string) || undefined,
+        name: getString(frontmatter.name, name),
+        description: getString(frontmatter.description, ""),
+        canSpawnChildren: frontmatter.canSpawnChildren === true,
+        model: getString(frontmatter.model, "") || undefined,
         permissions: permissions ? {
           allow: Array.isArray(permissions.allow) ? permissions.allow as string[] : undefined,
           deny: Array.isArray(permissions.deny) ? permissions.deny as string[] : undefined,
         } : undefined,
-        instructionStyle: (frontmatter.instructionStyle as AgentType["instructionStyle"]) || "worker",
+        instructionStyle: (getString(frontmatter.instructionStyle, "") as AgentType["instructionStyle"]) || "worker",
         markdownBody: body || undefined,
       };
     }

@@ -136,17 +136,16 @@ export async function processTaskIntercept(
       if (await metaFile.exists()) {
         const meta = await metaFile.json() as Record<string, unknown>;
 
-        // Check if meta.worker === true (backward compat)
-        if (meta.worker === true) {
-          return { action: "skip" };
-        }
-
-        // Check if agentType has canSpawnChildren === false
+        // agentType takes precedence over legacy worker boolean when present
         if (meta.agentType && typeof meta.agentType === "string") {
           const agentType = await loadAgentType(meta.agentType);
           if (!agentType.canSpawnChildren) {
             return { action: "skip" };
           }
+          // canSpawnChildren=true means intercept — fall through
+        } else if (meta.worker === true) {
+          // Backward compat: legacy agents without agentType
+          return { action: "skip" };
         }
       }
     } catch {

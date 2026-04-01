@@ -559,8 +559,8 @@ describe("agent types", () => {
   });
 
   test("agentType takes precedence over meta.worker when both present", async () => {
-    // If agentType says canSpawnChildren=true, allow intercept even if meta.worker=true
-    // (This is the "priority" case: agentType config overrides legacy worker flag)
+    // If meta.worker=true but agentType says canSpawnChildren=true,
+    // the agentType should win and intercept the Task call
     const fs = await import("fs/promises");
     const { tmpdir } = await import("os");
     const { join } = await import("path");
@@ -573,9 +573,9 @@ describe("agent types", () => {
         join(agentDir, "meta.json"),
         JSON.stringify({
           id: agentId,
-          worker: false,
+          worker: true,           // Legacy field says worker (skip intercept)
           manager: null,
-          agentType: "manager", // This says canSpawnChildren=true
+          agentType: "manager",   // agentType says canSpawnChildren=true (intercept)
         })
       );
 
@@ -594,6 +594,7 @@ describe("agent types", () => {
           }),
         }
       );
+      // agentType should take precedence: canSpawnChildren=true → intercept
       expect(result.action).toBe("intercept");
     } finally {
       await fs.rm(tmpDir, { recursive: true, force: true });

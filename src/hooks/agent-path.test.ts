@@ -340,7 +340,7 @@ describe("parseIbCommand", () => {
     expect(result).toEqual({ subcommand: "merge", targetId: "agent-abc12345" });
   });
 
-  test("parses ib merge-check <id>", () => {
+  test("parses ib merge-check <id> (merge-check is unrestricted/read-only)", () => {
     const result = parseIbCommand("ib merge-check agent-abc12345");
     expect(result).toEqual({ subcommand: "merge-check", targetId: "agent-abc12345" });
   });
@@ -355,7 +355,7 @@ describe("parseIbCommand", () => {
     expect(result).toEqual({ subcommand: "kill", targetId: "agent-abc12345" });
   });
 
-  test("returns null for ib send (unrestricted)", () => {
+  test("parses ib send (send is parsed but unrestricted in access check)", () => {
     const result = parseIbCommand("ib send agent-abc12345 hello");
     expect(result).toEqual({ subcommand: "send", targetId: "agent-abc12345" });
   });
@@ -439,6 +439,12 @@ describe("checkIbCommandAccess", () => {
   test("allows nuke when calling agent is the manager", async () => {
     await writeAgentMeta("agent-target1", { id: "agent-target1", manager: "agent-manager1" });
     const result = await checkIbCommandAccess("ib nuke agent-target1", "agent-manager1", agentsDir);
+    expect(result).toBeNull();
+  });
+
+  test("merge-check is unrestricted — returns null even for non-manager", async () => {
+    await writeAgentMeta("agent-target1", { id: "agent-target1", manager: "agent-manager1" });
+    const result = await checkIbCommandAccess("ib merge-check agent-target1", "agent-other111", agentsDir);
     expect(result).toBeNull();
   });
 

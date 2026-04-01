@@ -253,13 +253,14 @@ function checkFilePath(
 /**
  * ib subcommands that require manager relationship (calling agent must be the
  * target agent's manager). Read-only / communication commands (send, look,
- * diff, status) are intentionally excluded and remain unrestricted.
+ * diff, status, merge-check) are intentionally excluded and remain unrestricted.
+ * merge-check is read-only (checks mergeability without mutating) — workers
+ * need to run it as a preflight before asking their manager to merge.
  */
 const IB_MANAGER_ONLY_COMMANDS = new Set([
   "kill",
   "nuke",
   "merge",
-  "merge-check",
   "resume",
   "pause",
   "reassign",
@@ -269,6 +270,12 @@ const IB_MANAGER_ONLY_COMMANDS = new Set([
  * Parse an `ib <subcommand> <agent-id> [flags...]` command string.
  * Returns { subcommand, targetId } when parsed, or null if not an ib command
  * that targets a specific agent.
+ *
+ * NOTE: This only matches commands starting with exactly "ib ". Alternate
+ * invocations like `./ib kill` or `/usr/local/bin/ib kill` are not matched.
+ * This is safe because agents are expected to have only `Bash(ib:*)` in their
+ * allowList (not broader `Bash(*)`), so alternate paths are already blocked
+ * by the allowList check before this function is called.
  */
 export function parseIbCommand(command: string): { subcommand: string; targetId: string } | null {
   // Must start with "ib " or be exactly "ib"
@@ -438,23 +445,14 @@ export async function hookCheckPath(agentId: string, rawStdin?: string): Promise
   } catch { /* ignore */ }
 
   // Check ib manager-only command access before path checks
+  const ctx = { agentId, agentDir, worktreePath, agentsDir, rootRepo, isWorker, allowList };
   let decision: HookDecision;
   if (toolName === "Bash") {
     const command = String(toolInput.command ?? "");
-    const ibDenial = await checkIbCommandAccess(command, agentId, agentsDir);
-    if (ibDenial) {
-      decision = ibDenial;
-    } else {
-      decision = checkPathAccess(
-        { toolName, toolInput, cwd },
-        { agentId, agentDir, worktreePath, agentsDir, rootRepo, isWorker, allowList }
-      );
-    }
+    decision = await checkIbCommandAccess(command, agentId, agentsDir)
+      ?? checkPathAccess({ toolName, toolInput, cwd }, ctx);
   } else {
-    decision = checkPathAccess(
-      { toolName, toolInput, cwd },
-      { agentId, agentDir, worktreePath, agentsDir, rootRepo, isWorker, allowList }
-    );
+    decision = checkPathAccess({ toolName, toolInput, cwd }, ctx);
   }
 
   // Log denials

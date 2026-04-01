@@ -106,7 +106,7 @@ Height offsets are stored as deltas from the *computed base heights*, which depe
 - Combined with persistence, this means bad offsets survive restarts — user must manually edit layout.json
 
 **Suggested fix:** Add auto-clamping of offsets in `applyLayout()` (after line 713) to prevent zero-height panels. **Important caveat:** `displayHeight` is not yet known at `applyLayout()` time (it's set before each render). Two approaches:
-1. **Deferred clamping:** Don't clamp at load time. Instead, add clamping in the render path — in `computeSidebarHeights()` or immediately after it — to enforce a minimum effective height of 1 row per panel, and normalize the offsets when clamping triggers. This is the safer approach since `displayHeight` and `itemCount` are both available at render time.
+1. **Deferred clamping (recommended):** Don't clamp at load time. Instead, add clamping in the render path — in `computeSidebarHeights()` or immediately after it — to enforce a minimum effective height of 1 row per panel. When clamping triggers (i.e., `baseHeight + offset < 1`), normalize the offset: `heightOffsets[panel] = 1 - baseHeight`. This ensures the offset stays valid for the current terminal size and agent count. This is the safer approach since `displayHeight` and `itemCount` are both available at render time.
 2. **Eager clamping with `process.stdout.rows`:** Use `process.stdout.rows` as a proxy for `displayHeight` in `applyLayout()`. This is approximate (doesn't account for header/status rows) but sufficient for rejecting grossly invalid offsets.
 
 Additionally, add a "reset layout" keybinding (see §7.8) as an escape hatch. For a longer-term fix, normalize offsets on terminal resize or switch to ratio-based offsets (see §7.5).
@@ -147,6 +147,8 @@ When `layoutRestored` is false and the tmux poller reports a width (e.g., first 
 - If the user exits without manually resizing, no layout.json is ever created
 - New agents spawned by `ib new-agent` will use `DEFAULT_TMUX_WIDTH = 80` instead of the actual width
 
+**Suggested fix:** Add `this.persistLayout()` after updating `splitPaneLeftWidth` in the `onWidth` callback (after the `this.tui?.requestRender()` call at line ~677).
+
 **Impact:** Minor — only matters for the first-launch experience.
 
 ---
@@ -177,6 +179,8 @@ The pending resize only fires when `flatList.length > 0`. If the dashboard start
 - If an agent is created *after* the flag fires but *before* the next `onUpdate`, that agent won't get resized to the saved width
 - The agent gets resized when selected (line 1114), but not proactively
 
+**Disposition:** Acceptable as-is. Agent selection at line 1114 corrects the width, and new agents are created with `getSavedTmuxWidth()` which reads layout.json. The only gap is between creation and first selection, which is brief and non-disruptive.
+
 ### COMPLICATION-4: Sidebar height offsets interact non-obviously with agent count
 
 The base heights computed by `computeSidebarHeights()` depend on `itemCount` (number of visible tree items). As agents are added/removed, the base heights shift, but the stored offsets remain fixed. This means:
@@ -191,16 +195,6 @@ The offsets should probably be relative to a fixed reference rather than to a dy
 
 The SPEC §13.7 shows the layout.json schema without `repoCoordinatorHeightOffset`. This field was added later. The `loadLayout()` function handles it as optional (defaulting to 0), but the SPEC should be updated.
 
-### COMPLICATION-7: `hideCoordinator` mode doesn't adjust height offsets
-
-**File:** `dashboard.ts` (coordinator selection logic)
-
-**Severity:** Low
-
-When the coordinator agent is selected, `hideCoordinator` mode gives the coordinator's height allocation to the info panel. But the stored `heightOffsets` are not adjusted to account for this mode switch. When the user switches back to a normal agent, the offsets may produce a different layout than before the coordinator was selected, because the offsets were calibrated for the non-hidden layout.
-
-**Suggested fix:** Either temporarily zero the coordinator height offset during `hideCoordinator` mode and restore it on switch-back, or snapshot and restore the full offset state on coordinator selection changes.
-
 ### COMPLICATION-6: Width resize resizes ALL agent tmux sessions without batching
 
 **File:** `agent-actions.ts:908-913`
@@ -210,6 +204,16 @@ When the coordinator agent is selected, `hideCoordinator` mode gives the coordin
 `handleResizeLeft()` iterates over every agent in the tree and calls `resizeTmuxWindow()` for each. For a large number of agents, this spawns many concurrent tmux processes. There's no batching or throttling.
 
 **Suggested fix:** Debounce the resize-all operation (e.g., 100ms), or serialize the tmux resize calls, or use a single tmux command that resizes all windows in a session at once. Alternatively, only resize the currently-selected agent's tmux session immediately and defer the rest to the next agent selection change.
+
+### COMPLICATION-7: `hideCoordinator` mode doesn't adjust height offsets
+
+**File:** `dashboard.ts` (coordinator selection logic)
+
+**Severity:** Low
+
+When the coordinator agent is selected, `hideCoordinator` mode gives the coordinator's height allocation to the info panel. But the stored `heightOffsets` are not adjusted to account for this mode switch. When the user switches back to a normal agent, the offsets may produce a different layout than before the coordinator was selected, because the offsets were calibrated for the non-hidden layout.
+
+**Suggested fix:** Either temporarily zero the coordinator height offset during `hideCoordinator` mode and restore it on switch-back, or snapshot and restore the full offset state on coordinator selection changes.
 
 ---
 
@@ -338,7 +342,7 @@ Listen for `process.stdout.on('resize')` and:
 3. Resize all agent tmux sessions
 4. Persist the clamped layout
 
-**Note:** pi-tui already handles SIGWINCH internally for re-rendering. The resize listener must coordinate with pi-tui's own resize handling to avoid double-renders or acting on stale width values. Check if pi-tui exposes a resize callback or event, and hook into that rather than adding a competing listener.
+**Prerequisite:** pi-tui already handles SIGWINCH internally for re-rendering. Before implementing, investigate whether pi-tui exposes a resize callback or event (check `TUI` class API and `ProcessTerminal`). If it does, hook into that. If not, add `process.stdout.on('resize')` but ensure it runs *after* pi-tui has updated its internal dimensions to avoid stale width values. This investigation must be done before starting implementation.
 
 ### 7.5 Consider ratio-based height offsets (deferred — not recommended now)
 
@@ -357,7 +361,12 @@ Add `repoCoordinatorHeightOffset` to the documented schema in SPEC.md.
 
 ### 7.7 Prevent zero-height panels
 
-While zero-height panels are technically recoverable (Tab still reaches them and `}` grows them back), this is non-obvious UX. Enforce a minimum panel height of 1 row in the `{`/`}` resize logic so panels never fully disappear. Additionally, `loadLayout()` should auto-clamp height offsets on load to prevent persisted offsets from producing zero-height panels.
+**Complements BUG-3 fix.** There are three complementary intervention points — implement all three for defense-in-depth:
+1. **Keypress guard (`{`/`}` handler):** Reject resize operations that would reduce any panel below 1 row. This prevents new zero-height offsets from being created.
+2. **Render-path clamping (BUG-3 fix option 1):** Normalize offsets in `computeSidebarHeights()` when they produce sub-1-row panels. This catches offsets that become invalid due to terminal resize or agent count changes.
+3. **Load-time safety net:** In `applyLayout()`, use `process.stdout.rows` as an approximate `displayHeight` to reject grossly invalid offsets (BUG-3 fix option 2).
+
+All three are lightweight and non-conflicting. The keypress guard prevents the problem, the render-path clamp catches edge cases, and the load-time check is a safety net for corrupted layout files.
 
 ### 7.8 Add a "reset layout" keybinding
 

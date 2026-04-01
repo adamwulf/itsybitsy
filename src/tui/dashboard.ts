@@ -520,6 +520,8 @@ export class DashboardComponent implements Component {
   sidebarWidth = SIDEBAR_WIDTH;
   /** When true, saved layout was applied — suppress onWidth overrides from tmux poller */
   private layoutRestored = false;
+  /** When true, resize all agent tmux sessions on next onUpdate (after layout restore) */
+  private pendingTmuxResize = false;
   private _questionsFocused = false;
   /** Cache of which agents have an attached tmux client */
   private _clientAttached: Map<string, boolean> = new Map();
@@ -707,6 +709,7 @@ export class DashboardComponent implements Component {
       this.rightPane.repoCoordinatorHeightOffset = layout.repoCoordinatorHeightOffset;
     }
     this.layoutRestored = true;
+    this.pendingTmuxResize = true;
   }
 
   /** Persist current layout via debounced write. */
@@ -736,8 +739,6 @@ export class DashboardComponent implements Component {
     this.tmuxPoller.stop();
     this.coordinatorPoller.stop();
     this.repoCoordinatorPoller.stop();
-    // Flush any pending layout save to disk before exiting
-    flushPendingSave().catch(() => { /* ignore write errors on exit */ });
     if (this.usageTimer) {
       clearInterval(this.usageTimer);
       this.usageTimer = null;
@@ -950,6 +951,17 @@ export class DashboardComponent implements Component {
       }, null);
       if (newest) {
         this.agentTree.selectAgentById(newest.agent.id);
+      }
+    }
+
+    // After layout restore, resize all agent tmux sessions to match the restored splitPaneLeftWidth
+    if (this.pendingTmuxResize && flatList.length > 0) {
+      this.pendingTmuxResize = false;
+      const width = this.splitPane.getLeftWidth();
+      for (const entry of flatList) {
+        if (entry.kind === "agent" && entry.agent.meta.tmux_session) {
+          resizeTmuxWindow(entry.agent.meta.tmux_session, width);
+        }
       }
     }
 
@@ -1902,6 +1914,8 @@ export async function launchDashboard(): Promise<void> {
   const dashboard = new DashboardComponent();
   const savedLayout = await loadLayout();
   if (savedLayout) dashboard.applyLayout(savedLayout);
+  // Always resize coordinator tmux to match sidebar width, even when no saved layout exists
+  resizeCoordinatorTmux(dashboard.sidebarWidth);
   dashboard.setTui(tui);
   dashboard.setRepos(repos);
   const diffToolValue = config["externalDiffTool"]?.value;
@@ -1932,13 +1946,16 @@ export async function launchDashboard(): Promise<void> {
       tui.stop();
       dashboard.setTerminalTitle("");
       process.stdout.write("\x1b[2J\x1b[H");
-      // Release coordinator ref — if last ref, kills the tmux session
-      // and pauses all per-repo coordinators
-      releaseSystemCoordinator(async () => {
-        // Pause all per-repo coordinators when last watcher exits
-        const agents = dashboard.watcher?.lastAgents ?? [];
-        const coordinators = agents.filter(a => a.meta.coordinator === true);
-        await Promise.all(coordinators.map(a => pauseAgent(a).catch(() => {})));
+      // Flush layout save to disk before exiting, then release coordinator
+      flushPendingSave().catch(() => { /* ignore write errors on exit */ }).then(() => {
+        // Release coordinator ref — if last ref, kills the tmux session
+        // and pauses all per-repo coordinators
+        return releaseSystemCoordinator(async () => {
+          // Pause all per-repo coordinators when last watcher exits
+          const agents = dashboard.watcher?.lastAgents ?? [];
+          const coordinators = agents.filter(a => a.meta.coordinator === true);
+          await Promise.all(coordinators.map(a => pauseAgent(a).catch(() => {})));
+        });
       }).finally(() => {
         process.exit(0);
       });

@@ -73,6 +73,8 @@ export interface ActionCtx {
   jumpToMode(mode: PaneMode, forceRefresh?: boolean): void;
   setQuestionsFocused(value: boolean): void;
   healthReport: RepoHealthReport | undefined;
+  sidebarWidth: number;
+  repoCoordinatorSession: string | null;
 }
 
 export function handleKill(ctx: ActionCtx) {
@@ -907,6 +909,14 @@ export function handleResizeLeft(ctx: ActionCtx, delta: number) {
   for (const entry of ctx.agentTree.flatList) {
     if (entry.kind === "agent" && entry.agent.meta.tmux_session) {
       resizeTmuxWindow(entry.agent.meta.tmux_session, newWidth);
+    }
+  }
+  // Resize repo coordinator tmux to match new right pane width
+  if (ctx.repoCoordinatorSession) {
+    const mainWidth = process.stdout.columns - ctx.sidebarWidth - 1;
+    const rightPaneWidth = mainWidth - newWidth - 1;
+    if (rightPaneWidth > 0) {
+      resizeTmuxWindow(ctx.repoCoordinatorSession, rightPaneWidth);
     }
   }
   ctx.tui?.requestRender();

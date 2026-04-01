@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { detectRole, generateInstructions } from "./session-start";
+import { detectRole, generateInstructions, type SessionContext } from "./session-start";
 
 describe("session-start", () => {
   test("detectRole non-agent cwd → primary", () => {
@@ -124,5 +124,71 @@ describe("session-start", () => {
     });
     expect(ctx.agentManager).toBe("");
     expect(ctx.parentBranch).toBe("main");
+  });
+
+  test("detectRole coordinator cwd (with meta)", () => {
+    const cwd = "/Users/me/project/.ittybitty/agents/coordinator/repo";
+    const ctx = detectRole(cwd, {
+      id: "coordinator",
+      manager: null,
+      worker: false,
+      coordinator: true,
+    });
+    expect(ctx.role).toBe("coordinator");
+    expect(ctx.agentId).toBe("coordinator");
+    expect(ctx.agentManager).toBe("");
+    expect(ctx.parentBranch).toBe("main");
+    expect(ctx.rootRepoPath).toBe("/Users/me/project");
+  });
+
+  test("generateInstructions coordinator contains 'Per-Repo Coordinator'", () => {
+    // Build context directly to test generateInstructions independently
+    const ctx: SessionContext = {
+      role: "coordinator",
+      agentId: "coordinator",
+      agentManager: "",
+      parentBranch: "main",
+      worktreePath: "/Users/me/project/.ittybitty/agents/coordinator/repo",
+      rootRepoPath: "/Users/me/project",
+    };
+    const instructions = generateInstructions(ctx);
+    expect(instructions).not.toContain("Primary Claude");
+    expect(instructions).toContain("Per-Repo Coordinator");
+    expect(instructions).toContain("project");
+    expect(instructions).toContain("ib new-agent --worker");
+    expect(instructions).toContain("ib send coordinator");
+  });
+
+  test("coordinator instructions mention Read, Glob, Grep, LS", () => {
+    const ctx: SessionContext = {
+      role: "coordinator",
+      agentId: "coordinator",
+      agentManager: "",
+      parentBranch: "main",
+      worktreePath: "/Users/me/muse-ios/.ittybitty/agents/coordinator/repo",
+      rootRepoPath: "/Users/me/muse-ios",
+    };
+    const instructions = generateInstructions(ctx);
+    expect(instructions).toContain("Read");
+    expect(instructions).toContain("Glob");
+    expect(instructions).toContain("Grep");
+    expect(instructions).toContain("LS");
+  });
+
+  test("worker under coordinator uses repo basename for messaging (SPEC §12.2.6)", () => {
+    const cwd = "/Users/me/muse-ios/.ittybitty/agents/agent-abc12345/repo";
+    const ctx = detectRole(cwd, {
+      id: "agent-abc12345",
+      manager: "coordinator",
+      worker: true,
+    });
+    expect(ctx.role).toBe("worker");
+    expect(ctx.agentManager).toBe("coordinator");
+    const instructions = generateInstructions(ctx);
+    // Should use repo basename 'muse-ios' not 'coordinator' for ib send
+    expect(instructions).toContain('ib send muse-ios "msg"');
+    expect(instructions).toContain('ib send muse-ios "message"');
+    // Should NOT contain 'ib send coordinator' in the worker commands
+    expect(instructions).not.toContain('ib send coordinator "msg"');
   });
 });

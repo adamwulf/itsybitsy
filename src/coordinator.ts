@@ -1,10 +1,12 @@
 /**
  * System coordinator configuration, prompt, permissions, and lifecycle.
- * See SPEC.md §12.1 for the full specification.
+ * Per-repo coordinator settings, prompt, and lifecycle.
+ * See SPEC.md §12.1 (system) and §12.2 (per-repo) for the full specification.
  */
 
-import { join } from "path";
+import { join, basename } from "path";
 import { homedir } from "os";
+import { readFileSync, existsSync } from "node:fs";
 import { readConfig } from "./config";
 import { captureTmuxOutput, resizeTmuxWindow } from "./tmux-poller";
 import { isCompacting, isRateLimited } from "./agents";
@@ -356,4 +358,108 @@ export async function detectSystemCoordinatorState(): Promise<CoordinatorState> 
  */
 export async function resizeCoordinatorTmux(width: number): Promise<void> {
   await resizeTmuxWindow(IB_COORDINATOR_SESSION, width);
+}
+
+// ---------------------------------------------------------------------------
+// Per-repo coordinator support (SPEC §12.2)
+// ---------------------------------------------------------------------------
+
+/**
+ * Hardcoded allow list for per-repo coordinators (SPEC §12.2.4).
+ * Can read code + run ib commands + basic git read-only commands.
+ */
+const PER_REPO_COORDINATOR_ALLOW = [
+  "Bash(ib:*)",
+  "Bash(git status:*)", "Bash(git log:*)", "Bash(git diff:*)",
+  "Bash(git show:*)", "Bash(git ls-files:*)",
+  "Bash(pwd:*)", "Bash(ls:*)",
+  "Read", "Glob", "Grep", "LS",
+  "TodoWrite", "AskUserQuestion",
+];
+
+/**
+ * Hardcoded deny list for per-repo coordinators (SPEC §12.2.4).
+ * No Write/Edit, no web, no sub-agent spawning via Task/Agent.
+ */
+const PER_REPO_COORDINATOR_DENY = [
+  "Write", "Edit", "MultiEdit", "NotebookEdit",
+  "WebFetch", "WebSearch", "Task", "TaskOutput", "Agent", "KillShell",
+  "EnterPlanMode", "ExitPlanMode",
+];
+
+/**
+ * Build the settings permissions for a per-repo coordinator.
+ * Config allow entries are appended but filtered against the hardcoded deny list.
+ * Config deny entries are appended to the hardcoded deny list.
+ */
+export async function buildPerRepoCoordinatorSettings(): Promise<{
+  permissions: { allow: string[]; deny: string[] };
+}> {
+  const config = await readConfig();
+  const configAllow = (config["permissions.coordinator.allow"]?.value as string[] | undefined) ?? [];
+  const configDeny = (config["permissions.coordinator.deny"]?.value as string[] | undefined) ?? [];
+
+  // Filter out any user-configured allow entries that appear in the hardcoded deny list
+  const denySet = new Set(PER_REPO_COORDINATOR_DENY);
+  const filteredConfigAllow = configAllow.filter(entry => !denySet.has(entry));
+
+  const allAllow = [...new Set([...PER_REPO_COORDINATOR_ALLOW, ...filteredConfigAllow])];
+  const allDeny = [...new Set([...PER_REPO_COORDINATOR_DENY, ...configDeny])];
+
+  return {
+    permissions: {
+      allow: allAllow,
+      deny: allDeny,
+    },
+  };
+}
+
+/**
+ * Per-repo coordinator session start prompt (SPEC §12.2.6).
+ * Parameterized with the repo name.
+ */
+export function perRepoCoordinatorPrompt(repoName: string): string {
+  return `You are a per-repo coordinator for the \`${repoName}\` repository. You can read files and code in this repo using Read, Glob, Grep, and LS. You coordinate work by spawning and managing worker agents using \`ib\` commands. You do NOT write code directly — instead, spawn worker agents with \`ib new-agent --worker "task"\` to implement changes. Review their work with \`ib diff <id>\` and merge with \`ib merge <id>\`. To send messages to the system coordinator, use \`ib send coordinator "message"\`.`;
+}
+
+/**
+ * Determine the coordinator agent ID for a repo.
+ * Per SPEC §12.2.2, the ID is always "coordinator".
+ */
+export function getCoordinatorAgentId(): string {
+  return "coordinator";
+}
+
+/**
+ * Check if a coordinator already exists for a repo.
+ * Returns: { exists: true, isCoordinator: true } if coordinator agent exists with coordinator:true
+ *          { exists: true, isCoordinator: false } if agent named "coordinator" exists but is NOT a coordinator
+ *          { exists: false } if no agent named "coordinator" exists
+ */
+export async function checkCoordinatorExists(repoPath: string): Promise<
+  { exists: true; isCoordinator: boolean } | { exists: false }
+> {
+  const agentsDir = join(repoPath, ".ittybitty", "agents");
+  const coordDir = join(agentsDir, "coordinator");
+  const metaPath = join(coordDir, "meta.json");
+
+  if (!existsSync(metaPath)) {
+    return { exists: false };
+  }
+
+  try {
+    const raw = readFileSync(metaPath, "utf8");
+    const meta = JSON.parse(raw);
+    return { exists: true, isCoordinator: meta.coordinator === true };
+  } catch {
+    // File exists but can't be read/parsed — agent exists but not a coordinator
+    return { exists: true, isCoordinator: false };
+  }
+}
+
+/**
+ * Get the repo basename from a repo path.
+ */
+export function getRepoBasename(repoPath: string): string {
+  return basename(repoPath);
 }

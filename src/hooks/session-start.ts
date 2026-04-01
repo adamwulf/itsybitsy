@@ -2,10 +2,10 @@
  * Hook: generate ittybitty session-start instructions based on detected role.
  */
 
-import { join } from "path";
+import { join, basename } from "path";
 import { AGENT_CWD_PATTERN } from "./shared";
 
-export type SessionRole = "primary" | "manager" | "worker";
+export type SessionRole = "primary" | "manager" | "worker" | "coordinator";
 
 export interface SessionContext {
   role: SessionRole;
@@ -18,7 +18,7 @@ export interface SessionContext {
 
 export function detectRole(
   cwd: string,
-  metaJson?: { id?: string; manager?: string | null; worker?: boolean }
+  metaJson?: { id?: string; manager?: string | null; worker?: boolean; coordinator?: boolean }
 ): SessionContext {
   const match = AGENT_CWD_PATTERN.exec(cwd);
   if (!match) {
@@ -44,8 +44,9 @@ export function detectRole(
   const worktreePath = join(agentDir, "repo");
 
   const meta = metaJson ?? {};
+  const isCoordinator = (meta as Record<string, unknown>).coordinator === true;
   const worker = meta.worker === true;
-  const role: SessionRole = worker ? "worker" : "manager";
+  const role: SessionRole = isCoordinator ? "coordinator" : worker ? "worker" : "manager";
 
   // Normalize manager: treat null and "null" as empty
   let agentManager = "";
@@ -66,6 +67,9 @@ export function detectRole(
 }
 
 export function generateInstructions(ctx: SessionContext): string {
+  if (ctx.role === "coordinator") {
+    return generateCoordinatorInstructions(ctx);
+  }
   switch (ctx.role) {
     case "primary":
       return generatePrimaryInstructions();
@@ -73,6 +77,8 @@ export function generateInstructions(ctx: SessionContext): string {
       return generateManagerInstructions(ctx);
     case "worker":
       return generateWorkerInstructions(ctx);
+    default:
+      return generatePrimaryInstructions();
   }
 }
 
@@ -243,6 +249,12 @@ ${askSection}
 }
 
 function generateWorkerInstructions(ctx: SessionContext): string {
+  // SPEC §12.2.6: Workers under a per-repo coordinator use repo basename for messaging
+  // because `ib send coordinator` routes to the system coordinator, not the per-repo one.
+  const managerSendTarget = ctx.agentManager === "coordinator"
+    ? basename(ctx.rootRepoPath)
+    : ctx.agentManager;
+
   return `<ittybitty>
 ## IttyBitty Worker Agent
 
@@ -280,7 +292,7 @@ You are in a git worktree, which shares the same repository as the main checkout
 
 | Command | Description |
 |---------|-------------|
-| \`ib send ${ctx.agentManager} "msg"\` | Send a message to your manager |
+| \`ib send ${managerSendTarget} "msg"\` | Send a message to your manager |
 | \`ib diff\` | Check your changes vs base branch |
 | \`ib status\` | See your commits |
 | \`ib log "msg"\` | Log to your agent log |
@@ -295,9 +307,9 @@ These phrases MUST be the LAST thing you output. Put summaries or status updates
 
 ### Communication
 
-- Report progress or completion to your manager: \`ib send ${ctx.agentManager} "message"\`
+- Report progress or completion to your manager: \`ib send ${managerSendTarget} "message"\`
 - Ask questions if requirements are unclear
-- If stuck: \`ib send ${ctx.agentManager} "[STUCK] description"\`, then enter WAITING state
+- If stuck: \`ib send ${managerSendTarget} "[STUCK] description"\`, then enter WAITING state
 - Your manager can send you messages even after you complete - you will restart and respond
 
 ### Completion
@@ -307,6 +319,86 @@ These phrases MUST be the LAST thing you output. Put summaries or status updates
 3. Write a summary of what you accomplished
 4. Say "I HAVE COMPLETED THE GOAL" as the final line
 5. Wait for your manager to merge or kill your session
+
+</ittybitty>`;
+}
+
+function generateCoordinatorInstructions(ctx: SessionContext): string {
+  const repoName = basename(ctx.rootRepoPath);
+
+  return `<ittybitty>
+## IttyBitty Per-Repo Coordinator
+
+You are a per-repo coordinator for the \`${repoName}\` repository. You can read files and code in this repo using Read, Glob, Grep, and LS. You coordinate work by spawning and managing worker agents using \`ib\` commands. You do NOT write code directly — instead, spawn worker agents with \`ib new-agent --worker "task"\` to implement changes. Review their work with \`ib diff <id>\` and merge with \`ib merge <id>\`. To send messages to the system coordinator, use \`ib send coordinator "message"\`.
+
+IMPORTANT: Always use \`ib\` (not \`./ib\`) to ensure you use the current version from PATH.
+
+### Bash Rules
+
+Each Bash tool call must run exactly ONE command. Multi-command calls will be blocked.
+- NO piping: \`cmd1 | cmd2\` is not allowed
+- NO chaining: \`cmd1 && cmd2\` and \`cmd1 ; cmd2\` are not allowed
+- NO subshells or command substitution that runs multiple commands
+- If you need to run two commands, make two separate Bash tool calls
+
+### Path Isolation
+
+You are isolated to your worktree at: ${ctx.worktreePath}
+- You CAN access: Your worktree, ~/.claude, /tmp, and general system paths
+- You CANNOT access: The main repo at ${ctx.rootRepoPath}, other agents' worktrees
+- If you get "Access denied" or "Path violation" errors, you're trying to access a forbidden path
+
+### Git Worktree Context
+
+You are in a git worktree, which shares the same repository as the main checkout.
+- Your branch: \`agent/${ctx.agentId}\`
+- Forked from: \`${ctx.parentBranch}\`
+- All branches are LOCAL - no need for \`git fetch origin\`
+- To merge latest changes from your parent: \`git merge ${ctx.parentBranch}\`
+- Other agents' branches are visible as local branches (\`agent/*\`)
+
+### Commands
+
+| Command | Description |
+|---------|-------------|
+| \`ib new-agent --worker "task"\` | Spawn a worker sub-agent |
+| \`ib list --manager coordinator\` | List your sub-agents |
+| \`ib look <id>\` | Read an agent's output |
+| \`ib send <id> "msg"\` | Send input to an agent |
+| \`ib send coordinator "msg"\` | Send message to system coordinator |
+| \`ib status <id>\` | Show agent's commits/changes |
+| \`ib diff <id>\` | Review agent's changes |
+| \`ib merge <id>\` | Merge agent's work and close it |
+| \`ib kill <id>\` | Stop an agent without merging |
+
+### State Management
+
+Whenever you stop working and are idle, end your message with one of:
+- \`WAITING\` - if waiting for workers or have nothing more to do
+- \`I HAVE COMPLETED THE GOAL\` - if you have completed your primary goal
+
+These phrases MUST be the LAST thing you output. Put summaries or status updates BEFORE them.
+
+### Workflow
+
+1. **Understand the codebase**: Use Read, Glob, Grep to understand the relevant code
+2. **Break down tasks**: Split work into independent units for worker agents
+3. **Spawn workers**: \`ib new-agent --worker "task"\` with clear instructions
+4. **Monitor & review**: Check worker output with \`ib look <id>\`, review with \`ib diff <id>\`
+5. **Merge or redirect**: \`ib merge <id>\` for good work, \`ib send <id> "feedback"\` for corrections
+6. **Coordinate**: Report status to system coordinator via \`ib send coordinator "message"\`
+
+### Agent States
+
+| State | Meaning |
+|-------|---------|
+| \`creating\` | Starting up |
+| \`running\` | Actively working |
+| \`compacting\` | Summarizing context |
+| \`waiting\` | Idle, may need input |
+| \`complete\` | Signaled done |
+| \`rate_limited\` | Hit API rate limits |
+| \`stopped\` | Session ended |
 
 </ittybitty>`;
 }
@@ -334,7 +426,7 @@ export async function hookSessionStart(): Promise<void> {
 
   // Detect role - read meta.json from filesystem if in an agent directory
   const match = AGENT_CWD_PATTERN.exec(cwd);
-  let metaJson: { id?: string; manager?: string | null; worker?: boolean } | undefined;
+  let metaJson: { id?: string; manager?: string | null; worker?: boolean; coordinator?: boolean } | undefined;
 
   if (match) {
     const agentId = match[1]!;

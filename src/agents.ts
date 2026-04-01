@@ -28,6 +28,7 @@ export interface AgentMeta {
   claude_pid: string;
   summary?: string;
   watchdog_pid?: number;
+  coordinator?: boolean;
   state?: MetaState;
   state_updated_at?: number;
   coordinator?: boolean;

@@ -87,7 +87,7 @@ export function colorizeLog(lines: string[]): string[] {
 export function formatAgentRow(
   agent: Agent, connector: string, stateColWidth: number,
 ): string {
-  const icon = agent.meta.coordinator ? "◇" : (agent.meta.worker ? "⚙" : "◆");
+  const icon = agent.meta.coordinator ? "◇" : ((agent.meta.worker || agent.meta.type === "worker") ? "⚙" : "◆");
   const state = displayState(agent.state);
   const stateColor = getStateColors()[state] ?? getStateColors().unknown;
   const promptText = (agent.meta.summary ?? agent.meta.prompt).replace(/\n/g, " ");
@@ -411,6 +411,9 @@ export class RightPaneComponent implements Component {
     // Default: 60% repo, 40% coordinator
     const baseCoordinatorHeight = Math.max(5, Math.floor(available * 0.4));
     const coordinatorHeight = Math.max(3, Math.min(available - 3, baseCoordinatorHeight + this.repoCoordinatorHeightOffset));
+    // BUG-10 render-path clamping: normalize offset so it stays valid for the current terminal
+    // size (mirrors BUG-3 fix in sidebar.ts).
+    this.repoCoordinatorHeightOffset = coordinatorHeight - baseCoordinatorHeight;
     const repoHeight = available - coordinatorHeight;
     return { repoHeight, coordinatorHeight };
   }

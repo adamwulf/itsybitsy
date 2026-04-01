@@ -213,4 +213,60 @@ describe("SidebarComponent", () => {
     expect(text).not.toContain("System Coordinator");
     expect(text).toContain("Info");
   });
+
+  test("render-path clamping: tree offset that would cause zero-height is normalized (BUG-3)", () => {
+    const sidebar = makeSidebar();
+    sidebar.displayHeight = 25;
+    sidebar.agentTree.setFlatList([]);
+    // Compute base heights so we can set a definitely-too-negative tree offset
+    const base = computeSidebarHeights(25, 0);
+    // Set offset so that base.treeHeight + offset = -5 (way below 1)
+    sidebar.heightOffsets.tree = -(base.treeHeight + 5);
+    sidebar.render(SIDEBAR_WIDTH);
+    // After render, offset must be normalized so effective height = 1
+    expect(base.treeHeight + sidebar.heightOffsets.tree).toBe(1);
+  });
+
+  test("render-path clamping: info offset that would cause zero-height is normalized (BUG-3)", () => {
+    const sidebar = makeSidebar();
+    sidebar.displayHeight = 25;
+    sidebar.agentTree.setFlatList([]);
+    const base = computeSidebarHeights(25, 0);
+    // Force info offset so that base.infoHeight + offset = 0
+    sidebar.heightOffsets.info = -base.infoHeight;
+    sidebar.render(SIDEBAR_WIDTH);
+    // After render, offset must be normalized so effective height = 1
+    if (base.infoHeight > 0) {
+      expect(base.infoHeight + sidebar.heightOffsets.info).toBe(1);
+    }
+  });
+
+  test("render-path clamping: coordinator offset that would cause zero-height is normalized (BUG-3)", () => {
+    const sidebar = makeSidebar();
+    sidebar.displayHeight = 25;
+    sidebar.agentTree.setFlatList([]);
+    const base = computeSidebarHeights(25, 0);
+    // Force coordinator offset so that base.coordinatorHeight + offset = 0
+    sidebar.heightOffsets.coordinator = -base.coordinatorHeight;
+    sidebar.render(SIDEBAR_WIDTH);
+    // After render, offset must be normalized so effective height = 1
+    if (base.coordinatorHeight > 0) {
+      expect(base.coordinatorHeight + sidebar.heightOffsets.coordinator).toBe(1);
+    }
+  });
+
+  test("render-path clamping: panels remain fully visible after clamping (BUG-3)", () => {
+    const sidebar = makeSidebar();
+    sidebar.displayHeight = 25;
+    sidebar.agentTree.setFlatList([]);
+    const base = computeSidebarHeights(25, 0);
+    // Apply extreme negative offsets to panels
+    sidebar.heightOffsets.tree = -(base.treeHeight + 100);
+    sidebar.heightOffsets.info = -(base.infoHeight + 100);
+    const lines = sidebar.render(SIDEBAR_WIDTH);
+    const text = lines.map(stripAnsi).join("\n");
+    // Both sections should still render (headers visible)
+    expect(text).toContain("Agents");
+    expect(text).toContain("Info");
+  });
 });

@@ -40,8 +40,8 @@ export class SplitPane implements Component {
     }
 
     const sepWidth = visibleWidth(this.separator);
-    const lw = Math.min(this.leftWidth, width - sepWidth - 1);
-    const rw = width - lw - sepWidth;
+    const lw = Math.max(1, Math.min(this.leftWidth, width - sepWidth - 1));
+    const rw = Math.max(1, width - lw - sepWidth);
 
     const leftLines = this.left.render(lw);
     const rightLines = this.right.render(rw);

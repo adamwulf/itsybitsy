@@ -308,6 +308,42 @@ describe("REPO mode with coordinator", () => {
     expect(rh1).toBeLessThan(rh2);
   });
 
+  test("computeRepoCoordinatorSplit normalizes offset when it exceeds valid range (BUG-10)", () => {
+    const rp = new RightPaneComponent();
+    rp.displayHeight = 20;
+    rp.repoCoordinatorAgent = makeAgent({ id: "coord-1", meta: { coordinator: true } as any });
+    // Set a grossly large offset that would push coordinator beyond available space
+    rp.repoCoordinatorHeightOffset = 9999;
+    const { repoHeight, coordinatorHeight } = rp.computeRepoCoordinatorSplit();
+    // Both panes must stay >= 3
+    expect(repoHeight).toBeGreaterThanOrEqual(3);
+    expect(coordinatorHeight).toBeGreaterThanOrEqual(3);
+    // Offset must be normalized (not 9999 anymore)
+    expect(rp.repoCoordinatorHeightOffset).not.toBe(9999);
+    // Re-calling with normalized offset gives the same result
+    const { repoHeight: rh2, coordinatorHeight: ch2 } = rp.computeRepoCoordinatorSplit();
+    expect(rh2).toBe(repoHeight);
+    expect(ch2).toBe(coordinatorHeight);
+  });
+
+  test("computeRepoCoordinatorSplit normalizes large negative offset (BUG-10)", () => {
+    const rp = new RightPaneComponent();
+    rp.displayHeight = 20;
+    rp.repoCoordinatorAgent = makeAgent({ id: "coord-1", meta: { coordinator: true } as any });
+    // Set a large negative offset that would shrink coordinator below minimum
+    rp.repoCoordinatorHeightOffset = -9999;
+    const { repoHeight, coordinatorHeight } = rp.computeRepoCoordinatorSplit();
+    // Both panes must stay >= 3
+    expect(repoHeight).toBeGreaterThanOrEqual(3);
+    expect(coordinatorHeight).toBeGreaterThanOrEqual(3);
+    // Offset must be normalized
+    expect(rp.repoCoordinatorHeightOffset).not.toBe(-9999);
+    // Re-calling gives stable result
+    const { repoHeight: rh2, coordinatorHeight: ch2 } = rp.computeRepoCoordinatorSplit();
+    expect(rh2).toBe(repoHeight);
+    expect(ch2).toBe(coordinatorHeight);
+  });
+
   test("renderRepoCoordinatorSection shows 'No coordinator' when no coordinator agent", () => {
     const rp = new RightPaneComponent();
     rp.repoCoordinatorAgent = null;

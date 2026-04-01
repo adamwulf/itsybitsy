@@ -8,7 +8,8 @@ import { join, dirname } from "path";
 import { readdir, chmod, rm, mkdir } from "fs/promises";
 import { homedir } from "node:os";
 import type { Agent } from "./agents";
-import { writeAgentState } from "./agents";
+import { writeAgentState, isWorkerLike, getAgentType, canSpawnChildren } from "./agents";
+import { resolveAgentType } from "./agent-types";
 import {
   logAgent,
   removeAgentQuestions,
@@ -228,8 +229,8 @@ export async function nukeAgent(agent: Agent): Promise<IbCommandResult> {
   // Get all descendants (includes the agent itself)
   const descendants = await getDescendantsRecursive(agentsDir, agent.id);
 
-  // Check if this is a worker with no children — reject
-  if (agent.meta.worker && descendants.length <= 1) {
+  // Check if this is a worker-like agent with no children — reject
+  if (isWorkerLike(agent.meta) && descendants.length <= 1) {
     return {
       ok: false,
       exitCode: 1,
@@ -642,8 +643,8 @@ export async function reassignAgent(agent: Agent, newManager: string | null): Pr
         return { ok: false, exitCode: 1, stdout: "", stderr: `New manager '${newManager}' not found` };
       }
       const parentMeta = await file.json();
-      // Validate not a worker
-      if (parentMeta.worker) {
+      // Validate not a worker-like agent
+      if (isWorkerLike(parentMeta)) {
         return { ok: false, exitCode: 1, stdout: "", stderr: `Cannot reassign to worker agent '${newManager}'` };
       }
     } catch {
@@ -1166,6 +1167,7 @@ export interface NewAgentOptions {
   name?: string;
   worker?: boolean;
   coordinator?: boolean;
+  type?: string;
   yolo?: boolean;
   model?: string;
   manager?: string;
@@ -1282,10 +1284,11 @@ async function getRepoId(repoPath: string): Promise<string> {
  */
 async function buildAgentSettings(
   repoPath: string,
-  agentType: "manager" | "worker",
+  agentType: string,
   agentId: string,
   configAllow: string[],
-  configDeny: string[]
+  configDeny: string[],
+  canSpawnChildrenOverride?: boolean
 ): Promise<string> {
   // Start with existing settings if available
   let baseSettings: Record<string, unknown> = {};
@@ -1322,8 +1325,12 @@ async function buildAgentSettings(
   const allDeny = [...new Set([...existingDeny, ...blockedTools, ...configDeny])];
 
   // Check if intercept hook should be added (reuse already-parsed baseSettings)
+  // Managers and custom types with canSpawnChildren get the intercept hook
+  const shouldCheckIntercept = canSpawnChildrenOverride !== undefined
+    ? canSpawnChildrenOverride
+    : agentType === "manager";
   let addIntercept = false;
-  if (agentType === "manager") {
+  if (shouldCheckIntercept) {
     const hooksObj = baseSettings.hooks as Record<string, unknown> | undefined;
     const preToolUse = hooksObj?.PreToolUse;
     if (Array.isArray(preToolUse)) {
@@ -1428,10 +1435,29 @@ export async function newAgent(
   const workerMode = opts?.worker === true;
   const coordinatorMode = opts?.coordinator === true;
   const yoloMode = opts?.yolo === true;
+  const customType = opts?.type;
 
   // Coordinator mutual exclusivity checks
   if (coordinatorMode && workerMode) {
     return { ok: false, exitCode: 1, stdout: "", stderr: "Error: --coordinator and --worker are mutually exclusive" };
+  }
+
+  // Type mutual exclusivity checks
+  if (customType && workerMode) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: "Error: --type and --worker are mutually exclusive" };
+  }
+  if (customType && coordinatorMode) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: "Error: --type and --coordinator are mutually exclusive" };
+  }
+
+  // Resolve custom type if specified
+  let resolvedType: import("./agent-types").AgentTypeDefinition | undefined;
+  if (customType) {
+    try {
+      resolvedType = await resolveAgentType(customType);
+    } catch (err) {
+      return { ok: false, exitCode: 1, stdout: "", stderr: `Error: ${(err as Error).message}` };
+    }
   }
   if (coordinatorMode && !useWorktree) {
     return { ok: false, exitCode: 1, stdout: "", stderr: "Error: --no-worktree is not allowed with --coordinator" };
@@ -1493,7 +1519,7 @@ export async function newAgent(
     // Check manager is not a worker
     try {
       const managerMeta = await Bun.file(join(agentsDir, manager, "meta.json")).json();
-      if (managerMeta.worker === true) {
+      if (isWorkerLike(managerMeta)) {
         return { ok: false, exitCode: 1, stdout: "", stderr: `Error: '${manager}' is a worker agent and cannot manage sub-agents` };
       }
     } catch { /* ignore */ }
@@ -1528,9 +1554,12 @@ export async function newAgent(
   const config = await readConfig();
   const customPrompts = await loadCustomPrompts(rootRepoPath);
 
-  // 7. Model fallback: --model > config.model > 'opus'
+  // 7. Model fallback: --model > type.model > config.model > 'opus'
   //    For coordinators: --model > coordinator.model > 'opus'
   let model = opts?.model ?? "";
+  if (!model && resolvedType?.model) {
+    model = resolvedType.model;
+  }
   if (!model) {
     if (coordinatorMode) {
       const coordModel = config["coordinator.model"]?.value as string | undefined;
@@ -1548,13 +1577,18 @@ export async function newAgent(
   }
 
   // Config permissions
-  const agentType = workerMode ? "worker" : "manager";
+  // Determine the effective agent type name for permission lookup
+  const agentType = customType ?? (workerMode ? "worker" : "manager");
   const roleAllow = (config[`permissions.${agentType}.allow`]?.value as string[] | undefined) ?? [];
   const roleDeny = (config[`permissions.${agentType}.deny`]?.value as string[] | undefined) ?? [];
   const allAllow = (config["permissions.all.allow"]?.value as string[] | undefined) ?? [];
   const allDeny = (config["permissions.all.deny"]?.value as string[] | undefined) ?? [];
-  const configAllow = [...new Set([...roleAllow, ...allAllow])];
-  const configDeny = [...new Set([...roleDeny, ...allDeny])];
+
+  // Permission resolution order: type frontmatter > config role > config all
+  const typeAllow = resolvedType?.permissions.allow ?? [];
+  const typeDeny = resolvedType?.permissions.deny ?? [];
+  const configAllow = [...new Set([...typeAllow, ...roleAllow, ...allAllow])];
+  const configDeny = [...new Set([...typeDeny, ...roleDeny, ...allDeny])];
 
   // 8. Max agents check — coordinators bypass this (SPEC §12.4.3)
   if (!coordinatorMode) {
@@ -1646,7 +1680,7 @@ export async function newAgent(
       };
       settingsContent = JSON.stringify(coordSettingsObj, null, 2);
     } else {
-      settingsContent = await buildAgentSettings(rootRepoPath, agentType, id, configAllow, configDeny);
+      settingsContent = await buildAgentSettings(rootRepoPath, agentType, id, configAllow, configDeny, resolvedType?.canSpawnChildren);
     }
     await Bun.write(join(agentDir, "repo", ".claude", "settings.local.json"), settingsContent);
   } else {
@@ -1685,10 +1719,13 @@ export async function newAgent(
     created: now.toISOString(),
     created_epoch: Math.floor(now.getTime() / 1000),
     worktree: useWorktree,
-    worker: workerMode,
+    worker: customType ? (customType === "worker") : workerMode,
     yolo: yoloMode,
     model: model || null,
   };
+  if (customType) {
+    metaJson.type = customType;
+  }
   if (coordinatorMode) {
     metaJson.coordinator = true;
   }
@@ -1698,7 +1735,7 @@ export async function newAgent(
   if (manager) {
     await logAgent(agentDir, `Agent created (manager: ${manager}, prompt: ${prompt})`);
     const managerDir = join(agentsDir, manager);
-    const typeLabel = workerMode ? "worker" : "manager";
+    const typeLabel = customType ?? (workerMode ? "worker" : "manager");
     await logAgent(managerDir, `Spawned ${typeLabel} subagent: ${id} (prompt: ${prompt})`);
   } else {
     await logAgent(agentDir, `Agent created (prompt: ${prompt})`);
@@ -1708,7 +1745,8 @@ export async function newAgent(
   const createPRs = config.createPullRequests?.value === true;
   let completionInstructions = "";
 
-  if (useWorktree && !workerMode) {
+  const effectiveWorkerMode = workerMode || (customType !== undefined && customType !== "manager" && !resolvedType?.canSpawnChildren);
+  if (useWorktree && !effectiveWorkerMode) {
     // Check for gh and remote
     const hasGhResult = await newAgentSpawnCtx.run(["which", "gh"]);
     const hasGh = hasGhResult.exitCode === 0;
@@ -1732,9 +1770,9 @@ When your task is complete:
   }
 
   let customRolePrompt = "";
-  if (workerMode && customPrompts.worker) {
+  if ((workerMode || customType === "worker") && customPrompts.worker) {
     customRolePrompt = `[CUSTOM WORKER INSTRUCTIONS]\n${customPrompts.worker}\n\n`;
-  } else if (!workerMode && customPrompts.manager) {
+  } else if (!workerMode && !customType && customPrompts.manager) {
     customRolePrompt = `[CUSTOM MANAGER INSTRUCTIONS]\n${customPrompts.manager}\n\n`;
   }
 

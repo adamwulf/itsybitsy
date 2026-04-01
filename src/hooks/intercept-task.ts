@@ -6,6 +6,8 @@ import { join } from "path";
 import { newAgent } from "../ib-commands";
 import type { IbCommandResult } from "../ib-commands";
 import { AGENT_CWD_PATTERN } from "./shared";
+import { canSpawnChildren as checkCanSpawnChildren } from "../agents";
+import type { AgentMeta } from "../agents";
 
 export interface InterceptResult {
   action: "skip" | "intercept";
@@ -133,8 +135,10 @@ export async function processTaskIntercept(
     try {
       const metaFile = Bun.file(join(agentDir, "meta.json"));
       if (await metaFile.exists()) {
-        const meta = await metaFile.json();
-        if (meta.worker === true) {
+        const meta = await metaFile.json() as AgentMeta;
+        // Check if this agent type can spawn children
+        const canSpawn = await checkCanSpawnChildren(meta);
+        if (!canSpawn) {
           return { action: "skip" };
         }
       }

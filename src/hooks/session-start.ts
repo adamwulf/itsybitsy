@@ -4,8 +4,10 @@
 
 import { join, basename } from "path";
 import { AGENT_CWD_PATTERN } from "./shared";
+import { resolveAgentType } from "../agent-types";
+import type { AgentTypeDefinition } from "../agent-types";
 
-export type SessionRole = "primary" | "manager" | "worker" | "coordinator";
+export type SessionRole = "primary" | "manager" | "worker" | "coordinator" | "custom";
 
 export interface SessionContext {
   role: SessionRole;
@@ -14,11 +16,15 @@ export interface SessionContext {
   parentBranch: string;
   worktreePath: string;
   rootRepoPath: string;
+  /** The custom agent type name (set when role === "custom" or when meta.type is set) */
+  typeName?: string;
+  /** The resolved agent type definition (set when typeName is present) */
+  typeDef?: AgentTypeDefinition;
 }
 
 export function detectRole(
   cwd: string,
-  metaJson?: { id?: string; manager?: string | null; worker?: boolean; coordinator?: boolean }
+  metaJson?: { id?: string; manager?: string | null; worker?: boolean; coordinator?: boolean; type?: string }
 ): SessionContext {
   const match = AGENT_CWD_PATTERN.exec(cwd);
   if (!match) {
@@ -46,7 +52,19 @@ export function detectRole(
   const meta = metaJson ?? {};
   const isCoordinator = (meta as Record<string, unknown>).coordinator === true;
   const worker = meta.worker === true;
-  const role: SessionRole = isCoordinator ? "coordinator" : worker ? "worker" : "manager";
+  const typeName = (meta as Record<string, unknown>).type as string | undefined;
+
+  // Determine role from type field or legacy fields
+  let role: SessionRole;
+  if (typeName && typeName !== "manager" && typeName !== "worker" && typeName !== "coordinator") {
+    role = "custom";
+  } else if (isCoordinator || typeName === "coordinator") {
+    role = "coordinator";
+  } else if (worker || typeName === "worker") {
+    role = "worker";
+  } else {
+    role = "manager";
+  }
 
   // Normalize manager: treat null and "null" as empty
   let agentManager = "";
@@ -63,10 +81,23 @@ export function detectRole(
     parentBranch,
     worktreePath,
     rootRepoPath,
+    typeName: typeName || undefined,
   };
 }
 
-export function generateInstructions(ctx: SessionContext): string {
+export async function generateInstructions(ctx: SessionContext): Promise<string> {
+  // Custom type: resolve the type definition and generate custom instructions
+  if (ctx.role === "custom" && ctx.typeName) {
+    try {
+      const typeDef = await resolveAgentType(ctx.typeName);
+      ctx.typeDef = typeDef;
+      return generateCustomTypeInstructions(ctx, typeDef);
+    } catch {
+      // Fall back to manager instructions if type can't be resolved
+      return generateManagerInstructions(ctx);
+    }
+  }
+
   if (ctx.role === "coordinator") {
     return generateCoordinatorInstructions(ctx);
   }
@@ -402,6 +433,95 @@ These phrases MUST be the LAST thing you output. Put summaries or status updates
 </ittybitty>`;
 }
 
+function generateCustomTypeInstructions(ctx: SessionContext, typeDef: AgentTypeDefinition): string {
+  const managerSendTarget = ctx.agentManager;
+  const canSpawn = typeDef.canSpawnChildren;
+
+  // Build commands table based on capabilities
+  const commands: string[] = [];
+  if (canSpawn) {
+    commands.push(`| \`ib new-agent --worker "task"\` | Spawn a worker sub-agent |`);
+    commands.push(`| \`ib list --manager ${ctx.agentId}\` | List your sub-agents |`);
+    commands.push(`| \`ib look <id>\` | Read an agent's output |`);
+    commands.push(`| \`ib send <id> "msg"\` | Send input to an agent |`);
+    commands.push(`| \`ib status <id>\` | Show agent's commits/changes |`);
+    commands.push(`| \`ib diff <id>\` | Review agent's changes |`);
+    commands.push(`| \`ib merge <id>\` | Merge agent's work and close it |`);
+    commands.push(`| \`ib kill <id>\` | Stop an agent without merging |`);
+  } else if (managerSendTarget) {
+    commands.push(`| \`ib send ${managerSendTarget} "msg"\` | Send a message to your manager |`);
+  }
+  commands.push(`| \`ib diff\` | Check your changes vs base branch |`);
+  commands.push(`| \`ib status\` | See your commits |`);
+  commands.push(`| \`ib log "msg"\` | Log to your agent log |`);
+
+  const managerInfo = ctx.agentManager
+    ? `Your manager agent is: ${ctx.agentManager}`
+    : "";
+
+  const communicationSection = managerSendTarget ? `
+### Communication
+
+- Report progress or completion to your manager: \`ib send ${managerSendTarget} "message"\`
+- Ask questions if requirements are unclear
+- If stuck: \`ib send ${managerSendTarget} "[STUCK] description"\`, then enter WAITING state
+- Your manager can send you messages even after you complete - you will restart and respond` : "";
+
+  return `<ittybitty>
+## IttyBitty Agent: ${typeDef.name}
+
+${typeDef.description ? typeDef.description + "\n" : ""}You are agent \`${ctx.agentId}\` (type: ${typeDef.name}) in the ittybitty multi-agent orchestration system.
+You are running in a git worktree on branch \`agent/${ctx.agentId}\`, forked from \`${ctx.parentBranch}\`.
+${managerInfo}
+
+IMPORTANT: Always use \`ib\` (not \`./ib\`) to ensure you use the current version from PATH.
+
+### Bash Rules
+
+Each Bash tool call must run exactly ONE command. Multi-command calls will be blocked.
+- NO piping: \`cmd1 | cmd2\` is not allowed
+- NO chaining: \`cmd1 && cmd2\` and \`cmd1 ; cmd2\` are not allowed
+- NO subshells or command substitution that runs multiple commands
+- If you need to run two commands, make two separate Bash tool calls
+
+### Path Isolation
+
+You are isolated to your worktree at: ${ctx.worktreePath}
+- You CAN access: Your worktree, ~/.claude, /tmp, and general system paths
+- You CANNOT access: The main repo at ${ctx.rootRepoPath}, other agents' worktrees
+- If you get "Access denied" or "Path violation" errors, you're trying to access a forbidden path
+
+### Git Worktree Context
+
+You are in a git worktree, which shares the same repository as the main checkout.
+- Your branch: \`agent/${ctx.agentId}\`
+- Forked from: \`${ctx.parentBranch}\`
+- All branches are LOCAL - no need for \`git fetch origin\`
+- To merge latest changes from your parent: \`git merge ${ctx.parentBranch}\`
+- Other agents' branches are visible as local branches (\`agent/*\`)
+
+### Commands
+
+| Command | Description |
+|---------|-------------|
+${commands.join("\n")}
+
+### State Management
+
+Whenever you stop working and are idle, end your message with one of:
+- \`WAITING\` - if waiting for input or have nothing more to do
+- \`I HAVE COMPLETED THE GOAL\` - if you have completed your task
+
+These phrases MUST be the LAST thing you output. Put summaries or status updates BEFORE them.
+${communicationSection}
+
+### Role-Specific Instructions
+
+${typeDef.promptBody}
+
+</ittybitty>`;
+}
+
 export async function hookSessionStart(rawStdin?: string): Promise<void> {
   const raw = rawStdin ?? await new Response(Bun.stdin.stream()).text();
   let parsed: unknown;
@@ -425,7 +545,7 @@ export async function hookSessionStart(rawStdin?: string): Promise<void> {
 
   // Detect role - read meta.json from filesystem if in an agent directory
   const match = AGENT_CWD_PATTERN.exec(cwd);
-  let metaJson: { id?: string; manager?: string | null; worker?: boolean; coordinator?: boolean } | undefined;
+  let metaJson: { id?: string; manager?: string | null; worker?: boolean; coordinator?: boolean; type?: string } | undefined;
 
   if (match) {
     const agentId = match[1]!;
@@ -443,7 +563,7 @@ export async function hookSessionStart(rawStdin?: string): Promise<void> {
   }
 
   const ctx = detectRole(cwd, metaJson);
-  const instructions = generateInstructions(ctx);
+  const instructions = await generateInstructions(ctx);
 
   const output = {
     hookSpecificOutput: {

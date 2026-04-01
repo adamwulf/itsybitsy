@@ -327,6 +327,29 @@ describe("checkOrphanedWorktrees", () => {
     expect(warnings.length).toBe(0);
   });
 
+  test("does not flag coordinator worktree when agent dir exists with different branch name", async () => {
+    // Coordinator branch is agent/{id}-{repoId} but agent dir is agents/{id}
+    const coordinatorId = "itsybitsy";
+    const repoId = "a3f2b1c0";
+    const agentDir = join(tmpDir, ".ittybitty", "agents", coordinatorId);
+    await mkdir(agentDir, { recursive: true });
+    await writeFile(join(agentDir, "meta.json"), JSON.stringify({ coordinator: true }));
+
+    const worktreePath = join(tmpDir, ".ittybitty", "agents", coordinatorId, "repo");
+    healthSpawnCtx.set((cmd: string[]) => {
+      if (cmd.includes("worktree")) {
+        return mockResult(
+          `worktree ${tmpDir}\nbranch refs/heads/main\n\nworktree ${worktreePath}\nbranch refs/heads/agent/${coordinatorId}-${repoId}\n\n`,
+          0,
+        );
+      }
+      return mockResult("", 1);
+    });
+
+    const warnings = await checkOrphanedWorktrees(tmpDir);
+    expect(warnings.length).toBe(0);
+  });
+
   test("returns empty when git fails", async () => {
     healthSpawnCtx.set(() => mockResult("", 128));
 

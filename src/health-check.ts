@@ -295,11 +295,14 @@ export async function checkOrphanedWorktrees(repoPath: string): Promise<RepoHeal
   let currentWorktreePath: string | null = null;
   let currentBranch: string | null = null;
 
+  const agentsDir = join(repoPath, ".ittybitty", "agents");
+
   /** Check the current worktree entry and emit a warning if orphaned */
   const checkEntry = async () => {
     if (!currentBranch || !currentWorktreePath) return;
     // currentBranch is the capture from refs/heads/agent/(.+), e.g., "agent-a1b2c3d4"
-    const agentDirForId = join(repoPath, ".ittybitty", "agents", currentBranch);
+    // For coordinators the branch is agent/{id}-{repoId} but the dir is just agents/{id}
+    const agentDirForId = join(agentsDir, currentBranch);
 
     let exists = false;
     try {
@@ -307,6 +310,19 @@ export async function checkOrphanedWorktrees(repoPath: string): Promise<RepoHeal
       const file = Bun.file(join(agentDirForId, "meta.json"));
       exists = await file.exists();
     } catch { /* ignore */ }
+
+    // Fallback: if the worktree path is inside agents/, derive ID from the path
+    // This handles coordinator worktrees whose branch includes a repo-id suffix
+    if (!exists && currentWorktreePath.startsWith(agentsDir + "/")) {
+      const relPath = currentWorktreePath.slice(agentsDir.length + 1);
+      const agentIdFromPath = relPath.split("/")[0];
+      if (agentIdFromPath) {
+        try {
+          const file = Bun.file(join(agentsDir, agentIdFromPath, "meta.json"));
+          exists = await file.exists();
+        } catch { /* ignore */ }
+      }
+    }
 
     if (!exists) {
       warnings.push({

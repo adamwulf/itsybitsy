@@ -3534,10 +3534,10 @@ describe("coordinator input field (Phase 49)", () => {
     // selectedIndex 0 is the system-coordinator entry
     expect(dashboard.agentTree.isSystemCoordinatorSelected).toBe(true);
     // coordinatorMode limits focus to agent-tree, info, and coordinator
-    // Set tmuxPane output — coordinator TMUX view uses tmuxPane in main area
+    // Set coordinatorPane output — coordinator TMUX view uses coordinatorPane in main area
+    // (tmuxPane is for regular agents; coordinatorPane has its own poller)
     dashboard.tmuxPane.rawOutput = "Coordinator output";
     dashboard.tmuxPane.hasPolled = true;
-    // Also set coordinatorPane for sidebar (when coordinator is not selected)
     dashboard.coordinatorPane.rawOutput = "Coordinator output";
     dashboard.coordinatorPane.hasPolled = true;
     return dashboard;

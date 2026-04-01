@@ -604,13 +604,13 @@ The stop hook does **not** parse tmux output for state detection. It relies sole
 ### 6.4 Intercept Task Hook (PreToolUse)
 
 **Command**: `ib hooks intercept-task`
-**Matcher**: `Task|Agent`
+**Matcher**: `Task|Agent|TaskCreate`
 **Hook type**: PreToolUse
 
-Intercepts Claude Code's Task and Agent tools and redirects them to spawn ib agents instead:
+Intercepts Claude Code's Task, Agent, and TaskCreate tools and redirects them to spawn ib agents instead:
 
-1. **Worker skip**: If called from a worker agent (detected via CWD + `meta.json`), passes through without interception — workers use native Task/Agent
-2. **Only intercepts `Task` and `Agent` tools** — all other tools pass through
+1. **Worker denial**: If called from a worker agent (detected via CWD + `meta.json`), denies with "Workers cannot create tasks or spawn sub-agents"
+2. **Only intercepts `Task`, `Agent`, and `TaskCreate` tools** — all other tools pass through
 3. **Skip for certain subagent_types**: `Bash`, `statusline-setup`, `claude-code-guide`, `meta-agent`, `ib-merge` pass through unintercepted
 4. **Model validation**: Only `sonnet`, `opus`, `haiku`, or empty string are allowed
 5. **Spawn behavior**:
@@ -635,7 +635,7 @@ Fires when Claude requests permission for a tool that isn't auto-allowed. Simply
 These are optional hooks that the user installs globally:
 
 - **Main-path hook** (`ib hooks main-path`): PreToolUse hook on `Bash` matcher that prevents the primary Claude from `cd`-ing into agent worktrees. Only checks Bash `cd` commands — allows Read/Write/Edit to worktree paths. Resolves relative paths via `cwd` from stdin JSON. Exits 0 (allow) or 2 (deny with JSON written to stdout).
-- **Intercept-task hook** (`ib hooks intercept-task`): PreToolUse hook on `Task|Agent` matcher (global version, enables task/agent interception for all repos; intercepts both Task and Agent tools)
+- **Intercept-task hook** (`ib hooks intercept-task`): PreToolUse hook on `Task|Agent|TaskCreate` matcher (global version, enables task/agent/TaskCreate interception for all repos)
 - **Status injection hooks** (`ib hooks inject-status`): Two hooks — a UserPromptSubmit hook (no matcher, `--full --visible`) and a PostToolUse hook (`Bash|Task` matcher, `--if-changed --visible`). Skips injection when CWD is inside an agent worktree. Supports modes: `--full` (complete agent tree), `--brief` (one-liner summary), `--if-changed` (hash-compared, outputs brief only when changed). `--visible` adds a `systemMessage` field for user-visible status line.
 - **Session-start hook** (`ib hooks session-start`): SessionStart hook that injects ittybitty context
 
@@ -1768,7 +1768,7 @@ Each check produces zero or more **warnings**. Warnings have a severity level an
 
 **Detection**: Read `~/.claude/settings.json` and check for the presence of:
 - **Safety hooks** (checked as a group): `ib hooks main-path` (PreToolUse), `ib hooks session-start` (SessionStart), and at least one `ib hooks inject-status` hook (UserPromptSubmit or PostToolUse). If ANY of these are missing, warn.
-- **Intercept-task hook**: `ib hooks intercept-task` in PreToolUse with `Task|Agent` matcher. Checked separately since it's an optional but recommended hook.
+- **Intercept-task hook**: `ib hooks intercept-task` in PreToolUse with `Task|Agent|TaskCreate` matcher. Checked separately since it's an optional but recommended hook.
 
 **Message**: `"Missing global safety hooks in ~/.claude/settings.json — run setup (h) to install"` or `"Missing intercept-task hook in ~/.claude/settings.json — run setup (h) to install"`
 

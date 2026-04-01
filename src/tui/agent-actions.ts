@@ -306,7 +306,14 @@ export function handleMerge(ctx: ActionCtx) {
   const agent = ctx.agentTree.selectedAgent;
   if (!agent) return;
   ctx.setNotice(`Running merge-check for ${agent.id}...`);
-  mergeCheckAgent(agent).then((checkResult) => {
+  ctx.executeAndRefresh(async () => {
+    let checkResult;
+    try {
+      checkResult = await mergeCheckAgent(agent);
+    } catch (err) {
+      ctx.setNotice(`Merge-check error: ${err}`);
+      return;
+    }
     const checkOutput = checkResult.stdout || checkResult.stderr || "(no output)";
     if (!checkResult.ok) {
       ctx.setNotice(`Merge-check failed for ${agent.id}: ${checkOutput}`);
@@ -325,8 +332,6 @@ export function handleMerge(ctx: ActionCtx) {
         });
       },
     });
-  }).catch((err) => {
-    ctx.setNotice(`Merge-check error: ${err}`);
   });
 }
 

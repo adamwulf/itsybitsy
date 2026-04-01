@@ -456,8 +456,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     dashboard.handleInput("\t");
     expect(assertDialog(dashboard.dialog, 'confirm').focusedButton).toBe("confirm");
     dashboard.handleInput("\r");
-    // Wait for async execution
-    await Bun.sleep(10);
+    await dashboard.flushPendingActions();
     // Dialog should be dismissed after native kill executes
     expect(dashboard.dialog).toBeNull();
     // Agent directory should be removed by teardown
@@ -508,7 +507,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     // focusedButton defaults to "cancel", Tab to Nuke, then press Enter
     dashboard.handleInput("\t");
     dashboard.handleInput("\r");
-    await Bun.sleep(10);
+    await dashboard.flushPendingActions();
     // Dialog should be dismissed after native nuke executes
     expect(dashboard.dialog).toBeNull();
     // Agent directory should be removed by native nuke teardown
@@ -556,7 +555,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     // focusedButton is "cancel", Tab to move to confirm, then Enter
     dashboard.handleInput("\t");
     dashboard.handleInput("\r");
-    await Bun.sleep(10);
+    await dashboard.flushPendingActions();
     // Agent directory should be removed by native nuke-all
     expect(await Bun.file(join(agentDir, "meta.json")).exists()).toBe(false);
   });
@@ -576,7 +575,7 @@ describe("DashboardComponent dialog and action handlers", () => {
   test("R key resumes stopped agents", async () => {
     await setupDashboardWithAgent("stopped");
     dashboard.handleInput("R");
-    await Bun.sleep(10);
+    await dashboard.flushPendingActions();
     // Native resume creates resume.sh and logs to agent.log
     const agentDir = join(actionTempDir!, ".ittybitty", "agents", "agent-test");
     const log = await Bun.file(join(agentDir, "agent.log")).text();
@@ -586,7 +585,7 @@ describe("DashboardComponent dialog and action handlers", () => {
   test("R key does not resume running agents", async () => {
     await setupDashboardWithAgent("running");
     dashboard.handleInput("R");
-    await Bun.sleep(10);
+    await dashboard.flushPendingActions();
     expect(lastIbCall).toBeNull();
     // Should show a notice in the header instead
     expect(dashboard.notice).not.toBeNull();
@@ -608,7 +607,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     // Tab to confirm, then Enter
     dashboard.handleInput("\t");
     dashboard.handleInput("\r");
-    await Bun.sleep(10);
+    await dashboard.flushPendingActions();
     // Dialog should be dismissed after native pause executes
     expect(dashboard.dialog).toBeNull();
     // Agent directory should be preserved (pause does NOT remove it)
@@ -664,7 +663,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     dashboard.handleInput("r");
     // First item is already selected (index 0 = No parent), press Enter
     dashboard.handleInput("\r");
-    await Bun.sleep(10);
+    await dashboard.flushPendingActions();
     const updated = await Bun.file(metaPath).json();
     expect(updated.manager).toBeNull();
   });
@@ -705,7 +704,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     // Move down to agent-manager (index 1) and select — use arrow key, not j (which is a search char in fuzzy)
     dashboard.handleInput("\x1b[B");
     dashboard.handleInput("\r");
-    await Bun.sleep(10);
+    await dashboard.flushPendingActions();
     const updated = await Bun.file(join(agentsDir, "agent-test", "meta.json")).json();
     expect(updated.manager).toBe("agent-manager");
   });
@@ -801,7 +800,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     dashboard.handleInput("\t");
     dashboard.handleInput("\t");
     dashboard.handleInput("\r");
-    await Bun.sleep(10);
+    await dashboard.flushPendingActions();
     expect(sentMessages.length).toBe(1);
     expect(sentMessages[0]!.message).toBe("hello");
   });
@@ -912,7 +911,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     dashboard.handleInput("\t");
     dashboard.handleInput("\t");
     dashboard.handleInput("\r");
-    await Bun.sleep(10);
+    await dashboard.flushPendingActions();
     // Should have sent to agent-a and agent-b only (agent-c archived, agent-d no tmux)
     expect(sentMessages.length).toBe(2);
     expect(sentMessages[0]!.message).toBe("hi");
@@ -939,7 +938,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     dashboard.handleInput("\t");
     dashboard.handleInput("\t");
     dashboard.handleInput("\r");
-    await Bun.sleep(10);
+    await dashboard.flushPendingActions();
     expect(sentMessages.length).toBe(1);
     expect(sentMessages[0]!.message).toBe("hi");
   });
@@ -975,8 +974,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     // Create worktree dir so mergeCheckAgent passes that check
     await mkdir(join(actionTempDir!, ".ittybitty", "agents", "agent-test", "repo"), { recursive: true });
     dashboard.handleInput("m");
-    // Wait for merge-check to complete
-    await Bun.sleep(50);
+    await dashboard.flushPendingActions();
     expect(assertDialog(dashboard.dialog, 'confirm').prompt).toContain("Merge agent-test");
   });
 
@@ -992,7 +990,7 @@ describe("DashboardComponent dialog and action handlers", () => {
       return makeSpawnResult();
     });
     dashboard.handleInput("m");
-    await Bun.sleep(50);
+    await dashboard.flushPendingActions();
     expect(dashboard.notice).toContain("Merge-check failed");
   });
 
@@ -1150,16 +1148,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     dashboard.handleInput("\t");
     dashboard.handleInput("\r");
 
-    // Wait for async executeAndRefresh to complete
-    for (let i = 0; i < 20; i++) {
-      await Bun.sleep(20);
-      const agentsDir = join(newAgentTempDir, ".ittybitty", "agents");
-      try {
-        const { readdir: rd } = await import("fs/promises");
-        const entries = await rd(agentsDir, { withFileTypes: true });
-        if (entries.filter(e => e.isDirectory()).length > 0) break;
-      } catch { /* not yet */ }
-    }
+    await dashboard.flushPendingActions();
 
     // Find the created agent's meta.json
     const agentsDir = join(newAgentTempDir, ".ittybitty", "agents");
@@ -1227,13 +1216,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     dashboard.handleInput("\t");
     dashboard.handleInput("\r");
 
-    // Wait for async executeAndRefresh to complete
-    for (let i = 0; i < 20; i++) {
-      await Bun.sleep(20);
-      try {
-        if (await Bun.file(join(newAgentTempDir, ".ittybitty", "agents", "my-agent", "meta.json")).exists()) break;
-      } catch { /* not yet */ }
-    }
+    await dashboard.flushPendingActions();
 
     const meta = await Bun.file(join(newAgentTempDir, ".ittybitty", "agents", "my-agent", "meta.json")).json();
     expect(meta.id).toBe("my-agent");
@@ -1258,7 +1241,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(d.focused).toBe("cancel");
     dashboard.handleInput("\t"); // name (create still skipped — prompt still empty)
     expect(d.focused).toBe("name");
-    await Bun.sleep(10);
+    await dashboard.flushPendingActions();
     // Should NOT have called newAgent
     expect(lastIbCall).toBeNull();
     // Dialog should still be open
@@ -1468,7 +1451,7 @@ describe("Cross-repo send (E key)", () => {
     // Message input
     const inputDialog = assertDialog(dashboard.dialog, 'input');
     inputDialog.onSubmit("hello cross-repo");
-    await Bun.sleep(10);
+    await dashboard.flushPendingActions();
 
     // Verify message was sent to agent-b's tmux session
     expect(sentMessages.length).toBeGreaterThanOrEqual(1);
@@ -1521,7 +1504,7 @@ describe("Cross-repo send (E key)", () => {
     dashboard.handleInput("E");
     assertDialog(dashboard.dialog, 'select').onSelect(0);
     assertDialog(dashboard.dialog, 'input').onSubmit("  ");
-    await Bun.sleep(10);
+    await dashboard.flushPendingActions();
 
     expect(sentMessages.length).toBe(0);
   });
@@ -1805,7 +1788,7 @@ describe("DashboardComponent right pane and navigation features", () => {
     dashboard.handleInput("\t"); // Tab to Cancel button
     dashboard.handleInput("\t"); // Tab to Send button
     dashboard.handleInput("\r"); // Submit
-    await Bun.sleep(50);
+    await dashboard.flushPendingActions();
 
     // Should have acknowledged natively (file updated)
     const updated = await Bun.file(questionsPath).json();
@@ -1842,7 +1825,7 @@ describe("DashboardComponent right pane and navigation features", () => {
 
     dashboard.handleInput("q"); // QUESTIONS mode
     dashboard.handleInput("\x1b"); // Escape to acknowledge
-    await Bun.sleep(50);
+    await dashboard.flushPendingActions();
 
     // Should have acknowledged natively (file updated)
     const updated = await Bun.file(questionsPath).json();
@@ -2805,8 +2788,7 @@ describe("Context-sensitive footer (repo header vs agent)", () => {
     setupMultiRepoWithRepoHeader();
     expect(dashboard.agentTree.selectedRepoHeader).toBe("alpha");
     dashboard.handleInput("x");
-    // handleRemoveRepoSafe is async (checks agent dirs), wait for it
-    await new Promise((r) => setTimeout(r, 10));
+    await dashboard.flushPendingActions();
     expect(dashboard.dialog).not.toBeNull();
     const d = assertDialog(dashboard.dialog, 'confirm');
     expect(d.prompt).toContain("Remove");

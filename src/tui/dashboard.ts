@@ -63,7 +63,7 @@ import { MIN_LEFT_WIDTH, MAX_LEFT_WIDTH } from "./split-pane";
 import { FocusManager } from "./focus";
 import type { FocusTarget, SubFocus } from "./focus";
 import { SystemDashboardComponent } from "./system-dashboard";
-import { loadLayout, saveLayoutDebounced, cancelPendingSave, flushPendingSave } from "./layout";
+import { loadLayout, saveLayoutDebounced, cancelPendingSave, flushPendingSave, MIN_SIDEBAR, MAX_SIDEBAR, DEFAULT_TMUX_WIDTH } from "./layout";
 import type { LayoutState } from "./layout";
 import { InputFieldComponent } from "./input-field";
 import { sendMessage, pauseAgent } from "../ib-commands";
@@ -81,7 +81,6 @@ export { SystemDashboardComponent } from "./system-dashboard";
 export type { Selection } from "./selection";
 
 const DIALOG_WIDTH = 80;
-const DEFAULT_LEFT_WIDTH = 80;
 const LEFT_WIDTH_STEP = 5;
 
 // findLastTwoSeparators moved to wrap.ts — re-exported for external consumers
@@ -610,7 +609,7 @@ export class DashboardComponent implements Component {
     this.systemDashboard = new SystemDashboardComponent();
     this.sidebar = new SidebarComponent(this.agentTree, this.infoPanel);
     this.sidebar.coordinatorPane = this.coordinatorPane;
-    this.splitPane = new SplitPane(this.tmuxPane, this.rightPane, DEFAULT_LEFT_WIDTH, `${DIM_GRAY}│${RESET}`);
+    this.splitPane = new SplitPane(this.tmuxPane, this.rightPane, DEFAULT_TMUX_WIDTH, `${DIM_GRAY}│${RESET}`);
     this.inputField = new InputFieldComponent();
     this.inputField.onSubmit = (text: string) => {
       const agent = this.agentTree.selectedAgent;
@@ -684,6 +683,7 @@ export class DashboardComponent implements Component {
         if (clamped !== this.splitPane.getLeftWidth()) {
           this.splitPane.setLeftWidth(clamped);
           this.tui?.requestRender();
+          this.persistLayout();
         }
       },
     });
@@ -714,8 +714,6 @@ export class DashboardComponent implements Component {
 
   /** Apply a saved layout state to restore panel sizes, clamping to valid ranges. */
   applyLayout(layout: LayoutState) {
-    const MIN_SIDEBAR = 30;
-    const MAX_SIDEBAR = 120;
     this.sidebarWidth = Math.max(MIN_SIDEBAR, Math.min(MAX_SIDEBAR, layout.sidebarWidth));
     resizeCoordinatorTmux(this.sidebarWidth);
     this.splitPane.setLeftWidth(Math.max(MIN_LEFT_WIDTH, Math.min(MAX_LEFT_WIDTH, layout.splitPaneLeftWidth)));
@@ -1562,8 +1560,6 @@ export class DashboardComponent implements Component {
       const focus = this.focusManager.current();
       if (focus === "agent-tree" || focus === "info" || focus === "coordinator") {
         // Sidebar panel focused: adjust sidebar width
-        const MIN_SIDEBAR = 30;
-        const MAX_SIDEBAR = 120;
         this.sidebarWidth = Math.max(MIN_SIDEBAR, Math.min(MAX_SIDEBAR, this.sidebarWidth + delta));
         resizeCoordinatorTmux(this.sidebarWidth);
         // Resize repo coordinator tmux to match new right pane width

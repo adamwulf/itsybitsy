@@ -5,7 +5,15 @@
 
 import { join, dirname } from "path";
 import { homedir } from "os";
-import { mkdir } from "fs/promises";
+import { mkdir, rename } from "fs/promises";
+import { SIDEBAR_WIDTH } from "./sidebar";
+import { MIN_LEFT_WIDTH, MAX_LEFT_WIDTH } from "./split-pane";
+
+/** Minimum sidebar width (columns). */
+export const MIN_SIDEBAR = 30;
+
+/** Maximum sidebar width (columns). */
+export const MAX_SIDEBAR = 120;
 
 export interface LayoutState {
   sidebarWidth: number;
@@ -62,14 +70,14 @@ export async function loadLayout(): Promise<LayoutState | null> {
     // Optional: repoCoordinatorHeightOffset (added later, may not be in saved file)
     const repoCoordOffset = isFiniteNum(data.repoCoordinatorHeightOffset) ? data.repoCoordinatorHeightOffset : 0;
     return {
-      sidebarWidth: data.sidebarWidth,
-      splitPaneLeftWidth: data.splitPaneLeftWidth,
+      sidebarWidth: Math.round(data.sidebarWidth),
+      splitPaneLeftWidth: Math.round(data.splitPaneLeftWidth),
       heightOffsets: {
-        tree: data.heightOffsets.tree,
-        info: data.heightOffsets.info,
-        coordinator: data.heightOffsets.coordinator,
+        tree: Math.round(data.heightOffsets.tree),
+        info: Math.round(data.heightOffsets.info),
+        coordinator: Math.round(data.heightOffsets.coordinator),
       },
-      repoCoordinatorHeightOffset: repoCoordOffset,
+      repoCoordinatorHeightOffset: Math.round(repoCoordOffset),
     };
   } catch {
     return null;
@@ -82,7 +90,9 @@ export async function loadLayout(): Promise<LayoutState | null> {
  */
 export async function saveLayout(state: LayoutState): Promise<void> {
   await mkdir(dirname(layoutPath), { recursive: true });
-  await Bun.write(layoutPath, JSON.stringify(state, null, 2) + "\n");
+  const tmpPath = layoutPath + ".tmp";
+  await Bun.write(tmpPath, JSON.stringify(state, null, 2) + "\n");
+  await rename(tmpPath, layoutPath);
 }
 
 let debounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -96,8 +106,9 @@ export function saveLayoutDebounced(state: LayoutState): void {
   if (debounceTimer) clearTimeout(debounceTimer);
   debounceTimer = setTimeout(() => {
     debounceTimer = null;
+    const toSave = pendingState;
     pendingState = null;
-    saveLayout(state).catch(() => {
+    if (toSave) saveLayout(toSave).catch(() => {
       // Silently ignore write errors
     });
   }, 500);
@@ -129,27 +140,28 @@ export async function flushPendingSave(): Promise<void> {
   }
 }
 
-/** Default tmux width when no layout has been saved. */
+/** Default tmux (split-pane left) width when no layout has been saved. */
 export const DEFAULT_TMUX_WIDTH = 80;
 
 /**
  * Read the saved main agent tmux pane width from layout.json.
  * Returns DEFAULT_TMUX_WIDTH if no layout is saved or the value is invalid.
+ * Clamps to [MIN_LEFT_WIDTH, MAX_LEFT_WIDTH].
  */
 export async function getSavedTmuxWidth(): Promise<number> {
   const layout = await loadLayout();
-  return layout?.splitPaneLeftWidth ?? DEFAULT_TMUX_WIDTH;
+  const width = layout?.splitPaneLeftWidth ?? DEFAULT_TMUX_WIDTH;
+  return Math.max(MIN_LEFT_WIDTH, Math.min(MAX_LEFT_WIDTH, width));
 }
-
-/** Default sidebar width when no layout has been saved. */
-export const DEFAULT_SIDEBAR_WIDTH = 60;
 
 /**
  * Read the saved sidebar width from layout.json.
  * Used by the system coordinator to create its tmux session at the correct width.
- * Returns DEFAULT_SIDEBAR_WIDTH if no layout is saved or the value is invalid.
+ * Returns SIDEBAR_WIDTH if no layout is saved or the value is invalid.
+ * Clamps to [MIN_SIDEBAR, MAX_SIDEBAR].
  */
 export async function getSavedSidebarWidth(): Promise<number> {
   const layout = await loadLayout();
-  return layout?.sidebarWidth ?? DEFAULT_SIDEBAR_WIDTH;
+  const width = layout?.sidebarWidth ?? SIDEBAR_WIDTH;
+  return Math.max(MIN_SIDEBAR, Math.min(MAX_SIDEBAR, width));
 }

@@ -3110,6 +3110,33 @@ describe("sidebar height resize ({/} keys)", () => {
     // tree should not grow since there's nothing to steal from
     expect(dashboard.sidebar.heightOffsets.tree).toBe(before.tree);
   });
+
+  test("{/} are no-ops for sidebar height when active-agent is focused", () => {
+    const dashboard = makeDashboard();
+    const agent = makeAgent("agent-a", "/repos/test");
+    dashboard.onUpdate([agent], [makeFlatAgent(agent)], []);
+    // Tab to active-agent
+    dashboard.handleInput("\t"); // info
+    dashboard.handleInput("\t"); // active-agent
+    expect(dashboard.focus).toBe("active-agent");
+    const before = { ...dashboard.sidebar.heightOffsets };
+    dashboard.handleInput("}");
+    dashboard.handleInput("{");
+    expect(dashboard.sidebar.heightOffsets).toEqual(before);
+  });
+
+  test("{/} are no-ops for sidebar height when right-pane is focused", () => {
+    const dashboard = makeDashboard();
+    // Tab to right-pane
+    dashboard.handleInput("\t"); // info
+    dashboard.handleInput("\t"); // active-agent
+    dashboard.handleInput("\t"); // right-pane
+    expect(dashboard.focus).toBe("right-pane");
+    const before = { ...dashboard.sidebar.heightOffsets };
+    dashboard.handleInput("}");
+    dashboard.handleInput("{");
+    expect(dashboard.sidebar.heightOffsets).toEqual(before);
+  });
 });
 
 describe("input field integration", () => {

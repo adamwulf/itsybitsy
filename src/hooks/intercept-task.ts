@@ -23,6 +23,80 @@ const SKIP_SUBAGENT_TYPES = [
 
 const VALID_MODELS = new Set(["sonnet", "opus", "haiku", ""]);
 
+/**
+ * Shell metacharacters blocked for coordinator Bash commands (SPEC §12.2.4).
+ * These prevent chained commands that bypass Bash(ib:*) prefix matching.
+ */
+const SHELL_METACHARACTERS = /[;|&`><]|\$\(|\$\{|\$'|\n|\r/;
+
+/**
+ * Check if this is a Bash tool call from a coordinator session that contains
+ * shell metacharacters or --output in git commands (SPEC §12.2.4).
+ * Returns a deny result if blocked, or null to proceed normally.
+ */
+async function checkCoordinatorBashRestrictions(
+  input: { tool_name: string; tool_input: Record<string, unknown>; cwd: string }
+): Promise<InterceptResult | null> {
+  if (input.tool_name !== "Bash") return null;
+
+  // Detect coordinator session via cwd pattern and meta.json
+  const cwdMatch = AGENT_CWD_PATTERN.exec(input.cwd);
+  if (!cwdMatch) return null;
+
+  const agentId = cwdMatch[1]!;
+  const agentDir = input.cwd.substring(
+    0,
+    input.cwd.indexOf(".ittybitty/agents/" + agentId) +
+      ".ittybitty/agents/".length +
+      agentId.length
+  );
+
+  let isCoordinator = false;
+  try {
+    const metaFile = Bun.file(join(agentDir, "meta.json"));
+    if (await metaFile.exists()) {
+      const meta = await metaFile.json();
+      isCoordinator = meta.coordinator === true;
+    }
+  } catch {
+    // If we can't read meta, not a coordinator
+  }
+
+  if (!isCoordinator) return null;
+
+  const command = (input.tool_input.command as string) ?? "";
+
+  // Block shell metacharacters
+  if (SHELL_METACHARACTERS.test(command)) {
+    return {
+      action: "intercept",
+      output: {
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "deny",
+          permissionDecisionReason: "Coordinator Bash commands cannot contain shell metacharacters (;, |, &, `, >, <, $() etc.)",
+        },
+      },
+    };
+  }
+
+  // Block --output in git commands (can write files without shell metacharacters)
+  if (command.startsWith("git") && command.includes("--output")) {
+    return {
+      action: "intercept",
+      output: {
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "deny",
+          permissionDecisionReason: "Coordinator git commands cannot use --output flag (file write bypass)",
+        },
+      },
+    };
+  }
+
+  return null;
+}
+
 export async function processTaskIntercept(
   input: {
     tool_name: string;
@@ -37,6 +111,10 @@ export async function processTaskIntercept(
     ) => Promise<{ ok: boolean; stdout: string; stderr: string }>;
   }
 ): Promise<InterceptResult> {
+  // 0. Check coordinator Bash restrictions (SPEC §12.2.4)
+  const coordBlock = await checkCoordinatorBashRestrictions(input);
+  if (coordBlock) return coordBlock;
+
   // 1. Only intercept Task and Agent tools
   if (input.tool_name !== "Task" && input.tool_name !== "Agent") {
     return { action: "skip" };

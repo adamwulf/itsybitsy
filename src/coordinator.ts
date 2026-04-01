@@ -1,15 +1,17 @@
 /**
  * System coordinator configuration, prompt, permissions, and lifecycle.
- * See SPEC.md §12.1 for the full specification.
+ * Per-repo coordinator settings, prompt, and lifecycle.
+ * See SPEC.md §12.1 (system) and §12.2 (per-repo) for the full specification.
  */
 
-import { join } from "path";
+import { join, basename } from "path";
 import { homedir } from "os";
+import { readFileSync, existsSync } from "node:fs";
 import { readConfig } from "./config";
 import { captureTmuxOutput, resizeTmuxWindow } from "./tmux-poller";
 import { isCompacting, isRateLimited } from "./agents";
 import { SpawnContext } from "./types";
-import { getSavedTmuxWidth } from "./tui/layout";
+import { getSavedSidebarWidth } from "./tui/layout";
 
 export const IB_COORDINATOR_SESSION = "ib-coordinator";
 
@@ -188,8 +190,8 @@ export async function ensureSystemCoordinator(): Promise<string> {
   await ensureHomeRepo();
   await writeCoordinatorFiles();
 
-  // Create tmux session — use saved layout width so it matches the dashboard pane
-  const coordTmuxWidth = await getSavedTmuxWidth();
+  // Create tmux session — use saved sidebar width so it matches the coordinator panel
+  const coordTmuxWidth = await getSavedSidebarWidth();
   const { exitCode } = await coordinatorSpawnCtx.run([
     "tmux", "new-session", "-d", "-x", String(coordTmuxWidth), "-s", IB_COORDINATOR_SESSION, "-c", home,
   ]);
@@ -356,4 +358,136 @@ export async function detectSystemCoordinatorState(): Promise<CoordinatorState> 
  */
 export async function resizeCoordinatorTmux(width: number): Promise<void> {
   await resizeTmuxWindow(IB_COORDINATOR_SESSION, width);
+}
+
+// ---------------------------------------------------------------------------
+// Per-repo coordinator support (SPEC §12.2)
+// ---------------------------------------------------------------------------
+
+/**
+ * Hardcoded allow list for per-repo coordinators (SPEC §12.2.4).
+ * Can read code + run ib commands + basic git read-only commands.
+ */
+const PER_REPO_COORDINATOR_ALLOW = [
+  "Bash(ib:*)",
+  "Bash(git status:*)", "Bash(git log:*)", "Bash(git diff:*)",
+  "Bash(git show:*)", "Bash(git ls-files:*)",
+  "Bash(pwd:*)", "Bash(ls:*)",
+  "Read", "Glob", "Grep", "LS",
+  "TodoWrite", "AskUserQuestion",
+];
+
+/**
+ * Hardcoded deny list for per-repo coordinators (SPEC §12.2.4).
+ * No Write/Edit, no web, no sub-agent spawning via Task/Agent.
+ */
+const PER_REPO_COORDINATOR_DENY = [
+  "Write", "Edit", "MultiEdit", "NotebookEdit",
+  "WebFetch", "WebSearch", "Task", "TaskOutput", "Agent", "KillShell",
+  "EnterPlanMode", "ExitPlanMode",
+];
+
+/**
+ * Build the settings permissions for a per-repo coordinator.
+ * Config allow entries are appended but filtered against the hardcoded deny list.
+ * Config deny entries are appended to the hardcoded deny list.
+ */
+export async function buildPerRepoCoordinatorSettings(): Promise<{
+  permissions: { allow: string[]; deny: string[] };
+}> {
+  const config = await readConfig();
+  const configAllow = (config["permissions.coordinator.allow"]?.value as string[] | undefined) ?? [];
+  const configDeny = (config["permissions.coordinator.deny"]?.value as string[] | undefined) ?? [];
+
+  // Filter out any user-configured allow entries that appear in the hardcoded deny list
+  const denySet = new Set(PER_REPO_COORDINATOR_DENY);
+  const filteredConfigAllow = configAllow.filter(entry => !denySet.has(entry));
+
+  const allAllow = [...new Set([...PER_REPO_COORDINATOR_ALLOW, ...filteredConfigAllow])];
+  const allDeny = [...new Set([...PER_REPO_COORDINATOR_DENY, ...configDeny])];
+
+  return {
+    permissions: {
+      allow: allAllow,
+      deny: allDeny,
+    },
+  };
+}
+
+/**
+ * Per-repo coordinator session start prompt (SPEC §12.2.6).
+ * Parameterized with the repo name.
+ */
+export function perRepoCoordinatorPrompt(repoName: string): string {
+  return `You are a per-repo coordinator for the \`${repoName}\` repository. Your agent ID is \`${repoName}\`. You can read files and code in this repo using Read, Glob, Grep, and LS. You coordinate work by spawning and managing worker agents using \`ib\` commands. You do NOT write code directly — instead, spawn worker agents with \`ib new-agent --worker "task"\` to implement changes. Review their work with \`ib diff <id>\` and merge with \`ib merge <id>\`. To send messages to the system coordinator, use \`ib send coordinator "message"\`. Workers send messages to you with \`ib send ${repoName} "message"\`.`;
+}
+
+/**
+ * Determine the coordinator agent ID for a repo.
+ * Uses the repo basename (e.g., "muse-ios" for /Users/adam/Developer/muse-ios).
+ * This enables `ib send muse-ios "message"` for consistent messaging.
+ */
+export function getCoordinatorAgentId(repoPath: string): string {
+  return basename(repoPath);
+}
+
+/**
+ * Check if a coordinator already exists for a repo.
+ * Scans all agents in the repo for one with coordinator:true in meta.json.
+ * Also checks whether a non-coordinator agent with the repo basename already exists (collision).
+ *
+ * Returns:
+ *   { exists: true, isCoordinator: true, agentId: string } — coordinator found
+ *   { exists: false, collision: true } — no coordinator, but basename-named non-coordinator agent exists
+ *   { exists: false, collision: false } — no coordinator and no collision
+ */
+export async function checkCoordinatorExists(repoPath: string): Promise<
+  | { exists: true; isCoordinator: true; agentId: string }
+  | { exists: false; collision: boolean }
+> {
+  const agentsDir = join(repoPath, ".ittybitty", "agents");
+
+  if (!existsSync(agentsDir)) {
+    return { exists: false, collision: false };
+  }
+
+  const repoBasename = basename(repoPath);
+  let hasCollision = false;
+
+  try {
+    const { readdirSync } = await import("node:fs");
+    const entries = readdirSync(agentsDir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const metaPath = join(agentsDir, entry.name, "meta.json");
+      if (!existsSync(metaPath)) continue;
+      try {
+        const raw = readFileSync(metaPath, "utf8");
+        const meta = JSON.parse(raw);
+        if (meta.coordinator === true) {
+          return { exists: true, isCoordinator: true, agentId: entry.name };
+        }
+        // Check for name collision with repo basename
+        if (entry.name === repoBasename) {
+          hasCollision = true;
+        }
+      } catch {
+        // Can't parse — check name collision only
+        if (entry.name === repoBasename) {
+          hasCollision = true;
+        }
+      }
+    }
+  } catch {
+    return { exists: false, collision: false };
+  }
+
+  return { exists: false, collision: hasCollision };
+}
+
+/**
+ * Get the repo basename from a repo path.
+ */
+export function getRepoBasename(repoPath: string): string {
+  return basename(repoPath);
 }

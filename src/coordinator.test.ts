@@ -1,6 +1,6 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { join } from "path";
-import { mkdtemp, rm, readFile, readdir } from "fs/promises";
+import { mkdtemp, rm, readFile, readdir, mkdir } from "fs/promises";
 import { tmpdir } from "os";
 import {
   IB_COORDINATOR_SESSION,
@@ -17,6 +17,11 @@ import {
   resetCoordinatorHome,
   setCoordinatorSleepFn,
   resetCoordinatorSleepFn,
+  buildPerRepoCoordinatorSettings,
+  perRepoCoordinatorPrompt,
+  getCoordinatorAgentId,
+  checkCoordinatorExists,
+  getRepoBasename,
 } from "./coordinator";
 import { spawnCtx as tmuxSpawnCtx } from "./tmux-poller";
 
@@ -799,5 +804,189 @@ describe("detectSystemCoordinatorState", () => {
 
     const state = await detectSystemCoordinatorState();
     expect(state).toBe("running");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Per-repo coordinator tests (SPEC §12.2)
+// ---------------------------------------------------------------------------
+
+describe("getCoordinatorAgentId", () => {
+  test("returns repo basename", () => {
+    expect(getCoordinatorAgentId("/Users/adam/Developer/muse-ios")).toBe("muse-ios");
+    expect(getCoordinatorAgentId("/home/user/itsybitsy")).toBe("itsybitsy");
+  });
+});
+
+describe("getRepoBasename", () => {
+  test("returns basename of a path", () => {
+    expect(getRepoBasename("/Users/adam/Developer/muse-ios")).toBe("muse-ios");
+    expect(getRepoBasename("/home/user/itsybitsy")).toBe("itsybitsy");
+  });
+});
+
+describe("perRepoCoordinatorPrompt", () => {
+  test("includes repo name", () => {
+    const prompt = perRepoCoordinatorPrompt("muse-ios");
+    expect(prompt).toContain("muse-ios");
+  });
+
+  test("mentions Read, Glob, Grep, LS", () => {
+    const prompt = perRepoCoordinatorPrompt("test-repo");
+    expect(prompt).toContain("Read");
+    expect(prompt).toContain("Glob");
+    expect(prompt).toContain("Grep");
+    expect(prompt).toContain("LS");
+  });
+
+  test("mentions ib new-agent --worker", () => {
+    const prompt = perRepoCoordinatorPrompt("test-repo");
+    expect(prompt).toContain("ib new-agent --worker");
+  });
+
+  test("mentions ib send coordinator for system coordinator messaging", () => {
+    const prompt = perRepoCoordinatorPrompt("test-repo");
+    expect(prompt).toContain('ib send coordinator "message"');
+  });
+
+  test("says coordinator does not write code", () => {
+    const prompt = perRepoCoordinatorPrompt("test-repo");
+    expect(prompt).toContain("do NOT write code directly");
+  });
+
+  test("includes agent ID equal to repo name", () => {
+    const prompt = perRepoCoordinatorPrompt("muse-ios");
+    expect(prompt).toContain("Your agent ID is `muse-ios`");
+  });
+
+  test("mentions workers send messages via repo name", () => {
+    const prompt = perRepoCoordinatorPrompt("muse-ios");
+    expect(prompt).toContain('ib send muse-ios "message"');
+  });
+});
+
+describe("buildPerRepoCoordinatorSettings", () => {
+  test("includes Read, Glob, Grep, LS in allow list", async () => {
+    const settings = await buildPerRepoCoordinatorSettings();
+    expect(settings.permissions.allow).toContain("Read");
+    expect(settings.permissions.allow).toContain("Glob");
+    expect(settings.permissions.allow).toContain("Grep");
+    expect(settings.permissions.allow).toContain("LS");
+  });
+
+  test("includes Bash(ib:*) in allow list", async () => {
+    const settings = await buildPerRepoCoordinatorSettings();
+    expect(settings.permissions.allow).toContain("Bash(ib:*)");
+  });
+
+  test("includes git read commands in allow list", async () => {
+    const settings = await buildPerRepoCoordinatorSettings();
+    expect(settings.permissions.allow).toContain("Bash(git status:*)");
+    expect(settings.permissions.allow).toContain("Bash(git log:*)");
+    expect(settings.permissions.allow).toContain("Bash(git diff:*)");
+    expect(settings.permissions.allow).toContain("Bash(git show:*)");
+    expect(settings.permissions.allow).toContain("Bash(git ls-files:*)");
+  });
+
+  test("denies Write, Edit, MultiEdit", async () => {
+    const settings = await buildPerRepoCoordinatorSettings();
+    expect(settings.permissions.deny).toContain("Write");
+    expect(settings.permissions.deny).toContain("Edit");
+    expect(settings.permissions.deny).toContain("MultiEdit");
+  });
+
+  test("denies Task, Agent, WebFetch, WebSearch", async () => {
+    const settings = await buildPerRepoCoordinatorSettings();
+    expect(settings.permissions.deny).toContain("Task");
+    expect(settings.permissions.deny).toContain("Agent");
+    expect(settings.permissions.deny).toContain("WebFetch");
+    expect(settings.permissions.deny).toContain("WebSearch");
+  });
+
+  test("does not include cat, head, tail, grep bash commands", async () => {
+    const settings = await buildPerRepoCoordinatorSettings();
+    expect(settings.permissions.allow).not.toContain("Bash(cat:*)");
+    expect(settings.permissions.allow).not.toContain("Bash(head:*)");
+    expect(settings.permissions.allow).not.toContain("Bash(tail:*)");
+    expect(settings.permissions.allow).not.toContain("Bash(grep:*)");
+    expect(settings.permissions.allow).not.toContain("Bash(git grep:*)");
+  });
+
+  test("does not deny unqualified Bash", async () => {
+    const settings = await buildPerRepoCoordinatorSettings();
+    expect(settings.permissions.deny).not.toContain("Bash");
+  });
+});
+
+describe("checkCoordinatorExists", () => {
+  test("returns false when no agents directory", async () => {
+    const td = join(tmpdir(), `coord-nodir-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    await mkdir(td, { recursive: true });
+    const result = await checkCoordinatorExists(td);
+    expect(result.exists).toBe(false);
+    if (!result.exists) {
+      expect(result.collision).toBe(false);
+    }
+    await rm(td, { recursive: true, force: true });
+  });
+
+  test("returns exists when any agent has coordinator:true", async () => {
+    const td = join(tmpdir(), `coord-true-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    const coordDir = join(td, ".ittybitty", "agents", "my-repo");
+    await mkdir(coordDir, { recursive: true });
+    await Bun.write(join(coordDir, "meta.json"), JSON.stringify({ id: "my-repo", coordinator: true }));
+
+    const result = await checkCoordinatorExists(td);
+    expect(result.exists).toBe(true);
+    if (result.exists) {
+      expect(result.isCoordinator).toBe(true);
+      expect(result.agentId).toBe("my-repo");
+    }
+    await rm(td, { recursive: true, force: true });
+  });
+
+  test("returns collision when basename-named agent exists without coordinator flag", async () => {
+    // Repo path ends in "coord-repo" so basename is "coord-repo"
+    const td = join(tmpdir(), `coord-repo`);
+    const agentDir = join(td, ".ittybitty", "agents", "coord-repo");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id: "coord-repo" }));
+
+    const result = await checkCoordinatorExists(td);
+    expect(result.exists).toBe(false);
+    if (!result.exists) {
+      expect(result.collision).toBe(true);
+    }
+    await rm(td, { recursive: true, force: true });
+  });
+
+  test("returns no collision when agents exist but none match basename", async () => {
+    const td = join(tmpdir(), `coord-nocol-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    const agentDir = join(td, ".ittybitty", "agents", "agent-abc123");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id: "agent-abc123" }));
+
+    const result = await checkCoordinatorExists(td);
+    expect(result.exists).toBe(false);
+    if (!result.exists) {
+      expect(result.collision).toBe(false);
+    }
+    await rm(td, { recursive: true, force: true });
+  });
+
+  test("finds coordinator regardless of agent directory name", async () => {
+    const td = join(tmpdir(), `coord-anyname-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    // Agent named with suffix due to collision, but still has coordinator:true
+    const coordDir = join(td, ".ittybitty", "agents", "my-repo-a3f2");
+    await mkdir(coordDir, { recursive: true });
+    await Bun.write(join(coordDir, "meta.json"), JSON.stringify({ id: "my-repo-a3f2", coordinator: true }));
+
+    const result = await checkCoordinatorExists(td);
+    expect(result.exists).toBe(true);
+    if (result.exists) {
+      expect(result.isCoordinator).toBe(true);
+      expect(result.agentId).toBe("my-repo-a3f2");
+    }
+    await rm(td, { recursive: true, force: true });
   });
 });

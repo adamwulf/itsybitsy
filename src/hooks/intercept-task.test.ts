@@ -170,3 +170,225 @@ describe("intercept-task", () => {
     expect((updatedInput.prompt as string)).toContain("Failed to create worktree");
   });
 });
+
+describe("coordinator Bash restrictions", () => {
+  let tmpDir: string;
+  let coordCwd: string;
+
+  // Set up a coordinator agent directory with coordinator:true in meta.json
+  async function setupCoordinatorDir() {
+    const fs = await import("fs/promises");
+    const { tmpdir } = await import("os");
+    const { join } = await import("path");
+    tmpDir = await fs.mkdtemp(join(tmpdir(), "intercept-coord-"));
+    const agentDir = join(tmpDir, ".ittybitty", "agents", "coordinator");
+    await fs.mkdir(agentDir, { recursive: true });
+    await Bun.write(
+      join(agentDir, "meta.json"),
+      JSON.stringify({ id: "coordinator", coordinator: true })
+    );
+    const repoDir = join(agentDir, "repo");
+    await fs.mkdir(repoDir, { recursive: true });
+    coordCwd = repoDir;
+    return coordCwd;
+  }
+
+  async function cleanup() {
+    if (tmpDir) {
+      const fs = await import("fs/promises");
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  }
+
+  test("blocks semicolons in coordinator Bash commands", async () => {
+    await setupCoordinatorDir();
+    try {
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: { command: "ib list; cat /etc/passwd" },
+        cwd: coordCwd,
+      });
+      expect(result.action).toBe("intercept");
+      const output = result.output as Record<string, unknown>;
+      const hookOutput = output.hookSpecificOutput as Record<string, unknown>;
+      expect(hookOutput.permissionDecision).toBe("deny");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("blocks && in coordinator Bash commands", async () => {
+    await setupCoordinatorDir();
+    try {
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: { command: "ib list && cat secret.txt" },
+        cwd: coordCwd,
+      });
+      expect(result.action).toBe("intercept");
+      const output = result.output as Record<string, unknown>;
+      const hookOutput = output.hookSpecificOutput as Record<string, unknown>;
+      expect(hookOutput.permissionDecision).toBe("deny");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("blocks pipe in coordinator Bash commands", async () => {
+    await setupCoordinatorDir();
+    try {
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: { command: "ib list | grep secret" },
+        cwd: coordCwd,
+      });
+      expect(result.action).toBe("intercept");
+      const output = result.output as Record<string, unknown>;
+      const hookOutput = output.hookSpecificOutput as Record<string, unknown>;
+      expect(hookOutput.permissionDecision).toBe("deny");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("blocks backticks in coordinator Bash commands", async () => {
+    await setupCoordinatorDir();
+    try {
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: { command: "ib send agent `whoami`" },
+        cwd: coordCwd,
+      });
+      expect(result.action).toBe("intercept");
+      const output = result.output as Record<string, unknown>;
+      const hookOutput = output.hookSpecificOutput as Record<string, unknown>;
+      expect(hookOutput.permissionDecision).toBe("deny");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("blocks $() command substitution", async () => {
+    await setupCoordinatorDir();
+    try {
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: { command: "ib send agent $(cat /etc/passwd)" },
+        cwd: coordCwd,
+      });
+      expect(result.action).toBe("intercept");
+      const output = result.output as Record<string, unknown>;
+      const hookOutput = output.hookSpecificOutput as Record<string, unknown>;
+      expect(hookOutput.permissionDecision).toBe("deny");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("blocks redirect > in coordinator Bash commands", async () => {
+    await setupCoordinatorDir();
+    try {
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: { command: "ib list > /tmp/output.txt" },
+        cwd: coordCwd,
+      });
+      expect(result.action).toBe("intercept");
+      const output = result.output as Record<string, unknown>;
+      const hookOutput = output.hookSpecificOutput as Record<string, unknown>;
+      expect(hookOutput.permissionDecision).toBe("deny");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("blocks $' ANSI-C quoting", async () => {
+    await setupCoordinatorDir();
+    try {
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: { command: "ib list $'\\x0a'cat /etc/passwd" },
+        cwd: coordCwd,
+      });
+      expect(result.action).toBe("intercept");
+      const output = result.output as Record<string, unknown>;
+      const hookOutput = output.hookSpecificOutput as Record<string, unknown>;
+      expect(hookOutput.permissionDecision).toBe("deny");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("blocks --output in git commands from coordinator", async () => {
+    await setupCoordinatorDir();
+    try {
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: { command: "git diff --output=/tmp/secret.txt" },
+        cwd: coordCwd,
+      });
+      expect(result.action).toBe("intercept");
+      const output = result.output as Record<string, unknown>;
+      const hookOutput = output.hookSpecificOutput as Record<string, unknown>;
+      expect(hookOutput.permissionDecision).toBe("deny");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("allows clean ib commands from coordinator", async () => {
+    await setupCoordinatorDir();
+    try {
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: { command: "ib list" },
+        cwd: coordCwd,
+      });
+      // Bash is not Task/Agent, so it's skipped after passing coordinator check
+      expect(result.action).toBe("skip");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("allows clean git commands from coordinator", async () => {
+    await setupCoordinatorDir();
+    try {
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: { command: "git status" },
+        cwd: coordCwd,
+      });
+      expect(result.action).toBe("skip");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("does not block Bash metacharacters from non-coordinator agents", async () => {
+    const fs = await import("fs/promises");
+    const { tmpdir } = await import("os");
+    const { join } = await import("path");
+    const td = await fs.mkdtemp(join(tmpdir(), "intercept-noncoord-"));
+    try {
+      const agentDir = join(td, ".ittybitty", "agents", "agent-abcd1234");
+      await fs.mkdir(agentDir, { recursive: true });
+      await Bun.write(
+        join(agentDir, "meta.json"),
+        JSON.stringify({ id: "agent-abcd1234", worker: false })
+      );
+      const repoDir = join(agentDir, "repo");
+      await fs.mkdir(repoDir, { recursive: true });
+
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: { command: "ls -la && echo done" },
+        cwd: repoDir,
+      });
+      // Non-coordinator: Bash is not Task/Agent, so skip
+      expect(result.action).toBe("skip");
+    } finally {
+      await fs.rm(td, { recursive: true, force: true });
+    }
+  });
+});

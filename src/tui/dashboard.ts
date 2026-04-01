@@ -66,7 +66,7 @@ import { SystemDashboardComponent } from "./system-dashboard";
 import { loadLayout, saveLayoutDebounced, cancelPendingSave, flushPendingSave } from "./layout";
 import type { LayoutState } from "./layout";
 import { InputFieldComponent } from "./input-field";
-import { sendMessage } from "../ib-commands";
+import { sendMessage, pauseAgent } from "../ib-commands";
 import { getResolvableWarnings } from "../health-check";
 
 // Re-export for test compatibility
@@ -471,6 +471,10 @@ export class DashboardComponent implements Component {
   private tmuxPoller: TmuxPoller;
   coordinatorPane: TmuxPaneComponent;
   private coordinatorPoller: TmuxPoller;
+  /** Poller for per-repo coordinator tmux output (REPO mode) */
+  private repoCoordinatorPoller: TmuxPoller;
+  /** The tmux session currently being polled for repo coordinator */
+  private repoCoordinatorSession: string | null = null;
   currentAgentId: string | null = null;
   _dialog: DialogState = null;
   private overlayHandle: OverlayHandle | null = null;
@@ -638,6 +642,15 @@ export class DashboardComponent implements Component {
       },
     });
     this.coordinatorPoller.setAgent(IB_COORDINATOR_SESSION);
+
+    // Per-repo coordinator poller — polls the coordinator agent's tmux session in REPO mode
+    this.repoCoordinatorPoller = new TmuxPoller({
+      onOutput: (raw, _stripped) => {
+        this.rightPane.repoCoordinatorOutput = raw;
+        this.rightPane.repoCoordinatorHasPolled = true;
+        this.tui?.requestRender();
+      },
+    });
   }
 
   setTui(tui: TUI) {
@@ -652,6 +665,9 @@ export class DashboardComponent implements Component {
     resizeCoordinatorTmux(this.sidebarWidth);
     this.splitPane.setLeftWidth(Math.max(MIN_LEFT_WIDTH, Math.min(MAX_LEFT_WIDTH, layout.splitPaneLeftWidth)));
     this.sidebar.heightOffsets = { ...layout.heightOffsets };
+    if (layout.repoCoordinatorHeightOffset !== undefined) {
+      this.rightPane.repoCoordinatorHeightOffset = layout.repoCoordinatorHeightOffset;
+    }
     this.layoutRestored = true;
   }
 
@@ -661,6 +677,7 @@ export class DashboardComponent implements Component {
       sidebarWidth: this.sidebarWidth,
       splitPaneLeftWidth: this.splitPane.getLeftWidth(),
       heightOffsets: { ...this.sidebar.heightOffsets },
+      repoCoordinatorHeightOffset: this.rightPane.repoCoordinatorHeightOffset,
     });
   }
 
@@ -672,6 +689,7 @@ export class DashboardComponent implements Component {
   startPolling() {
     this.tmuxPoller.start();
     this.coordinatorPoller.start();
+    this.repoCoordinatorPoller.start();
     this.refreshUsage();
     this.usageTimer = setInterval(() => this.refreshUsage(), 240_000);
   }
@@ -679,6 +697,7 @@ export class DashboardComponent implements Component {
   stopPolling() {
     this.tmuxPoller.stop();
     this.coordinatorPoller.stop();
+    this.repoCoordinatorPoller.stop();
     // Flush any pending layout save to disk before exiting
     flushPendingSave().catch(() => { /* ignore write errors on exit */ });
     if (this.usageTimer) {
@@ -935,6 +954,33 @@ export class DashboardComponent implements Component {
     this.rightPane.healthReport = healthReport;
     this.statusBar.hasResolvableWarnings = !!(healthReport && getResolvableWarnings(healthReport.warnings).length > 0);
 
+    // Find and wire per-repo coordinator for the selected repo
+    const repoPathForCoordinator = this.agentTree.selectedRepoPath;
+    if (repoPathForCoordinator && !selected && !isCoordinator) {
+      // Repo header is selected — find coordinator agent
+      const coordAgent = this.agentTree.flatList.find(
+        (f): f is Extract<FlatEntry, { kind: "agent" }> =>
+          f.kind === "agent" && f.agent.repoPath === repoPathForCoordinator && !!f.agent.meta.coordinator
+      );
+      this.rightPane.repoCoordinatorAgent = coordAgent?.agent ?? null;
+      const tmuxSession = coordAgent?.agent.meta.tmux_session ?? null;
+      if (tmuxSession !== this.repoCoordinatorSession) {
+        this.repoCoordinatorSession = tmuxSession;
+        this.rightPane.repoCoordinatorOutput = null;
+        this.rightPane.repoCoordinatorHasPolled = false;
+        this.repoCoordinatorPoller.setAgent(tmuxSession);
+      }
+    } else {
+      // Not a repo header — clear coordinator state
+      this.rightPane.repoCoordinatorAgent = null;
+      if (this.repoCoordinatorSession) {
+        this.repoCoordinatorSession = null;
+        this.rightPane.repoCoordinatorOutput = null;
+        this.rightPane.repoCoordinatorHasPolled = false;
+        this.repoCoordinatorPoller.setAgent(null);
+      }
+    }
+
     // Auto-switch to/from REPO mode based on selection
     const currentMode = PANE_MODES[this.modeIndex];
     if (!selected && !isCoordinator && this.agentTree.selectedRepoHeader) {
@@ -1108,7 +1154,10 @@ export class DashboardComponent implements Component {
     }
 
     // When coordinator panel is focused, use same three-level sub-focus as active-agent.
-    if (this.focusManager.current() === "coordinator" && this.agentTree.isSystemCoordinatorSelected) {
+    // Only requires the coordinator to have polled (session is running), not that it's
+    // selected in the agent tree — the sidebar coordinator panel should accept input
+    // regardless of which agent is selected.
+    if (this.focusManager.current() === "coordinator" && this.coordinatorPane.hasPolled) {
       const sf = this.focusManager.subFocus;
 
       // Tab navigation through sub-focus states
@@ -1403,6 +1452,16 @@ export class DashboardComponent implements Component {
         }
         this.tui?.requestRender();
       }
+      else if (focus === "right-pane" && this.rightPane.mode === "REPO" && this.rightPane.repoCoordinatorAgent) {
+        // Resize repo coordinator split: } grows coordinator, { shrinks it
+        this.rightPane.repoCoordinatorHeightOffset += delta;
+        // Clamp to valid range
+        const { repoHeight, coordinatorHeight } = this.rightPane.computeRepoCoordinatorSplit();
+        if (repoHeight < 3 || coordinatorHeight < 3) {
+          this.rightPane.repoCoordinatorHeightOffset -= delta; // revert
+        }
+        this.tui?.requestRender();
+      }
       this.persistLayout();
     }
     // Folder browser / add repo
@@ -1692,8 +1751,12 @@ export async function launchDashboard(): Promise<void> {
       dashboard.setTerminalTitle("");
       process.stdout.write("\x1b[2J\x1b[H");
       // Release coordinator ref — if last ref, kills the tmux session
+      // and pauses all per-repo coordinators
       releaseSystemCoordinator(async () => {
-        // onLastRef no-op — Phase 48h will add per-repo coordinator pausing
+        // Pause all per-repo coordinators when last watcher exits
+        const agents = dashboard.watcher?.lastAgents ?? [];
+        const coordinators = agents.filter(a => a.meta.coordinator === true);
+        await Promise.all(coordinators.map(a => pauseAgent(a).catch(() => {})));
       }).finally(() => {
         process.exit(0);
       });

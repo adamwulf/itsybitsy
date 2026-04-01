@@ -12,6 +12,7 @@ const sampleLayout: LayoutState = {
   sidebarWidth: 70,
   splitPaneLeftWidth: 90,
   heightOffsets: { tree: 2, info: -1, coordinator: -1 },
+  repoCoordinatorHeightOffset: 0,
 };
 
 describe("layout persistence", () => {

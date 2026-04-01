@@ -15,6 +15,8 @@ export interface LayoutState {
     info: number;
     coordinator: number;
   };
+  /** Height offset for the repo coordinator split in REPO right pane mode */
+  repoCoordinatorHeightOffset?: number;
 }
 
 const LAYOUT_PATH = join(homedir(), ".itsybitsy", "layout.json");
@@ -56,6 +58,8 @@ export async function loadLayout(): Promise<LayoutState | null> {
     ) {
       return null;
     }
+    // Optional: repoCoordinatorHeightOffset (added later, may not be in saved file)
+    const repoCoordOffset = isFiniteNum(data.repoCoordinatorHeightOffset) ? data.repoCoordinatorHeightOffset : 0;
     return {
       sidebarWidth: data.sidebarWidth,
       splitPaneLeftWidth: data.splitPaneLeftWidth,
@@ -64,6 +68,7 @@ export async function loadLayout(): Promise<LayoutState | null> {
         info: data.heightOffsets.info,
         coordinator: data.heightOffsets.coordinator,
       },
+      repoCoordinatorHeightOffset: repoCoordOffset,
     };
   } catch {
     return null;
@@ -127,10 +132,23 @@ export async function flushPendingSave(): Promise<void> {
 export const DEFAULT_TMUX_WIDTH = 80;
 
 /**
- * Read the saved tmux pane width from layout.json.
+ * Read the saved main agent tmux pane width from layout.json.
  * Returns DEFAULT_TMUX_WIDTH if no layout is saved or the value is invalid.
  */
 export async function getSavedTmuxWidth(): Promise<number> {
   const layout = await loadLayout();
   return layout?.splitPaneLeftWidth ?? DEFAULT_TMUX_WIDTH;
+}
+
+/** Default sidebar width when no layout has been saved. */
+export const DEFAULT_SIDEBAR_WIDTH = 60;
+
+/**
+ * Read the saved sidebar width from layout.json.
+ * Used by the system coordinator to create its tmux session at the correct width.
+ * Returns DEFAULT_SIDEBAR_WIDTH if no layout is saved or the value is invalid.
+ */
+export async function getSavedSidebarWidth(): Promise<number> {
+  const layout = await loadLayout();
+  return layout?.sidebarWidth ?? DEFAULT_SIDEBAR_WIDTH;
 }

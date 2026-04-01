@@ -27,6 +27,7 @@ import { SpawnContext } from "./types";
 import type { SpawnFn } from "./types";
 import { isValidModel, isValidToolList, isValidTmuxSession, isValidSessionId, isValidShellPath, shellQuote } from "./validation";
 import { getSavedTmuxWidth } from "./tui/layout";
+import { buildPerRepoCoordinatorSettings, checkCoordinatorExists, getCoordinatorAgentId } from "./coordinator";
 
 export interface IbCommandResult {
   ok: boolean;
@@ -1158,6 +1159,7 @@ export async function sendMessage(
 export interface NewAgentOptions {
   name?: string;
   worker?: boolean;
+  coordinator?: boolean;
   yolo?: boolean;
   model?: string;
   manager?: string;
@@ -1418,7 +1420,26 @@ export async function newAgent(
   // Configuration
   const useWorktree = opts?.noWorktree !== true;
   const workerMode = opts?.worker === true;
+  const coordinatorMode = opts?.coordinator === true;
   const yoloMode = opts?.yolo === true;
+
+  // Coordinator mutual exclusivity checks
+  if (coordinatorMode && workerMode) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: "Error: --coordinator and --worker are mutually exclusive" };
+  }
+  if (coordinatorMode && !useWorktree) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: "Error: --no-worktree is not allowed with --coordinator" };
+  }
+
+  // Coordinator one-per-repo check
+  if (coordinatorMode) {
+    const coordStatus = await checkCoordinatorExists(rootRepoPath);
+    if (coordStatus.exists) {
+      // Idempotent no-op per SPEC §12.2.3
+      const repoName = rootRepoPath.split("/").pop() ?? rootRepoPath;
+      return { ok: true, exitCode: 0, stdout: coordStatus.agentId, stderr: `Coordinator already exists for ${repoName}` };
+    }
+  }
   const printMode = opts?.print === true;
   const allowTools = opts?.allowTools ?? "";
   const denyTools = opts?.denyTools ?? "";
@@ -1434,7 +1455,8 @@ export async function newAgent(
   let manager = opts?.manager ?? "";
 
   // 3. Auto-detect manager from cwd (only if cwd is in the same repo)
-  if (!manager) {
+  //    Coordinators are top-level agents — never auto-detect a manager (SPEC §12.2.3)
+  if (!manager && !coordinatorMode) {
     const cwd = opts?._cwd ?? process.cwd();
     const agentPattern = /\/.ittybitty\/agents\/([^/]+)\/repo/;
     const match = cwd.match(agentPattern);
@@ -1501,10 +1523,16 @@ export async function newAgent(
   const customPrompts = await loadCustomPrompts(rootRepoPath);
 
   // 7. Model fallback: --model > config.model > 'opus'
+  //    For coordinators: --model > coordinator.model > 'opus'
   let model = opts?.model ?? "";
   if (!model) {
-    const configModel = config.model?.value as string | undefined;
-    if (configModel) model = configModel;
+    if (coordinatorMode) {
+      const coordModel = config["coordinator.model"]?.value as string | undefined;
+      if (coordModel) model = coordModel;
+    } else {
+      const configModel = config.model?.value as string | undefined;
+      if (configModel) model = configModel;
+    }
   }
   if (!model) model = "opus";
 
@@ -1522,16 +1550,28 @@ export async function newAgent(
   const configAllow = [...new Set([...roleAllow, ...allAllow])];
   const configDeny = [...new Set([...roleDeny, ...allDeny])];
 
-  // 8. Max agents check
-  const maxAgents = (config.maxAgents?.value as number | undefined) ?? 10;
-  const currentCount = await countAgents(agentsDir);
-  if (currentCount >= maxAgents) {
-    return { ok: false, exitCode: 1, stdout: "", stderr: `Error: Maximum agent limit reached (${currentCount}/${maxAgents} agents)` };
+  // 8. Max agents check — coordinators bypass this (SPEC §12.4.3)
+  if (!coordinatorMode) {
+    const maxAgents = (config.maxAgents?.value as number | undefined) ?? 10;
+    const currentCount = await countAgents(agentsDir);
+    if (currentCount >= maxAgents) {
+      return { ok: false, exitCode: 1, stdout: "", stderr: `Error: Maximum agent limit reached (${currentCount}/${maxAgents} agents)` };
+    }
   }
 
   // 9. Generate agent ID
   let id: string;
-  if (opts?.name) {
+  if (coordinatorMode) {
+    id = getCoordinatorAgentId(rootRepoPath);
+    // Collision handling: if a non-coordinator agent already has the basename,
+    // append a random 4-char hex suffix
+    const coordCheck = await checkCoordinatorExists(rootRepoPath);
+    if (!coordCheck.exists && coordCheck.collision) {
+      const suffix = Array.from(crypto.getRandomValues(new Uint8Array(2)))
+        .map(b => b.toString(16).padStart(2, "0")).join("");
+      id = `${id}-${suffix}`;
+    }
+  } else if (opts?.name) {
     if (!/^[a-zA-Z0-9_\-]+$/.test(opts.name)) {
       return { ok: false, exitCode: 1, stdout: "", stderr: "Error: agent name may only contain letters, digits, hyphens, and underscores" };
     }
@@ -1565,7 +1605,8 @@ export async function newAgent(
   let workPath = rootRepoPath;
 
   // 12. Create git worktree if requested
-  const branchName = `agent/${id}`;
+  // Coordinator branch includes repo-id to avoid collision across repos (SPEC §12.2.2)
+  const branchName = coordinatorMode ? `agent/${id}-${repoId}` : `agent/${id}`;
   if (useWorktree) {
     const baseRef = manager ? `agent/${manager}` : "HEAD";
     const worktreeResult = await newAgentSpawnCtx.run([
@@ -1579,7 +1620,28 @@ export async function newAgent(
 
     // 13. Write settings.local.json
     await mkdir(join(agentDir, "repo", ".claude"), { recursive: true });
-    const settingsContent = await buildAgentSettings(rootRepoPath, agentType, id, configAllow, configDeny);
+    let settingsContent: string;
+    if (coordinatorMode) {
+      const coordSettings = await buildPerRepoCoordinatorSettings();
+      // Build coordinator settings with hooks (path-check, stop, permission-denied, session-start, intercept-task)
+      const hookCmd = `ib hook-permission-denied ${id}`;
+      const coordSettingsObj = {
+        ...coordSettings,
+        spinnerTipsEnabled: false,
+        hooks: {
+          Stop: [{ matcher: "*", hooks: [{ type: "command", command: `ib hook-status ${id}` }] }],
+          PermissionRequest: [{ matcher: "*", hooks: [{ type: "command", command: hookCmd }] }],
+          PreToolUse: [
+            { matcher: "*", hooks: [{ type: "command", command: `ib hook-check-path ${id}` }] },
+            { matcher: "Task|Agent|Bash", hooks: [{ type: "command", command: "ib hooks intercept-task" }] },
+          ],
+          SessionStart: [{ hooks: [{ type: "command", command: "ib hooks session-start" }] }],
+        },
+      };
+      settingsContent = JSON.stringify(coordSettingsObj, null, 2);
+    } else {
+      settingsContent = await buildAgentSettings(rootRepoPath, agentType, id, configAllow, configDeny);
+    }
     await Bun.write(join(agentDir, "repo", ".claude", "settings.local.json"), settingsContent);
   } else {
     // Non-worktree mode: ensure ib permissions in root repo settings
@@ -1608,7 +1670,7 @@ export async function newAgent(
 
   // 14. Write meta.json
   const now = new Date();
-  const metaJson = {
+  const metaJson: Record<string, unknown> = {
     id,
     session_id: sessionUuid,
     tmux_session: tmuxSession,
@@ -1621,6 +1683,9 @@ export async function newAgent(
     yolo: yoloMode,
     model: model || null,
   };
+  if (coordinatorMode) {
+    metaJson.coordinator = true;
+  }
   await Bun.write(join(agentDir, "meta.json"), JSON.stringify(metaJson, null, 2) + "\n");
 
   // Log agent creation

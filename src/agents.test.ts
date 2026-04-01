@@ -327,6 +327,24 @@ describe("flattenAgentTree", () => {
     expect(flat[0]!.kind).toBe("agent");
     expect(asAgent(flat[0]!).agent.id).toBe("a1");
   });
+
+  test("multi-repo: coordinators sorted first under their repo header", () => {
+    const now = Math.floor(Date.now() / 1000);
+    const regular = makeAgent({ id: "regular-1", repoName: "my-repo", meta: { created_epoch: now - 100 } as any });
+    const coord = makeAgent({ id: "coord-1", repoName: "my-repo", meta: { coordinator: true, created_epoch: now - 50 } as any });
+    const regular2 = makeAgent({ id: "regular-2", repoName: "my-repo", meta: { created_epoch: now - 200 } as any });
+    const roots = buildAgentTree([regular, coord, regular2]);
+    // Need 2+ repos for headers to appear
+    const flat = flattenAgentTree(roots, ["my-repo", "other-repo"]);
+
+    // Should have: repo-headers + agents, with coord-1 first under my-repo
+    expect(asRepoHeader(flat[0]!).repoName).toBe("my-repo");
+    expect(asAgent(flat[1]!).agent.id).toBe("coord-1");
+    expect(asAgent(flat[1]!).agent.meta.coordinator).toBe(true);
+    // other two agents follow
+    expect(asAgent(flat[2]!).agent.meta.coordinator).toBeFalsy();
+    expect(asAgent(flat[3]!).agent.meta.coordinator).toBeFalsy();
+  });
 });
 
 describe("readRepoAgents", () => {

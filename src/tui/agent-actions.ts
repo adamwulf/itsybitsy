@@ -33,7 +33,7 @@ import { RESET, BOLD, DIM, RED } from "./colors";
 import { MIN_LEFT_WIDTH, MAX_LEFT_WIDTH } from "./split-pane";
 import type { RepoHealthReport } from "../health-check";
 import { getResolvableWarnings, resolveHealthWarnings } from "../health-check";
-import { IB_COORDINATOR_SESSION, sanitizeTmuxInput, restartSystemCoordinator } from "../coordinator";
+import { IB_COORDINATOR_SESSION, sanitizeTmuxInput, restartSystemCoordinator, checkCoordinatorExists } from "../coordinator";
 
 const SCROLL_STEP = 10;
 
@@ -172,6 +172,37 @@ export function handleResume(ctx: ActionCtx) {
     });
     return;
   }
+
+  // Repo header selected: spawn or resume per-repo coordinator
+  const repoHeader = ctx.agentTree.selectedRepoHeader;
+  if (!ctx.agentTree.selectedAgent && repoHeader) {
+    const repo = ctx.repos.find((r) => repoDisplayName(r) === repoHeader);
+    if (!repo) return;
+    ctx.executeAndRefresh(async () => {
+      const coordStatus = await checkCoordinatorExists(repo.path);
+      if (coordStatus.exists) {
+        // Coordinator exists — find and resume it
+        const agent = ctx.agentTree.flatList
+          .filter((e): e is Extract<typeof e, { kind: "agent" }> => e.kind === "agent")
+          .map(e => e.agent)
+          .find(a => a.id === coordStatus.agentId);
+        if (agent && (agent.state === "stopped" || agent.state === "complete")) {
+          const result = await resumeAgent(agent);
+          ctx.setNotice(result.ok ? `Resumed coordinator ${agent.id}` : `Resume failed: ${result.stderr || result.stdout}`);
+        } else if (agent) {
+          ctx.setNotice(`Coordinator ${agent.id} is already ${agent.state}`);
+        } else {
+          ctx.setNotice(`Coordinator ${coordStatus.agentId} not found in agent tree`);
+        }
+      } else {
+        // No coordinator — spawn one
+        const result = await newAgent(repo.path, "You are the per-repo coordinator. Await instructions.", { coordinator: true });
+        ctx.setNotice(result.ok ? `Spawned coordinator ${result.stdout}` : `Spawn failed: ${result.stderr || result.stdout}`);
+      }
+    });
+    return;
+  }
+
   const agent = ctx.agentTree.selectedAgent;
   if (!agent) return;
   if (agent.state !== "stopped" && agent.state !== "complete") {

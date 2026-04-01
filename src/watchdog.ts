@@ -628,10 +628,7 @@ async function captureAndLogDeadPane(agentId: string, agentDir: string, tmuxSess
       { stdout: "pipe", stderr: "pipe" },
     );
     const deadExitCode = await deadCheck.exited;
-    if (deadExitCode !== 0) {
-      await logAgent(agentDir, "[watchdog] tmux session gone (session not found) — likely crashed or was killed externally");
-      return;
-    }
+    if (deadExitCode !== 0) return;
     const deadOutput = await new Response(deadCheck.stdout).text();
     if (deadOutput.trim() !== "1") return;
 
@@ -709,9 +706,9 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
     if (output === null) {
       // Tmux session missing — start or continue grace period
       if (tmuxGoneSince === null) {
+        await logAgent(agentDir, "[watchdog] tmux session disappeared — starting 10s grace period");
         await captureAndLogDeadPane(agentId, agentDir, tmuxSession);
         tmuxGoneSince = nowFn();
-        await logAgent(agentDir, "[watchdog] tmux session disappeared — starting 10s grace period");
       } else if (nowFn() - tmuxGoneSince >= TMUX_GONE_GRACE_MS) {
         // Exit condition (b): tmux gone for >10s
         await logAgent(agentDir, "[watchdog] tmux session gone for >10s — exiting watchdog");

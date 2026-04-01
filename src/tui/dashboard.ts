@@ -1627,13 +1627,11 @@ export class DashboardComponent implements Component {
         this.tui?.requestRender();
       }
       else if ((focus === "right-pane" || focus === "repo-coordinator") && this.rightPane.mode === "REPO" && this.rightPane.repoCoordinatorAgent) {
-        // Resize repo coordinator split: } grows coordinator, { shrinks it
+        // Resize repo coordinator split: } grows coordinator, { shrinks it.
+        // computeRepoCoordinatorSplit() normalizes the offset in-place to the clamped value (BUG-10),
+        // so no separate revert check is needed — the render path enforces valid bounds.
         this.rightPane.repoCoordinatorHeightOffset += delta;
-        // Clamp to valid range
-        const { repoHeight, coordinatorHeight } = this.rightPane.computeRepoCoordinatorSplit();
-        if (repoHeight < 3 || coordinatorHeight < 3) {
-          this.rightPane.repoCoordinatorHeightOffset -= delta; // revert
-        }
+        this.rightPane.computeRepoCoordinatorSplit();
         this.tui?.requestRender();
       }
       this.persistLayout();

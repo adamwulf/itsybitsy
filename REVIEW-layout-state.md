@@ -105,7 +105,11 @@ Height offsets are stored as deltas from the *computed base heights*, which depe
 - Growing the terminal back doesn't recover the original proportions because the offsets were over-clamped
 - Combined with persistence, this means bad offsets survive restarts — user must manually edit layout.json
 
-**Suggested fix:** Add auto-clamping of offsets on load when they would produce zero-height panels (immediate safety net). Additionally, consider a "reset layout" keybinding (e.g., `Ctrl+R`) to restore defaults without manual file editing. For a longer-term fix, normalize offsets on terminal resize or switch to ratio-based offsets (see §7.5).
+**Suggested fix:** Add auto-clamping of offsets in `applyLayout()` (after line 713) to prevent zero-height panels. **Important caveat:** `displayHeight` is not yet known at `applyLayout()` time (it's set before each render). Two approaches:
+1. **Deferred clamping:** Don't clamp at load time. Instead, add clamping in the render path — in `computeSidebarHeights()` or immediately after it — to enforce a minimum effective height of 1 row per panel, and normalize the offsets when clamping triggers. This is the safer approach since `displayHeight` and `itemCount` are both available at render time.
+2. **Eager clamping with `process.stdout.rows`:** Use `process.stdout.rows` as a proxy for `displayHeight` in `applyLayout()`. This is approximate (doesn't account for header/status rows) but sufficient for rejecting grossly invalid offsets.
+
+Additionally, add a "reset layout" keybinding (see §7.8) as an escape hatch. For a longer-term fix, normalize offsets on terminal resize or switch to ratio-based offsets (see §7.5).
 
 ### BUG-4: SplitPane right side can receive negative or zero width
 
@@ -131,7 +135,7 @@ When `pendingTmuxResize` fires, it calls `resizeTmuxWindow()` for all agents usi
 
 `applyLayout()` (line 1932) already calls `resizeCoordinatorTmux(this.sidebarWidth)` internally (line 711) with the correctly clamped sidebar width. Then `launchDashboard()` calls `resizeCoordinatorTmux(dashboard.sidebarWidth)` again unconditionally at line 1934. Both calls use the same correct, post-clamp value — the coordinator is never sized to a wrong width.
 
-The second call is purely redundant work. Fix: remove either the call inside `applyLayout()` or the one at line 1934 (prefer removing the one at 1934, and add the call to the `else` branch for when no saved layout exists).
+The second call is purely redundant work. **Fix:** Remove the unconditional call at line 1934 and move it into the `else` branch of the `if (savedLayout)` check, so `resizeCoordinatorTmux()` is only called once regardless of whether a saved layout exists.
 
 ### BUG-7: `persistLayout()` is NOT called when tmux-reported width updates the split pane
 
@@ -168,7 +172,7 @@ Both `applyLayout()` and the `[`/`]` handler define `MIN_SIDEBAR = 30` and `MAX_
 
 **File:** `dashboard.ts:964-972`
 
-The pending resize only fires when `flatList.length > 0`. If the dashboard starts with zero agents, the resize never happens. When agents are later added, the flag has already been cleared... wait, no — the flag persists until the first `onUpdate` with agents. But there's still a timing issue:
+The pending resize only fires when `flatList.length > 0`. If the dashboard starts with zero agents, the resize is deferred — the flag persists until the first `onUpdate` call that has agents. However, there's a timing issue:
 
 - If an agent is created *after* the flag fires but *before* the next `onUpdate`, that agent won't get resized to the saved width
 - The agent gets resized when selected (line 1114), but not proactively
@@ -186,6 +190,16 @@ The offsets should probably be relative to a fixed reference rather than to a dy
 ### COMPLICATION-5: `repoCoordinatorHeightOffset` is not in the SPEC
 
 The SPEC §13.7 shows the layout.json schema without `repoCoordinatorHeightOffset`. This field was added later. The `loadLayout()` function handles it as optional (defaulting to 0), but the SPEC should be updated.
+
+### COMPLICATION-7: `hideCoordinator` mode doesn't adjust height offsets
+
+**File:** `dashboard.ts` (coordinator selection logic)
+
+**Severity:** Low
+
+When the coordinator agent is selected, `hideCoordinator` mode gives the coordinator's height allocation to the info panel. But the stored `heightOffsets` are not adjusted to account for this mode switch. When the user switches back to a normal agent, the offsets may produce a different layout than before the coordinator was selected, because the offsets were calibrated for the non-hidden layout.
+
+**Suggested fix:** Either temporarily zero the coordinator height offset during `hideCoordinator` mode and restore it on switch-back, or snapshot and restore the full offset state on coordinator selection changes.
 
 ### COMPLICATION-6: Width resize resizes ALL agent tmux sessions without batching
 
@@ -217,7 +231,7 @@ Height offsets are then applied as deltas to these base values. The `{`/`}` keys
 
 2. **Zero-height panels are confusing but recoverable.** If the coordinator's effective height reaches 0, Tab cycling still reaches the coordinator focus target (the focus targets are not dynamically skipped based on height). Pressing `}` while focused on coordinator will grow it back. However, this is non-obvious — the panel is invisible, the user doesn't know they can Tab to it, and the offsets persist across restarts. A better UX would be to prevent panels from reaching zero height in the first place (enforce a minimum of 1 row), or to add a visible "collapsed" indicator that the user can interact with.
 
-3. **`hideCoordinator` mode (coordinator selected)** gives coordinator space to info, but doesn't adjust the height offsets. When switching back to a normal agent, the offset state may produce a layout that looks different from before the coordinator was selected.
+3. **`hideCoordinator` mode (coordinator selected)** gives coordinator space to info, but doesn't adjust the height offsets. When switching back to a normal agent, the offset state may produce a layout that looks different from before the coordinator was selected. (See COMP-7 below for tracking.)
 
 ---
 
@@ -249,14 +263,14 @@ The sidebar width is also not clamped against the new terminal width during rend
 
 ## 6. Race Conditions and Ordering Issues
 
-### RACE-1: Layout restore vs tmux poller initial width report
+### RACE-1: Layout restore vs tmux poller initial width report (subsumed by BUG-1)
 
 When the dashboard starts with a saved layout:
 1. `applyLayout()` sets `splitPaneLeftWidth` and `layoutRestored = true`
 2. The tmux poller starts polling and may report a width before `resizeTmuxWindow()` takes effect
 3. The `onWidth` callback checks `layoutRestored` and returns early — correct
 
-But because `layoutRestored` is never cleared (BUG-1), this guard becomes permanent.
+But because `layoutRestored` is never cleared (BUG-1), this guard becomes permanent. **No separate fix needed — fixing BUG-1 (§7.2) resolves this entirely.**
 
 ### RACE-2: `pendingTmuxResize` vs agent creation
 
@@ -284,6 +298,8 @@ If two `ib watch` instances run simultaneously and both resize, they'll overwrit
 Move `MIN_SIDEBAR`, `MAX_SIDEBAR` to module-level exports in `layout.ts` alongside `MIN_LEFT_WIDTH` / `MAX_LEFT_WIDTH`. Consolidate `DEFAULT_LEFT_WIDTH` / `DEFAULT_TMUX_WIDTH` into a single constant.
 
 ### 7.2 Clear `layoutRestored` after pending resize
+
+Add a new field to the Dashboard class: `private skipWidthReports = 0;`
 
 In `onUpdate()`, after the `pendingTmuxResize` block (line 972), add:
 ```ts
@@ -366,6 +382,6 @@ Add a keybinding (e.g., `Ctrl+R` or similar) that resets all layout state to def
 | COMP-4 | Design | Medium | Height offsets sensitive to agent count changes |
 | COMP-5 | Documentation | Low | `repoCoordinatorHeightOffset` not in SPEC |
 | COMP-6 | Performance | Low-Medium | Width resize spawns N concurrent tmux processes without batching |
-| RACE-1 | Race | Medium | Permanent tmux width suppression (= BUG-1) |
+| COMP-7 | Design | Low | `hideCoordinator` mode doesn't adjust height offsets on mode switch |
 | RACE-2 | Race | Low | New agents may get stale width from layout.json |
 | RACE-4 | Race | Very low | Multiple dashboard instances overwrite layout.json |

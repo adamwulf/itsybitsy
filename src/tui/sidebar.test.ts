@@ -19,10 +19,12 @@ describe("computeSidebarHeights", () => {
   test("allocates tree and info (coordinator always 0 in sidebar)", () => {
     const { treeHeight, infoHeight, coordinatorHeight } = computeSidebarHeights(30, 5);
     expect(treeHeight).toBe(5);
-    // coordinatorHeight is always 0 since coordinator is never shown in sidebar
-    expect(coordinatorHeight).toBeGreaterThanOrEqual(0);
-    // The sidebar only uses tree + info sections
-    expect(infoHeight).toBeGreaterThanOrEqual(0);
+    // coordinatorHeight is always 0 — coordinator is never shown in sidebar
+    expect(coordinatorHeight).toBe(0);
+    // Info gets all remaining space after tree + headers
+    expect(infoHeight).toBeGreaterThanOrEqual(1);
+    // Total must fit: Agents header (1) + tree + Info header (1) + info = 30
+    expect(1 + treeHeight + 1 + infoHeight).toBe(30);
   });
 
   test("caps tree at MAX_TREE_HEIGHT (7)", () => {
@@ -43,11 +45,9 @@ describe("computeSidebarHeights", () => {
     expect(treeHeight + infoHeight + headers).toBeLessThanOrEqual(5);
   });
 
-  test("coordinatorHeight from computeSidebarHeights is always overridden to 0 in render", () => {
-    // computeSidebarHeights may return a coordinator value, but the sidebar ignores it
+  test("coordinatorHeight is always 0 — coordinator never shown in sidebar", () => {
     const { coordinatorHeight } = computeSidebarHeights(20, 3);
-    // The value may be non-zero from the formula, but render always treats it as 0
-    expect(typeof coordinatorHeight).toBe("number");
+    expect(coordinatorHeight).toBe(0);
   });
 });
 

@@ -1560,57 +1560,35 @@ export class DashboardComponent implements Component {
       const delta = data === "}" ? 1 : -1;
       const focus = this.focusManager.current();
       if (focus === "agent-tree") {
-        // Grow tree, shrink info first; if info is exhausted, shrink coordinator
+        // Grow tree, shrink info; give back to info when shrinking
         const base = computeSidebarHeights(this.sidebar.displayHeight, this.agentTree.visibleList.length);
         const effectiveInfo = Math.max(0, base.infoHeight + this.sidebar.heightOffsets.info);
-        const effectiveCoord = Math.max(0, base.coordinatorHeight + this.sidebar.heightOffsets.coordinator);
         if (delta > 0) {
-          // Growing tree: steal from info, or coordinator if info already 0
+          // Growing tree: steal from info
           if (effectiveInfo > 0) {
             this.sidebar.heightOffsets.tree += delta;
             this.sidebar.heightOffsets.info -= delta;
-          } else if (effectiveCoord > 0) {
-            this.sidebar.heightOffsets.tree += delta;
-            this.sidebar.heightOffsets.coordinator -= delta;
           }
         } else {
-          // Shrinking tree: give back to info, or coordinator if info base is 0
+          // Shrinking tree: give back to info
           const effectiveTree = Math.max(1, base.treeHeight + this.sidebar.heightOffsets.tree);
           if (effectiveTree > 1) {
             this.sidebar.heightOffsets.tree += delta;
-            if (base.infoHeight > 0) {
-              this.sidebar.heightOffsets.info -= delta;
-            } else {
-              this.sidebar.heightOffsets.coordinator -= delta;
-            }
+            this.sidebar.heightOffsets.info -= delta;
           }
         }
         this.tui?.requestRender();
       } else if (focus === "info") {
-        // Grow info, shrink coordinator
+        // Grow info, shrink tree; give back to tree when shrinking
         const base = computeSidebarHeights(this.sidebar.displayHeight, this.agentTree.visibleList.length);
-        const effectiveCoord = Math.max(0, base.coordinatorHeight + this.sidebar.heightOffsets.coordinator);
         const effectiveInfo = Math.max(0, base.infoHeight + this.sidebar.heightOffsets.info);
-        if (delta > 0 && effectiveCoord > 0) {
+        const effectiveTree = Math.max(1, base.treeHeight + this.sidebar.heightOffsets.tree);
+        if (delta > 0 && effectiveTree > 1) {
           this.sidebar.heightOffsets.info += delta;
-          this.sidebar.heightOffsets.coordinator -= delta;
+          this.sidebar.heightOffsets.tree -= delta;
         } else if (delta < 0 && effectiveInfo > 0) {
           this.sidebar.heightOffsets.info += delta;
-          this.sidebar.heightOffsets.coordinator -= delta;
-        }
-        this.tui?.requestRender();
-      }
-      else if (focus === "coordinator") {
-        // Coordinator: steal from info pane above (SPEC §13.3.1)
-        const base = computeSidebarHeights(this.sidebar.displayHeight, this.agentTree.visibleList.length);
-        const effectiveInfo = Math.max(0, base.infoHeight + this.sidebar.heightOffsets.info);
-        const effectiveCoord = Math.max(0, base.coordinatorHeight + this.sidebar.heightOffsets.coordinator);
-        if (delta > 0 && effectiveInfo > 0) {
-          this.sidebar.heightOffsets.coordinator += delta;
-          this.sidebar.heightOffsets.info -= delta;
-        } else if (delta < 0 && effectiveCoord > 0) {
-          this.sidebar.heightOffsets.coordinator += delta;
-          this.sidebar.heightOffsets.info -= delta;
+          this.sidebar.heightOffsets.tree -= delta;
         }
         this.tui?.requestRender();
       }

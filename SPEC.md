@@ -1057,31 +1057,28 @@ The `ib watch` TUI uses a three-column layout:
 
 The input field location depends on which panel has focus: when the coordinator has focus and is selected (TMUX view in main area), the input field appears at the bottom of the coordinator tmux pane in the main area; when the active agent pane has focus, it appears at the bottom of the tmux pane in the main area (see §13.4).
 
-The left sidebar defaults to 60 columns (resizable via `[`/`]` when a sidebar panel has focus, range 30–120). It is a vertical stack containing three sections: agent tree (top), info panel (middle), and coordinator Claude panel (bottom). When the system coordinator is selected, the coordinator section is hidden from the sidebar (coordinator is shown in the main area instead) and its space is given to the info panel. The main area to the right of the sidebar retains the existing split-pane layout: tmux output on the left and cycling right pane on the right.
+The left sidebar defaults to 60 columns (resizable via `[`/`]` when a sidebar panel has focus, range 30–120). It is a vertical stack containing two sections: agent tree (top) and info panel (bottom). The system coordinator is never shown in the sidebar — when the coordinator is selected in the agent tree, the main area shows its tmux output at full width. The main area to the right of the sidebar retains the existing split-pane layout: tmux output on the left and cycling right pane on the right.
 
 ### 11.2 Left Sidebar
 
 The sidebar defaults to 60 columns wide, resizable via `[`/`]` when any sidebar panel has focus (range: 30–120 columns). A vertical separator (`│`) divides the sidebar from the main area.
 
-The sidebar renders three vertically stacked sections, separated by horizontal rules:
+The sidebar renders two vertically stacked sections, separated by horizontal rules:
 
 1. **Agent Tree** — compact agent list (see §11.3)
 2. **Info Panel** — details for the selected agent (see §11.4)
-3. **System Coordinator** — system-wide coordinator session (see §12)
 
 The relative heights of these sections are determined as follows:
 
 ```
 available = terminal_rows - header(1) - separator(1) - status_bar(2)
 tree_height = min(MAX_TREE_HEIGHT, agent_count + repo_count)  // up to 7
-coordinator_height = max(5, floor((available - tree_height) * 0.4))
-info_height = max(1, available - tree_height - coordinator_height - separators(2))
+info_height = max(1, available - tree_height - separators(1))
 ```
 
 - The agent tree occupies up to 7 rows (same as the current `MAX_TREE_HEIGHT`), with scroll indicators (`▲`/`▼`) if more rows exist.
-- The coordinator panel gets 40% of remaining height (minimum 5 rows).
 - The info panel fills the rest (minimum 1 row).
-- If the terminal is too short to fit all three sections, the coordinator panel shrinks first (down to 3 rows), then the info panel (down to 0 rows — hidden entirely).
+- If the terminal is too short to fit both sections, the info panel shrinks first (down to 0 rows — hidden entirely).
 
 ### 11.3 Compact Agent Tree
 
@@ -1189,7 +1186,7 @@ This ensures the system coordinator can only run `ib` commands (e.g., `ib list`,
 
 **Layout when system coordinator is selected**: When the system coordinator is selected in the agent tree, the layout changes:
 
-- **Sidebar** hides the coordinator section (since coordinator is shown in the main area) and shows the normal two-section layout: agent tree (top) + info panel (bottom, showing "System Coordinator"). The coordinator section's space is redistributed to the info panel.
+- **Sidebar** shows the normal two-section layout: agent tree (top) + info panel (bottom). The coordinator is never shown in the sidebar.
 - **Main area** (middle + right panes) merge into a **single full-width view** that toggles between two modes via `n`/`p`:
   - **TMUX view** (default): Live coordinator tmux output at full width, with input field at the bottom when the coordinator panel has focus (see §13.4). Supports scrollback via `;`/`l` keys.
   - **DASHBOARD view**: A scrollable, read-only system dashboard showing a detailed agent overview table.
@@ -1248,7 +1245,7 @@ DASHBOARD view (toggle with n/p):
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-When any other agent or repo header is selected, the layout reverts to the normal three-section sidebar (tree + info + coordinator) with the standard split-pane main area.
+When any other agent or repo header is selected, the layout reverts to the normal two-section sidebar (tree + info) with the standard split-pane main area.
 
 The system coordinator panel uses its own `TmuxPoller` instance (separate from the agent tmux poller) to capture output from the `ib-coordinator` session at ~1s intervals.
 
@@ -1621,7 +1618,7 @@ The TUI has five focusable panels:
 
 ### 13.2 Focus Cycling
 
-- **Tab**: Cycle focus forward through the focus targets in order: `agent-tree` → `info` → `coordinator` → `active-agent` → `right-pane` → `agent-tree` → ...
+- **Tab**: Cycle focus forward through the focus targets in order: `agent-tree` → `info` → `active-agent` → `right-pane` → `agent-tree` → ... (normal mode). In coordinator mode: `agent-tree` → `info` → `coordinator` → `agent-tree` → ...
 - **Shift+Tab**: Cycle focus backward.
 
 Tab replaces the previous tree/questions toggle behavior. When in QUESTIONS pane mode, Tab now cycles focus rather than toggling between the tree and the questions list.
@@ -1650,7 +1647,7 @@ Width changes apply in increments (e.g., 5 columns per keypress). Sidebar width 
 
 **Height resizing (`{` / `}`):**
 
-Only meaningful for sidebar panels (agent tree, info, coordinator). Growing one sidebar panel shrinks the panel(s) below it. The bottom-most panel (coordinator) steals height from its upper neighbor (info panel) instead.
+Only meaningful for sidebar panels (agent tree, info). Growing one sidebar panel shrinks the other. `{`/`}` when `agent-tree` is focused grows/shrinks the tree by stealing from/giving to info. `{`/`}` when `info` is focused grows/shrinks info by stealing from/giving to tree.
 
 ### 13.4 Input Field
 
@@ -1716,7 +1713,7 @@ Panel sizes are persisted across `ib watch` sessions via `~/.itsybitsy/layout.js
 {
   "sidebarWidth": 60,
   "splitPaneLeftWidth": 80,
-  "heightOffsets": { "tree": 0, "info": 0, "coordinator": 0 }
+  "heightOffsets": { "tree": 0, "info": 0, "coordinator": 0 }  // coordinator kept for backward compat, unused
 }
 ```
 

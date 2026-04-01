@@ -40,6 +40,22 @@ export function computeSidebarHeights(
   return { treeHeight, infoHeight, coordinatorHeight: 0 };
 }
 
+/**
+ * Clamp sidebar height offsets so no panel drops below 1 row.
+ * Mutates `offsets` in place. Safe to call at both load time and render time.
+ */
+export function clampSidebarOffsets(
+  base: { treeHeight: number; infoHeight: number; coordinatorHeight: number },
+  offsets: { tree: number; info: number; coordinator: number },
+): void {
+  if (base.treeHeight + offsets.tree < 1) {
+    offsets.tree = 1 - base.treeHeight;
+  }
+  if (base.infoHeight > 0 && base.infoHeight + offsets.info < 1) {
+    offsets.info = 1 - base.infoHeight;
+  }
+}
+
 export class SidebarComponent implements Component {
   agentTree: AgentTreeComponent;
   infoPanel: InfoPanelComponent;
@@ -76,14 +92,9 @@ export class SidebarComponent implements Component {
     const itemCount = this.agentTree.visibleList.length;
     const base = computeSidebarHeights(this.displayHeight, itemCount);
     // Apply height offsets: grow focused panel, shrink the other.
-    // Render-path clamping (BUG-3/§7.7): enforce minimum effective height of 1 per panel
-    // and normalize offsets so they stay valid for the current terminal size and agent count.
-    if (base.treeHeight + this.heightOffsets.tree < 1) {
-      this.heightOffsets.tree = 1 - base.treeHeight;
-    }
-    if (base.infoHeight > 0 && base.infoHeight + this.heightOffsets.info < 1) {
-      this.heightOffsets.info = 1 - base.infoHeight;
-    }
+    // Render-path clamping (BUG-3/§7.7): normalize offsets so they stay valid
+    // for the current terminal size and agent count.
+    clampSidebarOffsets(base, this.heightOffsets);
     let treeHeight = Math.max(1, base.treeHeight + this.heightOffsets.tree);
     let infoHeight = Math.max(0, base.infoHeight + this.heightOffsets.info);
 

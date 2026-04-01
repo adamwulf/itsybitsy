@@ -41,7 +41,7 @@ import { fetchUsage } from "../usage";
 import type { UsageData } from "../usage";
 import { getStateColors, setupColorSchemeDetection } from "./color-scheme";
 import { AgentTreeComponent } from "./agent-tree";
-import { SidebarComponent, SIDEBAR_WIDTH, computeSidebarHeights } from "./sidebar";
+import { SidebarComponent, SIDEBAR_WIDTH, computeSidebarHeights, clampSidebarOffsets } from "./sidebar";
 import { InfoPanelComponent } from "./info-panel";
 import type { DialogState } from "./dialog-handler";
 import {
@@ -729,15 +729,7 @@ export class DashboardComponent implements Component {
     // terminal rows as an approximation (slightly higher than actual displayHeight).
     const approxHeight = process.stdout.rows ?? 24;
     const approxBase = computeSidebarHeights(approxHeight, 1);
-    if (approxBase.treeHeight + this.sidebar.heightOffsets.tree < 1) {
-      this.sidebar.heightOffsets.tree = 1 - approxBase.treeHeight;
-    }
-    if (approxBase.infoHeight > 0 && approxBase.infoHeight + this.sidebar.heightOffsets.info < 1) {
-      this.sidebar.heightOffsets.info = 1 - approxBase.infoHeight;
-    }
-    if (approxBase.coordinatorHeight > 0 && approxBase.coordinatorHeight + this.sidebar.heightOffsets.coordinator < 1) {
-      this.sidebar.heightOffsets.coordinator = 1 - approxBase.coordinatorHeight;
-    }
+    clampSidebarOffsets(approxBase, this.sidebar.heightOffsets);
     this.layoutRestored = true;
     this.pendingTmuxResize = true;
   }

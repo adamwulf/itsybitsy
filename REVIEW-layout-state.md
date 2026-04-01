@@ -76,32 +76,62 @@
 - After a layout is restored, if a user resizes the tmux session externally (e.g., via `tmux resize-window`), the dashboard will never pick up the change.
 - This is intentional for the initial race window (the comment says so), but the flag should be cleared after the pending resize completes — e.g., after `pendingTmuxResize` fires in `onUpdate()`.
 
-**Suggested fix:** Clear `layoutRestored` after the pending tmux resize is processed (around line 965).
+**Suggested fix:** Clear `layoutRestored` after the pending tmux resize is processed (around line 965). Note: there's a timing edge case — the tmux poller may report a stale width during the same tick as the resize. Consider skipping the next 1-2 width reports after clearing the flag, or verifying the reported width matches the saved width (within a small tolerance) before re-enabling sync.
 
-### BUG-2: `saveLayoutDebounced` has a confusing dual-state pattern
+### BUG-2: `saveLayoutDebounced` has a latent correctness risk from dual-state pattern
 
 **File:** `layout.ts:93-103`
+
+**Type:** Latent bug — **Severity:** Medium
 
 The function stores the state in both `pendingState` (for `flushPendingSave`) and in the `setTimeout` closure (for the timer callback). Line 99 writes `state` (the closure-captured parameter), not `pendingState`. This works correctly because each call replaces the timer, but:
 
 - If someone adds logic between "clear old timer" and "set new timer," the `pendingState` and the closure's `state` could diverge.
-- It's unnecessarily confusing. The timer callback should use `pendingState` instead.
+- More concretely: if `flushPendingSave()` is called during the timeout window, it writes `pendingState` and sets it to `null`, but the timer callback still has the old `state` reference and will write it again — creating a double-write with potentially stale data.
+- The timer callback should use `pendingState` instead for a single source of truth.
 
-**Impact:** Currently not a bug because the pattern happens to be correct, but it's fragile and misleading.
+**Impact:** Latent bug — the dual-state pattern creates a real correctness risk if the timing of flush and timer overlap, and is a trap for future modifications.
 
 ### BUG-3: Height offsets can accumulate beyond valid ranges across terminal resizes
 
 **File:** `dashboard.ts:1549-1614`, `sidebar.ts:104-134`
+
+**Severity:** High — can require manual editing of `~/.itsybitsy/layout.json` to recover.
 
 Height offsets are stored as deltas from the *computed base heights*, which depend on `displayHeight` and `itemCount`. If the terminal is resized (making `displayHeight` change), the stored offsets may produce invalid effective heights. The sidebar's clamping logic (lines 116-134) handles the worst case by shrinking from the bottom up, but:
 
 - An offset of +10 saved on a 40-row terminal becomes meaningless on a 20-row terminal
 - The clamping is done at render time but the offsets are never normalized — so the saved layout.json may contain offsets that only make sense at one terminal size
 - Growing the terminal back doesn't recover the original proportions because the offsets were over-clamped
+- Combined with persistence, this means bad offsets survive restarts — user must manually edit layout.json
 
-**Suggested fix:** Either save ratios instead of absolute offsets, or normalize offsets on terminal resize.
+**Suggested fix:** Add auto-clamping of offsets on load when they would produce zero-height panels (immediate safety net). Additionally, consider a "reset layout" keybinding (e.g., `Ctrl+R`) to restore defaults without manual file editing. For a longer-term fix, normalize offsets on terminal resize or switch to ratio-based offsets (see §7.5).
 
-### BUG-4: `persistLayout()` is NOT called when tmux-reported width updates the split pane
+### BUG-4: SplitPane right side can receive negative or zero width
+
+**File:** `split-pane.ts`
+
+When the terminal shrinks, the right pane width is computed as `terminal_width - sidebarWidth - separators - splitPaneLeftWidth`. If the terminal becomes narrower than `sidebarWidth + splitPaneLeftWidth + separators`, the right pane gets negative width. `SplitPane.render()` clamps left width via `Math.min(this.leftWidth, width - sepWidth - 1)`, but the right side can still end up with very small or zero width if the overall `width` passed to `render()` is already too small. No guard exists at the dashboard level to re-clamp `splitPaneLeftWidth` when terminal width shrinks.
+
+**Impact:** Low — causes rendering glitches on very narrow terminals.
+
+### BUG-5: Unclamped tmux resize on layout restore
+
+**File:** `dashboard.ts` (pendingTmuxResize block)
+
+When `pendingTmuxResize` fires, it calls `resizeTmuxWindow()` for all agents using `splitPaneLeftWidth`. But this width was only clamped against `MIN_LEFT_WIDTH`/`MAX_LEFT_WIDTH` during `applyLayout()` — it's not re-validated against the current terminal width at the time the resize actually happens. If the terminal is narrower than when the layout was saved, agents get resized to a width that's wider than the visible pane.
+
+**Impact:** Low — tmux handles oversized windows gracefully, but it wastes space.
+
+### BUG-6: Redundant `resizeCoordinatorTmux` call on startup
+
+**File:** `dashboard.ts` (launchDashboard)
+
+`resizeCoordinatorTmux(dashboard.sidebarWidth)` is called unconditionally at startup, even when a saved layout is about to be applied. If `applyLayout()` changes `sidebarWidth`, the coordinator was sized to the wrong width. It should be called *after* layout restoration, not before.
+
+**Impact:** Low — coordinator gets re-sized correctly on next render cycle, but the initial sizing is wasted work.
+
+### BUG-7: `persistLayout()` is NOT called when tmux-reported width updates the split pane
 
 **File:** `dashboard.ts:669-679`
 
@@ -155,11 +185,15 @@ The offsets should probably be relative to a fixed reference rather than to a dy
 
 The SPEC §13.7 shows the layout.json schema without `repoCoordinatorHeightOffset`. This field was added later. The `loadLayout()` function handles it as optional (defaulting to 0), but the SPEC should be updated.
 
-### COMPLICATION-6: Width resize resizes ALL agent tmux sessions
+### COMPLICATION-6: Width resize resizes ALL agent tmux sessions without batching
 
 **File:** `agent-actions.ts:908-913`
 
+**Severity:** Low-Medium — noticeable lag with 20+ agents since `[`/`]` fires rapidly.
+
 `handleResizeLeft()` iterates over every agent in the tree and calls `resizeTmuxWindow()` for each. For a large number of agents, this spawns many concurrent tmux processes. There's no batching or throttling.
+
+**Suggested fix:** Debounce the resize-all operation (e.g., 100ms), or serialize the tmux resize calls, or use a single tmux command that resizes all windows in a session at once. Alternatively, only resize the currently-selected agent's tmux session immediately and defer the rest to the next agent selection change.
 
 ---
 
@@ -179,7 +213,7 @@ Height offsets are then applied as deltas to these base values. The `{`/`}` keys
 
 1. **Base heights are recomputed every render** but offsets are absolute deltas persisted across renders. When `displayHeight` changes (terminal resize) or `itemCount` changes (agents added/removed), the base values shift but offsets don't, leading to unexpected proportions.
 
-2. **Zero-height panels disappear permanently** within a session. If the coordinator's effective height reaches 0, there's no way to grow it back via `{`/`}` because the coordinator focus target is skipped when its height is 0 (it's hidden, so Tab cycling skips it). The only recovery is to restart and let the offsets reset... but they're persisted, so even restart doesn't help.
+2. **Zero-height panels are confusing but recoverable.** If the coordinator's effective height reaches 0, Tab cycling still reaches the coordinator focus target (the focus targets are not dynamically skipped based on height). Pressing `}` while focused on coordinator will grow it back. However, this is non-obvious — the panel is invisible, the user doesn't know they can Tab to it, and the offsets persist across restarts. A better UX would be to prevent panels from reaching zero height in the first place (enforce a minimum of 1 row), or to add a visible "collapsed" indicator that the user can interact with.
 
 3. **`hideCoordinator` mode (coordinator selected)** gives coordinator space to info, but doesn't adjust the height offsets. When switching back to a normal agent, the offset state may produce a layout that looks different from before the coordinator was selected.
 
@@ -279,17 +313,30 @@ Listen for `process.stdout.on('resize')` and:
 3. Resize all agent tmux sessions
 4. Persist the clamped layout
 
-### 7.5 Consider ratio-based height offsets
+**Note:** pi-tui already handles SIGWINCH internally for re-rendering. The resize listener must coordinate with pi-tui's own resize handling to avoid double-renders or acting on stale width values. Check if pi-tui exposes a resize callback or event, and hook into that rather than adding a competing listener.
 
-Instead of storing absolute deltas, store the desired height ratios for sidebar panels. This would make the layout stable across terminal resizes. However, this is a larger refactor and the current system works acceptably for the common case (terminal size doesn't change much).
+### 7.5 Consider ratio-based height offsets (deferred — not recommended now)
+
+Instead of storing absolute deltas, store the desired height ratios for sidebar panels. This would make the layout stable across terminal resizes. **However, this is a non-trivial refactor** that requires:
+1. Changing the `LayoutState` interface (breaking existing `layout.json` files)
+2. Rewriting all `{`/`}` resize logic to work in ratio space
+3. Changing `computeSidebarHeights()` to accept ratios
+4. Migration logic for existing layout files
+5. Updating the extensive height resize tests in `dashboard.test.ts`
+
+**Recommendation:** Defer this. The immediate problems (BUG-3, zero-height panels) are better addressed with auto-clamping on load and a minimum panel height of 1. Ratio-based offsets can be revisited if terminal resizing becomes a frequent user workflow.
 
 ### 7.6 Update SPEC §13.7
 
 Add `repoCoordinatorHeightOffset` to the documented schema in SPEC.md.
 
-### 7.7 Guard against zero-height coordinator recovery
+### 7.7 Prevent zero-height panels
 
-When `{`/`}` resize would reduce a panel to 0, ensure there's a way to grow it back. One option: skip focus cycling for zero-height panels but still allow Tab to reach them for the purpose of resizing up.
+While zero-height panels are technically recoverable (Tab still reaches them and `}` grows them back), this is non-obvious UX. Enforce a minimum panel height of 1 row in the `{`/`}` resize logic so panels never fully disappear. Additionally, `loadLayout()` should auto-clamp height offsets on load to prevent persisted offsets from producing zero-height panels.
+
+### 7.8 Add a "reset layout" keybinding
+
+Add a keybinding (e.g., `Ctrl+R` or similar) that resets all layout state to defaults (sidebar width, split pane width, height offsets). This provides an escape hatch for users who end up with broken layout state without needing to manually edit `~/.itsybitsy/layout.json`.
 
 ---
 
@@ -298,15 +345,18 @@ When `{`/`}` resize would reduce a panel to 0, ensure there's a way to grow it b
 | ID | Type | Severity | Description |
 |----|------|----------|-------------|
 | BUG-1 | Bug | Medium | `layoutRestored` never cleared — permanently suppresses tmux width sync |
-| BUG-2 | Code smell | Low | Dual-state in `saveLayoutDebounced` — confusing but correct |
-| BUG-3 | Bug | Medium | Height offsets invalid after terminal resize |
-| BUG-4 | Bug | Low | First-launch tmux width not persisted |
+| BUG-2 | Latent bug | Medium | Dual-state in `saveLayoutDebounced` — correctness risk if flush and timer overlap |
+| BUG-3 | Bug | **High** | Height offsets invalid after terminal resize; can require manual layout.json edit to recover |
+| BUG-4 | Bug | Low | SplitPane right side can receive negative/zero width on narrow terminals |
+| BUG-5 | Bug | Low | Unclamped tmux resize on layout restore — width not re-validated against terminal |
+| BUG-6 | Bug | Low | Redundant/premature `resizeCoordinatorTmux` call before layout is applied |
+| BUG-7 | Bug | Low | First-launch tmux width not persisted |
 | COMP-1 | Cleanup | Low | Duplicated MIN/MAX_SIDEBAR constants |
 | COMP-2 | Cleanup | Low | Three separate default-width constants |
 | COMP-3 | Edge case | Low | `pendingTmuxResize` misses late-arriving agents |
 | COMP-4 | Design | Medium | Height offsets sensitive to agent count changes |
 | COMP-5 | Documentation | Low | `repoCoordinatorHeightOffset` not in SPEC |
-| COMP-6 | Performance | Low | Width resize spawns N concurrent tmux processes |
+| COMP-6 | Performance | Low-Medium | Width resize spawns N concurrent tmux processes without batching |
 | RACE-1 | Race | Medium | Permanent tmux width suppression (= BUG-1) |
 | RACE-2 | Race | Low | New agents may get stale width from layout.json |
 | RACE-4 | Race | Very low | Multiple dashboard instances overwrite layout.json |

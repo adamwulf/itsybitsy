@@ -1055,9 +1055,9 @@ The `ib watch` TUI uses a three-column layout:
   status bar (2 lines)
 ```
 
-The input field location depends on which panel has focus: when the coordinator has focus, the input field appears at the bottom of the coordinator section in the sidebar; when the active agent pane has focus, it appears at the bottom of the tmux pane in the main area (see §13.4).
+The input field location depends on which panel has focus: when the coordinator has focus and is selected (TMUX view in main area), the input field appears at the bottom of the coordinator tmux pane in the main area; when the active agent pane has focus, it appears at the bottom of the tmux pane in the main area (see §13.4).
 
-The left sidebar defaults to 60 columns (resizable via `[`/`]` when a sidebar panel has focus, range 30–120). It is a vertical stack containing three sections: agent tree (top), info panel (middle), and coordinator Claude panel (bottom). The main area to the right of the sidebar retains the existing split-pane layout: tmux output on the left and cycling right pane on the right.
+The left sidebar defaults to 60 columns (resizable via `[`/`]` when a sidebar panel has focus, range 30–120). It is a vertical stack containing three sections: agent tree (top), info panel (middle), and coordinator Claude panel (bottom). When the system coordinator is selected, the coordinator section is hidden from the sidebar (coordinator is shown in the main area instead) and its space is given to the info panel. The main area to the right of the sidebar retains the existing split-pane layout: tmux output on the left and cycling right pane on the right.
 
 ### 11.2 Left Sidebar
 
@@ -1187,14 +1187,16 @@ This ensures the system coordinator can only run `ib` commands (e.g., `ib list`,
   ⚙ agent-c9d0e1f2   complete  1h
 ```
 
-**Layout when system coordinator is selected**: When the system coordinator is selected in the agent tree, the entire layout changes:
+**Layout when system coordinator is selected**: When the system coordinator is selected in the agent tree, the layout changes:
 
-- **Sidebar** switches to a two-section layout: agent tree (top) + system coordinator tmux output (bottom, with input field when focused — see §13.4). The info panel is **hidden** — it is not relevant for the system coordinator.
-- **Sidebar height allocation**: With info panel hidden, the agent tree retains its normal height (up to `MAX_TREE_HEIGHT`), and the system coordinator panel gets all remaining sidebar height (`available - tree_height - 1 separator`).
-- **Focus cycling**: In full-width mode, Tab skips `info`, `active-agent`, and `right-pane` targets (they have no rendered panels) — cycling goes `agent-tree` → `coordinator` → `agent-tree`. The system dashboard table is read-only and scrolled via `;`/`l` keys regardless of focus.
-- **Main area** (middle + right panes) merge into a **single full-width system dashboard** showing a detailed agent overview. This is a dedicated system view, not the regular split-pane layout.
+- **Sidebar** hides the coordinator section (since coordinator is shown in the main area) and shows the normal two-section layout: agent tree (top) + info panel (bottom, showing "System Coordinator"). The coordinator section's space is redistributed to the info panel.
+- **Main area** (middle + right panes) merge into a **single full-width view** that toggles between two modes via `n`/`p`:
+  - **TMUX view** (default): Live coordinator tmux output at full width, with input field at the bottom when the coordinator panel has focus (see §13.4). Supports scrollback via `;`/`l` keys.
+  - **DASHBOARD view**: A scrollable, read-only system dashboard showing a detailed agent overview table.
+- **Focus cycling**: Tab cycles `agent-tree` → `info` → `coordinator` → `agent-tree`. The `coordinator` target represents the main area content (tmux pane in TMUX view). In DASHBOARD view, `;`/`l` scrolls the table regardless of focus.
+- **View mode reset**: `coordinatorViewMode` resets to TMUX only when *entering* coordinator mode (transition detection via `currentAgentId`), not on every watcher tick. This ensures the user's view choice persists.
 
-**System dashboard contents** (rendered as a scrollable, read-only table):
+**System dashboard contents** (shown in DASHBOARD view, rendered as a scrollable table):
 
 | Column | Width | Source |
 |--------|-------|--------|
@@ -1211,9 +1213,27 @@ Rows are grouped by repo (with repo header rows). Coordinators appear first with
 **Narrow-terminal fallback**: If the available width for the system dashboard is less than 80 columns, the Summary column is hidden. If less than 60 columns, the Model and Age columns are also hidden. Column widths are fixed — no proportional scaling.
 
 ```
+TMUX view (default when coordinator selected):
 ┌──────────────────────────────────────────────────────────────────┐
 │ ib — agent dashboard                                            │
-├──── Agents ──────────────────┬──── System Dashboard ────────────┤
+├──── Agents ──────────────────┬─── System Coordinator  TMUX ─────┤
+│ ◆ coordinator  running  5m  │ coordinator tmux output           │
+│ ▾ itsybitsy                  │ ...                               │
+│   ◇ coordinator  running 3m │                                   │
+│   ⚙ agent-a1b2  running 2m  │                                   │
+│ ▾ muse-ios                   │                                   │
+│   ◇ coordinator  running 1m │                                   │
+│   ⚙ agent-c9d0  complete 1h │                                   │
+├──── Info ────────────────────│ > input field█       [Send]       │
+│ System Coordinator           │                                   │
+├──────────────────────────────┴───────────────────────────────────┤
+│ status bar                                                       │
+└──────────────────────────────────────────────────────────────────┘
+
+DASHBOARD view (toggle with n/p):
+┌──────────────────────────────────────────────────────────────────┐
+│ ib — agent dashboard                                            │
+├──── Agents ──────────────────┬─── System Coordinator  DASHBOARD ┤
 │ ◆ coordinator  running  5m  │ REPO         AGENT          ROLE  │
 │ ▾ itsybitsy                  │ itsybitsy    coordinator     coord │
 │   ◇ coordinator  running 3m │ itsybitsy    agent-a1b2c3d4  wkr  │
@@ -1221,9 +1241,8 @@ Rows are grouped by repo (with repo header rows). Coordinators appear first with
 │ ▾ muse-ios                   │ muse-ios     agent-c9d0e1f2  wkr  │
 │   ◇ coordinator  running 1m │                                   │
 │   ⚙ agent-c9d0  complete 1h │                                   │
-├──── System Coordinator ──────│                                   │
-│ coordinator tmux output      │                                   │
-│ > input field█               │                                   │
+├──── Info ────────────────────│                                   │
+│ System Coordinator           │                                   │
 ├──────────────────────────────┴───────────────────────────────────┤
 │ status bar                                                       │
 └──────────────────────────────────────────────────────────────────┘
@@ -1251,7 +1270,7 @@ The system coordinator does **not** have a standard watchdog or stop hook. It is
   3. Rate limit patterns in last 15 lines of tmux output → `rate_limited`
   4. Otherwise → `running`
 - The system coordinator has no `waiting` or `complete` states — it runs indefinitely. There is no meta.json to store state, so tmux is the sole source of truth.
-- If the system coordinator session dies unexpectedly, the sidebar panel shows "System coordinator stopped — press R to restart". The `R` key (same as agent resume) triggers `restartSystemCoordinator()` when the system coordinator is selected.
+- If the system coordinator session dies unexpectedly, the main area TMUX view shows "Session stopped — press R to restart". The `R` key (same as agent resume) triggers `restartSystemCoordinator()` when the system coordinator is selected.
 - The system coordinator is expected to run indefinitely — it is never nudged to complete
 
 ### 12.2 Per-Repo Coordinators
@@ -1568,14 +1587,14 @@ The coordinator system touches many modules. This section catalogs every file th
 | `src/hooks/agent-path.ts` | No changes needed — per-repo coordinators use standard path isolation. System coordinator has no worktree to isolate. |
 | `src/hooks/agent-status.ts` | No changes needed — stop hook writes state normally. Coordinator-specific behavior is in the watchdog, not the hook. |
 | `src/config.ts` | New config keys: `coordinator.model` (string), `permissions.coordinator.allow` (string[]), `permissions.coordinator.deny` (string[]). |
-| `src/tui/dashboard.ts` | Detect system coordinator selection → switch to full-width view mode (no split-pane). System coordinator lifecycle on startup/shutdown. Coordinator restart on `R` key. Input field routing for coordinator vs agent. |
+| `src/tui/dashboard.ts` | Detect system coordinator selection → switch to full-width view mode with n/p toggling between TMUX and DASHBOARD views. System coordinator lifecycle on startup/shutdown. Coordinator restart on `R` key. Input field routing for coordinator vs agent. |
 | `src/tui/agent-tree.ts` | Render system coordinator as first entry with `◆` icon. Render per-repo coordinators with `◇` icon, sorted before regular agents. Handle selection of `kind: "system-coordinator"` entries. |
 | `src/tui/sidebar.ts` | Rename "Coordinator" header to "System Coordinator". No structural changes — sidebar coordinator panel still shows system coordinator tmux output. |
 | `src/tui/split-pane.ts` | Support conditional full-width mode when system coordinator is selected (may already be partially supported via `fullWidth` flag). |
 | `src/tui/pane-manager.ts` | When system coordinator is selected, right pane modes may be limited or hidden. The full-width view replaces the split pane entirely. |
-| `src/tui/focus.ts` | No structural changes. The `coordinator` focus target still refers to the sidebar system coordinator panel. |
+| `src/tui/focus.ts` | Coordinator focus order includes `info` (agent-tree → info → coordinator). The `coordinator` focus target refers to the main area coordinator view when selected. |
 | `src/tui/agent-actions.ts` | `a` (new agent) dialog: add "Coordinator" option when selected repo has no coordinator. Handle coordinator-specific action keys (no merge/kill for system coordinator). |
-| `src/tui/info-panel.ts` | Handle `kind: "system-coordinator"` without crashing (render empty — info panel is hidden in full-width mode). For per-repo coordinators (`kind: "agent"` with `coordinator: true`), show coordinator type indicator. |
+| `src/tui/info-panel.ts` | Handle `kind: "system-coordinator"` (render minimal "System Coordinator" label — info panel is visible in sidebar when coordinator is selected). For per-repo coordinators (`kind: "agent"` with `coordinator: true`), show coordinator type indicator. |
 | `src/hooks/intercept-task.ts` | Extend to block Bash tool calls from coordinator sessions that contain shell metacharacters (§12.2.4). Detect coordinator sessions via `coordinator: true` in meta.json. |
 | `src/tui/input-field.ts` | No changes — generic input component used by both coordinator and agent panels. |
 | `src/tui/layout.ts` | No changes needed — existing layout persistence covers coordinator panel sizing. |

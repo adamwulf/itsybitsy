@@ -633,11 +633,11 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(dashboard.notice).not.toBeNull();
   });
 
-  test("P key does not pause complete agents", async () => {
+  test("P key pauses complete agents", async () => {
     await setupDashboardWithAgent("complete");
     dashboard.handleInput("P");
-    expect(dashboard.dialog).toBeNull();
-    expect(dashboard.notice).not.toBeNull();
+    expect(dashboard.dialog).not.toBeNull();
+    expect(dashboard.dialog!.type).toBe("confirm");
   });
 
   test("r key opens reassign fuzzy select dialog", async () => {

@@ -251,21 +251,22 @@ describe("handlePause", () => {
     const agent = makeAgent({ id: "agent-1", state: "stopped" });
     const { ctx, notices } = makeMockCtx({ agent });
     handlePause(ctx);
-    expect(notices).toEqual(["Can only pause running or waiting agents"]);
+    expect(notices).toEqual(["Can only pause running, waiting, or complete agents"]);
   });
 
-  test("shows notice for complete agent", () => {
+  test("shows confirm for complete agent", () => {
     const agent = makeAgent({ id: "agent-1", state: "complete" });
-    const { ctx, notices } = makeMockCtx({ agent });
+    const { ctx, dialogs } = makeMockCtx({ agent });
     handlePause(ctx);
-    expect(notices).toEqual(["Can only pause running or waiting agents"]);
+    expect(dialogs).toHaveLength(1);
+    assertDialog(dialogs[0]!, "confirm");
   });
 
   test("shows notice for archived agent", () => {
     const agent = makeAgent({ id: "agent-1", state: "running", archived: true });
     const { ctx, notices } = makeMockCtx({ agent });
     handlePause(ctx);
-    expect(notices).toEqual(["Can only pause running or waiting agents"]);
+    expect(notices).toEqual(["Can only pause running, waiting, or complete agents"]);
   });
 
   test("shows confirm for running agent", () => {

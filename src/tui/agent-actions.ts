@@ -220,8 +220,8 @@ export function handleResume(ctx: ActionCtx) {
 export function handlePause(ctx: ActionCtx) {
   const agent = ctx.agentTree.selectedAgent;
   if (!agent) return;
-  if (agent.state === "stopped" || agent.state === "complete" || agent.archived) {
-    ctx.setNotice("Can only pause running or waiting agents");
+  if (agent.state === "stopped" || agent.archived) {
+    ctx.setNotice("Can only pause running, waiting, or complete agents");
     return;
   }
   ctx.showDialog({

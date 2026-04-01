@@ -1,511 +1,209 @@
-# Configuration and Permission System Research
+# Research: itsybitsy Configuration & Permission System
 
-## Executive Summary
+## 1. Complete Config Key Inventory
 
-Itsybitsy has a multi-layered permission system that combines:
-1. **Mandatory permissions** (always granted to agents)
-2. **Role-specific config permissions** (per agent type: manager/worker/coordinator)
-3. **Global config permissions** (all agents)
-4. **CLI flag overrides** (--allow, --deny)
-5. **Hardcoded role-specific restrictions** (coordinators only)
+All keys are defined in `src/config.ts` `CONFIG_KEYS` array. Config is read from `~/.itsybitsy/config.json` (user source) with typed defaults.
 
-The system supports three agent types (manager, worker, coordinator) plus system coordinator, each with distinct capabilities and permission sets.
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `maxAgents` | number | `10` | Maximum concurrent agents per repo. Coordinators bypass this limit. |
+| `model` | string | `"opus"` | Default model for manager/worker agents. |
+| `createPullRequests` | boolean | `false` | When true, managers create PRs on completion (if `gh` and remote available). |
+| `allowAgentQuestions` | boolean | `true` | Whether agents can ask the user questions via `ib ask`. |
+| `autoCompactThreshold` | number | `undefined` | Context window usage % that triggers auto-compact. |
+| `externalDiffTool` | string | `undefined` | External diff tool command for `ib diff`. |
+| `hooks.injectStatus` | boolean | `true` | Whether status injection hook runs. |
+| `hooks.statusVisible` | boolean | `true` | Whether injected status is visible (systemMessage) vs silent (additionalContext). |
+| `coordinator.model` | string | `"opus"` | Model for both system and per-repo coordinators. Per-repo can override with `--model`. |
+| `permissions.all.allow` | string[] | `[]` | Additional allow permissions applied to ALL agent types (manager, worker, coordinator). |
+| `permissions.all.deny` | string[] | `[]` | Additional deny permissions applied to ALL agent types. |
+| `permissions.manager.allow` | string[] | `[]` | Additional allow permissions for manager agents only. |
+| `permissions.manager.deny` | string[] | `[]` | Additional deny permissions for manager agents only. |
+| `permissions.worker.allow` | string[] | `[]` | Additional allow permissions for worker agents only. |
+| `permissions.worker.deny` | string[] | `[]` | Additional deny permissions for worker agents only. |
+| `permissions.coordinator.allow` | string[] | `[]` | Additional allow permissions for per-repo coordinators. |
+| `permissions.coordinator.deny` | string[] | `[]` | Additional deny permissions for per-repo coordinators. |
+| `permissions.repo.allow` | string[] | `[]` | **DEFINED BUT UNUSED** - exists in CONFIG_KEYS but never read by any code. |
+| `permissions.repo.deny` | string[] | `[]` | **DEFINED BUT UNUSED** - exists in CONFIG_KEYS but never read by any code. |
 
----
+### Config Read/Write
 
-## Configuration System (src/config.ts)
+- **Read**: `readConfig()` reads `~/.itsybitsy/config.json`, iterates CONFIG_KEYS, returns `Record<string, ConfigEntry>` where each entry has `{ value, source: "user" | "default" }`.
+- **Write**: `writeConfig(filePath, key, value)` reads existing file, sets nested value, writes back.
+- **Nested keys**: Dot-separated keys like `permissions.manager.allow` are resolved via `getNestedValue`/`setNestedValue` to traverse nested JSON objects.
+- **Validation**: `validateConfigValue()` checks type matches (number, boolean, string, string[]).
 
-### CONFIG_KEYS Inventory
+## 2. Permission Layering
 
-All user-configurable settings are defined in `CONFIG_KEYS: ConfigKeyDef[]`:
+### For Manager/Worker Agents (`buildAgentSettings()`)
 
-| Key | Type | Default | Purpose |
-|-----|------|---------|---------|
-| `maxAgents` | number | 10 | Max concurrent agents per repo |
-| `model` | string | "opus" | Default model for manager/worker agents |
-| `createPullRequests` | boolean | false | Auto-create PRs on merge (managers only) |
-| `allowAgentQuestions` | boolean | true | Allow agents to ask questions |
-| `autoCompactThreshold` | number | undefined | Context usage % to trigger auto-compact |
-| `externalDiffTool` | string | undefined | External tool for `ib diff` |
-| `hooks.injectStatus` | boolean | true | Add stop hook to agents |
-| `hooks.statusVisible` | boolean | true | Show stop hook status messages |
-| `permissions.all.allow` | string[] | [] | Applies to ALL agents (managers, workers, coordinators) |
-| `permissions.all.deny` | string[] | [] | Applies to ALL agents |
-| `permissions.manager.allow` | string[] | [] | Manager-only permissions |
-| `permissions.manager.deny` | string[] | [] | Manager-only denials |
-| `permissions.worker.allow` | string[] | [] | Worker-only permissions |
-| `permissions.worker.deny` | string[] | [] | Worker-only denials |
-| `coordinator.model` | string | "opus" | Model for both system and per-repo coordinators |
-| `permissions.coordinator.allow` | string[] | [] | Per-repo coordinator permissions (system coordinator hardcoded) |
-| `permissions.coordinator.deny` | string[] | [] | Per-repo coordinator denials |
-| `permissions.repo.allow` | string[] | [] | **Currently unused** (reserved for future per-repo config) |
-| `permissions.repo.deny` | string[] | [] | **Currently unused** |
+Permissions are layered in this order (all merged via set union + dedup):
 
-### Config Reading/Writing
+1. **Existing permissions** — from `<repo>/.claude/settings.local.json` `permissions.allow`/`deny` (if file exists)
+2. **Mandatory permissions** (hardcoded `ibPerms`):
+   - `Bash(ib:*)` + git commands (`git status`, `git add`, `git commit`, `git diff`, `git show`, `git log`, `git ls-files`, `git grep`, `git rm`, `git merge`, `git rebase`, `git checkout`, `git restore`, `git reset`)
+   - Filesystem inspection: `Bash(pwd:*)`, `Bash(ls:*)`, `Bash(head:*)`, `Bash(tail:*)`, `Bash(cat:*)`, `Bash(grep:*)`
+   - Claude Code tools: `Read`, `Write`, `Edit`, `MultiEdit`, `Glob`, `Grep`, `LS`, `TodoWrite`, `Task`, `Agent`, `TaskOutput`, `KillShell`, `NotebookEdit`, `WebFetch`, `WebSearch`, `AskUserQuestion`, `ToolSearch`
+3. **Config role-specific permissions** — `permissions.manager.allow`/`deny` OR `permissions.worker.allow`/`deny` (based on agent type)
+4. **Config global permissions** — `permissions.all.allow`/`deny` (merged with role-specific)
+5. **Always denied** (hardcoded): `EnterPlanMode`, `ExitPlanMode`
 
-**Location:** `~/.itsybitsy/config.json` (user home directory)
-
-**Reading:**
-- `readConfig(options?: ReadConfigOptions)` → returns `ConfigResult` (map of key → {value, source})
-- Returns default values for any missing keys
-- Validates type before returning (rejects mistyped config entries)
-- Source field indicates "user" (from config.json) or "default" (built-in)
-
-**Writing:**
-- `writeConfig(filePath: string, key: string, value: unknown)`
-- Supports nested dot-keys (e.g., "permissions.manager.allow")
-- Creates/updates config.json atomically
-
----
-
-## Permission System (src/ib-commands.ts)
-
-### Permission Layering in buildAgentSettings()
-
-Permissions are merged in this order (highest priority first):
-
+**Merge formula** (in `newAgent()`):
 ```
-1. Mandatory permissions (always added)
-   ├─ Bash(ib:*)
-   ├─ All git Bash subcommands
-   ├─ File system Bash subcommands (pwd, ls, head, tail, cat, grep)
-   └─ Core tools: Read, Write, Edit, MultiEdit, Glob, Grep, LS, TodoWrite, Task, Agent, TaskOutput, KillShell, NotebookEdit, WebFetch, WebSearch, AskUserQuestion, ToolSearch
-
-2. Config allow permissions (role-specific + global)
-   ├─ permissions.{manager|worker}.allow (if agent type is manager/worker)
-   ├─ permissions.all.allow (always)
-   └─ Deduplicated with Set
-
-3. CLI --allow flag (NOT IMPLEMENTED IN buildAgentSettings)
-   └─ Passed as configAllow parameter, merged in step 2
-
-4. Blocked tools (always denied)
-   ├─ EnterPlanMode
-   ├─ ExitPlanMode
-   └─ Plus config deny entries
-
-5. Config deny permissions (role-specific + global)
-   ├─ permissions.{manager|worker}.deny (if agent type is manager/worker)
-   └─ permissions.all.deny (always)
-
-6. CLI --deny flag (NOT IMPLEMENTED IN buildAgentSettings)
-   └─ Passed as configDeny parameter, merged in step 5
+configAllow = dedupe(roleAllow + allAllow)
+configDeny = dedupe(roleDeny + allDeny)
 ```
 
-**Key Function Signature:**
-```typescript
-async function buildAgentSettings(
-  repoPath: string,
-  agentType: "manager" | "worker",
-  agentId: string,
-  configAllow: string[],    // CLI --allow flags merged with role/all config
-  configDeny: string[]       // CLI --deny flags merged with role/all config
-): Promise<string>           // Returns JSON settings
+Then in `buildAgentSettings()`:
+```
+finalAllow = dedupe(existingAllow + mandatoryPerms + configAllow)
+finalDeny = dedupe(existingDeny + blockedTools + configDeny)
 ```
 
-**Mandatory Permissions Detail:**
-```typescript
-const ibPerms = [
-  "Bash(ib:*)",
-  "Bash(git status:*)", "Bash(git add:*)", "Bash(git commit:*)",
-  "Bash(git diff:*)", "Bash(git show:*)", "Bash(git log:*)",
-  "Bash(git ls-files:*)", "Bash(git grep:*)", "Bash(git rm:*)",
-  "Bash(git merge:*)", "Bash(git rebase:*)", "Bash(git checkout:*)",
-  "Bash(git restore:*)", "Bash(git reset:*)",
-  "Bash(pwd:*)", "Bash(ls:*)", "Bash(head:*)", "Bash(tail:*)",
-  "Bash(cat:*)", "Bash(grep:*)",
-  "Read", "Write", "Edit", "MultiEdit", "Glob", "Grep", "LS",
-  "TodoWrite", "Task", "Agent", "TaskOutput", "KillShell", "NotebookEdit",
-  "WebFetch", "WebSearch", "AskUserQuestion", "ToolSearch",
-];
-
-const blockedTools = ["EnterPlanMode", "ExitPlanMode"];
-```
-
-### newAgent() Model Selection Logic
-
-**Priority order:**
-```
-1. --model CLI flag (if provided)
-2. coordinator.model config (if --coordinator flag)
-   else config.model (for regular agents)
-3. Fallback: "opus"
-```
-
-**Code location:** `newAgent()` lines 1531-1543
-
-```typescript
-// 7. Model fallback: --model > config.model > 'opus'
-//    For coordinators: --model > coordinator.model > 'opus'
-let model = opts?.model ?? "";
-if (!model) {
-  if (coordinatorMode) {
-    const coordModel = config["coordinator.model"]?.value as string | undefined;
-    if (coordModel) model = coordModel;
-  } else {
-    const configModel = config.model?.value as string | undefined;
-    if (configModel) model = configModel;
-  }
-}
-if (!model) model = "opus";
-```
-
-**Validation:** `isValidModel(model)` checks: `/^[a-zA-Z0-9._-]+$/`
-
-### Config Permission Merging in newAgent()
-
-```typescript
-const agentType = workerMode ? "worker" : "manager";
-const roleAllow = (config[`permissions.${agentType}.allow`]?.value as string[] | undefined) ?? [];
-const roleDeny = (config[`permissions.${agentType}.deny`]?.value as string[] | undefined) ?? [];
-const allAllow = (config["permissions.all.allow"]?.value as string[] | undefined) ?? [];
-const allDeny = (config["permissions.all.deny"]?.value as string[] | undefined) ?? [];
-const configAllow = [...new Set([...roleAllow, ...allAllow])];
-const configDeny = [...new Set([...roleDeny, ...allDeny])];
-```
-
-**Result:** Deduped union of role-specific + global for both allow/deny lists
-
-### Hooks Injection
-
-All agents get these hooks in settings.local.json:
-- **Stop hook:** `ib hook-status {agentId}` (detects stuck agents, sends nudge)
-- **PermissionRequest hook:** `ib hook-permission-denied {agentId}` (logs permission denials)
-- **PreToolUse hooks:**
-  - `ib hook-check-path {agentId}` (all agents: path isolation)
-  - `ib hooks intercept-task` (managers only: spawn ib agents on Task/Agent tool calls)
-- **SessionStart hook:** `ib hooks session-start` (all agents: role-specific context injection)
-
----
-
-## Coordinator System (src/coordinator.ts)
-
-### System Coordinator
-
-**Hardcoded permissions (not configurable):**
-- **Allow:** `["Bash(ib:*)", "ToolSearch"]`
-- **Deny:** `["Read", "Write", "Edit", "MultiEdit", "Glob", "Grep", "LS", "NotebookEdit", "WebFetch", "WebSearch", "Task", "TaskOutput", "Agent", "KillShell", "EnterPlanMode", "ExitPlanMode"]`
-
-**Model:** `config["coordinator.model"]` or default "opus"
-
-**Location:** `~/.itsybitsy/` (system-wide)
-
-### Per-Repo Coordinator
-
-**Hardcoded allow list:**
-```typescript
-const PER_REPO_COORDINATOR_ALLOW = [
-  "Bash(ib:*)",
-  "Bash(git status:*)", "Bash(git log:*)", "Bash(git diff:*)",
-  "Bash(git show:*)", "Bash(git ls-files:*)",
-  "Bash(pwd:*)", "Bash(ls:*)",
-  "Read", "Glob", "Grep", "LS",
-];
-```
-
-**Hardcoded deny list:**
-```typescript
-const PER_REPO_COORDINATOR_DENY = [
-  "Write", "Edit", "MultiEdit", "NotebookEdit",
-  "WebFetch", "WebSearch", "Task", "TaskOutput", "Agent", "KillShell",
-  "EnterPlanMode", "ExitPlanMode",
-];
-```
+**CLI overrides** (`--allow`/`--deny`): These are passed as `--allowedTools`/`--disallowedTools` flags to the `claude` CLI in `start.sh`, which are separate from `settings.local.json` permissions. They are additive to the settings file.
 
-**Config merge algorithm (`buildPerRepoCoordinatorSettings()`):**
-1. Read `permissions.coordinator.allow/deny` and `permissions.all.allow/deny` from config
-2. Filter config allow entries that conflict with hardcoded deny (silently drop)
-3. Merge: `[...hardcodedAllow, ...filteredConfigAllow]`
-4. Merge deny: `[...hardcodedDeny, ...configDeny]`
-5. Return final permissions
+### For Per-Repo Coordinators (`buildPerRepoCoordinatorSettings()`)
 
-**Key constraint:** Config allow entries in hardcoded deny list are *dropped*, not applied.
+Different layering — hardcoded base is more restrictive:
 
-**Model:** `config["coordinator.model"]` or default "opus"
-
----
-
-## Coordinator-Specific Restrictions (src/hooks/intercept-task.ts)
-
-### Shell Metacharacter Blocking
-
-Coordinator Bash commands cannot contain: `;`, `|`, `&`, `` ` ``, `>`, `<`, `$()`, `${}`, `$'`, newlines
-
-**Regex:** `/[;|&`><]|\$\(|\$\{|\$'|\n|\r/`
-
-**Use case:** Prevents bypassing Bash(ib:*) permission via piped commands
-
-### Git Output Flag Blocking
-
-Coordinator git commands cannot use `--output` flag (prevents file writes without shell metacharacters)
-
-### Task/Agent Tool Interception
-
-Stored in `SKIP_SUBAGENT_TYPES`:
-```typescript
-const SKIP_SUBAGENT_TYPES = [
-  "Bash",
-  "statusline-setup",
-  "claude-code-guide",
-  "meta-agent",
-  "ib-merge",
-];
-```
-
-**Behavior:** These subagent types bypass interception and run directly (not spawned as ib agents)
-
-### Valid Models for Task Interception
-
-```typescript
-const VALID_MODELS = new Set(["sonnet", "opus", "haiku", ""]);
-```
-
-Invalid model → defaults to empty string (no --model flag passed to spawned agent)
-
----
-
-## CLI Flags (newAgent Options)
-
-### New-Agent CLI Signature
-
-```typescript
-export interface NewAgentOptions {
-  worker?: boolean;        // --worker: spawn as worker (not manager)
-  coordinator?: boolean;   // --coordinator: spawn as per-repo coordinator
-  model?: string;          // --model: override model selection
-  yolo?: boolean;          // --yolo: skip permissions, --dangerously-skip-permissions
-  name?: string;           // --name: custom agent ID
-  noWorktree?: boolean;    // --no-worktree: no git worktree isolation
-  allowTools?: string;     // --allow: comma-separated tool list
-  denyTools?: string;      // --deny: comma-separated tool list
-  print?: boolean;         // --print: print result, don't spawn tmux
-  manager?: string;        // --manager: explicit parent agent ID
-  _cwd?: string;           // (internal testing) override cwd
-}
-```
-
-### Validation Rules
-
-| Flag | Validation | Rule |
-|------|-----------|------|
-| `--model` | `isValidModel()` | `/^[a-zA-Z0-9._-]+$/` |
-| `--allow` / `--deny` | `isValidToolList()` | `/^[a-zA-Z0-9_*()\-:,. ]+$/` |
-| `--name` | Custom regex | `/^[a-zA-Z0-9_\-]+$/` |
-| `--worker` / `--coordinator` | Mutual exclusive | Both cannot be true |
-| `--coordinator` + `--no-worktree` | Forbidden | Coordinators require worktree |
-| `--yolo` | Escalation check | Parent must also be yolo to escalate |
-
-### Model Fallback Chain
-
-```
---model CLI > config (coordinator.model | model) > "opus"
-```
-
----
-
-## Validation Rules (src/validation.ts)
-
-| Function | Pattern | Purpose |
-|----------|---------|---------|
-| `isValidModel()` | `/^[a-zA-Z0-9._-]+$/` | Model names (claude-*, sonnet-*, opus-*, etc.) |
-| `isValidToolList()` | `/^[a-zA-Z0-9_*()\-:,. ]+$/` | Comma-separated tool names with wildcards |
-| `isValidAgentId()` | `/^[a-zA-Z0-9_-]+$/` | Agent IDs, names |
-| `isValidTmuxSession()` | `/^[a-zA-Z0-9_-]+$/` | Tmux session names |
-| `isValidSessionId()` | `/^[a-fA-F0-9-]+$/` | Claude session UUID |
-| `isValidShellPath()` | No null bytes or newlines | File paths in shell scripts |
-| `isValidSource()` | `/^[\w-]+$/` | Inbox message sources |
-| `isValidInboxFilename()` | `/^\d+-[0-9a-f]{4}-[\w-]+\.msg$/` | Inbox message filenames |
-
-**Shell quoting:** `shellQuote(value)` uses the standard idiom: `'value'.replace(/'/g, "'\\''")` 
-
----
-
-## Yolo Mode
-
-**Activation:** `--yolo` flag on `ib new-agent`
-
-**Effects:**
-1. Agent created with `yolo: true` in meta.json
-2. start.sh gets `--dangerously-skip-permissions` flag
-3. Skips workspace trust dialogs
-
-**Escalation check:** Can only be enabled if parent agent is also yolo (prevents permission escalation from restricted parent)
-
-**Code:** `newAgent()` lines 1502-1525
-
----
-
-## Per-Agent-Type Configuration Needs
-
-For a hypothetical new agent type system, these config keys would need to be per-type:
-
-### Knobs That Should Be Per-Type
-
-1. **Permissions**
-   - `permissions.{type}.allow` (already exists for manager/worker/coordinator)
-   - `permissions.{type}.deny` (already exists)
-
-2. **Model Selection**
-   - `model.{type}` (currently only `model` global + `coordinator.model`)
-
-3. **Role-Specific Constraints** (NEW)
-   - `{type}.allowWorktree` (boolean) — require/forbid git worktree
-   - `{type}.allowWorkerChildren` (boolean) — can spawn worker sub-agents
-   - `{type}.allowCoordinatorChildren` (boolean) — can spawn coordinators
-   - `{type}.skipPermissionDialogs` (boolean) — auto-accept workspace trust
-   - `{type}.allowTaskInterception` (boolean) — intercept Task/Agent tools
-   - `{type}.maxConcurrentChildren` (number) — concurrent sub-agents limit
-
-4. **Hooks** (future)
-   - `hooks.{type}.PreToolUse` (array) — custom pre-tool hooks
-   - `hooks.{type}.PermissionRequest` (array) — custom permission hooks
-
-### Constraints for Validation
-
-Any agent type definition should enforce:
-
-1. **Permission Sets**
-   - Hardcoded mandatory allow list (always enforced)
-   - Hardcoded deny list (config allow entries conflicting with deny are dropped)
-   - Config allow/deny entries are merged/deduplicated
-
-2. **Model Selection**
-   - Must be a valid model name per `isValidModel()`
-   - Fallback chain: CLI --model > config > default
-
-3. **Tool Lists** (for --allow/--deny)
-   - Must match `isValidToolList()` pattern
-   - Merged with mandatory permissions (not replaced)
-
-4. **Coordinator-Specific**
-   - Read-only file access only (Write/Edit/MultiEdit in deny list)
-   - Shell metacharacter blocking via regex
-   - Cannot use non-ib Bash commands (require manual approval)
-   - Task/Agent tool interception (skips certain types)
-
-5. **Worker-Specific**
-   - Cannot manage sub-agents (no Task/Agent tool interception)
-   - Cannot spawn other workers or coordinators
-   - Cannot escalate permissions via yolo
-
-6. **Manager-Specific**
-   - Can spawn worker sub-agents
-   - Can use Task/Agent tools (intercepted to spawn ib agents)
-   - Can create PRs if config enabled
-
----
-
-## Existing Permission Merging Examples
-
-### Manager Agent (from ib new-agent)
-```javascript
-// Config values
-roleAllow = config["permissions.manager.allow"]?.value ?? []
-roleDeny = config["permissions.manager.deny"]?.value ?? []
-allAllow = config["permissions.all.allow"]?.value ?? []
-allDeny = config["permissions.all.deny"]?.value ?? []
-configAllow = dedup([...roleAllow, ...allAllow])
-configDeny = dedup([...roleDeny, ...allDeny])
-
-// buildAgentSettings merges:
-finalAllow = dedup([
-  ...ibPerms,  // mandatory
-  ...configAllow
-])
-finalDeny = dedup([
-  "EnterPlanMode", "ExitPlanMode",  // hardcoded blocked
-  ...configDeny
-])
-```
-
-### Per-Repo Coordinator (from buildPerRepoCoordinatorSettings)
-```javascript
-configAllow = config["permissions.coordinator.allow"]?.value ?? []
-configDeny = config["permissions.coordinator.deny"]?.value ?? []
-allAllow = config["permissions.all.allow"]?.value ?? []
-allDeny = config["permissions.all.deny"]?.value ?? []
-
-hardcodedDenySet = new Set(PER_REPO_COORDINATOR_DENY)
-filteredConfigAllow = filter(
-  [...configAllow, ...allAllow],
-  entry => !hardcodedDenySet.has(entry)  // drop conflicts
-)
-
-finalAllow = dedup([
-  ...PER_REPO_COORDINATOR_ALLOW,  // hardcoded
-  ...filteredConfigAllow
-])
-finalDeny = dedup([
-  ...PER_REPO_COORDINATOR_DENY,  // hardcoded
-  ...configDeny,
-  ...allDeny
-])
-```
-
-**Key difference:** Coordinator config allow entries that conflict with hardcoded deny are *silently filtered*, while manager/worker allow lists are simply merged.
-
----
-
-## Summary of Knobs in Current System
-
-### Global Knobs (apply to all agents)
-- `maxAgents` — max concurrent agents per repo
-- `model` — default model (overridden by coordinator.model for coordinators)
-- `createPullRequests` — auto-create PRs on merge (managers only)
-- `allowAgentQuestions` — allow agents to ask questions
-- `autoCompactThreshold` — context usage % for auto-compact
-- `externalDiffTool` — diff tool override
-- `hooks.injectStatus` — enable stop hook
-- `hooks.statusVisible` — show stop hook messages
-- `permissions.all.allow/deny` — apply to all agents
-
-### Manager-Specific Knobs
-- `permissions.manager.allow/deny`
-
-### Worker-Specific Knobs
-- `permissions.worker.allow/deny`
-
-### Coordinator-Specific Knobs
-- `coordinator.model` — model for both system and per-repo coordinators
-- `permissions.coordinator.allow/deny` — per-repo coordinator only (system coordinator hardcoded)
-
-### CLI-Specific Knobs
-- `--worker` — spawn as worker
-- `--coordinator` — spawn as per-repo coordinator
-- `--model` — override model
-- `--yolo` — skip permissions
-- `--name` — custom ID
-- `--no-worktree` — no git isolation
-- `--allow` — comma-separated tool allow list
-- `--deny` — comma-separated tool deny list
-- `--manager` — explicit parent agent
-
----
-
-## Notes on Agent Type Extensibility
-
-To support new agent types beyond manager/worker/coordinator, the system would need:
-
-1. **Config schema expansion**
-   - `permissions.{newtype}.allow/deny` arrays
-   - `model.{newtype}` string (or use global model fallback)
-   - Type-specific feature flags (allowWorktree, allowChildren, etc.)
-
-2. **buildAgentSettings() enhancement**
-   - Accept agentType parameter (currently hardcoded "manager" | "worker")
-   - Extend to support additional types
-   - Apply role-specific permission merging based on type
-
-3. **buildPerRepoCoordinatorSettings() pattern**
-   - Each type could have hardcoded allow/deny lists
-   - Config entries filter against hardcoded deny (not added to allow)
-   - Merge with config values
-
-4. **Intercept-task type checking**
-   - Extend `SKIP_SUBAGENT_TYPES` to include type-specific skip lists
-   - Allow types to opt-in/out of Task/Agent tool interception
-
-5. **Validation layers**
-   - Type-specific validation rules for model, tools, paths
-   - Type-specific constraints (worktree required? can spawn children?)
-
+1. **Hardcoded allow** (`PER_REPO_COORDINATOR_ALLOW`):
+   - `Bash(ib:*)` + read-only git: `git status`, `git log`, `git diff`, `git show`, `git ls-files`
+   - `Bash(pwd:*)`, `Bash(ls:*)`
+   - `Read`, `Glob`, `Grep`, `LS`, `TodoWrite`, `AskUserQuestion`, `ToolSearch`
+2. **Hardcoded deny** (`PER_REPO_COORDINATOR_DENY`):
+   - `Write`, `Edit`, `MultiEdit`, `NotebookEdit`, `WebFetch`, `WebSearch`, `Task`, `TaskOutput`, `Agent`, `KillShell`, `EnterPlanMode`, `ExitPlanMode`
+3. **Config merge**:
+   - `permissions.coordinator.allow` + `permissions.all.allow` — but entries that appear in hardcoded deny are **silently dropped**
+   - `permissions.coordinator.deny` + `permissions.all.deny` — appended to hardcoded deny
+
+### For System Coordinator (`buildSystemCoordinatorSettings()`)
+
+Fixed permissions, no config merge at all:
+- **Allow**: `Bash(ib:*)`, `ToolSearch`
+- **Deny**: `Read`, `Write`, `Edit`, `MultiEdit`, `Glob`, `Grep`, `LS`, `NotebookEdit`, `WebFetch`, `WebSearch`, `Task`, `TaskOutput`, `Agent`, `KillShell`, `EnterPlanMode`, `ExitPlanMode`
+
+### Additional Hook-Based Restrictions
+
+- **Path isolation** (`hook-check-path`): Agents can only access their own worktree, `~/.claude`, `/tmp`, and system paths. Cannot access main repo or other agents' worktrees.
+- **Intercept-task** (`intercept-task.ts`): Intercepts `Task`/`Agent` tool calls from managers, spawns ib agents instead. Workers are skipped (native Task allowed). Certain subagent_types are skipped: `Bash`, `statusline-setup`, `claude-code-guide`, `meta-agent`, `ib-merge`.
+- **Coordinator Bash restrictions**: Per-repo coordinators cannot use shell metacharacters (`;`, `|`, `&`, `` ` ``, `>`, `<`, `$()`, etc.) in Bash commands. Also blocks `--output` in git commands.
+
+## 3. Model Selection
+
+### Manager/Worker Agents
+Priority chain: `--model` CLI flag > `config.model` > `"opus"` (hardcoded default)
+
+### Coordinators
+Priority chain: `--model` CLI flag > `config["coordinator.model"]` > `"opus"` (hardcoded default)
+
+### Validation
+- `isValidModel()`: Must match `/^[a-zA-Z0-9._-]+$/` (alphanumeric, dots, hyphens, underscores)
+- `intercept-task.ts` `VALID_MODELS`: Only `"sonnet"`, `"opus"`, `"haiku"`, `""` are accepted. Invalid models are silently reset to `""`.
+
+## 4. New-Agent CLI Flags
+
+Defined in `NewAgentOptions` interface:
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--worker` | boolean | Spawn as worker (cannot manage sub-agents, uses worker permissions, native Task allowed) |
+| `--coordinator` | boolean | Spawn as per-repo coordinator (read-only, one per repo, bypasses maxAgents) |
+| `--model` | string | Override model (takes precedence over config) |
+| `--yolo` | boolean | Skip permissions (`--dangerously-skip-permissions`). Blocked unless parent is also yolo (escalation prevention). |
+| `--name` | string | Custom agent ID (must match `/^[a-zA-Z0-9_\-]+$/`) |
+| `--no-worktree` | boolean | Run in main repo (no git worktree). Not allowed with `--coordinator`. |
+| `--allow` | string | Additional allowed tools (passed as `--allowedTools` to claude CLI) |
+| `--deny` | string | Additional denied tools (passed as `--disallowedTools` to claude CLI) |
+| `--print` | boolean | Run in print mode (`--print` flag to claude CLI) |
+| `--manager` | string | Explicit parent agent ID (auto-detected from cwd if in an agent worktree) |
+
+Mutual exclusivity: `--coordinator` + `--worker` = error. `--coordinator` + `--no-worktree` = error.
+
+## 5. Custom Prompts
+
+Read from `.ittybitsy/prompts/` directory:
+- `all.md` — injected for all agents as `[CUSTOM INSTRUCTIONS]`
+- `manager.md` — injected for managers as `[CUSTOM MANAGER INSTRUCTIONS]`
+- `worker.md` — injected for workers as `[CUSTOM WORKER INSTRUCTIONS]`
+
+No coordinator-specific custom prompt file is loaded.
+
+## 6. Session-Start Role Detection
+
+`session-start.ts` detects 4 roles: `primary`, `manager`, `worker`, `coordinator`. Each gets a different instruction template injected via the SessionStart hook. Role detection reads `meta.json` fields: `worker: true` → worker, `coordinator: true` → coordinator, otherwise → manager. Non-agent cwd → primary.
+
+## 7. Hooks Installed Per Agent Type
+
+| Hook | Manager | Worker | Coordinator |
+|------|---------|--------|-------------|
+| `hook-check-path` (PreToolUse, matcher: `*`) | Yes | Yes | Yes |
+| `hook-status` (Stop, matcher: `*`) | Yes | Yes | Yes |
+| `hook-permission-denied` (PermissionRequest, matcher: `*`) | Yes | Yes | Yes |
+| `session-start` (SessionStart) | Yes | Yes | Yes |
+| `intercept-task` (PreToolUse, matcher: `Task\|Agent`) | Only if parent repo has it | No | Yes (matcher: `Task\|Agent\|Bash`) |
+
+## 8. Knobs Needed for Per-Agent-Type Definitions
+
+If agent types were user-definable, each type would need:
+
+### Permission knobs
+- **allow**: List of tool/bash patterns to add to the allow list
+- **deny**: List of tool/bash patterns to add to the deny list
+- **mandatory allow base**: Which hardcoded set to use (full manager set vs restricted coordinator set vs custom)
+- **mandatory deny base**: Which blocked tools apply
+- **config allow conflict resolution**: Whether config allow entries conflicting with hardcoded deny are silently dropped (coordinator behavior) or allowed through (manager/worker behavior)
+
+### Model knobs
+- **default model**: What model to use when `--model` is not specified (currently `config.model` for manager/worker, `config["coordinator.model"]` for coordinator)
+- **model validation**: Whether to restrict to VALID_MODELS set or allow any valid model string
+
+### Behavioral knobs
+- **can_spawn_agents**: Whether Task/Agent tools are intercepted to spawn ib agents (manager: yes via intercept hook, worker: no/native, coordinator: yes via intercept hook)
+- **can_write_code**: Whether Write/Edit/MultiEdit are allowed (manager/worker: yes, coordinator: no)
+- **can_access_web**: Whether WebFetch/WebSearch are allowed
+- **max_agents_bypass**: Whether this type bypasses the maxAgents limit (coordinator: yes, others: no)
+- **one_per_repo**: Whether only one agent of this type can exist per repo (coordinator: yes, others: no)
+- **bash_restrictions**: Whether shell metacharacters are blocked (coordinator: yes, others: no)
+- **read_only_git**: Whether git write commands (add, commit, merge, rebase) are excluded from allow list
+- **yolo_allowed**: Whether `--yolo` can be used
+- **custom_prompt_file**: Which file from `.ittybitty/prompts/` to load (currently `manager.md` or `worker.md`, not coordinator)
+- **session_instructions_template**: Which instruction template to use at session start
+- **create_prs**: Whether PR creation instructions are injected
+- **auto_detect_manager**: Whether to auto-detect parent from cwd (coordinator: never, others: yes)
+- **naming**: How agent IDs are generated (coordinator: repo basename, others: random hex or `--name`)
+
+### Hook knobs
+- **intercept_task_hook**: Whether the intercept-task PreToolUse hook is installed
+- **intercept_task_matcher**: What tool matcher to use (`Task|Agent` vs `Task|Agent|Bash`)
+
+## 9. Validation Rules & Constraints
+
+| Validator | Regex/Rule | Used For |
+|-----------|-----------|----------|
+| `isValidModel` | `/^[a-zA-Z0-9._-]+$/` | Model names before shell interpolation |
+| `isValidToolList` | `/^[a-zA-Z0-9_*()\-:,. ]+$/` | `--allow`/`--deny` tool lists |
+| `isValidAgentId` | `/^[a-zA-Z0-9_-]+$/` | Agent IDs |
+| `isValidTmuxSession` | `/^[a-zA-Z0-9_-]+$/` | Tmux session names |
+| `isValidSessionId` | `/^[a-fA-F0-9-]+$/` | Claude session UUIDs |
+| `isValidShellPath` | No null bytes or newlines | Repo paths in shell scripts |
+| `isValidSource` | `/^[\w-]+$/` | Inbox message sources |
+| `isValidInboxFilename` | `/^\d+-[0-9a-f]{4}-[\w-]+\.msg$/` | Inbox filenames |
+| `shellQuote` | Replace `'` with `'\''`, wrap in `'` | All shell-interpolated values |
+| Agent name | `/^[a-zA-Z0-9_\-]+$/` | Custom `--name` values |
+| `VALID_MODELS` (intercept) | Set: `sonnet`, `opus`, `haiku`, `""` | Models in intercepted Task/Agent calls |
+
+## 10. Summary: Current Type System
+
+Today there are effectively 4 agent types, but they are **not user-definable**. Each has hardcoded behavior scattered across multiple files:
+
+| Aspect | Manager | Worker | Per-Repo Coordinator | System Coordinator |
+|--------|---------|--------|---------------------|-------------------|
+| Config permissions key | `permissions.manager.*` | `permissions.worker.*` | `permissions.coordinator.*` | None (fixed) |
+| Can write code | Yes | Yes | No | No |
+| Can read code | Yes | Yes | Yes | No |
+| Can spawn agents | Yes (intercepted) | No (native Task) | Yes (intercepted) | No |
+| Bash restrictions | None | None | No metacharacters | Only `ib:*` |
+| Model config key | `model` | `model` | `coordinator.model` | `coordinator.model` |
+| Custom prompt | `manager.md` | `worker.md` | None | Fixed prompt |
+| One per repo | No | No | Yes | One globally |
+| Bypasses maxAgents | No | No | Yes | N/A |

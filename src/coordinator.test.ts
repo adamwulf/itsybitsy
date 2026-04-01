@@ -812,8 +812,9 @@ describe("detectSystemCoordinatorState", () => {
 // ---------------------------------------------------------------------------
 
 describe("getCoordinatorAgentId", () => {
-  test("returns 'coordinator'", () => {
-    expect(getCoordinatorAgentId()).toBe("coordinator");
+  test("returns repo basename", () => {
+    expect(getCoordinatorAgentId("/Users/adam/Developer/muse-ios")).toBe("muse-ios");
+    expect(getCoordinatorAgentId("/home/user/itsybitsy")).toBe("itsybitsy");
   });
 });
 
@@ -851,6 +852,16 @@ describe("perRepoCoordinatorPrompt", () => {
   test("says coordinator does not write code", () => {
     const prompt = perRepoCoordinatorPrompt("test-repo");
     expect(prompt).toContain("do NOT write code directly");
+  });
+
+  test("includes agent ID equal to repo name", () => {
+    const prompt = perRepoCoordinatorPrompt("muse-ios");
+    expect(prompt).toContain("Your agent ID is `muse-ios`");
+  });
+
+  test("mentions workers send messages via repo name", () => {
+    const prompt = perRepoCoordinatorPrompt("muse-ios");
+    expect(prompt).toContain('ib send muse-ios "message"');
   });
 });
 
@@ -908,38 +919,73 @@ describe("buildPerRepoCoordinatorSettings", () => {
 });
 
 describe("checkCoordinatorExists", () => {
-  test("returns false when no coordinator directory", async () => {
+  test("returns false when no agents directory", async () => {
     const td = join(tmpdir(), `coord-nodir-${Date.now()}-${Math.random().toString(36).slice(2)}`);
     await mkdir(td, { recursive: true });
     const result = await checkCoordinatorExists(td);
     expect(result.exists).toBe(false);
+    if (!result.exists) {
+      expect(result.collision).toBe(false);
+    }
     await rm(td, { recursive: true, force: true });
   });
 
-  test("returns exists+isCoordinator when coordinator:true", async () => {
+  test("returns exists when any agent has coordinator:true", async () => {
     const td = join(tmpdir(), `coord-true-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-    const coordDir = join(td, ".ittybitty", "agents", "coordinator");
+    const coordDir = join(td, ".ittybitty", "agents", "my-repo");
     await mkdir(coordDir, { recursive: true });
-    await Bun.write(join(coordDir, "meta.json"), JSON.stringify({ id: "coordinator", coordinator: true }));
+    await Bun.write(join(coordDir, "meta.json"), JSON.stringify({ id: "my-repo", coordinator: true }));
 
     const result = await checkCoordinatorExists(td);
     expect(result.exists).toBe(true);
     if (result.exists) {
       expect(result.isCoordinator).toBe(true);
+      expect(result.agentId).toBe("my-repo");
     }
     await rm(td, { recursive: true, force: true });
   });
 
-  test("returns exists+notCoordinator when no coordinator flag", async () => {
-    const td = join(tmpdir(), `coord-false-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-    const coordDir = join(td, ".ittybitty", "agents", "coordinator");
+  test("returns collision when basename-named agent exists without coordinator flag", async () => {
+    // Repo path ends in "coord-repo" so basename is "coord-repo"
+    const td = join(tmpdir(), `coord-repo`);
+    const agentDir = join(td, ".ittybitty", "agents", "coord-repo");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id: "coord-repo" }));
+
+    const result = await checkCoordinatorExists(td);
+    expect(result.exists).toBe(false);
+    if (!result.exists) {
+      expect(result.collision).toBe(true);
+    }
+    await rm(td, { recursive: true, force: true });
+  });
+
+  test("returns no collision when agents exist but none match basename", async () => {
+    const td = join(tmpdir(), `coord-nocol-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    const agentDir = join(td, ".ittybitty", "agents", "agent-abc123");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id: "agent-abc123" }));
+
+    const result = await checkCoordinatorExists(td);
+    expect(result.exists).toBe(false);
+    if (!result.exists) {
+      expect(result.collision).toBe(false);
+    }
+    await rm(td, { recursive: true, force: true });
+  });
+
+  test("finds coordinator regardless of agent directory name", async () => {
+    const td = join(tmpdir(), `coord-anyname-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    // Agent named with suffix due to collision, but still has coordinator:true
+    const coordDir = join(td, ".ittybitty", "agents", "my-repo-a3f2");
     await mkdir(coordDir, { recursive: true });
-    await Bun.write(join(coordDir, "meta.json"), JSON.stringify({ id: "coordinator" }));
+    await Bun.write(join(coordDir, "meta.json"), JSON.stringify({ id: "my-repo-a3f2", coordinator: true }));
 
     const result = await checkCoordinatorExists(td);
     expect(result.exists).toBe(true);
     if (result.exists) {
-      expect(result.isCoordinator).toBe(false);
+      expect(result.isCoordinator).toBe(true);
+      expect(result.agentId).toBe("my-repo-a3f2");
     }
     await rm(td, { recursive: true, force: true });
   });

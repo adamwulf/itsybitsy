@@ -249,11 +249,10 @@ ${askSection}
 }
 
 function generateWorkerInstructions(ctx: SessionContext): string {
-  // SPEC §12.2.6: Workers under a per-repo coordinator use repo basename for messaging
-  // because `ib send coordinator` routes to the system coordinator, not the per-repo one.
-  const managerSendTarget = ctx.agentManager === "coordinator"
-    ? basename(ctx.rootRepoPath)
-    : ctx.agentManager;
+  // Workers send messages to their manager by agent ID.
+  // Per-repo coordinators are now named with the repo basename (e.g., "muse-ios"),
+  // so `ib send muse-ios` routes correctly to the per-repo coordinator.
+  const managerSendTarget = ctx.agentManager;
 
   return `<ittybitty>
 ## IttyBitty Worker Agent
@@ -362,7 +361,7 @@ You are in a git worktree, which shares the same repository as the main checkout
 | Command | Description |
 |---------|-------------|
 | \`ib new-agent --worker "task"\` | Spawn a worker sub-agent |
-| \`ib list --manager coordinator\` | List your sub-agents |
+| \`ib list --manager ${ctx.agentId}\` | List your sub-agents |
 | \`ib look <id>\` | Read an agent's output |
 | \`ib send <id> "msg"\` | Send input to an agent |
 | \`ib send coordinator "msg"\` | Send message to system coordinator |

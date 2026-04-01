@@ -177,18 +177,18 @@ describe("session-start", () => {
 
   test("worker under coordinator uses repo basename for messaging (SPEC §12.2.6)", () => {
     const cwd = "/Users/me/muse-ios/.ittybitty/agents/agent-abc12345/repo";
+    // After the rename, per-repo coordinators are named by repo basename,
+    // so the worker's manager field is "muse-ios" (not "coordinator").
     const ctx = detectRole(cwd, {
       id: "agent-abc12345",
-      manager: "coordinator",
+      manager: "muse-ios",
       worker: true,
     });
     expect(ctx.role).toBe("worker");
-    expect(ctx.agentManager).toBe("coordinator");
+    expect(ctx.agentManager).toBe("muse-ios");
     const instructions = generateInstructions(ctx);
-    // Should use repo basename 'muse-ios' not 'coordinator' for ib send
+    // Worker should send to manager using the repo basename
     expect(instructions).toContain('ib send muse-ios "msg"');
     expect(instructions).toContain('ib send muse-ios "message"');
-    // Should NOT contain 'ib send coordinator' in the worker commands
-    expect(instructions).not.toContain('ib send coordinator "msg"');
   });
 });

@@ -1435,12 +1435,9 @@ export async function newAgent(
   if (coordinatorMode) {
     const coordStatus = await checkCoordinatorExists(rootRepoPath);
     if (coordStatus.exists) {
-      if (coordStatus.isCoordinator) {
-        // Idempotent no-op per SPEC §12.2.3
-        const repoName = rootRepoPath.split("/").pop() ?? rootRepoPath;
-        return { ok: true, exitCode: 0, stdout: "coordinator", stderr: `Coordinator already exists for ${repoName}` };
-      }
-      return { ok: false, exitCode: 1, stdout: "", stderr: "Error: Agent 'coordinator' already exists but is not a coordinator — kill it first" };
+      // Idempotent no-op per SPEC §12.2.3
+      const repoName = rootRepoPath.split("/").pop() ?? rootRepoPath;
+      return { ok: true, exitCode: 0, stdout: coordStatus.agentId, stderr: `Coordinator already exists for ${repoName}` };
     }
   }
   const printMode = opts?.print === true;
@@ -1565,7 +1562,15 @@ export async function newAgent(
   // 9. Generate agent ID
   let id: string;
   if (coordinatorMode) {
-    id = getCoordinatorAgentId();
+    id = getCoordinatorAgentId(rootRepoPath);
+    // Collision handling: if a non-coordinator agent already has the basename,
+    // append a random 4-char hex suffix
+    const coordCheck = await checkCoordinatorExists(rootRepoPath);
+    if (!coordCheck.exists && coordCheck.collision) {
+      const suffix = Array.from(crypto.getRandomValues(new Uint8Array(2)))
+        .map(b => b.toString(16).padStart(2, "0")).join("");
+      id = `${id}-${suffix}`;
+    }
   } else if (opts?.name) {
     if (!/^[a-zA-Z0-9_\-]+$/.test(opts.name)) {
       return { ok: false, exitCode: 1, stdout: "", stderr: "Error: agent name may only contain letters, digits, hyphens, and underscores" };

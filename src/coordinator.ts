@@ -419,42 +419,70 @@ export async function buildPerRepoCoordinatorSettings(): Promise<{
  * Parameterized with the repo name.
  */
 export function perRepoCoordinatorPrompt(repoName: string): string {
-  return `You are a per-repo coordinator for the \`${repoName}\` repository. You can read files and code in this repo using Read, Glob, Grep, and LS. You coordinate work by spawning and managing worker agents using \`ib\` commands. You do NOT write code directly — instead, spawn worker agents with \`ib new-agent --worker "task"\` to implement changes. Review their work with \`ib diff <id>\` and merge with \`ib merge <id>\`. To send messages to the system coordinator, use \`ib send coordinator "message"\`.`;
+  return `You are a per-repo coordinator for the \`${repoName}\` repository. Your agent ID is \`${repoName}\`. You can read files and code in this repo using Read, Glob, Grep, and LS. You coordinate work by spawning and managing worker agents using \`ib\` commands. You do NOT write code directly — instead, spawn worker agents with \`ib new-agent --worker "task"\` to implement changes. Review their work with \`ib diff <id>\` and merge with \`ib merge <id>\`. To send messages to the system coordinator, use \`ib send coordinator "message"\`. Workers send messages to you with \`ib send ${repoName} "message"\`.`;
 }
 
 /**
  * Determine the coordinator agent ID for a repo.
- * Per SPEC §12.2.2, the ID is always "coordinator".
+ * Uses the repo basename (e.g., "muse-ios" for /Users/adam/Developer/muse-ios).
+ * This enables `ib send muse-ios "message"` for consistent messaging.
  */
-export function getCoordinatorAgentId(): string {
-  return "coordinator";
+export function getCoordinatorAgentId(repoPath: string): string {
+  return basename(repoPath);
 }
 
 /**
  * Check if a coordinator already exists for a repo.
- * Returns: { exists: true, isCoordinator: true } if coordinator agent exists with coordinator:true
- *          { exists: true, isCoordinator: false } if agent named "coordinator" exists but is NOT a coordinator
- *          { exists: false } if no agent named "coordinator" exists
+ * Scans all agents in the repo for one with coordinator:true in meta.json.
+ * Also checks whether a non-coordinator agent with the repo basename already exists (collision).
+ *
+ * Returns:
+ *   { exists: true, isCoordinator: true, agentId: string } — coordinator found
+ *   { exists: false, collision: true } — no coordinator, but basename-named non-coordinator agent exists
+ *   { exists: false, collision: false } — no coordinator and no collision
  */
 export async function checkCoordinatorExists(repoPath: string): Promise<
-  { exists: true; isCoordinator: boolean } | { exists: false }
+  | { exists: true; isCoordinator: true; agentId: string }
+  | { exists: false; collision: boolean }
 > {
   const agentsDir = join(repoPath, ".ittybitty", "agents");
-  const coordDir = join(agentsDir, "coordinator");
-  const metaPath = join(coordDir, "meta.json");
 
-  if (!existsSync(metaPath)) {
-    return { exists: false };
+  if (!existsSync(agentsDir)) {
+    return { exists: false, collision: false };
   }
+
+  const repoBasename = basename(repoPath);
+  let hasCollision = false;
 
   try {
-    const raw = readFileSync(metaPath, "utf8");
-    const meta = JSON.parse(raw);
-    return { exists: true, isCoordinator: meta.coordinator === true };
+    const { readdirSync } = await import("node:fs");
+    const entries = readdirSync(agentsDir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const metaPath = join(agentsDir, entry.name, "meta.json");
+      if (!existsSync(metaPath)) continue;
+      try {
+        const raw = readFileSync(metaPath, "utf8");
+        const meta = JSON.parse(raw);
+        if (meta.coordinator === true) {
+          return { exists: true, isCoordinator: true, agentId: entry.name };
+        }
+        // Check for name collision with repo basename
+        if (entry.name === repoBasename) {
+          hasCollision = true;
+        }
+      } catch {
+        // Can't parse — check name collision only
+        if (entry.name === repoBasename) {
+          hasCollision = true;
+        }
+      }
+    }
   } catch {
-    // File exists but can't be read/parsed — agent exists but not a coordinator
-    return { exists: true, isCoordinator: false };
+    return { exists: false, collision: false };
   }
+
+  return { exists: false, collision: hasCollision };
 }
 
 /**

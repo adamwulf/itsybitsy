@@ -66,7 +66,7 @@ import { SystemDashboardComponent } from "./system-dashboard";
 import { loadLayout, saveLayoutDebounced, cancelPendingSave, flushPendingSave } from "./layout";
 import type { LayoutState } from "./layout";
 import { InputFieldComponent } from "./input-field";
-import { sendMessage } from "../ib-commands";
+import { sendMessage, pauseAgent } from "../ib-commands";
 import { getResolvableWarnings } from "../health-check";
 
 // Re-export for test compatibility
@@ -1751,8 +1751,12 @@ export async function launchDashboard(): Promise<void> {
       dashboard.setTerminalTitle("");
       process.stdout.write("\x1b[2J\x1b[H");
       // Release coordinator ref — if last ref, kills the tmux session
+      // and pauses all per-repo coordinators
       releaseSystemCoordinator(async () => {
-        // onLastRef no-op — Phase 48h will add per-repo coordinator pausing
+        // Pause all per-repo coordinators when last watcher exits
+        const agents = dashboard.watcher?.lastAgents ?? [];
+        const coordinators = agents.filter(a => a.meta.coordinator === true);
+        await Promise.all(coordinators.map(a => pauseAgent(a).catch(() => {})));
       }).finally(() => {
         process.exit(0);
       });

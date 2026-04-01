@@ -706,10 +706,12 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
     if (output === null) {
       // Tmux session missing — start or continue grace period
       if (tmuxGoneSince === null) {
+        await logAgent(agentDir, "[watchdog] tmux session disappeared — starting 10s grace period");
         await captureAndLogDeadPane(agentId, agentDir, tmuxSession);
         tmuxGoneSince = nowFn();
       } else if (nowFn() - tmuxGoneSince >= TMUX_GONE_GRACE_MS) {
         // Exit condition (b): tmux gone for >10s
+        await logAgent(agentDir, "[watchdog] tmux session gone for >10s — exiting watchdog");
         break;
       }
     } else {

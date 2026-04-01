@@ -405,7 +405,7 @@ CLAUDE_PID=$!
 log "Claude PID: $CLAUDE_PID"
 trap 'log "script received SIGHUP — tmux pane killed or closed; sending SIGTERM to Claude PID=$CLAUDE_PID"; kill $CLAUDE_PID 2>/dev/null' HUP
 trap 'log "script received SIGTERM; sending SIGTERM to Claude PID=$CLAUDE_PID"; kill $CLAUDE_PID 2>/dev/null' TERM
-trap 'log "script received SIGINT; sending SIGINT to Claude PID=$CLAUDE_PID"; kill $CLAUDE_PID 2>/dev/null' INT
+trap 'log "script received SIGINT; sending SIGINT to Claude PID=$CLAUDE_PID"; kill -INT $CLAUDE_PID 2>/dev/null' INT
 
 # Store PID in meta.json
 META_JSON=${qMetaJson}
@@ -1839,7 +1839,7 @@ CLAUDE_PID=$!
 log "Claude PID: $CLAUDE_PID"
 trap 'log "script received SIGHUP — tmux pane killed or closed; sending SIGTERM to Claude PID=$CLAUDE_PID"; kill $CLAUDE_PID 2>/dev/null' HUP
 trap 'log "script received SIGTERM; sending SIGTERM to Claude PID=$CLAUDE_PID"; kill $CLAUDE_PID 2>/dev/null' TERM
-trap 'log "script received SIGINT; sending SIGINT to Claude PID=$CLAUDE_PID"; kill $CLAUDE_PID 2>/dev/null' INT
+trap 'log "script received SIGINT; sending SIGINT to Claude PID=$CLAUDE_PID"; kill -INT $CLAUDE_PID 2>/dev/null' INT
 
 # Store PID in meta.json
 META_JSON=${qStartMetaJson}

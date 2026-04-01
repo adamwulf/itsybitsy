@@ -203,7 +203,7 @@ export async function ensureSystemCoordinator(): Promise<string> {
     }
     throw new Error("Failed to create system coordinator tmux session");
   }
-  await coordinatorSpawnCtx.run(["tmux", "set-option", "-t", IB_COORDINATOR_SESSION, "history-limit", "50000"]);
+  await coordinatorSpawnCtx.run(["tmux", "set-option", "-w", "-t", IB_COORDINATOR_SESSION, "history-limit", "50000"]);
 
   // Read coordinator model from config
   const config = await readConfig();

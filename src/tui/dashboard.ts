@@ -492,7 +492,7 @@ export class DashboardComponent implements Component {
   /** Poller for per-repo coordinator tmux output (REPO mode) */
   private repoCoordinatorPoller: TmuxPoller;
   /** The tmux session currently being polled for repo coordinator */
-  private repoCoordinatorSession: string | null = null;
+  repoCoordinatorSession: string | null = null;
   currentAgentId: string | null = null;
   _dialog: DialogState = null;
   private overlayHandle: OverlayHandle | null = null;
@@ -540,6 +540,12 @@ export class DashboardComponent implements Component {
   /** Read-only access to whether questions list has focus (for testing) */
   get questionsFocused(): boolean {
     return this._questionsFocused;
+  }
+
+  /** Compute the right pane width based on terminal, sidebar, and split pane widths */
+  getRightPaneWidth(): number {
+    const mainWidth = process.stdout.columns - this.sidebarWidth - 1;
+    return mainWidth - this.splitPane.getLeftWidth() - 1;
   }
 
   setQuestionsFocused(value: boolean) {
@@ -1021,6 +1027,11 @@ export class DashboardComponent implements Component {
         this.rightPane.repoCoordinatorOutput = null;
         this.rightPane.repoCoordinatorHasPolled = false;
         this.repoCoordinatorPoller.setAgent(tmuxSession);
+        // Resize repo coordinator tmux to match right pane width
+        if (tmuxSession) {
+          const rpw = this.getRightPaneWidth();
+          if (rpw > 0) resizeTmuxWindow(tmuxSession, rpw);
+        }
       }
     } else {
       // Not a repo header — clear coordinator state
@@ -1516,6 +1527,11 @@ export class DashboardComponent implements Component {
         const MAX_SIDEBAR = 120;
         this.sidebarWidth = Math.max(MIN_SIDEBAR, Math.min(MAX_SIDEBAR, this.sidebarWidth + delta));
         resizeCoordinatorTmux(this.sidebarWidth);
+        // Resize repo coordinator tmux to match new right pane width
+        if (this.repoCoordinatorSession) {
+          const rpw = this.getRightPaneWidth();
+          if (rpw > 0) resizeTmuxWindow(this.repoCoordinatorSession, rpw);
+        }
         this.tui?.requestRender();
       } else if (focus === "right-pane") {
         // Right pane focused: ] grows right (shrinks middle) = negative delta to handleResizeLeft

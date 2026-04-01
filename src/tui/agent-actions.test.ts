@@ -103,6 +103,8 @@ function makeMockCtx(overrides?: {
     jumpToMode: () => {},
     setQuestionsFocused: () => {},
     healthReport: undefined,
+    sidebarWidth: 60,
+    repoCoordinatorSession: null,
   };
   return { ctx, dialogs, notices, refreshCalls, scrollUpCalls, scrollDownCalls };
 }

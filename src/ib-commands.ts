@@ -1355,7 +1355,7 @@ async function buildAgentSettings(
   ];
   if (addIntercept) {
     preToolUseHooks.push(
-      { matcher: "Task|Agent", hooks: [{ type: "command", command: "ib hooks intercept-task" }] }
+      { matcher: "Task|Agent|TaskCreate", hooks: [{ type: "command", command: "ib hooks intercept-task" }] }
     );
   }
 
@@ -1673,7 +1673,7 @@ export async function newAgent(
           PermissionRequest: [{ matcher: "*", hooks: [{ type: "command", command: hookCmd }] }],
           PreToolUse: [
             { matcher: "*", hooks: [{ type: "command", command: `ib hook-check-path ${id}` }] },
-            { matcher: "Task|Agent|Bash", hooks: [{ type: "command", command: "ib hooks intercept-task" }] },
+            { matcher: "Task|Agent|TaskCreate|Bash", hooks: [{ type: "command", command: "ib hooks intercept-task" }] },
           ],
           SessionStart: [{ hooks: [{ type: "command", command: "ib hooks session-start" }] }],
         },
@@ -2746,7 +2746,7 @@ export async function installInterceptHook(_repoPath: string, settingsPath?: str
   settings.hooks = hooks;
   if (!Array.isArray(hooks.PreToolUse)) hooks.PreToolUse = [];
   (hooks.PreToolUse as unknown[]).push({
-    matcher: "Task|Agent",
+    matcher: "Task|Agent|TaskCreate",
     hooks: [{ type: "command", command: "ib hooks intercept-task" }],
   });
 

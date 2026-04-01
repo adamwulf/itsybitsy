@@ -5,6 +5,7 @@
 
 import type { Component } from "@mariozechner/pi-tui";
 import { truncateToWidth } from "@mariozechner/pi-tui";
+import type { InputFieldComponent } from "./input-field";
 import type { Agent, FlatEntry, PendingQuestion, DenialEntry } from "../agents";
 import type { RepoHealthReport } from "../health-check";
 import { getResolvableWarnings } from "../health-check";
@@ -125,6 +126,10 @@ export class RightPaneComponent implements Component {
   repoCoordinatorHeightOffset = 0;
   /** The coordinator agent for the selected repo (if any) */
   repoCoordinatorAgent: Agent | null = null;
+  /** Input field for sending messages to the repo coordinator */
+  repoCoordinatorInputField: InputFieldComponent | null = null;
+  /** Whether the repo-coordinator panel is focused */
+  repoCoordinatorFocused = false;
   private content: string[] = [];
 
   /** Return questions filtered by the currently selected agent. If no agent, return all. */
@@ -467,10 +472,17 @@ export class RightPaneComponent implements Component {
     }
     while (lines.length < repoHeight) { lines.push(" "); }
 
-    // Bottom section: coordinator tmux output
+    // Bottom section: coordinator tmux output + optional input field
     if (coordinatorHeight > 0) {
-      const coordLines = this.renderRepoCoordinatorSection(width, coordinatorHeight, false);
+      const showInputField = this.repoCoordinatorFocused && this.repoCoordinatorInputField?.active === true;
+      const inputFieldHeight = showInputField ? this.repoCoordinatorInputField!.getHeight(width) : 0;
+      const coordContentHeight = coordinatorHeight - inputFieldHeight;
+      const coordLines = this.renderRepoCoordinatorSection(width, coordContentHeight, this.repoCoordinatorFocused);
       lines.push(...coordLines);
+      if (showInputField) {
+        const inputLines = this.repoCoordinatorInputField!.render(width);
+        lines.push(...inputLines);
+      }
     }
 
     while (lines.length < this.displayHeight) { lines.push(" "); }

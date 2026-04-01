@@ -512,6 +512,7 @@ export class DashboardComponent implements Component {
   private focusManager = new FocusManager();
   inputField: InputFieldComponent;
   coordinatorInputField: InputFieldComponent;
+  repoCoordinatorInputField: InputFieldComponent;
   systemDashboard: SystemDashboardComponent;
   /** Which view to show in the main area when coordinator is selected */
   coordinatorViewMode: "TMUX" | "DASHBOARD" = "TMUX";
@@ -633,6 +634,23 @@ export class DashboardComponent implements Component {
       this.tui?.requestRender();
     };
     this.sidebar.coordinatorInputField = this.coordinatorInputField;
+
+    this.repoCoordinatorInputField = new InputFieldComponent();
+    this.repoCoordinatorInputField.onSubmit = (text: string) => {
+      const agent = this.rightPane.repoCoordinatorAgent;
+      if (!agent || !text.trim()) return;
+      this.executeAndRefresh(async () => {
+        const result = await sendMessage(agent, text.trim(), { cwd: "/" });
+        this.setNotice(result.ok ? `Sent to ${agent.id}` : `Send failed: ${result.stderr || result.stdout}`);
+      });
+    };
+    this.repoCoordinatorInputField.onCancel = () => {
+      this.focusManager.setFocus("agent-tree");
+      this.tui?.requestRender();
+    };
+    this.repoCoordinatorInputField.onAsyncRender = () => {
+      this.tui?.requestRender();
+    };
 
     this.tmuxPoller = new TmuxPoller({
       onOutput: (raw, _stripped) => {
@@ -1021,6 +1039,22 @@ export class DashboardComponent implements Component {
       jumpToMode(this, wouldSkip ? "AGENT LOG" : savedMode);
     }
 
+    // Update skip targets: repo-coordinator is only available in REPO mode with a coordinator
+    const repoCoordAvailable = this.rightPane.mode === "REPO" && this.rightPane.repoCoordinatorAgent != null;
+    if (repoCoordAvailable) {
+      this.focusManager.skipTargets.delete("repo-coordinator");
+    } else {
+      this.focusManager.skipTargets.add("repo-coordinator");
+      // If currently focused on repo-coordinator but it's no longer available, move to agent-tree
+      if (this.focusManager.current() === "repo-coordinator") {
+        this.focusManager.setFocus("agent-tree");
+      }
+    }
+    // Switch repo coordinator input field agent
+    this.repoCoordinatorInputField.switchAgent(
+      this.rightPane.repoCoordinatorAgent?.id ?? null
+    );
+
     // Determine the effective ID for change detection
     const newId = isCoordinator ? "__coordinator__" : (selected?.id ?? null);
     if (newId !== this.currentAgentId) {
@@ -1219,6 +1253,63 @@ export class DashboardComponent implements Component {
             this.coordinatorInputField.clear();
             this.focusManager.setSubFocus("pane");
             this.coordinatorInputField.onSubmit?.(text);
+          }
+          this.tui?.requestRender();
+          return;
+        }
+        if (matchesKey(data, Key.escape) || data === "\x1b") {
+          this.focusManager.setSubFocus("pane");
+          this.tui?.requestRender();
+          return;
+        }
+        // Fall through to normal dashboard handling
+      }
+
+      // Pane sub-focus and Send sub-focus: fall through to normal dashboard key handling
+    }
+
+    // When repo-coordinator panel is focused, use same three-level sub-focus as coordinator.
+    // Only active when in REPO mode with a coordinator agent.
+    if (this.focusManager.current() === "repo-coordinator" && this.rightPane.repoCoordinatorAgent) {
+      const sf = this.focusManager.subFocus;
+
+      // Tab navigation through sub-focus states
+      if (data === "\t" || matchesKey(data, Key.tab)) {
+        if (sf === "pane") { this.focusManager.setSubFocus("input"); }
+        else if (sf === "input") { this.focusManager.setSubFocus("send"); }
+        else { this.focusManager.cycle(1); } // send → next panel
+        this.tui?.requestRender();
+        return;
+      }
+      if (data === "\x1b[Z" || matchesKey(data, Key.shift("tab"))) {
+        if (sf === "send") { this.focusManager.setSubFocus("input"); }
+        else if (sf === "input") { this.focusManager.setSubFocus("pane"); }
+        else { this.focusManager.cycle(-1); } // pane → prev panel
+        this.tui?.requestRender();
+        return;
+      }
+
+      // Input sub-focus: capture everything
+      if (sf === "input") {
+        if (matchesKey(data, Key.escape) || data === "\x1b") {
+          this.repoCoordinatorInputField.clear();
+          this.focusManager.setSubFocus("pane");
+          this.tui?.requestRender();
+          return;
+        }
+        this.repoCoordinatorInputField.handleInput(data);
+        this.tui?.requestRender();
+        return;
+      }
+
+      // Send sub-focus: Enter submits
+      if (sf === "send") {
+        if (matchesKey(data, Key.enter) || data === "\r" || data === "\n") {
+          const text = this.repoCoordinatorInputField.getText();
+          if (text.trim()) {
+            this.repoCoordinatorInputField.clear();
+            this.focusManager.setSubFocus("pane");
+            this.repoCoordinatorInputField.onSubmit?.(text);
           }
           this.tui?.requestRender();
           return;
@@ -1482,7 +1573,7 @@ export class DashboardComponent implements Component {
         }
         this.tui?.requestRender();
       }
-      else if (focus === "right-pane" && this.rightPane.mode === "REPO" && this.rightPane.repoCoordinatorAgent) {
+      else if ((focus === "right-pane" || focus === "repo-coordinator") && this.rightPane.mode === "REPO" && this.rightPane.repoCoordinatorAgent) {
         // Resize repo coordinator split: } grows coordinator, { shrinks it
         this.rightPane.repoCoordinatorHeightOffset += delta;
         // Clamp to valid range
@@ -1675,6 +1766,16 @@ export class DashboardComponent implements Component {
         this.coordinatorInputField.setFocusState(coordSf === "send" ? "send" : "text");
       }
     }
+
+    // Set repo coordinator input field state
+    const isRepoCoordFocused = this.focusManager.current() === "repo-coordinator";
+    const repoCoordSf = this.focusManager.subFocus;
+    this.repoCoordinatorInputField.active = isRepoCoordFocused && repoCoordSf !== "pane";
+    if (isRepoCoordFocused) {
+      this.repoCoordinatorInputField.setFocusState(repoCoordSf === "send" ? "send" : "text");
+    }
+    this.rightPane.repoCoordinatorInputField = this.repoCoordinatorInputField;
+    this.rightPane.repoCoordinatorFocused = isRepoCoordFocused;
     const sidebarLines = this.sidebar.render(sidebarW);
     lines.push(...mergeSidebarAndMain(sidebarLines, mainLines, availableHeight + 1, mainWidth, sidebarW));
 

@@ -106,6 +106,8 @@ export class TmuxPaneComponent implements Component {
   trimInputSeparator = false;
   /** Lines below the last separator (status line), populated by parseStatusLines() */
   statusLines: string[] = [];
+  /** When true, render output without requiring an agent (used for coordinator) */
+  agentless = false;
 
   invalidate(): void {}
 
@@ -149,12 +151,28 @@ export class TmuxPaneComponent implements Component {
   }
 
   render(width: number): string[] {
-    if (!this.agent) {
+    if (!this.agent && !this.agentless) {
       return padLines([truncateToWidth(`${DIM}No agent selected${RESET}`, width, "")], this.displayHeight);
     }
 
+    // Agentless mode: simplified state handling (no clientAttached/stopped display)
+    if (this.agentless) {
+      if (!this.hasPolled) {
+        return padLines([
+          truncateToWidth(`${DIM}Waiting for output...${RESET}`, width, ""),
+        ], this.displayHeight);
+      }
+      if (!this.rawOutput) {
+        return padLines([
+          truncateToWidth(`${YELLOW}Session stopped${RESET}`, width, ""),
+          truncateToWidth(`${DIM}Press R to restart${RESET}`, width, ""),
+        ], this.displayHeight);
+      }
+      // Fall through to normal output rendering below
+    }
+
     // Show centered message when agent's tmux session is opened in an external terminal
-    if (this.clientAttached) {
+    if (this.clientAttached && this.agent) {
       const lines: string[] = [];
       const midLine = Math.floor(this.displayHeight / 2);
       const idText = `${DIM}${this.agent.id}${RESET}`;
@@ -178,7 +196,7 @@ export class TmuxPaneComponent implements Component {
     }
 
     // Graceful display for stopped/orphaned agents (no tmux session)
-    if (this.hasPolled && !this.rawOutput) {
+    if (this.hasPolled && !this.rawOutput && this.agent) {
       const stateColor = getStateColors()[this.agent.state] ?? getStateColors().unknown;
       const lines = [
         truncateToWidth(`${BOLD}${this.agent.id}${RESET}`, width, ""),
@@ -194,7 +212,7 @@ export class TmuxPaneComponent implements Component {
       return padLines(lines, this.displayHeight);
     }
 
-    if (!this.rawOutput) {
+    if (!this.rawOutput && this.agent) {
       return padLines([
         truncateToWidth(`${BOLD}${this.agent.id}${RESET} ${DIM}(${this.agent.meta.tmux_session})${RESET}`, width, ""),
         truncateToWidth(`${DIM}Waiting for tmux output...${RESET}`, width, ""),
@@ -929,8 +947,9 @@ export class DashboardComponent implements Component {
     this.focusManager.coordinatorMode = isCoordinator;
     this.sidebar.hideCoordinator = isCoordinator;
 
-    // When entering coordinator mode, ensure focus is on a valid target and reset view
-    if (isCoordinator) {
+    // When entering coordinator mode (transition, not every tick), reset view and focus
+    const wasCoordinator = this.currentAgentId === "__coordinator__";
+    if (isCoordinator && !wasCoordinator) {
       this.coordinatorViewMode = "TMUX";
       const focus = this.focusManager.current();
       if (focus !== "agent-tree" && focus !== "info" && focus !== "coordinator") {
@@ -1528,7 +1547,7 @@ export class DashboardComponent implements Component {
     let mainLines: string[];
     if (isCoordinatorView && this.coordinatorViewMode === "TMUX") {
       // System coordinator TMUX view: full-width coordinator tmux output in main area.
-      // Uses coordinatorPane (always-on poller) since tmuxPane.render() requires an agent.
+      // Reuses coordinatorPane (agentless TmuxPaneComponent) for rendering.
       const isCoordFocused = this.focusManager.current() === "coordinator";
       const coordSf = this.focusManager.subFocus;
       const showCoordInput = isCoordFocused && coordSf !== "pane";
@@ -1539,71 +1558,24 @@ export class DashboardComponent implements Component {
         this.coordinatorInputField.setFocusState(coordSf === "send" ? "send" : "text");
       }
 
-      // Compute input field height
-      let statusLines: string[] = [];
-      if (showCoordInput && this.coordinatorPane.rawOutput) {
-        const wrapped = wrapLines(this.coordinatorPane.rawOutput, mainWidth);
-        const { lowerIndex } = findLastTwoSeparators(wrapped);
-        if (lowerIndex >= 0 && lowerIndex < wrapped.length - 1) {
-          statusLines = wrapped.slice(lowerIndex + 1).map(
-            (line) => truncateToWidth(line, mainWidth, "")
-          );
-          while (statusLines.length > 0 && statusLines[statusLines.length - 1]!.trim() === "") {
-            statusLines.pop();
-          }
-        }
-      }
-      const inputFieldHeight = showCoordInput ? this.coordinatorInputField.getHeight(mainWidth) + statusLines.length : 0;
-      const outputHeight = availableHeight - inputFieldHeight;
-
-      // Render coordinator tmux output
-      const rawOutput = this.coordinatorPane.rawOutput;
-      let tmuxLines: string[];
-      if (!this.coordinatorPane.hasPolled) {
-        tmuxLines = padLines([
-          truncateToWidth(`${DIM}Waiting for coordinator output...${RESET}`, mainWidth, ""),
-        ], outputHeight);
-      } else if (!rawOutput) {
-        tmuxLines = padLines([
-          truncateToWidth(`${YELLOW}System coordinator stopped${RESET}`, mainWidth, ""),
-          truncateToWidth(`${DIM}Press R to restart${RESET}`, mainWidth, ""),
-        ], outputHeight);
+      // Configure coordinatorPane for main area rendering
+      this.coordinatorPane.agentless = true;
+      this.coordinatorPane.trimInputSeparator = showCoordInput;
+      if (showCoordInput) {
+        this.coordinatorPane.parseStatusLines(mainWidth);
       } else {
-        let wrapped = wrapLines(rawOutput, mainWidth);
-
-        // Trim Claude's input area when showing our own input field
-        if (showCoordInput) {
-          const { upperIndex } = findLastTwoSeparators(wrapped);
-          if (upperIndex >= 0 && upperIndex < wrapped.length) {
-            wrapped = wrapped.slice(0, upperIndex);
-          }
-        }
-
-        // Scroll support via coordinatorPane.scrollBack
-        const maxScrollBack = Math.max(0, wrapped.length - outputHeight);
-        if (this.coordinatorPane.scrollBack > maxScrollBack) {
-          this.coordinatorPane.scrollBack = maxScrollBack;
-        }
-        const contentHeight = this.coordinatorPane.scrollBack > 0 ? outputHeight - 1 : outputHeight;
-        const end = wrapped.length - this.coordinatorPane.scrollBack;
-        const start = Math.max(0, end - contentHeight);
-        const visible = wrapped.slice(start, end);
-        tmuxLines = visible.map((line) => truncateToWidth(line, mainWidth, ""));
-
-        if (this.coordinatorPane.scrollBack > 0) {
-          tmuxLines.push(truncateToWidth(
-            `${DIM}── ↓ ${this.coordinatorPane.scrollBack} lines below ──${RESET}`,
-            mainWidth,
-            ""
-          ));
-        }
-
-        tmuxLines = padLines(tmuxLines, outputHeight);
+        this.coordinatorPane.statusLines = [];
       }
+
+      const statusLinesCount = this.coordinatorPane.statusLines.length;
+      const inputFieldHeight = showCoordInput ? this.coordinatorInputField.getHeight(mainWidth) + statusLinesCount : 0;
+      this.coordinatorPane.displayHeight = Math.max(0, availableHeight - inputFieldHeight);
+
+      const tmuxLines = this.coordinatorPane.render(mainWidth);
 
       if (showCoordInput) {
         const inputLines = this.coordinatorInputField.render(mainWidth);
-        tmuxLines.push(...inputLines, ...statusLines);
+        tmuxLines.push(...inputLines, ...this.coordinatorPane.statusLines);
       }
 
       // Pad to available height
@@ -1612,6 +1584,7 @@ export class DashboardComponent implements Component {
       mainLines = [mainTitleSep, ...tmuxLines.slice(0, availableHeight)];
     } else if (isCoordinatorView) {
       // System coordinator DASHBOARD view: full-width agent overview table
+      this.coordinatorInputField.active = false;
       this.systemDashboard.displayHeight = availableHeight;
       mainLines = [mainTitleSep, ...this.systemDashboard.render(mainWidth)];
     } else if (isTreeMode) {

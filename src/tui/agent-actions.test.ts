@@ -92,7 +92,7 @@ function makeMockCtx(overrides?: {
     },
     tui: { requestRender: () => {} },
     repos: overrides?.repos ?? [],
-    watcher: { refresh: () => refreshCalls.push(1), updateRepos: () => {}, recheckHealth: () => {} },
+    watcher: { refresh: () => refreshCalls.push(1), updateRepos: () => {}, recheckHealth: () => {}, lastAgents: [] },
     diffTool: undefined,
     pendingSelectNewestInRepo: null,
     showDialog: (d: NonNullable<DialogState>) => { dialogs.push(d); },

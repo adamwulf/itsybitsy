@@ -62,7 +62,7 @@ export interface ActionCtx {
   splitPane: { getLeftWidth(): number; setLeftWidth(w: number): void };
   tui: { requestRender(): void } | null;
   repos: RepoEntry[];
-  watcher: { refresh(): void; updateRepos(repos: RepoEntry[]): void; recheckHealth(): void } | null;
+  watcher: { refresh(): void; updateRepos(repos: RepoEntry[]): void; recheckHealth(): void; lastAgents: Agent[] } | null;
   diffTool: string | undefined;
   pendingSelectNewestInRepo: string | null;
   showDialog(dialog: NonNullable<DialogState>): void;
@@ -183,9 +183,8 @@ export function handleResume(ctx: ActionCtx) {
       const coordStatus = await checkCoordinatorExists(repo.path);
       if (coordStatus.exists) {
         // Coordinator exists — find and resume it
-        const agent = ctx.agentTree.flatList
-          .filter((e): e is Extract<typeof e, { kind: "agent" }> => e.kind === "agent")
-          .map(e => e.agent)
+        // Coordinators are filtered out of flatList, so search the full agent list
+        const agent = (ctx.watcher?.lastAgents ?? [])
           .find(a => a.id === coordStatus.agentId);
         if (agent && (agent.state === "stopped" || agent.state === "complete")) {
           const result = await resumeAgent(agent);

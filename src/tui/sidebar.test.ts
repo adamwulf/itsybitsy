@@ -260,15 +260,13 @@ describe("SidebarComponent", () => {
     sidebar.displayHeight = 25;
     sidebar.agentTree.setFlatList([]);
     const base = computeSidebarHeights(25, 0);
-    // Apply extreme negative offsets to all panels
+    // Apply extreme negative offsets to panels
     sidebar.heightOffsets.tree = -(base.treeHeight + 100);
     sidebar.heightOffsets.info = -(base.infoHeight + 100);
-    sidebar.heightOffsets.coordinator = -(base.coordinatorHeight + 100);
     const lines = sidebar.render(SIDEBAR_WIDTH);
     const text = lines.map(stripAnsi).join("\n");
-    // All sections should still render (headers visible)
+    // Both sections should still render (headers visible)
     expect(text).toContain("Agents");
     expect(text).toContain("Info");
-    expect(text).toContain("System Coordinator");
   });
 });

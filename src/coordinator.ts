@@ -365,39 +365,59 @@ export async function resizeCoordinatorTmux(width: number): Promise<void> {
 // ---------------------------------------------------------------------------
 
 /**
+ * Hardcoded allow list for per-repo coordinators (SPEC §12.2.4).
+ * Read-only file access + ib commands + read-only git commands.
+ */
+const PER_REPO_COORDINATOR_ALLOW = [
+  "Bash(ib:*)",
+  "Bash(git status:*)", "Bash(git log:*)", "Bash(git diff:*)",
+  "Bash(git show:*)", "Bash(git ls-files:*)",
+  "Bash(pwd:*)", "Bash(ls:*)",
+  "Read", "Glob", "Grep", "LS",
+  "TodoWrite", "AskUserQuestion", "ToolSearch",
+];
+
+/**
+ * Hardcoded deny list for per-repo coordinators (SPEC §12.2.4).
+ * Blocks all file writes, web access, and agent spawning via built-in tools.
+ * Note: unqualified "Bash" is NOT denied — see SYSTEM_COORDINATOR_DENY comment.
+ */
+const PER_REPO_COORDINATOR_DENY = [
+  "Write", "Edit", "MultiEdit", "NotebookEdit",
+  "WebFetch", "WebSearch", "Task", "TaskOutput", "Agent", "KillShell",
+  "EnterPlanMode", "ExitPlanMode",
+];
+
+/**
  * Build the settings permissions for a per-repo coordinator.
- * Uses the same mandatory permissions as managers (from buildAgentSettings).
- * Reads from permissions.repo.* and permissions.all.* config keys.
+ * Coordinators can read the codebase and run ib commands, but cannot write code.
+ * See SPEC §12.2.4 for the full specification.
+ *
+ * Config merge: permissions.coordinator.allow entries are appended to the
+ * hardcoded allow list, but any that appear in the hardcoded deny list are
+ * silently dropped. permissions.coordinator.deny entries are appended to
+ * the hardcoded deny list.
  */
 export async function buildPerRepoCoordinatorSettings(): Promise<{
   permissions: { allow: string[]; deny: string[] };
 }> {
   const config = await readConfig();
 
-  // Same mandatory permissions as managers
-  const ibPerms = [
-    "Bash(ib:*)",
-    "Bash(git status:*)", "Bash(git add:*)", "Bash(git commit:*)",
-    "Bash(git diff:*)", "Bash(git show:*)", "Bash(git log:*)",
-    "Bash(git ls-files:*)", "Bash(git grep:*)", "Bash(git rm:*)",
-    "Bash(git merge:*)", "Bash(git rebase:*)", "Bash(git checkout:*)",
-    "Bash(git restore:*)", "Bash(git reset:*)",
-    "Bash(pwd:*)", "Bash(ls:*)", "Bash(head:*)", "Bash(tail:*)",
-    "Bash(cat:*)", "Bash(grep:*)",
-    "Read", "Write", "Edit", "MultiEdit", "Glob", "Grep", "LS",
-    "TodoWrite", "Task", "Agent", "TaskOutput", "KillShell", "NotebookEdit",
-    "WebFetch", "WebSearch", "AskUserQuestion", "ToolSearch",
-  ];
-  const blockedTools = ["EnterPlanMode", "ExitPlanMode"];
-
-  // Role-specific config (permissions.repo.*) + global (permissions.all.*)
-  const roleAllow = (config["permissions.repo.allow"]?.value as string[] | undefined) ?? [];
-  const roleDeny = (config["permissions.repo.deny"]?.value as string[] | undefined) ?? [];
+  // Role-specific config (permissions.coordinator.*) + global (permissions.all.*)
+  const roleAllow = (config["permissions.coordinator.allow"]?.value as string[] | undefined) ?? [];
+  const roleDeny = (config["permissions.coordinator.deny"]?.value as string[] | undefined) ?? [];
   const allAllow = (config["permissions.all.allow"]?.value as string[] | undefined) ?? [];
   const allDeny = (config["permissions.all.deny"]?.value as string[] | undefined) ?? [];
 
-  const finalAllow = [...new Set([...ibPerms, ...roleAllow, ...allAllow])];
-  const finalDeny = [...new Set([...blockedTools, ...roleDeny, ...allDeny])];
+  const hardcodedDenySet = new Set(PER_REPO_COORDINATOR_DENY);
+
+  // Filter out config allow entries that conflict with hardcoded deny
+  const filteredConfigAllow = [...roleAllow, ...allAllow].filter(
+    (entry) => !hardcodedDenySet.has(entry)
+  );
+
+  const finalAllow = [...new Set([...PER_REPO_COORDINATOR_ALLOW, ...filteredConfigAllow])];
+  const finalDeny = [...new Set([...PER_REPO_COORDINATOR_DENY, ...roleDeny, ...allDeny])];
 
   return { permissions: { allow: finalAllow, deny: finalDeny } };
 }

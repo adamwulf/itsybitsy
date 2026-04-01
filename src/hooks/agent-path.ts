@@ -79,15 +79,7 @@ export function checkPathAccess(
   const { toolName, toolInput, cwd } = input;
   const { agentDir, worktreePath, agentsDir, rootRepo, isWorker, allowList } = ctx;
 
-  // 1. Block TaskCreate with role-specific message
-  if (toolName === "TaskCreate") {
-    if (isWorker) {
-      return { decision: "deny", reason: "TaskCreate is not available. Workers cannot create tasks." };
-    }
-    return { decision: "deny", reason: "TaskCreate is not available. Use ib new-agent --worker to spawn worker agents instead." };
-  }
-
-  // 2. Check allow list
+  // 1. Check allow list (TaskCreate is handled by intercept-task hook)
   let inAllowList = false;
   for (const pattern of allowList) {
     if (!pattern) continue;
@@ -101,7 +93,7 @@ export function checkPathAccess(
     return { decision: "deny", reason: "Tool not in allow list" };
   }
 
-  // 3. Special handling for Bash tool — check cd commands
+  // 2. Special handling for Bash tool — check cd commands
   if (toolName === "Bash") {
     const command = String(toolInput.command ?? "");
 
@@ -132,7 +124,7 @@ export function checkPathAccess(
     return { decision: "allow", reason: "Tool in allow list" };
   }
 
-  // 4. Extract file_path or path or notebook_path from toolInput
+  // 3. Extract file_path or path or notebook_path from toolInput
   const filePath = (toolInput.file_path as string | undefined) ??
                    (toolInput.path as string | undefined) ??
                    (toolInput.notebook_path as string | undefined);
@@ -207,13 +199,13 @@ function checkFilePath(
 ): HookDecision {
   const { agentDir, worktreePath, agentsDir, rootRepo } = ctx;
 
-  // 5. Resolve relative to absolute using cwd
+  // 4. Resolve relative to absolute using cwd
   let filePath = rawPath;
   if (!filePath.startsWith("/")) {
     filePath = join(cwd, filePath);
   }
 
-  // 6. Normalize: resolve . and .. via path.resolve, then try realpathSync for symlinks
+  // 5. Normalize: resolve . and .. via path.resolve, then try realpathSync for symlinks
   filePath = resolve(filePath);
   try {
     filePath = realpathSync(filePath);
@@ -221,17 +213,17 @@ function checkFilePath(
     // Path doesn't exist yet — keep the resolve() result
   }
 
-  // 7. Allow: path within worktree
+  // 6. Allow: path within worktree
   if (filePath.startsWith(worktreePath + "/") || filePath === worktreePath) {
     return { decision: "allow", reason: "Tool in allow list, path in worktree" };
   }
 
-  // 8. Allow: own agent.log
+  // 7. Allow: own agent.log
   if (filePath === join(agentDir, "agent.log")) {
     return { decision: "allow", reason: "Tool in allow list, accessing own log" };
   }
 
-  // 9. Block: other agents' directories
+  // 8. Block: other agents' directories
   if (filePath.startsWith(agentsDir + "/")) {
     if (toolName === "Bash") {
       return { decision: "deny", reason: "Access denied: cannot cd into other agents' worktrees" };
@@ -239,12 +231,12 @@ function checkFilePath(
     return { decision: "deny", reason: "Access denied: cannot access other agents' files" };
   }
 
-  // 10. Block: main repo (outside worktree)
+  // 9. Block: main repo (outside worktree)
   if (rootRepo && filePath.startsWith(rootRepo + "/") && !filePath.startsWith(worktreePath + "/")) {
     return { decision: "deny", reason: "Access denied: work in your worktree, not the main repo" };
   }
 
-  // 11. Allow: all other paths (system files, ~/.claude, etc.)
+  // 10. Allow: all other paths (system files, ~/.claude, etc.)
   return { decision: "allow", reason: "Tool in allow list" };
 }
 

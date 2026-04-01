@@ -3,10 +3,28 @@
  * Each hook should gracefully handle invalid JSON, non-object input,
  * and schema violations (wrong types for tool_name, tool_input).
  */
-import { test, expect, describe } from "bun:test";
+import { test, expect, describe, beforeAll, afterAll } from "bun:test";
 import { join } from "path";
+import { mkdtemp, rm, mkdir } from "fs/promises";
+import { tmpdir } from "os";
 
 const INDEX_PATH = join(import.meta.dir, "..", "index.ts");
+
+// Temp directory structured as .ittybitty/agents/<id>/repo so that
+// resolveAgentDir() points debug-logs writes into /tmp instead of the
+// real agents directory.
+let tempBase: string;
+let hookCwd: string;
+
+beforeAll(async () => {
+  tempBase = await mkdtemp(join(tmpdir(), "ib-hook-test-"));
+  hookCwd = join(tempBase, ".ittybitty", "agents", "agent-test1234", "repo");
+  await mkdir(hookCwd, { recursive: true });
+});
+
+afterAll(async () => {
+  await rm(tempBase, { recursive: true, force: true });
+});
 
 /** Run a hook subcommand via `bun index.ts`, piping stdin, returning stdout/stderr/exitCode. */
 async function runHook(
@@ -14,6 +32,7 @@ async function runHook(
   stdin: string
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   const proc = Bun.spawn(["bun", INDEX_PATH, ...args], {
+    cwd: hookCwd,
     stdin: new Response(stdin).body!,
     stdout: "pipe",
     stderr: "pipe",

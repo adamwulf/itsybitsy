@@ -628,7 +628,10 @@ async function captureAndLogDeadPane(agentId: string, agentDir: string, tmuxSess
       { stdout: "pipe", stderr: "pipe" },
     );
     const deadExitCode = await deadCheck.exited;
-    if (deadExitCode !== 0) return;
+    if (deadExitCode !== 0) {
+      await logAgent(agentDir, "[watchdog] tmux session gone (session not found) — likely crashed or was killed externally");
+      return;
+    }
     const deadOutput = await new Response(deadCheck.stdout).text();
     if (deadOutput.trim() !== "1") return;
 

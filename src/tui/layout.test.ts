@@ -4,9 +4,11 @@ import { mkdtemp, rm } from "fs/promises";
 import { tmpdir } from "os";
 import {
   loadLayout, saveLayout, saveLayoutDebounced, cancelPendingSave, flushPendingSave,
-  setLayoutPath, resetLayoutPath,
+  setLayoutPath, resetLayoutPath, getSavedTmuxWidth, getSavedSidebarWidth,
+  MIN_SIDEBAR, MAX_SIDEBAR,
 } from "./layout";
 import type { LayoutState } from "./layout";
+import { MIN_LEFT_WIDTH, MAX_LEFT_WIDTH } from "./split-pane";
 
 const sampleLayout: LayoutState = {
   sidebarWidth: 70,
@@ -143,5 +145,46 @@ describe("layout persistence", () => {
     // No saveLayoutDebounced call — flush should do nothing
     await flushPendingSave();
     expect(await Bun.file(path).exists()).toBe(false);
+  });
+
+  test("loadLayout rounds fractional numeric fields", async () => {
+    await Bun.write(join(tmpDir, "layout.json"), JSON.stringify({
+      sidebarWidth: 60.7,
+      splitPaneLeftWidth: 80.3,
+      heightOffsets: { tree: 2.9, info: -1.1, coordinator: 0.5 },
+      repoCoordinatorHeightOffset: 1.6,
+    }));
+    const loaded = await loadLayout();
+    expect(loaded).not.toBeNull();
+    expect(loaded!.sidebarWidth).toBe(61);
+    expect(loaded!.splitPaneLeftWidth).toBe(80);
+    expect(loaded!.heightOffsets.tree).toBe(3);
+    expect(loaded!.heightOffsets.info).toBe(-1);
+    expect(loaded!.heightOffsets.coordinator).toBe(1);
+    expect(loaded!.repoCoordinatorHeightOffset).toBe(2);
+  });
+
+  test("getSavedTmuxWidth returns DEFAULT_TMUX_WIDTH when no layout saved", async () => {
+    const width = await getSavedTmuxWidth();
+    expect(width).toBe(80);
+  });
+
+  test("getSavedTmuxWidth clamps extreme saved values", async () => {
+    await saveLayout({ ...sampleLayout, splitPaneLeftWidth: 99999 });
+    expect(await getSavedTmuxWidth()).toBe(MAX_LEFT_WIDTH);
+    await saveLayout({ ...sampleLayout, splitPaneLeftWidth: 1 });
+    expect(await getSavedTmuxWidth()).toBe(MIN_LEFT_WIDTH);
+  });
+
+  test("getSavedSidebarWidth returns default when no layout saved", async () => {
+    const width = await getSavedSidebarWidth();
+    expect(width).toBe(60);
+  });
+
+  test("getSavedSidebarWidth clamps extreme saved values", async () => {
+    await saveLayout({ ...sampleLayout, sidebarWidth: 99999 });
+    expect(await getSavedSidebarWidth()).toBe(MAX_SIDEBAR);
+    await saveLayout({ ...sampleLayout, sidebarWidth: 1 });
+    expect(await getSavedSidebarWidth()).toBe(MIN_SIDEBAR);
   });
 });

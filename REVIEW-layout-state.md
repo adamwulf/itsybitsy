@@ -33,8 +33,9 @@
 
 1. **Startup** (`launchDashboard()` in dashboard.ts:1901):
    - `loadLayout()` reads `~/.itsybitsy/layout.json`, validates shape (rejects NaN/Infinity)
-   - If valid, `dashboard.applyLayout(savedLayout)` is called
+   - If valid, `dashboard.applyLayout(savedLayout)` is called (sets `pendingTmuxResize = true`)
    - `resizeCoordinatorTmux(dashboard.sidebarWidth)` is always called (even without saved layout)
+   - **Ordering note:** `applyLayout()` runs before `tui.start()` and `watcher.start()`. This is intentional — `pendingTmuxResize` must be set before the watcher's `onUpdate` callback is wired, so the first `onUpdate` with agents triggers the deferred resize.
 
 2. **applyLayout()** (dashboard.ts:707):
    - Clamps `sidebarWidth` to [30, 120]
@@ -76,7 +77,7 @@
 - After a layout is restored, if a user resizes the tmux session externally (e.g., via `tmux resize-window`), the dashboard will never pick up the change.
 - This is intentional for the initial race window (the comment says so), but the flag should be cleared after the pending resize completes — e.g., after `pendingTmuxResize` fires in `onUpdate()`.
 
-**Suggested fix:** Clear `layoutRestored` after the pending tmux resize is processed (around line 965). To handle the timing edge case where the tmux poller may report a stale width during the same tick as the resize, add a `skipWidthReports` counter initialized to 1 when clearing `layoutRestored`. The `onWidth` callback should decrement and skip when `skipWidthReports > 0`, ensuring the first stale report after clearing is ignored before normal sync resumes.
+**Suggested fix:** Clear `layoutRestored` after the pending tmux resize is processed (around line 965). To handle the timing edge case where the tmux poller may report a stale width (since `resizeTmuxWindow()` is fire-and-forget and tmux may not process the resize before the next ~1s poll), add a `skipWidthReports` counter initialized to 2 when clearing `layoutRestored`. The `onWidth` callback should decrement and skip when `skipWidthReports > 0`. Using 2 (not 1) accounts for the round-trip: one poll may catch the pre-resize width, the next catches the post-resize width. **Trade-off:** this may swallow one legitimate external resize during the ~2s window, which is acceptable given the narrow timing.
 
 ### BUG-2: `saveLayoutDebounced` has a confusing dual-state pattern
 
@@ -115,9 +116,11 @@ Additionally, add a "reset layout" keybinding (see §7.8) as an escape hatch. Fo
 
 **File:** `split-pane.ts`
 
-When the terminal shrinks, the right pane width is computed as `terminal_width - sidebarWidth - separators - splitPaneLeftWidth`. If the terminal becomes narrower than `sidebarWidth + splitPaneLeftWidth + separators`, the right pane gets negative width. `SplitPane.render()` clamps left width via `Math.min(this.leftWidth, width - sepWidth - 1)`, but the right side can still end up with very small or zero width if the overall `width` passed to `render()` is already too small. No guard exists at the dashboard level to re-clamp `splitPaneLeftWidth` when terminal width shrinks.
+When the terminal shrinks, the right pane width is computed as `terminal_width - sidebarWidth - separators - splitPaneLeftWidth`. If the terminal becomes narrower than `sidebarWidth + splitPaneLeftWidth + separators`, the right pane gets negative width. `SplitPane.render()` clamps left width via `Math.min(this.leftWidth, width - sepWidth - 1)`, but if the total `width` passed to `render()` is less than `sepWidth + 2`, the left width can go negative (e.g., `Math.min(80, -1) = -1`), and downstream string operations on negative widths could throw. No guard exists at the dashboard level to re-clamp `splitPaneLeftWidth` when terminal width shrinks.
 
-**Impact:** Low — causes rendering glitches on very narrow terminals.
+**Suggested fix:** Add `Math.max(1, ...)` guards for both `lw` and `rw` in `SplitPane.render()`, and re-clamp `splitPaneLeftWidth` in the terminal resize handler (§7.4).
+
+**Impact:** Low-Medium — rendering glitches on narrow terminals; potential crash if width < sepWidth + 2.
 
 ### BUG-5: Unclamped tmux resize on layout restore
 
@@ -150,6 +153,46 @@ When `layoutRestored` is false and the tmux poller reports a width (e.g., first 
 **Suggested fix:** Add `this.persistLayout()` after updating `splitPaneLeftWidth` in the `onWidth` callback (after the `this.tui?.requestRender()` call at line ~677).
 
 **Impact:** Minor — only matters for the first-launch experience.
+
+### BUG-8: `saveLayout()` uses non-atomic write — crash can corrupt layout.json
+
+**File:** `layout.ts:82-84`
+
+**Severity:** Low
+
+`saveLayout()` uses `Bun.write()` which truncates then writes. If the process dies mid-write (kill -9, power loss), the result is a partially-written corrupt JSON file. On next launch, `loadLayout()` catches the JSON parse error and returns `null`, losing the saved layout silently.
+
+**Suggested fix:** Write to a temp file (e.g., `layout.json.tmp`) then `rename()` (atomic on POSIX). Alternatively, accept the risk since layout loss is non-critical — but log a one-time warning when `loadLayout()` encounters corrupt JSON so users know their layout was reset.
+
+### BUG-9: `getSavedTmuxWidth()` and `getSavedSidebarWidth()` return unclamped values
+
+**File:** `layout.ts:132, 146`
+
+**Severity:** Low
+
+These functions call `loadLayout()` and return the raw `splitPaneLeftWidth` or `sidebarWidth` without clamping. If `layout.json` contains an extreme value (e.g., `splitPaneLeftWidth: 99999` — which passes validation since it's finite), the caller creates a tmux session at width 99999. `applyLayout()` clamps these values, but the external accessor functions don't.
+
+**Suggested fix:** Apply the same clamping in `getSavedTmuxWidth()` (clamp to `[MIN_LEFT_WIDTH, MAX_LEFT_WIDTH]`) and `getSavedSidebarWidth()` (clamp to `[MIN_SIDEBAR, MAX_SIDEBAR]`).
+
+### BUG-10: `repoCoordinatorHeightOffset` not covered by height offset clamping
+
+**File:** `dashboard.ts:1606-1611`
+
+**Severity:** Low
+
+BUG-3's suggested fix addresses sidebar `heightOffsets` (tree, info, coordinator) but `repoCoordinatorHeightOffset` has its own independent offset that can also drift unboundedly. It's clamped at keypress time (line 1609-1611) but not at load time in `applyLayout()`. A large offset saved from a tall terminal could produce sub-3-row panels on a shorter terminal.
+
+**Suggested fix:** Include `repoCoordinatorHeightOffset` in the same deferred clamping logic as BUG-3 fix option 1.
+
+### BUG-11: `loadLayout()` accepts fractional values for integer fields
+
+**File:** `layout.ts:43-75`
+
+**Severity:** Very Low
+
+Validation rejects NaN/Infinity but accepts non-integer values (e.g., `sidebarWidth: 60.7`). While JavaScript doesn't crash on fractional pixel counts, downstream code like `"─".repeat(sidebarWidth)` could produce unexpected results if `Math.floor()` is applied inconsistently.
+
+**Suggested fix:** Add `Math.round()` to all numeric fields in `loadLayout()` after validation.
 
 ---
 
@@ -291,7 +334,9 @@ The `flushPendingSave()` call on Ctrl+C handles this correctly — it cancels th
 
 ### RACE-4: Multiple dashboard instances
 
-If two `ib watch` instances run simultaneously and both resize, they'll overwrite each other's layout.json. The last write wins. No locking mechanism exists. This is low priority since running multiple dashboards is unusual.
+If two `ib watch` instances run simultaneously and both resize, they'll overwrite each other's layout.json. Worse than simple "last write wins" — since `saveLayout()` uses non-atomic `Bun.write()` (see BUG-8), concurrent writes could produce a corrupt (partially-written) file. Additionally, if one instance resizes the sidebar while another resizes the split pane, neither layout.json contains both changes — the loser's in-memory state diverges from disk permanently.
+
+**Severity:** Low — running multiple dashboards is unusual, but worth noting the coherency issue beyond simple data loss.
 
 ---
 
@@ -308,13 +353,13 @@ Add a new field to the Dashboard class: `private skipWidthReports = 0;`
 In `onUpdate()`, after the `pendingTmuxResize` block (line 972), add:
 ```ts
 this.layoutRestored = false;
-this.skipWidthReports = 1;  // skip the next stale tmux width report
+this.skipWidthReports = 2;  // skip stale reports during tmux resize round-trip (~2s)
 ```
 And in the `onWidth` callback, before the existing `layoutRestored` check:
 ```ts
 if (this.skipWidthReports > 0) { this.skipWidthReports--; return; }
 ```
-This restores normal tmux width sync after the initial layout application, while ignoring the first potentially-stale width report.
+Using 2 accounts for the fire-and-forget `resizeTmuxWindow()` round-trip: tmux may not process the resize before the next 1s poll, so skipping 2 reports covers both the pre-resize and post-resize poll cycles.
 
 ### 7.3 Simplify `saveLayoutDebounced`
 
@@ -381,7 +426,7 @@ Add a keybinding (e.g., `Ctrl+R` or similar) that resets all layout state to def
 | BUG-1 | Bug | Medium | `layoutRestored` never cleared — permanently suppresses tmux width sync |
 | BUG-2 | Code smell | Low | Dual-state in `saveLayoutDebounced` — confusing pattern, trap for future modifications |
 | BUG-3 | Bug | **High** | Height offsets invalid after terminal resize; can require manual layout.json edit to recover |
-| BUG-4 | Bug | Low | SplitPane right side can receive negative/zero width on narrow terminals |
+| BUG-4 | Bug | Low-Medium | SplitPane can receive negative width on very narrow terminals; potential crash |
 | BUG-5 | Bug | Low | Unclamped tmux resize on layout restore — width not re-validated against terminal |
 | BUG-6 | Code smell | Very Low | Redundant `resizeCoordinatorTmux` call on startup (correct width, just wasted work) |
 | BUG-7 | Bug | Low | First-launch tmux width not persisted |
@@ -392,5 +437,9 @@ Add a keybinding (e.g., `Ctrl+R` or similar) that resets all layout state to def
 | COMP-5 | Documentation | Low | `repoCoordinatorHeightOffset` not in SPEC |
 | COMP-6 | Performance | Low-Medium | Width resize spawns N concurrent tmux processes without batching |
 | COMP-7 | Design | Low | `hideCoordinator` mode doesn't adjust height offsets on mode switch |
+| BUG-8 | Bug | Low | Non-atomic `saveLayout()` — crash mid-write corrupts layout.json |
+| BUG-9 | Bug | Low | `getSavedTmuxWidth/SidebarWidth` return unclamped values to external callers |
+| BUG-10 | Bug | Low | `repoCoordinatorHeightOffset` not covered by height offset clamping |
+| BUG-11 | Code smell | Very Low | `loadLayout()` accepts fractional values for integer fields |
 | RACE-2 | Race | Low | New agents may get stale width from layout.json |
-| RACE-4 | Race | Very low | Multiple dashboard instances overwrite layout.json |
+| RACE-4 | Race | Low | Multiple dashboard instances — non-atomic writes can corrupt, not just overwrite |

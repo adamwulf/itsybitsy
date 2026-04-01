@@ -6,14 +6,10 @@
 import { join, dirname } from "path";
 import { homedir } from "os";
 import { mkdir, rename } from "fs/promises";
-import { SIDEBAR_WIDTH } from "./sidebar";
+import { SIDEBAR_WIDTH, MIN_SIDEBAR, MAX_SIDEBAR } from "./sidebar";
 import { MIN_LEFT_WIDTH, MAX_LEFT_WIDTH } from "./split-pane";
 
-/** Minimum sidebar width (columns). */
-export const MIN_SIDEBAR = 30;
-
-/** Maximum sidebar width (columns). */
-export const MAX_SIDEBAR = 120;
+export { MIN_SIDEBAR, MAX_SIDEBAR };
 
 export interface LayoutState {
   sidebarWidth: number;

@@ -15,6 +15,12 @@ import type { FocusTarget } from "./focus";
 
 export const SIDEBAR_WIDTH = 60;
 
+/** Minimum sidebar width (columns). */
+export const MIN_SIDEBAR = 30;
+
+/** Maximum sidebar width (columns). */
+export const MAX_SIDEBAR = 120;
+
 /**
  * Compute sidebar section heights.
  * The sidebar has two sections: tree (top) and info (bottom).

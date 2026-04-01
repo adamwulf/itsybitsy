@@ -634,7 +634,7 @@ async function captureAndLogDeadPane(agentId: string, agentDir: string, tmuxSess
 
     // Capture the last screen content
     const captureProc = spawnCtx.runner(
-      ["tmux", "capture-pane", "-p", "-t", tmuxSession, "-e"],
+      ["tmux", "capture-pane", "-p", "-t", tmuxSession, "-E", "-"],
       { stdout: "pipe", stderr: "pipe" },
     );
     const captureExitCode = await captureProc.exited;

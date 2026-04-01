@@ -866,9 +866,12 @@ describe("perRepoCoordinatorPrompt", () => {
 });
 
 describe("buildPerRepoCoordinatorSettings", () => {
-  test("includes Read, Glob, Grep, LS in allow list", async () => {
+  test("includes Read, Write, Edit, MultiEdit, Glob, Grep, LS in allow list", async () => {
     const settings = await buildPerRepoCoordinatorSettings();
     expect(settings.permissions.allow).toContain("Read");
+    expect(settings.permissions.allow).toContain("Write");
+    expect(settings.permissions.allow).toContain("Edit");
+    expect(settings.permissions.allow).toContain("MultiEdit");
     expect(settings.permissions.allow).toContain("Glob");
     expect(settings.permissions.allow).toContain("Grep");
     expect(settings.permissions.allow).toContain("LS");
@@ -879,37 +882,44 @@ describe("buildPerRepoCoordinatorSettings", () => {
     expect(settings.permissions.allow).toContain("Bash(ib:*)");
   });
 
-  test("includes git read commands in allow list", async () => {
+  test("includes git read and write commands in allow list", async () => {
     const settings = await buildPerRepoCoordinatorSettings();
     expect(settings.permissions.allow).toContain("Bash(git status:*)");
     expect(settings.permissions.allow).toContain("Bash(git log:*)");
     expect(settings.permissions.allow).toContain("Bash(git diff:*)");
     expect(settings.permissions.allow).toContain("Bash(git show:*)");
     expect(settings.permissions.allow).toContain("Bash(git ls-files:*)");
+    expect(settings.permissions.allow).toContain("Bash(git add:*)");
+    expect(settings.permissions.allow).toContain("Bash(git commit:*)");
+    expect(settings.permissions.allow).toContain("Bash(git merge:*)");
+    expect(settings.permissions.allow).toContain("Bash(git rebase:*)");
   });
 
-  test("denies Write, Edit, MultiEdit", async () => {
+  test("includes Task, Agent, WebFetch, WebSearch in allow list", async () => {
     const settings = await buildPerRepoCoordinatorSettings();
-    expect(settings.permissions.deny).toContain("Write");
-    expect(settings.permissions.deny).toContain("Edit");
-    expect(settings.permissions.deny).toContain("MultiEdit");
+    expect(settings.permissions.allow).toContain("Task");
+    expect(settings.permissions.allow).toContain("Agent");
+    expect(settings.permissions.allow).toContain("WebFetch");
+    expect(settings.permissions.allow).toContain("WebSearch");
+    expect(settings.permissions.allow).toContain("TaskOutput");
+    expect(settings.permissions.allow).toContain("KillShell");
+    expect(settings.permissions.allow).toContain("NotebookEdit");
+    expect(settings.permissions.allow).toContain("ToolSearch");
   });
 
-  test("denies Task, Agent, WebFetch, WebSearch", async () => {
+  test("includes cat, head, tail, grep bash commands", async () => {
     const settings = await buildPerRepoCoordinatorSettings();
-    expect(settings.permissions.deny).toContain("Task");
-    expect(settings.permissions.deny).toContain("Agent");
-    expect(settings.permissions.deny).toContain("WebFetch");
-    expect(settings.permissions.deny).toContain("WebSearch");
+    expect(settings.permissions.allow).toContain("Bash(cat:*)");
+    expect(settings.permissions.allow).toContain("Bash(head:*)");
+    expect(settings.permissions.allow).toContain("Bash(tail:*)");
+    expect(settings.permissions.allow).toContain("Bash(grep:*)");
+    expect(settings.permissions.allow).toContain("Bash(git grep:*)");
   });
 
-  test("does not include cat, head, tail, grep bash commands", async () => {
+  test("denies EnterPlanMode and ExitPlanMode", async () => {
     const settings = await buildPerRepoCoordinatorSettings();
-    expect(settings.permissions.allow).not.toContain("Bash(cat:*)");
-    expect(settings.permissions.allow).not.toContain("Bash(head:*)");
-    expect(settings.permissions.allow).not.toContain("Bash(tail:*)");
-    expect(settings.permissions.allow).not.toContain("Bash(grep:*)");
-    expect(settings.permissions.allow).not.toContain("Bash(git grep:*)");
+    expect(settings.permissions.deny).toContain("EnterPlanMode");
+    expect(settings.permissions.deny).toContain("ExitPlanMode");
   });
 
   test("does not deny unqualified Bash", async () => {

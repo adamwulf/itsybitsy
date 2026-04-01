@@ -35,6 +35,8 @@ export const CONFIG_KEYS: ConfigKeyDef[] = [
   { key: "coordinator.model", type: "string", default: "opus" },
   { key: "permissions.coordinator.allow", type: "string[]", default: [] },
   { key: "permissions.coordinator.deny", type: "string[]", default: [] },
+  { key: "permissions.repo.allow", type: "string[]", default: [] },
+  { key: "permissions.repo.deny", type: "string[]", default: [] },
 ];
 
 function getNestedValue(obj: Record<string, unknown>, dotKey: string): unknown {

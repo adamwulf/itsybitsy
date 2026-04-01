@@ -19,8 +19,6 @@ describe("FocusManager", () => {
     fm.cycle(1);
     expect(fm.current()).toBe("info");
     fm.cycle(1);
-    expect(fm.current()).toBe("coordinator");
-    fm.cycle(1);
     expect(fm.current()).toBe("active-agent");
     fm.cycle(1);
     expect(fm.current()).toBe("right-pane");
@@ -37,8 +35,6 @@ describe("FocusManager", () => {
     fm.cycle(-1);
     expect(fm.current()).toBe("active-agent");
     fm.cycle(-1);
-    expect(fm.current()).toBe("coordinator");
-    fm.cycle(-1);
     expect(fm.current()).toBe("info");
     fm.cycle(-1);
     expect(fm.current()).toBe("agent-tree");
@@ -53,7 +49,6 @@ describe("FocusManager", () => {
   test("full forward cycle returns to start", () => {
     const fm = new FocusManager("agent-tree");
     fm.cycle(1); // info
-    fm.cycle(1); // coordinator
     fm.cycle(1); // active-agent
     fm.cycle(1); // right-pane
     fm.cycle(1); // agent-tree
@@ -64,7 +59,6 @@ describe("FocusManager", () => {
     const fm = new FocusManager("agent-tree");
     fm.cycle(-1); // right-pane
     fm.cycle(-1); // active-agent
-    fm.cycle(-1); // coordinator
     fm.cycle(-1); // info
     fm.cycle(-1); // agent-tree
     expect(fm.current()).toBe("agent-tree");
@@ -86,7 +80,7 @@ describe("FocusManager", () => {
 
   test("setFocus() then cycle() continues from new position", () => {
     const fm = new FocusManager("agent-tree");
-    fm.setFocus("coordinator");
+    fm.setFocus("info");
     fm.cycle(1);
     expect(fm.current()).toBe("active-agent");
   });
@@ -94,7 +88,7 @@ describe("FocusManager", () => {
   test("multiple rapid cycles are stable", () => {
     const fm = new FocusManager("agent-tree");
     for (let i = 0; i < 100; i++) fm.cycle(1);
-    // 100 % 5 = 0, so should be at index 0 = agent-tree
+    // 100 % 4 = 0, so should be at index 0 = agent-tree
     expect(fm.current()).toBe("agent-tree");
   });
 
@@ -157,8 +151,6 @@ describe("FocusManager", () => {
     fm.skipTargets.delete("repo-coordinator");
     fm.cycle(1); // info
     expect(fm.current()).toBe("info");
-    fm.cycle(1); // coordinator
-    expect(fm.current()).toBe("coordinator");
     fm.cycle(1); // active-agent
     expect(fm.current()).toBe("active-agent");
     fm.cycle(1); // right-pane
@@ -178,8 +170,6 @@ describe("FocusManager", () => {
     expect(fm.current()).toBe("right-pane");
     fm.cycle(-1); // active-agent
     expect(fm.current()).toBe("active-agent");
-    fm.cycle(-1); // coordinator
-    expect(fm.current()).toBe("coordinator");
     fm.cycle(-1); // info
     expect(fm.current()).toBe("info");
     fm.cycle(-1); // agent-tree (wrap)
@@ -190,15 +180,14 @@ describe("FocusManager", () => {
     const fm = new FocusManager("agent-tree");
     fm.skipTargets.delete("repo-coordinator");
     fm.skipTargets.add("info");
-    fm.skipTargets.add("coordinator");
-    fm.cycle(1); // skips info and coordinator
-    expect(fm.current()).toBe("active-agent");
+    fm.skipTargets.add("active-agent");
+    fm.cycle(1); // skips info and active-agent
+    expect(fm.current()).toBe("right-pane");
   });
 
   test("cycle does not infinite loop when all targets are skipped", () => {
     const fm = new FocusManager("agent-tree");
     fm.skipTargets.add("info");
-    fm.skipTargets.add("coordinator");
     fm.skipTargets.add("active-agent");
     fm.skipTargets.add("right-pane");
     // repo-coordinator already skipped by default

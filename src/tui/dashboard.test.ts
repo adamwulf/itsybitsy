@@ -1930,13 +1930,11 @@ describe("DashboardComponent right pane and navigation features", () => {
 });
 
 describe("focus cycling", () => {
-  test("Tab cycles focus forward through all 5 targets", () => {
+  test("Tab cycles focus forward through all 4 targets (no coordinator in normal mode)", () => {
     const dashboard = makeDashboard();
     expect(dashboard.focus).toBe("agent-tree");
     dashboard.handleInput("\t");
     expect(dashboard.focus).toBe("info");
-    dashboard.handleInput("\t");
-    expect(dashboard.focus).toBe("coordinator");
     dashboard.handleInput("\t");
     expect(dashboard.focus).toBe("active-agent");
     dashboard.handleInput("\t");
@@ -1945,15 +1943,13 @@ describe("focus cycling", () => {
     expect(dashboard.focus).toBe("agent-tree");
   });
 
-  test("Shift+Tab cycles focus backward through all 5 targets", () => {
+  test("Shift+Tab cycles focus backward through all 4 targets (no coordinator in normal mode)", () => {
     const dashboard = makeDashboard();
     expect(dashboard.focus).toBe("agent-tree");
     dashboard.handleInput("\x1b[Z"); // Shift+Tab
     expect(dashboard.focus).toBe("right-pane");
     dashboard.handleInput("\x1b[Z");
     expect(dashboard.focus).toBe("active-agent");
-    dashboard.handleInput("\x1b[Z");
-    expect(dashboard.focus).toBe("coordinator");
     dashboard.handleInput("\x1b[Z");
     expect(dashboard.focus).toBe("info");
     dashboard.handleInput("\x1b[Z");
@@ -1984,9 +1980,8 @@ describe("focus cycling", () => {
       const mainPartDefault = titleLineDefault!.split("│").slice(1).join("│");
       expect(mainPartDefault).not.toContain("\x1b[7m"); // REVERSE
 
-      // Tab three times to active-agent (agent-tree -> info -> coordinator -> active-agent)
+      // Tab twice to active-agent (agent-tree -> info -> active-agent)
       dashboard.handleInput("\t"); // info
-      dashboard.handleInput("\t"); // coordinator
       dashboard.handleInput("\t"); // active-agent
       expect(dashboard.focus).toBe("active-agent");
 
@@ -3063,6 +3058,87 @@ describe("applyLayout", () => {
   });
 });
 
+describe("sidebar height resize ({/} keys)", () => {
+  test("} when agent-tree focused grows tree by stealing from info", () => {
+    const dashboard = makeDashboard();
+    const before = { ...dashboard.sidebar.heightOffsets };
+    dashboard.handleInput("}");
+    expect(dashboard.sidebar.heightOffsets.tree).toBe(before.tree + 1);
+    expect(dashboard.sidebar.heightOffsets.info).toBe(before.info - 1);
+  });
+
+  test("{ when agent-tree focused shrinks tree and gives back to info", () => {
+    const dashboard = makeDashboard();
+    // First grow tree so we have room to shrink
+    dashboard.handleInput("}");
+    const before = { ...dashboard.sidebar.heightOffsets };
+    dashboard.handleInput("{");
+    expect(dashboard.sidebar.heightOffsets.tree).toBe(before.tree - 1);
+    expect(dashboard.sidebar.heightOffsets.info).toBe(before.info + 1);
+  });
+
+  test("} when info focused grows info by stealing from tree", () => {
+    const dashboard = makeDashboard();
+    // Give tree some extra height so it can be stolen from (tree min is 1)
+    dashboard.sidebar.heightOffsets.tree = 3;
+    dashboard.handleInput("\t"); // move to info
+    expect(dashboard.focus).toBe("info");
+    const before = { ...dashboard.sidebar.heightOffsets };
+    dashboard.handleInput("}");
+    expect(dashboard.sidebar.heightOffsets.info).toBe(before.info + 1);
+    expect(dashboard.sidebar.heightOffsets.tree).toBe(before.tree - 1);
+  });
+
+  test("{ when info focused shrinks info and gives back to tree", () => {
+    const dashboard = makeDashboard();
+    // Give tree some extra height, then grow info to have room to shrink
+    dashboard.sidebar.heightOffsets.tree = 3;
+    dashboard.handleInput("\t"); // move to info
+    dashboard.handleInput("}"); // grow info, steal from tree
+    const before = { ...dashboard.sidebar.heightOffsets };
+    dashboard.handleInput("{");
+    expect(dashboard.sidebar.heightOffsets.info).toBe(before.info - 1);
+    expect(dashboard.sidebar.heightOffsets.tree).toBe(before.tree + 1);
+  });
+
+  test("} when agent-tree focused does nothing if info height is 0", () => {
+    const dashboard = makeDashboard();
+    // Force info to 0 by shrinking it completely
+    dashboard.sidebar.heightOffsets.info = -999; // force effective info to 0
+    const before = { ...dashboard.sidebar.heightOffsets };
+    dashboard.handleInput("}");
+    // tree should not grow since there's nothing to steal from
+    expect(dashboard.sidebar.heightOffsets.tree).toBe(before.tree);
+  });
+
+  test("{/} are no-ops for sidebar height when active-agent is focused", () => {
+    const dashboard = makeDashboard();
+    const agent = makeAgent("agent-a", "/repos/test");
+    dashboard.onUpdate([agent], [makeFlatAgent(agent)], []);
+    // Tab to active-agent
+    dashboard.handleInput("\t"); // info
+    dashboard.handleInput("\t"); // active-agent
+    expect(dashboard.focus).toBe("active-agent");
+    const before = { ...dashboard.sidebar.heightOffsets };
+    dashboard.handleInput("}");
+    dashboard.handleInput("{");
+    expect(dashboard.sidebar.heightOffsets).toEqual(before);
+  });
+
+  test("{/} are no-ops for sidebar height when right-pane is focused", () => {
+    const dashboard = makeDashboard();
+    // Tab to right-pane
+    dashboard.handleInput("\t"); // info
+    dashboard.handleInput("\t"); // active-agent
+    dashboard.handleInput("\t"); // right-pane
+    expect(dashboard.focus).toBe("right-pane");
+    const before = { ...dashboard.sidebar.heightOffsets };
+    dashboard.handleInput("}");
+    dashboard.handleInput("{");
+    expect(dashboard.sidebar.heightOffsets).toEqual(before);
+  });
+});
+
 describe("input field integration", () => {
   test("when agent selected, tmux display height is reduced by input field height", () => {
     const dashboard = makeDashboard();
@@ -3105,9 +3181,8 @@ describe("input field integration", () => {
     Object.defineProperty(process.stdout, "rows", { value: 30, writable: true, configurable: true });
     try {
       // Tab to active-agent, then Tab again to enter input sub-focus
-      dashboard.handleInput("\t");
-      dashboard.handleInput("\t");
-      dashboard.handleInput("\t");
+      dashboard.handleInput("\t"); // info
+      dashboard.handleInput("\t"); // active-agent
       expect(dashboard.focus).toBe("active-agent");
       dashboard.handleInput("\t"); // pane → input sub-focus
 
@@ -3156,9 +3231,8 @@ describe("input field integration", () => {
     dashboard.onUpdate([agent], flatList, []);
 
     // Tab to active-agent, then Tab to input sub-focus
-    dashboard.handleInput("\t");
-    dashboard.handleInput("\t");
-    dashboard.handleInput("\t");
+    dashboard.handleInput("\t"); // info
+    dashboard.handleInput("\t"); // active-agent
     expect(dashboard.focus).toBe("active-agent");
     dashboard.handleInput("\t"); // pane → input sub-focus
 
@@ -3184,9 +3258,8 @@ describe("input field integration", () => {
     dashboard.onUpdate([agent], flatList, []);
 
     // Tab to active-agent, then Tab to input sub-focus
-    dashboard.handleInput("\t");
-    dashboard.handleInput("\t");
-    dashboard.handleInput("\t");
+    dashboard.handleInput("\t"); // info
+    dashboard.handleInput("\t"); // active-agent
     expect(dashboard.focus).toBe("active-agent");
     dashboard.handleInput("\t"); // pane → input sub-focus
 
@@ -3209,9 +3282,8 @@ describe("input field integration", () => {
     dashboard.onUpdate([agent], flatList, []);
 
     // Tab to active-agent, then Tab to input sub-focus
-    dashboard.handleInput("\t");
-    dashboard.handleInput("\t");
-    dashboard.handleInput("\t");
+    dashboard.handleInput("\t"); // info
+    dashboard.handleInput("\t"); // active-agent
     expect(dashboard.focus).toBe("active-agent");
     dashboard.handleInput("\t"); // pane → input sub-focus
 
@@ -3235,9 +3307,8 @@ describe("input field integration", () => {
     dashboard.onUpdate([agent], flatList, []);
 
     // Tab to active-agent, then Tab to input sub-focus
-    dashboard.handleInput("\t");
-    dashboard.handleInput("\t");
-    dashboard.handleInput("\t");
+    dashboard.handleInput("\t"); // info
+    dashboard.handleInput("\t"); // active-agent
     expect(dashboard.focus).toBe("active-agent");
     dashboard.handleInput("\t"); // pane → input sub-focus
 
@@ -3258,9 +3329,8 @@ describe("input field integration", () => {
     dashboard.onUpdate([agent], flatList, []);
 
     // Tab to active-agent — stays in pane sub-focus
-    dashboard.handleInput("\t");
-    dashboard.handleInput("\t");
-    dashboard.handleInput("\t");
+    dashboard.handleInput("\t"); // info
+    dashboard.handleInput("\t"); // active-agent
     expect(dashboard.focus).toBe("active-agent");
     expect(dashboard.subFocus).toBe("pane");
 
@@ -3278,7 +3348,6 @@ describe("input field integration", () => {
     dashboard.onUpdate([agent], flatList, []);
 
     dashboard.handleInput("\t"); // info
-    dashboard.handleInput("\t"); // coordinator
     dashboard.handleInput("\t"); // active-agent (pane)
     expect(dashboard.focus).toBe("active-agent");
     expect(dashboard.subFocus).toBe("pane");
@@ -3295,7 +3364,6 @@ describe("input field integration", () => {
     dashboard.onUpdate([agent], flatList, []);
 
     dashboard.handleInput("\t"); // info
-    dashboard.handleInput("\t"); // coordinator
     dashboard.handleInput("\t"); // active-agent (pane)
     dashboard.handleInput("\t"); // pane → input
     dashboard.handleInput("\t"); // input → send
@@ -3310,7 +3378,6 @@ describe("input field integration", () => {
     dashboard.onUpdate([agent], flatList, []);
 
     dashboard.handleInput("\t"); // info
-    dashboard.handleInput("\t"); // coordinator
     dashboard.handleInput("\t"); // active-agent (pane)
     dashboard.handleInput("\t"); // pane → input
     dashboard.handleInput("\t"); // input → send
@@ -3327,7 +3394,6 @@ describe("input field integration", () => {
 
     // Get to send sub-focus
     dashboard.handleInput("\t"); // info
-    dashboard.handleInput("\t"); // coordinator
     dashboard.handleInput("\t"); // active-agent (pane)
     dashboard.handleInput("\t"); // pane → input
     dashboard.handleInput("\t"); // input → send
@@ -3342,8 +3408,8 @@ describe("input field integration", () => {
     expect(dashboard.focus).toBe("active-agent");
     expect(dashboard.subFocus).toBe("pane");
 
-    dashboard.handleInput("\x1b[Z"); // pane → prev panel (coordinator)
-    expect(dashboard.focus).toBe("coordinator");
+    dashboard.handleInput("\x1b[Z"); // pane → prev panel (info)
+    expect(dashboard.focus).toBe("info");
   });
 
   test("[/] keys work in send sub-focus (resize, not captured)", () => {
@@ -3354,7 +3420,6 @@ describe("input field integration", () => {
 
     // Get to send sub-focus
     dashboard.handleInput("\t"); // info
-    dashboard.handleInput("\t"); // coordinator
     dashboard.handleInput("\t"); // active-agent (pane)
     dashboard.handleInput("\t"); // pane → input
     dashboard.handleInput("\t"); // input → send
@@ -3373,7 +3438,6 @@ describe("input field integration", () => {
 
     // Get to input sub-focus
     dashboard.handleInput("\t"); // info
-    dashboard.handleInput("\t"); // coordinator
     dashboard.handleInput("\t"); // active-agent (pane)
     dashboard.handleInput("\t"); // pane → input
 
@@ -3390,7 +3454,6 @@ describe("input field integration", () => {
 
     // Get to send sub-focus
     dashboard.handleInput("\t"); // info
-    dashboard.handleInput("\t"); // coordinator
     dashboard.handleInput("\t"); // active-agent (pane)
     dashboard.handleInput("\t"); // pane → input
     dashboard.handleInput("\t"); // input → send
@@ -3425,7 +3488,7 @@ describe("coordinator TmuxPoller (Phase 47c)", () => {
     dashboard.stopPolling();
   });
 
-  test("coordinator pane renders in sidebar when it has output", () => {
+  test("coordinator pane never renders in sidebar (only in main area when selected)", () => {
     const dashboard = makeDashboard();
     // Simulate coordinator poller delivering output
     dashboard.coordinatorPane.rawOutput = "Hello from coordinator\nLine 2";
@@ -3436,8 +3499,9 @@ describe("coordinator TmuxPoller (Phase 47c)", () => {
     try {
       const lines = dashboard.render(160);
       const text = lines.map(l => stripAnsi(l)).join("\n");
-      expect(text).toContain("System Coordinator");
-      expect(text).toContain("Hello from coordinator");
+      // Coordinator is NOT rendered in the sidebar — only appears in main area when selected
+      expect(text).not.toContain("System Coordinator");
+      expect(text).not.toContain("Hello from coordinator");
     } finally {
       Object.defineProperty(process.stdout, "rows", { value: origRows, writable: true, configurable: true });
     }
@@ -3447,7 +3511,12 @@ describe("coordinator TmuxPoller (Phase 47c)", () => {
 describe("coordinator lifecycle (Phase 47f)", () => {
   test("R key triggers restartSystemCoordinator when coordinator is focused", () => {
     const dashboard = makeDashboard();
-    // Focus the coordinator panel: Tab 3 times (agent-tree -> info -> coordinator)
+    // Select system coordinator in agent tree to enter coordinator mode
+    // In coordinator mode, COORDINATOR_FOCUS_ORDER applies: agent-tree → info → coordinator
+    const flatList: FlatEntry[] = [makeFlatSystemCoordinator()];
+    dashboard.onUpdate([], flatList, []);
+    expect(dashboard.agentTree.isSystemCoordinatorSelected).toBe(true);
+    // Tab twice to reach coordinator focus
     dashboard.handleInput("\t"); // info
     dashboard.handleInput("\t"); // coordinator
     expect(dashboard.focus).toBe("coordinator");
@@ -3472,8 +3541,13 @@ describe("coordinator lifecycle (Phase 47f)", () => {
     // No crash — just returns silently
   });
 
-  test("coordinator pane shows stopped message when session dies", () => {
+  test("coordinator pane shows stopped message when session dies (main area when selected)", () => {
     const dashboard = makeDashboard();
+    // Select system coordinator in the agent tree so its output appears in the main area
+    const flatList: FlatEntry[] = [makeFlatSystemCoordinator()];
+    dashboard.onUpdate([], flatList, []);
+    expect(dashboard.agentTree.isSystemCoordinatorSelected).toBe(true);
+
     // Simulate coordinator session dying — hasPolled but no output
     dashboard.coordinatorPane.hasPolled = true;
     dashboard.coordinatorPane.rawOutput = "";
@@ -3483,15 +3557,21 @@ describe("coordinator lifecycle (Phase 47f)", () => {
     try {
       const lines = dashboard.render(160);
       const text = lines.map(l => stripAnsi(l)).join("\n");
-      expect(text).toContain("System coordinator stopped");
-      expect(text).toContain("Press R to restart");
+      // Main area renders coordinator tmux via TmuxPaneComponent (agentless mode)
+      // when coordinator is selected — the session dying shows as empty pane
+      expect(text).toContain("System Coordinator");
     } finally {
       Object.defineProperty(process.stdout, "rows", { value: origRows, writable: true, configurable: true });
     }
   });
 
-  test("coordinator pane shows loading message before first poll", () => {
+  test("coordinator pane shows loading message before first poll (main area when selected)", () => {
     const dashboard = makeDashboard();
+    // Select system coordinator in the agent tree so its output appears in the main area
+    const flatList: FlatEntry[] = [makeFlatSystemCoordinator()];
+    dashboard.onUpdate([], flatList, []);
+    expect(dashboard.agentTree.isSystemCoordinatorSelected).toBe(true);
+
     dashboard.coordinatorPane.hasPolled = false;
     dashboard.coordinatorPane.rawOutput = "";
 
@@ -3500,7 +3580,8 @@ describe("coordinator lifecycle (Phase 47f)", () => {
     try {
       const lines = dashboard.render(160);
       const text = lines.map(l => stripAnsi(l)).join("\n");
-      expect(text).toContain("Starting system coordinator");
+      // Main area renders coordinator tmux via TmuxPaneComponent (agentless mode) before first poll
+      expect(text).toContain("Waiting for output");
     } finally {
       Object.defineProperty(process.stdout, "rows", { value: origRows, writable: true, configurable: true });
     }

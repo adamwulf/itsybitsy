@@ -13,6 +13,7 @@ export interface LayoutState {
   heightOffsets: {
     tree: number;
     info: number;
+    /** @deprecated Coordinator is no longer shown in the sidebar. Preserved for backward compatibility with existing layout.json files. */
     coordinator: number;
   };
   /** Height offset for the repo coordinator split in REPO right pane mode */

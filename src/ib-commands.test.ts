@@ -2308,6 +2308,61 @@ describe("newAgent (native)", () => {
     expect(settings.permissions.deny).toContain("Bash(rm:*)");
   });
 
+  test("permissions.all.allow/deny are merged into settings for managers", async () => {
+    await Bun.write(join(tempDir, "config.json"), JSON.stringify({
+      permissions: {
+        manager: { allow: ["Bash(deploy:*)"], deny: ["Bash(rm:*)"] },
+        all: { allow: ["Bash(curl:*)"], deny: ["Bash(sudo:*)"] },
+      },
+    }));
+
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    await callNewAgent("task", { name: "test-all-perms" });
+
+    const settingsPath = join(agentsDir, "test-all-perms", "repo", ".claude", "settings.local.json");
+    const settings = await Bun.file(settingsPath).json();
+    // Role-specific permissions
+    expect(settings.permissions.allow).toContain("Bash(deploy:*)");
+    expect(settings.permissions.deny).toContain("Bash(rm:*)");
+    // All permissions merged in
+    expect(settings.permissions.allow).toContain("Bash(curl:*)");
+    expect(settings.permissions.deny).toContain("Bash(sudo:*)");
+  });
+
+  test("permissions.all.allow/deny are merged into settings for workers", async () => {
+    await Bun.write(join(tempDir, "config.json"), JSON.stringify({
+      permissions: {
+        worker: { allow: ["Bash(npm:*)"], deny: [] },
+        all: { allow: ["Bash(curl:*)"], deny: ["Bash(sudo:*)"] },
+      },
+    }));
+
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    await callNewAgent("task", { name: "test-all-worker", worker: true });
+
+    const settingsPath = join(agentsDir, "test-all-worker", "repo", ".claude", "settings.local.json");
+    const settings = await Bun.file(settingsPath).json();
+    expect(settings.permissions.allow).toContain("Bash(npm:*)");
+    expect(settings.permissions.allow).toContain("Bash(curl:*)");
+    expect(settings.permissions.deny).toContain("Bash(sudo:*)");
+  });
+
+  test("permissions.all without role-specific permissions still applies", async () => {
+    await Bun.write(join(tempDir, "config.json"), JSON.stringify({
+      permissions: {
+        all: { allow: ["Bash(curl:*)"], deny: ["Bash(sudo:*)"] },
+      },
+    }));
+
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    await callNewAgent("task", { name: "test-all-only" });
+
+    const settingsPath = join(agentsDir, "test-all-only", "repo", ".claude", "settings.local.json");
+    const settings = await Bun.file(settingsPath).json();
+    expect(settings.permissions.allow).toContain("Bash(curl:*)");
+    expect(settings.permissions.deny).toContain("Bash(sudo:*)");
+  });
+
   test("allowTools flag is included in start.sh", async () => {
     setNewAgentSpawnRunner(mockSpawnRunner());
     await callNewAgent("task", { name: "test-allow", allowTools: "Read,Write" });

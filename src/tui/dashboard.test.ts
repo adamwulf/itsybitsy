@@ -1930,13 +1930,11 @@ describe("DashboardComponent right pane and navigation features", () => {
 });
 
 describe("focus cycling", () => {
-  test("Tab cycles focus forward through all 5 targets", () => {
+  test("Tab cycles focus forward through all 4 targets (no coordinator in normal mode)", () => {
     const dashboard = makeDashboard();
     expect(dashboard.focus).toBe("agent-tree");
     dashboard.handleInput("\t");
     expect(dashboard.focus).toBe("info");
-    dashboard.handleInput("\t");
-    expect(dashboard.focus).toBe("coordinator");
     dashboard.handleInput("\t");
     expect(dashboard.focus).toBe("active-agent");
     dashboard.handleInput("\t");
@@ -1945,15 +1943,13 @@ describe("focus cycling", () => {
     expect(dashboard.focus).toBe("agent-tree");
   });
 
-  test("Shift+Tab cycles focus backward through all 5 targets", () => {
+  test("Shift+Tab cycles focus backward through all 4 targets (no coordinator in normal mode)", () => {
     const dashboard = makeDashboard();
     expect(dashboard.focus).toBe("agent-tree");
     dashboard.handleInput("\x1b[Z"); // Shift+Tab
     expect(dashboard.focus).toBe("right-pane");
     dashboard.handleInput("\x1b[Z");
     expect(dashboard.focus).toBe("active-agent");
-    dashboard.handleInput("\x1b[Z");
-    expect(dashboard.focus).toBe("coordinator");
     dashboard.handleInput("\x1b[Z");
     expect(dashboard.focus).toBe("info");
     dashboard.handleInput("\x1b[Z");
@@ -1984,9 +1980,8 @@ describe("focus cycling", () => {
       const mainPartDefault = titleLineDefault!.split("│").slice(1).join("│");
       expect(mainPartDefault).not.toContain("\x1b[7m"); // REVERSE
 
-      // Tab three times to active-agent (agent-tree -> info -> coordinator -> active-agent)
+      // Tab twice to active-agent (agent-tree -> info -> active-agent)
       dashboard.handleInput("\t"); // info
-      dashboard.handleInput("\t"); // coordinator
       dashboard.handleInput("\t"); // active-agent
       expect(dashboard.focus).toBe("active-agent");
 
@@ -3105,9 +3100,8 @@ describe("input field integration", () => {
     Object.defineProperty(process.stdout, "rows", { value: 30, writable: true, configurable: true });
     try {
       // Tab to active-agent, then Tab again to enter input sub-focus
-      dashboard.handleInput("\t");
-      dashboard.handleInput("\t");
-      dashboard.handleInput("\t");
+      dashboard.handleInput("\t"); // info
+      dashboard.handleInput("\t"); // active-agent
       expect(dashboard.focus).toBe("active-agent");
       dashboard.handleInput("\t"); // pane → input sub-focus
 
@@ -3156,9 +3150,8 @@ describe("input field integration", () => {
     dashboard.onUpdate([agent], flatList, []);
 
     // Tab to active-agent, then Tab to input sub-focus
-    dashboard.handleInput("\t");
-    dashboard.handleInput("\t");
-    dashboard.handleInput("\t");
+    dashboard.handleInput("\t"); // info
+    dashboard.handleInput("\t"); // active-agent
     expect(dashboard.focus).toBe("active-agent");
     dashboard.handleInput("\t"); // pane → input sub-focus
 
@@ -3184,9 +3177,8 @@ describe("input field integration", () => {
     dashboard.onUpdate([agent], flatList, []);
 
     // Tab to active-agent, then Tab to input sub-focus
-    dashboard.handleInput("\t");
-    dashboard.handleInput("\t");
-    dashboard.handleInput("\t");
+    dashboard.handleInput("\t"); // info
+    dashboard.handleInput("\t"); // active-agent
     expect(dashboard.focus).toBe("active-agent");
     dashboard.handleInput("\t"); // pane → input sub-focus
 
@@ -3209,9 +3201,8 @@ describe("input field integration", () => {
     dashboard.onUpdate([agent], flatList, []);
 
     // Tab to active-agent, then Tab to input sub-focus
-    dashboard.handleInput("\t");
-    dashboard.handleInput("\t");
-    dashboard.handleInput("\t");
+    dashboard.handleInput("\t"); // info
+    dashboard.handleInput("\t"); // active-agent
     expect(dashboard.focus).toBe("active-agent");
     dashboard.handleInput("\t"); // pane → input sub-focus
 
@@ -3235,9 +3226,8 @@ describe("input field integration", () => {
     dashboard.onUpdate([agent], flatList, []);
 
     // Tab to active-agent, then Tab to input sub-focus
-    dashboard.handleInput("\t");
-    dashboard.handleInput("\t");
-    dashboard.handleInput("\t");
+    dashboard.handleInput("\t"); // info
+    dashboard.handleInput("\t"); // active-agent
     expect(dashboard.focus).toBe("active-agent");
     dashboard.handleInput("\t"); // pane → input sub-focus
 
@@ -3258,9 +3248,8 @@ describe("input field integration", () => {
     dashboard.onUpdate([agent], flatList, []);
 
     // Tab to active-agent — stays in pane sub-focus
-    dashboard.handleInput("\t");
-    dashboard.handleInput("\t");
-    dashboard.handleInput("\t");
+    dashboard.handleInput("\t"); // info
+    dashboard.handleInput("\t"); // active-agent
     expect(dashboard.focus).toBe("active-agent");
     expect(dashboard.subFocus).toBe("pane");
 
@@ -3278,7 +3267,6 @@ describe("input field integration", () => {
     dashboard.onUpdate([agent], flatList, []);
 
     dashboard.handleInput("\t"); // info
-    dashboard.handleInput("\t"); // coordinator
     dashboard.handleInput("\t"); // active-agent (pane)
     expect(dashboard.focus).toBe("active-agent");
     expect(dashboard.subFocus).toBe("pane");
@@ -3295,7 +3283,6 @@ describe("input field integration", () => {
     dashboard.onUpdate([agent], flatList, []);
 
     dashboard.handleInput("\t"); // info
-    dashboard.handleInput("\t"); // coordinator
     dashboard.handleInput("\t"); // active-agent (pane)
     dashboard.handleInput("\t"); // pane → input
     dashboard.handleInput("\t"); // input → send
@@ -3310,7 +3297,6 @@ describe("input field integration", () => {
     dashboard.onUpdate([agent], flatList, []);
 
     dashboard.handleInput("\t"); // info
-    dashboard.handleInput("\t"); // coordinator
     dashboard.handleInput("\t"); // active-agent (pane)
     dashboard.handleInput("\t"); // pane → input
     dashboard.handleInput("\t"); // input → send
@@ -3327,7 +3313,6 @@ describe("input field integration", () => {
 
     // Get to send sub-focus
     dashboard.handleInput("\t"); // info
-    dashboard.handleInput("\t"); // coordinator
     dashboard.handleInput("\t"); // active-agent (pane)
     dashboard.handleInput("\t"); // pane → input
     dashboard.handleInput("\t"); // input → send
@@ -3342,8 +3327,8 @@ describe("input field integration", () => {
     expect(dashboard.focus).toBe("active-agent");
     expect(dashboard.subFocus).toBe("pane");
 
-    dashboard.handleInput("\x1b[Z"); // pane → prev panel (coordinator)
-    expect(dashboard.focus).toBe("coordinator");
+    dashboard.handleInput("\x1b[Z"); // pane → prev panel (info)
+    expect(dashboard.focus).toBe("info");
   });
 
   test("[/] keys work in send sub-focus (resize, not captured)", () => {
@@ -3354,7 +3339,6 @@ describe("input field integration", () => {
 
     // Get to send sub-focus
     dashboard.handleInput("\t"); // info
-    dashboard.handleInput("\t"); // coordinator
     dashboard.handleInput("\t"); // active-agent (pane)
     dashboard.handleInput("\t"); // pane → input
     dashboard.handleInput("\t"); // input → send
@@ -3373,7 +3357,6 @@ describe("input field integration", () => {
 
     // Get to input sub-focus
     dashboard.handleInput("\t"); // info
-    dashboard.handleInput("\t"); // coordinator
     dashboard.handleInput("\t"); // active-agent (pane)
     dashboard.handleInput("\t"); // pane → input
 
@@ -3390,7 +3373,6 @@ describe("input field integration", () => {
 
     // Get to send sub-focus
     dashboard.handleInput("\t"); // info
-    dashboard.handleInput("\t"); // coordinator
     dashboard.handleInput("\t"); // active-agent (pane)
     dashboard.handleInput("\t"); // pane → input
     dashboard.handleInput("\t"); // input → send
@@ -3425,7 +3407,7 @@ describe("coordinator TmuxPoller (Phase 47c)", () => {
     dashboard.stopPolling();
   });
 
-  test("coordinator pane renders in sidebar when it has output", () => {
+  test("coordinator pane never renders in sidebar (only in main area when selected)", () => {
     const dashboard = makeDashboard();
     // Simulate coordinator poller delivering output
     dashboard.coordinatorPane.rawOutput = "Hello from coordinator\nLine 2";
@@ -3436,8 +3418,9 @@ describe("coordinator TmuxPoller (Phase 47c)", () => {
     try {
       const lines = dashboard.render(160);
       const text = lines.map(l => stripAnsi(l)).join("\n");
-      expect(text).toContain("System Coordinator");
-      expect(text).toContain("Hello from coordinator");
+      // Coordinator is NOT rendered in the sidebar — only appears in main area when selected
+      expect(text).not.toContain("System Coordinator");
+      expect(text).not.toContain("Hello from coordinator");
     } finally {
       Object.defineProperty(process.stdout, "rows", { value: origRows, writable: true, configurable: true });
     }
@@ -3447,7 +3430,12 @@ describe("coordinator TmuxPoller (Phase 47c)", () => {
 describe("coordinator lifecycle (Phase 47f)", () => {
   test("R key triggers restartSystemCoordinator when coordinator is focused", () => {
     const dashboard = makeDashboard();
-    // Focus the coordinator panel: Tab 3 times (agent-tree -> info -> coordinator)
+    // Select system coordinator in agent tree to enter coordinator mode
+    // In coordinator mode, COORDINATOR_FOCUS_ORDER applies: agent-tree → info → coordinator
+    const flatList: FlatEntry[] = [makeFlatSystemCoordinator()];
+    dashboard.onUpdate([], flatList, []);
+    expect(dashboard.agentTree.isSystemCoordinatorSelected).toBe(true);
+    // Tab twice to reach coordinator focus
     dashboard.handleInput("\t"); // info
     dashboard.handleInput("\t"); // coordinator
     expect(dashboard.focus).toBe("coordinator");
@@ -3472,8 +3460,13 @@ describe("coordinator lifecycle (Phase 47f)", () => {
     // No crash — just returns silently
   });
 
-  test("coordinator pane shows stopped message when session dies", () => {
+  test("coordinator pane shows stopped message when session dies (main area when selected)", () => {
     const dashboard = makeDashboard();
+    // Select system coordinator in the agent tree so its output appears in the main area
+    const flatList: FlatEntry[] = [makeFlatSystemCoordinator()];
+    dashboard.onUpdate([], flatList, []);
+    expect(dashboard.agentTree.isSystemCoordinatorSelected).toBe(true);
+
     // Simulate coordinator session dying — hasPolled but no output
     dashboard.coordinatorPane.hasPolled = true;
     dashboard.coordinatorPane.rawOutput = "";
@@ -3483,15 +3476,21 @@ describe("coordinator lifecycle (Phase 47f)", () => {
     try {
       const lines = dashboard.render(160);
       const text = lines.map(l => stripAnsi(l)).join("\n");
-      expect(text).toContain("System coordinator stopped");
-      expect(text).toContain("Press R to restart");
+      // Main area renders coordinator tmux via TmuxPaneComponent (agentless mode)
+      // when coordinator is selected — the session dying shows as empty pane
+      expect(text).toContain("System Coordinator");
     } finally {
       Object.defineProperty(process.stdout, "rows", { value: origRows, writable: true, configurable: true });
     }
   });
 
-  test("coordinator pane shows loading message before first poll", () => {
+  test("coordinator pane shows loading message before first poll (main area when selected)", () => {
     const dashboard = makeDashboard();
+    // Select system coordinator in the agent tree so its output appears in the main area
+    const flatList: FlatEntry[] = [makeFlatSystemCoordinator()];
+    dashboard.onUpdate([], flatList, []);
+    expect(dashboard.agentTree.isSystemCoordinatorSelected).toBe(true);
+
     dashboard.coordinatorPane.hasPolled = false;
     dashboard.coordinatorPane.rawOutput = "";
 
@@ -3500,7 +3499,8 @@ describe("coordinator lifecycle (Phase 47f)", () => {
     try {
       const lines = dashboard.render(160);
       const text = lines.map(l => stripAnsi(l)).join("\n");
-      expect(text).toContain("Starting system coordinator");
+      // Main area renders coordinator tmux via TmuxPaneComponent (agentless mode) before first poll
+      expect(text).toContain("Waiting for output");
     } finally {
       Object.defineProperty(process.stdout, "rows", { value: origRows, writable: true, configurable: true });
     }

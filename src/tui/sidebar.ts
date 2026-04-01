@@ -107,15 +107,13 @@ export class SidebarComponent implements Component {
     let infoHeight = Math.max(0, base.infoHeight + this.heightOffsets.info);
     let coordinatorHeight = Math.max(0, base.coordinatorHeight + this.heightOffsets.coordinator);
 
-    // When coordinator is hidden (shown in main area), give its space to info
-    if (this.hideCoordinator) {
-      infoHeight += coordinatorHeight;
-      coordinatorHeight = 0;
-    }
+    // Coordinator is never shown in sidebar — always give its space to info
+    infoHeight += coordinatorHeight;
+    coordinatorHeight = 0;
 
     // Clamp so total content + headers fits within displayHeight.
-    // Headers: 1 (Agents) + 1 (Info, if shown) + 1 (Coordinator, if shown)
-    const headerCount = 1 + (infoHeight > 0 ? 1 : 0) + (coordinatorHeight > 0 ? 1 : 0);
+    // Headers: 1 (Agents) + 1 (Info, if shown)
+    const headerCount = 1 + (infoHeight > 0 ? 1 : 0);
     const budget = this.displayHeight - headerCount;
     if (budget > 0 && treeHeight + infoHeight + coordinatorHeight > budget) {
       // Shrink from bottom up: coordinator first, then info, then tree
@@ -149,12 +147,6 @@ export class SidebarComponent implements Component {
       this.infoPanel.displayHeight = infoHeight;
       const infoLines = this.infoPanel.render(w);
       lines.push(...infoLines);
-    }
-
-    // System Coordinator separator + content
-    if (coordinatorHeight > 0) {
-      lines.push(buildFocusSeparator("System Coordinator", w, this.focusTarget === "coordinator"));
-      this.renderCoordinatorContent(lines, w, coordinatorHeight);
     }
 
     // Ensure total output matches displayHeight

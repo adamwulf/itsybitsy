@@ -993,9 +993,8 @@ export class DashboardComponent implements Component {
     const selected = this.agentTree.selectedAgent;
     const isCoordinator = this.agentTree.isSystemCoordinatorSelected;
 
-    // Update focus cycling and sidebar layout for coordinator mode
+    // Update focus cycling for coordinator mode
     this.focusManager.coordinatorMode = isCoordinator;
-    this.sidebar.hideCoordinator = isCoordinator;
 
     // When entering coordinator mode (transition, not every tick), reset view and focus
     const wasCoordinator = this.currentAgentId === "__coordinator__";

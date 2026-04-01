@@ -18,7 +18,6 @@ export type SubFocus = "pane" | "input" | "send";
 const FOCUS_ORDER: readonly FocusTarget[] = [
   "agent-tree",
   "info",
-  "coordinator",
   "active-agent",
   "right-pane",
   "repo-coordinator",

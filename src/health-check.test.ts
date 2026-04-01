@@ -104,7 +104,7 @@ describe("checkLeakedAgentHooks", () => {
     await writeFile(join(settingsDir, "settings.local.json"), JSON.stringify({
       hooks: {
         PreToolUse: [{
-          matcher: "Task|Agent",
+          matcher: "Task|Agent|TaskCreate",
           hooks: [{ type: "command", command: "ib hooks intercept-task" }],
         }],
       },

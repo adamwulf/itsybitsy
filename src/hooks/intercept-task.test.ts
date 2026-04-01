@@ -35,7 +35,7 @@ describe("intercept-task", () => {
     expect(result.spawnedAgentId).toBe("agent-deadbeef02");
   });
 
-  test("skip worker agent", async () => {
+  test("deny worker agent from spawning sub-agents", async () => {
     // Create a temp directory simulating an agent worktree with worker meta
     const tmpDir = await import("fs/promises").then((fs) =>
       fs.mkdtemp("/tmp/ib-test-worker-")
@@ -56,11 +56,69 @@ describe("intercept-task", () => {
       tool_input: { prompt: "do stuff", description: "stuff" },
       cwd,
     });
-    expect(result.action).toBe("skip");
+    expect(result.action).toBe("intercept");
+    const output = result.output as Record<string, unknown>;
+    const hookOutput = output.hookSpecificOutput as Record<string, unknown>;
+    expect(hookOutput.permissionDecision).toBe("deny");
+    expect(hookOutput.permissionDecisionReason).toContain("Workers cannot create tasks");
 
     // Cleanup
     const { rm } = await import("fs/promises");
     await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  test("deny worker agent from using TaskCreate", async () => {
+    const tmpDir = await import("fs/promises").then((fs) =>
+      fs.mkdtemp("/tmp/ib-test-worker-taskcreate-")
+    );
+    const { join } = await import("path");
+    const { mkdir } = await import("fs/promises");
+    const agentId = "agent-abc12345";
+    const agentDir = join(tmpDir, ".ittybitty", "agents", agentId);
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    await Bun.write(
+      join(agentDir, "meta.json"),
+      JSON.stringify({ id: agentId, worker: true, manager: "agent-parent" })
+    );
+
+    const cwd = join(agentDir, "repo");
+    const result = await processTaskIntercept({
+      tool_name: "TaskCreate",
+      tool_input: { prompt: "track progress" },
+      cwd,
+    });
+    expect(result.action).toBe("intercept");
+    const output = result.output as Record<string, unknown>;
+    const hookOutput = output.hookSpecificOutput as Record<string, unknown>;
+    expect(hookOutput.permissionDecision).toBe("deny");
+
+    const { rm } = await import("fs/promises");
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  test("intercept TaskCreate from manager and spawn ib worker", async () => {
+    const result = await processTaskIntercept(
+      {
+        tool_name: "TaskCreate",
+        tool_input: { prompt: "implement feature Y", description: "feature Y" },
+        cwd: "/some/repo",
+      },
+      {
+        spawnAgent: async () => ({
+          ok: true,
+          stdout: "Created agent-deadbeef03 in worktree",
+          stderr: "",
+        }),
+      }
+    );
+
+    expect(result.action).toBe("intercept");
+    expect(result.spawnedAgentId).toBe("agent-deadbeef03");
+    const output = result.output as Record<string, unknown>;
+    const hookOutput = output.hookSpecificOutput as Record<string, unknown>;
+    expect(hookOutput.permissionDecision).toBe("allow");
+    const updatedInput = hookOutput.updatedInput as Record<string, unknown>;
+    expect(updatedInput.prompt).toContain("agent-deadbeef03");
   });
 
   test("skip subagent_type in skip list", async () => {

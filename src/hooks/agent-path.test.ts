@@ -121,22 +121,6 @@ describe("checkPathAccess", () => {
     expect(result.reason).toContain("accessing own log");
   });
 
-  test("TaskCreate denial — worker message", () => {
-    const ctx = makeCtx({ isWorker: true });
-    const input = makeInput({ toolName: "TaskCreate", toolInput: {} });
-    const result = checkPathAccess(input, ctx);
-    expect(result.decision).toBe("deny");
-    expect(result.reason).toContain("Workers cannot create tasks");
-  });
-
-  test("TaskCreate denial — manager message", () => {
-    const ctx = makeCtx({ isWorker: false });
-    const input = makeInput({ toolName: "TaskCreate", toolInput: {} });
-    const result = checkPathAccess(input, ctx);
-    expect(result.decision).toBe("deny");
-    expect(result.reason).toContain("ib new-agent --worker");
-  });
-
   test("tool not in allow list", () => {
     const ctx = makeCtx({ allowList: ["Read", "Write"] });
     const input = makeInput({ toolName: "Bash", toolInput: { command: "ls" } });

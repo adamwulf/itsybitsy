@@ -117,12 +117,12 @@ export async function processTaskIntercept(
   const coordBlock = await checkCoordinatorBashRestrictions(input);
   if (coordBlock) return coordBlock;
 
-  // 1. Only intercept Task and Agent tools
-  if (input.tool_name !== "Task" && input.tool_name !== "Agent") {
+  // 1. Only intercept Task, Agent, and TaskCreate tools
+  if (input.tool_name !== "Task" && input.tool_name !== "Agent" && input.tool_name !== "TaskCreate") {
     return { action: "skip" };
   }
 
-  // 2. Check if calling from a worker agent
+  // 2. Check if calling from a worker agent — workers cannot spawn sub-agents
   const cwdMatch = AGENT_CWD_PATTERN.exec(input.cwd);
   if (cwdMatch) {
     const agentId = cwdMatch[1]!;
@@ -139,7 +139,16 @@ export async function processTaskIntercept(
         // Check if this agent type can spawn children
         const canSpawn = await checkCanSpawnChildren(meta);
         if (!canSpawn) {
-          return { action: "skip" };
+          return {
+            action: "intercept",
+            output: {
+              hookSpecificOutput: {
+                hookEventName: "PreToolUse",
+                permissionDecision: "deny",
+                permissionDecisionReason: "Workers cannot create tasks or spawn sub-agents. Only manager agents can spawn workers.",
+              },
+            },
+          };
         }
       }
     } catch {

@@ -385,7 +385,7 @@ const PER_REPO_COORDINATOR_ALLOW = [
  */
 const PER_REPO_COORDINATOR_DENY = [
   "Write", "Edit", "MultiEdit", "NotebookEdit",
-  "WebFetch", "WebSearch", "Task", "TaskOutput", "Agent", "KillShell",
+  "WebFetch", "WebSearch", "Task", "TaskCreate", "TaskOutput", "Agent", "KillShell",
   "EnterPlanMode", "ExitPlanMode",
 ];
 

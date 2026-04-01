@@ -2295,9 +2295,12 @@ export async function pauseAgent(agent: Agent): Promise<IbCommandResult> {
   }
 
   // Kill Claude process
+  await logAgent(agentDir, `Pausing agent (state=${agent.state}, pid=${agent.meta.claude_pid ?? "none"}, tmux=${tmuxSession ?? "none"})`);
   const killed = await killAgentProcess(tmuxSession, { claude_pid: agent.meta.claude_pid });
   if (killed) {
     await logAgent(agentDir, "Terminated Claude process");
+  } else {
+    await logAgent(agentDir, "Claude process not running (nothing to kill)");
   }
 
   // Kill tmux session
@@ -2316,7 +2319,11 @@ export async function pauseAgent(agent: Agent): Promise<IbCommandResult> {
       await new Response(killProc.stderr).text(); // drain
       await killProc.exited;
       await logAgent(agentDir, "Killed tmux session");
+    } else {
+      await logAgent(agentDir, "Tmux session not found (already gone)");
     }
+  } else {
+    await logAgent(agentDir, "No tmux session configured");
   }
 
   // Log the pause

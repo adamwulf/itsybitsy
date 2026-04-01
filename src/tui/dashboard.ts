@@ -1649,9 +1649,13 @@ export async function launchDashboard(): Promise<void> {
     // Ignore
   }
 
-  // Acquire coordinator ref and ensure session before starting TUI
+  // Acquire coordinator ref synchronously (fast file write), then ensure
+  // the coordinator session in the background so the TUI isn't delayed.
   await acquireSystemCoordinator();
-  await ensureSystemCoordinator();
+  ensureSystemCoordinator().catch((err) => {
+    // Surface coordinator startup errors to the dashboard once it exists
+    console.error("System coordinator startup failed:", err);
+  });
 
   const config = await readConfig();
   const dashboard = new DashboardComponent();

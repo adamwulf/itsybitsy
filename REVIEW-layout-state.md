@@ -76,21 +76,21 @@
 - After a layout is restored, if a user resizes the tmux session externally (e.g., via `tmux resize-window`), the dashboard will never pick up the change.
 - This is intentional for the initial race window (the comment says so), but the flag should be cleared after the pending resize completes — e.g., after `pendingTmuxResize` fires in `onUpdate()`.
 
-**Suggested fix:** Clear `layoutRestored` after the pending tmux resize is processed (around line 965). Note: there's a timing edge case — the tmux poller may report a stale width during the same tick as the resize. Consider skipping the next 1-2 width reports after clearing the flag, or verifying the reported width matches the saved width (within a small tolerance) before re-enabling sync.
+**Suggested fix:** Clear `layoutRestored` after the pending tmux resize is processed (around line 965). To handle the timing edge case where the tmux poller may report a stale width during the same tick as the resize, add a `skipWidthReports` counter initialized to 1 when clearing `layoutRestored`. The `onWidth` callback should decrement and skip when `skipWidthReports > 0`, ensuring the first stale report after clearing is ignored before normal sync resumes.
 
-### BUG-2: `saveLayoutDebounced` has a latent correctness risk from dual-state pattern
+### BUG-2: `saveLayoutDebounced` has a confusing dual-state pattern
 
 **File:** `layout.ts:93-103`
 
-**Type:** Latent bug — **Severity:** Medium
+**Type:** Code smell — **Severity:** Low
 
-The function stores the state in both `pendingState` (for `flushPendingSave`) and in the `setTimeout` closure (for the timer callback). Line 99 writes `state` (the closure-captured parameter), not `pendingState`. This works correctly because each call replaces the timer, but:
+The function stores the state in both `pendingState` (for `flushPendingSave`) and in the `setTimeout` closure (for the timer callback). Line 99 writes `state` (the closure-captured parameter), not `pendingState`. This works correctly because each call replaces the timer, and `flushPendingSave()` always cancels the timer via `clearTimeout()` before writing — so no double-write can occur.
 
+However, the dual-state pattern is unnecessarily confusing and a trap for future modifications:
 - If someone adds logic between "clear old timer" and "set new timer," the `pendingState` and the closure's `state` could diverge.
-- More concretely: if `flushPendingSave()` is called during the timeout window, it writes `pendingState` and sets it to `null`, but the timer callback still has the old `state` reference and will write it again — creating a double-write with potentially stale data.
-- The timer callback should use `pendingState` instead for a single source of truth.
+- The timer callback should use `pendingState` instead for a single source of truth, making the code easier to reason about.
 
-**Impact:** Latent bug — the dual-state pattern creates a real correctness risk if the timing of flush and timer overlap, and is a trap for future modifications.
+**Impact:** Low — the code is currently correct, but the pattern is fragile and misleading.
 
 ### BUG-3: Height offsets can accumulate beyond valid ranges across terminal resizes
 
@@ -125,11 +125,13 @@ When `pendingTmuxResize` fires, it calls `resizeTmuxWindow()` for all agents usi
 
 ### BUG-6: Redundant `resizeCoordinatorTmux` call on startup
 
-**File:** `dashboard.ts` (launchDashboard)
+**File:** `dashboard.ts` (launchDashboard, lines ~1932-1934)
 
-`resizeCoordinatorTmux(dashboard.sidebarWidth)` is called unconditionally at startup, even when a saved layout is about to be applied. If `applyLayout()` changes `sidebarWidth`, the coordinator was sized to the wrong width. It should be called *after* layout restoration, not before.
+**Type:** Code smell — **Severity:** Very Low
 
-**Impact:** Low — coordinator gets re-sized correctly on next render cycle, but the initial sizing is wasted work.
+`applyLayout()` (line 1932) already calls `resizeCoordinatorTmux(this.sidebarWidth)` internally (line 711) with the correctly clamped sidebar width. Then `launchDashboard()` calls `resizeCoordinatorTmux(dashboard.sidebarWidth)` again unconditionally at line 1934. Both calls use the same correct, post-clamp value — the coordinator is never sized to a wrong width.
+
+The second call is purely redundant work. Fix: remove either the call inside `applyLayout()` or the one at line 1934 (prefer removing the one at 1934, and add the call to the `else` branch for when no saved layout exists).
 
 ### BUG-7: `persistLayout()` is NOT called when tmux-reported width updates the split pane
 
@@ -286,8 +288,13 @@ Move `MIN_SIDEBAR`, `MAX_SIDEBAR` to module-level exports in `layout.ts` alongsi
 In `onUpdate()`, after the `pendingTmuxResize` block (line 972), add:
 ```ts
 this.layoutRestored = false;
+this.skipWidthReports = 1;  // skip the next stale tmux width report
 ```
-This restores normal tmux width sync after the initial layout application.
+And in the `onWidth` callback, before the existing `layoutRestored` check:
+```ts
+if (this.skipWidthReports > 0) { this.skipWidthReports--; return; }
+```
+This restores normal tmux width sync after the initial layout application, while ignoring the first potentially-stale width report.
 
 ### 7.3 Simplify `saveLayoutDebounced`
 
@@ -304,6 +311,8 @@ export function saveLayoutDebounced(state: LayoutState): void {
   }, 500);
 }
 ```
+
+**Behavioral change:** After this fix, if `flushPendingSave()` is called during the timeout window, it clears `pendingState`. When the timer fires, `toSave` will be `null` and the callback becomes a no-op — preventing a redundant write of already-flushed state. The current code doesn't have this problem in practice (because `flushPendingSave()` cancels the timer), but unifying on `pendingState` makes the single-source-of-truth guarantee explicit rather than relying on cancellation timing.
 
 ### 7.4 Add terminal resize handler
 
@@ -345,11 +354,11 @@ Add a keybinding (e.g., `Ctrl+R` or similar) that resets all layout state to def
 | ID | Type | Severity | Description |
 |----|------|----------|-------------|
 | BUG-1 | Bug | Medium | `layoutRestored` never cleared — permanently suppresses tmux width sync |
-| BUG-2 | Latent bug | Medium | Dual-state in `saveLayoutDebounced` — correctness risk if flush and timer overlap |
+| BUG-2 | Code smell | Low | Dual-state in `saveLayoutDebounced` — confusing pattern, trap for future modifications |
 | BUG-3 | Bug | **High** | Height offsets invalid after terminal resize; can require manual layout.json edit to recover |
 | BUG-4 | Bug | Low | SplitPane right side can receive negative/zero width on narrow terminals |
 | BUG-5 | Bug | Low | Unclamped tmux resize on layout restore — width not re-validated against terminal |
-| BUG-6 | Bug | Low | Redundant/premature `resizeCoordinatorTmux` call before layout is applied |
+| BUG-6 | Code smell | Very Low | Redundant `resizeCoordinatorTmux` call on startup (correct width, just wasted work) |
 | BUG-7 | Bug | Low | First-launch tmux width not persisted |
 | COMP-1 | Cleanup | Low | Duplicated MIN/MAX_SIDEBAR constants |
 | COMP-2 | Cleanup | Low | Three separate default-width constants |

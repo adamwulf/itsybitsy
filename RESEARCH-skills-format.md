@@ -1,227 +1,256 @@
-# Research: Claude Code Skills Format and Agent Prompts System
+# Research: Claude Code Skills/CLAUDE.md Format & itsybitsy Custom Prompts
 
-## Executive Summary
+## 1. Claude Code CLAUDE.md Format
 
-Claude Code skills use YAML frontmatter to configure behavior and markdown content to define instructions. The itsybitsy system has a parallel custom prompts system for injecting role-specific instructions into spawned agents. Both systems can be unified using consistent YAML frontmatter + markdown body structures.
+### Locations & Scope
 
-## Claude Code CLAUDE.md / Skills Front Matter Format
+| Scope | Location | Purpose |
+|-------|----------|---------|
+| Managed policy | `/Library/Application Support/ClaudeCode/CLAUDE.md` (macOS) | Org-wide, cannot be excluded |
+| Project | `./CLAUDE.md` or `./.claude/CLAUDE.md` | Team-shared via source control |
+| User | `~/.claude/CLAUDE.md` | Personal, all projects |
+| Subdirectory | `subdir/CLAUDE.md` | Loaded on-demand when Claude reads files there |
 
-### Core Concept
+Files walk up the directory tree from cwd. More specific locations take precedence.
 
-Claude Code supports skill files (typically `SKILL.md` or `.claude/CLAUDE.md`) with YAML front matter between `---` markers, followed by markdown content. The front matter controls behavior, and the body contains instructions.
+### YAML Front Matter Fields (CLAUDE.md)
 
-### Frontmatter Fields Reference
-
-| Field | Required | Type | Description |
-|-------|----------|------|-------------|
-| `name` | No | string | Display name for the skill. If omitted, uses directory name. Lowercase letters, numbers, and hyphens only (max 64 characters). Also becomes the slash command name. |
-| `description` | Recommended | string | What the skill does and when to use it. Claude uses this to decide when to apply the skill. Front-load the key use case. Descriptions over 250 characters are truncated in skill listings. |
-| `argument-hint` | No | string | Hint shown during autocomplete for expected arguments. Example: `[issue-number]` or `[filename] [format]`. |
-| `disable-model-invocation` | No | boolean | Set to `true` to prevent Claude from automatically loading this skill. Use for workflows you want to trigger manually with `/name`. Default: `false`. |
-| `user-invocable` | No | boolean | Set to `false` to hide from the `/` menu. Use for background knowledge users shouldn't invoke directly. Default: `true`. |
-| `allowed-tools` | No | string | Tools Claude can use without asking permission when this skill is active. Comma-separated list: `Read, Grep, Glob`. |
-| `model` | No | string | Model to use when this skill is active. Overrides session model. |
-| `effort` | No | enum | Effort level when this skill is active: `low`, `medium`, `high`, `max` (Opus 4.6 only). Overrides session effort level. |
-| `context` | No | enum | Set to `fork` to run in a forked subagent context. Skill becomes the prompt for an isolated agent. |
-| `agent` | No | string | Which subagent type to use when `context: fork` is set. Options: `Explore`, `Plan`, `general-purpose`, or custom agent from `.claude/agents/`. |
-| `hooks` | No | object | Hooks scoped to this skill's lifecycle. See hooks documentation for configuration format. |
-| `paths` | No | string/array | Glob patterns that limit when this skill is activated. Comma-separated string or YAML list. Claude loads the skill only when working with matching files. |
-| `shell` | No | enum | Shell to use for `` !`command` `` blocks: `bash` (default) or `powershell`. Requires `CLAUDE_CODE_USE_POWERSHELL_TOOL=1` for PowerShell. |
-
-### String Substitutions Available in Skill Content
-
-Skills support dynamic variable substitution in the markdown body:
-
-| Variable | Description |
-|----------|-------------|
-| `$ARGUMENTS` | All arguments passed when invoking the skill. If not present, appended as `ARGUMENTS: <value>`. |
-| `$ARGUMENTS[N]` or `$N` | Access specific argument by 0-based index (e.g., `$0`, `$1`). |
-| `${CLAUDE_SESSION_ID}` | Current session ID. Useful for logging and session-specific files. |
-| `${CLAUDE_SKILL_DIR}` | Directory containing the skill's `SKILL.md` file. Use for referencing bundled scripts/files. |
-
-### Example SKILL.md Structure
+CLAUDE.md files support **optional** YAML front matter between `---` markers:
 
 ```yaml
 ---
-name: explain-code
-description: Explains code with visual diagrams and analogies. Use when explaining how code works, teaching about a codebase, or when the user asks "how does this work?"
-allowed-tools: Read, Grep
+description: "What this file covers"
+globs: "*.ts, *.tsx, *.html"
+alwaysApply: false
 ---
-
-When explaining code, always include:
-
-1. **Start with an analogy**: Compare the code to something from everyday life
-2. **Draw a diagram**: Use ASCII art to show the flow, structure, or relationships
-3. **Walk through the code**: Explain step-by-step what happens
-4. **Highlight a gotcha**: What's a common mistake or misconception?
-
-Keep explanations conversational. For complex concepts, use multiple analogies.
 ```
 
-### Key Behaviors
+However, based on the official docs, CLAUDE.md files are **plain markdown** — the front matter is not officially documented as a CLAUDE.md feature. The front matter seen in this repo's CLAUDE.md appears to be treated as context rather than enforced configuration.
 
-1. **Description as Trigger**: The description field is Claude's primary mechanism for deciding when to use a skill. Make descriptions include specific keywords users would naturally say.
-2. **Automatic Loading**: By default, Claude automatically loads skills when their description matches the current context. Skills can be invoked manually with `/skill-name` regardless of `disable-model-invocation`.
-3. **Full Skill on Invocation**: Only the description is kept in context; full skill content loads when invoked (either by Claude or user).
-4. **Supporting Files**: Skills can include additional files in their directory. Reference them from `SKILL.md` so Claude knows when to load them.
+### `.claude/rules/` Files
 
-## itsybitsy Custom Prompts System
+Rules files in `.claude/rules/` support one front matter field:
 
-### Current Implementation
+| Field | Description |
+|-------|-------------|
+| `paths` | Glob patterns for when the rule applies. Without it, the rule loads unconditionally. |
 
-The itsybitsy system has a parallel custom prompts mechanism located at `.ittybitty/prompts/` with three files:
-- `all.md`: Applied to all agent types
-- `manager.md`: Applied to manager agents only
-- `worker.md`: Applied to worker agents only
+```yaml
+---
+paths:
+  - "src/api/**/*.ts"
+---
+# API rules here...
+```
 
-### How It Works (src/ib-commands.ts, lines 1211-1237)
+### Imports
+
+CLAUDE.md files can import other files with `@path/to/file` syntax. Relative paths resolve from the importing file. Max depth: 5 hops.
+
+---
+
+## 2. Claude Code Skills Format (SKILL.md)
+
+Skills are `.md` files in `.claude/skills/<skill-name>/SKILL.md` with YAML front matter + markdown body. They replace the older `.claude/commands/` system (which still works).
+
+### Locations
+
+| Location | Scope |
+|----------|-------|
+| `~/.claude/skills/<name>/SKILL.md` | Personal, all projects |
+| `.claude/skills/<name>/SKILL.md` | Project only |
+| `<plugin>/skills/<name>/SKILL.md` | Where plugin is enabled |
+| Enterprise managed settings | All users in org |
+
+Skills can also include supporting files alongside SKILL.md (templates, examples, scripts).
+
+### Frontmatter Reference
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `name` | No | Display name / slash command. Defaults to directory name. Lowercase, hyphens, max 64 chars. |
+| `description` | Recommended | What the skill does. Used for auto-matching. Truncated at 250 chars in listings. |
+| `argument-hint` | No | Hint shown during autocomplete, e.g. `[issue-number]`. |
+| `disable-model-invocation` | No | `true` = only user can invoke (not auto-triggered). Default: `false`. |
+| `user-invocable` | No | `false` = hidden from `/` menu, only Claude can invoke. Default: `true`. |
+| `allowed-tools` | No | Tools Claude can use without permission when skill is active. |
+| `model` | No | Model override when skill is active. |
+| `effort` | No | Effort level override: `low`, `medium`, `high`, `max`. |
+| `context` | No | `fork` = run in a forked subagent context. |
+| `agent` | No | Which subagent type to use when `context: fork`. |
+| `hooks` | No | Hooks scoped to this skill's lifecycle. |
+| `paths` | No | Glob patterns limiting when skill auto-activates. |
+| `shell` | No | `bash` (default) or `powershell` for inline shell commands. |
+
+### String Substitutions
+
+| Variable | Description |
+|----------|-------------|
+| `$ARGUMENTS` | All arguments passed when invoking |
+| `$ARGUMENTS[N]` / `$N` | Specific argument by 0-based index |
+| `${CLAUDE_SESSION_ID}` | Current session ID |
+| `${CLAUDE_SKILL_DIR}` | Directory containing the SKILL.md |
+
+### Dynamic Context Injection
+
+`` !`<command>` `` syntax runs shell commands before skill content is sent to Claude. Output replaces the placeholder.
+
+### Invocation Control
+
+| Frontmatter | User can invoke | Claude can invoke |
+|-------------|-----------------|-------------------|
+| (default) | Yes | Yes |
+| `disable-model-invocation: true` | Yes | No |
+| `user-invocable: false` | No | Yes |
+
+---
+
+## 3. Claude Code Subagent Format (.claude/agents/*.md)
+
+Subagents are Markdown files with YAML frontmatter, stored in `.claude/agents/`.
+
+### Locations & Priority
+
+| Priority | Location | Scope |
+|----------|----------|-------|
+| 1 (highest) | `--agents` CLI flag (JSON) | Current session |
+| 2 | `.claude/agents/` | Project |
+| 3 | `~/.claude/agents/` | Personal/all projects |
+| 4 (lowest) | Plugin `agents/` | Where plugin enabled |
+
+### Frontmatter Reference
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `name` | Yes | Unique identifier, lowercase + hyphens |
+| `description` | Yes | When Claude should delegate to this subagent |
+| `tools` | No | Tools the subagent can use (inherits all if omitted) |
+| `disallowedTools` | No | Tools to deny |
+| `model` | No | `sonnet`, `opus`, `haiku`, full model ID, or `inherit` (default) |
+| `permissionMode` | No | `default`, `acceptEdits`, `dontAsk`, `bypassPermissions`, `plan` |
+| `maxTurns` | No | Max agentic turns |
+| `skills` | No | Skills to preload into subagent context |
+| `mcpServers` | No | MCP servers available to subagent |
+| `hooks` | No | Lifecycle hooks scoped to subagent |
+| `memory` | No | Persistent memory scope: `user`, `project`, `local` |
+| `background` | No | `true` to always run as background task |
+| `effort` | No | Effort level: `low`, `medium`, `high`, `max` |
+| `isolation` | No | `worktree` for isolated git worktree |
+| `initialPrompt` | No | Auto-submitted first user turn when running as main agent |
+
+The markdown body becomes the subagent's **system prompt**.
+
+---
+
+## 4. How itsybitsy Custom Prompts Work Today
+
+### Prompt Files
+
+itsybitsy reads from `.ittybitty/prompts/` in the repo root:
+
+| File | Applied to |
+|------|------------|
+| `all.md` | All agents (prepended before role-specific) |
+| `manager.md` | Manager agents only |
+| `worker.md` | Worker agents only |
+
+### Loading (`loadCustomPrompts()` in `src/ib-commands.ts:1215`)
 
 ```typescript
 async function loadCustomPrompts(repoPath: string): Promise<{
-  all: string;
-  manager: string;
-  worker: string;
-}> {
-  const promptsDir = join(repoPath, ".ittybitty", "prompts");
-  const result = { all: "", manager: "", worker: "" };
-
-  for (const [key, filename] of [
-    ["all", "all.md"],
-    ["manager", "manager.md"],
-    ["worker", "worker.md"],
-  ] as const) {
-    try {
-      const file = Bun.file(join(promptsDir, filename));
-      if (await file.exists()) {
-        result[key] = await file.text();
-      }
-    } catch { /* ignore */ }
-  }
-
-  return result;
-}
+  all: string; manager: string; worker: string;
+}>
 ```
 
-### Prompt Injection (src/ib-commands.ts, lines 1707-1744)
+Reads each file from `{repoPath}/.ittybitty/prompts/`. If a file doesn't exist, its value is empty string. No front matter parsing — raw markdown content only.
 
-Custom prompts are injected into the agent's `prompt.txt` file in this order:
+### Injection into Agent Prompt (`newAgent()` at line ~1728)
 
-1. **Completion instructions** (optional, based on config)
-   - "IMPORTANT: ..." instructions about how to complete the task
-   - Includes optional PR creation instructions and exit instructions
-
-2. **Custom all.md** (if exists)
-   - Wrapped in `[CUSTOM INSTRUCTIONS]\n...\n\n`
-   - Applied to all agents
-
-3. **Role-specific custom prompts** (if exists)
-   - Wrapped in `[CUSTOM MANAGER INSTRUCTIONS]\n...\n\n` or `[CUSTOM WORKER INSTRUCTIONS]\n...\n\n`
-   - Applied only to matching agent type
-
-4. **User prompt** (the actual task)
-   - The prompt provided to `newAgent()`
-
-Example composition:
-```
-${completionInstructions}${customAllPrompt}${customRolePrompt}${prompt}
-```
-
-## Recommendations for Agent Type .md Files Structure
-
-### Option 1: Unified Frontmatter (Recommended)
-
-Adopt Claude Code's YAML frontmatter + markdown body pattern for all agent type .md files:
+Custom prompts are injected as prefixes to the user's prompt:
 
 ```
----
-name: manager-instructions
-description: Base instructions and conventions for manager agents in this repo
-applies-to: manager
-version: "1.0.0"
+[completionInstructions]     ← worktree/completion instructions
+[CUSTOM INSTRUCTIONS]        ← all.md content (if present)
+[CUSTOM WORKER INSTRUCTIONS] ← worker.md or manager.md (if present)
+[user's prompt]              ← the actual task prompt
+```
+
+This goes into `prompt.txt` which is passed to `claude --resume --prompt-file`.
+
+### Session-Start Hook Injection (separate path)
+
+The session-start hook (`src/hooks/session-start.ts`) injects role-specific instructions via Claude Code's `SessionStart` hook mechanism. This is **separate** from custom prompts — it provides the `<ittybitty>` block with commands, state management, and workflow instructions. It does NOT read from `.ittybitty/prompts/`.
+
+### Two Separate Injection Paths
+
+1. **prompt.txt** (via `newAgent()`): completionInstructions + customPrompts + user prompt → written to file, passed as `--prompt-file`
+2. **SessionStart hook** (via `session-start.ts`): role-based instructions injected as `additionalContext` in the hook output → appears in the system reminder
+
 ---
 
-# Manager Agent Instructions
+## 5. Recommendations for Agent Type .md Files
 
-Manager agents coordinate and review work from sub-agents. When spawning sub-agents:
+Based on the Claude Code skills/subagent format and itsybitsy's needs, here's a recommended structure for agent type definition files:
 
-1. Clearly define success criteria in your agent prompt
-2. Review sub-agent work before merging
-3. ...
+### Proposed Format
+
+```yaml
+---
+name: researcher
+description: "Research agent that investigates codebases and reports findings"
+roles:
+  - worker
+model: sonnet
+tools:
+  allow: Read, Grep, Glob, Bash(git log:*), Bash(git diff:*)
+  deny: Write, Edit
+maxTurns: 50
+---
+
+## Instructions
+
+You are a research specialist. When given a research task:
+
+1. Explore the codebase using read-only tools
+2. Take detailed notes on what you find
+3. Write a comprehensive report
+
+## Constraints
+
+- Do not modify any files
+- Focus on understanding, not implementing
+- Report findings with specific file:line references
 ```
 
-**Advantages:**
-- Consistent with Claude Code standards
-- Enables version tracking
-- Supports conditional application via metadata
-- Allows future tooling to process and validate these files
-- Frontmatter can include author, deprecation notices, or compatibility info
+### Recommended Front Matter Fields
 
-### Option 2: Markdown Comments
+| Field | Purpose | Maps to |
+|-------|---------|---------|
+| `name` | Agent type identifier | Directory name fallback |
+| `description` | What this agent type does | Shown in agent listings |
+| `roles` | Which roles can use this type: `manager`, `worker`, `coordinator`, `all` | Replaces `all.md`/`manager.md`/`worker.md` split |
+| `model` | Default model for this type | `--model` flag override |
+| `tools.allow` | Tool allowlist | Maps to Claude settings `permissions.allow` |
+| `tools.deny` | Tool denylist | Maps to Claude settings `permissions.deny` |
+| `maxTurns` | Safety limit on agent turns | Prevents runaway agents |
+| `extends` | Inherit from another type definition | Composability |
 
-Use HTML comments in markdown to embed metadata:
+### Markdown Body
 
-```markdown
-<!-- name: manager-instructions -->
-<!-- applies-to: manager -->
+The markdown body serves as the **system prompt / instructions** for the agent type. It replaces the current hardcoded instructions in `session-start.ts` and the raw markdown from `.ittybitty/prompts/`.
 
-# Manager Agent Instructions
+### Key Design Decisions
 
-...
-```
+1. **YAML front matter + markdown body** — matches Claude Code's own format for skills and subagents, so it's familiar to users
+2. **`roles` field** — replaces the current `all.md`/`manager.md`/`worker.md` split with a single file that declares which roles it applies to
+3. **Tool restrictions in front matter** — currently itsybitsy sets tools via `config.json` permission lists; this moves them into the type definition
+4. **Body replaces hardcoded prompts** — the markdown body would replace or augment the `generateManagerInstructions()`/`generateWorkerInstructions()` in `session-start.ts`
+5. **Directory structure** — store in `.ittybitty/types/<name>.md` (or `.ittybitty/agent-types/<name>/TYPE.md` for types with supporting files)
 
-**Advantages:**
-- Simpler parsing
-- More lightweight
-- Still readable as markdown
-- Backward compatible with existing tools
+### Migration Path
 
-### Option 3: Plain Markdown + Sibling Config
-
-Keep `all.md`, `manager.md`, `worker.md` as-is, but add a `.ittybitty/prompts/config.json`:
-
-```json
-{
-  "all": {
-    "file": "all.md",
-    "description": "Base instructions for all agents",
-    "version": "1.0.0"
-  },
-  "manager": {
-    "file": "manager.md",
-    "description": "Instructions specific to manager agents",
-    "version": "1.0.0"
-  }
-}
-```
-
-**Advantages:**
-- Minimal changes to existing system
-- Config lives in structured format (JSON/YAML)
-- Decoupled from markdown content
-- Easy to add tooling
-
-## Comparison to Claude Code Skills
-
-| Aspect | Claude Code Skills | itsybitsy Prompts |
-|--------|-------------------|-------------------|
-| Storage | `.claude/skills/`, `.claude/commands/` | `.ittybitty/prompts/` |
-| Metadata | YAML frontmatter | None (currently) |
-| Application | Automatic (Claude decides) + manual (`/name`) | Injected by system at agent creation |
-| Scope | Global or per-file patterns | Per-agent-type |
-| Versioning | Not built-in | Not built-in |
-| Content | Instructions for Claude + tasks | Instructions for Claude agents |
-
-## Implementation Path
-
-If adopting frontmatter for itsybitsy prompts:
-
-1. **Phase 1**: Add optional YAML frontmatter parsing to `loadCustomPrompts()`
-2. **Phase 2**: Rename files to match directory structure (`.ittybitty/prompts/all/INSTRUCTIONS.md`, etc.) to align with skills directory pattern
-3. **Phase 3**: Add validation and metadata extraction (version, author, deprecation notices)
-4. **Phase 4**: CLI commands to list and validate custom prompts with `ib prompts list` and `ib prompts validate`
-
-## Sources
-
-- [Extend Claude with skills - Claude Code Docs](https://code.claude.com/docs/en/skills)
-- [Skill authoring best practices - Claude API Docs](https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices)
-- [skills/skill-creator/SKILL.md at main · anthropics/skills](https://github.com/anthropics/skills/blob/main/skills/skill-creator/SKILL.md)
+1. Keep `.ittybitty/prompts/` working as-is (backward compat)
+2. Add `.ittybitty/types/` as new agent type definitions
+3. Type definitions take precedence over prompts when both exist
+4. `loadCustomPrompts()` checks for type definitions first, falls back to `prompts/`
+5. Gradually move hardcoded instructions from `session-start.ts` into default type definitions that ship with itsybitsy

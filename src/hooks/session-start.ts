@@ -402,8 +402,8 @@ These phrases MUST be the LAST thing you output. Put summaries or status updates
 </ittybitty>`;
 }
 
-export async function hookSessionStart(): Promise<void> {
-  const raw = await new Response(Bun.stdin.stream()).text();
+export async function hookSessionStart(rawStdin?: string): Promise<void> {
+  const raw = rawStdin ?? await new Response(Bun.stdin.stream()).text();
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);

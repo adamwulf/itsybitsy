@@ -98,8 +98,8 @@ export function checkMainPath(input: MainPathInput): MainPathResult {
  * CLI entry point for `ib hooks main-path`.
  * Reads stdin JSON, checks for cd into agent worktrees, outputs decision.
  */
-export async function hookMainPath(): Promise<void> {
-  const raw = await new Response(Bun.stdin.stream()).text();
+export async function hookMainPath(rawStdin?: string): Promise<void> {
+  const raw = rawStdin ?? await new Response(Bun.stdin.stream()).text();
   let data: Record<string, unknown>;
   try {
     data = JSON.parse(raw);

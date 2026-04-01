@@ -353,9 +353,9 @@ export async function findUnfinishedChildren(
  * CLI entry point for the stop hook.
  * Reads stdin JSON, processes the hook, and executes tmux actions.
  */
-export async function hookStatus(agentId: string): Promise<void> {
-  // Read stdin
-  const stdinText = await new Response(Bun.stdin.stream()).text();
+export async function hookStatus(agentId: string, rawStdin?: string): Promise<void> {
+  // Read stdin (use pre-read value if provided)
+  const stdinText = rawStdin ?? await new Response(Bun.stdin.stream()).text();
   let lastMessage = "";
   try {
     const parsed = JSON.parse(stdinText);

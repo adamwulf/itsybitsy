@@ -12,11 +12,11 @@ import { logAgent } from "../agent-lifecycle";
  * CLI entry for hook-permission-denied subcommand.
  * Reads stdin JSON, logs the denied tool, exits 0.
  */
-export async function hookPermissionDenied(agentId: string): Promise<void> {
-  // Read JSON from stdin
+export async function hookPermissionDenied(agentId: string, rawStdin?: string): Promise<void> {
+  // Read JSON from stdin (use pre-read value if provided)
   let toolName = "unknown";
   try {
-    const raw = await new Response(Bun.stdin.stream()).text();
+    const raw = rawStdin ?? await new Response(Bun.stdin.stream()).text();
     const json = JSON.parse(raw);
     toolName = json.tool_name ?? "unknown";
   } catch {

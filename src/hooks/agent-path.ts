@@ -253,9 +253,9 @@ function checkFilePath(
  * CLI entry for hook-check-path subcommand.
  * Reads stdin JSON, resolves context, calls checkPathAccess(), outputs JSON.
  */
-export async function hookCheckPath(agentId: string): Promise<void> {
-  // Read JSON from stdin
-  const raw = await new Response(Bun.stdin.stream()).text();
+export async function hookCheckPath(agentId: string, rawStdin?: string): Promise<void> {
+  // Read JSON from stdin (use pre-read value if provided)
+  const raw = rawStdin ?? await new Response(Bun.stdin.stream()).text();
   let json: unknown;
   try {
     json = JSON.parse(raw);

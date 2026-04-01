@@ -233,8 +233,8 @@ export async function processTaskIntercept(
   };
 }
 
-export async function hookInterceptTask(): Promise<void> {
-  const raw = await new Response(Bun.stdin.stream()).text();
+export async function hookInterceptTask(rawStdin?: string): Promise<void> {
+  const raw = rawStdin ?? await new Response(Bun.stdin.stream()).text();
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);

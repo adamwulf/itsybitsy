@@ -242,9 +242,10 @@ export async function checkAndUpdateHash(
  * Reads stdin JSON, checks cwd, and outputs agent status if primary Claude.
  */
 export async function hookInjectStatus(
-  options: InjectStatusOptions = { mode: "full", visible: false }
+  options: InjectStatusOptions = { mode: "full", visible: false },
+  rawStdin?: string,
 ): Promise<void> {
-  const raw = await new Response(Bun.stdin.stream()).text();
+  const raw = rawStdin ?? await new Response(Bun.stdin.stream()).text();
   let data: Record<string, unknown>;
   try {
     data = JSON.parse(raw);

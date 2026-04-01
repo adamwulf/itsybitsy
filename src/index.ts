@@ -809,24 +809,33 @@ async function main() {
       const id = args[1];
       if (!id) { console.error("Usage: ib hook-check-path <agent-id>"); process.exit(1); }
       if (!isValidAgentId(id)) { console.error("Invalid agent ID"); process.exit(1); }
+      const { resolveAgentDir, withSlowHookLogging } = await import("./hooks/slow-hook-logger");
       const { hookCheckPath } = await import("./hooks/agent-path");
-      await hookCheckPath(id);
+      const stdin = await new Response(Bun.stdin.stream()).text();
+      const agentDir = resolveAgentDir(process.cwd(), id);
+      await withSlowHookLogging("hook-check-path", agentDir, stdin, () => hookCheckPath(id, stdin));
       break;
     }
     case "hook-status": {
       const id = args[1];
       if (!id) { console.error("Usage: ib hook-status <agent-id>"); process.exit(1); }
       if (!isValidAgentId(id)) { console.error("Invalid agent ID"); process.exit(1); }
+      const { resolveAgentDir, withSlowHookLogging } = await import("./hooks/slow-hook-logger");
       const { hookStatus } = await import("./hooks/agent-status");
-      await hookStatus(id);
+      const stdin = await new Response(Bun.stdin.stream()).text();
+      const agentDir = resolveAgentDir(process.cwd(), id);
+      await withSlowHookLogging("hook-status", agentDir, stdin, () => hookStatus(id, stdin));
       break;
     }
     case "hook-permission-denied": {
       const id = args[1];
       if (!id) { console.error("Usage: ib hook-permission-denied <agent-id>"); process.exit(1); }
       if (!isValidAgentId(id)) { console.error("Invalid agent ID"); process.exit(1); }
+      const { resolveAgentDir, withSlowHookLogging } = await import("./hooks/slow-hook-logger");
       const { hookPermissionDenied } = await import("./hooks/permission-denied");
-      await hookPermissionDenied(id);
+      const stdin = await new Response(Bun.stdin.stream()).text();
+      const agentDir = resolveAgentDir(process.cwd(), id);
+      await withSlowHookLogging("hook-permission-denied", agentDir, stdin, () => hookPermissionDenied(id, stdin));
       break;
     }
     case "inbox": {
@@ -902,22 +911,34 @@ async function main() {
       const subcommand = args[1];
       switch (subcommand) {
         case "intercept-task": {
+          const { resolveAgentDir, withSlowHookLogging } = await import("./hooks/slow-hook-logger");
           const { hookInterceptTask } = await import("./hooks/intercept-task");
-          await hookInterceptTask();
+          const stdin = await new Response(Bun.stdin.stream()).text();
+          const agentDir = resolveAgentDir(process.cwd());
+          await withSlowHookLogging("intercept-task", agentDir, stdin, () => hookInterceptTask(stdin));
           break;
         }
         case "session-start": {
+          const { resolveAgentDir, withSlowHookLogging } = await import("./hooks/slow-hook-logger");
           const { hookSessionStart } = await import("./hooks/session-start");
-          await hookSessionStart();
+          const stdin = await new Response(Bun.stdin.stream()).text();
+          const agentDir = resolveAgentDir(process.cwd());
+          await withSlowHookLogging("session-start", agentDir, stdin, () => hookSessionStart(stdin));
           break;
         }
         case "main-path": {
+          const { resolveAgentDir, withSlowHookLogging } = await import("./hooks/slow-hook-logger");
           const { hookMainPath } = await import("./hooks/main-path");
-          await hookMainPath();
+          const stdin = await new Response(Bun.stdin.stream()).text();
+          const agentDir = resolveAgentDir(process.cwd());
+          await withSlowHookLogging("main-path", agentDir, stdin, () => hookMainPath(stdin));
           break;
         }
         case "inject-status": {
+          const { resolveAgentDir, withSlowHookLogging } = await import("./hooks/slow-hook-logger");
           const { hookInjectStatus } = await import("./hooks/inject-status");
+          const stdin = await new Response(Bun.stdin.stream()).text();
+          const agentDir = resolveAgentDir(process.cwd());
           const statusFlags = args.slice(2);
           let mode: "full" | "if-changed" | "brief" = "full";
           let visible = false;
@@ -927,7 +948,7 @@ async function main() {
             else if (flag === "--brief") mode = "brief";
             else if (flag === "--visible") visible = true;
           }
-          await hookInjectStatus({ mode, visible });
+          await withSlowHookLogging("inject-status", agentDir, stdin, () => hookInjectStatus({ mode, visible }, stdin));
           break;
         }
         case "install": {

@@ -56,6 +56,14 @@ export function killActiveDiffProc() {
   }
 }
 
+/** Kill any active diff process (used during shutdown to prevent orphans) */
+export function killActiveDiffProc() {
+  if (activeDiffProc) {
+    try { activeDiffProc.proc.kill(); } catch {}
+    activeDiffProc = null;
+  }
+}
+
 /** Context interface — DashboardComponent satisfies this structurally */
 export interface ActionCtx {
   agentTree: {

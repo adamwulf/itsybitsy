@@ -44,6 +44,14 @@ let activeDiffProc: { proc: ReturnType<typeof Bun.spawn>; agentId: string } | nu
 export function getActiveDiffProc() { return activeDiffProc; }
 export function setActiveDiffProc(v: typeof activeDiffProc) { activeDiffProc = v; }
 
+/** Kill any active diff process (used during shutdown to prevent orphans) */
+export function killActiveDiffProc() {
+  if (activeDiffProc) {
+    try { activeDiffProc.proc.kill(); } catch {}
+    activeDiffProc = null;
+  }
+}
+
 /** Context interface — DashboardComponent satisfies this structurally */
 export interface ActionCtx {
   agentTree: {
@@ -619,7 +627,7 @@ export async function handleOpenDiffTool(ctx: ActionCtx) {
   // the HTTP server under ib's control (harmless for other diff tools).
   const proc = Bun.spawn(
     ["/bin/bash", "-c", 'exec $1 $(git merge-base HEAD main)', "--", tool],
-    { cwd, stdout: "pipe", stderr: "pipe", env: { ...process.env, WEBDIFF_RUN_IN_PROCESS: "1" } },
+    { cwd, stdout: "ignore", stderr: "pipe", env: { ...process.env, WEBDIFF_RUN_IN_PROCESS: "1" } },
   );
   activeDiffProc = { proc, agentId: agent.id };
   ctx.setNotice(`Opened diff in ${tool}`);

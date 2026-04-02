@@ -10,7 +10,7 @@ import {
   handleKill, handleNuke, handleNukeAll, handleResume, handlePause,
   handleSend, handleNewAgent, handleScrollUp, handleScrollDown,
   handleHelp, handleResizeLeft,
-  handleOpenDiffTool, getActiveDiffProc, setActiveDiffProc,
+  handleOpenDiffTool, getActiveDiffProc, setActiveDiffProc, killActiveDiffProc,
 } from "./agent-actions";
 import { MIN_LEFT_WIDTH, MAX_LEFT_WIDTH } from "./split-pane";
 import {
@@ -461,5 +461,32 @@ describe("handleOpenDiffTool", () => {
     ctx.diffTool = undefined;
     await handleOpenDiffTool(ctx);
     expect(notices).toContain("No diff tool configured — set externalDiffTool in ~/.itsybitsy/config.json");
+  });
+});
+
+describe("killActiveDiffProc", () => {
+  afterEach(() => {
+    setActiveDiffProc(null);
+  });
+
+  test("kills active diff process and clears state", () => {
+    let killed = false;
+    const fakeProc = {
+      kill: () => { killed = true; },
+      exited: new Promise<number>(() => {}),
+      stderr: new Response("").body!,
+    } as unknown as ReturnType<typeof Bun.spawn>;
+    setActiveDiffProc({ proc: fakeProc, agentId: "test-agent" });
+
+    killActiveDiffProc();
+
+    expect(killed).toBe(true);
+    expect(getActiveDiffProc()).toBeNull();
+  });
+
+  test("is a no-op when no diff process is active", () => {
+    setActiveDiffProc(null);
+    killActiveDiffProc(); // should not throw
+    expect(getActiveDiffProc()).toBeNull();
   });
 });

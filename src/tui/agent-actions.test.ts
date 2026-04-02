@@ -11,6 +11,7 @@ import {
   handleSend, handleNewAgent, handleScrollUp, handleScrollDown,
   handleHelp, handleResizeLeft,
   handleOpenDiffTool, getActiveDiffProc, setActiveDiffProc, killActiveDiffProc,
+  getDiffToolLaunching, setDiffToolLaunching,
 } from "./agent-actions";
 import { MIN_LEFT_WIDTH, MAX_LEFT_WIDTH } from "./split-pane";
 import {
@@ -427,6 +428,18 @@ describe("handleResizeLeft", () => {
 describe("handleOpenDiffTool", () => {
   afterEach(() => {
     setActiveDiffProc(null);
+    setDiffToolLaunching(false);
+  });
+
+  test("bails out with notice when diff tool is already launching", async () => {
+    setDiffToolLaunching(true);
+    const agent = makeAgent({ id: "test-agent" });
+    const { ctx, notices } = makeMockCtx({ agent });
+    ctx.diffTool = "some-tool";
+    await handleOpenDiffTool(ctx);
+    expect(notices).toContain("Diff tool is already launching");
+    // Flag should still be true — the function bailed without clearing it
+    expect(getDiffToolLaunching()).toBe(true);
   });
 
   test("kills previous diff process before launching new one", async () => {

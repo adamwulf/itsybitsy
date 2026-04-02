@@ -40,9 +40,13 @@ const SCROLL_STEP = 10;
 /** Track active diff tool process so we can kill it before relaunching */
 let activeDiffProc: { proc: ReturnType<typeof Bun.spawn>; agentId: string } | null = null;
 
+let diffToolLaunching = false;
+
 /** Test helpers for activeDiffProc */
 export function getActiveDiffProc() { return activeDiffProc; }
 export function setActiveDiffProc(v: typeof activeDiffProc) { activeDiffProc = v; }
+export function getDiffToolLaunching() { return diffToolLaunching; }
+export function setDiffToolLaunching(v: boolean) { diffToolLaunching = v; }
 
 /** Kill any active diff process (used during shutdown to prevent orphans) */
 export function killActiveDiffProc() {
@@ -600,6 +604,8 @@ export async function handleOpenDiffTool(ctx: ActionCtx) {
     activeDiffProc = null;
   }
 
+  if (diffToolLaunching) { ctx.setNotice("Diff tool is already launching"); return; }
+
   const agent = ctx.agentTree.selectedAgent;
   if (!agent) { ctx.setNotice("No agent selected"); return; }
   if (!ctx.diffTool) { ctx.setNotice("No diff tool configured — set externalDiffTool in ~/.itsybitsy/config.json"); return; }
@@ -612,14 +618,16 @@ export async function handleOpenDiffTool(ctx: ActionCtx) {
     return;
   }
 
+  diffToolLaunching = true;
+
   // Check for empty diff before launching tool
   const mergeBaseProc = Bun.spawn(["git", "merge-base", "HEAD", "main"], { cwd, stdout: "pipe", stderr: "ignore" });
   const mergeBase = (await new Response(mergeBaseProc.stdout).text()).trim();
-  if (!mergeBase) { ctx.setNotice("Could not determine merge-base with main"); return; }
+  if (!mergeBase) { diffToolLaunching = false; ctx.setNotice("Could not determine merge-base with main"); return; }
 
-  const checkProc = Bun.spawn(["git", "diff", "--quiet", mergeBase], { cwd });
+  const checkProc = Bun.spawn(["git", "diff", "--quiet", mergeBase], { cwd, stdout: "ignore", stderr: "ignore" });
   const checkCode = await checkProc.exited;
-  if (checkCode === 0) { ctx.setNotice("No changes to show — diff is empty"); return; }
+  if (checkCode === 0) { diffToolLaunching = false; ctx.setNotice("No changes to show — diff is empty"); return; }
 
   // Run diff tool in the worktree, showing changes since merge-base with main.
   // 'exec' replaces bash so kill signals reach the actual process tree.
@@ -630,6 +638,7 @@ export async function handleOpenDiffTool(ctx: ActionCtx) {
     { cwd, stdout: "ignore", stderr: "pipe", env: { ...process.env, WEBDIFF_RUN_IN_PROCESS: "1" } },
   );
   activeDiffProc = { proc, agentId: agent.id };
+  diffToolLaunching = false;
   ctx.setNotice(`Opened diff in ${tool}`);
 
   // Report errors asynchronously, stripping newlines for single-line status bar display

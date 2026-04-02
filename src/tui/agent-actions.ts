@@ -290,7 +290,7 @@ export function handleReassign(ctx: ActionCtx) {
       f.agent.repoPath === agent.repoPath &&
       f.agent.id !== agent.id &&
       !descendantIds.has(f.agent.id) &&
-      !f.agent.meta.worker && !(f.agent.meta.type === "worker") &&
+      !f.agent.meta.worker && !(f.agent.meta.agentType === "worker") &&
       !f.agent.archived
     );
 

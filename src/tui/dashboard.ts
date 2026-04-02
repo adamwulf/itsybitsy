@@ -1971,6 +1971,7 @@ export async function launchDashboard(): Promise<void> {
 
   tui.addInputListener((data) => {
     if (matchesKey(data, Key.ctrl("c"))) {
+      agentActions.killActiveDiffProc();
       colorDetection.cleanup();
       dashboard.stopPolling();
       watcher.stop();

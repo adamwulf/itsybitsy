@@ -37,6 +37,25 @@ import { IB_COORDINATOR_SESSION, sanitizeTmuxInput, restartSystemCoordinator, ch
 
 const SCROLL_STEP = 10;
 
+/** Track active diff tool process so we can kill it before relaunching */
+let activeDiffProc: { proc: ReturnType<typeof Bun.spawn>; agentId: string } | null = null;
+
+let diffToolLaunching = false;
+
+/** Test helpers for activeDiffProc */
+export function getActiveDiffProc() { return activeDiffProc; }
+export function setActiveDiffProc(v: typeof activeDiffProc) { activeDiffProc = v; }
+export function getDiffToolLaunching() { return diffToolLaunching; }
+export function setDiffToolLaunching(v: boolean) { diffToolLaunching = v; }
+
+/** Kill any active diff process (used during shutdown to prevent orphans) */
+export function killActiveDiffProc() {
+  if (activeDiffProc) {
+    try { activeDiffProc.proc.kill(); } catch {}
+    activeDiffProc = null;
+  }
+}
+
 /** Context interface — DashboardComponent satisfies this structurally */
 export interface ActionCtx {
   agentTree: {
@@ -579,6 +598,14 @@ export function handleOpenWorktree(ctx: ActionCtx) {
 }
 
 export async function handleOpenDiffTool(ctx: ActionCtx) {
+  // Kill previous diff process before doing anything else
+  if (activeDiffProc) {
+    try { activeDiffProc.proc.kill(); } catch {}
+    activeDiffProc = null;
+  }
+
+  if (diffToolLaunching) { ctx.setNotice("Diff tool is already launching"); return; }
+
   const agent = ctx.agentTree.selectedAgent;
   if (!agent) { ctx.setNotice("No agent selected"); return; }
   if (!ctx.diffTool) { ctx.setNotice("No diff tool configured — set externalDiffTool in ~/.itsybitsy/config.json"); return; }
@@ -591,33 +618,41 @@ export async function handleOpenDiffTool(ctx: ActionCtx) {
     return;
   }
 
+  diffToolLaunching = true;
+
   // Check for empty diff before launching tool
   const mergeBaseProc = Bun.spawn(["git", "merge-base", "HEAD", "main"], { cwd, stdout: "pipe", stderr: "ignore" });
   const mergeBase = (await new Response(mergeBaseProc.stdout).text()).trim();
-  if (!mergeBase) { ctx.setNotice("Could not determine merge-base with main"); return; }
+  if (!mergeBase) { diffToolLaunching = false; ctx.setNotice("Could not determine merge-base with main"); return; }
 
-  const checkProc = Bun.spawn(["git", "diff", "--quiet", mergeBase], { cwd });
+  const checkProc = Bun.spawn(["git", "diff", "--quiet", mergeBase], { cwd, stdout: "ignore", stderr: "ignore" });
   const checkCode = await checkProc.exited;
-  if (checkCode === 0) { ctx.setNotice("No changes to show — diff is empty"); return; }
+  if (checkCode === 0) { diffToolLaunching = false; ctx.setNotice("No changes to show — diff is empty"); return; }
 
   // Run diff tool in the worktree, showing changes since merge-base with main.
-  // Tool string is unquoted so multi-word tools (e.g. "git webdiff") are word-split correctly.
+  // 'exec' replaces bash so kill signals reach the actual process tree.
+  // WEBDIFF_RUN_IN_PROCESS=1 prevents webdiff from forking/detaching, keeping
+  // the HTTP server under ib's control (harmless for other diff tools).
   const proc = Bun.spawn(
-    ["/bin/bash", "-c", '$1 $(git merge-base HEAD main)', "--", tool],
-    { cwd, stdout: "ignore", stderr: "pipe" },
+    ["/bin/bash", "-c", 'exec $1 $(git merge-base HEAD main)', "--", tool],
+    { cwd, stdout: "ignore", stderr: "pipe", env: { ...process.env, WEBDIFF_RUN_IN_PROCESS: "1" } },
   );
+  activeDiffProc = { proc, agentId: agent.id };
+  diffToolLaunching = false;
   ctx.setNotice(`Opened diff in ${tool}`);
 
   // Report errors asynchronously, stripping newlines for single-line status bar display
   (async () => {
     try {
       const exitCode = await proc.exited;
+      if (activeDiffProc?.proc === proc) activeDiffProc = null;
       if (exitCode !== 0) {
         const stderr = await new Response(proc.stderr).text();
         const msg = (stderr || `exit code ${exitCode}`).split("\n")[0]!.trim();
         ctx.setNotice(`Diff tool error: ${msg}`);
       }
     } catch (err) {
+      if (activeDiffProc?.proc === proc) activeDiffProc = null;
       const msg = String(err).split("\n")[0]!.trim();
       ctx.setNotice(`Diff tool error: ${msg}`);
     }

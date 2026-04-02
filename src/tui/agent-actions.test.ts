@@ -10,6 +10,8 @@ import {
   handleKill, handleNuke, handleNukeAll, handleResume, handlePause,
   handleSend, handleNewAgent, handleScrollUp, handleScrollDown,
   handleHelp, handleResizeLeft,
+  handleOpenDiffTool, getActiveDiffProc, setActiveDiffProc, killActiveDiffProc,
+  getDiffToolLaunching, setDiffToolLaunching,
 } from "./agent-actions";
 import { MIN_LEFT_WIDTH, MAX_LEFT_WIDTH } from "./split-pane";
 import {
@@ -420,5 +422,84 @@ describe("handleResizeLeft", () => {
     handleResizeLeft(ctx, -5);
     // Width unchanged
     expect(ctx.splitPane.getLeftWidth()).toBe(MIN_LEFT_WIDTH);
+  });
+});
+
+describe("handleOpenDiffTool", () => {
+  afterEach(() => {
+    setActiveDiffProc(null);
+    setDiffToolLaunching(false);
+  });
+
+  test("bails out with notice when diff tool is already launching", async () => {
+    setDiffToolLaunching(true);
+    const agent = makeAgent({ id: "test-agent" });
+    const { ctx, notices } = makeMockCtx({ agent });
+    ctx.diffTool = "some-tool";
+    await handleOpenDiffTool(ctx);
+    expect(notices).toContain("Diff tool is already launching");
+    // Flag should still be true — the function bailed without clearing it
+    expect(getDiffToolLaunching()).toBe(true);
+  });
+
+  test("kills previous diff process before launching new one", async () => {
+    let killed = false;
+    const fakeProc = {
+      kill: () => { killed = true; },
+      exited: new Promise<number>(() => {}), // never resolves
+      stdout: new Response("").body!,
+      stderr: new Response("").body!,
+    } as unknown as ReturnType<typeof Bun.spawn>;
+
+    setActiveDiffProc({ proc: fakeProc, agentId: "old-agent" });
+
+    // Call with no agent selected — will bail early after killing previous proc
+    const { ctx, notices } = makeMockCtx();
+    await handleOpenDiffTool(ctx);
+
+    expect(killed).toBe(true);
+    expect(getActiveDiffProc()).toBeNull();
+    expect(notices).toContain("No agent selected");
+  });
+
+  test("shows notice when no agent is selected", async () => {
+    const { ctx, notices } = makeMockCtx();
+    await handleOpenDiffTool(ctx);
+    expect(notices).toContain("No agent selected");
+  });
+
+  test("shows notice when no diff tool configured", async () => {
+    const agent = makeAgent({ id: "test-agent" });
+    const { ctx, notices } = makeMockCtx({ agent });
+    ctx.diffTool = undefined;
+    await handleOpenDiffTool(ctx);
+    expect(notices).toContain("No diff tool configured — set externalDiffTool in ~/.itsybitsy/config.json");
+  });
+});
+
+describe("killActiveDiffProc", () => {
+  afterEach(() => {
+    setActiveDiffProc(null);
+  });
+
+  test("kills active diff process and clears state", () => {
+    let killed = false;
+    const fakeProc = {
+      kill: () => { killed = true; },
+      exited: new Promise<number>(() => {}),
+      stderr: new Response("").body!,
+    } as unknown as ReturnType<typeof Bun.spawn>;
+    setActiveDiffProc({ proc: fakeProc, agentId: "test-agent" });
+
+    killActiveDiffProc();
+
+    expect(killed).toBe(true);
+    expect(getActiveDiffProc()).toBeNull();
+  });
+
+  test("is a no-op when no diff process is active", () => {
+    setActiveDiffProc(null);
+    killActiveDiffProc(); // should not throw
+    expect(getActiveDiffProc()).toBeNull();
   });
 });

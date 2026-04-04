@@ -1550,11 +1550,6 @@ export async function newAgent(
   // Load the agent type definition
   const agentTypeDef = await loadAgentType(resolvedTypeName);
 
-  // Validate that type's canSpawnChildren matches mode flags
-  if (agentTypeDef.canSpawnChildren && workerMode) {
-    return { ok: false, exitCode: 1, stdout: "", stderr: `Error: agent type '${resolvedTypeName}' has canSpawnChildren=true but --worker was specified` };
-  }
-
   // Leaf agents can't spawn children (worker-like behavior)
   const isLeafAgent = !agentTypeDef.canSpawnChildren;
 

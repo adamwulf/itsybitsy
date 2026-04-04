@@ -1438,6 +1438,12 @@ export async function newAgent(
   if (coordinatorMode && !useWorktree) {
     return { ok: false, exitCode: 1, stdout: "", stderr: "Error: --no-worktree is not allowed with --coordinator" };
   }
+  if (opts?.type && (workerMode || coordinatorMode)) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Error: --type cannot be combined with --worker or --coordinator` };
+  }
+  if (opts?.type === "coordinator") {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Error: use --coordinator instead of --type coordinator` };
+  }
 
   // Coordinator one-per-repo check
   if (coordinatorMode) {
@@ -1529,16 +1535,6 @@ export async function newAgent(
   // 6. Load config
   const config = await readConfig();
   const customPrompts = await loadCustomPrompts(rootRepoPath);
-
-  // Validate mutual exclusivity: --type with --worker or --coordinator
-  if (opts?.type && (workerMode || coordinatorMode)) {
-    return { ok: false, exitCode: 1, stdout: "", stderr: `Error: --type cannot be combined with --worker or --coordinator` };
-  }
-
-  // Reject --type coordinator: must use --coordinator flag for full coordinator behavior
-  if (opts?.type === "coordinator") {
-    return { ok: false, exitCode: 1, stdout: "", stderr: `Error: use --coordinator instead of --type coordinator` };
-  }
 
   // Resolve agent type: --type > --worker/--coordinator flags > default to manager
   let resolvedTypeName = opts?.type ?? "";

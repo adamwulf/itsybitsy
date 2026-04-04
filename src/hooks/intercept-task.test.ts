@@ -478,7 +478,8 @@ describe("agent types", () => {
         tool_input: { prompt: "do stuff", description: "stuff" },
         cwd,
       });
-      expect(result.action).toBe("skip");
+      expect(result.action).toBe("intercept");
+      expect((result.output as any).hookSpecificOutput.permissionDecision).toBe("deny");
     } finally {
       await fs.rm(tmpDir, { recursive: true, force: true });
     }
@@ -552,7 +553,8 @@ describe("agent types", () => {
         tool_input: { prompt: "do stuff", description: "stuff" },
         cwd,
       });
-      expect(result.action).toBe("skip");
+      expect(result.action).toBe("intercept");
+      expect((result.output as any).hookSpecificOutput.permissionDecision).toBe("deny");
     } finally {
       await fs.rm(tmpDir, { recursive: true, force: true });
     }

@@ -248,3 +248,9 @@ export async function listAgentTypes(): Promise<AgentType[]> {
 
   return Array.from(types.values());
 }
+
+/**
+ * Resolve an agent type by name. Alias for loadAgentType — tries user-defined
+ * file first, falls back to built-in, defaults to manager for unknown types.
+ */
+export const resolveAgentType = loadAgentType;

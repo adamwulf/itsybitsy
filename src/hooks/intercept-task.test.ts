@@ -452,7 +452,7 @@ describe("coordinator Bash restrictions", () => {
 });
 
 describe("agent types", () => {
-  test("skip agent type with canSpawnChildren=false", async () => {
+  test("deny agent type with canSpawnChildren=false", async () => {
     // Create a temp directory simulating an agent with a custom type that cannot spawn
     const fs = await import("fs/promises");
     const { tmpdir } = await import("os");

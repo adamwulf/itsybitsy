@@ -1732,8 +1732,7 @@ export async function newAgent(
   if (manager) {
     await logAgent(agentDir, `Agent created (manager: ${manager}, prompt: ${prompt})`);
     const managerDir = join(agentsDir, manager);
-    const typeLabel = isLeafAgent ? "worker" : "manager";
-    await logAgent(managerDir, `Spawned ${typeLabel} subagent: ${id} (prompt: ${prompt})`);
+    await logAgent(managerDir, `Spawned ${resolvedTypeName} subagent: ${id} (prompt: ${prompt})`);
   } else {
     await logAgent(agentDir, `Agent created (prompt: ${prompt})`);
   }

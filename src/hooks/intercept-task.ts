@@ -151,7 +151,7 @@ export async function processTaskIntercept(
               },
             };
           }
-          // canSpawnChildren=true means intercept — fall through
+          // canSpawnChildren=true — allow Task, fall through to spawn
         } else if (meta.worker === true) {
           // Backward compat: legacy agents without agentType
           return {

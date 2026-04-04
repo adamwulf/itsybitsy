@@ -91,6 +91,13 @@ export function parseAgentTypeFile(content: string): {
       }
     }
 
+    // Close any pending empty-value key that never got nested children
+    if (currentParent && currentObj && Object.keys(currentObj).length === 0) {
+      frontmatter[currentParent] = "";
+      currentParent = null;
+      currentObj = null;
+    }
+
     // Top-level key
     const trimmed = line.trim();
     const colonIdx = trimmed.indexOf(":");
@@ -99,7 +106,8 @@ export function parseAgentTypeFile(content: string): {
     const key = trimmed.substring(0, colonIdx).trim();
     const valueStr = trimmed.substring(colonIdx + 1).trim();
 
-    // If value is empty, this starts a nested object
+    // If value is empty, tentatively start a nested object
+    // (will be converted to "" if no indented children follow)
     if (valueStr === "") {
       currentParent = key;
       currentObj = {};
@@ -110,6 +118,11 @@ export function parseAgentTypeFile(content: string): {
       currentObj = null;
       frontmatter[key] = parseSimpleValue(valueStr);
     }
+  }
+
+  // Flush any trailing empty-value key that never got nested children
+  if (currentParent && currentObj && Object.keys(currentObj).length === 0) {
+    frontmatter[currentParent] = "";
   }
 
   const body = lines.slice(endIdx + 1).join("\n").trim();

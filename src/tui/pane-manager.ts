@@ -87,7 +87,7 @@ export function colorizeLog(lines: string[]): string[] {
 export function formatAgentRow(
   agent: Agent, connector: string, stateColWidth: number,
 ): string {
-  const icon = agent.meta.coordinator ? "◇" : ((agent.meta.worker || agent.meta.agentType === "worker") ? "⚙" : "◆");
+  const icon = agent.meta.coordinator ? "◇" : (agent.meta.worker ? "⚙" : "◆");
   const state = displayState(agent.state);
   const stateColor = getStateColors()[state] ?? getStateColors().unknown;
   const promptText = (agent.meta.summary ?? agent.meta.prompt).replace(/\n/g, " ");

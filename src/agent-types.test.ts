@@ -126,11 +126,10 @@ body`;
 
   const { frontmatter } = parseAgentTypeFile(content);
 
-  // Empty values should start nested objects or remain as empty objects, not become 0
+  // Empty values should parse as empty strings, not become 0 or objects
   expect(frontmatter.name).toBe("test");
-  // description with no value starts a nested object
-  expect(typeof frontmatter.description).toBe("object");
-  expect(typeof frontmatter.model).toBe("object");
+  expect(frontmatter.description).toBe("");
+  expect(frontmatter.model).toBe("");
 });
 
 test("parseAgentTypeFile: handles empty inline array", () => {

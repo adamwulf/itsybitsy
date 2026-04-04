@@ -219,6 +219,22 @@ export function getBuiltinTypes(): Record<string, AgentType> {
 }
 
 /**
+ * Check if an agent type exists (either as a built-in or user-defined file).
+ */
+export async function agentTypeExists(name: string): Promise<boolean> {
+  const builtins = getBuiltinTypes();
+  if (builtins[name]) return true;
+
+  const home = process.env.HOME || homedir();
+  const typeFile = join(home, ".itsybitsy", "agent-types", `${name}.md`);
+  try {
+    return await Bun.file(typeFile).exists();
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Load an agent type definition from ~/.itsybitsy/agent-types/<name>.md
  * User-defined files override built-in defaults. Falls back to built-in manager
  * if the type is not found anywhere.

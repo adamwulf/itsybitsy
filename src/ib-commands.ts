@@ -28,7 +28,7 @@ import type { SpawnFn } from "./types";
 import { isValidModel, isValidToolList, isValidTmuxSession, isValidSessionId, isValidShellPath, shellQuote } from "./validation";
 import { getSavedTmuxWidth } from "./tui/layout";
 import { buildPerRepoCoordinatorSettings, checkCoordinatorExists, getCoordinatorAgentId } from "./coordinator";
-import { loadAgentType } from "./agent-types";
+import { loadAgentType, agentTypeExists } from "./agent-types";
 
 export interface IbCommandResult {
   ok: boolean;
@@ -1548,6 +1548,11 @@ export async function newAgent(
     }
   }
 
+  // Validate the type exists before loading
+  if (!(await agentTypeExists(resolvedTypeName))) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Unknown agent type: '${resolvedTypeName}'. Create ~/.itsybitsy/agent-types/${resolvedTypeName}.md or use a built-in type (manager, worker, coordinator).` };
+  }
+
   // Load the agent type definition
   const agentTypeDef = await loadAgentType(resolvedTypeName);
 
@@ -1576,13 +1581,16 @@ export async function newAgent(
     return { ok: false, exitCode: 1, stdout: "", stderr: `Invalid model name: ${model}` };
   }
 
-  // Config permissions
-  const roleAllow = (config[`permissions.${resolvedTypeName}.allow`]?.value as string[] | undefined) ?? [];
-  const roleDeny = (config[`permissions.${resolvedTypeName}.deny`]?.value as string[] | undefined) ?? [];
+  // Config permissions: permissions.all.* applies to all types,
+  // permissions.coordinator.* and permissions.repo.* apply to those specific types.
+  // Custom types only get permissions.all.* from config — per-type permissions live in the type file.
+  const configRoleKey = [`coordinator`, `repo`].includes(resolvedTypeName) ? resolvedTypeName : null;
+  const roleAllow = configRoleKey ? (config[`permissions.${configRoleKey}.allow`]?.value as string[] | undefined) ?? [] : [];
+  const roleDeny = configRoleKey ? (config[`permissions.${configRoleKey}.deny`]?.value as string[] | undefined) ?? [] : [];
   const allAllow = (config["permissions.all.allow"]?.value as string[] | undefined) ?? [];
   const allDeny = (config["permissions.all.deny"]?.value as string[] | undefined) ?? [];
 
-  // Merge permissions: config role + config all + type definition (order irrelevant — deduplicated via Set)
+  // Merge permissions: config role + config all + type definition (deduplicated via Set)
   const typeAllow = agentTypeDef.permissions?.allow ?? [];
   const typeDeny = agentTypeDef.permissions?.deny ?? [];
   const configAllow = [...new Set([...roleAllow, ...allAllow, ...typeAllow])];

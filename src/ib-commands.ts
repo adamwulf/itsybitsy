@@ -1582,7 +1582,7 @@ export async function newAgent(
   const allAllow = (config["permissions.all.allow"]?.value as string[] | undefined) ?? [];
   const allDeny = (config["permissions.all.deny"]?.value as string[] | undefined) ?? [];
 
-  // Merge type definition permissions with config permissions
+  // Merge permissions: config role + config all + type definition (order irrelevant — deduplicated via Set)
   const typeAllow = agentTypeDef.permissions?.allow ?? [];
   const typeDeny = agentTypeDef.permissions?.deny ?? [];
   const configAllow = [...new Set([...roleAllow, ...allAllow, ...typeAllow])];

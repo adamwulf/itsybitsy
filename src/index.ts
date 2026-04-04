@@ -164,6 +164,7 @@ async function main() {
           age: a.age,
           model: a.meta.model,
           worker: a.meta.worker,
+          agentType: a.meta.agentType ?? null,
           manager: a.meta.manager ?? null,
           repo: a.repoName,
           repoPath: a.repoPath,
@@ -418,6 +419,7 @@ async function main() {
       console.log(`Repo:         ${agent.repoName} (${agent.repoPath})`);
       console.log(`State:        ${agent.state}`);
       console.log(`Model:        ${m.model}`);
+      console.log(`Agent Type:   ${m.agentType ?? (m.worker ? "worker" : "manager")}`);
       console.log(`Worker:       ${m.worker}`);
       console.log(`Manager:      ${m.manager ?? "none"}`);
       console.log(`Created:      ${m.created}`);

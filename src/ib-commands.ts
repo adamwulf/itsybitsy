@@ -1530,6 +1530,16 @@ export async function newAgent(
   const config = await readConfig();
   const customPrompts = await loadCustomPrompts(rootRepoPath);
 
+  // Validate mutual exclusivity: --type with --worker or --coordinator
+  if (opts?.type && (workerMode || coordinatorMode)) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Error: --type cannot be combined with --worker or --coordinator` };
+  }
+
+  // Reject --type coordinator: must use --coordinator flag for full coordinator behavior
+  if (opts?.type === "coordinator") {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Error: use --coordinator instead of --type coordinator` };
+  }
+
   // Resolve agent type: --type > --worker/--coordinator flags > default to manager
   let resolvedTypeName = opts?.type ?? "";
   if (!resolvedTypeName) {
@@ -1540,11 +1550,6 @@ export async function newAgent(
     } else {
       resolvedTypeName = "manager";
     }
-  }
-
-  // Validate mutual exclusivity: --type with --worker or --coordinator
-  if (opts?.type && (workerMode || coordinatorMode)) {
-    return { ok: false, exitCode: 1, stdout: "", stderr: `Error: --type cannot be combined with --worker or --coordinator` };
   }
 
   // Load the agent type definition
@@ -1764,6 +1769,8 @@ When your task is complete:
     customAllPrompt = `[CUSTOM INSTRUCTIONS]\n${customPrompts.all}\n\n`;
   }
 
+  // Custom role prompts are keyed by spawn capability: leaf agents (canSpawnChildren=false)
+  // get worker prompts, non-leaf agents get manager prompts — regardless of custom type name
   let customRolePrompt = "";
   if (isLeafAgent && customPrompts.worker) {
     customRolePrompt = `[CUSTOM WORKER INSTRUCTIONS]\n${customPrompts.worker}\n\n`;

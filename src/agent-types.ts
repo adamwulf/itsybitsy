@@ -54,6 +54,7 @@ export function parseAgentTypeFile(content: string): {
 
   let currentParent: string | null = null;
   let currentObj: Record<string, unknown> | null = null;
+  let currentListKey: string | null = null; // tracks which nested key receives list items
 
   for (const line of fmLines) {
     // Skip blank lines and comments
@@ -72,30 +73,37 @@ export function parseAgentTypeFile(content: string): {
         if (valueStr.startsWith("- ")) {
           // YAML list item as value of parent.key — treat as single-item array start
           currentObj[key] = [valueStr.substring(2).trim().replace(/^["']|["']$/g, "")];
+          currentListKey = key;
         } else if (valueStr === "") {
           // Empty value in nested context starts a list (e.g. allow:\n    - Read)
           currentObj[key] = [];
+          currentListKey = key;
         } else {
           currentObj[key] = parseSimpleValue(valueStr);
+          currentListKey = null;
         }
         continue;
       }
       // Could be a YAML list item (- value) under a key
       if (childLine.startsWith("- ")) {
-        // Append to the last key in currentObj
-        const lastKey = Object.keys(currentObj).pop();
-        if (lastKey && Array.isArray(currentObj[lastKey])) {
-          (currentObj[lastKey] as unknown[]).push(childLine.substring(2).trim().replace(/^["']|["']$/g, ""));
+        // Append to the tracked list key in currentObj
+        if (currentListKey && Array.isArray(currentObj[currentListKey])) {
+          (currentObj[currentListKey] as unknown[]).push(childLine.substring(2).trim().replace(/^["']|["']$/g, ""));
         }
         continue;
       }
     }
 
-    // Close any pending empty-value key that never got nested children
-    if (currentParent && currentObj && Object.keys(currentObj).length === 0) {
-      frontmatter[currentParent] = "";
+    // Transitioning to a top-level line: close any open nested object
+    if (currentParent && currentObj) {
+      if (Object.keys(currentObj).length === 0) {
+        // Pending empty-value key that never got nested children → store as ""
+        frontmatter[currentParent] = "";
+      }
+      // currentObj with content is already stored via reference in frontmatter[currentParent]
       currentParent = null;
       currentObj = null;
+      currentListKey = null;
     }
 
     // Top-level key
@@ -111,11 +119,9 @@ export function parseAgentTypeFile(content: string): {
     if (valueStr === "") {
       currentParent = key;
       currentObj = {};
+      currentListKey = null;
       frontmatter[key] = currentObj;
     } else {
-      // Close any open nested object
-      currentParent = null;
-      currentObj = null;
       frontmatter[key] = parseSimpleValue(valueStr);
     }
   }

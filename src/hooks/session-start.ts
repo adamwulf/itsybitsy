@@ -48,7 +48,17 @@ export function detectRole(
   const meta = metaJson ?? {};
   const isCoordinator = (meta as Record<string, unknown>).coordinator === true;
   const worker = meta.worker === true;
-  const role: SessionRole = isCoordinator ? "coordinator" : worker ? "worker" : "manager";
+  const agentType = (meta as Record<string, unknown>).agentType as string | undefined;
+
+  // Derive role: prefer agentType's instructionStyle mapping, fall back to legacy booleans
+  let role: SessionRole;
+  if (agentType === "coordinator" || isCoordinator) {
+    role = "coordinator";
+  } else if (agentType === "worker" || worker) {
+    role = "worker";
+  } else {
+    role = "manager";
+  }
 
   // Normalize manager: treat null and "null" as empty
   let agentManager = "";
@@ -57,7 +67,6 @@ export function detectRole(
   }
 
   const parentBranch = agentManager ? `agent/${agentManager}` : "main";
-  const agentType = (meta as Record<string, unknown>).agentType as string | undefined;
 
   return {
     role,

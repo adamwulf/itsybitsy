@@ -32,8 +32,9 @@ export function computeStateColWidth(agents: FlatEntry[]): number {
   return maxLen;
 }
 
-/** Get the icon for an agent based on its role */
+/** Get the icon for an agent based on its type or role */
 function agentIcon(agent: Agent): string {
+  if (agent.meta.agentIcon) return agent.meta.agentIcon;
   if (agent.meta.coordinator) return "◇";
   if (agent.meta.worker) return "⚙";
   return "◆";

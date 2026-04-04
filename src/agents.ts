@@ -30,6 +30,7 @@ export interface AgentMeta {
   watchdog_pid?: number;
   coordinator?: boolean;
   agentType?: string;
+  agentIcon?: string;
   state?: MetaState;
   state_updated_at?: number;
 }

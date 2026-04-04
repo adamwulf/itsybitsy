@@ -213,7 +213,7 @@ async function main() {
         } else {
           for (const { agent, depth } of agentsToShow) {
             const indent = "  ".repeat(depth);
-            const icon = agent.meta.worker ? "⚙" : "◆";
+            const icon = agent.meta.agentIcon ?? (agent.meta.worker ? "⚙" : "◆");
             const state = displayState(agent.state);
             const colorCode = stateColors[state] ?? DIM;
             const orphanMark = agent.orphaned ? "⚠ " : "";
@@ -309,7 +309,7 @@ async function main() {
         for (const entry of flat) {
           if (entry.kind !== "agent") continue;
           const orphanedPrefix = entry.agent.orphaned ? "⚠ " : "";
-          const icon = entry.agent.meta.worker ? "⚙" : "◆";
+          const icon = entry.agent.meta.agentIcon ?? (entry.agent.meta.worker ? "⚙" : "◆");
           const prefix = `${entry.connector}${orphanedPrefix}${icon} ${entry.agent.id}`;
           rowByEntry.set(entry, {
             prefix,

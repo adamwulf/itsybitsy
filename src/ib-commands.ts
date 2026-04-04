@@ -1730,6 +1730,7 @@ export async function newAgent(
     worktree: useWorktree,
     worker: isLeafAgent,
     agentType: resolvedTypeName,
+    agentIcon: agentTypeDef.icon || undefined,
     yolo: yoloMode,
     model: model || null,
   };

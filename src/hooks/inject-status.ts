@@ -74,9 +74,11 @@ export function formatAgentStatus(
     lines.push(`${name}:`);
     for (const agent of active) {
       const state = agent.state === "unknown" ? "running" : agent.state;
-      const icon = agent.meta.agentType
-        ? (agent.meta.agentType === "coordinator" ? "c" : agent.meta.agentType === "worker" ? "w" : agent.meta.agentType[0] ?? "m")
-        : (agent.meta.coordinator ? "c" : agent.meta.worker ? "w" : "m");
+      const icon = agent.meta.agentIcon
+        ? agent.meta.agentIcon
+        : agent.meta.agentType
+          ? (agent.meta.agentType === "coordinator" ? "c" : agent.meta.agentType === "worker" ? "w" : agent.meta.agentType[0] ?? "m")
+          : (agent.meta.coordinator ? "c" : agent.meta.worker ? "w" : "m");
       const prompt = (agent.meta.summary ?? agent.meta.prompt).slice(0, 80).replace(/\n/g, " ");
       lines.push(`  ${icon} ${agent.id} [${state}] ${agent.age} — ${prompt}`);
     }

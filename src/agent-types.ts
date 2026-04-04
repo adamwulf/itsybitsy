@@ -15,6 +15,7 @@ export interface AgentType {
     allow?: string[];
     deny?: string[];
   };
+  icon?: string;
   instructionStyle: "manager" | "worker" | "coordinator";
   markdownBody?: string;
 }
@@ -198,18 +199,21 @@ export function getBuiltinTypes(): Record<string, AgentType> {
       name: "manager",
       description: "Manages sub-agents and coordinates work",
       canSpawnChildren: true,
+      icon: "◆",
       instructionStyle: "manager",
     },
     worker: {
       name: "worker",
       description: "Executes tasks assigned by a manager",
       canSpawnChildren: false,
+      icon: "⚙",
       instructionStyle: "worker",
     },
     coordinator: {
       name: "coordinator",
       description: "Read-only coordinator that manages agents without writing code",
       canSpawnChildren: true,
+      icon: "◇",
       instructionStyle: "coordinator",
       permissions: {
         deny: ["Write", "Edit", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch"],
@@ -258,10 +262,15 @@ export async function loadAgentType(name: string): Promise<AgentType> {
       const getString = (val: unknown, fallback: string): string =>
         typeof val === "string" ? val : fallback;
 
+      // Extract icon: first non-whitespace character of the icon field
+      const rawIcon = getString(frontmatter.icon, "");
+      const iconChar = rawIcon.match(/\S/)?.[0] || undefined;
+
       return {
         name: getString(frontmatter.name, name),
         description: getString(frontmatter.description, ""),
         canSpawnChildren: frontmatter.canSpawnChildren === true,
+        icon: iconChar,
         model: getString(frontmatter.model, "") || undefined,
         permissions: permissions ? {
           allow: Array.isArray(permissions.allow) ? permissions.allow as string[] : undefined,

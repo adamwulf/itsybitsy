@@ -117,6 +117,15 @@ export function parseAgentTypeFile(content: string): {
   return { frontmatter, body };
 }
 
+const VALID_INSTRUCTION_STYLES = new Set<AgentType["instructionStyle"]>(["manager", "worker", "coordinator"]);
+
+function validateInstructionStyle(value: string): AgentType["instructionStyle"] {
+  if (VALID_INSTRUCTION_STYLES.has(value as AgentType["instructionStyle"])) {
+    return value as AgentType["instructionStyle"];
+  }
+  return "manager";
+}
+
 /**
  * Parse a simple YAML value: booleans, numbers, strings, inline arrays.
  */
@@ -124,7 +133,7 @@ function parseSimpleValue(valueStr: string): unknown {
   if (valueStr === "true") return true;
   if (valueStr === "false") return false;
   // Only parse as number if it's a non-empty string that looks like a number
-  if (valueStr !== "" && !isNaN(Number(valueStr)) && valueStr.trim() !== "") {
+  if (valueStr !== "" && !isNaN(Number(valueStr))) {
     return Number(valueStr);
   }
   if (valueStr.startsWith("[") && valueStr.endsWith("]")) {
@@ -200,7 +209,7 @@ export async function loadAgentType(name: string): Promise<AgentType> {
           allow: Array.isArray(permissions.allow) ? permissions.allow as string[] : undefined,
           deny: Array.isArray(permissions.deny) ? permissions.deny as string[] : undefined,
         } : undefined,
-        instructionStyle: (getString(frontmatter.instructionStyle, "") as AgentType["instructionStyle"]) || "worker",
+        instructionStyle: validateInstructionStyle(getString(frontmatter.instructionStyle, "")),
         markdownBody: body || undefined,
       };
     }
@@ -251,9 +260,3 @@ export async function listAgentTypes(): Promise<AgentType[]> {
 
   return Array.from(types.values());
 }
-
-/**
- * Resolve an agent type by name. Alias for loadAgentType — tries user-defined
- * file first, falls back to built-in, defaults to manager for unknown types.
- */
-export const resolveAgentType = loadAgentType;

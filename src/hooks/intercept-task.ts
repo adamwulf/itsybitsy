@@ -116,7 +116,7 @@ export async function processTaskIntercept(
   const coordBlock = await checkCoordinatorBashRestrictions(input);
   if (coordBlock) return coordBlock;
 
-  // 1. Only intercept Task and Agent tools
+  // 1. Only intercept Task, Agent, and TaskCreate tools
   if (input.tool_name !== "Task" && input.tool_name !== "Agent" && input.tool_name !== "TaskCreate") {
     return { action: "skip" };
   }

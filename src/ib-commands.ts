@@ -1582,11 +1582,12 @@ export async function newAgent(
   }
 
   // Config permissions: permissions.all.* applies to all types,
-  // permissions.coordinator.* and permissions.repo.* apply to those specific types.
-  // Custom types only get permissions.all.* from config — per-type permissions live in the type file.
-  const configRoleKey = [`coordinator`, `repo`].includes(resolvedTypeName) ? resolvedTypeName : null;
-  const roleAllow = configRoleKey ? (config[`permissions.${configRoleKey}.allow`]?.value as string[] | undefined) ?? [] : [];
-  const roleDeny = configRoleKey ? (config[`permissions.${configRoleKey}.deny`]?.value as string[] | undefined) ?? [] : [];
+  // permissions.coordinator.* applies to coordinator type,
+  // permissions.repo.* applies to all non-coordinator types (repo-wide baseline).
+  // Per-type permissions also come from the type definition file.
+  const configRoleKey = coordinatorMode ? "coordinator" : "repo";
+  const roleAllow = (config[`permissions.${configRoleKey}.allow`]?.value as string[] | undefined) ?? [];
+  const roleDeny = (config[`permissions.${configRoleKey}.deny`]?.value as string[] | undefined) ?? [];
   const allAllow = (config["permissions.all.allow"]?.value as string[] | undefined) ?? [];
   const allDeny = (config["permissions.all.deny"]?.value as string[] | undefined) ?? [];
 

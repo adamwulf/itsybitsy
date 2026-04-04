@@ -79,44 +79,67 @@ export function detectRole(
   };
 }
 
+/**
+ * Interpolate {{placeholder}} variables and {{#if cond}}...{{/if}} blocks in a template.
+ * Available variables: agentId, agentManager, parentBranch, worktreePath, rootRepoPath, repoName
+ * Available conditions: hasManager (agent has a manager), isTopLevel (no manager = top-level)
+ */
+export function interpolateTemplate(template: string, ctx: SessionContext): string {
+  const repoName = basename(ctx.rootRepoPath);
+  const vars: Record<string, string> = {
+    agentId: ctx.agentId,
+    agentManager: ctx.agentManager,
+    parentBranch: ctx.parentBranch,
+    worktreePath: ctx.worktreePath,
+    rootRepoPath: ctx.rootRepoPath,
+    repoName,
+  };
+
+  const conditions: Record<string, boolean> = {
+    hasManager: !!ctx.agentManager,
+    isTopLevel: !ctx.agentManager,
+  };
+
+  // Process {{#if cond}}...{{/if}} blocks (no nesting)
+  let result = template.replace(
+    /\{\{#if\s+(\w+)\}\}\n?([\s\S]*?)\{\{\/if\}\}\n?/g,
+    (_match, condName: string, content: string) => {
+      return conditions[condName] ? content : "";
+    }
+  );
+
+  // Replace {{variable}} placeholders
+  result = result.replace(/\{\{(\w+)\}\}/g, (_match, varName: string) => {
+    return vars[varName] ?? "";
+  });
+
+  return result;
+}
+
 export async function generateInstructions(ctx: SessionContext): Promise<string> {
-  // If agentType is set, load it and use its instructionStyle
+  // If agentType is set, load it and check for a template body
   if (ctx.agentType) {
     const agentType = await loadAgentType(ctx.agentType);
-    let baseInstructions = "";
 
+    // If the type definition has a markdown body, use it as the full template
+    // The <ittybitty> wrapper is added by the code so users don't need to include it
+    if (agentType.markdownBody) {
+      const content = interpolateTemplate(agentType.markdownBody, ctx);
+      return `<ittybitty>\n${content}\n</ittybitty>`;
+    }
+
+    // No body — fall back to hardcoded instructions based on instructionStyle
     switch (agentType.instructionStyle) {
       case "manager":
-        baseInstructions = generateManagerInstructions(ctx);
-        break;
+        return generateManagerInstructions(ctx);
       case "worker":
-        baseInstructions = generateWorkerInstructions(ctx);
-        break;
+        return generateWorkerInstructions(ctx);
       case "coordinator":
-        baseInstructions = generateCoordinatorInstructions(ctx);
-        break;
+        return generateCoordinatorInstructions(ctx);
     }
-
-    // Append the markdown body if it exists
-    if (agentType.markdownBody) {
-      // Insert the markdown body before the closing </ittybitty> tag
-      const closingTag = "</ittybitty>";
-      const insertIdx = baseInstructions.lastIndexOf(closingTag);
-      if (insertIdx !== -1) {
-        return (
-          baseInstructions.substring(0, insertIdx) +
-          "\n\n" +
-          agentType.markdownBody +
-          "\n\n" +
-          baseInstructions.substring(insertIdx)
-        );
-      }
-    }
-
-    return baseInstructions;
   }
 
-  // Fall back to current logic when agentType is not set
+  // Fall back to current logic when agentType is not set (legacy agents)
   if (ctx.role === "coordinator") {
     return generateCoordinatorInstructions(ctx);
   }

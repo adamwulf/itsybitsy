@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { detectRole, generateInstructions, type SessionContext } from "./session-start";
+import { detectRole, generateInstructions, interpolateTemplate, type SessionContext } from "./session-start";
 
 describe("session-start", () => {
   test("detectRole non-agent cwd → primary", () => {
@@ -261,5 +261,63 @@ describe("session-start", () => {
     // Should have the closing tag
     expect(instructions).toContain("</ittybitty>");
     expect(instructions).toContain("<ittybitty>");
+  });
+});
+
+describe("interpolateTemplate", () => {
+  const baseCtx: SessionContext = {
+    role: "manager",
+    agentId: "agent-abc123",
+    agentManager: "agent-parent",
+    parentBranch: "agent/agent-parent",
+    worktreePath: "/repo/.ittybitty/agents/agent-abc123/repo",
+    rootRepoPath: "/repo",
+  };
+
+  test("replaces simple {{variable}} placeholders", () => {
+    const template = "Agent {{agentId}} on branch agent/{{agentId}}";
+    const result = interpolateTemplate(template, baseCtx);
+    expect(result).toBe("Agent agent-abc123 on branch agent/agent-abc123");
+  });
+
+  test("replaces all available variables", () => {
+    const template = "{{agentId}} {{agentManager}} {{parentBranch}} {{worktreePath}} {{rootRepoPath}} {{repoName}}";
+    const result = interpolateTemplate(template, baseCtx);
+    expect(result).toBe("agent-abc123 agent-parent agent/agent-parent /repo/.ittybitty/agents/agent-abc123/repo /repo repo");
+  });
+
+  test("unknown variables become empty string", () => {
+    const result = interpolateTemplate("hello {{unknown}} world", baseCtx);
+    expect(result).toBe("hello  world");
+  });
+
+  test("{{#if hasManager}} includes block when manager exists", () => {
+    const template = "start\n{{#if hasManager}}\nManager: {{agentManager}}\n{{/if}}\nend";
+    const result = interpolateTemplate(template, baseCtx);
+    expect(result).toContain("Manager: agent-parent");
+    expect(result).toContain("start");
+    expect(result).toContain("end");
+  });
+
+  test("{{#if hasManager}} excludes block when no manager", () => {
+    const ctx = { ...baseCtx, agentManager: "" };
+    const template = "start\n{{#if hasManager}}\nManager: {{agentManager}}\n{{/if}}\nend";
+    const result = interpolateTemplate(template, ctx);
+    expect(result).not.toContain("Manager:");
+    expect(result).toContain("start");
+    expect(result).toContain("end");
+  });
+
+  test("{{#if isTopLevel}} includes block for top-level agents", () => {
+    const ctx = { ...baseCtx, agentManager: "" };
+    const template = "{{#if isTopLevel}}\nask questions\n{{/if}}";
+    const result = interpolateTemplate(template, ctx);
+    expect(result).toContain("ask questions");
+  });
+
+  test("{{#if isTopLevel}} excludes block for sub-agents", () => {
+    const template = "{{#if isTopLevel}}\nask questions\n{{/if}}";
+    const result = interpolateTemplate(template, baseCtx);
+    expect(result).not.toContain("ask questions");
   });
 });

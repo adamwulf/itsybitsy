@@ -35,6 +35,30 @@ export interface AgentMeta {
   state_updated_at?: number;
 }
 
+/** Resolve the display icon for an agent from meta fields with legacy fallback */
+export function resolveAgentIcon(meta: AgentMeta): string {
+  if (meta.agentIcon) return meta.agentIcon;
+  if (meta.coordinator) return "◇";
+  if (meta.worker) return "⚙";
+  return "◆";
+}
+
+/**
+ * Resolve a single-character icon for text-only contexts (e.g. inject-status).
+ * Uses agentIcon if single char, else derives from agentType name or legacy booleans.
+ */
+export function resolveAgentIconChar(meta: AgentMeta): string {
+  if (meta.agentIcon && meta.agentIcon.length === 1) return meta.agentIcon;
+  if (meta.agentType) {
+    if (meta.agentType === "coordinator") return "c";
+    if (meta.agentType === "worker") return "w";
+    return meta.agentType[0] ?? "m";
+  }
+  if (meta.coordinator) return "c";
+  if (meta.worker) return "w";
+  return "m";
+}
+
 export interface Agent {
   id: string;
   repoPath: string;

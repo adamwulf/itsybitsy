@@ -6,6 +6,7 @@
 
 import { join } from "path";
 import { addRepo, removeRepo, listRepos, repoDisplayName, type RepoEntry } from "./registry";
+import { resolveAgentIcon } from "./agents";
 import type { Agent, FlatEntry } from "./agents";
 import { isValidAgentId } from "./validation";
 
@@ -213,7 +214,7 @@ async function main() {
         } else {
           for (const { agent, depth } of agentsToShow) {
             const indent = "  ".repeat(depth);
-            const icon = agent.meta.agentIcon ?? (agent.meta.worker ? "⚙" : "◆");
+            const icon = resolveAgentIcon(agent.meta);
             const state = displayState(agent.state);
             const colorCode = stateColors[state] ?? DIM;
             const orphanMark = agent.orphaned ? "⚠ " : "";

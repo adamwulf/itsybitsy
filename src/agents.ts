@@ -30,17 +30,17 @@ export interface AgentMeta {
   summary?: string;
   watchdog_pid?: number;
   coordinator?: boolean;
-  type?: string;
+  agentType?: string;
   state?: MetaState;
   state_updated_at?: number;
 }
 
 /**
  * Get the agent type name from meta.json fields.
- * Resolution: meta.type > meta.coordinator > meta.worker > 'manager'
+ * Resolution: meta.agentType > meta.coordinator > meta.worker > 'manager'
  */
 export function getAgentType(meta: AgentMeta): string {
-  if (meta.type) return meta.type;
+  if (meta.agentType) return meta.agentType;
   if (meta.coordinator) return "coordinator";
   if (meta.worker) return "worker";
   return "manager";
@@ -51,7 +51,7 @@ export function getAgentType(meta: AgentMeta): string {
  * Returns true for type='worker' OR legacy worker===true.
  */
 export function isWorkerLike(meta: AgentMeta): boolean {
-  if (meta.type === "worker") return true;
+  if (meta.agentType === "worker") return true;
   if (meta.worker === true) return true;
   return false;
 }
@@ -248,7 +248,7 @@ export async function readAgentMeta(agentDir: string): Promise<{ meta: AgentMeta
     if (typeof data.claude_pid !== "string") data.claude_pid = "";
     if (data.summary !== undefined && typeof data.summary !== "string") delete data.summary;
     if (data.coordinator !== undefined && typeof data.coordinator !== "boolean") delete data.coordinator;
-    if (data.type !== undefined && typeof data.type !== "string") delete data.type;
+    if (data.agentType !== undefined && typeof data.agentType !== "string") delete data.agentType;
     return { meta: data as AgentMeta };
   } catch (err) {
     return { meta: null, error: `Failed to read ${join(agentDir, "meta.json")}: ${err}` };

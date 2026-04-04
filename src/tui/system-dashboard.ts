@@ -64,7 +64,7 @@ export function buildDashboardRows(flatList: FlatEntry[]): SystemDashboardRow[] 
     // kind === "agent"
     const agent = entry.agent;
     const isCoordinator = !!agent.meta.coordinator;
-    const role = isCoordinator ? "coord" : (agent.meta.type ?? (agent.meta.worker ? "wkr" : "mgr"));
+    const role = isCoordinator ? "coord" : (agent.meta.agentType ?? (agent.meta.worker ? "wkr" : "mgr"));
     const summary = (agent.meta.summary ?? agent.meta.prompt).replace(/\n/g, " ");
 
     rows.push({

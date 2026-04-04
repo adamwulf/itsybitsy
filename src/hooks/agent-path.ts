@@ -402,7 +402,7 @@ export async function hookCheckPath(agentId: string, rawStdin?: string): Promise
     const metaFile = Bun.file(join(agentDir, "meta.json"));
     if (await metaFile.exists()) {
       const meta = await metaFile.json();
-      isWorker = meta.worker === true || meta.type === "worker";
+      isWorker = meta.worker === true || meta.agentType === "worker";
     }
   } catch { /* ignore */ }
 

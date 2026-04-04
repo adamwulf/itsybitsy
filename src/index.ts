@@ -310,7 +310,7 @@ async function main() {
         for (const entry of flat) {
           if (entry.kind !== "agent") continue;
           const orphanedPrefix = entry.agent.orphaned ? "⚠ " : "";
-          const icon = entry.agent.meta.agentIcon ?? (entry.agent.meta.worker ? "⚙" : "◆");
+          const icon = resolveAgentIcon(entry.agent.meta);
           const prefix = `${entry.connector}${orphanedPrefix}${icon} ${entry.agent.id}`;
           rowByEntry.set(entry, {
             prefix,

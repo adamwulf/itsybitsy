@@ -237,6 +237,7 @@ export async function readAgentMeta(agentDir: string): Promise<{ meta: AgentMeta
     if (data.summary !== undefined && typeof data.summary !== "string") delete data.summary;
     if (data.coordinator !== undefined && typeof data.coordinator !== "boolean") delete data.coordinator;
     if (data.agentType !== undefined && typeof data.agentType !== "string") delete data.agentType;
+    if (data.agentIcon !== undefined && typeof data.agentIcon !== "string") delete data.agentIcon;
     return { meta: data as AgentMeta };
   } catch (err) {
     return { meta: null, error: `Failed to read ${join(agentDir, "meta.json")}: ${err}` };

@@ -50,7 +50,7 @@ export function detectRole(
   const worker = meta.worker === true;
   const agentType = (meta as Record<string, unknown>).agentType as string | undefined;
 
-  // Derive role: prefer agentType's instructionStyle mapping, fall back to legacy booleans
+  // Derive role from agentType name or legacy booleans (used only as fallback when agentType is not set)
   let role: SessionRole;
   if (agentType === "coordinator" || isCoordinator) {
     role = "coordinator";

@@ -2007,6 +2007,13 @@ describe("newAgent (native)", () => {
     expect(meta.worker).toBe(true); // canSpawnChildren: false → worker: true
   });
 
+  test("rejects --type coordinator with helpful message", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("test type coordinator", { name: "test-type-coord", type: "coordinator" });
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("use --coordinator instead of --type coordinator");
+  });
+
   test("creates prompt.txt with prompt content", async () => {
     setNewAgentSpawnRunner(mockSpawnRunner());
     await callNewAgent("build a widget", { name: "test-prompt" });

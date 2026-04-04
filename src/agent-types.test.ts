@@ -103,6 +103,25 @@ body`;
   expect(perms.deny).toEqual(["Write", "Edit"]);
 });
 
+test("parseAgentTypeFile: parses top-level multi-line YAML lists", () => {
+  const content = `---
+name: researcher
+tools:
+  - Read
+  - Grep
+  - Glob
+model: sonnet
+---
+body`;
+
+  const { frontmatter } = parseAgentTypeFile(content);
+
+  expect(frontmatter.name).toBe("researcher");
+  expect(Array.isArray(frontmatter.tools)).toBe(true);
+  expect(frontmatter.tools).toEqual(["Read", "Grep", "Glob"]);
+  expect(frontmatter.model).toBe("sonnet");
+});
+
 test("parseAgentTypeFile: parses simple array format", () => {
   const content = `---
 tools: [Tool1, Tool2, Tool3]

@@ -62,45 +62,68 @@ export function parseAgentTypeFile(content: string): {
       continue;
     }
 
-    // Check if this is an indented child line (part of a nested object)
+    // Check if this is an indented child line (part of a nested object or top-level list)
     const indentMatch = line.match(/^(\s+)(\S.*)/);
-    if (indentMatch && currentParent && currentObj) {
+    if (indentMatch && currentParent) {
       const childLine = indentMatch[2]!.trim();
-      const colonIdx = childLine.indexOf(":");
-      if (colonIdx !== -1) {
-        const key = childLine.substring(0, colonIdx).trim();
-        const valueStr = childLine.substring(colonIdx + 1).trim();
-        if (valueStr.startsWith("- ")) {
-          // YAML list item as value of parent.key — treat as single-item array start
-          currentObj[key] = [valueStr.substring(2).trim().replace(/^["']|["']$/g, "")];
-          currentListKey = key;
-        } else if (valueStr === "") {
-          // Empty value in nested context starts a list (e.g. allow:\n    - Read)
-          currentObj[key] = [];
-          currentListKey = key;
-        } else {
-          currentObj[key] = parseSimpleValue(valueStr);
-          currentListKey = null;
-        }
+
+      // Top-level list: parent has no nested subkeys yet and child is a list item
+      if (childLine.startsWith("- ") && currentObj && Object.keys(currentObj).length === 0 && !currentListKey) {
+        // Convert from tentative nested object to top-level list
+        const value = childLine.substring(2).trim().replace(/^["']|["']$/g, "");
+        const arr = Array.isArray(frontmatter[currentParent]) ? frontmatter[currentParent] as unknown[] : [];
+        arr.push(value);
+        frontmatter[currentParent] = arr;
+        currentObj = null; // no longer a nested object
         continue;
       }
-      // Could be a YAML list item (- value) under a key
-      if (childLine.startsWith("- ")) {
-        // Append to the tracked list key in currentObj
-        if (currentListKey && Array.isArray(currentObj[currentListKey])) {
-          (currentObj[currentListKey] as unknown[]).push(childLine.substring(2).trim().replace(/^["']|["']$/g, ""));
-        }
+
+      // Continue appending to an existing top-level list
+      if (childLine.startsWith("- ") && !currentObj && Array.isArray(frontmatter[currentParent])) {
+        const value = childLine.substring(2).trim().replace(/^["']|["']$/g, "");
+        (frontmatter[currentParent] as unknown[]).push(value);
         continue;
+      }
+
+      // Nested object handling
+      if (currentObj) {
+        const colonIdx = childLine.indexOf(":");
+        if (colonIdx !== -1) {
+          const key = childLine.substring(0, colonIdx).trim();
+          const valueStr = childLine.substring(colonIdx + 1).trim();
+          if (valueStr.startsWith("- ")) {
+            // YAML list item as value of parent.key — treat as single-item array start
+            currentObj[key] = [valueStr.substring(2).trim().replace(/^["']|["']$/g, "")];
+            currentListKey = key;
+          } else if (valueStr === "") {
+            // Empty value in nested context starts a list (e.g. allow:\n    - Read)
+            currentObj[key] = [];
+            currentListKey = key;
+          } else {
+            currentObj[key] = parseSimpleValue(valueStr);
+            currentListKey = null;
+          }
+          continue;
+        }
+        // Could be a YAML list item (- value) under a nested key
+        if (childLine.startsWith("- ")) {
+          // Append to the tracked list key in currentObj
+          if (currentListKey && Array.isArray(currentObj[currentListKey])) {
+            (currentObj[currentListKey] as unknown[]).push(childLine.substring(2).trim().replace(/^["']|["']$/g, ""));
+          }
+          continue;
+        }
       }
     }
 
-    // Transitioning to a top-level line: close any open nested object
-    if (currentParent && currentObj) {
-      if (Object.keys(currentObj).length === 0) {
+    // Transitioning to a top-level line: close any open nested object or list
+    if (currentParent) {
+      if (currentObj && Object.keys(currentObj).length === 0) {
         // Pending empty-value key that never got nested children → store as ""
         frontmatter[currentParent] = "";
       }
       // currentObj with content is already stored via reference in frontmatter[currentParent]
+      // top-level lists are already stored directly in frontmatter[currentParent]
       currentParent = null;
       currentObj = null;
       currentListKey = null;

@@ -302,3 +302,64 @@ export async function listAgentTypes(): Promise<AgentType[]> {
 
   return Array.from(types.values());
 }
+
+/**
+ * Validate all agent type files in ~/.itsybitsy/agent-types/.
+ * Returns an array of error messages. Empty array means all valid.
+ */
+export async function validateAllAgentTypes(): Promise<string[]> {
+  const errors: string[] = [];
+  const home = process.env.HOME || homedir();
+  const typesDir = join(home, ".itsybitsy", "agent-types");
+
+  try {
+    const glob = new Glob("*.md");
+    for await (const file of glob.scan(typesDir)) {
+      const filePath = join(typesDir, file);
+      const name = file.replace(/\.md$/, "");
+      try {
+        const content = await Bun.file(filePath).text();
+        const { frontmatter } = parseAgentTypeFile(content);
+
+        // Validate required fields
+        if (frontmatter.canSpawnChildren !== undefined && typeof frontmatter.canSpawnChildren !== "boolean") {
+          errors.push(`${file}: canSpawnChildren must be true or false, got "${frontmatter.canSpawnChildren}"`);
+        }
+
+        // Validate instructionStyle if present
+        if (frontmatter.instructionStyle !== undefined) {
+          const style = typeof frontmatter.instructionStyle === "string" ? frontmatter.instructionStyle : "";
+          if (style && !VALID_INSTRUCTION_STYLES.has(style as AgentType["instructionStyle"])) {
+            errors.push(`${file}: instructionStyle must be "manager", "worker", or "coordinator", got "${style}"`);
+          }
+        }
+
+        // Validate permissions structure
+        if (frontmatter.permissions !== undefined) {
+          if (typeof frontmatter.permissions !== "object" || frontmatter.permissions === null) {
+            errors.push(`${file}: permissions must be an object with allow/deny arrays`);
+          } else {
+            const perms = frontmatter.permissions as Record<string, unknown>;
+            if (perms.allow !== undefined && !Array.isArray(perms.allow)) {
+              errors.push(`${file}: permissions.allow must be a list`);
+            }
+            if (perms.deny !== undefined && !Array.isArray(perms.deny)) {
+              errors.push(`${file}: permissions.deny must be a list`);
+            }
+          }
+        }
+
+        // Validate model if present
+        if (frontmatter.model !== undefined && typeof frontmatter.model !== "string" && frontmatter.model !== "") {
+          errors.push(`${file}: model must be a string`);
+        }
+      } catch (err) {
+        errors.push(`${file}: failed to parse — ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+  } catch {
+    // Types directory doesn't exist — that's fine, no files to validate
+  }
+
+  return errors;
+}

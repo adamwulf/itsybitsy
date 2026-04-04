@@ -2329,10 +2329,10 @@ describe("newAgent (native)", () => {
     expect(worktreeCall).toBeUndefined();
   });
 
-  test("config permissions are merged into settings", async () => {
+  test("config permissions.all are merged into settings", async () => {
     await Bun.write(join(tempDir, "config.json"), JSON.stringify({
       permissions: {
-        manager: { allow: ["Bash(deploy:*)"], deny: ["Bash(rm:*)"] },
+        all: { allow: ["Bash(deploy:*)"], deny: ["Bash(rm:*)"] },
       },
     }));
 
@@ -2348,7 +2348,6 @@ describe("newAgent (native)", () => {
   test("permissions.all.allow/deny are merged into settings for managers", async () => {
     await Bun.write(join(tempDir, "config.json"), JSON.stringify({
       permissions: {
-        manager: { allow: ["Bash(deploy:*)"], deny: ["Bash(rm:*)"] },
         all: { allow: ["Bash(curl:*)"], deny: ["Bash(sudo:*)"] },
       },
     }));
@@ -2358,9 +2357,6 @@ describe("newAgent (native)", () => {
 
     const settingsPath = join(agentsDir, "test-all-perms", "repo", ".claude", "settings.local.json");
     const settings = await Bun.file(settingsPath).json();
-    // Role-specific permissions
-    expect(settings.permissions.allow).toContain("Bash(deploy:*)");
-    expect(settings.permissions.deny).toContain("Bash(rm:*)");
     // All permissions merged in
     expect(settings.permissions.allow).toContain("Bash(curl:*)");
     expect(settings.permissions.deny).toContain("Bash(sudo:*)");
@@ -2369,7 +2365,6 @@ describe("newAgent (native)", () => {
   test("permissions.all.allow/deny are merged into settings for workers", async () => {
     await Bun.write(join(tempDir, "config.json"), JSON.stringify({
       permissions: {
-        worker: { allow: ["Bash(npm:*)"], deny: [] },
         all: { allow: ["Bash(curl:*)"], deny: ["Bash(sudo:*)"] },
       },
     }));
@@ -2379,7 +2374,6 @@ describe("newAgent (native)", () => {
 
     const settingsPath = join(agentsDir, "test-all-worker", "repo", ".claude", "settings.local.json");
     const settings = await Bun.file(settingsPath).json();
-    expect(settings.permissions.allow).toContain("Bash(npm:*)");
     expect(settings.permissions.allow).toContain("Bash(curl:*)");
     expect(settings.permissions.deny).toContain("Bash(sudo:*)");
   });

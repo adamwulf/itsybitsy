@@ -63,7 +63,7 @@ export type DialogState =
     } & DialogCommon)
   | ({
       type: "permissions-editor";
-      roleKey: string; // e.g., "permissions.manager"
+      roleKey: string; // e.g., "permissions.coordinator"
       tab: 0 | 1; // 0=Allow, 1=Deny
       allowList: string[];
       denyList: string[];
@@ -920,7 +920,7 @@ export function buildPermissionsEditorContent(
 ): DialogContent {
   const lines: string[] = [];
 
-  // Title from roleKey: "permissions.manager" → "Manager Permissions"
+  // Title from roleKey: "permissions.coordinator" → "Coordinator Permissions"
   const roleName = dialog.roleKey.split(".").pop() ?? "";
   const title = `${roleName.charAt(0).toUpperCase()}${roleName.slice(1)} Permissions`;
 

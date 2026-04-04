@@ -30,10 +30,10 @@ describe("readConfig", () => {
     expect(result["externalDiffTool"]).toEqual({ value: undefined, source: "default" });
     expect(result["hooks.injectStatus"]).toEqual({ value: true, source: "default" });
     expect(result["hooks.statusVisible"]).toEqual({ value: true, source: "default" });
-    expect(result["permissions.manager.allow"]).toEqual({ value: [], source: "default" });
-    expect(result["permissions.worker.deny"]).toEqual({ value: [], source: "default" });
     expect(result["permissions.all.allow"]).toEqual({ value: [], source: "default" });
     expect(result["permissions.all.deny"]).toEqual({ value: [], source: "default" });
+    expect(result["permissions.coordinator.allow"]).toEqual({ value: [], source: "default" });
+    expect(result["permissions.coordinator.deny"]).toEqual({ value: [], source: "default" });
   });
 
   test("has entries for all CONFIG_KEYS", async () => {
@@ -57,24 +57,24 @@ describe("readConfig", () => {
       userCfgPath,
       JSON.stringify({
         hooks: { injectStatus: false },
-        permissions: { manager: { allow: ["Edit", "Read"] } },
+        permissions: { coordinator: { allow: ["Edit", "Read"] } },
       })
     );
 
     const result = await readConfig(opts());
     expect(result["hooks.injectStatus"]).toEqual({ value: false, source: "user" });
     expect(result["hooks.statusVisible"]).toEqual({ value: true, source: "default" });
-    expect(result["permissions.manager.allow"]).toEqual({ value: ["Edit", "Read"], source: "user" });
-    expect(result["permissions.manager.deny"]).toEqual({ value: [], source: "default" });
+    expect(result["permissions.coordinator.allow"]).toEqual({ value: ["Edit", "Read"], source: "user" });
+    expect(result["permissions.coordinator.deny"]).toEqual({ value: [], source: "default" });
   });
 
   test("default arrays are independent across calls", async () => {
     const result1 = await readConfig(opts());
-    const arr1 = result1["permissions.manager.allow"]!.value as string[];
+    const arr1 = result1["permissions.all.allow"]!.value as string[];
     arr1.push("mutated");
 
     const result2 = await readConfig(opts());
-    expect(result2["permissions.manager.allow"]!.value).toEqual([]);
+    expect(result2["permissions.all.allow"]!.value).toEqual([]);
   });
 
   test("handles malformed JSON gracefully", async () => {
@@ -134,10 +134,10 @@ describe("writeConfig", () => {
 
   test("writes array values", async () => {
     const filePath = join(tmpDir, "config.json");
-    await writeConfig(filePath, "permissions.manager.allow", ["Edit", "Read"]);
+    await writeConfig(filePath, "permissions.coordinator.allow", ["Edit", "Read"]);
 
     const data = await Bun.file(filePath).json();
-    expect(data.permissions.manager.allow).toEqual(["Edit", "Read"]);
+    expect(data.permissions.coordinator.allow).toEqual(["Edit", "Read"]);
   });
 });
 
@@ -195,14 +195,14 @@ describe("config type validation in readConfig", () => {
     expect(result["createPullRequests"]).toEqual({ value: false, source: "default" });
   });
 
-  test("permissions.manager.allow: string falls back to default", async () => {
+  test("permissions.coordinator.allow: string falls back to default", async () => {
     await Bun.write(
       userCfgPath,
-      JSON.stringify({ permissions: { manager: { allow: "not-an-array" } } })
+      JSON.stringify({ permissions: { coordinator: { allow: "not-an-array" } } })
     );
 
     const result = await readConfig(opts());
-    expect(result["permissions.manager.allow"]).toEqual({ value: [], source: "default" });
+    expect(result["permissions.coordinator.allow"]).toEqual({ value: [], source: "default" });
   });
 
   test("correctly typed values still work", async () => {
@@ -237,10 +237,10 @@ describe("dot-notation key handling", () => {
 
   test("creates deeply nested structure", async () => {
     const filePath = join(tmpDir, "config.json");
-    await writeConfig(filePath, "permissions.worker.deny", ["Bash"]);
+    await writeConfig(filePath, "permissions.repo.deny", ["Bash"]);
 
     const data = await Bun.file(filePath).json();
-    expect(data.permissions.worker.deny).toEqual(["Bash"]);
+    expect(data.permissions.repo.deny).toEqual(["Bash"]);
   });
 
   test("preserves sibling keys in nested objects", async () => {
@@ -261,14 +261,14 @@ describe("dot-notation key handling", () => {
 
   test("writes multiple dot-notation keys sequentially", async () => {
     const filePath = join(tmpDir, "config.json");
-    await writeConfig(filePath, "permissions.manager.allow", ["Edit"]);
-    await writeConfig(filePath, "permissions.manager.deny", ["Bash"]);
-    await writeConfig(filePath, "permissions.worker.allow", ["Read"]);
+    await writeConfig(filePath, "permissions.coordinator.allow", ["Edit"]);
+    await writeConfig(filePath, "permissions.coordinator.deny", ["Bash"]);
+    await writeConfig(filePath, "permissions.repo.allow", ["Read"]);
 
     const data = await Bun.file(filePath).json();
-    expect(data.permissions.manager.allow).toEqual(["Edit"]);
-    expect(data.permissions.manager.deny).toEqual(["Bash"]);
-    expect(data.permissions.worker.allow).toEqual(["Read"]);
+    expect(data.permissions.coordinator.allow).toEqual(["Edit"]);
+    expect(data.permissions.coordinator.deny).toEqual(["Bash"]);
+    expect(data.permissions.repo.allow).toEqual(["Read"]);
   });
 
   test("overwrites primitive with nested object when needed", async () => {
@@ -284,11 +284,11 @@ describe("dot-notation key handling", () => {
   test("readConfig reads back what writeConfig wrote", async () => {
     await writeConfig(userCfgPath, "maxAgents", 7);
     await writeConfig(userCfgPath, "hooks.injectStatus", false);
-    await writeConfig(userCfgPath, "permissions.worker.deny", ["Bash", "Write"]);
+    await writeConfig(userCfgPath, "permissions.repo.deny", ["Bash", "Write"]);
 
     const result = await readConfig(opts());
     expect(result["maxAgents"]).toEqual({ value: 7, source: "user" });
     expect(result["hooks.injectStatus"]).toEqual({ value: false, source: "user" });
-    expect(result["permissions.worker.deny"]).toEqual({ value: ["Bash", "Write"], source: "user" });
+    expect(result["permissions.repo.deny"]).toEqual({ value: ["Bash", "Write"], source: "user" });
   });
 });

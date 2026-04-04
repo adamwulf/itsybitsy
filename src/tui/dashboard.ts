@@ -22,6 +22,7 @@ import {
 import type { Component, OverlayHandle } from "@mariozechner/pi-tui";
 import { loadRegistry } from "../registry";
 import { readConfig } from "../config";
+import { validateAllAgentTypes } from "../agent-types";
 import type { RepoEntry } from "../registry";
 import { AgentWatcher } from "../watcher";
 import { TmuxPoller, hasAttachedClient, sendTmuxKeys, resizeTmuxWindow } from "../tmux-poller";
@@ -1936,6 +1937,16 @@ export async function launchDashboard(): Promise<void> {
     // Surface coordinator startup errors to the dashboard once it exists
     console.error("System coordinator startup failed:", err);
   });
+
+  // Validate all agent type files before starting
+  const typeErrors = await validateAllAgentTypes();
+  if (typeErrors.length > 0) {
+    console.error("Agent type validation failed:");
+    for (const err of typeErrors) {
+      console.error(`  - ${err}`);
+    }
+    process.exit(1);
+  }
 
   const config = await readConfig();
   const dashboard = new DashboardComponent();

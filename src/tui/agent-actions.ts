@@ -857,9 +857,9 @@ function handleConfigItemAction(
       });
     } else if (item.type === "string[]" && item.key.startsWith("permissions.")) {
       // Open permissions editor for allow/deny lists
-      // Derive the role key (e.g., "permissions.manager") from "permissions.manager.allow"
+      // Derive the role key (e.g., "permissions.coordinator") from "permissions.coordinator.allow"
       const parts = item.key.split(".");
-      const roleKey = parts.slice(0, 2).join("."); // "permissions.manager" or "permissions.worker"
+      const roleKey = parts.slice(0, 2).join("."); // e.g. "permissions.all", "permissions.coordinator"
       const allowKey = `${roleKey}.allow`;
       const denyKey = `${roleKey}.deny`;
       const allowEntry = config[allowKey];

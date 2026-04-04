@@ -79,6 +79,30 @@ body`;
   expect(perms.deny).toEqual(["Write", "Edit"]);
 });
 
+test("parseAgentTypeFile: parses multi-line YAML lists under nested objects", () => {
+  const content = `---
+name: researcher
+permissions:
+  allow:
+    - Read
+    - Grep
+    - Glob
+  deny:
+    - Write
+    - Edit
+---
+body`;
+
+  const { frontmatter } = parseAgentTypeFile(content);
+
+  const perms = frontmatter.permissions as Record<string, unknown>;
+  expect(perms).toBeDefined();
+  expect(Array.isArray(perms.allow)).toBe(true);
+  expect(perms.allow).toEqual(["Read", "Grep", "Glob"]);
+  expect(Array.isArray(perms.deny)).toBe(true);
+  expect(perms.deny).toEqual(["Write", "Edit"]);
+});
+
 test("parseAgentTypeFile: parses simple array format", () => {
   const content = `---
 tools: [Tool1, Tool2, Tool3]

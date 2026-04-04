@@ -72,6 +72,9 @@ export function parseAgentTypeFile(content: string): {
         if (valueStr.startsWith("- ")) {
           // YAML list item as value of parent.key — treat as single-item array start
           currentObj[key] = [valueStr.substring(2).trim().replace(/^["']|["']$/g, "")];
+        } else if (valueStr === "") {
+          // Empty value in nested context starts a list (e.g. allow:\n    - Read)
+          currentObj[key] = [];
         } else {
           currentObj[key] = parseSimpleValue(valueStr);
         }

@@ -316,7 +316,6 @@ export async function validateAllAgentTypes(): Promise<string[]> {
     const glob = new Glob("*.md");
     for await (const file of glob.scan(typesDir)) {
       const filePath = join(typesDir, file);
-      const name = file.replace(/\.md$/, "");
       try {
         const content = await Bun.file(filePath).text();
         const { frontmatter } = parseAgentTypeFile(content);
@@ -328,9 +327,10 @@ export async function validateAllAgentTypes(): Promise<string[]> {
 
         // Validate instructionStyle if present
         if (frontmatter.instructionStyle !== undefined) {
-          const style = typeof frontmatter.instructionStyle === "string" ? frontmatter.instructionStyle : "";
-          if (style && !VALID_INSTRUCTION_STYLES.has(style as AgentType["instructionStyle"])) {
-            errors.push(`${file}: instructionStyle must be "manager", "worker", or "coordinator", got "${style}"`);
+          if (typeof frontmatter.instructionStyle !== "string") {
+            errors.push(`${file}: instructionStyle must be a string, got ${typeof frontmatter.instructionStyle}`);
+          } else if (!VALID_INSTRUCTION_STYLES.has(frontmatter.instructionStyle as AgentType["instructionStyle"])) {
+            errors.push(`${file}: instructionStyle must be "manager", "worker", or "coordinator", got "${frontmatter.instructionStyle}"`);
           }
         }
 
@@ -350,7 +350,7 @@ export async function validateAllAgentTypes(): Promise<string[]> {
         }
 
         // Validate model if present
-        if (frontmatter.model !== undefined && typeof frontmatter.model !== "string" && frontmatter.model !== "") {
+        if (frontmatter.model !== undefined && typeof frontmatter.model !== "string") {
           errors.push(`${file}: model must be a string`);
         }
       } catch (err) {

@@ -21,7 +21,7 @@ import {
 } from "@mariozechner/pi-tui";
 import type { Component, OverlayHandle } from "@mariozechner/pi-tui";
 import { loadRegistry } from "../registry";
-import { readConfig } from "../config";
+import { readConfig, checkDeprecatedConfigKeys } from "../config";
 import { validateAllAgentTypes } from "../agent-types";
 import type { RepoEntry } from "../registry";
 import { AgentWatcher } from "../watcher";
@@ -1946,6 +1946,12 @@ export async function launchDashboard(): Promise<void> {
       console.error(`  - ${err}`);
     }
     process.exit(1);
+  }
+
+  // Warn about deprecated config keys (non-blocking)
+  const deprecationWarnings = await checkDeprecatedConfigKeys();
+  for (const warning of deprecationWarnings) {
+    console.error(`Warning: ${warning}`);
   }
 
   const config = await readConfig();

@@ -119,6 +119,30 @@ export async function readConfig(options?: ReadConfigOptions): Promise<ConfigRes
   return result;
 }
 
+const DEPRECATED_CONFIG_KEYS = [
+  "permissions.manager.allow",
+  "permissions.manager.deny",
+  "permissions.worker.allow",
+  "permissions.worker.deny",
+];
+
+/**
+ * Check for deprecated config keys in the user config file.
+ * Returns an array of warning messages for any deprecated keys found with values.
+ */
+export async function checkDeprecatedConfigKeys(): Promise<string[]> {
+  const userPath = defaultUserConfigPath();
+  const userData = await readJsonFile(userPath);
+  const warnings: string[] = [];
+  for (const key of DEPRECATED_CONFIG_KEYS) {
+    const val = getNestedValue(userData, key);
+    if (val !== undefined) {
+      warnings.push(`Config key '${key}' is deprecated. Permissions now live in agent type files (~/.itsybitsy/agent-types/). Remove this key from ~/.itsybitsy/config.json.`);
+    }
+  }
+  return warnings;
+}
+
 export async function writeConfig(filePath: string, key: string, value: unknown): Promise<void> {
   const data = await readJsonFile(filePath);
   setNestedValue(data, key, value);

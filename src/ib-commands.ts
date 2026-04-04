@@ -1542,6 +1542,11 @@ export async function newAgent(
     }
   }
 
+  // Validate mutual exclusivity: --type with --worker or --coordinator
+  if (opts?.type && (workerMode || coordinatorMode)) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Error: --type cannot be combined with --worker or --coordinator` };
+  }
+
   // Load the agent type definition
   const agentTypeDef = await loadAgentType(resolvedTypeName);
 

@@ -116,9 +116,9 @@ describe("intercept-task", () => {
     expect(result.spawnedAgentId).toBe("agent-deadbeef03");
     const output = result.output as Record<string, unknown>;
     const hookOutput = output.hookSpecificOutput as Record<string, unknown>;
-    expect(hookOutput.permissionDecision).toBe("allow");
-    const updatedInput = hookOutput.updatedInput as Record<string, unknown>;
-    expect(updatedInput.prompt).toContain("agent-deadbeef03");
+    expect(hookOutput.permissionDecision).toBe("deny");
+    expect(hookOutput.permissionDecisionReason).toContain("agent-deadbeef03");
+    expect(hookOutput.permissionDecisionReason).toContain("ib look");
   });
 
   test("skip subagent_type in skip list", async () => {
@@ -163,10 +163,9 @@ describe("intercept-task", () => {
     expect(result.spawnedAgentId).toBe("agent-deadbeef01");
     const output = result.output as Record<string, unknown>;
     const hookOutput = output.hookSpecificOutput as Record<string, unknown>;
-    expect(hookOutput.permissionDecision).toBe("allow");
-    const updatedInput = hookOutput.updatedInput as Record<string, unknown>;
-    expect(updatedInput.prompt).toContain("agent-deadbeef01");
-    expect(updatedInput.prompt).toContain("ib look");
+    expect(hookOutput.permissionDecision).toBe("deny");
+    expect(hookOutput.permissionDecisionReason).toContain("agent-deadbeef01");
+    expect(hookOutput.permissionDecisionReason).toContain("ib look");
   });
 
   test("empty prompt+description → skip", async () => {
@@ -223,9 +222,9 @@ describe("intercept-task", () => {
     expect(result.action).toBe("intercept");
     const output = result.output as Record<string, unknown>;
     const hookOutput = output.hookSpecificOutput as Record<string, unknown>;
-    const updatedInput = hookOutput.updatedInput as Record<string, unknown>;
-    expect((updatedInput.prompt as string)).toContain("spawn failed");
-    expect((updatedInput.prompt as string)).toContain("Failed to create worktree");
+    expect(hookOutput.permissionDecision).toBe("deny");
+    expect((hookOutput.permissionDecisionReason as string)).toContain("spawn failed");
+    expect((hookOutput.permissionDecisionReason as string)).toContain("Failed to create worktree");
   });
 });
 

@@ -2002,6 +2002,13 @@ export async function launchDashboard(): Promise<void> {
     return undefined;
   });
 
+  // Handle terminal resize to update coordinator tmux width
+  process.stdout.on("resize", () => {
+    const newMainWidth = (process.stdout.columns ?? 80) - dashboard.sidebarWidth - 1;
+    resizeCoordinatorTmux(newMainWidth);
+    tui.requestRender();
+  });
+
   tui.start();
   colorDetection.queryColorScheme();
   dashboard.startPolling();

@@ -216,18 +216,17 @@ export async function processTaskIntercept(
       output: {
         hookSpecificOutput: {
           hookEventName: "PreToolUse",
-          permissionDecision: "allow",
-          updatedInput: {
-            subagent_type: "claude-code-guide",
-            prompt: `Respond with only this message: ib agent spawn failed: ${result.stderr || "unknown error"}`,
-            description: "Task intercepted by ittybitty (spawn failed)",
-          },
+          permissionDecision: "deny",
+          permissionDecisionReason: `ib agent spawn failed: ${result.stderr || "unknown error"}. Do NOT retry — investigate the error.`,
         },
       },
     };
   }
 
-  // 12. Success
+  // 12. Success — deny the original tool to prevent double-spawn.
+  // Using "deny" ensures the model won't retry the tool call, which would
+  // create duplicate agents. The denial reason tells the model the agent
+  // was successfully spawned and how to monitor it.
   const id = spawnedId ?? "unknown";
   return {
     action: "intercept",
@@ -235,12 +234,8 @@ export async function processTaskIntercept(
     output: {
       hookSpecificOutput: {
         hookEventName: "PreToolUse",
-        permissionDecision: "allow",
-        updatedInput: {
-          subagent_type: "claude-code-guide",
-          prompt: `Respond with only this message: ib agent ${id} has been spawned to handle the original task. Monitor with: ib look ${id}`,
-          description: "Task intercepted by ittybitty",
-        },
+        permissionDecision: "deny",
+        permissionDecisionReason: `ib agent ${id} has been spawned to handle this task. Monitor with: ib look ${id} — Do NOT retry or re-spawn.`,
       },
     },
   };

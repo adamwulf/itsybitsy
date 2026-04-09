@@ -881,10 +881,9 @@ function handleConfigItemAction(
         scrollOffset: 0,
         onSave: (newAllow: string[], newDeny: string[]) => {
           ctx.closeDialog();
-          Promise.all([
-            writeConfig(configFilePath, allowKey, newAllow),
+          writeConfig(configFilePath, allowKey, newAllow).then(() =>
             writeConfig(configFilePath, denyKey, newDeny),
-          ]).then(() => {
+          ).then(() => {
             config[allowKey] = { value: newAllow, source: "user" };
             config[denyKey] = { value: newDeny, source: "user" };
             ctx.setNotice(`${roleKey} permissions updated`);

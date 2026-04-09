@@ -674,6 +674,10 @@ export class DashboardComponent implements Component {
         this.tui?.requestRender();
       },
       onWidth: (width) => {
+        // When the system coordinator is selected, the tmux poller polls the
+        // coordinator session which runs at full mainWidth. Ignore its width
+        // reports — they would corrupt the agent splitPaneLeftWidth.
+        if (this.agentTree.isSystemCoordinatorSelected) return;
         // Skip stale width reports during tmux resize round-trip
         if (this.skipWidthReports > 0) {
           this.skipWidthReports--;

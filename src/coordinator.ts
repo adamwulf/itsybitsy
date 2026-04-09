@@ -11,7 +11,7 @@ import { readConfig } from "./config";
 import { captureTmuxOutput, resizeTmuxWindow } from "./tmux-poller";
 import { isCompacting, isRateLimited } from "./agents";
 import { SpawnContext } from "./types";
-import { getSavedSidebarWidth } from "./tui/layout";
+import { getSavedMainWidth } from "./tui/layout";
 
 export const IB_COORDINATOR_SESSION = "ib-coordinator";
 
@@ -190,8 +190,8 @@ export async function ensureSystemCoordinator(): Promise<string> {
   await ensureHomeRepo();
   await writeCoordinatorFiles();
 
-  // Create tmux session — use saved sidebar width so it matches the coordinator panel
-  const coordTmuxWidth = await getSavedSidebarWidth();
+  // Create tmux session — use mainWidth (full middle+right area) so it matches the coordinator rendering
+  const coordTmuxWidth = await getSavedMainWidth();
   const { exitCode } = await coordinatorSpawnCtx.run([
     "tmux", "new-session", "-d", "-x", String(coordTmuxWidth), "-s", IB_COORDINATOR_SESSION, "-c", home,
   ]);

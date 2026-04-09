@@ -161,3 +161,15 @@ export async function getSavedSidebarWidth(): Promise<number> {
   const width = layout?.sidebarWidth ?? SIDEBAR_WIDTH;
   return Math.max(MIN_SIDEBAR, Math.min(MAX_SIDEBAR, width));
 }
+
+/**
+ * Compute the main area width (middle + right panes) based on terminal width
+ * and saved sidebar width. Used to size the system coordinator tmux session
+ * to match the full width available to the coordinator output.
+ * Formula: terminal width - sidebar width - 1 (for separator)
+ */
+export async function getSavedMainWidth(): Promise<number> {
+  const terminalWidth = process.stdout.columns ?? 80;
+  const sidebarWidth = await getSavedSidebarWidth();
+  return Math.max(1, terminalWidth - sidebarWidth - 1);
+}

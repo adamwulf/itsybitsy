@@ -715,7 +715,8 @@ export class DashboardComponent implements Component {
   /** Apply a saved layout state to restore panel sizes, clamping to valid ranges. */
   applyLayout(layout: LayoutState) {
     this.sidebarWidth = Math.max(MIN_SIDEBAR, Math.min(MAX_SIDEBAR, layout.sidebarWidth));
-    resizeCoordinatorTmux(this.sidebarWidth);
+    const mainWidth = (process.stdout.columns ?? 80) - this.sidebarWidth - 1;
+    resizeCoordinatorTmux(mainWidth);
     this.splitPane.setLeftWidth(Math.max(MIN_LEFT_WIDTH, Math.min(MAX_LEFT_WIDTH, layout.splitPaneLeftWidth)));
     this.sidebar.heightOffsets = { ...layout.heightOffsets };
     if (layout.repoCoordinatorHeightOffset !== undefined) {
@@ -1561,7 +1562,8 @@ export class DashboardComponent implements Component {
       if (focus === "agent-tree" || focus === "info" || focus === "coordinator") {
         // Sidebar panel focused: adjust sidebar width
         this.sidebarWidth = Math.max(MIN_SIDEBAR, Math.min(MAX_SIDEBAR, this.sidebarWidth + delta));
-        resizeCoordinatorTmux(this.sidebarWidth);
+        const mainWidth = (process.stdout.columns ?? 80) - this.sidebarWidth - 1;
+        resizeCoordinatorTmux(mainWidth);
         // Resize repo coordinator tmux to match new right pane width
         if (this.repoCoordinatorSession) {
           const rpw = this.getRightPaneWidth();
@@ -1943,9 +1945,10 @@ export async function launchDashboard(): Promise<void> {
   if (savedLayout) {
     dashboard.applyLayout(savedLayout);
   } else {
-    // Resize coordinator tmux to match sidebar width when no saved layout exists
+    // Resize coordinator tmux to match mainWidth when no saved layout exists
     // (applyLayout handles this internally when a layout is restored)
-    resizeCoordinatorTmux(dashboard.sidebarWidth);
+    const mainWidth = (process.stdout.columns ?? 80) - dashboard.sidebarWidth - 1;
+    resizeCoordinatorTmux(mainWidth);
   }
   dashboard.setTui(tui);
   dashboard.setRepos(repos);

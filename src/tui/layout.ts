@@ -152,7 +152,6 @@ export async function getSavedTmuxWidth(): Promise<number> {
 
 /**
  * Read the saved sidebar width from layout.json.
- * Used by the system coordinator to create its tmux session at the correct width.
  * Returns SIDEBAR_WIDTH if no layout is saved or the value is invalid.
  * Clamps to [MIN_SIDEBAR, MAX_SIDEBAR].
  */

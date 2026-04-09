@@ -1968,6 +1968,12 @@ export async function launchDashboard(): Promise<void> {
 
   dashboard.setWatcher(watcher);
 
+  // Resize system coordinator tmux when terminal dimensions change
+  process.stdout.on("resize", () => {
+    const mainWidth = (process.stdout.columns || 120) - dashboard.sidebarWidth - 1;
+    resizeCoordinatorTmux(mainWidth);
+  });
+
   const colorDetection = setupColorSchemeDetection(() => {
     tui.requestRender();
   });

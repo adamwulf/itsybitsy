@@ -168,6 +168,9 @@ pi-tui's `Box` is vertical-only. `SplitPane` renders two child components side-b
 - `writeAgentState()` atomically writes state to meta.json (used by stop hook, sendMessage, resumeAgent)
 - `isCompacting()`, `isRateLimited()`, `hasBackgroundTasks()` — targeted tmux output checks (no full parseState)
 - `buildAgentTree()` mutates `agent.children` in place; call it after state detection
+- `resolveAgentIcon(meta)` — returns unicode icon for agent based on `agentIcon` → coordinator/worker/manager legacy → manager default
+- `resolveAgentIconChar(meta)` — returns single character icon for text-only contexts (e.g., status injection)
+- `readAgentMeta()` validates `agentIcon` field type (must be string or deleted)
 - `readAgentLog()`, `readAgentPrompt()`, `parseDenials()` — async helpers for right pane content
 
 ### parse-state.ts priority order (legacy)
@@ -206,9 +209,12 @@ Five native hook implementations run as Claude Code hook commands inside spawned
 - `hook-status <agentId>` maps to `agent-status.ts`: Stop hook — detects stuck agents and sends nudge messages. Debounced via timestamp file.
 - `hook-permission-denied <agentId>` maps to `permission-denied.ts`: Logs permission denial events to agent.log.
 - `hooks intercept-task` maps to `intercept-task.ts`: PreToolUse hook — blocks disallowed models and unauthorized task spawning.
-- `hooks session-start` maps to `session-start.ts`: SessionStart hook — injects role-specific context at session start.
+- `hooks session-start` maps to `session-start.ts`: SessionStart hook — injects role-specific context at session start. Supports agent types: loads type definition, interpolates template body with `{{variable}}` and `{{#if cond}}...{{/if}}` blocks, falls back to hardcoded instructions based on `instructionStyle`. Legacy agents without `agentType` use role detection from `worker`/`coordinator` booleans.
 
 Hooks read input from stdin. Path-check, intercept-task, and session-start write JSON to stdout and use exit codes (0 allow, 1 deny). Agent-status writes a plain state string to stdout. Permission-denied only logs to agent.log and exits 0.
+
+### Agent types (src/agent-types.ts)
+Configurable agent type system. Agent types are defined as `.md` files with YAML frontmatter in `~/.itsybitsy/agent-types/`. Three built-in types (manager, worker, coordinator) can be overridden by user files. `AgentType` interface: `name`, `description`, `canSpawnChildren`, `icon`, `model`, `permissions`, `instructionStyle`, `markdownBody`. Key exports: `loadAgentType(name)` (loads from user file → builtin → manager fallback), `agentTypeExists(name)`, `listAgentTypes()`, `validateAllAgentTypes()` (startup validation), `parseAgentTypeFile(content)` (YAML frontmatter parser with nested object and list support). Icon is first non-whitespace character of the `icon` field.
 
 ### Agent lifecycle (src/agent-lifecycle.ts)
 Shared agent lifecycle helpers used by multiple ib commands. Mirrors the ib bash script's teardown, archive, kill, and utility functions. Provides a pluggable `SpawnFn` runner (`setSpawnRunner()`/`resetSpawnRunner()`) for test injection. Handles formatting timestamps, archiving agent directories, and cleaning up tmux sessions and git worktrees.
@@ -217,7 +223,7 @@ Shared agent lifecycle helpers used by multiple ib commands. Mirrors the ib bash
 Reads Claude transcript JSONL files to determine an agent's context window usage percentage, then sends `/compact` to agents that exceed a configured threshold. Matches ib's `get_agent_context_usage()` logic for transcript parsing. Encodes worktree paths into Claude's project directory naming scheme to locate the correct transcript file.
 
 ### Config (src/config.ts)
-User-wide configuration system with user and default sources. Defines all config keys (`maxAgents`, `model`, `createPullRequests`, `allowAgentQuestions`, `autoCompactThreshold`, `externalDiffTool`, hooks settings, per-role permission allow/deny lists, and coordinator config: `coordinator.model`, `permissions.coordinator.allow/deny`). Reads from `~/.itsybitsy/config.json` (user home), merging with typed defaults. No per-repo configuration.
+User-wide configuration system with user and default sources. Defines all config keys (`maxAgents`, `model`, `createPullRequests`, `allowAgentQuestions`, `autoCompactThreshold`, `externalDiffTool`, hooks settings, `permissions.all.allow/deny`, `permissions.repo.allow/deny`, `permissions.coordinator.allow/deny`, and `coordinator.model`). Checks for deprecated keys (`permissions.manager.*`, `permissions.worker.*`) and warns at startup. Reads from `~/.itsybitsy/config.json` (user home), merging with typed defaults. No per-repo configuration.
 
 ### Folder browser (src/tui/folder-browser.ts)
 Builds the navigable item list for the add-repo folder browser dialog. Given a current path, produces a list of `FolderItem` entries: ancestors from root down to parent, the current folder, and sorted child directories. Each item includes depth, git-repo detection, and ancestor/current flags for rendering the tree-style UI.
@@ -226,6 +232,7 @@ Builds the navigable item list for the add-repo folder browser dialog. Given a c
 - Mutations are implemented natively. `runIb()` and `IbRunner` have been deleted. `hooksStatus`, `installSafetyHooks`, `uninstallSafetyHooks`, `installInterceptHook`, `uninstallInterceptHook`, `interceptHooksStatus` are natively implemented — they read/write `~/.claude/settings.json` (global).
 - Always sets `cwd` to `agent.repoPath` — ib requires running from a git repo root
 - Commands: killAgent, nukeAgent, nukeAllAgents, pauseAgent, resumeAgent, reassignAgent, mergeCheckAgent, mergeAgent, sendMessage, newAgent, diffAgent, statusAgent, acknowledgeQuestion
+- `newAgent()` validates `--type` exists before loading (via `agentTypeExists()`), stores `agentType` and `agentIcon` in meta.json. Permission lookup: coordinators get `permissions.coordinator.*`, all others get `permissions.repo.*`. Type-defined permissions merged from type definition file.
 - `nukeAllAgents(repoPath)` — kills and archives all agents in a repo, plus cleans orphaned tmux sessions
 - `pauseAgent(agent)` — stops a running agent by killing its Claude process and tmux session without archiving
 

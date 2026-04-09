@@ -1722,15 +1722,15 @@ Panel sizes are persisted across `ib watch` sessions via `~/.itsybitsy/layout.js
 
 ### 13.8 Tmux Width Model
 
-Each tmux session type uses an independent width, tracked and resized separately. Changing one must never affect the others.
+Each tmux session type uses a separately-tracked width. The three widths have well-defined dependency relationships:
 
 | Component | Width formula | Persisted in | Used when |
 |-----------|--------------|--------------|-----------|
 | **Agent tmux** (middle pane) | `splitPaneLeftWidth` | `layout.json` → `splitPaneLeftWidth` | Creating new agents, resuming agents, selecting an agent, `[`/`]` with active-agent focus, layout restore |
-| **System coordinator tmux** | `mainWidth` = `terminal_cols - sidebarWidth - 1` | Computed dynamically (not persisted directly) | Creating coordinator session, `[`/`]` with sidebar focus, terminal resize (SIGWINCH), layout restore |
-| **Per-repo coordinator tmux** | `rightPaneWidth` = `mainWidth - splitPaneLeftWidth - 1` | Computed dynamically | Selecting a repo header, `[`/`]` with any focus that changes either `sidebarWidth` or `splitPaneLeftWidth` |
+| **System coordinator tmux** | `mainWidth` = `terminal_cols - sidebarWidth - 1` | Computed dynamically (not persisted directly) | Creating coordinator session, `[`/`]` with sidebar or coordinator focus, terminal resize (SIGWINCH), layout restore |
+| **Per-repo coordinator tmux** | `rightPaneWidth` = `mainWidth - splitPaneLeftWidth - 1` | Computed dynamically | Selecting a repo header, `[`/`]` with sidebar/coordinator focus (via `sidebarWidth` change) or active-agent/right-pane focus (via `splitPaneLeftWidth` change) |
 
-**Key invariant**: These three widths are independent. A sidebar resize changes `mainWidth` (affecting the system coordinator and per-repo coordinator) but does not change `splitPaneLeftWidth` (agents). A split-pane resize changes `splitPaneLeftWidth` (agents) and `rightPaneWidth` (per-repo coordinator) but does not change `mainWidth` (system coordinator).
+**Key invariant**: `splitPaneLeftWidth` and `sidebarWidth` are the two independent inputs; `mainWidth` and `rightPaneWidth` are derived. A sidebar resize changes `sidebarWidth`, which changes `mainWidth` (affecting the system coordinator and per-repo coordinator) but does not change `splitPaneLeftWidth` (agents). A split-pane resize changes `splitPaneLeftWidth` (agents) and `rightPaneWidth` (per-repo coordinator) but does not change `mainWidth` (system coordinator).
 
 **Tmux width feedback**: The tmux poller reports the polled session's window width back to the dashboard via `onWidth`. This feedback is used to sync `splitPaneLeftWidth` when an external client (e.g., Ghostty) resizes an agent's tmux session. However, the main tmux poller is repointed to the system coordinator's tmux session when the coordinator is selected (to show coordinator output in the middle pane). Since the coordinator runs at `mainWidth` (much wider than `splitPaneLeftWidth`), the `onWidth` callback must be suppressed when the system coordinator is selected — otherwise the coordinator's width would overwrite `splitPaneLeftWidth` and corrupt all agent widths.
 

@@ -488,6 +488,32 @@ async function main() {
           filteredSendArgs.push(sendArgs[i]!);
         }
       }
+      // Special case: 'ib send coordinator' routes to system coordinator inbox
+      if (filteredSendArgs[0] === "coordinator") {
+        let coordMessage = filteredSendArgs.slice(1).join(" ");
+        if (!coordMessage) {
+          if (!process.stdin.isTTY) {
+            const chunks: string[] = [];
+            for await (const chunk of process.stdin) {
+              chunks.push(typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk));
+            }
+            coordMessage = chunks.join("").trim();
+          }
+          if (!coordMessage) {
+            console.error("Usage: ib send [--from <id>] coordinator <message...>");
+            process.exit(1);
+          }
+        }
+        const { inboxWrite } = await import("./inbox");
+        const result = await inboxWrite(coordMessage, fromAgent ? { source: fromAgent } : undefined);
+        if (result.ok) {
+          console.log("Sent to system coordinator");
+        } else {
+          console.error(result.stderr);
+        }
+        process.exit(result.ok ? 0 : 1);
+        break;
+      }
       const agent = await requireAgent(filteredSendArgs[0], repos);
       let message = filteredSendArgs.slice(1).join(" ");
       if (!message) {

@@ -1128,7 +1128,7 @@ Terminals narrower than 140 columns or shorter than 24 rows display a warning: `
 
 ## 12. Coordinator System
 
-The coordinator system has two tiers: one **system coordinator** that manages work across all repos, and **per-repo coordinators** that manage work within a single repo. Both tiers are auto-spawned when `ib watch` launches (§12.1.2, §12.2.3). Per-repo coordinators can also be killed and manually re-created as needed. Together they form a coordination hierarchy: user → system coordinator → per-repo coordinators → agents.
+The coordinator system has two tiers: one **system coordinator** that manages work across all repos, and **per-repo coordinators** that manage work within a single repo. The system coordinator is auto-spawned when `ib watch` launches (§12.1.2). Per-repo coordinators are created manually via CLI, TUI, or the system coordinator (§12.2.3). Together they form a coordination hierarchy: user → system coordinator → per-repo coordinators → agents.
 
 ### 12.1 System Coordinator
 
@@ -1534,9 +1534,7 @@ export type FlatEntry =
 
 #### 12.4.3 maxAgents
 
-Per-repo coordinators bypass the `maxAgents` check during both auto-spawn (§12.2.3) and manual creation (`ib new-agent --coordinator`) — coordinators are infrastructure, not user tasks. They DO occupy agent directories in `.ittybitty/agents/` and appear in `ib list` output, but they are **excluded from the agent count** when checking `maxAgents` for regular agent creation. Example: if `maxAgents=10` and there are 3 coordinators, you can still create 10 regular agents (not 7). The system coordinator does NOT count — it is not a regular agent and lives outside any repo.
-
-**Auto-spawn and maxAgents**: When `ib watch` auto-spawns per-repo coordinators on startup (§12.2.3), coordinators bypass the `maxAgents` check. This prevents the situation where registering many repos makes it impossible to create any regular agents. Manual coordinator creation via `ib new-agent --coordinator` also bypasses the limit — coordinators are infrastructure, not user tasks. This bypass is unbounded — registering 50 repos creates 50 coordinators. This is acceptable because: (a) users control how many repos they register, (b) coordinators idle most of the time (low resource usage when waiting), and (c) the registry is a deliberate user action, not an automated process.
+Per-repo coordinators bypass the `maxAgents` check during creation (`ib new-agent --coordinator` or TUI `R` key) — coordinators are infrastructure, not user tasks. They DO occupy agent directories in `.ittybitty/agents/` and appear in `ib list` output, but they are **excluded from the agent count** when checking `maxAgents` for regular agent creation. Example: if `maxAgents=10` and there are 3 coordinators, you can still create 10 regular agents (not 7). The system coordinator does NOT count — it is not a regular agent and lives outside any repo.
 
 ### 12.5 Coordinator-Specific Config
 
@@ -1584,7 +1582,7 @@ The coordinator system touches many modules. This section catalogs the current i
 | `src/tui/focus.ts` | **Implemented** | Coordinator focus order: `agent-tree` → `info` → `coordinator`. |
 | `src/tui/pane-manager.ts` | **Implemented** | Full-width view when system coordinator is selected. Per-repo coordinator REPO mode with split pane. |
 | `src/watcher.ts` | **No changes needed** | Per-repo coordinators are regular agents detected by fs.watch. System coordinator state polled via `getCoordinatorInfo()`. |
-| `src/index.ts` | **Implemented** | `ib new-agent --coordinator` flag handling. `ib inbox` subcommand routing. Standard `matchAgentById()` handles all coordinator addressing. |
+| `src/index.ts` | **Implemented** | `ib new-agent --coordinator` flag handling. `ib inbox` subcommand routing. Special `ib send coordinator` routing to system coordinator inbox (§12.3.1). Standard `matchAgentById()` handles all other coordinator addressing. |
 | `src/auto-compact.ts` | **No changes needed** | Per-repo coordinators get auto-compact as regular agents. System coordinator has no watchdog/auto-compact. |
 
 ---

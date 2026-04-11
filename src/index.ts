@@ -100,13 +100,13 @@ export async function requireAgent(idArg: string | undefined, repos: RepoEntry[]
 }
 
 /**
- * Resolve a send target using the new hybrid @/colon addressing scheme.
+ * Resolve a send target using @-based addressing.
  * Returns { agent, isSystemCoordinator } or null if not found/invalid.
  * Supports:
  *   @system → system coordinator
  *   @coordinator → own repo's coordinator
  *   @<repo-name> → that repo's coordinator
- *   <repo>:<agent-id> → agent in specific repo
+ *   @<repo-name>/<agent-id> → agent in specific repo
  *   <agent-id> (bare) → search same-repo first, then all repos
  */
 export async function resolveTarget(
@@ -159,13 +159,36 @@ export async function resolveTarget(
   }
 
   // @<repo-name> → that repo's coordinator
+  // @<repo-name>/<agent-id> → agent in specific repo
   if (target.startsWith("@")) {
-    const repoName = target.substring(1);
+    const afterAt = target.substring(1);
+    const slashIdx = afterAt.indexOf("/");
+    const repoName = slashIdx >= 0 ? afterAt.substring(0, slashIdx) : afterAt;
+    const agentId = slashIdx >= 0 ? afterAt.substring(slashIdx + 1) : null;
+
     const repo = repos.find((r) => repoDisplayName(r) === repoName);
     if (!repo) {
       console.error(`Error: repo not found: ${repoName}`);
       return { agent: null, isSystemCoordinator: false };
     }
+
+    if (agentId) {
+      // @<repo>/<agent-id> → agent in specific repo
+      const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })));
+      const repoAgents = agents.filter((a) => a.repoPath === repo.path);
+      const { match, ambiguous } = matchAgentById(agentId, repoAgents);
+      if (ambiguous.length > 0) {
+        console.error(`Ambiguous ID "${agentId}" in repo ${repoName} matches: ${ambiguous.join(", ")}`);
+        return { agent: null, isSystemCoordinator: false };
+      }
+      if (!match) {
+        console.error(`Agent not found: ${agentId} in repo ${repoName}`);
+        return { agent: null, isSystemCoordinator: false };
+      }
+      return { agent: match, isSystemCoordinator: false };
+    }
+
+    // @<repo> → that repo's coordinator
     const coordResult = await checkCoordinatorExists(repo.path);
     if (coordResult.exists && coordResult.isCoordinator) {
       const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })));
@@ -174,28 +197,6 @@ export async function resolveTarget(
     }
     console.error(`Error: no coordinator found for repo ${repoName}`);
     return { agent: null, isSystemCoordinator: false };
-  }
-
-  // <repo>:<agent-id> → agent in specific repo
-  if (target.includes(":")) {
-    const [repoName, agentId] = target.split(":", 2);
-    const repo = repos.find((r) => repoDisplayName(r) === repoName);
-    if (!repo) {
-      console.error(`Error: repo not found: ${repoName}`);
-      return { agent: null, isSystemCoordinator: false };
-    }
-    const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })));
-    const repoAgents = agents.filter((a) => a.repoPath === repo.path);
-    const { match, ambiguous } = matchAgentById(agentId!, repoAgents);
-    if (ambiguous.length > 0) {
-      console.error(`Ambiguous ID "${agentId}" in repo ${repoName} matches: ${ambiguous.join(", ")}`);
-      return { agent: null, isSystemCoordinator: false };
-    }
-    if (!match) {
-      console.error(`Agent not found: ${agentId} in repo ${repoName}`);
-      return { agent: null, isSystemCoordinator: false };
-    }
-    return { agent: match, isSystemCoordinator: false };
   }
 
   // <agent-id> (bare) → search same-repo first, then all repos
@@ -622,7 +623,7 @@ async function main() {
 
       if (!filteredSendArgs[0]) {
         console.error("Usage: ib send [--from <id>] <target> <message...>");
-        console.error("Targets: @system, @coordinator, @<repo>, <repo>:<agent-id>, or <agent-id>");
+        console.error("Targets: @system, @coordinator, @<repo>, @<repo>/<agent-id>, or <agent-id>");
         process.exit(1);
       }
 

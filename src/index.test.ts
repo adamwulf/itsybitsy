@@ -382,12 +382,12 @@ describe("resolveTarget addressing", () => {
     expect(isSystemCoordinator).toBe(false);
   });
 
-  test("repo:agent-id syntax is recognized", async () => {
+  test("@repo/agent-id syntax is recognized", async () => {
     const repos: RepoEntry[] = [
       { path: "/repo1", name: "repo1" },
     ];
     // This will fail to find agents since repos don't have .ittybitty dirs
-    const { agent, isSystemCoordinator } = await resolveTarget("repo1:agent1", repos);
+    const { agent, isSystemCoordinator } = await resolveTarget("@repo1/agent1", repos);
     expect(agent).toBeNull();
     expect(isSystemCoordinator).toBe(false);
   });

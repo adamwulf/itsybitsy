@@ -128,6 +128,73 @@ describe("registry", () => {
     expect(result.message).toContain("reserved name");
   });
 
+  // --- Group I: additional addRepo coordinator enforcement ---
+
+  test("I2: addRepo custom name overrides reserved basename", async () => {
+    // Path basename is "coordinator" but custom name "api" overrides it
+    const repoDir = join(tempDir, "coordinator");
+    await mkdir(repoDir, { recursive: true });
+    const result = await addRepo(repoDir, "api");
+    expect(result.ok).toBe(true);
+    const repos = await listRepos();
+    expect(repos[0]!.name).toBe("api");
+  });
+
+  test("I4: plural 'coordinators' is allowed (not reserved)", async () => {
+    const repoDir = join(tempDir, "coordinators");
+    await mkdir(repoDir, { recursive: true });
+    const result = await addRepo(repoDir);
+    expect(result.ok).toBe(true);
+    expect(result.message).toContain("coordinators");
+  });
+
+  test("I5: 'system' is NOT blocked by addRepo", async () => {
+    const repoDir = join(tempDir, "system");
+    await mkdir(repoDir, { recursive: true });
+    const result = await addRepo(repoDir);
+    expect(result.ok).toBe(true);
+  });
+
+  test("addRepo 'Coordinator' (uppercase) passes — case-sensitive", async () => {
+    const repoDir = join(tempDir, "Coordinator");
+    await mkdir(repoDir, { recursive: true });
+    const result = await addRepo(repoDir);
+    expect(result.ok).toBe(true);
+  });
+
+  // --- Group J: additional renameRepo coordinator enforcement ---
+
+  test("J4: renameRepo whitespace-only nickname clears nickname", async () => {
+    const repoDir = join(tempDir, "myrepo-ws");
+    await mkdir(repoDir, { recursive: true });
+    await addRepo(repoDir);
+    await renameRepo(repoDir, "some-nick");
+    const result = await renameRepo(repoDir, "   ");
+    expect(result.ok).toBe(true);
+    const repos = await listRepos();
+    const entry = repos.find(r => r.path.endsWith("myrepo-ws"));
+    expect(entry!.nickname).toBeUndefined();
+  });
+
+  test("J5: renameRepo 'system' is NOT blocked", async () => {
+    const repoDir = join(tempDir, "myrepo-sys");
+    await mkdir(repoDir, { recursive: true });
+    await addRepo(repoDir);
+    const result = await renameRepo(repoDir, "system");
+    expect(result.ok).toBe(true);
+    const repos = await listRepos();
+    const entry = repos.find(r => r.path.endsWith("myrepo-sys"));
+    expect(entry!.nickname).toBe("system");
+  });
+
+  test("renameRepo 'Coordinator' (uppercase) passes — case-sensitive", async () => {
+    const repoDir = join(tempDir, "myrepo-cap");
+    await mkdir(repoDir, { recursive: true });
+    await addRepo(repoDir);
+    const result = await renameRepo(repoDir, "Coordinator");
+    expect(result.ok).toBe(true);
+  });
+
   test("renameRepo rejects nickname that collides with another repo's display name", async () => {
     const repo1 = join(tempDir, "repo1");
     const repo2 = join(tempDir, "repo2");

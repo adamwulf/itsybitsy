@@ -29,6 +29,7 @@ import type { SpawnFn } from "./types";
 import { isValidModel, isValidToolList, isValidTmuxSession, isValidSessionId, isValidShellPath, shellQuote } from "./validation";
 import { getSavedTmuxWidth } from "./tui/layout";
 import { buildPerRepoCoordinatorSettings, checkCoordinatorExists, getCoordinatorAgentId } from "./coordinator";
+import { listRepos, repoDisplayName } from "./registry";
 
 export interface IbCommandResult {
   ok: boolean;
@@ -1431,11 +1432,16 @@ export async function newAgent(
   await mkdir(archiveDir, { recursive: true });
 
   // Configuration
-  const useWorktree = opts?.noWorktree !== true;
+  let useWorktree = opts?.noWorktree !== true;
   const workerMode = opts?.worker === true;
   const coordinatorMode = opts?.coordinator === true;
   const yoloMode = opts?.yolo === true;
   const customType = opts?.type;
+
+  // Coordinators never use worktrees (SPEC §12.2.3)
+  if (coordinatorMode) {
+    useWorktree = false;
+  }
 
   // Coordinator mutual exclusivity checks
   if (coordinatorMode && workerMode) {
@@ -1458,9 +1464,6 @@ export async function newAgent(
     } catch (err) {
       return { ok: false, exitCode: 1, stdout: "", stderr: `Error: ${(err as Error).message}` };
     }
-  }
-  if (coordinatorMode && !useWorktree) {
-    return { ok: false, exitCode: 1, stdout: "", stderr: "Error: --no-worktree is not allowed with --coordinator" };
   }
 
   // Coordinator one-per-repo check
@@ -1625,9 +1628,31 @@ export async function newAgent(
     id = `agent-${Array.from(bytes).map(b => b.toString(16).padStart(2, "0")).join("")}`;
   }
 
-  // Reserved name check — applies to all ID generation paths
+  // Reserved names check — applies to all ID generation paths
   if (id === "coordinator") {
     return { ok: false, exitCode: 1, stdout: "", stderr: 'Error: "coordinator" is a reserved name (used for system coordinator addressing)' };
+  }
+  if (id === "system") {
+    return { ok: false, exitCode: 1, stdout: "", stderr: 'Error: "system" is a reserved name (used for system coordinator addressing)' };
+  }
+
+  // Repo display name collision check
+  const repos = await listRepos();
+  if (coordinatorMode) {
+    // For coordinator agents, check against OTHER repos' display names
+    // (the ID IS the repo basename by design, which is the current repo)
+    const thisRepo = repos.find(r => r.path === rootRepoPath);
+    const otherRepos = repos.filter(r => r.path !== rootRepoPath);
+    const collision = otherRepos.find(r => repoDisplayName(r) === id);
+    if (collision) {
+      return { ok: false, exitCode: 1, stdout: "", stderr: `Error: agent name "${id}" collides with registered repo name` };
+    }
+  } else {
+    // For named and random agents, check against ALL repos' display names and basenames
+    const collision = repos.find(r => repoDisplayName(r) === id || r.name === id);
+    if (collision) {
+      return { ok: false, exitCode: 1, stdout: "", stderr: `Error: agent name "${id}" collides with registered repo name` };
+    }
   }
 
   // Get repo-id for session naming
@@ -1666,50 +1691,48 @@ export async function newAgent(
     }
     workPath = join(agentDir, "repo");
 
-    // 13. Write settings.local.json
+    // 13. Write settings.local.json (worktree mode only)
     await mkdir(join(agentDir, "repo", ".claude"), { recursive: true });
-    let settingsContent: string;
-    if (coordinatorMode) {
-      const coordSettings = await buildPerRepoCoordinatorSettings();
-      // Build coordinator settings with hooks (path-check, stop, permission-denied, session-start, intercept-task)
-      const hookCmd = `ib hook-permission-denied ${id}`;
-      const coordSettingsObj = {
-        ...coordSettings,
-        spinnerTipsEnabled: false,
-        hooks: {
-          Stop: [{ matcher: "*", hooks: [{ type: "command", command: `ib hook-status ${id}` }] }],
-          PermissionRequest: [{ matcher: "*", hooks: [{ type: "command", command: hookCmd }] }],
-          PreToolUse: [
-            { matcher: "*", hooks: [{ type: "command", command: `ib hook-check-path ${id}` }] },
-            { matcher: "Task|Agent|TaskCreate|Bash", hooks: [{ type: "command", command: "ib hooks intercept-task" }] },
-          ],
-          SessionStart: [{ hooks: [{ type: "command", command: "ib hooks session-start" }] }],
-        },
-      };
-      settingsContent = JSON.stringify(coordSettingsObj, null, 2);
-    } else {
-      settingsContent = await buildAgentSettings(rootRepoPath, agentType, id, configAllow, configDeny, resolvedType?.canSpawnChildren);
-    }
+    const settingsContent = await buildAgentSettings(rootRepoPath, agentType, id, configAllow, configDeny, resolvedType?.canSpawnChildren);
     await Bun.write(join(agentDir, "repo", ".claude", "settings.local.json"), settingsContent);
   } else {
     // Non-worktree mode: ensure ib permissions in root repo settings
     const rootSettingsPath = join(rootRepoPath, ".claude", "settings.local.json");
     try {
       const rootSettingsFile = Bun.file(rootSettingsPath);
-      if (await rootSettingsFile.exists()) {
-        const settings = await rootSettingsFile.json();
-        const allow = (settings?.permissions?.allow as string[]) ?? [];
-        let needsUpdate = false;
-        if (!allow.includes("Bash(ib:*)")) needsUpdate = true;
-        if (needsUpdate) {
-          if (!allow.includes("Bash(ib:*)")) allow.push("Bash(ib:*)");
-          settings.permissions = { ...settings.permissions, allow };
-          await Bun.write(rootSettingsPath, JSON.stringify(settings, null, 2));
-        }
+      let settingsContent: string;
+
+      if (coordinatorMode) {
+        // Coordinator-specific settings
+        const coordSettings = await buildPerRepoCoordinatorSettings();
+        const hookCmd = `ib hook-permission-denied ${id}`;
+        const coordSettingsObj = {
+          ...coordSettings,
+          spinnerTipsEnabled: false,
+          hooks: {
+            Stop: [{ matcher: "*", hooks: [{ type: "command", command: `ib hook-status ${id}` }] }],
+            PermissionRequest: [{ matcher: "*", hooks: [{ type: "command", command: hookCmd }] }],
+            PreToolUse: [
+              { matcher: "*", hooks: [{ type: "command", command: `ib hook-check-path ${id}` }] },
+              { matcher: "Task|Agent|TaskCreate|Bash", hooks: [{ type: "command", command: "ib hooks intercept-task" }] },
+            ],
+            SessionStart: [{ hooks: [{ type: "command", command: "ib hooks session-start" }] }],
+          },
+        };
+        settingsContent = JSON.stringify(coordSettingsObj, null, 2);
       } else {
-        await mkdir(join(rootRepoPath, ".claude"), { recursive: true });
-        await Bun.write(rootSettingsPath, JSON.stringify({ permissions: { allow: ["Bash(ib:*)"] } }));
+        // Non-coordinator agent in non-worktree mode
+        const settings = await rootSettingsFile.exists() ? await rootSettingsFile.json() : {};
+        const allow = (settings?.permissions?.allow as string[]) ?? [];
+        if (!allow.includes("Bash(ib:*)")) {
+          allow.push("Bash(ib:*)");
+        }
+        settings.permissions = { ...settings.permissions, allow };
+        settingsContent = JSON.stringify(settings, null, 2);
       }
+
+      await mkdir(join(rootRepoPath, ".claude"), { recursive: true });
+      await Bun.write(rootSettingsPath, settingsContent);
     } catch { /* ignore */ }
   }
 
@@ -2099,10 +2122,10 @@ export type ResolveAgentResult =
 /** Extract agent ID from a tmux session name (format: ittybitty-<repoid>-<agentid>) */
 function extractAgentIdFromTmuxSession(sessionName: string): string | null {
   if (!sessionName.startsWith("ittybitty-")) return null;
-  // Format: ittybitty-<repoid>-<agentid>
-  // repoid and agentid both contain hyphens, but agentid always starts with "agent-"
-  const agentMatch = sessionName.match(/-(agent-[a-f0-9]+)$/);
-  return agentMatch ? agentMatch[1]! : null;
+  // Format: ittybitty-<8hexchars>-<agentid>
+  // repoId is always exactly 8 hex characters (4 random bytes)
+  const match = sessionName.match(/^ittybitty-[a-f0-9]{8}-(.+)$/);
+  return match ? match[1]! : null;
 }
 
 /**

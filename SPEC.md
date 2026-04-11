@@ -998,7 +998,7 @@ Each entry is an object with `path` (absolute path to the git repository root), 
 
 | Command | Description |
 |---------|-------------|
-| `ib add [path]` | Add a repo to the registry. Defaults to `git rev-parse --show-toplevel` in the current directory if no path is given. Errors if the path is not a git repository or is already registered. |
+| `ib add [path]` | Add a repo to the registry. Defaults to `git rev-parse --show-toplevel` in the current directory if no path is given. Errors if the path is not a git repository or is already registered. Rejects repos whose basename is `coordinator` (reserved for system coordinator addressing, §12.3.1). |
 | `ib remove [path]` | Remove a repo from the registry. Defaults to CWD git root. Errors if the path is not currently registered. |
 | `ib list` | List all registered repos and their agents. |
 
@@ -1279,7 +1279,7 @@ Per-repo coordinators are Claude Code agents that coordinate work within a singl
 
 Per-repo coordinators are stored in `.ittybitty/agents/` like regular agents, but with distinguishing characteristics:
 
-- **Agent ID**: The repo basename (e.g., `itsybitsy` for `/Users/adam/Developer/itsybitsy`). This is computed by `getCoordinatorAgentId(repoPath)` which returns `basename(repoPath)`. Only one coordinator per repo. The agent directory is `.ittybitty/agents/<repo-basename>/` (matching the standard `agents/<id>/` convention). Using the repo basename as the agent ID means standard agent ID resolution (§4.1) naturally routes `ib send <repo-basename>` to the per-repo coordinator — no special addressing logic needed. If a non-coordinator agent already has the repo basename as its ID (collision), a random 4-char hex suffix is appended (e.g., `itsybitsy-a3f1`). **Reserved name**: The name `coordinator` is reserved for system coordinator addressing (§12.3.1). If a repo's basename is `coordinator`, `newAgent()` rejects the creation with an error. The repo must be renamed or a `--name` override used (not yet implemented).
+- **Agent ID**: The repo basename (e.g., `itsybitsy` for `/Users/adam/Developer/itsybitsy`). This is computed by `getCoordinatorAgentId(repoPath)` which returns `basename(repoPath)`. Only one coordinator per repo. The agent directory is `.ittybitty/agents/<repo-basename>/` (matching the standard `agents/<id>/` convention). Using the repo basename as the agent ID means standard agent ID resolution (§4.1) naturally routes `ib send <repo-basename>` to the per-repo coordinator — no special addressing logic needed. If a non-coordinator agent already has the repo basename as its ID (collision), a random 4-char hex suffix is appended (e.g., `itsybitsy-a3f1`). **Reserved name**: The name `coordinator` is reserved for system coordinator addressing (§12.3.1). Repos with basename `coordinator` are rejected at registration time (`ib add`, §9). As a secondary guard, `newAgent()` also rejects any agent with ID `coordinator`.
 - **meta.json flag**: `"coordinator": true` — marks this agent as a coordinator
 - **Tmux session naming**: Standard convention: `ittybitty-<repo-id>-<agent-id>` (where `<agent-id>` is the repo basename)
 - **Branch name**: `agent/<agent-id>-<repo-id>` (includes repo-id to avoid collision across repos sharing the same git remote — each repo has a unique 8-char hex repo-id in `.ittybitty/repo-id`)

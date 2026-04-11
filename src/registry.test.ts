@@ -50,6 +50,22 @@ describe("registry", () => {
     expect(result.message).toContain("Already registered");
   });
 
+  test("addRepo rejects 'coordinator' basename", async () => {
+    const repoDir = join(tempDir, "coordinator");
+    await mkdir(repoDir, { recursive: true });
+    const result = await addRepo(repoDir);
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("reserved name");
+  });
+
+  test("addRepo rejects 'coordinator' as custom name", async () => {
+    const repoDir = join(tempDir, "myrepo2");
+    await mkdir(repoDir, { recursive: true });
+    const result = await addRepo(repoDir, "coordinator");
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("reserved name");
+  });
+
   test("removeRepo removes by path", async () => {
     const repoDir = join(tempDir, "myrepo");
     await mkdir(repoDir, { recursive: true });
@@ -101,6 +117,15 @@ describe("registry", () => {
   test("renameRepo returns error for unknown path", async () => {
     const result = await renameRepo("/nonexistent", "foo");
     expect(result.ok).toBe(false);
+  });
+
+  test("renameRepo rejects 'coordinator' as nickname", async () => {
+    const repoDir = join(tempDir, "myrepo");
+    await mkdir(repoDir, { recursive: true });
+    await addRepo(repoDir);
+    const result = await renameRepo(repoDir, "coordinator");
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("reserved name");
   });
 
   test("renameRepo rejects nickname that collides with another repo's display name", async () => {

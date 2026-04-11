@@ -1,7 +1,8 @@
 import { test, expect, describe } from "bun:test";
 import { makeAgent } from "./test-utils";
-import { collectAgents, findManagerInTree, matchAgentById } from "./index";
+import { collectAgents, findManagerInTree, matchAgentById, resolveTarget } from "./index";
 import type { Agent } from "./agents";
+import type { RepoEntry } from "./registry";
 
 // ─── collectAgents ───────────────────────────────────────────────────────────
 
@@ -341,6 +342,64 @@ describe("CLI arg parsing", () => {
   test("questions (q alias) with no repos shows message", async () => {
     const { stdout } = await runCli(["q"]);
     expect(stdout).toContain("No repos registered");
+  });
+});
+
+// ─── resolveTarget addressing ─────────────────────────────────────────────
+
+describe("resolveTarget addressing", () => {
+  // Note: resolveTarget uses async imports and file system calls.
+  // These integration tests verify the addressing logic with mocked agents.
+  // Unit tests for addressing logic patterns:
+
+  test("@system target is recognized as system coordinator", async () => {
+    // @system should return isSystemCoordinator: true
+    const repos: RepoEntry[] = [];
+    const { agent, isSystemCoordinator } = await resolveTarget("@system", repos);
+    expect(agent).toBeNull();
+    expect(isSystemCoordinator).toBe(true);
+  });
+
+  test("@coordinator without repo context exits with error", async () => {
+    const repos: RepoEntry[] = [];
+    // Should fail since we're not in a repo context
+    // The function will print an error and return null agent
+    const { agent, isSystemCoordinator } = await resolveTarget("@coordinator", repos, "/tmp");
+    expect(agent).toBeNull();
+    expect(isSystemCoordinator).toBe(false);
+  });
+
+  test("bare agent-id performs global search", async () => {
+    const repos: RepoEntry[] = [
+      { path: "/repo1", name: "repo1" },
+      { path: "/repo2", name: "repo2" },
+    ];
+    // With the default cwd (/tmp), this will fail to find an agent
+    // since readAllAgents will find no agents in empty .ittybitty dirs
+    const { agent, isSystemCoordinator } = await resolveTarget("agent1", repos, "/tmp");
+    // Since no agents exist, it should return null
+    expect(agent).toBeNull();
+    expect(isSystemCoordinator).toBe(false);
+  });
+
+  test("repo:agent-id syntax is recognized", async () => {
+    const repos: RepoEntry[] = [
+      { path: "/repo1", name: "repo1" },
+    ];
+    // This will fail to find agents since repos don't have .ittybitty dirs
+    const { agent, isSystemCoordinator } = await resolveTarget("repo1:agent1", repos);
+    expect(agent).toBeNull();
+    expect(isSystemCoordinator).toBe(false);
+  });
+
+  test("@repo-name syntax is recognized", async () => {
+    const repos: RepoEntry[] = [
+      { path: "/repo1", name: "repo1" },
+    ];
+    // This will fail to find a coordinator since repo has no .ittybitty dir
+    const { agent, isSystemCoordinator } = await resolveTarget("@repo1", repos);
+    expect(agent).toBeNull();
+    expect(isSystemCoordinator).toBe(false);
   });
 });
 

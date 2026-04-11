@@ -56,13 +56,13 @@ describe("SYSTEM_COORDINATOR_PROMPT", () => {
 
   test("warns against sending to self", () => {
     expect(SYSTEM_COORDINATOR_PROMPT).toContain(
-      "Do NOT use `ib send coordinator`"
+      "Do NOT use `ib send @system`"
     );
   });
 
   test("explains delegation to per-repo coordinators", () => {
     expect(SYSTEM_COORDINATOR_PROMPT).toContain("per-repo coordinators");
-    expect(SYSTEM_COORDINATOR_PROMPT).toContain("ib send <repo-name>");
+    expect(SYSTEM_COORDINATOR_PROMPT).toContain("ib send @<repo-name>");
   });
 
   test("states no file tool access", () => {
@@ -844,9 +844,9 @@ describe("perRepoCoordinatorPrompt", () => {
     expect(prompt).toContain("ib new-agent --worker");
   });
 
-  test("mentions ib send coordinator for system coordinator messaging", () => {
+  test("mentions ib send @system for system coordinator messaging", () => {
     const prompt = perRepoCoordinatorPrompt("test-repo");
-    expect(prompt).toContain('ib send coordinator "message"');
+    expect(prompt).toContain('ib send @system "message"');
   });
 
   test("says coordinator does not write code", () => {
@@ -859,9 +859,9 @@ describe("perRepoCoordinatorPrompt", () => {
     expect(prompt).toContain("Your agent ID is `muse-ios`");
   });
 
-  test("mentions workers send messages via repo name", () => {
+  test("mentions workers send messages via @coordinator", () => {
     const prompt = perRepoCoordinatorPrompt("muse-ios");
-    expect(prompt).toContain('ib send muse-ios "message"');
+    expect(prompt).toContain('ib send @coordinator "message"');
   });
 });
 

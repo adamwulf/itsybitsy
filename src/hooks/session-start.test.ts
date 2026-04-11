@@ -159,7 +159,7 @@ describe("session-start", () => {
     expect(instructions).toContain("Per-Repo Coordinator");
     expect(instructions).toContain("project");
     expect(instructions).toContain("ib new-agent --worker");
-    expect(instructions).toContain("ib send coordinator");
+    expect(instructions).toContain("ib send @system");
   });
 
   test("coordinator instructions mention Read, Glob, Grep, LS", async () => {

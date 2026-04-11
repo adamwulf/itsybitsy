@@ -378,7 +378,7 @@ function generateCoordinatorInstructions(ctx: SessionContext): string {
   return `<ittybitty>
 ## IttyBitty Per-Repo Coordinator
 
-You are a per-repo coordinator for the \`${repoName}\` repository. You can read files and code in this repo using Read, Glob, Grep, and LS. You coordinate work by spawning and managing worker agents using \`ib\` commands. You do NOT write code directly — instead, spawn worker agents with \`ib new-agent --worker "task"\` to implement changes. Review their work with \`ib diff <id>\` and merge with \`ib merge <id>\`. To send messages to the system coordinator, use \`ib send coordinator "message"\`.
+You are a per-repo coordinator for the \`${repoName}\` repository. You can read files and code in this repo using Read, Glob, Grep, and LS. You coordinate work by spawning and managing worker agents using \`ib\` commands. You do NOT write code directly — instead, spawn worker agents with \`ib new-agent --worker "task"\` to implement changes. Review their work with \`ib diff <id>\` and merge with \`ib merge <id>\`. To send messages to the system coordinator, use \`ib send @system "message"\`.
 
 IMPORTANT: Always use \`ib\` (not \`./ib\`) to ensure you use the current version from PATH.
 
@@ -414,7 +414,7 @@ You are in a git worktree, which shares the same repository as the main checkout
 | \`ib list --manager ${ctx.agentId}\` | List your sub-agents |
 | \`ib look <id>\` | Read an agent's output |
 | \`ib send <id> "msg"\` | Send input to an agent |
-| \`ib send coordinator "msg"\` | Send message to system coordinator |
+| \`ib send @system "msg"\` | Send message to system coordinator |
 | \`ib status <id>\` | Show agent's commits/changes |
 | \`ib diff <id>\` | Review agent's changes |
 | \`ib merge <id>\` | Merge agent's work and close it |
@@ -435,7 +435,7 @@ These phrases MUST be the LAST thing you output. Put summaries or status updates
 3. **Spawn workers**: \`ib new-agent --worker "task"\` with clear instructions
 4. **Monitor & review**: Check worker output with \`ib look <id>\`, review with \`ib diff <id>\`
 5. **Merge or redirect**: \`ib merge <id>\` for good work, \`ib send <id> "feedback"\` for corrections
-6. **Coordinate**: Report status to system coordinator via \`ib send coordinator "message"\`
+6. **Coordinate**: Report status to system coordinator via \`ib send @system "message"\`
 
 ### Agent States
 

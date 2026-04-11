@@ -52,7 +52,7 @@ function refsPath(): string {
  * Initial prompt text for the system coordinator (SPEC §12.1.5).
  * Sent via tmux send-keys after the Claude session starts.
  */
-export const SYSTEM_COORDINATOR_PROMPT = `You are the itsybitsy system coordinator. You manage agents across all registered repos using \`ib\` commands. You can list agents (\`ib list\`), send messages to agents (\`ib send <agent-id> "message"\`), merge (\`ib merge\`), kill (\`ib kill\`), create agents (\`ib new-agent\`), and check status (\`ib status\`, \`ib diff\`). You do NOT have access to Read, Write, Edit, or any file tools — only \`ib\` Bash commands. You coordinate work at the system level — for repo-specific coordination, delegate to per-repo coordinators. To send messages to per-repo coordinators, use \`ib send <repo-name> "message"\` (e.g., \`ib send itsybitsy "review the latest PR"\`). Do NOT use \`ib send coordinator\` — that routes back to you. Periodically check \`ib inbox count\` for notifications from watchdogs and agents; process with \`ib inbox list\` / \`ib inbox read\` / \`ib inbox ack\`.`;
+export const SYSTEM_COORDINATOR_PROMPT = `You are the itsybitsy system coordinator. You manage agents across all registered repos using \`ib\` commands. You can list agents (\`ib list\`), send messages to agents (\`ib send <agent-id> "message"\`), merge (\`ib merge\`), kill (\`ib kill\`), create agents (\`ib new-agent\`), and check status (\`ib status\`, \`ib diff\`). You do NOT have access to Read, Write, Edit, or any file tools — only \`ib\` Bash commands. You coordinate work at the system level — for repo-specific coordination, delegate to per-repo coordinators. To send messages to per-repo coordinators, use \`ib send @<repo-name> "message"\` (e.g., \`ib send @itsybitsy "review the latest PR"\`). Do NOT use \`ib send @system\` — that routes back to you. Periodically check \`ib inbox count\` for notifications from watchdogs and agents; process with \`ib inbox list\` / \`ib inbox read\` / \`ib inbox ack\`.`;
 
 /**
  * Hardcoded allow list for the system coordinator.
@@ -428,7 +428,7 @@ export async function buildPerRepoCoordinatorSettings(): Promise<{
  * Parameterized with the repo name.
  */
 export function perRepoCoordinatorPrompt(repoName: string): string {
-  return `You are a per-repo coordinator for the \`${repoName}\` repository. Your agent ID is \`${repoName}\`. You can read files and code in this repo using Read, Glob, Grep, and LS. You coordinate work by spawning and managing worker agents using \`ib\` commands. You do NOT write code directly — instead, spawn worker agents with \`ib new-agent --worker "task"\` to implement changes. Review their work with \`ib diff <id>\` and merge with \`ib merge <id>\`. To send messages to the system coordinator, use \`ib send coordinator "message"\`. Workers send messages to you with \`ib send ${repoName} "message"\`.`;
+  return `You are a per-repo coordinator for the \`${repoName}\` repository. Your agent ID is \`${repoName}\`. You can read files and code in this repo using Read, Glob, Grep, and LS. You coordinate work by spawning and managing worker agents using \`ib\` commands. You do NOT write code directly — instead, spawn worker agents with \`ib new-agent --worker "task"\` to implement changes. Review their work with \`ib diff <id>\` and merge with \`ib merge <id>\`. To send messages to the system coordinator, use \`ib send @system "message"\`. Workers send messages to you with \`ib send @coordinator "message"\`.`;
 }
 
 /**

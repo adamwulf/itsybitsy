@@ -1,747 +1,527 @@
-import { test, expect, describe, beforeEach, afterEach, mock } from "bun:test";
+import { test, expect, describe, beforeEach, jest, mock } from "bun:test";
 import type { Agent } from "./agents";
 import { makeAgent } from "./test-utils";
 import type { RepoEntry } from "./registry";
-import { repoDisplayName } from "./registry";
 
-// --- Mock agents and coordinator modules BEFORE importing resolveTarget ---
-const mockReadAllAgents = mock<() => Promise<{ agents: Agent[]; errors: any[] }>>(async () => ({
-  agents: [],
-  errors: [],
-}));
-
-const mockCheckCoordinatorExists = mock<
-  (repoPath: string) => Promise<{ exists: boolean; isCoordinator?: boolean; agentId?: string }>
->(async () => ({ exists: false }));
+// --- Mock agents module ---
+const mockReadAllAgents = jest.fn<() => Promise<{ agents: Agent[]; errors: any[] }>>();
 
 mock.module("./agents", () => ({
   readAllAgents: mockReadAllAgents,
-  // Re-export other functions so they're available after mock
-  detectAgentStates: async () => {},
-  buildAgentTree: (agents: Agent[]) => agents,
-  flattenAgentTree: (agents: Agent[]) => agents.map((a) => ({ kind: "agent" as const, agent: a, depth: 0, connector: "" })),
+  detectAgentStates: jest.fn(),
+  buildAgentTree: jest.fn(),
+  flattenAgentTree: jest.fn(),
+  readPendingQuestions: jest.fn(),
+  computeAge: () => "1m",
   isCompacting: () => false,
   isRateLimited: () => false,
-  getAgentType: () => "manager",
   isWorkerLike: () => false,
+  getAgentType: () => null,
 }));
+
+// --- Mock coordinator module ---
+const mockCheckCoordinatorExists = jest.fn<(repoPath: string) => Promise<any>>();
 
 mock.module("./coordinator", () => ({
   checkCoordinatorExists: mockCheckCoordinatorExists,
+  coordinatorSpawnCtx: { runner: null },
 }));
 
 // Import after mocking
 const { resolveTarget, matchAgentById } = await import("./index");
 
-describe("resolveTarget", () => {
-  let repos: RepoEntry[];
+// --- Test helpers ---
+const repoA: RepoEntry = { path: "/home/user/projects/app", name: "app" };
+const repoB: RepoEntry = { path: "/home/user/projects/lib", name: "lib", nickname: "libs" };
+const repoC: RepoEntry = { path: "/home/user/projects/api", name: "api", nickname: "backend" };
+const repos = [repoA, repoB, repoC];
+
+function agentIn(id: string, repo: RepoEntry): Agent {
+  return makeAgent({ id, repoPath: repo.path, repoName: repo.nickname ?? repo.name });
+}
+
+function setupAgents(...agents: Agent[]) {
+  mockReadAllAgents.mockResolvedValue({ agents, errors: [] });
+}
+
+// Capture console.error output
+let errorOutput: string[];
+const origError = console.error;
+beforeEach(() => {
+  errorOutput = [];
+  console.error = (...args: any[]) => { errorOutput.push(args.join(" ")); };
+  mockReadAllAgents.mockReset();
+  mockCheckCoordinatorExists.mockReset();
+});
+
+// Restore after all tests (best effort)
+process.on("exit", () => { console.error = origError; });
+
+// ============================================================
+// Group A: @system addressing
+// ============================================================
+describe("Group A: @system addressing", () => {
+  test("A1: @system returns system coordinator", async () => {
+    const result = await resolveTarget("@system", repos);
+    expect(result).toEqual({ agent: null, isSystemCoordinator: true });
+  });
+
+  test("A2: @system does NOT call readAllAgents (fast path)", async () => {
+    await resolveTarget("@system", repos);
+    expect(mockReadAllAgents).not.toHaveBeenCalled();
+  });
+
+  test("A3: @System (wrong case) is not treated as @system", async () => {
+    setupAgents();
+    const result = await resolveTarget("@System", repos, "/somewhere");
+    expect(result.isSystemCoordinator).toBe(false);
+    expect(result.agent).toBeNull();
+    expect(errorOutput.some((e) => e.includes("repo not found: System"))).toBe(true);
+  });
+});
+
+// ============================================================
+// Group B: @coordinator with CWD contexts
+// ============================================================
+describe("Group B: @coordinator addressing", () => {
+  test("B1: @coordinator inside repo, coordinator exists", async () => {
+    const coordAgent = agentIn("coord-xyz", repoA);
+    setupAgents(coordAgent);
+    mockCheckCoordinatorExists.mockResolvedValue({ exists: true, isCoordinator: true, agentId: "coord-xyz" });
+    const result = await resolveTarget("@coordinator", repos, "/home/user/projects/app");
+    expect(result.agent?.id).toBe("coord-xyz");
+    expect(result.isSystemCoordinator).toBe(false);
+  });
+
+  test("B2: @coordinator inside repo, no coordinator", async () => {
+    mockCheckCoordinatorExists.mockResolvedValue({ exists: false, collision: false });
+    const result = await resolveTarget("@coordinator", repos, "/home/user/projects/app");
+    expect(result.agent).toBeNull();
+    expect(errorOutput.some((e) => e.includes("no coordinator found for repo app"))).toBe(true);
+  });
+
+  test("B3: @coordinator outside all repos", async () => {
+    const result = await resolveTarget("@coordinator", repos, "/home/other/place");
+    expect(result.agent).toBeNull();
+    expect(errorOutput.some((e) => e.includes("@coordinator requires running from within a repo"))).toBe(true);
+  });
+
+  test("B4: CWD exact match finds own repo", async () => {
+    const coordAgent = agentIn("coord-a", repoA);
+    setupAgents(coordAgent);
+    mockCheckCoordinatorExists.mockResolvedValue({ exists: true, isCoordinator: true, agentId: "coord-a" });
+    const result = await resolveTarget("@coordinator", repos, "/home/user/projects/app");
+    expect(result.agent?.id).toBe("coord-a");
+    expect(mockCheckCoordinatorExists).toHaveBeenCalledWith("/home/user/projects/app");
+  });
+
+  test("B5: CWD inside repo (subdirectory) finds own repo via prefix", async () => {
+    const coordAgent = agentIn("coord-a", repoA);
+    setupAgents(coordAgent);
+    mockCheckCoordinatorExists.mockResolvedValue({ exists: true, isCoordinator: true, agentId: "coord-a" });
+    const result = await resolveTarget("@coordinator", repos, "/home/user/projects/app/src/components");
+    expect(result.agent?.id).toBe("coord-a");
+  });
+
+  test("B6: CWD in worktree finds own repo", async () => {
+    const coordAgent = agentIn("coord-a", repoA);
+    setupAgents(coordAgent);
+    mockCheckCoordinatorExists.mockResolvedValue({ exists: true, isCoordinator: true, agentId: "coord-a" });
+    const result = await resolveTarget("@coordinator", repos, "/home/user/projects/app/.ittybitty/agents/agent-abc/repo");
+    expect(result.agent?.id).toBe("coord-a");
+  });
+
+  test("B7: CWD prefix collision - /app-data does NOT match /app", async () => {
+    setupAgents();
+    // /home/user/projects/app-data doesn't start with /home/user/projects/app/
+    const result = await resolveTarget("@coordinator", repos, "/home/user/projects/app-data");
+    expect(result.agent).toBeNull();
+    expect(errorOutput.some((e) => e.includes("@coordinator requires running from within a repo"))).toBe(true);
+  });
+});
+
+// ============================================================
+// Group C: @repo-name coordinator lookup
+// ============================================================
+describe("Group C: @repo-name coordinator lookup", () => {
+  test("C1: @app finds Repo A coordinator by basename", async () => {
+    const coordAgent = agentIn("coord-app", repoA);
+    setupAgents(coordAgent);
+    mockCheckCoordinatorExists.mockResolvedValue({ exists: true, isCoordinator: true, agentId: "coord-app" });
+    const result = await resolveTarget("@app", repos);
+    expect(result.agent?.id).toBe("coord-app");
+  });
+
+  test("C2: @libs finds Repo B coordinator by nickname", async () => {
+    const coordAgent = agentIn("coord-lib", repoB);
+    setupAgents(coordAgent);
+    mockCheckCoordinatorExists.mockResolvedValue({ exists: true, isCoordinator: true, agentId: "coord-lib" });
+    const result = await resolveTarget("@libs", repos);
+    expect(result.agent?.id).toBe("coord-lib");
+  });
+
+  test("C3: @lib fails because nickname 'libs' overrides basename 'lib'", async () => {
+    const result = await resolveTarget("@lib", repos);
+    expect(result.agent).toBeNull();
+    expect(errorOutput.some((e) => e.includes("repo not found: lib"))).toBe(true);
+  });
+
+  test("C4: @unknown fails with repo not found", async () => {
+    const result = await resolveTarget("@unknown", repos);
+    expect(result.agent).toBeNull();
+    expect(errorOutput.some((e) => e.includes("repo not found: unknown"))).toBe(true);
+  });
+
+  test("C5: @app but no coordinator exists", async () => {
+    mockCheckCoordinatorExists.mockResolvedValue({ exists: false, collision: false });
+    const result = await resolveTarget("@app", repos);
+    expect(result.agent).toBeNull();
+    expect(errorOutput.some((e) => e.includes("no coordinator found for repo app"))).toBe(true);
+  });
+});
+
+// ============================================================
+// Group D: @repo/agent-id scoped lookup
+// ============================================================
+describe("Group D: @repo/agent-id scoped lookup", () => {
+  const agent111 = agentIn("agent-111", repoA);
+  const agentAbc = agentIn("agent-abc", repoA);
+  const agent222 = agentIn("agent-222", repoB);
+  const agentAbd = agentIn("agent-abd", repoB);
 
   beforeEach(() => {
-    // Reset mocks before each test
-    mockReadAllAgents.mockClear();
-    mockCheckCoordinatorExists.mockClear();
+    setupAgents(agent111, agentAbc, agent222, agentAbd);
+  });
 
-    // Setup default repos
-    repos = [
-      { path: "/home/user/projects/app", name: "app" },
-      { path: "/home/user/projects/lib", name: "lib", nickname: "libs" },
-      { path: "/home/user/projects/api", name: "api", nickname: "backend" },
+  test("D1: @app/agent-111 exact match in Repo A", async () => {
+    const result = await resolveTarget("@app/agent-111", repos);
+    expect(result.agent?.id).toBe("agent-111");
+  });
+
+  test("D2: @app/agent-1 prefix match (unique in Repo A)", async () => {
+    const result = await resolveTarget("@app/agent-1", repos);
+    expect(result.agent?.id).toBe("agent-111");
+  });
+
+  test("D3: @app/agent-222 not in Repo A (only in Repo B)", async () => {
+    const result = await resolveTarget("@app/agent-222", repos);
+    expect(result.agent).toBeNull();
+    expect(errorOutput.some((e) => e.includes("Agent not found: agent-222 in repo app"))).toBe(true);
+  });
+
+  test("D4: @unknown/agent-111 fails with repo not found", async () => {
+    const result = await resolveTarget("@unknown/agent-111", repos);
+    expect(result.agent).toBeNull();
+    expect(errorOutput.some((e) => e.includes("repo not found: unknown"))).toBe(true);
+  });
+
+  test("D5: @libs/agent-111 cross-repo forbidden (agent-111 is in app, not libs)", async () => {
+    const result = await resolveTarget("@libs/agent-111", repos);
+    expect(result.agent).toBeNull();
+    expect(errorOutput.some((e) => e.includes("Agent not found: agent-111 in repo libs"))).toBe(true);
+  });
+
+  test("D6: @app/agent-a prefix ambiguous with agent-abc only (agent-abd is in Repo B)", async () => {
+    // Only agent-abc is in repoA, agent-abd is in repoB, so prefix "agent-a" matches only 1 in repoA
+    const result = await resolveTarget("@app/agent-a", repos);
+    expect(result.agent?.id).toBe("agent-abc");
+  });
+
+  test("D7: @app/agent-a ambiguous when Repo A has both agent-abc and agent-abd", async () => {
+    const abdInA = agentIn("agent-abd", repoA);
+    setupAgents(agent111, agentAbc, abdInA, agent222);
+    const result = await resolveTarget("@app/agent-a", repos);
+    expect(result.agent).toBeNull();
+    expect(errorOutput.some((e) => e.includes('Ambiguous ID "agent-a" in repo app matches: agent-abc, agent-abd'))).toBe(true);
+  });
+});
+
+// ============================================================
+// Group E: Bare agent-id with same-repo-first logic
+// ============================================================
+describe("Group E: Bare agent-id (same-repo-first)", () => {
+  const agent111 = agentIn("agent-111", repoA);
+  const agentAbc = agentIn("agent-abc", repoA);
+  const worker001 = agentIn("worker-001", repoA);
+  const agent222 = agentIn("agent-222", repoB);
+  const agentAbd = agentIn("agent-abd", repoB);
+  const worker002 = agentIn("worker-002", repoB);
+
+  beforeEach(() => {
+    setupAgents(agent111, agentAbc, worker001, agent222, agentAbd, worker002);
+  });
+
+  test("E1: exact match in same repo", async () => {
+    const result = await resolveTarget("agent-111", repos, "/home/user/projects/app");
+    expect(result.agent?.id).toBe("agent-111");
+  });
+
+  test("E2: same-repo-first - agent-abc in alpha AND agent-abc prefix in beta, alpha wins", async () => {
+    // agent-abc is in repoA; from repoA CWD, it should find same-repo match first
+    const result = await resolveTarget("agent-abc", repos, "/home/user/projects/app");
+    expect(result.agent?.id).toBe("agent-abc");
+    expect(result.agent?.repoPath).toBe(repoA.path);
+  });
+
+  test("E3: prefix match unique in same repo", async () => {
+    const result = await resolveTarget("agent-1", repos, "/home/user/projects/app");
+    expect(result.agent?.id).toBe("agent-111");
+  });
+
+  test("E4: prefix ambiguous in same repo does NOT fall back to global", async () => {
+    // "agent-" matches agent-111 and agent-abc in repoA (2 matches)
+    const result = await resolveTarget("agent-", repos, "/home/user/projects/app");
+    expect(result.agent).toBeNull();
+    expect(errorOutput.some((e) => e.includes('Ambiguous ID "agent-" in app matches: agent-111, agent-abc'))).toBe(true);
+  });
+
+  test("E5: not in same repo, falls back to global", async () => {
+    const result = await resolveTarget("agent-222", repos, "/home/user/projects/app");
+    expect(result.agent?.id).toBe("agent-222");
+  });
+
+  test("E6: not in same repo, prefix match in global", async () => {
+    const result = await resolveTarget("agent-2", repos, "/home/user/projects/app");
+    expect(result.agent?.id).toBe("agent-222");
+  });
+
+  test("E7: global prefix ambiguous", async () => {
+    // Add agent-2yy to repoB so "agent-2" matches 2 globally
+    const agent2yy = agentIn("agent-2yy", repoB);
+    setupAgents(agent111, agentAbc, worker001, agent222, agentAbd, worker002, agent2yy);
+    const result = await resolveTarget("agent-2", repos, "/home/user/projects/app");
+    expect(result.agent).toBeNull();
+    expect(errorOutput.some((e) => e.includes('Ambiguous ID "agent-2" matches:'))).toBe(true);
+  });
+
+  test("E8: same-repo takes precedence when agent-id exists in both repos", async () => {
+    // Put agent-xyz in both repos; from repoA, same-repo should win
+    const xyzA = agentIn("agent-xyz", repoA);
+    const xyzB = agentIn("agent-xyz", repoB);
+    setupAgents(xyzA, xyzB);
+    const result = await resolveTarget("agent-xyz", repos, "/home/user/projects/app");
+    expect(result.agent?.id).toBe("agent-xyz");
+    expect(result.agent?.repoPath).toBe(repoA.path);
+  });
+
+  test("E9: outside all repos, global search finds agent", async () => {
+    const result = await resolveTarget("agent-111", repos, "/home/other");
+    expect(result.agent?.id).toBe("agent-111");
+  });
+
+  test("E10: outside all repos, not found globally", async () => {
+    const result = await resolveTarget("nonexistent-id", repos, "/home/other");
+    expect(result.agent).toBeNull();
+    expect(errorOutput.some((e) => e.includes("Agent not found: nonexistent-id"))).toBe(true);
+  });
+
+  test("E11: worker-001 found in same repo via prefix", async () => {
+    const result = await resolveTarget("worker-0", repos, "/home/user/projects/app");
+    expect(result.agent?.id).toBe("worker-001");
+  });
+});
+
+// ============================================================
+// Group F: matchAgentById unit tests
+// ============================================================
+describe("Group F: matchAgentById unit tests", () => {
+  const agents = [
+    makeAgent({ id: "agent-111" }),
+    makeAgent({ id: "agent-abc" }),
+    makeAgent({ id: "worker-001" }),
+  ];
+
+  test("F1: exact match returns agent", () => {
+    const result = matchAgentById("agent-111", agents);
+    expect(result.match?.id).toBe("agent-111");
+    expect(result.ambiguous).toEqual([]);
+  });
+
+  test("F2: prefix match (unique) returns agent", () => {
+    const result = matchAgentById("agent-1", agents);
+    expect(result.match?.id).toBe("agent-111");
+    expect(result.ambiguous).toEqual([]);
+  });
+
+  test("F3: prefix match ambiguous returns null + ids", () => {
+    const result = matchAgentById("agent-", agents);
+    expect(result.match).toBeNull();
+    expect(result.ambiguous).toEqual(["agent-111", "agent-abc"]);
+  });
+
+  test("F4: no match returns null + empty ambiguous", () => {
+    const result = matchAgentById("nonexistent", agents);
+    expect(result.match).toBeNull();
+    expect(result.ambiguous).toEqual([]);
+  });
+
+  test("F5: exact match takes precedence over prefix matches", () => {
+    const agentsWithOverlap = [
+      makeAgent({ id: "agent-1" }),
+      makeAgent({ id: "agent-11" }),
+      makeAgent({ id: "agent-111" }),
     ];
+    const result = matchAgentById("agent-1", agentsWithOverlap);
+    expect(result.match?.id).toBe("agent-1");
+    expect(result.ambiguous).toEqual([]);
   });
 
-  describe("Group A: @system Addressing", () => {
-    test("@system-exact returns system coordinator without calling readAllAgents", async () => {
-      mockReadAllAgents.mockResolvedValueOnce({ agents: [], errors: [] });
-
-      const result = await resolveTarget("@system", repos);
-
-      expect(result.isSystemCoordinator).toBe(true);
-      expect(result.agent).toBe(null);
-      // Verify readAllAgents was NOT called
-      expect(mockReadAllAgents.mock.calls.length).toBe(0);
-    });
-
-    test("@system-case-sensitive rejects uppercase variants", async () => {
-      mockReadAllAgents.mockResolvedValueOnce({ agents: [], errors: [] });
-
-      const result = await resolveTarget("@System", repos);
-
-      expect(result.agent).toBe(null);
-      expect(result.isSystemCoordinator).toBe(false);
-      // Should fall through to bare search and find nothing
-    });
-
-    test("@system-with-args rejects @system with slash", async () => {
-      mockReadAllAgents.mockResolvedValueOnce({ agents: [], errors: [] });
-
-      const result = await resolveTarget("@system/something", repos);
-
-      expect(result.agent).toBe(null);
-      expect(result.isSystemCoordinator).toBe(false);
-    });
+  test("F6: empty string prefix matches all agents (ambiguous)", () => {
+    const result = matchAgentById("", agents);
+    expect(result.match).toBeNull();
+    expect(result.ambiguous).toEqual(["agent-111", "agent-abc", "worker-001"]);
   });
 
-  describe("Group B: @coordinator Addressing (own repo detection)", () => {
-    test("@coordinator-found inside repo detects coordinator agent", async () => {
-      const coordAgent = makeAgent({ id: "coord-xyz", repoPath: "/home/user/projects/app" });
-      mockCheckCoordinatorExists.mockResolvedValueOnce({
-        exists: true,
-        isCoordinator: true,
-        agentId: "coord-xyz",
-      });
-      mockReadAllAgents.mockResolvedValueOnce({ agents: [coordAgent], errors: [] });
-
-      const result = await resolveTarget("@coordinator", repos, "/home/user/projects/app");
-
-      expect(result.agent?.id).toBe("coord-xyz");
-      expect(result.isSystemCoordinator).toBe(false);
-    });
-
-    test("@coordinator-not-found when no coordinator in repo", async () => {
-      mockCheckCoordinatorExists.mockResolvedValueOnce({ exists: false });
-
-      const result = await resolveTarget("@coordinator", repos, "/home/user/projects/app");
-
-      expect(result.agent).toBe(null);
-      expect(result.isSystemCoordinator).toBe(false);
-    });
-
-    test("@coordinator-outside-repo errors when CWD is outside all repos", async () => {
-      const result = await resolveTarget("@coordinator", repos, "/home/other/place");
-
-      expect(result.agent).toBe(null);
-      expect(result.isSystemCoordinator).toBe(false);
-    });
-
-    test("@coordinator-cwd-inside-repo detects via prefix match", async () => {
-      const coordAgent = makeAgent({ id: "coord-xyz", repoPath: "/home/user/projects/app" });
-      mockReadAllAgents.mockResolvedValueOnce({ agents: [coordAgent], errors: [] });
-      mockCheckCoordinatorExists.mockResolvedValueOnce({
-        exists: true,
-        isCoordinator: true,
-        agentId: "coord-xyz",
-      });
-
-      const result = await resolveTarget("@coordinator", repos, "/home/user/projects/app/src/components");
-
-      expect(result.agent?.id).toBe("coord-xyz");
-      expect(result.isSystemCoordinator).toBe(false);
-    });
-
-    test("@coordinator-cwd-worktree-basic detects from worktree path", async () => {
-      const coordAgent = makeAgent({ id: "coord-abc", repoPath: "/home/user/projects/app" });
-      mockReadAllAgents.mockResolvedValueOnce({ agents: [coordAgent], errors: [] });
-      mockCheckCoordinatorExists.mockResolvedValueOnce({
-        exists: true,
-        isCoordinator: true,
-        agentId: "coord-abc",
-      });
-
-      const result = await resolveTarget(
-        "@coordinator",
-        repos,
-        "/home/user/projects/app/.ittybitty/agents/agent-xyz/repo",
-      );
-
-      expect(result.agent?.id).toBe("coord-abc");
-      expect(result.isSystemCoordinator).toBe(false);
-    });
-
-    test("@coordinator-cwd-worktree-nested handles agent-id with hyphens", async () => {
-      const coordAgent = makeAgent({ id: "coord-nested", repoPath: "/home/user/projects/app" });
-      mockReadAllAgents.mockResolvedValueOnce({ agents: [coordAgent], errors: [] });
-      mockCheckCoordinatorExists.mockResolvedValueOnce({
-        exists: true,
-        isCoordinator: true,
-        agentId: "coord-nested",
-      });
-
-      const result = await resolveTarget(
-        "@coordinator",
-        repos,
-        "/home/user/projects/app/.ittybitty/agents/agent-with-hyphens-123/repo",
-      );
-
-      expect(result.agent?.id).toBe("coord-nested");
-      expect(result.isSystemCoordinator).toBe(false);
-    });
-
-    test("@coordinator-cwd-worktree-not-at-end does NOT match if not ending with /repo", async () => {
-      const result = await resolveTarget(
-        "@coordinator",
-        repos,
-        "/home/user/projects/app/.ittybitty/agents/agent-abc/repo/src",
-      );
-
-      expect(result.agent).toBe(null);
-      expect(result.isSystemCoordinator).toBe(false);
-    });
+  test("F7: case-sensitive matching", () => {
+    const result = matchAgentById("Agent-111", agents);
+    expect(result.match).toBeNull();
+    expect(result.ambiguous).toEqual([]);
   });
 
-  describe("Group C: @<repo-name> Addressing (repo coordinator lookup)", () => {
-    test("@repo-by-name finds coordinator for repo with matching name", async () => {
-      const coordAgent = makeAgent({ id: "coord-app", repoPath: "/home/user/projects/app" });
-      mockReadAllAgents.mockResolvedValueOnce({ agents: [coordAgent], errors: [] });
-      mockCheckCoordinatorExists.mockResolvedValueOnce({
-        exists: true,
-        isCoordinator: true,
-        agentId: "coord-app",
-      });
+  test("F8: single agent in list, prefix match", () => {
+    const single = [makeAgent({ id: "agent-foo-bar" })];
+    const result = matchAgentById("agent-foo", single);
+    expect(result.match?.id).toBe("agent-foo-bar");
+    expect(result.ambiguous).toEqual([]);
+  });
+});
 
-      const result = await resolveTarget("@app", repos);
+// ============================================================
+// Group G: findOwnRepo edge cases via CWD param
+// ============================================================
+describe("Group G: findOwnRepo edge cases", () => {
+  // We test findOwnRepo indirectly through resolveTarget's bare lookup behavior
+  const agentA = agentIn("agent-aaa", repoA);
 
-      expect(result.agent?.id).toBe("coord-app");
-      expect(result.isSystemCoordinator).toBe(false);
-    });
-
-    test("@repo-by-nickname finds coordinator via nickname override", async () => {
-      const coordAgent = makeAgent({ id: "coord-libs", repoPath: "/home/user/projects/lib" });
-      mockReadAllAgents.mockResolvedValueOnce({ agents: [coordAgent], errors: [] });
-      mockCheckCoordinatorExists.mockResolvedValueOnce({
-        exists: true,
-        isCoordinator: true,
-        agentId: "coord-libs",
-      });
-
-      const result = await resolveTarget("@libs", repos);
-
-      expect(result.agent?.id).toBe("coord-libs");
-      expect(result.isSystemCoordinator).toBe(false);
-    });
-
-    test("@repo-by-nickname-not-basename rejects when nickname exists", async () => {
-      // Repo B has nickname "libs", so "lib" should NOT match
-      const result = await resolveTarget("@lib", repos);
-
-      expect(result.agent).toBe(null);
-      expect(result.isSystemCoordinator).toBe(false);
-    });
-
-    test("@repo-nonexistent errors for unknown repo name", async () => {
-      const result = await resolveTarget("@unknown", repos);
-
-      expect(result.agent).toBe(null);
-      expect(result.isSystemCoordinator).toBe(false);
-    });
-
-    test("@repo-case-sensitive rejects mismatched case", async () => {
-      const result = await resolveTarget("@App", repos);
-
-      expect(result.agent).toBe(null);
-      expect(result.isSystemCoordinator).toBe(false);
-    });
-
-    test("@repo-coordinator-not-exists errors when coordinator missing", async () => {
-      mockCheckCoordinatorExists.mockResolvedValueOnce({ exists: false });
-
-      const result = await resolveTarget("@app", repos);
-
-      expect(result.agent).toBe(null);
-      expect(result.isSystemCoordinator).toBe(false);
-    });
+  beforeEach(() => {
+    setupAgents(agentA);
   });
 
-  describe("Group D: @<repo-name>/<agent-id> Addressing", () => {
-    test("@repo/agent-exact matches agent by exact ID", async () => {
-      const agent111 = makeAgent({ id: "agent-111", repoPath: "/home/user/projects/app" });
-      mockReadAllAgents.mockResolvedValueOnce({ agents: [agent111], errors: [] });
-
-      const result = await resolveTarget("@app/agent-111", repos);
-
-      expect(result.agent?.id).toBe("agent-111");
-      expect(result.isSystemCoordinator).toBe(false);
-    });
-
-    test("@repo/agent-prefix-unique matches via prefix when unique in repo", async () => {
-      const agent111 = makeAgent({ id: "agent-111", repoPath: "/home/user/projects/app" });
-      mockReadAllAgents.mockResolvedValueOnce({ agents: [agent111], errors: [] });
-
-      const result = await resolveTarget("@app/agent-1", repos);
-
-      expect(result.agent?.id).toBe("agent-111");
-      expect(result.isSystemCoordinator).toBe(false);
-    });
-
-    test("@repo/agent-prefix-ambiguous in repo errors with matches", async () => {
-      const agentAbc = makeAgent({ id: "agent-abc", repoPath: "/home/user/projects/app" });
-      const agentAbd = makeAgent({ id: "agent-abd", repoPath: "/home/user/projects/app" });
-      mockReadAllAgents.mockResolvedValueOnce({ agents: [agentAbc, agentAbd], errors: [] });
-
-      const result = await resolveTarget("@app/agent-a", repos);
-
-      expect(result.agent).toBe(null);
-      expect(result.isSystemCoordinator).toBe(false);
-    });
-
-    test("@repo/agent-not-in-repo errors when agent not found in scoped repo", async () => {
-      const agent222 = makeAgent({ id: "agent-222", repoPath: "/home/user/projects/lib" });
-      mockReadAllAgents.mockResolvedValueOnce({ agents: [agent222], errors: [] });
-
-      const result = await resolveTarget("@app/agent-222", repos);
-
-      expect(result.agent).toBe(null);
-      expect(result.isSystemCoordinator).toBe(false);
-    });
-
-    test("@repo/repo-nonexistent errors when repo not found", async () => {
-      const result = await resolveTarget("@unknown/agent-111", repos);
-
-      expect(result.agent).toBe(null);
-      expect(result.isSystemCoordinator).toBe(false);
-    });
-
-    test("@repo/agent-cross-repo-forbidden blocks agent from different repo", async () => {
-      const agent111 = makeAgent({ id: "agent-111", repoPath: "/home/user/projects/app" });
-      mockReadAllAgents.mockResolvedValueOnce({ agents: [agent111], errors: [] });
-
-      const result = await resolveTarget("@lib/agent-111", repos);
-
-      expect(result.agent).toBe(null);
-      expect(result.isSystemCoordinator).toBe(false);
-    });
-
-    test("@repo/agent-empty-id matches all agents (ambiguous)", async () => {
-      const agentAbc = makeAgent({ id: "agent-abc", repoPath: "/home/user/projects/app" });
-      const agentDef = makeAgent({ id: "agent-def", repoPath: "/home/user/projects/app" });
-      mockReadAllAgents.mockResolvedValueOnce({ agents: [agentAbc, agentDef], errors: [] });
-
-      const result = await resolveTarget("@app/", repos);
-
-      expect(result.agent).toBe(null);
-      expect(result.isSystemCoordinator).toBe(false);
-    });
+  test("G1: CWD exact match", async () => {
+    const result = await resolveTarget("agent-aaa", repos, "/home/user/projects/app");
+    expect(result.agent?.id).toBe("agent-aaa");
   });
 
-  describe("Group E: Bare Agent-ID Addressing (same-repo first, then global fallback)", () => {
-    test("bare-exact-same-repo returns exact match in same repo without global fallback", async () => {
-      const agent111 = makeAgent({ id: "agent-111", repoPath: "/home/user/projects/app" });
-      mockReadAllAgents.mockResolvedValueOnce({ agents: [agent111], errors: [] });
-
-      const result = await resolveTarget("agent-111", repos, "/home/user/projects/app");
-
-      expect(result.agent?.id).toBe("agent-111");
-      expect(result.isSystemCoordinator).toBe(false);
-    });
-
-    test("bare-prefix-same-repo-unique returns prefix match in same repo", async () => {
-      const agent111 = makeAgent({ id: "agent-111", repoPath: "/home/user/projects/app" });
-      mockReadAllAgents.mockResolvedValueOnce({ agents: [agent111], errors: [] });
-
-      const result = await resolveTarget("agent-1", repos, "/home/user/projects/app");
-
-      expect(result.agent?.id).toBe("agent-111");
-      expect(result.isSystemCoordinator).toBe(false);
-    });
-
-    test("bare-prefix-same-repo-single-match returns single prefix match", async () => {
-      const agentAbc = makeAgent({ id: "agent-abc", repoPath: "/home/user/projects/app" });
-      mockReadAllAgents.mockResolvedValueOnce({ agents: [agentAbc], errors: [] });
-
-      const result = await resolveTarget("agent-a", repos, "/home/user/projects/app");
-
-      expect(result.agent?.id).toBe("agent-abc");
-      expect(result.isSystemCoordinator).toBe(false);
-    });
-
-    test("bare-prefix-same-repo-ambiguous-2-matches errors and does not fallback", async () => {
-      const agentAbc = makeAgent({ id: "agent-abc", repoPath: "/home/user/projects/app" });
-      const agentAbd = makeAgent({ id: "agent-abd", repoPath: "/home/user/projects/app" });
-      mockReadAllAgents.mockResolvedValueOnce({ agents: [agentAbc, agentAbd], errors: [] });
-
-      const result = await resolveTarget("agent-a", repos, "/home/user/projects/app");
-
-      expect(result.agent).toBe(null);
-      expect(result.isSystemCoordinator).toBe(false);
-    });
-
-    test("bare-not-in-same-repo-found-global falls back when not in same repo", async () => {
-      const agent222 = makeAgent({ id: "agent-222", repoPath: "/home/user/projects/lib" });
-      mockReadAllAgents.mockResolvedValueOnce({ agents: [agent222], errors: [] });
-
-      const result = await resolveTarget("agent-222", repos, "/home/user/projects/app");
-
-      expect(result.agent?.id).toBe("agent-222");
-      expect(result.isSystemCoordinator).toBe(false);
-    });
-
-    test("bare-not-in-same-repo-prefix-global falls back with prefix match", async () => {
-      const agent222 = makeAgent({ id: "agent-222", repoPath: "/home/user/projects/lib" });
-      mockReadAllAgents.mockResolvedValueOnce({ agents: [agent222], errors: [] });
-
-      const result = await resolveTarget("agent-2", repos, "/home/user/projects/app");
-
-      expect(result.agent?.id).toBe("agent-222");
-      expect(result.isSystemCoordinator).toBe(false);
-    });
-
-    test("bare-same-repo-takes-precedence-over-global when exact match in both repos", async () => {
-      const agentXyzApp = makeAgent({ id: "agent-xyz", repoPath: "/home/user/projects/app" });
-      const agentXyzLib = makeAgent({ id: "agent-xyz", repoPath: "/home/user/projects/lib" });
-      mockReadAllAgents.mockResolvedValueOnce({ agents: [agentXyzApp, agentXyzLib], errors: [] });
-
-      const result = await resolveTarget("agent-xyz", repos, "/home/user/projects/app");
-
-      expect(result.agent?.repoPath).toBe("/home/user/projects/app");
-      expect(result.isSystemCoordinator).toBe(false);
-    });
-
-    test("bare-global-ambiguous-cross-repo errors when multiple matches globally", async () => {
-      const agent2xxA = makeAgent({ id: "agent-222", repoPath: "/home/user/projects/app" });
-      const agent2xxB = makeAgent({ id: "agent-2yy", repoPath: "/home/user/projects/lib" });
-      mockReadAllAgents.mockResolvedValueOnce({ agents: [agent2xxA, agent2xxB], errors: [] });
-
-      const result = await resolveTarget("agent-2", repos, "/home/user/projects/api");
-
-      expect(result.agent).toBe(null);
-      expect(result.isSystemCoordinator).toBe(false);
-    });
-
-    test("bare-outside-all-repos searches globally without same-repo filter", async () => {
-      const agent111 = makeAgent({ id: "agent-111", repoPath: "/home/user/projects/app" });
-      mockReadAllAgents.mockResolvedValueOnce({ agents: [agent111], errors: [] });
-
-      const result = await resolveTarget("agent-111", repos, "/home/other");
-
-      expect(result.agent?.id).toBe("agent-111");
-      expect(result.isSystemCoordinator).toBe(false);
-    });
-
-    test("bare-not-found-no-repo errors when not found globally outside all repos", async () => {
-      mockReadAllAgents.mockResolvedValueOnce({ agents: [], errors: [] });
-
-      const result = await resolveTarget("nonexistent-id", repos, "/home/other");
-
-      expect(result.agent).toBe(null);
-      expect(result.isSystemCoordinator).toBe(false);
-    });
-
-    test("bare-empty-string matches all agents in same repo (ambiguous)", async () => {
-      const agentA = makeAgent({ id: "agent-a", repoPath: "/home/user/projects/app" });
-      const agentB = makeAgent({ id: "agent-b", repoPath: "/home/user/projects/app" });
-      mockReadAllAgents.mockResolvedValueOnce({ agents: [agentA, agentB], errors: [] });
-
-      const result = await resolveTarget("", repos, "/home/user/projects/app");
-
-      expect(result.agent).toBe(null);
-      expect(result.isSystemCoordinator).toBe(false);
-    });
+  test("G2: CWD inside repo subdirectory (prefix match)", async () => {
+    const result = await resolveTarget("agent-aaa", repos, "/home/user/projects/app/src/deep/nested");
+    expect(result.agent?.id).toBe("agent-aaa");
   });
 
-  describe("Group F: matchAgentById Unit Tests", () => {
-    test("exact-match returns agent", () => {
-      const agent = makeAgent({ id: "agent-111" });
-      const result = matchAgentById("agent-111", [agent]);
-
-      expect(result.match?.id).toBe("agent-111");
-      expect(result.ambiguous).toEqual([]);
-    });
-
-    test("prefix-single-match returns agent", () => {
-      const agent = makeAgent({ id: "agent-111" });
-      const result = matchAgentById("agent-1", [agent]);
-
-      expect(result.match?.id).toBe("agent-111");
-      expect(result.ambiguous).toEqual([]);
-    });
-
-    test("prefix-multiple-matches returns ambiguous list", () => {
-      const agentA = makeAgent({ id: "agent-abc" });
-      const agentB = makeAgent({ id: "agent-abd" });
-      const result = matchAgentById("agent-a", [agentA, agentB]);
-
-      expect(result.match).toBe(null);
-      expect(result.ambiguous).toEqual(["agent-abc", "agent-abd"]);
-    });
-
-    test("no-match returns null", () => {
-      const agent = makeAgent({ id: "agent-111" });
-      const result = matchAgentById("worker-", [agent]);
-
-      expect(result.match).toBe(null);
-      expect(result.ambiguous).toEqual([]);
-    });
-
-    test("case-sensitive-no-match when case differs", () => {
-      const agent = makeAgent({ id: "agent-ABC" });
-      const result = matchAgentById("Agent-", [agent]);
-
-      expect(result.match).toBe(null);
-      expect(result.ambiguous).toEqual([]);
-    });
-
-    test("hyphen-in-id prefix matches correctly", () => {
-      const agent = makeAgent({ id: "agent-foo-bar" });
-      const result = matchAgentById("agent-foo-", [agent]);
-
-      expect(result.match?.id).toBe("agent-foo-bar");
-      expect(result.ambiguous).toEqual([]);
-    });
-
-    test("underscore-in-id prefix matches correctly", () => {
-      const agent = makeAgent({ id: "agent_foo" });
-      const result = matchAgentById("agent_", [agent]);
-
-      expect(result.match?.id).toBe("agent_foo");
-      expect(result.ambiguous).toEqual([]);
-    });
-
-    test("empty-string-prefix matches all agents (ambiguous)", () => {
-      const agentA = makeAgent({ id: "agent-a" });
-      const agentB = makeAgent({ id: "agent-b" });
-      const result = matchAgentById("", [agentA, agentB]);
-
-      expect(result.match).toBe(null);
-      expect(result.ambiguous).toEqual(["agent-a", "agent-b"]);
-    });
+  test("G3: CWD in worktree path", async () => {
+    const result = await resolveTarget("agent-aaa", repos, "/home/user/projects/app/.ittybitty/agents/agent-with-hyphens-123/repo");
+    expect(result.agent?.id).toBe("agent-aaa");
   });
 
-  describe("Group G: findOwnRepo Edge Cases via CWD", () => {
-    test("cwd-exact-match finds repo by exact path", async () => {
-      mockReadAllAgents.mockResolvedValueOnce({ agents: [], errors: [] });
-
-      const result = await resolveTarget("", repos, "/home/user/projects/app");
-
-      // Bare empty string will try to match, but we're testing CWD detection
-      // The CWD is exact match, so it's used for same-repo filtering
-      expect(mockReadAllAgents).toHaveBeenCalled();
-    });
-
-    test("cwd-inside-repo finds via prefix match", async () => {
-      mockReadAllAgents.mockResolvedValueOnce({ agents: [], errors: [] });
-
-      const result = await resolveTarget("", repos, "/home/user/projects/app/src");
-
-      expect(mockReadAllAgents).toHaveBeenCalled();
-    });
-
-    test("cwd-worktree-basic extracts root and matches", async () => {
-      mockReadAllAgents.mockResolvedValueOnce({ agents: [], errors: [] });
-
-      const result = await resolveTarget(
-        "",
-        repos,
-        "/home/user/projects/app/.ittybitty/agents/agent-abc/repo",
-      );
-
-      expect(mockReadAllAgents).toHaveBeenCalled();
-    });
-
-    test("cwd-worktree-not-at-end does not extract", async () => {
-      mockReadAllAgents.mockResolvedValueOnce({ agents: [], errors: [] });
-
-      const result = await resolveTarget(
-        "",
-        repos,
-        "/home/user/projects/app/.ittybitty/agents/agent-abc/repo/src",
-      );
-
-      // Falls back to prefix match instead
-      expect(mockReadAllAgents).toHaveBeenCalled();
-    });
-
-    test("cwd-outside-all-repos returns no own repo", async () => {
-      mockReadAllAgents.mockResolvedValueOnce({ agents: [], errors: [] });
-
-      const result = await resolveTarget("", repos, "/home/other/place");
-
-      // No ownRepo found, searches globally only
-      expect(mockReadAllAgents).toHaveBeenCalled();
-    });
-
-    test("cwd-prefix-collision-exact-takes-precedence", async () => {
-      // Test that /home/user/projects/app/data does NOT match /home/user/projects/app
-      // because prefix match requires r.path + "/" so /app/ does NOT prefix /app/data
-      const exactRepo = { path: "/home/user/projects/app", name: "app" };
-      const prefixRepo = { path: "/home/user/projects/app/data", name: "appdata" };
-      const testRepos = [exactRepo, prefixRepo];
-
-      mockReadAllAgents.mockResolvedValueOnce({ agents: [], errors: [] });
-
-      // If CWD is /home/user/projects/app, exact match should win
-      const result = await resolveTarget("", testRepos, "/home/user/projects/app");
-
-      expect(mockReadAllAgents).toHaveBeenCalled();
-    });
-
-    test("cwd-worktree-extract-reporoot handles nested paths", async () => {
-      const nestedRepos = [
-        { path: "/home/user/projects/deep/nested/app", name: "app" },
-      ];
-      mockReadAllAgents.mockResolvedValueOnce({ agents: [], errors: [] });
-
-      const result = await resolveTarget(
-        "",
-        nestedRepos,
-        "/home/user/projects/deep/nested/app/.ittybitty/agents/agent-xyz/repo",
-      );
-
-      expect(mockReadAllAgents).toHaveBeenCalled();
-    });
-
-    test("cwd-worktree-extract-no-matching-repo when extracted path not in repos", async () => {
-      mockReadAllAgents.mockResolvedValueOnce({ agents: [], errors: [] });
-
-      const result = await resolveTarget(
-        "",
-        repos,
-        "/home/user/projects/unknown/.ittybitty/agents/agent-xyz/repo",
-      );
-
-      // Extracted /home/user/projects/unknown, not in repos, so ownRepo = null
-      expect(mockReadAllAgents).toHaveBeenCalled();
-    });
+  test("G4: CWD in worktree subdir does NOT match worktree regex", async () => {
+    // Ends with /repo/src, not /repo — worktree regex fails, falls back to prefix match
+    // But /home/user/projects/app/.ittybitty/agents/.../repo/src starts with /home/user/projects/app/
+    // so prefix match succeeds
+    const result = await resolveTarget("agent-aaa", repos, "/home/user/projects/app/.ittybitty/agents/agent-abc/repo/src");
+    expect(result.agent?.id).toBe("agent-aaa");
   });
 
-  describe("Group K: Cross-Cutting Edge Cases", () => {
-    test("K1: multiple-slashes in @ addressing", async () => {
-      mockReadAllAgents.mockResolvedValueOnce({ agents: [], errors: [] });
-
-      const result = await resolveTarget("@repo/agent/extra", repos);
-
-      // Parsed as repo="repo", agentId="agent/extra", agent lookup fails
-      expect(result.agent).toBe(null);
-      expect(result.isSystemCoordinator).toBe(false);
-    });
-
-    test("K2: @-sign-alone errors on empty repo name", async () => {
-      mockReadAllAgents.mockResolvedValueOnce({ agents: [], errors: [] });
-
-      const result = await resolveTarget("@", repos);
-
-      expect(result.agent).toBe(null);
-      expect(result.isSystemCoordinator).toBe(false);
-    });
-
-    test("K3: whitespace-only input treated as bare ID", async () => {
-      mockReadAllAgents.mockResolvedValueOnce({ agents: [], errors: [] });
-
-      const result = await resolveTarget("   ", repos);
-
-      expect(result.agent).toBe(null);
-      expect(result.isSystemCoordinator).toBe(false);
-    });
-
-    test("K4: special-chars-bare ID not validated", async () => {
-      mockReadAllAgents.mockResolvedValueOnce({ agents: [], errors: [] });
-
-      const result = await resolveTarget("agent@id", repos);
-
-      // Treated as literal bare ID, no match
-      expect(result.agent).toBe(null);
-      expect(result.isSystemCoordinator).toBe(false);
-    });
-
-    test("K5: special-chars-at-addressing fails repo lookup", async () => {
-      mockReadAllAgents.mockResolvedValueOnce({ agents: [], errors: [] });
-
-      const result = await resolveTarget("@repo@name", repos);
-
-      // Parsed as repoName="repo@name", not found
-      expect(result.agent).toBe(null);
-      expect(result.isSystemCoordinator).toBe(false);
-    });
-
-    test("K6: multi-repo-same-agent-id same-repo-first routing", async () => {
-      const agent123App = makeAgent({ id: "agent-123", repoPath: "/home/user/projects/app" });
-      const agent123Lib = makeAgent({ id: "agent-123", repoPath: "/home/user/projects/lib" });
-      mockReadAllAgents.mockResolvedValueOnce({ agents: [agent123App, agent123Lib], errors: [] });
-
-      const result = await resolveTarget("agent-123", repos, "/home/user/projects/app");
-
-      expect(result.agent?.repoPath).toBe("/home/user/projects/app");
-      expect(result.isSystemCoordinator).toBe(false);
-    });
-
-    test("K7: multi-repo-same-agent-id-explicit with @repo scoping", async () => {
-      const agent123Lib = makeAgent({ id: "agent-123", repoPath: "/home/user/projects/lib" });
-      mockReadAllAgents.mockResolvedValueOnce({ agents: [agent123Lib], errors: [] });
-
-      const result = await resolveTarget("@libs/agent-123", repos);
-
-      expect(result.agent?.id).toBe("agent-123");
-      expect(result.agent?.repoPath).toBe("/home/user/projects/lib");
-      expect(result.isSystemCoordinator).toBe(false);
-    });
-
-    test("K8: multi-repo-same-agent-id-wrong-repo errors", async () => {
-      const agent123App = makeAgent({ id: "agent-123", repoPath: "/home/user/projects/app" });
-      mockReadAllAgents.mockResolvedValueOnce({ agents: [agent123App], errors: [] });
-
-      const result = await resolveTarget("@lib/agent-123", repos);
-
-      // agent-123 is in app, not lib
-      expect(result.agent).toBe(null);
-      expect(result.isSystemCoordinator).toBe(false);
-    });
-
-    test("K9: multi-repo-coordinator-routing from specific repo", async () => {
-      const coordApp = makeAgent({ id: "coord-app", repoPath: "/home/user/projects/app" });
-      const coordLib = makeAgent({ id: "coord-lib", repoPath: "/home/user/projects/lib" });
-      mockReadAllAgents.mockResolvedValueOnce({ agents: [coordApp, coordLib], errors: [] });
-      mockCheckCoordinatorExists.mockResolvedValueOnce({
-        exists: true,
-        isCoordinator: true,
-        agentId: "coord-app",
-      });
-
-      const result = await resolveTarget("@coordinator", repos, "/home/user/projects/app");
-
-      expect(result.agent?.id).toBe("coord-app");
-      expect(result.isSystemCoordinator).toBe(false);
-    });
-
-    test("K10: priority-exact-over-prefix-over-worktree", async () => {
-      const coordAgent = makeAgent({ id: "coord-xyz", repoPath: "/home/user/projects/app" });
-      mockReadAllAgents.mockResolvedValueOnce({ agents: [coordAgent], errors: [] });
-      mockCheckCoordinatorExists.mockResolvedValueOnce({
-        exists: true,
-        isCoordinator: true,
-        agentId: "coord-xyz",
-      });
-
-      // CWD is exact match (higher priority than prefix or worktree)
-      const result = await resolveTarget("@coordinator", repos, "/home/user/projects/app");
-
-      expect(result.agent?.id).toBe("coord-xyz");
-      expect(result.isSystemCoordinator).toBe(false);
-    });
+  test("G5: CWD outside all repos, ownRepo is null", async () => {
+    // Still finds agent-aaa via global fallback
+    const result = await resolveTarget("agent-aaa", repos, "/home/other/place");
+    expect(result.agent?.id).toBe("agent-aaa");
   });
 
-  describe("Coordinator Name Validation", () => {
-    // Note: these test the reserved name checks in ib-commands and registry
-    // We include them here for completeness but they may be tested elsewhere
-
-    test("coordinator-reserved-name check in agent naming", () => {
-      // This would be tested in ib-commands.test.ts but documenting the requirement here
-      expect("coordinator".match(/^[a-zA-Z0-9_\-]+$/)).not.toBe(null);
-      expect("coordinator" === "coordinator").toBe(true);
-    });
-
-    test("coordinator-case-mismatch not reserved", () => {
-      expect("Coordinator".match(/^[a-zA-Z0-9_\-]+$/)).not.toBe(null);
-      expect("Coordinator" === "coordinator").toBe(false);
-    });
-
-    test("coordinator-suffix not reserved", () => {
-      expect("coordinator-foo".match(/^[a-zA-Z0-9_\-]+$/)).not.toBe(null);
-      expect("coordinator-foo" === "coordinator").toBe(false);
-    });
+  test("G6: worktree path with no matching repo returns null ownRepo", async () => {
+    // Worktree path for unknown repo: extracts /home/user/projects/unknown but no repo matches
+    setupAgents(agentA);
+    const result = await resolveTarget("agent-aaa", repos, "/home/user/projects/unknown/.ittybitty/agents/agent-xyz/repo");
+    // ownRepo=null, falls back to global search
+    expect(result.agent?.id).toBe("agent-aaa");
   });
 
-  describe("repoDisplayName Utility", () => {
-    test("nickname takes precedence over name", () => {
-      const repo = { path: "/test", name: "myrepo", nickname: "alias" };
-      expect(repoDisplayName(repo)).toBe("alias");
-    });
+  test("G7: CWD is a prefix collision path (/app-data)", async () => {
+    // /app-data does not start with /app/, so ownRepo should be null
+    // Agent found via global fallback
+    const result = await resolveTarget("agent-aaa", repos, "/home/user/projects/app-data");
+    expect(result.agent?.id).toBe("agent-aaa");
+  });
+});
 
-    test("name used when no nickname", () => {
-      const repo = { path: "/test", name: "myrepo" };
-      expect(repoDisplayName(repo)).toBe("myrepo");
-    });
+// ============================================================
+// Group K: Cross-cutting edge cases
+// ============================================================
+describe("Group K: Cross-cutting edge cases", () => {
+  test("K1: @app/ with empty agentId falls through to coordinator lookup", async () => {
+    // agentId = "" is falsy, so code treats @app/ same as @app (coordinator lookup)
+    mockCheckCoordinatorExists.mockResolvedValue({ exists: false, collision: false });
+    const result = await resolveTarget("@app/", repos);
+    expect(result.agent).toBeNull();
+    expect(errorOutput.some((e) => e.includes("no coordinator found for repo app"))).toBe(true);
+  });
 
-    test("empty nickname still uses name", () => {
-      const repo = { path: "/test", name: "myrepo", nickname: "" };
-      expect(repoDisplayName(repo)).toBe("myrepo");
-    });
+  test("K2: @ alone treated as repo name empty string", async () => {
+    const result = await resolveTarget("@", repos);
+    expect(result.agent).toBeNull();
+    expect(errorOutput.some((e) => e.includes("repo not found:"))).toBe(true);
+  });
+
+  test("K3: multi-repo same agent ID - same-repo first wins", async () => {
+    const a123A = agentIn("agent-123", repoA);
+    const a123B = agentIn("agent-123", repoB);
+    setupAgents(a123A, a123B);
+    const result = await resolveTarget("agent-123", repos, "/home/user/projects/app");
+    expect(result.agent?.repoPath).toBe(repoA.path);
+  });
+
+  test("K4: multi-repo same agent ID - explicit repo scoping overrides", async () => {
+    const a123A = agentIn("agent-123", repoA);
+    const a123B = agentIn("agent-123", repoB);
+    setupAgents(a123A, a123B);
+    const result = await resolveTarget("@libs/agent-123", repos);
+    expect(result.agent?.repoPath).toBe(repoB.path);
+  });
+
+  test("K5: multi-repo coordinator routing via @coordinator uses CWD repo", async () => {
+    const coordA = agentIn("coord-a", repoA);
+    const coordB = agentIn("coord-b", repoB);
+    setupAgents(coordA, coordB);
+    mockCheckCoordinatorExists.mockResolvedValue({ exists: true, isCoordinator: true, agentId: "coord-a" });
+    const result = await resolveTarget("@coordinator", repos, "/home/user/projects/app");
+    expect(result.agent?.id).toBe("coord-a");
+  });
+
+  test("K6: multi-repo coordinator routing via @repo-name", async () => {
+    const coordA = agentIn("coord-a", repoA);
+    const coordB = agentIn("coord-b", repoB);
+    setupAgents(coordA, coordB);
+    mockCheckCoordinatorExists.mockResolvedValue({ exists: true, isCoordinator: true, agentId: "coord-b" });
+    const result = await resolveTarget("@libs", repos);
+    expect(result.agent?.id).toBe("coord-b");
+  });
+
+  test("K7: special characters in bare ID - no match", async () => {
+    setupAgents();
+    const result = await resolveTarget("agent@123", repos, "/home/other");
+    expect(result.agent).toBeNull();
+    expect(errorOutput.some((e) => e.includes("Agent not found: agent@123"))).toBe(true);
+  });
+
+  test("K8: multiple slashes in @-addressing parses first slash only", async () => {
+    setupAgents();
+    const result = await resolveTarget("@app/agent/extra", repos);
+    expect(result.agent).toBeNull();
+    // agentId = "agent/extra", won't match any agent
+    expect(errorOutput.some((e) => e.includes("Agent not found: agent/extra in repo app"))).toBe(true);
+  });
+
+  test("K9: @system/something treated as repo name 'system/something' — fails differently", async () => {
+    // target starts with @ but is not "@system" exactly
+    // afterAt = "system/something", slashIdx = 6, repoName = "system", agentId = "something"
+    setupAgents();
+    const result = await resolveTarget("@system/something", repos);
+    expect(result.agent).toBeNull();
+    expect(errorOutput.some((e) => e.includes("repo not found: system"))).toBe(true);
+  });
+
+  test("K10: readAllAgents returns errors but still has agents — routing still works", async () => {
+    const a1 = agentIn("agent-111", repoA);
+    mockReadAllAgents.mockResolvedValue({ agents: [a1], errors: [{ path: "/broken", error: "bad" }] });
+    const result = await resolveTarget("agent-111", repos, "/home/user/projects/app");
+    expect(result.agent?.id).toBe("agent-111");
   });
 });

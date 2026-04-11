@@ -138,6 +138,8 @@ describe("session-start", () => {
     expect(ctx.agentId).toBe("coordinator");
     expect(ctx.agentManager).toBe("");
     expect(ctx.parentBranch).toBe("main");
+    // branchName falls back to agent/<id> when repo-id file is not available
+    expect(ctx.branchName).toBe("agent/coordinator");
     expect(ctx.rootRepoPath).toBe("/Users/me/project");
   });
 
@@ -148,6 +150,7 @@ describe("session-start", () => {
       agentId: "coordinator",
       agentManager: "",
       parentBranch: "main",
+      branchName: "agent/coordinator",
       worktreePath: "/Users/me/project/.ittybitty/agents/coordinator/repo",
       rootRepoPath: "/Users/me/project",
     };
@@ -156,7 +159,7 @@ describe("session-start", () => {
     expect(instructions).toContain("Per-Repo Coordinator");
     expect(instructions).toContain("project");
     expect(instructions).toContain("ib new-agent --worker");
-    expect(instructions).toContain("ib send coordinator");
+    expect(instructions).toContain("ib send @system");
   });
 
   test("coordinator instructions mention Read, Glob, Grep, LS", async () => {
@@ -165,6 +168,7 @@ describe("session-start", () => {
       agentId: "coordinator",
       agentManager: "",
       parentBranch: "main",
+      branchName: "agent/coordinator",
       worktreePath: "/Users/me/muse-ios/.ittybitty/agents/coordinator/repo",
       rootRepoPath: "/Users/me/muse-ios",
     };

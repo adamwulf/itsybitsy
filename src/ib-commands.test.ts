@@ -2570,6 +2570,93 @@ describe("newAgent (native)", () => {
     expect(meta.watchdog_pid).toBe(fakePid);
     resetWatchdogSpawnFn();
   });
+
+  // --- Group H: coordinator reserved name enforcement ---
+
+  test("H1: rejects explicit --name coordinator", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("task", { name: "coordinator" });
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain('"coordinator" is a reserved name');
+  });
+
+  test("H3: coordinator mode with repo basename 'coordinator' is rejected by post-generation guard", async () => {
+    // Create a tempDir whose basename is "coordinator" to simulate coordinator mode
+    // generating id = "coordinator" via getCoordinatorAgentId()
+    const coordRepoDir = await mkdtemp(join(tmpdir(), "ib-coord-test-"));
+    const coordRepo = join(coordRepoDir, "coordinator");
+    await mkdir(join(coordRepo, ".ittybitty", "agents"), { recursive: true });
+    await Bun.write(join(coordRepo, ".ittybitty", "repo-id"), "coordtest\n");
+
+    const userConfigPath = join(coordRepo, "config.json");
+    setUserConfigPath(userConfigPath);
+    await Bun.write(userConfigPath, JSON.stringify({ model: "sonnet" }, null, 2));
+
+    lifecycleSpawnCtx.set((cmd: string[], _opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
+      const cmdStr = cmd.join(" ");
+      if (cmdStr.includes("--git-common-dir")) return makeSpawnResult(".git", 0);
+      if (cmdStr.includes("--show-toplevel")) return makeSpawnResult(coordRepo, 0);
+      if (cmdStr.includes("--git-dir")) return makeSpawnResult(".git", 0);
+      return makeSpawnResult("", 0);
+    });
+
+    setNewAgentSpawnRunner(mockSpawnRunner());
+
+    // coordinator mode: getCoordinatorAgentId(coordRepo) returns "coordinator"
+    // checkCoordinatorExists finds no coordinator and no collision → id stays "coordinator"
+    // post-generation guard at line 1629 catches it
+    const result = await newAgent(coordRepo, "start coordinator", { coordinator: true, _cwd: coordRepo });
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain('"coordinator" is a reserved name');
+
+    await rm(coordRepoDir, { recursive: true, force: true });
+  });
+
+  test("H5: 'Coordinator' (uppercase) passes — case-sensitive check", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("task", { name: "Coordinator" });
+    expect(result.ok).toBe(true);
+  });
+
+  test("H6: 'my-coordinator' passes — substring not blocked", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("task", { name: "my-coordinator" });
+    expect(result.ok).toBe(true);
+  });
+
+  test("H7: coordinator mode with collision suffix doesn't produce 'coordinator'", async () => {
+    // Create a repo whose basename is "coordinator" but with a non-coordinator agent
+    // already named "coordinator" (collision case).
+    // The collision suffix should produce "coordinator-XXXX", not "coordinator".
+    const coordRepoDir = await mkdtemp(join(tmpdir(), "ib-coord-coll-"));
+    const coordRepo = join(coordRepoDir, "coordinator");
+    const coordAgentsDir = join(coordRepo, ".ittybitty", "agents");
+    // Create existing non-coordinator agent named "coordinator" (the collision)
+    await mkdir(join(coordAgentsDir, "coordinator"), { recursive: true });
+    await Bun.write(join(coordAgentsDir, "coordinator", "meta.json"), JSON.stringify({ id: "coordinator" }));
+    await Bun.write(join(coordRepo, ".ittybitty", "repo-id"), "colltest\n");
+
+    const userConfigPath = join(coordRepo, "config.json");
+    setUserConfigPath(userConfigPath);
+    await Bun.write(userConfigPath, JSON.stringify({ model: "sonnet" }, null, 2));
+
+    lifecycleSpawnCtx.set((cmd: string[], _opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
+      const cmdStr = cmd.join(" ");
+      if (cmdStr.includes("--git-common-dir")) return makeSpawnResult(".git", 0);
+      if (cmdStr.includes("--show-toplevel")) return makeSpawnResult(coordRepo, 0);
+      if (cmdStr.includes("--git-dir")) return makeSpawnResult(".git", 0);
+      return makeSpawnResult("", 0);
+    });
+
+    setNewAgentSpawnRunner(mockSpawnRunner());
+
+    // checkCoordinatorExists will find the collision (non-coordinator agent named "coordinator")
+    // So id = "coordinator-XXXX" (with random suffix), which won't match the reserved name
+    const result = await newAgent(coordRepo, "start coordinator", { coordinator: true, _cwd: coordRepo });
+    expect(result.ok).toBe(true);
+
+    await rm(coordRepoDir, { recursive: true, force: true });
+  });
 });
 
 describe("reassignAgent (native)", () => {

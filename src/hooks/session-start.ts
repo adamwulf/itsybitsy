@@ -3,6 +3,7 @@
  */
 
 import { join, basename } from "path";
+import { readFileSync } from "node:fs";
 import { AGENT_CWD_PATTERN } from "./shared";
 import { resolveAgentType } from "../agent-types";
 import type { AgentTypeDefinition } from "../agent-types";
@@ -14,6 +15,8 @@ export interface SessionContext {
   agentId: string;
   agentManager: string;
   parentBranch: string;
+  /** The actual git branch name for this agent's worktree (e.g., agent/foo or agent/foo-a1b2c3d4 for coordinators) */
+  branchName: string;
   worktreePath: string;
   rootRepoPath: string;
   /** The custom agent type name (set when role === "custom" or when meta.type is set) */
@@ -33,6 +36,7 @@ export function detectRole(
       agentId: "",
       agentManager: "",
       parentBranch: "main",
+      branchName: "",
       worktreePath: "",
       rootRepoPath: "",
     };
@@ -74,11 +78,26 @@ export function detectRole(
 
   const parentBranch = agentManager ? `agent/${agentManager}` : "main";
 
+  // Compute actual branch name — coordinators use agent/<id>-<repoId> (SPEC §12.2.2)
+  let branchName = `agent/${agentId}`;
+  if (isCoordinator) {
+    try {
+      const repoIdPath = join(rootRepoPath, ".ittybitty", "repo-id");
+      const repoId = readFileSync(repoIdPath, "utf8").trim();
+      if (repoId) {
+        branchName = `agent/${agentId}-${repoId}`;
+      }
+    } catch {
+      // If repo-id not readable, fall back to standard convention
+    }
+  }
+
   return {
     role,
     agentId,
     agentManager,
     parentBranch,
+    branchName,
     worktreePath,
     rootRepoPath,
     typeName: typeName || undefined,
@@ -188,7 +207,7 @@ Top-level managers can ask the user questions with \`ib ask "question"\`. After 
 ## IttyBitty Manager Agent
 
 You are manager agent \`${ctx.agentId}\` in the ittybitty multi-agent orchestration system.
-You are running in a git worktree on branch \`agent/${ctx.agentId}\`, forked from \`${ctx.parentBranch}\`.
+You are running in a git worktree on branch \`${ctx.branchName}\`, forked from \`${ctx.parentBranch}\`.
 ${managerInfo}
 
 IMPORTANT: Always use \`ib\` (not \`./ib\`) to ensure you use the current version from PATH.
@@ -211,7 +230,7 @@ You are isolated to your worktree at: ${ctx.worktreePath}
 ### Git Worktree Context
 
 You are in a git worktree, which shares the same repository as the main checkout.
-- Your branch: \`agent/${ctx.agentId}\`
+- Your branch: \`${ctx.branchName}\`
 - Forked from: \`${ctx.parentBranch}\`
 - All branches are LOCAL - no need for \`git fetch origin\`
 - To merge latest changes from your parent: \`git merge ${ctx.parentBranch}\`
@@ -258,7 +277,7 @@ These phrases MUST be the LAST thing you output. Put summaries or status updates
 
 - NEVER blindly accept one side (\`--ours\`/\`--theirs\`) - understand and merge the intent of both sides
 - Do NOT attempt to rebase a sub-agent's worktree yourself
-- If \`ib merge <id> --force\` fails with a conflict, send the sub-agent a message: \`ib send <id> "Rebase your branch onto agent/${ctx.agentId} and resolve any conflicts, then signal completion again"\`
+- If \`ib merge <id> --force\` fails with a conflict, send the sub-agent a message: \`ib send <id> "Rebase your branch onto ${ctx.branchName} and resolve any conflicts, then signal completion again"\`
 - Once the sub-agent completes, re-attempt \`ib merge <id> --force\`
 - You can \`ib send\` messages to completed or stopped agents - they will restart and respond
 ${askSection}
@@ -289,7 +308,7 @@ function generateWorkerInstructions(ctx: SessionContext): string {
 ## IttyBitty Worker Agent
 
 You are worker agent \`${ctx.agentId}\` in the ittybitty multi-agent orchestration system.
-You are running in a git worktree on branch \`agent/${ctx.agentId}\`, forked from \`${ctx.parentBranch}\`.
+You are running in a git worktree on branch \`${ctx.branchName}\`, forked from \`${ctx.parentBranch}\`.
 Your manager agent is: ${ctx.agentManager}
 
 IMPORTANT: Always use \`ib\` (not \`./ib\`) to ensure you use the current version from PATH.
@@ -312,7 +331,7 @@ You are isolated to your worktree at: ${ctx.worktreePath}
 ### Git Worktree Context
 
 You are in a git worktree, which shares the same repository as the main checkout.
-- Your branch: \`agent/${ctx.agentId}\`
+- Your branch: \`${ctx.branchName}\`
 - Forked from: \`${ctx.parentBranch}\`
 - All branches are LOCAL - no need for \`git fetch origin\`
 - To merge latest changes from your parent: \`git merge ${ctx.parentBranch}\`
@@ -359,7 +378,7 @@ function generateCoordinatorInstructions(ctx: SessionContext): string {
   return `<ittybitty>
 ## IttyBitty Per-Repo Coordinator
 
-You are a per-repo coordinator for the \`${repoName}\` repository. You can read files and code in this repo using Read, Glob, Grep, and LS. You coordinate work by spawning and managing worker agents using \`ib\` commands. You do NOT write code directly — instead, spawn worker agents with \`ib new-agent --worker "task"\` to implement changes. Review their work with \`ib diff <id>\` and merge with \`ib merge <id>\`. To send messages to the system coordinator, use \`ib send coordinator "message"\`.
+You are a per-repo coordinator for the \`${repoName}\` repository. You can read files and code in this repo using Read, Glob, Grep, and LS. You coordinate work by spawning and managing worker agents using \`ib\` commands. You do NOT write code directly — instead, spawn worker agents with \`ib new-agent --worker "task"\` to implement changes. Review their work with \`ib diff <id>\` and merge with \`ib merge <id>\`. To send messages to the system coordinator, use \`ib send @system "message"\`.
 
 IMPORTANT: Always use \`ib\` (not \`./ib\`) to ensure you use the current version from PATH.
 
@@ -381,7 +400,7 @@ You are isolated to your worktree at: ${ctx.worktreePath}
 ### Git Worktree Context
 
 You are in a git worktree, which shares the same repository as the main checkout.
-- Your branch: \`agent/${ctx.agentId}\`
+- Your branch: \`${ctx.branchName}\`
 - Forked from: \`${ctx.parentBranch}\`
 - All branches are LOCAL - no need for \`git fetch origin\`
 - To merge latest changes from your parent: \`git merge ${ctx.parentBranch}\`
@@ -395,7 +414,7 @@ You are in a git worktree, which shares the same repository as the main checkout
 | \`ib list --manager ${ctx.agentId}\` | List your sub-agents |
 | \`ib look <id>\` | Read an agent's output |
 | \`ib send <id> "msg"\` | Send input to an agent |
-| \`ib send coordinator "msg"\` | Send message to system coordinator |
+| \`ib send @system "msg"\` | Send message to system coordinator |
 | \`ib status <id>\` | Show agent's commits/changes |
 | \`ib diff <id>\` | Review agent's changes |
 | \`ib merge <id>\` | Merge agent's work and close it |
@@ -416,7 +435,7 @@ These phrases MUST be the LAST thing you output. Put summaries or status updates
 3. **Spawn workers**: \`ib new-agent --worker "task"\` with clear instructions
 4. **Monitor & review**: Check worker output with \`ib look <id>\`, review with \`ib diff <id>\`
 5. **Merge or redirect**: \`ib merge <id>\` for good work, \`ib send <id> "feedback"\` for corrections
-6. **Coordinate**: Report status to system coordinator via \`ib send coordinator "message"\`
+6. **Coordinate**: Report status to system coordinator via \`ib send @system "message"\`
 
 ### Agent States
 
@@ -471,7 +490,7 @@ function generateCustomTypeInstructions(ctx: SessionContext, typeDef: AgentTypeD
 ## IttyBitty Agent: ${typeDef.name}
 
 ${typeDef.description ? typeDef.description + "\n" : ""}You are agent \`${ctx.agentId}\` (type: ${typeDef.name}) in the ittybitty multi-agent orchestration system.
-You are running in a git worktree on branch \`agent/${ctx.agentId}\`, forked from \`${ctx.parentBranch}\`.
+You are running in a git worktree on branch \`${ctx.branchName}\`, forked from \`${ctx.parentBranch}\`.
 ${managerInfo}
 
 IMPORTANT: Always use \`ib\` (not \`./ib\`) to ensure you use the current version from PATH.
@@ -494,7 +513,7 @@ You are isolated to your worktree at: ${ctx.worktreePath}
 ### Git Worktree Context
 
 You are in a git worktree, which shares the same repository as the main checkout.
-- Your branch: \`agent/${ctx.agentId}\`
+- Your branch: \`${ctx.branchName}\`
 - Forked from: \`${ctx.parentBranch}\`
 - All branches are LOCAL - no need for \`git fetch origin\`
 - To merge latest changes from your parent: \`git merge ${ctx.parentBranch}\`

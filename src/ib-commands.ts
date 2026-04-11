@@ -1615,11 +1615,19 @@ export async function newAgent(
     if (!/^[a-zA-Z0-9_\-]+$/.test(opts.name)) {
       return { ok: false, exitCode: 1, stdout: "", stderr: "Error: agent name may only contain letters, digits, hyphens, and underscores" };
     }
+    if (opts.name === "coordinator") {
+      return { ok: false, exitCode: 1, stdout: "", stderr: 'Error: "coordinator" is a reserved name (used for system coordinator addressing)' };
+    }
     id = opts.name;
   } else {
     const bytes = new Uint8Array(4);
     crypto.getRandomValues(bytes);
     id = `agent-${Array.from(bytes).map(b => b.toString(16).padStart(2, "0")).join("")}`;
+  }
+
+  // Reserved name check — applies to all ID generation paths
+  if (id === "coordinator") {
+    return { ok: false, exitCode: 1, stdout: "", stderr: 'Error: "coordinator" is a reserved name (used for system coordinator addressing)' };
   }
 
   // Get repo-id for session naming

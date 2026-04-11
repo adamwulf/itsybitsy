@@ -48,6 +48,13 @@ export async function saveRegistry(data: RegistryData): Promise<void> {
 
 export async function addRepo(repoPath: string, name?: string): Promise<{ ok: boolean; message: string }> {
   const resolved = resolve(repoPath);
+  const repoName = name ?? basename(resolved);
+
+  // "coordinator" is reserved for system coordinator addressing (SPEC §12.3.1)
+  if (repoName === "coordinator") {
+    return { ok: false, message: `"coordinator" is a reserved name — rename the directory or use a custom name` };
+  }
+
   const registry = await loadRegistry();
 
   // Check for duplicate
@@ -55,7 +62,6 @@ export async function addRepo(repoPath: string, name?: string): Promise<{ ok: bo
     return { ok: false, message: `Already registered: ${resolved}` };
   }
 
-  const repoName = name ?? basename(resolved);
   registry.repos.push({ path: resolved, name: repoName });
   await saveRegistry(registry);
   return { ok: true, message: `Added: ${repoName} (${resolved})` };
@@ -89,6 +95,10 @@ export async function renameRepo(repoPath: string, nickname: string): Promise<{ 
   }
   const trimmed = nickname.trim();
   if (trimmed) {
+    // "coordinator" is reserved for system coordinator addressing (SPEC §12.3.1)
+    if (trimmed === "coordinator") {
+      return { ok: false, message: `"coordinator" is a reserved name` };
+    }
     // Reject nicknames that collide with another repo's display name or basename
     const collision = registry.repos.find((r) =>
       r.path !== resolved && (repoDisplayName(r) === trimmed || r.name === trimmed)

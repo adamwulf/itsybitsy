@@ -1128,7 +1128,7 @@ Terminals narrower than 140 columns or shorter than 24 rows display a warning: `
 
 ## 12. Coordinator System
 
-The coordinator system has two tiers: one **system coordinator** that manages work across all repos, and **per-repo coordinators** that manage work within a single repo. The system coordinator is auto-spawned when `ib watch` launches (§12.1.2). Per-repo coordinators are created manually via CLI, TUI, or the system coordinator (§12.2.3). Together they form a coordination hierarchy: user → system coordinator → per-repo coordinators → agents.
+The coordinator system has two tiers: one **system coordinator** that manages work across all repos, and **per-repo coordinators** that manage work within a single repo. The system coordinator is auto-spawned when `ib watch` launches (§12.1.2). Per-repo coordinators are created manually via CLI, TUI, or the system coordinator (§12.2.3). Together they form a coordination hierarchy: user → system coordinator → per-repo coordinators → agents. Addressing uses `@`-based syntax for coordinator targets and bare agent IDs for direct agent messaging (§12.3.1).
 
 ### 12.1 System Coordinator
 
@@ -1252,7 +1252,7 @@ The system coordinator panel uses its own `TmuxPoller` instance (separate from t
 
 The system coordinator does NOT use the standard session-start hook (§6.3). Instead, it receives a custom initial prompt explaining its role:
 
-> You are the itsybitsy system coordinator. You manage agents across all registered repos using `ib` commands. You can list agents (`ib list`), send messages to agents (`ib send <agent-id> "message"`), merge (`ib merge`), kill (`ib kill`), create agents (`ib new-agent`), and check status (`ib status`, `ib diff`). You do NOT have access to Read, Write, Edit, or any file tools — only `ib` Bash commands. You coordinate work at the system level — for repo-specific coordination, delegate to per-repo coordinators. To send messages to per-repo coordinators, use `ib send <repo-name> "message"` (e.g., `ib send itsybitsy "review the latest PR"`). Do NOT use `ib send coordinator` — that routes back to you. Periodically check `ib inbox count` for notifications from watchdogs and agents; process with `ib inbox list` / `ib inbox read` / `ib inbox ack`.
+> You are the itsybitsy system coordinator. You manage agents across all registered repos using `ib` commands. You can list agents (`ib list`), send messages to agents (`ib send <agent-id> "message"`), merge (`ib merge`), kill (`ib kill`), create agents (`ib new-agent`), and check status (`ib status`, `ib diff`). You do NOT have access to Read, Write, Edit, or any file tools — only `ib` Bash commands. You coordinate work at the system level — for repo-specific coordination, delegate to per-repo coordinators. To send messages to per-repo coordinators, use `ib send @<repo-name> "message"` (e.g., `ib send @itsybitsy "review the latest PR"`). To send to a specific agent in another repo, use `ib send @<repo-name>/<agent-id> "message"`. Do NOT use `ib send @system` — that routes back to you. Periodically check `ib inbox count` for notifications from watchdogs and agents; process with `ib inbox list` / `ib inbox read` / `ib inbox ack`.
 
 #### 12.1.6 Watchdog Behavior
 
@@ -1384,14 +1384,14 @@ Per-repo coordinators use a custom session-start context (injected via the sessi
 - Bash rules (single-command enforcement)
 - Path isolation (worktree boundaries)
 - Git worktree context (branch name, parent branch)
-- Command table (`ib new-agent --worker`, `ib list --manager`, `ib look`, `ib send`, `ib send coordinator`, `ib status`, `ib diff`, `ib merge`, `ib kill`)
+- Command table (`ib new-agent --worker`, `ib list --manager`, `ib look`, `ib send`, `ib send @system "msg"`, `ib send @coordinator "msg"`, `ib status`, `ib diff`, `ib merge`, `ib kill`)
 - State management (`WAITING` / `I HAVE COMPLETED THE GOAL`)
 - Workflow steps (understand codebase → break down tasks → spawn workers → monitor → merge → coordinate)
 - Agent state reference table
 
-The coordinator is told to send messages to the system coordinator via `ib send coordinator "message"` and workers can reach the coordinator via `ib send <repo-basename> "message"`.
+The coordinator is told to send messages to the system coordinator via `ib send @system "message"`. Workers can reach their repo's coordinator via `ib send @coordinator "message"`, or reach the coordinator directly via `ib send <repo-basename> "message"` (standard agent ID resolution).
 
-**Worker session-start context under coordinators**: When the session-start hook detects a worker agent whose `manager` field is a coordinator's agent ID (the repo basename), it injects `ib send <repo-basename> "message"` as the way to reach the manager. Since the coordinator's agent ID is the repo basename, this uses standard agent ID resolution — no special addressing needed.
+**Worker session-start context under coordinators**: When the session-start hook detects a worker agent whose `manager` field is a coordinator's agent ID (the repo basename), it injects both `ib send @coordinator "message"` (to reach the repo coordinator) and `ib send <manager-id> "message"` (for direct manager communication, where `<manager-id>` is the agent's `manager` field from meta.json). Workers can also reach the system coordinator via `ib send @system "message"`.
 
 #### 12.2.7 Watchdog Behavior
 
@@ -1406,21 +1406,42 @@ Per-repo coordinators currently use the **standard watchdog behavior** — no co
 
 #### 12.3.1 CLI Addressing
 
-Per-repo coordinators use **standard agent ID resolution** for all commands — there is no special dual-resolution system. Since a per-repo coordinator's agent ID is the repo basename (§12.2.2), commands naturally work:
+The `ib send` command uses a hybrid addressing scheme: `@`-prefixed targets for coordinator routing, and bare agent IDs for direct agent messaging. The `@` character is shell-safe (no quoting needed in bash).
+
+**@-based targets** (checked before agent ID resolution):
+
+| Syntax | Description | Resolution |
+|--------|-------------|------------|
+| `ib send @system "msg"` | System coordinator | Routes to system coordinator via `ib inbox write` (§12.3.4). Works even when the coordinator's tmux session is not running — messages are queued. The `--from` flag value is passed as the inbox source. Output: `"Sent to system coordinator"` on success. |
+| `ib send @coordinator "msg"` | Own repo's coordinator | Detects the current repo from CWD (agent worktree or registered repo root), finds the coordinator agent for that repo (the agent with `coordinator: true` in meta.json), and sends via `tmux send-keys`. Error if CWD is not in a registered repo or agent worktree. Error if no coordinator exists for the detected repo. |
+| `ib send @muse-ios "msg"` | Named repo's coordinator | Looks up the repo by name in the repo registry (`repos.json`), finds the coordinator agent for that repo, and sends via `tmux send-keys`. Error if no repo with that name is registered. Error if no coordinator exists for the named repo. |
+| `ib send @muse-ios/agent-a1b2 "msg"` | Agent in named repo | Looks up the repo by name, then resolves the agent ID within that repo only (exact match, then prefix match). Error if repo not found, agent not found, or ambiguous prefix match. |
+
+**Bare agent ID targets** (standard agent ID resolution):
+
+| Syntax | Description | Resolution |
+|--------|-------------|------------|
+| `ib send agent-a1b2 "msg"` | Same-repo or global agent | Resolution order below |
+
+Resolution rules for bare agent IDs (no `@` prefix):
+
+1. **Own-repo exact match**: If CWD is in a registered repo or agent worktree, search that repo's agents for an exact ID match
+2. **Own-repo prefix match**: Search the same repo for a unique prefix match
+3. **Global exact match**: Search all repos for an exact ID match
+4. **Global prefix match**: Search all repos for a unique prefix match
+5. **Error**: If no match found, or if prefix match is ambiguous (matches agents in multiple repos), print an error with the ambiguous matches
+
+Other commands (`ib kill`, `ib nuke`, `ib status`, `ib diff`, `ib merge`, etc.) continue to use standard agent ID resolution (bare IDs only) — `@`-based addressing is specific to `ib send`:
 
 | Command | Resolution | Notes |
 |---------|-----------|-------|
-| `ib send itsybitsy "msg"` | Standard: exact match on agent ID `itsybitsy` | Reaches per-repo coordinator via `tmux send-keys` |
-| `ib send agent-a1b2c3d4 "msg"` | Standard: exact match on agent ID | Reaches regular agent |
 | `ib kill itsybitsy` | Standard: exact match on agent ID | Kills per-repo coordinator |
 | `ib nuke itsybitsy` | Standard: exact match on agent ID | Kills coordinator + children (§1.8) |
 | `ib status itsybitsy` | Standard: exact match on agent ID | Shows coordinator's commits |
 
-The system coordinator has no agent ID and cannot be targeted by any standard CLI command. It is not a regular agent — it has no agent directory, no meta.json, and no entry in any repo's `.ittybitty/agents/`. To send messages to the system coordinator programmatically, use `ib inbox write` (§12.3.4).
+The system coordinator has no agent ID and cannot be targeted by any standard CLI command (only via `@system` in `ib send`). It is not a regular agent — it has no agent directory, no meta.json, and no entry in any repo's `.ittybitty/agents/`. To send messages to the system coordinator programmatically, use `ib send @system` or `ib inbox write` directly (§12.3.4).
 
-**`ib send coordinator` routing**: The string `coordinator` receives special handling in `ib send`. Before standard agent ID resolution, `ib send` checks if the target is exactly `coordinator`. If so, the message is routed to the system coordinator via `ib inbox write` (§12.3.4) instead of the normal `tmux send-keys` path. This works even when the system coordinator's tmux session is not running — messages are queued in the inbox and processed when the coordinator starts. The `--from` flag value is passed as the inbox source. Output: `"Sent to system coordinator"` on success.
-
-**Reserved name `coordinator`**: The name `coordinator` is reserved and cannot be used as an agent ID. `newAgent()` rejects any attempt to create an agent with the ID `coordinator` — whether via `--name coordinator`, or because a repo's basename happens to be `coordinator` (in coordinator mode). This ensures `ib send coordinator` always unambiguously routes to the system coordinator. No other agent can shadow this name.
+**Reserved name `coordinator`**: The name `coordinator` is reserved and cannot be used as an agent ID. `newAgent()` rejects any attempt to create an agent with the ID `coordinator` — whether via `--name coordinator`, or because a repo's basename happens to be `coordinator` (in coordinator mode). This prevents confusion: if someone types `ib send coordinator` (without the `@`), they get "Agent not found" rather than silently messaging the wrong target. The old `ib send coordinator` special routing is removed — use `ib send @system` instead.
 
 **Prefix matching caveat**: If a repo is named `agent` and there's also an `agent-a1b2c3d4`, `ib send agent "msg"` is an exact match on the coordinator's ID (exact matches take priority over prefix). But `ib kill agent` also exact-matches the coordinator — there's no separate resolution for management commands vs messaging commands.
 
@@ -1436,7 +1457,7 @@ The system coordinator has two messaging paths, each for a different context:
 
 **User-interactive (TUI)**: When the user types in the coordinator sidebar input field or uses `s` with the system coordinator selected, `tmux send-keys -t ib-coordinator -l "<message>"` followed by a separate `tmux send-keys -t ib-coordinator Enter` is used. The `-l` (literal) flag prevents tmux from interpreting special key sequences in the message text. **Control character sanitization**: Before sending, all non-printable characters must be stripped: newlines (`\n`, `\r`) to prevent injecting multiple inputs, `\x03` (Ctrl-C) to prevent killing the Claude process, `\x04` (Ctrl-D, EOF), `\x1a` (Ctrl-Z, suspend), and `\x1b` (Escape, which could corrupt terminal state or trigger escape sequences). In practice, strip all characters with code points below `0x20` (this includes tab `0x09`, which is intentionally stripped to prevent unexpected whitespace in messages) and also `0x7F` (DEL). The `-l` flag on `tmux send-keys` prevents tmux from interpreting special key names, but the receiving Claude process would still see control characters in its stdin. This is safe because the user controls timing and can see whether the coordinator is busy.
 
-**Programmatic (watchdog, automated notifications)**: When the watchdog or other automated systems need to notify the system coordinator, they use the `ib inbox` command (see §12.3.4). This avoids the race condition of injecting text via `tmux send-keys` while the coordinator is mid-response.
+**Programmatic (watchdog, automated notifications, agents)**: When the watchdog, automated systems, or agents need to notify the system coordinator, they use `ib send @system "message"` (which routes to `ib inbox write`, see §12.3.4). This avoids the race condition of injecting text via `tmux send-keys` while the coordinator is mid-response.
 
 #### 12.3.4 `ib inbox` Command
 
@@ -1582,7 +1603,7 @@ The coordinator system touches many modules. This section catalogs the current i
 | `src/tui/focus.ts` | **Implemented** | Coordinator focus order: `agent-tree` → `info` → `coordinator`. |
 | `src/tui/pane-manager.ts` | **Implemented** | Full-width view when system coordinator is selected. Per-repo coordinator REPO mode with split pane. |
 | `src/watcher.ts` | **No changes needed** | Per-repo coordinators are regular agents detected by fs.watch. System coordinator state polled via `getCoordinatorInfo()`. |
-| `src/index.ts` | **Implemented** | `ib new-agent --coordinator` flag handling. `ib inbox` subcommand routing. Special `ib send coordinator` routing to system coordinator inbox (§12.3.1). Standard `matchAgentById()` handles all other coordinator addressing. |
+| `src/index.ts` | **Implemented** | `ib new-agent --coordinator` flag handling. `ib inbox` subcommand routing. `@`-based routing in `ib send`: `@system` routes to system coordinator inbox, `@coordinator` routes to own repo's coordinator, `@<repo-name>` routes to named repo's coordinator, `@<repo-name>/<agent-id>` routes to specific agent in named repo (§12.3.1). Bare agent IDs use standard `matchAgentById()` with own-repo-first resolution. |
 | `src/auto-compact.ts` | **No changes needed** | Per-repo coordinators get auto-compact as regular agents. System coordinator has no watchdog/auto-compact. |
 
 ---

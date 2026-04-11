@@ -2658,6 +2658,71 @@ describe("newAgent (native)", () => {
 
     await rm(coordRepoDir, { recursive: true, force: true });
   });
+
+  // --- Group K: repo name collision enforcement ---
+
+  test("K1: rejects --name matching a repo display name (nickname)", async () => {
+    const originalHome = process.env.HOME;
+    const fakeHome = await mkdtemp(join(tmpdir(), "ib-collision-test-"));
+    process.env.HOME = fakeHome;
+    try {
+      await mkdir(join(fakeHome, ".itsybitsy"), { recursive: true });
+      await Bun.write(join(fakeHome, ".itsybitsy", "repos.json"), JSON.stringify({
+        repos: [{ path: "/tmp/some-repo", name: "some-repo", nickname: "my-agent" }],
+      }));
+      setNewAgentSpawnRunner(mockSpawnRunner());
+      const result = await callNewAgent("task", { name: "my-agent" });
+      expect(result.ok).toBe(false);
+      expect(result.stderr).toContain('collides with registered repo name');
+    } finally {
+      process.env.HOME = originalHome;
+      await rm(fakeHome, { recursive: true, force: true });
+    }
+  });
+
+  test("K2: rejects --name matching a repo basename", async () => {
+    const originalHome = process.env.HOME;
+    const fakeHome = await mkdtemp(join(tmpdir(), "ib-collision-test-"));
+    process.env.HOME = fakeHome;
+    try {
+      await mkdir(join(fakeHome, ".itsybitsy"), { recursive: true });
+      await Bun.write(join(fakeHome, ".itsybitsy", "repos.json"), JSON.stringify({
+        repos: [{ path: "/tmp/tools-repo", name: "tools" }],
+      }));
+      setNewAgentSpawnRunner(mockSpawnRunner());
+      const result = await callNewAgent("task", { name: "tools" });
+      expect(result.ok).toBe(false);
+      expect(result.stderr).toContain('collides with registered repo name');
+    } finally {
+      process.env.HOME = originalHome;
+      await rm(fakeHome, { recursive: true, force: true });
+    }
+  });
+
+  test("K3: rejects --name 'system' as reserved", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("task", { name: "system" });
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain('"system" is a reserved name');
+  });
+
+  test("K4: allows --name that doesn't collide with any repo", async () => {
+    const originalHome = process.env.HOME;
+    const fakeHome = await mkdtemp(join(tmpdir(), "ib-collision-test-"));
+    process.env.HOME = fakeHome;
+    try {
+      await mkdir(join(fakeHome, ".itsybitsy"), { recursive: true });
+      await Bun.write(join(fakeHome, ".itsybitsy", "repos.json"), JSON.stringify({
+        repos: [{ path: "/tmp/other-repo", name: "other-repo" }],
+      }));
+      setNewAgentSpawnRunner(mockSpawnRunner());
+      const result = await callNewAgent("task", { name: "unique-name" });
+      expect(result.ok).toBe(true);
+    } finally {
+      process.env.HOME = originalHome;
+      await rm(fakeHome, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("reassignAgent (native)", () => {

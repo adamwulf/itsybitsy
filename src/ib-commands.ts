@@ -1678,7 +1678,8 @@ export async function newAgent(
   let workPath = rootRepoPath;
 
   // 12. Create git worktree if requested
-  // Coordinator branch includes repo-id to avoid collision across repos (SPEC §12.2.2)
+  // Note: coordinator branch format retained for backward compatibility with
+  // session-start.ts and health-check.ts, even though coordinators no longer use worktrees.
   const branchName = coordinatorMode ? `agent/${id}-${repoId}` : `agent/${id}`;
   if (useWorktree) {
     const baseRef = manager ? `agent/${manager}` : "HEAD";
@@ -1703,10 +1704,12 @@ export async function newAgent(
       let settingsContent: string;
 
       if (coordinatorMode) {
-        // Coordinator-specific settings
+        // Coordinator-specific settings — merge with existing to avoid clobbering
+        const existing = await rootSettingsFile.exists() ? await rootSettingsFile.json() : {};
         const coordSettings = await buildPerRepoCoordinatorSettings();
         const hookCmd = `ib hook-permission-denied ${id}`;
         const coordSettingsObj = {
+          ...existing,
           ...coordSettings,
           spinnerTipsEnabled: false,
           hooks: {

@@ -1719,7 +1719,7 @@ export async function newAgent(
               { matcher: "*", hooks: [{ type: "command", command: `ib hook-check-path ${id}` }] },
               { matcher: "Task|Agent|TaskCreate|Bash", hooks: [{ type: "command", command: "ib hooks intercept-task" }] },
             ],
-            SessionStart: [{ hooks: [{ type: "command", command: "ib hooks session-start" }] }],
+            SessionStart: [{ hooks: [{ type: "command", command: `ib hooks session-start ${id}` }] }],
           },
         };
         settingsContent = JSON.stringify(coordSettingsObj, null, 2);

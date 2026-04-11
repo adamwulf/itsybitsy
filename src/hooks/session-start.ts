@@ -27,10 +27,11 @@ export interface SessionContext {
 
 export function detectRole(
   cwd: string,
-  metaJson?: { id?: string; manager?: string | null; worker?: boolean; coordinator?: boolean; type?: string }
+  metaJson?: { id?: string; manager?: string | null; worker?: boolean; coordinator?: boolean; type?: string },
+  agentIdOverride?: string,
 ): SessionContext {
   const match = AGENT_CWD_PATTERN.exec(cwd);
-  if (!match) {
+  if (!match && !agentIdOverride) {
     return {
       role: "primary",
       agentId: "",
@@ -42,16 +43,17 @@ export function detectRole(
     };
   }
 
-  const agentId = match[1]!;
-  const ittybittyIdx = cwd.indexOf("/.ittybitty/agents/");
-  const rootRepoPath = cwd.substring(0, ittybittyIdx);
+  // For worktree agents: derive paths from CWD pattern
+  // For non-worktree agents (e.g., coordinators): CWD is the repo root, agent ID is passed explicitly
+  const agentId = match ? match[1]! : agentIdOverride!;
+  const rootRepoPath = match ? cwd.substring(0, cwd.indexOf("/.ittybitty/agents/")) : cwd;
   const agentDir = join(
     rootRepoPath,
     ".ittybitty",
     "agents",
     agentId
   );
-  const worktreePath = join(agentDir, "repo");
+  const worktreePath = match ? join(agentDir, "repo") : "";
 
   const meta = metaJson ?? {};
   const isCoordinator = (meta as Record<string, unknown>).coordinator === true;
@@ -78,18 +80,10 @@ export function detectRole(
 
   const parentBranch = agentManager ? `agent/${agentManager}` : "main";
 
-  // Compute actual branch name — coordinators use agent/<id>-<repoId> (SPEC §12.2.2)
-  let branchName = `agent/${agentId}`;
-  if (isCoordinator) {
-    try {
-      const repoIdPath = join(rootRepoPath, ".ittybitty", "repo-id");
-      const repoId = readFileSync(repoIdPath, "utf8").trim();
-      if (repoId) {
-        branchName = `agent/${agentId}-${repoId}`;
-      }
-    } catch {
-      // If repo-id not readable, fall back to standard convention
-    }
+  // Compute branch name — coordinators without worktrees have no branch
+  let branchName = "";
+  if (worktreePath) {
+    branchName = `agent/${agentId}`;
   }
 
   return {
@@ -378,7 +372,7 @@ function generateCoordinatorInstructions(ctx: SessionContext): string {
   return `<ittybitty>
 ## IttyBitty Per-Repo Coordinator
 
-You are a per-repo coordinator for the \`${repoName}\` repository. You can read files and code in this repo using Read, Glob, Grep, and LS. You coordinate work by spawning and managing worker agents using \`ib\` commands. You do NOT write code directly — instead, spawn worker agents with \`ib new-agent --worker "task"\` to implement changes. Review their work with \`ib diff <id>\` and merge with \`ib merge <id>\`. To send messages to the system coordinator, use \`ib send @system "message"\`.
+You are a per-repo coordinator for the \`${repoName}\` repository. You work directly in the repo directory (no git worktree). You can read files and code using Read, Glob, Grep, and LS. You coordinate work by spawning and managing worker agents using \`ib\` commands. You do NOT write code directly — instead, spawn worker agents with \`ib new-agent --worker "task"\` to implement changes. Review their work with \`ib diff <id>\` and merge with \`ib merge <id>\`. To send messages to the system coordinator, use \`ib send @system "message"\`.
 
 IMPORTANT: Always use \`ib\` (not \`./ib\`) to ensure you use the current version from PATH.
 
@@ -392,19 +386,10 @@ Each Bash tool call must run exactly ONE command. Multi-command calls will be bl
 
 ### Path Isolation
 
-You are isolated to your worktree at: ${ctx.worktreePath}
-- You CAN access: Your worktree, ~/.claude, /tmp, and general system paths
-- You CANNOT access: The main repo at ${ctx.rootRepoPath}, other agents' worktrees
+You are working directly in the repo at: ${ctx.rootRepoPath}
+- You CAN access: This repo, ~/.claude, /tmp, and general system paths
+- You CANNOT access: Other agents' worktrees
 - If you get "Access denied" or "Path violation" errors, you're trying to access a forbidden path
-
-### Git Worktree Context
-
-You are in a git worktree, which shares the same repository as the main checkout.
-- Your branch: \`${ctx.branchName}\`
-- Forked from: \`${ctx.parentBranch}\`
-- All branches are LOCAL - no need for \`git fetch origin\`
-- To merge latest changes from your parent: \`git merge ${ctx.parentBranch}\`
-- Other agents' branches are visible as local branches (\`agent/*\`)
 
 ### Commands
 
@@ -541,7 +526,7 @@ ${typeDef.promptBody}
 </ittybitty>`;
 }
 
-export async function hookSessionStart(rawStdin?: string): Promise<void> {
+export async function hookSessionStart(rawStdin?: string, agentIdArg?: string): Promise<void> {
   const raw = rawStdin ?? await new Response(Bun.stdin.stream()).text();
   let parsed: unknown;
   try {
@@ -579,9 +564,21 @@ export async function hookSessionStart(rawStdin?: string): Promise<void> {
     } catch {
       // Fall through to primary if meta can't be read
     }
+  } else if (agentIdArg) {
+    // Non-worktree agent (e.g., coordinator): CWD is the repo root, not a worktree path.
+    // The agent ID is passed as a command argument. Look for meta.json in the repo's agents dir.
+    const agentDir = join(cwd, ".ittybitty", "agents", agentIdArg);
+    try {
+      const metaFile = Bun.file(join(agentDir, "meta.json"));
+      if (await metaFile.exists()) {
+        metaJson = await metaFile.json();
+      }
+    } catch {
+      // Fall through to primary if meta can't be read
+    }
   }
 
-  const ctx = detectRole(cwd, metaJson);
+  const ctx = detectRole(cwd, metaJson, agentIdArg);
   const instructions = await generateInstructions(ctx);
 
   const output = {

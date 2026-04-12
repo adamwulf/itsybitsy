@@ -15,6 +15,7 @@ import {
   sendMessage,
   newAgent,
   diffAgent,
+  diffCwd,
   statusAgent,
   pauseAgent,
   acknowledgeQuestion,
@@ -3025,6 +3026,97 @@ describe("diffAgent (native)", () => {
 
     expect(result.ok).toBe(false);
     expect(result.stderr).toContain("no worktree");
+  });
+});
+
+describe("diffCwd", () => {
+  afterEach(() => {
+    resetDiffStatusSpawnRunner();
+  });
+
+  test("diffs HEAD against merge-base of current branch", async () => {
+    setDiffStatusSpawnRunner((cmd: string[]) => {
+      if (cmd.includes("symbolic-ref")) {
+        return makeSpawnResult(0, "refs/remotes/origin/main");
+      }
+      if (cmd.includes("rev-parse") && cmd.includes("--abbrev-ref")) {
+        return makeSpawnResult(0, "feature-branch");
+      }
+      if (cmd.includes("merge-base")) {
+        return makeSpawnResult(0, "abc123");
+      }
+      if (cmd.includes("diff")) {
+        return makeSpawnResult(0, "+new line\n-old line\n");
+      }
+      return makeSpawnResult();
+    });
+
+    const result = await diffCwd();
+    expect(result.ok).toBe(true);
+    expect(result.stdout).toContain("+new line");
+  });
+
+  test("stat mode passes --stat flag", async () => {
+    let diffCmd: string[] = [];
+    setDiffStatusSpawnRunner((cmd: string[]) => {
+      if (cmd.includes("symbolic-ref")) {
+        return makeSpawnResult(0, "refs/remotes/origin/main");
+      }
+      if (cmd.includes("rev-parse") && cmd.includes("--abbrev-ref")) {
+        return makeSpawnResult(0, "feature-branch");
+      }
+      if (cmd.includes("merge-base")) {
+        return makeSpawnResult(0, "abc123");
+      }
+      if (cmd.includes("diff")) {
+        diffCmd = cmd;
+        return makeSpawnResult(0, " file.ts | 2 +-\n");
+      }
+      return makeSpawnResult();
+    });
+
+    await diffCwd({ stat: true });
+    expect(diffCmd).toContain("--stat");
+  });
+
+  test("fails when rev-parse fails", async () => {
+    setDiffStatusSpawnRunner((cmd: string[]) => {
+      if (cmd.includes("symbolic-ref")) {
+        return makeSpawnResult(1, "", "not a git repo");
+      }
+      if (cmd.includes("rev-parse")) {
+        return makeSpawnResult(1, "", "not a git repo");
+      }
+      return makeSpawnResult();
+    });
+
+    const result = await diffCwd();
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("Failed to determine current branch");
+  });
+
+  test("falls back to main when symbolic-ref fails", async () => {
+    let mergeBaseArgs: string[] = [];
+    setDiffStatusSpawnRunner((cmd: string[]) => {
+      if (cmd.includes("symbolic-ref")) {
+        return makeSpawnResult(1, "", "no remote HEAD");
+      }
+      if (cmd.includes("rev-parse") && cmd.includes("--abbrev-ref")) {
+        return makeSpawnResult(0, "my-branch");
+      }
+      if (cmd.includes("merge-base")) {
+        mergeBaseArgs = cmd;
+        return makeSpawnResult(0, "def456");
+      }
+      if (cmd.includes("diff")) {
+        return makeSpawnResult(0, "some diff");
+      }
+      return makeSpawnResult();
+    });
+
+    const result = await diffCwd();
+    expect(result.ok).toBe(true);
+    expect(mergeBaseArgs).toContain("main");
   });
 });
 

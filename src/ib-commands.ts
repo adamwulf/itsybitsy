@@ -2200,6 +2200,42 @@ export async function diffAgent(agent: Agent, opts?: { stat?: boolean }): Promis
 }
 
 /**
+ * Diff the current working directory's branch against its merge-base.
+ * Used when `ib diff` is run without an agent ID and outside an agent worktree.
+ * Finds the merge-base of HEAD vs the default branch (main/master) and diffs against it.
+ */
+export async function diffCwd(opts?: { stat?: boolean }): Promise<IbCommandResult> {
+  const cwd = process.cwd();
+
+  // Determine the default branch (try main, then master)
+  const symbolicRef = await diffStatusSpawnCtx.run(["git", "-C", cwd, "symbolic-ref", "refs/remotes/origin/HEAD"]);
+  let baseBranch = "main";
+  if (symbolicRef.exitCode === 0 && symbolicRef.stdout) {
+    const ref = symbolicRef.stdout.replace("refs/remotes/origin/", "");
+    if (ref) baseBranch = ref;
+  }
+
+  // Get the current branch
+  const headRef = await diffStatusSpawnCtx.run(["git", "-C", cwd, "rev-parse", "--abbrev-ref", "HEAD"]);
+  if (headRef.exitCode !== 0) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Failed to determine current branch: ${headRef.stderr}` };
+  }
+  const currentBranch = headRef.stdout;
+
+  // Find merge-base
+  const mergeBase = await diffStatusSpawnCtx.run(["git", "-C", cwd, "merge-base", baseBranch, currentBranch]);
+  if (mergeBase.exitCode !== 0) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Failed to find merge-base between ${baseBranch} and ${currentBranch}: ${mergeBase.stderr}` };
+  }
+
+  const diffCmd = opts?.stat
+    ? ["git", "-C", cwd, "diff", "--stat", `${mergeBase.stdout}..HEAD`]
+    : ["git", "-C", cwd, "diff", `${mergeBase.stdout}..HEAD`];
+  const diff = await diffStatusSpawnCtx.run(diffCmd);
+  return { ok: diff.exitCode === 0, exitCode: diff.exitCode, stdout: diff.stdout, stderr: diff.stderr };
+}
+
+/**
  * Native status implementation — replaces `ib status <id>`.
  * Shows header, commits vs parent branch, uncommitted changes, and file change summary.
  */

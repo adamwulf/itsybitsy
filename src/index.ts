@@ -593,10 +593,32 @@ async function main() {
     }
     case "diff": {
       const repos = await listRepos();
-      const agent = await requireAgent(args[1], repos);
       const statOnly = args.includes("--stat");
-      const { diffAgent } = await import("./ib-commands");
-      await printAndExit(await diffAgent(agent, { stat: statOnly }));
+      const diffArgs = args.slice(1).filter((a) => a !== "--stat");
+      let diffAgentId: string | undefined = diffArgs[0];
+
+      // Auto-detect agent ID from CWD if not provided
+      if (!diffAgentId) {
+        const cwd = process.cwd();
+        const worktreeMatch = cwd.match(/\/.ittybitty\/agents\/([^/]+)\/repo/);
+        if (worktreeMatch) {
+          diffAgentId = worktreeMatch[1];
+        }
+      }
+
+      if (diffAgentId) {
+        const agent = await findAgentById(diffAgentId, repos);
+        if (!agent) {
+          console.error(`Agent not found: ${diffAgentId}`);
+          process.exit(1);
+        }
+        const { diffAgent } = await import("./ib-commands");
+        await printAndExit(await diffAgent(agent, { stat: statOnly }));
+      } else {
+        // No agent context — diff current branch vs its merge-base
+        const { diffCwd } = await import("./ib-commands");
+        await printAndExit(await diffCwd({ stat: statOnly }));
+      }
       break;
     }
     case "status": {

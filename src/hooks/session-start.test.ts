@@ -143,6 +143,22 @@ describe("session-start", () => {
     expect(ctx.rootRepoPath).toBe("/Users/me/project");
   });
 
+  test("detectRole non-worktree coordinator via agentIdOverride", () => {
+    // Coordinator running directly in the repo root (no worktree)
+    const cwd = "/Users/me/project";
+    const ctx = detectRole(cwd, {
+      id: "project",
+      manager: null,
+      worker: false,
+      coordinator: true,
+    }, "project");
+    expect(ctx.role).toBe("coordinator");
+    expect(ctx.agentId).toBe("project");
+    expect(ctx.branchName).toBe(""); // no worktree = no branch
+    expect(ctx.worktreePath).toBe(""); // no worktree
+    expect(ctx.rootRepoPath).toBe("/Users/me/project");
+  });
+
   test("generateInstructions coordinator contains 'Per-Repo Coordinator'", async () => {
     // Build context directly to test generateInstructions independently
     const ctx: SessionContext = {

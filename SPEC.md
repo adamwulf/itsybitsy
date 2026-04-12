@@ -1293,7 +1293,7 @@ Per-repo coordinators are stored in `.ittybitty/agents/` like regular agents, bu
 3. Uses coordinator-specific permissions (§12.2.4)
 4. Uses coordinator-specific session start context (§12.2.6)
 5. Does NOT set a `--manager` — coordinators are top-level agents
-6. `--no-worktree` is NOT allowed with `--coordinator` — coordinators always use git worktrees (they need branch isolation for their read-only code access)
+6. Coordinators work directly in the repo directory (no git worktree) — they are read-only agents that do not need branch isolation
 7. Defaults to `coordinator.model` config (§12.5) when no explicit `--model` is provided — overridable with `--model <model>` on `ib new-agent --coordinator`
 8. `--coordinator` is mutually exclusive with `--worker` and `--type`
 9. Otherwise follows the standard agent creation flow (§1.1)

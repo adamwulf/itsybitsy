@@ -1124,7 +1124,8 @@ async function main() {
           const { hookSessionStart } = await import("./hooks/session-start");
           const stdin = await new Response(Bun.stdin.stream()).text();
           const agentDir = resolveAgentDir(process.cwd());
-          await withHookLogging("session-start", agentDir, stdin, () => hookSessionStart(stdin));
+          const agentIdArg = args[2]; // optional: ib hooks session-start <agentId>
+          await withHookLogging("session-start", agentDir, stdin, () => hookSessionStart(stdin, agentIdArg));
           break;
         }
         case "main-path": {

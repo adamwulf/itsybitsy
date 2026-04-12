@@ -39,3 +39,7 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 .claude/scheduled_tasks.lock
 ib
 index.js.map
+
+# Temporary rebase/merge artifacts
+patch.diff
+rebase-editor.sh

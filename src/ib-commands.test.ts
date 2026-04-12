@@ -15,6 +15,7 @@ import {
   sendMessage,
   newAgent,
   diffAgent,
+  diffCwd,
   statusAgent,
   pauseAgent,
   acknowledgeQuestion,
@@ -2601,6 +2602,158 @@ describe("newAgent (native)", () => {
     expect(meta.watchdog_pid).toBe(fakePid);
     resetWatchdogSpawnFn();
   });
+
+  // --- Group H: coordinator reserved name enforcement ---
+
+  test("H1: rejects explicit --name coordinator", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("task", { name: "coordinator" });
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain('"coordinator" is a reserved name');
+  });
+
+  test("H3: coordinator mode with repo basename 'coordinator' is rejected by post-generation guard", async () => {
+    // Create a tempDir whose basename is "coordinator" to simulate coordinator mode
+    // generating id = "coordinator" via getCoordinatorAgentId()
+    const coordRepoDir = await mkdtemp(join(tmpdir(), "ib-coord-test-"));
+    const coordRepo = join(coordRepoDir, "coordinator");
+    await mkdir(join(coordRepo, ".ittybitty", "agents"), { recursive: true });
+    await Bun.write(join(coordRepo, ".ittybitty", "repo-id"), "coordtest\n");
+
+    const userConfigPath = join(coordRepo, "config.json");
+    setUserConfigPath(userConfigPath);
+    await Bun.write(userConfigPath, JSON.stringify({ model: "sonnet" }, null, 2));
+
+    lifecycleSpawnCtx.set((cmd: string[], _opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
+      const cmdStr = cmd.join(" ");
+      if (cmdStr.includes("--git-common-dir")) return makeSpawnResult(".git", 0);
+      if (cmdStr.includes("--show-toplevel")) return makeSpawnResult(coordRepo, 0);
+      if (cmdStr.includes("--git-dir")) return makeSpawnResult(".git", 0);
+      return makeSpawnResult("", 0);
+    });
+
+    setNewAgentSpawnRunner(mockSpawnRunner());
+
+    // coordinator mode: getCoordinatorAgentId(coordRepo) returns "coordinator"
+    // checkCoordinatorExists finds no coordinator and no collision → id stays "coordinator"
+    // post-generation guard at line 1629 catches it
+    const result = await newAgent(coordRepo, "start coordinator", { coordinator: true, _cwd: coordRepo });
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain('"coordinator" is a reserved name');
+
+    await rm(coordRepoDir, { recursive: true, force: true });
+  });
+
+  test("H5: 'Coordinator' (uppercase) passes — case-sensitive check", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("task", { name: "Coordinator" });
+    expect(result.ok).toBe(true);
+  });
+
+  test("H6: 'my-coordinator' passes — substring not blocked", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("task", { name: "my-coordinator" });
+    expect(result.ok).toBe(true);
+  });
+
+  test("H7: coordinator mode with collision suffix doesn't produce 'coordinator'", async () => {
+    // Create a repo whose basename is "coordinator" but with a non-coordinator agent
+    // already named "coordinator" (collision case).
+    // The collision suffix should produce "coordinator-XXXX", not "coordinator".
+    const coordRepoDir = await mkdtemp(join(tmpdir(), "ib-coord-coll-"));
+    const coordRepo = join(coordRepoDir, "coordinator");
+    const coordAgentsDir = join(coordRepo, ".ittybitty", "agents");
+    // Create existing non-coordinator agent named "coordinator" (the collision)
+    await mkdir(join(coordAgentsDir, "coordinator"), { recursive: true });
+    await Bun.write(join(coordAgentsDir, "coordinator", "meta.json"), JSON.stringify({ id: "coordinator" }));
+    await Bun.write(join(coordRepo, ".ittybitty", "repo-id"), "colltest\n");
+
+    const userConfigPath = join(coordRepo, "config.json");
+    setUserConfigPath(userConfigPath);
+    await Bun.write(userConfigPath, JSON.stringify({ model: "sonnet" }, null, 2));
+
+    lifecycleSpawnCtx.set((cmd: string[], _opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
+      const cmdStr = cmd.join(" ");
+      if (cmdStr.includes("--git-common-dir")) return makeSpawnResult(".git", 0);
+      if (cmdStr.includes("--show-toplevel")) return makeSpawnResult(coordRepo, 0);
+      if (cmdStr.includes("--git-dir")) return makeSpawnResult(".git", 0);
+      return makeSpawnResult("", 0);
+    });
+
+    setNewAgentSpawnRunner(mockSpawnRunner());
+
+    // checkCoordinatorExists will find the collision (non-coordinator agent named "coordinator")
+    // So id = "coordinator-XXXX" (with random suffix), which won't match the reserved name
+    const result = await newAgent(coordRepo, "start coordinator", { coordinator: true, _cwd: coordRepo });
+    expect(result.ok).toBe(true);
+
+    await rm(coordRepoDir, { recursive: true, force: true });
+  });
+
+  // --- Group K: repo name collision enforcement ---
+
+  test("K1: rejects --name matching a repo display name (nickname)", async () => {
+    const originalHome = process.env.HOME;
+    const fakeHome = await mkdtemp(join(tmpdir(), "ib-collision-test-"));
+    process.env.HOME = fakeHome;
+    try {
+      await mkdir(join(fakeHome, ".itsybitsy"), { recursive: true });
+      await Bun.write(join(fakeHome, ".itsybitsy", "repos.json"), JSON.stringify({
+        repos: [{ path: "/tmp/some-repo", name: "some-repo", nickname: "my-agent" }],
+      }));
+      setNewAgentSpawnRunner(mockSpawnRunner());
+      const result = await callNewAgent("task", { name: "my-agent" });
+      expect(result.ok).toBe(false);
+      expect(result.stderr).toContain('collides with registered repo name');
+    } finally {
+      process.env.HOME = originalHome;
+      await rm(fakeHome, { recursive: true, force: true });
+    }
+  });
+
+  test("K2: rejects --name matching a repo basename", async () => {
+    const originalHome = process.env.HOME;
+    const fakeHome = await mkdtemp(join(tmpdir(), "ib-collision-test-"));
+    process.env.HOME = fakeHome;
+    try {
+      await mkdir(join(fakeHome, ".itsybitsy"), { recursive: true });
+      await Bun.write(join(fakeHome, ".itsybitsy", "repos.json"), JSON.stringify({
+        repos: [{ path: "/tmp/tools-repo", name: "tools" }],
+      }));
+      setNewAgentSpawnRunner(mockSpawnRunner());
+      const result = await callNewAgent("task", { name: "tools" });
+      expect(result.ok).toBe(false);
+      expect(result.stderr).toContain('collides with registered repo name');
+    } finally {
+      process.env.HOME = originalHome;
+      await rm(fakeHome, { recursive: true, force: true });
+    }
+  });
+
+  test("K3: rejects --name 'system' as reserved", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("task", { name: "system" });
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain('"system" is a reserved name');
+  });
+
+  test("K4: allows --name that doesn't collide with any repo", async () => {
+    const originalHome = process.env.HOME;
+    const fakeHome = await mkdtemp(join(tmpdir(), "ib-collision-test-"));
+    process.env.HOME = fakeHome;
+    try {
+      await mkdir(join(fakeHome, ".itsybitsy"), { recursive: true });
+      await Bun.write(join(fakeHome, ".itsybitsy", "repos.json"), JSON.stringify({
+        repos: [{ path: "/tmp/other-repo", name: "other-repo" }],
+      }));
+      setNewAgentSpawnRunner(mockSpawnRunner());
+      const result = await callNewAgent("task", { name: "unique-name" });
+      expect(result.ok).toBe(true);
+    } finally {
+      process.env.HOME = originalHome;
+      await rm(fakeHome, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("reassignAgent (native)", () => {
@@ -2969,6 +3122,97 @@ describe("diffAgent (native)", () => {
 
     expect(result.ok).toBe(false);
     expect(result.stderr).toContain("no worktree");
+  });
+});
+
+describe("diffCwd", () => {
+  afterEach(() => {
+    resetDiffStatusSpawnRunner();
+  });
+
+  test("diffs HEAD against merge-base of current branch", async () => {
+    setDiffStatusSpawnRunner((cmd: string[]) => {
+      if (cmd.includes("symbolic-ref")) {
+        return makeSpawnResult(0, "refs/remotes/origin/main");
+      }
+      if (cmd.includes("rev-parse") && cmd.includes("--abbrev-ref")) {
+        return makeSpawnResult(0, "feature-branch");
+      }
+      if (cmd.includes("merge-base")) {
+        return makeSpawnResult(0, "abc123");
+      }
+      if (cmd.includes("diff")) {
+        return makeSpawnResult(0, "+new line\n-old line\n");
+      }
+      return makeSpawnResult();
+    });
+
+    const result = await diffCwd();
+    expect(result.ok).toBe(true);
+    expect(result.stdout).toContain("+new line");
+  });
+
+  test("stat mode passes --stat flag", async () => {
+    let diffCmd: string[] = [];
+    setDiffStatusSpawnRunner((cmd: string[]) => {
+      if (cmd.includes("symbolic-ref")) {
+        return makeSpawnResult(0, "refs/remotes/origin/main");
+      }
+      if (cmd.includes("rev-parse") && cmd.includes("--abbrev-ref")) {
+        return makeSpawnResult(0, "feature-branch");
+      }
+      if (cmd.includes("merge-base")) {
+        return makeSpawnResult(0, "abc123");
+      }
+      if (cmd.includes("diff")) {
+        diffCmd = cmd;
+        return makeSpawnResult(0, " file.ts | 2 +-\n");
+      }
+      return makeSpawnResult();
+    });
+
+    await diffCwd({ stat: true });
+    expect(diffCmd).toContain("--stat");
+  });
+
+  test("fails when rev-parse fails", async () => {
+    setDiffStatusSpawnRunner((cmd: string[]) => {
+      if (cmd.includes("symbolic-ref")) {
+        return makeSpawnResult(1, "", "not a git repo");
+      }
+      if (cmd.includes("rev-parse")) {
+        return makeSpawnResult(1, "", "not a git repo");
+      }
+      return makeSpawnResult();
+    });
+
+    const result = await diffCwd();
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("Failed to determine current branch");
+  });
+
+  test("falls back to main when symbolic-ref fails", async () => {
+    let mergeBaseArgs: string[] = [];
+    setDiffStatusSpawnRunner((cmd: string[]) => {
+      if (cmd.includes("symbolic-ref")) {
+        return makeSpawnResult(1, "", "no remote HEAD");
+      }
+      if (cmd.includes("rev-parse") && cmd.includes("--abbrev-ref")) {
+        return makeSpawnResult(0, "my-branch");
+      }
+      if (cmd.includes("merge-base")) {
+        mergeBaseArgs = cmd;
+        return makeSpawnResult(0, "def456");
+      }
+      if (cmd.includes("diff")) {
+        return makeSpawnResult(0, "some diff");
+      }
+      return makeSpawnResult();
+    });
+
+    const result = await diffCwd();
+    expect(result.ok).toBe(true);
+    expect(mergeBaseArgs).toContain("main");
   });
 });
 
@@ -3784,7 +4028,7 @@ describe("resolveAgentId", () => {
 
   test("exact match via tmux session only (no directory)", async () => {
     const result = await resolveAgentId(agentsDir, "agent-abc123", async () => [
-      "ittybitty-myrepo-agent-abc123",
+      "ittybitty-abc12345-agent-abc123",
     ]);
     expect(result).toEqual({ resolved: "agent-abc123" });
   });
@@ -3800,7 +4044,7 @@ describe("resolveAgentId", () => {
 
   test("substring match via tmux session only (no directory)", async () => {
     const result = await resolveAgentId(agentsDir, "abc123", async () => [
-      "ittybitty-myrepo-agent-abc123",
+      "ittybitty-abc12345-agent-abc123",
     ]);
     expect(result).toEqual({ resolved: "agent-abc123" });
   });
@@ -3828,7 +4072,7 @@ describe("resolveAgentId", () => {
 
     // Another agent only in tmux
     const result = await resolveAgentId(agentsDir, "abc", async () => [
-      "ittybitty-repo-agent-abc222",
+      "ittybitty-abc12345-agent-abc222",
     ]);
     expect(result).toEqual({
       error: "Ambiguous agent ID — multiple matches",
@@ -3851,7 +4095,7 @@ describe("resolveAgentId", () => {
 
     // Same agent also in tmux — should still be a single unique match
     const result = await resolveAgentId(agentsDir, "abc123", async () => [
-      "ittybitty-repo-agent-abc123",
+      "ittybitty-abc12345-agent-abc123",
     ]);
     expect(result).toEqual({ resolved: "agent-abc123" });
   });
@@ -3860,6 +4104,56 @@ describe("resolveAgentId", () => {
     const result = await resolveAgentId(agentsDir, "abc123", async () => [
       "my-other-session",
       "random-session-agent-abc123",
+    ]);
+    expect(result).toEqual({ error: "No matching agent found", matches: [] });
+  });
+
+  test("extracts default agent ID from ittybitty tmux session", async () => {
+    const result = await resolveAgentId(agentsDir, "agent-deadbeef", async () => [
+      "ittybitty-abc12345-agent-deadbeef",
+    ]);
+    expect(result).toEqual({ resolved: "agent-deadbeef" });
+  });
+
+  test("extracts coordinator-style ID from tmux session", async () => {
+    const result = await resolveAgentId(agentsDir, "myrepo", async () => [
+      "ittybitty-abc12345-myrepo",
+    ]);
+    expect(result).toEqual({ resolved: "myrepo" });
+  });
+
+  test("extracts custom-named agent ID from tmux session", async () => {
+    const result = await resolveAgentId(agentsDir, "my-custom-name", async () => [
+      "ittybitty-def67890-my-custom-name",
+    ]);
+    expect(result).toEqual({ resolved: "my-custom-name" });
+  });
+
+  test("extracts custom-named agent with hyphens from tmux session", async () => {
+    const result = await resolveAgentId(agentsDir, "my-long-custom-name", async () => [
+      "ittybitty-fe98dcba-my-long-custom-name",
+    ]);
+    expect(result).toEqual({ resolved: "my-long-custom-name" });
+  });
+
+  test("rejects malformed tmux session without ittybitty prefix", async () => {
+    const result = await resolveAgentId(agentsDir, "agent-abc", async () => [
+      "notittybitty-abc12345-agent-abc",
+    ]);
+    expect(result).toEqual({ error: "No matching agent found", matches: [] });
+  });
+
+  test("rejects tmux session with wrong repo ID format (not 8 hex chars)", async () => {
+    const result = await resolveAgentId(agentsDir, "agent-abc", async () => [
+      "ittybitty-abc123-agent-abc",
+      "ittybitty-abc123456789-agent-abc",
+    ]);
+    expect(result).toEqual({ error: "No matching agent found", matches: [] });
+  });
+
+  test("rejects tmux session with non-hex repo ID", async () => {
+    const result = await resolveAgentId(agentsDir, "agent-abc", async () => [
+      "ittybitty-abcdefgx-agent-abc",
     ]);
     expect(result).toEqual({ error: "No matching agent found", matches: [] });
   });

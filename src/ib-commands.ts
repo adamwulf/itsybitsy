@@ -29,6 +29,7 @@ import { isValidModel, isValidToolList, isValidTmuxSession, isValidSessionId, is
 import { getSavedTmuxWidth } from "./tui/layout";
 import { buildPerRepoCoordinatorSettings, checkCoordinatorExists, getCoordinatorAgentId } from "./coordinator";
 import { loadAgentType, agentTypeExists } from "./agent-types";
+import { listRepos, repoDisplayName } from "./registry";
 
 export interface IbCommandResult {
   ok: boolean;
@@ -1426,23 +1427,33 @@ export async function newAgent(
   await mkdir(archiveDir, { recursive: true });
 
   // Configuration
-  const useWorktree = opts?.noWorktree !== true;
+  let useWorktree = opts?.noWorktree !== true;
   const workerMode = opts?.worker === true;
   const coordinatorMode = opts?.coordinator === true;
   const yoloMode = opts?.yolo === true;
 
+  // Coordinators never use worktrees (SPEC §12.2.3)
+  if (coordinatorMode) {
+    useWorktree = false;
+  }
+
   // Coordinator mutual exclusivity checks
   if (coordinatorMode && workerMode) {
     return { ok: false, exitCode: 1, stdout: "", stderr: "Error: --coordinator and --worker are mutually exclusive" };
-  }
-  if (coordinatorMode && !useWorktree) {
-    return { ok: false, exitCode: 1, stdout: "", stderr: "Error: --no-worktree is not allowed with --coordinator" };
   }
   if (opts?.type && (workerMode || coordinatorMode)) {
     return { ok: false, exitCode: 1, stdout: "", stderr: `Error: --type cannot be combined with --worker or --coordinator` };
   }
   if (opts?.type === "coordinator") {
     return { ok: false, exitCode: 1, stdout: "", stderr: `Error: use --coordinator instead of --type coordinator` };
+  }
+
+  // Validate --type exists before proceeding
+  if (opts?.type) {
+    const typeExists = await agentTypeExists(opts.type);
+    if (!typeExists) {
+      return { ok: false, exitCode: 1, stdout: "", stderr: `Error: unknown agent type '${opts.type}'` };
+    }
   }
 
   // Coordinator one-per-repo check
@@ -1622,11 +1633,41 @@ export async function newAgent(
     if (!/^[a-zA-Z0-9_\-]+$/.test(opts.name)) {
       return { ok: false, exitCode: 1, stdout: "", stderr: "Error: agent name may only contain letters, digits, hyphens, and underscores" };
     }
+    if (opts.name === "coordinator") {
+      return { ok: false, exitCode: 1, stdout: "", stderr: 'Error: "coordinator" is a reserved name (used for system coordinator addressing)' };
+    }
     id = opts.name;
   } else {
     const bytes = new Uint8Array(4);
     crypto.getRandomValues(bytes);
     id = `agent-${Array.from(bytes).map(b => b.toString(16).padStart(2, "0")).join("")}`;
+  }
+
+  // Reserved names check — applies to all ID generation paths
+  if (id === "coordinator") {
+    return { ok: false, exitCode: 1, stdout: "", stderr: 'Error: "coordinator" is a reserved name (used for system coordinator addressing)' };
+  }
+  if (id === "system") {
+    return { ok: false, exitCode: 1, stdout: "", stderr: 'Error: "system" is a reserved name (used for system coordinator addressing)' };
+  }
+
+  // Repo display name collision check
+  const repos = await listRepos();
+  if (coordinatorMode) {
+    // For coordinator agents, check against OTHER repos' display names
+    // (the ID IS the repo basename by design, which is the current repo)
+    const thisRepo = repos.find(r => r.path === rootRepoPath);
+    const otherRepos = repos.filter(r => r.path !== rootRepoPath);
+    const collision = otherRepos.find(r => repoDisplayName(r) === id);
+    if (collision) {
+      return { ok: false, exitCode: 1, stdout: "", stderr: `Error: agent name "${id}" collides with registered repo name` };
+    }
+  } else {
+    // For named and random agents, check against ALL repos' display names and basenames
+    const collision = repos.find(r => repoDisplayName(r) === id || r.name === id);
+    if (collision) {
+      return { ok: false, exitCode: 1, stdout: "", stderr: `Error: agent name "${id}" collides with registered repo name` };
+    }
   }
 
   // Get repo-id for session naming
@@ -1652,7 +1693,8 @@ export async function newAgent(
   let workPath = rootRepoPath;
 
   // 12. Create git worktree if requested
-  // Coordinator branch includes repo-id to avoid collision across repos (SPEC §12.2.2)
+  // Note: coordinator branch format retained for backward compatibility with
+  // session-start.ts and health-check.ts, even though coordinators no longer use worktrees.
   const branchName = coordinatorMode ? `agent/${id}-${repoId}` : `agent/${id}`;
   if (useWorktree) {
     const baseRef = manager ? `agent/${manager}` : "HEAD";
@@ -1665,7 +1707,7 @@ export async function newAgent(
     }
     workPath = join(agentDir, "repo");
 
-    // 13. Write settings.local.json
+    // 13. Write settings.local.json (worktree mode only)
     await mkdir(join(agentDir, "repo", ".claude"), { recursive: true });
     let settingsContent: string;
     if (coordinatorMode) {
@@ -1682,7 +1724,7 @@ export async function newAgent(
             { matcher: "*", hooks: [{ type: "command", command: `ib hook-check-path ${id}` }] },
             { matcher: "Task|Agent|TaskCreate|Bash", hooks: [{ type: "command", command: "ib hooks intercept-task" }] },
           ],
-          SessionStart: [{ hooks: [{ type: "command", command: "ib hooks session-start" }] }],
+          SessionStart: [{ hooks: [{ type: "command", command: `ib hooks session-start ${id}` }] }],
         },
       };
       settingsContent = JSON.stringify(coordSettingsObj, null, 2);
@@ -1697,20 +1739,41 @@ export async function newAgent(
     const rootSettingsPath = join(rootRepoPath, ".claude", "settings.local.json");
     try {
       const rootSettingsFile = Bun.file(rootSettingsPath);
-      if (await rootSettingsFile.exists()) {
-        const settings = await rootSettingsFile.json();
-        const allow = (settings?.permissions?.allow as string[]) ?? [];
-        let needsUpdate = false;
-        if (!allow.includes("Bash(ib:*)")) needsUpdate = true;
-        if (needsUpdate) {
-          if (!allow.includes("Bash(ib:*)")) allow.push("Bash(ib:*)");
-          settings.permissions = { ...settings.permissions, allow };
-          await Bun.write(rootSettingsPath, JSON.stringify(settings, null, 2));
-        }
+      let settingsContent: string;
+
+      if (coordinatorMode) {
+        // Coordinator-specific settings — merge with existing to avoid clobbering
+        const existing = await rootSettingsFile.exists() ? await rootSettingsFile.json() : {};
+        const coordSettings = await buildPerRepoCoordinatorSettings();
+        const hookCmd = `ib hook-permission-denied ${id}`;
+        const coordSettingsObj = {
+          ...existing,
+          ...coordSettings,
+          spinnerTipsEnabled: false,
+          hooks: {
+            Stop: [{ matcher: "*", hooks: [{ type: "command", command: `ib hook-status ${id}` }] }],
+            PermissionRequest: [{ matcher: "*", hooks: [{ type: "command", command: hookCmd }] }],
+            PreToolUse: [
+              { matcher: "*", hooks: [{ type: "command", command: `ib hook-check-path ${id}` }] },
+              { matcher: "Task|Agent|TaskCreate|Bash", hooks: [{ type: "command", command: "ib hooks intercept-task" }] },
+            ],
+            SessionStart: [{ hooks: [{ type: "command", command: `ib hooks session-start ${id}` }] }],
+          },
+        };
+        settingsContent = JSON.stringify(coordSettingsObj, null, 2);
       } else {
-        await mkdir(join(rootRepoPath, ".claude"), { recursive: true });
-        await Bun.write(rootSettingsPath, JSON.stringify({ permissions: { allow: ["Bash(ib:*)"] } }));
+        // Non-coordinator agent in non-worktree mode
+        const settings = await rootSettingsFile.exists() ? await rootSettingsFile.json() : {};
+        const allow = (settings?.permissions?.allow as string[]) ?? [];
+        if (!allow.includes("Bash(ib:*)")) {
+          allow.push("Bash(ib:*)");
+        }
+        settings.permissions = { ...settings.permissions, allow };
+        settingsContent = JSON.stringify(settings, null, 2);
       }
+
+      await mkdir(join(rootRepoPath, ".claude"), { recursive: true });
+      await Bun.write(rootSettingsPath, settingsContent);
     } catch { /* ignore */ }
   }
 
@@ -2099,10 +2162,10 @@ export type ResolveAgentResult =
 /** Extract agent ID from a tmux session name (format: ittybitty-<repoid>-<agentid>) */
 function extractAgentIdFromTmuxSession(sessionName: string): string | null {
   if (!sessionName.startsWith("ittybitty-")) return null;
-  // Format: ittybitty-<repoid>-<agentid>
-  // repoid and agentid both contain hyphens, but agentid always starts with "agent-"
-  const agentMatch = sessionName.match(/-(agent-[a-f0-9]+)$/);
-  return agentMatch ? agentMatch[1]! : null;
+  // Format: ittybitty-<8hexchars>-<agentid>
+  // repoId is always exactly 8 hex characters (4 random bytes)
+  const match = sessionName.match(/^ittybitty-[a-f0-9]{8}-(.+)$/);
+  return match ? match[1]! : null;
 }
 
 /**
@@ -2195,6 +2258,42 @@ export async function diffAgent(agent: Agent, opts?: { stat?: boolean }): Promis
   const diffCmd = opts?.stat
     ? ["git", "-C", worktreePath, "diff", "--stat", `${mergeBase.stdout}..${agentBranch}`]
     : ["git", "-C", worktreePath, "diff", `${mergeBase.stdout}..${agentBranch}`];
+  const diff = await diffStatusSpawnCtx.run(diffCmd);
+  return { ok: diff.exitCode === 0, exitCode: diff.exitCode, stdout: diff.stdout, stderr: diff.stderr };
+}
+
+/**
+ * Diff the current working directory's branch against its merge-base.
+ * Used when `ib diff` is run without an agent ID and outside an agent worktree.
+ * Finds the merge-base of HEAD vs the default branch (main/master) and diffs against it.
+ */
+export async function diffCwd(opts?: { stat?: boolean }): Promise<IbCommandResult> {
+  const cwd = process.cwd();
+
+  // Determine the default branch (try main, then master)
+  const symbolicRef = await diffStatusSpawnCtx.run(["git", "-C", cwd, "symbolic-ref", "refs/remotes/origin/HEAD"]);
+  let baseBranch = "main";
+  if (symbolicRef.exitCode === 0 && symbolicRef.stdout) {
+    const ref = symbolicRef.stdout.replace("refs/remotes/origin/", "");
+    if (ref) baseBranch = ref;
+  }
+
+  // Get the current branch
+  const headRef = await diffStatusSpawnCtx.run(["git", "-C", cwd, "rev-parse", "--abbrev-ref", "HEAD"]);
+  if (headRef.exitCode !== 0) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Failed to determine current branch: ${headRef.stderr}` };
+  }
+  const currentBranch = headRef.stdout;
+
+  // Find merge-base
+  const mergeBase = await diffStatusSpawnCtx.run(["git", "-C", cwd, "merge-base", baseBranch, currentBranch]);
+  if (mergeBase.exitCode !== 0) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Failed to find merge-base between ${baseBranch} and ${currentBranch}: ${mergeBase.stderr}` };
+  }
+
+  const diffCmd = opts?.stat
+    ? ["git", "-C", cwd, "diff", "--stat", `${mergeBase.stdout}..HEAD`]
+    : ["git", "-C", cwd, "diff", `${mergeBase.stdout}..HEAD`];
   const diff = await diffStatusSpawnCtx.run(diffCmd);
   return { ok: diff.exitCode === 0, exitCode: diff.exitCode, stdout: diff.stdout, stderr: diff.stderr };
 }

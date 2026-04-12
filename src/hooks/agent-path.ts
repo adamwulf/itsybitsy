@@ -388,23 +388,33 @@ export async function hookCheckPath(agentId: string, rawStdin?: string): Promise
 
   const agentDir = join(agentsDir, agentId);
   let worktreePath = join(agentDir, "repo");
+  let isNoWorktree = false;
 
   // Resolve worktree to absolute path if it exists
   try {
     worktreePath = await realpath(worktreePath);
   } catch {
-    // Keep the constructed path if realpath fails
+    // Worktree dir doesn't exist — agent may be a non-worktree agent (e.g., coordinator)
+    isNoWorktree = true;
   }
 
-  // Read meta.json for worker flag (or type === "worker")
+  // Read meta.json for worker flag (or type === "worker") and worktree field
   let isWorker = false;
   try {
     const metaFile = Bun.file(join(agentDir, "meta.json"));
     if (await metaFile.exists()) {
       const meta = await metaFile.json();
       isWorker = meta.worker === true || meta.agentType === "worker";
+      if (meta.worktree === false) isNoWorktree = true;
     }
   } catch { /* ignore */ }
+
+  // For non-worktree agents (e.g., coordinators), worktreePath is the repo root
+  if (isNoWorktree) {
+    // Derive repo root: agents dir is <repo>/.ittybitty/agents
+    const repoRoot = resolve(agentsDir, "..", "..");
+    worktreePath = repoRoot;
+  }
 
   // Read settings.local.json for allow list
   let allowList: string[] = [];

@@ -138,6 +138,24 @@ describe("session-start", () => {
     expect(ctx.agentId).toBe("coordinator");
     expect(ctx.agentManager).toBe("");
     expect(ctx.parentBranch).toBe("main");
+    // branchName falls back to agent/<id> when repo-id file is not available
+    expect(ctx.branchName).toBe("agent/coordinator");
+    expect(ctx.rootRepoPath).toBe("/Users/me/project");
+  });
+
+  test("detectRole non-worktree coordinator via agentIdOverride", () => {
+    // Coordinator running directly in the repo root (no worktree)
+    const cwd = "/Users/me/project";
+    const ctx = detectRole(cwd, {
+      id: "project",
+      manager: null,
+      worker: false,
+      coordinator: true,
+    }, "project");
+    expect(ctx.role).toBe("coordinator");
+    expect(ctx.agentId).toBe("project");
+    expect(ctx.branchName).toBe(""); // no worktree = no branch
+    expect(ctx.worktreePath).toBe(""); // no worktree
     expect(ctx.rootRepoPath).toBe("/Users/me/project");
   });
 
@@ -148,6 +166,7 @@ describe("session-start", () => {
       agentId: "coordinator",
       agentManager: "",
       parentBranch: "main",
+      branchName: "agent/coordinator",
       worktreePath: "/Users/me/project/.ittybitty/agents/coordinator/repo",
       rootRepoPath: "/Users/me/project",
     };
@@ -156,7 +175,7 @@ describe("session-start", () => {
     expect(instructions).toContain("Per-Repo Coordinator");
     expect(instructions).toContain("project");
     expect(instructions).toContain("ib new-agent --worker");
-    expect(instructions).toContain("ib send coordinator");
+    expect(instructions).toContain("ib send @system");
   });
 
   test("coordinator instructions mention Read, Glob, Grep, LS", async () => {
@@ -165,6 +184,7 @@ describe("session-start", () => {
       agentId: "coordinator",
       agentManager: "",
       parentBranch: "main",
+      branchName: "agent/coordinator",
       worktreePath: "/Users/me/muse-ios/.ittybitty/agents/coordinator/repo",
       rootRepoPath: "/Users/me/muse-ios",
     };
@@ -220,6 +240,7 @@ describe("session-start", () => {
       agentId: "agent-abc12345",
       agentManager: "",
       parentBranch: "main",
+      branchName: "agent/agent-abc12345",
       worktreePath: "/Users/me/project/.ittybitty/agents/agent-abc12345/repo",
       rootRepoPath: "/Users/me/project",
       agentType: "manager",
@@ -236,6 +257,7 @@ describe("session-start", () => {
       agentId: "agent-def67890",
       agentManager: "agent-abc12345",
       parentBranch: "agent/agent-abc12345",
+      branchName: "agent/agent-def67890",
       worktreePath: "/Users/me/project/.ittybitty/agents/agent-def67890/repo",
       rootRepoPath: "/Users/me/project",
       agentType: "worker",
@@ -253,6 +275,7 @@ describe("session-start", () => {
       agentId: "coordinator",
       agentManager: "",
       parentBranch: "main",
+      branchName: "agent/coordinator",
       worktreePath: "/Users/me/project/.ittybitty/agents/coordinator/repo",
       rootRepoPath: "/Users/me/project",
       agentType: "coordinator",
@@ -270,6 +293,7 @@ describe("interpolateTemplate", () => {
     agentId: "agent-abc123",
     agentManager: "agent-parent",
     parentBranch: "agent/agent-parent",
+    branchName: "agent/agent-abc123",
     worktreePath: "/repo/.ittybitty/agents/agent-abc123/repo",
     rootRepoPath: "/repo",
   };

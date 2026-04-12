@@ -93,6 +93,7 @@ export interface ActionCtx {
   setQuestionsFocused(value: boolean): void;
   healthReport: RepoHealthReport | undefined;
   sidebarWidth: number;
+  getMainWidth(): number;
   repoCoordinatorSession: string | null;
 }
 
@@ -881,10 +882,9 @@ function handleConfigItemAction(
         scrollOffset: 0,
         onSave: (newAllow: string[], newDeny: string[]) => {
           ctx.closeDialog();
-          Promise.all([
-            writeConfig(configFilePath, allowKey, newAllow),
+          writeConfig(configFilePath, allowKey, newAllow).then(() =>
             writeConfig(configFilePath, denyKey, newDeny),
-          ]).then(() => {
+          ).then(() => {
             config[allowKey] = { value: newAllow, source: "user" };
             config[denyKey] = { value: newDeny, source: "user" };
             ctx.setNotice(`${roleKey} permissions updated`);
@@ -949,8 +949,7 @@ export function handleResizeLeft(ctx: ActionCtx, delta: number) {
   }
   // Resize repo coordinator tmux to match new right pane width
   if (ctx.repoCoordinatorSession) {
-    const mainWidth = process.stdout.columns - ctx.sidebarWidth - 1;
-    const rightPaneWidth = mainWidth - newWidth - 1;
+    const rightPaneWidth = ctx.getMainWidth() - newWidth - 1;
     if (rightPaneWidth > 0) {
       resizeTmuxWindow(ctx.repoCoordinatorSession, rightPaneWidth);
     }

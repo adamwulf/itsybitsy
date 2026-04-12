@@ -106,6 +106,7 @@ function makeMockCtx(overrides?: {
     setQuestionsFocused: () => {},
     healthReport: undefined,
     sidebarWidth: 60,
+    getMainWidth: () => (process.stdout.columns ?? 80) - 60 - 1,
     repoCoordinatorSession: null,
   };
   return { ctx, dialogs, notices, refreshCalls, scrollUpCalls, scrollDownCalls };

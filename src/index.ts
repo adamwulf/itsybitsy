@@ -99,6 +99,138 @@ export async function requireAgent(idArg: string | undefined, repos: RepoEntry[]
   return agent;
 }
 
+/**
+ * Resolve a send target using @-based addressing.
+ * Returns { agent, isSystemCoordinator } or null if not found/invalid.
+ * Supports:
+ *   @system → system coordinator
+ *   @coordinator → own repo's coordinator
+ *   @<repo-name> → that repo's coordinator
+ *   @<repo-name>/<agent-id> → agent in specific repo
+ *   <agent-id> (bare) → search same-repo first, then all repos
+ */
+export async function resolveTarget(
+  target: string,
+  repos: RepoEntry[],
+  cwd: string = process.cwd(),
+): Promise<{ agent: Agent | null; isSystemCoordinator: boolean }> {
+  const { readAllAgents } = await import("./agents");
+  const { checkCoordinatorExists } = await import("./coordinator");
+
+  // @system → system coordinator
+  if (target === "@system") {
+    return { agent: null, isSystemCoordinator: true };
+  }
+
+  // Detect own repo from CWD
+  const findOwnRepo = (): RepoEntry | null => {
+    const exactMatch = repos.find((r) => r.path === cwd);
+    if (exactMatch) return exactMatch;
+    const prefixMatch = repos.find((r) => cwd.startsWith(r.path + "/"));
+    if (prefixMatch) return prefixMatch;
+
+    // Check if CWD is inside an agent worktree: /.ittybitty/agents/([^/]+)/repo/
+    const match = cwd.match(/\/.ittybitty\/agents\/[^/]+\/repo$/);
+    if (match) {
+      // Extract the root repo path by going up from /.ittybitty/agents/
+      const repoRoot = cwd.substring(0, cwd.lastIndexOf("/.ittybitty"));
+      return repos.find((r) => r.path === repoRoot) || null;
+    }
+
+    return null;
+  };
+
+  const ownRepo = findOwnRepo();
+
+  // @coordinator → own repo's coordinator
+  if (target === "@coordinator") {
+    if (!ownRepo) {
+      console.error("Error: @coordinator requires running from within a repo");
+      return { agent: null, isSystemCoordinator: false };
+    }
+    const coordResult = await checkCoordinatorExists(ownRepo.path);
+    if (coordResult.exists && coordResult.isCoordinator) {
+      const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })));
+      const coordinator = agents.find((a) => a.id === coordResult.agentId);
+      return { agent: coordinator || null, isSystemCoordinator: false };
+    }
+    console.error(`Error: no coordinator found for repo ${repoDisplayName(ownRepo)}`);
+    return { agent: null, isSystemCoordinator: false };
+  }
+
+  // @<repo-name> → that repo's coordinator
+  // @<repo-name>/<agent-id> → agent in specific repo
+  if (target.startsWith("@")) {
+    const afterAt = target.substring(1);
+    const slashIdx = afterAt.indexOf("/");
+    const repoName = slashIdx >= 0 ? afterAt.substring(0, slashIdx) : afterAt;
+    const agentId = slashIdx >= 0 ? afterAt.substring(slashIdx + 1) : null;
+
+    const repo = repos.find((r) => repoDisplayName(r) === repoName);
+    if (!repo) {
+      console.error(`Error: repo not found: ${repoName}`);
+      return { agent: null, isSystemCoordinator: false };
+    }
+
+    if (agentId) {
+      // @<repo>/<agent-id> → agent in specific repo
+      const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })));
+      const repoAgents = agents.filter((a) => a.repoPath === repo.path);
+      const { match, ambiguous } = matchAgentById(agentId, repoAgents);
+      if (ambiguous.length > 0) {
+        console.error(`Ambiguous ID "${agentId}" in repo ${repoName} matches: ${ambiguous.join(", ")}`);
+        return { agent: null, isSystemCoordinator: false };
+      }
+      if (!match) {
+        console.error(`Agent not found: ${agentId} in repo ${repoName}`);
+        return { agent: null, isSystemCoordinator: false };
+      }
+      return { agent: match, isSystemCoordinator: false };
+    }
+
+    // @<repo> → that repo's coordinator
+    const coordResult = await checkCoordinatorExists(repo.path);
+    if (coordResult.exists && coordResult.isCoordinator) {
+      const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })));
+      const coordinator = agents.find((a) => a.id === coordResult.agentId);
+      return { agent: coordinator || null, isSystemCoordinator: false };
+    }
+    console.error(`Error: no coordinator found for repo ${repoName}`);
+    return { agent: null, isSystemCoordinator: false };
+  }
+
+  // <agent-id> (bare) → search same-repo first, then all repos
+  const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })));
+
+  // Try same-repo agents first (if we have an ownRepo)
+  if (ownRepo) {
+    const sameRepoAgents = agents.filter((a) => a.repoPath === ownRepo.path);
+    const sameRepoResult = matchAgentById(target, sameRepoAgents);
+    if (sameRepoResult.match) {
+      return { agent: sameRepoResult.match, isSystemCoordinator: false };
+    }
+    // If ambiguous in same repo, report it
+    if (sameRepoResult.ambiguous.length > 0) {
+      console.error(`Ambiguous ID "${target}" in ${repoDisplayName(ownRepo)} matches: ${sameRepoResult.ambiguous.join(", ")}`);
+      return { agent: null, isSystemCoordinator: false };
+    }
+    // No match in same repo, continue to global
+  }
+
+  // Fall back to global search
+  const globalResult = matchAgentById(target, agents);
+  if (globalResult.ambiguous.length > 0) {
+    console.error(`Ambiguous ID "${target}" matches: ${globalResult.ambiguous.join(", ")}`);
+    return { agent: null, isSystemCoordinator: false };
+  }
+  if (!globalResult.match) {
+    console.error(`Agent not found: ${target}`);
+    return { agent: null, isSystemCoordinator: false };
+  }
+
+  return { agent: globalResult.match, isSystemCoordinator: false };
+}
+
 async function main() {
   switch (command) {
     case "add": {
@@ -461,10 +593,32 @@ async function main() {
     }
     case "diff": {
       const repos = await listRepos();
-      const agent = await requireAgent(args[1], repos);
       const statOnly = args.includes("--stat");
-      const { diffAgent } = await import("./ib-commands");
-      await printAndExit(await diffAgent(agent, { stat: statOnly }));
+      const diffArgs = args.slice(1).filter((a) => a !== "--stat");
+      let diffAgentId: string | undefined = diffArgs[0];
+
+      // Auto-detect agent ID from CWD if not provided
+      if (!diffAgentId) {
+        const cwd = process.cwd();
+        const worktreeMatch = cwd.match(/\/.ittybitty\/agents\/([^/]+)\/repo/);
+        if (worktreeMatch) {
+          diffAgentId = worktreeMatch[1];
+        }
+      }
+
+      if (diffAgentId) {
+        const agent = await findAgentById(diffAgentId, repos);
+        if (!agent) {
+          console.error(`Agent not found: ${diffAgentId}`);
+          process.exit(1);
+        }
+        const { diffAgent } = await import("./ib-commands");
+        await printAndExit(await diffAgent(agent, { stat: statOnly }));
+      } else {
+        // No agent context — diff current branch vs its merge-base
+        const { diffCwd } = await import("./ib-commands");
+        await printAndExit(await diffCwd({ stat: statOnly }));
+      }
       break;
     }
     case "status": {
@@ -476,7 +630,7 @@ async function main() {
     }
     case "send": {
       const repos = await listRepos();
-      // Parse --from flag before determining agent and message
+      // Parse --from flag before determining target and message
       const sendArgs = args.slice(1);
       let fromAgent: string | undefined;
       const filteredSendArgs: string[] = [];
@@ -488,7 +642,46 @@ async function main() {
           filteredSendArgs.push(sendArgs[i]!);
         }
       }
-      const agent = await requireAgent(filteredSendArgs[0], repos);
+
+      if (!filteredSendArgs[0]) {
+        console.error("Usage: ib send [--from <id>] <target> <message...>");
+        console.error("Targets: @system, @coordinator, @<repo>, @<repo>/<agent-id>, or <agent-id>");
+        process.exit(1);
+      }
+
+      const target = filteredSendArgs[0]!;
+      const { agent: resolvedAgent, isSystemCoordinator } = await resolveTarget(target, repos);
+
+      if (isSystemCoordinator) {
+        let coordMessage = filteredSendArgs.slice(1).join(" ");
+        if (!coordMessage) {
+          if (!process.stdin.isTTY) {
+            const chunks: string[] = [];
+            for await (const chunk of process.stdin) {
+              chunks.push(typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk));
+            }
+            coordMessage = chunks.join("").trim();
+          }
+          if (!coordMessage) {
+            console.error("Usage: ib send [--from <id>] @system <message...>");
+            process.exit(1);
+          }
+        }
+        const { inboxWrite } = await import("./inbox");
+        const result = await inboxWrite(coordMessage, fromAgent ? { source: fromAgent } : undefined);
+        if (result.ok) {
+          console.log("Sent to system coordinator");
+        } else {
+          console.error(result.stderr);
+        }
+        process.exit(result.ok ? 0 : 1);
+        break;
+      }
+
+      if (!resolvedAgent) {
+        process.exit(1);
+      }
+
       let message = filteredSendArgs.slice(1).join(" ");
       if (!message) {
         // If stdin is piped (not TTY), read message from stdin
@@ -500,12 +693,12 @@ async function main() {
           message = chunks.join("").trim();
         }
         if (!message) {
-          console.error("Usage: ib send [--from <id>] <agent-id> <message...>");
+          console.error("Usage: ib send [--from <id>] <target> <message...>");
           process.exit(1);
         }
       }
       const { sendMessage } = await import("./ib-commands");
-      await printAndExit(await sendMessage(agent, message, fromAgent ? { fromAgent } : undefined));
+      await printAndExit(await sendMessage(resolvedAgent, message, fromAgent ? { fromAgent } : undefined));
       break;
     }
     case "kill": {
@@ -596,6 +789,7 @@ async function main() {
           if (!(await promptFile.exists())) { console.error(`Error: prompt file not found: ${promptFilePath}`); process.exit(1); }
           promptParts.push(await promptFile.text());
         }
+        else if (arg === "--coordinator") { opts.coordinator = true; }
         else if (arg === "--no-worktree") { opts.noWorktree = true; }
         else if (arg === "--yolo") { opts.yolo = true; }
         else if (arg === "--allow") {
@@ -941,7 +1135,8 @@ async function main() {
           const { hookSessionStart } = await import("./hooks/session-start");
           const stdin = await new Response(Bun.stdin.stream()).text();
           const agentDir = resolveAgentDir(process.cwd());
-          await withHookLogging("session-start", agentDir, stdin, () => hookSessionStart(stdin));
+          const agentIdArg = args[2]; // optional: ib hooks session-start <agentId>
+          await withHookLogging("session-start", agentDir, stdin, () => hookSessionStart(stdin, agentIdArg));
           break;
         }
         case "main-path": {

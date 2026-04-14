@@ -267,10 +267,19 @@ if (spawnedByAgentId) {
 
 Note: `--spawned-by` without `--spawned-by-repo` is valid — `repo_path` defaults to CWD, which is correct for same-repo spawns.
 
-**e) Validate `repo_path`**: Before writing to meta.json, validate that `spawnedBy.repo_path` is an absolute path:
+**e) Validate and normalize `repo_path`**: Before writing to meta.json, ensure `spawnedBy.repo_path` is an absolute, normalized path. Use `realpathSync` to resolve symlinks (with `resolve()` fallback for non-existent paths) so the stored path matches the registry's canonical form:
 ```ts
-if (spawnedBy && !spawnedBy.repo_path.startsWith("/")) {
-  spawnedBy.repo_path = resolve(spawnedBy.repo_path);
+if (spawnedBy) {
+  // Normalize: resolve symlinks so stored path matches registry's canonical form.
+  // realpathSync resolves symlinks; resolve() only normalizes .. and trailing slashes.
+  // Registry's addRepo stores resolve()-d paths, but the user may pass a symlinked path
+  // via --spawned-by-repo. realpathSync ensures consistency.
+  try {
+    spawnedBy.repo_path = realpathSync(spawnedBy.repo_path);
+  } catch {
+    // Path doesn't exist yet — fall back to resolve() normalization
+    spawnedBy.repo_path = resolve(spawnedBy.repo_path);
+  }
 }
 ```
 
@@ -296,6 +305,8 @@ The critical change: `checkIbCommandAccess()` (line 296-338) currently only chec
 
 The `spawned_by.repo_path` check is critical for security: without it, any agent with a matching `agent_id` (possible with `--name`) in any repo could gain control. The repo_path ties the spawner identity to a specific repo, preventing privilege escalation.
 
+**Path comparison uses `resolve()`** which normalizes `..` and trailing slashes but does NOT resolve symlinks. This is acceptable because: (a) the registry stores `resolve()`-d paths, (b) auto-detected `repo_path` is derived from CWD which is consistent with the registry, and (c) CLI `--spawned-by-repo` values are normalized with `realpathSync` (section 2e) which does resolve symlinks. A mismatch due to symlinks would cause a false deny (safe), never a false allow.
+
 ```ts
 export async function checkIbCommandAccess(
   command: string,
@@ -310,28 +321,31 @@ export async function checkIbCommandAccess(
   const targetMetaPath = join(agentsDir, targetId, "meta.json");
   const callerRepoRoot = resolve(agentsDir, "..", "..");
 
-  // Same-repo check
-  let foundSameRepo = false;
+  /** Check if a meta.json grants access to the calling agent (manager or spawner). */
+  function hasAccess(meta: Record<string, unknown>): boolean {
+    // Allow if caller is the manager
+    if (typeof meta.manager === "string" && meta.manager === callingAgentId) {
+      return true;
+    }
+    // Allow if caller is the spawner with matching repo_path
+    const sb = meta.spawned_by as { agent_id?: string; repo_path?: string } | undefined;
+    if (
+      sb &&
+      sb.agent_id === callingAgentId &&
+      typeof sb.repo_path === "string" &&
+      resolve(sb.repo_path) === callerRepoRoot
+    ) {
+      return true;
+    }
+    return false;
+  }
+
+  // Same-repo check: target exists in calling agent's repo
   try {
     const metaFile = Bun.file(targetMetaPath);
     if (await metaFile.exists()) {
-      foundSameRepo = true;
       const meta = await metaFile.json();
-
-      // Allow if caller is the manager
-      if (typeof meta.manager === "string" && meta.manager === callingAgentId) {
-        return null;
-      }
-      // Allow if caller is the spawner (same-repo case — e.g., coordinator spawned agent in own repo)
-      if (
-        meta.spawned_by &&
-        meta.spawned_by.agent_id === callingAgentId &&
-        typeof meta.spawned_by.repo_path === "string" &&
-        resolve(meta.spawned_by.repo_path) === callerRepoRoot
-      ) {
-        return null;
-      }
-      // Same-repo but neither manager nor spawner
+      if (hasAccess(meta)) return null; // allow
       return {
         decision: "deny",
         reason: `Access denied: only the manager or spawner of '${targetId}' can run 'ib ${parsed.subcommand}'`,
@@ -340,49 +354,29 @@ export async function checkIbCommandAccess(
   } catch { /* fall through to cross-repo check */ }
 
   // Cross-repo check: target not in this repo — search other repos
-  if (!foundSameRepo) {
-    try {
-      const { listRepos } = await import("../registry");
-      const repos = await listRepos();
-      for (const repo of repos) {
-        // Skip our own repo (already checked)
-        if (resolve(repo.path) === callerRepoRoot) continue;
+  try {
+    const { listRepos } = await import("../registry");
+    const repos = await listRepos();
+    for (const repo of repos) {
+      // Skip our own repo (already checked above)
+      if (resolve(repo.path) === callerRepoRoot) continue;
 
-        const crossMetaPath = join(repo.path, ".ittybitty", "agents", targetId, "meta.json");
-        const crossMetaFile = Bun.file(crossMetaPath);
-        if (await crossMetaFile.exists()) {
-          const meta = await crossMetaFile.json();
-          // Allow if caller is the spawner with matching repo_path
-          if (
-            meta.spawned_by &&
-            meta.spawned_by.agent_id === callingAgentId &&
-            typeof meta.spawned_by.repo_path === "string" &&
-            resolve(meta.spawned_by.repo_path) === callerRepoRoot
-          ) {
-            return null;
-          }
-          // Allow if caller is listed as manager (unusual cross-repo but honor it)
-          if (typeof meta.manager === "string" && meta.manager === callingAgentId) {
-            return null;
-          }
-          // Found target but caller has no relationship
-          return {
-            decision: "deny",
-            reason: `Access denied: only the spawner or manager of '${targetId}' can run 'ib ${parsed.subcommand}'`,
-          };
-        }
+      const crossMetaPath = join(repo.path, ".ittybitty", "agents", targetId, "meta.json");
+      const crossMetaFile = Bun.file(crossMetaPath);
+      if (await crossMetaFile.exists()) {
+        const meta = await crossMetaFile.json();
+        if (hasAccess(meta)) return null; // allow
+        return {
+          decision: "deny",
+          reason: `Access denied: only the spawner or manager of '${targetId}' can run 'ib ${parsed.subcommand}'`,
+        };
       }
-    } catch { /* ignore — deny below */ }
-
-    return {
-      decision: "deny",
-      reason: `Access denied: agent '${targetId}' not found in any registered repo`,
-    };
-  }
+    }
+  } catch { /* ignore — deny below */ }
 
   return {
     decision: "deny",
-    reason: `Access denied: agent '${targetId}' not found in this repo`,
+    reason: `Access denied: agent '${targetId}' not found in any registered repo`,
   };
 }
 ```
@@ -453,12 +447,18 @@ The current implementation (line 778+) only reads agents from the watched agent'
 
 ```ts
 async function loadAllAgentsForNotification(repoPath: string): Promise<Agent[]> {
-  // Read all registered repos, not just the current one
+  // Read all registered repos so cross-repo spawners can be found by findAgent().
+  // The existing implementation only reads the agent's own repo, which makes
+  // cross-repo notifySpawner impossible since findAgent can't locate the spawner.
   const { listRepos } = await import("./registry");
   const repos = await listRepos();
-  const { readAllAgents, buildAgentTree } = await import("./agents");
+  const { readAllAgents } = await import("./agents");
   const { agents } = await readAllAgents(repos.map(r => ({ path: r.path, name: r.name })));
-  const roots = buildAgentTree(agents);
+  // Note: buildAgentTree() is NOT called here. findAgent() iterates the flat
+  // array first (exact ID match) so tree structure is unnecessary for notifications.
+  // Also note: detectAgentStates() is intentionally omitted — sendMessage() sends
+  // tmux keys directly and does not check agent state, so state detection adds
+  // overhead with no benefit on the notification path.
   return agents;
 }
 ```
@@ -492,7 +492,14 @@ export async function notifySpawner(
 
 **c) Call `notifySpawner` at every site where `notifyManager` is called:**
 
-In `handleWaiting()`, `handleUnknown()`, `handleComplete()`, and any other state handlers that call `notifyManager`, add a corresponding `notifySpawner` call with the same message and the same guards (debounce, backoff). The spawner notification should use the same `tracker.waitCounter` / `tracker.notifyInterval` thresholds as the manager notification — no separate tracking needed since they fire at the same times.
+Add a `notifySpawner` call immediately after each existing `notifyManager` call, using the same message and the same debounce/backoff guards. The spawner notification shares the same `tracker.waitCounter` / `tracker.notifyInterval` thresholds — no separate tracking needed since they fire at the same times.
+
+Specific call sites in `src/watchdog.ts`:
+- **`handleWaiting()`** (line ~236): After `notifyManager(agent, "[watchdog]: Your subtask ... started waiting", allAgents)`, add `await notifySpawner(agent, "[watchdog]: Agent ... you spawned started waiting", allAgents)`
+- **`handleUnknown()`** (line ~262): After `notifyManager(agent, "[watchdog]: Your subtask ... in unknown state", allAgents)`, add matching `notifySpawner` call
+- **`handleComplete()`** (line ~309): After `notifyManager(agent, "[watchdog]: Your subtask ... just completed", allAgents)`, add matching `notifySpawner` call
+
+The message text should distinguish spawner notifications from manager notifications (e.g., "Agent X you spawned" vs "Your subtask X") so the recipient understands the relationship.
 
 #### 6. `src/hooks/intercept-task.ts` — Pass spawned_by for intercepted spawns
 

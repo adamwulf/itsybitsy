@@ -59,6 +59,36 @@ describe("toolMatchesPattern", () => {
       toolMatchesPattern("Read", { command: "ib send" }, "Bash(ib:*)")
     ).toBe(false);
   });
+
+  test("Bash(exact command) matches exact command", () => {
+    expect(
+      toolMatchesPattern("Bash", { command: "git remote -v" }, "Bash(git remote -v)")
+    ).toBe(true);
+  });
+
+  test("Bash(exact command) does not match different command", () => {
+    expect(
+      toolMatchesPattern("Bash", { command: "git remote add origin foo" }, "Bash(git remote -v)")
+    ).toBe(false);
+  });
+
+  test("Bash(exact command) does not match prefix of command", () => {
+    expect(
+      toolMatchesPattern("Bash", { command: "git remote -v --verbose" }, "Bash(git remote -v)")
+    ).toBe(false);
+  });
+
+  test("Bash(exact command) only matches Bash tool", () => {
+    expect(
+      toolMatchesPattern("Read", { command: "git remote -v" }, "Bash(git remote -v)")
+    ).toBe(false);
+  });
+
+  test("Bash(exact command) works for simple commands", () => {
+    expect(
+      toolMatchesPattern("Bash", { command: "swift package resolve" }, "Bash(swift package resolve)")
+    ).toBe(true);
+  });
 });
 
 // ── checkPathAccess ──────────────────────────────────────────────────────────

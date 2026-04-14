@@ -104,7 +104,7 @@ async function checkCoordinatorBashRestrictions(
         hookSpecificOutput: {
           hookEventName: "PreToolUse",
           permissionDecision: "deny",
-          permissionDecisionReason: "Coordinator git commands cannot use -C flag (bypasses path isolation)",
+          permissionDecisionReason: "The -C flag is not allowed with git. Run git commands from your working directory instead.",
         },
       },
     };
@@ -116,7 +116,7 @@ async function checkCoordinatorBashRestrictions(
         hookSpecificOutput: {
           hookEventName: "PreToolUse",
           permissionDecision: "deny",
-          permissionDecisionReason: "Coordinator git commands cannot use --git-dir flag (bypasses path isolation)",
+          permissionDecisionReason: "The --git-dir flag is not allowed with git. Run git commands from your working directory instead.",
         },
       },
     };
@@ -128,7 +128,7 @@ async function checkCoordinatorBashRestrictions(
         hookSpecificOutput: {
           hookEventName: "PreToolUse",
           permissionDecision: "deny",
-          permissionDecisionReason: "Coordinator git commands cannot use --work-tree flag (bypasses path isolation)",
+          permissionDecisionReason: "The --work-tree flag is not allowed with git. Run git commands from your working directory instead.",
         },
       },
     };

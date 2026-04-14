@@ -350,7 +350,7 @@ describe("checkPathAccess", () => {
     });
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("deny");
-    expect(result.reason).toContain("git -C is not allowed");
+    expect(result.reason).toContain("-C flag is not allowed");
   });
 
   test("blocks git -C even with own worktree path", () => {
@@ -361,7 +361,7 @@ describe("checkPathAccess", () => {
     });
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("deny");
-    expect(result.reason).toContain("git -C is not allowed");
+    expect(result.reason).toContain("-C flag is not allowed");
   });
 
   test("blocks git --git-dir (bypasses path isolation)", () => {
@@ -372,7 +372,7 @@ describe("checkPathAccess", () => {
     });
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("deny");
-    expect(result.reason).toContain("git --git-dir is not allowed");
+    expect(result.reason).toContain("--git-dir flag is not allowed");
   });
 
   test("blocks git --git-dir= with equals syntax", () => {
@@ -383,7 +383,7 @@ describe("checkPathAccess", () => {
     });
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("deny");
-    expect(result.reason).toContain("git --git-dir is not allowed");
+    expect(result.reason).toContain("--git-dir flag is not allowed");
   });
 
   test("blocks git --work-tree (bypasses path isolation)", () => {
@@ -394,7 +394,7 @@ describe("checkPathAccess", () => {
     });
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("deny");
-    expect(result.reason).toContain("git --work-tree is not allowed");
+    expect(result.reason).toContain("--work-tree flag is not allowed");
   });
 
   test("blocks git --work-tree= with equals syntax", () => {
@@ -405,7 +405,7 @@ describe("checkPathAccess", () => {
     });
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("deny");
-    expect(result.reason).toContain("git --work-tree is not allowed");
+    expect(result.reason).toContain("--work-tree flag is not allowed");
   });
 
   test("allows normal git commands without -C", () => {

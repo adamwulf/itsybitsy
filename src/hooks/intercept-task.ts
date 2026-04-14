@@ -96,6 +96,44 @@ async function checkCoordinatorBashRestrictions(
     };
   }
 
+  // Block -C, --git-dir, --work-tree in git commands (bypasses path isolation)
+  if (/^git\s/.test(command) && /\s-C\s/.test(command)) {
+    return {
+      action: "intercept",
+      output: {
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "deny",
+          permissionDecisionReason: "Coordinator git commands cannot use -C flag (bypasses path isolation)",
+        },
+      },
+    };
+  }
+  if (/^git\s/.test(command) && /\s--git-dir[\s=]/.test(command)) {
+    return {
+      action: "intercept",
+      output: {
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "deny",
+          permissionDecisionReason: "Coordinator git commands cannot use --git-dir flag (bypasses path isolation)",
+        },
+      },
+    };
+  }
+  if (/^git\s/.test(command) && /\s--work-tree[\s=]/.test(command)) {
+    return {
+      action: "intercept",
+      output: {
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "deny",
+          permissionDecisionReason: "Coordinator git commands cannot use --work-tree flag (bypasses path isolation)",
+        },
+      },
+    };
+  }
+
   return null;
 }
 

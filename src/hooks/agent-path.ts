@@ -42,6 +42,7 @@ export interface HookDecision {
  *
  * Patterns:
  * - "Bash(prefix:*)": matches Bash tool where command starts with prefix
+ * - "Bash(exact command)": matches Bash tool where command equals exact string
  * - "ToolName": exact tool name match
  */
 export function toolMatchesPattern(
@@ -58,6 +59,17 @@ export function toolMatchesPattern(
       if (command === prefix || command.startsWith(prefix + " ")) {
         return true;
       }
+    }
+    return false;
+  }
+
+  // Check for Bash(exact command) pattern — no :* wildcard
+  const exactBashMatch = pattern.match(/^Bash\((.+)\)$/);
+  if (exactBashMatch) {
+    if (toolName === "Bash") {
+      const exactCommand = exactBashMatch[1]!;
+      const command = String(toolInput.command ?? "");
+      return command === exactCommand;
     }
     return false;
   }

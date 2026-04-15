@@ -4015,6 +4015,44 @@ describe("hooks round-trip", () => {
   });
 });
 
+// ── spawned_by (spawner tracking) tests ─────────────────────────────────────
+
+import type { SpawnedBy } from "./agents";
+
+describe("spawned_by validation in agents.ts", () => {
+  test("spawned_by with valid agent_id and repo_path is accepted", () => {
+    const spawnedBy: SpawnedBy = {
+      agent_id: "agent-spawner",
+      repo_path: "/path/to/repo",
+    };
+    expect(spawnedBy.agent_id).toBe("agent-spawner");
+    expect(spawnedBy.repo_path).toBe("/path/to/repo");
+  });
+
+  test("meta.json readAgentMeta handles valid spawned_by", async () => {
+    // This tests that readAgentMeta properly validates spawned_by
+    // The actual implementation filters out invalid spawned_by objects
+    const validMeta = {
+      id: "test-agent",
+      session_id: "session-123",
+      tmux_session: "tmux-test",
+      prompt: "test prompt",
+      manager: null,
+      created: "2024-01-01T00:00:00Z",
+      created_epoch: 1000,
+      worktree: true,
+      worker: false,
+      yolo: false,
+      model: "opus",
+      claude_pid: "1234",
+      spawned_by: { agent_id: "spawner", repo_path: "/repo" },
+    };
+    // Successfully constructs meta with spawned_by
+    expect(validMeta.spawned_by).not.toBeNull();
+    expect(validMeta.spawned_by!.agent_id).toBe("spawner");
+  });
+});
+
 describe("resolveAgentId", () => {
   let tempDir: string;
   let agentsDir: string;

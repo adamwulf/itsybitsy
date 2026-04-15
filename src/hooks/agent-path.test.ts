@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { checkPathAccess, toolMatchesPattern, parseIbCommand, checkIbCommandAccess } from "./agent-path";
+import { checkPathAccess, toolMatchesPattern, parseIbCommand, checkIbCommandAccess, isInAllowedPaths } from "./agent-path";
 import type { PathCheckInput, PathCheckContext } from "./agent-path";
 import { join } from "path";
 import { mkdir, rm } from "fs/promises";
@@ -679,5 +679,162 @@ describe("checkIbCommandAccess", () => {
     const result = await checkIbCommandAccess("ib resume agent-target1", "agent-sibling1", agentsDir);
     expect(result).not.toBeNull();
     expect(result!.decision).toBe("deny");
+  });
+});
+
+// ── isInAllowedPaths ─────────────────────────────────────────────────────────
+
+describe("isInAllowedPaths", () => {
+  test("exact match", () => {
+    const result = isInAllowedPaths("/home/user/allowed", ["/home/user/allowed"]);
+    expect(result).toBe(true);
+  });
+
+  test("prefix match with directory separator", () => {
+    const result = isInAllowedPaths("/home/user/allowed/file.txt", ["/home/user/allowed"]);
+    expect(result).toBe(true);
+  });
+
+  test("no match for partial name", () => {
+    const result = isInAllowedPaths("/home/user/allowed-other", ["/home/user/allowed"]);
+    expect(result).toBe(false);
+  });
+
+  test("multiple paths in allowedPaths list", () => {
+    const allowed = ["/home/user/project", "/data/shared"];
+    expect(isInAllowedPaths("/home/user/project/src/index.ts", allowed)).toBe(true);
+    expect(isInAllowedPaths("/data/shared/file.csv", allowed)).toBe(true);
+    expect(isInAllowedPaths("/home/user/other/file.txt", allowed)).toBe(false);
+  });
+
+  test("empty allowedPaths list", () => {
+    const result = isInAllowedPaths("/home/user/file.txt", []);
+    expect(result).toBe(false);
+  });
+
+  test("nested subdirectory match", () => {
+    const result = isInAllowedPaths("/home/user/project/src/lib/util.ts", ["/home/user/project"]);
+    expect(result).toBe(true);
+  });
+
+  test("does not match when separator is missing", () => {
+    const result = isInAllowedPaths("/home/user/projects", ["/home/user/project"]);
+    expect(result).toBe(false);
+  });
+});
+
+// ── allowedPaths integration tests ───────────────────────────────────────────
+
+describe("checkPathAccess with allowedPaths", () => {
+  test("allowedPaths undefined: legacy permissive mode (allows all system paths)", () => {
+    const ctx = makeCtx({
+      allowedPaths: undefined,
+    });
+    const input = makeInput({
+      toolName: "Read",
+      toolInput: { file_path: "/usr/local/bin/someapp" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("allow");
+  });
+
+  test("allowedPaths empty array: strict mode (denies non-worktree paths)", () => {
+    const ctx = makeCtx({
+      allowedPaths: [],
+    });
+    const input = makeInput({
+      toolName: "Read",
+      toolInput: { file_path: "/usr/local/bin/someapp" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("allowedPaths");
+  });
+
+  test("allowedPaths empty array: still allows worktree", () => {
+    const ctx = makeCtx({
+      allowedPaths: [],
+    });
+    const input = makeInput({
+      toolName: "Read",
+      toolInput: { file_path: "/repo/.ittybitty/agents/agent-abc123/repo/src/index.ts" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("allow");
+  });
+
+  test("allowedPaths with entries: allows matching paths", () => {
+    const ctx = makeCtx({
+      allowedPaths: ["/home/user/data", "/var/log"],
+    });
+    const input = makeInput({
+      toolName: "Read",
+      toolInput: { file_path: "/home/user/data/file.csv" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("allow");
+  });
+
+  test("allowedPaths with entries: denies non-matching paths", () => {
+    const ctx = makeCtx({
+      allowedPaths: ["/home/user/data", "/var/log"],
+    });
+    const input = makeInput({
+      toolName: "Read",
+      toolInput: { file_path: "/home/user/config/secret.json" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("allowedPaths");
+  });
+
+  test("allowedPaths: step 8 (other agents) still blocks even if path in allowedPaths", () => {
+    const ctx = makeCtx({
+      allowedPaths: ["/repo/.ittybitty/agents"],
+    });
+    const input = makeInput({
+      toolName: "Read",
+      toolInput: { file_path: "/repo/.ittybitty/agents/agent-other/repo/src/index.ts" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("other agents");
+  });
+
+  test("allowedPaths: step 9 (main repo) still blocks even if path in allowedPaths", () => {
+    const ctx = makeCtx({
+      allowedPaths: ["/repo"],
+    });
+    const input = makeInput({
+      toolName: "Read",
+      toolInput: { file_path: "/repo/src/main.ts" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("work in your worktree");
+  });
+
+  test("allowedPaths with Bash cd command", () => {
+    const ctx = makeCtx({
+      allowedPaths: ["/home/user/project"],
+    });
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "cd /home/user/project" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("allow");
+  });
+
+  test("allowedPaths with Glob path field", () => {
+    const ctx = makeCtx({
+      allowedPaths: ["/data/files"],
+    });
+    const input = makeInput({
+      toolName: "Glob",
+      toolInput: { pattern: "*.txt", path: "/data/files" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("allow");
   });
 });

@@ -25,6 +25,7 @@ export interface AgentType {
     deny?: string[];
   };
   icon?: string;
+  allowedPaths?: string[];
   instructionStyle: "manager" | "worker" | "coordinator";
   markdownBody?: string;
 }
@@ -304,6 +305,14 @@ export async function loadAgentType(name: string): Promise<AgentType> {
   const rawIcon = getString(frontmatter.icon, "");
   const iconChar = rawIcon.match(/\S/)?.[0] || undefined;
 
+  // Parse allowedPaths: distinguish between absent (undefined) and present-but-empty ([])
+  let allowedPaths: string[] | undefined = undefined;
+  if ("allowedPaths" in frontmatter) {
+    allowedPaths = Array.isArray(frontmatter.allowedPaths)
+      ? (frontmatter.allowedPaths as string[])
+      : [];
+  }
+
   return {
     name: getString(frontmatter.name, name),
     description: getString(frontmatter.description, ""),
@@ -314,6 +323,7 @@ export async function loadAgentType(name: string): Promise<AgentType> {
       allow: Array.isArray(permissions.allow) ? permissions.allow as string[] : undefined,
       deny: Array.isArray(permissions.deny) ? permissions.deny as string[] : undefined,
     } : undefined,
+    allowedPaths,
     instructionStyle: validateInstructionStyle(getString(frontmatter.instructionStyle, "")),
     markdownBody: body || undefined,
   };

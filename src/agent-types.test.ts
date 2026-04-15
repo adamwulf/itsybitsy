@@ -353,3 +353,56 @@ test("agentTypeExists: returns false for nonexistent types", async () => {
   const nonexistentExists = await agentTypeExists("nonexistent-type-xyz");
   expect(nonexistentExists).toBe(false);
 });
+
+test("parseAgentTypeFile: parses allowedPaths from list syntax", () => {
+  const content = `---
+name: restricted
+allowedPaths:
+  - /home/user/project
+  - /data
+---
+body`;
+
+  const { frontmatter } = parseAgentTypeFile(content);
+
+  expect(Array.isArray(frontmatter.allowedPaths)).toBe(true);
+  expect(frontmatter.allowedPaths).toEqual(["/home/user/project", "/data"]);
+});
+
+test("parseAgentTypeFile: parses allowedPaths from inline array", () => {
+  const content = `---
+name: restricted
+allowedPaths: [/home/user/project, /data]
+---
+body`;
+
+  const { frontmatter } = parseAgentTypeFile(content);
+
+  expect(Array.isArray(frontmatter.allowedPaths)).toBe(true);
+  expect(frontmatter.allowedPaths).toEqual(["/home/user/project", "/data"]);
+});
+
+test("parseAgentTypeFile: allowedPaths absent means undefined", () => {
+  const content = `---
+name: unrestricted
+canSpawnChildren: true
+---
+body`;
+
+  const { frontmatter } = parseAgentTypeFile(content);
+
+  expect(frontmatter.allowedPaths).toBeUndefined();
+});
+
+test("parseAgentTypeFile: allowedPaths empty array is preserved", () => {
+  const content = `---
+name: strict
+allowedPaths: []
+---
+body`;
+
+  const { frontmatter } = parseAgentTypeFile(content);
+
+  expect(Array.isArray(frontmatter.allowedPaths)).toBe(true);
+  expect((frontmatter.allowedPaths as unknown[]).length).toBe(0);
+});

@@ -20,6 +20,8 @@ export interface SessionContext {
   agentType?: string;
   /** Cross-repo spawner info (set when meta.spawned_by is present and differs from manager) */
   spawnedBy?: { agent_id: string; repo_path: string };
+  /** Additional allowed paths from agent type */
+  allowedPaths?: string[];
 }
 
 export function detectRole(
@@ -31,6 +33,7 @@ export function detectRole(
     coordinator?: boolean;
     agentType?: string;
     spawned_by?: { agent_id: string; repo_path: string };
+    allowedPaths?: unknown;
   },
   agentIdOverride?: string,
 ): SessionContext {
@@ -96,6 +99,12 @@ export function detectRole(
   const effectiveSpawnedBy =
     spawnedBy && spawnedBy.agent_id !== agentManager ? spawnedBy : undefined;
 
+  // Parse allowedPaths: should be an array of strings or undefined
+  let allowedPaths: string[] | undefined = undefined;
+  if (Array.isArray(meta.allowedPaths)) {
+    allowedPaths = meta.allowedPaths.filter((p): p is string => typeof p === "string");
+  }
+
   return {
     role,
     agentId,
@@ -106,6 +115,7 @@ export function detectRole(
     rootRepoPath,
     agentType,
     spawnedBy: effectiveSpawnedBy,
+    allowedPaths,
   };
 }
 
@@ -183,6 +193,52 @@ export async function generateInstructions(ctx: SessionContext): Promise<string>
     default:
       return generatePrimaryInstructions();
   }
+}
+
+/**
+ * Build the Path Isolation section of instructions based on agent context.
+ *
+ * Shows:
+ * - Worktree path or repo path (for non-worktree agents)
+ * - CAN access: worktree, ~/.claude, /tmp, system paths
+ * - Additional allowedPaths if defined in agent type
+ * - CANNOT access: main repo (for worktree agents) or other agents' worktrees
+ */
+export function buildPathIsolationSection(ctx: SessionContext): string {
+  let baseSection = "";
+  let canAccessSection = "";
+  let additionalPaths = "";
+  let cannotAccessSection = "";
+
+  if (ctx.worktreePath) {
+    // Worktree agent
+    baseSection = `You are isolated to your worktree at: ${ctx.worktreePath}`;
+    canAccessSection = `- You CAN access: Your worktree, ~/.claude, /tmp, and general system paths`;
+    cannotAccessSection = `- You CANNOT access: The main repo at ${ctx.rootRepoPath}, other agents' worktrees`;
+  } else {
+    // Non-worktree agent (e.g., coordinator)
+    baseSection = `You are working directly in the repo at: ${ctx.rootRepoPath}`;
+    canAccessSection = `- You CAN access: This repo, ~/.claude, /tmp, and general system paths`;
+    cannotAccessSection = `- You CANNOT access: Other agents' worktrees`;
+  }
+
+  // Add allowedPaths if present
+  if (ctx.allowedPaths && ctx.allowedPaths.length > 0) {
+    additionalPaths = `and these additional paths:\n${ctx.allowedPaths.map(p => `  - ${p}`).join("\n")}`;
+  }
+
+  // Combine sections
+  let pathSection = `### Path Isolation\n\n${baseSection}\n${canAccessSection}`;
+  if (additionalPaths) {
+    pathSection += `\n${additionalPaths}`;
+  }
+  pathSection += `\n${cannotAccessSection}`;
+
+  if (ctx.worktreePath) {
+    pathSection += `\n- If you get "Access denied" or "Path violation" errors, you're trying to access a forbidden path`;
+  }
+
+  return pathSection;
 }
 
 function generatePrimaryInstructions(): string {
@@ -278,12 +334,7 @@ Each Bash tool call must run exactly ONE command. Multi-command calls will be bl
 - NO subshells or command substitution that runs multiple commands
 - If you need to run two commands, make two separate Bash tool calls
 
-### Path Isolation
-
-You are isolated to your worktree at: ${ctx.worktreePath}
-- You CAN access: Your worktree, ~/.claude, /tmp, and general system paths
-- You CANNOT access: The main repo at ${ctx.rootRepoPath}, other agents' worktrees
-- If you get "Access denied" or "Path violation" errors, you're trying to access a forbidden path
+${buildPathIsolationSection(ctx)}
 
 ### Git Worktree Context
 
@@ -388,12 +439,7 @@ Each Bash tool call must run exactly ONE command. Multi-command calls will be bl
 - NO subshells or command substitution that runs multiple commands
 - If you need to run two commands, make two separate Bash tool calls
 
-### Path Isolation
-
-You are isolated to your worktree at: ${ctx.worktreePath}
-- You CAN access: Your worktree, ~/.claude, /tmp, and general system paths
-- You CANNOT access: The main repo at ${ctx.rootRepoPath}, other agents' worktrees
-- If you get "Access denied" or "Path violation" errors, you're trying to access a forbidden path
+${buildPathIsolationSection(ctx)}
 
 ### Git Worktree Context
 
@@ -457,12 +503,7 @@ Each Bash tool call must run exactly ONE command. Multi-command calls will be bl
 - NO subshells or command substitution that runs multiple commands
 - If you need to run two commands, make two separate Bash tool calls
 
-### Path Isolation
-
-You are working directly in the repo at: ${ctx.rootRepoPath}
-- You CAN access: This repo, ~/.claude, /tmp, and general system paths
-- You CANNOT access: Other agents' worktrees
-- If you get "Access denied" or "Path violation" errors, you're trying to access a forbidden path
+${buildPathIsolationSection(ctx)}
 
 ### Commands
 

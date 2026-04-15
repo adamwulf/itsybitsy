@@ -1821,16 +1821,24 @@ export async function newAgent(
     };
   }
 
-  // 14. Write meta.json
-  // If spawned_by wasn't auto-detected and we have a same-repo manager,
-  // set spawned_by to match the manager for consistency
-  if (!spawnedBy && manager) {
-    spawnedBy = {
-      agent_id: manager,
-      repo_path: rootRepoPath,
-    };
+  // 14. Resolve and normalize allowedPaths from agent type
+  let resolvedAllowedPaths: string[] | undefined = undefined;
+  if (agentTypeDef.allowedPaths !== undefined) {
+    resolvedAllowedPaths = agentTypeDef.allowedPaths.map(path => {
+      // Expand ~ to home directory
+      let expanded = path.startsWith("~") ? path.replace("~", homedir()) : path;
+      // Resolve to absolute path
+      expanded = resolve(expanded);
+      // Try to resolve symlinks, fall back to resolve() result if path doesn't exist
+      try {
+        return realpathSync(expanded);
+      } catch {
+        return expanded;
+      }
+    });
   }
 
+  // 15. Write meta.json
   const now = new Date();
   const metaJson: Record<string, unknown> = {
     id,
@@ -1851,6 +1859,10 @@ export async function newAgent(
   if (coordinatorMode) {
     metaJson.coordinator = true;
   }
+  // Only write allowedPaths if it's defined (preserves [] for strict mode)
+  if (resolvedAllowedPaths !== undefined) {
+    metaJson.allowedPaths = resolvedAllowedPaths;
+  }
   await Bun.write(join(agentDir, "meta.json"), JSON.stringify(metaJson, null, 2) + "\n");
 
   // Log agent creation
@@ -1862,7 +1874,7 @@ export async function newAgent(
     await logAgent(agentDir, `Agent created (prompt: ${prompt})`);
   }
 
-  // 15. Build prompt.txt
+  // 16. Build prompt.txt
   const createPRs = config.createPullRequests?.value === true;
   let completionInstructions = "";
 

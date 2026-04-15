@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { detectRole, generateInstructions, interpolateTemplate, type SessionContext } from "./session-start";
+import { detectRole, generateInstructions, interpolateTemplate, buildPathIsolationSection, type SessionContext } from "./session-start";
 
 describe("session-start", () => {
   test("detectRole non-agent cwd → primary", () => {
@@ -343,5 +343,127 @@ describe("interpolateTemplate", () => {
     const template = "{{#if isTopLevel}}\nask questions\n{{/if}}";
     const result = interpolateTemplate(template, baseCtx);
     expect(result).not.toContain("ask questions");
+  });
+});
+
+describe("buildPathIsolationSection", () => {
+  const baseCtx: SessionContext = {
+    role: "manager",
+    agentId: "agent-abc123",
+    agentManager: "",
+    parentBranch: "main",
+    branchName: "agent/agent-abc123",
+    worktreePath: "/repo/.ittybitty/agents/agent-abc123/repo",
+    rootRepoPath: "/repo",
+  };
+
+  test("worktree agent without allowedPaths shows default message", () => {
+    const ctx = { ...baseCtx };
+    const section = buildPathIsolationSection(ctx);
+    expect(section).toContain("### Path Isolation");
+    expect(section).toContain("You are isolated to your worktree at: /repo/.ittybitty/agents/agent-abc123/repo");
+    expect(section).toContain("You CAN access: Your worktree, ~/.claude, /tmp, and general system paths");
+    expect(section).toContain("The main repo at /repo");
+    expect(section).not.toContain("additional paths");
+  });
+
+  test("worktree agent with allowedPaths lists them", () => {
+    const ctx = { ...baseCtx, allowedPaths: ["/home/user/data", "/var/log"] };
+    const section = buildPathIsolationSection(ctx);
+    expect(section).toContain("and these additional paths:");
+    expect(section).toContain("/home/user/data");
+    expect(section).toContain("/var/log");
+  });
+
+  test("worktree agent with empty allowedPaths shows default", () => {
+    const ctx = { ...baseCtx, allowedPaths: [] };
+    const section = buildPathIsolationSection(ctx);
+    expect(section).toContain("You CAN access: Your worktree, ~/.claude, /tmp, and general system paths");
+    expect(section).not.toContain("additional paths");
+  });
+
+  test("non-worktree (coordinator) shows repo path", () => {
+    const ctx: SessionContext = {
+      role: "coordinator",
+      agentId: "coordinator",
+      agentManager: "",
+      parentBranch: "main",
+      branchName: "",
+      worktreePath: "",
+      rootRepoPath: "/repo",
+    };
+    const section = buildPathIsolationSection(ctx);
+    expect(section).toContain("You are working directly in the repo at: /repo");
+    expect(section).toContain("You CAN access: This repo, ~/.claude, /tmp, and general system paths");
+    expect(section).not.toContain("The main repo");
+  });
+
+  test("non-worktree coordinator with allowedPaths lists them", () => {
+    const ctx: SessionContext = {
+      role: "coordinator",
+      agentId: "coordinator",
+      agentManager: "",
+      parentBranch: "main",
+      branchName: "",
+      worktreePath: "",
+      rootRepoPath: "/repo",
+      allowedPaths: ["/data/shared"],
+    };
+    const section = buildPathIsolationSection(ctx);
+    expect(section).toContain("and these additional paths:");
+    expect(section).toContain("/data/shared");
+  });
+
+  test("detectRole parses allowedPaths from meta.json", () => {
+    const cwd = "/Users/me/project/.ittybitty/agents/agent-abc12345/repo";
+    const ctx = detectRole(cwd, {
+      id: "agent-abc12345",
+      manager: null,
+      worker: false,
+      allowedPaths: ["/home/user/project", "/tmp/shared"],
+    });
+    expect(ctx.allowedPaths).toEqual(["/home/user/project", "/tmp/shared"]);
+  });
+
+  test("detectRole allowedPaths undefined when not in meta", () => {
+    const cwd = "/Users/me/project/.ittybitty/agents/agent-abc12345/repo";
+    const ctx = detectRole(cwd, {
+      id: "agent-abc12345",
+      manager: null,
+      worker: false,
+    });
+    expect(ctx.allowedPaths).toBeUndefined();
+  });
+
+  test("manager instructions include buildPathIsolationSection", async () => {
+    const ctx: SessionContext = {
+      role: "manager",
+      agentId: "agent-abc123",
+      agentManager: "",
+      parentBranch: "main",
+      branchName: "agent/agent-abc123",
+      worktreePath: "/repo/.ittybitty/agents/agent-abc123/repo",
+      rootRepoPath: "/repo",
+      allowedPaths: ["/home/user/data"],
+    };
+    const instructions = await generateInstructions(ctx);
+    expect(instructions).toContain("### Path Isolation");
+    expect(instructions).toContain("/home/user/data");
+  });
+
+  test("worker instructions include buildPathIsolationSection", async () => {
+    const ctx: SessionContext = {
+      role: "worker",
+      agentId: "agent-def67890",
+      agentManager: "agent-abc12345",
+      parentBranch: "agent/agent-abc12345",
+      branchName: "agent/agent-def67890",
+      worktreePath: "/repo/.ittybitty/agents/agent-def67890/repo",
+      rootRepoPath: "/repo",
+      allowedPaths: ["/var/data"],
+    };
+    const instructions = await generateInstructions(ctx);
+    expect(instructions).toContain("### Path Isolation");
+    expect(instructions).toContain("/var/data");
   });
 });

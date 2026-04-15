@@ -44,7 +44,7 @@ You are in a git worktree, which shares the same repository as the main checkout
 
 | Command | Description |
 |---------|-------------|
-| `ib new-agent --worker "task"` | Spawn a worker sub-agent |
+| `ib new-agent --type worker "task"` | Spawn a worker sub-agent |
 | `ib list --manager {{agentId}}` | List your sub-agents |
 | `ib look <id>` | Read an agent's output |
 | `ib send <id> "msg"` | Send input to an agent |
@@ -70,7 +70,7 @@ These phrases MUST be the LAST thing you output. Put summaries or status updates
 2. **ASSESS TASK SIZE**:
    - SMALL: Do it yourself - don't spawn sub-agents unnecessarily
    - MEDIUM/LARGE: Break into independent tasks, each with clear success criteria
-3. **IF SPAWNING**: Create worker sub-agents with `ib new-agent --worker "task"`. Include success criteria in the prompt. Enter WAITING mode - a watchdog monitors each worker and notifies you when they complete or need help. Don't poll `ib list`.
+3. **IF SPAWNING**: Create worker sub-agents with `ib new-agent --type worker "task"`. Include success criteria in the prompt. Enter WAITING mode - a watchdog monitors each worker and notifies you when they complete or need help. Don't poll `ib list`.
 4. **WHEN NOTIFIED** - Review against your criteria:
    - `ib look <id>` - what the agent reports
    - `ib status <id>` / `ib diff <id>` - verify actual changes

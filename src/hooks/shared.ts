@@ -29,17 +29,33 @@ export function checkGitDirectoryFlags(command: string): string | null {
   // For -C, walk tokens after "git" to find it in the global flag position.
   // Global flags come before the subcommand (first non-flag token).
   // Once we see a non-flag token, any subsequent -C is a subcommand flag.
+  //
+  // Some global flags consume the next token as their value (e.g., -c key=val).
+  // We must skip those value tokens so they aren't mistaken for the subcommand.
   const tokens = command.split(/\s+/);
   // tokens[0] is "git"
-  for (let i = 1; i < tokens.length; i++) {
+  let i = 1;
+  while (i < tokens.length) {
     const token = tokens[i]!;
-    // -C with attached path (e.g., "-C/other/repo")
+    // -C with attached path (e.g., "-C/other/repo") or standalone -C
     if (token === "-C" || token.startsWith("-C")) {
       return "-C";
     }
-    // Skip other global flags (tokens starting with -)
-    // Also skip values of long flags like --no-pager (no value) vs --git-dir=x (handled above)
+    // Git global short flags that consume the next token as a value.
+    // Must skip the value so it isn't mistaken for the subcommand.
+    if (token === "-c") {
+      i += 2; // skip -c and its value
+      continue;
+    }
+    // Long flags with = (e.g., --namespace=foo) are one token starting with -
+    // Long flags with space value (e.g., --namespace foo) — these are already
+    // handled by --git-dir/--work-tree regex above. For other long flags with
+    // values (--namespace, --config-env, --super-prefix), their values don't
+    // start with - so they'd cause a false break. But these are obscure global
+    // flags unlikely to appear in agent commands, and a false break just means
+    // we stop scanning early — erring on the side of allowing (not blocking).
     if (token.startsWith("-")) {
+      i++;
       continue;
     }
     // First non-flag token is the subcommand — stop scanning for global -C

@@ -460,6 +460,17 @@ describe("checkPathAccess", () => {
     expect(result.reason).toContain("-C flag is not allowed");
   });
 
+  test("blocks git -c key=val -C /path (value-consuming flag before -C)", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "git -c user.name=test -C /other/repo status" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("-C flag is not allowed");
+  });
+
   test("blocks git -C/path (no space after -C)", () => {
     const ctx = makeCtx();
     const input = makeInput({

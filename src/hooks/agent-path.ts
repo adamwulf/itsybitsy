@@ -378,7 +378,15 @@ export async function checkIbCommandAccess(
       const crossMetaPath = join(repo.path, ".ittybitty", "agents", targetId, "meta.json");
       const crossMetaFile = Bun.file(crossMetaPath);
       if (await crossMetaFile.exists()) {
-        const meta = await crossMetaFile.json();
+        let meta: Record<string, unknown>;
+        try {
+          meta = await crossMetaFile.json();
+        } catch {
+          return {
+            decision: "deny",
+            reason: `Access denied: cannot read meta for agent '${targetId}'`,
+          };
+        }
         if (hasAccess(meta)) return null; // allow
         return {
           decision: "deny",

@@ -224,9 +224,10 @@ export async function processTaskIntercept(
   }
 
   // 12. Success — deny the original tool to prevent double-spawn.
-  // Using "deny" ensures the model won't retry the tool call, which would
-  // create duplicate agents. The denial reason tells the model the agent
-  // was successfully spawned and how to monitor it.
+  // Using "deny" is required because it's the only way to prevent the original
+  // Task/Agent tool from also executing (which would create a duplicate).
+  // The denial reason clearly communicates that this was a SUCCESSFUL redirect,
+  // not a failure. The additionalContext reinforces this.
   const id = spawnedId ?? "unknown";
   return {
     action: "intercept",
@@ -235,7 +236,7 @@ export async function processTaskIntercept(
       hookSpecificOutput: {
         hookEventName: "PreToolUse",
         permissionDecision: "deny",
-        permissionDecisionReason: `ib agent ${id} has been spawned to handle this task. Monitor with: ib look ${id} — Do NOT retry or re-spawn.`,
+        permissionDecisionReason: `SUCCESS: Your task was intercepted and redirected to ib agent ${id}. The agent is now running autonomously. This "deny" is expected behavior — it prevents duplicate execution. Do NOT retry or re-spawn. Monitor progress: ib look ${id}`,
       },
     },
   };

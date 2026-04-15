@@ -758,6 +758,8 @@ async function main() {
       const promptParts: string[] = [];
       const opts: import("./ib-commands").NewAgentOptions = {};
       let repoArg: string | undefined;
+      let spawnedByAgentId: string | undefined;
+      let spawnedByRepoPath: string | undefined;
       for (let i = 0; i < ibArgs.length; i++) {
         const arg = ibArgs[i]!;
         if (arg === "--worker") { opts.worker = true; }
@@ -780,6 +782,14 @@ async function main() {
         else if (arg === "--repo") {
           if (!ibArgs[i + 1]) { console.error("Error: --repo requires a value"); process.exit(1); }
           repoArg = ibArgs[++i];
+        }
+        else if (arg === "--spawned-by") {
+          if (!ibArgs[i + 1]) { console.error("Error: --spawned-by requires a value"); process.exit(1); }
+          spawnedByAgentId = ibArgs[++i];
+        }
+        else if (arg === "--spawned-by-repo") {
+          if (!ibArgs[i + 1]) { console.error("Error: --spawned-by-repo requires a value"); process.exit(1); }
+          spawnedByRepoPath = ibArgs[++i];
         }
         else if (arg === "--prompt-file") {
           if (!ibArgs[i + 1]) { console.error("Error: --prompt-file requires a value"); process.exit(1); }
@@ -804,6 +814,20 @@ async function main() {
           process.exit(1);
         }
         else { promptParts.push(arg); }
+      }
+
+      // Validate spawned-by co-dependency
+      if (spawnedByRepoPath && !spawnedByAgentId) {
+        console.error("Error: --spawned-by-repo requires --spawned-by");
+        process.exit(1);
+      }
+
+      // Construct spawnedBy if provided
+      if (spawnedByAgentId) {
+        opts.spawnedBy = {
+          agent_id: spawnedByAgentId,
+          repo_path: spawnedByRepoPath ?? process.cwd(),
+        };
       }
       const prompt = promptParts.join(" ");
       if (!prompt) {

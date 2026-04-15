@@ -623,7 +623,7 @@ describe("checkIbCommandAccess", () => {
     const result = await checkIbCommandAccess("ib kill agent-target1", "agent-manager1", agentsDir);
     expect(result).not.toBeNull();
     expect(result!.decision).toBe("deny");
-    expect(result!.reason).toContain("not found in this repo");
+    expect(result!.reason).toContain("not found in any registered repo");
   });
 
   test("allows merge when calling agent is the manager", async () => {

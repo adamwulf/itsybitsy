@@ -4,10 +4,11 @@
  * All commands are implemented natively — no ib CLI dependency.
  */
 
-import { join, dirname } from "path";
+import { join, dirname, resolve } from "path";
 import { readdir, chmod, rm, mkdir } from "fs/promises";
+import { realpathSync } from "fs";
 import { homedir } from "node:os";
-import type { Agent } from "./agents";
+import type { Agent, SpawnedBy } from "./agents";
 import { writeAgentState, isWorkerLike, getAgentType, canSpawnChildren } from "./agents";
 import { resolveAgentType } from "./agent-types";
 import {
@@ -1166,6 +1167,7 @@ export interface NewAgentOptions {
   allowTools?: string;
   denyTools?: string;
   print?: boolean;
+  spawnedBy?: SpawnedBy;
   /** Override cwd for auto-detect manager (used in tests). */
   _cwd?: string;
 }
@@ -1501,6 +1503,48 @@ export async function newAgent(
     }
   }
 
+  // 3.5. Auto-detect spawned_by from CWD (works cross-repo, unlike manager auto-detect)
+  let spawnedBy: SpawnedBy | undefined = opts?.spawnedBy;
+  if (!spawnedBy) {
+    const cwd = opts?._cwd ?? process.cwd();
+
+    // Case 1: Worktree agent — CWD matches /.ittybitty/agents/<id>/repo
+    const agentPattern = /\/.ittybitty\/agents\/([^/]+)\/repo/;
+    const worktreeMatch = cwd.match(agentPattern);
+    if (worktreeMatch) {
+      const spawnerDir = cwd.replace(/(\/.ittybitty\/agents\/[^/]*)\/repo.*/, "$1");
+      try {
+        const spawnerMeta = await Bun.file(join(spawnerDir, "meta.json")).json();
+        if (spawnerMeta.id) {
+          const spawnerRepoPath = cwd.substring(0, cwd.indexOf("/.ittybitty/agents/"));
+          spawnedBy = {
+            agent_id: spawnerMeta.id,
+            repo_path: spawnerRepoPath,
+          };
+        }
+      } catch { /* ignore */ }
+    }
+
+    // Case 2: Non-worktree agent (coordinator) — CWD is a registered repo root
+    // Coordinators run from the repo root, so CWD won't match the worktree pattern.
+    // Detect by checking if CWD is a registered repo with a coordinator agent.
+    if (!spawnedBy && !worktreeMatch) {
+      try {
+        const repos = await listRepos();
+        const repoMatch = repos.find(r => r.path === cwd);
+        if (repoMatch) {
+          const coordStatus = await checkCoordinatorExists(cwd);
+          if (coordStatus.exists && coordStatus.agentId) {
+            spawnedBy = {
+              agent_id: coordStatus.agentId,
+              repo_path: cwd,
+            };
+          }
+        }
+      } catch { /* ignore */ }
+    }
+  }
+
   // 4. Validate manager
   if (manager) {
     // Resolve partial ID
@@ -1736,6 +1780,29 @@ export async function newAgent(
   // Generate UUID for Claude session
   const sessionUuid = crypto.randomUUID();
 
+  // Normalize and validate spawned_by repo_path before writing to meta.json
+  if (spawnedBy) {
+    // Normalize: resolve symlinks so stored path matches registry's canonical form.
+    // realpathSync resolves symlinks; resolve() only normalizes .. and trailing slashes.
+    // Registry's addRepo stores resolve()-d paths, but the user may pass a symlinked path
+    // via --spawned-by-repo. realpathSync ensures consistency.
+    try {
+      spawnedBy.repo_path = realpathSync(spawnedBy.repo_path);
+    } catch {
+      // Path doesn't exist yet — fall back to resolve() normalization
+      spawnedBy.repo_path = resolve(spawnedBy.repo_path);
+    }
+  }
+
+  // If spawned_by wasn't auto-detected and we have a same-repo manager,
+  // set spawned_by to match the manager for consistency
+  if (!spawnedBy && manager) {
+    spawnedBy = {
+      agent_id: manager,
+      repo_path: rootRepoPath,
+    };
+  }
+
   // 14. Write meta.json
   const now = new Date();
   const metaJson: Record<string, unknown> = {
@@ -1750,6 +1817,7 @@ export async function newAgent(
     worker: customType ? (customType === "worker") : workerMode,
     yolo: yoloMode,
     model: model || null,
+    spawned_by: spawnedBy ?? null,
   };
   if (customType) {
     metaJson.type = customType;

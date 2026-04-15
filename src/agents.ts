@@ -14,6 +14,11 @@ import { resolveAgentType } from "./agent-types";
 /** States that can be written to meta.json */
 export type MetaState = "running" | "waiting" | "complete";
 
+export interface SpawnedBy {
+  agent_id: string;
+  repo_path: string;
+}
+
 export interface AgentMeta {
   id: string;
   session_id: string;
@@ -33,6 +38,7 @@ export interface AgentMeta {
   type?: string;
   state?: MetaState;
   state_updated_at?: number;
+  spawned_by?: SpawnedBy | null;
 }
 
 /**
@@ -249,6 +255,17 @@ export async function readAgentMeta(agentDir: string): Promise<{ meta: AgentMeta
     if (data.summary !== undefined && typeof data.summary !== "string") delete data.summary;
     if (data.coordinator !== undefined && typeof data.coordinator !== "boolean") delete data.coordinator;
     if (data.type !== undefined && typeof data.type !== "string") delete data.type;
+    // Validate spawned_by: must be an object with string agent_id and repo_path
+    if (data.spawned_by !== undefined && data.spawned_by !== null) {
+      if (
+        typeof data.spawned_by !== "object" ||
+        Array.isArray(data.spawned_by) ||
+        typeof data.spawned_by.agent_id !== "string" ||
+        typeof data.spawned_by.repo_path !== "string"
+      ) {
+        delete data.spawned_by;
+      }
+    }
     return { meta: data as AgentMeta };
   } catch (err) {
     return { meta: null, error: `Failed to read ${join(agentDir, "meta.json")}: ${err}` };

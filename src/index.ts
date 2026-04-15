@@ -1122,6 +1122,20 @@ async function main() {
       }
       break;
     }
+    case "init-types":
+    case "init-agent-types": {
+      const { ensureAgentTypesDir } = await import("./agent-types");
+      try {
+        await ensureAgentTypesDir();
+        const home = process.env.HOME || (await import("os")).homedir();
+        const typesDir = (await import("path")).join(home, ".itsybitsy", "agent-types");
+        console.log(`Agent type files initialized at: ${typesDir}`);
+      } catch (err) {
+        console.error(`Error initializing agent types: ${err instanceof Error ? err.message : String(err)}`);
+        process.exit(1);
+      }
+      break;
+    }
     case "config": {
       const { runConfigCommand } = await import("./config-command");
       await runConfigCommand(args.slice(1));
@@ -1247,6 +1261,7 @@ async function main() {
       console.log("  config list         List all config keys with values");
       console.log("  config get <key>    Get a config value");
       console.log("  config set <k> <v>  Set a config value");
+      console.log("  init-types          Populate ~/.itsybitsy/agent-types/ with built-in types");
       console.log("  config add <k> <v>  Add to array config key");
       console.log("  config remove <k> <v> Remove from array config key");
       console.log("  config unset <key>  Unset a config key (revert to default)");

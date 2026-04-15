@@ -5,6 +5,15 @@
 import { join } from "path";
 import { homedir } from "os";
 import { Glob } from "bun";
+import managerMd from '../docs/agent-types/manager.md' with { type: 'text' };
+import workerMd from '../docs/agent-types/worker.md' with { type: 'text' };
+import coordinatorMd from '../docs/agent-types/coordinator.md' with { type: 'text' };
+
+const EMBEDDED_TYPES: Record<string, string> = {
+  'manager': managerMd,
+  'worker': workerMd,
+  'coordinator': coordinatorMd,
+};
 
 export interface AgentType {
   name: string;
@@ -223,12 +232,43 @@ export function getBuiltinTypes(): Record<string, AgentType> {
 }
 
 /**
- * Check if an agent type exists (either as a built-in or user-defined file).
+ * Ensure ~/.itsybitsy/agent-types/ directory exists and populate it with
+ * embedded type files on first run. If the directory already exists, does nothing.
+ */
+export async function ensureAgentTypesDir(): Promise<void> {
+  const home = process.env.HOME || homedir();
+  const typesDir = join(home, ".itsybitsy", "agent-types");
+  const { mkdir, stat } = await import("fs/promises");
+
+  try {
+    // Check if path exists and is a directory
+    const stats = await stat(typesDir);
+    if (stats.isDirectory()) {
+      // Directory already exists, don't overwrite anything
+      return;
+    }
+    // Path exists but is not a directory (e.g., a file) — delete it
+    // This handles the case where an empty file was created instead of a dir
+    await Bun.file(typesDir).delete();
+  } catch {
+    // Path doesn't exist, continue to create it
+  }
+
+  // Create the directory and all parents
+  await mkdir(typesDir, { recursive: true });
+
+  // Write all embedded type files
+  for (const [name, content] of Object.entries(EMBEDDED_TYPES)) {
+    const filePath = join(typesDir, `${name}.md`);
+    await Bun.write(filePath, content);
+  }
+}
+
+/**
+ * Check if an agent type exists (as a file in ~/.itsybitsy/agent-types/<name>.md).
+ * Does NOT check built-in types — those must be written to disk by ensureAgentTypesDir().
  */
 export async function agentTypeExists(name: string): Promise<boolean> {
-  const builtins = getBuiltinTypes();
-  if (builtins[name]) return true;
-
   const home = process.env.HOME || homedir();
   const typeFile = join(home, ".itsybitsy", "agent-types", `${name}.md`);
   try {
@@ -240,57 +280,43 @@ export async function agentTypeExists(name: string): Promise<boolean> {
 
 /**
  * Load an agent type definition from ~/.itsybitsy/agent-types/<name>.md
- * User-defined files override built-in defaults. Falls back to built-in manager
- * if the type is not found anywhere.
+ * Throws an error if the file does not exist.
  */
 export async function loadAgentType(name: string): Promise<AgentType> {
-  const builtins = getBuiltinTypes();
-
-  // Try user-defined file first (allows overriding built-ins)
   const home = process.env.HOME || homedir();
   const typeFile = join(home, ".itsybitsy", "agent-types", `${name}.md`);
 
-  try {
-    const file = Bun.file(typeFile);
-    if (await file.exists()) {
-      const content = await file.text();
-      const { frontmatter, body } = parseAgentTypeFile(content);
-
-      const permissions = typeof frontmatter.permissions === "object" && frontmatter.permissions !== null
-        ? frontmatter.permissions as Record<string, unknown>
-        : undefined;
-      const getString = (val: unknown, fallback: string): string =>
-        typeof val === "string" ? val : fallback;
-
-      // Extract icon: first non-whitespace character of the icon field
-      const rawIcon = getString(frontmatter.icon, "");
-      const iconChar = rawIcon.match(/\S/)?.[0] || undefined;
-
-      return {
-        name: getString(frontmatter.name, name),
-        description: getString(frontmatter.description, ""),
-        canSpawnChildren: frontmatter.canSpawnChildren === true,
-        icon: iconChar,
-        model: getString(frontmatter.model, "") || undefined,
-        permissions: permissions ? {
-          allow: Array.isArray(permissions.allow) ? permissions.allow as string[] : undefined,
-          deny: Array.isArray(permissions.deny) ? permissions.deny as string[] : undefined,
-        } : undefined,
-        instructionStyle: validateInstructionStyle(getString(frontmatter.instructionStyle, "")),
-        markdownBody: body || undefined,
-      };
-    }
-  } catch {
-    // File doesn't exist or can't be read — fall through to built-in
+  const file = Bun.file(typeFile);
+  if (!(await file.exists())) {
+    throw new Error(`Unknown agent type '${name}'. Run 'ib init-types' to restore default type files, or create ${typeFile}`);
   }
 
-  // Fall back to built-in
-  if (builtins[name]) {
-    return builtins[name]!;
-  }
+  const content = await file.text();
+  const { frontmatter, body } = parseAgentTypeFile(content);
 
-  // Unknown type — return manager default
-  return builtins.manager!;
+  const permissions = typeof frontmatter.permissions === "object" && frontmatter.permissions !== null
+    ? frontmatter.permissions as Record<string, unknown>
+    : undefined;
+  const getString = (val: unknown, fallback: string): string =>
+    typeof val === "string" ? val : fallback;
+
+  // Extract icon: first non-whitespace character of the icon field
+  const rawIcon = getString(frontmatter.icon, "");
+  const iconChar = rawIcon.match(/\S/)?.[0] || undefined;
+
+  return {
+    name: getString(frontmatter.name, name),
+    description: getString(frontmatter.description, ""),
+    canSpawnChildren: frontmatter.canSpawnChildren === true,
+    icon: iconChar,
+    model: getString(frontmatter.model, "") || undefined,
+    permissions: permissions ? {
+      allow: Array.isArray(permissions.allow) ? permissions.allow as string[] : undefined,
+      deny: Array.isArray(permissions.deny) ? permissions.deny as string[] : undefined,
+    } : undefined,
+    instructionStyle: validateInstructionStyle(getString(frontmatter.instructionStyle, "")),
+    markdownBody: body || undefined,
+  };
 }
 
 /**

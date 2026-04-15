@@ -22,7 +22,7 @@ import {
 import type { Component, OverlayHandle } from "@mariozechner/pi-tui";
 import { loadRegistry } from "../registry";
 import { readConfig, checkDeprecatedConfigKeys } from "../config";
-import { validateAllAgentTypes } from "../agent-types";
+import { validateAllAgentTypes, ensureAgentTypesDir } from "../agent-types";
 import type { RepoEntry } from "../registry";
 import { AgentWatcher } from "../watcher";
 import { TmuxPoller, hasAttachedClient, sendTmuxKeys, resizeTmuxWindow } from "../tmux-poller";
@@ -1945,6 +1945,9 @@ export async function launchDashboard(): Promise<void> {
     // Surface coordinator startup errors to the dashboard once it exists
     console.error("System coordinator startup failed:", err);
   });
+
+  // Ensure agent types directory is initialized
+  await ensureAgentTypesDir();
 
   // Validate all agent type files before starting
   const typeErrors = await validateAllAgentTypes();

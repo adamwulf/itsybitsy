@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { parseAgentTypeFile, loadAgentType, listAgentTypes, getBuiltinTypes } from "./agent-types";
+import { parseAgentTypeFile, loadAgentType, listAgentTypes, getBuiltinTypes, ensureAgentTypesDir, agentTypeExists } from "./agent-types";
 
 test("parseAgentTypeFile: parses frontmatter and body", () => {
   const content = `---
@@ -226,7 +226,11 @@ test("getBuiltinTypes: returns manager, worker, coordinator", async () => {
   expect(builtins.coordinator!.permissions?.deny).toContain("Edit");
 });
 
-test("loadAgentType: returns built-in manager by name", async () => {
+test("loadAgentType: loads manager type from embedded file", async () => {
+  // Ensure types dir is populated first
+  const { ensureAgentTypesDir } = await import("./agent-types");
+  await ensureAgentTypesDir();
+
   const type = await loadAgentType("manager");
 
   expect(type.name).toBe("manager");
@@ -235,7 +239,11 @@ test("loadAgentType: returns built-in manager by name", async () => {
   expect(type.instructionStyle).toBe("manager");
 });
 
-test("loadAgentType: returns built-in worker by name", async () => {
+test("loadAgentType: loads worker type from embedded file", async () => {
+  // Ensure types dir is populated first
+  const { ensureAgentTypesDir } = await import("./agent-types");
+  await ensureAgentTypesDir();
+
   const type = await loadAgentType("worker");
 
   expect(type.name).toBe("worker");
@@ -244,7 +252,11 @@ test("loadAgentType: returns built-in worker by name", async () => {
   expect(type.instructionStyle).toBe("worker");
 });
 
-test("loadAgentType: returns built-in coordinator by name", async () => {
+test("loadAgentType: loads coordinator type from embedded file", async () => {
+  // Ensure types dir is populated first
+  const { ensureAgentTypesDir } = await import("./agent-types");
+  await ensureAgentTypesDir();
+
   const type = await loadAgentType("coordinator");
 
   expect(type.name).toBe("coordinator");
@@ -252,12 +264,22 @@ test("loadAgentType: returns built-in coordinator by name", async () => {
   expect(type.permissions?.deny).toContain("Write");
 });
 
-test("loadAgentType: returns manager for unknown type", async () => {
-  const type = await loadAgentType("nonexistent-type-xyz");
+test("loadAgentType: throws for unknown type", async () => {
+  // Ensure types dir is populated first
+  const { ensureAgentTypesDir } = await import("./agent-types");
+  await ensureAgentTypesDir();
 
-  // Falls back to manager when type not found
-  expect(type.name).toBe("manager");
-  expect(type.canSpawnChildren).toBe(true);
+  let threw = false;
+  let errorMsg = "";
+  try {
+    await loadAgentType("nonexistent-type-xyz");
+  } catch (err) {
+    threw = true;
+    errorMsg = err instanceof Error ? err.message : String(err);
+  }
+
+  expect(threw).toBe(true);
+  expect(errorMsg).toContain("Unknown agent type");
 });
 
 test("listAgentTypes: includes all built-in types", async () => {
@@ -283,4 +305,51 @@ test("listAgentTypes: returns array of AgentTypes", async () => {
     expect(typeof type.canSpawnChildren).toBe("boolean");
     expect(["manager", "worker", "coordinator"]).toContain(type.instructionStyle);
   }
+});
+
+test("ensureAgentTypesDir: creates directory and populates files", async () => {
+  // First call should create and populate
+  await ensureAgentTypesDir();
+
+  // All three built-in types should now exist
+  const managerExists = await agentTypeExists("manager");
+  const workerExists = await agentTypeExists("worker");
+  const coordinatorExists = await agentTypeExists("coordinator");
+
+  expect(managerExists).toBe(true);
+  expect(workerExists).toBe(true);
+  expect(coordinatorExists).toBe(true);
+});
+
+test("ensureAgentTypesDir: does nothing when directory already exists", async () => {
+  // First call populates the directory
+  await ensureAgentTypesDir();
+
+  // Second call should be idempotent and not fail
+  await ensureAgentTypesDir();
+
+  // Files should still exist
+  const managerExists = await agentTypeExists("manager");
+  expect(managerExists).toBe(true);
+});
+
+test("agentTypeExists: returns true for existing type files", async () => {
+  // Ensure directory is populated
+  await ensureAgentTypesDir();
+
+  const managerExists = await agentTypeExists("manager");
+  const workerExists = await agentTypeExists("worker");
+  const coordinatorExists = await agentTypeExists("coordinator");
+
+  expect(managerExists).toBe(true);
+  expect(workerExists).toBe(true);
+  expect(coordinatorExists).toBe(true);
+});
+
+test("agentTypeExists: returns false for nonexistent types", async () => {
+  // Ensure directory is populated
+  await ensureAgentTypesDir();
+
+  const nonexistentExists = await agentTypeExists("nonexistent-type-xyz");
+  expect(nonexistentExists).toBe(false);
 });

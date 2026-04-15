@@ -1426,13 +1426,21 @@ export async function newAgent(
   let useWorktree = opts?.noWorktree !== true;
   const yoloMode = opts?.yolo === true;
 
+  // Ensure agent types directory is initialized
+  const { ensureAgentTypesDir } = await import("./agent-types");
+  try {
+    await ensureAgentTypesDir();
+  } catch (err) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Error initializing agent types: ${err instanceof Error ? err.message : String(err)}` };
+  }
+
   // Resolve agent type: --type <name> or default to 'manager'
   const typeName = opts?.type ?? "manager";
 
   // Validate --type exists before proceeding
   const typeExists = await agentTypeExists(typeName);
   if (!typeExists) {
-    return { ok: false, exitCode: 1, stdout: "", stderr: `Error: unknown agent type '${typeName}'` };
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Error: unknown agent type '${typeName}'. Run 'ib init-types' to restore default type files, or create ~/.itsybitsy/agent-types/${typeName}.md` };
   }
 
   // Determine if this is a coordinator type

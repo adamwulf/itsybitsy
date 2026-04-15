@@ -19,6 +19,11 @@ export function isValidAgentDir(agentDir: string): boolean {
   return agentDir.startsWith("/") && /\/\.ittybitty\/agents\/[^/]+$/.test(agentDir);
 }
 
+/** Build the claude -p command array for summary generation. Exported for testing. */
+export function buildSummaryCommand(summaryPrompt: string): string[] {
+  return ["claude", "-p", summaryPrompt, "--model", "claude-haiku-4-5-20251001", "--tools", ""];
+}
+
 export async function generateSummary(agentDir: string): Promise<void> {
   if (!isValidAgentDir(agentDir)) return;
 
@@ -31,9 +36,11 @@ export async function generateSummary(agentDir: string): Promise<void> {
   const prompt = await promptFile.text();
   if (!prompt.trim()) return;
 
-  // Ask Haiku for a summary
+  // Ask Haiku for a summary — --tools "" disables all tools so Haiku
+  // cannot execute the task (e.g. spawning agents) instead of summarizing it.
   const summaryPrompt = `Summarize the following agent task in at most 30 words:\n\n${prompt}`;
-  const proc = Bun.spawn(["claude", "-p", summaryPrompt, "--model", "claude-haiku-4-5-20251001", "--tools", ""], {
+  const cmd = buildSummaryCommand(summaryPrompt);
+  const proc = Bun.spawn(cmd, {
     stdout: "pipe",
     stderr: "ignore",
   });

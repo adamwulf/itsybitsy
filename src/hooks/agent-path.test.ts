@@ -437,6 +437,46 @@ describe("checkPathAccess", () => {
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("allow");
   });
+
+  test("allows git commit -C HEAD (subcommand flag, not global -C)", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "git commit -C HEAD" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("allow");
+  });
+
+  test("allows git diff -C (copy detection flag)", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "git diff -C" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("allow");
+  });
+
+  test("allows git blame -C -C (moved/copied lines detection)", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "git blame -C -C src/index.ts" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("allow");
+  });
+
+  test("allows git log -C (copy detection in log)", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "git log -C --oneline" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("allow");
+  });
 });
 
 // ── parseIbCommand ───────────────────────────────────────────────────────────

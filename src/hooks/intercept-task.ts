@@ -5,7 +5,7 @@
 import { join } from "path";
 import { newAgent } from "../ib-commands";
 import type { IbCommandResult } from "../ib-commands";
-import { AGENT_CWD_PATTERN } from "./shared";
+import { AGENT_CWD_PATTERN, checkGitDirectoryFlags } from "./shared";
 import { canSpawnChildren as checkCanSpawnChildren } from "../agents";
 import type { AgentMeta } from "../agents";
 
@@ -83,7 +83,7 @@ async function checkCoordinatorBashRestrictions(
   }
 
   // Block --output in git commands (can write files without shell metacharacters)
-  if (command.startsWith("git") && command.includes("--output")) {
+  if (/^git\s/.test(command) && command.includes("--output")) {
     return {
       action: "intercept",
       output: {
@@ -96,39 +96,16 @@ async function checkCoordinatorBashRestrictions(
     };
   }
 
-  // Block -C, --git-dir, --work-tree in git commands (bypasses path isolation)
-  if (/^git\s/.test(command) && /\s-C\s/.test(command)) {
+  // Block directory-changing flags in git commands (bypasses path isolation)
+  const blockedFlag = checkGitDirectoryFlags(command);
+  if (blockedFlag) {
     return {
       action: "intercept",
       output: {
         hookSpecificOutput: {
           hookEventName: "PreToolUse",
           permissionDecision: "deny",
-          permissionDecisionReason: "The -C flag is not allowed with git. Run git commands from your working directory instead.",
-        },
-      },
-    };
-  }
-  if (/^git\s/.test(command) && /\s--git-dir[\s=]/.test(command)) {
-    return {
-      action: "intercept",
-      output: {
-        hookSpecificOutput: {
-          hookEventName: "PreToolUse",
-          permissionDecision: "deny",
-          permissionDecisionReason: "The --git-dir flag is not allowed with git. Run git commands from your working directory instead.",
-        },
-      },
-    };
-  }
-  if (/^git\s/.test(command) && /\s--work-tree[\s=]/.test(command)) {
-    return {
-      action: "intercept",
-      output: {
-        hookSpecificOutput: {
-          hookEventName: "PreToolUse",
-          permissionDecision: "deny",
-          permissionDecisionReason: "The --work-tree flag is not allowed with git. Run git commands from your working directory instead.",
+          permissionDecisionReason: `The ${blockedFlag} flag is not allowed with git. Run git commands from your working directory instead.`,
         },
       },
     };

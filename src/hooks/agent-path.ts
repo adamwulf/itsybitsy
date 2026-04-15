@@ -11,6 +11,7 @@ import { realpath, stat } from "fs/promises";
 import { realpathSync } from "fs";
 import { logAgent } from "../agent-lifecycle";
 import { isValidAgentId } from "../validation";
+import { checkGitDirectoryFlags } from "./shared";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -162,16 +163,10 @@ function checkBashCommandPaths(
 ): HookDecision | null {
   const { agentDir, agentsDir, worktreePath, rootRepo } = ctx;
 
-  // Block git commands that use -C, --git-dir, or --work-tree flags.
-  // These allow git to operate on a different directory, bypassing path isolation.
-  if (/^git\s/.test(command) && /\s-C\s/.test(command)) {
-    return { decision: "deny", reason: "The -C flag is not allowed with git. Run git commands from your working directory instead." };
-  }
-  if (/^git\s/.test(command) && /\s--git-dir[\s=]/.test(command)) {
-    return { decision: "deny", reason: "The --git-dir flag is not allowed with git. Run git commands from your working directory instead." };
-  }
-  if (/^git\s/.test(command) && /\s--work-tree[\s=]/.test(command)) {
-    return { decision: "deny", reason: "The --work-tree flag is not allowed with git. Run git commands from your working directory instead." };
+  // Block git commands that use directory-changing flags (bypasses path isolation).
+  const blockedFlag = checkGitDirectoryFlags(command);
+  if (blockedFlag) {
+    return { decision: "deny", reason: `The ${blockedFlag} flag is not allowed with git. Run git commands from your working directory instead.` };
   }
 
   // Check for references to other agents' directories

@@ -33,7 +33,7 @@ export async function generateSummary(agentDir: string): Promise<void> {
 
   // Ask Haiku for a summary
   const summaryPrompt = `Summarize the following agent task in at most 30 words:\n\n${prompt}`;
-  const proc = Bun.spawn(["claude", "-p", summaryPrompt, "--model", "claude-haiku-4-5-20251001", "--max-turns", "0"], {
+  const proc = Bun.spawn(["claude", "-p", summaryPrompt, "--model", "claude-haiku-4-5-20251001", "--tools", ""], {
     stdout: "pipe",
     stderr: "ignore",
   });

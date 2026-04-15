@@ -320,19 +320,11 @@ export async function loadAgentType(name: string): Promise<AgentType> {
 }
 
 /**
- * List all available agent types (built-in + user-defined in ~/.itsybitsy/agent-types/).
- * User-defined types with the same name as built-ins override them.
+ * List all available agent types from ~/.itsybitsy/agent-types/.
+ * Only returns types that exist as .md files on disk.
  */
 export async function listAgentTypes(): Promise<AgentType[]> {
-  const types: Map<string, AgentType> = new Map();
-  const builtins = getBuiltinTypes();
-
-  // Add built-ins first
-  for (const [name, type] of Object.entries(builtins)) {
-    types.set(name, type);
-  }
-
-  // Add/override with user-defined types from ~/.itsybitsy/agent-types/
+  const types: AgentType[] = [];
   const home = process.env.HOME || homedir();
   const typesDir = join(home, ".itsybitsy", "agent-types");
 
@@ -342,7 +334,7 @@ export async function listAgentTypes(): Promise<AgentType[]> {
       const name = file.replace(/\.md$/, "");
       try {
         const type = await loadAgentType(name);
-        types.set(name, type);
+        types.push(type);
       } catch {
         // Skip files that can't be parsed
       }
@@ -351,7 +343,7 @@ export async function listAgentTypes(): Promise<AgentType[]> {
     // Types directory doesn't exist or can't be read
   }
 
-  return Array.from(types.values());
+  return types;
 }
 
 /**

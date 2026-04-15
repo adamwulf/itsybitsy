@@ -15,13 +15,13 @@ This document is the definitive behavioral specification for itsybitsy, a multi-
 
 When a new agent is created (`ib new-agent "prompt"`):
 
-1. **Validate inputs**: A prompt is required. If `--manager` is specified, the manager must exist and must not be a leaf agent (an agent whose type has `canSpawnChildren: false`). Leaf agents cannot manage sub-agents. If `--type` is specified, the type must exist (either as a built-in or a user-defined file in `~/.itsybitsy/agent-types/`).
+1. **Validate inputs**: A prompt is required. If `--manager` is specified, the manager must exist and must not be a leaf agent (an agent whose type has `canSpawnChildren: false`). Leaf agents cannot manage sub-agents. If `--type` is specified, the type must exist as a `.md` file in `~/.itsybitsy/agent-types/`.
 
 2. **Auto-detect manager**: If no `--manager` is provided and the caller is running inside an agent worktree (CWD matches `/.ittybitty/agents/<id>/repo`), the caller's agent ID is automatically set as the manager.
 
 3. **Yolo escalation prevention**: A `--yolo` child cannot be spawned by a non-yolo parent. This prevents permission escalation where a constrained agent spawns an unconstrained one. The parent's yolo status is checked via `meta.json` or `start.sh`.
 
-4. **Configuration**: Config is loaded from `~/.itsybitsy/config.json` (user-wide). The agent type is resolved by: `--type` flag > default `"manager"`. The type definition is loaded from `~/.itsybitsy/agent-types/<name>.md` (user-defined, overrides built-in) or falls back to built-in defaults. The model is determined by: `--model` flag > type definition `model` > config `model` (or `coordinator.model` for coordinators) > `"opus"` (default).
+4. **Configuration**: Config is loaded from `~/.itsybitsy/config.json` (user-wide). The agent type is resolved by: `--type` flag > default `"manager"`. The type definition is loaded from `~/.itsybitsy/agent-types/<name>.md` — the `.md` file on disk is the sole source of truth (no hardcoded fallback). On first run, `~/.itsybitsy/agent-types/` is auto-populated with embedded default templates (see §2.7). The model is determined by: `--model` flag > type definition `model` > config `model` (or `coordinator.model` for coordinators) > `"opus"` (default).
 
 5. **Max agents check**: The number of active agents (directories with `meta.json` in `.ittybitty/agents/`) must not exceed the `maxAgents` config value (default: 10).
 
@@ -220,7 +220,7 @@ Agents are assigned a **type** at creation time that determines their behavior, 
 1. `--type <name>` flag — explicit type selection (e.g., `--type worker`, `--type coordinator`)
 2. Default → type `"manager"`
 
-**Three built-in types** are provided and can be overridden by user-defined files:
+**Three default types** are provided via embedded templates that are auto-populated on first run (see §2.7):
 
 | Type | `canSpawnChildren` | Icon | `instructionStyle` | Description |
 |------|-------------------|------|-------------------|-------------|
@@ -228,7 +228,7 @@ Agents are assigned a **type** at creation time that determines their behavior, 
 | `worker` | `false` | `⚙` | `worker` | Executes tasks assigned by a manager |
 | `coordinator` | `true` | `◇` | `coordinator` | Read-only coordinator that manages agents without writing code |
 
-**Custom types** are defined as `.md` files in `~/.itsybitsy/agent-types/<name>.md` with YAML frontmatter and an optional markdown body for instructions. User-defined files with the same name as built-in types override them. See §2.6 for the file format.
+**All types** are defined as `.md` files in `~/.itsybitsy/agent-types/<name>.md` with YAML frontmatter and an optional markdown body for instructions. The `.md` file on disk is the sole source of truth — there is no hardcoded fallback. Users can edit the default type files, create custom types, or delete the manager/worker files (coordinator types auto-regenerate; see §2.7). See §2.6 for the file format.
 
 ### 2.2 Type Properties
 
@@ -319,13 +319,21 @@ You are research agent `{{agentId}}`...
 
 **Icon resolution**: The `icon` field's first non-whitespace character is extracted and stored in `meta.json` as `agentIcon`. This icon is displayed in the TUI agent tree, CLI output (`ib list`), and status injection.
 
-**Location**: User-defined types live in `~/.itsybitsy/agent-types/<name>.md`. Reference templates are provided in `docs/agent-types/` in the source repository.
+**Location**: All types live in `~/.itsybitsy/agent-types/<name>.md`. The default types (manager, worker, coordinator) are embedded in the `ib` binary and auto-populated on first run (§2.7). Source templates are also available in `docs/agent-types/` in the source repository.
 
-### 2.7 Startup Validation
+### 2.7 Auto-Population and init-types
 
-When `ib watch` launches, it validates all agent type files in `~/.itsybitsy/agent-types/` before starting the dashboard. If any file has YAML parsing errors, invalid field types (e.g., `canSpawnChildren` is not a boolean), or invalid `instructionStyle` values, the dashboard exits immediately with error messages describing each issue. This prevents runtime failures from malformed type definitions.
+**Auto-population**: On first run (when `~/.itsybitsy/agent-types/` does not exist), the directory is created and populated with the embedded default type files (manager.md, worker.md, coordinator.md). This happens automatically at `ib watch` startup and `ib new-agent` execution. If the directory already exists, no files are written — the user's customizations are preserved.
 
-### 2.8 Backward Compatibility
+**`ib init-types` command**: Writes any missing embedded type files to `~/.itsybitsy/agent-types/` without overwriting existing files. Use this to restore accidentally deleted defaults or after an `ib` upgrade that adds new built-in types. Alias: `ib init-agent-types`.
+
+**Embedded templates**: The default type `.md` files from `docs/agent-types/` are compiled into the `ib` binary via text imports. Changes to `docs/agent-types/*.md` are reflected in the binary on recompilation.
+
+### 2.8 Startup Validation
+
+When `ib watch` launches, it validates all agent type files in `~/.itsybitsy/agent-types/` before starting the dashboard (after auto-population). If any file has YAML parsing errors, invalid field types (e.g., `canSpawnChildren` is not a boolean), or invalid `instructionStyle` values, the dashboard exits immediately with error messages describing each issue. This prevents runtime failures from malformed type definitions.
+
+### 2.9 Backward Compatibility
 
 Legacy agents (created before the agent types system) that lack `agentType` in their `meta.json` fall back to the old behavior:
 - `meta.json` `worker: true` → treated as `worker` type

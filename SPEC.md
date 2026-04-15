@@ -34,9 +34,12 @@ When a new agent is created (`ib new-agent "prompt"`):
    - Base ref: If the agent has a manager, branch from `agent/<manager-id>`. Otherwise, branch from `HEAD`.
    - Command: `git -C <root-repo> worktree add <agent-dir>/repo -b <branch-name> <base-ref>`
 
-9. **Settings**: A `settings.local.json` is written to `<agent-dir>/repo/.claude/` containing:
-   - Merged permissions (mandatory + config + type definition + existing)
-   - Hook definitions (path-check, stop, permission-denied, session-start, optionally intercept-task)
+9. **Settings**: `<agent-dir>/repo/.claude/settings.local.json` is written with permissions merged from four sources (see §2.3 for full details):
+   - Base allow list from `<repo>/.claude/settings.json` (deny entries NOT inherited)
+   - Hardcoded mandatory permissions (ib commands, git operations, Claude Code tools)
+   - Config-defined permissions from `~/.itsybitsy/config.json` (`permissions.all.*` + role-specific scope)
+   - Type-defined permissions from `~/.itsybitsy/agent-types/<type>.md` frontmatter
+   - Hook definitions: path-check, stop, permission-denied, session-start, and optionally intercept-task (for agents with `canSpawnChildren: true`)
    - The agent ID placeholder `__AGENT_ID__` is replaced with the actual ID after writing
 
 10. **Write meta.json** to `<agent-dir>/meta.json` (see §5.2 for fields). Includes `agentType` (the resolved type name) and `agentIcon` (the type's icon character, if defined).
@@ -250,21 +253,28 @@ The key behavioral distinction is `canSpawnChildren`:
 
 ### 2.3 Agent Permissions
 
-When building `settings.local.json` for an agent, permissions come from four sources, merged and deduplicated:
+When building `<agent-dir>/repo/.claude/settings.local.json` for an agent, permissions are merged from these sources, in order:
 
-1. **Existing base settings**: From the root repo's `.claude/settings.json` (NOT `settings.local.json` — the `.local` file may belong to a per-repo coordinator and should not propagate to spawned agents)
-2. **Mandatory permissions** (always added for all agents):
+1. **Base project settings** — `<repo>/.claude/settings.json`
+   - The version-controlled project settings file. Only the `permissions.allow` array is inherited (existing allow entries are harmless — they grant access the project already intended). Existing `permissions.deny` entries are NOT inherited — agent deny lists come exclusively from mandatory, config, and type sources below.
+   - NOT `settings.local.json` — the `.local` file may belong to a per-repo coordinator or contain repo-specific overrides that should not propagate to spawned agents.
+
+2. **Mandatory permissions** (hardcoded, always added for all agents):
    - `Bash(ib:*)`, `Bash(./ib:*)` — ib commands (both forms to handle PATH vs relative invocation) [^callout]: The TS implementation only includes `Bash(ib:*)`. The `Bash(./ib:*)` form is bash-only, since the TS `ib` binary is always expected to be on PATH.
    - `Bash(git status:*)`, `Bash(git add:*)`, `Bash(git commit:*)`, `Bash(git diff:*)`, `Bash(git show:*)`, `Bash(git log:*)`, `Bash(git ls-files:*)`, `Bash(git grep:*)`, `Bash(git rm:*)`, `Bash(git merge:*)`, `Bash(git rebase:*)`, `Bash(git checkout:*)`, `Bash(git restore:*)`, `Bash(git reset:*)` — git operations
    - `Bash(pwd:*)`, `Bash(ls:*)`, `Bash(head:*)`, `Bash(tail:*)`, `Bash(cat:*)`, `Bash(grep:*)` — filesystem inspection
    - `Read`, `Write`, `Edit`, `MultiEdit`, `Glob`, `Grep`, `LS`, `TodoWrite`, `Task`, `TaskOutput`, `KillShell`, `NotebookEdit`, `WebFetch`, `WebSearch`, `AskUserQuestion`, `ToolSearch` — Claude Code tools
-3. **Config-defined permissions**: Layered from two config scopes:
+   - **Always denied**: `EnterPlanMode`, `ExitPlanMode`
+
+3. **Config-defined permissions** — `~/.itsybitsy/config.json`
    - `permissions.all.allow/deny` — applies to ALL agent types
    - `permissions.coordinator.allow/deny` — applies only to coordinator-type agents
    - `permissions.repo.allow/deny` — applies to all non-coordinator agent types (repo-wide baseline)
-4. **Type-defined permissions**: From the `permissions.allow/deny` fields in the agent type definition file
 
-**Always denied** (for all agents): `EnterPlanMode`, `ExitPlanMode`
+4. **Type-defined permissions** — `~/.itsybitsy/agent-types/<type>.md` (frontmatter)
+   - `permissions.allow` and `permissions.deny` fields from the agent type definition file's YAML frontmatter
+
+All allow/deny lists are merged and deduplicated. The final result is written to `<agent-dir>/repo/.claude/settings.local.json` along with hook definitions (§6).
 
 **Deprecated config keys**: `permissions.manager.allow/deny` and `permissions.worker.allow/deny` have been removed. If present in `~/.itsybitsy/config.json`, a deprecation warning is shown at `ib watch` startup. Users should move per-type permissions into the agent type `.md` files and use `permissions.repo.*` for repo-wide defaults.
 
@@ -795,15 +805,14 @@ All keys are read from `~/.itsybitsy/config.json`. If a key is absent or has an 
 
 ### 7.3 Permission Resolution
 
-For a given agent:
+For a given agent, `buildAgentSettings()` constructs `<agent-dir>/repo/.claude/settings.local.json` by merging permissions from four sources. See §2.3 for the full details and exact file paths.
 
-1. Start with the base settings from `.claude/settings.json` in the repo root (NOT `settings.local.json` — the `.local` file may belong to a per-repo coordinator and should not propagate to spawned agents)
-2. Add mandatory permissions (§2.3)
-3. Add config-defined permissions from three scopes (all merged, deduplicated):
-   - `permissions.all.*` — applies to all agent types
-   - `permissions.coordinator.*` — applies only if the agent is a coordinator
-   - `permissions.repo.*` — applies to all non-coordinator agents
-4. Add type-defined permissions from the agent type definition file (`permissions.allow/deny` in frontmatter)
+Summary:
+
+1. **`<repo>/.claude/settings.json`** — base project allow list (deny entries NOT inherited)
+2. **Hardcoded mandatory** — ib commands, git operations, filesystem inspection, Claude Code tools
+3. **`~/.itsybitsy/config.json`** — `permissions.all.*` + role-specific scope (`permissions.coordinator.*` or `permissions.repo.*`)
+4. **`~/.itsybitsy/agent-types/<type>.md`** — `permissions.allow/deny` from type frontmatter
 5. Deduplicate all allow/deny lists
 
 [^perm-quirk]: The bash implementation has a quirk: if `CONFIG_WORKER_ALLOW` is empty, it falls through to `CONFIG_MANAGER_ALLOW` (and `deny` follows suit). The TS implementation intentionally does not replicate this — the new system uses explicit scope-based permissions (all/repo/coordinator) with no fallthrough.

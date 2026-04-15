@@ -2252,6 +2252,48 @@ describe("newAgent (native)", () => {
     expect(settings.spinnerTipsEnabled).toBe(false);
   });
 
+  test("does not inherit deny list from base settings.local.json (coordinator contamination fix)", async () => {
+    // Simulate a coordinator having written its restrictive deny list to the main repo
+    await mkdir(join(tempDir, ".claude"), { recursive: true });
+    await Bun.write(join(tempDir, ".claude", "settings.local.json"), JSON.stringify({
+      permissions: {
+        allow: ["Bash(ib:*)", "Read", "Glob", "Grep", "LS"],
+        deny: ["Write", "Edit", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch",
+               "Task", "TaskCreate", "TaskOutput", "Agent", "KillShell",
+               "EnterPlanMode", "ExitPlanMode"],
+      },
+    }));
+
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    await callNewAgent("task", { name: "test-no-inherit-deny" });
+
+    const settingsPath = join(agentsDir, "test-no-inherit-deny", "repo", ".claude", "settings.local.json");
+    const settings = await Bun.file(settingsPath).json();
+
+    // Agent should have Write/Edit in allow (from ibPerms), NOT in deny
+    expect(settings.permissions.allow).toContain("Write");
+    expect(settings.permissions.allow).toContain("Edit");
+    expect(settings.permissions.allow).toContain("MultiEdit");
+    expect(settings.permissions.allow).toContain("NotebookEdit");
+    expect(settings.permissions.allow).toContain("Agent");
+    expect(settings.permissions.allow).toContain("Task");
+
+    // Coordinator deny entries should NOT have leaked through
+    expect(settings.permissions.deny).not.toContain("Write");
+    expect(settings.permissions.deny).not.toContain("Edit");
+    expect(settings.permissions.deny).not.toContain("MultiEdit");
+    expect(settings.permissions.deny).not.toContain("NotebookEdit");
+    expect(settings.permissions.deny).not.toContain("Agent");
+    expect(settings.permissions.deny).not.toContain("Task");
+    expect(settings.permissions.deny).not.toContain("WebFetch");
+    expect(settings.permissions.deny).not.toContain("WebSearch");
+
+    // Only the standard blocked tools should be in deny
+    expect(settings.permissions.deny).toContain("EnterPlanMode");
+    expect(settings.permissions.deny).toContain("ExitPlanMode");
+    expect(settings.permissions.deny).toHaveLength(2);
+  });
+
   test("includes Agent in permissions allow list so intercept hook can fire", async () => {
     setNewAgentSpawnRunner(mockSpawnRunner());
     await callNewAgent("task", { name: "test-agent-perm" });

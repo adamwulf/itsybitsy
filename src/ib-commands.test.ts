@@ -925,8 +925,8 @@ describe("resumeAgent (native)", () => {
     expect(result.ok).toBe(true);
 
     const resumeScript = await Bun.file(join(agentDir, "resume.sh")).text();
-    // PATH export should use single-quoted path
-    expect(resumeScript).toContain(`export PATH='${tempDir}'":$PATH"`);
+    // No PATH export — ib is already on the user's PATH
+    expect(resumeScript).not.toContain("export PATH");
     // meta.json should be passed as process.argv, not embedded in JS
     expect(resumeScript).toContain(`META_JSON='${join(agentDir, "meta.json")}'`);
     expect(resumeScript).toContain('bun -e "const f=process.argv[1]');
@@ -1995,7 +1995,8 @@ describe("newAgent (native)", () => {
     expect(startSh).toContain("claude --session-id");
     expect(startSh).toContain("CLAUDE_PID=$!");
     expect(startSh).toContain("unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT");
-    expect(startSh).toContain(`export PATH='${tempDir}'":$PATH"`);
+    // No PATH export — ib is already on the user's PATH
+    expect(startSh).not.toContain("export PATH");
   });
 
   test("creates exit-check.sh", async () => {
@@ -2516,8 +2517,8 @@ describe("newAgent (native)", () => {
     await callNewAgent("do work", { name: "test-quotes" });
 
     const startSh = await Bun.file(join(agentsDir, "test-quotes", "start.sh")).text();
-    // PATH export should use single-quoted path
-    expect(startSh).toContain(`export PATH='${tempDir}'":$PATH"`);
+    // No PATH export — ib is already on the user's PATH
+    expect(startSh).not.toContain("export PATH");
     // prompt.txt path should be single-quoted
     const agentDir = join(agentsDir, "test-quotes");
     expect(startSh).toContain(`$(cat '${join(agentDir, "prompt.txt")}')`);

@@ -380,7 +380,7 @@ export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
   const absExitScript = join(agentDir, "exit-check.sh");
 
   // Shell-quote all paths for safe interpolation
-  const qGitRoot = shellQuote(gitRoot);
+
   const qAgentDir = shellQuote(agentDir);
   const qAbsExitScript = shellQuote(absExitScript);
 
@@ -389,9 +389,6 @@ export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
   const qMetaJson = shellQuote(join(agentDir, "meta.json"));
   const qAgentLog = shellQuote(join(agentDir, "agent.log"));
   const resumeContent = `#!/bin/bash
-# Add git repo root to PATH so 'ib' is available
-export PATH=${qGitRoot}":$PATH"
-
 # Clear Claude Code nesting detection so agents can start their own claude process
 unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT
 
@@ -1887,15 +1884,12 @@ echo ""
   const absPromptFile = join(agentDir, "prompt.txt");
   const absExitScript = join(agentDir, "exit-check.sh");
   const startScript = join(agentDir, "start.sh");
-  const qRootRepoPath = shellQuote(rootRepoPath);
+
   const qAbsPromptFile = shellQuote(absPromptFile);
   const qStartMetaJson = shellQuote(join(agentDir, "meta.json"));
   const qStartExitScript = shellQuote(absExitScript);
   const qStartAgentLog = shellQuote(join(agentDir, "agent.log"));
   const startContent = `#!/bin/bash
-# Add git repo root to PATH so 'ib' is available
-export PATH=${qRootRepoPath}":$PATH"
-
 # Clear Claude Code nesting detection so agents can start their own claude process
 unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT
 

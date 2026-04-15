@@ -839,9 +839,9 @@ describe("perRepoCoordinatorPrompt", () => {
     expect(prompt).toContain("LS");
   });
 
-  test("mentions ib new-agent --worker", () => {
+  test("mentions ib new-agent --type worker", () => {
     const prompt = perRepoCoordinatorPrompt("test-repo");
-    expect(prompt).toContain("ib new-agent --worker");
+    expect(prompt).toContain("ib new-agent --type worker");
   });
 
   test("mentions ib send @system for system coordinator messaging", () => {

@@ -45,10 +45,10 @@ export type DialogState =
       type: "new-agent-form";
       repoName: string;
       name: string;
-      worker: boolean;
+      agentType: string;
       buffer: TextBuffer;
-      focused: "name" | "worker" | "prompt" | "create" | "cancel";
-      onSubmit: (name: string, worker: boolean, prompt: string) => void;
+      focused: "name" | "agentType" | "prompt" | "create" | "cancel";
+      onSubmit: (name: string, agentType: string, prompt: string) => void;
     } & DialogCommon)
   | ({
       type: "setup";
@@ -290,7 +290,7 @@ function handleNewAgentFormDialog(
   d: Extract<NonNullable<DialogState>, { type: "new-agent-form" }>,
   data: string
 ): boolean {
-  const focusOrder: Array<typeof d.focused> = ["name", "worker", "prompt", "cancel", "create"];
+  const focusOrder: Array<typeof d.focused> = ["name", "agentType", "prompt", "cancel", "create"];
   const promptEmpty = () => d.buffer.getText().trim().length === 0;
   const onAsyncRender = () => ctx.tui?.requestRender();
   const nextFocus = () => {
@@ -334,11 +334,12 @@ function handleNewAgentFormDialog(
         ctx.tui?.requestRender();
       }
     }
-  } else if (d.focused === "worker") {
+  } else if (d.focused === "agentType") {
     if (matchesKey(data, Key.tab)) { nextFocus(); }
     else if (matchesKey(data, Key.shift("tab"))) { prevFocus(); }
     else if (matchesKey(data, Key.enter) || data === " ") {
-      d.worker = !d.worker;
+      // Toggle between manager and worker
+      d.agentType = d.agentType === "worker" ? "manager" : "worker";
       ctx.tui?.requestRender();
     }
   } else if (d.focused === "prompt") {
@@ -351,7 +352,7 @@ function handleNewAgentFormDialog(
     if (matchesKey(data, Key.enter)) {
       const promptText = d.buffer.getText().trim();
       if (promptText.length > 0) {
-        d.onSubmit(d.name, d.worker, promptText);
+        d.onSubmit(d.name, d.agentType, promptText);
       }
     } else if (matchesKey(data, Key.tab) || matchesKey(data, Key.right)) { nextFocus(); }
     else if (matchesKey(data, Key.shift("tab")) || matchesKey(data, Key.left)) { prevFocus(); }
@@ -787,11 +788,11 @@ export function buildNewAgentFormContent(
   const nameValue = dialog.focused === "name" ? `${dialog.name}█` : (dialog.name || `${DIM}(optional)${RESET}`);
   lines.push(`${nameLabel}  ${truncateToWidth(nameValue, innerWidth - 8, "")}`);
 
-  const checkbox = dialog.worker ? "[x]" : "[ ]";
-  const workerLabel = dialog.focused === "worker"
-    ? `${BOLD}${GREEN}${checkbox} Worker${RESET}`
-    : `${checkbox} Worker`;
-  lines.push(workerLabel);
+  const typeCheckbox = dialog.agentType === "worker" ? "[x]" : "[ ]";
+  const typeLabel = dialog.focused === "agentType"
+    ? `${BOLD}${GREEN}${typeCheckbox} Worker${RESET}`
+    : `${typeCheckbox} Worker`;
+  lines.push(typeLabel);
   lines.push("");
 
   const promptLabel = dialog.focused === "prompt" ? `${BOLD}Prompt:${RESET} ${DIM}(required)${RESET}` : `${DIM}Prompt: (required)${RESET}`;

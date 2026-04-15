@@ -762,9 +762,7 @@ async function main() {
       let spawnedByRepoPath: string | undefined;
       for (let i = 0; i < ibArgs.length; i++) {
         const arg = ibArgs[i]!;
-        if (arg === "--worker") { opts.worker = true; }
-        else if (arg === "--coordinator") { opts.coordinator = true; }
-        else if (arg === "--type") {
+        if (arg === "--type") {
           if (!ibArgs[i + 1]) { console.error("Error: --type requires a value"); process.exit(1); }
           opts.type = ibArgs[++i];
         }
@@ -799,7 +797,6 @@ async function main() {
           if (!(await promptFile.exists())) { console.error(`Error: prompt file not found: ${promptFilePath}`); process.exit(1); }
           promptParts.push(await promptFile.text());
         }
-        else if (arg === "--coordinator") { opts.coordinator = true; }
         else if (arg === "--no-worktree") { opts.noWorktree = true; }
         else if (arg === "--yolo") { opts.yolo = true; }
         else if (arg === "--allow") {
@@ -810,14 +807,6 @@ async function main() {
           if (!ibArgs[i + 1]) { console.error("Error: --deny requires a value"); process.exit(1); }
           opts.denyTools = ibArgs[++i];
         }
-        else if (arg === "--spawned-by") {
-          if (!ibArgs[i + 1]) { console.error("Error: --spawned-by requires a value"); process.exit(1); }
-          spawnedByAgentId = ibArgs[++i];
-        }
-        else if (arg === "--spawned-by-repo") {
-          if (!ibArgs[i + 1]) { console.error("Error: --spawned-by-repo requires a value"); process.exit(1); }
-          spawnedByRepoPath = ibArgs[++i];
-        }
         else if (arg.startsWith("--")) {
           console.error(`Error: unknown flag '${arg}'`);
           process.exit(1);
@@ -825,16 +814,6 @@ async function main() {
         else { promptParts.push(arg); }
       }
       const prompt = promptParts.join(" ");
-
-      // Check --type / --worker / --coordinator mutual exclusivity
-      if (opts.type && opts.worker) {
-        console.error("Error: --type and --worker are mutually exclusive");
-        process.exit(1);
-      }
-      if (opts.type && opts.coordinator) {
-        console.error("Error: --type and --coordinator are mutually exclusive");
-        process.exit(1);
-      }
 
       // Validate --spawned-by / --spawned-by-repo co-dependency and construct spawnedBy
       if (spawnedByRepoPath && !spawnedByAgentId) {

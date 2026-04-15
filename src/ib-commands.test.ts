@@ -1979,9 +1979,9 @@ describe("newAgent (native)", () => {
     expect(typeof meta.created_epoch).toBe("number");
   });
 
-  test("stores agentType in meta.json when --worker flag is used", async () => {
+  test("stores agentType in meta.json when --type worker is used", async () => {
     setNewAgentSpawnRunner(mockSpawnRunner());
-    const result = await callNewAgent("test worker", { name: "test-worker-type", worker: true });
+    const result = await callNewAgent("test worker", { name: "test-worker-type", type: "worker" });
     expect(result.ok).toBe(true);
 
     const meta = await Bun.file(join(agentsDir, "test-worker-type", "meta.json")).json();
@@ -2008,11 +2008,14 @@ describe("newAgent (native)", () => {
     expect(meta.worker).toBe(true); // canSpawnChildren: false → worker: true
   });
 
-  test("rejects --type coordinator with helpful message", async () => {
+  test("--type coordinator creates a coordinator agent", async () => {
     setNewAgentSpawnRunner(mockSpawnRunner());
-    const result = await callNewAgent("test type coordinator", { name: "test-type-coord", type: "coordinator" });
-    expect(result.ok).toBe(false);
-    expect(result.stderr).toContain("use --coordinator instead of --type coordinator");
+    const result = await callNewAgent("start coordinator", { type: "coordinator", _cwd: tempDir });
+    expect(result.ok).toBe(true);
+
+    const repoName = tempDir.split("/").pop() ?? tempDir;
+    const meta = await Bun.file(join(agentsDir, repoName, "meta.json")).json();
+    expect(meta.agentType).toBe("coordinator");
   });
 
   test("creates prompt.txt with prompt content", async () => {
@@ -2177,9 +2180,9 @@ describe("newAgent (native)", () => {
     expect(meta.model).toBe("opus");
   });
 
-  test("worker mode sets meta.worker and start.sh doesn't have yolo flags", async () => {
+  test("type: worker sets meta.worker and start.sh doesn't have yolo flags", async () => {
     setNewAgentSpawnRunner(mockSpawnRunner());
-    await callNewAgent("task", { name: "test-worker", worker: true });
+    await callNewAgent("task", { name: "test-worker", type: "worker" });
 
     const meta = await Bun.file(join(agentsDir, "test-worker", "meta.json")).json();
     expect(meta.worker).toBe(true);
@@ -2255,7 +2258,7 @@ describe("newAgent (native)", () => {
     await Bun.write(join(promptsDir, "manager.md"), "Coordinate sub-agents.");
 
     setNewAgentSpawnRunner(mockSpawnRunner());
-    await callNewAgent("work task", { name: "test-worker-prompts", worker: true });
+    await callNewAgent("work task", { name: "test-worker-prompts", type: "worker" });
 
     const promptContent = await Bun.file(join(agentsDir, "test-worker-prompts", "prompt.txt")).text();
     expect(promptContent).toContain("[CUSTOM WORKER INSTRUCTIONS]");
@@ -2432,7 +2435,7 @@ describe("newAgent (native)", () => {
     }));
 
     setNewAgentSpawnRunner(mockSpawnRunner());
-    await callNewAgent("task", { name: "test-all-worker", worker: true });
+    await callNewAgent("task", { name: "test-all-worker", type: "worker" });
 
     const settingsPath = join(agentsDir, "test-all-worker", "repo", ".claude", "settings.local.json");
     const settings = await Bun.file(settingsPath).json();
@@ -2698,7 +2701,7 @@ describe("newAgent (native)", () => {
     // coordinator mode: getCoordinatorAgentId(coordRepo) returns "coordinator"
     // checkCoordinatorExists finds no coordinator and no collision → id stays "coordinator"
     // post-generation guard at line 1629 catches it
-    const result = await newAgent(coordRepo, "start coordinator", { coordinator: true, _cwd: coordRepo });
+    const result = await newAgent(coordRepo, "start coordinator", { type: "coordinator", _cwd: coordRepo });
     expect(result.ok).toBe(false);
     expect(result.stderr).toContain('"coordinator" is a reserved name');
 
@@ -2745,7 +2748,7 @@ describe("newAgent (native)", () => {
 
     // checkCoordinatorExists will find the collision (non-coordinator agent named "coordinator")
     // So id = "coordinator-XXXX" (with random suffix), which won't match the reserved name
-    const result = await newAgent(coordRepo, "start coordinator", { coordinator: true, _cwd: coordRepo });
+    const result = await newAgent(coordRepo, "start coordinator", { type: "coordinator", _cwd: coordRepo });
     expect(result.ok).toBe(true);
 
     await rm(coordRepoDir, { recursive: true, force: true });

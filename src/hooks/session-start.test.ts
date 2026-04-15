@@ -74,7 +74,7 @@ describe("session-start", () => {
     const instructions = await generateInstructions(ctx);
     expect(instructions).toContain("agent-abc12345");
     expect(instructions).toContain("Manager Agent");
-    expect(instructions).toContain("ib new-agent --worker");
+    expect(instructions).toContain("ib new-agent --type worker");
   });
 
   test("generateInstructions worker contains manager ID", async () => {
@@ -174,7 +174,7 @@ describe("session-start", () => {
     expect(instructions).not.toContain("Primary Claude");
     expect(instructions).toContain("Per-Repo Coordinator");
     expect(instructions).toContain("project");
-    expect(instructions).toContain("ib new-agent --worker");
+    expect(instructions).toContain("ib new-agent --type worker");
     expect(instructions).toContain("ib send @system");
   });
 
@@ -247,7 +247,7 @@ describe("session-start", () => {
     };
     const instructions = await generateInstructions(ctx);
     expect(instructions).toContain("Manager Agent");
-    expect(instructions).toContain("ib new-agent --worker");
+    expect(instructions).toContain("ib new-agent --type worker");
   });
 
   test("agent type with worker instructionStyle uses worker base instructions", async () => {

@@ -15,13 +15,13 @@ This document is the definitive behavioral specification for itsybitsy, a multi-
 
 When a new agent is created (`ib new-agent "prompt"`):
 
-1. **Validate inputs**: A prompt is required. If `--manager` is specified, the manager must exist and must not be a leaf agent (an agent whose type has `canSpawnChildren: false`). Leaf agents cannot manage sub-agents. If `--type` is specified, the type must exist (either as a built-in or a user-defined file in `~/.itsybitsy/agent-types/`). `--type` cannot be combined with `--worker` or `--coordinator`. `--type coordinator` is rejected (use `--coordinator` instead).
+1. **Validate inputs**: A prompt is required. If `--manager` is specified, the manager must exist and must not be a leaf agent (an agent whose type has `canSpawnChildren: false`). Leaf agents cannot manage sub-agents. If `--type` is specified, the type must exist (either as a built-in or a user-defined file in `~/.itsybitsy/agent-types/`).
 
 2. **Auto-detect manager**: If no `--manager` is provided and the caller is running inside an agent worktree (CWD matches `/.ittybitty/agents/<id>/repo`), the caller's agent ID is automatically set as the manager.
 
 3. **Yolo escalation prevention**: A `--yolo` child cannot be spawned by a non-yolo parent. This prevents permission escalation where a constrained agent spawns an unconstrained one. The parent's yolo status is checked via `meta.json` or `start.sh`.
 
-4. **Configuration**: Config is loaded from `~/.itsybitsy/config.json` (user-wide). The agent type is resolved by: `--type` flag > `--worker`/`--coordinator` flags > default `"manager"`. The type definition is loaded from `~/.itsybitsy/agent-types/<name>.md` (user-defined, overrides built-in) or falls back to built-in defaults. The model is determined by: `--model` flag > type definition `model` > config `model` (or `coordinator.model` for coordinators) > `"opus"` (default).
+4. **Configuration**: Config is loaded from `~/.itsybitsy/config.json` (user-wide). The agent type is resolved by: `--type` flag > default `"manager"`. The type definition is loaded from `~/.itsybitsy/agent-types/<name>.md` (user-defined, overrides built-in) or falls back to built-in defaults. The model is determined by: `--model` flag > type definition `model` > config `model` (or `coordinator.model` for coordinators) > `"opus"` (default).
 
 5. **Max agents check**: The number of active agents (directories with `meta.json` in `.ittybitty/agents/`) must not exceed the `maxAgents` config value (default: 10).
 
@@ -217,10 +217,8 @@ Nuke-all (`ib nuke` with no agent ID) kills all agents in the repository. The `-
 Agents are assigned a **type** at creation time that determines their behavior, permissions, instructions, and icon. The type system replaces the old binary manager/worker distinction with a configurable, extensible model.
 
 **Type resolution at creation time** (checked in order):
-1. `--type <name>` flag — explicit type selection
-2. `--worker` flag → type `"worker"`
-3. `--coordinator` flag → type `"coordinator"`
-4. Default → type `"manager"`
+1. `--type <name>` flag — explicit type selection (e.g., `--type worker`, `--type coordinator`)
+2. Default → type `"manager"`
 
 **Three built-in types** are provided and can be overridden by user-defined files:
 
@@ -280,7 +278,7 @@ All allow/deny lists are merged and deduplicated. The final result is written to
 
 ### 2.4 Sub-Agent Spawning
 
-Agents with `canSpawnChildren: true` spawn sub-agents either explicitly with `ib new-agent --worker "task"` or implicitly via the Task tool (which the intercept hook converts into `ib new-agent --worker`). In both cases, the parent's agent ID is automatically set as the `--manager` for the child. The child's branch forks from `agent/<parent-id>`. When invoked from the primary Claude session (no agent context), the intercept hook spawns a manager instead of a worker.
+Agents with `canSpawnChildren: true` spawn sub-agents either explicitly with `ib new-agent --type worker "task"` or implicitly via the Task tool (which the intercept hook converts into `ib new-agent --type worker`). In both cases, the parent's agent ID is automatically set as the `--manager` for the child. The child's branch forks from `agent/<parent-id>`. When invoked from the primary Claude session (no agent context), the intercept hook spawns a manager instead of a worker.
 
 ### 2.5 Unfinished Children Check
 
@@ -734,8 +732,8 @@ Intercepts Claude Code's Task, Agent, and TaskCreate tools and redirects them to
 3. **Skip for certain subagent_types**: `Bash`, `statusline-setup`, `claude-code-guide`, `meta-agent`, `ib-merge` pass through unintercepted
 4. **Model validation**: Only `sonnet`, `opus`, `haiku`, or empty string are allowed
 5. **Spawn behavior**:
-   - When called from an agent context: spawns a `--worker` with the calling agent as `--manager`
-   - When called from primary Claude: spawns a manager (no `--worker`)
+   - When called from an agent context: spawns a `--type worker` with the calling agent as `--manager`
+   - When called from primary Claude: spawns a manager (no `--type worker`)
 6. **Output**: Rewrites the Task invocation to a `claude-code-guide` subagent that simply reports the spawned agent ID
 
 This hook is installed for agents with `canSpawnChildren: true` (not leaf agents), and only when the main repo's settings already have the intercept hook installed. The hook intercepts `Task`, `Agent`, and `TaskCreate` tool calls. For spawning agents, all three are intercepted and spawn ib workers. For leaf agents, all three are denied with "Workers cannot create tasks or spawn sub-agents." The hook matcher includes `TaskCreate` so it fires for that tool in addition to `Task` and `Agent` (see §2.2).
@@ -1413,7 +1411,7 @@ Per-repo coordinators are stored in `.ittybitty/agents/` like regular agents, bu
 
 #### 12.2.3 Lifecycle
 
-**Creation**: Per-repo coordinators are created via `ib new-agent --coordinator` (new flag). This:
+**Creation**: Per-repo coordinators are created via `ib new-agent --type coordinator`. This:
 
 1. Uses the repo basename as the agent ID (via `getCoordinatorAgentId(repoPath)`)
 2. Sets `coordinator: true` in meta.json
@@ -1421,19 +1419,18 @@ Per-repo coordinators are stored in `.ittybitty/agents/` like regular agents, bu
 4. Uses coordinator-specific session start context (§12.2.6)
 5. Does NOT set a `--manager` — coordinators are top-level agents
 6. Coordinators work directly in the repo directory (no git worktree) — they are read-only agents that do not need branch isolation
-7. Defaults to `coordinator.model` config (§12.5) when no explicit `--model` is provided — overridable with `--model <model>` on `ib new-agent --coordinator`
-8. `--coordinator` is mutually exclusive with `--worker` and `--type`
-9. Otherwise follows the standard agent creation flow (§1.1)
+7. Defaults to `coordinator.model` config (§12.5) when no explicit `--model` is provided — overridable with `--model <model>` on `ib new-agent --type coordinator`
+8. Otherwise follows the standard agent creation flow (§1.1)
 
-**One-per-repo constraint**: `checkCoordinatorExists(repoPath)` scans all agent directories in `.ittybitty/agents/` for any agent with `coordinator: true` in meta.json. If a coordinator already exists, `ib new-agent --coordinator` prints `"Coordinator already exists for <repo-name>"` and exits 0 (idempotent no-op). If a non-coordinator agent already has the repo basename as its ID (collision), a random 4-char hex suffix is appended to the coordinator's ID. There is exactly one coordinator per repo, never more. Archived coordinators (in `.ittybitty/archive/`) do not block creation — "active" means a directory in `.ittybitty/agents/` (not `.ittybitty/archive/`). A stopped or paused coordinator whose directory is still in `agents/` DOES block creation — only archiving removes the block.
+**One-per-repo constraint**: `checkCoordinatorExists(repoPath)` scans all agent directories in `.ittybitty/agents/` for any agent with `coordinator: true` in meta.json. If a coordinator already exists, `ib new-agent --type coordinator` prints `"Coordinator already exists for <repo-name>"` and exits 0 (idempotent no-op). If a non-coordinator agent already has the repo basename as its ID (collision), a random 4-char hex suffix is appended to the coordinator's ID. There is exactly one coordinator per repo, never more. Archived coordinators (in `.ittybitty/archive/`) do not block creation — "active" means a directory in `.ittybitty/agents/` (not `.ittybitty/archive/`). A stopped or paused coordinator whose directory is still in `agents/` DOES block creation — only archiving removes the block.
 
-**No auto-spawn on watch startup**: Per-repo coordinators are NOT auto-spawned when `ib watch` launches. Only the system coordinator is auto-spawned (§12.1.2). Per-repo coordinators are created manually via one of: (a) `ib new-agent --coordinator` from the CLI, (b) pressing `R` on a repo header in the TUI (which spawns a coordinator if none exists, or resumes a stopped one), or (c) the system coordinator running `ib new-agent --coordinator` from within a repo directory.
+**No auto-spawn on watch startup**: Per-repo coordinators are NOT auto-spawned when `ib watch` launches. Only the system coordinator is auto-spawned (§12.1.2). Per-repo coordinators are created manually via one of: (a) `ib new-agent --type coordinator` from the CLI, (b) pressing `R` on a repo header in the TUI (which spawns a coordinator if none exists, or resumes a stopped one), or (c) the system coordinator running `ib new-agent --type coordinator` from within a repo directory.
 
 **Auto-close on exit**: When `ib watch` exits, per-repo coordinators are paused (§1.5 — kill Claude process + tmux session, preserve worktree/meta.json/branch; paused coordinators show as `stopped` in state detection since their tmux session no longer exists) **only if** no other `ib watch` instance is running. This uses the same PID-based `~/.itsybitsy/coordinator.refs` file used by the system coordinator (§12.1.2) — a single shared file governs both the system coordinator kill and all per-repo coordinator pauses. When no live PIDs remain, the system coordinator session is killed and per-repo coordinators across **all registered repos** (from `~/.itsybitsy/repos.json`) are paused. If other instances remain, all coordinators are left running.
 
 **Resume**: Paused coordinators can be resumed via `ib resume <repo-basename>` (standard §1.6 resume flow) or by pressing `R` on the repo header in the TUI. The TUI's `R` handler checks `checkCoordinatorExists()` — if a coordinator exists and is stopped/complete, it resumes it; if none exists, it spawns a new one.
 
-**Children**: Agents spawned by a per-repo coordinator (via `ib new-agent --worker` from within the coordinator's session) will have `manager: "<repo-basename>"` in their meta.json (where `<repo-basename>` is the coordinator's agent ID). This means `buildAgentTree()` will correctly parent them under the coordinator, and `ib nuke <repo-basename>` will recursively kill them.
+**Children**: Agents spawned by a per-repo coordinator (via `ib new-agent --type worker` from within the coordinator's session) will have `manager: "<repo-basename>"` in their meta.json (where `<repo-basename>` is the coordinator's agent ID). This means `buildAgentTree()` will correctly parent them under the coordinator, and `ib nuke <repo-basename>` will recursively kill them.
 
 **Killing/Archiving**: Per-repo coordinators follow the standard kill/archive flow (§1.4, §1.7). `ib kill <repo-basename>` kills only the coordinator itself (standard §1.4 behavior). To recursively kill a coordinator and all its children, use `ib nuke <repo-basename>` (§1.8). The `manager: "<repo-basename>"` field in children's meta.json links them to the coordinator for the nuke traversal.
 
@@ -1511,7 +1508,7 @@ Per-repo coordinators use a custom session-start context (injected via the sessi
 - Bash rules (single-command enforcement)
 - Path isolation (worktree boundaries)
 - Git worktree context (branch name, parent branch)
-- Command table (`ib new-agent --worker`, `ib list --manager`, `ib look`, `ib send`, `ib send @system "msg"`, `ib send @coordinator "msg"`, `ib status`, `ib diff`, `ib merge`, `ib kill`)
+- Command table (`ib new-agent --type worker`, `ib list --manager`, `ib look`, `ib send`, `ib send @system "msg"`, `ib send @coordinator "msg"`, `ib status`, `ib diff`, `ib merge`, `ib kill`)
 - State management (`WAITING` / `I HAVE COMPLETED THE GOAL`)
 - Workflow steps (understand codebase → break down tasks → spawn workers → monitor → merge → coordinate)
 - Agent state reference table
@@ -1682,7 +1679,7 @@ export type FlatEntry =
 
 #### 12.4.3 maxAgents
 
-Per-repo coordinators bypass the `maxAgents` check during creation (`ib new-agent --coordinator` or TUI `R` key) — coordinators are infrastructure, not user tasks. They DO occupy agent directories in `.ittybitty/agents/` and appear in `ib list` output, but they are **excluded from the agent count** when checking `maxAgents` for regular agent creation. Example: if `maxAgents=10` and there are 3 coordinators, you can still create 10 regular agents (not 7). The system coordinator does NOT count — it is not a regular agent and lives outside any repo.
+Per-repo coordinators bypass the `maxAgents` check during creation (`ib new-agent --type coordinator` or TUI `R` key) — coordinators are infrastructure, not user tasks. They DO occupy agent directories in `.ittybitty/agents/` and appear in `ib list` output, but they are **excluded from the agent count** when checking `maxAgents` for regular agent creation. Example: if `maxAgents=10` and there are 3 coordinators, you can still create 10 regular agents (not 7). The system coordinator does NOT count — it is not a regular agent and lives outside any repo.
 
 ### 12.5 Coordinator-Specific Config
 
@@ -1717,7 +1714,7 @@ The coordinator system touches many modules. This section catalogs the current i
 | `src/coordinator.ts` | **Implemented** | System coordinator lifecycle (`ensureSystemCoordinator()`, `releaseSystemCoordinator()`, `restartSystemCoordinator()`), PID-based reference counting, system coordinator permissions/prompt, `sanitizeTmuxInput()`, per-repo coordinator permissions (`buildPerRepoCoordinatorSettings()`), per-repo coordinator prompt (`perRepoCoordinatorPrompt()`), coordinator existence check (`checkCoordinatorExists()`), agent ID generation (`getCoordinatorAgentId()` — returns repo basename). No separate `coordinator-settings.ts` — per-repo settings are in this file. |
 | `src/inbox.ts` | **Implemented** | `ib inbox` command implementation (write/list/read/ack/count). File-based message queue at `~/.itsybitsy/coordinator-inbox/`. |
 | `src/agents.ts` | **Implemented** | `coordinator?: boolean` in `AgentMeta`. `{ kind: "system-coordinator" }` in `FlatEntry`. `flattenAgentTree()` prepends system coordinator entry. Per-repo coordinators sorted before regular agents within each repo section. |
-| `src/ib-commands.ts` | **Implemented** | `newAgent()` extended with `--coordinator` flag: uses repo basename as ID (via `getCoordinatorAgentId()`), sets `coordinator: true` in meta.json, one-per-repo validation via `checkCoordinatorExists()`, mutual exclusivity with `--worker` and `--type`, `coordinator.model` default, max-agents bypass, coordinator-specific `settings.local.json` with hooks. No special `ib send` routing — standard agent ID resolution handles everything. |
+| `src/ib-commands.ts` | **Implemented** | `newAgent()` extended with `--type coordinator`: uses repo basename as ID (via `getCoordinatorAgentId()`), sets `coordinator: true` in meta.json, one-per-repo validation via `checkCoordinatorExists()`, `coordinator.model` default, max-agents bypass, coordinator-specific `settings.local.json` with hooks. No special `ib send` routing — standard agent ID resolution handles everything. |
 | `src/hooks/session-start.ts` | **Implemented** | Detects `coordinator: true` in meta.json. `generateCoordinatorInstructions()` injects coordinator-specific prompt. Worker instructions correctly use manager's agent ID (repo basename) for `ib send`. |
 | `src/hooks/intercept-task.ts` | **Implemented** | `checkCoordinatorBashRestrictions()` blocks shell metacharacters and `--output` in git commands for coordinator sessions. Detects coordinators via `coordinator: true` in meta.json. |
 | `src/hooks/agent-path.ts` | **No changes needed** | Per-repo coordinators use standard path isolation. |
@@ -1730,7 +1727,7 @@ The coordinator system touches many modules. This section catalogs the current i
 | `src/tui/focus.ts` | **Implemented** | Coordinator focus order: `agent-tree` → `info` → `coordinator`. |
 | `src/tui/pane-manager.ts` | **Implemented** | Full-width view when system coordinator is selected. Per-repo coordinator REPO mode with split pane. |
 | `src/watcher.ts` | **No changes needed** | Per-repo coordinators are regular agents detected by fs.watch. System coordinator state polled via `getCoordinatorInfo()`. |
-| `src/index.ts` | **Implemented** | `ib new-agent --coordinator` flag handling. `ib inbox` subcommand routing. `@`-based routing in `ib send`: `@system` routes to system coordinator inbox, `@coordinator` routes to own repo's coordinator, `@<repo-name>` routes to named repo's coordinator, `@<repo-name>/<agent-id>` routes to specific agent in named repo (§12.3.1). Bare agent IDs use standard `matchAgentById()` with own-repo-first resolution. |
+| `src/index.ts` | **Implemented** | `ib new-agent --type coordinator` flag handling. `ib inbox` subcommand routing. `@`-based routing in `ib send`: `@system` routes to system coordinator inbox, `@coordinator` routes to own repo's coordinator, `@<repo-name>` routes to named repo's coordinator, `@<repo-name>/<agent-id>` routes to specific agent in named repo (§12.3.1). Bare agent IDs use standard `matchAgentById()` with own-repo-first resolution. |
 | `src/auto-compact.ts` | **No changes needed** | Per-repo coordinators get auto-compact as regular agents. System coordinator has no watchdog/auto-compact. |
 
 ---

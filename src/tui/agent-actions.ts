@@ -219,7 +219,7 @@ export function handleResume(ctx: ActionCtx) {
         }
       } else {
         // No coordinator — spawn one
-        const result = await newAgent(repo.path, "You are the per-repo coordinator. Await instructions.", { coordinator: true });
+        const result = await newAgent(repo.path, "You are the per-repo coordinator. Await instructions.", { type: "coordinator" });
         ctx.setNotice(result.ok ? `Spawned coordinator ${result.stdout}` : `Spawn failed: ${result.stderr || result.stdout}`);
       }
     });
@@ -466,14 +466,14 @@ function showNewAgentFormDialog(ctx: ActionCtx, repo: RepoEntry) {
     type: "new-agent-form",
     repoName: repoDisplayName(repo),
     name: "",
-    worker: false,
+    agentType: "manager",
     buffer: new TextBuffer(),
     focused: "name",
-    onSubmit: (name: string, worker: boolean, prompt: string) => {
+    onSubmit: (name: string, agentType: string, prompt: string) => {
       ctx.closeDialog();
       const opts: NewAgentOptions = {};
       if (name.trim()) opts.name = name.trim();
-      if (worker) opts.worker = true;
+      if (agentType && agentType !== "manager") opts.type = agentType;
       ctx.executeAndRefresh(async () => {
         const result = await newAgent(repo.path, prompt, opts);
         if (result.ok) {

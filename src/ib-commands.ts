@@ -1157,8 +1157,6 @@ export async function sendMessage(
 
 export interface NewAgentOptions {
   name?: string;
-  worker?: boolean;
-  coordinator?: boolean;
   type?: string;
   yolo?: boolean;
   model?: string;
@@ -1426,32 +1424,24 @@ export async function newAgent(
 
   // Configuration
   let useWorktree = opts?.noWorktree !== true;
-  const workerMode = opts?.worker === true;
-  const coordinatorMode = opts?.coordinator === true;
   const yoloMode = opts?.yolo === true;
+
+  // Resolve agent type: --type <name> or default to 'manager'
+  const typeName = opts?.type ?? "manager";
+
+  // Validate --type exists before proceeding
+  const typeExists = await agentTypeExists(typeName);
+  if (!typeExists) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Error: unknown agent type '${typeName}'` };
+  }
+
+  // Determine if this is a coordinator type
+  const agentTypeDef = await loadAgentType(typeName);
+  const coordinatorMode = typeName === "coordinator";
 
   // Coordinators never use worktrees (SPEC §12.2.3)
   if (coordinatorMode) {
     useWorktree = false;
-  }
-
-  // Coordinator mutual exclusivity checks
-  if (coordinatorMode && workerMode) {
-    return { ok: false, exitCode: 1, stdout: "", stderr: "Error: --coordinator and --worker are mutually exclusive" };
-  }
-  if (opts?.type && (workerMode || coordinatorMode)) {
-    return { ok: false, exitCode: 1, stdout: "", stderr: `Error: --type cannot be combined with --worker or --coordinator` };
-  }
-  if (opts?.type === "coordinator") {
-    return { ok: false, exitCode: 1, stdout: "", stderr: `Error: use --coordinator instead of --type coordinator` };
-  }
-
-  // Validate --type exists before proceeding
-  if (opts?.type) {
-    const typeExists = await agentTypeExists(opts.type);
-    if (!typeExists) {
-      return { ok: false, exitCode: 1, stdout: "", stderr: `Error: unknown agent type '${opts.type}'` };
-    }
   }
 
   // Coordinator one-per-repo check
@@ -1586,26 +1576,6 @@ export async function newAgent(
   // 6. Load config
   const config = await readConfig();
   const customPrompts = await loadCustomPrompts(rootRepoPath);
-
-  // Resolve agent type: --type > --worker/--coordinator flags > default to manager
-  let resolvedTypeName = opts?.type ?? "";
-  if (!resolvedTypeName) {
-    if (workerMode) {
-      resolvedTypeName = "worker";
-    } else if (coordinatorMode) {
-      resolvedTypeName = "coordinator";
-    } else {
-      resolvedTypeName = "manager";
-    }
-  }
-
-  // Validate the type exists before loading
-  if (!(await agentTypeExists(resolvedTypeName))) {
-    return { ok: false, exitCode: 1, stdout: "", stderr: `Unknown agent type: '${resolvedTypeName}'. Create ~/.itsybitsy/agent-types/${resolvedTypeName}.md or use a built-in type (manager, worker, coordinator).` };
-  }
-
-  // Load the agent type definition
-  const agentTypeDef = await loadAgentType(resolvedTypeName);
 
   // Leaf agents can't spawn children (worker-like behavior)
   const isLeafAgent = !agentTypeDef.canSpawnChildren;
@@ -1864,7 +1834,7 @@ export async function newAgent(
     created_epoch: Math.floor(now.getTime() / 1000),
     worktree: useWorktree,
     worker: isLeafAgent,
-    agentType: resolvedTypeName,
+    agentType: typeName,
     agentIcon: agentTypeDef.icon || undefined,
     yolo: yoloMode,
     model: model || null,
@@ -1879,7 +1849,7 @@ export async function newAgent(
   if (manager) {
     await logAgent(agentDir, `Agent created (manager: ${manager}, prompt: ${prompt})`);
     const managerDir = join(agentsDir, manager);
-    await logAgent(managerDir, `Spawned ${resolvedTypeName} subagent: ${id} (prompt: ${prompt})`);
+    await logAgent(managerDir, `Spawned ${typeName} subagent: ${id} (prompt: ${prompt})`);
   } else {
     await logAgent(agentDir, `Agent created (prompt: ${prompt})`);
   }

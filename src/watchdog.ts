@@ -834,23 +834,3 @@ async function loadAllAgentsForNotification(_repoPath: string): Promise<Agent[]>
   }
 }
 
-/**
- * Send a watchdog notification to the agent's spawner (if different from manager).
- * No-op if the agent has no spawned_by, or if spawner === manager, or if
- * spawner agent is not found in any registered repo.
- */
-async function notifySpawner(
-  agent: Agent,
-  message: string,
-  allAgents: Agent[],
-): Promise<void> {
-  const spawner = agent.meta.spawned_by;
-  if (!spawner) return;
-  // Don't double-notify if spawner is the same as manager
-  if (spawner.agent_id === agent.meta.manager) return;
-
-  const spawnerAgent = findAgent(allAgents, spawner.agent_id);
-  if (!spawnerAgent) return;
-
-  await sendMessage(spawnerAgent, message);
-}

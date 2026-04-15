@@ -356,13 +356,7 @@ export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
     claudeArgs = claudeArgs ? `${claudeArgs} --model ${model}` : `--model ${model}`;
   }
 
-  // Get git root for PATH
-  const gitRoot = await resolveGitRoot(agent.repoPath) || agent.repoPath;
-
   // Validate paths for shell script interpolation
-  if (!isValidShellPath(gitRoot)) {
-    return { ok: false, exitCode: 1, stdout: "", stderr: `Git root path contains characters unsafe for shell scripts: ${gitRoot}` };
-  }
   if (!isValidShellPath(agentDir)) {
     return { ok: false, exitCode: 1, stdout: "", stderr: `Agent directory path contains characters unsafe for shell scripts: ${agentDir}` };
   }
@@ -380,7 +374,6 @@ export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
   const absExitScript = join(agentDir, "exit-check.sh");
 
   // Shell-quote all paths for safe interpolation
-
   const qAgentDir = shellQuote(agentDir);
   const qAbsExitScript = shellQuote(absExitScript);
 

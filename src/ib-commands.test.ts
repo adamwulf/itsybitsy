@@ -2252,7 +2252,7 @@ describe("newAgent (native)", () => {
     expect(settings.spinnerTipsEnabled).toBe(false);
   });
 
-  test("does not inherit deny list from base settings.json (coordinator contamination fix)", async () => {
+  test("does not inherit deny list from base settings.json", async () => {
     // Even if settings.json has a restrictive deny list, agents should not inherit it
     await mkdir(join(tempDir, ".claude"), { recursive: true });
     await Bun.write(join(tempDir, ".claude", "settings.json"), JSON.stringify({

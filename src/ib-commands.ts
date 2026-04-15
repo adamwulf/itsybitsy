@@ -1312,11 +1312,10 @@ async function buildAgentSettings(
   const blockedTools = ["EnterPlanMode", "ExitPlanMode"];
 
   // Initialize permissions
-  // Note: we inherit existing allow entries (harmless — more permissions don't hurt),
-  // but NOT existing deny entries. The base settings.local.json may belong to a
-  // per-repo coordinator whose deny list (Write, Edit, etc.) would incorrectly
-  // propagate to all subsequent agents. Agent permissions come from config and
-  // agent type frontmatter, not from whatever was last written to the shared file.
+  // Note: we inherit existing allow entries from settings.json (harmless — more
+  // permissions don't hurt), but NOT existing deny entries. The base settings.json
+  // may have deny entries that should not propagate to agents. Agent deny lists come
+  // from config and agent type frontmatter only.
   const perms = (baseSettings.permissions ?? {}) as Record<string, unknown>;
   const existingAllow = Array.isArray(perms.allow) ? (perms.allow as string[]) : [];
 

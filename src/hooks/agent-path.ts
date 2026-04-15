@@ -348,14 +348,24 @@ export async function checkIbCommandAccess(
   try {
     const metaFile = Bun.file(targetMetaPath);
     if (await metaFile.exists()) {
-      const meta = await metaFile.json();
+      let meta: Record<string, unknown>;
+      try {
+        meta = await metaFile.json();
+      } catch {
+        // File exists but can't be parsed — deny rather than falling through
+        // to cross-repo check which could match a different agent with the same ID
+        return {
+          decision: "deny",
+          reason: `Access denied: cannot read meta for agent '${targetId}'`,
+        };
+      }
       if (hasAccess(meta)) return null; // allow
       return {
         decision: "deny",
         reason: `Access denied: only the manager or spawner of '${targetId}' can run 'ib ${parsed.subcommand}'`,
       };
     }
-  } catch { /* fall through to cross-repo check */ }
+  } catch { /* exists() failed — fall through to cross-repo check */ }
 
   // Cross-repo check: target not in this repo — search other repos
   try {

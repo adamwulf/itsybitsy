@@ -811,11 +811,11 @@ async function main() {
         }
         else if (arg === "--spawned-by") {
           if (!ibArgs[i + 1]) { console.error("Error: --spawned-by requires a value"); process.exit(1); }
-          (opts as Record<string, unknown>)._spawnedByAgentId = ibArgs[++i];
+          spawnedByAgentId = ibArgs[++i];
         }
         else if (arg === "--spawned-by-repo") {
           if (!ibArgs[i + 1]) { console.error("Error: --spawned-by-repo requires a value"); process.exit(1); }
-          (opts as Record<string, unknown>)._spawnedByRepoPath = ibArgs[++i];
+          spawnedByRepoPath = ibArgs[++i];
         }
         else if (arg.startsWith("--")) {
           console.error(`Error: unknown flag '${arg}'`);
@@ -844,21 +844,20 @@ async function main() {
       }
 
       // Validate --spawned-by / --spawned-by-repo co-dependency and construct spawnedBy
-      const _spawnedByAgentId = (opts as Record<string, unknown>)._spawnedByAgentId as string | undefined;
-      const _spawnedByRepoPath = (opts as Record<string, unknown>)._spawnedByRepoPath as string | undefined;
-      if (_spawnedByRepoPath && !_spawnedByAgentId) {
+      if (spawnedByRepoPath && !spawnedByAgentId) {
         console.error("Error: --spawned-by-repo requires --spawned-by");
         process.exit(1);
       }
-      if (_spawnedByAgentId) {
+      if (spawnedByAgentId && !isValidAgentId(spawnedByAgentId)) {
+        console.error("Error: invalid --spawned-by agent ID");
+        process.exit(1);
+      }
+      if (spawnedByAgentId) {
         opts.spawnedBy = {
-          agent_id: _spawnedByAgentId,
-          repo_path: _spawnedByRepoPath ?? process.cwd(),
+          agent_id: spawnedByAgentId,
+          repo_path: spawnedByRepoPath ?? process.cwd(),
         };
       }
-      // Clean up temp fields
-      delete (opts as Record<string, unknown>)._spawnedByAgentId;
-      delete (opts as Record<string, unknown>)._spawnedByRepoPath;
 
       // Determine target repo: --repo flag > cwd match > single registered repo > error
       const repos = await listRepos();

@@ -11,7 +11,7 @@
 
 import { join } from "path";
 import { mkdirSync } from "fs";
-import { readRepoAgents, readAllAgents, detectAgentStates, isCompacting, isRateLimited, readAgentState } from "./agents";
+import { readRepoAgents, readAllAgents, isCompacting, isRateLimited, readAgentState } from "./agents";
 import type { Agent } from "./agents";
 import { captureTmuxOutput } from "./tmux-poller";
 import { logAgent } from "./agent-lifecycle";

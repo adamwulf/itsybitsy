@@ -95,10 +95,8 @@ export function detectRole(
     branchName = `agent/${agentId}`;
   }
 
-  const spawnedBy = (meta as Record<string, unknown>).spawned_by as
-    { agent_id: string; repo_path: string } | undefined;
-
   // Only include spawnedBy when it differs from manager (cross-repo or non-manager spawner)
+  const spawnedBy = meta.spawned_by;
   const effectiveSpawnedBy =
     spawnedBy && spawnedBy.agent_id !== agentManager ? spawnedBy : undefined;
 

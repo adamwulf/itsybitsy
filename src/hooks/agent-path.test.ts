@@ -438,6 +438,39 @@ describe("checkPathAccess", () => {
     expect(result.decision).toBe("allow");
   });
 
+  test("blocks git -C after other global flags (e.g., git --bare -C /path)", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "git --bare -C /other/repo status" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("-C flag is not allowed");
+  });
+
+  test("blocks git --no-pager -C /path (global flag before -C)", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "git --no-pager -C /other/repo log" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("-C flag is not allowed");
+  });
+
+  test("blocks git -C/path (no space after -C)", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "git -C/other/repo status" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("-C flag is not allowed");
+  });
+
   test("allows git commit -C HEAD (subcommand flag, not global -C)", () => {
     const ctx = makeCtx();
     const input = makeInput({

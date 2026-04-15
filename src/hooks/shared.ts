@@ -13,20 +13,38 @@ export const AGENT_CWD_PATTERN = /\.ittybitty\/agents\/([^/]+)\/repo(\/|$)/;
  * Returns the blocked flag name if found, or null if the command is clean.
  *
  * Blocked flags:
- * - `-C <path>`: must appear immediately after `git` (before the subcommand).
- *   Note: `-C` is also a valid subcommand flag (e.g., `git commit -C HEAD`,
- *   `git diff -C`), so we only match it in the global position.
+ * - `-C <path>` or `-C<path>`: only in the global position (before the subcommand).
+ *   `-C` is also a valid subcommand flag (e.g., `git commit -C HEAD`,
+ *   `git diff -C`), so we walk tokens to distinguish global vs subcommand position.
  * - `--git-dir[= ]<path>`: always a global flag.
  * - `--work-tree[= ]<path>`: always a global flag.
  */
 export function checkGitDirectoryFlags(command: string): string | null {
   if (!/^git\s/.test(command)) return null;
 
-  // -C must appear right after "git" (possibly after other global flags) but
-  // before the subcommand. The simplest correct check: -C immediately after "git ".
-  if (/^git\s+-C\s/.test(command)) return "-C";
+  // --git-dir and --work-tree are always global flags, safe to match anywhere.
   if (/\s--git-dir[\s=]/.test(command)) return "--git-dir";
   if (/\s--work-tree[\s=]/.test(command)) return "--work-tree";
+
+  // For -C, walk tokens after "git" to find it in the global flag position.
+  // Global flags come before the subcommand (first non-flag token).
+  // Once we see a non-flag token, any subsequent -C is a subcommand flag.
+  const tokens = command.split(/\s+/);
+  // tokens[0] is "git"
+  for (let i = 1; i < tokens.length; i++) {
+    const token = tokens[i]!;
+    // -C with attached path (e.g., "-C/other/repo")
+    if (token === "-C" || token.startsWith("-C")) {
+      return "-C";
+    }
+    // Skip other global flags (tokens starting with -)
+    // Also skip values of long flags like --no-pager (no value) vs --git-dir=x (handled above)
+    if (token.startsWith("-")) {
+      continue;
+    }
+    // First non-flag token is the subcommand — stop scanning for global -C
+    break;
+  }
 
   return null;
 }

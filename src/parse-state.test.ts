@@ -50,6 +50,10 @@ describe("parseState", () => {
       const input = "Allow external CLAUDE.md file imports?\nEnter to confirm";
       expect(parseState(input).state).toBe("creating");
     });
+    test("MCP server prompt", () => {
+      const input = "New MCP server found in .mcp.json: activepieces\n\nMCP servers may execute code or access system resources.\n\n❯ 1. Use this and all future MCP servers\n  2. Use this MCP server\n  3. Continue without using\n\nEnter to confirm · Esc to cancel";
+      expect(parseState(input).state).toBe("creating");
+    });
     test("NOT creating at top if Claude Code v is present (falls through to later check)", () => {
       // The first creating check skips if "Claude Code v" is in full input,
       // but the second check (in last 15 lines) still catches it as creating
@@ -65,6 +69,14 @@ describe("parseState", () => {
       const lines = Array(10).fill("some output");
       lines.push("Claude Code v1.0");
       lines.push("Do you trust the files");
+      lines.push("Enter to confirm");
+      const input = lines.join("\n");
+      expect(parseState(input).state).toBe("creating");
+    });
+    test("MCP server prompt in last 15 lines after Claude started", () => {
+      const lines = Array(10).fill("some output");
+      lines.push("Claude Code v1.0");
+      lines.push("New MCP server found in .mcp.json: activepieces");
       lines.push("Enter to confirm");
       const input = lines.join("\n");
       expect(parseState(input).state).toBe("creating");

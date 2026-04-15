@@ -5,7 +5,7 @@
 import { join } from "path";
 import { newAgent } from "../ib-commands";
 import type { IbCommandResult } from "../ib-commands";
-import { AGENT_CWD_PATTERN } from "./shared";
+import { AGENT_CWD_PATTERN, checkGitDirectoryFlags } from "./shared";
 import { canSpawnChildren as checkCanSpawnChildren } from "../agents";
 import type { AgentMeta } from "../agents";
 
@@ -83,7 +83,7 @@ async function checkCoordinatorBashRestrictions(
   }
 
   // Block --output in git commands (can write files without shell metacharacters)
-  if (command.startsWith("git") && command.includes("--output")) {
+  if (/^git\s/.test(command) && command.includes("--output")) {
     return {
       action: "intercept",
       output: {
@@ -91,6 +91,21 @@ async function checkCoordinatorBashRestrictions(
           hookEventName: "PreToolUse",
           permissionDecision: "deny",
           permissionDecisionReason: "Coordinator git commands cannot use --output flag (file write bypass)",
+        },
+      },
+    };
+  }
+
+  // Block directory-changing flags in git commands (bypasses path isolation)
+  const blockedFlag = checkGitDirectoryFlags(command);
+  if (blockedFlag) {
+    return {
+      action: "intercept",
+      output: {
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "deny",
+          permissionDecisionReason: `The ${blockedFlag} flag is not allowed with git. Run git commands from your working directory instead.`,
         },
       },
     };

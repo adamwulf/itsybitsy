@@ -11,6 +11,7 @@ import { realpath, stat } from "fs/promises";
 import { realpathSync } from "fs";
 import { logAgent } from "../agent-lifecycle";
 import { isValidAgentId } from "../validation";
+import { checkGitDirectoryFlags } from "./shared";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -161,6 +162,12 @@ function checkBashCommandPaths(
   ctx: PathCheckContext
 ): HookDecision | null {
   const { agentDir, agentsDir, worktreePath, rootRepo } = ctx;
+
+  // Block git commands that use directory-changing flags (bypasses path isolation).
+  const blockedFlag = checkGitDirectoryFlags(command);
+  if (blockedFlag) {
+    return { decision: "deny", reason: `The ${blockedFlag} flag is not allowed with git. Run git commands from your working directory instead.` };
+  }
 
   // Check for references to other agents' directories
   if (agentsDir) {

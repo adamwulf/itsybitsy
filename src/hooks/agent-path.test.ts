@@ -339,6 +339,188 @@ describe("checkPathAccess", () => {
     expect(result.decision).toBe("deny");
     expect(result.reason).toContain("bash command references main repo");
   });
+
+  // ── git -C / --git-dir / --work-tree blocking ──────────────────────────────
+
+  test("blocks git -C (bypasses path isolation)", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "git -C /some/other/repo status" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("-C flag is not allowed");
+  });
+
+  test("blocks git -C even with own worktree path", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "git -C /repo/.ittybitty/agents/agent-abc123/repo status" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("-C flag is not allowed");
+  });
+
+  test("blocks git --git-dir (bypasses path isolation)", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "git --git-dir /other/.git log" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("--git-dir flag is not allowed");
+  });
+
+  test("blocks git --git-dir= with equals syntax", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "git --git-dir=/other/.git log" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("--git-dir flag is not allowed");
+  });
+
+  test("blocks git --work-tree (bypasses path isolation)", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "git --work-tree /other/repo status" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("--work-tree flag is not allowed");
+  });
+
+  test("blocks git --work-tree= with equals syntax", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "git --work-tree=/other/repo status" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("--work-tree flag is not allowed");
+  });
+
+  test("allows normal git commands without -C", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "git status" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("allow");
+  });
+
+  test("allows git log, commit, etc. without directory flags", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "git log --oneline -10" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("allow");
+  });
+
+  test("non-git commands with -C are not blocked", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "ls -C /tmp" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("allow");
+  });
+
+  test("blocks git -C after other global flags (e.g., git --bare -C /path)", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "git --bare -C /other/repo status" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("-C flag is not allowed");
+  });
+
+  test("blocks git --no-pager -C /path (global flag before -C)", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "git --no-pager -C /other/repo log" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("-C flag is not allowed");
+  });
+
+  test("blocks git -c key=val -C /path (value-consuming flag before -C)", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "git -c user.name=test -C /other/repo status" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("-C flag is not allowed");
+  });
+
+  test("blocks git -C/path (no space after -C)", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "git -C/other/repo status" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("-C flag is not allowed");
+  });
+
+  test("allows git commit -C HEAD (subcommand flag, not global -C)", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "git commit -C HEAD" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("allow");
+  });
+
+  test("allows git diff -C (copy detection flag)", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "git diff -C" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("allow");
+  });
+
+  test("allows git blame -C -C (moved/copied lines detection)", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "git blame -C -C src/index.ts" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("allow");
+  });
+
+  test("allows git log -C (copy detection in log)", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "git log -C --oneline" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("allow");
+  });
 });
 
 // ── parseIbCommand ───────────────────────────────────────────────────────────

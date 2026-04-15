@@ -1283,10 +1283,13 @@ async function buildAgentSettings(
   configDeny: string[],
   canSpawnChildrenOverride?: boolean
 ): Promise<string> {
-  // Start with existing settings if available
+  // Start with existing project settings if available.
+  // We read settings.json (the version-controlled project settings), NOT settings.local.json.
+  // The .local file may belong to a coordinator or have repo-specific overrides that should
+  // not propagate to spawned agents.
   let baseSettings: Record<string, unknown> = {};
   try {
-    const settingsFile = Bun.file(join(repoPath, ".claude", "settings.local.json"));
+    const settingsFile = Bun.file(join(repoPath, ".claude", "settings.json"));
     if (await settingsFile.exists()) {
       baseSettings = await settingsFile.json();
     }

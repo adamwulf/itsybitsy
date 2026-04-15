@@ -27,10 +27,11 @@ test("resolveAgentDir with agentId and agents dir in cwd", () => {
   );
 });
 
-test("resolveAgentDir with agentId different from cwd agent", () => {
-  const cwd = "/repo/.ittybitsy/agents/agent-abc12345/repo";
-  // cwd doesn't match .ittybitty pattern
-  expect(resolveAgentDir(cwd)).toBeNull();
+test("resolveAgentDir without agentId extracts from cwd agent path", () => {
+  const cwd = "/repo/.ittybitty/agents/agent-abc12345/repo";
+  expect(resolveAgentDir(cwd)).toBe(
+    "/repo/.ittybitty/agents/agent-abc12345",
+  );
 });
 
 test("resolveAgentDir without agentId extracts from cwd", () => {

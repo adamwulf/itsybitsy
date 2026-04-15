@@ -758,6 +758,8 @@ async function main() {
       const promptParts: string[] = [];
       const opts: import("./ib-commands").NewAgentOptions = {};
       let repoArg: string | undefined;
+      let spawnedByAgentId: string | undefined;
+      let spawnedByRepoPath: string | undefined;
       for (let i = 0; i < ibArgs.length; i++) {
         const arg = ibArgs[i]!;
         if (arg === "--worker") { opts.worker = true; }
@@ -782,6 +784,14 @@ async function main() {
           if (!ibArgs[i + 1]) { console.error("Error: --repo requires a value"); process.exit(1); }
           repoArg = ibArgs[++i];
         }
+        else if (arg === "--spawned-by") {
+          if (!ibArgs[i + 1]) { console.error("Error: --spawned-by requires a value"); process.exit(1); }
+          spawnedByAgentId = ibArgs[++i];
+        }
+        else if (arg === "--spawned-by-repo") {
+          if (!ibArgs[i + 1]) { console.error("Error: --spawned-by-repo requires a value"); process.exit(1); }
+          spawnedByRepoPath = ibArgs[++i];
+        }
         else if (arg === "--prompt-file") {
           if (!ibArgs[i + 1]) { console.error("Error: --prompt-file requires a value"); process.exit(1); }
           const promptFilePath = ibArgs[++i]!;
@@ -800,12 +810,21 @@ async function main() {
           if (!ibArgs[i + 1]) { console.error("Error: --deny requires a value"); process.exit(1); }
           opts.denyTools = ibArgs[++i];
         }
+        else if (arg === "--spawned-by") {
+          if (!ibArgs[i + 1]) { console.error("Error: --spawned-by requires a value"); process.exit(1); }
+          spawnedByAgentId = ibArgs[++i];
+        }
+        else if (arg === "--spawned-by-repo") {
+          if (!ibArgs[i + 1]) { console.error("Error: --spawned-by-repo requires a value"); process.exit(1); }
+          spawnedByRepoPath = ibArgs[++i];
+        }
         else if (arg.startsWith("--")) {
           console.error(`Error: unknown flag '${arg}'`);
           process.exit(1);
         }
         else { promptParts.push(arg); }
       }
+      const prompt = promptParts.join(" ");
 
       // Check --type / --worker / --coordinator mutual exclusivity
       if (opts.type && opts.worker) {
@@ -816,10 +835,21 @@ async function main() {
         console.error("Error: --type and --coordinator are mutually exclusive");
         process.exit(1);
       }
-      const prompt = promptParts.join(" ");
-      if (!prompt) {
-        console.error("Usage: ib new-agent [flags] <prompt...>");
+
+      // Validate --spawned-by / --spawned-by-repo co-dependency and construct spawnedBy
+      if (spawnedByRepoPath && !spawnedByAgentId) {
+        console.error("Error: --spawned-by-repo requires --spawned-by");
         process.exit(1);
+      }
+      if (spawnedByAgentId && !isValidAgentId(spawnedByAgentId)) {
+        console.error("Error: invalid --spawned-by agent ID");
+        process.exit(1);
+      }
+      if (spawnedByAgentId) {
+        opts.spawnedBy = {
+          agent_id: spawnedByAgentId,
+          repo_path: spawnedByRepoPath ?? process.cwd(),
+        };
       }
 
       // Determine target repo: --repo flag > cwd match > single registered repo > error

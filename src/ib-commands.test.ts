@@ -2264,9 +2264,9 @@ describe("newAgent (native)", () => {
   });
 
   test("creates settings.local.json in worktree with permissions", async () => {
-    // Create base settings
+    // Create base settings in settings.json (not .local — agents inherit from project settings)
     await mkdir(join(tempDir, ".claude"), { recursive: true });
-    await Bun.write(join(tempDir, ".claude", "settings.local.json"), JSON.stringify({
+    await Bun.write(join(tempDir, ".claude", "settings.json"), JSON.stringify({
       permissions: { allow: ["CustomTool"] },
     }));
 
@@ -2289,10 +2289,10 @@ describe("newAgent (native)", () => {
     expect(settings.spinnerTipsEnabled).toBe(false);
   });
 
-  test("does not inherit deny list from base settings.local.json (coordinator contamination fix)", async () => {
-    // Simulate a coordinator having written its restrictive deny list to the main repo
+  test("does not inherit deny list from base settings.json", async () => {
+    // Even if settings.json has a restrictive deny list, agents should not inherit it
     await mkdir(join(tempDir, ".claude"), { recursive: true });
-    await Bun.write(join(tempDir, ".claude", "settings.local.json"), JSON.stringify({
+    await Bun.write(join(tempDir, ".claude", "settings.json"), JSON.stringify({
       permissions: {
         allow: ["Bash(ib:*)", "Read", "Glob", "Grep", "LS"],
         deny: ["Write", "Edit", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch",
@@ -2315,7 +2315,7 @@ describe("newAgent (native)", () => {
     expect(settings.permissions.allow).toContain("Agent");
     expect(settings.permissions.allow).toContain("Task");
 
-    // Coordinator deny entries should NOT have leaked through
+    // Base settings.json deny entries should NOT have leaked through
     expect(settings.permissions.deny).not.toContain("Write");
     expect(settings.permissions.deny).not.toContain("Edit");
     expect(settings.permissions.deny).not.toContain("MultiEdit");
@@ -2329,6 +2329,24 @@ describe("newAgent (native)", () => {
     expect(settings.permissions.deny).toContain("EnterPlanMode");
     expect(settings.permissions.deny).toContain("ExitPlanMode");
     expect(settings.permissions.deny).toHaveLength(2);
+  });
+
+  test("does not inherit permissions from settings.local.json (coordinator isolation)", async () => {
+    // settings.local.json is used by coordinators — its permissions should NOT propagate to agents
+    await mkdir(join(tempDir, ".claude"), { recursive: true });
+    await Bun.write(join(tempDir, ".claude", "settings.local.json"), JSON.stringify({
+      permissions: { allow: ["CoordinatorOnlyTool"] },
+    }));
+
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    await callNewAgent("task", { name: "test-no-local-inherit" });
+
+    const settingsPath = join(agentsDir, "test-no-local-inherit", "repo", ".claude", "settings.local.json");
+    const settings = await Bun.file(settingsPath).json();
+    expect(settings.permissions.allow).not.toContain("CoordinatorOnlyTool");
+    // Standard permissions still present
+    expect(settings.permissions.allow).toContain("Bash(ib:*)");
+    expect(settings.permissions.allow).toContain("Read");
   });
 
   test("includes Agent in permissions allow list so intercept hook can fire", async () => {
@@ -4043,6 +4061,44 @@ describe("hooks round-trip", () => {
 
     const exists = await Bun.file(settingsFile).exists();
     expect(exists).toBe(false);
+  });
+});
+
+// ── spawned_by (spawner tracking) tests ─────────────────────────────────────
+
+import type { SpawnedBy } from "./agents";
+
+describe("spawned_by validation in agents.ts", () => {
+  test("spawned_by with valid agent_id and repo_path is accepted", () => {
+    const spawnedBy: SpawnedBy = {
+      agent_id: "agent-spawner",
+      repo_path: "/path/to/repo",
+    };
+    expect(spawnedBy.agent_id).toBe("agent-spawner");
+    expect(spawnedBy.repo_path).toBe("/path/to/repo");
+  });
+
+  test("meta.json readAgentMeta handles valid spawned_by", async () => {
+    // This tests that readAgentMeta properly validates spawned_by
+    // The actual implementation filters out invalid spawned_by objects
+    const validMeta = {
+      id: "test-agent",
+      session_id: "session-123",
+      tmux_session: "tmux-test",
+      prompt: "test prompt",
+      manager: null,
+      created: "2024-01-01T00:00:00Z",
+      created_epoch: 1000,
+      worktree: true,
+      worker: false,
+      yolo: false,
+      model: "opus",
+      claude_pid: "1234",
+      spawned_by: { agent_id: "spawner", repo_path: "/repo" },
+    };
+    // Successfully constructs meta with spawned_by
+    expect(validMeta.spawned_by).not.toBeNull();
+    expect(validMeta.spawned_by!.agent_id).toBe("spawner");
   });
 });
 

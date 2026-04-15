@@ -11,7 +11,7 @@
 
 import { join } from "path";
 import { mkdirSync } from "fs";
-import { readRepoAgents, detectAgentStates, isCompacting, isRateLimited, readAgentState } from "./agents";
+import { readRepoAgents, readAllAgents, isCompacting, isRateLimited, readAgentState } from "./agents";
 import type { Agent } from "./agents";
 import { captureTmuxOutput } from "./tmux-poller";
 import { logAgent } from "./agent-lifecycle";
@@ -27,6 +27,7 @@ import { checkAndCompact } from "./auto-compact";
 import type { CompactState } from "./auto-compact";
 import { readConfig } from "./config";
 import { isValidTmuxSession } from "./validation";
+import { listRepos } from "./registry";
 
 /** Per-agent tracking state managed by the watchdog */
 export interface AgentTracker {
@@ -202,6 +203,27 @@ export async function notifyManager(
   await sendMessage(manager, message);
 }
 
+/**
+ * Send a watchdog notification to the agent's spawner (if different from manager).
+ * No-op if the agent has no spawned_by, or if spawner === manager, or if
+ * spawner agent is not found in any registered repo.
+ */
+export async function notifySpawner(
+  agent: Agent,
+  message: string,
+  allAgents: Agent[],
+): Promise<void> {
+  const spawner = agent.meta.spawned_by;
+  if (!spawner) return;
+  // Don't double-notify if spawner is the same as manager
+  if (spawner.agent_id === agent.meta.manager) return;
+
+  const spawnerAgent = findAgent(allAgents, spawner.agent_id);
+  if (!spawnerAgent) return;
+
+  await sendMessage(spawnerAgent, message);
+}
+
 /** Send Enter to a tmux session to dismiss a dialog. */
 async function sendTmuxEnter(tmuxSession: string): Promise<boolean> {
   if (!isValidTmuxSession(tmuxSession)) {
@@ -238,6 +260,11 @@ async function handleWaiting(agent: Agent, tracker: AgentTracker, allAgents: Age
       `[watchdog]: Your subtask ${agent.id} recently started waiting for input`,
       allAgents,
     );
+    await notifySpawner(
+      agent,
+      `[watchdog]: Agent ${agent.id} you spawned recently started waiting for input`,
+      allAgents,
+    );
 
     // Reset counter and double interval (exponential backoff)
     tracker.waitCounter = 0;
@@ -262,6 +289,11 @@ async function handleUnknown(agent: Agent, tracker: AgentTracker, allAgents: Age
     await notifyManager(
       agent,
       `[watchdog]: Your subtask ${agent.id} state is unknown - may need attention`,
+      allAgents,
+    );
+    await notifySpawner(
+      agent,
+      `[watchdog]: Agent ${agent.id} you spawned has an unknown state - may need attention`,
       allAgents,
     );
 
@@ -309,6 +341,11 @@ async function handleComplete(agent: Agent, tracker: AgentTracker, allAgents: Ag
     await notifyManager(
       agent,
       `[watchdog]: Your subtask ${agent.id} recently completed`,
+      allAgents,
+    );
+    await notifySpawner(
+      agent,
+      `[watchdog]: Agent ${agent.id} you spawned recently completed`,
       allAgents,
     );
     tracker.completionNotified = true;
@@ -775,18 +812,25 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
 }
 
 /**
- * Load all agents from disk for notification purposes (finding the manager).
+ * Load all agents from all registered repos for notification purposes
+ * (finding managers and cross-repo spawners).
  * Best-effort — returns empty array on failure.
  */
-async function loadAllAgentsForNotification(repoPath: string): Promise<Agent[]> {
+async function loadAllAgentsForNotification(_repoPath: string): Promise<Agent[]> {
   try {
-    const repoName = repoPath.split("/").pop() ?? "";
-    const { agents } = await readRepoAgents(repoPath, repoName);
-    if (agents.length > 0) {
-      await detectAgentStates(agents);
-    }
+    // Read all registered repos so cross-repo spawners can be found by findAgent().
+    // The previous implementation only read the agent's own repo, which made
+    // cross-repo notifySpawner impossible since findAgent can't locate the spawner.
+    const repos = await listRepos();
+    const { agents } = await readAllAgents(repos.map(r => ({ path: r.path, name: r.name })));
+    // Note: buildAgentTree() is NOT called here. findAgent() iterates the flat
+    // array first (exact ID match) so tree structure is unnecessary for notifications.
+    // Also note: detectAgentStates() is intentionally omitted — sendMessage() sends
+    // tmux keys directly and does not check agent state, so state detection adds
+    // overhead with no benefit on the notification path.
     return agents;
   } catch {
     return [];
   }
 }
+

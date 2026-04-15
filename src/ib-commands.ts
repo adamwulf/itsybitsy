@@ -4,10 +4,11 @@
  * All commands are implemented natively — no ib CLI dependency.
  */
 
-import { join, dirname } from "path";
+import { join, dirname, resolve } from "path";
 import { readdir, chmod, rm, mkdir } from "fs/promises";
+import { realpathSync } from "fs";
 import { homedir } from "node:os";
-import type { Agent } from "./agents";
+import type { Agent, SpawnedBy } from "./agents";
 import { writeAgentState } from "./agents";
 import {
   logAgent,
@@ -1166,6 +1167,7 @@ export interface NewAgentOptions {
   allowTools?: string;
   denyTools?: string;
   print?: boolean;
+  spawnedBy?: SpawnedBy;
   /** Override cwd for auto-detect manager (used in tests). */
   _cwd?: string;
 }
@@ -1280,10 +1282,13 @@ async function buildAgentSettings(
   configAllow: string[],
   configDeny: string[]
 ): Promise<string> {
-  // Start with existing settings if available
+  // Start with existing project settings if available.
+  // We read settings.json (the version-controlled project settings), NOT settings.local.json.
+  // The .local file may belong to a coordinator or have repo-specific overrides that should
+  // not propagate to spawned agents.
   let baseSettings: Record<string, unknown> = {};
   try {
-    const settingsFile = Bun.file(join(repoPath, ".claude", "settings.local.json"));
+    const settingsFile = Bun.file(join(repoPath, ".claude", "settings.json"));
     if (await settingsFile.exists()) {
       baseSettings = await settingsFile.json();
     }
@@ -1306,11 +1311,10 @@ async function buildAgentSettings(
   const blockedTools = ["EnterPlanMode", "ExitPlanMode"];
 
   // Initialize permissions
-  // Note: we inherit existing allow entries (harmless — more permissions don't hurt),
-  // but NOT existing deny entries. The base settings.local.json may belong to a
-  // per-repo coordinator whose deny list (Write, Edit, etc.) would incorrectly
-  // propagate to all subsequent agents. Agent permissions come from config and
-  // agent type frontmatter, not from whatever was last written to the shared file.
+  // Note: we inherit existing allow entries from settings.json (harmless — more
+  // permissions don't hurt), but NOT existing deny entries. The base settings.json
+  // may have deny entries that should not propagate to agents. Agent deny lists come
+  // from config and agent type frontmatter only.
   const perms = (baseSettings.permissions ?? {}) as Record<string, unknown>;
   const existingAllow = Array.isArray(perms.allow) ? (perms.allow as string[]) : [];
 
@@ -1486,6 +1490,48 @@ export async function newAgent(
         if (await metaFile.exists()) {
           const meta = await metaFile.json();
           if (meta.id) manager = meta.id;
+        }
+      } catch { /* ignore */ }
+    }
+  }
+
+  // 3.5. Auto-detect spawned_by from CWD (works cross-repo, unlike manager auto-detect)
+  let spawnedBy: SpawnedBy | undefined = opts?.spawnedBy;
+  if (!spawnedBy) {
+    const cwd = opts?._cwd ?? process.cwd();
+
+    // Case 1: Worktree agent — CWD matches /.ittybitty/agents/<id>/repo
+    const agentPattern = /\/.ittybitty\/agents\/([^/]+)\/repo/;
+    const worktreeMatch = cwd.match(agentPattern);
+    if (worktreeMatch) {
+      const spawnerDir = cwd.replace(/(\/.ittybitty\/agents\/[^/]*)\/repo.*/, "$1");
+      try {
+        const spawnerMeta = await Bun.file(join(spawnerDir, "meta.json")).json();
+        if (spawnerMeta.id) {
+          const spawnerRepoPath = cwd.substring(0, cwd.indexOf("/.ittybitty/agents/"));
+          spawnedBy = {
+            agent_id: spawnerMeta.id,
+            repo_path: spawnerRepoPath,
+          };
+        }
+      } catch { /* ignore */ }
+    }
+
+    // Case 2: Non-worktree agent (coordinator) — CWD is a registered repo root
+    // Coordinators run from the repo root, so CWD won't match the worktree pattern.
+    // Detect by checking if CWD is a registered repo with a coordinator agent.
+    if (!spawnedBy && !worktreeMatch) {
+      try {
+        const repos = await listRepos();
+        const repoMatch = repos.find(r => r.path === cwd);
+        if (repoMatch) {
+          const coordStatus = await checkCoordinatorExists(cwd);
+          if (coordStatus.exists && coordStatus.agentId) {
+            spawnedBy = {
+              agent_id: coordStatus.agentId,
+              repo_path: cwd,
+            };
+          }
         }
       } catch { /* ignore */ }
     }
@@ -1774,7 +1820,39 @@ export async function newAgent(
   // Generate UUID for Claude session
   const sessionUuid = crypto.randomUUID();
 
+  // Normalize and validate spawned_by repo_path before writing to meta.json
+  if (spawnedBy) {
+    // Normalize: resolve symlinks so stored path matches registry's canonical form.
+    // realpathSync resolves symlinks; resolve() only normalizes .. and trailing slashes.
+    // Registry's addRepo stores resolve()-d paths, but the user may pass a symlinked path
+    // via --spawned-by-repo. realpathSync ensures consistency.
+    try {
+      spawnedBy.repo_path = realpathSync(spawnedBy.repo_path);
+    } catch {
+      // Path doesn't exist yet — fall back to resolve() normalization
+      spawnedBy.repo_path = resolve(spawnedBy.repo_path);
+    }
+  }
+
+  // If spawned_by wasn't auto-detected and we have a same-repo manager,
+  // set spawned_by to match the manager for consistency
+  if (!spawnedBy && manager) {
+    spawnedBy = {
+      agent_id: manager,
+      repo_path: rootRepoPath,
+    };
+  }
+
   // 14. Write meta.json
+  // If spawned_by wasn't auto-detected and we have a same-repo manager,
+  // set spawned_by to match the manager for consistency
+  if (!spawnedBy && manager) {
+    spawnedBy = {
+      agent_id: manager,
+      repo_path: rootRepoPath,
+    };
+  }
+
   const now = new Date();
   const metaJson: Record<string, unknown> = {
     id,
@@ -1790,6 +1868,7 @@ export async function newAgent(
     agentIcon: agentTypeDef.icon || undefined,
     yolo: yoloMode,
     model: model || null,
+    spawned_by: spawnedBy ?? null,
   };
   if (coordinatorMode) {
     metaJson.coordinator = true;

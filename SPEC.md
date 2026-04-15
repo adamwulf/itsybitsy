@@ -252,7 +252,7 @@ The key behavioral distinction is `canSpawnChildren`:
 
 When building `settings.local.json` for an agent, permissions come from four sources, merged and deduplicated:
 
-1. **Existing base settings**: From the root repo's `.claude/settings.local.json`
+1. **Existing base settings**: From the root repo's `.claude/settings.json` (NOT `settings.local.json` — the `.local` file may belong to a per-repo coordinator and should not propagate to spawned agents)
 2. **Mandatory permissions** (always added for all agents):
    - `Bash(ib:*)`, `Bash(./ib:*)` — ib commands (both forms to handle PATH vs relative invocation) [^callout]: The TS implementation only includes `Bash(ib:*)`. The `Bash(./ib:*)` form is bash-only, since the TS `ib` binary is always expected to be on PATH.
    - `Bash(git status:*)`, `Bash(git add:*)`, `Bash(git commit:*)`, `Bash(git diff:*)`, `Bash(git show:*)`, `Bash(git log:*)`, `Bash(git ls-files:*)`, `Bash(git grep:*)`, `Bash(git rm:*)`, `Bash(git merge:*)`, `Bash(git rebase:*)`, `Bash(git checkout:*)`, `Bash(git restore:*)`, `Bash(git reset:*)` — git operations
@@ -797,7 +797,7 @@ All keys are read from `~/.itsybitsy/config.json`. If a key is absent or has an 
 
 For a given agent:
 
-1. Start with the base settings from `.claude/settings.local.json` in the repo root
+1. Start with the base settings from `.claude/settings.json` in the repo root (NOT `settings.local.json` — the `.local` file may belong to a per-repo coordinator and should not propagate to spawned agents)
 2. Add mandatory permissions (§2.3)
 3. Add config-defined permissions from three scopes (all merged, deduplicated):
    - `permissions.all.*` — applies to all agent types

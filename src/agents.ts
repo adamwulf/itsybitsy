@@ -13,6 +13,12 @@ import { InjectionContext } from "./types";
 /** States that can be written to meta.json */
 export type MetaState = "running" | "waiting" | "complete";
 
+/** Cross-repo spawner provenance — records which agent created this one */
+export interface SpawnedBy {
+  agent_id: string;
+  repo_path: string;
+}
+
 export interface AgentMeta {
   id: string;
   session_id: string;
@@ -33,6 +39,7 @@ export interface AgentMeta {
   agentIcon?: string;
   state?: MetaState;
   state_updated_at?: number;
+  spawned_by?: SpawnedBy | null;
 }
 
 /** Resolve the display icon for an agent from meta fields with legacy fallback */
@@ -238,6 +245,17 @@ export async function readAgentMeta(agentDir: string): Promise<{ meta: AgentMeta
     if (data.coordinator !== undefined && typeof data.coordinator !== "boolean") delete data.coordinator;
     if (data.agentType !== undefined && typeof data.agentType !== "string") delete data.agentType;
     if (data.agentIcon !== undefined && typeof data.agentIcon !== "string") delete data.agentIcon;
+    // Validate spawned_by: must be an object with string agent_id and repo_path
+    if (data.spawned_by !== undefined && data.spawned_by !== null) {
+      if (
+        typeof data.spawned_by !== "object" ||
+        Array.isArray(data.spawned_by) ||
+        typeof data.spawned_by.agent_id !== "string" ||
+        typeof data.spawned_by.repo_path !== "string"
+      ) {
+        delete data.spawned_by;
+      }
+    }
     return { meta: data as AgentMeta };
   } catch (err) {
     return { meta: null, error: `Failed to read ${join(agentDir, "meta.json")}: ${err}` };

@@ -69,6 +69,7 @@ function makeMockCtx(overrides?: {
     },
     rightPane: {
       mode: overrides?.mode ?? "AGENT LOG",
+      repoCoordinatorAgent: null,
       filteredQuestions: overrides?.questions ?? [],
       questionsSelectedIndex: 0,
       scrollOffset: 5,
@@ -321,6 +322,34 @@ describe("handleSend", () => {
     const d = assertDialog(dialogs[0]!, "textarea");
     d.onSubmit("   ");
     expect(notices).toEqual(["Send cancelled"]);
+  });
+
+  test("shows textarea dialog for per-repo coordinator when repo header selected", () => {
+    const coordAgent = makeAgent({ id: "coord-1", meta: { coordinator: true } as any });
+    const { ctx, dialogs } = makeMockCtx({ repoHeader: "my-repo" });
+    ctx.rightPane.repoCoordinatorAgent = coordAgent;
+    handleSend(ctx);
+    expect(dialogs).toHaveLength(1);
+    const d = assertDialog(dialogs[0]!, "textarea");
+    expect(d.prompt).toContain("coord-1");
+  });
+
+  test("per-repo coordinator send calls sendMessage", async () => {
+    const coordAgent = makeAgent({ id: "coord-1", meta: { coordinator: true } as any });
+    const { ctx, dialogs, notices } = makeMockCtx({ repoHeader: "my-repo" });
+    ctx.rightPane.repoCoordinatorAgent = coordAgent;
+    handleSend(ctx);
+    const d = assertDialog(dialogs[0]!, "textarea");
+    d.onSubmit("Hello coordinator");
+    await Bun.sleep(10);
+    expect(notices.some((n) => n.includes("Sent to coord-1") || n.includes("Send failed"))).toBe(true);
+  });
+
+  test("does nothing when repo header selected but no coordinator agent", () => {
+    const { ctx, dialogs } = makeMockCtx({ repoHeader: "my-repo" });
+    // repoCoordinatorAgent is null by default
+    handleSend(ctx);
+    expect(dialogs).toHaveLength(0);
   });
 });
 

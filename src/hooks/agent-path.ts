@@ -11,6 +11,7 @@ import { realpath, stat } from "fs/promises";
 import { realpathSync } from "fs";
 import { logAgent } from "../agent-lifecycle";
 import { isValidAgentId } from "../validation";
+import { checkGitDirectoryFlags } from "./shared";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -42,6 +43,7 @@ export interface HookDecision {
  *
  * Patterns:
  * - "Bash(prefix:*)": matches Bash tool where command starts with prefix
+ * - "Bash(exact command)": matches Bash tool where command equals exact string
  * - "ToolName": exact tool name match
  */
 export function toolMatchesPattern(
@@ -58,6 +60,17 @@ export function toolMatchesPattern(
       if (command === prefix || command.startsWith(prefix + " ")) {
         return true;
       }
+    }
+    return false;
+  }
+
+  // Check for Bash(exact command) pattern — no :* wildcard
+  const exactBashMatch = pattern.match(/^Bash\((.+)\)$/);
+  if (exactBashMatch) {
+    if (toolName === "Bash") {
+      const exactCommand = exactBashMatch[1]!;
+      const command = String(toolInput.command ?? "");
+      return command === exactCommand;
     }
     return false;
   }
@@ -149,6 +162,12 @@ function checkBashCommandPaths(
   ctx: PathCheckContext
 ): HookDecision | null {
   const { agentDir, agentsDir, worktreePath, rootRepo } = ctx;
+
+  // Block git commands that use directory-changing flags (bypasses path isolation).
+  const blockedFlag = checkGitDirectoryFlags(command);
+  if (blockedFlag) {
+    return { decision: "deny", reason: `The ${blockedFlag} flag is not allowed with git. Run git commands from your working directory instead.` };
+  }
 
   // Check for references to other agents' directories
   if (agentsDir) {

@@ -296,6 +296,10 @@ Whenever you stop working and are idle, end your message with one of:
 
 These phrases MUST be the LAST thing you output. Put summaries or status updates BEFORE them.
 
+### Tool Interception
+
+Your Task, Agent, and TaskCreate tool calls are **automatically intercepted** and redirected to spawn ib agents instead. When this happens, you will see a "deny" response — this is **expected and means SUCCESS**. The deny message will include the spawned agent ID. Do NOT retry the tool call — the agent is already running. Use \`ib look <id>\` to monitor it.
+
 ### Workflow
 
 1. **DEFINE SUCCESS CRITERIA** - What does 'done' look like? Track in TodoWrite with measurable criteria.

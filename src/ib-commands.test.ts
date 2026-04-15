@@ -925,8 +925,8 @@ describe("resumeAgent (native)", () => {
     expect(result.ok).toBe(true);
 
     const resumeScript = await Bun.file(join(agentDir, "resume.sh")).text();
-    // PATH export should use single-quoted path
-    expect(resumeScript).toContain(`export PATH='${tempDir}'":$PATH"`);
+    // No PATH export — ib is already on the user's PATH
+    expect(resumeScript).not.toContain("export PATH");
     // meta.json should be passed as process.argv, not embedded in JS
     expect(resumeScript).toContain(`META_JSON='${join(agentDir, "meta.json")}'`);
     expect(resumeScript).toContain('bun -e "const f=process.argv[1]');
@@ -2032,7 +2032,8 @@ describe("newAgent (native)", () => {
     expect(startSh).toContain("claude --session-id");
     expect(startSh).toContain("CLAUDE_PID=$!");
     expect(startSh).toContain("unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT");
-    expect(startSh).toContain(`export PATH='${tempDir}'":$PATH"`);
+    // No PATH export — ib is already on the user's PATH
+    expect(startSh).not.toContain("export PATH");
   });
 
   test("creates exit-check.sh", async () => {
@@ -2286,6 +2287,48 @@ describe("newAgent (native)", () => {
     expect(settings.hooks.SessionStart).toBeDefined();
     expect(settings.hooks.PreToolUse).toBeDefined();
     expect(settings.spinnerTipsEnabled).toBe(false);
+  });
+
+  test("does not inherit deny list from base settings.local.json (coordinator contamination fix)", async () => {
+    // Simulate a coordinator having written its restrictive deny list to the main repo
+    await mkdir(join(tempDir, ".claude"), { recursive: true });
+    await Bun.write(join(tempDir, ".claude", "settings.local.json"), JSON.stringify({
+      permissions: {
+        allow: ["Bash(ib:*)", "Read", "Glob", "Grep", "LS"],
+        deny: ["Write", "Edit", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch",
+               "Task", "TaskCreate", "TaskOutput", "Agent", "KillShell",
+               "EnterPlanMode", "ExitPlanMode"],
+      },
+    }));
+
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    await callNewAgent("task", { name: "test-no-inherit-deny" });
+
+    const settingsPath = join(agentsDir, "test-no-inherit-deny", "repo", ".claude", "settings.local.json");
+    const settings = await Bun.file(settingsPath).json();
+
+    // Agent should have Write/Edit in allow (from ibPerms), NOT in deny
+    expect(settings.permissions.allow).toContain("Write");
+    expect(settings.permissions.allow).toContain("Edit");
+    expect(settings.permissions.allow).toContain("MultiEdit");
+    expect(settings.permissions.allow).toContain("NotebookEdit");
+    expect(settings.permissions.allow).toContain("Agent");
+    expect(settings.permissions.allow).toContain("Task");
+
+    // Coordinator deny entries should NOT have leaked through
+    expect(settings.permissions.deny).not.toContain("Write");
+    expect(settings.permissions.deny).not.toContain("Edit");
+    expect(settings.permissions.deny).not.toContain("MultiEdit");
+    expect(settings.permissions.deny).not.toContain("NotebookEdit");
+    expect(settings.permissions.deny).not.toContain("Agent");
+    expect(settings.permissions.deny).not.toContain("Task");
+    expect(settings.permissions.deny).not.toContain("WebFetch");
+    expect(settings.permissions.deny).not.toContain("WebSearch");
+
+    // Only the standard blocked tools should be in deny
+    expect(settings.permissions.deny).toContain("EnterPlanMode");
+    expect(settings.permissions.deny).toContain("ExitPlanMode");
+    expect(settings.permissions.deny).toHaveLength(2);
   });
 
   test("includes Agent in permissions allow list so intercept hook can fire", async () => {
@@ -2547,8 +2590,8 @@ describe("newAgent (native)", () => {
     await callNewAgent("do work", { name: "test-quotes" });
 
     const startSh = await Bun.file(join(agentsDir, "test-quotes", "start.sh")).text();
-    // PATH export should use single-quoted path
-    expect(startSh).toContain(`export PATH='${tempDir}'":$PATH"`);
+    // No PATH export — ib is already on the user's PATH
+    expect(startSh).not.toContain("export PATH");
     // prompt.txt path should be single-quoted
     const agentDir = join(agentsDir, "test-quotes");
     expect(startSh).toContain(`$(cat '${join(agentDir, "prompt.txt")}')`);

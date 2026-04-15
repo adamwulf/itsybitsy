@@ -5,7 +5,7 @@
 import { join } from "path";
 import { newAgent } from "../ib-commands";
 import type { IbCommandResult } from "../ib-commands";
-import { AGENT_CWD_PATTERN } from "./shared";
+import { AGENT_CWD_PATTERN, checkGitDirectoryFlags } from "./shared";
 import { loadAgentType } from "../agent-types";
 
 export interface InterceptResult {
@@ -82,7 +82,7 @@ async function checkCoordinatorBashRestrictions(
   }
 
   // Block --output in git commands (can write files without shell metacharacters)
-  if (command.startsWith("git") && command.includes("--output")) {
+  if (/^git\s/.test(command) && command.includes("--output")) {
     return {
       action: "intercept",
       output: {
@@ -90,6 +90,21 @@ async function checkCoordinatorBashRestrictions(
           hookEventName: "PreToolUse",
           permissionDecision: "deny",
           permissionDecisionReason: "Coordinator git commands cannot use --output flag (file write bypass)",
+        },
+      },
+    };
+  }
+
+  // Block directory-changing flags in git commands (bypasses path isolation)
+  const blockedFlag = checkGitDirectoryFlags(command);
+  if (blockedFlag) {
+    return {
+      action: "intercept",
+      output: {
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "deny",
+          permissionDecisionReason: `The ${blockedFlag} flag is not allowed with git. Run git commands from your working directory instead.`,
         },
       },
     };
@@ -239,9 +254,10 @@ export async function processTaskIntercept(
   }
 
   // 12. Success — deny the original tool to prevent double-spawn.
-  // Using "deny" ensures the model won't retry the tool call, which would
-  // create duplicate agents. The denial reason tells the model the agent
-  // was successfully spawned and how to monitor it.
+  // Using "deny" is required because it's the only way to prevent the original
+  // Task/Agent tool from also executing (which would create a duplicate).
+  // The denial reason clearly communicates that this was a SUCCESSFUL redirect,
+  // not a failure. The additionalContext reinforces this.
   const id = spawnedId ?? "unknown";
   return {
     action: "intercept",
@@ -250,7 +266,7 @@ export async function processTaskIntercept(
       hookSpecificOutput: {
         hookEventName: "PreToolUse",
         permissionDecision: "deny",
-        permissionDecisionReason: `ib agent ${id} has been spawned to handle this task. Monitor with: ib look ${id} — Do NOT retry or re-spawn.`,
+        permissionDecisionReason: `SUCCESS: Your task was intercepted and redirected to ib agent ${id}. The agent is now running autonomously. This "deny" is expected behavior — it prevents duplicate execution. Do NOT retry or re-spawn. Monitor progress: ib look ${id}`,
       },
     },
   };

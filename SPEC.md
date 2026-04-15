@@ -44,7 +44,6 @@ When a new agent is created (`ib new-agent "prompt"`):
 11. **Write prompt.txt** with the full prompt including any completion instructions, custom prompts, and the user's task.
 
 12. **Write start.sh**: A bash script that:
-    - Adds the git root to `$PATH` (so `ib` is available)
     - Clears `CLAUDECODE` and `CLAUDE_CODE_ENTRYPOINT` env vars (allows nesting)
     - Starts `claude --session-id <uuid> <args> "$(cat prompt.txt)"` in background
     - Captures the Claude PID into `meta.json`

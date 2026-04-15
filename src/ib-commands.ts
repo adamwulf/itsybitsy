@@ -356,13 +356,7 @@ export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
     claudeArgs = claudeArgs ? `${claudeArgs} --model ${model}` : `--model ${model}`;
   }
 
-  // Get git root for PATH
-  const gitRoot = await resolveGitRoot(agent.repoPath) || agent.repoPath;
-
   // Validate paths for shell script interpolation
-  if (!isValidShellPath(gitRoot)) {
-    return { ok: false, exitCode: 1, stdout: "", stderr: `Git root path contains characters unsafe for shell scripts: ${gitRoot}` };
-  }
   if (!isValidShellPath(agentDir)) {
     return { ok: false, exitCode: 1, stdout: "", stderr: `Agent directory path contains characters unsafe for shell scripts: ${agentDir}` };
   }
@@ -380,7 +374,6 @@ export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
   const absExitScript = join(agentDir, "exit-check.sh");
 
   // Shell-quote all paths for safe interpolation
-  const qGitRoot = shellQuote(gitRoot);
   const qAgentDir = shellQuote(agentDir);
   const qAbsExitScript = shellQuote(absExitScript);
 
@@ -389,9 +382,6 @@ export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
   const qMetaJson = shellQuote(join(agentDir, "meta.json"));
   const qAgentLog = shellQuote(join(agentDir, "agent.log"));
   const resumeContent = `#!/bin/bash
-# Add git repo root to PATH so 'ib' is available
-export PATH=${qGitRoot}":$PATH"
-
 # Clear Claude Code nesting detection so agents can start their own claude process
 unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT
 
@@ -1316,13 +1306,17 @@ async function buildAgentSettings(
   const blockedTools = ["EnterPlanMode", "ExitPlanMode"];
 
   // Initialize permissions
+  // Note: we inherit existing allow entries (harmless — more permissions don't hurt),
+  // but NOT existing deny entries. The base settings.local.json may belong to a
+  // per-repo coordinator whose deny list (Write, Edit, etc.) would incorrectly
+  // propagate to all subsequent agents. Agent permissions come from config and
+  // agent type frontmatter, not from whatever was last written to the shared file.
   const perms = (baseSettings.permissions ?? {}) as Record<string, unknown>;
   const existingAllow = Array.isArray(perms.allow) ? (perms.allow as string[]) : [];
-  const existingDeny = Array.isArray(perms.deny) ? (perms.deny as string[]) : [];
 
   // Merge and deduplicate
   const allAllow = [...new Set([...existingAllow, ...ibPerms, ...configAllow])];
-  const allDeny = [...new Set([...existingDeny, ...blockedTools, ...configDeny])];
+  const allDeny = [...new Set([...blockedTools, ...configDeny])];
 
   // Check if intercept hook should be added (reuse already-parsed baseSettings)
   let addIntercept = false;
@@ -1924,15 +1918,12 @@ echo ""
   const absPromptFile = join(agentDir, "prompt.txt");
   const absExitScript = join(agentDir, "exit-check.sh");
   const startScript = join(agentDir, "start.sh");
-  const qRootRepoPath = shellQuote(rootRepoPath);
+
   const qAbsPromptFile = shellQuote(absPromptFile);
   const qStartMetaJson = shellQuote(join(agentDir, "meta.json"));
   const qStartExitScript = shellQuote(absExitScript);
   const qStartAgentLog = shellQuote(join(agentDir, "agent.log"));
   const startContent = `#!/bin/bash
-# Add git repo root to PATH so 'ib' is available
-export PATH=${qRootRepoPath}":$PATH"
-
 # Clear Claude Code nesting detection so agents can start their own claude process
 unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT
 

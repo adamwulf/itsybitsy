@@ -422,6 +422,60 @@ describe("coordinator Bash restrictions", () => {
     }
   });
 
+  test("blocks git -C from coordinator", async () => {
+    await setupCoordinatorDir();
+    try {
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: { command: "git -C /other/repo status" },
+        cwd: coordCwd,
+      });
+      expect(result.action).toBe("intercept");
+      const output = result.output as Record<string, unknown>;
+      const hookOutput = output.hookSpecificOutput as Record<string, unknown>;
+      expect(hookOutput.permissionDecision).toBe("deny");
+      expect(hookOutput.permissionDecisionReason).toContain("-C");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("blocks git --git-dir from coordinator", async () => {
+    await setupCoordinatorDir();
+    try {
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: { command: "git --git-dir=/other/.git log" },
+        cwd: coordCwd,
+      });
+      expect(result.action).toBe("intercept");
+      const output = result.output as Record<string, unknown>;
+      const hookOutput = output.hookSpecificOutput as Record<string, unknown>;
+      expect(hookOutput.permissionDecision).toBe("deny");
+      expect(hookOutput.permissionDecisionReason).toContain("--git-dir");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("blocks git --work-tree from coordinator", async () => {
+    await setupCoordinatorDir();
+    try {
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: { command: "git --work-tree /other/repo diff" },
+        cwd: coordCwd,
+      });
+      expect(result.action).toBe("intercept");
+      const output = result.output as Record<string, unknown>;
+      const hookOutput = output.hookSpecificOutput as Record<string, unknown>;
+      expect(hookOutput.permissionDecision).toBe("deny");
+      expect(hookOutput.permissionDecisionReason).toContain("--work-tree");
+    } finally {
+      await cleanup();
+    }
+  });
+
   test("does not block Bash metacharacters from non-coordinator agents", async () => {
     const fs = await import("fs/promises");
     const { tmpdir } = await import("os");

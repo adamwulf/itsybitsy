@@ -68,6 +68,7 @@ export interface ActionCtx {
   };
   rightPane: {
     mode: PaneMode;
+    repoCoordinatorAgent: Agent | null;
     filteredQuestions: PendingQuestion[];
     questionsSelectedIndex: number;
     scrollOffset: number;
@@ -361,6 +362,12 @@ export function handleSend(ctx: ActionCtx) {
     handleSendToCoordinator(ctx);
     return;
   }
+  // Per-repo coordinator: when a repo header is selected and has a coordinator agent
+  const repoCoord = ctx.rightPane.repoCoordinatorAgent;
+  if (ctx.agentTree.selectedRepoHeader && repoCoord) {
+    handleSendToRepoCoordinator(ctx, repoCoord);
+    return;
+  }
   const agent = ctx.agentTree.selectedAgent;
   if (!agent) return;
   const dialog: Extract<NonNullable<DialogState>, { type: "textarea" }> = {
@@ -415,6 +422,23 @@ function handleSendToCoordinator(ctx: ActionCtx) {
       ctx.executeAndRefresh(async () => {
         const sendResult = await sendTmuxKeys(IB_COORDINATOR_SESSION, sanitized);
         ctx.setNotice(sendResult ? "Sent to coordinator" : "Failed to send to coordinator");
+      });
+    },
+  });
+}
+
+function handleSendToRepoCoordinator(ctx: ActionCtx, agent: Agent) {
+  ctx.showDialog({
+    type: "textarea",
+    prompt: `Send message to ${agent.id} (coordinator):`,
+    buffer: new TextBuffer(),
+    focusedButton: "text",
+    onSubmit: (message: string) => {
+      ctx.closeDialog();
+      if (!message.trim()) { ctx.setNotice("Send cancelled"); return; }
+      ctx.executeAndRefresh(async () => {
+        const result = await sendMessage(agent, message.trim(), { cwd: "/" });
+        ctx.setNotice(result.ok ? `Sent to ${agent.id}` : `Send failed: ${result.stderr || result.stdout}`);
       });
     },
   });

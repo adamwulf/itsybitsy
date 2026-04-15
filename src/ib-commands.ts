@@ -1307,13 +1307,17 @@ async function buildAgentSettings(
   const blockedTools = ["EnterPlanMode", "ExitPlanMode"];
 
   // Initialize permissions
+  // Note: we inherit existing allow entries (harmless — more permissions don't hurt),
+  // but NOT existing deny entries. The base settings.local.json may belong to a
+  // per-repo coordinator whose deny list (Write, Edit, etc.) would incorrectly
+  // propagate to all subsequent agents. Agent permissions come from config and
+  // agent type frontmatter, not from whatever was last written to the shared file.
   const perms = (baseSettings.permissions ?? {}) as Record<string, unknown>;
   const existingAllow = Array.isArray(perms.allow) ? (perms.allow as string[]) : [];
-  const existingDeny = Array.isArray(perms.deny) ? (perms.deny as string[]) : [];
 
   // Merge and deduplicate
   const allAllow = [...new Set([...existingAllow, ...ibPerms, ...configAllow])];
-  const allDeny = [...new Set([...existingDeny, ...blockedTools, ...configDeny])];
+  const allDeny = [...new Set([...blockedTools, ...configDeny])];
 
   // Check if intercept hook should be added (reuse already-parsed baseSettings)
   // Managers and custom types with canSpawnChildren get the intercept hook

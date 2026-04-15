@@ -681,7 +681,7 @@ All keys are read from `~/.itsybitsy/config.json`. If a key is absent or has an 
 
 For a given agent type (manager or worker):
 
-1. Start with the base settings from `.claude/settings.json` in the repo root (NOT `settings.local.json` — the `.local` file is reserved for coordinators and should not propagate to spawned agents)
+1. Start with the base settings from `.claude/settings.json` in the repo root (NOT `settings.local.json` — the `.local` file may belong to a per-repo coordinator and should not propagate to spawned agents)
 2. Add mandatory permissions (§2.2)
 3. Add config-defined permissions for the agent's role
 4. Workers use `permissions.worker.allow`/`deny`; managers use `permissions.manager.allow`/`deny`. There is no fallthrough between types [^perm-quirk]

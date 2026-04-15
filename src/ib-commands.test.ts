@@ -2278,7 +2278,7 @@ describe("newAgent (native)", () => {
     expect(settings.permissions.allow).toContain("Agent");
     expect(settings.permissions.allow).toContain("Task");
 
-    // Coordinator deny entries should NOT have leaked through
+    // Base settings.json deny entries should NOT have leaked through
     expect(settings.permissions.deny).not.toContain("Write");
     expect(settings.permissions.deny).not.toContain("Edit");
     expect(settings.permissions.deny).not.toContain("MultiEdit");

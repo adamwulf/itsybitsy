@@ -406,6 +406,20 @@ export async function validateAllAgentTypes(): Promise<string[]> {
         if (frontmatter.model !== undefined && typeof frontmatter.model !== "string") {
           errors.push(`${file}: model must be a string`);
         }
+
+        // Validate allowedPaths if present
+        if (frontmatter.allowedPaths !== undefined) {
+          if (!Array.isArray(frontmatter.allowedPaths)) {
+            errors.push(`${file}: allowedPaths must be a list of directory paths`);
+          } else {
+            for (const p of frontmatter.allowedPaths) {
+              if (typeof p !== "string") {
+                errors.push(`${file}: allowedPaths entries must be strings, got ${typeof p}`);
+                break;
+              }
+            }
+          }
+        }
       } catch (err) {
         errors.push(`${file}: failed to parse — ${err instanceof Error ? err.message : String(err)}`);
       }

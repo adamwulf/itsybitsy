@@ -242,6 +242,7 @@ The `AgentType` interface defines these properties:
 | `icon` | string | No | Display icon — first non-whitespace character is extracted |
 | `model` | string | No | Default model override (used before config fallback) |
 | `permissions` | object | No | Type-specific `allow`/`deny` permission lists |
+| `allowedPaths` | string[] | No | Directories the agent can access beyond its worktree. `undefined` = legacy permissive, `[]` = strict (worktree only). Paths may use `~` (expanded at creation time). See §6.1 for enforcement details. |
 | `instructionStyle` | `"manager"` \| `"worker"` \| `"coordinator"` | Yes | Maps to base instruction set for session-start (defaults to `"manager"`) |
 | `markdownBody` | string | No | Template body for custom instructions (see §6.3.1) |
 
@@ -305,6 +306,9 @@ permissions:
   deny:
     - Write
     - Edit
+allowedPaths:
+  - ~/Developer/shared-lib
+  - /tmp
 ---
 
 ## Research Agent Instructions
@@ -630,14 +634,20 @@ itsybitsy installs hooks into each agent's `settings.local.json`, plus optional 
 
 [^ts-only-notebook-path]: **TS-only behavior.** The bash `ib` only extracts `file_path` and `path` from `tool_input`. The TS implementation additionally checks `notebook_path` to cover Jupyter notebook tools.
 
-**Allowed paths**:
+**Always allowed paths** (steps 6–7):
 - Agent's own worktree (`<agent-dir>/repo/...`)
 - Agent's own `agent.log`
-- Home directory, `/tmp`, and other system paths (anything not in another agent's dir or the main repo)
 
-**Denied paths**:
+**Always denied paths** (steps 8–9, checked before allowedPaths):
 - Other agents' directories
 - Main repo root (outside the agent's worktree)
+
+**allowedPaths-based access control** (step 10): If the agent's `meta.json` contains an `allowedPaths` field (set from the agent type's frontmatter at creation time — see §2.1), it controls access to all other paths:
+- `allowedPaths` **absent** (`undefined`): Legacy permissive mode — all paths outside the always-denied set are allowed (home directory, `/tmp`, system paths, other repos).
+- `allowedPaths: []` (empty array): Strict mode — only the always-allowed paths above are permitted. No system paths, no other repos.
+- `allowedPaths` with entries: Only paths under the listed directories are allowed (in addition to the always-allowed paths). Matching is by exact path or directory prefix (`filePath === allowed || filePath.startsWith(allowed + "/")`).
+
+The distinction between `undefined` (absent) and `[]` (empty) is critical for backward compatibility: existing agents without `allowedPaths` in meta.json retain the current permissive behavior.
 
 **Logging**: Denials are logged to the agent's `agent.log` with format: `[PreToolUse] Permission denied: <tool-name> (<params>)`
 
@@ -714,6 +724,7 @@ Instructions are generated based on the agent's type definition:
 | `{{worktreePath}}` | Full path to agent's worktree |
 | `{{rootRepoPath}}` | Full path to the root repo |
 | `{{repoName}}` | Repository basename |
+| `{{pathIsolation}}` | Rendered Path Isolation section (from `buildPathIsolationSection()`, includes allowedPaths if defined) |
 
 | Condition | True when |
 |-----------|-----------|

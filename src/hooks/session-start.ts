@@ -121,7 +121,7 @@ export function detectRole(
 
 /**
  * Interpolate {{placeholder}} variables and {{#if cond}}...{{/if}} blocks in a template.
- * Available variables: agentId, agentManager, parentBranch, worktreePath, rootRepoPath, repoName
+ * Available variables: agentId, agentManager, parentBranch, worktreePath, rootRepoPath, repoName, pathIsolation
  * Available conditions: hasManager (agent has a manager), isTopLevel (no manager = top-level)
  */
 export function interpolateTemplate(template: string, ctx: SessionContext): string {
@@ -133,6 +133,7 @@ export function interpolateTemplate(template: string, ctx: SessionContext): stri
     worktreePath: ctx.worktreePath,
     rootRepoPath: ctx.rootRepoPath,
     repoName,
+    pathIsolation: buildPathIsolationSection(ctx),
   };
 
   const conditions: Record<string, boolean> = {
@@ -234,9 +235,7 @@ export function buildPathIsolationSection(ctx: SessionContext): string {
   }
   pathSection += `\n${cannotAccessSection}`;
 
-  if (ctx.worktreePath) {
-    pathSection += `\n- If you get "Access denied" or "Path violation" errors, you're trying to access a forbidden path`;
-  }
+  pathSection += `\n- If you get "Access denied" or "Path violation" errors, you're trying to access a forbidden path`;
 
   return pathSection;
 }

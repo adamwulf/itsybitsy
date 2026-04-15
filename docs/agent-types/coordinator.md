@@ -28,12 +28,7 @@ Each Bash tool call must run exactly ONE command. Multi-command calls will be bl
 - NO subshells or command substitution that runs multiple commands
 - If you need to run two commands, make two separate Bash tool calls
 
-### Path Isolation
-
-You are isolated to your worktree at: {{worktreePath}}
-- You CAN access: Your worktree, ~/.claude, /tmp, and general system paths
-- You CANNOT access: The main repo at {{rootRepoPath}}, other agents' worktrees
-- If you get "Access denied" or "Path violation" errors, you're trying to access a forbidden path
+{{pathIsolation}}
 
 ### Git Worktree Context
 

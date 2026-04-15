@@ -1824,9 +1824,16 @@ export async function newAgent(
   // 14. Resolve and normalize allowedPaths from agent type
   let resolvedAllowedPaths: string[] | undefined = undefined;
   if (agentTypeDef.allowedPaths !== undefined) {
-    resolvedAllowedPaths = agentTypeDef.allowedPaths.map(path => {
+    resolvedAllowedPaths = agentTypeDef.allowedPaths.map(p => {
       // Expand ~ to home directory
-      let expanded = path.startsWith("~") ? path.replace("~", homedir()) : path;
+      let expanded: string;
+      if (p === "~") {
+        expanded = homedir();
+      } else if (p.startsWith("~/")) {
+        expanded = join(homedir(), p.slice(2));
+      } else {
+        expanded = p;
+      }
       // Resolve to absolute path
       expanded = resolve(expanded);
       // Try to resolve symlinks, fall back to resolve() result if path doesn't exist

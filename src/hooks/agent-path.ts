@@ -323,37 +323,83 @@ export async function checkIbCommandAccess(
 
   const targetId = parsed.targetId;
   const targetMetaPath = join(agentsDir, targetId, "meta.json");
+  const callerRepoRoot = resolve(agentsDir, "..", "..");
 
-  let targetManager: string | undefined;
+  /** Check if a meta.json grants access to the calling agent (manager or spawner). */
+  function hasAccess(meta: Record<string, unknown>): boolean {
+    // Allow if caller is the manager
+    if (typeof meta.manager === "string" && meta.manager === callingAgentId) {
+      return true;
+    }
+    // Allow if caller is the spawner with matching repo_path
+    const sb = meta.spawned_by as { agent_id?: string; repo_path?: string } | undefined;
+    if (
+      sb &&
+      sb.agent_id === callingAgentId &&
+      typeof sb.repo_path === "string" &&
+      resolve(sb.repo_path) === callerRepoRoot
+    ) {
+      return true;
+    }
+    return false;
+  }
+
+  // Same-repo check: target exists in calling agent's repo
   try {
     const metaFile = Bun.file(targetMetaPath);
     if (await metaFile.exists()) {
-      const meta = await metaFile.json();
-      targetManager = typeof meta.manager === "string" ? meta.manager : undefined;
-    } else {
-      // Target agent directory not found in this repo's agents dir.
-      // Could be a different repo — deny to prevent cross-repo control.
+      let meta: Record<string, unknown>;
+      try {
+        meta = await metaFile.json();
+      } catch {
+        // File exists but can't be parsed — deny rather than falling through
+        // to cross-repo check which could match a different agent with the same ID
+        return {
+          decision: "deny",
+          reason: `Access denied: cannot read meta for agent '${targetId}'`,
+        };
+      }
+      if (hasAccess(meta)) return null; // allow
       return {
         decision: "deny",
-        reason: `Access denied: agent '${targetId}' not found in this repo`,
+        reason: `Access denied: only the manager or spawner of '${targetId}' can run 'ib ${parsed.subcommand}'`,
       };
     }
-  } catch {
-    // Can't read meta — deny to be safe
-    return {
-      decision: "deny",
-      reason: `Access denied: cannot read meta for agent '${targetId}'`,
-    };
-  }
+  } catch { /* exists() failed — fall through to cross-repo check */ }
 
-  if (targetManager !== callingAgentId) {
-    return {
-      decision: "deny",
-      reason: `Access denied: only the manager of '${targetId}' can run 'ib ${parsed.subcommand}'`,
-    };
-  }
+  // Cross-repo check: target not in this repo — search other repos
+  try {
+    const { listRepos } = await import("../registry");
+    const repos = await listRepos();
+    for (const repo of repos) {
+      // Skip our own repo (already checked above)
+      if (resolve(repo.path) === callerRepoRoot) continue;
 
-  return null;
+      const crossMetaPath = join(repo.path, ".ittybitty", "agents", targetId, "meta.json");
+      const crossMetaFile = Bun.file(crossMetaPath);
+      if (await crossMetaFile.exists()) {
+        let meta: Record<string, unknown>;
+        try {
+          meta = await crossMetaFile.json();
+        } catch {
+          return {
+            decision: "deny",
+            reason: `Access denied: cannot read meta for agent '${targetId}'`,
+          };
+        }
+        if (hasAccess(meta)) return null; // allow
+        return {
+          decision: "deny",
+          reason: `Access denied: only the spawner or manager of '${targetId}' can run 'ib ${parsed.subcommand}'`,
+        };
+      }
+    }
+  } catch { /* ignore — deny below */ }
+
+  return {
+    decision: "deny",
+    reason: `Access denied: agent '${targetId}' not found in any registered repo`,
+  };
 }
 
 // ── CLI entry point ──────────────────────────────────────────────────────────

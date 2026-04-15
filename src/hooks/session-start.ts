@@ -23,11 +23,20 @@ export interface SessionContext {
   typeName?: string;
   /** The resolved agent type definition (set when typeName is present) */
   typeDef?: AgentTypeDefinition;
+  /** Cross-repo spawner info (set when meta.spawned_by is present and differs from manager) */
+  spawnedBy?: { agent_id: string; repo_path: string };
 }
 
 export function detectRole(
   cwd: string,
-  metaJson?: { id?: string; manager?: string | null; worker?: boolean; coordinator?: boolean; type?: string },
+  metaJson?: {
+    id?: string;
+    manager?: string | null;
+    worker?: boolean;
+    coordinator?: boolean;
+    type?: string;
+    spawned_by?: { agent_id: string; repo_path: string };
+  },
   agentIdOverride?: string,
 ): SessionContext {
   const match = AGENT_CWD_PATTERN.exec(cwd);
@@ -86,6 +95,11 @@ export function detectRole(
     branchName = `agent/${agentId}`;
   }
 
+  // Only include spawnedBy when it differs from manager (cross-repo or non-manager spawner)
+  const spawnedBy = meta.spawned_by;
+  const effectiveSpawnedBy =
+    spawnedBy && spawnedBy.agent_id !== agentManager ? spawnedBy : undefined;
+
   return {
     role,
     agentId,
@@ -95,6 +109,7 @@ export function detectRole(
     worktreePath,
     rootRepoPath,
     typeName: typeName || undefined,
+    spawnedBy: effectiveSpawnedBy,
   };
 }
 
@@ -186,6 +201,10 @@ function generateManagerInstructions(ctx: SessionContext): string {
     ? `Your manager agent is: ${ctx.agentManager}`
     : "";
 
+  const spawnerInfo = ctx.spawnedBy
+    ? `You were spawned by agent \`${ctx.spawnedBy.agent_id}\` in repo \`${basename(ctx.spawnedBy.repo_path)}\`. You can send messages to your spawner with: \`ib send ${ctx.spawnedBy.agent_id} "message"\``
+    : "";
+
   const askLine = !ctx.agentManager
     ? `| \`ib ask "question"\` | Ask the user a question (top-level managers only) |`
     : "";
@@ -203,6 +222,7 @@ Top-level managers can ask the user questions with \`ib ask "question"\`. After 
 You are manager agent \`${ctx.agentId}\` in the ittybitty multi-agent orchestration system.
 You are running in a git worktree on branch \`${ctx.branchName}\`, forked from \`${ctx.parentBranch}\`.
 ${managerInfo}
+${spawnerInfo}
 
 IMPORTANT: Always use \`ib\` (not \`./ib\`) to ensure you use the current version from PATH.
 
@@ -302,12 +322,17 @@ function generateWorkerInstructions(ctx: SessionContext): string {
   // so `ib send muse-ios` routes correctly to the per-repo coordinator.
   const managerSendTarget = ctx.agentManager;
 
+  const spawnerInfo = ctx.spawnedBy
+    ? `You were spawned by agent \`${ctx.spawnedBy.agent_id}\` in repo \`${basename(ctx.spawnedBy.repo_path)}\`. You can send messages to your spawner with: \`ib send ${ctx.spawnedBy.agent_id} "message"\``
+    : "";
+
   return `<ittybitty>
 ## IttyBitty Worker Agent
 
 You are worker agent \`${ctx.agentId}\` in the ittybitty multi-agent orchestration system.
 You are running in a git worktree on branch \`${ctx.branchName}\`, forked from \`${ctx.parentBranch}\`.
 Your manager agent is: ${ctx.agentManager}
+${spawnerInfo}
 
 IMPORTANT: Always use \`ib\` (not \`./ib\`) to ensure you use the current version from PATH.
 
@@ -467,6 +492,10 @@ function generateCustomTypeInstructions(ctx: SessionContext, typeDef: AgentTypeD
     ? `Your manager agent is: ${ctx.agentManager}`
     : "";
 
+  const spawnerInfo = ctx.spawnedBy
+    ? `You were spawned by agent \`${ctx.spawnedBy.agent_id}\` in repo \`${basename(ctx.spawnedBy.repo_path)}\`. You can send messages to your spawner with: \`ib send ${ctx.spawnedBy.agent_id} "message"\``
+    : "";
+
   const communicationSection = managerSendTarget ? `
 ### Communication
 
@@ -481,6 +510,7 @@ function generateCustomTypeInstructions(ctx: SessionContext, typeDef: AgentTypeD
 ${typeDef.description ? typeDef.description + "\n" : ""}You are agent \`${ctx.agentId}\` (type: ${typeDef.name}) in the ittybitty multi-agent orchestration system.
 You are running in a git worktree on branch \`${ctx.branchName}\`, forked from \`${ctx.parentBranch}\`.
 ${managerInfo}
+${spawnerInfo}
 
 IMPORTANT: Always use \`ib\` (not \`./ib\`) to ensure you use the current version from PATH.
 
@@ -553,7 +583,7 @@ export async function hookSessionStart(rawStdin?: string, agentIdArg?: string): 
 
   // Detect role - read meta.json from filesystem if in an agent directory
   const match = AGENT_CWD_PATTERN.exec(cwd);
-  let metaJson: { id?: string; manager?: string | null; worker?: boolean; coordinator?: boolean; type?: string } | undefined;
+  let metaJson: { id?: string; manager?: string | null; worker?: boolean; coordinator?: boolean; type?: string; spawned_by?: { agent_id: string; repo_path: string } } | undefined;
 
   if (match) {
     const agentId = match[1]!;

@@ -42,7 +42,7 @@ When a new agent is created (`ib new-agent "prompt"`):
    - Hook definitions: path-check, stop, permission-denied, session-start, and optionally intercept-task (for agents with `canSpawnChildren: true`)
    - The agent ID placeholder `__AGENT_ID__` is replaced with the actual ID after writing
 
-10. **Write meta.json** to `<agent-dir>/meta.json` (see §5.2 for fields). Includes `agentType` (the resolved type name) and `agentIcon` (the type's icon character, if defined).
+10. **Write meta.json** to `<agent-dir>/meta.json` (see §5.2 for fields). Includes `agentType` (the resolved type name), `agentIcon` (the type's icon character, if defined), and `allowedPaths` (resolved absolute paths from the type's `allowedPaths` frontmatter, if defined — see §6.1).
 
 11. **Write prompt.txt** with the full prompt including any completion instructions, custom prompts, and the user's task.
 
@@ -335,7 +335,7 @@ You are research agent `{{agentId}}`...
 
 ### 2.8 Startup Validation
 
-When `ib watch` launches, it validates all agent type files in `~/.itsybitsy/agent-types/` before starting the dashboard (after auto-population). If any file has YAML parsing errors, invalid field types (e.g., `canSpawnChildren` is not a boolean), or invalid `instructionStyle` values, the dashboard exits immediately with error messages describing each issue. This prevents runtime failures from malformed type definitions.
+When `ib watch` launches, it validates all agent type files in `~/.itsybitsy/agent-types/` before starting the dashboard (after auto-population). If any file has YAML parsing errors, invalid field types (e.g., `canSpawnChildren` is not a boolean), invalid `instructionStyle` values, or invalid `allowedPaths` entries (must be a list of strings), the dashboard exits immediately with error messages describing each issue. This prevents runtime failures from malformed type definitions.
 
 ### 2.9 Backward Compatibility
 
@@ -539,7 +539,8 @@ Questions from agents that no longer exist (no directory in `.ittybitty/agents/`
   "watchdog_pid": "12346",        // appended after watchdog spawns (see §8.5); not in initial write
   "state": "running",             // written by stop hook, ib send, ib resume (see §1.3.1)
   "state_updated_at": 1704825030, // epoch seconds when state was last written
-  "coordinator": true             // only present for per-repo coordinators (§12.2.2)
+  "coordinator": true,            // only present for per-repo coordinators (§12.2.2)
+  "allowedPaths": ["/Users/adam/Developer/shared-lib", "/tmp"]  // optional, from agent type (§6.1)
 }
 ```
 
@@ -563,6 +564,7 @@ Questions from agents that no longer exist (no directory in `.ittybitty/agents/`
 | `state` | string \| undefined | Deterministic agent state written by the stop hook, `ib send`, or `ib resume`. Values: `"running"`, `"waiting"`, `"complete"`. Absent on legacy agents or before the first stop hook fires (treated as `"running"` if agent is older than 6s). See §1.3.1. |
 | `state_updated_at` | number \| undefined | Unix epoch seconds when `state` was last written. Used for debugging. |
 | `coordinator` | boolean \| undefined | `true` for per-repo coordinators (§12.2.2). Absent for regular agents. |
+| `allowedPaths` | string[] \| undefined | Resolved absolute paths the agent can access beyond its worktree (from agent type `allowedPaths` frontmatter, expanded at creation time). `undefined` = legacy permissive, `[]` = strict mode. See §6.1. |
 
 ### 5.3 Worktree ↔ Branch Relationship
 
@@ -642,7 +644,7 @@ itsybitsy installs hooks into each agent's `settings.local.json`, plus optional 
 - Other agents' directories
 - Main repo root (outside the agent's worktree)
 
-**allowedPaths-based access control** (step 10): If the agent's `meta.json` contains an `allowedPaths` field (set from the agent type's frontmatter at creation time — see §2.1), it controls access to all other paths:
+**allowedPaths-based access control** (step 10): If the agent's `meta.json` contains an `allowedPaths` field (set from the agent type's frontmatter at creation time — see §2.2), it controls access to all other paths:
 - `allowedPaths` **absent** (`undefined`): Legacy permissive mode — all paths outside the always-denied set are allowed (home directory, `/tmp`, system paths, other repos).
 - `allowedPaths: []` (empty array): Strict mode — only the always-allowed paths above are permitted. No system paths, no other repos.
 - `allowedPaths` with entries: Only paths under the listed directories are allowed (in addition to the always-allowed paths). Matching is by exact path or directory prefix (`filePath === allowed || filePath.startsWith(allowed + "/")`).

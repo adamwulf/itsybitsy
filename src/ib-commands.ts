@@ -1804,6 +1804,15 @@ export async function newAgent(
   }
 
   // 14. Write meta.json
+  // If spawned_by wasn't auto-detected and we have a same-repo manager,
+  // set spawned_by to match the manager for consistency
+  if (!spawnedBy && manager) {
+    spawnedBy = {
+      agent_id: manager,
+      repo_path: rootRepoPath,
+    };
+  }
+
   const now = new Date();
   const metaJson: Record<string, unknown> = {
     id,

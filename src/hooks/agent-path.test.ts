@@ -619,7 +619,7 @@ describe("checkIbCommandAccess", () => {
     expect(result!.decision).toBe("deny");
   });
 
-  test("denies kill when target agent not found in this repo", async () => {
+  test("denies kill when target agent not found in any repo", async () => {
     const result = await checkIbCommandAccess("ib kill agent-target1", "agent-manager1", agentsDir);
     expect(result).not.toBeNull();
     expect(result!.decision).toBe("deny");

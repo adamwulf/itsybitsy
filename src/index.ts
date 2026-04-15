@@ -809,6 +809,14 @@ async function main() {
           if (!ibArgs[i + 1]) { console.error("Error: --deny requires a value"); process.exit(1); }
           opts.denyTools = ibArgs[++i];
         }
+        else if (arg === "--spawned-by") {
+          if (!ibArgs[i + 1]) { console.error("Error: --spawned-by requires a value"); process.exit(1); }
+          (opts as Record<string, unknown>)._spawnedByAgentId = ibArgs[++i];
+        }
+        else if (arg === "--spawned-by-repo") {
+          if (!ibArgs[i + 1]) { console.error("Error: --spawned-by-repo requires a value"); process.exit(1); }
+          (opts as Record<string, unknown>)._spawnedByRepoPath = ibArgs[++i];
+        }
         else if (arg.startsWith("--")) {
           console.error(`Error: unknown flag '${arg}'`);
           process.exit(1);
@@ -834,6 +842,23 @@ async function main() {
         console.error("Usage: ib new-agent [flags] <prompt...>");
         process.exit(1);
       }
+
+      // Validate --spawned-by / --spawned-by-repo co-dependency and construct spawnedBy
+      const _spawnedByAgentId = (opts as Record<string, unknown>)._spawnedByAgentId as string | undefined;
+      const _spawnedByRepoPath = (opts as Record<string, unknown>)._spawnedByRepoPath as string | undefined;
+      if (_spawnedByRepoPath && !_spawnedByAgentId) {
+        console.error("Error: --spawned-by-repo requires --spawned-by");
+        process.exit(1);
+      }
+      if (_spawnedByAgentId) {
+        opts.spawnedBy = {
+          agent_id: _spawnedByAgentId,
+          repo_path: _spawnedByRepoPath ?? process.cwd(),
+        };
+      }
+      // Clean up temp fields
+      delete (opts as Record<string, unknown>)._spawnedByAgentId;
+      delete (opts as Record<string, unknown>)._spawnedByRepoPath;
 
       // Determine target repo: --repo flag > cwd match > single registered repo > error
       const repos = await listRepos();

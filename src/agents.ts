@@ -14,6 +14,7 @@ import { resolveAgentType } from "./agent-types";
 /** States that can be written to meta.json */
 export type MetaState = "running" | "waiting" | "complete";
 
+/** Cross-repo spawner provenance — records which agent created this one */
 export interface SpawnedBy {
   agent_id: string;
   repo_path: string;

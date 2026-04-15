@@ -513,7 +513,6 @@ ${typeDef.description ? typeDef.description + "\n" : ""}You are agent \`${ctx.ag
 You are running in a git worktree on branch \`${ctx.branchName}\`, forked from \`${ctx.parentBranch}\`.
 ${managerInfo}
 ${spawnerInfo}
-${spawnerInfo}
 
 IMPORTANT: Always use \`ib\` (not \`./ib\`) to ensure you use the current version from PATH.
 
@@ -586,7 +585,7 @@ export async function hookSessionStart(rawStdin?: string, agentIdArg?: string): 
 
   // Detect role - read meta.json from filesystem if in an agent directory
   const match = AGENT_CWD_PATTERN.exec(cwd);
-  let metaJson: { id?: string; manager?: string | null; worker?: boolean; coordinator?: boolean; type?: string } | undefined;
+  let metaJson: { id?: string; manager?: string | null; worker?: boolean; coordinator?: boolean; type?: string; spawned_by?: { agent_id: string; repo_path: string } } | undefined;
 
   if (match) {
     const agentId = match[1]!;

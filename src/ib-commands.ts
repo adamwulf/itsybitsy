@@ -1283,10 +1283,13 @@ async function buildAgentSettings(
   configDeny: string[],
   canSpawnChildrenOverride?: boolean
 ): Promise<string> {
-  // Start with existing settings if available
+  // Start with existing project settings if available.
+  // We read settings.json (the version-controlled project settings), NOT settings.local.json.
+  // The .local file may belong to a coordinator or have repo-specific overrides that should
+  // not propagate to spawned agents.
   let baseSettings: Record<string, unknown> = {};
   try {
-    const settingsFile = Bun.file(join(repoPath, ".claude", "settings.local.json"));
+    const settingsFile = Bun.file(join(repoPath, ".claude", "settings.json"));
     if (await settingsFile.exists()) {
       baseSettings = await settingsFile.json();
     }
@@ -1309,11 +1312,10 @@ async function buildAgentSettings(
   const blockedTools = ["EnterPlanMode", "ExitPlanMode"];
 
   // Initialize permissions
-  // Note: we inherit existing allow entries (harmless — more permissions don't hurt),
-  // but NOT existing deny entries. The base settings.local.json may belong to a
-  // per-repo coordinator whose deny list (Write, Edit, etc.) would incorrectly
-  // propagate to all subsequent agents. Agent permissions come from config and
-  // agent type frontmatter, not from whatever was last written to the shared file.
+  // Note: we inherit existing allow entries from settings.json (harmless — more
+  // permissions don't hurt), but NOT existing deny entries. The base settings.json
+  // may have deny entries that should not propagate to agents. Agent deny lists come
+  // from config and agent type frontmatter only.
   const perms = (baseSettings.permissions ?? {}) as Record<string, unknown>;
   const existingAllow = Array.isArray(perms.allow) ? (perms.allow as string[]) : [];
 

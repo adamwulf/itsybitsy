@@ -1530,7 +1530,11 @@ export async function newAgent(
     // Case 2: Non-worktree agent (coordinator) — CWD is a registered repo root
     // Coordinators run from the repo root, so CWD won't match the worktree pattern.
     // Detect by checking if CWD is a registered repo with a coordinator agent.
-    if (!spawnedBy && !worktreeMatch) {
+    // Only fires when CLAUDE_SESSION_ID is set, which means the caller is a Claude agent
+    // session (e.g. a coordinator). Human users running ib watch or ib new-agent from the
+    // command line won't have this variable, so they won't get auto-assigned a coordinator
+    // as spawner.
+    if (!spawnedBy && !worktreeMatch && process.env.CLAUDE_SESSION_ID) {
       try {
         const repos = await listRepos();
         const repoMatch = repos.find(r => r.path === cwd);

@@ -66,6 +66,7 @@ function makeMockCtx(overrides?: {
       flatList: overrides?.flatList ?? [],
       visibleList: overrides?.flatList ?? [],
       selectAgentById: () => true,
+      selectByRepoPath: () => true,
     },
     rightPane: {
       mode: overrides?.mode ?? "AGENT LOG",

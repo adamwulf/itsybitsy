@@ -4071,6 +4071,139 @@ describe("spawned_by validation in agents.ts", () => {
   });
 });
 
+describe("spawned_by Case 2 coordinator auto-detect", () => {
+  let tempDir: string;
+  let agentsDir: string;
+  let fakeHome: string;
+  let originalHome: string | undefined;
+  let originalClaudeSessionId: string | undefined;
+  let spawnCalls: string[][];
+
+  function mockSpawnRunner() {
+    return (cmd: string[], _opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
+      spawnCalls.push(cmd);
+      const cmdStr = cmd.join(" ");
+      if (cmdStr.includes("tmux has-session")) {
+        const newSessionCalled = spawnCalls.some(c => c.join(" ").includes("tmux new-session"));
+        return makeSpawnResult(newSessionCalled ? 0 : 1);
+      }
+      if (cmdStr.includes("tmux start-server")) return makeSpawnResult(0);
+      if (cmdStr.includes("tmux new-session")) return makeSpawnResult(0);
+      if (cmdStr.includes("worktree add")) {
+        const repoIdx = cmd.indexOf("add") + 1;
+        if (repoIdx > 0 && repoIdx < cmd.length) {
+          const repoDir = cmd[repoIdx]!;
+          require("fs").mkdirSync(repoDir, { recursive: true });
+        }
+        return makeSpawnResult(0);
+      }
+      if (cmdStr.includes("worktree remove")) return makeSpawnResult(0);
+      if (cmdStr.includes("branch -D")) return makeSpawnResult(0);
+      if (cmdStr.includes("--git-common-dir")) return makeSpawnResult(0, ".git");
+      if (cmdStr.includes("--show-toplevel")) return makeSpawnResult(0, tempDir);
+      if (cmdStr.includes("--git-dir")) return makeSpawnResult(0, ".git");
+      if (cmdStr.includes("which gh")) return makeSpawnResult(1);
+      if (cmdStr.includes("git") && cmd[cmd.length - 1] === "remote") return makeSpawnResult(0);
+      if (cmdStr.includes("capture-pane")) return makeSpawnResult(0, "Claude Code v1.0");
+      return makeSpawnResult(0);
+    };
+  }
+
+  beforeEach(async () => {
+    tempDir = require("fs").realpathSync(await mkdtemp(join(tmpdir(), "ib-spawner-case2-")));
+    agentsDir = join(tempDir, ".ittybitty", "agents");
+    fakeHome = require("fs").realpathSync(await mkdtemp(join(tmpdir(), "ib-spawner-case2-home-")));
+    spawnCalls = [];
+
+    // Save and override HOME so listRepos reads our fake repos.json
+    originalHome = process.env.HOME;
+    process.env.HOME = fakeHome;
+
+    // Save original CLAUDE_SESSION_ID
+    originalClaudeSessionId = process.env.CLAUDE_SESSION_ID;
+
+    // Set up repo structure
+    await mkdir(join(tempDir, ".ittybitty"), { recursive: true });
+    await Bun.write(join(tempDir, ".ittybitty", "repo-id"), "abcd1234\n");
+
+    // Register this tempDir as a repo in the fake home's repos.json
+    await mkdir(join(fakeHome, ".itsybitsy"), { recursive: true });
+    await Bun.write(join(fakeHome, ".itsybitsy", "repos.json"), JSON.stringify({
+      repos: [{ path: tempDir, name: "test-repo" }]
+    }));
+
+    // Create a coordinator agent in the repo
+    const coordId = require("path").basename(tempDir);
+    const coordDir = join(agentsDir, coordId);
+    await mkdir(coordDir, { recursive: true });
+    await Bun.write(join(coordDir, "meta.json"), JSON.stringify({
+      id: coordId,
+      coordinator: true,
+      tmux_session: `ittybitty-abcd1234-${coordId}`,
+      prompt: "coordinate",
+      manager: null,
+      worktree: false,
+      worker: false,
+      yolo: false,
+      model: "sonnet",
+    }));
+
+    // Set user config path to temp dir
+    setUserConfigPath(join(tempDir, "config.json"));
+    await Bun.write(join(tempDir, "config.json"), JSON.stringify({ model: "sonnet" }));
+
+    lifecycleSpawnCtx.set((cmd: string[], _opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
+      const cmdStr = cmd.join(" ");
+      if (cmdStr.includes("--git-common-dir")) return makeSpawnResult(0, ".git");
+      if (cmdStr.includes("--show-toplevel")) return makeSpawnResult(0, tempDir);
+      if (cmdStr.includes("--git-dir")) return makeSpawnResult(0, ".git");
+      return makeSpawnResult(0);
+    });
+  });
+
+  afterEach(async () => {
+    resetNewAgentSpawnRunner();
+    resetNewAgentSummaryGenerator();
+    lifecycleSpawnCtx.reset();
+    resetUserConfigPath();
+    process.env.HOME = originalHome;
+    if (originalClaudeSessionId !== undefined) {
+      process.env.CLAUDE_SESSION_ID = originalClaudeSessionId;
+    } else {
+      delete process.env.CLAUDE_SESSION_ID;
+    }
+    await rm(tempDir, { recursive: true, force: true });
+    await rm(fakeHome, { recursive: true, force: true });
+  });
+
+  test("Case 2 is skipped when CLAUDE_SESSION_ID is not set (human user)", async () => {
+    delete process.env.CLAUDE_SESSION_ID;
+    setNewAgentSpawnRunner(mockSpawnRunner());
+
+    const result = await newAgent(tempDir, "do work", { name: "test-no-session", _cwd: tempDir });
+    expect(result.ok).toBe(true);
+
+    // Read the meta.json of the newly created agent — spawned_by should be null
+    const meta = await Bun.file(join(agentsDir, "test-no-session", "meta.json")).json();
+    expect(meta.spawned_by).toBeNull();
+  });
+
+  test("Case 2 fires when CLAUDE_SESSION_ID is set and CWD is repo root with coordinator", async () => {
+    process.env.CLAUDE_SESSION_ID = "fake-session-id-12345";
+    setNewAgentSpawnRunner(mockSpawnRunner());
+
+    const result = await newAgent(tempDir, "do work", { name: "test-with-session", _cwd: tempDir });
+    expect(result.ok).toBe(true);
+
+    // Read the meta.json — spawned_by should be set to the coordinator
+    const meta = await Bun.file(join(agentsDir, "test-with-session", "meta.json")).json();
+    const coordId = require("path").basename(tempDir);
+    expect(meta.spawned_by).not.toBeNull();
+    expect(meta.spawned_by.agent_id).toBe(coordId);
+    expect(meta.spawned_by.repo_path).toBe(tempDir);
+  });
+});
+
 describe("resolveAgentId", () => {
   let tempDir: string;
   let agentsDir: string;

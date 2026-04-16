@@ -65,6 +65,7 @@ export interface ActionCtx {
     flatList: FlatEntry[];
     visibleList: FlatEntry[];
     selectAgentById(id: string): boolean;
+    selectByRepoPath(repoPath: string): boolean;
   };
   rightPane: {
     mode: PaneMode;
@@ -542,16 +543,26 @@ export function handleGoToQuestionAgent(ctx: ActionCtx) {
 export function handleFuzzyAgent(ctx: ActionCtx) {
   const visible = ctx.agentTree.visibleList;
   const agentEntries = visible.filter((f): f is Extract<FlatEntry, { kind: "agent" }> => f.kind === "agent");
-  if (agentEntries.length === 0) { ctx.setNotice("No agents to search"); return; }
+  const repoEntries = visible.filter((f): f is Extract<FlatEntry, { kind: "repo-header" }> => f.kind === "repo-header");
+  if (agentEntries.length === 0 && repoEntries.length === 0) { ctx.setNotice("No agents to search"); return; }
   const fuzzyStateColWidth = computeStateColWidth(agentEntries);
-  const allItems = agentEntries.map((f) => {
-    const promptText = (f.agent.meta.summary ?? f.agent.meta.prompt).replace(/\n/g, " ");
-    const state = displayState(f.agent.state);
-    return `${f.agent.repoName}/${f.agent.id}  ${state.padEnd(fuzzyStateColWidth)}  ${f.agent.age.padStart(AGE_COL_WIDTH)}  ${promptText}`;
+  // Build a mixed list: repo headers first, then agents
+  type FuzzyEntry = { kind: "agent"; entry: Extract<FlatEntry, { kind: "agent" }> } | { kind: "repo"; entry: Extract<FlatEntry, { kind: "repo-header" }> };
+  const entries: FuzzyEntry[] = [
+    ...repoEntries.map((e) => ({ kind: "repo" as const, entry: e })),
+    ...agentEntries.map((e) => ({ kind: "agent" as const, entry: e })),
+  ];
+  const allItems = entries.map((e) => {
+    if (e.kind === "repo") {
+      return `${e.entry.repoName}/  (repo)`;
+    }
+    const promptText = (e.entry.agent.meta.summary ?? e.entry.agent.meta.prompt).replace(/\n/g, " ");
+    const state = displayState(e.entry.agent.state);
+    return `${e.entry.agent.repoName}/${e.entry.agent.id}  ${state.padEnd(fuzzyStateColWidth)}  ${e.entry.agent.age.padStart(AGE_COL_WIDTH)}  ${promptText}`;
   });
   ctx.showDialog({
     type: "fuzzy",
-    prompt: "Jump to agent",
+    prompt: "Jump to agent or repo",
     query: "",
     allItems,
     filteredIndices: allItems.map((_, i) => i),
@@ -559,11 +570,18 @@ export function handleFuzzyAgent(ctx: ActionCtx) {
     selectedIndex: 0,
     onSelect: (originalIndex: number) => {
       ctx.closeDialog();
-      const agent = agentEntries[originalIndex]!;
-      ctx.agentTree.selectAgentById(agent.agent.id);
-      ctx.syncSelectedAgent();
-      ctx.jumpToMode("AGENT LOG");
-      ctx.tui?.requestRender();
+      const selected = entries[originalIndex]!;
+      if (selected.kind === "repo") {
+        ctx.agentTree.selectByRepoPath(selected.entry.repoPath);
+        ctx.syncSelectedAgent();
+        ctx.jumpToMode("REPO");
+        ctx.tui?.requestRender();
+      } else {
+        ctx.agentTree.selectAgentById(selected.entry.agent.id);
+        ctx.syncSelectedAgent();
+        ctx.jumpToMode("AGENT LOG");
+        ctx.tui?.requestRender();
+      }
     },
   });
 }
@@ -694,7 +712,7 @@ export function handleHelp(ctx: ActionCtx) {
     lines: [
       header("Navigation"),
       row("j / k / ↑↓", "select agent"),
-      row("@", "fuzzy jump to agent"),
+      row("@", "fuzzy jump to agent/repo"),
       row("/", "fuzzy mode picker"),
       "",
       header("Panes"),

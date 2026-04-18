@@ -81,6 +81,22 @@ describe("parseState", () => {
       const input = lines.join("\n");
       expect(parseState(input).state).toBe("creating");
     });
+    test("multi-MCP server prompt (3 servers, multi-select)", () => {
+      const input = "3 new MCP servers found in .mcp.json\nSelect any you wish to enable.\n\nMCP servers may execute code or access system resources.\n\n❯ [✔] granola\n  [✔] activepieces\n  [✔] essential-mcp\n Space to select · Enter to confirm · Esc to reject all";
+      expect(parseState(input).state).toBe("creating");
+    });
+    test("multi-MCP server prompt (2 servers)", () => {
+      const input = "2 new MCP servers found in .mcp.json\nSelect any you wish to enable.\n\n❯ [✔] granola\n  [✔] activepieces\n Space to select · Enter to confirm · Esc to reject all";
+      expect(parseState(input).state).toBe("creating");
+    });
+    test("multi-MCP server prompt in last 15 lines after Claude started", () => {
+      const lines = Array(10).fill("some output");
+      lines.push("Claude Code v1.0");
+      lines.push("3 new MCP servers found in .mcp.json");
+      lines.push("Enter to confirm");
+      const input = lines.join("\n");
+      expect(parseState(input).state).toBe("creating");
+    });
   });
 
   describe("compacting", () => {

@@ -1333,6 +1333,51 @@ describe("runPerAgentWatchdog", () => {
     expect(enterCmds.length).toBeGreaterThanOrEqual(1);
   });
 
+  test("auto-accepts multi-MCP server permissions prompt", async () => {
+    const sentKeys: string[][] = [];
+    setWatchdogSpawnRunner((cmd, _opts) => {
+      sentKeys.push(cmd);
+      return { stdout: new ReadableStream(), stderr: new ReadableStream(), exited: Promise.resolve(0) } as any;
+    });
+
+    let captureCalls = 0;
+    setPerAgentCaptureTmux(async (_session: string) => {
+      captureCalls++;
+      if (captureCalls <= 2) {
+        // First two captures: multi-MCP checklist prompt visible
+        return [
+          "3 new MCP servers found in .mcp.json",
+          "Select any you wish to enable.",
+          "",
+          "MCP servers may execute code or access system resources. All tool calls require approval.",
+          "",
+          "  ❯ [✔] granola",
+          "    [✔] activepieces",
+          "    [✔] essential-mcp",
+          "",
+          " Space to select · Enter to confirm · Esc to reject all",
+        ].join("\n");
+      }
+      // Third capture: prompt dismissed, show logo
+      return "Claude Code v1.0.0\n[USER TASK]";
+    });
+
+    let existsChecks = 0;
+    setPerAgentExistsSync((_path: string) => {
+      existsChecks++;
+      return existsChecks <= 3;
+    });
+
+    setPerAgentReadState(async (_dir: string) => undefined);
+
+    await runPerAgentWatchdog("agent-test1", "/tmp/test");
+
+    const enterCmds = sentKeys.filter(
+      (cmd) => cmd.includes("send-keys") && cmd.includes("Enter"),
+    );
+    expect(enterCmds.length).toBeGreaterThanOrEqual(1);
+  });
+
   test("auto-accepts workspace trust prompt", async () => {
     const sentKeys: string[][] = [];
     setWatchdogSpawnRunner((cmd, _opts) => {

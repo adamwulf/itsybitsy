@@ -3040,13 +3040,26 @@ describe("newAgent (native)", () => {
     expect(result.ok).toBe(true);
 
     // Only the spawnee's agent.log exists in the agents dir — no other logs created
-    const entries = await require("fs/promises").readdir(agentsDir);
+    const entries = await readdir(agentsDir);
     expect(entries).toContain("test-no-spawner");
     expect(entries.length).toBe(1);
 
     const log = await Bun.file(join(agentsDir, "test-no-spawner", "agent.log")).text();
     expect(log).toContain("[spawn] start id=test-no-spawner");
     expect(log).not.toContain("[spawn child=");
+  });
+
+  test("spawn log: self-heal entry fires when residual repo dir exists", async () => {
+    // Pre-create the residual dir at <agentDir>/repo that newAgent should clean up.
+    const agentDir = join(agentsDir, "test-residual");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("do work", { name: "test-residual" });
+    expect(result.ok).toBe(true);
+
+    const log = await Bun.file(join(agentsDir, "test-residual", "agent.log")).text();
+    expect(log).toContain("[spawn] self-heal: removed residual repo dir");
   });
 });
 

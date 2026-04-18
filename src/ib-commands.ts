@@ -5,7 +5,7 @@
  */
 
 import { join, dirname, resolve } from "path";
-import { readdir, chmod, rm, mkdir } from "fs/promises";
+import { readdir, chmod, rm, mkdir, stat } from "fs/promises";
 import { realpathSync } from "fs";
 import { homedir } from "node:os";
 import type { Agent, SpawnedBy } from "./agents";
@@ -1729,9 +1729,7 @@ export async function newAgent(
   // 11. Create agent directory
   await mkdir(agentDir, { recursive: true });
 
-  // Resolve the spawner's agent dir for dual-logging. Prefer spawnedBy (covers
-  // cross-repo managers and per-repo coordinators). Fall back to the same-repo
-  // manager id for the `--manager` flag path where spawnedBy isn't set until later.
+  // Prefer spawnedBy; fall back to --manager flag.
   const spawnerAgentDir: string | null = spawnedBy
     ? join(spawnedBy.repo_path, ".ittybitty", "agents", spawnedBy.agent_id)
     : manager
@@ -1792,7 +1790,7 @@ export async function newAgent(
     // If <agentDir>/repo exists from an earlier aborted run, remove it so
     // `git worktree add` can create a fresh directory there.
     const repoPath = join(agentDir, "repo");
-    const residualExisted = await Bun.file(repoPath).exists().catch(() => false);
+    const residualExisted = await stat(repoPath).then(() => true).catch(() => false);
     await rm(repoPath, { recursive: true, force: true });
     if (residualExisted) {
       await logSpawn(agentDir, spawnerAgentDir, id, `self-heal: removed residual repo dir ${repoPath}`);

@@ -132,12 +132,52 @@ export async function processTaskIntercept(
   const coordBlock = await checkCoordinatorBashRestrictions(input);
   if (coordBlock) return coordBlock;
 
-  // 1. Only intercept Task, Agent, and TaskCreate tools
+  // 1. Deny AskUserQuestion — agents must use `ib ask` instead
+  if (input.tool_name === "AskUserQuestion") {
+    const cwdMatch = AGENT_CWD_PATTERN.exec(input.cwd);
+    let isWorker = false;
+    if (cwdMatch) {
+      const agentId = cwdMatch[1]!;
+      const agentDir = input.cwd.substring(
+        0,
+        input.cwd.indexOf(".ittybitty/agents/" + agentId) +
+          ".ittybitty/agents/".length +
+          agentId.length
+      );
+      try {
+        const metaFile = Bun.file(join(agentDir, "meta.json"));
+        if (await metaFile.exists()) {
+          const meta = await metaFile.json() as AgentMeta;
+          const canSpawn = await checkCanSpawnChildren(meta);
+          if (!canSpawn) isWorker = true;
+        }
+      } catch {
+        // If we can't read meta, treat as manager-like (non-agent fallback)
+      }
+    }
+
+    const reason = isWorker
+      ? "Workers cannot ask the user questions directly. Report your question or findings to your manager agent instead."
+      : "Use `ib ask \"question\"` instead of AskUserQuestion. The ittybitty system routes questions through its own dashboard and question-acknowledgement flow.";
+
+    return {
+      action: "intercept",
+      output: {
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "deny",
+          permissionDecisionReason: reason,
+        },
+      },
+    };
+  }
+
+  // 2. Only intercept Task, Agent, and TaskCreate tools
   if (input.tool_name !== "Task" && input.tool_name !== "Agent" && input.tool_name !== "TaskCreate") {
     return { action: "skip" };
   }
 
-  // 2. Check if calling from a worker agent — workers cannot spawn sub-agents
+  // 3. Check if calling from a worker agent — workers cannot spawn sub-agents
   const cwdMatch = AGENT_CWD_PATTERN.exec(input.cwd);
   if (cwdMatch) {
     const agentId = cwdMatch[1]!;

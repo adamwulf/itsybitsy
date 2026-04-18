@@ -1318,7 +1318,7 @@ async function buildAgentSettings(
     "Bash(cat:*)", "Bash(grep:*)",
     "Read", "Write", "Edit", "MultiEdit", "Glob", "Grep", "LS",
     "TodoWrite", "Task", "TaskCreate", "Agent", "TaskOutput", "KillShell", "NotebookEdit",
-    "WebFetch", "WebSearch", "AskUserQuestion", "ToolSearch",
+    "WebFetch", "WebSearch", "ToolSearch",
   ];
   const blockedTools = ["EnterPlanMode", "ExitPlanMode"];
 
@@ -1365,7 +1365,7 @@ async function buildAgentSettings(
   ];
   if (addIntercept) {
     preToolUseHooks.push(
-      { matcher: "Task|Agent|TaskCreate", hooks: [{ type: "command", command: "ib hooks intercept-task" }] }
+      { matcher: "Task|Agent|TaskCreate|AskUserQuestion", hooks: [{ type: "command", command: "ib hooks intercept-task" }] }
     );
   }
 
@@ -1835,7 +1835,7 @@ export async function newAgent(
             PermissionRequest: [{ matcher: "*", hooks: [{ type: "command", command: hookCmd }] }],
             PreToolUse: [
               { matcher: "*", hooks: [{ type: "command", command: `ib hook-check-path ${id}` }] },
-              { matcher: "Task|Agent|TaskCreate|Bash", hooks: [{ type: "command", command: "ib hooks intercept-task" }] },
+              { matcher: "Task|Agent|TaskCreate|Bash|AskUserQuestion", hooks: [{ type: "command", command: "ib hooks intercept-task" }] },
             ],
             SessionStart: [{ hooks: [{ type: "command", command: `ib hooks session-start ${id}` }] }],
           },
@@ -2991,7 +2991,7 @@ export async function installInterceptHook(_repoPath: string, settingsPath?: str
   settings.hooks = hooks;
   if (!Array.isArray(hooks.PreToolUse)) hooks.PreToolUse = [];
   (hooks.PreToolUse as unknown[]).push({
-    matcher: "Task|Agent|TaskCreate",
+    matcher: "Task|Agent|TaskCreate|AskUserQuestion",
     hooks: [{ type: "command", command: "ib hooks intercept-task" }],
   });
 

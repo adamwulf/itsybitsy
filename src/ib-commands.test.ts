@@ -2263,6 +2263,49 @@ describe("newAgent (native)", () => {
     expect(branchDeleteIdx).toBeLessThan(addIdx);
   });
 
+  test("worktree-list match is anchored: prefix-collision does not trigger 'already checked out'", async () => {
+    // A different worktree holds `agent/test-prefix-extra`; we're spawning
+    // `agent/test-prefix` whose branch also exists but has NO worktree.
+    // The old substring match would false-positive and refuse to delete.
+    const branchName = "agent/test-prefix";
+    setNewAgentSpawnRunner((cmd: string[], _opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
+      spawnCalls.push(cmd);
+      const cmdStr = cmd.join(" ");
+
+      if (cmd[0] === "git" && cmd.includes("branch") && cmd.includes("--list") && cmd.includes(branchName)) {
+        return makeSpawnResult(`  ${branchName}\n`, 0);
+      }
+      // worktree list holds a LONGER-named branch that starts with branchName
+      if (cmdStr.includes("worktree list")) {
+        return makeSpawnResult(
+          `worktree /some/other/path\nHEAD abc123\nbranch refs/heads/${branchName}-extra\n`,
+          0,
+        );
+      }
+      if (cmdStr.includes("tmux has-session")) {
+        const newSessionCalled = spawnCalls.some(c => c.join(" ").includes("tmux new-session"));
+        return makeSpawnResult("", newSessionCalled ? 0 : 1);
+      }
+      if (cmdStr.includes("worktree add")) {
+        const addIdx = cmd.indexOf("add");
+        if (addIdx > -1 && addIdx + 1 < cmd.length) {
+          require("fs").mkdirSync(cmd[addIdx + 1]!, { recursive: true });
+        }
+        return makeSpawnResult("", 0);
+      }
+      return makeSpawnResult("", 0);
+    });
+    const result = await callNewAgent("task", { name: "test-prefix" });
+    expect(result.ok).toBe(true);
+
+    // The residual branch should have been auto-deleted (not falsely
+    // flagged as "already checked out")
+    const branchDelete = spawnCalls.find(
+      c => c.includes("branch") && c.includes("-D") && c.includes(branchName)
+    );
+    expect(branchDelete).toBeDefined();
+  });
+
   test("residual worktree holding agent/<id> yields clean error, not generic", async () => {
     const branchName = "agent/test-held";
     setNewAgentSpawnRunner((cmd: string[], _opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {

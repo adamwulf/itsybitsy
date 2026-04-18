@@ -1750,7 +1750,11 @@ export async function newAgent(
       const worktreeList = await newAgentSpawnCtx.run([
         "git", "-C", rootRepoPath, "worktree", "list", "--porcelain",
       ]);
-      const worktreeHoldsBranch = worktreeList.stdout.includes(`branch refs/heads/${branchName}`);
+      // Anchor the match so `agent/foo` does not match inside `agent/foo-extra`.
+      // Porcelain format places each `branch refs/heads/<name>` on its own line.
+      const needle = `branch refs/heads/${branchName}`;
+      const worktreeHoldsBranch =
+        worktreeList.stdout.includes(needle + "\n") || worktreeList.stdout.endsWith(needle);
       if (worktreeHoldsBranch) {
         await rm(agentDir, { recursive: true, force: true });
         return {

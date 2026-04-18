@@ -1,8 +1,8 @@
 {
   "mcpServers": {
-    "test-echo": {
-      "command": "echo",
-      "args": ["hello from test mcp"]
+    "granola": {
+      "type": "http",
+      "url": "https://mcp.granola.ai/mcp"
     }
   }
 }

@@ -532,7 +532,12 @@ async function autoAcceptWorkspaceTrust(tmuxSession: string): Promise<void> {
     }
     // Check for permissions screens (workspace trust, external imports, MCP servers)
     if (/enter to confirm/i.test(output)) {
-      if (/trust/i.test(output) || /Allow external CLAUDE\.md file imports/i.test(output) || /New MCP server found/i.test(output)) {
+      if (
+        /trust/i.test(output) ||
+        /Allow external CLAUDE\.md file imports/i.test(output) ||
+        /New MCP server found/i.test(output) ||
+        /\d+ new MCP servers? found/i.test(output)
+      ) {
         startedWith = "permissions";
         break;
       }
@@ -559,7 +564,12 @@ async function autoAcceptWorkspaceTrust(tmuxSession: string): Promise<void> {
     // Check if permissions prompt is still active
     let hasPermissions = false;
     if (/enter to confirm/i.test(recent)) {
-      if (/trust/i.test(recent) || /Allow external CLAUDE\.md file imports/i.test(recent) || /New MCP server found/i.test(recent)) {
+      if (
+        /trust/i.test(recent) ||
+        /Allow external CLAUDE\.md file imports/i.test(recent) ||
+        /New MCP server found/i.test(recent) ||
+        /\d+ new MCP servers? found/i.test(recent)
+      ) {
         hasPermissions = true;
       }
     }
@@ -2146,7 +2156,12 @@ async function autoAcceptWorkspaceTrustForNewAgent(tmuxSession: string): Promise
       break;
     }
     if (/enter to confirm/i.test(output)) {
-      if (/trust/i.test(output) || /Allow external CLAUDE\.md file imports/i.test(output) || /New MCP server found/i.test(output)) {
+      if (
+        /trust/i.test(output) ||
+        /Allow external CLAUDE\.md file imports/i.test(output) ||
+        /New MCP server found/i.test(output) ||
+        /\d+ new MCP servers? found/i.test(output)
+      ) {
         startedWith = "permissions";
         break;
       }
@@ -2169,7 +2184,12 @@ async function autoAcceptWorkspaceTrustForNewAgent(tmuxSession: string): Promise
     const recent = captureResult.stdout;
     let hasPermissions = false;
     if (/enter to confirm/i.test(recent)) {
-      if (/trust/i.test(recent) || /Allow external CLAUDE\.md file imports/i.test(recent) || /New MCP server found/i.test(recent)) {
+      if (
+        /trust/i.test(recent) ||
+        /Allow external CLAUDE\.md file imports/i.test(recent) ||
+        /New MCP server found/i.test(recent) ||
+        /\d+ new MCP servers? found/i.test(recent)
+      ) {
         hasPermissions = true;
       }
     }

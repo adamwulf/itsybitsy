@@ -13,6 +13,7 @@ import { writeAgentState, isWorkerLike, getAgentType, canSpawnChildren } from ".
 import { resolveAgentType } from "./agent-types";
 import {
   logAgent,
+  logSpawn,
   removeAgentQuestions,
   killAgentProcess,
   teardownAgent,
@@ -1728,6 +1729,15 @@ export async function newAgent(
   // 11. Create agent directory
   await mkdir(agentDir, { recursive: true });
 
+  // Resolve the spawner's agent dir for dual-logging. Prefer spawnedBy (covers
+  // cross-repo managers and per-repo coordinators). Fall back to the same-repo
+  // manager id for the `--manager` flag path where spawnedBy isn't set until later.
+  const spawnerAgentDir: string | null = spawnedBy
+    ? join(spawnedBy.repo_path, ".ittybitty", "agents", spawnedBy.agent_id)
+    : manager
+      ? join(agentsDir, manager)
+      : null;
+
   // Working directory defaults to root repo
   let workPath = rootRepoPath;
 
@@ -1735,9 +1745,17 @@ export async function newAgent(
   // Note: coordinator branch format retained for backward compatibility with
   // session-start.ts and health-check.ts, even though coordinators no longer use worktrees.
   const branchName = coordinatorMode ? `agent/${id}-${repoId}` : `agent/${id}`;
+  const baseRefForLog = manager ? `agent/${manager}` : "HEAD";
+  await logSpawn(
+    agentDir,
+    spawnerAgentDir,
+    id,
+    `start id=${id} repo=${rootRepoPath} worktree=${useWorktree} coordinator=${coordinatorMode} worker=${workerMode} manager=${manager || "null"} baseRef=${useWorktree ? baseRefForLog : "n/a"}`,
+  );
   if (useWorktree) {
     // Self-healing: discard stale worktree metadata pointing at paths that no longer exist.
-    await newAgentSpawnCtx.run(["git", "-C", rootRepoPath, "worktree", "prune"]);
+    const pruneResult = await newAgentSpawnCtx.run(["git", "-C", rootRepoPath, "worktree", "prune"]);
+    await logSpawn(agentDir, spawnerAgentDir, id, `git worktree prune → exit=${pruneResult.exitCode}${pruneResult.exitCode !== 0 && pruneResult.stderr ? ` stderr="${pruneResult.stderr.trim()}"` : ""}`);
 
     // If a same-name branch lingers from a prior failed/killed spawn, drop it —
     // but only when no worktree is checked out on it. If a worktree holds the
@@ -1746,6 +1764,7 @@ export async function newAgent(
       "git", "-C", rootRepoPath, "branch", "--list", branchName,
     ]);
     const branchExists = branchList.stdout.trim().length > 0;
+    await logSpawn(agentDir, spawnerAgentDir, id, `git branch --list ${branchName} → exit=${branchList.exitCode} exists=${branchExists}`);
     if (branchExists) {
       const worktreeList = await newAgentSpawnCtx.run([
         "git", "-C", rootRepoPath, "worktree", "list", "--porcelain",
@@ -1755,7 +1774,9 @@ export async function newAgent(
       const needle = `branch refs/heads/${branchName}`;
       const worktreeHoldsBranch =
         worktreeList.stdout.includes(needle + "\n") || worktreeList.stdout.endsWith(needle);
+      await logSpawn(agentDir, spawnerAgentDir, id, `git worktree list → exit=${worktreeList.exitCode} holdsBranch=${worktreeHoldsBranch}`);
       if (worktreeHoldsBranch) {
+        await logSpawn(agentDir, spawnerAgentDir, id, `spawn FAILED: branch ${branchName} is already checked out in another worktree`);
         await rm(agentDir, { recursive: true, force: true });
         return {
           ok: false,
@@ -1764,21 +1785,28 @@ export async function newAgent(
           stderr: `Error: branch ${branchName} is already checked out in another worktree`,
         };
       }
-      await newAgentSpawnCtx.run(["git", "-C", rootRepoPath, "branch", "-D", branchName]);
+      const branchDelResult = await newAgentSpawnCtx.run(["git", "-C", rootRepoPath, "branch", "-D", branchName]);
+      await logSpawn(agentDir, spawnerAgentDir, id, `self-heal: deleted orphan branch ${branchName} → exit=${branchDelResult.exitCode}${branchDelResult.exitCode !== 0 && branchDelResult.stderr ? ` stderr="${branchDelResult.stderr.trim()}"` : ""}`);
     }
 
     // If <agentDir>/repo exists from an earlier aborted run, remove it so
     // `git worktree add` can create a fresh directory there.
     const repoPath = join(agentDir, "repo");
+    const residualExisted = await Bun.file(repoPath).exists().catch(() => false);
     await rm(repoPath, { recursive: true, force: true });
+    if (residualExisted) {
+      await logSpawn(agentDir, spawnerAgentDir, id, `self-heal: removed residual repo dir ${repoPath}`);
+    }
 
     const baseRef = manager ? `agent/${manager}` : "HEAD";
     const worktreeResult = await newAgentSpawnCtx.run([
       "git", "-C", rootRepoPath, "worktree", "add", repoPath, "-b", branchName, baseRef,
     ]);
+    await logSpawn(agentDir, spawnerAgentDir, id, `git worktree add ${repoPath} -b ${branchName} ${baseRef} → exit=${worktreeResult.exitCode}${worktreeResult.exitCode !== 0 && worktreeResult.stderr ? ` stderr="${worktreeResult.stderr.trim()}"` : ""}`);
     if (worktreeResult.exitCode !== 0) {
-      await rm(agentDir, { recursive: true, force: true });
       const gitErr = worktreeResult.stderr.trim();
+      await logSpawn(agentDir, spawnerAgentDir, id, `spawn FAILED: could not create worktree${gitErr ? `: ${gitErr}` : ""}`);
+      await rm(agentDir, { recursive: true, force: true });
       const suffix = gitErr ? `: ${gitErr}` : "";
       return { ok: false, exitCode: 1, stdout: "", stderr: `Error: could not create worktree${suffix}` };
     }
@@ -2066,9 +2094,11 @@ ${qStartExitScript}
 
   // 18. Ensure tmux server is running
   const startServerResult = await newAgentSpawnCtx.run(["tmux", "start-server"]);
+  await logSpawn(agentDir, spawnerAgentDir, id, `tmux start-server → exit=${startServerResult.exitCode}${startServerResult.exitCode !== 0 && startServerResult.stderr ? ` stderr="${startServerResult.stderr.trim()}"` : ""}`);
   if (startServerResult.exitCode !== 0) {
-    await cleanupOnFailure();
     const err = startServerResult.stderr.trim();
+    await logSpawn(agentDir, spawnerAgentDir, id, `spawn FAILED: could not start tmux server${err ? `: ${err}` : ""}`);
+    await cleanupOnFailure();
     const suffix = err ? `: ${err}` : "";
     return { ok: false, exitCode: 1, stdout: "", stderr: `Error: could not start tmux server${suffix}` };
   }
@@ -2079,9 +2109,11 @@ ${qStartExitScript}
   const tmuxResult = await newAgentSpawnCtx.run([
     "tmux", "new-session", "-d", "-x", String(newTmuxWidth), "-s", tmuxSession, "-c", workPath, shellQuote(absStartScript),
   ]);
+  await logSpawn(agentDir, spawnerAgentDir, id, `tmux new-session -s ${tmuxSession} -x ${newTmuxWidth} → exit=${tmuxResult.exitCode}${tmuxResult.exitCode !== 0 && tmuxResult.stderr ? ` stderr="${tmuxResult.stderr.trim()}"` : ""}`);
   if (tmuxResult.exitCode !== 0) {
-    await cleanupOnFailure();
     const err = tmuxResult.stderr.trim();
+    await logSpawn(agentDir, spawnerAgentDir, id, `spawn FAILED: could not create tmux session '${tmuxSession}'${err ? `: ${err}` : ""}`);
+    await cleanupOnFailure();
     const suffix = err ? `: ${err}` : "";
     return { ok: false, exitCode: 1, stdout: "", stderr: `Error: could not create tmux session '${tmuxSession}'${suffix}` };
   }
@@ -2090,12 +2122,16 @@ ${qStartExitScript}
 
   // 19. Verify tmux session created
   const verifyResult = await newAgentSpawnCtx.run(["tmux", "has-session", "-t", tmuxSession]);
+  await logSpawn(agentDir, spawnerAgentDir, id, `tmux has-session verify → exit=${verifyResult.exitCode}`);
   if (verifyResult.exitCode !== 0) {
-    await cleanupOnFailure();
     const err = verifyResult.stderr.trim();
+    await logSpawn(agentDir, spawnerAgentDir, id, `spawn FAILED: tmux session '${tmuxSession}' failed to start${err ? `: ${err}` : ""}`);
+    await cleanupOnFailure();
     const suffix = err ? `: ${err}` : "";
     return { ok: false, exitCode: 1, stdout: "", stderr: `Error: tmux session '${tmuxSession}' failed to start${suffix}` };
   }
+
+  await logSpawn(agentDir, spawnerAgentDir, id, `spawn OK: agent ${id} running (tmux=${tmuxSession} workPath=${workPath})`);
 
   // 20. Output agent ID
   const stdout = id;
@@ -2131,8 +2167,11 @@ ${qStartExitScript}
         metaContent.watchdog_pid = watchdogPid;
         await Bun.write(metaPath, JSON.stringify(metaContent, null, 2));
       }
+      await logSpawn(agentDir, spawnerAgentDir, id, `watchdog spawned pid=${watchdogPid}`);
     }
-  } catch { /* ignore */ }
+  } catch (err) {
+    await logSpawn(agentDir, spawnerAgentDir, id, `watchdog spawn failed: ${(err as Error)?.message ?? String(err)}`);
+  }
 
   // 23. Generate prompt summary in background (fire-and-forget)
   generatePromptSummary(agentDir).catch(() => {});

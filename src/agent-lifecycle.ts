@@ -47,6 +47,28 @@ export async function logAgent(agentDir: string, message: string): Promise<void>
   } catch { /* agent dir may not exist */ }
 }
 
+// ── logSpawn ─────────────────────────────────────────────────────────────────
+
+/**
+ * Log a spawn-related event to both the spawnee's and (when detectable) the spawner's
+ * agent.log in one call. Spawnee lines are prefixed with `[spawn]`, spawner lines with
+ * `[spawn child=<spawneeId>]` so they're distinguishable from the spawner's own activity.
+ *
+ * Either directory may be missing (logAgent swallows errors). On spawn failures where the
+ * spawnee dir is cleaned up, the spawner's log survives and preserves the record.
+ */
+export async function logSpawn(
+  spawneeDir: string,
+  spawnerDir: string | null,
+  spawneeId: string,
+  message: string,
+): Promise<void> {
+  await Promise.all([
+    logAgent(spawneeDir, `[spawn] ${message}`),
+    spawnerDir ? logAgent(spawnerDir, `[spawn child=${spawneeId}] ${message}`) : Promise.resolve(),
+  ]);
+}
+
 // ── removeAgentQuestions ─────────────────────────────────────────────────────
 
 /**

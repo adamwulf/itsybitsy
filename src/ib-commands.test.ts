@@ -2959,6 +2959,95 @@ describe("newAgent (native)", () => {
       await rm(fakeHome, { recursive: true, force: true });
     }
   });
+
+  // --- Spawn logging tests ---
+
+  test("spawn log: writes [spawn] lines to spawnee agent.log on success", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("do work", { name: "test-spawnlog-ok" });
+    expect(result.ok).toBe(true);
+
+    const log = await Bun.file(join(agentsDir, "test-spawnlog-ok", "agent.log")).text();
+    expect(log).toContain("[spawn] start id=test-spawnlog-ok");
+    expect(log).toContain("[spawn] git worktree add");
+    expect(log).toContain("[spawn] tmux start-server → exit=0");
+    expect(log).toContain("[spawn] tmux new-session");
+    expect(log).toContain("[spawn] tmux has-session verify → exit=0");
+    expect(log).toContain("[spawn] spawn OK: agent test-spawnlog-ok running");
+    // No `child=` tag — this agent has no spawner
+    expect(log).not.toContain("[spawn child=");
+  });
+
+  test("spawn log: writes [spawn child=<id>] lines to manager agent.log on success", async () => {
+    const mgrDir = join(agentsDir, "agent-mgr-spawnlog");
+    await mkdir(mgrDir, { recursive: true });
+    await Bun.write(join(mgrDir, "meta.json"), JSON.stringify({ id: "agent-mgr-spawnlog", worker: false }));
+
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("sub-task", { name: "child-spawnlog", manager: "agent-mgr-spawnlog" });
+    expect(result.ok).toBe(true);
+
+    const mgrLog = await Bun.file(join(mgrDir, "agent.log")).text();
+    expect(mgrLog).toContain("[spawn child=child-spawnlog] start id=child-spawnlog");
+    expect(mgrLog).toContain("[spawn child=child-spawnlog] spawn OK: agent child-spawnlog running");
+    // Existing log line from the pre-spawn logAgent call must still be present (back-compat)
+    expect(mgrLog).toContain("Spawned manager subagent: child-spawnlog");
+
+    // Spawnee log still gets its [spawn] lines
+    const childLog = await Bun.file(join(agentsDir, "child-spawnlog", "agent.log")).text();
+    expect(childLog).toContain("[spawn] start id=child-spawnlog");
+    expect(childLog).toContain("[spawn] spawn OK:");
+  });
+
+  test("spawn log: writes FAILED line to spawner log when worktree add fails, spawnee dir is gone", async () => {
+    const mgrDir = join(agentsDir, "agent-mgr-failspawn");
+    await mkdir(mgrDir, { recursive: true });
+    await Bun.write(join(mgrDir, "meta.json"), JSON.stringify({ id: "agent-mgr-failspawn", worker: false }));
+
+    setNewAgentSpawnRunner(mockSpawnRunner({ failWorktree: true }));
+    const result = await callNewAgent("task", { name: "child-failspawn", manager: "agent-mgr-failspawn" });
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("could not create worktree");
+
+    // Spawnee dir was cleaned up on failure
+    const spawneeLogExists = await Bun.file(join(agentsDir, "child-failspawn", "agent.log")).exists();
+    expect(spawneeLogExists).toBe(false);
+
+    // Manager's log survives and has the FAILED entry plus earlier steps
+    const mgrLog = await Bun.file(join(mgrDir, "agent.log")).text();
+    expect(mgrLog).toContain("[spawn child=child-failspawn] start id=child-failspawn");
+    expect(mgrLog).toContain("[spawn child=child-failspawn] spawn FAILED: could not create worktree");
+  });
+
+  test("spawn log: writes FAILED line when tmux new-session fails", async () => {
+    const mgrDir = join(agentsDir, "agent-mgr-tmuxfail");
+    await mkdir(mgrDir, { recursive: true });
+    await Bun.write(join(mgrDir, "meta.json"), JSON.stringify({ id: "agent-mgr-tmuxfail", worker: false }));
+
+    setNewAgentSpawnRunner(mockSpawnRunner({ failTmuxNewSession: true }));
+    const result = await callNewAgent("task", { name: "child-tmuxfail", manager: "agent-mgr-tmuxfail" });
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("could not create tmux session");
+
+    const mgrLog = await Bun.file(join(mgrDir, "agent.log")).text();
+    expect(mgrLog).toContain("[spawn child=child-tmuxfail] tmux new-session");
+    expect(mgrLog).toContain("[spawn child=child-tmuxfail] spawn FAILED: could not create tmux session");
+  });
+
+  test("spawn log: no spawner log written when no spawner detected (human from shell)", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("do work", { name: "test-no-spawner" });
+    expect(result.ok).toBe(true);
+
+    // Only the spawnee's agent.log exists in the agents dir — no other logs created
+    const entries = await require("fs/promises").readdir(agentsDir);
+    expect(entries).toContain("test-no-spawner");
+    expect(entries.length).toBe(1);
+
+    const log = await Bun.file(join(agentsDir, "test-no-spawner", "agent.log")).text();
+    expect(log).toContain("[spawn] start id=test-no-spawner");
+    expect(log).not.toContain("[spawn child=");
+  });
 });
 
 describe("reassignAgent (native)", () => {

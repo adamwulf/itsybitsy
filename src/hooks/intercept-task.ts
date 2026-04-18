@@ -219,11 +219,11 @@ export async function processTaskIntercept(
   const callingAgentId = cwdMatch ? cwdMatch[1]! : undefined;
 
   // 9. Spawn agent
-  // Only set worker+manager when called from an agent context (callingAgentId present).
+  // Only set type+manager when called from an agent context (callingAgentId present).
   // From primary Claude, spawn managers (not workers).
   let result: { ok: boolean; stdout: string; stderr: string };
   const spawnOpts: Record<string, unknown> = {
-    worker: callingAgentId ? true : undefined,
+    type: callingAgentId ? "worker" : undefined,
     manager: callingAgentId,
     model: model || undefined,
   };

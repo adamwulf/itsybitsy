@@ -573,7 +573,7 @@ export async function hookSessionStart(rawStdin?: string, agentIdArg?: string): 
 
   // Detect role - read meta.json from filesystem if in an agent directory
   const match = AGENT_CWD_PATTERN.exec(cwd);
-  let metaJson: { id?: string; manager?: string | null; worker?: boolean; coordinator?: boolean; agentType?: string; spawned_by?: { agent_id: string; repo_path: string } } | undefined;
+  let metaJson: { id?: string; manager?: string | null; worker?: boolean; coordinator?: boolean; agentType?: string; allowedPaths?: string[]; spawned_by?: { agent_id: string; repo_path: string } } | undefined;
 
   if (match) {
     const agentId = match[1]!;

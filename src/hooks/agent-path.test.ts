@@ -12,7 +12,6 @@ function makeCtx(overrides: Partial<PathCheckContext> = {}): PathCheckContext {
     worktreePath: "/repo/.ittybitty/agents/agent-abc123/repo",
     agentsDir: "/repo/.ittybitty/agents",
     rootRepo: "/repo",
-    isWorker: false,
     allowList: ["Read", "Write", "Edit", "Glob", "Grep", "Bash"],
     ...overrides,
   };

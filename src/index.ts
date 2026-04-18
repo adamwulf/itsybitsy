@@ -1124,12 +1124,19 @@ async function main() {
     }
     case "init-types":
     case "init-agent-types": {
-      const { ensureAgentTypesDir } = await import("./agent-types");
+      const { initAgentTypes } = await import("./agent-types");
       try {
-        await ensureAgentTypesDir();
+        const created = await initAgentTypes();
         const home = process.env.HOME || (await import("os")).homedir();
         const typesDir = (await import("path")).join(home, ".itsybitsy", "agent-types");
-        console.log(`Agent type files initialized at: ${typesDir}`);
+        if (created.length === 0) {
+          console.log(`Agent type files already present at: ${typesDir} (no files created)`);
+        } else {
+          console.log(`Agent type files initialized at: ${typesDir}`);
+          for (const name of created) {
+            console.log(`  created ${name}`);
+          }
+        }
       } catch (err) {
         console.error(`Error initializing agent types: ${err instanceof Error ? err.message : String(err)}`);
         process.exit(1);

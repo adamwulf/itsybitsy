@@ -27,7 +27,6 @@ export interface PathCheckContext {
   worktreePath: string;
   agentsDir: string;
   rootRepo: string;
-  isWorker: boolean;
   allowList: string[];
   allowedPaths?: string[];
 }
@@ -113,7 +112,7 @@ export function checkPathAccess(
   ctx: PathCheckContext
 ): HookDecision {
   const { toolName, toolInput, cwd } = input;
-  const { agentDir, worktreePath, agentsDir, rootRepo, isWorker, allowList } = ctx;
+  const { agentDir, worktreePath, agentsDir, rootRepo, allowList } = ctx;
 
   // 1. Check allow list (TaskCreate is handled by intercept-task hook)
   let inAllowList = false;
@@ -496,14 +495,12 @@ export async function hookCheckPath(agentId: string, rawStdin?: string): Promise
     isNoWorktree = true;
   }
 
-  // Read meta.json for worker flag (or type === "worker"), worktree field, and allowedPaths
-  let isWorker = false;
+  // Read meta.json for worktree field and allowedPaths
   let allowedPaths: string[] | undefined = undefined;
   try {
     const metaFile = Bun.file(join(agentDir, "meta.json"));
     if (await metaFile.exists()) {
       const meta = await metaFile.json();
-      isWorker = meta.worker === true || meta.agentType === "worker";
       if (meta.worktree === false) isNoWorktree = true;
       // Parse allowedPaths from meta.json (should be an array of strings or undefined)
       if (Array.isArray(meta.allowedPaths)) {
@@ -550,7 +547,7 @@ export async function hookCheckPath(agentId: string, rawStdin?: string): Promise
   } catch { /* ignore */ }
 
   // Check ib manager-only command access before path checks
-  const ctx = { agentId, agentDir, worktreePath, agentsDir, rootRepo, isWorker, allowList, allowedPaths };
+  const ctx = { agentId, agentDir, worktreePath, agentsDir, rootRepo, allowList, allowedPaths };
   let decision: HookDecision;
   if (toolName === "Bash") {
     const command = String(toolInput.command ?? "");

@@ -201,40 +201,9 @@ function parseSimpleValue(valueStr: string): unknown {
 }
 
 /**
- * Get the built-in default types.
- */
-export function getBuiltinTypes(): Record<string, AgentType> {
-  return {
-    manager: {
-      name: "manager",
-      description: "Manages sub-agents and coordinates work",
-      canSpawnChildren: true,
-      icon: "◆",
-      instructionStyle: "manager",
-    },
-    worker: {
-      name: "worker",
-      description: "Executes tasks assigned by a manager",
-      canSpawnChildren: false,
-      icon: "⚙",
-      instructionStyle: "worker",
-    },
-    coordinator: {
-      name: "coordinator",
-      description: "Read-only coordinator that manages agents without writing code",
-      canSpawnChildren: true,
-      icon: "◇",
-      instructionStyle: "coordinator",
-      permissions: {
-        deny: ["Write", "Edit", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch"],
-      },
-    },
-  };
-}
-
-/**
  * Ensure ~/.itsybitsy/agent-types/ directory exists and populate it with
  * embedded type files on first run. If the directory already exists, does nothing.
+ * Use {@link initAgentTypes} to restore missing files without overwriting existing ones.
  */
 export async function ensureAgentTypesDir(): Promise<void> {
   const home = process.env.HOME || homedir();
@@ -263,6 +232,44 @@ export async function ensureAgentTypesDir(): Promise<void> {
     const filePath = join(typesDir, `${name}.md`);
     await Bun.write(filePath, content);
   }
+}
+
+/**
+ * Ensure the agent-types directory exists and restore any missing embedded
+ * type files without overwriting existing ones. Returns the list of file
+ * names that were created.
+ *
+ * Intended for `ib init-types`: users can delete a built-in `.md` to restore
+ * a stock copy without losing their edits to the others.
+ */
+export async function initAgentTypes(): Promise<string[]> {
+  const home = process.env.HOME || homedir();
+  const typesDir = join(home, ".itsybitsy", "agent-types");
+  const { mkdir, stat } = await import("fs/promises");
+
+  // Make sure the directory exists (without writing any embedded files yet)
+  try {
+    const stats = await stat(typesDir);
+    if (!stats.isDirectory()) {
+      // Path exists but is not a directory — remove the stale file
+      await Bun.file(typesDir).delete();
+      await mkdir(typesDir, { recursive: true });
+    }
+  } catch {
+    await mkdir(typesDir, { recursive: true });
+  }
+
+  // Write only the missing embedded files
+  const created: string[] = [];
+  for (const [name, content] of Object.entries(EMBEDDED_TYPES)) {
+    const fileName = `${name}.md`;
+    const filePath = join(typesDir, fileName);
+    if (!(await Bun.file(filePath).exists())) {
+      await Bun.write(filePath, content);
+      created.push(fileName);
+    }
+  }
+  return created;
 }
 
 /**

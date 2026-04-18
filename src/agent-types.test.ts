@@ -1,5 +1,8 @@
-import { test, expect } from "bun:test";
-import { parseAgentTypeFile, loadAgentType, listAgentTypes, getBuiltinTypes, ensureAgentTypesDir, agentTypeExists } from "./agent-types";
+import { test, expect, describe, beforeEach, afterEach } from "bun:test";
+import { parseAgentTypeFile, loadAgentType, listAgentTypes, ensureAgentTypesDir, initAgentTypes, agentTypeExists } from "./agent-types";
+import { mkdtemp, rm } from "fs/promises";
+import { tmpdir } from "os";
+import { join } from "path";
 
 test("parseAgentTypeFile: parses frontmatter and body", () => {
   const content = `---
@@ -204,28 +207,6 @@ body`;
   expect(Object.keys(frontmatter).length).toBe(2);
 });
 
-test("getBuiltinTypes: returns manager, worker, coordinator", async () => {
-  const builtins = getBuiltinTypes();
-
-  expect(builtins.manager).toBeDefined();
-  expect(builtins.worker).toBeDefined();
-  expect(builtins.coordinator).toBeDefined();
-
-  expect(builtins.manager!.name).toBe("manager");
-  expect(builtins.manager!.canSpawnChildren).toBe(true);
-  expect(builtins.manager!.instructionStyle).toBe("manager");
-
-  expect(builtins.worker!.name).toBe("worker");
-  expect(builtins.worker!.canSpawnChildren).toBe(false);
-  expect(builtins.worker!.instructionStyle).toBe("worker");
-
-  expect(builtins.coordinator!.name).toBe("coordinator");
-  expect(builtins.coordinator!.canSpawnChildren).toBe(true);
-  expect(builtins.coordinator!.instructionStyle).toBe("coordinator");
-  expect(builtins.coordinator!.permissions?.deny).toContain("Write");
-  expect(builtins.coordinator!.permissions?.deny).toContain("Edit");
-});
-
 test("loadAgentType: loads manager type from embedded file", async () => {
   // Ensure types dir is populated first
   const { ensureAgentTypesDir } = await import("./agent-types");
@@ -352,6 +333,57 @@ test("agentTypeExists: returns false for nonexistent types", async () => {
 
   const nonexistentExists = await agentTypeExists("nonexistent-type-xyz");
   expect(nonexistentExists).toBe(false);
+});
+
+describe("initAgentTypes", () => {
+  const originalHome = process.env.HOME;
+  let tempHome: string;
+
+  beforeEach(async () => {
+    tempHome = await mkdtemp(join(tmpdir(), "itsybitsy-init-types-"));
+    process.env.HOME = tempHome;
+  });
+
+  afterEach(async () => {
+    process.env.HOME = originalHome;
+    await rm(tempHome, { recursive: true, force: true });
+  });
+
+  test("creates directory and writes all embedded files when missing", async () => {
+    const created = await initAgentTypes();
+
+    expect(created.sort()).toEqual(["coordinator.md", "manager.md", "worker.md"]);
+    expect(await agentTypeExists("manager")).toBe(true);
+    expect(await agentTypeExists("worker")).toBe(true);
+    expect(await agentTypeExists("coordinator")).toBe(true);
+  });
+
+  test("restores a missing file without touching existing customizations", async () => {
+    // First populate
+    await initAgentTypes();
+
+    // User customizes manager and deletes worker
+    const typesDir = join(tempHome, ".itsybitsy", "agent-types");
+    const customManager = "---\nname: manager\n---\nCustomized!";
+    await Bun.write(join(typesDir, "manager.md"), customManager);
+    await Bun.file(join(typesDir, "worker.md")).delete();
+
+    // Re-run init
+    const created = await initAgentTypes();
+
+    expect(created).toEqual(["worker.md"]);
+    // Customized manager remains untouched
+    const managerContents = await Bun.file(join(typesDir, "manager.md")).text();
+    expect(managerContents).toBe(customManager);
+    // Worker was restored
+    expect(await agentTypeExists("worker")).toBe(true);
+  });
+
+  test("returns empty array when nothing needs to be created", async () => {
+    await initAgentTypes();
+    const created = await initAgentTypes();
+    expect(created).toEqual([]);
+  });
 });
 
 test("parseAgentTypeFile: parses allowedPaths from list syntax", () => {

@@ -1736,13 +1736,47 @@ export async function newAgent(
   // session-start.ts and health-check.ts, even though coordinators no longer use worktrees.
   const branchName = coordinatorMode ? `agent/${id}-${repoId}` : `agent/${id}`;
   if (useWorktree) {
+    // Self-healing: discard stale worktree metadata pointing at paths that no longer exist.
+    await newAgentSpawnCtx.run(["git", "-C", rootRepoPath, "worktree", "prune"]);
+
+    // If a same-name branch lingers from a prior failed/killed spawn, drop it —
+    // but only when no worktree is checked out on it. If a worktree holds the
+    // branch, surface a clear error instead of silently failing later.
+    const branchList = await newAgentSpawnCtx.run([
+      "git", "-C", rootRepoPath, "branch", "--list", branchName,
+    ]);
+    const branchExists = branchList.stdout.trim().length > 0;
+    if (branchExists) {
+      const worktreeList = await newAgentSpawnCtx.run([
+        "git", "-C", rootRepoPath, "worktree", "list", "--porcelain",
+      ]);
+      const worktreeHoldsBranch = worktreeList.stdout.includes(`branch refs/heads/${branchName}`);
+      if (worktreeHoldsBranch) {
+        await rm(agentDir, { recursive: true, force: true });
+        return {
+          ok: false,
+          exitCode: 1,
+          stdout: "",
+          stderr: `Error: branch ${branchName} is already checked out in another worktree`,
+        };
+      }
+      await newAgentSpawnCtx.run(["git", "-C", rootRepoPath, "branch", "-D", branchName]);
+    }
+
+    // If <agentDir>/repo exists from an earlier aborted run, remove it so
+    // `git worktree add` can create a fresh directory there.
+    const repoPath = join(agentDir, "repo");
+    await rm(repoPath, { recursive: true, force: true });
+
     const baseRef = manager ? `agent/${manager}` : "HEAD";
     const worktreeResult = await newAgentSpawnCtx.run([
-      "git", "-C", rootRepoPath, "worktree", "add", join(agentDir, "repo"), "-b", branchName, baseRef,
+      "git", "-C", rootRepoPath, "worktree", "add", repoPath, "-b", branchName, baseRef,
     ]);
     if (worktreeResult.exitCode !== 0) {
       await rm(agentDir, { recursive: true, force: true });
-      return { ok: false, exitCode: 1, stdout: "", stderr: "Error: could not create worktree" };
+      const gitErr = worktreeResult.stderr.trim();
+      const suffix = gitErr ? `: ${gitErr}` : "";
+      return { ok: false, exitCode: 1, stdout: "", stderr: `Error: could not create worktree${suffix}` };
     }
     workPath = join(agentDir, "repo");
 
@@ -2030,7 +2064,9 @@ ${qStartExitScript}
   const startServerResult = await newAgentSpawnCtx.run(["tmux", "start-server"]);
   if (startServerResult.exitCode !== 0) {
     await cleanupOnFailure();
-    return { ok: false, exitCode: 1, stdout: "", stderr: "Error: could not start tmux server" };
+    const err = startServerResult.stderr.trim();
+    const suffix = err ? `: ${err}` : "";
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Error: could not start tmux server${suffix}` };
   }
 
   // Start tmux session — use saved layout width so it matches the dashboard pane
@@ -2041,7 +2077,9 @@ ${qStartExitScript}
   ]);
   if (tmuxResult.exitCode !== 0) {
     await cleanupOnFailure();
-    return { ok: false, exitCode: 1, stdout: "", stderr: `Error: could not create tmux session '${tmuxSession}'` };
+    const err = tmuxResult.stderr.trim();
+    const suffix = err ? `: ${err}` : "";
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Error: could not create tmux session '${tmuxSession}'${suffix}` };
   }
   await newAgentSpawnCtx.run(["tmux", "set-option", "-w", "-t", tmuxSession, "history-limit", "50000"]);
   await newAgentSpawnCtx.run(["tmux", "set-option", "-w", "-t", tmuxSession, "remain-on-exit", "on"]);
@@ -2050,7 +2088,9 @@ ${qStartExitScript}
   const verifyResult = await newAgentSpawnCtx.run(["tmux", "has-session", "-t", tmuxSession]);
   if (verifyResult.exitCode !== 0) {
     await cleanupOnFailure();
-    return { ok: false, exitCode: 1, stdout: "", stderr: `Error: tmux session '${tmuxSession}' failed to start` };
+    const err = verifyResult.stderr.trim();
+    const suffix = err ? `: ${err}` : "";
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Error: tmux session '${tmuxSession}' failed to start${suffix}` };
   }
 
   // 20. Output agent ID

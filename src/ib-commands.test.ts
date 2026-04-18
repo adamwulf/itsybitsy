@@ -2174,6 +2174,138 @@ describe("newAgent (native)", () => {
     expect(exists).toBe(false);
   });
 
+  // Build a SpawnResult with stdout/stderr/exitCode — used by self-healing tests
+  function makeSpawnResultWithStderr(stdout: string, stderr: string, exitCode: number): SpawnResult {
+    return {
+      stdout: new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(stdout));
+          controller.close();
+        },
+      }),
+      stderr: new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(stderr));
+          controller.close();
+        },
+      }),
+      exited: Promise.resolve(exitCode),
+    };
+  }
+
+  test("surfaces git stderr in worktree creation failure message", async () => {
+    const gitStderr = "fatal: A branch named 'agent/test-stderr' already exists.";
+    setNewAgentSpawnRunner((cmd: string[], _opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
+      spawnCalls.push(cmd);
+      const cmdStr = cmd.join(" ");
+
+      // worktree add fails with a specific git stderr
+      if (cmdStr.includes("worktree add")) {
+        return makeSpawnResultWithStderr("", gitStderr, 1);
+      }
+      // tmux has-session — agent doesn't exist yet
+      if (cmdStr.includes("tmux has-session")) {
+        return makeSpawnResult("", 1);
+      }
+      // Default: succeed with no output
+      return makeSpawnResult("", 0);
+    });
+    const result = await callNewAgent("task", { name: "test-stderr" });
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("could not create worktree");
+    expect(result.stderr).toContain(gitStderr);
+  });
+
+  test("self-heals residual agent/<id> branch with no worktree before worktree add", async () => {
+    const branchName = "agent/test-residual";
+    setNewAgentSpawnRunner((cmd: string[], _opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
+      spawnCalls.push(cmd);
+      const cmdStr = cmd.join(" ");
+
+      // branch --list <branchName> → pretend the branch exists
+      if (cmd[0] === "git" && cmd.includes("branch") && cmd.includes("--list") && cmd.includes(branchName)) {
+        return makeSpawnResult(`  ${branchName}\n`, 0);
+      }
+      // worktree list --porcelain → no worktree holds the branch
+      if (cmdStr.includes("worktree list")) {
+        return makeSpawnResult("worktree /some/path\nHEAD abc123\nbranch refs/heads/main\n", 0);
+      }
+      // tmux has-session — agent doesn't exist yet
+      if (cmdStr.includes("tmux has-session")) {
+        const newSessionCalled = spawnCalls.some(c => c.join(" ").includes("tmux new-session"));
+        return makeSpawnResult("", newSessionCalled ? 0 : 1);
+      }
+      // git worktree add — simulate creating the repo dir
+      if (cmdStr.includes("worktree add")) {
+        const addIdx = cmd.indexOf("add");
+        if (addIdx > -1 && addIdx + 1 < cmd.length) {
+          require("fs").mkdirSync(cmd[addIdx + 1]!, { recursive: true });
+        }
+        return makeSpawnResult("", 0);
+      }
+      // Default: succeed
+      return makeSpawnResult("", 0);
+    });
+    const result = await callNewAgent("task", { name: "test-residual" });
+    expect(result.ok).toBe(true);
+
+    // A `git worktree prune` call happened before `git worktree add`
+    const pruneIdx = spawnCalls.findIndex(c => c.includes("worktree") && c.includes("prune"));
+    const addIdx = spawnCalls.findIndex(c => c.includes("worktree") && c.includes("add"));
+    expect(pruneIdx).toBeGreaterThanOrEqual(0);
+    expect(addIdx).toBeGreaterThan(pruneIdx);
+
+    // `git branch -D <branchName>` happened before `git worktree add`
+    const branchDeleteIdx = spawnCalls.findIndex(
+      c => c.includes("branch") && c.includes("-D") && c.includes(branchName)
+    );
+    expect(branchDeleteIdx).toBeGreaterThanOrEqual(0);
+    expect(branchDeleteIdx).toBeLessThan(addIdx);
+  });
+
+  test("residual worktree holding agent/<id> yields clean error, not generic", async () => {
+    const branchName = "agent/test-held";
+    setNewAgentSpawnRunner((cmd: string[], _opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
+      spawnCalls.push(cmd);
+      const cmdStr = cmd.join(" ");
+
+      // branch --list <branchName> → pretend the branch exists
+      if (cmd[0] === "git" && cmd.includes("branch") && cmd.includes("--list") && cmd.includes(branchName)) {
+        return makeSpawnResult(`  ${branchName}\n`, 0);
+      }
+      // worktree list --porcelain → a worktree DOES hold the branch
+      if (cmdStr.includes("worktree list")) {
+        return makeSpawnResult(
+          `worktree /some/other/path\nHEAD deadbeef\nbranch refs/heads/${branchName}\n`,
+          0,
+        );
+      }
+      if (cmdStr.includes("tmux has-session")) {
+        return makeSpawnResult("", 1);
+      }
+      return makeSpawnResult("", 0);
+    });
+    const result = await callNewAgent("task", { name: "test-held" });
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain(branchName);
+    expect(result.stderr).toContain("already checked out");
+    expect(result.stderr).not.toContain("could not create worktree");
+
+    // No `git branch -D` was issued (we bailed before deletion)
+    const branchDelete = spawnCalls.find(
+      c => c.includes("branch") && c.includes("-D") && c.includes(branchName)
+    );
+    expect(branchDelete).toBeUndefined();
+
+    // No `git worktree add` was attempted
+    const worktreeAdd = spawnCalls.find(c => c.includes("worktree") && c.includes("add"));
+    expect(worktreeAdd).toBeUndefined();
+
+    // Agent dir should be cleaned up
+    const exists = await Bun.file(join(agentsDir, "test-held", "meta.json")).exists().catch(() => false);
+    expect(exists).toBe(false);
+  });
+
   test("cleans up on tmux new-session failure", async () => {
     setNewAgentSpawnRunner(mockSpawnRunner({ failTmuxNewSession: true }));
     const result = await callNewAgent("task", { name: "test-fail-tmux" });

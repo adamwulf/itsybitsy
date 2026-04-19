@@ -1312,6 +1312,8 @@ Per-repo coordinators are stored in `.ittybitty/agents/` like regular agents, bu
 
 **Killing/Archiving**: Per-repo coordinators follow the standard kill/archive flow (§1.4, §1.7). `ib kill <repo-basename>` kills only the coordinator itself (standard §1.4 behavior). To recursively kill a coordinator and all its children, use `ib nuke <repo-basename>` (§1.8). The `manager: "<repo-basename>"` field in children's meta.json links them to the coordinator for the nuke traversal.
 
+**Expanded same-repo authority**: Per-repo coordinators may run `ib kill` and `ib reassign` on ANY non-coordinator agent within their own repo, regardless of the target's `manager` field. This is enforced in `checkIbCommandAccess` (src/hooks/agent-path.ts) by checking the caller's `coordinator: true` flag in its own meta.json before falling back to the standard manager/spawner check. Other manager-only operations (`nuke`, `merge`, `resume`, `pause`) still require the standard manager/spawner relationship. Cross-repo `kill`/`reassign` is not permitted — a coordinator in repo A cannot act on agents in repo B. Coordinators cannot kill or reassign other coordinators via this bypass (the target's `coordinator: true` flag disqualifies it from the bypass and falls through to the standard check).
+
 **Resuming**: Standard resume flow (§1.6). Per-repo coordinators can be paused and resumed like any agent.
 
 #### 12.2.4 Permissions

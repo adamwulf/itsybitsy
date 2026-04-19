@@ -246,6 +246,21 @@ When a manager spawns sub-agents to do work, the manager's role is to **review a
 
 A manager should never duplicate a sub-agent's work by re-implementing it directly. Trust the sub-agent's output, review it, and act accordingly.
 
+### Sending literal strings with `ib send`
+
+The shell expands `$(...)`, backticks, and `$VAR` inside double quotes before `ib` sees the argument. To pass a literal message:
+
+- Single quotes: `ib send <id> 'literal $(foo) string'`
+- Escape metacharacters: `ib send <id> "literal \$(foo) string"`
+- Heredoc via stdin (safest for multi-line or complex content — `ib send` reads stdin when no message arg is given):
+  ```
+  ib send <id> <<'EOF'
+  ...literal content...
+  EOF
+  ```
+
+The quoted heredoc terminator (`<<'EOF'`) prevents any expansion inside the body.
+
 ### Agent monitoring loop
 
 When running parallel agents, start a 2-minute cron loop to auto-merge completed agents:

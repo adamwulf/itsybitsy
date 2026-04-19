@@ -113,6 +113,25 @@ export function detectRole(
   };
 }
 
+/**
+ * Shared guidance block explaining how to send literal strings via `ib send`.
+ * Injected into each role's instructions near the `ib send` command documentation.
+ */
+const SEND_LITERAL_STRINGS_SECTION = `### Sending Literal Strings with \`ib send\`
+
+The shell expands \`$(...)\`, backticks, and \`$VAR\` inside double quotes BEFORE \`ib\` receives the argument. To send a literal message containing these characters, use one of:
+
+- Single quotes: \`ib send <id> 'literal $(foo) string'\`
+- Escape the metacharacters: \`ib send <id> "literal \\$(foo) string"\`
+- Heredoc via stdin (safest for multi-line or complex content):
+  \`\`\`
+  ib send <id> <<'EOF'
+  ...literal content with $(foo), \`bar\`, $VAR all preserved...
+  EOF
+  \`\`\`
+
+The quoted heredoc terminator (\`<<'EOF'\`) is the safest option — nothing inside gets expanded. \`ib send\` reads from stdin when no message argument is provided.`;
+
 export async function generateInstructions(ctx: SessionContext): Promise<string> {
   // Custom type: resolve the type definition and generate custom instructions
   if (ctx.role === "custom" && ctx.typeName) {
@@ -171,6 +190,8 @@ Always spawn **manager** agents (not \`--worker\`). Managers assess the task and
 **Agent questions:** Agents ask via \`ib ask\`. Check \`ib questions\` periodically.
 
 **Completed/stopped agents:** You can \`ib send\` messages to completed or stopped agents - they will restart and respond to the message.
+
+${SEND_LITERAL_STRINGS_SECTION}
 
 ### Agent States
 
@@ -263,6 +284,8 @@ You are in a git worktree, which shares the same repository as the main checkout
 | \`ib merge <id>\` | Merge agent's work and close it |
 | \`ib kill <id>\` | Stop an agent without merging |
 ${askLine}
+
+${SEND_LITERAL_STRINGS_SECTION}
 
 ### State Management
 
@@ -369,6 +392,8 @@ You are in a git worktree, which shares the same repository as the main checkout
 | \`ib status\` | See your commits |
 | \`ib log "msg"\` | Log to your agent log |
 
+${SEND_LITERAL_STRINGS_SECTION}
+
 ### State Management
 
 Whenever you stop working and are idle, end your message with one of:
@@ -433,6 +458,8 @@ You are working directly in the repo at: ${ctx.rootRepoPath}
 | \`ib diff <id>\` | Review agent's changes |
 | \`ib merge <id>\` | Merge agent's work and close it |
 | \`ib kill <id>\` | Stop an agent without merging |
+
+${SEND_LITERAL_STRINGS_SECTION}
 
 ### State Management
 
@@ -543,6 +570,8 @@ You are in a git worktree, which shares the same repository as the main checkout
 | Command | Description |
 |---------|-------------|
 ${commands.join("\n")}
+
+${SEND_LITERAL_STRINGS_SECTION}
 
 ### State Management
 

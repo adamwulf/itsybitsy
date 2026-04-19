@@ -44,6 +44,7 @@ import {
   setWatchdogSpawnFn,
   resetWatchdogSpawnFn,
 } from "./ib-commands";
+import { setAgentNameGenerator, resetAgentNameGenerator } from "./generate-agent-name";
 import { spawnCtx as lifecycleSpawnCtx } from "./agent-lifecycle";
 import { setUserConfigPath, resetUserConfigPath } from "./config";
 import type { AgentState } from "./parse-state";
@@ -1925,11 +1926,16 @@ describe("newAgent (native)", () => {
       if (cmdStr.includes("--git-dir")) return makeSpawnResult(".git", 0);
       return makeSpawnResult("", 0);
     });
+
+    // Default to the fallback name so unrelated tests keep producing "agent-<hex>" IDs.
+    // Tests that exercise name generation install their own override.
+    setAgentNameGenerator(async () => "agent");
   });
 
   afterEach(async () => {
     resetNewAgentSpawnRunner();
     resetNewAgentSummaryGenerator();
+    resetAgentNameGenerator();
     lifecycleSpawnCtx.reset();
     resetUserConfigPath();
     await rm(tempDir, { recursive: true, force: true });
@@ -2745,6 +2751,83 @@ describe("newAgent (native)", () => {
     const metaPath = join(agentsDir, "test-summary-empty", "meta.json");
     const meta = await Bun.file(metaPath).json();
     expect(meta.summary).toBeUndefined();
+  });
+
+  test("uses generated name as ID prefix when no --name given", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    setAgentNameGenerator(async () => "LoginFix");
+    const result = await callNewAgent("fix the login bug");
+    expect(result.ok).toBe(true);
+    expect(result.stdout).toMatch(/^loginfix-[0-9a-f]{8}$/);
+  });
+
+  test("falls back to agent-<hex> when name generator throws", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    setAgentNameGenerator(async () => { throw new Error("boom"); });
+    const result = await callNewAgent("do a thing");
+    expect(result.ok).toBe(true);
+    expect(result.stdout).toMatch(/^agent-[0-9a-f]{8}$/);
+  });
+
+  test("falls back to agent-<hex> when name generator returns reserved word", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    setAgentNameGenerator(async () => "coordinator");
+    const result = await callNewAgent("do a thing");
+    expect(result.ok).toBe(true);
+    expect(result.stdout).toMatch(/^agent-[0-9a-f]{8}$/);
+  });
+
+  test("--name bypasses name generation", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    let generatorCalled = false;
+    setAgentNameGenerator(async () => { generatorCalled = true; return "something"; });
+    const result = await callNewAgent("task", { name: "my-explicit" });
+    expect(result.ok).toBe(true);
+    expect(result.stdout).toBe("my-explicit");
+    expect(generatorCalled).toBe(false);
+  });
+
+  test("config generateAgentName=false bypasses name generation", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const userConfigPath = join(tempDir, "config.json");
+    await Bun.write(
+      userConfigPath,
+      JSON.stringify({ model: "sonnet", generateAgentName: false }, null, 2),
+    );
+    let generatorCalled = false;
+    setAgentNameGenerator(async () => { generatorCalled = true; return "loginfix"; });
+    const result = await callNewAgent("fix the login bug");
+    expect(result.ok).toBe(true);
+    expect(result.stdout).toMatch(/^agent-[0-9a-f]{8}$/);
+    expect(generatorCalled).toBe(false);
+  });
+
+  test("coordinator mode bypasses name generation", async () => {
+    const coordRepoDir = await mkdtemp(join(tmpdir(), "ib-coord-name-"));
+    const coordRepo = join(coordRepoDir, "myrepo");
+    await mkdir(join(coordRepo, ".ittybitty", "agents"), { recursive: true });
+    await Bun.write(join(coordRepo, ".ittybitty", "repo-id"), "coordname\n");
+
+    const userConfigPath = join(coordRepo, "config.json");
+    setUserConfigPath(userConfigPath);
+    await Bun.write(userConfigPath, JSON.stringify({ model: "sonnet" }, null, 2));
+
+    lifecycleSpawnCtx.set((cmd: string[], _opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
+      const cmdStr = cmd.join(" ");
+      if (cmdStr.includes("--git-common-dir")) return makeSpawnResult(".git", 0);
+      if (cmdStr.includes("--show-toplevel")) return makeSpawnResult(coordRepo, 0);
+      if (cmdStr.includes("--git-dir")) return makeSpawnResult(".git", 0);
+      return makeSpawnResult("", 0);
+    });
+
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    let generatorCalled = false;
+    setAgentNameGenerator(async () => { generatorCalled = true; return "something"; });
+    const result = await newAgent(coordRepo, "start", { coordinator: true, _cwd: coordRepo });
+    expect(result.ok).toBe(true);
+    expect(generatorCalled).toBe(false);
+
+    await rm(coordRepoDir, { recursive: true, force: true });
   });
 
   test("start.sh shell-quotes paths to handle spaces and special chars", async () => {

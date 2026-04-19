@@ -359,6 +359,16 @@ export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
     claudeArgs = claudeArgs ? `${claudeArgs} --model ${model}` : `--model ${model}`;
   }
 
+  // Per-repo coordinator: reuse the isolated settings file the coordinator was
+  // spawned with so permissions + hooks keep pointing at the agent dir (not the repo).
+  if (agent.meta.coordinator === true) {
+    const coordSettingsPath = join(agentDir, ".claude", "settings.local.json");
+    if (await Bun.file(coordSettingsPath).exists()) {
+      const coordSettingsArg = shellQuote(coordSettingsPath);
+      claudeArgs = claudeArgs ? `${claudeArgs} --settings ${coordSettingsArg}` : `--settings ${coordSettingsArg}`;
+    }
+  }
+
   // Validate paths for shell script interpolation
   if (!isValidShellPath(agentDir)) {
     return { ok: false, exitCode: 1, stdout: "", stderr: `Agent directory path contains characters unsafe for shell scripts: ${agentDir}` };
@@ -1851,46 +1861,48 @@ export async function newAgent(
     await mkdir(join(agentDir, "repo", ".claude"), { recursive: true });
     const settingsContent = await buildAgentSettings(rootRepoPath, agentType, id, configAllow, configDeny, resolvedType?.canSpawnChildren);
     await Bun.write(join(agentDir, "repo", ".claude", "settings.local.json"), settingsContent);
+  } else if (coordinatorMode) {
+    // Per-repo coordinator: write settings (permissions + hooks) into the
+    // coordinator's own agent dir, NOT the repo's .claude/settings.local.json.
+    // Writing into the repo would pollute every non-coordinator Claude session
+    // opened in that repo with coordinator-specific hooks.
+    // The coordinator's claude process is launched with --settings pointing at
+    // this file (see start.sh generation below).
+    try {
+      const coordSettings = await buildPerRepoCoordinatorSettings();
+      const hookCmd = `ib hook-permission-denied ${id}`;
+      const coordSettingsObj = {
+        ...coordSettings,
+        spinnerTipsEnabled: false,
+        hooks: {
+          Stop: [{ matcher: "*", hooks: [{ type: "command", command: `ib hook-status ${id}` }] }],
+          PermissionRequest: [{ matcher: "*", hooks: [{ type: "command", command: hookCmd }] }],
+          PreToolUse: [
+            { matcher: "*", hooks: [{ type: "command", command: `ib hook-check-path ${id}` }] },
+            { matcher: "Task|Agent|TaskCreate|Bash|AskUserQuestion", hooks: [{ type: "command", command: "ib hooks intercept-task" }] },
+          ],
+          SessionStart: [{ hooks: [{ type: "command", command: `ib hooks session-start ${id}` }] }],
+        },
+      };
+      await mkdir(join(agentDir, ".claude"), { recursive: true });
+      await Bun.write(
+        join(agentDir, ".claude", "settings.local.json"),
+        JSON.stringify(coordSettingsObj, null, 2),
+      );
+    } catch { /* ignore */ }
   } else {
-    // Non-worktree mode: ensure ib permissions in root repo settings
+    // Non-worktree mode (non-coordinator): ensure ib permissions in root repo settings
     const rootSettingsPath = join(rootRepoPath, ".claude", "settings.local.json");
     try {
       const rootSettingsFile = Bun.file(rootSettingsPath);
-      let settingsContent: string;
-
-      if (coordinatorMode) {
-        // Coordinator-specific settings — merge with existing to avoid clobbering
-        const existing = await rootSettingsFile.exists() ? await rootSettingsFile.json() : {};
-        const coordSettings = await buildPerRepoCoordinatorSettings();
-        const hookCmd = `ib hook-permission-denied ${id}`;
-        const coordSettingsObj = {
-          ...existing,
-          ...coordSettings,
-          spinnerTipsEnabled: false,
-          hooks: {
-            Stop: [{ matcher: "*", hooks: [{ type: "command", command: `ib hook-status ${id}` }] }],
-            PermissionRequest: [{ matcher: "*", hooks: [{ type: "command", command: hookCmd }] }],
-            PreToolUse: [
-              { matcher: "*", hooks: [{ type: "command", command: `ib hook-check-path ${id}` }] },
-              { matcher: "Task|Agent|TaskCreate|Bash|AskUserQuestion", hooks: [{ type: "command", command: "ib hooks intercept-task" }] },
-            ],
-            SessionStart: [{ hooks: [{ type: "command", command: `ib hooks session-start ${id}` }] }],
-          },
-        };
-        settingsContent = JSON.stringify(coordSettingsObj, null, 2);
-      } else {
-        // Non-coordinator agent in non-worktree mode
-        const settings = await rootSettingsFile.exists() ? await rootSettingsFile.json() : {};
-        const allow = (settings?.permissions?.allow as string[]) ?? [];
-        if (!allow.includes("Bash(ib:*)")) {
-          allow.push("Bash(ib:*)");
-        }
-        settings.permissions = { ...settings.permissions, allow };
-        settingsContent = JSON.stringify(settings, null, 2);
+      const settings = await rootSettingsFile.exists() ? await rootSettingsFile.json() : {};
+      const allow = (settings?.permissions?.allow as string[]) ?? [];
+      if (!allow.includes("Bash(ib:*)")) {
+        allow.push("Bash(ib:*)");
       }
-
+      settings.permissions = { ...settings.permissions, allow };
       await mkdir(join(rootRepoPath, ".claude"), { recursive: true });
-      await Bun.write(rootSettingsPath, settingsContent);
+      await Bun.write(rootSettingsPath, JSON.stringify(settings, null, 2));
     } catch { /* ignore */ }
   }
 
@@ -2023,6 +2035,12 @@ When your task is complete:
   }
   if (model) {
     claudeArgs = claudeArgs ? `${claudeArgs} --model ${model}` : `--model ${model}`;
+  }
+  if (coordinatorMode) {
+    // Load permissions + hooks from the coordinator's isolated settings file
+    // so they don't pollute the repo's .claude/settings.local.json.
+    const coordSettingsArg = shellQuote(join(agentDir, ".claude", "settings.local.json"));
+    claudeArgs = claudeArgs ? `${claudeArgs} --settings ${coordSettingsArg}` : `--settings ${coordSettingsArg}`;
   }
 
   // 16. Write exit-check.sh

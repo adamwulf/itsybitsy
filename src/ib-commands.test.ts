@@ -2830,6 +2830,86 @@ describe("newAgent (native)", () => {
     await rm(coordRepoDir, { recursive: true, force: true });
   });
 
+  test("coordinator spawn does not write hooks into repo's .claude/settings.local.json", async () => {
+    // Regression test: previously, per-repo coordinators wrote their hook
+    // entries (ib hook-status, ib hook-check-path, ib hooks intercept-task,
+    // ib hooks session-start, ib hook-permission-denied) into the repo's
+    // .claude/settings.local.json, polluting every Claude session opened in
+    // that repo. The fix routes these into an isolated settings file at
+    // .ittybitty/agents/<coord-id>/.claude/settings.local.json instead.
+    const coordRepoDir = await mkdtemp(join(tmpdir(), "ib-coord-settings-"));
+    const coordRepo = join(coordRepoDir, "myrepo");
+    await mkdir(join(coordRepo, ".ittybitty", "agents"), { recursive: true });
+    await Bun.write(join(coordRepo, ".ittybitty", "repo-id"), "coordsettings\n");
+
+    // Pre-existing repo settings with an unrelated user permission; must
+    // remain untouched by coordinator spawn.
+    await mkdir(join(coordRepo, ".claude"), { recursive: true });
+    const repoSettingsPath = join(coordRepo, ".claude", "settings.local.json");
+    await Bun.write(repoSettingsPath, JSON.stringify({
+      permissions: { allow: ["Bash(npm:*)"] },
+    }));
+    const originalRepoSettings = await Bun.file(repoSettingsPath).text();
+
+    const userConfigPath = join(coordRepo, "config.json");
+    setUserConfigPath(userConfigPath);
+    await Bun.write(userConfigPath, JSON.stringify({ model: "sonnet" }, null, 2));
+
+    lifecycleSpawnCtx.set((cmd: string[], _opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
+      const cmdStr = cmd.join(" ");
+      if (cmdStr.includes("--git-common-dir")) return makeSpawnResult(".git", 0);
+      if (cmdStr.includes("--show-toplevel")) return makeSpawnResult(coordRepo, 0);
+      if (cmdStr.includes("--git-dir")) return makeSpawnResult(".git", 0);
+      return makeSpawnResult("", 0);
+    });
+
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await newAgent(coordRepo, "start", { coordinator: true, _cwd: coordRepo });
+    expect(result.ok).toBe(true);
+
+    // The repo's settings file must be byte-for-byte unchanged.
+    const afterRepoSettings = await Bun.file(repoSettingsPath).text();
+    expect(afterRepoSettings).toBe(originalRepoSettings);
+    const parsedRepoSettings = JSON.parse(afterRepoSettings);
+    expect(parsedRepoSettings.hooks).toBeUndefined();
+    expect(parsedRepoSettings.permissions?.allow ?? []).not.toContain("Bash(ib:*)");
+
+    // The coordinator's hooks + permissions must live in the agent-isolated path.
+    const coordId = result.stdout.trim();
+    expect(coordId.length).toBeGreaterThan(0);
+    const isolatedSettingsPath = join(
+      coordRepo, ".ittybitty", "agents", coordId, ".claude", "settings.local.json",
+    );
+    const isolatedSettings = await Bun.file(isolatedSettingsPath).json();
+    expect(isolatedSettings.hooks).toBeDefined();
+    expect(isolatedSettings.hooks.Stop[0].hooks[0].command).toBe(`ib hook-status ${coordId}`);
+    expect(isolatedSettings.hooks.SessionStart[0].hooks[0].command).toBe(`ib hooks session-start ${coordId}`);
+    expect(isolatedSettings.hooks.PreToolUse[0].hooks[0].command).toBe(`ib hook-check-path ${coordId}`);
+    expect(isolatedSettings.hooks.PreToolUse[1].hooks[0].command).toBe("ib hooks intercept-task");
+    expect(isolatedSettings.hooks.PermissionRequest[0].hooks[0].command).toBe(`ib hook-permission-denied ${coordId}`);
+    expect(isolatedSettings.permissions.allow).toContain("Read");
+    expect(isolatedSettings.permissions.allow).toContain("Bash(ib:*)");
+
+    // start.sh must launch claude with --settings pointing at the isolated file.
+    const startSh = await Bun.file(join(coordRepo, ".ittybitty", "agents", coordId, "start.sh")).text();
+    expect(startSh).toContain(`--settings '${isolatedSettingsPath}'`);
+
+    await rm(coordRepoDir, { recursive: true, force: true });
+  });
+
+  test("non-coordinator, non-worktree agent still adds Bash(ib:*) to repo settings", async () => {
+    // The fix should NOT change behavior for non-coordinator no-worktree agents:
+    // they still need Bash(ib:*) in the repo's settings so their ib commands work.
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("task", { name: "test-no-wt-perm", noWorktree: true });
+    expect(result.ok).toBe(true);
+
+    const repoSettings = await Bun.file(join(tempDir, ".claude", "settings.local.json")).json();
+    expect(repoSettings.permissions.allow).toContain("Bash(ib:*)");
+    // No coordinator hooks should appear.
+    expect(repoSettings.hooks).toBeUndefined();
+  });
+
   test("start.sh shell-quotes paths to handle spaces and special chars", async () => {
     setNewAgentSpawnRunner(mockSpawnRunner());
     await callNewAgent("do work", { name: "test-quotes" });

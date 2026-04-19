@@ -74,6 +74,7 @@ function makeMockCtx(overrides?: {
       filteredQuestions: overrides?.questions ?? [],
       questionsSelectedIndex: 0,
       scrollOffset: 5,
+      repoCoordinatorScrollBack: 0,
       errors: overrides?.errors ?? [],
       orphanedTmuxSessions: overrides?.orphanedTmuxSessions ?? [],
       updateContent: () => {},

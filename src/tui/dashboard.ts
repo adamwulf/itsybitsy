@@ -1071,6 +1071,7 @@ export class DashboardComponent implements Component {
         this.repoCoordinatorSession = tmuxSession;
         this.rightPane.repoCoordinatorOutput = null;
         this.rightPane.repoCoordinatorHasPolled = false;
+        this.rightPane.repoCoordinatorScrollBack = 0;
         this.repoCoordinatorPoller.setAgent(tmuxSession);
         // Resize repo coordinator tmux to match right pane width
         if (tmuxSession) {
@@ -1085,6 +1086,7 @@ export class DashboardComponent implements Component {
         this.repoCoordinatorSession = null;
         this.rightPane.repoCoordinatorOutput = null;
         this.rightPane.repoCoordinatorHasPolled = false;
+        this.rightPane.repoCoordinatorScrollBack = 0;
         this.repoCoordinatorPoller.setAgent(null);
       }
     }

@@ -25,7 +25,10 @@ When a new agent is created (`ib new-agent "prompt"`):
 
 5. **Max agents check**: The number of active agents (directories with `meta.json` in `.ittybitty/agents/`) must not exceed the `maxAgents` config value (default: 10).
 
-6. **Generate agent ID**: Either `--name NAME` or `agent-<8 random hex chars>` (e.g., `agent-a1b2c3d4`).
+6. **Generate agent ID**: In priority order:
+   - `--name NAME` if supplied (must match `[A-Za-z0-9_-]+`, cannot be `coordinator` or `system`).
+   - Otherwise, `<slug>-<8 random hex chars>`, where `<slug>` is produced by invoking `claude -p` against Haiku (`claude-haiku-4-5-20251001`) with `--tools ""` to generate a short kebab-case description of the prompt (e.g. `login-bug-fix-abc12345`). The raw Haiku output is sanitized (lowercased, non-`[a-z0-9-]` replaced with `-`, runs collapsed, truncated to 16 chars, reserved names `agent`/`coordinator`/`system` rejected, pure-digit rejected) and must then pass `isValidAgentId`. Any failure in this pipeline — missing/whitespace prompt, spawn error, 8 s timeout, non-zero exit, empty output, sanitization rejection, or final `isValidAgentId` failure — falls back to the literal slug `agent`, yielding `agent-<hex>`. When `isValidAgentId` rejects a sanitized slug (defensive check only — `sanitizeAgentName` already emits a strict subset), a `name-generation rejected: <value>` line is written to `spawn.log` so the surprising case is auditable.
+   - If `generateAgentName` config is `false`, Haiku is skipped entirely and the ID is always `agent-<hex>`.
 
 7. **Tmux session naming**: The tmux session name is `ittybitty-<repo-id>-<agent-id>`, where `<repo-id>` is an 8-character hex identifier stored in `.ittybitty/repo-id`. This prevents session collisions across different repositories.
 
@@ -668,6 +671,7 @@ All keys are read from `~/.itsybitsy/config.json`. If a key is absent or has an 
 |-----|------|---------|-------------|
 | `maxAgents` | number | `10` | Maximum number of concurrently active agents. Checked at spawn time in `newAgent()` — the count of agent directories that contain a `meta.json` must not exceed this value. |
 | `model` | string | `"opus"` | Default Claude model for new agents. Resolution order at spawn time: `--model` CLI flag → config `model` → `"opus"`. |
+| `generateAgentName` | boolean | `true` | When `true`, auto-generated agent IDs (no `--name`) use a short Haiku-generated kebab-case slug plus 8 hex chars (e.g. `login-bug-fix-abc12345`). When `false`, IDs are always `agent-<hex>` and Haiku is not invoked. See §1.1 step 6 for the full generation and fallback pipeline. |
 | `fps` | number | `10` | TUI screen refresh rate (frames per second) for `ib watch`. |
 | `createPullRequests` | boolean | `false` | When `true`, agents are instructed (via their prompt) to create a pull request upon completing their work. |
 | `allowAgentQuestions` | boolean | `true` | When `false`, the `askQuestion` (`ib ask`) command returns an error, blocking top-level manager agents from posing questions to the user. (`acknowledgeQuestion` is the user-facing command to mark a question answered and does not check this flag.) |

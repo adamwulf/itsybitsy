@@ -375,7 +375,7 @@ const PER_REPO_COORDINATOR_ALLOW = [
   "Bash(git show:*)", "Bash(git ls-files:*)",
   "Bash(pwd:*)", "Bash(ls:*)",
   "Read", "Glob", "Grep", "LS",
-  "TodoWrite", "AskUserQuestion", "ToolSearch",
+  "TodoWrite", "ToolSearch",
 ];
 
 /**

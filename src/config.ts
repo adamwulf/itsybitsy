@@ -22,7 +22,6 @@ export const CONFIG_KEYS: ConfigKeyDef[] = [
   { key: "model", type: "string", default: "opus" },
   { key: "createPullRequests", type: "boolean", default: false },
   { key: "allowAgentQuestions", type: "boolean", default: true },
-  { key: "generateAgentName", type: "boolean", default: true },
   { key: "autoCompactThreshold", type: "number", default: undefined },
   { key: "externalDiffTool", type: "string", default: undefined },
   { key: "hooks.injectStatus", type: "boolean", default: true },

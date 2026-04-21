@@ -1054,7 +1054,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(d.focused).toBe("name");
 
     // Type something in prompt to enable create
-    dashboard.handleInput("\t"); // worker
+    dashboard.handleInput("\t"); // agentType
     dashboard.handleInput("\t"); // prompt
     for (const ch of "hello") dashboard.handleInput(ch);
     dashboard.handleInput("\t"); // cancel
@@ -1110,7 +1110,9 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(d.agentType).toBe("manager");
   });
 
-  test("new-agent form: Worker type sets worker meta field", async () => {
+  // Relies on "worker" sorting immediately after "manager" in the default types list,
+  // so a single Space press from the default focus advances the selection from manager to worker.
+  test("new-agent form: cycling from manager to worker creates agent with worker meta field", async () => {
     const newAgentTempDir = await mkdtemp(join(tmpdir(), "ib-na-test-"));
     await mkdir(join(newAgentTempDir, ".ittybitty"), { recursive: true });
     await Bun.write(join(newAgentTempDir, ".ittybitty", "repo-id"), "abcd1234\n");
@@ -1245,8 +1247,8 @@ describe("DashboardComponent dialog and action handlers", () => {
     dashboard.setRepos([{ path: "/repos/only", name: "only-repo" }]);
 
     dashboard.handleInput("a");
-    // Tab past name, worker, prompt (empty) — create is skipped, lands on cancel, wraps to name
-    dashboard.handleInput("\t"); // worker
+    // Tab past name, agentType, prompt (empty) — create is skipped, lands on cancel, wraps to name
+    dashboard.handleInput("\t"); // agentType
     dashboard.handleInput("\t"); // prompt
     dashboard.handleInput("\t"); // cancel (create skipped)
     const d = assertDialog(dashboard.dialog, 'new-agent-form');
@@ -1267,7 +1269,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     dashboard.handleInput("a");
     expect(dashboard.dialog!.type).toBe("new-agent-form");
     // Tab to cancel
-    dashboard.handleInput("\t"); // worker
+    dashboard.handleInput("\t"); // agentType
     dashboard.handleInput("\t"); // prompt
     dashboard.handleInput("\t"); // cancel
     expect(assertDialog(dashboard.dialog, 'new-agent-form').focused).toBe("cancel");

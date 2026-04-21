@@ -1828,7 +1828,7 @@ export async function newAgent(
           PermissionRequest: [{ matcher: "*", hooks: [{ type: "command", command: hookCmd }] }],
           PreToolUse: [
             { matcher: "*", hooks: [{ type: "command", command: `ib hook-check-path ${id}` }] },
-            { matcher: "Task|Agent|TaskCreate|Bash", hooks: [{ type: "command", command: "ib hooks intercept-task" }] },
+            { matcher: "Task|Agent|TaskCreate|Bash|AskUserQuestion", hooks: [{ type: "command", command: "ib hooks intercept-task" }] },
           ],
           SessionStart: [{ hooks: [{ type: "command", command: `ib hooks session-start ${id}` }] }],
         },

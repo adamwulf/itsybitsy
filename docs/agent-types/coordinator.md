@@ -53,6 +53,21 @@ You are in a git worktree, which shares the same repository as the main checkout
 | `ib merge <id>` | Merge agent's work and close it |
 | `ib kill <id>` | Stop an agent without merging |
 
+### Sending Literal Strings with `ib send`
+
+The shell expands `$(...)`, backticks, and `$VAR` inside double quotes BEFORE `ib` receives the argument. To send a literal message containing these characters, use one of:
+
+- Single quotes: `ib send <id> 'literal $(foo) string'`
+- Escape the metacharacters: `ib send <id> "literal \$(foo) string"`
+- Heredoc via stdin (safest for multi-line or complex content):
+  ```
+  ib send <id> <<'EOF'
+  ...literal content with $(foo), `bar`, $VAR all preserved...
+  EOF
+  ```
+
+The quoted heredoc terminator (`<<'EOF'`) is the safest option — nothing inside gets expanded. `ib send` reads from stdin when no message argument is provided.
+
 ### State Management
 
 Whenever you stop working and are idle, end your message with one of:

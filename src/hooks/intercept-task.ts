@@ -4,7 +4,6 @@
 
 import { join } from "path";
 import { newAgent } from "../ib-commands";
-import type { IbCommandResult } from "../ib-commands";
 import { AGENT_CWD_PATTERN, checkGitDirectoryFlags } from "./shared";
 import { loadAgentType } from "../agent-types";
 

@@ -273,7 +273,7 @@ When building `<agent-dir>/repo/.claude/settings.local.json` for an agent, permi
 4. **Type-defined permissions** — `~/.itsybitsy/agent-types/<type>.md` (frontmatter)
    - `permissions.allow` and `permissions.deny` fields from the agent type definition file's YAML frontmatter
 
-**AskUserQuestion is intercepted and denied**: The intercept-task hook matches `AskUserQuestion` alongside `Task|Agent|TaskCreate` and denies the call with a message directing the agent to use `ib ask "question"` instead. Workers are told to report to their manager rather than asking the user directly. This routes user questions through the dashboard's QUESTIONS pane and the `ib ask` / question-acknowledgement flow rather than Claude Code's built-in multi-choice prompt.
+**AskUserQuestion is intercepted and denied**: The intercept-task hook matches `AskUserQuestion` alongside `Task|Agent|TaskCreate` and denies the call with a message directing the agent to use `ib ask "question"` instead. Leaf agents are told to report to their manager rather than asking the user directly. This routes user questions through the dashboard's QUESTIONS pane and the `ib ask` / question-acknowledgement flow rather than Claude Code's built-in multi-choice prompt.
 
 All allow/deny lists are merged and deduplicated. The final result is written to `<agent-dir>/repo/.claude/settings.local.json` along with hook definitions (§6).
 

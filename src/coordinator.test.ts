@@ -946,7 +946,9 @@ describe("buildPerRepoCoordinatorSettings", () => {
   });
 
   test("silently drops config allow entries that conflict with hardcoded deny", async () => {
-    // Write is in hardcoded deny, so adding it to config allow should be dropped
+    // Write is in hardcoded deny, so adding it to permissions.all.allow should be dropped.
+    // (permissions.coordinator.* is removed; coordinator-specific permissions now live in
+    // ~/.itsybitsy/agent-types/coordinator.md frontmatter.)
     const settings = await buildPerRepoCoordinatorSettings();
     expect(settings.permissions.deny).toContain("Write");
     expect(settings.permissions.allow).not.toContain("Write");

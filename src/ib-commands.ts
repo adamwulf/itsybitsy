@@ -1636,12 +1636,16 @@ export async function newAgent(
   }
 
   // Config permissions: permissions.all.* applies to all types,
-  // permissions.coordinator.* applies to coordinator type,
   // permissions.repo.* applies to all non-coordinator types (repo-wide baseline).
+  // Coordinators use only permissions.all.* + type-defined permissions from
+  // ~/.itsybitsy/agent-types/coordinator.md frontmatter (no config-level role key).
   // Per-type permissions also come from the type definition file.
-  const configRoleKey = coordinatorMode ? "coordinator" : "repo";
-  const roleAllow = (config[`permissions.${configRoleKey}.allow`]?.value as string[] | undefined) ?? [];
-  const roleDeny = (config[`permissions.${configRoleKey}.deny`]?.value as string[] | undefined) ?? [];
+  const roleAllow = coordinatorMode
+    ? []
+    : ((config["permissions.repo.allow"]?.value as string[] | undefined) ?? []);
+  const roleDeny = coordinatorMode
+    ? []
+    : ((config["permissions.repo.deny"]?.value as string[] | undefined) ?? []);
   const allAllow = (config["permissions.all.allow"]?.value as string[] | undefined) ?? [];
   const allDeny = (config["permissions.all.deny"]?.value as string[] | undefined) ?? [];
 

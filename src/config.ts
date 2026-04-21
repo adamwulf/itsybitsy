@@ -29,8 +29,6 @@ export const CONFIG_KEYS: ConfigKeyDef[] = [
   { key: "permissions.all.allow", type: "string[]", default: [] },
   { key: "permissions.all.deny", type: "string[]", default: [] },
   { key: "coordinator.model", type: "string", default: "opus" },
-  { key: "permissions.coordinator.allow", type: "string[]", default: [] },
-  { key: "permissions.coordinator.deny", type: "string[]", default: [] },
   { key: "permissions.repo.allow", type: "string[]", default: [] },
   { key: "permissions.repo.deny", type: "string[]", default: [] },
 ];
@@ -119,11 +117,18 @@ export async function readConfig(options?: ReadConfigOptions): Promise<ConfigRes
   return result;
 }
 
-const DEPRECATED_CONFIG_KEYS = [
-  "permissions.manager.allow",
-  "permissions.manager.deny",
-  "permissions.worker.allow",
-  "permissions.worker.deny",
+interface DeprecatedConfigKey {
+  key: string;
+  message: string;
+}
+
+const DEPRECATED_CONFIG_KEYS: DeprecatedConfigKey[] = [
+  { key: "permissions.manager.allow", message: "Config key 'permissions.manager.allow' is deprecated. Permissions now live in agent type files (~/.itsybitsy/agent-types/). Remove this key from ~/.itsybitsy/config.json." },
+  { key: "permissions.manager.deny", message: "Config key 'permissions.manager.deny' is deprecated. Permissions now live in agent type files (~/.itsybitsy/agent-types/). Remove this key from ~/.itsybitsy/config.json." },
+  { key: "permissions.worker.allow", message: "Config key 'permissions.worker.allow' is deprecated. Permissions now live in agent type files (~/.itsybitsy/agent-types/). Remove this key from ~/.itsybitsy/config.json." },
+  { key: "permissions.worker.deny", message: "Config key 'permissions.worker.deny' is deprecated. Permissions now live in agent type files (~/.itsybitsy/agent-types/). Remove this key from ~/.itsybitsy/config.json." },
+  { key: "permissions.coordinator.allow", message: "Config key 'permissions.coordinator.allow' is deprecated. Coordinator permissions now live in ~/.itsybitsy/agent-types/coordinator.md frontmatter. Migrate any entries there and remove this key from ~/.itsybitsy/config.json." },
+  { key: "permissions.coordinator.deny", message: "Config key 'permissions.coordinator.deny' is deprecated. Coordinator permissions now live in ~/.itsybitsy/agent-types/coordinator.md frontmatter. Migrate any entries there and remove this key from ~/.itsybitsy/config.json." },
 ];
 
 /**
@@ -134,10 +139,10 @@ export async function checkDeprecatedConfigKeys(): Promise<string[]> {
   const userPath = defaultUserConfigPath();
   const userData = await readJsonFile(userPath);
   const warnings: string[] = [];
-  for (const key of DEPRECATED_CONFIG_KEYS) {
-    const val = getNestedValue(userData, key);
+  for (const entry of DEPRECATED_CONFIG_KEYS) {
+    const val = getNestedValue(userData, entry.key);
     if (val !== undefined) {
-      warnings.push(`Config key '${key}' is deprecated. Permissions now live in agent type files (~/.itsybitsy/agent-types/). Remove this key from ~/.itsybitsy/config.json.`);
+      warnings.push(entry.message);
     }
   }
   return warnings;

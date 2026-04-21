@@ -87,7 +87,10 @@ describe("config list", () => {
     expect(output).toContain("maxAgents = 10 (default)");
     expect(output).toContain("model = opus (default)");
     expect(output).toContain("autoCompactThreshold = (unset)");
-    expect(output).toContain("permissions.coordinator.allow = [] (default)");
+    expect(output).toContain("permissions.repo.allow = [] (default)");
+    // permissions.coordinator.* keys have been removed from CONFIG_KEYS;
+    // coordinator permissions now live in ~/.itsybitsy/agent-types/coordinator.md.
+    expect(output).not.toContain("permissions.coordinator.allow");
     // Legend line
     expect(output).toContain("Sources:");
   });
@@ -141,8 +144,8 @@ describe("config get", () => {
   });
 
   test("gets array value as JSON", async () => {
-    await Bun.write(cfgPath, JSON.stringify({ permissions: { coordinator: { allow: ["Bash(*)"] } } }));
-    await runConfigCommand(["get", "permissions.coordinator.allow"]);
+    await Bun.write(cfgPath, JSON.stringify({ permissions: { repo: { allow: ["Bash(*)"] } } }));
+    await runConfigCommand(["get", "permissions.repo.allow"]);
     expect(logged()).toBe('["Bash(*)"]');
   });
 
@@ -250,9 +253,14 @@ describe("config set", () => {
   });
 
   test("rejects array key", async () => {
-    await expect(runConfigCommand(["set", "permissions.coordinator.allow", "foo"])).rejects.toThrow("EXIT");
+    await expect(runConfigCommand(["set", "permissions.repo.allow", "foo"])).rejects.toThrow("EXIT");
     expect(errored()).toContain("array key");
     expect(errored()).toContain("ib config add");
+  });
+
+  test("rejects deprecated permissions.coordinator.allow as unknown key", async () => {
+    await expect(runConfigCommand(["set", "permissions.coordinator.allow", "foo"])).rejects.toThrow("EXIT");
+    expect(errored()).toContain("Unknown config key: 'permissions.coordinator.allow'");
   });
 
   test("rejects unknown key", async () => {
@@ -275,25 +283,25 @@ describe("config set", () => {
 
 describe("config add", () => {
   test("adds value to array", async () => {
-    await runConfigCommand(["add", "permissions.coordinator.allow", "Bash(*)"]);
-    expect(logged()).toBe("Added 'Bash(*)' to permissions.coordinator.allow");
+    await runConfigCommand(["add", "permissions.repo.allow", "Bash(*)"]);
+    expect(logged()).toBe("Added 'Bash(*)' to permissions.repo.allow");
     const data = await Bun.file(cfgPath).json();
-    expect(data.permissions.coordinator.allow).toEqual(["Bash(*)"]);
+    expect(data.permissions.repo.allow).toEqual(["Bash(*)"]);
   });
 
   test("adds to existing array", async () => {
-    await Bun.write(cfgPath, JSON.stringify({ permissions: { coordinator: { allow: ["Read"] } } }));
-    await runConfigCommand(["add", "permissions.coordinator.allow", "Write"]);
+    await Bun.write(cfgPath, JSON.stringify({ permissions: { repo: { allow: ["Read"] } } }));
+    await runConfigCommand(["add", "permissions.repo.allow", "Write"]);
     const data = await Bun.file(cfgPath).json();
-    expect(data.permissions.coordinator.allow).toEqual(["Read", "Write"]);
+    expect(data.permissions.repo.allow).toEqual(["Read", "Write"]);
   });
 
   test("prevents duplicates", async () => {
-    await Bun.write(cfgPath, JSON.stringify({ permissions: { coordinator: { allow: ["Bash(*)"] } } }));
-    await runConfigCommand(["add", "permissions.coordinator.allow", "Bash(*)"]);
-    expect(logged()).toBe("Value 'Bash(*)' already exists in permissions.coordinator.allow");
+    await Bun.write(cfgPath, JSON.stringify({ permissions: { repo: { allow: ["Bash(*)"] } } }));
+    await runConfigCommand(["add", "permissions.repo.allow", "Bash(*)"]);
+    expect(logged()).toBe("Value 'Bash(*)' already exists in permissions.repo.allow");
     const data = await Bun.file(cfgPath).json();
-    expect(data.permissions.coordinator.allow).toEqual(["Bash(*)"]);
+    expect(data.permissions.repo.allow).toEqual(["Bash(*)"]);
   });
 
   test("creates config file", async () => {
@@ -316,14 +324,14 @@ describe("config add", () => {
   });
 
   test("missing value exits with error", async () => {
-    await expect(runConfigCommand(["add", "permissions.coordinator.allow"])).rejects.toThrow("EXIT");
+    await expect(runConfigCommand(["add", "permissions.repo.allow"])).rejects.toThrow("EXIT");
     expect(errored()).toContain("key and value required");
   });
 
-  test("works with all four array keys", async () => {
+  test("works with all array keys", async () => {
     for (const key of [
-      "permissions.coordinator.allow",
-      "permissions.coordinator.deny",
+      "permissions.all.allow",
+      "permissions.all.deny",
       "permissions.repo.allow",
       "permissions.repo.deny",
     ]) {
@@ -331,6 +339,13 @@ describe("config add", () => {
       await runConfigCommand(["add", key, "TestTool"]);
       expect(logged()).toContain(`Added 'TestTool' to ${key}`);
     }
+  });
+
+  test("rejects deprecated permissions.coordinator.allow as non-array key", async () => {
+    await expect(runConfigCommand(["add", "permissions.coordinator.allow", "Bash(*)"])).rejects.toThrow("EXIT");
+    expect(errored()).toContain("'permissions.coordinator.allow' is not an array key.");
+    expect(errored()).not.toContain("permissions.coordinator.allow,");
+    expect(errored()).not.toContain(", permissions.coordinator.allow");
   });
 });
 
@@ -354,7 +369,7 @@ describe("config remove", () => {
   test("config file not found exits with error", async () => {
     const missingPath = join(tmpDir, "missing", "config.json");
     setUserConfigPath(missingPath);
-    await expect(runConfigCommand(["remove", "permissions.coordinator.allow", "X"])).rejects.toThrow("EXIT");
+    await expect(runConfigCommand(["remove", "permissions.repo.allow", "X"])).rejects.toThrow("EXIT");
     expect(errored()).toContain("Config file not found");
     expect(exitSpy).toHaveBeenCalledWith(1);
   });
@@ -371,8 +386,8 @@ describe("config remove", () => {
 
   test("removes from empty array (not in array)", async () => {
     await Bun.write(cfgPath, JSON.stringify({}));
-    await runConfigCommand(["remove", "permissions.coordinator.allow", "X"]);
-    expect(logged()).toBe("Value 'X' not found in permissions.coordinator.allow");
+    await runConfigCommand(["remove", "permissions.repo.allow", "X"]);
+    expect(logged()).toBe("Value 'X' not found in permissions.repo.allow");
   });
 });
 
@@ -397,11 +412,11 @@ describe("config unset", () => {
   });
 
   test("unsets array key", async () => {
-    await Bun.write(cfgPath, JSON.stringify({ permissions: { coordinator: { allow: ["Bash(*)"] } } }));
-    await runConfigCommand(["unset", "permissions.coordinator.allow"]);
-    expect(logged()).toBe("Unset permissions.coordinator.allow (reverted to default)");
+    await Bun.write(cfgPath, JSON.stringify({ permissions: { repo: { allow: ["Bash(*)"] } } }));
+    await runConfigCommand(["unset", "permissions.repo.allow"]);
+    expect(logged()).toBe("Unset permissions.repo.allow (reverted to default)");
     const data = await Bun.file(cfgPath).json();
-    expect(data.permissions.coordinator.allow).toBeUndefined();
+    expect(data.permissions.repo.allow).toBeUndefined();
   });
 
   test("key not set prints message", async () => {
@@ -446,11 +461,11 @@ describe("edge cases", () => {
   });
 
   test("add then remove leaves empty array", async () => {
-    await runConfigCommand(["add", "permissions.coordinator.allow", "Bash(*)"]);
+    await runConfigCommand(["add", "permissions.repo.allow", "Bash(*)"]);
     logSpy.mockClear();
-    await runConfigCommand(["remove", "permissions.coordinator.allow", "Bash(*)"]);
+    await runConfigCommand(["remove", "permissions.repo.allow", "Bash(*)"]);
     const data = await Bun.file(cfgPath).json();
-    expect(data.permissions.coordinator.allow).toEqual([]);
+    expect(data.permissions.repo.allow).toEqual([]);
   });
 
   test("set overwrites previous value", async () => {

@@ -267,17 +267,17 @@ When building `<agent-dir>/repo/.claude/settings.local.json` for an agent, permi
 
 3. **Config-defined permissions** — `~/.itsybitsy/config.json`
    - `permissions.all.allow/deny` — applies to ALL agent types
-   - `permissions.coordinator.allow/deny` — applies only to coordinator-type agents
    - `permissions.repo.allow/deny` — applies to all non-coordinator agent types (repo-wide baseline)
 
 4. **Type-defined permissions** — `~/.itsybitsy/agent-types/<type>.md` (frontmatter)
    - `permissions.allow` and `permissions.deny` fields from the agent type definition file's YAML frontmatter
+   - Coordinator-specific permissions live here (`coordinator.md`), not in `~/.itsybitsy/config.json`
 
 **AskUserQuestion is intercepted and denied**: The intercept-task hook matches `AskUserQuestion` alongside `Task|Agent|TaskCreate` and denies the call with a message directing the agent to use `ib ask "question"` instead. Leaf agents are told to report to their manager rather than asking the user directly. This routes user questions through the dashboard's QUESTIONS pane and the `ib ask` / question-acknowledgement flow rather than Claude Code's built-in multi-choice prompt.
 
 All allow/deny lists are merged and deduplicated. The final result is written to `<agent-dir>/repo/.claude/settings.local.json` along with hook definitions (§6).
 
-**Deprecated config keys**: `permissions.manager.allow/deny` and `permissions.worker.allow/deny` have been removed. If present in `~/.itsybitsy/config.json`, a deprecation warning is shown at `ib watch` startup. Users should move per-type permissions into the agent type `.md` files and use `permissions.repo.*` for repo-wide defaults.
+**Deprecated config keys**: `permissions.manager.allow/deny`, `permissions.worker.allow/deny`, and `permissions.coordinator.allow/deny` have been removed. If present in `~/.itsybitsy/config.json`, a deprecation warning is shown at `ib watch` startup. Users should move per-type permissions into the agent type `.md` files (e.g., `~/.itsybitsy/agent-types/coordinator.md`) and use `permissions.repo.*` for repo-wide defaults.
 
 ### 2.4 Sub-Agent Spawning
 
@@ -604,7 +604,7 @@ itsybitsy hooks operate across three distinct execution contexts. Each context h
 | Context | CWD | Hooks source | Permissions source | Role detection |
 |---------|-----|-------------|-------------------|----------------|
 | **Primary Claude** | Any non-worktree path | `~/.claude/settings.json` (global hooks only) | User's own `~/.claude/settings.json` + repo `.claude/settings.local.json` | CWD does NOT match `/.ittybitsy/agents/<id>/repo` |
-| **Spawning agent** (`canSpawnChildren: true`) | `<repo>/.ittybitsy/agents/<id>/repo` | Agent's `settings.local.json` (5 hooks: path-check, stop, session-start, permission-denied, intercept-task) | Built per §2.3 with `permissions.repo.*` (or `permissions.coordinator.*`) + `permissions.all.*` + type-defined permissions | CWD matches pattern AND agent type has `canSpawnChildren: true` |
+| **Spawning agent** (`canSpawnChildren: true`) | `<repo>/.ittybitsy/agents/<id>/repo` | Agent's `settings.local.json` (5 hooks: path-check, stop, session-start, permission-denied, intercept-task) | Built per §2.3 with `permissions.repo.*` (non-coordinators only) + `permissions.all.*` + type-defined permissions | CWD matches pattern AND agent type has `canSpawnChildren: true` |
 | **Leaf agent** (`canSpawnChildren: false`) | `<repo>/.ittybitty/agents/<id>/repo` | Agent's `settings.local.json` (4 hooks: path-check, stop, session-start, permission-denied — NO intercept-task) | Built per §2.3 with `permissions.repo.*` + `permissions.all.*` + type-defined permissions | CWD matches pattern AND agent type has `canSpawnChildren: false` |
 
 **Key distinction**: Primary Claude uses ONLY the global hooks from `~/.claude/settings.json` (§6.6). Per-agent hooks (§6.1–6.5) are installed ONLY in agent worktree `settings.local.json` files and must never leak into the user's repo-level `settings.local.json`. If agent hooks are left in a repo's `settings.local.json` after an agent is killed or merged, they will incorrectly restrict the user's direct Claude sessions in that repo.
@@ -818,12 +818,10 @@ All keys are read from `~/.itsybitsy/config.json`. If a key is absent or has an 
 | `permissions.all.allow` | string[] | `[]` | Additional tool names added to the allow list for ALL agents regardless of type (merged with mandatory permissions at spawn time). |
 | `permissions.all.deny` | string[] | `[]` | Additional tool names added to the deny list for ALL agents regardless of type. |
 | `coordinator.model` | string | `"opus"` | Default model for coordinator agents. Resolution: `--model` > type `model` > `coordinator.model` > `"opus"`. |
-| `permissions.coordinator.allow` | string[] | `[]` | Additional tool names added to the allow list for coordinator-type agents. |
-| `permissions.coordinator.deny` | string[] | `[]` | Additional tool names added to the deny list for coordinator-type agents. |
 | `permissions.repo.allow` | string[] | `[]` | Additional tool names added to the allow list for all non-coordinator agents (repo-wide baseline). |
 | `permissions.repo.deny` | string[] | `[]` | Additional tool names added to the deny list for all non-coordinator agents. |
 
-**Deprecated keys**: `permissions.manager.allow/deny` and `permissions.worker.allow/deny` have been removed. If present in the config file, a deprecation warning is shown at `ib watch` startup. Per-type permissions now live in agent type definition files (see §2.6).
+**Deprecated keys**: `permissions.manager.allow/deny`, `permissions.worker.allow/deny`, and `permissions.coordinator.allow/deny` have been removed. If present in the config file, a deprecation warning is shown at `ib watch` startup. Per-type permissions now live in agent type definition files (see §2.6) — coordinator-specific permissions live in `~/.itsybitsy/agent-types/coordinator.md`.
 
 ### 7.3 Permission Resolution
 
@@ -833,8 +831,8 @@ Summary:
 
 1. **`<repo>/.claude/settings.json`** — base project allow list (deny entries NOT inherited)
 2. **Hardcoded mandatory** — ib commands, git operations, filesystem inspection, Claude Code tools
-3. **`~/.itsybitsy/config.json`** — `permissions.all.*` + role-specific scope (`permissions.coordinator.*` or `permissions.repo.*`)
-4. **`~/.itsybitsy/agent-types/<type>.md`** — `permissions.allow/deny` from type frontmatter
+3. **`~/.itsybitsy/config.json`** — `permissions.all.*` + `permissions.repo.*` (non-coordinators only; coordinators skip `permissions.repo.*`)
+4. **`~/.itsybitsy/agent-types/<type>.md`** — `permissions.allow/deny` from type frontmatter (coordinator-specific permissions live here, in `coordinator.md`)
 5. Deduplicate all allow/deny lists
 
 [^perm-quirk]: The bash implementation has a quirk: if `CONFIG_WORKER_ALLOW` is empty, it falls through to `CONFIG_MANAGER_ALLOW` (and `deny` follows suit). The TS implementation intentionally does not replicate this — the new system uses explicit scope-based permissions (all/repo/coordinator) with no fallthrough.
@@ -873,7 +871,7 @@ Lists all known config keys with their current values and sources.
 
 1. Each line shows the key, its effective value, and a source label: `(user)` or `(default)`.
 2. **Unset keys**: Keys with no value and no default display as `(unset)`.
-3. **All known keys are listed**, including those not present in the config file. The full key list matches `CONFIG_KEYS` in `config.ts`: `maxAgents`, `model`, `createPullRequests`, `allowAgentQuestions`, `autoCompactThreshold`, `externalDiffTool`, `hooks.injectStatus`, `hooks.statusVisible`, `permissions.all.allow`, `permissions.all.deny`, `coordinator.model`, `permissions.coordinator.allow`, `permissions.coordinator.deny`, `permissions.repo.allow`, `permissions.repo.deny`.
+3. **All known keys are listed**, including those not present in the config file. The full key list matches `CONFIG_KEYS` in `config.ts`: `maxAgents`, `model`, `createPullRequests`, `allowAgentQuestions`, `autoCompactThreshold`, `externalDiffTool`, `hooks.injectStatus`, `hooks.statusVisible`, `permissions.all.allow`, `permissions.all.deny`, `coordinator.model`, `permissions.repo.allow`, `permissions.repo.deny`.
 4. A legend line is printed after the list explaining the source labels.
 5. Aliases: `ib config ls` is accepted as an alias for `list`.
 
@@ -907,7 +905,7 @@ Sets a scalar config value.
 Adds a value to an array config key, preventing duplicates.
 
 1. **Key and value required**: Exits with error if either is missing. Error output lists the valid array keys.
-2. **Array keys only**: Only `permissions.all.allow`, `permissions.all.deny`, `permissions.coordinator.allow`, `permissions.coordinator.deny`, `permissions.repo.allow`, and `permissions.repo.deny` are accepted. All other keys are rejected with an error.
+2. **Array keys only**: Only `permissions.all.allow`, `permissions.all.deny`, `permissions.repo.allow`, and `permissions.repo.deny` are accepted. All other keys are rejected with an error.
 3. **Config file creation**: If `~/.itsybitsy/config.json` does not exist, the directory and file are created.
 4. **Duplicate prevention**: If the value already exists in the array, prints `"Value '<value>' already exists in <key>"` and exits successfully (exit code 0).
 5. **Output**: On success, prints `"Added '<value>' to <key>"`.
@@ -1170,7 +1168,7 @@ Tab names are defined in `SETUP_TAB_NAMES = ['Hooks', 'Config']`. Switching betw
 
 ### 10.2 Permissions Editor
 
-Within the Config tab, a **permissions editor** sub-dialog allows editing the config-level permission lists (`permissions.all.allow/deny`, `permissions.coordinator.allow/deny`, `permissions.repo.allow/deny`) in `~/.itsybitsy/config.json`. Each list is editable independently. Changes take effect for newly created agents (existing agents' `settings.local.json` is not modified retroactively). Per-type permissions are defined in agent type files (§2.6), not in the config.
+Within the Config tab, a **permissions editor** sub-dialog allows editing the config-level permission lists (`permissions.all.allow/deny`, `permissions.repo.allow/deny`) in `~/.itsybitsy/config.json`. Each list is editable independently. Changes take effect for newly created agents (existing agents' `settings.local.json` is not modified retroactively). Per-type permissions — including coordinator permissions — are defined in agent type files (§2.6), not in the config.
 
 ---
 
@@ -1496,18 +1494,9 @@ Key differences from regular agents:
 - **No WebFetch/WebSearch** — coordinators don't need internet access
 - **No KillShell** — coordinators don't run long-lived shell processes
 
-These permissions are constructed by a new `buildCoordinatorSettings()` function (parallel to the existing `buildAgentSettings()`). Per-repo coordinator permissions are also configurable via config. **Merge semantics**: Config `allow` entries are appended to the hardcoded allow list. Config `deny` entries are appended to the hardcoded deny list. The hardcoded deny list always takes precedence — `buildCoordinatorSettings()` enforces this at construction time by filtering out any user-configured `allow` entries that appear in the hardcoded `deny` list before building the final permissions object. Adding `"Write"` to `permissions.coordinator.allow` is silently dropped because `Write` is in the hardcoded deny list. This prevents users from accidentally granting write access to coordinators via config:
+These permissions are constructed by a new `buildCoordinatorSettings()` function (parallel to the existing `buildAgentSettings()`). Per-repo coordinator permissions are customized by editing the `permissions.allow` / `permissions.deny` frontmatter in `~/.itsybitsy/agent-types/coordinator.md`. **Merge semantics**: `permissions.all.*` config entries and the coordinator type file's frontmatter `allow` entries are appended to the hardcoded allow list. The hardcoded deny list always takes precedence — `buildCoordinatorSettings()` enforces this at construction time by filtering out any user-configured `allow` entries that appear in the hardcoded `deny` list before building the final permissions object. Adding `"Write"` to `coordinator.md`'s `permissions.allow` is silently dropped because `Write` is in the hardcoded deny list. This prevents users from accidentally granting write access to coordinators.
 
-```json
-{
-  "permissions": {
-    "coordinator": {
-      "allow": [],
-      "deny": []
-    }
-  }
-}
-```
+The former config keys `permissions.coordinator.allow` and `permissions.coordinator.deny` have been removed; if present in `~/.itsybitsy/config.json`, a deprecation warning is shown at `ib watch` startup directing users to migrate entries into `~/.itsybitsy/agent-types/coordinator.md` frontmatter.
 
 #### 12.2.5 Display
 
@@ -1709,18 +1698,12 @@ Per-repo coordinators bypass the `maxAgents` check during creation (`ib new-agen
 
 ### 12.5 Coordinator-Specific Config
 
-New config keys in `~/.itsybitsy/config.json`:
+Coordinator model selection lives in `~/.itsybitsy/config.json`:
 
 ```json
 {
   "coordinator": {
     "model": "opus"
-  },
-  "permissions": {
-    "coordinator": {
-      "allow": [],
-      "deny": []
-    }
   }
 }
 ```
@@ -1728,8 +1711,8 @@ New config keys in `~/.itsybitsy/config.json`:
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `coordinator.model` | string | `"opus"` | Model for both system and per-repo coordinators. A single key is used because both tiers perform the same kind of work (orchestration via `ib` commands). If different models are needed, per-repo coordinators can be spawned with `--model <model>` to override. Changing the system coordinator's model requires restarting it (`R` key in TUI when selected, or kill + re-launch `ib watch`) — the config is read at spawn time. |
-| `permissions.coordinator.allow` | string[] | `[]` | Additional permissions for per-repo coordinators |
-| `permissions.coordinator.deny` | string[] | `[]` | Additional deny rules for per-repo coordinators |
+
+Coordinator permissions (allow/deny lists) live in `~/.itsybitsy/agent-types/coordinator.md` frontmatter, not in the config file. The former `permissions.coordinator.allow` / `permissions.coordinator.deny` config keys have been removed; if present, a deprecation warning is shown at `ib watch` startup.
 
 ### 12.6 Affected Files and Modules
 
@@ -1745,7 +1728,7 @@ The coordinator system touches many modules. This section catalogs the current i
 | `src/hooks/intercept-task.ts` | **Implemented** | `checkCoordinatorBashRestrictions()` blocks shell metacharacters and `--output` in git commands for coordinator sessions. Detects coordinators via `coordinator: true` in meta.json. |
 | `src/hooks/agent-path.ts` | **No changes needed** | Per-repo coordinators use standard path isolation. |
 | `src/hooks/agent-status.ts` | **No changes needed** | Stop hook writes state normally. |
-| `src/config.ts` | **Implemented** | Config keys: `coordinator.model`, `permissions.coordinator.allow`, `permissions.coordinator.deny`. |
+| `src/config.ts` | **Implemented** | Config keys: `coordinator.model`. (`permissions.coordinator.*` removed — coordinator permissions live in `~/.itsybitsy/agent-types/coordinator.md` frontmatter.) |
 | `src/watchdog.ts` | **Not yet modified** | Does NOT have coordinator-specific behavior. Treats coordinators identically to regular agents. See §12.2.7. |
 | `src/tui/dashboard.ts` | **Implemented** | System coordinator full-width view with TMUX/DASHBOARD toggle, coordinator lifecycle on startup/shutdown, coordinator restart on `R`, input field routing, per-repo coordinator pausing on exit. |
 | `src/tui/agent-tree.ts` | **Implemented** | System coordinator as first entry with `◆` icon. Per-repo coordinators with `◇` icon, sorted before regular agents. |

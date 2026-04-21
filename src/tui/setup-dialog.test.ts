@@ -25,7 +25,7 @@ function makeConfigItems(): ConfigDialogItem[] {
     { key: "maxAgents", type: "number", value: 10, source: "default", default: 10 },
     { key: "model", type: "string", value: "sonnet", source: "user", default: "sonnet" },
     { key: "createPullRequests", type: "boolean", value: false, source: "default", default: false },
-    { key: "permissions.coordinator.allow", type: "string[]", value: ["Edit", "Write"], source: "user", default: [] },
+    { key: "permissions.repo.allow", type: "string[]", value: ["Edit", "Write"], source: "user", default: [] },
   ];
 }
 
@@ -228,7 +228,7 @@ describe("setup dialog config tab content", () => {
     expect(stripped.some((l) => l.includes("maxAgents"))).toBe(true);
     expect(stripped.some((l) => l.includes("model"))).toBe(true);
     expect(stripped.some((l) => l.includes("createPullRequests"))).toBe(true);
-    expect(stripped.some((l) => l.includes("permissions.coordinator.allow"))).toBe(true);
+    expect(stripped.some((l) => l.includes("permissions.repo.allow"))).toBe(true);
   });
 
   test("boolean values show true/false", () => {
@@ -258,7 +258,7 @@ describe("setup dialog config tab content", () => {
       selectedIndex: 0,
 
       configItems: [
-        { key: "permissions.coordinator.allow", type: "string[]", value: ["Edit", "Write"], source: "user", default: [] },
+        { key: "permissions.repo.allow", type: "string[]", value: ["Edit", "Write"], source: "user", default: [] },
       ],
       configSelectedIndex: 0,
       onAction: () => {},
@@ -521,7 +521,7 @@ describe("config write integration", () => {
 function makePermsDialog(overrides?: Partial<Extract<NonNullable<DialogState>, { type: "permissions-editor" }>>): Extract<NonNullable<DialogState>, { type: "permissions-editor" }> {
   return {
     type: "permissions-editor",
-    roleKey: "permissions.coordinator",
+    roleKey: "permissions.repo",
     tab: 0,
     allowList: ["Edit", "Write"],
     denyList: ["Bash"],
@@ -538,13 +538,13 @@ describe("permissions editor rendering", () => {
   test("renders title with role name", () => {
     const dialog = makePermsDialog();
     const result = buildPermissionsEditorContent(dialog, 60);
-    expect(result.title).toBe("Coordinator Permissions");
+    expect(result.title).toBe("Repo Permissions");
   });
 
-  test("renders title for repo role", () => {
-    const dialog = makePermsDialog({ roleKey: "permissions.repo" });
+  test("renders title for all role", () => {
+    const dialog = makePermsDialog({ roleKey: "permissions.all" });
     const result = buildPermissionsEditorContent(dialog, 60);
-    expect(result.title).toBe("Repo Permissions");
+    expect(result.title).toBe("All Permissions");
   });
 
   test("renders tab bar with Allow and Deny", () => {

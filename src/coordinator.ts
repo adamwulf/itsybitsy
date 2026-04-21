@@ -90,8 +90,9 @@ const SYSTEM_COORDINATOR_DENY = [
 
 /**
  * Build the settings.local.json content for the system coordinator.
- * The system coordinator's permissions are fixed — config allow/deny
- * keys (permissions.coordinator.*) apply only to per-repo coordinators.
+ * The system coordinator's permissions are fixed — per-repo coordinator
+ * permissions live in ~/.itsybitsy/agent-types/coordinator.md frontmatter
+ * and are not applied to the system coordinator.
  */
 export function buildSystemCoordinatorSettings(): {
   permissions: { allow: string[]; deny: string[] };
@@ -394,31 +395,31 @@ const PER_REPO_COORDINATOR_DENY = [
  * Coordinators can read the codebase and run ib commands, but cannot write code.
  * See SPEC §12.2.4 for the full specification.
  *
- * Config merge: permissions.coordinator.allow entries are appended to the
+ * Config merge: global `permissions.all.allow` entries are appended to the
  * hardcoded allow list, but any that appear in the hardcoded deny list are
- * silently dropped. permissions.coordinator.deny entries are appended to
- * the hardcoded deny list.
+ * silently dropped. `permissions.all.deny` entries are appended to the
+ * hardcoded deny list. Role-specific config keys for coordinators no longer
+ * exist — coordinator-specific permissions live in
+ * ~/.itsybitsy/agent-types/coordinator.md frontmatter.
  */
 export async function buildPerRepoCoordinatorSettings(): Promise<{
   permissions: { allow: string[]; deny: string[] };
 }> {
   const config = await readConfig();
 
-  // Role-specific config (permissions.coordinator.*) + global (permissions.all.*)
-  const roleAllow = (config["permissions.coordinator.allow"]?.value as string[] | undefined) ?? [];
-  const roleDeny = (config["permissions.coordinator.deny"]?.value as string[] | undefined) ?? [];
+  // Global (permissions.all.*) — coordinator-specific config keys have been removed.
   const allAllow = (config["permissions.all.allow"]?.value as string[] | undefined) ?? [];
   const allDeny = (config["permissions.all.deny"]?.value as string[] | undefined) ?? [];
 
   const hardcodedDenySet = new Set(PER_REPO_COORDINATOR_DENY);
 
   // Filter out config allow entries that conflict with hardcoded deny
-  const filteredConfigAllow = [...roleAllow, ...allAllow].filter(
+  const filteredConfigAllow = allAllow.filter(
     (entry) => !hardcodedDenySet.has(entry)
   );
 
   const finalAllow = [...new Set([...PER_REPO_COORDINATOR_ALLOW, ...filteredConfigAllow])];
-  const finalDeny = [...new Set([...PER_REPO_COORDINATOR_DENY, ...roleDeny, ...allDeny])];
+  const finalDeny = [...new Set([...PER_REPO_COORDINATOR_DENY, ...allDeny])];
 
   return { permissions: { allow: finalAllow, deny: finalDeny } };
 }

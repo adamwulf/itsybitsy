@@ -2,7 +2,7 @@ import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { join } from "path";
 import { mkdtemp, rm, mkdir } from "fs/promises";
 import { tmpdir } from "os";
-import { generateSummary, isValidAgentDir } from "./generate-summary";
+import { generateSummary, isValidAgentDir, buildSummaryCommand } from "./generate-summary";
 
 describe("isValidAgentDir", () => {
   test("rejects relative paths", () => {
@@ -24,6 +24,28 @@ describe("isValidAgentDir", () => {
   test("accepts valid agent directory paths", () => {
     expect(isValidAgentDir("/tmp/.ittybitty/agents/agent-abc123")).toBe(true);
     expect(isValidAgentDir("/Users/me/project/.ittybitty/agents/test-agent")).toBe(true);
+  });
+});
+
+describe("buildSummaryCommand", () => {
+  test("includes --tools with empty string to disable all tools", () => {
+    const cmd = buildSummaryCommand("test prompt");
+    const toolsIdx = cmd.indexOf("--tools");
+    expect(toolsIdx).toBeGreaterThan(-1);
+    expect(cmd[toolsIdx + 1]).toBe("");
+  });
+
+  test("uses claude -p with haiku model", () => {
+    const cmd = buildSummaryCommand("test prompt");
+    expect(cmd[0]).toBe("claude");
+    expect(cmd[1]).toBe("-p");
+    expect(cmd).toContain("--model");
+    expect(cmd).toContain("claude-haiku-4-5-20251001");
+  });
+
+  test("passes the summary prompt as the -p argument", () => {
+    const cmd = buildSummaryCommand("my summary prompt");
+    expect(cmd[2]).toBe("my summary prompt");
   });
 });
 

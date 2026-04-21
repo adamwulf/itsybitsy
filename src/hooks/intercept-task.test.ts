@@ -203,6 +203,79 @@ describe("intercept-task", () => {
     expect(capturedOpts.model).toBeUndefined();
   });
 
+  test("AskUserQuestion from manager agent → deny with 'ib ask' message", async () => {
+    const fs = await import("fs/promises");
+    const { tmpdir } = await import("os");
+    const { join } = await import("path");
+    const tmpDir = await fs.mkdtemp(join(tmpdir(), "ib-test-aq-manager-"));
+    try {
+      const agentId = "agent-11112222";
+      const agentDir = join(tmpDir, ".ittybitty", "agents", agentId);
+      await fs.mkdir(join(agentDir, "repo"), { recursive: true });
+      await Bun.write(
+        join(agentDir, "meta.json"),
+        JSON.stringify({ id: agentId, worker: false })
+      );
+
+      const result = await processTaskIntercept({
+        tool_name: "AskUserQuestion",
+        tool_input: { question: "foo?" },
+        cwd: join(agentDir, "repo"),
+      });
+      expect(result.action).toBe("intercept");
+      const output = result.output as Record<string, unknown>;
+      const hookOutput = output.hookSpecificOutput as Record<string, unknown>;
+      expect(hookOutput.permissionDecision).toBe("deny");
+      expect(hookOutput.permissionDecisionReason).toContain("ib ask");
+      expect(hookOutput.permissionDecisionReason).toContain("dashboard");
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  test("AskUserQuestion from worker agent → deny with 'report to manager' message", async () => {
+    const fs = await import("fs/promises");
+    const { tmpdir } = await import("os");
+    const { join } = await import("path");
+    const tmpDir = await fs.mkdtemp(join(tmpdir(), "ib-test-aq-worker-"));
+    try {
+      const agentId = "agent-33334444";
+      const agentDir = join(tmpDir, ".ittybitty", "agents", agentId);
+      await fs.mkdir(join(agentDir, "repo"), { recursive: true });
+      await Bun.write(
+        join(agentDir, "meta.json"),
+        JSON.stringify({ id: agentId, worker: true, manager: "agent-parent" })
+      );
+
+      const result = await processTaskIntercept({
+        tool_name: "AskUserQuestion",
+        tool_input: { question: "foo?" },
+        cwd: join(agentDir, "repo"),
+      });
+      expect(result.action).toBe("intercept");
+      const output = result.output as Record<string, unknown>;
+      const hookOutput = output.hookSpecificOutput as Record<string, unknown>;
+      expect(hookOutput.permissionDecision).toBe("deny");
+      expect(hookOutput.permissionDecisionReason).toContain("Workers cannot ask");
+      expect(hookOutput.permissionDecisionReason).toContain("manager");
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  test("AskUserQuestion from non-agent cwd → deny with manager-style message", async () => {
+    const result = await processTaskIntercept({
+      tool_name: "AskUserQuestion",
+      tool_input: { question: "foo?" },
+      cwd: "/tmp/not-an-agent",
+    });
+    expect(result.action).toBe("intercept");
+    const output = result.output as Record<string, unknown>;
+    const hookOutput = output.hookSpecificOutput as Record<string, unknown>;
+    expect(hookOutput.permissionDecision).toBe("deny");
+    expect(hookOutput.permissionDecisionReason).toContain("ib ask");
+  });
+
   test("spawn failure → error stub", async () => {
     const result = await processTaskIntercept(
       {

@@ -2214,6 +2214,181 @@ describe("newAgent (native)", () => {
     expect(exists).toBe(false);
   });
 
+  // Build a SpawnResult with stdout/stderr/exitCode — used by self-healing tests
+  function makeSpawnResultWithStderr(stdout: string, stderr: string, exitCode: number): SpawnResult {
+    return {
+      stdout: new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(stdout));
+          controller.close();
+        },
+      }),
+      stderr: new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(stderr));
+          controller.close();
+        },
+      }),
+      exited: Promise.resolve(exitCode),
+    };
+  }
+
+  test("surfaces git stderr in worktree creation failure message", async () => {
+    const gitStderr = "fatal: A branch named 'agent/test-stderr' already exists.";
+    setNewAgentSpawnRunner((cmd: string[], _opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
+      spawnCalls.push(cmd);
+      const cmdStr = cmd.join(" ");
+
+      // worktree add fails with a specific git stderr
+      if (cmdStr.includes("worktree add")) {
+        return makeSpawnResultWithStderr("", gitStderr, 1);
+      }
+      // tmux has-session — agent doesn't exist yet
+      if (cmdStr.includes("tmux has-session")) {
+        return makeSpawnResult("", 1);
+      }
+      // Default: succeed with no output
+      return makeSpawnResult("", 0);
+    });
+    const result = await callNewAgent("task", { name: "test-stderr" });
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("could not create worktree");
+    expect(result.stderr).toContain(gitStderr);
+  });
+
+  test("self-heals residual agent/<id> branch with no worktree before worktree add", async () => {
+    const branchName = "agent/test-residual";
+    setNewAgentSpawnRunner((cmd: string[], _opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
+      spawnCalls.push(cmd);
+      const cmdStr = cmd.join(" ");
+
+      // branch --list <branchName> → pretend the branch exists
+      if (cmd[0] === "git" && cmd.includes("branch") && cmd.includes("--list") && cmd.includes(branchName)) {
+        return makeSpawnResult(`  ${branchName}\n`, 0);
+      }
+      // worktree list --porcelain → no worktree holds the branch
+      if (cmdStr.includes("worktree list")) {
+        return makeSpawnResult("worktree /some/path\nHEAD abc123\nbranch refs/heads/main\n", 0);
+      }
+      // tmux has-session — agent doesn't exist yet
+      if (cmdStr.includes("tmux has-session")) {
+        const newSessionCalled = spawnCalls.some(c => c.join(" ").includes("tmux new-session"));
+        return makeSpawnResult("", newSessionCalled ? 0 : 1);
+      }
+      // git worktree add — simulate creating the repo dir
+      if (cmdStr.includes("worktree add")) {
+        const addIdx = cmd.indexOf("add");
+        if (addIdx > -1 && addIdx + 1 < cmd.length) {
+          require("fs").mkdirSync(cmd[addIdx + 1]!, { recursive: true });
+        }
+        return makeSpawnResult("", 0);
+      }
+      // Default: succeed
+      return makeSpawnResult("", 0);
+    });
+    const result = await callNewAgent("task", { name: "test-residual" });
+    expect(result.ok).toBe(true);
+
+    // A `git worktree prune` call happened before `git worktree add`
+    const pruneIdx = spawnCalls.findIndex(c => c.includes("worktree") && c.includes("prune"));
+    const addIdx = spawnCalls.findIndex(c => c.includes("worktree") && c.includes("add"));
+    expect(pruneIdx).toBeGreaterThanOrEqual(0);
+    expect(addIdx).toBeGreaterThan(pruneIdx);
+
+    // `git branch -D <branchName>` happened before `git worktree add`
+    const branchDeleteIdx = spawnCalls.findIndex(
+      c => c.includes("branch") && c.includes("-D") && c.includes(branchName)
+    );
+    expect(branchDeleteIdx).toBeGreaterThanOrEqual(0);
+    expect(branchDeleteIdx).toBeLessThan(addIdx);
+  });
+
+  test("worktree-list match is anchored: prefix-collision does not trigger 'already checked out'", async () => {
+    // A different worktree holds `agent/test-prefix-extra`; we're spawning
+    // `agent/test-prefix` whose branch also exists but has NO worktree.
+    // The old substring match would false-positive and refuse to delete.
+    const branchName = "agent/test-prefix";
+    setNewAgentSpawnRunner((cmd: string[], _opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
+      spawnCalls.push(cmd);
+      const cmdStr = cmd.join(" ");
+
+      if (cmd[0] === "git" && cmd.includes("branch") && cmd.includes("--list") && cmd.includes(branchName)) {
+        return makeSpawnResult(`  ${branchName}\n`, 0);
+      }
+      // worktree list holds a LONGER-named branch that starts with branchName
+      if (cmdStr.includes("worktree list")) {
+        return makeSpawnResult(
+          `worktree /some/other/path\nHEAD abc123\nbranch refs/heads/${branchName}-extra\n`,
+          0,
+        );
+      }
+      if (cmdStr.includes("tmux has-session")) {
+        const newSessionCalled = spawnCalls.some(c => c.join(" ").includes("tmux new-session"));
+        return makeSpawnResult("", newSessionCalled ? 0 : 1);
+      }
+      if (cmdStr.includes("worktree add")) {
+        const addIdx = cmd.indexOf("add");
+        if (addIdx > -1 && addIdx + 1 < cmd.length) {
+          require("fs").mkdirSync(cmd[addIdx + 1]!, { recursive: true });
+        }
+        return makeSpawnResult("", 0);
+      }
+      return makeSpawnResult("", 0);
+    });
+    const result = await callNewAgent("task", { name: "test-prefix" });
+    expect(result.ok).toBe(true);
+
+    // The residual branch should have been auto-deleted (not falsely
+    // flagged as "already checked out")
+    const branchDelete = spawnCalls.find(
+      c => c.includes("branch") && c.includes("-D") && c.includes(branchName)
+    );
+    expect(branchDelete).toBeDefined();
+  });
+
+  test("residual worktree holding agent/<id> yields clean error, not generic", async () => {
+    const branchName = "agent/test-held";
+    setNewAgentSpawnRunner((cmd: string[], _opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
+      spawnCalls.push(cmd);
+      const cmdStr = cmd.join(" ");
+
+      // branch --list <branchName> → pretend the branch exists
+      if (cmd[0] === "git" && cmd.includes("branch") && cmd.includes("--list") && cmd.includes(branchName)) {
+        return makeSpawnResult(`  ${branchName}\n`, 0);
+      }
+      // worktree list --porcelain → a worktree DOES hold the branch
+      if (cmdStr.includes("worktree list")) {
+        return makeSpawnResult(
+          `worktree /some/other/path\nHEAD deadbeef\nbranch refs/heads/${branchName}\n`,
+          0,
+        );
+      }
+      if (cmdStr.includes("tmux has-session")) {
+        return makeSpawnResult("", 1);
+      }
+      return makeSpawnResult("", 0);
+    });
+    const result = await callNewAgent("task", { name: "test-held" });
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain(branchName);
+    expect(result.stderr).toContain("already checked out");
+    expect(result.stderr).not.toContain("could not create worktree");
+
+    // No `git branch -D` was issued (we bailed before deletion)
+    const branchDelete = spawnCalls.find(
+      c => c.includes("branch") && c.includes("-D") && c.includes(branchName)
+    );
+    expect(branchDelete).toBeUndefined();
+
+    // No `git worktree add` was attempted
+    const worktreeAdd = spawnCalls.find(c => c.includes("worktree") && c.includes("add"));
+    expect(worktreeAdd).toBeUndefined();
+
+    // Agent dir should be cleaned up
+    const exists = await Bun.file(join(agentsDir, "test-held", "meta.json")).exists().catch(() => false);
+    expect(exists).toBe(false);
+  });
+
   test("cleans up on tmux new-session failure", async () => {
     setNewAgentSpawnRunner(mockSpawnRunner({ failTmuxNewSession: true }));
     const result = await callNewAgent("task", { name: "test-fail-tmux" });
@@ -2606,6 +2781,86 @@ describe("newAgent (native)", () => {
     expect(meta.summary).toBeUndefined();
   });
 
+  test("coordinator spawn does not write hooks into repo's .claude/settings.local.json", async () => {
+    // Regression test: previously, per-repo coordinators wrote their hook
+    // entries (ib hook-status, ib hook-check-path, ib hooks intercept-task,
+    // ib hooks session-start, ib hook-permission-denied) into the repo's
+    // .claude/settings.local.json, polluting every Claude session opened in
+    // that repo. The fix routes these into an isolated settings file at
+    // .ittybitty/agents/<coord-id>/.claude/settings.local.json instead.
+    const coordRepoDir = await mkdtemp(join(tmpdir(), "ib-coord-settings-"));
+    const coordRepo = join(coordRepoDir, "myrepo");
+    await mkdir(join(coordRepo, ".ittybitty", "agents"), { recursive: true });
+    await Bun.write(join(coordRepo, ".ittybitty", "repo-id"), "coordsettings\n");
+
+    // Pre-existing repo settings with an unrelated user permission; must
+    // remain untouched by coordinator spawn.
+    await mkdir(join(coordRepo, ".claude"), { recursive: true });
+    const repoSettingsPath = join(coordRepo, ".claude", "settings.local.json");
+    await Bun.write(repoSettingsPath, JSON.stringify({
+      permissions: { allow: ["Bash(npm:*)"] },
+    }));
+    const originalRepoSettings = await Bun.file(repoSettingsPath).text();
+
+    const userConfigPath = join(coordRepo, "config.json");
+    setUserConfigPath(userConfigPath);
+    await Bun.write(userConfigPath, JSON.stringify({ model: "sonnet" }, null, 2));
+
+    lifecycleSpawnCtx.set((cmd: string[], _opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
+      const cmdStr = cmd.join(" ");
+      if (cmdStr.includes("--git-common-dir")) return makeSpawnResult(".git", 0);
+      if (cmdStr.includes("--show-toplevel")) return makeSpawnResult(coordRepo, 0);
+      if (cmdStr.includes("--git-dir")) return makeSpawnResult(".git", 0);
+      return makeSpawnResult("", 0);
+    });
+
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await newAgent(coordRepo, "start", { type: "coordinator", _cwd: coordRepo });
+    expect(result.ok).toBe(true);
+
+    // The repo's settings file must be byte-for-byte unchanged.
+    const afterRepoSettings = await Bun.file(repoSettingsPath).text();
+    expect(afterRepoSettings).toBe(originalRepoSettings);
+    const parsedRepoSettings = JSON.parse(afterRepoSettings);
+    expect(parsedRepoSettings.hooks).toBeUndefined();
+    expect(parsedRepoSettings.permissions?.allow ?? []).not.toContain("Bash(ib:*)");
+
+    // The coordinator's hooks + permissions must live in the agent-isolated path.
+    const coordId = result.stdout.trim();
+    expect(coordId.length).toBeGreaterThan(0);
+    const isolatedSettingsPath = join(
+      coordRepo, ".ittybitty", "agents", coordId, ".claude", "settings.local.json",
+    );
+    const isolatedSettings = await Bun.file(isolatedSettingsPath).json();
+    expect(isolatedSettings.hooks).toBeDefined();
+    expect(isolatedSettings.hooks.Stop[0].hooks[0].command).toBe(`ib hook-status ${coordId}`);
+    expect(isolatedSettings.hooks.SessionStart[0].hooks[0].command).toBe(`ib hooks session-start ${coordId}`);
+    expect(isolatedSettings.hooks.PreToolUse[0].hooks[0].command).toBe(`ib hook-check-path ${coordId}`);
+    expect(isolatedSettings.hooks.PreToolUse[1].hooks[0].command).toBe("ib hooks intercept-task");
+    expect(isolatedSettings.hooks.PermissionRequest[0].hooks[0].command).toBe(`ib hook-permission-denied ${coordId}`);
+    expect(isolatedSettings.permissions.allow).toContain("Read");
+    expect(isolatedSettings.permissions.allow).toContain("Bash(ib:*)");
+
+    // start.sh must launch claude with --settings pointing at the isolated file.
+    const startSh = await Bun.file(join(coordRepo, ".ittybitty", "agents", coordId, "start.sh")).text();
+    expect(startSh).toContain(`--settings '${isolatedSettingsPath}'`);
+
+    await rm(coordRepoDir, { recursive: true, force: true });
+  });
+
+  test("non-coordinator, non-worktree agent still adds Bash(ib:*) to repo settings", async () => {
+    // The fix should NOT change behavior for non-coordinator no-worktree agents:
+    // they still need Bash(ib:*) in the repo's settings so their ib commands work.
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("task", { name: "test-no-wt-perm", noWorktree: true });
+    expect(result.ok).toBe(true);
+
+    const repoSettings = await Bun.file(join(tempDir, ".claude", "settings.local.json")).json();
+    expect(repoSettings.permissions.allow).toContain("Bash(ib:*)");
+    // No coordinator hooks should appear.
+    expect(repoSettings.hooks).toBeUndefined();
+  });
+
   test("start.sh shell-quotes paths to handle spaces and special chars", async () => {
     setNewAgentSpawnRunner(mockSpawnRunner());
     await callNewAgent("do work", { name: "test-quotes" });
@@ -2817,6 +3072,108 @@ describe("newAgent (native)", () => {
       process.env.HOME = originalHome;
       await rm(fakeHome, { recursive: true, force: true });
     }
+  });
+
+  // --- Spawn logging tests ---
+
+  test("spawn log: writes [spawn] lines to spawnee agent.log on success", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("do work", { name: "test-spawnlog-ok" });
+    expect(result.ok).toBe(true);
+
+    const log = await Bun.file(join(agentsDir, "test-spawnlog-ok", "agent.log")).text();
+    expect(log).toContain("[spawn] start id=test-spawnlog-ok");
+    expect(log).toContain("[spawn] git worktree add");
+    expect(log).toContain("[spawn] tmux start-server → exit=0");
+    expect(log).toContain("[spawn] tmux new-session");
+    expect(log).toContain("[spawn] tmux has-session verify → exit=0");
+    expect(log).toContain("[spawn] spawn OK: agent test-spawnlog-ok running");
+    // No `child=` tag — this agent has no spawner
+    expect(log).not.toContain("[spawn child=");
+  });
+
+  test("spawn log: writes [spawn child=<id>] lines to manager agent.log on success", async () => {
+    const mgrDir = join(agentsDir, "agent-mgr-spawnlog");
+    await mkdir(mgrDir, { recursive: true });
+    await Bun.write(join(mgrDir, "meta.json"), JSON.stringify({ id: "agent-mgr-spawnlog", worker: false }));
+
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("sub-task", { name: "child-spawnlog", manager: "agent-mgr-spawnlog" });
+    expect(result.ok).toBe(true);
+
+    const mgrLog = await Bun.file(join(mgrDir, "agent.log")).text();
+    expect(mgrLog).toContain("[spawn child=child-spawnlog] start id=child-spawnlog");
+    expect(mgrLog).toContain("[spawn child=child-spawnlog] spawn OK: agent child-spawnlog running");
+    // Existing log line from the pre-spawn logAgent call must still be present (back-compat)
+    expect(mgrLog).toContain("Spawned manager subagent: child-spawnlog");
+
+    // Spawnee log still gets its [spawn] lines
+    const childLog = await Bun.file(join(agentsDir, "child-spawnlog", "agent.log")).text();
+    expect(childLog).toContain("[spawn] start id=child-spawnlog");
+    expect(childLog).toContain("[spawn] spawn OK:");
+  });
+
+  test("spawn log: writes FAILED line to spawner log when worktree add fails, spawnee dir is gone", async () => {
+    const mgrDir = join(agentsDir, "agent-mgr-failspawn");
+    await mkdir(mgrDir, { recursive: true });
+    await Bun.write(join(mgrDir, "meta.json"), JSON.stringify({ id: "agent-mgr-failspawn", worker: false }));
+
+    setNewAgentSpawnRunner(mockSpawnRunner({ failWorktree: true }));
+    const result = await callNewAgent("task", { name: "child-failspawn", manager: "agent-mgr-failspawn" });
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("could not create worktree");
+
+    // Spawnee dir was cleaned up on failure
+    const spawneeLogExists = await Bun.file(join(agentsDir, "child-failspawn", "agent.log")).exists();
+    expect(spawneeLogExists).toBe(false);
+
+    // Manager's log survives and has the FAILED entry plus earlier steps
+    const mgrLog = await Bun.file(join(mgrDir, "agent.log")).text();
+    expect(mgrLog).toContain("[spawn child=child-failspawn] start id=child-failspawn");
+    expect(mgrLog).toContain("[spawn child=child-failspawn] spawn FAILED: could not create worktree");
+  });
+
+  test("spawn log: writes FAILED line when tmux new-session fails", async () => {
+    const mgrDir = join(agentsDir, "agent-mgr-tmuxfail");
+    await mkdir(mgrDir, { recursive: true });
+    await Bun.write(join(mgrDir, "meta.json"), JSON.stringify({ id: "agent-mgr-tmuxfail", worker: false }));
+
+    setNewAgentSpawnRunner(mockSpawnRunner({ failTmuxNewSession: true }));
+    const result = await callNewAgent("task", { name: "child-tmuxfail", manager: "agent-mgr-tmuxfail" });
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("could not create tmux session");
+
+    const mgrLog = await Bun.file(join(mgrDir, "agent.log")).text();
+    expect(mgrLog).toContain("[spawn child=child-tmuxfail] tmux new-session");
+    expect(mgrLog).toContain("[spawn child=child-tmuxfail] spawn FAILED: could not create tmux session");
+  });
+
+  test("spawn log: no spawner log written when no spawner detected (human from shell)", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("do work", { name: "test-no-spawner" });
+    expect(result.ok).toBe(true);
+
+    // Only the spawnee's agent.log exists in the agents dir — no other logs created
+    const entries = await readdir(agentsDir);
+    expect(entries).toContain("test-no-spawner");
+    expect(entries.length).toBe(1);
+
+    const log = await Bun.file(join(agentsDir, "test-no-spawner", "agent.log")).text();
+    expect(log).toContain("[spawn] start id=test-no-spawner");
+    expect(log).not.toContain("[spawn child=");
+  });
+
+  test("spawn log: self-heal entry fires when residual repo dir exists", async () => {
+    // Pre-create the residual dir at <agentDir>/repo that newAgent should clean up.
+    const agentDir = join(agentsDir, "test-residual");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("do work", { name: "test-residual" });
+    expect(result.ok).toBe(true);
+
+    const log = await Bun.file(join(agentsDir, "test-residual", "agent.log")).text();
+    expect(log).toContain("[spawn] self-heal: removed residual repo dir");
   });
 });
 
@@ -3863,7 +4220,7 @@ describe("installInterceptHook", () => {
 
     const settings = await Bun.file(settingsFile).json();
     expect(settings.hooks.PreToolUse).toHaveLength(1);
-    expect(settings.hooks.PreToolUse[0].matcher).toBe("Task|Agent|TaskCreate");
+    expect(settings.hooks.PreToolUse[0].matcher).toBe("Task|Agent|TaskCreate|AskUserQuestion");
     expect(settings.hooks.PreToolUse[0].hooks[0].command).toBe("ib hooks intercept-task");
   });
 
@@ -4102,6 +4459,139 @@ describe("spawned_by validation in agents.ts", () => {
     // Successfully constructs meta with spawned_by
     expect(validMeta.spawned_by).not.toBeNull();
     expect(validMeta.spawned_by!.agent_id).toBe("spawner");
+  });
+});
+
+describe("spawned_by Case 2 coordinator auto-detect", () => {
+  let tempDir: string;
+  let agentsDir: string;
+  let fakeHome: string;
+  let originalHome: string | undefined;
+  let originalClaudeSessionId: string | undefined;
+  let spawnCalls: string[][];
+
+  function mockSpawnRunner() {
+    return (cmd: string[], _opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
+      spawnCalls.push(cmd);
+      const cmdStr = cmd.join(" ");
+      if (cmdStr.includes("tmux has-session")) {
+        const newSessionCalled = spawnCalls.some(c => c.join(" ").includes("tmux new-session"));
+        return makeSpawnResult(newSessionCalled ? 0 : 1);
+      }
+      if (cmdStr.includes("tmux start-server")) return makeSpawnResult(0);
+      if (cmdStr.includes("tmux new-session")) return makeSpawnResult(0);
+      if (cmdStr.includes("worktree add")) {
+        const repoIdx = cmd.indexOf("add") + 1;
+        if (repoIdx > 0 && repoIdx < cmd.length) {
+          const repoDir = cmd[repoIdx]!;
+          require("fs").mkdirSync(repoDir, { recursive: true });
+        }
+        return makeSpawnResult(0);
+      }
+      if (cmdStr.includes("worktree remove")) return makeSpawnResult(0);
+      if (cmdStr.includes("branch -D")) return makeSpawnResult(0);
+      if (cmdStr.includes("--git-common-dir")) return makeSpawnResult(0, ".git");
+      if (cmdStr.includes("--show-toplevel")) return makeSpawnResult(0, tempDir);
+      if (cmdStr.includes("--git-dir")) return makeSpawnResult(0, ".git");
+      if (cmdStr.includes("which gh")) return makeSpawnResult(1);
+      if (cmdStr.includes("git") && cmd[cmd.length - 1] === "remote") return makeSpawnResult(0);
+      if (cmdStr.includes("capture-pane")) return makeSpawnResult(0, "Claude Code v1.0");
+      return makeSpawnResult(0);
+    };
+  }
+
+  beforeEach(async () => {
+    tempDir = require("fs").realpathSync(await mkdtemp(join(tmpdir(), "ib-spawner-case2-")));
+    agentsDir = join(tempDir, ".ittybitty", "agents");
+    fakeHome = require("fs").realpathSync(await mkdtemp(join(tmpdir(), "ib-spawner-case2-home-")));
+    spawnCalls = [];
+
+    // Save and override HOME so listRepos reads our fake repos.json
+    originalHome = process.env.HOME;
+    process.env.HOME = fakeHome;
+
+    // Save original CLAUDE_SESSION_ID
+    originalClaudeSessionId = process.env.CLAUDE_SESSION_ID;
+
+    // Set up repo structure
+    await mkdir(join(tempDir, ".ittybitty"), { recursive: true });
+    await Bun.write(join(tempDir, ".ittybitty", "repo-id"), "abcd1234\n");
+
+    // Register this tempDir as a repo in the fake home's repos.json
+    await mkdir(join(fakeHome, ".itsybitsy"), { recursive: true });
+    await Bun.write(join(fakeHome, ".itsybitsy", "repos.json"), JSON.stringify({
+      repos: [{ path: tempDir, name: "test-repo" }]
+    }));
+
+    // Create a coordinator agent in the repo
+    const coordId = require("path").basename(tempDir);
+    const coordDir = join(agentsDir, coordId);
+    await mkdir(coordDir, { recursive: true });
+    await Bun.write(join(coordDir, "meta.json"), JSON.stringify({
+      id: coordId,
+      coordinator: true,
+      tmux_session: `ittybitty-abcd1234-${coordId}`,
+      prompt: "coordinate",
+      manager: null,
+      worktree: false,
+      worker: false,
+      yolo: false,
+      model: "sonnet",
+    }));
+
+    // Set user config path to temp dir
+    setUserConfigPath(join(tempDir, "config.json"));
+    await Bun.write(join(tempDir, "config.json"), JSON.stringify({ model: "sonnet" }));
+
+    lifecycleSpawnCtx.set((cmd: string[], _opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
+      const cmdStr = cmd.join(" ");
+      if (cmdStr.includes("--git-common-dir")) return makeSpawnResult(0, ".git");
+      if (cmdStr.includes("--show-toplevel")) return makeSpawnResult(0, tempDir);
+      if (cmdStr.includes("--git-dir")) return makeSpawnResult(0, ".git");
+      return makeSpawnResult(0);
+    });
+  });
+
+  afterEach(async () => {
+    resetNewAgentSpawnRunner();
+    resetNewAgentSummaryGenerator();
+    lifecycleSpawnCtx.reset();
+    resetUserConfigPath();
+    process.env.HOME = originalHome;
+    if (originalClaudeSessionId !== undefined) {
+      process.env.CLAUDE_SESSION_ID = originalClaudeSessionId;
+    } else {
+      delete process.env.CLAUDE_SESSION_ID;
+    }
+    await rm(tempDir, { recursive: true, force: true });
+    await rm(fakeHome, { recursive: true, force: true });
+  });
+
+  test("Case 2 is skipped when CLAUDE_SESSION_ID is not set (human user)", async () => {
+    delete process.env.CLAUDE_SESSION_ID;
+    setNewAgentSpawnRunner(mockSpawnRunner());
+
+    const result = await newAgent(tempDir, "do work", { name: "test-no-session", _cwd: tempDir });
+    expect(result.ok).toBe(true);
+
+    // Read the meta.json of the newly created agent — spawned_by should be null
+    const meta = await Bun.file(join(agentsDir, "test-no-session", "meta.json")).json();
+    expect(meta.spawned_by).toBeNull();
+  });
+
+  test("Case 2 fires when CLAUDE_SESSION_ID is set and CWD is repo root with coordinator", async () => {
+    process.env.CLAUDE_SESSION_ID = "fake-session-id-12345";
+    setNewAgentSpawnRunner(mockSpawnRunner());
+
+    const result = await newAgent(tempDir, "do work", { name: "test-with-session", _cwd: tempDir });
+    expect(result.ok).toBe(true);
+
+    // Read the meta.json — spawned_by should be set to the coordinator
+    const meta = await Bun.file(join(agentsDir, "test-with-session", "meta.json")).json();
+    const coordId = require("path").basename(tempDir);
+    expect(meta.spawned_by).not.toBeNull();
+    expect(meta.spawned_by.agent_id).toBe(coordId);
+    expect(meta.spawned_by.repo_path).toBe(tempDir);
   });
 });
 

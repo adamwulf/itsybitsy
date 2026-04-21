@@ -85,9 +85,11 @@ export function parseState(input: string): ParseStateResult {
       if (
         input.includes("Do you trust the files") ||
         input.includes("trust this folder") ||
-        input.includes("Allow external CLAUDE.md file imports")
+        input.includes("Allow external CLAUDE.md file imports") ||
+        input.includes("New MCP server found") ||
+        /\d+ new MCP servers? found/i.test(input)
       ) {
-        return { state: "creating", reason: "permission prompt (workspace trust or external imports)" };
+        return { state: "creating", reason: "permission prompt (workspace trust, external imports, or MCP server)" };
       }
     }
   }
@@ -176,7 +178,9 @@ export function parseState(input: string): ParseStateResult {
     if (
       last15.includes("Do you trust the files") ||
       last15.includes("trust this folder") ||
-      last15.includes("Allow external CLAUDE.md file imports")
+      last15.includes("Allow external CLAUDE.md file imports") ||
+      last15.includes("New MCP server found") ||
+      /\d+ new MCP servers? found/i.test(last15)
     ) {
       return { state: "creating", reason: "permission prompt in last 15 lines" };
     }

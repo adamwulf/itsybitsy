@@ -755,6 +755,21 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
       // Tmux session exists — reset grace period
       tmuxGoneSince = null;
 
+      // Auto-accept permissions prompts (workspace trust, external imports, MCP servers)
+      if (/enter to confirm/i.test(output)) {
+        if (
+          /trust/i.test(output) ||
+          /Allow external CLAUDE\.md file imports/i.test(output) ||
+          /New MCP server found/i.test(output) ||
+          /\d+ new MCP servers? found/i.test(output)
+        ) {
+          await logAgent(agentDir, "[watchdog] Detected permissions prompt — sending Enter to accept");
+          await sendTmuxEnter(tmuxSession);
+          await sleepFn(POLL_INTERVAL_MS);
+          continue;
+        }
+      }
+
       // Resolve state from meta.json with tmux overrides
       const metaState = await readAgentStateFn(agentDir);
       const resolvedState = resolveWatchdogState(output, metaState);

@@ -120,6 +120,26 @@ export function detectRole(
 }
 
 /**
+ * Shared guidance block explaining how to send literal strings via `ib send`.
+ * Injected into each role's hardcoded-instruction fallback near the `ib send` command documentation.
+ * Template-driven types should include this content directly in their .md body.
+ */
+const SEND_LITERAL_STRINGS_SECTION = `### Sending Literal Strings with \`ib send\`
+
+The shell expands \`$(...)\`, backticks, and \`$VAR\` inside double quotes BEFORE \`ib\` receives the argument. To send a literal message containing these characters, use one of:
+
+- Single quotes: \`ib send <id> 'literal $(foo) string'\`
+- Escape the metacharacters: \`ib send <id> "literal \\$(foo) string"\`
+- Heredoc via stdin (safest for multi-line or complex content):
+  \`\`\`
+  ib send <id> <<'EOF'
+  ...literal content with $(foo), \`bar\`, $VAR all preserved...
+  EOF
+  \`\`\`
+
+The quoted heredoc terminator (\`<<'EOF'\`) is the safest option — nothing inside gets expanded. \`ib send\` reads from stdin when no message argument is provided.`;
+
+/**
  * Interpolate {{placeholder}} variables and {{#if cond}}...{{/if}} blocks in a template.
  * Available variables: agentId, agentManager, parentBranch, worktreePath, rootRepoPath, repoName, pathIsolation
  * Available conditions: hasManager (agent has a manager), isTopLevel (no manager = top-level)
@@ -271,6 +291,8 @@ Always spawn **manager** agents (not \`--type worker\`). Managers assess the tas
 
 **Completed/stopped agents:** You can \`ib send\` messages to completed or stopped agents - they will restart and respond to the message.
 
+${SEND_LITERAL_STRINGS_SECTION}
+
 ### Agent States
 
 | State | Meaning |
@@ -357,6 +379,8 @@ You are in a git worktree, which shares the same repository as the main checkout
 | \`ib merge <id>\` | Merge agent's work and close it |
 | \`ib kill <id>\` | Stop an agent without merging |
 ${askLine}
+
+${SEND_LITERAL_STRINGS_SECTION}
 
 ### State Management
 
@@ -458,6 +482,8 @@ You are in a git worktree, which shares the same repository as the main checkout
 | \`ib status\` | See your commits |
 | \`ib log "msg"\` | Log to your agent log |
 
+${SEND_LITERAL_STRINGS_SECTION}
+
 ### State Management
 
 Whenever you stop working and are idle, end your message with one of:
@@ -517,6 +543,8 @@ ${buildPathIsolationSection(ctx)}
 | \`ib diff <id>\` | Review agent's changes |
 | \`ib merge <id>\` | Merge agent's work and close it |
 | \`ib kill <id>\` | Stop an agent without merging |
+
+${SEND_LITERAL_STRINGS_SECTION}
 
 ### State Management
 

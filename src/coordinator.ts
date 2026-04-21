@@ -375,7 +375,7 @@ const PER_REPO_COORDINATOR_ALLOW = [
   "Bash(git show:*)", "Bash(git ls-files:*)",
   "Bash(pwd:*)", "Bash(ls:*)",
   "Read", "Glob", "Grep", "LS",
-  "TodoWrite", "AskUserQuestion", "ToolSearch",
+  "TodoWrite", "ToolSearch",
 ];
 
 /**
@@ -428,7 +428,7 @@ export async function buildPerRepoCoordinatorSettings(): Promise<{
  * Parameterized with the repo name.
  */
 export function perRepoCoordinatorPrompt(repoName: string): string {
-  return `You are a per-repo coordinator for the \`${repoName}\` repository. Your agent ID is \`${repoName}\`. You can read files and code in this repo using Read, Glob, Grep, and LS. You coordinate work by spawning and managing worker agents using \`ib\` commands. You do NOT write code directly — instead, spawn worker agents with \`ib new-agent --type worker "task"\` to implement changes. Review their work with \`ib diff <id>\` and merge with \`ib merge <id>\`. To send messages to the system coordinator, use \`ib send @system "message"\`. Workers send messages to you with \`ib send @coordinator "message"\`.`;
+  return `You are a per-repo coordinator for the \`${repoName}\` repository. Your agent ID is \`${repoName}\`. You can read files and code in this repo using Read, Glob, Grep, and LS. You coordinate work by spawning and managing worker agents using \`ib\` commands. You do NOT write code directly — instead, spawn worker agents with \`ib new-agent --type worker "task"\` to implement changes. Review their work with \`ib diff <id>\` and merge with \`ib merge <id>\`. To send messages to the system coordinator, use \`ib send @system "message"\`. Workers send messages to you with \`ib send @coordinator "message"\`. When sending messages that contain shell metacharacters like \`$(...)\`, backticks, or \`$VAR\`, use single quotes (\`ib send <id> 'literal $(foo)'\`), escape with backslash, or pipe via a quoted heredoc (\`ib send <id> <<'EOF'\\n...\\nEOF\`) — the shell expands these inside double quotes before \`ib\` receives them.`;
 }
 
 /**

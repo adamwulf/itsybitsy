@@ -5,13 +5,14 @@
  */
 
 import { join, dirname, resolve } from "path";
-import { readdir, chmod, rm, mkdir } from "fs/promises";
+import { readdir, chmod, rm, mkdir, stat } from "fs/promises";
 import { realpathSync } from "fs";
 import { homedir } from "node:os";
 import type { Agent, SpawnedBy } from "./agents";
 import { writeAgentState } from "./agents";
 import {
   logAgent,
+  logSpawn,
   removeAgentQuestions,
   killAgentProcess,
   teardownAgent,
@@ -357,6 +358,16 @@ export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
     claudeArgs = claudeArgs ? `${claudeArgs} --model ${model}` : `--model ${model}`;
   }
 
+  // Per-repo coordinator: reuse the isolated settings file the coordinator was
+  // spawned with so permissions + hooks keep pointing at the agent dir (not the repo).
+  if (agent.meta.coordinator === true) {
+    const coordSettingsPath = join(agentDir, ".claude", "settings.local.json");
+    if (await Bun.file(coordSettingsPath).exists()) {
+      const coordSettingsArg = shellQuote(coordSettingsPath);
+      claudeArgs = claudeArgs ? `${claudeArgs} --settings ${coordSettingsArg}` : `--settings ${coordSettingsArg}`;
+    }
+  }
+
   // Validate paths for shell script interpolation
   if (!isValidShellPath(agentDir)) {
     return { ok: false, exitCode: 1, stdout: "", stderr: `Agent directory path contains characters unsafe for shell scripts: ${agentDir}` };
@@ -530,9 +541,14 @@ async function autoAcceptWorkspaceTrust(tmuxSession: string): Promise<void> {
       startedWith = "logo";
       break;
     }
-    // Check for permissions screens
+    // Check for permissions screens (workspace trust, external imports, MCP servers)
     if (/enter to confirm/i.test(output)) {
-      if (/trust/i.test(output) || /Allow external CLAUDE\.md file imports/i.test(output)) {
+      if (
+        /trust/i.test(output) ||
+        /Allow external CLAUDE\.md file imports/i.test(output) ||
+        /New MCP server found/i.test(output) ||
+        /\d+ new MCP servers? found/i.test(output)
+      ) {
         startedWith = "permissions";
         break;
       }
@@ -559,7 +575,12 @@ async function autoAcceptWorkspaceTrust(tmuxSession: string): Promise<void> {
     // Check if permissions prompt is still active
     let hasPermissions = false;
     if (/enter to confirm/i.test(recent)) {
-      if (/trust/i.test(recent) || /Allow external CLAUDE\.md file imports/i.test(recent)) {
+      if (
+        /trust/i.test(recent) ||
+        /Allow external CLAUDE\.md file imports/i.test(recent) ||
+        /New MCP server found/i.test(recent) ||
+        /\d+ new MCP servers? found/i.test(recent)
+      ) {
         hasPermissions = true;
       }
     }
@@ -1304,7 +1325,7 @@ async function buildAgentSettings(
     "Bash(cat:*)", "Bash(grep:*)",
     "Read", "Write", "Edit", "MultiEdit", "Glob", "Grep", "LS",
     "TodoWrite", "Task", "TaskCreate", "Agent", "TaskOutput", "KillShell", "NotebookEdit",
-    "WebFetch", "WebSearch", "AskUserQuestion", "ToolSearch",
+    "WebFetch", "WebSearch", "ToolSearch",
   ];
   const blockedTools = ["EnterPlanMode", "ExitPlanMode"];
 
@@ -1347,7 +1368,7 @@ async function buildAgentSettings(
   ];
   if (addIntercept) {
     preToolUseHooks.push(
-      { matcher: "Task|Agent|TaskCreate", hooks: [{ type: "command", command: "ib hooks intercept-task" }] }
+      { matcher: "Task|Agent|TaskCreate|AskUserQuestion", hooks: [{ type: "command", command: "ib hooks intercept-task" }] }
     );
   }
 
@@ -1518,7 +1539,11 @@ export async function newAgent(
     // Case 2: Non-worktree agent (coordinator) — CWD is a registered repo root
     // Coordinators run from the repo root, so CWD won't match the worktree pattern.
     // Detect by checking if CWD is a registered repo with a coordinator agent.
-    if (!spawnedBy && !worktreeMatch) {
+    // Only fires when CLAUDE_SESSION_ID is set, which means the caller is a Claude agent
+    // session (e.g. a coordinator). Human users running ib watch or ib new-agent from the
+    // command line won't have this variable, so they won't get auto-assigned a coordinator
+    // as spawner.
+    if (!spawnedBy && !worktreeMatch && process.env.CLAUDE_SESSION_ID) {
       try {
         const repos = await listRepos();
         const repoMatch = repos.find(r => r.path === cwd);
@@ -1707,6 +1732,13 @@ export async function newAgent(
   // 11. Create agent directory
   await mkdir(agentDir, { recursive: true });
 
+  // Prefer spawnedBy; fall back to --manager flag.
+  const spawnerAgentDir: string | null = spawnedBy
+    ? join(spawnedBy.repo_path, ".ittybitty", "agents", spawnedBy.agent_id)
+    : manager
+      ? join(agentsDir, manager)
+      : null;
+
   // Working directory defaults to root repo
   let workPath = rootRepoPath;
 
@@ -1714,14 +1746,70 @@ export async function newAgent(
   // Note: coordinator branch format retained for backward compatibility with
   // session-start.ts and health-check.ts, even though coordinators no longer use worktrees.
   const branchName = coordinatorMode ? `agent/${id}-${repoId}` : `agent/${id}`;
+  const baseRefForLog = manager ? `agent/${manager}` : "HEAD";
+  await logSpawn(
+    agentDir,
+    spawnerAgentDir,
+    id,
+    `start id=${id} repo=${rootRepoPath} worktree=${useWorktree} coordinator=${coordinatorMode} worker=${isLeafAgent} manager=${manager || "null"} baseRef=${useWorktree ? baseRefForLog : "n/a"}`,
+  );
   if (useWorktree) {
+    // Self-healing: discard stale worktree metadata pointing at paths that no longer exist.
+    const pruneResult = await newAgentSpawnCtx.run(["git", "-C", rootRepoPath, "worktree", "prune"]);
+    await logSpawn(agentDir, spawnerAgentDir, id, `git worktree prune → exit=${pruneResult.exitCode}${pruneResult.exitCode !== 0 && pruneResult.stderr ? ` stderr="${pruneResult.stderr.trim()}"` : ""}`);
+
+    // If a same-name branch lingers from a prior failed/killed spawn, drop it —
+    // but only when no worktree is checked out on it. If a worktree holds the
+    // branch, surface a clear error instead of silently failing later.
+    const branchList = await newAgentSpawnCtx.run([
+      "git", "-C", rootRepoPath, "branch", "--list", branchName,
+    ]);
+    const branchExists = branchList.stdout.trim().length > 0;
+    await logSpawn(agentDir, spawnerAgentDir, id, `git branch --list ${branchName} → exit=${branchList.exitCode} exists=${branchExists}`);
+    if (branchExists) {
+      const worktreeList = await newAgentSpawnCtx.run([
+        "git", "-C", rootRepoPath, "worktree", "list", "--porcelain",
+      ]);
+      // Anchor the match so `agent/foo` does not match inside `agent/foo-extra`.
+      // Porcelain format places each `branch refs/heads/<name>` on its own line.
+      const needle = `branch refs/heads/${branchName}`;
+      const worktreeHoldsBranch =
+        worktreeList.stdout.includes(needle + "\n") || worktreeList.stdout.endsWith(needle);
+      await logSpawn(agentDir, spawnerAgentDir, id, `git worktree list → exit=${worktreeList.exitCode} holdsBranch=${worktreeHoldsBranch}`);
+      if (worktreeHoldsBranch) {
+        await logSpawn(agentDir, spawnerAgentDir, id, `spawn FAILED: branch ${branchName} is already checked out in another worktree`);
+        await rm(agentDir, { recursive: true, force: true });
+        return {
+          ok: false,
+          exitCode: 1,
+          stdout: "",
+          stderr: `Error: branch ${branchName} is already checked out in another worktree`,
+        };
+      }
+      const branchDelResult = await newAgentSpawnCtx.run(["git", "-C", rootRepoPath, "branch", "-D", branchName]);
+      await logSpawn(agentDir, spawnerAgentDir, id, `self-heal: deleted orphan branch ${branchName} → exit=${branchDelResult.exitCode}${branchDelResult.exitCode !== 0 && branchDelResult.stderr ? ` stderr="${branchDelResult.stderr.trim()}"` : ""}`);
+    }
+
+    // If <agentDir>/repo exists from an earlier aborted run, remove it so
+    // `git worktree add` can create a fresh directory there.
+    const repoPath = join(agentDir, "repo");
+    const residualExisted = await stat(repoPath).then(() => true).catch(() => false);
+    await rm(repoPath, { recursive: true, force: true });
+    if (residualExisted) {
+      await logSpawn(agentDir, spawnerAgentDir, id, `self-heal: removed residual repo dir ${repoPath}`);
+    }
+
     const baseRef = manager ? `agent/${manager}` : "HEAD";
     const worktreeResult = await newAgentSpawnCtx.run([
-      "git", "-C", rootRepoPath, "worktree", "add", join(agentDir, "repo"), "-b", branchName, baseRef,
+      "git", "-C", rootRepoPath, "worktree", "add", repoPath, "-b", branchName, baseRef,
     ]);
+    await logSpawn(agentDir, spawnerAgentDir, id, `git worktree add ${repoPath} -b ${branchName} ${baseRef} → exit=${worktreeResult.exitCode}${worktreeResult.exitCode !== 0 && worktreeResult.stderr ? ` stderr="${worktreeResult.stderr.trim()}"` : ""}`);
     if (worktreeResult.exitCode !== 0) {
+      const gitErr = worktreeResult.stderr.trim();
+      await logSpawn(agentDir, spawnerAgentDir, id, `spawn FAILED: could not create worktree${gitErr ? `: ${gitErr}` : ""}`);
       await rm(agentDir, { recursive: true, force: true });
-      return { ok: false, exitCode: 1, stdout: "", stderr: "Error: could not create worktree" };
+      const suffix = gitErr ? `: ${gitErr}` : "";
+      return { ok: false, exitCode: 1, stdout: "", stderr: `Error: could not create worktree${suffix}` };
     }
     workPath = join(agentDir, "repo");
 
@@ -1752,46 +1840,48 @@ export async function newAgent(
       settingsContent = await buildAgentSettings(rootRepoPath, managerOrWorker, id, configAllow, configDeny);
     }
     await Bun.write(join(agentDir, "repo", ".claude", "settings.local.json"), settingsContent);
+  } else if (coordinatorMode) {
+    // Per-repo coordinator: write settings (permissions + hooks) into the
+    // coordinator's own agent dir, NOT the repo's .claude/settings.local.json.
+    // Writing into the repo would pollute every non-coordinator Claude session
+    // opened in that repo with coordinator-specific hooks.
+    // The coordinator's claude process is launched with --settings pointing at
+    // this file (see start.sh generation below).
+    try {
+      const coordSettings = await buildPerRepoCoordinatorSettings();
+      const hookCmd = `ib hook-permission-denied ${id}`;
+      const coordSettingsObj = {
+        ...coordSettings,
+        spinnerTipsEnabled: false,
+        hooks: {
+          Stop: [{ matcher: "*", hooks: [{ type: "command", command: `ib hook-status ${id}` }] }],
+          PermissionRequest: [{ matcher: "*", hooks: [{ type: "command", command: hookCmd }] }],
+          PreToolUse: [
+            { matcher: "*", hooks: [{ type: "command", command: `ib hook-check-path ${id}` }] },
+            { matcher: "Task|Agent|TaskCreate|Bash|AskUserQuestion", hooks: [{ type: "command", command: "ib hooks intercept-task" }] },
+          ],
+          SessionStart: [{ hooks: [{ type: "command", command: `ib hooks session-start ${id}` }] }],
+        },
+      };
+      await mkdir(join(agentDir, ".claude"), { recursive: true });
+      await Bun.write(
+        join(agentDir, ".claude", "settings.local.json"),
+        JSON.stringify(coordSettingsObj, null, 2),
+      );
+    } catch { /* ignore */ }
   } else {
-    // Non-worktree mode: ensure ib permissions in root repo settings
+    // Non-worktree mode (non-coordinator): ensure ib permissions in root repo settings
     const rootSettingsPath = join(rootRepoPath, ".claude", "settings.local.json");
     try {
       const rootSettingsFile = Bun.file(rootSettingsPath);
-      let settingsContent: string;
-
-      if (coordinatorMode) {
-        // Coordinator-specific settings — merge with existing to avoid clobbering
-        const existing = await rootSettingsFile.exists() ? await rootSettingsFile.json() : {};
-        const coordSettings = await buildPerRepoCoordinatorSettings();
-        const hookCmd = `ib hook-permission-denied ${id}`;
-        const coordSettingsObj = {
-          ...existing,
-          ...coordSettings,
-          spinnerTipsEnabled: false,
-          hooks: {
-            Stop: [{ matcher: "*", hooks: [{ type: "command", command: `ib hook-status ${id}` }] }],
-            PermissionRequest: [{ matcher: "*", hooks: [{ type: "command", command: hookCmd }] }],
-            PreToolUse: [
-              { matcher: "*", hooks: [{ type: "command", command: `ib hook-check-path ${id}` }] },
-              { matcher: "Task|Agent|TaskCreate|Bash", hooks: [{ type: "command", command: "ib hooks intercept-task" }] },
-            ],
-            SessionStart: [{ hooks: [{ type: "command", command: `ib hooks session-start ${id}` }] }],
-          },
-        };
-        settingsContent = JSON.stringify(coordSettingsObj, null, 2);
-      } else {
-        // Non-coordinator agent in non-worktree mode
-        const settings = await rootSettingsFile.exists() ? await rootSettingsFile.json() : {};
-        const allow = (settings?.permissions?.allow as string[]) ?? [];
-        if (!allow.includes("Bash(ib:*)")) {
-          allow.push("Bash(ib:*)");
-        }
-        settings.permissions = { ...settings.permissions, allow };
-        settingsContent = JSON.stringify(settings, null, 2);
+      const settings = await rootSettingsFile.exists() ? await rootSettingsFile.json() : {};
+      const allow = (settings?.permissions?.allow as string[]) ?? [];
+      if (!allow.includes("Bash(ib:*)")) {
+        allow.push("Bash(ib:*)");
       }
-
+      settings.permissions = { ...settings.permissions, allow };
       await mkdir(join(rootRepoPath, ".claude"), { recursive: true });
-      await Bun.write(rootSettingsPath, settingsContent);
+      await Bun.write(rootSettingsPath, JSON.stringify(settings, null, 2));
     } catch { /* ignore */ }
   }
 
@@ -1939,6 +2029,12 @@ When your task is complete:
   if (model) {
     claudeArgs = claudeArgs ? `${claudeArgs} --model ${model}` : `--model ${model}`;
   }
+  if (coordinatorMode) {
+    // Load permissions + hooks from the coordinator's isolated settings file
+    // so they don't pollute the repo's .claude/settings.local.json.
+    const coordSettingsArg = shellQuote(join(agentDir, ".claude", "settings.local.json"));
+    claudeArgs = claudeArgs ? `${claudeArgs} --settings ${coordSettingsArg}` : `--settings ${coordSettingsArg}`;
+  }
 
   // 16. Write exit-check.sh
   const exitScript = join(agentDir, "exit-check.sh");
@@ -2048,9 +2144,13 @@ ${qStartExitScript}
 
   // 18. Ensure tmux server is running
   const startServerResult = await newAgentSpawnCtx.run(["tmux", "start-server"]);
+  await logSpawn(agentDir, spawnerAgentDir, id, `tmux start-server → exit=${startServerResult.exitCode}${startServerResult.exitCode !== 0 && startServerResult.stderr ? ` stderr="${startServerResult.stderr.trim()}"` : ""}`);
   if (startServerResult.exitCode !== 0) {
+    const err = startServerResult.stderr.trim();
+    await logSpawn(agentDir, spawnerAgentDir, id, `spawn FAILED: could not start tmux server${err ? `: ${err}` : ""}`);
     await cleanupOnFailure();
-    return { ok: false, exitCode: 1, stdout: "", stderr: "Error: could not start tmux server" };
+    const suffix = err ? `: ${err}` : "";
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Error: could not start tmux server${suffix}` };
   }
 
   // Start tmux session — use saved layout width so it matches the dashboard pane
@@ -2059,19 +2159,29 @@ ${qStartExitScript}
   const tmuxResult = await newAgentSpawnCtx.run([
     "tmux", "new-session", "-d", "-x", String(newTmuxWidth), "-s", tmuxSession, "-c", workPath, shellQuote(absStartScript),
   ]);
+  await logSpawn(agentDir, spawnerAgentDir, id, `tmux new-session -s ${tmuxSession} -x ${newTmuxWidth} → exit=${tmuxResult.exitCode}${tmuxResult.exitCode !== 0 && tmuxResult.stderr ? ` stderr="${tmuxResult.stderr.trim()}"` : ""}`);
   if (tmuxResult.exitCode !== 0) {
+    const err = tmuxResult.stderr.trim();
+    await logSpawn(agentDir, spawnerAgentDir, id, `spawn FAILED: could not create tmux session '${tmuxSession}'${err ? `: ${err}` : ""}`);
     await cleanupOnFailure();
-    return { ok: false, exitCode: 1, stdout: "", stderr: `Error: could not create tmux session '${tmuxSession}'` };
+    const suffix = err ? `: ${err}` : "";
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Error: could not create tmux session '${tmuxSession}'${suffix}` };
   }
   await newAgentSpawnCtx.run(["tmux", "set-option", "-w", "-t", tmuxSession, "history-limit", "50000"]);
   await newAgentSpawnCtx.run(["tmux", "set-option", "-w", "-t", tmuxSession, "remain-on-exit", "on"]);
 
   // 19. Verify tmux session created
   const verifyResult = await newAgentSpawnCtx.run(["tmux", "has-session", "-t", tmuxSession]);
+  await logSpawn(agentDir, spawnerAgentDir, id, `tmux has-session verify → exit=${verifyResult.exitCode}`);
   if (verifyResult.exitCode !== 0) {
+    const err = verifyResult.stderr.trim();
+    await logSpawn(agentDir, spawnerAgentDir, id, `spawn FAILED: tmux session '${tmuxSession}' failed to start${err ? `: ${err}` : ""}`);
     await cleanupOnFailure();
-    return { ok: false, exitCode: 1, stdout: "", stderr: `Error: tmux session '${tmuxSession}' failed to start` };
+    const suffix = err ? `: ${err}` : "";
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Error: tmux session '${tmuxSession}' failed to start${suffix}` };
   }
+
+  await logSpawn(agentDir, spawnerAgentDir, id, `spawn OK: agent ${id} running (tmux=${tmuxSession} workPath=${workPath})`);
 
   // 20. Output agent ID
   const stdout = id;
@@ -2107,8 +2217,11 @@ ${qStartExitScript}
         metaContent.watchdog_pid = watchdogPid;
         await Bun.write(metaPath, JSON.stringify(metaContent, null, 2));
       }
+      await logSpawn(agentDir, spawnerAgentDir, id, `watchdog spawned pid=${watchdogPid}`);
     }
-  } catch { /* ignore */ }
+  } catch (err) {
+    await logSpawn(agentDir, spawnerAgentDir, id, `watchdog spawn failed: ${(err as Error)?.message ?? String(err)}`);
+  }
 
   // 23. Generate prompt summary in background (fire-and-forget)
   generatePromptSummary(agentDir).catch(() => {});
@@ -2176,7 +2289,12 @@ async function autoAcceptWorkspaceTrustForNewAgent(tmuxSession: string): Promise
       break;
     }
     if (/enter to confirm/i.test(output)) {
-      if (/trust/i.test(output) || /Allow external CLAUDE\.md file imports/i.test(output)) {
+      if (
+        /trust/i.test(output) ||
+        /Allow external CLAUDE\.md file imports/i.test(output) ||
+        /New MCP server found/i.test(output) ||
+        /\d+ new MCP servers? found/i.test(output)
+      ) {
         startedWith = "permissions";
         break;
       }
@@ -2199,7 +2317,12 @@ async function autoAcceptWorkspaceTrustForNewAgent(tmuxSession: string): Promise
     const recent = captureResult.stdout;
     let hasPermissions = false;
     if (/enter to confirm/i.test(recent)) {
-      if (/trust/i.test(recent) || /Allow external CLAUDE\.md file imports/i.test(recent)) {
+      if (
+        /trust/i.test(recent) ||
+        /Allow external CLAUDE\.md file imports/i.test(recent) ||
+        /New MCP server found/i.test(recent) ||
+        /\d+ new MCP servers? found/i.test(recent)
+      ) {
         hasPermissions = true;
       }
     }
@@ -2920,7 +3043,7 @@ export async function installInterceptHook(_repoPath: string, settingsPath?: str
   settings.hooks = hooks;
   if (!Array.isArray(hooks.PreToolUse)) hooks.PreToolUse = [];
   (hooks.PreToolUse as unknown[]).push({
-    matcher: "Task|Agent|TaskCreate",
+    matcher: "Task|Agent|TaskCreate|AskUserQuestion",
     hooks: [{ type: "command", command: "ib hooks intercept-task" }],
   });
 

@@ -47,6 +47,21 @@ export async function logAgent(agentDir: string, message: string): Promise<void>
   } catch { /* agent dir may not exist */ }
 }
 
+// ── logSpawn ─────────────────────────────────────────────────────────────────
+
+/** Log a spawn event to the spawnee and (if detected) spawner agent.log, tagged distinctly. */
+export async function logSpawn(
+  spawneeDir: string,
+  spawnerDir: string | null,
+  spawneeId: string,
+  message: string,
+): Promise<void> {
+  await Promise.all([
+    logAgent(spawneeDir, `[spawn] ${message}`),
+    spawnerDir ? logAgent(spawnerDir, `[spawn child=${spawneeId}] ${message}`) : Promise.resolve(),
+  ]);
+}
+
 // ── removeAgentQuestions ─────────────────────────────────────────────────────
 
 /**

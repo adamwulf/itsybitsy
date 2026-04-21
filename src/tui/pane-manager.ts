@@ -124,6 +124,8 @@ export class RightPaneComponent implements Component {
   repoCoordinatorHasPolled = false;
   /** Height offset for the coordinator split in REPO mode (positive = more coordinator) */
   repoCoordinatorHeightOffset = 0;
+  /** Lines scrolled back from the bottom of the repo coordinator tmux output. 0 = follow newest. */
+  repoCoordinatorScrollBack = 0;
   /** The coordinator agent for the selected repo (if any) */
   repoCoordinatorAgent: Agent | null = null;
   /** Input field for sending messages to the repo coordinator */
@@ -382,15 +384,33 @@ export class RightPaneComponent implements Component {
       return lines;
     }
 
-    // Render coordinator tmux output (bottom-pinned, following newest output)
+    // Render coordinator tmux output (bottom-pinned, with optional scrollback)
     const wrapped = wrapLines(this.repoCoordinatorOutput!, width);
     // Trim trailing blank lines
     while (wrapped.length > 0 && wrapped[wrapped.length - 1]!.trim() === "") {
       wrapped.pop();
     }
-    const start = Math.max(0, wrapped.length - contentHeight);
-    const visible = wrapped.slice(start, start + contentHeight);
+
+    // Clamp scrollBack to valid range
+    const maxScrollBack = Math.max(0, wrapped.length - contentHeight);
+    if (this.repoCoordinatorScrollBack > maxScrollBack) {
+      this.repoCoordinatorScrollBack = maxScrollBack;
+    }
+
+    // Reserve a row for the scroll indicator when scrolled back
+    const visibleHeight = this.repoCoordinatorScrollBack > 0 ? contentHeight - 1 : contentHeight;
+    const end = wrapped.length - this.repoCoordinatorScrollBack;
+    const start = Math.max(0, end - visibleHeight);
+    const visible = wrapped.slice(start, end);
     const contentLines = visible.map((line) => truncateToWidth(line, width, ""));
+
+    if (this.repoCoordinatorScrollBack > 0) {
+      contentLines.push(truncateToWidth(
+        `${DIM}── ↓ ${this.repoCoordinatorScrollBack} lines below ──${RESET}`,
+        width,
+        ""
+      ));
+    }
 
     // Bottom-pin: pad at the top so content sticks to the bottom
     const padCount = Math.max(0, contentHeight - contentLines.length);

@@ -391,6 +391,26 @@ export async function checkIbCommandAccess(
           reason: `Access denied: cannot read meta for agent '${targetId}'`,
         };
       }
+
+      // Per-repo coordinator bypass: a per-repo coordinator may run 'kill' or
+      // 'reassign' on any non-coordinator agent within its own repo, even when
+      // it is not the target's manager or spawner. Only applies same-repo and
+      // never to other coordinators. (SPEC §12.2)
+      if (
+        (parsed.subcommand === "kill" || parsed.subcommand === "reassign") &&
+        meta.coordinator !== true
+      ) {
+        try {
+          const callerMetaFile = Bun.file(join(agentsDir, callingAgentId, "meta.json"));
+          if (await callerMetaFile.exists()) {
+            const callerMeta = await callerMetaFile.json();
+            if (callerMeta && callerMeta.coordinator === true) {
+              return null; // allow
+            }
+          }
+        } catch { /* fall through to standard check */ }
+      }
+
       if (hasAccess(meta)) return null; // allow
       return {
         decision: "deny",

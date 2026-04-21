@@ -930,7 +930,7 @@ export class DashboardComponent implements Component {
       { label: "open diff in tool — o", action: () => agentActions.handleOpenDiffTool(this) },
       { label: "open in Ghostty — G", action: () => agentActions.handleOpenGhostty(this) },
       { label: "debug snapshot — S", action: () => agentActions.handleSnapshot(this) },
-      { label: "fuzzy jump to agent — @", action: () => agentActions.handleFuzzyAgent(this) },
+      { label: "fuzzy jump to agent/repo — @", action: () => agentActions.handleFuzzyAgent(this) },
       { label: "add repo — A", action: () => agentActions.handleAddRepo(this) },
       { label: "remove repo — D", action: () => this.executeAndRefresh(() => agentActions.handleRemoveRepoSafe(this)) },
       { label: "help — ?", action: () => agentActions.handleHelp(this) },
@@ -1072,6 +1072,7 @@ export class DashboardComponent implements Component {
         this.repoCoordinatorSession = tmuxSession;
         this.rightPane.repoCoordinatorOutput = null;
         this.rightPane.repoCoordinatorHasPolled = false;
+        this.rightPane.repoCoordinatorScrollBack = 0;
         this.repoCoordinatorPoller.setAgent(tmuxSession);
         // Resize repo coordinator tmux to match right pane width
         if (tmuxSession) {
@@ -1086,6 +1087,7 @@ export class DashboardComponent implements Component {
         this.repoCoordinatorSession = null;
         this.rightPane.repoCoordinatorOutput = null;
         this.rightPane.repoCoordinatorHasPolled = false;
+        this.rightPane.repoCoordinatorScrollBack = 0;
         this.repoCoordinatorPoller.setAgent(null);
       }
     }

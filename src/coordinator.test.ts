@@ -873,7 +873,7 @@ describe("buildPerRepoCoordinatorSettings", () => {
     expect(settings.permissions.allow).toContain("Grep");
     expect(settings.permissions.allow).toContain("LS");
     expect(settings.permissions.allow).toContain("TodoWrite");
-    expect(settings.permissions.allow).toContain("AskUserQuestion");
+    expect(settings.permissions.allow).not.toContain("AskUserQuestion");
     expect(settings.permissions.allow).toContain("ToolSearch");
   });
 

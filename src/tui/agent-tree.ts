@@ -201,6 +201,19 @@ export class AgentTreeComponent implements Component {
     return false;
   }
 
+  /** Select repo header by repoPath. Returns true if found. */
+  selectByRepoPath(repoPath: string): boolean {
+    const visible = this.visibleList;
+    const idx = visible.findIndex((f) => f.kind === "repo-header" && f.repoPath === repoPath);
+    if (idx !== -1) {
+      this.selectedIndex = idx;
+      this.selectedId = `repopath:${repoPath}`;
+      this.ensureSelectedVisible();
+      return true;
+    }
+    return false;
+  }
+
   moveSelection(delta: number) {
     const visible = this.visibleList;
     if (visible.length === 0) return;

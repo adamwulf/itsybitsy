@@ -273,6 +273,8 @@ When building `<agent-dir>/repo/.claude/settings.local.json` for an agent, permi
 4. **Type-defined permissions** — `~/.itsybitsy/agent-types/<type>.md` (frontmatter)
    - `permissions.allow` and `permissions.deny` fields from the agent type definition file's YAML frontmatter
 
+**AskUserQuestion is intercepted and denied**: The intercept-task hook matches `AskUserQuestion` alongside `Task|Agent|TaskCreate` and denies the call with a message directing the agent to use `ib ask "question"` instead. Workers are told to report to their manager rather than asking the user directly. This routes user questions through the dashboard's QUESTIONS pane and the `ib ask` / question-acknowledgement flow rather than Claude Code's built-in multi-choice prompt.
+
 All allow/deny lists are merged and deduplicated. The final result is written to `<agent-dir>/repo/.claude/settings.local.json` along with hook definitions (§6).
 
 **Deprecated config keys**: `permissions.manager.allow/deny` and `permissions.worker.allow/deny` have been removed. If present in `~/.itsybitsy/config.json`, a deprecation warning is shown at `ib watch` startup. Users should move per-type permissions into the agent type `.md` files and use `permissions.repo.*` for repo-wide defaults.
@@ -743,21 +745,22 @@ Instructions are generated based on the agent's type definition:
 ### 6.4 Intercept Task Hook (PreToolUse)
 
 **Command**: `ib hooks intercept-task`
-**Matcher**: `Task|Agent|TaskCreate`
+**Matcher**: `Task|Agent|TaskCreate|AskUserQuestion`
 **Hook type**: PreToolUse
 
-Intercepts Claude Code's Task, Agent, and TaskCreate tools and redirects them to spawn ib agents instead:
+Intercepts Claude Code's Task, Agent, TaskCreate, and AskUserQuestion tools and redirects them to the ib system instead:
 
-1. **Leaf agent denial**: If called from a leaf agent (an agent whose type has `canSpawnChildren: false`, detected via CWD + `meta.json`), denies with "Workers cannot create tasks or spawn sub-agents"
-2. **Only intercepts `Task`, `Agent`, and `TaskCreate` tools** — all other tools pass through
-3. **Skip for certain subagent_types**: `Bash`, `statusline-setup`, `claude-code-guide`, `meta-agent`, `ib-merge` pass through unintercepted
-4. **Model validation**: Only `sonnet`, `opus`, `haiku`, or empty string are allowed
-5. **Spawn behavior**:
+1. **AskUserQuestion denial**: Always denied. Managers (and primary Claude) are told to use `ib ask "question"` — which routes through the dashboard's QUESTIONS pane and the question-acknowledgement flow — instead of Claude Code's built-in multi-choice prompt. Leaf agents are told to report to their manager instead of asking the user directly.
+2. **Leaf agent denial**: If Task/Agent/TaskCreate is called from a leaf agent (an agent whose type has `canSpawnChildren: false`, detected via CWD + `meta.json`), denies with "Workers cannot create tasks or spawn sub-agents"
+3. **Only intercepts `Task`, `Agent`, `TaskCreate`, and `AskUserQuestion`** — all other tools pass through
+4. **Skip for certain subagent_types**: `Bash`, `statusline-setup`, `claude-code-guide`, `meta-agent`, `ib-merge` pass through unintercepted
+5. **Model validation**: Only `sonnet`, `opus`, `haiku`, or empty string are allowed
+6. **Spawn behavior**:
    - When called from an agent context: spawns a `--type worker` with the calling agent as `--manager`
    - When called from primary Claude: spawns a manager (no `--type worker`)
-6. **Output**: Rewrites the Task invocation to a `claude-code-guide` subagent that simply reports the spawned agent ID
+7. **Output**: Rewrites the Task invocation to a `claude-code-guide` subagent that simply reports the spawned agent ID
 
-This hook is installed for agents with `canSpawnChildren: true` (not leaf agents), and only when the main repo's settings already have the intercept hook installed. The hook intercepts `Task`, `Agent`, and `TaskCreate` tool calls. For spawning agents, all three are intercepted and spawn ib workers. For leaf agents, all three are denied with "Workers cannot create tasks or spawn sub-agents." The hook matcher includes `TaskCreate` so it fires for that tool in addition to `Task` and `Agent` (see §2.2).
+This hook is installed for agents with `canSpawnChildren: true` (not leaf agents), and only when the main repo's settings already have the intercept hook installed. The hook intercepts `Task`, `Agent`, `TaskCreate`, and `AskUserQuestion` tool calls. For spawning agents, Task/Agent/TaskCreate are intercepted and spawn ib workers. For leaf agents, those three are denied with "Workers cannot create tasks or spawn sub-agents." `AskUserQuestion` is denied for all callers regardless of role. The hook matcher includes `TaskCreate` so it fires for that tool in addition to `Task` and `Agent` (see §2.2).
 
 ### 6.5 Permission Denied Hook (PermissionRequest)
 
@@ -774,7 +777,7 @@ Fires when Claude requests permission for a tool that isn't auto-allowed. Simply
 These are optional hooks that the user installs globally:
 
 - **Main-path hook** (`ib hooks main-path`): PreToolUse hook on `Bash` matcher that prevents the primary Claude from `cd`-ing into agent worktrees. Only checks Bash `cd` commands — allows Read/Write/Edit to worktree paths. Resolves relative paths via `cwd` from stdin JSON. Exits 0 (allow) or 2 (deny with JSON written to stdout).
-- **Intercept-task hook** (`ib hooks intercept-task`): PreToolUse hook on `Task|Agent|TaskCreate` matcher (global version, enables task/agent/TaskCreate interception for all repos)
+- **Intercept-task hook** (`ib hooks intercept-task`): PreToolUse hook on `Task|Agent|TaskCreate|AskUserQuestion` matcher (global version, enables task/agent/TaskCreate interception and AskUserQuestion denial for all repos)
 - **Status injection hooks** (`ib hooks inject-status`): Two hooks — a UserPromptSubmit hook (no matcher, `--full --visible`) and a PostToolUse hook (`Bash|Task` matcher, `--if-changed --visible`). Skips injection when CWD is inside an agent worktree. Supports modes: `--full` (complete agent tree), `--brief` (one-liner summary), `--if-changed` (hash-compared, outputs brief only when changed). `--visible` adds a `systemMessage` field for user-visible status line.
 - **Session-start hook** (`ib hooks session-start`): SessionStart hook that injects ittybitty context
 
@@ -1455,6 +1458,8 @@ Per-repo coordinators are stored in `.ittybitty/agents/` like regular agents, bu
 
 **Killing/Archiving**: Per-repo coordinators follow the standard kill/archive flow (§1.4, §1.7). `ib kill <repo-basename>` kills only the coordinator itself (standard §1.4 behavior). To recursively kill a coordinator and all its children, use `ib nuke <repo-basename>` (§1.8). The `manager: "<repo-basename>"` field in children's meta.json links them to the coordinator for the nuke traversal.
 
+**Expanded same-repo authority**: Per-repo coordinators may run `ib kill` and `ib reassign` on ANY non-coordinator agent within their own repo, regardless of the target's `manager` field. This is enforced in `checkIbCommandAccess` (src/hooks/agent-path.ts) by checking the caller's `coordinator: true` flag in its own meta.json before falling back to the standard manager/spawner check. Other manager-only operations (`nuke`, `merge`, `resume`, `pause`) still require the standard manager/spawner relationship. Cross-repo `kill`/`reassign` is not permitted — a coordinator in repo A cannot act on agents in repo B. Coordinators cannot kill or reassign other coordinators via this bypass (the target's `coordinator: true` flag disqualifies it from the bypass and falls through to the standard check).
+
 **Resuming**: Standard resume flow (§1.6). Per-repo coordinators can be paused and resumed like any agent.
 
 #### 12.2.4 Permissions
@@ -1469,7 +1474,7 @@ Per-repo coordinators get a restricted permission set — they can read the code
       "Bash(git show:*)", "Bash(git ls-files:*)",
       "Bash(pwd:*)", "Bash(ls:*)",
       "Read", "Glob", "Grep", "LS",
-      "TodoWrite", "AskUserQuestion", "ToolSearch"
+      "TodoWrite", "ToolSearch"
     ],
     "deny": [
       "Write", "Edit", "MultiEdit", "NotebookEdit",
@@ -1936,7 +1941,7 @@ Each check produces zero or more **warnings**. Warnings have a severity level an
 
 **Detection**: Read `~/.claude/settings.json` and check for the presence of:
 - **Safety hooks** (checked as a group): `ib hooks main-path` (PreToolUse), `ib hooks session-start` (SessionStart), and at least one `ib hooks inject-status` hook (UserPromptSubmit or PostToolUse). If ANY of these are missing, warn.
-- **Intercept-task hook**: `ib hooks intercept-task` in PreToolUse with `Task|Agent|TaskCreate` matcher. Checked separately since it's an optional but recommended hook.
+- **Intercept-task hook**: `ib hooks intercept-task` in PreToolUse with `Task|Agent|TaskCreate|AskUserQuestion` matcher. Checked separately since it's an optional but recommended hook.
 
 **Message**: `"Missing global safety hooks in ~/.claude/settings.json — run setup (h) to install"` or `"Missing intercept-task hook in ~/.claude/settings.json — run setup (h) to install"`
 

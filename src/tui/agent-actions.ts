@@ -22,6 +22,7 @@ import { captureTmuxOutput, resizeTmuxWindow, killTmuxSession, sendTmuxKeys } fr
 import { parseState } from "../parse-state";
 import { openInGhostty, openPathInGhostty } from "../ghostty";
 import { buildFolderItems } from "./folder-browser";
+import { listAgentTypeNamesSync } from "../agent-types";
 import type { DialogState, SetupItem, ConfigDialogItem } from "./dialog-handler";
 import { TextBuffer } from "./text-buffer";
 import { readConfig, writeConfig, CONFIG_KEYS, defaultUserConfigPath } from "../config";
@@ -464,18 +465,27 @@ export function handleNewAgent(ctx: ActionCtx) {
 }
 
 function showNewAgentFormDialog(ctx: ActionCtx, repo: RepoEntry) {
+  // Read the names of available agent types synchronously so the dialog can
+  // open immediately. listAgentTypeNamesSync always returns at least the
+  // embedded defaults when the on-disk types directory is missing.
+  const availableTypes = listAgentTypeNamesSync();
+  const defaultType = availableTypes.includes("manager")
+    ? "manager"
+    : (availableTypes[0] ?? "manager");
+
   ctx.showDialog({
     type: "new-agent-form",
     repoName: repoDisplayName(repo),
     name: "",
-    agentType: "manager",
+    agentType: defaultType,
+    availableTypes,
     buffer: new TextBuffer(),
     focused: "name",
     onSubmit: (name: string, agentType: string, prompt: string) => {
       ctx.closeDialog();
       const opts: NewAgentOptions = {};
       if (name.trim()) opts.name = name.trim();
-      if (agentType && agentType !== "manager") opts.type = agentType;
+      if (agentType) opts.type = agentType;
       ctx.executeAndRefresh(async () => {
         const result = await newAgent(repo.path, prompt, opts);
         if (result.ok) {

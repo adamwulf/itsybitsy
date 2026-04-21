@@ -46,6 +46,7 @@ export type DialogState =
       repoName: string;
       name: string;
       agentType: string;
+      availableTypes: string[];
       buffer: TextBuffer;
       focused: "name" | "agentType" | "prompt" | "create" | "cancel";
       onSubmit: (name: string, agentType: string, prompt: string) => void;
@@ -338,9 +339,13 @@ function handleNewAgentFormDialog(
     if (matchesKey(data, Key.tab)) { nextFocus(); }
     else if (matchesKey(data, Key.shift("tab"))) { prevFocus(); }
     else if (matchesKey(data, Key.enter) || data === " ") {
-      // Toggle between manager and worker
-      d.agentType = d.agentType === "worker" ? "manager" : "worker";
-      ctx.tui?.requestRender();
+      // Cycle through the available agent types
+      if (d.availableTypes.length > 0) {
+        const currentIdx = d.availableTypes.indexOf(d.agentType);
+        const nextIdx = (currentIdx + 1) % d.availableTypes.length;
+        d.agentType = d.availableTypes[nextIdx]!;
+        ctx.tui?.requestRender();
+      }
     }
   } else if (d.focused === "prompt") {
     if (matchesKey(data, Key.tab)) { nextFocus(); }
@@ -788,10 +793,13 @@ export function buildNewAgentFormContent(
   const nameValue = dialog.focused === "name" ? `${dialog.name}█` : (dialog.name || `${DIM}(optional)${RESET}`);
   lines.push(`${nameLabel}  ${truncateToWidth(nameValue, innerWidth - 8, "")}`);
 
-  const typeCheckbox = dialog.agentType === "worker" ? "[x]" : "[ ]";
+  const cycleHint = dialog.availableTypes.length > 1
+    ? ` ${DIM}[Enter/Space to cycle]${RESET}`
+    : "";
+  const typeValue = dialog.agentType || "manager";
   const typeLabel = dialog.focused === "agentType"
-    ? `${BOLD}${GREEN}${typeCheckbox} Worker${RESET}`
-    : `${typeCheckbox} Worker`;
+    ? `${BOLD}${GREEN}Type: ${typeValue}${RESET}${cycleHint}`
+    : `${DIM}Type:${RESET} ${typeValue}`;
   lines.push(typeLabel);
   lines.push("");
 

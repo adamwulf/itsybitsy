@@ -4,6 +4,7 @@
 
 import { join } from "path";
 import { homedir } from "os";
+import { readdirSync } from "fs";
 import { Glob } from "bun";
 import managerMd from '../docs/agent-types/manager.md' with { type: 'text' };
 import workerMd from '../docs/agent-types/worker.md' with { type: 'text' };
@@ -334,6 +335,29 @@ export async function loadAgentType(name: string): Promise<AgentType> {
     instructionStyle: validateInstructionStyle(getString(frontmatter.instructionStyle, "")),
     markdownBody: body || undefined,
   };
+}
+
+/**
+ * Synchronously list agent type names from ~/.itsybitsy/agent-types/
+ * without parsing the files. Returns the basenames of *.md files,
+ * sorted alphabetically. Falls back to the embedded default type names
+ * when the directory doesn't exist yet (e.g. before ensureAgentTypesDir
+ * has run). Used by UI code that needs to cycle through types without
+ * blocking on disk I/O or YAML parsing.
+ */
+export function listAgentTypeNamesSync(): string[] {
+  const home = process.env.HOME || homedir();
+  const typesDir = join(home, ".itsybitsy", "agent-types");
+  try {
+    const names = readdirSync(typesDir)
+      .filter((f) => f.endsWith(".md"))
+      .map((f) => f.replace(/\.md$/, ""))
+      .sort();
+    if (names.length > 0) return names;
+  } catch {
+    // fall through to embedded defaults
+  }
+  return Object.keys(EMBEDDED_TYPES).sort();
 }
 
 /**

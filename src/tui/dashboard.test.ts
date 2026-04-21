@@ -1079,7 +1079,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(d.focused).toBe("prompt");
   });
 
-  test("new-agent form: Agent type toggle with Space and Enter", () => {
+  test("new-agent form: Agent type cycles with Space and Enter", () => {
     dashboard = makeDashboard();
     dashboard.setRepos([{ path: "/repos/only", name: "only-repo" }]);
 
@@ -1089,14 +1089,25 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(d.focused).toBe("agentType");
     expect(d.agentType).toBe("manager");
 
-    dashboard.handleInput(" "); // Space toggles
-    expect(d.agentType).toBe("worker");
+    // Cycling should walk through availableTypes in order and wrap.
+    const types = d.availableTypes;
+    expect(types.length).toBeGreaterThan(0);
+    expect(types).toContain("manager");
+    const managerIdx = types.indexOf("manager");
 
-    dashboard.handleInput(" "); // Space toggles back
+    // Space cycles forward once
+    dashboard.handleInput(" ");
+    expect(d.agentType).toBe(types[(managerIdx + 1) % types.length]!);
+
+    // Enter cycles forward again
+    dashboard.handleInput("\r");
+    expect(d.agentType).toBe(types[(managerIdx + 2) % types.length]!);
+
+    // Cycle all the way back to manager
+    for (let i = 0; i < types.length - 2; i++) {
+      dashboard.handleInput(" ");
+    }
     expect(d.agentType).toBe("manager");
-
-    dashboard.handleInput("\r"); // Enter also toggles
-    expect(d.agentType).toBe("worker");
   });
 
   test("new-agent form: Worker type sets worker meta field", async () => {

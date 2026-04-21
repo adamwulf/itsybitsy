@@ -12,6 +12,7 @@ import { captureTmuxOutput, resizeTmuxWindow } from "./tmux-poller";
 import { isCompacting, isRateLimited } from "./agents";
 import { SpawnContext } from "./types";
 import { getSavedMainWidth } from "./tui/layout";
+import { loadAgentType, ensureAgentTypesDir } from "./agent-types";
 
 export const IB_COORDINATOR_SESSION = "ib-coordinator";
 
@@ -395,30 +396,45 @@ const PER_REPO_COORDINATOR_DENY = [
  * Coordinators can read the codebase and run ib commands, but cannot write code.
  * See SPEC §12.2.4 for the full specification.
  *
- * Config merge: global `permissions.all.allow` entries are appended to the
- * hardcoded allow list, but any that appear in the hardcoded deny list are
- * silently dropped. `permissions.all.deny` entries are appended to the
- * hardcoded deny list. Role-specific config keys for coordinators no longer
- * exist — coordinator-specific permissions live in
- * ~/.itsybitsy/agent-types/coordinator.md frontmatter.
+ * Layer merge: the `_all.md` agent-type file's frontmatter permissions are
+ * appended to the hardcoded allow list, but any entries that appear in the
+ * hardcoded deny list are silently dropped. `_all.md` deny entries are
+ * appended to the hardcoded deny list. Coordinator-specific permissions
+ * live in ~/.itsybitsy/agent-types/coordinator.md frontmatter and are not
+ * read here — they're applied at spawn time in `newAgent()`.
+ *
+ * Note: `_non_coordinator.md` is intentionally NOT merged — per-repo
+ * coordinators are coordinators.
  */
 export async function buildPerRepoCoordinatorSettings(): Promise<{
   permissions: { allow: string[]; deny: string[] };
 }> {
-  const config = await readConfig();
+  // Ensure the embedded _all.md layer exists on disk
+  try {
+    await ensureAgentTypesDir();
+  } catch {
+    // If this fails, fall through — loadAgentType will throw and we'll skip the layer
+  }
 
-  // Global (permissions.all.*) — coordinator-specific config keys have been removed.
-  const allAllow = (config["permissions.all.allow"]?.value as string[] | undefined) ?? [];
-  const allDeny = (config["permissions.all.deny"]?.value as string[] | undefined) ?? [];
+  // Load _all.md permissions layer (replaces the former config.permissions.all.* keys)
+  let allAllow: string[] = [];
+  let allDeny: string[] = [];
+  try {
+    const allLayer = await loadAgentType("_all");
+    allAllow = allLayer.permissions?.allow ?? [];
+    allDeny = allLayer.permissions?.deny ?? [];
+  } catch (err) {
+    console.error(`Warning: failed to load _all agent type layer: ${err instanceof Error ? err.message : String(err)}`);
+  }
 
   const hardcodedDenySet = new Set(PER_REPO_COORDINATOR_DENY);
 
-  // Filter out config allow entries that conflict with hardcoded deny
-  const filteredConfigAllow = allAllow.filter(
+  // Filter out _all.md allow entries that conflict with hardcoded deny
+  const filteredLayerAllow = allAllow.filter(
     (entry) => !hardcodedDenySet.has(entry)
   );
 
-  const finalAllow = [...new Set([...PER_REPO_COORDINATOR_ALLOW, ...filteredConfigAllow])];
+  const finalAllow = [...new Set([...PER_REPO_COORDINATOR_ALLOW, ...filteredLayerAllow])];
   const finalDeny = [...new Set([...PER_REPO_COORDINATOR_DENY, ...allDeny])];
 
   return { permissions: { allow: finalAllow, deny: finalDeny } };

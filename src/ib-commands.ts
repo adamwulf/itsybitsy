@@ -1466,6 +1466,12 @@ export async function newAgent(
 
   // Determine if this is a coordinator type
   const agentTypeDef = await loadAgentType(typeName);
+
+  // Reject layer-only types (spawnable: false) — these are merge layers, not spawnable agents
+  if (agentTypeDef.spawnable === false) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Error: type ${typeName} is not spawnable (used only as a permissions/prompt layer)` };
+  }
+
   const coordinatorMode = typeName === "coordinator";
 
   // Coordinators never use worktrees (SPEC §12.2.3)
@@ -1635,25 +1641,39 @@ export async function newAgent(
     return { ok: false, exitCode: 1, stdout: "", stderr: `Invalid model name: ${model}` };
   }
 
-  // Config permissions: permissions.all.* applies to all types,
-  // permissions.repo.* applies to all non-coordinator types (repo-wide baseline).
-  // Coordinators use only permissions.all.* + type-defined permissions from
-  // ~/.itsybitsy/agent-types/coordinator.md frontmatter (no config-level role key).
-  // Per-type permissions also come from the type definition file.
-  const roleAllow = coordinatorMode
-    ? []
-    : ((config["permissions.repo.allow"]?.value as string[] | undefined) ?? []);
-  const roleDeny = coordinatorMode
-    ? []
-    : ((config["permissions.repo.deny"]?.value as string[] | undefined) ?? []);
-  const allAllow = (config["permissions.all.allow"]?.value as string[] | undefined) ?? [];
-  const allDeny = (config["permissions.all.deny"]?.value as string[] | undefined) ?? [];
+  // Permissions are assembled in three layers (SPEC §2.3):
+  //   1. `_all.md` frontmatter — applied to every spawned agent
+  //   2. `_non_coordinator.md` frontmatter — applied to non-coordinator agents only
+  //   3. `<type>.md` frontmatter — per-type permissions
+  // The layers are merged (allow/deny deduplicated via Set). Config-level
+  // `permissions.all.*` / `permissions.repo.*` keys have been deprecated —
+  // their contents have moved into the `_all.md` and `_non_coordinator.md` files.
+  let allLayerAllow: string[] = [];
+  let allLayerDeny: string[] = [];
+  try {
+    const allLayer = await loadAgentType("_all");
+    allLayerAllow = allLayer.permissions?.allow ?? [];
+    allLayerDeny = allLayer.permissions?.deny ?? [];
+  } catch (err) {
+    console.error(`Warning: failed to load _all agent type layer: ${err instanceof Error ? err.message : String(err)}`);
+  }
 
-  // Merge permissions: config role + config all + type definition (deduplicated via Set)
+  let nonCoordAllow: string[] = [];
+  let nonCoordDeny: string[] = [];
+  if (!coordinatorMode) {
+    try {
+      const nonCoordLayer = await loadAgentType("_non_coordinator");
+      nonCoordAllow = nonCoordLayer.permissions?.allow ?? [];
+      nonCoordDeny = nonCoordLayer.permissions?.deny ?? [];
+    } catch (err) {
+      console.error(`Warning: failed to load _non_coordinator agent type layer: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
   const typeAllow = agentTypeDef.permissions?.allow ?? [];
   const typeDeny = agentTypeDef.permissions?.deny ?? [];
-  const configAllow = [...new Set([...roleAllow, ...allAllow, ...typeAllow])];
-  const configDeny = [...new Set([...roleDeny, ...allDeny, ...typeDeny])];
+  const configAllow = [...new Set([...allLayerAllow, ...nonCoordAllow, ...typeAllow])];
+  const configDeny = [...new Set([...allLayerDeny, ...nonCoordDeny, ...typeDeny])];
 
   // 8. Max agents check — coordinators bypass this (SPEC §12.4.3)
   if (!coordinatorMode) {

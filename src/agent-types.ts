@@ -4,22 +4,33 @@
 
 import { join } from "path";
 import { homedir } from "os";
-import { readdirSync } from "fs";
+import { readdirSync, readFileSync } from "fs";
 import { Glob } from "bun";
 import managerMd from '../docs/agent-types/manager.md' with { type: 'text' };
 import workerMd from '../docs/agent-types/worker.md' with { type: 'text' };
 import coordinatorMd from '../docs/agent-types/coordinator.md' with { type: 'text' };
+import allLayerMd from '../docs/agent-types/_all.md' with { type: 'text' };
+import nonCoordinatorLayerMd from '../docs/agent-types/_non_coordinator.md' with { type: 'text' };
 
 const EMBEDDED_TYPES: Record<string, string> = {
   'manager': managerMd,
   'worker': workerMd,
   'coordinator': coordinatorMd,
+  '_all': allLayerMd,
+  '_non_coordinator': nonCoordinatorLayerMd,
 };
 
 export interface AgentType {
   name: string;
   description: string;
   canSpawnChildren: boolean;
+  /**
+   * Whether this agent type can be spawned directly via `ib new-agent --type <name>`.
+   * Defaults to `true` when absent. Types with `spawnable: false` are layer-only
+   * files (e.g. `_all.md`, `_non_coordinator.md`) whose frontmatter permissions
+   * and markdown body merge into every spawned agent.
+   */
+  spawnable?: boolean;
   model?: string;
   permissions?: {
     allow?: string[];
@@ -321,10 +332,15 @@ export async function loadAgentType(name: string): Promise<AgentType> {
       : [];
   }
 
+  // Parse spawnable: absent → true (spawnable by default).
+  // Explicit `false` marks layer-only files like _all.md / _non_coordinator.md.
+  const spawnable = frontmatter.spawnable === false ? false : true;
+
   return {
     name: getString(frontmatter.name, name),
     description: getString(frontmatter.description, ""),
     canSpawnChildren: frontmatter.canSpawnChildren === true,
+    spawnable,
     icon: iconChar,
     model: getString(frontmatter.model, "") || undefined,
     permissions: permissions ? {
@@ -358,6 +374,63 @@ export function listAgentTypeNamesSync(): string[] {
     // fall through to embedded defaults
   }
   return Object.keys(EMBEDDED_TYPES).sort();
+}
+
+/**
+ * Synchronously list the names of types that can be spawned directly
+ * (i.e. their frontmatter does not declare `spawnable: false`).
+ * Used by UI cyclers in the new-agent dialog so layer-only files like
+ * `_all.md` / `_non_coordinator.md` never appear as spawn choices.
+ *
+ * Performs a lightweight scan of each `.md` file's frontmatter for the
+ * `spawnable:` key — no full parse is required.
+ */
+export function listSpawnableTypeNamesSync(): string[] {
+  const allNames = listAgentTypeNamesSync();
+  const home = process.env.HOME || homedir();
+  const typesDir = join(home, ".itsybitsy", "agent-types");
+
+  const spawnable: string[] = [];
+  for (const name of allNames) {
+    const filePath = join(typesDir, `${name}.md`);
+    let content: string | undefined;
+    try {
+      content = readFileSync(filePath, "utf8");
+    } catch {
+      // File gone between listing and read — fall back to embedded content if we know it
+      content = EMBEDDED_TYPES[name];
+    }
+    if (content === undefined) {
+      // Directory didn't exist and no embedded default — assume spawnable
+      spawnable.push(name);
+      continue;
+    }
+    if (isSpawnableFrontmatter(content)) {
+      spawnable.push(name);
+    }
+  }
+  return spawnable;
+}
+
+/**
+ * Lightweight sync check: return true unless the frontmatter explicitly
+ * declares `spawnable: false`. Avoids pulling in the full parser so this
+ * stays cheap enough to call from UI render paths.
+ */
+function isSpawnableFrontmatter(content: string): boolean {
+  const lines = content.split("\n");
+  if (lines[0] !== "---") return true;
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i]!;
+    if (line === "---") break;
+    const trimmed = line.trim();
+    if (trimmed.startsWith("spawnable:")) {
+      const valueStr = trimmed.substring("spawnable:".length).trim();
+      if (valueStr === "false") return false;
+      return true;
+    }
+  }
+  return true;
 }
 
 /**
@@ -407,6 +480,10 @@ export async function validateAllAgentTypes(): Promise<string[]> {
         // Validate required fields
         if (frontmatter.canSpawnChildren !== undefined && typeof frontmatter.canSpawnChildren !== "boolean") {
           errors.push(`${file}: canSpawnChildren must be true or false, got "${frontmatter.canSpawnChildren}"`);
+        }
+
+        if (frontmatter.spawnable !== undefined && typeof frontmatter.spawnable !== "boolean") {
+          errors.push(`${file}: spawnable must be true or false, got "${frontmatter.spawnable}"`);
         }
 
         // Validate instructionStyle if present

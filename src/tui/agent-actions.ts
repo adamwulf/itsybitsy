@@ -22,7 +22,7 @@ import { captureTmuxOutput, resizeTmuxWindow, killTmuxSession, sendTmuxKeys } fr
 import { parseState } from "../parse-state";
 import { openInGhostty, openPathInGhostty } from "../ghostty";
 import { buildFolderItems } from "./folder-browser";
-import { listAgentTypeNamesSync } from "../agent-types";
+import { listSpawnableTypeNamesSync } from "../agent-types";
 import type { DialogState, SetupItem, ConfigDialogItem } from "./dialog-handler";
 import { TextBuffer } from "./text-buffer";
 import { readConfig, writeConfig, CONFIG_KEYS, defaultUserConfigPath } from "../config";
@@ -465,10 +465,11 @@ export function handleNewAgent(ctx: ActionCtx) {
 }
 
 function showNewAgentFormDialog(ctx: ActionCtx, repo: RepoEntry) {
-  // Read the names of available agent types synchronously so the dialog can
-  // open immediately. listAgentTypeNamesSync always returns at least the
+  // Read the names of available spawnable agent types synchronously so the
+  // dialog can open immediately. Layer-only types (e.g. `_all`, `_non_coordinator`)
+  // are filtered out — they act only as permission/prompt layers. Falls back to
   // embedded defaults when the on-disk types directory is missing.
-  const availableTypes = listAgentTypeNamesSync();
+  const availableTypes = listSpawnableTypeNamesSync();
   const defaultType = availableTypes.includes("manager")
     ? "manager"
     : (availableTypes[0] ?? "manager");

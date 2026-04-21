@@ -177,6 +177,28 @@ export function interpolateTemplate(template: string, ctx: SessionContext): stri
   return result;
 }
 
+/**
+ * Load a layer agent type's markdown body (e.g. `_all`, `_non_coordinator`)
+ * and return the interpolated prefix text. Returns an empty string if the
+ * layer file doesn't exist or has no body — layer files are optional, and
+ * a missing one should never fail session-start.
+ */
+async function loadPrefixLayerBody(
+  typeName: string,
+  ctx: SessionContext,
+): Promise<string> {
+  try {
+    const layer = await loadAgentType(typeName);
+    if (!layer.markdownBody) return "";
+    return interpolateTemplate(layer.markdownBody, ctx);
+  } catch (err) {
+    process.stderr.write(
+      `session-start: failed to load prefix layer '${typeName}': ${err instanceof Error ? err.message : String(err)}\n`,
+    );
+    return "";
+  }
+}
+
 export async function generateInstructions(ctx: SessionContext): Promise<string> {
   // If agentType is set, load it and check for a template body
   if (ctx.agentType) {
@@ -185,11 +207,21 @@ export async function generateInstructions(ctx: SessionContext): Promise<string>
     // If the type definition has a markdown body, use it as the full template
     // The <ittybitty> wrapper is added by the code so users don't need to include it
     if (agentType.markdownBody) {
-      const content = interpolateTemplate(agentType.markdownBody, ctx);
+      // Prepend prefix layer bodies: _all (always) + _non_coordinator (when not coordinator)
+      const allPrefix = await loadPrefixLayerBody("_all", ctx);
+      const nonCoordPrefix =
+        ctx.agentType !== "coordinator"
+          ? await loadPrefixLayerBody("_non_coordinator", ctx)
+          : "";
+
+      const typeBody = interpolateTemplate(agentType.markdownBody, ctx);
+      const parts = [allPrefix, nonCoordPrefix, typeBody].filter((p) => p.trim().length > 0);
+      const content = parts.join("\n\n");
       return `<ittybitty>\n${content}\n</ittybitty>`;
     }
 
-    // No body — fall back to hardcoded instructions based on instructionStyle
+    // No body — fall back to hardcoded instructions based on instructionStyle.
+    // Prefix layers do NOT apply to the hardcoded fallback path.
     switch (agentType.instructionStyle) {
       case "manager":
         return generateManagerInstructions(ctx);

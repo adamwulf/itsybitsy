@@ -352,10 +352,12 @@ describe("initAgentTypes", () => {
   test("creates directory and writes all embedded files when missing", async () => {
     const created = await initAgentTypes();
 
-    expect(created.sort()).toEqual(["coordinator.md", "manager.md", "worker.md"]);
+    expect(created.sort()).toEqual(["_all.md", "_non_coordinator.md", "coordinator.md", "manager.md", "worker.md"]);
     expect(await agentTypeExists("manager")).toBe(true);
     expect(await agentTypeExists("worker")).toBe(true);
     expect(await agentTypeExists("coordinator")).toBe(true);
+    expect(await agentTypeExists("_all")).toBe(true);
+    expect(await agentTypeExists("_non_coordinator")).toBe(true);
   });
 
   test("restores a missing file without touching existing customizations", async () => {

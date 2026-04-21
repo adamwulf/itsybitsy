@@ -103,8 +103,6 @@ function printHelp(): void {
   console.log("  ib config set model sonnet");
   console.log("  ib config set maxAgents 5");
   console.log("  ib config set hooks.injectStatus false");
-  console.log("  ib config add permissions.repo.deny \"Bash(*)\"");
-  console.log("  ib config remove permissions.repo.deny \"Bash(*)\"");
   console.log("  ib config unset model");
   console.log("  ib config get model");
 }

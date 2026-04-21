@@ -26,11 +26,7 @@ export const CONFIG_KEYS: ConfigKeyDef[] = [
   { key: "externalDiffTool", type: "string", default: undefined },
   { key: "hooks.injectStatus", type: "boolean", default: true },
   { key: "hooks.statusVisible", type: "boolean", default: true },
-  { key: "permissions.all.allow", type: "string[]", default: [] },
-  { key: "permissions.all.deny", type: "string[]", default: [] },
   { key: "coordinator.model", type: "string", default: "opus" },
-  { key: "permissions.repo.allow", type: "string[]", default: [] },
-  { key: "permissions.repo.deny", type: "string[]", default: [] },
 ];
 
 function getNestedValue(obj: Record<string, unknown>, dotKey: string): unknown {
@@ -129,6 +125,10 @@ const DEPRECATED_CONFIG_KEYS: DeprecatedConfigKey[] = [
   { key: "permissions.worker.deny", message: "Config key 'permissions.worker.deny' is deprecated. Permissions now live in agent type files (~/.itsybitsy/agent-types/). Remove this key from ~/.itsybitsy/config.json." },
   { key: "permissions.coordinator.allow", message: "Config key 'permissions.coordinator.allow' is deprecated. Coordinator permissions now live in ~/.itsybitsy/agent-types/coordinator.md frontmatter. Migrate any entries there and remove this key from ~/.itsybitsy/config.json." },
   { key: "permissions.coordinator.deny", message: "Config key 'permissions.coordinator.deny' is deprecated. Coordinator permissions now live in ~/.itsybitsy/agent-types/coordinator.md frontmatter. Migrate any entries there and remove this key from ~/.itsybitsy/config.json." },
+  { key: "permissions.all.allow", message: "Config key 'permissions.all.allow' is deprecated. Move these entries into ~/.itsybitsy/agent-types/_all.md frontmatter under 'permissions.allow:' and remove this key from ~/.itsybitsy/config.json." },
+  { key: "permissions.all.deny", message: "Config key 'permissions.all.deny' is deprecated. Move these entries into ~/.itsybitsy/agent-types/_all.md frontmatter under 'permissions.deny:' and remove this key from ~/.itsybitsy/config.json." },
+  { key: "permissions.repo.allow", message: "Config key 'permissions.repo.allow' is deprecated. Move these entries into ~/.itsybitsy/agent-types/_non_coordinator.md frontmatter under 'permissions.allow:' and remove this key from ~/.itsybitsy/config.json." },
+  { key: "permissions.repo.deny", message: "Config key 'permissions.repo.deny' is deprecated. Move these entries into ~/.itsybitsy/agent-types/_non_coordinator.md frontmatter under 'permissions.deny:' and remove this key from ~/.itsybitsy/config.json." },
 ];
 
 /**

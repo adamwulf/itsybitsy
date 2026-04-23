@@ -4,7 +4,7 @@
  * All commands are implemented natively — no ib CLI dependency.
  */
 
-import { join, dirname, resolve } from "path";
+import { join, dirname, resolve, basename } from "path";
 import { readdir, chmod, rm, mkdir, stat } from "fs/promises";
 import { realpathSync } from "fs";
 import { homedir } from "node:os";
@@ -1470,6 +1470,32 @@ export async function newAgent(
   // Reject layer-only types (spawnable: false) — these are merge layers, not spawnable agents
   if (agentTypeDef.spawnable === false) {
     return { ok: false, exitCode: 1, stdout: "", stderr: `Error: type ${typeName} is not spawnable (used only as a permissions/prompt layer)` };
+  }
+
+  // Repo restriction check (see PLAN-INHERITS.md §Part 2). Must run after
+  // `loadAgentType` so an inherited `repos` list is honored, and before any
+  // worktree/tmux/agent-dir allocation so a rejection leaves no residue. Also
+  // before the coordinator idempotency check below — a restricted coordinator
+  // spawned in the wrong repo should fail with the repo error, not silently
+  // succeed via idempotency.
+  if (agentTypeDef.repos !== undefined) {
+    const allKnownRepos = await listRepos();
+    const entry = allKnownRepos.find((r) => r.path === rootRepoPath);
+    const basenameOnly = basename(rootRepoPath);
+    const candidates = entry
+      ? [entry.name, entry.nickname].filter((s): s is string => typeof s === "string" && s.length > 0)
+      : [basenameOnly];
+    const allowed = agentTypeDef.repos.map((s) => s.trim()).filter(Boolean);
+    const matches = candidates.some((c) => allowed.includes(c));
+    if (!matches) {
+      const display = entry ? repoDisplayName(entry) : basenameOnly;
+      return {
+        ok: false,
+        exitCode: 1,
+        stdout: "",
+        stderr: `Error: agent type '${typeName}' is restricted to repos [${allowed.join(", ")}]; current repo '${display}' (path: ${rootRepoPath}) is not in that list`,
+      };
+    }
   }
 
   const coordinatorMode = typeName === "coordinator";

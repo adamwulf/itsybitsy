@@ -237,16 +237,18 @@ The `AgentType` interface defines these properties:
 
 | Property | Type | Required | Description |
 |----------|------|----------|-------------|
-| `name` | string | Yes | Type identifier (derived from filename if not in frontmatter) |
-| `description` | string | No | Human-readable description |
-| `canSpawnChildren` | boolean | Yes | Whether agents of this type can spawn sub-agents |
-| `spawnable` | boolean | No | Whether this type can be spawned directly via `ib new-agent --type <name>`. Defaults to `true` when absent. `false` marks layer-only files (e.g. `_all.md`, `_non_coordinator.md`) whose frontmatter permissions and markdown body merge into every spawned agent but which cannot themselves be spawned. |
-| `icon` | string | No | Display icon — first non-whitespace character is extracted |
-| `model` | string | No | Default model override (used before config fallback) |
-| `permissions` | object | No | Type-specific `allow`/`deny` permission lists |
-| `allowedPaths` | string[] | No | Directories the agent can access beyond its worktree. `undefined` = legacy permissive, `[]` = strict (worktree only). Paths may use `~` (expanded at creation time). See §6.1 for enforcement details. |
-| `instructionStyle` | `"manager"` \| `"worker"` \| `"coordinator"` | Yes | Maps to base instruction set for session-start (defaults to `"manager"`) |
-| `markdownBody` | string | No | Template body for custom instructions (see §6.3.1) |
+| `name` | string | Yes | Type identifier. Always derived from the filename — **never inherited** from a parent type, even if the parent's frontmatter declares `name:`. |
+| `description` | string | No | Human-readable description. Inheritable (child replaces when present). |
+| `canSpawnChildren` | boolean | Yes | Whether agents of this type can spawn sub-agents. Inheritable (child replaces when present, including explicit `false`). |
+| `spawnable` | boolean | No | Whether this type can be spawned directly via `ib new-agent --type <name>`. Defaults to `true` when absent. `false` marks layer-only files (e.g. `_all.md`, `_non_coordinator.md`) whose frontmatter permissions and markdown body merge into every spawned agent but which cannot themselves be spawned. **Never inherited** — always read from the target file's own frontmatter. |
+| `inherits` | string | No | Name of another agent type (filename minus `.md`) to inherit from. Scalar fields override when the child declares them; `permissions.allow/deny` **merge** across the chain (Set-deduped); `allowedPaths` and `repos` **replace** (not merge) when the child declares them. Cycles and missing parents are errors. Layer files (`spawnable: false`) may NOT use `inherits:`. Empty string (`inherits: ""`) is treated as absent. |
+| `icon` | string | No | Display icon — first non-whitespace character is extracted. Inheritable (child replaces when present and non-empty). |
+| `model` | string | No | Default model override (used before config fallback). Inheritable (child replaces when present and non-empty — empty string means inherit). |
+| `permissions` | object | No | Type-specific `allow`/`deny` permission lists. Inheritable — each list is **unioned across the chain** and Set-deduped. |
+| `allowedPaths` | string[] | No | Directories the agent can access beyond its worktree. `undefined` = legacy permissive, `[]` = strict (worktree only). Paths may use `~` (expanded at creation time). See §6.1 for enforcement details. Inheritable — **replaces** (not merges) when the child declares it; a child declaring `allowedPaths: []` correctly overrides a permissive parent. |
+| `repos` | string[] | No | If defined, this type can only be spawned in repos whose basename or registered nickname matches an entry. Checked by `ib new-agent` before any worktree/tmux/agent-dir allocation. `undefined` = no restriction. **Empty list is rejected at validation** (an unspawnable type is almost always a YAML typo). Inheritable — **replaces** (not merges) when the child declares it. |
+| `instructionStyle` | `"manager"` \| `"worker"` \| `"coordinator"` | Yes | Maps to base instruction set for session-start (defaults to `"manager"`). Inheritable (child replaces when present). |
+| `markdownBody` | string | No | Template body for custom instructions (see §6.3.1). Inheritable — child replaces when its body is non-empty after trim; otherwise inherits the parent's body. |
 
 The key behavioral distinction is `canSpawnChildren`:
 - **`true`** (manager-like): Can spawn sub-agents, Task tool is intercepted to spawn ib agents, receives manager-style instructions
@@ -330,7 +332,11 @@ You are research agent `{{agentId}}`...
 
 **Location**: All types live in `~/.itsybitsy/agent-types/<name>.md`. The default types (manager, worker, coordinator) plus two layer files (`_all.md`, `_non_coordinator.md`) are embedded in the `ib` binary and auto-populated on first run (§2.7). Source templates are also available in `docs/agent-types/` in the source repository.
 
-**Layer files (`_all.md` and `_non_coordinator.md`)**: These are agent type files with `spawnable: false` frontmatter. They cannot be spawned directly (`ib new-agent --type _all` is rejected with an error), but their `permissions.allow/deny` frontmatter and markdown body merge into every spawned agent: `_all.md` applies to every type; `_non_coordinator.md` applies to every type except `coordinator`. The type body is joined after the applicable layer bodies (layer prefix first, then type) in the session-start instruction output — see §6.3.1.
+**Layer files (`_all.md` and `_non_coordinator.md`)**: These are agent type files with `spawnable: false` frontmatter. They cannot be spawned directly (`ib new-agent --type _all` is rejected with an error), but their `permissions.allow/deny` frontmatter and markdown body merge into every spawned agent: `_all.md` applies to every type; `_non_coordinator.md` applies to every type except `coordinator`. The type body is joined after the applicable layer bodies (layer prefix first, then type) in the session-start instruction output — see §6.3.1. `spawnable` is per-file (never inherited) and layer files (`spawnable: false`) **cannot use `inherits:`** — a layer inheriting another type's body would silently prepend that body to every spawned agent's prompt, which is a high-blast-radius footgun. Validation rejects the combination at `ib watch` startup.
+
+**Inheritance (`inherits:`)**: A type may declare `inherits: <parent>` in its frontmatter to build on another type. Chain resolution walks parent-first; the resolver merges **raw parsed frontmatter objects** rather than already-constructed `AgentType` records. This matters because a child's explicit `canSpawnChildren: false` must override a parent's `true` — merging already-constructed records would collapse the "absent vs. explicit false" distinction. See the field table in §2.2 for per-field override / merge / replace rules. Cycles (`A → B → A`), self-inheritance, and missing parents all surface as errors at `ib watch` startup (§2.8) via `validateAllAgentTypes`.
+
+**Repo restriction (`repos:`)**: A type may declare a `repos:` list in its frontmatter to restrict which registered repos it can be spawned in. Matching: when the current repo is registered in `~/.itsybitsy/repos.json`, a match requires the list to contain the repo's basename (`name`) or its nickname. Unregistered repos match only via basename. The check runs in `ib new-agent` *before* any worktree, tmux, or agent-directory allocation so a rejection leaves no residue. The `--name` flag does not bypass this check. An empty list (`repos: []`) is a YAML typo rather than an intentional "unspawnable" marker — validation rejects it.
 
 ### 2.7 Auto-Population and init-types
 
@@ -342,7 +348,7 @@ You are research agent `{{agentId}}`...
 
 ### 2.8 Startup Validation
 
-When `ib watch` launches, it validates all agent type files in `~/.itsybitsy/agent-types/` before starting the dashboard (after auto-population). If any file has YAML parsing errors, invalid field types (e.g., `canSpawnChildren` is not a boolean), invalid `instructionStyle` values, or invalid `allowedPaths` entries (must be a list of strings), the dashboard exits immediately with error messages describing each issue. This prevents runtime failures from malformed type definitions.
+When `ib watch` launches, it validates all agent type files in `~/.itsybitsy/agent-types/` before starting the dashboard (after auto-population). If any file has YAML parsing errors, invalid field types (e.g., `canSpawnChildren` is not a boolean), invalid `instructionStyle` values, invalid `allowedPaths` entries (must be a list of strings), a non-string `inherits:` value, `inherits:` on a layer file (`spawnable: false`), a malformed `repos:` value (must be a list of strings; empty lists and bare strings are rejected), a **circular inheritance chain** (`A → B → A`), or a **missing parent** in an inheritance chain, the dashboard exits immediately with error messages describing each issue. This prevents runtime failures from malformed type definitions — inheritance-chain errors in particular surface at startup rather than at spawn time.
 
 ### 2.9 Backward Compatibility
 

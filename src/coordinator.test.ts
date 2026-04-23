@@ -866,6 +866,27 @@ describe("perRepoCoordinatorPrompt", () => {
 });
 
 describe("buildPerRepoCoordinatorSettings", () => {
+  // Isolate HOME so these tests read the embedded `_all.md` layer rather than
+  // the developer's customized ~/.itsybitsy/agent-types/_all.md. Without this,
+  // any extra Bash(...) entry the user has added locally leaks into the test
+  // assertions (e.g. if the user allows `Bash(git add:*)` for themselves, the
+  // "write git commands not allowed" test fails).
+  const originalHome = process.env.HOME;
+  let tempHome: string;
+
+  beforeEach(async () => {
+    tempHome = await mkdtemp(join(tmpdir(), "coord-settings-"));
+    process.env.HOME = tempHome;
+    // Populate with embedded defaults (including _all.md) so loadAgentType
+    // works and returns the unmodified layer.
+    await (await import("./agent-types")).ensureAgentTypesDir();
+  });
+
+  afterEach(async () => {
+    process.env.HOME = originalHome;
+    await rm(tempHome, { recursive: true, force: true });
+  });
+
   test("includes read-only tools in allow list", async () => {
     const settings = await buildPerRepoCoordinatorSettings();
     expect(settings.permissions.allow).toContain("Read");

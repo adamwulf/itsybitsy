@@ -3232,6 +3232,147 @@ describe("newAgent (native)", () => {
     const log = await Bun.file(join(agentsDir, "test-residual", "agent.log")).text();
     expect(log).toContain("[spawn] self-heal: removed residual repo dir");
   });
+
+  // --- Group R: `repos:` agent-type restriction (see PLAN-INHERITS.md §Part 2) ---
+  //
+  // These tests write a custom agent-type file into the temp $HOME used by
+  // `beforeEach`, then verify the restriction is enforced by `newAgent`
+  // *before* any worktree / tmux / agent-dir allocation.
+
+  /** Write a custom agent-type file into the test's temp HOME. */
+  async function writeAgentTypeFile(name: string, body: string): Promise<void> {
+    const dir = join(process.env.HOME!, ".itsybitsy", "agent-types");
+    await mkdir(dir, { recursive: true });
+    await Bun.write(join(dir, `${name}.md`), body);
+  }
+
+  test("R1: newAgent accepts when type's repos includes the current repo's basename", async () => {
+    const repoBasename = tempDir.split("/").pop()!;
+    await writeAgentTypeFile(
+      "repo-restricted",
+      `---
+name: repo-restricted
+description: restricted to this repo
+canSpawnChildren: false
+repos: [${repoBasename}]
+---
+body`,
+    );
+
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("do work", { name: "test-repos-basename", type: "repo-restricted" });
+    expect(result.ok).toBe(true);
+  });
+
+  test("R2: newAgent accepts when type's repos includes the current repo's nickname", async () => {
+    // Register this repo with a nickname that is NOT its basename.
+    const fakeHome = process.env.HOME!;
+    await Bun.write(
+      join(fakeHome, ".itsybitsy", "repos.json"),
+      JSON.stringify({
+        repos: [{ path: tempDir, name: tempDir.split("/").pop(), nickname: "my-nickname" }],
+      }),
+    );
+
+    await writeAgentTypeFile(
+      "nick-only",
+      `---
+name: nick-only
+description: matches by nickname
+canSpawnChildren: false
+repos: [my-nickname]
+---
+body`,
+    );
+
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("do work", { name: "test-repos-nick", type: "nick-only" });
+    expect(result.ok).toBe(true);
+  });
+
+  test("R3: newAgent rejects with a clear message when current repo matches no entry", async () => {
+    await writeAgentTypeFile(
+      "other-only",
+      `---
+name: other-only
+description: only valid in other repos
+canSpawnChildren: false
+repos: [some-other-repo, yet-another]
+---
+body`,
+    );
+
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("do work", { name: "test-repos-reject", type: "other-only" });
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("restricted to repos [some-other-repo, yet-another]");
+    expect(result.stderr).toContain("is not in that list");
+
+    // Regression: rejection must leave no residue. No agent dir should exist.
+    const dirExists = await Bun.file(join(agentsDir, "test-repos-reject", "meta.json")).exists().catch(() => false);
+    expect(dirExists).toBe(false);
+  });
+
+  test("R4: newAgent accepts (regression) when repos is absent — existing types work", async () => {
+    // The default `worker` type has no `repos:` — must still spawn.
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("do work", { name: "test-repos-absent", type: "worker" });
+    expect(result.ok).toBe(true);
+  });
+
+  test("R5: newAgent rejects when repos is inherited from a parent and current repo doesn't match", async () => {
+    // Parent has a `repos:` list that excludes this repo; child inherits it.
+    await writeAgentTypeFile(
+      "restricted-parent",
+      `---
+name: restricted-parent
+description: parent restricting repos
+canSpawnChildren: false
+repos: [foreign-repo]
+---
+body`,
+    );
+    await writeAgentTypeFile(
+      "restricted-child",
+      `---
+name: restricted-child
+inherits: restricted-parent
+description: inherits the repos restriction
+---
+body`,
+    );
+
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("do work", { name: "test-repos-inherited", type: "restricted-child" });
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("restricted to repos [foreign-repo]");
+  });
+
+  test("R6: newAgent accepts when repo is unregistered but its basename appears in repos", async () => {
+    // Make sure no repo is registered — the test's tempDir isn't added to
+    // repos.json, so the unregistered-fallback path (basename(rootRepoPath))
+    // is the code under test. Clear any repos.json if one exists.
+    const reposJson = join(process.env.HOME!, ".itsybitsy", "repos.json");
+    if (await Bun.file(reposJson).exists()) {
+      await Bun.write(reposJson, JSON.stringify({ repos: [] }));
+    }
+
+    const repoBasename = tempDir.split("/").pop()!;
+    await writeAgentTypeFile(
+      "unregistered-ok",
+      `---
+name: unregistered-ok
+description: matches by basename when unregistered
+canSpawnChildren: false
+repos: [${repoBasename}]
+---
+body`,
+    );
+
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("do work", { name: "test-repos-unregistered", type: "unregistered-ok" });
+    expect(result.ok).toBe(true);
+  });
 });
 
 describe("reassignAgent (native)", () => {

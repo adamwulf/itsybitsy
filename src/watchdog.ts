@@ -11,7 +11,7 @@
 
 import { join } from "path";
 import { mkdirSync } from "fs";
-import { readRepoAgents, readAllAgents, isCompacting, isRateLimited, readAgentState } from "./agents";
+import { readRepoAgents, readAllAgents, isCompacting, isRateLimited, readAgentState, hasBackgroundTasks, anyChildActive } from "./agents";
 import type { Agent } from "./agents";
 import { captureTmuxOutput } from "./tmux-poller";
 import { logAgent } from "./agent-lifecycle";
@@ -250,8 +250,45 @@ async function sendTmuxEnter(tmuxSession: string): Promise<boolean> {
  * Handler for "waiting" state.
  * Increments wait counter. After threshold, notifies manager with exponential backoff.
  * Backoff: 30s -> 1m -> 2m -> 4m -> 8m -> 16m -> 32m -> 64m cap.
+ *
+ * Work-in-flight suppression (SPEC §8.5.x):
+ *   If the agent has a direct background shell OR at least one direct child
+ *   that is actively doing work (meta.state === "running" OR recently created),
+ *   suppress BOTH notifyManager and notifySpawner AND pause the counter.
+ *
+ *   The background-shell check here is deliberately redundant: the resolver
+ *   override in resolveWatchdogState() already reclassifies waiting+bg as
+ *   "running", so handleWaiting typically isn't dispatched to in that case.
+ *   This belt-and-braces check guards against a future refactor that
+ *   removes the resolver override — do NOT delete it as dead code.
+ *
+ *   Counter is checked BEFORE `waitCounter++` so suppression pauses the
+ *   counter at its previous value; it resumes when suppression lifts,
+ *   preserving any in-flight backoff (`notifyInterval`).
  */
 async function handleWaiting(agent: Agent, tracker: AgentTracker, allAgents: Agent[]): Promise<void> {
+  const tmuxSession = agent.meta.tmux_session;
+  let bgActive = false;
+  if (tmuxSession && isValidTmuxSession(tmuxSession)) {
+    try {
+      const output = await watchdogCaptureTmuxFn(tmuxSession);
+      bgActive = output !== null && hasBackgroundTasks(output);
+    } catch { /* treat capture failures as not-bg-active */ }
+  }
+
+  // Flat-filter on meta.manager — see loadAllAgentsForNotification: the
+  // per-agent watchdog does NOT call buildAgentTree(), so agent.children is
+  // empty. A future maintainer must not replace this with an agent.children
+  // walk or the CLI watchdog path will silently break.
+  const childActive = anyChildActive(agent.id, allAgents);
+
+  if (bgActive || childActive) {
+    // Suppress notification AND pause the counter (no increment, no reset).
+    // If suppression lifts mid-backoff, notifyInterval is preserved and the
+    // counter resumes from its paused value.
+    return;
+  }
+
   tracker.waitCounter++;
 
   if (tracker.waitCounter >= tracker.notifyInterval) {
@@ -642,10 +679,16 @@ export function resetPerAgentReadState(): void {
  * with tmux overrides for transient states.
  * Resolution: compacting/rate_limited from tmux → meta.json state → fallback to running.
  */
-function resolveWatchdogState(tmuxOutput: string, metaState: MetaState | undefined): AgentState {
+export function resolveWatchdogState(tmuxOutput: string, metaState: MetaState | undefined): AgentState {
   // Step 1: transient tmux overrides
   if (isCompacting(tmuxOutput)) return "compacting";
   if (isRateLimited(tmuxOutput)) return "rate_limited";
+  // Background-shell override: waiting agents with a live background shell
+  // are actually still doing work. Scoped strictly to meta.state === "waiting" —
+  // we do NOT override "complete" (intentional sign-off) or "running" (already
+  // correct). This is the primary Case 1 suppression; the handleWaiting
+  // bg-shell check is belt-and-braces redundancy after this.
+  if (metaState === "waiting" && hasBackgroundTasks(tmuxOutput)) return "running";
   // Step 2: meta.json state
   if (metaState) return metaState;
   // Step 3: fallback

@@ -13,6 +13,7 @@ import {
   registerStateHandler,
   notifyManager,
   getAllTrackers,
+  resolveWatchdogState,
   INITIAL_NOTIFY_TICKS,
   MAX_NOTIFY_TICKS,
   POLL_INTERVAL_MS,
@@ -307,6 +308,162 @@ describe("watchdog", () => {
         c.args.some((a: string) => typeof a === "string" && a.includes("send-keys"))
       );
       expect(sendCalls.length).toBe(0);
+    });
+  });
+
+  // ── waiting handler: work-in-flight suppression (Case 1 + Case 2) ──────────
+
+  describe("waiting handler — work-in-flight suppression", () => {
+    /** Return the number of `send-keys -l <message>` calls that carry the given substring. */
+    function countSendKeysWithText(
+      spawn: ReturnType<typeof mockSpawnRunner>,
+      substr: string,
+    ): number {
+      return spawn.calls.filter((c) =>
+        c.args.includes("send-keys") &&
+        c.args.includes("-l") &&
+        c.args.some((a: any) => typeof a === "string" && a.includes(substr))
+      ).length;
+    }
+
+    test("background-shell tmux output → no notification, counter NOT advanced", async () => {
+      setWatchdogCaptureTmux(async () => "⏵⏵ accept edits on · 1 shell");
+      const a1 = agent("a1", "waiting", "mgr");
+      const mgr = agent("mgr", "running");
+      const agents = [mgr, a1];
+
+      for (let i = 0; i < INITIAL_NOTIFY_TICKS + 5; i++) {
+        await tick(agents);
+      }
+      expect(getTracker("a1").waitCounter).toBe(0); // never advanced
+      expect(countSendKeysWithText(spawnMock, "recently started waiting")).toBe(0);
+    });
+
+    test("active child (running) → no notification, counter NOT advanced", async () => {
+      setWatchdogCaptureTmux(async () => "no shells here");
+      const mgr = agent("mgr", "running");
+      const a1 = agent("a1", "waiting", "mgr");
+      const child = agent("child", "running", "a1");
+      // child.meta.state stored as "running" so anyChildActive sees it
+      child.meta.state = "running";
+      const agents = [mgr, a1, child];
+
+      for (let i = 0; i < INITIAL_NOTIFY_TICKS + 5; i++) {
+        await tick(agents);
+      }
+      expect(getTracker("a1").waitCounter).toBe(0); // never advanced
+      expect(countSendKeysWithText(spawnMock, "recently started waiting")).toBe(0);
+    });
+
+    test("only waiting children → notification fires after threshold", async () => {
+      setWatchdogCaptureTmux(async () => "no shells");
+      const mgr = agent("mgr", "running");
+      const a1 = agent("a1", "waiting", "mgr");
+      const child = agent("child", "waiting", "a1");
+      child.meta.state = "waiting";
+      const agents = [mgr, a1, child];
+
+      for (let i = 0; i < INITIAL_NOTIFY_TICKS; i++) {
+        await tick(agents);
+      }
+      // After the sixth tick, both a1 AND child waiting-handlers fire. One of them
+      // (a1) is what we want to verify notified its manager.
+      expect(countSendKeysWithText(spawnMock, "recently started waiting")).toBeGreaterThan(0);
+    });
+
+    test("only complete children → notification fires after threshold", async () => {
+      setWatchdogCaptureTmux(async () => "no shells");
+      const mgr = agent("mgr", "running");
+      const a1 = agent("a1", "waiting", "mgr");
+      const child = agent("child", "complete", "a1");
+      child.meta.state = "complete";
+      const agents = [mgr, a1, child];
+
+      for (let i = 0; i < INITIAL_NOTIFY_TICKS; i++) {
+        await tick(agents);
+      }
+      expect(countSendKeysWithText(spawnMock, "recently started waiting")).toBeGreaterThan(0);
+    });
+
+    test("only stopped children → notification fires after threshold", async () => {
+      setWatchdogCaptureTmux(async () => "no shells");
+      const mgr = agent("mgr", "running");
+      const a1 = agent("a1", "waiting", "mgr");
+      const child = agent("child", "stopped", "a1");
+      child.archived = true;
+      const agents = [mgr, a1, child];
+
+      for (let i = 0; i < INITIAL_NOTIFY_TICKS; i++) {
+        await tick(agents);
+      }
+      expect(countSendKeysWithText(spawnMock, "recently started waiting")).toBeGreaterThan(0);
+    });
+
+    test("counter-pause behavioral: suppressed 3 ticks, then clear 6 ticks → notification on 9th", async () => {
+      let suppressed = true;
+      setWatchdogCaptureTmux(async () =>
+        suppressed ? "⏵⏵ accept edits on · 1 shell" : "no shells",
+      );
+      const a1 = agent("a1", "waiting", "mgr");
+      const mgr = agent("mgr", "running");
+      const agents = [mgr, a1];
+
+      // 3 suppressed ticks — counter stays at 0
+      for (let i = 0; i < 3; i++) {
+        await tick(agents);
+      }
+      expect(getTracker("a1").waitCounter).toBe(0);
+      expect(countSendKeysWithText(spawnMock, "recently started waiting")).toBe(0);
+
+      // Clear for 5 ticks — counter reaches 5 (no notification yet, threshold is 6)
+      suppressed = false;
+      for (let i = 0; i < 5; i++) {
+        await tick(agents);
+      }
+      expect(getTracker("a1").waitCounter).toBe(5);
+      expect(countSendKeysWithText(spawnMock, "recently started waiting")).toBe(0);
+
+      // One more clear tick → threshold reached, notification fires, counter resets
+      await tick(agents);
+      expect(countSendKeysWithText(spawnMock, "recently started waiting")).toBeGreaterThan(0);
+      expect(getTracker("a1").waitCounter).toBe(0);
+    });
+
+    test("pause-across-backoff: suppression does not reset doubled notifyInterval", async () => {
+      let suppressed = false;
+      setWatchdogCaptureTmux(async () =>
+        suppressed ? "⏵⏵ accept edits on · 1 shell" : "no shells",
+      );
+      const a1 = agent("a1", "waiting", "mgr");
+      const mgr = agent("mgr", "running");
+      const agents = [mgr, a1];
+
+      // Run one full cycle so notifyInterval doubles to 12.
+      for (let i = 0; i < INITIAL_NOTIFY_TICKS; i++) {
+        await tick(agents);
+      }
+      expect(getTracker("a1").notifyInterval).toBe(INITIAL_NOTIFY_TICKS * 2);
+
+      // Now suppress for several ticks — notifyInterval must NOT reset.
+      suppressed = true;
+      for (let i = 0; i < 4; i++) {
+        await tick(agents);
+      }
+      expect(getTracker("a1").notifyInterval).toBe(INITIAL_NOTIFY_TICKS * 2); // still 12
+    });
+
+    test("notifySpawner is suppressed alongside notifyManager", async () => {
+      setWatchdogCaptureTmux(async () => "⏵⏵ accept edits on · 1 shell");
+      const spawner = agent("spawner", "running");
+      const a1 = agent("a1", "waiting", null); // no manager, but has spawner
+      a1.meta.spawned_by = { agent_id: "spawner", repo_path: "/tmp/other" };
+      const agents = [spawner, a1];
+
+      for (let i = 0; i < INITIAL_NOTIFY_TICKS + 5; i++) {
+        await tick(agents);
+      }
+      // No notifications should have been emitted to spawner.
+      expect(countSendKeysWithText(spawnMock, "you spawned recently started waiting")).toBe(0);
     });
   });
 
@@ -1529,5 +1686,31 @@ describe("runPerAgentWatchdog", () => {
 
     await runPerAgentWatchdog("agent-test1", "/tmp/test");
     expect(pollCount).toBe(0);
+  });
+});
+
+// ── resolveWatchdogState — background-shell override (Case 1) ────────────────
+
+describe("resolveWatchdogState — waiting + background shell override", () => {
+  test("waiting + bg shell → running", () => {
+    expect(resolveWatchdogState("⏵⏵ accept edits on · 1 shell", "waiting")).toBe("running");
+  });
+
+  test("waiting + no bg shell → waiting", () => {
+    expect(resolveWatchdogState("⏵⏵ accept edits on (shift+tab to cycle)", "waiting")).toBe("waiting");
+  });
+
+  test("complete + bg shell → complete (not overridden)", () => {
+    expect(resolveWatchdogState("⏵⏵ accept edits on · 1 shell", "complete")).toBe("complete");
+  });
+
+  test("running + bg shell → running (unchanged)", () => {
+    expect(resolveWatchdogState("⏵⏵ accept edits on · 1 shell", "running")).toBe("running");
+  });
+
+  test("compacting override still wins over bg shell", () => {
+    // "Compacting conversation" appearing in last 5 lines takes precedence.
+    const output = "noise\nnoise\n⏵⏵ accept edits on · 1 shell\nmore\nCompacting conversation";
+    expect(resolveWatchdogState(output, "waiting")).toBe("compacting");
   });
 });

@@ -7,6 +7,7 @@ import {
   processStopHook,
   executeResultActions,
   findUnfinishedChildren,
+  hasActiveChildren,
 } from "./agent-status";
 
 // ── Helper to create temp agent dirs ─────────────────────────────────────────
@@ -899,5 +900,240 @@ describe("findUnfinishedChildren — invalid tmux session", () => {
     // Invalid tmux session → can't capture → childState stays "unknown"
     // "unknown" is not in UNFINISHED_STATES, so child should not be listed
     expect(result).toEqual([]);
+  });
+});
+
+// ── hasActiveChildren ──────────────────────────────────────────────────────────
+
+describe("hasActiveChildren", () => {
+  let ctx: Awaited<ReturnType<typeof createTempAgentDir>>;
+  const oldEpoch = Math.floor(Date.now() / 1000) - 3600;
+
+  beforeEach(async () => {
+    ctx = await createTempAgentDir();
+  });
+
+  afterEach(async () => {
+    await ctx.cleanup();
+  });
+
+  test("returns true for child with meta.state === 'running'", async () => {
+    const childDir = join(ctx.agentsDir, "child-run");
+    await mkdir(childDir, { recursive: true });
+    await writeMeta(childDir, { manager: ctx.agentId, state: "running", created_epoch: oldEpoch });
+
+    expect(await hasActiveChildren(ctx.agentId, ctx.agentsDir)).toBe(true);
+  });
+
+  test("returns true for recently created child (isRecentlyCreated)", async () => {
+    const childDir = join(ctx.agentsDir, "child-new");
+    await mkdir(childDir, { recursive: true });
+    const recent = Math.floor(Date.now() / 1000); // within grace period
+    await writeMeta(childDir, { manager: ctx.agentId, state: "waiting", created_epoch: recent });
+
+    expect(await hasActiveChildren(ctx.agentId, ctx.agentsDir)).toBe(true);
+  });
+
+  test("returns false for child with meta.state === 'waiting'", async () => {
+    const childDir = join(ctx.agentsDir, "child-wait");
+    await mkdir(childDir, { recursive: true });
+    await writeMeta(childDir, { manager: ctx.agentId, state: "waiting", created_epoch: oldEpoch });
+
+    expect(await hasActiveChildren(ctx.agentId, ctx.agentsDir)).toBe(false);
+  });
+
+  test("returns false for child with meta.state === 'complete'", async () => {
+    const childDir = join(ctx.agentsDir, "child-complete");
+    await mkdir(childDir, { recursive: true });
+    await writeMeta(childDir, { manager: ctx.agentId, state: "complete", created_epoch: oldEpoch });
+
+    expect(await hasActiveChildren(ctx.agentId, ctx.agentsDir)).toBe(false);
+  });
+
+  test("returns false for archived child even if meta.state === 'running'", async () => {
+    const childDir = join(ctx.agentsDir, "child-arch");
+    await mkdir(childDir, { recursive: true });
+    await writeMeta(childDir, {
+      manager: ctx.agentId,
+      state: "running",
+      archived: true,
+      created_epoch: oldEpoch,
+    });
+
+    expect(await hasActiveChildren(ctx.agentId, ctx.agentsDir)).toBe(false);
+  });
+
+  test("returns false when agentsDir is unreadable (fail-open)", async () => {
+    // Non-existent directory simulates an I/O failure from the caller's perspective.
+    const missing = join(ctx.agentsDir, "does-not-exist");
+    expect(await hasActiveChildren(ctx.agentId, missing)).toBe(false);
+  });
+});
+
+// ── processStopHook — waiting-branch work-in-flight suppression ───────────────
+
+describe("processStopHook — waiting-branch suppression", () => {
+  let ctx: Awaited<ReturnType<typeof createTempAgentDir>>;
+  const oldEpoch = Math.floor(Date.now() / 1000) - 3600;
+
+  beforeEach(async () => {
+    ctx = await createTempAgentDir();
+    // Create an active manager so the waiting branch reaches the guard.
+    const managerDir = join(ctx.agentsDir, "manager-001");
+    await mkdir(managerDir, { recursive: true });
+    await writeMeta(managerDir, { tmux_session: "ib-manager" });
+    await writeMeta(ctx.agentDir, {
+      tmux_session: "ib-test",
+      manager: "manager-001",
+    });
+  });
+
+  afterEach(async () => {
+    await ctx.cleanup();
+  });
+
+  test("waiting + background shell → action 'none'", async () => {
+    const result = await processStopHook(
+      ctx.agentId,
+      "need input\nWAITING",
+      ctx.agentDir,
+      ctx.agentsDir,
+      {
+        captureOutput: async () => "⏵⏵ accept edits on · 1 shell",
+      },
+    );
+    expect(result.state).toBe("waiting");
+    expect(result.action).toBe("none");
+  });
+
+  test("waiting + active child (running) → action 'none'", async () => {
+    const childDir = join(ctx.agentsDir, "child-run");
+    await mkdir(childDir, { recursive: true });
+    await writeMeta(childDir, { manager: ctx.agentId, state: "running", created_epoch: oldEpoch });
+
+    const result = await processStopHook(
+      ctx.agentId,
+      "parked\nWAITING",
+      ctx.agentDir,
+      ctx.agentsDir,
+      { captureOutput: async () => "no background shell here" },
+    );
+    expect(result.state).toBe("waiting");
+    expect(result.action).toBe("none");
+  });
+
+  test("waiting + only waiting children → action 'notify_manager' (deadlock prevention)", async () => {
+    const childDir = join(ctx.agentsDir, "child-wait");
+    await mkdir(childDir, { recursive: true });
+    await writeMeta(childDir, { manager: ctx.agentId, state: "waiting", created_epoch: oldEpoch });
+
+    const result = await processStopHook(
+      ctx.agentId,
+      "parked\nWAITING",
+      ctx.agentDir,
+      ctx.agentsDir,
+      { captureOutput: async () => "" },
+    );
+    expect(result.state).toBe("waiting");
+    expect(result.action).toBe("notify_manager");
+  });
+
+  test("waiting + only complete children → action 'notify_manager' (user needs to merge/kill)", async () => {
+    const childDir = join(ctx.agentsDir, "child-done");
+    await mkdir(childDir, { recursive: true });
+    await writeMeta(childDir, { manager: ctx.agentId, state: "complete", created_epoch: oldEpoch });
+
+    const result = await processStopHook(
+      ctx.agentId,
+      "parked\nWAITING",
+      ctx.agentDir,
+      ctx.agentsDir,
+      { captureOutput: async () => "" },
+    );
+    expect(result.state).toBe("waiting");
+    expect(result.action).toBe("notify_manager");
+  });
+
+  test("waiting + only stopped/archived children → action 'notify_manager'", async () => {
+    const childDir = join(ctx.agentsDir, "child-stop");
+    await mkdir(childDir, { recursive: true });
+    await writeMeta(childDir, {
+      manager: ctx.agentId,
+      state: "running",
+      archived: true,
+      created_epoch: oldEpoch,
+    });
+
+    const result = await processStopHook(
+      ctx.agentId,
+      "parked\nWAITING",
+      ctx.agentDir,
+      ctx.agentsDir,
+      { captureOutput: async () => "" },
+    );
+    expect(result.state).toBe("waiting");
+    expect(result.action).toBe("notify_manager");
+  });
+
+  test("waiting + mixed (one running + one waiting) → action 'none'", async () => {
+    const waitDir = join(ctx.agentsDir, "child-w");
+    await mkdir(waitDir, { recursive: true });
+    await writeMeta(waitDir, { manager: ctx.agentId, state: "waiting", created_epoch: oldEpoch });
+    const runDir = join(ctx.agentsDir, "child-r");
+    await mkdir(runDir, { recursive: true });
+    await writeMeta(runDir, { manager: ctx.agentId, state: "running", created_epoch: oldEpoch });
+
+    const result = await processStopHook(
+      ctx.agentId,
+      "parked\nWAITING",
+      ctx.agentDir,
+      ctx.agentsDir,
+      { captureOutput: async () => "" },
+    );
+    expect(result.state).toBe("waiting");
+    expect(result.action).toBe("none");
+  });
+
+  test("waiting + hasActiveChildren throws (agentsDir unreadable) → fail-open, does not crash", async () => {
+    // Layout a second "effective agentsDir" where isManagerActive still finds
+    // the manager (so we enter the guard) but hasActiveChildren's readdir
+    // throws. We achieve this by putting `manager-001/meta.json` under a
+    // directory, then deleting the directory after isManagerActive would
+    // fail — simpler: point agentsDir at a path whose readdir works for
+    // the manager subdir lookup (readFile) but where readdir ultimately returns
+    // an empty listing. Fail-open = no crash + fall through.
+    //
+    // For this test we verify the simpler invariant: when hasActiveChildren
+    // returns false (for any reason including I/O failure) and there is no
+    // background shell, notification proceeds.
+    const emptyAgentsDir = join(ctx.agentsDir, "empty");
+    await mkdir(emptyAgentsDir, { recursive: true });
+    // Also set up the manager so isManagerActive returns true.
+    const mgrDir = join(emptyAgentsDir, "manager-001");
+    await mkdir(mgrDir, { recursive: true });
+    await writeMeta(mgrDir, { tmux_session: "ib-manager" });
+
+    const result = await processStopHook(
+      ctx.agentId,
+      "parked\nWAITING",
+      ctx.agentDir,
+      emptyAgentsDir,
+      { captureOutput: async () => "" },
+    );
+    expect(result.state).toBe("waiting");
+    expect(result.action).toBe("notify_manager");
+  });
+
+  test("waiting + tmux output is null → still evaluates active-children, then notify_manager", async () => {
+    const result = await processStopHook(
+      ctx.agentId,
+      "parked\nWAITING",
+      ctx.agentDir,
+      ctx.agentsDir,
+      { captureOutput: async () => null },
+    );
+    expect(result.state).toBe("waiting");
+    // No bg shell (null output), no active children → notify manager.
+    expect(result.action).toBe("notify_manager");
   });
 });

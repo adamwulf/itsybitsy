@@ -195,6 +195,29 @@ export function hasBackgroundTasks(tmuxOutput: string): boolean {
   return /⏵⏵.*·\s\d+\s/.test(last15);
 }
 
+/**
+ * Predicate: does any agent in `allAgents` represent an "active" direct child
+ * of `parentId`?
+ *
+ * "Active" means `meta.manager === parentId` AND `!archived` AND
+ * (stored `meta.state === "running"` OR `isRecentlyCreated(meta.created_epoch)`).
+ *
+ * Deliberately excludes children in `waiting` (would create transitive-waiting
+ * deadlock — the top of a parked chain must still be notified) and `complete`
+ * (the user needs to merge/kill those). `compacting` and `rate_limited` are
+ * transient tmux overrides; the child's stored `meta.state` remains `"running"`
+ * in those cases, so they are counted as active without per-child tmux calls.
+ *
+ * Used for notification suppression in both the stop hook and the watchdog.
+ */
+export function anyChildActive(parentId: string, allAgents: Agent[]): boolean {
+  return allAgents.some((a) =>
+    a.meta.manager === parentId &&
+    !a.archived &&
+    (a.meta.state === "running" || isRecentlyCreated(a.meta.created_epoch))
+  );
+}
+
 /** Get the worktree path for an agent, or the repo root if worktree is false. */
 export function agentWorktreePath(agent: Agent): string {
   if (agent.meta.worktree === false) return agent.repoPath;
@@ -612,6 +635,14 @@ export async function detectAgentStates(agents: Agent[]): Promise<void> {
       }
       if (isRateLimited(output)) {
         agent.state = "rate_limited";
+        return;
+      }
+      // Background-shell override: waiting agents with a live background
+      // shell are actually still doing work. Scoped strictly to
+      // meta.state === "waiting" — we do NOT override "complete" (the agent
+      // signed off intentionally) or "running" (already correct).
+      if (agent.meta.state === "waiting" && hasBackgroundTasks(output)) {
+        agent.state = "running";
         return;
       }
 

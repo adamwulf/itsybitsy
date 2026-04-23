@@ -467,12 +467,18 @@ Ordered. Each bullet is one commit-scoped unit; test changes go with their code.
 ### 7.2 SPEC.md updates
 
 - **§1.3 State Detection Flow** (around line 85-99): add step 3.5 "If `meta.state === 'waiting'` and tmux shows `⏵⏵.*·\s\d+\s` (background shells) → `running`."
-- **§6.2 Stop Hook Actions table** (around line 684-693): add rows:
-  - `waiting | Background tasks active | No action (agent is working via background tasks)`
-  - `waiting | Has active children (non-terminal: running/waiting/complete/creating) | No action (children still working)`
+- **§6.2 Stop Hook Actions table** (around line 684-693): add rows (predicate wording must exactly match `hasActiveChildren` in code — only `running` or `creating` children count as "active"; `waiting` and `complete` children do NOT):
+  - `waiting | Background tasks active (⏵⏵.*·\s\d+\s in last 15 lines of tmux) | No action (agent is working via background tasks)`
+  - `waiting | Has at least one direct child with meta.state === "running" OR isRecentlyCreated(created_epoch) | No action (child still working)`
   - `waiting | Has manager, no background tasks, no active children | Notify manager (existing)`
-- **§8.5 Watchdog Monitoring Behaviors table** (around line 1014-1021): update the `waiting` row to: "Increment waiting counter unless (a) tmux shows background shells OR (b) agent has non-terminal children — in which case suppress notification and pause counter. Otherwise existing backoff."
-- Add a short subsection "8.5.x Work-in-flight suppression" explaining the invariant: we never upward-notify a manager about a child that is directly (background shell) or transitively (via grandchildren) doing work.
+- **§8.5 Watchdog Monitoring Behaviors table** (around line 1014-1021): update the `waiting` row to: "Increment waiting counter unless (a) tmux shows background shells OR (b) agent has at least one direct child in `{running, creating}` — in which case suppress notification and pause counter. Otherwise existing backoff."
+- Add a short subsection "8.5.x Work-in-flight suppression" explaining the invariant. **Scoped wording** (important — avoid broader phrasings that creep toward "any descendant in a non-terminal state"):
+
+  > We suppress upward notification of a waiting agent when that agent has work in flight. "Work in flight" means one of:
+  > 1. **Direct background shell** — the agent's own tmux footer shows `⏵⏵.*·\s\d+\s` (e.g., `⏵⏵ accept edits on · 1 shell`), OR
+  > 2. **Direct active child** — the agent has at least one immediate child (`meta.manager === parentId`) whose `meta.state === "running"` OR which is within the `isRecentlyCreated` grace period (i.e., still `creating`).
+  >
+  > "Transitive" suppression is bounded to this one-level walk. We do NOT recurse into grandchildren to determine a parent's suppression status; the `running`/`creating` check on direct children is sufficient because each layer's watchdog independently applies this guard. If a grandchild is running, the child-manager will have its own direct active child and suppress its own notification; that upward silence propagates naturally without the parent ever needing to look past its immediate children. Critically, `waiting` and `complete` children are **not** "work in flight" — the top of a parked chain must still be told, and `complete` children need user merge/kill.
 
 ### 7.3 Out-of-scope / explicitly unfixed
 

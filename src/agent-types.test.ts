@@ -502,6 +502,46 @@ body`);
     expect(type.description).toBe("parent description");
   });
 
+  test("model: empty string in child inherits parent's model (not wipes to undefined)", async () => {
+    // PLAN-INHERITS.md rules table: `model` — Child replaces if key is
+    // **present** and non-empty string (empty string → inherit, matches
+    // existing `""` → undefined coercion).
+    await writeType("parent", `---
+name: parent
+model: opus
+---
+body`);
+    await writeType("child", `---
+inherits: parent
+model: ""
+---
+body`);
+
+    const type = await loadAgentType("child");
+    expect(type.model).toBe("opus");
+  });
+
+  test("icon: empty string in child inherits parent's icon (not wipes to undefined)", async () => {
+    // PLAN-INHERITS.md rules table: `icon` — Child replaces if key is
+    // **present** and non-empty. An empty child icon means "inherit".
+    // (Use a BMP character — the legacy iconChar extractor returns the first
+    // UTF-16 code unit, which splits astral-plane emoji; that pre-existing
+    // quirk is orthogonal to the inheritance rule exercised here.)
+    await writeType("parent", `---
+name: parent
+icon: "M"
+---
+body`);
+    await writeType("child", `---
+inherits: parent
+icon: ""
+---
+body`);
+
+    const type = await loadAgentType("child");
+    expect(type.icon).toBe("M");
+  });
+
   test("canSpawnChildren: false on child overrides true on parent (raw-frontmatter-merge regression)", async () => {
     await writeType("parent", `---
 name: parent
@@ -970,32 +1010,27 @@ repos: []
     expect(err).toBeDefined();
   });
 
-  test("rejects non-string repos entries", async () => {
-    // Inline arrays of numbers parse as strings with the current simple YAML
-    // parser (values aren't coerced inside `[]`). To force a non-string entry
-    // we use block-list syntax — but those too round-trip to strings. The
-    // validator handles the general shape; exercise it by mutating the parsed
-    // frontmatter path. For coverage, block form with a nested list value.
-    await writeType("bad", `---
+  test("numeric repos entries are coerced to strings by the parser (no false positives)", async () => {
+    // The simple YAML parser converts block-list and inline-array numeric
+    // tokens to strings (`- 1` → "1"). This test documents that behavior
+    // so the validator's "repos entries must be strings" check is reserved
+    // for shapes the parser can't flatten — e.g. direct object entries
+    // (covered by the next test).
+    await writeType("coerced", `---
 repos:
   - 1
   - 2
 ---
 `);
 
-    // After parsing, entries are likely strings "1"/"2" — skip this narrow
-    // case if the parser normalizes. The validation path is still exercised
-    // by the other tests in this describe block.
     const errors = await validateAllAgentTypes();
-    // Either the list-of-strings check passes (parser coerced to strings) or
-    // the entries-must-be-strings error fires. Both are acceptable — we just
-    // want to verify no unexpected crash.
-    // If the validator reports the specific error, great:
-    const entriesErr = errors.find(
-      (e) => e.startsWith("bad.md") && e.includes("repos entries must be strings"),
-    );
-    const loadOk = !errors.some((e) => e.startsWith("bad.md") && e.includes("failed"));
-    expect(entriesErr !== undefined || loadOk).toBe(true);
+    // No errors should be reported for this file — numeric tokens become
+    // string "1"/"2" after parsing, and the validator accepts strings.
+    const hasFileErrors = errors.some((e) => e.startsWith("coerced.md"));
+    expect(hasFileErrors).toBe(false);
+
+    const type = await loadAgentType("coerced");
+    expect(type.repos).toEqual(["1", "2"]);
   });
 
   test("rejects object repos (not a list)", async () => {

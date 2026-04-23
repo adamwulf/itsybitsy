@@ -411,6 +411,14 @@ function mergeRawFrontmatters(
     "repos",
   ]);
 
+  // Keys that treat an explicit empty string as "inherit / no override" —
+  // matching PLAN-INHERITS.md's rules table (icon must be present *and
+  // non-empty*; model's empty string collapses to the inherit convention).
+  // Without this, a child that declares `icon:` or `model:` with no value
+  // silently wipes the parent's value to undefined. description and
+  // instructionStyle keep the strict "present → replace" rule.
+  const EMPTY_STRING_INHERITS = new Set(["icon", "model"]);
+
   // Accumulated permission lists (unioned across the chain, deduped below).
   const allAllow: string[] = [];
   const allDeny: string[] = [];
@@ -420,11 +428,10 @@ function mergeRawFrontmatters(
 
     for (const key of Object.keys(fm)) {
       if (SCALAR_KEYS.has(key)) {
-        // Present in this (possibly descendant) level → overwrite. The
-        // `icon` and `model` fields have a looser "present but empty string
-        // means inherit" rule applied later in `buildAgentTypeFromFrontmatter`;
-        // we still copy them so the descendant's empty-string intent is
-        // preserved and can be distinguished from "absent" downstream.
+        // Skip empty-string values for icon/model — those mean "inherit",
+        // matching the PLAN-INHERITS.md rule and the existing `""` → undefined
+        // coercion in buildAgentTypeFromFrontmatter.
+        if (EMPTY_STRING_INHERITS.has(key) && fm[key] === "") continue;
         merged[key] = fm[key];
       }
     }

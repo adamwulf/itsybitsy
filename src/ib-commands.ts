@@ -1482,9 +1482,13 @@ export async function newAgent(
     const allKnownRepos = await listRepos();
     const entry = allKnownRepos.find((r) => r.path === rootRepoPath);
     const basenameOnly = basename(rootRepoPath);
-    const candidates = entry
+    // Trim whitespace on the candidates as a defensive parallel to the
+    // `allowed` list's .trim() — a nickname with trailing whitespace in
+    // repos.json should still match a clean entry in the type's repos list.
+    const candidates = (entry
       ? [entry.name, entry.nickname].filter((s): s is string => typeof s === "string" && s.length > 0)
-      : [basenameOnly];
+      : [basenameOnly]
+    ).map((s) => s.trim()).filter(Boolean);
     const allowed = agentTypeDef.repos.map((s) => s.trim()).filter(Boolean);
     const matches = candidates.some((c) => allowed.includes(c));
     if (!matches) {

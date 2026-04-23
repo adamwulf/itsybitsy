@@ -193,7 +193,7 @@ export async function processStopHook(
 
     if (meta?.manager && await isManagerActive(agentsDir, meta.manager)) {
       // Suppress upward notification if the agent still has work in flight
-      // (background shell or an active direct child). See SPEC.md §8.5.x.
+      // (background shell or an active direct child). See SPEC.md §8.5.1.
       // `waiting` / `complete` children do NOT count as active — see
       // hasActiveChildren for rationale.
       let waitingBgOutput: string | null = null;

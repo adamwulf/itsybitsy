@@ -251,7 +251,7 @@ async function sendTmuxEnter(tmuxSession: string): Promise<boolean> {
  * Increments wait counter. After threshold, notifies manager with exponential backoff.
  * Backoff: 30s -> 1m -> 2m -> 4m -> 8m -> 16m -> 32m -> 64m cap.
  *
- * Work-in-flight suppression (SPEC §8.5.x):
+ * Work-in-flight suppression (SPEC §8.5.1):
  *   If the agent has a direct background shell OR at least one direct child
  *   that is actively doing work (meta.state === "running" OR recently created),
  *   suppress BOTH notifyManager and notifySpawner AND pause the counter.

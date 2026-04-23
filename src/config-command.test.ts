@@ -87,7 +87,11 @@ describe("config list", () => {
     expect(output).toContain("maxAgents = 10 (default)");
     expect(output).toContain("model = opus (default)");
     expect(output).toContain("autoCompactThreshold = (unset)");
-    expect(output).toContain("permissions.manager.allow = [] (default)");
+    // Permission list keys have all been removed from CONFIG_KEYS and now live in
+    // ~/.itsybitsy/agent-types/*.md frontmatter.
+    expect(output).not.toContain("permissions.repo.allow");
+    expect(output).not.toContain("permissions.all.allow");
+    expect(output).not.toContain("permissions.coordinator.allow");
     // Legend line
     expect(output).toContain("Sources:");
   });
@@ -140,15 +144,12 @@ describe("config get", () => {
     expect(logged()).toBe("false");
   });
 
-  test("gets array value as JSON", async () => {
-    await Bun.write(cfgPath, JSON.stringify({ permissions: { manager: { allow: ["Bash(*)"] } } }));
-    await runConfigCommand(["get", "permissions.manager.allow"]);
-    expect(logged()).toBe('["Bash(*)"]');
-  });
-
-  test("gets empty array default", async () => {
-    await runConfigCommand(["get", "permissions.worker.deny"]);
-    expect(logged()).toBe("[]");
+  test("rejects array-style permission keys as unknown (moved to _all.md / _non_coordinator.md)", async () => {
+    await expect(runConfigCommand(["get", "permissions.repo.allow"])).rejects.toThrow("EXIT");
+    expect(errored()).toContain("Unknown config key: 'permissions.repo.allow'");
+    errorSpy.mockClear();
+    await expect(runConfigCommand(["get", "permissions.all.allow"])).rejects.toThrow("EXIT");
+    expect(errored()).toContain("Unknown config key: 'permissions.all.allow'");
   });
 
   test("unset key prints empty string", async () => {
@@ -249,10 +250,19 @@ describe("config set", () => {
     expect(errored()).toContain("'model' must be one of: sonnet, opus, haiku");
   });
 
-  test("rejects array key", async () => {
-    await expect(runConfigCommand(["set", "permissions.manager.allow", "foo"])).rejects.toThrow("EXIT");
-    expect(errored()).toContain("array key");
-    expect(errored()).toContain("ib config add");
+  test("rejects deprecated permissions.repo.allow as unknown key (moved to _non_coordinator.md)", async () => {
+    await expect(runConfigCommand(["set", "permissions.repo.allow", "foo"])).rejects.toThrow("EXIT");
+    expect(errored()).toContain("Unknown config key: 'permissions.repo.allow'");
+  });
+
+  test("rejects deprecated permissions.all.allow as unknown key (moved to _all.md)", async () => {
+    await expect(runConfigCommand(["set", "permissions.all.allow", "foo"])).rejects.toThrow("EXIT");
+    expect(errored()).toContain("Unknown config key: 'permissions.all.allow'");
+  });
+
+  test("rejects deprecated permissions.coordinator.allow as unknown key", async () => {
+    await expect(runConfigCommand(["set", "permissions.coordinator.allow", "foo"])).rejects.toThrow("EXIT");
+    expect(errored()).toContain("Unknown config key: 'permissions.coordinator.allow'");
   });
 
   test("rejects unknown key", async () => {
@@ -273,38 +283,12 @@ describe("config set", () => {
 
 // ── add ──
 
+// NOTE: With the move of all permission lists to ~/.itsybitsy/agent-types/*.md
+// files, CONFIG_KEYS no longer has any string[] (array) entries. The `add`/`remove`
+// subcommands remain in the CLI but exercise an empty ARRAY_KEYS list, so every
+// key request is rejected as non-array.
 describe("config add", () => {
-  test("adds value to array", async () => {
-    await runConfigCommand(["add", "permissions.manager.allow", "Bash(*)"]);
-    expect(logged()).toBe("Added 'Bash(*)' to permissions.manager.allow");
-    const data = await Bun.file(cfgPath).json();
-    expect(data.permissions.manager.allow).toEqual(["Bash(*)"]);
-  });
-
-  test("adds to existing array", async () => {
-    await Bun.write(cfgPath, JSON.stringify({ permissions: { manager: { allow: ["Read"] } } }));
-    await runConfigCommand(["add", "permissions.manager.allow", "Write"]);
-    const data = await Bun.file(cfgPath).json();
-    expect(data.permissions.manager.allow).toEqual(["Read", "Write"]);
-  });
-
-  test("prevents duplicates", async () => {
-    await Bun.write(cfgPath, JSON.stringify({ permissions: { manager: { allow: ["Bash(*)"] } } }));
-    await runConfigCommand(["add", "permissions.manager.allow", "Bash(*)"]);
-    expect(logged()).toBe("Value 'Bash(*)' already exists in permissions.manager.allow");
-    const data = await Bun.file(cfgPath).json();
-    expect(data.permissions.manager.allow).toEqual(["Bash(*)"]);
-  });
-
-  test("creates config file", async () => {
-    const newPath = join(tmpDir, "new2", ".itsybitsy", "config.json");
-    setUserConfigPath(newPath);
-    await runConfigCommand(["add", "permissions.worker.deny", "Edit"]);
-    const data = await Bun.file(newPath).json();
-    expect(data.permissions.worker.deny).toEqual(["Edit"]);
-  });
-
-  test("rejects non-array key", async () => {
+  test("rejects non-array scalar key", async () => {
     await expect(runConfigCommand(["add", "model", "opus"])).rejects.toThrow("EXIT");
     expect(errored()).toContain("not an array key");
     expect(exitSpy).toHaveBeenCalledWith(1);
@@ -315,51 +299,28 @@ describe("config add", () => {
     expect(errored()).toContain("key and value required");
   });
 
-  test("missing value exits with error", async () => {
-    await expect(runConfigCommand(["add", "permissions.manager.allow"])).rejects.toThrow("EXIT");
-    expect(errored()).toContain("key and value required");
+  test("rejects deprecated permissions.repo.allow as non-array key (moved to _non_coordinator.md)", async () => {
+    await expect(runConfigCommand(["add", "permissions.repo.allow", "Bash(*)"])).rejects.toThrow("EXIT");
+    expect(errored()).toContain("'permissions.repo.allow' is not an array key.");
   });
 
-  test("works with all four array keys", async () => {
-    for (const key of [
-      "permissions.manager.allow",
-      "permissions.manager.deny",
-      "permissions.worker.allow",
-      "permissions.worker.deny",
-    ]) {
-      logSpy.mockClear();
-      await runConfigCommand(["add", key, "TestTool"]);
-      expect(logged()).toContain(`Added 'TestTool' to ${key}`);
-    }
+  test("rejects deprecated permissions.all.deny as non-array key (moved to _all.md)", async () => {
+    await expect(runConfigCommand(["add", "permissions.all.deny", "Write"])).rejects.toThrow("EXIT");
+    expect(errored()).toContain("'permissions.all.deny' is not an array key.");
+  });
+
+  test("rejects deprecated permissions.coordinator.allow as non-array key", async () => {
+    await expect(runConfigCommand(["add", "permissions.coordinator.allow", "Bash(*)"])).rejects.toThrow("EXIT");
+    expect(errored()).toContain("'permissions.coordinator.allow' is not an array key.");
   });
 });
 
 // ── remove ──
 
+// NOTE: CONFIG_KEYS has no array entries after permissions moved to .md files,
+// so `remove` rejects every key as non-array.
 describe("config remove", () => {
-  test("removes value from array", async () => {
-    await Bun.write(cfgPath, JSON.stringify({ permissions: { worker: { deny: ["Bash(*)", "Edit"] } } }));
-    await runConfigCommand(["remove", "permissions.worker.deny", "Bash(*)"]);
-    expect(logged()).toBe("Removed 'Bash(*)' from permissions.worker.deny");
-    const data = await Bun.file(cfgPath).json();
-    expect(data.permissions.worker.deny).toEqual(["Edit"]);
-  });
-
-  test("missing value prints message and succeeds", async () => {
-    await Bun.write(cfgPath, JSON.stringify({ permissions: { worker: { deny: ["Edit"] } } }));
-    await runConfigCommand(["remove", "permissions.worker.deny", "Bash(*)"]);
-    expect(logged()).toBe("Value 'Bash(*)' not found in permissions.worker.deny");
-  });
-
-  test("config file not found exits with error", async () => {
-    const missingPath = join(tmpDir, "missing", "config.json");
-    setUserConfigPath(missingPath);
-    await expect(runConfigCommand(["remove", "permissions.manager.allow", "X"])).rejects.toThrow("EXIT");
-    expect(errored()).toContain("Config file not found");
-    expect(exitSpy).toHaveBeenCalledWith(1);
-  });
-
-  test("rejects non-array key", async () => {
+  test("rejects non-array scalar key", async () => {
     await expect(runConfigCommand(["remove", "model", "opus"])).rejects.toThrow("EXIT");
     expect(errored()).toContain("not an array key");
   });
@@ -369,10 +330,9 @@ describe("config remove", () => {
     expect(errored()).toContain("key and value required");
   });
 
-  test("removes from empty array (not in array)", async () => {
-    await Bun.write(cfgPath, JSON.stringify({}));
-    await runConfigCommand(["remove", "permissions.manager.allow", "X"]);
-    expect(logged()).toBe("Value 'X' not found in permissions.manager.allow");
+  test("rejects deprecated permissions.repo.allow as non-array key", async () => {
+    await expect(runConfigCommand(["remove", "permissions.repo.allow", "X"])).rejects.toThrow("EXIT");
+    expect(errored()).toContain("'permissions.repo.allow' is not an array key.");
   });
 });
 
@@ -396,12 +356,13 @@ describe("config unset", () => {
     expect(data.hooks.statusVisible).toBe(true);
   });
 
-  test("unsets array key", async () => {
-    await Bun.write(cfgPath, JSON.stringify({ permissions: { manager: { allow: ["Bash(*)"] } } }));
-    await runConfigCommand(["unset", "permissions.manager.allow"]);
-    expect(logged()).toBe("Unset permissions.manager.allow (reverted to default)");
-    const data = await Bun.file(cfgPath).json();
-    expect(data.permissions.manager.allow).toBeUndefined();
+  test("rejects unset of deprecated permissions.repo.allow as unknown key", async () => {
+    // permissions.repo.* now lives in ~/.itsybitsy/agent-types/_non_coordinator.md,
+    // so `ib config unset` rejects it as an unknown key. Users with the key set
+    // in config.json see a deprecation warning at `ib watch` startup instead.
+    await Bun.write(cfgPath, JSON.stringify({ permissions: { repo: { allow: ["Bash(*)"] } } }));
+    await expect(runConfigCommand(["unset", "permissions.repo.allow"])).rejects.toThrow("EXIT");
+    expect(errored()).toContain("Unknown config key: 'permissions.repo.allow'");
   });
 
   test("key not set prints message", async () => {
@@ -445,12 +406,11 @@ describe("edge cases", () => {
     expect(data.externalDiffTool).toBe("delta");
   });
 
-  test("add then remove leaves empty array", async () => {
-    await runConfigCommand(["add", "permissions.manager.allow", "Bash(*)"]);
-    logSpy.mockClear();
-    await runConfigCommand(["remove", "permissions.manager.allow", "Bash(*)"]);
-    const data = await Bun.file(cfgPath).json();
-    expect(data.permissions.manager.allow).toEqual([]);
+  test("add of deprecated permissions key is rejected (moved to .md files)", async () => {
+    // After the permission-list migration, no array keys remain in CONFIG_KEYS,
+    // so `ib config add` no longer supports any permission-list key.
+    await expect(runConfigCommand(["add", "permissions.repo.allow", "Bash(*)"])).rejects.toThrow("EXIT");
+    expect(errored()).toContain("'permissions.repo.allow' is not an array key.");
   });
 
   test("set overwrites previous value", async () => {

@@ -22,6 +22,7 @@ import { captureTmuxOutput, resizeTmuxWindow, killTmuxSession, sendTmuxKeys } fr
 import { parseState } from "../parse-state";
 import { openInGhostty, openPathInGhostty } from "../ghostty";
 import { buildFolderItems } from "./folder-browser";
+import { listSpawnableTypeNamesSync } from "../agent-types";
 import type { DialogState, SetupItem, ConfigDialogItem } from "./dialog-handler";
 import { TextBuffer } from "./text-buffer";
 import { readConfig, writeConfig, CONFIG_KEYS, defaultUserConfigPath } from "../config";
@@ -221,7 +222,7 @@ export function handleResume(ctx: ActionCtx) {
         }
       } else {
         // No coordinator — spawn one
-        const result = await newAgent(repo.path, "You are the per-repo coordinator. Await instructions.", { coordinator: true });
+        const result = await newAgent(repo.path, "You are the per-repo coordinator. Await instructions.", { type: "coordinator" });
         ctx.setNotice(result.ok ? `Spawned coordinator ${result.stdout}` : `Spawn failed: ${result.stderr || result.stdout}`);
       }
     });
@@ -294,7 +295,7 @@ export function handleReassign(ctx: ActionCtx) {
       f.agent.repoPath === agent.repoPath &&
       f.agent.id !== agent.id &&
       !descendantIds.has(f.agent.id) &&
-      !f.agent.meta.worker && !(f.agent.meta.type === "worker") &&
+      !f.agent.meta.worker &&
       !f.agent.archived
     );
 
@@ -464,18 +465,28 @@ export function handleNewAgent(ctx: ActionCtx) {
 }
 
 function showNewAgentFormDialog(ctx: ActionCtx, repo: RepoEntry) {
+  // Read the names of available spawnable agent types synchronously so the
+  // dialog can open immediately. Layer-only types (e.g. `_all`, `_non_coordinator`)
+  // are filtered out — they act only as permission/prompt layers. Falls back to
+  // embedded defaults when the on-disk types directory is missing.
+  const availableTypes = listSpawnableTypeNamesSync();
+  const defaultType = availableTypes.includes("manager")
+    ? "manager"
+    : (availableTypes[0] ?? "manager");
+
   ctx.showDialog({
     type: "new-agent-form",
     repoName: repoDisplayName(repo),
     name: "",
-    worker: false,
+    agentType: defaultType,
+    availableTypes,
     buffer: new TextBuffer(),
     focused: "name",
-    onSubmit: (name: string, worker: boolean, prompt: string) => {
+    onSubmit: (name: string, agentType: string, prompt: string) => {
       ctx.closeDialog();
       const opts: NewAgentOptions = {};
       if (name.trim()) opts.name = name.trim();
-      if (worker) opts.worker = true;
+      if (agentType) opts.type = agentType;
       ctx.executeAndRefresh(async () => {
         const result = await newAgent(repo.path, prompt, opts);
         if (result.ok) {
@@ -903,9 +914,9 @@ function handleConfigItemAction(
       });
     } else if (item.type === "string[]" && item.key.startsWith("permissions.")) {
       // Open permissions editor for allow/deny lists
-      // Derive the role key (e.g., "permissions.manager") from "permissions.manager.allow"
+      // Derive the role key (e.g., "permissions.repo") from "permissions.repo.allow"
       const parts = item.key.split(".");
-      const roleKey = parts.slice(0, 2).join("."); // "permissions.manager" or "permissions.worker"
+      const roleKey = parts.slice(0, 2).join("."); // e.g. "permissions.all", "permissions.repo"
       const allowKey = `${roleKey}.allow`;
       const denyKey = `${roleKey}.deny`;
       const allowEntry = config[allowKey];

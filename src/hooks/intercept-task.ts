@@ -4,10 +4,8 @@
 
 import { join } from "path";
 import { newAgent } from "../ib-commands";
-import type { IbCommandResult } from "../ib-commands";
 import { AGENT_CWD_PATTERN, checkGitDirectoryFlags } from "./shared";
-import { canSpawnChildren as checkCanSpawnChildren } from "../agents";
-import type { AgentMeta } from "../agents";
+import { loadAgentType } from "../agent-types";
 
 export interface InterceptResult {
   action: "skip" | "intercept";
@@ -147,9 +145,15 @@ export async function processTaskIntercept(
       try {
         const metaFile = Bun.file(join(agentDir, "meta.json"));
         if (await metaFile.exists()) {
-          const meta = await metaFile.json() as AgentMeta;
-          const canSpawn = await checkCanSpawnChildren(meta);
-          if (!canSpawn) isWorker = true;
+          const meta = await metaFile.json() as Record<string, unknown>;
+          // agentType takes precedence over legacy worker boolean when present
+          if (meta.agentType && typeof meta.agentType === "string") {
+            const agentType = await loadAgentType(meta.agentType);
+            if (!agentType.canSpawnChildren) isWorker = true;
+          } else if (meta.worker === true) {
+            // Backward compat: legacy agents without agentType
+            isWorker = true;
+          }
         }
       } catch {
         // If we can't read meta, treat as manager-like (non-agent fallback)
@@ -177,7 +181,7 @@ export async function processTaskIntercept(
     return { action: "skip" };
   }
 
-  // 3. Check if calling from a worker agent — workers cannot spawn sub-agents
+  // 3. Check if calling from a worker agent or from an agent type that can't spawn children
   const cwdMatch = AGENT_CWD_PATTERN.exec(input.cwd);
   if (cwdMatch) {
     const agentId = cwdMatch[1]!;
@@ -190,10 +194,26 @@ export async function processTaskIntercept(
     try {
       const metaFile = Bun.file(join(agentDir, "meta.json"));
       if (await metaFile.exists()) {
-        const meta = await metaFile.json() as AgentMeta;
-        // Check if this agent type can spawn children
-        const canSpawn = await checkCanSpawnChildren(meta);
-        if (!canSpawn) {
+        const meta = await metaFile.json() as Record<string, unknown>;
+
+        // agentType takes precedence over legacy worker boolean when present
+        if (meta.agentType && typeof meta.agentType === "string") {
+          const agentType = await loadAgentType(meta.agentType);
+          if (!agentType.canSpawnChildren) {
+            return {
+              action: "intercept",
+              output: {
+                hookSpecificOutput: {
+                  hookEventName: "PreToolUse",
+                  permissionDecision: "deny",
+                  permissionDecisionReason: "Workers cannot create tasks or spawn sub-agents. Only manager agents can spawn workers.",
+                },
+              },
+            };
+          }
+          // canSpawnChildren=true — allow Task, fall through to spawn
+        } else if (meta.worker === true) {
+          // Backward compat: legacy agents without agentType
           return {
             action: "intercept",
             output: {
@@ -211,44 +231,44 @@ export async function processTaskIntercept(
     }
   }
 
-  // 3. Check subagent_type skip list
+  // 4. Check subagent_type skip list
   const subagentType = input.tool_input.subagent_type as string | undefined;
   if (subagentType && SKIP_SUBAGENT_TYPES.includes(subagentType)) {
     return { action: "skip" };
   }
 
-  // 4. Extract prompt, description, model
+  // 5. Extract prompt, description, model
   const prompt = (input.tool_input.prompt as string) ?? "";
   const description = (input.tool_input.description as string) ?? "";
   let model = (input.tool_input.model as string) ?? "";
 
-  // 5. Validate model
+  // 6. Validate model
   if (!VALID_MODELS.has(model)) {
     model = "";
   }
 
-  // 6. Determine agent prompt
+  // 7. Determine agent prompt
   const agentPrompt = prompt || description;
   if (!agentPrompt.trim()) {
     return { action: "skip" };
   }
 
-  // 7. Determine repoPath
+  // 8. Determine repoPath
   let repoPath = input.cwd;
   const ittybittyIdx = input.cwd.indexOf("/.ittybitty/agents/");
   if (ittybittyIdx !== -1) {
     repoPath = input.cwd.substring(0, ittybittyIdx);
   }
 
-  // 8. Determine calling agent ID
+  // 9. Determine calling agent ID
   const callingAgentId = cwdMatch ? cwdMatch[1]! : undefined;
 
-  // 9. Spawn agent
-  // Only set worker+manager when called from an agent context (callingAgentId present).
+  // 10. Spawn agent
+  // Only set type+manager when called from an agent context (callingAgentId present).
   // From primary Claude, spawn managers (not workers).
   let result: { ok: boolean; stdout: string; stderr: string };
   const spawnOpts: Record<string, unknown> = {
-    worker: callingAgentId ? true : undefined,
+    type: callingAgentId ? "worker" : undefined,
     manager: callingAgentId,
     model: model || undefined,
   };
@@ -259,11 +279,11 @@ export async function processTaskIntercept(
     result = await newAgent(repoPath, agentPrompt, spawnOpts as Parameters<typeof newAgent>[2]);
   }
 
-  // 10. Extract agent ID from stdout
+  // 11. Extract agent ID from stdout
   const agentIdMatch = /(agent-[a-f0-9]+)/.exec(result.stdout);
   const spawnedId = agentIdMatch ? agentIdMatch[1]! : undefined;
 
-  // 11. Spawn failure
+  // 12. Spawn failure
   if (!result.ok) {
     return {
       action: "intercept",
@@ -278,7 +298,7 @@ export async function processTaskIntercept(
     };
   }
 
-  // 12. Success — deny the original tool to prevent double-spawn.
+  // 13. Success — deny the original tool to prevent double-spawn.
   // Using "deny" is required because it's the only way to prevent the original
   // Task/Agent tool from also executing (which would create a duplicate).
   // The denial reason clearly communicates that this was a SUCCESSFUL redirect,

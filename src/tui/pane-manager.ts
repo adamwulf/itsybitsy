@@ -9,7 +9,7 @@ import type { InputFieldComponent } from "./input-field";
 import type { Agent, FlatEntry, PendingQuestion, DenialEntry } from "../agents";
 import type { RepoHealthReport } from "../health-check";
 import { getResolvableWarnings } from "../health-check";
-import { readAgentLog, readAgentPrompt, parseDenials } from "../agents";
+import { readAgentLog, readAgentPrompt, parseDenials, resolveAgentIcon } from "../agents";
 import { diffAgent, statusAgent } from "../ib-commands";
 import { wrapLines } from "./wrap";
 import { getStateColors } from "./color-scheme";
@@ -87,7 +87,7 @@ export function colorizeLog(lines: string[]): string[] {
 export function formatAgentRow(
   agent: Agent, connector: string, stateColWidth: number,
 ): string {
-  const icon = agent.meta.coordinator ? "◇" : ((agent.meta.worker || agent.meta.type === "worker") ? "⚙" : "◆");
+  const icon = resolveAgentIcon(agent.meta);
   const state = displayState(agent.state);
   const stateColor = getStateColors()[state] ?? getStateColors().unknown;
   const promptText = (agent.meta.summary ?? agent.meta.prompt).replace(/\n/g, " ");

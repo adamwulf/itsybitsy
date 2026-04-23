@@ -9,7 +9,6 @@ import type { AgentState } from "./parse-state";
 import { parseState, stripAnsi, STARTUP_MARKERS } from "./parse-state";
 import { captureTmuxOutput, listTmuxSessions } from "./tmux-poller";
 import { InjectionContext } from "./types";
-import { resolveAgentType } from "./agent-types";
 
 /** States that can be written to meta.json */
 export type MetaState = "running" | "waiting" | "complete";
@@ -36,46 +35,35 @@ export interface AgentMeta {
   summary?: string;
   watchdog_pid?: number;
   coordinator?: boolean;
-  type?: string;
+  agentType?: string;
+  agentIcon?: string;
   state?: MetaState;
   state_updated_at?: number;
   spawned_by?: SpawnedBy | null;
 }
 
-/**
- * Get the agent type name from meta.json fields.
- * Resolution: meta.type > meta.coordinator > meta.worker > 'manager'
- */
-export function getAgentType(meta: AgentMeta): string {
-  if (meta.type) return meta.type;
-  if (meta.coordinator) return "coordinator";
-  if (meta.worker) return "worker";
-  return "manager";
+/** Resolve the display icon for an agent from meta fields with legacy fallback */
+export function resolveAgentIcon(meta: AgentMeta): string {
+  if (meta.agentIcon) return meta.agentIcon;
+  if (meta.coordinator) return "◇";
+  if (meta.worker) return "⚙";
+  return "◆";
 }
 
 /**
- * Check if an agent behaves like a worker (cannot spawn children, is a leaf node).
- * Returns true for type='worker' OR legacy worker===true.
+ * Resolve a single-character icon for text-only contexts (e.g. inject-status).
+ * Uses agentIcon if single char, else derives from agentType name or legacy booleans.
  */
-export function isWorkerLike(meta: AgentMeta): boolean {
-  if (meta.type === "worker") return true;
-  if (meta.worker === true) return true;
-  return false;
-}
-
-/**
- * Check if an agent's type allows spawning children.
- * Resolves the agent type definition and checks canSpawnChildren flag.
- */
-export async function canSpawnChildren(meta: AgentMeta): Promise<boolean> {
-  const typeName = getAgentType(meta);
-  try {
-    const typeDef = await resolveAgentType(typeName);
-    return typeDef.canSpawnChildren;
-  } catch {
-    // Unknown type — default to not allowing spawning
-    return false;
+export function resolveAgentIconChar(meta: AgentMeta): string {
+  if (meta.agentIcon && meta.agentIcon.length === 1) return meta.agentIcon;
+  if (meta.agentType) {
+    if (meta.agentType === "coordinator") return "c";
+    if (meta.agentType === "worker") return "w";
+    return meta.agentType[0] ?? "m";
   }
+  if (meta.coordinator) return "c";
+  if (meta.worker) return "w";
+  return "m";
 }
 
 export interface Agent {
@@ -255,7 +243,8 @@ export async function readAgentMeta(agentDir: string): Promise<{ meta: AgentMeta
     if (typeof data.claude_pid !== "string") data.claude_pid = "";
     if (data.summary !== undefined && typeof data.summary !== "string") delete data.summary;
     if (data.coordinator !== undefined && typeof data.coordinator !== "boolean") delete data.coordinator;
-    if (data.type !== undefined && typeof data.type !== "string") delete data.type;
+    if (data.agentType !== undefined && typeof data.agentType !== "string") delete data.agentType;
+    if (data.agentIcon !== undefined && typeof data.agentIcon !== "string") delete data.agentIcon;
     // Validate spawned_by: must be an object with string agent_id and repo_path
     if (data.spawned_by !== undefined && data.spawned_by !== null) {
       if (

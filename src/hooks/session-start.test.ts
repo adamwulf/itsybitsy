@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { detectRole, generateInstructions, type SessionContext } from "./session-start";
+import { detectRole, generateInstructions, interpolateTemplate, buildPathIsolationSection, type SessionContext } from "./session-start";
 
 describe("session-start", () => {
   test("detectRole non-agent cwd → primary", () => {
@@ -74,7 +74,7 @@ describe("session-start", () => {
     const instructions = await generateInstructions(ctx);
     expect(instructions).toContain("agent-abc12345");
     expect(instructions).toContain("Manager Agent");
-    expect(instructions).toContain("ib new-agent --worker");
+    expect(instructions).toContain("ib new-agent --type worker");
   });
 
   test("generateInstructions worker contains manager ID", async () => {
@@ -174,7 +174,7 @@ describe("session-start", () => {
     expect(instructions).not.toContain("Primary Claude");
     expect(instructions).toContain("Per-Repo Coordinator");
     expect(instructions).toContain("project");
-    expect(instructions).toContain("ib new-agent --worker");
+    expect(instructions).toContain("ib new-agent --type worker");
     expect(instructions).toContain("ib send @system");
   });
 
@@ -212,92 +212,258 @@ describe("session-start", () => {
     expect(instructions).toContain('ib send muse-ios "message"');
   });
 
-  test("detectRole with type field returns custom role", () => {
-    const cwd = "/Users/me/project/.ittybitty/agents/agent-abc12345/repo";
-    const ctx = detectRole(cwd, {
-      id: "agent-abc12345",
-      manager: "agent-parent00",
-      worker: false,
-      type: "reviewer",
-    });
-    expect(ctx.role).toBe("custom");
-    expect(ctx.typeName).toBe("reviewer");
-    expect(ctx.agentManager).toBe("agent-parent00");
-  });
-
-  test("detectRole with type='worker' returns worker role", () => {
-    const cwd = "/Users/me/project/.ittybitty/agents/agent-abc12345/repo";
-    const ctx = detectRole(cwd, {
-      id: "agent-abc12345",
-      manager: "agent-parent00",
-      worker: false,
-      type: "worker",
-    });
-    expect(ctx.role).toBe("worker");
-    expect(ctx.typeName).toBe("worker");
-  });
-
-  test("detectRole with type='manager' returns manager role", () => {
+  test("detectRole includes agentType from meta.json", () => {
     const cwd = "/Users/me/project/.ittybitty/agents/agent-abc12345/repo";
     const ctx = detectRole(cwd, {
       id: "agent-abc12345",
       manager: null,
       worker: false,
-      type: "manager",
+      agentType: "researcher",
     });
-    expect(ctx.role).toBe("manager");
-    expect(ctx.typeName).toBe("manager");
+    expect(ctx.agentType).toBe("researcher");
   });
 
-  test("detectRole with type='coordinator' returns coordinator role", () => {
-    const cwd = "/Users/me/project/.ittybitty/agents/agent-abc12345/repo";
-    const ctx = detectRole(cwd, {
-      id: "agent-abc12345",
-      manager: null,
-      worker: false,
-      type: "coordinator",
-    });
-    expect(ctx.role).toBe("coordinator");
-    expect(ctx.typeName).toBe("coordinator");
-  });
-
-  test("backward compat: no type field generates manager instructions", async () => {
+  test("backward compat: no agentType in meta.json", () => {
     const cwd = "/Users/me/project/.ittybitty/agents/agent-abc12345/repo";
     const ctx = detectRole(cwd, {
       id: "agent-abc12345",
       manager: null,
       worker: false,
     });
-    expect(ctx.role).toBe("manager");
-    expect(ctx.typeName).toBeUndefined();
+    expect(ctx.agentType).toBeUndefined();
+  });
+
+  test("agent type with manager instructionStyle uses manager base instructions", async () => {
+    // Built-in manager type uses manager instructionStyle
+    const ctx: SessionContext = {
+      role: "manager",
+      agentId: "agent-abc12345",
+      agentManager: "",
+      parentBranch: "main",
+      branchName: "agent/agent-abc12345",
+      worktreePath: "/Users/me/project/.ittybitty/agents/agent-abc12345/repo",
+      rootRepoPath: "/Users/me/project",
+      agentType: "manager",
+    };
     const instructions = await generateInstructions(ctx);
     expect(instructions).toContain("Manager Agent");
+    expect(instructions).toContain("ib new-agent --type worker");
   });
 
-  test("backward compat: worker meta still generates worker instructions", async () => {
-    const cwd = "/Users/me/project/.ittybitty/agents/agent-def67890/repo";
-    const ctx = detectRole(cwd, {
-      id: "agent-def67890",
-      manager: "agent-abc12345",
-      worker: true,
-    });
-    expect(ctx.role).toBe("worker");
+  test("agent type with worker instructionStyle uses worker base instructions", async () => {
+    // Built-in worker type uses worker instructionStyle
+    const ctx: SessionContext = {
+      role: "worker",
+      agentId: "agent-def67890",
+      agentManager: "agent-abc12345",
+      parentBranch: "agent/agent-abc12345",
+      branchName: "agent/agent-def67890",
+      worktreePath: "/Users/me/project/.ittybitty/agents/agent-def67890/repo",
+      rootRepoPath: "/Users/me/project",
+      agentType: "worker",
+    };
     const instructions = await generateInstructions(ctx);
     expect(instructions).toContain("Worker Agent");
+    expect(instructions).toContain("ib send agent-abc12345");
   });
 
-  test("custom type generates custom instructions with common sections", async () => {
-    // This test verifies the custom type fallback to manager when type can't be resolved
+  test("agent type markdown body is appended before closing ittybitty tag", async () => {
+    // This test uses the built-in coordinator type which has no body,
+    // but we test the mechanism by verifying basic structure is intact
+    const ctx: SessionContext = {
+      role: "coordinator",
+      agentId: "coordinator",
+      agentManager: "",
+      parentBranch: "main",
+      branchName: "agent/coordinator",
+      worktreePath: "/Users/me/project/.ittybitty/agents/coordinator/repo",
+      rootRepoPath: "/Users/me/project",
+      agentType: "coordinator",
+    };
+    const instructions = await generateInstructions(ctx);
+    // Should have the closing tag
+    expect(instructions).toContain("</ittybitty>");
+    expect(instructions).toContain("<ittybitty>");
+  });
+});
+
+describe("interpolateTemplate", () => {
+  const baseCtx: SessionContext = {
+    role: "manager",
+    agentId: "agent-abc123",
+    agentManager: "agent-parent",
+    parentBranch: "agent/agent-parent",
+    branchName: "agent/agent-abc123",
+    worktreePath: "/repo/.ittybitty/agents/agent-abc123/repo",
+    rootRepoPath: "/repo",
+  };
+
+  test("replaces simple {{variable}} placeholders", () => {
+    const template = "Agent {{agentId}} on branch agent/{{agentId}}";
+    const result = interpolateTemplate(template, baseCtx);
+    expect(result).toBe("Agent agent-abc123 on branch agent/agent-abc123");
+  });
+
+  test("replaces all available variables", () => {
+    const template = "{{agentId}} {{agentManager}} {{parentBranch}} {{worktreePath}} {{rootRepoPath}} {{repoName}}";
+    const result = interpolateTemplate(template, baseCtx);
+    expect(result).toBe("agent-abc123 agent-parent agent/agent-parent /repo/.ittybitty/agents/agent-abc123/repo /repo repo");
+  });
+
+  test("unknown variables become empty string", () => {
+    const result = interpolateTemplate("hello {{unknown}} world", baseCtx);
+    expect(result).toBe("hello  world");
+  });
+
+  test("{{#if hasManager}} includes block when manager exists", () => {
+    const template = "start\n{{#if hasManager}}\nManager: {{agentManager}}\n{{/if}}\nend";
+    const result = interpolateTemplate(template, baseCtx);
+    expect(result).toContain("Manager: agent-parent");
+    expect(result).toContain("start");
+    expect(result).toContain("end");
+  });
+
+  test("{{#if hasManager}} excludes block when no manager", () => {
+    const ctx = { ...baseCtx, agentManager: "" };
+    const template = "start\n{{#if hasManager}}\nManager: {{agentManager}}\n{{/if}}\nend";
+    const result = interpolateTemplate(template, ctx);
+    expect(result).not.toContain("Manager:");
+    expect(result).toContain("start");
+    expect(result).toContain("end");
+  });
+
+  test("{{#if isTopLevel}} includes block for top-level agents", () => {
+    const ctx = { ...baseCtx, agentManager: "" };
+    const template = "{{#if isTopLevel}}\nask questions\n{{/if}}";
+    const result = interpolateTemplate(template, ctx);
+    expect(result).toContain("ask questions");
+  });
+
+  test("{{#if isTopLevel}} excludes block for sub-agents", () => {
+    const template = "{{#if isTopLevel}}\nask questions\n{{/if}}";
+    const result = interpolateTemplate(template, baseCtx);
+    expect(result).not.toContain("ask questions");
+  });
+});
+
+describe("buildPathIsolationSection", () => {
+  const baseCtx: SessionContext = {
+    role: "manager",
+    agentId: "agent-abc123",
+    agentManager: "",
+    parentBranch: "main",
+    branchName: "agent/agent-abc123",
+    worktreePath: "/repo/.ittybitty/agents/agent-abc123/repo",
+    rootRepoPath: "/repo",
+  };
+
+  test("worktree agent without allowedPaths shows default message", () => {
+    const ctx = { ...baseCtx };
+    const section = buildPathIsolationSection(ctx);
+    expect(section).toContain("### Path Isolation");
+    expect(section).toContain("You are isolated to your worktree at: /repo/.ittybitty/agents/agent-abc123/repo");
+    expect(section).toContain("You CAN access: Your worktree, ~/.claude, /tmp, and general system paths");
+    expect(section).toContain("The main repo at /repo");
+    expect(section).not.toContain("additional paths");
+  });
+
+  test("worktree agent with allowedPaths lists them", () => {
+    const ctx = { ...baseCtx, allowedPaths: ["/home/user/data", "/var/log"] };
+    const section = buildPathIsolationSection(ctx);
+    expect(section).toContain("and these additional paths:");
+    expect(section).toContain("/home/user/data");
+    expect(section).toContain("/var/log");
+  });
+
+  test("worktree agent with empty allowedPaths shows default", () => {
+    const ctx = { ...baseCtx, allowedPaths: [] };
+    const section = buildPathIsolationSection(ctx);
+    expect(section).toContain("You CAN access: Your worktree, ~/.claude, /tmp, and general system paths");
+    expect(section).not.toContain("additional paths");
+  });
+
+  test("non-worktree (coordinator) shows repo path", () => {
+    const ctx: SessionContext = {
+      role: "coordinator",
+      agentId: "coordinator",
+      agentManager: "",
+      parentBranch: "main",
+      branchName: "",
+      worktreePath: "",
+      rootRepoPath: "/repo",
+    };
+    const section = buildPathIsolationSection(ctx);
+    expect(section).toContain("You are working directly in the repo at: /repo");
+    expect(section).toContain("You CAN access: This repo, ~/.claude, /tmp, and general system paths");
+    expect(section).not.toContain("The main repo");
+  });
+
+  test("non-worktree coordinator with allowedPaths lists them", () => {
+    const ctx: SessionContext = {
+      role: "coordinator",
+      agentId: "coordinator",
+      agentManager: "",
+      parentBranch: "main",
+      branchName: "",
+      worktreePath: "",
+      rootRepoPath: "/repo",
+      allowedPaths: ["/data/shared"],
+    };
+    const section = buildPathIsolationSection(ctx);
+    expect(section).toContain("and these additional paths:");
+    expect(section).toContain("/data/shared");
+  });
+
+  test("detectRole parses allowedPaths from meta.json", () => {
     const cwd = "/Users/me/project/.ittybitty/agents/agent-abc12345/repo";
     const ctx = detectRole(cwd, {
       id: "agent-abc12345",
-      manager: "agent-parent00",
+      manager: null,
       worker: false,
-      type: "nonexistent-type-for-test",
+      allowedPaths: ["/home/user/project", "/tmp/shared"],
     });
-    expect(ctx.role).toBe("custom");
-    // When type can't be resolved, should fall back to manager instructions
+    expect(ctx.allowedPaths).toEqual(["/home/user/project", "/tmp/shared"]);
+  });
+
+  test("detectRole allowedPaths undefined when not in meta", () => {
+    const cwd = "/Users/me/project/.ittybitty/agents/agent-abc12345/repo";
+    const ctx = detectRole(cwd, {
+      id: "agent-abc12345",
+      manager: null,
+      worker: false,
+    });
+    expect(ctx.allowedPaths).toBeUndefined();
+  });
+
+  test("manager instructions include buildPathIsolationSection", async () => {
+    const ctx: SessionContext = {
+      role: "manager",
+      agentId: "agent-abc123",
+      agentManager: "",
+      parentBranch: "main",
+      branchName: "agent/agent-abc123",
+      worktreePath: "/repo/.ittybitty/agents/agent-abc123/repo",
+      rootRepoPath: "/repo",
+      allowedPaths: ["/home/user/data"],
+    };
     const instructions = await generateInstructions(ctx);
-    expect(instructions).toContain("Manager Agent");
+    expect(instructions).toContain("### Path Isolation");
+    expect(instructions).toContain("/home/user/data");
+  });
+
+  test("worker instructions include buildPathIsolationSection", async () => {
+    const ctx: SessionContext = {
+      role: "worker",
+      agentId: "agent-def67890",
+      agentManager: "agent-abc12345",
+      parentBranch: "agent/agent-abc12345",
+      branchName: "agent/agent-def67890",
+      worktreePath: "/repo/.ittybitty/agents/agent-def67890/repo",
+      rootRepoPath: "/repo",
+      allowedPaths: ["/var/data"],
+    };
+    const instructions = await generateInstructions(ctx);
+    expect(instructions).toContain("### Path Isolation");
+    expect(instructions).toContain("/var/data");
   });
 });

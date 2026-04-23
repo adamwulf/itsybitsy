@@ -4,6 +4,7 @@
 
 import type { Component } from "@mariozechner/pi-tui";
 import { truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
+import { resolveAgentIcon } from "../agents";
 import type { Agent, FlatEntry } from "../agents";
 import type { RepoHealthReport } from "../health-check";
 import type { Selection } from "./selection";
@@ -32,11 +33,9 @@ export function computeStateColWidth(agents: FlatEntry[]): number {
   return maxLen;
 }
 
-/** Get the icon for an agent based on its role */
+/** Get the icon for an agent based on its type or role */
 function agentIcon(agent: Agent): string {
-  if (agent.meta.coordinator) return "◇";
-  if (agent.meta.worker || agent.meta.type === "worker") return "⚙";
-  return "◆";
+  return resolveAgentIcon(agent.meta);
 }
 
 /** Compute the visible width of the name prefix (connector + icon + repo/id) for an agent row */

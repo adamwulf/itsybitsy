@@ -1,5 +1,13 @@
 import { test, expect, beforeEach, afterEach, describe } from "bun:test";
-import { readConfig, writeConfig, CONFIG_KEYS, validateConfigValue } from "./config";
+import {
+  readConfig,
+  writeConfig,
+  CONFIG_KEYS,
+  validateConfigValue,
+  checkDeprecatedConfigKeys,
+  setUserConfigPath,
+  resetUserConfigPath,
+} from "./config";
 import { join } from "path";
 import { mkdtemp, rm } from "fs/promises";
 import { tmpdir } from "os";
@@ -30,10 +38,14 @@ describe("readConfig", () => {
     expect(result["externalDiffTool"]).toEqual({ value: undefined, source: "default" });
     expect(result["hooks.injectStatus"]).toEqual({ value: true, source: "default" });
     expect(result["hooks.statusVisible"]).toEqual({ value: true, source: "default" });
-    expect(result["permissions.manager.allow"]).toEqual({ value: [], source: "default" });
-    expect(result["permissions.worker.deny"]).toEqual({ value: [], source: "default" });
-    expect(result["permissions.all.allow"]).toEqual({ value: [], source: "default" });
-    expect(result["permissions.all.deny"]).toEqual({ value: [], source: "default" });
+    // Permission list keys have all been removed from CONFIG_KEYS; they now live in
+    // ~/.itsybitsy/agent-types/*.md frontmatter (coordinator.md, _all.md, _non_coordinator.md).
+    expect(result["permissions.all.allow"]).toBeUndefined();
+    expect(result["permissions.all.deny"]).toBeUndefined();
+    expect(result["permissions.repo.allow"]).toBeUndefined();
+    expect(result["permissions.repo.deny"]).toBeUndefined();
+    expect(result["permissions.coordinator.allow"]).toBeUndefined();
+    expect(result["permissions.coordinator.deny"]).toBeUndefined();
   });
 
   test("has entries for all CONFIG_KEYS", async () => {
@@ -57,24 +69,21 @@ describe("readConfig", () => {
       userCfgPath,
       JSON.stringify({
         hooks: { injectStatus: false },
-        permissions: { manager: { allow: ["Edit", "Read"] } },
       })
     );
 
     const result = await readConfig(opts());
     expect(result["hooks.injectStatus"]).toEqual({ value: false, source: "user" });
     expect(result["hooks.statusVisible"]).toEqual({ value: true, source: "default" });
-    expect(result["permissions.manager.allow"]).toEqual({ value: ["Edit", "Read"], source: "user" });
-    expect(result["permissions.manager.deny"]).toEqual({ value: [], source: "default" });
   });
 
   test("default arrays are independent across calls", async () => {
+    // `autoCompactThreshold` is one of the few remaining default values that's
+    // a non-primitive (undefined) — we just re-read twice to confirm repeated
+    // reads return independent copies for any keys we may add later.
     const result1 = await readConfig(opts());
-    const arr1 = result1["permissions.manager.allow"]!.value as string[];
-    arr1.push("mutated");
-
     const result2 = await readConfig(opts());
-    expect(result2["permissions.manager.allow"]!.value).toEqual([]);
+    expect(result1["maxAgents"]).toEqual(result2["maxAgents"]);
   });
 
   test("handles malformed JSON gracefully", async () => {
@@ -134,10 +143,10 @@ describe("writeConfig", () => {
 
   test("writes array values", async () => {
     const filePath = join(tmpDir, "config.json");
-    await writeConfig(filePath, "permissions.manager.allow", ["Edit", "Read"]);
+    await writeConfig(filePath, "permissions.repo.allow", ["Edit", "Read"]);
 
     const data = await Bun.file(filePath).json();
-    expect(data.permissions.manager.allow).toEqual(["Edit", "Read"]);
+    expect(data.permissions.repo.allow).toEqual(["Edit", "Read"]);
   });
 });
 
@@ -195,14 +204,16 @@ describe("config type validation in readConfig", () => {
     expect(result["createPullRequests"]).toEqual({ value: false, source: "default" });
   });
 
-  test("permissions.manager.allow: string falls back to default", async () => {
+  test("permissions.repo.allow key is not in CONFIG_KEYS", async () => {
+    // permissions.repo.* keys have been removed from CONFIG_KEYS — they now
+    // live in ~/.itsybitsy/agent-types/_non_coordinator.md frontmatter.
     await Bun.write(
       userCfgPath,
-      JSON.stringify({ permissions: { manager: { allow: "not-an-array" } } })
+      JSON.stringify({ permissions: { repo: { allow: ["anything"] } } })
     );
 
     const result = await readConfig(opts());
-    expect(result["permissions.manager.allow"]).toEqual({ value: [], source: "default" });
+    expect(result["permissions.repo.allow"]).toBeUndefined();
   });
 
   test("correctly typed values still work", async () => {
@@ -237,10 +248,10 @@ describe("dot-notation key handling", () => {
 
   test("creates deeply nested structure", async () => {
     const filePath = join(tmpDir, "config.json");
-    await writeConfig(filePath, "permissions.worker.deny", ["Bash"]);
+    await writeConfig(filePath, "permissions.repo.deny", ["Bash"]);
 
     const data = await Bun.file(filePath).json();
-    expect(data.permissions.worker.deny).toEqual(["Bash"]);
+    expect(data.permissions.repo.deny).toEqual(["Bash"]);
   });
 
   test("preserves sibling keys in nested objects", async () => {
@@ -261,14 +272,14 @@ describe("dot-notation key handling", () => {
 
   test("writes multiple dot-notation keys sequentially", async () => {
     const filePath = join(tmpDir, "config.json");
-    await writeConfig(filePath, "permissions.manager.allow", ["Edit"]);
-    await writeConfig(filePath, "permissions.manager.deny", ["Bash"]);
-    await writeConfig(filePath, "permissions.worker.allow", ["Read"]);
+    await writeConfig(filePath, "permissions.all.allow", ["Edit"]);
+    await writeConfig(filePath, "permissions.all.deny", ["Bash"]);
+    await writeConfig(filePath, "permissions.repo.allow", ["Read"]);
 
     const data = await Bun.file(filePath).json();
-    expect(data.permissions.manager.allow).toEqual(["Edit"]);
-    expect(data.permissions.manager.deny).toEqual(["Bash"]);
-    expect(data.permissions.worker.allow).toEqual(["Read"]);
+    expect(data.permissions.all.allow).toEqual(["Edit"]);
+    expect(data.permissions.all.deny).toEqual(["Bash"]);
+    expect(data.permissions.repo.allow).toEqual(["Read"]);
   });
 
   test("overwrites primitive with nested object when needed", async () => {
@@ -284,11 +295,118 @@ describe("dot-notation key handling", () => {
   test("readConfig reads back what writeConfig wrote", async () => {
     await writeConfig(userCfgPath, "maxAgents", 7);
     await writeConfig(userCfgPath, "hooks.injectStatus", false);
-    await writeConfig(userCfgPath, "permissions.worker.deny", ["Bash", "Write"]);
 
     const result = await readConfig(opts());
     expect(result["maxAgents"]).toEqual({ value: 7, source: "user" });
     expect(result["hooks.injectStatus"]).toEqual({ value: false, source: "user" });
-    expect(result["permissions.worker.deny"]).toEqual({ value: ["Bash", "Write"], source: "user" });
+  });
+});
+
+describe("checkDeprecatedConfigKeys", () => {
+  beforeEach(() => {
+    setUserConfigPath(userCfgPath);
+  });
+
+  afterEach(() => {
+    resetUserConfigPath();
+  });
+
+  test("returns empty when no deprecated keys are set", async () => {
+    await Bun.write(userCfgPath, JSON.stringify({ model: "opus" }));
+    const warnings = await checkDeprecatedConfigKeys();
+    expect(warnings).toEqual([]);
+  });
+
+  test("warns when permissions.coordinator.allow is set", async () => {
+    await Bun.write(
+      userCfgPath,
+      JSON.stringify({ permissions: { coordinator: { allow: ["Bash(*)"] } } })
+    );
+    const warnings = await checkDeprecatedConfigKeys();
+    expect(warnings.length).toBe(1);
+    expect(warnings[0]).toContain("permissions.coordinator.allow");
+    expect(warnings[0]).toContain("coordinator.md");
+  });
+
+  test("warns when permissions.coordinator.deny is set", async () => {
+    await Bun.write(
+      userCfgPath,
+      JSON.stringify({ permissions: { coordinator: { deny: ["Write"] } } })
+    );
+    const warnings = await checkDeprecatedConfigKeys();
+    expect(warnings.length).toBe(1);
+    expect(warnings[0]).toContain("permissions.coordinator.deny");
+    expect(warnings[0]).toContain("coordinator.md");
+  });
+
+  test("warns for both coordinator and legacy manager/worker keys", async () => {
+    await Bun.write(
+      userCfgPath,
+      JSON.stringify({
+        permissions: {
+          coordinator: { allow: ["Read"], deny: ["Write"] },
+          manager: { allow: ["Bash"] },
+          worker: { deny: ["Edit"] },
+        },
+      })
+    );
+    const warnings = await checkDeprecatedConfigKeys();
+    expect(warnings.length).toBe(4);
+    expect(warnings.some((w) => w.includes("permissions.coordinator.allow"))).toBe(true);
+    expect(warnings.some((w) => w.includes("permissions.coordinator.deny"))).toBe(true);
+    expect(warnings.some((w) => w.includes("permissions.manager.allow"))).toBe(true);
+    expect(warnings.some((w) => w.includes("permissions.worker.deny"))).toBe(true);
+  });
+
+  test("warns when permissions.all.allow is set and points to _all.md", async () => {
+    await Bun.write(
+      userCfgPath,
+      JSON.stringify({ permissions: { all: { allow: ["Read"] } } })
+    );
+    const warnings = await checkDeprecatedConfigKeys();
+    expect(warnings.length).toBe(1);
+    expect(warnings[0]).toContain("permissions.all.allow");
+    expect(warnings[0]).toContain("_all.md");
+  });
+
+  test("warns when permissions.all.deny is set and points to _all.md", async () => {
+    await Bun.write(
+      userCfgPath,
+      JSON.stringify({ permissions: { all: { deny: ["Bash"] } } })
+    );
+    const warnings = await checkDeprecatedConfigKeys();
+    expect(warnings.length).toBe(1);
+    expect(warnings[0]).toContain("permissions.all.deny");
+    expect(warnings[0]).toContain("_all.md");
+  });
+
+  test("warns when permissions.repo.allow is set and points to _non_coordinator.md", async () => {
+    await Bun.write(
+      userCfgPath,
+      JSON.stringify({ permissions: { repo: { allow: ["Edit"] } } })
+    );
+    const warnings = await checkDeprecatedConfigKeys();
+    expect(warnings.length).toBe(1);
+    expect(warnings[0]).toContain("permissions.repo.allow");
+    expect(warnings[0]).toContain("_non_coordinator.md");
+  });
+
+  test("warns when permissions.repo.deny is set and points to _non_coordinator.md", async () => {
+    await Bun.write(
+      userCfgPath,
+      JSON.stringify({ permissions: { repo: { deny: ["Write"] } } })
+    );
+    const warnings = await checkDeprecatedConfigKeys();
+    expect(warnings.length).toBe(1);
+    expect(warnings[0]).toContain("permissions.repo.deny");
+    expect(warnings[0]).toContain("_non_coordinator.md");
+  });
+
+  test("CONFIG_KEYS does not include the newly deprecated permission list keys", () => {
+    const keys = CONFIG_KEYS.map((def) => def.key);
+    expect(keys).not.toContain("permissions.all.allow");
+    expect(keys).not.toContain("permissions.all.deny");
+    expect(keys).not.toContain("permissions.repo.allow");
+    expect(keys).not.toContain("permissions.repo.deny");
   });
 });

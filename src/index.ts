@@ -6,8 +6,8 @@
 
 import { join } from "path";
 import { addRepo, removeRepo, listRepos, repoDisplayName, type RepoEntry } from "./registry";
+import { resolveAgentIcon } from "./agents";
 import type { Agent, FlatEntry } from "./agents";
-import { isWorkerLike, getAgentType } from "./agents";
 import { isValidAgentId } from "./validation";
 
 const args = process.argv.slice(2);
@@ -296,8 +296,8 @@ async function main() {
           state: a.state,
           age: a.age,
           model: a.meta.model,
-          type: getAgentType(a.meta),
           worker: a.meta.worker,
+          agentType: a.meta.agentType ?? null,
           manager: a.meta.manager ?? null,
           repo: a.repoName,
           repoPath: a.repoPath,
@@ -346,7 +346,7 @@ async function main() {
         } else {
           for (const { agent, depth } of agentsToShow) {
             const indent = "  ".repeat(depth);
-            const icon = isWorkerLike(agent.meta) ? "⚙" : "◆";
+            const icon = resolveAgentIcon(agent.meta);
             const state = displayState(agent.state);
             const colorCode = stateColors[state] ?? DIM;
             const orphanMark = agent.orphaned ? "⚠ " : "";
@@ -442,7 +442,7 @@ async function main() {
         for (const entry of flat) {
           if (entry.kind !== "agent") continue;
           const orphanedPrefix = entry.agent.orphaned ? "⚠ " : "";
-          const icon = isWorkerLike(entry.agent.meta) ? "⚙" : "◆";
+          const icon = resolveAgentIcon(entry.agent.meta);
           const prefix = `${entry.connector}${orphanedPrefix}${icon} ${entry.agent.id}`;
           rowByEntry.set(entry, {
             prefix,
@@ -552,7 +552,7 @@ async function main() {
       console.log(`Repo:         ${agent.repoName} (${agent.repoPath})`);
       console.log(`State:        ${agent.state}`);
       console.log(`Model:        ${m.model}`);
-      console.log(`Type:         ${getAgentType(m)}`);
+      console.log(`Agent Type:   ${m.agentType ?? (m.worker ? "worker" : "manager")}`);
       console.log(`Worker:       ${m.worker}`);
       console.log(`Manager:      ${m.manager ?? "none"}`);
       console.log(`Created:      ${m.created}`);
@@ -762,8 +762,7 @@ async function main() {
       let spawnedByRepoPath: string | undefined;
       for (let i = 0; i < ibArgs.length; i++) {
         const arg = ibArgs[i]!;
-        if (arg === "--worker") { opts.worker = true; }
-        else if (arg === "--type") {
+        if (arg === "--type") {
           if (!ibArgs[i + 1]) { console.error("Error: --type requires a value"); process.exit(1); }
           opts.type = ibArgs[++i];
         }
@@ -798,7 +797,6 @@ async function main() {
           if (!(await promptFile.exists())) { console.error(`Error: prompt file not found: ${promptFilePath}`); process.exit(1); }
           promptParts.push(await promptFile.text());
         }
-        else if (arg === "--coordinator") { opts.coordinator = true; }
         else if (arg === "--no-worktree") { opts.noWorktree = true; }
         else if (arg === "--yolo") { opts.yolo = true; }
         else if (arg === "--allow") {
@@ -809,39 +807,13 @@ async function main() {
           if (!ibArgs[i + 1]) { console.error("Error: --deny requires a value"); process.exit(1); }
           opts.denyTools = ibArgs[++i];
         }
-        else if (arg === "--spawned-by") {
-          if (!ibArgs[i + 1]) { console.error("Error: --spawned-by requires a value"); process.exit(1); }
-          spawnedByAgentId = ibArgs[++i];
-        }
-        else if (arg === "--spawned-by-repo") {
-          if (!ibArgs[i + 1]) { console.error("Error: --spawned-by-repo requires a value"); process.exit(1); }
-          spawnedByRepoPath = ibArgs[++i];
-        }
         else if (arg.startsWith("--")) {
           console.error(`Error: unknown flag '${arg}'`);
           process.exit(1);
         }
         else { promptParts.push(arg); }
       }
-
-      // Validate spawned-by co-dependency
-      if (spawnedByRepoPath && !spawnedByAgentId) {
-        console.error("Error: --spawned-by-repo requires --spawned-by");
-        process.exit(1);
-      }
-
-      // Construct spawnedBy if provided
-      if (spawnedByAgentId) {
-        opts.spawnedBy = {
-          agent_id: spawnedByAgentId,
-          repo_path: spawnedByRepoPath ?? process.cwd(),
-        };
-      }
       const prompt = promptParts.join(" ");
-      if (!prompt) {
-        console.error("Usage: ib new-agent [flags] <prompt...>");
-        process.exit(1);
-      }
 
       // Validate --spawned-by / --spawned-by-repo co-dependency and construct spawnedBy
       if (spawnedByRepoPath && !spawnedByAgentId) {
@@ -1150,6 +1122,27 @@ async function main() {
       }
       break;
     }
+    case "init-types":
+    case "init-agent-types": {
+      const { initAgentTypes } = await import("./agent-types");
+      try {
+        const created = await initAgentTypes();
+        const home = process.env.HOME || (await import("os")).homedir();
+        const typesDir = (await import("path")).join(home, ".itsybitsy", "agent-types");
+        if (created.length === 0) {
+          console.log(`Agent type files already present at: ${typesDir} (no files created)`);
+        } else {
+          console.log(`Agent type files initialized at: ${typesDir}`);
+          for (const name of created) {
+            console.log(`  created ${name}`);
+          }
+        }
+      } catch (err) {
+        console.error(`Error initializing agent types: ${err instanceof Error ? err.message : String(err)}`);
+        process.exit(1);
+      }
+      break;
+    }
     case "config": {
       const { runConfigCommand } = await import("./config-command");
       await runConfigCommand(args.slice(1));
@@ -1275,6 +1268,7 @@ async function main() {
       console.log("  config list         List all config keys with values");
       console.log("  config get <key>    Get a config value");
       console.log("  config set <k> <v>  Set a config value");
+      console.log("  init-types          Populate ~/.itsybitsy/agent-types/ with built-in types");
       console.log("  config add <k> <v>  Add to array config key");
       console.log("  config remove <k> <v> Remove from array config key");
       console.log("  config unset <key>  Unset a config key (revert to default)");

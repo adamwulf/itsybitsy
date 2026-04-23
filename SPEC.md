@@ -15,13 +15,13 @@ This document is the definitive behavioral specification for itsybitsy, a multi-
 
 When a new agent is created (`ib new-agent "prompt"`):
 
-1. **Validate inputs**: A prompt is required. If `--manager` is specified, the manager must exist and must not be a worker agent. Worker agents cannot manage sub-agents.
+1. **Validate inputs**: A prompt is required. If `--manager` is specified, the manager must exist and must not be a leaf agent (an agent whose type has `canSpawnChildren: false`). Leaf agents cannot manage sub-agents. If `--type` is specified, the type must exist as a `.md` file in `~/.itsybitsy/agent-types/`.
 
 2. **Auto-detect manager**: If no `--manager` is provided and the caller is running inside an agent worktree (CWD matches `/.ittybitty/agents/<id>/repo`), the caller's agent ID is automatically set as the manager.
 
 3. **Yolo escalation prevention**: A `--yolo` child cannot be spawned by a non-yolo parent. This prevents permission escalation where a constrained agent spawns an unconstrained one. The parent's yolo status is checked via `meta.json` or `start.sh`.
 
-4. **Configuration**: Config is loaded from `~/.itsybitsy/config.json` (user-wide). The model is determined by: `--model` flag > config `model` > `"opus"` (default).
+4. **Configuration**: Config is loaded from `~/.itsybitsy/config.json` (user-wide). The agent type is resolved by: `--type` flag > default `"manager"`. The type definition is loaded from `~/.itsybitsy/agent-types/<name>.md` — the `.md` file on disk is the sole source of truth (no hardcoded fallback). On first run, `~/.itsybitsy/agent-types/` is auto-populated with embedded default templates (see §2.7). The model is determined by: `--model` flag > type definition `model` > config `model` (or `coordinator.model` for coordinators) > `"opus"` (default).
 
 5. **Max agents check**: The number of active agents (directories with `meta.json` in `.ittybitty/agents/`) must not exceed the `maxAgents` config value (default: 10).
 
@@ -34,12 +34,15 @@ When a new agent is created (`ib new-agent "prompt"`):
    - Base ref: If the agent has a manager, branch from `agent/<manager-id>`. Otherwise, branch from `HEAD`.
    - Command: `git -C <root-repo> worktree add <agent-dir>/repo -b <branch-name> <base-ref>`
 
-9. **Settings**: A `settings.local.json` is written to `<agent-dir>/repo/.claude/` containing:
-   - Merged permissions (mandatory + config + existing)
-   - Hook definitions (path-check, stop, permission-denied, session-start, optionally intercept-task)
+9. **Settings**: `<agent-dir>/repo/.claude/settings.local.json` is written with permissions merged from four sources (see §2.3 for full details):
+   - Base allow list from `<repo>/.claude/settings.json` (deny entries NOT inherited)
+   - Hardcoded mandatory permissions (ib commands, git operations, Claude Code tools)
+   - Layer-file permissions from `~/.itsybitsy/agent-types/_all.md` (all agents) and `~/.itsybitsy/agent-types/_non_coordinator.md` (non-coordinator agents only)
+   - Type-defined permissions from `~/.itsybitsy/agent-types/<type>.md` frontmatter
+   - Hook definitions: path-check, stop, permission-denied, session-start, and optionally intercept-task (for agents with `canSpawnChildren: true`)
    - The agent ID placeholder `__AGENT_ID__` is replaced with the actual ID after writing
 
-10. **Write meta.json** to `<agent-dir>/meta.json` (see §5.2 for fields).
+10. **Write meta.json** to `<agent-dir>/meta.json` (see §5.2 for fields). Includes `agentType` (the resolved type name), `agentIcon` (the type's icon character, if defined), and `allowedPaths` (resolved absolute paths from the type's `allowedPaths` frontmatter, if defined — see §6.1).
 
 11. **Write prompt.txt** with the full prompt including any completion instructions, custom prompts, and the user's task.
 
@@ -207,47 +210,147 @@ Nuke-all (`ib nuke` with no agent ID) kills all agents in the repository. The `-
 
 ---
 
-## 2. Manager vs Worker Agents
+## 2. Agent Types
 
-### 2.1 Distinction
+### 2.1 Configurable Agent Types
 
-The `--worker` flag at creation time determines the agent's role:
+Agents are assigned a **type** at creation time that determines their behavior, permissions, instructions, and icon. The type system replaces the old binary manager/worker distinction with a configurable, extensible model.
 
-| Property | Manager | Worker |
-|----------|---------|--------|
-| `meta.json` `worker` field | `false` | `true` |
-| Can spawn sub-agents | Yes (via `ib new-agent --worker`) | No |
-| Can use Task tool | Intercepted → spawns ib agents (only when intercept hook is installed in parent repo settings) | Denied by intercept hook ("Workers cannot create tasks or spawn sub-agents") |
-| Can ask user questions | Only if top-level (no manager); bash also allows if manager was merged/killed | No |
-| Permissions source | `permissions.manager.allow/deny` | `permissions.worker.allow/deny` |
-| Session-start instructions | Manager template (with sub-agent commands) | Worker template (with send/diff/status only) |
-| TaskCreate | Intercepted → spawns ib worker (same as Task/Agent interception) | Denied by intercept hook ("Workers cannot create tasks or spawn sub-agents") |
+**Type resolution at creation time** (checked in order):
+1. `--type <name>` flag — explicit type selection (e.g., `--type worker`, `--type coordinator`)
+2. Default → type `"manager"`
 
-### 2.2 Agent Permissions
+**Three default types** are provided via embedded templates that are auto-populated on first run (see §2.7):
 
-When building `settings.local.json` for an agent, permissions come from three sources, merged and deduplicated:
+| Type | `canSpawnChildren` | Icon | `instructionStyle` | Description |
+|------|-------------------|------|-------------------|-------------|
+| `manager` | `true` | `◆` | `manager` | Manages sub-agents and coordinates work |
+| `worker` | `false` | `⚙` | `worker` | Executes tasks assigned by a manager |
+| `coordinator` | `true` | `◇` | `coordinator` | Read-only coordinator that manages agents without writing code |
 
-1. **Existing base settings**: From the root repo's `.claude/settings.json` (NOT `settings.local.json` — the `.local` file may belong to a per-repo coordinator and should not propagate to spawned agents)
-2. **Mandatory permissions** (always added for all agents):
+**All types** are defined as `.md` files in `~/.itsybitsy/agent-types/<name>.md` with YAML frontmatter and an optional markdown body for instructions. The `.md` file on disk is the sole source of truth — there is no hardcoded fallback. Users can edit the default type files, create custom types, or delete the manager/worker files (coordinator types auto-regenerate; see §2.7). See §2.6 for the file format.
+
+### 2.2 Type Properties
+
+The `AgentType` interface defines these properties:
+
+| Property | Type | Required | Description |
+|----------|------|----------|-------------|
+| `name` | string | Yes | Type identifier (derived from filename if not in frontmatter) |
+| `description` | string | No | Human-readable description |
+| `canSpawnChildren` | boolean | Yes | Whether agents of this type can spawn sub-agents |
+| `spawnable` | boolean | No | Whether this type can be spawned directly via `ib new-agent --type <name>`. Defaults to `true` when absent. `false` marks layer-only files (e.g. `_all.md`, `_non_coordinator.md`) whose frontmatter permissions and markdown body merge into every spawned agent but which cannot themselves be spawned. |
+| `icon` | string | No | Display icon — first non-whitespace character is extracted |
+| `model` | string | No | Default model override (used before config fallback) |
+| `permissions` | object | No | Type-specific `allow`/`deny` permission lists |
+| `allowedPaths` | string[] | No | Directories the agent can access beyond its worktree. `undefined` = legacy permissive, `[]` = strict (worktree only). Paths may use `~` (expanded at creation time). See §6.1 for enforcement details. |
+| `instructionStyle` | `"manager"` \| `"worker"` \| `"coordinator"` | Yes | Maps to base instruction set for session-start (defaults to `"manager"`) |
+| `markdownBody` | string | No | Template body for custom instructions (see §6.3.1) |
+
+The key behavioral distinction is `canSpawnChildren`:
+- **`true`** (manager-like): Can spawn sub-agents, Task tool is intercepted to spawn ib agents, receives manager-style instructions
+- **`false`** (worker-like): Cannot spawn sub-agents, Task tool is denied by intercept hook, receives worker-style instructions
+
+### 2.3 Agent Permissions
+
+When building `<agent-dir>/repo/.claude/settings.local.json` for an agent, permissions are merged from these sources, in order:
+
+1. **Base project settings** — `<repo>/.claude/settings.json`
+   - The version-controlled project settings file. Only the `permissions.allow` array is inherited (existing allow entries are harmless — they grant access the project already intended). Existing `permissions.deny` entries are NOT inherited — agent deny lists come exclusively from mandatory, config, and type sources below.
+   - NOT `settings.local.json` — the `.local` file may belong to a per-repo coordinator or contain repo-specific overrides that should not propagate to spawned agents.
+
+2. **Mandatory permissions** (hardcoded, always added for all agents):
    - `Bash(ib:*)`, `Bash(./ib:*)` — ib commands (both forms to handle PATH vs relative invocation) [^callout]: The TS implementation only includes `Bash(ib:*)`. The `Bash(./ib:*)` form is bash-only, since the TS `ib` binary is always expected to be on PATH.
    - `Bash(git status:*)`, `Bash(git add:*)`, `Bash(git commit:*)`, `Bash(git diff:*)`, `Bash(git show:*)`, `Bash(git log:*)`, `Bash(git ls-files:*)`, `Bash(git grep:*)`, `Bash(git rm:*)`, `Bash(git merge:*)`, `Bash(git rebase:*)`, `Bash(git checkout:*)`, `Bash(git restore:*)`, `Bash(git reset:*)` — git operations
    - `Bash(pwd:*)`, `Bash(ls:*)`, `Bash(head:*)`, `Bash(tail:*)`, `Bash(cat:*)`, `Bash(grep:*)` — filesystem inspection
-   - `Read`, `Write`, `Edit`, `MultiEdit`, `Glob`, `Grep`, `LS`, `TodoWrite`, `Task`, `TaskOutput`, `KillShell`, `NotebookEdit`, `WebFetch`, `WebSearch`, `ToolSearch` — Claude Code tools
-3. **Config-defined permissions**: From `permissions.manager.allow/deny` or `permissions.worker.allow/deny` in `~/.itsybitsy/config.json`
+   - `Read`, `Write`, `Edit`, `MultiEdit`, `Glob`, `Grep`, `LS`, `TodoWrite`, `Task`, `TaskCreate`, `Agent`, `TaskOutput`, `KillShell`, `NotebookEdit`, `WebFetch`, `WebSearch`, `AskUserQuestion`, `ToolSearch` — Claude Code tools
+   - **Always denied**: `EnterPlanMode`, `ExitPlanMode`
 
-**Always denied** (for all agents): `EnterPlanMode`, `ExitPlanMode`
+3. **Layer-file permissions** — `~/.itsybitsy/agent-types/_all.md` and `~/.itsybitsy/agent-types/_non_coordinator.md`
+   - `_all.md` — `permissions.allow/deny` from its YAML frontmatter applies to ALL agent types (including coordinators)
+   - `_non_coordinator.md` — `permissions.allow/deny` from its YAML frontmatter applies only to non-coordinator agents (i.e. skipped for agents spawned with `--type coordinator`)
+   - Both files have `spawnable: false` frontmatter so `ib new-agent --type _all` (or `_non_coordinator`) is rejected — they are permission/prompt layers, not spawnable types.
 
-**AskUserQuestion is intercepted and denied**: The intercept-task hook matches `AskUserQuestion` alongside `Task|Agent|TaskCreate` and denies the call with a message directing the agent to use `ib ask "question"` instead. Workers are told to report to their manager rather than asking the user directly. This routes user questions through the dashboard's QUESTIONS pane and the `ib ask` / question-acknowledgement flow rather than Claude Code's built-in multi-choice prompt.
+4. **Type-defined permissions** — `~/.itsybitsy/agent-types/<type>.md` (frontmatter)
+   - `permissions.allow` and `permissions.deny` fields from the agent type definition file's YAML frontmatter
+   - Coordinator-specific permissions live here (`coordinator.md`), not in `~/.itsybitsy/config.json`
 
-### 2.3 Manager Sub-Agent Spawning
+**AskUserQuestion is intercepted and denied**: The intercept-task hook matches `AskUserQuestion` alongside `Task|Agent|TaskCreate` and denies the call with a message directing the agent to use `ib ask "question"` instead. Leaf agents are told to report to their manager rather than asking the user directly. This routes user questions through the dashboard's QUESTIONS pane and the `ib ask` / question-acknowledgement flow rather than Claude Code's built-in multi-choice prompt.
 
-Managers spawn workers either explicitly with `ib new-agent --worker "task"` or implicitly via the Task tool (which the intercept hook converts into `ib new-agent --worker`). In both cases, the manager's agent ID is automatically set as the `--manager` for the child. The child's branch forks from `agent/<manager-id>`. When invoked from the primary Claude session (no agent context), the intercept hook spawns a manager instead of a worker.
+All allow/deny lists are merged and deduplicated. The final result is written to `<agent-dir>/repo/.claude/settings.local.json` along with hook definitions (§6).
 
-### 2.4 Unfinished Children Check
+**Deprecated config keys**: `permissions.manager.allow/deny`, `permissions.worker.allow/deny`, `permissions.coordinator.allow/deny`, `permissions.all.allow/deny`, and `permissions.repo.allow/deny` have all been removed from `CONFIG_KEYS`. If present in `~/.itsybitsy/config.json`, a deprecation warning is shown at `ib watch` startup directing users to migrate entries into the appropriate agent-type layer file: `permissions.all.*` → `~/.itsybitsy/agent-types/_all.md` frontmatter under `permissions.allow/deny`; `permissions.repo.*` → `~/.itsybitsy/agent-types/_non_coordinator.md`; `permissions.<role>.*` → the corresponding type file.
 
-When a top-level manager (no manager of its own) signals completion, the stop hook checks for unfinished children. Both bash and TS determine "unfinished" by checking actual tmux state (creating, running, waiting, or complete — but NOT stopped/unknown).
+### 2.4 Sub-Agent Spawning
+
+Agents with `canSpawnChildren: true` spawn sub-agents either explicitly with `ib new-agent --type worker "task"` or implicitly via the Task tool (which the intercept hook converts into `ib new-agent --type worker`). In both cases, the parent's agent ID is automatically set as the `--manager` for the child. The child's branch forks from `agent/<parent-id>`. When invoked from the primary Claude session (no agent context), the intercept hook spawns a manager instead of a worker.
+
+### 2.5 Unfinished Children Check
+
+When a top-level agent (no manager of its own) with `canSpawnChildren: true` signals completion, the stop hook checks for unfinished children. Both bash and TS determine "unfinished" by checking actual tmux state (creating, running, waiting, or complete — but NOT stopped/unknown).
 
 Specifically, it looks for children — agents in `.ittybitty/agents/` whose `meta.json` `manager` field matches the completing agent's ID. If any exist, the agent receives a nudge message listing them and instructing it to merge or kill each one before completing.
+
+### 2.6 Agent Type File Format
+
+Agent type files are markdown files with YAML frontmatter:
+
+```markdown
+---
+name: researcher
+description: Specialized research agent
+canSpawnChildren: false
+icon: 🔍
+instructionStyle: worker
+model: sonnet
+permissions:
+  allow:
+    - WebFetch
+    - WebSearch
+  deny:
+    - Write
+    - Edit
+allowedPaths:
+  - ~/Developer/shared-lib
+  - /tmp
+---
+
+## Research Agent Instructions
+
+You are research agent `{{agentId}}`...
+(template body with {{variable}} and {{#if condition}}...{{/if}} blocks)
+```
+
+**Frontmatter fields**: See §2.2 for the full list.
+
+**Template body**: If present, the markdown body below the frontmatter is used as the instruction template at session start (see §6.3.1). If absent, the hardcoded instructions for the `instructionStyle` are used.
+
+**Icon resolution**: The `icon` field's first non-whitespace character is extracted and stored in `meta.json` as `agentIcon`. This icon is displayed in the TUI agent tree, CLI output (`ib list`), and status injection.
+
+**Location**: All types live in `~/.itsybitsy/agent-types/<name>.md`. The default types (manager, worker, coordinator) plus two layer files (`_all.md`, `_non_coordinator.md`) are embedded in the `ib` binary and auto-populated on first run (§2.7). Source templates are also available in `docs/agent-types/` in the source repository.
+
+**Layer files (`_all.md` and `_non_coordinator.md`)**: These are agent type files with `spawnable: false` frontmatter. They cannot be spawned directly (`ib new-agent --type _all` is rejected with an error), but their `permissions.allow/deny` frontmatter and markdown body merge into every spawned agent: `_all.md` applies to every type; `_non_coordinator.md` applies to every type except `coordinator`. The type body is joined after the applicable layer bodies (layer prefix first, then type) in the session-start instruction output — see §6.3.1.
+
+### 2.7 Auto-Population and init-types
+
+**Auto-population**: On first run (when `~/.itsybitsy/agent-types/` does not exist), the directory is created and populated with the embedded default type files (manager.md, worker.md, coordinator.md, _all.md, _non_coordinator.md). This happens automatically at `ib watch` startup and `ib new-agent` execution. If the directory already exists, no files are written — the user's customizations are preserved.
+
+**`ib init-types` command**: Writes any missing embedded type files to `~/.itsybitsy/agent-types/` without overwriting existing files. Use this to restore accidentally deleted defaults or after an `ib` upgrade that adds new built-in types. Alias: `ib init-agent-types`.
+
+**Embedded templates**: The default type `.md` files from `docs/agent-types/` are compiled into the `ib` binary via text imports. Changes to `docs/agent-types/*.md` are reflected in the binary on recompilation.
+
+### 2.8 Startup Validation
+
+When `ib watch` launches, it validates all agent type files in `~/.itsybitsy/agent-types/` before starting the dashboard (after auto-population). If any file has YAML parsing errors, invalid field types (e.g., `canSpawnChildren` is not a boolean), invalid `instructionStyle` values, or invalid `allowedPaths` entries (must be a list of strings), the dashboard exits immediately with error messages describing each issue. This prevents runtime failures from malformed type definitions.
+
+### 2.9 Backward Compatibility
+
+Legacy agents (created before the agent types system) that lack `agentType` in their `meta.json` fall back to the old behavior:
+- `meta.json` `worker: true` → treated as `worker` type
+- `meta.json` `coordinator: true` → treated as `coordinator` type
+- Neither → treated as `manager` type
+
+The `worker` boolean field is still written to meta.json for backward compatibility with the bash `ib` reference implementation. Its value is derived from `canSpawnChildren`: `worker: true` when `canSpawnChildren` is `false`, `worker: false` otherwise.
 
 ---
 
@@ -434,13 +537,16 @@ Questions from agents that no longer exist (no directory in `.ittybitty/agents/`
   "created_epoch": 1704825000,
   "worktree": true,
   "worker": false,
+  "agentType": "manager",         // resolved type name (see §2.1)
+  "agentIcon": "◆",               // type icon character (see §2.6)
   "yolo": false,
   "model": "sonnet",              // bash defaults to "sonnet"; legacy agents may have null
   "claude_pid": "12345",          // appended after Claude starts (not in initial write)
   "watchdog_pid": "12346",        // appended after watchdog spawns (see §8.5); not in initial write
   "state": "running",             // written by stop hook, ib send, ib resume (see §1.3.1)
   "state_updated_at": 1704825030, // epoch seconds when state was last written
-  "coordinator": true             // only present for per-repo coordinators (§12.2.2)
+  "coordinator": true,            // only present for per-repo coordinators (§12.2.2)
+  "allowedPaths": ["/Users/adam/Developer/shared-lib", "/tmp"]  // optional, from agent type (§6.1)
 }
 ```
 
@@ -454,7 +560,9 @@ Questions from agents that no longer exist (no directory in `.ittybitty/agents/`
 | `created` | string | ISO 8601 creation timestamp with timezone |
 | `created_epoch` | number | Unix epoch seconds at creation |
 | `worktree` | boolean | Whether agent has an isolated git worktree |
-| `worker` | boolean | `true` for worker agents, `false` for managers |
+| `worker` | boolean | `true` for leaf agents (`canSpawnChildren: false`), `false` otherwise. Retained for backward compatibility with bash `ib`. |
+| `agentType` | string \| undefined | Resolved agent type name (e.g., `"manager"`, `"worker"`, `"researcher"`). Absent on legacy agents created before the type system. See §2.1. |
+| `agentIcon` | string \| undefined | Single-character icon from the agent type definition. Absent if the type has no icon or for legacy agents. See §2.6. |
 | `yolo` | boolean | Whether `--yolo` (skip permissions) was used |
 | `model` | string \| null | Claude model name (e.g., "sonnet", "opus", "haiku"), or `null` for legacy agents | [^callout]: Bash defaults `MODEL` to config value then `"sonnet"` before writing meta.json (the null branch in the template is unreachable dead code). TS normalizes null/missing to `"unknown"`. The `string \| null` type is retained because legacy agents may have null values, and display code (bash `ib list`) handles this defensively.
 | `claude_pid` | string | PID of the Claude process (appended to meta.json via `sed` after start.sh launches Claude — not present in the initial write) |
@@ -462,6 +570,7 @@ Questions from agents that no longer exist (no directory in `.ittybitty/agents/`
 | `state` | string \| undefined | Deterministic agent state written by the stop hook, `ib send`, or `ib resume`. Values: `"running"`, `"waiting"`, `"complete"`. Absent on legacy agents or before the first stop hook fires (treated as `"running"` if agent is older than 6s). See §1.3.1. |
 | `state_updated_at` | number \| undefined | Unix epoch seconds when `state` was last written. Used for debugging. |
 | `coordinator` | boolean \| undefined | `true` for per-repo coordinators (§12.2.2). Absent for regular agents. |
+| `allowedPaths` | string[] \| undefined | Resolved absolute paths the agent can access beyond its worktree (from agent type `allowedPaths` frontmatter, expanded at creation time). `undefined` = legacy permissive, `[]` = strict mode. See §6.1. |
 
 ### 5.3 Worktree ↔ Branch Relationship
 
@@ -499,8 +608,8 @@ itsybitsy hooks operate across three distinct execution contexts. Each context h
 | Context | CWD | Hooks source | Permissions source | Role detection |
 |---------|-----|-------------|-------------------|----------------|
 | **Primary Claude** | Any non-worktree path | `~/.claude/settings.json` (global hooks only) | User's own `~/.claude/settings.json` + repo `.claude/settings.local.json` | CWD does NOT match `/.ittybitsy/agents/<id>/repo` |
-| **Manager agent** | `<repo>/.ittybitsy/agents/<id>/repo` | Agent's `settings.local.json` (5 hooks: path-check, stop, session-start, permission-denied, intercept-task) | Built per §2.2 with `permissions.manager.allow/deny` | CWD matches pattern AND `meta.json` has `worker: false` or absent |
-| **Worker agent** | `<repo>/.ittybitty/agents/<id>/repo` | Agent's `settings.local.json` (4 hooks: path-check, stop, session-start, permission-denied — NO intercept-task) | Built per §2.2 with `permissions.worker.allow/deny` | CWD matches pattern AND `meta.json` has `worker: true` |
+| **Spawning agent** (`canSpawnChildren: true`) | `<repo>/.ittybitsy/agents/<id>/repo` | Agent's `settings.local.json` (5 hooks: path-check, stop, session-start, permission-denied, intercept-task) | Built per §2.3 with `_all.md` (always) + `_non_coordinator.md` (non-coordinators only) + type-defined permissions | CWD matches pattern AND agent type has `canSpawnChildren: true` |
+| **Leaf agent** (`canSpawnChildren: false`) | `<repo>/.ittybitty/agents/<id>/repo` | Agent's `settings.local.json` (4 hooks: path-check, stop, session-start, permission-denied — NO intercept-task) | Built per §2.3 with `_all.md` + `_non_coordinator.md` + type-defined permissions | CWD matches pattern AND agent type has `canSpawnChildren: false` |
 
 **Key distinction**: Primary Claude uses ONLY the global hooks from `~/.claude/settings.json` (§6.6). Per-agent hooks (§6.1–6.5) are installed ONLY in agent worktree `settings.local.json` files and must never leak into the user's repo-level `settings.local.json`. If agent hooks are left in a repo's `settings.local.json` after an agent is killed or merged, they will incorrectly restrict the user's direct Claude sessions in that repo.
 
@@ -511,7 +620,7 @@ itsybitsy hooks operate across three distinct execution contexts. Each context h
 
 **Detection pattern**: The `AGENT_CWD_PATTERN` regex (`/.ittybitty/agents/([^/]+)/repo(/|$)`) is used by all hooks to distinguish agent contexts from primary Claude. If CWD does not match this pattern, the session is treated as primary Claude and per-agent restrictions do not apply.
 
-itsybitsy installs hooks into each agent's `settings.local.json`, plus optional global hooks in `~/.claude/settings.json`. Managers get five hooks (path isolation, stop, session-start, permission-denied, and intercept-task); workers get four (no intercept-task).
+itsybitsy installs hooks into each agent's `settings.local.json`, plus optional global hooks in `~/.claude/settings.json`. Agents with `canSpawnChildren: true` get five hooks (path isolation, stop, session-start, permission-denied, and intercept-task); leaf agents (`canSpawnChildren: false`) get four (no intercept-task).
 
 ### 6.1 Path Isolation Hook (PreToolUse)
 
@@ -533,14 +642,20 @@ itsybitsy installs hooks into each agent's `settings.local.json`, plus optional 
 
 [^ts-only-notebook-path]: **TS-only behavior.** The bash `ib` only extracts `file_path` and `path` from `tool_input`. The TS implementation additionally checks `notebook_path` to cover Jupyter notebook tools.
 
-**Allowed paths**:
+**Always allowed paths** (steps 6–7):
 - Agent's own worktree (`<agent-dir>/repo/...`)
 - Agent's own `agent.log`
-- Home directory, `/tmp`, and other system paths (anything not in another agent's dir or the main repo)
 
-**Denied paths**:
+**Always denied paths** (steps 8–9, checked before allowedPaths):
 - Other agents' directories
 - Main repo root (outside the agent's worktree)
+
+**allowedPaths-based access control** (step 10): If the agent's `meta.json` contains an `allowedPaths` field (set from the agent type's frontmatter at creation time — see §2.2), it controls access to all other paths:
+- `allowedPaths` **absent** (`undefined`): Legacy permissive mode — all paths outside the always-denied set are allowed (home directory, `/tmp`, system paths, other repos).
+- `allowedPaths: []` (empty array): Strict mode — only the always-allowed paths above are permitted. No system paths, no other repos.
+- `allowedPaths` with entries: Only paths under the listed directories are allowed (in addition to the always-allowed paths). Matching is by exact path or directory prefix (`filePath === allowed || filePath.startsWith(allowed + "/")`).
+
+The distinction between `undefined` (absent) and `[]` (empty) is critical for backward compatibility: existing agents without `allowedPaths` in meta.json retain the current permissive behavior.
 
 **Logging**: Denials are logged to the agent's `agent.log` with format: `[PreToolUse] Permission denied: <tool-name> (<params>)`
 
@@ -591,16 +706,45 @@ The stop hook does **not** parse tmux output for state detection. It relies sole
 
 **Input**: JSON from stdin with `cwd` field (falls back to `process.cwd()` if absent).
 
-**Role detection** based on CWD:
+**Role detection** based on CWD and `meta.json`:
 - If CWD does not match `/.ittybitty/agents/<id>/repo` → **primary** (user-level Claude)
-- If CWD matches and `meta.json` has `worker: true` → **worker**
-- If CWD matches and `worker` is false/absent → **manager**
+- If CWD matches → reads `meta.json` and checks `agentType`, then falls back to legacy booleans:
+  - `agentType` is set → role is derived from the type name (`"coordinator"` → coordinator, `"worker"` → worker, else → manager). However, this role is only used as a fallback — the actual instruction generation uses the type's `instructionStyle` field.
+  - `agentType` is not set (legacy agent) → `coordinator: true` → coordinator, `worker: true` → worker, else → manager
 
-**Output**: JSON with `hookSpecificOutput.additionalContext` containing role-appropriate instructions wrapped in `<ittybitty>` tags. Instructions include:
+**Output**: JSON with `hookSpecificOutput.additionalContext` containing role-appropriate instructions wrapped in `<ittybitty>` tags.
+
+### 6.3.1 Instruction Generation
+
+Instructions are generated based on the agent's type definition:
+
+1. **If `agentType` is set in meta.json**: Load the type definition via `loadAgentType()`. If the type has a `markdownBody` (template body from the `.md` file), interpolate it with the session context variables and wrap in `<ittybitty>` tags. If no body, fall back to the hardcoded instructions matching the type's `instructionStyle` field (`"manager"`, `"worker"`, or `"coordinator"`).
+
+2. **If `agentType` is not set (legacy agent)**: Use the detected role (from legacy `worker`/`coordinator` booleans) to select hardcoded instructions.
+
+**Template interpolation**: Template bodies support `{{variable}}` placeholders and `{{#if condition}}...{{/if}}` conditional blocks:
+
+| Variable | Value |
+|----------|-------|
+| `{{agentId}}` | Agent's ID |
+| `{{agentManager}}` | Manager's agent ID (empty if top-level) |
+| `{{parentBranch}}` | Parent branch name (`agent/<manager-id>` or `main`) |
+| `{{worktreePath}}` | Full path to agent's worktree |
+| `{{rootRepoPath}}` | Full path to the root repo |
+| `{{repoName}}` | Repository basename |
+| `{{pathIsolation}}` | Rendered Path Isolation section (from `buildPathIsolationSection()`, includes allowedPaths if defined) |
+
+| Condition | True when |
+|-----------|-----------|
+| `{{#if hasManager}}` | Agent has a manager |
+| `{{#if isTopLevel}}` | Agent has no manager |
+
+**Hardcoded instruction sets** (used when no template body exists):
 
 - **Primary**: Available `ib` commands for spawning and managing agents
 - **Manager**: Agent identity, worktree path, git context, sub-agent commands, workflow guidance, merge conflict handling (delegate rebasing to sub-agents), state management (`WAITING`/`I HAVE COMPLETED THE GOAL`), ask capability (top-level only)
 - **Worker**: Agent identity, worktree path, git context, send/diff/status commands only, state management, communication with manager
+- **Coordinator**: Read-only coordination, `ib` commands, code reading tools, no write access
 
 ### 6.4 Intercept Task Hook (PreToolUse)
 
@@ -610,17 +754,17 @@ The stop hook does **not** parse tmux output for state detection. It relies sole
 
 Intercepts Claude Code's Task, Agent, TaskCreate, and AskUserQuestion tools and redirects them to the ib system instead:
 
-1. **AskUserQuestion denial**: Always denied. Managers (and primary Claude) are told to use `ib ask "question"` — which routes through the dashboard's QUESTIONS pane and the question-acknowledgement flow — instead of Claude Code's built-in multi-choice prompt. Workers are told to report to their manager instead of asking the user directly.
-2. **Worker denial**: If Task/Agent/TaskCreate is called from a worker agent (detected via CWD + `meta.json`), denies with "Workers cannot create tasks or spawn sub-agents"
+1. **AskUserQuestion denial**: Always denied. Managers (and primary Claude) are told to use `ib ask "question"` — which routes through the dashboard's QUESTIONS pane and the question-acknowledgement flow — instead of Claude Code's built-in multi-choice prompt. Leaf agents are told to report to their manager instead of asking the user directly.
+2. **Leaf agent denial**: If Task/Agent/TaskCreate is called from a leaf agent (an agent whose type has `canSpawnChildren: false`, detected via CWD + `meta.json`), denies with "Workers cannot create tasks or spawn sub-agents"
 3. **Only intercepts `Task`, `Agent`, `TaskCreate`, and `AskUserQuestion`** — all other tools pass through
 4. **Skip for certain subagent_types**: `Bash`, `statusline-setup`, `claude-code-guide`, `meta-agent`, `ib-merge` pass through unintercepted
 5. **Model validation**: Only `sonnet`, `opus`, `haiku`, or empty string are allowed
 6. **Spawn behavior**:
-   - When called from an agent context: spawns a `--worker` with the calling agent as `--manager`
-   - When called from primary Claude: spawns a manager (no `--worker`)
+   - When called from an agent context: spawns a `--type worker` with the calling agent as `--manager`
+   - When called from primary Claude: spawns a manager (no `--type worker`)
 7. **Output**: Rewrites the Task invocation to a `claude-code-guide` subagent that simply reports the spawned agent ID
 
-This hook is installed for manager agents (not workers), and only when the main repo's settings already have the intercept hook installed. The hook intercepts `Task`, `Agent`, `TaskCreate`, and `AskUserQuestion` tool calls. For managers, Task/Agent/TaskCreate are intercepted and spawn ib workers. For workers, those three are denied with "Workers cannot create tasks or spawn sub-agents." `AskUserQuestion` is denied for all callers regardless of role. The hook matcher includes `TaskCreate` so it fires for that tool in addition to `Task` and `Agent` (see §2.1).
+This hook is installed for agents with `canSpawnChildren: true` (not leaf agents), and only when the main repo's settings already have the intercept hook installed. The hook intercepts `Task`, `Agent`, `TaskCreate`, and `AskUserQuestion` tool calls. For spawning agents, Task/Agent/TaskCreate are intercepted and spawn ib workers. For leaf agents, those three are denied with "Workers cannot create tasks or spawn sub-agents." `AskUserQuestion` is denied for all callers regardless of role. The hook matcher includes `TaskCreate` so it fires for that tool in addition to `Task` and `Agent` (see §2.2).
 
 ### 6.5 Permission Denied Hook (PermissionRequest)
 
@@ -675,22 +819,34 @@ All keys are read from `~/.itsybitsy/config.json`. If a key is absent or has an 
 | `externalDiffTool` | string | (none) | External diff viewer command used by the TUI (`ib watch`). Read from `~/.itsybitsy/config.json` at startup via `readConfig()`; written back via `writeConfig()` when changed in the settings dialog. When absent or empty, the diff action is disabled. |
 | `hooks.injectStatus` | boolean | `true` | When `false`, the `inject-status` UserPromptSubmit/PostToolUse hook exits immediately without injecting agent status into the Claude context. |
 | `hooks.statusVisible` | boolean | `true` | When `true` (and `hooks.injectStatus` is also `true`), the status injection hook also emits a `systemMessage` field so the injected summary appears visibly to the user in the Claude UI. When `false`, status is injected as silent `additionalContext` only. |
-| `permissions.manager.allow` | string[] | `[]` | Additional tool names added to the allow list for manager agents (merged with mandatory permissions at spawn time). |
-| `permissions.manager.deny` | string[] | `[]` | Additional tool names added to the deny list for manager agents. |
-| `permissions.worker.allow` | string[] | `[]` | Additional tool names added to the allow list for worker agents. |
-| `permissions.worker.deny` | string[] | `[]` | Additional tool names added to the deny list for worker agents. |
+| `coordinator.model` | string | `"opus"` | Default model for coordinator agents. Resolution: `--model` > type `model` > `coordinator.model` > `"opus"`. |
+
+**Deprecated keys**: All permission list keys have been moved out of `config.json` into agent type layer files:
+
+| Deprecated key | New location |
+|---|---|
+| `permissions.all.allow/deny` | `~/.itsybitsy/agent-types/_all.md` frontmatter |
+| `permissions.repo.allow/deny` | `~/.itsybitsy/agent-types/_non_coordinator.md` frontmatter |
+| `permissions.coordinator.allow/deny` | `~/.itsybitsy/agent-types/coordinator.md` frontmatter |
+| `permissions.manager.allow/deny` | `~/.itsybitsy/agent-types/manager.md` frontmatter |
+| `permissions.worker.allow/deny` | `~/.itsybitsy/agent-types/worker.md` frontmatter |
+
+If any of these keys remain in the config file, a deprecation warning is shown at `ib watch` startup pointing to the correct replacement file.
 
 ### 7.3 Permission Resolution
 
-For a given agent type (manager or worker):
+For a given agent, `buildAgentSettings()` constructs `<agent-dir>/repo/.claude/settings.local.json` by merging permissions from four sources. See §2.3 for the full details and exact file paths.
 
-1. Start with the base settings from `.claude/settings.json` in the repo root (NOT `settings.local.json` — the `.local` file may belong to a per-repo coordinator and should not propagate to spawned agents)
-2. Add mandatory permissions (§2.2)
-3. Add config-defined permissions for the agent's role
-4. Workers use `permissions.worker.allow`/`deny`; managers use `permissions.manager.allow`/`deny`. There is no fallthrough between types [^perm-quirk]
-5. Deduplicate all allow/deny lists
+Summary:
 
-[^perm-quirk]: The bash implementation has a quirk: if `CONFIG_WORKER_ALLOW` is empty, it falls through to `CONFIG_MANAGER_ALLOW` (and `deny` follows suit). The TS implementation intentionally does not replicate this — workers with empty `permissions.worker.allow` get no extra config permissions rather than inheriting manager permissions.
+1. **`<repo>/.claude/settings.json`** — base project allow list (deny entries NOT inherited)
+2. **Hardcoded mandatory** — ib commands, git operations, filesystem inspection, Claude Code tools
+3. **`~/.itsybitsy/agent-types/_all.md`** — frontmatter `permissions.allow/deny` applied to ALL agent types
+4. **`~/.itsybitsy/agent-types/_non_coordinator.md`** — frontmatter `permissions.allow/deny` applied to every non-coordinator type (skipped for coordinators)
+5. **`~/.itsybitsy/agent-types/<type>.md`** — `permissions.allow/deny` from type frontmatter (coordinator-specific permissions live here, in `coordinator.md`)
+6. Deduplicate all allow/deny lists
+
+[^perm-quirk]: The bash implementation has a quirk: if `CONFIG_WORKER_ALLOW` is empty, it falls through to `CONFIG_MANAGER_ALLOW` (and `deny` follows suit). The TS implementation intentionally does not replicate this — the new system uses explicit scope-based permissions (all/repo/coordinator) with no fallthrough.
 
 ### 7.4 Custom Prompts
 
@@ -726,7 +882,7 @@ Lists all known config keys with their current values and sources.
 
 1. Each line shows the key, its effective value, and a source label: `(user)` or `(default)`.
 2. **Unset keys**: Keys with no value and no default display as `(unset)`.
-3. **All known keys are listed**, including those not present in the config file. The full key list matches `CONFIG_KEYS` in `config.ts`: `maxAgents`, `model`, `createPullRequests`, `allowAgentQuestions`, `autoCompactThreshold`, `externalDiffTool`, `hooks.injectStatus`, `hooks.statusVisible`, `permissions.manager.allow`, `permissions.manager.deny`, `permissions.worker.allow`, `permissions.worker.deny`.
+3. **All known keys are listed**, including those not present in the config file. The full key list matches `CONFIG_KEYS` in `config.ts`: `maxAgents`, `model`, `createPullRequests`, `allowAgentQuestions`, `autoCompactThreshold`, `externalDiffTool`, `hooks.injectStatus`, `hooks.statusVisible`, `coordinator.model`. (Permission list keys have moved out of `config.json` into agent type layer files — see §2.3.)
 4. A legend line is printed after the list explaining the source labels.
 5. Aliases: `ib config ls` is accepted as an alias for `list`.
 
@@ -746,7 +902,7 @@ Sets a scalar config value.
 1. **Key and value required**: Exits with error if either is missing.
 2. **Config file creation**: If `~/.itsybitsy/config.json` does not exist, the `~/.itsybitsy/` directory and file are created.
 3. **Unknown keys rejected**: Only keys defined in `CONFIG_KEYS` are accepted. Unknown keys produce error `"Unknown config key: '<key>'"`.
-4. **Array keys rejected**: Keys with type `string[]` (the `permissions.*` keys) are rejected with an error directing the user to use `ib config add` / `ib config remove` instead.
+4. **Array keys rejected**: No `string[]` keys are currently defined in `CONFIG_KEYS` (permission lists were migrated out in Phase 50 — see §2.3). Historically this rule rejected such keys and directed users to `ib config add` / `ib config remove`; it remains in the schema for future expansion.
 5. **Type validation** for known keys:
    - `number` type keys (`maxAgents`, `autoCompactThreshold`): Must be a non-negative integer (`/^[0-9]+$/`). Error: `"'<key>' must be a number, got '<value>'"`.
    - `boolean` type keys (`createPullRequests`, `allowAgentQuestions`, `hooks.injectStatus`, `hooks.statusVisible`): Must be `"true"` or `"false"`. Error: `"'<key>' must be true or false, got '<value>'"`.
@@ -760,7 +916,7 @@ Sets a scalar config value.
 Adds a value to an array config key, preventing duplicates.
 
 1. **Key and value required**: Exits with error if either is missing. Error output lists the valid array keys.
-2. **Array keys only**: Only `permissions.manager.allow`, `permissions.manager.deny`, `permissions.worker.allow`, and `permissions.worker.deny` are accepted. All other keys are rejected with an error.
+2. **Array keys only**: No `string[]` keys are currently defined in `CONFIG_KEYS` — all former permission-list keys moved out of `config.json` into agent-type layer files (see §2.3). The command remains in the schema for future expansion; today all keys are rejected with an error directing the user to the appropriate `.md` file.
 3. **Config file creation**: If `~/.itsybitsy/config.json` does not exist, the directory and file are created.
 4. **Duplicate prevention**: If the value already exists in the array, prints `"Value '<value>' already exists in <key>"` and exits successfully (exit code 0).
 5. **Output**: On success, prints `"Added '<value>' to <key>"`.
@@ -896,7 +1052,7 @@ Reassigns an agent to a different parent manager (or makes it a root manager wit
 2. Agent must exist
 3. Cannot reassign an agent to itself
 4. New parent must exist (unless `--none`)
-5. New parent cannot be a worker
+5. New parent cannot be a leaf agent (`canSpawnChildren: false`)
 6. New parent cannot be a descendant of the agent (circular dependency check)
 7. No-op if agent already has the requested parent
 
@@ -1023,7 +1179,7 @@ Tab names are defined in `SETUP_TAB_NAMES = ['Hooks', 'Config']`. Switching betw
 
 ### 10.2 Permissions Editor
 
-Within the Config tab, a **permissions editor** sub-dialog allows editing the `permissions.manager.allow`, `permissions.manager.deny`, `permissions.worker.allow`, and `permissions.worker.deny` lists in `~/.itsybitsy/config.json`. Each list is editable independently. Changes take effect for newly created agents (existing agents' `settings.local.json` is not modified retroactively).
+A **permissions editor** sub-dialog exists in the Config tab code for historical reasons, but its target config keys (`permissions.all.*`, `permissions.repo.*`) were removed from `CONFIG_KEYS` when permission lists migrated into agent-type layer files (see §2.3). The UI is retained as defensive dead code and is no longer reachable through normal navigation. All permission edits now happen by editing the corresponding `.md` file directly: `~/.itsybitsy/agent-types/_all.md`, `~/.itsybitsy/agent-types/_non_coordinator.md`, or per-type files (`manager.md`, `worker.md`, `coordinator.md`). Changes take effect for newly created agents — existing agents' `settings.local.json` is not modified retroactively.
 
 ---
 
@@ -1090,7 +1246,7 @@ icon agent-id          state      age
 ```
 
 Each row shows:
-- **Icon**: `◆` (manager) or `⚙` (worker), with `⚠` prefix if orphaned
+- **Icon**: Resolved from `meta.json` `agentIcon` field, falling back to legacy detection (`◇` coordinator, `⚙` worker, `◆` manager). Custom types can define any icon character (see §2.6). `⚠` prefix if orphaned.
 - **Agent ID**: e.g., `agent-a1b2c3d4`
 - **State**: color-coded, right-aligned
 - **Age**: e.g., `2h`, `3d`
@@ -1288,7 +1444,7 @@ Per-repo coordinators are stored in `.ittybitty/agents/` like regular agents, bu
 
 #### 12.2.3 Lifecycle
 
-**Creation**: Per-repo coordinators are created via `ib new-agent --coordinator` (new flag). This:
+**Creation**: Per-repo coordinators are created via `ib new-agent --type coordinator`. This:
 
 1. Uses the repo basename as the agent ID (via `getCoordinatorAgentId(repoPath)`)
 2. Sets `coordinator: true` in meta.json
@@ -1296,19 +1452,18 @@ Per-repo coordinators are stored in `.ittybitty/agents/` like regular agents, bu
 4. Uses coordinator-specific session start context (§12.2.6)
 5. Does NOT set a `--manager` — coordinators are top-level agents
 6. Coordinators work directly in the repo directory (no git worktree) — they are read-only agents that do not need branch isolation
-7. Defaults to `coordinator.model` config (§12.5) when no explicit `--model` is provided — overridable with `--model <model>` on `ib new-agent --coordinator`
-8. `--coordinator` is mutually exclusive with `--worker` and `--type`
-9. Otherwise follows the standard agent creation flow (§1.1)
+7. Defaults to `coordinator.model` config (§12.5) when no explicit `--model` is provided — overridable with `--model <model>` on `ib new-agent --type coordinator`
+8. Otherwise follows the standard agent creation flow (§1.1)
 
-**One-per-repo constraint**: `checkCoordinatorExists(repoPath)` scans all agent directories in `.ittybitty/agents/` for any agent with `coordinator: true` in meta.json. If a coordinator already exists, `ib new-agent --coordinator` prints `"Coordinator already exists for <repo-name>"` and exits 0 (idempotent no-op). If a non-coordinator agent already has the repo basename as its ID (collision), a random 4-char hex suffix is appended to the coordinator's ID. There is exactly one coordinator per repo, never more. Archived coordinators (in `.ittybitty/archive/`) do not block creation — "active" means a directory in `.ittybitty/agents/` (not `.ittybitty/archive/`). A stopped or paused coordinator whose directory is still in `agents/` DOES block creation — only archiving removes the block.
+**One-per-repo constraint**: `checkCoordinatorExists(repoPath)` scans all agent directories in `.ittybitty/agents/` for any agent with `coordinator: true` in meta.json. If a coordinator already exists, `ib new-agent --type coordinator` prints `"Coordinator already exists for <repo-name>"` and exits 0 (idempotent no-op). If a non-coordinator agent already has the repo basename as its ID (collision), a random 4-char hex suffix is appended to the coordinator's ID. There is exactly one coordinator per repo, never more. Archived coordinators (in `.ittybitty/archive/`) do not block creation — "active" means a directory in `.ittybitty/agents/` (not `.ittybitty/archive/`). A stopped or paused coordinator whose directory is still in `agents/` DOES block creation — only archiving removes the block.
 
-**No auto-spawn on watch startup**: Per-repo coordinators are NOT auto-spawned when `ib watch` launches. Only the system coordinator is auto-spawned (§12.1.2). Per-repo coordinators are created manually via one of: (a) `ib new-agent --coordinator` from the CLI, (b) pressing `R` on a repo header in the TUI (which spawns a coordinator if none exists, or resumes a stopped one), or (c) the system coordinator running `ib new-agent --coordinator` from within a repo directory.
+**No auto-spawn on watch startup**: Per-repo coordinators are NOT auto-spawned when `ib watch` launches. Only the system coordinator is auto-spawned (§12.1.2). Per-repo coordinators are created manually via one of: (a) `ib new-agent --type coordinator` from the CLI, (b) pressing `R` on a repo header in the TUI (which spawns a coordinator if none exists, or resumes a stopped one), or (c) the system coordinator running `ib new-agent --type coordinator` from within a repo directory.
 
 **Auto-close on exit**: When `ib watch` exits, per-repo coordinators are paused (§1.5 — kill Claude process + tmux session, preserve worktree/meta.json/branch; paused coordinators show as `stopped` in state detection since their tmux session no longer exists) **only if** no other `ib watch` instance is running. This uses the same PID-based `~/.itsybitsy/coordinator.refs` file used by the system coordinator (§12.1.2) — a single shared file governs both the system coordinator kill and all per-repo coordinator pauses. When no live PIDs remain, the system coordinator session is killed and per-repo coordinators across **all registered repos** (from `~/.itsybitsy/repos.json`) are paused. If other instances remain, all coordinators are left running.
 
 **Resume**: Paused coordinators can be resumed via `ib resume <repo-basename>` (standard §1.6 resume flow) or by pressing `R` on the repo header in the TUI. The TUI's `R` handler checks `checkCoordinatorExists()` — if a coordinator exists and is stopped/complete, it resumes it; if none exists, it spawns a new one.
 
-**Children**: Agents spawned by a per-repo coordinator (via `ib new-agent --worker` from within the coordinator's session) will have `manager: "<repo-basename>"` in their meta.json (where `<repo-basename>` is the coordinator's agent ID). This means `buildAgentTree()` will correctly parent them under the coordinator, and `ib nuke <repo-basename>` will recursively kill them.
+**Children**: Agents spawned by a per-repo coordinator (via `ib new-agent --type worker` from within the coordinator's session) will have `manager: "<repo-basename>"` in their meta.json (where `<repo-basename>` is the coordinator's agent ID). This means `buildAgentTree()` will correctly parent them under the coordinator, and `ib nuke <repo-basename>` will recursively kill them.
 
 **Killing/Archiving**: Per-repo coordinators follow the standard kill/archive flow (§1.4, §1.7). `ib kill <repo-basename>` kills only the coordinator itself (standard §1.4 behavior). To recursively kill a coordinator and all its children, use `ib nuke <repo-basename>` (§1.8). The `manager: "<repo-basename>"` field in children's meta.json links them to the coordinator for the nuke traversal.
 
@@ -1350,18 +1505,9 @@ Key differences from regular agents:
 - **No WebFetch/WebSearch** — coordinators don't need internet access
 - **No KillShell** — coordinators don't run long-lived shell processes
 
-These permissions are constructed by a new `buildCoordinatorSettings()` function (parallel to the existing `buildAgentSettings()`). Per-repo coordinator permissions are also configurable via config. **Merge semantics**: Config `allow` entries are appended to the hardcoded allow list. Config `deny` entries are appended to the hardcoded deny list. The hardcoded deny list always takes precedence — `buildCoordinatorSettings()` enforces this at construction time by filtering out any user-configured `allow` entries that appear in the hardcoded `deny` list before building the final permissions object. Adding `"Write"` to `permissions.coordinator.allow` is silently dropped because `Write` is in the hardcoded deny list. This prevents users from accidentally granting write access to coordinators via config:
+These permissions are constructed by a new `buildCoordinatorSettings()` function (parallel to the existing `buildAgentSettings()`). Per-repo coordinator permissions are customized by editing the `permissions.allow` / `permissions.deny` frontmatter in `~/.itsybitsy/agent-types/coordinator.md`. **Merge semantics**: `_all.md` frontmatter entries (applied to every agent type, including coordinators) and the coordinator type file's own frontmatter `allow` entries are appended to the hardcoded allow list. `_non_coordinator.md` is NOT merged for coordinators. The hardcoded deny list always takes precedence — `buildCoordinatorSettings()` enforces this at construction time by filtering out any user-configured `allow` entries that appear in the hardcoded `deny` list before building the final permissions object. Adding `"Write"` to `coordinator.md`'s `permissions.allow` is silently dropped because `Write` is in the hardcoded deny list. This prevents users from accidentally granting write access to coordinators.
 
-```json
-{
-  "permissions": {
-    "coordinator": {
-      "allow": [],
-      "deny": []
-    }
-  }
-}
-```
+The former config keys `permissions.coordinator.allow` and `permissions.coordinator.deny` have been removed; if present in `~/.itsybitsy/config.json`, a deprecation warning is shown at `ib watch` startup directing users to migrate entries into `~/.itsybitsy/agent-types/coordinator.md` frontmatter.
 
 #### 12.2.5 Display
 
@@ -1388,7 +1534,7 @@ Per-repo coordinators use a custom session-start context (injected via the sessi
 - Bash rules (single-command enforcement)
 - Path isolation (worktree boundaries)
 - Git worktree context (branch name, parent branch)
-- Command table (`ib new-agent --worker`, `ib list --manager`, `ib look`, `ib send`, `ib send @system "msg"`, `ib send @coordinator "msg"`, `ib status`, `ib diff`, `ib merge`, `ib kill`)
+- Command table (`ib new-agent --type worker`, `ib list --manager`, `ib look`, `ib send`, `ib send @system "msg"`, `ib send @coordinator "msg"`, `ib status`, `ib diff`, `ib merge`, `ib kill`)
 - State management (`WAITING` / `I HAVE COMPLETED THE GOAL`)
 - Workflow steps (understand codebase → break down tasks → spawn workers → monitor → merge → coordinate)
 - Agent state reference table
@@ -1559,22 +1705,16 @@ export type FlatEntry =
 
 #### 12.4.3 maxAgents
 
-Per-repo coordinators bypass the `maxAgents` check during creation (`ib new-agent --coordinator` or TUI `R` key) — coordinators are infrastructure, not user tasks. They DO occupy agent directories in `.ittybitty/agents/` and appear in `ib list` output, but they are **excluded from the agent count** when checking `maxAgents` for regular agent creation. Example: if `maxAgents=10` and there are 3 coordinators, you can still create 10 regular agents (not 7). The system coordinator does NOT count — it is not a regular agent and lives outside any repo.
+Per-repo coordinators bypass the `maxAgents` check during creation (`ib new-agent --type coordinator` or TUI `R` key) — coordinators are infrastructure, not user tasks. They DO occupy agent directories in `.ittybitty/agents/` and appear in `ib list` output, but they are **excluded from the agent count** when checking `maxAgents` for regular agent creation. Example: if `maxAgents=10` and there are 3 coordinators, you can still create 10 regular agents (not 7). The system coordinator does NOT count — it is not a regular agent and lives outside any repo.
 
 ### 12.5 Coordinator-Specific Config
 
-New config keys in `~/.itsybitsy/config.json`:
+Coordinator model selection lives in `~/.itsybitsy/config.json`:
 
 ```json
 {
   "coordinator": {
     "model": "opus"
-  },
-  "permissions": {
-    "coordinator": {
-      "allow": [],
-      "deny": []
-    }
   }
 }
 ```
@@ -1582,8 +1722,8 @@ New config keys in `~/.itsybitsy/config.json`:
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `coordinator.model` | string | `"opus"` | Model for both system and per-repo coordinators. A single key is used because both tiers perform the same kind of work (orchestration via `ib` commands). If different models are needed, per-repo coordinators can be spawned with `--model <model>` to override. Changing the system coordinator's model requires restarting it (`R` key in TUI when selected, or kill + re-launch `ib watch`) — the config is read at spawn time. |
-| `permissions.coordinator.allow` | string[] | `[]` | Additional permissions for per-repo coordinators |
-| `permissions.coordinator.deny` | string[] | `[]` | Additional deny rules for per-repo coordinators |
+
+Coordinator permissions (allow/deny lists) live in `~/.itsybitsy/agent-types/coordinator.md` frontmatter, not in the config file. The former `permissions.coordinator.allow` / `permissions.coordinator.deny` config keys have been removed; if present, a deprecation warning is shown at `ib watch` startup.
 
 ### 12.6 Affected Files and Modules
 
@@ -1594,12 +1734,12 @@ The coordinator system touches many modules. This section catalogs the current i
 | `src/coordinator.ts` | **Implemented** | System coordinator lifecycle (`ensureSystemCoordinator()`, `releaseSystemCoordinator()`, `restartSystemCoordinator()`), PID-based reference counting, system coordinator permissions/prompt, `sanitizeTmuxInput()`, per-repo coordinator permissions (`buildPerRepoCoordinatorSettings()`), per-repo coordinator prompt (`perRepoCoordinatorPrompt()`), coordinator existence check (`checkCoordinatorExists()`), agent ID generation (`getCoordinatorAgentId()` — returns repo basename). No separate `coordinator-settings.ts` — per-repo settings are in this file. |
 | `src/inbox.ts` | **Implemented** | `ib inbox` command implementation (write/list/read/ack/count). File-based message queue at `~/.itsybitsy/coordinator-inbox/`. |
 | `src/agents.ts` | **Implemented** | `coordinator?: boolean` in `AgentMeta`. `{ kind: "system-coordinator" }` in `FlatEntry`. `flattenAgentTree()` prepends system coordinator entry. Per-repo coordinators sorted before regular agents within each repo section. |
-| `src/ib-commands.ts` | **Implemented** | `newAgent()` extended with `--coordinator` flag: uses repo basename as ID (via `getCoordinatorAgentId()`), sets `coordinator: true` in meta.json, one-per-repo validation via `checkCoordinatorExists()`, mutual exclusivity with `--worker` and `--type`, `coordinator.model` default, max-agents bypass, coordinator-specific `settings.local.json` with hooks. No special `ib send` routing — standard agent ID resolution handles everything. |
+| `src/ib-commands.ts` | **Implemented** | `newAgent()` extended with `--type coordinator`: uses repo basename as ID (via `getCoordinatorAgentId()`), sets `coordinator: true` in meta.json, one-per-repo validation via `checkCoordinatorExists()`, `coordinator.model` default, max-agents bypass, coordinator-specific `settings.local.json` with hooks. No special `ib send` routing — standard agent ID resolution handles everything. |
 | `src/hooks/session-start.ts` | **Implemented** | Detects `coordinator: true` in meta.json. `generateCoordinatorInstructions()` injects coordinator-specific prompt. Worker instructions correctly use manager's agent ID (repo basename) for `ib send`. |
 | `src/hooks/intercept-task.ts` | **Implemented** | `checkCoordinatorBashRestrictions()` blocks shell metacharacters and `--output` in git commands for coordinator sessions. Detects coordinators via `coordinator: true` in meta.json. |
 | `src/hooks/agent-path.ts` | **No changes needed** | Per-repo coordinators use standard path isolation. |
 | `src/hooks/agent-status.ts` | **No changes needed** | Stop hook writes state normally. |
-| `src/config.ts` | **Implemented** | Config keys: `coordinator.model`, `permissions.coordinator.allow`, `permissions.coordinator.deny`. |
+| `src/config.ts` | **Implemented** | Config keys: `coordinator.model`. (`permissions.coordinator.*` removed — coordinator permissions live in `~/.itsybitsy/agent-types/coordinator.md` frontmatter.) |
 | `src/watchdog.ts` | **Not yet modified** | Does NOT have coordinator-specific behavior. Treats coordinators identically to regular agents. See §12.2.7. |
 | `src/tui/dashboard.ts` | **Implemented** | System coordinator full-width view with TMUX/DASHBOARD toggle, coordinator lifecycle on startup/shutdown, coordinator restart on `R`, input field routing, per-repo coordinator pausing on exit. |
 | `src/tui/agent-tree.ts` | **Implemented** | System coordinator as first entry with `◆` icon. Per-repo coordinators with `◇` icon, sorted before regular agents. |
@@ -1607,7 +1747,7 @@ The coordinator system touches many modules. This section catalogs the current i
 | `src/tui/focus.ts` | **Implemented** | Coordinator focus order: `agent-tree` → `info` → `coordinator`. |
 | `src/tui/pane-manager.ts` | **Implemented** | Full-width view when system coordinator is selected. Per-repo coordinator REPO mode with split pane. |
 | `src/watcher.ts` | **No changes needed** | Per-repo coordinators are regular agents detected by fs.watch. System coordinator state polled via `getCoordinatorInfo()`. |
-| `src/index.ts` | **Implemented** | `ib new-agent --coordinator` flag handling. `ib inbox` subcommand routing. `@`-based routing in `ib send`: `@system` routes to system coordinator inbox, `@coordinator` routes to own repo's coordinator, `@<repo-name>` routes to named repo's coordinator, `@<repo-name>/<agent-id>` routes to specific agent in named repo (§12.3.1). Bare agent IDs use standard `matchAgentById()` with own-repo-first resolution. |
+| `src/index.ts` | **Implemented** | `ib new-agent --type coordinator` flag handling. `ib inbox` subcommand routing. `@`-based routing in `ib send`: `@system` routes to system coordinator inbox, `@coordinator` routes to own repo's coordinator, `@<repo-name>` routes to named repo's coordinator, `@<repo-name>/<agent-id>` routes to specific agent in named repo (§12.3.1). Bare agent IDs use standard `matchAgentById()` with own-repo-first resolution. |
 | `src/auto-compact.ts` | **No changes needed** | Per-repo coordinators get auto-compact as regular agents. System coordinator has no watchdog/auto-compact. |
 
 ---

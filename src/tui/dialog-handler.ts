@@ -45,10 +45,11 @@ export type DialogState =
       type: "new-agent-form";
       repoName: string;
       name: string;
-      worker: boolean;
+      agentType: string;
+      availableTypes: string[];
       buffer: TextBuffer;
-      focused: "name" | "worker" | "prompt" | "create" | "cancel";
-      onSubmit: (name: string, worker: boolean, prompt: string) => void;
+      focused: "name" | "agentType" | "prompt" | "create" | "cancel";
+      onSubmit: (name: string, agentType: string, prompt: string) => void;
     } & DialogCommon)
   | ({
       type: "setup";
@@ -63,7 +64,7 @@ export type DialogState =
     } & DialogCommon)
   | ({
       type: "permissions-editor";
-      roleKey: string; // e.g., "permissions.manager"
+      roleKey: string; // e.g., "permissions.repo"
       tab: 0 | 1; // 0=Allow, 1=Deny
       allowList: string[];
       denyList: string[];
@@ -290,7 +291,7 @@ function handleNewAgentFormDialog(
   d: Extract<NonNullable<DialogState>, { type: "new-agent-form" }>,
   data: string
 ): boolean {
-  const focusOrder: Array<typeof d.focused> = ["name", "worker", "prompt", "cancel", "create"];
+  const focusOrder: Array<typeof d.focused> = ["name", "agentType", "prompt", "cancel", "create"];
   const promptEmpty = () => d.buffer.getText().trim().length === 0;
   const onAsyncRender = () => ctx.tui?.requestRender();
   const nextFocus = () => {
@@ -334,12 +335,17 @@ function handleNewAgentFormDialog(
         ctx.tui?.requestRender();
       }
     }
-  } else if (d.focused === "worker") {
+  } else if (d.focused === "agentType") {
     if (matchesKey(data, Key.tab)) { nextFocus(); }
     else if (matchesKey(data, Key.shift("tab"))) { prevFocus(); }
     else if (matchesKey(data, Key.enter) || data === " ") {
-      d.worker = !d.worker;
-      ctx.tui?.requestRender();
+      // Cycle through the available agent types
+      if (d.availableTypes.length > 0) {
+        const currentIdx = d.availableTypes.indexOf(d.agentType);
+        const nextIdx = (currentIdx + 1) % d.availableTypes.length;
+        d.agentType = d.availableTypes[nextIdx]!;
+        ctx.tui?.requestRender();
+      }
     }
   } else if (d.focused === "prompt") {
     if (matchesKey(data, Key.tab)) { nextFocus(); }
@@ -351,7 +357,7 @@ function handleNewAgentFormDialog(
     if (matchesKey(data, Key.enter)) {
       const promptText = d.buffer.getText().trim();
       if (promptText.length > 0) {
-        d.onSubmit(d.name, d.worker, promptText);
+        d.onSubmit(d.name, d.agentType, promptText);
       }
     } else if (matchesKey(data, Key.tab) || matchesKey(data, Key.right)) { nextFocus(); }
     else if (matchesKey(data, Key.shift("tab")) || matchesKey(data, Key.left)) { prevFocus(); }
@@ -787,11 +793,14 @@ export function buildNewAgentFormContent(
   const nameValue = dialog.focused === "name" ? `${dialog.name}█` : (dialog.name || `${DIM}(optional)${RESET}`);
   lines.push(`${nameLabel}  ${truncateToWidth(nameValue, innerWidth - 8, "")}`);
 
-  const checkbox = dialog.worker ? "[x]" : "[ ]";
-  const workerLabel = dialog.focused === "worker"
-    ? `${BOLD}${GREEN}${checkbox} Worker${RESET}`
-    : `${checkbox} Worker`;
-  lines.push(workerLabel);
+  const cycleHint = dialog.availableTypes.length > 1
+    ? ` ${DIM}[Enter/Space to cycle]${RESET}`
+    : "";
+  const typeValue = dialog.agentType || "manager";
+  const typeLabel = dialog.focused === "agentType"
+    ? `${BOLD}${GREEN}Type: ${typeValue}${RESET}${cycleHint}`
+    : `${DIM}Type:${RESET} ${typeValue}`;
+  lines.push(typeLabel);
   lines.push("");
 
   const promptLabel = dialog.focused === "prompt" ? `${BOLD}Prompt:${RESET} ${DIM}(required)${RESET}` : `${DIM}Prompt: (required)${RESET}`;
@@ -920,7 +929,7 @@ export function buildPermissionsEditorContent(
 ): DialogContent {
   const lines: string[] = [];
 
-  // Title from roleKey: "permissions.manager" → "Manager Permissions"
+  // Title from roleKey: "permissions.repo" → "Repo Permissions"
   const roleName = dialog.roleKey.split(".").pop() ?? "";
   const title = `${roleName.charAt(0).toUpperCase()}${roleName.slice(1)} Permissions`;
 

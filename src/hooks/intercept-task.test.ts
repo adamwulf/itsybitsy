@@ -576,3 +576,156 @@ describe("coordinator Bash restrictions", () => {
     }
   });
 });
+
+describe("agent types", () => {
+  test("deny agent type with canSpawnChildren=false", async () => {
+    // Create a temp directory simulating an agent with a custom type that cannot spawn
+    const fs = await import("fs/promises");
+    const { tmpdir } = await import("os");
+    const { join } = await import("path");
+    const tmpDir = await fs.mkdtemp(join(tmpdir(), "ib-test-agenttype-"));
+    try {
+      const agentId = "agent-researcher123";
+      const agentDir = join(tmpDir, ".ittybitty", "agents", agentId);
+      await fs.mkdir(join(agentDir, "repo"), { recursive: true });
+      await Bun.write(
+        join(agentDir, "meta.json"),
+        JSON.stringify({
+          id: agentId,
+          worker: false,
+          manager: null,
+          agentType: "worker", // Built-in worker type has canSpawnChildren: false
+        })
+      );
+
+      const cwd = join(agentDir, "repo");
+      const result = await processTaskIntercept({
+        tool_name: "Task",
+        tool_input: { prompt: "do stuff", description: "stuff" },
+        cwd,
+      });
+      expect(result.action).toBe("intercept");
+      expect((result.output as any).hookSpecificOutput.permissionDecision).toBe("deny");
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  test("intercept agent type with canSpawnChildren=true", async () => {
+    // Create a temp directory simulating an agent with a custom type that can spawn
+    const fs = await import("fs/promises");
+    const { tmpdir } = await import("os");
+    const { join } = await import("path");
+    const tmpDir = await fs.mkdtemp(join(tmpdir(), "ib-test-agenttype-manager-"));
+    try {
+      const agentId = "agent-manager456";
+      const agentDir = join(tmpDir, ".ittybitty", "agents", agentId);
+      await fs.mkdir(join(agentDir, "repo"), { recursive: true });
+      await Bun.write(
+        join(agentDir, "meta.json"),
+        JSON.stringify({
+          id: agentId,
+          worker: false,
+          manager: null,
+          agentType: "manager", // Built-in manager type has canSpawnChildren: true
+        })
+      );
+
+      const cwd = join(agentDir, "repo");
+      const result = await processTaskIntercept(
+        {
+          tool_name: "Task",
+          tool_input: { prompt: "implement something", description: "something" },
+          cwd,
+        },
+        {
+          spawnAgent: async () => ({
+            ok: true,
+            stdout: "Created agent-def67890 in worktree",
+            stderr: "",
+          }),
+        }
+      );
+      expect(result.action).toBe("intercept");
+      expect(result.spawnedAgentId).toBe("agent-def67890");
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  test("backward compat: agent with no agentType still uses meta.worker check", async () => {
+    // Old-style agent without agentType field - should use meta.worker for decision
+    const fs = await import("fs/promises");
+    const { tmpdir } = await import("os");
+    const { join } = await import("path");
+    const tmpDir = await fs.mkdtemp(join(tmpdir(), "ib-test-oldstyle-"));
+    try {
+      const agentId = "agent-oldstyle";
+      const agentDir = join(tmpDir, ".ittybitty", "agents", agentId);
+      await fs.mkdir(join(agentDir, "repo"), { recursive: true });
+      await Bun.write(
+        join(agentDir, "meta.json"),
+        JSON.stringify({
+          id: agentId,
+          worker: true,
+          manager: "agent-parent",
+          // No agentType field
+        })
+      );
+
+      const cwd = join(agentDir, "repo");
+      const result = await processTaskIntercept({
+        tool_name: "Task",
+        tool_input: { prompt: "do stuff", description: "stuff" },
+        cwd,
+      });
+      expect(result.action).toBe("intercept");
+      expect((result.output as any).hookSpecificOutput.permissionDecision).toBe("deny");
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  test("agentType takes precedence over meta.worker when both present", async () => {
+    // If meta.worker=true but agentType says canSpawnChildren=true,
+    // the agentType should win and intercept the Task call
+    const fs = await import("fs/promises");
+    const { tmpdir } = await import("os");
+    const { join } = await import("path");
+    const tmpDir = await fs.mkdtemp(join(tmpdir(), "ib-test-agenttype-precedence-"));
+    try {
+      const agentId = "agent-mixed";
+      const agentDir = join(tmpDir, ".ittybitty", "agents", agentId);
+      await fs.mkdir(join(agentDir, "repo"), { recursive: true });
+      await Bun.write(
+        join(agentDir, "meta.json"),
+        JSON.stringify({
+          id: agentId,
+          worker: true,           // Legacy field says worker (skip intercept)
+          manager: null,
+          agentType: "manager",   // agentType says canSpawnChildren=true (intercept)
+        })
+      );
+
+      const cwd = join(agentDir, "repo");
+      const result = await processTaskIntercept(
+        {
+          tool_name: "Task",
+          tool_input: { prompt: "do stuff", description: "stuff" },
+          cwd,
+        },
+        {
+          spawnAgent: async () => ({
+            ok: true,
+            stdout: "Created agent-spawned000",
+            stderr: "",
+          }),
+        }
+      );
+      // agentType should take precedence: canSpawnChildren=true → intercept
+      expect(result.action).toBe("intercept");
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+});

@@ -12,6 +12,17 @@ import { displayState } from "./agent-tree";
 import { getStateColors } from "./color-scheme";
 import { RESET, BOLD, DIM } from "./colors";
 
+/** Abbreviate agent type for display — built-in types get short forms, custom types truncate to 5 chars */
+function abbreviateRole(agentType: string | undefined, isWorker: boolean | undefined): string {
+  const name = agentType ?? (isWorker ? "worker" : "manager");
+  switch (name) {
+    case "manager": return "mgr";
+    case "worker": return "wkr";
+    case "coordinator": return "coord";
+    default: return name.length > 5 ? name.slice(0, 5) : name;
+  }
+}
+
 /** Column widths per SPEC */
 const COL_REPO = 15;
 const COL_AGENT = 20;
@@ -64,7 +75,7 @@ export function buildDashboardRows(flatList: FlatEntry[]): SystemDashboardRow[] 
     // kind === "agent"
     const agent = entry.agent;
     const isCoordinator = !!agent.meta.coordinator;
-    const role = isCoordinator ? "coord" : (agent.meta.type ?? (agent.meta.worker ? "wkr" : "mgr"));
+    const role = isCoordinator ? "coord" : abbreviateRole(agent.meta.agentType, agent.meta.worker);
     const summary = (agent.meta.summary ?? agent.meta.prompt).replace(/\n/g, " ");
 
     rows.push({

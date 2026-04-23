@@ -27,8 +27,8 @@ export interface PathCheckContext {
   worktreePath: string;
   agentsDir: string;
   rootRepo: string;
-  isWorker: boolean;
   allowList: string[];
+  allowedPaths?: string[];
 }
 
 export interface HookDecision {
@@ -79,6 +79,28 @@ export function toolMatchesPattern(
   return pattern === toolName;
 }
 
+/**
+ * Check if a file path is in the allowed paths list.
+ * Matches exact directory paths or path prefixes.
+ *
+ * A path is allowed if:
+ * - filePath === allowed (exact match)
+ * - filePath.startsWith(allowed + '/') (prefix match with directory separator)
+ *
+ * Examples:
+ * - filePath: /home/user/allowed, allowed: /home/user/allowed → true (exact)
+ * - filePath: /home/user/allowed/file.txt, allowed: /home/user/allowed → true (prefix)
+ * - filePath: /home/user/allowed-other, allowed: /home/user/allowed → false (partial name)
+ */
+export function isInAllowedPaths(filePath: string, allowedPaths: string[]): boolean {
+  for (const allowed of allowedPaths) {
+    if (filePath === allowed || filePath.startsWith(allowed + "/")) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // ── Pure decision logic ──────────────────────────────────────────────────────
 
 /**
@@ -90,7 +112,7 @@ export function checkPathAccess(
   ctx: PathCheckContext
 ): HookDecision {
   const { toolName, toolInput, cwd } = input;
-  const { agentDir, worktreePath, agentsDir, rootRepo, isWorker, allowList } = ctx;
+  const { agentDir, worktreePath, agentsDir, rootRepo, allowList } = ctx;
 
   // 1. Check allow list (TaskCreate is handled by intercept-task hook)
   let inAllowList = false;
@@ -255,7 +277,17 @@ function checkFilePath(
     return { decision: "deny", reason: "Access denied: work in your worktree, not the main repo" };
   }
 
-  // 10. Allow: all other paths (system files, ~/.claude, etc.)
+  // 10. allowedPaths-based access control
+  if (ctx.allowedPaths !== undefined) {
+    // allowedPaths is defined: check if path is in the list
+    if (isInAllowedPaths(filePath, ctx.allowedPaths)) {
+      return { decision: "allow", reason: "Tool in allow list, path in allowedPaths" };
+    }
+    // Path is not in allowedPaths — deny
+    return { decision: "deny", reason: "Access denied: path not in allowedPaths" };
+  }
+
+  // 11. Legacy fallback: allow all other paths (system files, ~/.claude, etc.)
   return { decision: "allow", reason: "Tool in allow list" };
 }
 
@@ -483,14 +515,17 @@ export async function hookCheckPath(agentId: string, rawStdin?: string): Promise
     isNoWorktree = true;
   }
 
-  // Read meta.json for worker flag (or type === "worker") and worktree field
-  let isWorker = false;
+  // Read meta.json for worktree field and allowedPaths
+  let allowedPaths: string[] | undefined = undefined;
   try {
     const metaFile = Bun.file(join(agentDir, "meta.json"));
     if (await metaFile.exists()) {
       const meta = await metaFile.json();
-      isWorker = meta.worker === true || meta.type === "worker";
       if (meta.worktree === false) isNoWorktree = true;
+      // Parse allowedPaths from meta.json (should be an array of strings or undefined)
+      if (Array.isArray(meta.allowedPaths)) {
+        allowedPaths = (meta.allowedPaths as unknown[]).filter((p): p is string => typeof p === "string");
+      }
     }
   } catch { /* ignore */ }
 
@@ -532,7 +567,7 @@ export async function hookCheckPath(agentId: string, rawStdin?: string): Promise
   } catch { /* ignore */ }
 
   // Check ib manager-only command access before path checks
-  const ctx = { agentId, agentDir, worktreePath, agentsDir, rootRepo, isWorker, allowList };
+  const ctx = { agentId, agentDir, worktreePath, agentsDir, rootRepo, allowList, allowedPaths };
   let decision: HookDecision;
   if (toolName === "Bash") {
     const command = String(toolInput.command ?? "");

@@ -3,12 +3,10 @@
  */
 
 import { join, basename } from "path";
-import { readFileSync } from "node:fs";
 import { AGENT_CWD_PATTERN } from "./shared";
-import { resolveAgentType } from "../agent-types";
-import type { AgentTypeDefinition } from "../agent-types";
+import { loadAgentType } from "../agent-types";
 
-export type SessionRole = "primary" | "manager" | "worker" | "coordinator" | "custom";
+export type SessionRole = "primary" | "manager" | "worker" | "coordinator";
 
 export interface SessionContext {
   role: SessionRole;
@@ -19,12 +17,11 @@ export interface SessionContext {
   branchName: string;
   worktreePath: string;
   rootRepoPath: string;
-  /** The custom agent type name (set when role === "custom" or when meta.type is set) */
-  typeName?: string;
-  /** The resolved agent type definition (set when typeName is present) */
-  typeDef?: AgentTypeDefinition;
+  agentType?: string;
   /** Cross-repo spawner info (set when meta.spawned_by is present and differs from manager) */
   spawnedBy?: { agent_id: string; repo_path: string };
+  /** Additional allowed paths from agent type */
+  allowedPaths?: string[];
 }
 
 export function detectRole(
@@ -34,8 +31,9 @@ export function detectRole(
     manager?: string | null;
     worker?: boolean;
     coordinator?: boolean;
-    type?: string;
+    agentType?: string;
     spawned_by?: { agent_id: string; repo_path: string };
+    allowedPaths?: unknown;
   },
   agentIdOverride?: string,
 ): SessionContext {
@@ -67,15 +65,16 @@ export function detectRole(
   const meta = metaJson ?? {};
   const isCoordinator = (meta as Record<string, unknown>).coordinator === true;
   const worker = meta.worker === true;
-  const typeName = (meta as Record<string, unknown>).type as string | undefined;
+  const agentType = (meta as Record<string, unknown>).agentType as string | undefined;
 
-  // Determine role from type field or legacy fields
+  // Derive role from agentType name or legacy booleans.
+  // NOTE: This role is ONLY used as a fallback in generateInstructions() for legacy agents
+  // that don't have agentType in meta.json. When agentType IS set, generateInstructions()
+  // loads the type definition and uses its instructionStyle field instead of this role.
   let role: SessionRole;
-  if (typeName && typeName !== "manager" && typeName !== "worker" && typeName !== "coordinator") {
-    role = "custom";
-  } else if (isCoordinator || typeName === "coordinator") {
+  if (agentType === "coordinator" || isCoordinator) {
     role = "coordinator";
-  } else if (worker || typeName === "worker") {
+  } else if (agentType === "worker" || worker) {
     role = "worker";
   } else {
     role = "manager";
@@ -100,6 +99,12 @@ export function detectRole(
   const effectiveSpawnedBy =
     spawnedBy && spawnedBy.agent_id !== agentManager ? spawnedBy : undefined;
 
+  // Parse allowedPaths: should be an array of strings or undefined
+  let allowedPaths: string[] | undefined = undefined;
+  if (Array.isArray(meta.allowedPaths)) {
+    allowedPaths = meta.allowedPaths.filter((p): p is string => typeof p === "string");
+  }
+
   return {
     role,
     agentId,
@@ -108,14 +113,16 @@ export function detectRole(
     branchName,
     worktreePath,
     rootRepoPath,
-    typeName: typeName || undefined,
+    agentType,
     spawnedBy: effectiveSpawnedBy,
+    allowedPaths,
   };
 }
 
 /**
  * Shared guidance block explaining how to send literal strings via `ib send`.
- * Injected into each role's instructions near the `ib send` command documentation.
+ * Injected into each role's hardcoded-instruction fallback near the `ib send` command documentation.
+ * Template-driven types should include this content directly in their .md body.
  */
 const SEND_LITERAL_STRINGS_SECTION = `### Sending Literal Strings with \`ib send\`
 
@@ -132,19 +139,100 @@ The shell expands \`$(...)\`, backticks, and \`$VAR\` inside double quotes BEFOR
 
 The quoted heredoc terminator (\`<<'EOF'\`) is the safest option — nothing inside gets expanded. \`ib send\` reads from stdin when no message argument is provided.`;
 
+/**
+ * Interpolate {{placeholder}} variables and {{#if cond}}...{{/if}} blocks in a template.
+ * Available variables: agentId, agentManager, parentBranch, worktreePath, rootRepoPath, repoName, pathIsolation
+ * Available conditions: hasManager (agent has a manager), isTopLevel (no manager = top-level)
+ */
+export function interpolateTemplate(template: string, ctx: SessionContext): string {
+  const repoName = basename(ctx.rootRepoPath);
+  const vars: Record<string, string> = {
+    agentId: ctx.agentId,
+    agentManager: ctx.agentManager,
+    parentBranch: ctx.parentBranch,
+    worktreePath: ctx.worktreePath,
+    rootRepoPath: ctx.rootRepoPath,
+    repoName,
+    pathIsolation: buildPathIsolationSection(ctx),
+  };
+
+  const conditions: Record<string, boolean> = {
+    hasManager: !!ctx.agentManager,
+    isTopLevel: !ctx.agentManager,
+  };
+
+  // Process {{#if cond}}...{{/if}} blocks (no nesting)
+  let result = template.replace(
+    /\{\{#if\s+(\w+)\}\}\n?([\s\S]*?)\{\{\/if\}\}\n?/g,
+    (_match, condName: string, content: string) => {
+      return conditions[condName] ? content : "";
+    }
+  );
+
+  // Replace {{variable}} placeholders
+  result = result.replace(/\{\{(\w+)\}\}/g, (_match, varName: string) => {
+    return vars[varName] ?? "";
+  });
+
+  return result;
+}
+
+/**
+ * Load a layer agent type's markdown body (e.g. `_all`, `_non_coordinator`)
+ * and return the interpolated prefix text. Returns an empty string if the
+ * layer file doesn't exist or has no body — layer files are optional, and
+ * a missing one should never fail session-start.
+ */
+async function loadPrefixLayerBody(
+  typeName: string,
+  ctx: SessionContext,
+): Promise<string> {
+  try {
+    const layer = await loadAgentType(typeName);
+    if (!layer.markdownBody) return "";
+    return interpolateTemplate(layer.markdownBody, ctx);
+  } catch (err) {
+    process.stderr.write(
+      `session-start: failed to load prefix layer '${typeName}': ${err instanceof Error ? err.message : String(err)}\n`,
+    );
+    return "";
+  }
+}
+
 export async function generateInstructions(ctx: SessionContext): Promise<string> {
-  // Custom type: resolve the type definition and generate custom instructions
-  if (ctx.role === "custom" && ctx.typeName) {
-    try {
-      const typeDef = await resolveAgentType(ctx.typeName);
-      ctx.typeDef = typeDef;
-      return generateCustomTypeInstructions(ctx, typeDef);
-    } catch {
-      // Fall back to manager instructions if type can't be resolved
-      return generateManagerInstructions(ctx);
+  // If agentType is set, load it and check for a template body
+  if (ctx.agentType) {
+    const agentType = await loadAgentType(ctx.agentType);
+
+    // If the type definition has a markdown body, use it as the full template
+    // The <ittybitty> wrapper is added by the code so users don't need to include it
+    if (agentType.markdownBody) {
+      // Prepend prefix layer bodies: _all (always) + _non_coordinator (when not coordinator)
+      const allPrefix = await loadPrefixLayerBody("_all", ctx);
+      const nonCoordPrefix =
+        ctx.agentType !== "coordinator"
+          ? await loadPrefixLayerBody("_non_coordinator", ctx)
+          : "";
+
+      const typeBody = interpolateTemplate(agentType.markdownBody, ctx);
+      const parts = [allPrefix, nonCoordPrefix, typeBody].filter((p) => p.trim().length > 0);
+      const content = parts.join("\n\n");
+      return `<ittybitty>\n${content}\n</ittybitty>`;
+    }
+
+    // No body — fall back to hardcoded instructions based on instructionStyle.
+    // Prefix layers do NOT apply to the hardcoded fallback path.
+    switch (agentType.instructionStyle) {
+      case "manager":
+        return generateManagerInstructions(ctx);
+      case "worker":
+        return generateWorkerInstructions(ctx);
+      case "coordinator":
+        return generateCoordinatorInstructions(ctx);
     }
   }
 
+  // Fall back to current logic when agentType is not set (legacy agents)
   if (ctx.role === "coordinator") {
     return generateCoordinatorInstructions(ctx);
   }
@@ -160,6 +248,50 @@ export async function generateInstructions(ctx: SessionContext): Promise<string>
   }
 }
 
+/**
+ * Build the Path Isolation section of instructions based on agent context.
+ *
+ * Shows:
+ * - Worktree path or repo path (for non-worktree agents)
+ * - CAN access: worktree, ~/.claude, /tmp, system paths
+ * - Additional allowedPaths if defined in agent type
+ * - CANNOT access: main repo (for worktree agents) or other agents' worktrees
+ */
+export function buildPathIsolationSection(ctx: SessionContext): string {
+  let baseSection = "";
+  let canAccessSection = "";
+  let additionalPaths = "";
+  let cannotAccessSection = "";
+
+  if (ctx.worktreePath) {
+    // Worktree agent
+    baseSection = `You are isolated to your worktree at: ${ctx.worktreePath}`;
+    canAccessSection = `- You CAN access: Your worktree, ~/.claude, /tmp, and general system paths`;
+    cannotAccessSection = `- You CANNOT access: The main repo at ${ctx.rootRepoPath}, other agents' worktrees`;
+  } else {
+    // Non-worktree agent (e.g., coordinator)
+    baseSection = `You are working directly in the repo at: ${ctx.rootRepoPath}`;
+    canAccessSection = `- You CAN access: This repo, ~/.claude, /tmp, and general system paths`;
+    cannotAccessSection = `- You CANNOT access: Other agents' worktrees`;
+  }
+
+  // Add allowedPaths if present
+  if (ctx.allowedPaths && ctx.allowedPaths.length > 0) {
+    additionalPaths = `and these additional paths:\n${ctx.allowedPaths.map(p => `  - ${p}`).join("\n")}`;
+  }
+
+  // Combine sections
+  let pathSection = `### Path Isolation\n\n${baseSection}\n${canAccessSection}`;
+  if (additionalPaths) {
+    pathSection += `\n${additionalPaths}`;
+  }
+  pathSection += `\n${cannotAccessSection}`;
+
+  pathSection += `\n- If you get "Access denied" or "Path violation" errors, you're trying to access a forbidden path`;
+
+  return pathSection;
+}
+
 function generatePrimaryInstructions(): string {
   return `<ittybitty>
 ## Multi-Agent Orchestration (ittybitty)
@@ -169,7 +301,7 @@ function generatePrimaryInstructions(): string {
 ### Primary Claude
 
 Spawn agents for complex/parallel tasks. Status updates appear automatically via hooks. User can also run \`ib watch\` for live monitoring.
-Always spawn **manager** agents (not \`--worker\`). Managers assess the task and spawn their own workers if needed.
+Always spawn **manager** agents (not \`--type worker\`). Managers assess the task and spawn their own workers if needed.
 
 **Agents start automatically** - each agent has a watchdog that handles initialization, permission prompts, and monitors for issues (rate limits, context compaction). Never send input to "help" an agent start. Just spawn with \`ib new-agent\` and monitor with \`ib look\` or \`ib list\`.
 
@@ -255,12 +387,7 @@ Each Bash tool call must run exactly ONE command. Multi-command calls will be bl
 - NO subshells or command substitution that runs multiple commands
 - If you need to run two commands, make two separate Bash tool calls
 
-### Path Isolation
-
-You are isolated to your worktree at: ${ctx.worktreePath}
-- You CAN access: Your worktree, ~/.claude, /tmp, and general system paths
-- You CANNOT access: The main repo at ${ctx.rootRepoPath}, other agents' worktrees
-- If you get "Access denied" or "Path violation" errors, you're trying to access a forbidden path
+${buildPathIsolationSection(ctx)}
 
 ### Git Worktree Context
 
@@ -275,7 +402,7 @@ You are in a git worktree, which shares the same repository as the main checkout
 
 | Command | Description |
 |---------|-------------|
-| \`ib new-agent --worker "task"\` | Spawn a worker sub-agent |
+| \`ib new-agent --type worker "task"\` | Spawn a worker sub-agent |
 | \`ib list --manager ${ctx.agentId}\` | List your sub-agents |
 | \`ib look <id>\` | Read an agent's output |
 | \`ib send <id> "msg"\` | Send input to an agent |
@@ -305,7 +432,7 @@ Your Task, Agent, and TaskCreate tool calls are **automatically intercepted** an
 2. **ASSESS TASK SIZE**:
    - SMALL: Do it yourself - don't spawn sub-agents unnecessarily
    - MEDIUM/LARGE: Break into independent tasks, each with clear success criteria
-3. **IF SPAWNING**: Create worker sub-agents with \`ib new-agent --worker "task"\`. Include success criteria in the prompt. Enter WAITING mode - a watchdog monitors each worker and notifies you when they complete or need help. Don't poll \`ib list\`.
+3. **IF SPAWNING**: Create worker sub-agents with \`ib new-agent --type worker "task"\`. Include success criteria in the prompt. Enter WAITING mode - a watchdog monitors each worker and notifies you when they complete or need help. Don't poll \`ib list\`.
 4. **WHEN NOTIFIED** - Review against your criteria:
    - \`ib look <id>\` - what the agent reports
    - \`ib status <id>\` / \`ib diff <id>\` - verify actual changes
@@ -367,12 +494,7 @@ Each Bash tool call must run exactly ONE command. Multi-command calls will be bl
 - NO subshells or command substitution that runs multiple commands
 - If you need to run two commands, make two separate Bash tool calls
 
-### Path Isolation
-
-You are isolated to your worktree at: ${ctx.worktreePath}
-- You CAN access: Your worktree, ~/.claude, /tmp, and general system paths
-- You CANNOT access: The main repo at ${ctx.rootRepoPath}, other agents' worktrees
-- If you get "Access denied" or "Path violation" errors, you're trying to access a forbidden path
+${buildPathIsolationSection(ctx)}
 
 ### Git Worktree Context
 
@@ -426,7 +548,7 @@ function generateCoordinatorInstructions(ctx: SessionContext): string {
   return `<ittybitty>
 ## IttyBitty Per-Repo Coordinator
 
-You are a per-repo coordinator for the \`${repoName}\` repository. You work directly in the repo directory (no git worktree). You can read files and code using Read, Glob, Grep, and LS. You coordinate work by spawning and managing worker agents using \`ib\` commands. You do NOT write code directly — instead, spawn worker agents with \`ib new-agent --worker "task"\` to implement changes. Review their work with \`ib diff <id>\` and merge with \`ib merge <id>\`. To send messages to the system coordinator, use \`ib send @system "message"\`.
+You are a per-repo coordinator for the \`${repoName}\` repository. You work directly in the repo directory (no git worktree). You can read files and code using Read, Glob, Grep, and LS. You coordinate work by spawning and managing worker agents using \`ib\` commands. You do NOT write code directly — instead, spawn worker agents with \`ib new-agent --type worker "task"\` to implement changes. Review their work with \`ib diff <id>\` and merge with \`ib merge <id>\`. To send messages to the system coordinator, use \`ib send @system "message"\`.
 
 IMPORTANT: Always use \`ib\` (not \`./ib\`) to ensure you use the current version from PATH.
 
@@ -438,18 +560,13 @@ Each Bash tool call must run exactly ONE command. Multi-command calls will be bl
 - NO subshells or command substitution that runs multiple commands
 - If you need to run two commands, make two separate Bash tool calls
 
-### Path Isolation
-
-You are working directly in the repo at: ${ctx.rootRepoPath}
-- You CAN access: This repo, ~/.claude, /tmp, and general system paths
-- You CANNOT access: Other agents' worktrees
-- If you get "Access denied" or "Path violation" errors, you're trying to access a forbidden path
+${buildPathIsolationSection(ctx)}
 
 ### Commands
 
 | Command | Description |
 |---------|-------------|
-| \`ib new-agent --worker "task"\` | Spawn a worker sub-agent |
+| \`ib new-agent --type worker "task"\` | Spawn a worker sub-agent |
 | \`ib list --manager ${ctx.agentId}\` | List your sub-agents |
 | \`ib look <id>\` | Read an agent's output |
 | \`ib send <id> "msg"\` | Send input to an agent |
@@ -473,7 +590,7 @@ These phrases MUST be the LAST thing you output. Put summaries or status updates
 
 1. **Understand the codebase**: Use Read, Glob, Grep to understand the relevant code
 2. **Break down tasks**: Split work into independent units for worker agents
-3. **Spawn workers**: \`ib new-agent --worker "task"\` with clear instructions
+3. **Spawn workers**: \`ib new-agent --type worker "task"\` with clear instructions
 4. **Monitor & review**: Check worker output with \`ib look <id>\`, review with \`ib diff <id>\`
 5. **Merge or redirect**: \`ib merge <id>\` for good work, \`ib send <id> "feedback"\` for corrections
 6. **Coordinate**: Report status to system coordinator via \`ib send @system "message"\`
@@ -489,102 +606,6 @@ These phrases MUST be the LAST thing you output. Put summaries or status updates
 | \`complete\` | Signaled done |
 | \`rate_limited\` | Hit API rate limits |
 | \`stopped\` | Session ended |
-
-</ittybitty>`;
-}
-
-function generateCustomTypeInstructions(ctx: SessionContext, typeDef: AgentTypeDefinition): string {
-  const managerSendTarget = ctx.agentManager;
-  const canSpawn = typeDef.canSpawnChildren;
-
-  // Build commands table based on capabilities
-  const commands: string[] = [];
-  if (canSpawn) {
-    commands.push(`| \`ib new-agent --worker "task"\` | Spawn a worker sub-agent |`);
-    commands.push(`| \`ib list --manager ${ctx.agentId}\` | List your sub-agents |`);
-    commands.push(`| \`ib look <id>\` | Read an agent's output |`);
-    commands.push(`| \`ib send <id> "msg"\` | Send input to an agent |`);
-    commands.push(`| \`ib status <id>\` | Show agent's commits/changes |`);
-    commands.push(`| \`ib diff <id>\` | Review agent's changes |`);
-    commands.push(`| \`ib merge <id>\` | Merge agent's work and close it |`);
-    commands.push(`| \`ib kill <id>\` | Stop an agent without merging |`);
-  } else if (managerSendTarget) {
-    commands.push(`| \`ib send ${managerSendTarget} "msg"\` | Send a message to your manager |`);
-  }
-  commands.push(`| \`ib diff\` | Check your changes vs base branch |`);
-  commands.push(`| \`ib status\` | See your commits |`);
-  commands.push(`| \`ib log "msg"\` | Log to your agent log |`);
-
-  const managerInfo = ctx.agentManager
-    ? `Your manager agent is: ${ctx.agentManager}`
-    : "";
-
-  const spawnerInfo = ctx.spawnedBy
-    ? `You were spawned by agent \`${ctx.spawnedBy.agent_id}\` in repo \`${basename(ctx.spawnedBy.repo_path)}\`. You can send messages to your spawner with: \`ib send ${ctx.spawnedBy.agent_id} "message"\``
-    : "";
-
-  const communicationSection = managerSendTarget ? `
-### Communication
-
-- Report progress or completion to your manager: \`ib send ${managerSendTarget} "message"\`
-- Ask questions if requirements are unclear
-- If stuck: \`ib send ${managerSendTarget} "[STUCK] description"\`, then enter WAITING state
-- Your manager can send you messages even after you complete - you will restart and respond` : "";
-
-  return `<ittybitty>
-## IttyBitty Agent: ${typeDef.name}
-
-${typeDef.description ? typeDef.description + "\n" : ""}You are agent \`${ctx.agentId}\` (type: ${typeDef.name}) in the ittybitty multi-agent orchestration system.
-You are running in a git worktree on branch \`${ctx.branchName}\`, forked from \`${ctx.parentBranch}\`.
-${managerInfo}
-${spawnerInfo}
-
-IMPORTANT: Always use \`ib\` (not \`./ib\`) to ensure you use the current version from PATH.
-
-### Bash Rules
-
-Each Bash tool call must run exactly ONE command. Multi-command calls will be blocked.
-- NO piping: \`cmd1 | cmd2\` is not allowed
-- NO chaining: \`cmd1 && cmd2\` and \`cmd1 ; cmd2\` are not allowed
-- NO subshells or command substitution that runs multiple commands
-- If you need to run two commands, make two separate Bash tool calls
-
-### Path Isolation
-
-You are isolated to your worktree at: ${ctx.worktreePath}
-- You CAN access: Your worktree, ~/.claude, /tmp, and general system paths
-- You CANNOT access: The main repo at ${ctx.rootRepoPath}, other agents' worktrees
-- If you get "Access denied" or "Path violation" errors, you're trying to access a forbidden path
-
-### Git Worktree Context
-
-You are in a git worktree, which shares the same repository as the main checkout.
-- Your branch: \`${ctx.branchName}\`
-- Forked from: \`${ctx.parentBranch}\`
-- All branches are LOCAL - no need for \`git fetch origin\`
-- To merge latest changes from your parent: \`git merge ${ctx.parentBranch}\`
-- Other agents' branches are visible as local branches (\`agent/*\`)
-
-### Commands
-
-| Command | Description |
-|---------|-------------|
-${commands.join("\n")}
-
-${SEND_LITERAL_STRINGS_SECTION}
-
-### State Management
-
-Whenever you stop working and are idle, end your message with one of:
-- \`WAITING\` - if waiting for input or have nothing more to do
-- \`I HAVE COMPLETED THE GOAL\` - if you have completed your task
-
-These phrases MUST be the LAST thing you output. Put summaries or status updates BEFORE them.
-${communicationSection}
-
-### Role-Specific Instructions
-
-${typeDef.promptBody}
 
 </ittybitty>`;
 }
@@ -612,7 +633,7 @@ export async function hookSessionStart(rawStdin?: string, agentIdArg?: string): 
 
   // Detect role - read meta.json from filesystem if in an agent directory
   const match = AGENT_CWD_PATTERN.exec(cwd);
-  let metaJson: { id?: string; manager?: string | null; worker?: boolean; coordinator?: boolean; type?: string; spawned_by?: { agent_id: string; repo_path: string } } | undefined;
+  let metaJson: { id?: string; manager?: string | null; worker?: boolean; coordinator?: boolean; agentType?: string; allowedPaths?: string[]; spawned_by?: { agent_id: string; repo_path: string } } | undefined;
 
   if (match) {
     const agentId = match[1]!;

@@ -1903,6 +1903,8 @@ describe("newAgent (native)", () => {
     };
   }
 
+  let originalHome: string | undefined;
+
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "ib-newagent-test-"));
     agentsDir = join(tempDir, ".ittybitty", "agents");
@@ -1911,6 +1913,16 @@ describe("newAgent (native)", () => {
     // Create .ittybitty/repo-id
     await mkdir(join(tempDir, ".ittybitty"), { recursive: true });
     await Bun.write(join(tempDir, ".ittybitty", "repo-id"), "abcd1234\n");
+
+    // Override HOME so agent-types lookups resolve to a temp dir isolated from
+    // the developer's real ~/.itsybitsy/agent-types/.
+    originalHome = process.env.HOME;
+    const fakeHome = join(tempDir, "home");
+    await mkdir(join(fakeHome, ".itsybitsy"), { recursive: true });
+    process.env.HOME = fakeHome;
+    // Populate the embedded defaults (including _all.md and _non_coordinator.md).
+    // ensureAgentTypesDir() writes all embedded files only on first run.
+    await (await import("./agent-types")).ensureAgentTypesDir();
 
     // Set user config path to temp dir so tests don't inherit the real user config
     const userConfigPath = join(tempDir, "config.json");
@@ -1932,8 +1944,26 @@ describe("newAgent (native)", () => {
     resetNewAgentSummaryGenerator();
     lifecycleSpawnCtx.reset();
     resetUserConfigPath();
+    if (originalHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = originalHome;
+    }
     await rm(tempDir, { recursive: true, force: true });
   });
+
+  /**
+   * Overwrite the temp-home _all.md layer with the given allow/deny lists.
+   * Uses inline array syntax (`[...]`) so entries containing colons (e.g.
+   * `Bash(curl:*)`) are handled correctly by the simple YAML parser.
+   */
+  async function writeAllLayer(allow: string[], deny: string[]) {
+    const path = join(process.env.HOME!, ".itsybitsy", "agent-types", "_all.md");
+    const allowYaml = `  allow: [${allow.map((a) => JSON.stringify(a)).join(", ")}]`;
+    const denyYaml = `  deny: [${deny.map((d) => JSON.stringify(d)).join(", ")}]`;
+    const body = `---\nname: _all\ndescription: Test all-layer\nspawnable: false\npermissions:\n${allowYaml}\n${denyYaml}\n---\n`;
+    await Bun.write(path, body);
+  }
 
   /** Wrapper that always passes _cwd to prevent auto-detect manager from our own worktree */
   async function callNewAgent(prompt: string, opts?: import("./ib-commands").NewAgentOptions) {
@@ -1972,10 +2002,50 @@ describe("newAgent (native)", () => {
     expect(meta.manager).toBeNull();
     expect(meta.worktree).toBe(true);
     expect(meta.worker).toBe(false);
+    expect(meta.agentType).toBe("manager"); // default type
     expect(meta.yolo).toBe(false);
     expect(meta.model).toBe("sonnet"); // model from test config
     expect(meta.session_id).toMatch(/^[0-9a-f-]+$/);
     expect(typeof meta.created_epoch).toBe("number");
+  });
+
+  test("stores agentType in meta.json when --type worker is used", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("test worker", { name: "test-worker-type", type: "worker" });
+    expect(result.ok).toBe(true);
+
+    const meta = await Bun.file(join(agentsDir, "test-worker-type", "meta.json")).json();
+    expect(meta.agentType).toBe("worker");
+    expect(meta.worker).toBe(true);
+  });
+
+  test("stores agentType in meta.json when --type flag is used", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("test custom type", { name: "test-type-flag", type: "worker" });
+    expect(result.ok).toBe(true);
+
+    const meta = await Bun.file(join(agentsDir, "test-type-flag", "meta.json")).json();
+    expect(meta.agentType).toBe("worker");
+  });
+
+  test("--type flag overrides default agentType", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("test custom", { name: "test-type-override", type: "worker" });
+    expect(result.ok).toBe(true);
+
+    const meta = await Bun.file(join(agentsDir, "test-type-override", "meta.json")).json();
+    expect(meta.agentType).toBe("worker");
+    expect(meta.worker).toBe(true); // canSpawnChildren: false → worker: true
+  });
+
+  test("--type coordinator creates a coordinator agent", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("start coordinator", { type: "coordinator", _cwd: tempDir });
+    expect(result.ok).toBe(true);
+
+    const repoName = tempDir.split("/").pop() ?? tempDir;
+    const meta = await Bun.file(join(agentsDir, repoName, "meta.json")).json();
+    expect(meta.agentType).toBe("coordinator");
   });
 
   test("creates prompt.txt with prompt content", async () => {
@@ -2140,9 +2210,9 @@ describe("newAgent (native)", () => {
     expect(meta.model).toBe("opus");
   });
 
-  test("worker mode sets meta.worker and start.sh doesn't have yolo flags", async () => {
+  test("type: worker sets meta.worker and start.sh doesn't have yolo flags", async () => {
     setNewAgentSpawnRunner(mockSpawnRunner());
-    await callNewAgent("task", { name: "test-worker", worker: true });
+    await callNewAgent("task", { name: "test-worker", type: "worker" });
 
     const meta = await Bun.file(join(agentsDir, "test-worker", "meta.json")).json();
     expect(meta.worker).toBe(true);
@@ -2393,7 +2463,7 @@ describe("newAgent (native)", () => {
     await Bun.write(join(promptsDir, "manager.md"), "Coordinate sub-agents.");
 
     setNewAgentSpawnRunner(mockSpawnRunner());
-    await callNewAgent("work task", { name: "test-worker-prompts", worker: true });
+    await callNewAgent("work task", { name: "test-worker-prompts", type: "worker" });
 
     const promptContent = await Bun.file(join(agentsDir, "test-worker-prompts", "prompt.txt")).text();
     expect(promptContent).toContain("[CUSTOM WORKER INSTRUCTIONS]");
@@ -2529,12 +2599,8 @@ describe("newAgent (native)", () => {
     expect(worktreeCall).toBeUndefined();
   });
 
-  test("config permissions are merged into settings", async () => {
-    await Bun.write(join(tempDir, "config.json"), JSON.stringify({
-      permissions: {
-        manager: { allow: ["Bash(deploy:*)"], deny: ["Bash(rm:*)"] },
-      },
-    }));
+  test("_all.md layer permissions are merged into settings", async () => {
+    await writeAllLayer(["Bash(deploy:*)"], ["Bash(rm:*)"]);
 
     setNewAgentSpawnRunner(mockSpawnRunner());
     await callNewAgent("task", { name: "test-cfg-perms" });
@@ -2545,51 +2611,33 @@ describe("newAgent (native)", () => {
     expect(settings.permissions.deny).toContain("Bash(rm:*)");
   });
 
-  test("permissions.all.allow/deny are merged into settings for managers", async () => {
-    await Bun.write(join(tempDir, "config.json"), JSON.stringify({
-      permissions: {
-        manager: { allow: ["Bash(deploy:*)"], deny: ["Bash(rm:*)"] },
-        all: { allow: ["Bash(curl:*)"], deny: ["Bash(sudo:*)"] },
-      },
-    }));
+  test("_all.md layer allow/deny are merged into settings for managers", async () => {
+    await writeAllLayer(["Bash(curl:*)"], ["Bash(sudo:*)"]);
 
     setNewAgentSpawnRunner(mockSpawnRunner());
     await callNewAgent("task", { name: "test-all-perms" });
 
     const settingsPath = join(agentsDir, "test-all-perms", "repo", ".claude", "settings.local.json");
     const settings = await Bun.file(settingsPath).json();
-    // Role-specific permissions
-    expect(settings.permissions.allow).toContain("Bash(deploy:*)");
-    expect(settings.permissions.deny).toContain("Bash(rm:*)");
     // All permissions merged in
     expect(settings.permissions.allow).toContain("Bash(curl:*)");
     expect(settings.permissions.deny).toContain("Bash(sudo:*)");
   });
 
-  test("permissions.all.allow/deny are merged into settings for workers", async () => {
-    await Bun.write(join(tempDir, "config.json"), JSON.stringify({
-      permissions: {
-        worker: { allow: ["Bash(npm:*)"], deny: [] },
-        all: { allow: ["Bash(curl:*)"], deny: ["Bash(sudo:*)"] },
-      },
-    }));
+  test("_all.md layer allow/deny are merged into settings for workers", async () => {
+    await writeAllLayer(["Bash(curl:*)"], ["Bash(sudo:*)"]);
 
     setNewAgentSpawnRunner(mockSpawnRunner());
-    await callNewAgent("task", { name: "test-all-worker", worker: true });
+    await callNewAgent("task", { name: "test-all-worker", type: "worker" });
 
     const settingsPath = join(agentsDir, "test-all-worker", "repo", ".claude", "settings.local.json");
     const settings = await Bun.file(settingsPath).json();
-    expect(settings.permissions.allow).toContain("Bash(npm:*)");
     expect(settings.permissions.allow).toContain("Bash(curl:*)");
     expect(settings.permissions.deny).toContain("Bash(sudo:*)");
   });
 
-  test("permissions.all without role-specific permissions still applies", async () => {
-    await Bun.write(join(tempDir, "config.json"), JSON.stringify({
-      permissions: {
-        all: { allow: ["Bash(curl:*)"], deny: ["Bash(sudo:*)"] },
-      },
-    }));
+  test("_all.md layer applies without role-specific permissions", async () => {
+    await writeAllLayer(["Bash(curl:*)"], ["Bash(sudo:*)"]);
 
     setNewAgentSpawnRunner(mockSpawnRunner());
     await callNewAgent("task", { name: "test-all-only" });
@@ -2598,6 +2646,49 @@ describe("newAgent (native)", () => {
     const settings = await Bun.file(settingsPath).json();
     expect(settings.permissions.allow).toContain("Bash(curl:*)");
     expect(settings.permissions.deny).toContain("Bash(sudo:*)");
+  });
+
+  test("_non_coordinator.md layer applies to non-coordinator agents", async () => {
+    const nonCoordPath = join(process.env.HOME!, ".itsybitsy", "agent-types", "_non_coordinator.md");
+    await Bun.write(nonCoordPath, `---\nname: _non_coordinator\ndescription: Test\nspawnable: false\npermissions:\n  allow: ["Bash(test-tool:*)"]\n  deny: []\n---\n`);
+
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    await callNewAgent("task", { name: "test-noncoord" });
+
+    const settingsPath = join(agentsDir, "test-noncoord", "repo", ".claude", "settings.local.json");
+    const settings = await Bun.file(settingsPath).json();
+    expect(settings.permissions.allow).toContain("Bash(test-tool:*)");
+  });
+
+  test("_non_coordinator.md layer does NOT apply to coordinator agents", async () => {
+    const nonCoordPath = join(process.env.HOME!, ".itsybitsy", "agent-types", "_non_coordinator.md");
+    await Bun.write(nonCoordPath, `---\nname: _non_coordinator\ndescription: Test\nspawnable: false\npermissions:\n  allow: ["Bash(worker-only-tool:*)"]\n  deny: []\n---\n`);
+
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    // Coordinator agent ID is derived from repo basename; --name is ignored for coordinators
+    const { getCoordinatorAgentId } = await import("./coordinator");
+    const coordId = getCoordinatorAgentId(tempDir);
+    const result = await callNewAgent("task", { type: "coordinator" });
+    expect(result.ok).toBe(true);
+
+    // Coordinator writes settings to .claude/ in its own agent dir (not a worktree subdir)
+    const settingsPath = join(agentsDir, coordId, ".claude", "settings.local.json");
+    const settings = await Bun.file(settingsPath).json();
+    expect(settings.permissions.allow).not.toContain("Bash(worker-only-tool:*)");
+  });
+
+  test("rejects spawning a non-spawnable type (_all)", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("task", { name: "test-bad", type: "_all" });
+    expect(result.ok).toBe(false);
+    expect(result.stderr.toLowerCase()).toContain("not spawnable");
+  });
+
+  test("rejects spawning a non-spawnable type (_non_coordinator)", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("task", { name: "test-bad2", type: "_non_coordinator" });
+    expect(result.ok).toBe(false);
+    expect(result.stderr.toLowerCase()).toContain("not spawnable");
   });
 
   test("allowTools flag is included in start.sh", async () => {
@@ -2781,7 +2872,7 @@ describe("newAgent (native)", () => {
     });
 
     setNewAgentSpawnRunner(mockSpawnRunner());
-    const result = await newAgent(coordRepo, "start", { coordinator: true, _cwd: coordRepo });
+    const result = await newAgent(coordRepo, "start", { type: "coordinator", _cwd: coordRepo });
     expect(result.ok).toBe(true);
 
     // The repo's settings file must be byte-for-byte unchanged.
@@ -2922,7 +3013,7 @@ describe("newAgent (native)", () => {
     // coordinator mode: getCoordinatorAgentId(coordRepo) returns "coordinator"
     // checkCoordinatorExists finds no coordinator and no collision → id stays "coordinator"
     // post-generation guard at line 1629 catches it
-    const result = await newAgent(coordRepo, "start coordinator", { coordinator: true, _cwd: coordRepo });
+    const result = await newAgent(coordRepo, "start coordinator", { type: "coordinator", _cwd: coordRepo });
     expect(result.ok).toBe(false);
     expect(result.stderr).toContain('"coordinator" is a reserved name');
 
@@ -2969,7 +3060,7 @@ describe("newAgent (native)", () => {
 
     // checkCoordinatorExists will find the collision (non-coordinator agent named "coordinator")
     // So id = "coordinator-XXXX" (with random suffix), which won't match the reserved name
-    const result = await newAgent(coordRepo, "start coordinator", { coordinator: true, _cwd: coordRepo });
+    const result = await newAgent(coordRepo, "start coordinator", { type: "coordinator", _cwd: coordRepo });
     expect(result.ok).toBe(true);
 
     await rm(coordRepoDir, { recursive: true, force: true });

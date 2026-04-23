@@ -1,272 +1,540 @@
 /**
- * Agent type definitions: load, parse, and resolve agent types from
- * ~/.itsybitsy/agent-types/<name>/AGENTTYPE.md files.
- *
- * Each file uses YAML frontmatter + markdown body (similar to Claude Code skills).
+ * Agent types system: load and parse agent type definitions from ~/.itsybitsy/agent-types/
  */
 
 import { join } from "path";
 import { homedir } from "os";
+import { readdirSync, readFileSync } from "fs";
+import { Glob } from "bun";
+import managerMd from '../docs/agent-types/manager.md' with { type: 'text' };
+import workerMd from '../docs/agent-types/worker.md' with { type: 'text' };
+import coordinatorMd from '../docs/agent-types/coordinator.md' with { type: 'text' };
+import allLayerMd from '../docs/agent-types/_all.md' with { type: 'text' };
+import nonCoordinatorLayerMd from '../docs/agent-types/_non_coordinator.md' with { type: 'text' };
 
-export const AGENT_TYPES_DIR = join(process.env.HOME ?? homedir(), ".itsybitsy", "agent-types");
+const EMBEDDED_TYPES: Record<string, string> = {
+  'manager': managerMd,
+  'worker': workerMd,
+  'coordinator': coordinatorMd,
+  '_all': allLayerMd,
+  '_non_coordinator': nonCoordinatorLayerMd,
+};
 
-export interface AgentTypeDefinition {
+export interface AgentType {
   name: string;
   description: string;
   canSpawnChildren: boolean;
-  canBeParent: boolean;
-  permissions: {
-    allow: string[];
-    deny: string[];
-  };
+  /**
+   * Whether this agent type can be spawned directly via `ib new-agent --type <name>`.
+   * Defaults to `true` when absent. Types with `spawnable: false` are layer-only
+   * files (e.g. `_all.md`, `_non_coordinator.md`) whose frontmatter permissions
+   * and markdown body merge into every spawned agent.
+   */
+  spawnable?: boolean;
   model?: string;
-  coordinator?: boolean;
-  promptBody: string;
+  permissions?: {
+    allow?: string[];
+    deny?: string[];
+  };
+  icon?: string;
+  allowedPaths?: string[];
+  instructionStyle: "manager" | "worker" | "coordinator";
+  markdownBody?: string;
 }
 
 /**
- * Parse YAML frontmatter + markdown body from an agent type file.
- * Expects `---` delimiters around YAML frontmatter.
+ * Parse YAML front matter from a markdown file and extract metadata + body.
+ * Front matter is between --- delimiters at the start of the file.
+ * Supports nested objects (one level deep) and YAML arrays.
  */
-export function parseAgentTypeFile(content: string): AgentTypeDefinition {
-  const trimmed = content.trim();
-  if (!trimmed.startsWith("---")) {
-    throw new Error("Agent type file must start with YAML frontmatter (---)");
+export function parseAgentTypeFile(content: string): {
+  frontmatter: Record<string, unknown>;
+  body: string;
+} {
+  const lines = content.split("\n");
+
+  // Check if starts with ---
+  if (lines[0] !== "---") {
+    return { frontmatter: {}, body: content };
   }
 
-  const endIdx = trimmed.indexOf("---", 3);
+  // Find closing ---
+  let endIdx = -1;
+  for (let i = 1; i < lines.length; i++) {
+    if (lines[i] === "---") {
+      endIdx = i;
+      break;
+    }
+  }
+
   if (endIdx === -1) {
-    throw new Error("Agent type file has unclosed YAML frontmatter");
+    return { frontmatter: {}, body: content };
   }
 
-  const frontmatterStr = trimmed.substring(3, endIdx).trim();
-  const body = trimmed.substring(endIdx + 3).trim();
+  // Parse YAML-like front matter with support for nested objects
+  const fmLines = lines.slice(1, endIdx);
+  const frontmatter: Record<string, unknown> = {};
 
-  // Simple YAML parser for the subset we need
-  const frontmatter = parseSimpleYaml(frontmatterStr);
+  let currentParent: string | null = null;
+  let currentObj: Record<string, unknown> | null = null;
+  let currentListKey: string | null = null; // tracks which nested key receives list items
 
-  const name = typeof frontmatter.name === "string" ? frontmatter.name : "";
-  if (!name) {
-    throw new Error("Agent type file must have a 'name' field in frontmatter");
+  for (const line of fmLines) {
+    // Skip blank lines and comments
+    if (!line.trim() || line.trim().startsWith("#")) {
+      continue;
+    }
+
+    // Check if this is an indented child line (part of a nested object or top-level list)
+    const indentMatch = line.match(/^(\s+)(\S.*)/);
+    if (indentMatch && currentParent) {
+      const childLine = indentMatch[2]!.trim();
+
+      // Top-level list: parent has no nested subkeys yet and child is a list item
+      if (childLine.startsWith("- ") && currentObj && Object.keys(currentObj).length === 0 && !currentListKey) {
+        // Convert from tentative nested object to top-level list
+        const value = childLine.substring(2).trim().replace(/^["']|["']$/g, "");
+        const arr = Array.isArray(frontmatter[currentParent]) ? frontmatter[currentParent] as unknown[] : [];
+        arr.push(value);
+        frontmatter[currentParent] = arr;
+        currentObj = null; // no longer a nested object
+        continue;
+      }
+
+      // Continue appending to an existing top-level list
+      if (childLine.startsWith("- ") && !currentObj && Array.isArray(frontmatter[currentParent])) {
+        const value = childLine.substring(2).trim().replace(/^["']|["']$/g, "");
+        (frontmatter[currentParent] as unknown[]).push(value);
+        continue;
+      }
+
+      // Nested object handling
+      if (currentObj) {
+        const colonIdx = childLine.indexOf(":");
+        if (colonIdx !== -1) {
+          const key = childLine.substring(0, colonIdx).trim();
+          const valueStr = childLine.substring(colonIdx + 1).trim();
+          if (valueStr.startsWith("- ")) {
+            // YAML list item as value of parent.key — treat as single-item array start
+            currentObj[key] = [valueStr.substring(2).trim().replace(/^["']|["']$/g, "")];
+            currentListKey = key;
+          } else if (valueStr === "") {
+            // Empty value in nested context starts a list (e.g. allow:\n    - Read)
+            currentObj[key] = [];
+            currentListKey = key;
+          } else {
+            currentObj[key] = parseSimpleValue(valueStr);
+            currentListKey = null;
+          }
+          continue;
+        }
+        // Could be a YAML list item (- value) under a nested key
+        if (childLine.startsWith("- ")) {
+          // Append to the tracked list key in currentObj
+          if (currentListKey && Array.isArray(currentObj[currentListKey])) {
+            (currentObj[currentListKey] as unknown[]).push(childLine.substring(2).trim().replace(/^["']|["']$/g, ""));
+          }
+          continue;
+        }
+      }
+    }
+
+    // Transitioning to a top-level line: close any open nested object or list
+    if (currentParent) {
+      if (currentObj && Object.keys(currentObj).length === 0) {
+        // Pending empty-value key that never got nested children → store as ""
+        frontmatter[currentParent] = "";
+      }
+      // currentObj with content is already stored via reference in frontmatter[currentParent]
+      // top-level lists are already stored directly in frontmatter[currentParent]
+      currentParent = null;
+      currentObj = null;
+      currentListKey = null;
+    }
+
+    // Top-level key
+    const trimmed = line.trim();
+    const colonIdx = trimmed.indexOf(":");
+    if (colonIdx === -1) continue;
+
+    const key = trimmed.substring(0, colonIdx).trim();
+    const valueStr = trimmed.substring(colonIdx + 1).trim();
+
+    // If value is empty, tentatively start a nested object
+    // (will be converted to "" if no indented children follow)
+    if (valueStr === "") {
+      currentParent = key;
+      currentObj = {};
+      currentListKey = null;
+      frontmatter[key] = currentObj;
+    } else {
+      frontmatter[key] = parseSimpleValue(valueStr);
+    }
   }
 
-  const description = typeof frontmatter.description === "string" ? frontmatter.description : "";
-  const canSpawnChildren = frontmatter.canSpawnChildren === true;
-  const canBeParent = frontmatter.canBeParent !== undefined ? frontmatter.canBeParent === true : true;
-  const model = typeof frontmatter.model === "string" ? frontmatter.model : undefined;
-  const coordinator = frontmatter.coordinator === true ? true : undefined;
+  // Flush any trailing empty-value key that never got nested children
+  if (currentParent && currentObj && Object.keys(currentObj).length === 0) {
+    frontmatter[currentParent] = "";
+  }
 
-  // Parse permissions
-  const permsRaw = frontmatter.permissions as Record<string, unknown> | undefined;
-  const allow = parseStringArray(permsRaw?.allow);
-  const deny = parseStringArray(permsRaw?.deny);
+  const body = lines.slice(endIdx + 1).join("\n").trim();
+
+  return { frontmatter, body };
+}
+
+const VALID_INSTRUCTION_STYLES = new Set<AgentType["instructionStyle"]>(["manager", "worker", "coordinator"]);
+
+function validateInstructionStyle(value: string): AgentType["instructionStyle"] {
+  if (VALID_INSTRUCTION_STYLES.has(value as AgentType["instructionStyle"])) {
+    return value as AgentType["instructionStyle"];
+  }
+  return "manager";
+}
+
+/**
+ * Parse a simple YAML value: booleans, numbers, strings, inline arrays.
+ */
+function parseSimpleValue(valueStr: string): unknown {
+  if (valueStr === "true") return true;
+  if (valueStr === "false") return false;
+  // Only parse as number if it's a non-empty string that looks like a number
+  if (valueStr !== "" && !isNaN(Number(valueStr))) {
+    return Number(valueStr);
+  }
+  if (valueStr.startsWith("[") && valueStr.endsWith("]")) {
+    const itemsStr = valueStr.substring(1, valueStr.length - 1);
+    if (itemsStr.trim() === "") return [];
+    return itemsStr
+      .split(",")
+      .map((s) => s.trim().replace(/^["']|["']$/g, ""));
+  }
+  // String value — strip surrounding quotes
+  return valueStr.replace(/^["']|["']$/g, "");
+}
+
+/**
+ * Ensure ~/.itsybitsy/agent-types/ directory exists and populate it with
+ * embedded type files on first run. If the directory already exists, does nothing.
+ * Use {@link initAgentTypes} to restore missing files without overwriting existing ones.
+ */
+export async function ensureAgentTypesDir(): Promise<void> {
+  const home = process.env.HOME || homedir();
+  const typesDir = join(home, ".itsybitsy", "agent-types");
+  const { mkdir, stat } = await import("fs/promises");
+
+  try {
+    // Check if path exists and is a directory
+    const stats = await stat(typesDir);
+    if (stats.isDirectory()) {
+      // Directory already exists, don't overwrite anything
+      return;
+    }
+    // Path exists but is not a directory (e.g., a file) — delete it
+    // This handles the case where an empty file was created instead of a dir
+    await Bun.file(typesDir).delete();
+  } catch {
+    // Path doesn't exist, continue to create it
+  }
+
+  // Create the directory and all parents
+  await mkdir(typesDir, { recursive: true });
+
+  // Write all embedded type files
+  for (const [name, content] of Object.entries(EMBEDDED_TYPES)) {
+    const filePath = join(typesDir, `${name}.md`);
+    await Bun.write(filePath, content);
+  }
+}
+
+/**
+ * Ensure the agent-types directory exists and restore any missing embedded
+ * type files without overwriting existing ones. Returns the list of file
+ * names that were created.
+ *
+ * Intended for `ib init-types`: users can delete a built-in `.md` to restore
+ * a stock copy without losing their edits to the others.
+ */
+export async function initAgentTypes(): Promise<string[]> {
+  const home = process.env.HOME || homedir();
+  const typesDir = join(home, ".itsybitsy", "agent-types");
+  const { mkdir, stat } = await import("fs/promises");
+
+  // Make sure the directory exists (without writing any embedded files yet)
+  try {
+    const stats = await stat(typesDir);
+    if (!stats.isDirectory()) {
+      // Path exists but is not a directory — remove the stale file
+      await Bun.file(typesDir).delete();
+      await mkdir(typesDir, { recursive: true });
+    }
+  } catch {
+    await mkdir(typesDir, { recursive: true });
+  }
+
+  // Write only the missing embedded files
+  const created: string[] = [];
+  for (const [name, content] of Object.entries(EMBEDDED_TYPES)) {
+    const fileName = `${name}.md`;
+    const filePath = join(typesDir, fileName);
+    if (!(await Bun.file(filePath).exists())) {
+      await Bun.write(filePath, content);
+      created.push(fileName);
+    }
+  }
+  return created;
+}
+
+/**
+ * Check if an agent type exists (as a file in ~/.itsybitsy/agent-types/<name>.md).
+ * Does NOT check built-in types — those must be written to disk by ensureAgentTypesDir().
+ */
+export async function agentTypeExists(name: string): Promise<boolean> {
+  const home = process.env.HOME || homedir();
+  const typeFile = join(home, ".itsybitsy", "agent-types", `${name}.md`);
+  try {
+    return await Bun.file(typeFile).exists();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Load an agent type definition from ~/.itsybitsy/agent-types/<name>.md
+ * Throws an error if the file does not exist.
+ */
+export async function loadAgentType(name: string): Promise<AgentType> {
+  const home = process.env.HOME || homedir();
+  const typeFile = join(home, ".itsybitsy", "agent-types", `${name}.md`);
+
+  const file = Bun.file(typeFile);
+  if (!(await file.exists())) {
+    throw new Error(`Unknown agent type '${name}'. Run 'ib init-types' to restore default type files, or create ${typeFile}`);
+  }
+
+  const content = await file.text();
+  const { frontmatter, body } = parseAgentTypeFile(content);
+
+  const permissions = typeof frontmatter.permissions === "object" && frontmatter.permissions !== null
+    ? frontmatter.permissions as Record<string, unknown>
+    : undefined;
+  const getString = (val: unknown, fallback: string): string =>
+    typeof val === "string" ? val : fallback;
+
+  // Extract icon: first non-whitespace character of the icon field
+  const rawIcon = getString(frontmatter.icon, "");
+  const iconChar = rawIcon.match(/\S/)?.[0] || undefined;
+
+  // Parse allowedPaths: distinguish between absent (undefined) and present-but-empty ([])
+  let allowedPaths: string[] | undefined = undefined;
+  if ("allowedPaths" in frontmatter) {
+    allowedPaths = Array.isArray(frontmatter.allowedPaths)
+      ? (frontmatter.allowedPaths as string[])
+      : [];
+  }
+
+  // Parse spawnable: absent → true (spawnable by default).
+  // Explicit `false` marks layer-only files like _all.md / _non_coordinator.md.
+  const spawnable = frontmatter.spawnable === false ? false : true;
 
   return {
-    name,
-    description,
-    canSpawnChildren,
-    canBeParent,
-    permissions: { allow, deny },
-    model,
-    coordinator,
-    promptBody: body,
+    name: getString(frontmatter.name, name),
+    description: getString(frontmatter.description, ""),
+    canSpawnChildren: frontmatter.canSpawnChildren === true,
+    spawnable,
+    icon: iconChar,
+    model: getString(frontmatter.model, "") || undefined,
+    permissions: permissions ? {
+      allow: Array.isArray(permissions.allow) ? permissions.allow as string[] : undefined,
+      deny: Array.isArray(permissions.deny) ? permissions.deny as string[] : undefined,
+    } : undefined,
+    allowedPaths,
+    instructionStyle: validateInstructionStyle(getString(frontmatter.instructionStyle, "")),
+    markdownBody: body || undefined,
   };
 }
 
-/** Parse a value that should be a string array (from YAML list) */
-function parseStringArray(value: unknown): string[] {
-  if (Array.isArray(value)) {
-    return value.filter((v): v is string => typeof v === "string");
-  }
-  return [];
-}
-
 /**
- * Simple YAML parser that handles the subset we need:
- * - Top-level scalar keys (string, boolean, number)
- * - Top-level object with one level of nesting (permissions.allow/deny)
- * - YAML lists (sequences)
+ * Synchronously list agent type names from ~/.itsybitsy/agent-types/
+ * without parsing the files. Returns the basenames of *.md files,
+ * sorted alphabetically. Falls back to the embedded default type names
+ * when the directory doesn't exist yet (e.g. before ensureAgentTypesDir
+ * has run). Used by UI code that needs to cycle through types without
+ * blocking on disk I/O or YAML parsing.
  */
-function parseSimpleYaml(yaml: string): Record<string, unknown> {
-  const result: Record<string, unknown> = {};
-  const lines = yaml.split("\n");
-  let currentKey = "";
-  let currentObj: Record<string, unknown> | null = null;
-  let currentList: string[] | null = null;
-  let currentListKey = "";
-
-  for (const line of lines) {
-    // Skip empty lines and comments
-    if (!line.trim() || line.trim().startsWith("#")) continue;
-
-    // List item (indented with -)
-    const listMatch = /^\s+-\s+(.+)$/.exec(line);
-    if (listMatch && currentList !== null) {
-      currentList.push(listMatch[1]!.trim());
-      continue;
-    }
-
-    // If we were building a list, save it
-    if (currentList !== null) {
-      if (currentObj && currentListKey) {
-        currentObj[currentListKey] = currentList;
-      } else {
-        result[currentListKey] = currentList;
-      }
-      currentList = null;
-      currentListKey = "";
-    }
-
-    // Nested key (indented, part of an object)
-    const nestedMatch = /^(\s{2,})(\w+):\s*(.*)$/.exec(line);
-    if (nestedMatch && currentKey && currentObj) {
-      const nestedKey = nestedMatch[2]!;
-      const nestedVal = nestedMatch[3]!.trim();
-      if (nestedVal === "") {
-        // Start of a list
-        currentList = [];
-        currentListKey = nestedKey;
-      } else if (nestedVal.startsWith("[")) {
-        currentObj[nestedKey] = parseInlineArray(nestedVal);
-      } else {
-        currentObj[nestedKey] = parseScalar(nestedVal);
-      }
-      continue;
-    }
-
-    // If we were building an object and hit a non-nested line, save it
-    if (currentObj) {
-      result[currentKey] = currentObj;
-      currentObj = null;
-      currentKey = "";
-    }
-
-    // Top-level key: value
-    const topMatch = /^(\w+):\s*(.*)$/.exec(line);
-    if (topMatch) {
-      const key = topMatch[1]!;
-      const val = topMatch[2]!.trim();
-      if (val === "") {
-        // Could be an object or list — start collecting
-        currentKey = key;
-        currentObj = {};
-      } else if (val.startsWith("[")) {
-        // Inline array: [item1, item2]
-        result[key] = parseInlineArray(val);
-      } else {
-        result[key] = parseScalar(val);
-      }
-    }
-  }
-
-  // Flush any remaining list
-  if (currentList !== null) {
-    if (currentObj && currentListKey) {
-      currentObj[currentListKey] = currentList;
-    } else {
-      result[currentListKey] = currentList;
-    }
-  }
-
-  // Flush any remaining object
-  if (currentObj && currentKey) {
-    result[currentKey] = currentObj;
-  }
-
-  return result;
-}
-
-function parseScalar(val: string): string | boolean | number {
-  if (val === "true") return true;
-  if (val === "false") return false;
-  const num = Number(val);
-  if (!isNaN(num) && val !== "") return num;
-  // Strip surrounding quotes
-  if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
-    return val.slice(1, -1);
-  }
-  return val;
-}
-
-function parseInlineArray(val: string): string[] {
-  // Parse [item1, item2, item3]
-  const inner = val.slice(1, -1).trim();
-  if (!inner) return [];
-  return inner.split(",").map((s) => {
-    const trimmed = s.trim();
-    if ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
-      return trimmed.slice(1, -1);
-    }
-    return trimmed;
-  });
-}
-
-/**
- * Load an agent type definition from disk.
- * Looks in ~/.itsybitsy/agent-types/<name>/AGENTTYPE.md
- */
-export async function loadAgentType(typeName: string): Promise<AgentTypeDefinition | null> {
-  const filePath = join(AGENT_TYPES_DIR, typeName, "AGENTTYPE.md");
+export function listAgentTypeNamesSync(): string[] {
+  const home = process.env.HOME || homedir();
+  const typesDir = join(home, ".itsybitsy", "agent-types");
   try {
-    const file = Bun.file(filePath);
-    if (!(await file.exists())) return null;
-    const content = await file.text();
-    return parseAgentTypeFile(content);
+    const names = readdirSync(typesDir)
+      .filter((f) => f.endsWith(".md"))
+      .map((f) => f.replace(/\.md$/, ""))
+      .sort();
+    if (names.length > 0) return names;
   } catch {
-    return null;
+    // fall through to embedded defaults
   }
+  return Object.keys(EMBEDDED_TYPES).sort();
 }
 
 /**
- * Return a built-in agent type definition for the three legacy types.
+ * Synchronously list the names of types that can be spawned directly
+ * (i.e. their frontmatter does not declare `spawnable: false`).
+ * Used by UI cyclers in the new-agent dialog so layer-only files like
+ * `_all.md` / `_non_coordinator.md` never appear as spawn choices.
+ *
+ * Performs a lightweight scan of each `.md` file's frontmatter for the
+ * `spawnable:` key — no full parse is required.
  */
-export function getBuiltinType(typeName: "manager" | "worker" | "coordinator"): AgentTypeDefinition {
-  switch (typeName) {
-    case "manager":
-      return {
-        name: "manager",
-        description: "Manager agent that can spawn and coordinate sub-agents",
-        canSpawnChildren: true,
-        canBeParent: true,
-        permissions: { allow: [], deny: [] },
-        promptBody: "",
-      };
-    case "worker":
-      return {
-        name: "worker",
-        description: "Worker agent that executes tasks assigned by a manager",
-        canSpawnChildren: false,
-        canBeParent: false,
-        permissions: { allow: [], deny: [] },
-        promptBody: "",
-      };
-    case "coordinator":
-      return {
-        name: "coordinator",
-        description: "Per-repo coordinator that manages agents via ib commands",
-        canSpawnChildren: true,
-        canBeParent: true,
-        coordinator: true,
-        permissions: { allow: [], deny: [] },
-        promptBody: "",
-      };
+export function listSpawnableTypeNamesSync(): string[] {
+  const allNames = listAgentTypeNamesSync();
+  const home = process.env.HOME || homedir();
+  const typesDir = join(home, ".itsybitsy", "agent-types");
+
+  const spawnable: string[] = [];
+  for (const name of allNames) {
+    const filePath = join(typesDir, `${name}.md`);
+    let content: string | undefined;
+    try {
+      content = readFileSync(filePath, "utf8");
+    } catch {
+      // File gone between listing and read — fall back to embedded content if we know it
+      content = EMBEDDED_TYPES[name];
+    }
+    if (content === undefined) {
+      // Directory didn't exist and no embedded default — assume spawnable
+      spawnable.push(name);
+      continue;
+    }
+    if (isSpawnableFrontmatter(content)) {
+      spawnable.push(name);
+    }
   }
+  return spawnable;
 }
 
 /**
- * Resolve an agent type by name. Tries loading from disk first,
- * then falls back to built-in types for manager/worker/coordinator.
- * Throws for unknown types that aren't found on disk.
+ * Lightweight sync check: return true unless the frontmatter explicitly
+ * declares `spawnable: false`. Avoids pulling in the full parser so this
+ * stays cheap enough to call from UI render paths.
  */
-export async function resolveAgentType(typeName: string): Promise<AgentTypeDefinition> {
-  // Try disk first
-  const fromDisk = await loadAgentType(typeName);
-  if (fromDisk) return fromDisk;
+function isSpawnableFrontmatter(content: string): boolean {
+  const lines = content.split("\n");
+  if (lines[0] !== "---") return true;
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i]!;
+    if (line === "---") break;
+    const trimmed = line.trim();
+    if (trimmed.startsWith("spawnable:")) {
+      const valueStr = trimmed.substring("spawnable:".length).trim();
+      if (valueStr === "false") return false;
+      return true;
+    }
+  }
+  return true;
+}
 
-  // Fall back to built-in types
-  if (typeName === "manager" || typeName === "worker" || typeName === "coordinator") {
-    return getBuiltinType(typeName);
+/**
+ * List all available agent types from ~/.itsybitsy/agent-types/.
+ * Only returns types that exist as .md files on disk.
+ */
+export async function listAgentTypes(): Promise<AgentType[]> {
+  const types: AgentType[] = [];
+  const home = process.env.HOME || homedir();
+  const typesDir = join(home, ".itsybitsy", "agent-types");
+
+  try {
+    const glob = new Glob("*.md");
+    for await (const file of glob.scan(typesDir)) {
+      const name = file.replace(/\.md$/, "");
+      try {
+        const type = await loadAgentType(name);
+        types.push(type);
+      } catch {
+        // Skip files that can't be parsed
+      }
+    }
+  } catch {
+    // Types directory doesn't exist or can't be read
   }
 
-  throw new Error(`Unknown agent type: '${typeName}'. Create it at ${join(AGENT_TYPES_DIR, typeName, "AGENTTYPE.md")}`);
+  return types;
+}
+
+/**
+ * Validate all agent type files in ~/.itsybitsy/agent-types/.
+ * Returns an array of error messages. Empty array means all valid.
+ */
+export async function validateAllAgentTypes(): Promise<string[]> {
+  const errors: string[] = [];
+  const home = process.env.HOME || homedir();
+  const typesDir = join(home, ".itsybitsy", "agent-types");
+
+  try {
+    const glob = new Glob("*.md");
+    for await (const file of glob.scan(typesDir)) {
+      const filePath = join(typesDir, file);
+      try {
+        const content = await Bun.file(filePath).text();
+        const { frontmatter } = parseAgentTypeFile(content);
+
+        // Validate required fields
+        if (frontmatter.canSpawnChildren !== undefined && typeof frontmatter.canSpawnChildren !== "boolean") {
+          errors.push(`${file}: canSpawnChildren must be true or false, got "${frontmatter.canSpawnChildren}"`);
+        }
+
+        if (frontmatter.spawnable !== undefined && typeof frontmatter.spawnable !== "boolean") {
+          errors.push(`${file}: spawnable must be true or false, got "${frontmatter.spawnable}"`);
+        }
+
+        // Validate instructionStyle if present
+        if (frontmatter.instructionStyle !== undefined) {
+          if (typeof frontmatter.instructionStyle !== "string") {
+            errors.push(`${file}: instructionStyle must be a string, got ${typeof frontmatter.instructionStyle}`);
+          } else if (!VALID_INSTRUCTION_STYLES.has(frontmatter.instructionStyle as AgentType["instructionStyle"])) {
+            errors.push(`${file}: instructionStyle must be "manager", "worker", or "coordinator", got "${frontmatter.instructionStyle}"`);
+          }
+        }
+
+        // Validate permissions structure
+        if (frontmatter.permissions !== undefined) {
+          if (typeof frontmatter.permissions !== "object" || frontmatter.permissions === null) {
+            errors.push(`${file}: permissions must be an object with allow/deny arrays`);
+          } else {
+            const perms = frontmatter.permissions as Record<string, unknown>;
+            if (perms.allow !== undefined && !Array.isArray(perms.allow)) {
+              errors.push(`${file}: permissions.allow must be a list`);
+            }
+            if (perms.deny !== undefined && !Array.isArray(perms.deny)) {
+              errors.push(`${file}: permissions.deny must be a list`);
+            }
+          }
+        }
+
+        // Validate model if present
+        if (frontmatter.model !== undefined && typeof frontmatter.model !== "string") {
+          errors.push(`${file}: model must be a string`);
+        }
+
+        // Validate allowedPaths if present
+        if (frontmatter.allowedPaths !== undefined) {
+          if (!Array.isArray(frontmatter.allowedPaths)) {
+            errors.push(`${file}: allowedPaths must be a list of directory paths`);
+          } else {
+            for (const p of frontmatter.allowedPaths) {
+              if (typeof p !== "string") {
+                errors.push(`${file}: allowedPaths entries must be strings, got ${typeof p}`);
+                break;
+              }
+            }
+          }
+        }
+      } catch (err) {
+        errors.push(`${file}: failed to parse — ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+  } catch {
+    // Types directory doesn't exist — that's fine, no files to validate
+  }
+
+  return errors;
 }

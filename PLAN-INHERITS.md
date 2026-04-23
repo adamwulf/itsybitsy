@@ -1,282 +1,304 @@
-# Agent Type Inheritance — Implementation Plan
+# Agent Type Inheritance + Repo Restriction — Implementation Plan (Revised)
 
-## Goal
-
-Support `inherits: <other-type-name>` in an agent type's YAML frontmatter. When resolving a type:
-
-- **Scalar attributes** (`name`, `description`, `canSpawnChildren`, `spawnable`, `model`, `icon`, `instructionStyle`, `allowedPaths`, `markdownBody`): child overrides parent if *defined on the child*. Undefined on child → inherited from parent.
-- **Permissions** (`permissions.allow`, `permissions.deny`): **merged** (concatenated + deduped) across the inheritance chain.
-- **Circular inheritance**: must be detected and reported as a validation error; no runtime crash.
-
-Scope: this is purely an **agent type resolution** change. The downstream consumers (`ib-commands.ts`, `coordinator.ts`, `session-start.ts`, `intercept-task.ts`) call `loadAgentType(name)` and use the returned `AgentType` record — if `loadAgentType` correctly returns the *resolved* type (fields merged along the chain), the consumers need **no changes**.
-
-## Design decisions
-
-### 1. Inheritance only applies to regular types
-
-The existing `_all.md` and `_non_coordinator.md` layers are *still* merged in on top of the resolved type (for non-coordinator / every agent). `inherits:` is orthogonal to the existing layer system — it operates on a single resolved type, which the layer system then applies on top of.
-
-In other words, the order of precedence stays:
-
-1. `_all.md` (every agent)
-2. `_non_coordinator.md` (if not coordinator)
-3. **Resolved `<type>.md`** (← new: now recursively resolved via `inherits:`)
-
-The layer files themselves (`_all`, `_non_coordinator`) **may** use `inherits:` too — there is no special case. They remain non-spawnable via `spawnable: false`.
-
-### 2. Override semantics for each field
-
-The child type's frontmatter either **defines** a field or **doesn't**. "Defined" means the YAML key is literally present in the frontmatter (even if its value is `""`, `[]`, or `false`). "Not defined" means the key is absent.
-
-| Field | Merge strategy |
-|---|---|
-| `name` | child overrides if defined; otherwise inherited. (In practice every file has a `name` — this is mostly academic, but the rule is consistent.) |
-| `description` | child overrides if defined |
-| `canSpawnChildren` | child overrides if defined |
-| `spawnable` | child overrides if defined |
-| `model` | child overrides if defined (empty string → inherit — see "edge case" below) |
-| `icon` | child overrides if defined |
-| `instructionStyle` | child overrides if defined |
-| `allowedPaths` | child overrides if defined (replacement, not merge — matches the current "present-but-empty `[]` = strict" semantics) |
-| `markdownBody` | child overrides if **non-empty**; otherwise inherited |
-| `permissions.allow` | concatenate chain then dedupe via Set |
-| `permissions.deny` | concatenate chain then dedupe via Set |
-| `inherits` | metadata only — never exposed on the resolved `AgentType` |
-
-#### Edge case: `model`
-
-`parseSimpleValue` returns `""` for an empty/quoted-empty string. The existing `loadAgentType` treats `""` as `undefined` for `model`. To stay consistent, "defined but empty-string" = not overriding (i.e. inherit). This matters only for `model` because other string fields don't have this fallback treatment.
-
-#### Edge case: `markdownBody`
-
-The current `loadAgentType` returns `body || undefined`. The inheritance rule: child's body wins if **non-empty**; otherwise parent's body is used. A child file that is pure frontmatter (no body) therefore inherits its parent's body verbatim — useful for tweaking permissions without redefining a long instruction template.
-
-### 3. Chain resolution
-
-`loadAgentType(name)` must walk the inheritance chain:
-
-```
-loadAgentType("researcher")
-  → reads researcher.md, sees `inherits: worker`
-  → recursively reads worker.md
-  → merges (worker base ← researcher overrides)
-  → returns AgentType
-```
-
-A missing parent in the chain (e.g. `inherits: nonexistent`) throws with the **parent** name in the message. The error path uses the same `Unknown agent type '<name>'` wording as a missing top-level type. Chain depth is bounded by the cycle check.
-
-### 4. Circular detection
-
-Tracked via a `Set<string>` of type names already visited on the current chain. If the next parent is already in the set, throw `Circular inheritance detected: <a> → <b> → <a>` (or a similar chain-visualized message). The list is passed down the recursion (not cloned per branch — a linear chain).
-
-Self-inheritance (`inherits: <own-name>`) is the degenerate case and must also be rejected by the same mechanism.
-
-### 5. Validation
-
-`validateAllAgentTypes()` (run at `ib watch` startup) already walks every `*.md`. Add:
-
-- Type check: `inherits` must be a string or absent. Arrays/objects/booleans → error.
-- **Reachability**: resolving each type (by calling the resolver in validation-only mode, or by running `loadAgentType` inside a try/catch) must not throw. This catches both missing parents and cycles at startup rather than later at spawn time.
-
-### 6. Non-goals
-
-- **No multiple inheritance** (`inherits: [a, b]`). Single-parent only. If the user wants to combine types, they chain `inherits` through intermediate files — keeps merge semantics unambiguous and keeps the YAML parser simple.
-- **No method/body composition** beyond "child replaces, empty child inherits". No "super" / no prepending — keep it simple.
-- **No change to layer files**. `_all.md` and `_non_coordinator.md` keep their existing merge semantics applied *after* type resolution. Their `inherits:` is legal but unusual — we won't special-case it.
-- **No persistence of inherited chain in `meta.json`**. Only the final resolved type name (already in `meta.agentType`) is persisted. The chain is resolved fresh on every session-start / permission read.
-
-## Code changes
-
-### `src/agent-types.ts`
-
-1. **Extend `AgentType` interface**: no new field on the resolved record — `inherits` is a build-time concern only. (Optionally expose `inheritsFrom?: string[]` for debugging — not strictly needed; skip unless a reviewer asks.)
-2. **Split `loadAgentType` into two functions**:
-   - `loadAgentTypeRaw(name)` — existing single-file parse. Returns `{ frontmatter, body, definedKeys: Set<string> }`. `definedKeys` is the set of top-level YAML keys literally present in the file.
-   - `loadAgentType(name)` — public API. Walks the chain starting at `name`, calls `loadAgentTypeRaw` for each, merges parent ← child per the rules in §2, returns an `AgentType`.
-3. **`definedKeys` tracking**: `parseAgentTypeFile` needs to expose which top-level keys were present in the frontmatter (so the merger can tell "absent" from "present but falsy"). Extend the returned shape to `{ frontmatter, body, definedKeys: Set<string> }` — or derive `definedKeys` from `Object.keys(frontmatter)` since the parser only adds keys that appear in the source. **Simpler path**: use `Object.keys(frontmatter)`. Verified against the parser: it never synthesizes keys.
-4. **Cycle detection**: recursive helper `resolveChain(name, visited: Set<string>): ResolvedLink[]`. Throws on cycles with a human-readable chain. Returns a root-first list of raw records; `loadAgentType` folds them left-to-right (root, then each descendant overrides).
-5. **Missing-parent error**: wrap the inner `Bun.file(...).exists()` check — rethrow with context `"Type '<child>' inherits from unknown type '<parent>'"`.
-6. **`validateAllAgentTypes`**: after the existing per-file validations, for each file call `loadAgentType(name)` and push any thrown error to the errors array. This gives reachability/cycle checks for free.
-7. **`listSpawnableTypeNamesSync`**: unchanged — still reads the file directly. A type that *inherits* `spawnable: false` but does not restate it on itself is still spawnable (because the lightweight sync scan only looks at its own frontmatter). This is the correct behavior: `spawnable` is not about hiding layer files behind inheritance, it's about a file being a layer itself. Document this in a code comment.
-
-### `src/agent-types.test.ts`
-
-New tests (outline):
-
-- Parses `inherits:` from frontmatter.
-- Child inherits missing scalar fields from parent.
-- Child overrides defined scalar fields.
-- `permissions.allow` merges across chain.
-- `permissions.deny` merges across chain.
-- Deduplicates duplicate permission entries.
-- Multi-level chain (A → B → C) merges correctly.
-- `markdownBody` inherits when child has empty body.
-- `markdownBody` overrides when child has non-empty body.
-- `allowedPaths` is replaced (not merged) when child defines it.
-- `model: ""` on child inherits parent's model (edge case).
-- Missing parent throws with parent name in message.
-- Self-cycle (A inherits A) throws "Circular inheritance".
-- Two-node cycle (A → B → A) throws.
-- Three-node cycle (A → B → C → A) throws.
-- `validateAllAgentTypes` flags circular type files.
-- `validateAllAgentTypes` flags missing parent.
-- `validateAllAgentTypes` flags non-string `inherits` value.
-
-### Other files
-
-- **`src/ib-commands.ts`**: no changes — already calls `loadAgentType(typeName)`. Permission assembly at L1673-1676 continues to work because resolved type now has merged permissions.
-- **`src/coordinator.ts`**: no changes. `buildPerRepoCoordinatorSettings()` uses hardcoded lists — it doesn't call `loadAgentType` for coordinator.md. (Though it could, to honor coordinator.md inheritance — see "Open question" below.)
-- **`src/hooks/session-start.ts`**: no changes. Already calls `loadAgentType(ctx.agentType)`.
-- **`src/hooks/intercept-task.ts`**: no changes. Already calls `loadAgentType(meta.agentType)`.
-
-### Docs / SPEC
-
-- `SPEC.md` §2.3: add a bullet that type files may declare `inherits: <parent>` and that resolution produces a merged view (override on scalars, union on permissions).
-- `SPEC.md` §2.6: document the `inherits` frontmatter field.
-- `docs/agent-types/README.md`: mention inheritance briefly.
-
-## Open question for the reviewer
-
-`coordinator.ts:buildPerRepoCoordinatorSettings()` explicitly loads `_all` and merges it in, but **does not** load `coordinator.md` — its allow list is hardcoded. Should inheritance changes touch this path so that `coordinator.md`'s `inherits:` chain is honored for per-repo coordinators too? I lean **no for this PR** — the hardcoded coordinator permission path is a separate design decision, and expanding scope invites regressions. Flag this as a follow-up if the team wants it.
-
-## Risks
-
-1. **`Object.keys(frontmatter)` false negatives**: if the parser ever injects synthetic keys, `definedKeys` would be wrong. Mitigation: code-read the parser once to confirm it only adds user-authored keys. (Confirmed on a first read: the parser only writes to `frontmatter[key]` where `key` comes from the input line.)
-2. **Performance**: resolving a chain re-parses each file. Chains are small and files are tiny (<2KB), so this is fine. No cache needed for v1.
-3. **Layer files using `inherits:`**: `_all.md` could inherit from a user-authored base. This works as specified — layer file frontmatter is resolved the same way, merged result wins. Mention in a comment but don't special-case.
-4. **Test isolation**: existing tests share `~/.itsybitsy/agent-types/` via `process.env.HOME`. New tests must also point to a temp HOME. Match existing `beforeEach/afterEach` pattern in `describe("initAgentTypes")`.
-
-## Acceptance criteria
-
-- `bun test` passes (all 1471+ existing tests, plus new ones).
-- `bunx tsc --noEmit` reports zero errors.
-- Authoring `researcher.md` with `inherits: worker` and extra `permissions.allow` produces a resolved type whose permissions include worker's + researcher's entries, deduped.
-- Cycle or missing parent surfaces at `ib watch` startup, not as a spawn-time crash.
+Revised after review cycle #1. Resolves all ranked punch-list items from both reviewers.
 
 ---
 
-# Part 2 — Per-Type Repo Restriction (`repos:` field)
+## Overview
 
-## Goal
+Two independent additions to the agent-types system:
 
-Add a new YAML frontmatter field `repos:` (comma-separated string OR YAML list of strings) on an agent type. When present, `ib new-agent --type <type>` may only be used in a repo whose display name is in the list. Agents spawned against a non-matching repo are rejected with a clear error.
+1. **`inherits: <parent-type>`** — YAML frontmatter field that makes a type inherit scalar fields (with override) and permission lists (with merge) from another type.
+2. **`repos: [name, ...]`** — YAML frontmatter field that restricts which registered repos a type can be spawned in.
 
-## Semantics
+Both changes are scoped to the agent-type resolution layer (`src/agent-types.ts`) and a small additive check in `newAgent` (for `repos`). Downstream consumers — `ib-commands.ts` permission assembly, `session-start.ts`, `intercept-task.ts`, `coordinator.ts` — see the merged/resolved `AgentType` and do not need code changes beyond the new `repos` check.
 
-- `repos` **absent** (current behavior for every file): type can be spawned in any registered repo. No restriction.
-- `repos` **present** (non-empty list): the root repo basename (and nickname, if set) must appear in the list. If neither matches, `ib new-agent` errors out with a message like:
-  `Error: agent type 'researcher' is restricted to repos [muse-ios, muse-mac]; current repo 'itsybitsy' is not in that list`
-- `repos` **present but empty** (`repos: []`): interpret as "no repos allowed — effectively unspawnable anywhere". This mirrors the `allowedPaths: []` = strict interpretation. Document clearly and include a test.
+---
 
-### Matching rule
+# Part 1 — `inherits:`
 
-A repo **matches** if its display name (nickname-or-basename, per `repoDisplayName()`) equals any entry in `repos`, OR its raw basename `name` equals any entry. Matching against both `name` and `nickname` removes a footgun when users rename repos.
+## Resolution model
 
-Case-sensitive match (matches `repos.json` storage). Whitespace around each entry is trimmed.
+The resolver operates on **raw parsed frontmatter objects**, not on already-constructed `AgentType` records. This matters because an `AgentType` built per-file would have already applied defaults (e.g., `canSpawnChildren: frontmatter.canSpawnChildren === true` → `false` when absent), collapsing the "absent vs explicit false" distinction. By merging raw frontmatters first and constructing the `AgentType` once at the end, `canSpawnChildren: false` declared on a child correctly overrides a parent's `true`.
 
-### Inheritance interaction
+Pipeline (new):
 
-`repos` follows the same **override** rule as other scalar fields: if the child defines `repos`, child wins; otherwise inherit from parent. **Not merged** — restriction is a child's explicit opt-in/out. This avoids surprising widening (e.g., a parent with `repos: [a]` being silently overridden by a child that doesn't mention it — actually that case should inherit, which is fine).
-
-Rationale: if a user wants broader access in a child, they either redefine `repos:` explicitly or drop the parent's restriction by setting `repos:` to an explicit list. The rule is consistent.
-
-### YAML parsing
-
-Two accepted forms, matching existing conventions:
-
-```yaml
-repos: [muse-ios, muse-mac]
+```
+loadAgentType("researcher")
+  1. resolveChain("researcher") → [raw_base, raw_mid, raw_leaf]   (root-first)
+  2. mergedFrontmatter = mergeRawFrontmatters(chain)
+  3. buildAgentTypeFromFrontmatter(mergedFrontmatter, mergedBody, name="researcher")
 ```
 
-or
+### Chain resolution
 
-```yaml
-repos:
-  - muse-ios
-  - muse-mac
-```
+`resolveChain(name, visited: string[])` reads `<name>.md`, parses frontmatter, and if `inherits:` is set, recurses on the parent. `visited` carries the chain so far; if `parent ∈ visited`, throw `Circular inheritance detected: a → b → c → a`. Self-inheritance is the degenerate case of the same check.
 
-The existing `parseAgentTypeFile` already handles both. No parser change required.
+Missing parent throws: `Type '<child>' inherits from unknown type '<parent>' (file not found: ~/.itsybitsy/agent-types/<parent>.md)`.
 
-A third form — a single string `repos: muse-ios` — should be **rejected at validation time** (consistent error). We do not quietly coerce a bare string to a single-element list; it would hide typos like `repos: muse-ios, muse-mac` (which YAML reads as the string `"muse-ios, muse-mac"`, not a list).
+Chain returns root-first: `[root, ..., leaf]`. Merge folds left-to-right, so descendants overwrite.
 
-## Code changes
+### Merge rules
+
+Merge input: a list of `{frontmatter, body}` pairs (root → leaf). Output: a single `{frontmatter, body}`.
+
+| Field | Rule |
+|---|---|
+| `name` | **Never inherited.** Always set to the filename (basename minus `.md`) in `buildAgentTypeFromFrontmatter`. |
+| `description` | Child's frontmatter value replaces parent's if the key is **present** in child. |
+| `canSpawnChildren` | Child replaces if key is **present** in child (including explicit `false`). |
+| `icon` | Child replaces if key is **present** and non-empty. |
+| `model` | Child replaces if key is **present** and non-empty string (empty string → inherit, matches existing `""` → `undefined` coercion in `loadAgentType`). |
+| `instructionStyle` | Child replaces if key is **present**. |
+| `allowedPaths` | Child replaces if key is **present** (replacement, not merge — matches existing "`[]` = strict" semantics). |
+| `repos` | Child replaces if key is **present** (replacement, not merge — see Part 2). |
+| `markdownBody` | Child replaces if child body is **non-empty** (after `.trim()`). |
+| `permissions.allow` | **Union across chain**, deduped via `Set`. |
+| `permissions.deny` | **Union across chain**, deduped via `Set`. |
+| `spawnable` | **NOT inherited.** Always read from the target file only. See §spawnable below. |
+| `inherits` | Metadata only — never written onto the resolved `AgentType`. |
+
+"Present" means the YAML key appears literally in the frontmatter source. We detect this via `Object.keys(frontmatter).includes(key)` — safe because the parser in `parseAgentTypeFile` only ever writes keys drawn from the source (verified by reading src/agent-types.ts:50-184).
+
+#### Empty-string `inherits:`
+
+An explicit empty string (`inherits:` with no value, or `inherits: ""`) is treated as **absent** (no parent). This matches the `model: ""` → inherit/no-override convention.
+
+#### Why `spawnable` is not inherited
+
+`listSpawnableTypeNamesSync` (src/agent-types.ts:389) does a lightweight sync scan of each file's own frontmatter for `spawnable: false`. It does not resolve inheritance. If `spawnable` were inherited, a file without the field but whose parent has `spawnable: false` would be filtered by `loadAgentType` but still appear in the sync scanner — they'd disagree. Making `spawnable` non-inherited keeps both consistent.
+
+Documented behavior: `spawnable: false` is a per-file declaration. A type that wants to be non-spawnable must say so in its own frontmatter.
+
+#### Why `permissions` merges but `allowedPaths` and `repos` replace
+
+`permissions` is additive by design — the existing `_all.md` / `_non_coordinator.md` layer system already merges allow/deny via `Set`. Inheritance extends that model for type chains.
+
+`allowedPaths` and `repos` are **access restrictions**; merging them would quietly widen the attack surface (a strict child with `allowedPaths: []` inheriting from a permissive parent would inadvertently get the parent's paths). Replace-on-redefine keeps the child in control. A child that wants to extend the parent's list must copy+extend explicitly.
+
+### Layer files (`_all.md`, `_non_coordinator.md`)
+
+**Layer files may NOT use `inherits:`.** `validateAllAgentTypes` rejects `inherits:` in any file whose own frontmatter has `spawnable: false`. Rationale: layer files inject their body into every spawned agent. A layer inheriting an unrelated type's body would silently prepend that body to every agent's prompt — a high-blast-radius footgun. Disallowing this closes the loophole at zero cost (users can always edit the layer file directly).
+
+Error message: `_all.md: layer files (spawnable: false) cannot use 'inherits:' — layer files inject their body into every agent and inheritance would be surprising.`
+
+### Hot-path note
+
+`intercept-task.ts:151,201` calls `loadAgentType(agentType)` on every tool-use hook invocation. Under inheritance, each call walks the chain and re-reads every file. Chain depth is user-controlled; in practice 1–3 hops. Sub-millisecond on APFS. If profiling ever flags this, the fix is a short-lived in-process cache keyed on resolved type name — left as a follow-up, not required for v1.
+
+### Migration / backwards compatibility
+
+- Existing `manager.md`, `worker.md`, `coordinator.md`, `_all.md`, `_non_coordinator.md` do not declare `inherits:` — they resolve identically (single-file chain → same result). No behavioral change.
+- Users authoring new types with `inherits:` and then downgrading to an older `ib` binary: the older binary's `loadAgentType` ignores unknown frontmatter keys, so the child file is read standalone (missing the parent's fields). This is a graceful failure — the type loads but lacks merged permissions. Documented in `docs/agent-types/README.md`.
+
+## Code changes — Part 1
 
 ### `src/agent-types.ts`
 
-1. Extend `AgentType`:
-   ```ts
-   export interface AgentType {
-     // ...existing fields...
-     /** If defined, this type can only be spawned in repos whose name or nickname is in this list. */
-     repos?: string[];
-   }
-   ```
-2. In `loadAgentType` (after the inheritance resolver is in place), parse `repos` like `allowedPaths`:
-   - Absent: `repos = undefined`
-   - Array: keep as-is, trim each entry, drop non-string entries
-   - Present but not array: validation error (see below)
-3. In `validateAllAgentTypes`: if `frontmatter.repos !== undefined && !Array.isArray(frontmatter.repos)` → push error `"repos must be a list of strings"`. For non-string list entries, push analogous error.
+1. **New private helper**: `parseAgentTypeFileRaw(content)` returns `{ frontmatter, body }`. (Thin rename of existing `parseAgentTypeFile` export — keep the export name; helper just clarifies the role.)
+2. **New function**: `resolveChain(name: string, visited: string[] = []): Promise<Array<{name: string; frontmatter: Record<string, unknown>; body: string}>>`. Reads `<name>.md`, parses, recurses on `inherits:` if present. Throws on cycles and missing parents with the error messages above.
+3. **New function**: `mergeRawFrontmatters(chain: Array<{frontmatter, body}>): {frontmatter, body}`. Folds left-to-right per the rules table. Only merges frontmatters — `buildAgentTypeFromFrontmatter` applies defaults.
+4. **New function**: `buildAgentTypeFromFrontmatter(frontmatter, body, name): AgentType`. Factored out of existing `loadAgentType` body (src/agent-types.ts:340-354). Uses `name` parameter for the `AgentType.name` field (never reads from frontmatter → guarantees rule "`name` is never inherited"). Reads `spawnable` directly from the leaf file (caller passes the leaf's raw `spawnable`).
+5. **Rewrite `loadAgentType(name)`**: compose `resolveChain` → `mergeRawFrontmatters` → `buildAgentTypeFromFrontmatter`. Read `spawnable` from the leaf file separately so chain-merge doesn't affect it.
+6. **Extend `validateAllAgentTypes`**:
+   - Reject non-string `inherits` with `"${file}: inherits must be a string (the name of the parent type)"`.
+   - Reject `inherits` in layer files (`spawnable: false`) with the error above.
+   - After per-file checks, call `loadAgentType(basename)` in a try/catch for every type file; push any thrown error to the errors list. Catches cycles and missing parents at `ib watch` startup.
 
-### `src/ib-commands.ts` (`newAgent`)
+### No changes required in
 
-After `agentTypeDef = await loadAgentType(typeName)` (around line 1468), before the coordinator-mode branch:
+- `src/ib-commands.ts` — already uses `await loadAgentType(...)`, which now transparently returns the merged type.
+- `src/hooks/session-start.ts` — same.
+- `src/hooks/intercept-task.ts` — same.
+- `src/coordinator.ts` — `buildPerRepoCoordinatorSettings` uses hardcoded allow/deny plus `_all.md` merge. It does NOT load `coordinator.md`. Because layer files can't use `inherits:` (new rule), no action needed. A future PR can choose to honor `coordinator.md` inheritance here; it's intentionally out of scope now because this path is security-sensitive and a misconfigured chain could widen coordinator permissions.
+
+### Tests (`src/agent-types.test.ts`)
+
+All new tests MUST use the `mkdtemp` + `process.env.HOME` swap pattern from `describe("initAgentTypes")` at src/agent-types.test.ts:338 (per reviewer #2 punch-list item 7). Top-level `test(...)` blocks rely on the real HOME and will pollute/consume user config.
+
+Test cases (each asserts message text where validation is expected to fail):
+
+- **Scalars override**: child with `description: "new"` overrides parent's `description`.
+- **Scalars inherit**: child omits `model` → inherits parent's `model`.
+- **`canSpawnChildren: false` on child overrides true on parent** (regression for the raw-frontmatter-merge decision).
+- **`name` is never inherited** — even if parent's frontmatter has `name: other`, child resolves to its own filename.
+- **`spawnable` is never inherited** — child without `spawnable:` and parent with `spawnable: false` → child is spawnable (regression for sync/async consistency).
+- **`permissions.allow` merges and dedupes** across chain.
+- **`permissions.deny` merges and dedupes** across chain.
+- **Multi-level chain (A → B → C)**: merges and overrides correctly in order.
+- **`markdownBody` inherits** when child body is empty.
+- **`markdownBody` overrides** when child body is non-empty.
+- **`allowedPaths` replaces** (not merges) when child defines it.
+- **`allowedPaths: []` on child** correctly overrides parent's non-empty list.
+- **`repos` replaces** when child defines it (see Part 2).
+- **Empty-string `inherits: ""`** treated as absent.
+- **Missing parent** throws with `"Type 'child' inherits from unknown type 'missing'"` — assert message content.
+- **Self-cycle (A inherits A)** throws `"Circular inheritance"` and includes the chain.
+- **Two-node cycle (A → B → A)** throws.
+- **Three-node cycle (A → B → C → A)** throws.
+- **Layer file with `inherits:`** — `_all.md` with `inherits: manager` → `validateAllAgentTypes` returns an error listing the layer filename.
+- **`validateAllAgentTypes` flags circular chains** at startup.
+- **`validateAllAgentTypes` flags missing parent** at startup.
+- **Non-string `inherits`** (array/object/boolean) flagged by `validateAllAgentTypes`.
+- **Inherited body interpolates with child's context**: child without body, parent body contains `{{agentId}}` → `generateInstructions` renders the child's agent ID, not the parent's (ensures inheritance doesn't break `interpolateTemplate`).
+- **Tree of types still allows `listAgentTypes()` to return all**: chain-valid types appear; chain-broken types are still excluded (existing behavior preserved).
+
+---
+
+# Part 2 — `repos:` restriction
+
+## Semantics
+
+`repos:` in an agent type's frontmatter is either:
+
+- **Absent** — no restriction (current default). Type can be spawned in any repo.
+- **A non-empty YAML list of strings** (`[a, b]` or block list) — the root repo's basename **or** nickname must match one entry. Otherwise `ib new-agent --type <type>` fails with a clear error.
+- **Anything else** — validation error at `ib watch` startup.
+
+### Rejected forms (validation errors)
+
+| Form | Error |
+|---|---|
+| `repos: muse-ios` (bare string) | `repos must be a YAML list of strings; got string "muse-ios". Use [muse-ios] or a multi-line list.` |
+| `repos: []` (empty list) | `repos must be absent (no restriction) or a non-empty list; an empty list makes the type unspawnable.` |
+| `repos: [1, 2]` | `repos entries must be strings; got number.` |
+| `repos: {}` (object) | `repos must be a list of strings.` |
+
+Rejecting `repos: []` matches reviewer #2's punch-list item 6 and reviewer #1's item 15 — a YAML typo silently disabling a type is worse than the type failing loudly at startup.
+
+### Matching rule
+
+Given `rootRepoPath` (resolved via `resolveGitRoot`):
+
+1. Look up `listRepos().find(r => r.path === rootRepoPath)`.
+2. If registered: a match requires the `repos` list to contain the repo's **basename** (`entry.name`) OR its **nickname** (`entry.nickname`, if set).
+3. If unregistered: fall back to `basename(rootRepoPath)`. Matches only via basename.
+
+Case-sensitive. Entries trimmed of surrounding whitespace.
+
+### Unknown-name warning
+
+`validateAllAgentTypes` additionally produces a **warning** (not error) if any `repos` entry matches neither a current basename nor nickname in `repos.json`. The warning names the type file and the unresolved entry. Startup does not abort — users may register the repo later; this is a nudge, not a fence.
+
+**Implementation note**: `validateAllAgentTypes` currently returns `string[]` of errors. Add a second parallel function (or extend the return shape to `{errors: string[], warnings: string[]}`) and have the caller at `ib watch` startup print warnings at INFO level. If extending the shape is more invasive than worth the nudge, we can demote to an error or defer. **Decision**: defer the warning to a follow-up if it balloons scope — warnings are not strictly required for v1.
+
+### Inheritance interaction
+
+`repos` **replaces** on child definition, never merges (see rules table). Child without `repos:` inherits parent's `repos` (if any). This means:
+
+- To add a restriction on top of an unrestricted parent: set `repos:` in the child.
+- To remove a parent's restriction: there is no syntactic way in v1. Document this: "to undo a parent's `repos` restriction, either remove `inherits:` or use an intermediate parent without `repos`." No sentinel-string escape hatch in v1 (keeps YAML shape simple; punch-list item 17 noted).
+
+### `newAgent` check placement
+
+In `src/ib-commands.ts:newAgent`, insert the check **after** `const agentTypeDef = await loadAgentType(typeName);` (line 1468) and **before** the coordinator-mode branch at line 1475. Rationale:
+
+- Must run after `loadAgentType` so the resolved (potentially inherited) `repos` list is available.
+- Must run before worktree/tmux/agent-dir creation so rejection leaves no residue.
+- Must run before the coordinator idempotency check — a restricted coordinator type spawned in the wrong repo should fail with the repo error, not silently succeed via idempotency.
 
 ```ts
 if (agentTypeDef.repos !== undefined) {
   const repos = await listRepos();
-  const matchName = basename(rootRepoPath);
   const entry = repos.find(r => r.path === rootRepoPath);
-  const display = entry ? repoDisplayName(entry) : matchName;
-  const allowed = new Set(agentTypeDef.repos.map(s => s.trim()).filter(Boolean));
-  const ok = allowed.has(matchName) || allowed.has(display);
+  const basenameOnly = basename(rootRepoPath);
+  const candidates = entry
+    ? [entry.name, entry.nickname].filter((s): s is string => typeof s === "string" && s.length > 0)
+    : [basenameOnly];
+  const allowed = agentTypeDef.repos.map(s => s.trim()).filter(Boolean);
+  const ok = candidates.some(c => allowed.includes(c));
   if (!ok) {
+    const display = entry ? repoDisplayName(entry) : basenameOnly;
     return {
       ok: false, exitCode: 1, stdout: "",
-      stderr: `Error: agent type '${typeName}' is restricted to repos [${[...allowed].join(", ")}]; current repo '${display}' is not in that list`,
+      stderr: `Error: agent type '${typeName}' is restricted to repos [${allowed.join(", ")}]; current repo '${display}' (path: ${rootRepoPath}) is not in that list`,
     };
   }
 }
 ```
 
-`listRepos()` is already imported at L34 (via `registry`). `basename` is imported from `path` higher in the file.
+`listRepos` and `repoDisplayName` are already imported at src/ib-commands.ts:34. `basename` from `path` is used elsewhere in the file.
 
-This happens **before** the worktree/tmux spin-up so no cleanup is needed on rejection.
+### Coordinator interaction
 
-### SPEC + docs
+A restricted `coordinator.md` with `repos: [foo]` means system-coordinator-spawned per-repo coordinators will fail for any repo other than `foo`. This is a legitimate and possibly desired use case (e.g., restricting the personal-assistant pattern to one repo). Documented behavior; not a bug.
 
-- `SPEC.md` §2.6 table: add `repos` row.
-- Brief note in `docs/agent-types/README.md`.
+### `--name` bypass
 
-## Tests
+The existing `--name` flag overrides agent-id generation but not type resolution. The `repos` check runs before name generation, so `--name foo --type restricted` still fails correctly if the repo doesn't match. Confirmed by reading src/ib-commands.ts:1699.
 
-New tests in `agent-types.test.ts`:
+## Code changes — Part 2
 
-- `repos` absent → resolved `AgentType.repos === undefined`.
-- `repos: [muse-ios]` → resolved `AgentType.repos === ["muse-ios"]`.
-- `repos: []` → resolved `AgentType.repos === []`.
-- `repos` inheritance: child without `repos` inherits parent's list.
-- `repos` inheritance: child defines `repos` → overrides parent (not merged).
-- Validation: `repos: "muse-ios"` (string, not list) fails validation.
-- Validation: `repos: [1, 2]` fails with "entries must be strings".
+### `src/agent-types.ts`
 
-New tests in `ib-commands.test.ts`:
+1. Extend `AgentType` interface:
+   ```ts
+   /** If defined, this type can only be spawned in repos whose name or nickname matches an entry. */
+   repos?: string[];
+   ```
+2. In `buildAgentTypeFromFrontmatter`: parse `repos` analogously to `allowedPaths`:
+   - Absent → `undefined`
+   - Array of strings → trim each, drop empties, assign
+   - Any other shape → validation should have caught it; defensive: treat as `undefined` here (validator is the actual gate).
+3. In `validateAllAgentTypes`: add `repos` checks per the validation table above.
 
-- `newAgent` rejects when type's `repos` doesn't include the current repo basename.
-- `newAgent` accepts when type's `repos` includes the basename.
-- `newAgent` accepts when type's `repos` includes the nickname (not basename).
-- `newAgent` rejects when `repos: []` (empty → no matches).
-- `newAgent` allows any repo when `repos` is absent (regression guard).
+### `src/ib-commands.ts`
 
-## Edge cases + risks
+Add the `repos` check in `newAgent` as shown above. No other changes.
 
-1. **Unregistered repo** — `newAgent` accepts paths outside `repos.json` too (via `resolveGitRoot`). In that case `listRepos().find(...)` returns `undefined` and we fall back to `basename(rootRepoPath)`. If `repos` restriction names the basename, it still works. If the user relies on the nickname for matching, an unregistered repo can't satisfy it. Documented behavior — not a bug.
-2. **Coordinator types with `repos:`** — coordinator types are spawned from the system coordinator or UI; they go through the same `newAgent` path, so the restriction applies uniformly. No special-casing needed.
-3. **System coordinator** — the system coordinator session itself is not a regular agent (not created via `newAgent`); `repos` restrictions don't apply to it. Correct.
-4. **Interaction with inheritance** — combining both features: `researcher inherits worker, repos: [muse-ios]` works. Validator must run inheritance resolution before checking `repos` shape (resolution preserves the override shape already). Add a test.
+### Tests (`src/agent-types.test.ts` + `src/ib-commands.test.ts`)
 
-## Acceptance criteria (extended)
+**`agent-types.test.ts`** (same HOME-swap pattern):
 
-- Everything from Part 1 still passes.
-- A type file with `repos: [a, b]` can only be spawned from repos matching `a` or `b`; otherwise `ib new-agent` errors out cleanly.
-- Validator flags malformed `repos` at `ib watch` startup.
+- `repos` absent → `AgentType.repos === undefined`.
+- `repos: [muse-ios, muse-mac]` → `AgentType.repos === ["muse-ios", "muse-mac"]`.
+- `repos` inherits from parent when child omits it.
+- `repos` on child overrides parent's list entirely.
+- `validateAllAgentTypes` rejects `repos: "muse-ios"` (string) with a message that names the file and suggests the list form.
+- `validateAllAgentTypes` rejects `repos: []` with the "empty list makes the type unspawnable" message.
+- `validateAllAgentTypes` rejects `repos: [1, 2]` ("entries must be strings").
+- `validateAllAgentTypes` rejects `repos: {}` (object).
+
+**`ib-commands.test.ts`** (extend existing `newAgent` fixture pattern):
+
+- `newAgent` accepts when type's `repos` includes the current repo's basename.
+- `newAgent` accepts when type's `repos` includes the current repo's nickname (not basename).
+- `newAgent` rejects with a clear message when the current repo matches no entry.
+- `newAgent` accepts (regression) when `repos` is absent — existing types continue to work.
+- `newAgent` rejects when `repos` is inherited from a parent and current repo doesn't match.
+- `newAgent` accepts when the repo is unregistered but its basename appears in `repos`.
+
+---
+
+## Docs
+
+- **`SPEC.md` §2.6**: add `inherits` and `repos` rows to the frontmatter fields table. Note the per-field merge rules (override / merge / replace / never-inherited).
+- **`SPEC.md` §2.5 (or similar)**: add a sentence: `spawnable` is per-file (never inherited) and layer files (`spawnable: false`) cannot use `inherits:`.
+- **`docs/agent-types/README.md`**: add two worked examples:
+  1. `researcher.md` with `inherits: worker` and extra `permissions.allow`.
+  2. A type restricted to specific repos via `repos: [muse-ios, muse-mac]`.
+- Mention briefly that older `ib` binaries ignore unknown frontmatter fields and will read the child file as-is (graceful degradation).
+
+---
+
+## Out of scope (deferred)
+
+- TUI display of inherited chain (info panel showing `Type: researcher ← worker`).
+- `inheritsFrom?: string[]` on the resolved `AgentType` for debug/display.
+- In-process `loadAgentType` cache for hot paths.
+- `buildPerRepoCoordinatorSettings` honoring `coordinator.md` inheritance.
+- Sentinel value to "remove" an inherited `repos` restriction (e.g., `repos: "*"`).
+- Registry-warning validation (`repos:` entry names an unregistered repo) — mentioned as a stretch but skipped from v1 if return-shape change is invasive. Can be promoted to an error via the existing `validateAllAgentTypes` → `string[]` path as a one-line follow-up.
+
+---
+
+## Acceptance criteria
+
+- `bun test` passes (all existing + new tests).
+- `bunx tsc --noEmit` reports zero errors.
+- `researcher.md` with `inherits: worker` and extra `permissions.allow` produces a resolved type with merged permissions and no `inherits` key exposed on the result.
+- A child with `canSpawnChildren: false` correctly overrides a parent with `canSpawnChildren: true`.
+- Cycles and missing parents surface as errors at `ib watch` startup (via `validateAllAgentTypes`), not as spawn-time crashes.
+- `repos: [foo]` on a type makes `ib new-agent --type <type>` from a non-`foo` repo fail with the error message above and leave no residue (no worktree created, no meta.json).
+- `repos: []`, bare-string `repos`, and non-string `repos` entries all fail validation with file+reason messages.
+- Existing `manager.md`, `worker.md`, `coordinator.md`, `_all.md`, `_non_coordinator.md` behave identically (no `inherits:` or `repos:` declared — resolved result is unchanged).

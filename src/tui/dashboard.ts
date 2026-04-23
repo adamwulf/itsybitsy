@@ -1538,6 +1538,8 @@ export class DashboardComponent implements Component {
     }
     else if (data === "m") { agentActions.handleMerge(this); }
     else if (data === "s") { agentActions.handleSend(this); }
+    // Add permission to selected agent's settings.local.json allow list
+    else if (data === "b") { agentActions.handleAddPermission(this); }
     // New agent
     else if (data === "a") { agentActions.handleNewAgent(this); }
     // Fuzzy jump

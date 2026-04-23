@@ -35,6 +35,7 @@ import { MIN_LEFT_WIDTH, MAX_LEFT_WIDTH } from "./split-pane";
 import type { RepoHealthReport } from "../health-check";
 import { getResolvableWarnings, resolveHealthWarnings } from "../health-check";
 import { IB_COORDINATOR_SESSION, sanitizeTmuxInput, restartSystemCoordinator, checkCoordinatorExists } from "../coordinator";
+import { isValidToolList } from "../validation";
 
 const SCROLL_STEP = 10;
 
@@ -48,6 +49,69 @@ export function getActiveDiffProc() { return activeDiffProc; }
 export function setActiveDiffProc(v: typeof activeDiffProc) { activeDiffProc = v; }
 export function getDiffToolLaunching() { return diffToolLaunching; }
 export function setDiffToolLaunching(v: boolean) { diffToolLaunching = v; }
+
+/** Resolve the settings.local.json path for an agent.
+ * Coordinator agents use <agentDir>/.claude/; everyone else uses <agentDir>/repo/.claude/. */
+export function agentSettingsLocalPath(agent: Agent): string {
+  const dir = agent.archived ? "archive" : "agents";
+  const agentDir = join(agent.repoPath, ".ittybitty", dir, agent.id);
+  const base = agent.meta.coordinator ? agentDir : join(agentDir, "repo");
+  return join(base, ".claude", "settings.local.json");
+}
+
+/** Append an entry to the permissions.allow array in a settings.local.json file.
+ *  Returns { added: true } on success, { added: false, reason: "duplicate" } if the
+ *  entry is already present, or { added: false, reason: "error", message } on failure.
+ *  Preserves deny list and any other keys. If the file is missing, creates a new one.
+ *  If the file exists but is malformed, aborts without overwriting. */
+export type AddPermissionResult =
+  | { added: true }
+  | { added: false; reason: "duplicate" }
+  | { added: false; reason: "error"; message: string };
+
+export async function addPermissionToSettings(
+  settingsPath: string,
+  entry: string,
+): Promise<AddPermissionResult> {
+  const file = Bun.file(settingsPath);
+  let settings: Record<string, unknown> = {};
+  if (await file.exists()) {
+    try {
+      settings = (await file.json()) as Record<string, unknown>;
+    } catch (err) {
+      return { added: false, reason: "error", message: `Malformed JSON: ${(err as Error).message}` };
+    }
+    if (typeof settings !== "object" || settings === null || Array.isArray(settings)) {
+      return { added: false, reason: "error", message: "settings.local.json is not an object" };
+    }
+  }
+  const existingPerms = (settings.permissions as Record<string, unknown> | undefined) ?? {};
+  if (typeof existingPerms !== "object" || existingPerms === null || Array.isArray(existingPerms)) {
+    return { added: false, reason: "error", message: "permissions is not an object" };
+  }
+  const rawAllow = existingPerms.allow;
+  const allow = Array.isArray(rawAllow) ? [...(rawAllow as unknown[])].filter((v): v is string => typeof v === "string") : [];
+  const rawDeny = existingPerms.deny;
+  const deny = Array.isArray(rawDeny) ? [...(rawDeny as unknown[])].filter((v): v is string => typeof v === "string") : [];
+  if (allow.includes(entry)) {
+    return { added: false, reason: "duplicate" };
+  }
+  const dedupedAllow = Array.from(new Set([...allow, entry]));
+  const newSettings = {
+    ...settings,
+    permissions: {
+      ...existingPerms,
+      allow: dedupedAllow,
+      deny,
+    },
+  };
+  try {
+    await Bun.write(settingsPath, JSON.stringify(newSettings, null, 2));
+  } catch (err) {
+    return { added: false, reason: "error", message: (err as Error).message };
+  }
+  return { added: true };
+}
 
 /** Kill any active diff process (used during shutdown to prevent orphans) */
 export function killActiveDiffProc() {
@@ -447,6 +511,58 @@ function handleSendToRepoCoordinator(ctx: ActionCtx, agent: Agent) {
   });
 }
 
+/** 'b' — add an entry to the selected agent's settings.local.json allow list. */
+export function handleAddPermission(ctx: ActionCtx) {
+  if (ctx.agentTree.isSystemCoordinatorSelected) return;
+
+  // Resolve target agent: if a repo header is selected with a coordinator,
+  // route to the coordinator; otherwise use the selected agent.
+  let target: Agent | null = null;
+  if (ctx.agentTree.selectedRepoHeader && !ctx.agentTree.selectedAgent) {
+    if (ctx.rightPane.repoCoordinatorAgent) {
+      target = ctx.rightPane.repoCoordinatorAgent;
+    } else {
+      ctx.setNotice("No coordinator for this repo");
+      return;
+    }
+  } else {
+    target = ctx.agentTree.selectedAgent;
+  }
+  if (!target) return;
+  if (target.archived) {
+    ctx.setNotice("Cannot modify archived agent");
+    return;
+  }
+  const agent = target;
+
+  ctx.showDialog({
+    type: "input",
+    prompt: `Add permission to ${agent.id}:`,
+    value: "",
+    onSubmit: (value: string) => {
+      ctx.closeDialog();
+      const entry = value.trim();
+      if (!entry) { ctx.setNotice("Permission add cancelled"); return; }
+      if (!isValidToolList(entry)) {
+        ctx.setNotice("Invalid permission entry — disallowed characters");
+        return;
+      }
+      const settingsPath = agentSettingsLocalPath(agent);
+      addPermissionToSettings(settingsPath, entry).then((result) => {
+        if (result.added) {
+          ctx.setNotice(`Added ${entry} to ${agent.id} allow list`);
+        } else if (result.reason === "duplicate") {
+          ctx.setNotice("Already in allow list");
+        } else {
+          ctx.setNotice(`Failed: ${result.message}`);
+        }
+      }).catch((err) => {
+        ctx.setNotice(`Failed: ${(err as Error).message}`);
+      });
+    },
+  });
+}
+
 /** 'a' — infer repo from current selection, fallback to first repo */
 export function handleNewAgent(ctx: ActionCtx) {
   if (ctx.repos.length === 0) { ctx.setNotice("No repos registered"); return; }
@@ -741,6 +857,7 @@ export function handleHelp(ctx: ActionCtx) {
       header("Actions"),
       row("s", "send message"),
       row("E", "cross-repo send"),
+      row("b", "add permission"),
       row("m", "merge"),
       row("x / !", "kill / nuke (all if none selected)"),
       row("R", "resume"),

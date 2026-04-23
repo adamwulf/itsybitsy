@@ -12,6 +12,7 @@ import {
   handleHelp, handleResizeLeft,
   handleOpenDiffTool, getActiveDiffProc, setActiveDiffProc, killActiveDiffProc,
   getDiffToolLaunching, setDiffToolLaunching,
+  handleAddPermission, addPermissionToSettings, agentSettingsLocalPath,
 } from "./agent-actions";
 import { MIN_LEFT_WIDTH, MAX_LEFT_WIDTH } from "./split-pane";
 import {
@@ -533,5 +534,164 @@ describe("killActiveDiffProc", () => {
     setActiveDiffProc(null);
     killActiveDiffProc(); // should not throw
     expect(getActiveDiffProc()).toBeNull();
+  });
+});
+
+describe("agentSettingsLocalPath", () => {
+  test("non-coordinator uses <agentDir>/repo/.claude/settings.local.json", () => {
+    const agent = makeAgent({ id: "agent-1", repoPath: "/tmp/myrepo" });
+    expect(agentSettingsLocalPath(agent)).toBe(
+      "/tmp/myrepo/.ittybitty/agents/agent-1/repo/.claude/settings.local.json",
+    );
+  });
+
+  test("coordinator uses <agentDir>/.claude/settings.local.json", () => {
+    const agent = makeAgent({
+      id: "coord-1",
+      repoPath: "/tmp/myrepo",
+      meta: { coordinator: true } as any,
+    });
+    expect(agentSettingsLocalPath(agent)).toBe(
+      "/tmp/myrepo/.ittybitty/agents/coord-1/.claude/settings.local.json",
+    );
+  });
+
+  test("archived non-coordinator uses archive/<id>/repo", () => {
+    const agent = makeAgent({ id: "agent-1", repoPath: "/tmp/myrepo", archived: true });
+    expect(agentSettingsLocalPath(agent)).toBe(
+      "/tmp/myrepo/.ittybitty/archive/agent-1/repo/.claude/settings.local.json",
+    );
+  });
+});
+
+describe("addPermissionToSettings", () => {
+  const tmpDir = `/tmp/ib-perm-test-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+  afterEach(async () => {
+    await Bun.$`rm -rf ${tmpDir}`.quiet().nothrow();
+  });
+
+  test("creates missing file and appends entry", async () => {
+    const p = `${tmpDir}/settings.local.json`;
+    const result = await addPermissionToSettings(p, "Bash(git status:*)");
+    expect(result).toEqual({ added: true });
+    const contents = await Bun.file(p).json();
+    expect(contents.permissions.allow).toEqual(["Bash(git status:*)"]);
+    expect(contents.permissions.deny).toEqual([]);
+  });
+
+  test("appends to existing allow list and preserves deny + other keys", async () => {
+    const p = `${tmpDir}/settings.local.json`;
+    await Bun.write(p, JSON.stringify({
+      extra: "keep-me",
+      permissions: {
+        allow: ["Bash(ib:*)"],
+        deny: ["Bash(rm:*)"],
+      },
+    }, null, 2));
+    const result = await addPermissionToSettings(p, "Bash(git status:*)");
+    expect(result).toEqual({ added: true });
+    const contents = await Bun.file(p).json();
+    expect(contents.extra).toBe("keep-me");
+    expect(contents.permissions.allow).toEqual(["Bash(ib:*)", "Bash(git status:*)"]);
+    expect(contents.permissions.deny).toEqual(["Bash(rm:*)"]);
+  });
+
+  test("duplicate entry is not written twice", async () => {
+    const p = `${tmpDir}/settings.local.json`;
+    await addPermissionToSettings(p, "Bash(git status:*)");
+    const secondResult = await addPermissionToSettings(p, "Bash(git status:*)");
+    expect(secondResult).toEqual({ added: false, reason: "duplicate" });
+    const contents = await Bun.file(p).json();
+    expect(contents.permissions.allow).toEqual(["Bash(git status:*)"]);
+  });
+
+  test("malformed JSON returns error and does not overwrite", async () => {
+    const p = `${tmpDir}/settings.local.json`;
+    await Bun.write(p, "{ not json");
+    const result = await addPermissionToSettings(p, "Bash(git status:*)");
+    expect(result.added).toBe(false);
+    if (!result.added) expect(result.reason).toBe("error");
+    // Original file content is preserved
+    const raw = await Bun.file(p).text();
+    expect(raw).toBe("{ not json");
+  });
+
+  test("handles file with no permissions key", async () => {
+    const p = `${tmpDir}/settings.local.json`;
+    await Bun.write(p, JSON.stringify({ other: "value" }, null, 2));
+    const result = await addPermissionToSettings(p, "Bash(git status:*)");
+    expect(result).toEqual({ added: true });
+    const contents = await Bun.file(p).json();
+    expect(contents.other).toBe("value");
+    expect(contents.permissions.allow).toEqual(["Bash(git status:*)"]);
+  });
+});
+
+describe("handleAddPermission", () => {
+  test("does nothing when no agent selected and no repo header", () => {
+    const { ctx, dialogs, notices } = makeMockCtx({ agent: null });
+    handleAddPermission(ctx);
+    expect(dialogs).toHaveLength(0);
+    expect(notices).toHaveLength(0);
+  });
+
+  test("skipped when system coordinator selected", () => {
+    const { ctx, dialogs } = makeMockCtx({ agent: null });
+    ctx.agentTree.isSystemCoordinatorSelected = true;
+    handleAddPermission(ctx);
+    expect(dialogs).toHaveLength(0);
+  });
+
+  test("shows input dialog for selected agent", () => {
+    const agent = makeAgent({ id: "agent-1" });
+    const { ctx, dialogs } = makeMockCtx({ agent });
+    handleAddPermission(ctx);
+    expect(dialogs).toHaveLength(1);
+    const d = assertDialog(dialogs[0]!, "input");
+    expect(d.prompt).toContain("agent-1");
+  });
+
+  test("archived agent gets notice", () => {
+    const agent = makeAgent({ id: "agent-1", archived: true });
+    const { ctx, notices, dialogs } = makeMockCtx({ agent });
+    handleAddPermission(ctx);
+    expect(dialogs).toHaveLength(0);
+    expect(notices).toEqual(["Cannot modify archived agent"]);
+  });
+
+  test("repo header without coordinator shows notice", () => {
+    const { ctx, notices, dialogs } = makeMockCtx({ repoHeader: "my-repo" });
+    handleAddPermission(ctx);
+    expect(dialogs).toHaveLength(0);
+    expect(notices).toEqual(["No coordinator for this repo"]);
+  });
+
+  test("repo header with coordinator routes to coordinator", () => {
+    const coordAgent = makeAgent({ id: "coord-1", meta: { coordinator: true } as any });
+    const { ctx, dialogs } = makeMockCtx({ repoHeader: "my-repo" });
+    ctx.rightPane.repoCoordinatorAgent = coordAgent;
+    handleAddPermission(ctx);
+    expect(dialogs).toHaveLength(1);
+    const d = assertDialog(dialogs[0]!, "input");
+    expect(d.prompt).toContain("coord-1");
+  });
+
+  test("empty submit cancels", () => {
+    const agent = makeAgent({ id: "agent-1" });
+    const { ctx, dialogs, notices } = makeMockCtx({ agent });
+    handleAddPermission(ctx);
+    const d = assertDialog(dialogs[0]!, "input");
+    d.onSubmit("   ");
+    expect(notices).toEqual(["Permission add cancelled"]);
+  });
+
+  test("invalid characters rejected", () => {
+    const agent = makeAgent({ id: "agent-1" });
+    const { ctx, dialogs, notices } = makeMockCtx({ agent });
+    handleAddPermission(ctx);
+    const d = assertDialog(dialogs[0]!, "input");
+    d.onSubmit("Bash(foo; rm -rf /)");
+    expect(notices.some((n) => n.includes("Invalid permission"))).toBe(true);
   });
 });

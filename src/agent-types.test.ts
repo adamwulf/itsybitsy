@@ -1,8 +1,9 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { parseAgentTypeFile, loadAgentType, listAgentTypes, ensureAgentTypesDir, initAgentTypes, agentTypeExists } from "./agent-types";
-import { mkdtemp, rm } from "fs/promises";
+import { parseAgentTypeFile, loadAgentType, listAgentTypes, ensureAgentTypesDir, initAgentTypes, agentTypeExists, validateAllAgentTypes } from "./agent-types";
+import { mkdtemp, rm, mkdir } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
+import { interpolateTemplate } from "./hooks/session-start";
 
 test("parseAgentTypeFile: parses frontmatter and body", () => {
   const content = `---
@@ -439,4 +440,728 @@ body`;
 
   expect(Array.isArray(frontmatter.allowedPaths)).toBe(true);
   expect((frontmatter.allowedPaths as unknown[]).length).toBe(0);
+});
+
+// ── inherits: / repos: inheritance tests (see PLAN-INHERITS.md) ──────────────
+
+describe("loadAgentType: inherits", () => {
+  const originalHome = process.env.HOME;
+  let tempHome: string;
+  let typesDir: string;
+
+  beforeEach(async () => {
+    tempHome = await mkdtemp(join(tmpdir(), "itsybitsy-inherits-"));
+    process.env.HOME = tempHome;
+    typesDir = join(tempHome, ".itsybitsy", "agent-types");
+    await mkdir(typesDir, { recursive: true });
+  });
+
+  afterEach(async () => {
+    process.env.HOME = originalHome;
+    await rm(tempHome, { recursive: true, force: true });
+  });
+
+  async function writeType(name: string, content: string): Promise<void> {
+    await Bun.write(join(typesDir, `${name}.md`), content);
+  }
+
+  test("scalar field overrides when present in child", async () => {
+    await writeType("parent", `---
+name: parent
+description: parent description
+model: sonnet
+---
+body`);
+    await writeType("child", `---
+name: child
+inherits: parent
+description: new description
+---
+body`);
+
+    const type = await loadAgentType("child");
+    expect(type.description).toBe("new description");
+    expect(type.model).toBe("sonnet"); // inherited
+  });
+
+  test("scalar field inherits when child omits it", async () => {
+    await writeType("parent", `---
+name: parent
+description: parent description
+model: haiku
+---
+body`);
+    await writeType("child", `---
+name: child
+inherits: parent
+---
+body`);
+
+    const type = await loadAgentType("child");
+    expect(type.model).toBe("haiku");
+    expect(type.description).toBe("parent description");
+  });
+
+  test("model: empty string in child inherits parent's model (not wipes to undefined)", async () => {
+    // PLAN-INHERITS.md rules table: `model` — Child replaces if key is
+    // **present** and non-empty string (empty string → inherit, matches
+    // existing `""` → undefined coercion).
+    await writeType("parent", `---
+name: parent
+model: opus
+---
+body`);
+    await writeType("child", `---
+inherits: parent
+model: ""
+---
+body`);
+
+    const type = await loadAgentType("child");
+    expect(type.model).toBe("opus");
+  });
+
+  test("icon: empty string in child inherits parent's icon (not wipes to undefined)", async () => {
+    // PLAN-INHERITS.md rules table: `icon` — Child replaces if key is
+    // **present** and non-empty. An empty child icon means "inherit".
+    // (Use a BMP character — the legacy iconChar extractor returns the first
+    // UTF-16 code unit, which splits astral-plane emoji; that pre-existing
+    // quirk is orthogonal to the inheritance rule exercised here.)
+    await writeType("parent", `---
+name: parent
+icon: "M"
+---
+body`);
+    await writeType("child", `---
+inherits: parent
+icon: ""
+---
+body`);
+
+    const type = await loadAgentType("child");
+    expect(type.icon).toBe("M");
+  });
+
+  test("canSpawnChildren: false on child overrides true on parent (raw-frontmatter-merge regression)", async () => {
+    await writeType("parent", `---
+name: parent
+canSpawnChildren: true
+---
+body`);
+    await writeType("child", `---
+name: child
+inherits: parent
+canSpawnChildren: false
+---
+body`);
+
+    const type = await loadAgentType("child");
+    expect(type.canSpawnChildren).toBe(false);
+  });
+
+  test("name is never inherited", async () => {
+    // Even if parent's frontmatter declares name: other, the resolved type name
+    // is always the filename basename.
+    await writeType("parent", `---
+name: other
+description: parent
+---
+body`);
+    await writeType("child", `---
+inherits: parent
+---
+body`);
+
+    const type = await loadAgentType("child");
+    expect(type.name).toBe("child");
+  });
+
+  test("spawnable is never inherited", async () => {
+    // Parent with spawnable: false should NOT propagate to a child that omits it.
+    // Keeps the sync scanner (listSpawnableTypeNamesSync) and async loader in sync.
+    await writeType("parent", `---
+name: parent
+spawnable: false
+---
+body`);
+    await writeType("child", `---
+inherits: parent
+---
+body`);
+
+    const type = await loadAgentType("child");
+    expect(type.spawnable).toBe(true);
+  });
+
+  test("permissions.allow merges and dedupes across chain", async () => {
+    await writeType("parent", `---
+name: parent
+permissions:
+  allow: [Read, Grep]
+---
+body`);
+    await writeType("child", `---
+inherits: parent
+permissions:
+  allow: [Grep, Edit]
+---
+body`);
+
+    const type = await loadAgentType("child");
+    expect(type.permissions?.allow?.sort()).toEqual(["Edit", "Grep", "Read"]);
+  });
+
+  test("permissions.deny merges and dedupes across chain", async () => {
+    await writeType("parent", `---
+name: parent
+permissions:
+  deny: [Write, Bash]
+---
+body`);
+    await writeType("child", `---
+inherits: parent
+permissions:
+  deny: [Bash, NotebookEdit]
+---
+body`);
+
+    const type = await loadAgentType("child");
+    expect(type.permissions?.deny?.sort()).toEqual(["Bash", "NotebookEdit", "Write"]);
+  });
+
+  test("multi-level chain (A -> B -> C) merges and overrides correctly in order", async () => {
+    await writeType("a", `---
+name: a
+description: A-desc
+model: opus
+permissions:
+  allow: [Read]
+---
+body A`);
+    await writeType("b", `---
+inherits: a
+description: B-desc
+model: sonnet
+permissions:
+  allow: [Grep]
+---
+`);
+    await writeType("c", `---
+inherits: b
+permissions:
+  allow: [Edit]
+---
+`);
+
+    const type = await loadAgentType("c");
+    // B overrides A's description; C inherits B's (no override)
+    expect(type.description).toBe("B-desc");
+    // B overrides A's model; C inherits B's
+    expect(type.model).toBe("sonnet");
+    // All three allow lists merged
+    expect(type.permissions?.allow?.sort()).toEqual(["Edit", "Grep", "Read"]);
+    // Body inherits from A (B and C have empty bodies)
+    expect(type.markdownBody).toBe("body A");
+  });
+
+  test("markdownBody inherits when child body is empty", async () => {
+    await writeType("parent", `---
+name: parent
+---
+Parent body content.`);
+    await writeType("child", `---
+inherits: parent
+---
+`);
+
+    const type = await loadAgentType("child");
+    expect(type.markdownBody).toBe("Parent body content.");
+  });
+
+  test("markdownBody appends child body after parent body when both non-empty", async () => {
+    // PLAN-BODY-APPEND.md: bodies concatenate root-first with blank-line
+    // separators so a child extending a manager/base type gets the parent's
+    // boilerplate first, then the child's own additions.
+    await writeType("parent", `---
+name: parent
+---
+Parent body.`);
+    await writeType("child", `---
+inherits: parent
+---
+Child body.`);
+
+    const type = await loadAgentType("child");
+    expect(type.markdownBody).toBe("Parent body.\n\nChild body.");
+  });
+
+  test("markdownBody concatenates three-level chain root-first", async () => {
+    await writeType("a", `---
+name: a
+---
+A content`);
+    await writeType("b", `---
+inherits: a
+---
+B content`);
+    await writeType("c", `---
+inherits: b
+---
+C content`);
+
+    const type = await loadAgentType("c");
+    expect(type.markdownBody).toBe("A content\n\nB content\n\nC content");
+  });
+
+  test("markdownBody skips empty ancestors without adding blank separators", async () => {
+    // Middle ancestor has no body — the join should not leave an extra
+    // blank-line artifact between the root and the leaf.
+    await writeType("a", `---
+name: a
+---
+A content`);
+    await writeType("b", `---
+inherits: a
+---
+`);
+    await writeType("c", `---
+inherits: b
+---
+C content`);
+
+    const type = await loadAgentType("c");
+    expect(type.markdownBody).toBe("A content\n\nC content");
+  });
+
+  test("allowedPaths replaces (not merges) when child defines it", async () => {
+    await writeType("parent", `---
+name: parent
+allowedPaths:
+  - /parent/path
+---
+body`);
+    await writeType("child", `---
+inherits: parent
+allowedPaths:
+  - /child/path
+---
+body`);
+
+    const type = await loadAgentType("child");
+    expect(type.allowedPaths).toEqual(["/child/path"]);
+  });
+
+  test("allowedPaths: [] on child correctly overrides parent's non-empty list", async () => {
+    await writeType("parent", `---
+name: parent
+allowedPaths: [/parent/path, /another]
+---
+body`);
+    await writeType("child", `---
+inherits: parent
+allowedPaths: []
+---
+body`);
+
+    const type = await loadAgentType("child");
+    expect(type.allowedPaths).toEqual([]);
+  });
+
+  test("repos replaces when child defines it", async () => {
+    await writeType("parent", `---
+name: parent
+repos: [repo-a, repo-b]
+---
+body`);
+    await writeType("child", `---
+inherits: parent
+repos: [repo-c]
+---
+body`);
+
+    const type = await loadAgentType("child");
+    expect(type.repos).toEqual(["repo-c"]);
+  });
+
+  test("empty-string inherits treated as absent", async () => {
+    // `inherits: ""` and `inherits:` with no value both mean "no parent".
+    await writeType("standalone", `---
+name: standalone
+inherits: ""
+description: self
+---
+body`);
+
+    const type = await loadAgentType("standalone");
+    expect(type.description).toBe("self");
+  });
+
+  test("missing parent throws with a helpful message", async () => {
+    await writeType("child", `---
+inherits: nonexistent-parent
+---
+body`);
+
+    let thrown: unknown;
+    try {
+      await loadAgentType("child");
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(Error);
+    expect((thrown as Error).message).toContain("Type 'child' inherits from unknown type 'nonexistent-parent'");
+  });
+
+  test("self-cycle (A inherits A) throws Circular inheritance", async () => {
+    await writeType("self", `---
+inherits: self
+---
+body`);
+
+    let thrown: unknown;
+    try {
+      await loadAgentType("self");
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(Error);
+    expect((thrown as Error).message).toContain("Circular inheritance");
+    expect((thrown as Error).message).toContain("self");
+  });
+
+  test("two-node cycle (A -> B -> A) throws", async () => {
+    await writeType("a", `---
+inherits: b
+---
+`);
+    await writeType("b", `---
+inherits: a
+---
+`);
+
+    let thrown: unknown;
+    try {
+      await loadAgentType("a");
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(Error);
+    expect((thrown as Error).message).toContain("Circular inheritance");
+  });
+
+  test("three-node cycle (A -> B -> C -> A) throws", async () => {
+    await writeType("a", `---
+inherits: b
+---
+`);
+    await writeType("b", `---
+inherits: c
+---
+`);
+    await writeType("c", `---
+inherits: a
+---
+`);
+
+    let thrown: unknown;
+    try {
+      await loadAgentType("a");
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(Error);
+    expect((thrown as Error).message).toContain("Circular inheritance");
+  });
+
+  test("inherited body interpolates with child's context (not parent's)", async () => {
+    // Parent body uses {{agentId}} — when loaded through the child, the
+    // child's agent id should render. This verifies that inheritance doesn't
+    // break interpolateTemplate (the body is owned by the child type load).
+    await writeType("parent", `---
+name: parent
+---
+Hello from agent {{agentId}}.`);
+    await writeType("child", `---
+inherits: parent
+---
+`);
+
+    const type = await loadAgentType("child");
+    expect(type.markdownBody).toBe("Hello from agent {{agentId}}.");
+
+    const rendered = interpolateTemplate(type.markdownBody!, {
+      role: "manager",
+      agentId: "agent-child-abc",
+      agentManager: "",
+      parentBranch: "main",
+      branchName: "agent/agent-child-abc",
+      worktreePath: "/tmp/wt",
+      rootRepoPath: "/tmp/repo",
+    });
+    expect(rendered).toBe("Hello from agent agent-child-abc.");
+  });
+
+  test("listAgentTypes: chain-valid types appear; chain-broken types are excluded", async () => {
+    await writeType("good", `---
+name: good
+description: ok
+---
+`);
+    await writeType("broken", `---
+inherits: does-not-exist
+---
+`);
+
+    const types = await listAgentTypes();
+    const names = types.map((t) => t.name).sort();
+    expect(names).toContain("good");
+    // broken has a missing parent → loadAgentType throws → skipped
+    expect(names).not.toContain("broken");
+  });
+});
+
+describe("validateAllAgentTypes: inherits + repos", () => {
+  const originalHome = process.env.HOME;
+  let tempHome: string;
+  let typesDir: string;
+
+  beforeEach(async () => {
+    tempHome = await mkdtemp(join(tmpdir(), "itsybitsy-validate-"));
+    process.env.HOME = tempHome;
+    typesDir = join(tempHome, ".itsybitsy", "agent-types");
+    await mkdir(typesDir, { recursive: true });
+  });
+
+  afterEach(async () => {
+    process.env.HOME = originalHome;
+    await rm(tempHome, { recursive: true, force: true });
+  });
+
+  async function writeType(name: string, content: string): Promise<void> {
+    await Bun.write(join(typesDir, `${name}.md`), content);
+  }
+
+  test("rejects layer file (spawnable: false) with inherits:", async () => {
+    await writeType("manager", `---
+name: manager
+description: a manager
+---
+`);
+    await writeType("_all", `---
+name: _all
+spawnable: false
+inherits: manager
+---
+`);
+
+    const errors = await validateAllAgentTypes();
+    const layerErr = errors.find(
+      (e) => e.startsWith("_all.md") && e.includes("layer files") && e.includes("inherits"),
+    );
+    expect(layerErr).toBeDefined();
+  });
+
+  test("flags circular chains at startup", async () => {
+    await writeType("a", `---
+inherits: b
+---
+`);
+    await writeType("b", `---
+inherits: a
+---
+`);
+
+    const errors = await validateAllAgentTypes();
+    // At least one of a.md / b.md should surface a Circular error
+    const hasCycle = errors.some((e) => e.includes("Circular inheritance"));
+    expect(hasCycle).toBe(true);
+  });
+
+  test("flags missing parent at startup", async () => {
+    await writeType("orphan", `---
+inherits: gone
+---
+`);
+
+    const errors = await validateAllAgentTypes();
+    const missing = errors.find((e) => e.includes("unknown type 'gone'"));
+    expect(missing).toBeDefined();
+  });
+
+  test("rejects non-string inherits (array)", async () => {
+    await writeType("bad", `---
+inherits: [a, b]
+---
+`);
+
+    const errors = await validateAllAgentTypes();
+    const err = errors.find((e) => e.startsWith("bad.md") && e.includes("inherits must be a string"));
+    expect(err).toBeDefined();
+  });
+
+  test("rejects non-string inherits (boolean)", async () => {
+    await writeType("bad", `---
+inherits: true
+---
+`);
+
+    const errors = await validateAllAgentTypes();
+    const err = errors.find((e) => e.startsWith("bad.md") && e.includes("inherits must be a string"));
+    expect(err).toBeDefined();
+  });
+
+  test("rejects non-string inherits (object)", async () => {
+    await writeType("bad", `---
+inherits:
+  name: manager
+---
+`);
+
+    const errors = await validateAllAgentTypes();
+    const err = errors.find((e) => e.startsWith("bad.md") && e.includes("inherits must be a string"));
+    expect(err).toBeDefined();
+  });
+
+  test("rejects bare-string repos with a suggestion to use list form", async () => {
+    await writeType("bad", `---
+repos: muse-ios
+---
+`);
+
+    const errors = await validateAllAgentTypes();
+    const err = errors.find(
+      (e) =>
+        e.startsWith("bad.md") &&
+        e.includes("repos must be a YAML list of strings") &&
+        e.includes('"muse-ios"'),
+    );
+    expect(err).toBeDefined();
+  });
+
+  test("rejects empty repos list (unspawnable trap)", async () => {
+    await writeType("bad", `---
+repos: []
+---
+`);
+
+    const errors = await validateAllAgentTypes();
+    const err = errors.find(
+      (e) => e.startsWith("bad.md") && e.includes("empty list makes the type unspawnable"),
+    );
+    expect(err).toBeDefined();
+  });
+
+  test("numeric repos entries are coerced to strings by the parser (no false positives)", async () => {
+    // The simple YAML parser converts block-list and inline-array numeric
+    // tokens to strings (`- 1` → "1"). This test documents that behavior
+    // so the validator's "repos entries must be strings" check is reserved
+    // for shapes the parser can't flatten — e.g. direct object entries
+    // (covered by the next test).
+    await writeType("coerced", `---
+repos:
+  - 1
+  - 2
+---
+`);
+
+    const errors = await validateAllAgentTypes();
+    // No errors should be reported for this file — numeric tokens become
+    // string "1"/"2" after parsing, and the validator accepts strings.
+    const hasFileErrors = errors.some((e) => e.startsWith("coerced.md"));
+    expect(hasFileErrors).toBe(false);
+
+    const type = await loadAgentType("coerced");
+    expect(type.repos).toEqual(["1", "2"]);
+  });
+
+  test("rejects object repos (not a list)", async () => {
+    await writeType("bad", `---
+repos:
+  foo: bar
+---
+`);
+
+    const errors = await validateAllAgentTypes();
+    // Depending on how the parser treats nested object, either shape error or
+    // list-of-strings error should fire.
+    const err = errors.find(
+      (e) => e.startsWith("bad.md") && (e.includes("repos must be a list of strings") || e.includes("repos must be a YAML list of strings") || e.includes("repos entries must be strings")),
+    );
+    expect(err).toBeDefined();
+  });
+});
+
+describe("loadAgentType: repos field", () => {
+  const originalHome = process.env.HOME;
+  let tempHome: string;
+  let typesDir: string;
+
+  beforeEach(async () => {
+    tempHome = await mkdtemp(join(tmpdir(), "itsybitsy-repos-load-"));
+    process.env.HOME = tempHome;
+    typesDir = join(tempHome, ".itsybitsy", "agent-types");
+    await mkdir(typesDir, { recursive: true });
+  });
+
+  afterEach(async () => {
+    process.env.HOME = originalHome;
+    await rm(tempHome, { recursive: true, force: true });
+  });
+
+  async function writeType(name: string, content: string): Promise<void> {
+    await Bun.write(join(typesDir, `${name}.md`), content);
+  }
+
+  test("repos absent -> AgentType.repos === undefined", async () => {
+    await writeType("unrestricted", `---
+name: unrestricted
+description: no repo restriction
+---
+body`);
+
+    const type = await loadAgentType("unrestricted");
+    expect(type.repos).toBeUndefined();
+  });
+
+  test("repos list populates AgentType.repos", async () => {
+    await writeType("restricted", `---
+name: restricted
+repos: [muse-ios, muse-mac]
+---
+body`);
+
+    const type = await loadAgentType("restricted");
+    expect(type.repos).toEqual(["muse-ios", "muse-mac"]);
+  });
+
+  test("repos inherits from parent when child omits it", async () => {
+    await writeType("parent", `---
+name: parent
+repos: [parent-repo]
+---
+body`);
+    await writeType("child", `---
+inherits: parent
+---
+body`);
+
+    const type = await loadAgentType("child");
+    expect(type.repos).toEqual(["parent-repo"]);
+  });
+
+  test("repos on child overrides parent's list entirely", async () => {
+    await writeType("parent", `---
+name: parent
+repos: [parent-repo, shared-repo]
+---
+body`);
+    await writeType("child", `---
+inherits: parent
+repos: [child-repo]
+---
+body`);
+
+    const type = await loadAgentType("child");
+    expect(type.repos).toEqual(["child-repo"]);
+  });
 });

@@ -38,6 +38,12 @@ export interface AgentType {
   };
   icon?: string;
   allowedPaths?: string[];
+  /**
+   * If defined, this type can only be spawned in repos whose name or nickname
+   * matches an entry. Checked by `newAgent` before any worktree or tmux
+   * allocation. Absent → no restriction (type works in any repo).
+   */
+  repos?: string[];
   instructionStyle: "manager" | "worker" | "coordinator";
   markdownBody?: string;
 }
@@ -300,32 +306,202 @@ export async function agentTypeExists(name: string): Promise<boolean> {
 }
 
 /**
- * Load an agent type definition from ~/.itsybitsy/agent-types/<name>.md
- * Throws an error if the file does not exist.
+ * Read an agent type file from disk and return its raw parsed frontmatter + body.
+ * Does NOT resolve inheritance or apply any defaults — callers that want the
+ * resolved `AgentType` should use {@link loadAgentType} instead.
+ *
+ * Throws if the file does not exist. Use {@link agentTypeExists} to check first
+ * when the absence should not be an error.
  */
-export async function loadAgentType(name: string): Promise<AgentType> {
+async function readRawTypeFile(
+  name: string,
+): Promise<{ frontmatter: Record<string, unknown>; body: string }> {
   const home = process.env.HOME || homedir();
   const typeFile = join(home, ".itsybitsy", "agent-types", `${name}.md`);
 
   const file = Bun.file(typeFile);
   if (!(await file.exists())) {
-    throw new Error(`Unknown agent type '${name}'. Run 'ib init-types' to restore default type files, or create ${typeFile}`);
+    throw new Error(
+      `Unknown agent type '${name}'. Run 'ib init-types' to restore default type files, or create ${typeFile}`,
+    );
   }
 
   const content = await file.text();
-  const { frontmatter, body } = parseAgentTypeFile(content);
+  return parseAgentTypeFile(content);
+}
 
-  const permissions = typeof frontmatter.permissions === "object" && frontmatter.permissions !== null
-    ? frontmatter.permissions as Record<string, unknown>
-    : undefined;
+/**
+ * Treat an `inherits:` frontmatter value as "set" only when it's a non-empty
+ * string. Absent keys and the empty-string sentinel (`inherits:` with no
+ * value, or `inherits: ""`) both resolve to "no parent" — matching the
+ * `model: ""` convention used elsewhere.
+ */
+function inheritsParentName(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+/**
+ * Walk the inheritance chain starting at `name`, returning each step's raw
+ * parsed file in root-first order (so `[root, ..., leaf]`). Throws on cycles
+ * (including self-inheritance) and missing parents.
+ */
+async function resolveChain(
+  name: string,
+  visited: string[] = [],
+): Promise<Array<{ name: string; frontmatter: Record<string, unknown>; body: string }>> {
+  // Cycle check — includes self-inheritance (name === visited[-1])
+  if (visited.includes(name)) {
+    const chain = [...visited, name].join(" -> ");
+    throw new Error(`Circular inheritance detected: ${chain}`);
+  }
+
+  let raw: { frontmatter: Record<string, unknown>; body: string };
+  try {
+    raw = await readRawTypeFile(name);
+  } catch (err) {
+    if (visited.length === 0) {
+      // Leaf type doesn't exist — re-throw the clean "unknown agent type" message
+      throw err;
+    }
+    // Missing parent — produce a child-aware error
+    const child = visited[visited.length - 1]!;
+    const home = process.env.HOME || homedir();
+    const expectedPath = join(home, ".itsybitsy", "agent-types", `${name}.md`);
+    throw new Error(
+      `Type '${child}' inherits from unknown type '${name}' (file not found: ${expectedPath})`,
+    );
+  }
+
+  const parent = inheritsParentName(raw.frontmatter.inherits);
+  if (parent === null) {
+    return [{ name, frontmatter: raw.frontmatter, body: raw.body }];
+  }
+
+  const parentChain = await resolveChain(parent, [...visited, name]);
+  return [...parentChain, { name, frontmatter: raw.frontmatter, body: raw.body }];
+}
+
+/**
+ * Merge a root-first chain of raw `{frontmatter, body}` records into a single
+ * record. Scalar fields take the descendant's value when the key is **present**
+ * in the descendant's frontmatter. `permissions.allow` / `permissions.deny`
+ * are unioned (deduped via Set) across the entire chain. `allowedPaths` and
+ * `repos` are replaced (not merged) when the descendant declares them.
+ *
+ * The `name` and `spawnable` keys are intentionally not set here — the caller
+ * (`buildAgentTypeFromFrontmatter`) is responsible for the final `name` (from
+ * the filename) and `spawnable` (read from the leaf file only).
+ */
+function mergeRawFrontmatters(
+  chain: Array<{ name: string; frontmatter: Record<string, unknown>; body: string }>,
+): { frontmatter: Record<string, unknown>; body: string } {
+  const merged: Record<string, unknown> = {};
+
+  // Scalar keys that follow the "present in child → replace" rule.
+  const SCALAR_KEYS = new Set([
+    "description",
+    "canSpawnChildren",
+    "icon",
+    "model",
+    "instructionStyle",
+    "allowedPaths",
+    "repos",
+  ]);
+
+  // Keys that treat an explicit empty string as "inherit / no override" —
+  // matching PLAN-INHERITS.md's rules table (icon must be present *and
+  // non-empty*; model's empty string collapses to the inherit convention).
+  // Without this, a child that declares `icon:` or `model:` with no value
+  // silently wipes the parent's value to undefined. description and
+  // instructionStyle keep the strict "present → replace" rule.
+  const EMPTY_STRING_INHERITS = new Set(["icon", "model"]);
+
+  // Accumulated permission lists (unioned across the chain, deduped below).
+  const allAllow: string[] = [];
+  const allDeny: string[] = [];
+
+  // Accumulated body parts — concatenated root-first with blank-line
+  // separators in PLAN-BODY-APPEND.md. Each entry's body is already trimmed
+  // by parseAgentTypeFile, so no re-trim here.
+  const bodyParts: string[] = [];
+
+  for (const entry of chain) {
+    const fm = entry.frontmatter;
+
+    for (const key of Object.keys(fm)) {
+      if (SCALAR_KEYS.has(key)) {
+        // Skip empty-string values for icon/model — those mean "inherit",
+        // matching the PLAN-INHERITS.md rule and the existing `""` → undefined
+        // coercion in buildAgentTypeFromFrontmatter.
+        if (EMPTY_STRING_INHERITS.has(key) && fm[key] === "") continue;
+        merged[key] = fm[key];
+      }
+    }
+
+    // Permissions — union across the chain.
+    if (typeof fm.permissions === "object" && fm.permissions !== null) {
+      const perms = fm.permissions as Record<string, unknown>;
+      if (Array.isArray(perms.allow)) {
+        for (const v of perms.allow) if (typeof v === "string") allAllow.push(v);
+      }
+      if (Array.isArray(perms.deny)) {
+        for (const v of perms.deny) if (typeof v === "string") allDeny.push(v);
+      }
+    }
+
+    // Body — root-first concatenation. Skip empties so missing-body
+    // ancestors don't produce stray blank lines.
+    if (entry.body.length > 0) {
+      bodyParts.push(entry.body);
+    }
+  }
+
+  const body = bodyParts.join("\n\n");
+
+  // Emit merged permissions only when something accumulated.
+  if (allAllow.length > 0 || allDeny.length > 0) {
+    const permsOut: Record<string, string[]> = {};
+    if (allAllow.length > 0) permsOut.allow = Array.from(new Set(allAllow));
+    if (allDeny.length > 0) permsOut.deny = Array.from(new Set(allDeny));
+    merged.permissions = permsOut;
+  }
+
+  return { frontmatter: merged, body };
+}
+
+/**
+ * Build the final `AgentType` record from an already-merged frontmatter + body.
+ * Applies defaults (e.g. `canSpawnChildren: false` when absent) — which is why
+ * chain resolution must happen before this step, not after, so that a child's
+ * explicit `canSpawnChildren: false` correctly overrides a parent's `true`.
+ *
+ * The `name` field is always set from the caller-supplied `name` argument
+ * (the filename), never read from the merged frontmatter — the plan's
+ * "name is never inherited" rule is enforced here.
+ *
+ * The `spawnable` flag is supplied separately so it can be read from the leaf
+ * file only. See §Why `spawnable` is not inherited in PLAN-INHERITS.md.
+ */
+function buildAgentTypeFromFrontmatter(
+  frontmatter: Record<string, unknown>,
+  body: string,
+  name: string,
+  leafSpawnable: boolean,
+): AgentType {
   const getString = (val: unknown, fallback: string): string =>
     typeof val === "string" ? val : fallback;
 
-  // Extract icon: first non-whitespace character of the icon field
+  const permissions = typeof frontmatter.permissions === "object" && frontmatter.permissions !== null
+    ? (frontmatter.permissions as Record<string, unknown>)
+    : undefined;
+
+  // Extract icon: first non-whitespace character of the icon field.
   const rawIcon = getString(frontmatter.icon, "");
   const iconChar = rawIcon.match(/\S/)?.[0] || undefined;
 
-  // Parse allowedPaths: distinguish between absent (undefined) and present-but-empty ([])
+  // Parse allowedPaths: distinguish between absent (undefined) and present-but-empty ([]).
   let allowedPaths: string[] | undefined = undefined;
   if ("allowedPaths" in frontmatter) {
     allowedPaths = Array.isArray(frontmatter.allowedPaths)
@@ -333,25 +509,60 @@ export async function loadAgentType(name: string): Promise<AgentType> {
       : [];
   }
 
-  // Parse spawnable: absent → true (spawnable by default).
-  // Explicit `false` marks layer-only files like _all.md / _non_coordinator.md.
-  const spawnable = frontmatter.spawnable === false ? false : true;
+  // Parse repos: absent → undefined; present non-array → undefined (the
+  // validator is the actual gate for bad shapes — defensive here). Entries
+  // are trimmed and empties dropped.
+  let repos: string[] | undefined = undefined;
+  if ("repos" in frontmatter) {
+    if (Array.isArray(frontmatter.repos)) {
+      const entries: string[] = [];
+      for (const v of frontmatter.repos) {
+        if (typeof v === "string") {
+          const t = v.trim();
+          if (t.length > 0) entries.push(t);
+        }
+      }
+      repos = entries;
+    }
+    // Non-array shapes fall through → repos stays undefined (validator reports).
+  }
 
   return {
-    name: getString(frontmatter.name, name),
+    name,
     description: getString(frontmatter.description, ""),
     canSpawnChildren: frontmatter.canSpawnChildren === true,
-    spawnable,
+    spawnable: leafSpawnable,
     icon: iconChar,
     model: getString(frontmatter.model, "") || undefined,
-    permissions: permissions ? {
-      allow: Array.isArray(permissions.allow) ? permissions.allow as string[] : undefined,
-      deny: Array.isArray(permissions.deny) ? permissions.deny as string[] : undefined,
-    } : undefined,
+    permissions: permissions
+      ? {
+          allow: Array.isArray(permissions.allow) ? (permissions.allow as string[]) : undefined,
+          deny: Array.isArray(permissions.deny) ? (permissions.deny as string[]) : undefined,
+        }
+      : undefined,
     allowedPaths,
+    repos,
     instructionStyle: validateInstructionStyle(getString(frontmatter.instructionStyle, "")),
     markdownBody: body || undefined,
   };
+}
+
+/**
+ * Load an agent type definition from ~/.itsybitsy/agent-types/<name>.md,
+ * resolving `inherits:` chains via `resolveChain` and merging permissions
+ * across the whole chain (see PLAN-INHERITS.md).
+ *
+ * Throws if the file does not exist, if the chain contains a cycle, or if
+ * any parent in the chain is missing.
+ */
+export async function loadAgentType(name: string): Promise<AgentType> {
+  const chain = await resolveChain(name);
+  const leaf = chain[chain.length - 1]!;
+  // `spawnable` is read from the leaf file only — see PLAN-INHERITS.md
+  // §"Why `spawnable` is not inherited".
+  const leafSpawnable = leaf.frontmatter.spawnable === false ? false : true;
+  const { frontmatter, body } = mergeRawFrontmatters(chain);
+  return buildAgentTypeFromFrontmatter(frontmatter, body, name, leafSpawnable);
 }
 
 /**
@@ -470,10 +681,17 @@ export async function validateAllAgentTypes(): Promise<string[]> {
   const home = process.env.HOME || homedir();
   const typesDir = join(home, ".itsybitsy", "agent-types");
 
+  // Collect the basenames we see — used afterwards to try loading each type
+  // so cycles / missing parents are caught at `ib watch` startup rather than
+  // at spawn time.
+  const seenBasenames: string[] = [];
+
   try {
     const glob = new Glob("*.md");
     for await (const file of glob.scan(typesDir)) {
       const filePath = join(typesDir, file);
+      const basename = file.replace(/\.md$/, "");
+      seenBasenames.push(basename);
       try {
         const content = await Bun.file(filePath).text();
         const { frontmatter } = parseAgentTypeFile(content);
@@ -529,12 +747,61 @@ export async function validateAllAgentTypes(): Promise<string[]> {
             }
           }
         }
+
+        // Validate `inherits:` shape
+        if (frontmatter.inherits !== undefined) {
+          if (typeof frontmatter.inherits !== "string") {
+            errors.push(`${file}: inherits must be a string (the name of the parent type)`);
+          } else if (frontmatter.spawnable === false && frontmatter.inherits.trim().length > 0) {
+            // Layer files (spawnable: false) may not use `inherits:` — a layer
+            // inheriting an unrelated type's body would silently prepend that
+            // body to every spawned agent's prompt.
+            errors.push(
+              `${file}: layer files (spawnable: false) cannot use 'inherits:' — layer files inject their body into every agent and inheritance would be surprising.`,
+            );
+          }
+        }
+
+        // Validate `repos:` shape (see PLAN-INHERITS.md §Part 2).
+        if (frontmatter.repos !== undefined) {
+          if (typeof frontmatter.repos === "string") {
+            errors.push(
+              `${file}: repos must be a YAML list of strings; got string "${frontmatter.repos}". Use [${frontmatter.repos}] or a multi-line list.`,
+            );
+          } else if (!Array.isArray(frontmatter.repos)) {
+            errors.push(`${file}: repos must be a list of strings.`);
+          } else if (frontmatter.repos.length === 0) {
+            errors.push(
+              `${file}: repos must be absent (no restriction) or a non-empty list; an empty list makes the type unspawnable.`,
+            );
+          } else {
+            for (const r of frontmatter.repos) {
+              if (typeof r !== "string") {
+                errors.push(`${file}: repos entries must be strings; got ${typeof r}.`);
+                break;
+              }
+            }
+          }
+        }
       } catch (err) {
         errors.push(`${file}: failed to parse — ${err instanceof Error ? err.message : String(err)}`);
       }
     }
   } catch {
     // Types directory doesn't exist — that's fine, no files to validate
+  }
+
+  // Second pass: try to resolve every type's inheritance chain so cycles and
+  // missing parents surface at startup rather than at spawn time. Layer files
+  // (spawnable: false) are still attempted — a clean chain resolution for a
+  // layer is harmless, and failure modes (e.g. layer with `inherits:`) are
+  // already reported by the per-file pass above.
+  for (const basename of seenBasenames) {
+    try {
+      await loadAgentType(basename);
+    } catch (err) {
+      errors.push(`${basename}.md: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   return errors;

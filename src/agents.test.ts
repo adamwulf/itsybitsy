@@ -17,9 +17,12 @@ import {
   isCompacting,
   isRateLimited,
   hasBackgroundTasks,
+  anyChildActive,
+  detectAgentStates,
   CREATING_GRACE_PERIOD_MS,
   isRecentlyCreatedDirCtx,
 } from "./agents";
+import { spawnCtx as tmuxPollerSpawnCtx } from "./tmux-poller";
 import type { Agent, AgentMeta, FlatEntry } from "./agents";
 import { makeAgent } from "./test-utils";
 
@@ -944,5 +947,165 @@ describe("hasBackgroundTasks", () => {
   test("strips ANSI before checking", () => {
     const output = "line1\n\x1b[33m⏵⏵ tasks · 2 running\x1b[0m\nline3";
     expect(hasBackgroundTasks(output)).toBe(true);
+  });
+});
+
+// ── anyChildActive ─────────────────────────────────────────────────────────
+
+describe("anyChildActive", () => {
+  const oldEpoch = Math.floor(Date.now() / 1000) - 3600;
+
+  test("returns true for child with meta.state === running", () => {
+    const child = makeAgent({
+      id: "c1",
+      meta: { manager: "p1", state: "running", created_epoch: oldEpoch } as Partial<AgentMeta> as AgentMeta,
+    });
+    expect(anyChildActive("p1", [child])).toBe(true);
+  });
+
+  test("returns true for recently created child (creating)", () => {
+    const recent = Math.floor(Date.now() / 1000); // within grace period
+    const child = makeAgent({
+      id: "c1",
+      meta: { manager: "p1", state: "waiting", created_epoch: recent } as Partial<AgentMeta> as AgentMeta,
+    });
+    expect(anyChildActive("p1", [child])).toBe(true);
+  });
+
+  test("returns false for child with meta.state === waiting (not recently created)", () => {
+    const child = makeAgent({
+      id: "c1",
+      meta: { manager: "p1", state: "waiting", created_epoch: oldEpoch } as Partial<AgentMeta> as AgentMeta,
+    });
+    expect(anyChildActive("p1", [child])).toBe(false);
+  });
+
+  test("returns false for child with meta.state === complete", () => {
+    const child = makeAgent({
+      id: "c1",
+      meta: { manager: "p1", state: "complete", created_epoch: oldEpoch } as Partial<AgentMeta> as AgentMeta,
+    });
+    expect(anyChildActive("p1", [child])).toBe(false);
+  });
+
+  test("skips archived children even when state === running", () => {
+    const child = makeAgent({
+      id: "c1",
+      archived: true,
+      meta: { manager: "p1", state: "running", created_epoch: oldEpoch } as Partial<AgentMeta> as AgentMeta,
+    });
+    expect(anyChildActive("p1", [child])).toBe(false);
+  });
+
+  test("skips children whose manager field does not match", () => {
+    const child = makeAgent({
+      id: "c1",
+      meta: { manager: "other-parent", state: "running", created_epoch: oldEpoch } as Partial<AgentMeta> as AgentMeta,
+    });
+    expect(anyChildActive("p1", [child])).toBe(false);
+  });
+
+  test("returns true when at least one of many children is active", () => {
+    const waitingChild = makeAgent({
+      id: "c1",
+      meta: { manager: "p1", state: "waiting", created_epoch: oldEpoch } as Partial<AgentMeta> as AgentMeta,
+    });
+    const runningChild = makeAgent({
+      id: "c2",
+      meta: { manager: "p1", state: "running", created_epoch: oldEpoch } as Partial<AgentMeta> as AgentMeta,
+    });
+    expect(anyChildActive("p1", [waitingChild, runningChild])).toBe(true);
+  });
+
+  test("returns false when allAgents is empty", () => {
+    expect(anyChildActive("p1", [])).toBe(false);
+  });
+});
+
+// ── detectAgentStates — background-shell override ──────────────────────────
+
+describe("detectAgentStates — waiting + background shell override", () => {
+  /** Install a tmux-poller spawn runner that returns the given pane text for all capture-pane calls. */
+  function installTmuxRunner(output: string | null): void {
+    tmuxPollerSpawnCtx.set(((args: any[]) => {
+      const isCapture = args[0] === "tmux" && args[1] === "capture-pane";
+      if (isCapture && output === null) {
+        return {
+          stdout: new ReadableStream({
+            start(c) { c.close(); },
+          }),
+          stderr: new ReadableStream({ start(c) { c.close(); } }),
+          exited: Promise.resolve(1), // non-zero → captureTmuxOutput returns null
+        };
+      }
+      return {
+        stdout: new ReadableStream({
+          start(c) {
+            c.enqueue(new TextEncoder().encode(isCapture ? (output ?? "") : ""));
+            c.close();
+          },
+        }),
+        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        exited: Promise.resolve(0),
+      };
+    }) as any);
+  }
+
+  afterEach(() => {
+    tmuxPollerSpawnCtx.reset();
+  });
+
+  test("waiting + bg shell → running", async () => {
+    installTmuxRunner("⏵⏵ accept edits on · 1 shell");
+    const a = makeAgent({
+      id: "a1",
+      meta: { state: "waiting", tmux_session: "ib-a1" } as Partial<AgentMeta> as AgentMeta,
+    });
+    await detectAgentStates([a]);
+    expect(a.state).toBe("running");
+  });
+
+  test("waiting + no bg shell → waiting", async () => {
+    installTmuxRunner("⏵⏵ accept edits on (shift+tab to cycle)");
+    const a = makeAgent({
+      id: "a1",
+      meta: { state: "waiting", tmux_session: "ib-a1" } as Partial<AgentMeta> as AgentMeta,
+    });
+    await detectAgentStates([a]);
+    expect(a.state).toBe("waiting");
+  });
+
+  test("complete + bg shell → complete (not overridden)", async () => {
+    installTmuxRunner("⏵⏵ accept edits on · 1 shell");
+    const a = makeAgent({
+      id: "a1",
+      meta: { state: "complete", tmux_session: "ib-a1" } as Partial<AgentMeta> as AgentMeta,
+    });
+    await detectAgentStates([a]);
+    expect(a.state).toBe("complete");
+  });
+
+  test("running + bg shell → running (unchanged)", async () => {
+    installTmuxRunner("⏵⏵ accept edits on · 1 shell");
+    const a = makeAgent({
+      id: "a1",
+      meta: { state: "running", tmux_session: "ib-a1" } as Partial<AgentMeta> as AgentMeta,
+    });
+    await detectAgentStates([a]);
+    expect(a.state).toBe("running");
+  });
+
+  test("waiting + no tmux session → stopped (existing precedence wins)", async () => {
+    installTmuxRunner(null);
+    const a = makeAgent({
+      id: "a1",
+      meta: {
+        state: "waiting",
+        tmux_session: "ib-a1",
+        created_epoch: Math.floor(Date.now() / 1000) - 3600,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+    await detectAgentStates([a]);
+    expect(a.state).toBe("stopped");
   });
 });

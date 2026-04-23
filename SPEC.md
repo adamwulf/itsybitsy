@@ -95,6 +95,7 @@ State detection is deterministic — the stop hook writes authoritative state to
 3. **Tmux session exists — check transient overrides** (tmux output parsing, minimal):
    - If "Compacting conversation" appears in last 5 lines of tmux output → `compacting`
    - If `rate_limit_error`, "usage limit reached", "hit your limit", or "/upgrade to increase your usage limit" appears in last 15 lines → `rate_limited`
+   - If stored `meta.state === "waiting"` AND tmux shows `⏵⏵.*·\s\d+\s` (background shells, e.g. `⏵⏵ accept edits on · 1 shell`) in last 15 lines → `running`. Scoped strictly to `waiting` — we do NOT override `complete` (intentional sign-off) or `running` (already correct). See §8.5.1.
 
 4. **Read `state` from meta.json** → return the stored value (`running`, `waiting`, or `complete`). If `state` field is absent (legacy agent or freshly created agent before first stop hook fires): if `created_epoch` is less than 6 seconds ago → `creating`; otherwise → `running`.
 
@@ -689,7 +690,9 @@ The stop hook does **not** parse tmux output for state detection. It relies sole
 | `complete` | Has manager | **Notify manager** — sends "[hook]: Your subtask <id> just completed" to manager's tmux [^notify-mechanism] |
 | `complete` | No manager, unfinished children | **Remind children** — tells agent to merge/kill all sub-agents |
 | `complete` | No manager, no children | No action |
-| `waiting` | Has manager | **Notify manager** — sends "[hook]: Your subtask <id> is now waiting for input" |
+| `waiting` | Has manager, background tasks active (`⏵⏵.*·\s\d+\s` in last 15 lines of tmux) | No action (agent is working via background tasks — see §8.5.1) |
+| `waiting` | Has manager, no background tasks, at least one direct child with `meta.state === "running"` OR `isRecentlyCreated(created_epoch)` | No action (child still working — see §8.5.1) |
+| `waiting` | Has manager, no background tasks, no active children | **Notify manager** — sends "[hook]: Your subtask <id> is now waiting for input" |
 | `waiting` | No manager | No action |
 
 **Debounce mechanism**: A `last-nudge` file stores the unix timestamp of the last nudge. If less than 5 seconds have passed, the nudge is suppressed. When debounced, a delayed recheck is scheduled (5s later) via a background `bash -c "sleep 5 && rm -f <recheck-file> && ib hooks agent-status <id>"` process, using a `nudge-recheck` marker file to prevent duplicate rechecks. The marker file is removed just before the recheck call so subsequent debounces can schedule new rechecks.
@@ -1006,13 +1009,14 @@ Per-agent watchdogs do not use lock files. There is no global watchdog.
 1. No tmux session → `stopped` (or `creating` if within grace period)
 2. Tmux "Compacting conversation" in last 5 lines → `compacting`
 3. Tmux rate limit patterns in last 15 lines → `rate_limited`
-4. Read `state` from meta.json → `running`, `waiting`, or `complete`
+4. Stored `meta.state === "waiting"` AND tmux shows background shells (`⏵⏵.*·\s\d+\s` in last 15 lines) → `running` (see §8.5.1). Scoped strictly to `waiting` — not applied to `complete` or `running`.
+5. Read `state` from meta.json → `running`, `waiting`, or `complete`
 
 **Monitoring behaviors by state:**
 
 | State | Action |
 |-------|--------|
-| `waiting` | Increment waiting counter. When counter reaches the notification threshold, notify manager: "[watchdog]: Your subtask <id> recently started waiting for input". Uses exponential backoff: initial threshold 30s (6 polls), doubles after each notification, capped at 64 minutes. |
+| `waiting` | Increment waiting counter unless (a) tmux shows background shells OR (b) the agent has at least one direct child with `meta.state === "running"` OR `isRecentlyCreated(created_epoch)` — in which case suppress BOTH `notifyManager` AND `notifySpawner` and pause the counter (neither increment nor reset; `notifyInterval` is preserved). Otherwise, when counter reaches the notification threshold, notify manager: "[watchdog]: Your subtask <id> recently started waiting for input". Uses exponential backoff: initial threshold 30s (6 polls), doubles after each notification, capped at 64 minutes. See §8.5.1. |
 | `complete` | Reset waiting counter and notification interval. Notify manager once: "[watchdog]: Your subtask <id> recently completed". Sets a flag to prevent duplicate notifications. Flag resets if agent returns to `running`. |
 | `rate_limited` | Attempt to bypass the rate limit dialog (3-attempt retry loop with 2s sleeps between attempts; checks tmux output for rate limit patterns after each Enter to verify dismissal). Then poll Claude's usage API; when session usage drops below 5%, send nudge: "[watchdog]: Usage has refreshed (<pct>%). Please continue your task." Reset waiting counter and notification interval. |
 | `running` | Reset waiting counter, notification interval, and `rateLimitBypassed` flag. Clear completion flag if previously set. |
@@ -1029,6 +1033,14 @@ Per-agent watchdogs do not use lock files. There is no global watchdog.
 **Quiet mode** (`--quiet`): Allows monitoring agents without managers. All notifications are logged but not sent.
 
 > [^callout] TS has no `--quiet` mode; agents without managers simply receive no notifications (the `notifyManager` helper no-ops when `meta.manager` is unset). The per-agent TS watchdog adds a tmux session grace period (10s) as an additional exit condition not present in bash.
+
+### 8.5.1 Work-in-flight suppression
+
+We suppress upward notification of a waiting agent when that agent has work in flight. "Work in flight" means one of:
+1. **Direct background shell** — the agent's own tmux footer shows `⏵⏵.*·\s\d+\s` (e.g., `⏵⏵ accept edits on · 1 shell`), OR
+2. **Direct active child** — the agent has at least one immediate child (`meta.manager === parentId`) whose `meta.state === "running"` OR which is within the `isRecentlyCreated` grace period (i.e., still `creating`).
+
+"Transitive" suppression is bounded to this one-level walk. We do NOT recurse into grandchildren to determine a parent's suppression status; the `running`/`creating` check on direct children is sufficient because each layer's watchdog independently applies this guard. If a grandchild is running, the child-manager will have its own direct active child and suppress its own notification; that upward silence propagates naturally without the parent ever needing to look past its immediate children. Critically, `waiting` and `complete` children are **not** "work in flight" — the top of a parked chain must still be told, and `complete` children need user merge/kill.
 
 ### 8.6 Root Repo Resolution
 

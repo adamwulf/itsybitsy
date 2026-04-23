@@ -192,6 +192,30 @@ export async function processStopHook(
     const meta = await readMeta(agentDir);
 
     if (meta?.manager && await isManagerActive(agentsDir, meta.manager)) {
+      // Suppress upward notification if the agent still has work in flight
+      // (background shell or an active direct child). See SPEC.md §8.5.1.
+      // `waiting` / `complete` children do NOT count as active — see
+      // hasActiveChildren for rationale.
+      let waitingBgOutput: string | null = null;
+      if (opts?.captureOutput) {
+        waitingBgOutput = await opts.captureOutput();
+      } else if (meta.tmux_session) {
+        if (!isValidTmuxSession(meta.tmux_session)) {
+          console.error(`[agent-status] Invalid tmux session name: ${meta.tmux_session}`);
+        } else {
+          try {
+            waitingBgOutput = await captureTmuxOutput(meta.tmux_session, 15);
+          } catch {
+            /* ignore — fall through to active-children check */
+          }
+        }
+      }
+      if (waitingBgOutput && hasBackgroundTasks(waitingBgOutput)) {
+        return { state, action: "none" };
+      }
+      if (await hasActiveChildren(agentId, agentsDir)) {
+        return { state, action: "none" };
+      }
       return {
         state,
         action: "notify_manager",
@@ -273,6 +297,65 @@ async function isManagerActive(agentsDir: string, managerId: string): Promise<bo
 
 /** States stored in meta.json that count as "unfinished" */
 const UNFINISHED_META_STATES = new Set(["running", "waiting", "complete"]);
+
+/**
+ * Options for hasActiveChildren. `getChildState` is retained for signature
+ * parity with findUnfinishedChildren but is not used by the default
+ * implementation — `hasActiveChildren` reads stored `meta.state` directly
+ * rather than invoking per-child tmux captures (this predicate is called on
+ * every waiting stop-hook and every 5s watchdog tick; latency matters).
+ */
+export interface HasActiveChildrenOpts {
+  getChildState?: (tmuxSession: string) => Promise<string>;
+}
+
+/**
+ * Predicate: does the parent `agentId` have any direct child that is still
+ * actively doing work?
+ *
+ * A child is active iff all of:
+ *   - `meta.manager === agentId`
+ *   - `!meta.archived`
+ *   - `meta.state === "running"` OR `isRecentlyCreated(meta.created_epoch)`
+ *
+ * Children in `waiting`, `complete`, or `stopped` do NOT count as active.
+ * `waiting` is excluded to prevent transitive-waiting deadlocks where every
+ * node in a chain is parked; `complete` is excluded because the user still
+ * needs to merge/kill those children. `compacting` / `rate_limited` are
+ * transient tmux overrides — the stored `meta.state` is still `"running"`
+ * for those, so they are counted as active without a per-child tmux call.
+ *
+ * Fail-open: returns `false` on I/O errors so notification is not suppressed
+ * when we lack information.
+ */
+export async function hasActiveChildren(
+  agentId: string,
+  agentsDir: string,
+  _opts?: HasActiveChildrenOpts,
+): Promise<boolean> {
+  try {
+    const entries = await readdir(agentsDir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const childDir = join(agentsDir, entry.name);
+      const metaPath = join(childDir, "meta.json");
+      try {
+        const raw = await readFile(metaPath, "utf-8");
+        const meta = JSON.parse(raw);
+        if (meta.manager !== agentId) continue;
+        if (meta.archived) continue;
+        if (meta.state === "running") return true;
+        if (isRecentlyCreated(meta.created_epoch)) return true;
+      } catch {
+        /* skip malformed meta */
+      }
+    }
+  } catch {
+    /* fail-open: agentsDir may not exist or be unreadable */
+    return false;
+  }
+  return false;
+}
 
 /**
  * Find children of a parent agent that are still unfinished.

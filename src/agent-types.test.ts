@@ -678,7 +678,10 @@ inherits: parent
     expect(type.markdownBody).toBe("Parent body content.");
   });
 
-  test("markdownBody overrides when child body is non-empty", async () => {
+  test("markdownBody appends child body after parent body when both non-empty", async () => {
+    // PLAN-BODY-APPEND.md: bodies concatenate root-first with blank-line
+    // separators so a child extending a manager/base type gets the parent's
+    // boilerplate first, then the child's own additions.
     await writeType("parent", `---
 name: parent
 ---
@@ -689,7 +692,45 @@ inherits: parent
 Child body.`);
 
     const type = await loadAgentType("child");
-    expect(type.markdownBody).toBe("Child body.");
+    expect(type.markdownBody).toBe("Parent body.\n\nChild body.");
+  });
+
+  test("markdownBody concatenates three-level chain root-first", async () => {
+    await writeType("a", `---
+name: a
+---
+A content`);
+    await writeType("b", `---
+inherits: a
+---
+B content`);
+    await writeType("c", `---
+inherits: b
+---
+C content`);
+
+    const type = await loadAgentType("c");
+    expect(type.markdownBody).toBe("A content\n\nB content\n\nC content");
+  });
+
+  test("markdownBody skips empty ancestors without adding blank separators", async () => {
+    // Middle ancestor has no body — the join should not leave an extra
+    // blank-line artifact between the root and the leaf.
+    await writeType("a", `---
+name: a
+---
+A content`);
+    await writeType("b", `---
+inherits: a
+---
+`);
+    await writeType("c", `---
+inherits: b
+---
+C content`);
+
+    const type = await loadAgentType("c");
+    expect(type.markdownBody).toBe("A content\n\nC content");
   });
 
   test("allowedPaths replaces (not merges) when child defines it", async () => {

@@ -398,7 +398,6 @@ function mergeRawFrontmatters(
   chain: Array<{ name: string; frontmatter: Record<string, unknown>; body: string }>,
 ): { frontmatter: Record<string, unknown>; body: string } {
   const merged: Record<string, unknown> = {};
-  let body = "";
 
   // Scalar keys that follow the "present in child → replace" rule.
   const SCALAR_KEYS = new Set([
@@ -422,6 +421,11 @@ function mergeRawFrontmatters(
   // Accumulated permission lists (unioned across the chain, deduped below).
   const allAllow: string[] = [];
   const allDeny: string[] = [];
+
+  // Accumulated body parts — concatenated root-first with blank-line
+  // separators in PLAN-BODY-APPEND.md. Each entry's body is already trimmed
+  // by parseAgentTypeFile, so no re-trim here.
+  const bodyParts: string[] = [];
 
   for (const entry of chain) {
     const fm = entry.frontmatter;
@@ -447,11 +451,14 @@ function mergeRawFrontmatters(
       }
     }
 
-    // Body — descendant body replaces when non-empty after trim.
-    if (entry.body.trim().length > 0) {
-      body = entry.body;
+    // Body — root-first concatenation. Skip empties so missing-body
+    // ancestors don't produce stray blank lines.
+    if (entry.body.length > 0) {
+      bodyParts.push(entry.body);
     }
   }
+
+  const body = bodyParts.join("\n\n");
 
   // Emit merged permissions only when something accumulated.
   if (allAllow.length > 0 || allDeny.length > 0) {

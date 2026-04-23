@@ -56,10 +56,10 @@ resolvedBody = chain
 [_all] \n\n [_non_coordinator?] \n\n [typeBody]
 ```
 
-Under the new rule, `typeBody` is already the chain-concatenation. Final order becomes:
+Under the new rule, `typeBody` is already the chain-concatenation. Final order becomes (with `ancestor1` = root, `ancestorN` = immediate parent):
 
 ```
-[_all] \n\n [_non_coordinator?] \n\n [ancestorN] \n\n ... \n\n [ancestor1] \n\n [child]
+[_all] \n\n [_non_coordinator?] \n\n [ancestor1 (root)] \n\n ... \n\n [ancestorN] \n\n [child]
 ```
 
 This is the right shape: layers outside the type chain come first, then the chain runs root-first. No change needed to `session-start.ts`.
@@ -90,15 +90,19 @@ if (entry.body.trim().length > 0) {
 const bodyParts: string[] = [];
 for (const entry of chain) {
   if (entry.body.trim().length > 0) {
-    bodyParts.push(entry.body.trim());
+    bodyParts.push(entry.body);
   }
 }
 body = bodyParts.join("\n\n");
 ```
 
-The `.trim()` on each part prevents trailing whitespace/blank-line accumulation from making the joined output ragged.
+No inner `.trim()`: `parseAgentTypeFile` already trims the body at src/agent-types.ts:187, so `entry.body` arrives with no leading or trailing whitespace. Re-trimming would be redundant and misleading (would imply it guards against some unnormalized input path).
 
 Everything else in `mergeRawFrontmatters` stays identical — scalars still override, permissions still Set-union.
+
+### `{{#if}}` block boundaries
+
+A handlebars-style `{{#if cond}}...{{/if}}` block is resolved by `interpolateTemplate` in session-start.ts:147 on the **concatenated** body. If a user splits an `{{#if}}` block across an ancestor boundary (opening tag in ancestor, closing tag in child), the interpolator still sees a balanced pair and resolves it. But it's confusing authoring and silently couples two files. This is an **authoring footgun**, not a spec hole — document it in `docs/agent-types/README.md` so users know each file should keep its `{{#if}}` blocks self-contained.
 
 ### Tests — updates in `src/agent-types.test.ts`
 

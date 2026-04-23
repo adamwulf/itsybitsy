@@ -110,6 +110,15 @@ export function parseAgentTypeFile(content: string): {
 
       // Nested object handling
       if (currentObj) {
+        // A YAML list item under a nested key. Must be checked BEFORE the
+        // colon branch, since list values can legitimately contain `:`
+        // (e.g. `- "Bash(xcodebuild:*)"`).
+        if (childLine.startsWith("- ")) {
+          if (currentListKey && Array.isArray(currentObj[currentListKey])) {
+            (currentObj[currentListKey] as unknown[]).push(childLine.substring(2).trim().replace(/^["']|["']$/g, ""));
+          }
+          continue;
+        }
         const colonIdx = childLine.indexOf(":");
         if (colonIdx !== -1) {
           const key = childLine.substring(0, colonIdx).trim();
@@ -125,14 +134,6 @@ export function parseAgentTypeFile(content: string): {
           } else {
             currentObj[key] = parseSimpleValue(valueStr);
             currentListKey = null;
-          }
-          continue;
-        }
-        // Could be a YAML list item (- value) under a nested key
-        if (childLine.startsWith("- ")) {
-          // Append to the tracked list key in currentObj
-          if (currentListKey && Array.isArray(currentObj[currentListKey])) {
-            (currentObj[currentListKey] as unknown[]).push(childLine.substring(2).trim().replace(/^["']|["']$/g, ""));
           }
           continue;
         }

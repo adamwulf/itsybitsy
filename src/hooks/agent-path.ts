@@ -7,11 +7,14 @@
  */
 
 import { join, resolve, dirname, basename } from "path";
+import { homedir } from "os";
 import { realpath, stat } from "fs/promises";
 import { realpathSync } from "fs";
 import { logAgent } from "../agent-lifecycle";
 import { isValidAgentId } from "../validation";
 import { checkGitDirectoryFlags } from "./shared";
+// Single source of truth for the encoding — see src/auto-compact.ts
+import { encodeClaudeProjectPath } from "../auto-compact";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -229,6 +232,23 @@ function checkBashCommandPaths(
 }
 
 /**
+ * Compute the fully-resolved absolute path to an agent's Claude project
+ * directory (`~/.claude/projects/<encoded-worktree>`). The directory may not
+ * exist yet — in that case we fall back to the resolve() result so the match
+ * against realpath'd inbound file paths still works once it's created.
+ */
+export function claudeProjectDirFor(worktreePath: string): string {
+  const encoded = encodeClaudeProjectPath(worktreePath);
+  let projectDir = resolve(join(homedir(), ".claude", "projects", encoded));
+  try {
+    projectDir = realpathSync(projectDir);
+  } catch {
+    // Directory doesn't exist yet — keep the resolve() result
+  }
+  return projectDir;
+}
+
+/**
  * Check whether a resolved file path is allowed.
  * Shared by both Bash cd and general file-path tools.
  */
@@ -264,7 +284,14 @@ function checkFilePath(
     return { decision: "allow", reason: "Tool in allow list, accessing own log" };
   }
 
-  // 8. Block: other agents' directories
+  // 8. Allow: own Claude project dir (where Claude Code spills oversized tool
+  // responses and stores transcripts — ~/.claude/projects/<encoded-worktree>).
+  const projectDir = claudeProjectDirFor(worktreePath);
+  if (filePath === projectDir || filePath.startsWith(projectDir + "/")) {
+    return { decision: "allow", reason: "Tool in allow list, accessing own Claude project dir" };
+  }
+
+  // 9. Block: other agents' directories
   if (filePath.startsWith(agentsDir + "/")) {
     if (toolName === "Bash") {
       return { decision: "deny", reason: "Access denied: cannot cd into other agents' worktrees" };
@@ -272,12 +299,12 @@ function checkFilePath(
     return { decision: "deny", reason: "Access denied: cannot access other agents' files" };
   }
 
-  // 9. Block: main repo (outside worktree)
+  // 10. Block: main repo (outside worktree)
   if (rootRepo && filePath.startsWith(rootRepo + "/") && !filePath.startsWith(worktreePath + "/")) {
     return { decision: "deny", reason: "Access denied: work in your worktree, not the main repo" };
   }
 
-  // 10. allowedPaths-based access control
+  // 11. allowedPaths-based access control
   if (ctx.allowedPaths !== undefined) {
     // allowedPaths is defined: check if path is in the list
     if (isInAllowedPaths(filePath, ctx.allowedPaths)) {
@@ -287,7 +314,7 @@ function checkFilePath(
     return { decision: "deny", reason: "Access denied: path not in allowedPaths" };
   }
 
-  // 11. Legacy fallback: allow all other paths (system files, ~/.claude, etc.)
+  // 12. Legacy fallback: allow all other paths (system files, ~/.claude, etc.)
   return { decision: "allow", reason: "Tool in allow list" };
 }
 

@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { checkPathAccess, toolMatchesPattern, parseIbCommand, checkIbCommandAccess, isInAllowedPaths } from "./agent-path";
+import { checkPathAccess, toolMatchesPattern, parseIbCommand, checkIbCommandAccess, isInAllowedPaths, claudeProjectDirFor } from "./agent-path";
 import type { PathCheckInput, PathCheckContext } from "./agent-path";
 import { join } from "path";
 import { mkdir, rm } from "fs/promises";
@@ -892,5 +892,158 @@ describe("checkPathAccess with allowedPaths", () => {
     });
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("allow");
+  });
+});
+
+// ── Claude project dir access (own spilled tool-results / transcripts) ──────
+
+describe("checkPathAccess with own Claude project dir", () => {
+  const WORKTREE = "/Users/test/repo/.ittybitty/agents/agent-abc123/repo";
+  const OWN_PROJECT_DIR = claudeProjectDirFor(WORKTREE);
+  const OTHER_WORKTREE = "/Users/test/repo/.ittybitty/agents/agent-other/repo";
+  const OTHER_PROJECT_DIR = claudeProjectDirFor(OTHER_WORKTREE);
+
+  function makeClaudeCtx(overrides: Partial<PathCheckContext> = {}): PathCheckContext {
+    return {
+      agentId: "agent-abc123",
+      agentDir: "/Users/test/repo/.ittybitty/agents/agent-abc123",
+      worktreePath: WORKTREE,
+      agentsDir: "/Users/test/repo/.ittybitty/agents",
+      rootRepo: "/Users/test/repo",
+      allowList: ["Read", "Write", "Edit", "Glob", "Grep", "Bash"],
+      ...overrides,
+    };
+  }
+
+  test("allow own tool-results file", () => {
+    const ctx = makeClaudeCtx();
+    const input = {
+      toolName: "Read",
+      toolInput: { file_path: `${OWN_PROJECT_DIR}/abc-session/tool-results/Read-123.txt` },
+      cwd: WORKTREE,
+    };
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("allow");
+    expect(result.reason).toContain("accessing own Claude project dir");
+  });
+
+  test("allow own transcript file directly under project dir", () => {
+    const ctx = makeClaudeCtx();
+    const input = {
+      toolName: "Read",
+      toolInput: { file_path: `${OWN_PROJECT_DIR}/abc-session.jsonl` },
+      cwd: WORKTREE,
+    };
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("allow");
+    expect(result.reason).toContain("accessing own Claude project dir");
+  });
+
+  test("allow exact match on project dir path", () => {
+    const ctx = makeClaudeCtx();
+    const input = {
+      toolName: "Read",
+      toolInput: { file_path: OWN_PROJECT_DIR },
+      cwd: WORKTREE,
+    };
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("allow");
+    expect(result.reason).toContain("accessing own Claude project dir");
+  });
+
+  test("deny sibling prefix dir under allowedPaths:[] (boundary guard)", () => {
+    const ctx = makeClaudeCtx({ allowedPaths: [] });
+    // A sibling dir whose encoded name is a prefix of ours plus "-extra"
+    const input = {
+      toolName: "Read",
+      toolInput: { file_path: `${OWN_PROJECT_DIR}-extra/file.txt` },
+      cwd: WORKTREE,
+    };
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("allowedPaths");
+  });
+
+  test("deny ~/.claude/projects root under allowedPaths:[]", () => {
+    const ctx = makeClaudeCtx({ allowedPaths: [] });
+    const projectsRoot = join(require("os").homedir(), ".claude", "projects");
+    const input = {
+      toolName: "Read",
+      toolInput: { file_path: projectsRoot },
+      cwd: WORKTREE,
+    };
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("allowedPaths");
+  });
+
+  test("deny other agent's project dir under allowedPaths:[]", () => {
+    const ctx = makeClaudeCtx({ allowedPaths: [] });
+    const input = {
+      toolName: "Read",
+      toolInput: { file_path: `${OTHER_PROJECT_DIR}/abc-session/tool-results/Read-123.txt` },
+      cwd: WORKTREE,
+    };
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("allowedPaths");
+  });
+
+  test("allowedPaths:[] does not block own project dir (always-allowed step runs first)", () => {
+    const ctx = makeClaudeCtx({ allowedPaths: [] });
+    const input = {
+      toolName: "Read",
+      toolInput: { file_path: `${OWN_PROJECT_DIR}/abc-session/tool-results/Read-123.txt` },
+      cwd: WORKTREE,
+    };
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("allow");
+    expect(result.reason).toContain("accessing own Claude project dir");
+  });
+
+  test("own project dir allowed without explicit allowedPaths entry", () => {
+    const ctx = makeClaudeCtx({ allowedPaths: ["/var/log"] });
+    const input = {
+      toolName: "Read",
+      toolInput: { file_path: `${OWN_PROJECT_DIR}/abc-session.jsonl` },
+      cwd: WORKTREE,
+    };
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("allow");
+    expect(result.reason).toContain("accessing own Claude project dir");
+  });
+
+  test("Bash cd into own project dir under allowedPaths:[] is allowed", () => {
+    const ctx = makeClaudeCtx({ allowedPaths: [] });
+    const input = {
+      toolName: "Bash",
+      toolInput: { command: `cd ${OWN_PROJECT_DIR}` },
+      cwd: WORKTREE,
+    };
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("allow");
+    expect(result.reason).toContain("accessing own Claude project dir");
+  });
+
+  test("coordinator case: worktreePath === rootRepo, own project dir allowed", () => {
+    const coordRepo = "/Users/test/repo";
+    const coordProjectDir = claudeProjectDirFor(coordRepo);
+    const ctx: PathCheckContext = {
+      agentId: "itsybitsy",
+      agentDir: "/Users/test/repo/.ittybitty/agents/itsybitsy",
+      worktreePath: coordRepo,
+      agentsDir: "/Users/test/repo/.ittybitty/agents",
+      rootRepo: coordRepo,
+      allowList: ["Read", "Write", "Edit", "Glob", "Grep", "Bash"],
+      allowedPaths: [],
+    };
+    const input = {
+      toolName: "Read",
+      toolInput: { file_path: `${coordProjectDir}/session.jsonl` },
+      cwd: coordRepo,
+    };
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("allow");
+    expect(result.reason).toContain("accessing own Claude project dir");
   });
 });

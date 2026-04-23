@@ -140,6 +140,15 @@ After any code changes, always run:
 1. `bun test` — all tests must pass
 2. `bunx tsc --noEmit` — must report zero TypeScript errors; fix any new errors before committing
 
+## Cross-Cutting Review Checklist
+
+Every new feature or fix must be evaluated from these four perspectives before it is considered complete. A change that looks local may have implications in any of the four — explicitly confirm each, even if only to note "not affected":
+
+1. **General agent functionality** — does the change affect what an agent can do, how it is spawned, how its meta.json is shaped, or how its lifecycle proceeds?
+2. **Hooks** — does the change affect any of the five hooks (agent-path, agent-status, permission-denied, intercept-task, session-start) or the main-path hook? New paths, new tool categories, and new agent metadata usually require hook updates.
+3. **Watchdog** — does the change affect agent state detection, nudge timing, rate-limit recovery, or any background monitoring behavior?
+4. **`ib watch` / dashboard** — does the change affect what the TUI displays, which modes are needed, focus/input handling, or layout?
+
 ## itsybitsy Implementation Notes
 
 1471 tests across 40 files.

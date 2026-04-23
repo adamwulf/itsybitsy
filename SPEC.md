@@ -643,15 +643,16 @@ itsybitsy installs hooks into each agent's `settings.local.json`, plus optional 
 
 [^ts-only-notebook-path]: **TS-only behavior.** The bash `ib` only extracts `file_path` and `path` from `tool_input`. The TS implementation additionally checks `notebook_path` to cover Jupyter notebook tools.
 
-**Always allowed paths** (steps 6–7):
+**Always allowed paths** (steps 6–8):
 - Agent's own worktree (`<agent-dir>/repo/...`)
 - Agent's own `agent.log`
+- Agent's own Claude project directory (`~/.claude/projects/<encoded-worktree-path>/**`) — where Claude Code spills oversized tool responses and stores transcripts. Encoded via replacing `/` and `.` with `-` (see `src/auto-compact.ts::encodeClaudeProjectPath`).
 
-**Always denied paths** (steps 8–9, checked before allowedPaths):
+**Always denied paths** (steps 9–10, checked before allowedPaths):
 - Other agents' directories
 - Main repo root (outside the agent's worktree)
 
-**allowedPaths-based access control** (step 10): If the agent's `meta.json` contains an `allowedPaths` field (set from the agent type's frontmatter at creation time — see §2.2), it controls access to all other paths:
+**allowedPaths-based access control** (step 11): If the agent's `meta.json` contains an `allowedPaths` field (set from the agent type's frontmatter at creation time — see §2.2), it controls access to all other paths:
 - `allowedPaths` **absent** (`undefined`): Legacy permissive mode — all paths outside the always-denied set are allowed (home directory, `/tmp`, system paths, other repos).
 - `allowedPaths: []` (empty array): Strict mode — only the always-allowed paths above are permitted. No system paths, no other repos.
 - `allowedPaths` with entries: Only paths under the listed directories are allowed (in addition to the always-allowed paths). Matching is by exact path or directory prefix (`filePath === allowed || filePath.startsWith(allowed + "/")`).

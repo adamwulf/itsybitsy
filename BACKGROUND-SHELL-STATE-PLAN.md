@@ -2,6 +2,8 @@
 
 > Location note: This repo's existing planning docs live at repo root (`PLAN.md`, `AGENT-TYPES-PLAN.md`, `SPAWNER-TRACKING-PLAN.md`). The task requested `docs/plans/background-shell-state.md`, but since there is no `docs/plans/` tree and in-progress plans follow the repo-root convention, this doc is placed at `BACKGROUND-SHELL-STATE-PLAN.md`.
 
+> **Revision v2** (post-review): incorporates reviewer feedback. Key changes from v1: (a) predicate for "active child" narrowed to `{running, creating}` — `waiting` and `complete` explicitly excluded to avoid transitive-waiting deadlock and ensure `complete` children still escalate to users for merge/kill. (b) Counter-pause semantics for `handleWaiting` specified exactly (check-before-increment). (c) `hasActiveChildren` I/O profile clarified — reads stored `meta.state` only, no per-child tmux calls. (d) `notifySpawner` added explicitly to gap table and implementation checklist. (e) Layering clarified: for Case 1 watchdog, the resolver override is primary, `handleWaiting` bg-check is redundancy. (f) §7.3 strengthened — complete-branch transitive notifications are called out as EXPLICITLY UNFIXED after this change. (g) Expanded test matrix.
+
 ---
 
 ## 1. Problem Statement
@@ -187,10 +189,11 @@ There is no tmux-level indicator that a parent has active children. The parent's
 | Layer | Current Behavior | Gap |
 |---|---|---|
 | **Stop hook, `waiting` branch** | Unconditional `notify_manager`. | ❌ Does not check children. |
-| **Stop hook, `complete` branch** | `findUnfinishedChildren()` is called, but **only** in the `no-manager` path. If manager exists, notifies manager without checking. | ❌ Inverted logic for Case 2: a manager that signals complete while children are mid-work should not be reported up until children settle. (Related but separate from the notification-suppression ask; flag for discussion.) |
+| **Stop hook, `complete` branch** | `findUnfinishedChildren()` is called, but **only** in the `no-manager` path. If manager exists, notifies manager without checking. | ❌ Inverted logic for Case 2: a manager that signals complete while children are mid-work should not be reported up until children settle. (Related but separate from the notification-suppression ask; called out as an explicit unfixed limitation in §7.3.) |
 | **`detectAgentStates()`** | Considers only the agent's own tmux + meta.json. | ❌ No visibility into child state. |
 | **Watchdog `resolveWatchdogState`** | Per-agent watchdog only reads the focal agent. `loadAllAgentsForNotification` fetches all agents but only for the notification-target lookup. | ❌ Children information is available but not consulted for state resolution. |
-| **Watchdog `handleWaiting`** | Receives `allAgents` as its third arg, so children are reachable via `agent.children`, but it never walks them. | ❌ Cheap to add: iterate `agent.children` (already built by `buildAgentTree`) and short-circuit notification when any child is in a non-terminal state. |
+| **Watchdog `handleWaiting` — `notifyManager`** | Receives `allAgents` as its third arg, so siblings are reachable by filtering `meta.manager === agent.id`, but it never walks them. | ❌ Cheap to add: flat-filter `allAgents` and short-circuit notification when any child is non-terminal. |
+| **Watchdog `handleWaiting` — `notifySpawner`** (`src/watchdog.ts:263-267`) | Same unconditional call as `notifyManager`, targeting the cross-repo spawner. | ❌ Needs the same guard as `notifyManager`. A parent spawned from another repo gets just as noisy as a same-repo manager. |
 
 ### 4.3 Summary
 
@@ -329,10 +332,12 @@ Specifically:
 
 **Layer responsibility (answering the "which layer gets the guard" question):**
 
-- Case 1 gets **both** a state-resolution override (so TUI/watchdog see `running`) **and** a notifier guard in the stop hook (because the stop hook writes before the resolver ever runs).
-- Case 2 gets **only** a notifier guard (stop hook `waiting` branch + watchdog `handleWaiting`). It does not rewrite state, because the parent really is waiting; we just suppress the upward notification.
+- **Case 1, stop hook**: notifier guard in the `waiting` branch. The stop hook runs before any resolver, so this is the only place that can suppress the `[hook]` notification.
+- **Case 1, watchdog**: the resolver override (step 4 in §7.1) is the **primary** suppression — with that in place, `resolveWatchdogState` returns `"running"` for a waiting-with-shell agent, so `handleWaiting` is never dispatched to; the `running` handler runs instead (which is a no-op for notification). The `hasBackgroundTasks` check proposed in §7.1 step 3 for `handleWaiting` is **belt-and-braces redundancy** — useful if the resolver ever gets refactored, but not the primary fix. This redundancy is deliberate; it is documented in the checklist so a future reader doesn't delete it as dead code.
+- **Case 1, TUI**: the resolver override shows the agent as `running` (GREEN), matching user intuition.
+- **Case 2, stop hook + watchdog**: notifier guard in both. The state resolver does NOT rewrite the parent's own state — the parent really is waiting (on its children). We suppress upward notification only.
 
-**Scope non-goal:** `handleComplete` in the watchdog (and the complete-branch of the stop hook, when a manager exists) has a similar "child still busy" smell but is outside the reported problem. It's listed in §7 as an optional follow-up so it isn't accidentally bundled into this change.
+**Scope non-goal:** `handleComplete` in the watchdog (and the complete-branch of the stop hook, when a manager exists) has a similar "child still busy" smell but is outside the reported problem. It's listed in §7.3 as an explicitly unfixed limitation so it isn't accidentally bundled into this change. A user should expect that after this fix lands, the `[hook]` and `[watchdog]` notifications for **waiting** agents respect work-in-flight, but the **complete**-branch notifications do not.
 
 ---
 
@@ -342,45 +347,122 @@ Specifically:
 
 Ordered. Each bullet is one commit-scoped unit; test changes go with their code.
 
-1. **Extract a shared predicate** `hasActiveChildren(agentId: string, agentsDir: string, opts?) → Promise<boolean>` in `src/hooks/agent-status.ts` (near `findUnfinishedChildren`), or factor out a lighter sibling that returns a boolean instead of a list. Predicate: any child with `meta.manager === agentId`, not archived, with `meta.state ∈ {"running", "waiting", "complete"}` AND tmux session exists, OR `isRecentlyCreated`. Mirror the existing `findUnfinishedChildren` logic.
-   - New unit tests in `src/hooks/agent-status.test.ts`.
+1. **Extract a shared predicate** `hasActiveChildren(agentId: string, agentsDir: string, opts?) → Promise<boolean>` in `src/hooks/agent-status.ts` (near `findUnfinishedChildren`).
+
+   **Canonical predicate (the "active" set — this is ground truth for both the stop hook and the watchdog):**
+
+   > A child is **active** iff `meta.manager === agentId` AND `!meta.archived` AND (`meta.state === "running"` OR `isRecentlyCreated(meta.created_epoch)`).
+
+   **Explicitly NOT in the active set:** `waiting`, `complete`, `stopped`, or any child whose tmux session is gone. Rationale:
+   - **`waiting` excluded**: a chain of all-`waiting` agents means genuine human-intervention deadlock — the top of the chain *must* be notified so the user can unstick it. Including `waiting` as "active" would silence the chain indefinitely (see design note below for the worked example).
+   - **`complete` excluded**: a `complete` child is done and awaiting merge/kill. Suppressing the parent's "I am waiting" notification because children are `complete` just delays the "please merge me" signal. The user wants to know.
+   - **`creating` handled via `isRecentlyCreated(meta.created_epoch)`**: matches the existing `findUnfinishedChildren` treatment — `creating` is derived state, not stored.
+   - **`compacting` / `rate_limited` automatic**: these are transient tmux-overrides at resolution time, but the *stored* `meta.state` remains `"running"`. So a child that is currently `compacting` still reads `meta.state === "running"` in meta.json and is correctly counted as active without a per-child tmux capture.
+
+   **I/O profile**: reads each sibling agent's `meta.json` file (one `readdir` + one `readFile` per child). **Does NOT call `captureTmuxOutput` per child** — this is an intentional deviation from `findUnfinishedChildren`, which does. Rationale: `findUnfinishedChildren` is called on `complete` to decide whether to show "remind children" text to the user (latency isn't critical); `hasActiveChildren` is called on every `waiting` stop-hook and every 5s watchdog tick (latency matters). Reading stored `meta.state` is O(N children) file reads, no process spawns. Corner case: a child with stale `meta.state = "running"` whose tmux process actually died will be counted as active until the watchdog's 10s grace period writes `stopped` — fail-safe direction (slightly over-suppress instead of under-suppress).
+
+   **Fail-open on I/O errors**: wrap the `readdir` in a try/catch and return `false` (not `true`) on failure — matching `findUnfinishedChildren`'s existing behavior. The priority is "notify when in doubt." Test this explicitly (see §7.1 step 2 test list).
+
+   **Test injection**: add `opts.getChildState?: (tmuxSession: string) => Promise<string>` in the signature for consistency with `findUnfinishedChildren`, but note that `hasActiveChildren` does not actually use it under the default implementation (since we read meta.state, not live state). Left in place in case future revisions need tmux-aware checks. Unit tests in `src/hooks/agent-status.test.ts`:
+   - `hasActiveChildren returns true for child with meta.state === "running"`
+   - `returns true for child with isRecentlyCreated === true`
+   - `returns false for child with meta.state === "waiting"`
+   - `returns false for child with meta.state === "complete"`
+   - `returns false for archived child even if meta.state === "running"`
+   - `returns false when agentsDir is unreadable (fail-open)`
 
 2. **Stop hook `waiting` branch** — `src/hooks/agent-status.ts:191-203`:
    - Read tmux output (same pattern as the existing `running` branch at lines 107-122, with the same `captureOutput` opts injection).
    - If `hasBackgroundTasks(tmuxOutput)` → return `{ state, action: "none" }`.
    - Else if `await hasActiveChildren(agentId, agentsDir)` → return `{ state, action: "none" }`.
    - Else fall through to existing `notify_manager`.
-   - Add `opts.getChildState` pass-through for `hasActiveChildren` the same way `findUnfinishedChildren` uses it.
    - Tests in `src/hooks/agent-status.test.ts`:
      - `waiting + background shell → action "none"`.
      - `waiting + active child (running) → action "none"`.
-     - `waiting + active child (waiting) → action "none"` (transitive — a parked child is still work in flight; see design note below).
-     - `waiting + only stopped children → action "notify_manager"` (regression).
-     - `waiting + no tmux output (null) → action "notify_manager"` (fail-open for tmux gone).
+     - `waiting + only waiting children → action "notify_manager"` (transitive-waiting deadlock prevention — the top of an all-waiting chain MUST be told).
+     - `waiting + only complete children → action "notify_manager"` (user needs to merge/kill; don't suppress).
+     - `waiting + only stopped children → action "notify_manager"` (regression — no children are actually doing work).
+     - `waiting + mixed: one running + one waiting → action "none"` (at least one active).
+     - `waiting + hasActiveChildren throws (agentsDir unreadable) → action "notify_manager"` (fail-open).
+     - `waiting + tmux output is null → action "notify_manager"` (fail-open; same as existing running-branch behavior when tmux is gone).
 
-   > Design note on "child in waiting counts as work in flight": adopting this transitively means a chain of agents all parked at WAITING will suppress notifications up the chain indefinitely. This is correct behavior — if no one has work in flight, the *leaf* waiting agent will notify its manager, who will then propagate up naturally as it's told about the child. Each layer's notification is driven by its own child activity, not the leaf.
+   > **Design note — why `waiting` children don't count as "active"**: the reflexive instinct is "a waiting child still has context, let's suppress the parent." But Claude agents at `meta.state = "waiting"` have tmux panes that are idle; when a tmux-send message arrives from a child's stop hook, it lands in the input buffer without re-running Claude. So a parent parked at `waiting` does *not* automatically wake up when its child notifies it. This means: if we treated `waiting` as "active", a tree where every node is at `waiting` would produce zero notifications to the user — classic deadlock, requiring the user to independently notice something is stuck. The correct semantic is "`waiting` children propagate upward normally so each layer's backoff clock runs"; suppression is reserved for cases where the child is *actively doing work* (running, creating, or in a transient tmux-override state).
 
 3. **Watchdog `handleWaiting`** — `src/watchdog.ts:254-273`:
-   - Before the existing threshold check, capture tmux output (already done earlier in the loop — thread it through, or add a `captureTmuxOutput` call here).
-   - Compute `bgActive = hasBackgroundTasks(output)` and `childActive = anyChildNonTerminal(agent, allAgents)`.
-   - If either is true, skip the `notifyManager`/`notifySpawner` calls and also **do not reset/advance `waitCounter`** (so that if the condition clears, the next tick notifies immediately if it's past the threshold; or alternatively clamp `waitCounter` to `notifyInterval - 1`). Decision: skip advance, so counter pauses. This is consistent with the "the agent isn't actually idle" framing.
-   - New local helper `anyChildNonTerminal(agent, allAgents)` that walks `agent.children` (one level) and returns `true` if any child has `state ∈ {running, creating, compacting, rate_limited}`. Note: tree is built in `processAgents` via `buildAgentTree()` — verify `agent.children` is populated at this point. Per `watcher.ts:223`, yes: `pollStates()` calls `buildAgentTree` before `onUpdate`. Per-agent watchdog path: `loadAllAgentsForNotification` does NOT call `buildAgentTree` — need to add that call there (`src/watchdog.ts:834-850`), OR walk `allAgents` flat-filtering on `meta.manager === agent.id`. Flat filter is simpler and more robust.
-   - Tests in `src/watchdog.test.ts`:
-     - `handleWaiting` with background-shell tmux output → no notification.
-     - `handleWaiting` with one active child in `allAgents` → no notification.
-     - `handleWaiting` with only stopped/complete children → notification fires.
-     - `handleWaiting` across multiple backoff cycles — counter does not advance while suppressed.
+   - **Note on layering**: after step 4 (resolver override) lands, `resolveWatchdogState` returns `"running"` for waiting-with-background-shell agents, so `handleWaiting` is not dispatched to in that case; the no-op `running` handler runs. Therefore the background-shell check inside `handleWaiting` is **belt-and-braces redundancy**, not the primary Case 1 fix. Keep it as a safety net and note this in a code comment so a future reader doesn't remove it as dead code. The primary role of the `handleWaiting` changes is Case 2 (active children), which the resolver override cannot address.
+
+   Implementation sketch (ordering matters — check BEFORE increment):
+
+   ```ts
+   async function handleWaiting(agent, tracker, allAgents) {
+     // Capture tmux to check background shells (belt-and-braces for Case 1).
+     const output = await captureTmuxOutput(agent.meta.tmux_session);
+     const bgActive = output !== null && hasBackgroundTasks(output);
+     const childActive = anyChildActive(agent.id, allAgents);
+
+     if (bgActive || childActive) {
+       // Suppress notification AND do not advance the counter — the agent
+       // isn't actually idle. When suppression lifts, waitCounter resumes
+       // from where it stopped. Leaving the counter paused (rather than
+       // resetting to 0 or arming to threshold-1) is a deliberate choice:
+       // it means a short blip of activity won't reset a long backoff,
+       // but it does mean that if the activity clears right after suppression
+       // began, the manager waits a few more ticks for the normal threshold —
+       // which is the right tradeoff for the "don't spam on flapping" case.
+       return;
+     }
+
+     tracker.waitCounter++;
+     if (tracker.waitCounter >= tracker.notifyInterval) {
+       await notifyManager(agent, "[watchdog]: Your subtask ... waiting", allAgents);
+       await notifySpawner(agent, "[watchdog]: Agent ... waiting", allAgents);
+       tracker.waitCounter = 0;
+       tracker.notifyInterval = Math.min(tracker.notifyInterval * 2, MAX_NOTIFY_TICKS);
+     }
+   }
+   ```
+
+   **Counter behavior (explicit, per reviewer feedback)**: the check happens BEFORE `waitCounter++`. When suppression fires, `waitCounter` retains its previous value; on the next tick, if suppression has lifted, `waitCounter++` resumes from the paused value. If the threshold had already been crossed before suppression began, the next clear tick notifies immediately. Note that because `waitCounter` is reset to 0 after every notification (line 270 in current code), "paused after notification" means paused at 0 (with a doubled `notifyInterval`) — still correct: the backoff isn't reset, which prevents notification flapping.
+
+   **Both `notifyManager` AND `notifySpawner` are suppressed** — symmetric treatment, since both fire on the same condition inside `handleWaiting`.
+
+   **Walking children — flat-filter only**. Define `anyChildActive(parentId, allAgents)` as:
+
+   ```ts
+   function anyChildActive(parentId: string, allAgents: Agent[]): boolean {
+     return allAgents.some(a =>
+       a.meta.manager === parentId &&
+       !a.archived &&
+       (a.meta.state === "running" || isRecentlyCreated(a.meta.created_epoch))
+     );
+   }
+   ```
+
+   Flat-filter over `allAgents` is used **for both call sites** (`watcher.ts` processAgents path AND `runPerAgentWatchdog` path) to avoid depending on `buildAgentTree()`, which is NOT called in `loadAllAgentsForNotification` (src/watchdog.ts:841-843 — the existing comment documents this intentional omission). Flat-filter reads stored `meta.state` directly, same as `hasActiveChildren` in step 1; in fact they should share the `anyChildActive` implementation (export from `src/agents.ts` and import in both places).
+
+   Tests in `src/watchdog.test.ts`:
+   - `handleWaiting` with background-shell tmux output → no notification, counter NOT advanced.
+   - `handleWaiting` with one active child (`running`) in `allAgents` → no notification, counter NOT advanced.
+   - `handleWaiting` with only `waiting` children → notification fires after threshold.
+   - `handleWaiting` with only `complete` children → notification fires after threshold.
+   - `handleWaiting` with only `stopped`/archived children → notification fires after threshold.
+   - `handleWaiting` across multiple ticks — counter advances normally when clear, pauses when suppressed.
+   - **Counter-pause behavioral test**: suppressed for 3 ticks (counter stays at 0), then clear for 6 ticks (counter reaches threshold), notification fires on the 9th tick total. Verifies suppression does not advance the counter.
+   - **Pause-across-backoff test**: after one notification has fired and `notifyInterval` has doubled to 12, subsequent suppression for several ticks does not reset `notifyInterval` — it remains at 12.
+   - **`notifySpawner` guard**: cross-repo spawner lookup returns a valid spawner agent; verify `notifySpawner` is suppressed alongside `notifyManager`.
 
 4. **State-resolver override (Case 1 only)** — add to both:
    - `detectAgentStates()` in `src/agents.ts:583-629`: after the `isRateLimited(output)` check, add `if (agent.meta.state === "waiting" && hasBackgroundTasks(output)) { agent.state = "running"; return; }`.
    - `resolveWatchdogState()` in `src/watchdog.ts:645-653`: same check, mirrored.
+   - Scope note: this override is **only for `meta.state === "waiting"`**. It does NOT fire for `"complete"` (agent signed off intentionally; preserve that) or `"running"` (already correct).
    - Tests in `src/agents.test.ts` + `src/watchdog.test.ts`:
      - `meta.state = "waiting"`, tmux has background shell → resolved state = `running`.
      - `meta.state = "waiting"`, tmux without shell → `waiting`.
-     - `meta.state = "complete"`, tmux has background shell → `complete` (not overridden).
-     - `meta.state = "running"`, tmux has background shell → `running` (no change).
+     - `meta.state = "complete"`, tmux has background shell → `complete` (not overridden — agent explicitly signed off).
+     - `meta.state = "running"`, tmux has background shell → `running` (no change — regression guard).
+     - `meta.state = "waiting"`, tmux is null (session gone) → `stopped` (existing precedence still wins; override doesn't fire because no output).
 
-5. **Update `loadAllAgentsForNotification` (if flat-filter isn't chosen for step 3)** — `src/watchdog.ts:834-850`: call `buildAgentTree(agents)` on the returned list so `agent.children` is populated before `handleWaiting` is invoked. Otherwise, document the flat-filter choice with a comment.
+5. **`loadAllAgentsForNotification`** — `src/watchdog.ts:834-850`: no change required. Add a short code comment at the flat-filter site in `handleWaiting` (step 3) documenting that we flat-filter on `meta.manager` rather than walking `agent.children` precisely because the per-agent watchdog path does not build a tree. This avoids a future maintainer accidentally introducing an `agent.children` dependency that would silently break the CLI watchdog.
 
 ### 7.2 SPEC.md updates
 
@@ -392,14 +474,16 @@ Ordered. Each bullet is one commit-scoped unit; test changes go with their code.
 - **§8.5 Watchdog Monitoring Behaviors table** (around line 1014-1021): update the `waiting` row to: "Increment waiting counter unless (a) tmux shows background shells OR (b) agent has non-terminal children — in which case suppress notification and pause counter. Otherwise existing backoff."
 - Add a short subsection "8.5.x Work-in-flight suppression" explaining the invariant: we never upward-notify a manager about a child that is directly (background shell) or transitively (via grandchildren) doing work.
 
-### 7.3 Out-of-scope / follow-ups
+### 7.3 Out-of-scope / explicitly unfixed
 
-Listed so a future agent knows these exist but aren't part of this change:
+Called out so the user (and any future reader) knows these remain after this change ships:
 
-- Complete-branch symmetry: same guard for `state === "complete"` in stop hook + watchdog `handleComplete`. Would need a story for agents that genuinely completed while a leftover background shell (zombie) still lingers.
-- Cross-repo spawner notifications (`notifySpawner`) get the same guard by construction (they're called right next to `notifyManager`); called out in tests.
-- `handleUnknown` path: in practice `unknown` should not occur anymore (§8.5 removal note). Leave as-is.
-- Dashboard: consider an info-panel line "Active children: N" or "1 bg shell" when the state override fires, so the suppression is visible to the user. Purely cosmetic.
+- **Complete-branch transitive notifications — explicitly unfixed.** After this change lands, the following bug class STILL misbehaves: a manager agent spawns children, signals `I HAVE COMPLETED THE GOAL` while children are still `running`. The stop hook's `complete` branch (src/hooks/agent-status.ts:162-170) notifies the grandparent because `findUnfinishedChildren` is only consulted in the no-manager path. The watchdog's `handleComplete` (src/watchdog.ts:339-353) similarly notifies the grandparent once. This is the same bug class as Case 2 shifted to `complete`. It is **not** fixed by this plan. Users will continue to see `[hook]: Your subtask <id> just completed` and `[watchdog]: … recently completed` for managers that completed prematurely. File a follow-up ticket; it is a similar shape fix (reuse `hasActiveChildren`) but is outside the reported bug scope.
+- **Agents that signal `I HAVE COMPLETED THE GOAL` with a background shell still running**: the state resolver override only fires for `meta.state === "waiting"`. An agent that wrote `complete` while a background shell lingers will show as `complete` in the TUI and notify upward. Arguably a user error (the agent should not have signed off), and arguably something the stop hook `complete` branch should catch — but this plan does not address it.
+- **`handleUnknown` path** (`src/watchdog.ts:280-304`): in practice `unknown` should not occur anymore (§8.5 removal note says `unknown` → `running` fallback with deterministic state). Leave as-is.
+- **Dashboard / info panel hint**: consider adding an info-panel line "Active children: N" or "1 bg shell — notifications suppressed" when the Case 1/2 suppression fires, so the user can tell *why* a parent is quiet. Purely cosmetic; out of scope for this behavioral fix.
+
+None of these unfixed items reintroduce the reported bug — they are separate, adjacent issues the user may want to follow up on.
 
 ---
 

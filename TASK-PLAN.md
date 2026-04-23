@@ -25,10 +25,13 @@ Matching rule (mirrors `agent.log` and `isInAllowedPaths`): `filePath === projec
 ### 1. `src/hooks/agent-path.ts`
 - In `checkFilePath()` (between step 7 / own `agent.log`, line ~263 and step 8 / other-agents block): insert a new step that allows the agent's own Claude project dir.
 - Compute `claudeProjectDir` **inside `checkFilePath` on the fly** from `ctx.worktreePath` — no new `PathCheckContext` field. Pure string work, no I/O.
-- Import `encodeClaudeProjectPath` from `../auto-compact` — do NOT duplicate the encoding.
+- **Extract a small helper `claudeProjectDirFor(worktreePath: string): string`** (exported) that returns the fully-resolved absolute project dir. This lets tests import and assert against the exact path the hook will compute, and centralizes the encoding-reuse comment.
+- Import `encodeClaudeProjectPath` from `../auto-compact` — do NOT duplicate the encoding. Leave a one-line comment at the import site pointing to `src/auto-compact.ts` as the source-of-truth.
 - Import `homedir` from `os`. Resolve `~/.claude/projects/<encoded>` via `join(homedir(), ".claude", "projects", encoded)`.
-- Canonicalise via `resolve()` so the comparison is apples-to-apples with the already-resolved `filePath`. We don't `realpathSync` the projectDir (it's a stable, non-symlinked location in practice).
-- Edge: for `isNoWorktree` agents (coordinators), `worktreePath` is set to the repo root by `hookCheckPath` (line ~536). Coordinator would "own" `~/.claude/projects/<encoded-repo-root>` — acceptable, and their encoded path is also unique.
+- **`realpathSync` the projectDir** (with try/catch for ENOENT — the dir may not exist yet) to handle the case where `~/.claude` is symlinked to another volume. Otherwise the inbound `filePath` (already realpath'd at agent-path.ts:252) won't prefix-match. Reviewer flagged this as the highest-probability miss.
+- Canonicalise via `resolve()` first, then `realpathSync` best-effort.
+- Allow reason string: `"Tool in allow list, accessing own Claude project dir"` — mirrors `agent.log` format (line 264) for greppability in `agent.log`.
+- Edge: for `isNoWorktree` agents (coordinators), `worktreePath` is set to the repo root by `hookCheckPath` (line ~536). Coordinator would "own" `~/.claude/projects/<encoded-repo-root>` — acceptable, and their encoded path is unique per coordinator-repo pair.
 
 ### 2. `src/auto-compact.ts`
 - **No behavioral change.** `encodeClaudeProjectPath` is already exported and is the single source of truth. Confirmed — we import, not duplicate.
@@ -43,7 +46,9 @@ Add a new `describe` block with cases:
 - **Deny (via allowedPaths:[])**: a sibling dir whose name is a prefix of ours (e.g. `~/.claude/projects/<ours>-extra/...`) — confirms the `"/"` boundary guard.
 - **Interaction with `allowedPaths: []` (strict mode)**: own project dir still allowed (new step runs *before* the allowedPaths gate, matching the `agent.log` precedent).
 - **Interaction with `allowedPaths: [...]`**: own project dir allowed without needing an explicit entry.
-- Tests compute the expected `projectDir` using the same `encodeClaudeProjectPath` and `homedir()` — match the hook exactly.
+- **Bash `cd` into own project dir under `allowedPaths: []`**: allowed (previously denied). Routes through `checkFilePath` via line 151 so it exercises the new step.
+- **Coordinator edge** (`worktreePath === rootRepo`): own project dir allowed; pins that the helper handles the no-worktree case.
+- Tests import the helper `claudeProjectDirFor()` (see file 1) to compute the expected `projectDir` — guarantees the test and hook compute identically. Tests use absolute `/Users/...`-style paths (what Claude Code actually sends); no reliance on `~` expansion.
 
 ### 4. `src/hooks/main-path.test.ts`
 - **Not affected.** `main-path.ts` is the global hook for the *primary* Claude; it is not agent-scoped and has no project-dir logic. No test changes.
@@ -51,7 +56,12 @@ Add a new `describe` block with cases:
 ### 5. `SPEC.md` §6.1
 - Update "Always allowed paths" (line ~646–648) to add a third bullet:
   - Agent's own Claude project directory (`~/.claude/projects/<encoded-worktree-path>/**`) — where Claude Code spills oversized tool responses and stores transcripts. Encoded via replacing `/` and `.` with `-` (see `src/auto-compact.ts::encodeClaudeProjectPath`).
-- Step numbering: current text says "steps 6–7" for always-allowed and "steps 8–9" for always-denied. Inserting a new check bumps numbering. We'll renumber cleanly (always-allowed becomes steps 6–8, always-denied becomes 9–10, allowedPaths becomes 11, legacy fallback becomes 12). Update in-code comments (`// 6.`, `// 7.`, `// 8.`, `// 9.`, `// 10.`, `// 11.`) to match.
+- Step numbering: current SPEC prose says "steps 6–7" (always-allowed), "steps 8–9" (always-denied), "step 10" (allowedPaths). Code comments number through step 11 (legacy fallback).
+- **New numbering**: always-allowed → steps 6–8, always-denied → 9–10, allowedPaths → 11, legacy fallback → 12.
+- Update these spots:
+  - `SPEC.md` §6.1 headings at the "Always allowed paths" line (change `steps 6–7` → `steps 6–8`), "Always denied paths" line (change `steps 8–9` → `steps 9–10`), "allowedPaths-based access control" line (change `step 10` → `step 11`).
+  - `src/hooks/agent-path.ts` in-code numbered comments `// 6. Allow: path within worktree` … `// 11. Legacy fallback` accordingly.
+- Do **not** disturb footnote anchors at SPEC.md:641 (`[^ts-only-bash-scan]`) and SPEC.md:644 (`[^ts-only-notebook-path]`).
 
 ## Placement & ordering reasoning
 
@@ -78,9 +88,17 @@ Per CLAUDE.md's requirement to evaluate every change from four perspectives:
 ### 4. `ib watch` / dashboard
 - **Not affected.** Dashboard reads `agent.log`, `meta.json`, `tmux capture-pane`, and transcript JSONL (for context usage). It does not invoke the path hook. The transcript-reading code in `auto-compact.ts` already uses `encodeClaudeProjectPath` — reusing that same helper in the hook keeps one source of truth. No dashboard behaviour changes.
 
-## Open question for reviewer
+## Reviewer verdict (agent-1cac800a, resolved)
 
-Should `claudeProjectDir` be computed in `hookCheckPath` and passed via `PathCheckContext`, or on-the-fly inside `checkFilePath`? I lean **on-the-fly** (pure string work; adding a ctx field adds a surface for tests to forget to populate). Push back if there's a concrete reason to cache.
+Reviewer approved the plan's core approach. Feedback folded in above:
+- Keep on-the-fly computation; extract `claudeProjectDirFor()` helper for test reuse.
+- Whole-project-dir scope is correct.
+- Add `realpathSync` on projectDir to handle symlinked `~/.claude`.
+- Use reason string `"Tool in allow list, accessing own Claude project dir"`.
+- Add Bash-cd-under-strict-mode test case and coordinator (`worktreePath === rootRepo`) test case.
+- SPEC renumber must also update the prose ranges in §6.1 headings, not just code comments; don't disturb footnote anchors.
+- Legacy-permissive concern correctly out of scope.
+- Flagged (out-of-scope, acknowledged): encoded-path collision for weird worktree names (e.g. `/a/b` vs `/a.b` both encode to `-a-b`) — inherited from `auto-compact.ts`, not fixing here.
 
 ## Success criteria (from task prompt)
 

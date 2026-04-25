@@ -18,6 +18,7 @@ import {
   MAX_NOTIFY_TICKS,
   POLL_INTERVAL_MS,
   COMPACT_CHECK_COOLDOWN_MS,
+  stampAgentCompactCheck,
   TMUX_GONE_GRACE_MS,
   setWatchdogSpawnRunner,
   resetWatchdogSpawnRunner,
@@ -1321,6 +1322,36 @@ describe("watchdog", () => {
       currentTime = 100_000 + COMPACT_CHECK_COOLDOWN_MS;
       await tick([a1]);
       expect(usageCheckCount).toBe(2);
+    });
+
+    test("stampAgentCompactCheck delays the first compact check by cooldown", async () => {
+      let usageCheckCount = 0;
+      setUsageReader(async () => {
+        usageCheckCount++;
+        return 90;
+      });
+      setWatchdogReadConfig(async () => mockConfig(80));
+
+      let currentTime = 100_000;
+      setWatchdogNow(() => currentTime);
+
+      // Simulate resumeAgent stamping the tracker before the watchdog starts ticking.
+      stampAgentCompactCheck("a1");
+      expect(getTracker("a1").lastCompactCheckMs).toBe(100_000);
+
+      const a1 = agent("a1", "running");
+
+      // Tick within cooldown — usage must NOT be checked, /compact must NOT be sent.
+      currentTime += COMPACT_CHECK_COOLDOWN_MS - 1;
+      await tick([a1]);
+      expect(usageCheckCount).toBe(0);
+      expect(compactCalls.filter((c) => c.args.includes("/compact")).length).toBe(0);
+
+      // Tick after cooldown elapses — now the check should run and /compact should fire.
+      currentTime = 100_000 + COMPACT_CHECK_COOLDOWN_MS;
+      await tick([a1]);
+      expect(usageCheckCount).toBe(1);
+      expect(compactCalls.filter((c) => c.args.includes("/compact")).length).toBe(1);
     });
 
     test("does not re-send /compact once compactSent is true", async () => {

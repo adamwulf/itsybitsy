@@ -32,6 +32,7 @@ import { getSavedTmuxWidth } from "./tui/layout";
 import { buildPerRepoCoordinatorSettings, checkCoordinatorExists, getCoordinatorAgentId } from "./coordinator";
 import { loadAgentType, agentTypeExists } from "./agent-types";
 import { listRepos, repoDisplayName } from "./registry";
+import { stampAgentCompactCheck } from "./watchdog";
 
 export interface IbCommandResult {
   ok: boolean;
@@ -483,6 +484,12 @@ ${qAbsExitScript}
 
   // Write state: "running" to meta.json
   await writeAgentState(agentDir, "running");
+
+  // Suppress immediate auto-compact on resume: stamp the per-agent tracker so
+  // the watchdog's first compact check is delayed by COMPACT_CHECK_COOLDOWN_MS.
+  // Without this, a resumed agent whose prior transcript is already above
+  // autoCompactThreshold would receive /compact on the very first tick.
+  stampAgentCompactCheck(agent.id);
 
   // Auto-spawn per-agent watchdog
   try {

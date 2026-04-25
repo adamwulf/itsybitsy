@@ -4,7 +4,7 @@
 
 import { join, basename } from "path";
 import { AGENT_CWD_PATTERN } from "./shared";
-import { loadAgentType } from "../agent-types";
+import { loadAgentType, buildAvailableTypesSection } from "../agent-types";
 
 export type SessionRole = "primary" | "manager" | "worker" | "coordinator";
 
@@ -141,7 +141,7 @@ The quoted heredoc terminator (\`<<'EOF'\`) is the safest option — nothing ins
 
 /**
  * Interpolate {{placeholder}} variables and {{#if cond}}...{{/if}} blocks in a template.
- * Available variables: agentId, agentManager, parentBranch, worktreePath, rootRepoPath, repoName, pathIsolation
+ * Available variables: agentId, agentManager, parentBranch, worktreePath, rootRepoPath, repoName, pathIsolation, availableTypes
  * Available conditions: hasManager (agent has a manager), isTopLevel (no manager = top-level)
  */
 export function interpolateTemplate(template: string, ctx: SessionContext): string {
@@ -154,6 +154,7 @@ export function interpolateTemplate(template: string, ctx: SessionContext): stri
     rootRepoPath: ctx.rootRepoPath,
     repoName,
     pathIsolation: buildPathIsolationSection(ctx),
+    availableTypes: buildAvailableTypesSection(),
   };
 
   const conditions: Record<string, boolean> = {

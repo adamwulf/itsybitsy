@@ -1,5 +1,8 @@
-import { test, expect, describe } from "bun:test";
+import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { detectRole, generateInstructions, interpolateTemplate, buildPathIsolationSection, type SessionContext } from "./session-start";
+import { mkdtemp, rm, mkdir } from "fs/promises";
+import { tmpdir } from "os";
+import { join } from "path";
 
 describe("session-start", () => {
   test("detectRole non-agent cwd → primary", () => {
@@ -343,6 +346,64 @@ describe("interpolateTemplate", () => {
     const template = "{{#if isTopLevel}}\nask questions\n{{/if}}";
     const result = interpolateTemplate(template, baseCtx);
     expect(result).not.toContain("ask questions");
+  });
+
+});
+
+describe("interpolateTemplate {{availableTypes}}", () => {
+  const baseCtx: SessionContext = {
+    role: "manager",
+    agentId: "agent-abc123",
+    agentManager: "agent-parent",
+    parentBranch: "agent/agent-parent",
+    branchName: "agent/agent-abc123",
+    worktreePath: "/repo/.ittybitty/agents/agent-abc123/repo",
+    rootRepoPath: "/repo",
+  };
+
+  const originalHome = process.env.HOME;
+  let tempHome: string;
+  let typesDir: string;
+
+  beforeEach(async () => {
+    tempHome = await mkdtemp(join(tmpdir(), "itsybitsy-tpl-available-"));
+    process.env.HOME = tempHome;
+    typesDir = join(tempHome, ".itsybitsy", "agent-types");
+    await mkdir(typesDir, { recursive: true });
+  });
+
+  afterEach(async () => {
+    process.env.HOME = originalHome;
+    await rm(tempHome, { recursive: true, force: true });
+  });
+
+  test("expands to a markdown section listing spawnable types", async () => {
+    await Bun.write(
+      join(typesDir, "manager.md"),
+      "---\nname: manager\ndescription: Manages sub-agents\n---\nbody",
+    );
+    await Bun.write(
+      join(typesDir, "worker.md"),
+      "---\nname: worker\ndescription: Implements a focused task\n---\nbody",
+    );
+    await Bun.write(
+      join(typesDir, "_all.md"),
+      "---\nname: _all\nspawnable: false\ndescription: Layer file\n---\nbody",
+    );
+
+    const template = "before\n\n{{availableTypes}}\n\nafter";
+    const result = interpolateTemplate(template, baseCtx);
+
+    expect(result).toContain("### Available Agent Types");
+    expect(result).toContain('`ib new-agent --type <name> "task"`');
+    expect(result).toContain("`manager` — Manages sub-agents");
+    expect(result).toContain("`worker` — Implements a focused task");
+    // Layer files must not appear
+    expect(result).not.toContain("_all");
+    expect(result).not.toContain("Layer file");
+    // Surrounding text preserved
+    expect(result).toContain("before");
+    expect(result).toContain("after");
   });
 });
 

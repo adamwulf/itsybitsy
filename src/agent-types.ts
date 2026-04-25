@@ -646,6 +646,85 @@ function isSpawnableFrontmatter(content: string): boolean {
 }
 
 /**
+ * Lightweight sync extractor: read the `description:` value from a
+ * frontmatter block without invoking the full parser. Returns an empty
+ * string when the key is absent. Strips surrounding single/double quotes.
+ */
+function readDescriptionFrontmatter(content: string): string {
+  const lines = content.split("\n");
+  if (lines[0] !== "---") return "";
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i]!;
+    if (line === "---") break;
+    const trimmed = line.trim();
+    if (trimmed.startsWith("description:")) {
+      const valueStr = trimmed.substring("description:".length).trim();
+      return valueStr.replace(/^["']|["']$/g, "");
+    }
+  }
+  return "";
+}
+
+/**
+ * Synchronously list spawnable agent types as `{name, description}` pairs.
+ * Used by session-start templates via the `{{availableTypes}}` placeholder
+ * to render the list of types an agent can spawn.
+ *
+ * Performs a lightweight per-file scan of frontmatter (spawnable + description)
+ * so it stays cheap enough to call from the session-start hook synchronously.
+ */
+export function listSpawnableAgentTypesSync(): Array<{ name: string; description: string }> {
+  const allNames = listAgentTypeNamesSync();
+  const home = process.env.HOME || homedir();
+  const typesDir = join(home, ".itsybitsy", "agent-types");
+
+  const result: Array<{ name: string; description: string }> = [];
+  for (const name of allNames) {
+    const filePath = join(typesDir, `${name}.md`);
+    let content: string | undefined;
+    try {
+      content = readFileSync(filePath, "utf8");
+    } catch {
+      // File gone between listing and read — fall back to embedded content if we know it
+      content = EMBEDDED_TYPES[name];
+    }
+    if (content === undefined) {
+      // Directory didn't exist and no embedded default — assume spawnable, no description
+      result.push({ name, description: "" });
+      continue;
+    }
+    if (isSpawnableFrontmatter(content)) {
+      result.push({ name, description: readDescriptionFrontmatter(content) });
+    }
+  }
+  return result;
+}
+
+/**
+ * Build a markdown section listing every spawnable agent type with its
+ * description, for use in session-start templates via `{{availableTypes}}`.
+ *
+ * Falls back to a placeholder note if no spawnable types are found (this
+ * shouldn't happen in practice — the embedded defaults guarantee at least
+ * `manager` and `worker`).
+ */
+export function buildAvailableTypesSection(): string {
+  const types = listSpawnableAgentTypesSync();
+  const header = `### Available Agent Types
+
+You can spawn any of these with \`ib new-agent --type <name> "task"\`:`;
+
+  if (types.length === 0) {
+    return `${header}\n\n_No agent types installed. Run \`ib init-types\` to restore defaults._`;
+  }
+
+  const lines = types.map(({ name, description }) =>
+    description ? `- \`${name}\` — ${description}` : `- \`${name}\``,
+  );
+  return `${header}\n\n${lines.join("\n")}`;
+}
+
+/**
  * List all available agent types from ~/.itsybitsy/agent-types/.
  * Only returns types that exist as .md files on disk.
  */

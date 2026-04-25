@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { parseAgentTypeFile, loadAgentType, listAgentTypes, ensureAgentTypesDir, initAgentTypes, agentTypeExists, validateAllAgentTypes } from "./agent-types";
+import { parseAgentTypeFile, loadAgentType, listAgentTypes, ensureAgentTypesDir, initAgentTypes, agentTypeExists, validateAllAgentTypes, listSpawnableAgentTypesSync, buildAvailableTypesSection } from "./agent-types";
 import { mkdtemp, rm, mkdir } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -1163,5 +1163,142 @@ body`);
 
     const type = await loadAgentType("child");
     expect(type.repos).toEqual(["child-repo"]);
+  });
+});
+
+describe("buildAvailableTypesSection / listSpawnableAgentTypesSync", () => {
+  const originalHome = process.env.HOME;
+  let tempHome: string;
+  let typesDir: string;
+
+  beforeEach(async () => {
+    tempHome = await mkdtemp(join(tmpdir(), "itsybitsy-available-types-"));
+    process.env.HOME = tempHome;
+    typesDir = join(tempHome, ".itsybitsy", "agent-types");
+    await mkdir(typesDir, { recursive: true });
+  });
+
+  afterEach(async () => {
+    process.env.HOME = originalHome;
+    await rm(tempHome, { recursive: true, force: true });
+  });
+
+  async function writeType(name: string, content: string): Promise<void> {
+    await Bun.write(join(typesDir, `${name}.md`), content);
+  }
+
+  test("listSpawnableAgentTypesSync returns name + description for spawnable types", async () => {
+    await writeType("manager", `---
+name: manager
+description: Manages sub-agents and coordinates work
+---
+body`);
+    await writeType("worker", `---
+name: worker
+description: Implements a focused task
+---
+body`);
+
+    const types = listSpawnableAgentTypesSync();
+    expect(types).toEqual([
+      { name: "manager", description: "Manages sub-agents and coordinates work" },
+      { name: "worker", description: "Implements a focused task" },
+    ]);
+  });
+
+  test("listSpawnableAgentTypesSync excludes layer types (spawnable: false)", async () => {
+    await writeType("manager", `---
+name: manager
+description: Manages sub-agents
+---
+body`);
+    await writeType("_all", `---
+name: _all
+spawnable: false
+description: Layer file
+---
+body`);
+    await writeType("_non_coordinator", `---
+name: _non_coordinator
+spawnable: false
+description: Another layer file
+---
+body`);
+
+    const types = listSpawnableAgentTypesSync();
+    const names = types.map((t) => t.name);
+    expect(names).toContain("manager");
+    expect(names).not.toContain("_all");
+    expect(names).not.toContain("_non_coordinator");
+  });
+
+  test("listSpawnableAgentTypesSync handles missing description gracefully", async () => {
+    await writeType("plain", `---
+name: plain
+---
+body`);
+
+    const types = listSpawnableAgentTypesSync();
+    expect(types).toEqual([{ name: "plain", description: "" }]);
+  });
+
+  test("listSpawnableAgentTypesSync strips quotes from description", async () => {
+    await writeType("quoted", `---
+name: quoted
+description: "A quoted description"
+---
+body`);
+
+    const types = listSpawnableAgentTypesSync();
+    expect(types[0]?.description).toBe("A quoted description");
+  });
+
+  test("buildAvailableTypesSection produces markdown with header and list", async () => {
+    await writeType("manager", `---
+name: manager
+description: Manages sub-agents
+---
+body`);
+    await writeType("worker", `---
+name: worker
+description: Implements a focused task
+---
+body`);
+
+    const section = buildAvailableTypesSection();
+    expect(section).toContain("### Available Agent Types");
+    expect(section).toContain("`ib new-agent --type <name> \"task\"`");
+    expect(section).toContain("`manager` — Manages sub-agents");
+    expect(section).toContain("`worker` — Implements a focused task");
+  });
+
+  test("buildAvailableTypesSection excludes layer types from output", async () => {
+    await writeType("manager", `---
+name: manager
+description: Manages sub-agents
+---
+body`);
+    await writeType("_all", `---
+name: _all
+spawnable: false
+description: Layer file
+---
+body`);
+
+    const section = buildAvailableTypesSection();
+    expect(section).toContain("`manager`");
+    expect(section).not.toContain("_all");
+    expect(section).not.toContain("Layer file");
+  });
+
+  test("buildAvailableTypesSection omits em-dash when description is empty", async () => {
+    await writeType("plain", `---
+name: plain
+---
+body`);
+
+    const section = buildAvailableTypesSection();
+    expect(section).toContain("- `plain`");
+    expect(section).not.toContain("- `plain` —");
   });
 });

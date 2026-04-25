@@ -1,5 +1,6 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { parseAgentTypeFile, loadAgentType, listAgentTypes, ensureAgentTypesDir, initAgentTypes, agentTypeExists, validateAllAgentTypes, listSpawnableAgentTypesSync, buildAvailableTypesSection } from "./agent-types";
+import { parseAgentTypeFile, loadAgentType, listAgentTypes, ensureAgentTypesDir, initAgentTypes, agentTypeExists, validateAllAgentTypes, listSpawnableAgentTypesSync, listSpawnableTypeNamesSync } from "./agent-types";
+import { buildAvailableTypesSection } from "./hooks/session-start";
 import { mkdtemp, rm, mkdir } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -1300,5 +1301,52 @@ body`);
     const section = buildAvailableTypesSection();
     expect(section).toContain("- `plain`");
     expect(section).not.toContain("- `plain` —");
+  });
+
+  test("listSpawnableAgentTypesSync ignores nested description: keys", async () => {
+    // A nested key like permissions.description would be incorrectly picked
+    // up by a flat scan. The top-level description should win.
+    await writeType("nested", `---
+name: nested
+description: top-level
+permissions:
+  description: nested-should-be-ignored
+---
+body`);
+
+    const types = listSpawnableAgentTypesSync();
+    expect(types).toEqual([{ name: "nested", description: "top-level" }]);
+  });
+
+  test("listSpawnableAgentTypesSync returns empty description when only nested description: is present", async () => {
+    await writeType("only-nested", `---
+name: only-nested
+permissions:
+  description: nested-only
+---
+body`);
+
+    const types = listSpawnableAgentTypesSync();
+    expect(types).toEqual([{ name: "only-nested", description: "" }]);
+  });
+
+  test("listSpawnableTypeNamesSync still returns names only after refactor", async () => {
+    await writeType("manager", `---
+name: manager
+description: Manages sub-agents
+---
+body`);
+    await writeType("worker", `---
+name: worker
+description: Worker
+---
+body`);
+    await writeType("_all", `---
+name: _all
+spawnable: false
+---
+body`);
+
+    expect(listSpawnableTypeNamesSync()).toEqual(["manager", "worker"]);
   });
 });

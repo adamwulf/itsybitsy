@@ -589,89 +589,15 @@ export function listAgentTypeNamesSync(): string[] {
 }
 
 /**
- * Synchronously list the names of types that can be spawned directly
- * (i.e. their frontmatter does not declare `spawnable: false`).
- * Used by UI cyclers in the new-agent dialog so layer-only files like
- * `_all.md` / `_non_coordinator.md` never appear as spawn choices.
- *
- * Performs a lightweight scan of each `.md` file's frontmatter for the
- * `spawnable:` key — no full parse is required.
- */
-export function listSpawnableTypeNamesSync(): string[] {
-  const allNames = listAgentTypeNamesSync();
-  const home = process.env.HOME || homedir();
-  const typesDir = join(home, ".itsybitsy", "agent-types");
-
-  const spawnable: string[] = [];
-  for (const name of allNames) {
-    const filePath = join(typesDir, `${name}.md`);
-    let content: string | undefined;
-    try {
-      content = readFileSync(filePath, "utf8");
-    } catch {
-      // File gone between listing and read — fall back to embedded content if we know it
-      content = EMBEDDED_TYPES[name];
-    }
-    if (content === undefined) {
-      // Directory didn't exist and no embedded default — assume spawnable
-      spawnable.push(name);
-      continue;
-    }
-    if (isSpawnableFrontmatter(content)) {
-      spawnable.push(name);
-    }
-  }
-  return spawnable;
-}
-
-/**
- * Lightweight sync check: return true unless the frontmatter explicitly
- * declares `spawnable: false`. Avoids pulling in the full parser so this
- * stays cheap enough to call from UI render paths.
- */
-function isSpawnableFrontmatter(content: string): boolean {
-  const lines = content.split("\n");
-  if (lines[0] !== "---") return true;
-  for (let i = 1; i < lines.length; i++) {
-    const line = lines[i]!;
-    if (line === "---") break;
-    const trimmed = line.trim();
-    if (trimmed.startsWith("spawnable:")) {
-      const valueStr = trimmed.substring("spawnable:".length).trim();
-      if (valueStr === "false") return false;
-      return true;
-    }
-  }
-  return true;
-}
-
-/**
- * Lightweight sync extractor: read the `description:` value from a
- * frontmatter block without invoking the full parser. Returns an empty
- * string when the key is absent. Strips surrounding single/double quotes.
- */
-function readDescriptionFrontmatter(content: string): string {
-  const lines = content.split("\n");
-  if (lines[0] !== "---") return "";
-  for (let i = 1; i < lines.length; i++) {
-    const line = lines[i]!;
-    if (line === "---") break;
-    const trimmed = line.trim();
-    if (trimmed.startsWith("description:")) {
-      const valueStr = trimmed.substring("description:".length).trim();
-      return valueStr.replace(/^["']|["']$/g, "");
-    }
-  }
-  return "";
-}
-
-/**
  * Synchronously list spawnable agent types as `{name, description}` pairs.
- * Used by session-start templates via the `{{availableTypes}}` placeholder
- * to render the list of types an agent can spawn.
+ * Used by both the new-agent UI cyclers (which only care about names) and
+ * session-start templates that render the `{{availableTypes}}` placeholder.
  *
- * Performs a lightweight per-file scan of frontmatter (spawnable + description)
- * so it stays cheap enough to call from the session-start hook synchronously.
+ * Performs a single lightweight scan of each `.md` file's frontmatter to
+ * extract `spawnable` and `description` together — no full parse is
+ * required. Layer-only files (`spawnable: false`) are excluded.
+ *
+ * Listing order is alphabetical (inherited from {@link listAgentTypeNamesSync}).
  */
 export function listSpawnableAgentTypesSync(): Array<{ name: string; description: string }> {
   const allNames = listAgentTypeNamesSync();
@@ -693,35 +619,73 @@ export function listSpawnableAgentTypesSync(): Array<{ name: string; description
       result.push({ name, description: "" });
       continue;
     }
-    if (isSpawnableFrontmatter(content)) {
-      result.push({ name, description: readDescriptionFrontmatter(content) });
+    const { spawnable, description } = readFrontmatterScalars(content);
+    if (spawnable) {
+      result.push({ name, description });
     }
   }
   return result;
 }
 
 /**
- * Build a markdown section listing every spawnable agent type with its
- * description, for use in session-start templates via `{{availableTypes}}`.
+ * Synchronously list the names of types that can be spawned directly
+ * (i.e. their frontmatter does not declare `spawnable: false`).
+ * Used by UI cyclers in the new-agent dialog so layer-only files like
+ * `_all.md` / `_non_coordinator.md` never appear as spawn choices.
  *
- * Falls back to a placeholder note if no spawnable types are found (this
- * shouldn't happen in practice — the embedded defaults guarantee at least
- * `manager` and `worker`).
+ * Implemented on top of {@link listSpawnableAgentTypesSync} so the disk
+ * scan and fallback semantics stay in one place.
  */
-export function buildAvailableTypesSection(): string {
-  const types = listSpawnableAgentTypesSync();
-  const header = `### Available Agent Types
+export function listSpawnableTypeNamesSync(): string[] {
+  return listSpawnableAgentTypesSync().map((t) => t.name);
+}
 
-You can spawn any of these with \`ib new-agent --type <name> "task"\`:`;
+/**
+ * Lightweight sync extractor: read both `spawnable` and `description`
+ * from a frontmatter block in a single pass. Avoids the full parser so
+ * this stays cheap enough to call from UI render paths and the
+ * session-start hook.
+ *
+ * - `spawnable` is true unless explicitly declared `spawnable: false`.
+ * - `description` is the trimmed value of the top-level `description:`
+ *   key, with surrounding single/double quotes stripped. An absent key
+ *   yields an empty string.
+ *
+ * Only top-level keys are considered: lines beginning with whitespace
+ * (i.e. nested values like `permissions:\n  description: ...`) are
+ * skipped so a nested key never accidentally shadows the top-level one.
+ *
+ * YAML block scalars (`description: |`, `description: >`) are not
+ * supported — same limitation as the full parser. The literal `|` or
+ * `>` would be returned as the description string. None of the
+ * embedded defaults use this form.
+ */
+function readFrontmatterScalars(content: string): { spawnable: boolean; description: string } {
+  let spawnable = true;
+  let description = "";
+  const lines = content.split("\n");
+  if (lines[0] !== "---") return { spawnable, description };
 
-  if (types.length === 0) {
-    return `${header}\n\n_No agent types installed. Run \`ib init-types\` to restore defaults._`;
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i]!;
+    if (line === "---") break;
+    // Skip nested keys: anything indented is part of a nested object/list,
+    // not a top-level frontmatter key.
+    if (/^\s/.test(line)) continue;
+    if (!line.trim() || line.trim().startsWith("#")) continue;
+
+    const colonIdx = line.indexOf(":");
+    if (colonIdx === -1) continue;
+    const key = line.substring(0, colonIdx).trim();
+    const valueStr = line.substring(colonIdx + 1).trim();
+
+    if (key === "spawnable") {
+      if (valueStr === "false") spawnable = false;
+    } else if (key === "description") {
+      description = valueStr.replace(/^["']|["']$/g, "");
+    }
   }
-
-  const lines = types.map(({ name, description }) =>
-    description ? `- \`${name}\` — ${description}` : `- \`${name}\``,
-  );
-  return `${header}\n\n${lines.join("\n")}`;
+  return { spawnable, description };
 }
 
 /**

@@ -403,6 +403,7 @@ You are in a git worktree, which shares the same repository as the main checkout
 | Command | Description |
 |---------|-------------|
 | \`ib new-agent --type worker "task"\` | Spawn a worker sub-agent |
+| \`ib list-types\` | List available agent types you can spawn |
 | \`ib list --manager ${ctx.agentId}\` | List your sub-agents |
 | \`ib look <id>\` | Read an agent's output |
 | \`ib send <id> "msg"\` | Send input to an agent |
@@ -567,6 +568,7 @@ ${buildPathIsolationSection(ctx)}
 | Command | Description |
 |---------|-------------|
 | \`ib new-agent --type worker "task"\` | Spawn a worker sub-agent |
+| \`ib list-types\` | List available agent types you can spawn |
 | \`ib list --manager ${ctx.agentId}\` | List your sub-agents |
 | \`ib look <id>\` | Read an agent's output |
 | \`ib send <id> "msg"\` | Send input to an agent |

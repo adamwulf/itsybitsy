@@ -1143,6 +1143,51 @@ async function main() {
       }
       break;
     }
+    case "list-types":
+    case "list-agent-types": {
+      const { ensureAgentTypesDir, listAgentTypes } = await import("./agent-types");
+      try {
+        await ensureAgentTypesDir();
+        const types = await listAgentTypes();
+        types.sort((a, b) => a.name.localeCompare(b.name));
+
+        const DESC_MAX = 60;
+        const truncate = (s: string): string =>
+          s.length > DESC_MAX ? s.substring(0, DESC_MAX - 1) + "…" : s;
+
+        const rows = types.map((t) => {
+          const spawnable = t.spawnable === false ? "no" : "yes";
+          const spawnsChildren =
+            t.spawnable === false ? "-" : t.canSpawnChildren ? "yes" : "no";
+          return {
+            name: t.name,
+            spawnable,
+            spawnsChildren,
+            description: truncate(t.description || ""),
+          };
+        });
+
+        const headers = { name: "NAME", spawnable: "SPAWNABLE", spawnsChildren: "SPAWNS CHILDREN", description: "DESCRIPTION" };
+        const nameWidth = Math.max(headers.name.length, ...rows.map((r) => r.name.length));
+        const spawnableWidth = Math.max(headers.spawnable.length, ...rows.map((r) => r.spawnable.length));
+        const childrenWidth = Math.max(headers.spawnsChildren.length, ...rows.map((r) => r.spawnsChildren.length));
+
+        const pad = (s: string, w: number): string => s + " ".repeat(Math.max(0, w - s.length));
+
+        console.log(
+          `${pad(headers.name, nameWidth)}  ${pad(headers.spawnable, spawnableWidth)}  ${pad(headers.spawnsChildren, childrenWidth)}  ${headers.description}`,
+        );
+        for (const row of rows) {
+          console.log(
+            `${pad(row.name, nameWidth)}  ${pad(row.spawnable, spawnableWidth)}  ${pad(row.spawnsChildren, childrenWidth)}  ${row.description}`,
+          );
+        }
+      } catch (err) {
+        console.error(`Error listing agent types: ${err instanceof Error ? err.message : String(err)}`);
+        process.exit(1);
+      }
+      break;
+    }
     case "config": {
       const { runConfigCommand } = await import("./config-command");
       await runConfigCommand(args.slice(1));
@@ -1269,6 +1314,7 @@ async function main() {
       console.log("  config get <key>    Get a config value");
       console.log("  config set <k> <v>  Set a config value");
       console.log("  init-types          Populate ~/.itsybitsy/agent-types/ with built-in types");
+      console.log("  list-types          List available agent types");
       console.log("  config add <k> <v>  Add to array config key");
       console.log("  config remove <k> <v> Remove from array config key");
       console.log("  config unset <key>  Unset a config key (revert to default)");

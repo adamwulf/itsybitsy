@@ -345,6 +345,94 @@ describe("CLI arg parsing", () => {
   });
 });
 
+// ─── list-types CLI command ─────────────────────────────────────────────────
+
+describe("list-types CLI command", () => {
+  async function runCliWithHome(cliArgs: string[], home: string): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+    const proc = Bun.spawn(["bun", "run", "src/index.ts", ...cliArgs], {
+      cwd: import.meta.dir.replace(/\/src$/, ""),
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, HOME: home },
+    });
+    const [stdout, stderr] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+    ]);
+    const exitCode = await proc.exited;
+    return { stdout, stderr, exitCode };
+  }
+
+  test("list-types prints all default types and exits 0", async () => {
+    const { mkdtemp, rm } = await import("fs/promises");
+    const { tmpdir } = await import("os");
+    const { join: joinPath } = await import("path");
+    const home = await mkdtemp(joinPath(tmpdir(), "ib-list-types-test-"));
+    try {
+      const { stdout, exitCode } = await runCliWithHome(["list-types"], home);
+      expect(exitCode).toBe(0);
+      expect(stdout).toContain("NAME");
+      expect(stdout).toContain("SPAWNABLE");
+      expect(stdout).toContain("SPAWNS CHILDREN");
+      expect(stdout).toContain("DESCRIPTION");
+      expect(stdout).toContain("manager");
+      expect(stdout).toContain("worker");
+      expect(stdout).toContain("coordinator");
+      expect(stdout).toContain("_all");
+      expect(stdout).toContain("_non_coordinator");
+      // Layer-only types should be marked non-spawnable with "-" for spawns-children
+      const lines = stdout.split("\n");
+      const allLine = lines.find((l) => l.startsWith("_all "));
+      expect(allLine).toBeDefined();
+      expect(allLine).toContain("no");
+      expect(allLine).toContain("-");
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("list-agent-types alias works the same as list-types", async () => {
+    const { mkdtemp, rm } = await import("fs/promises");
+    const { tmpdir } = await import("os");
+    const { join: joinPath } = await import("path");
+    const home = await mkdtemp(joinPath(tmpdir(), "ib-list-types-alias-test-"));
+    try {
+      const { stdout, exitCode } = await runCliWithHome(["list-agent-types"], home);
+      expect(exitCode).toBe(0);
+      expect(stdout).toContain("manager");
+      expect(stdout).toContain("worker");
+      expect(stdout).toContain("coordinator");
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("list-types output is sorted alphabetically", async () => {
+    const { mkdtemp, rm } = await import("fs/promises");
+    const { tmpdir } = await import("os");
+    const { join: joinPath } = await import("path");
+    const home = await mkdtemp(joinPath(tmpdir(), "ib-list-types-sort-test-"));
+    try {
+      const { stdout, exitCode } = await runCliWithHome(["list-types"], home);
+      expect(exitCode).toBe(0);
+      const lines = stdout.split("\n").filter((l) => l.length > 0);
+      // Skip header — collect type names from data rows
+      const dataLines = lines.slice(1);
+      const names = dataLines.map((l) => l.split(/\s+/)[0]!).filter((n) => n.length > 0);
+      const sorted = [...names].sort((a, b) => a.localeCompare(b));
+      expect(names).toEqual(sorted);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("help text mentions list-types", async () => {
+    const { stdout, exitCode } = await runCliWithHome([], "/tmp/ib-test-nonexistent-home");
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("list-types");
+  });
+});
+
 // ─── resolveTarget addressing ─────────────────────────────────────────────
 
 describe("resolveTarget addressing", () => {

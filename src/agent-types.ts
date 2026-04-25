@@ -589,20 +589,22 @@ export function listAgentTypeNamesSync(): string[] {
 }
 
 /**
- * Synchronously list the names of types that can be spawned directly
- * (i.e. their frontmatter does not declare `spawnable: false`).
- * Used by UI cyclers in the new-agent dialog so layer-only files like
- * `_all.md` / `_non_coordinator.md` never appear as spawn choices.
+ * Synchronously list spawnable agent types as `{name, description}` pairs.
+ * Used by both the new-agent UI cyclers (which only care about names) and
+ * session-start templates that render the `{{availableTypes}}` placeholder.
  *
- * Performs a lightweight scan of each `.md` file's frontmatter for the
- * `spawnable:` key — no full parse is required.
+ * Performs a single lightweight scan of each `.md` file's frontmatter to
+ * extract `spawnable` and `description` together — no full parse is
+ * required. Layer-only files (`spawnable: false`) are excluded.
+ *
+ * Listing order is alphabetical (inherited from {@link listAgentTypeNamesSync}).
  */
-export function listSpawnableTypeNamesSync(): string[] {
+export function listSpawnableAgentTypesSync(): Array<{ name: string; description: string }> {
   const allNames = listAgentTypeNamesSync();
   const home = process.env.HOME || homedir();
   const typesDir = join(home, ".itsybitsy", "agent-types");
 
-  const spawnable: string[] = [];
+  const result: Array<{ name: string; description: string }> = [];
   for (const name of allNames) {
     const filePath = join(typesDir, `${name}.md`);
     let content: string | undefined;
@@ -613,36 +615,77 @@ export function listSpawnableTypeNamesSync(): string[] {
       content = EMBEDDED_TYPES[name];
     }
     if (content === undefined) {
-      // Directory didn't exist and no embedded default — assume spawnable
-      spawnable.push(name);
+      // Directory didn't exist and no embedded default — assume spawnable, no description
+      result.push({ name, description: "" });
       continue;
     }
-    if (isSpawnableFrontmatter(content)) {
-      spawnable.push(name);
+    const { spawnable, description } = readFrontmatterScalars(content);
+    if (spawnable) {
+      result.push({ name, description });
     }
   }
-  return spawnable;
+  return result;
 }
 
 /**
- * Lightweight sync check: return true unless the frontmatter explicitly
- * declares `spawnable: false`. Avoids pulling in the full parser so this
- * stays cheap enough to call from UI render paths.
+ * Synchronously list the names of types that can be spawned directly
+ * (i.e. their frontmatter does not declare `spawnable: false`).
+ * Used by UI cyclers in the new-agent dialog so layer-only files like
+ * `_all.md` / `_non_coordinator.md` never appear as spawn choices.
+ *
+ * Implemented on top of {@link listSpawnableAgentTypesSync} so the disk
+ * scan and fallback semantics stay in one place.
  */
-function isSpawnableFrontmatter(content: string): boolean {
+export function listSpawnableTypeNamesSync(): string[] {
+  return listSpawnableAgentTypesSync().map((t) => t.name);
+}
+
+/**
+ * Lightweight sync extractor: read both `spawnable` and `description`
+ * from a frontmatter block in a single pass. Avoids the full parser so
+ * this stays cheap enough to call from UI render paths and the
+ * session-start hook.
+ *
+ * - `spawnable` is true unless explicitly declared `spawnable: false`.
+ * - `description` is the trimmed value of the top-level `description:`
+ *   key, with surrounding single/double quotes stripped. An absent key
+ *   yields an empty string.
+ *
+ * Only top-level keys are considered: lines beginning with whitespace
+ * (i.e. nested values like `permissions:\n  description: ...`) are
+ * skipped so a nested key never accidentally shadows the top-level one.
+ *
+ * YAML block scalars (`description: |`, `description: >`) are not
+ * supported — same limitation as the full parser. The literal `|` or
+ * `>` would be returned as the description string. None of the
+ * embedded defaults use this form.
+ */
+function readFrontmatterScalars(content: string): { spawnable: boolean; description: string } {
+  let spawnable = true;
+  let description = "";
   const lines = content.split("\n");
-  if (lines[0] !== "---") return true;
+  if (lines[0] !== "---") return { spawnable, description };
+
   for (let i = 1; i < lines.length; i++) {
     const line = lines[i]!;
     if (line === "---") break;
-    const trimmed = line.trim();
-    if (trimmed.startsWith("spawnable:")) {
-      const valueStr = trimmed.substring("spawnable:".length).trim();
-      if (valueStr === "false") return false;
-      return true;
+    // Skip nested keys: anything indented is part of a nested object/list,
+    // not a top-level frontmatter key.
+    if (/^\s/.test(line)) continue;
+    if (!line.trim() || line.trim().startsWith("#")) continue;
+
+    const colonIdx = line.indexOf(":");
+    if (colonIdx === -1) continue;
+    const key = line.substring(0, colonIdx).trim();
+    const valueStr = line.substring(colonIdx + 1).trim();
+
+    if (key === "spawnable") {
+      if (valueStr === "false") spawnable = false;
+    } else if (key === "description") {
+      description = valueStr.replace(/^["']|["']$/g, "");
     }
   }
-  return true;
+  return { spawnable, description };
 }
 
 /**

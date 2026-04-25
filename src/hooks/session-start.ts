@@ -4,7 +4,7 @@
 
 import { join, basename } from "path";
 import { AGENT_CWD_PATTERN } from "./shared";
-import { loadAgentType } from "../agent-types";
+import { loadAgentType, listSpawnableAgentTypesSync } from "../agent-types";
 
 export type SessionRole = "primary" | "manager" | "worker" | "coordinator";
 
@@ -141,19 +141,28 @@ The quoted heredoc terminator (\`<<'EOF'\`) is the safest option — nothing ins
 
 /**
  * Interpolate {{placeholder}} variables and {{#if cond}}...{{/if}} blocks in a template.
- * Available variables: agentId, agentManager, parentBranch, worktreePath, rootRepoPath, repoName, pathIsolation
+ * Available variables: agentId, agentManager, parentBranch, worktreePath, rootRepoPath, repoName, pathIsolation, availableTypes
  * Available conditions: hasManager (agent has a manager), isTopLevel (no manager = top-level)
+ *
+ * `availableTypes` is evaluated lazily so templates that don't reference it
+ * don't pay the synchronous disk-scan cost of reading every file in
+ * `~/.itsybitsy/agent-types/`.
  */
 export function interpolateTemplate(template: string, ctx: SessionContext): string {
   const repoName = basename(ctx.rootRepoPath);
-  const vars: Record<string, string> = {
+
+  const scalarVars: Record<string, string> = {
     agentId: ctx.agentId,
     agentManager: ctx.agentManager,
     parentBranch: ctx.parentBranch,
     worktreePath: ctx.worktreePath,
     rootRepoPath: ctx.rootRepoPath,
     repoName,
-    pathIsolation: buildPathIsolationSection(ctx),
+  };
+
+  const lazyVars: Record<string, () => string> = {
+    pathIsolation: () => buildPathIsolationSection(ctx),
+    availableTypes: () => buildAvailableTypesSection(),
   };
 
   const conditions: Record<string, boolean> = {
@@ -171,7 +180,9 @@ export function interpolateTemplate(template: string, ctx: SessionContext): stri
 
   // Replace {{variable}} placeholders
   result = result.replace(/\{\{(\w+)\}\}/g, (_match, varName: string) => {
-    return vars[varName] ?? "";
+    if (varName in scalarVars) return scalarVars[varName]!;
+    if (varName in lazyVars) return lazyVars[varName]!();
+    return "";
   });
 
   return result;
@@ -290,6 +301,30 @@ export function buildPathIsolationSection(ctx: SessionContext): string {
   pathSection += `\n- If you get "Access denied" or "Path violation" errors, you're trying to access a forbidden path`;
 
   return pathSection;
+}
+
+/**
+ * Build a markdown section listing every spawnable agent type with its
+ * description, for use in session-start templates via `{{availableTypes}}`.
+ *
+ * Falls back to a placeholder note if no spawnable types are found (this
+ * shouldn't happen in practice — the embedded defaults guarantee at least
+ * `manager` and `worker`).
+ */
+export function buildAvailableTypesSection(): string {
+  const types = listSpawnableAgentTypesSync();
+  const header = `### Available Agent Types
+
+You can spawn any of these with \`ib new-agent --type <name> "task"\`:`;
+
+  if (types.length === 0) {
+    return `${header}\n\n_No agent types installed. Run \`ib init-types\` to restore defaults._`;
+  }
+
+  const lines = types.map(({ name, description }) =>
+    description ? `- \`${name}\` — ${description}` : `- \`${name}\``,
+  );
+  return `${header}\n\n${lines.join("\n")}`;
 }
 
 function generatePrimaryInstructions(): string {

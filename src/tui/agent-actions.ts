@@ -548,9 +548,17 @@ export function handleAddPermission(ctx: ActionCtx) {
         return;
       }
       const settingsPath = agentSettingsLocalPath(agent);
-      addPermissionToSettings(settingsPath, entry).then((result) => {
+      addPermissionToSettings(settingsPath, entry).then(async (result) => {
         if (result.added) {
           ctx.setNotice(`Added ${entry} to ${agent.id} allow list`);
+          const sendResult = await sendMessage(
+            agent,
+            `[watchdog]: Permission to '${entry}' has been granted. You may retry the action that was previously denied.`,
+            { cwd: "/" },
+          );
+          if (!sendResult.ok) {
+            ctx.setNotice(`Added ${entry}, but notify failed: ${sendResult.stderr || sendResult.stdout}`);
+          }
         } else if (result.reason === "duplicate") {
           ctx.setNotice("Already in allow list");
         } else {

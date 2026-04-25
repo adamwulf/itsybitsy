@@ -406,29 +406,28 @@ describe("interpolateTemplate {{availableTypes}}", () => {
     expect(result).toContain("after");
   });
 
-  test("templates without {{availableTypes}} do not read the agent-types directory", () => {
-    // Point HOME at a tempdir with NO agent-types directory at all. If the
-    // hook eagerly evaluated availableTypes it would silently fall back to
-    // EMBEDDED_TYPES; the lazy path should not even try.
-    // Verified indirectly: the template doesn't reference {{availableTypes}},
-    // so removing the directory mid-test must not cause any failure.
+  test("templates without {{availableTypes}} render unaffected when agent-types dir is empty", () => {
+    // HOME points at a tempdir whose agent-types directory exists but is empty.
+    // Eagerly invoking buildAvailableTypesSection would still succeed (the
+    // empty-types fallback message would be produced), but the rendered
+    // template shouldn't contain it because the placeholder isn't referenced.
     const template = "{{agentId}} on {{parentBranch}}";
     const result = interpolateTemplate(template, baseCtx);
     expect(result).toBe("agent-abc123 on agent/agent-parent");
-    // Sanity: no leftover placeholder syntax
-    expect(result).not.toContain("{{");
+    expect(result).not.toContain("Available Agent Types");
   });
 
-  test("multiple {{availableTypes}} placeholders in one template share one disk scan", async () => {
+  test("multiple {{availableTypes}} placeholders all expand to the same content", async () => {
     await Bun.write(
       join(typesDir, "manager.md"),
       "---\nname: manager\ndescription: Manages\n---\nbody",
     );
     const template = "{{availableTypes}}\n---\n{{availableTypes}}";
     const result = interpolateTemplate(template, baseCtx);
-    // Both occurrences expand to the same content
     const occurrences = result.split("### Available Agent Types").length - 1;
     expect(occurrences).toBe(2);
+    // Both copies must list the same type
+    expect(result.split("`manager` — Manages").length - 1).toBe(2);
   });
 });
 

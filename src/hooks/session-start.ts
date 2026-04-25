@@ -144,15 +144,13 @@ The quoted heredoc terminator (\`<<'EOF'\`) is the safest option — nothing ins
  * Available variables: agentId, agentManager, parentBranch, worktreePath, rootRepoPath, repoName, pathIsolation, availableTypes
  * Available conditions: hasManager (agent has a manager), isTopLevel (no manager = top-level)
  *
- * Computed placeholders (`pathIsolation`, `availableTypes`) are evaluated
- * lazily via thunks so templates that don't reference them don't pay the
- * cost — `availableTypes` in particular reads every file in
- * `~/.itsybitsy/agent-types/` synchronously.
+ * `availableTypes` is evaluated lazily so templates that don't reference it
+ * don't pay the synchronous disk-scan cost of reading every file in
+ * `~/.itsybitsy/agent-types/`.
  */
 export function interpolateTemplate(template: string, ctx: SessionContext): string {
   const repoName = basename(ctx.rootRepoPath);
 
-  // Pre-computed scalar values — cheap, no I/O.
   const scalarVars: Record<string, string> = {
     agentId: ctx.agentId,
     agentManager: ctx.agentManager,
@@ -162,11 +160,9 @@ export function interpolateTemplate(template: string, ctx: SessionContext): stri
     repoName,
   };
 
-  // Lazy-computed values — only invoked when the template references the key.
-  // Each thunk runs at most once per call thanks to the memoization wrapper.
   const lazyVars: Record<string, () => string> = {
-    pathIsolation: memoize(() => buildPathIsolationSection(ctx)),
-    availableTypes: memoize(() => buildAvailableTypesSection()),
+    pathIsolation: () => buildPathIsolationSection(ctx),
+    availableTypes: () => buildAvailableTypesSection(),
   };
 
   const conditions: Record<string, boolean> = {
@@ -190,19 +186,6 @@ export function interpolateTemplate(template: string, ctx: SessionContext): stri
   });
 
   return result;
-}
-
-/**
- * Cache the result of a zero-arg function so repeated calls within a single
- * `interpolateTemplate` invocation share the same value (and so a placeholder
- * that appears multiple times in a template still only pays the I/O cost once).
- */
-function memoize<T>(fn: () => T): () => T {
-  let cached: { value: T } | undefined;
-  return () => {
-    if (!cached) cached = { value: fn() };
-    return cached.value;
-  };
 }
 
 /**

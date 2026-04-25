@@ -162,6 +162,20 @@ export function getAllTrackers(): ReadonlyMap<string, AgentTracker> {
   return trackers;
 }
 
+/**
+ * Stamp the per-agent tracker's `lastCompactCheckMs` to "now", so the next
+ * auto-compact eligibility check is delayed by the full `COMPACT_CHECK_COOLDOWN_MS`.
+ *
+ * Used by `resumeAgent` to suppress an immediate compact-on-resume when the
+ * prior transcript already shows usage above `autoCompactThreshold`. Without
+ * this, a freshly-resumed agent would receive `/compact` on the very first
+ * watchdog tick — defeating the purpose of resuming.
+ */
+export function stampAgentCompactCheck(agentId: string): void {
+  const tracker = getTracker(agentId);
+  tracker.lastCompactCheckMs = nowFn();
+}
+
 /** Clear all trackers (for testing) */
 export function clearTrackers(): void {
   trackers.clear();

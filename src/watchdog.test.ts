@@ -43,10 +43,16 @@ import {
   resetWatchdogSleep,
   setWatchdogCaptureTmux,
   resetWatchdogCaptureTmux,
+  setWatchdogListRepos,
+  resetWatchdogListRepos,
+  setWatchdogReadAllAgents,
+  resetWatchdogReadAllAgents,
+  clearAllAgentsCache,
+  makeLazyAllAgents,
+  ALL_AGENTS_TTL_MS,
   RATE_LIMIT_MAX_RETRIES,
   RATE_LIMIT_RETRY_DELAY_MS,
   type AgentTracker,
-  type StateHandler,
 } from "./watchdog";
 import {
   setSendSpawnRunner,
@@ -1462,6 +1468,9 @@ describe("runPerAgentWatchdog", () => {
     setSendSpawnRunner(() => ({ stdout: "", exitCode: 0 }) as any);
     // Disable auto-compact
     setWatchdogReadConfig(async () => ({} as any));
+    // Module-level snapshot cache survives across tests; clear so
+    // notification-path handlers don't leak a populated cache forward.
+    clearAllAgentsCache();
   });
 
   afterEach(() => {
@@ -1474,6 +1483,7 @@ describe("runPerAgentWatchdog", () => {
     resetWatchdogReadConfig();
     resetWatchdogSpawnRunner();
     resetPerAgentReadState();
+    clearAllAgentsCache();
   });
 
   test("auto-accepts MCP server permissions prompt", async () => {
@@ -1743,5 +1753,123 @@ describe("resolveWatchdogState — waiting + background shell override", () => {
     // "Compacting conversation" appearing in last 5 lines takes precedence.
     const output = "noise\nnoise\n⏵⏵ accept edits on · 1 shell\nmore\nCompacting conversation";
     expect(resolveWatchdogState(output, "waiting")).toBe("compacting");
+  });
+});
+
+// ── Lazy + TTL-cached allAgents loading ──────────────────────────────────────
+
+describe("lazy allAgents loading via runPerAgentWatchdog", () => {
+  let worktreeExists: boolean;
+  let tmuxOutput: string | null;
+  let currentTime: number;
+  let readAllAgentsCalls: number;
+
+  beforeEach(() => {
+    worktreeExists = true;
+    tmuxOutput = null;
+    currentTime = 1000000;
+    readAllAgentsCalls = 0;
+
+    setPerAgentExistsSync((_path: string) => worktreeExists);
+    setPerAgentCaptureTmux(async (_session: string) => tmuxOutput);
+    setPerAgentReadMeta(async (_dir: string) => ({
+      meta: {
+        id: "agent-test1",
+        session_id: "sid-123",
+        tmux_session: "tmux-test1",
+        prompt: "test",
+        manager: "agent-mgr",
+        created: "2026-03-05T00:00:00Z",
+        created_epoch: 1000,
+        worktree: true,
+        worker: false,
+        yolo: false,
+        model: "sonnet",
+        claude_pid: "999",
+      },
+    }));
+    setWatchdogNow(() => currentTime);
+    setPerAgentSleep(async () => {});
+    setSendSpawnRunner(() => ({ stdout: "", exitCode: 0 }) as any);
+    setWatchdogReadConfig(async () => ({} as any));
+
+    setWatchdogListRepos(async () => [{ path: "/tmp/r", name: "r" }]);
+    setWatchdogReadAllAgents(async (_repos) => {
+      readAllAgentsCalls++;
+      return { agents: [], errors: [], orphanedTmuxSessions: [] };
+    });
+    clearAllAgentsCache();
+  });
+
+  afterEach(() => {
+    resetPerAgentExistsSync();
+    resetPerAgentCaptureTmux();
+    resetPerAgentReadMeta();
+    resetPerAgentSleep();
+    resetWatchdogNow();
+    resetSendSpawnRunner();
+    resetWatchdogReadConfig();
+    resetWatchdogSpawnRunner();
+    resetPerAgentReadState();
+    resetWatchdogListRepos();
+    resetWatchdogReadAllAgents();
+    clearAllAgentsCache();
+  });
+
+  test("running-state tick does NOT call readAllAgents (lazy thunk skipped)", async () => {
+    // Running agent: handleRunning never invokes the thunk, so no disk read.
+    setPerAgentReadState(async (_dir: string) => "running");
+    tmuxOutput = "Claude Code v1.0.0\n[USER TASK]";
+
+    let pollCount = 0;
+    setPerAgentCaptureTmux(async (_session: string) => {
+      pollCount++;
+      // Allow a single poll, then exit by removing the worktree.
+      if (pollCount >= 1) worktreeExists = false;
+      return tmuxOutput;
+    });
+
+    await runPerAgentWatchdog("agent-test1", "/tmp/test");
+    expect(pollCount).toBeGreaterThanOrEqual(1);
+    expect(readAllAgentsCalls).toBe(0);
+  });
+
+  test("TTL refetch: cache hit within window, fresh read after expiry", async () => {
+    setPerAgentReadState(async (_dir: string) => "waiting");
+    tmuxOutput = "no shells";
+
+    let pollCount = 0;
+    setPerAgentCaptureTmux(async (_session: string) => {
+      pollCount++;
+      if (pollCount >= 1) worktreeExists = false;
+      return tmuxOutput;
+    });
+
+    await runPerAgentWatchdog("agent-test1", "/tmp/test");
+    expect(readAllAgentsCalls).toBe(1); // cold cache → fresh read
+
+    worktreeExists = true;
+    pollCount = 0;
+    await runPerAgentWatchdog("agent-test1", "/tmp/test");
+    expect(readAllAgentsCalls).toBe(1); // cache hit (within TTL)
+
+    currentTime += ALL_AGENTS_TTL_MS + 1;
+    worktreeExists = true;
+    pollCount = 0;
+    await runPerAgentWatchdog("agent-test1", "/tmp/test");
+    expect(readAllAgentsCalls).toBe(2); // cache miss (TTL expired) → fresh read
+  });
+
+  test("intra-tick memoization: a thunk's repeated calls trigger one disk read", async () => {
+    // Direct test of makeLazyAllAgents() — bypasses the watchdog loop so we
+    // don't have to override any production handler.
+    clearAllAgentsCache();
+    const thunk = makeLazyAllAgents();
+    const a = await thunk();
+    const b = await thunk();
+    const c = await thunk();
+    expect(a).toBe(b);
+    expect(b).toBe(c);
+    expect(readAllAgentsCalls).toBe(1);
   });
 });

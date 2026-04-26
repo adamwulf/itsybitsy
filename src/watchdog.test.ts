@@ -48,11 +48,11 @@ import {
   setWatchdogReadAllAgents,
   resetWatchdogReadAllAgents,
   clearAllAgentsCache,
+  makeLazyAllAgents,
   ALL_AGENTS_TTL_MS,
   RATE_LIMIT_MAX_RETRIES,
   RATE_LIMIT_RETRY_DELAY_MS,
   type AgentTracker,
-  type StateHandler,
 } from "./watchdog";
 import {
   setSendSpawnRunner,
@@ -1468,6 +1468,9 @@ describe("runPerAgentWatchdog", () => {
     setSendSpawnRunner(() => ({ stdout: "", exitCode: 0 }) as any);
     // Disable auto-compact
     setWatchdogReadConfig(async () => ({} as any));
+    // Module-level snapshot cache survives across tests; clear so
+    // notification-path handlers don't leak a populated cache forward.
+    clearAllAgentsCache();
   });
 
   afterEach(() => {
@@ -1480,6 +1483,7 @@ describe("runPerAgentWatchdog", () => {
     resetWatchdogReadConfig();
     resetWatchdogSpawnRunner();
     resetPerAgentReadState();
+    clearAllAgentsCache();
   });
 
   test("auto-accepts MCP server permissions prompt", async () => {
@@ -1753,12 +1757,6 @@ describe("resolveWatchdogState — waiting + background shell override", () => {
 });
 
 // ── Lazy + TTL-cached allAgents loading ──────────────────────────────────────
-//
-// The per-agent watchdog used to call listRepos() + readAllAgents() on every
-// tick (~250 openat syscalls per iteration). Now it passes a lazy thunk that
-// (a) skips the disk read entirely for handlers that never need allAgents
-// (running/creating/compacting/rate_limited/stopped) and (b) wraps the call
-// in a 10s TTL cache so a waiting agent's repeat ticks reuse one snapshot.
 
 describe("lazy allAgents loading via runPerAgentWatchdog", () => {
   let worktreeExists: boolean;
@@ -1836,85 +1834,42 @@ describe("lazy allAgents loading via runPerAgentWatchdog", () => {
     expect(readAllAgentsCalls).toBe(0);
   });
 
-  test("TTL refetch: thunk hit twice within 10s = 1 read; advance past TTL = 2 reads", async () => {
-    // Drive the thunk directly via the public per-tick lazy mechanism: instead
-    // of relying on runPerAgentWatchdog, we simulate two iterations by calling
-    // a fresh thunk per iteration (matching makeLazyAllAgents() per-tick build).
-    // This isolates TTL cache behavior from the watchdog poll loop.
-
-    // First iteration: thunk fires, cold cache → readAllAgents called once.
-    // Build a fresh per-iteration thunk by clearing then loading a waiting agent.
+  test("TTL refetch: cache hit within window, fresh read after expiry", async () => {
     setPerAgentReadState(async (_dir: string) => "waiting");
     tmuxOutput = "no shells";
 
-    // First runPerAgentWatchdog tick: handleWaiting fires, calls thunk.
     let pollCount = 0;
     setPerAgentCaptureTmux(async (_session: string) => {
       pollCount++;
       if (pollCount >= 1) worktreeExists = false;
       return tmuxOutput;
     });
-    await runPerAgentWatchdog("agent-test1", "/tmp/test");
-    expect(readAllAgentsCalls).toBe(1);
 
-    // Second runPerAgentWatchdog within TTL (still currentTime = 1000000): cache hit, no new read.
+    await runPerAgentWatchdog("agent-test1", "/tmp/test");
+    expect(readAllAgentsCalls).toBe(1); // cold cache → fresh read
+
     worktreeExists = true;
     pollCount = 0;
     await runPerAgentWatchdog("agent-test1", "/tmp/test");
-    expect(readAllAgentsCalls).toBe(1);
+    expect(readAllAgentsCalls).toBe(1); // cache hit (within TTL)
 
-    // Advance time past TTL: cache stale, fresh read.
     currentTime += ALL_AGENTS_TTL_MS + 1;
     worktreeExists = true;
     pollCount = 0;
     await runPerAgentWatchdog("agent-test1", "/tmp/test");
-    expect(readAllAgentsCalls).toBe(2);
+    expect(readAllAgentsCalls).toBe(2); // cache miss (TTL expired) → fresh read
   });
 
-  test("intra-tick memoization: a handler calling thunk N times reads disk only once", async () => {
-    // Validates the per-tick lazy thunk contract: even if a handler invokes
-    // getAllAgents() multiple times within one tick, the underlying disk read
-    // happens at most once per tick. This is independent of the TTL cache —
-    // we ensure that by clearing the cache before the call so the very first
-    // thunk invocation must hit disk.
-    let thunkInvocations = 0;
-    const customHandler: StateHandler = async (_agent, _tracker, getAllAgents) => {
-      // Call the thunk three times back-to-back. With per-tick memoization,
-      // these resolve to the same Promise and the disk is read once.
-      await getAllAgents();
-      await getAllAgents();
-      await getAllAgents();
-      thunkInvocations++;
-    };
-    // Register on "running" — that's what resolveWatchdogState() returns when
-    // metaState is undefined (the fallback branch), so this overrides the real
-    // running handler for the duration of this test only. The real running
-    // handler only resets two tracker fields, which clearTrackers() in
-    // beforeEach restores between tests. We restore the override after.
-    registerStateHandler("running", customHandler);
-    try {
-      // metaState undefined → resolveWatchdogState falls through to "running".
-      setPerAgentReadState(async (_dir: string) => undefined);
-      tmuxOutput = "Claude Code v1.0.0\n[USER TASK]";
-
-      let pollCount = 0;
-      setPerAgentCaptureTmux(async (_session: string) => {
-        pollCount++;
-        if (pollCount >= 1) worktreeExists = false;
-        return tmuxOutput;
-      });
-
-      clearAllAgentsCache();
-      await runPerAgentWatchdog("agent-test1", "/tmp/test");
-      expect(thunkInvocations).toBe(1);
-      // Three thunk calls within one tick → exactly one disk read.
-      expect(readAllAgentsCalls).toBe(1);
-    } finally {
-      // Restore the real running handler (resets two tracker fields).
-      registerStateHandler("running", async (_agent, tracker, _getAllAgents) => {
-        if (tracker.completionNotified) tracker.completionNotified = false;
-        tracker.rateLimitBypassed = false;
-      });
-    }
+  test("intra-tick memoization: a thunk's repeated calls trigger one disk read", async () => {
+    // Direct test of makeLazyAllAgents() — bypasses the watchdog loop so we
+    // don't have to override any production handler.
+    clearAllAgentsCache();
+    const thunk = makeLazyAllAgents();
+    const a = await thunk();
+    const b = await thunk();
+    const c = await thunk();
+    expect(a).toBe(b);
+    expect(b).toBe(c);
+    expect(readAllAgentsCalls).toBe(1);
   });
 });

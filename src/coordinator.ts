@@ -335,8 +335,10 @@ export async function detectSystemCoordinatorState(): Promise<CoordinatorState> 
     return "stopped";
   }
 
-  // Capture tmux output
-  const output = await captureTmuxOutput(IB_COORDINATOR_SESSION);
+  // Capture tmux output — only the last 50 lines are inspected (compacting:
+  // last 5, rate_limited: last 15), so request just 50 to avoid the default
+  // 5000-line capture cost.
+  const output = await captureTmuxOutput(IB_COORDINATOR_SESSION, 50);
   if (output === null) {
     return "stopped";
   }

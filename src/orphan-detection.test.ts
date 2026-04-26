@@ -19,7 +19,7 @@ mock.module("./tmux-poller", () => ({
 }));
 
 // Import after mocking
-const { readAllAgents } = await import("./agents");
+const { readAllAgents, resetListTmuxSessionsCache } = await import("./agents");
 
 describe("orphaned tmux session detection", () => {
   let tempDir: string;
@@ -27,6 +27,8 @@ describe("orphaned tmux session detection", () => {
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "itsybitsy-orphan-test-"));
     mockListTmuxSessions.mockReset();
+    // Clear the listTmuxSessions TTL cache so each test sees fresh mock results
+    resetListTmuxSessionsCache();
   });
 
   afterEach(async () => {

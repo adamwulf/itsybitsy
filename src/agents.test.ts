@@ -21,6 +21,7 @@ import {
   detectAgentStates,
   CREATING_GRACE_PERIOD_MS,
   isRecentlyCreatedDirCtx,
+  resetListTmuxSessionsCache,
 } from "./agents";
 import { spawnCtx as tmuxPollerSpawnCtx } from "./tmux-poller";
 import type { Agent, AgentMeta, FlatEntry } from "./agents";
@@ -1107,5 +1108,143 @@ describe("detectAgentStates — waiting + background shell override", () => {
     });
     await detectAgentStates([a]);
     expect(a.state).toBe("stopped");
+  });
+});
+
+// ── detectAgentStates — complete agent fast-path (Change A) ────────────────
+
+describe("detectAgentStates — 'complete' agents skip capture-pane", () => {
+  afterEach(() => {
+    tmuxPollerSpawnCtx.reset();
+  });
+
+  test("complete agent with tmux session does not invoke captureTmuxOutput", async () => {
+    let captureCalls = 0;
+    tmuxPollerSpawnCtx.set(((args: any[]) => {
+      if (args[0] === "tmux" && args[1] === "capture-pane") captureCalls++;
+      return {
+        stdout: new ReadableStream({ start(c) { c.close(); } }),
+        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        exited: Promise.resolve(0),
+      };
+    }) as any);
+
+    const a = makeAgent({
+      id: "a1",
+      meta: { state: "complete", tmux_session: "ib-a1" } as Partial<AgentMeta> as AgentMeta,
+    });
+    await detectAgentStates([a]);
+    expect(a.state).toBe("complete");
+    expect(captureCalls).toBe(0);
+  });
+
+  test("complete agent with no tmux session resolves to 'stopped' (existing path)", async () => {
+    let captureCalls = 0;
+    tmuxPollerSpawnCtx.set(((args: any[]) => {
+      if (args[0] === "tmux" && args[1] === "capture-pane") captureCalls++;
+      return {
+        stdout: new ReadableStream({ start(c) { c.close(); } }),
+        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        exited: Promise.resolve(0),
+      };
+    }) as any);
+
+    const a = makeAgent({
+      id: "a1",
+      meta: {
+        state: "complete",
+        tmux_session: "",
+        created_epoch: Math.floor(Date.now() / 1000) - 3600,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+    await detectAgentStates([a]);
+    expect(a.state).toBe("stopped");
+    expect(captureCalls).toBe(0);
+  });
+
+  test("running agent still invokes captureTmuxOutput (no regression)", async () => {
+    let captureCalls = 0;
+    tmuxPollerSpawnCtx.set(((args: any[]) => {
+      const isCapture = args[0] === "tmux" && args[1] === "capture-pane";
+      if (isCapture) captureCalls++;
+      return {
+        stdout: new ReadableStream({
+          start(c) {
+            c.enqueue(new TextEncoder().encode(isCapture ? "ordinary output\n" : ""));
+            c.close();
+          },
+        }),
+        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        exited: Promise.resolve(0),
+      };
+    }) as any);
+
+    const a = makeAgent({
+      id: "a1",
+      meta: { state: "running", tmux_session: "ib-a1" } as Partial<AgentMeta> as AgentMeta,
+    });
+    await detectAgentStates([a]);
+    expect(a.state).toBe("running");
+    expect(captureCalls).toBe(1);
+  });
+});
+
+// ── readAllAgents — listTmuxSessions TTL cache (Change D) ──────────────────
+
+describe("readAllAgents — listTmuxSessions cache", () => {
+  let tempDir: string;
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "itsybitsy-listcache-"));
+    resetListTmuxSessionsCache();
+  });
+
+  afterEach(async () => {
+    tmuxPollerSpawnCtx.reset();
+    resetListTmuxSessionsCache();
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  test("two consecutive readAllAgents within TTL invoke list-sessions only once", async () => {
+    let listCalls = 0;
+    tmuxPollerSpawnCtx.set(((args: any[]) => {
+      if (args[0] === "tmux" && args[1] === "list-sessions") listCalls++;
+      return {
+        stdout: new ReadableStream({
+          start(c) {
+            c.enqueue(new TextEncoder().encode(""));
+            c.close();
+          },
+        }),
+        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        exited: Promise.resolve(0),
+      };
+    }) as any);
+
+    await readAllAgents([{ path: tempDir, name: "test-repo" }]);
+    await readAllAgents([{ path: tempDir, name: "test-repo" }]);
+    expect(listCalls).toBe(1);
+  });
+
+  test("after cache reset, list-sessions is invoked again", async () => {
+    let listCalls = 0;
+    tmuxPollerSpawnCtx.set(((args: any[]) => {
+      if (args[0] === "tmux" && args[1] === "list-sessions") listCalls++;
+      return {
+        stdout: new ReadableStream({
+          start(c) {
+            c.enqueue(new TextEncoder().encode(""));
+            c.close();
+          },
+        }),
+        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        exited: Promise.resolve(0),
+      };
+    }) as any);
+
+    await readAllAgents([{ path: tempDir, name: "test-repo" }]);
+    resetListTmuxSessionsCache();
+    await readAllAgents([{ path: tempDir, name: "test-repo" }]);
+    expect(listCalls).toBe(2);
   });
 });

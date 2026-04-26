@@ -37,6 +37,8 @@ mock.module("./agents", () => ({
 const { AgentWatcher } = await import("./watcher");
 // Import coordinatorSpawnCtx to inject noop (prevents real tmux calls in getCoordinatorInfo)
 const { coordinatorSpawnCtx } = await import("./coordinator");
+// Import tmux-poller spawnCtx for tests that exercise captureTmuxOutput / display-message
+const { spawnCtx: tmuxPollerSpawnCtx } = await import("./tmux-poller");
 
 function makeAgent(id: string, archived = false): Agent {
   return _makeAgent({ id, archived });
@@ -1073,5 +1075,131 @@ describe("AgentWatcher", () => {
       watcher.stop();
       await rm(tempDir2, { recursive: true, force: true });
     }, 10_000);
+  });
+
+  describe("getCoordinatorInfo session_created cache (Change C)", () => {
+    test("display-message is invoked only once across two refreshes when session is alive", async () => {
+      setupDefaultMocks();
+      // coordinatorSpawnCtx handles `tmux has-session` — return exit 0 (alive)
+      coordinatorSpawnCtx.set(((cmd: string[]) => {
+        if (cmd.includes("has-session")) {
+          return {
+            stdout: new Response("").body!,
+            stderr: new Response("").body!,
+            exited: Promise.resolve(0),
+          };
+        }
+        return {
+          stdout: new Response("").body!,
+          stderr: new Response("").body!,
+          exited: Promise.resolve(0),
+        };
+      }) as any);
+
+      // tmux-poller spawnCtx handles capture-pane and display-message
+      let displayMessageCalls = 0;
+      tmuxPollerSpawnCtx.set(((cmd: string[]) => {
+        if (cmd.includes("capture-pane")) {
+          return {
+            stdout: new Response("normal output").body!,
+            stderr: new Response("").body!,
+            exited: Promise.resolve(0),
+          };
+        }
+        if (cmd.includes("display-message")) {
+          displayMessageCalls++;
+          return {
+            stdout: new Response("1700000000\n").body!,
+            stderr: new Response("").body!,
+            exited: Promise.resolve(0),
+          };
+        }
+        return {
+          stdout: new Response("").body!,
+          stderr: new Response("").body!,
+          exited: Promise.resolve(0),
+        };
+      }) as any);
+
+      const watcher = new AgentWatcher(
+        [{ path: tempDir, name: "test" }],
+        { onUpdate: () => {} }
+      );
+
+      await watcher.start(); // first refresh — should call display-message
+      await watcher.refresh(); // second refresh — should reuse cached value
+      watcher.stop();
+
+      expect(displayMessageCalls).toBe(1);
+
+      tmuxPollerSpawnCtx.reset();
+    });
+
+    test("cache is invalidated when coordinator state becomes 'stopped'", async () => {
+      setupDefaultMocks();
+
+      // Phase 1: session alive — display-message returns 1700000000
+      let hasSessionExit = 0;
+      coordinatorSpawnCtx.set(((cmd: string[]) => {
+        if (cmd.includes("has-session")) {
+          return {
+            stdout: new Response("").body!,
+            stderr: new Response("").body!,
+            exited: Promise.resolve(hasSessionExit),
+          };
+        }
+        return {
+          stdout: new Response("").body!,
+          stderr: new Response("").body!,
+          exited: Promise.resolve(0),
+        };
+      }) as any);
+
+      let displayMessageCalls = 0;
+      tmuxPollerSpawnCtx.set(((cmd: string[]) => {
+        if (cmd.includes("capture-pane")) {
+          return {
+            stdout: new Response("normal output").body!,
+            stderr: new Response("").body!,
+            exited: Promise.resolve(0),
+          };
+        }
+        if (cmd.includes("display-message")) {
+          displayMessageCalls++;
+          return {
+            stdout: new Response("1700000000\n").body!,
+            stderr: new Response("").body!,
+            exited: Promise.resolve(0),
+          };
+        }
+        return {
+          stdout: new Response("").body!,
+          stderr: new Response("").body!,
+          exited: Promise.resolve(0),
+        };
+      }) as any);
+
+      const watcher = new AgentWatcher(
+        [{ path: tempDir, name: "test" }],
+        { onUpdate: () => {} }
+      );
+
+      await watcher.start();
+      expect(displayMessageCalls).toBe(1);
+
+      // Phase 2: session reported stopped — cache invalidates
+      hasSessionExit = 1;
+      await watcher.refresh();
+      // display-message NOT called when stopped
+      expect(displayMessageCalls).toBe(1);
+
+      // Phase 3: session alive again — display-message called again because cache cleared
+      hasSessionExit = 0;
+      await watcher.refresh();
+      expect(displayMessageCalls).toBe(2);
+
+      watcher.stop();
+      tmuxPollerSpawnCtx.reset();
+    });
   });
 });

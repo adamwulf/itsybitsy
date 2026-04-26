@@ -545,17 +545,40 @@ export function flattenAgentTree(
   return result;
 }
 
+/** TTL (ms) for the listTmuxSessions() cache used by readAllAgents(). */
+const LIST_TMUX_SESSIONS_TTL_MS = 5_000;
+
+/** Cached result of listTmuxSessions() — debounced fs.watch refreshes can fire
+ * many times per second, but the orphan list rarely changes that fast. */
+let listTmuxSessionsCache: { value: string[]; expiresAt: number } | null = null;
+
+/** Reset the listTmuxSessions cache. Exported for tests. */
+export function resetListTmuxSessionsCache(): void {
+  listTmuxSessionsCache = null;
+}
+
 /**
  * Read all agents across multiple repos.
  * Also detects orphaned tmux sessions (sessions matching ittybitty-* pattern
- * that don't correspond to any known agent).
+ * that don't correspond to any known agent). The tmux session list is cached
+ * for a short TTL so back-to-back refreshes don't each spawn `tmux list-sessions`.
  */
 export async function readAllAgents(
   repos: Array<{ path: string; name: string }>
 ): Promise<ReadAgentsResult> {
+  const now = Date.now();
+  const cached = listTmuxSessionsCache;
+  const tmuxSessionsPromise =
+    cached && cached.expiresAt > now
+      ? Promise.resolve(cached.value)
+      : listTmuxSessions().then((value) => {
+          listTmuxSessionsCache = { value, expiresAt: Date.now() + LIST_TMUX_SESSIONS_TTL_MS };
+          return value;
+        });
+
   const [results, tmuxSessions] = await Promise.all([
     Promise.all(repos.map((r) => readRepoAgents(r.path, r.name))),
-    listTmuxSessions(),
+    tmuxSessionsPromise,
   ]);
 
   const allAgents = results.flatMap((r) => r.agents);
@@ -622,6 +645,21 @@ export async function detectAgentStates(agents: Agent[]): Promise<void> {
         agent.state = isRecentlyCreated(agent.meta.created_epoch) ? "creating" : "stopped";
         return;
       }
+
+      // Fast-path: 'complete' agents have signed off — no transient overrides
+      // apply (compacting/rate_limited shouldn't happen post-signoff, and the
+      // background-task override is scoped to meta.state === "waiting"). Trust
+      // the stored state and skip the tmux capture (saves a posix_spawn +
+      // ~20 openat() per agent per 2s tick).
+      // Trade-off: if the tmux session was killed externally, we'll briefly
+      // report 'complete' instead of 'stopped' until refresh() reconciles via
+      // fs.watch when the agent is archived. Acceptable — the alternative is
+      // a `tmux has-session` check, which still costs a spawn.
+      if (agent.meta.state === "complete") {
+        agent.state = "complete";
+        return;
+      }
+
       const output = await captureTmuxOutput(tmuxSession, 50);
       if (output === null) {
         agent.state = isRecentlyCreated(agent.meta.created_epoch) ? "creating" : "stopped";

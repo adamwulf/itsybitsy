@@ -9,7 +9,7 @@ import type { InputFieldComponent } from "./input-field";
 import type { Agent, FlatEntry, PendingQuestion, DenialEntry } from "../agents";
 import type { RepoHealthReport } from "../health-check";
 import { getResolvableWarnings } from "../health-check";
-import { readAgentLog, readAgentPrompt, parseDenials, resolveAgentIcon } from "../agents";
+import { readAgentLog, readAgentLogWindow, readAgentPrompt, parseDenials, resolveAgentIcon } from "../agents";
 import { diffAgent, statusAgent } from "../ib-commands";
 import { wrapLines } from "./wrap";
 import { getStateColors } from "./color-scheme";
@@ -96,6 +96,26 @@ export function formatAgentRow(
   return `${connector}${icon} ${agent.id}  ${coloredState}  ${paddedAge}  ${agent.meta.model}  ${promptText}`;
 }
 
+/**
+ * Tracks the tail-window of agent.log currently loaded into RightPaneComponent.agentLogContent.
+ * Used by loadAgentLog() to skip re-reads when the cached window already covers the requested view.
+ */
+export interface LoadedLogWindow {
+  agentId: string;
+  /** Total file size at the time of the last read (cache invalidation key) */
+  fileSize: number;
+  /** True if the read started at byte 0 — entire file is in memory, no further reads needed */
+  atTop: boolean;
+  /** Number of lines currently held in agentLogContent */
+  loadedLineCount: number;
+  /** displayHeight at the time of the last read (used to detect resize-driven reloads) */
+  displayHeight: number;
+  /** scrollOffset at the time of the last read */
+  scrollOffset: number;
+  /** bufferRows used at the time of the last read (used to size the safety margin) */
+  bufferRows: number;
+}
+
 /** Right pane content component */
 export class RightPaneComponent implements Component {
   mode: PaneMode = "AGENT LOG";
@@ -106,8 +126,16 @@ export class RightPaneComponent implements Component {
   scrollOffset = 0;
   displayHeight = 20;
   agentLogContent: string[] | null = null;
+  /**
+   * Bookkeeping for the tail-window currently loaded into agentLogContent.
+   * Used by loadAgentLog() to decide whether a re-read is needed.
+   */
+  loadedLogWindow: LoadedLogWindow | null = null;
+  /** Guard so concurrent loadAgentLog calls don't stomp on each other */
+  agentLogLoading = false;
   promptContent: string[] | null = null;
   denialsContent: DenialEntry[] | null = null;
+  denialsLoading = false;
   denialFilter: DenialFilter = "all";
   errors: string[] = [];
   orphanedTmuxSessions: string[] = [];
@@ -202,7 +230,7 @@ export class RightPaneComponent implements Component {
         break;
       case "DENIALS":
         if (!this.agent) { this.content = [`${DIM}No agent selected${RESET}`]; }
-        else if (!this.denialsContent) { this.content = [`${DIM}Loading denials...${RESET}`]; }
+        else if (this.denialsLoading || !this.denialsContent) { this.content = [`${DIM}Loading denials...${RESET}`]; }
         else {
           const filtered = this.filterDenials(this.denialsContent);
           const filterLabel = this.denialFilter === "all" ? "all time" : `last ${this.denialFilter}`;
@@ -569,16 +597,103 @@ export function triggerAsyncLoadIfNeeded(ctx: PaneCtx, forceRefresh = false) {
     loadDiff(ctx, agent, forceRefresh);
   } else if (mode === "STATUS" && (forceRefresh || (!ctx.rightPane.statusContent && !ctx.rightPane.statusLoading))) {
     loadStatus(ctx, agent, forceRefresh);
+  } else if (mode === "DENIALS" && (forceRefresh || (!ctx.rightPane.denialsContent && !ctx.rightPane.denialsLoading))) {
+    loadDenials(ctx, agent, forceRefresh);
   }
 }
 
+/**
+ * Decide whether the currently-cached AGENT LOG window is still adequate for
+ * the requested view, or whether a fresh tail-read is required.
+ *
+ * Returns true when the cache is up-to-date and covers the requested window
+ * with no need for new I/O.
+ */
+function logCacheCovers(
+  loaded: LoadedLogWindow | null,
+  agentId: string,
+  displayHeight: number,
+  scrollOffset: number,
+  bufferRows: number,
+): boolean {
+  if (!loaded) return false;
+  if (loaded.agentId !== agentId) return false;
+  // If we already have the whole file, nothing more to read.
+  if (loaded.atTop) return true;
+  // Resize → reload (need to compute a different window size)
+  if (loaded.displayHeight !== displayHeight) return false;
+  // The buffer was sized with the previous bufferRows. If a new caller needs a
+  // bigger buffer, we should re-read.
+  if (bufferRows > loaded.bufferRows) return false;
+  // The visible window extends from `scrollOffset` to `scrollOffset+displayHeight`
+  // back from the bottom. As long as our cache covers that range we're fine.
+  const requiredCoverage = scrollOffset + displayHeight;
+  return requiredCoverage <= loaded.loadedLineCount;
+}
+
 export async function loadAgentLog(ctx: PaneCtx, agent: Agent) {
-  const content = await readAgentLog(agent);
-  if (ctx.currentAgentId === agent.id) {
-    ctx.rightPane.agentLogContent = colorizeLog(content);
-    ctx.rightPane.denialsContent = parseDenials(content);
+  // Avoid concurrent reads stomping on each other.
+  if (ctx.rightPane.agentLogLoading) return;
+
+  const displayHeight = Math.max(1, ctx.rightPane.displayHeight);
+  const scrollOffset = Math.max(0, ctx.rightPane.scrollOffset);
+  const bufferRows = displayHeight * 2;
+
+  // Cache hit: the loaded window already covers the visible area for this agent.
+  if (logCacheCovers(ctx.rightPane.loadedLogWindow, agent.id, displayHeight, scrollOffset, bufferRows)) {
+    return;
+  }
+
+  ctx.rightPane.agentLogLoading = true;
+  try {
+    const window = await readAgentLogWindow(agent, {
+      rows: displayHeight,
+      scrollOffset,
+      bufferRows,
+    });
+    if (ctx.currentAgentId !== agent.id) return;
+    ctx.rightPane.agentLogContent = colorizeLog(window.lines);
+    ctx.rightPane.loadedLogWindow = window.isPlaceholder ? null : {
+      agentId: agent.id,
+      fileSize: window.fileSize,
+      atTop: window.atTop,
+      loadedLineCount: window.lines.length,
+      displayHeight,
+      scrollOffset,
+      bufferRows,
+    };
     ctx.rightPane.updateContent();
     ctx.tui?.requestRender();
+  } finally {
+    ctx.rightPane.agentLogLoading = false;
+  }
+}
+
+/**
+ * Load DENIALS for the entire agent.log. Unlike AGENT LOG this needs the full
+ * file so the all-time denial count is correct.
+ */
+export async function loadDenials(ctx: PaneCtx, agent: Agent, forceRefresh = false) {
+  if (ctx.rightPane.denialsLoading) return;
+  if (forceRefresh) ctx.rightPane.denialsContent = null;
+  ctx.rightPane.denialsLoading = true;
+  ctx.rightPane.updateContent();
+  ctx.tui?.requestRender();
+  try {
+    const lines = await readAgentLog(agent);
+    if (ctx.currentAgentId === agent.id) {
+      ctx.rightPane.denialsContent = parseDenials(lines);
+      ctx.rightPane.updateContent();
+      ctx.tui?.requestRender();
+    }
+  } finally {
+    if (ctx.currentAgentId === agent.id) {
+      ctx.rightPane.denialsLoading = false;
+      ctx.rightPane.updateContent();
+      ctx.tui?.requestRender();
+    } else {
+      ctx.rightPane.denialsLoading = false;
+    }
   }
 }
 

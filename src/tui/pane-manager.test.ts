@@ -1,4 +1,7 @@
-import { test, expect, describe } from "bun:test";
+import { test, expect, describe, beforeEach, afterEach } from "bun:test";
+import { join } from "path";
+import { mkdtemp, rm, mkdir } from "fs/promises";
+import { tmpdir } from "os";
 import { makeAgent } from "../test-utils";
 import type { Agent, FlatEntry, PendingQuestion } from "../agents";
 import {
@@ -6,6 +9,7 @@ import {
   cyclePaneMode, jumpToMode, triggerAsyncLoadIfNeeded,
   colorizeDiff, colorizeLog,
   closeOsc8, OSC8_OPEN, OSC8_CLOSE,
+  loadAgentLog, loadDenials,
 } from "./pane-manager";
 import type { PaneCtx, PaneMode } from "./pane-manager";
 import { stripAnsi } from "../parse-state";
@@ -469,5 +473,239 @@ describe("closeOsc8", () => {
   test("handles ANSI SGR codes mixed with OSC 8", () => {
     const line = `\x1b[2mPath:\x1b[0m ${OSC8_OPEN}file:///tmp\x07/tmp`;
     expect(closeOsc8(line)).toBe(line + OSC8_CLOSE);
+  });
+});
+
+describe("loadAgentLog (windowed)", () => {
+  let tmpDir: string;
+
+  beforeEach(async () => {
+    tmpDir = await mkdtemp(join(tmpdir(), "itsybitsy-loadlog-"));
+  });
+
+  afterEach(async () => {
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  /** Build a Bun.file shim that counts reads via a wrapper around Bun.file. */
+  function makeBigLog(agentId: string, lineCount: number): Promise<Agent> {
+    return (async () => {
+      const agentDir = join(tmpDir, ".ittybitty", "agents", agentId);
+      await mkdir(agentDir, { recursive: true });
+      const filler = "x".repeat(240);
+      const lines: string[] = [];
+      for (let i = 0; i < lineCount; i++) lines.push(`line${String(i).padStart(5, "0")}-${filler}`);
+      await Bun.write(join(agentDir, "agent.log"), lines.join("\n"));
+      return makeAgent({ id: agentId, repoPath: tmpDir, archived: false });
+    })();
+  }
+
+  test("populates loadedLogWindow + agentLogContent on first read", async () => {
+    // Small log that comfortably fits within the 8KB minimum tail read.
+    const agentDir = join(tmpDir, ".ittybitty", "agents", "agent-pm-1");
+    await mkdir(agentDir, { recursive: true });
+    const lines: string[] = [];
+    for (let i = 0; i < 20; i++) lines.push(`line${i}`);
+    await Bun.write(join(agentDir, "agent.log"), lines.join("\n"));
+    const agent = makeAgent({ id: "agent-pm-1", repoPath: tmpDir });
+
+    const ctx = makePaneCtx({ agent });
+    ctx.rightPane.displayHeight = 10;
+    ctx.rightPane.scrollOffset = 0;
+
+    expect(ctx.rightPane.agentLogContent).toBeNull();
+    expect(ctx.rightPane.loadedLogWindow).toBeNull();
+
+    await loadAgentLog(ctx, agent);
+
+    expect(ctx.rightPane.agentLogContent).not.toBeNull();
+    expect(ctx.rightPane.loadedLogWindow).not.toBeNull();
+    expect(ctx.rightPane.loadedLogWindow!.agentId).toBe(agent.id);
+    expect(ctx.rightPane.loadedLogWindow!.atTop).toBe(true);
+  });
+
+  test("does not parse denials during AGENT LOG load", async () => {
+    const agent = await makeBigLog("agent-pm-denials", 20);
+    const ctx = makePaneCtx({ agent });
+    ctx.rightPane.displayHeight = 10;
+    await loadAgentLog(ctx, agent);
+    expect(ctx.rightPane.denialsContent).toBeNull();
+    expect(ctx.rightPane.denialsLoading).toBe(false);
+  });
+
+  test("cache hit: re-calling loadAgentLog with same params does not change loaded window", async () => {
+    const agent = await makeBigLog("agent-pm-cache", 50);
+    const ctx = makePaneCtx({ agent });
+    ctx.rightPane.displayHeight = 10;
+    ctx.rightPane.scrollOffset = 0;
+
+    await loadAgentLog(ctx, agent);
+    const firstWindow = ctx.rightPane.loadedLogWindow;
+    const firstContent = ctx.rightPane.agentLogContent;
+
+    // Re-call with identical state — should be a cache hit (atTop=true means we have the whole file)
+    await loadAgentLog(ctx, agent);
+    // Cache hit: the loadedLogWindow object reference should be unchanged
+    expect(ctx.rightPane.loadedLogWindow).toBe(firstWindow);
+    expect(ctx.rightPane.agentLogContent).toBe(firstContent);
+  });
+
+  test("scroll past loaded window triggers a re-read with larger buffer", async () => {
+    // Big enough that small reads don't reach atTop.
+    const agent = await makeBigLog("agent-pm-scroll", 5000);
+    const ctx = makePaneCtx({ agent });
+    ctx.rightPane.displayHeight = 10;
+    ctx.rightPane.scrollOffset = 0;
+
+    await loadAgentLog(ctx, agent);
+    const firstLoaded = ctx.rightPane.loadedLogWindow!;
+    expect(firstLoaded.atTop).toBe(false); // file is too big to fit in initial window
+    const firstCount = firstLoaded.loadedLineCount;
+
+    // Now scroll way past the buffer — beyond loadedLineCount.
+    ctx.rightPane.scrollOffset = firstCount + 50;
+    await loadAgentLog(ctx, agent);
+
+    const secondLoaded = ctx.rightPane.loadedLogWindow!;
+    // A second read happened: either a new object or larger lineCount.
+    expect(secondLoaded).not.toBe(firstLoaded);
+    expect(secondLoaded.loadedLineCount).toBeGreaterThan(firstCount);
+  });
+
+  test("scroll within buffer is a cache hit (no re-read)", async () => {
+    const agent = await makeBigLog("agent-pm-buf", 5000);
+    const ctx = makePaneCtx({ agent });
+    ctx.rightPane.displayHeight = 10;
+    ctx.rightPane.scrollOffset = 0;
+
+    await loadAgentLog(ctx, agent);
+    const firstLoaded = ctx.rightPane.loadedLogWindow!;
+
+    // Scroll a small amount — well within the 2*displayHeight buffer.
+    ctx.rightPane.scrollOffset = 5;
+    await loadAgentLog(ctx, agent);
+
+    expect(ctx.rightPane.loadedLogWindow).toBe(firstLoaded);
+  });
+
+  test("displayHeight change forces a re-read", async () => {
+    const agent = await makeBigLog("agent-pm-resize", 5000);
+    const ctx = makePaneCtx({ agent });
+    ctx.rightPane.displayHeight = 10;
+
+    await loadAgentLog(ctx, agent);
+    const firstLoaded = ctx.rightPane.loadedLogWindow!;
+    expect(firstLoaded.atTop).toBe(false);
+
+    // Simulate terminal resize.
+    ctx.rightPane.displayHeight = 40;
+    await loadAgentLog(ctx, agent);
+
+    const secondLoaded = ctx.rightPane.loadedLogWindow!;
+    expect(secondLoaded).not.toBe(firstLoaded);
+    expect(secondLoaded.displayHeight).toBe(40);
+  });
+
+  test("agent change forces a re-read", async () => {
+    const agentA = await makeBigLog("agent-pm-A", 50);
+    const agentB = await makeBigLog("agent-pm-B", 80);
+    const ctx = makePaneCtx({ agent: agentA });
+    ctx.rightPane.displayHeight = 10;
+
+    await loadAgentLog(ctx, agentA);
+    const firstLoaded = ctx.rightPane.loadedLogWindow!;
+    expect(firstLoaded.agentId).toBe(agentA.id);
+
+    // Switch to agentB
+    ctx.currentAgentId = agentB.id;
+    await loadAgentLog(ctx, agentB);
+    const secondLoaded = ctx.rightPane.loadedLogWindow!;
+    expect(secondLoaded.agentId).toBe(agentB.id);
+    expect(secondLoaded).not.toBe(firstLoaded);
+  });
+
+  test("stale agent (currentAgentId changed during await) does not write content", async () => {
+    const agent = await makeBigLog("agent-pm-stale", 50);
+    const ctx = makePaneCtx({ agent });
+    ctx.rightPane.displayHeight = 10;
+    ctx.currentAgentId = "different-agent";
+
+    await loadAgentLog(ctx, agent);
+    expect(ctx.rightPane.agentLogContent).toBeNull();
+    expect(ctx.rightPane.loadedLogWindow).toBeNull();
+  });
+});
+
+describe("loadDenials (lazy)", () => {
+  let tmpDir: string;
+
+  beforeEach(async () => {
+    tmpDir = await mkdtemp(join(tmpdir(), "itsybitsy-denials-"));
+  });
+
+  afterEach(async () => {
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  test("populates denialsContent from full agent.log", async () => {
+    const agentDir = join(tmpDir, ".ittybitty", "agents", "agent-d");
+    await mkdir(agentDir, { recursive: true });
+    const log = [
+      "[2025-01-01 10:00:00] [PreToolUse] Permission denied: Bash(rm:*)",
+      "[2025-01-01 10:00:01] [Hook] something else",
+      "[2025-01-01 10:00:02] [PreToolUse] Permission denied: Write(/etc/*)",
+    ].join("\n");
+    await Bun.write(join(agentDir, "agent.log"), log);
+
+    const agent = makeAgent({ id: "agent-d", repoPath: tmpDir });
+    const ctx = makePaneCtx({ agent });
+    expect(ctx.rightPane.denialsContent).toBeNull();
+
+    await loadDenials(ctx, agent);
+    expect(ctx.rightPane.denialsLoading).toBe(false);
+    expect(ctx.rightPane.denialsContent).not.toBeNull();
+    expect(ctx.rightPane.denialsContent!.length).toBe(2);
+  });
+
+  test("triggerAsyncLoadIfNeeded triggers loadDenials when DENIALS mode is active", async () => {
+    const agentDir = join(tmpDir, ".ittybitty", "agents", "agent-d2");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(
+      join(agentDir, "agent.log"),
+      "[2025-01-01 10:00:00] [PreToolUse] Permission denied: Bash(rm:*)",
+    );
+    const agent = makeAgent({ id: "agent-d2", repoPath: tmpDir });
+    const ctx = makePaneCtx({ agent });
+    ctx.modeIndex = PANE_MODES.indexOf("DENIALS");
+    ctx.rightPane.mode = "DENIALS";
+
+    triggerAsyncLoadIfNeeded(ctx);
+    // loadDenials runs async — wait for it.
+    // denialsLoading flips true synchronously, then false after the read.
+    // Polling loop instead of arbitrary sleep:
+    for (let i = 0; i < 50 && ctx.rightPane.denialsContent === null; i++) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(ctx.rightPane.denialsContent).not.toBeNull();
+    expect(ctx.rightPane.denialsContent!.length).toBe(1);
+  });
+
+  test("triggerAsyncLoadIfNeeded does NOT load denials when not in DENIALS mode", async () => {
+    const agentDir = join(tmpDir, ".ittybitty", "agents", "agent-d3");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(
+      join(agentDir, "agent.log"),
+      "[2025-01-01 10:00:00] [PreToolUse] Permission denied: Bash(rm:*)",
+    );
+    const agent = makeAgent({ id: "agent-d3", repoPath: tmpDir });
+    const ctx = makePaneCtx({ agent });
+    ctx.modeIndex = PANE_MODES.indexOf("AGENT LOG");
+    ctx.rightPane.mode = "AGENT LOG";
+
+    triggerAsyncLoadIfNeeded(ctx);
+    // Give any spurious async work a chance to run
+    await new Promise((r) => setTimeout(r, 50));
+    expect(ctx.rightPane.denialsContent).toBeNull();
+    expect(ctx.rightPane.denialsLoading).toBe(false);
   });
 });

@@ -158,6 +158,12 @@ export interface ActionCtx {
   executeAndRefresh(fn: () => Promise<void>): Promise<void>;
   syncSelectedAgent(): void;
   jumpToMode(mode: PaneMode, forceRefresh?: boolean): void;
+  /**
+   * Reload the AGENT LOG tail-window for the currently selected agent if the
+   * cached window no longer covers the visible area (after scrolling, agent
+   * change, or terminal resize). Cache hits short-circuit without I/O.
+   */
+  loadAgentLogIfNeeded(): void;
   setQuestionsFocused(value: boolean): void;
   healthReport: RepoHealthReport | undefined;
   sidebarWidth: number;
@@ -733,6 +739,11 @@ export function handleScrollUp(ctx: ActionCtx) {
   ctx.rightPane.repoCoordinatorScrollBack += SCROLL_STEP;
   ctx.systemDashboard.scrollUp(SCROLL_STEP);
   ctx.rightPane.updateContent();
+  // In AGENT LOG mode, scrolling up may reveal lines beyond the cached window.
+  // The loader's cache check short-circuits when no read is needed.
+  if (ctx.rightPane.mode === "AGENT LOG") {
+    ctx.loadAgentLogIfNeeded();
+  }
   ctx.tui?.requestRender();
 }
 
@@ -743,6 +754,11 @@ export function handleScrollDown(ctx: ActionCtx) {
   ctx.rightPane.repoCoordinatorScrollBack = Math.max(0, ctx.rightPane.repoCoordinatorScrollBack - SCROLL_STEP);
   ctx.systemDashboard.scrollDown(SCROLL_STEP);
   ctx.rightPane.updateContent();
+  // Scrolling down typically uses cached content but call for symmetry —
+  // cache hit makes this free.
+  if (ctx.rightPane.mode === "AGENT LOG") {
+    ctx.loadAgentLogIfNeeded();
+  }
   ctx.tui?.requestRender();
 }
 

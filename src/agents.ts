@@ -763,3 +763,82 @@ export async function readAgentLog(agent: Agent): Promise<string[]> {
     return [`Failed to read agent.log`];
   }
 }
+
+/** Tail-window snapshot of an agent.log */
+export interface LogWindow {
+  /** Lines in chronological order (newest-last). If start > 0, the partial first line is dropped. */
+  lines: string[];
+  /** Total file size in bytes (used for cache invalidation). */
+  fileSize: number;
+  /** True if the read started at byte 0 (the entire file is in `lines`). */
+  atTop: boolean;
+  /**
+   * Whether `lines` contains a placeholder message (file missing/empty/error)
+   * rather than real log content. Callers can use this to skip the cache.
+   */
+  isPlaceholder: boolean;
+}
+
+export interface ReadLogWindowOpts {
+  /** Visible rows (typically displayHeight) */
+  rows: number;
+  /** Lines back from bottom; 0 = newest at the bottom */
+  scrollOffset: number;
+  /** Over-fetch factor; default 2 * rows */
+  bufferRows?: number;
+}
+
+/** Approximate bytes-per-line — used to size the tail read */
+const BYTES_PER_LINE_ESTIMATE = 200;
+/** Minimum bytes to read even for very small windows */
+const MIN_TAIL_BYTES = 8192;
+
+/**
+ * Read only the tail of agent.log needed to display the requested window.
+ *
+ * The window covers `rows + scrollOffset + bufferRows` lines back from the end
+ * of the file. To guarantee we land on a line boundary, the first (potentially
+ * partial) line is dropped whenever the read started past byte 0.
+ */
+export async function readAgentLogWindow(
+  agent: Agent,
+  opts: ReadLogWindowOpts,
+): Promise<LogWindow> {
+  const dir = agent.archived ? "archive" : "agents";
+  const logPath = join(agent.repoPath, ".ittybitty", dir, agent.id, "agent.log");
+  try {
+    const file = Bun.file(logPath);
+    if (!(await file.exists())) {
+      return { lines: [`No agent.log found`], fileSize: 0, atTop: true, isPlaceholder: true };
+    }
+    const fileSize = file.size;
+    if (fileSize === 0) {
+      return { lines: [`agent.log is empty`], fileSize: 0, atTop: true, isPlaceholder: true };
+    }
+
+    const rows = Math.max(1, opts.rows);
+    const bufferRows = opts.bufferRows ?? rows * 2;
+    const desiredLines = rows + Math.max(0, opts.scrollOffset) + bufferRows;
+    const desiredBytes = Math.max(MIN_TAIL_BYTES, desiredLines * BYTES_PER_LINE_ESTIMATE);
+    const start = Math.max(0, fileSize - desiredBytes);
+    const text = await file.slice(start, fileSize).text();
+    if (!text) {
+      return { lines: [`agent.log is empty`], fileSize, atTop: true, isPlaceholder: true };
+    }
+
+    let lines = text.split("\n");
+    // If we started past BOF, the first "line" is almost certainly a partial line —
+    // drop it so callers always see whole lines.
+    const atTop = start === 0;
+    if (!atTop && lines.length > 0) {
+      lines = lines.slice(1);
+    }
+    if (lines.length === 0) {
+      // Window was entirely a single partial line — fall back to the placeholder
+      return { lines: [`agent.log is empty`], fileSize, atTop, isPlaceholder: true };
+    }
+    return { lines, fileSize, atTop, isPlaceholder: false };
+  } catch {
+    return { lines: [`Failed to read agent.log`], fileSize: 0, atTop: true, isPlaceholder: true };
+  }
+}

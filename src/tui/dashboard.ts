@@ -901,6 +901,13 @@ export class DashboardComponent implements Component {
     jumpToMode(this, mode, forceRefresh);
   }
 
+  /** Reload AGENT LOG tail-window (or skip via cache) — called from scroll/resize handlers. */
+  loadAgentLogIfNeeded() {
+    const agent = this.agentTree.selectedAgent;
+    if (!agent) return;
+    void loadAgentLog(this, agent);
+  }
+
   private cyclePaneMode(delta: number) {
     cyclePaneMode(this, delta);
   }
@@ -1135,8 +1142,11 @@ export class DashboardComponent implements Component {
       this.inputField.switchAgent(newId);
       this.coordinatorInputField.switchAgent(isCoordinator ? "__coordinator__" : null);
       this.rightPane.agentLogContent = null;
+      this.rightPane.loadedLogWindow = null;
+      this.rightPane.agentLogLoading = false;
       this.rightPane.promptContent = null;
       this.rightPane.denialsContent = null;
+      this.rightPane.denialsLoading = false;
       this.rightPane.diffContent = null;
       this.rightPane.diffLoading = false;
       this.rightPane.statusContent = null;
@@ -2051,6 +2061,10 @@ export async function launchDashboard(): Promise<void> {
   // Handle terminal resize to update coordinator tmux width
   process.stdout.on("resize", () => {
     resizeCoordinatorTmux(dashboard.getMainWidth());
+    // displayHeight changes after resize → the AGENT LOG cache is stale, so re-read.
+    if (dashboard.rightPane.mode === "AGENT LOG") {
+      dashboard.loadAgentLogIfNeeded();
+    }
     tui.requestRender();
   });
 

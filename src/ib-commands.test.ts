@@ -453,6 +453,83 @@ describe("pauseAgent (native)", () => {
     const log = await Bun.file(join(agentDir, "agent.log")).text();
     expect(log).toContain("Killed tmux session");
   });
+
+  test("writes meta.state = 'stopped' when pausing a 'complete' agent", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-abc",
+      tmux_session: "tmux-agent-abc",
+      state: "complete",
+    }));
+
+    const runner = mockSpawnFnWithFailures(spawnCalls, (cmd) =>
+      cmd.includes("has-session") || cmd.includes("pgrep")
+    );
+    lifecycleSpawnCtx.set(runner);
+    setKillPauseSpawnRunner(runner);
+
+    const agent = makeAgent("agent-abc", tempDir, "complete");
+    const result = await pauseAgent(agent);
+
+    expect(result.ok).toBe(true);
+    const meta = await Bun.file(join(agentDir, "meta.json")).json();
+    expect(meta.state).toBe("stopped");
+  });
+
+  test("writes meta.state = 'stopped' when pausing a 'waiting' agent", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-abc",
+      tmux_session: "tmux-agent-abc",
+      state: "waiting",
+    }));
+
+    const runner = mockSpawnFnWithFailures(spawnCalls, (cmd) =>
+      cmd.includes("has-session") || cmd.includes("pgrep")
+    );
+    lifecycleSpawnCtx.set(runner);
+    setKillPauseSpawnRunner(runner);
+
+    const agent = makeAgent("agent-abc", tempDir, "waiting");
+    const result = await pauseAgent(agent);
+
+    expect(result.ok).toBe(true);
+    const meta = await Bun.file(join(agentDir, "meta.json")).json();
+    expect(meta.state).toBe("stopped");
+  });
+
+  test("second pause on already-paused agent returns 'already stopped'", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-abc",
+      tmux_session: "tmux-agent-abc",
+      state: "waiting",
+    }));
+
+    const runner = mockSpawnFnWithFailures(spawnCalls, (cmd) =>
+      cmd.includes("has-session") || cmd.includes("pgrep")
+    );
+    lifecycleSpawnCtx.set(runner);
+    setKillPauseSpawnRunner(runner);
+
+    // First pause: succeeds, writes state=stopped
+    const agent1 = makeAgent("agent-abc", tempDir, "waiting");
+    const first = await pauseAgent(agent1);
+    expect(first.ok).toBe(true);
+
+    // Re-read meta to confirm state landed, then attempt second pause with
+    // runtime state reflecting the freshly-paused agent (state="stopped")
+    const meta = await Bun.file(join(agentDir, "meta.json")).json();
+    expect(meta.state).toBe("stopped");
+
+    const agent2 = makeAgent("agent-abc", tempDir, "stopped");
+    const second = await pauseAgent(agent2);
+    expect(second.ok).toBe(false);
+    expect(second.stderr).toContain("already stopped");
+  });
 });
 
 describe("nukeAgent (native)", () => {

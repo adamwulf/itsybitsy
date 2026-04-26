@@ -2772,6 +2772,11 @@ export async function pauseAgent(agent: Agent): Promise<IbCommandResult> {
     await logAgent(agentDir, "No tmux session configured");
   }
 
+  // Persist stopped state so resume's `state === "stopped"` guard is satisfied
+  // and the fast-path in detectAgentStates() doesn't keep reporting the
+  // pre-pause state (e.g. "complete") forever.
+  await writeAgentState(agentDir, "stopped");
+
   // Log the pause
   await logAgent(agentDir, "Agent paused");
 

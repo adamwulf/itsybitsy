@@ -346,6 +346,114 @@ describe("TmuxPoller", () => {
     expect(displayMessageCalls).toBe(2);
   });
 
+  test("default capture uses the new 200-line cap", async () => {
+    let capturedCmd: string[] = [];
+    spawnCtx.set((cmd: string[], _opts?: any) => {
+      capturedCmd = cmd;
+      return {
+        stdout: new ReadableStream({ start(c) { c.close(); } }),
+        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        exited: Promise.resolve(0),
+      };
+    });
+
+    poller = new TmuxPoller({ onOutput() {} });
+    poller.start();
+    poller.setAgent("session-A");
+    await Bun.sleep(50);
+
+    expect(capturedCmd).toContain("-200");
+    expect(capturedCmd).not.toContain("-5000");
+  });
+
+  test("setLines updates the next capture command's -S argument", async () => {
+    let lastCmd: string[] = [];
+    spawnCtx.set((cmd: string[], _opts?: any) => {
+      lastCmd = cmd;
+      return {
+        stdout: new ReadableStream({ start(c) { c.close(); } }),
+        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        exited: Promise.resolve(0),
+      };
+    });
+
+    poller = new TmuxPoller({ onOutput() {} });
+    poller.start();
+    poller.setAgent("session-A");
+    await Bun.sleep(50);
+    expect(lastCmd).toContain("-200");
+
+    poller.setLines(50);
+    await Bun.sleep(50);
+    expect(lastCmd).toContain("-50");
+
+    poller.setLines(1234);
+    await Bun.sleep(50);
+    expect(lastCmd).toContain("-1234");
+  });
+
+  test("setLines triggers an immediate poll when value changes (no wait for tick)", async () => {
+    let captureCalls = 0;
+    spawnCtx.set((cmd: string[], _opts?: any) => {
+      if (cmd.includes("capture-pane")) captureCalls++;
+      return {
+        stdout: new ReadableStream({ start(c) { c.close(); } }),
+        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        exited: Promise.resolve(0),
+      };
+    });
+
+    poller = new TmuxPoller({ onOutput() {} });
+    poller.start();
+    poller.setAgent("session-A");
+    await Bun.sleep(50);
+    const before = captureCalls;
+
+    // Changing the value should trigger an immediate extra poll
+    poller.setLines(500);
+    await Bun.sleep(50);
+    expect(captureCalls).toBe(before + 1);
+  });
+
+  test("setLines is a no-op when the value is unchanged", async () => {
+    let captureCalls = 0;
+    spawnCtx.set((cmd: string[], _opts?: any) => {
+      if (cmd.includes("capture-pane")) captureCalls++;
+      return {
+        stdout: new ReadableStream({ start(c) { c.close(); } }),
+        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        exited: Promise.resolve(0),
+      };
+    });
+
+    poller = new TmuxPoller({ onOutput() {} });
+    poller.start();
+    poller.setAgent("session-A");
+    await Bun.sleep(50);
+    const before = captureCalls;
+
+    poller.setLines(200); // same as default
+    await Bun.sleep(50);
+    expect(captureCalls).toBe(before);
+  });
+
+  test("setLines before start does not poll", async () => {
+    let captureCalls = 0;
+    spawnCtx.set((cmd: string[], _opts?: any) => {
+      if (cmd.includes("capture-pane")) captureCalls++;
+      return {
+        stdout: new ReadableStream({ start(c) { c.close(); } }),
+        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        exited: Promise.resolve(0),
+      };
+    });
+
+    poller = new TmuxPoller({ onOutput() {} });
+    poller.setLines(100);
+    await Bun.sleep(50);
+    expect(captureCalls).toBe(0);
+  });
+
   test("setAgent before start does not query width", async () => {
     let displayMessageCalls = 0;
     spawnCtx.set((cmd: string[], _opts?: any) => {

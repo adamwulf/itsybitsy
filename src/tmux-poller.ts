@@ -24,9 +24,23 @@ export class TmuxPoller {
   private events: TmuxPollerEvents;
   private lines: number;
 
-  constructor(events: TmuxPollerEvents, lines = 5000) {
+  constructor(events: TmuxPollerEvents, lines = 200) {
     this.events = events;
     this.lines = lines;
+  }
+
+  /**
+   * Update the scrollback length captured per poll. Triggers an immediate
+   * poll if the value changed AND a session is set AND the poller is running,
+   * so the next render reflects the new buffer size without waiting up to 1s
+   * for the next tick.
+   */
+  setLines(n: number): void {
+    if (n === this.lines) return;
+    this.lines = n;
+    if (this.tmuxSession && this.running) {
+      this.poll();
+    }
   }
 
   /** Set the agent to poll. Pass null to pause polling. */

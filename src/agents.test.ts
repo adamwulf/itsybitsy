@@ -1533,20 +1533,25 @@ describe("detectAgentStates — meta.transient.json fast-path", () => {
     expect(captureCalls).toBe(1);
   });
 
-  test("freshly-written disk snapshot supersedes any in-memory staleness", async () => {
-    // Earlier iterations of this change cached `agent.transient` in
-    // memory and short-circuited the disk read. That broke when the
-    // watcher's pollStates() reused agents from a 10s-old refresh()
-    // while the watchdog kept writing fresh snapshots to disk. The
-    // current code always reads from disk, so a fresh disk snapshot
-    // wins over whatever the in-memory copy might have been.
+  test("re-reads disk snapshot every call (no in-memory caching of transient state)", async () => {
+    // detectAgentStates was previously refactored to prefer a preloaded
+    // `agent.transient` field over the disk read. That broke pollStates'
+    // 2s polling cadence: the watcher reuses _lastAgents from a 10s-old
+    // refresh() while the watchdog writes fresh disk snapshots every 5s,
+    // so the in-memory copy aged out of the freshness window before disk
+    // staleness ever became an issue. The fix removed Agent.transient
+    // entirely; this test guards against re-introducing a memory cache
+    // by verifying the disk snapshot drives the resolved state on every
+    // call (no preload setup possible).
     installSpyCapture();
-    const a = await makeBackedAgent("agent-disk-wins");
+    const a = await makeBackedAgent("agent-disk-read");
     isPidAliveCtx.set(() => true);
     const fakeNow = 5_000_000;
     nowMsCtx.set(() => fakeNow);
 
     const agentDir = join(tempDir, ".ittybitty", "agents", a.id);
+
+    // First call: disk says rate_limited
     await writeAgentTransient(agentDir, {
       tmux_compacting: false,
       tmux_rate_limited: true,
@@ -1554,9 +1559,21 @@ describe("detectAgentStates — meta.transient.json fast-path", () => {
       updated_at_ms: fakeNow - 100,
       watchdog_pid: 12345,
     });
-
     await detectAgentStates([a]);
     expect(a.state).toBe("rate_limited");
+
+    // Second call after the watchdog rewrites disk: state must follow
+    // the new disk content, not the old. If detectAgentStates were
+    // caching transient in-memory, it would still return rate_limited.
+    await writeAgentTransient(agentDir, {
+      tmux_compacting: true,
+      tmux_rate_limited: false,
+      has_background_tasks: false,
+      updated_at_ms: fakeNow - 50,
+      watchdog_pid: 12345,
+    });
+    await detectAgentStates([a]);
+    expect(a.state).toBe("compacting");
     expect(captureCalls).toBe(0);
   });
 });

@@ -764,6 +764,23 @@ export async function readAgentLog(agent: Agent): Promise<string[]> {
   }
 }
 
+/**
+ * Stat the agent.log file and return its current size, or null if it does
+ * not exist. Used by the AGENT LOG cache layer to detect whether the file
+ * has grown since the last tail read.
+ */
+export async function statAgentLogSize(agent: Agent): Promise<number | null> {
+  const dir = agent.archived ? "archive" : "agents";
+  const logPath = join(agent.repoPath, ".ittybitty", dir, agent.id, "agent.log");
+  try {
+    const file = Bun.file(logPath);
+    if (!(await file.exists())) return null;
+    return file.size;
+  } catch {
+    return null;
+  }
+}
+
 /** Tail-window snapshot of an agent.log */
 export interface LogWindow {
   /** Lines in chronological order (newest-last). If start > 0, the partial first line is dropped. */
@@ -834,8 +851,10 @@ export async function readAgentLogWindow(
       lines = lines.slice(1);
     }
     if (lines.length === 0) {
-      // Window was entirely a single partial line — fall back to the placeholder
-      return { lines: [`agent.log is empty`], fileSize, atTop, isPlaceholder: true };
+      // The tail window covered exactly one partial line, which we then dropped.
+      // The file is non-empty but the last line is longer than the read window —
+      // surface that explicitly rather than claiming the file is empty.
+      return { lines: [`agent.log line too long to window`], fileSize, atTop, isPlaceholder: true };
     }
     return { lines, fileSize, atTop, isPlaceholder: false };
   } catch {

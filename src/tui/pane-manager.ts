@@ -9,7 +9,7 @@ import type { InputFieldComponent } from "./input-field";
 import type { Agent, FlatEntry, PendingQuestion, DenialEntry } from "../agents";
 import type { RepoHealthReport } from "../health-check";
 import { getResolvableWarnings } from "../health-check";
-import { readAgentLog, readAgentLogWindow, readAgentPrompt, parseDenials, resolveAgentIcon } from "../agents";
+import { readAgentLog, readAgentLogWindow, statAgentLogSize, readAgentPrompt, parseDenials, resolveAgentIcon } from "../agents";
 import { diffAgent, statusAgent } from "../ib-commands";
 import { wrapLines } from "./wrap";
 import { getStateColors } from "./color-scheme";
@@ -606,6 +606,11 @@ export function triggerAsyncLoadIfNeeded(ctx: PaneCtx, forceRefresh = false) {
  * Decide whether the currently-cached AGENT LOG window is still adequate for
  * the requested view, or whether a fresh tail-read is required.
  *
+ * `currentFileSize` is the live size of agent.log on disk, or null if the
+ * caller could not stat it. When the file has grown since the last read, the
+ * cache is invalidated so that newly-appended lines from active agents are
+ * picked up.
+ *
  * Returns true when the cache is up-to-date and covers the requested window
  * with no need for new I/O.
  */
@@ -615,9 +620,13 @@ function logCacheCovers(
   displayHeight: number,
   scrollOffset: number,
   bufferRows: number,
+  currentFileSize: number | null,
 ): boolean {
   if (!loaded) return false;
   if (loaded.agentId !== agentId) return false;
+  // The file has changed on disk (grew, shrank, or vanished) — re-read so
+  // active agents see new lines and orphaned-file errors surface promptly.
+  if (currentFileSize === null || currentFileSize !== loaded.fileSize) return false;
   // If we already have the whole file, nothing more to read.
   if (loaded.atTop) return true;
   // Resize → reload (need to compute a different window size)
@@ -639,8 +648,13 @@ export async function loadAgentLog(ctx: PaneCtx, agent: Agent) {
   const scrollOffset = Math.max(0, ctx.rightPane.scrollOffset);
   const bufferRows = displayHeight * 2;
 
+  // Stat the file before deciding on cache coverage so growing logs from
+  // active agents trigger a re-read instead of being served stale forever.
+  const currentFileSize = await statAgentLogSize(agent);
+  if (ctx.currentAgentId !== agent.id) return;
+
   // Cache hit: the loaded window already covers the visible area for this agent.
-  if (logCacheCovers(ctx.rightPane.loadedLogWindow, agent.id, displayHeight, scrollOffset, bufferRows)) {
+  if (logCacheCovers(ctx.rightPane.loadedLogWindow, agent.id, displayHeight, scrollOffset, bufferRows, currentFileSize)) {
     return;
   }
 
@@ -676,23 +690,28 @@ export async function loadAgentLog(ctx: PaneCtx, agent: Agent) {
 export async function loadDenials(ctx: PaneCtx, agent: Agent, forceRefresh = false) {
   if (ctx.rightPane.denialsLoading) return;
   if (forceRefresh) ctx.rightPane.denialsContent = null;
+  // Capture the agent id we started with — when we resolve we must NOT touch
+  // shared state (denialsLoading) on behalf of a different agent's load,
+  // otherwise we'd clobber the new agent's in-flight load flag.
+  const startedForAgentId = agent.id;
   ctx.rightPane.denialsLoading = true;
   ctx.rightPane.updateContent();
   ctx.tui?.requestRender();
   try {
     const lines = await readAgentLog(agent);
-    if (ctx.currentAgentId === agent.id) {
+    if (ctx.currentAgentId === startedForAgentId) {
       ctx.rightPane.denialsContent = parseDenials(lines);
       ctx.rightPane.updateContent();
       ctx.tui?.requestRender();
     }
   } finally {
-    if (ctx.currentAgentId === agent.id) {
+    // Only clear the loading flag if this load is still the active one for
+    // the currently-selected agent — otherwise leave it alone so we don't
+    // clobber a newer load's denialsLoading=true.
+    if (ctx.currentAgentId === startedForAgentId) {
       ctx.rightPane.denialsLoading = false;
       ctx.rightPane.updateContent();
       ctx.tui?.requestRender();
-    } else {
-      ctx.rightPane.denialsLoading = false;
     }
   }
 }

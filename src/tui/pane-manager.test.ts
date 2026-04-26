@@ -634,6 +634,34 @@ describe("loadAgentLog (windowed)", () => {
     expect(ctx.rightPane.agentLogContent).toBeNull();
     expect(ctx.rightPane.loadedLogWindow).toBeNull();
   });
+
+  test("file growth (active agent appending) invalidates cache", async () => {
+    const agentDir = join(tmpDir, ".ittybitty", "agents", "agent-pm-grow");
+    await mkdir(agentDir, { recursive: true });
+    const logPath = join(agentDir, "agent.log");
+    // Initial small log
+    const initial = ["line0", "line1", "line2"].join("\n");
+    await Bun.write(logPath, initial);
+    const agent = makeAgent({ id: "agent-pm-grow", repoPath: tmpDir });
+
+    const ctx = makePaneCtx({ agent });
+    ctx.rightPane.displayHeight = 10;
+    await loadAgentLog(ctx, agent);
+    const firstLoaded = ctx.rightPane.loadedLogWindow!;
+    expect(firstLoaded.fileSize).toBe(initial.length);
+    const firstContent = ctx.rightPane.agentLogContent;
+
+    // Simulate the agent appending more content.
+    const grown = initial + "\nline3\nline4\nline5";
+    await Bun.write(logPath, grown);
+
+    await loadAgentLog(ctx, agent);
+    const secondLoaded = ctx.rightPane.loadedLogWindow!;
+    // Cache must have been invalidated and a fresh read taken.
+    expect(secondLoaded).not.toBe(firstLoaded);
+    expect(secondLoaded.fileSize).toBe(grown.length);
+    expect(ctx.rightPane.agentLogContent).not.toBe(firstContent);
+  });
 });
 
 describe("loadDenials (lazy)", () => {
@@ -707,5 +735,31 @@ describe("loadDenials (lazy)", () => {
     await new Promise((r) => setTimeout(r, 50));
     expect(ctx.rightPane.denialsContent).toBeNull();
     expect(ctx.rightPane.denialsLoading).toBe(false);
+  });
+
+  test("stale loadDenials (agent switched mid-await) does not clobber denialsLoading after switch", async () => {
+    const agentDirA = join(tmpDir, ".ittybitty", "agents", "agent-race-A");
+    await mkdir(agentDirA, { recursive: true });
+    await Bun.write(
+      join(agentDirA, "agent.log"),
+      "[2025-01-01 10:00:00] [PreToolUse] Permission denied: Bash(rm:*)",
+    );
+    const agentA = makeAgent({ id: "agent-race-A", repoPath: tmpDir });
+
+    const ctx = makePaneCtx({ agent: agentA });
+    const aPromise = loadDenials(ctx, agentA);
+    expect(ctx.rightPane.denialsLoading).toBe(true);
+
+    // Simulate dashboard agent-switch: a different agent is now selected,
+    // and the new agent's load has set denialsLoading=true again.
+    ctx.currentAgentId = "agent-race-B";
+    ctx.rightPane.denialsLoading = true; // B's load is in flight
+
+    // Now A's stale promise resolves. Because startedForAgentId !==
+    // currentAgentId, A's finally must NOT touch denialsLoading.
+    await aPromise;
+    expect(ctx.rightPane.denialsLoading).toBe(true);
+    // A's stale read must also NOT have populated denials for the new agent.
+    expect(ctx.rightPane.denialsContent).toBeNull();
   });
 });

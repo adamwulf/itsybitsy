@@ -195,6 +195,23 @@ describe("readAgentLogWindow", () => {
     expect(win.atTop).toBe(true);
     expect(win.lines).toEqual(["old line one", "old line two"]);
   });
+
+  test("returns 'line too long' placeholder when window covers a single oversized line", async () => {
+    // Build a file where the trailing line is longer than any reasonable
+    // tail-window byte budget. The first line is short so we have a clear
+    // partial-line cut after the newline.
+    const agentDir = join(tmpDir, ".ittybitty", "agents", "agent-bigline");
+    await mkdir(agentDir, { recursive: true });
+    // 50KB single line (well over the default 8KB minimum read).
+    const huge = "z".repeat(50_000);
+    await Bun.write(join(agentDir, "agent.log"), `prefix-line\n${huge}`);
+    const agent = makeAgent("agent-bigline", tmpDir, false);
+    // Tiny rows/buffer → desiredBytes = 8192 < 50KB → tail starts mid-huge-line.
+    const win = await readAgentLogWindow(agent, { rows: 5, scrollOffset: 0, bufferRows: 5 });
+    expect(win.atTop).toBe(false);
+    expect(win.isPlaceholder).toBe(true);
+    expect(win.lines[0]).toContain("line too long");
+  });
 });
 
 describe("TmuxPaneComponent scroll logic", () => {

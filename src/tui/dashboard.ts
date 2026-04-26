@@ -2061,9 +2061,18 @@ export async function launchDashboard(): Promise<void> {
   // Handle terminal resize to update coordinator tmux width
   process.stdout.on("resize", () => {
     resizeCoordinatorTmux(dashboard.getMainWidth());
-    // displayHeight changes after resize → the AGENT LOG cache is stale, so re-read.
+    // displayHeight is recomputed inside render() — at the moment the resize
+    // event fires it still holds the pre-resize value, so a cache check now
+    // would falsely hit. Drop the cached window so loadAgentLogIfNeeded is
+    // forced to re-read once render has updated displayHeight; defer the
+    // call via setImmediate so it runs after the next render tick.
     if (dashboard.rightPane.mode === "AGENT LOG") {
-      dashboard.loadAgentLogIfNeeded();
+      dashboard.rightPane.loadedLogWindow = null;
+      setImmediate(() => {
+        if (dashboard.rightPane.mode === "AGENT LOG") {
+          dashboard.loadAgentLogIfNeeded();
+        }
+      });
     }
     tui.requestRender();
   });

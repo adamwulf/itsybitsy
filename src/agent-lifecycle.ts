@@ -8,6 +8,7 @@ import { join, dirname, resolve } from "path";
 import { readdir, mkdir, cp, rm, rename, appendFile } from "fs/promises";
 import { SpawnContext } from "./types";
 import { isValidTmuxSession } from "./validation";
+import { deleteAgentTransient } from "./agents";
 
 /** Spawn context for agent lifecycle operations */
 export const spawnCtx = new SpawnContext();
@@ -273,6 +274,9 @@ export async function archiveAgent(
     await readdir(debugLogsDir);
     await cp(debugLogsDir, join(archiveFolder, "debug-logs"), { recursive: true });
   } catch { /* dir doesn't exist or copy failed */ }
+
+  // meta.transient.json has no historical value — delete rather than copy.
+  await deleteAgentTransient(agentDir);
 
   return archiveFolder;
 }

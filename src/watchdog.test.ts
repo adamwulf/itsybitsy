@@ -1873,3 +1873,103 @@ describe("lazy allAgents loading via runPerAgentWatchdog", () => {
     expect(readAllAgentsCalls).toBe(1);
   });
 });
+
+// ── meta.transient.json persistence ─────────────────────────────────────────
+
+describe("runPerAgentWatchdog — meta.transient.json persistence", () => {
+  let tempDir: string;
+  let agentDir: string;
+
+  beforeEach(async () => {
+    const { mkdtemp } = await import("fs/promises");
+    tempDir = await mkdtemp(join(tmpdir(), "ib-wd-transient-"));
+    agentDir = join(tempDir, ".ittybitty", "agents", "agent-test1");
+    mkdirSync(agentDir, { recursive: true });
+
+    setPerAgentReadMeta(async () => ({
+      meta: {
+        id: "agent-test1",
+        session_id: "sid-123",
+        tmux_session: "tmux-test1",
+        prompt: "test",
+        manager: null,
+        created: "2026-03-05T00:00:00Z",
+        created_epoch: 1000,
+        worktree: true,
+        worker: false,
+        yolo: false,
+        model: "sonnet",
+        claude_pid: "999",
+      },
+    }));
+    setPerAgentReadState(async () => "running");
+    setPerAgentSleep(async () => {});
+    setWatchdogReadConfig(async () => ({} as any));
+    setSendSpawnRunner(() => ({ stdout: "", exitCode: 0 }) as any);
+    clearAllAgentsCache();
+    setWatchdogNow(() => 1_700_000_000_000);
+  });
+
+  afterEach(async () => {
+    resetPerAgentExistsSync();
+    resetPerAgentCaptureTmux();
+    resetPerAgentReadMeta();
+    resetPerAgentSleep();
+    resetWatchdogNow();
+    resetSendSpawnRunner();
+    resetWatchdogReadConfig();
+    resetWatchdogSpawnRunner();
+    resetPerAgentReadState();
+    clearAllAgentsCache();
+    const { rm } = await import("fs/promises");
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  test("writes meta.transient.json with classified booleans every tick", async () => {
+    let captureCalls = 0;
+    setPerAgentCaptureTmux(async () => {
+      captureCalls++;
+      // Tick 1: idle output → all booleans false
+      // Tick 2: compacting output → tmux_compacting=true
+      if (captureCalls === 1) return "ordinary output\n";
+      return "Compacting conversation\nmore content";
+    });
+
+    let existsChecks = 0;
+    setPerAgentExistsSync(() => {
+      existsChecks++;
+      return existsChecks <= 2;
+    });
+
+    await runPerAgentWatchdog("agent-test1", tempDir);
+
+    const { readAgentTransient } = await import("./agents");
+    const written = await readAgentTransient(agentDir);
+    expect(written).not.toBeNull();
+    expect(written!.tmux_compacting).toBe(true);
+    expect(written!.tmux_rate_limited).toBe(false);
+    expect(written!.has_background_tasks).toBe(false);
+    expect(written!.updated_at_ms).toBe(1_700_000_000_000);
+    expect(written!.watchdog_pid).toBe(process.pid);
+  });
+
+  test("background-shell output → has_background_tasks=true", async () => {
+    // ⏵⏵ pattern with a duration like "⏵⏵ blah · 5 something"
+    setPerAgentCaptureTmux(async () => "ordinary output\n⏵⏵ task running · 5 m\n");
+
+    let existsChecks = 0;
+    setPerAgentExistsSync(() => {
+      existsChecks++;
+      return existsChecks <= 1;
+    });
+
+    await runPerAgentWatchdog("agent-test1", tempDir);
+
+    const { readAgentTransient } = await import("./agents");
+    const written = await readAgentTransient(agentDir);
+    expect(written).not.toBeNull();
+    expect(written!.has_background_tasks).toBe(true);
+    expect(written!.tmux_compacting).toBe(false);
+    expect(written!.tmux_rate_limited).toBe(false);
+  });
+});

@@ -22,7 +22,15 @@ import {
   CREATING_GRACE_PERIOD_MS,
   isRecentlyCreatedDirCtx,
   resetListTmuxSessionsCache,
+  readAgentTransient,
+  writeAgentTransient,
+  deleteAgentTransient,
+  isPidAliveCtx,
+  nowMsCtx,
+  resetReadAgentMetaCache,
+  TRANSIENT_FRESH_MS,
 } from "./agents";
+import type { TransientState } from "./agents";
 import { spawnCtx as tmuxPollerSpawnCtx } from "./tmux-poller";
 import type { Agent, AgentMeta, FlatEntry } from "./agents";
 import { makeAgent } from "./test-utils";
@@ -1246,5 +1254,395 @@ describe("readAllAgents — listTmuxSessions cache", () => {
     resetListTmuxSessionsCache();
     await readAllAgents([{ path: tempDir, name: "test-repo" }]);
     expect(listCalls).toBe(2);
+  });
+});
+
+// ── readAgentTransient / writeAgentTransient ─────────────────────────────────
+
+describe("readAgentTransient / writeAgentTransient", () => {
+  let tempDir: string;
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "itsybitsy-transient-"));
+  });
+
+  afterEach(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  test("returns null when meta.transient.json is missing", async () => {
+    const result = await readAgentTransient(tempDir);
+    expect(result).toBeNull();
+  });
+
+  test("happy path: writes data and reads it back", async () => {
+    const data: TransientState = {
+      tmux_compacting: true,
+      tmux_rate_limited: false,
+      has_background_tasks: true,
+      updated_at_ms: 1_700_000_000_000,
+      watchdog_pid: 12345,
+    };
+    await writeAgentTransient(tempDir, data);
+    const result = await readAgentTransient(tempDir);
+    expect(result).toEqual(data);
+  });
+
+  test("returns null when file is malformed", async () => {
+    await Bun.write(join(tempDir, "meta.transient.json"), "{ not json");
+    const result = await readAgentTransient(tempDir);
+    expect(result).toBeNull();
+  });
+
+  test("returns null when fields have wrong types", async () => {
+    await Bun.write(
+      join(tempDir, "meta.transient.json"),
+      JSON.stringify({ tmux_compacting: "yes", tmux_rate_limited: false, has_background_tasks: true, updated_at_ms: 0, watchdog_pid: 1 }),
+    );
+    const result = await readAgentTransient(tempDir);
+    expect(result).toBeNull();
+  });
+
+  test("write is atomic (.tmp + rename) — second write replaces first", async () => {
+    const first: TransientState = { tmux_compacting: true, tmux_rate_limited: false, has_background_tasks: false, updated_at_ms: 1, watchdog_pid: 100 };
+    const second: TransientState = { tmux_compacting: false, tmux_rate_limited: true, has_background_tasks: false, updated_at_ms: 2, watchdog_pid: 200 };
+    await writeAgentTransient(tempDir, first);
+    await writeAgentTransient(tempDir, second);
+    expect(await readAgentTransient(tempDir)).toEqual(second);
+  });
+
+  test("deleteAgentTransient removes the file", async () => {
+    const data: TransientState = { tmux_compacting: false, tmux_rate_limited: false, has_background_tasks: false, updated_at_ms: 1, watchdog_pid: 1 };
+    await writeAgentTransient(tempDir, data);
+    expect(await readAgentTransient(tempDir)).not.toBeNull();
+    await deleteAgentTransient(tempDir);
+    expect(await readAgentTransient(tempDir)).toBeNull();
+  });
+
+  test("deleteAgentTransient is a no-op when file is missing", async () => {
+    await deleteAgentTransient(tempDir);
+    expect(await readAgentTransient(tempDir)).toBeNull();
+  });
+});
+
+// ── detectAgentStates — meta.transient.json fast-path ────────────────────────
+
+describe("detectAgentStates — meta.transient.json fast-path", () => {
+  let tempDir: string;
+  let captureCalls: number;
+
+  /** Mock spawn runner that counts capture-pane calls and returns plain output. */
+  function installSpyCapture(output = "ordinary output\n"): void {
+    tmuxPollerSpawnCtx.set(((args: any[]) => {
+      const isCapture = args[0] === "tmux" && args[1] === "capture-pane";
+      if (isCapture) captureCalls++;
+      return {
+        stdout: new ReadableStream({
+          start(c) {
+            c.enqueue(new TextEncoder().encode(isCapture ? output : ""));
+            c.close();
+          },
+        }),
+        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        exited: Promise.resolve(0),
+      };
+    }) as any);
+  }
+
+  /** Build an agent backed by a real .ittybitty/agents/<id>/ directory. */
+  async function makeBackedAgent(id: string, metaState: "running" | "waiting" = "running"): Promise<Agent> {
+    const agentDir = join(tempDir, ".ittybitty", "agents", id);
+    await mkdir(agentDir, { recursive: true });
+    return makeAgent({
+      id,
+      repoPath: tempDir,
+      meta: {
+        state: metaState,
+        tmux_session: `ib-${id}`,
+        created_epoch: Math.floor(Date.now() / 1000) - 60,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+  }
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "itsybitsy-fastpath-"));
+    captureCalls = 0;
+  });
+
+  afterEach(async () => {
+    tmuxPollerSpawnCtx.reset();
+    isPidAliveCtx.reset();
+    nowMsCtx.reset();
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  test("trusts fresh transient file (watchdog alive) — no tmux capture", async () => {
+    installSpyCapture();
+    const a = await makeBackedAgent("agent-fastpath");
+
+    isPidAliveCtx.set(() => true);
+    const fakeNow = 5_000_000;
+    nowMsCtx.set(() => fakeNow);
+
+    const agentDir = join(tempDir, ".ittybitty", "agents", a.id);
+    await writeAgentTransient(agentDir, {
+      tmux_compacting: false,
+      tmux_rate_limited: false,
+      has_background_tasks: false,
+      updated_at_ms: fakeNow - 1_000, // 1s old, fresh
+      watchdog_pid: 99999,
+    });
+
+    await detectAgentStates([a]);
+    expect(a.state).toBe("running");
+    expect(captureCalls).toBe(0);
+  });
+
+  test("trusts fresh transient with tmux_compacting → state=compacting", async () => {
+    installSpyCapture();
+    const a = await makeBackedAgent("agent-compact");
+    isPidAliveCtx.set(() => true);
+    const fakeNow = 5_000_000;
+    nowMsCtx.set(() => fakeNow);
+
+    const agentDir = join(tempDir, ".ittybitty", "agents", a.id);
+    await writeAgentTransient(agentDir, {
+      tmux_compacting: true,
+      tmux_rate_limited: false,
+      has_background_tasks: false,
+      updated_at_ms: fakeNow - 100,
+      watchdog_pid: 12345,
+    });
+
+    await detectAgentStates([a]);
+    expect(a.state).toBe("compacting");
+    expect(captureCalls).toBe(0);
+  });
+
+  test("trusts fresh transient with tmux_rate_limited → state=rate_limited", async () => {
+    installSpyCapture();
+    const a = await makeBackedAgent("agent-rl");
+    isPidAliveCtx.set(() => true);
+    const fakeNow = 5_000_000;
+    nowMsCtx.set(() => fakeNow);
+
+    const agentDir = join(tempDir, ".ittybitty", "agents", a.id);
+    await writeAgentTransient(agentDir, {
+      tmux_compacting: false,
+      tmux_rate_limited: true,
+      has_background_tasks: false,
+      updated_at_ms: fakeNow - 100,
+      watchdog_pid: 12345,
+    });
+
+    await detectAgentStates([a]);
+    expect(a.state).toBe("rate_limited");
+    expect(captureCalls).toBe(0);
+  });
+
+  test("waiting + has_background_tasks via fast-path → state=running", async () => {
+    installSpyCapture();
+    const a = await makeBackedAgent("agent-bg", "waiting");
+    isPidAliveCtx.set(() => true);
+    const fakeNow = 5_000_000;
+    nowMsCtx.set(() => fakeNow);
+
+    const agentDir = join(tempDir, ".ittybitty", "agents", a.id);
+    await writeAgentTransient(agentDir, {
+      tmux_compacting: false,
+      tmux_rate_limited: false,
+      has_background_tasks: true,
+      updated_at_ms: fakeNow - 100,
+      watchdog_pid: 12345,
+    });
+
+    await detectAgentStates([a]);
+    expect(a.state).toBe("running");
+    expect(captureCalls).toBe(0);
+  });
+
+  test("falls back to tmux capture when watchdog PID is dead", async () => {
+    installSpyCapture();
+    const a = await makeBackedAgent("agent-deadwd");
+    isPidAliveCtx.set(() => false);
+    const fakeNow = 5_000_000;
+    nowMsCtx.set(() => fakeNow);
+
+    const agentDir = join(tempDir, ".ittybitty", "agents", a.id);
+    await writeAgentTransient(agentDir, {
+      tmux_compacting: true, // would say compacting via fast-path
+      tmux_rate_limited: false,
+      has_background_tasks: false,
+      updated_at_ms: fakeNow - 100,
+      watchdog_pid: 99999,
+    });
+
+    await detectAgentStates([a]);
+    // With dead watchdog, fast-path is bypassed; tmux capture sees plain output.
+    expect(a.state).toBe("running");
+    expect(captureCalls).toBe(1);
+  });
+
+  test("falls back when transient is older than TRANSIENT_FRESH_MS", async () => {
+    installSpyCapture();
+    const a = await makeBackedAgent("agent-stale");
+    isPidAliveCtx.set(() => true);
+    const fakeNow = 5_000_000;
+    nowMsCtx.set(() => fakeNow);
+
+    const agentDir = join(tempDir, ".ittybitty", "agents", a.id);
+    await writeAgentTransient(agentDir, {
+      tmux_compacting: true, // would say compacting via fast-path
+      tmux_rate_limited: false,
+      has_background_tasks: false,
+      updated_at_ms: fakeNow - TRANSIENT_FRESH_MS - 1,
+      watchdog_pid: 12345,
+    });
+
+    await detectAgentStates([a]);
+    expect(a.state).toBe("running");
+    expect(captureCalls).toBe(1);
+  });
+
+  test("falls back when transient file is missing", async () => {
+    installSpyCapture();
+    const a = await makeBackedAgent("agent-missing");
+    isPidAliveCtx.set(() => true);
+
+    await detectAgentStates([a]);
+    expect(a.state).toBe("running");
+    expect(captureCalls).toBe(1);
+  });
+
+  test("falls back when transient.updated_at_ms is 0 (PID-only seed)", async () => {
+    installSpyCapture();
+    const a = await makeBackedAgent("agent-seed");
+    isPidAliveCtx.set(() => true);
+
+    const agentDir = join(tempDir, ".ittybitty", "agents", a.id);
+    await writeAgentTransient(agentDir, {
+      tmux_compacting: true, // would say compacting via fast-path if trusted
+      tmux_rate_limited: false,
+      has_background_tasks: false,
+      updated_at_ms: 0,
+      watchdog_pid: 12345,
+    });
+
+    await detectAgentStates([a]);
+    expect(a.state).toBe("running");
+    expect(captureCalls).toBe(1);
+  });
+
+  test("uses preloaded agent.transient and skips disk read on subsequent ticks", async () => {
+    installSpyCapture();
+    const a = await makeBackedAgent("agent-preloaded");
+    isPidAliveCtx.set(() => true);
+    const fakeNow = 5_000_000;
+    nowMsCtx.set(() => fakeNow);
+
+    a.transient = {
+      tmux_compacting: true,
+      tmux_rate_limited: false,
+      has_background_tasks: false,
+      updated_at_ms: fakeNow - 100,
+      watchdog_pid: 12345,
+    };
+
+    await detectAgentStates([a]);
+    expect(a.state).toBe("compacting");
+    expect(captureCalls).toBe(0);
+  });
+});
+
+// ── archive cleanup deletes meta.transient.json ─────────────────────────────
+
+describe("archive cleanup deletes meta.transient.json", () => {
+  let tempDir: string;
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "itsybitsy-archive-transient-"));
+  });
+
+  afterEach(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  test("archiveAgent deletes meta.transient.json", async () => {
+    const { archiveAgent } = await import("./agent-lifecycle");
+
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-arch");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id: "agent-arch" }));
+    await writeAgentTransient(agentDir, {
+      tmux_compacting: false,
+      tmux_rate_limited: false,
+      has_background_tasks: false,
+      updated_at_ms: Date.now(),
+      watchdog_pid: 12345,
+    });
+
+    expect(await readAgentTransient(agentDir)).not.toBeNull();
+    await archiveAgent(tempDir, "agent-arch", agentDir);
+    expect(await readAgentTransient(agentDir)).toBeNull();
+  });
+});
+
+// ── readAgentMeta mtime cache (Phase 2) ─────────────────────────────────────
+
+describe("readAgentMeta mtime cache", () => {
+  let tempDir: string;
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "itsybitsy-metacache-"));
+    resetReadAgentMetaCache();
+  });
+
+  afterEach(async () => {
+    resetReadAgentMetaCache();
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  test("returns same data on consecutive reads", async () => {
+    const agentDir = tempDir;
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-cache",
+      tmux_session: "ib-agent-cache",
+    }));
+    const a = await readAgentMeta(agentDir);
+    const b = await readAgentMeta(agentDir);
+    expect(a.meta?.id).toBe("agent-cache");
+    expect(b.meta?.id).toBe("agent-cache");
+  });
+
+  test("re-parses when mtime changes", async () => {
+    const agentDir = tempDir;
+    const path = join(agentDir, "meta.json");
+    await Bun.write(path, JSON.stringify({ id: "agent-cache" }));
+    const a = await readAgentMeta(agentDir);
+    expect(a.meta?.tmux_session).toBe("");
+
+    // Bump mtime by writing different content. Sleep 5ms first to ensure
+    // the new mtime differs from the old one even on coarse-grained FS clocks.
+    await Bun.sleep(5);
+    await Bun.write(path, JSON.stringify({ id: "agent-cache", tmux_session: "ib-new" }));
+    const b = await readAgentMeta(agentDir);
+    expect(b.meta?.tmux_session).toBe("ib-new");
+  });
+
+  test("returns 'Missing' error when meta.json absent", async () => {
+    const result = await readAgentMeta(tempDir);
+    expect(result.meta).toBeNull();
+    expect(result.error).toContain("Missing");
+  });
+
+  test("caller can mutate returned meta without polluting cache", async () => {
+    await Bun.write(join(tempDir, "meta.json"), JSON.stringify({
+      id: "agent-mut",
+      tmux_session: "ib-original",
+    }));
+    const first = await readAgentMeta(tempDir);
+    if (first.meta) first.meta.tmux_session = "ib-mutated";
+    const second = await readAgentMeta(tempDir);
+    expect(second.meta?.tmux_session).toBe("ib-original");
   });
 });

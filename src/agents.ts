@@ -4,7 +4,7 @@
  */
 
 import { join } from "path";
-import { readdir, rename, stat } from "fs/promises";
+import { readdir, rename, stat, unlink } from "fs/promises";
 import type { AgentState } from "./parse-state";
 import { parseState, stripAnsi, STARTUP_MARKERS } from "./parse-state";
 import { captureTmuxOutput, listTmuxSessions } from "./tmux-poller";
@@ -76,6 +76,11 @@ export interface Agent {
   archived: boolean;
   orphaned?: boolean;
   children: Agent[];
+  /**
+   * Watchdog-owned transient observations, loaded from meta.transient.json.
+   * Undefined if the file is missing/malformed. Populated by readRepoAgents().
+   */
+  transient?: TransientState;
 }
 
 export interface PendingQuestion {
@@ -134,6 +139,86 @@ export async function writeAgentState(agentDir: string, state: MetaState): Promi
     await rename(tmpPath, metaPath);
   } catch {
     /* best-effort — don't crash on write failures */
+  }
+}
+
+/**
+ * Transient observations about an agent, owned by the per-agent watchdog.
+ * Persisted to meta.transient.json (sibling of meta.json) so ib watch can
+ * read the watchdog's classification instead of running its own tmux capture.
+ *
+ * The watchdog is the single writer — no locks needed. Readers must check
+ * watchdog liveness (process.kill(pid, 0)) and freshness (updated_at_ms)
+ * before trusting these fields, and fall back to live capture otherwise.
+ */
+export interface TransientState {
+  tmux_compacting: boolean;
+  tmux_rate_limited: boolean;
+  has_background_tasks: boolean;
+  updated_at_ms: number;
+  watchdog_pid: number;
+}
+
+/**
+ * Read meta.transient.json for an agent. Returns null if missing or malformed.
+ */
+export async function readAgentTransient(agentDir: string): Promise<TransientState | null> {
+  const path = join(agentDir, "meta.transient.json");
+  try {
+    const file = Bun.file(path);
+    if (!(await file.exists())) return null;
+    const data = await file.json();
+    if (
+      !data ||
+      typeof data !== "object" ||
+      typeof data.tmux_compacting !== "boolean" ||
+      typeof data.tmux_rate_limited !== "boolean" ||
+      typeof data.has_background_tasks !== "boolean" ||
+      typeof data.updated_at_ms !== "number" ||
+      typeof data.watchdog_pid !== "number"
+    ) {
+      return null;
+    }
+    return {
+      tmux_compacting: data.tmux_compacting,
+      tmux_rate_limited: data.tmux_rate_limited,
+      has_background_tasks: data.has_background_tasks,
+      updated_at_ms: data.updated_at_ms,
+      watchdog_pid: data.watchdog_pid,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Write meta.transient.json atomically (.tmp + rename).
+ * Best-effort: silently swallows write errors so a failing watchdog write
+ * does not crash the watchdog loop.
+ */
+export async function writeAgentTransient(agentDir: string, data: TransientState): Promise<void> {
+  const path = join(agentDir, "meta.transient.json");
+  try {
+    const tmpPath = path + ".tmp";
+    await Bun.write(tmpPath, JSON.stringify(data, null, 2));
+    await rename(tmpPath, path);
+  } catch {
+    /* best-effort */
+  }
+}
+
+/**
+ * Delete meta.transient.json. Used when archiving — transient state has no
+ * historical value. ENOENT is silently swallowed.
+ */
+export async function deleteAgentTransient(agentDir: string): Promise<void> {
+  const path = join(agentDir, "meta.transient.json");
+  try {
+    await unlink(path);
+  } catch (err: unknown) {
+    if (err instanceof Error && "code" in err && (err as NodeJS.ErrnoException).code !== "ENOENT") {
+      /* best-effort */
+    }
   }
 }
 
@@ -239,16 +324,56 @@ export interface AgentReadError {
   error: string;
 }
 
+/**
+ * mtime-keyed cache for parsed meta.json. Invalidates naturally because
+ * meta.json mtime only changes on real lifecycle events (Stop hook,
+ * sendMessage, resumeAgent, pauseAgent, newAgent). Transient observations
+ * live in meta.transient.json — they don't bump meta.json's mtime.
+ *
+ * Map key: absolute meta.json path. Value: { mtimeMs, meta }.
+ * Stored is a frozen reference to the parsed AgentMeta — callers must NOT
+ * mutate the returned object. detectAgentStates() mutates `agent.state`,
+ * not `agent.meta`, so this is safe in practice.
+ */
+const metaCache = new Map<string, { mtimeMs: number; meta: AgentMeta }>();
+
+/** Reset the meta.json mtime cache. Exported for tests. */
+export function resetReadAgentMetaCache(): void {
+  metaCache.clear();
+}
+
 /** Read a single agent's meta.json. Returns meta or an error description.
- * Exported as _readAgentMeta for testing only. */
+ * Uses an mtime-keyed cache to avoid re-parsing on every refresh tick when
+ * meta.json hasn't changed. */
 export async function readAgentMeta(agentDir: string): Promise<{ meta: AgentMeta | null; error?: string }> {
+  const metaPath = join(agentDir, "meta.json");
+
+  // Single syscall: stat() returns mtimeMs and confirms existence.
+  // Replaces the previous Bun.file().exists() + file.json() pair.
+  let mtimeMs: number;
   try {
-    const metaPath = join(agentDir, "meta.json");
+    const st = await stat(metaPath);
+    mtimeMs = st.mtimeMs;
+  } catch (err: unknown) {
+    if (err instanceof Error && "code" in err && (err as NodeJS.ErrnoException).code === "ENOENT") {
+      metaCache.delete(metaPath);
+      return { meta: null, error: `Missing ${metaPath}` };
+    }
+    return { meta: null, error: `Failed to read ${metaPath}: ${err}` };
+  }
+
+  const cached = metaCache.get(metaPath);
+  if (cached && cached.mtimeMs === mtimeMs) {
+    // Return a shallow copy so callers cannot mutate the cached object.
+    return { meta: { ...cached.meta } };
+  }
+
+  try {
     const file = Bun.file(metaPath);
-    if (!(await file.exists())) return { meta: null, error: `Missing ${metaPath}` };
     const data = await file.json();
     // Basic validation: id is required
     if (!data || typeof data.id !== "string") {
+      metaCache.delete(metaPath);
       return { meta: null, error: `Malformed ${metaPath}: missing or invalid 'id'` };
     }
     // Apply sensible defaults for all fields with wrong types
@@ -278,9 +403,12 @@ export async function readAgentMeta(agentDir: string): Promise<{ meta: AgentMeta
         delete data.spawned_by;
       }
     }
-    return { meta: data as AgentMeta };
+    const meta = data as AgentMeta;
+    metaCache.set(metaPath, { mtimeMs, meta });
+    return { meta: { ...meta } };
   } catch (err) {
-    return { meta: null, error: `Failed to read ${join(agentDir, "meta.json")}: ${err}` };
+    metaCache.delete(metaPath);
+    return { meta: null, error: `Failed to read ${metaPath}: ${err}` };
   }
 }
 
@@ -315,6 +443,9 @@ async function readAgentsFromDir(
       }
       if (!meta) continue;
 
+      // Load transient observations (watchdog_pid + tmux booleans) — best-effort.
+      const transient = archived ? null : await readAgentTransient(agentDir);
+
       agents.push({
         id: meta.id,
         repoPath,
@@ -324,6 +455,7 @@ async function readAgentsFromDir(
         age: computeAge(meta.created_epoch),
         archived,
         children: [],
+        ...(transient ? { transient } : {}),
       });
     }
   } catch (err: unknown) {
@@ -616,6 +748,30 @@ export function computeStateFromContent(stripped: string): AgentState | null {
 }
 
 /**
+ * Maximum age (ms) for a meta.transient.json snapshot to be trusted by
+ * detectAgentStates(). Set to 3 watchdog ticks (POLL_INTERVAL_MS = 5s).
+ * A stale or missing snapshot causes the reader to fall back to a live
+ * tmux capture.
+ */
+export const TRANSIENT_FRESH_MS = 15_000;
+
+/** Default isPidAlive — checks if a process is alive via signal 0. */
+function _isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Injectable isPidAlive for tests. */
+export const isPidAliveCtx = new InjectionContext<(pid: number) => boolean>(_isPidAlive);
+
+/** Injectable Date.now for tests. */
+export const nowMsCtx = new InjectionContext<() => number>(() => Date.now());
+
+/**
  * Detect agent state for each agent using deterministic meta.json state
  * with tmux overrides for transient states. Mutates agent.state in place.
  *
@@ -623,6 +779,8 @@ export function computeStateFromContent(stripped: string): AgentState | null {
  * 1. Archived agents → stopped
  * 2. No tmux session → creating (if < 6s old) or stopped
  * 3. Tmux exists → check for compacting/rate_limited overrides
+ *    - Fast-path: trust meta.transient.json if its watchdog is alive and
+ *      the snapshot is fresh; otherwise fall back to a live tmux capture.
  * 4. Read state from meta.json → return stored value or default to running
  */
 export async function detectAgentStates(agents: Agent[]): Promise<void> {
@@ -658,6 +816,41 @@ export async function detectAgentStates(agents: Agent[]): Promise<void> {
       // optimization. Cosmetic-only on signed-off agents.
       if (agent.meta.state === "complete") {
         agent.state = "complete";
+        return;
+      }
+
+      // Fast-path: trust meta.transient.json if its watchdog is alive and
+      // the snapshot is fresh. The watchdog already runs the same
+      // captureTmuxOutput + classify work every 5s — reusing its result
+      // saves ~1 posix_spawn + ~20 file opens per agent per tick.
+      // Prefer the snapshot already loaded by readRepoAgents() (Agent.transient);
+      // re-read from disk if the caller did not pre-load it.
+      const agentDir = join(agent.repoPath, ".ittybitty", "agents", agent.id);
+      const transient = agent.transient ?? (await readAgentTransient(agentDir));
+      if (
+        transient &&
+        transient.updated_at_ms > 0 &&
+        nowMsCtx.fn() - transient.updated_at_ms < TRANSIENT_FRESH_MS &&
+        isPidAliveCtx.fn(transient.watchdog_pid)
+      ) {
+        if (transient.tmux_compacting) {
+          agent.state = "compacting";
+          return;
+        }
+        if (transient.tmux_rate_limited) {
+          agent.state = "rate_limited";
+          return;
+        }
+        if (agent.meta.state === "waiting" && transient.has_background_tasks) {
+          agent.state = "running";
+          return;
+        }
+        const metaState = agent.meta.state;
+        if (metaState) {
+          agent.state = metaState;
+          return;
+        }
+        agent.state = isRecentlyCreated(agent.meta.created_epoch) ? "creating" : "running";
         return;
       }
 

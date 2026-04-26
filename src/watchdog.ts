@@ -11,8 +11,8 @@
 
 import { join } from "path";
 import { mkdirSync } from "fs";
-import { readRepoAgents, readAllAgents, isCompacting, isRateLimited, readAgentState, hasBackgroundTasks, anyChildActive } from "./agents";
-import type { Agent } from "./agents";
+import { readRepoAgents, readAllAgents, isCompacting, isRateLimited, readAgentState, hasBackgroundTasks, anyChildActive, writeAgentTransient } from "./agents";
+import type { Agent, TransientState } from "./agents";
 import { captureTmuxOutput } from "./tmux-poller";
 import { logAgent } from "./agent-lifecycle";
 import { parseState } from "./parse-state";
@@ -837,6 +837,18 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
           continue;
         }
       }
+
+      // Persist transient observations so ib watch can skip its own
+      // tmux capture for this agent. Single writer (this watchdog), so
+      // no lock is needed; readers gate on watchdog liveness + freshness.
+      const transientSnapshot: TransientState = {
+        tmux_compacting: isCompacting(output),
+        tmux_rate_limited: isRateLimited(output),
+        has_background_tasks: hasBackgroundTasks(output),
+        updated_at_ms: nowFn(),
+        watchdog_pid: process.pid,
+      };
+      await writeAgentTransient(agentDir, transientSnapshot);
 
       // Resolve state from meta.json with tmux overrides
       const metaState = await readAgentStateFn(agentDir);

@@ -920,11 +920,7 @@ export function resetWatchdogReadAllAgents(): void {
   readAllAgentsFn = readAllAgents;
 }
 
-/**
- * TTL cache for the cross-repo agent snapshot.
- * Stores `expiresAtMs` (deadline) instead of load time, so backward time jumps
- * (e.g. setWatchdogNow injection) treat the cache as stale rather than fresh forever.
- */
+/** TTL cache for the cross-repo agent snapshot. */
 let allAgentsCache: { snapshot: Agent[]; expiresAtMs: number } | null = null;
 
 export function clearAllAgentsCache(): void {

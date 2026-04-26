@@ -9,7 +9,7 @@ import { readdir, chmod, rm, mkdir, stat } from "fs/promises";
 import { realpathSync } from "fs";
 import { homedir } from "node:os";
 import type { Agent, SpawnedBy } from "./agents";
-import { writeAgentState } from "./agents";
+import { writeAgentState, isRecentlyCreated } from "./agents";
 import {
   logAgent,
   logSpawn,
@@ -292,6 +292,17 @@ export async function nukeAllAgents(repoPath: string): Promise<IbCommandResult> 
 /**
  * Native resume implementation — replaces `ib resume <id>`.
  *
+ * Resume eligibility is determined by tmux liveness, NOT by `meta.state`.
+ * Pre-Phase-42 paused agents may have a stale state like "complete" that
+ * the old pause path never overwrote; trusting `meta.state` would refuse to
+ * resume those stuck agents forever. Checking tmux directly lets them
+ * self-heal: if no live tmux session exists, resume proceeds.
+ *
+ * Refusal cases:
+ * - tmux session is alive — resuming would clobber a running agent.
+ * - agent is in the 6s creating-grace-period with no tmux yet — don't race
+ *   with the spawn pipeline.
+ *
  * Sequence (mirrors cmd_resume in ib bash):
  * 1. Read session_id, model from meta.json
  * 2. Check yolo mode from start.sh
@@ -312,9 +323,26 @@ export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
     return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' not found` };
   }
 
-  // Must be stopped
-  if (agent.state !== "stopped") {
-    return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' is not stopped (current state: ${agent.state})` };
+  // Resume is allowed when no live tmux session exists for the agent. We don't
+  // trust meta.state here because legacy paused agents (pre-Phase 42) may have a
+  // stale state like "complete" or "waiting" that pause never overwrote. Checking
+  // tmux directly lets those stuck agents self-heal.
+  //
+  // Two refusal cases:
+  // 1. tmux session is alive — agent is running, resuming would clobber it.
+  // 2. agent is in the 6s creating-grace-period and hasn't started tmux yet —
+  //    don't race with the spawn pipeline.
+  const tmuxSessionForGuard = agent.meta.tmux_session;
+  if (tmuxSessionForGuard) {
+    if (!isValidTmuxSession(tmuxSessionForGuard)) {
+      return { ok: false, exitCode: 1, stdout: "", stderr: `Invalid tmux session name: ${tmuxSessionForGuard}` };
+    }
+    const hasSession = await nukeResumeSpawnCtx.run(["tmux", "has-session", "-t", tmuxSessionForGuard]);
+    if (hasSession.exitCode === 0) {
+      return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' has a live tmux session ('${tmuxSessionForGuard}') — refuse to resume a running agent` };
+    }
+  } else if (isRecentlyCreated(agent.meta.created_epoch)) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' is still being created — wait for spawn to complete before resuming` };
   }
 
   // Read session_id from meta.json
@@ -336,11 +364,8 @@ export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
     return { ok: false, exitCode: 1, stdout: "", stderr: `Invalid model name: ${model}` };
   }
 
-  // Validate tmux session ID
+  // Tmux session was validated at the top of resumeAgent (liveness guard).
   const tmuxSession = agent.meta.tmux_session;
-  if (tmuxSession && !isValidTmuxSession(tmuxSession)) {
-    return { ok: false, exitCode: 1, stdout: "", stderr: `Invalid tmux session name: ${tmuxSession}` };
-  }
 
   // Detect yolo mode from start.sh
   let yoloMode = false;
@@ -2771,6 +2796,11 @@ export async function pauseAgent(agent: Agent): Promise<IbCommandResult> {
   } else {
     await logAgent(agentDir, "No tmux session configured");
   }
+
+  // Persist stopped state so resume's `state === "stopped"` guard is satisfied
+  // and the fast-path in detectAgentStates() doesn't keep reporting the
+  // pre-pause state (e.g. "complete") forever.
+  await writeAgentState(agentDir, "stopped");
 
   // Log the pause
   await logAgent(agentDir, "Agent paused");

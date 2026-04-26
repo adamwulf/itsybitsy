@@ -407,12 +407,30 @@ describe("DashboardComponent dialog and action handlers", () => {
 
     setupSendMock();
 
-    // Mock spawn runners for native kill/pause (all tmux/pgrep calls succeed with no-op)
-    const noopSpawn = (cmd: string[]) => ({
-      stdout: new Response("").body!,
-      stderr: new Response("").body!,
-      exited: Promise.resolve(cmd.includes("pgrep") ? 1 : 0),
-    } as SpawnResult);
+    // Mock spawn runners for native kill/pause/resume.
+    // - pgrep → fail (no running process)
+    // - has-session BEFORE new-session → fail (no live tmux, so resume guard passes)
+    // - has-session AFTER new-session → succeed (resume's verify-before-nudge check)
+    // - everything else → succeed
+    let newSessionSeen = false;
+    const noopSpawn = (cmd: string[]) => {
+      if (cmd[0] === "tmux" && cmd[1] === "new-session") {
+        newSessionSeen = true;
+        return {
+          stdout: new Response("").body!,
+          stderr: new Response("").body!,
+          exited: Promise.resolve(0),
+        } as SpawnResult;
+      }
+      const isHasSession = cmd[0] === "tmux" && cmd.includes("has-session");
+      const isPgrep = cmd.includes("pgrep");
+      const code = isPgrep ? 1 : isHasSession ? (newSessionSeen ? 0 : 1) : 0;
+      return {
+        stdout: new Response("").body!,
+        stderr: new Response("").body!,
+        exited: Promise.resolve(code),
+      } as SpawnResult;
+    };
     setKillPauseSpawnRunner(noopSpawn);
     lifecycleSpawnCtx.set(noopSpawn);
     setNukeResumeSpawnRunner(noopSpawn);

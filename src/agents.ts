@@ -11,7 +11,7 @@ import { captureTmuxOutput, listTmuxSessions } from "./tmux-poller";
 import { InjectionContext } from "./types";
 
 /** States that can be written to meta.json */
-export type MetaState = "running" | "waiting" | "complete";
+export type MetaState = "running" | "waiting" | "complete" | "stopped";
 
 /** Cross-repo spawner provenance — records which agent created this one */
 export interface SpawnedBy {
@@ -118,7 +118,6 @@ export const isRecentlyCreatedDirCtx = new InjectionContext<(dirPath: string) =>
 
 /**
  * Write agent state to meta.json atomically (write .tmp, rename over original).
- * Only "running", "waiting", or "complete" are valid values.
  * No-op if meta.json doesn't exist.
  */
 export async function writeAgentState(agentDir: string, state: MetaState): Promise<void> {

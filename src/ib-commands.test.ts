@@ -453,6 +453,83 @@ describe("pauseAgent (native)", () => {
     const log = await Bun.file(join(agentDir, "agent.log")).text();
     expect(log).toContain("Killed tmux session");
   });
+
+  test("writes meta.state = 'stopped' when pausing a 'complete' agent", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-abc",
+      tmux_session: "tmux-agent-abc",
+      state: "complete",
+    }));
+
+    const runner = mockSpawnFnWithFailures(spawnCalls, (cmd) =>
+      cmd.includes("has-session") || cmd.includes("pgrep")
+    );
+    lifecycleSpawnCtx.set(runner);
+    setKillPauseSpawnRunner(runner);
+
+    const agent = makeAgent("agent-abc", tempDir, "complete");
+    const result = await pauseAgent(agent);
+
+    expect(result.ok).toBe(true);
+    const meta = await Bun.file(join(agentDir, "meta.json")).json();
+    expect(meta.state).toBe("stopped");
+  });
+
+  test("writes meta.state = 'stopped' when pausing a 'waiting' agent", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-abc",
+      tmux_session: "tmux-agent-abc",
+      state: "waiting",
+    }));
+
+    const runner = mockSpawnFnWithFailures(spawnCalls, (cmd) =>
+      cmd.includes("has-session") || cmd.includes("pgrep")
+    );
+    lifecycleSpawnCtx.set(runner);
+    setKillPauseSpawnRunner(runner);
+
+    const agent = makeAgent("agent-abc", tempDir, "waiting");
+    const result = await pauseAgent(agent);
+
+    expect(result.ok).toBe(true);
+    const meta = await Bun.file(join(agentDir, "meta.json")).json();
+    expect(meta.state).toBe("stopped");
+  });
+
+  test("second pause on already-paused agent returns 'already stopped'", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-abc",
+      tmux_session: "tmux-agent-abc",
+      state: "waiting",
+    }));
+
+    const runner = mockSpawnFnWithFailures(spawnCalls, (cmd) =>
+      cmd.includes("has-session") || cmd.includes("pgrep")
+    );
+    lifecycleSpawnCtx.set(runner);
+    setKillPauseSpawnRunner(runner);
+
+    // First pause: succeeds, writes state=stopped
+    const agent1 = makeAgent("agent-abc", tempDir, "waiting");
+    const first = await pauseAgent(agent1);
+    expect(first.ok).toBe(true);
+
+    // Re-read meta to confirm state landed, then attempt second pause with
+    // runtime state reflecting the freshly-paused agent (state="stopped")
+    const meta = await Bun.file(join(agentDir, "meta.json")).json();
+    expect(meta.state).toBe("stopped");
+
+    const agent2 = makeAgent("agent-abc", tempDir, "stopped");
+    const second = await pauseAgent(agent2);
+    expect(second.ok).toBe(false);
+    expect(second.stderr).toContain("already stopped");
+  });
 });
 
 describe("nukeAgent (native)", () => {
@@ -642,10 +719,30 @@ describe("resumeAgent (native)", () => {
   let tempDir: string;
   let spawnCalls: string[][];
 
+  // Default runner mimics the canonical "stopped agent, no live tmux" path:
+  // - The first has-session call (the resume liveness guard) must fail so resume proceeds.
+  // - After new-session creates the tmux session, subsequent has-session calls must succeed
+  //   (resume verifies the session exists before sending the nudge).
+  // Tests that need a live session at guard time install their own runner.
+  function makeDefaultResumeRunner(calls: string[][]) {
+    let newSessionSeen = false;
+    return (cmd: string[]): SpawnResult => {
+      calls.push(cmd);
+      if (cmd[0] === "tmux" && cmd[1] === "new-session") {
+        newSessionSeen = true;
+        return makeSpawnResult();
+      }
+      if (cmd.includes("has-session")) {
+        return makeSpawnResult(newSessionSeen ? 0 : 1);
+      }
+      return makeSpawnResult();
+    };
+  }
+
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "resume-test-"));
     spawnCalls = [];
-    const runner = mockSpawnFn(spawnCalls);
+    const runner = makeDefaultResumeRunner(spawnCalls);
     lifecycleSpawnCtx.set(runner);
     setNukeResumeSpawnRunner(runner);
   });
@@ -664,7 +761,7 @@ describe("resumeAgent (native)", () => {
     expect(result.stderr).toContain("not found");
   });
 
-  test("returns error when agent is not stopped", async () => {
+  test("refuses when tmux session is alive, regardless of meta.state", async () => {
     const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
@@ -673,12 +770,24 @@ describe("resumeAgent (native)", () => {
       session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
     }));
 
-    const agent = makeAgent("agent-abc", tempDir, "running");
+    // Override the default runner: has-session always succeeds (live tmux).
+    const liveRunner = (cmd: string[]): SpawnResult => {
+      spawnCalls.push(cmd);
+      return makeSpawnResult();
+    };
+    lifecycleSpawnCtx.set(liveRunner);
+    setNukeResumeSpawnRunner(liveRunner);
+
+    // Even with state="stopped", a live tmux session must refuse resume.
+    const agent = makeAgent("agent-abc", tempDir, "stopped");
+    agent.meta.tmux_session = "tmux-agent-abc";
     const result = await resumeAgent(agent);
 
     expect(result.ok).toBe(false);
-    expect(result.stderr).toContain("not stopped");
-    expect(result.stderr).toContain("running");
+    expect(result.stderr).toContain("live tmux session");
+    // Ensure resume.sh was NOT written — guard must short-circuit before script generation.
+    const resumeScriptExists = await Bun.file(join(agentDir, "resume.sh")).exists();
+    expect(resumeScriptExists).toBe(false);
   });
 
   test("returns error when no session_id in meta.json", async () => {
@@ -1000,6 +1109,104 @@ describe("resumeAgent (native)", () => {
     const meta = await Bun.file(join(agentDir, "meta.json")).json();
     expect(meta.watchdog_pid).toBe(fakePid);
     resetWatchdogSpawnFn();
+  });
+
+  // ----- Tmux liveness guard (replaces meta.state guard) -----
+
+  test("self-heals: resume succeeds when meta.state='complete' but tmux session is dead", async () => {
+    // Bug scenario: a pre-Phase-42 paused agent has stale state="complete" in
+    // meta.json because the old pause path never wrote "stopped". The new
+    // tmux-based guard must let resume proceed because the session is dead.
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-abc",
+      tmux_session: "tmux-agent-abc",
+      session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    }));
+
+    // Default runner: has-session fails before new-session, succeeds after.
+    const agent = _makeAgent({
+      id: "agent-abc",
+      repoPath: tempDir,
+      repoName: "test",
+      state: "complete",
+      meta: {
+        session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        tmux_session: "tmux-agent-abc",
+      } as any,
+    });
+    const result = await resumeAgent(agent);
+
+    expect(result.ok).toBe(true);
+    expect(result.stdout).toContain("ib look agent-abc");
+    // resume.sh should be created and tmux new-session called
+    const newSessionCall = spawnCalls.find(
+      (c) => c[0] === "tmux" && c[1] === "new-session"
+    );
+    expect(newSessionCall).toBeDefined();
+  });
+
+  test("regression: resume succeeds when meta.state='stopped' and tmux session is dead", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-abc",
+      tmux_session: "tmux-agent-abc",
+      session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    }));
+
+    const agent = _makeAgent({
+      id: "agent-abc",
+      repoPath: tempDir,
+      repoName: "test",
+      state: "stopped",
+      meta: {
+        session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        tmux_session: "tmux-agent-abc",
+      } as any,
+    });
+    const result = await resumeAgent(agent);
+
+    expect(result.ok).toBe(true);
+    expect(result.stdout).toContain("ib look agent-abc");
+    const newSessionCall = spawnCalls.find(
+      (c) => c[0] === "tmux" && c[1] === "new-session"
+    );
+    expect(newSessionCall).toBeDefined();
+  });
+
+  test("refuses to resume when agent is in creating grace period and has no tmux session yet", async () => {
+    // Agent created < 6s ago with no tmux_session means spawn pipeline is still
+    // running. Resuming now would race with the spawn. meta.state is irrelevant.
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-abc",
+      session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    }));
+
+    const agent = _makeAgent({
+      id: "agent-abc",
+      repoPath: tempDir,
+      repoName: "test",
+      state: "creating",
+      meta: {
+        session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        tmux_session: "",
+        // Created ~now — well within the 6s grace period.
+        created_epoch: Math.floor(Date.now() / 1000),
+      } as any,
+    });
+    const result = await resumeAgent(agent);
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("still being created");
+    // Guard must short-circuit before any tmux spawn.
+    const newSessionCall = spawnCalls.find(
+      (c) => c[0] === "tmux" && c[1] === "new-session"
+    );
+    expect(newSessionCall).toBeUndefined();
   });
 
 });

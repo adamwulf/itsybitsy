@@ -31,6 +31,11 @@ export class TmuxPoller {
 
   /** Set the agent to poll. Pass null to pause polling. */
   setAgent(tmuxSession: string | null): void {
+    // Short-circuit when the session hasn't changed — the dashboard calls
+    // setAgent() on every onUpdate (~2s), so without this guard we'd fire a
+    // redundant poll() and getTmuxWindowWidth() every state-poll tick even
+    // when the user hasn't switched agents.
+    if (this.tmuxSession === tmuxSession) return;
     this.tmuxSession = tmuxSession;
     // Immediately poll on agent change, and query the tmux window width once
     // for this session. Width only changes on terminal resize or our own

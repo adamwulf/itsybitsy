@@ -274,6 +274,46 @@ describe("TmuxPoller", () => {
     expect(displayMessageCalls).toBe(1);
   });
 
+  test("setAgent with the same session does NOT re-trigger poll or width query", async () => {
+    let captureCalls = 0;
+    let displayMessageCalls = 0;
+    spawnCtx.set((cmd: string[], _opts?: any) => {
+      const isDisplayMessage = cmd.includes("display-message");
+      const isCapture = cmd.includes("capture-pane");
+      if (isCapture) captureCalls++;
+      if (isDisplayMessage) displayMessageCalls++;
+      const stdout = isDisplayMessage ? "100\n" : "pane content\n";
+      return {
+        stdout: new ReadableStream({
+          start(c) {
+            c.enqueue(new TextEncoder().encode(stdout));
+            c.close();
+          },
+        }),
+        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        exited: Promise.resolve(0),
+      };
+    });
+
+    poller = new TmuxPoller({
+      onOutput() {},
+      onWidth() {},
+    });
+    poller.start();
+    poller.setAgent("session-A");
+    await Bun.sleep(50);
+    const capturesAfterFirst = captureCalls;
+    expect(displayMessageCalls).toBe(1);
+
+    // Calling setAgent with the same session should be a no-op (short-circuit)
+    poller.setAgent("session-A");
+    poller.setAgent("session-A");
+    await Bun.sleep(50);
+
+    expect(captureCalls).toBe(capturesAfterFirst);
+    expect(displayMessageCalls).toBe(1);
+  });
+
   test("switching agents triggers a fresh display-message call", async () => {
     let displayMessageCalls = 0;
     spawnCtx.set((cmd: string[], _opts?: any) => {

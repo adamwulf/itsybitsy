@@ -1875,15 +1875,17 @@ export async function newAgent(
   );
   if (useWorktree) {
     // Self-healing: discard stale worktree metadata pointing at paths that no longer exist.
-    const pruneResult = await newAgentSpawnCtx.run(["git", "-C", rootRepoPath, "worktree", "prune"]);
+    // The branch --list enumeration is independent of prune (prune cleans worktree refs;
+    // branch --list reads the branch ref store), so run them concurrently.
+    const [pruneResult, branchList] = await Promise.all([
+      newAgentSpawnCtx.run(["git", "-C", rootRepoPath, "worktree", "prune"]),
+      newAgentSpawnCtx.run(["git", "-C", rootRepoPath, "branch", "--list", branchName]),
+    ]);
     await logSpawn(agentDir, spawnerAgentDir, id, `git worktree prune → exit=${pruneResult.exitCode}${pruneResult.exitCode !== 0 && pruneResult.stderr ? ` stderr="${pruneResult.stderr.trim()}"` : ""}`);
 
     // If a same-name branch lingers from a prior failed/killed spawn, drop it —
     // but only when no worktree is checked out on it. If a worktree holds the
     // branch, surface a clear error instead of silently failing later.
-    const branchList = await newAgentSpawnCtx.run([
-      "git", "-C", rootRepoPath, "branch", "--list", branchName,
-    ]);
     const branchExists = branchList.stdout.trim().length > 0;
     await logSpawn(agentDir, spawnerAgentDir, id, `git branch --list ${branchName} → exit=${branchList.exitCode} exists=${branchExists}`);
     if (branchExists) {
@@ -2100,10 +2102,12 @@ export async function newAgent(
   let completionInstructions = "";
 
   if (useWorktree && !isLeafAgent) {
-    // Check for gh and remote
-    const hasGhResult = await newAgentSpawnCtx.run(["which", "gh"]);
+    // Check for gh and remote — independent probes, run concurrently
+    const [hasGhResult, hasRemoteResult] = await Promise.all([
+      newAgentSpawnCtx.run(["which", "gh"]),
+      newAgentSpawnCtx.run(["git", "-C", rootRepoPath, "remote"]),
+    ]);
     const hasGh = hasGhResult.exitCode === 0;
-    const hasRemoteResult = await newAgentSpawnCtx.run(["git", "-C", rootRepoPath, "remote"]);
     const hasRemote = hasRemoteResult.stdout.trim().length > 0;
 
     if (createPRs && hasGh && hasRemote) {
@@ -2295,11 +2299,14 @@ ${qStartExitScript}
     const suffix = err ? `: ${err}` : "";
     return { ok: false, exitCode: 1, stdout: "", stderr: `Error: could not create tmux session '${tmuxSession}'${suffix}` };
   }
-  await newAgentSpawnCtx.run(["tmux", "set-option", "-w", "-t", tmuxSession, "history-limit", "50000"]);
-  await newAgentSpawnCtx.run(["tmux", "set-option", "-w", "-t", tmuxSession, "remain-on-exit", "on"]);
-
-  // 19. Verify tmux session created
-  const verifyResult = await newAgentSpawnCtx.run(["tmux", "has-session", "-t", tmuxSession]);
+  // The two set-option calls and the has-session verify all depend on the
+  // session existing (above), but are independent of each other — run together.
+  const [, , verifyResult] = await Promise.all([
+    newAgentSpawnCtx.run(["tmux", "set-option", "-w", "-t", tmuxSession, "history-limit", "50000"]),
+    newAgentSpawnCtx.run(["tmux", "set-option", "-w", "-t", tmuxSession, "remain-on-exit", "on"]),
+    // 19. Verify tmux session created
+    newAgentSpawnCtx.run(["tmux", "has-session", "-t", tmuxSession]),
+  ]);
   await logSpawn(agentDir, spawnerAgentDir, id, `tmux has-session verify → exit=${verifyResult.exitCode}`);
   if (verifyResult.exitCode !== 0) {
     const err = verifyResult.stderr.trim();

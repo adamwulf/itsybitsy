@@ -1533,7 +1533,7 @@ describe("detectAgentStates — meta.transient.json fast-path", () => {
     expect(captureCalls).toBe(1);
   });
 
-  test("uses preloaded agent.transient and skips disk read on subsequent ticks", async () => {
+  test("uses preloaded agent.transient → fast-path with no tmux capture", async () => {
     installSpyCapture();
     const a = await makeBackedAgent("agent-preloaded");
     isPidAliveCtx.set(() => true);
@@ -1550,6 +1550,31 @@ describe("detectAgentStates — meta.transient.json fast-path", () => {
 
     await detectAgentStates([a]);
     expect(a.state).toBe("compacting");
+    expect(captureCalls).toBe(0);
+  });
+
+  test("preloaded agent.transient short-circuits the disk read entirely", async () => {
+    installSpyCapture();
+    const a = await makeBackedAgent("agent-skip-disk");
+    isPidAliveCtx.set(() => true);
+    const fakeNow = 5_000_000;
+    nowMsCtx.set(() => fakeNow);
+
+    // Preload with rate_limited=true; deliberately do NOT write
+    // meta.transient.json on disk. If detectAgentStates reads from disk,
+    // it will get null (missing) and fall back to the live tmux capture
+    // path, producing state="running" (1 capture call). If it uses the
+    // preloaded value, state=rate_limited (0 captures).
+    a.transient = {
+      tmux_compacting: false,
+      tmux_rate_limited: true,
+      has_background_tasks: false,
+      updated_at_ms: fakeNow - 100,
+      watchdog_pid: 12345,
+    };
+
+    await detectAgentStates([a]);
+    expect(a.state).toBe("rate_limited");
     expect(captureCalls).toBe(0);
   });
 });
@@ -1644,5 +1669,40 @@ describe("readAgentMeta mtime cache", () => {
     if (first.meta) first.meta.tmux_session = "ib-mutated";
     const second = await readAgentMeta(tempDir);
     expect(second.meta?.tmux_session).toBe("ib-original");
+  });
+
+  test("caller can mutate nested spawned_by without polluting cache", async () => {
+    await Bun.write(join(tempDir, "meta.json"), JSON.stringify({
+      id: "agent-nested",
+      tmux_session: "ib-orig",
+      spawned_by: { agent_id: "spawner-1", repo_path: "/orig/path" },
+    }));
+    const first = await readAgentMeta(tempDir);
+    if (first.meta?.spawned_by) {
+      first.meta.spawned_by.agent_id = "POLLUTED";
+      first.meta.spawned_by.repo_path = "/polluted/path";
+    }
+    const second = await readAgentMeta(tempDir);
+    expect(second.meta?.spawned_by?.agent_id).toBe("spawner-1");
+    expect(second.meta?.spawned_by?.repo_path).toBe("/orig/path");
+  });
+
+  test("invalidates cache after .tmp + rename write pattern", async () => {
+    const path = join(tempDir, "meta.json");
+    const tmpPath = path + ".tmp";
+    await Bun.write(path, JSON.stringify({ id: "agent-rename", tmux_session: "ib-v1" }));
+    const a = await readAgentMeta(tempDir);
+    expect(a.meta?.tmux_session).toBe("ib-v1");
+
+    // Sleep so the new file's mtime is observably newer than the old one.
+    await Bun.sleep(5);
+    // .tmp + rename is the actual production write pattern (writeAgentState,
+    // writeAgentTransient). The cache must invalidate when the inode behind
+    // meta.json changes via rename, not just in-place writes.
+    await Bun.write(tmpPath, JSON.stringify({ id: "agent-rename", tmux_session: "ib-v2" }));
+    const { rename } = await import("fs/promises");
+    await rename(tmpPath, path);
+    const b = await readAgentMeta(tempDir);
+    expect(b.meta?.tmux_session).toBe("ib-v2");
   });
 });

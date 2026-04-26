@@ -275,7 +275,11 @@ export async function archiveAgent(
     await cp(debugLogsDir, join(archiveFolder, "debug-logs"), { recursive: true });
   } catch { /* dir doesn't exist or copy failed */ }
 
-  // meta.transient.json has no historical value — delete rather than copy.
+  // meta.transient.json has no historical value — explicitly delete it
+  // (rather than copying) so any future archive flow that doesn't rm-rf
+  // the agent directory still cleans it up. Current callers (mergeAgent,
+  // teardownAgent, nukeAllAgents) all rm-rf afterwards, so this is
+  // defensive insurance.
   await deleteAgentTransient(agentDir);
 
   return archiveFolder;

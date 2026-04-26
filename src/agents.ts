@@ -331,9 +331,10 @@ export interface AgentReadError {
  * live in meta.transient.json — they don't bump meta.json's mtime.
  *
  * Map key: absolute meta.json path. Value: { mtimeMs, meta }.
- * Stored is a frozen reference to the parsed AgentMeta — callers must NOT
- * mutate the returned object. detectAgentStates() mutates `agent.state`,
- * not `agent.meta`, so this is safe in practice.
+ * Cache stores a single canonical reference; readers receive a deep copy
+ * via structuredClone() so caller mutations to nested objects (e.g.
+ * spawned_by) cannot pollute the cache. The shallow-spread alternative
+ * leaves spawned_by shared by reference.
  */
 const metaCache = new Map<string, { mtimeMs: number; meta: AgentMeta }>();
 
@@ -364,8 +365,7 @@ export async function readAgentMeta(agentDir: string): Promise<{ meta: AgentMeta
 
   const cached = metaCache.get(metaPath);
   if (cached && cached.mtimeMs === mtimeMs) {
-    // Return a shallow copy so callers cannot mutate the cached object.
-    return { meta: { ...cached.meta } };
+    return { meta: structuredClone(cached.meta) };
   }
 
   try {
@@ -405,7 +405,7 @@ export async function readAgentMeta(agentDir: string): Promise<{ meta: AgentMeta
     }
     const meta = data as AgentMeta;
     metaCache.set(metaPath, { mtimeMs, meta });
-    return { meta: { ...meta } };
+    return { meta: structuredClone(meta) };
   } catch (err) {
     metaCache.delete(metaPath);
     return { meta: null, error: `Failed to read ${metaPath}: ${err}` };

@@ -76,11 +76,6 @@ export interface Agent {
   archived: boolean;
   orphaned?: boolean;
   children: Agent[];
-  /**
-   * Watchdog-owned transient observations, loaded from meta.transient.json.
-   * Undefined if the file is missing/malformed. Populated by readRepoAgents().
-   */
-  transient?: TransientState;
 }
 
 export interface PendingQuestion {
@@ -209,16 +204,14 @@ export async function writeAgentTransient(agentDir: string, data: TransientState
 
 /**
  * Delete meta.transient.json. Used when archiving — transient state has no
- * historical value. ENOENT is silently swallowed.
+ * historical value. Best-effort: any error (including ENOENT) is ignored.
  */
 export async function deleteAgentTransient(agentDir: string): Promise<void> {
   const path = join(agentDir, "meta.transient.json");
   try {
     await unlink(path);
-  } catch (err: unknown) {
-    if (err instanceof Error && "code" in err && (err as NodeJS.ErrnoException).code !== "ENOENT") {
-      /* best-effort */
-    }
+  } catch {
+    /* best-effort */
   }
 }
 
@@ -443,9 +436,6 @@ async function readAgentsFromDir(
       }
       if (!meta) continue;
 
-      // Load transient observations (watchdog_pid + tmux booleans) — best-effort.
-      const transient = archived ? null : await readAgentTransient(agentDir);
-
       agents.push({
         id: meta.id,
         repoPath,
@@ -455,7 +445,6 @@ async function readAgentsFromDir(
         age: computeAge(meta.created_epoch),
         archived,
         children: [],
-        ...(transient ? { transient } : {}),
       });
     }
   } catch (err: unknown) {
@@ -823,10 +812,17 @@ export async function detectAgentStates(agents: Agent[]): Promise<void> {
       // the snapshot is fresh. The watchdog already runs the same
       // captureTmuxOutput + classify work every 5s — reusing its result
       // saves ~1 posix_spawn + ~20 file opens per agent per tick.
-      // Prefer the snapshot already loaded by readRepoAgents() (Agent.transient);
-      // re-read from disk if the caller did not pre-load it.
+      //
+      // Always read from disk here (not from a preloaded `agent.transient`):
+      // the watcher calls pollStates() every 2s using cached _lastAgents
+      // from a refresh() that runs every 10s. A preloaded snapshot would
+      // age in memory while the watchdog keeps writing fresh data to disk
+      // — we'd hit the staleness threshold and fall back to live capture
+      // even when fresh data was available on disk. The disk read here is
+      // cheap (one stat + a small JSON parse) compared to the tmux spawn
+      // we're avoiding.
       const agentDir = join(agent.repoPath, ".ittybitty", "agents", agent.id);
-      const transient = agent.transient ?? (await readAgentTransient(agentDir));
+      const transient = await readAgentTransient(agentDir);
       if (
         transient &&
         transient.updated_at_ms > 0 &&

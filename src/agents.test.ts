@@ -1533,45 +1533,27 @@ describe("detectAgentStates — meta.transient.json fast-path", () => {
     expect(captureCalls).toBe(1);
   });
 
-  test("uses preloaded agent.transient → fast-path with no tmux capture", async () => {
+  test("freshly-written disk snapshot supersedes any in-memory staleness", async () => {
+    // Earlier iterations of this change cached `agent.transient` in
+    // memory and short-circuited the disk read. That broke when the
+    // watcher's pollStates() reused agents from a 10s-old refresh()
+    // while the watchdog kept writing fresh snapshots to disk. The
+    // current code always reads from disk, so a fresh disk snapshot
+    // wins over whatever the in-memory copy might have been.
     installSpyCapture();
-    const a = await makeBackedAgent("agent-preloaded");
+    const a = await makeBackedAgent("agent-disk-wins");
     isPidAliveCtx.set(() => true);
     const fakeNow = 5_000_000;
     nowMsCtx.set(() => fakeNow);
 
-    a.transient = {
-      tmux_compacting: true,
-      tmux_rate_limited: false,
-      has_background_tasks: false,
-      updated_at_ms: fakeNow - 100,
-      watchdog_pid: 12345,
-    };
-
-    await detectAgentStates([a]);
-    expect(a.state).toBe("compacting");
-    expect(captureCalls).toBe(0);
-  });
-
-  test("preloaded agent.transient short-circuits the disk read entirely", async () => {
-    installSpyCapture();
-    const a = await makeBackedAgent("agent-skip-disk");
-    isPidAliveCtx.set(() => true);
-    const fakeNow = 5_000_000;
-    nowMsCtx.set(() => fakeNow);
-
-    // Preload with rate_limited=true; deliberately do NOT write
-    // meta.transient.json on disk. If detectAgentStates reads from disk,
-    // it will get null (missing) and fall back to the live tmux capture
-    // path, producing state="running" (1 capture call). If it uses the
-    // preloaded value, state=rate_limited (0 captures).
-    a.transient = {
+    const agentDir = join(tempDir, ".ittybitty", "agents", a.id);
+    await writeAgentTransient(agentDir, {
       tmux_compacting: false,
       tmux_rate_limited: true,
       has_background_tasks: false,
       updated_at_ms: fakeNow - 100,
       watchdog_pid: 12345,
-    };
+    });
 
     await detectAgentStates([a]);
     expect(a.state).toBe("rate_limited");

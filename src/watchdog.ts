@@ -55,11 +55,26 @@ export const MAX_NOTIFY_TICKS = 768;
 /** Recovery threshold for rate limits — matches ib bash's recovery_threshold (5%) */
 const RATE_LIMIT_RECOVERY_THRESHOLD = 5;
 
+/**
+ * Lazy accessor for the flat list of all agents across all registered repos.
+ *
+ * Handlers receive a thunk instead of a pre-loaded array so that handlers
+ * which never need the list (handleRunning, handleCreating, handleCompacting,
+ * handleRateLimited, handleStopped) avoid the ~250 openat syscalls per call
+ * that come from `listRepos()` + `readAllAgents()`.
+ *
+ * Per-tick memoization: the runPerAgentWatchdog poll loop builds one thunk
+ * per iteration that closes over a single Promise — multiple calls within
+ * the same tick share one snapshot. The underlying disk read is further
+ * gated by a module-level TTL cache (see ALL_AGENTS_TTL_MS).
+ */
+export type GetAllAgents = () => Promise<Agent[]>;
+
 /** State handler function signature — called on each tick for each agent */
 export type StateHandler = (
   agent: Agent,
   tracker: AgentTracker,
-  allAgents: Agent[],
+  getAllAgents: GetAllAgents,
 ) => Promise<void>;
 
 /** Registry of state handlers keyed by AgentState */
@@ -280,7 +295,7 @@ async function sendTmuxEnter(tmuxSession: string): Promise<boolean> {
  *   counter at its previous value; it resumes when suppression lifts,
  *   preserving any in-flight backoff (`notifyInterval`).
  */
-async function handleWaiting(agent: Agent, tracker: AgentTracker, allAgents: Agent[]): Promise<void> {
+async function handleWaiting(agent: Agent, tracker: AgentTracker, getAllAgents: GetAllAgents): Promise<void> {
   const tmuxSession = agent.meta.tmux_session;
   let bgActive = false;
   if (tmuxSession && isValidTmuxSession(tmuxSession)) {
@@ -289,6 +304,10 @@ async function handleWaiting(agent: Agent, tracker: AgentTracker, allAgents: Age
       bgActive = output !== null && hasBackgroundTasks(output);
     } catch { /* treat capture failures as not-bg-active */ }
   }
+
+  // Resolve the snapshot once and reuse for anyChildActive + both notify calls,
+  // so a single waiting-handler invocation never triggers more than one disk read.
+  const allAgents = await getAllAgents();
 
   // Flat-filter on meta.manager — see loadAllAgentsForNotification: the
   // per-agent watchdog does NOT call buildAgentTree(), so agent.children is
@@ -328,7 +347,7 @@ async function handleWaiting(agent: Agent, tracker: AgentTracker, allAgents: Age
  * Same exponential backoff as waiting — agent may need attention.
  * On first transition into unknown, saves tmux output to debug-logs/ (matches bash watchdog).
  */
-async function handleUnknown(agent: Agent, tracker: AgentTracker, allAgents: Agent[]): Promise<void> {
+async function handleUnknown(agent: Agent, tracker: AgentTracker, getAllAgents: GetAllAgents): Promise<void> {
   // Save debug log on transition into unknown state (not on every tick)
   if (tracker.previousState !== "unknown") {
     await saveUnknownDebugLog(agent);
@@ -337,6 +356,9 @@ async function handleUnknown(agent: Agent, tracker: AgentTracker, allAgents: Age
   tracker.waitCounter++;
 
   if (tracker.waitCounter >= tracker.notifyInterval) {
+    // Only resolve allAgents when we actually need to notify — most ticks in
+    // unknown state increment the counter without notifying.
+    const allAgents = await getAllAgents();
     await notifyManager(
       agent,
       `[watchdog]: Your subtask ${agent.id} state is unknown - may need attention`,
@@ -387,8 +409,11 @@ async function saveUnknownDebugLog(agent: Agent): Promise<void> {
  * Handler for "complete" state.
  * One-time notification to manager. Sets completionNotified flag; cleared on resume (running only).
  */
-async function handleComplete(agent: Agent, tracker: AgentTracker, allAgents: Agent[]): Promise<void> {
+async function handleComplete(agent: Agent, tracker: AgentTracker, getAllAgents: GetAllAgents): Promise<void> {
   if (!tracker.completionNotified) {
+    // Only resolve allAgents on the one-shot notification — subsequent ticks
+    // in complete state hit the early return and never load the snapshot.
+    const allAgents = await getAllAgents();
     await notifyManager(
       agent,
       `[watchdog]: Your subtask ${agent.id} recently completed`,
@@ -408,7 +433,7 @@ async function handleComplete(agent: Agent, tracker: AgentTracker, allAgents: Ag
  * Resets counters (done by processAgents for all non-backoff states).
  * Only running clears completionNotified — matches ib bash (lines 14573-14578).
  */
-async function handleRunning(_agent: Agent, tracker: AgentTracker, _allAgents: Agent[]): Promise<void> {
+async function handleRunning(_agent: Agent, tracker: AgentTracker, _getAllAgents: GetAllAgents): Promise<void> {
   if (tracker.completionNotified) {
     tracker.completionNotified = false;
   }
@@ -420,7 +445,7 @@ async function handleRunning(_agent: Agent, tracker: AgentTracker, _allAgents: A
  * Agent still initializing — just reset rate limit bypass flag.
  * Does NOT clear completionNotified (matches ib bash).
  */
-async function handleCreating(_agent: Agent, tracker: AgentTracker, _allAgents: Agent[]): Promise<void> {
+async function handleCreating(_agent: Agent, tracker: AgentTracker, _getAllAgents: GetAllAgents): Promise<void> {
   tracker.rateLimitBypassed = false;
 }
 
@@ -429,7 +454,7 @@ async function handleCreating(_agent: Agent, tracker: AgentTracker, _allAgents: 
  * Agent is compacting context — normal operation, just reset rate limit bypass flag.
  * Does NOT clear completionNotified (matches ib bash).
  */
-async function handleCompacting(_agent: Agent, tracker: AgentTracker, _allAgents: Agent[]): Promise<void> {
+async function handleCompacting(_agent: Agent, tracker: AgentTracker, _getAllAgents: GetAllAgents): Promise<void> {
   tracker.rateLimitBypassed = false;
 }
 
@@ -444,7 +469,7 @@ export const RATE_LIMIT_RETRY_DELAY_MS = 2_000;
  * - 3-attempt retry loop: send Enter, wait 2s, check state, repeat if still rate_limited
  * - Check usage API; when session usage drops below threshold, nudge agent
  */
-async function handleRateLimited(agent: Agent, tracker: AgentTracker, _allAgents: Agent[]): Promise<void> {
+async function handleRateLimited(agent: Agent, tracker: AgentTracker, _getAllAgents: GetAllAgents): Promise<void> {
   const tmuxSession = agent.meta.tmux_session;
 
   if (tmuxSession && !isValidTmuxSession(tmuxSession)) {
@@ -489,7 +514,7 @@ async function handleRateLimited(agent: Agent, tracker: AgentTracker, _allAgents
  * Handler for "stopped" state.
  * No-op — counter reset is handled by processAgents for all non-backoff states.
  */
-async function handleStopped(_agent: Agent, _tracker: AgentTracker, _allAgents: Agent[]): Promise<void> {
+async function handleStopped(_agent: Agent, _tracker: AgentTracker, _getAllAgents: GetAllAgents): Promise<void> {
   // No-op
 }
 
@@ -520,12 +545,16 @@ function collectIds(agents: Agent[], ids: Set<string>): void {
 
 /** Recursively process all agents through their state handlers */
 async function processAgents(agents: Agent[], allAgents: Agent[]): Promise<void> {
+  // Wrap the in-memory snapshot in a resolved thunk so the new handler
+  // signature is satisfied without doing any disk I/O. tick()'s caller
+  // already has the full agent list in scope.
+  const getAllAgents: GetAllAgents = async () => allAgents;
   for (const agent of agents) {
     const tracker = getTracker(agent.id);
     const handler = stateHandlers.get(agent.state);
 
     if (handler) {
-      await handler(agent, tracker, allAgents);
+      await handler(agent, tracker, getAllAgents);
     }
 
     // Reset wait counter and backoff when transitioning away from backoff states.
@@ -846,10 +875,12 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
       const handler = stateHandlers.get(resolvedState);
       if (handler) {
         try {
-          // For notifyManager, we need allAgents — but per-agent watchdog
-          // only knows about this agent. Read siblings from disk.
-          const allAgents = await loadAllAgentsForNotification(repoPath);
-          await handler(agent, tracker, allAgents);
+          // Pass a per-tick lazy thunk instead of pre-loading. Handlers like
+          // handleRunning never call it (zero disk reads); handleWaiting calls
+          // it once per tick (memoized + TTL-cached). This is the change that
+          // takes a running-state agent from ~250 openat/iter to ~3.
+          const getAllAgents = makeLazyAllAgents();
+          await handler(agent, tracker, getAllAgents);
         } catch { /* don't crash */ }
       }
 
@@ -884,25 +915,102 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
 }
 
 /**
+ * TTL cache lifetime for the cross-repo agent snapshot, in milliseconds.
+ *
+ * The watchdog polls every 5s. With a 10s TTL, a single snapshot covers
+ * roughly two consecutive ticks, halving the disk-read rate for waiting
+ * agents (the main remaining hot path). The staleness window is bounded
+ * by 10s, which is negligible against the exponential-backoff thresholds
+ * (30s → 1min → 2min → ...) governing notification cadence.
+ *
+ * 10s is intentionally larger than the 5s POLL_INTERVAL_MS so consecutive
+ * ticks reuse the snapshot but smaller than INITIAL_NOTIFY_TICKS * POLL_INTERVAL_MS
+ * (30s) so a manager spawned mid-window is visible before the first
+ * notification fires.
+ */
+export const ALL_AGENTS_TTL_MS = 10_000;
+
+/** Injectable readers for testing the TTL cache. */
+type ListReposFn = typeof listRepos;
+type ReadAllAgentsFn = typeof readAllAgents;
+let listReposFn: ListReposFn = listRepos;
+let readAllAgentsFn: ReadAllAgentsFn = readAllAgents;
+
+/** Override listRepos for testing. */
+export function setWatchdogListRepos(fn: ListReposFn): void {
+  listReposFn = fn;
+}
+
+/** Reset listRepos to default. */
+export function resetWatchdogListRepos(): void {
+  listReposFn = listRepos;
+}
+
+/** Override readAllAgents for testing. */
+export function setWatchdogReadAllAgents(fn: ReadAllAgentsFn): void {
+  readAllAgentsFn = fn;
+}
+
+/** Reset readAllAgents to default. */
+export function resetWatchdogReadAllAgents(): void {
+  readAllAgentsFn = readAllAgents;
+}
+
+/** Module-level TTL cache for the cross-repo agent snapshot. */
+let allAgentsCache: { snapshot: Agent[]; loadedAtMs: number } | null = null;
+
+/** Clear the TTL cache (for testing). */
+export function clearAllAgentsCache(): void {
+  allAgentsCache = null;
+}
+
+/**
  * Load all agents from all registered repos for notification purposes
  * (finding managers and cross-repo spawners).
- * Best-effort — returns empty array on failure.
+ *
+ * Cached for ALL_AGENTS_TTL_MS. Best-effort — returns empty array on failure
+ * AND does NOT cache the empty result, so a transient disk error doesn't
+ * hide newly-spawned managers for the full TTL window.
  */
-async function loadAllAgentsForNotification(_repoPath: string): Promise<Agent[]> {
+async function loadAllAgentsForNotification(): Promise<Agent[]> {
+  const now = nowFn();
+  if (allAgentsCache && now - allAgentsCache.loadedAtMs < ALL_AGENTS_TTL_MS) {
+    return allAgentsCache.snapshot;
+  }
+
   try {
     // Read all registered repos so cross-repo spawners can be found by findAgent().
     // The previous implementation only read the agent's own repo, which made
     // cross-repo notifySpawner impossible since findAgent can't locate the spawner.
-    const repos = await listRepos();
-    const { agents } = await readAllAgents(repos.map(r => ({ path: r.path, name: r.name })));
+    const repos = await listReposFn();
+    const { agents } = await readAllAgentsFn(repos.map(r => ({ path: r.path, name: r.name })));
     // Note: buildAgentTree() is NOT called here. findAgent() iterates the flat
     // array first (exact ID match) so tree structure is unnecessary for notifications.
     // Also note: detectAgentStates() is intentionally omitted — sendMessage() sends
     // tmux keys directly and does not check agent state, so state detection adds
     // overhead with no benefit on the notification path.
+    allAgentsCache = { snapshot: agents, loadedAtMs: now };
     return agents;
   } catch {
     return [];
   }
+}
+
+/**
+ * Build a per-tick lazy thunk over loadAllAgentsForNotification.
+ *
+ * Within a single tick, multiple handler calls (e.g. anyChildActive →
+ * notifyManager → notifySpawner inside handleWaiting) share one Promise
+ * and therefore one snapshot. Across ticks, the underlying TTL cache
+ * decides whether a fresh disk read happens.
+ */
+function makeLazyAllAgents(): GetAllAgents {
+  let cached: Promise<Agent[]> | null = null;
+  return () => {
+    if (!cached) {
+      cached = loadAllAgentsForNotification();
+    }
+    return cached;
+  };
 }
 

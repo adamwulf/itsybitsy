@@ -43,6 +43,12 @@ import {
   resetWatchdogSleep,
   setWatchdogCaptureTmux,
   resetWatchdogCaptureTmux,
+  setWatchdogListRepos,
+  resetWatchdogListRepos,
+  setWatchdogReadAllAgents,
+  resetWatchdogReadAllAgents,
+  clearAllAgentsCache,
+  ALL_AGENTS_TTL_MS,
   RATE_LIMIT_MAX_RETRIES,
   RATE_LIMIT_RETRY_DELAY_MS,
   type AgentTracker,
@@ -1743,5 +1749,172 @@ describe("resolveWatchdogState — waiting + background shell override", () => {
     // "Compacting conversation" appearing in last 5 lines takes precedence.
     const output = "noise\nnoise\n⏵⏵ accept edits on · 1 shell\nmore\nCompacting conversation";
     expect(resolveWatchdogState(output, "waiting")).toBe("compacting");
+  });
+});
+
+// ── Lazy + TTL-cached allAgents loading ──────────────────────────────────────
+//
+// The per-agent watchdog used to call listRepos() + readAllAgents() on every
+// tick (~250 openat syscalls per iteration). Now it passes a lazy thunk that
+// (a) skips the disk read entirely for handlers that never need allAgents
+// (running/creating/compacting/rate_limited/stopped) and (b) wraps the call
+// in a 10s TTL cache so a waiting agent's repeat ticks reuse one snapshot.
+
+describe("lazy allAgents loading via runPerAgentWatchdog", () => {
+  let worktreeExists: boolean;
+  let tmuxOutput: string | null;
+  let currentTime: number;
+  let readAllAgentsCalls: number;
+
+  beforeEach(() => {
+    worktreeExists = true;
+    tmuxOutput = null;
+    currentTime = 1000000;
+    readAllAgentsCalls = 0;
+
+    setPerAgentExistsSync((_path: string) => worktreeExists);
+    setPerAgentCaptureTmux(async (_session: string) => tmuxOutput);
+    setPerAgentReadMeta(async (_dir: string) => ({
+      meta: {
+        id: "agent-test1",
+        session_id: "sid-123",
+        tmux_session: "tmux-test1",
+        prompt: "test",
+        manager: "agent-mgr",
+        created: "2026-03-05T00:00:00Z",
+        created_epoch: 1000,
+        worktree: true,
+        worker: false,
+        yolo: false,
+        model: "sonnet",
+        claude_pid: "999",
+      },
+    }));
+    setWatchdogNow(() => currentTime);
+    setPerAgentSleep(async () => {});
+    setSendSpawnRunner(() => ({ stdout: "", exitCode: 0 }) as any);
+    setWatchdogReadConfig(async () => ({} as any));
+
+    setWatchdogListRepos(async () => [{ path: "/tmp/r", name: "r" }]);
+    setWatchdogReadAllAgents(async (_repos) => {
+      readAllAgentsCalls++;
+      return { agents: [], errors: [], orphanedTmuxSessions: [] };
+    });
+    clearAllAgentsCache();
+  });
+
+  afterEach(() => {
+    resetPerAgentExistsSync();
+    resetPerAgentCaptureTmux();
+    resetPerAgentReadMeta();
+    resetPerAgentSleep();
+    resetWatchdogNow();
+    resetSendSpawnRunner();
+    resetWatchdogReadConfig();
+    resetWatchdogSpawnRunner();
+    resetPerAgentReadState();
+    resetWatchdogListRepos();
+    resetWatchdogReadAllAgents();
+    clearAllAgentsCache();
+  });
+
+  test("running-state tick does NOT call readAllAgents (lazy thunk skipped)", async () => {
+    // Running agent: handleRunning never invokes the thunk, so no disk read.
+    setPerAgentReadState(async (_dir: string) => "running");
+    tmuxOutput = "Claude Code v1.0.0\n[USER TASK]";
+
+    let pollCount = 0;
+    setPerAgentCaptureTmux(async (_session: string) => {
+      pollCount++;
+      // Allow a single poll, then exit by removing the worktree.
+      if (pollCount >= 1) worktreeExists = false;
+      return tmuxOutput;
+    });
+
+    await runPerAgentWatchdog("agent-test1", "/tmp/test");
+    expect(pollCount).toBeGreaterThanOrEqual(1);
+    expect(readAllAgentsCalls).toBe(0);
+  });
+
+  test("TTL refetch: thunk hit twice within 10s = 1 read; advance past TTL = 2 reads", async () => {
+    // Drive the thunk directly via the public per-tick lazy mechanism: instead
+    // of relying on runPerAgentWatchdog, we simulate two iterations by calling
+    // a fresh thunk per iteration (matching makeLazyAllAgents() per-tick build).
+    // This isolates TTL cache behavior from the watchdog poll loop.
+
+    // First iteration: thunk fires, cold cache → readAllAgents called once.
+    // Build a fresh per-iteration thunk by clearing then loading a waiting agent.
+    setPerAgentReadState(async (_dir: string) => "waiting");
+    tmuxOutput = "no shells";
+
+    // First runPerAgentWatchdog tick: handleWaiting fires, calls thunk.
+    let pollCount = 0;
+    setPerAgentCaptureTmux(async (_session: string) => {
+      pollCount++;
+      if (pollCount >= 1) worktreeExists = false;
+      return tmuxOutput;
+    });
+    await runPerAgentWatchdog("agent-test1", "/tmp/test");
+    expect(readAllAgentsCalls).toBe(1);
+
+    // Second runPerAgentWatchdog within TTL (still currentTime = 1000000): cache hit, no new read.
+    worktreeExists = true;
+    pollCount = 0;
+    await runPerAgentWatchdog("agent-test1", "/tmp/test");
+    expect(readAllAgentsCalls).toBe(1);
+
+    // Advance time past TTL: cache stale, fresh read.
+    currentTime += ALL_AGENTS_TTL_MS + 1;
+    worktreeExists = true;
+    pollCount = 0;
+    await runPerAgentWatchdog("agent-test1", "/tmp/test");
+    expect(readAllAgentsCalls).toBe(2);
+  });
+
+  test("intra-tick memoization: a handler calling thunk N times reads disk only once", async () => {
+    // Validates the per-tick lazy thunk contract: even if a handler invokes
+    // getAllAgents() multiple times within one tick, the underlying disk read
+    // happens at most once per tick. This is independent of the TTL cache —
+    // we ensure that by clearing the cache before the call so the very first
+    // thunk invocation must hit disk.
+    let thunkInvocations = 0;
+    const customHandler: StateHandler = async (_agent, _tracker, getAllAgents) => {
+      // Call the thunk three times back-to-back. With per-tick memoization,
+      // these resolve to the same Promise and the disk is read once.
+      await getAllAgents();
+      await getAllAgents();
+      await getAllAgents();
+      thunkInvocations++;
+    };
+    // Register on "running" — that's what resolveWatchdogState() returns when
+    // metaState is undefined (the fallback branch), so this overrides the real
+    // running handler for the duration of this test only. The real running
+    // handler only resets two tracker fields, which clearTrackers() in
+    // beforeEach restores between tests. We restore the override after.
+    registerStateHandler("running", customHandler);
+    try {
+      // metaState undefined → resolveWatchdogState falls through to "running".
+      setPerAgentReadState(async (_dir: string) => undefined);
+      tmuxOutput = "Claude Code v1.0.0\n[USER TASK]";
+
+      let pollCount = 0;
+      setPerAgentCaptureTmux(async (_session: string) => {
+        pollCount++;
+        if (pollCount >= 1) worktreeExists = false;
+        return tmuxOutput;
+      });
+
+      clearAllAgentsCache();
+      await runPerAgentWatchdog("agent-test1", "/tmp/test");
+      expect(thunkInvocations).toBe(1);
+      // Three thunk calls within one tick → exactly one disk read.
+      expect(readAllAgentsCalls).toBe(1);
+    } finally {
+      // Restore the real running handler (resets two tracker fields).
+      registerStateHandler("running", async (_agent, tracker, _getAllAgents) => {
+        if (tracker.completionNotified) tracker.completionNotified = false;
+        tracker.rateLimitBypassed = false;
+      });
+    }
   });
 });

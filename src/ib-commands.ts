@@ -33,6 +33,7 @@ import { buildPerRepoCoordinatorSettings, checkCoordinatorExists, getCoordinator
 import { loadAgentType, agentTypeExists } from "./agent-types";
 import { listRepos, repoDisplayName } from "./registry";
 import { stampAgentCompactCheck } from "./watchdog";
+import { timed } from "./perf";
 
 export interface IbCommandResult {
   ok: boolean;
@@ -749,33 +750,43 @@ export async function mergeCheckAgent(agent: Agent): Promise<IbCommandResult> {
   const worktreePath = join(agentDir, "repo");
   const branchName = `agent/${agent.id}`;
 
-  // 1. Check worktree exists
-  try {
-    await readdir(worktreePath);
-  } catch {
-    return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' has no worktree` };
+  // 1. Check worktree exists + no uncommitted changes
+  const worktreeCheck = await timed("merge-check", "worktree-check", async () => {
+    try {
+      await readdir(worktreePath);
+    } catch {
+      return { ok: false as const, stderr: `Agent '${agent.id}' has no worktree` };
+    }
+    const worktreeStatus = await mergeSpawnCtx.run(["git", "-C", worktreePath, "status", "--porcelain"]);
+    if (worktreeStatus.exitCode === 0 && worktreeStatus.stdout.trim()) {
+      return { ok: false as const, stderr: `Agent '${agent.id}' has uncommitted changes` };
+    }
+    return { ok: true as const };
+  });
+  if (!worktreeCheck.ok) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: worktreeCheck.stderr };
   }
 
-  // 2. Check no uncommitted changes
-  const worktreeStatus = await mergeSpawnCtx.run(["git", "-C", worktreePath, "status", "--porcelain"]);
-  if (worktreeStatus.exitCode === 0 && worktreeStatus.stdout.trim()) {
-    return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' has uncommitted changes` };
+  // 2. Check main + agent branches exist
+  const branchCheck = await timed("merge-check", "branch-resolve", async () => {
+    const mainRef = await mergeSpawnCtx.run(["git", "-C", agent.repoPath, "show-ref", "--verify", "refs/heads/main"]);
+    if (mainRef.exitCode !== 0) {
+      return { ok: false as const, stderr: "Main branch not found" };
+    }
+    const branchRef = await mergeSpawnCtx.run(["git", "-C", agent.repoPath, "show-ref", "--verify", `refs/heads/${branchName}`]);
+    if (branchRef.exitCode !== 0) {
+      return { ok: false as const, stderr: `Branch '${branchName}' does not exist` };
+    }
+    return { ok: true as const };
+  });
+  if (!branchCheck.ok) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: branchCheck.stderr };
   }
 
-  // 3. Check main branch exists
-  const mainRef = await mergeSpawnCtx.run(["git", "-C", agent.repoPath, "show-ref", "--verify", "refs/heads/main"]);
-  if (mainRef.exitCode !== 0) {
-    return { ok: false, exitCode: 1, stdout: "", stderr: "Main branch not found" };
-  }
-
-  // 4. Check agent branch exists
-  const branchRef = await mergeSpawnCtx.run(["git", "-C", agent.repoPath, "show-ref", "--verify", `refs/heads/${branchName}`]);
-  if (branchRef.exitCode !== 0) {
-    return { ok: false, exitCode: 1, stdout: "", stderr: `Branch '${branchName}' does not exist` };
-  }
-
-  // 5. Pre-rebase conflict check
-  const conflictResult = await checkRebaseConflicts(agent.repoPath, "main", branchName);
+  // 3. Pre-rebase conflict check
+  const conflictResult = await timed("merge-check", "conflict-detect", () =>
+    checkRebaseConflicts(agent.repoPath, "main", branchName)
+  );
   if (!conflictResult.ok) {
     return {
       ok: false, exitCode: 1, stdout: "",
@@ -783,9 +794,11 @@ export async function mergeCheckAgent(agent: Agent): Promise<IbCommandResult> {
     };
   }
 
-  // Count commits
-  const logResult = await mergeSpawnCtx.run(["git", "-C", agent.repoPath, "log", `main..${branchName}`, "--oneline"]);
-  const commitCount = logResult.stdout.trim() ? logResult.stdout.trim().split("\n").length : 0;
+  // 4. Count commits
+  const commitCount = await timed("merge-check", "commit-count", async () => {
+    const logResult = await mergeSpawnCtx.run(["git", "-C", agent.repoPath, "log", `main..${branchName}`, "--oneline"]);
+    return logResult.stdout.trim() ? logResult.stdout.trim().split("\n").length : 0;
+  });
 
   return {
     ok: true, exitCode: 0,
@@ -888,66 +901,76 @@ export async function mergeAgent(agent: Agent, targetDir: string): Promise<IbCom
   const worktreePath = join(agentDir, "repo");
   const tmuxSession = agent.meta.tmux_session;
 
-  // 1. Agent dir must exist
-  const dirExists = await Bun.file(join(agentDir, "meta.json")).exists().catch(() => false);
-  if (!dirExists) {
-    return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' not found` };
-  }
+  // 1-6. Preflight: agent dir, worktree, statuses, target branch, branch existence
+  const preflight = await timed("merge", "preflight", async () => {
+    // 1. Agent dir must exist
+    const dirExists = await Bun.file(join(agentDir, "meta.json")).exists().catch(() => false);
+    if (!dirExists) {
+      return { ok: false as const, stderr: `Agent '${agent.id}' not found` };
+    }
 
-  // 2. Agent must have a worktree
-  try {
-    await readdir(worktreePath);
-  } catch {
-    return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' has no worktree (was created with --no-worktree?)` };
-  }
+    // 2. Agent must have a worktree
+    try {
+      await readdir(worktreePath);
+    } catch {
+      return { ok: false as const, stderr: `Agent '${agent.id}' has no worktree (was created with --no-worktree?)` };
+    }
 
-  // 2b. Cannot merge from within the agent's own worktree
-  const currentDir = process.cwd();
-  if (currentDir.startsWith(worktreePath)) {
-    return { ok: false, exitCode: 1, stdout: "", stderr: "Cannot merge agent from within its own worktree" };
-  }
+    // 2b. Cannot merge from within the agent's own worktree
+    const currentDir = process.cwd();
+    if (currentDir.startsWith(worktreePath)) {
+      return { ok: false as const, stderr: "Cannot merge agent from within its own worktree" };
+    }
 
-  // 3. Agent worktree must have no uncommitted changes
-  const worktreeStatus = await mergeSpawnCtx.run(["git", "-C", worktreePath, "status", "--porcelain"]);
-  if (worktreeStatus.exitCode === 0 && worktreeStatus.stdout.trim()) {
-    return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' has uncommitted changes` };
-  }
+    // 3. Agent worktree must have no uncommitted changes
+    const worktreeStatus = await mergeSpawnCtx.run(["git", "-C", worktreePath, "status", "--porcelain"]);
+    if (worktreeStatus.exitCode === 0 && worktreeStatus.stdout.trim()) {
+      return { ok: false as const, stderr: `Agent '${agent.id}' has uncommitted changes` };
+    }
 
-  // 4. Detect target branch from targetDir — the caller decides where to merge:
-  //    CLI/agent passes CWD (manager worktree), dashboard passes agent.repoPath
-  let targetBranch = "";
-  const currentBranch = await mergeSpawnCtx.run(["git", "-C", targetDir, "branch", "--show-current"]);
-  if (currentBranch.exitCode === 0 && currentBranch.stdout.trim()) {
-    targetBranch = currentBranch.stdout.trim();
-  }
-  if (!targetBranch) {
-    const mainRef = await mergeSpawnCtx.run(["git", "show-ref", "--verify", "refs/heads/main"]);
-    if (mainRef.exitCode === 0) {
-      targetBranch = "main";
-    } else {
-      const masterRef = await mergeSpawnCtx.run(["git", "show-ref", "--verify", "refs/heads/master"]);
-      if (masterRef.exitCode === 0) {
-        targetBranch = "master";
+    // 4. Detect target branch from targetDir
+    let targetBranch = "";
+    const currentBranch = await mergeSpawnCtx.run(["git", "-C", targetDir, "branch", "--show-current"]);
+    if (currentBranch.exitCode === 0 && currentBranch.stdout.trim()) {
+      targetBranch = currentBranch.stdout.trim();
+    }
+    if (!targetBranch) {
+      const mainRef = await mergeSpawnCtx.run(["git", "show-ref", "--verify", "refs/heads/main"]);
+      if (mainRef.exitCode === 0) {
+        targetBranch = "main";
       } else {
-        return { ok: false, exitCode: 1, stdout: "", stderr: "Could not determine target branch (detached HEAD with no main/master)" };
+        const masterRef = await mergeSpawnCtx.run(["git", "show-ref", "--verify", "refs/heads/master"]);
+        if (masterRef.exitCode === 0) {
+          targetBranch = "master";
+        } else {
+          return { ok: false as const, stderr: "Could not determine target branch (detached HEAD with no main/master)" };
+        }
       }
     }
-  }
 
-  // 5. Agent branch must exist
-  const branchRef = await mergeSpawnCtx.run(["git", "-C", agent.repoPath, "show-ref", "--verify", `refs/heads/${branchName}`]);
-  if (branchRef.exitCode !== 0) {
-    return { ok: false, exitCode: 1, stdout: "", stderr: `Branch '${branchName}' does not exist` };
-  }
+    // 5. Agent branch must exist
+    const branchRef = await mergeSpawnCtx.run(["git", "-C", agent.repoPath, "show-ref", "--verify", `refs/heads/${branchName}`]);
+    if (branchRef.exitCode !== 0) {
+      return { ok: false as const, stderr: `Branch '${branchName}' does not exist` };
+    }
 
-  // 6. Target directory must have no uncommitted changes
-  const repoStatus = await mergeSpawnCtx.run(["git", "-C", targetDir, "status", "--porcelain"]);
-  if (repoStatus.exitCode === 0 && repoStatus.stdout.trim()) {
-    return { ok: false, exitCode: 1, stdout: "", stderr: "Target directory has uncommitted changes" };
+    // 6. Target directory must have no uncommitted changes
+    const repoStatus = await mergeSpawnCtx.run(["git", "-C", targetDir, "status", "--porcelain"]);
+    if (repoStatus.exitCode === 0 && repoStatus.stdout.trim()) {
+      return { ok: false as const, stderr: "Target directory has uncommitted changes" };
+    }
+
+    return { ok: true as const, targetBranch };
+  });
+  if (!preflight.ok) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: preflight.stderr };
   }
+  const targetBranch = preflight.targetBranch;
 
   // 7. Pre-rebase conflict check
-  const conflictResult = await checkRebaseConflicts(agent.repoPath, targetBranch, branchName);
+  const conflictResult = await timed("merge", "conflict-check", () =>
+    checkRebaseConflicts(agent.repoPath, targetBranch, branchName)
+  );
   if (!conflictResult.ok) {
     await logAgent(agentDir, `Pre-rebase conflict check failed - conflicts detected with ${targetBranch}`);
     return {
@@ -964,100 +987,111 @@ export async function mergeAgent(agent: Agent, targetDir: string): Promise<IbCom
 
   if (commitCount > 0) {
     // 8. Rebase agent branch onto target (in agent's worktree)
-    await logAgent(agentDir, `Rebasing ${branchName} onto ${targetBranch}...`);
-    const rebaseResult = await mergeSpawnCtx.run(["git", "-C", worktreePath, "rebase", targetBranch]);
-    if (rebaseResult.exitCode !== 0) {
-      return { ok: false, exitCode: 1, stdout: "", stderr: `Rebase failed: ${rebaseResult.stderr || rebaseResult.stdout}` };
-    }
-    await logAgent(agentDir, "Rebase completed successfully");
-
-    // 9. Checkout target branch (in targetDir)
-    await logAgent(agentDir, `Checking out ${targetBranch}...`);
-    const checkoutResult = await mergeSpawnCtx.run(["git", "-C", targetDir, "checkout", targetBranch]);
-    if (checkoutResult.exitCode !== 0) {
-      return { ok: false, exitCode: 1, stdout: "", stderr: `Could not checkout ${targetBranch}: ${checkoutResult.stderr || checkoutResult.stdout}` };
-    }
-
-    // 10. Merge — ff-only if agent, --no-ff if user
-    const runningAsAgent = await isRunningAsAgent();
-    if (runningAsAgent) {
-      await logAgent(agentDir, `Fast-forwarding ${targetBranch} to ${branchName}...`);
-      const ffResult = await mergeSpawnCtx.run(["git", "-C", targetDir, "merge", "--ff-only", branchName]);
-      if (ffResult.exitCode !== 0) {
-        return { ok: false, exitCode: 1, stdout: "", stderr: `Fast-forward failed: ${ffResult.stderr || ffResult.stdout}` };
+    const rebaseOk = await timed("merge", "git-rebase", async () => {
+      await logAgent(agentDir, `Rebasing ${branchName} onto ${targetBranch}...`);
+      const rebaseResult = await mergeSpawnCtx.run(["git", "-C", worktreePath, "rebase", targetBranch]);
+      if (rebaseResult.exitCode !== 0) {
+        return { ok: false as const, stderr: `Rebase failed: ${rebaseResult.stderr || rebaseResult.stdout}` };
       }
-      await logAgent(agentDir, "Fast-forward merge completed successfully");
-    } else {
-      await logAgent(agentDir, `Merging ${branchName} with --no-ff...`);
-      const noFFResult = await mergeSpawnCtx.run(["git", "-C", targetDir, "merge", "--no-ff", branchName, "-m", `Merge agent ${agent.id} work`]);
-      if (noFFResult.exitCode !== 0) {
-        return { ok: false, exitCode: 1, stdout: "", stderr: `Merge failed: ${noFFResult.stderr || noFFResult.stdout}` };
+      await logAgent(agentDir, "Rebase completed successfully");
+      return { ok: true as const };
+    });
+    if (!rebaseOk.ok) {
+      return { ok: false, exitCode: 1, stdout: "", stderr: rebaseOk.stderr };
+    }
+
+    // 9-10. Checkout target branch + merge
+    const mergeOk = await timed("merge", "git-merge", async () => {
+      await logAgent(agentDir, `Checking out ${targetBranch}...`);
+      const checkoutResult = await mergeSpawnCtx.run(["git", "-C", targetDir, "checkout", targetBranch]);
+      if (checkoutResult.exitCode !== 0) {
+        return { ok: false as const, stderr: `Could not checkout ${targetBranch}: ${checkoutResult.stderr || checkoutResult.stdout}` };
       }
-      await logAgent(agentDir, "Merge completed successfully");
+
+      const runningAsAgent = await isRunningAsAgent();
+      if (runningAsAgent) {
+        await logAgent(agentDir, `Fast-forwarding ${targetBranch} to ${branchName}...`);
+        const ffResult = await mergeSpawnCtx.run(["git", "-C", targetDir, "merge", "--ff-only", branchName]);
+        if (ffResult.exitCode !== 0) {
+          return { ok: false as const, stderr: `Fast-forward failed: ${ffResult.stderr || ffResult.stdout}` };
+        }
+        await logAgent(agentDir, "Fast-forward merge completed successfully");
+      } else {
+        await logAgent(agentDir, `Merging ${branchName} with --no-ff...`);
+        const noFFResult = await mergeSpawnCtx.run(["git", "-C", targetDir, "merge", "--no-ff", branchName, "-m", `Merge agent ${agent.id} work`]);
+        if (noFFResult.exitCode !== 0) {
+          return { ok: false as const, stderr: `Merge failed: ${noFFResult.stderr || noFFResult.stdout}` };
+        }
+        await logAgent(agentDir, "Merge completed successfully");
+      }
+      return { ok: true as const };
+    });
+    if (!mergeOk.ok) {
+      return { ok: false, exitCode: 1, stdout: "", stderr: mergeOk.stderr };
     }
   }
 
   // 11. Capture tmux output before killing
-  await logAgent(agentDir, "Capturing tmux output...");
-  if (tmuxSession) {
-    const hasSession = await mergeSpawnCtx.run(["tmux", "has-session", "-t", tmuxSession]);
-    if (hasSession.exitCode === 0) {
-      await captureTmuxOutputToFile(tmuxSession, join(agentDir, "output.log"));
+  await timed("merge", "tmux-capture", async () => {
+    await logAgent(agentDir, "Capturing tmux output...");
+    if (tmuxSession) {
+      const hasSession = await mergeSpawnCtx.run(["tmux", "has-session", "-t", tmuxSession]);
+      if (hasSession.exitCode === 0) {
+        await captureTmuxOutputToFile(tmuxSession, join(agentDir, "output.log"));
+      }
     }
-  }
+  });
 
-  // 12. Kill Claude process
-  await logAgent(agentDir, "Terminating Claude process...");
-  const killed = await killAgentProcess(tmuxSession, { claude_pid: agent.meta.claude_pid });
-  if (killed) {
-    await logAgent(agentDir, "Claude process terminated");
-  }
-
-  // 13. Kill tmux session
-  if (tmuxSession) {
-    const hasSession2 = await mergeSpawnCtx.run(["tmux", "has-session", "-t", tmuxSession]);
-    if (hasSession2.exitCode === 0) {
-      await mergeSpawnCtx.run(["tmux", "kill-session", "-t", tmuxSession]);
-      await logAgent(agentDir, "Tmux session stopped");
+  // 12-13. Kill Claude process + tmux session
+  await timed("merge", "tmux-cleanup", async () => {
+    await logAgent(agentDir, "Terminating Claude process...");
+    const killed = await killAgentProcess(tmuxSession, { claude_pid: agent.meta.claude_pid });
+    if (killed) {
+      await logAgent(agentDir, "Claude process terminated");
     }
-  }
-
-  // 14. Copy settings.local.json from worktree before removing
-  const settingsPath = join(worktreePath, ".claude", "settings.local.json");
-  try {
-    if (await Bun.file(settingsPath).exists()) {
-      const content = await Bun.file(settingsPath).text();
-      await Bun.write(join(agentDir, "settings.local.json"), content);
+    if (tmuxSession) {
+      const hasSession2 = await mergeSpawnCtx.run(["tmux", "has-session", "-t", tmuxSession]);
+      if (hasSession2.exitCode === 0) {
+        await mergeSpawnCtx.run(["tmux", "kill-session", "-t", tmuxSession]);
+        await logAgent(agentDir, "Tmux session stopped");
+      }
     }
-  } catch { /* ignore */ }
+  });
 
-  // 15. Remove worktree
-  await logAgent(agentDir, "Removing worktree...");
-  const removeResult = await mergeSpawnCtx.run(["git", "-C", agent.repoPath, "worktree", "remove", worktreePath, "--force"]);
-  if (removeResult.exitCode !== 0) {
-    try { await rm(worktreePath, { recursive: true, force: true }); } catch { /* ignore */ }
-  }
-  await logAgent(agentDir, "Worktree removed");
+  // 14-16. Copy settings, remove worktree, delete branch
+  await timed("merge", "worktree-cleanup", async () => {
+    const settingsPath = join(worktreePath, ".claude", "settings.local.json");
+    try {
+      if (await Bun.file(settingsPath).exists()) {
+        const content = await Bun.file(settingsPath).text();
+        await Bun.write(join(agentDir, "settings.local.json"), content);
+      }
+    } catch { /* ignore */ }
 
-  // 16. Delete branch
-  await logAgent(agentDir, `Deleting branch ${branchName}...`);
-  const deleteBranch = await mergeSpawnCtx.run(["git", "-C", agent.repoPath, "branch", "-D", branchName]);
-  if (deleteBranch.exitCode === 0) {
-    await logAgent(agentDir, `Branch deleted: ${branchName}`);
-  }
+    await logAgent(agentDir, "Removing worktree...");
+    const removeResult = await mergeSpawnCtx.run(["git", "-C", agent.repoPath, "worktree", "remove", worktreePath, "--force"]);
+    if (removeResult.exitCode !== 0) {
+      try { await rm(worktreePath, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
+    await logAgent(agentDir, "Worktree removed");
 
-  // 17. Archive artifacts
-  await logAgent(agentDir, "Merge complete - archiving and closing agent");
-  await archiveAgent(agent.repoPath, agent.id, agentDir);
+    await logAgent(agentDir, `Deleting branch ${branchName}...`);
+    const deleteBranch = await mergeSpawnCtx.run(["git", "-C", agent.repoPath, "branch", "-D", branchName]);
+    if (deleteBranch.exitCode === 0) {
+      await logAgent(agentDir, `Branch deleted: ${branchName}`);
+    }
+  });
 
-  // 18. Remove questions
-  await removeAgentQuestions(agent.repoPath, agent.id);
-
-  // 19. Remove agent directory
-  try { await rm(agentDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  // 17-19. Archive artifacts, remove questions, remove agent dir
+  await timed("merge", "archive", async () => {
+    await logAgent(agentDir, "Merge complete - archiving and closing agent");
+    await archiveAgent(agent.repoPath, agent.id, agentDir);
+    await removeAgentQuestions(agent.repoPath, agent.id);
+    try { await rm(agentDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  });
 
   // 20. Scan for orphaned Claude processes
-  await scanAndKillOrphans(agentsDir);
+  await timed("merge", "orphan-scan", () => scanAndKillOrphans(agentsDir));
 
   return { ok: true, exitCode: 0, stdout: `Closed agent: ${agent.id}`, stderr: "" };
 }
@@ -1454,10 +1488,10 @@ export async function newAgent(
   let useWorktree = opts?.noWorktree !== true;
   const yoloMode = opts?.yolo === true;
 
-  // Ensure agent types directory is initialized
+  // Ensure agent types directory is initialized + load the requested type.
   const { ensureAgentTypesDir } = await import("./agent-types");
   try {
-    await ensureAgentTypesDir();
+    await timed("new-agent", "type-init", () => ensureAgentTypesDir());
   } catch (err) {
     return { ok: false, exitCode: 1, stdout: "", stderr: `Error initializing agent types: ${err instanceof Error ? err.message : String(err)}` };
   }
@@ -1466,13 +1500,13 @@ export async function newAgent(
   const typeName = opts?.type ?? "manager";
 
   // Validate --type exists before proceeding
-  const typeExists = await agentTypeExists(typeName);
+  const typeExists = await timed("new-agent", "type-exists", () => agentTypeExists(typeName));
   if (!typeExists) {
     return { ok: false, exitCode: 1, stdout: "", stderr: `Error: unknown agent type '${typeName}'. Run 'ib init-types' to restore default type files, or create ~/.itsybitsy/agent-types/${typeName}.md` };
   }
 
   // Determine if this is a coordinator type
-  const agentTypeDef = await loadAgentType(typeName);
+  const agentTypeDef = await timed("new-agent", "type-load", () => loadAgentType(typeName));
 
   // Reject layer-only types (spawnable: false) — these are merge layers, not spawnable agents
   if (agentTypeDef.spawnable === false) {
@@ -1861,9 +1895,11 @@ export async function newAgent(
     }
 
     const baseRef = manager ? `agent/${manager}` : "HEAD";
-    const worktreeResult = await newAgentSpawnCtx.run([
-      "git", "-C", rootRepoPath, "worktree", "add", repoPath, "-b", branchName, baseRef,
-    ]);
+    const worktreeResult = await timed("new-agent", "worktree-create", () =>
+      newAgentSpawnCtx.run([
+        "git", "-C", rootRepoPath, "worktree", "add", repoPath, "-b", branchName, baseRef,
+      ])
+    );
     await logSpawn(agentDir, spawnerAgentDir, id, `git worktree add ${repoPath} -b ${branchName} ${baseRef} → exit=${worktreeResult.exitCode}${worktreeResult.exitCode !== 0 && worktreeResult.stderr ? ` stderr="${worktreeResult.stderr.trim()}"` : ""}`);
     if (worktreeResult.exitCode !== 0) {
       const gitErr = worktreeResult.stderr.trim();
@@ -2021,7 +2057,9 @@ export async function newAgent(
   if (resolvedAllowedPaths !== undefined) {
     metaJson.allowedPaths = resolvedAllowedPaths;
   }
-  await Bun.write(join(agentDir, "meta.json"), JSON.stringify(metaJson, null, 2) + "\n");
+  await timed("new-agent", "meta-write", () =>
+    Bun.write(join(agentDir, "meta.json"), JSON.stringify(metaJson, null, 2) + "\n")
+  );
 
   // Log agent creation
   if (manager) {
@@ -2204,7 +2242,9 @@ ${qStartExitScript}
   }
 
   // 18. Ensure tmux server is running
-  const startServerResult = await newAgentSpawnCtx.run(["tmux", "start-server"]);
+  const startServerResult = await timed("new-agent", "tmux-start-server", () =>
+    newAgentSpawnCtx.run(["tmux", "start-server"])
+  );
   await logSpawn(agentDir, spawnerAgentDir, id, `tmux start-server → exit=${startServerResult.exitCode}${startServerResult.exitCode !== 0 && startServerResult.stderr ? ` stderr="${startServerResult.stderr.trim()}"` : ""}`);
   if (startServerResult.exitCode !== 0) {
     const err = startServerResult.stderr.trim();
@@ -2217,9 +2257,11 @@ ${qStartExitScript}
   // Start tmux session — use saved layout width so it matches the dashboard pane
   const absStartScript = join(agentDir, "start.sh");
   const newTmuxWidth = await getSavedTmuxWidth();
-  const tmuxResult = await newAgentSpawnCtx.run([
-    "tmux", "new-session", "-d", "-x", String(newTmuxWidth), "-s", tmuxSession, "-c", workPath, shellQuote(absStartScript),
-  ]);
+  const tmuxResult = await timed("new-agent", "tmux-spawn", () =>
+    newAgentSpawnCtx.run([
+      "tmux", "new-session", "-d", "-x", String(newTmuxWidth), "-s", tmuxSession, "-c", workPath, shellQuote(absStartScript),
+    ])
+  );
   await logSpawn(agentDir, spawnerAgentDir, id, `tmux new-session -s ${tmuxSession} -x ${newTmuxWidth} → exit=${tmuxResult.exitCode}${tmuxResult.exitCode !== 0 && tmuxResult.stderr ? ` stderr="${tmuxResult.stderr.trim()}"` : ""}`);
   if (tmuxResult.exitCode !== 0) {
     const err = tmuxResult.stderr.trim();
@@ -2254,35 +2296,37 @@ ${qStartExitScript}
   }
 
   // 22. Auto-spawn per-agent watchdog
-  try {
-    const watchdogLog = join(agentDir, "watchdog.log");
-    let watchdogPid: number | undefined;
+  await timed("new-agent", "watchdog-spawn", async () => {
+    try {
+      const watchdogLog = join(agentDir, "watchdog.log");
+      let watchdogPid: number | undefined;
 
-    if (watchdogSpawnOverride) {
-      const result = watchdogSpawnOverride(id, rootRepoPath, watchdogLog);
-      watchdogPid = result?.pid;
-    } else {
-      const watchdogProc = Bun.spawn(["ib", "watchdog", id], {
-        cwd: rootRepoPath,
-        stdout: Bun.file(watchdogLog),
-        stderr: Bun.file(watchdogLog),
-      });
-      watchdogProc.unref();
-      watchdogPid = watchdogProc.pid;
-    }
-
-    if (watchdogPid !== undefined) {
-      const metaPath = join(agentDir, "meta.json");
-      const metaContent = await Bun.file(metaPath).json().catch(() => null);
-      if (metaContent) {
-        metaContent.watchdog_pid = watchdogPid;
-        await Bun.write(metaPath, JSON.stringify(metaContent, null, 2));
+      if (watchdogSpawnOverride) {
+        const result = watchdogSpawnOverride(id, rootRepoPath, watchdogLog);
+        watchdogPid = result?.pid;
+      } else {
+        const watchdogProc = Bun.spawn(["ib", "watchdog", id], {
+          cwd: rootRepoPath,
+          stdout: Bun.file(watchdogLog),
+          stderr: Bun.file(watchdogLog),
+        });
+        watchdogProc.unref();
+        watchdogPid = watchdogProc.pid;
       }
-      await logSpawn(agentDir, spawnerAgentDir, id, `watchdog spawned pid=${watchdogPid}`);
+
+      if (watchdogPid !== undefined) {
+        const metaPath = join(agentDir, "meta.json");
+        const metaContent = await Bun.file(metaPath).json().catch(() => null);
+        if (metaContent) {
+          metaContent.watchdog_pid = watchdogPid;
+          await Bun.write(metaPath, JSON.stringify(metaContent, null, 2));
+        }
+        await logSpawn(agentDir, spawnerAgentDir, id, `watchdog spawned pid=${watchdogPid}`);
+      }
+    } catch (err) {
+      await logSpawn(agentDir, spawnerAgentDir, id, `watchdog spawn failed: ${(err as Error)?.message ?? String(err)}`);
     }
-  } catch (err) {
-    await logSpawn(agentDir, spawnerAgentDir, id, `watchdog spawn failed: ${(err as Error)?.message ?? String(err)}`);
-  }
+  });
 
   // 23. Generate prompt summary in background (fire-and-forget)
   generatePromptSummary(agentDir).catch(() => {});

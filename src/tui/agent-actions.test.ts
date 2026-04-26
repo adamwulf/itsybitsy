@@ -354,6 +354,15 @@ describe("handleSend", () => {
     handleSend(ctx);
     expect(dialogs).toHaveLength(0);
   });
+
+  test("shows notice and no dialog when repo coordinator is stopped", () => {
+    const coordAgent = makeAgent({ id: "coord-1", state: "stopped", meta: { coordinator: true } as any });
+    const { ctx, dialogs, notices } = makeMockCtx({ repoHeader: "my-repo" });
+    ctx.rightPane.repoCoordinatorAgent = coordAgent;
+    handleSend(ctx);
+    expect(dialogs).toHaveLength(0);
+    expect(notices).toEqual(["Coordinator coord-1 is not running"]);
+  });
 });
 
 describe("handleNewAgent", () => {

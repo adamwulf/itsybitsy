@@ -432,6 +432,10 @@ export function handleSend(ctx: ActionCtx) {
   // Per-repo coordinator: when a repo header is selected and has a coordinator agent
   const repoCoord = ctx.rightPane.repoCoordinatorAgent;
   if (ctx.agentTree.selectedRepoHeader && repoCoord) {
+    if (repoCoord.state === "stopped") {
+      ctx.setNotice(`Coordinator ${repoCoord.id} is not running`);
+      return;
+    }
     handleSendToRepoCoordinator(ctx, repoCoord);
     return;
   }

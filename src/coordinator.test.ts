@@ -805,6 +805,29 @@ describe("detectSystemCoordinatorState", () => {
     const state = await detectSystemCoordinatorState();
     expect(state).toBe("running");
   });
+
+  test("captureTmuxOutput is called with the 50-line cap (Change B)", async () => {
+    coordinatorSpawnCtx.set(createCommandRouter({
+      "has-session": { exitCode: 0 },
+    }));
+    let captureArgs: string[] | null = null;
+    tmuxSpawnCtx.set((cmd: string[], _opts?: any) => {
+      if (cmd[0] === "tmux" && cmd[1] === "capture-pane") {
+        captureArgs = cmd;
+      }
+      return {
+        stdout: mockStream(""),
+        stderr: emptyStream(),
+        exited: Promise.resolve(0),
+      };
+    });
+
+    await detectSystemCoordinatorState();
+    expect(captureArgs).not.toBeNull();
+    // captureTmuxOutput passes "-S" then "-<lines>"
+    expect(captureArgs!).toContain("-50");
+    expect(captureArgs!).not.toContain("-5000");
+  });
 });
 
 // ---------------------------------------------------------------------------

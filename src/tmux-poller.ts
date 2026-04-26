@@ -31,10 +31,27 @@ export class TmuxPoller {
 
   /** Set the agent to poll. Pass null to pause polling. */
   setAgent(tmuxSession: string | null): void {
+    // Short-circuit when the session hasn't changed — the dashboard calls
+    // setAgent() on every onUpdate (~2s), so without this guard we'd fire a
+    // redundant poll() and getTmuxWindowWidth() every state-poll tick even
+    // when the user hasn't switched agents.
+    if (this.tmuxSession === tmuxSession) return;
     this.tmuxSession = tmuxSession;
-    // Immediately poll on agent change
+    // Immediately poll on agent change, and query the tmux window width once
+    // for this session. Width only changes on terminal resize or our own
+    // resizeTmuxWindow() calls, so polling it every tick wastes posix_spawn.
     if (tmuxSession && this.running) {
       this.poll();
+      if (this.events.onWidth) {
+        const target = tmuxSession;
+        getTmuxWindowWidth(target).then((w) => {
+          if (w !== null && this.tmuxSession === target) {
+            this.events.onWidth!(w);
+          }
+        }).catch(() => {
+          // Silently ignore — width query is best-effort
+        });
+      }
     }
   }
 
@@ -79,17 +96,9 @@ export class TmuxPoller {
 
       const stripped = stripAnsi(raw);
       this.events.onOutput(raw, stripped);
-
-      // Also query tmux window width
-      if (this.events.onWidth) {
-        getTmuxWindowWidth(targetSession).then((w) => {
-          if (w !== null && this.tmuxSession === targetSession) {
-            this.events.onWidth!(w);
-          }
-        }).catch(() => {
-          // Silently ignore — width query is best-effort
-        });
-      }
+      // Note: window width is queried once in setAgent() rather than on every
+      // poll tick — it only changes on terminal resize or resizeTmuxWindow()
+      // calls, so per-tick polling wasted ~1 posix_spawn/sec.
     } catch (err) {
       // Discard errors for stale polls too
       if (this.tmuxSession !== targetSession) return;

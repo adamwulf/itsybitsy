@@ -201,6 +201,171 @@ describe("TmuxPoller", () => {
     await Bun.sleep(50);
     expect(callCount).toBe(0);
   });
+
+  // Change E: window_width should be queried once on setAgent, not every tick
+  test("setAgent triggers exactly one display-message (#{window_width}) call", async () => {
+    let captureCalls = 0;
+    let displayMessageCalls = 0;
+    spawnCtx.set((cmd: string[], _opts?: any) => {
+      const isDisplayMessage = cmd.includes("display-message");
+      const isCapture = cmd.includes("capture-pane");
+      if (isCapture) captureCalls++;
+      if (isDisplayMessage) displayMessageCalls++;
+      const stdout = isDisplayMessage ? "120\n" : "pane content\n";
+      return {
+        stdout: new ReadableStream({
+          start(c) {
+            c.enqueue(new TextEncoder().encode(stdout));
+            c.close();
+          },
+        }),
+        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        exited: Promise.resolve(0),
+      };
+    });
+
+    let widths: number[] = [];
+    poller = new TmuxPoller({
+      onOutput() {},
+      onWidth(w) { widths.push(w); },
+    });
+    poller.start();
+    poller.setAgent("session-A");
+    // Allow the immediate poll + width query to complete
+    await Bun.sleep(50);
+
+    expect(captureCalls).toBe(1);
+    expect(displayMessageCalls).toBe(1);
+    expect(widths).toEqual([120]);
+  });
+
+  test("subsequent poll ticks for the same session do NOT call display-message", async () => {
+    let captureCalls = 0;
+    let displayMessageCalls = 0;
+    spawnCtx.set((cmd: string[], _opts?: any) => {
+      const isDisplayMessage = cmd.includes("display-message");
+      const isCapture = cmd.includes("capture-pane");
+      if (isCapture) captureCalls++;
+      if (isDisplayMessage) displayMessageCalls++;
+      const stdout = isDisplayMessage ? "100\n" : "pane content\n";
+      return {
+        stdout: new ReadableStream({
+          start(c) {
+            c.enqueue(new TextEncoder().encode(stdout));
+            c.close();
+          },
+        }),
+        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        exited: Promise.resolve(0),
+      };
+    });
+
+    poller = new TmuxPoller({
+      onOutput() {},
+      onWidth() {},
+    });
+    poller.start();
+    poller.setAgent("session-A");
+    // Wait long enough for at least 2 poll ticks (1s interval, immediate + 1)
+    await Bun.sleep(1200);
+
+    // Multiple captures should have happened, but display-message only once (from setAgent)
+    expect(captureCalls).toBeGreaterThan(1);
+    expect(displayMessageCalls).toBe(1);
+  });
+
+  test("setAgent with the same session does NOT re-trigger poll or width query", async () => {
+    let captureCalls = 0;
+    let displayMessageCalls = 0;
+    spawnCtx.set((cmd: string[], _opts?: any) => {
+      const isDisplayMessage = cmd.includes("display-message");
+      const isCapture = cmd.includes("capture-pane");
+      if (isCapture) captureCalls++;
+      if (isDisplayMessage) displayMessageCalls++;
+      const stdout = isDisplayMessage ? "100\n" : "pane content\n";
+      return {
+        stdout: new ReadableStream({
+          start(c) {
+            c.enqueue(new TextEncoder().encode(stdout));
+            c.close();
+          },
+        }),
+        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        exited: Promise.resolve(0),
+      };
+    });
+
+    poller = new TmuxPoller({
+      onOutput() {},
+      onWidth() {},
+    });
+    poller.start();
+    poller.setAgent("session-A");
+    await Bun.sleep(50);
+    const capturesAfterFirst = captureCalls;
+    expect(displayMessageCalls).toBe(1);
+
+    // Calling setAgent with the same session should be a no-op (short-circuit)
+    poller.setAgent("session-A");
+    poller.setAgent("session-A");
+    await Bun.sleep(50);
+
+    expect(captureCalls).toBe(capturesAfterFirst);
+    expect(displayMessageCalls).toBe(1);
+  });
+
+  test("switching agents triggers a fresh display-message call", async () => {
+    let displayMessageCalls = 0;
+    spawnCtx.set((cmd: string[], _opts?: any) => {
+      const isDisplayMessage = cmd.includes("display-message");
+      if (isDisplayMessage) displayMessageCalls++;
+      const stdout = isDisplayMessage ? "80\n" : "pane content\n";
+      return {
+        stdout: new ReadableStream({
+          start(c) {
+            c.enqueue(new TextEncoder().encode(stdout));
+            c.close();
+          },
+        }),
+        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        exited: Promise.resolve(0),
+      };
+    });
+
+    poller = new TmuxPoller({
+      onOutput() {},
+      onWidth() {},
+    });
+    poller.start();
+    poller.setAgent("session-A");
+    await Bun.sleep(50);
+    expect(displayMessageCalls).toBe(1);
+
+    poller.setAgent("session-B");
+    await Bun.sleep(50);
+    expect(displayMessageCalls).toBe(2);
+  });
+
+  test("setAgent before start does not query width", async () => {
+    let displayMessageCalls = 0;
+    spawnCtx.set((cmd: string[], _opts?: any) => {
+      if (cmd.includes("display-message")) displayMessageCalls++;
+      return {
+        stdout: new ReadableStream({ start(c) { c.close(); } }),
+        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        exited: Promise.resolve(0),
+      };
+    });
+
+    poller = new TmuxPoller({
+      onOutput() {},
+      onWidth() {},
+    });
+    // setAgent without start — should not trigger width query
+    poller.setAgent("session");
+    await Bun.sleep(50);
+    expect(displayMessageCalls).toBe(0);
+  });
 });
 
 // -------------------------------------------------------------------

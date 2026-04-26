@@ -34,6 +34,10 @@ export class AgentWatcher {
   private refreshQueued = false;
   private _lastAgents: Agent[] = [];
   private lastOrphanedSessions: string[] = [];
+  /** Cached coordinator tmux session_created epoch — immutable for the session
+   * lifetime, so we query tmux display-message once and reuse. Cleared when
+   * detectSystemCoordinatorState() reports 'stopped' (session ended). */
+  private coordinatorSessionEpoch: number | null = null;
 
   /** Health check results per repo path */
   healthReports: Map<string, RepoHealthReport> = new Map();
@@ -189,9 +193,19 @@ export class AgentWatcher {
   private async getCoordinatorInfo(): Promise<{ state: string; age: string } | undefined> {
     try {
       const state = await detectSystemCoordinatorState();
-      if (state === "stopped") return { state, age: "" };
+      if (state === "stopped") {
+        // Session ended — invalidate cached epoch so a new session re-queries
+        this.coordinatorSessionEpoch = null;
+        return { state, age: "" };
+      }
 
-      // Get session creation time via tmux display-message
+      // Use the cached session_created epoch when available — it's immutable
+      // for the lifetime of the tmux session, so a single display-message
+      // call covers every refresh until the session is replaced.
+      if (this.coordinatorSessionEpoch !== null) {
+        return { state, age: computeAge(this.coordinatorSessionEpoch) };
+      }
+
       const proc = tmuxSpawnCtx.runner(
         ["tmux", "display-message", "-t", IB_COORDINATOR_SESSION, "-p", "#{session_created}"],
         { stdout: "pipe", stderr: "pipe" },
@@ -202,6 +216,7 @@ export class AgentWatcher {
 
       const epoch = parseInt(output, 10);
       if (isNaN(epoch)) return { state, age: "" };
+      this.coordinatorSessionEpoch = epoch;
       return { state, age: computeAge(epoch) };
     } catch {
       return undefined;

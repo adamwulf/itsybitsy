@@ -1715,6 +1715,10 @@ export class DashboardComponent implements Component {
       const statusLinesCount = this.coordinatorPane.statusLines.length;
       const inputFieldHeight = showCoordInput ? this.coordinatorInputField.getHeight(mainWidth) + statusLinesCount : 0;
       this.coordinatorPane.displayHeight = Math.max(0, availableHeight - inputFieldHeight);
+      // Match tmuxPane: only capture as much scrollback as the pane will actually render.
+      this.coordinatorPoller.setLines(
+        Math.max(200, this.coordinatorPane.displayHeight + this.coordinatorPane.scrollBack + 10)
+      );
 
       const tmuxLines = this.coordinatorPane.render(mainWidth);
 
@@ -1767,6 +1771,19 @@ export class DashboardComponent implements Component {
       const inputFieldHeight = showInputField ? this.inputField.getHeight(leftW) + statusLinesCount : 0;
       this.tmuxPane.displayHeight = showInputField ? availableHeight - inputFieldHeight : availableHeight;
       this.rightPane.displayHeight = availableHeight;
+      // Cap tmux capture-pane scrollback to what's actually visible (+10 padding
+      // for trimInputSeparator). Keeps a 200-line floor so parseStatusLines
+      // separator detection always has plenty of context.
+      this.tmuxPoller.setLines(
+        Math.max(200, this.tmuxPane.displayHeight + this.tmuxPane.scrollBack + 10)
+      );
+      // Repo coordinator capture: size to the coordinator section's height in REPO mode.
+      if (this.rightPane.repoCoordinatorAgent) {
+        const { coordinatorHeight } = this.rightPane.computeRepoCoordinatorSplit();
+        this.repoCoordinatorPoller.setLines(
+          Math.max(200, coordinatorHeight + this.rightPane.repoCoordinatorScrollBack + 10)
+        );
+      }
       this.splitPane.fullWidth = isFullWidth;
       const splitLines = this.splitPane.render(mainWidth);
 

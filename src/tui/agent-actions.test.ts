@@ -51,12 +51,14 @@ function makeMockCtx(overrides?: {
   refreshCalls: number[];
   scrollUpCalls: number[];
   scrollDownCalls: number[];
+  loadAgentLogIfNeededCalls: number[];
 } {
   const dialogs: NonNullable<DialogState>[] = [];
   const notices: string[] = [];
   const refreshCalls: number[] = [];
   const scrollUpCalls: number[] = [];
   const scrollDownCalls: number[] = [];
+  const loadAgentLogIfNeededCalls: number[] = [];
   let leftWidth = overrides?.leftWidth ?? 60;
 
   const ctx: ActionCtx = {
@@ -107,13 +109,16 @@ function makeMockCtx(overrides?: {
     executeAndRefresh: async (fn: () => Promise<void>) => { await fn(); },
     syncSelectedAgent: () => {},
     jumpToMode: () => {},
+    loadAgentLogIfNeeded: () => {
+      loadAgentLogIfNeededCalls.push(1);
+    },
     setQuestionsFocused: () => {},
     healthReport: undefined,
     sidebarWidth: 60,
     getMainWidth: () => (process.stdout.columns ?? 80) - 60 - 1,
     repoCoordinatorSession: null,
   };
-  return { ctx, dialogs, notices, refreshCalls, scrollUpCalls, scrollDownCalls };
+  return { ctx, dialogs, notices, refreshCalls, scrollUpCalls, scrollDownCalls, loadAgentLogIfNeededCalls };
 }
 
 beforeEach(() => {
@@ -421,6 +426,24 @@ describe("handleScrollUp / handleScrollDown", () => {
     handleScrollDown(ctx);
     expect(ctx.rightPane.scrollOffset).toBe(0);
     expect(scrollDownCalls).toHaveLength(1);
+  });
+
+  test("scrollUp triggers loadAgentLogIfNeeded when in AGENT LOG mode", () => {
+    const { ctx, loadAgentLogIfNeededCalls } = makeMockCtx({ mode: "AGENT LOG" });
+    handleScrollUp(ctx);
+    expect(loadAgentLogIfNeededCalls).toHaveLength(1);
+  });
+
+  test("scrollDown triggers loadAgentLogIfNeeded when in AGENT LOG mode", () => {
+    const { ctx, loadAgentLogIfNeededCalls } = makeMockCtx({ mode: "AGENT LOG" });
+    handleScrollDown(ctx);
+    expect(loadAgentLogIfNeededCalls).toHaveLength(1);
+  });
+
+  test("scrollUp does NOT trigger loadAgentLogIfNeeded when not in AGENT LOG mode", () => {
+    const { ctx, loadAgentLogIfNeededCalls } = makeMockCtx({ mode: "DENIALS" });
+    handleScrollUp(ctx);
+    expect(loadAgentLogIfNeededCalls).toHaveLength(0);
   });
 });
 

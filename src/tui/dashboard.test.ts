@@ -2,7 +2,7 @@ import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { join } from "path";
 import { mkdtemp, rm, mkdir } from "fs/promises";
 import { tmpdir } from "os";
-import { readAgentLog, readAgentPrompt, parseDenials } from "../agents";
+import { readAgentLog, readAgentLogWindow, readAgentPrompt, parseDenials } from "../agents";
 import type { Agent, AgentMeta, FlatEntry, PendingQuestion } from "../agents";
 import { stripAnsi } from "../parse-state";
 import { makeAgent as _makeAgent, makeFlatAgent, makeFlatRepoHeader, makeFlatSystemCoordinator, setAgentState, makeSpawnResult } from "../test-utils";
@@ -89,6 +89,128 @@ describe("readAgentLog", () => {
     const lines = await readAgentLog(agent);
     expect(lines.length).toBe(1);
     expect(lines[0]).toContain("empty");
+  });
+});
+
+describe("readAgentLogWindow", () => {
+  let tmpDir: string;
+
+  beforeEach(async () => {
+    tmpDir = await mkdtemp(join(tmpdir(), "itsybitsy-test-"));
+  });
+
+  afterEach(async () => {
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  test("returns the entire file when small (atTop=true)", async () => {
+    const agentDir = join(tmpDir, ".ittybitty", "agents", "agent-small");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "agent.log"), "line one\nline two\nline three");
+
+    const agent = makeAgent("agent-small", tmpDir, false);
+    const win = await readAgentLogWindow(agent, { rows: 20, scrollOffset: 0 });
+    expect(win.atTop).toBe(true);
+    expect(win.isPlaceholder).toBe(false);
+    expect(win.lines).toEqual(["line one", "line two", "line three"]);
+    expect(win.fileSize).toBeGreaterThan(0);
+  });
+
+  test("drops partial first line when window starts past BOF", async () => {
+    // Build a log large enough that the default window won't cover it from the top.
+    // Each line is ~250 chars (over the 200 estimate) so 1000 lines is ~250KB.
+    const agentDir = join(tmpDir, ".ittybitty", "agents", "agent-big");
+    await mkdir(agentDir, { recursive: true });
+    const filler = "x".repeat(240);
+    const lines: string[] = [];
+    for (let i = 0; i < 1000; i++) lines.push(`line${String(i).padStart(4, "0")}-${filler}`);
+    await Bun.write(join(agentDir, "agent.log"), lines.join("\n"));
+
+    const agent = makeAgent("agent-big", tmpDir, false);
+    // rows=20, scrollOffset=0 → desiredLines=60, desiredBytes=12000 → much smaller than file
+    const win = await readAgentLogWindow(agent, { rows: 20, scrollOffset: 0 });
+    expect(win.atTop).toBe(false);
+    expect(win.isPlaceholder).toBe(false);
+    // Last line of the window must be the last line of the file (lines are newest-last).
+    expect(win.lines[win.lines.length - 1]).toBe(lines[lines.length - 1]);
+    // The first line in the window must be a complete line (we drop the partial).
+    // Verify: the first line should match one of the original whole lines.
+    expect(win.lines[0]!.startsWith("line")).toBe(true);
+    // No partial first line — the line before the first one in window
+    // is also a whole line (because we trimmed the partial).
+    const firstLineNum = parseInt(win.lines[0]!.slice(4, 8), 10);
+    expect(firstLineNum).toBeGreaterThan(0);
+    // Total lines returned should be at least rows + bufferRows (20 + 40 = 60),
+    // give or take some bytes-per-line variance, but well under the file's 1000.
+    expect(win.lines.length).toBeGreaterThan(20);
+    expect(win.lines.length).toBeLessThan(1000);
+  });
+
+  test("scrollOffset extends window further back", async () => {
+    const agentDir = join(tmpDir, ".ittybitty", "agents", "agent-scroll");
+    await mkdir(agentDir, { recursive: true });
+    const filler = "x".repeat(240);
+    const lines: string[] = [];
+    for (let i = 0; i < 2000; i++) lines.push(`line${String(i).padStart(4, "0")}-${filler}`);
+    await Bun.write(join(agentDir, "agent.log"), lines.join("\n"));
+
+    const agent = makeAgent("agent-scroll", tmpDir, false);
+    const small = await readAgentLogWindow(agent, { rows: 20, scrollOffset: 0 });
+    const large = await readAgentLogWindow(agent, { rows: 20, scrollOffset: 200 });
+    // Bigger scrollOffset must produce a larger window (or atTop)
+    expect(large.lines.length).toBeGreaterThan(small.lines.length);
+    // Both should still end at the last line
+    expect(small.lines[small.lines.length - 1]).toBe(lines[lines.length - 1]);
+    expect(large.lines[large.lines.length - 1]).toBe(lines[lines.length - 1]);
+  });
+
+  test("returns 'No agent.log found' when file does not exist", async () => {
+    const agentDir = join(tmpDir, ".ittybitty", "agents", "agent-missing");
+    await mkdir(agentDir, { recursive: true });
+    const agent = makeAgent("agent-missing", tmpDir, false);
+    const win = await readAgentLogWindow(agent, { rows: 20, scrollOffset: 0 });
+    expect(win.isPlaceholder).toBe(true);
+    expect(win.fileSize).toBe(0);
+    expect(win.atTop).toBe(true);
+    expect(win.lines[0]).toContain("No agent.log found");
+  });
+
+  test("returns 'agent.log is empty' for zero-byte file", async () => {
+    const agentDir = join(tmpDir, ".ittybitty", "agents", "agent-empty2");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "agent.log"), "");
+    const agent = makeAgent("agent-empty2", tmpDir, false);
+    const win = await readAgentLogWindow(agent, { rows: 20, scrollOffset: 0 });
+    expect(win.isPlaceholder).toBe(true);
+    expect(win.fileSize).toBe(0);
+    expect(win.lines[0]).toContain("empty");
+  });
+
+  test("works for archived agents", async () => {
+    const agentDir = join(tmpDir, ".ittybitty", "archive", "agent-arc");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "agent.log"), "old line one\nold line two");
+    const agent = makeAgent("agent-arc", tmpDir, true);
+    const win = await readAgentLogWindow(agent, { rows: 20, scrollOffset: 0 });
+    expect(win.atTop).toBe(true);
+    expect(win.lines).toEqual(["old line one", "old line two"]);
+  });
+
+  test("returns 'line too long' placeholder when window covers a single oversized line", async () => {
+    // Build a file where the trailing line is longer than any reasonable
+    // tail-window byte budget. The first line is short so we have a clear
+    // partial-line cut after the newline.
+    const agentDir = join(tmpDir, ".ittybitty", "agents", "agent-bigline");
+    await mkdir(agentDir, { recursive: true });
+    // 50KB single line (well over the default 8KB minimum read).
+    const huge = "z".repeat(50_000);
+    await Bun.write(join(agentDir, "agent.log"), `prefix-line\n${huge}`);
+    const agent = makeAgent("agent-bigline", tmpDir, false);
+    // Tiny rows/buffer → desiredBytes = 8192 < 50KB → tail starts mid-huge-line.
+    const win = await readAgentLogWindow(agent, { rows: 5, scrollOffset: 0, bufferRows: 5 });
+    expect(win.atTop).toBe(false);
+    expect(win.isPlaceholder).toBe(true);
+    expect(win.lines[0]).toContain("line too long");
   });
 });
 

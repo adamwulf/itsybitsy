@@ -901,6 +901,13 @@ export class DashboardComponent implements Component {
     jumpToMode(this, mode, forceRefresh);
   }
 
+  /** Reload AGENT LOG tail-window (or skip via cache) — called from scroll/resize handlers. */
+  loadAgentLogIfNeeded() {
+    const agent = this.agentTree.selectedAgent;
+    if (!agent) return;
+    void loadAgentLog(this, agent);
+  }
+
   private cyclePaneMode(delta: number) {
     cyclePaneMode(this, delta);
   }
@@ -1135,8 +1142,11 @@ export class DashboardComponent implements Component {
       this.inputField.switchAgent(newId);
       this.coordinatorInputField.switchAgent(isCoordinator ? "__coordinator__" : null);
       this.rightPane.agentLogContent = null;
+      this.rightPane.loadedLogWindow = null;
+      this.rightPane.agentLogLoading = false;
       this.rightPane.promptContent = null;
       this.rightPane.denialsContent = null;
+      this.rightPane.denialsLoading = false;
       this.rightPane.diffContent = null;
       this.rightPane.diffLoading = false;
       this.rightPane.statusContent = null;
@@ -2051,6 +2061,19 @@ export async function launchDashboard(): Promise<void> {
   // Handle terminal resize to update coordinator tmux width
   process.stdout.on("resize", () => {
     resizeCoordinatorTmux(dashboard.getMainWidth());
+    // displayHeight is recomputed inside render() — at the moment the resize
+    // event fires it still holds the pre-resize value, so a cache check now
+    // would falsely hit. Drop the cached window so loadAgentLogIfNeeded is
+    // forced to re-read once render has updated displayHeight; defer the
+    // call via setImmediate so it runs after the next render tick.
+    if (dashboard.rightPane.mode === "AGENT LOG") {
+      dashboard.rightPane.loadedLogWindow = null;
+      setImmediate(() => {
+        if (dashboard.rightPane.mode === "AGENT LOG") {
+          dashboard.loadAgentLogIfNeeded();
+        }
+      });
+    }
     tui.requestRender();
   });
 

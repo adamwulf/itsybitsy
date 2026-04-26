@@ -641,31 +641,37 @@ function logCacheCovers(
 }
 
 export async function loadAgentLog(ctx: PaneCtx, agent: Agent) {
-  // Avoid concurrent reads stomping on each other.
+  // Avoid concurrent reads stomping on each other. Set the guard
+  // synchronously BEFORE the stat — otherwise two callers can both pass the
+  // early-exit before either flips it true, and we pay duplicate I/O.
   if (ctx.rightPane.agentLogLoading) return;
-
-  const displayHeight = Math.max(1, ctx.rightPane.displayHeight);
-  const scrollOffset = Math.max(0, ctx.rightPane.scrollOffset);
-  const bufferRows = displayHeight * 2;
-
-  // Stat the file before deciding on cache coverage so growing logs from
-  // active agents trigger a re-read instead of being served stale forever.
-  const currentFileSize = await statAgentLogSize(agent);
-  if (ctx.currentAgentId !== agent.id) return;
-
-  // Cache hit: the loaded window already covers the visible area for this agent.
-  if (logCacheCovers(ctx.rightPane.loadedLogWindow, agent.id, displayHeight, scrollOffset, bufferRows, currentFileSize)) {
-    return;
-  }
-
   ctx.rightPane.agentLogLoading = true;
+
+  // Capture the agent id we started with so a stale finally can detect that
+  // a newer load owns the flag and decline to clear it.
+  const startedForAgentId = agent.id;
+
   try {
+    const displayHeight = Math.max(1, ctx.rightPane.displayHeight);
+    const scrollOffset = Math.max(0, ctx.rightPane.scrollOffset);
+    const bufferRows = displayHeight * 2;
+
+    // Stat the file before deciding on cache coverage so growing logs from
+    // active agents trigger a re-read instead of being served stale forever.
+    const currentFileSize = await statAgentLogSize(agent);
+    if (ctx.currentAgentId !== startedForAgentId) return;
+
+    // Cache hit: the loaded window already covers the visible area for this agent.
+    if (logCacheCovers(ctx.rightPane.loadedLogWindow, agent.id, displayHeight, scrollOffset, bufferRows, currentFileSize)) {
+      return;
+    }
+
     const window = await readAgentLogWindow(agent, {
       rows: displayHeight,
       scrollOffset,
       bufferRows,
     });
-    if (ctx.currentAgentId !== agent.id) return;
+    if (ctx.currentAgentId !== startedForAgentId) return;
     ctx.rightPane.agentLogContent = colorizeLog(window.lines);
     ctx.rightPane.loadedLogWindow = window.isPlaceholder ? null : {
       agentId: agent.id,
@@ -679,7 +685,12 @@ export async function loadAgentLog(ctx: PaneCtx, agent: Agent) {
     ctx.rightPane.updateContent();
     ctx.tui?.requestRender();
   } finally {
-    ctx.rightPane.agentLogLoading = false;
+    // Only clear the loading flag if this load is still the active one for
+    // the currently-selected agent — otherwise leave it alone so we don't
+    // clobber a newer load's agentLogLoading=true (mirrors loadDenials).
+    if (ctx.currentAgentId === startedForAgentId) {
+      ctx.rightPane.agentLogLoading = false;
+    }
   }
 }
 

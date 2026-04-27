@@ -16,6 +16,7 @@ import {
   readAgentState,
   isCompacting,
   isRateLimited,
+  isApiError,
   hasBackgroundTasks,
   anyChildActive,
   detectAgentStates,
@@ -942,6 +943,87 @@ describe("isRateLimited", () => {
   });
 });
 
+describe("isApiError", () => {
+  test("detects Stream idle timeout (real example)", () => {
+    const output = "line1\nline2\n  ⎿  API Error: Stream idle timeout - partial response received\nline4";
+    expect(isApiError(output)).toBe(true);
+  });
+
+  test("detects 500 status code", () => {
+    const output = "  ⎿  API Error: 500 Internal Server Error";
+    expect(isApiError(output)).toBe(true);
+  });
+
+  test("detects 502 status code", () => {
+    const output = "  ⎿  API Error: 502 Bad Gateway";
+    expect(isApiError(output)).toBe(true);
+  });
+
+  test("detects 503 status code", () => {
+    const output = "  ⎿  API Error: 503 Service Unavailable";
+    expect(isApiError(output)).toBe(true);
+  });
+
+  test("detects Connection error", () => {
+    const output = "  ⎿  API Error: Connection error";
+    expect(isApiError(output)).toBe(true);
+  });
+
+  test("detects fetch failed", () => {
+    const output = "  ⎿  API Error: fetch failed";
+    expect(isApiError(output)).toBe(true);
+  });
+
+  test("detects Request was aborted", () => {
+    const output = "  ⎿  API Error: Request was aborted";
+    expect(isApiError(output)).toBe(true);
+  });
+
+  test("detects ETIMEDOUT", () => {
+    const output = "  ⎿  API Error: ETIMEDOUT";
+    expect(isApiError(output)).toBe(true);
+  });
+
+  test("detects ECONNRESET", () => {
+    const output = "  ⎿  API Error: ECONNRESET";
+    expect(isApiError(output)).toBe(true);
+  });
+
+  test("strips ANSI before checking", () => {
+    const output = "line1\n\x1b[31m  ⎿  API Error: Stream idle timeout\x1b[0m\nline3";
+    expect(isApiError(output)).toBe(true);
+  });
+
+  test("returns false on plain text without API Error marker", () => {
+    const output = "line1\nline2\nrunning some task\nline4";
+    expect(isApiError(output)).toBe(false);
+  });
+
+  test("returns false when 'API Error' lacks ⎿ marker (avoids quoting false-positive)", () => {
+    // Watchdog nudge that quotes the phrase shouldn't re-fire detection.
+    const output = "[watchdog] previous tick observed an API Error: Stream idle timeout — see log";
+    expect(isApiError(output)).toBe(false);
+  });
+
+  test("returns false when API Error marker present but no recovery-eligible variant matches", () => {
+    // Conservative — unknown shapes should NOT match so we don't loop on
+    // things we don't know how to recover from.
+    const output = "  ⎿  API Error: invalid_request_error - prompt too long";
+    expect(isApiError(output)).toBe(false);
+  });
+
+  test("only inspects last 15 lines", () => {
+    // API Error far above the window — should NOT be detected.
+    const oldLines = Array.from({ length: 20 }, () => "filler");
+    const output = ["  ⎿  API Error: Stream idle timeout", ...oldLines].join("\n");
+    expect(isApiError(output)).toBe(false);
+  });
+
+  test("returns false on empty input", () => {
+    expect(isApiError("")).toBe(false);
+  });
+});
+
 describe("hasBackgroundTasks", () => {
   test("detects background task pattern", () => {
     const output = "line1\n⏵⏵ tasks · 3 running\nline3";
@@ -1279,6 +1361,7 @@ describe("readAgentTransient / writeAgentTransient", () => {
     const data: TransientState = {
       tmux_compacting: true,
       tmux_rate_limited: false,
+      tmux_api_error: false,
       has_background_tasks: true,
       updated_at_ms: 1_700_000_000_000,
       watchdog_pid: 12345,
@@ -1304,15 +1387,15 @@ describe("readAgentTransient / writeAgentTransient", () => {
   });
 
   test("write is atomic (.tmp + rename) — second write replaces first", async () => {
-    const first: TransientState = { tmux_compacting: true, tmux_rate_limited: false, has_background_tasks: false, updated_at_ms: 1, watchdog_pid: 100 };
-    const second: TransientState = { tmux_compacting: false, tmux_rate_limited: true, has_background_tasks: false, updated_at_ms: 2, watchdog_pid: 200 };
+    const first: TransientState = { tmux_compacting: true, tmux_rate_limited: false, tmux_api_error: false, has_background_tasks: false, updated_at_ms: 1, watchdog_pid: 100 };
+    const second: TransientState = { tmux_compacting: false, tmux_rate_limited: true, tmux_api_error: false, has_background_tasks: false, updated_at_ms: 2, watchdog_pid: 200 };
     await writeAgentTransient(tempDir, first);
     await writeAgentTransient(tempDir, second);
     expect(await readAgentTransient(tempDir)).toEqual(second);
   });
 
   test("deleteAgentTransient removes the file", async () => {
-    const data: TransientState = { tmux_compacting: false, tmux_rate_limited: false, has_background_tasks: false, updated_at_ms: 1, watchdog_pid: 1 };
+    const data: TransientState = { tmux_compacting: false, tmux_rate_limited: false, tmux_api_error: false, has_background_tasks: false, updated_at_ms: 1, watchdog_pid: 1 };
     await writeAgentTransient(tempDir, data);
     expect(await readAgentTransient(tempDir)).not.toBeNull();
     await deleteAgentTransient(tempDir);
@@ -1388,6 +1471,7 @@ describe("detectAgentStates — meta.transient.json fast-path", () => {
     await writeAgentTransient(agentDir, {
       tmux_compacting: false,
       tmux_rate_limited: false,
+      tmux_api_error: false,
       has_background_tasks: false,
       updated_at_ms: fakeNow - 1_000, // 1s old, fresh
       watchdog_pid: 99999,
@@ -1409,6 +1493,7 @@ describe("detectAgentStates — meta.transient.json fast-path", () => {
     await writeAgentTransient(agentDir, {
       tmux_compacting: true,
       tmux_rate_limited: false,
+      tmux_api_error: false,
       has_background_tasks: false,
       updated_at_ms: fakeNow - 100,
       watchdog_pid: 12345,
@@ -1430,6 +1515,7 @@ describe("detectAgentStates — meta.transient.json fast-path", () => {
     await writeAgentTransient(agentDir, {
       tmux_compacting: false,
       tmux_rate_limited: true,
+      tmux_api_error: false,
       has_background_tasks: false,
       updated_at_ms: fakeNow - 100,
       watchdog_pid: 12345,
@@ -1451,6 +1537,7 @@ describe("detectAgentStates — meta.transient.json fast-path", () => {
     await writeAgentTransient(agentDir, {
       tmux_compacting: false,
       tmux_rate_limited: false,
+      tmux_api_error: false,
       has_background_tasks: true,
       updated_at_ms: fakeNow - 100,
       watchdog_pid: 12345,
@@ -1472,6 +1559,7 @@ describe("detectAgentStates — meta.transient.json fast-path", () => {
     await writeAgentTransient(agentDir, {
       tmux_compacting: true, // would say compacting via fast-path
       tmux_rate_limited: false,
+      tmux_api_error: false,
       has_background_tasks: false,
       updated_at_ms: fakeNow - 100,
       watchdog_pid: 99999,
@@ -1494,6 +1582,7 @@ describe("detectAgentStates — meta.transient.json fast-path", () => {
     await writeAgentTransient(agentDir, {
       tmux_compacting: true, // would say compacting via fast-path
       tmux_rate_limited: false,
+      tmux_api_error: false,
       has_background_tasks: false,
       updated_at_ms: fakeNow - TRANSIENT_FRESH_MS - 1,
       watchdog_pid: 12345,
@@ -1523,6 +1612,7 @@ describe("detectAgentStates — meta.transient.json fast-path", () => {
     await writeAgentTransient(agentDir, {
       tmux_compacting: true, // would say compacting via fast-path if trusted
       tmux_rate_limited: false,
+      tmux_api_error: false,
       has_background_tasks: false,
       updated_at_ms: 0,
       watchdog_pid: 12345,
@@ -1555,6 +1645,7 @@ describe("detectAgentStates — meta.transient.json fast-path", () => {
     await writeAgentTransient(agentDir, {
       tmux_compacting: false,
       tmux_rate_limited: true,
+      tmux_api_error: false,
       has_background_tasks: false,
       updated_at_ms: fakeNow - 100,
       watchdog_pid: 12345,
@@ -1568,6 +1659,7 @@ describe("detectAgentStates — meta.transient.json fast-path", () => {
     await writeAgentTransient(agentDir, {
       tmux_compacting: true,
       tmux_rate_limited: false,
+      tmux_api_error: false,
       has_background_tasks: false,
       updated_at_ms: fakeNow - 50,
       watchdog_pid: 12345,
@@ -1600,6 +1692,7 @@ describe("archive cleanup deletes meta.transient.json", () => {
     await writeAgentTransient(agentDir, {
       tmux_compacting: false,
       tmux_rate_limited: false,
+      tmux_api_error: false,
       has_background_tasks: false,
       updated_at_ms: Date.now(),
       watchdog_pid: 12345,

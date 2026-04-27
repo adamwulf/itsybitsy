@@ -135,8 +135,10 @@ export function handleDialogInput(ctx: DialogCtx, data: string): boolean {
     return true;
   }
 
-  // Escape: permissions-editor in input mode exits input mode first
+  // Escape: permissions-editor in input mode exits input mode first.
+  // Discard any in-progress chunked paste so its prefix can't leak.
   if (matchesKey(data, Key.escape) && dialog.type === "permissions-editor" && dialog.inputMode) {
+    cancelPaste();
     dialog.inputMode = false;
     dialog.inputValue = "";
     ctx.tui?.requestRender();

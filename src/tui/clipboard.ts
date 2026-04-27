@@ -53,7 +53,15 @@ export function extractBracketedPaste(data: string): string | null {
   return data.slice(PASTE_START.length);
 }
 
-/** Test-only: reset paste reassembly state. */
+/** Cancel any in-progress chunked bracketed paste, discarding its buffered prefix.
+ *  Callers should invoke this when input focus is interrupted (e.g. user presses
+ *  Escape, dialog closes) so a paste that never receives its end marker cannot
+ *  silently swallow subsequent input. */
+export function cancelPaste(): void {
+  pasteInProgress = null;
+}
+
+/** Test-only alias for cancelPaste — retained so test setup reads as state reset. */
 export function resetPasteState(): void {
   pasteInProgress = null;
 }

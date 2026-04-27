@@ -6,6 +6,7 @@ import {
   resolvePasteText,
   resetPasteState,
   isPasteInProgress,
+  cancelPaste,
 } from "./clipboard";
 
 describe("isPasteData", () => {
@@ -185,6 +186,42 @@ describe("resolvePasteText (chunked bracketed paste)", () => {
     expect(isPasteInProgress()).toBe(true);
     expect(resolvePasteText("\x1b[201~", cb)).toBeNull();
     expect(delivered).toEqual([""]);
+  });
+
+  test("cancelPaste discards buffered prefix so subsequent input is not swallowed", () => {
+    const delivered: string[] = [];
+    const cb = (text: string) => { delivered.push(text); };
+
+    // Start a paste but never complete it (simulates the user pressing Escape
+    // mid-paste, which is caught by the dialog handler before reaching here).
+    expect(resolvePasteText("\x1b[200~partial-content", cb)).toBeNull();
+    expect(isPasteInProgress()).toBe(true);
+
+    cancelPaste();
+    expect(isPasteInProgress()).toBe(false);
+
+    // A subsequent multi-char paste must NOT be appended to the discarded
+    // buffer — it should resolve as its own paste.
+    const next = resolvePasteText("hello world", cb);
+    expect(next).toBe("hello world");
+    expect(delivered).toEqual([]); // nothing delivered via callback
+  });
+
+  test("back-to-back chunked pastes do not bleed into each other", () => {
+    const delivered: string[] = [];
+    const cb = (text: string) => { delivered.push(text); };
+
+    // Paste A
+    expect(resolvePasteText("\x1b[200~aaa", cb)).toBeNull();
+    expect(resolvePasteText("AAA\x1b[201~", cb)).toBeNull();
+    expect(delivered).toEqual(["aaaAAA"]);
+    expect(isPasteInProgress()).toBe(false);
+
+    // Paste B immediately afterwards
+    expect(resolvePasteText("\x1b[200~bbb", cb)).toBeNull();
+    expect(resolvePasteText("BBB\x1b[201~", cb)).toBeNull();
+    expect(delivered).toEqual(["aaaAAA", "bbbBBB"]);
+    expect(isPasteInProgress()).toBe(false);
   });
 
   test("continuation chunks containing escape codes mid-content are buffered verbatim", () => {

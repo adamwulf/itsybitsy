@@ -12,6 +12,7 @@ import { truncateToWidth, matchesKey, Key } from "@mariozechner/pi-tui";
 import type { Component } from "@mariozechner/pi-tui";
 import { DIM_GRAY, RESET, BOLD, GREEN, DIM } from "./colors";
 import { TextBuffer } from "./text-buffer";
+import { cancelPaste } from "./clipboard";
 
 /** Maximum number of visible content lines before scrolling */
 const MAX_VISIBLE_LINES = 5;
@@ -92,8 +93,10 @@ export class InputFieldComponent implements Component {
    * Handle keyboard input. Returns true if the input was consumed.
    */
   handleInput(data: string): boolean {
-    // Escape: cancel (clear and defocus)
+    // Escape: cancel (clear and defocus). Discard any in-progress chunked
+    // bracketed paste so its buffered prefix can't leak into the next dialog.
     if (matchesKey(data, Key.escape) || data === "\x1b") {
+      cancelPaste();
       this.clear();
       this.onCancel?.();
       return true;

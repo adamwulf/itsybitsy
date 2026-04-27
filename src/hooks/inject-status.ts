@@ -105,7 +105,7 @@ export function briefSummary(agents: Agent[], questionCount?: number): string {
   }
 
   // Ordered state display
-  const order = ["running", "waiting", "complete", "rate_limited", "stopped", "creating"];
+  const order = ["running", "waiting", "complete", "rate_limited", "api_error", "stopped", "creating"];
   const parts: string[] = [];
   for (const s of order) {
     const n = counts.get(s);

@@ -149,6 +149,7 @@ export async function writeAgentState(agentDir: string, state: MetaState): Promi
 export interface TransientState {
   tmux_compacting: boolean;
   tmux_rate_limited: boolean;
+  tmux_api_error: boolean;
   has_background_tasks: boolean;
   updated_at_ms: number;
   watchdog_pid: number;
@@ -177,6 +178,8 @@ export async function readAgentTransient(agentDir: string): Promise<TransientSta
     return {
       tmux_compacting: data.tmux_compacting,
       tmux_rate_limited: data.tmux_rate_limited,
+      // Field added later — older transient files default to false on read.
+      tmux_api_error: typeof data.tmux_api_error === "boolean" ? data.tmux_api_error : false,
       has_background_tasks: data.has_background_tasks,
       updated_at_ms: data.updated_at_ms,
       watchdog_pid: data.watchdog_pid,
@@ -259,6 +262,39 @@ export function isRateLimited(tmuxOutput: string): boolean {
     lower.includes("hit your limit") ||
     lower.includes("/upgrade to increase your usage limit")
   );
+}
+
+/**
+ * Check if tmux output indicates a transient API error from Claude Code.
+ *
+ * Claude renders these errors as a tool-result line beginning with `⎿  API Error: …`
+ * and then idles waiting for the user to type "please retry". We detect a small,
+ * conservative family of patterns in the last 15 lines (ANSI-stripped).
+ *
+ * The leading `⎿` (tool-result connector) is required so we don't false-positive
+ * on a watchdog nudge that quotes the phrase "API Error:" inside a sentence.
+ */
+export function isApiError(tmuxOutput: string): boolean {
+  const stripped = stripAnsi(tmuxOutput);
+  const lines = stripped.split("\n");
+  const last15 = lines.slice(-15).join("\n");
+
+  // Require the tool-result connector ⎿ followed by "API Error:" — anchor strictly
+  // so quoted occurrences in a watchdog nudge ("…the message 'API Error:'…") don't match.
+  if (!/⎿\s*API Error:/.test(last15)) return false;
+
+  // Conservative family of recovery-eligible variants. Easier to add patterns
+  // later than debug false positives.
+  if (/Stream idle timeout/i.test(last15)) return true;
+  if (/partial response/i.test(last15)) return true;
+  if (/\b5\d{2}\b/.test(last15)) return true; // 500/502/503/...
+  if (/Connection error/i.test(last15)) return true;
+  if (/fetch failed/i.test(last15)) return true;
+  if (/Request was aborted/i.test(last15)) return true;
+  if (/ETIMEDOUT/.test(last15)) return true;
+  if (/ECONNRESET/.test(last15)) return true;
+
+  return false;
 }
 
 /**
@@ -837,6 +873,10 @@ export async function detectAgentStates(agents: Agent[]): Promise<void> {
           agent.state = "rate_limited";
           return;
         }
+        if (transient.tmux_api_error) {
+          agent.state = "api_error";
+          return;
+        }
         if (agent.meta.state === "waiting" && transient.has_background_tasks) {
           agent.state = "running";
           return;
@@ -863,6 +903,10 @@ export async function detectAgentStates(agents: Agent[]): Promise<void> {
       }
       if (isRateLimited(output)) {
         agent.state = "rate_limited";
+        return;
+      }
+      if (isApiError(output)) {
+        agent.state = "api_error";
         return;
       }
       // Background-shell override: waiting agents with a live background

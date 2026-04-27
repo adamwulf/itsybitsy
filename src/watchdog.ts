@@ -11,7 +11,7 @@
 
 import { join } from "path";
 import { mkdirSync } from "fs";
-import { readRepoAgents, readAllAgents, isCompacting, isRateLimited, readAgentState, hasBackgroundTasks, anyChildActive, writeAgentTransient } from "./agents";
+import { readRepoAgents, readAllAgents, isCompacting, isRateLimited, isApiError, readAgentState, hasBackgroundTasks, anyChildActive, writeAgentTransient } from "./agents";
 import type { Agent, TransientState } from "./agents";
 import { captureTmuxOutput } from "./tmux-poller";
 import { logAgent } from "./agent-lifecycle";
@@ -38,6 +38,10 @@ export interface AgentTracker {
   rateLimitBypassed: boolean;
   compactState: CompactState;
   lastCompactCheckMs: number;
+  /** Number of "please retry" nudges sent for the current api_error episode */
+  apiErrorRetries: number;
+  /** Wall-clock ms of the last "please retry" nudge (0 = never sent) */
+  apiErrorLastAtMs: number;
 }
 
 /** How often the watchdog polls, in milliseconds */
@@ -147,6 +151,8 @@ export function createTracker(): AgentTracker {
     rateLimitBypassed: false,
     compactState: { compactSent: false },
     lastCompactCheckMs: 0,
+    apiErrorRetries: 0,
+    apiErrorLastAtMs: 0,
   };
 }
 
@@ -503,6 +509,48 @@ async function handleStopped(_agent: Agent, _tracker: AgentTracker, _getAllAgent
   // No-op
 }
 
+/** Maximum number of "please retry" nudges per api_error episode */
+export const API_ERROR_MAX_RETRIES = 5;
+
+/** Minimum wall-clock interval between "please retry" nudges, in milliseconds */
+export const API_ERROR_RETRY_INTERVAL_MS = 10_000;
+
+/**
+ * Handler for "api_error" state.
+ *
+ * Claude has displayed a transient API error (e.g. "Stream idle timeout",
+ * 5xx, connection error) and is idling waiting for the user to type
+ * "please retry". We do that automatically, capped at API_ERROR_MAX_RETRIES
+ * per episode and rate-limited to one nudge per API_ERROR_RETRY_INTERVAL_MS
+ * so we don't loop hot on a persistent outage.
+ *
+ * Counter reset for this state happens in processAgents: when any non-api_error
+ * state is observed, we clear the retry counters so a successful recovery
+ * (or a different transient state) starts the next episode from zero.
+ */
+async function handleApiError(agent: Agent, tracker: AgentTracker, _getAllAgents: GetAllAgents): Promise<void> {
+  if (tracker.apiErrorRetries >= API_ERROR_MAX_RETRIES) {
+    // One-shot log on the tick we hit the cap so user knows we backed off.
+    if (tracker.previousState !== "api_error") {
+      const agentDir = join(agent.repoPath, ".ittybitty", "agents", agent.id);
+      try {
+        await logAgent(agentDir, `[watchdog] api_error: hit MAX_RETRIES (${API_ERROR_MAX_RETRIES}) — leaving agent for user intervention`);
+      } catch { /* best-effort */ }
+    }
+    return;
+  }
+
+  const now = nowFn();
+  if (tracker.apiErrorLastAtMs > 0 && now - tracker.apiErrorLastAtMs < API_ERROR_RETRY_INTERVAL_MS) {
+    // Too soon since last retry — skip this tick.
+    return;
+  }
+
+  tracker.apiErrorLastAtMs = now;
+  tracker.apiErrorRetries++;
+  await sendMessage(agent, "please retry");
+}
+
 // Register built-in handlers
 registerStateHandler("waiting", handleWaiting);
 registerStateHandler("unknown", handleUnknown);
@@ -511,6 +559,7 @@ registerStateHandler("running", handleRunning);
 registerStateHandler("creating", handleCreating);
 registerStateHandler("compacting", handleCompacting);
 registerStateHandler("rate_limited", handleRateLimited);
+registerStateHandler("api_error", handleApiError);
 registerStateHandler("stopped", handleStopped);
 
 /** States that use the wait counter / backoff system */
@@ -543,6 +592,13 @@ async function processAgents(agents: Agent[], allAgents: Agent[]): Promise<void>
     if (!BACKOFF_STATES.has(agent.state)) {
       tracker.waitCounter = 0;
       tracker.notifyInterval = INITIAL_NOTIFY_TICKS;
+    }
+
+    // Reset api_error retry tracking when state has moved off api_error.
+    // Any non-api_error tick clears the slate so the next episode starts fresh.
+    if (agent.state !== "api_error") {
+      tracker.apiErrorRetries = 0;
+      tracker.apiErrorLastAtMs = 0;
     }
 
     // Update previous state after handler runs
@@ -705,9 +761,14 @@ export function resetPerAgentReadState(): void {
  * Resolution: compacting/rate_limited from tmux → meta.json state → fallback to running.
  */
 export function resolveWatchdogState(tmuxOutput: string, metaState: MetaState | undefined): AgentState {
-  // Step 1: transient tmux overrides
+  // Step 1: transient tmux overrides.
+  // Order among compacting / rate_limited / api_error is mostly cosmetic — they are
+  // mutually exclusive in practice (an agent showing "Compacting conversation" does
+  // not also show "API Error:"). Compacting is checked first because it is the
+  // most narrowly scoped (last 5 lines) and the cheapest signal to validate.
   if (isCompacting(tmuxOutput)) return "compacting";
   if (isRateLimited(tmuxOutput)) return "rate_limited";
+  if (isApiError(tmuxOutput)) return "api_error";
   // Background-shell override: waiting agents with a live background shell
   // are actually still doing work. Scoped strictly to meta.state === "waiting" —
   // we do NOT override "complete" (intentional sign-off) or "running" (already
@@ -844,6 +905,7 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
       const transientSnapshot: TransientState = {
         tmux_compacting: isCompacting(output),
         tmux_rate_limited: isRateLimited(output),
+        tmux_api_error: isApiError(output),
         has_background_tasks: hasBackgroundTasks(output),
         updated_at_ms: nowFn(),
         watchdog_pid: process.pid,
@@ -878,6 +940,12 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
       if (!BACKOFF_STATES.has(resolvedState)) {
         tracker.waitCounter = 0;
         tracker.notifyInterval = INITIAL_NOTIFY_TICKS;
+      }
+
+      // Reset api_error retry tracking when state has moved off api_error.
+      if (resolvedState !== "api_error") {
+        tracker.apiErrorRetries = 0;
+        tracker.apiErrorLastAtMs = 0;
       }
 
       tracker.previousState = resolvedState;

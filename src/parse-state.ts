@@ -13,6 +13,7 @@ export type AgentState =
   | "complete"
   | "compacting"
   | "rate_limited"
+  | "api_error"
   | "stopped"
   | "unknown";
 

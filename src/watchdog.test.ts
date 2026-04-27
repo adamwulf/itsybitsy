@@ -52,6 +52,8 @@ import {
   ALL_AGENTS_TTL_MS,
   RATE_LIMIT_MAX_RETRIES,
   RATE_LIMIT_RETRY_DELAY_MS,
+  API_ERROR_MAX_RETRIES,
+  API_ERROR_RETRY_INTERVAL_MS,
   type AgentTracker,
 } from "./watchdog";
 import {
@@ -618,7 +620,7 @@ describe("watchdog", () => {
     });
 
     test("all non-backoff states reset counters", async () => {
-      const nonBackoffStates: AgentState[] = ["running", "creating", "complete", "stopped", "compacting", "rate_limited"];
+      const nonBackoffStates: AgentState[] = ["running", "creating", "complete", "stopped", "compacting", "rate_limited", "api_error"];
 
       for (const state of nonBackoffStates) {
         clearTrackers();
@@ -1120,6 +1122,116 @@ describe("watchdog", () => {
 
       expect(tracker.waitCounter).toBe(0);
       expect(tracker.notifyInterval).toBe(INITIAL_NOTIFY_TICKS);
+    });
+  });
+
+  describe("api_error handler", () => {
+    /** Count "please retry" send-keys -l calls in spawnMock.
+     *  Note: sendMessage may auto-detect a fromId from cwd and prefix the
+     *  message with "[sent by agent <id>]: …", so we substring-match. */
+    function countRetryCalls(): number {
+      return spawnMock.calls.filter((c) => {
+        if (!c.args.includes("send-keys") || !c.args.includes("-l")) return false;
+        return c.args.some((a: unknown) => typeof a === "string" && a.includes("please retry"));
+      }).length;
+    }
+
+    test("first detection sends 'please retry' once", async () => {
+      setWatchdogNow(() => 1_000_000);
+      const a1 = agent("a1", "api_error");
+
+      await tick([a1]);
+
+      expect(countRetryCalls()).toBe(1);
+      const tracker = getTracker("a1");
+      expect(tracker.apiErrorRetries).toBe(1);
+      expect(tracker.apiErrorLastAtMs).toBe(1_000_000);
+    });
+
+    test("second tick within retry interval is a no-op", async () => {
+      let now = 1_000_000;
+      setWatchdogNow(() => now);
+      const a1 = agent("a1", "api_error");
+
+      await tick([a1]);
+      expect(countRetryCalls()).toBe(1);
+
+      // Advance less than the retry interval
+      now += API_ERROR_RETRY_INTERVAL_MS - 1;
+      await tick([a1]);
+      expect(countRetryCalls()).toBe(1);
+      expect(getTracker("a1").apiErrorRetries).toBe(1);
+    });
+
+    test("tick after retry interval sends another 'please retry'", async () => {
+      let now = 1_000_000;
+      setWatchdogNow(() => now);
+      const a1 = agent("a1", "api_error");
+
+      await tick([a1]);
+      expect(countRetryCalls()).toBe(1);
+
+      now += API_ERROR_RETRY_INTERVAL_MS;
+      await tick([a1]);
+      expect(countRetryCalls()).toBe(2);
+      expect(getTracker("a1").apiErrorRetries).toBe(2);
+    });
+
+    test("MAX_RETRIES caps further sends", async () => {
+      let now = 1_000_000;
+      setWatchdogNow(() => now);
+      const a1 = agent("a1", "api_error");
+
+      // Fire MAX_RETRIES times by advancing the clock past the interval.
+      for (let i = 0; i < API_ERROR_MAX_RETRIES; i++) {
+        await tick([a1]);
+        now += API_ERROR_RETRY_INTERVAL_MS;
+      }
+      expect(countRetryCalls()).toBe(API_ERROR_MAX_RETRIES);
+
+      // Further ticks should NOT send any more "please retry"s.
+      for (let i = 0; i < 3; i++) {
+        await tick([a1]);
+        now += API_ERROR_RETRY_INTERVAL_MS;
+      }
+      expect(countRetryCalls()).toBe(API_ERROR_MAX_RETRIES);
+      expect(getTracker("a1").apiErrorRetries).toBe(API_ERROR_MAX_RETRIES);
+    });
+
+    test("transitioning to running resets the counter", async () => {
+      let now = 1_000_000;
+      setWatchdogNow(() => now);
+      const a1 = agent("a1", "api_error");
+
+      await tick([a1]);
+      expect(getTracker("a1").apiErrorRetries).toBe(1);
+
+      // Move to running — counter resets.
+      now += API_ERROR_RETRY_INTERVAL_MS;
+      await tick([agent("a1", "running")]);
+      expect(getTracker("a1").apiErrorRetries).toBe(0);
+      expect(getTracker("a1").apiErrorLastAtMs).toBe(0);
+
+      // Back into api_error — fresh episode, fires immediately.
+      now += API_ERROR_RETRY_INTERVAL_MS;
+      await tick([a1]);
+      expect(getTracker("a1").apiErrorRetries).toBe(1);
+      expect(countRetryCalls()).toBe(2);
+    });
+
+    test("transitioning to waiting also resets the counter", async () => {
+      let now = 1_000_000;
+      setWatchdogNow(() => now);
+      const a1 = agent("a1", "api_error");
+
+      await tick([a1]);
+      expect(getTracker("a1").apiErrorRetries).toBe(1);
+
+      // Any non-api_error state (here: waiting) should clear the slate.
+      now += API_ERROR_RETRY_INTERVAL_MS;
+      await tick([agent("a1", "waiting")]);
+      expect(getTracker("a1").apiErrorRetries).toBe(0);
+      expect(getTracker("a1").apiErrorLastAtMs).toBe(0);
     });
   });
 
@@ -1753,6 +1865,12 @@ describe("resolveWatchdogState — waiting + background shell override", () => {
     // "Compacting conversation" appearing in last 5 lines takes precedence.
     const output = "noise\nnoise\n⏵⏵ accept edits on · 1 shell\nmore\nCompacting conversation";
     expect(resolveWatchdogState(output, "waiting")).toBe("compacting");
+  });
+
+  test("api_error tmux marker overrides meta state", () => {
+    const output = "noise\n  ⎿  API Error: Stream idle timeout - partial response received";
+    expect(resolveWatchdogState(output, "waiting")).toBe("api_error");
+    expect(resolveWatchdogState(output, "running")).toBe("api_error");
   });
 });
 

@@ -74,7 +74,7 @@ These phrases MUST be the LAST thing you output. Put summaries or status updates
 
 ### Completion
 
-1. Commit your changes (`git add && git commit`)
+1. Commit your changes (`git add && git commit` — see "Writing Commit Messages" above for safe message handling)
 2. Verify your work with `ib diff` and `ib status`
 3. Write a summary of what you accomplished
 4. Say "I HAVE COMPLETED THE GOAL" as the final line

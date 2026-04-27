@@ -8,7 +8,7 @@ import { wrapSingleLine } from "./wrap";
 import { buildFolderItems } from "./folder-browser";
 import type { FolderItem } from "./folder-browser";
 import { RESET, BOLD, DIM, REVERSE, GREEN, DIM_GRAY } from "./colors";
-import { resolvePasteText } from "./clipboard";
+import { resolvePasteText, cancelPaste } from "./clipboard";
 import { TextBuffer, deleteWord } from "./text-buffer";
 
 export const TEXTAREA_VISIBLE_HEIGHT = 5;
@@ -135,16 +135,20 @@ export function handleDialogInput(ctx: DialogCtx, data: string): boolean {
     return true;
   }
 
-  // Escape: permissions-editor in input mode exits input mode first
+  // Escape: permissions-editor in input mode exits input mode first.
+  // Discard any in-progress chunked paste so its prefix can't leak.
   if (matchesKey(data, Key.escape) && dialog.type === "permissions-editor" && dialog.inputMode) {
+    cancelPaste();
     dialog.inputMode = false;
     dialog.inputValue = "";
     ctx.tui?.requestRender();
     return true;
   }
 
-  // Escape cancels any dialog
+  // Escape cancels any dialog. Discard any in-progress chunked bracketed paste
+  // so its buffered prefix can't leak into the next dialog or input field.
   if (matchesKey(data, Key.escape)) {
+    cancelPaste();
     ctx.closeDialog();
     return true;
   }

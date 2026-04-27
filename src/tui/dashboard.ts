@@ -65,6 +65,7 @@ import { FocusManager } from "./focus";
 import type { FocusTarget, SubFocus } from "./focus";
 import { SystemDashboardComponent } from "./system-dashboard";
 import { loadLayout, saveLayoutDebounced, cancelPendingSave, flushPendingSave, MIN_SIDEBAR, MAX_SIDEBAR, DEFAULT_TMUX_WIDTH } from "./layout";
+import { cancelPaste } from "./clipboard";
 import type { LayoutState } from "./layout";
 import { InputFieldComponent } from "./input-field";
 import { sendMessage, pauseAgent } from "../ib-commands";
@@ -1257,6 +1258,9 @@ export class DashboardComponent implements Component {
       // Input sub-focus: capture everything
       if (sf === "input") {
         if (matchesKey(data, Key.escape) || data === "\x1b") {
+          // Discard any in-progress chunked paste so its prefix can't leak
+          // into the next input context.
+          cancelPaste();
           this.inputField.clear();
           this.focusManager.setSubFocus("pane");
           this.tui?.requestRender();
@@ -1280,6 +1284,7 @@ export class DashboardComponent implements Component {
           return;
         }
         if (matchesKey(data, Key.escape) || data === "\x1b") {
+          cancelPaste();
           this.focusManager.setSubFocus("pane");
           this.tui?.requestRender();
           return;
@@ -1316,6 +1321,7 @@ export class DashboardComponent implements Component {
       // Input sub-focus: capture everything
       if (sf === "input") {
         if (matchesKey(data, Key.escape) || data === "\x1b") {
+          cancelPaste();
           this.coordinatorInputField.clear();
           this.focusManager.setSubFocus("pane");
           this.tui?.requestRender();
@@ -1339,6 +1345,7 @@ export class DashboardComponent implements Component {
           return;
         }
         if (matchesKey(data, Key.escape) || data === "\x1b") {
+          cancelPaste();
           this.focusManager.setSubFocus("pane");
           this.tui?.requestRender();
           return;
@@ -1373,6 +1380,7 @@ export class DashboardComponent implements Component {
       // Input sub-focus: capture everything
       if (sf === "input") {
         if (matchesKey(data, Key.escape) || data === "\x1b") {
+          cancelPaste();
           this.repoCoordinatorInputField.clear();
           this.focusManager.setSubFocus("pane");
           this.tui?.requestRender();
@@ -1396,6 +1404,7 @@ export class DashboardComponent implements Component {
           return;
         }
         if (matchesKey(data, Key.escape) || data === "\x1b") {
+          cancelPaste();
           this.focusManager.setSubFocus("pane");
           this.tui?.requestRender();
           return;

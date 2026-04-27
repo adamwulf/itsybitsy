@@ -1,5 +1,12 @@
-import { test, expect, describe } from "bun:test";
-import { isPasteData, extractBracketedPaste, insertTextIntoLines, resolvePasteText } from "./clipboard";
+import { test, expect, describe, beforeEach } from "bun:test";
+import {
+  isPasteData,
+  extractBracketedPaste,
+  insertTextIntoLines,
+  resolvePasteText,
+  resetPasteState,
+  isPasteInProgress,
+} from "./clipboard";
 
 describe("isPasteData", () => {
   test("single character is not paste", () => {
@@ -61,9 +68,16 @@ describe("extractBracketedPaste", () => {
 });
 
 describe("resolvePasteText", () => {
+  beforeEach(() => {
+    // Module-level paste state must be reset between tests so a leak from one
+    // test cannot poison the next.
+    resetPasteState();
+  });
+
   test("bracketed paste returns extracted text", () => {
     const cb = () => {};
     expect(resolvePasteText("\x1b[200~hello\x1b[201~", cb)).toBe("hello");
+    expect(isPasteInProgress()).toBe(false);
   });
 
   test("multi-char printable text returns the data", () => {
@@ -87,6 +101,102 @@ describe("resolvePasteText", () => {
     const result = resolvePasteText("\x16", cb);
     expect(result).toBeNull();
     // Async callback is triggered via readClipboard().then() — can't easily assert synchronously
+  });
+});
+
+describe("resolvePasteText (chunked bracketed paste)", () => {
+  beforeEach(() => {
+    resetPasteState();
+  });
+
+  test("paste split across two chunks assembles correctly", () => {
+    const delivered: string[] = [];
+    const cb = (text: string) => { delivered.push(text); };
+
+    // Chunk 1: start marker + partial content, no end marker.
+    const r1 = resolvePasteText("\x1b[200~hello", cb);
+    expect(r1).toBeNull();
+    expect(isPasteInProgress()).toBe(true);
+    expect(delivered).toEqual([]); // not delivered yet
+
+    // Chunk 2: rest of content + end marker.
+    const r2 = resolvePasteText("world\x1b[201~", cb);
+    expect(r2).toBeNull(); // chunked paste delivers via callback, not return value
+    expect(isPasteInProgress()).toBe(false);
+    expect(delivered).toEqual(["helloworld"]);
+  });
+
+  test("paste split across three chunks assembles correctly", () => {
+    const delivered: string[] = [];
+    const cb = (text: string) => { delivered.push(text); };
+
+    expect(resolvePasteText("\x1b[200~one ", cb)).toBeNull();
+    expect(isPasteInProgress()).toBe(true);
+    expect(resolvePasteText("two ", cb)).toBeNull();
+    expect(isPasteInProgress()).toBe(true);
+    expect(resolvePasteText("three\x1b[201~", cb)).toBeNull();
+    expect(isPasteInProgress()).toBe(false);
+    expect(delivered).toEqual(["one two three"]);
+  });
+
+  test("split paste preserves shell special characters", () => {
+    const delivered: string[] = [];
+    const cb = (text: string) => { delivered.push(text); };
+
+    // Chunk boundary in the middle of a `$(...)` expression.
+    expect(resolvePasteText("\x1b[200~$(echo ", cb)).toBeNull();
+    expect(resolvePasteText('"hi")\x1b[201~', cb)).toBeNull();
+    expect(delivered).toEqual(['$(echo "hi")']);
+  });
+
+  test("split paste preserves embedded newlines", () => {
+    const delivered: string[] = [];
+    const cb = (text: string) => { delivered.push(text); };
+
+    expect(resolvePasteText("\x1b[200~line1\nline", cb)).toBeNull();
+    expect(resolvePasteText("2\nline3\x1b[201~", cb)).toBeNull();
+    expect(delivered).toEqual(["line1\nline2\nline3"]);
+  });
+
+  test("trailing data after end marker is dropped (consistent with single-chunk)", () => {
+    const delivered: string[] = [];
+    const cb = (text: string) => { delivered.push(text); };
+
+    expect(resolvePasteText("\x1b[200~payload", cb)).toBeNull();
+    expect(resolvePasteText("done\x1b[201~trailing", cb)).toBeNull();
+    expect(delivered).toEqual(["payloaddone"]);
+  });
+
+  test("end marker arriving in the same chunk as start marker is single-chunk path", () => {
+    const delivered: string[] = [];
+    const cb = (text: string) => { delivered.push(text); };
+
+    const result = resolvePasteText("\x1b[200~complete\x1b[201~", cb);
+    expect(result).toBe("complete"); // returned synchronously
+    expect(delivered).toEqual([]); // callback NOT invoked
+    expect(isPasteInProgress()).toBe(false);
+  });
+
+  test("empty paste split where start marker is alone in first chunk", () => {
+    const delivered: string[] = [];
+    const cb = (text: string) => { delivered.push(text); };
+
+    expect(resolvePasteText("\x1b[200~", cb)).toBeNull();
+    expect(isPasteInProgress()).toBe(true);
+    expect(resolvePasteText("\x1b[201~", cb)).toBeNull();
+    expect(delivered).toEqual([""]);
+  });
+
+  test("continuation chunks containing escape codes mid-content are buffered verbatim", () => {
+    // A bracketed paste content can legitimately contain ESC bytes (e.g. pasted
+    // ANSI text). The buffering path must accept them — the only thing that
+    // ends a paste is the literal PASTE_END sequence.
+    const delivered: string[] = [];
+    const cb = (text: string) => { delivered.push(text); };
+
+    expect(resolvePasteText("\x1b[200~before-", cb)).toBeNull();
+    expect(resolvePasteText("\x1b[31m-after\x1b[201~", cb)).toBeNull();
+    expect(delivered).toEqual(["before-\x1b[31m-after"]);
   });
 });
 

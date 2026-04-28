@@ -210,11 +210,15 @@ export async function ensureSystemCoordinator(): Promise<string> {
   // Read coordinator model from config
   const config = await readConfig();
   const model = (config["coordinator.model"]?.value as string) ?? "opus";
+  const imessage = config["coordinator.imessage"]?.value === true;
 
   // Start Claude in interactive mode
+  const claudeCmd = imessage
+    ? `claude --model ${model} --channels plugin:imessage@claude-plugins-official`
+    : `claude --model ${model}`;
   await coordinatorSpawnCtx.run([
     "tmux", "send-keys", "-t", IB_COORDINATOR_SESSION,
-    `claude --model ${model}`, "Enter",
+    claudeCmd, "Enter",
   ]);
 
   // Wait for Claude to start up

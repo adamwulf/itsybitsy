@@ -1198,15 +1198,24 @@ export async function sendMessage(
   if (delay < 0.2) delay = 0.2;
   if (delay > 3.0) delay = 3.0;
 
-  // Send via tmux send-keys
-  const sendProc = sendSpawnCtx.runner(
-    ["tmux", "send-keys", "-t", tmuxSession, "-l", fullMessage],
-    { stdout: "pipe", stderr: "pipe" }
-  );
-  const sendStderr = await new Response(sendProc.stderr).text();
-  const sendExit = await sendProc.exited;
-  if (sendExit !== 0) {
-    return { ok: false, exitCode: sendExit, stdout: "", stderr: sendStderr.trim() };
+  // Send via tmux send-keys, chunked to avoid silent truncation when the
+  // recipient TUI cannot ingest a large -l payload fast enough.
+  const CHUNK_SIZE = 500;
+  const INTER_CHUNK_SLEEP_MS = 50;
+  const interChunkSleepMs = sendDelayOverrideMs !== null ? sendDelayOverrideMs : INTER_CHUNK_SLEEP_MS;
+  for (let i = 0; i < fullMessage.length; i += CHUNK_SIZE) {
+    const chunk = fullMessage.slice(i, i + CHUNK_SIZE);
+    const chunkProc = sendSpawnCtx.runner(
+      ["tmux", "send-keys", "-t", tmuxSession, "-l", chunk],
+      { stdout: "pipe", stderr: "pipe" }
+    );
+    const chunkStderr = await new Response(chunkProc.stderr).text();
+    const chunkExit = await chunkProc.exited;
+    if (chunkExit !== 0) {
+      return { ok: false, exitCode: chunkExit, stdout: "", stderr: chunkStderr.trim() };
+    }
+    const isLastChunk = i + CHUNK_SIZE >= fullMessage.length;
+    if (!isLastChunk && interChunkSleepMs > 0) await Bun.sleep(interChunkSleepMs);
   }
 
   // Sleep for calculated delay (skippable in tests)

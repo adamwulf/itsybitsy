@@ -168,6 +168,81 @@ describe("ib-commands", () => {
       expect(result.ok).toBe(false);
       expect(result.stderr).toContain("no tmux session");
     });
+
+    test("sends short message (< 500 chars) as a single chunk + Enter", async () => {
+      const agent = makeAgent("agent-abc", tempDir);
+      const msg = "x".repeat(499);
+      const result = await sendMessage(agent, msg, { cwd: "/" });
+
+      expect(result.ok).toBe(true);
+      const sendKeysCalls = spawnCalls.filter(
+        (c) => c[0] === "tmux" && c[1] === "send-keys" && c.includes("-l")
+      );
+      expect(sendKeysCalls.length).toBe(1);
+      expect(sendKeysCalls[0]![5]).toBe(msg);
+      // Last call must be Enter
+      const lastCall = spawnCalls[spawnCalls.length - 1]!;
+      expect(lastCall).toEqual(["tmux", "send-keys", "-t", "tmux-agent-abc", "Enter"]);
+    });
+
+    test("sends long message (1500 chars) as 3 ordered chunks + Enter", async () => {
+      const agent = makeAgent("agent-abc", tempDir);
+      // Distinguishable per-chunk content so we can verify ordering and slicing.
+      const part1 = "a".repeat(500);
+      const part2 = "b".repeat(500);
+      const part3 = "c".repeat(500);
+      const msg = part1 + part2 + part3;
+      const result = await sendMessage(agent, msg, { cwd: "/" });
+
+      expect(result.ok).toBe(true);
+
+      const sendKeysCalls = spawnCalls.filter(
+        (c) => c[0] === "tmux" && c[1] === "send-keys" && c.includes("-l")
+      );
+      expect(sendKeysCalls.length).toBe(3);
+      expect(sendKeysCalls[0]![5]).toBe(part1);
+      expect(sendKeysCalls[1]![5]).toBe(part2);
+      expect(sendKeysCalls[2]![5]).toBe(part3);
+
+      // Final call must be the Enter, after all chunks.
+      const lastCall = spawnCalls[spawnCalls.length - 1]!;
+      expect(lastCall).toEqual(["tmux", "send-keys", "-t", "tmux-agent-abc", "Enter"]);
+    });
+
+    test("returns error and does not send Enter when a chunk fails mid-stream", async () => {
+      let chunkCallCount = 0;
+      setSendSpawnRunner((cmd: string[]) => {
+        spawnCalls.push(cmd);
+        if (cmd[0] === "tmux" && cmd[1] === "send-keys" && cmd.includes("-l")) {
+          chunkCallCount++;
+          // Fail the second chunk.
+          if (chunkCallCount === 2) {
+            return makeSpawnResult(1, "", "tmux: send-keys failed");
+          }
+        }
+        return makeSpawnResult();
+      });
+
+      const agent = makeAgent("agent-abc", tempDir);
+      const msg = "a".repeat(500) + "b".repeat(500) + "c".repeat(500);
+      const result = await sendMessage(agent, msg, { cwd: "/" });
+
+      expect(result.ok).toBe(false);
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("tmux: send-keys failed");
+
+      // No Enter should be sent.
+      const enterCall = spawnCalls.find(
+        (c) => c[0] === "tmux" && c[1] === "send-keys" && c[c.length - 1] === "Enter"
+      );
+      expect(enterCall).toBeUndefined();
+
+      // Should have stopped after the failed chunk (no third chunk).
+      const chunkCalls = spawnCalls.filter(
+        (c) => c[0] === "tmux" && c[1] === "send-keys" && c.includes("-l")
+      );
+      expect(chunkCalls.length).toBe(2);
+    });
   });
 
   // newAgent tests are in the dedicated "newAgent (native)" describe block below

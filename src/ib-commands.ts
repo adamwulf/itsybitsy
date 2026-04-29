@@ -5,7 +5,7 @@
  */
 
 import { join, dirname, resolve, basename } from "path";
-import { readdir, chmod, rm, mkdir, stat } from "fs/promises";
+import { readdir, chmod, rm, mkdir, rename, stat } from "fs/promises";
 import { realpathSync } from "fs";
 import { homedir } from "node:os";
 import type { Agent, SpawnedBy } from "./agents";
@@ -42,6 +42,19 @@ export interface IbCommandResult {
   stderr: string;
 }
 
+
+/**
+ * Write meta.json atomically (write .tmp + rename). Mirrors the pattern in
+ * writeAgentState() — used during newAgent() to publish the initial meta.json
+ * before slow steps (worktree-add) so the dashboard does not flag the in-progress
+ * agent dir as orphaned.
+ */
+async function writeMetaJsonAtomic(agentDir: string, meta: Record<string, unknown>): Promise<void> {
+  const metaPath = join(agentDir, "meta.json");
+  const tmpPath = metaPath + ".tmp";
+  await Bun.write(tmpPath, JSON.stringify(meta, null, 2) + "\n");
+  await rename(tmpPath, metaPath);
+}
 
 /** Spawn context for kill/pause operations */
 export const killPauseSpawnCtx = new SpawnContext();
@@ -1521,10 +1534,10 @@ async function buildAgentSettings(
  * 8.  Max agents check
  * 9.  Generate agent ID (--name or agent-<8 hex chars>)
  * 10. Uniqueness check (dir + tmux session)
- * 11. Create agent directory
+ * 11. Create agent directory + write initial meta.json (state="creating")
  * 12. Create git worktree + branch (if worktree mode)
  * 13. Write settings.local.json in worktree
- * 14. Write meta.json
+ * 14. (formerly meta.json — now written in step 11 before slow worktree add)
  * 15. Write prompt.txt
  * 16. Write start.sh + exit-check.sh
  * 17. Init agent.log
@@ -1913,6 +1926,92 @@ export async function newAgent(
   // Working directory defaults to root repo
   let workPath = rootRepoPath;
 
+  // Compute fields needed for the early meta.json write below. These were
+  // previously computed just before the late meta.json write (post worktree-add),
+  // but slow worktree checkouts (60-90s on large repos) leave the agent dir
+  // without meta.json — the dashboard's readAllAgents() then flags it as an
+  // orphan. Writing meta.json with state='creating' before any slow step gives
+  // the dashboard something to render and avoids the orphan-detection race.
+  const sessionUuid = crypto.randomUUID();
+
+  // Normalize and validate spawned_by repo_path before writing to meta.json
+  if (spawnedBy) {
+    // Normalize: resolve symlinks so stored path matches registry's canonical form.
+    // realpathSync resolves symlinks; resolve() only normalizes .. and trailing slashes.
+    // Registry's addRepo stores resolve()-d paths, but the user may pass a symlinked path
+    // via --spawned-by-repo. realpathSync ensures consistency.
+    try {
+      spawnedBy.repo_path = realpathSync(spawnedBy.repo_path);
+    } catch {
+      // Path doesn't exist yet — fall back to resolve() normalization
+      spawnedBy.repo_path = resolve(spawnedBy.repo_path);
+    }
+  }
+
+  // If spawned_by wasn't auto-detected and we have a same-repo manager,
+  // set spawned_by to match the manager for consistency
+  if (!spawnedBy && manager) {
+    spawnedBy = {
+      agent_id: manager,
+      repo_path: rootRepoPath,
+    };
+  }
+
+  // Resolve and normalize allowedPaths from agent type
+  let resolvedAllowedPaths: string[] | undefined = undefined;
+  if (agentTypeDef.allowedPaths !== undefined) {
+    resolvedAllowedPaths = agentTypeDef.allowedPaths.map(p => {
+      // Expand ~ to home directory
+      let expanded: string;
+      if (p === "~") {
+        expanded = homedir();
+      } else if (p.startsWith("~/")) {
+        expanded = join(homedir(), p.slice(2));
+      } else {
+        expanded = p;
+      }
+      // Resolve to absolute path
+      expanded = resolve(expanded);
+      // Try to resolve symlinks, fall back to resolve() result if path doesn't exist
+      try {
+        return realpathSync(expanded);
+      } catch {
+        return expanded;
+      }
+    });
+  }
+
+  // Build the initial meta.json. Subsequent writes (start.sh setting claude_pid,
+  // watchdog spawn setting watchdog_pid, generate-summary setting summary, the
+  // post-worktree refresh below) all read-modify-write so they merge cleanly
+  // with these fields.
+  const createdAt = new Date();
+  const initialMetaJson: Record<string, unknown> = {
+    id,
+    session_id: sessionUuid,
+    tmux_session: tmuxSession,
+    prompt,
+    manager: manager || null,
+    created: createdAt.toISOString(),
+    created_epoch: Math.floor(createdAt.getTime() / 1000),
+    worktree: useWorktree,
+    worker: isLeafAgent,
+    agentType: typeName,
+    agentIcon: agentTypeDef.icon || undefined,
+    yolo: yoloMode,
+    model: model || null,
+    spawned_by: spawnedBy ?? null,
+    state: "creating",
+    state_updated_at: Math.floor(createdAt.getTime() / 1000),
+  };
+  if (coordinatorMode) {
+    initialMetaJson.coordinator = true;
+  }
+  if (resolvedAllowedPaths !== undefined) {
+    initialMetaJson.allowedPaths = resolvedAllowedPaths;
+  }
+  await timed("new-agent", "meta-write", () => writeMetaJsonAtomic(agentDir, initialMetaJson));
+
   // 12. Create git worktree if requested
   // Note: coordinator branch format retained for backward compatibility with
   // session-start.ts and health-check.ts, even though coordinators no longer use worktrees.
@@ -1973,6 +2072,10 @@ export async function newAgent(
     }
 
     const baseRef = manager ? `agent/${manager}` : "HEAD";
+    // Bracket-log the slow worktree-add. On large repos this can take 60-90s,
+    // and if the spawn process crashes or hangs, the LAST log line is what
+    // tells us where it died. The "completes" line below logs after.
+    await logSpawn(agentDir, spawnerAgentDir, id, `git worktree add starting: ${repoPath} -b ${branchName} ${baseRef}`);
     const worktreeResult = await timed("new-agent", "worktree-create", () =>
       newAgentSpawnCtx.run([
         "git", "-C", rootRepoPath, "worktree", "add", repoPath, "-b", branchName, baseRef,
@@ -2060,84 +2163,12 @@ export async function newAgent(
     } catch { /* ignore */ }
   }
 
-  // Generate UUID for Claude session
-  const sessionUuid = crypto.randomUUID();
-
-  // Normalize and validate spawned_by repo_path before writing to meta.json
-  if (spawnedBy) {
-    // Normalize: resolve symlinks so stored path matches registry's canonical form.
-    // realpathSync resolves symlinks; resolve() only normalizes .. and trailing slashes.
-    // Registry's addRepo stores resolve()-d paths, but the user may pass a symlinked path
-    // via --spawned-by-repo. realpathSync ensures consistency.
-    try {
-      spawnedBy.repo_path = realpathSync(spawnedBy.repo_path);
-    } catch {
-      // Path doesn't exist yet — fall back to resolve() normalization
-      spawnedBy.repo_path = resolve(spawnedBy.repo_path);
-    }
-  }
-
-  // If spawned_by wasn't auto-detected and we have a same-repo manager,
-  // set spawned_by to match the manager for consistency
-  if (!spawnedBy && manager) {
-    spawnedBy = {
-      agent_id: manager,
-      repo_path: rootRepoPath,
-    };
-  }
-
-  // 14. Resolve and normalize allowedPaths from agent type
-  let resolvedAllowedPaths: string[] | undefined = undefined;
-  if (agentTypeDef.allowedPaths !== undefined) {
-    resolvedAllowedPaths = agentTypeDef.allowedPaths.map(p => {
-      // Expand ~ to home directory
-      let expanded: string;
-      if (p === "~") {
-        expanded = homedir();
-      } else if (p.startsWith("~/")) {
-        expanded = join(homedir(), p.slice(2));
-      } else {
-        expanded = p;
-      }
-      // Resolve to absolute path
-      expanded = resolve(expanded);
-      // Try to resolve symlinks, fall back to resolve() result if path doesn't exist
-      try {
-        return realpathSync(expanded);
-      } catch {
-        return expanded;
-      }
-    });
-  }
-
-  // 15. Write meta.json
-  const now = new Date();
-  const metaJson: Record<string, unknown> = {
-    id,
-    session_id: sessionUuid,
-    tmux_session: tmuxSession,
-    prompt,
-    manager: manager || null,
-    created: now.toISOString(),
-    created_epoch: Math.floor(now.getTime() / 1000),
-    worktree: useWorktree,
-    worker: isLeafAgent,
-    agentType: typeName,
-    agentIcon: agentTypeDef.icon || undefined,
-    yolo: yoloMode,
-    model: model || null,
-    spawned_by: spawnedBy ?? null,
-  };
-  if (coordinatorMode) {
-    metaJson.coordinator = true;
-  }
-  // Only write allowedPaths if it's defined (preserves [] for strict mode)
-  if (resolvedAllowedPaths !== undefined) {
-    metaJson.allowedPaths = resolvedAllowedPaths;
-  }
-  await timed("new-agent", "meta-write", () =>
-    Bun.write(join(agentDir, "meta.json"), JSON.stringify(metaJson, null, 2) + "\n")
-  );
+  // 14. meta.json was written early (before mkdir worktree) so the dashboard
+  // does not flag the in-progress agent dir as orphaned during a slow
+  // git worktree add. See the "Compute fields needed for the early meta.json
+  // write" block above. Subsequent writers (start.sh → claude_pid, watchdog
+  // spawn → watchdog_pid, generate-summary → summary, hook-status → state)
+  // do read-modify-write so they merge cleanly with the early fields.
 
   // Log agent creation
   if (manager) {
@@ -2337,6 +2368,9 @@ ${qStartExitScript}
   // Start tmux session — use saved layout width so it matches the dashboard pane
   const absStartScript = join(agentDir, "start.sh");
   const newTmuxWidth = await getSavedTmuxWidth();
+  // Bracket-log the tmux session creation so a hang here is identifiable from
+  // the agent.log alone (the "starting" line is the last entry on hang).
+  await logSpawn(agentDir, spawnerAgentDir, id, `tmux new-session starting: -s ${tmuxSession} -x ${newTmuxWidth}`);
   const tmuxResult = await timed("new-agent", "tmux-spawn", () =>
     newAgentSpawnCtx.run([
       "tmux", "new-session", "-d", "-x", String(newTmuxWidth), "-s", tmuxSession, "-c", workPath, shellQuote(absStartScript),
@@ -2352,6 +2386,7 @@ ${qStartExitScript}
   }
   // The two set-option calls and the has-session verify all depend on the
   // session existing (above), but are independent of each other — run together.
+  await logSpawn(agentDir, spawnerAgentDir, id, `tmux has-session verify starting: -t ${tmuxSession}`);
   const [, , verifyResult] = await Promise.all([
     newAgentSpawnCtx.run(["tmux", "set-option", "-w", "-t", tmuxSession, "history-limit", "50000"]),
     newAgentSpawnCtx.run(["tmux", "set-option", "-w", "-t", tmuxSession, "remain-on-exit", "on"]),

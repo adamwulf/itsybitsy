@@ -22,6 +22,8 @@ import {
   detectAgentStates,
   CREATING_GRACE_PERIOD_MS,
   isRecentlyCreatedDirCtx,
+  classifySpawnLogCtx,
+  SPAWN_IN_PROGRESS_WINDOW_MS,
   resetListTmuxSessionsCache,
   readAgentTransient,
   writeAgentTransient,
@@ -493,6 +495,104 @@ describe("readRepoAgents", () => {
     const { agents, errors } = await readRepoAgents(tempDir, "test-repo");
     expect(agents.length).toBe(0);
     expect(errors.length).toBe(0); // Error suppressed during grace period
+  });
+
+  test("renders in-progress spawn (recent [spawn] start, no completion) as creating, not orphan", async () => {
+    // Fix 3: when meta.json is missing but agent.log shows a recent [spawn]
+    // start with no terminating "spawn OK" / "spawn FAILED", the dashboard
+    // should surface this as a creating agent, not an orphan.
+    isRecentlyCreatedDirCtx.set(async () => false); // past 6s grace
+    classifySpawnLogCtx.set(async () => ({
+      kind: "in_progress",
+      startEpochMs: Date.now() - 30_000, // 30s ago — well within window
+    }));
+
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-spawning");
+    await mkdir(agentDir, { recursive: true });
+    // No meta.json — but a `[spawn] start` line in agent.log indicates active spawn.
+    await Bun.write(
+      join(agentDir, "agent.log"),
+      "[2026-04-29 12:00:00] [spawn] start id=agent-spawning repo=/x worktree=true\n",
+    );
+
+    const { agents, errors } = await readRepoAgents(tempDir, "test-repo");
+    expect(errors.length).toBe(0);
+    expect(agents.length).toBe(1);
+    expect(agents[0]!.id).toBe("agent-spawning");
+    expect(agents[0]!.state).toBe("creating");
+    expect(agents[0]!.meta.state).toBe("creating");
+
+    classifySpawnLogCtx.reset();
+  });
+
+  test("flags orphan when [spawn] start is stale (older than the in-progress window)", async () => {
+    isRecentlyCreatedDirCtx.set(async () => false);
+    classifySpawnLogCtx.set(async () => ({ kind: "orphan" }));
+
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-stale");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(
+      join(agentDir, "agent.log"),
+      "[2026-04-29 09:00:00] [spawn] start id=agent-stale repo=/x worktree=true\n",
+    );
+
+    const { agents, errors } = await readRepoAgents(tempDir, "test-repo");
+    expect(agents.length).toBe(0);
+    expect(errors.length).toBe(1);
+    expect(errors[0]!.error).toContain("Missing");
+
+    classifySpawnLogCtx.reset();
+  });
+
+  test("flags orphan when [spawn] start is followed by 'spawn FAILED' (terminated, not in-progress)", async () => {
+    isRecentlyCreatedDirCtx.set(async () => false);
+    classifySpawnLogCtx.set(async () => ({ kind: "orphan" }));
+
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-failed");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(
+      join(agentDir, "agent.log"),
+      "[2026-04-29 12:00:00] [spawn] start id=agent-failed repo=/x worktree=true\n" +
+      "[2026-04-29 12:00:01] [spawn] spawn FAILED: could not create worktree\n",
+    );
+
+    const { agents, errors } = await readRepoAgents(tempDir, "test-repo");
+    expect(agents.length).toBe(0);
+    expect(errors.length).toBe(1);
+
+    classifySpawnLogCtx.reset();
+  });
+
+  test("classifySpawnLog default impl: detects recent in-progress spawn from real agent.log", async () => {
+    // Exercises the actual classifier (not the injected mock) to verify it
+    // parses timestamps and the start-without-terminator condition correctly.
+    isRecentlyCreatedDirCtx.set(async () => false);
+
+    // Use a timestamp 1 minute ago (within the 5min in-progress window) in
+    // local time, formatted exactly like logAgent() does.
+    const oneMinAgo = new Date(Date.now() - 60_000);
+    const pad = (n: number) => String(n).padStart(2, "0");
+    const ts =
+      `${oneMinAgo.getFullYear()}-${pad(oneMinAgo.getMonth() + 1)}-${pad(oneMinAgo.getDate())} ` +
+      `${pad(oneMinAgo.getHours())}:${pad(oneMinAgo.getMinutes())}:${pad(oneMinAgo.getSeconds())}`;
+
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-real");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(
+      join(agentDir, "agent.log"),
+      `[${ts}] [spawn] start id=agent-real repo=/x worktree=true\n` +
+      `[${ts}] [spawn] git worktree prune → exit=0\n`,
+    );
+
+    const { agents, errors } = await readRepoAgents(tempDir, "test-repo");
+    expect(errors.length).toBe(0);
+    expect(agents.length).toBe(1);
+    expect(agents[0]!.state).toBe("creating");
+  });
+
+  test("SPAWN_IN_PROGRESS_WINDOW_MS is reasonable for slow worktree-add", () => {
+    // Sanity: window must comfortably exceed observed slow checkouts.
+    expect(SPAWN_IN_PROGRESS_WINDOW_MS).toBeGreaterThanOrEqual(2 * 60 * 1000);
   });
 });
 

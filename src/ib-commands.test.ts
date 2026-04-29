@@ -2472,6 +2472,64 @@ describe("newAgent (native)", () => {
     expect(meta.worker).toBe(true);
   });
 
+  test("writes meta.json with state='creating' BEFORE git worktree add runs", async () => {
+    // Verifies Fix 1: the early meta.json write happens before any slow step.
+    // On large repos, `git worktree add` can take 60-90s. Without the early
+    // write, the dashboard's readAllAgents() flagged the in-progress dir as
+    // an orphan. With the early write, meta.json exists with state='creating'
+    // by the time any spawn (including worktree add) is invoked.
+    let metaAtWorktreeAdd: { exists: boolean; state?: string; id?: string } | null = null;
+
+    const fs = require("fs");
+    const customSpawn = (cmd: string[], _opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
+      const cmdStr = cmd.join(" ");
+      // Snapshot meta.json state at the moment worktree add is invoked.
+      if (cmdStr.includes("worktree add") && metaAtWorktreeAdd === null) {
+        const metaPath = join(agentsDir, "test-early-meta", "meta.json");
+        try {
+          const raw = fs.readFileSync(metaPath, "utf8");
+          const data = JSON.parse(raw);
+          metaAtWorktreeAdd = { exists: true, state: data.state, id: data.id };
+        } catch {
+          metaAtWorktreeAdd = { exists: false };
+        }
+      }
+      // Delegate to the standard mock for the actual response.
+      return mockSpawnRunner()(cmd, _opts);
+    };
+    setNewAgentSpawnRunner(customSpawn);
+    lifecycleSpawnCtx.set(customSpawn);
+
+    const result = await callNewAgent("slow checkout", { name: "test-early-meta" });
+    expect(result.ok).toBe(true);
+
+    expect(metaAtWorktreeAdd).not.toBeNull();
+    expect(metaAtWorktreeAdd!.exists).toBe(true);
+    expect(metaAtWorktreeAdd!.state).toBe("creating");
+    expect(metaAtWorktreeAdd!.id).toBe("test-early-meta");
+  });
+
+  test("logs 'starting' lines before slow spawn steps (worktree add, tmux new-session)", async () => {
+    // Verifies Fix 2: bracket-logging — if a spawn hangs, the LAST log line
+    // identifies which step hung. Each slow step gets a "starting" log line
+    // before the operation runs, plus the existing post-completion line.
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("test bracket logs", { name: "test-bracket-logs" });
+    expect(result.ok).toBe(true);
+
+    const log = await Bun.file(join(agentsDir, "test-bracket-logs", "agent.log")).text();
+    expect(log).toContain("[spawn] git worktree add starting:");
+    expect(log).toContain("[spawn] tmux new-session starting:");
+    expect(log).toContain("[spawn] tmux has-session verify starting:");
+
+    // Sanity check: the "starting" line for worktree add appears BEFORE the
+    // post-completion exit line in the log.
+    const startingIdx = log.indexOf("git worktree add starting:");
+    const completedIdx = log.indexOf("git worktree add /");
+    expect(startingIdx).toBeGreaterThan(-1);
+    expect(completedIdx).toBeGreaterThan(startingIdx);
+  });
+
   test("stores agentType in meta.json when --type flag is used", async () => {
     setNewAgentSpawnRunner(mockSpawnRunner());
     const result = await callNewAgent("test custom type", { name: "test-type-flag", type: "worker" });

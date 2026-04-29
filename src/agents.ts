@@ -11,7 +11,7 @@ import { captureTmuxOutput, listTmuxSessions } from "./tmux-poller";
 import { InjectionContext } from "./types";
 
 /** States that can be written to meta.json */
-export type MetaState = "running" | "waiting" | "complete" | "stopped";
+export type MetaState = "creating" | "running" | "waiting" | "complete" | "stopped";
 
 /** Cross-repo spawner provenance — records which agent created this one */
 export interface SpawnedBy {
@@ -115,6 +115,80 @@ async function _isRecentlyCreatedDir(dirPath: string): Promise<boolean> {
 }
 
 export const isRecentlyCreatedDirCtx = new InjectionContext<(dirPath: string) => Promise<boolean>>(_isRecentlyCreatedDir);
+
+/** Window during which a `[spawn] start` log line without a terminating
+ * `spawn OK` / `spawn FAILED` is treated as an in-progress spawn rather than
+ * an orphaned agent dir. Tuned for slow `git worktree add` on large repos
+ * (60–90s checkouts), with headroom. */
+export const SPAWN_IN_PROGRESS_WINDOW_MS = 5 * 60 * 1000;
+
+/**
+ * Result of inspecting agent.log to classify a missing-meta.json directory.
+ * - "in_progress": [spawn] start within window, no terminating line → render as creating
+ * - "orphan": no start line, or stale, or terminated → existing orphan behavior
+ */
+export type SpawnLogStatus =
+  | { kind: "in_progress"; startEpochMs: number }
+  | { kind: "orphan" };
+
+/**
+ * Parse an agent.log to determine whether a spawn is currently in progress.
+ * Used by readAgentsFromDir() to differentiate slow-but-running spawns (which
+ * the dashboard should render as state='creating') from truly orphaned dirs.
+ *
+ * Looks for the most recent `[spawn] start` line and checks that no
+ * `spawn OK` or `spawn FAILED` line appears after it within the window.
+ */
+async function _classifySpawnLog(agentDir: string): Promise<SpawnLogStatus> {
+  const logPath = join(agentDir, "agent.log");
+  let text: string;
+  try {
+    const file = Bun.file(logPath);
+    if (!(await file.exists())) return { kind: "orphan" };
+    text = await file.text();
+  } catch {
+    return { kind: "orphan" };
+  }
+
+  // Lines look like:  [2026-04-28 15:45:57] [spawn] start id=agent-xxx ...
+  // Walk from the end so we find the most recent start.
+  const lines = text.split("\n");
+  let startIdx = -1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (lines[i]!.includes("[spawn] start ")) {
+      startIdx = i;
+      break;
+    }
+  }
+  if (startIdx < 0) return { kind: "orphan" };
+
+  // Any terminator AFTER the start line means the spawn is no longer in progress.
+  for (let i = startIdx + 1; i < lines.length; i++) {
+    const line = lines[i]!;
+    if (line.includes("spawn OK") || line.includes("spawn FAILED")) {
+      return { kind: "orphan" };
+    }
+  }
+
+  // Parse timestamp from the start line: [YYYY-MM-DD HH:MM:SS]
+  const startLine = lines[startIdx]!;
+  const tsMatch = startLine.match(/^\[(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})\]/);
+  if (!tsMatch) return { kind: "orphan" };
+  // logAgent() writes timestamps in local time, so parse as local.
+  const [, y, mo, d, h, mi, s] = tsMatch;
+  const startEpochMs = new Date(
+    Number(y), Number(mo) - 1, Number(d),
+    Number(h), Number(mi), Number(s),
+  ).getTime();
+  if (!Number.isFinite(startEpochMs)) return { kind: "orphan" };
+
+  if (nowMsCtx.fn() - startEpochMs > SPAWN_IN_PROGRESS_WINDOW_MS) {
+    return { kind: "orphan" };
+  }
+  return { kind: "in_progress", startEpochMs };
+}
+
+export const classifySpawnLogCtx = new InjectionContext<(agentDir: string) => Promise<SpawnLogStatus>>(_classifySpawnLog);
 
 /**
  * Write agent state to meta.json atomically (write .tmp, rename over original).
@@ -463,6 +537,47 @@ async function readAgentsFromDir(
       const agentDir = join(dir, entry.name);
       const { meta, error } = await readAgentMeta(agentDir);
       if (error) {
+        // Defense-in-depth: when meta.json is missing on a non-archived dir,
+        // check agent.log for an in-progress [spawn] start line. A slow
+        // `git worktree add` (large repo, 60-90s) leaves the dir without
+        // meta.json briefly. After Fix 1 (early meta.json write) this is
+        // rare, but still possible if the early write itself failed.
+        if (!archived) {
+          const status = await classifySpawnLogCtx.fn(agentDir);
+          if (status.kind === "in_progress") {
+            // Synthesize a placeholder agent in the "creating" state so the
+            // dashboard renders the in-progress spawn instead of treating
+            // the dir as orphaned. Fields not knowable yet are left empty.
+            const startEpochSec = Math.floor(status.startEpochMs / 1000);
+            const placeholderMeta: AgentMeta = {
+              id: entry.name,
+              session_id: "",
+              tmux_session: "",
+              prompt: "",
+              manager: null,
+              created: new Date(status.startEpochMs).toISOString(),
+              created_epoch: startEpochSec,
+              worktree: false,
+              worker: false,
+              yolo: false,
+              model: "",
+              claude_pid: "",
+              state: "creating",
+              state_updated_at: startEpochSec,
+            };
+            agents.push({
+              id: entry.name,
+              repoPath,
+              repoName,
+              meta: placeholderMeta,
+              state: "creating",
+              age: computeAge(startEpochSec),
+              archived: false,
+              children: [],
+            });
+            continue;
+          }
+        }
         // Suppress errors for newly-created agent directories — during creation,
         // the directory exists but meta.json may not be written yet.
         const isNewDir = await isRecentlyCreatedDirCtx.fn(agentDir);

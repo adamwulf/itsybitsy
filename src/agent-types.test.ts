@@ -354,10 +354,11 @@ describe("initAgentTypes", () => {
   test("creates directory and writes all embedded files when missing", async () => {
     const created = await initAgentTypes();
 
-    expect(created.sort()).toEqual(["_all.md", "_non_coordinator.md", "coordinator.md", "manager.md", "worker.md"]);
+    expect(created.sort()).toEqual(["_all.md", "_non_coordinator.md", "coordinator.md", "manager.md", "system.md", "worker.md"]);
     expect(await agentTypeExists("manager")).toBe(true);
     expect(await agentTypeExists("worker")).toBe(true);
     expect(await agentTypeExists("coordinator")).toBe(true);
+    expect(await agentTypeExists("system")).toBe(true);
     expect(await agentTypeExists("_all")).toBe(true);
     expect(await agentTypeExists("_non_coordinator")).toBe(true);
   });
@@ -387,6 +388,42 @@ describe("initAgentTypes", () => {
     await initAgentTypes();
     const created = await initAgentTypes();
     expect(created).toEqual([]);
+  });
+
+  test("system.md is populated with spawnable: false", async () => {
+    await initAgentTypes();
+
+    expect(await agentTypeExists("system")).toBe(true);
+
+    const systemType = await loadAgentType("system");
+    expect(systemType.name).toBe("system");
+    expect(systemType.spawnable).toBe(false);
+  });
+});
+
+describe("ensureAgentTypesDir: system layer", () => {
+  const originalHome = process.env.HOME;
+  let tempHome: string;
+
+  beforeEach(async () => {
+    tempHome = await mkdtemp(join(tmpdir(), "itsybitsy-system-layer-"));
+    process.env.HOME = tempHome;
+  });
+
+  afterEach(async () => {
+    process.env.HOME = originalHome;
+    await rm(tempHome, { recursive: true, force: true });
+  });
+
+  test("auto-populates system.md alongside other layer files", async () => {
+    await ensureAgentTypesDir();
+
+    expect(await agentTypeExists("system")).toBe(true);
+    expect(await agentTypeExists("_all")).toBe(true);
+    expect(await agentTypeExists("_non_coordinator")).toBe(true);
+
+    const systemType = await loadAgentType("system");
+    expect(systemType.spawnable).toBe(false);
   });
 });
 

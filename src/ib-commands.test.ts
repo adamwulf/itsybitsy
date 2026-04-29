@@ -1284,6 +1284,177 @@ describe("resumeAgent (native)", () => {
     expect(newSessionCall).toBeUndefined();
   });
 
+  // ----- Per-repo coordinator: R triggers a full reset -----
+  //
+  // When meta.coordinator === true, resumeAgent must NOT take the regular
+  // resume-session path. Instead, it tears down the existing coordinator
+  // (nukeAgent) and respawns it (newAgent). These tests verify the routing
+  // and teardown half. The respawn half goes through newAgent which has its
+  // own dedicated tests — here we just confirm the coordinator was nuked
+  // and resumeAgent did NOT generate a resume.sh script (which would be the
+  // tell that it took the wrong branch).
+
+  describe("coordinator reset path", () => {
+    let originalHome: string | undefined;
+    let coordTempDir: string;
+
+    beforeEach(async () => {
+      // newAgent needs a fake HOME with an agent-types directory and a
+      // .ittybitty/repo-id file. Set those up so the respawn half of
+      // resetCoordinator can run far enough to verify routing.
+      coordTempDir = tempDir;
+      await mkdir(join(coordTempDir, ".ittybitty"), { recursive: true });
+      await Bun.write(join(coordTempDir, ".ittybitty", "repo-id"), "abcd1234\n");
+
+      originalHome = process.env.HOME;
+      const fakeHome = join(coordTempDir, "home");
+      await mkdir(join(fakeHome, ".itsybitsy"), { recursive: true });
+      process.env.HOME = fakeHome;
+      await (await import("./agent-types")).ensureAgentTypesDir();
+
+      // Isolate user config too — newAgent reads it for default model.
+      const userConfigPath = join(coordTempDir, "ib-coord-config.json");
+      setUserConfigPath(userConfigPath);
+      await Bun.write(userConfigPath, JSON.stringify({ model: "sonnet" }, null, 2));
+
+      // newAgent uses its own spawn context; route everything through the
+      // shared spawnCalls log so tests can introspect.
+      setNewAgentSpawnRunner((cmd: string[]) => {
+        spawnCalls.push(cmd);
+        const cmdStr = cmd.join(" ");
+        if (cmdStr.includes("tmux has-session")) return makeSpawnResult(1);
+        if (cmdStr.includes("--git-common-dir")) return makeSpawnResult(0, ".git");
+        if (cmdStr.includes("--show-toplevel")) return makeSpawnResult(0, coordTempDir);
+        if (cmdStr.includes("--git-dir")) return makeSpawnResult(0, ".git");
+        if (cmdStr.includes("capture-pane")) return makeSpawnResult(0, "Claude Code v1.0");
+        return makeSpawnResult(0);
+      });
+    });
+
+    afterEach(async () => {
+      resetNewAgentSpawnRunner();
+      resetUserConfigPath();
+      if (originalHome === undefined) {
+        delete process.env.HOME;
+      } else {
+        process.env.HOME = originalHome;
+      }
+    });
+
+    test("on coordinator: nukes the original agent dir and does NOT generate resume.sh", async () => {
+      const repoBasename = coordTempDir.split("/").pop()!;
+      const coordDir = join(coordTempDir, ".ittybitty", "agents", repoBasename);
+      await mkdir(coordDir, { recursive: true });
+      await Bun.write(join(coordDir, "meta.json"), JSON.stringify({
+        id: repoBasename,
+        tmux_session: `tmux-${repoBasename}`,
+        session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        coordinator: true,
+        agentType: "coordinator",
+      }));
+
+      const agent = _makeAgent({
+        id: repoBasename,
+        repoPath: coordTempDir,
+        repoName: "test",
+        state: "running",
+        meta: {
+          session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+          tmux_session: `tmux-${repoBasename}`,
+          coordinator: true,
+        } as any,
+      });
+
+      await resumeAgent(agent);
+
+      // Old meta.json must be gone — proves nukeAgent ran.
+      // (resetCoordinator removes the dir before respawning, and the respawn
+      // creates a *fresh* meta.json with new content. Whether it succeeded
+      // or failed during respawn, the original session_id stamp is gone.)
+      const newMeta = await Bun.file(join(coordDir, "meta.json")).json().catch(() => null);
+      if (newMeta) {
+        // Respawn succeeded — meta.json should NOT carry the old session_id
+        // (newAgent generates a fresh sessionUuid).
+        expect(newMeta.session_id).not.toBe("a1b2c3d4-e5f6-7890-abcd-ef1234567890");
+      }
+
+      // resume.sh must NOT have been written — the coordinator path skips
+      // the regular resume-session generator.
+      const resumeShExists = await Bun.file(join(coordDir, "resume.sh")).exists().catch(() => false);
+      expect(resumeShExists).toBe(false);
+    });
+
+    test("on coordinator: returns success with 'Reset' in stdout when respawn succeeds", async () => {
+      const repoBasename = coordTempDir.split("/").pop()!;
+      const coordDir = join(coordTempDir, ".ittybitty", "agents", repoBasename);
+      await mkdir(coordDir, { recursive: true });
+      await Bun.write(join(coordDir, "meta.json"), JSON.stringify({
+        id: repoBasename,
+        tmux_session: `tmux-${repoBasename}`,
+        session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        coordinator: true,
+        agentType: "coordinator",
+      }));
+
+      const agent = _makeAgent({
+        id: repoBasename,
+        repoPath: coordTempDir,
+        repoName: "test",
+        state: "running",
+        meta: {
+          session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+          tmux_session: `tmux-${repoBasename}`,
+          coordinator: true,
+        } as any,
+      });
+
+      const result = await resumeAgent(agent);
+
+      // If respawn succeeded, stdout should reflect the reset.
+      // If it failed (test environment limitations), stderr should at
+      // least mention "respawn" — proving the routing happened, not the
+      // regular resume path (which would say "session_id" or similar).
+      if (result.ok) {
+        expect(result.stdout).toContain("Reset coordinator");
+      } else {
+        expect(result.stderr).toContain("respawn");
+      }
+    });
+
+    test("non-coordinator resume is unchanged (still writes resume.sh)", async () => {
+      // Regression guard: a regular agent (no coordinator flag) must still
+      // go through the resume-session path.
+      const agentDir = join(coordTempDir, ".ittybitty", "agents", "agent-noncoord");
+      await mkdir(join(agentDir, "repo"), { recursive: true });
+      await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+        id: "agent-noncoord",
+        tmux_session: "tmux-agent-noncoord",
+        session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      }));
+
+      const agent = _makeAgent({
+        id: "agent-noncoord",
+        repoPath: coordTempDir,
+        repoName: "test",
+        state: "stopped",
+        meta: {
+          session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+          tmux_session: "tmux-agent-noncoord",
+          // coordinator deliberately omitted (or false)
+        } as any,
+      });
+
+      const result = await resumeAgent(agent);
+
+      expect(result.ok).toBe(true);
+      // Regular resume path: resume.sh exists, agent dir intact.
+      const resumeShExists = await Bun.file(join(agentDir, "resume.sh")).exists();
+      expect(resumeShExists).toBe(true);
+      const metaExists = await Bun.file(join(agentDir, "meta.json")).exists();
+      expect(metaExists).toBe(true);
+    });
+  });
+
 });
 
 describe("mergeAgent (native)", () => {

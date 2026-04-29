@@ -290,6 +290,42 @@ export async function nukeAllAgents(repoPath: string): Promise<IbCommandResult> 
 }
 
 /**
+ * Reset (kill + respawn) a per-repo coordinator.
+ *
+ * Tears down the existing coordinator and immediately spawns a fresh one.
+ * The new coordinator's settings.local.json is rebuilt from current sources
+ * (hardcoded constants + _all.md + coordinator.md), so any edits to those
+ * files are picked up. Hooks block is rebuilt fresh too. Agent ID stays the
+ * same (it's keyed to the repo basename).
+ *
+ * Caller must have already verified `agent.meta.coordinator === true`.
+ */
+async function resetCoordinator(agent: Agent): Promise<IbCommandResult> {
+  // Tear down the existing coordinator: kill tmux session, claude process,
+  // watchdog, and remove the agent dir. Note: nukeAgent walks descendants too,
+  // but per-repo coordinators are top-level by design (SPEC §12.2.3) so the
+  // descendants list is just [agent.id].
+  const nukeResult = await nukeAgent(agent);
+  if (!nukeResult.ok) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Reset failed during teardown: ${nukeResult.stderr || nukeResult.stdout}` };
+  }
+
+  // Spawn a fresh coordinator. newAgent's coordinator path generates the
+  // agent ID from the repo basename, so it lands at the same ID we just
+  // tore down.
+  const spawnResult = await newAgent(
+    agent.repoPath,
+    "You are the per-repo coordinator. Await instructions.",
+    { type: "coordinator" },
+  );
+  if (!spawnResult.ok) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Reset failed during respawn: ${spawnResult.stderr || spawnResult.stdout}` };
+  }
+
+  return { ok: true, exitCode: 0, stdout: `Reset coordinator ${agent.id}`, stderr: "" };
+}
+
+/**
  * Native resume implementation — replaces `ib resume <id>`.
  *
  * Resume eligibility is determined by tmux liveness, NOT by `meta.state`.
@@ -321,6 +357,16 @@ export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
   const dirExists = await Bun.file(join(agentDir, "meta.json")).exists().catch(() => false);
   if (!dirExists) {
     return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' not found` };
+  }
+
+  // Per-repo coordinators: R triggers a full reset rather than a session resume.
+  // The coordinator's settings.local.json is assembled from three sources at
+  // spawn time (hardcoded constants, _all.md, coordinator.md), and its hooks
+  // template is rebuilt then. Resuming the existing session would reuse stale
+  // permissions and hooks, so we tear the coordinator down and respawn it
+  // — fresher, simpler, and matches the user's mental model of "R to reset".
+  if (agent.meta.coordinator === true) {
+    return await resetCoordinator(agent);
   }
 
   // Resume is allowed when no live tmux session exists for the agent. We don't
@@ -385,15 +431,10 @@ export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
     claudeArgs = claudeArgs ? `${claudeArgs} --model ${model}` : `--model ${model}`;
   }
 
-  // Per-repo coordinator: reuse the isolated settings file the coordinator was
-  // spawned with so permissions + hooks keep pointing at the agent dir (not the repo).
-  if (agent.meta.coordinator === true) {
-    const coordSettingsPath = join(agentDir, ".claude", "settings.local.json");
-    if (await Bun.file(coordSettingsPath).exists()) {
-      const coordSettingsArg = shellQuote(coordSettingsPath);
-      claudeArgs = claudeArgs ? `${claudeArgs} --settings ${coordSettingsArg}` : `--settings ${coordSettingsArg}`;
-    }
-  }
+  // Note: per-repo coordinators never reach this point — the early branch at
+  // the top of resumeAgent routes them to resetCoordinator instead. So no
+  // need to re-thread --settings to the (no-longer-relevant) saved coordinator
+  // settings file here.
 
   // Validate paths for shell script interpolation
   if (!isValidShellPath(agentDir)) {

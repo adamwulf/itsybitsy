@@ -131,6 +131,28 @@ async function tmuxSessionExists(): Promise<boolean> {
 }
 
 /**
+ * Poll the ib-coordinator tmux session until Claude's UI is ready.
+ * Mirrors the readiness pattern used by autoAcceptWorkspaceTrustForNewAgent in
+ * ib-commands.ts: capture the pane every 500ms and look for the Claude logo
+ * (`Claude Code v`) or a previously-injected user task marker (`[USER TASK]`).
+ *
+ * Returns true once the readiness marker appears, false if the poll exhausts
+ * its attempt budget (~15s).
+ */
+export async function waitForCoordinatorReady(): Promise<boolean> {
+  const maxAttempts = 30;
+  for (let i = 0; i < maxAttempts; i++) {
+    await sleepFn(500);
+    const output = await captureTmuxOutput(IB_COORDINATOR_SESSION, 200);
+    if (output === null) continue;
+    if (output.includes("Claude Code v") || output.includes("[USER TASK]")) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Ensure ~/.itsybitsy/ exists and is a git repo.
  * Creates directory, runs git init, writes .gitignore with '*'.
  */
@@ -225,14 +247,20 @@ export async function ensureSystemCoordinator(): Promise<string> {
     claudeCmd, "Enter",
   ]);
 
-  // Wait for Claude to start up
-  await sleepFn(3000);
+  // Wait for Claude's UI to be ready before sending the prompt. A flat sleep
+  // races slow startups: the prompt text gets pasted but the Enter key is
+  // swallowed before the input box becomes active, leaving the prompt
+  // unsubmitted.
+  await waitForCoordinatorReady();
 
   // Send the initial prompt (sanitized) via send-keys -l then Enter
   const sanitizedPrompt = sanitizeTmuxInput(SYSTEM_COORDINATOR_PROMPT);
   await coordinatorSpawnCtx.run([
     "tmux", "send-keys", "-t", IB_COORDINATOR_SESSION, "-l", sanitizedPrompt,
   ]);
+  // Brief delay between paste and Enter so the input box doesn't debounce
+  // the paste and drop the Enter (mirrors sendMessage in ib-commands.ts).
+  await sleepFn(500);
   await coordinatorSpawnCtx.run([
     "tmux", "send-keys", "-t", IB_COORDINATOR_SESSION, "Enter",
   ]);

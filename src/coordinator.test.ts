@@ -248,10 +248,18 @@ describe("ensureSystemCoordinator", () => {
     tmpDir = await mkdtemp(join(tmpdir(), "coord-test-"));
     setCoordinatorHome(tmpDir);
     setCoordinatorSleepFn(async () => {}); // No-op sleep for tests
+    // Stub tmuxSpawnCtx so waitForCoordinatorReady's capture returns
+    // a "ready" marker on the first poll. Individual tests can override.
+    tmuxSpawnCtx.set((_cmd: string[], _opts?: any) => ({
+      stdout: mockStream("Claude Code v1.0.0"),
+      stderr: emptyStream(),
+      exited: Promise.resolve(0),
+    }));
   });
 
   afterEach(async () => {
     coordinatorSpawnCtx.reset();
+    tmuxSpawnCtx.reset();
     resetCoordinatorHome();
     resetCoordinatorSleepFn();
     await rm(tmpDir, { recursive: true, force: true });
@@ -468,6 +476,99 @@ describe("ensureSystemCoordinator", () => {
       }
     }
   });
+
+  test("does not send prompt until 'Claude Code v' appears in tmux output", async () => {
+    // Simulate a slow startup: capture-pane returns blank for the first 3
+    // calls (i.e. Claude isn't ready yet) and only on the 4th call returns
+    // the readiness marker. Verify that the order of operations is:
+    //   1. tmux capture-pane probes happen until ready
+    //   2. Only after ready does the prompt send-keys -l fire
+    //   3. The Enter follows the prompt
+    const events: string[] = [];
+    let capturePolls = 0;
+
+    coordinatorSpawnCtx.set((cmd: string[], _opts?: any) => {
+      const cmdStr = cmd.join(" ");
+      if (cmdStr.includes("has-session")) {
+        return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(1) };
+      }
+      if (cmd.includes("send-keys")) {
+        if (cmd.includes("-l")) {
+          events.push("send-prompt");
+        } else if (cmd[cmd.length - 1] === "Enter" && cmd.some((a) => a.startsWith("claude --model"))) {
+          events.push("launch-claude");
+        } else if (cmd[cmd.length - 1] === "Enter") {
+          events.push("send-enter");
+        }
+      }
+      return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(0) };
+    });
+
+    // captureTmuxOutput uses tmuxSpawnCtx — override the default beforeEach
+    // stub for this test so the readiness marker only appears after several
+    // polls.
+    tmuxSpawnCtx.set((cmd: string[], _opts?: any) => {
+      if (cmd[0] === "tmux" && cmd[1] === "capture-pane") {
+        capturePolls++;
+        events.push(`poll-${capturePolls}`);
+        const out = capturePolls < 4 ? "(loading)" : "Claude Code v1.0.0";
+        return {
+          stdout: mockStream(out),
+          stderr: emptyStream(),
+          exited: Promise.resolve(0),
+        };
+      }
+      return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(0) };
+    });
+
+    await ensureSystemCoordinator();
+
+    // Claude must be launched first
+    const launchIdx = events.indexOf("launch-claude");
+    const promptIdx = events.indexOf("send-prompt");
+    const enterIdx = events.indexOf("send-enter");
+    expect(launchIdx).toBeGreaterThanOrEqual(0);
+    expect(promptIdx).toBeGreaterThan(launchIdx);
+    expect(enterIdx).toBeGreaterThan(promptIdx);
+
+    // The first 3 polls happen BEFORE the prompt is sent (Claude not ready).
+    // The 4th poll returns "Claude Code v" and the prompt fires after.
+    expect(events.indexOf("poll-1")).toBeLessThan(promptIdx);
+    expect(events.indexOf("poll-2")).toBeLessThan(promptIdx);
+    expect(events.indexOf("poll-3")).toBeLessThan(promptIdx);
+    expect(events.indexOf("poll-4")).toBeLessThan(promptIdx);
+    // No additional polls after readiness — the loop returned true.
+    expect(capturePolls).toBe(4);
+  });
+
+  test("waitForCoordinatorReady recognises [USER TASK] marker", async () => {
+    // Verifies the alternative readiness marker (used when a task has already
+    // been injected by a previous wake-up) is also accepted.
+    let polls = 0;
+    coordinatorSpawnCtx.set((cmd: string[], _opts?: any) => {
+      const cmdStr = cmd.join(" ");
+      if (cmdStr.includes("has-session")) {
+        return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(1) };
+      }
+      return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(0) };
+    });
+    tmuxSpawnCtx.set((cmd: string[], _opts?: any) => {
+      if (cmd[0] === "tmux" && cmd[1] === "capture-pane") {
+        polls++;
+        return {
+          stdout: mockStream("[USER TASK] some prior task"),
+          stderr: emptyStream(),
+          exited: Promise.resolve(0),
+        };
+      }
+      return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(0) };
+    });
+
+    await ensureSystemCoordinator();
+
+    // First poll already returns ready, so we should only see one poll.
+    expect(polls).toBe(1);
+  });
 });
 
 // -------------------------------------------------------------------
@@ -643,10 +744,16 @@ describe("restartSystemCoordinator", () => {
     tmpDir = await mkdtemp(join(tmpdir(), "coord-restart-"));
     setCoordinatorHome(tmpDir);
     setCoordinatorSleepFn(async () => {});
+    tmuxSpawnCtx.set((_cmd: string[], _opts?: any) => ({
+      stdout: mockStream("Claude Code v1.0.0"),
+      stderr: emptyStream(),
+      exited: Promise.resolve(0),
+    }));
   });
 
   afterEach(async () => {
     coordinatorSpawnCtx.reset();
+    tmuxSpawnCtx.reset();
     resetCoordinatorHome();
     resetCoordinatorSleepFn();
     await rm(tmpDir, { recursive: true, force: true });

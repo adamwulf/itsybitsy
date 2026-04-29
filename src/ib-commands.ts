@@ -302,9 +302,10 @@ export async function nukeAllAgents(repoPath: string): Promise<IbCommandResult> 
  */
 async function resetCoordinator(agent: Agent): Promise<IbCommandResult> {
   // Tear down the existing coordinator: kill tmux session, claude process,
-  // watchdog, and remove the agent dir. Note: nukeAgent walks descendants too,
-  // but per-repo coordinators are top-level by design (SPEC §12.2.3) so the
-  // descendants list is just [agent.id].
+  // watchdog, and remove the agent dir. nukeAgent recurses through descendants,
+  // so any workers the coordinator has spawned will be torn down too — that is
+  // intentional. A coordinator reset abandons its in-flight work; the new
+  // coordinator starts with a clean slate and no inherited child agents.
   const nukeResult = await nukeAgent(agent);
   if (!nukeResult.ok) {
     return { ok: false, exitCode: 1, stdout: "", stderr: `Reset failed during teardown: ${nukeResult.stderr || nukeResult.stdout}` };

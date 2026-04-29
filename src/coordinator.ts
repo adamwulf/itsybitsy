@@ -91,19 +91,63 @@ const SYSTEM_COORDINATOR_DENY = [
 
 /**
  * Build the settings.local.json content for the system coordinator.
- * The system coordinator's permissions are fixed — per-repo coordinator
- * permissions live in ~/.itsybitsy/agent-types/coordinator.md frontmatter
- * and are not applied to the system coordinator.
+ *
+ * Layer merge: the hardcoded SYSTEM_COORDINATOR_ALLOW/DENY constants are the
+ * floor. The `_all.md` and `system.md` agent-type layer files contribute
+ * additional allow/deny entries via their frontmatter; any allow entry that
+ * appears in SYSTEM_COORDINATOR_DENY is silently dropped so a layer can never
+ * override the hardcoded denies. Deny lists are unioned. The result is
+ * deduplicated via Set.
+ *
+ * Per-repo coordinator permissions live in
+ * ~/.itsybitsy/agent-types/coordinator.md and are not read here.
  */
-export function buildSystemCoordinatorSettings(): {
+export async function buildSystemCoordinatorSettings(): Promise<{
   permissions: { allow: string[]; deny: string[] };
-} {
-  return {
-    permissions: {
-      allow: [...SYSTEM_COORDINATOR_ALLOW],
-      deny: [...SYSTEM_COORDINATOR_DENY],
-    },
-  };
+}> {
+  // Ensure the embedded layer files exist on disk
+  try {
+    await ensureAgentTypesDir();
+  } catch {
+    // If this fails, fall through — loadAgentType will throw and we'll skip the layer
+  }
+
+  // Load _all.md permissions layer (applies to every agent, including system coordinator)
+  let allAllow: string[] = [];
+  let allDeny: string[] = [];
+  try {
+    const allLayer = await loadAgentType("_all");
+    allAllow = allLayer.permissions?.allow ?? [];
+    allDeny = allLayer.permissions?.deny ?? [];
+  } catch (err) {
+    console.error(`Warning: failed to load _all agent type layer: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  // Load system.md permissions layer (system-coordinator-specific overrides)
+  let systemAllow: string[] = [];
+  let systemDeny: string[] = [];
+  try {
+    const systemLayer = await loadAgentType("system");
+    systemAllow = systemLayer.permissions?.allow ?? [];
+    systemDeny = systemLayer.permissions?.deny ?? [];
+  } catch (err) {
+    console.error(`Warning: failed to load system agent type layer: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  const hardcodedDenySet = new Set(SYSTEM_COORDINATOR_DENY);
+
+  // Filter out layer allow entries that conflict with hardcoded deny
+  const filteredAllAllow = allAllow.filter((entry) => !hardcodedDenySet.has(entry));
+  const filteredSystemAllow = systemAllow.filter((entry) => !hardcodedDenySet.has(entry));
+
+  const finalAllow = [
+    ...new Set([...SYSTEM_COORDINATOR_ALLOW, ...filteredAllAllow, ...filteredSystemAllow]),
+  ];
+  const finalDeny = [
+    ...new Set([...SYSTEM_COORDINATOR_DENY, ...allDeny, ...systemDeny]),
+  ];
+
+  return { permissions: { allow: finalAllow, deny: finalDeny } };
 }
 
 /**
@@ -185,7 +229,7 @@ async function writeCoordinatorFiles(): Promise<void> {
   const claudeDir = join(home, ".claude");
   await mkdir(claudeDir, { recursive: true });
   const settingsPath = join(claudeDir, "settings.local.json");
-  const settings = buildSystemCoordinatorSettings();
+  const settings = await buildSystemCoordinatorSettings();
   await Bun.write(settingsPath, JSON.stringify(settings, null, 2) + "\n");
 
   // Write coordinator-prompt.txt
@@ -434,12 +478,12 @@ const PER_REPO_COORDINATOR_DENY = [
  * Coordinators can read the codebase and run ib commands, but cannot write code.
  * See SPEC §12.2.4 for the full specification.
  *
- * Layer merge: the `_all.md` agent-type file's frontmatter permissions are
- * appended to the hardcoded allow list, but any entries that appear in the
- * hardcoded deny list are silently dropped. `_all.md` deny entries are
- * appended to the hardcoded deny list. Coordinator-specific permissions
- * live in ~/.itsybitsy/agent-types/coordinator.md frontmatter and are not
- * read here — they're applied at spawn time in `newAgent()`.
+ * Layer merge: the hardcoded PER_REPO_COORDINATOR_ALLOW/DENY constants are the
+ * floor. The `_all.md` and `coordinator.md` agent-type layer files contribute
+ * additional allow/deny entries via their frontmatter; any allow entry that
+ * appears in PER_REPO_COORDINATOR_DENY is silently dropped so a layer can
+ * never override the hardcoded denies. Deny lists are unioned. The result is
+ * deduplicated via Set.
  *
  * Note: `_non_coordinator.md` is intentionally NOT merged — per-repo
  * coordinators are coordinators.
@@ -447,14 +491,14 @@ const PER_REPO_COORDINATOR_DENY = [
 export async function buildPerRepoCoordinatorSettings(): Promise<{
   permissions: { allow: string[]; deny: string[] };
 }> {
-  // Ensure the embedded _all.md layer exists on disk
+  // Ensure the embedded layer files exist on disk
   try {
     await ensureAgentTypesDir();
   } catch {
     // If this fails, fall through — loadAgentType will throw and we'll skip the layer
   }
 
-  // Load _all.md permissions layer (replaces the former config.permissions.all.* keys)
+  // Load _all.md permissions layer (applies to every agent)
   let allAllow: string[] = [];
   let allDeny: string[] = [];
   try {
@@ -465,15 +509,29 @@ export async function buildPerRepoCoordinatorSettings(): Promise<{
     console.error(`Warning: failed to load _all agent type layer: ${err instanceof Error ? err.message : String(err)}`);
   }
 
+  // Load coordinator.md permissions layer (per-repo coordinator-specific permissions)
+  let coordAllow: string[] = [];
+  let coordDeny: string[] = [];
+  try {
+    const coordLayer = await loadAgentType("coordinator");
+    coordAllow = coordLayer.permissions?.allow ?? [];
+    coordDeny = coordLayer.permissions?.deny ?? [];
+  } catch (err) {
+    console.error(`Warning: failed to load coordinator agent type layer: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
   const hardcodedDenySet = new Set(PER_REPO_COORDINATOR_DENY);
 
-  // Filter out _all.md allow entries that conflict with hardcoded deny
-  const filteredLayerAllow = allAllow.filter(
-    (entry) => !hardcodedDenySet.has(entry)
-  );
+  // Filter out layer allow entries that conflict with hardcoded deny
+  const filteredAllAllow = allAllow.filter((entry) => !hardcodedDenySet.has(entry));
+  const filteredCoordAllow = coordAllow.filter((entry) => !hardcodedDenySet.has(entry));
 
-  const finalAllow = [...new Set([...PER_REPO_COORDINATOR_ALLOW, ...filteredLayerAllow])];
-  const finalDeny = [...new Set([...PER_REPO_COORDINATOR_DENY, ...allDeny])];
+  const finalAllow = [
+    ...new Set([...PER_REPO_COORDINATOR_ALLOW, ...filteredAllAllow, ...filteredCoordAllow]),
+  ];
+  const finalDeny = [
+    ...new Set([...PER_REPO_COORDINATOR_DENY, ...allDeny, ...coordDeny]),
+  ];
 
   return { permissions: { allow: finalAllow, deny: finalDeny } };
 }

@@ -9,6 +9,7 @@ import { Glob } from "bun";
 import managerMd from '../docs/agent-types/manager.md' with { type: 'text' };
 import workerMd from '../docs/agent-types/worker.md' with { type: 'text' };
 import coordinatorMd from '../docs/agent-types/coordinator.md' with { type: 'text' };
+import systemLayerMd from '../docs/agent-types/system.md' with { type: 'text' };
 import allLayerMd from '../docs/agent-types/_all.md' with { type: 'text' };
 import nonCoordinatorLayerMd from '../docs/agent-types/_non_coordinator.md' with { type: 'text' };
 
@@ -16,6 +17,7 @@ const EMBEDDED_TYPES: Record<string, string> = {
   'manager': managerMd,
   'worker': workerMd,
   'coordinator': coordinatorMd,
+  'system': systemLayerMd,
   '_all': allLayerMd,
   '_non_coordinator': nonCoordinatorLayerMd,
 };

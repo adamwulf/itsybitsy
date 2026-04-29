@@ -1252,12 +1252,23 @@ describe("DashboardComponent dialog and action handlers", () => {
 
   // Relies on "worker" sorting immediately after "manager" in the default types list,
   // so a single Space press from the default focus advances the selection from manager to worker.
+  // Isolates process.env.HOME so the cycle reads only the embedded layer files
+  // (developer-customized ~/.itsybitsy/agent-types/ would otherwise inject extra
+  // spawnable types between manager and worker).
   test("new-agent form: cycling from manager to worker creates agent with worker meta field", async () => {
     const newAgentTempDir = await mkdtemp(join(tmpdir(), "ib-na-test-"));
     await mkdir(join(newAgentTempDir, ".ittybitty"), { recursive: true });
     await Bun.write(join(newAgentTempDir, ".ittybitty", "repo-id"), "abcd1234\n");
     setUserConfigPath(join(newAgentTempDir, "config.json"));
     await Bun.write(join(newAgentTempDir, "config.json"), JSON.stringify({ model: "sonnet" }));
+
+    const tempHome = await mkdtemp(join(tmpdir(), "ib-na-home-"));
+    const originalHome = process.env.HOME;
+    process.env.HOME = tempHome;
+    // Populate the temp HOME with embedded defaults so listSpawnableTypeNamesSync
+    // returns exactly [coordinator, manager, worker] (system / _all / _non_coordinator
+    // are filtered out as spawnable: false).
+    await (await import("../agent-types")).ensureAgentTypesDir();
 
     const spawnCalls: string[] = [];
     const mockSpawn = (cmd: string[]): SpawnResult => {
@@ -1317,7 +1328,9 @@ describe("DashboardComponent dialog and action handlers", () => {
     resetNewAgentSpawnRunner();
     lifecycleSpawnCtx.reset();
     resetUserConfigPath();
+    process.env.HOME = originalHome;
     await rm(newAgentTempDir, { recursive: true, force: true });
+    await rm(tempHome, { recursive: true, force: true });
   });
 
   test("new-agent form: Name field passes --name flag", async () => {

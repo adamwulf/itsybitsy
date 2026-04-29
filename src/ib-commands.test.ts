@@ -3144,6 +3144,13 @@ describe("newAgent (native)", () => {
     expect(result.stderr.toLowerCase()).toContain("not spawnable");
   });
 
+  test("rejects spawning a non-spawnable type (system)", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("task", { name: "test-bad3", type: "system" });
+    expect(result.ok).toBe(false);
+    expect(result.stderr.toLowerCase()).toContain("not spawnable");
+  });
+
   test("allowTools flag is included in start.sh", async () => {
     setNewAgentSpawnRunner(mockSpawnRunner());
     await callNewAgent("task", { name: "test-allow", allowTools: "Read,Write" });

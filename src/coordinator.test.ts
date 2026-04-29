@@ -73,25 +73,44 @@ describe("SYSTEM_COORDINATOR_PROMPT", () => {
 });
 
 describe("buildSystemCoordinatorSettings", () => {
-  test("returns permissions object with allow and deny", () => {
-    const settings = buildSystemCoordinatorSettings();
+  // Isolate HOME so these tests read the embedded `_all.md` / `system.md`
+  // layers rather than the developer's customized files. Without this, any
+  // extra entry the user has added locally leaks into the test assertions.
+  const originalHome = process.env.HOME;
+  let tempHome: string;
+
+  beforeEach(async () => {
+    tempHome = await mkdtemp(join(tmpdir(), "sys-coord-settings-"));
+    process.env.HOME = tempHome;
+    // Populate with embedded defaults (including _all.md and system.md)
+    // so loadAgentType works and returns the unmodified layers.
+    await (await import("./agent-types")).ensureAgentTypesDir();
+  });
+
+  afterEach(async () => {
+    process.env.HOME = originalHome;
+    await rm(tempHome, { recursive: true, force: true });
+  });
+
+  test("returns permissions object with allow and deny", async () => {
+    const settings = await buildSystemCoordinatorSettings();
     expect(settings).toHaveProperty("permissions");
     expect(settings.permissions).toHaveProperty("allow");
     expect(settings.permissions).toHaveProperty("deny");
   });
 
-  test("allows Bash(ib:*) and ToolSearch", () => {
-    const settings = buildSystemCoordinatorSettings();
+  test("allows Bash(ib:*) and ToolSearch", async () => {
+    const settings = await buildSystemCoordinatorSettings();
     expect(settings.permissions.allow).toEqual(["Bash(ib:*)", "ToolSearch"]);
   });
 
-  test("does not deny unqualified Bash (would remove tool entirely)", () => {
-    const settings = buildSystemCoordinatorSettings();
+  test("does not deny unqualified Bash (would remove tool entirely)", async () => {
+    const settings = await buildSystemCoordinatorSettings();
     expect(settings.permissions.deny).not.toContain("Bash");
   });
 
-  test("denies all file access tools", () => {
-    const settings = buildSystemCoordinatorSettings();
+  test("denies all file access tools", async () => {
+    const settings = await buildSystemCoordinatorSettings();
     const deny = settings.permissions.deny;
     expect(deny).toContain("Read");
     expect(deny).toContain("Write");
@@ -102,23 +121,23 @@ describe("buildSystemCoordinatorSettings", () => {
     expect(deny).toContain("LS");
   });
 
-  test("denies web access tools", () => {
-    const settings = buildSystemCoordinatorSettings();
+  test("denies web access tools", async () => {
+    const settings = await buildSystemCoordinatorSettings();
     const deny = settings.permissions.deny;
     expect(deny).toContain("WebFetch");
     expect(deny).toContain("WebSearch");
   });
 
-  test("denies agent/task spawning tools", () => {
-    const settings = buildSystemCoordinatorSettings();
+  test("denies agent/task spawning tools", async () => {
+    const settings = await buildSystemCoordinatorSettings();
     const deny = settings.permissions.deny;
     expect(deny).toContain("Task");
     expect(deny).toContain("TaskOutput");
     expect(deny).toContain("Agent");
   });
 
-  test("denies other restricted tools", () => {
-    const settings = buildSystemCoordinatorSettings();
+  test("denies other restricted tools", async () => {
+    const settings = await buildSystemCoordinatorSettings();
     const deny = settings.permissions.deny;
     expect(deny).toContain("NotebookEdit");
     expect(deny).toContain("KillShell");
@@ -126,18 +145,122 @@ describe("buildSystemCoordinatorSettings", () => {
     expect(deny).toContain("ExitPlanMode");
   });
 
-  test("deny list has exactly 17 entries", () => {
-    const settings = buildSystemCoordinatorSettings();
+  test("deny list has exactly 16 entries (embedded layers add nothing)", async () => {
+    const settings = await buildSystemCoordinatorSettings();
     expect(settings.permissions.deny).toHaveLength(16);
   });
 
-  test("returns fresh arrays on each call (no shared mutation)", () => {
-    const a = buildSystemCoordinatorSettings();
-    const b = buildSystemCoordinatorSettings();
+  test("returns fresh arrays on each call (no shared mutation)", async () => {
+    const a = await buildSystemCoordinatorSettings();
+    const b = await buildSystemCoordinatorSettings();
     expect(a.permissions.allow).not.toBe(b.permissions.allow);
     expect(a.permissions.deny).not.toBe(b.permissions.deny);
     a.permissions.allow.push("extra");
     expect(b.permissions.allow).not.toContain("extra");
+  });
+
+  test("merges system.md allow entries into final allow list", async () => {
+    // Edit ~/.itsybitsy/agent-types/system.md to add a custom permission
+    const systemPath = join(tempHome, ".itsybitsy", "agent-types", "system.md");
+    await Bun.write(
+      systemPath,
+      `---
+name: system
+description: System coordinator layer (permissions only)
+spawnable: false
+permissions:
+  allow:
+    - "Bash(echo:*)"
+  deny: []
+---
+`,
+    );
+    const settings = await buildSystemCoordinatorSettings();
+    expect(settings.permissions.allow).toContain("Bash(echo:*)");
+    // Hardcoded floor still present
+    expect(settings.permissions.allow).toContain("Bash(ib:*)");
+    expect(settings.permissions.allow).toContain("ToolSearch");
+  });
+
+  test("merges _all.md allow entries into final allow list", async () => {
+    const allPath = join(tempHome, ".itsybitsy", "agent-types", "_all.md");
+    await Bun.write(
+      allPath,
+      `---
+name: _all
+description: Permissions and prompt prefix applied to every agent
+spawnable: false
+permissions:
+  allow:
+    - "Bash(date:*)"
+  deny: []
+---
+`,
+    );
+    const settings = await buildSystemCoordinatorSettings();
+    expect(settings.permissions.allow).toContain("Bash(date:*)");
+  });
+
+  test("merges system.md deny entries into final deny list", async () => {
+    const systemPath = join(tempHome, ".itsybitsy", "agent-types", "system.md");
+    await Bun.write(
+      systemPath,
+      `---
+name: system
+description: System coordinator layer (permissions only)
+spawnable: false
+permissions:
+  allow: []
+  deny:
+    - SomeCustomTool
+---
+`,
+    );
+    const settings = await buildSystemCoordinatorSettings();
+    expect(settings.permissions.deny).toContain("SomeCustomTool");
+    // Hardcoded floor still present
+    expect(settings.permissions.deny).toContain("Read");
+  });
+
+  test("silently drops system.md allow entry that conflicts with hardcoded deny", async () => {
+    // Read is in SYSTEM_COORDINATOR_DENY, so a layer that tries to allow it must be dropped
+    const systemPath = join(tempHome, ".itsybitsy", "agent-types", "system.md");
+    await Bun.write(
+      systemPath,
+      `---
+name: system
+description: System coordinator layer (permissions only)
+spawnable: false
+permissions:
+  allow:
+    - Read
+  deny: []
+---
+`,
+    );
+    const settings = await buildSystemCoordinatorSettings();
+    expect(settings.permissions.deny).toContain("Read");
+    expect(settings.permissions.allow).not.toContain("Read");
+  });
+
+  test("silently drops _all.md allow entry that conflicts with hardcoded deny", async () => {
+    const allPath = join(tempHome, ".itsybitsy", "agent-types", "_all.md");
+    await Bun.write(
+      allPath,
+      `---
+name: _all
+description: Permissions and prompt prefix applied to every agent
+spawnable: false
+permissions:
+  allow:
+    - Write
+  deny: []
+---
+`,
+    );
+    const settings = await buildSystemCoordinatorSettings();
+    expect(settings.permissions.deny).toContain("Write");
+    expect(settings.permissions.allow).not.toContain("Write");
   });
 });
 
@@ -243,10 +366,17 @@ function createCommandRouter(handlers: Record<string, { stdout?: string; exitCod
 // -------------------------------------------------------------------
 describe("ensureSystemCoordinator", () => {
   let tmpDir: string;
+  let typesHome: string;
+  const originalHome = process.env.HOME;
 
   beforeEach(async () => {
     tmpDir = await mkdtemp(join(tmpdir(), "coord-test-"));
     setCoordinatorHome(tmpDir);
+    // Isolate HOME for agent-types loading so buildSystemCoordinatorSettings
+    // reads the embedded `_all.md`/`system.md` layers, not the developer's
+    // customized ones (which would leak extra allow entries into the assertions).
+    typesHome = await mkdtemp(join(tmpdir(), "coord-types-home-"));
+    process.env.HOME = typesHome;
     setCoordinatorSleepFn(async () => {}); // No-op sleep for tests
     // Stub tmuxSpawnCtx so waitForCoordinatorReady's capture returns
     // a "ready" marker on the first poll. Individual tests can override.
@@ -262,7 +392,9 @@ describe("ensureSystemCoordinator", () => {
     tmuxSpawnCtx.reset();
     resetCoordinatorHome();
     resetCoordinatorSleepFn();
+    process.env.HOME = originalHome;
     await rm(tmpDir, { recursive: true, force: true });
+    await rm(typesHome, { recursive: true, force: true });
   });
 
   test("returns session name when session already exists", async () => {
@@ -1100,6 +1232,79 @@ describe("buildPerRepoCoordinatorSettings", () => {
     // Write is in hardcoded deny, so adding it to permissions.all.allow should be dropped.
     // (permissions.coordinator.* is removed; coordinator-specific permissions now live in
     // ~/.itsybitsy/agent-types/coordinator.md frontmatter.)
+    const settings = await buildPerRepoCoordinatorSettings();
+    expect(settings.permissions.deny).toContain("Write");
+    expect(settings.permissions.allow).not.toContain("Write");
+  });
+
+  test("merges coordinator.md allow entries into final allow list", async () => {
+    // Edit ~/.itsybitsy/agent-types/coordinator.md to add a custom allow entry.
+    const coordPath = join(tempHome, ".itsybitsy", "agent-types", "coordinator.md");
+    await Bun.write(
+      coordPath,
+      `---
+name: coordinator
+description: Read-only coordinator that manages agents without writing code
+canSpawnChildren: true
+icon: ◇
+instructionStyle: coordinator
+permissions:
+  allow:
+    - "Bash(echo:*)"
+  deny:
+    - Write
+    - Edit
+---
+`,
+    );
+    const settings = await buildPerRepoCoordinatorSettings();
+    expect(settings.permissions.allow).toContain("Bash(echo:*)");
+    // Hardcoded floor still present
+    expect(settings.permissions.allow).toContain("Bash(ib:*)");
+  });
+
+  test("merges coordinator.md deny entries into final deny list", async () => {
+    const coordPath = join(tempHome, ".itsybitsy", "agent-types", "coordinator.md");
+    await Bun.write(
+      coordPath,
+      `---
+name: coordinator
+description: Read-only coordinator that manages agents without writing code
+canSpawnChildren: true
+icon: ◇
+instructionStyle: coordinator
+permissions:
+  allow: []
+  deny:
+    - SomeCustomTool
+---
+`,
+    );
+    const settings = await buildPerRepoCoordinatorSettings();
+    expect(settings.permissions.deny).toContain("SomeCustomTool");
+    // Hardcoded floor still present
+    expect(settings.permissions.deny).toContain("Write");
+  });
+
+  test("silently drops coordinator.md allow entry that conflicts with hardcoded deny", async () => {
+    // Write is in PER_REPO_COORDINATOR_DENY; a coordinator.md that tries to allow it
+    // must be silently dropped from the final allow list.
+    const coordPath = join(tempHome, ".itsybitsy", "agent-types", "coordinator.md");
+    await Bun.write(
+      coordPath,
+      `---
+name: coordinator
+description: Read-only coordinator that manages agents without writing code
+canSpawnChildren: true
+icon: ◇
+instructionStyle: coordinator
+permissions:
+  allow:
+    - Write
+  deny: []
+---
+`,
+    );
     const settings = await buildPerRepoCoordinatorSettings();
     expect(settings.permissions.deny).toContain("Write");
     expect(settings.permissions.allow).not.toContain("Write");

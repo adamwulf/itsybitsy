@@ -270,7 +270,7 @@ export function handleResume(ctx: ActionCtx) {
     return;
   }
 
-  // Repo header selected: spawn or resume per-repo coordinator
+  // Repo header selected: spawn or reset per-repo coordinator
   const repoHeader = ctx.agentTree.selectedRepoHeader;
   if (!ctx.agentTree.selectedAgent && repoHeader) {
     const repo = ctx.repos.find((r) => repoDisplayName(r) === repoHeader);
@@ -278,15 +278,15 @@ export function handleResume(ctx: ActionCtx) {
     ctx.executeAndRefresh(async () => {
       const coordStatus = await checkCoordinatorExists(repo.path);
       if (coordStatus.exists) {
-        // Coordinator exists — find and resume it
-        // Coordinators are filtered out of flatList, so search the full agent list
+        // Coordinator exists — full reset (kill + respawn). Allowed regardless
+        // of state: a running coordinator with stale permissions/hooks is the
+        // primary case this command is for. resumeAgent() detects coordinators
+        // and routes to the reset path.
         const agent = (ctx.watcher?.lastAgents ?? [])
           .find(a => a.id === coordStatus.agentId);
-        if (agent && (agent.state === "stopped" || agent.state === "complete")) {
+        if (agent) {
           const result = await resumeAgent(agent);
-          ctx.setNotice(result.ok ? `Resumed coordinator ${agent.id}` : `Resume failed: ${result.stderr || result.stdout}`);
-        } else if (agent) {
-          ctx.setNotice(`Coordinator ${agent.id} is already ${agent.state}`);
+          ctx.setNotice(result.ok ? `Reset coordinator ${agent.id}` : `Reset failed: ${result.stderr || result.stdout}`);
         } else {
           ctx.setNotice(`Coordinator ${coordStatus.agentId} not found in agent tree`);
         }

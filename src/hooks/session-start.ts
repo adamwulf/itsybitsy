@@ -5,6 +5,7 @@
 import { join, basename } from "path";
 import { AGENT_CWD_PATTERN } from "./shared";
 import { loadAgentType, listSpawnableAgentTypesSync } from "../agent-types";
+import { writeAgentState } from "../agents";
 
 export type SessionRole = "primary" | "manager" | "worker" | "coordinator";
 
@@ -670,13 +671,15 @@ export async function hookSessionStart(rawStdin?: string, agentIdArg?: string): 
 
   // Detect role - read meta.json from filesystem if in an agent directory
   const match = AGENT_CWD_PATTERN.exec(cwd);
-  let metaJson: { id?: string; manager?: string | null; worker?: boolean; coordinator?: boolean; agentType?: string; allowedPaths?: string[]; spawned_by?: { agent_id: string; repo_path: string } } | undefined;
+  let metaJson: { id?: string; manager?: string | null; worker?: boolean; coordinator?: boolean; agentType?: string; allowedPaths?: string[]; spawned_by?: { agent_id: string; repo_path: string }; state?: string } | undefined;
+  let agentDirForState: string | undefined;
 
   if (match) {
     const agentId = match[1]!;
     const ittybittyIdx = cwd.indexOf("/.ittybitty/agents/");
     const rootRepoPath = cwd.substring(0, ittybittyIdx);
     const agentDir = join(rootRepoPath, ".ittybitty", "agents", agentId);
+    agentDirForState = agentDir;
     try {
       const metaFile = Bun.file(join(agentDir, "meta.json"));
       if (await metaFile.exists()) {
@@ -689,6 +692,7 @@ export async function hookSessionStart(rawStdin?: string, agentIdArg?: string): 
     // Non-worktree agent (e.g., coordinator): CWD is the repo root, not a worktree path.
     // The agent ID is passed as a command argument. Look for meta.json in the repo's agents dir.
     const agentDir = join(cwd, ".ittybitty", "agents", agentIdArg);
+    agentDirForState = agentDir;
     try {
       const metaFile = Bun.file(join(agentDir, "meta.json"));
       if (await metaFile.exists()) {
@@ -697,6 +701,17 @@ export async function hookSessionStart(rawStdin?: string, agentIdArg?: string): 
     } catch {
       // Fall through to primary if meta can't be read
     }
+  }
+
+  // Stale-creating fix: meta.state is written as "creating" at spawn time and
+  // only overwritten by the Stop hook / sendMessage / resumeAgent. An agent
+  // that boots and works without ever going idle keeps "creating" in meta.json
+  // indefinitely. The session-start hook fires the moment Claude begins a
+  // session — exactly when "creating" becomes stale — so flip it to "running"
+  // here. Scoped strictly to "creating": session resumes for "complete" or
+  // "waiting" agents must not be overwritten.
+  if (metaJson && metaJson.state === "creating" && agentDirForState) {
+    await writeAgentState(agentDirForState, "running");
   }
 
   const ctx = detectRole(cwd, metaJson, agentIdArg);

@@ -1,5 +1,6 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { detectRole, generateInstructions, interpolateTemplate, buildPathIsolationSection, type SessionContext } from "./session-start";
+import { detectRole, generateInstructions, interpolateTemplate, buildPathIsolationSection, hookSessionStart, type SessionContext } from "./session-start";
+import { readAgentState } from "../agents";
 import { mkdtemp, rm, mkdir } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -550,5 +551,93 @@ describe("buildPathIsolationSection", () => {
     const instructions = await generateInstructions(ctx);
     expect(instructions).toContain("### Path Isolation");
     expect(instructions).toContain("/var/data");
+  });
+});
+
+describe("hookSessionStart — stale 'creating' state correction", () => {
+  let tempDir: string;
+  let originalWrite: typeof process.stdout.write;
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "ib-sessstart-"));
+    // Silence process.stdout.write — the hook emits a JSON blob.
+    originalWrite = process.stdout.write.bind(process.stdout);
+    process.stdout.write = ((..._args: unknown[]) => true) as typeof process.stdout.write;
+  });
+
+  afterEach(async () => {
+    process.stdout.write = originalWrite;
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  /** Build a minimal meta.json on disk and return the agentDir. */
+  async function setup(metaState: string, agentId = "agent-test1"): Promise<{
+    agentDir: string;
+    cwd: string;
+  }> {
+    const agentDir = join(tempDir, ".ittybitty", "agents", agentId);
+    const cwd = join(agentDir, "repo");
+    await mkdir(cwd, { recursive: true });
+    await Bun.write(
+      join(agentDir, "meta.json"),
+      JSON.stringify({
+        id: agentId,
+        manager: null,
+        worker: false,
+        state: metaState,
+      }),
+    );
+    return { agentDir, cwd };
+  }
+
+  test("meta.state === 'creating' is overwritten to 'running'", async () => {
+    const { agentDir, cwd } = await setup("creating");
+    const stdin = JSON.stringify({ cwd });
+    await hookSessionStart(stdin);
+    const state = await readAgentState(agentDir);
+    expect(state).toBe("running");
+  });
+
+  test("meta.state === 'waiting' is preserved (session resume)", async () => {
+    const { agentDir, cwd } = await setup("waiting");
+    const stdin = JSON.stringify({ cwd });
+    await hookSessionStart(stdin);
+    const state = await readAgentState(agentDir);
+    expect(state).toBe("waiting");
+  });
+
+  test("meta.state === 'complete' is preserved (session resume)", async () => {
+    const { agentDir, cwd } = await setup("complete");
+    const stdin = JSON.stringify({ cwd });
+    await hookSessionStart(stdin);
+    const state = await readAgentState(agentDir);
+    expect(state).toBe("complete");
+  });
+
+  test("meta.state === 'creating' for non-worktree agent (agentIdArg) → 'running'", async () => {
+    // Coordinator-style: cwd is the repo root, agent ID passed as arg.
+    const agentId = "agent-coord";
+    const agentDir = join(tempDir, ".ittybitty", "agents", agentId);
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(
+      join(agentDir, "meta.json"),
+      JSON.stringify({
+        id: agentId,
+        manager: null,
+        coordinator: true,
+        state: "creating",
+      }),
+    );
+    const stdin = JSON.stringify({ cwd: tempDir });
+    await hookSessionStart(stdin, agentId);
+    const state = await readAgentState(agentDir);
+    expect(state).toBe("running");
+  });
+
+  test("missing meta.json is a no-op (does not crash)", async () => {
+    // cwd points outside any agent dir — no meta to update.
+    const stdin = JSON.stringify({ cwd: tempDir });
+    await hookSessionStart(stdin);
+    // No exception means pass.
   });
 });

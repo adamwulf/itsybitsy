@@ -936,9 +936,23 @@ export async function detectAgentStates(agents: Agent[]): Promise<void> {
   await Promise.all(
     active.map(async (agent) => {
       const tmuxSession = agent.meta.tmux_session;
+      const agentDir = join(agent.repoPath, ".ittybitty", "agents", agent.id);
 
       // Step 2: check tmux session existence
       if (!tmuxSession) {
+        // meta.json is written before `git worktree add` runs (so the dir
+        // isn't flagged as orphaned), but tmux_session is only set later
+        // once the worktree finishes and tmux starts. On large repos that
+        // window can be 60–90s — well past the 6s creating grace period.
+        // Consult the spawn log: if a [spawn] start line is present within
+        // SPAWN_IN_PROGRESS_WINDOW_MS with no terminator, render as
+        // 'creating'. Falls back to 'stopped' if the spawn died (no log,
+        // stale, or terminated).
+        const status = await classifySpawnLogCtx.fn(agentDir);
+        if (status.kind === "in_progress") {
+          agent.state = "creating";
+          return;
+        }
         agent.state = isRecentlyCreated(agent.meta.created_epoch) ? "creating" : "stopped";
         return;
       }
@@ -972,7 +986,6 @@ export async function detectAgentStates(agents: Agent[]): Promise<void> {
       // even when fresh data was available on disk. The disk read here is
       // cheap (one stat + a small JSON parse) compared to the tmux spawn
       // we're avoiding.
-      const agentDir = join(agent.repoPath, ".ittybitty", "agents", agent.id);
       const transient = await readAgentTransient(agentDir);
       if (
         transient &&

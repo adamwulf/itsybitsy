@@ -1379,6 +1379,75 @@ describe("detectAgentStates — 'complete' agents skip capture-pane", () => {
   });
 });
 
+// ── detectAgentStates — slow worktree spawn (no tmux + spawn log) ──────────
+
+describe("detectAgentStates — no tmux_session falls back to spawn log", () => {
+  afterEach(() => {
+    classifySpawnLogCtx.reset();
+    nowMsCtx.reset();
+  });
+
+  test("no tmux + in_progress spawn within window → creating", async () => {
+    classifySpawnLogCtx.set(async () => ({
+      kind: "in_progress",
+      startEpochMs: Date.now() - 30_000,
+    }));
+    const a = makeAgent({
+      id: "a1",
+      meta: {
+        // Past 6s grace — without spawn log fallback, would resolve to "stopped".
+        tmux_session: "",
+        created_epoch: Math.floor(Date.now() / 1000) - 60,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+    await detectAgentStates([a]);
+    expect(a.state).toBe("creating");
+  });
+
+  test("no tmux + spawn log orphan + old created_epoch → stopped", async () => {
+    classifySpawnLogCtx.set(async () => ({ kind: "orphan" }));
+    const a = makeAgent({
+      id: "a1",
+      meta: {
+        tmux_session: "",
+        created_epoch: Math.floor(Date.now() / 1000) - 3600,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+    await detectAgentStates([a]);
+    expect(a.state).toBe("stopped");
+  });
+
+  test("no tmux + spawn log orphan + recent created_epoch → creating (6s grace fast path)", async () => {
+    classifySpawnLogCtx.set(async () => ({ kind: "orphan" }));
+    const a = makeAgent({
+      id: "a1",
+      meta: {
+        tmux_session: "",
+        // Within 6s grace — preserves existing fast path when spawn log absent.
+        created_epoch: Math.floor(Date.now() / 1000) - 1,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+    await detectAgentStates([a]);
+    expect(a.state).toBe("creating");
+  });
+
+  test("no tmux + spawn log orphan + old created_epoch (no in-progress signal) → stopped", async () => {
+    // Same as case 2 but framed as the auto-recovery scenario: spawn died
+    // (5-minute window expired or terminator written), and the agent is no
+    // longer recently created — should resolve to "stopped".
+    classifySpawnLogCtx.set(async () => ({ kind: "orphan" }));
+    const a = makeAgent({
+      id: "a1",
+      meta: {
+        tmux_session: "",
+        created_epoch: Math.floor(Date.now() / 1000) - SPAWN_IN_PROGRESS_WINDOW_MS / 1000 - 60,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+    await detectAgentStates([a]);
+    expect(a.state).toBe("stopped");
+  });
+});
+
 // ── readAllAgents — listTmuxSessions TTL cache (Change D) ──────────────────
 
 describe("readAllAgents — listTmuxSessions cache", () => {

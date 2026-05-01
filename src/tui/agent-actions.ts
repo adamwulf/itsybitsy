@@ -1159,6 +1159,15 @@ export function handleResizeLeft(ctx: ActionCtx, delta: number) {
 }
 
 export function handleOpenGhostty(ctx: ActionCtx) {
+  // System coordinator selected: open its tmux session
+  if (ctx.agentTree.isSystemCoordinatorSelected) {
+    openInGhostty(IB_COORDINATOR_SESSION).then((result) => {
+      ctx.setNotice(result.message);
+    }).catch((err) => {
+      ctx.setNotice(`Ghostty error: ${err}`);
+    });
+    return;
+  }
   const agent = ctx.agentTree.selectedAgent;
   if (agent) {
     if (!agent.meta.tmux_session) { ctx.setNotice("No active tmux session"); return; }

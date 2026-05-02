@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { isValidModel, isValidToolList, isValidAgentId, isValidTmuxSession, isValidSessionId, isValidShellPath, isValidSource, isValidInboxFilename, shellQuote } from "./validation";
+import { isValidModel, isValidToolList, isValidAgentId, isValidTmuxSession, isValidSessionId, isValidShellPath, shellQuote } from "./validation";
 
 describe("isValidModel", () => {
   test("accepts typical model names", () => {
@@ -110,46 +110,6 @@ describe("isValidShellPath", () => {
   test("rejects paths with newlines", () => {
     expect(isValidShellPath("/path/with\nnewline")).toBe(false);
     expect(isValidShellPath("/path/with\r\nnewline")).toBe(false);
-  });
-});
-
-describe("isValidSource", () => {
-  test("accepts valid source names", () => {
-    expect(isValidSource("manual")).toBe(true);
-    expect(isValidSource("watchdog")).toBe(true);
-    expect(isValidSource("agent-abc123")).toBe(true);
-    expect(isValidSource("my_source")).toBe(true);
-  });
-
-  test("rejects invalid source names", () => {
-    expect(isValidSource("")).toBe(false);
-    expect(isValidSource("../evil")).toBe(false);
-    expect(isValidSource("foo/bar")).toBe(false);
-    expect(isValidSource("bad source")).toBe(false);
-    expect(isValidSource("src$(whoami)")).toBe(false);
-  });
-});
-
-describe("isValidInboxFilename", () => {
-  test("accepts valid inbox filenames", () => {
-    expect(isValidInboxFilename("1704825000123-a3f1-watchdog.msg")).toBe(true);
-    expect(isValidInboxFilename("1000000-0000-manual.msg")).toBe(true);
-    expect(isValidInboxFilename("1704825000123-abcd-agent-abc123.msg")).toBe(true);
-  });
-
-  test("rejects path traversal", () => {
-    expect(isValidInboxFilename("../../../etc/passwd")).toBe(false);
-    expect(isValidInboxFilename("1000-aaaa-../../etc.msg")).toBe(false);
-  });
-
-  test("rejects wrong extension", () => {
-    expect(isValidInboxFilename("1000000-aaaa-test.txt")).toBe(false);
-  });
-
-  test("rejects malformed filenames", () => {
-    expect(isValidInboxFilename("")).toBe(false);
-    expect(isValidInboxFilename("not-a-valid-name")).toBe(false);
-    expect(isValidInboxFilename("1000000-ZZZZ-test.msg")).toBe(false); // uppercase hex
   });
 });
 

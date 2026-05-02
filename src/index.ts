@@ -85,6 +85,113 @@ export async function printAndExit(result: { ok: boolean; exitCode: number; stdo
   process.exit(result.exitCode);
 }
 
+/**
+ * Injectable check for whether the system-coordinator tmux session is running.
+ * Default implementation calls `tmux has-session -t ib-coordinator`. Tests can
+ * override via `setSystemCoordinatorHasSessionFn()` to avoid invoking tmux.
+ */
+let systemCoordinatorHasSessionFn: (sessionName: string) => Promise<boolean> = async (
+  sessionName: string,
+) => {
+  const exit = await Bun.spawn(["tmux", "has-session", "-t", sessionName], {
+    stdout: "ignore",
+    stderr: "ignore",
+  }).exited;
+  return exit === 0;
+};
+
+export function setSystemCoordinatorHasSessionFn(
+  fn: (sessionName: string) => Promise<boolean>,
+): void {
+  systemCoordinatorHasSessionFn = fn;
+}
+
+export function resetSystemCoordinatorHasSessionFn(): void {
+  systemCoordinatorHasSessionFn = async (sessionName: string) => {
+    const exit = await Bun.spawn(["tmux", "has-session", "-t", sessionName], {
+      stdout: "ignore",
+      stderr: "ignore",
+    }).exited;
+    return exit === 0;
+  };
+}
+
+/**
+ * Build the synthetic Agent used to deliver @system messages through the
+ * standard sendMessage path. The recipient log/state writes inside sendMessage
+ * target an agent dir that does not exist (the system coordinator has no agent
+ * dir by design) — logAgent and writeAgentState both swallow missing-dir
+ * errors. We pick the sender's repo as the synthetic repoPath when detectable
+ * so sendMessage's sender-log write lands in the correct repo.
+ */
+export function buildSystemCoordinatorAgent(
+  tmuxSessionName: string,
+  cwd: string = process.cwd(),
+): Agent {
+  const m = cwd.match(/^(.+?)\/\.ittybitty\/agents\/[^/]+\/repo(?:\/|$)/);
+  const repoPath = m ? m[1]! : "/tmp";
+  return {
+    id: "ib-coordinator",
+    repoPath,
+    repoName: "system",
+    meta: {
+      id: "ib-coordinator",
+      session_id: "",
+      tmux_session: tmuxSessionName,
+      prompt: "",
+      manager: null,
+      created: "",
+      created_epoch: 0,
+      worktree: false,
+      worker: false,
+      yolo: false,
+      model: "",
+      claude_pid: "",
+    },
+    state: "running",
+    age: "",
+    archived: false,
+    children: [],
+  };
+}
+
+/**
+ * Deliver a message to the system coordinator's tmux session via the standard
+ * sendMessage path. Returns an IbCommandResult — the caller is responsible for
+ * printing output and exiting with the appropriate code.
+ *
+ * If the coordinator session is not running, returns ok=false with a clear
+ * error message and never invokes sendMessage.
+ */
+export async function sendToSystemCoordinator(
+  message: string,
+  opts?: { fromAgent?: string; cwd?: string },
+): Promise<{ ok: boolean; exitCode: number; stdout: string; stderr: string }> {
+  const { IB_COORDINATOR_SESSION } = await import("./coordinator");
+  const running = await systemCoordinatorHasSessionFn(IB_COORDINATOR_SESSION);
+  if (!running) {
+    return {
+      ok: false,
+      exitCode: 1,
+      stdout: "",
+      stderr:
+        "System coordinator is not running. Start it from the dashboard (`ib watch`) or by selecting it there.",
+    };
+  }
+
+  const cwd = opts?.cwd ?? process.cwd();
+  const syntheticAgent = buildSystemCoordinatorAgent(IB_COORDINATOR_SESSION, cwd);
+  const { sendMessage } = await import("./ib-commands");
+  const sendOpts: { fromAgent?: string; cwd?: string } = { cwd };
+  if (opts?.fromAgent) sendOpts.fromAgent = opts.fromAgent;
+  const result = await sendMessage(syntheticAgent, message, sendOpts);
+
+  if (result.ok) {
+    return { ok: true, exitCode: 0, stdout: "Sent to system coordinator", stderr: "" };
+  }
+  return result;
+}
+
 /** Require an agent ID argument, find it, or exit with error. */
 export async function requireAgent(idArg: string | undefined, repos: RepoEntry[]): Promise<Agent> {
   if (!idArg) {
@@ -667,14 +774,8 @@ async function main() {
             process.exit(1);
           }
         }
-        const { inboxWrite } = await import("./inbox");
-        const result = await inboxWrite(coordMessage, fromAgent ? { source: fromAgent } : undefined);
-        if (result.ok) {
-          console.log("Sent to system coordinator");
-        } else {
-          console.error(result.stderr);
-        }
-        process.exit(result.ok ? 0 : 1);
+        const result = await sendToSystemCoordinator(coordMessage, fromAgent ? { fromAgent } : undefined);
+        await printAndExit(result);
         break;
       }
 
@@ -1059,69 +1160,6 @@ async function main() {
       await withHookLogging("hook-permission-denied", agentDir, stdin, () => hookPermissionDenied(id, stdin));
       break;
     }
-    case "inbox": {
-      const { inboxWrite, inboxList, inboxRead, inboxAck, inboxCount } = await import("./inbox");
-      const inboxSub = args[1];
-      switch (inboxSub) {
-        case "write": {
-          // Parse --source flag before extracting message (flag may appear before or after message)
-          const writeArgs = args.slice(2);
-          let source: string | undefined;
-          const positionalArgs: string[] = [];
-          for (let i = 0; i < writeArgs.length; i++) {
-            if (writeArgs[i] === "--source") {
-              if (!writeArgs[i + 1]) {
-                console.error('Usage: ib inbox write [--source <name>] "message"');
-                process.exit(1);
-              }
-              source = writeArgs[++i];
-            } else {
-              positionalArgs.push(writeArgs[i]!);
-            }
-          }
-          const message = positionalArgs[0];
-          if (!message) {
-            console.error('Usage: ib inbox write [--source <name>] "message"');
-            process.exit(1);
-          }
-          await printAndExit(await inboxWrite(message, { source }));
-          break;
-        }
-        case "list":
-          await printAndExit(await inboxList());
-          break;
-        case "read": {
-          const filename = args[2];
-          if (!filename) {
-            console.error("Usage: ib inbox read <filename>");
-            process.exit(1);
-          }
-          await printAndExit(await inboxRead(filename));
-          break;
-        }
-        case "ack": {
-          const filename = args[2];
-          if (!filename) {
-            console.error("Usage: ib inbox ack <filename>");
-            process.exit(1);
-          }
-          await printAndExit(await inboxAck(filename));
-          break;
-        }
-        case "count":
-          await printAndExit(await inboxCount());
-          break;
-        default:
-          if (!inboxSub) {
-            console.error("Usage: ib inbox <write|list|read|ack|count>");
-          } else {
-            console.error(`Unknown inbox subcommand: ${inboxSub}`);
-          }
-          console.error("Available: write, list, read, ack, count");
-          process.exit(1);
-      }
-      break;
-    }
     case "init-types":
     case "init-agent-types": {
       const { initAgentTypes } = await import("./agent-types");
@@ -1326,13 +1364,6 @@ async function main() {
       console.log("  hooks intercept-install    Install intercept hook");
       console.log("  hooks intercept-uninstall  Uninstall intercept hook");
       console.log("  hooks intercept-status     Show intercept hook status");
-      console.log("");
-      console.log("Inbox (system coordinator message queue):");
-      console.log('  inbox write "msg"   Write a message (--source <name>)');
-      console.log("  inbox list          List pending messages");
-      console.log("  inbox read <file>   Read a message");
-      console.log("  inbox ack <file>    Acknowledge (delete) a message");
-      console.log("  inbox count         Count pending messages");
       break;
     }
   }

@@ -47,13 +47,6 @@ describe("SYSTEM_COORDINATOR_PROMPT", () => {
     expect(SYSTEM_COORDINATOR_PROMPT).toContain("ib diff");
   });
 
-  test("mentions inbox commands", () => {
-    expect(SYSTEM_COORDINATOR_PROMPT).toContain("ib inbox count");
-    expect(SYSTEM_COORDINATOR_PROMPT).toContain("ib inbox list");
-    expect(SYSTEM_COORDINATOR_PROMPT).toContain("ib inbox read");
-    expect(SYSTEM_COORDINATOR_PROMPT).toContain("ib inbox ack");
-  });
-
   test("warns against sending to self", () => {
     expect(SYSTEM_COORDINATOR_PROMPT).toContain(
       "Do NOT use `ib send @system`"

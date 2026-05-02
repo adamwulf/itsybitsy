@@ -1429,7 +1429,7 @@ The system coordinator panel uses its own `TmuxPoller` instance (separate from t
 
 The system coordinator does NOT use the standard session-start hook (§6.3). Instead, it receives a custom initial prompt explaining its role:
 
-> You are the itsybitsy system coordinator. You manage agents across all registered repos using `ib` commands. You can list agents (`ib list`), send messages to agents (`ib send <agent-id> "message"`), merge (`ib merge`), kill (`ib kill`), create agents (`ib new-agent`), and check status (`ib status`, `ib diff`). You do NOT have access to Read, Write, Edit, or any file tools — only `ib` Bash commands. You coordinate work at the system level — for repo-specific coordination, delegate to per-repo coordinators. To send messages to per-repo coordinators, use `ib send @<repo-name> "message"` (e.g., `ib send @itsybitsy "review the latest PR"`). To send to a specific agent in another repo, use `ib send @<repo-name>/<agent-id> "message"`. Do NOT use `ib send @system` — that routes back to you. Periodically check `ib inbox count` for notifications from watchdogs and agents; process with `ib inbox list` / `ib inbox read` / `ib inbox ack`.
+> You are the itsybitsy system coordinator. You manage agents across all registered repos using `ib` commands. You can list agents (`ib list`), send messages to agents (`ib send <agent-id> "message"`), merge (`ib merge`), kill (`ib kill`), create agents (`ib new-agent`), and check status (`ib status`, `ib diff`). You do NOT have access to Read, Write, Edit, or any file tools — only `ib` Bash commands. You coordinate work at the system level — for repo-specific coordination, delegate to per-repo coordinators. To send messages to per-repo coordinators, use `ib send @<repo-name> "message"` (e.g., `ib send @itsybitsy "review the latest PR"`). To send to a specific agent in another repo, use `ib send @<repo-name>/<agent-id> "message"`. Do NOT use `ib send @system` — that routes back to you.
 
 #### 12.1.6 Watchdog Behavior
 
@@ -1520,7 +1520,7 @@ Key differences from regular agents:
 - **Has Read/Glob/Grep/LS** — coordinators can read the codebase for context via Claude Code's built-in tools (which cannot perform writes)
 - **No Task/Agent** — coordinators spawn sub-agents only via `Bash(ib:*)`, not Claude's built-in Task/Agent tools. This ensures all agents are tracked through the ib system.
 
-**Bash permission pattern and shell metacharacters**: Claude Code's `Bash(<command>:*)` permission patterns match based on command prefix — `Bash(ib:*)` allows any command starting with `ib`. This means a chained command like `ib list && cat secret.txt` would match `Bash(ib:*)` because the full string starts with `ib`. **Mitigation**: The existing `intercept-task` hook (§6) is extended to reject Bash tool calls from coordinator sessions that contain shell metacharacters (`;`, `&&`, `||`, `|`, `>`, `>>`, `<`, `` ` ``, `$(`, `${`, `$'`, `\n`, `\r`) anywhere in the raw command string. Newlines and carriage returns are included because they act as command separators in bash. `$'` (ANSI-C quoting) is included because `$'\x0a'` encodes a newline without using any other blocked characters — bash interprets it as a literal newline at execution time, splitting the command (e.g., `ib list $'\x0a'cat /etc/passwd`). Additionally, the hook blocks `--output` (and `--output=`) in git commands from coordinator sessions — `git diff --output=<path>`, `git log --output=<path>`, and `git show --output=<path>` can write files without shell metacharacters, bypassing the Write/Edit deny. The check is a simple substring match for `--output` in the raw command string when the command starts with `git`. The hook inspects the `command` field from the Bash tool's input JSON — this is the unquoted, uninterpreted command string that Claude generated. The check is a simple regex scan for metacharacters; it does not attempt to parse shell quoting (a false positive on `ib send agent "hello; world"` is acceptable — the coordinator can use `ib inbox write` instead). This is a defense-in-depth layer on top of Claude Code's prefix matching — the primary trust boundary is that coordinators are Claude agents following instructions, and the hooks catch edge cases where the agent might attempt to circumvent its role. **Security gate**: This intercept-task extension MUST be implemented and deployed before any **per-repo** coordinator goes live — without it, the `Bash(ib:*)` permission has a known bypass via shell metacharacters. The system coordinator is exempt from this gate: it has no meta.json (so the intercept-task hook cannot detect it), but it also has no Read/Write/Glob/Grep/LS tools and runs in `~/.itsybitsy/` (not a code repository), so a metacharacter bypass can only access `ib` commands and the limited filesystem at `~/.itsybitsy/`. This is an acceptable risk — the system coordinator's deny list prevents meaningful file access.
+**Bash permission pattern and shell metacharacters**: Claude Code's `Bash(<command>:*)` permission patterns match based on command prefix — `Bash(ib:*)` allows any command starting with `ib`. This means a chained command like `ib list && cat secret.txt` would match `Bash(ib:*)` because the full string starts with `ib`. **Mitigation**: The existing `intercept-task` hook (§6) is extended to reject Bash tool calls from coordinator sessions that contain shell metacharacters (`;`, `&&`, `||`, `|`, `>`, `>>`, `<`, `` ` ``, `$(`, `${`, `$'`, `\n`, `\r`) anywhere in the raw command string. Newlines and carriage returns are included because they act as command separators in bash. `$'` (ANSI-C quoting) is included because `$'\x0a'` encodes a newline without using any other blocked characters — bash interprets it as a literal newline at execution time, splitting the command (e.g., `ib list $'\x0a'cat /etc/passwd`). Additionally, the hook blocks `--output` (and `--output=`) in git commands from coordinator sessions — `git diff --output=<path>`, `git log --output=<path>`, and `git show --output=<path>` can write files without shell metacharacters, bypassing the Write/Edit deny. The check is a simple substring match for `--output` in the raw command string when the command starts with `git`. The hook inspects the `command` field from the Bash tool's input JSON — this is the unquoted, uninterpreted command string that Claude generated. The check is a simple regex scan for metacharacters; it does not attempt to parse shell quoting (a false positive on `ib send agent "hello; world"` is acceptable — the coordinator can rephrase the message without metacharacters). This is a defense-in-depth layer on top of Claude Code's prefix matching — the primary trust boundary is that coordinators are Claude agents following instructions, and the hooks catch edge cases where the agent might attempt to circumvent its role. **Security gate**: This intercept-task extension MUST be implemented and deployed before any **per-repo** coordinator goes live — without it, the `Bash(ib:*)` permission has a known bypass via shell metacharacters. The system coordinator is exempt from this gate: it has no meta.json (so the intercept-task hook cannot detect it), but it also has no Read/Write/Glob/Grep/LS tools and runs in `~/.itsybitsy/` (not a code repository), so a metacharacter bypass can only access `ib` commands and the limited filesystem at `~/.itsybitsy/`. This is an acceptable risk — the system coordinator's deny list prevents meaningful file access.
 - **No WebFetch/WebSearch** — coordinators don't need internet access
 - **No KillShell** — coordinators don't run long-lived shell processes
 
@@ -1581,7 +1581,7 @@ The `ib send` command uses a hybrid addressing scheme: `@`-prefixed targets for 
 
 | Syntax | Description | Resolution |
 |--------|-------------|------------|
-| `ib send @system "msg"` | System coordinator | Routes to system coordinator via `ib inbox write` (§12.3.4). Works even when the coordinator's tmux session is not running — messages are queued. The `--from` flag value is passed as the inbox source. Output: `"Sent to system coordinator"` on success. |
+| `ib send @system "msg"` | System coordinator | Delivers directly to the `ib-coordinator` tmux session via `tmux send-keys`, identical to how messages are delivered to any other agent (§12.3.3). The `--from` flag value is rendered as a `[sent by agent <id>]:` prefix. Errors with exit code 1 if the coordinator session is not running. Output: `"Sent to system coordinator"` on success. |
 | `ib send @coordinator "msg"` | Own repo's coordinator | Detects the current repo from CWD (agent worktree or registered repo root), finds the coordinator agent for that repo (the agent with `coordinator: true` in meta.json), and sends via `tmux send-keys`. Error if CWD is not in a registered repo or agent worktree. Error if no coordinator exists for the detected repo. |
 | `ib send @muse-ios "msg"` | Named repo's coordinator | Looks up the repo by name in the repo registry (`repos.json`), finds the coordinator agent for that repo, and sends via `tmux send-keys`. Error if no repo with that name is registered. Error if no coordinator exists for the named repo. |
 | `ib send @muse-ios/agent-a1b2 "msg"` | Agent in named repo | Looks up the repo by name, then resolves the agent ID within that repo only (exact match, then prefix match). Error if repo not found, agent not found, or ambiguous prefix match. |
@@ -1608,7 +1608,7 @@ Other commands (`ib kill`, `ib nuke`, `ib status`, `ib diff`, `ib merge`, etc.) 
 | `ib nuke itsybitsy` | Standard: exact match on agent ID | Kills coordinator + children (§1.8) |
 | `ib status itsybitsy` | Standard: exact match on agent ID | Shows coordinator's commits |
 
-The system coordinator has no agent ID and cannot be targeted by any standard CLI command (only via `@system` in `ib send`). It is not a regular agent — it has no agent directory, no meta.json, and no entry in any repo's `.ittybitty/agents/`. To send messages to the system coordinator programmatically, use `ib send @system` or `ib inbox write` directly (§12.3.4).
+The system coordinator has no agent ID and cannot be targeted by any standard CLI command (only via `@system` in `ib send`). It is not a regular agent — it has no agent directory, no meta.json, and no entry in any repo's `.ittybitty/agents/`. To send messages to the system coordinator programmatically, use `ib send @system` (§12.3.3).
 
 **Reserved name `coordinator`**: The name `coordinator` is reserved and cannot be used as an agent ID. `newAgent()` rejects any attempt to create an agent with the ID `coordinator` — whether via `--name coordinator`, or because a repo's basename happens to be `coordinator` (in coordinator mode). This prevents confusion: if someone types `ib send coordinator` (without the `@`), they get "Agent not found" rather than silently messaging the wrong target. The old `ib send coordinator` special routing is removed — use `ib send @system` instead.
 
@@ -1622,71 +1622,11 @@ The system coordinator has no agent ID and cannot be targeted by any standard CL
 
 #### 12.3.3 System Coordinator Messaging
 
-The system coordinator has two messaging paths, each for a different context:
+All messages to the system coordinator — interactive (TUI) and programmatic (`ib send @system`, watchdog, agents) — are delivered the same way: `tmux send-keys -t ib-coordinator -l "<message>"` followed by a separate `tmux send-keys -t ib-coordinator Enter`. The `-l` (literal) flag prevents tmux from interpreting special key sequences in the message text.
 
-**User-interactive (TUI)**: When the user types in the coordinator sidebar input field or uses `s` with the system coordinator selected, `tmux send-keys -t ib-coordinator -l "<message>"` followed by a separate `tmux send-keys -t ib-coordinator Enter` is used. The `-l` (literal) flag prevents tmux from interpreting special key sequences in the message text. **Control character sanitization**: Before sending, all non-printable characters must be stripped: newlines (`\n`, `\r`) to prevent injecting multiple inputs, `\x03` (Ctrl-C) to prevent killing the Claude process, `\x04` (Ctrl-D, EOF), `\x1a` (Ctrl-Z, suspend), and `\x1b` (Escape, which could corrupt terminal state or trigger escape sequences). In practice, strip all characters with code points below `0x20` (this includes tab `0x09`, which is intentionally stripped to prevent unexpected whitespace in messages) and also `0x7F` (DEL). The `-l` flag on `tmux send-keys` prevents tmux from interpreting special key names, but the receiving Claude process would still see control characters in its stdin. This is safe because the user controls timing and can see whether the coordinator is busy.
+`ib send @system` re-uses the same `sendMessage()` path used for any other agent: the chunked send-keys writes, the post-send Enter, and the `[sent by agent <id>]:` prefix when `--from` is provided. The only difference is that the synthetic recipient has no agent directory, so the recipient-side log/state writes are no-ops (intentional — the system coordinator has no `meta.json` by design). If the `ib-coordinator` tmux session is not running, `ib send @system` errors with exit code 1 and a message instructing the user to start it (typically by selecting it in the dashboard). Messages are not queued.
 
-**Programmatic (watchdog, automated notifications, agents)**: When the watchdog, automated systems, or agents need to notify the system coordinator, they use `ib send @system "message"` (which routes to `ib inbox write`, see §12.3.4). This avoids the race condition of injecting text via `tmux send-keys` while the coordinator is mid-response.
-
-#### 12.3.4 `ib inbox` Command
-
-The system coordinator cannot read files directly (it has only `Bash(ib:*)` permissions). To receive programmatic messages safely, a new `ib inbox` CLI command provides access to a file-based message queue:
-
-**Inbox directory**: `~/.itsybitsy/coordinator-inbox/`. Created automatically on first `ib inbox write`. Message files use the naming pattern `<epoch_ms>-<random4hex>-<source>.msg`.
-
-**Filename format**: `<epoch_ms>-<random4hex>-<source>.msg` — Unix epoch in milliseconds plus 4 random hex characters (e.g., `1704825000123-a3f1-watchdog.msg`). The random suffix prevents collisions when multiple messages arrive in the same millisecond from the same source.
-
-**Source field**: The `<source>` portion of the filename identifies the sender. Values: the calling agent ID (e.g., `agent-a1b2c3d4`), `"watchdog"`, or `"manual"` (for `ib inbox write` called directly by the user or scripts). Source is validated against `/^[\w-]+$/` to prevent path traversal.
-
-**Subcommands**:
-
-##### `ib inbox write "message text"`
-
-Writes a message file to the inbox directory.
-
-- **Source detection** (in priority order): (1) `--source <name>` flag if provided, (2) auto-detected agent ID if called from within an agent worktree, (3) `"manual"` as default. The `--source` flag takes highest priority so that the watchdog can override CWD-based detection (see §12.2.7).
-- **Output**: Prints the filename to stdout (e.g., `1704825000123-a3f1-watchdog.msg`)
-- **Exit code**: 0 on success, 1 on write failure
-- **Retention limit**: After writing the new message, if the inbox exceeds 100 messages, the oldest messages are deleted until exactly 100 remain. This prevents unbounded growth.
-
-##### `ib inbox list`
-
-Lists pending messages, newest first.
-
-- **Output format** (one line per message, tab-separated):
-  ```
-  <filename>\t<source>\t<first-80-chars-of-message>
-  ```
-  Example: `1704825000123-a3f1-watchdog.msg\twatchdog\t[coordinator] Agent agent-a1 entered waiting...`
-- **Empty inbox**: Prints nothing (empty output), exit code 0
-- **Exit code**: 0 on success, 1 on read failure
-
-##### `ib inbox read <filename>`
-
-Reads the full content of a specific message.
-
-- **Filename validation**: Must match `/^\d+-[0-9a-f]{4}-[\w-]+\.msg$/`. Rejects filenames containing `/`, `..`, or other path traversal characters. Returns exit code 1 with error: `"Invalid filename: <name>"`
-- **Output**: Full message text to stdout
-- **Missing file**: Exit code 1, error: `"Message not found: <filename>"`
-- **Exit code**: 0 on success, 1 on error
-
-##### `ib inbox ack <filename>`
-
-Acknowledges (deletes) a processed message.
-
-- **Filename validation**: Same as `read` — must match `/^\d+-[0-9a-f]{4}-[\w-]+\.msg$/`
-- **Output**: `"Acknowledged: <filename>"`
-- **Missing file**: Exit code 0 (idempotent — already acknowledged)
-- **Exit code**: 0 on success, 1 on validation error
-
-##### `ib inbox count`
-
-Returns the number of pending messages.
-
-- **Output**: A single integer to stdout (e.g., `3`). Outputs `0` for an empty inbox.
-- **Exit code**: Always 0
-
-**Usage by system coordinator**: The session-start prompt instructs the coordinator to periodically run `ib inbox count` and process messages with `ib inbox list` / `ib inbox read` / `ib inbox ack`. This keeps the system coordinator's permissions minimal (`Bash(ib:*)` covers `ib inbox *`) while giving it access to programmatic notifications.
+**Control character sanitization**: Before sending, all non-printable characters must be stripped: newlines (`\n`, `\r`) to prevent injecting multiple inputs, `\x03` (Ctrl-C) to prevent killing the Claude process, `\x04` (Ctrl-D, EOF), `\x1a` (Ctrl-Z, suspend), and `\x1b` (Escape, which could corrupt terminal state or trigger escape sequences). In practice, strip all characters with code points below `0x20` (this includes tab `0x09`, which is intentionally stripped to prevent unexpected whitespace in messages) and also `0x7F` (DEL). The `-l` flag on `tmux send-keys` prevents tmux from interpreting special key names, but the receiving Claude process would still see control characters in its stdin.
 
 ### 12.4 Coordinator Relationship to Regular Agents
 
@@ -1751,7 +1691,6 @@ The coordinator system touches many modules. This section catalogs the current i
 | Module | Status | Description |
 |--------|--------|-------------|
 | `src/coordinator.ts` | **Implemented** | System coordinator lifecycle (`ensureSystemCoordinator()`, `releaseSystemCoordinator()`, `restartSystemCoordinator()`), PID-based reference counting, system coordinator permissions/prompt, `sanitizeTmuxInput()`, per-repo coordinator permissions (`buildPerRepoCoordinatorSettings()`), per-repo coordinator prompt (`perRepoCoordinatorPrompt()`), coordinator existence check (`checkCoordinatorExists()`), agent ID generation (`getCoordinatorAgentId()` — returns repo basename). No separate `coordinator-settings.ts` — per-repo settings are in this file. |
-| `src/inbox.ts` | **Implemented** | `ib inbox` command implementation (write/list/read/ack/count). File-based message queue at `~/.itsybitsy/coordinator-inbox/`. |
 | `src/agents.ts` | **Implemented** | `coordinator?: boolean` in `AgentMeta`. `{ kind: "system-coordinator" }` in `FlatEntry`. `flattenAgentTree()` prepends system coordinator entry. Per-repo coordinators sorted before regular agents within each repo section. |
 | `src/ib-commands.ts` | **Implemented** | `newAgent()` extended with `--type coordinator`: uses repo basename as ID (via `getCoordinatorAgentId()`), sets `coordinator: true` in meta.json, one-per-repo validation via `checkCoordinatorExists()`, `coordinator.model` default, max-agents bypass, coordinator-specific `settings.local.json` with hooks. No special `ib send` routing — standard agent ID resolution handles everything. |
 | `src/hooks/session-start.ts` | **Implemented** | Detects `coordinator: true` in meta.json. `generateCoordinatorInstructions()` injects coordinator-specific prompt. Worker instructions correctly use manager's agent ID (repo basename) for `ib send`. |
@@ -1766,7 +1705,7 @@ The coordinator system touches many modules. This section catalogs the current i
 | `src/tui/focus.ts` | **Implemented** | Coordinator focus order: `agent-tree` → `info` → `coordinator`. |
 | `src/tui/pane-manager.ts` | **Implemented** | Full-width view when system coordinator is selected. Per-repo coordinator REPO mode with split pane. |
 | `src/watcher.ts` | **No changes needed** | Per-repo coordinators are regular agents detected by fs.watch. System coordinator state polled via `getCoordinatorInfo()`. |
-| `src/index.ts` | **Implemented** | `ib new-agent --type coordinator` flag handling. `ib inbox` subcommand routing. `@`-based routing in `ib send`: `@system` routes to system coordinator inbox, `@coordinator` routes to own repo's coordinator, `@<repo-name>` routes to named repo's coordinator, `@<repo-name>/<agent-id>` routes to specific agent in named repo (§12.3.1). Bare agent IDs use standard `matchAgentById()` with own-repo-first resolution. |
+| `src/index.ts` | **Implemented** | `ib new-agent --type coordinator` flag handling. `@`-based routing in `ib send`: `@system` delivers directly to the `ib-coordinator` tmux session via `sendMessage()`, `@coordinator` routes to own repo's coordinator, `@<repo-name>` routes to named repo's coordinator, `@<repo-name>/<agent-id>` routes to specific agent in named repo (§12.3.1). Bare agent IDs use standard `matchAgentById()` with own-repo-first resolution. |
 | `src/auto-compact.ts` | **No changes needed** | Per-repo coordinators get auto-compact as regular agents. System coordinator has no watchdog/auto-compact. |
 
 ---

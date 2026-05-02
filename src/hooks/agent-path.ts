@@ -415,22 +415,22 @@ export async function checkIbCommandAccess(
       return false;
     }
 
-    // @<repo-name> sentinel: caller must be the per-repo coordinator of that repo.
+    // @<repo-name> sentinel: caller must be the per-repo coordinator of that
+    // repo. We require all of:
+    //   1. repo_path is a string and resolves to the caller's own repo root
+    //   2. caller's meta.coordinator === true (flagged as coordinator)
+    //   3. caller's agent ID matches the repo name (per-repo coordinators
+    //      use the repo basename as their ID — see getCoordinatorAgentId)
     if (sb.agent_id !== "@system") {
       const repoName = sb.agent_id.slice(1);
-      // The caller's agent ID matches the repo basename and they are flagged
-      // as a coordinator in meta.json — treat as the spawner.
       if (typeof sb.repo_path !== "string") return false;
       if (resolve(sb.repo_path) !== callerRepoRoot) return false;
+      if (callingAgentId !== repoName) return false;
       try {
         const callerMetaFile = Bun.file(join(agentsDir, callingAgentId, "meta.json"));
         if (await callerMetaFile.exists()) {
           const callerMeta = await callerMetaFile.json();
-          if (
-            callerMeta &&
-            callerMeta.coordinator === true &&
-            (callerMeta.id === repoName || basename(callerRepoRoot) === repoName)
-          ) {
+          if (callerMeta && callerMeta.coordinator === true) {
             return true;
           }
         }

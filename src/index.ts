@@ -85,6 +85,113 @@ export async function printAndExit(result: { ok: boolean; exitCode: number; stdo
   process.exit(result.exitCode);
 }
 
+/**
+ * Injectable check for whether the system-coordinator tmux session is running.
+ * Default implementation calls `tmux has-session -t ib-coordinator`. Tests can
+ * override via `setSystemCoordinatorHasSessionFn()` to avoid invoking tmux.
+ */
+let systemCoordinatorHasSessionFn: (sessionName: string) => Promise<boolean> = async (
+  sessionName: string,
+) => {
+  const exit = await Bun.spawn(["tmux", "has-session", "-t", sessionName], {
+    stdout: "ignore",
+    stderr: "ignore",
+  }).exited;
+  return exit === 0;
+};
+
+export function setSystemCoordinatorHasSessionFn(
+  fn: (sessionName: string) => Promise<boolean>,
+): void {
+  systemCoordinatorHasSessionFn = fn;
+}
+
+export function resetSystemCoordinatorHasSessionFn(): void {
+  systemCoordinatorHasSessionFn = async (sessionName: string) => {
+    const exit = await Bun.spawn(["tmux", "has-session", "-t", sessionName], {
+      stdout: "ignore",
+      stderr: "ignore",
+    }).exited;
+    return exit === 0;
+  };
+}
+
+/**
+ * Build the synthetic Agent used to deliver @system messages through the
+ * standard sendMessage path. The recipient log/state writes inside sendMessage
+ * target an agent dir that does not exist (the system coordinator has no agent
+ * dir by design) — logAgent and writeAgentState both swallow missing-dir
+ * errors. We pick the sender's repo as the synthetic repoPath when detectable
+ * so sendMessage's sender-log write lands in the correct repo.
+ */
+export function buildSystemCoordinatorAgent(
+  tmuxSessionName: string,
+  cwd: string = process.cwd(),
+): Agent {
+  const m = cwd.match(/^(.+?)\/\.ittybitty\/agents\/[^/]+\/repo(?:\/|$)/);
+  const repoPath = m ? m[1]! : "/tmp";
+  return {
+    id: "ib-coordinator",
+    repoPath,
+    repoName: "system",
+    meta: {
+      id: "ib-coordinator",
+      session_id: "",
+      tmux_session: tmuxSessionName,
+      prompt: "",
+      manager: null,
+      created: "",
+      created_epoch: 0,
+      worktree: false,
+      worker: false,
+      yolo: false,
+      model: "",
+      claude_pid: "",
+    },
+    state: "running",
+    age: "",
+    archived: false,
+    children: [],
+  };
+}
+
+/**
+ * Deliver a message to the system coordinator's tmux session via the standard
+ * sendMessage path. Returns an IbCommandResult — the caller is responsible for
+ * printing output and exiting with the appropriate code.
+ *
+ * If the coordinator session is not running, returns ok=false with a clear
+ * error message and never invokes sendMessage.
+ */
+export async function sendToSystemCoordinator(
+  message: string,
+  opts?: { fromAgent?: string; cwd?: string },
+): Promise<{ ok: boolean; exitCode: number; stdout: string; stderr: string }> {
+  const { IB_COORDINATOR_SESSION } = await import("./coordinator");
+  const running = await systemCoordinatorHasSessionFn(IB_COORDINATOR_SESSION);
+  if (!running) {
+    return {
+      ok: false,
+      exitCode: 1,
+      stdout: "",
+      stderr:
+        "System coordinator is not running. Start it from the dashboard (`ib watch`) or by selecting it there.",
+    };
+  }
+
+  const cwd = opts?.cwd ?? process.cwd();
+  const syntheticAgent = buildSystemCoordinatorAgent(IB_COORDINATOR_SESSION, cwd);
+  const { sendMessage } = await import("./ib-commands");
+  const sendOpts: { fromAgent?: string; cwd?: string } = { cwd };
+  if (opts?.fromAgent) sendOpts.fromAgent = opts.fromAgent;
+  const result = await sendMessage(syntheticAgent, message, sendOpts);
+
+  if (result.ok) {
+    return { ok: true, exitCode: 0, stdout: "Sent to system coordinator", stderr: "" };
+  }
+  return result;
+}
+
 /** Require an agent ID argument, find it, or exit with error. */
 export async function requireAgent(idArg: string | undefined, repos: RepoEntry[]): Promise<Agent> {
   if (!idArg) {
@@ -667,69 +774,8 @@ async function main() {
             process.exit(1);
           }
         }
-
-        // Verify the coordinator tmux session is running before delivering.
-        const { IB_COORDINATOR_SESSION } = await import("./coordinator");
-        const hasSession = await Bun.spawn(
-          ["tmux", "has-session", "-t", IB_COORDINATOR_SESSION],
-          { stdout: "ignore", stderr: "ignore" },
-        ).exited;
-        if (hasSession !== 0) {
-          console.error(
-            "System coordinator is not running. Start it from the dashboard (`ib watch`) or by selecting it there.",
-          );
-          process.exit(1);
-        }
-
-        // Deliver via the standard sendMessage path. We construct a synthetic
-        // Agent-shaped object whose meta.tmux_session points at the coordinator
-        // session so we re-use the chunking + Enter + delay logic. The
-        // recipient log/state writes inside sendMessage target an agent dir
-        // that does not exist (the system coordinator has no agent dir by
-        // design) — logAgent and writeAgentState both swallow missing-dir
-        // errors, so this is harmless. We pick the sender's repo as the
-        // synthetic repoPath when detectable so sendMessage's sender-log
-        // write lands in the correct repo's `.ittybitty/agents/<sender>/`.
-        const syntheticRepoPath = (() => {
-          const cwd = process.cwd();
-          const m = cwd.match(/^(.+?)\/\.ittybitty\/agents\/[^/]+\/repo(?:\/|$)/);
-          return m ? m[1]! : "/tmp";
-        })();
-        const syntheticAgent: import("./agents").Agent = {
-          id: "ib-coordinator",
-          repoPath: syntheticRepoPath,
-          repoName: "system",
-          meta: {
-            id: "ib-coordinator",
-            session_id: "",
-            tmux_session: IB_COORDINATOR_SESSION,
-            prompt: "",
-            manager: null,
-            created: "",
-            created_epoch: 0,
-            worktree: false,
-            worker: false,
-            yolo: false,
-            model: "",
-            claude_pid: "",
-          },
-          state: "running",
-          age: "",
-          archived: false,
-          children: [],
-        };
-        const { sendMessage } = await import("./ib-commands");
-        const result = await sendMessage(
-          syntheticAgent,
-          coordMessage,
-          fromAgent ? { fromAgent } : undefined,
-        );
-        if (result.ok) {
-          console.log("Sent to system coordinator");
-        } else {
-          console.error(result.stderr);
-        }
-        process.exit(result.ok ? 0 : 1);
+        const result = await sendToSystemCoordinator(coordMessage, fromAgent ? { fromAgent } : undefined);
+        await printAndExit(result);
         break;
       }
 

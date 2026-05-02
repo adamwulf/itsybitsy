@@ -119,7 +119,6 @@ itsybitsy
 │   ├── ib-commands.test.ts   # ib-commands tests
 │   ├── coordinator.ts        # System coordinator lifecycle (spawn/teardown/ref counter)
 │   ├── coordinator-settings.ts # Per-repo coordinator settings builder (buildCoordinatorSettings)
-│   ├── inbox.ts              # File-based message queue for system coordinator (ib inbox)
 │   ├── ghostty.ts            # Open tmux sessions in Ghostty
 │   ├── ghostty.test.ts       # Ghostty tests
 │   ├── orphan-detection.test.ts # Orphaned tmux session detection tests
@@ -1085,20 +1084,12 @@ Implement session spawn/teardown and state detection:
 - [ ] System coordinator state detection (SPEC.md §12.1.6): no tmux session → `stopped`; compacting pattern in last 5 lines → `compacting`; rate limit in last 15 lines → `rate_limited`; otherwise → `running`
 - [ ] Tests for session creation, reuse, cleanup, restart, PID-based ref counting, state detection
 
-#### 47b: `ib inbox` command
+#### 47b: `ib inbox` command — **SUPERSEDED**
 
-**Files:** `src/inbox.ts` (new), `src/index.ts`
-
-Implement the file-based message queue CLI command in a dedicated `src/inbox.ts` file (see SPEC.md §12.3.4 for full I/O specs). Keeping inbox separate from `src/coordinator.ts` avoids file conflicts when parallelizing with 47a-ii:
-
-- [ ] Create `~/.itsybitsy/coordinator-inbox/` directory on first `ib inbox write`
-- [ ] `ib inbox write "message"` — write message file as `<epoch_ms>-<random4hex>-<source>.msg`. Source from `--source` flag, agent CWD auto-detection, or `"manual"`. Validate source against `/^[\w-]+$/`. Enforce 100-message retention limit (delete oldest after writing).
-- [ ] `ib inbox list` — list pending messages (newest first), tab-separated: `<filename>\t<source>\t<first-80-chars>`
-- [ ] `ib inbox read <filename>` — read full message. Validate filename against `/^\d+-[0-9a-f]{4}-[\w-]+\.msg$/` to prevent path traversal.
-- [ ] `ib inbox ack <filename>` — delete processed message. Same filename validation. Idempotent (missing file → exit 0).
-- [ ] `ib inbox count` — print pending message count
-- [ ] Route `ib inbox` subcommand in `src/index.ts`
-- [ ] Tests for all subcommands, filename validation, retention limit, empty inbox
+The file-based inbox was implemented and then removed. `ib send @system <msg>`
+now delivers directly to the `ib-coordinator` tmux session via `sendMessage()`
+(see SPEC.md §12.3.3). The `ib inbox` subcommand and `src/inbox.ts` no longer
+exist; reviewer agents should not look for them.
 
 #### 47c: System coordinator TmuxPoller
 
@@ -1128,7 +1119,7 @@ Add the system coordinator as the first entry in the agent tree:
 - [ ] Update `info-panel.ts` to handle `kind: "system-coordinator"` — render empty/no-op (info panel is hidden in full-width mode, but the code must handle this kind without crashing). For per-repo coordinators (`kind: "agent"` with `coordinator: true`), show a coordinator type indicator (this is handled in 48e, not here)
 - [ ] **Blast radius audit**: Adding `kind: "system-coordinator"` to the `FlatEntry` union means ALL consumers need updating — every `flatList.filter()`, `Extract<FlatEntry, ...>`, and exhaustive switch. Files: `agent-tree.ts` (densest FlatEntry usage — ~9 pattern matches), `dashboard.ts`, `dashboard.test.ts`, `agent-actions.ts`, `pane-manager.ts`, `info-panel.ts`, `sidebar.test.ts`
 - [ ] **Action key suppression**: When system coordinator is selected, suppress action keys that don't apply: `x` (kill), `!` (nuke), `m` (merge), `r` (reassign). `s` (send) IS allowed — routes via `tmux send-keys` per SPEC §12.3.3 (TUI uses user-interactive path, not inbox). `R` (resume/restart) is allowed (triggers restart). Update `agent-actions.ts` to check for `kind: "system-coordinator"`.
-- [ ] **`s` key routing**: When system coordinator is selected and user presses `s`, the standard send dialog opens and the message is delivered via `tmux send-keys -t ib-coordinator -l "<message>"` followed by `tmux send-keys -t ib-coordinator Enter` (same as the sidebar input field). This matches SPEC §12.3.3 — TUI interactions are user-interactive and use tmux send-keys directly. The `ib inbox write` path is only for programmatic/automated senders (watchdog, agents). **Control character sanitization**: Before sending, strip all characters with code points below `0x20` and `0x7F` (DEL) from the message text (SPEC §12.3.3). This prevents Ctrl-C/D/Escape injection. Create a `sanitizeTmuxInput(text: string): string` function (in `src/coordinator.ts` or a shared util) that Phase 49c will reuse.
+- [ ] **`s` key routing**: When system coordinator is selected and user presses `s`, the standard send dialog opens and the message is delivered via `tmux send-keys -t ib-coordinator -l "<message>"` followed by `tmux send-keys -t ib-coordinator Enter` (same as the sidebar input field). This matches SPEC §12.3.3 — all paths into the system coordinator now use direct tmux send-keys (the previous file-based inbox path is gone — see superseded 47b). **Control character sanitization**: Before sending, strip all characters with code points below `0x20` and `0x7F` (DEL) from the message text (SPEC §12.3.3). This prevents Ctrl-C/D/Escape injection. Create a `sanitizeTmuxInput(text: string): string` function (in `src/coordinator.ts` or a shared util) that Phase 49c will reuse.
 - [ ] Tests for tree rendering with system coordinator, action key suppression
 
 #### 47e: Full-width coordinator view
@@ -1229,8 +1220,7 @@ Modify watchdog for coordinator agents:
 - [ ] Coordinators DO get rate-limit bypass, compacting detection, auto-compact
 - [ ] When a coordinator enters `waiting` with no active children: notify system coordinator instead of a manager. **Active children check**: read all agents in the repo, filter by `meta.json` `manager === "coordinator"`, check state against active set (`creating`, `running`, `waiting`, `compacting`). This check runs in the watchdog's poll loop whenever the coordinator's state transitions to `waiting`.
 - [ ] When a coordinator enters `complete`: notify system coordinator (completion notification goes to system coordinator instead of parent manager, since coordinators have no manager)
-- [ ] `notifySystemCoordinator(message)` — writes message file to `~/.itsybitsy/coordinator-inbox/` with `--source watchdog` (the watchdog runs from the coordinator's worktree, so CWD-based auto-detection would incorrectly set source to coordinator's agent ID). Uses file-based message queue (SPEC.md §12.3.4). Avoids fragile `tmux send-keys` which can corrupt the session if coordinator is mid-response.
-- [ ] **Fallback when system coordinator is not running**: `notifySystemCoordinator()` writes to inbox regardless of whether `ib-coordinator` tmux session exists. Messages are queued for processing when the system coordinator is restarted.
+- [ ] `notifySystemCoordinator(message)` — **SUPERSEDED**: the file-based inbox is gone. Watchdog notifications now use `ib send @system "message" --from watchdog`, which routes to the same direct tmux send-keys path used for any agent (SPEC §12.3.3). If the `ib-coordinator` session is not running, the send returns exit 1 and the message is dropped — there is no queueing.
 - [ ] Tests for coordinator-specific watchdog behavior, fallback notification
 
 #### 48e: Agent tree — per-repo coordinator display
@@ -1262,7 +1252,7 @@ Add ability to spawn per-repo coordinators from the TUI:
 
 Support addressing coordinators by name:
 
-- [ ] `ib send coordinator "message"` — always addresses the system coordinator. **Note**: The current `sendMessage()` takes an `Agent` object, not a string target. Add a new `resolveAndSendMessage(target: string, message: string, repoPath: string)` wrapper that performs name resolution (coordinator → inbox, repo-name → per-repo coordinator agent, agent-id → standard), then calls `sendMessage()` for agent targets or `writeInboxMessage()` for the system coordinator. The `ib send` CLI handler in `src/index.ts` calls this wrapper instead of `sendMessage()` directly. The wrapper imports `writeInboxMessage()` from `src/inbox.ts` (created in 47b) for the system coordinator path. **Graceful queueing**: if the `ib-coordinator` tmux session doesn't exist, the message is still queued to the inbox (not an error) — it will be processed when the system coordinator restarts (SPEC §12.3.1).
+- [ ] `ib send @system "message"` — addresses the system coordinator. Implemented via `sendToSystemCoordinator()` in `src/index.ts`, which checks the `ib-coordinator` tmux session is running and then delivers via the standard `sendMessage()` path with a synthetic Agent (SPEC §12.3.3). If the session is not running, exit 1 with a clear error — messages are not queued.
 - [ ] `ib send <repo-name> "message"` — addresses the per-repo coordinator for that repo (using repo basename from `src/registry.ts` to look up the coordinator agent). This is how the system coordinator reaches per-repo coordinators.
 - [ ] `sendMessage()` function: detect `coordinator` as target → system coordinator; detect registered repo basename as target → per-repo coordinator. Resolution priority: literal `coordinator` → repo basename → standard agent ID matching (SPEC.md §12.3.1). **Note**: repo basenames take priority over agent ID substring matching — if a repo is named `agent`, `ib send agent "msg"` addresses the repo coordinator, not `agent-a1b2c3d4`. Users can bypass with full agent IDs. **Backward compatibility**: existing callers pass agent IDs directly (e.g., `agent-a1b2c3d4`) — these will fall through to standard agent ID matching unchanged. The new resolution paths only activate for the literal string `coordinator` or strings matching registered repo basenames.
 - [ ] Error with clear message when repo exists but has no coordinator: "No coordinator for repo <name>"
@@ -1341,7 +1331,7 @@ Complete the input field component (may already be partially implemented):
 
 **Phase 46** is partially complete — FocusManager, focus-aware routing, panel resizing, and layout persistence are done. Input field components are deferred to Phase 49.
 
-**Phase 47** (system coordinator) is next. Sub-phases 47a-i (config/templates) and 47a-ii (lifecycle) are foundational. 47b (inbox) shares `src/coordinator.ts` with 47a-ii, so they should be done by the same agent or sequentially to avoid merge conflicts — extract inbox into `src/inbox.ts` if parallel agents are desired. 47c-47f depend on 47a.
+**Phase 47** (system coordinator) is next. Sub-phases 47a-i (config/templates) and 47a-ii (lifecycle) are foundational. 47b (inbox) is **superseded** — the file-based inbox has been removed in favor of direct tmux delivery; see SPEC §12.3.3. 47c-47f depend on 47a.
 
 **Phase 48** (per-repo coordinators) has partial parallelism with Phase 47. Sub-phases 48a (agent creation), 48c (session-start), 48e-48f (tree display, TUI actions) have **zero functional dependencies** on Phase 47 — they extend existing agent infrastructure, not coordinator-specific infrastructure. However, 48b's `buildCoordinatorSettings()` targets `src/coordinator.ts` (created in 47a), creating a **file-level dependency** — either 48b must follow 47a or the function should go in a separate file. 48d (watchdog notification), 48g (addressing resolution), and 48h (auto-spawn) truly depend on Phase 47. When parallelizing, assign agents to avoid shared file conflicts.
 
@@ -1349,7 +1339,7 @@ Complete the input field component (may already be partially implemented):
 
 ```
 Phase 47a ────── config/templates (47a-i) + lifecycle (47a-ii)
-Phase 47b ────── inbox (same agent as 47a, or extract to src/inbox.ts for parallelism)
+Phase 47b ────── SUPERSEDED — file-based inbox removed; @system uses direct tmux delivery
 Phase 47c-f ──── TmuxPoller, tree entry, full-width view, dashboard integration
                  (depends on 47a)
 Phase 48a,c ──┐

@@ -1,6 +1,20 @@
-import { test, expect, describe } from "bun:test";
-import { makeAgent } from "./test-utils";
-import { collectAgents, findManagerInTree, matchAgentById, resolveTarget } from "./index";
+import { test, expect, describe, beforeEach, afterEach } from "bun:test";
+import { mkdtemp, rm } from "fs/promises";
+import { tmpdir } from "os";
+import { join } from "path";
+import { makeAgent, makeSpawnResult } from "./test-utils";
+import {
+  collectAgents,
+  findManagerInTree,
+  matchAgentById,
+  resolveTarget,
+  buildSystemCoordinatorAgent,
+  sendToSystemCoordinator,
+  setSystemCoordinatorHasSessionFn,
+  resetSystemCoordinatorHasSessionFn,
+} from "./index";
+import { setSendSpawnRunner, resetSendSpawnRunner } from "./ib-commands";
+import { IB_COORDINATOR_SESSION } from "./coordinator";
 import type { Agent } from "./agents";
 import type { RepoEntry } from "./registry";
 
@@ -488,6 +502,133 @@ describe("resolveTarget addressing", () => {
     const { agent, isSystemCoordinator } = await resolveTarget("@repo1", repos);
     expect(agent).toBeNull();
     expect(isSystemCoordinator).toBe(false);
+  });
+});
+
+// ─── @system delivery (sendToSystemCoordinator) ──────────────────────────
+
+describe("buildSystemCoordinatorAgent", () => {
+  test("uses /tmp as repoPath when cwd is not inside an agent worktree", () => {
+    const a = buildSystemCoordinatorAgent("ib-coordinator", "/some/random/dir");
+    expect(a.repoPath).toBe("/tmp");
+    expect(a.id).toBe("ib-coordinator");
+    expect(a.meta.tmux_session).toBe("ib-coordinator");
+  });
+
+  test("uses the sender's repo root when cwd is inside an agent worktree", () => {
+    const cwd = "/Users/me/project/.ittybitty/agents/agent-abc123/repo/src";
+    const a = buildSystemCoordinatorAgent("ib-coordinator", cwd);
+    expect(a.repoPath).toBe("/Users/me/project");
+  });
+
+  test("synthetic agent has no manager and is not archived", () => {
+    const a = buildSystemCoordinatorAgent("ib-coordinator", "/tmp");
+    expect(a.meta.manager).toBeNull();
+    expect(a.archived).toBe(false);
+    expect(a.children).toEqual([]);
+  });
+});
+
+describe("sendToSystemCoordinator", () => {
+  let spawnCalls: string[][];
+  let tempDir: string;
+
+  beforeEach(async () => {
+    spawnCalls = [];
+    tempDir = await mkdtemp(join(tmpdir(), "system-coord-test-"));
+    setSendSpawnRunner((cmd: string[]) => {
+      spawnCalls.push(cmd);
+      return makeSpawnResult();
+    });
+  });
+
+  afterEach(() => {
+    resetSendSpawnRunner();
+    resetSystemCoordinatorHasSessionFn();
+    return rm(tempDir, { recursive: true, force: true });
+  });
+
+  test("returns error and does not invoke sendMessage when coordinator session is not running", async () => {
+    setSystemCoordinatorHasSessionFn(async () => false);
+
+    const result = await sendToSystemCoordinator("hello", { cwd: tempDir });
+
+    expect(result.ok).toBe(false);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("System coordinator is not running");
+    // sendMessage was never called: no tmux spawn calls were made via the
+    // sendSpawnCtx runner (the has-session check uses a separate injectable).
+    expect(spawnCalls.length).toBe(0);
+  });
+
+  test("queries the coordinator session by name when checking has-session", async () => {
+    let queriedSession: string | undefined;
+    setSystemCoordinatorHasSessionFn(async (sessionName) => {
+      queriedSession = sessionName;
+      return false;
+    });
+
+    await sendToSystemCoordinator("hi", { cwd: tempDir });
+
+    expect(queriedSession).toBe(IB_COORDINATOR_SESSION);
+  });
+
+  test("invokes sendMessage with synthetic Agent (tmux_session = IB_COORDINATOR_SESSION) when running", async () => {
+    setSystemCoordinatorHasSessionFn(async () => true);
+
+    const result = await sendToSystemCoordinator("hello world", { cwd: tempDir });
+
+    expect(result.ok).toBe(true);
+    expect(result.stdout).toBe("Sent to system coordinator");
+
+    // Verify sendMessage routed to IB_COORDINATOR_SESSION via the standard
+    // tmux send-keys path: has-session probe + literal-paste + Enter.
+    expect(spawnCalls.length).toBe(3);
+    expect(spawnCalls[0]).toEqual(["tmux", "has-session", "-t", IB_COORDINATOR_SESSION]);
+    expect(spawnCalls[1]).toEqual([
+      "tmux",
+      "send-keys",
+      "-t",
+      IB_COORDINATOR_SESSION,
+      "-l",
+      "hello world",
+    ]);
+    expect(spawnCalls[2]).toEqual(["tmux", "send-keys", "-t", IB_COORDINATOR_SESSION, "Enter"]);
+  });
+
+  test("renders [sent by agent <id>]: prefix when fromAgent is supplied", async () => {
+    setSystemCoordinatorHasSessionFn(async () => true);
+
+    await sendToSystemCoordinator("ping", { fromAgent: "agent-xyz", cwd: tempDir });
+
+    // The literal-paste send-keys call carries the prefixed message body.
+    const sendKeysLiteral = spawnCalls.find(
+      (c) =>
+        c[0] === "tmux" &&
+        c[1] === "send-keys" &&
+        c.length === 6 &&
+        c[3] === IB_COORDINATOR_SESSION &&
+        c[4] === "-l",
+    );
+    expect(sendKeysLiteral).toBeDefined();
+    expect(sendKeysLiteral![5]).toBe("[sent by agent agent-xyz]: ping");
+  });
+
+  test("does not prepend a prefix when fromAgent is omitted", async () => {
+    setSystemCoordinatorHasSessionFn(async () => true);
+
+    await sendToSystemCoordinator("plain text", { cwd: tempDir });
+
+    const sendKeysLiteral = spawnCalls.find(
+      (c) =>
+        c[0] === "tmux" &&
+        c[1] === "send-keys" &&
+        c.length === 6 &&
+        c[3] === IB_COORDINATOR_SESSION &&
+        c[4] === "-l",
+    );
+    expect(sendKeysLiteral).toBeDefined();
+    expect(sendKeysLiteral![5]).toBe("plain text");
   });
 });
 

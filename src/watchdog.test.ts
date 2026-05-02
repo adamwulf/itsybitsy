@@ -873,40 +873,33 @@ describe("watchdog", () => {
   // =========================================================================
 
   describe("notifySpawner @-prefixed routing", () => {
-    let inboxDir: string;
-
     beforeEach(async () => {
-      inboxDir = await Bun.$`mktemp -d`.text().then((s) => s.trim());
-      const { setInboxDir } = await import("./inbox");
-      setInboxDir(inboxDir);
+      const { setSystemCoordinatorHasSessionFn } = await import("./index");
+      setSystemCoordinatorHasSessionFn(async () => true);
     });
 
     afterEach(async () => {
-      const { setInboxDir } = await import("./inbox");
-      setInboxDir(undefined);
-      await Bun.$`rm -rf ${inboxDir}`.quiet();
+      const { resetSystemCoordinatorHasSessionFn } = await import("./index");
+      resetSystemCoordinatorHasSessionFn();
     });
 
-    test("@system sentinel routes to inboxWrite", async () => {
+    test("@system sentinel routes to system coordinator tmux session", async () => {
       const a1 = agent("a1", "complete", null);
       a1.meta.spawned_by = { agent_id: "@system", repo_path: null };
 
       const { notifySpawner } = await import("./watchdog");
-      await notifySpawner(a1, "[watchdog]: hello system", []);
+      const ok = await notifySpawner(a1, "[watchdog]: hello system", []);
 
-      // Inbox should now have one .msg file authored by a1
-      const { readdirSync } = await import("node:fs");
-      const files = readdirSync(inboxDir);
-      expect(files.length).toBe(1);
-      const filename = files[0]!;
-      expect(filename.endsWith(".msg")).toBe(true);
-      // Source should be the spawnee agent ID
-      expect(filename).toContain("-a1.msg");
-      const content = await Bun.file(join(inboxDir, filename)).text();
-      expect(content).toBe("[watchdog]: hello system");
-
-      // No tmux send-keys should have been issued for @system routing
-      expect(spawnMock.calls.filter((c) => c.args.includes("send-keys")).length).toBe(0);
+      expect(ok).toBe(true);
+      // sendMessage delivers via `tmux send-keys -t <session>` — assert the
+      // system coordinator session received send-keys traffic.
+      const { IB_COORDINATOR_SESSION } = await import("./coordinator");
+      const sendKeysCalls = spawnMock.calls.filter((c) =>
+        c.args.includes("send-keys") &&
+        c.args.includes("-t") &&
+        c.args.includes(IB_COORDINATOR_SESSION)
+      );
+      expect(sendKeysCalls.length).toBeGreaterThan(0);
     });
 
     test("@<repo-name> sentinel resolves to that repo's coordinator and sendMessage", async () => {
@@ -1069,17 +1062,19 @@ describe("watchdog", () => {
       }
     });
 
-    test("handleComplete: failure on @system inboxWrite leaves completionNotified=false", async () => {
-      // Force inbox write to fail by overriding the inbox dir to a non-writable path
-      const { setInboxDir } = await import("./inbox");
-      setInboxDir("/proc/0/nonexistent/cant-write-here");
+    test("handleComplete: failure on @system delivery leaves completionNotified=false", async () => {
+      // Force @system delivery to fail by reporting the coordinator session as
+      // not running — sendToSystemCoordinator returns ok=false in that case.
+      const { setSystemCoordinatorHasSessionFn, resetSystemCoordinatorHasSessionFn } =
+        await import("./index");
+      setSystemCoordinatorHasSessionFn(async () => false);
       try {
         const a1 = agent("a1", "complete", null);
         a1.meta.spawned_by = { agent_id: "@system", repo_path: null };
         await tick([a1]);
         expect(getTracker("a1").completionNotified).toBe(false);
       } finally {
-        setInboxDir(undefined);
+        resetSystemCoordinatorHasSessionFn();
       }
     });
 

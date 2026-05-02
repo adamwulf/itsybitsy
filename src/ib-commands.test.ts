@@ -933,6 +933,51 @@ describe("resumeAgent (native)", () => {
     expect(nudgeCall).toContain("-l");
   });
 
+  test("resume.sh captures stderr and annotates exit codes; resume sets pane-died hook", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-resume");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-resume",
+      tmux_session: "tmux-agent-resume",
+      session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      model: "opus",
+    }));
+
+    const agent = _makeAgent({
+      id: "agent-resume",
+      repoPath: tempDir,
+      repoName: "test",
+      state: "stopped",
+      meta: {
+        session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        tmux_session: "tmux-agent-resume",
+        model: "opus",
+      } as any,
+    });
+    const result = await resumeAgent(agent);
+    expect(result.ok).toBe(true);
+
+    const resumeScript = await Bun.file(join(agentDir, "resume.sh")).text();
+    // Same diagnostic logging as start.sh — stderr sidecar + tail-on-error.
+    expect(resumeScript).toContain("STDERR_LOG=");
+    expect(resumeScript).toContain("claude.stderr.log");
+    expect(resumeScript).toMatch(/claude --resume[^\n]*2> "\$STDERR_LOG"/);
+    expect(resumeScript).toContain('if [[ "$EXIT_CODE" -ne 0 && -s "$STDERR_LOG" ]]');
+    expect(resumeScript).toContain('tail -n 50 "$STDERR_LOG" >> "$AGENT_LOG"');
+    expect(resumeScript).toContain("case $EXIT_CODE in");
+    expect(resumeScript).toContain("137) log \"exit=137 → SIGKILL");
+
+    // Resume path also sets the pane-died backstop.
+    const setHookCall = spawnCalls.find(
+      (c) => c[0] === "tmux" && c[1] === "set-hook" && c.includes("pane-died"),
+    );
+    expect(setHookCall).toBeDefined();
+    const hookBody = setHookCall![setHookCall!.length - 1]!;
+    expect(hookBody).toContain("run-shell");
+    expect(hookBody).toContain("[tmux pane-died]");
+    expect(hookBody).toContain("agent.log");
+  });
+
   test("detects yolo mode from start.sh", async () => {
     const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
     await mkdir(join(agentDir, "repo"), { recursive: true });
@@ -2578,6 +2623,52 @@ describe("newAgent (native)", () => {
     expect(startSh).toContain("unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT");
     // No PATH export — ib is already on the user's PATH
     expect(startSh).not.toContain("export PATH");
+  });
+
+  test("start.sh captures claude stderr to a sidecar log and tails it on non-zero exit", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    await callNewAgent("do work", { name: "test-stderr" });
+
+    const startSh = await Bun.file(join(agentsDir, "test-stderr", "start.sh")).text();
+    // STDERR_LOG variable is set and used as claude's stderr redirect target.
+    expect(startSh).toContain("STDERR_LOG=");
+    expect(startSh).toContain("claude.stderr.log");
+    expect(startSh).toMatch(/claude --session-id[^\n]*2> "\$STDERR_LOG"/);
+    // On non-zero exit, last 50 lines of stderr are appended to agent.log
+    // so post-mortem doesn't depend on the (now-dying) tmux pane.
+    expect(startSh).toContain('if [[ "$EXIT_CODE" -ne 0 && -s "$STDERR_LOG" ]]');
+    expect(startSh).toContain('tail -n 50 "$STDERR_LOG" >> "$AGENT_LOG"');
+  });
+
+  test("start.sh annotates common claude exit codes", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    await callNewAgent("do work", { name: "test-exit-codes" });
+
+    const startSh = await Bun.file(join(agentsDir, "test-exit-codes", "start.sh")).text();
+    // The case statement labels each known exit code so the cause is obvious
+    // in agent.log without consulting external docs.
+    expect(startSh).toContain("case $EXIT_CODE in");
+    expect(startSh).toContain("137) log \"exit=137 → SIGKILL");
+    expect(startSh).toContain("139) log \"exit=139 → SIGSEGV");
+    expect(startSh).toContain("143) log \"exit=143 → SIGTERM");
+    expect(startSh).toContain("127) log \"exit=127 → command not found");
+  });
+
+  test("new-agent sets a tmux pane-died hook that writes to agent.log", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    await callNewAgent("do work", { name: "test-pane-died" });
+
+    // The pane-died hook is a backstop for cases where start.sh dies before
+    // it can log the exit code (e.g. bash crash, tmux server killed).
+    const setHookCall = spawnCalls.find(
+      (c) => c[0] === "tmux" && c[1] === "set-hook" && c.includes("pane-died"),
+    );
+    expect(setHookCall).toBeDefined();
+    const hookBody = setHookCall![setHookCall!.length - 1]!;
+    expect(hookBody).toContain("run-shell");
+    expect(hookBody).toContain("[tmux pane-died]");
+    expect(hookBody).toContain("#{session_name}");
+    expect(hookBody).toContain("agent.log");
   });
 
   test("creates exit-check.sh", async () => {

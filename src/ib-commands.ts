@@ -475,18 +475,22 @@ export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
   const resumeScript = join(agentDir, "resume.sh");
   const qMetaJson = shellQuote(join(agentDir, "meta.json"));
   const qAgentLog = shellQuote(join(agentDir, "agent.log"));
+  const qResumeStderrLog = shellQuote(join(agentDir, "claude.stderr.log"));
   const resumeContent = `#!/bin/bash
 # Clear Claude Code nesting detection so agents can start their own claude process
 unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT
 
 AGENT_LOG=${qAgentLog}
+STDERR_LOG=${qResumeStderrLog}
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [resume.sh] $1" >> "$AGENT_LOG"; }
 
 log "Starting claude --resume ${sessionId} ${claudeArgs}"
 log "PWD=$(pwd) which_claude=$(which claude 2>&1)"
 
-# Start Claude in background and capture PID
-claude --resume "${sessionId}" ${claudeArgs} &
+# Start Claude in background and capture PID. Stderr is redirected to a sidecar
+# file so we can tail it into agent.log on exit (helps diagnose crashes / 429s).
+: > "$STDERR_LOG"
+claude --resume "${sessionId}" ${claudeArgs} 2> "$STDERR_LOG" &
 CLAUDE_PID=$!
 log "Claude PID: $CLAUDE_PID"
 trap 'log "script received SIGHUP — tmux pane killed or closed; sending SIGTERM to Claude PID=$CLAUDE_PID"; kill $CLAUDE_PID 2>/dev/null' HUP
@@ -504,6 +508,28 @@ wait $CLAUDE_PID
 EXIT_CODE=$?
 SIGNAL=$(kill -l $EXIT_CODE 2>/dev/null || echo "none")
 log "Claude exited: code=$EXIT_CODE signal=$SIGNAL"
+
+# Annotate common exit codes so the cause is obvious in agent.log.
+case $EXIT_CODE in
+    0)   log "exit=0 → clean exit" ;;
+    1)   log "exit=1 → generic claude error (check stderr tail below)" ;;
+    2)   log "exit=2 → claude usage / argument error" ;;
+    127) log "exit=127 → command not found ('claude' missing from PATH?)" ;;
+    129) log "exit=129 → SIGHUP (tmux pane closed or controlling terminal lost)" ;;
+    130) log "exit=130 → SIGINT (Ctrl-C)" ;;
+    137) log "exit=137 → SIGKILL (likely OOM kill or 'kill -9'; check Console.app for 'low memory')" ;;
+    139) log "exit=139 → SIGSEGV (claude segfault)" ;;
+    143) log "exit=143 → SIGTERM (graceful kill, e.g. ib kill / pause)" ;;
+    *)   log "exit=$EXIT_CODE → unrecognized; SIGNAL=$SIGNAL" ;;
+esac
+
+# If Claude exited non-cleanly and wrote anything to stderr, dump the tail into
+# agent.log so the post-mortem doesn't depend on the (now-dying) tmux pane.
+if [[ "$EXIT_CODE" -ne 0 && -s "$STDERR_LOG" ]]; then
+    log "── claude stderr (last 50 lines) ──"
+    tail -n 50 "$STDERR_LOG" >> "$AGENT_LOG"
+    log "── end claude stderr ──"
+fi
 
 # Run exit check
 ${qAbsExitScript}
@@ -530,6 +556,11 @@ ${qAbsExitScript}
   }
   await nukeResumeSpawnCtx.run(["tmux", "set-option", "-w", "-t", tmuxSession, "history-limit", "50000"]);
   await nukeResumeSpawnCtx.run(["tmux", "set-option", "-w", "-t", tmuxSession, "remain-on-exit", "on"]);
+  // pane-died hook fires on every pane termination (graceful or otherwise)
+  // as a backstop for the case where resume.sh itself dies before reaching
+  // its exit-log line. See the new-agent path for the matching comment.
+  const resumePaneDiedHook = `run-shell "echo '[tmux pane-died] session=#{session_name} pane_dead_status=#{pane_dead_status} pane_dead_signal=#{pane_dead_signal}' >> ${shellQuote(join(agentDir, "agent.log"))}"`;
+  await nukeResumeSpawnCtx.run(["tmux", "set-hook", "-t", tmuxSession, "pane-died", resumePaneDiedHook]);
 
   await logAgent(agentDir, "[resume] tmux session created, running autoAcceptWorkspaceTrust");
 
@@ -2305,18 +2336,22 @@ echo ""
   const qStartMetaJson = shellQuote(join(agentDir, "meta.json"));
   const qStartExitScript = shellQuote(absExitScript);
   const qStartAgentLog = shellQuote(join(agentDir, "agent.log"));
+  const qStartStderrLog = shellQuote(join(agentDir, "claude.stderr.log"));
   const startContent = `#!/bin/bash
 # Clear Claude Code nesting detection so agents can start their own claude process
 unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT
 
 AGENT_LOG=${qStartAgentLog}
+STDERR_LOG=${qStartStderrLog}
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [start.sh] $1" >> "$AGENT_LOG"; }
 
 log "Starting claude --session-id ${sessionUuid} ${claudeArgs}"
 log "PWD=$(pwd) which_claude=$(which claude 2>&1)"
 
-# Start Claude in background and capture PID
-claude --session-id "${sessionUuid}" ${claudeArgs} "$(cat ${qAbsPromptFile})" &
+# Start Claude in background and capture PID. Stderr is redirected to a sidecar
+# file so we can tail it into agent.log on exit (helps diagnose crashes / 429s).
+: > "$STDERR_LOG"
+claude --session-id "${sessionUuid}" ${claudeArgs} "$(cat ${qAbsPromptFile})" 2> "$STDERR_LOG" &
 CLAUDE_PID=$!
 log "Claude PID: $CLAUDE_PID"
 trap 'log "script received SIGHUP — tmux pane killed or closed; sending SIGTERM to Claude PID=$CLAUDE_PID"; kill $CLAUDE_PID 2>/dev/null' HUP
@@ -2334,6 +2369,28 @@ wait $CLAUDE_PID
 EXIT_CODE=$?
 SIGNAL=$(kill -l $EXIT_CODE 2>/dev/null || echo "none")
 log "Claude exited: code=$EXIT_CODE signal=$SIGNAL"
+
+# Annotate common exit codes so the cause is obvious in agent.log.
+case $EXIT_CODE in
+    0)   log "exit=0 → clean exit" ;;
+    1)   log "exit=1 → generic claude error (check stderr tail below)" ;;
+    2)   log "exit=2 → claude usage / argument error" ;;
+    127) log "exit=127 → command not found ('claude' missing from PATH?)" ;;
+    129) log "exit=129 → SIGHUP (tmux pane closed or controlling terminal lost)" ;;
+    130) log "exit=130 → SIGINT (Ctrl-C)" ;;
+    137) log "exit=137 → SIGKILL (likely OOM kill or 'kill -9'; check Console.app for 'low memory')" ;;
+    139) log "exit=139 → SIGSEGV (claude segfault)" ;;
+    143) log "exit=143 → SIGTERM (graceful kill, e.g. ib kill / pause)" ;;
+    *)   log "exit=$EXIT_CODE → unrecognized; SIGNAL=$SIGNAL" ;;
+esac
+
+# If Claude exited non-cleanly and wrote anything to stderr, dump the tail into
+# agent.log so the post-mortem doesn't depend on the (now-dying) tmux pane.
+if [[ "$EXIT_CODE" -ne 0 && -s "$STDERR_LOG" ]]; then
+    log "── claude stderr (last 50 lines) ──"
+    tail -n 50 "$STDERR_LOG" >> "$AGENT_LOG"
+    log "── end claude stderr ──"
+fi
 
 # Run exit check
 ${qStartExitScript}
@@ -2384,12 +2441,26 @@ ${qStartExitScript}
     const suffix = err ? `: ${err}` : "";
     return { ok: false, exitCode: 1, stdout: "", stderr: `Error: could not create tmux session '${tmuxSession}'${suffix}` };
   }
-  // The two set-option calls and the has-session verify all depend on the
-  // session existing (above), but are independent of each other — run together.
+  // The two set-option calls, the pane-died hook, and the has-session verify
+  // all depend on the session existing (above), but are independent of each
+  // other — run together. The pane-died hook fires on every pane termination
+  // (graceful or otherwise) and acts as a backstop for the case where the
+  // bash wrapper itself dies before reaching its exit-log line. On normal
+  // shutdowns it produces a redundant log line next to start.sh's "Claude
+  // exited" — that's expected, not a sign of trouble.
+  //
+  // No timestamp is included in the message — the previous log line in
+  // agent.log carries one, and embedding $(date) inside tmux's run-shell
+  // argument requires fragile double-escaping. tmux only expands #{...}
+  // format strings inside the run-shell body; the echo'd literal goes
+  // straight to sh -c. agentDir is constrained by isValidShellPath so
+  // shellQuote's single-quote wrapping is safe inside tmux's double quotes.
+  const paneDiedHook = `run-shell "echo '[tmux pane-died] session=#{session_name} pane_dead_status=#{pane_dead_status} pane_dead_signal=#{pane_dead_signal}' >> ${shellQuote(join(agentDir, "agent.log"))}"`;
   await logSpawn(agentDir, spawnerAgentDir, id, `tmux has-session verify starting: -t ${tmuxSession}`);
-  const [, , verifyResult] = await Promise.all([
+  const [, , , verifyResult] = await Promise.all([
     newAgentSpawnCtx.run(["tmux", "set-option", "-w", "-t", tmuxSession, "history-limit", "50000"]),
     newAgentSpawnCtx.run(["tmux", "set-option", "-w", "-t", tmuxSession, "remain-on-exit", "on"]),
+    newAgentSpawnCtx.run(["tmux", "set-hook", "-t", tmuxSession, "pane-died", paneDiedHook]),
     // 19. Verify tmux session created
     newAgentSpawnCtx.run(["tmux", "has-session", "-t", tmuxSession]),
   ]);

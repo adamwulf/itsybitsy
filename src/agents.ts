@@ -17,7 +17,8 @@ export type MetaState = "creating" | "running" | "waiting" | "complete" | "stopp
  *
  * `agent_id` may be a real agent ID (e.g. "agent-1234abcd") or an `@`-prefixed
  * sentinel that resolves through `resolveTarget`:
- *   - `@system` — system coordinator (notifications go to ~/.itsybitsy inbox)
+ *   - `@system` — system coordinator (notifications routed via
+ *     sendToSystemCoordinator → tmux send-keys to the ib-coordinator session)
  *   - `@<repo-name>` — that repo's per-repo coordinator (basename-based; see
  *     getCoordinatorAgentId)
  *

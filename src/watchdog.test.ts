@@ -892,24 +892,19 @@ describe("watchdog", () => {
 
       expect(ok).toBe(true);
       // sendMessage delivers via `tmux send-keys -t <session> -l <chunk>` —
-      // assert the system coordinator session received send-keys traffic AND
-      // the chunked payload carries the [sent by agent a1]: prefix so a
-      // regression dropping `fromAgent: agent.id` would fail this test.
+      // assert one chunked payload arrived at the coordinator session AND
+      // carries the `[sent by agent a1]:` prefix, so a regression dropping
+      // `fromAgent: agent.id` would fail this test. Position-independent
+      // arg scan mirrors the existing countSendKeysWithText helper.
       const { IB_COORDINATOR_SESSION } = await import("./coordinator");
-      const sendKeysCalls = spawnMock.calls.filter((c) =>
+      const matchingCalls = spawnMock.calls.filter((c) =>
         c.args.includes("send-keys") &&
         c.args.includes("-t") &&
-        c.args.includes(IB_COORDINATOR_SESSION)
+        c.args.includes(IB_COORDINATOR_SESSION) &&
+        c.args.includes("-l") &&
+        c.args.some((a: any) => typeof a === "string" && a.includes("[sent by agent a1]:"))
       );
-      expect(sendKeysCalls.length).toBeGreaterThan(0);
-      // The -l flag's argument is the literal payload chunk; one of the
-      // chunked payloads must carry the from-agent prefix.
-      const payloadChunks = sendKeysCalls
-        .map((c) => {
-          const lIdx = c.args.indexOf("-l");
-          return lIdx >= 0 ? String(c.args[lIdx + 1] ?? "") : "";
-        });
-      expect(payloadChunks.some((p) => p.includes("[sent by agent a1]:"))).toBe(true);
+      expect(matchingCalls.length).toBeGreaterThan(0);
     });
 
     test("@<repo-name> sentinel resolves to that repo's coordinator and sendMessage", async () => {

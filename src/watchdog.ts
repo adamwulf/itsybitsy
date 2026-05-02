@@ -407,7 +407,7 @@ async function handleWaiting(agent: Agent, tracker: AgentTracker, getAllAgents: 
     }
 
     // Only reset counter and advance backoff on successful (or no-op)
-    // delivery. A transient inbox/tmux failure must not silently advance
+    // delivery. A transient delivery failure must not silently advance
     // the backoff — we want to keep nagging until delivery succeeds.
     if (notified) {
       tracker.waitCounter = 0;
@@ -522,7 +522,7 @@ async function handleComplete(agent: Agent, tracker: AgentTracker, getAllAgents:
       notified = true;
     }
     // Only set the one-shot flag when delivery actually succeeded. A
-    // transient inbox/tmux failure must not silently swallow the
+    // transient delivery failure must not silently swallow the
     // completion notification — we want the next tick to retry.
     if (notified) {
       tracker.completionNotified = true;

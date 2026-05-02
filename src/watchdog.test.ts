@@ -768,6 +768,369 @@ describe("watchdog", () => {
     });
   });
 
+  // =========================================================================
+  // Mutually-exclusive notify precedence (manager wins over spawned_by)
+  // =========================================================================
+
+  describe("notify precedence (mutually exclusive)", () => {
+    /** Same matcher used elsewhere — counts the watchdog message that goes
+     * over `tmux send-keys -l <text>`. */
+    function countSendKeysWithText(
+      spawn: ReturnType<typeof mockSpawnRunner>,
+      substr: string,
+    ): number {
+      return spawn.calls.filter((c) =>
+        c.args.includes("send-keys") &&
+        c.args.includes("-l") &&
+        c.args.some((a: any) => typeof a === "string" && a.includes(substr))
+      ).length;
+    }
+
+    test("waiting: manager wins — spawner is NOT notified when both are set", async () => {
+      setWatchdogCaptureTmux(async () => "no shells");
+      const mgr = agent("mgr", "running");
+      const spawner = agent("spawner", "running");
+      const a1 = agent("a1", "waiting", "mgr");
+      a1.meta.spawned_by = { agent_id: "spawner", repo_path: "/tmp/other" };
+
+      for (let i = 0; i < INITIAL_NOTIFY_TICKS; i++) {
+        await tick([mgr, spawner, a1]);
+      }
+      // Manager (subtask wording) was notified; spawner (you spawned wording) was NOT.
+      expect(countSendKeysWithText(spawnMock, "Your subtask a1 recently started waiting")).toBeGreaterThan(0);
+      expect(countSendKeysWithText(spawnMock, "you spawned recently started waiting")).toBe(0);
+    });
+
+    test("waiting: spawner notified when manager is null", async () => {
+      setWatchdogCaptureTmux(async () => "no shells");
+      const spawner = agent("spawner", "running");
+      const a1 = agent("a1", "waiting", null);
+      a1.meta.spawned_by = { agent_id: "spawner", repo_path: "/tmp/other" };
+
+      for (let i = 0; i < INITIAL_NOTIFY_TICKS; i++) {
+        await tick([spawner, a1]);
+      }
+      expect(countSendKeysWithText(spawnMock, "you spawned recently started waiting")).toBeGreaterThan(0);
+    });
+
+    test("waiting: no notification when neither manager nor spawner is set", async () => {
+      setWatchdogCaptureTmux(async () => "no shells");
+      const a1 = agent("a1", "waiting", null);
+
+      for (let i = 0; i < INITIAL_NOTIFY_TICKS + 5; i++) {
+        await tick([a1]);
+      }
+      expect(spawnMock.calls.filter((c) => c.args.includes("send-keys")).length).toBe(0);
+    });
+
+    test("complete: manager wins — spawner is NOT notified", async () => {
+      const mgr = agent("mgr", "running");
+      const spawner = agent("spawner", "running");
+      const a1 = agent("a1", "complete", "mgr");
+      a1.meta.spawned_by = { agent_id: "spawner", repo_path: "/tmp/other" };
+
+      await tick([mgr, spawner, a1]);
+      expect(countSendKeysWithText(spawnMock, "Your subtask a1 recently completed")).toBeGreaterThan(0);
+      expect(countSendKeysWithText(spawnMock, "you spawned recently completed")).toBe(0);
+    });
+
+    test("complete: spawner notified when manager is null", async () => {
+      const spawner = agent("spawner", "running");
+      const a1 = agent("a1", "complete", null);
+      a1.meta.spawned_by = { agent_id: "spawner", repo_path: "/tmp/other" };
+
+      await tick([spawner, a1]);
+      expect(countSendKeysWithText(spawnMock, "you spawned recently completed")).toBeGreaterThan(0);
+    });
+
+    test("unknown: manager wins — spawner is NOT notified", async () => {
+      const mgr = agent("mgr", "running");
+      const spawner = agent("spawner", "running");
+      const a1 = agent("a1", "unknown", "mgr");
+      a1.meta.spawned_by = { agent_id: "spawner", repo_path: "/tmp/other" };
+
+      for (let i = 0; i < INITIAL_NOTIFY_TICKS; i++) {
+        await tick([mgr, spawner, a1]);
+      }
+      expect(countSendKeysWithText(spawnMock, "Your subtask a1 state is unknown")).toBeGreaterThan(0);
+      expect(countSendKeysWithText(spawnMock, "you spawned has an unknown state")).toBe(0);
+    });
+
+    test("unknown: spawner notified when manager is null", async () => {
+      const spawner = agent("spawner", "running");
+      const a1 = agent("a1", "unknown", null);
+      a1.meta.spawned_by = { agent_id: "spawner", repo_path: "/tmp/other" };
+
+      for (let i = 0; i < INITIAL_NOTIFY_TICKS; i++) {
+        await tick([spawner, a1]);
+      }
+      expect(countSendKeysWithText(spawnMock, "you spawned has an unknown state")).toBeGreaterThan(0);
+    });
+  });
+
+  // =========================================================================
+  // notifySpawner: @-prefixed sentinel routing
+  // =========================================================================
+
+  describe("notifySpawner @-prefixed routing", () => {
+    let inboxDir: string;
+
+    beforeEach(async () => {
+      inboxDir = await Bun.$`mktemp -d`.text().then((s) => s.trim());
+      const { setInboxDir } = await import("./inbox");
+      setInboxDir(inboxDir);
+    });
+
+    afterEach(async () => {
+      const { setInboxDir } = await import("./inbox");
+      setInboxDir(undefined);
+      await Bun.$`rm -rf ${inboxDir}`.quiet();
+    });
+
+    test("@system sentinel routes to inboxWrite", async () => {
+      const a1 = agent("a1", "complete", null);
+      a1.meta.spawned_by = { agent_id: "@system", repo_path: null };
+
+      const { notifySpawner } = await import("./watchdog");
+      await notifySpawner(a1, "[watchdog]: hello system", []);
+
+      // Inbox should now have one .msg file authored by a1
+      const { readdirSync } = await import("node:fs");
+      const files = readdirSync(inboxDir);
+      expect(files.length).toBe(1);
+      const filename = files[0]!;
+      expect(filename.endsWith(".msg")).toBe(true);
+      // Source should be the spawnee agent ID
+      expect(filename).toContain("-a1.msg");
+      const content = await Bun.file(join(inboxDir, filename)).text();
+      expect(content).toBe("[watchdog]: hello system");
+
+      // No tmux send-keys should have been issued for @system routing
+      expect(spawnMock.calls.filter((c) => c.args.includes("send-keys")).length).toBe(0);
+    });
+
+    test("@<repo-name> sentinel resolves to that repo's coordinator and sendMessage", async () => {
+      // Use a real tempdir whose basename we control so the @<basename>
+      // lookup in notifySpawner finds the registered repo.
+      const { join: pjoin, basename: pbasename } = await import("path");
+      const parentDir = await Bun.$`mktemp -d`.text().then((s) => s.trim());
+      const repoDir = pjoin(parentDir, "myrepo");
+      mkdirSync(repoDir, { recursive: true });
+      const repoBasename = pbasename(repoDir); // "myrepo"
+
+      try {
+        // Coordinator agent: id matches the repo basename.
+        const coord = makeAgent({
+          id: repoBasename,
+          state: "running",
+          meta: {
+            id: repoBasename,
+            session_id: "sess-coord",
+            tmux_session: "tmux-coord",
+            prompt: "coord",
+            manager: null,
+            created: "2026-03-05T00:00:00Z",
+            created_epoch: Math.floor(Date.now() / 1000) - 60,
+            worktree: false,
+            worker: false,
+            yolo: false,
+            model: "sonnet",
+            claude_pid: "12345",
+            coordinator: true,
+          },
+        });
+
+        // Real on-disk coordinator meta so checkCoordinatorExists finds it.
+        const agentDir = `${repoDir}/.ittybitty/agents/${repoBasename}`;
+        mkdirSync(agentDir, { recursive: true });
+        writeFileSync(`${agentDir}/meta.json`, JSON.stringify({
+          id: repoBasename,
+          coordinator: true,
+        }));
+
+        // The registry name DELIBERATELY differs from basename — the lookup
+        // must use basename(repo.path), not registry.name.
+        setWatchdogListRepos(async () => [
+          { path: repoDir, name: "completely-different-name" },
+        ]);
+
+        const a1 = agent("a1", "complete", null);
+        a1.meta.spawned_by = { agent_id: `@${repoBasename}`, repo_path: repoDir };
+
+        const { notifySpawner } = await import("./watchdog");
+        const ok = await notifySpawner(a1, "[watchdog]: hello @myrepo", [coord]);
+
+        expect(ok).toBe(true);
+        const sendKeysCalls = spawnMock.calls.filter((c) =>
+          c.args.includes("send-keys") && c.args.includes("-t") && c.args.includes("tmux-coord")
+        );
+        expect(sendKeysCalls.length).toBeGreaterThan(0);
+      } finally {
+        await Bun.$`rm -rf ${parentDir}`.quiet();
+        resetWatchdogListRepos();
+      }
+    });
+
+    test("@<repo-name> sentinel: no-op when repo not registered", async () => {
+      setWatchdogListRepos(async () => []);
+      try {
+        const a1 = agent("a1", "complete", null);
+        a1.meta.spawned_by = { agent_id: "@gone-repo", repo_path: "/tmp/gone" };
+
+        const { notifySpawner } = await import("./watchdog");
+        const ok = await notifySpawner(a1, "msg", []);
+
+        expect(ok).toBe(false);
+        expect(spawnMock.calls.filter((c) => c.args.includes("send-keys")).length).toBe(0);
+      } finally {
+        resetWatchdogListRepos();
+      }
+    });
+  });
+
+  // =========================================================================
+  // BUG-1 regression: notify failures must not advance handler state
+  // =========================================================================
+
+  describe("notify failure handling", () => {
+    /** Same matcher used elsewhere — counts the watchdog message that goes
+     * over `tmux send-keys -l <text>`. */
+    function countSendKeysWithText(
+      spawn: ReturnType<typeof mockSpawnRunner>,
+      substr: string,
+    ): number {
+      return spawn.calls.filter((c) =>
+        c.args.includes("send-keys") &&
+        c.args.includes("-l") &&
+        c.args.some((a: any) => typeof a === "string" && a.includes(substr))
+      ).length;
+    }
+
+    /** Spawn runner that fails `tmux has-session` so sendMessage returns ok:false. */
+    function failingSendRunner() {
+      const calls: Array<{ args: any[]; opts: any }> = [];
+      const runner = (args: any[], opts?: any): any => {
+        calls.push({ args: [...args], opts });
+        const isHasSession = args.includes("has-session");
+        return {
+          stdout: new ReadableStream({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode(""));
+              controller.close();
+            },
+          }),
+          stderr: new ReadableStream({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode(""));
+              controller.close();
+            },
+          }),
+          exited: Promise.resolve(isHasSession ? 1 : 0),
+        };
+      };
+      return { runner: runner as any, calls };
+    }
+
+    test("notifyManager returns false when manager not found", async () => {
+      const a1 = agent("a1", "waiting", "missing-mgr");
+      const ok = await notifyManager(a1, "test", [a1]);
+      expect(ok).toBe(false);
+    });
+
+    test("notifyManager returns false when sendMessage fails (tmux session gone)", async () => {
+      const failing = failingSendRunner();
+      setSendSpawnRunner(failing.runner);
+      try {
+        const mgr = agent("mgr", "running");
+        const a1 = agent("a1", "waiting", "mgr");
+        const ok = await notifyManager(a1, "test", [mgr, a1]);
+        expect(ok).toBe(false);
+      } finally {
+        setSendSpawnRunner(spawnMock.runner);
+      }
+    });
+
+    test("handleComplete: completionNotified is NOT set when sendMessage fails", async () => {
+      const failing = failingSendRunner();
+      setSendSpawnRunner(failing.runner);
+      try {
+        const mgr = agent("mgr", "running");
+        const a1 = agent("a1", "complete", "mgr");
+        await tick([mgr, a1]);
+        // First tick: notification attempted, failed → flag must NOT be set
+        expect(getTracker("a1").completionNotified).toBe(false);
+
+        // Recover: subsequent tick with working sendMessage delivers, then sets the flag
+        setSendSpawnRunner(spawnMock.runner);
+        await tick([mgr, a1]);
+        expect(getTracker("a1").completionNotified).toBe(true);
+      } finally {
+        setSendSpawnRunner(spawnMock.runner);
+      }
+    });
+
+    test("handleComplete: failure on @system inboxWrite leaves completionNotified=false", async () => {
+      // Force inbox write to fail by overriding the inbox dir to a non-writable path
+      const { setInboxDir } = await import("./inbox");
+      setInboxDir("/proc/0/nonexistent/cant-write-here");
+      try {
+        const a1 = agent("a1", "complete", null);
+        a1.meta.spawned_by = { agent_id: "@system", repo_path: null };
+        await tick([a1]);
+        expect(getTracker("a1").completionNotified).toBe(false);
+      } finally {
+        setInboxDir(undefined);
+      }
+    });
+
+    test("handleWaiting: failure does NOT advance backoff (notifyInterval stays at INITIAL)", async () => {
+      const failing = failingSendRunner();
+      setSendSpawnRunner(failing.runner);
+      try {
+        setWatchdogCaptureTmux(async () => "no shells");
+        const mgr = agent("mgr", "running");
+        const a1 = agent("a1", "waiting", "mgr");
+
+        for (let i = 0; i < INITIAL_NOTIFY_TICKS; i++) {
+          await tick([mgr, a1]);
+        }
+        // Notification tried but failed → notifyInterval stays at INITIAL
+        // and counter is held just below threshold for next-tick retry.
+        expect(getTracker("a1").notifyInterval).toBe(INITIAL_NOTIFY_TICKS);
+        expect(getTracker("a1").waitCounter).toBe(INITIAL_NOTIFY_TICKS - 1);
+      } finally {
+        setSendSpawnRunner(spawnMock.runner);
+      }
+    });
+
+    test("handleWaiting: success advances backoff as before", async () => {
+      setWatchdogCaptureTmux(async () => "no shells");
+      const mgr = agent("mgr", "running");
+      const a1 = agent("a1", "waiting", "mgr");
+
+      for (let i = 0; i < INITIAL_NOTIFY_TICKS; i++) {
+        await tick([mgr, a1]);
+      }
+      // Successful delivery → counter reset to 0, interval doubled.
+      expect(getTracker("a1").notifyInterval).toBe(INITIAL_NOTIFY_TICKS * 2);
+      expect(getTracker("a1").waitCounter).toBe(0);
+      expect(countSendKeysWithText(spawnMock, "Your subtask a1 recently started waiting")).toBeGreaterThan(0);
+    });
+
+    test("handleWaiting: agent with no manager AND no spawner — backoff DOES advance (no recipient → no point retrying)", async () => {
+      setWatchdogCaptureTmux(async () => "no shells");
+      const a1 = agent("a1", "waiting", null);
+      // No spawned_by either
+
+      for (let i = 0; i < INITIAL_NOTIFY_TICKS; i++) {
+        await tick([a1]);
+      }
+      // No-recipient case: treat as fully handled so we don't tight-loop
+      expect(getTracker("a1").notifyInterval).toBe(INITIAL_NOTIFY_TICKS * 2);
+      expect(getTracker("a1").waitCounter).toBe(0);
+    });
+  });
+
   describe("constants", () => {
     test("POLL_INTERVAL_MS is 5 seconds", () => {
       expect(POLL_INTERVAL_MS).toBe(5000);

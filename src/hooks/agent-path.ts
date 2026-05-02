@@ -384,21 +384,57 @@ export async function checkIbCommandAccess(
   const targetMetaPath = join(agentsDir, targetId, "meta.json");
   const callerRepoRoot = resolve(agentsDir, "..", "..");
 
-  /** Check if a meta.json grants access to the calling agent (manager or spawner). */
-  function hasAccess(meta: Record<string, unknown>): boolean {
+  /** Check if a meta.json grants access to the calling agent (manager or spawner).
+   *
+   * `meta.spawned_by.agent_id` may be a real agent ID, or an `@`-prefixed
+   * sentinel. The `@<repo-name>` sentinel is owned by that repo's per-repo
+   * coordinator, whose actual agent ID is the repo basename — so we grant
+   * access when the caller's ID matches the repo basename and the caller is
+   * a coordinator. The `@system` sentinel is never a same-agent caller (the
+   * system coordinator runs from `~/.itsybitsy/`, outside any registered
+   * repo), so it is ignored here.
+   */
+  async function hasAccess(meta: Record<string, unknown>): Promise<boolean> {
     // Allow if caller is the manager
     if (typeof meta.manager === "string" && meta.manager === callingAgentId) {
       return true;
     }
-    // Allow if caller is the spawner with matching repo_path
-    const sb = meta.spawned_by as { agent_id?: string; repo_path?: string } | undefined;
-    if (
-      sb &&
-      sb.agent_id === callingAgentId &&
-      typeof sb.repo_path === "string" &&
-      resolve(sb.repo_path) === callerRepoRoot
-    ) {
-      return true;
+    // Allow if caller is the spawner.
+    const sb = meta.spawned_by as { agent_id?: string; repo_path?: string | null } | undefined;
+    if (!sb || typeof sb.agent_id !== "string") return false;
+
+    // Real agent ID: existing path — match by ID and repo_path.
+    if (!sb.agent_id.startsWith("@")) {
+      if (
+        sb.agent_id === callingAgentId &&
+        typeof sb.repo_path === "string" &&
+        resolve(sb.repo_path) === callerRepoRoot
+      ) {
+        return true;
+      }
+      return false;
+    }
+
+    // @<repo-name> sentinel: caller must be the per-repo coordinator of that
+    // repo. We require all of:
+    //   1. repo_path is a string and resolves to the caller's own repo root
+    //   2. caller's meta.coordinator === true (flagged as coordinator)
+    //   3. caller's agent ID matches the repo name (per-repo coordinators
+    //      use the repo basename as their ID — see getCoordinatorAgentId)
+    if (sb.agent_id !== "@system") {
+      const repoName = sb.agent_id.slice(1);
+      if (typeof sb.repo_path !== "string") return false;
+      if (resolve(sb.repo_path) !== callerRepoRoot) return false;
+      if (callingAgentId !== repoName) return false;
+      try {
+        const callerMetaFile = Bun.file(join(agentsDir, callingAgentId, "meta.json"));
+        if (await callerMetaFile.exists()) {
+          const callerMeta = await callerMetaFile.json();
+          if (callerMeta && callerMeta.coordinator === true) {
+            return true;
+          }
+        }
+      } catch { /* fall through */ }
     }
     return false;
   }
@@ -438,7 +474,7 @@ export async function checkIbCommandAccess(
         } catch { /* fall through to standard check */ }
       }
 
-      if (hasAccess(meta)) return null; // allow
+      if (await hasAccess(meta)) return null; // allow
       return {
         decision: "deny",
         reason: `Access denied: only the manager or spawner of '${targetId}' can run 'ib ${parsed.subcommand}'`,
@@ -466,7 +502,7 @@ export async function checkIbCommandAccess(
             reason: `Access denied: cannot read meta for agent '${targetId}'`,
           };
         }
-        if (hasAccess(meta)) return null; // allow
+        if (await hasAccess(meta)) return null; // allow
         return {
           decision: "deny",
           reason: `Access denied: only the spawner or manager of '${targetId}' can run 'ib ${parsed.subcommand}'`,

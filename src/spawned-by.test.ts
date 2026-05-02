@@ -141,6 +141,43 @@ describe("readAgentMeta spawned_by validation", () => {
     expect(meta).not.toBeNull();
     expect(meta!.spawned_by).toBeUndefined();
   });
+
+  test("@system sentinel with null repo_path is preserved", async () => {
+    await Bun.write(
+      join(tempDir, "meta.json"),
+      JSON.stringify({
+        id: "agent-childA",
+        spawned_by: {
+          agent_id: "@system",
+          repo_path: null,
+        },
+      })
+    );
+
+    const { meta } = await readAgentMeta(tempDir);
+    expect(meta).not.toBeNull();
+    expect(meta!.spawned_by).toBeDefined();
+    expect(meta!.spawned_by!.agent_id).toBe("@system");
+    expect(meta!.spawned_by!.repo_path).toBeNull();
+  });
+
+  test("@<repo-name> sentinel with string repo_path is preserved", async () => {
+    await Bun.write(
+      join(tempDir, "meta.json"),
+      JSON.stringify({
+        id: "agent-childB",
+        spawned_by: {
+          agent_id: "@myrepo",
+          repo_path: "/Users/me/repos/myrepo",
+        },
+      })
+    );
+
+    const { meta } = await readAgentMeta(tempDir);
+    expect(meta).not.toBeNull();
+    expect(meta!.spawned_by!.agent_id).toBe("@myrepo");
+    expect(meta!.spawned_by!.repo_path).toBe("/Users/me/repos/myrepo");
+  });
 });
 
 // ── checkIbCommandAccess with spawned_by ─────────────────────────────────────
@@ -240,6 +277,115 @@ describe("checkIbCommandAccess spawned_by", () => {
       },
     });
     const result = await checkIbCommandAccess("ib kill agent-target6", "agent-intruder", agentsDir);
+    expect(result).not.toBeNull();
+    expect(result!.decision).toBe("deny");
+  });
+
+  // ── @<repo-name> sentinel access checks ──────────────────────────────────
+  // Per-repo coordinators are stamped as `@<basename>` in spawned_by. The
+  // hasAccess path must grant the actual coordinator (whose ID is the
+  // basename and meta.coordinator===true) and deny everyone else.
+
+  // We use `ib merge` for these tests instead of `ib kill` because the
+  // per-repo coordinator bypass (SPEC §12.2) lets any same-repo coordinator
+  // kill/reassign any non-coordinator agent — which would mask whether the
+  // @<repo-name> hasAccess branch is doing the work. `merge` exercises only
+  // the manager/spawner paths.
+
+  test("@<repo-name> sentinel: ALLOWS merge when caller is the per-repo coordinator", async () => {
+    const repoName = require("path").basename(tmpDir);
+    await writeAgentMeta(repoName, {
+      id: repoName,
+      coordinator: true,
+      manager: null,
+    });
+    await writeAgentMeta("agent-targetA", {
+      id: "agent-targetA",
+      manager: null,
+      spawned_by: {
+        agent_id: `@${repoName}`,
+        repo_path: tmpDir,
+      },
+    });
+    const result = await checkIbCommandAccess("ib merge agent-targetA --force", repoName, agentsDir);
+    expect(result).toBeNull(); // allowed via @<repo-name> coordinator-spawner path
+  });
+
+  test("@<repo-name> sentinel: DENIES merge when caller is not flagged as coordinator", async () => {
+    const repoName = require("path").basename(tmpDir);
+    await writeAgentMeta(repoName, {
+      id: repoName,
+      coordinator: false,
+      manager: null,
+    });
+    await writeAgentMeta("agent-targetB", {
+      id: "agent-targetB",
+      manager: null,
+      spawned_by: {
+        agent_id: `@${repoName}`,
+        repo_path: tmpDir,
+      },
+    });
+    const result = await checkIbCommandAccess("ib merge agent-targetB --force", repoName, agentsDir);
+    expect(result).not.toBeNull();
+    expect(result!.decision).toBe("deny");
+  });
+
+  test("@<repo-name> sentinel: DENIES merge when caller's ID does not match the sentinel suffix", async () => {
+    const repoName = require("path").basename(tmpDir);
+    await writeAgentMeta("not-the-repo", {
+      id: "not-the-repo",
+      coordinator: true,
+      manager: null,
+    });
+    await writeAgentMeta("agent-targetC", {
+      id: "agent-targetC",
+      manager: null,
+      spawned_by: {
+        agent_id: `@${repoName}`,
+        repo_path: tmpDir,
+      },
+    });
+    const result = await checkIbCommandAccess("ib merge agent-targetC --force", "not-the-repo", agentsDir);
+    expect(result).not.toBeNull();
+    expect(result!.decision).toBe("deny");
+  });
+
+  test("@<repo-name> sentinel: DENIES merge when repo_path doesn't match caller's repo", async () => {
+    const repoName = require("path").basename(tmpDir);
+    await writeAgentMeta(repoName, {
+      id: repoName,
+      coordinator: true,
+      manager: null,
+    });
+    await writeAgentMeta("agent-targetD", {
+      id: "agent-targetD",
+      manager: null,
+      spawned_by: {
+        agent_id: `@${repoName}`,
+        repo_path: "/some/other/repo",
+      },
+    });
+    const result = await checkIbCommandAccess("ib merge agent-targetD --force", repoName, agentsDir);
+    expect(result).not.toBeNull();
+    expect(result!.decision).toBe("deny");
+  });
+
+  test("@system sentinel: DENIES merge — @system is never a same-agent access grant", async () => {
+    await writeAgentMeta("system-impersonator", {
+      id: "system-impersonator",
+      coordinator: true,
+      manager: null,
+    });
+    await writeAgentMeta("agent-targetE", {
+      id: "agent-targetE",
+      manager: null,
+      spawned_by: {
+        agent_id: "@system",
+        repo_path: null,
+      },
+    });
+    const result = await checkIbCommandAccess("ib merge agent-targetE --force", "system-impersonator", agentsDir);
     expect(result).not.toBeNull();
     expect(result!.decision).toBe("deny");
   });
@@ -388,13 +534,13 @@ describe("notifySpawner", () => {
     };
   }
 
-  test("no-op when agent has no spawned_by", async () => {
+  test("returns false when agent has no spawned_by", async () => {
     const agent = makeAgent("agent-child1", {});
-    // Should not throw — just returns without doing anything
-    await notifySpawner(agent, "test message", []);
+    const result = await notifySpawner(agent, "test message", []);
+    expect(result).toBe(false);
   });
 
-  test("no-op when spawner.agent_id matches manager (avoids double-notify)", async () => {
+  test("returns false when spawner.agent_id matches manager (avoids double-notify)", async () => {
     const agent = makeAgent("agent-child2", {
       manager: "agent-manager1",
       spawned_by: {
@@ -402,11 +548,11 @@ describe("notifySpawner", () => {
         repo_path: "/tmp/test-repo",
       },
     });
-    // Should not throw — deduplication prevents notification
-    await notifySpawner(agent, "test message", []);
+    const result = await notifySpawner(agent, "test message", []);
+    expect(result).toBe(false);
   });
 
-  test("no-op when spawner agent is not found in allAgents", async () => {
+  test("returns false when spawner agent is not found in allAgents", async () => {
     const agent = makeAgent("agent-child3", {
       manager: null,
       spawned_by: {
@@ -414,7 +560,7 @@ describe("notifySpawner", () => {
         repo_path: "/tmp/other-repo",
       },
     });
-    // Should not throw — spawner not found, silently returns
-    await notifySpawner(agent, "test message", []);
+    const result = await notifySpawner(agent, "test message", []);
+    expect(result).toBe(false);
   });
 });

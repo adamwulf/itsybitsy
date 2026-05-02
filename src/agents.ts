@@ -13,10 +13,29 @@ import { InjectionContext } from "./types";
 /** States that can be written to meta.json */
 export type MetaState = "creating" | "running" | "waiting" | "complete" | "stopped";
 
-/** Cross-repo spawner provenance — records which agent created this one */
+/** Cross-repo spawner provenance — records which agent created this one.
+ *
+ * `agent_id` may be a real agent ID (e.g. "agent-1234abcd") or an `@`-prefixed
+ * sentinel that resolves through `resolveTarget`:
+ *   - `@system` — system coordinator (notifications go to ~/.itsybitsy inbox)
+ *   - `@<repo-name>` — that repo's per-repo coordinator (basename-based; see
+ *     getCoordinatorAgentId)
+ *
+ * `repo_path` is the spawner's repo when the spawner is a real agent or a
+ * per-repo coordinator. It is `null` for the `@system` sentinel because the
+ * system coordinator does not live inside a registered repo.
+ *
+ * KNOWN MAINTENANCE FOOTGUN: this is a conceptually 3-way union (real ID |
+ * @system | @<repo-name>) packed into a single string. A future caller that
+ * does `findAgent(spawned_by.agent_id)` directly will silently no-op for
+ * either sentinel. If you add a new reader, route through the watchdog
+ * notify path (or build a discriminated union) rather than open-coding the
+ * lookup. Reviewers flagged a discriminated-union refactor as the eventual
+ * fix; deferred for scope.
+ */
 export interface SpawnedBy {
   agent_id: string;
-  repo_path: string;
+  repo_path: string | null;
 }
 
 export interface AgentMeta {
@@ -495,13 +514,18 @@ export async function readAgentMeta(agentDir: string): Promise<{ meta: AgentMeta
     if (data.coordinator !== undefined && typeof data.coordinator !== "boolean") delete data.coordinator;
     if (data.agentType !== undefined && typeof data.agentType !== "string") delete data.agentType;
     if (data.agentIcon !== undefined && typeof data.agentIcon !== "string") delete data.agentIcon;
-    // Validate spawned_by: must be an object with string agent_id and repo_path
+    // Validate spawned_by: must be an object with string agent_id; repo_path
+    // is either a string or null (null is reserved for the @system sentinel
+    // whose spawner is not a registered repo).
     if (data.spawned_by !== undefined && data.spawned_by !== null) {
+      const sb = data.spawned_by;
+      const repoPathOk =
+        typeof sb.repo_path === "string" || sb.repo_path === null;
       if (
-        typeof data.spawned_by !== "object" ||
-        Array.isArray(data.spawned_by) ||
-        typeof data.spawned_by.agent_id !== "string" ||
-        typeof data.spawned_by.repo_path !== "string"
+        typeof sb !== "object" ||
+        Array.isArray(sb) ||
+        typeof sb.agent_id !== "string" ||
+        !repoPathOk
       ) {
         delete data.spawned_by;
       }

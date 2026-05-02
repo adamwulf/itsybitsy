@@ -556,9 +556,10 @@ ${qAbsExitScript}
   }
   await nukeResumeSpawnCtx.run(["tmux", "set-option", "-w", "-t", tmuxSession, "history-limit", "50000"]);
   await nukeResumeSpawnCtx.run(["tmux", "set-option", "-w", "-t", tmuxSession, "remain-on-exit", "on"]);
-  // Safety net: if resume.sh crashes before it can log the exit code, tmux
-  // will still record the pane death in agent.log via this hook.
-  const resumePaneDiedHook = `run-shell "echo '[$(date +%Y-%m-%dT%H:%M:%S)] [tmux pane-died] session=#{session_name} pane_dead_status=#{pane_dead_status} pane_dead_signal=#{pane_dead_signal}' >> ${shellQuote(join(agentDir, "agent.log"))}"`;
+  // pane-died hook fires on every pane termination (graceful or otherwise)
+  // as a backstop for the case where resume.sh itself dies before reaching
+  // its exit-log line. See the new-agent path for the matching comment.
+  const resumePaneDiedHook = `run-shell "echo '[tmux pane-died] session=#{session_name} pane_dead_status=#{pane_dead_status} pane_dead_signal=#{pane_dead_signal}' >> ${shellQuote(join(agentDir, "agent.log"))}"`;
   await nukeResumeSpawnCtx.run(["tmux", "set-hook", "-t", tmuxSession, "pane-died", resumePaneDiedHook]);
 
   await logAgent(agentDir, "[resume] tmux session created, running autoAcceptWorkspaceTrust");
@@ -2442,10 +2443,19 @@ ${qStartExitScript}
   }
   // The two set-option calls, the pane-died hook, and the has-session verify
   // all depend on the session existing (above), but are independent of each
-  // other — run together. The pane-died hook is a safety net: if start.sh
-  // crashes before it can log the exit code (e.g. bash segfault, tmux server
-  // killed mid-pane), tmux will still record the death in agent.log.
-  const paneDiedHook = `run-shell "echo '[$(date +%Y-%m-%dT%H:%M:%S)] [tmux pane-died] session=#{session_name} pane_dead_status=#{pane_dead_status} pane_dead_signal=#{pane_dead_signal}' >> ${shellQuote(join(agentDir, "agent.log"))}"`;
+  // other — run together. The pane-died hook fires on every pane termination
+  // (graceful or otherwise) and acts as a backstop for the case where the
+  // bash wrapper itself dies before reaching its exit-log line. On normal
+  // shutdowns it produces a redundant log line next to start.sh's "Claude
+  // exited" — that's expected, not a sign of trouble.
+  //
+  // No timestamp is included in the message — the previous log line in
+  // agent.log carries one, and embedding $(date) inside tmux's run-shell
+  // argument requires fragile double-escaping. tmux only expands #{...}
+  // format strings inside the run-shell body; the echo'd literal goes
+  // straight to sh -c. agentDir is constrained by isValidShellPath so
+  // shellQuote's single-quote wrapping is safe inside tmux's double quotes.
+  const paneDiedHook = `run-shell "echo '[tmux pane-died] session=#{session_name} pane_dead_status=#{pane_dead_status} pane_dead_signal=#{pane_dead_signal}' >> ${shellQuote(join(agentDir, "agent.log"))}"`;
   await logSpawn(agentDir, spawnerAgentDir, id, `tmux has-session verify starting: -t ${tmuxSession}`);
   const [, , , verifyResult] = await Promise.all([
     newAgentSpawnCtx.run(["tmux", "set-option", "-w", "-t", tmuxSession, "history-limit", "50000"]),

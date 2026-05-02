@@ -883,7 +883,7 @@ describe("watchdog", () => {
       resetSystemCoordinatorHasSessionFn();
     });
 
-    test("@system sentinel routes to system coordinator tmux session", async () => {
+    test("@system sentinel routes to system coordinator tmux session with from-agent attribution", async () => {
       const a1 = agent("a1", "complete", null);
       a1.meta.spawned_by = { agent_id: "@system", repo_path: null };
 
@@ -891,8 +891,10 @@ describe("watchdog", () => {
       const ok = await notifySpawner(a1, "[watchdog]: hello system", []);
 
       expect(ok).toBe(true);
-      // sendMessage delivers via `tmux send-keys -t <session>` — assert the
-      // system coordinator session received send-keys traffic.
+      // sendMessage delivers via `tmux send-keys -t <session> -l <chunk>` —
+      // assert the system coordinator session received send-keys traffic AND
+      // the chunked payload carries the [sent by agent a1]: prefix so a
+      // regression dropping `fromAgent: agent.id` would fail this test.
       const { IB_COORDINATOR_SESSION } = await import("./coordinator");
       const sendKeysCalls = spawnMock.calls.filter((c) =>
         c.args.includes("send-keys") &&
@@ -900,6 +902,14 @@ describe("watchdog", () => {
         c.args.includes(IB_COORDINATOR_SESSION)
       );
       expect(sendKeysCalls.length).toBeGreaterThan(0);
+      // The -l flag's argument is the literal payload chunk; one of the
+      // chunked payloads must carry the from-agent prefix.
+      const payloadChunks = sendKeysCalls
+        .map((c) => {
+          const lIdx = c.args.indexOf("-l");
+          return lIdx >= 0 ? String(c.args[lIdx + 1] ?? "") : "";
+        });
+      expect(payloadChunks.some((p) => p.includes("[sent by agent a1]:"))).toBe(true);
     });
 
     test("@<repo-name> sentinel resolves to that repo's coordinator and sendMessage", async () => {

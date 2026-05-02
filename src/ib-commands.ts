@@ -1736,9 +1736,10 @@ export async function newAgent(
     // Case 2A: System coordinator — CWD is the system coordinator home
     // (~/.itsybitsy/). The system coordinator is not a registered repo so the
     // Case 2B per-repo lookup below would never match. Tag with the @system
-    // sentinel so the watchdog can route notifications via inboxWrite().
-    // Like Case 2B, this is gated on CLAUDE_SESSION_ID so a human running
-    // `ib new-agent` from the system coordinator dir does not get tagged.
+    // sentinel so the watchdog can route notifications via
+    // sendToSystemCoordinator() (direct tmux delivery to the ib-coordinator
+    // session). Like Case 2B, this is gated on CLAUDE_SESSION_ID so a human
+    // running `ib new-agent` from the system coordinator dir does not get tagged.
     if (!spawnedBy && !worktreeMatch && process.env.CLAUDE_SESSION_ID) {
       let systemHome: string | null = null;
       try {

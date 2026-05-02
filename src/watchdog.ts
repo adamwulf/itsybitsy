@@ -213,20 +213,27 @@ function findAgent(agents: Agent[], id: string): Agent | undefined {
 
 /**
  * Send a watchdog notification to the agent's manager.
- * No-op if the agent has no manager or manager isn't found.
+ *
+ * Returns `true` only when a real notification reached the manager.
+ * Returns `false` if the agent has no manager, the manager cannot be found
+ * in the snapshot, or `sendMessage` reported failure. Callers MUST gate
+ * any state advance (counter reset, backoff doubling, completionNotified
+ * flag-set) on this result so a transient delivery failure does not get
+ * silently swallowed.
  */
 export async function notifyManager(
   agent: Agent,
   message: string,
   allAgents: Agent[],
-): Promise<void> {
+): Promise<boolean> {
   const managerId = agent.meta.manager;
-  if (!managerId) return;
+  if (!managerId) return false;
 
   const manager = findAgent(allAgents, managerId);
-  if (!manager) return;
+  if (!manager) return false;
 
-  await sendMessage(manager, message);
+  const result = await sendMessage(manager, message);
+  return result.ok;
 }
 
 /**
@@ -237,53 +244,77 @@ export async function notifyManager(
  *   - `@<repo-name>` → look up the repo, find its per-repo coordinator, sendMessage
  *   - real agent_id → findAgent + sendMessage (existing path)
  *
- * No-op if the agent has no spawned_by, if spawner === manager (defensive —
- * the caller in handleWaiting/handleUnknown/handleComplete already gates on
- * manager being absent), or if the spawner cannot be resolved.
+ * Returns `true` only when a real notification was delivered.
+ * Returns `false` if the agent has no spawned_by, the spawner === manager,
+ * the spawner cannot be resolved, the underlying delivery (inboxWrite or
+ * sendMessage) reported failure, or any unexpected error was thrown
+ * during routing. Callers MUST gate state advance on this result so a
+ * transient delivery failure does not get silently swallowed.
+ *
+ * Error policy: all three branches behave the same — never throw, always
+ * return a boolean. Wrap each branch in try/catch so an unexpected disk
+ * error in one branch can never crash the watchdog or be mistaken for
+ * "delivered".
  */
 export async function notifySpawner(
   agent: Agent,
   message: string,
   allAgents: Agent[],
-): Promise<void> {
+): Promise<boolean> {
   const spawner = agent.meta.spawned_by;
-  if (!spawner) return;
+  if (!spawner) return false;
   // Defense-in-depth: callers in handleWaiting/handleUnknown/handleComplete
   // already enforce mutual exclusivity by skipping notifySpawner when manager
   // is set. This guard remains so direct callers (and tests) still get the
   // same dedupe semantics as before.
-  if (spawner.agent_id === agent.meta.manager) return;
+  if (spawner.agent_id === agent.meta.manager) return false;
 
   // @system → append to the system coordinator's file-based inbox.
   if (spawner.agent_id === "@system") {
-    const { inboxWrite } = await import("./inbox");
-    await inboxWrite(message, { source: agent.id });
-    return;
+    try {
+      const { inboxWrite } = await import("./inbox");
+      const result = await inboxWrite(message, { source: agent.id });
+      return result.ok;
+    } catch { /* swallowed unexpected error counts as delivery failure */
+      return false;
+    }
   }
 
   // @<repo-name> → resolve to that repo's per-repo coordinator.
   if (spawner.agent_id.startsWith("@")) {
     const repoName = spawner.agent_id.slice(1);
     try {
+      const { basename: pathBasename } = await import("path");
       const repos = await listReposFn();
-      const { repoDisplayName } = await import("./registry");
-      const repo = repos.find((r) => repoDisplayName(r) === repoName);
-      if (!repo) return;
+      // Match by `basename(repo.path)`, NOT repo.name or repoDisplayName.
+      // This is the same invariant `getCoordinatorAgentId()` uses for the
+      // coordinator's actual agent ID. ib-commands stamps the @<repo-name>
+      // sentinel with basename(cwd) for the same reason. Any other lookup
+      // here (registry name, nickname) silently breaks for repos whose
+      // user-overridden name differs from the directory basename.
+      const repo = repos.find((r) => pathBasename(r.path) === repoName);
+      if (!repo) return false;
       const { checkCoordinatorExists } = await import("./coordinator");
       const coordStatus = await checkCoordinatorExists(repo.path);
-      if (!coordStatus.exists || !coordStatus.agentId) return;
+      if (!coordStatus.exists || !coordStatus.agentId) return false;
       const coordinator = findAgent(allAgents, coordStatus.agentId);
-      if (!coordinator) return;
-      await sendMessage(coordinator, message);
-    } catch { /* best-effort — never crash watchdog */ }
-    return;
+      if (!coordinator) return false;
+      const result = await sendMessage(coordinator, message);
+      return result.ok;
+    } catch { /* swallowed unexpected error counts as delivery failure */
+      return false;
+    }
   }
 
   // Real agent ID — existing path.
-  const spawnerAgent = findAgent(allAgents, spawner.agent_id);
-  if (!spawnerAgent) return;
-
-  await sendMessage(spawnerAgent, message);
+  try {
+    const spawnerAgent = findAgent(allAgents, spawner.agent_id);
+    if (!spawnerAgent) return false;
+    const result = await sendMessage(spawnerAgent, message);
+    return result.ok;
+  } catch {
+    return false;
+  }
 }
 
 /** Send Enter to a tmux session to dismiss a dialog. */
@@ -355,23 +386,36 @@ async function handleWaiting(agent: Agent, tracker: AgentTracker, getAllAgents: 
     // Mutually-exclusive precedence: manager wins if present; otherwise the
     // spawner is notified; otherwise nothing. Previously we notified both
     // when they differed, which led to duplicate noise for cross-repo spawns.
+    let notified = false;
     if (agent.meta.manager) {
-      await notifyManager(
+      notified = await notifyManager(
         agent,
         `[watchdog]: Your subtask ${agent.id} recently started waiting for input`,
         allAgents,
       );
     } else if (agent.meta.spawned_by) {
-      await notifySpawner(
+      notified = await notifySpawner(
         agent,
         `[watchdog]: Agent ${agent.id} you spawned recently started waiting for input`,
         allAgents,
       );
+    } else {
+      // No recipient at all — there is no point retrying every tick.
+      // Treat as "fully handled" so the backoff still kicks in.
+      notified = true;
     }
 
-    // Reset counter and double interval (exponential backoff)
-    tracker.waitCounter = 0;
-    tracker.notifyInterval = Math.min(tracker.notifyInterval * 2, MAX_NOTIFY_TICKS);
+    // Only reset counter and advance backoff on successful (or no-op)
+    // delivery. A transient inbox/tmux failure must not silently advance
+    // the backoff — we want to keep nagging until delivery succeeds.
+    if (notified) {
+      tracker.waitCounter = 0;
+      tracker.notifyInterval = Math.min(tracker.notifyInterval * 2, MAX_NOTIFY_TICKS);
+    } else {
+      // Hold the counter just below the threshold so we retry on the next
+      // tick instead of waiting for the (now-doubled) interval.
+      tracker.waitCounter = Math.max(0, tracker.notifyInterval - 1);
+    }
   }
 }
 
@@ -393,23 +437,30 @@ async function handleUnknown(agent: Agent, tracker: AgentTracker, getAllAgents: 
     // unknown state increment the counter without notifying.
     const allAgents = await getAllAgents();
     // Mutually-exclusive precedence — see handleWaiting for rationale.
+    let notified = false;
     if (agent.meta.manager) {
-      await notifyManager(
+      notified = await notifyManager(
         agent,
         `[watchdog]: Your subtask ${agent.id} state is unknown - may need attention`,
         allAgents,
       );
     } else if (agent.meta.spawned_by) {
-      await notifySpawner(
+      notified = await notifySpawner(
         agent,
         `[watchdog]: Agent ${agent.id} you spawned has an unknown state - may need attention`,
         allAgents,
       );
+    } else {
+      notified = true;
     }
 
-    // Reset counter and double interval (exponential backoff)
-    tracker.waitCounter = 0;
-    tracker.notifyInterval = Math.min(tracker.notifyInterval * 2, MAX_NOTIFY_TICKS);
+    // Backoff only advances on successful delivery — see handleWaiting.
+    if (notified) {
+      tracker.waitCounter = 0;
+      tracker.notifyInterval = Math.min(tracker.notifyInterval * 2, MAX_NOTIFY_TICKS);
+    } else {
+      tracker.waitCounter = Math.max(0, tracker.notifyInterval - 1);
+    }
   }
 }
 
@@ -452,20 +503,29 @@ async function handleComplete(agent: Agent, tracker: AgentTracker, getAllAgents:
     // in complete state hit the early return and never load the snapshot.
     const allAgents = await getAllAgents();
     // Mutually-exclusive precedence — see handleWaiting for rationale.
+    let notified = false;
     if (agent.meta.manager) {
-      await notifyManager(
+      notified = await notifyManager(
         agent,
         `[watchdog]: Your subtask ${agent.id} recently completed`,
         allAgents,
       );
     } else if (agent.meta.spawned_by) {
-      await notifySpawner(
+      notified = await notifySpawner(
         agent,
         `[watchdog]: Agent ${agent.id} you spawned recently completed`,
         allAgents,
       );
+    } else {
+      // No recipient — flag-set immediately so we don't retry forever.
+      notified = true;
     }
-    tracker.completionNotified = true;
+    // Only set the one-shot flag when delivery actually succeeded. A
+    // transient inbox/tmux failure must not silently swallow the
+    // completion notification — we want the next tick to retry.
+    if (notified) {
+      tracker.completionNotified = true;
+    }
   }
 }
 

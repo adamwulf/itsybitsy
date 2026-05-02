@@ -1778,8 +1778,17 @@ export async function newAgent(
         if (repoMatch) {
           const coordStatus = await checkCoordinatorExists(cwd);
           if (coordStatus.exists && coordStatus.agentId) {
+            // Stamp with `basename(cwd)` — the same invariant that
+            // `getCoordinatorAgentId()` uses for the coordinator's actual
+            // agent ID. The access checks in agent-path.ts and the
+            // routing in notifySpawner @<repo-name> both compare the
+            // sentinel suffix against the coordinator's agent ID, so
+            // they must use the same source of truth. Using the registry
+            // `name` (or worse, the nickname) would silently break access
+            // any time a user passed a custom name via `ib add <path>
+            // <custom-name>` or set a nickname.
             spawnedBy = {
-              agent_id: `@${repoDisplayName(repoMatch)}`,
+              agent_id: `@${basename(cwd)}`,
               repo_path: cwd,
             };
           }

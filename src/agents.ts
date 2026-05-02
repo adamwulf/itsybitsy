@@ -18,11 +18,20 @@ export type MetaState = "creating" | "running" | "waiting" | "complete" | "stopp
  * `agent_id` may be a real agent ID (e.g. "agent-1234abcd") or an `@`-prefixed
  * sentinel that resolves through `resolveTarget`:
  *   - `@system` — system coordinator (notifications go to ~/.itsybitsy inbox)
- *   - `@<repo-name>` — that repo's per-repo coordinator
+ *   - `@<repo-name>` — that repo's per-repo coordinator (basename-based; see
+ *     getCoordinatorAgentId)
  *
  * `repo_path` is the spawner's repo when the spawner is a real agent or a
  * per-repo coordinator. It is `null` for the `@system` sentinel because the
  * system coordinator does not live inside a registered repo.
+ *
+ * KNOWN MAINTENANCE FOOTGUN: this is a conceptually 3-way union (real ID |
+ * @system | @<repo-name>) packed into a single string. A future caller that
+ * does `findAgent(spawned_by.agent_id)` directly will silently no-op for
+ * either sentinel. If you add a new reader, route through the watchdog
+ * notify path (or build a discriminated union) rather than open-coding the
+ * lookup. Reviewers flagged a discriminated-union refactor as the eventual
+ * fix; deferred for scope.
  */
 export interface SpawnedBy {
   agent_id: string;

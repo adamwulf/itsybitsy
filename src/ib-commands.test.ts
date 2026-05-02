@@ -5386,19 +5386,48 @@ describe("spawned_by Case 2 coordinator auto-detect", () => {
     expect(meta.spawned_by).toBeNull();
   });
 
-  test("Case 2B fires when CLAUDE_SESSION_ID is set and CWD is repo root with coordinator (uses @<repo-name> sentinel)", async () => {
+  test("Case 2B fires when CLAUDE_SESSION_ID is set and CWD is repo root with coordinator (uses @<basename> sentinel)", async () => {
     process.env.CLAUDE_SESSION_ID = "fake-session-id-12345";
     setNewAgentSpawnRunner(mockSpawnRunner());
 
     const result = await newAgent(tempDir, "do work", { name: "test-with-session", _cwd: tempDir });
     expect(result.ok).toBe(true);
 
-    // Read the meta.json — spawned_by should be the @<repo-name> sentinel,
-    // not the coordinator's actual agent_id. The watchdog routes notifications
-    // through resolveTarget so the sentinel survives coordinator restarts.
+    // Read the meta.json — spawned_by must be `@<basename(cwd)>`, NOT the
+    // registry name or any nickname. The per-repo coordinator's actual
+    // agent ID is basename(repoPath) (see getCoordinatorAgentId), and
+    // both agent-path access checks and notifySpawner routing rely on
+    // that invariant. Using a different value silently breaks access.
     const meta = await Bun.file(join(agentsDir, "test-with-session", "meta.json")).json();
+    const expectedSentinel = `@${require("path").basename(tempDir)}`;
     expect(meta.spawned_by).not.toBeNull();
-    expect(meta.spawned_by.agent_id).toBe("@test-repo");
+    expect(meta.spawned_by.agent_id).toBe(expectedSentinel);
+    expect(meta.spawned_by.repo_path).toBe(tempDir);
+  });
+
+  test("Case 2B: nickname-vs-basename regression — sentinel uses basename even when registry has a custom name", async () => {
+    // Re-seed the registry so this repo has a registry name AND a nickname
+    // that both differ from the directory basename. The sentinel must
+    // ignore both and stamp @<basename(tempDir)>. This covers the bug-2
+    // regression where stamping repoDisplayName/registry-name would
+    // silently break access for the per-repo coordinator.
+    await Bun.write(join(fakeHome, ".itsybitsy", "repos.json"), JSON.stringify({
+      repos: [{ path: tempDir, name: "custom-registry-name", nickname: "shiny-nickname" }],
+    }));
+
+    process.env.CLAUDE_SESSION_ID = "fake-session-id-nick";
+    setNewAgentSpawnRunner(mockSpawnRunner());
+
+    const result = await newAgent(tempDir, "do work", { name: "test-nickname", _cwd: tempDir });
+    expect(result.ok).toBe(true);
+
+    const meta = await Bun.file(join(agentsDir, "test-nickname", "meta.json")).json();
+    const expectedSentinel = `@${require("path").basename(tempDir)}`;
+    expect(meta.spawned_by).not.toBeNull();
+    expect(meta.spawned_by.agent_id).toBe(expectedSentinel);
+    // Specifically must NOT be the registry name or the nickname
+    expect(meta.spawned_by.agent_id).not.toBe("@custom-registry-name");
+    expect(meta.spawned_by.agent_id).not.toBe("@shiny-nickname");
     expect(meta.spawned_by.repo_path).toBe(tempDir);
   });
 

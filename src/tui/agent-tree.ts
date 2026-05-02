@@ -224,11 +224,17 @@ export class AgentTreeComponent implements Component {
   }
 
   /**
-   * Jump to next (delta=1) or previous (delta=-1) repo.
+   * Jump to next (delta=1) or previous (delta=-1) repo or agent group.
    *
-   * If a repo-header is selected: move to the next/prev repo-header.
-   * If an agent is selected: skip repos with no agents, always land on an agent.
-   * If system-coordinator is selected: treat as before first repo (J goes to first repo header/agent).
+   * Behavior depends on what is selected:
+   *
+   * - **Repo header selected**: cycle through repo headers only. The system
+   *   coordinator is NOT in this rotation (it has no repo to "jump to next").
+   *
+   * - **Agent or system-coordinator selected**: cycle through agent groups,
+   *   where the coordinator counts as its own group. Repo groups land on the
+   *   first/last agent of that repo (empty repos skipped); the coordinator
+   *   group lands on the coordinator row itself.
    */
   moveToRepo(delta: 1 | -1) {
     const visible = this.visibleList;
@@ -236,65 +242,70 @@ export class AgentTreeComponent implements Component {
 
     const current = visible[this.selectedIndex];
     const isRepoHeader = current?.kind === "repo-header";
-    const isCoordinator = current?.kind === "system-coordinator";
 
-    // Find all repo-header indices
+    // Find all repo-header indices (used by both branches)
     const repoIndices = visible.map((f, i) => (f.kind === "repo-header" ? i : -1)).filter((i) => i !== -1);
-    if (repoIndices.length === 0) return;
 
-    // System coordinator: J goes to first repo header, K wraps to last
-    if (isCoordinator) {
-      if (delta === 1) {
-        this.selectedIndex = repoIndices[0]!;
-      } else {
-        this.selectedIndex = repoIndices[repoIndices.length - 1]!;
-      }
+    if (isRepoHeader) {
+      // Original behavior: cycle through repo headers only.
+      if (repoIndices.length === 0) return;
+      let currentRepoIdx = repoIndices.indexOf(this.selectedIndex);
+      if (currentRepoIdx === -1) currentRepoIdx = 0;
+      const targetRepoIdx = ((currentRepoIdx + delta) % repoIndices.length + repoIndices.length) % repoIndices.length;
+      this.selectedIndex = repoIndices[targetRepoIdx]!;
       this.updateSelectedId();
       this.ensureSelectedVisible();
       return;
     }
 
-    // Helper: get agent indices for repo at repoIndices[ri]
-    const agentsForRepo = (ri: number): number[] => {
-      const headerPos = repoIndices[ri]!;
-      const nextHeaderPos = repoIndices[ri + 1] ?? visible.length;
+    // Agent or coordinator selected: build agent-group anchor list.
+    // Anchors are the system-coordinator (if present) plus each repo-header,
+    // ordered by their position in the visible list.
+    type Anchor = { kind: "system-coordinator"; index: number } | { kind: "repo-header"; index: number };
+    const anchors: Anchor[] = [];
+    for (let i = 0; i < visible.length; i++) {
+      const item = visible[i]!;
+      if (item.kind === "system-coordinator") anchors.push({ kind: "system-coordinator", index: i });
+      else if (item.kind === "repo-header") anchors.push({ kind: "repo-header", index: i });
+    }
+    if (anchors.length === 0) return;
+
+    // Helper: get agent indices for the repo anchor at anchors[ai]
+    const agentsForAnchor = (ai: number): number[] => {
+      const anchor = anchors[ai]!;
+      if (anchor.kind !== "repo-header") return [];
+      const nextAnchor = anchors[ai + 1];
+      const endPos = nextAnchor ? nextAnchor.index : visible.length;
       const result: number[] = [];
-      for (let i = headerPos + 1; i < nextHeaderPos; i++) {
+      for (let i = anchor.index + 1; i < endPos; i++) {
         if (visible[i]?.kind === "agent") result.push(i);
       }
       return result;
     };
 
-    // Find which repo we are currently in
-    let currentRepoIdx: number;
-    if (isRepoHeader) {
-      currentRepoIdx = repoIndices.indexOf(this.selectedIndex);
-      if (currentRepoIdx === -1) currentRepoIdx = 0;
-    } else {
-      let found = -1;
-      for (let i = repoIndices.length - 1; i >= 0; i--) {
-        if (repoIndices[i]! <= this.selectedIndex) {
-          found = i;
-          break;
-        }
+    // Find which anchor we are currently at/under
+    let currentAnchorIdx = 0;
+    for (let i = anchors.length - 1; i >= 0; i--) {
+      if (anchors[i]!.index <= this.selectedIndex) {
+        currentAnchorIdx = i;
+        break;
       }
-      currentRepoIdx = found === -1 ? 0 : found;
     }
 
-    if (isRepoHeader) {
-      // Repo-header selected: simply move to the next/prev repo-header
-      const targetRepoIdx = ((currentRepoIdx + delta) % repoIndices.length + repoIndices.length) % repoIndices.length;
-      this.selectedIndex = repoIndices[targetRepoIdx]!;
-    } else {
-      // Agent selected: scan for the next/prev repo that has agents, skipping empty ones
-      let targetRepoIdx = currentRepoIdx;
-      for (let step = 0; step < repoIndices.length; step++) {
-        targetRepoIdx = ((targetRepoIdx + delta) % repoIndices.length + repoIndices.length) % repoIndices.length;
-        const agents = agentsForRepo(targetRepoIdx);
-        if (agents.length > 0) {
-          this.selectedIndex = delta === 1 ? agents[0]! : agents[agents.length - 1]!;
-          break;
-        }
+    // Cycle through anchors. Coordinator anchor is always a valid landing spot;
+    // repo anchors require at least one agent (skip empty repos).
+    let targetAnchorIdx = currentAnchorIdx;
+    for (let step = 0; step < anchors.length; step++) {
+      targetAnchorIdx = ((targetAnchorIdx + delta) % anchors.length + anchors.length) % anchors.length;
+      const target = anchors[targetAnchorIdx]!;
+      if (target.kind === "system-coordinator") {
+        this.selectedIndex = target.index;
+        break;
+      }
+      const agents = agentsForAnchor(targetAnchorIdx);
+      if (agents.length > 0) {
+        this.selectedIndex = delta === 1 ? agents[0]! : agents[agents.length - 1]!;
+        break;
       }
     }
 

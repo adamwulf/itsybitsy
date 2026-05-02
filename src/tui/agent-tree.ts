@@ -243,11 +243,9 @@ export class AgentTreeComponent implements Component {
     const current = visible[this.selectedIndex];
     const isRepoHeader = current?.kind === "repo-header";
 
-    // Find all repo-header indices (used by both branches)
-    const repoIndices = visible.map((f, i) => (f.kind === "repo-header" ? i : -1)).filter((i) => i !== -1);
-
     if (isRepoHeader) {
       // Original behavior: cycle through repo headers only.
+      const repoIndices = visible.map((f, i) => (f.kind === "repo-header" ? i : -1)).filter((i) => i !== -1);
       if (repoIndices.length === 0) return;
       let currentRepoIdx = repoIndices.indexOf(this.selectedIndex);
       if (currentRepoIdx === -1) currentRepoIdx = 0;
@@ -261,12 +259,12 @@ export class AgentTreeComponent implements Component {
     // Agent or coordinator selected: build agent-group anchor list.
     // Anchors are the system-coordinator (if present) plus each repo-header,
     // ordered by their position in the visible list.
-    type Anchor = { kind: "system-coordinator"; index: number } | { kind: "repo-header"; index: number };
-    const anchors: Anchor[] = [];
+    const anchors: { kind: "system-coordinator" | "repo-header"; index: number }[] = [];
     for (let i = 0; i < visible.length; i++) {
       const item = visible[i]!;
-      if (item.kind === "system-coordinator") anchors.push({ kind: "system-coordinator", index: i });
-      else if (item.kind === "repo-header") anchors.push({ kind: "repo-header", index: i });
+      if (item.kind === "system-coordinator" || item.kind === "repo-header") {
+        anchors.push({ kind: item.kind, index: i });
+      }
     }
     if (anchors.length === 0) return;
 
@@ -283,7 +281,9 @@ export class AgentTreeComponent implements Component {
       return result;
     };
 
-    // Find which anchor we are currently at/under
+    // Find which anchor we are currently at/under. Default 0 is a safe fallback
+    // (selectedIndex < anchors[0].index is unreachable since coordinator-when-present
+    // and first-repo-header are always at index 0).
     let currentAnchorIdx = 0;
     for (let i = anchors.length - 1; i >= 0; i--) {
       if (anchors[i]!.index <= this.selectedIndex) {

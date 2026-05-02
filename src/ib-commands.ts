@@ -29,7 +29,7 @@ import { SpawnContext } from "./types";
 import type { SpawnFn } from "./types";
 import { isValidModel, isValidToolList, isValidTmuxSession, isValidSessionId, isValidShellPath, shellQuote } from "./validation";
 import { getSavedTmuxWidth } from "./tui/layout";
-import { buildPerRepoCoordinatorSettings, checkCoordinatorExists, getCoordinatorAgentId } from "./coordinator";
+import { buildPerRepoCoordinatorSettings, checkCoordinatorExists, getCoordinatorAgentId, getCoordinatorHome } from "./coordinator";
 import { loadAgentType, agentTypeExists } from "./agent-types";
 import { listRepos, repoDisplayName } from "./registry";
 import { stampAgentCompactCheck } from "./watchdog";
@@ -1733,13 +1733,44 @@ export async function newAgent(
       } catch { /* ignore */ }
     }
 
-    // Case 2: Non-worktree agent (coordinator) — CWD is a registered repo root
+    // Case 2A: System coordinator — CWD is the system coordinator home
+    // (~/.itsybitsy/). The system coordinator is not a registered repo so the
+    // Case 2B per-repo lookup below would never match. Tag with the @system
+    // sentinel so the watchdog can route notifications via inboxWrite().
+    // Like Case 2B, this is gated on CLAUDE_SESSION_ID so a human running
+    // `ib new-agent` from the system coordinator dir does not get tagged.
+    if (!spawnedBy && !worktreeMatch && process.env.CLAUDE_SESSION_ID) {
+      let systemHome: string | null = null;
+      try {
+        systemHome = realpathSync(getCoordinatorHome());
+      } catch {
+        systemHome = resolve(getCoordinatorHome());
+      }
+      let resolvedCwd: string;
+      try {
+        resolvedCwd = realpathSync(cwd);
+      } catch {
+        resolvedCwd = resolve(cwd);
+      }
+      if (systemHome && resolvedCwd === systemHome) {
+        spawnedBy = {
+          agent_id: "@system",
+          repo_path: null,
+        };
+      }
+    }
+
+    // Case 2B: Non-worktree per-repo coordinator — CWD is a registered repo root.
     // Coordinators run from the repo root, so CWD won't match the worktree pattern.
     // Detect by checking if CWD is a registered repo with a coordinator agent.
     // Only fires when CLAUDE_SESSION_ID is set, which means the caller is a Claude agent
     // session (e.g. a coordinator). Human users running ib watch or ib new-agent from the
     // command line won't have this variable, so they won't get auto-assigned a coordinator
     // as spawner.
+    //
+    // The stored agent_id is the `@<repo-name>` sentinel (not the coordinator's
+    // actual agent_id) so the watchdog routes notifications through resolveTarget,
+    // which is robust to the coordinator being killed and re-created.
     if (!spawnedBy && !worktreeMatch && process.env.CLAUDE_SESSION_ID) {
       try {
         const repos = await listRepos();
@@ -1748,7 +1779,7 @@ export async function newAgent(
           const coordStatus = await checkCoordinatorExists(cwd);
           if (coordStatus.exists && coordStatus.agentId) {
             spawnedBy = {
-              agent_id: coordStatus.agentId,
+              agent_id: `@${repoDisplayName(repoMatch)}`,
               repo_path: cwd,
             };
           }
@@ -1948,11 +1979,15 @@ export async function newAgent(
   await mkdir(agentDir, { recursive: true });
 
   // Prefer spawnedBy; fall back to --manager flag.
-  const spawnerAgentDir: string | null = spawnedBy
-    ? join(spawnedBy.repo_path, ".ittybitty", "agents", spawnedBy.agent_id)
-    : manager
-      ? join(agentsDir, manager)
-      : null;
+  // @-prefixed sentinels (e.g. @system, @<repo-name>) and null repo_path are
+  // skipped here — the spawner is not a real agent directory we can log into,
+  // so logSpawn writes only to the spawnee's log.
+  const spawnerAgentDir: string | null =
+    spawnedBy && spawnedBy.repo_path !== null && !spawnedBy.agent_id.startsWith("@")
+      ? join(spawnedBy.repo_path, ".ittybitty", "agents", spawnedBy.agent_id)
+      : manager
+        ? join(agentsDir, manager)
+        : null;
 
   // Working directory defaults to root repo
   let workPath = rootRepoPath;
@@ -1965,8 +2000,10 @@ export async function newAgent(
   // the dashboard something to render and avoids the orphan-detection race.
   const sessionUuid = crypto.randomUUID();
 
-  // Normalize and validate spawned_by repo_path before writing to meta.json
-  if (spawnedBy) {
+  // Normalize and validate spawned_by repo_path before writing to meta.json.
+  // Skip when repo_path is null — that path is reserved for the @system
+  // sentinel whose spawner has no repo.
+  if (spawnedBy && spawnedBy.repo_path !== null) {
     // Normalize: resolve symlinks so stored path matches registry's canonical form.
     // realpathSync resolves symlinks; resolve() only normalizes .. and trailing slashes.
     // Registry's addRepo stores resolve()-d paths, but the user may pass a symlinked path

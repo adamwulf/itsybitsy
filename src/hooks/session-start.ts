@@ -19,8 +19,10 @@ export interface SessionContext {
   worktreePath: string;
   rootRepoPath: string;
   agentType?: string;
-  /** Cross-repo spawner info (set when meta.spawned_by is present and differs from manager) */
-  spawnedBy?: { agent_id: string; repo_path: string };
+  /** Cross-repo spawner info (set when meta.spawned_by is present and differs from manager).
+   * `repo_path` may be `null` for the `@system` sentinel (system coordinator
+   * has no repo). `agent_id` may be `@system` or `@<repo-name>`. */
+  spawnedBy?: { agent_id: string; repo_path: string | null };
   /** Additional allowed paths from agent type */
   allowedPaths?: string[];
 }
@@ -33,7 +35,7 @@ export function detectRole(
     worker?: boolean;
     coordinator?: boolean;
     agentType?: string;
-    spawned_by?: { agent_id: string; repo_path: string };
+    spawned_by?: { agent_id: string; repo_path: string | null };
     allowedPaths?: unknown;
   },
   agentIdOverride?: string,
@@ -385,14 +387,31 @@ Each Bash tool call must run exactly ONE command. Multi-command calls will be bl
 </ittybitty>`;
 }
 
+/**
+ * Format a one-line `You were spawned by ...` blurb for inclusion in
+ * session-start instructions. Handles `@`-prefixed sentinels:
+ *   - `@system` — system coordinator (no repo_path)
+ *   - `@<repo-name>` — per-repo coordinator
+ * Real agent IDs render with the spawner's repo basename when available.
+ */
+function formatSpawnerInfo(spawnedBy: { agent_id: string; repo_path: string | null }): string {
+  const id = spawnedBy.agent_id;
+  if (id === "@system") {
+    return `You were spawned by the system coordinator. You can send messages to it with: \`ib send @system "message"\``;
+  }
+  if (id.startsWith("@")) {
+    return `You were spawned by the per-repo coordinator \`${id}\`. You can send messages to it with: \`ib send ${id} "message"\``;
+  }
+  const repoLabel = spawnedBy.repo_path ? ` in repo \`${basename(spawnedBy.repo_path)}\`` : "";
+  return `You were spawned by agent \`${id}\`${repoLabel}. You can send messages to your spawner with: \`ib send ${id} "message"\``;
+}
+
 function generateManagerInstructions(ctx: SessionContext): string {
   const managerInfo = ctx.agentManager
     ? `Your manager agent is: ${ctx.agentManager}`
     : "";
 
-  const spawnerInfo = ctx.spawnedBy
-    ? `You were spawned by agent \`${ctx.spawnedBy.agent_id}\` in repo \`${basename(ctx.spawnedBy.repo_path)}\`. You can send messages to your spawner with: \`ib send ${ctx.spawnedBy.agent_id} "message"\``
-    : "";
+  const spawnerInfo = ctx.spawnedBy ? formatSpawnerInfo(ctx.spawnedBy) : "";
 
   const askLine = !ctx.agentManager
     ? `| \`ib ask "question"\` | Ask the user a question (top-level managers only) |`
@@ -509,9 +528,7 @@ function generateWorkerInstructions(ctx: SessionContext): string {
   // so `ib send muse-ios` routes correctly to the per-repo coordinator.
   const managerSendTarget = ctx.agentManager;
 
-  const spawnerInfo = ctx.spawnedBy
-    ? `You were spawned by agent \`${ctx.spawnedBy.agent_id}\` in repo \`${basename(ctx.spawnedBy.repo_path)}\`. You can send messages to your spawner with: \`ib send ${ctx.spawnedBy.agent_id} "message"\``
-    : "";
+  const spawnerInfo = ctx.spawnedBy ? formatSpawnerInfo(ctx.spawnedBy) : "";
 
   return `<ittybitty>
 ## IttyBitty Worker Agent
@@ -671,7 +688,7 @@ export async function hookSessionStart(rawStdin?: string, agentIdArg?: string): 
 
   // Detect role - read meta.json from filesystem if in an agent directory
   const match = AGENT_CWD_PATTERN.exec(cwd);
-  let metaJson: { id?: string; manager?: string | null; worker?: boolean; coordinator?: boolean; agentType?: string; allowedPaths?: string[]; spawned_by?: { agent_id: string; repo_path: string }; state?: string } | undefined;
+  let metaJson: { id?: string; manager?: string | null; worker?: boolean; coordinator?: boolean; agentType?: string; allowedPaths?: string[]; spawned_by?: { agent_id: string; repo_path: string | null }; state?: string } | undefined;
   let agentDirForState: string | undefined;
 
   if (match) {

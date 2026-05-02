@@ -768,6 +768,223 @@ describe("watchdog", () => {
     });
   });
 
+  // =========================================================================
+  // Mutually-exclusive notify precedence (manager wins over spawned_by)
+  // =========================================================================
+
+  describe("notify precedence (mutually exclusive)", () => {
+    /** Same matcher used elsewhere — counts the watchdog message that goes
+     * over `tmux send-keys -l <text>`. */
+    function countSendKeysWithText(
+      spawn: ReturnType<typeof mockSpawnRunner>,
+      substr: string,
+    ): number {
+      return spawn.calls.filter((c) =>
+        c.args.includes("send-keys") &&
+        c.args.includes("-l") &&
+        c.args.some((a: any) => typeof a === "string" && a.includes(substr))
+      ).length;
+    }
+
+    test("waiting: manager wins — spawner is NOT notified when both are set", async () => {
+      setWatchdogCaptureTmux(async () => "no shells");
+      const mgr = agent("mgr", "running");
+      const spawner = agent("spawner", "running");
+      const a1 = agent("a1", "waiting", "mgr");
+      a1.meta.spawned_by = { agent_id: "spawner", repo_path: "/tmp/other" };
+
+      for (let i = 0; i < INITIAL_NOTIFY_TICKS; i++) {
+        await tick([mgr, spawner, a1]);
+      }
+      // Manager (subtask wording) was notified; spawner (you spawned wording) was NOT.
+      expect(countSendKeysWithText(spawnMock, "Your subtask a1 recently started waiting")).toBeGreaterThan(0);
+      expect(countSendKeysWithText(spawnMock, "you spawned recently started waiting")).toBe(0);
+    });
+
+    test("waiting: spawner notified when manager is null", async () => {
+      setWatchdogCaptureTmux(async () => "no shells");
+      const spawner = agent("spawner", "running");
+      const a1 = agent("a1", "waiting", null);
+      a1.meta.spawned_by = { agent_id: "spawner", repo_path: "/tmp/other" };
+
+      for (let i = 0; i < INITIAL_NOTIFY_TICKS; i++) {
+        await tick([spawner, a1]);
+      }
+      expect(countSendKeysWithText(spawnMock, "you spawned recently started waiting")).toBeGreaterThan(0);
+    });
+
+    test("waiting: no notification when neither manager nor spawner is set", async () => {
+      setWatchdogCaptureTmux(async () => "no shells");
+      const a1 = agent("a1", "waiting", null);
+
+      for (let i = 0; i < INITIAL_NOTIFY_TICKS + 5; i++) {
+        await tick([a1]);
+      }
+      expect(spawnMock.calls.filter((c) => c.args.includes("send-keys")).length).toBe(0);
+    });
+
+    test("complete: manager wins — spawner is NOT notified", async () => {
+      const mgr = agent("mgr", "running");
+      const spawner = agent("spawner", "running");
+      const a1 = agent("a1", "complete", "mgr");
+      a1.meta.spawned_by = { agent_id: "spawner", repo_path: "/tmp/other" };
+
+      await tick([mgr, spawner, a1]);
+      expect(countSendKeysWithText(spawnMock, "Your subtask a1 recently completed")).toBeGreaterThan(0);
+      expect(countSendKeysWithText(spawnMock, "you spawned recently completed")).toBe(0);
+    });
+
+    test("complete: spawner notified when manager is null", async () => {
+      const spawner = agent("spawner", "running");
+      const a1 = agent("a1", "complete", null);
+      a1.meta.spawned_by = { agent_id: "spawner", repo_path: "/tmp/other" };
+
+      await tick([spawner, a1]);
+      expect(countSendKeysWithText(spawnMock, "you spawned recently completed")).toBeGreaterThan(0);
+    });
+
+    test("unknown: manager wins — spawner is NOT notified", async () => {
+      const mgr = agent("mgr", "running");
+      const spawner = agent("spawner", "running");
+      const a1 = agent("a1", "unknown", "mgr");
+      a1.meta.spawned_by = { agent_id: "spawner", repo_path: "/tmp/other" };
+
+      for (let i = 0; i < INITIAL_NOTIFY_TICKS; i++) {
+        await tick([mgr, spawner, a1]);
+      }
+      expect(countSendKeysWithText(spawnMock, "Your subtask a1 state is unknown")).toBeGreaterThan(0);
+      expect(countSendKeysWithText(spawnMock, "you spawned has an unknown state")).toBe(0);
+    });
+
+    test("unknown: spawner notified when manager is null", async () => {
+      const spawner = agent("spawner", "running");
+      const a1 = agent("a1", "unknown", null);
+      a1.meta.spawned_by = { agent_id: "spawner", repo_path: "/tmp/other" };
+
+      for (let i = 0; i < INITIAL_NOTIFY_TICKS; i++) {
+        await tick([spawner, a1]);
+      }
+      expect(countSendKeysWithText(spawnMock, "you spawned has an unknown state")).toBeGreaterThan(0);
+    });
+  });
+
+  // =========================================================================
+  // notifySpawner: @-prefixed sentinel routing
+  // =========================================================================
+
+  describe("notifySpawner @-prefixed routing", () => {
+    let inboxDir: string;
+
+    beforeEach(async () => {
+      inboxDir = await Bun.$`mktemp -d`.text().then((s) => s.trim());
+      const { setInboxDir } = await import("./inbox");
+      setInboxDir(inboxDir);
+    });
+
+    afterEach(async () => {
+      const { setInboxDir } = await import("./inbox");
+      setInboxDir(undefined);
+      await Bun.$`rm -rf ${inboxDir}`.quiet();
+    });
+
+    test("@system sentinel routes to inboxWrite", async () => {
+      const a1 = agent("a1", "complete", null);
+      a1.meta.spawned_by = { agent_id: "@system", repo_path: null };
+
+      const { notifySpawner } = await import("./watchdog");
+      await notifySpawner(a1, "[watchdog]: hello system", []);
+
+      // Inbox should now have one .msg file authored by a1
+      const { readdirSync } = await import("node:fs");
+      const files = readdirSync(inboxDir);
+      expect(files.length).toBe(1);
+      const filename = files[0]!;
+      expect(filename.endsWith(".msg")).toBe(true);
+      // Source should be the spawnee agent ID
+      expect(filename).toContain("-a1.msg");
+      const content = await Bun.file(join(inboxDir, filename)).text();
+      expect(content).toBe("[watchdog]: hello system");
+
+      // No tmux send-keys should have been issued for @system routing
+      expect(spawnMock.calls.filter((c) => c.args.includes("send-keys")).length).toBe(0);
+    });
+
+    test("@<repo-name> sentinel resolves to that repo's coordinator and sendMessage", async () => {
+      // Stub listRepos and the per-agent agents so notifySpawner can find the
+      // coordinator. The spawner stub returns one repo with a coordinator agent.
+      setWatchdogListRepos(async () => [
+        { path: "/tmp/test-repo", name: "myrepo" },
+      ]);
+
+      // Stub the coordinator-exists check via dependency injection. The simplest
+      // way is to construct the coordinator in `allAgents` so findAgent locates it.
+      const coord = makeAgent({
+        id: "myrepo",
+        state: "running",
+        meta: {
+          id: "myrepo",
+          session_id: "sess-coord",
+          tmux_session: "tmux-coord",
+          prompt: "coord",
+          manager: null,
+          created: "2026-03-05T00:00:00Z",
+          created_epoch: Math.floor(Date.now() / 1000) - 60,
+          worktree: false,
+          worker: false,
+          yolo: false,
+          model: "sonnet",
+          claude_pid: "12345",
+          coordinator: true,
+        },
+      });
+
+      // Mock a fake coordinator dir so checkCoordinatorExists finds it.
+      const repoDir = await Bun.$`mktemp -d`.text().then((s) => s.trim());
+      try {
+        const agentDir = `${repoDir}/.ittybitty/agents/myrepo`;
+        mkdirSync(agentDir, { recursive: true });
+        writeFileSync(`${agentDir}/meta.json`, JSON.stringify({
+          id: "myrepo",
+          coordinator: true,
+        }));
+
+        setWatchdogListRepos(async () => [
+          { path: repoDir, name: "myrepo" },
+        ]);
+
+        const a1 = agent("a1", "complete", null);
+        a1.meta.spawned_by = { agent_id: "@myrepo", repo_path: repoDir };
+
+        const { notifySpawner } = await import("./watchdog");
+        await notifySpawner(a1, "[watchdog]: hello @myrepo", [coord]);
+
+        // Should have issued tmux send-keys to the coordinator's tmux session
+        const sendKeysCalls = spawnMock.calls.filter((c) =>
+          c.args.includes("send-keys") && c.args.includes("-t") && c.args.includes("tmux-coord")
+        );
+        expect(sendKeysCalls.length).toBeGreaterThan(0);
+      } finally {
+        await Bun.$`rm -rf ${repoDir}`.quiet();
+        resetWatchdogListRepos();
+      }
+    });
+
+    test("@<repo-name> sentinel: no-op when repo not registered", async () => {
+      setWatchdogListRepos(async () => []);
+      try {
+        const a1 = agent("a1", "complete", null);
+        a1.meta.spawned_by = { agent_id: "@gone-repo", repo_path: "/tmp/gone" };
+
+        const { notifySpawner } = await import("./watchdog");
+        await notifySpawner(a1, "msg", []);
+
+        expect(spawnMock.calls.filter((c) => c.args.includes("send-keys")).length).toBe(0);
+      } finally {
+        resetWatchdogListRepos();
+      }
+    });
+  });
+
   describe("constants", () => {
     test("POLL_INTERVAL_MS is 5 seconds", () => {
       expect(POLL_INTERVAL_MS).toBe(5000);

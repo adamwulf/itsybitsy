@@ -230,9 +230,16 @@ export async function notifyManager(
 }
 
 /**
- * Send a watchdog notification to the agent's spawner (if different from manager).
- * No-op if the agent has no spawned_by, or if spawner === manager, or if
- * spawner agent is not found in any registered repo.
+ * Send a watchdog notification to the agent's spawner.
+ *
+ * Routing:
+ *   - `@system` → write to ~/.itsybitsy/coordinator-inbox/ via inboxWrite()
+ *   - `@<repo-name>` → look up the repo, find its per-repo coordinator, sendMessage
+ *   - real agent_id → findAgent + sendMessage (existing path)
+ *
+ * No-op if the agent has no spawned_by, if spawner === manager (defensive —
+ * the caller in handleWaiting/handleUnknown/handleComplete already gates on
+ * manager being absent), or if the spawner cannot be resolved.
  */
 export async function notifySpawner(
   agent: Agent,
@@ -241,9 +248,38 @@ export async function notifySpawner(
 ): Promise<void> {
   const spawner = agent.meta.spawned_by;
   if (!spawner) return;
-  // Don't double-notify if spawner is the same as manager
+  // Defense-in-depth: callers in handleWaiting/handleUnknown/handleComplete
+  // already enforce mutual exclusivity by skipping notifySpawner when manager
+  // is set. This guard remains so direct callers (and tests) still get the
+  // same dedupe semantics as before.
   if (spawner.agent_id === agent.meta.manager) return;
 
+  // @system → append to the system coordinator's file-based inbox.
+  if (spawner.agent_id === "@system") {
+    const { inboxWrite } = await import("./inbox");
+    await inboxWrite(message, { source: agent.id });
+    return;
+  }
+
+  // @<repo-name> → resolve to that repo's per-repo coordinator.
+  if (spawner.agent_id.startsWith("@")) {
+    const repoName = spawner.agent_id.slice(1);
+    try {
+      const repos = await listReposFn();
+      const { repoDisplayName } = await import("./registry");
+      const repo = repos.find((r) => repoDisplayName(r) === repoName);
+      if (!repo) return;
+      const { checkCoordinatorExists } = await import("./coordinator");
+      const coordStatus = await checkCoordinatorExists(repo.path);
+      if (!coordStatus.exists || !coordStatus.agentId) return;
+      const coordinator = findAgent(allAgents, coordStatus.agentId);
+      if (!coordinator) return;
+      await sendMessage(coordinator, message);
+    } catch { /* best-effort — never crash watchdog */ }
+    return;
+  }
+
+  // Real agent ID — existing path.
   const spawnerAgent = findAgent(allAgents, spawner.agent_id);
   if (!spawnerAgent) return;
 
@@ -316,16 +352,22 @@ async function handleWaiting(agent: Agent, tracker: AgentTracker, getAllAgents: 
   tracker.waitCounter++;
 
   if (tracker.waitCounter >= tracker.notifyInterval) {
-    await notifyManager(
-      agent,
-      `[watchdog]: Your subtask ${agent.id} recently started waiting for input`,
-      allAgents,
-    );
-    await notifySpawner(
-      agent,
-      `[watchdog]: Agent ${agent.id} you spawned recently started waiting for input`,
-      allAgents,
-    );
+    // Mutually-exclusive precedence: manager wins if present; otherwise the
+    // spawner is notified; otherwise nothing. Previously we notified both
+    // when they differed, which led to duplicate noise for cross-repo spawns.
+    if (agent.meta.manager) {
+      await notifyManager(
+        agent,
+        `[watchdog]: Your subtask ${agent.id} recently started waiting for input`,
+        allAgents,
+      );
+    } else if (agent.meta.spawned_by) {
+      await notifySpawner(
+        agent,
+        `[watchdog]: Agent ${agent.id} you spawned recently started waiting for input`,
+        allAgents,
+      );
+    }
 
     // Reset counter and double interval (exponential backoff)
     tracker.waitCounter = 0;
@@ -350,16 +392,20 @@ async function handleUnknown(agent: Agent, tracker: AgentTracker, getAllAgents: 
     // Only resolve allAgents when we actually need to notify — most ticks in
     // unknown state increment the counter without notifying.
     const allAgents = await getAllAgents();
-    await notifyManager(
-      agent,
-      `[watchdog]: Your subtask ${agent.id} state is unknown - may need attention`,
-      allAgents,
-    );
-    await notifySpawner(
-      agent,
-      `[watchdog]: Agent ${agent.id} you spawned has an unknown state - may need attention`,
-      allAgents,
-    );
+    // Mutually-exclusive precedence — see handleWaiting for rationale.
+    if (agent.meta.manager) {
+      await notifyManager(
+        agent,
+        `[watchdog]: Your subtask ${agent.id} state is unknown - may need attention`,
+        allAgents,
+      );
+    } else if (agent.meta.spawned_by) {
+      await notifySpawner(
+        agent,
+        `[watchdog]: Agent ${agent.id} you spawned has an unknown state - may need attention`,
+        allAgents,
+      );
+    }
 
     // Reset counter and double interval (exponential backoff)
     tracker.waitCounter = 0;
@@ -405,16 +451,20 @@ async function handleComplete(agent: Agent, tracker: AgentTracker, getAllAgents:
     // Only resolve allAgents on the one-shot notification — subsequent ticks
     // in complete state hit the early return and never load the snapshot.
     const allAgents = await getAllAgents();
-    await notifyManager(
-      agent,
-      `[watchdog]: Your subtask ${agent.id} recently completed`,
-      allAgents,
-    );
-    await notifySpawner(
-      agent,
-      `[watchdog]: Agent ${agent.id} you spawned recently completed`,
-      allAgents,
-    );
+    // Mutually-exclusive precedence — see handleWaiting for rationale.
+    if (agent.meta.manager) {
+      await notifyManager(
+        agent,
+        `[watchdog]: Your subtask ${agent.id} recently completed`,
+        allAgents,
+      );
+    } else if (agent.meta.spawned_by) {
+      await notifySpawner(
+        agent,
+        `[watchdog]: Agent ${agent.id} you spawned recently completed`,
+        allAgents,
+      );
+    }
     tracker.completionNotified = true;
   }
 }

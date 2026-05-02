@@ -141,6 +141,43 @@ describe("readAgentMeta spawned_by validation", () => {
     expect(meta).not.toBeNull();
     expect(meta!.spawned_by).toBeUndefined();
   });
+
+  test("@system sentinel with null repo_path is preserved", async () => {
+    await Bun.write(
+      join(tempDir, "meta.json"),
+      JSON.stringify({
+        id: "agent-childA",
+        spawned_by: {
+          agent_id: "@system",
+          repo_path: null,
+        },
+      })
+    );
+
+    const { meta } = await readAgentMeta(tempDir);
+    expect(meta).not.toBeNull();
+    expect(meta!.spawned_by).toBeDefined();
+    expect(meta!.spawned_by!.agent_id).toBe("@system");
+    expect(meta!.spawned_by!.repo_path).toBeNull();
+  });
+
+  test("@<repo-name> sentinel with string repo_path is preserved", async () => {
+    await Bun.write(
+      join(tempDir, "meta.json"),
+      JSON.stringify({
+        id: "agent-childB",
+        spawned_by: {
+          agent_id: "@myrepo",
+          repo_path: "/Users/me/repos/myrepo",
+        },
+      })
+    );
+
+    const { meta } = await readAgentMeta(tempDir);
+    expect(meta).not.toBeNull();
+    expect(meta!.spawned_by!.agent_id).toBe("@myrepo");
+    expect(meta!.spawned_by!.repo_path).toBe("/Users/me/repos/myrepo");
+  });
 });
 
 // ── checkIbCommandAccess with spawned_by ─────────────────────────────────────

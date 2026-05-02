@@ -45,6 +45,16 @@ function itsybitsyHome(): string {
   return overrideHome ?? join(process.env.HOME ?? homedir(), ".itsybitsy");
 }
 
+/**
+ * Public accessor for the system coordinator's home directory (`~/.itsybitsy/`).
+ * Used by `ib new-agent` to recognize when its CWD is the system coordinator
+ * and stamp the new agent's `spawned_by` with the `@system` sentinel.
+ * Honors the test override set via `setCoordinatorHome`.
+ */
+export function getCoordinatorHome(): string {
+  return itsybitsyHome();
+}
+
 function refsPath(): string {
   return join(itsybitsyHome(), "coordinator.refs");
 }

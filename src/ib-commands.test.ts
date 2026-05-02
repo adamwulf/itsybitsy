@@ -5386,19 +5386,68 @@ describe("spawned_by Case 2 coordinator auto-detect", () => {
     expect(meta.spawned_by).toBeNull();
   });
 
-  test("Case 2 fires when CLAUDE_SESSION_ID is set and CWD is repo root with coordinator", async () => {
+  test("Case 2B fires when CLAUDE_SESSION_ID is set and CWD is repo root with coordinator (uses @<repo-name> sentinel)", async () => {
     process.env.CLAUDE_SESSION_ID = "fake-session-id-12345";
     setNewAgentSpawnRunner(mockSpawnRunner());
 
     const result = await newAgent(tempDir, "do work", { name: "test-with-session", _cwd: tempDir });
     expect(result.ok).toBe(true);
 
-    // Read the meta.json — spawned_by should be set to the coordinator
+    // Read the meta.json — spawned_by should be the @<repo-name> sentinel,
+    // not the coordinator's actual agent_id. The watchdog routes notifications
+    // through resolveTarget so the sentinel survives coordinator restarts.
     const meta = await Bun.file(join(agentsDir, "test-with-session", "meta.json")).json();
-    const coordId = require("path").basename(tempDir);
     expect(meta.spawned_by).not.toBeNull();
-    expect(meta.spawned_by.agent_id).toBe(coordId);
+    expect(meta.spawned_by.agent_id).toBe("@test-repo");
     expect(meta.spawned_by.repo_path).toBe(tempDir);
+  });
+
+  test("Case 2A fires when CWD is the system coordinator home (@system sentinel, repo_path=null)", async () => {
+    process.env.CLAUDE_SESSION_ID = "fake-session-id-system";
+    const { setCoordinatorHome, resetCoordinatorHome } = await import("./coordinator");
+
+    // Use the fake home as the system coordinator dir.
+    const sysCoordHome = join(fakeHome, ".itsybitsy");
+    setCoordinatorHome(sysCoordHome);
+
+    setNewAgentSpawnRunner(mockSpawnRunner());
+
+    try {
+      const result = await newAgent(tempDir, "do work", {
+        name: "test-from-system",
+        _cwd: sysCoordHome,
+      });
+      expect(result.ok).toBe(true);
+
+      const meta = await Bun.file(join(agentsDir, "test-from-system", "meta.json")).json();
+      expect(meta.spawned_by).not.toBeNull();
+      expect(meta.spawned_by.agent_id).toBe("@system");
+      expect(meta.spawned_by.repo_path).toBeNull();
+    } finally {
+      resetCoordinatorHome();
+    }
+  });
+
+  test("Case 2A is skipped without CLAUDE_SESSION_ID (human user from system coord dir)", async () => {
+    delete process.env.CLAUDE_SESSION_ID;
+    const { setCoordinatorHome, resetCoordinatorHome } = await import("./coordinator");
+    const sysCoordHome = join(fakeHome, ".itsybitsy");
+    setCoordinatorHome(sysCoordHome);
+
+    setNewAgentSpawnRunner(mockSpawnRunner());
+
+    try {
+      const result = await newAgent(tempDir, "do work", {
+        name: "test-from-system-human",
+        _cwd: sysCoordHome,
+      });
+      expect(result.ok).toBe(true);
+
+      const meta = await Bun.file(join(agentsDir, "test-from-system-human", "meta.json")).json();
+      expect(meta.spawned_by).toBeNull();
+    } finally {
+      resetCoordinatorHome();
+    }
   });
 });
 

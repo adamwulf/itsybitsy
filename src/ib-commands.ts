@@ -559,6 +559,11 @@ ${qAbsExitScript}
   }
   await nukeResumeSpawnCtx.run(["tmux", "set-option", "-w", "-t", tmuxSession, "history-limit", "50000"]);
   await nukeResumeSpawnCtx.run(["tmux", "set-option", "-w", "-t", tmuxSession, "remain-on-exit", "on"]);
+  // window-size manual prevents tmux from auto-resizing the window to the
+  // latest attached client's terminal size. The dashboard sizes the session
+  // to the saved pane width; the default ("latest") would silently shrink
+  // it back when other clients attach/detach.
+  await nukeResumeSpawnCtx.run(["tmux", "set-option", "-w", "-t", tmuxSession, "window-size", "manual"]);
   // pane-died hook fires on every pane termination (graceful or otherwise)
   // as a backstop for the case where resume.sh itself dies before reaching
   // its exit-log line. See the new-agent path for the matching comment.
@@ -2526,9 +2531,14 @@ ${qStartExitScript}
   // shellQuote's single-quote wrapping is safe inside tmux's double quotes.
   const paneDiedHook = `run-shell "echo '[tmux pane-died] session=#{session_name} pane_dead_status=#{pane_dead_status} pane_dead_signal=#{pane_dead_signal}' >> ${shellQuote(join(agentDir, "agent.log"))}"`;
   await logSpawn(agentDir, spawnerAgentDir, id, `tmux has-session verify starting: -t ${tmuxSession}`);
-  const [, , , verifyResult] = await Promise.all([
+  const [, , , , verifyResult] = await Promise.all([
     newAgentSpawnCtx.run(["tmux", "set-option", "-w", "-t", tmuxSession, "history-limit", "50000"]),
     newAgentSpawnCtx.run(["tmux", "set-option", "-w", "-t", tmuxSession, "remain-on-exit", "on"]),
+    // window-size manual prevents tmux from auto-resizing the window to the
+    // latest attached client's terminal size. The dashboard sizes the session
+    // to the saved pane width; the default ("latest") would silently shrink
+    // it back when other clients attach/detach.
+    newAgentSpawnCtx.run(["tmux", "set-option", "-w", "-t", tmuxSession, "window-size", "manual"]),
     newAgentSpawnCtx.run(["tmux", "set-hook", "-t", tmuxSession, "pane-died", paneDiedHook]),
     // 19. Verify tmux session created
     newAgentSpawnCtx.run(["tmux", "has-session", "-t", tmuxSession]),

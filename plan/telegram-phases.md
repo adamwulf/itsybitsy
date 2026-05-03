@@ -25,8 +25,9 @@ writes code. Output is a short addendum to the plan, not a PR.
   dispatcher does not start (no warning beyond a single info-level log
   line). **No `--no-telegram` flag.** The escape hatch is "unset the
   token in config."
-- **`TELEGRAM_API_BASE` env override:** yes, defaults to
-  `https://api.telegram.org`. Cheap to add now, expensive to retrofit.
+- **Bot API base URL:** hardcoded to `https://api.telegram.org`. No env
+  override, no config key. If we ever need to point at a self-hosted Bot
+  API instance, change the constant.
 - **Channel-reminder text — final wording.** Pick one phrasing and stick with
   it; the inline reply hint vs. one-shot orientation block tradeoff is called
   out in implementation-notes §7.
@@ -150,8 +151,8 @@ only by tests in this phase.
     `allowed_updates: ["message"]` by default to cut payload noise
     (implementation-notes open-question 2).
   - `sendMessage({ chat_id, text })` — POST.
-  - Base URL from `TELEGRAM_API_BASE` env or
-    `https://api.telegram.org` default (Phase 0 decision).
+  - Base URL hardcoded to `https://api.telegram.org` (Phase 0
+    decision). No env override.
   - **Outer retry loop pattern** (implementation-notes §3): wrap the
     long-poll in `for(;;) try { ... } catch { backoff; continue }`.
     Reset backoff on a successful poll. Exponential backoff capped at

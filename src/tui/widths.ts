@@ -13,9 +13,12 @@
  *
  * All pane width math in the codebase MUST go through this module.
  * Never compute widths inline.
+ *
+ * Naming convention: pure math takes raw arguments and has no prefix
+ * (`mainWidth`, `leftPaneWidth`, `rightPaneWidth`, `maxLeftPaneWidth`).
+ * `getSaved*` is the async, disk-backed family. `getLive*` is the sync,
+ * dashboard-state family. Both wrap the same pure math via `LayoutWidths`.
  */
-import { homedir } from "os";
-import { join } from "path";
 import { SIDEBAR_WIDTH, MIN_SIDEBAR, MAX_SIDEBAR } from "./sidebar";
 import { MIN_LEFT_WIDTH, MAX_LEFT_WIDTH } from "./split-pane";
 import { loadLayout } from "./layout";
@@ -93,18 +96,20 @@ export function clampLeftWidthAbsolute(width: number): number {
 /**
  * Tmux spawn width for a newly spawned (or resumed) agent.
  * Coordinators (system + per-repo) span middle+right (mainWidth, terminal-aware).
- * Regular agents use the saved split-pane left width clamped to
- * [MIN_LEFT_WIDTH, MAX_LEFT_WIDTH] — dashboard render re-clamps to fit mainWidth later.
+ *
+ * Non-coordinators clamp ONLY to [MIN_LEFT_WIDTH, MAX_LEFT_WIDTH] — not to
+ * `maxLeftPaneWidth(mainWidth)` — so the saved tmux width is preserved across
+ * sessions even when the user spawns from a too-narrow terminal. The dashboard
+ * render path re-clamps against the live mainWidth via `clampLeftWidth` and
+ * issues `resizeTmuxWindow` if needed; the post-layout-restore handler at
+ * `dashboard.ts` (`pendingTmuxResize` branch) is the one that owns that contract.
  */
 export function tmuxWidthForAgent(layout: LayoutWidths, isCoordinator: boolean): number {
   if (isCoordinator) return mainWidth(layout.terminalWidth, layout.sidebarWidth);
-  return Math.max(MIN_LEFT_WIDTH, Math.min(MAX_LEFT_WIDTH, layout.splitPaneLeftWidth));
+  return clampLeftWidthAbsolute(layout.splitPaneLeftWidth);
 }
 
 // ---------- saved (disk-backed) wrappers ----------
-
-const LAYOUT_PATH = join(homedir(), ".itsybitsy", "layout.json");
-export { LAYOUT_PATH };
 
 /** Read terminal width with a sane fallback. */
 function getTerminalWidth(): number {
@@ -121,9 +126,7 @@ async function getSavedLayout(): Promise<LayoutWidths> {
   };
 }
 
-/**
- * Read the saved sidebar width (clamped). Used by callers outside the dashboard.
- */
+/** Read the saved sidebar width (clamped). Used by callers outside the dashboard. */
 export async function getSavedSidebarWidth(): Promise<number> {
   const l = await getSavedLayout();
   return l.sidebarWidth;
@@ -136,7 +139,7 @@ export async function getSavedSidebarWidth(): Promise<number> {
  */
 export async function getSavedTmuxWidth(): Promise<number> {
   const l = await getSavedLayout();
-  return Math.max(MIN_LEFT_WIDTH, Math.min(MAX_LEFT_WIDTH, l.splitPaneLeftWidth));
+  return clampLeftWidthAbsolute(l.splitPaneLeftWidth);
 }
 
 /** Read the saved main area width (middle+right combined). */
@@ -157,31 +160,14 @@ export async function getTmuxWidthForAgent(isCoordinator: boolean): Promise<numb
 
 // ---------- live (dashboard-state) wrappers ----------
 
-/**
- * Inputs the dashboard has at hand: live terminal width, current sidebar width,
- * and the SplitPane's current left width. The two thin wrappers below are sync
- * counterparts of the saved-side getters.
- */
-export interface LiveLayoutInputs {
-  terminalWidth: number;
-  sidebarWidth: number;
-  splitPaneLeftWidth: number;
-}
-
-export function getLiveMainWidth(input: LiveLayoutInputs): number {
+export function getLiveMainWidth(input: LayoutWidths): number {
   return mainWidth(input.terminalWidth, input.sidebarWidth);
 }
 
-export function getLiveLeftPaneWidth(input: LiveLayoutInputs): number {
-  const mw = getLiveMainWidth(input);
-  return leftPaneWidth(mw, input.splitPaneLeftWidth);
+export function getLiveLeftPaneWidth(input: LayoutWidths): number {
+  return leftPaneWidth(getLiveMainWidth(input), input.splitPaneLeftWidth);
 }
 
-export function getLiveRightPaneWidth(input: LiveLayoutInputs): number {
-  const mw = getLiveMainWidth(input);
-  return rightPaneWidth(mw, input.splitPaneLeftWidth);
-}
-
-export function getLiveMaxLeftPaneWidth(input: LiveLayoutInputs): number {
-  return maxLeftPaneWidth(getLiveMainWidth(input));
+export function getLiveRightPaneWidth(input: LayoutWidths): number {
+  return rightPaneWidth(getLiveMainWidth(input), input.splitPaneLeftWidth);
 }

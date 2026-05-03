@@ -5,7 +5,7 @@ import { tmpdir } from "os";
 import {
   mainWidth, leftPaneWidth, rightPaneWidth, maxLeftPaneWidth,
   clampLeftWidth, clampSidebarWidth, tmuxWidthForAgent,
-  getLiveMainWidth, getLiveLeftPaneWidth, getLiveRightPaneWidth, getLiveMaxLeftPaneWidth,
+  getLiveMainWidth, getLiveLeftPaneWidth, getLiveRightPaneWidth,
   getSavedTmuxWidth, getSavedSidebarWidth, getSavedMainWidth, getTmuxWidthForAgent,
   DEFAULT_TMUX_WIDTH,
 } from "./widths";
@@ -89,7 +89,6 @@ describe("widths — live wrappers", () => {
     expect(getLiveMainWidth(input)).toBe(139);
     expect(getLiveLeftPaneWidth(input)).toBe(80);
     expect(getLiveRightPaneWidth(input)).toBe(58);
-    expect(getLiveMaxLeftPaneWidth(input)).toBe(137);
   });
 
   test("getLiveLeftPaneWidth + 1 + getLiveRightPaneWidth == getLiveMainWidth", () => {

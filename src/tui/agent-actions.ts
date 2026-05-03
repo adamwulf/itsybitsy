@@ -166,9 +166,6 @@ export interface ActionCtx {
   loadAgentLogIfNeeded(): void;
   setQuestionsFocused(value: boolean): void;
   healthReport: RepoHealthReport | undefined;
-  sidebarWidth: number;
-  getMainWidth(): number;
-  repoCoordinatorSession: string | null;
 }
 
 export function handleKill(ctx: ActionCtx) {
@@ -1139,6 +1136,9 @@ function handleConfigItemAction(
 
 export function handleResizeLeft(ctx: ActionCtx, delta: number) {
   const current = ctx.splitPane.getLeftWidth();
+  // Pre-existing behavior: clamps to absolute MIN/MAX_LEFT_WIDTH only. On a narrow
+  // terminal the user can momentarily drag past the visible cap; the dashboard
+  // render path re-clamps via `clampLeftWidth(mainWidth, …)`.
   const newWidth = clampLeftWidthAbsolute(current + delta);
   if (newWidth === current) return;
   ctx.splitPane.setLeftWidth(newWidth);

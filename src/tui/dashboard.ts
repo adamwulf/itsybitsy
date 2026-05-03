@@ -66,7 +66,7 @@ import { SystemDashboardComponent } from "./system-dashboard";
 import { loadLayout, saveLayoutDebounced, cancelPendingSave, flushPendingSave } from "./layout";
 import {
   DEFAULT_TMUX_WIDTH,
-  getLiveMainWidth, getLiveLeftPaneWidth, getLiveRightPaneWidth, getLiveMaxLeftPaneWidth,
+  getLiveMainWidth, getLiveLeftPaneWidth, getLiveRightPaneWidth,
   clampLeftWidth, clampLeftWidthAbsolute, clampSidebarWidth,
 } from "./widths";
 import { cancelPaste } from "./clipboard";
@@ -551,10 +551,14 @@ export class DashboardComponent implements Component {
     return this._questionsFocused;
   }
 
-  /** Inputs for the widths module — built fresh on each call so any field stays current. */
-  private liveLayout() {
+  /**
+   * Inputs for the widths module — built fresh on each call so every field stays
+   * current. Pass `termWidth` from `render(width)` so a TUI test that overrides
+   * the width drives the same computation.
+   */
+  liveLayout(termWidth?: number): import("./widths").LayoutWidths {
     return {
-      terminalWidth: process.stdout.columns ?? 80,
+      terminalWidth: termWidth ?? process.stdout.columns ?? 80,
       sidebarWidth: this.sidebarWidth,
       splitPaneLeftWidth: this.splitPane.getLeftWidth(),
     };
@@ -565,25 +569,9 @@ export class DashboardComponent implements Component {
     return getLiveMainWidth(this.liveLayout());
   }
 
-  /** Width of the middle (split-pane left) pane, clamped to fit. */
-  getLeftPaneWidth(): number {
-    return getLiveLeftPaneWidth(this.liveLayout());
-  }
-
-  /** Width of the right pane (split-pane right). */
-  getRightPaneWidth(): number {
-    return getLiveRightPaneWidth(this.liveLayout());
-  }
-
-  /** Maximum permissible split-pane left width given current main area. */
-  getMaxLeftPaneWidth(): number {
-    return getLiveMaxLeftPaneWidth(this.liveLayout());
-  }
-
   /**
    * Width at which a per-repo coordinator should render and be sized — the full
-   * main area, matching the system coordinator's behavior. Falls through to
-   * `getMainWidth()` today; kept as a named call site for clarity.
+   * main area, matching the system coordinator's behavior.
    */
   getRepoCoordinatorWidth(): number {
     return this.getMainWidth();
@@ -1201,7 +1189,7 @@ export class DashboardComponent implements Component {
       if (selected?.meta.tmux_session) {
         this.checkClientAttached(selected);
         // Resize the newly selected agent's tmux to match the current middle pane.
-        resizeTmuxWindow(selected.meta.tmux_session, this.getLeftPaneWidth());
+        resizeTmuxWindow(selected.meta.tmux_session, getLiveLeftPaneWidth(this.liveLayout()));
       }
     }
 
@@ -1730,13 +1718,7 @@ export class DashboardComponent implements Component {
     const availableHeight = Math.max(5, terminalRows - chromeLines);
 
     // Width math comes from the widths module — never inline.
-    // We pass `width` (the terminal width handed to render) so a TUI test that
-    // overrides the width can drive the same computation.
-    const renderLayout = {
-      terminalWidth: width,
-      sidebarWidth: this.sidebarWidth,
-      splitPaneLeftWidth: this.splitPane.getLeftWidth(),
-    };
+    const renderLayout = this.liveLayout(width);
     const sidebarW = renderLayout.sidebarWidth;
     const mainWidth = getLiveMainWidth(renderLayout);
     this.sidebar.displayHeight = availableHeight + 1; // sidebar gets the title separator row too

@@ -645,3 +645,115 @@ describe("merge-check case", () => {
     expect(matches!.length).toBe(1);
   });
 });
+
+// ─── Telegram admin subcommands (tgallow / tgdeny / tgcheck) ────────────────
+
+describe("Telegram admin subcommands", () => {
+  let home: string;
+
+  async function runCli(cliArgs: string[]): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+    const proc = Bun.spawn(["bun", "run", "src/index.ts", ...cliArgs], {
+      cwd: import.meta.dir.replace(/\/src$/, ""),
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, HOME: home },
+    });
+    const [stdout, stderr] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+    ]);
+    const exitCode = await proc.exited;
+    return { stdout, stderr, exitCode };
+  }
+
+  beforeEach(async () => {
+    home = await mkdtemp(join(tmpdir(), "ib-tg-test-"));
+  });
+
+  afterEach(async () => {
+    await rm(home, { recursive: true, force: true });
+  });
+
+  test("tgallow without chat_id shows usage and exits 1", async () => {
+    const { stderr, exitCode } = await runCli(["tgallow"]);
+    expect(stderr).toContain("Usage: ib tgallow");
+    expect(exitCode).toBe(1);
+  });
+
+  test("tgdeny without chat_id shows usage and exits 1", async () => {
+    const { stderr, exitCode } = await runCli(["tgdeny"]);
+    expect(stderr).toContain("Usage: ib tgdeny");
+    expect(exitCode).toBe(1);
+  });
+
+  test("tgallow adds and is idempotent", async () => {
+    const r1 = await runCli(["tgallow", "12345"]);
+    expect(r1.exitCode).toBe(0);
+    expect(r1.stdout).toContain("added: 12345");
+
+    const r2 = await runCli(["tgallow", "12345"]);
+    expect(r2.exitCode).toBe(0);
+    expect(r2.stdout).toContain("already allowed: 12345");
+  });
+
+  test("tgdeny removes and is idempotent", async () => {
+    await runCli(["tgallow", "12345"]);
+    const r1 = await runCli(["tgdeny", "12345"]);
+    expect(r1.exitCode).toBe(0);
+    expect(r1.stdout).toContain("removed: 12345");
+
+    const r2 = await runCli(["tgdeny", "12345"]);
+    expect(r2.exitCode).toBe(0);
+    expect(r2.stdout).toContain("not present: 12345");
+  });
+
+  test("tgallow on group-shaped id surfaces a warning but still adds", async () => {
+    const r = await runCli(["tgallow", "-1001234567890"]);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("added: -1001234567890");
+    expect(r.stdout.toLowerCase()).toContain("group");
+  });
+
+  test("tgcheck reports unset token, empty allowlist, no token leak", async () => {
+    const { stdout, exitCode } = await runCli(["tgcheck"]);
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("bot_token: not set");
+    expect(stdout).toContain("(empty");
+  });
+
+  test("tgcheck reports token-set without printing the token, and prints chat_id value", async () => {
+    // Seed a config file with a token + chat_id
+    const cfgDir = join(home, ".itsybitsy");
+    const { mkdir, writeFile } = await import("fs/promises");
+    await mkdir(cfgDir, { recursive: true });
+    await writeFile(
+      join(cfgDir, "config.json"),
+      JSON.stringify({ channels: { telegram: { bot_token: "SECRET-DO-NOT-LEAK", chat_id: "12345" } } }),
+    );
+
+    const { stdout, exitCode } = await runCli(["tgcheck"]);
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("bot_token: set");
+    expect(stdout).toContain("chat_id: 12345");
+    // Critical: never print the token itself
+    expect(stdout).not.toContain("SECRET-DO-NOT-LEAK");
+  });
+
+  test("tgcheck warns when allowlist contains a group-shaped id", async () => {
+    await runCli(["tgallow", "-1001234567890"]);
+    const { stdout, exitCode } = await runCli(["tgcheck"]);
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("warnings:");
+    expect(stdout).toContain("-1001234567890");
+  });
+
+  test("tgcheck does not perform any network call (sanity: completes quickly)", async () => {
+    const start = Date.now();
+    const { exitCode } = await runCli(["tgcheck"]);
+    const elapsed = Date.now() - start;
+    expect(exitCode).toBe(0);
+    // 5s upper bound — generous to allow Bun startup but well below any realistic
+    // network round-trip with retries. Phase 5 is where the live probe lands.
+    expect(elapsed).toBeLessThan(5000);
+  });
+});

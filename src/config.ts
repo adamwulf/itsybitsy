@@ -1,5 +1,6 @@
 import { join } from "path";
 import { homedir } from "os";
+import { chmod, stat } from "fs/promises";
 
 export type ConfigSource = "user" | "default";
 export type ConfigType = "number" | "boolean" | "string" | "string[]";
@@ -28,6 +29,8 @@ export const CONFIG_KEYS: ConfigKeyDef[] = [
   { key: "hooks.statusVisible", type: "boolean", default: true },
   { key: "coordinator.model", type: "string", default: "opus" },
   { key: "coordinator.imessage", type: "boolean", default: false },
+  { key: "channels.telegram.bot_token", type: "string", default: "" },
+  { key: "channels.telegram.chat_id", type: "string", default: "" },
 ];
 
 function getNestedValue(obj: Record<string, unknown>, dotKey: string): unknown {
@@ -149,8 +152,25 @@ export async function checkDeprecatedConfigKeys(): Promise<string[]> {
   return warnings;
 }
 
+/**
+ * Ensure a config file has mode 0600 (owner read/write only). The bot token
+ * lives in this file (Phase 0 decision), so any path that touches the config
+ * must enforce the tight perms. Best-effort: failures (e.g. on filesystems
+ * that don't support chmod) are swallowed.
+ */
+export async function ensureConfigFilePerms(filePath: string): Promise<void> {
+  try {
+    const st = await stat(filePath);
+    // Mask is the low 9 bits (mode permissions).
+    if ((st.mode & 0o777) !== 0o600) {
+      await chmod(filePath, 0o600);
+    }
+  } catch { /* expected when file is missing or chmod is unsupported */ }
+}
+
 export async function writeConfig(filePath: string, key: string, value: unknown): Promise<void> {
   const data = await readJsonFile(filePath);
   setNestedValue(data, key, value);
   await Bun.write(filePath, JSON.stringify(data, null, 2) + "\n");
+  await ensureConfigFilePerms(filePath);
 }

@@ -1325,6 +1325,70 @@ async function main() {
       }
       break;
     }
+    case "tgallow": {
+      const id = args[1];
+      if (!id) {
+        console.error("Usage: ib tgallow <chat_id>");
+        process.exit(1);
+      }
+      const { addChat, isGroupShaped } = await import("./channels/access");
+      const added = await addChat(id);
+      if (added) {
+        console.log(`added: ${id}`);
+        if (isGroupShaped(id)) {
+          console.log(`warning: ${id} looks like a group/supergroup id (starts with "-"). Phase 5 only routes 1:1 DMs.`);
+        }
+      } else {
+        console.log(`already allowed: ${id}`);
+      }
+      break;
+    }
+    case "tgdeny": {
+      const id = args[1];
+      if (!id) {
+        console.error("Usage: ib tgdeny <chat_id>");
+        process.exit(1);
+      }
+      const { removeChat } = await import("./channels/access");
+      const removed = await removeChat(id);
+      console.log(removed ? `removed: ${id}` : `not present: ${id}`);
+      break;
+    }
+    case "tgcheck": {
+      const { readConfig } = await import("./config");
+      const { readAccess, isGroupShaped } = await import("./channels/access");
+      const cfg = await readConfig();
+      const tokenEntry = cfg["channels.telegram.bot_token"];
+      const chatEntry = cfg["channels.telegram.chat_id"];
+      const tokenSet = typeof tokenEntry?.value === "string" && tokenEntry.value.length > 0;
+      const chatId = typeof chatEntry?.value === "string" ? chatEntry.value : "";
+      const access = await readAccess();
+
+      console.log(`bot_token: ${tokenSet ? "set" : "not set"}`);
+      console.log(`chat_id: ${chatId ? chatId : "(not set)"}`);
+      console.log("");
+      console.log(`allowlist (${access.allowed_chat_ids.length} chat_ids, ${access.allowed_user_ids.length} user_ids):`);
+      if (access.allowed_chat_ids.length === 0 && access.allowed_user_ids.length === 0) {
+        console.log("  (empty — deny-all)");
+      } else {
+        for (const id of access.allowed_chat_ids) console.log(`  chat_id: ${id}`);
+        for (const id of access.allowed_user_ids) console.log(`  user_id: ${id}`);
+      }
+
+      const groupShaped: string[] = [];
+      if (chatId && isGroupShaped(chatId)) groupShaped.push(`channels.telegram.chat_id (${chatId})`);
+      for (const id of access.allowed_chat_ids) {
+        if (isGroupShaped(id)) groupShaped.push(`allowlist chat_id ${id}`);
+      }
+      if (groupShaped.length > 0) {
+        console.log("");
+        console.log("warnings:");
+        for (const w of groupShaped) {
+          console.log(`  ${w} looks like a group/supergroup id (starts with "-"). Phase 5 only routes 1:1 DMs.`);
+        }
+      }
+      break;
+    }
     default: {
       console.log("ib — Cross-repo agent dashboard");
       console.log("");
@@ -1375,6 +1439,11 @@ async function main() {
       console.log("  hooks intercept-install    Install intercept hook");
       console.log("  hooks intercept-uninstall  Uninstall intercept hook");
       console.log("  hooks intercept-status     Show intercept hook status");
+      console.log("");
+      console.log("Telegram:");
+      console.log("  tgallow <chat_id>   Allow a Telegram chat_id");
+      console.log("  tgdeny <chat_id>    Remove a Telegram chat_id from the allowlist");
+      console.log("  tgcheck             Show Telegram config + allowlist status");
       break;
     }
   }

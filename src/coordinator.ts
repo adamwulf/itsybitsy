@@ -229,45 +229,7 @@ async function ensureHomeRepo(): Promise<void> {
 }
 
 /**
- * Write or remove the system coordinator's `.mcp.json`. When `telegram` is
- * enabled, register the local Telegram bridge as an MCP server so the
- * coordinator session — and only the coordinator session — can reach it.
- *
- * Scope is enforced by location: `.mcp.json` lives in the system coordinator's
- * cwd (`~/.itsybitsy/`). Worker/manager agents run in their own worktrees,
- * which never contain this file, so they cannot inherit the entry. This is
- * intentional: letting workers reach the Telegram bot would let them read
- * inbound messages or send outbound ones.
- *
- * The URL is the local SwiftBar-managed bridge listed in CLAUDE.md / user setup.
- */
-async function writeCoordinatorMcpConfig(home: string, telegram: boolean): Promise<void> {
-  const mcpPath = join(home, ".mcp.json");
-
-  if (!telegram) {
-    // Remove any stale entry so flipping the flag off cleans up.
-    const { rm } = await import("fs/promises");
-    await rm(mcpPath, { force: true });
-    return;
-  }
-
-  const config = {
-    mcpServers: {
-      telegram: {
-        type: "http",
-        url: "http://127.0.0.1:9876/mcp",
-      },
-    },
-  };
-  await Bun.write(mcpPath, JSON.stringify(config, null, 2) + "\n");
-}
-
-/**
- * Write settings.local.json, coordinator-prompt.txt, and .mcp.json to
- * ~/.itsybitsy/. The `.mcp.json` is written or removed based on the
- * current value of `coordinator.telegram` (read once at coordinator
- * startup — flipping the flag while the session is alive does not
- * rewrite the file; restart the coordinator to pick up the change).
+ * Write settings.local.json and coordinator-prompt.txt to ~/.itsybitsy/.
  */
 async function writeCoordinatorFiles(): Promise<void> {
   const home = itsybitsyHome();
@@ -283,11 +245,6 @@ async function writeCoordinatorFiles(): Promise<void> {
   // Write coordinator-prompt.txt
   const promptPath = join(home, "coordinator-prompt.txt");
   await Bun.write(promptPath, SYSTEM_COORDINATOR_PROMPT + "\n");
-
-  // Telegram is delivered via an MCP server, gated on coordinator.telegram.
-  const config = await readConfig();
-  const telegram = config["coordinator.telegram"]?.value === true;
-  await writeCoordinatorMcpConfig(home, telegram);
 }
 
 /**
@@ -333,12 +290,12 @@ export async function ensureSystemCoordinator(): Promise<string> {
   const config = await readConfig();
   const model = (config["coordinator.model"]?.value as string) ?? "opus";
   const imessage = config["coordinator.imessage"]?.value === true;
+  const telegram = config["coordinator.telegram"]?.value === true;
 
-  // Start Claude in interactive mode. Telegram is no longer loaded as a plugin
-  // channel — it is registered as an MCP server in `.mcp.json` by
-  // writeCoordinatorMcpConfig() above. iMessage still uses the plugin channel.
+  // Start Claude in interactive mode
   const channels: string[] = [];
   if (imessage) channels.push("plugin:imessage@claude-plugins-official");
+  if (telegram) channels.push("plugin:telegram@claude-plugins-official");
   const claudeCmd = channels.length > 0
     ? `claude --model ${model} --channels ${channels.join(" ")}`
     : `claude --model ${model}`;

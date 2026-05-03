@@ -513,6 +513,8 @@ export class DashboardComponent implements Component {
   }
   private lastSentNotice: string | null = null;
   private usageTimer: ReturnType<typeof setInterval> | null = null;
+  private telegramStatus: "red" | "yellow" | "green" | null = null;
+  telegramStatusTimer: ReturnType<typeof setInterval> | null = null;
   /** Tracks in-flight executeAndRefresh promises — used by tests to await completion */
   private _pendingActions: Set<Promise<void>> = new Set();
   pendingSelectNewestInRepo: string | null = null;
@@ -797,6 +799,10 @@ export class DashboardComponent implements Component {
       clearInterval(this.clientCheckTimer);
       this.clientCheckTimer = null;
     }
+    if (this.telegramStatusTimer) {
+      clearInterval(this.telegramStatusTimer);
+      this.telegramStatusTimer = null;
+    }
     // Watchdog runs as standalone process — do NOT stop it when TUI closes
   }
 
@@ -827,6 +833,11 @@ export class DashboardComponent implements Component {
 
   setVersion(version: string) {
     this.statusBar.version = version;
+  }
+
+  setTelegramStatus(status: "red" | "yellow" | "green" | null): void {
+    this.telegramStatus = status;
+    this.tui?.requestRender();
   }
 
   /** Add an error to the errors list (called from watcher onError).
@@ -1709,7 +1720,18 @@ export class DashboardComponent implements Component {
     const subtitle = this.lastSentNotice
       ? `${DIM}—${RESET} ${YELLOW}${this.lastSentNotice}${RESET}`
       : `${DIM}— agent dashboard${RESET}`;
-    lines.push(truncateToWidth(`${BOLD}ib${RESET} ${subtitle}`, width, ""));
+    const left = `${BOLD}ib${RESET} ${subtitle}`;
+    if (this.telegramStatus) {
+      const tgColor =
+        this.telegramStatus === "green" ? GREEN
+        : this.telegramStatus === "yellow" ? YELLOW
+        : RED;
+      const right = `${tgColor}●${RESET} Telegram`;
+      const pad = Math.max(1, width - visibleWidth(left) - visibleWidth(right));
+      lines.push(truncateToWidth(left + " ".repeat(pad) + right, width, ""));
+    } else {
+      lines.push(truncateToWidth(left, width, ""));
+    }
 
     // Compute available height for the main content area.
     // Chrome lines: header(1) + main title separator(1) +
@@ -2056,6 +2078,7 @@ export async function launchDashboard(): Promise<void> {
   }
   let telegramDispatcher: import("../channels/dispatcher").TelegramDispatcher | null = null;
   let telegramOutbox: import("../channels/outbox").TelegramOutbox | null = null;
+  let telegramBootOk = false;
   try {
     const bootResult = await bootTelegramSubsystem({
       token: tgToken,
@@ -2067,6 +2090,7 @@ export async function launchDashboard(): Promise<void> {
     if (bootResult.ok) {
       telegramDispatcher = bootResult.dispatcher;
       telegramOutbox = bootResult.outbox;
+      telegramBootOk = true;
       // Don't await — start() runs the loop in the background.
       telegramDispatcher.start().catch((err) => {
         console.error(`Telegram dispatcher failed to start: ${err instanceof Error ? err.message : String(err)}`);
@@ -2097,6 +2121,18 @@ export async function launchDashboard(): Promise<void> {
   const diffToolValue = config["externalDiffTool"]?.value;
   dashboard.setDiffTool(typeof diffToolValue === "string" && diffToolValue ? diffToolValue : undefined);
   dashboard.setVersion(version);
+  if (tgToken !== "") {
+    dashboard.setTelegramStatus(telegramBootOk ? "green" : "red");
+    dashboard.telegramStatusTimer = setInterval(() => {
+      if (telegramDispatcher && telegramDispatcher.isRunning()) {
+        dashboard.setTelegramStatus("green");
+      } else if (telegramBootOk) {
+        dashboard.setTelegramStatus("yellow");
+      } else {
+        dashboard.setTelegramStatus("red");
+      }
+    }, 5_000);
+  }
   tui.addChild(dashboard);
 
   const watcher = new AgentWatcher(repos, {

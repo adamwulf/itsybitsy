@@ -4102,3 +4102,72 @@ describe("coordinator view mode toggling (n/p)", () => {
     expect(dashboard.coordinatorViewMode).toBe("DASHBOARD");
   });
 });
+
+describe("Telegram header indicator", () => {
+  let dashboard: DashboardComponent;
+  let origRows: number | undefined;
+
+  beforeEach(() => {
+    dashboard = makeDashboard();
+    origRows = process.stdout.rows;
+    Object.defineProperty(process.stdout, "rows", { value: 30, writable: true, configurable: true });
+  });
+
+  afterEach(() => {
+    Object.defineProperty(process.stdout, "rows", { value: origRows, writable: true, configurable: true });
+  });
+
+  test("header hides indicator when telegramStatus is null", () => {
+    const lines = dashboard.render(160);
+    const header = lines[0]!;
+    expect(stripAnsi(header)).toContain("ib");
+    expect(stripAnsi(header)).not.toContain("Telegram");
+  });
+
+  test("header shows green indicator when telegramStatus is green", () => {
+    dashboard.setTelegramStatus("green");
+    const lines = dashboard.render(160);
+    const header = lines[0]!;
+    expect(stripAnsi(header)).toContain("Telegram");
+    // GREEN is "\x1b[32m"
+    expect(header).toContain("\x1b[32m●");
+  });
+
+  test("header shows red indicator when telegramStatus is red", () => {
+    dashboard.setTelegramStatus("red");
+    const lines = dashboard.render(160);
+    const header = lines[0]!;
+    expect(stripAnsi(header)).toContain("Telegram");
+    // RED is "\x1b[31m"
+    expect(header).toContain("\x1b[31m●");
+  });
+
+  test("header shows yellow indicator when telegramStatus is yellow", () => {
+    dashboard.setTelegramStatus("yellow");
+    const lines = dashboard.render(160);
+    const header = lines[0]!;
+    expect(stripAnsi(header)).toContain("Telegram");
+    // YELLOW is "\x1b[33m"
+    expect(header).toContain("\x1b[33m●");
+  });
+
+  test("Telegram indicator right-aligns at terminal width", () => {
+    dashboard.setTelegramStatus("green");
+    const width = 160;
+    const lines = dashboard.render(width);
+    const header = lines[0]!;
+    expect(visibleWidth(header)).toBeLessThanOrEqual(width);
+    // The visible text should end with "Telegram"
+    expect(stripAnsi(header).trimEnd().endsWith("Telegram")).toBe(true);
+    // Visible width of the header should equal the requested width (right-aligned via padding)
+    expect(visibleWidth(header)).toBe(width);
+  });
+
+  test("narrow render width truncates and does not crash", () => {
+    dashboard.setTelegramStatus("green");
+    const lines = dashboard.render(140);
+    expect(lines.length).toBeGreaterThan(0);
+    const header = lines[0]!;
+    expect(visibleWidth(header)).toBeLessThanOrEqual(140);
+  });
+});

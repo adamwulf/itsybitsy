@@ -15,7 +15,9 @@
  * Never compute widths inline.
  *
  * Naming convention: pure math takes raw arguments and has no prefix
- * (`mainWidth`, `leftPaneWidth`, `rightPaneWidth`, `maxLeftPaneWidth`).
+ * (`mainWidth`, `leftPaneWidth`, `rightPaneWidth`, `maxLeftPaneWidth`) —
+ * except `tmuxWidthForAgent`, which takes a `LayoutWidths` object so it can
+ * serve both saved and live callers via a single dispatch.
  * `getSaved*` is the async, disk-backed family. `getLive*` is the sync,
  * dashboard-state family. Both wrap the same pure math via `LayoutWidths`.
  */

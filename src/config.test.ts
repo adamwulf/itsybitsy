@@ -7,9 +7,10 @@ import {
   checkDeprecatedConfigKeys,
   setUserConfigPath,
   resetUserConfigPath,
+  ensureConfigFilePerms,
 } from "./config";
 import { join } from "path";
-import { mkdtemp, rm } from "fs/promises";
+import { mkdtemp, rm, stat, chmod } from "fs/promises";
 import { tmpdir } from "os";
 
 let tmpDir: string;
@@ -408,5 +409,73 @@ describe("checkDeprecatedConfigKeys", () => {
     expect(keys).not.toContain("permissions.all.deny");
     expect(keys).not.toContain("permissions.repo.allow");
     expect(keys).not.toContain("permissions.repo.deny");
+  });
+});
+
+describe("channels.telegram config keys", () => {
+  test("CONFIG_KEYS contains channels.telegram.bot_token and chat_id", () => {
+    const keys = CONFIG_KEYS.map((def) => def.key);
+    expect(keys).toContain("channels.telegram.bot_token");
+    expect(keys).toContain("channels.telegram.chat_id");
+  });
+
+  test("default values are empty strings", async () => {
+    const result = await readConfig(opts());
+    expect(result["channels.telegram.bot_token"]).toEqual({ value: "", source: "default" });
+    expect(result["channels.telegram.chat_id"]).toEqual({ value: "", source: "default" });
+  });
+
+  test("reads user-supplied bot_token and chat_id", async () => {
+    await Bun.write(
+      userCfgPath,
+      JSON.stringify({ channels: { telegram: { bot_token: "abc:xyz", chat_id: "12345" } } })
+    );
+    const result = await readConfig(opts());
+    expect(result["channels.telegram.bot_token"]).toEqual({ value: "abc:xyz", source: "user" });
+    expect(result["channels.telegram.chat_id"]).toEqual({ value: "12345", source: "user" });
+  });
+});
+
+describe("ensureConfigFilePerms / writeConfig 0600 enforcement", () => {
+  test("writeConfig leaves the file at mode 0600 for a fresh file", async () => {
+    const filePath = join(tmpDir, "perms-fresh.json");
+    await writeConfig(filePath, "channels.telegram.bot_token", "secret");
+    const st = await stat(filePath);
+    expect(st.mode & 0o777).toBe(0o600);
+  });
+
+  test("writeConfig tightens looser perms (0644 → 0600)", async () => {
+    const filePath = join(tmpDir, "perms-loose.json");
+    await Bun.write(filePath, JSON.stringify({}));
+    await chmod(filePath, 0o644);
+    let st = await stat(filePath);
+    expect(st.mode & 0o777).toBe(0o644);
+
+    await writeConfig(filePath, "channels.telegram.bot_token", "secret");
+    st = await stat(filePath);
+    expect(st.mode & 0o777).toBe(0o600);
+  });
+
+  test("ensureConfigFilePerms is a no-op when the file is missing", async () => {
+    // No throw, no file created.
+    await ensureConfigFilePerms(join(tmpDir, "does-not-exist.json"));
+  });
+
+  test("ensureConfigFilePerms tightens existing looser perms", async () => {
+    const filePath = join(tmpDir, "perms-existing.json");
+    await Bun.write(filePath, "{}");
+    await chmod(filePath, 0o666);
+    await ensureConfigFilePerms(filePath);
+    const st = await stat(filePath);
+    expect(st.mode & 0o777).toBe(0o600);
+  });
+
+  test("ensureConfigFilePerms is a no-op when perms are already 0600", async () => {
+    const filePath = join(tmpDir, "perms-already.json");
+    await Bun.write(filePath, "{}");
+    await chmod(filePath, 0o600);
+    await ensureConfigFilePerms(filePath);
+    const st = await stat(filePath);
+    expect(st.mode & 0o777).toBe(0o600);
   });
 });

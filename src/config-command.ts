@@ -1,4 +1,4 @@
-import { readConfig, writeConfig, CONFIG_KEYS, validateConfigValue, defaultUserConfigPath, type ConfigKeyDef } from "./config";
+import { readConfig, writeConfig, CONFIG_KEYS, validateConfigValue, defaultUserConfigPath, ensureConfigFilePerms, type ConfigKeyDef } from "./config";
 import { join, dirname } from "path";
 import { mkdir } from "fs/promises";
 
@@ -273,6 +273,7 @@ export async function runConfigCommand(args: string[]): Promise<void> {
         break;
       }
       await Bun.write(cfgPath, JSON.stringify(data, null, 2) + "\n");
+      await ensureConfigFilePerms(cfgPath);
       console.log(`Unset ${key} (reverted to default)`);
       break;
     }

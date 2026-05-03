@@ -5715,3 +5715,214 @@ describe("resolveAgentId", () => {
     expect(result).toEqual({ error: "No matching agent found", matches: [] });
   });
 });
+
+describe("telegramSend (native)", () => {
+  let tempDir: string;
+  let userConfigPath: string;
+  let originalFetch: typeof globalThis.fetch;
+
+  // Lazy import to keep load order consistent with other tests.
+  async function loadDeps() {
+    const ibCmds = await import("./ib-commands");
+    const tgClient = await import("./channels/telegram-client");
+    return { ibCmds, tgClient };
+  }
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "tgsend-test-"));
+    userConfigPath = join(tempDir, "config.json");
+    setUserConfigPath(userConfigPath);
+    originalFetch = globalThis.fetch;
+  });
+
+  afterEach(async () => {
+    resetUserConfigPath();
+    const { tgClient } = await loadDeps();
+    tgClient.fetchCtx.reset();
+    tgClient.sleepCtx.reset();
+    tgClient.logCtx.reset();
+    globalThis.fetch = originalFetch;
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  test("missing token returns ok=false with bot_token hint", async () => {
+    await Bun.write(userConfigPath, JSON.stringify({
+      channels: { telegram: { chat_id: "12345" } },
+    }));
+    const { ibCmds } = await loadDeps();
+    const result = await ibCmds.telegramSend("hello");
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("channels.telegram.bot_token");
+  });
+
+  test("missing chat_id returns ok=false with chat_id hint", async () => {
+    await Bun.write(userConfigPath, JSON.stringify({
+      channels: { telegram: { bot_token: "TEST_TOKEN" } },
+    }));
+    const { ibCmds } = await loadDeps();
+    const result = await ibCmds.telegramSend("hello");
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("channels.telegram.chat_id");
+  });
+
+  test("both present + short text → one sendMessage call, ok=true with message='ok'", async () => {
+    await Bun.write(userConfigPath, JSON.stringify({
+      channels: { telegram: { bot_token: "TEST_TOKEN", chat_id: "12345" } },
+    }));
+    const { ibCmds, tgClient } = await loadDeps();
+    const calls: Array<{ url: string; body: unknown }> = [];
+    tgClient.fetchCtx.set(async (input, init) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const body = init?.body ? JSON.parse(init.body as string) : null;
+      calls.push({ url, body });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 1, chat: { id: 12345 } } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+
+    const result = await ibCmds.telegramSend("hello");
+    expect(result.ok).toBe(true);
+    expect(result.message).toBe("ok");
+    expect(calls.length).toBe(1);
+    expect((calls[0]!.body as { text: string }).text).toBe("hello");
+    expect((calls[0]!.body as { chat_id: string }).chat_id).toBe("12345");
+  });
+
+  test("both present + 5000-char text → two sendMessage calls, ok=true with message='ok (2 parts)'", async () => {
+    await Bun.write(userConfigPath, JSON.stringify({
+      channels: { telegram: { bot_token: "TEST_TOKEN", chat_id: "12345" } },
+    }));
+    const { ibCmds, tgClient } = await loadDeps();
+    const calls: Array<{ text: string }> = [];
+    tgClient.fetchCtx.set(async (_input, init) => {
+      const body = init?.body ? JSON.parse(init.body as string) : null;
+      calls.push(body as { text: string });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 1, chat: { id: 12345 } } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+
+    const longText = "a".repeat(5000);
+    const result = await ibCmds.telegramSend(longText);
+    expect(result.ok).toBe(true);
+    expect(result.message).toBe("ok (2 parts)");
+    expect(calls.length).toBe(2);
+    expect(calls[0]!.text.length).toBe(4000);
+    expect(calls[1]!.text.length).toBe(1000);
+    expect(calls[0]!.text + calls[1]!.text).toBe(longText);
+  });
+
+  test("sendMessage throws → ok=false", async () => {
+    await Bun.write(userConfigPath, JSON.stringify({
+      channels: { telegram: { bot_token: "TEST_TOKEN", chat_id: "12345" } },
+    }));
+    const { ibCmds, tgClient } = await loadDeps();
+    tgClient.fetchCtx.set(async () => {
+      throw new Error("network down");
+    });
+
+    const result = await ibCmds.telegramSend("hello");
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("network down");
+  });
+
+  test("sendMessage 4xx response → ok=false with description", async () => {
+    await Bun.write(userConfigPath, JSON.stringify({
+      channels: { telegram: { bot_token: "TEST_TOKEN", chat_id: "12345" } },
+    }));
+    const { ibCmds, tgClient } = await loadDeps();
+    tgClient.fetchCtx.set(async () => {
+      return new Response(JSON.stringify({ ok: false, error_code: 400, description: "Bad Request: chat not found" }), {
+        status: 400,
+        headers: { "content-type": "application/json" },
+      });
+    });
+
+    const result = await ibCmds.telegramSend("hello");
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("Bad Request: chat not found");
+  });
+
+  test("429 → sleeps Retry-After then retries once, ok=true on success", async () => {
+    await Bun.write(userConfigPath, JSON.stringify({
+      channels: { telegram: { bot_token: "TEST_TOKEN", chat_id: "12345" } },
+    }));
+    const { ibCmds, tgClient } = await loadDeps();
+
+    const sleeps: number[] = [];
+    tgClient.sleepCtx.set(async (ms) => { sleeps.push(ms); });
+
+    let call = 0;
+    tgClient.fetchCtx.set(async () => {
+      call += 1;
+      if (call === 1) {
+        return new Response(
+          JSON.stringify({ ok: false, error_code: 429, description: "Too Many Requests", parameters: { retry_after: 3 } }),
+          { status: 429, headers: { "content-type": "application/json", "retry-after": "3" } },
+        );
+      }
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 1, chat: { id: 12345 } } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+
+    const result = await ibCmds.telegramSend("hello");
+    expect(result.ok).toBe(true);
+    expect(result.message).toBe("ok");
+    expect(call).toBe(2);
+    expect(sleeps).toEqual([3000]);
+  });
+
+  test("429 retry that also fails → ok=false", async () => {
+    await Bun.write(userConfigPath, JSON.stringify({
+      channels: { telegram: { bot_token: "TEST_TOKEN", chat_id: "12345" } },
+    }));
+    const { ibCmds, tgClient } = await loadDeps();
+
+    tgClient.sleepCtx.set(async () => {});
+    tgClient.fetchCtx.set(async () => {
+      return new Response(
+        JSON.stringify({ ok: false, error_code: 429, description: "Too Many Requests", parameters: { retry_after: 1 } }),
+        { status: 429, headers: { "content-type": "application/json", "retry-after": "1" } },
+      );
+    });
+
+    const result = await ibCmds.telegramSend("hello");
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("429 retry");
+  });
+
+  test("429 with only Retry-After header (no body parameter) sleeps the header value", async () => {
+    await Bun.write(userConfigPath, JSON.stringify({
+      channels: { telegram: { bot_token: "TEST_TOKEN", chat_id: "12345" } },
+    }));
+    const { ibCmds, tgClient } = await loadDeps();
+
+    const sleeps: number[] = [];
+    tgClient.sleepCtx.set(async (ms) => { sleeps.push(ms); });
+
+    let call = 0;
+    tgClient.fetchCtx.set(async () => {
+      call += 1;
+      if (call === 1) {
+        // No `parameters.retry_after` in body — only the HTTP header carries it.
+        return new Response(
+          JSON.stringify({ ok: false, error_code: 429, description: "Too Many Requests" }),
+          { status: 429, headers: { "content-type": "application/json", "retry-after": "5" } },
+        );
+      }
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 1, chat: { id: 12345 } } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+
+    const result = await ibCmds.telegramSend("hello");
+    expect(result.ok).toBe(true);
+    expect(call).toBe(2);
+    expect(sleeps).toEqual([5000]);
+  });
+});

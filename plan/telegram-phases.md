@@ -110,28 +110,24 @@ configure things in Phase 5.
 
 ---
 
-## Phase 3 — `multiline` mode for `sendMessage`
+## Phase 3 — DROPPED
 
-Self-contained refactor of `src/ib-commands.ts:sendMessage`. No callers use
-`multiline: true` yet — added in Phase 5. Lands as its own change so the
-diff stays reviewable.
+Originally planned a `multiline` mode for `sendMessage`. Dropped after
+empirical confirmation that the existing send dialog already submits
+multi-line buffers (the input field's `TextBuffer` joins lines with
+`\n` and passes the joined string to `sendMessage` unmodified) without
+breaking. Phase 5 will pass the channel-reminder block through
+`sendToSystemCoordinator` as-is, embedded `\n` characters and all.
 
-**Changes:**
-- Add `{ multiline?: boolean }` opt to `sendMessage`.
-- When `multiline: true`: chunk on `\n`, use `tmux send-keys -l <chunk>`
-  per chunk with `tmux send-keys Enter` between chunks (the
-  literal-then-Enter pattern from
-  `autoAcceptWorkspaceTrustForNewAgent`). One final Enter to submit.
-- When `multiline` is absent or false: behavior is byte-identical to today.
-- Sentinel handling for `fromAgent` starting with `@` already exists; no
-  change needed for `@telegram` to be formatted as
-  `[sent by @telegram]: ...` (verify with a test).
+If smoke-testing in Phase 5 reveals that the channel-reminder block
+actually does break across turns, revisit this decision. Until then, no
+`multiline` opt is added.
 
-**Tests:**
-- `multiline: true` with embedded `\n` → captured tmux call sequence has
-  alternating chunk/Enter calls + one final Enter.
-- `multiline: false` → byte-identical capture vs. baseline (regression).
-- `fromAgent: "@telegram"` formats prefix as `[sent by @telegram]: ...`.
+**Sentinel handling for `@telegram`:** `sendMessage` already formats
+`fromAgent` IDs starting with `@` as `[sent by @telegram]: ...` (vs.
+`[sent by agent telegram]`). Phase 5 should add a regression test for
+this when wiring the dispatcher, but no code change to `sendMessage`
+is needed.
 
 **Exit criteria:** New opt is fully tested, no behavior change for
 existing callers, `bun test` + `tsc --noEmit` green.
@@ -211,7 +207,11 @@ The big phase. This is where Telegram routing comes back online.
     5. Wrap in channel-reminder block per Phase 0 final wording.
        Coerce all IDs to `String()` (implementation-notes §6).
     6. Acquire per-coordinator-session mutex (in-process); call
-       `sendToSystemCoordinator(wrapped, { fromAgent: "@telegram", multiline: true })`.
+       `sendToSystemCoordinator(wrapped, { fromAgent: "@telegram" })`.
+       The wrapped block contains real `\n` characters; `sendMessage`
+       passes them through `tmux send-keys -l` as-is. (Phase 3 was
+       dropped after confirming the existing send dialog already does
+       this without breaking — see Phase 3 above.)
        Release mutex.
   - **Attachment fallback:** for unsupported message types, reply on
     Telegram with "Received attachment — text only supported" AND
@@ -244,9 +244,13 @@ The big phase. This is where Telegram routing comes back online.
 **Tests:**
 - End-to-end inbound (text): mocked `getUpdates` response →
   `sendToSystemCoordinator` called with wrapped text +
-  `multiline: true` + `fromAgent: "@telegram"`.
-- Resulting `coordinatorSpawnCtx` send-keys sequence has alternating
-  chunk/Enter + one final Enter (validates Phase 3 wiring).
+  `fromAgent: "@telegram"`.
+- Multi-line wrapped block reaches the recipient as one turn (smoke
+  test on a real coordinator session — if this fails, Phase 3 needs
+  to come back as `multiline` mode).
+- Sentinel labelling: `fromAgent: "@telegram"` formats as
+  `[sent by @telegram]: ...` (regression test for the case Phase 3
+  was going to verify).
 - Burst coalescing: 3 updates same chat → 1 wrapped block with
   `count="3"` + `---` separators. 1 update → no count, no separators.
 - Per-coordinator serialization: 2 updates from 2 chats arriving
@@ -344,7 +348,7 @@ Phase 1 (remove plugin wiring) ──┐
                                   │
 Phase 2 (config + access.json) ──┤
                                   │
-Phase 3 (multiline sendMessage) ─┤
+Phase 3 (DROPPED — see above)    │
                                   │
 Phase 4 (transport client) ──────┤
                                   ▼
@@ -354,9 +358,10 @@ Phase 4 (transport client) ──────┤
                         Phase 6 (ib tgsend)
 ```
 
-Phases 1–4 are independent and can land in any order or in parallel
-once Phase 0 is done. Phase 5 requires Phases 2, 3, 4. Phase 6 requires
-Phase 4 (and benefits from Phase 2 for the config keys).
+Phases 1, 2, and 4 are independent and can land in any order or in
+parallel once Phase 0 is done. Phase 5 requires Phases 2 and 4.
+Phase 6 requires Phase 4 (and benefits from Phase 2 for the config
+keys).
 
 ---
 

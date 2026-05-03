@@ -1240,10 +1240,15 @@ describe("detectAgentStates — waiting + background shell override", () => {
         exited: Promise.resolve(0),
       };
     }) as any);
+    // The 'complete' fast-path now verifies claude_pid liveness — stub alive
+    // so existing assertions (which use makeAgent's default claude_pid) still
+    // resolve through that path.
+    isPidAliveCtx.set(() => true);
   }
 
   afterEach(() => {
     tmuxPollerSpawnCtx.reset();
+    isPidAliveCtx.reset();
   });
 
   test("waiting + bg shell → running", async () => {
@@ -1306,6 +1311,7 @@ describe("detectAgentStates — waiting + background shell override", () => {
 describe("detectAgentStates — 'complete' agents skip capture-pane", () => {
   afterEach(() => {
     tmuxPollerSpawnCtx.reset();
+    isPidAliveCtx.reset();
   });
 
   test("complete agent with tmux session does not invoke captureTmuxOutput", async () => {
@@ -1318,14 +1324,52 @@ describe("detectAgentStates — 'complete' agents skip capture-pane", () => {
         exited: Promise.resolve(0),
       };
     }) as any);
+    isPidAliveCtx.set(() => true);
 
     const a = makeAgent({
       id: "a1",
-      meta: { state: "complete", tmux_session: "ib-a1" } as Partial<AgentMeta> as AgentMeta,
+      meta: { state: "complete", tmux_session: "ib-a1", claude_pid: "12345" } as Partial<AgentMeta> as AgentMeta,
     });
     await detectAgentStates([a]);
     expect(a.state).toBe("complete");
     expect(captureCalls).toBe(0);
+  });
+
+  test("complete agent with dead claude_pid → stopped", async () => {
+    let captureCalls = 0;
+    tmuxPollerSpawnCtx.set(((args: any[]) => {
+      if (args[0] === "tmux" && args[1] === "capture-pane") captureCalls++;
+      return {
+        stdout: new ReadableStream({ start(c) { c.close(); } }),
+        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        exited: Promise.resolve(0),
+      };
+    }) as any);
+    isPidAliveCtx.set(() => false);
+
+    const a = makeAgent({
+      id: "a1",
+      meta: { state: "complete", tmux_session: "ib-a1", claude_pid: "12345" } as Partial<AgentMeta> as AgentMeta,
+    });
+    await detectAgentStates([a]);
+    expect(a.state).toBe("stopped");
+    expect(captureCalls).toBe(0);
+  });
+
+  test("complete agent with empty claude_pid trusts meta.state (legacy)", async () => {
+    let pidChecks = 0;
+    isPidAliveCtx.set(() => {
+      pidChecks++;
+      return false;
+    });
+
+    const a = makeAgent({
+      id: "a1",
+      meta: { state: "complete", tmux_session: "ib-a1", claude_pid: "" } as Partial<AgentMeta> as AgentMeta,
+    });
+    await detectAgentStates([a]);
+    expect(a.state).toBe("complete");
+    expect(pidChecks).toBe(0);
   });
 
   test("complete agent with no tmux session resolves to 'stopped' (existing path)", async () => {

@@ -1,58 +1,29 @@
 # Telegram via ib tgsend + sendToSystemCoordinator — implementation plan
 
-## Why
+## Overview
 
-Claude Code's MCP channel mechanism — the thing that makes `<channel
-source="telegram" ...>` blocks appear in a session and route the bot's
-`reply` tool — has constraints that don't fit our use case:
+Telegram becomes a transport for ittybitty's existing inbound comms
+(`sendToSystemCoordinator`, the same path `ib send @system` uses)
+plus one new outbound subcommand (`ib tgsend`).
 
-- **Research-preview status** with allowlist gating; custom channels need
-  `--dangerously-load-development-channels` and the org-policy
-  `channelsEnabled` flag.
-- **Stdio-only transport in practice**, per the channel-reference docs.
-  Stdio MCP servers are killed by Claude Code's wall-clock SIGTERM timer
-  ([anthropics/claude-code#40207](https://github.com/anthropics/claude-code/issues/40207))
-  and never auto-reconnected
-  ([#43177](https://github.com/anthropics/claude-code/issues/43177)),
-  which is the bug the Telegram bot has been hitting all along.
-- **claude.ai login required**; not API key.
-- **Per-session lifetime**: a channel is bound to one Claude Code session.
-  When that session ends, the channel ends. There's no persistence across
-  sessions and no routing to the right session if multiple are open.
+- **Inbound:** a dispatcher in `ib watch` (or `ib tgdaemon`) long-polls
+  Telegram, wraps each message in a channel-reminder block, and
+  delivers it to the system coordinator via tmux send-keys.
+- **Outbound:** the coordinator runs `ib tgsend "..."` and the
+  subcommand posts to Telegram directly.
 
-Instead, treat Telegram as a **transport for ittybitty's existing
-inbound comms** (`sendToSystemCoordinator`, the same path `ib send
-@system` uses) plus one new outbound subcommand (`ib tgsend`). The
-bot runs independently of any Claude session. Inbound: the dispatcher
-in `ib watch` polls Telegram, wraps each message in a channel-reminder
-block, and delivers it to the system coordinator via tmux send-keys.
-Outbound: the coordinator runs `ib tgsend "..."` and the subcommand
-posts to Telegram directly. No question/answer correlation, no qid
-aliasing, no `ib ask` interception — just plain text in both
-directions, with the coordinator's normal session scrollback acting as
-the conversational context.
-
-This is independent of Claude Code's channel mechanism, transport
-limitations, and research-preview status. The dispatcher and the
-`ib tg` subcommand generalize naturally to iMessage, Slack, Discord —
-any channel becomes "another transport for `sendToSystemCoordinator`
-plus a per-channel `ib X send` command."
+Plain text both ways. No question/answer correlation, no qid aliasing,
+no `ib ask` interception — the coordinator's normal session scrollback
+is the conversational context. The same dispatcher pattern generalizes
+later to iMessage, Slack, Discord.
 
 ## Non-goals
 
-- **Replacing the official Telegram channel plugin's behavior at the MCP
-  layer.** This plan deliberately doesn't try to be a drop-in for the
-  channel system. The channel-reminder framing and permission-relay flow
-  are reimplemented at the ib layer, where they belong.
 - **Multi-channel support in v1.** The dispatcher should be designed so
   that adding iMessage/Slack later is straightforward, but only Telegram
   ships in v1.
 - **Pairing UX in v1.** Use static config (a single allowlisted Telegram
-  user ID) to start. The interactive pairing flow the official plugins
-  ship can come later.
-- **Sandbox / cross-repo agent routing.** v1 routes only to the system
-  coordinator. Routing to per-repo coordinators or named agents
-  (`ib send @itsybitsy "..."`) is a v2 concern.
+  user ID) to start.
 - **`ib ask` / question-answer correlation.** v1 has no qid handling.
   If the coordinator wants a structured Q&A flow, it just types the
   question into `ib tgsend` and treats whatever the user replies with
@@ -60,13 +31,9 @@ plus a per-channel `ib X send` command."
   integration would require restructuring `askQuestion()` and
   `PendingQuestion` to handle the in-memory `@system` agent — out of
   scope for v1.
-- **External bot processes / bridges.** v1 owns the entire transport:
-  `ib watch` polls Telegram directly via the Bot API. The official
-  Telegram MCP plugin is no longer attached to the coordinator session.
-- **Web-hook / MTProto transport.** The Bot API supports webhooks, but
-  that requires a public URL on the user's machine. MTProto (user-mode
-  protocol) gets you websocket-style streaming but is overkill and out
-  of scope. v1 uses HTTP long-polling (`getUpdates`).
+- **Webhook / MTProto transport.** Webhooks need a public URL on the
+  user's Mac (no thanks); MTProto is overkill. v1 uses HTTP
+  long-polling (`getUpdates`).
 
 ## Architecture
 
@@ -92,9 +59,10 @@ plus a per-channel `ib X send` command."
                       ▼             │            │
        ┌────────────────────────────┴────────────┴───────────┐
        │ System coordinator (Claude Code in tmux)            │
-       │   receives messages via tmux send-keys              │
+       │   receives messages via tmux send-keys               │
        │   replies via `ib tgsend "<text>"`                  │
-       │   has no MCP plugin / no awareness of Telegram      │
+       │   knows about Telegram only via the channel-reminder │
+       │   text and the `ib tgsend` subcommand                │
        └─────────────────────────────────────────────────────┘
 ```
 
@@ -105,11 +73,6 @@ Key properties:
 2. **The dispatcher runs in either `ib watch` (foreground TUI) or a
    dedicated `ib tgdaemon` (background)** — both ship in v1 so the
    user can pick. Don't run both simultaneously against the same bot.
-3. **The coordinator has no MCP plugin for Telegram.** It learns about
-   Telegram only via (a) the channel-reminder text wrapping inbound
-   messages and (b) the `ib tgsend` subcommand. All transport,
-   connection management, polling, and allowlist enforcement live in
-   the dispatcher / subcommand.
 
 ## Pieces to build
 
@@ -117,27 +80,15 @@ Three pieces, in suggested implementation order.
 
 ### 1. Telegram transport — direct integration in `ib watch`
 
-`ib watch` talks to Telegram's HTTP API directly. The Telegram Bot API
-token lives in itsybitsy config; the dispatcher uses it to long-poll
-`getUpdates` and to call `sendMessage` for outbound. No external bot
-process, no bridge, no MCP layer.
+`ib watch` talks to Telegram's HTTP API directly using the bot token
+from itsybitsy config. The dispatcher long-polls `getUpdates` for
+inbound and calls `sendMessage` for outbound.
 
-**Why direct:**
-- The official Telegram plugin is currently registered for the system
-  coordinator (via `--channels plugin:telegram@claude-plugins-official`
-  in `src/coordinator.ts:298`), but the user has decided not to use it.
-  Removing that registration eliminates the entire MCP transport stack.
-- Long-polling `getUpdates` is straightforward: an HTTPS GET that hangs
-  for ~30s waiting for new messages, returning an offset for the next
-  call. No persistent connection bookkeeping; reconnects are just the
-  next HTTP call.
-- Telegram does not expose websockets for bots in the public Bot API
-  (websocket-style bidirectional comms are available only through
-  user-mode MTProto clients, which is overkill and out of scope).
-  Long-polling is the right primitive.
-- Webhook mode is an alternative — Telegram POSTs to a public URL
-  whenever a message arrives. Not viable here (no public URL on the
-  user's local Mac without tunnelling). Long-polling is the v1 path.
+**Why long-polling:** an HTTPS GET that hangs for ~30s waiting for
+new messages, returning an offset for the next call. No persistent
+connection bookkeeping; reconnects are just the next HTTP call.
+Webhooks would be cleaner but require a public URL on the user's
+Mac (no thanks). Telegram doesn't expose websockets for bots.
 
 **Files to touch (transport + dispatcher lifecycle):**
 - New: `src/channels/telegram-client.ts` — thin wrapper around the
@@ -209,9 +160,7 @@ dispatcher needs to:
    coordinator knows it's a Telegram message and how to reply.
 4. Call `sendToSystemCoordinator(wrapped, { fromAgent: "@telegram", multiline: true })`.
 
-The wrapping format mirrors the channel-system convention but is
-ours to define since we are no longer interoperating with the MCP
-channel mechanism:
+The wrapping format:
 
 ```text
 <channel source="telegram" user="alice" ts="2026-05-03T01:26:30Z">
@@ -436,8 +385,7 @@ no telegram, still produces the correct
 `claude --model opus --channels plugin:imessage@...` invocation.
 
 **Unchanged config:** `coordinator.imessage` stays exactly as-is.
-This plan does not touch iMessage routing — that flow keeps using
-the official MCP plugin via `--channels`.
+This plan does not touch iMessage routing.
 
 **Allowlist file:** `~/.itsybitsy/channels/telegram/access.json`. Schema:
 ```json
@@ -458,13 +406,6 @@ group `chat_id`, so allowlisting one trusts everyone in the group.
 v2 may add a per-message `from.id` check; for now, document the
 restriction in the schema docstring and `ib tgcheck` warns if a
 configured `chat_id` looks group-shaped (negative integer).
-
-**No `.mcp.json` writer to remove:** the original draft mentioned
-`writeCoordinatorMcpConfig` in `src/coordinator.ts`. That function
-does not exist in the current codebase. The MCP-server approach
-was introduced and reverted in commits `b4e042f` → `97874c6`; today
-the Telegram integration is exclusively the `--channels plugin:...`
-flag above.
 
 ## Cutover plan
 
@@ -597,35 +538,6 @@ These should be settled during implementation, not before:
   offline" reply. Implementer's call.
 - **Multi-machine / multi-user scenarios.** Out of scope for v1.
 
-## Migration from current state
-
-Today:
-- The system coordinator's `claude` command optionally includes
-  `--channels plugin:telegram@claude-plugins-official` when
-  `coordinator.telegram` is true (`src/coordinator.ts:298`).
-- The official plugin handles bot polling and exposes a `reply`
-  tool inside the coordinator's claude session.
-- The user has decided not to use this path. (An alternative
-  MCP-server experiment via a `.mcp.json` writer was tried and
-  reverted in commits `b4e042f` → `97874c6`.)
-
-After v1:
-- `ib watch` (or `ib tgdaemon`) long-polls Telegram directly using
-  the bot token from `channels.telegram.bot_token`.
-- The dispatcher relays inbound messages to the system coordinator
-  via `sendToSystemCoordinator(text, { fromAgent: "@telegram",
-  multiline: true })`.
-- The coordinator replies via `ib tgsend "<text>"`. No question/
-  answer correlation — plain text both ways.
-- The `--channels plugin:telegram@...` registration is removed; the
-  coordinator's claude session has no Telegram awareness at all.
-
-The user-visible difference: messages arrive in the coordinator
-wrapped in our channel-reminder block (no MCP `<channel>`
-injection), and outbound goes through `ib tgsend` rather than a
-`reply` MCP tool. Multi-line messages arrive intact (multiline
-sendMessage); bursts arrive as a single coalesced turn.
-
 ## What this is *not* tackling
 
 - **`ib ask` correlation.** v1 has no qid handling and no question/
@@ -662,9 +574,7 @@ Rough sizing, not a commitment:
 | Cutover (remove `coordinator.telegram` config + plugin registration) | ~30 lines deleted | trivial |
 | **Total** | **~1470 net new, ~30 deleted** | — |
 
-For comparison, the merged "Telegram MCP server entry" change was
-~160 lines. This is meaningfully bigger but localized to
-`src/channels/` plus surgical edits in:
+Localized to `src/channels/` plus surgical edits in:
 - `src/index.ts` — add `tgsend`/`tgallow`/`tgdeny`/`tgcheck`/
   `tgdaemon` cases
 - `src/ib-commands.ts` — add `telegramSend()`, add `multiline`
@@ -681,10 +591,6 @@ For comparison, the merged "Telegram MCP server entry" change was
 
 - [Telegram Bot API](https://core.telegram.org/bots/api) —
   `getUpdates` and `sendMessage` endpoints used by the Telegram client.
-- [Channels reference](https://code.claude.com/docs/en/channels-reference) —
-  the official MCP channel-server contract. We are *not*
-  implementing it, but the wrapping conventions are useful priors
-  for our channel-reminder format.
 - `src/index.ts:166` — `sendToSystemCoordinator()`, the existing
   helper the inbound dispatcher reuses.
 - `src/ib-commands.ts:1241` — `sendMessage()`, gets a `multiline`

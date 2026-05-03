@@ -7,9 +7,9 @@ Telegram becomes a transport for ittybitty's existing inbound comms
 plus one new outbound subcommand (`ib tgsend`). This document covers v1;
 v2 may add other channels (Slack, iMessage, Discord).
 
-- **Inbound:** a dispatcher in `ib watch` (or `ib tgdaemon`) long-polls
-  Telegram, wraps each message in a channel-reminder block, and
-  delivers it to the system coordinator via tmux send-keys.
+- **Inbound:** a dispatcher in `ib watch` long-polls Telegram, wraps
+  each message in a channel-reminder block, and delivers it to the
+  system coordinator via tmux send-keys.
 - **Outbound:** the coordinator runs `ib tgsend "..."` and the
   subcommand posts to Telegram directly.
 
@@ -57,9 +57,8 @@ The following are explicitly out of scope and deferred:
    getUpdates       sendMessage
          ▼                │
    ┌──────────────┐  ┌────┴──────┐
-   │ ib watch  or │  │ ib tgsend │
-   │ ib tgdaemon  │  └────▲──────┘
-   └──────┬───────┘       │
+   │   ib watch   │  │ ib tgsend │
+   └──────┬───────┘  └────▲──────┘
           │ tmux          │ subprocess
           ▼               │
        ┌─────────────────────┐
@@ -71,9 +70,9 @@ Key properties:
 1. **Two clients hit the Telegram API**: the long-running dispatcher
    for inbound, and one-shot `ib tgsend` invocations for outbound.
    The Bot API serializes per-chat; concurrent calls just queue.
-2. **The dispatcher runs in either `ib watch` (foreground TUI) or a
-   dedicated `ib tgdaemon` (headless background)** — both ship so the
-   user can pick. Don't run both simultaneously against the same bot.
+2. **The dispatcher runs inside `ib watch`.** When the dashboard is
+   not running, Telegram routing is offline; `ib tgsend` still works
+   as a one-shot, and inbound messages are simply not forwarded.
 
 ## Pieces to build
 
@@ -98,23 +97,17 @@ The transport client is a thin wrapper around the Bot API
 shutdown. The update-id offset is managed in memory; persist to disk
 only if we discover a reason to (we don't yet).
 
-**Deployment lifetime — two ways to run the dispatcher:**
+**Deployment lifetime:** the dispatcher is started by
+`launchDashboard()` alongside `AgentWatcher`, and stopped on TUI exit
+via the `AbortController` so the in-flight long-poll cancels within
+~1s. When `ib watch` is not running, Telegram routing is offline.
 
-1. **Inside `ib watch` (foreground TUI).** Started by `launchDashboard()`
-   alongside `AgentWatcher`; stopped on TUI exit via the
-   `AbortController` so the in-flight long-poll cancels within ~1s.
-2. **As `ib tgdaemon` (headless background).** A separate CLI entry
-   that constructs the same dispatcher class but skips the TUI.
-   Designed to be supervised by launchd. This is the "always on"
-   path — required for the personal-assistant use case where the
-   user wants the assistant reachable when the dashboard isn't open.
-
-Both ship. The two are mutually exclusive against the same bot
-token (long-polling against the same bot from two clients splits
-updates unpredictably). On startup, the dispatcher does a single
+On startup, the dispatcher does a single
 `getUpdates(offset=-1, limit=1, timeout=0)` to clear any held update
-and detect a 409 Conflict (which means a webhook is set or another
-poller is active) — log loudly and exit if 409.
+and detect a 409 Conflict — which means a webhook is set or another
+poller is active (e.g. a stray webhook left over from earlier setup,
+or a forgotten poller in another tool). Log loudly and skip Telegram
+startup so the rest of the TUI works.
 
 The dispatcher itself owns the long-poll loop, allowlist check,
 channel-reminder wrapping, and per-coordinator serialization mutex.
@@ -131,8 +124,8 @@ longer gets the Telegram channel passed to its claude session.
 
 **Failure modes to handle:**
 - Telegram API unreachable on startup (no network): log warning,
-  retry on exponential backoff capped at ~30s. Don't crash the host
-  process (`ib watch` keeps its TUI; `ib tgdaemon` keeps trying).
+  retry on exponential backoff capped at ~30s. Don't crash `ib watch`
+  — the TUI keeps running.
 - Mid-poll HTTP failure: log, retry with backoff. The `getUpdates`
   offset is in memory; on retry, the next call sends the same offset
   — Telegram is idempotent for the same offset. No durable state
@@ -142,9 +135,9 @@ longer gets the Telegram channel passed to its claude session.
 - Bot token missing or invalid: log "Telegram routing disabled: bot
   token not configured" / "Telegram API rejected token, check
   `channels.telegram.bot_token`." Don't crash.
-- 409 Conflict on startup probe: another poller is active or a
-  webhook is set. Log and exit (in `ib tgdaemon`) or skip Telegram
-  startup entirely (in `ib watch`) so the rest of the TUI works.
+- 409 Conflict on startup probe: a webhook is set or another poller
+  is active. Log and skip Telegram startup so the rest of the TUI
+  works.
 
 ### 2. Inbound dispatcher (Telegram → coordinator)
 
@@ -176,8 +169,8 @@ configured chat). No `chat_id` or `message_id` shown in the wrapper
 — they're not needed by the coordinator and would just be noise.
 
 Subcommand naming uses single-word verbs (`ib tgsend`, `ib tgallow`,
-`ib tgdeny`, `ib tgcheck`, `ib tgdaemon`) — consistent with how the
-rest of itsybitsy spells commands (`ib new-agent`, `ib merge-check`,
+`ib tgdeny`, `ib tgcheck`) — consistent with how the rest of
+itsybitsy spells commands (`ib new-agent`, `ib merge-check`,
 `ib hook-status`, etc., where each command is one shell argv entry).
 Avoids subcommand parsing logic in `src/index.ts`.
 
@@ -322,11 +315,10 @@ New config keys (defined in `src/config.ts`):
 
 The `channels.*` namespace is new; mirrors the directory layout
 (`~/.itsybitsy/channels/telegram/`). The bot token isn't really
-"coordinator-owned" — the dispatcher in `ib watch`/`ib tgdaemon`
-reads it, not the coordinator's claude session. (Compare with
-`coordinator.imessage`, which legitimately is a coordinator-side
-flag because the coordinator's claude session loads the iMessage
-plugin.)
+"coordinator-owned" — the dispatcher in `ib watch` reads it, not the
+coordinator's claude session. (Compare with `coordinator.imessage`,
+which legitimately is a coordinator-side flag because the
+coordinator's claude session loads the iMessage plugin.)
 
 **Removed config:** `coordinator.telegram` (bool). It currently gates
 appending `--channels plugin:telegram@claude-plugins-official` to the
@@ -369,33 +361,28 @@ warns if a configured `chat_id` looks group-shaped (negative integer).
 
 This is the order to ship without breaking anything mid-flight.
 
-1. **Add config keys + access.json schema + `ib tgallow`/`ib tgdeny`/
-   `ib tgcheck` subcommands.** No behavior change yet — just config
-   and validation plumbing. Tests verify atomic writes, schema
-   validation, deny-all default.
-2. **Add the `multiline` mode to `sendMessage`.** Self-contained
-   refactor with its own tests. No callers use it yet.
-3. **Land §1: the Telegram transport client.** The `getUpdates` /
-   `sendMessage` wrapper with `AbortController` and 429 handling. No
-   wiring yet — just the client class and its tests.
-4. **Land §2: the inbound dispatcher wired to `launchDashboard()`.**
-   Allowlist filter, channel-reminder wrapping, burst coalescing,
-   per-coordinator mutex, calls into `sendToSystemCoordinator`. The
-   `--channels plugin:telegram@...` registration on the coordinator
-   stays in place during this step — the user can verify the new
-   path without losing the old one. Document that running both
-   simultaneously will cause Telegram to split updates between them.
-5. **Land the `ib tgsend` subcommand.** Outbound path, reusing the
-   transport client from step 3.
-6. **Add `ib tgdaemon`.** Same dispatcher class, headless entry.
-   Useful immediately for the personal-assistant use case where the
-   user wants 24/7 routing.
-7. **Remove the `--channels plugin:telegram@...` branch and the
+1. **Remove the `--channels plugin:telegram@...` branch and the
    `coordinator.telegram` config key.** Edit `src/coordinator.ts:ensureSystemCoordinator`
    to drop the `telegram` push and the surrounding config read.
    Remove the key from `src/config.ts`. After this step, the
    official Telegram plugin is no longer attached to the coordinator
-   session.
+   session — Telegram routing is offline until the new dispatcher
+   lands. Doing this first avoids any window where both the old
+   plugin and the new dispatcher could poll the same bot token.
+2. **Add config keys + access.json schema + `ib tgallow`/`ib tgdeny`/
+   `ib tgcheck` subcommands.** No behavior change yet — just config
+   and validation plumbing. Tests verify atomic writes, schema
+   validation, deny-all default.
+3. **Add the `multiline` mode to `sendMessage`.** Self-contained
+   refactor with its own tests. No callers use it yet.
+4. **Land §1: the Telegram transport client.** The `getUpdates` /
+   `sendMessage` wrapper with `AbortController` and 429 handling. No
+   wiring yet — just the client class and its tests.
+5. **Land §2: the inbound dispatcher wired to `launchDashboard()`.**
+   Allowlist filter, channel-reminder wrapping, burst coalescing,
+   per-coordinator mutex, calls into `sendToSystemCoordinator`.
+6. **Land the `ib tgsend` subcommand.** Outbound path, reusing the
+   transport client from step 4.
 
 Each step is independently testable and rollback-able.
 
@@ -457,9 +444,8 @@ Each step is independently testable and rollback-able.
 - **HTTP 429**: mock a `Retry-After: 5` response; verify the client
   sleeps 5s then resumes.
 - **409 Conflict on startup probe**: mock the initial probe to
-  return 409; verify `ib tgdaemon` exits with a clear error and
-  `ib watch` skips Telegram startup but keeps the rest of the TUI
-  alive.
+  return 409; verify `ib watch` skips Telegram startup but keeps the
+  rest of the TUI alive.
 
 ### Manual / live tests (gated on local Telegram bot token)
 
@@ -476,8 +462,6 @@ Each step is independently testable and rollback-able.
   arrive on Telegram.
 - Quit `ib watch` while a long-poll is in flight → verify the
   process exits within ~1s (AbortController cancels the poll).
-- Run `ib tgdaemon` and quit `ib watch` → verify Telegram still
-  routes through the daemon.
 
 ## Open questions
 
@@ -510,10 +494,9 @@ Rough sizing, not a commitment:
 | §1 Telegram client (`fetch` + AbortController + 429 handling) | ~150 | high — small, well-defined HTTP API |
 | §2 inbound dispatcher (poll loop + allowlist + wrapping + coalesce + serialize) | ~280 | medium — coalescing and per-coord mutex add complexity |
 | §3 `ib tgsend` subcommand | ~80 | high — straightforward |
-| `ib tgdaemon` entry | ~50 | high — factor out of `launchDashboard` |
 | Tests for all of above | ~700 | matches existing test density |
 | Cutover (remove `coordinator.telegram` config + plugin registration) | ~30 lines deleted | trivial |
-| **Total** | **~1470 net new, ~30 deleted** | — |
+| **Total** | **~1420 net new, ~30 deleted** | — |
 
 Files to touch, consolidated:
 
@@ -525,7 +508,7 @@ Files to touch, consolidated:
 - New: `src/channels/access.ts` — read/write
   `~/.itsybitsy/channels/telegram/access.json`.
 - Modified: `src/index.ts` — add `tgsend`/`tgallow`/`tgdeny`/
-  `tgcheck`/`tgdaemon` cases.
+  `tgcheck` cases.
 - Modified: `src/ib-commands.ts` — add `telegramSend()`, add
   `multiline` option to `sendMessage` (`src/ib-commands.ts:sendMessage`).
 - Modified: `src/coordinator.ts:ensureSystemCoordinator` — remove plugin registration.
@@ -543,11 +526,11 @@ Files to touch, consolidated:
 - `src/index.ts:sendToSystemCoordinator` — the existing
   helper the inbound dispatcher reuses.
 - `src/ib-commands.ts:sendMessage` — gets a `multiline`
-  option in step 2 of the cutover.
+  option in step 3 of the cutover.
 - `src/ib-commands.ts:sendMessage` — sentinel-prefix handling for
   `fromAgent` IDs starting with `@`; pattern reused for `@telegram`.
 - `src/coordinator.ts:sanitizeTmuxInput` — the existing
   helper that strips control chars (which is why we can't use it
   on the channel-reminder block — we need newlines preserved).
 - `src/coordinator.ts:ensureSystemCoordinator` — current Telegram plugin
-  registration; removed in step 7 of the cutover plan.
+  registration; removed in step 1 of the cutover plan.

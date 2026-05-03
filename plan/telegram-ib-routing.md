@@ -32,7 +32,7 @@ The following are explicitly out of scope and deferred:
   If the coordinator wants a structured Q&A flow, it just types the
   question into `ib tgsend` and treats whatever the user replies with
   as the answer (visible in its own scrollback). Real `ib ask`
-  integration would require restructuring `askQuestion()` (`src/ib-commands.ts:3057`)
+  integration would require restructuring `askQuestion()` (`src/ib-commands.ts:askQuestion`)
   and `PendingQuestion` to handle the in-memory `@system` agent
   (no `meta.json` on disk), threading `repoPath` into `PendingQuestion`,
   and bypassing the `activeAgentIds` filter in `readQuestionsInternal()`.
@@ -118,14 +118,14 @@ poller is active) — log loudly and exit if 409.
 
 The dispatcher itself owns the long-poll loop, allowlist check,
 channel-reminder wrapping, and per-coordinator serialization mutex.
-`launchDashboard()` (`src/tui/dashboard.ts:1961` — the body of
+`launchDashboard()` (`src/tui/dashboard.ts:launchDashboard` — the body of
 `ib watch`) starts and stops the dispatcher alongside the
 `AgentWatcher`. The dispatcher is not coupled to TUI rendering; it
 just runs in the same process.
 
 The `coordinator.telegram` config flag and the
 `--channels plugin:telegram@...` registration in
-`src/coordinator.ts:296-301` are removed. Per user: the plugin is
+`src/coordinator.ts:ensureSystemCoordinator` are removed. Per user: the plugin is
 installed but should not be used at all. The system coordinator no
 longer gets the Telegram channel passed to its claude session.
 
@@ -181,7 +181,7 @@ rest of itsybitsy spells commands (`ib new-agent`, `ib merge-check`,
 `ib hook-status`, etc., where each command is one shell argv entry).
 Avoids subcommand parsing logic in `src/index.ts`.
 
-**Critical: tmux newline handling.** `sendMessage` (`src/ib-commands.ts:1241`)
+**Critical: tmux newline handling.** `sendMessage` (`src/ib-commands.ts:sendMessage`)
 does NOT call `sanitizeTmuxInput`. It chunks the message and ships
 each chunk via `tmux send-keys -t <sess> -l <chunk>`. Literal `\n`
 bytes inside the chunk are sent as raw newline keystrokes, which
@@ -197,7 +197,7 @@ inbound flow.
 2. **Add a `multiline` mode to `sendMessage`** that joins lines with
    tmux's `Enter` key sent through send-keys (not `-l`) using the
    "literal-then-Enter" pattern that the existing newAgent flow uses
-   (`src/ib-commands.ts:2665`). Cleaner; touches `sendMessage`'s
+   (`src/ib-commands.ts:autoAcceptWorkspaceTrustForNewAgent`). Cleaner; touches `sendMessage`'s
    public API.
 3. **Render the channel-reminder block as a single line** using `|` or
    `␤` glyphs as visual separators. Loses the natural line breaks in
@@ -213,12 +213,12 @@ function but preserves the channel-reminder format. Falls back
 cleanly for callers that don't pass the opt.
 
 **Reuse, don't add:** `sendToSystemCoordinator(message, opts)`
-already exists at `src/index.ts:166`. The dispatcher calls it
+already exists at `src/index.ts:sendToSystemCoordinator`. The dispatcher calls it
 directly (no subprocess overhead, structured errors). Pass
 `fromAgent: "@telegram"` — the leading `@` marks it as a sentinel
 so `sendMessage` formats it as `[sent by @telegram]: ...` rather
 than `[sent by agent telegram]: ...` (per the existing sentinel
-handling at `src/ib-commands.ts:1294`). Document `@telegram`
+handling at `src/ib-commands.ts:sendMessage`). Document `@telegram`
 alongside `@system` in `src/agents.ts`'s `SpawnedBy` comments.
 
 The allowlist file lives at `~/.itsybitsy/channels/telegram/access.json`.
@@ -330,14 +330,14 @@ plugin.)
 
 **Removed config:** `coordinator.telegram` (bool). It currently gates
 appending `--channels plugin:telegram@claude-plugins-official` to the
-coordinator's `claude` command (`src/coordinator.ts:296-301`). Per
+coordinator's `claude` command (`src/coordinator.ts:ensureSystemCoordinator`). Per
 the user, the official Telegram plugin should not be used at all.
 Remove both the config key (`src/config.ts`) and the
 `--channels plugin:telegram@...` branch.
 
 **Verification step:** after removing the `telegram` push from the
-`channels` array in `src/coordinator.ts:296-301`, the `if
-(channels.length > 0)` branch (line 299) will fire only when
+`channels` array in `src/coordinator.ts:ensureSystemCoordinator`, the `if
+(channels.length > 0)` branch will fire only when
 `coordinator.imessage` is true. Confirm `coordinator.imessage=true`,
 no telegram, still produces the correct
 `claude --model opus --channels plugin:imessage@...` invocation.
@@ -391,7 +391,7 @@ This is the order to ship without breaking anything mid-flight.
    Useful immediately for the personal-assistant use case where the
    user wants 24/7 routing.
 7. **Remove the `--channels plugin:telegram@...` branch and the
-   `coordinator.telegram` config key.** Edit `src/coordinator.ts:296-301`
+   `coordinator.telegram` config key.** Edit `src/coordinator.ts:ensureSystemCoordinator`
    to drop the `telegram` push and the surrounding config read.
    Remove the key from `src/config.ts`. After this step, the
    official Telegram plugin is no longer attached to the coordinator
@@ -527,12 +527,12 @@ Files to touch, consolidated:
 - Modified: `src/index.ts` — add `tgsend`/`tgallow`/`tgdeny`/
   `tgcheck`/`tgdaemon` cases.
 - Modified: `src/ib-commands.ts` — add `telegramSend()`, add
-  `multiline` option to `sendMessage` (`src/ib-commands.ts:1241`).
-- Modified: `src/coordinator.ts:296-301` — remove plugin registration.
+  `multiline` option to `sendMessage` (`src/ib-commands.ts:sendMessage`).
+- Modified: `src/coordinator.ts:ensureSystemCoordinator` — remove plugin registration.
 - Modified: `src/config.ts` — add `channels.telegram.*`, remove
   `coordinator.telegram`.
 - Modified: `src/tui/dashboard.ts` — start/stop dispatcher in
-  `launchDashboard()` (`src/tui/dashboard.ts:1961`).
+  `launchDashboard()` (`src/tui/dashboard.ts:launchDashboard`).
 - Modified: `src/agents.ts` — document `@telegram` sentinel
   alongside `@system` in `SpawnedBy` comments.
 
@@ -540,14 +540,14 @@ Files to touch, consolidated:
 
 - [Telegram Bot API](https://core.telegram.org/bots/api) —
   `getUpdates` and `sendMessage` endpoints used by the Telegram client.
-- `src/index.ts:166` — `sendToSystemCoordinator()`, the existing
+- `src/index.ts:sendToSystemCoordinator` — the existing
   helper the inbound dispatcher reuses.
-- `src/ib-commands.ts:1241` — `sendMessage()`, gets a `multiline`
+- `src/ib-commands.ts:sendMessage` — gets a `multiline`
   option in step 2 of the cutover.
-- `src/ib-commands.ts:1294` — sentinel-prefix handling for
+- `src/ib-commands.ts:sendMessage` — sentinel-prefix handling for
   `fromAgent` IDs starting with `@`; pattern reused for `@telegram`.
-- `src/coordinator.ts:168` — `sanitizeTmuxInput()`, the existing
+- `src/coordinator.ts:sanitizeTmuxInput` — the existing
   helper that strips control chars (which is why we can't use it
   on the channel-reminder block — we need newlines preserved).
-- `src/coordinator.ts:296-301` — current Telegram plugin
+- `src/coordinator.ts:ensureSystemCoordinator` — current Telegram plugin
   registration; removed in step 7 of the cutover plan.

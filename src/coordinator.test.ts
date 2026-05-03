@@ -576,6 +576,118 @@ describe("ensureSystemCoordinator", () => {
     }
   });
 
+  test("writes .mcp.json with telegram entry when coordinator.telegram is true", async () => {
+    const { mkdir } = await import("fs/promises");
+    await mkdir(tmpDir, { recursive: true });
+    const configPath = join(tmpDir, "config.json");
+    await Bun.write(configPath, JSON.stringify({ coordinator: { telegram: true } }));
+
+    const { setUserConfigPath, resetUserConfigPath } = await import("./config");
+    setUserConfigPath(configPath);
+
+    coordinatorSpawnCtx.set(createCommandRouter({
+      "has-session": { exitCode: 1 },
+    }));
+
+    try {
+      await ensureSystemCoordinator();
+
+      const mcpPath = join(tmpDir, ".mcp.json");
+      const content = await readFile(mcpPath, "utf-8");
+      const mcp = JSON.parse(content);
+      expect(mcp).toEqual({
+        mcpServers: {
+          telegram: {
+            url: "http://127.0.0.1:9876/mcp",
+          },
+        },
+      });
+    } finally {
+      resetUserConfigPath();
+    }
+  });
+
+  test("does not write .mcp.json when coordinator.telegram is false", async () => {
+    const { mkdir } = await import("fs/promises");
+    await mkdir(tmpDir, { recursive: true });
+    const configPath = join(tmpDir, "config.json");
+    await Bun.write(configPath, JSON.stringify({ coordinator: { telegram: false } }));
+
+    const { setUserConfigPath, resetUserConfigPath } = await import("./config");
+    setUserConfigPath(configPath);
+
+    coordinatorSpawnCtx.set(createCommandRouter({
+      "has-session": { exitCode: 1 },
+    }));
+
+    try {
+      await ensureSystemCoordinator();
+
+      const mcpPath = join(tmpDir, ".mcp.json");
+      expect(await Bun.file(mcpPath).exists()).toBe(false);
+    } finally {
+      resetUserConfigPath();
+    }
+  });
+
+  test("removes stale .mcp.json when telegram flag flips off", async () => {
+    const { mkdir } = await import("fs/promises");
+    await mkdir(tmpDir, { recursive: true });
+    // Pre-seed a stale .mcp.json from a previous run when telegram was on.
+    const mcpPath = join(tmpDir, ".mcp.json");
+    await Bun.write(mcpPath, JSON.stringify({ mcpServers: { telegram: { url: "http://127.0.0.1:9876/mcp" } } }));
+
+    const configPath = join(tmpDir, "config.json");
+    await Bun.write(configPath, JSON.stringify({ coordinator: { telegram: false } }));
+
+    const { setUserConfigPath, resetUserConfigPath } = await import("./config");
+    setUserConfigPath(configPath);
+
+    coordinatorSpawnCtx.set(createCommandRouter({
+      "has-session": { exitCode: 1 },
+    }));
+
+    try {
+      await ensureSystemCoordinator();
+
+      expect(await Bun.file(mcpPath).exists()).toBe(false);
+    } finally {
+      resetUserConfigPath();
+    }
+  });
+
+  test("does not pass --channels plugin:telegram to claude command", async () => {
+    // The Telegram plugin has been uninstalled; the coordinator must not
+    // reference it on the command line. (iMessage still uses --channels.)
+    const { mkdir } = await import("fs/promises");
+    await mkdir(tmpDir, { recursive: true });
+    const configPath = join(tmpDir, "config.json");
+    await Bun.write(configPath, JSON.stringify({ coordinator: { telegram: true } }));
+
+    const { setUserConfigPath, resetUserConfigPath } = await import("./config");
+    setUserConfigPath(configPath);
+
+    const commands: string[][] = [];
+    coordinatorSpawnCtx.set((cmd: string[], _opts?: any) => {
+      commands.push([...cmd]);
+      const cmdStr = cmd.join(" ");
+      if (cmdStr.includes("has-session")) {
+        return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(1) };
+      }
+      return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(0) };
+    });
+
+    try {
+      await ensureSystemCoordinator();
+      const cmdStrs = commands.map((c) => c.join(" "));
+      const claudeCmd = cmdStrs.find((c) => c.includes("claude --model"));
+      expect(claudeCmd).toBeDefined();
+      expect(claudeCmd).not.toContain("telegram");
+    } finally {
+      resetUserConfigPath();
+    }
+  });
+
   test("sanitizes prompt text before sending via tmux", async () => {
     const commands: string[][] = [];
     coordinatorSpawnCtx.set((cmd: string[], _opts?: any) => {

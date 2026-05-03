@@ -290,12 +290,10 @@ export async function ensureSystemCoordinator(): Promise<string> {
   const config = await readConfig();
   const model = (config["coordinator.model"]?.value as string) ?? "opus";
   const imessage = config["coordinator.imessage"]?.value === true;
-  const telegram = config["coordinator.telegram"]?.value === true;
 
   // Start Claude in interactive mode
   const channels: string[] = [];
   if (imessage) channels.push("plugin:imessage@claude-plugins-official");
-  if (telegram) channels.push("plugin:telegram@claude-plugins-official");
   const claudeCmd = channels.length > 0
     ? `claude --model ${model} --channels ${channels.join(" ")}`
     : `claude --model ${model}`;

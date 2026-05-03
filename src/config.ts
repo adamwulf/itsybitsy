@@ -28,7 +28,6 @@ export const CONFIG_KEYS: ConfigKeyDef[] = [
   { key: "hooks.statusVisible", type: "boolean", default: true },
   { key: "coordinator.model", type: "string", default: "opus" },
   { key: "coordinator.imessage", type: "boolean", default: false },
-  { key: "coordinator.telegram", type: "boolean", default: false },
 ];
 
 function getNestedValue(obj: Record<string, unknown>, dotKey: string): unknown {

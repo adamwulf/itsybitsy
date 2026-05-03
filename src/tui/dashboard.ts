@@ -60,11 +60,15 @@ import {
 import type { PaneMode, DenialFilter } from "./pane-manager";
 import * as agentActions from "./agent-actions";
 import { RESET, BOLD, DIM, RED, GREEN, YELLOW, DIM_GRAY, REVERSE } from "./colors";
-import { MIN_LEFT_WIDTH, MAX_LEFT_WIDTH } from "./split-pane";
 import { FocusManager } from "./focus";
 import type { FocusTarget, SubFocus } from "./focus";
 import { SystemDashboardComponent } from "./system-dashboard";
-import { loadLayout, saveLayoutDebounced, cancelPendingSave, flushPendingSave, MIN_SIDEBAR, MAX_SIDEBAR, DEFAULT_TMUX_WIDTH } from "./layout";
+import { loadLayout, saveLayoutDebounced, cancelPendingSave, flushPendingSave } from "./layout";
+import {
+  DEFAULT_TMUX_WIDTH,
+  getLiveMainWidth, getLiveLeftPaneWidth, getLiveRightPaneWidth, getLiveMaxLeftPaneWidth,
+  clampLeftWidth, clampLeftWidthAbsolute, clampSidebarWidth,
+} from "./widths";
 import { cancelPaste } from "./clipboard";
 import type { LayoutState } from "./layout";
 import { InputFieldComponent } from "./input-field";
@@ -547,14 +551,42 @@ export class DashboardComponent implements Component {
     return this._questionsFocused;
   }
 
-  /** Compute the main area width (terminal minus sidebar and separator) */
-  getMainWidth(): number {
-    return (process.stdout.columns ?? 80) - this.sidebarWidth - 1;
+  /** Inputs for the widths module — built fresh on each call so any field stays current. */
+  private liveLayout() {
+    return {
+      terminalWidth: process.stdout.columns ?? 80,
+      sidebarWidth: this.sidebarWidth,
+      splitPaneLeftWidth: this.splitPane.getLeftWidth(),
+    };
   }
 
-  /** Compute the right pane width based on terminal, sidebar, and split pane widths */
+  /** Width of the main area (middle + inner-separator + right). */
+  getMainWidth(): number {
+    return getLiveMainWidth(this.liveLayout());
+  }
+
+  /** Width of the middle (split-pane left) pane, clamped to fit. */
+  getLeftPaneWidth(): number {
+    return getLiveLeftPaneWidth(this.liveLayout());
+  }
+
+  /** Width of the right pane (split-pane right). */
   getRightPaneWidth(): number {
-    return this.getMainWidth() - this.splitPane.getLeftWidth() - 1;
+    return getLiveRightPaneWidth(this.liveLayout());
+  }
+
+  /** Maximum permissible split-pane left width given current main area. */
+  getMaxLeftPaneWidth(): number {
+    return getLiveMaxLeftPaneWidth(this.liveLayout());
+  }
+
+  /**
+   * Width at which a per-repo coordinator should render and be sized — the full
+   * main area, matching the system coordinator's behavior. Falls through to
+   * `getMainWidth()` today; kept as a named call site for clarity.
+   */
+  getRepoCoordinatorWidth(): number {
+    return this.getMainWidth();
   }
 
   setQuestionsFocused(value: boolean) {
@@ -689,7 +721,7 @@ export class DashboardComponent implements Component {
         // Skip tmux-reported width to avoid overriding the saved value during the
         // race window before resizeTmuxWindow takes effect on the agent's session.
         if (this.layoutRestored) return;
-        const clamped = Math.max(MIN_LEFT_WIDTH, Math.min(MAX_LEFT_WIDTH, width));
+        const clamped = clampLeftWidthAbsolute(width);
         if (clamped !== this.splitPane.getLeftWidth()) {
           this.splitPane.setLeftWidth(clamped);
           this.tui?.requestRender();
@@ -724,9 +756,9 @@ export class DashboardComponent implements Component {
 
   /** Apply a saved layout state to restore panel sizes, clamping to valid ranges. */
   applyLayout(layout: LayoutState) {
-    this.sidebarWidth = Math.max(MIN_SIDEBAR, Math.min(MAX_SIDEBAR, layout.sidebarWidth));
+    this.sidebarWidth = clampSidebarWidth(layout.sidebarWidth);
     resizeCoordinatorTmux(this.getMainWidth());
-    this.splitPane.setLeftWidth(Math.max(MIN_LEFT_WIDTH, Math.min(MAX_LEFT_WIDTH, layout.splitPaneLeftWidth)));
+    this.splitPane.setLeftWidth(clampLeftWidthAbsolute(layout.splitPaneLeftWidth));
     this.sidebar.heightOffsets = { ...layout.heightOffsets };
     if (layout.repoCoordinatorHeightOffset !== undefined) {
       this.rightPane.repoCoordinatorHeightOffset = layout.repoCoordinatorHeightOffset;
@@ -1006,11 +1038,9 @@ export class DashboardComponent implements Component {
     // After layout restore, resize all agent tmux sessions to match the restored splitPaneLeftWidth
     if (this.pendingTmuxResize && flatList.length > 0) {
       this.pendingTmuxResize = false;
-      // Re-validate splitPaneLeftWidth against current terminal width to ensure agents aren't
-      // resized to a width wider than the available space.
-      const terminalWidth = process.stdout.columns;
-      const availableWidth = terminalWidth - this.sidebarWidth - 2; // 2 for separators
-      const validWidth = Math.max(MIN_LEFT_WIDTH, Math.min(MAX_LEFT_WIDTH, Math.min(this.splitPane.getLeftWidth(), availableWidth)));
+      // Re-validate splitPaneLeftWidth against current terminal width via the
+      // widths module so a too-large saved value can't push the right pane off-screen.
+      const validWidth = clampLeftWidth(this.getMainWidth(), this.splitPane.getLeftWidth());
       if (validWidth !== this.splitPane.getLeftWidth()) {
         this.splitPane.setLeftWidth(validWidth);
       }
@@ -1082,10 +1112,11 @@ export class DashboardComponent implements Component {
         this.rightPane.repoCoordinatorHasPolled = false;
         this.rightPane.repoCoordinatorScrollBack = 0;
         this.repoCoordinatorPoller.setAgent(tmuxSession);
-        // Resize repo coordinator tmux to match right pane width
+        // Resize repo coordinator tmux to mainWidth — per-repo coordinators render
+        // full-pane (same behavior as the system coordinator), not right-pane-only.
         if (tmuxSession) {
-          const rpw = this.getRightPaneWidth();
-          if (rpw > 0) resizeTmuxWindow(tmuxSession, rpw);
+          const w = this.getRepoCoordinatorWidth();
+          if (w > 0) resizeTmuxWindow(tmuxSession, w);
         }
       }
     } else {
@@ -1169,8 +1200,8 @@ export class DashboardComponent implements Component {
       }
       if (selected?.meta.tmux_session) {
         this.checkClientAttached(selected);
-        // Resize the newly selected agent's tmux to match the current split pane width
-        resizeTmuxWindow(selected.meta.tmux_session, this.splitPane.getLeftWidth());
+        // Resize the newly selected agent's tmux to match the current middle pane.
+        resizeTmuxWindow(selected.meta.tmux_session, this.getLeftPaneWidth());
       }
     }
 
@@ -1592,12 +1623,13 @@ export class DashboardComponent implements Component {
       const focus = this.focusManager.current();
       if (focus === "agent-tree" || focus === "info" || focus === "coordinator") {
         // Sidebar panel focused: adjust sidebar width
-        this.sidebarWidth = Math.max(MIN_SIDEBAR, Math.min(MAX_SIDEBAR, this.sidebarWidth + delta));
+        this.sidebarWidth = clampSidebarWidth(this.sidebarWidth + delta);
         resizeCoordinatorTmux(this.getMainWidth());
-        // Resize repo coordinator tmux to match new right pane width
+        // Per-repo coordinator renders full-pane like the system coordinator,
+        // so resize its tmux to the new mainWidth.
         if (this.repoCoordinatorSession) {
-          const rpw = this.getRightPaneWidth();
-          if (rpw > 0) resizeTmuxWindow(this.repoCoordinatorSession, rpw);
+          const w = this.getRepoCoordinatorWidth();
+          if (w > 0) resizeTmuxWindow(this.repoCoordinatorSession, w);
         }
         this.tui?.requestRender();
       } else if (focus === "right-pane") {
@@ -1697,14 +1729,24 @@ export class DashboardComponent implements Component {
     const chromeLines = 5;
     const availableHeight = Math.max(5, terminalRows - chromeLines);
 
-    const sidebarW = this.sidebarWidth;
-    const mainWidth = width - sidebarW - 1; // 1 for sidebar separator
+    // Width math comes from the widths module — never inline.
+    // We pass `width` (the terminal width handed to render) so a TUI test that
+    // overrides the width can drive the same computation.
+    const renderLayout = {
+      terminalWidth: width,
+      sidebarWidth: this.sidebarWidth,
+      splitPaneLeftWidth: this.splitPane.getLeftWidth(),
+    };
+    const sidebarW = renderLayout.sidebarWidth;
+    const mainWidth = getLiveMainWidth(renderLayout);
     this.sidebar.displayHeight = availableHeight + 1; // sidebar gets the title separator row too
 
-    // Build main area title separator (agent-id left, pane-mode right)
+    // Build main area title separator (agent-id left, pane-mode right).
+    // Pass leftPaneWidth so the junction lines up with the SplitPane's seam.
+    const leftPaneW = getLiveLeftPaneWidth(renderLayout);
     const mainTitleSep = isCoordinatorView
       ? this.buildCoordinatorTitleSeparator(mainWidth)
-      : this.buildMainTitleSeparator(mainWidth, isTreeMode, isFullWidth);
+      : this.buildMainTitleSeparator(mainWidth, leftPaneW, isTreeMode, isFullWidth);
 
     let mainLines: string[];
     // Reset agentless before branching; only the TMUX branch sets it true
@@ -1768,7 +1810,7 @@ export class DashboardComponent implements Component {
       const showInputField = this.agentTree.selectedAgent != null && !isFullWidth;
 
       // Compute leftW early — needed for input field height calculation
-      const leftW = Math.min(this.splitPane.getLeftWidth(), mainWidth - 2);
+      const leftW = getLiveLeftPaneWidth(renderLayout);
 
       // Set active state on input field based on focus and sub-focus
       const isAgentFocused = this.focusManager.current() === "active-agent";
@@ -1813,7 +1855,7 @@ export class DashboardComponent implements Component {
         // lines with input field content on the left + right pane content on
         // the right.
         const sepChar = `${DIM_GRAY}│${RESET}`;
-        const rw = mainWidth - leftW - 1;
+        const rw = getLiveRightPaneWidth(renderLayout);
         const inputLines = this.inputField.render(leftW);
         // Append status lines below the input field
         const overlayLines = [...inputLines, ...this.tmuxPane.statusLines];
@@ -1868,7 +1910,8 @@ export class DashboardComponent implements Component {
     lines.push(...mergeSidebarAndMain(sidebarLines, mainLines, availableHeight + 1, mainWidth, sidebarW));
 
     // Bottom separator with junction characters
-    const bottomSep = this.buildBottomSeparator(width, isTreeMode, isFullWidth);
+    const rightPaneW = getLiveRightPaneWidth(renderLayout);
+    const bottomSep = this.buildBottomSeparator(mainWidth, sidebarW, leftPaneW, rightPaneW, isTreeMode, isFullWidth);
     lines.push(truncateToWidth(`${DIM_GRAY}${bottomSep}${RESET}`, width, ""));
 
     // Status bar
@@ -1879,7 +1922,7 @@ export class DashboardComponent implements Component {
   }
 
   /** Build titled separator at the top of the main area showing agent-id and pane-mode */
-  private buildMainTitleSeparator(mainWidth: number, isTreeMode: boolean, isFullWidth: boolean): string {
+  private buildMainTitleSeparator(mainWidth: number, leftPaneW: number, isTreeMode: boolean, isFullWidth: boolean): string {
     const selAgent = this.agentTree.selectedAgent;
     const repoHeader = this.agentTree.selectedRepoHeader;
     const isRepoMode = this.rightPane.mode === "REPO";
@@ -1902,8 +1945,8 @@ export class DashboardComponent implements Component {
     const rightTitleStyle = rightFocused ? `${REVERSE}${BOLD}` : BOLD;
 
     if (!isTreeMode && !isFullWidth && leftTitle) {
-      // Show junction at inner split position
-      const splitAt = this.splitPane.getLeftWidth() + 1;
+      // Show junction at inner split position (one beyond the left pane).
+      const splitAt = leftPaneW + 1;
       const leftHalfDashes = Math.max(1, splitAt - leftPad - leftTitle.length);
       const rightHalfDashes = Math.max(1, mainWidth - splitAt - rightTitle.length - rightPad);
       const leftDashStr = "─".repeat(Math.max(0, leftHalfDashes - 1)) + "┬";
@@ -1941,20 +1984,18 @@ export class DashboardComponent implements Component {
   }
 
   /** Build bottom separator with appropriate junction characters */
-  private buildBottomSeparator(width: number, isTreeMode: boolean, isFullWidth: boolean): string {
-    const sidebarW = this.sidebarWidth;
+  private buildBottomSeparator(mainWidth: number, sidebarW: number, leftPaneW: number, rightPaneW: number, isTreeMode: boolean, isFullWidth: boolean): string {
     // Sidebar junction at position sidebarWidth
     const sidebarJunction = "┴";
     const leftPart = "─".repeat(sidebarW) + sidebarJunction;
 
     if (!isTreeMode && !isFullWidth) {
-      // Also add inner split pane junction
-      const innerJPos = this.splitPane.getLeftWidth();
-      const innerSep = "─".repeat(innerJPos) + "┴" + "─".repeat(Math.max(0, width - sidebarW - 1 - innerJPos - 1));
+      // Add inner split-pane junction at the left pane boundary, then right pane width.
+      const innerSep = "─".repeat(leftPaneW) + "┴" + "─".repeat(Math.max(0, rightPaneW));
       return leftPart + innerSep;
     }
 
-    return leftPart + "─".repeat(Math.max(0, width - sidebarW - 1));
+    return leftPart + "─".repeat(Math.max(0, mainWidth));
   }
 }
 
@@ -2117,6 +2158,12 @@ export async function launchDashboard(): Promise<void> {
   // Handle terminal resize to update coordinator tmux width
   process.stdout.on("resize", () => {
     resizeCoordinatorTmux(dashboard.getMainWidth());
+    // Per-repo coordinator renders full-pane like the system coordinator,
+    // so its tmux width tracks the same mainWidth.
+    if (dashboard.repoCoordinatorSession) {
+      const w = dashboard.getRepoCoordinatorWidth();
+      if (w > 0) resizeTmuxWindow(dashboard.repoCoordinatorSession, w);
+    }
     // displayHeight is recomputed inside render() — at the moment the resize
     // event fires it still holds the pre-resize value, so a cache check now
     // would falsely hit. Drop the cached window so loadAgentLogIfNeeded is

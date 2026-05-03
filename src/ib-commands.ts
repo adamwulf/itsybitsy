@@ -28,7 +28,7 @@ import { listTmuxSessions } from "./tmux-poller";
 import { SpawnContext } from "./types";
 import type { SpawnFn } from "./types";
 import { isValidModel, isValidToolList, isValidTmuxSession, isValidSessionId, isValidShellPath, shellQuote } from "./validation";
-import { getTmuxWidthForAgent } from "./tui/layout";
+import { getTmuxWidthForAgent } from "./tui/widths";
 import { buildPerRepoCoordinatorSettings, checkCoordinatorExists, getCoordinatorAgentId, getCoordinatorHome } from "./coordinator";
 import { loadAgentType, agentTypeExists } from "./agent-types";
 import { listRepos, repoDisplayName } from "./registry";

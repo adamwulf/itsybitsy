@@ -31,7 +31,7 @@ import { fuzzyFilterIndices } from "./dialog-handler";
 import { displayState, computeStateColWidth, AGE_COL_WIDTH } from "./agent-tree";
 import type { PaneMode } from "./pane-manager";
 import { RESET, BOLD, DIM, RED } from "./colors";
-import { MIN_LEFT_WIDTH, MAX_LEFT_WIDTH } from "./split-pane";
+import { clampLeftWidthAbsolute } from "./widths";
 import type { RepoHealthReport } from "../health-check";
 import { getResolvableWarnings, resolveHealthWarnings } from "../health-check";
 import { IB_COORDINATOR_SESSION, sanitizeTmuxInput, restartSystemCoordinator, checkCoordinatorExists } from "../coordinator";
@@ -1139,22 +1139,17 @@ function handleConfigItemAction(
 
 export function handleResizeLeft(ctx: ActionCtx, delta: number) {
   const current = ctx.splitPane.getLeftWidth();
-  const newWidth = Math.max(MIN_LEFT_WIDTH, Math.min(MAX_LEFT_WIDTH, current + delta));
+  const newWidth = clampLeftWidthAbsolute(current + delta);
   if (newWidth === current) return;
   ctx.splitPane.setLeftWidth(newWidth);
-  // Resize ALL agents' tmux sessions so the width is consistent across agents
+  // Resize ALL agents' tmux sessions so the width is consistent across agents.
   for (const entry of ctx.agentTree.flatList) {
     if (entry.kind === "agent" && entry.agent.meta.tmux_session) {
       resizeTmuxWindow(entry.agent.meta.tmux_session, newWidth);
     }
   }
-  // Resize repo coordinator tmux to match new right pane width
-  if (ctx.repoCoordinatorSession) {
-    const rightPaneWidth = ctx.getMainWidth() - newWidth - 1;
-    if (rightPaneWidth > 0) {
-      resizeTmuxWindow(ctx.repoCoordinatorSession, rightPaneWidth);
-    }
-  }
+  // Per-repo coordinators are full-pane (sized by sidebar+terminal, not by the
+  // middle/right split), so the inner split-pane resize doesn't change their width.
   ctx.tui?.requestRender();
 }
 

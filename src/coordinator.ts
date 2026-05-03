@@ -11,7 +11,7 @@ import { readConfig } from "./config";
 import { captureTmuxOutput, resizeTmuxWindow } from "./tmux-poller";
 import { isCompacting, isRateLimited } from "./agents";
 import { SpawnContext } from "./types";
-import { getTmuxWidthForAgent } from "./tui/layout";
+import { getTmuxWidthForAgent } from "./tui/widths";
 import { loadAgentType, ensureAgentTypesDir } from "./agent-types";
 
 export const IB_COORDINATOR_SESSION = "ib-coordinator";

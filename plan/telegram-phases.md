@@ -13,21 +13,26 @@ state — Telegram routing simply goes offline between Phase 1 and Phase 6.
 Settle the few open questions that affect schema/wire format before anyone
 writes code. Output is a short addendum to the plan, not a PR.
 
-**Decisions to lock:**
-- **Bot token storage location.** Plan puts it in `~/.itsybitsy/config.json`.
-  Confirm that file is mode 0600. If not, either chmod it on touch or follow
-  the official plugin's pattern of a separate `.env` file at
-  `~/.itsybitsy/channels/telegram/.env` (mode 0600). Decide before Phase 2.
-- **`TELEGRAM_API_BASE` env override.** Recommend yes, defaults to
+**Decisions (locked):**
+- **Bot token storage location:** `channels.telegram.bot_token` in
+  `~/.itsybitsy/config.json`. **No separate `.env` file.** Phase 2 must
+  ensure `~/.itsybitsy/config.json` is created with mode 0600 (and chmod'd
+  to 0600 on touch if it already exists with looser perms) since the bot
+  token now lives there. Drop the alternative `.env` path from
+  consideration entirely.
+- **Auto-start policy:** if `channels.telegram.bot_token` is set,
+  `ib watch` auto-starts the dispatcher. If it is unset or empty, the
+  dispatcher does not start (no warning beyond a single info-level log
+  line). **No `--no-telegram` flag.** The escape hatch is "unset the
+  token in config."
+- **`TELEGRAM_API_BASE` env override:** yes, defaults to
   `https://api.telegram.org`. Cheap to add now, expensive to retrofit.
-- **Auto-start vs `--no-telegram` flag.** Recommend auto-start when token
-  present; add `--no-telegram` to `ib watch` for the escape hatch.
 - **Channel-reminder text — final wording.** Pick one phrasing and stick with
   it; the inline reply hint vs. one-shot orientation block tradeoff is called
   out in implementation-notes §7.
 
-**Exit criteria:** decisions documented (append to `telegram-ib-routing.md`
-under a "Decisions" heading or inline in §"Open questions").
+**Exit criteria:** decisions documented (this section, plus a short
+"Decisions" addendum appended to `telegram-ib-routing.md`).
 
 ---
 
@@ -81,6 +86,9 @@ configure things in Phase 5.
 **Modified:**
 - `src/config.ts` — add `channels.telegram.bot_token` and
   `channels.telegram.chat_id` keys. Defaults: empty strings → "disabled".
+  **Ensure `~/.itsybitsy/config.json` is created with mode 0600 and
+  chmod'd to 0600 on touch if it exists with looser perms** — the bot
+  token now lives in this file (Phase 0 decision).
 - `src/index.ts` — add `tgallow`, `tgdeny`, `tgcheck` subcommand cases.
   - `ib tgallow <chat_id>` — adds entry, idempotent.
   - `ib tgdeny <chat_id>` — removes entry, idempotent.
@@ -220,15 +228,17 @@ The big phase. This is where Telegram routing comes back online.
 
 **Modified:**
 - `src/tui/dashboard.ts:launchDashboard` — instantiate dispatcher
-  alongside `AgentWatcher`. Await `dispatcher.stop()` (with a 2s
-  timeout race) on TUI exit before returning. Don't `process.exit()`
-  synchronously — implementation-notes §4.
+  alongside `AgentWatcher` **only when `channels.telegram.bot_token`
+  is set** (Phase 0 auto-start policy). When unset/empty: log one
+  info-level line ("Telegram routing disabled: no bot token
+  configured") and skip dispatcher startup entirely. Await
+  `dispatcher.stop()` (with a 2s timeout race) on TUI exit before
+  returning. Don't `process.exit()` synchronously —
+  implementation-notes §4.
 - `src/agents.ts` — document `@telegram` sentinel alongside `@system`
   in `SpawnedBy` comments. No code change beyond comments.
 - `src/index.ts` — wire `ib tgcheck` to actually call the live probe
   via the client (was placeholder in Phase 2).
-- `src/tui/dashboard.ts` (or wherever flag parsing lives) — add
-  `--no-telegram` flag for `ib watch` per Phase 0 decision.
 
 **Tests:**
 - End-to-end inbound (text): mocked `getUpdates` response →
@@ -255,6 +265,9 @@ The big phase. This is where Telegram routing comes back online.
   running.
 - Dispatcher throw inside `forEach` over updates does NOT break the
   next iteration (implementation-notes §3).
+- Auto-start gate: `channels.telegram.bot_token` empty/unset →
+  dispatcher is never instantiated, one info-log line emitted,
+  `launchDashboard()` proceeds normally.
 
 **Exit criteria:** Manual smoke test on a live bot:
 - Send text → see one coordinator turn.

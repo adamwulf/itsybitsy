@@ -347,6 +347,40 @@ describe("getUpdates", () => {
     expect(logs.filter((l) => l.includes("ECONNRESET")).length).toBe(1);
   });
 
+  test("alternating error classes within one streak still log only once per class", async () => {
+    // 4 attempts alternating ETIMEDOUT/ECONNRESET, then success on attempt 5.
+    // The single-slot last-seen tracker would have logged all 4 because the
+    // class flips every attempt. The Set-based tracker logs exactly 2 — one
+    // line per unique class for the streak.
+    mock.enqueueError(new Error("ETIMEDOUT"));
+    mock.enqueueError(new Error("ECONNRESET"));
+    mock.enqueueError(new Error("ETIMEDOUT"));
+    mock.enqueueError(new Error("ECONNRESET"));
+    mock.enqueueResponse({ ok: true, result: [] });
+    const client = new TelegramClient({ token: "T" });
+
+    await client.getUpdates();
+
+    expect(logs.filter((l) => l.includes("ETIMEDOUT")).length).toBe(1);
+    expect(logs.filter((l) => l.includes("ECONNRESET")).length).toBe(1);
+  });
+
+  test("successful poll clears the seen-set so the next streak logs fresh", async () => {
+    // First streak: ETIMEDOUT then success. One log line.
+    mock.enqueueError(new Error("ETIMEDOUT"));
+    mock.enqueueResponse({ ok: true, result: [] });
+    const client = new TelegramClient({ token: "T" });
+    await client.getUpdates();
+    expect(logs.filter((l) => l.includes("ETIMEDOUT")).length).toBe(1);
+
+    // Second streak: another ETIMEDOUT then success. Should log again because
+    // the success between the two streaks cleared the seen-set.
+    mock.enqueueError(new Error("ETIMEDOUT"));
+    mock.enqueueResponse({ ok: true, result: [] });
+    await client.getUpdates();
+    expect(logs.filter((l) => l.includes("ETIMEDOUT")).length).toBe(2);
+  });
+
   test("response with bad envelope (ok:false, no error_code mapping) retries", async () => {
     mock.enqueueResponse({ ok: false, description: "weird" });
     mock.enqueueResponse({ ok: true, result: [] });
@@ -382,7 +416,9 @@ describe("sendMessage", () => {
     const result = await client.sendMessage({ chat_id: 99, text: "hello" });
 
     expect(result.ok).toBe(true);
-    expect(result.result).toEqual(sent);
+    if (result.ok) {
+      expect(result.result).toEqual(sent);
+    }
 
     const url = mock.allUrls()[0];
     expect(url).toContain("/botTEST/sendMessage");
@@ -399,7 +435,9 @@ describe("sendMessage", () => {
 
     const result = await client.sendMessage({ chat_id: 1, text: "x" });
     expect(result.ok).toBe(false);
-    expect(result.error_code).toBe(400);
+    if (!result.ok) {
+      expect(result.error_code).toBe(400);
+    }
   });
 
   test("logs status only — never the URL with the token", async () => {
@@ -411,5 +449,41 @@ describe("sendMessage", () => {
     expect(logs.length).toBeGreaterThan(0);
     expect(logs.some((l) => l.includes("VERYSECRET"))).toBe(false);
     expect(logs.some((l) => l.includes("status=500"))).toBe(true);
+  });
+
+  test("429 with only Retry-After header (no body parameter) surfaces retryAfterSec", async () => {
+    // Some 429 responses arrive with only the HTTP header set and no
+    // parameters.retry_after in the body. Callers must still see the actual
+    // backoff value rather than falling back to a 1s default.
+    mock.enqueueResponse(
+      { ok: false, error_code: 429, description: "Too Many Requests" },
+      429,
+      { "retry-after": "7" },
+    );
+    const client = new TelegramClient({ token: "T" });
+
+    const result = await client.sendMessage({ chat_id: 1, text: "x" });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.status).toBe(429);
+      expect(result.error_code).toBe(429);
+      expect(result.retryAfterSec).toBe(7);
+    }
+  });
+
+  test("429 with only body parameter (no Retry-After header) falls back to body", async () => {
+    mock.enqueueResponse(
+      { ok: false, error_code: 429, description: "Too Many Requests", parameters: { retry_after: 4 } },
+      429,
+    );
+    const client = new TelegramClient({ token: "T" });
+
+    const result = await client.sendMessage({ chat_id: 1, text: "x" });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.retryAfterSec).toBe(4);
+    }
   });
 });

@@ -5894,4 +5894,35 @@ describe("telegramSend (native)", () => {
     expect(result.ok).toBe(false);
     expect(result.message).toContain("429 retry");
   });
+
+  test("429 with only Retry-After header (no body parameter) sleeps the header value", async () => {
+    await Bun.write(userConfigPath, JSON.stringify({
+      channels: { telegram: { bot_token: "TEST_TOKEN", chat_id: "12345" } },
+    }));
+    const { ibCmds, tgClient } = await loadDeps();
+
+    const sleeps: number[] = [];
+    tgClient.sleepCtx.set(async (ms) => { sleeps.push(ms); });
+
+    let call = 0;
+    tgClient.fetchCtx.set(async () => {
+      call += 1;
+      if (call === 1) {
+        // No `parameters.retry_after` in body — only the HTTP header carries it.
+        return new Response(
+          JSON.stringify({ ok: false, error_code: 429, description: "Too Many Requests" }),
+          { status: 429, headers: { "content-type": "application/json", "retry-after": "5" } },
+        );
+      }
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 1, chat: { id: 12345 } } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+
+    const result = await ibCmds.telegramSend("hello");
+    expect(result.ok).toBe(true);
+    expect(call).toBe(2);
+    expect(sleeps).toEqual([5000]);
+  });
 });

@@ -10,8 +10,11 @@
  *     successful poll resets the backoff. The loop must not exit on a single
  *     transient failure (mirrors official plugin server.ts:999-1038).
  *   - 429 with `Retry-After` and 409 mid-poll both retry with backoff.
- *   - One warning per error class per call site — five consecutive ETIMEDOUTs
- *     produce one log line, not five.
+ *   - One warning per unique error class per `getUpdates` streak — five
+ *     consecutive ETIMEDOUTs produce one log line, not five, and an
+ *     ETIMEDOUT/ECONNRESET alternation produces two lines (one per class),
+ *     not one per attempt. The set is cleared on every successful poll so a
+ *     recovery resets logging fresh.
  *   - Never log URLs verbatim. They embed the bot token.
  *   - The base URL is hardcoded to https://api.telegram.org per Phase 0
  *     decision. No env override.
@@ -70,8 +73,10 @@ export function chunk(text: string, limit: number = TELEGRAM_CHUNK_LIMIT): strin
 
 /** Classify an error into a stable string for one-warning-per-class dedup.
  *  We don't try to be exhaustive — just stable enough that a streak of
- *  identical errors collapses to one log line. */
-function classifyError(err: unknown): string {
+ *  identical errors collapses to one log line. Exported so callers logging
+ *  network failures elsewhere (e.g. the dispatcher's probe path) can avoid
+ *  surfacing raw `err.message`, which may embed URL fragments. */
+export function classifyError(err: unknown): string {
   if (err instanceof Error) {
     const code = (err as Error & { code?: string }).code;
     if (code) return `errno:${code}`;
@@ -108,6 +113,20 @@ export interface SendMessageOptions {
   text: string;
 }
 
+/** Result of a single `sendMessage` POST. The failure variant exposes
+ *  `retryAfterSec` parsed from BOTH the `Retry-After` HTTP header and the
+ *  `parameters.retry_after` body field (header wins, body is the fallback)
+ *  so callers can honor the server's actual backoff hint instead of guessing. */
+export type SendMessageResult =
+  | { ok: true; result: TelegramMessage }
+  | {
+      ok: false;
+      status: number;
+      error_code?: number;
+      description?: string;
+      retryAfterSec: number | null;
+    };
+
 export interface TelegramClientOptions {
   /** Bot token from `~/.itsybitsy/config.json:channels.telegram.bot_token`. */
   token: string;
@@ -137,9 +156,13 @@ export class TelegramClient {
   private readonly token: string;
   private readonly baseUrl: string;
 
-  /** Tracks the last error class seen by `getUpdates` so consecutive errors
-   *  of the same class log only once. Reset on every successful poll. */
-  private lastGetUpdatesErrorClass: string | null = null;
+  /** Tracks every error class seen by `getUpdates` since the last successful
+   *  poll, so a streak of errors logs at most one line per unique class.
+   *  Cleared on every successful poll — a poll that recovers resets so the
+   *  next streak can log fresh. (A `Set` rather than a single-slot tracker
+   *  because alternating ETIMEDOUT/ECONNRESET would otherwise log every
+   *  attempt instead of one line per class.) */
+  private seenGetUpdatesErrorClasses: Set<string> = new Set();
 
   constructor(opts: TelegramClientOptions) {
     if (!opts.token) throw new Error("TelegramClient: token is required");
@@ -182,7 +205,7 @@ export class TelegramClient {
       );
 
       if (outcome.kind === "ok") {
-        this.lastGetUpdatesErrorClass = null;
+        this.seenGetUpdatesErrorClasses.clear();
         return outcome.result;
       }
       if (outcome.kind === "abort") {
@@ -190,8 +213,8 @@ export class TelegramClient {
       }
 
       // Retry path: log once per error class, then sleep with backoff.
-      if (this.lastGetUpdatesErrorClass !== outcome.reason) {
-        this.lastGetUpdatesErrorClass = outcome.reason;
+      if (!this.seenGetUpdatesErrorClasses.has(outcome.reason)) {
+        this.seenGetUpdatesErrorClasses.add(outcome.reason);
         logCtx.fn(`telegram getUpdates: ${outcome.reason}, retrying with backoff`);
       }
       const sleepMs =
@@ -252,8 +275,13 @@ export class TelegramClient {
 
   /** POST `sendMessage`. No retry loop — outbound is one-shot from the caller's
    *  perspective. Phase 6 (`ib tgsend`) wraps this with one 429-retry of its
-   *  own; the dispatcher (Phase 5) doesn't retry on outbound failures. */
-  async sendMessage(opts: SendMessageOptions): Promise<TelegramApiResponse<TelegramMessage>> {
+   *  own; the dispatcher (Phase 5) doesn't retry on outbound failures.
+   *
+   *  Goes through `readRaw` so the `Retry-After` HTTP header is read alongside
+   *  the body's `parameters.retry_after`. Callers honoring 429 backoff should
+   *  prefer the returned `retryAfterSec` over `parameters?.retry_after`, since
+   *  Telegram occasionally sends the header without a body parameter. */
+  async sendMessage(opts: SendMessageOptions): Promise<SendMessageResult> {
     const body = JSON.stringify({ chat_id: opts.chat_id, text: opts.text });
     const url = this.urlFor("sendMessage");
     const resp = await fetchCtx.fn(url, {
@@ -261,15 +289,18 @@ export class TelegramClient {
       headers: { "content-type": "application/json" },
       body,
     });
-    const status = resp.status;
-    const parsed = (await resp.json().catch(() => null)) as TelegramApiResponse<TelegramMessage> | null;
-    if (!resp.ok || !parsed?.ok) {
-      logCtx.fn(`telegram sendMessage: status=${status}`);
-      // Surface the parsed body when present so callers can decide retry/exit;
-      // the v1 contract is "return what we got, let the caller branch."
-      return parsed ?? { ok: false, error_code: status, description: `HTTP ${status}` };
+    const raw = await readRaw<TelegramMessage>(resp);
+    if (raw.status >= 200 && raw.status < 300 && raw.body?.ok === true) {
+      return { ok: true, result: (raw.body.result ?? {}) as TelegramMessage };
     }
-    return parsed;
+    logCtx.fn(`telegram sendMessage: status=${raw.status}`);
+    return {
+      ok: false,
+      status: raw.status,
+      error_code: raw.body?.error_code ?? raw.status,
+      description: raw.body?.description ?? `HTTP ${raw.status}`,
+      retryAfterSec: raw.retryAfterSec,
+    };
   }
 
   /** Single attempt at a Bot API method. Maps HTTP / parse outcomes onto the

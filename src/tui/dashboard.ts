@@ -2079,6 +2079,11 @@ export async function launchDashboard(): Promise<void> {
       // Stop the Telegram dispatcher if it was started. Race against a 2s
       // timeout so a hung getUpdates abort cannot block exit. We don't
       // process.exit() synchronously — give shutdown a chance to flush.
+      // The race is a safety net, not a kill: the dispatcher loop is
+      // supposed to unwind via AbortController within ~1s, and the timeout
+      // just keeps a misbehaving loop from blocking the TUI exit. If the
+      // loop somehow ignored the AbortSignal it will keep running until
+      // the process actually exits below — but the TUI gets out of the way.
       const stopTelegram = telegramDispatcher
         ? Promise.race([
             telegramDispatcher.stop(),

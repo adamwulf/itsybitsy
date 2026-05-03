@@ -35,7 +35,7 @@
  */
 
 import { InjectionContext } from "../types";
-import { TelegramClient } from "./telegram-client";
+import { TelegramClient, classifyError } from "./telegram-client";
 import type { TelegramMessage, TelegramUpdate } from "./types";
 
 /** Delivery hook the dispatcher calls per coalesced batch. Defaults to
@@ -182,8 +182,11 @@ export class TelegramDispatcher {
       probe = await this.client.probeOnce({ offset: -1, limit: 1, timeout: 0 });
     } catch (err) {
       // Network failure on the probe — let the loop start; it retries.
+      // Use classifyError to surface a bounded, stable label rather than the
+      // raw message, which could embed URL fragments containing the bot token
+      // if fetch ever leaks them into the exception text.
       logCtx.fn(
-        `Telegram startup probe failed (network): ${err instanceof Error ? err.message : String(err)}; starting main loop anyway`,
+        `Telegram startup probe failed (network): ${classifyError(err)}; starting main loop anyway`,
       );
       probe = { ok: true, updates: [] };
     }
@@ -332,6 +335,12 @@ export class TelegramDispatcher {
     // sequentially via the same mutex chain so two chats' messages never
     // interleave on the coordinator pipe.
     for (const [chatId, messages] of byChat.entries()) {
+      // Mutex acquisition inside this for-await loop is redundant with the
+      // sequential iteration — the loop already serializes per-chat batches
+      // within a single getUpdates result. Kept as defense-in-depth: a
+      // future refactor that parallelizes batches across chats (e.g. via
+      // Promise.all) must still serialize keystrokes to a single coordinator
+      // tmux session, and the mutex is the contract that enforces it.
       // Capture for the closure — TS narrows `messages` correctly.
       await this.withMutex(SYSTEM_COORDINATOR_MUTEX_KEY, async () => {
         await this.deliver(chatId, messages);
@@ -445,8 +454,12 @@ export class TelegramDispatcher {
     } else if (attachmentType !== null) {
       body = `[user sent ${attachmentType}]`;
     } else {
-      // No text, no caption, no recognized attachment kind — surface as
-      // empty body so the coordinator at least sees something arrived.
+      // Defensive only — upstream normalize() guarantees text/caption/
+      // attachment-notice via the rawText fallback (`text ?? caption ?? ""`)
+      // plus attachmentTypeOf(), so reaching this branch requires a future
+      // refactor that changes normalize()'s contract. Kept as a paranoia
+      // fallback so the coordinator at least sees something arrived rather
+      // than silently dropping the update.
       body = "[user sent message with no text]";
     }
 

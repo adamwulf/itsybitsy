@@ -3482,9 +3482,12 @@ export async function telegramSend(text: string): Promise<{ ok: boolean; message
       return { ok: false, message: `sendMessage failed: ${msg}` };
     }
     if (!resp.ok) {
-      // 429 → retry once after Retry-After sleep.
-      if (resp.error_code === 429) {
-        const retryAfterSec = resp.parameters?.retry_after ?? 1;
+      // 429 → retry once after Retry-After sleep. Prefer the value parsed from
+      // the HTTP header (surfaced as retryAfterSec), since Telegram sometimes
+      // returns the header without a body parameter; readRaw already falls
+      // back to parameters.retry_after when the header is missing.
+      if (resp.error_code === 429 || resp.status === 429) {
+        const retryAfterSec = resp.retryAfterSec ?? 1;
         await sleepCtx.fn(retryAfterSec * 1000);
         let retryResp;
         try {

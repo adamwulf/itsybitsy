@@ -1058,6 +1058,43 @@ describe("resumeAgent (native)", () => {
     expect(hookBody).toContain("agent.log");
   });
 
+  test("resume sets window-size manual on the new tmux session", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-window-size");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-window-size",
+      tmux_session: "tmux-agent-window-size",
+      session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      model: "opus",
+    }));
+
+    const agent = _makeAgent({
+      id: "agent-window-size",
+      repoPath: tempDir,
+      repoName: "test",
+      state: "stopped",
+      meta: {
+        session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        tmux_session: "tmux-agent-window-size",
+        model: "opus",
+      } as any,
+    });
+    const result = await resumeAgent(agent);
+    expect(result.ok).toBe(true);
+
+    // window-size manual prevents tmux from auto-resizing the agent's
+    // session to the latest attached client's terminal size.
+    const setWindowSize = spawnCalls.find(
+      (c) =>
+        c[0] === "tmux" &&
+        c[1] === "set-option" &&
+        c.includes("tmux-agent-window-size") &&
+        c.includes("window-size") &&
+        c.includes("manual"),
+    );
+    expect(setWindowSize).toBeDefined();
+  });
+
   test("detects yolo mode from start.sh", async () => {
     const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
     await mkdir(join(agentDir, "repo"), { recursive: true });
@@ -2749,6 +2786,22 @@ describe("newAgent (native)", () => {
     expect(hookBody).toContain("[tmux pane-died]");
     expect(hookBody).toContain("#{session_name}");
     expect(hookBody).toContain("agent.log");
+  });
+
+  test("new-agent sets window-size manual on the new tmux session", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    await callNewAgent("do work", { name: "test-window-size" });
+
+    // window-size manual prevents tmux from auto-resizing the agent's
+    // session to the latest attached client's terminal size.
+    const setWindowSize = spawnCalls.find(
+      (c) =>
+        c[0] === "tmux" &&
+        c[1] === "set-option" &&
+        c.includes("window-size") &&
+        c.includes("manual"),
+    );
+    expect(setWindowSize).toBeDefined();
   });
 
   test("creates exit-check.sh", async () => {

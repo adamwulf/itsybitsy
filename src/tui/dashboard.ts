@@ -1074,6 +1074,13 @@ export class DashboardComponent implements Component {
       if (focus !== "agent-tree" && focus !== "info" && focus !== "coordinator") {
         this.focusManager.setFocus("agent-tree");
       }
+      // Reassert coordinator tmux width on selection (mirrors the agent path
+      // at the bottom of this method). tmux can drift the window size when
+      // clients with different terminal sizes attach/detach; agents get
+      // re-resized on every selection change, so without this the system
+      // coordinator was the only session whose drift wasn't corrected on
+      // selection.
+      resizeCoordinatorTmux(this.getMainWidth());
     }
 
     this.rightPane.agent = selected;

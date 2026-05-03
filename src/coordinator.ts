@@ -285,6 +285,11 @@ export async function ensureSystemCoordinator(): Promise<string> {
     throw new Error("Failed to create system coordinator tmux session");
   }
   await coordinatorSpawnCtx.run(["tmux", "set-option", "-w", "-t", IB_COORDINATOR_SESSION, "history-limit", "50000"]);
+  // window-size manual prevents tmux from auto-resizing the window to the
+  // latest attached client's terminal size. The dashboard sizes the session
+  // to the rendered pane width; the default ("latest") would silently shrink
+  // it back when other clients attach/detach.
+  await coordinatorSpawnCtx.run(["tmux", "set-option", "-w", "-t", IB_COORDINATOR_SESSION, "window-size", "manual"]);
 
   // Read coordinator model from config
   const config = await readConfig();

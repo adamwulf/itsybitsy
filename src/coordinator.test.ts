@@ -429,6 +429,40 @@ describe("ensureSystemCoordinator", () => {
     expect(cmdStrs.some((c) => c.includes("send-keys") && c.includes("-l"))).toBe(true);
   });
 
+  test("sets window-size manual on the coordinator session during creation", async () => {
+    const commands: string[][] = [];
+    coordinatorSpawnCtx.set((cmd: string[], _opts?: any) => {
+      commands.push([...cmd]);
+      const cmdStr = cmd.join(" ");
+      if (cmdStr.includes("has-session")) {
+        return {
+          stdout: mockStream(""),
+          stderr: emptyStream(),
+          exited: Promise.resolve(1), // No session
+        };
+      }
+      return {
+        stdout: mockStream(""),
+        stderr: emptyStream(),
+        exited: Promise.resolve(0),
+      };
+    });
+
+    await ensureSystemCoordinator();
+
+    // window-size manual prevents tmux from auto-resizing the coordinator
+    // session to the latest attached client's terminal size.
+    const setWindowSize = commands.find(
+      (c) =>
+        c[0] === "tmux" &&
+        c[1] === "set-option" &&
+        c.includes(IB_COORDINATOR_SESSION) &&
+        c.includes("window-size") &&
+        c.includes("manual")
+    );
+    expect(setWindowSize).toBeDefined();
+  });
+
   test("writes settings.local.json during creation", async () => {
     coordinatorSpawnCtx.set(createCommandRouter({
       "has-session": { exitCode: 1 },

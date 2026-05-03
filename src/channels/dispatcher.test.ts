@@ -822,6 +822,192 @@ describe("TelegramDispatcher startup probe cache clear", () => {
 });
 
 /* ------------------------------------------------------------------ */
+/*  Health state machine                                                */
+/* ------------------------------------------------------------------ */
+
+describe("TelegramDispatcher health state machine", () => {
+  let mock: MockFetch;
+  let send: SendSpy;
+  let dispLogs: string[];
+  let nowMs: number;
+
+  beforeEach(() => {
+    mock = makeMockFetch();
+    clientFetchCtx.set(mock.fn);
+    clientSleepCtx.set(async () => { /* fast forward */ });
+    clientLogCtx.set(() => { /* silence */ });
+
+    send = makeSendSpy();
+    sendCtx.set(send.fn);
+
+    sleepCtx.set(async () => { /* fast forward */ });
+    nowMs = 1_700_000_000_000;
+    nowCtx.set(() => nowMs);
+    dispLogs = [];
+    logCtx.set((line) => dispLogs.push(line));
+  });
+
+  afterEach(() => {
+    clientFetchCtx.reset();
+    clientSleepCtx.reset();
+    clientLogCtx.reset();
+    sendCtx.reset();
+    sleepCtx.reset();
+    nowCtx.reset();
+    logCtx.reset();
+  });
+
+  function makeDispatcher(): TelegramDispatcher {
+    const client = new TelegramClient({ token: "TEST_TOKEN" });
+    return new TelegramDispatcher({
+      client,
+      allowedChatIds: ["100"],
+      allowedUserIds: [],
+      chatId: "100",
+    });
+  }
+
+  test("getHealth() reports 'down' before start()", () => {
+    const d = makeDispatcher();
+    const h = d.getHealth();
+    expect(h.state).toBe("down");
+    expect(h.lastSuccessAt).toBeNull();
+    expect(h.reason).toBeNull();
+  });
+
+  test("transitions: down → polling on start, polling → retrying on first failure, retrying → polling on recovery", async () => {
+    // Probe ok, then 1 failure, then success.
+    mock.enqueueResponse({ ok: true, result: [] }); // probe
+    mock.enqueueError(new Error("ETIMEDOUT")); // long-poll attempt 1 fails
+    mock.enqueueResponse({ ok: true, result: [] }); // long-poll attempt 2 succeeds
+
+    const d = makeDispatcher();
+    const events: Array<{ from: string; to: string; reason: string | null }> = [];
+    d.onStateChange((change) => events.push({ from: change.from, to: change.to, reason: change.reason }));
+
+    await d.start();
+    // After start(): down → polling.
+    expect(events.some((e) => e.from === "down" && e.to === "polling")).toBe(true);
+
+    // Wait until at least one full cycle (failure → success) has been applied.
+    await waitFor(() => events.some((e) => e.from === "retrying" && e.to === "polling"), 1_000);
+    await d.stop();
+
+    // The full sequence should be: down→polling (start), polling→retrying (timeout), retrying→polling (recovery), polling→down (stop).
+    const transitions = events.map((e) => `${e.from}->${e.to}`);
+    expect(transitions[0]).toBe("down->polling");
+    expect(transitions).toContain("polling->retrying");
+    expect(transitions).toContain("retrying->polling");
+    expect(transitions[transitions.length - 1]).toBe("polling->down");
+  });
+
+  test("five consecutive failures fire exactly one polling→retrying transition", async () => {
+    mock.enqueueResponse({ ok: true, result: [] }); // probe
+    for (let i = 0; i < 5; i++) {
+      mock.enqueueError(new Error("ETIMEDOUT"));
+    }
+    mock.enqueueResponse({ ok: true, result: [] }); // recovery
+
+    const d = makeDispatcher();
+    const events: Array<{ from: string; to: string }> = [];
+    d.onStateChange((change) => events.push({ from: change.from, to: change.to }));
+
+    await d.start();
+    await waitFor(() => events.some((e) => e.from === "retrying" && e.to === "polling"), 1_000);
+    await d.stop();
+
+    // Even though five errors fired, polling→retrying transitions exactly once.
+    expect(events.filter((e) => e.from === "polling" && e.to === "retrying").length).toBe(1);
+    // And retrying→polling exactly once after recovery.
+    expect(events.filter((e) => e.from === "retrying" && e.to === "polling").length).toBe(1);
+  });
+
+  test("recovery transition carries 'reconnected after Ns' reason", async () => {
+    mock.enqueueResponse({ ok: true, result: [] }); // probe
+    mock.enqueueError(new Error("ETIMEDOUT")); // 1 failure
+    // Use the sleep hook to simulate elapsed wall-clock between the disconnect
+    // (first failure) and the recovery (next successful response). The
+    // dispatcher's transitionHealth captures disconnectedAt = nowCtx.fn() on
+    // polling → retrying; we advance the mock clock during the backoff sleep
+    // so the recovery sees a non-zero gap.
+    clientSleepCtx.set(async () => {
+      nowMs += 12_000;
+    });
+    mock.enqueueResponse({ ok: true, result: [] }); // recovery
+
+    const d = makeDispatcher();
+    const events: Array<{ from: string; to: string; reason: string | null }> = [];
+    d.onStateChange((change) => events.push({ from: change.from, to: change.to, reason: change.reason }));
+
+    await d.start();
+    await waitFor(() => events.some((e) => e.from === "retrying" && e.to === "polling"), 1_000);
+    await d.stop();
+
+    const recovery = events.find((e) => e.from === "retrying" && e.to === "polling")!;
+    expect(recovery.reason).toBe("reconnected after 12s");
+  });
+
+  test("getHealth() during retrying returns the latest reason and a non-null lastSuccessAt", async () => {
+    mock.enqueueResponse({ ok: true, result: [] }); // probe
+    mock.enqueueResponse({ ok: true, result: [] }); // first long-poll succeeds
+    // Subsequent long-polls fail forever, so the dispatcher stays in retrying.
+    for (let i = 0; i < 30; i++) {
+      mock.enqueueError(new Error("ETIMEDOUT"));
+    }
+
+    const d = makeDispatcher();
+    await d.start();
+    // Wait until the first success has been recorded.
+    await waitFor(() => d.getHealth().lastSuccessAt !== null, 1_000);
+    const successAt = d.getHealth().lastSuccessAt;
+    expect(successAt).toBe(nowMs);
+
+    // Advance clock so a subsequent failure marker uses a different timestamp.
+    nowMs += 5_000;
+    // Wait for the dispatcher to flip to retrying.
+    await waitFor(() => d.getHealth().state === "retrying", 1_000);
+    const h = d.getHealth();
+    expect(h.state).toBe("retrying");
+    expect(h.reason).toBe("errno:ETIMEDOUT");
+    expect(h.lastSuccessAt).toBe(successAt);
+    await d.stop();
+  });
+
+  test("409 startup probe transitions to 'down' (no listener leak, safe to stop after)", async () => {
+    mock.enqueueResponse({ ok: false, error_code: 409, description: "Conflict" }, 409);
+
+    const d = makeDispatcher();
+    const events: Array<{ from: string; to: string; reason: string | null }> = [];
+    d.onStateChange((change) => events.push({ from: change.from, to: change.to, reason: change.reason }));
+
+    await d.start();
+    expect(d.isRunning()).toBe(false);
+    expect(d.getHealth().state).toBe("down");
+    // start() called transitionHealth("down", "409 Conflict"), but since
+    // initial state is also "down" no listener fires (no edge transition).
+    expect(events.length).toBe(0);
+    await d.stop();
+  });
+
+  test("onStateChange unsubscribe stops further notifications", async () => {
+    mock.enqueueResponse({ ok: true, result: [] }); // probe
+    mock.enqueueResponse({ ok: true, result: [] }); // first poll
+
+    const d = makeDispatcher();
+    let count = 0;
+    const unsub = d.onStateChange(() => { count += 1; });
+    await d.start();
+    // The down→polling transition should have fired.
+    expect(count).toBeGreaterThanOrEqual(1);
+    const before = count;
+    unsub();
+    await d.stop();
+    // No further notifications after unsubscribe.
+    expect(count).toBe(before);
+  });
+});
+
+/* ------------------------------------------------------------------ */
 /*  Sentinel labelling regression                                      */
 /* ------------------------------------------------------------------ */
 

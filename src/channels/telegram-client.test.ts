@@ -487,3 +487,121 @@ describe("sendMessage", () => {
     }
   });
 });
+
+describe("getUpdates per-request timeout & onPollOutcome", () => {
+  let mock: MockFetch;
+  let sleeps: number[];
+  let logs: string[];
+
+  beforeEach(() => {
+    mock = makeMockFetch();
+    fetchCtx.set(mock.fn);
+    sleeps = [];
+    sleepCtx.set(async (ms) => { sleeps.push(ms); });
+    logs = [];
+    logCtx.set((line) => logs.push(line));
+  });
+
+  afterEach(() => {
+    fetchCtx.reset();
+    sleepCtx.reset();
+    logCtx.reset();
+  });
+
+  test("timer-fired abort surfaces as a retry, not a user-abort exit", async () => {
+    // Simulate the per-request timer firing on a hung socket. The user's
+    // own AbortSignal stays unaborted — we throw TimeoutError directly to
+    // mimic what `AbortSignal.timeout` produces. The client must treat
+    // that as a transient ETIMEDOUT-class failure and retry, NOT throw out
+    // of getUpdates as if the user cancelled.
+    const userController = new AbortController();
+    let attempts = 0;
+    fetchCtx.set(((_url: string | URL | Request, _init?: RequestInit) => {
+      attempts += 1;
+      if (attempts === 1) {
+        // First attempt: timer fires. User signal is NOT aborted.
+        expect(userController.signal.aborted).toBe(false);
+        return Promise.reject(new DOMException("The operation timed out.", "TimeoutError"));
+      }
+      // Second attempt: succeed immediately.
+      return Promise.resolve(makeResponse({ ok: true, result: [] }));
+    }) as FetchLike);
+
+    const client = new TelegramClient({ token: "T" });
+    const result = await client.getUpdates({ signal: userController.signal });
+    expect(result).toEqual([]);
+    expect(attempts).toBe(2);
+    // The retry log should fire once (one ETIMEDOUT class). The timer-fired
+    // abort is mapped to errno:ETIMEDOUT.
+    expect(logs.filter((l) => l.includes("ETIMEDOUT")).length).toBe(1);
+  });
+
+  test("user-aborted signal terminates the loop even if a TimeoutError is in flight", async () => {
+    const userController = new AbortController();
+    fetchCtx.set(((_url: string | URL | Request, init?: RequestInit) => {
+      const sig = init?.signal as AbortSignal | undefined;
+      return new Promise<Response>((_, reject) => {
+        if (sig?.aborted) {
+          reject(new DOMException("aborted", "AbortError"));
+          return;
+        }
+        sig?.addEventListener("abort", () => {
+          reject(new DOMException("aborted", "AbortError"));
+        });
+      });
+    }) as FetchLike);
+
+    const client = new TelegramClient({ token: "T" });
+    const promise = client.getUpdates({ signal: userController.signal });
+    setTimeout(() => userController.abort(), 5);
+
+    await expect(promise).rejects.toThrow();
+    // No retry attempted — we exited on user abort, not timer.
+    expect(logs.filter((l) => l.includes("ETIMEDOUT")).length).toBe(0);
+  });
+
+  test("onPollOutcome fires 'success' on a 2xx response", async () => {
+    mock.enqueueResponse({ ok: true, result: [] });
+    const client = new TelegramClient({ token: "T" });
+    const outcomes: Array<"success" | { kind: "retry"; reason: string }> = [];
+
+    await client.getUpdates({ onPollOutcome: (o) => outcomes.push(o) });
+
+    expect(outcomes).toEqual(["success"]);
+  });
+
+  test("onPollOutcome fires retry events on transient failures, then success on recovery", async () => {
+    mock.enqueueError(new Error("ETIMEDOUT"));
+    mock.enqueueError(new Error("ETIMEDOUT"));
+    mock.enqueueResponse({ ok: true, result: [] });
+
+    const client = new TelegramClient({ token: "T" });
+    const outcomes: Array<"success" | { kind: "retry"; reason: string }> = [];
+
+    await client.getUpdates({ onPollOutcome: (o) => outcomes.push(o) });
+
+    expect(outcomes.length).toBe(3);
+    expect(outcomes[0]).toEqual({ kind: "retry", reason: "errno:ETIMEDOUT" });
+    expect(outcomes[1]).toEqual({ kind: "retry", reason: "errno:ETIMEDOUT" });
+    expect(outcomes[2]).toBe("success");
+  });
+
+  test("five consecutive errors fire one log line, but onPollOutcome fires every attempt", async () => {
+    for (let i = 0; i < 5; i++) {
+      mock.enqueueError(new Error("ETIMEDOUT"));
+    }
+    mock.enqueueResponse({ ok: true, result: [] });
+    const client = new TelegramClient({ token: "T" });
+    const outcomes: Array<"success" | { kind: "retry"; reason: string }> = [];
+
+    await client.getUpdates({ onPollOutcome: (o) => outcomes.push(o) });
+
+    // Existing behavior: one log line per error class per streak.
+    expect(logs.filter((l) => l.includes("ETIMEDOUT")).length).toBe(1);
+    // New behavior: every attempt fires the outcome callback, so the
+    // dispatcher can drive its own streak counter / state machine.
+    expect(outcomes.length).toBe(6);
+    expect(outcomes.slice(0, 5).every((o) => typeof o !== "string" && o.kind === "retry")).toBe(true);
+    expect(outcomes[5]).toBe("success");
+  });
+});

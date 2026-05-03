@@ -36,6 +36,7 @@
 
 import { InjectionContext } from "../types";
 import { TelegramClient, classifyError } from "./telegram-client";
+import type { PollOutcome } from "./telegram-client";
 import type { TelegramMessage, TelegramUpdate } from "./types";
 import { clearCachedChatId } from "./chat-id-cache";
 
@@ -84,6 +85,29 @@ export const TELEGRAM_SENTINEL = "@telegram";
  *  coordinator) but the structure allows future per-repo coordinators to
  *  serialize independently. */
 const SYSTEM_COORDINATOR_MUTEX_KEY = "system";
+
+/** Health state of the long-poll loop. Drives the dashboard's traffic-light
+ *  indicator. The dispatcher transitions through these in response to poll
+ *  outcomes:
+ *    polling  → last poll succeeded → green
+ *    retrying → loop is alive but backing off after a failure → yellow
+ *    down     → loop is not running (probe-409, never started, or stopped) → red
+ */
+export type DispatcherHealthState = "polling" | "retrying" | "down";
+
+export interface DispatcherHealth {
+  state: DispatcherHealthState;
+  lastSuccessAt: number | null;
+  reason: string | null;
+}
+
+export interface DispatcherStateChange {
+  from: DispatcherHealthState;
+  to: DispatcherHealthState;
+  reason: string | null;
+}
+
+export type DispatcherStateChangeFn = (change: DispatcherStateChange) => void;
 
 export interface DispatcherOptions {
   client: TelegramClient;
@@ -149,6 +173,19 @@ export class TelegramDispatcher {
    *  running. Set to false by `stop()`. */
   private running = false;
 
+  /** Health state machine — see `DispatcherHealthState`. Initialized to
+   *  `down` since the loop has not started. `start()` transitions to
+   *  `polling`, the loop transitions between `polling` and `retrying`
+   *  per outcome, and `stop()` transitions back to `down`. */
+  private healthState: DispatcherHealthState = "down";
+  private lastSuccessAt: number | null = null;
+  private lastFailureReason: string | null = null;
+  private consecutiveFailures = 0;
+  /** Wall-clock at the moment we left "polling" — used to compute the
+   *  "reconnected after Ns" message when a streak ends. */
+  private disconnectedAt: number | null = null;
+  private readonly stateChangeListeners: Set<DispatcherStateChangeFn> = new Set();
+
   constructor(opts: DispatcherOptions) {
     this.client = opts.client;
     this.allowedChatIds = new Set(opts.allowedChatIds.map(String));
@@ -163,6 +200,87 @@ export class TelegramDispatcher {
    *  or if the startup probe detected a 409 and never started the loop. */
   isRunning(): boolean {
     return this.running;
+  }
+
+  /** Snapshot of the current health state — safe to call from any thread,
+   *  including the dashboard's status-poll timer. */
+  getHealth(): DispatcherHealth {
+    return {
+      state: this.healthState,
+      lastSuccessAt: this.lastSuccessAt,
+      reason: this.lastFailureReason,
+    };
+  }
+
+  /** Subscribe to edge-only state transitions. The callback fires once when
+   *  the state changes (e.g. `polling → retrying`); it does NOT fire on every
+   *  poll outcome. Returns an unsubscribe function. */
+  onStateChange(callback: DispatcherStateChangeFn): () => void {
+    this.stateChangeListeners.add(callback);
+    return () => {
+      this.stateChangeListeners.delete(callback);
+    };
+  }
+
+  /** Update the health state. Fires listeners (and writes the dispatcher's
+   *  own log line) only when the state actually changes — repeated outcomes
+   *  in the same state are silent so a streak of 5 ETIMEDOUTs produces one
+   *  transition log, not five. */
+  private transitionHealth(to: DispatcherHealthState, reason: string | null): void {
+    const from = this.healthState;
+    if (from === to) {
+      // Same state — no transition. Update reason for `getHealth()` callers
+      // but don't fire listeners or log.
+      if (reason !== null) this.lastFailureReason = reason;
+      return;
+    }
+    this.healthState = to;
+    if (reason !== null) this.lastFailureReason = reason;
+    if (to === "retrying" && from === "polling") {
+      // Edge into retrying: capture the moment so a later success can compute
+      // "reconnected after Ns".
+      this.disconnectedAt = nowCtx.fn();
+    }
+    const change: DispatcherStateChange = { from, to, reason };
+    for (const listener of this.stateChangeListeners) {
+      try {
+        listener(change);
+      } catch (err) {
+        logCtx.fn(`Telegram dispatcher: state-change listener threw: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+  }
+
+  /** Apply a single poll outcome to the health state machine. Called by the
+   *  long-poll loop via the `onPollOutcome` hook on `getUpdates`. */
+  private handlePollOutcome(outcome: PollOutcome): void {
+    if (outcome === "success") {
+      this.consecutiveFailures = 0;
+      this.lastSuccessAt = nowCtx.fn();
+      if (this.healthState !== "polling") {
+        let reason: string | null = null;
+        if (this.disconnectedAt !== null) {
+          const seconds = Math.max(1, Math.round((nowCtx.fn() - this.disconnectedAt) / 1000));
+          reason = `reconnected after ${seconds}s`;
+        }
+        this.transitionHealth("polling", reason);
+        this.disconnectedAt = null;
+        // Clear the failure reason once we've surfaced the recovery
+        // transition — health snapshots after a recovery should reflect
+        // the green state, not the prior red.
+        this.lastFailureReason = null;
+      }
+      return;
+    }
+    // retry-path entry
+    this.consecutiveFailures += 1;
+    if (this.healthState === "polling") {
+      this.transitionHealth("retrying", outcome.reason);
+    } else {
+      // Stay in retrying — no transition, but update the reason so the
+      // dashboard's snapshot reflects the most recent failure class.
+      this.lastFailureReason = outcome.reason;
+    }
   }
 
   /**
@@ -204,6 +322,8 @@ export class TelegramDispatcher {
     if (!probe.ok && probe.status === 409) {
       logCtx.fn("Telegram routing disabled: another poller or webhook is active");
       this.running = false;
+      // No transition log — boot already logged via the line above.
+      this.transitionHealth("down", "409 Conflict");
       return;
     }
 
@@ -229,6 +349,11 @@ export class TelegramDispatcher {
 
     this.abortController = new AbortController();
     this.running = true;
+    // Optimistically transition to polling on loop launch — the first
+    // successful getUpdates will keep us here, a failure will flip us to
+    // retrying. Boot already logged "connected" so we suppress a duplicate
+    // here by passing reason=null.
+    this.transitionHealth("polling", null);
     this.loopDone = this.runLoop(this.abortController.signal).catch((err) => {
       logCtx.fn(`Telegram dispatcher loop exited: ${err instanceof Error ? err.message : String(err)}`);
     });
@@ -256,6 +381,10 @@ export class TelegramDispatcher {
       this.loopDone = null;
     }
     this.abortController = null;
+    // Stopping is normal shutdown — transition silently to `down`. The
+    // dashboard will see the state flip via getHealth(); listeners get one
+    // notification; no log line (per spec — shutdown is normal).
+    this.transitionHealth("down", null);
   }
 
   /** The actual long-poll loop. Exits when the abort signal fires. */
@@ -267,6 +396,7 @@ export class TelegramDispatcher {
           offset: this.nextOffset,
           allowed_updates: ["message"],
           signal,
+          onPollOutcome: (outcome) => this.handlePollOutcome(outcome),
         });
       } catch (err) {
         // getUpdates only throws on abort. Any other transient failure is

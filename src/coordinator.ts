@@ -558,6 +558,10 @@ export async function releaseSystemCoordinator(
     if (onLastRef) {
       await onLastRef();
     }
+    // Persist the current session id before killing tmux so the next `ib watch`
+    // boot can resume it. Best-effort — failures (no transcript yet, dir gone)
+    // just leave the prior saved id (or no id) in place.
+    await captureCoordinatorSessionId().catch(() => null);
     // Kill the tmux session
     await coordinatorSpawnCtx.run([
       "tmux", "kill-session", "-t", IB_COORDINATOR_SESSION,
@@ -567,8 +571,15 @@ export async function releaseSystemCoordinator(
 
 /**
  * Restart the system coordinator — kill session and re-create.
+ *
+ * Captures the current Claude session id from the transcript directory before
+ * killing tmux so the subsequent ensureSystemCoordinator() call can resume it.
+ * Without this, a `R` press right after the very first ensureSystemCoordinator
+ * (when the post-spawn capture returned null because Claude hadn't yet written
+ * a transcript line) would always fall back to fresh.
  */
 export async function restartSystemCoordinator(): Promise<void> {
+  await captureCoordinatorSessionId().catch(() => null);
   // Kill existing session if present
   await coordinatorSpawnCtx.run([
     "tmux", "kill-session", "-t", IB_COORDINATOR_SESSION,

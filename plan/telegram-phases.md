@@ -112,25 +112,15 @@ configure things in Phase 5.
 
 ## Phase 3 — DROPPED
 
-Originally planned a `multiline` mode for `sendMessage`. Dropped after
-empirical confirmation that the existing send dialog already submits
-multi-line buffers (the input field's `TextBuffer` joins lines with
-`\n` and passes the joined string to `sendMessage` unmodified) without
-breaking. Phase 5 will pass the channel-reminder block through
-`sendToSystemCoordinator` as-is, embedded `\n` characters and all.
-
-If smoke-testing in Phase 5 reveals that the channel-reminder block
-actually does break across turns, revisit this decision. Until then, no
-`multiline` opt is added.
+Reserved slot — no work in this phase. `sendMessage` already preserves
+embedded `\n` characters via `tmux send-keys -l`; the existing send
+dialog uses this path with multi-line buffers. Phase 5 passes the
+channel-reminder block through `sendToSystemCoordinator` as-is.
 
 **Sentinel handling for `@telegram`:** `sendMessage` already formats
 `fromAgent` IDs starting with `@` as `[sent by @telegram]: ...` (vs.
-`[sent by agent telegram]`). Phase 5 should add a regression test for
-this when wiring the dispatcher, but no code change to `sendMessage`
-is needed.
-
-**Exit criteria:** New opt is fully tested, no behavior change for
-existing callers, `bun test` + `tsc --noEmit` green.
+`[sent by agent telegram]`). Phase 5 adds a regression test when
+wiring the dispatcher.
 
 ---
 
@@ -245,12 +235,11 @@ The big phase. This is where Telegram routing comes back online.
 - End-to-end inbound (text): mocked `getUpdates` response →
   `sendToSystemCoordinator` called with wrapped text +
   `fromAgent: "@telegram"`.
-- Multi-line wrapped block reaches the recipient as one turn (smoke
-  test on a real coordinator session — if this fails, Phase 3 needs
-  to come back as `multiline` mode).
+- Multi-line wrapped block reaches the recipient as one turn with
+  embedded `\n` characters preserved (smoke test on a real coordinator
+  session).
 - Sentinel labelling: `fromAgent: "@telegram"` formats as
-  `[sent by @telegram]: ...` (regression test for the case Phase 3
-  was going to verify).
+  `[sent by @telegram]: ...`.
 - Burst coalescing: 3 updates same chat → 1 wrapped block with
   `count="3"` + `---` separators. 1 update → no count, no separators.
 - Per-coordinator serialization: 2 updates from 2 chats arriving
@@ -276,7 +265,7 @@ The big phase. This is where Telegram routing comes back online.
 
 **Exit criteria:** Manual smoke test on a live bot:
 - Send text → see one coordinator turn.
-- Send multi-line text → arrives as one turn (no early submit).
+- Send multi-line text → arrives as one turn with newlines preserved.
 - Send 3 quick messages → one coalesced turn.
 - Send image (no caption) → "Received attachment" reply.
 - Quit `ib watch` → exits within ~1s.

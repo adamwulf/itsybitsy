@@ -280,7 +280,7 @@ plugin-derived implementation hints:
 | `src/channels/access.ts` (new) | `server.ts:147-208` (`readAccessFile`/`saveAccess`/atomic-write) | Copy the corrupt-file recovery and the `tmp + rename` write. Schema is much simpler — just `allowed_chat_ids` + `allowed_user_ids`. |
 | `src/channels/types.ts` (new) | n/a | Shared interfaces for `TelegramUpdate`, `TelegramMessage`, etc. Hand-rolled minimal subset of the Bot API types — no need to import grammy's. |
 | `src/index.ts` (modified) | n/a | Add `tgsend`/`tgallow`/`tgdeny`/`tgcheck` cases. |
-| `src/ib-commands.ts` (modified) | `server.ts:357-376` (`chunk()`) | `telegramSend()` uses the chunking pattern. `sendMessage` gets a `multiline` opt (no plugin equivalent — this is a tmux-side concern, not Telegram). |
+| `src/ib-commands.ts` (modified) | `server.ts:357-376` (`chunk()`) | `telegramSend()` uses the chunking pattern. |
 | `src/coordinator.ts` (modified) | `server.ts:295-301` analog | Remove `coordinator.telegram` branch from `ensureSystemCoordinator`. |
 | `src/config.ts` (modified) | n/a | Add `channels.telegram.bot_token` and `channels.telegram.chat_id`. Remove `coordinator.telegram`. |
 | `src/tui/dashboard.ts` (modified) | `server.ts:649-660` (shutdown) | Start dispatcher in `launchDashboard()`, stop on TUI exit via AbortController. |

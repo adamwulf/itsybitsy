@@ -150,7 +150,7 @@ dispatcher needs to:
    the system coordinator (`@system` sentinel).
 3. Wrap the message text with a channel-reminder block so the
    coordinator knows it's a Telegram message and how to reply.
-4. Call `sendToSystemCoordinator(wrapped, { fromAgent: "@telegram", multiline: true })`.
+4. Call `sendToSystemCoordinator(wrapped, { fromAgent: "@telegram" })`.
 
 The wrapping format:
 
@@ -174,36 +174,15 @@ itsybitsy spells commands (`ib new-agent`, `ib merge-check`,
 `ib hook-status`, etc., where each command is one shell argv entry).
 Avoids subcommand parsing logic in `src/index.ts`.
 
-**Critical: tmux newline handling.** `sendMessage` (`src/ib-commands.ts:sendMessage`)
-does NOT call `sanitizeTmuxInput`. It chunks the message and ships
-each chunk via `tmux send-keys -t <sess> -l <chunk>`. Literal `\n`
-bytes inside the chunk are sent as raw newline keystrokes, which
-Claude Code's TUI treats as Submit. A multi-line `<channel>...</channel>`
-block would submit each line as a separate user turn — breaking the
-inbound flow.
-
-**Mitigation:** the dispatcher must collapse newlines before calling
-`sendToSystemCoordinator`. Pick one of:
-1. **Replace `\n` with literal `\\n` (two chars).** The coordinator
-   sees a single line containing `\n` escapes, which Claude can
-   interpret. Simple, lossless on read-back, but cosmetically ugly.
-2. **Add a `multiline` mode to `sendMessage`** that joins lines with
-   tmux's `Enter` key sent through send-keys (not `-l`) using the
-   "literal-then-Enter" pattern that the existing newAgent flow uses
-   (`src/ib-commands.ts:autoAcceptWorkspaceTrustForNewAgent`). Cleaner; touches `sendMessage`'s
-   public API.
-3. **Render the channel-reminder block as a single line** using `|` or
-   `␤` glyphs as visual separators. Loses the natural line breaks in
-   user-typed Telegram messages — bad for screenshots-of-stack-traces
-   etc.
-
-**Recommendation: option 2.** Add a `{ multiline: true }` opt to
-`sendMessage`. When set, the function chunks on newlines and uses
-`tmux send-keys -l <chunk>; tmux send-keys Enter` between chunks
-(without the trailing submit-Enter that today fires after the loop).
-Final submit happens after the last newline-chunk. Touches one
-function but preserves the channel-reminder format. Falls back
-cleanly for callers that don't pass the opt.
+**Newline handling — no special treatment needed.** `sendMessage`
+(`src/ib-commands.ts:sendMessage`) chunks the message and ships each
+chunk via `tmux send-keys -t <sess> -l <chunk>`. Literal `\n` bytes
+inside the chunk are preserved as newline characters in Claude Code's
+input box (the existing send dialog already submits multi-line buffers
+this way — its TextBuffer joins lines with `\n` and passes the joined
+string straight through). The dispatcher passes the wrapped
+channel-reminder block to `sendToSystemCoordinator` as-is, embedded
+`\n` characters and all.
 
 **Reuse, don't add:** `sendToSystemCoordinator(message, opts)`
 already exists at `src/index.ts:sendToSystemCoordinator`. The dispatcher calls it
@@ -373,16 +352,14 @@ This is the order to ship without breaking anything mid-flight.
    `ib tgcheck` subcommands.** No behavior change yet — just config
    and validation plumbing. Tests verify atomic writes, schema
    validation, deny-all default.
-3. **Add the `multiline` mode to `sendMessage`.** Self-contained
-   refactor with its own tests. No callers use it yet.
-4. **Land §1: the Telegram transport client.** The `getUpdates` /
+3. **Land §1: the Telegram transport client.** The `getUpdates` /
    `sendMessage` wrapper with `AbortController` and 429 handling. No
    wiring yet — just the client class and its tests.
-5. **Land §2: the inbound dispatcher wired to `launchDashboard()`.**
+4. **Land §2: the inbound dispatcher wired to `launchDashboard()`.**
    Allowlist filter, channel-reminder wrapping, burst coalescing,
    per-coordinator mutex, calls into `sendToSystemCoordinator`.
-6. **Land the `ib tgsend` subcommand.** Outbound path, reusing the
-   transport client from step 4.
+5. **Land the `ib tgsend` subcommand.** Outbound path, reusing the
+   transport client from step 3.
 
 Each step is independently testable and rollback-able.
 
@@ -394,16 +371,12 @@ Each step is independently testable and rollback-able.
   vs. non-allowlisted chat/user IDs; deny-all when both lists empty;
   warns on group-shaped (negative) chat IDs in `ib tgcheck`.
 - **Channel-reminder wrapping**: given chat metadata + body, produces
-  the expected `<channel ...>...</channel>` block; multi-line bodies
-  preserved when `multiline: true` is propagated.
+  the expected `<channel ...>...</channel>` block with embedded `\n`
+  characters preserved.
 - **Burst coalescing**: 3 updates in one `getUpdates` payload
   produce a single wrapped block with `count="3"` and `---`
   separators; 1 update produces a clean single-message wrap (no
   `count`, no separators).
-- **Newline handling in `sendMessage`**: with `multiline: true`,
-  embedded `\n` characters become `Enter` keystrokes via
-  `tmux send-keys` (no `-l`), with one final Enter to submit.
-  Without `multiline`, the function behaves exactly as today.
 - **`ib tgsend` config validation**: missing token → exit 1 with
   clear error; missing chat ID → same; both present → calls the
   client.
@@ -418,10 +391,8 @@ Each step is independently testable and rollback-able.
 
 - **End-to-end inbound (text)**: feed a fake `getUpdates` response
   to a mocked Telegram client; verify `sendToSystemCoordinator` was
-  called with the wrapped text and `multiline: true`, and the
-  resulting tmux send-keys sequence (captured via
-  `coordinatorSpawnCtx`) contains alternating chunk/Enter calls
-  with one final Enter.
+  called with the wrapped text (embedded `\n` preserved) and
+  `fromAgent: "@telegram"`.
 - **End-to-end outbound**: invoke `ib tgsend "hello"` as a
   subprocess; verify the Telegram client's `sendMessage` was called
   with the configured chat ID and the literal text.
@@ -452,7 +423,7 @@ Each step is independently testable and rollback-able.
 - Send a text message → see it wrapped and forwarded to the
   coordinator session.
 - Send a multi-line text message (real `\n` characters) → see the
-  whole thing arrive as one coordinator turn (no early submit).
+  whole thing arrive as one coordinator turn with newlines preserved.
 - Send 3 messages quickly → see one coalesced coordinator turn with
   3 numbered fragments.
 - Send an image with no caption → see "Received attachment" reply
@@ -490,13 +461,12 @@ Rough sizing, not a commitment:
 | Piece | Lines | Confidence |
 |---|---|---|
 | Config keys + access.json + `ib tgallow`/`ib tgdeny`/`ib tgcheck` | ~150 | high |
-| `multiline` mode for `sendMessage` | ~60 | high — small, well-scoped |
 | §1 Telegram client (`fetch` + AbortController + 429 handling) | ~150 | high — small, well-defined HTTP API |
 | §2 inbound dispatcher (poll loop + allowlist + wrapping + coalesce + serialize) | ~280 | medium — coalescing and per-coord mutex add complexity |
 | §3 `ib tgsend` subcommand | ~80 | high — straightforward |
 | Tests for all of above | ~700 | matches existing test density |
 | Cutover (remove `coordinator.telegram` config + plugin registration) | ~30 lines deleted | trivial |
-| **Total** | **~1420 net new, ~30 deleted** | — |
+| **Total** | **~1360 net new, ~30 deleted** | — |
 
 Files to touch, consolidated:
 
@@ -509,8 +479,7 @@ Files to touch, consolidated:
   `~/.itsybitsy/channels/telegram/access.json`.
 - Modified: `src/index.ts` — add `tgsend`/`tgallow`/`tgdeny`/
   `tgcheck` cases.
-- Modified: `src/ib-commands.ts` — add `telegramSend()`, add
-  `multiline` option to `sendMessage` (`src/ib-commands.ts:sendMessage`).
+- Modified: `src/ib-commands.ts` — add `telegramSend()`.
 - Modified: `src/coordinator.ts:ensureSystemCoordinator` — remove plugin registration.
 - Modified: `src/config.ts` — add `channels.telegram.*`, remove
   `coordinator.telegram`.
@@ -525,10 +494,11 @@ Files to touch, consolidated:
   `getUpdates` and `sendMessage` endpoints used by the Telegram client.
 - `src/index.ts:sendToSystemCoordinator` — the existing
   helper the inbound dispatcher reuses.
-- `src/ib-commands.ts:sendMessage` — gets a `multiline`
-  option in step 3 of the cutover.
 - `src/ib-commands.ts:sendMessage` — sentinel-prefix handling for
   `fromAgent` IDs starting with `@`; pattern reused for `@telegram`.
+  Embedded `\n` characters in the message are preserved by
+  `tmux send-keys -l` (the existing send dialog already relies on
+  this).
 - `src/coordinator.ts:sanitizeTmuxInput` — the existing
   helper that strips control chars (which is why we can't use it
   on the channel-reminder block — we need newlines preserved).

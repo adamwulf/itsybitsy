@@ -74,6 +74,7 @@ import type { LayoutState } from "./layout";
 import { InputFieldComponent } from "./input-field";
 import { sendMessage, pauseAgent } from "../ib-commands";
 import { getResolvableWarnings } from "../health-check";
+import { logToWatchLog } from "../watch-log";
 
 // Re-export for test compatibility
 export { AgentTreeComponent, formatAgentRow } from "./agent-tree";
@@ -2063,6 +2064,9 @@ export async function launchDashboard(): Promise<void> {
   // resolve chat id from inbound inference → construct dispatcher + outbox.
   // Each step gates the next; on failure we log a single line and continue
   // with the rest of the dashboard (agents, watcher, TUI) running normally.
+  // The boot itself is kicked off as a background promise AFTER the TUI is
+  // mounted (see below) — a hung Telegram API call must never delay the
+  // dashboard from appearing.
   const tgTokenEntry = config["channels.telegram.bot_token"];
   const tgToken = typeof tgTokenEntry?.value === "string" ? tgTokenEntry.value : "";
   const { TelegramClient } = await import("../channels/telegram-client");
@@ -2086,33 +2090,6 @@ export async function launchDashboard(): Promise<void> {
   let telegramDispatcher: import("../channels/dispatcher").TelegramDispatcher | null = null;
   let telegramOutbox: import("../channels/outbox").TelegramOutbox | null = null;
   let telegramBootOk = false;
-  try {
-    const bootResult = await bootTelegramSubsystem({
-      token: tgToken,
-      access,
-      buildClient: (token) => new TelegramClient({ token }),
-      buildDispatcher: (opts) => new TelegramDispatcher(opts),
-      buildOutbox: (opts) => new TelegramOutbox(opts),
-    });
-    if (bootResult.ok) {
-      telegramDispatcher = bootResult.dispatcher;
-      telegramOutbox = bootResult.outbox;
-      telegramBootOk = true;
-      // Don't await — start() runs the loop in the background.
-      telegramDispatcher.start().catch((err) => {
-        console.error(`Telegram dispatcher failed to start: ${err instanceof Error ? err.message : String(err)}`);
-      });
-      // Outbox start() awaits the sweep + watcher install. We let it run in
-      // the background so a stuck filesystem can't block dashboard startup.
-      telegramOutbox.start().catch((err) => {
-        console.error(`Telegram outbox failed to start at ${defaultOutboxDir()}: ${err instanceof Error ? err.message : String(err)}`);
-      });
-    }
-  } catch (err) {
-    // bootTelegramSubsystem itself shouldn't throw — but if a future change
-    // adds a path that does, we don't want it to take down launchDashboard.
-    console.error(`Telegram routing disabled: boot threw (${err instanceof Error ? err.message : String(err)})`);
-  }
 
   const dashboard = new DashboardComponent();
   const savedLayout = await loadLayout();
@@ -2129,7 +2106,11 @@ export async function launchDashboard(): Promise<void> {
   dashboard.setDiffTool(typeof diffToolValue === "string" && diffToolValue ? diffToolValue : undefined);
   dashboard.setVersion(version);
   if (tgToken !== "") {
-    dashboard.setTelegramStatus(telegramBootOk ? "green" : "red");
+    // Start yellow ("boot in progress"). The background boot promise below
+    // flips this to green on success or red on failure. The 5 s interval
+    // re-reads the closure-captured `telegramDispatcher` / `telegramBootOk`
+    // vars, which are populated when the background boot resolves.
+    dashboard.setTelegramStatus("yellow");
     dashboard.telegramStatusTimer = setInterval(() => {
       if (telegramDispatcher && telegramDispatcher.isRunning()) {
         dashboard.setTelegramStatus("green");
@@ -2152,6 +2133,49 @@ export async function launchDashboard(): Promise<void> {
   });
 
   dashboard.setWatcher(watcher);
+
+  // Telegram three-step boot — kicked off after the TUI is mounted and the
+  // watcher exists. Fire-and-forget: we only `await` it during shutdown (and
+  // even then with a short timeout) so a hung Telegram API call cannot stall
+  // dashboard startup. Boot diagnostics route through ~/.itsybitsy/watch.log
+  // rather than stderr (which would render the dashboard unreadable).
+  const telegramBootPromise: Promise<void> = (async () => {
+    try {
+      const bootResult = await bootTelegramSubsystem({
+        token: tgToken,
+        access,
+        buildClient: (token) => new TelegramClient({ token }),
+        buildDispatcher: (opts) => new TelegramDispatcher(opts),
+        buildOutbox: (opts) => new TelegramOutbox(opts),
+        log: logToWatchLog,
+      });
+      if (bootResult.ok) {
+        telegramDispatcher = bootResult.dispatcher;
+        telegramOutbox = bootResult.outbox;
+        telegramBootOk = true;
+        // Don't await — start() runs the loop in the background.
+        telegramDispatcher.start().catch((err) => {
+          logToWatchLog(`Telegram dispatcher failed to start: ${err instanceof Error ? err.message : String(err)}`);
+        });
+        // Outbox start() awaits the sweep + watcher install. We let it run in
+        // the background so a stuck filesystem can't block the dashboard.
+        telegramOutbox.start().catch((err) => {
+          logToWatchLog(`Telegram outbox failed to start at ${defaultOutboxDir()}: ${err instanceof Error ? err.message : String(err)}`);
+        });
+        // Promote to green on the next render.
+        if (tgToken !== "") dashboard.setTelegramStatus("green");
+      } else {
+        // The boot helper already wrote the failure reason to watch.log via
+        // the injected `log`; just flip the indicator.
+        if (tgToken !== "") dashboard.setTelegramStatus("red");
+      }
+    } catch (err) {
+      // bootTelegramSubsystem itself shouldn't throw — but if a future change
+      // adds a path that does, we don't want it to take down launchDashboard.
+      logToWatchLog(`Telegram routing disabled: boot threw (${err instanceof Error ? err.message : String(err)})`);
+      if (tgToken !== "") dashboard.setTelegramStatus("red");
+    }
+  })();
 
   const colorDetection = setupColorSchemeDetection(() => {
     tui.requestRender();
@@ -2186,11 +2210,21 @@ export async function launchDashboard(): Promise<void> {
             new Promise<void>((resolve) => setTimeout(resolve, 2_000)),
           ])
         : Promise.resolve();
+      // If the user hits Ctrl+C before the background boot resolves, race it
+      // out with a short timeout so the dashboard exits promptly even when
+      // the Telegram API is hung. After this race resolves the boot promise
+      // is "released" — any handlers it has chained will still run, but they
+      // won't block process exit because of the .finally(process.exit) below.
+      const finishBoot = Promise.race([
+        telegramBootPromise,
+        new Promise<void>((resolve) => setTimeout(resolve, 2_000)),
+      ]);
       // Flush layout save to disk before exiting, then release coordinator
       Promise.all([
         flushPendingSave().catch(() => { /* ignore write errors on exit */ }),
         stopTelegram.catch(() => { /* ignore — already raced */ }),
         stopOutbox.catch(() => { /* ignore — already raced */ }),
+        finishBoot.catch(() => { /* ignore — boot was best effort */ }),
       ]).then(() => {
         // Release coordinator ref — if last ref, kills the tmux session
         // and pauses all per-repo coordinators

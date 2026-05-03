@@ -2490,11 +2490,10 @@ ${qStartExitScript}
   }
 
   // Start tmux session — use saved layout width so it matches the dashboard pane.
-  // NOTE: this currently always uses the agent (middle-pane) width even for
-  // coordinators — the per-repo coordinator spawn bug is fixed in the next
-  // commit by passing `coordinatorMode` instead of `false`.
+  // Coordinators (system + per-repo) span middle+right and use mainWidth; regular
+  // agents use the middle-pane width. The helper picks the right one.
   const absStartScript = join(agentDir, "start.sh");
-  const newTmuxWidth = await getTmuxWidthForAgent(false);
+  const newTmuxWidth = await getTmuxWidthForAgent(coordinatorMode);
   // Bracket-log the tmux session creation so a hang here is identifiable from
   // the agent.log alone (the "starting" line is the last entry on hang).
   await logSpawn(agentDir, spawnerAgentDir, id, `tmux new-session starting: -s ${tmuxSession} -x ${newTmuxWidth}`);

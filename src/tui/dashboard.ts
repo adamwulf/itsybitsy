@@ -31,7 +31,6 @@ import {
   acquireSystemCoordinator,
   ensureSystemCoordinator,
   releaseSystemCoordinator,
-  restartSystemCoordinator,
   resizeCoordinatorTmux,
   sanitizeTmuxInput,
 } from "../coordinator";
@@ -1567,24 +1566,16 @@ export class DashboardComponent implements Component {
     else if (data === "l") { agentActions.handleScrollDown(this); }
     // Agent/repo actions — context-sensitive on whether a repo header is selected
     else if (data === "x") {
-      if (!this.agentTree.selectedAgent && this.agentTree.selectedRepoHeader) {
+      if (this.agentTree.isSystemCoordinatorSelected) {
+        agentActions.handleKillSystemCoordinator(this);
+      } else if (!this.agentTree.selectedAgent && this.agentTree.selectedRepoHeader) {
         this.executeAndRefresh(() => agentActions.handleRemoveRepoSafe(this));
       } else {
         agentActions.handleKill(this);
       }
     }
     else if (data === "!") { agentActions.handleNuke(this); }
-    else if (data === "R") {
-      if (this.focusManager.current() === "coordinator") {
-        this.executeAndRefresh(async () => {
-          await restartSystemCoordinator();
-          this.coordinatorPane.resetForAgent();
-          this.setNotice("System coordinator restarted");
-        });
-      } else {
-        agentActions.handleResume(this);
-      }
-    }
+    else if (data === "R") { agentActions.handleResume(this); }
     else if (data === "P") { agentActions.handlePause(this); }
     else if (data === "r") {
       if (!this.agentTree.selectedAgent && this.agentTree.selectedRepoHeader) {

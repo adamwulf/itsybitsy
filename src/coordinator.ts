@@ -13,6 +13,17 @@ import { isCompacting, isRateLimited } from "./agents";
 import { SpawnContext } from "./types";
 import { getTmuxWidthForAgent } from "./tui/widths";
 import { loadAgentType, ensureAgentTypesDir } from "./agent-types";
+import { isValidSessionId, isValidModel } from "./validation";
+
+/**
+ * Encode an absolute path into Claude's project-directory naming scheme:
+ * replace both `/` and `.` with `-`. Inlined here (rather than importing from
+ * auto-compact) because both modules need the same encoding without a
+ * cross-domain dependency.
+ */
+function encodeClaudeProjectPath(p: string): string {
+  return p.replace(/[/.]/g, "-");
+}
 
 export const IB_COORDINATOR_SESSION = "ib-coordinator";
 
@@ -57,6 +68,68 @@ export function getCoordinatorHome(): string {
 
 function refsPath(): string {
   return join(itsybitsyHome(), "coordinator.refs");
+}
+
+function clearedMarkerPath(): string {
+  return join(itsybitsyHome(), "coordinator-session.cleared");
+}
+
+function coordinatorTranscriptDir(): string {
+  const home = process.env.HOME ?? homedir();
+  return join(home, ".claude", "projects", encodeClaudeProjectPath(itsybitsyHome()));
+}
+
+/**
+ * Cleared-marker timestamp (ms epoch). Transcripts with mtime <= this value
+ * are ignored when resuming — that's how `x` says "everything before now
+ * is dead." Returns 0 when no marker exists.
+ */
+async function readClearedMarker(): Promise<number> {
+  try {
+    const file = Bun.file(clearedMarkerPath());
+    if (!(await file.exists())) return 0;
+    const raw = (await file.text()).trim();
+    const n = parseInt(raw, 10);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/** Write the cleared-marker so subsequent resumes ignore prior transcripts. */
+async function writeClearedMarker(): Promise<void> {
+  await Bun.write(clearedMarkerPath(), String(Date.now()) + "\n");
+}
+
+/**
+ * Returns the session id of the newest non-cleared transcript, or null.
+ * Picking the newest each time (rather than persisting an id) sidesteps
+ * Claude's mid-conversation session-id rotation.
+ */
+async function findLatestCoordinatorTranscriptId(): Promise<string | null> {
+  const dir = coordinatorTranscriptDir();
+  const clearedAt = await readClearedMarker();
+  let entries: { id: string; mtimeMs: number }[];
+  try {
+    const { readdir, stat } = await import("fs/promises");
+    const names = await readdir(dir);
+    entries = [];
+    for (const name of names) {
+      if (!name.endsWith(".jsonl")) continue;
+      const id = name.slice(0, -".jsonl".length);
+      if (!isValidSessionId(id)) continue;
+      try {
+        const s = await stat(join(dir, name));
+        if (s.mtimeMs <= clearedAt) continue;
+        entries.push({ id, mtimeMs: s.mtimeMs });
+      } catch { /* skip */ }
+    }
+  } catch {
+    return null;
+  }
+  if (entries.length === 0) return null;
+  entries.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  return entries[0]!.id;
 }
 
 /**
@@ -248,23 +321,36 @@ async function writeCoordinatorFiles(): Promise<void> {
 }
 
 /**
- * Ensure the system coordinator tmux session is running.
- * If a session already exists, returns immediately.
- * Otherwise creates the session, starts Claude, and sends the initial prompt.
- * Returns the session name.
- *
- * TOCTOU: If two instances race, tmux new-session will fail for the loser —
- * we catch that and fall through.
+ * - "existing": the tmux session was already alive — nothing was launched.
+ * - "resumed": `claude --resume <id>` ran and reached the ready marker.
+ * - "fresh":   a fresh `claude` session was launched and the prompt was pasted.
+ */
+export type CoordinatorSpawnMode = "existing" | "resumed" | "fresh";
+let lastSpawnMode: CoordinatorSpawnMode = "existing";
+export function getLastCoordinatorSpawnMode(): CoordinatorSpawnMode {
+  return lastSpawnMode;
+}
+
+/**
+ * Ensure the system coordinator tmux session is running. If alive, returns
+ * immediately. Otherwise launches Claude — resuming the newest non-cleared
+ * transcript when one exists, falling back to a fresh launch + prompt paste
+ * otherwise. If `--resume` is attempted but Claude's UI never reaches the
+ * ready marker, the session is killed, the cleared-marker is written, and a
+ * single fresh-launch retry runs.
  */
 export async function ensureSystemCoordinator(): Promise<string> {
-  // Check for existing session
+  return await ensureSystemCoordinatorImpl(false);
+}
+
+async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Promise<string> {
   if (await tmuxSessionExists()) {
+    lastSpawnMode = "existing";
     return IB_COORDINATOR_SESSION;
   }
 
   const home = itsybitsyHome();
 
-  // Set up the directory and files
   await ensureHomeRepo();
   await writeCoordinatorFiles();
 
@@ -280,6 +366,7 @@ export async function ensureSystemCoordinator(): Promise<string> {
   if (exitCode !== 0) {
     // TOCTOU: another instance created the session — that's fine
     if (await tmuxSessionExists()) {
+      lastSpawnMode = "existing";
       return IB_COORDINATOR_SESSION;
     }
     throw new Error("Failed to create system coordinator tmux session");
@@ -291,17 +378,25 @@ export async function ensureSystemCoordinator(): Promise<string> {
   // it back when other clients attach/detach.
   await coordinatorSpawnCtx.run(["tmux", "set-option", "-w", "-t", IB_COORDINATOR_SESSION, "window-size", "manual"]);
 
-  // Read coordinator model from config
   const config = await readConfig();
-  const model = (config["coordinator.model"]?.value as string) ?? "opus";
+  const rawModel = (config["coordinator.model"]?.value as string) ?? "opus";
+  // Reject malformed model names — they would otherwise be interpolated into
+  // the shell command below.
+  const model = isValidModel(rawModel) ? rawModel : "opus";
   const imessage = config["coordinator.imessage"]?.value === true;
 
-  // Start Claude in interactive mode
+  // Resume the newest non-cleared transcript. Skip on the post-failure retry
+  // so a single bad transcript can't trap us in an infinite loop.
+  const resumeId = retryAfterResumeFailure ? null : await findLatestCoordinatorTranscriptId();
+
   const channels: string[] = [];
   if (imessage) channels.push("plugin:imessage@claude-plugins-official");
-  const claudeCmd = channels.length > 0
-    ? `claude --model ${model} --channels ${channels.join(" ")}`
+  const baseCmd = resumeId
+    ? `claude --resume ${resumeId} --model ${model}`
     : `claude --model ${model}`;
+  const claudeCmd = channels.length > 0
+    ? `${baseCmd} --channels ${channels.join(" ")}`
+    : baseCmd;
   await coordinatorSpawnCtx.run([
     "tmux", "send-keys", "-t", IB_COORDINATOR_SESSION,
     claudeCmd, "Enter",
@@ -311,19 +406,34 @@ export async function ensureSystemCoordinator(): Promise<string> {
   // races slow startups: the prompt text gets pasted but the Enter key is
   // swallowed before the input box becomes active, leaving the prompt
   // unsubmitted.
-  await waitForCoordinatorReady();
+  const ready = await waitForCoordinatorReady();
 
-  // Send the initial prompt (sanitized) via send-keys -l then Enter
-  const sanitizedPrompt = sanitizeTmuxInput(SYSTEM_COORDINATOR_PROMPT);
-  await coordinatorSpawnCtx.run([
-    "tmux", "send-keys", "-t", IB_COORDINATOR_SESSION, "-l", sanitizedPrompt,
-  ]);
-  // Brief delay between paste and Enter so the input box doesn't debounce
-  // the paste and drop the Enter (mirrors sendMessage in ib-commands.ts).
-  await sleepFn(500);
-  await coordinatorSpawnCtx.run([
-    "tmux", "send-keys", "-t", IB_COORDINATOR_SESSION, "Enter",
-  ]);
+  if (resumeId && !ready) {
+    // Resume failed (likely a corrupt or version-mismatched transcript). Kill
+    // the dead session, write the cleared marker so this transcript is
+    // skipped, and retry once as a fresh launch.
+    await coordinatorSpawnCtx.run(["tmux", "kill-session", "-t", IB_COORDINATOR_SESSION]);
+    await writeClearedMarker();
+    return await ensureSystemCoordinatorImpl(true);
+  }
+
+  if (resumeId) {
+    // Resumed sessions already have the system prompt baked into history —
+    // re-pasting would inject a stray user message at the top of the new turn.
+    lastSpawnMode = "resumed";
+  } else {
+    const sanitizedPrompt = sanitizeTmuxInput(SYSTEM_COORDINATOR_PROMPT);
+    await coordinatorSpawnCtx.run([
+      "tmux", "send-keys", "-t", IB_COORDINATOR_SESSION, "-l", sanitizedPrompt,
+    ]);
+    // Brief delay between paste and Enter so the input box doesn't debounce
+    // the paste and drop the Enter (mirrors sendMessage in ib-commands.ts).
+    await sleepFn(500);
+    await coordinatorSpawnCtx.run([
+      "tmux", "send-keys", "-t", IB_COORDINATOR_SESSION, "Enter",
+    ]);
+    lastSpawnMode = "fresh";
+  }
 
   return IB_COORDINATOR_SESSION;
 }
@@ -401,22 +511,37 @@ export async function releaseSystemCoordinator(
     if (onLastRef) {
       await onLastRef();
     }
-    // Kill the tmux session
     await coordinatorSpawnCtx.run([
       "tmux", "kill-session", "-t", IB_COORDINATOR_SESSION,
     ]);
   }
 }
 
-/**
- * Restart the system coordinator — kill session and re-create.
- */
+/** Restart the system coordinator — kill the tmux session and re-create. */
 export async function restartSystemCoordinator(): Promise<void> {
-  // Kill existing session if present
   await coordinatorSpawnCtx.run([
     "tmux", "kill-session", "-t", IB_COORDINATOR_SESSION,
   ]);
   await ensureSystemCoordinator();
+}
+
+/**
+ * Discard the system coordinator: kill its tmux session, write the cleared
+ * marker so prior transcripts are ignored on the next launch, and remove the
+ * current process PID from coordinator.refs (so a stale ref doesn't keep the
+ * tmux session "logically alive" for the next acquire).
+ *
+ * Used by the dashboard `x` action on the system coordinator. Distinct from
+ * `restartSystemCoordinator` (which resumes the prior session).
+ */
+export async function discardSystemCoordinator(): Promise<void> {
+  await coordinatorSpawnCtx.run([
+    "tmux", "kill-session", "-t", IB_COORDINATOR_SESSION,
+  ]);
+  await writeClearedMarker();
+  const livePids = await readLivePids();
+  const remaining = livePids.filter((pid) => pid !== process.pid);
+  await writePidsAtomic(remaining);
 }
 
 export type CoordinatorState = "stopped" | "compacting" | "rate_limited" | "running";

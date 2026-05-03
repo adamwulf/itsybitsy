@@ -4,10 +4,13 @@ import { mkdtemp, rm } from "fs/promises";
 import { tmpdir } from "os";
 import {
   loadLayout, saveLayout, saveLayoutDebounced, cancelPendingSave, flushPendingSave,
-  setLayoutPath, resetLayoutPath, getSavedTmuxWidth, getSavedSidebarWidth,
+  setLayoutPath, resetLayoutPath,
   MIN_SIDEBAR, MAX_SIDEBAR,
 } from "./layout";
 import type { LayoutState } from "./layout";
+import {
+  getSavedTmuxWidth, getSavedSidebarWidth, getTmuxWidthForAgent,
+} from "./widths";
 import { MIN_LEFT_WIDTH, MAX_LEFT_WIDTH } from "./split-pane";
 
 const sampleLayout: LayoutState = {
@@ -186,5 +189,17 @@ describe("layout persistence", () => {
     expect(await getSavedSidebarWidth()).toBe(MAX_SIDEBAR);
     await saveLayout({ ...sampleLayout, sidebarWidth: 1 });
     expect(await getSavedSidebarWidth()).toBe(MIN_SIDEBAR);
+  });
+
+  test("getTmuxWidthForAgent returns the agent (split-pane) width when not a coordinator", async () => {
+    await saveLayout({ ...sampleLayout, splitPaneLeftWidth: 90, sidebarWidth: 70 });
+    expect(await getTmuxWidthForAgent(false)).toBe(await getSavedTmuxWidth());
+  });
+
+  test("getTmuxWidthForAgent returns the main (middle+right) width for coordinators", async () => {
+    await saveLayout({ ...sampleLayout, splitPaneLeftWidth: 90, sidebarWidth: 70 });
+    const terminalWidth = process.stdout.columns ?? 80;
+    const expected = Math.max(1, terminalWidth - (await getSavedSidebarWidth()) - 1);
+    expect(await getTmuxWidthForAgent(true)).toBe(expected);
   });
 });

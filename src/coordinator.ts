@@ -11,7 +11,7 @@ import { readConfig } from "./config";
 import { captureTmuxOutput, resizeTmuxWindow } from "./tmux-poller";
 import { isCompacting, isRateLimited } from "./agents";
 import { SpawnContext } from "./types";
-import { getSavedMainWidth } from "./tui/layout";
+import { getTmuxWidthForAgent } from "./tui/widths";
 import { loadAgentType, ensureAgentTypesDir } from "./agent-types";
 
 export const IB_COORDINATOR_SESSION = "ib-coordinator";
@@ -272,7 +272,7 @@ export async function ensureSystemCoordinator(): Promise<string> {
   await (await import("fs/promises")).rm(join(home, "coordinator-inbox"), { recursive: true, force: true }).catch(() => {});
 
   // Create tmux session — use mainWidth (full middle+right area) so it matches the coordinator rendering
-  const coordTmuxWidth = await getSavedMainWidth();
+  const coordTmuxWidth = await getTmuxWidthForAgent(true);
   const { exitCode } = await coordinatorSpawnCtx.run([
     "tmux", "new-session", "-d", "-x", String(coordTmuxWidth), "-s", IB_COORDINATOR_SESSION, "-c", home,
   ]);

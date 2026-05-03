@@ -28,7 +28,7 @@ import { listTmuxSessions } from "./tmux-poller";
 import { SpawnContext } from "./types";
 import type { SpawnFn } from "./types";
 import { isValidModel, isValidToolList, isValidTmuxSession, isValidSessionId, isValidShellPath, shellQuote } from "./validation";
-import { getSavedTmuxWidth } from "./tui/layout";
+import { getTmuxWidthForAgent } from "./tui/widths";
 import { buildPerRepoCoordinatorSettings, checkCoordinatorExists, getCoordinatorAgentId, getCoordinatorHome } from "./coordinator";
 import { loadAgentType, agentTypeExists } from "./agent-types";
 import { listRepos, repoDisplayName } from "./registry";
@@ -545,8 +545,11 @@ ${qAbsExitScript}
 
   await logAgent(agentDir, `[resume] Creating tmux session '${tmuxSession}' in ${workPath}`);
 
-  // Start tmux session — use saved layout width so it matches the dashboard pane
-  const resumeTmuxWidth = await getSavedTmuxWidth();
+  // Start tmux session — use saved layout width so it matches the dashboard pane.
+  // Per-repo coordinators are routed to resetCoordinator earlier (see line 382),
+  // so only non-coordinator agents reach here — pass false for clarity. Route
+  // through getTmuxWidthForAgent so all agent-tmux sizing flows through one helper.
+  const resumeTmuxWidth = await getTmuxWidthForAgent(false);
   const tmuxResult = await nukeResumeSpawnCtx.run([
     "tmux", "new-session", "-d", "-x", String(resumeTmuxWidth), "-s", tmuxSession, "-c", workPath, shellQuote(resumeScript),
   ]);
@@ -2486,9 +2489,11 @@ ${qStartExitScript}
     return { ok: false, exitCode: 1, stdout: "", stderr: `Error: could not start tmux server${suffix}` };
   }
 
-  // Start tmux session — use saved layout width so it matches the dashboard pane
+  // Start tmux session — use saved layout width so it matches the dashboard pane.
+  // Coordinators (system + per-repo) span middle+right and use mainWidth; regular
+  // agents use the middle-pane width. The helper picks the right one.
   const absStartScript = join(agentDir, "start.sh");
-  const newTmuxWidth = await getSavedTmuxWidth();
+  const newTmuxWidth = await getTmuxWidthForAgent(coordinatorMode);
   // Bracket-log the tmux session creation so a hang here is identifiable from
   // the agent.log alone (the "starting" line is the last entry on hang).
   await logSpawn(agentDir, spawnerAgentDir, id, `tmux new-session starting: -s ${tmuxSession} -x ${newTmuxWidth}`);

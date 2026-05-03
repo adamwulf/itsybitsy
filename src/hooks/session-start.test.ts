@@ -659,18 +659,21 @@ describe("hookSessionStart with @system", () => {
     process.stdout.write = originalWrite;
   });
 
-  test("returns SYSTEM_COORDINATOR_PROMPT wrapped in <ittybitty> for @system", async () => {
-    // cwd doesn't matter for @system — the agentIdArg is the trigger.
+  test("returns empty additionalContext for @system (prompt is delivered as positional arg)", async () => {
+    // The system coordinator's prompt is delivered to claude as a positional
+    // arg by ensureSystemCoordinatorImpl (so it appears as the first user
+    // message in the conversation transcript). The SessionStart hook still
+    // fires for @system but must NOT re-deliver the prompt — that would
+    // double-deliver on fresh launch and stale-duplicate on resume. There
+    // is no meta.json or worktree-derived role context for @system, so the
+    // hook returns empty additionalContext.
     const stdin = JSON.stringify({ cwd: "/tmp" });
     await hookSessionStart(stdin, "@system");
 
     const output = JSON.parse(captured);
     const ctx: string = output.hookSpecificOutput.additionalContext;
     expect(output.hookSpecificOutput.hookEventName).toBe("SessionStart");
-    expect(ctx).toContain("<ittybitty>");
-    expect(ctx).toContain("</ittybitty>");
-    expect(ctx).toContain("itsybitsy system coordinator");
-    expect(ctx).toContain("ib send @<repo-name>");
+    expect(ctx).toBe("");
   });
 });
 

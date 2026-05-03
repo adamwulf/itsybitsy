@@ -430,7 +430,8 @@ describe("ensureSystemCoordinator", () => {
     expect(cmdStrs.some((c) => c.includes("has-session"))).toBe(true);
     expect(cmdStrs.some((c) => c.includes("new-session"))).toBe(true);
     expect(cmdStrs.some((c) => c.includes("send-keys") && c.includes("claude --model"))).toBe(true);
-    // The SessionStart hook injects the prompt — no tmux send-keys -l paste.
+    // No tmux send-keys -l (literal paste) command should fire — the prompt is
+    // delivered as a positional arg to claude on the same send-keys command.
     expect(cmdStrs.some((c) => c.includes("send-keys") && c.includes("-l"))).toBe(false);
   });
 
@@ -652,15 +653,23 @@ describe("ensureSystemCoordinator", () => {
       const cmdStrs = commands.map((c) => c.join(" "));
       const claudeCmd = cmdStrs.find((c) => c.includes("claude --model"));
       expect(claudeCmd).toContain("claude --model sonnet");
+      // Fresh launch: prompt is delivered as a positional arg via cat substitution.
+      expect(claudeCmd).toContain('"$(cat ');
+      expect(claudeCmd).toContain("coordinator-prompt.txt");
     } finally {
       resetUserConfigPath();
     }
   });
 
-  test("does not paste SYSTEM_COORDINATOR_PROMPT via tmux on fresh launch", async () => {
-    // The SessionStart hook injects SYSTEM_COORDINATOR_PROMPT as
-    // additionalContext on every session start (fresh and resumed).
-    // Pasting it via tmux send-keys would produce a duplicate prompt.
+  test("fresh launch passes SYSTEM_COORDINATOR_PROMPT as positional arg via cat substitution", async () => {
+    // The prompt is delivered to claude as a positional arg via
+    // `"$(cat coordinator-prompt.txt)"` — the same pattern per-repo
+    // coordinators use (see ib-commands.ts start.sh assembly). This makes
+    // the prompt appear as the first user message in the conversation
+    // transcript (visible when the user attaches the tmux session) rather
+    // than as additionalContext (system-level, invisible). The SessionStart
+    // hook fires for @system but does NOT inject the prompt — that would
+    // double-deliver on fresh launch.
     const commands: string[][] = [];
     coordinatorSpawnCtx.set((cmd: string[], _opts?: any) => {
       commands.push([...cmd]);
@@ -673,15 +682,27 @@ describe("ensureSystemCoordinator", () => {
 
     await ensureSystemCoordinator();
 
-    // No send-keys -l (literal paste) command should fire.
+    // The send-keys command that launches claude must include the cat
+    // substitution that supplies the prompt as a positional arg.
+    const claudeLaunch = commands.find(
+      (c) => c.includes("send-keys") && c.some((a) => a.startsWith("claude --model")),
+    );
+    expect(claudeLaunch).toBeDefined();
+    const claudeCmd = claudeLaunch!.find((a) => a.startsWith("claude --model"))!;
+    expect(claudeCmd).toContain('"$(cat ');
+    expect(claudeCmd).toContain("coordinator-prompt.txt");
+
+    // No send-keys -l (literal paste) command should fire — the prompt is on
+    // the same launch line, not pasted afterward.
     const literalPaste = commands.find((c) => c.includes("send-keys") && c.includes("-l"));
     expect(literalPaste).toBeUndefined();
 
-    // And no command should ever carry the prompt body itself.
-    const carriesPrompt = commands.find((c) =>
+    // The launch command must not carry the prompt body inline — the prompt
+    // body lives in coordinator-prompt.txt and is interpolated via $(cat).
+    const carriesPromptBody = commands.find((c) =>
       c.some((arg) => arg.includes("itsybitsy system coordinator")),
     );
-    expect(carriesPrompt).toBeUndefined();
+    expect(carriesPromptBody).toBeUndefined();
   });
 
   test("polls for 'Claude Code v' readiness marker after launching claude", async () => {
@@ -758,7 +779,7 @@ describe("ensureSystemCoordinator", () => {
     expect(polls).toBe(1);
   });
 
-  test("session resume: launches with --resume when a transcript exists, never pastes prompt", async () => {
+  test("session resume: launches with --resume when a transcript exists, never carries prompt", async () => {
     const sessionId = "deadbeef-1234-5678-90ab-cdef00001111";
     const encoded = encodeClaudeProjectPath(tmpDir);
     const projectDir = join(typesHome, ".claude", "projects", encoded);
@@ -786,7 +807,13 @@ describe("ensureSystemCoordinator", () => {
     expect(claudeCmd).toContain(`claude --resume ${sessionId}`);
     expect(claudeCmd).toContain("--model");
 
-    // The SessionStart hook injects the prompt — no tmux paste on resume.
+    // Resume reuses the prior session's transcript, which already contains
+    // the prompt. Adding a positional arg would inject a stale duplicate, so
+    // the resume command must NOT include the cat substitution.
+    expect(claudeCmd).not.toContain("$(cat");
+    expect(claudeCmd).not.toContain("coordinator-prompt.txt");
+
+    // No tmux paste on resume either.
     const pastedPrompt = commands.find((c) => c.includes("-l"));
     expect(pastedPrompt).toBeUndefined();
   });
@@ -808,7 +835,10 @@ describe("ensureSystemCoordinator", () => {
     const cmdStrs = commands.map((c) => c.join(" "));
     expect(cmdStrs.some((c) => c.includes("claude --resume"))).toBe(false);
     expect(cmdStrs.some((c) => c.includes("claude --model"))).toBe(true);
-    // SessionStart hook injects the prompt — no tmux paste fallback.
+    // Fresh launch must include the prompt as a positional arg via cat
+    // substitution.
+    expect(cmdStrs.some((c) => c.includes("$(cat ") && c.includes("coordinator-prompt.txt"))).toBe(true);
+    // No tmux -l (literal paste) fallback.
     expect(commands.some((c) => c.includes("-l"))).toBe(false);
   });
 

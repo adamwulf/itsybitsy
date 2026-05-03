@@ -686,18 +686,19 @@ export async function hookSessionStart(rawStdin?: string, agentIdArg?: string): 
 
   const cwd: string = (data.cwd as string) ?? process.cwd();
 
-  // System coordinator: no meta.json on disk, cwd is `~/.itsybitsy/` rather
-  // than a worktree path, and the prompt is the SYSTEM_COORDINATOR_PROMPT
-  // from coordinator.ts. Inject it directly as additionalContext (wrapped in
-  // <ittybitty> tags for consistency with other roles' instructions). The
-  // dynamic import keeps `coordinator.ts` (which transitively pulls in
-  // tmux-poller and friends) out of the hot hook-import path.
+  // System coordinator: the prompt is delivered as a positional arg to claude
+  // by ensureSystemCoordinatorImpl (so it appears as the first user message
+  // in the conversation, visible when the user attaches to the tmux session).
+  // The hook fires on every session start (fresh and resumed), so injecting
+  // the prompt here would double-deliver on fresh launches. Resumes already
+  // have the prompt in the prior transcript. There is no meta.json or
+  // worktree-derived role context to add for @system, so return empty
+  // additionalContext.
   if (agentIdArg === SYSTEM_AGENT_ID) {
-    const { SYSTEM_COORDINATOR_PROMPT } = await import("../coordinator");
     const output = {
       hookSpecificOutput: {
         hookEventName: "SessionStart",
-        additionalContext: `<ittybitty>\n${SYSTEM_COORDINATOR_PROMPT}\n</ittybitty>`,
+        additionalContext: "",
       },
     };
     process.stdout.write(JSON.stringify(output));

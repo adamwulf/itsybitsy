@@ -1144,4 +1144,32 @@ describe("hookCheckPath with @system", () => {
     await expect(hookCheckPath("@system", stdin)).resolves.toBeUndefined();
     expect(logged.length).toBe(1);
   });
+
+  test("allows manager-only ib command (kill) targeting another agent", async () => {
+    // Integration check: `ib kill` is a manager-only command that would normally
+    // be denied for a non-manager caller. The @system bypass in
+    // checkIbCommandAccess should let it through end-to-end via hookCheckPath.
+    const home = join(tempHome, ".itsybitsy");
+    const stdin = JSON.stringify({
+      tool_name: "Bash",
+      tool_input: { command: "ib kill agent-foo" },
+      cwd: home,
+    });
+    await hookCheckPath("@system", stdin);
+    expect(logged.length).toBe(1);
+    const decision = JSON.parse(logged[0]!);
+    expect(decision.hookSpecificOutput.permissionDecision).toBe("allow");
+  });
+
+  test("allows manager-only ib command (merge) targeting another agent", async () => {
+    const home = join(tempHome, ".itsybitsy");
+    const stdin = JSON.stringify({
+      tool_name: "Bash",
+      tool_input: { command: "ib merge agent-foo --force" },
+      cwd: home,
+    });
+    await hookCheckPath("@system", stdin);
+    const decision = JSON.parse(logged[0]!);
+    expect(decision.hookSpecificOutput.permissionDecision).toBe("allow");
+  });
 });

@@ -321,6 +321,12 @@ async function writeCoordinatorFiles(): Promise<void> {
   await mkdir(claudeDir, { recursive: true });
   const settingsPath = join(claudeDir, "settings.local.json");
   const baseSettings = await buildSystemCoordinatorSettings();
+  // The literal "@system" appears in the hook command strings on purpose: the
+  // settings file is consumed by Claude Code (which invokes these as
+  // command-line args), not by TS code that could read SYSTEM_AGENT_ID. Both
+  // values must stay in sync — see `src/hooks/shared.ts` (SYSTEM_AGENT_ID),
+  // `src/index.ts` (hook-check-path / hook-permission-denied entry points),
+  // and `src/hooks/session-start.ts` (agentIdArg branch).
   const settings = {
     ...baseSettings,
     spinnerTipsEnabled: false,

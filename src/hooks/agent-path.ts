@@ -292,7 +292,12 @@ function checkFilePath(
   }
 
   // 9. Block: other agents' directories
-  if (filePath.startsWith(agentsDir + "/")) {
+  // Guard: an empty agentsDir means there are no sibling agents to isolate
+  // against (e.g. the @system context — see hookCheckPath). Without the
+  // guard, `"" + "/"` becomes `/`, which startsWith() matches against every
+  // absolute path and produces a dishonest "cannot cd into other agents'
+  // worktrees" denial for unrelated files.
+  if (agentsDir !== "" && filePath.startsWith(agentsDir + "/")) {
     if (toolName === "Bash") {
       return { decision: "deny", reason: "Access denied: cannot cd into other agents' worktrees" };
     }
@@ -376,15 +381,16 @@ export async function checkIbCommandAccess(
   callingAgentId: string,
   agentsDir: string
 ): Promise<HookDecision | null> {
+  // @system has system-wide authority; skip relationship checks. Must come
+  // BEFORE callerRepoRoot resolution below — for @system, agentsDir is "" and
+  // resolve("", "..", "..") would resolve relative to process.cwd(), producing
+  // a misleading caller repo path. Also keeps this bypass robust against
+  // future refactors that move parsing logic.
+  if (callingAgentId === SYSTEM_AGENT_ID) return null;
+
   const parsed = parseIbCommand(command);
   if (!parsed) return null;
   if (!IB_MANAGER_ONLY_COMMANDS.has(parsed.subcommand)) return null;
-
-  // The system coordinator has system-wide authority by design — it can run
-  // any manager-only command on any agent in any registered repo. Skipping
-  // the manager/spawner check here matches the intent of `@system` as the
-  // top-level operator.
-  if (callingAgentId === SYSTEM_AGENT_ID) return null;
 
   const targetId = parsed.targetId;
   const targetMetaPath = join(agentsDir, targetId, "meta.json");
@@ -427,7 +433,7 @@ export async function checkIbCommandAccess(
     //   2. caller's meta.coordinator === true (flagged as coordinator)
     //   3. caller's agent ID matches the repo name (per-repo coordinators
     //      use the repo basename as their ID — see getCoordinatorAgentId)
-    if (sb.agent_id !== "@system") {
+    if (sb.agent_id !== SYSTEM_AGENT_ID) {
       const repoName = sb.agent_id.slice(1);
       if (typeof sb.repo_path !== "string") return false;
       if (resolve(sb.repo_path) !== callerRepoRoot) return false;

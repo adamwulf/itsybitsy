@@ -1462,6 +1462,8 @@ The system coordinator's `~/.itsybitsy/.claude/settings.local.json` includes fou
 
 The Stop hook is intentionally **not** installed — the system coordinator's state detection lives in `detectSystemCoordinatorState()` (§12.1.6), which polls tmux output and does not need a Claude-driven idle signal. The `@system` sentinel is the system coordinator's identity at every hook callsite; it is not a valid agent ID per `isValidAgentId()` (it begins with `@`), but the three hook entry points (`hook-check-path`, `hook-permission-denied`, and the optional `agentIdArg` of `hooks session-start`) accept the literal `@system` because it is hardcoded into the coordinator's settings file by `writeCoordinatorFiles()` and is not user input. `ib hook-status` does not accept `@system` — the Stop hook is omitted, so the path is unreachable.
 
+Existing system coordinator sessions must be restarted (e.g., via the dashboard `x` action on the system coordinator) to pick up new hook configurations after upgrading; `ensureSystemCoordinator` only writes `settings.local.json` when the tmux session is absent.
+
 ### 12.2 Per-Repo Coordinators
 
 #### 12.2.1 Purpose

@@ -203,31 +203,41 @@ export async function processTaskIntercept(
     if (meta) {
       // agentType takes precedence over legacy worker boolean when present
       if (meta.agentType && typeof meta.agentType === "string") {
-        // The `system` agent type is a layer file with no canSpawnChildren
-        // declared. Treat the system coordinator as a spawner — it is the
-        // top-level operator and exists explicitly to spawn agents across
-        // repos. (Option A from the implementation plan.)
+        // The system coordinator spawns agents via `ib new-agent --repo <name>`,
+        // never via Task/Agent/TaskCreate. Spawning here would resolve repoPath
+        // to `~/.itsybitsy/` (not a registered repo) and produce confusing
+        // failures. In practice Claude can never reach this branch — the
+        // system coordinator's settings.local.json puts Task/Agent/TaskCreate
+        // in its deny list. Keep this explicit deny as defense-in-depth.
         if (meta.agentType === "system") {
-          // Allow — fall through to spawn.
-        } else {
-          try {
-            const agentType = await loadAgentType(meta.agentType as string);
-            if (!agentType.canSpawnChildren) {
-              return {
-                action: "intercept",
-                output: {
-                  hookSpecificOutput: {
-                    hookEventName: "PreToolUse",
-                    permissionDecision: "deny",
-                    permissionDecisionReason: "Workers cannot create tasks or spawn sub-agents. Only manager agents can spawn workers.",
-                  },
+          return {
+            action: "intercept",
+            output: {
+              hookSpecificOutput: {
+                hookEventName: "PreToolUse",
+                permissionDecision: "deny",
+                permissionDecisionReason: "The system coordinator spawns agents via `ib new-agent --repo <name>`, not Task/Agent/TaskCreate.",
+              },
+            },
+          };
+        }
+        try {
+          const agentType = await loadAgentType(meta.agentType as string);
+          if (!agentType.canSpawnChildren) {
+            return {
+              action: "intercept",
+              output: {
+                hookSpecificOutput: {
+                  hookEventName: "PreToolUse",
+                  permissionDecision: "deny",
+                  permissionDecisionReason: "Workers cannot create tasks or spawn sub-agents. Only manager agents can spawn workers.",
                 },
-              };
-            }
-            // canSpawnChildren=true — allow Task, fall through to spawn
-          } catch {
-            // Unknown type — fall through to intercept (safer default).
+              },
+            };
           }
+          // canSpawnChildren=true — allow Task, fall through to spawn
+        } catch {
+          // Unknown type — fall through to intercept (safer default).
         }
       } else if (meta.worker === true) {
         // Backward compat: legacy agents without agentType
@@ -274,12 +284,13 @@ export async function processTaskIntercept(
     repoPath = input.cwd.substring(0, ittybittyIdx);
   }
 
-  // 9. Determine calling agent ID
-  // For worktree agents this is the agent ID. The system coordinator
-  // (`@system`) is intentionally excluded — spawning into `~/.itsybitsy/`
-  // wouldn't make sense, and `Task` is in its deny list anyway.
-  const callingAgentId =
-    resolved && resolved.agentId !== SYSTEM_AGENT_ID ? resolved.agentId : undefined;
+  // 9. Determine calling agent ID. @system cannot reach here — the explicit
+  // deny above intercepts it before fall-through. Worktree agents pass their
+  // ID; primary Claude (no resolved agent) leaves callingAgentId undefined,
+  // which causes the spawn step to create a manager rather than a worker.
+  const callingAgentId = resolved && resolved.agentId !== SYSTEM_AGENT_ID
+    ? resolved.agentId
+    : undefined;
 
   // 10. Spawn agent
   // Only set type+manager when called from an agent context (callingAgentId present).

@@ -790,7 +790,7 @@ describe("@system caller", () => {
     expect(hookOutput.permissionDecisionReason).not.toContain("Workers cannot");
   });
 
-  test("Task from @system falls through to spawn (canSpawnChildren=true)", async () => {
+  test("Task from @system → explicit deny pointing at ib new-agent", async () => {
     let spawnCalled = false;
     const result = await processTaskIntercept(
       {
@@ -806,7 +806,22 @@ describe("@system caller", () => {
       },
     );
     expect(result.action).toBe("intercept");
-    expect(spawnCalled).toBe(true);
-    expect(result.spawnedAgentId).toBe("agent-deadbeef99");
+    expect(spawnCalled).toBe(false);
+    const output = result.output as Record<string, unknown>;
+    const hookOutput = output.hookSpecificOutput as Record<string, unknown>;
+    expect(hookOutput.permissionDecision).toBe("deny");
+    expect(hookOutput.permissionDecisionReason).toContain("ib new-agent --repo");
+  });
+
+  test("TaskCreate from @system → explicit deny", async () => {
+    const result = await processTaskIntercept({
+      tool_name: "TaskCreate",
+      tool_input: { prompt: "track" },
+      cwd: coordHome,
+    });
+    expect(result.action).toBe("intercept");
+    const hookOutput = (result.output as Record<string, unknown>).hookSpecificOutput as Record<string, unknown>;
+    expect(hookOutput.permissionDecision).toBe("deny");
+    expect(hookOutput.permissionDecisionReason).toContain("ib new-agent --repo");
   });
 });

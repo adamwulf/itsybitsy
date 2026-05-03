@@ -1354,6 +1354,22 @@ async function main() {
       console.log(removed ? `removed: ${id}` : `not present: ${id}`);
       break;
     }
+    case "tgsend": {
+      const text = args[1];
+      if (!text) {
+        console.error("Usage: ib tgsend <text>");
+        process.exit(1);
+      }
+      const { telegramSend } = await import("./ib-commands");
+      const result = await telegramSend(text);
+      if (result.ok) {
+        console.log(result.message);
+      } else {
+        console.error(result.message);
+        process.exit(1);
+      }
+      break;
+    }
     case "tgcheck": {
       const { readConfig } = await import("./config");
       const { readAccess, isGroupShaped } = await import("./channels/access");
@@ -1444,6 +1460,7 @@ async function main() {
       console.log("  tgallow <chat_id>   Allow a Telegram chat_id");
       console.log("  tgdeny <chat_id>    Remove a Telegram chat_id from the allowlist");
       console.log("  tgcheck             Show Telegram config + allowlist status");
+      console.log("  tgsend <text>       Send a message to the configured Telegram chat");
       break;
     }
   }

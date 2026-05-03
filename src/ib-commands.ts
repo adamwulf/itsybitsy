@@ -3444,4 +3444,64 @@ export async function uninstallInterceptHook(_repoPath: string, settingsPath?: s
   return { ok: true, exitCode: 0, stdout: "Task interception hook uninstalled from ~/.claude/settings.json", stderr: "" };
 }
 
+/**
+ * Outbound `ib tgsend` — chunk the text and POST each chunk via TelegramClient.
+ *
+ * Reads `channels.telegram.bot_token` and `channels.telegram.chat_id` from
+ * config. Both must be set; missing either returns a clear error message.
+ *
+ * 429 handling: TelegramClient.sendMessage does not retry on 429 (the v1
+ * contract is "return what we got, let the caller branch"). We do one retry
+ * here per Phase 6 spec — sleep `Retry-After` seconds then call once more.
+ * If the retry also fails, give up.
+ */
+export async function telegramSend(text: string): Promise<{ ok: boolean; message: string }> {
+  const cfg = await readConfig();
+  const tokenEntry = cfg["channels.telegram.bot_token"];
+  const chatEntry = cfg["channels.telegram.chat_id"];
+  const token = typeof tokenEntry?.value === "string" ? tokenEntry.value : "";
+  const chatId = typeof chatEntry?.value === "string" ? chatEntry.value : "";
+
+  if (!token) {
+    return { ok: false, message: "Telegram not configured: set channels.telegram.bot_token in ~/.itsybitsy/config.json" };
+  }
+  if (!chatId) {
+    return { ok: false, message: "Telegram not configured: set channels.telegram.chat_id in ~/.itsybitsy/config.json" };
+  }
+
+  const { TelegramClient, chunk, sleepCtx } = await import("./channels/telegram-client");
+  const client = new TelegramClient({ token });
+  const chunks = chunk(text);
+
+  for (const piece of chunks) {
+    let resp;
+    try {
+      resp = await client.sendMessage({ chat_id: chatId, text: piece });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { ok: false, message: `sendMessage failed: ${msg}` };
+    }
+    if (!resp.ok) {
+      // 429 → retry once after Retry-After sleep.
+      if (resp.error_code === 429) {
+        const retryAfterSec = resp.parameters?.retry_after ?? 1;
+        await sleepCtx.fn(retryAfterSec * 1000);
+        let retryResp;
+        try {
+          retryResp = await client.sendMessage({ chat_id: chatId, text: piece });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return { ok: false, message: `sendMessage failed after 429 retry: ${msg}` };
+        }
+        if (retryResp.ok) continue;
+        const desc = retryResp.description ?? `HTTP ${retryResp.error_code ?? "unknown"}`;
+        return { ok: false, message: `sendMessage failed after 429 retry: ${desc}` };
+      }
+      const desc = resp.description ?? `HTTP ${resp.error_code ?? "unknown"}`;
+      return { ok: false, message: `sendMessage failed: ${desc}` };
+    }
+  }
+
+  return { ok: true, message: chunks.length === 1 ? "ok" : `ok (${chunks.length} parts)` };
+}
 

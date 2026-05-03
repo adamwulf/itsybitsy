@@ -1403,6 +1403,30 @@ async function main() {
           console.log(`  ${w} looks like a group/supergroup id (starts with "-"). Phase 5 only routes 1:1 DMs.`);
         }
       }
+
+      // Phase 5: live probe. Confirms the bot is reachable and the token is
+      // valid by calling getUpdates with offset=-1, limit=1, timeout=0 — a
+      // single non-blocking call that does not consume anything from the
+      // pending update queue. Skipped when the token is unset.
+      console.log("");
+      if (!tokenSet) {
+        console.log("probe: skipped (no bot_token set)");
+      } else {
+        const tokenValue = typeof tokenEntry?.value === "string" ? tokenEntry.value : "";
+        try {
+          const { TelegramClient } = await import("./channels/telegram-client");
+          const client = new TelegramClient({ token: tokenValue });
+          const result = await client.probeOnce({ offset: -1, limit: 1, timeout: 0 });
+          if (result.ok) {
+            console.log("probe: OK: bot reachable");
+          } else {
+            const desc = result.description ? `: ${result.description}` : "";
+            console.log(`probe: HTTP ${result.status}${desc}`);
+          }
+        } catch (err) {
+          console.log(`probe: error: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
       break;
     }
     default: {

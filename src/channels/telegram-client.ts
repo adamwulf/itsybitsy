@@ -206,6 +206,50 @@ export class TelegramClient {
     }
   }
 
+  /** One-shot `getUpdates` probe used by the dispatcher's startup check.
+   *
+   *  Unlike `getUpdates()`, this does NOT retry — it surfaces HTTP errors as
+   *  a `{ status }` outcome so the dispatcher can detect a 409 Conflict
+   *  ("another poller or webhook is active") and skip starting the loop
+   *  rather than retrying forever. Network throws are surfaced as-is.
+   *
+   *  Returns `{ ok: true, updates }` on a successful 2xx response with a
+   *  parseable Telegram envelope, or `{ ok: false, status }` on any other
+   *  HTTP status. The dispatcher only branches on 409 — other failures are
+   *  logged via the API description and treated as "probe failed but go
+   *  ahead and start the loop", since the loop has its own retry handling.
+   */
+  async probeOnce(
+    opts: { offset?: number; limit?: number; timeout?: number; signal?: AbortSignal } = {},
+  ): Promise<
+    | { ok: true; updates: TelegramUpdate[] }
+    | { ok: false; status: number; description?: string }
+  > {
+    const params: Record<string, unknown> = {
+      timeout: opts.timeout ?? 0,
+      limit: opts.limit ?? 1,
+      allowed_updates: ["message"],
+    };
+    if (opts.offset !== undefined) params.offset = opts.offset;
+
+    const url = this.urlFor("getUpdates");
+    const resp = await fetchCtx.fn(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(params),
+      signal: opts.signal,
+    });
+    const raw = await readRaw<TelegramUpdate[]>(resp);
+    if (raw.status >= 200 && raw.status < 300 && raw.body?.ok === true) {
+      return { ok: true, updates: (raw.body.result ?? []) as TelegramUpdate[] };
+    }
+    const description = raw.body?.description;
+    if (description !== undefined) {
+      return { ok: false, status: raw.status, description };
+    }
+    return { ok: false, status: raw.status };
+  }
+
   /** POST `sendMessage`. No retry loop — outbound is one-shot from the caller's
    *  perspective. Phase 6 (`ib tgsend`) wraps this with one 429-retry of its
    *  own; the dispatcher (Phase 5) doesn't retry on outbound failures. */

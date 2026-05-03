@@ -2006,6 +2006,36 @@ export async function launchDashboard(): Promise<void> {
   }
 
   const config = await readConfig();
+
+  // Telegram dispatcher: auto-start only when bot_token is set (Phase 0).
+  // The dispatcher long-polls Telegram and forwards messages to the system
+  // coordinator. When the token is unset/empty we skip startup entirely;
+  // when set we start it alongside the agent watcher and stop it on exit.
+  const tgTokenEntry = config["channels.telegram.bot_token"];
+  const tgChatEntry = config["channels.telegram.chat_id"];
+  const tgToken = typeof tgTokenEntry?.value === "string" ? tgTokenEntry.value : "";
+  const tgChatId = typeof tgChatEntry?.value === "string" ? tgChatEntry.value : "";
+  let telegramDispatcher: import("../channels/dispatcher").TelegramDispatcher | null = null;
+  if (tgToken !== "") {
+    const { TelegramClient } = await import("../channels/telegram-client");
+    const { TelegramDispatcher } = await import("../channels/dispatcher");
+    const { readAccess } = await import("../channels/access");
+    const access = await readAccess();
+    const client = new TelegramClient({ token: tgToken });
+    telegramDispatcher = new TelegramDispatcher({
+      client,
+      allowedChatIds: access.allowed_chat_ids,
+      allowedUserIds: access.allowed_user_ids,
+      chatId: tgChatId,
+    });
+    // Don't await — start() runs the loop in the background.
+    telegramDispatcher.start().catch((err) => {
+      console.error(`Telegram dispatcher failed to start: ${err instanceof Error ? err.message : String(err)}`);
+    });
+  } else {
+    console.error("Telegram routing disabled: no bot token configured");
+  }
+
   const dashboard = new DashboardComponent();
   const savedLayout = await loadLayout();
   if (savedLayout) {
@@ -2046,8 +2076,20 @@ export async function launchDashboard(): Promise<void> {
       tui.stop();
       dashboard.setTerminalTitle("");
       process.stdout.write("\x1b[2J\x1b[H");
+      // Stop the Telegram dispatcher if it was started. Race against a 2s
+      // timeout so a hung getUpdates abort cannot block exit. We don't
+      // process.exit() synchronously — give shutdown a chance to flush.
+      const stopTelegram = telegramDispatcher
+        ? Promise.race([
+            telegramDispatcher.stop(),
+            new Promise<void>((resolve) => setTimeout(resolve, 2_000)),
+          ])
+        : Promise.resolve();
       // Flush layout save to disk before exiting, then release coordinator
-      flushPendingSave().catch(() => { /* ignore write errors on exit */ }).then(() => {
+      Promise.all([
+        flushPendingSave().catch(() => { /* ignore write errors on exit */ }),
+        stopTelegram.catch(() => { /* ignore — already raced */ }),
+      ]).then(() => {
         // Release coordinator ref — if last ref, kills the tmux session
         // and pauses all per-repo coordinators
         return releaseSystemCoordinator(async () => {

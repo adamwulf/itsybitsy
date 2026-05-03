@@ -21,18 +21,24 @@ export type MetaState = "creating" | "running" | "waiting" | "complete" | "stopp
  *     sendToSystemCoordinator → tmux send-keys to the ib-coordinator session)
  *   - `@<repo-name>` — that repo's per-repo coordinator (basename-based; see
  *     getCoordinatorAgentId)
+ *   - `@telegram` — Phase 5 inbound dispatcher. Never appears as an actual
+ *     spawner (the dispatcher does not own agents); it is used purely as
+ *     `sendMessage`'s `fromAgent` label so coordinator-bound messages render
+ *     as `[sent by @telegram]: ...`. Listed here so future readers don't
+ *     wonder where it comes from.
  *
  * `repo_path` is the spawner's repo when the spawner is a real agent or a
  * per-repo coordinator. It is `null` for the `@system` sentinel because the
- * system coordinator does not live inside a registered repo.
+ * system coordinator does not live inside a registered repo. (The same would
+ * apply to `@telegram` if it ever appeared here.)
  *
- * KNOWN MAINTENANCE FOOTGUN: this is a conceptually 3-way union (real ID |
- * @system | @<repo-name>) packed into a single string. A future caller that
- * does `findAgent(spawned_by.agent_id)` directly will silently no-op for
- * either sentinel. If you add a new reader, route through the watchdog
- * notify path (or build a discriminated union) rather than open-coding the
- * lookup. Reviewers flagged a discriminated-union refactor as the eventual
- * fix; deferred for scope.
+ * KNOWN MAINTENANCE FOOTGUN: this is a conceptually N-way union (real ID |
+ * @system | @<repo-name> | @telegram for sendMessage labels) packed into a
+ * single string. A future caller that does `findAgent(spawned_by.agent_id)`
+ * directly will silently no-op for any sentinel. If you add a new reader,
+ * route through the watchdog notify path (or build a discriminated union)
+ * rather than open-coding the lookup. Reviewers flagged a discriminated-union
+ * refactor as the eventual fix; deferred for scope.
  */
 export interface SpawnedBy {
   agent_id: string;

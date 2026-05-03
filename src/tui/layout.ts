@@ -172,3 +172,14 @@ export async function getSavedMainWidth(): Promise<number> {
   const sidebarWidth = await getSavedSidebarWidth();
   return Math.max(1, terminalWidth - sidebarWidth - 1);
 }
+
+/**
+ * Returns the correct initial tmux `-x` width for a newly spawned (or resumed)
+ * agent based on whether it is a coordinator. Coordinators (system + per-repo)
+ * span middle + right (`getSavedMainWidth`); regular agents fit in the middle
+ * pane only (`getSavedTmuxWidth`). All spawn/resume call sites must go through
+ * this helper instead of computing tmux widths inline.
+ */
+export async function getTmuxWidthForAgent(isCoordinator: boolean): Promise<number> {
+  return isCoordinator ? await getSavedMainWidth() : await getSavedTmuxWidth();
+}

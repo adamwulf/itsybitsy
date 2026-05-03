@@ -2030,33 +2030,57 @@ export async function launchDashboard(): Promise<void> {
 
   const config = await readConfig();
 
-  // Telegram dispatcher: auto-start only when bot_token is set (Phase 0).
-  // The dispatcher long-polls Telegram and forwards messages to the system
-  // coordinator. When the token is unset/empty we skip startup entirely;
-  // when set we start it alongside the agent watcher and stop it on exit.
+  // Telegram subsystem: three-step boot. Token check → connect probe →
+  // resolve chat id from inbound inference → construct dispatcher + outbox.
+  // Each step gates the next; on failure we log a single line and continue
+  // with the rest of the dashboard (agents, watcher, TUI) running normally.
   const tgTokenEntry = config["channels.telegram.bot_token"];
-  const tgChatEntry = config["channels.telegram.chat_id"];
   const tgToken = typeof tgTokenEntry?.value === "string" ? tgTokenEntry.value : "";
-  const tgChatId = typeof tgChatEntry?.value === "string" ? tgChatEntry.value : "";
+  const { TelegramClient } = await import("../channels/telegram-client");
+  const { TelegramDispatcher } = await import("../channels/dispatcher");
+  const { TelegramOutbox, defaultOutboxDir } = await import("../channels/outbox");
+  const { readAccess } = await import("../channels/access");
+  const { bootTelegramSubsystem } = await import("../channels/boot");
+  const access = await readAccess();
+  // One-time cleanup of the Phase A chat-id state file. Phase B holds the
+  // chat id in memory only; the on-disk artifact is no longer used. Best
+  // effort — ignore ENOENT and any other failure.
+  try {
+    const { join } = await import("path");
+    const { homedir } = await import("os");
+    const { unlink } = await import("fs/promises");
+    const stalePath = join(process.env.HOME ?? homedir(), ".itsybitsy", "channels", "telegram", "chat-id");
+    await unlink(stalePath).catch(() => { /* file already absent */ });
+  } catch {
+    /* best effort — never block boot on cleanup */
+  }
   let telegramDispatcher: import("../channels/dispatcher").TelegramDispatcher | null = null;
-  if (tgToken !== "") {
-    const { TelegramClient } = await import("../channels/telegram-client");
-    const { TelegramDispatcher } = await import("../channels/dispatcher");
-    const { readAccess } = await import("../channels/access");
-    const access = await readAccess();
-    const client = new TelegramClient({ token: tgToken });
-    telegramDispatcher = new TelegramDispatcher({
-      client,
-      allowedChatIds: access.allowed_chat_ids,
-      allowedUserIds: access.allowed_user_ids,
-      chatId: tgChatId,
+  let telegramOutbox: import("../channels/outbox").TelegramOutbox | null = null;
+  try {
+    const bootResult = await bootTelegramSubsystem({
+      token: tgToken,
+      access,
+      buildClient: (token) => new TelegramClient({ token }),
+      buildDispatcher: (opts) => new TelegramDispatcher(opts),
+      buildOutbox: (opts) => new TelegramOutbox(opts),
     });
-    // Don't await — start() runs the loop in the background.
-    telegramDispatcher.start().catch((err) => {
-      console.error(`Telegram dispatcher failed to start: ${err instanceof Error ? err.message : String(err)}`);
-    });
-  } else {
-    console.error("Telegram routing disabled: no bot token configured");
+    if (bootResult.ok) {
+      telegramDispatcher = bootResult.dispatcher;
+      telegramOutbox = bootResult.outbox;
+      // Don't await — start() runs the loop in the background.
+      telegramDispatcher.start().catch((err) => {
+        console.error(`Telegram dispatcher failed to start: ${err instanceof Error ? err.message : String(err)}`);
+      });
+      // Outbox start() awaits the sweep + watcher install. We let it run in
+      // the background so a stuck filesystem can't block dashboard startup.
+      telegramOutbox.start().catch((err) => {
+        console.error(`Telegram outbox failed to start at ${defaultOutboxDir()}: ${err instanceof Error ? err.message : String(err)}`);
+      });
+    }
+  } catch (err) {
+    // bootTelegramSubsystem itself shouldn't throw — but if a future change
+    // adds a path that does, we don't want it to take down launchDashboard.
+    console.error(`Telegram routing disabled: boot threw (${err instanceof Error ? err.message : String(err)})`);
   }
 
   const dashboard = new DashboardComponent();
@@ -2113,10 +2137,17 @@ export async function launchDashboard(): Promise<void> {
             new Promise<void>((resolve) => setTimeout(resolve, 2_000)),
           ])
         : Promise.resolve();
+      const stopOutbox = telegramOutbox
+        ? Promise.race([
+            telegramOutbox.stop(),
+            new Promise<void>((resolve) => setTimeout(resolve, 2_000)),
+          ])
+        : Promise.resolve();
       // Flush layout save to disk before exiting, then release coordinator
       Promise.all([
         flushPendingSave().catch(() => { /* ignore write errors on exit */ }),
         stopTelegram.catch(() => { /* ignore — already raced */ }),
+        stopOutbox.catch(() => { /* ignore — already raced */ }),
       ]).then(() => {
         // Release coordinator ref — if last ref, kills the tmux session
         // and pauses all per-repo coordinators

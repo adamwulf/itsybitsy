@@ -413,26 +413,24 @@ describe("checkDeprecatedConfigKeys", () => {
 });
 
 describe("channels.telegram config keys", () => {
-  test("CONFIG_KEYS contains channels.telegram.bot_token and chat_id", () => {
+  test("CONFIG_KEYS contains channels.telegram.bot_token and no chat_id", () => {
     const keys = CONFIG_KEYS.map((def) => def.key);
     expect(keys).toContain("channels.telegram.bot_token");
-    expect(keys).toContain("channels.telegram.chat_id");
+    expect(keys).not.toContain("channels.telegram.chat_id");
   });
 
-  test("default values are empty strings", async () => {
+  test("default value is empty string", async () => {
     const result = await readConfig(opts());
     expect(result["channels.telegram.bot_token"]).toEqual({ value: "", source: "default" });
-    expect(result["channels.telegram.chat_id"]).toEqual({ value: "", source: "default" });
   });
 
-  test("reads user-supplied bot_token and chat_id", async () => {
+  test("reads user-supplied bot_token", async () => {
     await Bun.write(
       userCfgPath,
-      JSON.stringify({ channels: { telegram: { bot_token: "abc:xyz", chat_id: "12345" } } })
+      JSON.stringify({ channels: { telegram: { bot_token: "abc:xyz" } } })
     );
     const result = await readConfig(opts());
     expect(result["channels.telegram.bot_token"]).toEqual({ value: "abc:xyz", source: "user" });
-    expect(result["channels.telegram.chat_id"]).toEqual({ value: "12345", source: "user" });
   });
 });
 

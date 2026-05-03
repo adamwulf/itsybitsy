@@ -184,3 +184,4 @@ describe("isGroupShaped", () => {
     expect(await isAllowed("-1001234567890", undefined)).toBe(true);
   });
 });
+

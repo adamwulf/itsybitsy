@@ -40,31 +40,46 @@ Edit `~/.itsybitsy/config.json`:
 {
   "channels": {
     "telegram": {
-      "bot_token": "<TOKEN_FROM_BOTFATHER>",
-      "chat_id": "<YOUR_CHAT_ID>"
+      "bot_token": "<TOKEN_FROM_BOTFATHER>"
     }
   }
 }
 ```
 
-Then allowlist your chat ID and confirm the bot is reachable:
+Then allowlist your chat ID:
 
 ```sh
 ib tgallow <YOUR_CHAT_ID>
-ib tgcheck
 ```
 
-`ib tgcheck` should print "OK: bot reachable" along with the configured
-chat_id and the allowlist contents. If it warns about a group-shaped
-chat_id (negative integer), you've configured a group ID — group chats
-aren't supported in v1, use a 1:1 DM ID instead.
+> **Note**: `ib watch` resolves the chat ID from your most recent inbound
+> DM at startup. You must DM the bot at least once and have run
+> `ib tgallow <your_chat_id>` before `ib watch`'s Telegram subsystem will
+> start. The chat ID lives in memory only — `ib tgsend` hands its message
+> to `ib watch` via a file-drop outbox rather than knowing the chat ID
+> itself.
+
+Start `ib watch`. Look at its stderr — you should see no "Telegram
+routing disabled" warnings. If you see "Telegram routing disabled:
+another poller or webhook is active", another process is polling the bot
+(see step 4.8). If you see "Telegram routing disabled: no bot token
+configured", the token did not load.
 
 ## 4. Smoke tests
 
 Run these in order. Each catches a different failure class — if step N
 fails, fix it before moving on.
 
-### 4.1. Outbound (catches token/chat_id misconfiguration)
+### 4.1. Outbound (catches token/chat-id misconfiguration)
+
+`ib tgsend` writes to `~/.itsybitsy/channels/telegram/outbox/` and waits
+up to 1s for `ib watch` to send the message and write back a result. If
+no result appears, the message stays queued in the outbox dir and will be
+processed when `ib watch` next starts (assuming Telegram is configured).
+`ib tgsend` itself does not know the chat ID and never talks to Telegram —
+only `ib watch` does.
+
+Make sure `ib watch` is running, then in a separate shell:
 
 ```sh
 ib tgsend "hello from ib"
@@ -73,8 +88,11 @@ ib tgsend "hello from ib"
 Expected: prints `ok`, the message arrives in your Telegram chat from the
 bot.
 
-If this fails, your token or chat_id is wrong — nothing else will work
-until this does.
+If you see `queued (ib watch may not be running, or Telegram is not configured)`,
+either `ib watch` is not running or its Telegram subsystem failed to boot
+(see step 4.2's stderr lines). The message is still on disk under the
+outbox directory and will be sent the next time `ib watch` boots
+successfully.
 
 ### 4.2. Inbound, single message (catches dispatcher startup, allowlist,
 channel-reminder format)
@@ -95,13 +113,23 @@ ping
 To reply on Telegram, run `ib tgsend "<your message>"`.
 ```
 
-If the coordinator doesn't see anything:
-- Look at `ib watch`'s stderr for "Telegram routing disabled" — means the
-  token wasn't set or the dispatcher didn't start.
-- Look for "Telegram routing disabled: another poller or webhook is
-  active" — means a webhook is set or another process is polling. See
-  step 4.8.
-- Check that `ib tgallow <YOUR_CHAT_ID>` was run with the right ID.
+If the coordinator doesn't see anything, look at `ib watch`'s stderr for
+one of these "Telegram routing disabled" lines (the new three-step boot
+emits exactly one and continues running the rest of the dashboard):
+
+- `Telegram routing disabled: no bot token configured` — `bot_token` is
+  missing or empty in `~/.itsybitsy/config.json`.
+- `Telegram routing disabled: another poller or webhook is active` — a
+  webhook is set or another process is polling the same token. See step
+  4.8.
+- `Telegram routing disabled: bot token rejected (HTTP 401)` /
+  `(HTTP 403)` — the token in config is wrong or the bot was deleted.
+- `Telegram routing disabled: probe failed (...)` — network error
+  reaching `api.telegram.org`. Check connectivity / DNS.
+- `Telegram routing disabled: no recent inbound from an allowlisted
+  private chat. DM your bot, then restart ib watch.` — the bot has no
+  pending message from a chat that's in your allowlist. DM the bot from
+  the chat you ran `ib tgallow` for, then restart `ib watch`.
 
 ### 4.3. Multi-line inbound (validates Phase 3-was-dropped assumption)
 

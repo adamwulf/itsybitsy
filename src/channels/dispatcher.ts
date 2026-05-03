@@ -96,6 +96,12 @@ export interface DispatcherOptions {
    *  notice). Required because Telegram chats are not addressable by anything
    *  else; the dispatcher does not invent reply targets. */
   chatId: string;
+  /** Optional offset hint for the first `getUpdates` call. The Phase A
+   *  three-step boot resolves the chat id by walking a probe response; it
+   *  passes `max(consumed update_id) + 1` here so the dispatcher's first
+   *  long-poll skips updates the boot already saw. Telegram drops everything
+   *  with `update_id < offset`. */
+  initialOffset?: number;
 }
 
 /** What we extract from one TelegramMessage for the channel-reminder body. */
@@ -147,6 +153,9 @@ export class TelegramDispatcher {
     this.allowedChatIds = new Set(opts.allowedChatIds.map(String));
     this.allowedUserIds = new Set(opts.allowedUserIds.map(String));
     this.chatId = String(opts.chatId);
+    if (opts.initialOffset !== undefined) {
+      this.nextOffset = opts.initialOffset;
+    }
   }
 
   /** Returns true when the main loop is running. False after `stop()` returns,
@@ -200,9 +209,11 @@ export class TelegramDispatcher {
     if (!probe.ok) {
       const desc = "description" in probe && probe.description ? `: ${probe.description}` : "";
       logCtx.fn(`Telegram startup probe got HTTP ${probe.status}${desc}; starting main loop anyway`);
-    } else if (probe.updates.length > 0) {
+    } else if (probe.updates.length > 0 && this.nextOffset === undefined) {
       // Seed the offset so we don't re-process anything the probe already
-      // surfaced. probe.updates is at most 1 (limit:1).
+      // surfaced. probe.updates is at most 1 (limit:1). When the caller
+      // already supplied an `initialOffset` via constructor (Phase A boot),
+      // we leave it alone — that hint is authoritative.
       const max = probe.updates.reduce((m, u) => (u.update_id > m ? u.update_id : m), -1);
       this.nextOffset = max + 1;
     }

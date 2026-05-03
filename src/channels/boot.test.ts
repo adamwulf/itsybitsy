@@ -610,6 +610,32 @@ describe("bootTelegramSubsystem", () => {
     expect(await readCachedChatId()).toBe("200");
   });
 
+  test("cache stale (empty allowlist / deny-all): falls through to step 2 instead of trusting cache", async () => {
+    // Cache holds an id, but the allowlist is empty (deny-all). The cache
+    // hit MUST be rejected by the `Set.has()` guard — boot falls through to
+    // step 2's update walk, which finds nothing → no-allowlisted-inbound.
+    await writeCachedChatId("100");
+
+    h.mock.enqueueResponse({ ok: true, result: [] }); // step 1
+    h.mock.enqueueResponse({ ok: true, result: [] }); // step 2 — no updates
+
+    const result = await bootTelegramSubsystem({
+      token: "TEST_TOKEN",
+      access: { allowed_chat_ids: [], allowed_user_ids: [] }, // deny-all
+      buildClient: h.buildClient,
+      buildDispatcher: h.buildDispatcher,
+      buildOutbox: h.buildOutbox,
+      log: h.log,
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe("no-allowlisted-inbound");
+    // Confirms the cache was NOT used: both probes fired.
+    expect(h.mock.callCount()).toBe(2);
+    // Cache untouched — failed boot does not overwrite or clear it.
+    expect(await readCachedChatId()).toBe("100");
+  });
+
   test("cache write happens after successful resolve, file persists with id", async () => {
     h.mock.enqueueResponse({ ok: true, result: [] }); // step 1
     h.mock.enqueueResponse({

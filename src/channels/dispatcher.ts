@@ -213,15 +213,10 @@ export class TelegramDispatcher {
       // Auth failure (401/403) means the cached chat id is stale relative to
       // whatever credentials the user has now (token rotated, bot disabled,
       // etc). Clear the cache so the next boot re-resolves via inbound walk.
-      // Best effort — a clear failure is logged but does not propagate.
+      // `clearCachedChatId` is best-effort by contract — it swallows ENOENT
+      // and any other error internally, so no wrapper is needed here.
       if (probe.status === 401 || probe.status === 403) {
-        try {
-          await clearCachedChatId();
-        } catch (err) {
-          logCtx.fn(
-            `Telegram chat-id cache clear failed: ${err instanceof Error ? err.message : String(err)}`,
-          );
-        }
+        await clearCachedChatId();
       }
     } else if (probe.updates.length > 0 && this.nextOffset === undefined) {
       // Seed the offset so we don't re-process anything the probe already

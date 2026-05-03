@@ -6,8 +6,7 @@
 import { join, dirname } from "path";
 import { homedir } from "os";
 import { mkdir, rename } from "fs/promises";
-import { SIDEBAR_WIDTH, MIN_SIDEBAR, MAX_SIDEBAR } from "./sidebar";
-import { MIN_LEFT_WIDTH, MAX_LEFT_WIDTH } from "./split-pane";
+import { MIN_SIDEBAR, MAX_SIDEBAR } from "./sidebar";
 
 export { MIN_SIDEBAR, MAX_SIDEBAR };
 
@@ -136,50 +135,7 @@ export async function flushPendingSave(): Promise<void> {
   }
 }
 
-/** Default tmux (split-pane left) width when no layout has been saved. */
-export const DEFAULT_TMUX_WIDTH = 80;
+// Width math (DEFAULT_TMUX_WIDTH, getSavedTmuxWidth, getSavedSidebarWidth,
+// getSavedMainWidth, getTmuxWidthForAgent) lives in ./widths.ts. All pane
+// width derivations must go through that module — never inline.
 
-/**
- * Read the saved main agent tmux pane width from layout.json.
- * Returns DEFAULT_TMUX_WIDTH if no layout is saved or the value is invalid.
- * Clamps to [MIN_LEFT_WIDTH, MAX_LEFT_WIDTH].
- */
-export async function getSavedTmuxWidth(): Promise<number> {
-  const layout = await loadLayout();
-  const width = layout?.splitPaneLeftWidth ?? DEFAULT_TMUX_WIDTH;
-  return Math.max(MIN_LEFT_WIDTH, Math.min(MAX_LEFT_WIDTH, width));
-}
-
-/**
- * Read the saved sidebar width from layout.json.
- * Returns SIDEBAR_WIDTH if no layout is saved or the value is invalid.
- * Clamps to [MIN_SIDEBAR, MAX_SIDEBAR].
- */
-export async function getSavedSidebarWidth(): Promise<number> {
-  const layout = await loadLayout();
-  const width = layout?.sidebarWidth ?? SIDEBAR_WIDTH;
-  return Math.max(MIN_SIDEBAR, Math.min(MAX_SIDEBAR, width));
-}
-
-/**
- * Compute the main area width (middle + right panes) based on terminal width
- * and saved sidebar width. Used to size the system coordinator tmux session
- * to match the full width available to the coordinator output.
- * Formula: terminal width - sidebar width - 1 (for separator)
- */
-export async function getSavedMainWidth(): Promise<number> {
-  const terminalWidth = process.stdout.columns ?? 80;
-  const sidebarWidth = await getSavedSidebarWidth();
-  return Math.max(1, terminalWidth - sidebarWidth - 1);
-}
-
-/**
- * Returns the correct initial tmux `-x` width for a newly spawned (or resumed)
- * agent based on whether it is a coordinator. Coordinators (system + per-repo)
- * span middle + right (`getSavedMainWidth`); regular agents fit in the middle
- * pane only (`getSavedTmuxWidth`). All spawn/resume call sites must go through
- * this helper instead of computing tmux widths inline.
- */
-export async function getTmuxWidthForAgent(isCoordinator: boolean): Promise<number> {
-  return isCoordinator ? await getSavedMainWidth() : await getSavedTmuxWidth();
-}

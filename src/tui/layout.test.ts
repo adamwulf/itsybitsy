@@ -4,11 +4,13 @@ import { mkdtemp, rm } from "fs/promises";
 import { tmpdir } from "os";
 import {
   loadLayout, saveLayout, saveLayoutDebounced, cancelPendingSave, flushPendingSave,
-  setLayoutPath, resetLayoutPath, getSavedTmuxWidth, getSavedSidebarWidth,
-  getTmuxWidthForAgent,
+  setLayoutPath, resetLayoutPath,
   MIN_SIDEBAR, MAX_SIDEBAR,
 } from "./layout";
 import type { LayoutState } from "./layout";
+import {
+  getSavedTmuxWidth, getSavedSidebarWidth, getTmuxWidthForAgent,
+} from "./widths";
 import { MIN_LEFT_WIDTH, MAX_LEFT_WIDTH } from "./split-pane";
 
 const sampleLayout: LayoutState = {

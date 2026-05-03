@@ -12,6 +12,8 @@ import {
 } from "./telegram-client";
 import { TelegramDispatcher } from "./dispatcher";
 import type { DispatcherOptions } from "./dispatcher";
+import { TelegramOutbox } from "./outbox";
+import type { OutboxOptions } from "./outbox";
 import type { AccessState } from "./access";
 import type { FetchLike } from "../types";
 import type { TelegramUpdate } from "./types";
@@ -75,20 +77,20 @@ const EMPTY_ACCESS: AccessState = { allowed_chat_ids: [], allowed_user_ids: [] }
 interface BootHarness {
   mock: MockFetch;
   logs: string[];
-  writes: string[];
   client: TelegramClient | null;
   dispatchers: TelegramDispatcher[];
+  outboxOpts: OutboxOptions[];
   buildClient: (token: string) => TelegramClient;
   buildDispatcher: (opts: DispatcherOptions) => TelegramDispatcher;
-  writeChatId: (id: string) => Promise<void>;
+  buildOutbox: (opts: OutboxOptions) => TelegramOutbox;
   log: (line: string) => void;
 }
 
 function makeHarness(): BootHarness {
   const mock = makeMockFetch();
   const logs: string[] = [];
-  const writes: string[] = [];
   const dispatchers: TelegramDispatcher[] = [];
+  const outboxOpts: OutboxOptions[] = [];
   let client: TelegramClient | null = null;
 
   // Inject the mock fetch so any TelegramClient built in this test uses it.
@@ -99,9 +101,9 @@ function makeHarness(): BootHarness {
   return {
     mock,
     logs,
-    writes,
     client,
     dispatchers,
+    outboxOpts,
     buildClient: (token) => {
       client = new TelegramClient({ token });
       return client;
@@ -111,7 +113,12 @@ function makeHarness(): BootHarness {
       dispatchers.push(d);
       return d;
     },
-    writeChatId: async (id) => { writes.push(id); },
+    buildOutbox: (opts) => {
+      // Capture the options for assertion. We construct a real TelegramOutbox
+      // but never call start() — its constructor does no I/O, so this is safe.
+      outboxOpts.push(opts);
+      return new TelegramOutbox(opts);
+    },
     log: (line) => { logs.push(line); },
   };
 }
@@ -139,7 +146,7 @@ describe("bootTelegramSubsystem", () => {
       access: EMPTY_ACCESS,
       buildClient: h.buildClient,
       buildDispatcher: h.buildDispatcher,
-      writeChatId: h.writeChatId,
+      buildOutbox: h.buildOutbox,
       log: h.log,
     });
     expect(result.ok).toBe(false);
@@ -148,7 +155,7 @@ describe("bootTelegramSubsystem", () => {
     expect(result.message).toBe("Telegram routing disabled: no bot token configured");
     expect(h.logs).toEqual([result.message]);
     expect(h.mock.callCount()).toBe(0);
-    expect(h.writes).toEqual([]);
+    expect(h.outboxOpts).toEqual([]);
   });
 
   test("step 1: probe 409 → disabled with 'another poller or webhook is active'", async () => {
@@ -158,7 +165,7 @@ describe("bootTelegramSubsystem", () => {
       access: { allowed_chat_ids: ["100"], allowed_user_ids: [] },
       buildClient: h.buildClient,
       buildDispatcher: h.buildDispatcher,
-      writeChatId: h.writeChatId,
+      buildOutbox: h.buildOutbox,
       log: h.log,
     });
     expect(result.ok).toBe(false);
@@ -167,7 +174,7 @@ describe("bootTelegramSubsystem", () => {
     expect(result.message).toBe("Telegram routing disabled: another poller or webhook is active");
     expect(h.logs).toEqual([result.message]);
     expect(h.mock.callCount()).toBe(1); // only the connect probe
-    expect(h.writes).toEqual([]);
+    expect(h.outboxOpts).toEqual([]);
   });
 
   test("step 1: probe 401 → disabled with 'bot token rejected (HTTP 401)'", async () => {
@@ -177,7 +184,7 @@ describe("bootTelegramSubsystem", () => {
       access: { allowed_chat_ids: ["100"], allowed_user_ids: [] },
       buildClient: h.buildClient,
       buildDispatcher: h.buildDispatcher,
-      writeChatId: h.writeChatId,
+      buildOutbox: h.buildOutbox,
       log: h.log,
     });
     expect(result.ok).toBe(false);
@@ -194,7 +201,7 @@ describe("bootTelegramSubsystem", () => {
       access: { allowed_chat_ids: ["100"], allowed_user_ids: [] },
       buildClient: h.buildClient,
       buildDispatcher: h.buildDispatcher,
-      writeChatId: h.writeChatId,
+      buildOutbox: h.buildOutbox,
       log: h.log,
     });
     expect(result.ok).toBe(false);
@@ -210,7 +217,7 @@ describe("bootTelegramSubsystem", () => {
       access: { allowed_chat_ids: ["100"], allowed_user_ids: [] },
       buildClient: h.buildClient,
       buildDispatcher: h.buildDispatcher,
-      writeChatId: h.writeChatId,
+      buildOutbox: h.buildOutbox,
       log: h.log,
     });
     expect(result.ok).toBe(false);
@@ -227,7 +234,7 @@ describe("bootTelegramSubsystem", () => {
       access: { allowed_chat_ids: ["100"], allowed_user_ids: [] },
       buildClient: h.buildClient,
       buildDispatcher: h.buildDispatcher,
-      writeChatId: h.writeChatId,
+      buildOutbox: h.buildOutbox,
       log: h.log,
     });
     expect(result.ok).toBe(false);
@@ -247,7 +254,7 @@ describe("bootTelegramSubsystem", () => {
       access: { allowed_chat_ids: ["100"], allowed_user_ids: [] },
       buildClient: h.buildClient,
       buildDispatcher: h.buildDispatcher,
-      writeChatId: h.writeChatId,
+      buildOutbox: h.buildOutbox,
       log: h.log,
     });
     expect(result.ok).toBe(false);
@@ -256,7 +263,7 @@ describe("bootTelegramSubsystem", () => {
     expect(result.message).toContain("no recent inbound from an allowlisted private chat");
     expect(result.message).toContain("DM your bot, then restart ib watch");
     expect(h.mock.callCount()).toBe(2);
-    expect(h.writes).toEqual([]);
+    expect(h.outboxOpts).toEqual([]);
   });
 
   test("step 2: skips group-chat updates", async () => {
@@ -276,13 +283,13 @@ describe("bootTelegramSubsystem", () => {
       access: { allowed_chat_ids: ["-1001234567890", "-10099"], allowed_user_ids: [] },
       buildClient: h.buildClient,
       buildDispatcher: h.buildDispatcher,
-      writeChatId: h.writeChatId,
+      buildOutbox: h.buildOutbox,
       log: h.log,
     });
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.reason).toBe("no-allowlisted-inbound");
-    expect(h.writes).toEqual([]);
+    expect(h.outboxOpts).toEqual([]);
   });
 
   test("step 2: skips non-allowlisted private chats", async () => {
@@ -300,7 +307,7 @@ describe("bootTelegramSubsystem", () => {
       access: { allowed_chat_ids: ["100"], allowed_user_ids: [] },
       buildClient: h.buildClient,
       buildDispatcher: h.buildDispatcher,
-      writeChatId: h.writeChatId,
+      buildOutbox: h.buildOutbox,
       log: h.log,
     });
     expect(result.ok).toBe(false);
@@ -325,13 +332,14 @@ describe("bootTelegramSubsystem", () => {
       access: { allowed_chat_ids: ["100", "200"], allowed_user_ids: [] },
       buildClient: h.buildClient,
       buildDispatcher: h.buildDispatcher,
-      writeChatId: h.writeChatId,
+      buildOutbox: h.buildOutbox,
       log: h.log,
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.chatId).toBe("100");
-    expect(h.writes).toEqual(["100"]);
+    expect(h.outboxOpts.length).toBe(1);
+    expect(h.outboxOpts[0]!.chatId).toBe("100");
   });
 
   test("happy path: probe + resolve + dispatcher constructed with offset hint", async () => {
@@ -349,14 +357,15 @@ describe("bootTelegramSubsystem", () => {
       access: { allowed_chat_ids: ["100"], allowed_user_ids: ["7"] },
       buildClient: h.buildClient,
       buildDispatcher: h.buildDispatcher,
-      writeChatId: h.writeChatId,
+      buildOutbox: h.buildOutbox,
       log: h.log,
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.chatId).toBe("100");
-    expect(h.writes).toEqual(["100"]);
     expect(h.dispatchers.length).toBe(1);
+    expect(h.outboxOpts.length).toBe(1);
+    expect(h.outboxOpts[0]!.chatId).toBe("100");
     expect(h.logs).toEqual([]); // happy path is silent
   });
 
@@ -407,7 +416,7 @@ describe("bootTelegramSubsystem", () => {
       access: { allowed_chat_ids: ["100"], allowed_user_ids: [] },
       buildClient: h.buildClient,
       buildDispatcher: h.buildDispatcher,
-      writeChatId: h.writeChatId,
+      buildOutbox: h.buildOutbox,
       log: h.log,
     });
     expect(result.ok).toBe(true);

@@ -10,8 +10,6 @@ import {
   isGroupShaped,
   setStateDir,
   resetStateDir,
-  readChatId,
-  writeChatId,
 } from "./access";
 
 let tmpRoot: string;
@@ -187,64 +185,3 @@ describe("isGroupShaped", () => {
   });
 });
 
-describe("chat-id state file (writeChatId / readChatId)", () => {
-  test("readChatId returns null when the file does not exist", async () => {
-    expect(await readChatId()).toBeNull();
-  });
-
-  test("writeChatId then readChatId round-trips a numeric id as string", async () => {
-    await writeChatId(12345);
-    expect(await readChatId()).toBe("12345");
-  });
-
-  test("writeChatId then readChatId round-trips a string id", async () => {
-    await writeChatId("987654");
-    expect(await readChatId()).toBe("987654");
-  });
-
-  test("readChatId trims trailing newline written by writeChatId", async () => {
-    await writeChatId("42");
-    // The file should contain a trailing newline, but readChatId trims it.
-    const raw = await Bun.file(join(stateDir, "chat-id")).text();
-    expect(raw.endsWith("\n")).toBe(true);
-    expect(await readChatId()).toBe("42");
-  });
-
-  test("readChatId returns null when the file is empty", async () => {
-    await writeChatId("seed");
-    await writeFile(join(stateDir, "chat-id"), "");
-    expect(await readChatId()).toBeNull();
-  });
-
-  test("readChatId returns null when the file is whitespace-only", async () => {
-    await writeChatId("seed");
-    await writeFile(join(stateDir, "chat-id"), "   \n\n");
-    expect(await readChatId()).toBeNull();
-  });
-
-  test("writeChatId overwrites the previous value", async () => {
-    await writeChatId("111");
-    await writeChatId("222");
-    expect(await readChatId()).toBe("222");
-  });
-
-  test("writeChatId creates the state directory if missing", async () => {
-    // No prior write to addChat; the dir should not exist yet.
-    let exists = true;
-    try {
-      await readdir(stateDir);
-    } catch {
-      exists = false;
-    }
-    expect(exists).toBe(false);
-
-    await writeChatId("555");
-    const entries = await readdir(stateDir);
-    expect(entries).toContain("chat-id");
-  });
-
-  test("writeChatId trims whitespace from the input", async () => {
-    await writeChatId("  12345  \n");
-    expect(await readChatId()).toBe("12345");
-  });
-});

@@ -55,8 +55,9 @@ ib tgallow <YOUR_CHAT_ID>
 > **Note**: `ib watch` resolves the chat ID from your most recent inbound
 > DM at startup. You must DM the bot at least once and have run
 > `ib tgallow <your_chat_id>` before `ib watch`'s Telegram subsystem will
-> start. The resolved chat ID is cached at
-> `~/.itsybitsy/channels/telegram/chat-id` so `ib tgsend` can read it.
+> start. The chat ID lives in memory only — `ib tgsend` hands its message
+> to `ib watch` via a file-drop outbox rather than knowing the chat ID
+> itself.
 
 Start `ib watch`. Look at its stderr — you should see no "Telegram
 routing disabled" warnings. If you see "Telegram routing disabled:
@@ -71,10 +72,14 @@ fails, fix it before moving on.
 
 ### 4.1. Outbound (catches token/chat-id misconfiguration)
 
-`ib tgsend` reads the chat ID from `~/.itsybitsy/channels/telegram/chat-id`,
-which `ib watch` writes after step 2 of the Telegram boot succeeds. Run
-`ib watch` at least once first so the file exists, then in a separate
-shell:
+`ib tgsend` writes to `~/.itsybitsy/channels/telegram/outbox/` and waits
+up to 1s for `ib watch` to send the message and write back a result. If
+no result appears, the message stays queued in the outbox dir and will be
+processed when `ib watch` next starts (assuming Telegram is configured).
+`ib tgsend` itself does not know the chat ID and never talks to Telegram —
+only `ib watch` does.
+
+Make sure `ib watch` is running, then in a separate shell:
 
 ```sh
 ib tgsend "hello from ib"
@@ -83,9 +88,11 @@ ib tgsend "hello from ib"
 Expected: prints `ok`, the message arrives in your Telegram chat from the
 bot.
 
-If you see `Telegram chat not yet resolved`, you haven't run `ib watch`
-since the bot received an allowlisted DM. DM the bot, then start
-`ib watch` again.
+If you see `queued (ib watch may not be running, or Telegram is not configured)`,
+either `ib watch` is not running or its Telegram subsystem failed to boot
+(see step 4.2's stderr lines). The message is still on disk under the
+outbox directory and will be sent the next time `ib watch` boots
+successfully.
 
 ### 4.2. Inbound, single message (catches dispatcher startup, allowlist,
 channel-reminder format)

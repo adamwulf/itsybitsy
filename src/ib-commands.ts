@@ -3450,74 +3450,60 @@ export async function uninstallInterceptHook(_repoPath: string, settingsPath?: s
 }
 
 /**
- * Outbound `ib tgsend` — chunk the text and POST each chunk via TelegramClient.
+ * Outbound `ib tgsend` — file-drop client for the `ib watch` outbox.
  *
- * Reads `channels.telegram.bot_token` from config and the resolved chat id
- * from the state file at `~/.itsybitsy/channels/telegram/chat-id`, which
- * `ib watch` writes after step 2 of the Telegram subsystem boot succeeds.
- * If the state file is missing or empty, the user has not yet DM'd their
- * allowlisted bot — we surface a clear error pointing at the fix.
- *
- * 429 handling: TelegramClient.sendMessage does not retry on 429 (the v1
- * contract is "return what we got, let the caller branch"). We do one retry
- * here per Phase 6 spec — sleep `Retry-After` seconds then call once more.
- * If the retry also fails, give up.
+ * Phase B refactor: `ib tgsend` no longer talks to Telegram directly. It
+ * writes the message text to `~/.itsybitsy/channels/telegram/outbox/` and
+ * polls for a `<stem>.txt.result` file containing the JSON outcome from
+ * `ib watch`'s outbox processor. If `ib watch` is not running (or Telegram
+ * is not configured), no result will appear; we time out after 1s and
+ * return an "ok-but-queued" outcome so the caller exits 0 — the message is
+ * legitimately waiting on disk and `ib watch` will pick it up next start.
  */
 export async function telegramSend(text: string): Promise<{ ok: boolean; message: string }> {
-  const cfg = await readConfig();
-  const tokenEntry = cfg["channels.telegram.bot_token"];
-  const token = typeof tokenEntry?.value === "string" ? tokenEntry.value : "";
+  const { defaultOutboxDir } = await import("./channels/outbox");
+  const { mkdir, rename, readFile, unlink } = await import("fs/promises");
+  const { randomBytes } = await import("crypto");
+  const { join } = await import("path");
 
-  if (!token) {
-    return { ok: false, message: "Telegram not configured: set channels.telegram.bot_token in ~/.itsybitsy/config.json" };
-  }
+  const dir = defaultOutboxDir();
+  const stem = `${Date.now()}-${randomBytes(3).toString("hex")}`;
+  const txtPath = join(dir, `${stem}.txt`);
+  const tmpPath = `${txtPath}.tmp`;
+  const resultPath = `${txtPath}.result`;
 
-  const { readChatId } = await import("./channels/access");
-  const chatId = await readChatId();
-  if (chatId === null) {
-    return {
-      ok: false,
-      message:
-        "Telegram chat not yet resolved — start `ib watch` and ensure the bot has received a recent allowlisted DM.",
-    };
-  }
+  await mkdir(dir, { recursive: true });
+  await Bun.write(tmpPath, text);
+  await rename(tmpPath, txtPath);
 
-  const { TelegramClient, chunk, sleepCtx } = await import("./channels/telegram-client");
-  const client = new TelegramClient({ token });
-  const chunks = chunk(text);
-
-  for (const piece of chunks) {
-    let resp;
+  // Poll up to 1s for the result file. 100ms cadence keeps the small-message
+  // happy path fast (one round trip is typically <100ms) without spinning.
+  const POLL_INTERVAL_MS = 100;
+  const POLL_ATTEMPTS = 10;
+  for (let i = 0; i < POLL_ATTEMPTS; i++) {
+    await new Promise<void>((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+    let resultText: string;
     try {
-      resp = await client.sendMessage({ chat_id: chatId, text: piece });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      return { ok: false, message: `sendMessage failed: ${msg}` };
+      resultText = await readFile(resultPath, "utf8");
+    } catch {
+      continue;
     }
-    if (!resp.ok) {
-      // 429 → retry once after Retry-After sleep. Prefer the value parsed from
-      // the HTTP header (surfaced as retryAfterSec), since Telegram sometimes
-      // returns the header without a body parameter; readRaw already falls
-      // back to parameters.retry_after when the header is missing.
-      if (resp.error_code === 429 || resp.status === 429) {
-        const retryAfterSec = resp.retryAfterSec ?? 1;
-        await sleepCtx.fn(retryAfterSec * 1000);
-        let retryResp;
-        try {
-          retryResp = await client.sendMessage({ chat_id: chatId, text: piece });
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          return { ok: false, message: `sendMessage failed after 429 retry: ${msg}` };
-        }
-        if (retryResp.ok) continue;
-        const desc = retryResp.description ?? `HTTP ${retryResp.error_code ?? "unknown"}`;
-        return { ok: false, message: `sendMessage failed after 429 retry: ${desc}` };
-      }
-      const desc = resp.description ?? `HTTP ${resp.error_code ?? "unknown"}`;
-      return { ok: false, message: `sendMessage failed: ${desc}` };
+    let parsed: { ok: boolean; message: string };
+    try {
+      parsed = JSON.parse(resultText) as { ok: boolean; message: string };
+    } catch {
+      // Malformed result — treat as transient and keep polling. The outbox
+      // processor writes valid JSON or nothing.
+      continue;
     }
+    // Best-effort delete of the .result; the outbox cleans up after 5s anyway.
+    await unlink(resultPath).catch(() => { /* ignore */ });
+    return { ok: !!parsed.ok, message: String(parsed.message ?? "") };
   }
 
-  return { ok: true, message: chunks.length === 1 ? "ok" : `ok (${chunks.length} parts)` };
+  return {
+    ok: true,
+    message: "queued (ib watch may not be running, or Telegram is not configured)",
+  };
 }
 

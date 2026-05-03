@@ -1,5 +1,5 @@
 /**
- * Three-step boot of the Telegram subsystem (Phase A).
+ * Three-step boot of the Telegram subsystem.
  *
  * `ib watch` calls {@link bootTelegramSubsystem} during launch. Each step
  * gates the next; a failure logs one stderr line and leaves the rest of the
@@ -10,28 +10,32 @@
  *      the token is rejected; anything else is logged as a network failure.
  *   2. Resolve chat ID — call probeOnce again with limit=100 and walk the
  *      returned updates for the first private-chat message whose chat.id is
- *      in the allowlist. The id is cached in memory and persisted to a state
- *      file (`~/.itsybitsy/channels/telegram/chat-id`) so out-of-process
- *      `ib tgsend` can read it.
- *   3. Start dispatcher — instantiate {@link TelegramDispatcher} with the
- *      cached chat id and an offset hint = max(consumed update_id) + 1, so
- *      the dispatcher's first long-poll does not re-deliver messages already
- *      seen during step 2.
+ *      in the allowlist. The id is held in memory and handed to the
+ *      dispatcher and outbox; no on-disk persistence (Phase B removed the
+ *      `chat-id` state file — `ib tgsend` now drops messages into the outbox
+ *      and `ib watch` is the only process that talks to Telegram).
+ *   3. Start subsystem — instantiate {@link TelegramDispatcher} with the
+ *      cached chat id and an offset hint = max(consumed update_id) + 1, and
+ *      instantiate {@link TelegramOutbox} with the same client and chat id.
+ *      The dispatcher's first long-poll skips updates step 2 already saw;
+ *      the outbox owns the file-drop queue from `ib tgsend`.
  *
- * Returns a {@link BootResult} describing the outcome. The caller owns the
- * dispatcher lifecycle (start/stop). When `dispatcher` is null the subsystem
- * is disabled — caller skips shutdown.
+ * Returns a {@link BootResult} describing the outcome. The caller owns both
+ * dispatcher and outbox lifecycles (start/stop). When `ok` is false neither
+ * is constructed — caller skips shutdown.
  */
 
 import type { TelegramClient } from "./telegram-client";
 import type { TelegramDispatcher, DispatcherOptions } from "./dispatcher";
+import type { TelegramOutbox, OutboxOptions } from "./outbox";
 import type { AccessState } from "./access";
 
-/** Successful boot — dispatcher is constructed and started. */
+/** Successful boot — dispatcher and outbox are constructed (not yet started). */
 export interface BootSuccess {
   ok: true;
   chatId: string;
   dispatcher: TelegramDispatcher;
+  outbox: TelegramOutbox;
 }
 
 /** Subsystem disabled — log line was emitted, no dispatcher. */
@@ -54,14 +58,13 @@ export type BootResult = BootSuccess | BootDisabled;
 export type LogFn = (line: string) => void;
 const defaultLog: LogFn = (line) => process.stderr.write(line + "\n");
 
-/** Injected `writeChatId` — defaults to the real {@link writeChatId} from
- *  `./access`. Tests inject a spy to assert the persisted value without
- *  touching the filesystem. */
-export type WriteChatIdFn = (id: string) => Promise<void>;
-
 /** Factory for the dispatcher. Tests inject a fake constructor to capture
  *  the options passed in step 3 without booting a real long-poll loop. */
 export type DispatcherFactory = (opts: DispatcherOptions) => TelegramDispatcher;
+
+/** Factory for the outbox. Tests inject a fake to capture options without
+ *  installing a real fs.watch. */
+export type OutboxFactory = (opts: OutboxOptions) => TelegramOutbox;
 
 export interface BootOptions {
   /** Bot token from config. Empty/unset → returns "no-token" disabled result. */
@@ -77,9 +80,9 @@ export interface BootOptions {
   /** Construct a {@link TelegramDispatcher}. Injected for tests. Defaults
    *  to `new TelegramDispatcher(opts)` in production. */
   buildDispatcher: DispatcherFactory;
-  /** Persist the resolved chat id. Defaults to {@link writeChatId} in
-   *  production; tests inject a spy. */
-  writeChatId: WriteChatIdFn;
+  /** Construct a {@link TelegramOutbox}. Injected for tests. Defaults to
+   *  `new TelegramOutbox(opts)` in production. */
+  buildOutbox: OutboxFactory;
   /** Log sink — defaults to stderr. */
   log?: LogFn;
 }
@@ -182,12 +185,8 @@ export async function bootTelegramSubsystem(opts: BootOptions): Promise<BootResu
     return { ok: false, reason: "no-allowlisted-inbound", message };
   }
 
-  // Persist the resolved chat id so `ib tgsend` (a separate process) can use
-  // it. Throwaway plumbing — Phase B replaces tgsend's in-process send with
-  // an outbox queue and this file goes away.
-  await opts.writeChatId(resolvedChatId);
-
-  // Step 3 — start dispatcher.
+  // Step 3 — construct dispatcher and outbox. Both share the resolved chat id;
+  // the caller starts each independently.
   const initialOffset = maxConsumedId >= 0 ? maxConsumedId + 1 : undefined;
   const dispatcher = opts.buildDispatcher({
     client,
@@ -196,8 +195,12 @@ export async function bootTelegramSubsystem(opts: BootOptions): Promise<BootResu
     chatId: resolvedChatId,
     initialOffset,
   });
+  const outbox = opts.buildOutbox({
+    client,
+    chatId: resolvedChatId,
+  });
 
-  return { ok: true, chatId: resolvedChatId, dispatcher };
+  return { ok: true, chatId: resolvedChatId, dispatcher, outbox };
 }
 
 /** Trim to a bounded length so a stray exception message can't dump arbitrary

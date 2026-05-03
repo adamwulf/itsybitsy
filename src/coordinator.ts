@@ -303,6 +303,14 @@ async function ensureHomeRepo(): Promise<void> {
 
 /**
  * Write settings.local.json and coordinator-prompt.txt to ~/.itsybitsy/.
+ *
+ * The settings file includes the four agent hooks (path-check, intercept-task,
+ * permission-denied, session-start), all keyed to the `@system` sentinel agent
+ * ID. The Stop hook is intentionally omitted — the system coordinator has its
+ * own state detection in `detectSystemCoordinatorState()`.
+ *
+ * `spinnerTipsEnabled: false` matches per-repo coordinators (see
+ * `src/ib-commands.ts`, the `coordinatorMode` branch).
  */
 async function writeCoordinatorFiles(): Promise<void> {
   const home = itsybitsyHome();
@@ -312,7 +320,19 @@ async function writeCoordinatorFiles(): Promise<void> {
   const claudeDir = join(home, ".claude");
   await mkdir(claudeDir, { recursive: true });
   const settingsPath = join(claudeDir, "settings.local.json");
-  const settings = await buildSystemCoordinatorSettings();
+  const baseSettings = await buildSystemCoordinatorSettings();
+  const settings = {
+    ...baseSettings,
+    spinnerTipsEnabled: false,
+    hooks: {
+      PreToolUse: [
+        { matcher: "*", hooks: [{ type: "command", command: "ib hook-check-path @system" }] },
+        { matcher: "Task|Agent|TaskCreate|Bash|AskUserQuestion", hooks: [{ type: "command", command: "ib hooks intercept-task" }] },
+      ],
+      PermissionRequest: [{ matcher: "*", hooks: [{ type: "command", command: "ib hook-permission-denied @system" }] }],
+      SessionStart: [{ hooks: [{ type: "command", command: "ib hooks session-start @system" }] }],
+    },
+  };
   await Bun.write(settingsPath, JSON.stringify(settings, null, 2) + "\n");
 
   // Write coordinator-prompt.txt

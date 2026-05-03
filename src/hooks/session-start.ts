@@ -3,7 +3,7 @@
  */
 
 import { join, basename } from "path";
-import { AGENT_CWD_PATTERN } from "./shared";
+import { AGENT_CWD_PATTERN, SYSTEM_AGENT_ID } from "./shared";
 import { loadAgentType, listSpawnableAgentTypesSync } from "../agent-types";
 import { writeAgentState } from "../agents";
 
@@ -685,6 +685,24 @@ export async function hookSessionStart(rawStdin?: string, agentIdArg?: string): 
   const data = parsed as Record<string, unknown>;
 
   const cwd: string = (data.cwd as string) ?? process.cwd();
+
+  // System coordinator: no meta.json on disk, cwd is `~/.itsybitsy/` rather
+  // than a worktree path, and the prompt is the SYSTEM_COORDINATOR_PROMPT
+  // from coordinator.ts. Inject it directly as additionalContext (wrapped in
+  // <ittybitty> tags for consistency with other roles' instructions). The
+  // dynamic import keeps `coordinator.ts` (which transitively pulls in
+  // tmux-poller and friends) out of the hot hook-import path.
+  if (agentIdArg === SYSTEM_AGENT_ID) {
+    const { SYSTEM_COORDINATOR_PROMPT } = await import("../coordinator");
+    const output = {
+      hookSpecificOutput: {
+        hookEventName: "SessionStart",
+        additionalContext: `<ittybitty>\n${SYSTEM_COORDINATOR_PROMPT}\n</ittybitty>`,
+      },
+    };
+    process.stdout.write(JSON.stringify(output));
+    return;
+  }
 
   // Detect role - read meta.json from filesystem if in an agent directory
   const match = AGENT_CWD_PATTERN.exec(cwd);

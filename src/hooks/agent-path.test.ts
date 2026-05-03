@@ -1,8 +1,9 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { checkPathAccess, toolMatchesPattern, parseIbCommand, checkIbCommandAccess, isInAllowedPaths, claudeProjectDirFor } from "./agent-path";
+import { checkPathAccess, toolMatchesPattern, parseIbCommand, checkIbCommandAccess, isInAllowedPaths, claudeProjectDirFor, hookCheckPath } from "./agent-path";
 import type { PathCheckInput, PathCheckContext } from "./agent-path";
 import { join } from "path";
-import { mkdir, rm } from "fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "fs/promises";
+import { tmpdir } from "os";
 
 /** Build a default context for testing */
 function makeCtx(overrides: Partial<PathCheckContext> = {}): PathCheckContext {
@@ -736,6 +737,32 @@ describe("checkIbCommandAccess", () => {
     expect(result).not.toBeNull();
     expect(result!.decision).toBe("deny");
   });
+
+  // ── @system bypass ─────────────────────────────────────────────────────────
+
+  test("@system can run kill on any agent regardless of manager/spawner", async () => {
+    await writeAgentMeta("agent-target1", { id: "agent-target1", manager: "agent-manager1" });
+    const result = await checkIbCommandAccess("ib kill agent-target1", "@system", agentsDir);
+    expect(result).toBeNull();
+  });
+
+  test("@system can run merge on any agent", async () => {
+    await writeAgentMeta("agent-target1", { id: "agent-target1", manager: "agent-manager1" });
+    const result = await checkIbCommandAccess("ib merge agent-target1 --force", "@system", agentsDir);
+    expect(result).toBeNull();
+  });
+
+  test("@system can run nuke on any agent", async () => {
+    await writeAgentMeta("agent-target1", { id: "agent-target1", manager: "agent-manager1" });
+    const result = await checkIbCommandAccess("ib nuke agent-target1", "@system", agentsDir);
+    expect(result).toBeNull();
+  });
+
+  test("@system can run kill on a target that doesn't exist (no found-in-repo check)", async () => {
+    // No target meta written — @system bypass returns null before existence check
+    const result = await checkIbCommandAccess("ib kill agent-target1", "@system", agentsDir);
+    expect(result).toBeNull();
+  });
 });
 
 // ── isInAllowedPaths ─────────────────────────────────────────────────────────
@@ -1045,5 +1072,76 @@ describe("checkPathAccess with own Claude project dir", () => {
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("allow");
     expect(result.reason).toContain("accessing own Claude project dir");
+  });
+});
+
+// ── hookCheckPath with @system ────────────────────────────────────────────────
+
+describe("hookCheckPath with @system", () => {
+  let tempHome: string;
+  let originalHome: string | undefined;
+  let logged: string[] = [];
+  const originalLog = console.log;
+
+  beforeEach(async () => {
+    originalHome = process.env.HOME;
+    tempHome = await mkdtemp(join(tmpdir(), "sys-coord-hook-check-"));
+    process.env.HOME = tempHome;
+    // Create the system coordinator home with an allow list permitting Bash(ib:*)
+    const claudeDir = join(tempHome, ".itsybitsy", ".claude");
+    await mkdir(claudeDir, { recursive: true });
+    await writeFile(
+      join(claudeDir, "settings.local.json"),
+      JSON.stringify({ permissions: { allow: ["Bash(ib:*)"], deny: [] } }),
+    );
+    logged = [];
+    console.log = (msg: string) => { logged.push(msg); };
+  });
+
+  afterEach(async () => {
+    console.log = originalLog;
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+    await rm(tempHome, { recursive: true, force: true });
+  });
+
+  test("allows ib commands when called from system coordinator home", async () => {
+    const home = join(tempHome, ".itsybitsy");
+    const stdin = JSON.stringify({
+      tool_name: "Bash",
+      tool_input: { command: "ib list" },
+      cwd: home,
+    });
+    await hookCheckPath("@system", stdin);
+    expect(logged.length).toBe(1);
+    const decision = JSON.parse(logged[0]!);
+    expect(decision.hookSpecificOutput.permissionDecision).toBe("allow");
+  });
+
+  test("denies tools not in the system coordinator's allow list", async () => {
+    const home = join(tempHome, ".itsybitsy");
+    const stdin = JSON.stringify({
+      tool_name: "Read",
+      tool_input: { file_path: "/etc/passwd" },
+      cwd: home,
+    });
+    await hookCheckPath("@system", stdin);
+    expect(logged.length).toBe(1);
+    const decision = JSON.parse(logged[0]!);
+    expect(decision.hookSpecificOutput.permissionDecision).toBe("deny");
+    expect(decision.hookSpecificOutput.permissionDecisionReason).toContain("not in allow list");
+  });
+
+  test("does not crash when worktree/agentsDir do not exist", async () => {
+    // Sanity check: even without a real git worktree, the @system path
+    // resolution shouldn't throw.
+    const home = join(tempHome, ".itsybitsy");
+    const stdin = JSON.stringify({
+      tool_name: "Bash",
+      tool_input: { command: "ib status" },
+      cwd: home,
+    });
+    await expect(hookCheckPath("@system", stdin)).resolves.toBeUndefined();
+    expect(logged.length).toBe(1);
   });
 });

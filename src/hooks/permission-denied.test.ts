@@ -1,6 +1,6 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { join } from "path";
-import { mkdtemp, rm, readFile } from "fs/promises";
+import { mkdir, mkdtemp, rm, readFile } from "fs/promises";
 import { tmpdir } from "os";
 
 describe("hookPermissionDenied", () => {
@@ -39,5 +39,38 @@ describe("hookPermissionDenied", () => {
 
     const logContent = await readFile(join(agentDir, "agent.log"), "utf-8");
     expect(logContent).toContain("[PermissionRequest] Tool denied: unknown");
+  });
+});
+
+describe("hookPermissionDenied with @system", () => {
+  let tempHome: string;
+  let originalHome: string | undefined;
+  let originalCwd: string;
+  let coordHome: string;
+
+  beforeEach(async () => {
+    originalHome = process.env.HOME;
+    originalCwd = process.cwd();
+    tempHome = await mkdtemp(join(tmpdir(), "perm-denied-system-"));
+    process.env.HOME = tempHome;
+    coordHome = join(tempHome, ".itsybitsy");
+    await mkdir(coordHome, { recursive: true });
+    process.chdir(coordHome);
+  });
+
+  afterEach(async () => {
+    process.chdir(originalCwd);
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+    await rm(tempHome, { recursive: true, force: true });
+  });
+
+  test("routes log to ~/.itsybitsy/agent.log when called from system coordinator", async () => {
+    const { hookPermissionDenied } = await import("./permission-denied");
+    const stdin = JSON.stringify({ tool_name: "Read" });
+    await hookPermissionDenied("@system", stdin);
+
+    const logContent = await readFile(join(coordHome, "agent.log"), "utf-8");
+    expect(logContent).toContain("[PermissionRequest] Tool denied: Read");
   });
 });

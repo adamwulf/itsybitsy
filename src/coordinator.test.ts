@@ -480,6 +480,48 @@ describe("ensureSystemCoordinator", () => {
     expect(settings.permissions.deny).not.toContain("Bash");
   });
 
+  test("writes the four agent hooks (no Stop) and spinnerTipsEnabled:false", async () => {
+    coordinatorSpawnCtx.set(createCommandRouter({
+      "has-session": { exitCode: 1 },
+    }));
+
+    await ensureSystemCoordinator();
+
+    const settingsPath = join(tmpDir, ".claude", "settings.local.json");
+    const settings = JSON.parse(await readFile(settingsPath, "utf-8"));
+
+    expect(settings.spinnerTipsEnabled).toBe(false);
+
+    // Stop hook is intentionally absent — system coordinator has its own
+    // state detection in detectSystemCoordinatorState.
+    expect(settings.hooks.Stop).toBeUndefined();
+
+    // PreToolUse: path-check + intercept-task
+    const preToolUse = settings.hooks.PreToolUse;
+    expect(Array.isArray(preToolUse)).toBe(true);
+    const preCommands = preToolUse.flatMap((entry: any) =>
+      entry.hooks.map((h: any) => h.command),
+    );
+    expect(preCommands).toContain("ib hook-check-path @system");
+    expect(preCommands).toContain("ib hooks intercept-task");
+
+    // PermissionRequest
+    const permissionRequest = settings.hooks.PermissionRequest;
+    expect(Array.isArray(permissionRequest)).toBe(true);
+    const permCommands = permissionRequest.flatMap((entry: any) =>
+      entry.hooks.map((h: any) => h.command),
+    );
+    expect(permCommands).toContain("ib hook-permission-denied @system");
+
+    // SessionStart
+    const sessionStart = settings.hooks.SessionStart;
+    expect(Array.isArray(sessionStart)).toBe(true);
+    const ssCommands = sessionStart.flatMap((entry: any) =>
+      entry.hooks.map((h: any) => h.command),
+    );
+    expect(ssCommands).toContain("ib hooks session-start @system");
+  });
+
   test("writes coordinator-prompt.txt during creation", async () => {
     coordinatorSpawnCtx.set(createCommandRouter({
       "has-session": { exitCode: 1 },

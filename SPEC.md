@@ -1427,7 +1427,12 @@ The system coordinator panel uses its own `TmuxPoller` instance (separate from t
 
 #### 12.1.5 Session Start Context
 
-The system coordinator does NOT use the standard session-start hook (§6.3). Instead, it receives a custom initial prompt explaining its role:
+The system coordinator's prompt is delivered through two paths that re-enforce the same content:
+
+1. **Initial paste** — On first launch (`fresh` mode), the prompt is typed into the tmux session via `tmux send-keys`. This is what the user sees in the conversation history.
+2. **Session-start hook** — The standard `ib hooks session-start @system` hook is installed in `~/.itsybitsy/.claude/settings.local.json` (§12.1.7) and emits the same prompt as `additionalContext` on every session start (including resumes).
+
+Both paths inject the same content:
 
 > You are the itsybitsy system coordinator. You manage agents across all registered repos using `ib` commands. You can list agents (`ib list`), send messages to agents (`ib send <agent-id> "message"`), merge (`ib merge`), kill (`ib kill`), create agents (`ib new-agent`), and check status (`ib status`, `ib diff`). You do NOT have access to Read, Write, Edit, or any file tools — only `ib` Bash commands. You coordinate work at the system level — for repo-specific coordination, delegate to per-repo coordinators. To send messages to per-repo coordinators, use `ib send @<repo-name> "message"` (e.g., `ib send @itsybitsy "review the latest PR"`). To send to a specific agent in another repo, use `ib send @<repo-name>/<agent-id> "message"`. Do NOT use `ib send @system` — that routes back to you.
 
@@ -1445,6 +1450,17 @@ The system coordinator does **not** have a standard watchdog or stop hook. It is
 - The system coordinator has no `waiting` or `complete` states — it runs indefinitely. There is no meta.json to store state, so tmux is the sole source of truth.
 - If the system coordinator session dies unexpectedly, the main area TMUX view shows "Session stopped — press R to restart". The `R` key (same as agent resume) triggers `restartSystemCoordinator()` when the system coordinator is selected.
 - The system coordinator is expected to run indefinitely — it is never nudged to complete
+
+#### 12.1.7 Hook Installation
+
+The system coordinator's `~/.itsybitsy/.claude/settings.local.json` includes four of the five agent hooks (§6), all keyed to the `@system` sentinel agent ID:
+
+- `PreToolUse` → `ib hook-check-path @system` (path isolation — `~/.itsybitsy/` is its own worktree, so cross-agent and main-repo blocks are no-ops; the allow-list check still runs)
+- `PreToolUse` → `ib hooks intercept-task` (intercepts Task/Agent/TaskCreate, denies AskUserQuestion, blocks shell metacharacters and `--output` in coordinator Bash commands per §12.2.4)
+- `PermissionRequest` → `ib hook-permission-denied @system` (logs denials to `~/.itsybitsy/agent.log`)
+- `SessionStart` → `ib hooks session-start @system` (injects the system coordinator prompt as `additionalContext`)
+
+The Stop hook is intentionally **not** installed — the system coordinator's state detection lives in `detectSystemCoordinatorState()` (§12.1.6), which polls tmux output and does not need a Claude-driven idle signal. The `@system` sentinel is the system coordinator's identity at every hook callsite; it is not a valid agent ID per `isValidAgentId()` (it begins with `@`), but the three hook entry points (`hook-check-path`, `hook-permission-denied`, and the optional `agentIdArg` of `hooks session-start`) accept the literal `@system` because it is hardcoded into the coordinator's settings file by `writeCoordinatorFiles()` and is not user input. `ib hook-status` does not accept `@system` — the Stop hook is omitted, so the path is unreachable.
 
 ### 12.2 Per-Repo Coordinators
 

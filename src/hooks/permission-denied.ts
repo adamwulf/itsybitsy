@@ -7,6 +7,7 @@
 
 import { join } from "path";
 import { logAgent } from "../agent-lifecycle";
+import { resolveAgentFromCwd } from "./shared";
 
 /**
  * CLI entry for hook-permission-denied subcommand.
@@ -23,12 +24,15 @@ export async function hookPermissionDenied(agentId: string, rawStdin?: string): 
     // If stdin parsing fails, log with "unknown"
   }
 
-  // Derive agentDir from cwd pattern or process.cwd()
+  // Derive agentDir from cwd. resolveAgentFromCwd handles both worktree
+  // agents (cwd inside `<repo>/.ittybitty/agents/<id>/repo`) and the
+  // system coordinator (cwd inside `~/.itsybitsy/`). For the system
+  // coordinator this routes the log to `~/.itsybitsy/agent.log`.
   const cwd = process.cwd();
-  const match = cwd.match(/(.*\/.ittybitty\/agents\/[^/]+)/);
+  const resolved = resolveAgentFromCwd(cwd);
   let agentDir: string;
-  if (match) {
-    agentDir = match[1]!;
+  if (resolved) {
+    agentDir = resolved.agentDir;
   } else {
     // Fallback: assume standard agent directory layout
     const agentsDirMatch = cwd.match(/(.*\/.ittybitty\/agents)/);

@@ -993,13 +993,17 @@ export async function detectAgentStates(agents: Agent[]): Promise<void> {
       // background-task override is scoped to meta.state === "waiting"). Trust
       // the stored state and skip the tmux capture (saves a posix_spawn +
       // ~20 openat() per agent per 2s tick).
-      // Trade-off: if the tmux session is killed externally without archiving
-      // the agent, this will keep reporting 'complete' instead of 'stopped'
-      // until the agent is archived (which routes through Step 1 above and
-      // sets state = "stopped"). Acceptable — the alternative is a
-      // `tmux has-session` check per agent per tick, which defeats the
-      // optimization. Cosmetic-only on signed-off agents.
+      //
+      // Liveness gate: verify claude_pid is still alive via signal 0 (free —
+      // pure syscall, no spawn). If Claude died without archiving the agent,
+      // demote to 'stopped' so the dashboard reflects reality. Empty/invalid
+      // claude_pid (legacy agents) skips the check and trusts meta.state.
       if (agent.meta.state === "complete") {
+        const claudePid = parseInt(agent.meta.claude_pid, 10);
+        if (claudePid > 0 && !isPidAliveCtx.fn(claudePid)) {
+          agent.state = "stopped";
+          return;
+        }
         agent.state = "complete";
         return;
       }

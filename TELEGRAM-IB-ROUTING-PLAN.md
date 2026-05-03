@@ -1,4 +1,4 @@
-# Telegram via ib send/ask/acknowledge — implementation plan
+# Telegram via ib tgsend + sendToSystemCoordinator — implementation plan
 
 ## Why
 
@@ -21,21 +21,22 @@ source="telegram" ...>` blocks appear in a session and route the bot's
   sessions and no routing to the right session if multiple are open.
 
 Instead, treat Telegram as a **transport for ittybitty's existing
-inter-agent comms** (`ib send`, `ib ask`, `ib acknowledge`). The bot runs
-independently of any Claude session. Inbound messages reach the system
-coordinator the same way any other agent would talk to it (via tmux
-send-keys from `sendToSystemCoordinator()` — the same path `ib send
-@system` uses). The coordinator asks questions back via `ib ask`, which
-the dispatcher routes to Telegram. User replies on Telegram; the
-dispatcher correlates them to the open question, marks it acknowledged
-via `ib acknowledge <qid>`, and delivers the actual reply text via
-`ib send <agent-id> "<reply>"`. (`ib acknowledge` only flips status —
-the answer is a separate `ib send`.)
+inbound comms** (`sendToSystemCoordinator`, the same path `ib send
+@system` uses) plus one new outbound subcommand (`ib tgsend`). The
+bot runs independently of any Claude session. Inbound: the dispatcher
+in `ib watch` polls Telegram, wraps each message in a channel-reminder
+block, and delivers it to the system coordinator via tmux send-keys.
+Outbound: the coordinator runs `ib tgsend "..."` and the subcommand
+posts to Telegram directly. No question/answer correlation, no qid
+aliasing, no `ib ask` interception — just plain text in both
+directions, with the coordinator's normal session scrollback acting as
+the conversational context.
 
 This is independent of Claude Code's channel mechanism, transport
-limitations, and research-preview status. It also generalizes naturally to
-iMessage, Slack, Discord — any channel becomes "another transport for `ib
-ask`/`ib send`."
+limitations, and research-preview status. The dispatcher and the
+`ib tg` subcommand generalize naturally to iMessage, Slack, Discord —
+any channel becomes "another transport for `sendToSystemCoordinator`
+plus a per-channel `ib X send` command."
 
 ## Non-goals
 
@@ -52,6 +53,13 @@ ask`/`ib send`."
 - **Sandbox / cross-repo agent routing.** v1 routes only to the system
   coordinator. Routing to per-repo coordinators or named agents
   (`ib send @itsybitsy "..."`) is a v2 concern.
+- **`ib ask` / question-answer correlation.** v1 has no qid handling.
+  If the coordinator wants a structured Q&A flow, it just types the
+  question into `ib tgsend` and treats whatever the user replies with
+  as the answer (visible in its own scrollback). Real `ib ask`
+  integration would require restructuring `askQuestion()` and
+  `PendingQuestion` to handle the in-memory `@system` agent — out of
+  scope for v1.
 - **External bot processes / bridges.** v1 owns the entire transport:
   `ib watch` polls Telegram directly via the Bot API. The official
   Telegram MCP plugin is no longer attached to the coordinator session.
@@ -63,59 +71,49 @@ ask`/`ib send`."
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│  Telegram cloud (Bot API over HTTPS)                    │
-└────────────────┬─────────────────────────▲──────────────┘
-                 │ getUpdates (long-poll)  │ sendMessage
-                 ▼                         │
-┌─────────────────────────────────────────────────────────┐
-│  ib watch (the dispatcher — new code in src/channels/)  │
-│   ┌─────────────────────────────────────────────────┐   │
-│   │ telegram-client.ts                              │   │
-│   │   getUpdates loop, sendMessage, fetch-based     │   │
-│   └─────────────────────────────────────────────────┘   │
-│   ┌─────────────────────────────────────────────────┐   │
-│   │ inbound dispatcher                              │   │
-│   │   allowlist filter → chat_id → agent_id         │   │
-│   │   wraps in channel-reminder block               │   │
-│   │   sendToSystemCoordinator(wrapped)              │   │
-│   └─────────────────────────────────────────────────┘   │
-│   ┌─────────────────────────────────────────────────┐   │
-│   │ outbound dispatcher                             │   │
-│   │   watches user-questions.json for new pending   │   │
-│   │     qids assigned to @system                    │   │
-│   │   forwards to Telegram with qid alias           │   │
-│   │   handles ib telegram-reply (fire-and-forget)   │   │
-│   └─────────────────────────────────────────────────┘   │
-│   ┌─────────────────────────────────────────────────┐   │
-│   │ reply correlator                                │   │
-│   │   matches Telegram replies to pending aliases   │   │
-│   │   sendToSystemCoordinator(answer) THEN          │   │
-│   │   acknowledgeQuestion(qid)                      │   │
-│   └─────────────────────────────────────────────────┘   │
-└────────────────┬─────────────────────────▲──────────────┘
-                 │ tmux send-keys          │ writes user-questions.json
-                 ▼                         │
-┌─────────────────────────────────────────────────────────┐
-│  System coordinator (Claude Code session in tmux)       │
-│  receives messages via tmux send-keys                   │
-│  asks user questions via `ib ask` (writes file)         │
-│  sends one-off Telegram messages via                    │
-│    `ib telegram-reply <chat_id> "<text>"`               │
-│  has no MCP plugin / no awareness of Telegram           │
-└─────────────────────────────────────────────────────────┘
+                    ┌────────────────────────────┐
+                    │  Telegram cloud            │
+                    │  (Bot API over HTTPS)      │
+                    └────┬──────────▲────────▲───┘
+       getUpdates        │          │        │ sendMessage
+       (long-poll)       │          │        │ (one-shot)
+                         ▼          │        │
+       ┌─────────────────────────┐  │     ┌──┴──────────────┐
+       │ ib watch (TUI)  -OR-    │  │     │ ib tgsend       │
+       │ ib tgdaemon (headless)  │  │     │ (subprocess)    │
+       │                         │  │     └──────▲──────────┘
+       │  long-poll → wrap →     │  │            │ runs from
+       │  sendToSystemCoordinator│  │            │ coordinator
+       │   (multiline:true,      │  │            │
+       │    fromAgent:"@telegram"│  │            │
+       └──────────────┬──────────┘  │            │
+                      │ tmux        │            │
+                      │ send-keys   │            │
+                      ▼             │            │
+       ┌────────────────────────────┴────────────┴───────────┐
+       │ System coordinator (Claude Code in tmux)            │
+       │   receives messages via tmux send-keys              │
+       │   replies via `ib tgsend "<text>"`                  │
+       │   has no MCP plugin / no awareness of Telegram      │
+       └─────────────────────────────────────────────────────┘
 ```
 
-Key property: **the system coordinator has no MCP transport for
-Telegram.** It learns about Telegram only via the channel-reminder
-text we inject inbound (which tells it `ib telegram-reply` and
-`ib ask` are the routes back) and via the new `ib telegram-reply`
-subcommand. All actual transport — connection management, polling,
-allowlist enforcement — lives in `ib watch`.
+Key properties:
+1. **Two clients hit the Telegram API**: the long-running dispatcher
+   for inbound, and one-shot `ib tgsend` invocations for outbound.
+   The Bot API serializes per-chat; concurrent calls just queue.
+2. **The dispatcher runs in either `ib watch` (foreground TUI) or a
+   dedicated `ib tgdaemon` (background)** — both ship in v1 so the
+   user can pick. Don't run both simultaneously against the same bot.
+3. **The coordinator has no MCP plugin for Telegram.** It learns about
+   Telegram only via (a) the channel-reminder text wrapping inbound
+   messages and (b) the `ib tgsend` subcommand. All transport,
+   connection management, polling, and allowlist enforcement live in
+   the dispatcher / subcommand.
 
 ## Pieces to build
 
-Four pieces, in suggested implementation order.
+Three pieces, in suggested implementation order.
 
 ### 1. Telegram transport — direct integration in `ib watch`
 
@@ -141,63 +139,62 @@ process, no bridge, no MCP layer.
   whenever a message arrives. Not viable here (no public URL on the
   user's local Mac without tunnelling). Long-polling is the v1 path.
 
-**Files to touch:**
+**Files to touch (transport + dispatcher lifecycle):**
 - New: `src/channels/telegram-client.ts` — thin wrapper around the
-  Bot API (`getUpdates`, `sendMessage`). Uses `fetch()`. Manages the
-  update-id offset in memory; persists to disk only if we discover a
-  reason to (we don't yet).
-- New: `src/channels/dispatcher.ts` — the long-poll loop, allowlist
-  check, inbound routing, outbound qid table.
-- Removed: `coordinator.telegram` config flag (the
-  `--channels plugin:telegram@...` registration in
-  `src/coordinator.ts:296-301`). Per user: the plugin is installed but
-  should not be used at all. The system coordinator no longer gets the
-  Telegram channel passed to its claude session.
-
-**Files to touch (transport layer only):**
-- New: `src/channels/telegram-client.ts` — see above.
-- New: `src/channels/types.ts` — shared interfaces. `ChannelMessage`,
-  `ChannelClient`, etc.
-- New: `src/channels/dispatcher.ts` — owns the lifecycle of the
-  Telegram client and the outbound/inbound flow. `launchDashboard()`
+  Bot API (`getUpdates`, `sendMessage`). Uses `fetch()` with an
+  `AbortController` so the long-poll can be cancelled cleanly on
+  shutdown. Manages the update-id offset in memory; persists to disk
+  only if we discover a reason to (we don't yet).
+- New: `src/channels/types.ts` — shared interfaces.
+- New: `src/channels/dispatcher.ts` — owns the long-poll loop,
+  allowlist check, channel-reminder wrapping, and per-coordinator
+  serialization mutex. `launchDashboard()`
   (`src/tui/dashboard.ts:1961` — the body of `ib watch`) starts and
-  stops the dispatcher alongside the `AgentWatcher`. The dispatcher is
-  not coupled to TUI rendering; it just runs in the same process.
+  stops the dispatcher alongside the `AgentWatcher`. The dispatcher
+  is not coupled to TUI rendering; it just runs in the same process.
+- New: `src/index.ts` `case "tgdaemon":` — alternate entry point that
+  starts only the dispatcher (no TUI), runs forever. The user
+  supervises it via launchd or any other process manager.
+- Removed: `coordinator.telegram` config flag and the
+  `--channels plugin:telegram@...` registration in
+  `src/coordinator.ts:296-301`. Per user: the plugin is installed but
+  should not be used at all. The system coordinator no longer gets
+  the Telegram channel passed to its claude session.
 
-**Deployment-lifetime note:** Today, `ib watch` is the foreground TUI
-process — when the user quits, the watcher (and our new dispatcher)
-goes with it. If the user wants Telegram routing while the dashboard
-is closed, the dispatcher needs to live in a longer-lived process.
-Options for v1:
-1. Accept the limitation: Telegram works only while `ib watch` is
-   running. Document and move on.
-2. Add a separate `ib telegram-daemon` (or similar) command that runs
-   only the dispatcher, no TUI. The user supervises it via launchd or
-   any other process manager.
-3. Detach the dispatcher into a child process when `ib watch` starts.
-   Complicated; defer.
+**Deployment lifetime — two ways to run the dispatcher in v1:**
 
-**Recommendation: option 1 for v1.** It mirrors the user's actual
-workflow (the dashboard is usually open) and keeps the implementation
-local to one process. If real-world use shows the dashboard is closed
-too often, ship option 2 in a follow-up.
+1. **Inside `ib watch` (foreground TUI).** Started by `launchDashboard()`
+   alongside `AgentWatcher`; stopped on TUI exit via the
+   `AbortController` so the in-flight long-poll cancels within ~1s.
+2. **As `ib tgdaemon` (background, headless).** A separate CLI entry
+   that constructs the same dispatcher class but skips the TUI.
+   Designed to be supervised by launchd. This is the "always on"
+   path — required for the personal-assistant use case where the
+   user wants the assistant reachable when the dashboard isn't open.
+
+Both ship in v1. The two are mutually exclusive against the same bot
+token (long-polling against the same bot from two clients splits
+updates unpredictably). On startup, the dispatcher does a single
+`getUpdates(offset=-1, limit=1, timeout=0)` to clear any held update
+and detect a 409 Conflict (which means a webhook is set or another
+poller is active) — log loudly and exit if 409.
 
 **Failure modes to handle:**
-- Telegram API unreachable on startup (no network): log warning, retry
-  on a backoff. Don't crash `ib watch`.
-- Mid-poll HTTP failure: log, retry with exponential backoff capped at
-  ~30s. The `getUpdates` offset is in memory; on retry, the next call
-  sends the same offset — Telegram responds with the same updates
-  (idempotent). No durable state required for offset.
-- Bot token missing or invalid: log a clear warning ("Telegram routing
-  disabled: bot token not configured" / "Telegram API rejected token,
-  check `coordinator.telegram_bot_token`"). Don't crash; the rest of
-  `ib watch` keeps working.
-- Two `ib watch` instances polling the same bot: Telegram serves each
-  poller a disjoint subset of updates depending on whose request lands
-  first, so messages get split unpredictably. Document as
-  "don't run two `ib watch` against the same bot." Detection is hard
-  without server-side state; punt for v1.
+- Telegram API unreachable on startup (no network): log warning,
+  retry on exponential backoff capped at ~30s. Don't crash the host
+  process (`ib watch` keeps its TUI; `ib tgdaemon` keeps trying).
+- Mid-poll HTTP failure: log, retry with backoff. The `getUpdates`
+  offset is in memory; on retry, the next call sends the same offset
+  — Telegram is idempotent for the same offset. No durable state
+  needed for offset.
+- HTTP 429 (rate limited): parse `Retry-After`, sleep that long,
+  resume.
+- Bot token missing or invalid: log "Telegram routing disabled: bot
+  token not configured" / "Telegram API rejected token, check
+  `channels.telegram.bot_token`." Don't crash.
+- 409 Conflict on startup probe: another poller is active or a
+  webhook is set. Log and exit (in `ib tgdaemon`) or skip Telegram
+  startup entirely (in `ib watch`) so the rest of the TUI works.
 
 ### 2. Inbound dispatcher (Telegram → coordinator)
 
@@ -210,263 +207,111 @@ dispatcher needs to:
    the system coordinator (`@system` sentinel).
 3. Wrap the message text with a channel-reminder block so the
    coordinator knows it's a Telegram message and how to reply.
-4. Call `sendToSystemCoordinator(wrapped, { fromAgent: "telegram" })`.
+4. Call `sendToSystemCoordinator(wrapped, { fromAgent: "@telegram", multiline: true })`.
 
 The wrapping format mirrors the channel-system convention but is
 ours to define since we are no longer interoperating with the MCP
 channel mechanism:
 
 ```text
-<channel source="telegram" chat_id="8766474645" message_id="47" user="alice" ts="2026-05-03T01:26:30Z">
+<channel source="telegram" user="alice" ts="2026-05-03T01:26:30Z">
 Hey, can you check on the build?
 </channel>
 
-To respond on Telegram, run `ib telegram-reply <chat_id> "<your message>"`
-(or `ib ask "<question>"` if you want to ask the user a question and
-correlate their reply). The ib-watch dispatcher relays both to this chat.
+To reply on Telegram, run `ib tgsend "<your message>"`.
 ```
 
 The trailing instruction sentence is the critical UX piece: it tells
-Claude (in the coordinator session) which `ib` commands route to
-Telegram. Two distinct verbs:
-- `ib ask` — for the existing question-asking flow; the dispatcher
-  forwards the question and correlates the user's reply via the qid.
-- `ib telegram-reply <chat_id> "<text>"` — for plain coordinator-to-user
-  messages that don't expect a structured reply (e.g., status updates,
-  acknowledgements, "done"). This is a new ib subcommand (see §3).
+Claude (in the coordinator session) the one outbound verb to Telegram.
+v1 ships only `ib tgsend` (no chat ID arg — it routes to the single
+configured chat). No `chat_id` or `message_id` shown in the wrapper
+— they're not needed by the coordinator and would just be noise.
+
+Subcommand naming uses single-word verbs (`ib tgsend`, `ib tgallow`,
+`ib tgdeny`, `ib tgcheck`, `ib tgdaemon`) — consistent with how the
+rest of itsybitsy spells commands (`ib new-agent`, `ib merge-check`,
+`ib hook-status`, etc., where each command is one shell argv entry).
+Avoids subcommand parsing logic in `src/index.ts`.
+
+**Critical: tmux newline handling.** `sendMessage` (`src/ib-commands.ts:1241`)
+does NOT call `sanitizeTmuxInput`. It chunks the message and ships
+each chunk via `tmux send-keys -t <sess> -l <chunk>`. Literal `\n`
+bytes inside the chunk are sent as raw newline keystrokes, which
+Claude Code's TUI treats as Submit. A multi-line `<channel>...</channel>`
+block would submit each line as a separate user turn — breaking the
+inbound flow.
+
+**Mitigation:** the dispatcher must collapse newlines before calling
+`sendToSystemCoordinator`. Pick one of:
+1. **Replace `\n` with literal `\\n` (two chars).** The coordinator
+   sees a single line containing `\n` escapes, which Claude can
+   interpret. Simple, lossless on read-back, but cosmetically ugly.
+2. **Add a `multiline` mode to `sendMessage`** that joins lines with
+   tmux's `Enter` key sent through send-keys (not `-l`) using the
+   "literal-then-Enter" pattern that the existing newAgent flow uses
+   (`src/ib-commands.ts:2665`). Cleaner; touches `sendMessage`'s
+   public API.
+3. **Render the channel-reminder block as a single line** using `|` or
+   `␤` glyphs as visual separators. Loses the natural line breaks in
+   user-typed Telegram messages — bad for screenshots-of-stack-traces
+   etc.
+
+**Recommendation: option 2.** Add a `{ multiline: true }` opt to
+`sendMessage`. When set, the function chunks on newlines and uses
+`tmux send-keys -l <chunk>; tmux send-keys Enter` between chunks
+(without the trailing submit-Enter that today fires after the loop).
+Final submit happens after the last newline-chunk. Touches one
+function but preserves the channel-reminder format. Falls back
+cleanly for callers that don't pass the opt.
 
 **Files to touch:**
-- New: `src/channels/dispatcher.ts` — the dispatcher itself. Single class
-  or module that owns chat-id → agent-id mapping, the wrapping function,
-  and the inbound side.
-- New: `src/channels/access.ts` — read/write the allowlist file
-  (`~/.itsybitsy/channels/telegram/access.json`, mirroring the official
-  plugin's location and schema). v1: read-only allowlist; pairing-flow
-  comes later.
+- New: `src/channels/dispatcher.ts` — the dispatcher itself. Single
+  class or module that owns inbound routing, allowlist filter, and
+  the channel-reminder wrapping function.
+- New: `src/channels/access.ts` — read/write the allowlist file at
+  `~/.itsybitsy/channels/telegram/access.json`. Schema below. v1
+  ships an `ib tgallow <chat_id>` subcommand to add entries
+  (single-line file edit; no full pairing-flow yet).
+- New: `src/channels/telegram-client.ts` — see §1.
+- Modified: `src/ib-commands.ts` `sendMessage` — add the `multiline`
+  option per the section above.
 - **Reuse, don't add:** `sendToSystemCoordinator(message, opts)`
-  already exists at `src/index.ts:166`. It validates the coordinator
-  tmux session is alive, then calls `sendMessage()` with a synthetic
-  agent. The dispatcher should call this directly (not shell out to
-  `ib send @system`) — same path, no subprocess overhead, structured
-  errors. Pass `fromAgent: "telegram"` (or similar sentinel) so the
-  message tag in the coordinator session reflects its origin.
+  already exists at `src/index.ts:166`. The dispatcher calls it
+  directly (no subprocess overhead, structured errors). Pass
+  `fromAgent: "@telegram"` — the leading `@` marks it as a sentinel
+  so `sendMessage` formats it as `[sent by @telegram]: ...` rather
+  than `[sent by agent telegram]: ...` (per the existing sentinel
+  handling at `src/ib-commands.ts:1294`). Document `@telegram`
+  alongside `@system` in `src/agents.ts`'s `SpawnedBy` comments.
 
-**Failure modes:**
-- Coordinator not running when message arrives:
-  `sendToSystemCoordinator()` returns `{ ok: false, ... }` with a
-  message saying so. Reply on Telegram with "coordinator offline,
-  message dropped." Don't queue — keeps state minimal in v1.
-- Sender not in allowlist: drop silently. Do not echo back; that's a
-  prompt-injection vector.
+**Burst / coalescing:** Telegram's `getUpdates` returns up to 100
+updates per call. If the user sends 5 messages in quick succession
+(text + screenshot + caption + follow-up text + correction),
+forwarding each one as a separate `sendToSystemCoordinator` call is:
+(a) ~30s of serialized tmux I/O given `sendMessage`'s ~0.2-3s
+per-message settling sleep, and (b) interleaved with any other
+sender hitting the same tmux session. v1 handles this by **batching
+within one poll cycle**: all updates from the same chat returned by
+the same `getUpdates` call are merged into one wrapped block:
 
-### 3. Outbound dispatcher (coordinator → Telegram)
-
-Two outbound paths from the coordinator's perspective:
-
-**3a. `ib telegram-reply <chat_id> "<text>"` — fire-and-forget.**
-
-A new ib subcommand. The coordinator runs it to send a plain message
-to a Telegram chat without expecting a structured reply (status
-updates, "done", "ok, working on it"). Dispatch:
-
-1. `ib telegram-reply` runs as a normal subprocess from the coordinator.
-2. It writes the request to a small on-disk file or unix-domain socket
-   that the dispatcher in `ib watch` is watching, OR — simpler — it
-   just makes the Telegram API call itself.
-
-Picking between those two: **the subcommand should make the API call
-itself.** Reasons:
-- Keeps `ib telegram-reply` working even if `ib watch` is closed
-  (sometimes the user runs the coordinator's claude session via an
-  attach-to-tmux without the dashboard up).
-- The bot token is already in config; both `ib watch` and
-  `ib telegram-reply` can read it.
-- No new IPC primitive to design.
-
-The downside: two processes can hit the Telegram API concurrently if
-`ib watch`'s outbound qid-formatted question and an
-`ib telegram-reply` race. Telegram handles this fine (rate-limited per
-bot, but our throughput is human-scale). Acceptable.
-
-**Naming:** `telegram-reply` is explicit but verbose. Alternatives:
-`tg-reply`, `tg`, `reply-telegram`. Pick during implementation; the
-plan keeps `telegram-reply` for clarity. Add an alias if the long form
-proves annoying.
-
-**3b. `ib ask "..."` interception — question/answer with correlation.**
-
-When the system coordinator calls `ib ask "..."`, we want the question
-to flow to Telegram (not just sit in `user-questions.json`) and the
-user's reply to flow back via `ib send <coordinator-id> "..."`.
-
-`ib ask` today writes the question to
-`<repo>/.ittybitty/user-questions.json` and exits. The dispatcher in
-`ib watch` is already watching that file via the `AgentWatcher` (it
-notices new pending questions for sidebar display via
-`readPendingQuestions()` in `src/agents.ts`). The cleanest way to
-intercept:
-
-1. **Detect** new pending questions where the asking agent is the
-   system coordinator. (The `Agent` synthesized for `@system` carries a
-   distinguishing marker; if not, the dispatcher can match by tmux
-   session name.)
-2. **Forward** the question text to Telegram, prepended with the qid:
-   ```text
-   ❓ Question (reply `abc12: <answer>`):
-
-   Should I deploy to staging?
-   ```
-3. **Track** the qid in an in-memory table keyed by qid, with the
-   `chat_id` and the asking agent's coordinator session name as values.
-
-**No code changes to `askQuestion()` itself.** The dispatcher works
-purely off the existing on-disk state. This is the load-bearing
-simplification: there is no fallback path to design (the local prompt
-flow doesn't apply — the coordinator runs in a tmux session with no
-human at a TTY for prompts), and there is no coupling between
-`src/ib-commands.ts` and the channels code.
-
-**Question identification:** the question record in
-`user-questions.json` already has `id`, `agent`, `question`, `timestamp`,
-`status`. The dispatcher checks `agent` against the `@system`
-coordinator and sees `status: "pending"` to know it's a fresh question.
-Once forwarded, the dispatcher remembers the qid in its in-memory
-table; on the next file refresh it should *not* re-forward already-seen
-qids — guard against double-send.
-
-**Files to touch:**
-- New: `src/channels/dispatcher.ts` — outbound side: hook into the
-  watcher's `onUpdate` callback (or read `user-questions.json` on the
-  same poll cycle), forward newly-pending qids for `@system`.
-- Modified: `src/index.ts` — add the `case "telegram-reply":` dispatch
-  for the new subcommand.
-- New: `src/ib-commands.ts` — `telegramReply(chatId, text): Promise<IbCommandResult>`
-  — reads token from config, calls the Telegram client, returns the
-  standard result type.
-
-**Question for design discussion:**
-
-Where does the qid ↔ chat_id mapping live? Two choices:
-
-1. **In-memory in `ib watch`.** Simple. Loses correlation if `ib watch`
-   restarts, but the question itself survives in `user-questions.json`,
-   so on restart the dispatcher re-forwards (with a warning to the user
-   on Telegram so they know).
-2. **On disk** (e.g., `~/.itsybitsy/channels/pending-questions.json`).
-   Survives `ib watch` restarts but adds complexity.
-
-**Recommendation: in-memory for v1, with re-forward on restart.** Add
-a "since-startup-seen" flag to in-memory entries; on the first refresh
-after startup, forward any pending question and mark it seen. The user
-gets the question once, possibly twice if they restart `ib watch`
-mid-pending-question. Acceptable for v1.
-
-**Failure modes:**
-- Telegram unreachable when forwarding `ib ask`: leave the question
-  pending in `user-questions.json` (it's already there), retry on the
-  next poll cycle. Log the failure to the coordinator's view if
-  practical. The user can also see the question via `ib q` from any
-  shell.
-- User answers on Telegram but `ib watch` has restarted and lost the
-  qid table: handle in §4 below.
-
-### 4. Reply correlator
-
-When a Telegram message arrives that matches a known qid pattern, the
-dispatcher should:
-
-1. Look up the qid in the pending-questions table.
-2. If found:
-   a. Call `acknowledgeQuestion(repoPath, qid)` (in `src/ib-commands.ts:3139`)
-      — this only flips `status: "acknowledged"` on the question record.
-   b. Call `sendToSystemCoordinator(replyText, { fromAgent: "telegram" })`
-      with the qid prefix stripped — this is the actual answer text the
-      coordinator session needs to see on its stdin.
-   c. Drop the qid from the in-memory table.
-3. If not found: treat it as a normal inbound message (route via §2).
-   The user may have meant to answer a question that's no longer
-   pending, or they typed a qid-shaped message by accident; either way,
-   falling through to the chat-route is the conservative behavior.
-
-**Important correction vs. the original draft:** `ib acknowledge` does
-*not* accept a reply argument. Its signature is `acknowledgeQuestion(
-repoPath, questionId)` — it just marks the question acknowledged in
-`user-questions.json` so the TUI's pending-questions list updates. The
-*answer* must be delivered separately via `sendMessage` /
-`sendToSystemCoordinator`. The dispatcher must call both.
-
-**Two-step caveat:** there is a brief window between `acknowledgeQuestion`
-and `sendToSystemCoordinator` where the question is acknowledged but
-the answer hasn't been delivered. If `sendToSystemCoordinator` fails,
-the user thinks their reply was received but the coordinator never
-sees it. Mitigation:
-- Call `sendToSystemCoordinator` *first*, then `acknowledgeQuestion`
-  only if the send succeeded. (Reverses the order vs. above.)
-- On send failure, reply on Telegram with "delivery failed, your reply
-  was: <quoted>". The user can re-send or fall back to `ib q` /
-  `ib send` from a shell.
-
-The qid format: itsybitsy's existing `askQuestion()` generates qids of
-the form `q-<unix-epoch>-<6-char-md5-hex>` (see `src/ib-commands.ts:3115`).
-That's far too long to type on a phone. Two ways to handle this:
-
-1. **Generate a Telegram-friendly short alias.** When the dispatcher
-   forwards a question, allocate a short alias (5 lowercase letters,
-   the channel-reference convention) and map alias → real qid in
-   memory. Show the alias on Telegram; the user replies `alias: text`,
-   the dispatcher resolves to the real qid.
-2. **Use the real qid suffix.** Show the last 6 hex chars of the qid as
-   the user-visible token. Less robust against collisions but no
-   in-memory mapping needed (just scan pending questions for one whose
-   id ends with the token).
-
-**Recommendation: option 1.** Six hex chars are still tedious, and the
-in-memory mapping is one line of code. Use the channel-reference regex
-for parsing user replies:
-
-```ts
-const QID_REPLY_RE = /^\s*([a-km-z]{5})\s*[:.]?\s*(.+)$/i
+```text
+<channel source="telegram" chat_id="…" user="…" first_ts="…" count="3">
+  Hey can you check the build?
+  ---
+  Looks like step 4 failed.
+  ---
+  Also: should we revert?
+</channel>
 ```
 
-**Files to touch:**
-- Modified: `src/channels/dispatcher.ts` — adds the regex check at the
-  top of the inbound handler before falling through to the chat-route.
-  Also owns the alias → qid map.
+The coordinator gets one turn instead of three. Single-message bursts
+(common case) render without the `count`/separators noise. The
+dispatcher must serialize calls to `sendToSystemCoordinator` per
+coordinator session — two parallel callers writing the same tmux
+session would interleave keystrokes. A simple in-process mutex on the
+coordinator's tmux session name suffices.
 
-**Permission-relay parallels:**
-
-The same correlator pattern handles permission requests if/when we want
-them. v1 doesn't need this; flag it for v2.
-
-## Configuration
-
-New config keys (defined in `src/config.ts`):
-
-| Key | Type | Description |
-|---|---|---|
-| `coordinator.telegram_bot_token` | string | The Telegram Bot API token (e.g., `123456:ABC-DEF...`). When unset or empty, Telegram routing is disabled. |
-| `coordinator.telegram_chat_id` | string | The Telegram chat ID this bot routes inbound messages from and outbound replies to. v1 supports a single chat. |
-
-These follow the existing `coordinator.*` namespace (`coordinator.model`,
-`coordinator.imessage`). The bot token replaces the
-`coordinator.telegram: bool` flag entirely — its presence/absence is
-the enable signal.
-
-**Removed config:** `coordinator.telegram` (bool). It currently gates
-appending `--channels plugin:telegram@claude-plugins-official` to the
-coordinator's `claude` command (`src/coordinator.ts:296-301`). Per the
-user, the official Telegram plugin should not be used at all. Remove
-both the config key and the `--channels plugin:telegram@...` branch.
-
-**Unchanged config:** `coordinator.imessage` stays exactly as-is. It
-serves a separate per-repo coordinator / iMessage use case
-(see project memory) and is wired through Claude's plugin channels,
-not through the new ib-layer dispatcher. This plan does not touch
-iMessage routing.
-
-**Allowlist file:** `~/.itsybitsy/channels/telegram/access.json`
-(itsybitsy-owned, separate from any `~/.claude/channels/...` path the
-removed plugin used). Schema for v1:
+**Allowlist file format (v1):**
 ```json
 {
   "allowed_chat_ids": ["8766474645"],
@@ -474,36 +319,178 @@ removed plugin used). Schema for v1:
 }
 ```
 Either list non-empty grants access; both empty means deny-all.
+v1 ships `ib tgallow <chat_id>` and `ib tgdeny <chat_id>` to edit
+this file (atomic write with file lock). Manual editing is also
+supported but the `ib tgcheck` command validates the JSON and
+prints "X chat IDs / Y user IDs allowed" so the user has a sanity
+check.
+
+**Group-chat caveat:** v1 is intended for 1:1 DMs only. Group chats
+deliver every member's message with the same `chat_id`, so
+allowlisting a group ID effectively trusts the whole group. Document
+explicitly in the access.json schema that `allowed_chat_ids` should
+hold 1:1 DM IDs only; group support requires a per-message `from.id`
+check that v1 doesn't ship.
+
+**Failure modes:**
+- Coordinator not running when message arrives:
+  `sendToSystemCoordinator()` returns `{ ok: false, ... }` with a
+  message saying so. v1 reply on Telegram with "coordinator offline,
+  message dropped — start it with `ib watch`." Don't queue.
+- Sender not in allowlist: drop silently on the user side, write a
+  rate-limited dispatcher-log entry (one entry per `chat_id` per hour)
+  so the user can debug "why doesn't the bot answer?" Do not echo back
+  on Telegram (prompt-injection vector).
+- Update without `message.text` (image, voice, sticker, document):
+  reply on Telegram with "Received attachment — v1 supports text only.
+  Please describe in text." Surface to the coordinator anyway as
+  `<channel source="telegram" ...>[user sent <type>: <caption or
+  filename>]</channel>` so the coordinator at least knows something
+  arrived. Defensively check `update.message?.text` before
+  destructuring; a missing text field must not crash the loop.
+- Single-update payload with both an image and a caption: fold the
+  caption into the channel-reminder text and keep the attachment-
+  notice for the image part.
+
+### 3. Outbound: `ib tgsend "<text>"`
+
+One subcommand. The coordinator runs `ib tgsend "<text>"` to send a
+message to the configured Telegram chat. No chat ID arg (v1 routes to
+the single chat in config). No reply correlation — the next inbound
+Telegram message lands on the coordinator's stdin via §2; if it's a
+reply to the coordinator's last `ib tgsend`, the coordinator sees the
+context in its own scrollback.
+
+**Behavior:**
+1. Read `channels.telegram.bot_token` and `channels.telegram.chat_id`
+   from config. If either is missing, exit with an error.
+2. POST to Telegram's `sendMessage` endpoint.
+3. Print `ok` on success or the API error on failure.
+
+**Files to touch:**
+- Modified: `src/index.ts` — add `case "tg":` that dispatches the
+  subcommand (`send` for v1; room for `allow`/`deny`/`check` later).
+- New: `src/ib-commands.ts` — `telegramSend(text): Promise<IbCommandResult>`.
+  Reads the token + chat ID from config, calls the Telegram client,
+  returns the standard result type.
+- Reuses `src/channels/telegram-client.ts` (built in §1) for the HTTP
+  call.
+
+**Why no `ib ask` correlation in v1:** the `ib ask` flow assumes a
+disk-backed agent. `askQuestion()` at `src/ib-commands.ts:3057`
+returns "Agent not found" when no `meta.json` exists, and the system
+coordinator is in-memory only — it has no agent dir. Forcing it to
+work for `@system` requires special-casing `askQuestion()`, threading
+`repoPath` into `PendingQuestion`, and bypassing the
+`activeAgentIds` filter in `readQuestionsInternal()`. None of that
+is justified for the marginal UX win of structured Q&A — the
+coordinator can ask questions in plain text via
+`ib tgsend "Should I deploy to staging?"` and the user replies in
+plain text. The answer arrives as the next inbound message; the
+coordinator's own scrollback is the conversational context.
+
+**Concurrency with `ib watch`:** both `ib tgsend` (one-shot
+subprocess) and `ib watch` (long-running dispatcher) can hit the
+Telegram Bot API concurrently. The Bot API serializes per-chat at
+~1 message/sec for non-broadcast; concurrent calls just queue.
+Acceptable. The dispatcher does not need to know `ib tgsend` ran.
+
+**Failure modes:**
+- Bot token missing: `ib tgsend` exits 1 with "Telegram not
+  configured: set channels.telegram.bot_token in config."
+- Telegram API error (4xx/5xx): print the response and exit non-zero.
+  The coordinator sees the error and can decide whether to retry.
+- Telegram rate-limited (HTTP 429): parse `Retry-After` from the
+  response, sleep, retry once. If still 429, give up and exit non-zero.
+- Network down: same as 5xx — print, exit non-zero.
+
+## Configuration
+
+New config keys (defined in `src/config.ts`):
+
+| Key | Type | Description |
+|---|---|---|
+| `channels.telegram.bot_token` | string | The Telegram Bot API token (e.g., `123456:ABC-DEF...`). When unset or empty, Telegram routing is disabled (the dispatcher logs and skips the loop). |
+| `channels.telegram.chat_id` | string | The Telegram chat ID this bot routes inbound messages from and outbound `ib tgsend` to. v1 supports a single chat. |
+
+The `channels.*` namespace is new; mirrors the directory layout
+(`~/.itsybitsy/channels/telegram/`). The bot token isn't really
+"coordinator-owned" — the dispatcher in `ib watch`/`ib tgdaemon`
+reads it, not the coordinator's claude session. (Compare with
+`coordinator.imessage`, which legitimately is a coordinator-side
+flag because the coordinator's claude session loads the iMessage
+plugin.)
+
+**Removed config:** `coordinator.telegram` (bool). It currently gates
+appending `--channels plugin:telegram@claude-plugins-official` to the
+coordinator's `claude` command (`src/coordinator.ts:296-301`). Per
+the user, the official Telegram plugin should not be used at all.
+Remove both the config key (`src/config.ts`) and the
+`--channels plugin:telegram@...` branch.
+
+**Verification step:** after removing the `telegram` push from the
+`channels` array in `src/coordinator.ts:296-301`, the `if
+(channels.length > 0)` branch (line 299) will fire only when
+`coordinator.imessage` is true. Confirm `coordinator.imessage=true`,
+no telegram, still produces the correct
+`claude --model opus --channels plugin:imessage@...` invocation.
+
+**Unchanged config:** `coordinator.imessage` stays exactly as-is.
+This plan does not touch iMessage routing — that flow keeps using
+the official MCP plugin via `--channels`.
+
+**Allowlist file:** `~/.itsybitsy/channels/telegram/access.json`. Schema:
+```json
+{
+  "allowed_chat_ids": ["8766474645"],
+  "allowed_user_ids": []
+}
+```
+Either list non-empty grants access; both empty means deny-all.
+v1 ships `ib tgallow <chat_id>` and `ib tgdeny <chat_id>` to edit
+this file (atomic write, idempotent). v1 also ships `ib tgcheck` —
+a dry-run that prints what's configured and tries a sample
+`getUpdates` call to confirm the bot is reachable.
+
+**Group-chat caveat:** `allowed_chat_ids` in v1 is intended for 1:1
+DMs only. Group chats deliver every member's message with the same
+group `chat_id`, so allowlisting one trusts everyone in the group.
+v2 may add a per-message `from.id` check; for now, document the
+restriction in the schema docstring and `ib tgcheck` warns if a
+configured `chat_id` looks group-shaped (negative integer).
 
 **No `.mcp.json` writer to remove:** the original draft mentioned
 `writeCoordinatorMcpConfig` in `src/coordinator.ts`. That function
-does not exist in the current codebase. The MCP-server approach was
-introduced and reverted (commits `b4e042f` → `97874c6`); today the
-Telegram integration is exclusively the `--channels plugin:...` flag
-above. There is nothing else to delete on the MCP side.
+does not exist in the current codebase. The MCP-server approach
+was introduced and reverted in commits `b4e042f` → `97874c6`; today
+the Telegram integration is exclusively the `--channels plugin:...`
+flag above.
 
 ## Cutover plan
 
 This is the order to ship without breaking anything mid-flight.
 
-1. **Add config keys** (`coordinator.telegram_bot_token`,
-   `coordinator.telegram_chat_id`) and the new
-   `~/.itsybitsy/channels/telegram/access.json` schema. No behavior
-   change yet — just config plumbing and validation.
-2. **Land §1 (Telegram client) and §2 (inbound dispatcher).**
-   `ib watch` long-polls Telegram and routes inbound messages to the
-   system coordinator via `sendToSystemCoordinator()`. The
-   `--channels plugin:telegram@...` registration on the coordinator
-   stays in place during this step — the user gets messages two ways
-   if they keep both enabled. Verify the new path works.
-3. **Land §3 (outbound dispatcher) and §4 (reply correlator).** New
-   `ib telegram-reply` subcommand ships; the dispatcher forwards `ib
-   ask` questions to Telegram and correlates replies via aliases.
-4. **Remove the `--channels plugin:telegram@...` branch and the
+1. **Add config keys + access.json schema + `ib tgallow`/`ib tgdeny`/
+   `ib tgcheck` subcommands.** No behavior change yet — just config
+   and validation plumbing. Tests verify atomic writes, schema
+   validation, deny-all default.
+2. **Add the `multiline` mode to `sendMessage`.** Self-contained
+   refactor with its own tests. No callers use it yet.
+3. **Land §1 + §2 + `ib tgsend`.** Telegram client, dispatcher,
+   inbound routing via `sendToSystemCoordinator`, plus the outbound
+   `ib tgsend` subcommand. The dispatcher runs inside
+   `launchDashboard()`. The `--channels plugin:telegram@...`
+   registration on the coordinator stays in place during this step
+   — the user can verify the new path without losing the old one.
+   Document that running both simultaneously will cause Telegram to
+   split updates between them.
+4. **Add `ib tgdaemon`.** Same dispatcher class, headless entry.
+   Useful immediately for the personal-assistant use case where the
+   user wants 24/7 routing.
+5. **Remove the `--channels plugin:telegram@...` branch and the
    `coordinator.telegram` config key.** Edit `src/coordinator.ts:296-301`
-   to drop the `telegram` push to the `channels` array and the
-   surrounding `const telegram = config["coordinator.telegram"]?.value`
-   read. Drop the key from `src/config.ts`. After this step, the
+   to drop the `telegram` push and the surrounding config read.
+   Remove the key from `src/config.ts`. After this step, the
    official Telegram plugin is no longer attached to the coordinator
    session.
 
@@ -513,73 +500,101 @@ Each step is independently testable and rollback-able.
 
 ### Unit tests
 
-- **Allowlist filter**: given a Telegram update, returns true/false
-  correctly for allowlisted vs. non-allowlisted chat/user IDs.
+- **Allowlist filter**: returns true/false correctly for allowlisted
+  vs. non-allowlisted chat/user IDs; deny-all when both lists empty;
+  warns on group-shaped (negative) chat IDs in `ib tgcheck`.
 - **Channel-reminder wrapping**: given chat metadata + body, produces
-  the expected `<channel ...>...</channel>` block.
-- **Outbound qid mapping**: forwarding a question allocates a unique
-  alias; the alias resolves back to the qid. Re-forwarding the same
-  qid in a second poll cycle does not produce a duplicate forward.
-- **Reply correlator regex**: `QID_REPLY_RE` matches `abc12: yes`,
-  `abc12 yes`, `ABC12: YES`, but not `12345: text` (digits) or
-  `abcde fghij` (no separator + extra word).
-- **Two-step ack ordering**: simulated `sendToSystemCoordinator`
-  failure leaves the question in `pending` (not acknowledged), and the
-  dispatcher generates the user-facing "delivery failed" reply.
+  the expected `<channel ...>...</channel>` block; multi-line bodies
+  preserved when `multiline: true` is propagated.
+- **Burst coalescing**: 3 updates in one `getUpdates` payload
+  produce a single wrapped block with `count="3"` and `---`
+  separators; 1 update produces a clean single-message wrap (no
+  `count`, no separators).
+- **Newline handling in `sendMessage`**: with `multiline: true`,
+  embedded `\n` characters become `Enter` keystrokes via
+  `tmux send-keys` (no `-l`), with one final Enter to submit.
+  Without `multiline`, the function behaves exactly as today.
+- **`ib tgsend` config validation**: missing token → exit 1 with
+  clear error; missing chat ID → same; both present → calls the
+  client.
+- **Attachment handling**: `update.message` without `text` (image,
+  voice, sticker, document) does not throw; produces an
+  attachment-notice channel-reminder + a Telegram reply.
+- **Sentinel labelling**: `sendMessage(..., { fromAgent: "@telegram" })`
+  formats the prefix as `[sent by @telegram]: ...` (not `[sent by
+  agent telegram]: ...`).
 
 ### Integration tests
 
-- **End-to-end inbound**: feed a fake `getUpdates` response to a
-  mocked Telegram client, verify `sendToSystemCoordinator` was called
-  with the wrapped text. Use the existing `coordinatorSpawnCtx`
-  mocking pattern to capture the resulting tmux send-keys.
-- **End-to-end outbound**: simulate `askQuestion()` writing a new
-  pending question for the coordinator agent; verify the dispatcher
-  detects it on its next refresh and calls
-  `telegramClient.sendMessage(chatId, formattedText)`.
-- **Roundtrip**: question goes out → reply arrives → `acknowledgeQuestion`
-  flips status → `sendToSystemCoordinator` delivers stripped reply.
-  Use a mock Telegram client and the existing watcher refresh hook.
-- **Telegram unreachable**: mock `getUpdates` to throw; verify backoff
-  retry loop runs and `ib watch` does not crash.
+- **End-to-end inbound (text)**: feed a fake `getUpdates` response
+  to a mocked Telegram client; verify `sendToSystemCoordinator` was
+  called with the wrapped text and `multiline: true`, and the
+  resulting tmux send-keys sequence (captured via
+  `coordinatorSpawnCtx`) contains alternating chunk/Enter calls
+  with one final Enter.
+- **End-to-end outbound**: invoke `ib tgsend "hello"` as a
+  subprocess; verify the Telegram client's `sendMessage` was called
+  with the configured chat ID and the literal text.
+- **Coordinator offline**: dispatcher receives a message while
+  `tmux has-session -t ib-coordinator` returns non-zero; verify the
+  dispatcher replies on Telegram with "coordinator offline" and
+  does not retry-storm.
+- **Per-coordinator serialization**: simulate two updates arriving
+  in rapid succession from two different chats; verify the
+  dispatcher serializes the two `sendToSystemCoordinator` calls
+  rather than interleaving keystrokes.
+- **fs.watch reliability for `user-questions.json`**: verify the
+  watcher fires when `acknowledgeQuestion` rewrites the file via
+  `Bun.write`. (Sanity check; not strictly needed by the new
+  dispatcher since v1 doesn't watch `user-questions.json`, but
+  worth confirming for any future round.)
+- **Telegram unreachable**: mock `getUpdates` to throw; verify
+  exponential-backoff retry loop runs and the host process does not
+  crash. Verify a single warning is emitted, not one per attempt.
+- **HTTP 429**: mock a `Retry-After: 5` response; verify the client
+  sleeps 5s then resumes.
+- **409 Conflict on startup probe**: mock the initial probe to
+  return 409; verify `ib tgdaemon` exits with a clear error and
+  `ib watch` skips Telegram startup but keeps the rest of the TUI
+  alive.
 
 ### Manual / live tests (gated on local Telegram bot token)
 
-- Send a message → see it in the coordinator session.
-- Coordinator runs `ib ask "..."` → see it on Telegram with an alias.
-- Reply `alias: text` → see the question acknowledged in `ib q` and
-  the answer arrive on the coordinator's stdin.
-- Coordinator runs `ib telegram-reply <chat_id> "done"` → see the plain
-  message arrive on Telegram.
-- Send a non-alias message while a question is pending → it goes to
-  chat route, question stays pending.
-- Restart `ib watch` mid-pending-question → on the next refresh, the
-  question is re-forwarded once with a new alias.
+- Send a text message → see it wrapped and forwarded to the
+  coordinator session.
+- Send a multi-line text message (real `\n` characters) → see the
+  whole thing arrive as one coordinator turn (no early submit).
+- Send 3 messages quickly → see one coalesced coordinator turn with
+  3 numbered fragments.
+- Send an image with no caption → see "Received attachment" reply
+  on Telegram + an `[user sent photo]` channel-reminder on the
+  coordinator side.
+- Coordinator runs `ib tgsend "done"` → see the plain message
+  arrive on Telegram.
+- Quit `ib watch` while a long-poll is in flight → verify the
+  process exits within ~1s (AbortController cancels the poll).
+- Run `ib tgdaemon` and quit `ib watch` → verify Telegram still
+  routes through the daemon.
 
 ## Open questions
 
 These should be settled during implementation, not before:
 
-- **One Telegram chat per coordinator, or many?** v1: one. Future:
-  configurable.
 - **What does the channel-reminder text look like exactly?** The
-  example above is a starting point; refine on first user-feedback
+  example in §2 is a starting point; refine on first user-feedback
   pass.
 - **Auto-start vs. opt-in dispatch.** When `ib watch` starts, should
-  the dispatcher run automatically if `coordinator.telegram_bot_token`
-  is set, or does it need a separate `coordinator.telegram_enabled`
+  the dispatcher run automatically if `channels.telegram.bot_token`
+  is set, or does it need a separate `channels.telegram.enabled`
   flag? Recommend: automatic — token presence is the enable signal.
-  Add a `--no-telegram` `ib watch` flag for the rare case the user
-  wants to start the dashboard without polling.
-- **What if the coordinator session restarts mid-pending-question?**
-  The coordinator's view of the question goes away (its own state
-  resets), but the question record in `user-questions.json` does not.
-  When the user replies on Telegram, we'll deliver the answer to the
-  fresh coordinator session via `sendToSystemCoordinator`, but the
-  coordinator will have no context for what the answer is responding
-  to. v1: include the original question text alongside the answer
-  when delivering, so the coordinator can pick up the thread:
-  `[answer to "Should I deploy to staging?"] yes`.
+  Add a `--no-telegram` flag to `ib watch` for the rare case where
+  the user wants the TUI without polling.
+- **Coordinator restart while messages are in flight.** If the user
+  sends a message while the coordinator session is being restarted
+  (rare but possible during `restartSystemCoordinator()`),
+  `sendToSystemCoordinator` may briefly return ok=false. Recommend:
+  retry once with a 2s backoff before sending the "coordinator
+  offline" reply. Implementer's call.
 - **Multi-machine / multi-user scenarios.** Out of scope for v1.
 
 ## Migration from current state
@@ -588,40 +603,48 @@ Today:
 - The system coordinator's `claude` command optionally includes
   `--channels plugin:telegram@claude-plugins-official` when
   `coordinator.telegram` is true (`src/coordinator.ts:298`).
-- The official plugin handles bot polling and exposes a `reply` tool
-  inside the coordinator's claude session.
+- The official plugin handles bot polling and exposes a `reply`
+  tool inside the coordinator's claude session.
 - The user has decided not to use this path. (An alternative
   MCP-server experiment via a `.mcp.json` writer was tried and
   reverted in commits `b4e042f` → `97874c6`.)
 
 After v1:
-- `ib watch` long-polls Telegram directly using the bot token from
-  `coordinator.telegram_bot_token`.
-- The dispatcher relays inbound messages to the system coordinator via
-  `sendToSystemCoordinator`. Coordinator outbound goes via either
-  `ib ask` (correlated Q&A) or `ib telegram-reply` (fire-and-forget).
+- `ib watch` (or `ib tgdaemon`) long-polls Telegram directly using
+  the bot token from `channels.telegram.bot_token`.
+- The dispatcher relays inbound messages to the system coordinator
+  via `sendToSystemCoordinator(text, { fromAgent: "@telegram",
+  multiline: true })`.
+- The coordinator replies via `ib tgsend "<text>"`. No question/
+  answer correlation — plain text both ways.
 - The `--channels plugin:telegram@...` registration is removed; the
   coordinator's claude session has no Telegram awareness at all.
 
-The user-visible difference: messages arrive in the coordinator wrapped
-in our channel-reminder block (no MCP `<channel>` injection), and
-outbound goes through `ib` subcommands rather than a `reply` MCP tool.
+The user-visible difference: messages arrive in the coordinator
+wrapped in our channel-reminder block (no MCP `<channel>`
+injection), and outbound goes through `ib tgsend` rather than a
+`reply` MCP tool. Multi-line messages arrive intact (multiline
+sendMessage); bursts arrive as a single coalesced turn.
 
 ## What this is *not* tackling
 
-- Permission relay (per-tool approval prompts on Telegram). The
-  channel-reference covers this; we'd reimplement it on top of
-  `ib acknowledge`. Defer to v2.
-- Group chat support, mention-detection, multi-chat routing. v1 is
-  single-user, single-chat.
-- Pairing flow / out-of-band ID capture. v1 uses static config. The
-  pairing flow the official plugin ships can be ported later.
-- File / image attachments inbound or outbound. v1 is text-only. The
-  bot already handles attachments correctly (downloads to inbox); the
-  dispatcher just needs to surface the local path in the channel-reminder
-  block. Probably a small v1.5 follow-up rather than v1 scope.
-- iMessage / Slack / Discord parity. Designed to generalize, but v1
-  ships only Telegram.
+- **`ib ask` correlation.** v1 has no qid handling and no question/
+  answer relay. If the coordinator wants to ask a question, it just
+  types it in `ib tgsend`; the user replies in plain text and the
+  reply lands as the next inbound message.
+- **Permission relay.** Defer to a later round.
+- **Group chat support, mention-detection, multi-chat routing.** v1
+  is single-user, single-chat.
+- **Pairing flow / out-of-band ID capture.** v1 uses static config
+  + `ib tgallow`. The bot's `/start` command and pairing dance can
+  be ported later.
+- **File / image attachments outbound.** Inbound attachments get a
+  reasonable degraded behavior (notice on both sides). Outbound
+  attachments would mean uploading files via the Bot API; out of
+  scope for v1.
+- **iMessage / Slack / Discord parity.** The `src/channels/`
+  layout and the dispatcher class are designed to host more
+  channels later, but v1 ships only Telegram.
 
 ## Estimated scope
 
@@ -629,36 +652,47 @@ Rough sizing, not a commitment:
 
 | Piece | Lines | Confidence |
 |---|---|---|
-| §1 Telegram client (`fetch`-based getUpdates/sendMessage) | ~120 | high — small, well-defined HTTP API |
-| §2 inbound dispatcher (poll loop + allowlist + wrapping) | ~200 | medium — wrapping format and lifecycle inside `launchDashboard` to nail down |
-| §3 outbound dispatcher + `ib telegram-reply` subcommand | ~250 | medium — pending-question polling, alias allocation |
-| §4 reply correlator (regex + two-step ack/send) | ~100 | high — small isolated logic |
-| Config keys + access.json plumbing | ~80 | high |
-| Tests for all of above | ~600 | matches existing test density |
+| Config keys + access.json + `ib tgallow`/`ib tgdeny`/`ib tgcheck` | ~150 | high |
+| `multiline` mode for `sendMessage` | ~60 | high — small, well-scoped |
+| §1 Telegram client (`fetch` + AbortController + 429 handling) | ~150 | high — small, well-defined HTTP API |
+| §2 inbound dispatcher (poll loop + allowlist + wrapping + coalesce + serialize) | ~280 | medium — coalescing and per-coord mutex add complexity |
+| §3 `ib tgsend` subcommand | ~80 | high — straightforward |
+| `ib tgdaemon` entry | ~50 | high — factor out of `launchDashboard` |
+| Tests for all of above | ~700 | matches existing test density |
 | Cutover (remove `coordinator.telegram` config + plugin registration) | ~30 lines deleted | trivial |
-| **Total** | **~1350 net new, ~30 deleted** | — |
+| **Total** | **~1470 net new, ~30 deleted** | — |
 
 For comparison, the merged "Telegram MCP server entry" change was
 ~160 lines. This is meaningfully bigger but localized to
-`src/channels/` plus surgical edits in `src/index.ts` (add
-`telegram-reply` case), `src/ib-commands.ts` (add `telegramReply()`),
-`src/coordinator.ts` (remove plugin registration), `src/config.ts` (new
-keys), and `src/tui/dashboard.ts` (start/stop dispatcher in
-`launchDashboard()`).
+`src/channels/` plus surgical edits in:
+- `src/index.ts` — add `tgsend`/`tgallow`/`tgdeny`/`tgcheck`/
+  `tgdaemon` cases
+- `src/ib-commands.ts` — add `telegramSend()`, add `multiline`
+  option to `sendMessage`
+- `src/coordinator.ts:296-301` — remove plugin registration
+- `src/config.ts` — add `channels.telegram.*`, remove
+  `coordinator.telegram`
+- `src/tui/dashboard.ts` — start/stop dispatcher in
+  `launchDashboard()`
+- `src/agents.ts` — document `@telegram` sentinel alongside
+  `@system` in `SpawnedBy` comments
 
 ## See also
 
 - [Telegram Bot API](https://core.telegram.org/bots/api) —
   `getUpdates` and `sendMessage` endpoints used by the Telegram client.
 - [Channels reference](https://code.claude.com/docs/en/channels-reference) —
-  the official MCP channel-server contract. We are *not* implementing
-  it, but the wrapping/permission-relay conventions are useful priors
-  for the channel-reminder format and qid-alias regex.
-- `src/index.ts:166` — `sendToSystemCoordinator()`, the existing helper
-  the inbound dispatcher reuses.
-- `src/ib-commands.ts:3048` — `askQuestion()`, which writes
-  `user-questions.json` (the dispatcher reads it).
-- `src/ib-commands.ts:3139` — `acknowledgeQuestion()`, which the
-  reply-correlator calls to flip status.
-- `src/coordinator.ts:296-301` — current Telegram plugin registration;
-  removed in §4 of the cutover plan.
+  the official MCP channel-server contract. We are *not*
+  implementing it, but the wrapping conventions are useful priors
+  for our channel-reminder format.
+- `src/index.ts:166` — `sendToSystemCoordinator()`, the existing
+  helper the inbound dispatcher reuses.
+- `src/ib-commands.ts:1241` — `sendMessage()`, gets a `multiline`
+  option in step 2 of the cutover.
+- `src/ib-commands.ts:1294` — sentinel-prefix handling for
+  `fromAgent` IDs starting with `@`; pattern reused for `@telegram`.
+- `src/coordinator.ts:168` — `sanitizeTmuxInput()`, the existing
+  helper that strips control chars (which is why we can't use it
+  on the channel-reminder block — we need newlines preserved).
+- `src/coordinator.ts:296-301` — current Telegram plugin
+  registration; removed in step 5 of the cutover plan.

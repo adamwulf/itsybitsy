@@ -17,10 +17,20 @@
  *      Cache invalidation: a 401/403 startup probe in the dispatcher
  *      clears the cache so the next boot re-resolves.
  *   2. Resolve chat ID — call probeOnce again with limit=100 and walk the
- *      returned updates for the first private-chat message whose chat.id is
- *      in the allowlist. The resolved id is written to the cache so the
- *      next `ib watch` start skips the fresh-DM requirement. Runs only on
- *      a cache miss (no cache or cached id no longer allowlisted).
+ *      returned updates. Two paths:
+ *
+ *        - **Configured allowlist** (any chat or user id present): pick the
+ *          first private-chat update whose chat.id is in `allowed_chat_ids`.
+ *
+ *        - **Trust-on-first-use** (both lists empty — i.e. never configured):
+ *          gather distinct private chat ids from the probe. Exactly one ⇒
+ *          auto-add it via {@link addChat} and use it. Two or more ⇒ refuse
+ *          to guess (returns `ambiguous-first-use`); the user must run
+ *          `ib tgallow <id>` to disambiguate. Zero ⇒ same outcome as the
+ *          configured-but-no-match case (returns `no-allowlisted-inbound`).
+ *
+ *      The resolved id is written to the cache so the next `ib watch` start
+ *      skips this step entirely. Runs only on a cache miss.
  *   3. Start subsystem — instantiate {@link TelegramDispatcher} with the
  *      resolved chat id and (on the resolve path only) an offset hint =
  *      max(consumed update_id) + 1, and instantiate {@link TelegramOutbox}
@@ -37,6 +47,7 @@ import type { TelegramClient } from "./telegram-client";
 import type { TelegramDispatcher, DispatcherOptions } from "./dispatcher";
 import type { TelegramOutbox, OutboxOptions } from "./outbox";
 import type { AccessState } from "./access";
+import { addChat } from "./access";
 import { readCachedChatId, writeCachedChatId } from "./chat-id-cache";
 
 /** Successful boot — dispatcher and outbox are constructed (not yet started). */
@@ -56,7 +67,8 @@ export interface BootDisabled {
     | "probe-auth"
     | "probe-network"
     | "probe-other"
-    | "no-allowlisted-inbound";
+    | "no-allowlisted-inbound"
+    | "ambiguous-first-use";
   /** The exact stderr line that was logged. Surfaced for tests/observability. */
   message: string;
 }
@@ -140,12 +152,24 @@ export async function bootTelegramSubsystem(opts: BootOptions): Promise<BootResu
   }
 
   const allowedChats = new Set(opts.access.allowed_chat_ids.map(String));
+  // Trust-on-first-use only fires when the allowlist has never been configured
+  // — both lists empty. Once a single id has been added (manually or
+  // auto-added by a previous boot), this flag goes false and the boot falls
+  // back to strict matching forever after.
+  const firstUse =
+    opts.access.allowed_chat_ids.length === 0 && opts.access.allowed_user_ids.length === 0;
+  // The dispatcher receives the (possibly mutated) allowlist; we re-read it
+  // from this slot rather than `opts.access` so an auto-allow in step 2 is
+  // visible to the dispatcher's incoming-update filter.
+  let dispatcherAllowedChatIds = opts.access.allowed_chat_ids;
 
   // Step 1.5 — cache lookup. If a cached id exists AND it's still in the
   // allowlist, skip the inbound walk. We don't compute an `initialOffset` in
   // this path: the dispatcher's own startup probe seeds its offset from the
   // first long-poll. The allowlist check guards against the user removing
-  // the chat between runs.
+  // the chat between runs. First-use boots have an empty allowlist by
+  // definition — `allowedChats.has(...)` is always false — so the cache is
+  // skipped and we always fall through to the inbound walk.
   let resolvedChatId: string | null = null;
   let initialOffset: number | undefined;
   const cachedId = await readCachedChatId();
@@ -186,18 +210,53 @@ export async function bootTelegramSubsystem(opts: BootOptions): Promise<BootResu
       return { ok: false, reason: "probe-other", message };
     }
 
+    // Single pass over updates: track the highest consumed id (for the
+    // dispatcher offset hint), the first match against an existing
+    // allowlist (the configured-allowlist path), and the set of distinct
+    // private chat ids seen (the first-use path).
     let maxConsumedId = -1;
+    const distinctPrivateChats = new Set<string>();
     for (const update of resolveProbe.updates) {
       if (update.update_id > maxConsumedId) maxConsumedId = update.update_id;
-      if (resolvedChatId !== null) continue;
       const msg = update.message;
       if (!msg) continue;
       if (msg.chat?.type !== "private") continue;
       const chatId = msg.chat?.id;
       if (chatId === undefined || chatId === null) continue;
       const chatIdStr = String(chatId);
-      if (!allowedChats.has(chatIdStr)) continue;
-      resolvedChatId = chatIdStr;
+      distinctPrivateChats.add(chatIdStr);
+      if (resolvedChatId === null && allowedChats.has(chatIdStr)) {
+        resolvedChatId = chatIdStr;
+      }
+    }
+
+    if (resolvedChatId === null && firstUse) {
+      // Trust-on-first-use. Exactly one private chat ⇒ adopt it. Anything
+      // else (zero or 2+) leaves resolvedChatId null and falls through to
+      // the per-case error below.
+      if (distinctPrivateChats.size === 1) {
+        const onlyId = distinctPrivateChats.values().next().value as string;
+        try {
+          await addChat(onlyId);
+        } catch (err) {
+          const reason = err instanceof Error ? err.message : String(err);
+          const message = `Telegram routing disabled: failed to write allowlist (${shortReason(reason)})`;
+          log(message);
+          return { ok: false, reason: "probe-other", message };
+        }
+        log(
+          `Telegram first-use auto-allowlist: added chat ${onlyId} (only inbound private chat). Use \`ib tgdeny ${onlyId}\` to revoke.`,
+        );
+        resolvedChatId = onlyId;
+        dispatcherAllowedChatIds = [onlyId];
+      } else if (distinctPrivateChats.size >= 2) {
+        const sample = Array.from(distinctPrivateChats).slice(0, 3).join(", ");
+        const more = distinctPrivateChats.size > 3 ? `, +${distinctPrivateChats.size - 3} more` : "";
+        const message = `Telegram routing disabled: ${distinctPrivateChats.size} private chats are pending (${sample}${more}); refusing to guess. Run \`ib tgallow <chat_id>\` to pick one.`;
+        log(message);
+        return { ok: false, reason: "ambiguous-first-use", message };
+      }
+      // size === 0: fall through to no-allowlisted-inbound below.
     }
 
     if (resolvedChatId === null) {
@@ -223,7 +282,7 @@ export async function bootTelegramSubsystem(opts: BootOptions): Promise<BootResu
   // the caller starts each independently.
   const dispatcher = opts.buildDispatcher({
     client,
-    allowedChatIds: opts.access.allowed_chat_ids,
+    allowedChatIds: dispatcherAllowedChatIds,
     allowedUserIds: opts.access.allowed_user_ids,
     chatId: resolvedChatId,
     initialOffset,

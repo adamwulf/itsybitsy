@@ -598,6 +598,7 @@ describe("ensureSystemCoordinator", () => {
       expect(mcp).toEqual({
         mcpServers: {
           telegram: {
+            type: "http",
             url: "http://127.0.0.1:9876/mcp",
           },
         },

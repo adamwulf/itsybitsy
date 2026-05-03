@@ -1,5 +1,5 @@
 /**
- * Three-step boot of the Telegram subsystem.
+ * Boot of the Telegram subsystem.
  *
  * `ib watch` calls {@link bootTelegramSubsystem} during launch. Each step
  * gates the next; a failure logs one stderr line and leaves the rest of the
@@ -8,17 +8,25 @@
  *   1. Connect — token must be set, and a non-consuming probe must succeed.
  *      A 409 Conflict means another poller/webhook is active; 401/403 mean
  *      the token is rejected; anything else is logged as a network failure.
+ *   1.5. Cache lookup — read the on-disk chat-id cache (see
+ *      {@link "./chat-id-cache"}). If a cached id is present AND that id is
+ *      still in the allowlist, skip step 2 entirely and proceed with the
+ *      cached id (no `initialOffset` is computed in this path; the
+ *      dispatcher's own startup probe seeds its offset). The allowlist
+ *      check guards against the user removing the chat between runs.
+ *      Cache invalidation: a 401/403 startup probe in the dispatcher
+ *      clears the cache so the next boot re-resolves.
  *   2. Resolve chat ID — call probeOnce again with limit=100 and walk the
  *      returned updates for the first private-chat message whose chat.id is
- *      in the allowlist. The id is held in memory and handed to the
- *      dispatcher and outbox; no on-disk persistence (Phase B removed the
- *      `chat-id` state file — `ib tgsend` now drops messages into the outbox
- *      and `ib watch` is the only process that talks to Telegram).
+ *      in the allowlist. The resolved id is written to the cache so the
+ *      next `ib watch` start skips the fresh-DM requirement. Runs only on
+ *      a cache miss (no cache or cached id no longer allowlisted).
  *   3. Start subsystem — instantiate {@link TelegramDispatcher} with the
- *      cached chat id and an offset hint = max(consumed update_id) + 1, and
- *      instantiate {@link TelegramOutbox} with the same client and chat id.
- *      The dispatcher's first long-poll skips updates step 2 already saw;
- *      the outbox owns the file-drop queue from `ib tgsend`.
+ *      resolved chat id and (on the resolve path only) an offset hint =
+ *      max(consumed update_id) + 1, and instantiate {@link TelegramOutbox}
+ *      with the same client and chat id. The dispatcher's first long-poll
+ *      skips updates step 2 already saw; the outbox owns the file-drop
+ *      queue from `ib tgsend`.
  *
  * Returns a {@link BootResult} describing the outcome. The caller owns both
  * dispatcher and outbox lifecycles (start/stop). When `ok` is false neither
@@ -29,6 +37,7 @@ import type { TelegramClient } from "./telegram-client";
 import type { TelegramDispatcher, DispatcherOptions } from "./dispatcher";
 import type { TelegramOutbox, OutboxOptions } from "./outbox";
 import type { AccessState } from "./access";
+import { readCachedChatId, writeCachedChatId } from "./chat-id-cache";
 
 /** Successful boot — dispatcher and outbox are constructed (not yet started). */
 export interface BootSuccess {
@@ -87,7 +96,7 @@ export interface BootOptions {
   log?: LogFn;
 }
 
-/** Three-step boot. See module-level docstring. */
+/** Boot. See module-level docstring. */
 export async function bootTelegramSubsystem(opts: BootOptions): Promise<BootResult> {
   const log = opts.log ?? defaultLog;
 
@@ -130,64 +139,88 @@ export async function bootTelegramSubsystem(opts: BootOptions): Promise<BootResu
     return { ok: false, reason: "probe-other", message };
   }
 
-  // Step 2 — resolve chat ID via inbound inference. Use a fresh probe with
-  // limit=100 so we walk a meaningful slice of pending updates. We pass no
-  // offset so we don't acknowledge anything — the dispatcher's first
-  // getUpdates call will use the offset hint we hand it to skip past what
-  // we've already seen.
-  let resolveProbe: Awaited<ReturnType<TelegramClient["probeOnce"]>>;
-  try {
-    resolveProbe = await client.probeOnce({ timeout: 0, limit: 100 });
-  } catch (err) {
-    const reason = err instanceof Error ? err.message : String(err);
-    const message = `Telegram routing disabled: probe failed (${shortReason(reason)})`;
-    log(message);
-    return { ok: false, reason: "probe-network", message };
-  }
-  if (!resolveProbe.ok) {
-    // Same classification as step 1's probe — a follow-up failure is
-    // surfaced the same way. Should be rare given step 1 just succeeded.
-    if (resolveProbe.status === 409) {
-      const message = "Telegram routing disabled: another poller or webhook is active";
-      log(message);
-      return { ok: false, reason: "probe-409", message };
-    }
-    if (resolveProbe.status === 401 || resolveProbe.status === 403) {
-      const message = `Telegram routing disabled: bot token rejected (HTTP ${resolveProbe.status})`;
-      log(message);
-      return { ok: false, reason: "probe-auth", message };
-    }
-    const message = `Telegram routing disabled: probe failed (HTTP ${resolveProbe.status})`;
-    log(message);
-    return { ok: false, reason: "probe-other", message };
-  }
-
   const allowedChats = new Set(opts.access.allowed_chat_ids.map(String));
+
+  // Step 1.5 — cache lookup. If a cached id exists AND it's still in the
+  // allowlist, skip the inbound walk. We don't compute an `initialOffset` in
+  // this path: the dispatcher's own startup probe seeds its offset from the
+  // first long-poll. The allowlist check guards against the user removing
+  // the chat between runs.
   let resolvedChatId: string | null = null;
-  let maxConsumedId = -1;
-  for (const update of resolveProbe.updates) {
-    if (update.update_id > maxConsumedId) maxConsumedId = update.update_id;
-    if (resolvedChatId !== null) continue;
-    const msg = update.message;
-    if (!msg) continue;
-    if (msg.chat?.type !== "private") continue;
-    const chatId = msg.chat?.id;
-    if (chatId === undefined || chatId === null) continue;
-    const chatIdStr = String(chatId);
-    if (!allowedChats.has(chatIdStr)) continue;
-    resolvedChatId = chatIdStr;
+  let initialOffset: number | undefined;
+  const cachedId = await readCachedChatId();
+  if (cachedId !== null && allowedChats.has(cachedId)) {
+    resolvedChatId = cachedId;
   }
 
   if (resolvedChatId === null) {
-    const message =
-      "Telegram routing disabled: no recent inbound from an allowlisted private chat. DM your bot, then restart ib watch.";
-    log(message);
-    return { ok: false, reason: "no-allowlisted-inbound", message };
+    // Step 2 — resolve chat ID via inbound inference. Use a fresh probe with
+    // limit=100 so we walk a meaningful slice of pending updates. We pass no
+    // offset so we don't acknowledge anything — the dispatcher's first
+    // getUpdates call will use the offset hint we hand it to skip past what
+    // we've already seen.
+    let resolveProbe: Awaited<ReturnType<TelegramClient["probeOnce"]>>;
+    try {
+      resolveProbe = await client.probeOnce({ timeout: 0, limit: 100 });
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      const message = `Telegram routing disabled: probe failed (${shortReason(reason)})`;
+      log(message);
+      return { ok: false, reason: "probe-network", message };
+    }
+    if (!resolveProbe.ok) {
+      // Same classification as step 1's probe — a follow-up failure is
+      // surfaced the same way. Should be rare given step 1 just succeeded.
+      if (resolveProbe.status === 409) {
+        const message = "Telegram routing disabled: another poller or webhook is active";
+        log(message);
+        return { ok: false, reason: "probe-409", message };
+      }
+      if (resolveProbe.status === 401 || resolveProbe.status === 403) {
+        const message = `Telegram routing disabled: bot token rejected (HTTP ${resolveProbe.status})`;
+        log(message);
+        return { ok: false, reason: "probe-auth", message };
+      }
+      const message = `Telegram routing disabled: probe failed (HTTP ${resolveProbe.status})`;
+      log(message);
+      return { ok: false, reason: "probe-other", message };
+    }
+
+    let maxConsumedId = -1;
+    for (const update of resolveProbe.updates) {
+      if (update.update_id > maxConsumedId) maxConsumedId = update.update_id;
+      if (resolvedChatId !== null) continue;
+      const msg = update.message;
+      if (!msg) continue;
+      if (msg.chat?.type !== "private") continue;
+      const chatId = msg.chat?.id;
+      if (chatId === undefined || chatId === null) continue;
+      const chatIdStr = String(chatId);
+      if (!allowedChats.has(chatIdStr)) continue;
+      resolvedChatId = chatIdStr;
+    }
+
+    if (resolvedChatId === null) {
+      const message =
+        "Telegram routing disabled: no recent inbound from an allowlisted private chat. DM your bot, then restart ib watch.";
+      log(message);
+      return { ok: false, reason: "no-allowlisted-inbound", message };
+    }
+
+    initialOffset = maxConsumedId >= 0 ? maxConsumedId + 1 : undefined;
+
+    // Persist the resolved chat id so the next boot can skip step 2. Best
+    // effort — a write failure is logged but does not fail the boot.
+    try {
+      await writeCachedChatId(resolvedChatId);
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      log(`Telegram chat-id cache write failed: ${shortReason(reason)}`);
+    }
   }
 
   // Step 3 — construct dispatcher and outbox. Both share the resolved chat id;
   // the caller starts each independently.
-  const initialOffset = maxConsumedId >= 0 ? maxConsumedId + 1 : undefined;
   const dispatcher = opts.buildDispatcher({
     client,
     allowedChatIds: opts.access.allowed_chat_ids,

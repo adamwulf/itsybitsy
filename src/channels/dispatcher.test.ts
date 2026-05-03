@@ -1,4 +1,7 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
+import { join } from "path";
+import { mkdtemp, rm } from "fs/promises";
+import { tmpdir } from "os";
 import {
   TelegramDispatcher,
   TELEGRAM_SENTINEL,
@@ -17,6 +20,12 @@ import {
   sleepCtx as clientSleepCtx,
   logCtx as clientLogCtx,
 } from "./telegram-client";
+import {
+  setStateDir as setCacheStateDir,
+  resetStateDir as resetCacheStateDir,
+  writeCachedChatId,
+  readCachedChatId,
+} from "./chat-id-cache";
 import type { FetchLike } from "../types";
 import type { TelegramUpdate, TelegramMessage } from "./types";
 
@@ -672,6 +681,143 @@ describe("TelegramDispatcher", () => {
 
     expect(send.calls.length).toBe(1);
     expect(send.calls[0]!.message).toContain("hi");
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/*  Startup probe → chat-id cache invalidation                          */
+/* ------------------------------------------------------------------ */
+
+describe("TelegramDispatcher startup probe cache clear", () => {
+  let mock: MockFetch;
+  let send: SendSpy;
+  let logs: string[];
+  let cacheRoot: string;
+  let cacheDir: string;
+
+  beforeEach(async () => {
+    mock = makeMockFetch();
+    clientFetchCtx.set(mock.fn);
+    clientSleepCtx.set(async () => { /* fast forward */ });
+    clientLogCtx.set(() => { /* silence */ });
+
+    send = makeSendSpy();
+    sendCtx.set(send.fn);
+
+    sleepCtx.set(async () => { /* fast forward */ });
+    nowCtx.set(() => 1_700_000_000_000);
+    logs = [];
+    logCtx.set((line) => logs.push(line));
+
+    cacheRoot = await mkdtemp(join(tmpdir(), "dispatcher-cache-clear-"));
+    cacheDir = join(cacheRoot, "channels", "telegram");
+    setCacheStateDir(cacheDir);
+  });
+
+  afterEach(async () => {
+    clientFetchCtx.reset();
+    clientSleepCtx.reset();
+    clientLogCtx.reset();
+    sendCtx.reset();
+    sleepCtx.reset();
+    nowCtx.reset();
+    logCtx.reset();
+    resetCacheStateDir();
+    await rm(cacheRoot, { recursive: true, force: true });
+  });
+
+  function makeDispatcher(): TelegramDispatcher {
+    const client = new TelegramClient({ token: "TEST_TOKEN" });
+    return new TelegramDispatcher({
+      client,
+      allowedChatIds: ["100"],
+      allowedUserIds: [],
+      chatId: "100",
+    });
+  }
+
+  test("401 on startup probe: clears cached chat id", async () => {
+    await writeCachedChatId("100");
+    expect(await readCachedChatId()).toBe("100");
+
+    mock.enqueueResponse({ ok: false, error_code: 401, description: "Unauthorized" }, 401);
+
+    const d = makeDispatcher();
+    await d.start();
+    // The dispatcher's clear is awaited inside start(), so by the time start
+    // returns the file is gone.
+    await d.stop();
+
+    expect(await readCachedChatId()).toBeNull();
+    // The dispatcher should still have started the loop (existing behavior).
+    expect(logs.some((l) => l.includes("HTTP 401"))).toBe(true);
+  });
+
+  test("403 on startup probe: clears cached chat id", async () => {
+    await writeCachedChatId("100");
+    expect(await readCachedChatId()).toBe("100");
+
+    mock.enqueueResponse({ ok: false, error_code: 403, description: "Forbidden" }, 403);
+
+    const d = makeDispatcher();
+    await d.start();
+    await d.stop();
+
+    expect(await readCachedChatId()).toBeNull();
+    expect(logs.some((l) => l.includes("HTTP 403"))).toBe(true);
+  });
+
+  test("500 on startup probe: cache is NOT cleared (only auth failures invalidate)", async () => {
+    await writeCachedChatId("100");
+    expect(await readCachedChatId()).toBe("100");
+
+    mock.enqueueResponse({ ok: false, error_code: 500, description: "Internal Server Error" }, 500);
+
+    const d = makeDispatcher();
+    await d.start();
+    await d.stop();
+
+    expect(await readCachedChatId()).toBe("100");
+    expect(logs.some((l) => l.includes("HTTP 500"))).toBe(true);
+  });
+
+  test("409 on startup probe: cache is NOT cleared (preserves existing 409 handling)", async () => {
+    await writeCachedChatId("100");
+    expect(await readCachedChatId()).toBe("100");
+
+    mock.enqueueResponse({ ok: false, error_code: 409, description: "Conflict" }, 409);
+
+    const d = makeDispatcher();
+    await d.start();
+    expect(d.isRunning()).toBe(false);
+    await d.stop();
+
+    expect(await readCachedChatId()).toBe("100");
+    expect(logs.some((l) => l.includes("another poller or webhook is active"))).toBe(true);
+  });
+
+  test("successful probe (200): cache is NOT cleared", async () => {
+    await writeCachedChatId("100");
+
+    mock.enqueueResponse({ ok: true, result: [] });
+
+    const d = makeDispatcher();
+    await d.start();
+    await d.stop();
+
+    expect(await readCachedChatId()).toBe("100");
+  });
+
+  test("network failure on startup probe: cache is NOT cleared (auth status unknown)", async () => {
+    await writeCachedChatId("100");
+
+    mock.enqueueError(new Error("ECONNRESET"));
+
+    const d = makeDispatcher();
+    await d.start();
+    await d.stop();
+
+    expect(await readCachedChatId()).toBe("100");
   });
 });
 

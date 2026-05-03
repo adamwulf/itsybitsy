@@ -240,16 +240,17 @@ export async function notifyManager(
  * Send a watchdog notification to the agent's spawner.
  *
  * Routing:
- *   - `@system` → write to ~/.itsybitsy/coordinator-inbox/ via inboxWrite()
+ *   - `@system` → deliver to the system coordinator's tmux session via
+ *     sendToSystemCoordinator (the same direct-tmux path `ib send @system` uses)
  *   - `@<repo-name>` → look up the repo, find its per-repo coordinator, sendMessage
  *   - real agent_id → findAgent + sendMessage (existing path)
  *
  * Returns `true` only when a real notification was delivered.
  * Returns `false` if the agent has no spawned_by, the spawner === manager,
- * the spawner cannot be resolved, the underlying delivery (inboxWrite or
- * sendMessage) reported failure, or any unexpected error was thrown
- * during routing. Callers MUST gate state advance on this result so a
- * transient delivery failure does not get silently swallowed.
+ * the spawner cannot be resolved, the underlying delivery reported failure,
+ * or any unexpected error was thrown during routing. Callers MUST gate
+ * state advance on this result so a transient delivery failure does not get
+ * silently swallowed.
  *
  * Error policy: all three branches behave the same — never throw, always
  * return a boolean. Wrap each branch in try/catch so an unexpected disk
@@ -269,11 +270,11 @@ export async function notifySpawner(
   // same dedupe semantics as before.
   if (spawner.agent_id === agent.meta.manager) return false;
 
-  // @system → append to the system coordinator's file-based inbox.
+  // @system → deliver via the same direct-tmux path `ib send @system` uses.
   if (spawner.agent_id === "@system") {
     try {
-      const { inboxWrite } = await import("./inbox");
-      const result = await inboxWrite(message, { source: agent.id });
+      const { sendToSystemCoordinator } = await import("./index");
+      const result = await sendToSystemCoordinator(message, { fromAgent: agent.id });
       return result.ok;
     } catch { /* swallowed unexpected error counts as delivery failure */
       return false;
@@ -406,7 +407,7 @@ async function handleWaiting(agent: Agent, tracker: AgentTracker, getAllAgents: 
     }
 
     // Only reset counter and advance backoff on successful (or no-op)
-    // delivery. A transient inbox/tmux failure must not silently advance
+    // delivery. A transient delivery failure must not silently advance
     // the backoff — we want to keep nagging until delivery succeeds.
     if (notified) {
       tracker.waitCounter = 0;
@@ -521,7 +522,7 @@ async function handleComplete(agent: Agent, tracker: AgentTracker, getAllAgents:
       notified = true;
     }
     // Only set the one-shot flag when delivery actually succeeded. A
-    // transient inbox/tmux failure must not silently swallow the
+    // transient delivery failure must not silently swallow the
     // completion notification — we want the next tick to retry.
     if (notified) {
       tracker.completionNotified = true;

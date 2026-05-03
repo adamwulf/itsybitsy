@@ -730,7 +730,18 @@ async function main() {
     }
     case "status": {
       const repos = await listRepos();
-      const agent = await requireAgent(args[1], repos);
+      let statusAgentId: string | undefined = args[1];
+
+      // Auto-detect agent ID from CWD if not provided
+      if (!statusAgentId) {
+        const cwd = process.cwd();
+        const worktreeMatch = cwd.match(/\/.ittybitty\/agents\/([^/]+)\/repo/);
+        if (worktreeMatch) {
+          statusAgentId = worktreeMatch[1];
+        }
+      }
+
+      const agent = await requireAgent(statusAgentId, repos);
       const { statusAgent } = await import("./ib-commands");
       await printAndExit(await statusAgent(agent));
       break;

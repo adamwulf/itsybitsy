@@ -683,6 +683,10 @@ describe("ensureSystemCoordinator", () => {
       const claudeCmd = cmdStrs.find((c) => c.includes("claude --model"));
       expect(claudeCmd).toBeDefined();
       expect(claudeCmd).not.toContain("telegram");
+      // imessage defaults to false in this test, so --channels should be
+      // absent entirely. This guards against a regression where someone
+      // re-introduces a telegram channel injection under a different name.
+      expect(claudeCmd).not.toContain("--channels");
     } finally {
       resetUserConfigPath();
     }

@@ -262,7 +262,11 @@ async function writeCoordinatorMcpConfig(home: string, telegram: boolean): Promi
 }
 
 /**
- * Write settings.local.json and coordinator-prompt.txt to ~/.itsybitsy/.
+ * Write settings.local.json, coordinator-prompt.txt, and .mcp.json to
+ * ~/.itsybitsy/. The `.mcp.json` is written or removed based on the
+ * current value of `coordinator.telegram` (read once at coordinator
+ * startup — flipping the flag while the session is alive does not
+ * rewrite the file; restart the coordinator to pick up the change).
  */
 async function writeCoordinatorFiles(): Promise<void> {
   const home = itsybitsyHome();

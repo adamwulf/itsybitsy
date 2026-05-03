@@ -3452,8 +3452,11 @@ export async function uninstallInterceptHook(_repoPath: string, settingsPath?: s
 /**
  * Outbound `ib tgsend` — chunk the text and POST each chunk via TelegramClient.
  *
- * Reads `channels.telegram.bot_token` and `channels.telegram.chat_id` from
- * config. Both must be set; missing either returns a clear error message.
+ * Reads `channels.telegram.bot_token` from config and the resolved chat id
+ * from the state file at `~/.itsybitsy/channels/telegram/chat-id`, which
+ * `ib watch` writes after step 2 of the Telegram subsystem boot succeeds.
+ * If the state file is missing or empty, the user has not yet DM'd their
+ * allowlisted bot — we surface a clear error pointing at the fix.
  *
  * 429 handling: TelegramClient.sendMessage does not retry on 429 (the v1
  * contract is "return what we got, let the caller branch"). We do one retry
@@ -3463,15 +3466,20 @@ export async function uninstallInterceptHook(_repoPath: string, settingsPath?: s
 export async function telegramSend(text: string): Promise<{ ok: boolean; message: string }> {
   const cfg = await readConfig();
   const tokenEntry = cfg["channels.telegram.bot_token"];
-  const chatEntry = cfg["channels.telegram.chat_id"];
   const token = typeof tokenEntry?.value === "string" ? tokenEntry.value : "";
-  const chatId = typeof chatEntry?.value === "string" ? chatEntry.value : "";
 
   if (!token) {
     return { ok: false, message: "Telegram not configured: set channels.telegram.bot_token in ~/.itsybitsy/config.json" };
   }
-  if (!chatId) {
-    return { ok: false, message: "Telegram not configured: set channels.telegram.chat_id in ~/.itsybitsy/config.json" };
+
+  const { readChatId } = await import("./channels/access");
+  const chatId = await readChatId();
+  if (chatId === null) {
+    return {
+      ok: false,
+      message:
+        "Telegram chat not yet resolved — start `ib watch` and ensure the bot has received a recent allowlisted DM.",
+    };
   }
 
   const { TelegramClient, chunk, sleepCtx } = await import("./channels/telegram-client");

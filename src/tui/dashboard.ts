@@ -2030,33 +2030,37 @@ export async function launchDashboard(): Promise<void> {
 
   const config = await readConfig();
 
-  // Telegram dispatcher: auto-start only when bot_token is set (Phase 0).
-  // The dispatcher long-polls Telegram and forwards messages to the system
-  // coordinator. When the token is unset/empty we skip startup entirely;
-  // when set we start it alongside the agent watcher and stop it on exit.
+  // Telegram subsystem: three-step boot (Phase A). Token check → connect
+  // probe → resolve chat id from inbound inference → start dispatcher.
+  // Each step gates the next; on failure we log a single line and continue
+  // with the rest of the dashboard (agents, watcher, TUI) running normally.
   const tgTokenEntry = config["channels.telegram.bot_token"];
-  const tgChatEntry = config["channels.telegram.chat_id"];
   const tgToken = typeof tgTokenEntry?.value === "string" ? tgTokenEntry.value : "";
-  const tgChatId = typeof tgChatEntry?.value === "string" ? tgChatEntry.value : "";
+  const { TelegramClient } = await import("../channels/telegram-client");
+  const { TelegramDispatcher } = await import("../channels/dispatcher");
+  const { readAccess, writeChatId } = await import("../channels/access");
+  const { bootTelegramSubsystem } = await import("../channels/boot");
+  const access = await readAccess();
   let telegramDispatcher: import("../channels/dispatcher").TelegramDispatcher | null = null;
-  if (tgToken !== "") {
-    const { TelegramClient } = await import("../channels/telegram-client");
-    const { TelegramDispatcher } = await import("../channels/dispatcher");
-    const { readAccess } = await import("../channels/access");
-    const access = await readAccess();
-    const client = new TelegramClient({ token: tgToken });
-    telegramDispatcher = new TelegramDispatcher({
-      client,
-      allowedChatIds: access.allowed_chat_ids,
-      allowedUserIds: access.allowed_user_ids,
-      chatId: tgChatId,
+  try {
+    const bootResult = await bootTelegramSubsystem({
+      token: tgToken,
+      access,
+      buildClient: (token) => new TelegramClient({ token }),
+      buildDispatcher: (opts) => new TelegramDispatcher(opts),
+      writeChatId,
     });
-    // Don't await — start() runs the loop in the background.
-    telegramDispatcher.start().catch((err) => {
-      console.error(`Telegram dispatcher failed to start: ${err instanceof Error ? err.message : String(err)}`);
-    });
-  } else {
-    console.error("Telegram routing disabled: no bot token configured");
+    if (bootResult.ok) {
+      telegramDispatcher = bootResult.dispatcher;
+      // Don't await — start() runs the loop in the background.
+      telegramDispatcher.start().catch((err) => {
+        console.error(`Telegram dispatcher failed to start: ${err instanceof Error ? err.message : String(err)}`);
+      });
+    }
+  } catch (err) {
+    // bootTelegramSubsystem itself shouldn't throw — but if a future change
+    // adds a path that does, we don't want it to take down launchDashboard.
+    console.error(`Telegram routing disabled: boot threw (${err instanceof Error ? err.message : String(err)})`);
   }
 
   const dashboard = new DashboardComponent();

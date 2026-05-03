@@ -5719,56 +5719,86 @@ describe("resolveAgentId", () => {
 describe("telegramSend (native)", () => {
   let tempDir: string;
   let userConfigPath: string;
+  let stateDir: string;
   let originalFetch: typeof globalThis.fetch;
 
   // Lazy import to keep load order consistent with other tests.
   async function loadDeps() {
     const ibCmds = await import("./ib-commands");
     const tgClient = await import("./channels/telegram-client");
-    return { ibCmds, tgClient };
+    const access = await import("./channels/access");
+    return { ibCmds, tgClient, access };
+  }
+
+  /** Persist the chat-id state file the way `ib watch` would have, so the
+   *  test mirrors the production read path. */
+  async function writeStateChatId(chatId: string): Promise<void> {
+    const { access } = await loadDeps();
+    await access.writeChatId(chatId);
   }
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "tgsend-test-"));
     userConfigPath = join(tempDir, "config.json");
+    stateDir = join(tempDir, "channels", "telegram");
     setUserConfigPath(userConfigPath);
+    const { access } = await loadDeps();
+    access.setStateDir(stateDir);
     originalFetch = globalThis.fetch;
   });
 
   afterEach(async () => {
     resetUserConfigPath();
-    const { tgClient } = await loadDeps();
+    const { tgClient, access } = await loadDeps();
     tgClient.fetchCtx.reset();
     tgClient.sleepCtx.reset();
     tgClient.logCtx.reset();
+    access.resetStateDir();
     globalThis.fetch = originalFetch;
     await rm(tempDir, { recursive: true, force: true });
   });
 
   test("missing token returns ok=false with bot_token hint", async () => {
     await Bun.write(userConfigPath, JSON.stringify({
-      channels: { telegram: { chat_id: "12345" } },
+      channels: { telegram: {} },
     }));
+    await writeStateChatId("12345");
     const { ibCmds } = await loadDeps();
     const result = await ibCmds.telegramSend("hello");
     expect(result.ok).toBe(false);
     expect(result.message).toContain("channels.telegram.bot_token");
   });
 
-  test("missing chat_id returns ok=false with chat_id hint", async () => {
+  test("missing chat-id state file returns ok=false with resolution hint", async () => {
     await Bun.write(userConfigPath, JSON.stringify({
       channels: { telegram: { bot_token: "TEST_TOKEN" } },
     }));
+    // No writeStateChatId — file absent.
     const { ibCmds } = await loadDeps();
     const result = await ibCmds.telegramSend("hello");
     expect(result.ok).toBe(false);
-    expect(result.message).toContain("channels.telegram.chat_id");
+    expect(result.message).toContain("Telegram chat not yet resolved");
+    expect(result.message).toContain("ib watch");
+  });
+
+  test("empty chat-id state file is treated as missing", async () => {
+    await Bun.write(userConfigPath, JSON.stringify({
+      channels: { telegram: { bot_token: "TEST_TOKEN" } },
+    }));
+    // Write a whitespace-only file: the read helper trims, so this is empty.
+    await mkdir(stateDir, { recursive: true });
+    await Bun.write(join(stateDir, "chat-id"), "   \n");
+    const { ibCmds } = await loadDeps();
+    const result = await ibCmds.telegramSend("hello");
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("Telegram chat not yet resolved");
   });
 
   test("both present + short text → one sendMessage call, ok=true with message='ok'", async () => {
     await Bun.write(userConfigPath, JSON.stringify({
-      channels: { telegram: { bot_token: "TEST_TOKEN", chat_id: "12345" } },
+      channels: { telegram: { bot_token: "TEST_TOKEN" } },
     }));
+    await writeStateChatId("12345");
     const { ibCmds, tgClient } = await loadDeps();
     const calls: Array<{ url: string; body: unknown }> = [];
     tgClient.fetchCtx.set(async (input, init) => {
@@ -5791,8 +5821,9 @@ describe("telegramSend (native)", () => {
 
   test("both present + 5000-char text → two sendMessage calls, ok=true with message='ok (2 parts)'", async () => {
     await Bun.write(userConfigPath, JSON.stringify({
-      channels: { telegram: { bot_token: "TEST_TOKEN", chat_id: "12345" } },
+      channels: { telegram: { bot_token: "TEST_TOKEN" } },
     }));
+    await writeStateChatId("12345");
     const { ibCmds, tgClient } = await loadDeps();
     const calls: Array<{ text: string }> = [];
     tgClient.fetchCtx.set(async (_input, init) => {
@@ -5816,8 +5847,9 @@ describe("telegramSend (native)", () => {
 
   test("sendMessage throws → ok=false", async () => {
     await Bun.write(userConfigPath, JSON.stringify({
-      channels: { telegram: { bot_token: "TEST_TOKEN", chat_id: "12345" } },
+      channels: { telegram: { bot_token: "TEST_TOKEN" } },
     }));
+    await writeStateChatId("12345");
     const { ibCmds, tgClient } = await loadDeps();
     tgClient.fetchCtx.set(async () => {
       throw new Error("network down");
@@ -5830,8 +5862,9 @@ describe("telegramSend (native)", () => {
 
   test("sendMessage 4xx response → ok=false with description", async () => {
     await Bun.write(userConfigPath, JSON.stringify({
-      channels: { telegram: { bot_token: "TEST_TOKEN", chat_id: "12345" } },
+      channels: { telegram: { bot_token: "TEST_TOKEN" } },
     }));
+    await writeStateChatId("12345");
     const { ibCmds, tgClient } = await loadDeps();
     tgClient.fetchCtx.set(async () => {
       return new Response(JSON.stringify({ ok: false, error_code: 400, description: "Bad Request: chat not found" }), {
@@ -5847,8 +5880,9 @@ describe("telegramSend (native)", () => {
 
   test("429 → sleeps Retry-After then retries once, ok=true on success", async () => {
     await Bun.write(userConfigPath, JSON.stringify({
-      channels: { telegram: { bot_token: "TEST_TOKEN", chat_id: "12345" } },
+      channels: { telegram: { bot_token: "TEST_TOKEN" } },
     }));
+    await writeStateChatId("12345");
     const { ibCmds, tgClient } = await loadDeps();
 
     const sleeps: number[] = [];
@@ -5878,8 +5912,9 @@ describe("telegramSend (native)", () => {
 
   test("429 retry that also fails → ok=false", async () => {
     await Bun.write(userConfigPath, JSON.stringify({
-      channels: { telegram: { bot_token: "TEST_TOKEN", chat_id: "12345" } },
+      channels: { telegram: { bot_token: "TEST_TOKEN" } },
     }));
+    await writeStateChatId("12345");
     const { ibCmds, tgClient } = await loadDeps();
 
     tgClient.sleepCtx.set(async () => {});
@@ -5897,8 +5932,9 @@ describe("telegramSend (native)", () => {
 
   test("429 with only Retry-After header (no body parameter) sleeps the header value", async () => {
     await Bun.write(userConfigPath, JSON.stringify({
-      channels: { telegram: { bot_token: "TEST_TOKEN", chat_id: "12345" } },
+      channels: { telegram: { bot_token: "TEST_TOKEN" } },
     }));
+    await writeStateChatId("12345");
     const { ibCmds, tgClient } = await loadDeps();
 
     const sleeps: number[] = [];

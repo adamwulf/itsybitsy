@@ -34,7 +34,7 @@ import { RESET, BOLD, DIM, RED } from "./colors";
 import { clampLeftWidthAbsolute } from "./widths";
 import type { RepoHealthReport } from "../health-check";
 import { getResolvableWarnings, resolveHealthWarnings } from "../health-check";
-import { IB_COORDINATOR_SESSION, sanitizeTmuxInput, restartSystemCoordinator, checkCoordinatorExists, getLastCoordinatorSpawnMode, clearCoordinatorSession } from "../coordinator";
+import { IB_COORDINATOR_SESSION, sanitizeTmuxInput, restartSystemCoordinator, checkCoordinatorExists, getLastCoordinatorSpawnMode, discardSystemCoordinator } from "../coordinator";
 import { isValidToolList } from "../validation";
 
 const SCROLL_STEP = 10;
@@ -144,7 +144,7 @@ export interface ActionCtx {
     updateContent(): void;
   };
   tmuxPane: { scrollUp(n?: number): void; scrollDown(n?: number): void };
-  coordinatorPane: { scrollUp(n?: number): void; scrollDown(n?: number): void };
+  coordinatorPane: { scrollUp(n?: number): void; scrollDown(n?: number): void; resetForAgent(): void };
   systemDashboard: { scrollUp(n?: number): void; scrollDown(n?: number): void };
   splitPane: { getLeftWidth(): number; setLeftWidth(w: number): void };
   tui: { requestRender(): void } | null;
@@ -189,24 +189,46 @@ export function handleKill(ctx: ActionCtx) {
 }
 
 /**
- * Kill the system coordinator and discard the saved session id so the next
- * spawn launches with a fresh prompt paste. Distinct from `R` (resume).
+ * Kill the system coordinator and write the cleared marker so the next
+ * launch ignores its transcripts and starts fresh. Distinct from `R`
+ * (which resumes).
  */
 export function handleKillSystemCoordinator(ctx: ActionCtx) {
   ctx.showDialog({
     type: "confirm",
-    prompt: "Kill system coordinator and start fresh on next launch?",
+    prompt: "Discard saved session and kill system coordinator? (will not auto-relaunch)",
     confirmLabel: "Kill",
     focusedButton: "cancel",
     confirmColor: RED,
     onYes: () => {
       ctx.closeDialog();
       ctx.executeAndRefresh(async () => {
-        await killTmuxSession(IB_COORDINATOR_SESSION);
-        await clearCoordinatorSession();
+        await discardSystemCoordinator();
         ctx.setNotice("System coordinator killed (next launch will be fresh)");
       });
     },
+  });
+}
+
+/**
+ * Restart the system coordinator: kill the tmux session and respawn. The
+ * respawn resumes the newest non-cleared transcript when one is available;
+ * otherwise it falls back to a fresh launch (with the system prompt paste).
+ *
+ * Single source of truth for the `R`-on-coordinator flow — both the dashboard
+ * key handler and `handleResume`'s system-coordinator branch delegate here so
+ * the notice text and tmux pane reset stay in sync.
+ */
+export function handleRestartSystemCoordinator(ctx: ActionCtx) {
+  ctx.executeAndRefresh(async () => {
+    await restartSystemCoordinator();
+    ctx.coordinatorPane.resetForAgent();
+    const mode = getLastCoordinatorSpawnMode();
+    ctx.setNotice(
+      mode === "resumed"
+        ? "System coordinator resumed"
+        : "System coordinator restarted (fresh)",
+    );
   });
 }
 
@@ -280,19 +302,8 @@ export function handleNukeAll(ctx: ActionCtx) {
 }
 
 export function handleResume(ctx: ActionCtx) {
-  // System coordinator: R kills the tmux session and respawns. The respawn
-  // resumes a saved Claude session when one is available; otherwise it falls
-  // back to a fresh launch (with the system prompt paste).
   if (ctx.agentTree.isSystemCoordinatorSelected) {
-    ctx.executeAndRefresh(async () => {
-      await restartSystemCoordinator();
-      const mode = getLastCoordinatorSpawnMode();
-      ctx.setNotice(
-        mode === "resumed"
-          ? "System coordinator resumed"
-          : "System coordinator restarted (fresh)",
-      );
-    });
+    handleRestartSystemCoordinator(ctx);
     return;
   }
 

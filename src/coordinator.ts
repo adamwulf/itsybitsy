@@ -14,7 +14,16 @@ import { SpawnContext } from "./types";
 import { getTmuxWidthForAgent } from "./tui/widths";
 import { loadAgentType, ensureAgentTypesDir } from "./agent-types";
 import { isValidSessionId, isValidModel } from "./validation";
-import { encodeClaudeProjectPath } from "./auto-compact";
+
+/**
+ * Encode an absolute path into Claude's project-directory naming scheme:
+ * replace both `/` and `.` with `-`. Inlined here (rather than importing from
+ * auto-compact) because both modules need the same encoding without a
+ * cross-domain dependency.
+ */
+function encodeClaudeProjectPath(p: string): string {
+  return p.replace(/[/.]/g, "-");
+}
 
 export const IB_COORDINATOR_SESSION = "ib-coordinator";
 
@@ -61,28 +70,46 @@ function refsPath(): string {
   return join(itsybitsyHome(), "coordinator.refs");
 }
 
-function coordinatorSessionFilePath(): string {
-  return join(itsybitsyHome(), "coordinator-session.json");
+function clearedMarkerPath(): string {
+  return join(itsybitsyHome(), "coordinator-session.cleared");
 }
 
-/**
- * Encoded directory under ~/.claude/projects/ where Claude writes the
- * coordinator's transcript JSONL files. Mirrors the encoding used by
- * auto-compact's `transcriptPath()` for normal agents.
- */
 function coordinatorTranscriptDir(): string {
   const home = process.env.HOME ?? homedir();
   return join(home, ".claude", "projects", encodeClaudeProjectPath(itsybitsyHome()));
 }
 
 /**
- * Locate the most recently modified `<session-id>.jsonl` transcript inside
- * the coordinator's Claude project directory. Returns the bare session id
- * (filename without extension), or null if no transcript exists.
+ * Cleared-marker timestamp (ms epoch). Transcripts with mtime <= this value
+ * are ignored when resuming — that's how `x` says "everything before now
+ * is dead." Returns 0 when no marker exists.
+ */
+async function readClearedMarker(): Promise<number> {
+  try {
+    const file = Bun.file(clearedMarkerPath());
+    if (!(await file.exists())) return 0;
+    const raw = (await file.text()).trim();
+    const n = parseInt(raw, 10);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/** Write the cleared-marker so subsequent resumes ignore prior transcripts. */
+async function writeClearedMarker(): Promise<void> {
+  await Bun.write(clearedMarkerPath(), String(Date.now()) + "\n");
+}
+
+/**
+ * Returns the session id of the newest non-cleared transcript, or null.
+ * Picking the newest each time (rather than persisting an id) sidesteps
+ * Claude's mid-conversation session-id rotation.
  */
 async function findLatestCoordinatorTranscriptId(): Promise<string | null> {
   const dir = coordinatorTranscriptDir();
-  let entries: { name: string; mtimeMs: number }[];
+  const clearedAt = await readClearedMarker();
+  let entries: { id: string; mtimeMs: number }[];
   try {
     const { readdir, stat } = await import("fs/promises");
     const names = await readdir(dir);
@@ -93,7 +120,8 @@ async function findLatestCoordinatorTranscriptId(): Promise<string | null> {
       if (!isValidSessionId(id)) continue;
       try {
         const s = await stat(join(dir, name));
-        entries.push({ name: id, mtimeMs: s.mtimeMs });
+        if (s.mtimeMs <= clearedAt) continue;
+        entries.push({ id, mtimeMs: s.mtimeMs });
       } catch { /* skip */ }
     }
   } catch {
@@ -101,59 +129,7 @@ async function findLatestCoordinatorTranscriptId(): Promise<string | null> {
   }
   if (entries.length === 0) return null;
   entries.sort((a, b) => b.mtimeMs - a.mtimeMs);
-  return entries[0]!.name;
-}
-
-/**
- * Persist the coordinator's session id so the next `ib watch` boot (or `R`
- * press) can resume that Claude session instead of starting fresh.
- */
-async function saveCoordinatorSession(sessionId: string): Promise<void> {
-  if (!isValidSessionId(sessionId)) return;
-  const payload = { session_id: sessionId, captured_at: Date.now() };
-  await Bun.write(coordinatorSessionFilePath(), JSON.stringify(payload) + "\n");
-}
-
-/**
- * Read the persisted coordinator session id, returning null if the file is
- * missing, malformed, or the id no longer matches the validation grammar.
- */
-export async function readCoordinatorSession(): Promise<string | null> {
-  try {
-    const file = Bun.file(coordinatorSessionFilePath());
-    if (!(await file.exists())) return null;
-    const raw = (await file.text()).trim();
-    if (!raw) return null;
-    const obj = JSON.parse(raw);
-    const id = typeof obj?.session_id === "string" ? obj.session_id : null;
-    if (!id || !isValidSessionId(id)) return null;
-    return id;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Delete the persisted coordinator session id so the next spawn falls back
- * to a fresh launch (with the SYSTEM_COORDINATOR_PROMPT paste).
- */
-export async function clearCoordinatorSession(): Promise<void> {
-  try {
-    const { rm } = await import("fs/promises");
-    await rm(coordinatorSessionFilePath(), { force: true });
-  } catch { /* ignore */ }
-}
-
-/**
- * Capture the coordinator's current Claude session id from the most recent
- * transcript file under ~/.claude/projects/<encoded>/ and persist it.
- * Skips silently if no transcript is found yet (Claude hasn't written one).
- */
-async function captureCoordinatorSessionId(): Promise<string | null> {
-  const id = await findLatestCoordinatorTranscriptId();
-  if (!id) return null;
-  await saveCoordinatorSession(id);
-  return id;
+  return entries[0]!.id;
 }
 
 /**
@@ -345,13 +321,9 @@ async function writeCoordinatorFiles(): Promise<void> {
 }
 
 /**
- * Spawn-mode classification for the most recent ensureSystemCoordinator call.
  * - "existing": the tmux session was already alive — nothing was launched.
- * - "resumed": claude --resume <id> ran; the SYSTEM_COORDINATOR_PROMPT was NOT pasted.
+ * - "resumed": `claude --resume <id>` ran and reached the ready marker.
  * - "fresh":   a fresh `claude` session was launched and the prompt was pasted.
- *
- * Callers (e.g. the dashboard 'R' handler) read this to surface an accurate
- * notice. Updated synchronously inside `ensureSystemCoordinator`.
  */
 export type CoordinatorSpawnMode = "existing" | "resumed" | "fresh";
 let lastSpawnMode: CoordinatorSpawnMode = "existing";
@@ -360,34 +332,18 @@ export function getLastCoordinatorSpawnMode(): CoordinatorSpawnMode {
 }
 
 /**
- * Decide whether the next spawn should resume a saved session.
- *
- * Returns the resumable session id only when (a) coordinator-session.json
- * names a session, and (b) the corresponding `<id>.jsonl` still exists in
- * Claude's project directory. Otherwise returns null and the caller falls
- * back to a fresh launch.
- */
-async function resolveResumableSessionId(): Promise<string | null> {
-  const id = await readCoordinatorSession();
-  if (!id) return null;
-  const transcript = join(coordinatorTranscriptDir(), `${id}.jsonl`);
-  if (!(await Bun.file(transcript).exists())) return null;
-  return id;
-}
-
-/**
- * Ensure the system coordinator tmux session is running.
- * If a session already exists, returns immediately.
- * Otherwise creates the session, starts Claude, and (only on a fresh launch)
- * sends the initial prompt. When a saved session id is available with its
- * transcript still on disk, this resumes that session via `claude --resume`.
- * Returns the tmux session name.
- *
- * TOCTOU: If two instances race, tmux new-session will fail for the loser —
- * we catch that and fall through.
+ * Ensure the system coordinator tmux session is running. If alive, returns
+ * immediately. Otherwise launches Claude — resuming the newest non-cleared
+ * transcript when one exists, falling back to a fresh launch + prompt paste
+ * otherwise. If `--resume` is attempted but Claude's UI never reaches the
+ * ready marker, the session is killed, the cleared-marker is written, and a
+ * single fresh-launch retry runs.
  */
 export async function ensureSystemCoordinator(): Promise<string> {
-  // Check for existing session
+  return await ensureSystemCoordinatorImpl(false);
+}
+
+async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Promise<string> {
   if (await tmuxSessionExists()) {
     lastSpawnMode = "existing";
     return IB_COORDINATOR_SESSION;
@@ -395,7 +351,6 @@ export async function ensureSystemCoordinator(): Promise<string> {
 
   const home = itsybitsyHome();
 
-  // Set up the directory and files
   await ensureHomeRepo();
   await writeCoordinatorFiles();
 
@@ -423,20 +378,17 @@ export async function ensureSystemCoordinator(): Promise<string> {
   // it back when other clients attach/detach.
   await coordinatorSpawnCtx.run(["tmux", "set-option", "-w", "-t", IB_COORDINATOR_SESSION, "window-size", "manual"]);
 
-  // Read coordinator model from config
   const config = await readConfig();
   const rawModel = (config["coordinator.model"]?.value as string) ?? "opus";
   // Reject malformed model names — they would otherwise be interpolated into
-  // the shell command below. The fallback matches the default.
+  // the shell command below.
   const model = isValidModel(rawModel) ? rawModel : "opus";
   const imessage = config["coordinator.imessage"]?.value === true;
 
-  // Decide between resume and fresh launch BEFORE starting Claude. Resume is
-  // skipped when the saved session id is missing or its transcript file is
-  // gone (e.g. Claude project dir was wiped).
-  const resumeId = await resolveResumableSessionId();
+  // Resume the newest non-cleared transcript. Skip on the post-failure retry
+  // so a single bad transcript can't trap us in an infinite loop.
+  const resumeId = retryAfterResumeFailure ? null : await findLatestCoordinatorTranscriptId();
 
-  // Start Claude — interactive mode, optionally resuming a prior session.
   const channels: string[] = [];
   if (imessage) channels.push("plugin:imessage@claude-plugins-official");
   const baseCmd = resumeId
@@ -454,14 +406,22 @@ export async function ensureSystemCoordinator(): Promise<string> {
   // races slow startups: the prompt text gets pasted but the Enter key is
   // swallowed before the input box becomes active, leaving the prompt
   // unsubmitted.
-  await waitForCoordinatorReady();
+  const ready = await waitForCoordinatorReady();
+
+  if (resumeId && !ready) {
+    // Resume failed (likely a corrupt or version-mismatched transcript). Kill
+    // the dead session, write the cleared marker so this transcript is
+    // skipped, and retry once as a fresh launch.
+    await coordinatorSpawnCtx.run(["tmux", "kill-session", "-t", IB_COORDINATOR_SESSION]);
+    await writeClearedMarker();
+    return await ensureSystemCoordinatorImpl(true);
+  }
 
   if (resumeId) {
     // Resumed sessions already have the system prompt baked into history —
     // re-pasting would inject a stray user message at the top of the new turn.
     lastSpawnMode = "resumed";
   } else {
-    // Send the initial prompt (sanitized) via send-keys -l then Enter
     const sanitizedPrompt = sanitizeTmuxInput(SYSTEM_COORDINATOR_PROMPT);
     await coordinatorSpawnCtx.run([
       "tmux", "send-keys", "-t", IB_COORDINATOR_SESSION, "-l", sanitizedPrompt,
@@ -474,13 +434,6 @@ export async function ensureSystemCoordinator(): Promise<string> {
     ]);
     lastSpawnMode = "fresh";
   }
-
-  // Capture the freshly-assigned session id so a future restart can resume
-  // this session. For resume, Claude reuses the same session id, so this is
-  // a no-op in practice but keeps the saved-id timestamp current.
-  // Failures are non-fatal: if the transcript hasn't appeared yet we just
-  // skip — the next R press / restart will fall back to fresh launch.
-  await captureCoordinatorSessionId().catch(() => null);
 
   return IB_COORDINATOR_SESSION;
 }
@@ -558,33 +511,37 @@ export async function releaseSystemCoordinator(
     if (onLastRef) {
       await onLastRef();
     }
-    // Persist the current session id before killing tmux so the next `ib watch`
-    // boot can resume it. Best-effort — failures (no transcript yet, dir gone)
-    // just leave the prior saved id (or no id) in place.
-    await captureCoordinatorSessionId().catch(() => null);
-    // Kill the tmux session
     await coordinatorSpawnCtx.run([
       "tmux", "kill-session", "-t", IB_COORDINATOR_SESSION,
     ]);
   }
 }
 
-/**
- * Restart the system coordinator — kill session and re-create.
- *
- * Captures the current Claude session id from the transcript directory before
- * killing tmux so the subsequent ensureSystemCoordinator() call can resume it.
- * Without this, a `R` press right after the very first ensureSystemCoordinator
- * (when the post-spawn capture returned null because Claude hadn't yet written
- * a transcript line) would always fall back to fresh.
- */
+/** Restart the system coordinator — kill the tmux session and re-create. */
 export async function restartSystemCoordinator(): Promise<void> {
-  await captureCoordinatorSessionId().catch(() => null);
-  // Kill existing session if present
   await coordinatorSpawnCtx.run([
     "tmux", "kill-session", "-t", IB_COORDINATOR_SESSION,
   ]);
   await ensureSystemCoordinator();
+}
+
+/**
+ * Discard the system coordinator: kill its tmux session, write the cleared
+ * marker so prior transcripts are ignored on the next launch, and remove the
+ * current process PID from coordinator.refs (so a stale ref doesn't keep the
+ * tmux session "logically alive" for the next acquire).
+ *
+ * Used by the dashboard `x` action on the system coordinator. Distinct from
+ * `restartSystemCoordinator` (which resumes the prior session).
+ */
+export async function discardSystemCoordinator(): Promise<void> {
+  await coordinatorSpawnCtx.run([
+    "tmux", "kill-session", "-t", IB_COORDINATOR_SESSION,
+  ]);
+  await writeClearedMarker();
+  const livePids = await readLivePids();
+  const remaining = livePids.filter((pid) => pid !== process.pid);
+  await writePidsAtomic(remaining);
 }
 
 export type CoordinatorState = "stopped" | "compacting" | "rate_limited" | "running";

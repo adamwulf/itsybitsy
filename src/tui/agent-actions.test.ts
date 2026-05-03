@@ -89,6 +89,7 @@ function makeMockCtx(overrides?: {
     coordinatorPane: {
       scrollUp: () => {},
       scrollDown: () => {},
+      resetForAgent: () => {},
     },
     systemDashboard: {
       scrollUp: () => {},

@@ -1,0 +1,415 @@
+import { test, expect, describe, beforeEach, afterEach } from "bun:test";
+import {
+  TelegramClient,
+  TELEGRAM_API_BASE,
+  TELEGRAM_CHUNK_LIMIT,
+  chunk,
+  fetchCtx,
+  sleepCtx,
+  logCtx,
+} from "./telegram-client";
+import type { FetchLike } from "../types";
+
+/** Build a Response object whose `.json()` resolves to `body`, with the
+ *  given status and optional headers. */
+function makeResponse(body: unknown, status = 200, headers: Record<string, string> = {}): Response {
+  // Bun's Response treats body=undefined as no-body; serialize so .json() works.
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json", ...headers },
+  });
+}
+
+/** A queue-driven fetch mock. Each call shifts the next response (or thrower)
+ *  off the queue. Call `calls` to see the URLs/inits captured. */
+type ResponseProducer = () => Response | Promise<Response>;
+interface MockFetch {
+  fn: FetchLike;
+  enqueue: (producer: ResponseProducer) => void;
+  enqueueResponse: (body: unknown, status?: number, headers?: Record<string, string>) => void;
+  enqueueError: (err: unknown) => void;
+  callCount: () => number;
+  lastInit: () => RequestInit | undefined;
+  allInits: () => Array<RequestInit | undefined>;
+  allUrls: () => string[];
+}
+
+function makeMockFetch(): MockFetch {
+  const queue: ResponseProducer[] = [];
+  const inits: Array<RequestInit | undefined> = [];
+  const urls: string[] = [];
+  const fn: FetchLike = async (input, init) => {
+    inits.push(init);
+    urls.push(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
+    const next = queue.shift();
+    if (!next) throw new Error("mockFetch: response queue empty");
+    return await next();
+  };
+  return {
+    fn,
+    enqueue: (p) => queue.push(p),
+    enqueueResponse: (body, status, headers) => queue.push(() => makeResponse(body, status, headers)),
+    enqueueError: (err) => queue.push(() => { throw err; }),
+    callCount: () => inits.length,
+    lastInit: () => inits[inits.length - 1],
+    allInits: () => inits,
+    allUrls: () => urls,
+  };
+}
+
+describe("chunk", () => {
+  test("returns single chunk for short input", () => {
+    expect(chunk("hello", 4000)).toEqual(["hello"]);
+  });
+
+  test("returns single chunk at exactly the limit", () => {
+    const s = "a".repeat(4000);
+    expect(chunk(s, 4000)).toEqual([s]);
+  });
+
+  test("splits 4500-char input into two chunks at limit 4000", () => {
+    const s = "a".repeat(4500);
+    const chunks = chunk(s, 4000);
+    expect(chunks.length).toBe(2);
+    expect(chunks[0]!.length).toBe(4000);
+    expect(chunks[1]!.length).toBe(500);
+    expect(chunks.join("")).toBe(s);
+  });
+
+  test("splits very long input into many chunks", () => {
+    const s = "x".repeat(12_345);
+    const chunks = chunk(s, 4000);
+    expect(chunks.length).toBe(4);
+    expect(chunks[0]!.length).toBe(4000);
+    expect(chunks[1]!.length).toBe(4000);
+    expect(chunks[2]!.length).toBe(4000);
+    expect(chunks[3]!.length).toBe(345);
+    expect(chunks.join("")).toBe(s);
+  });
+
+  test("default limit is TELEGRAM_CHUNK_LIMIT (4000)", () => {
+    expect(TELEGRAM_CHUNK_LIMIT).toBe(4000);
+    const s = "a".repeat(4500);
+    const chunks = chunk(s);
+    expect(chunks.length).toBe(2);
+    expect(chunks[0]!.length).toBe(4000);
+  });
+
+  test("hard cuts — does not look for whitespace boundaries", () => {
+    // v1 explicitly drops the `mode` param and never looks for newlines/spaces.
+    const s = "abcdefghij";
+    expect(chunk(s, 3)).toEqual(["abc", "def", "ghi", "j"]);
+  });
+
+  test("throws on non-positive limit", () => {
+    expect(() => chunk("x", 0)).toThrow();
+    expect(() => chunk("x", -1)).toThrow();
+  });
+});
+
+describe("TelegramClient construction", () => {
+  test("requires a token", () => {
+    expect(() => new TelegramClient({ token: "" })).toThrow();
+  });
+
+  test("uses the hardcoded base URL by default", () => {
+    expect(TELEGRAM_API_BASE).toBe("https://api.telegram.org");
+  });
+});
+
+describe("getUpdates", () => {
+  let mock: MockFetch;
+  let sleeps: number[];
+  let logs: string[];
+
+  beforeEach(() => {
+    mock = makeMockFetch();
+    fetchCtx.set(mock.fn);
+    sleeps = [];
+    sleepCtx.set(async (ms) => {
+      sleeps.push(ms);
+      // resolve immediately so tests don't actually wait
+    });
+    logs = [];
+    logCtx.set((line) => logs.push(line));
+  });
+
+  afterEach(() => {
+    fetchCtx.reset();
+    sleepCtx.reset();
+    logCtx.reset();
+  });
+
+  test("happy path returns parsed updates", async () => {
+    const updates = [
+      { update_id: 1, message: { message_id: 10, chat: { id: 99 }, text: "hi" } },
+    ];
+    mock.enqueueResponse({ ok: true, result: updates });
+    const client = new TelegramClient({ token: "TEST_TOKEN" });
+
+    const result = await client.getUpdates({ offset: 0 });
+    expect(result).toEqual(updates);
+    expect(mock.callCount()).toBe(1);
+  });
+
+  test("uses POST with JSON body and default allowed_updates=['message']", async () => {
+    mock.enqueueResponse({ ok: true, result: [] });
+    const client = new TelegramClient({ token: "T" });
+
+    await client.getUpdates({ offset: 5, timeout: 30, limit: 50 });
+
+    const init = mock.lastInit();
+    expect(init?.method).toBe("POST");
+    expect((init?.headers as Record<string, string>)["content-type"]).toBe("application/json");
+    const body = JSON.parse(init?.body as string);
+    expect(body.offset).toBe(5);
+    expect(body.timeout).toBe(30);
+    expect(body.limit).toBe(50);
+    expect(body.allowed_updates).toEqual(["message"]);
+  });
+
+  test("URL embeds the token but is not logged verbatim on success", async () => {
+    mock.enqueueResponse({ ok: true, result: [] });
+    const client = new TelegramClient({ token: "SECRET_TOKEN_123" });
+
+    await client.getUpdates();
+
+    expect(mock.allUrls()[0]).toContain("SECRET_TOKEN_123"); // sanity check on test mock
+    // No log line on success
+    expect(logs.filter((l) => l.includes("SECRET_TOKEN_123")).length).toBe(0);
+  });
+
+  test("429 → sleeps Retry-After then retries", async () => {
+    mock.enqueueResponse({ ok: false, error_code: 429, description: "rate limited" }, 429, { "retry-after": "3" });
+    mock.enqueueResponse({ ok: true, result: [] });
+    const client = new TelegramClient({ token: "T" });
+
+    const result = await client.getUpdates();
+    expect(result).toEqual([]);
+    expect(mock.callCount()).toBe(2);
+    expect(sleeps[0]).toBe(3_000);
+  });
+
+  test("429 with parameters.retry_after in body (no header) is honored", async () => {
+    mock.enqueueResponse(
+      { ok: false, error_code: 429, parameters: { retry_after: 7 } },
+      429,
+    );
+    mock.enqueueResponse({ ok: true, result: [] });
+    const client = new TelegramClient({ token: "T" });
+
+    await client.getUpdates();
+    expect(sleeps[0]).toBe(7_000);
+  });
+
+  test("409 mid-poll → retries with backoff (does not crash, does not skip-startup)", async () => {
+    mock.enqueueResponse({ ok: false, error_code: 409, description: "Conflict" }, 409);
+    mock.enqueueResponse({ ok: true, result: [] });
+    const client = new TelegramClient({ token: "T" });
+
+    const result = await client.getUpdates();
+    expect(result).toEqual([]);
+    expect(mock.callCount()).toBe(2);
+    expect(sleeps.length).toBe(1);
+    expect(sleeps[0]!).toBeGreaterThan(0);
+    expect(sleeps[0]!).toBeLessThanOrEqual(30_000);
+    // Should log a warning about the 409
+    expect(logs.some((l) => l.includes("409"))).toBe(true);
+  });
+
+  test("network throw → backoff, retry, no crash", async () => {
+    mock.enqueueError(new Error("ETIMEDOUT"));
+    mock.enqueueResponse({ ok: true, result: [] });
+    const client = new TelegramClient({ token: "T" });
+
+    const result = await client.getUpdates();
+    expect(result).toEqual([]);
+    expect(mock.callCount()).toBe(2);
+    expect(sleeps.length).toBe(1);
+  });
+
+  test("5xx → retries with backoff", async () => {
+    mock.enqueueResponse({}, 503);
+    mock.enqueueResponse({ ok: true, result: [] });
+    const client = new TelegramClient({ token: "T" });
+
+    const result = await client.getUpdates();
+    expect(result).toEqual([]);
+    expect(mock.callCount()).toBe(2);
+  });
+
+  test("backoff resets after success: a fresh getUpdates call starts at attempt 1", async () => {
+    // First getUpdates: one error then success.
+    mock.enqueueError(new Error("ETIMEDOUT"));
+    mock.enqueueResponse({ ok: true, result: [] });
+    const client = new TelegramClient({ token: "T" });
+
+    await client.getUpdates();
+    const firstCallSleeps = sleeps.slice();
+    expect(firstCallSleeps.length).toBe(1);
+
+    sleeps.length = 0;
+
+    // Second getUpdates: one error then success again — backoff should be the
+    // same magnitude as the first call (i.e., reset between calls).
+    mock.enqueueError(new Error("ETIMEDOUT"));
+    mock.enqueueResponse({ ok: true, result: [] });
+
+    await client.getUpdates();
+    expect(sleeps.length).toBe(1);
+    expect(sleeps[0]).toBe(firstCallSleeps[0]);
+  });
+
+  test("AbortController → cancels in-flight fetch within ~1s", async () => {
+    const controller = new AbortController();
+    const client = new TelegramClient({ token: "T" });
+
+    // Mock fetch that respects the abort signal: rejects with AbortError when
+    // the signal fires.
+    mock.enqueue(() => new Promise<Response>((_, reject) => {
+      // Wire abort listener to reject on signal trigger. The signal is the one
+      // passed via init from the client.
+      // We need access to the signal — capture via the fetch wrapper.
+    }));
+
+    // Override mock with a smarter fetch that hooks the signal.
+    fetchCtx.set(((_url: string | URL | Request, init?: RequestInit) =>
+      new Promise<Response>((_, reject) => {
+        const sig = init?.signal as AbortSignal | undefined;
+        if (sig?.aborted) {
+          reject(new DOMException("aborted", "AbortError"));
+          return;
+        }
+        sig?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+      })) as FetchLike);
+
+    const startedAt = Date.now();
+    const promise = client.getUpdates({ signal: controller.signal });
+
+    // Fire abort almost immediately.
+    setTimeout(() => controller.abort(), 5);
+
+    await expect(promise).rejects.toThrow();
+    const elapsedMs = Date.now() - startedAt;
+    expect(elapsedMs).toBeLessThan(1000);
+  });
+
+  test("AbortController fires during backoff sleep → rejects without another fetch", async () => {
+    const controller = new AbortController();
+    const client = new TelegramClient({ token: "T" });
+
+    // First fetch errors, triggering the backoff sleep. The sleepCtx mock above
+    // resolves immediately, so we replace it with one we can intercept.
+    sleepCtx.set((_ms) => new Promise(() => { /* never resolves on its own */ }));
+
+    mock.enqueueError(new Error("ETIMEDOUT"));
+    // No second response — if the loop misbehaves it'll throw "queue empty".
+
+    const promise = client.getUpdates({ signal: controller.signal });
+    setTimeout(() => controller.abort(), 5);
+
+    await expect(promise).rejects.toThrow();
+    expect(mock.callCount()).toBe(1); // no retry attempted after abort
+  });
+
+  test("pre-aborted signal short-circuits before first fetch", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const client = new TelegramClient({ token: "T" });
+
+    await expect(client.getUpdates({ signal: controller.signal })).rejects.toThrow();
+    expect(mock.callCount()).toBe(0);
+  });
+
+  test("one warning per error class: 5 consecutive ETIMEDOUTs produce exactly 1 log line", async () => {
+    for (let i = 0; i < 5; i++) {
+      mock.enqueueError(new Error("ETIMEDOUT"));
+    }
+    mock.enqueueResponse({ ok: true, result: [] });
+    const client = new TelegramClient({ token: "T" });
+
+    await client.getUpdates();
+
+    const timeoutWarnings = logs.filter((l) => l.includes("ETIMEDOUT"));
+    expect(timeoutWarnings.length).toBe(1);
+  });
+
+  test("error class change re-logs: ETIMEDOUT then ECONNRESET produce 2 warnings", async () => {
+    mock.enqueueError(new Error("ETIMEDOUT"));
+    mock.enqueueError(new Error("ETIMEDOUT"));
+    mock.enqueueError(new Error("ECONNRESET"));
+    mock.enqueueResponse({ ok: true, result: [] });
+    const client = new TelegramClient({ token: "T" });
+
+    await client.getUpdates();
+
+    expect(logs.filter((l) => l.includes("ETIMEDOUT")).length).toBe(1);
+    expect(logs.filter((l) => l.includes("ECONNRESET")).length).toBe(1);
+  });
+
+  test("response with bad envelope (ok:false, no error_code mapping) retries", async () => {
+    mock.enqueueResponse({ ok: false, description: "weird" });
+    mock.enqueueResponse({ ok: true, result: [] });
+    const client = new TelegramClient({ token: "T" });
+
+    const result = await client.getUpdates();
+    expect(result).toEqual([]);
+    expect(mock.callCount()).toBe(2);
+  });
+});
+
+describe("sendMessage", () => {
+  let mock: MockFetch;
+  let logs: string[];
+
+  beforeEach(() => {
+    mock = makeMockFetch();
+    fetchCtx.set(mock.fn);
+    logs = [];
+    logCtx.set((line) => logs.push(line));
+  });
+
+  afterEach(() => {
+    fetchCtx.reset();
+    logCtx.reset();
+  });
+
+  test("happy path posts JSON body to /sendMessage and returns parsed envelope", async () => {
+    const sent = { message_id: 42, chat: { id: 99 }, text: "hello" };
+    mock.enqueueResponse({ ok: true, result: sent });
+    const client = new TelegramClient({ token: "TEST" });
+
+    const result = await client.sendMessage({ chat_id: 99, text: "hello" });
+
+    expect(result.ok).toBe(true);
+    expect(result.result).toEqual(sent);
+
+    const url = mock.allUrls()[0];
+    expect(url).toContain("/botTEST/sendMessage");
+
+    const init = mock.lastInit();
+    expect(init?.method).toBe("POST");
+    const body = JSON.parse(init?.body as string);
+    expect(body).toEqual({ chat_id: 99, text: "hello" });
+  });
+
+  test("non-2xx returns the parsed body instead of throwing", async () => {
+    mock.enqueueResponse({ ok: false, error_code: 400, description: "Bad Request" }, 400);
+    const client = new TelegramClient({ token: "T" });
+
+    const result = await client.sendMessage({ chat_id: 1, text: "x" });
+    expect(result.ok).toBe(false);
+    expect(result.error_code).toBe(400);
+  });
+
+  test("logs status only — never the URL with the token", async () => {
+    mock.enqueueResponse({ ok: false, error_code: 500, description: "boom" }, 500);
+    const client = new TelegramClient({ token: "VERYSECRET" });
+
+    await client.sendMessage({ chat_id: 1, text: "x" });
+
+    expect(logs.length).toBeGreaterThan(0);
+    expect(logs.some((l) => l.includes("VERYSECRET"))).toBe(false);
+    expect(logs.some((l) => l.includes("status=500"))).toBe(true);
+  });
+});

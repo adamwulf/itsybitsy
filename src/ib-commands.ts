@@ -1230,8 +1230,10 @@ export function resetSendSpawnRunner(): void {
  * Steps:
  * 1. Read tmux_session from agent meta
  * 2. Verify tmux session exists
- * 3. Auto-detect sender from cwd if applicable
- * 4. Format message with [sent by agent ...] prefix if sender detected
+ * 3. Auto-detect sender from cwd if applicable (agent worktree → agent ID;
+ *    system coordinator home → `@system` sentinel)
+ * 4. Format message with [sent by ...] prefix if sender detected
+ *    (`agent <id>` for real agent IDs, bare sentinel for `@`-prefixed senders)
  * 5. Calculate delay: 0.1 + (msg_len / 100) * 0.5, clamped to [0.2, 3.0]
  * 6. Send via tmux send-keys, sleep, Enter
  * 7. Log to recipient's agent.log
@@ -1269,13 +1271,22 @@ export async function sendMessage(
         const senderMeta = await Bun.file(join(senderAgentDir, "meta.json")).json();
         if (senderMeta?.id) fromId = senderMeta.id;
       } catch { /* ignore */ }
+    } else {
+      // System coordinator runs from ~/.itsybitsy/ — no worktree match.
+      // If cwd is the coordinator home (or under it), stamp as @system.
+      const coordHome = getCoordinatorHome();
+      if (cwd === coordHome || cwd.startsWith(coordHome + "/")) {
+        fromId = "@system";
+      }
     }
   }
 
-  // Format message with sender prefix
+  // Format message with sender prefix. `@`-prefixed sender IDs (e.g. @system)
+  // are sentinels, not agent IDs, so omit the literal "agent " word for them.
   let fullMessage = message;
   if (fromId) {
-    fullMessage = `[sent by agent ${fromId}]: ${message}`;
+    const label = fromId.startsWith("@") ? fromId : `agent ${fromId}`;
+    fullMessage = `[sent by ${label}]: ${message}`;
   }
 
   // Calculate delay: 0.1 + (len / 100) * 0.5, clamped [0.2, 3.0]

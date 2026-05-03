@@ -121,6 +121,55 @@ describe("ib-commands", () => {
       expect(sendKeysCall![5]).toBe("[sent by agent agent-sender]: hello");
     });
 
+    test("auto-stamps @system when cwd is the system coordinator home", async () => {
+      const { setCoordinatorHome, resetCoordinatorHome } = await import("./coordinator");
+      const coordHome = await mkdtemp(join(tmpdir(), "coord-home-"));
+      setCoordinatorHome(coordHome);
+      try {
+        const agent = makeAgent("agent-abc", tempDir);
+        await sendMessage(agent, "ping", { cwd: coordHome });
+
+        const sendKeysCall = spawnCalls.find(
+          (c) => c[0] === "tmux" && c[1] === "send-keys" && c.length === 6 && c[4] === "-l"
+        );
+        expect(sendKeysCall).toBeDefined();
+        expect(sendKeysCall![5]).toBe("[sent by @system]: ping");
+      } finally {
+        resetCoordinatorHome();
+        await rm(coordHome, { recursive: true, force: true });
+      }
+    });
+
+    test("auto-stamps @system when cwd is under the coordinator home", async () => {
+      const { setCoordinatorHome, resetCoordinatorHome } = await import("./coordinator");
+      const coordHome = await mkdtemp(join(tmpdir(), "coord-home-"));
+      setCoordinatorHome(coordHome);
+      try {
+        const agent = makeAgent("agent-abc", tempDir);
+        await sendMessage(agent, "ping", { cwd: join(coordHome, "subdir") });
+
+        const sendKeysCall = spawnCalls.find(
+          (c) => c[0] === "tmux" && c[1] === "send-keys" && c.length === 6 && c[4] === "-l"
+        );
+        expect(sendKeysCall).toBeDefined();
+        expect(sendKeysCall![5]).toBe("[sent by @system]: ping");
+      } finally {
+        resetCoordinatorHome();
+        await rm(coordHome, { recursive: true, force: true });
+      }
+    });
+
+    test("explicit fromAgent='@system' renders without 'agent ' word", async () => {
+      const agent = makeAgent("agent-abc", tempDir);
+      await sendMessage(agent, "ping", { fromAgent: "@system", cwd: "/" });
+
+      const sendKeysCall = spawnCalls.find(
+        (c) => c[0] === "tmux" && c[1] === "send-keys" && c.length === 6 && c[4] === "-l"
+      );
+      expect(sendKeysCall).toBeDefined();
+      expect(sendKeysCall![5]).toBe("[sent by @system]: ping");
+    });
+
     test("logs to recipient agent.log", async () => {
       const agent = makeAgent("agent-abc", tempDir);
       await sendMessage(agent, "test message", { cwd: "/" });

@@ -34,6 +34,7 @@ import {
   restartSystemCoordinator,
   resizeCoordinatorTmux,
   sanitizeTmuxInput,
+  getLastCoordinatorSpawnMode,
 } from "../coordinator";
 import type { Agent, FlatEntry, PendingQuestion } from "../agents";
 import { SplitPane } from "./split-pane";
@@ -1567,7 +1568,9 @@ export class DashboardComponent implements Component {
     else if (data === "l") { agentActions.handleScrollDown(this); }
     // Agent/repo actions — context-sensitive on whether a repo header is selected
     else if (data === "x") {
-      if (!this.agentTree.selectedAgent && this.agentTree.selectedRepoHeader) {
+      if (this.agentTree.isSystemCoordinatorSelected) {
+        agentActions.handleKillSystemCoordinator(this);
+      } else if (!this.agentTree.selectedAgent && this.agentTree.selectedRepoHeader) {
         this.executeAndRefresh(() => agentActions.handleRemoveRepoSafe(this));
       } else {
         agentActions.handleKill(this);
@@ -1579,7 +1582,12 @@ export class DashboardComponent implements Component {
         this.executeAndRefresh(async () => {
           await restartSystemCoordinator();
           this.coordinatorPane.resetForAgent();
-          this.setNotice("System coordinator restarted");
+          const mode = getLastCoordinatorSpawnMode();
+          this.setNotice(
+            mode === "resumed"
+              ? "System coordinator resumed"
+              : "System coordinator restarted (fresh)",
+          );
         });
       } else {
         agentActions.handleResume(this);

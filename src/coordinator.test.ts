@@ -22,7 +22,11 @@ import {
   getCoordinatorAgentId,
   checkCoordinatorExists,
   getRepoBasename,
+  getLastCoordinatorSpawnMode,
+  readCoordinatorSession,
+  clearCoordinatorSession,
 } from "./coordinator";
+import { encodeClaudeProjectPath } from "./auto-compact";
 import { spawnCtx as tmuxSpawnCtx } from "./tmux-poller";
 
 describe("IB_COORDINATOR_SESSION", () => {
@@ -727,6 +731,130 @@ describe("ensureSystemCoordinator", () => {
 
     // First poll already returns ready, so we should only see one poll.
     expect(polls).toBe(1);
+  });
+
+  test("session resume: launches with --resume and skips prompt paste when saved id + transcript exist", async () => {
+    // Pre-seed coordinator-session.json and the corresponding transcript file
+    // under the encoded ~/.claude/projects/<encoded>/ directory. HOME is the
+    // typesHome temp dir set up in beforeEach.
+    const sessionId = "deadbeef-1234-5678-90ab-cdef00001111";
+    await Bun.write(join(tmpDir, "coordinator-session.json"), JSON.stringify({ session_id: sessionId, captured_at: Date.now() }));
+    const encoded = encodeClaudeProjectPath(tmpDir);
+    const projectDir = join(typesHome, ".claude", "projects", encoded);
+    await mkdir(projectDir, { recursive: true });
+    await Bun.write(join(projectDir, `${sessionId}.jsonl`), "{}\n");
+
+    const commands: string[][] = [];
+    coordinatorSpawnCtx.set((cmd: string[], _opts?: any) => {
+      commands.push([...cmd]);
+      const cmdStr = cmd.join(" ");
+      if (cmdStr.includes("has-session")) {
+        return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(1) };
+      }
+      return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(0) };
+    });
+
+    await ensureSystemCoordinator();
+
+    expect(getLastCoordinatorSpawnMode()).toBe("resumed");
+
+    // Verify the tmux send-keys for `claude --resume <id>` ran...
+    const claudeCmd = commands
+      .map((c) => c.join(" "))
+      .find((c) => c.includes("claude --resume"));
+    expect(claudeCmd).toBeDefined();
+    expect(claudeCmd).toContain(`claude --resume ${sessionId}`);
+    expect(claudeCmd).toContain("--model");
+
+    // ...and that the prompt paste (send-keys -l) was NOT issued.
+    const pastedPrompt = commands.find((c) => c.includes("-l"));
+    expect(pastedPrompt).toBeUndefined();
+  });
+
+  test("session resume: falls back to fresh launch when transcript file is missing", async () => {
+    // Saved id present but transcript file absent — should NOT resume.
+    const sessionId = "feedface-1111-2222-3333-444455556666";
+    await Bun.write(join(tmpDir, "coordinator-session.json"), JSON.stringify({ session_id: sessionId, captured_at: Date.now() }));
+
+    const commands: string[][] = [];
+    coordinatorSpawnCtx.set((cmd: string[], _opts?: any) => {
+      commands.push([...cmd]);
+      const cmdStr = cmd.join(" ");
+      if (cmdStr.includes("has-session")) {
+        return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(1) };
+      }
+      return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(0) };
+    });
+
+    await ensureSystemCoordinator();
+
+    expect(getLastCoordinatorSpawnMode()).toBe("fresh");
+    const cmdStrs = commands.map((c) => c.join(" "));
+    expect(cmdStrs.some((c) => c.includes("claude --resume"))).toBe(false);
+    expect(cmdStrs.some((c) => c.includes("claude --model"))).toBe(true);
+    // Fresh path pastes the prompt.
+    expect(commands.some((c) => c.includes("-l"))).toBe(true);
+  });
+
+  test("session resume: falls back to fresh launch when no saved session file exists", async () => {
+    // No coordinator-session.json file at all.
+    const commands: string[][] = [];
+    coordinatorSpawnCtx.set((cmd: string[], _opts?: any) => {
+      commands.push([...cmd]);
+      const cmdStr = cmd.join(" ");
+      if (cmdStr.includes("has-session")) {
+        return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(1) };
+      }
+      return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(0) };
+    });
+
+    await ensureSystemCoordinator();
+
+    expect(getLastCoordinatorSpawnMode()).toBe("fresh");
+  });
+
+  test("captures session id from latest transcript on fresh launch", async () => {
+    // Simulate Claude having created two transcript files; the newer one wins.
+    const oldId = "11111111-1111-1111-1111-111111111111";
+    const newId = "22222222-2222-2222-2222-222222222222";
+    const encoded = encodeClaudeProjectPath(tmpDir);
+    const projectDir = join(typesHome, ".claude", "projects", encoded);
+    await mkdir(projectDir, { recursive: true });
+    await Bun.write(join(projectDir, `${oldId}.jsonl`), "{}\n");
+    // Force older mtime on the first file by touching the second after a beat.
+    const { utimes } = await import("fs/promises");
+    const past = new Date(Date.now() - 60_000);
+    await utimes(join(projectDir, `${oldId}.jsonl`), past, past);
+    await Bun.write(join(projectDir, `${newId}.jsonl`), "{}\n");
+
+    coordinatorSpawnCtx.set((cmd: string[], _opts?: any) => {
+      const cmdStr = cmd.join(" ");
+      if (cmdStr.includes("has-session")) {
+        return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(1) };
+      }
+      return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(0) };
+    });
+
+    await ensureSystemCoordinator();
+
+    const saved = await readCoordinatorSession();
+    expect(saved).toBe(newId);
+  });
+
+  test("clearCoordinatorSession deletes the saved session file", async () => {
+    const sessionId = "abcdef00-0000-1111-2222-333344445555";
+    await Bun.write(join(tmpDir, "coordinator-session.json"), JSON.stringify({ session_id: sessionId, captured_at: Date.now() }));
+    expect(await readCoordinatorSession()).toBe(sessionId);
+
+    await clearCoordinatorSession();
+
+    expect(await readCoordinatorSession()).toBeNull();
+  });
+
+  test("readCoordinatorSession returns null for a malformed session id", async () => {
+    // session_id present but fails isValidSessionId (contains spaces, etc.)
+    await Bun.write(join(tmpDir, "coordinator-session.json"), JSON.stringify({ session_id: "not a valid id", captured_at: Date.now() }));
+    expect(await readCoordinatorSession()).toBeNull();
   });
 });
 

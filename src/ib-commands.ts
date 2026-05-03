@@ -493,7 +493,7 @@ log "PWD=$(pwd) which_claude=$(which claude 2>&1)"
 claude --resume "${sessionId}" ${claudeArgs} 2> "$STDERR_LOG" &
 CLAUDE_PID=$!
 log "Claude PID: $CLAUDE_PID"
-trap 'log "script received SIGHUP — tmux pane killed or closed; sending SIGTERM to Claude PID=$CLAUDE_PID"; kill $CLAUDE_PID 2>/dev/null' HUP
+trap 'log "script received SIGHUP — tmux pane killed or closed; sending SIGTERM to Claude PID=$CLAUDE_PID"; log "── SIGHUP diagnostics ──"; log "self ps: $(ps -o pid,ppid,pgid,sess,stat,command -p $$ 2>&1 | paste -sd "|" -)"; log "parent ps: $(ps -o pid,ppid,pgid,sess,stat,command -p $PPID 2>&1 | paste -sd "|" -)"; log "tmux processes: $(pgrep -lf tmux 2>&1 | head -20 | paste -sd "|" -)"; log "tmux list-sessions: $(tmux list-sessions 2>&1 | head -20 | paste -sd "|" -)"; log "── end SIGHUP diagnostics ──"; kill $CLAUDE_PID 2>/dev/null' HUP
 trap 'log "script received SIGTERM; sending SIGTERM to Claude PID=$CLAUDE_PID"; kill $CLAUDE_PID 2>/dev/null' TERM
 trap 'log "script received SIGINT; sending SIGINT to Claude PID=$CLAUDE_PID"; kill -INT $CLAUDE_PID 2>/dev/null' INT
 
@@ -2421,7 +2421,7 @@ log "PWD=$(pwd) which_claude=$(which claude 2>&1)"
 claude --session-id "${sessionUuid}" ${claudeArgs} "$(cat ${qAbsPromptFile})" 2> "$STDERR_LOG" &
 CLAUDE_PID=$!
 log "Claude PID: $CLAUDE_PID"
-trap 'log "script received SIGHUP — tmux pane killed or closed; sending SIGTERM to Claude PID=$CLAUDE_PID"; kill $CLAUDE_PID 2>/dev/null' HUP
+trap 'log "script received SIGHUP — tmux pane killed or closed; sending SIGTERM to Claude PID=$CLAUDE_PID"; log "── SIGHUP diagnostics ──"; log "self ps: $(ps -o pid,ppid,pgid,sess,stat,command -p $$ 2>&1 | paste -sd "|" -)"; log "parent ps: $(ps -o pid,ppid,pgid,sess,stat,command -p $PPID 2>&1 | paste -sd "|" -)"; log "tmux processes: $(pgrep -lf tmux 2>&1 | head -20 | paste -sd "|" -)"; log "tmux list-sessions: $(tmux list-sessions 2>&1 | head -20 | paste -sd "|" -)"; log "── end SIGHUP diagnostics ──"; kill $CLAUDE_PID 2>/dev/null' HUP
 trap 'log "script received SIGTERM; sending SIGTERM to Claude PID=$CLAUDE_PID"; kill $CLAUDE_PID 2>/dev/null' TERM
 trap 'log "script received SIGINT; sending SIGINT to Claude PID=$CLAUDE_PID"; kill -INT $CLAUDE_PID 2>/dev/null' INT
 

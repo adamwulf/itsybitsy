@@ -121,6 +121,86 @@ describe("ib-commands", () => {
       expect(sendKeysCall![5]).toBe("[sent by agent agent-sender]: hello");
     });
 
+    test("auto-stamps @system when cwd is the system coordinator home", async () => {
+      const { setCoordinatorHome, resetCoordinatorHome } = await import("./coordinator");
+      const coordHome = await mkdtemp(join(tmpdir(), "coord-home-"));
+      setCoordinatorHome(coordHome);
+      try {
+        const agent = makeAgent("agent-abc", tempDir);
+        await sendMessage(agent, "ping", { cwd: coordHome });
+
+        const sendKeysCall = spawnCalls.find(
+          (c) => c[0] === "tmux" && c[1] === "send-keys" && c.length === 6 && c[4] === "-l"
+        );
+        expect(sendKeysCall).toBeDefined();
+        expect(sendKeysCall![5]).toBe("[sent by @system]: ping");
+      } finally {
+        resetCoordinatorHome();
+        await rm(coordHome, { recursive: true, force: true });
+      }
+    });
+
+    test("auto-stamps @system when cwd is under the coordinator home", async () => {
+      const { setCoordinatorHome, resetCoordinatorHome } = await import("./coordinator");
+      const coordHome = await mkdtemp(join(tmpdir(), "coord-home-"));
+      setCoordinatorHome(coordHome);
+      try {
+        const agent = makeAgent("agent-abc", tempDir);
+        await sendMessage(agent, "ping", { cwd: join(coordHome, "subdir") });
+
+        const sendKeysCall = spawnCalls.find(
+          (c) => c[0] === "tmux" && c[1] === "send-keys" && c.length === 6 && c[4] === "-l"
+        );
+        expect(sendKeysCall).toBeDefined();
+        expect(sendKeysCall![5]).toBe("[sent by @system]: ping");
+      } finally {
+        resetCoordinatorHome();
+        await rm(coordHome, { recursive: true, force: true });
+      }
+    });
+
+    test("explicit fromAgent='@system' renders without 'agent ' word", async () => {
+      const agent = makeAgent("agent-abc", tempDir);
+      await sendMessage(agent, "ping", { fromAgent: "@system", cwd: "/" });
+
+      const sendKeysCall = spawnCalls.find(
+        (c) => c[0] === "tmux" && c[1] === "send-keys" && c.length === 6 && c[4] === "-l"
+      );
+      expect(sendKeysCall).toBeDefined();
+      expect(sendKeysCall![5]).toBe("[sent by @system]: ping");
+    });
+
+    test("agent worktree match wins over coordinator home match", async () => {
+      // Defensive test: even if coordHome were configured to be a parent of
+      // an agent worktree (impossible in practice, but ensures the regex
+      // branch preempts the coord-home else branch).
+      const { setCoordinatorHome, resetCoordinatorHome } = await import("./coordinator");
+      // Set coord home to tempDir so a worktree path under tempDir would
+      // match cwd.startsWith(coordHome + "/") if the else branch ever ran.
+      setCoordinatorHome(tempDir);
+      try {
+        // Create a sender agent dir with meta.json so the worktree branch
+        // can resolve a real ID.
+        const senderId = "agent-sender";
+        const senderAgentDir = join(tempDir, ".ittybitty", "agents", senderId);
+        await mkdir(senderAgentDir, { recursive: true });
+        await Bun.write(join(senderAgentDir, "meta.json"), JSON.stringify({ id: senderId }));
+
+        const agent = makeAgent("agent-abc", tempDir);
+        const senderCwd = join(senderAgentDir, "repo");
+        await sendMessage(agent, "ping", { cwd: senderCwd });
+
+        const sendKeysCall = spawnCalls.find(
+          (c) => c[0] === "tmux" && c[1] === "send-keys" && c.length === 6 && c[4] === "-l"
+        );
+        expect(sendKeysCall).toBeDefined();
+        // Should be agent-sender (worktree branch), NOT @system (coord-home branch)
+        expect(sendKeysCall![5]).toBe("[sent by agent agent-sender]: ping");
+      } finally {
+        resetCoordinatorHome();
+      }
+    });
+
     test("logs to recipient agent.log", async () => {
       const agent = makeAgent("agent-abc", tempDir);
       await sendMessage(agent, "test message", { cwd: "/" });

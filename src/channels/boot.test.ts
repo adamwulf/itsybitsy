@@ -19,6 +19,11 @@ import { TelegramOutbox } from "./outbox";
 import type { OutboxOptions } from "./outbox";
 import type { AccessState } from "./access";
 import {
+  setStateDir as setAccessStateDir,
+  resetStateDir as resetAccessStateDir,
+  readAccess,
+} from "./access";
+import {
   setStateDir as setCacheStateDir,
   resetStateDir as resetCacheStateDir,
   writeCachedChatId,
@@ -146,6 +151,9 @@ describe("bootTelegramSubsystem", () => {
     cacheRoot = await mkdtemp(join(tmpdir(), "boot-cache-"));
     cacheDir = join(cacheRoot, "channels", "telegram");
     setCacheStateDir(cacheDir);
+    // The first-use path writes to access.json; redirect so we never touch
+    // the user's real ~/.itsybitsy.
+    setAccessStateDir(cacheDir);
   });
 
   afterEach(async () => {
@@ -153,6 +161,7 @@ describe("bootTelegramSubsystem", () => {
     clientSleepCtx.reset();
     clientLogCtx.reset();
     resetCacheStateDir();
+    resetAccessStateDir();
     await rm(cacheRoot, { recursive: true, force: true });
   });
 
@@ -689,5 +698,180 @@ describe("bootTelegramSubsystem", () => {
     // The write-failure log line is the only entry — boot itself stayed silent.
     expect(h.logs.length).toBe(1);
     expect(h.logs[0]).toContain("Telegram chat-id cache write failed");
+  });
+
+  /* ------------------------------------------------------------------ */
+  /*  Step 2: trust-on-first-use auto-allowlist                          */
+  /* ------------------------------------------------------------------ */
+
+  test("first-use: empty access + exactly one private chat → auto-add and succeed", async () => {
+    h.mock.enqueueResponse({ ok: true, result: [] }); // step 1
+    h.mock.enqueueResponse({
+      ok: true,
+      result: [update(7, { id: 100, type: "private" }, 7, "hi")],
+    });
+
+    const result = await bootTelegramSubsystem({
+      token: "TEST_TOKEN",
+      access: { allowed_chat_ids: [], allowed_user_ids: [] },
+      buildClient: h.buildClient,
+      buildDispatcher: h.buildDispatcher,
+      buildOutbox: h.buildOutbox,
+      log: h.log,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.chatId).toBe("100");
+
+    // access.json now contains the auto-added chat.
+    const persisted = await readAccess();
+    expect(persisted.allowed_chat_ids).toEqual(["100"]);
+    expect(persisted.allowed_user_ids).toEqual([]);
+
+    // The dispatcher saw the mutated allowlist (otherwise it would reject
+    // updates from chat 100).
+    expect(h.dispatchers.length).toBe(1);
+    expect(h.outboxOpts.length).toBe(1);
+    expect(h.outboxOpts[0]!.chatId).toBe("100");
+
+    // One log line announces the auto-add.
+    expect(h.logs.length).toBe(1);
+    expect(h.logs[0]).toContain("first-use auto-allowlist");
+    expect(h.logs[0]).toContain("100");
+  });
+
+  test("first-use: empty access + multiple distinct private chats → ambiguous-first-use", async () => {
+    h.mock.enqueueResponse({ ok: true, result: [] }); // step 1
+    h.mock.enqueueResponse({
+      ok: true,
+      result: [
+        update(1, { id: 100, type: "private" }, 7),
+        update(2, { id: 200, type: "private" }, 8),
+      ],
+    });
+
+    const result = await bootTelegramSubsystem({
+      token: "TEST_TOKEN",
+      access: { allowed_chat_ids: [], allowed_user_ids: [] },
+      buildClient: h.buildClient,
+      buildDispatcher: h.buildDispatcher,
+      buildOutbox: h.buildOutbox,
+      log: h.log,
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe("ambiguous-first-use");
+    expect(result.message).toContain("2 private chats are pending");
+    expect(result.message).toContain("100");
+    expect(result.message).toContain("200");
+    expect(result.message).toContain("ib tgallow");
+
+    // No write happened.
+    const persisted = await readAccess();
+    expect(persisted.allowed_chat_ids).toEqual([]);
+    expect(h.outboxOpts).toEqual([]);
+  });
+
+  test("first-use: empty access + zero private chats → no-allowlisted-inbound (unchanged)", async () => {
+    h.mock.enqueueResponse({ ok: true, result: [] }); // step 1
+    h.mock.enqueueResponse({ ok: true, result: [] }); // step 2 — empty
+
+    const result = await bootTelegramSubsystem({
+      token: "TEST_TOKEN",
+      access: { allowed_chat_ids: [], allowed_user_ids: [] },
+      buildClient: h.buildClient,
+      buildDispatcher: h.buildDispatcher,
+      buildOutbox: h.buildOutbox,
+      log: h.log,
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe("no-allowlisted-inbound");
+
+    const persisted = await readAccess();
+    expect(persisted.allowed_chat_ids).toEqual([]);
+  });
+
+  test("first-use: deduplicates the same private chat across multiple updates", async () => {
+    // Two updates from the SAME chat id should still count as one — boot
+    // adopts the single chat instead of refusing as ambiguous.
+    h.mock.enqueueResponse({ ok: true, result: [] }); // step 1
+    h.mock.enqueueResponse({
+      ok: true,
+      result: [
+        update(1, { id: 100, type: "private" }, 7, "first"),
+        update(2, { id: 100, type: "private" }, 7, "second"),
+      ],
+    });
+
+    const result = await bootTelegramSubsystem({
+      token: "TEST_TOKEN",
+      access: { allowed_chat_ids: [], allowed_user_ids: [] },
+      buildClient: h.buildClient,
+      buildDispatcher: h.buildDispatcher,
+      buildOutbox: h.buildOutbox,
+      log: h.log,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.chatId).toBe("100");
+  });
+
+  test("first-use: skips group/supergroup updates when counting candidates", async () => {
+    // A pending group update + one private chat → should NOT trigger
+    // ambiguity, because groups are filtered out before the count.
+    h.mock.enqueueResponse({ ok: true, result: [] }); // step 1
+    h.mock.enqueueResponse({
+      ok: true,
+      result: [
+        update(1, { id: -1001234567890, type: "supergroup" }, 7),
+        update(2, { id: 100, type: "private" }, 8),
+      ],
+    });
+
+    const result = await bootTelegramSubsystem({
+      token: "TEST_TOKEN",
+      access: { allowed_chat_ids: [], allowed_user_ids: [] },
+      buildClient: h.buildClient,
+      buildDispatcher: h.buildDispatcher,
+      buildOutbox: h.buildOutbox,
+      log: h.log,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.chatId).toBe("100");
+
+    const persisted = await readAccess();
+    expect(persisted.allowed_chat_ids).toEqual(["100"]);
+  });
+
+  test("first-use does NOT fire when allowed_user_ids is non-empty (chat list empty)", async () => {
+    // The user has configured a user-id allowlist but no chat ids. That's a
+    // deliberate configuration — first-use must NOT silently auto-add a new
+    // chat in this case. The boot must fall through to no-allowlisted-inbound
+    // and leave the on-disk access file untouched (no auto-add).
+    h.mock.enqueueResponse({ ok: true, result: [] }); // step 1
+    h.mock.enqueueResponse({
+      ok: true,
+      result: [update(1, { id: 100, type: "private" }, 7)],
+    });
+
+    const result = await bootTelegramSubsystem({
+      token: "TEST_TOKEN",
+      access: { allowed_chat_ids: [], allowed_user_ids: ["7"] },
+      buildClient: h.buildClient,
+      buildDispatcher: h.buildDispatcher,
+      buildOutbox: h.buildOutbox,
+      log: h.log,
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe("no-allowlisted-inbound");
+
+    // Boot did not write to access.json — chat list stays empty. (The
+    // in-memory `["7"]` user list was never persisted, so readAccess()
+    // returns the on-disk default.)
+    const persisted = await readAccess();
+    expect(persisted.allowed_chat_ids).toEqual([]);
   });
 });

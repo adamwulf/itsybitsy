@@ -149,9 +149,9 @@ export async function isAllowed(chatId: string | number, userId: string | number
 
 /**
  * A chat_id whose stringified form starts with `-` is a Telegram group/supergroup.
- * Returns true if the id looks group-shaped. Phase 2 surfaces this as a warning
- * in `ib tgcheck` only — group-shaped IDs are NOT blocked from the allowlist
- * (the user may add a group deliberately, even though Phase 5 only routes 1:1 DMs).
+ * Returns true if the id looks group-shaped. Surfaced as a warning by `ib tgallow`
+ * — group-shaped IDs are NOT blocked from the allowlist (the user may add a group
+ * deliberately, even though only 1:1 DMs are routed).
  */
 export function isGroupShaped(id: string | number): boolean {
   return String(id).startsWith("-");

@@ -47,17 +47,17 @@ Edit `~/.itsybitsy/config.json`:
 }
 ```
 
-Then allowlist your chat ID and confirm the bot is reachable:
+Then allowlist your chat ID:
 
 ```sh
 ib tgallow <YOUR_CHAT_ID>
-ib tgcheck
 ```
 
-`ib tgcheck` should print "OK: bot reachable" along with the configured
-chat_id and the allowlist contents. If it warns about a group-shaped
-chat_id (negative integer), you've configured a group ID — group chats
-aren't supported in v1, use a 1:1 DM ID instead.
+Start `ib watch`. Look at its stderr — you should see no "Telegram
+routing disabled" warnings. If you see "Telegram routing disabled:
+another poller or webhook is active", another process is polling the bot
+(see step 4.8). If you see "Telegram routing disabled: no bot token
+configured", the token did not load.
 
 ## 4. Smoke tests
 

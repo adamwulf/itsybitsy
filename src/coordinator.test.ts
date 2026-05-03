@@ -128,6 +128,7 @@ describe("buildSystemCoordinatorSettings", () => {
     const settings = await buildSystemCoordinatorSettings();
     const deny = settings.permissions.deny;
     expect(deny).toContain("Task");
+    expect(deny).toContain("TaskCreate");
     expect(deny).toContain("TaskOutput");
     expect(deny).toContain("Agent");
   });
@@ -141,9 +142,9 @@ describe("buildSystemCoordinatorSettings", () => {
     expect(deny).toContain("ExitPlanMode");
   });
 
-  test("deny list has exactly 16 entries (embedded layers add nothing)", async () => {
+  test("deny list has exactly 17 entries (embedded layers add nothing)", async () => {
     const settings = await buildSystemCoordinatorSettings();
-    expect(settings.permissions.deny).toHaveLength(16);
+    expect(settings.permissions.deny).toHaveLength(17);
   });
 
   test("returns fresh arrays on each call (no shared mutation)", async () => {
@@ -429,7 +430,8 @@ describe("ensureSystemCoordinator", () => {
     expect(cmdStrs.some((c) => c.includes("has-session"))).toBe(true);
     expect(cmdStrs.some((c) => c.includes("new-session"))).toBe(true);
     expect(cmdStrs.some((c) => c.includes("send-keys") && c.includes("claude --model"))).toBe(true);
-    expect(cmdStrs.some((c) => c.includes("send-keys") && c.includes("-l"))).toBe(true);
+    // The SessionStart hook injects the prompt — no tmux send-keys -l paste.
+    expect(cmdStrs.some((c) => c.includes("send-keys") && c.includes("-l"))).toBe(false);
   });
 
   test("sets window-size manual on the coordinator session during creation", async () => {
@@ -655,7 +657,10 @@ describe("ensureSystemCoordinator", () => {
     }
   });
 
-  test("sanitizes prompt text before sending via tmux", async () => {
+  test("does not paste SYSTEM_COORDINATOR_PROMPT via tmux on fresh launch", async () => {
+    // The SessionStart hook injects SYSTEM_COORDINATOR_PROMPT as
+    // additionalContext on every session start (fresh and resumed).
+    // Pasting it via tmux send-keys would produce a duplicate prompt.
     const commands: string[][] = [];
     coordinatorSpawnCtx.set((cmd: string[], _opts?: any) => {
       commands.push([...cmd]);
@@ -668,26 +673,22 @@ describe("ensureSystemCoordinator", () => {
 
     await ensureSystemCoordinator();
 
-    // Find the send-keys -l command and verify it doesn't contain control chars
-    const sendKeysCmd = commands.find((c) => c.includes("-l"));
-    expect(sendKeysCmd).toBeDefined();
-    if (sendKeysCmd) {
-      const promptArg = sendKeysCmd[sendKeysCmd.indexOf("-l") + 1]!;
-      // Verify no control chars
-      for (let i = 0; i < promptArg.length; i++) {
-        const code = promptArg.charCodeAt(i);
-        expect(code >= 0x20 && code !== 0x7f).toBe(true);
-      }
-    }
+    // No send-keys -l (literal paste) command should fire.
+    const literalPaste = commands.find((c) => c.includes("send-keys") && c.includes("-l"));
+    expect(literalPaste).toBeUndefined();
+
+    // And no command should ever carry the prompt body itself.
+    const carriesPrompt = commands.find((c) =>
+      c.some((arg) => arg.includes("itsybitsy system coordinator")),
+    );
+    expect(carriesPrompt).toBeUndefined();
   });
 
-  test("does not send prompt until 'Claude Code v' appears in tmux output", async () => {
-    // Simulate a slow startup: capture-pane returns blank for the first 3
-    // calls (i.e. Claude isn't ready yet) and only on the 4th call returns
-    // the readiness marker. Verify that the order of operations is:
-    //   1. tmux capture-pane probes happen until ready
-    //   2. Only after ready does the prompt send-keys -l fire
-    //   3. The Enter follows the prompt
+  test("polls for 'Claude Code v' readiness marker after launching claude", async () => {
+    // Even though we no longer paste a prompt, waitForCoordinatorReady is
+    // still called so the resume-failure fallback can trigger when claude
+    // never reaches the marker. Verify we keep polling until ready and stop
+    // immediately once the marker appears.
     const events: string[] = [];
     let capturePolls = 0;
 
@@ -697,20 +698,13 @@ describe("ensureSystemCoordinator", () => {
         return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(1) };
       }
       if (cmd.includes("send-keys")) {
-        if (cmd.includes("-l")) {
-          events.push("send-prompt");
-        } else if (cmd[cmd.length - 1] === "Enter" && cmd.some((a) => a.startsWith("claude --model"))) {
+        if (cmd[cmd.length - 1] === "Enter" && cmd.some((a) => a.startsWith("claude --model"))) {
           events.push("launch-claude");
-        } else if (cmd[cmd.length - 1] === "Enter") {
-          events.push("send-enter");
         }
       }
       return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(0) };
     });
 
-    // captureTmuxOutput uses tmuxSpawnCtx — override the default beforeEach
-    // stub for this test so the readiness marker only appears after several
-    // polls.
     tmuxSpawnCtx.set((cmd: string[], _opts?: any) => {
       if (cmd[0] === "tmux" && cmd[1] === "capture-pane") {
         capturePolls++;
@@ -727,21 +721,11 @@ describe("ensureSystemCoordinator", () => {
 
     await ensureSystemCoordinator();
 
-    // Claude must be launched first
+    // Claude is launched first, then polling begins.
     const launchIdx = events.indexOf("launch-claude");
-    const promptIdx = events.indexOf("send-prompt");
-    const enterIdx = events.indexOf("send-enter");
     expect(launchIdx).toBeGreaterThanOrEqual(0);
-    expect(promptIdx).toBeGreaterThan(launchIdx);
-    expect(enterIdx).toBeGreaterThan(promptIdx);
-
-    // The first 3 polls happen BEFORE the prompt is sent (Claude not ready).
-    // The 4th poll returns "Claude Code v" and the prompt fires after.
-    expect(events.indexOf("poll-1")).toBeLessThan(promptIdx);
-    expect(events.indexOf("poll-2")).toBeLessThan(promptIdx);
-    expect(events.indexOf("poll-3")).toBeLessThan(promptIdx);
-    expect(events.indexOf("poll-4")).toBeLessThan(promptIdx);
-    // No additional polls after readiness — the loop returned true.
+    expect(events.indexOf("poll-1")).toBeGreaterThan(launchIdx);
+    // Loop stops once the marker appears (4th poll).
     expect(capturePolls).toBe(4);
   });
 
@@ -774,7 +758,7 @@ describe("ensureSystemCoordinator", () => {
     expect(polls).toBe(1);
   });
 
-  test("session resume: launches with --resume and skips prompt paste when a transcript exists", async () => {
+  test("session resume: launches with --resume when a transcript exists, never pastes prompt", async () => {
     const sessionId = "deadbeef-1234-5678-90ab-cdef00001111";
     const encoded = encodeClaudeProjectPath(tmpDir);
     const projectDir = join(typesHome, ".claude", "projects", encoded);
@@ -802,7 +786,7 @@ describe("ensureSystemCoordinator", () => {
     expect(claudeCmd).toContain(`claude --resume ${sessionId}`);
     expect(claudeCmd).toContain("--model");
 
-    // Resume must not paste the prompt.
+    // The SessionStart hook injects the prompt — no tmux paste on resume.
     const pastedPrompt = commands.find((c) => c.includes("-l"));
     expect(pastedPrompt).toBeUndefined();
   });
@@ -824,7 +808,8 @@ describe("ensureSystemCoordinator", () => {
     const cmdStrs = commands.map((c) => c.join(" "));
     expect(cmdStrs.some((c) => c.includes("claude --resume"))).toBe(false);
     expect(cmdStrs.some((c) => c.includes("claude --model"))).toBe(true);
-    expect(commands.some((c) => c.includes("-l"))).toBe(true);
+    // SessionStart hook injects the prompt — no tmux paste fallback.
+    expect(commands.some((c) => c.includes("-l"))).toBe(false);
   });
 
   test("session resume: picks the newest transcript regardless of name", async () => {
@@ -895,10 +880,11 @@ describe("ensureSystemCoordinator", () => {
       return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(0) };
     });
 
-    // Force readiness to fail on the FIRST attempt (resume) so resumed claude
-    // never reaches the marker. On the recursive retry the readiness mock can
-    // still report not-ready, but we still expect spawn-mode to report
-    // "fresh" because the prompt-paste path runs unconditionally on retry.
+    // Force readiness to fail (capture-pane never returns the marker). On the
+    // first attempt this triggers the resume-failure fallback: kill the
+    // session, write the cleared marker, recurse with retryAfterResumeFailure.
+    // On the retry, no transcript is found (cleared marker hides it), so the
+    // spawn mode lands on "fresh".
     tmuxSpawnCtx.set((_cmd: string[], _opts?: any) => ({
       stdout: mockStream(""),
       stderr: emptyStream(),

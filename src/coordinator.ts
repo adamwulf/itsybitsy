@@ -134,7 +134,8 @@ async function findLatestCoordinatorTranscriptId(): Promise<string | null> {
 
 /**
  * Initial prompt text for the system coordinator (SPEC §12.1.5).
- * Sent via tmux send-keys after the Claude session starts.
+ * Injected as additionalContext by the SessionStart hook on every session
+ * start (fresh and resumed). See `src/hooks/session-start.ts`.
  */
 export const SYSTEM_COORDINATOR_PROMPT = `You are the itsybitsy system coordinator. You manage agents across all registered repos using \`ib\` commands. You can list agents (\`ib list\`), send messages to agents (\`ib send <agent-id> "message"\`), merge (\`ib merge\`), kill (\`ib kill\`), create agents (\`ib new-agent\`), and check status (\`ib status\`, \`ib diff\`). You do NOT have access to Read, Write, Edit, or any file tools — only \`ib\` Bash commands. You coordinate work at the system level — for repo-specific coordination, delegate to per-repo coordinators. To send messages to per-repo coordinators, use \`ib send @<repo-name> "message"\` (e.g., \`ib send @itsybitsy "review the latest PR"\`). Do NOT use \`ib send @system\` — that routes back to you.`;
 
@@ -165,6 +166,7 @@ const SYSTEM_COORDINATOR_DENY = [
   "WebFetch",
   "WebSearch",
   "Task",
+  "TaskCreate",
   "TaskOutput",
   "Agent",
   "KillShell",
@@ -349,7 +351,8 @@ async function writeCoordinatorFiles(): Promise<void> {
 /**
  * - "existing": the tmux session was already alive — nothing was launched.
  * - "resumed": `claude --resume <id>` ran and reached the ready marker.
- * - "fresh":   a fresh `claude` session was launched and the prompt was pasted.
+ * - "fresh":   a fresh `claude` session was launched. The SessionStart hook
+ *              injects SYSTEM_COORDINATOR_PROMPT as additionalContext.
  */
 export type CoordinatorSpawnMode = "existing" | "resumed" | "fresh";
 let lastSpawnMode: CoordinatorSpawnMode = "existing";
@@ -360,10 +363,12 @@ export function getLastCoordinatorSpawnMode(): CoordinatorSpawnMode {
 /**
  * Ensure the system coordinator tmux session is running. If alive, returns
  * immediately. Otherwise launches Claude — resuming the newest non-cleared
- * transcript when one exists, falling back to a fresh launch + prompt paste
- * otherwise. If `--resume` is attempted but Claude's UI never reaches the
- * ready marker, the session is killed, the cleared-marker is written, and a
- * single fresh-launch retry runs.
+ * transcript when one exists, falling back to a fresh launch otherwise. The
+ * SessionStart hook injects SYSTEM_COORDINATOR_PROMPT as additionalContext on
+ * every session start (fresh and resumed), so no prompt paste happens here.
+ * If `--resume` is attempted but Claude's UI never reaches the ready marker,
+ * the session is killed, the cleared-marker is written, and a single
+ * fresh-launch retry runs.
  */
 export async function ensureSystemCoordinator(): Promise<string> {
   return await ensureSystemCoordinatorImpl(false);
@@ -428,10 +433,10 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
     claudeCmd, "Enter",
   ]);
 
-  // Wait for Claude's UI to be ready before sending the prompt. A flat sleep
-  // races slow startups: the prompt text gets pasted but the Enter key is
-  // swallowed before the input box becomes active, leaving the prompt
-  // unsubmitted.
+  // Wait for Claude's UI to be ready so the resume-failure fallback below
+  // can detect the case where `claude --resume` never reaches the marker
+  // (corrupt or version-mismatched transcript) and recover with a fresh
+  // launch. The SessionStart hook supplies the prompt itself.
   const ready = await waitForCoordinatorReady();
 
   if (resumeId && !ready) {
@@ -443,23 +448,10 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
     return await ensureSystemCoordinatorImpl(true);
   }
 
-  if (resumeId) {
-    // Resumed sessions already have the system prompt baked into history —
-    // re-pasting would inject a stray user message at the top of the new turn.
-    lastSpawnMode = "resumed";
-  } else {
-    const sanitizedPrompt = sanitizeTmuxInput(SYSTEM_COORDINATOR_PROMPT);
-    await coordinatorSpawnCtx.run([
-      "tmux", "send-keys", "-t", IB_COORDINATOR_SESSION, "-l", sanitizedPrompt,
-    ]);
-    // Brief delay between paste and Enter so the input box doesn't debounce
-    // the paste and drop the Enter (mirrors sendMessage in ib-commands.ts).
-    await sleepFn(500);
-    await coordinatorSpawnCtx.run([
-      "tmux", "send-keys", "-t", IB_COORDINATOR_SESSION, "Enter",
-    ]);
-    lastSpawnMode = "fresh";
-  }
+  // The SessionStart hook injects SYSTEM_COORDINATOR_PROMPT as additionalContext
+  // on every session start (fresh and resumed). Nothing to paste here — just
+  // record the spawn mode so callers can tell what happened.
+  lastSpawnMode = resumeId ? "resumed" : "fresh";
 
   return IB_COORDINATOR_SESSION;
 }

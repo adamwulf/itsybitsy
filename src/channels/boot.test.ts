@@ -3,6 +3,9 @@
  */
 
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
+import { join } from "path";
+import { mkdtemp, rm, readdir } from "fs/promises";
+import { tmpdir } from "os";
 import { bootTelegramSubsystem } from "./boot";
 import {
   TelegramClient,
@@ -15,6 +18,12 @@ import type { DispatcherOptions } from "./dispatcher";
 import { TelegramOutbox } from "./outbox";
 import type { OutboxOptions } from "./outbox";
 import type { AccessState } from "./access";
+import {
+  setStateDir as setCacheStateDir,
+  resetStateDir as resetCacheStateDir,
+  writeCachedChatId,
+  readCachedChatId,
+} from "./chat-id-cache";
 import type { FetchLike } from "../types";
 import type { TelegramUpdate } from "./types";
 
@@ -129,15 +138,22 @@ function makeHarness(): BootHarness {
 
 describe("bootTelegramSubsystem", () => {
   let h: BootHarness;
+  let cacheRoot: string;
+  let cacheDir: string;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     h = makeHarness();
+    cacheRoot = await mkdtemp(join(tmpdir(), "boot-cache-"));
+    cacheDir = join(cacheRoot, "channels", "telegram");
+    setCacheStateDir(cacheDir);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     clientFetchCtx.reset();
     clientSleepCtx.reset();
     clientLogCtx.reset();
+    resetCacheStateDir();
+    await rm(cacheRoot, { recursive: true, force: true });
   });
 
   test("step 1: empty token → disabled with 'no bot token configured'", async () => {
@@ -482,5 +498,170 @@ describe("bootTelegramSubsystem", () => {
     }
     await dispatcher.stop();
     expect(observedOffset).toBe(42);
+  });
+
+  /* ------------------------------------------------------------------ */
+  /*  Step 1.5: chat-id cache                                            */
+  /* ------------------------------------------------------------------ */
+
+  test("cache hit: skips inbound walk when cached id is allowlisted", async () => {
+    // Cache pre-populated with an allowlisted id. Boot should make only the
+    // step 1 connect probe (1 call) and skip the step 2 limit=100 probe.
+    await writeCachedChatId("100");
+    h.mock.enqueueResponse({ ok: true, result: [] }); // step 1 connect probe
+
+    const result = await bootTelegramSubsystem({
+      token: "TEST_TOKEN",
+      access: { allowed_chat_ids: ["100"], allowed_user_ids: [] },
+      buildClient: h.buildClient,
+      buildDispatcher: h.buildDispatcher,
+      buildOutbox: h.buildOutbox,
+      log: h.log,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.chatId).toBe("100");
+    expect(h.mock.callCount()).toBe(1); // ONLY the connect probe
+    expect(h.dispatchers.length).toBe(1);
+    expect(h.outboxOpts.length).toBe(1);
+    expect(h.outboxOpts[0]!.chatId).toBe("100");
+    expect(h.logs).toEqual([]);
+  });
+
+  test("cache hit: dispatcher receives no initialOffset (left undefined)", async () => {
+    await writeCachedChatId("100");
+    h.mock.enqueueResponse({ ok: true, result: [] }); // step 1 connect probe
+
+    // Capture the dispatcher options to assert on initialOffset.
+    const dispatcherOpts: DispatcherOptions[] = [];
+    const buildDispatcher = (opts: DispatcherOptions): TelegramDispatcher => {
+      dispatcherOpts.push(opts);
+      return new TelegramDispatcher(opts);
+    };
+
+    const result = await bootTelegramSubsystem({
+      token: "TEST_TOKEN",
+      access: { allowed_chat_ids: ["100"], allowed_user_ids: [] },
+      buildClient: h.buildClient,
+      buildDispatcher,
+      buildOutbox: h.buildOutbox,
+      log: h.log,
+    });
+    expect(result.ok).toBe(true);
+    expect(dispatcherOpts.length).toBe(1);
+    expect(dispatcherOpts[0]!.initialOffset).toBeUndefined();
+  });
+
+  test("cache miss (no file): falls through to resolve flow and writes the cache", async () => {
+    // No pre-populated cache. Boot should fall through, resolve via inbound,
+    // and write the cache after success.
+    expect(await readCachedChatId()).toBeNull();
+
+    h.mock.enqueueResponse({ ok: true, result: [] }); // step 1
+    h.mock.enqueueResponse({
+      ok: true,
+      result: [update(10, { id: 100, type: "private" }, 7, "hello")],
+    });
+
+    const result = await bootTelegramSubsystem({
+      token: "TEST_TOKEN",
+      access: { allowed_chat_ids: ["100"], allowed_user_ids: [] },
+      buildClient: h.buildClient,
+      buildDispatcher: h.buildDispatcher,
+      buildOutbox: h.buildOutbox,
+      log: h.log,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.chatId).toBe("100");
+    expect(h.mock.callCount()).toBe(2); // step 1 + step 2 probes
+    // Cache was written after the successful resolve.
+    expect(await readCachedChatId()).toBe("100");
+
+    // The cache file lives in the dir we configured (and not on top of access.json).
+    const entries = await readdir(cacheDir);
+    expect(entries).toContain("chat-id-cache.json");
+  });
+
+  test("cache stale (id removed from allowlist): falls through to resolve flow", async () => {
+    // Cache holds an id that is no longer allowlisted. Boot must not trust
+    // it — fall through to step 2 and re-resolve.
+    await writeCachedChatId("100"); // stale: not in allowlist below
+
+    h.mock.enqueueResponse({ ok: true, result: [] }); // step 1
+    h.mock.enqueueResponse({
+      ok: true,
+      result: [update(20, { id: 200, type: "private" }, 7, "hi")],
+    });
+
+    const result = await bootTelegramSubsystem({
+      token: "TEST_TOKEN",
+      access: { allowed_chat_ids: ["200"], allowed_user_ids: [] }, // 100 removed
+      buildClient: h.buildClient,
+      buildDispatcher: h.buildDispatcher,
+      buildOutbox: h.buildOutbox,
+      log: h.log,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.chatId).toBe("200");
+    expect(h.mock.callCount()).toBe(2);
+    // Cache was overwritten with the new resolved id.
+    expect(await readCachedChatId()).toBe("200");
+  });
+
+  test("cache write happens after successful resolve, file persists with id", async () => {
+    h.mock.enqueueResponse({ ok: true, result: [] }); // step 1
+    h.mock.enqueueResponse({
+      ok: true,
+      result: [update(5, { id: 100, type: "private" }, 7, "hello")],
+    });
+
+    const result = await bootTelegramSubsystem({
+      token: "TEST_TOKEN",
+      access: { allowed_chat_ids: ["100"], allowed_user_ids: [] },
+      buildClient: h.buildClient,
+      buildDispatcher: h.buildDispatcher,
+      buildOutbox: h.buildOutbox,
+      log: h.log,
+    });
+    expect(result.ok).toBe(true);
+
+    const cachePath = join(cacheDir, "chat-id-cache.json");
+    const file = Bun.file(cachePath);
+    expect(await file.exists()).toBe(true);
+    const parsed = JSON.parse(await file.text());
+    expect(parsed.chat_id).toBe("100");
+    expect(typeof parsed.cached_at).toBe("string");
+  });
+
+  test("cache write failure does NOT fail the boot", async () => {
+    // Point the cache state dir at a path we can't create (a file masquerading
+    // as a directory). The write will throw; boot must still succeed.
+    resetCacheStateDir();
+    const blockedPath = join(cacheRoot, "blocker");
+    await Bun.write(blockedPath, "i am a file, not a dir");
+    setCacheStateDir(join(blockedPath, "subdir"));
+
+    h.mock.enqueueResponse({ ok: true, result: [] }); // step 1
+    h.mock.enqueueResponse({
+      ok: true,
+      result: [update(5, { id: 100, type: "private" }, 7, "hello")],
+    });
+
+    const result = await bootTelegramSubsystem({
+      token: "TEST_TOKEN",
+      access: { allowed_chat_ids: ["100"], allowed_user_ids: [] },
+      buildClient: h.buildClient,
+      buildDispatcher: h.buildDispatcher,
+      buildOutbox: h.buildOutbox,
+      log: h.log,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.chatId).toBe("100");
+    // The write-failure log line is the only entry — boot itself stayed silent.
+    expect(h.logs.length).toBe(1);
+    expect(h.logs[0]).toContain("Telegram chat-id cache write failed");
   });
 });

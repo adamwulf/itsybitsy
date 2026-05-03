@@ -37,6 +37,7 @@
 import { InjectionContext } from "../types";
 import { TelegramClient, classifyError } from "./telegram-client";
 import type { TelegramMessage, TelegramUpdate } from "./types";
+import { clearCachedChatId } from "./chat-id-cache";
 
 /** Delivery hook the dispatcher calls per coalesced batch. Defaults to
  *  the real `sendToSystemCoordinator` from src/index.ts; tests inject a
@@ -209,6 +210,19 @@ export class TelegramDispatcher {
     if (!probe.ok) {
       const desc = "description" in probe && probe.description ? `: ${probe.description}` : "";
       logCtx.fn(`Telegram startup probe got HTTP ${probe.status}${desc}; starting main loop anyway`);
+      // Auth failure (401/403) means the cached chat id is stale relative to
+      // whatever credentials the user has now (token rotated, bot disabled,
+      // etc). Clear the cache so the next boot re-resolves via inbound walk.
+      // Best effort — a clear failure is logged but does not propagate.
+      if (probe.status === 401 || probe.status === 403) {
+        try {
+          await clearCachedChatId();
+        } catch (err) {
+          logCtx.fn(
+            `Telegram chat-id cache clear failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
     } else if (probe.updates.length > 0 && this.nextOffset === undefined) {
       // Seed the offset so we don't re-process anything the probe already
       // surfaced. probe.updates is at most 1 (limit:1). When the caller

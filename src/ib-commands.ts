@@ -1274,6 +1274,12 @@ export async function sendMessage(
     } else {
       // System coordinator runs from ~/.itsybitsy/ — no worktree match.
       // If cwd is the coordinator home (or under it), stamp as @system.
+      // Both paths are compared as raw strings (no realpath resolution): we
+      // assume process.cwd() and getCoordinatorHome() return paths in the
+      // same un-resolved form. If $HOME is itself a symlink and a caller
+      // resolved it before chdir'ing, this match would silently miss — in
+      // practice the coordinator session is launched with an un-resolved
+      // home so the assumption holds.
       const coordHome = getCoordinatorHome();
       if (cwd === coordHome || cwd.startsWith(coordHome + "/")) {
         fromId = "@system";

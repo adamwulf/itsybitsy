@@ -667,6 +667,76 @@ describe("ensureSystemCoordinator", () => {
     }
   });
 
+  test("fresh launch with --channels terminates the flag with `--` before the positional prompt", async () => {
+    // `--channels` is a multi-value flag — without `--` between channels and the
+    // positional `"$(cat …)"`, claude greedily eats the prompt as another channel
+    // entry and exits with "--channels entries must be tagged: <prompt body>".
+    const { mkdir } = await import("fs/promises");
+    await mkdir(tmpDir, { recursive: true });
+    const configPath = join(tmpDir, "config.json");
+    await Bun.write(
+      configPath,
+      JSON.stringify({ coordinator: { imessage: true } }),
+    );
+
+    const { setUserConfigPath, resetUserConfigPath } = await import("./config");
+    setUserConfigPath(configPath);
+
+    const commands: string[][] = [];
+    coordinatorSpawnCtx.set((cmd: string[], _opts?: any) => {
+      commands.push([...cmd]);
+      const cmdStr = cmd.join(" ");
+      if (cmdStr.includes("has-session")) {
+        return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(1) };
+      }
+      return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(0) };
+    });
+
+    try {
+      await ensureSystemCoordinator();
+
+      const claudeCmd = commands
+        .map((c) => c.join(" "))
+        .find((c) => c.includes("claude --model"));
+      expect(claudeCmd).toBeDefined();
+      expect(claudeCmd).toContain("--channels plugin:imessage@claude-plugins-official");
+      expect(claudeCmd).toContain('"$(cat ');
+      // The `--` end-of-flags marker must appear between the last channel entry
+      // and the positional `"$(cat …)"` prompt.
+      const channelsIdx = claudeCmd!.indexOf("--channels");
+      const dashDashIdx = claudeCmd!.indexOf(" -- ", channelsIdx);
+      const catIdx = claudeCmd!.indexOf('"$(cat ');
+      expect(dashDashIdx).toBeGreaterThan(channelsIdx);
+      expect(catIdx).toBeGreaterThan(dashDashIdx);
+    } finally {
+      resetUserConfigPath();
+    }
+  });
+
+  test("fresh launch without --channels does not emit a stray `--` separator", async () => {
+    // When no channels flag is present, we must not append `--` — the positional
+    // prompt is unambiguous on its own and a stray `--` would noise up the
+    // command line and the rendered transcript.
+    const commands: string[][] = [];
+    coordinatorSpawnCtx.set((cmd: string[], _opts?: any) => {
+      commands.push([...cmd]);
+      const cmdStr = cmd.join(" ");
+      if (cmdStr.includes("has-session")) {
+        return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(1) };
+      }
+      return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(0) };
+    });
+
+    await ensureSystemCoordinator();
+
+    const claudeCmd = commands
+      .map((c) => c.join(" "))
+      .find((c) => c.includes("claude --model"));
+    expect(claudeCmd).toBeDefined();
+    expect(claudeCmd).not.toContain("--channels");
+    expect(claudeCmd).not.toContain(" -- ");
+  });
+
   test("fresh launch passes SYSTEM_COORDINATOR_PROMPT as positional arg via cat substitution", async () => {
     // The prompt is delivered to claude as a positional arg via
     // `"$(cat coordinator-prompt.txt)"` — the same pattern per-repo

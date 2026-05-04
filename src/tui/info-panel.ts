@@ -29,6 +29,8 @@ export class InfoPanelComponent implements Component {
   selectedRepoPath: string | null = null;
   allAgents: FlatEntry[] = [];
   healthReport: RepoHealthReport | undefined = undefined;
+  /** Set of live tmux session names — used to render the agent's tmux stoplight. */
+  liveTmuxSessions: Set<string> = new Set();
   displayHeight = 5;
 
   invalidate(): void {}
@@ -61,6 +63,11 @@ export class InfoPanelComponent implements Component {
     const watchdogAlive = typeof watchdogPid === "number" && isPidAlive(watchdogPid);
     const watchdogColor = watchdogAlive ? GREEN : RED;
     lines.push(truncateToWidth(`${watchdogColor}●${RESET} Watchdog`, width, ""));
+
+    const tmuxSession = agent.meta.tmux_session;
+    const tmuxAlive = !!tmuxSession && this.liveTmuxSessions.has(tmuxSession);
+    const tmuxColor = tmuxAlive ? GREEN : RED;
+    lines.push(truncateToWidth(`${tmuxColor}●${RESET} Tmux`, width, ""));
 
     // Orphan warning
     if (agent.orphaned && agent.meta.manager) {

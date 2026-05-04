@@ -456,7 +456,14 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
   const baseCmd = resumeId
     ? `claude --resume ${resumeId} --model ${model}`
     : `claude --model ${model}`;
-  const channelsArg = channels.length > 0 ? ` --channels ${channels.join(" ")}` : "";
+  // `--channels` is a multi-value flag — without a `--` terminator, the trailing
+  // `"$(cat …)"` positional gets greedily consumed as another channel entry,
+  // which fails validation ("--channels entries must be tagged") and exits Claude
+  // immediately. Append `--` only when there's a positional prompt to terminate
+  // against; the resume path has no positional, so no `--` is needed.
+  const channelsArg = channels.length > 0
+    ? ` --channels ${channels.join(" ")}${promptArg ? " --" : ""}`
+    : "";
   const claudeCmd = `${baseCmd}${channelsArg}${promptArg}`;
   await coordinatorSpawnCtx.run([
     "tmux", "send-keys", "-t", IB_COORDINATOR_SESSION,

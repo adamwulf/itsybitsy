@@ -455,7 +455,15 @@ class DialogOverlayComponent implements Component {
         if (hasScrollIndicator) { lines.push(`${DIM}↑${RESET}`); }
         const sendLabel = dialog.focusedButton === "send" ? `${BOLD}${GREEN}[ Send ]${RESET}` : `[ Send ]`;
         const cancelLabel = dialog.focusedButton === "cancel" ? `${BOLD}${GREEN}[ Cancel ]${RESET}` : `[ Cancel ]`;
-        lines.push(`  ${cancelLabel}   ${sendLabel}`);
+        const leftSide = `  ${cancelLabel}   ${sendLabel}`;
+        if (dialog.onSendEsc) {
+          const escLabel = dialog.focusedButton === "esc" ? `${BOLD}${GREEN}[ Send Esc ]${RESET}` : `[ Send Esc ]`;
+          const used = visibleWidth(leftSide) + visibleWidth(escLabel);
+          const pad = Math.max(1, innerWidth - used);
+          lines.push(`${leftSide}${" ".repeat(pad)}${escLabel}`);
+        } else {
+          lines.push(leftSide);
+        }
         return { title: dialog.prompt, contentLines: lines };
       }
       case "folder-browser": {

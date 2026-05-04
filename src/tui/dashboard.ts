@@ -1122,6 +1122,7 @@ export class DashboardComponent implements Component {
         a => a.repoPath === repoPathForCoordinator && !!a.meta.coordinator
       );
       this.rightPane.repoCoordinatorAgent = coordAgent ?? null;
+      this.infoPanel.repoCoordinatorAgent = coordAgent ?? null;
       const tmuxSession = coordAgent?.meta.tmux_session ?? null;
       if (tmuxSession !== this.repoCoordinatorSession) {
         this.repoCoordinatorSession = tmuxSession;
@@ -1139,6 +1140,7 @@ export class DashboardComponent implements Component {
     } else {
       // Not a repo header — clear coordinator state
       this.rightPane.repoCoordinatorAgent = null;
+      this.infoPanel.repoCoordinatorAgent = null;
       if (this.repoCoordinatorSession) {
         this.repoCoordinatorSession = null;
         this.rightPane.repoCoordinatorOutput = null;

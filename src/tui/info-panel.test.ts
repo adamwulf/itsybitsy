@@ -175,6 +175,49 @@ describe("InfoPanelComponent", () => {
     }
   });
 
+  test("repo info shows coordinator stoplights when coordinator agent is set", () => {
+    const panel = new InfoPanelComponent();
+    panel.displayHeight = 10;
+    panel.selectedRepoHeader = "my-repo";
+    panel.selectedRepoPath = "/path/to/my-repo";
+
+    const coord = makeAgent({ id: "agent-coord", repoName: "my-repo" });
+    coord.meta.coordinator = true;
+    coord.meta.claude_pid = String(process.pid); // alive
+    coord.meta.watchdog_pid = 99999999; // dead
+    coord.meta.tmux_session = "ib-coord-my-repo";
+    panel.repoCoordinatorAgent = coord;
+    panel.liveTmuxSessions = new Set(["ib-coord-my-repo"]);
+
+    const lines = panel.render(60);
+    const text = lines.map(stripAnsi).join("\n");
+    expect(text).toContain("Coord Claude");
+    expect(text).toContain("Coord Watchdog");
+    expect(text).toContain("Coord Tmux");
+    expect(text).toContain("/path/to/my-repo");
+    // Claude should be green (alive PID)
+    expect(lines[0]!).toContain("\x1b[32m");
+    // Watchdog should be red (dead PID)
+    expect(lines[1]!).toContain("\x1b[31m");
+    // Tmux should be green (in liveTmuxSessions)
+    expect(lines[2]!).toContain("\x1b[32m");
+  });
+
+  test("repo info omits coordinator stoplights when no coordinator agent", () => {
+    const panel = new InfoPanelComponent();
+    panel.displayHeight = 5;
+    panel.selectedRepoHeader = "my-repo";
+    panel.selectedRepoPath = "/path/to/my-repo";
+    panel.repoCoordinatorAgent = null;
+
+    const lines = panel.render(60);
+    const text = lines.map(stripAnsi).join("\n");
+    expect(text).not.toContain("Coord Claude");
+    expect(text).not.toContain("Coord Watchdog");
+    expect(text).not.toContain("Coord Tmux");
+    expect(text).toContain("/path/to/my-repo");
+  });
+
   test("claude PID dead shows red indicator", () => {
     const panel = new InfoPanelComponent();
     panel.displayHeight = 5;

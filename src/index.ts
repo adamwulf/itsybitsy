@@ -193,6 +193,54 @@ export async function sendToSystemCoordinator(
   return result;
 }
 
+/**
+ * Resolve the target directory for `ib merge <agent-id>` based on the caller's cwd.
+ *
+ * Three branches:
+ *   1. cwd is the system coordinator home (~/.itsybitsy/ or under it) — returns
+ *      `agent.repoPath` so the merge lands in the agent's owning repo. This lets
+ *      the system coordinator merge agents across all registered repos.
+ *   2. cwd is inside `agent.repoPath` — returns cwd unchanged. The user is in
+ *      their own repo (possibly on a feature branch they want to merge into).
+ *   3. cwd is anything else — returns an error. Refuses to silently substitute
+ *      because a sibling-repo or unrelated cwd almost certainly means the user
+ *      meant to merge into the agent's repo from somewhere else, but proceeding
+ *      with `agent.repoPath` would mask the mistake.
+ *
+ * Paths are compared after `realpathSync` so symlinked $HOME (common on macOS)
+ * doesn't cause a silent miss. Falls back to `resolve()` when realpath fails
+ * (path may not exist on disk for some reason — defensive).
+ */
+export function resolveMergeTargetDir(
+  agent: Agent,
+  cwd: string,
+): { ok: true; targetDir: string } | { ok: false; error: string } {
+  const { realpathSync } = require("fs") as typeof import("fs");
+  const { resolve } = require("path") as typeof import("path");
+  const { getCoordinatorHome } = require("./coordinator") as typeof import("./coordinator");
+
+  const canonical = (p: string): string => {
+    try { return realpathSync(p); } catch { return resolve(p); }
+  };
+
+  const resolvedCwd = canonical(cwd);
+  const resolvedRepo = canonical(agent.repoPath);
+  const resolvedHome = canonical(getCoordinatorHome());
+
+  if (resolvedCwd === resolvedHome || resolvedCwd.startsWith(resolvedHome + "/")) {
+    return { ok: true, targetDir: agent.repoPath };
+  }
+
+  if (resolvedCwd === resolvedRepo || resolvedCwd.startsWith(resolvedRepo + "/")) {
+    return { ok: true, targetDir: cwd };
+  }
+
+  return {
+    ok: false,
+    error: `Refusing to merge: cwd is not inside agent's repo (${agent.repoPath}). cd into the repo, or use the per-repo coordinator.`,
+  };
+}
+
 /** Require an agent ID argument, find it, or exit with error. */
 export async function requireAgent(idArg: string | undefined, repos: RepoEntry[]): Promise<Agent> {
   if (!idArg) {
@@ -846,8 +894,13 @@ async function main() {
       if (extraArgs.length > 0) {
         console.error(`Warning: unknown arguments ignored: ${extraArgs.join(" ")}`);
       }
+      const resolved = resolveMergeTargetDir(agent, process.cwd());
+      if (!resolved.ok) {
+        console.error(resolved.error);
+        process.exit(1);
+      }
       const { mergeAgent } = await import("./ib-commands");
-      await printAndExit(await mergeAgent(agent, process.cwd()));
+      await printAndExit(await mergeAgent(agent, resolved.targetDir));
       break;
     }
     case "resume": {

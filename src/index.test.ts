@@ -8,6 +8,7 @@ import {
   findManagerInTree,
   matchAgentById,
   resolveTarget,
+  resolveMergeTargetDir,
   buildSystemCoordinatorAgent,
   sendToSystemCoordinator,
   setSystemCoordinatorHasSessionFn,
@@ -643,6 +644,73 @@ describe("merge-check case", () => {
     const matches = source.match(/case "merge-check":/g);
     expect(matches).not.toBeNull();
     expect(matches!.length).toBe(1);
+  });
+});
+
+describe("resolveMergeTargetDir", () => {
+  let coordHome: string;
+  let repoRoot: string;
+  let foreignRoot: string;
+
+  beforeEach(async () => {
+    const { realpathSync } = await import("fs");
+    coordHome = realpathSync(await mkdtemp(join(tmpdir(), "merge-coord-home-")));
+    repoRoot = realpathSync(await mkdtemp(join(tmpdir(), "merge-repo-")));
+    foreignRoot = realpathSync(await mkdtemp(join(tmpdir(), "merge-foreign-")));
+    const { setCoordinatorHome } = await import("./coordinator");
+    setCoordinatorHome(coordHome);
+  });
+
+  afterEach(async () => {
+    const { resetCoordinatorHome } = await import("./coordinator");
+    resetCoordinatorHome();
+    await rm(coordHome, { recursive: true, force: true });
+    await rm(repoRoot, { recursive: true, force: true });
+    await rm(foreignRoot, { recursive: true, force: true });
+  });
+
+  test("system coordinator cwd → targetDir = agent.repoPath", () => {
+    const agent = makeAgent({ id: "agent-abc", repoPath: repoRoot });
+    const result = resolveMergeTargetDir(agent, coordHome);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.targetDir).toBe(repoRoot);
+  });
+
+  test("subdir of system coordinator home → targetDir = agent.repoPath", () => {
+    const { mkdirSync } = require("fs");
+    const sub = join(coordHome, "subdir");
+    mkdirSync(sub, { recursive: true });
+    const agent = makeAgent({ id: "agent-abc", repoPath: repoRoot });
+    const result = resolveMergeTargetDir(agent, sub);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.targetDir).toBe(repoRoot);
+  });
+
+  test("cwd inside agent.repoPath → targetDir = cwd unchanged", () => {
+    const { mkdirSync } = require("fs");
+    const sub = join(repoRoot, "src");
+    mkdirSync(sub, { recursive: true });
+    const agent = makeAgent({ id: "agent-abc", repoPath: repoRoot });
+    const result = resolveMergeTargetDir(agent, sub);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.targetDir).toBe(sub);
+  });
+
+  test("cwd === agent.repoPath → targetDir = cwd unchanged", () => {
+    const agent = makeAgent({ id: "agent-abc", repoPath: repoRoot });
+    const result = resolveMergeTargetDir(agent, repoRoot);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.targetDir).toBe(repoRoot);
+  });
+
+  test("foreign cwd (sibling repo) → fails with refusal error", () => {
+    const agent = makeAgent({ id: "agent-abc", repoPath: repoRoot });
+    const result = resolveMergeTargetDir(agent, foreignRoot);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toContain("Refusing to merge");
+      expect(result.error).toContain(repoRoot);
+    }
   });
 });
 

@@ -55,7 +55,7 @@ export function setDiffToolLaunching(v: boolean) { diffToolLaunching = v; }
 export function agentSettingsLocalPath(agent: Agent): string {
   const dir = agent.archived ? "archive" : "agents";
   const agentDir = join(agent.repoPath, ".ittybitty", dir, agent.id);
-  const base = agent.meta.coordinator ? agentDir : join(agentDir, "repo");
+  const base = agent.meta.agentType === "coordinator" ? agentDir : join(agentDir, "repo");
   return join(base, ".claude", "settings.local.json");
 }
 

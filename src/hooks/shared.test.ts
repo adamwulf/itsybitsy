@@ -28,8 +28,8 @@ describe("resolveAgentFromCwd — system coordinator identity", () => {
     expect(resolved).not.toBeNull();
     expect(resolved!.agentId).toBe(SYSTEM_AGENT_ID);
     expect(resolved!.agentDir).toBe(resolvedHome);
-    expect(resolved!.syntheticMeta?.coordinator).toBe(true);
     expect(resolved!.syntheticMeta?.agentType).toBe("system");
+    expect(resolved!.syntheticMeta?.worker).toBe(false);
   });
 
   test("resolves to @system when cwd is the .claude subdirectory", async () => {

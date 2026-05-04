@@ -934,7 +934,7 @@ describe("watchdog", () => {
             yolo: false,
             model: "sonnet",
             claude_pid: "12345",
-            coordinator: true,
+            agentType: "coordinator",
           },
         });
 
@@ -943,7 +943,7 @@ describe("watchdog", () => {
         mkdirSync(agentDir, { recursive: true });
         writeFileSync(`${agentDir}/meta.json`, JSON.stringify({
           id: repoBasename,
-          coordinator: true,
+          agentType: "coordinator",
         }));
 
         // The registry name DELIBERATELY differs from basename — the lookup

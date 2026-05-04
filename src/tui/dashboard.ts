@@ -1121,7 +1121,7 @@ export class DashboardComponent implements Component {
       // Repo header is selected — find coordinator agent from the full agent list
       // (coordinators are filtered out of flatList, so search lastAgents directly)
       const coordAgent = this.watcher?.lastAgents.find(
-        a => a.repoPath === repoPathForCoordinator && !!a.meta.coordinator
+        a => a.repoPath === repoPathForCoordinator && a.meta.agentType === "coordinator"
       );
       this.rightPane.repoCoordinatorAgent = coordAgent ?? null;
       this.infoPanel.repoCoordinatorAgent = coordAgent ?? null;
@@ -2276,7 +2276,7 @@ export async function launchDashboard(): Promise<void> {
         return releaseSystemCoordinator(async () => {
           // Pause all per-repo coordinators when last watcher exits
           const agents = dashboard.watcher?.lastAgents ?? [];
-          const coordinators = agents.filter(a => a.meta.coordinator === true);
+          const coordinators = agents.filter(a => a.meta.agentType === "coordinator");
           await Promise.all(coordinators.map(a => pauseAgent(a).catch(() => {})));
         });
       }).finally(() => {

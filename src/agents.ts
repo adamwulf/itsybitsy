@@ -61,7 +61,6 @@ export interface AgentMeta {
   claude_pid: string;
   summary?: string;
   watchdog_pid?: number;
-  coordinator?: boolean;
   agentType?: string;
   agentIcon?: string;
   state?: MetaState;
@@ -72,7 +71,7 @@ export interface AgentMeta {
 /** Resolve the display icon for an agent from meta fields with legacy fallback */
 export function resolveAgentIcon(meta: AgentMeta): string {
   if (meta.agentIcon) return meta.agentIcon;
-  if (meta.coordinator) return "◇";
+  if (meta.agentType === "coordinator") return "◇";
   if (meta.worker) return "⚙";
   return "◆";
 }
@@ -88,7 +87,6 @@ export function resolveAgentIconChar(meta: AgentMeta): string {
     if (meta.agentType === "worker") return "w";
     return meta.agentType[0] ?? "m";
   }
-  if (meta.coordinator) return "c";
   if (meta.worker) return "w";
   return "m";
 }
@@ -519,7 +517,6 @@ export async function readAgentMeta(agentDir: string): Promise<{ meta: AgentMeta
     if (typeof data.model !== "string") data.model = "unknown";
     if (typeof data.claude_pid !== "string") data.claude_pid = "";
     if (data.summary !== undefined && typeof data.summary !== "string") delete data.summary;
-    if (data.coordinator !== undefined && typeof data.coordinator !== "boolean") delete data.coordinator;
     if (data.agentType !== undefined && typeof data.agentType !== "string") delete data.agentType;
     if (data.agentIcon !== undefined && typeof data.agentIcon !== "string") delete data.agentIcon;
     // Validate spawned_by: must be an object with string agent_id; repo_path
@@ -827,7 +824,7 @@ export function flattenAgentTree(
       const agents = repoGroups.get(repoName);
       if (agents && agents.length > 0) {
         // Filter out per-repo coordinators — they don't appear in the agent tree
-        const nonCoordinators = agents.filter(a => !a.meta.coordinator);
+        const nonCoordinators = agents.filter(a => a.meta.agentType !== "coordinator");
         // Repo with agents — emit repo header then walk agents
         result.push({ kind: "repo-header", repoName, repoPath: repoPathByName.get(repoName) ?? "", hasAgents: nonCoordinators.length > 0 });
         for (let i = 0; i < nonCoordinators.length; i++) {
@@ -841,7 +838,7 @@ export function flattenAgentTree(
     }
   } else {
     // Filter out per-repo coordinators — they don't appear in the agent tree
-    const nonCoordRoots = nonArchivedRoots.filter(a => !a.meta.coordinator);
+    const nonCoordRoots = nonArchivedRoots.filter(a => a.meta.agentType !== "coordinator");
     const multiRoot = nonCoordRoots.length > 1;
     for (let ri = 0; ri < nonCoordRoots.length; ri++) {
       const isLast = ri === nonCoordRoots.length - 1;

@@ -1448,7 +1448,7 @@ describe("resumeAgent (native)", () => {
 
   // ----- Per-repo coordinator: R triggers a full reset -----
   //
-  // When meta.coordinator === true, resumeAgent must NOT take the regular
+  // When meta.agentType === "coordinator", resumeAgent must NOT take the regular
   // resume-session path. Instead, it tears down the existing coordinator
   // (nukeAgent) and respawns it (newAgent). These tests verify the routing
   // and teardown half. The respawn half goes through newAgent which has its
@@ -1511,7 +1511,6 @@ describe("resumeAgent (native)", () => {
         id: repoBasename,
         tmux_session: `tmux-${repoBasename}`,
         session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-        coordinator: true,
         agentType: "coordinator",
       }));
 
@@ -1523,7 +1522,7 @@ describe("resumeAgent (native)", () => {
         meta: {
           session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
           tmux_session: `tmux-${repoBasename}`,
-          coordinator: true,
+          agentType: "coordinator",
         } as any,
       });
 
@@ -1554,7 +1553,6 @@ describe("resumeAgent (native)", () => {
         id: repoBasename,
         tmux_session: `tmux-${repoBasename}`,
         session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-        coordinator: true,
         agentType: "coordinator",
       }));
 
@@ -1566,7 +1564,7 @@ describe("resumeAgent (native)", () => {
         meta: {
           session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
           tmux_session: `tmux-${repoBasename}`,
-          coordinator: true,
+          agentType: "coordinator",
         } as any,
       });
 
@@ -5469,7 +5467,7 @@ describe("spawned_by Case 2 coordinator auto-detect", () => {
     await mkdir(coordDir, { recursive: true });
     await Bun.write(join(coordDir, "meta.json"), JSON.stringify({
       id: coordId,
-      coordinator: true,
+      agentType: "coordinator",
       tmux_session: `ittybitty-abcd1234-${coordId}`,
       prompt: "coordinate",
       manager: null,

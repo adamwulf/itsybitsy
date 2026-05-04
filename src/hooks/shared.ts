@@ -60,7 +60,7 @@ export interface ResolvedAgent {
   /**
    * Synthetic in-memory meta — only populated for `@system`, where no
    * meta.json exists on disk. Mirrors the meta fields hook bodies care about
-   * (coordinator, agentType, worker) so existing branches keep working.
+   * (agentType, worker) so existing branches keep working.
    */
   syntheticMeta?: Record<string, unknown>;
 }
@@ -84,7 +84,6 @@ export function resolveAgentFromCwd(cwd: string): ResolvedAgent | null {
       agentId: SYSTEM_AGENT_ID,
       agentDir: resolvedHome,
       syntheticMeta: {
-        coordinator: true,
         agentType: "system",
         worker: false,
       },

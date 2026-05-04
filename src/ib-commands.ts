@@ -31,6 +31,11 @@ import { isValidModel, isValidToolList, isValidTmuxSession, isValidSessionId, is
 import { getTmuxWidthForAgent } from "./tui/widths";
 import { buildPerRepoCoordinatorSettings, checkCoordinatorExists, getCoordinatorAgentId, getCoordinatorHome } from "./coordinator";
 import { loadAgentType, agentTypeExists } from "./agent-types";
+import {
+  buildHooksBlock,
+  COORDINATOR_INTERCEPT_MATCHER,
+  REGULAR_AGENT_INTERCEPT_MATCHER,
+} from "./settings-builder";
 import { listRepos, repoDisplayName } from "./registry";
 import { stampAgentCompactCheck } from "./watchdog";
 import { timed } from "./perf";
@@ -311,7 +316,7 @@ export async function nukeAllAgents(repoPath: string): Promise<IbCommandResult> 
  * files are picked up. Hooks block is rebuilt fresh too. Agent ID stays the
  * same (it's keyed to the repo basename).
  *
- * Caller must have already verified `agent.meta.coordinator === true`.
+ * Caller must have already verified `agent.meta.agentType === "coordinator"`.
  */
 async function resetCoordinator(agent: Agent): Promise<IbCommandResult> {
   // Tear down the existing coordinator: kill tmux session, claude process,
@@ -379,7 +384,7 @@ export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
   // template is rebuilt then. Resuming the existing session would reuse stale
   // permissions and hooks, so we tear the coordinator down and respawn it
   // — fresher, simpler, and matches the user's mental model of "R to reset".
-  if (agent.meta.coordinator === true) {
+  if (agent.meta.agentType === "coordinator") {
     return await resetCoordinator(agent);
   }
 
@@ -1546,18 +1551,6 @@ async function buildAgentSettings(
     }
   }
 
-  const hookCmd = `ib hook-permission-denied ${agentId}`;
-
-  // Build PreToolUse hooks
-  const preToolUseHooks: unknown[] = [
-    { matcher: "*", hooks: [{ type: "command", command: `ib hook-check-path ${agentId}` }] },
-  ];
-  if (addIntercept) {
-    preToolUseHooks.push(
-      { matcher: "Task|Agent|TaskCreate|AskUserQuestion", hooks: [{ type: "command", command: "ib hooks intercept-task" }] }
-    );
-  }
-
   const result = {
     ...baseSettings,
     spinnerTipsEnabled: false,
@@ -1565,12 +1558,12 @@ async function buildAgentSettings(
       allow: allAllow,
       deny: allDeny,
     },
-    hooks: {
-      Stop: [{ matcher: "*", hooks: [{ type: "command", command: `ib hook-status ${agentId}` }] }],
-      PermissionRequest: [{ matcher: "*", hooks: [{ type: "command", command: hookCmd }] }],
-      PreToolUse: preToolUseHooks,
-      SessionStart: [{ hooks: [{ type: "command", command: "ib hooks session-start" }] }],
-    },
+    hooks: buildHooksBlock({
+      agentId,
+      includeStop: true,
+      interceptMatcher: addIntercept ? REGULAR_AGENT_INTERCEPT_MATCHER : null,
+      sessionStartIncludesAgentId: false,
+    }),
   };
 
   return JSON.stringify(result, null, 2);
@@ -2107,9 +2100,6 @@ export async function newAgent(
     state: "creating",
     state_updated_at: Math.floor(createdAt.getTime() / 1000),
   };
-  if (coordinatorMode) {
-    initialMetaJson.coordinator = true;
-  }
   if (resolvedAllowedPaths !== undefined) {
     initialMetaJson.allowedPaths = resolvedAllowedPaths;
   }
@@ -2194,32 +2184,12 @@ export async function newAgent(
     }
     workPath = join(agentDir, "repo");
 
-    // 13. Write settings.local.json (worktree mode only)
+    // 13. Write settings.local.json (worktree mode only).
+    // Coordinators force useWorktree=false above (SPEC §12.2.3), so we never
+    // reach here in coordinator mode — only regular agents need settings here.
     await mkdir(join(agentDir, "repo", ".claude"), { recursive: true });
-    let settingsContent: string;
-    if (coordinatorMode) {
-      const coordSettings = await buildPerRepoCoordinatorSettings();
-      // Build coordinator settings with hooks (path-check, stop, permission-denied, session-start, intercept-task)
-      const hookCmd = `ib hook-permission-denied ${id}`;
-      const coordSettingsObj = {
-        ...coordSettings,
-        spinnerTipsEnabled: false,
-        hooks: {
-          Stop: [{ matcher: "*", hooks: [{ type: "command", command: `ib hook-status ${id}` }] }],
-          PermissionRequest: [{ matcher: "*", hooks: [{ type: "command", command: hookCmd }] }],
-          PreToolUse: [
-            { matcher: "*", hooks: [{ type: "command", command: `ib hook-check-path ${id}` }] },
-            { matcher: "Task|Agent|TaskCreate|Bash|AskUserQuestion", hooks: [{ type: "command", command: "ib hooks intercept-task" }] },
-          ],
-          SessionStart: [{ hooks: [{ type: "command", command: `ib hooks session-start ${id}` }] }],
-        },
-      };
-      settingsContent = JSON.stringify(coordSettingsObj, null, 2);
-    } else {
-      // Map agent type to manager/worker for buildAgentSettings
-      const managerOrWorker: "manager" | "worker" = isLeafAgent ? "worker" : "manager";
-      settingsContent = await buildAgentSettings(rootRepoPath, managerOrWorker, id, configAllow, configDeny);
-    }
+    const managerOrWorker: "manager" | "worker" = isLeafAgent ? "worker" : "manager";
+    const settingsContent = await buildAgentSettings(rootRepoPath, managerOrWorker, id, configAllow, configDeny);
     await Bun.write(join(agentDir, "repo", ".claude", "settings.local.json"), settingsContent);
   } else if (coordinatorMode) {
     // Per-repo coordinator: write settings (permissions + hooks) into the
@@ -2230,19 +2200,15 @@ export async function newAgent(
     // this file (see start.sh generation below).
     try {
       const coordSettings = await buildPerRepoCoordinatorSettings();
-      const hookCmd = `ib hook-permission-denied ${id}`;
       const coordSettingsObj = {
         ...coordSettings,
         spinnerTipsEnabled: false,
-        hooks: {
-          Stop: [{ matcher: "*", hooks: [{ type: "command", command: `ib hook-status ${id}` }] }],
-          PermissionRequest: [{ matcher: "*", hooks: [{ type: "command", command: hookCmd }] }],
-          PreToolUse: [
-            { matcher: "*", hooks: [{ type: "command", command: `ib hook-check-path ${id}` }] },
-            { matcher: "Task|Agent|TaskCreate|Bash|AskUserQuestion", hooks: [{ type: "command", command: "ib hooks intercept-task" }] },
-          ],
-          SessionStart: [{ hooks: [{ type: "command", command: `ib hooks session-start ${id}` }] }],
-        },
+        hooks: buildHooksBlock({
+          agentId: id,
+          includeStop: true,
+          interceptMatcher: COORDINATOR_INTERCEPT_MATCHER,
+          sessionStartIncludesAgentId: true,
+        }),
       };
       await mkdir(join(agentDir, ".claude"), { recursive: true });
       await Bun.write(

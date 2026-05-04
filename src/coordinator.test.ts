@@ -1672,11 +1672,11 @@ describe("checkCoordinatorExists", () => {
     await rm(td, { recursive: true, force: true });
   });
 
-  test("returns exists when any agent has coordinator:true", async () => {
+  test("returns exists when any agent has agentType: coordinator", async () => {
     const td = join(tmpdir(), `coord-true-${Date.now()}-${Math.random().toString(36).slice(2)}`);
     const coordDir = join(td, ".ittybitty", "agents", "my-repo");
     await mkdir(coordDir, { recursive: true });
-    await Bun.write(join(coordDir, "meta.json"), JSON.stringify({ id: "my-repo", coordinator: true }));
+    await Bun.write(join(coordDir, "meta.json"), JSON.stringify({ id: "my-repo", agentType: "coordinator" }));
 
     const result = await checkCoordinatorExists(td);
     expect(result.exists).toBe(true);
@@ -1718,10 +1718,10 @@ describe("checkCoordinatorExists", () => {
 
   test("finds coordinator regardless of agent directory name", async () => {
     const td = join(tmpdir(), `coord-anyname-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-    // Agent named with suffix due to collision, but still has coordinator:true
+    // Agent named with suffix due to collision, but still has agentType: coordinator
     const coordDir = join(td, ".ittybitty", "agents", "my-repo-a3f2");
     await mkdir(coordDir, { recursive: true });
-    await Bun.write(join(coordDir, "meta.json"), JSON.stringify({ id: "my-repo-a3f2", coordinator: true }));
+    await Bun.write(join(coordDir, "meta.json"), JSON.stringify({ id: "my-repo-a3f2", agentType: "coordinator" }));
 
     const result = await checkCoordinatorExists(td);
     expect(result.exists).toBe(true);

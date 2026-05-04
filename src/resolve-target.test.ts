@@ -57,7 +57,7 @@ function addAgentToRepo(repoPath: string, id: string, extra: Record<string, any>
 }
 
 function addCoordinatorToRepo(repoPath: string, id: string) {
-  addAgentToRepo(repoPath, id, { coordinator: true });
+  addAgentToRepo(repoPath, id, { agentType: "coordinator" });
 }
 
 // --- Test helpers ---

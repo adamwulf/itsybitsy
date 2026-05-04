@@ -550,6 +550,8 @@ export interface ReadAgentsResult {
   agents: Agent[];
   errors: AgentReadError[];
   orphanedTmuxSessions: string[];
+  /** Set of all live tmux sessions at refresh time (full list, including non-orphaned). */
+  liveTmuxSessions: Set<string>;
 }
 
 /** Read agents from a single directory (agents/ or archive/) */
@@ -635,7 +637,7 @@ async function readAgentsFromDir(
       errors.push({ agentDir: dir, error: `Failed to read directory: ${err.message}` });
     }
   }
-  return { agents, errors, orphanedTmuxSessions: [] };
+  return { agents, errors, orphanedTmuxSessions: [], liveTmuxSessions: new Set() };
 }
 
 /** Read all agents for a repo (both active and archived) */
@@ -652,6 +654,7 @@ export async function readRepoAgents(repoPath: string, repoName: string): Promis
     agents: [...active.agents, ...archived.agents],
     errors: [...active.errors, ...archived.errors],
     orphanedTmuxSessions: [],
+    liveTmuxSessions: new Set(),
   };
 }
 
@@ -911,6 +914,7 @@ export async function readAllAgents(
     agents: allAgents,
     errors: allErrors,
     orphanedTmuxSessions,
+    liveTmuxSessions: new Set(tmuxSessions),
   };
 }
 

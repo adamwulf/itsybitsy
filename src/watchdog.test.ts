@@ -2277,7 +2277,7 @@ describe("lazy allAgents loading via runPerAgentWatchdog", () => {
     setWatchdogListRepos(async () => [{ path: "/tmp/r", name: "r" }]);
     setWatchdogReadAllAgents(async (_repos) => {
       readAllAgentsCalls++;
-      return { agents: [], errors: [], orphanedTmuxSessions: [] };
+      return { agents: [], errors: [], orphanedTmuxSessions: [], liveTmuxSessions: new Set() };
     });
     clearAllAgentsCache();
   });

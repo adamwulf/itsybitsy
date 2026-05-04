@@ -1094,6 +1094,9 @@ export class DashboardComponent implements Component {
     this.infoPanel.selectedRepoHeader = this.agentTree.selectedRepoHeader;
     this.infoPanel.selectedRepoPath = this.agentTree.selectedRepoPath;
     this.infoPanel.allAgents = this.agentTree.flatList;
+    if (this.watcher) {
+      this.infoPanel.liveTmuxSessions = this.watcher.lastLiveTmuxSessions;
+    }
 
     // Wire health data to info panel and right pane
     const selectedRepoPath = this.agentTree.selectedRepoPath ?? (selected?.repoPath ?? null);

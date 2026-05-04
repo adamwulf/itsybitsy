@@ -34,6 +34,7 @@ export class AgentWatcher {
   private refreshQueued = false;
   private _lastAgents: Agent[] = [];
   private lastOrphanedSessions: string[] = [];
+  private _lastLiveTmuxSessions: Set<string> = new Set();
   /** Cached coordinator tmux session_created epoch — immutable for the session
    * lifetime, so we query tmux display-message once and reuse. Cleared when
    * detectSystemCoordinatorState() reports 'stopped' (session ended). */
@@ -49,6 +50,11 @@ export class AgentWatcher {
   /** Public read-only access to the most recently loaded agents list */
   get lastAgents(): Agent[] {
     return this._lastAgents;
+  }
+
+  /** Public read-only access to the most recent live tmux session set. */
+  get lastLiveTmuxSessions(): Set<string> {
+    return this._lastLiveTmuxSessions;
   }
 
   constructor(repos: RepoEntry[], events: WatcherEvents) {
@@ -260,7 +266,7 @@ export class AgentWatcher {
     this.refreshing = true;
     try {
       const reposWithDisplayNames = this.repos.map((r) => ({ path: r.path, name: repoDisplayName(r) }));
-      const { agents, errors, orphanedTmuxSessions } = await readAllAgents(reposWithDisplayNames);
+      const { agents, errors, orphanedTmuxSessions, liveTmuxSessions } = await readAllAgents(reposWithDisplayNames);
 
       // Report any read errors
       for (const err of errors) {
@@ -270,6 +276,7 @@ export class AgentWatcher {
       // Save agents and orphaned sessions for background state polling
       this._lastAgents = agents;
       this.lastOrphanedSessions = orphanedTmuxSessions;
+      this._lastLiveTmuxSessions = liveTmuxSessions;
 
       // Detect state for each agent via tmux capture + parseState, and get coordinator info
       const [, coordinatorInfo] = await Promise.all([

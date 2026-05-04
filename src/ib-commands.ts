@@ -2194,32 +2194,12 @@ export async function newAgent(
     }
     workPath = join(agentDir, "repo");
 
-    // 13. Write settings.local.json (worktree mode only)
+    // 13. Write settings.local.json (worktree mode only).
+    // Coordinators force useWorktree=false above (SPEC §12.2.3), so we never
+    // reach here in coordinator mode — only regular agents need settings here.
     await mkdir(join(agentDir, "repo", ".claude"), { recursive: true });
-    let settingsContent: string;
-    if (coordinatorMode) {
-      const coordSettings = await buildPerRepoCoordinatorSettings();
-      // Build coordinator settings with hooks (path-check, stop, permission-denied, session-start, intercept-task)
-      const hookCmd = `ib hook-permission-denied ${id}`;
-      const coordSettingsObj = {
-        ...coordSettings,
-        spinnerTipsEnabled: false,
-        hooks: {
-          Stop: [{ matcher: "*", hooks: [{ type: "command", command: `ib hook-status ${id}` }] }],
-          PermissionRequest: [{ matcher: "*", hooks: [{ type: "command", command: hookCmd }] }],
-          PreToolUse: [
-            { matcher: "*", hooks: [{ type: "command", command: `ib hook-check-path ${id}` }] },
-            { matcher: "Task|Agent|TaskCreate|Bash|AskUserQuestion", hooks: [{ type: "command", command: "ib hooks intercept-task" }] },
-          ],
-          SessionStart: [{ hooks: [{ type: "command", command: `ib hooks session-start ${id}` }] }],
-        },
-      };
-      settingsContent = JSON.stringify(coordSettingsObj, null, 2);
-    } else {
-      // Map agent type to manager/worker for buildAgentSettings
-      const managerOrWorker: "manager" | "worker" = isLeafAgent ? "worker" : "manager";
-      settingsContent = await buildAgentSettings(rootRepoPath, managerOrWorker, id, configAllow, configDeny);
-    }
+    const managerOrWorker: "manager" | "worker" = isLeafAgent ? "worker" : "manager";
+    const settingsContent = await buildAgentSettings(rootRepoPath, managerOrWorker, id, configAllow, configDeny);
     await Bun.write(join(agentDir, "repo", ".claude", "settings.local.json"), settingsContent);
   } else if (coordinatorMode) {
     // Per-repo coordinator: write settings (permissions + hooks) into the

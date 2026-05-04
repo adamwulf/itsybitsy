@@ -859,6 +859,28 @@ export function resetListTmuxSessionsCache(): void {
   listTmuxSessionsCache = null;
 }
 
+/** Fetch the live tmux session list, using the shared TTL cache.
+ *  Used by readAllAgents (orphan detection) and detectAgentStates
+ *  (verifying tmux is still alive for `complete` agents). */
+function getCachedTmuxSessions(): Promise<string[]> {
+  const now = Date.now();
+  const cached = listTmuxSessionsCache;
+  if (cached && cached.expiresAt > now) {
+    return Promise.resolve(cached.value);
+  }
+  return listTmuxSessions().then((value) => {
+    listTmuxSessionsCache = { value, expiresAt: Date.now() + LIST_TMUX_SESSIONS_TTL_MS };
+    return value;
+  });
+}
+
+/** Injectable tmux-session liveness lookup for tests. Returns the set of
+ *  currently live tmux session names. The default implementation calls
+ *  getCachedTmuxSessions() lazily and reuses the readAllAgents TTL cache. */
+export const liveTmuxSessionsCtx = new InjectionContext<() => Promise<Set<string>>>(
+  async () => new Set(await getCachedTmuxSessions())
+);
+
 /**
  * Read all agents across multiple repos.
  * Also detects orphaned tmux sessions (sessions matching ittybitty-* pattern
@@ -868,19 +890,9 @@ export function resetListTmuxSessionsCache(): void {
 export async function readAllAgents(
   repos: Array<{ path: string; name: string }>
 ): Promise<ReadAgentsResult> {
-  const now = Date.now();
-  const cached = listTmuxSessionsCache;
-  const tmuxSessionsPromise =
-    cached && cached.expiresAt > now
-      ? Promise.resolve(cached.value)
-      : listTmuxSessions().then((value) => {
-          listTmuxSessionsCache = { value, expiresAt: Date.now() + LIST_TMUX_SESSIONS_TTL_MS };
-          return value;
-        });
-
   const [results, tmuxSessions] = await Promise.all([
     Promise.all(repos.map((r) => readRepoAgents(r.path, r.name))),
-    tmuxSessionsPromise,
+    getCachedTmuxSessions(),
   ]);
 
   const allAgents = results.flatMap((r) => r.agents);
@@ -964,6 +976,18 @@ export async function detectAgentStates(agents: Agent[]): Promise<void> {
 
   const active = agents.filter((a) => !a.archived);
 
+  // Lazily resolve the live tmux session set — only fetch if at least one
+  // agent has meta.state === "complete" (that's the only fast-path that
+  // needs to verify tmux liveness; the running/waiting paths already do a
+  // captureTmuxOutput which fails on dead sessions). Reuses the
+  // listTmuxSessions TTL cache so back-to-back ticks don't respawn tmux.
+  const needsLiveTmuxCheck = active.some(
+    (a) => a.meta.state === "complete" && a.meta.tmux_session
+  );
+  const liveTmuxSessionsPromise: Promise<Set<string>> | null = needsLiveTmuxCheck
+    ? liveTmuxSessionsCtx.fn()
+    : null;
+
   await Promise.all(
     active.map(async (agent) => {
       const tmuxSession = agent.meta.tmux_session;
@@ -994,11 +1018,24 @@ export async function detectAgentStates(agents: Agent[]): Promise<void> {
       // the stored state and skip the tmux capture (saves a posix_spawn +
       // ~20 openat() per agent per 2s tick).
       //
-      // Liveness gate: verify claude_pid is still alive via signal 0 (free —
-      // pure syscall, no spawn). If Claude died without archiving the agent,
-      // demote to 'stopped' so the dashboard reflects reality. Empty/invalid
-      // claude_pid (legacy agents) skips the check and trusts meta.state.
+      // Liveness gates:
+      //   1. tmux session must still exist. If the tmux server was killed or
+      //      restarted, Claude can outlive its session as an orphaned process
+      //      attached to a regular tty — meaning a PID-only check passes
+      //      while the user sees no working tmux pane. Use the cached
+      //      list-sessions result (shared with readAllAgents).
+      //   2. claude_pid is still alive via signal 0 (free — pure syscall, no
+      //      spawn). If Claude died without archiving the agent, demote to
+      //      'stopped'. Empty/invalid claude_pid (legacy agents) skips this
+      //      check and trusts the tmux gate alone.
       if (agent.meta.state === "complete") {
+        if (liveTmuxSessionsPromise) {
+          const liveSessions = await liveTmuxSessionsPromise;
+          if (!liveSessions.has(tmuxSession)) {
+            agent.state = "stopped";
+            return;
+          }
+        }
         const claudePid = parseInt(agent.meta.claude_pid, 10);
         if (claudePid > 0 && !isPidAliveCtx.fn(claudePid)) {
           agent.state = "stopped";

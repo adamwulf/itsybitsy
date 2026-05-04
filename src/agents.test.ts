@@ -29,6 +29,7 @@ import {
   writeAgentTransient,
   deleteAgentTransient,
   isPidAliveCtx,
+  liveTmuxSessionsCtx,
   nowMsCtx,
   resetReadAgentMetaCache,
   TRANSIENT_FRESH_MS,
@@ -1244,11 +1245,15 @@ describe("detectAgentStates — waiting + background shell override", () => {
     // so existing assertions (which use makeAgent's default claude_pid) still
     // resolve through that path.
     isPidAliveCtx.set(() => true);
+    // The 'complete' fast-path also verifies the tmux session is alive —
+    // stub the live-session set to include the test session name.
+    liveTmuxSessionsCtx.set(async () => new Set(["ib-a1"]));
   }
 
   afterEach(() => {
     tmuxPollerSpawnCtx.reset();
     isPidAliveCtx.reset();
+    liveTmuxSessionsCtx.reset();
   });
 
   test("waiting + bg shell → running", async () => {
@@ -1312,6 +1317,7 @@ describe("detectAgentStates — 'complete' agents skip capture-pane", () => {
   afterEach(() => {
     tmuxPollerSpawnCtx.reset();
     isPidAliveCtx.reset();
+    liveTmuxSessionsCtx.reset();
   });
 
   test("complete agent with tmux session does not invoke captureTmuxOutput", async () => {
@@ -1325,6 +1331,7 @@ describe("detectAgentStates — 'complete' agents skip capture-pane", () => {
       };
     }) as any);
     isPidAliveCtx.set(() => true);
+    liveTmuxSessionsCtx.set(async () => new Set(["ib-a1"]));
 
     const a = makeAgent({
       id: "a1",
@@ -1346,6 +1353,7 @@ describe("detectAgentStates — 'complete' agents skip capture-pane", () => {
       };
     }) as any);
     isPidAliveCtx.set(() => false);
+    liveTmuxSessionsCtx.set(async () => new Set(["ib-a1"]));
 
     const a = makeAgent({
       id: "a1",
@@ -1362,6 +1370,7 @@ describe("detectAgentStates — 'complete' agents skip capture-pane", () => {
       pidChecks++;
       return false;
     });
+    liveTmuxSessionsCtx.set(async () => new Set(["ib-a1"]));
 
     const a = makeAgent({
       id: "a1",
@@ -1370,6 +1379,53 @@ describe("detectAgentStates — 'complete' agents skip capture-pane", () => {
     await detectAgentStates([a]);
     expect(a.state).toBe("complete");
     expect(pidChecks).toBe(0);
+  });
+
+  test("complete agent with live PID but dead tmux session → stopped", async () => {
+    // Bug fix: Claude can outlive its tmux session if the tmux server is
+    // killed/restarted — the process becomes orphaned, attached to a regular
+    // tty. PID alone passes liveness, but the user sees no working pane.
+    let captureCalls = 0;
+    tmuxPollerSpawnCtx.set(((args: any[]) => {
+      if (args[0] === "tmux" && args[1] === "capture-pane") captureCalls++;
+      return {
+        stdout: new ReadableStream({ start(c) { c.close(); } }),
+        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        exited: Promise.resolve(0),
+      };
+    }) as any);
+    isPidAliveCtx.set(() => true);
+    // tmux session list is empty — session "ib-a1" is gone
+    liveTmuxSessionsCtx.set(async () => new Set([]));
+
+    const a = makeAgent({
+      id: "a1",
+      meta: { state: "complete", tmux_session: "ib-a1", claude_pid: "12345" } as Partial<AgentMeta> as AgentMeta,
+    });
+    await detectAgentStates([a]);
+    expect(a.state).toBe("stopped");
+    expect(captureCalls).toBe(0);
+  });
+
+  test("no complete agents — does not invoke listTmuxSessions", async () => {
+    let liveCalls = 0;
+    liveTmuxSessionsCtx.set(async () => {
+      liveCalls++;
+      return new Set();
+    });
+    isPidAliveCtx.set(() => true);
+    tmuxPollerSpawnCtx.set(((_args: any[]) => ({
+      stdout: new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode("⏵⏵ accept edits on")); c.close(); } }),
+      stderr: new ReadableStream({ start(c) { c.close(); } }),
+      exited: Promise.resolve(0),
+    })) as any);
+
+    const a = makeAgent({
+      id: "a1",
+      meta: { state: "running", tmux_session: "ib-a1", claude_pid: "12345" } as Partial<AgentMeta> as AgentMeta,
+    });
+    await detectAgentStates([a]);
+    expect(liveCalls).toBe(0);
   });
 
   test("complete agent with no tmux session resolves to 'stopped' (existing path)", async () => {

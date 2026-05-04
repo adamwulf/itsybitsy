@@ -1005,6 +1005,55 @@ describe("TelegramDispatcher health state machine", () => {
     // No further notifications after unsubscribe.
     expect(count).toBe(before);
   });
+
+  test("getHealth() returns 'down' after stop()", async () => {
+    mock.enqueueResponse({ ok: true, result: [] }); // probe
+    mock.enqueueResponse({ ok: true, result: [] }); // long-poll
+
+    const d = makeDispatcher();
+    await d.start();
+    // After a successful start, we're in polling.
+    await waitFor(() => d.getHealth().state === "polling", 1_000);
+
+    await d.stop();
+    // After stop, state must be down.
+    expect(d.getHealth().state).toBe("down");
+  });
+
+  test("token never appears in dispatcher log lines or state-change reasons (token-safety regression)", async () => {
+    // Probe ok, then a getUpdates throw whose error message embeds the token.
+    // A future regression that swaps classifyError for err.message would cause
+    // the token to leak into the log; this test pins that behavior.
+    mock.enqueueResponse({ ok: true, result: [] }); // probe
+    // A throw that includes the token in its message — mimics what fetch
+    // libraries sometimes produce ("request to https://...token.../foo failed").
+    mock.enqueueError(new Error("request to https://api.telegram.org/botSECRET_DISP_TOKEN_999/getUpdates failed: ETIMEDOUT"));
+    mock.enqueueResponse({ ok: true, result: [] }); // recovery
+
+    const stateReasons: Array<string | null> = [];
+    // Build the dispatcher with a token that's distinct from any others, so
+    // we can assert tightly.
+    const client = new TelegramClient({ token: "SECRET_DISP_TOKEN_999" });
+    const d = new TelegramDispatcher({
+      client,
+      allowedChatIds: ["100"],
+      allowedUserIds: [],
+      chatId: "100",
+    });
+    d.onStateChange((change) => stateReasons.push(change.reason));
+
+    await d.start();
+    await waitFor(() => stateReasons.some((r) => r !== null && r.includes("reconnected")), 1_000);
+    await d.stop();
+
+    // No dispatcher log line may contain the token.
+    expect(dispLogs.some((l) => l.includes("SECRET_DISP_TOKEN_999"))).toBe(false);
+    // No state-change reason may contain the token.
+    expect(stateReasons.some((r) => r !== null && r.includes("SECRET_DISP_TOKEN_999"))).toBe(false);
+    // Sanity: lastFailureReason on the dispatcher must also be token-free.
+    const h = d.getHealth();
+    expect(h.reason === null || !h.reason.includes("SECRET_DISP_TOKEN_999")).toBe(true);
+  });
 });
 
 /* ------------------------------------------------------------------ */

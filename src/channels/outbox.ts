@@ -31,6 +31,7 @@ import { homedir } from "os";
 import { mkdir, readdir, readFile, rename, unlink, writeFile } from "fs/promises";
 import { watch, type FSWatcher } from "node:fs";
 import type { TelegramClient } from "./telegram-client";
+import { classifyError } from "./telegram-client";
 
 let overrideOutboxDir: string | undefined;
 
@@ -307,7 +308,9 @@ export class TelegramOutbox {
       try {
         resp = await this.client.sendMessage({ chat_id: this.chatId, text: piece });
       } catch (err) {
-        return { ok: false, message: `sendMessage failed: ${describeErr(err)}` };
+        // classifyError, not describeErr: fetch errors can embed the
+        // bot-token URL in err.message.
+        return { ok: false, message: `sendMessage failed: ${classifyError(err)}` };
       }
       if (resp.ok) continue;
 
@@ -320,7 +323,8 @@ export class TelegramOutbox {
         try {
           retryResp = await this.client.sendMessage({ chat_id: this.chatId, text: piece });
         } catch (err) {
-          return { ok: false, message: `sendMessage failed after 429 retry: ${describeErr(err)}` };
+          // classifyError, not describeErr — same token-safety reason as above.
+          return { ok: false, message: `sendMessage failed after 429 retry: ${classifyError(err)}` };
         }
         if (retryResp.ok) continue;
         const desc = retryResp.description ?? `HTTP ${retryResp.error_code ?? "unknown"}`;

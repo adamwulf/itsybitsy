@@ -180,7 +180,6 @@ export class TelegramDispatcher {
   private healthState: DispatcherHealthState = "down";
   private lastSuccessAt: number | null = null;
   private lastFailureReason: string | null = null;
-  private consecutiveFailures = 0;
   /** Wall-clock at the moment we left "polling" — used to compute the
    *  "reconnected after Ns" message when a streak ends. */
   private disconnectedAt: number | null = null;
@@ -255,7 +254,6 @@ export class TelegramDispatcher {
    *  long-poll loop via the `onPollOutcome` hook on `getUpdates`. */
   private handlePollOutcome(outcome: PollOutcome): void {
     if (outcome === "success") {
-      this.consecutiveFailures = 0;
       this.lastSuccessAt = nowCtx.fn();
       if (this.healthState !== "polling") {
         let reason: string | null = null;
@@ -273,7 +271,6 @@ export class TelegramDispatcher {
       return;
     }
     // retry-path entry
-    this.consecutiveFailures += 1;
     if (this.healthState === "polling") {
       this.transitionHealth("retrying", outcome.reason);
     } else {
@@ -355,7 +352,10 @@ export class TelegramDispatcher {
     // here by passing reason=null.
     this.transitionHealth("polling", null);
     this.loopDone = this.runLoop(this.abortController.signal).catch((err) => {
-      logCtx.fn(`Telegram dispatcher loop exited: ${err instanceof Error ? err.message : String(err)}`);
+      // Use classifyError instead of err.message — fetch errors can embed
+      // URL fragments containing the bot token. classifyError surfaces a
+      // bounded, stable label.
+      logCtx.fn(`Telegram dispatcher loop exited: ${classifyError(err)}`);
     });
   }
 
@@ -404,8 +404,9 @@ export class TelegramDispatcher {
         if (signal.aborted || (err instanceof Error && err.name === "AbortError")) {
           return;
         }
+        // Use classifyError — err.message could embed the bot-token URL.
         logCtx.fn(
-          `Telegram dispatcher: unexpected getUpdates throw: ${err instanceof Error ? err.message : String(err)}; continuing`,
+          `Telegram dispatcher: unexpected getUpdates throw: ${classifyError(err)}; continuing`,
         );
         continue;
       }

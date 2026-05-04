@@ -9,6 +9,7 @@ import type { AgentState } from "./parse-state";
 import { parseState, stripAnsi, STARTUP_MARKERS } from "./parse-state";
 import { captureTmuxOutput, listTmuxSessions } from "./tmux-poller";
 import { InjectionContext } from "./types";
+import { logToWatchLog } from "./watch-log";
 
 /** States that can be written to meta.json */
 export type MetaState = "creating" | "running" | "waiting" | "complete" | "stopped";
@@ -955,8 +956,71 @@ function _isPidAlive(pid: number): boolean {
 /** Injectable isPidAlive for tests. */
 export const isPidAliveCtx = new InjectionContext<(pid: number) => boolean>(_isPidAlive);
 
+/** Default killPid — sends a signal to a process. Returns true if the kill
+ *  syscall succeeded (process existed and we had permission). */
+function _killPid(pid: number, signal: NodeJS.Signals | number): boolean {
+  try {
+    process.kill(pid, signal);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Injectable killPid for tests. */
+export const killPidCtx = new InjectionContext<(pid: number, signal: NodeJS.Signals | number) => boolean>(_killPid);
+
 /** Injectable Date.now for tests. */
 export const nowMsCtx = new InjectionContext<() => number>(() => Date.now());
+
+/**
+ * Reap an orphaned Claude process AND its watchdog: when an agent's tmux
+ * session is gone, the Claude process and its per-agent watchdog are no
+ * longer reachable from the dashboard and burn CPU/RAM until manually
+ * killed. SIGTERM both (if alive) and write a line per kill to
+ * ~/.itsybitsy/watch.log so the user has an audit trail.
+ *
+ * Sources:
+ *  - claude_pid: agent.meta.claude_pid (meta.json)
+ *  - watchdog_pid: meta.transient.json (read via readAgentTransient)
+ *
+ * Skipped when:
+ *  - the PID is missing/empty/non-numeric (legacy or not-yet-started agents)
+ *  - the PID is already dead
+ *  - we're about to render the agent as 'creating' (still spawning — Claude
+ *    may not have a tmux session yet)
+ *
+ * Best-effort: failures are swallowed (logged to watch.log); state detection
+ * must never block on a kill.
+ */
+async function reapOrphanedClaude(
+  agent: Agent,
+  agentDir: string,
+  resolvedState: AgentState,
+  reason: string
+): Promise<void> {
+  if (resolvedState === "creating") return;
+
+  const repoTag = agent.repoName ? `${agent.repoName}/` : "";
+  const tmuxLabel = agent.meta.tmux_session || "<none>";
+
+  const reap = (kind: "claude" | "watchdog", pid: number): void => {
+    if (!Number.isFinite(pid) || pid <= 0) return;
+    if (!isPidAliveCtx.fn(pid)) return;
+    const ok = killPidCtx.fn(pid, "SIGTERM");
+    const status = ok ? "SIGTERM sent" : "SIGTERM failed";
+    logToWatchLog(
+      `[orphan-kill] ${status} kind=${kind} pid=${pid} agent=${repoTag}${agent.id} ` +
+      `tmux=${tmuxLabel} state=${resolvedState} reason=${reason}`
+    );
+  };
+
+  reap("claude", parseInt(agent.meta.claude_pid, 10));
+
+  // Watchdog PID lives in meta.transient.json, not meta.json
+  const transient = await readAgentTransient(agentDir);
+  if (transient) reap("watchdog", transient.watchdog_pid);
+}
 
 /**
  * Detect agent state for each agent using deterministic meta.json state
@@ -1012,7 +1076,9 @@ export async function detectAgentStates(agents: Agent[]): Promise<void> {
           agent.state = "creating";
           return;
         }
-        agent.state = isRecentlyCreated(agent.meta.created_epoch) ? "creating" : "stopped";
+        const resolved: AgentState = isRecentlyCreated(agent.meta.created_epoch) ? "creating" : "stopped";
+        agent.state = resolved;
+        await reapOrphanedClaude(agent, agentDir, resolved, "no tmux_session in meta");
         return;
       }
 
@@ -1037,6 +1103,7 @@ export async function detectAgentStates(agents: Agent[]): Promise<void> {
           const liveSessions = await liveTmuxSessionsPromise;
           if (!liveSessions.has(tmuxSession)) {
             agent.state = "stopped";
+            await reapOrphanedClaude(agent, agentDir, "stopped", "complete agent: tmux session gone");
             return;
           }
         }
@@ -1096,7 +1163,9 @@ export async function detectAgentStates(agents: Agent[]): Promise<void> {
 
       const output = await captureTmuxOutput(tmuxSession, 50);
       if (output === null) {
-        agent.state = isRecentlyCreated(agent.meta.created_epoch) ? "creating" : "stopped";
+        const resolved: AgentState = isRecentlyCreated(agent.meta.created_epoch) ? "creating" : "stopped";
+        agent.state = resolved;
+        await reapOrphanedClaude(agent, agentDir, resolved, "tmux capture returned null");
         return;
       }
 

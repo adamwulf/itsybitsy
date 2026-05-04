@@ -29,6 +29,7 @@ import {
   writeAgentTransient,
   deleteAgentTransient,
   isPidAliveCtx,
+  killPidCtx,
   liveTmuxSessionsCtx,
   nowMsCtx,
   resetReadAgentMetaCache,
@@ -1545,6 +1546,330 @@ describe("detectAgentStates — no tmux_session falls back to spawn log", () => 
     });
     await detectAgentStates([a]);
     expect(a.state).toBe("stopped");
+  });
+});
+
+// ── detectAgentStates — orphan Claude PID reaping ─────────────────────────
+
+describe("detectAgentStates — reapOrphanedClaude", () => {
+  let tmpLogDir: string;
+  let logPath: string;
+
+  beforeEach(async () => {
+    tmpLogDir = await mkdtemp(join(tmpdir(), "orphan-kill-log-"));
+    logPath = join(tmpLogDir, "watch.log");
+    const { setWatchLogPath } = await import("./watch-log");
+    setWatchLogPath(logPath);
+  });
+
+  afterEach(async () => {
+    classifySpawnLogCtx.reset();
+    isPidAliveCtx.reset();
+    killPidCtx.reset();
+    liveTmuxSessionsCtx.reset();
+    tmuxPollerSpawnCtx.reset();
+    const { resetWatchLogPath } = await import("./watch-log");
+    resetWatchLogPath();
+    await rm(tmpLogDir, { recursive: true, force: true });
+  });
+
+  test("no tmux_session + live PID + not creating → SIGTERMs PID and logs", async () => {
+    classifySpawnLogCtx.set(async () => ({ kind: "orphan" }));
+    isPidAliveCtx.set(() => true);
+    const killCalls: Array<{ pid: number; signal: NodeJS.Signals | number }> = [];
+    killPidCtx.set((pid, signal) => {
+      killCalls.push({ pid, signal });
+      return true;
+    });
+
+    const a = makeAgent({
+      id: "agent-1",
+      meta: {
+        tmux_session: "",
+        claude_pid: "12345",
+        created_epoch: Math.floor(Date.now() / 1000) - 3600,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+    await detectAgentStates([a]);
+    expect(a.state).toBe("stopped");
+    expect(killCalls).toEqual([{ pid: 12345, signal: "SIGTERM" }]);
+
+    const { readFile } = await import("fs/promises");
+    const log = await readFile(logPath, "utf8");
+    expect(log).toContain("[orphan-kill] SIGTERM sent");
+    expect(log).toContain("kind=claude");
+    expect(log).toContain("pid=12345");
+    expect(log).toContain("agent=");
+    expect(log).toContain("agent-1");
+    expect(log).toContain("state=stopped");
+  });
+
+  test("no tmux_session + live PID but resolved state is 'creating' → does not kill", async () => {
+    classifySpawnLogCtx.set(async () => ({ kind: "orphan" }));
+    isPidAliveCtx.set(() => true);
+    let killCalls = 0;
+    killPidCtx.set(() => {
+      killCalls++;
+      return true;
+    });
+
+    const a = makeAgent({
+      id: "agent-1",
+      meta: {
+        tmux_session: "",
+        claude_pid: "12345",
+        // Within 6s grace → resolves to "creating", NOT "stopped"
+        created_epoch: Math.floor(Date.now() / 1000) - 1,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+    await detectAgentStates([a]);
+    expect(a.state).toBe("creating");
+    expect(killCalls).toBe(0);
+  });
+
+  test("no tmux_session + spawn log in_progress → does not kill (creating path)", async () => {
+    classifySpawnLogCtx.set(async () => ({
+      kind: "in_progress",
+      startEpochMs: Date.now() - 10_000,
+    }));
+    isPidAliveCtx.set(() => true);
+    let killCalls = 0;
+    killPidCtx.set(() => {
+      killCalls++;
+      return true;
+    });
+
+    const a = makeAgent({
+      id: "agent-1",
+      meta: {
+        tmux_session: "",
+        claude_pid: "12345",
+        created_epoch: Math.floor(Date.now() / 1000) - 60,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+    await detectAgentStates([a]);
+    expect(a.state).toBe("creating");
+    expect(killCalls).toBe(0);
+  });
+
+  test("no tmux_session + dead PID → does not kill", async () => {
+    classifySpawnLogCtx.set(async () => ({ kind: "orphan" }));
+    isPidAliveCtx.set(() => false);
+    let killCalls = 0;
+    killPidCtx.set(() => {
+      killCalls++;
+      return true;
+    });
+
+    const a = makeAgent({
+      id: "agent-1",
+      meta: {
+        tmux_session: "",
+        claude_pid: "12345",
+        created_epoch: Math.floor(Date.now() / 1000) - 3600,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+    await detectAgentStates([a]);
+    expect(a.state).toBe("stopped");
+    expect(killCalls).toBe(0);
+  });
+
+  test("no tmux_session + empty claude_pid → does not kill", async () => {
+    classifySpawnLogCtx.set(async () => ({ kind: "orphan" }));
+    isPidAliveCtx.set(() => true);
+    let killCalls = 0;
+    killPidCtx.set(() => {
+      killCalls++;
+      return true;
+    });
+
+    const a = makeAgent({
+      id: "agent-1",
+      meta: {
+        tmux_session: "",
+        claude_pid: "",
+        created_epoch: Math.floor(Date.now() / 1000) - 3600,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+    await detectAgentStates([a]);
+    expect(a.state).toBe("stopped");
+    expect(killCalls).toBe(0);
+  });
+
+  test("complete agent with live PID but dead tmux session → SIGTERMs and logs", async () => {
+    isPidAliveCtx.set(() => true);
+    liveTmuxSessionsCtx.set(async () => new Set([])); // tmux session "ib-a1" is gone
+    const killCalls: Array<{ pid: number; signal: NodeJS.Signals | number }> = [];
+    killPidCtx.set((pid, signal) => {
+      killCalls.push({ pid, signal });
+      return true;
+    });
+
+    const a = makeAgent({
+      id: "agent-1",
+      meta: {
+        state: "complete",
+        tmux_session: "ib-a1",
+        claude_pid: "12345",
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+    await detectAgentStates([a]);
+    expect(a.state).toBe("stopped");
+    expect(killCalls).toEqual([{ pid: 12345, signal: "SIGTERM" }]);
+
+    const { readFile } = await import("fs/promises");
+    const log = await readFile(logPath, "utf8");
+    expect(log).toContain("[orphan-kill] SIGTERM sent");
+    expect(log).toContain("pid=12345");
+    expect(log).toContain("tmux=ib-a1");
+    expect(log).toContain("complete agent: tmux session gone");
+  });
+
+  test("running agent + tmux capture returns null + live PID → SIGTERMs and logs", async () => {
+    // Tmux capture returning null means the session disappeared mid-tick.
+    // Stub spawn so capture-pane fails.
+    tmuxPollerSpawnCtx.set(((args: any[]) => {
+      const isCapture = args[0] === "tmux" && args[1] === "capture-pane";
+      return {
+        stdout: new ReadableStream({ start(c) { c.close(); } }),
+        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        // capture-pane → exit 1 so captureTmuxOutput returns null
+        exited: Promise.resolve(isCapture ? 1 : 0),
+      };
+    }) as any);
+    isPidAliveCtx.set(() => true);
+    const killCalls: Array<{ pid: number; signal: NodeJS.Signals | number }> = [];
+    killPidCtx.set((pid, signal) => {
+      killCalls.push({ pid, signal });
+      return true;
+    });
+
+    const a = makeAgent({
+      id: "agent-1",
+      meta: {
+        state: "running",
+        tmux_session: "ib-a1",
+        claude_pid: "12345",
+        created_epoch: Math.floor(Date.now() / 1000) - 3600,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+    await detectAgentStates([a]);
+    expect(a.state).toBe("stopped");
+    expect(killCalls).toEqual([{ pid: 12345, signal: "SIGTERM" }]);
+
+    const { readFile } = await import("fs/promises");
+    const log = await readFile(logPath, "utf8");
+    expect(log).toContain("tmux capture returned null");
+  });
+
+  test("kills both Claude and watchdog when transient file exists", async () => {
+    classifySpawnLogCtx.set(async () => ({ kind: "orphan" }));
+    isPidAliveCtx.set(() => true);
+    const killCalls: Array<{ pid: number; signal: NodeJS.Signals | number }> = [];
+    killPidCtx.set((pid, signal) => {
+      killCalls.push({ pid, signal });
+      return true;
+    });
+
+    // Create a real agent dir with meta.transient.json so readAgentTransient
+    // returns the watchdog_pid we expect.
+    const agentTmp = await mkdtemp(join(tmpdir(), "orphan-kill-agent-"));
+    const agentDir = join(agentTmp, ".ittybitty", "agents", "agent-1");
+    await mkdir(agentDir, { recursive: true });
+    const transient: TransientState = {
+      tmux_compacting: false,
+      tmux_rate_limited: false,
+      tmux_api_error: false,
+      has_background_tasks: false,
+      updated_at_ms: Date.now(),
+      watchdog_pid: 67890,
+    };
+    const { writeFile } = await import("fs/promises");
+    await writeFile(join(agentDir, "meta.transient.json"), JSON.stringify(transient));
+
+    const a = makeAgent({
+      id: "agent-1",
+      repoPath: agentTmp,
+      meta: {
+        tmux_session: "",
+        claude_pid: "12345",
+        created_epoch: Math.floor(Date.now() / 1000) - 3600,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+    await detectAgentStates([a]);
+    expect(a.state).toBe("stopped");
+    // Both PIDs should be SIGTERMed
+    expect(killCalls).toEqual([
+      { pid: 12345, signal: "SIGTERM" },
+      { pid: 67890, signal: "SIGTERM" },
+    ]);
+
+    const { readFile } = await import("fs/promises");
+    const log = await readFile(logPath, "utf8");
+    expect(log).toContain("kind=claude");
+    expect(log).toContain("pid=12345");
+    expect(log).toContain("kind=watchdog");
+    expect(log).toContain("pid=67890");
+
+    await rm(agentTmp, { recursive: true, force: true });
+  });
+
+  test("kills only watchdog when claude_pid is empty", async () => {
+    classifySpawnLogCtx.set(async () => ({ kind: "orphan" }));
+    isPidAliveCtx.set(() => true);
+    const killCalls: Array<{ pid: number; signal: NodeJS.Signals | number }> = [];
+    killPidCtx.set((pid, signal) => {
+      killCalls.push({ pid, signal });
+      return true;
+    });
+
+    const agentTmp = await mkdtemp(join(tmpdir(), "orphan-kill-agent-"));
+    const agentDir = join(agentTmp, ".ittybitty", "agents", "agent-1");
+    await mkdir(agentDir, { recursive: true });
+    const transient: TransientState = {
+      tmux_compacting: false,
+      tmux_rate_limited: false,
+      tmux_api_error: false,
+      has_background_tasks: false,
+      updated_at_ms: Date.now(),
+      watchdog_pid: 67890,
+    };
+    const { writeFile } = await import("fs/promises");
+    await writeFile(join(agentDir, "meta.transient.json"), JSON.stringify(transient));
+
+    const a = makeAgent({
+      id: "agent-1",
+      repoPath: agentTmp,
+      meta: {
+        tmux_session: "",
+        claude_pid: "",
+        created_epoch: Math.floor(Date.now() / 1000) - 3600,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+    await detectAgentStates([a]);
+    expect(killCalls).toEqual([{ pid: 67890, signal: "SIGTERM" }]);
+
+    await rm(agentTmp, { recursive: true, force: true });
+  });
+
+  test("logs SIGTERM failed when killPid returns false", async () => {
+    classifySpawnLogCtx.set(async () => ({ kind: "orphan" }));
+    isPidAliveCtx.set(() => true);
+    killPidCtx.set(() => false); // simulate ESRCH/EPERM
+
+    const a = makeAgent({
+      id: "agent-1",
+      meta: {
+        tmux_session: "",
+        claude_pid: "12345",
+        created_epoch: Math.floor(Date.now() / 1000) - 3600,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+    await detectAgentStates([a]);
+
+    const { readFile } = await import("fs/promises");
+    const log = await readFile(logPath, "utf8");
+    expect(log).toContain("[orphan-kill] SIGTERM failed");
   });
 });
 

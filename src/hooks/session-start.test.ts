@@ -674,6 +674,12 @@ describe("hookSessionStart with @system", () => {
     const ctx: string = output.hookSpecificOutput.additionalContext;
     expect(output.hookSpecificOutput.hookEventName).toBe("SessionStart");
     expect(ctx).toBe("");
+    // Structural guards: even if a future change adds role context for
+    // @system, it MUST NOT re-introduce the SYSTEM_COORDINATOR_PROMPT body
+    // (which is delivered as a positional arg to claude). Doing so would
+    // resurrect the double-prompt bug fixed in 968db36.
+    expect(ctx).not.toContain("itsybitsy system coordinator");
+    expect(ctx).not.toContain("ib send <agent-id>");
   });
 });
 

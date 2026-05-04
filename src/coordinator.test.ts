@@ -433,6 +433,12 @@ describe("ensureSystemCoordinator", () => {
     // No tmux send-keys -l (literal paste) command should fire — the prompt is
     // delivered as a positional arg to claude on the same send-keys command.
     expect(cmdStrs.some((c) => c.includes("send-keys") && c.includes("-l"))).toBe(false);
+    // The new-session command must pass `bash` as the pane command so the
+    // launch line's POSIX `$(cat …)` substitution works regardless of the
+    // user's default $SHELL (fish uses `(…)` and would silently misbehave).
+    const newSession = commands.find((c) => c[0] === "tmux" && c[1] === "new-session");
+    expect(newSession).toBeDefined();
+    expect(newSession![newSession!.length - 1]).toBe("bash");
   });
 
   test("sets window-size manual on the coordinator session during creation", async () => {

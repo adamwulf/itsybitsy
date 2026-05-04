@@ -396,10 +396,13 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
   // One-shot cleanup of the old file-based inbox directory (now unused).
   await (await import("fs/promises")).rm(join(home, "coordinator-inbox"), { recursive: true, force: true }).catch(() => {});
 
-  // Create tmux session — use mainWidth (full middle+right area) so it matches the coordinator rendering
+  // Create tmux session — use mainWidth (full middle+right area) so it matches the coordinator rendering.
+  // Force bash as the pane's shell: the launch line below uses POSIX `$(cat …)` command substitution,
+  // which fish (a possible default $SHELL on macOS) does not support. Per-repo coordinators force bash
+  // via the `#!/bin/bash` shebang in their start.sh; this brings the system coordinator to true parity.
   const coordTmuxWidth = await getTmuxWidthForAgent(true);
   const { exitCode } = await coordinatorSpawnCtx.run([
-    "tmux", "new-session", "-d", "-x", String(coordTmuxWidth), "-s", IB_COORDINATOR_SESSION, "-c", home,
+    "tmux", "new-session", "-d", "-x", String(coordTmuxWidth), "-s", IB_COORDINATOR_SESSION, "-c", home, "bash",
   ]);
 
   if (exitCode !== 0) {
@@ -438,6 +441,11 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
   // (which is system-level and invisible). The SessionStart hook still
   // fires for @system but injects only role context, not the prompt
   // itself, so the prompt is delivered exactly once.
+  //
+  // The `$(cat …)` substitution is POSIX-shell syntax. The tmux pane runs
+  // bash (forced via the new-session command above) regardless of the
+  // user's default $SHELL, so this works on systems where $SHELL is fish
+  // (which uses `(…)` instead of `$(…)`).
   //
   // Resume path: claude --resume reuses the prior session's transcript,
   // which already contains the prompt — adding another positional arg

@@ -12,8 +12,12 @@ import { captureTmuxOutput, resizeTmuxWindow } from "./tmux-poller";
 import { isCompacting, isRateLimited } from "./agents";
 import { SpawnContext } from "./types";
 import { getTmuxWidthForAgent } from "./tui/widths";
-import { loadAgentType, ensureAgentTypesDir } from "./agent-types";
 import { isValidSessionId, isValidModel, shellQuote } from "./validation";
+import {
+  buildHooksBlock,
+  buildLayeredPermissions,
+  COORDINATOR_INTERCEPT_MATCHER,
+} from "./settings-builder";
 
 /**
  * Encode an absolute path into Claude's project-directory naming scheme:
@@ -192,49 +196,12 @@ const SYSTEM_COORDINATOR_DENY = [
 export async function buildSystemCoordinatorSettings(): Promise<{
   permissions: { allow: string[]; deny: string[] };
 }> {
-  // Ensure the embedded layer files exist on disk
-  try {
-    await ensureAgentTypesDir();
-  } catch {
-    // If this fails, fall through — loadAgentType will throw and we'll skip the layer
-  }
-
-  // Load _all.md permissions layer (applies to every agent, including system coordinator)
-  let allAllow: string[] = [];
-  let allDeny: string[] = [];
-  try {
-    const allLayer = await loadAgentType("_all");
-    allAllow = allLayer.permissions?.allow ?? [];
-    allDeny = allLayer.permissions?.deny ?? [];
-  } catch (err) {
-    console.error(`Warning: failed to load _all agent type layer: ${err instanceof Error ? err.message : String(err)}`);
-  }
-
-  // Load system.md permissions layer (system-coordinator-specific overrides)
-  let systemAllow: string[] = [];
-  let systemDeny: string[] = [];
-  try {
-    const systemLayer = await loadAgentType("system");
-    systemAllow = systemLayer.permissions?.allow ?? [];
-    systemDeny = systemLayer.permissions?.deny ?? [];
-  } catch (err) {
-    console.error(`Warning: failed to load system agent type layer: ${err instanceof Error ? err.message : String(err)}`);
-  }
-
-  const hardcodedDenySet = new Set(SYSTEM_COORDINATOR_DENY);
-
-  // Filter out layer allow entries that conflict with hardcoded deny
-  const filteredAllAllow = allAllow.filter((entry) => !hardcodedDenySet.has(entry));
-  const filteredSystemAllow = systemAllow.filter((entry) => !hardcodedDenySet.has(entry));
-
-  const finalAllow = [
-    ...new Set([...SYSTEM_COORDINATOR_ALLOW, ...filteredAllAllow, ...filteredSystemAllow]),
-  ];
-  const finalDeny = [
-    ...new Set([...SYSTEM_COORDINATOR_DENY, ...allDeny, ...systemDeny]),
-  ];
-
-  return { permissions: { allow: finalAllow, deny: finalDeny } };
+  const permissions = await buildLayeredPermissions({
+    hardcodedAllow: SYSTEM_COORDINATOR_ALLOW,
+    hardcodedDeny: SYSTEM_COORDINATOR_DENY,
+    layerNames: ["_all", "system"],
+  });
+  return { permissions };
 }
 
 /**
@@ -334,14 +301,12 @@ async function writeCoordinatorFiles(): Promise<void> {
   const settings = {
     ...baseSettings,
     spinnerTipsEnabled: false,
-    hooks: {
-      PreToolUse: [
-        { matcher: "*", hooks: [{ type: "command", command: "ib hook-check-path @system" }] },
-        { matcher: "Task|Agent|TaskCreate|Bash|AskUserQuestion", hooks: [{ type: "command", command: "ib hooks intercept-task" }] },
-      ],
-      PermissionRequest: [{ matcher: "*", hooks: [{ type: "command", command: "ib hook-permission-denied @system" }] }],
-      SessionStart: [{ hooks: [{ type: "command", command: "ib hooks session-start @system" }] }],
-    },
+    hooks: buildHooksBlock({
+      agentId: "@system",
+      includeStop: false,
+      interceptMatcher: COORDINATOR_INTERCEPT_MATCHER,
+      sessionStartIncludesAgentId: true,
+    }),
   };
   await Bun.write(settingsPath, JSON.stringify(settings, null, 2) + "\n");
 
@@ -688,49 +653,12 @@ const PER_REPO_COORDINATOR_DENY = [
 export async function buildPerRepoCoordinatorSettings(): Promise<{
   permissions: { allow: string[]; deny: string[] };
 }> {
-  // Ensure the embedded layer files exist on disk
-  try {
-    await ensureAgentTypesDir();
-  } catch {
-    // If this fails, fall through — loadAgentType will throw and we'll skip the layer
-  }
-
-  // Load _all.md permissions layer (applies to every agent)
-  let allAllow: string[] = [];
-  let allDeny: string[] = [];
-  try {
-    const allLayer = await loadAgentType("_all");
-    allAllow = allLayer.permissions?.allow ?? [];
-    allDeny = allLayer.permissions?.deny ?? [];
-  } catch (err) {
-    console.error(`Warning: failed to load _all agent type layer: ${err instanceof Error ? err.message : String(err)}`);
-  }
-
-  // Load coordinator.md permissions layer (per-repo coordinator-specific permissions)
-  let coordAllow: string[] = [];
-  let coordDeny: string[] = [];
-  try {
-    const coordLayer = await loadAgentType("coordinator");
-    coordAllow = coordLayer.permissions?.allow ?? [];
-    coordDeny = coordLayer.permissions?.deny ?? [];
-  } catch (err) {
-    console.error(`Warning: failed to load coordinator agent type layer: ${err instanceof Error ? err.message : String(err)}`);
-  }
-
-  const hardcodedDenySet = new Set(PER_REPO_COORDINATOR_DENY);
-
-  // Filter out layer allow entries that conflict with hardcoded deny
-  const filteredAllAllow = allAllow.filter((entry) => !hardcodedDenySet.has(entry));
-  const filteredCoordAllow = coordAllow.filter((entry) => !hardcodedDenySet.has(entry));
-
-  const finalAllow = [
-    ...new Set([...PER_REPO_COORDINATOR_ALLOW, ...filteredAllAllow, ...filteredCoordAllow]),
-  ];
-  const finalDeny = [
-    ...new Set([...PER_REPO_COORDINATOR_DENY, ...allDeny, ...coordDeny]),
-  ];
-
-  return { permissions: { allow: finalAllow, deny: finalDeny } };
+  const permissions = await buildLayeredPermissions({
+    hardcodedAllow: PER_REPO_COORDINATOR_ALLOW,
+    hardcodedDeny: PER_REPO_COORDINATOR_DENY,
+    layerNames: ["_all", "coordinator"],
+  });
+  return { permissions };
 }
 
 /**

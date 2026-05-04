@@ -31,6 +31,11 @@ import { isValidModel, isValidToolList, isValidTmuxSession, isValidSessionId, is
 import { getTmuxWidthForAgent } from "./tui/widths";
 import { buildPerRepoCoordinatorSettings, checkCoordinatorExists, getCoordinatorAgentId, getCoordinatorHome } from "./coordinator";
 import { loadAgentType, agentTypeExists } from "./agent-types";
+import {
+  buildHooksBlock,
+  COORDINATOR_INTERCEPT_MATCHER,
+  REGULAR_AGENT_INTERCEPT_MATCHER,
+} from "./settings-builder";
 import { listRepos, repoDisplayName } from "./registry";
 import { stampAgentCompactCheck } from "./watchdog";
 import { timed } from "./perf";
@@ -1546,18 +1551,6 @@ async function buildAgentSettings(
     }
   }
 
-  const hookCmd = `ib hook-permission-denied ${agentId}`;
-
-  // Build PreToolUse hooks
-  const preToolUseHooks: unknown[] = [
-    { matcher: "*", hooks: [{ type: "command", command: `ib hook-check-path ${agentId}` }] },
-  ];
-  if (addIntercept) {
-    preToolUseHooks.push(
-      { matcher: "Task|Agent|TaskCreate|AskUserQuestion", hooks: [{ type: "command", command: "ib hooks intercept-task" }] }
-    );
-  }
-
   const result = {
     ...baseSettings,
     spinnerTipsEnabled: false,
@@ -1565,12 +1558,12 @@ async function buildAgentSettings(
       allow: allAllow,
       deny: allDeny,
     },
-    hooks: {
-      Stop: [{ matcher: "*", hooks: [{ type: "command", command: `ib hook-status ${agentId}` }] }],
-      PermissionRequest: [{ matcher: "*", hooks: [{ type: "command", command: hookCmd }] }],
-      PreToolUse: preToolUseHooks,
-      SessionStart: [{ hooks: [{ type: "command", command: "ib hooks session-start" }] }],
-    },
+    hooks: buildHooksBlock({
+      agentId,
+      includeStop: true,
+      interceptMatcher: addIntercept ? REGULAR_AGENT_INTERCEPT_MATCHER : null,
+      sessionStartIncludesAgentId: false,
+    }),
   };
 
   return JSON.stringify(result, null, 2);
@@ -2207,19 +2200,15 @@ export async function newAgent(
     // this file (see start.sh generation below).
     try {
       const coordSettings = await buildPerRepoCoordinatorSettings();
-      const hookCmd = `ib hook-permission-denied ${id}`;
       const coordSettingsObj = {
         ...coordSettings,
         spinnerTipsEnabled: false,
-        hooks: {
-          Stop: [{ matcher: "*", hooks: [{ type: "command", command: `ib hook-status ${id}` }] }],
-          PermissionRequest: [{ matcher: "*", hooks: [{ type: "command", command: hookCmd }] }],
-          PreToolUse: [
-            { matcher: "*", hooks: [{ type: "command", command: `ib hook-check-path ${id}` }] },
-            { matcher: "Task|Agent|TaskCreate|Bash|AskUserQuestion", hooks: [{ type: "command", command: "ib hooks intercept-task" }] },
-          ],
-          SessionStart: [{ hooks: [{ type: "command", command: `ib hooks session-start ${id}` }] }],
-        },
+        hooks: buildHooksBlock({
+          agentId: id,
+          includeStop: true,
+          interceptMatcher: COORDINATOR_INTERCEPT_MATCHER,
+          sessionStartIncludesAgentId: true,
+        }),
       };
       await mkdir(join(agentDir, ".claude"), { recursive: true });
       await Bun.write(

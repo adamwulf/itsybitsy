@@ -1,4 +1,4 @@
-import { test, expect, describe } from "bun:test";
+import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { processTaskIntercept } from "./intercept-task";
 
 describe("intercept-task", () => {
@@ -727,5 +727,101 @@ describe("agent types", () => {
     } finally {
       await fs.rm(tmpDir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("@system caller", () => {
+  let tempHome: string;
+  let originalHome: string | undefined;
+  let coordHome: string;
+
+  beforeEach(async () => {
+    const fs = await import("fs/promises");
+    const { tmpdir } = await import("os");
+    const { join } = await import("path");
+    originalHome = process.env.HOME;
+    tempHome = await fs.mkdtemp(join(tmpdir(), "intercept-system-"));
+    process.env.HOME = tempHome;
+    coordHome = join(tempHome, ".itsybitsy");
+    await fs.mkdir(coordHome, { recursive: true });
+  });
+
+  afterEach(async () => {
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+    const fs = await import("fs/promises");
+    await fs.rm(tempHome, { recursive: true, force: true });
+  });
+
+  test("blocks shell metacharacters in Bash from system coordinator", async () => {
+    const result = await processTaskIntercept({
+      tool_name: "Bash",
+      tool_input: { command: "ib list; cat /etc/passwd" },
+      cwd: coordHome,
+    });
+    expect(result.action).toBe("intercept");
+    const output = result.output as Record<string, unknown>;
+    const hookOutput = output.hookSpecificOutput as Record<string, unknown>;
+    expect(hookOutput.permissionDecision).toBe("deny");
+    expect(hookOutput.permissionDecisionReason).toContain("shell metacharacters");
+  });
+
+  test("allows clean ib commands from system coordinator", async () => {
+    const result = await processTaskIntercept({
+      tool_name: "Bash",
+      tool_input: { command: "ib list" },
+      cwd: coordHome,
+    });
+    expect(result.action).toBe("skip");
+  });
+
+  test("AskUserQuestion from @system → 'use ib ask' redirect (manager-style)", async () => {
+    const result = await processTaskIntercept({
+      tool_name: "AskUserQuestion",
+      tool_input: { question: "wat" },
+      cwd: coordHome,
+    });
+    expect(result.action).toBe("intercept");
+    const output = result.output as Record<string, unknown>;
+    const hookOutput = output.hookSpecificOutput as Record<string, unknown>;
+    expect(hookOutput.permissionDecision).toBe("deny");
+    // System coordinator is top-level; gets the manager-style 'ib ask' redirect.
+    expect(hookOutput.permissionDecisionReason).toContain("ib ask");
+    expect(hookOutput.permissionDecisionReason).not.toContain("Workers cannot");
+  });
+
+  test("Task from @system → explicit deny pointing at ib new-agent", async () => {
+    let spawnCalled = false;
+    const result = await processTaskIntercept(
+      {
+        tool_name: "Task",
+        tool_input: { prompt: "do something", description: "x" },
+        cwd: coordHome,
+      },
+      {
+        spawnAgent: async () => {
+          spawnCalled = true;
+          return { ok: true, stdout: "Created agent-deadbeef99", stderr: "" };
+        },
+      },
+    );
+    expect(result.action).toBe("intercept");
+    expect(spawnCalled).toBe(false);
+    const output = result.output as Record<string, unknown>;
+    const hookOutput = output.hookSpecificOutput as Record<string, unknown>;
+    expect(hookOutput.permissionDecision).toBe("deny");
+    expect(hookOutput.permissionDecisionReason).toContain("ib new-agent --repo");
+  });
+
+  test("TaskCreate from @system → explicit deny", async () => {
+    const result = await processTaskIntercept({
+      tool_name: "TaskCreate",
+      tool_input: { prompt: "track" },
+      cwd: coordHome,
+    });
+    expect(result.action).toBe("intercept");
+    const hookOutput = (result.output as Record<string, unknown>).hookSpecificOutput as Record<string, unknown>;
+    expect(hookOutput.permissionDecision).toBe("deny");
+    expect(hookOutput.permissionDecisionReason).toContain("ib new-agent --repo");
   });
 });

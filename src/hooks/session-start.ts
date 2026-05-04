@@ -3,7 +3,7 @@
  */
 
 import { join, basename } from "path";
-import { AGENT_CWD_PATTERN } from "./shared";
+import { AGENT_CWD_PATTERN, SYSTEM_AGENT_ID } from "./shared";
 import { loadAgentType, listSpawnableAgentTypesSync } from "../agent-types";
 import { writeAgentState } from "../agents";
 
@@ -685,6 +685,25 @@ export async function hookSessionStart(rawStdin?: string, agentIdArg?: string): 
   const data = parsed as Record<string, unknown>;
 
   const cwd: string = (data.cwd as string) ?? process.cwd();
+
+  // System coordinator: the prompt is delivered as a positional arg to claude
+  // by ensureSystemCoordinatorImpl (so it appears as the first user message
+  // in the conversation, visible when the user attaches to the tmux session).
+  // The hook fires on every session start (fresh and resumed), so injecting
+  // the prompt here would double-deliver on fresh launches. Resumes already
+  // have the prompt in the prior transcript. There is no meta.json or
+  // worktree-derived role context to add for @system, so return empty
+  // additionalContext.
+  if (agentIdArg === SYSTEM_AGENT_ID) {
+    const output = {
+      hookSpecificOutput: {
+        hookEventName: "SessionStart",
+        additionalContext: "",
+      },
+    };
+    process.stdout.write(JSON.stringify(output));
+    return;
+  }
 
   // Detect role - read meta.json from filesystem if in an agent directory
   const match = AGENT_CWD_PATTERN.exec(cwd);

@@ -4,7 +4,7 @@
 
 import { join } from "path";
 import { newAgent } from "../ib-commands";
-import { AGENT_CWD_PATTERN, checkGitDirectoryFlags } from "./shared";
+import { checkGitDirectoryFlags, resolveAgentFromCwd, SYSTEM_AGENT_ID } from "./shared";
 import { loadAgentType } from "../agent-types";
 
 export interface InterceptResult {
@@ -39,27 +39,25 @@ async function checkCoordinatorBashRestrictions(
 ): Promise<InterceptResult | null> {
   if (input.tool_name !== "Bash") return null;
 
-  // Detect coordinator session via cwd pattern and meta.json
-  const cwdMatch = AGENT_CWD_PATTERN.exec(input.cwd);
-  if (!cwdMatch) return null;
-
-  const agentId = cwdMatch[1]!;
-  const agentDir = input.cwd.substring(
-    0,
-    input.cwd.indexOf(".ittybitty/agents/" + agentId) +
-      ".ittybitty/agents/".length +
-      agentId.length
-  );
+  // Resolve agent identity. The system coordinator carries `coordinator: true`
+  // in its synthetic meta, so the same restrictions (no shell metacharacters,
+  // no --output, no -C/--git-dir/--work-tree) apply uniformly.
+  const resolved = resolveAgentFromCwd(input.cwd);
+  if (!resolved) return null;
 
   let isCoordinator = false;
-  try {
-    const metaFile = Bun.file(join(agentDir, "meta.json"));
-    if (await metaFile.exists()) {
-      const meta = await metaFile.json();
-      isCoordinator = meta.coordinator === true;
+  if (resolved.syntheticMeta?.coordinator === true) {
+    isCoordinator = true;
+  } else {
+    try {
+      const metaFile = Bun.file(join(resolved.agentDir, "meta.json"));
+      if (await metaFile.exists()) {
+        const meta = await metaFile.json();
+        isCoordinator = meta.coordinator === true;
+      }
+    } catch {
+      // If we can't read meta, not a coordinator
     }
-  } catch {
-    // If we can't read meta, not a coordinator
   }
 
   if (!isCoordinator) return null;
@@ -132,31 +130,38 @@ export async function processTaskIntercept(
 
   // 1. Deny AskUserQuestion — agents must use `ib ask` instead
   if (input.tool_name === "AskUserQuestion") {
-    const cwdMatch = AGENT_CWD_PATTERN.exec(input.cwd);
+    const resolved = resolveAgentFromCwd(input.cwd);
     let isWorker = false;
-    if (cwdMatch) {
-      const agentId = cwdMatch[1]!;
-      const agentDir = input.cwd.substring(
-        0,
-        input.cwd.indexOf(".ittybitty/agents/" + agentId) +
-          ".ittybitty/agents/".length +
-          agentId.length
-      );
-      try {
-        const metaFile = Bun.file(join(agentDir, "meta.json"));
-        if (await metaFile.exists()) {
-          const meta = await metaFile.json() as Record<string, unknown>;
-          // agentType takes precedence over legacy worker boolean when present
-          if (meta.agentType && typeof meta.agentType === "string") {
-            const agentType = await loadAgentType(meta.agentType);
-            if (!agentType.canSpawnChildren) isWorker = true;
-          } else if (meta.worker === true) {
-            // Backward compat: legacy agents without agentType
-            isWorker = true;
+    if (resolved) {
+      // Prefer synthetic meta when present (e.g., @system); otherwise read disk.
+      let meta: Record<string, unknown> | null = resolved.syntheticMeta ?? null;
+      if (!meta) {
+        try {
+          const metaFile = Bun.file(join(resolved.agentDir, "meta.json"));
+          if (await metaFile.exists()) {
+            meta = (await metaFile.json()) as Record<string, unknown>;
           }
+        } catch {
+          // If we can't read meta, treat as manager-like (non-agent fallback)
         }
-      } catch {
-        // If we can't read meta, treat as manager-like (non-agent fallback)
+      }
+      if (meta) {
+        // agentType takes precedence over legacy worker boolean when present
+        if (meta.agentType && typeof meta.agentType === "string") {
+          // The `system` agent type is a layer file (no canSpawnChildren) —
+          // short-circuit to manager-style messaging since @system is top-level.
+          if (meta.agentType !== "system") {
+            try {
+              const agentType = await loadAgentType(meta.agentType as string);
+              if (!agentType.canSpawnChildren) isWorker = true;
+            } catch {
+              // Unknown type — treat as manager-like
+            }
+          }
+        } else if (meta.worker === true) {
+          // Backward compat: legacy agents without agentType
+          isWorker = true;
+        }
       }
     }
 
@@ -182,23 +187,42 @@ export async function processTaskIntercept(
   }
 
   // 3. Check if calling from a worker agent or from an agent type that can't spawn children
-  const cwdMatch = AGENT_CWD_PATTERN.exec(input.cwd);
-  if (cwdMatch) {
-    const agentId = cwdMatch[1]!;
-    const agentDir = input.cwd.substring(
-      0,
-      input.cwd.indexOf(".ittybitty/agents/" + agentId) +
-        ".ittybitty/agents/".length +
-        agentId.length
-    );
-    try {
-      const metaFile = Bun.file(join(agentDir, "meta.json"));
-      if (await metaFile.exists()) {
-        const meta = await metaFile.json() as Record<string, unknown>;
-
-        // agentType takes precedence over legacy worker boolean when present
-        if (meta.agentType && typeof meta.agentType === "string") {
-          const agentType = await loadAgentType(meta.agentType);
+  const resolved = resolveAgentFromCwd(input.cwd);
+  if (resolved) {
+    let meta: Record<string, unknown> | null = resolved.syntheticMeta ?? null;
+    if (!meta) {
+      try {
+        const metaFile = Bun.file(join(resolved.agentDir, "meta.json"));
+        if (await metaFile.exists()) {
+          meta = (await metaFile.json()) as Record<string, unknown>;
+        }
+      } catch {
+        // If we can't read meta, continue with intercept
+      }
+    }
+    if (meta) {
+      // agentType takes precedence over legacy worker boolean when present
+      if (meta.agentType && typeof meta.agentType === "string") {
+        // The system coordinator spawns agents via `ib new-agent --repo <name>`,
+        // never via Task/Agent/TaskCreate. Spawning here would resolve repoPath
+        // to `~/.itsybitsy/` (not a registered repo) and produce confusing
+        // failures. In practice Claude can never reach this branch — the
+        // system coordinator's settings.local.json puts Task/Agent/TaskCreate
+        // in its deny list. Keep this explicit deny as defense-in-depth.
+        if (meta.agentType === "system") {
+          return {
+            action: "intercept",
+            output: {
+              hookSpecificOutput: {
+                hookEventName: "PreToolUse",
+                permissionDecision: "deny",
+                permissionDecisionReason: "The system coordinator spawns agents via `ib new-agent --repo <name>`, not Task/Agent/TaskCreate.",
+              },
+            },
+          };
+        }
+        try {
+          const agentType = await loadAgentType(meta.agentType as string);
           if (!agentType.canSpawnChildren) {
             return {
               action: "intercept",
@@ -212,22 +236,22 @@ export async function processTaskIntercept(
             };
           }
           // canSpawnChildren=true — allow Task, fall through to spawn
-        } else if (meta.worker === true) {
-          // Backward compat: legacy agents without agentType
-          return {
-            action: "intercept",
-            output: {
-              hookSpecificOutput: {
-                hookEventName: "PreToolUse",
-                permissionDecision: "deny",
-                permissionDecisionReason: "Workers cannot create tasks or spawn sub-agents. Only manager agents can spawn workers.",
-              },
-            },
-          };
+        } catch {
+          // Unknown type — fall through to intercept (safer default).
         }
+      } else if (meta.worker === true) {
+        // Backward compat: legacy agents without agentType
+        return {
+          action: "intercept",
+          output: {
+            hookSpecificOutput: {
+              hookEventName: "PreToolUse",
+              permissionDecision: "deny",
+              permissionDecisionReason: "Workers cannot create tasks or spawn sub-agents. Only manager agents can spawn workers.",
+            },
+          },
+        };
       }
-    } catch {
-      // If we can't read meta, continue with intercept
     }
   }
 
@@ -260,8 +284,13 @@ export async function processTaskIntercept(
     repoPath = input.cwd.substring(0, ittybittyIdx);
   }
 
-  // 9. Determine calling agent ID
-  const callingAgentId = cwdMatch ? cwdMatch[1]! : undefined;
+  // 9. Determine calling agent ID. @system cannot reach here — the explicit
+  // deny above intercepts it before fall-through. Worktree agents pass their
+  // ID; primary Claude (no resolved agent) leaves callingAgentId undefined,
+  // which causes the spawn step to create a manager rather than a worker.
+  const callingAgentId = resolved && resolved.agentId !== SYSTEM_AGENT_ID
+    ? resolved.agentId
+    : undefined;
 
   // 10. Spawn agent
   // Only set type+manager when called from an agent context (callingAgentId present).

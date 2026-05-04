@@ -13,7 +13,7 @@ import { isCompacting, isRateLimited } from "./agents";
 import { SpawnContext } from "./types";
 import { getTmuxWidthForAgent } from "./tui/widths";
 import { loadAgentType, ensureAgentTypesDir } from "./agent-types";
-import { isValidSessionId, isValidModel } from "./validation";
+import { isValidSessionId, isValidModel, shellQuote } from "./validation";
 
 /**
  * Encode an absolute path into Claude's project-directory naming scheme:
@@ -134,7 +134,10 @@ async function findLatestCoordinatorTranscriptId(): Promise<string | null> {
 
 /**
  * Initial prompt text for the system coordinator (SPEC §12.1.5).
- * Sent via tmux send-keys after the Claude session starts.
+ * Delivered as a positional arg to `claude` on fresh launches (via
+ * `"$(cat coordinator-prompt.txt)"`), mirroring the per-repo coordinator
+ * launch in `src/ib-commands.ts`. On resume, the prompt is already in the
+ * prior session's transcript. The SessionStart hook does not re-inject it.
  */
 export const SYSTEM_COORDINATOR_PROMPT = `You are the itsybitsy system coordinator. You manage agents across all registered repos using \`ib\` commands. You can list agents (\`ib list\`), send messages to agents (\`ib send <agent-id> "message"\`), merge (\`ib merge\`), kill (\`ib kill\`), create agents (\`ib new-agent\`), and check status (\`ib status\`, \`ib diff\`). You do NOT have access to Read, Write, Edit, or any file tools — only \`ib\` Bash commands. You coordinate work at the system level — for repo-specific coordination, delegate to per-repo coordinators. To send messages to per-repo coordinators, use \`ib send @<repo-name> "message"\` (e.g., \`ib send @itsybitsy "review the latest PR"\`). Do NOT use \`ib send @system\` — that routes back to you.`;
 
@@ -165,6 +168,7 @@ const SYSTEM_COORDINATOR_DENY = [
   "WebFetch",
   "WebSearch",
   "Task",
+  "TaskCreate",
   "TaskOutput",
   "Agent",
   "KillShell",
@@ -303,6 +307,14 @@ async function ensureHomeRepo(): Promise<void> {
 
 /**
  * Write settings.local.json and coordinator-prompt.txt to ~/.itsybitsy/.
+ *
+ * The settings file includes the four agent hooks (path-check, intercept-task,
+ * permission-denied, session-start), all keyed to the `@system` sentinel agent
+ * ID. The Stop hook is intentionally omitted — the system coordinator has its
+ * own state detection in `detectSystemCoordinatorState()`.
+ *
+ * `spinnerTipsEnabled: false` matches per-repo coordinators (see
+ * `src/ib-commands.ts`, the `coordinatorMode` branch).
  */
 async function writeCoordinatorFiles(): Promise<void> {
   const home = itsybitsyHome();
@@ -312,7 +324,25 @@ async function writeCoordinatorFiles(): Promise<void> {
   const claudeDir = join(home, ".claude");
   await mkdir(claudeDir, { recursive: true });
   const settingsPath = join(claudeDir, "settings.local.json");
-  const settings = await buildSystemCoordinatorSettings();
+  const baseSettings = await buildSystemCoordinatorSettings();
+  // The literal "@system" appears in the hook command strings on purpose: the
+  // settings file is consumed by Claude Code (which invokes these as
+  // command-line args), not by TS code that could read SYSTEM_AGENT_ID. Both
+  // values must stay in sync — see `src/hooks/shared.ts` (SYSTEM_AGENT_ID),
+  // `src/index.ts` (hook-check-path / hook-permission-denied entry points),
+  // and `src/hooks/session-start.ts` (agentIdArg branch).
+  const settings = {
+    ...baseSettings,
+    spinnerTipsEnabled: false,
+    hooks: {
+      PreToolUse: [
+        { matcher: "*", hooks: [{ type: "command", command: "ib hook-check-path @system" }] },
+        { matcher: "Task|Agent|TaskCreate|Bash|AskUserQuestion", hooks: [{ type: "command", command: "ib hooks intercept-task" }] },
+      ],
+      PermissionRequest: [{ matcher: "*", hooks: [{ type: "command", command: "ib hook-permission-denied @system" }] }],
+      SessionStart: [{ hooks: [{ type: "command", command: "ib hooks session-start @system" }] }],
+    },
+  };
   await Bun.write(settingsPath, JSON.stringify(settings, null, 2) + "\n");
 
   // Write coordinator-prompt.txt
@@ -323,7 +353,10 @@ async function writeCoordinatorFiles(): Promise<void> {
 /**
  * - "existing": the tmux session was already alive — nothing was launched.
  * - "resumed": `claude --resume <id>` ran and reached the ready marker.
- * - "fresh":   a fresh `claude` session was launched and the prompt was pasted.
+ *              The prompt is already in the prior session's transcript.
+ * - "fresh":   a fresh `claude` session was launched with the prompt
+ *              passed as a positional arg via `"$(cat <prompt-file>)"`,
+ *              mirroring the per-repo coordinator launch pattern.
  */
 export type CoordinatorSpawnMode = "existing" | "resumed" | "fresh";
 let lastSpawnMode: CoordinatorSpawnMode = "existing";
@@ -334,10 +367,16 @@ export function getLastCoordinatorSpawnMode(): CoordinatorSpawnMode {
 /**
  * Ensure the system coordinator tmux session is running. If alive, returns
  * immediately. Otherwise launches Claude — resuming the newest non-cleared
- * transcript when one exists, falling back to a fresh launch + prompt paste
- * otherwise. If `--resume` is attempted but Claude's UI never reaches the
- * ready marker, the session is killed, the cleared-marker is written, and a
- * single fresh-launch retry runs.
+ * transcript when one exists, falling back to a fresh launch otherwise. On
+ * fresh launches the SYSTEM_COORDINATOR_PROMPT is delivered as a positional
+ * arg to claude (via `"$(cat coordinator-prompt.txt)"`), so it appears as the
+ * first user message in the conversation transcript. On resume the prompt is
+ * already in the prior session's history; no positional arg is appended. The
+ * SessionStart hook fires for @system but only injects role context — never
+ * the prompt itself.
+ * If `--resume` is attempted but Claude's UI never reaches the ready marker,
+ * the session is killed, the cleared-marker is written, and a single
+ * fresh-launch retry runs.
  */
 export async function ensureSystemCoordinator(): Promise<string> {
   return await ensureSystemCoordinatorImpl(false);
@@ -357,10 +396,13 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
   // One-shot cleanup of the old file-based inbox directory (now unused).
   await (await import("fs/promises")).rm(join(home, "coordinator-inbox"), { recursive: true, force: true }).catch(() => {});
 
-  // Create tmux session — use mainWidth (full middle+right area) so it matches the coordinator rendering
+  // Create tmux session — use mainWidth (full middle+right area) so it matches the coordinator rendering.
+  // Force bash as the pane's shell: the launch line below uses POSIX `$(cat …)` command substitution,
+  // which fish (a possible default $SHELL on macOS) does not support. Per-repo coordinators force bash
+  // via the `#!/bin/bash` shebang in their start.sh; this brings the system coordinator to true parity.
   const coordTmuxWidth = await getTmuxWidthForAgent(true);
   const { exitCode } = await coordinatorSpawnCtx.run([
-    "tmux", "new-session", "-d", "-x", String(coordTmuxWidth), "-s", IB_COORDINATOR_SESSION, "-c", home,
+    "tmux", "new-session", "-d", "-x", String(coordTmuxWidth), "-s", IB_COORDINATOR_SESSION, "-c", home, "bash",
   ]);
 
   if (exitCode !== 0) {
@@ -391,21 +433,41 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
 
   const channels: string[] = [];
   if (imessage) channels.push("plugin:imessage@claude-plugins-official");
+  // Fresh launch: pass SYSTEM_COORDINATOR_PROMPT as a positional arg via
+  // `"$(cat <prompt-file>)"` — same pattern as per-repo coordinators in
+  // `start.sh` (see ib-commands.ts:2426). This delivers the prompt as the
+  // first user message in the conversation transcript (visible when the
+  // user attaches to the tmux session) rather than via additionalContext
+  // (which is system-level and invisible). The SessionStart hook still
+  // fires for @system but injects only role context, not the prompt
+  // itself, so the prompt is delivered exactly once.
+  //
+  // The `$(cat …)` substitution is POSIX-shell syntax. The tmux pane runs
+  // bash (forced via the new-session command above) regardless of the
+  // user's default $SHELL, so this works on systems where $SHELL is fish
+  // (which uses `(…)` instead of `$(…)`).
+  //
+  // Resume path: claude --resume reuses the prior session's transcript,
+  // which already contains the prompt — adding another positional arg
+  // would inject a stale duplicate. So no positional arg on resume.
+  const promptArg = resumeId
+    ? ""
+    : ` "$(cat ${shellQuote(join(home, "coordinator-prompt.txt"))})"`;
   const baseCmd = resumeId
     ? `claude --resume ${resumeId} --model ${model}`
     : `claude --model ${model}`;
-  const claudeCmd = channels.length > 0
-    ? `${baseCmd} --channels ${channels.join(" ")}`
-    : baseCmd;
+  const channelsArg = channels.length > 0 ? ` --channels ${channels.join(" ")}` : "";
+  const claudeCmd = `${baseCmd}${channelsArg}${promptArg}`;
   await coordinatorSpawnCtx.run([
     "tmux", "send-keys", "-t", IB_COORDINATOR_SESSION,
     claudeCmd, "Enter",
   ]);
 
-  // Wait for Claude's UI to be ready before sending the prompt. A flat sleep
-  // races slow startups: the prompt text gets pasted but the Enter key is
-  // swallowed before the input box becomes active, leaving the prompt
-  // unsubmitted.
+  // Wait for Claude's UI to be ready so the resume-failure fallback below
+  // can detect the case where `claude --resume` never reaches the marker
+  // (corrupt or version-mismatched transcript) and recover with a fresh
+  // launch. On fresh launches the prompt is already on the command line
+  // (positional arg); on resume the prompt is in the prior transcript.
   const ready = await waitForCoordinatorReady();
 
   if (resumeId && !ready) {
@@ -417,23 +479,10 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
     return await ensureSystemCoordinatorImpl(true);
   }
 
-  if (resumeId) {
-    // Resumed sessions already have the system prompt baked into history —
-    // re-pasting would inject a stray user message at the top of the new turn.
-    lastSpawnMode = "resumed";
-  } else {
-    const sanitizedPrompt = sanitizeTmuxInput(SYSTEM_COORDINATOR_PROMPT);
-    await coordinatorSpawnCtx.run([
-      "tmux", "send-keys", "-t", IB_COORDINATOR_SESSION, "-l", sanitizedPrompt,
-    ]);
-    // Brief delay between paste and Enter so the input box doesn't debounce
-    // the paste and drop the Enter (mirrors sendMessage in ib-commands.ts).
-    await sleepFn(500);
-    await coordinatorSpawnCtx.run([
-      "tmux", "send-keys", "-t", IB_COORDINATOR_SESSION, "Enter",
-    ]);
-    lastSpawnMode = "fresh";
-  }
+  // Fresh launches deliver the prompt as a positional arg above; resumes rely
+  // on the prior session transcript. The SessionStart hook supplies role
+  // context but does NOT re-deliver the prompt. Just record the spawn mode.
+  lastSpawnMode = resumeId ? "resumed" : "fresh";
 
   return IB_COORDINATOR_SESSION;
 }

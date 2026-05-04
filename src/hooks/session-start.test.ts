@@ -641,3 +641,45 @@ describe("hookSessionStart — stale 'creating' state correction", () => {
     // No exception means pass.
   });
 });
+
+describe("hookSessionStart with @system", () => {
+  let captured: string;
+  let originalWrite: typeof process.stdout.write;
+
+  beforeEach(() => {
+    captured = "";
+    originalWrite = process.stdout.write.bind(process.stdout);
+    process.stdout.write = ((chunk: unknown) => {
+      captured += typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk as Uint8Array);
+      return true;
+    }) as typeof process.stdout.write;
+  });
+
+  afterEach(() => {
+    process.stdout.write = originalWrite;
+  });
+
+  test("returns empty additionalContext for @system (prompt is delivered as positional arg)", async () => {
+    // The system coordinator's prompt is delivered to claude as a positional
+    // arg by ensureSystemCoordinatorImpl (so it appears as the first user
+    // message in the conversation transcript). The SessionStart hook still
+    // fires for @system but must NOT re-deliver the prompt — that would
+    // double-deliver on fresh launch and stale-duplicate on resume. There
+    // is no meta.json or worktree-derived role context for @system, so the
+    // hook returns empty additionalContext.
+    const stdin = JSON.stringify({ cwd: "/tmp" });
+    await hookSessionStart(stdin, "@system");
+
+    const output = JSON.parse(captured);
+    const ctx: string = output.hookSpecificOutput.additionalContext;
+    expect(output.hookSpecificOutput.hookEventName).toBe("SessionStart");
+    expect(ctx).toBe("");
+    // Structural guards: even if a future change adds role context for
+    // @system, it MUST NOT re-introduce the SYSTEM_COORDINATOR_PROMPT body
+    // (which is delivered as a positional arg to claude). Doing so would
+    // resurrect the double-prompt bug fixed in 968db36.
+    expect(ctx).not.toContain("itsybitsy system coordinator");
+    expect(ctx).not.toContain("ib send <agent-id>");
+  });
+});
+

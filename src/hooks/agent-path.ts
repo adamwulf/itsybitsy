@@ -12,7 +12,7 @@ import { realpath, stat } from "fs/promises";
 import { realpathSync } from "fs";
 import { logAgent } from "../agent-lifecycle";
 import { isValidAgentId } from "../validation";
-import { checkGitDirectoryFlags } from "./shared";
+import { checkGitDirectoryFlags, resolveAgentFromCwd, SYSTEM_AGENT_ID } from "./shared";
 // Single source of truth for the encoding — see src/auto-compact.ts
 import { encodeClaudeProjectPath } from "../auto-compact";
 
@@ -292,7 +292,12 @@ function checkFilePath(
   }
 
   // 9. Block: other agents' directories
-  if (filePath.startsWith(agentsDir + "/")) {
+  // Guard: an empty agentsDir means there are no sibling agents to isolate
+  // against (e.g. the @system context — see hookCheckPath). Without the
+  // guard, `"" + "/"` becomes `/`, which startsWith() matches against every
+  // absolute path and produces a dishonest "cannot cd into other agents'
+  // worktrees" denial for unrelated files.
+  if (agentsDir !== "" && filePath.startsWith(agentsDir + "/")) {
     if (toolName === "Bash") {
       return { decision: "deny", reason: "Access denied: cannot cd into other agents' worktrees" };
     }
@@ -376,6 +381,13 @@ export async function checkIbCommandAccess(
   callingAgentId: string,
   agentsDir: string
 ): Promise<HookDecision | null> {
+  // @system has system-wide authority; skip relationship checks. Must come
+  // BEFORE callerRepoRoot resolution below — for @system, agentsDir is "" and
+  // resolve("", "..", "..") would resolve relative to process.cwd(), producing
+  // a misleading caller repo path. Also keeps this bypass robust against
+  // future refactors that move parsing logic.
+  if (callingAgentId === SYSTEM_AGENT_ID) return null;
+
   const parsed = parseIbCommand(command);
   if (!parsed) return null;
   if (!IB_MANAGER_ONLY_COMMANDS.has(parsed.subcommand)) return null;
@@ -421,7 +433,7 @@ export async function checkIbCommandAccess(
     //   2. caller's meta.coordinator === true (flagged as coordinator)
     //   3. caller's agent ID matches the repo name (per-repo coordinators
     //      use the repo basename as their ID — see getCoordinatorAgentId)
-    if (sb.agent_id !== "@system") {
+    if (sb.agent_id !== SYSTEM_AGENT_ID) {
       const repoName = sb.agent_id.slice(1);
       if (typeof sb.repo_path !== "string") return false;
       if (resolve(sb.repo_path) !== callerRepoRoot) return false;
@@ -561,45 +573,84 @@ export async function hookCheckPath(agentId: string, rawStdin?: string): Promise
   const toolInput: Record<string, unknown> = (data.tool_input as Record<string, unknown>) ?? {};
   const cwd: string = (data.cwd as string) ?? process.cwd();
 
-  // Resolve agent directory from cwd pattern
-  // cwd is typically: .../.ittybitty/agents/{id}/repo/...
-  const cwdMatch = cwd.match(/(.*\/.ittybitty\/agents)/);
-  const agentsDir = resolve(cwdMatch ? cwdMatch[1]! : join(process.cwd(), ".ittybitty", "agents"));
-
-  const agentDir = join(agentsDir, agentId);
-  let worktreePath = join(agentDir, "repo");
-  let isNoWorktree = false;
-
-  // Resolve worktree to absolute path if it exists
-  try {
-    worktreePath = await realpath(worktreePath);
-  } catch {
-    // Worktree dir doesn't exist — agent may be a non-worktree agent (e.g., coordinator)
-    isNoWorktree = true;
-  }
-
-  // Read meta.json for worktree field and allowedPaths
+  let agentsDir: string;
+  let agentDir: string;
+  let worktreePath: string;
   let allowedPaths: string[] | undefined = undefined;
-  try {
-    const metaFile = Bun.file(join(agentDir, "meta.json"));
-    if (await metaFile.exists()) {
-      const meta = await metaFile.json();
-      if (meta.worktree === false) isNoWorktree = true;
-      // Parse allowedPaths from meta.json (should be an array of strings or undefined)
-      if (Array.isArray(meta.allowedPaths)) {
-        allowedPaths = (meta.allowedPaths as unknown[]).filter((p): p is string => typeof p === "string");
-      }
-    }
-  } catch { /* ignore */ }
+  let rootRepo = "";
 
-  // For non-worktree agents (e.g., coordinators), worktreePath is the repo root
-  if (isNoWorktree) {
-    // Derive repo root: agents dir is <repo>/.ittybitty/agents
-    const repoRoot = resolve(agentsDir, "..", "..");
-    worktreePath = repoRoot;
+  if (agentId === SYSTEM_AGENT_ID) {
+    // System coordinator: it owns its own directory entirely. There is no
+    // outer agents-dir to isolate against and no main-repo to block.
+    // Treating ~/.itsybitsy/ as both agentDir and worktreePath lets the
+    // existing path checks (worktree-contains, agentsDir-blocks, rootRepo-blocks)
+    // degrade naturally:
+    //   - agentsDir = ""     → cross-agent blocks never fire.
+    //   - rootRepo = worktree → main-repo block never fires.
+    //   - allowedPaths = undefined → legacy permissive fallback.
+    const resolved = resolveAgentFromCwd(cwd);
+    // Prefer the resolved home (handles symlinked HOME) when available.
+    const home = resolved?.agentDir ?? join(process.env.HOME ?? "", ".itsybitsy");
+    agentsDir = "";
+    agentDir = home;
+    worktreePath = home;
+    rootRepo = home;
+  } else {
+    // Resolve agent directory from cwd pattern
+    // cwd is typically: .../.ittybitty/agents/{id}/repo/...
+    const cwdMatch = cwd.match(/(.*\/.ittybitty\/agents)/);
+    agentsDir = resolve(cwdMatch ? cwdMatch[1]! : join(process.cwd(), ".ittybitty", "agents"));
+
+    agentDir = join(agentsDir, agentId);
+    worktreePath = join(agentDir, "repo");
+    let isNoWorktree = false;
+
+    // Resolve worktree to absolute path if it exists
+    try {
+      worktreePath = await realpath(worktreePath);
+    } catch {
+      // Worktree dir doesn't exist — agent may be a non-worktree agent (e.g., coordinator)
+      isNoWorktree = true;
+    }
+
+    // Read meta.json for worktree field and allowedPaths
+    try {
+      const metaFile = Bun.file(join(agentDir, "meta.json"));
+      if (await metaFile.exists()) {
+        const meta = await metaFile.json();
+        if (meta.worktree === false) isNoWorktree = true;
+        // Parse allowedPaths from meta.json (should be an array of strings or undefined)
+        if (Array.isArray(meta.allowedPaths)) {
+          allowedPaths = (meta.allowedPaths as unknown[]).filter((p): p is string => typeof p === "string");
+        }
+      }
+    } catch { /* ignore */ }
+
+    // For non-worktree agents (e.g., coordinators), worktreePath is the repo root
+    if (isNoWorktree) {
+      // Derive repo root: agents dir is <repo>/.ittybitty/agents
+      const repoRoot = resolve(agentsDir, "..", "..");
+      worktreePath = repoRoot;
+    }
+
+    // Detect root repo via git worktree list --porcelain
+    try {
+      const proc = Bun.spawn(
+        ["git", "-C", worktreePath, "worktree", "list", "--porcelain"],
+        { stdout: "pipe", stderr: "pipe" }
+      );
+      const output = await new Response(proc.stdout).text();
+      const exitCode = await proc.exited;
+      if (exitCode === 0) {
+        const match = output.match(/^worktree (.+)$/m);
+        if (match) {
+          rootRepo = resolve(match[1]!);
+        }
+      }
+    } catch { /* ignore */ }
   }
 
-  // Read settings.local.json for allow list
+  // Read settings.local.json for allow list (works for both @system and worktree agents)
   let allowList: string[] = [];
   try {
     const settingsPath = join(worktreePath, ".claude", "settings.local.json");
@@ -608,23 +659,6 @@ export async function hookCheckPath(agentId: string, rawStdin?: string): Promise
       const settings = await settingsFile.json();
       if (Array.isArray(settings?.permissions?.allow)) {
         allowList = settings.permissions.allow;
-      }
-    }
-  } catch { /* ignore */ }
-
-  // Detect root repo via git worktree list --porcelain
-  let rootRepo = "";
-  try {
-    const proc = Bun.spawn(
-      ["git", "-C", worktreePath, "worktree", "list", "--porcelain"],
-      { stdout: "pipe", stderr: "pipe" }
-    );
-    const output = await new Response(proc.stdout).text();
-    const exitCode = await proc.exited;
-    if (exitCode === 0) {
-      const match = output.match(/^worktree (.+)$/m);
-      if (match) {
-        rootRepo = resolve(match[1]!);
       }
     }
   } catch { /* ignore */ }

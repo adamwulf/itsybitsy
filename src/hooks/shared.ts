@@ -2,11 +2,109 @@
  * Shared constants and patterns used across hook implementations.
  */
 
+import { join } from "path";
+import { homedir } from "os";
+import { realpathSync } from "fs";
+
 /**
  * Matches agent worktree paths: .ittybitty/agents/<agentId>/repo
  * Capturing group 1 contains the agent ID.
  */
 export const AGENT_CWD_PATTERN = /\.ittybitty\/agents\/([^/]+)\/repo(\/|$)/;
+
+/**
+ * Sentinel agent ID for the system coordinator. Not a valid agent ID per
+ * `isValidAgentId()` (begins with `@`), but accepted as a hardcoded constant
+ * by hook entry points so the system coordinator's hooks can identify
+ * themselves.
+ */
+export const SYSTEM_AGENT_ID = "@system";
+
+/**
+ * Compute the system coordinator's home directory (`~/.itsybitsy/`).
+ *
+ * Inlined here (rather than importing `getCoordinatorHome` from `coordinator.ts`)
+ * because `shared.ts` is loaded by every hook entry point, and pulling in
+ * `coordinator.ts` would transitively load `tmux-poller`, `agents`, and other
+ * heavyweight modules into hooks that don't need them.
+ *
+ * Honors the `HOME` env var (matching `coordinator.ts`'s `itsybitsyHome()`)
+ * but does NOT honor the test-only `setCoordinatorHome` override — tests that
+ * exercise hook code paths set `HOME` directly via the env var.
+ */
+function systemCoordinatorHome(): string {
+  return join(process.env.HOME ?? homedir(), ".itsybitsy");
+}
+
+/**
+ * Resolves the agent identity for a given cwd.
+ *
+ * Returns one of:
+ * - `{ agentId: "@system", agentDir: <coordinator home>, syntheticMeta: {...} }`
+ *   when cwd is inside the system coordinator's home directory.
+ * - `{ agentId: <id>, agentDir: <repo>/.ittybitty/agents/<id> }` when cwd
+ *   matches the agent worktree pattern. No `syntheticMeta` — callers should
+ *   read the on-disk `meta.json` themselves.
+ * - `null` for primary Claude / unrecognized cwds.
+ *
+ * Per-repo coordinators are intentionally NOT handled here — their existing
+ * flow (cwd matches pattern, meta.json read from `<repo>/.ittybitty/agents/<basename>/`)
+ * already works because per-repo coordinators ARE worktree agents. This
+ * helper exists primarily to give the system coordinator (which lives outside
+ * any repo) a uniform identity object so hook bodies don't need special-case
+ * branching.
+ */
+export interface ResolvedAgent {
+  agentId: string;
+  agentDir: string;
+  /**
+   * Synthetic in-memory meta — only populated for `@system`, where no
+   * meta.json exists on disk. Mirrors the meta fields hook bodies care about
+   * (coordinator, agentType, worker) so existing branches keep working.
+   */
+  syntheticMeta?: Record<string, unknown>;
+}
+
+export function resolveAgentFromCwd(cwd: string): ResolvedAgent | null {
+  // Try the system coordinator first. The cwd is `~/.itsybitsy/` itself or
+  // any subdirectory of it. Use realpath so symlinked HOME values match.
+  const home = systemCoordinatorHome();
+  let resolvedHome = home;
+  try {
+    resolvedHome = realpathSync(home);
+  } catch { /* directory may not exist yet — fall through */ }
+
+  let resolvedCwd = cwd;
+  try {
+    resolvedCwd = realpathSync(cwd);
+  } catch { /* cwd may not exist (unlikely from a hook) — fall through */ }
+
+  if (resolvedCwd === resolvedHome || resolvedCwd.startsWith(resolvedHome + "/")) {
+    return {
+      agentId: SYSTEM_AGENT_ID,
+      agentDir: resolvedHome,
+      syntheticMeta: {
+        coordinator: true,
+        agentType: "system",
+        worker: false,
+      },
+    };
+  }
+
+  // Worktree agent
+  const m = AGENT_CWD_PATTERN.exec(cwd);
+  if (m) {
+    const agentId = m[1]!;
+    const ittybittyIdx = cwd.indexOf("/.ittybitty/agents/");
+    const repoRoot = cwd.substring(0, ittybittyIdx);
+    return {
+      agentId,
+      agentDir: join(repoRoot, ".ittybitty", "agents", agentId),
+    };
+  }
+
+  return null;
+}
 
 /**
  * Check if a git command uses directory-changing flags that bypass path isolation.

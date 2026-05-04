@@ -9,6 +9,7 @@ import { addRepo, removeRepo, listRepos, repoDisplayName, type RepoEntry } from 
 import { resolveAgentIcon } from "./agents";
 import type { Agent, FlatEntry } from "./agents";
 import { isValidAgentId } from "./validation";
+import { SYSTEM_AGENT_ID } from "./hooks/shared";
 
 const args = process.argv.slice(2);
 const command = args[0];
@@ -1138,10 +1139,16 @@ async function main() {
       break;
     }
     // ── Hook subcommands (called by Claude Code's hook system) ──
+    // The literal `@system` sentinel is accepted in addition to real agent IDs
+    // here. It is NOT user input — it's hardcoded into the system coordinator's
+    // settings.local.json by `writeCoordinatorFiles()` in coordinator.ts —
+    // so allowing it doesn't widen the attack surface, and we keep
+    // `isValidAgentId()` itself strict for everywhere else (spawn, registry,
+    // health-check) where the value is supplied externally.
     case "hook-check-path": {
       const id = args[1];
       if (!id) { console.error("Usage: ib hook-check-path <agent-id>"); process.exit(1); }
-      if (!isValidAgentId(id)) { console.error("Invalid agent ID"); process.exit(1); }
+      if (id !== SYSTEM_AGENT_ID && !isValidAgentId(id)) { console.error("Invalid agent ID"); process.exit(1); }
       const { resolveAgentDir, withHookLogging } = await import("./hooks/slow-hook-logger");
       const { hookCheckPath } = await import("./hooks/agent-path");
       const stdin = await new Response(Bun.stdin.stream()).text();
@@ -1163,7 +1170,7 @@ async function main() {
     case "hook-permission-denied": {
       const id = args[1];
       if (!id) { console.error("Usage: ib hook-permission-denied <agent-id>"); process.exit(1); }
-      if (!isValidAgentId(id)) { console.error("Invalid agent ID"); process.exit(1); }
+      if (id !== SYSTEM_AGENT_ID && !isValidAgentId(id)) { console.error("Invalid agent ID"); process.exit(1); }
       const { resolveAgentDir, withHookLogging } = await import("./hooks/slow-hook-logger");
       const { hookPermissionDenied } = await import("./hooks/permission-denied");
       const stdin = await new Response(Bun.stdin.stream()).text();

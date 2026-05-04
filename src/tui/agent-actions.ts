@@ -1453,22 +1453,18 @@ export async function handleAddRepo(ctx: ActionCtx) {
   return handleFolderBrowser(ctx);
 }
 
-/** Count agent directories under .ittybitty/agents/ and .ittybitty/archive/ */
+/** Count live agent directories under .ittybitty/agents/ (archived agents do not block removal) */
 async function countAgentDirs(repoPath: string): Promise<{ count: number; error?: string }> {
-  let count = 0;
-  for (const sub of ["agents", "archive"]) {
-    const dir = join(repoPath, ".ittybitty", sub);
-    try {
-      const entries = await readdir(dir, { withFileTypes: true });
-      count += entries.filter((e) => e.isDirectory()).length;
-    } catch (err: unknown) {
-      if (err instanceof Error && "code" in err && (err as NodeJS.ErrnoException).code === "ENOENT") {
-        continue;
-      }
-      return { count: 0, error: `Cannot read ${dir}: ${(err as Error).message}` };
+  const dir = join(repoPath, ".ittybitty", "agents");
+  try {
+    const entries = await readdir(dir, { withFileTypes: true });
+    return { count: entries.filter((e) => e.isDirectory()).length };
+  } catch (err: unknown) {
+    if (err instanceof Error && "code" in err && (err as NodeJS.ErrnoException).code === "ENOENT") {
+      return { count: 0 };
     }
+    return { count: 0, error: `Cannot read ${dir}: ${(err as Error).message}` };
   }
-  return { count };
 }
 
 /** 'D' / 'x' on repo header — remove repo with safety check: must have zero agent directories */

@@ -273,3 +273,219 @@ describe("stop() cancels pending cleanup timeouts and unlinks immediately", () =
     expect(entries).not.toContain(`${stem}.txt.result`);
   });
 });
+
+describe("outbox edge-transition logging for send failures", () => {
+  /** Drop a `.txt` file via tmp + rename and wait until the `.result` appears.
+   *  Returns the `.result` body so callers can check ok/message. */
+  async function dropAndWait(stemSuffix: string, text: string): Promise<{ ok: boolean; message: string }> {
+    const stem = `${Date.now()}-${stemSuffix}`;
+    const txtPath = join(outboxDir, `${stem}.txt`);
+    await writeFile(`${txtPath}.tmp`, text);
+    const { rename } = await import("fs/promises");
+    await rename(`${txtPath}.tmp`, txtPath);
+    await waitFor(async () => {
+      try {
+        return (await readdir(outboxDir)).some((e) => e === `${stem}.txt.result`);
+      } catch {
+        return false;
+      }
+    }, 2_000);
+    const resultText = await readFile(join(outboxDir, `${stem}.txt.result`), "utf8");
+    return JSON.parse(resultText) as { ok: boolean; message: string };
+  }
+
+  test("first failure of a streak does NOT log 'send failed' (baseline-silent); subsequent failures also silent", async () => {
+    // All sends return HTTP 500 (non-2xx, not 429 — so no retry).
+    let calls = 0;
+    clientFetchCtx.set(async () => {
+      calls += 1;
+      return new Response(
+        JSON.stringify({ ok: false, error_code: 500, description: "boom" }),
+        { status: 500, headers: { "content-type": "application/json" } },
+      );
+    });
+
+    const logs: string[] = [];
+    const client = new TelegramClient({ token: "T" });
+    const outbox = new TelegramOutbox({
+      client,
+      chatId: "777",
+      log: (line) => logs.push(line),
+    });
+    await outbox.start();
+
+    // Three failures in a streak (the first sets the baseline silently,
+    // because the first attempt has no prior state to flip from).
+    const r1 = await dropAndWait("aa1111", "msg1");
+    const r2 = await dropAndWait("aa2222", "msg2");
+    const r3 = await dropAndWait("aa3333", "msg3");
+    expect(r1.ok).toBe(false);
+    expect(r2.ok).toBe(false);
+    expect(r3.ok).toBe(false);
+    expect(calls).toBe(3);
+
+    // Per-message logs always fire ("failed (...)") for each send. We're
+    // verifying the *edge-transition* layer — `send failed (...)` (without
+    // the chars/chat prefix) fires zero or one time depending on whether
+    // the first send establishes the streak silently. Spec: first send
+    // sets state without logging; subsequent same-state failures are also
+    // silent. So zero edge-transition lines for an all-failure streak.
+    const edgeFailLogs = logs.filter((l) => l === "telegram outbox: send failed (sendMessage failed: boom)");
+    expect(edgeFailLogs.length).toBe(0);
+
+    await outbox.stop();
+  });
+
+  test("success → failure → success transitions log 'send failed' once and 'send recovered' once", async () => {
+    // Pattern: ok, fail, fail, ok, ok. Expected log:
+    //   ok      (silent first-attempt baseline)
+    //   fail    (transition: log "send failed (...)")
+    //   fail    (no transition; silent)
+    //   ok      (transition: log "send recovered")
+    //   ok      (no transition; silent)
+    let attempt = 0;
+    const responses = [
+      { status: 200, body: { ok: true, result: { message_id: 1, chat: { id: 0 } } } },
+      { status: 500, body: { ok: false, error_code: 500, description: "bad" } },
+      { status: 500, body: { ok: false, error_code: 500, description: "bad" } },
+      { status: 200, body: { ok: true, result: { message_id: 2, chat: { id: 0 } } } },
+      { status: 200, body: { ok: true, result: { message_id: 3, chat: { id: 0 } } } },
+    ];
+    clientFetchCtx.set(async () => {
+      const resp = responses[attempt]!;
+      attempt += 1;
+      return new Response(
+        JSON.stringify(resp.body),
+        { status: resp.status, headers: { "content-type": "application/json" } },
+      );
+    });
+
+    const logs: string[] = [];
+    const client = new TelegramClient({ token: "T" });
+    const outbox = new TelegramOutbox({
+      client,
+      chatId: "777",
+      log: (line) => logs.push(line),
+    });
+    await outbox.start();
+
+    await dropAndWait("bb1111", "first");
+    await dropAndWait("bb2222", "second");
+    await dropAndWait("bb3333", "third");
+    await dropAndWait("bb4444", "fourth");
+    await dropAndWait("bb5555", "fifth");
+
+    // Edge-transition lines are exact match — no per-message prefix.
+    const failedEdgeLogs = logs.filter((l) => l.startsWith("telegram outbox: send failed (") && !l.includes("chars ->"));
+    const recoveredEdgeLogs = logs.filter((l) => l === "telegram outbox: send recovered");
+    expect(failedEdgeLogs.length).toBe(1);
+    expect(recoveredEdgeLogs.length).toBe(1);
+
+    await outbox.stop();
+  });
+
+  test("hung sendMessage (TimeoutError) surfaces as ok:false; never logs the bot token", async () => {
+    // Simulate a dead TCP socket on outbound: fetch rejects with TimeoutError
+    // (what AbortSignal.timeout actually produces). The outbox should turn
+    // that into an `ok: false` result file and a per-message log line —
+    // never blocking the queue indefinitely.
+    clientFetchCtx.set((async () => {
+      // Embed the bot-token URL in the error message so the token-leak
+      // assertion below has something to detect if classifyError is bypassed.
+      throw new DOMException(
+        "fetch https://api.telegram.org/botSECRET_TOKEN_OUTBOX_TIMEOUT/sendMessage timed out",
+        "TimeoutError",
+      );
+    }) as Parameters<typeof clientFetchCtx.set>[0]);
+
+    const logs: string[] = [];
+    const client = new TelegramClient({ token: "SECRET_TOKEN_OUTBOX_TIMEOUT" });
+    const outbox = new TelegramOutbox({
+      client,
+      chatId: "777",
+      log: (line) => logs.push(line),
+    });
+    await outbox.start();
+
+    const stem = `${Date.now()}-tt1111`;
+    const txtPath = join(outboxDir, `${stem}.txt`);
+    await writeFile(`${txtPath}.tmp`, "hung-socket");
+    const { rename } = await import("fs/promises");
+    await rename(`${txtPath}.tmp`, txtPath);
+
+    await waitFor(async () => {
+      try {
+        return (await readdir(outboxDir)).some((e) => e === `${stem}.txt.result`);
+      } catch {
+        return false;
+      }
+    }, 2_000);
+
+    const resultText = await readFile(join(outboxDir, `${stem}.txt.result`), "utf8");
+    const result = JSON.parse(resultText) as { ok: boolean; message: string };
+    expect(result.ok).toBe(false);
+    // Token must NEVER appear in any log line or in the result message —
+    // this is the regression we care about. classifyError surfaces a
+    // bounded label (DOMException's `code` wins, producing `errno:23`),
+    // never the raw err.message that would carry the URL.
+    expect(result.message.includes("SECRET_TOKEN_OUTBOX_TIMEOUT")).toBe(false);
+    expect(logs.some((l) => l.includes("SECRET_TOKEN_OUTBOX_TIMEOUT"))).toBe(false);
+    // Should be prefixed with "sendMessage failed:" — the error class label
+    // follows but its exact form depends on classifyError's priority order.
+    expect(result.message.startsWith("sendMessage failed:")).toBe(true);
+
+    await outbox.stop();
+  });
+
+  test("send-failure log line never embeds the bot token (token-safety regression)", async () => {
+    // Force two consecutive failures so the edge-transition log line fires.
+    let calls = 0;
+    clientFetchCtx.set((async () => {
+      calls += 1;
+      if (calls === 1) {
+        // First send: success, baseline.
+        return new Response(
+          JSON.stringify({ ok: true, result: { message_id: 1, chat: { id: 0 } } }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      // Subsequent sends: throw with token in the message.
+      throw new Error(
+        "request to https://api.telegram.org/botSECRET_TOKEN_OUTBOX_LOG/sendMessage failed",
+      );
+    }) as Parameters<typeof clientFetchCtx.set>[0]);
+
+    const logs: string[] = [];
+    const client = new TelegramClient({ token: "SECRET_TOKEN_OUTBOX_LOG" });
+    const outbox = new TelegramOutbox({
+      client,
+      chatId: "777",
+      log: (line) => logs.push(line),
+    });
+    await outbox.start();
+
+    const { rename } = await import("fs/promises");
+    for (const suffix of ["zz1111", "zz2222"]) {
+      const stem = `${Date.now()}-${suffix}`;
+      const txtPath = join(outboxDir, `${stem}.txt`);
+      await writeFile(`${txtPath}.tmp`, "msg");
+      await rename(`${txtPath}.tmp`, txtPath);
+      await waitFor(async () => {
+        try {
+          return (await readdir(outboxDir)).some((e) => e === `${stem}.txt.result`);
+        } catch {
+          return false;
+        }
+      }, 2_000);
+    }
+
+    // The transition log fires once (success → fail). It must not contain the token.
+    const edgeLog = logs.find((l) => l.startsWith("telegram outbox: send failed (") && !l.includes("chars ->"));
+    expect(edgeLog).toBeDefined();
+    expect(edgeLog!.includes("SECRET_TOKEN_OUTBOX_LOG")).toBe(false);
+    // No log line at all should contain the token.
+    expect(logs.some((l) => l.includes("SECRET_TOKEN_OUTBOX_LOG"))).toBe(false);
+
+    await outbox.stop();
+  });
+});

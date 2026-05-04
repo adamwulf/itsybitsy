@@ -2081,6 +2081,10 @@ export async function launchDashboard(): Promise<void> {
   let telegramDispatcher: import("../channels/dispatcher").TelegramDispatcher | null = null;
   let telegramOutbox: import("../channels/outbox").TelegramOutbox | null = null;
   let telegramBootOk = false;
+  /** Unsubscribe handle for the dispatcher's onStateChange listener.
+   *  Cleared on Ctrl+C so we don't leak the closure across the shutdown
+   *  promise chain. */
+  let telegramStateUnsub: (() => void) | null = null;
 
   const dashboard = new DashboardComponent();
   const savedLayout = await loadLayout();
@@ -2101,11 +2105,21 @@ export async function launchDashboard(): Promise<void> {
     // flips this to green on success or red on failure. The 5 s interval
     // re-reads the closure-captured `telegramDispatcher` / `telegramBootOk`
     // vars, which are populated when the background boot resolves.
+    //
+    // Health-aware polling: instead of `isRunning()` (a sticky boolean that
+    // stays true while the loop hangs on a dead socket), we read the
+    // dispatcher's state machine. `polling` → green, `retrying` → yellow,
+    // anything else → red.
     dashboard.setTelegramStatus("yellow");
     dashboard.telegramStatusTimer = setInterval(() => {
-      if (telegramDispatcher && telegramDispatcher.isRunning()) {
+      if (!telegramDispatcher) {
+        dashboard.setTelegramStatus(telegramBootOk ? "yellow" : "red");
+        return;
+      }
+      const health = telegramDispatcher.getHealth();
+      if (health.state === "polling") {
         dashboard.setTelegramStatus("green");
-      } else if (telegramBootOk) {
+      } else if (health.state === "retrying") {
         dashboard.setTelegramStatus("yellow");
       } else {
         dashboard.setTelegramStatus("red");
@@ -2144,6 +2158,21 @@ export async function launchDashboard(): Promise<void> {
         telegramDispatcher = bootResult.dispatcher;
         telegramOutbox = bootResult.outbox;
         telegramBootOk = true;
+        // Subscribe to dispatcher health transitions and pipe them to
+        // watch.log. Boot already logged the initial connect status, so the
+        // initial down→polling transition (reason=null) is suppressed here.
+        // Subsequent transitions:
+        //   polling  → retrying  : log "telegram: disconnected (<reason>)"
+        //   retrying → polling   : log "telegram: <reason>" (e.g. "reconnected after 12s")
+        //   any      → down      : silent (shutdown / 409 are already logged
+        //                          via boot or the dispatcher itself)
+        telegramStateUnsub = telegramDispatcher.onStateChange((change) => {
+          if (change.to === "retrying" && change.reason !== null) {
+            logToWatchLog(`telegram: disconnected (${change.reason})`);
+          } else if (change.to === "polling" && change.reason !== null) {
+            logToWatchLog(`telegram: ${change.reason}`);
+          }
+        });
         // Don't await — start() runs the loop in the background.
         telegramDispatcher.start().catch((err) => {
           logToWatchLog(`Telegram dispatcher failed to start: ${err instanceof Error ? err.message : String(err)}`);
@@ -2181,6 +2210,13 @@ export async function launchDashboard(): Promise<void> {
       tui.stop();
       dashboard.setTerminalTitle("");
       process.stdout.write("\x1b[2J\x1b[H");
+      // Unsubscribe the state-change listener before stopping so a stop()
+      // transition doesn't fire one final logToWatchLog call after we've
+      // already torn down the TUI write paths.
+      if (telegramStateUnsub) {
+        telegramStateUnsub();
+        telegramStateUnsub = null;
+      }
       // Stop the Telegram dispatcher if it was started. Race against a 2s
       // timeout so a hung getUpdates abort cannot block exit. We don't
       // process.exit() synchronously — give shutdown a chance to flush.

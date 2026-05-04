@@ -31,6 +31,7 @@ import { homedir } from "os";
 import { mkdir, readdir, readFile, rename, unlink, writeFile } from "fs/promises";
 import { watch, type FSWatcher } from "node:fs";
 import type { TelegramClient } from "./telegram-client";
+import { classifyError } from "./telegram-client";
 
 let overrideOutboxDir: string | undefined;
 
@@ -107,6 +108,12 @@ export class TelegramOutbox {
 
   /** Set to true once `start()` returns. Used to gate `stop()`. */
   private started = false;
+
+  /** Edge-transition tracker for send-failure logging. `lastSendOk` is null
+   *  until the first send attempt completes. We only log on edge transitions
+   *  (success → failure or failure → success) so a streak of failures
+   *  produces one line, not one per message. */
+  private lastSendOk: boolean | null = null;
 
   constructor(opts: OutboxOptions) {
     this.client = opts.client;
@@ -263,7 +270,32 @@ export class TelegramOutbox {
         `telegram outbox: ${text.length} chars -> chat ${this.chatId}: failed (${sendOutcome.message})`,
       );
     }
+    // Edge-transition tracking: surface a "send failed (reason)" line on the
+    // first failure of a streak and a "send recovered" line on the next
+    // success. Per-message logs are above; this layer is the network-state
+    // signal, not the per-message audit.
+    this.recordSendOutcome(sendOutcome);
     this.scheduleCleanup(stem);
+  }
+
+  /** Track success/failure transitions and log on edge changes only. The
+   *  first attempt sets `lastSendOk` without logging — only subsequent
+   *  flips log. (Initial failures aren't surprising during boot; the
+   *  per-message log already records them. We're tracking the *recovery*
+   *  signal here.) */
+  private recordSendOutcome(outcome: { ok: true } | { ok: false; message: string }): void {
+    if (this.lastSendOk === null) {
+      // First send — start the streak silently. The per-message log already
+      // recorded the outcome; the state-change log only surfaces transitions.
+      this.lastSendOk = outcome.ok;
+      return;
+    }
+    if (this.lastSendOk && !outcome.ok) {
+      this.log(`telegram outbox: send failed (${outcome.message})`);
+    } else if (!this.lastSendOk && outcome.ok) {
+      this.log(`telegram outbox: send recovered`);
+    }
+    this.lastSendOk = outcome.ok;
   }
 
   /** Loop the chunks, calling `client.sendMessage` once per chunk with a single
@@ -276,7 +308,9 @@ export class TelegramOutbox {
       try {
         resp = await this.client.sendMessage({ chat_id: this.chatId, text: piece });
       } catch (err) {
-        return { ok: false, message: `sendMessage failed: ${describeErr(err)}` };
+        // classifyError, not describeErr: fetch errors can embed the
+        // bot-token URL in err.message.
+        return { ok: false, message: `sendMessage failed: ${classifyError(err)}` };
       }
       if (resp.ok) continue;
 
@@ -289,7 +323,8 @@ export class TelegramOutbox {
         try {
           retryResp = await this.client.sendMessage({ chat_id: this.chatId, text: piece });
         } catch (err) {
-          return { ok: false, message: `sendMessage failed after 429 retry: ${describeErr(err)}` };
+          // classifyError, not describeErr — same token-safety reason as above.
+          return { ok: false, message: `sendMessage failed after 429 retry: ${classifyError(err)}` };
         }
         if (retryResp.ok) continue;
         const desc = retryResp.description ?? `HTTP ${retryResp.error_code ?? "unknown"}`;

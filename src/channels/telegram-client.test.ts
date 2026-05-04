@@ -487,3 +487,195 @@ describe("sendMessage", () => {
     }
   });
 });
+
+describe("getUpdates per-request timeout & onPollOutcome", () => {
+  let mock: MockFetch;
+  let sleeps: number[];
+  let logs: string[];
+
+  beforeEach(() => {
+    mock = makeMockFetch();
+    fetchCtx.set(mock.fn);
+    sleeps = [];
+    sleepCtx.set(async (ms) => { sleeps.push(ms); });
+    logs = [];
+    logCtx.set((line) => logs.push(line));
+  });
+
+  afterEach(() => {
+    fetchCtx.reset();
+    sleepCtx.reset();
+    logCtx.reset();
+  });
+
+  test("timer-fired abort surfaces as a retry, not a user-abort exit", async () => {
+    // Simulate the per-request timer firing on a hung socket. The user's
+    // own AbortSignal stays unaborted — we throw TimeoutError directly to
+    // mimic what `AbortSignal.timeout` produces. The client must treat
+    // that as a transient ETIMEDOUT-class failure and retry, NOT throw out
+    // of getUpdates as if the user cancelled.
+    const userController = new AbortController();
+    let attempts = 0;
+    fetchCtx.set(((_url: string | URL | Request, _init?: RequestInit) => {
+      attempts += 1;
+      if (attempts === 1) {
+        // First attempt: timer fires. User signal is NOT aborted.
+        expect(userController.signal.aborted).toBe(false);
+        return Promise.reject(new DOMException("The operation timed out.", "TimeoutError"));
+      }
+      // Second attempt: succeed immediately.
+      return Promise.resolve(makeResponse({ ok: true, result: [] }));
+    }) as FetchLike);
+
+    const client = new TelegramClient({ token: "T" });
+    const result = await client.getUpdates({ signal: userController.signal });
+    expect(result).toEqual([]);
+    expect(attempts).toBe(2);
+    // The retry log should fire once (one ETIMEDOUT class). The timer-fired
+    // abort is mapped to errno:ETIMEDOUT.
+    expect(logs.filter((l) => l.includes("ETIMEDOUT")).length).toBe(1);
+  });
+
+  test("user-aborted signal terminates the loop even if a TimeoutError is in flight", async () => {
+    const userController = new AbortController();
+    fetchCtx.set(((_url: string | URL | Request, init?: RequestInit) => {
+      const sig = init?.signal as AbortSignal | undefined;
+      return new Promise<Response>((_, reject) => {
+        if (sig?.aborted) {
+          reject(new DOMException("aborted", "AbortError"));
+          return;
+        }
+        sig?.addEventListener("abort", () => {
+          reject(new DOMException("aborted", "AbortError"));
+        });
+      });
+    }) as FetchLike);
+
+    const client = new TelegramClient({ token: "T" });
+    const promise = client.getUpdates({ signal: userController.signal });
+    setTimeout(() => userController.abort(), 5);
+
+    await expect(promise).rejects.toThrow();
+    // No retry attempted — we exited on user abort, not timer.
+    expect(logs.filter((l) => l.includes("ETIMEDOUT")).length).toBe(0);
+  });
+
+  test("onPollOutcome fires 'success' on a 2xx response", async () => {
+    mock.enqueueResponse({ ok: true, result: [] });
+    const client = new TelegramClient({ token: "T" });
+    const outcomes: Array<"success" | { kind: "retry"; reason: string }> = [];
+
+    await client.getUpdates({ onPollOutcome: (o) => outcomes.push(o) });
+
+    expect(outcomes).toEqual(["success"]);
+  });
+
+  test("onPollOutcome fires retry events on transient failures, then success on recovery", async () => {
+    mock.enqueueError(new Error("ETIMEDOUT"));
+    mock.enqueueError(new Error("ETIMEDOUT"));
+    mock.enqueueResponse({ ok: true, result: [] });
+
+    const client = new TelegramClient({ token: "T" });
+    const outcomes: Array<"success" | { kind: "retry"; reason: string }> = [];
+
+    await client.getUpdates({ onPollOutcome: (o) => outcomes.push(o) });
+
+    expect(outcomes.length).toBe(3);
+    expect(outcomes[0]).toEqual({ kind: "retry", reason: "errno:ETIMEDOUT" });
+    expect(outcomes[1]).toEqual({ kind: "retry", reason: "errno:ETIMEDOUT" });
+    expect(outcomes[2]).toBe("success");
+  });
+
+  test("five consecutive errors fire one log line, but onPollOutcome fires every attempt", async () => {
+    for (let i = 0; i < 5; i++) {
+      mock.enqueueError(new Error("ETIMEDOUT"));
+    }
+    mock.enqueueResponse({ ok: true, result: [] });
+    const client = new TelegramClient({ token: "T" });
+    const outcomes: Array<"success" | { kind: "retry"; reason: string }> = [];
+
+    await client.getUpdates({ onPollOutcome: (o) => outcomes.push(o) });
+
+    // Existing behavior: one log line per error class per streak.
+    expect(logs.filter((l) => l.includes("ETIMEDOUT")).length).toBe(1);
+    // New behavior: every attempt fires the outcome callback, so the
+    // dispatcher can drive its own streak counter / state machine.
+    expect(outcomes.length).toBe(6);
+    expect(outcomes.slice(0, 5).every((o) => typeof o !== "string" && o.kind === "retry")).toBe(true);
+    expect(outcomes[5]).toBe("success");
+  });
+
+  test("onPollOutcome fires BEFORE the backoff sleep (dashboard reacts in ms, not seconds)", async () => {
+    // Dispatcher contract: the dashboard's traffic light must flip yellow as
+    // soon as the failure is observed, not after the backoff window. We
+    // verify by replacing sleepCtx with a never-resolving promise — once the
+    // first error has been processed, onPollOutcome must have already fired
+    // even though no sleep has completed.
+    let sleepStarted = false;
+    sleepCtx.set(() => {
+      sleepStarted = true;
+      return new Promise<void>(() => { /* never resolves */ });
+    });
+
+    mock.enqueueError(new Error("ETIMEDOUT"));
+    // No second response — if the loop misbehaved and tried another fetch,
+    // we'd hit "queue empty".
+
+    const outcomes: Array<"success" | { kind: "retry"; reason: string }> = [];
+    const controller = new AbortController();
+    const client = new TelegramClient({ token: "T" });
+    const promise = client.getUpdates({
+      signal: controller.signal,
+      onPollOutcome: (o) => {
+        outcomes.push(o);
+        // At this exact moment the sleep has not yet been entered. If
+        // ordering were reversed (sleep before callback), this assertion
+        // would fire after sleepStarted=true.
+        expect(sleepStarted).toBe(false);
+      },
+    });
+
+    // Wait until the outcome was recorded (with a small spin so we don't
+    // race the await chain in `attemptOnce`).
+    const startedAt = Date.now();
+    while (outcomes.length === 0 && Date.now() - startedAt < 1000) {
+      await new Promise<void>((r) => setTimeout(r, 5));
+    }
+
+    expect(outcomes.length).toBe(1);
+    expect(outcomes[0]).toEqual({ kind: "retry", reason: "errno:ETIMEDOUT" });
+    expect(sleepStarted).toBe(true); // sleep started after the callback fired
+
+    // Clean up the hung loop.
+    controller.abort();
+    await expect(promise).rejects.toThrow();
+  });
+
+  test("probeOnce per-request timeout: TimeoutError surfaces and the call rejects (regression for hung-socket)", async () => {
+    // probeOnce wraps fetch with composeAbortSignal(userSig, PROBE_TIMEOUT_MS).
+    // Simulate the timer firing on a hung socket by having the mock fetch
+    // reject with a TimeoutError. Without the per-request timeout this
+    // would be the kind of failure that hangs the dashboard for minutes.
+    fetchCtx.set((async () => {
+      throw new DOMException("The operation timed out.", "TimeoutError");
+    }) as FetchLike);
+
+    const client = new TelegramClient({ token: "T" });
+    // probeOnce does NOT have an internal retry loop, so the TimeoutError
+    // surfaces as a thrown error. This is the contract — the dispatcher's
+    // start() catches it and proceeds with `starting main loop anyway`.
+    await expect(client.probeOnce({ offset: -1, limit: 1, timeout: 0 })).rejects.toThrow(/timed out/i);
+  });
+
+  test("sendMessage per-request timeout: TimeoutError surfaces", async () => {
+    fetchCtx.set((async () => {
+      throw new DOMException("The operation timed out.", "TimeoutError");
+    }) as FetchLike);
+
+    const client = new TelegramClient({ token: "T" });
+    // sendMessage doesn't have a retry loop — a hung socket surfaces as
+    // a thrown error to the caller (outbox catches it and writes a
+    // ok:false result file).
+    await expect(client.sendMessage({ chat_id: 1, text: "x" })).rejects.toThrow(/timed out/i);
+  });
+});

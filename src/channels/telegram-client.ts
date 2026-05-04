@@ -40,6 +40,14 @@ export const TELEGRAM_CHUNK_LIMIT = 4000;
 const BACKOFF_INITIAL_MS = 1_000;
 const BACKOFF_MAX_MS = 30_000;
 
+/** Per-request fetch timeouts. A dead TCP socket (e.g. after a Wi-Fi switch)
+ *  otherwise hangs the request indefinitely while the OS waits to surface a
+ *  TCP keepalive failure. The hard timeouts surface the disconnect as an
+ *  AbortError within seconds so the retry loop wakes up. */
+const GETUPDATES_TIMEOUT_BUFFER_MS = 10_000;
+const PROBE_TIMEOUT_MS = 10_000;
+const SENDMESSAGE_TIMEOUT_MS = 15_000;
+
 /** Injectable fetch — defaults to globalThis.fetch. */
 export const fetchCtx = new InjectionContext<FetchLike>(globalThis.fetch);
 
@@ -93,6 +101,17 @@ export function classifyError(err: unknown): string {
   return `unknown:${String(err).slice(0, 40)}`;
 }
 
+/** Callback fired by `getUpdates` after each attempt. Used by the dispatcher's
+ *  health state machine to track success/failure transitions without coupling
+ *  the client to dispatcher internals. `'success'` fires after a 2xx response;
+ *  the retry variant fires before the backoff sleep with the same `reason`
+ *  string the client already emits to its log. */
+export type PollOutcome =
+  | "success"
+  | { kind: "retry"; reason: string };
+
+export type PollOutcomeFn = (outcome: PollOutcome) => void;
+
 export interface GetUpdatesOptions {
   /** Last `update_id + 1` confirmed. Telegram drops everything strictly less. */
   offset?: number;
@@ -106,6 +125,9 @@ export interface GetUpdatesOptions {
   /** AbortSignal from the caller — used by Phase 5 dispatcher to cancel
    *  in-flight long-poll on TUI exit. */
   signal?: AbortSignal;
+  /** Optional hook fired after each attempt. Lets the dispatcher track
+   *  success/failure state without re-implementing log parsing. */
+  onPollOutcome?: PollOutcomeFn;
 }
 
 export interface SendMessageOptions {
@@ -183,12 +205,19 @@ export class TelegramClient {
    *  fires before any successful response. */
   async getUpdates(opts: GetUpdatesOptions = {}): Promise<TelegramUpdate[]> {
     const allowed = opts.allowed_updates ?? ["message"];
+    const longPollSec = opts.timeout ?? 25;
     const params: Record<string, unknown> = {
-      timeout: opts.timeout ?? 25,
+      timeout: longPollSec,
       limit: opts.limit ?? 100,
       allowed_updates: allowed,
     };
     if (opts.offset !== undefined) params.offset = opts.offset;
+
+    // The per-request timeout has to outlive the long-poll's server-side wait.
+    // Telegram holds the request for `timeout` seconds; we add 10s buffer for
+    // network latency + response framing. Past that, the socket is presumed
+    // dead and we abort the fetch so the retry loop can wake up.
+    const fetchTimeoutMs = longPollSec * 1_000 + GETUPDATES_TIMEOUT_BUFFER_MS;
 
     let attempt = 0;
 
@@ -202,17 +231,21 @@ export class TelegramClient {
         "getUpdates",
         params,
         opts.signal,
+        fetchTimeoutMs,
       );
 
       if (outcome.kind === "ok") {
         this.seenGetUpdatesErrorClasses.clear();
+        opts.onPollOutcome?.("success");
         return outcome.result;
       }
       if (outcome.kind === "abort") {
         throw new DOMException("getUpdates aborted", "AbortError");
       }
 
-      // Retry path: log once per error class, then sleep with backoff.
+      // Retry path: notify the dispatcher hook (if any) and log once per
+      // error class, then sleep with backoff.
+      opts.onPollOutcome?.({ kind: "retry", reason: outcome.reason });
       if (!this.seenGetUpdatesErrorClasses.has(outcome.reason)) {
         this.seenGetUpdatesErrorClasses.add(outcome.reason);
         logCtx.fn(`telegram getUpdates: ${outcome.reason}, retrying with backoff`);
@@ -256,11 +289,14 @@ export class TelegramClient {
     if (opts.offset !== undefined) params.offset = opts.offset;
 
     const url = this.urlFor("getUpdates");
+    // 10s timeout — the probe uses `timeout: 0` server-side so it should return
+    // promptly. A dead socket otherwise hangs forever.
+    const composedSignal = composeAbortSignal(opts.signal, PROBE_TIMEOUT_MS);
     const resp = await fetchCtx.fn(url, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(params),
-      signal: opts.signal,
+      signal: composedSignal,
     });
     const raw = await readRaw<TelegramUpdate[]>(resp);
     if (raw.status >= 200 && raw.status < 300 && raw.body?.ok === true) {
@@ -284,10 +320,14 @@ export class TelegramClient {
   async sendMessage(opts: SendMessageOptions): Promise<SendMessageResult> {
     const body = JSON.stringify({ chat_id: opts.chat_id, text: opts.text });
     const url = this.urlFor("sendMessage");
+    // 15s per-attempt timeout — outbound is one-shot; a dead socket otherwise
+    // stalls the outbox queue indefinitely.
+    const composedSignal = composeAbortSignal(undefined, SENDMESSAGE_TIMEOUT_MS);
     const resp = await fetchCtx.fn(url, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body,
+      signal: composedSignal,
     });
     const raw = await readRaw<TelegramMessage>(resp);
     if (raw.status >= 200 && raw.status < 300 && raw.body?.ok === true) {
@@ -304,27 +344,45 @@ export class TelegramClient {
   }
 
   /** Single attempt at a Bot API method. Maps HTTP / parse outcomes onto the
-   *  `AttemptOutcome` discriminated union the retry loop reads. */
+   *  `AttemptOutcome` discriminated union the retry loop reads.
+   *
+   *  `timeoutMs` adds a per-request hard deadline composed with the user's
+   *  signal. We distinguish the timer firing from the user firing the user's
+   *  own signal by checking `signal.aborted` after a catch — only the user's
+   *  abort terminates the loop. The timer-fired abort is reported as a
+   *  retryable timeout so the loop wakes up and tries again. */
   private async attemptOnce<T>(
     method: string,
     params: Record<string, unknown>,
     signal: AbortSignal | undefined,
+    timeoutMs: number,
   ): Promise<AttemptOutcome<T>> {
     const url = this.urlFor(method);
+    const composedSignal = composeAbortSignal(signal, timeoutMs);
     let raw: RawResponse<T>;
     try {
       const resp = await fetchCtx.fn(url, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(params),
-        signal,
+        signal: composedSignal,
       });
       raw = await readRaw<T>(resp);
     } catch (err) {
-      if (isAbortError(err) || signal?.aborted) {
+      // Distinguish a user-fired abort (terminate the loop) from a timer-fired
+      // abort (retry as a transient timeout). Only the user's own signal — not
+      // the composed signal — should end the loop. AbortSignal.timeout firing
+      // looks identical at the AbortError level, so we have to check whose
+      // signal it was.
+      if (signal?.aborted) {
         return { kind: "abort" };
       }
-      // Network/DNS/timeout — sleep with exponential backoff.
+      if (isAbortError(err)) {
+        // Timer-fired: surface as a retryable timeout so the outer loop sleeps
+        // and tries again.
+        return { kind: "retry", reason: "errno:ETIMEDOUT", sleepMs: null };
+      }
+      // Network/DNS — sleep with exponential backoff.
       return { kind: "retry", reason: classifyError(err), sleepMs: null };
     }
 
@@ -384,8 +442,29 @@ async function readRaw<T>(resp: Response): Promise<RawResponse<T>> {
 }
 
 function isAbortError(err: unknown): boolean {
-  if (err instanceof Error && err.name === "AbortError") return true;
+  if (err instanceof Error) {
+    // `AbortSignal.timeout` surfaces as TimeoutError; an AbortController-fired
+    // abort surfaces as AbortError. Both indicate a cancelled fetch.
+    if (err.name === "AbortError" || err.name === "TimeoutError") return true;
+  }
   return false;
+}
+
+/** Compose a user-supplied AbortSignal with a per-request timeout into one
+ *  signal that fires on whichever happens first. The caller still owns the
+ *  user-supplied signal and can inspect `userSignal?.aborted` after a catch
+ *  to distinguish "user cancelled" from "timeout fired" — they look identical
+ *  at the AbortError level but one ends the loop and the other retries.
+ *
+ *  Uses `AbortSignal.any` (Bun >=1.0) when both inputs exist; if only the
+ *  timer is needed we use `AbortSignal.timeout` directly to avoid the wrapper. */
+function composeAbortSignal(
+  userSignal: AbortSignal | undefined,
+  timeoutMs: number,
+): AbortSignal {
+  const timer = AbortSignal.timeout(timeoutMs);
+  if (!userSignal) return timer;
+  return AbortSignal.any([userSignal, timer]);
 }
 
 /** Standard exponential backoff capped at BACKOFF_MAX_MS. */

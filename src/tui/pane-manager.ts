@@ -146,19 +146,26 @@ export class RightPaneComponent implements Component {
   statusLoading = false;
   questionsSelectedIndex = 0;
   questionsFocused = false;
+  // Per-repo coordinator state. Although these fields live on
+  // RightPaneComponent, REPO mode is a full-width pane mode (see
+  // FULL_WIDTH_MODES) — its render call receives the full main width
+  // (`mainWidth`), and the per-repo coordinator's tmux session is sized to
+  // `mainWidth`, matching the system coordinator. The fields are colocated
+  // here because the existing render call site is `rightPane.render(...)`,
+  // not because the coordinator is right-pane-scoped.
   /** Per-repo coordinator tmux output (raw) for REPO mode */
   repoCoordinatorOutput: string | null = null;
-  /** Whether the repo coordinator poller has completed at least one poll */
+  /** Whether the per-repo coordinator poller has completed at least one poll */
   repoCoordinatorHasPolled = false;
-  /** Height offset for the coordinator split in REPO mode (positive = more coordinator) */
+  /** Height offset for the coordinator split in REPO mode (positive = more coordinator). Splits the full main area vertically between repo info and coordinator tmux. */
   repoCoordinatorHeightOffset = 0;
-  /** Lines scrolled back from the bottom of the repo coordinator tmux output. 0 = follow newest. */
+  /** Lines scrolled back from the bottom of the per-repo coordinator tmux output. 0 = follow newest. */
   repoCoordinatorScrollBack = 0;
   /** The coordinator agent for the selected repo (if any) */
   repoCoordinatorAgent: Agent | null = null;
-  /** Input field for sending messages to the repo coordinator */
+  /** Input field for sending messages to the per-repo coordinator */
   repoCoordinatorInputField: InputFieldComponent | null = null;
-  /** Whether the repo-coordinator panel is focused */
+  /** Whether the per-repo coordinator panel is focused */
   repoCoordinatorFocused = false;
   private content: string[] = [];
 
@@ -370,8 +377,10 @@ export class RightPaneComponent implements Component {
   }
 
   /**
-   * Render the coordinator section for REPO mode split pane.
-   * Returns lines for the coordinator pane portion.
+   * Render the per-repo coordinator section for the REPO-mode vertical split.
+   * REPO mode renders at full main width; this function produces the bottom
+   * (coordinator tmux) portion of that full-width view.
+   * Returns lines for the coordinator portion.
    */
   renderRepoCoordinatorSection(width: number, height: number, coordinatorFocused: boolean): string[] {
     const lines: string[] = [];
@@ -448,8 +457,12 @@ export class RightPaneComponent implements Component {
   }
 
   /**
-   * Compute the height split for REPO mode with coordinator.
-   * Returns { repoHeight, coordinatorHeight } where coordinatorHeight includes the separator line.
+   * Compute the vertical height split for REPO mode with a per-repo
+   * coordinator. The split is between the repo info (top) and the coordinator
+   * tmux (bottom) within the full main area — the `width` passed to the
+   * render path is `mainWidth`, not a right-pane width. Returns
+   * `{ repoHeight, coordinatorHeight }` where `coordinatorHeight` includes
+   * the separator line.
    */
   computeRepoCoordinatorSplit(): { repoHeight: number; coordinatorHeight: number } {
     const available = Math.max(1, this.displayHeight);
@@ -467,7 +480,10 @@ export class RightPaneComponent implements Component {
   }
 
   render(width: number): string[] {
-    // In REPO mode with a coordinator, render a split view
+    // In REPO mode with a per-repo coordinator, render the vertical split
+    // (repo info on top, coordinator tmux on bottom). REPO is in
+    // FULL_WIDTH_MODES, so `width` here is `mainWidth` — the full main area,
+    // matching the system coordinator's width.
     if (this.mode === "REPO" && this.repoCoordinatorAgent) {
       return this.renderRepoWithCoordinator(width);
     }
@@ -507,7 +523,11 @@ export class RightPaneComponent implements Component {
     return lines;
   }
 
-  /** Render REPO mode with coordinator split: repo info on top, coordinator tmux on bottom */
+  /**
+   * Render REPO mode at full main width, with a vertical split: repo info on
+   * top, per-repo coordinator tmux on bottom. Both halves render at the full
+   * `width` argument (which is `mainWidth` — REPO is a full-width mode).
+   */
   private renderRepoWithCoordinator(width: number): string[] {
     const { repoHeight, coordinatorHeight } = this.computeRepoCoordinatorSplit();
     const innerWidth = width - 1;

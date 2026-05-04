@@ -2,7 +2,7 @@
  * Tests for health check TUI integration:
  * - Agent tree repo header warning indicators
  * - Info panel health summary line
- * - Right pane REPO mode health section
+ * - REPO pane mode health section (rendered at full main width)
  */
 
 import { test, expect, describe } from "bun:test";

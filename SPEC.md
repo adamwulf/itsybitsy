@@ -1118,9 +1118,9 @@ The `ib watch` TUI supports the following keyboard navigation for the agent tree
 
 ### 8.11 Repo Info Panel
 
-When a repo header is selected and the current pane mode is agent-specific (AGENT LOG, INITIAL PROMPT, DENIALS, DIFF, STATUS), the right pane displays a repo info summary instead of showing "No agent selected".
+When a repo header is selected, the dashboard auto-switches the pane mode to **REPO** (a full-width mode in `FULL_WIDTH_MODES` — see §8.13). REPO mode renders across the entire main area at `mainWidth` (the same width the system coordinator and per-repo coordinators use — see §13.8), not just the right pane. The previous pane mode is saved; selecting an agent or coordinator afterward restores it. If the saved mode would render empty content (ERRORS with no errors, QUESTIONS with no questions), it falls back to AGENT LOG instead. REPO mode is skipped during `p`/`n` pane cycling, so the only way to reach it is via repo-header selection.
 
-The summary always includes:
+The repo info content shown in REPO mode (and in the sidebar info panel below the agent tree) always includes:
 
 - **Repo name** with a disclosure triangle (▾ if it has agents, ▸ if empty)
 - **Path** — always shown, even when the repo has no agents. The path is rendered as a terminal **OSC 8 hyperlink** using the `file://` scheme (e.g., `\x1b]8;;file:///Users/me/project\x07/Users/me/project\x1b]8;;\x07`), making it clickable in terminals that support OSC 8 (Ghostty, iTerm2, etc.). Clicking opens the path in Finder. Special characters in the path (`%`, space, `#`, `?`) are percent-encoded in the URI portion; the display text shows the raw path.
@@ -1353,12 +1353,12 @@ This ensures the system coordinator can only run `ib` commands (e.g., `ib list`,
 ```
 ◆ coordinator  running  5m
 ▾ itsybitsy
-  ◇ itsybitsy        running  3m
   ⚙ agent-a1b2c3d4   running  2m
 ▾ muse-ios
-  ◇ muse-ios         running  1m
   ⚙ agent-c9d0e1f2   complete  1h
 ```
+
+Per-repo coordinators are not shown as tree rows (see §12.2.5) — they are surfaced via REPO mode when the repo header is selected.
 
 **Layout when system coordinator is selected**: When the system coordinator is selected in the agent tree, the layout changes:
 
@@ -1392,10 +1392,8 @@ TMUX view (default when coordinator selected):
 ├──── Agents ──────────────────┬─── System Coordinator  TMUX ─────┤
 │ ◆ coordinator  running  5m  │ coordinator tmux output           │
 │ ▾ itsybitsy                  │ ...                               │
-│   ◇ itsybitsy    running 3m │                                   │
 │   ⚙ agent-a1b2  running 2m  │                                   │
 │ ▾ muse-ios                   │                                   │
-│   ◇ muse-ios     running 1m │                                   │
 │   ⚙ agent-c9d0  complete 1h │                                   │
 ├──── Info ────────────────────│ > input field█       [Send]       │
 │ System Coordinator           │                                   │
@@ -1409,17 +1407,17 @@ DASHBOARD view (toggle with n/p):
 ├──── Agents ──────────────────┬─── System Coordinator  DASHBOARD ┤
 │ ◆ coordinator  running  5m  │ REPO         AGENT          ROLE  │
 │ ▾ itsybitsy                  │ itsybitsy    itsybitsy       coord │
-│   ◇ itsybitsy    running 3m │ itsybitsy    agent-a1b2c3d4  wkr  │
-│   ⚙ agent-a1b2  running 2m  │ muse-ios     muse-ios        coord │
-│ ▾ muse-ios                   │ muse-ios     agent-c9d0e1f2  wkr  │
-│   ◇ muse-ios     running 1m │                                   │
-│   ⚙ agent-c9d0  complete 1h │                                   │
+│   ⚙ agent-a1b2  running 2m  │ itsybitsy    agent-a1b2c3d4  wkr  │
+│ ▾ muse-ios                   │ muse-ios     muse-ios        coord │
+│   ⚙ agent-c9d0  complete 1h │ muse-ios     agent-c9d0e1f2  wkr  │
 ├──── Info ────────────────────│                                   │
 │ System Coordinator           │                                   │
 ├──────────────────────────────┴───────────────────────────────────┤
 │ status bar                                                       │
 └──────────────────────────────────────────────────────────────────┘
 ```
+
+Per-repo coordinators are not shown as tree rows in the sidebar. They DO appear in the DASHBOARD-view system overview table (which lists all agents including coordinators), and are surfaced in the main area when their repo header is selected (REPO mode, §8.11, §12.2.5).
 
 When any other agent or repo header is selected, the layout reverts to the normal two-section sidebar (tree + info) with the standard split-pane main area.
 
@@ -1549,20 +1547,18 @@ The former config keys `permissions.coordinator.allow` and `permissions.coordina
 
 #### 12.2.5 Display
 
-Per-repo coordinators appear in the agent tree as the **first entry** under their repo header, with a special icon to distinguish them from regular agents:
+Per-repo coordinators are **not rendered as rows in the agent tree** — `flattenAgentTree()` filters out any agent with `coordinator: true` before emitting tree entries (src/agents.ts). Only the system coordinator and regular agents appear as selectable rows. The repo header itself is the access point for the per-repo coordinator: selecting it surfaces the coordinator in the main area (see below). The system coordinator is the only coordinator shown directly in the tree:
 
 ```
 ◆ coordinator       running  5m       (system coordinator)
 ▾ itsybitsy
-  ◇ itsybitsy        running  3m       (per-repo coordinator, agent ID = repo basename)
   ⚙ agent-a1b2c3d4   running  2m
   ⚙ agent-e5f6a7b8   waiting  10m
 ▾ muse-ios
-  ◇ muse-ios         stopped   1h      (per-repo coordinator)
   ⚙ agent-c9d0e1f2   complete  1h
 ```
 
-When a per-repo coordinator is selected in the agent tree, it behaves like any other agent — its tmux output shows in the middle pane, and the right pane shows the selected mode (log, prompt, etc.). Per-repo coordinators do NOT get the full-width view that the system coordinator gets.
+When a repo header is selected, the dashboard locates the per-repo coordinator (`watcher.lastAgents.find(a => a.repoPath === ... && a.meta.coordinator)`) and wires it up: the pane mode auto-switches to REPO (§8.11, §8.13), and the main area renders at full main width (`mainWidth`, the same width the system coordinator uses — see §13.8). The repo info summary occupies the top portion and the per-repo coordinator's tmux output occupies the bottom portion of the full main area. Choosing an agent or the system coordinator afterward restores the previous pane mode and the standard split-pane layout. The per-repo coordinator's tmux session is sized to `mainWidth`, matching the system coordinator's width — it is not a right-pane-scoped view.
 
 #### 12.2.6 Session Start Context
 
@@ -1669,8 +1665,8 @@ The system coordinator can spawn per-repo coordinators and can send messages to 
 The agent tree (§11) shows coordinators integrated with the agent hierarchy:
 
 1. **System coordinator**: Always first entry, before all repo headers. Uses `◆` icon.
-2. **Per-repo coordinators**: First entry under their repo header. Uses `◇` icon. Sorted before regular agents regardless of creation time.
-3. **Regular agents**: Listed below coordinators in their repo section, sorted by creation time (existing behavior).
+2. **Per-repo coordinators**: NOT rendered as tree rows — `flattenAgentTree()` filters them out. They are surfaced via the repo header (selecting a repo header auto-switches the main area to REPO mode at `mainWidth` and shows the per-repo coordinator's tmux output there — see §8.11, §12.2.5).
+3. **Regular agents**: Listed below their repo header, sorted by creation time (existing behavior).
 
 The `FlatEntry` union type gains a new variant for the system coordinator:
 
@@ -1710,7 +1706,7 @@ The coordinator system touches many modules. This section catalogs the current i
 | Module | Status | Description |
 |--------|--------|-------------|
 | `src/coordinator.ts` | **Implemented** | System coordinator lifecycle (`ensureSystemCoordinator()`, `releaseSystemCoordinator()`, `restartSystemCoordinator()`), PID-based reference counting, system coordinator permissions/prompt, `sanitizeTmuxInput()`, per-repo coordinator permissions (`buildPerRepoCoordinatorSettings()`), per-repo coordinator prompt (`perRepoCoordinatorPrompt()`), coordinator existence check (`checkCoordinatorExists()`), agent ID generation (`getCoordinatorAgentId()` — returns repo basename). No separate `coordinator-settings.ts` — per-repo settings are in this file. |
-| `src/agents.ts` | **Implemented** | `coordinator?: boolean` in `AgentMeta`. `{ kind: "system-coordinator" }` in `FlatEntry`. `flattenAgentTree()` prepends system coordinator entry. Per-repo coordinators sorted before regular agents within each repo section. |
+| `src/agents.ts` | **Implemented** | `coordinator?: boolean` in `AgentMeta`. `{ kind: "system-coordinator" }` in `FlatEntry`. `flattenAgentTree()` prepends system coordinator entry and filters out per-repo coordinators (`!a.meta.coordinator`) so they do not appear as tree rows under their repo header. |
 | `src/ib-commands.ts` | **Implemented** | `newAgent()` extended with `--type coordinator`: uses repo basename as ID (via `getCoordinatorAgentId()`), sets `coordinator: true` in meta.json, one-per-repo validation via `checkCoordinatorExists()`, `coordinator.model` default, max-agents bypass, coordinator-specific `settings.local.json` with hooks. No special `ib send` routing — standard agent ID resolution handles everything. |
 | `src/hooks/session-start.ts` | **Implemented** | Detects `coordinator: true` in meta.json. `generateCoordinatorInstructions()` injects coordinator-specific prompt. Worker instructions correctly use manager's agent ID (repo basename) for `ib send`. |
 | `src/hooks/intercept-task.ts` | **Implemented** | `checkCoordinatorBashRestrictions()` blocks shell metacharacters and `--output` in git commands for coordinator sessions. Detects coordinators via `coordinator: true` in meta.json. |
@@ -1719,7 +1715,7 @@ The coordinator system touches many modules. This section catalogs the current i
 | `src/config.ts` | **Implemented** | Config keys: `coordinator.model`. (`permissions.coordinator.*` removed — coordinator permissions live in `~/.itsybitsy/agent-types/coordinator.md` frontmatter.) |
 | `src/watchdog.ts` | **Not yet modified** | Does NOT have coordinator-specific behavior. Treats coordinators identically to regular agents. See §12.2.7. |
 | `src/tui/dashboard.ts` | **Implemented** | System coordinator full-width view with TMUX/DASHBOARD toggle, coordinator lifecycle on startup/shutdown, coordinator restart on `R`, input field routing, per-repo coordinator pausing on exit. |
-| `src/tui/agent-tree.ts` | **Implemented** | System coordinator as first entry with `◆` icon. Per-repo coordinators with `◇` icon, sorted before regular agents. |
+| `src/tui/agent-tree.ts` | **Implemented** | System coordinator as first entry with `◆` icon. Per-repo coordinators are not rendered as tree rows — they are surfaced via the repo header (REPO mode, §8.11, §12.2.5). |
 | `src/tui/agent-actions.ts` | **Implemented** | `R` on repo header spawns or resumes per-repo coordinator via `checkCoordinatorExists()`. |
 | `src/tui/focus.ts` | **Implemented** | Coordinator focus order: `agent-tree` → `info` → `coordinator`. |
 | `src/tui/pane-manager.ts` | **Implemented** | Full-width view when system coordinator is selected. Per-repo coordinator REPO mode with split pane. |
@@ -1856,9 +1852,9 @@ Each tmux session type uses a separately-tracked width. The three widths have we
 |-----------|--------------|--------------|-----------|
 | **Agent tmux** (middle pane) | `splitPaneLeftWidth` | `layout.json` → `splitPaneLeftWidth` | Creating new agents, resuming agents, selecting an agent, `[`/`]` with active-agent focus, layout restore |
 | **System coordinator tmux** | `mainWidth` = `terminal_cols - sidebarWidth - 1` | Computed dynamically (not persisted directly) | Creating coordinator session, `[`/`]` with sidebar or coordinator focus, terminal resize (SIGWINCH), layout restore |
-| **Per-repo coordinator tmux** | `rightPaneWidth` = `mainWidth - splitPaneLeftWidth - 1` | Computed dynamically | Selecting a repo header, `[`/`]` with sidebar/coordinator focus (via `sidebarWidth` change) or active-agent/right-pane focus (via `splitPaneLeftWidth` change) |
+| **Per-repo coordinator tmux** | `mainWidth` = `terminal_cols - sidebarWidth - 1` (same as the system coordinator) | Computed dynamically | Selecting a repo header, `[`/`]` with sidebar/coordinator focus (via `sidebarWidth` change → `mainWidth` change), terminal resize (SIGWINCH), layout restore. Independent of `splitPaneLeftWidth`. |
 
-**Key invariant**: `splitPaneLeftWidth` and `sidebarWidth` are the two independent inputs; `mainWidth` and `rightPaneWidth` are derived. A sidebar resize changes `sidebarWidth`, which changes `mainWidth` (affecting the system coordinator and per-repo coordinator) but does not change `splitPaneLeftWidth` (agents). A split-pane resize changes `splitPaneLeftWidth` (agents) and `rightPaneWidth` (per-repo coordinator) but does not change `mainWidth` (system coordinator).
+**Key invariant**: `splitPaneLeftWidth` and `sidebarWidth` are the two independent inputs; `mainWidth` and `rightPaneWidth` are derived. A sidebar resize changes `sidebarWidth`, which changes `mainWidth` (affecting both the system coordinator and per-repo coordinators — both follow `mainWidth`) but does not change `splitPaneLeftWidth` (agents). A split-pane resize changes `splitPaneLeftWidth` (agents) and `rightPaneWidth` but does NOT change `mainWidth`, so neither the system coordinator nor per-repo coordinators are affected by split-pane resizes — they only react to sidebar resizes and terminal resizes.
 
 **Tmux width feedback**: The tmux poller reports the polled session's window width back to the dashboard via `onWidth`. This feedback is used to sync `splitPaneLeftWidth` when an external client (e.g., Ghostty) resizes an agent's tmux session. However, the main tmux poller is repointed to the system coordinator's tmux session when the coordinator is selected (to show coordinator output in the middle pane). Since the coordinator runs at `mainWidth` (much wider than `splitPaneLeftWidth`), the `onWidth` callback must be suppressed when the system coordinator is selected — otherwise the coordinator's width would overwrite `splitPaneLeftWidth` and corrupt all agent widths.
 

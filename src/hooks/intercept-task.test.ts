@@ -305,7 +305,7 @@ describe("coordinator Bash restrictions", () => {
   let tmpDir: string;
   let coordCwd: string;
 
-  // Set up a coordinator agent directory with coordinator:true in meta.json
+  // Set up a coordinator agent directory with agentType "coordinator" in meta.json
   async function setupCoordinatorDir() {
     const fs = await import("fs/promises");
     const { tmpdir } = await import("os");
@@ -315,7 +315,7 @@ describe("coordinator Bash restrictions", () => {
     await fs.mkdir(agentDir, { recursive: true });
     await Bun.write(
       join(agentDir, "meta.json"),
-      JSON.stringify({ id: "coordinator", coordinator: true })
+      JSON.stringify({ id: "coordinator", agentType: "coordinator" })
     );
     const repoDir = join(agentDir, "repo");
     await fs.mkdir(repoDir, { recursive: true });

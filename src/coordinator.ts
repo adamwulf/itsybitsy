@@ -752,7 +752,7 @@ export function getCoordinatorAgentId(repoPath: string): string {
 
 /**
  * Check if a coordinator already exists for a repo.
- * Scans all agents in the repo for one with coordinator:true in meta.json.
+ * Scans all agents in the repo for one with agentType "coordinator" in meta.json.
  * Also checks whether a non-coordinator agent with the repo basename already exists (collision).
  *
  * Returns:
@@ -783,7 +783,7 @@ export async function checkCoordinatorExists(repoPath: string): Promise<
       try {
         const raw = readFileSync(metaPath, "utf8");
         const meta = JSON.parse(raw);
-        if (meta.coordinator === true) {
+        if (meta.agentType === "coordinator") {
           return { exists: true, isCoordinator: true, agentId: entry.name };
         }
         // Check for name collision with repo basename

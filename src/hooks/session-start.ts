@@ -33,7 +33,6 @@ export function detectRole(
     id?: string;
     manager?: string | null;
     worker?: boolean;
-    coordinator?: boolean;
     agentType?: string;
     spawned_by?: { agent_id: string; repo_path: string | null };
     allowedPaths?: unknown;
@@ -66,16 +65,16 @@ export function detectRole(
   const worktreePath = match ? join(agentDir, "repo") : "";
 
   const meta = metaJson ?? {};
-  const isCoordinator = (meta as Record<string, unknown>).coordinator === true;
   const worker = meta.worker === true;
   const agentType = (meta as Record<string, unknown>).agentType as string | undefined;
 
-  // Derive role from agentType name or legacy booleans.
-  // NOTE: This role is ONLY used as a fallback in generateInstructions() for legacy agents
-  // that don't have agentType in meta.json. When agentType IS set, generateInstructions()
-  // loads the type definition and uses its instructionStyle field instead of this role.
+  // Derive role from agentType name (post-Phase-47 source of truth) or legacy
+  // worker boolean. NOTE: This role is ONLY used as a fallback in
+  // generateInstructions() for legacy agents that don't have agentType in
+  // meta.json. When agentType IS set, generateInstructions() loads the type
+  // definition and uses its instructionStyle field instead of this role.
   let role: SessionRole;
-  if (agentType === "coordinator" || isCoordinator) {
+  if (agentType === "coordinator") {
     role = "coordinator";
   } else if (agentType === "worker" || worker) {
     role = "worker";

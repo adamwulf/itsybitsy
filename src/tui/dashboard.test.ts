@@ -2452,7 +2452,7 @@ describe("formatAgentRow compact mode", () => {
   });
 
   test("coordinator agent uses ◇ icon", () => {
-    const agent = makeTestAgent({ meta: { ...makeTestAgent().meta, coordinator: true } });
+    const agent = makeTestAgent({ meta: { ...makeTestAgent().meta, agentType: "coordinator" } });
     const row = formatAgentRow(agent, "", false, 80, 20);
     const stripped = stripAnsi(row);
     expect(stripped).toContain("◇");

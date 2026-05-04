@@ -284,7 +284,7 @@ describe("checkIbCommandAccess spawned_by", () => {
   // ── @<repo-name> sentinel access checks ──────────────────────────────────
   // Per-repo coordinators are stamped as `@<basename>` in spawned_by. The
   // hasAccess path must grant the actual coordinator (whose ID is the
-  // basename and meta.coordinator===true) and deny everyone else.
+  // basename and meta.agentType==="coordinator") and deny everyone else.
 
   // We use `ib merge` for these tests instead of `ib kill` because the
   // per-repo coordinator bypass (SPEC §12.2) lets any same-repo coordinator
@@ -296,7 +296,7 @@ describe("checkIbCommandAccess spawned_by", () => {
     const repoName = require("path").basename(tmpDir);
     await writeAgentMeta(repoName, {
       id: repoName,
-      coordinator: true,
+      agentType: "coordinator",
       manager: null,
     });
     await writeAgentMeta("agent-targetA", {
@@ -315,7 +315,6 @@ describe("checkIbCommandAccess spawned_by", () => {
     const repoName = require("path").basename(tmpDir);
     await writeAgentMeta(repoName, {
       id: repoName,
-      coordinator: false,
       manager: null,
     });
     await writeAgentMeta("agent-targetB", {
@@ -335,7 +334,7 @@ describe("checkIbCommandAccess spawned_by", () => {
     const repoName = require("path").basename(tmpDir);
     await writeAgentMeta("not-the-repo", {
       id: "not-the-repo",
-      coordinator: true,
+      agentType: "coordinator",
       manager: null,
     });
     await writeAgentMeta("agent-targetC", {
@@ -355,7 +354,7 @@ describe("checkIbCommandAccess spawned_by", () => {
     const repoName = require("path").basename(tmpDir);
     await writeAgentMeta(repoName, {
       id: repoName,
-      coordinator: true,
+      agentType: "coordinator",
       manager: null,
     });
     await writeAgentMeta("agent-targetD", {
@@ -374,7 +373,7 @@ describe("checkIbCommandAccess spawned_by", () => {
   test("@system sentinel: DENIES merge — @system is never a same-agent access grant", async () => {
     await writeAgentMeta("system-impersonator", {
       id: "system-impersonator",
-      coordinator: true,
+      agentType: "coordinator",
       manager: null,
     });
     await writeAgentMeta("agent-targetE", {

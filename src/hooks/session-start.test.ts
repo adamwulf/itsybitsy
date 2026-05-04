@@ -136,7 +136,7 @@ describe("session-start", () => {
       id: "coordinator",
       manager: null,
       worker: false,
-      coordinator: true,
+      agentType: "coordinator",
     });
     expect(ctx.role).toBe("coordinator");
     expect(ctx.agentId).toBe("coordinator");
@@ -154,7 +154,7 @@ describe("session-start", () => {
       id: "project",
       manager: null,
       worker: false,
-      coordinator: true,
+      agentType: "coordinator",
     }, "project");
     expect(ctx.role).toBe("coordinator");
     expect(ctx.agentId).toBe("project");
@@ -624,7 +624,7 @@ describe("hookSessionStart — stale 'creating' state correction", () => {
       JSON.stringify({
         id: agentId,
         manager: null,
-        coordinator: true,
+        agentType: "coordinator",
         state: "creating",
       }),
     );

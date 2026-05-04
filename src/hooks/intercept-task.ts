@@ -39,27 +39,29 @@ async function checkCoordinatorBashRestrictions(
 ): Promise<InterceptResult | null> {
   if (input.tool_name !== "Bash") return null;
 
-  // Resolve agent identity. The system coordinator carries `coordinator: true`
-  // in its synthetic meta, so the same restrictions (no shell metacharacters,
-  // no --output, no -C/--git-dir/--work-tree) apply uniformly.
+  // Resolve agent identity. The system coordinator's synthetic meta carries
+  // `agentType: "system"`; per-repo coordinators have `agentType: "coordinator"`
+  // on disk. Both should get the same restrictions (no shell metacharacters,
+  // no --output, no -C/--git-dir/--work-tree).
   const resolved = resolveAgentFromCwd(input.cwd);
   if (!resolved) return null;
 
-  let isCoordinator = false;
-  if (resolved.syntheticMeta?.coordinator === true) {
-    isCoordinator = true;
+  let agentType: string | undefined;
+  if (resolved.syntheticMeta) {
+    agentType = resolved.syntheticMeta.agentType as string | undefined;
   } else {
     try {
       const metaFile = Bun.file(join(resolved.agentDir, "meta.json"));
       if (await metaFile.exists()) {
         const meta = await metaFile.json();
-        isCoordinator = meta.coordinator === true;
+        agentType = typeof meta.agentType === "string" ? meta.agentType : undefined;
       }
     } catch {
-      // If we can't read meta, not a coordinator
+      // If we can't read meta, treat as not a coordinator
     }
   }
 
+  const isCoordinator = agentType === "coordinator" || agentType === "system";
   if (!isCoordinator) return null;
 
   const command = (input.tool_input.command as string) ?? "";

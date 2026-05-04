@@ -311,7 +311,7 @@ export async function nukeAllAgents(repoPath: string): Promise<IbCommandResult> 
  * files are picked up. Hooks block is rebuilt fresh too. Agent ID stays the
  * same (it's keyed to the repo basename).
  *
- * Caller must have already verified `agent.meta.coordinator === true`.
+ * Caller must have already verified `agent.meta.agentType === "coordinator"`.
  */
 async function resetCoordinator(agent: Agent): Promise<IbCommandResult> {
   // Tear down the existing coordinator: kill tmux session, claude process,
@@ -379,7 +379,7 @@ export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
   // template is rebuilt then. Resuming the existing session would reuse stale
   // permissions and hooks, so we tear the coordinator down and respawn it
   // — fresher, simpler, and matches the user's mental model of "R to reset".
-  if (agent.meta.coordinator === true) {
+  if (agent.meta.agentType === "coordinator") {
     return await resetCoordinator(agent);
   }
 
@@ -2107,9 +2107,6 @@ export async function newAgent(
     state: "creating",
     state_updated_at: Math.floor(createdAt.getTime() / 1000),
   };
-  if (coordinatorMode) {
-    initialMetaJson.coordinator = true;
-  }
   if (resolvedAllowedPaths !== undefined) {
     initialMetaJson.allowedPaths = resolvedAllowedPaths;
   }

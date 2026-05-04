@@ -684,21 +684,21 @@ describe("checkIbCommandAccess", () => {
   // ── Per-repo coordinator bypass (SPEC §12.2) ──────────────────────────────
 
   test("per-repo coordinator CAN kill a non-child regular agent in its own repo", async () => {
-    await writeAgentMeta("itsybitsy", { id: "itsybitsy", coordinator: true });
+    await writeAgentMeta("itsybitsy", { id: "itsybitsy", agentType: "coordinator" });
     await writeAgentMeta("agent-target1", { id: "agent-target1", manager: "agent-someone" });
     const result = await checkIbCommandAccess("ib kill agent-target1", "itsybitsy", agentsDir);
     expect(result).toBeNull();
   });
 
   test("per-repo coordinator CAN reassign a non-child regular agent in its own repo", async () => {
-    await writeAgentMeta("itsybitsy", { id: "itsybitsy", coordinator: true });
+    await writeAgentMeta("itsybitsy", { id: "itsybitsy", agentType: "coordinator" });
     await writeAgentMeta("agent-target1", { id: "agent-target1", manager: "agent-someone" });
     const result = await checkIbCommandAccess("ib reassign agent-target1 agent-newmgr1", "itsybitsy", agentsDir);
     expect(result).toBeNull();
   });
 
   test("per-repo coordinator CANNOT nuke a non-child regular agent (not in expanded list)", async () => {
-    await writeAgentMeta("itsybitsy", { id: "itsybitsy", coordinator: true });
+    await writeAgentMeta("itsybitsy", { id: "itsybitsy", agentType: "coordinator" });
     await writeAgentMeta("agent-target1", { id: "agent-target1", manager: "agent-someone" });
     const result = await checkIbCommandAccess("ib nuke agent-target1", "itsybitsy", agentsDir);
     expect(result).not.toBeNull();
@@ -706,7 +706,7 @@ describe("checkIbCommandAccess", () => {
   });
 
   test("per-repo coordinator CANNOT merge a non-child regular agent", async () => {
-    await writeAgentMeta("itsybitsy", { id: "itsybitsy", coordinator: true });
+    await writeAgentMeta("itsybitsy", { id: "itsybitsy", agentType: "coordinator" });
     await writeAgentMeta("agent-target1", { id: "agent-target1", manager: "agent-someone" });
     const result = await checkIbCommandAccess("ib merge agent-target1", "itsybitsy", agentsDir);
     expect(result).not.toBeNull();
@@ -714,8 +714,8 @@ describe("checkIbCommandAccess", () => {
   });
 
   test("per-repo coordinator CANNOT kill another coordinator", async () => {
-    await writeAgentMeta("itsybitsy", { id: "itsybitsy", coordinator: true });
-    await writeAgentMeta("other-repo", { id: "other-repo", coordinator: true });
+    await writeAgentMeta("itsybitsy", { id: "itsybitsy", agentType: "coordinator" });
+    await writeAgentMeta("other-repo", { id: "other-repo", agentType: "coordinator" });
     const result = await checkIbCommandAccess("ib kill other-repo", "itsybitsy", agentsDir);
     expect(result).not.toBeNull();
     expect(result!.decision).toBe("deny");

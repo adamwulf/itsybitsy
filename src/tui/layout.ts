@@ -19,7 +19,12 @@ export interface LayoutState {
     /** @deprecated Coordinator is no longer shown in the sidebar. Preserved for backward compatibility with existing layout.json files. */
     coordinator: number;
   };
-  /** Height offset for the repo coordinator split in REPO right pane mode */
+  /**
+   * Height offset for the per-repo coordinator split in REPO mode. REPO mode
+   * renders at full main width (`mainWidth`), with the repo info on top and
+   * the coordinator tmux on the bottom — this offset shifts the boundary
+   * between those two sections.
+   */
   repoCoordinatorHeightOffset?: number;
 }
 

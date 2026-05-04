@@ -502,7 +502,7 @@ export class DashboardComponent implements Component {
   private tmuxPoller: TmuxPoller;
   coordinatorPane: TmuxPaneComponent;
   private coordinatorPoller: TmuxPoller;
-  /** Poller for per-repo coordinator tmux output (REPO mode) */
+  /** Poller for per-repo coordinator tmux output. Active when a repo header is selected (REPO mode), captures into `rightPane.repoCoordinatorOutput` for full-main-width rendering. */
   private repoCoordinatorPoller: TmuxPoller;
   /** The tmux session currently being polled for repo coordinator */
   repoCoordinatorSession: string | null = null;
@@ -738,7 +738,9 @@ export class DashboardComponent implements Component {
     });
     this.coordinatorPoller.setAgent(IB_COORDINATOR_SESSION);
 
-    // Per-repo coordinator poller — polls the coordinator agent's tmux session in REPO mode
+    // Per-repo coordinator poller — polls the coordinator agent's tmux session
+    // when a repo header is selected (REPO mode). The captured output renders
+    // at full main width, same as the system coordinator (not right-pane-only).
     this.repoCoordinatorPoller = new TmuxPoller({
       onOutput: (raw, _stripped) => {
         this.rightPane.repoCoordinatorOutput = raw;
@@ -1854,7 +1856,10 @@ export class DashboardComponent implements Component {
       this.tmuxPoller.setLines(
         Math.max(200, this.tmuxPane.displayHeight + this.tmuxPane.scrollBack + 10)
       );
-      // Repo coordinator capture: size to the coordinator section's height in REPO mode.
+      // Per-repo coordinator capture: size scrollback to the coordinator
+      // section's height in REPO mode. The section renders within the
+      // full-main-width REPO view (vertical split: repo info on top,
+      // coordinator tmux on bottom).
       if (this.rightPane.repoCoordinatorAgent) {
         const { coordinatorHeight } = this.rightPane.computeRepoCoordinatorSplit();
         this.repoCoordinatorPoller.setLines(

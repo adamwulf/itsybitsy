@@ -1562,7 +1562,7 @@ Per-repo coordinators appear in the agent tree as the **first entry** under thei
   ⚙ agent-c9d0e1f2   complete  1h
 ```
 
-When a per-repo coordinator is selected in the agent tree, it behaves like any other agent — its tmux output shows in the middle pane, and the right pane shows the selected mode (log, prompt, etc.). Per-repo coordinators do NOT get the full-width view that the system coordinator gets.
+Per-repo coordinators are not selectable as agents in the tree — selection lives on the repo header. When a repo header is selected, the right pane mode auto-switches to REPO, and the main area renders at full main width (`mainWidth`, the same width the system coordinator uses): the repo info summary occupies the top portion and the per-repo coordinator's tmux output occupies the bottom portion of the full main area. Choosing an agent under the repo restores the previous pane mode and the standard split-pane layout. The per-repo coordinator's tmux session is sized to `mainWidth`, matching the system coordinator's width — it is not a right-pane-scoped view.
 
 #### 12.2.6 Session Start Context
 
@@ -1856,9 +1856,9 @@ Each tmux session type uses a separately-tracked width. The three widths have we
 |-----------|--------------|--------------|-----------|
 | **Agent tmux** (middle pane) | `splitPaneLeftWidth` | `layout.json` → `splitPaneLeftWidth` | Creating new agents, resuming agents, selecting an agent, `[`/`]` with active-agent focus, layout restore |
 | **System coordinator tmux** | `mainWidth` = `terminal_cols - sidebarWidth - 1` | Computed dynamically (not persisted directly) | Creating coordinator session, `[`/`]` with sidebar or coordinator focus, terminal resize (SIGWINCH), layout restore |
-| **Per-repo coordinator tmux** | `rightPaneWidth` = `mainWidth - splitPaneLeftWidth - 1` | Computed dynamically | Selecting a repo header, `[`/`]` with sidebar/coordinator focus (via `sidebarWidth` change) or active-agent/right-pane focus (via `splitPaneLeftWidth` change) |
+| **Per-repo coordinator tmux** | `mainWidth` = `terminal_cols - sidebarWidth - 1` (same as the system coordinator) | Computed dynamically | Selecting a repo header, `[`/`]` with sidebar/coordinator focus (via `sidebarWidth` change → `mainWidth` change), terminal resize (SIGWINCH), layout restore. Independent of `splitPaneLeftWidth`. |
 
-**Key invariant**: `splitPaneLeftWidth` and `sidebarWidth` are the two independent inputs; `mainWidth` and `rightPaneWidth` are derived. A sidebar resize changes `sidebarWidth`, which changes `mainWidth` (affecting the system coordinator and per-repo coordinator) but does not change `splitPaneLeftWidth` (agents). A split-pane resize changes `splitPaneLeftWidth` (agents) and `rightPaneWidth` (per-repo coordinator) but does not change `mainWidth` (system coordinator).
+**Key invariant**: `splitPaneLeftWidth` and `sidebarWidth` are the two independent inputs; `mainWidth` and `rightPaneWidth` are derived. A sidebar resize changes `sidebarWidth`, which changes `mainWidth` (affecting both the system coordinator and per-repo coordinators — both follow `mainWidth`) but does not change `splitPaneLeftWidth` (agents). A split-pane resize changes `splitPaneLeftWidth` (agents) and `rightPaneWidth` but does NOT change `mainWidth`, so neither the system coordinator nor per-repo coordinators are affected by split-pane resizes — they only react to sidebar resizes and terminal resizes.
 
 **Tmux width feedback**: The tmux poller reports the polled session's window width back to the dashboard via `onWidth`. This feedback is used to sync `splitPaneLeftWidth` when an external client (e.g., Ghostty) resizes an agent's tmux session. However, the main tmux poller is repointed to the system coordinator's tmux session when the coordinator is selected (to show coordinator output in the middle pane). Since the coordinator runs at `mainWidth` (much wider than `splitPaneLeftWidth`), the `onWidth` callback must be suppressed when the system coordinator is selected — otherwise the coordinator's width would overwrite `splitPaneLeftWidth` and corrupt all agent widths.
 

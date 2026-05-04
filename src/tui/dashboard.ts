@@ -339,7 +339,7 @@ class StatusBarComponent implements Component {
     if (!right) return truncateToWidth(left, width, "");
     const leftW = visibleWidth(left);
     const rightW = visibleWidth(right);
-    const gap = Math.max(2, width - leftW - rightW);
+    const gap = Math.max(2, width - leftW - rightW - 1);
     return truncateToWidth(left + " ".repeat(gap) + right, width, "");
   }
 
@@ -1726,7 +1726,7 @@ export class DashboardComponent implements Component {
         : this.telegramStatus === "yellow" ? YELLOW
         : RED;
       const right = `${tgColor}●${RESET} Telegram`;
-      const pad = Math.max(1, width - visibleWidth(left) - visibleWidth(right));
+      const pad = Math.max(1, width - visibleWidth(left) - visibleWidth(right) - 1);
       lines.push(truncateToWidth(left + " ".repeat(pad) + right, width, ""));
     } else {
       lines.push(truncateToWidth(left, width, ""));

@@ -4159,8 +4159,8 @@ describe("Telegram header indicator", () => {
     expect(visibleWidth(header)).toBeLessThanOrEqual(width);
     // The visible text should end with "Telegram"
     expect(stripAnsi(header).trimEnd().endsWith("Telegram")).toBe(true);
-    // Visible width of the header should equal the requested width (right-aligned via padding)
-    expect(visibleWidth(header)).toBe(width);
+    // Visible width should equal width - 1 (one space of padding before the right edge)
+    expect(visibleWidth(header)).toBe(width - 1);
   });
 
   test("narrow render width truncates and does not crash", () => {

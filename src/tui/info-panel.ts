@@ -31,6 +31,8 @@ export class InfoPanelComponent implements Component {
   healthReport: RepoHealthReport | undefined = undefined;
   /** Set of live tmux session names — used to render the agent's tmux stoplight. */
   liveTmuxSessions: Set<string> = new Set();
+  /** The selected repo's coordinator agent, if any — drives the repo-info stoplights. */
+  repoCoordinatorAgent: Agent | null = null;
   displayHeight = 5;
 
   invalidate(): void {}
@@ -49,25 +51,32 @@ export class InfoPanelComponent implements Component {
     return padLines([truncateToWidth(`${DIM}No selection${RESET}`, width, "")], this.displayHeight);
   }
 
-  private renderAgentInfo(width: number): string[] {
-    const agent = this.agent!;
+  private renderStoplights(agent: Agent, width: number, labelPrefix = ""): string[] {
     const lines: string[] = [];
 
-    // Stoplight indicators
     const claudePid = agent.meta.claude_pid ? parseInt(agent.meta.claude_pid, 10) : NaN;
     const claudeAlive = !isNaN(claudePid) && isPidAlive(claudePid);
     const claudeColor = claudeAlive ? GREEN : RED;
-    lines.push(truncateToWidth(`${claudeColor}●${RESET} Claude`, width, ""));
+    lines.push(truncateToWidth(`${claudeColor}●${RESET} ${labelPrefix}Claude`, width, ""));
 
     const watchdogPid = agent.meta.watchdog_pid;
     const watchdogAlive = typeof watchdogPid === "number" && isPidAlive(watchdogPid);
     const watchdogColor = watchdogAlive ? GREEN : RED;
-    lines.push(truncateToWidth(`${watchdogColor}●${RESET} Watchdog`, width, ""));
+    lines.push(truncateToWidth(`${watchdogColor}●${RESET} ${labelPrefix}Watchdog`, width, ""));
 
     const tmuxSession = agent.meta.tmux_session;
     const tmuxAlive = !!tmuxSession && this.liveTmuxSessions.has(tmuxSession);
     const tmuxColor = tmuxAlive ? GREEN : RED;
-    lines.push(truncateToWidth(`${tmuxColor}●${RESET} Tmux`, width, ""));
+    lines.push(truncateToWidth(`${tmuxColor}●${RESET} ${labelPrefix}Tmux`, width, ""));
+
+    return lines;
+  }
+
+  private renderAgentInfo(width: number): string[] {
+    const agent = this.agent!;
+    const lines: string[] = [];
+
+    lines.push(...this.renderStoplights(agent, width));
 
     // Orphan warning
     if (agent.orphaned && agent.meta.manager) {
@@ -100,6 +109,11 @@ export class InfoPanelComponent implements Component {
 
   private renderRepoInfo(width: number): string[] {
     const lines: string[] = [];
+
+    // Coordinator stoplights — Claude/Watchdog/Tmux for the repo's coordinator agent
+    if (this.repoCoordinatorAgent) {
+      lines.push(...this.renderStoplights(this.repoCoordinatorAgent, width, "Coord "));
+    }
 
     // Repo path
     const repoPath = this.selectedRepoPath ?? this.selectedRepoHeader ?? "";

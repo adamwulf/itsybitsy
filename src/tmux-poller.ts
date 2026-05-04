@@ -267,3 +267,20 @@ export async function sendTmuxKeys(tmuxSession: string, text: string): Promise<b
     return false;
   }
 }
+
+/**
+ * Send the Escape key to a tmux session. Used to interrupt a stuck/long-running
+ * agent without closing it.
+ */
+export async function sendTmuxEscape(tmuxSession: string): Promise<boolean> {
+  try {
+    const proc = spawnCtx.runner(
+      ["tmux", "send-keys", "-t", tmuxSession, "Escape"],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    const exitCode = await proc.exited;
+    return exitCode === 0;
+  } catch {
+    return false;
+  }
+}

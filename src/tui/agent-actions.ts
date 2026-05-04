@@ -18,7 +18,7 @@ import {
   installInterceptHook, uninstallInterceptHook,
 } from "../ib-commands";
 import type { NewAgentOptions, IbCommandResult } from "../ib-commands";
-import { captureTmuxOutput, resizeTmuxWindow, killTmuxSession, sendTmuxKeys } from "../tmux-poller";
+import { captureTmuxOutput, resizeTmuxWindow, killTmuxSession, sendTmuxKeys, sendTmuxEscape } from "../tmux-poller";
 import { parseState } from "../parse-state";
 import { openInGhostty, openPathInGhostty } from "../ghostty";
 import { buildFolderItems } from "./folder-browser";
@@ -490,6 +490,15 @@ export function handleSend(ctx: ActionCtx) {
     buffer: new TextBuffer(),
     focusedButton: "text",
     sendAll: false,
+    onSendEsc: () => {
+      ctx.closeDialog();
+      const session = agent.meta.tmux_session;
+      if (!session) { ctx.setNotice("No active tmux session"); return; }
+      ctx.executeAndRefresh(async () => {
+        const ok = await sendTmuxEscape(session);
+        ctx.setNotice(ok ? `Sent Esc to ${agent.id}` : `Failed to send Esc to ${agent.id}`);
+      });
+    },
     onSubmit: (message: string) => {
       ctx.closeDialog();
       if (!message.trim()) { ctx.setNotice("Send cancelled"); return; }
@@ -529,6 +538,13 @@ function handleSendToCoordinator(ctx: ActionCtx) {
     prompt: "Send message to coordinator:",
     buffer: new TextBuffer(),
     focusedButton: "text",
+    onSendEsc: () => {
+      ctx.closeDialog();
+      ctx.executeAndRefresh(async () => {
+        const ok = await sendTmuxEscape(IB_COORDINATOR_SESSION);
+        ctx.setNotice(ok ? "Sent Esc to coordinator" : "Failed to send Esc to coordinator");
+      });
+    },
     onSubmit: (message: string) => {
       ctx.closeDialog();
       if (!message.trim()) { ctx.setNotice("Send cancelled"); return; }
@@ -547,6 +563,15 @@ function handleSendToRepoCoordinator(ctx: ActionCtx, agent: Agent) {
     prompt: `Send message to ${agent.id} (coordinator):`,
     buffer: new TextBuffer(),
     focusedButton: "text",
+    onSendEsc: () => {
+      ctx.closeDialog();
+      const session = agent.meta.tmux_session;
+      if (!session) { ctx.setNotice("No active tmux session"); return; }
+      ctx.executeAndRefresh(async () => {
+        const ok = await sendTmuxEscape(session);
+        ctx.setNotice(ok ? `Sent Esc to ${agent.id}` : `Failed to send Esc to ${agent.id}`);
+      });
+    },
     onSubmit: (message: string) => {
       ctx.closeDialog();
       if (!message.trim()) { ctx.setNotice("Send cancelled"); return; }

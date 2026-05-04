@@ -28,9 +28,14 @@ export type DialogState =
       type: "textarea";
       prompt: string;
       buffer: TextBuffer;
-      focusedButton: "text" | "send" | "cancel";
+      focusedButton: "text" | "send" | "cancel" | "esc";
       sendAll?: boolean;
       onSubmit: (value: string) => void;
+      /** Optional: when set, an extra right-aligned "[ Send Esc ]" button is
+       *  rendered. Activating it (Enter while focused) invokes this callback,
+       *  which typically sends the Escape key to the agent's tmux session to
+       *  interrupt a stuck task. */
+      onSendEsc?: () => void;
     } & DialogCommon)
   | ({
       type: "folder-browser";
@@ -248,12 +253,24 @@ function handleTextareaDialog(
 
   const onAsyncRender = () => ctx.tui?.requestRender();
 
+  // Forward cycle: text → cancel → send → (esc if enabled) → text
+  // Reverse cycle: text → (esc if enabled) → send → cancel → text
+  const hasEsc = d.onSendEsc !== undefined;
+  const cycleForward: Array<typeof d.focusedButton> = hasEsc
+    ? ["text", "cancel", "send", "esc"]
+    : ["text", "cancel", "send"];
+  const nextFocus = (current: typeof d.focusedButton, dir: 1 | -1): typeof d.focusedButton => {
+    const idx = cycleForward.indexOf(current);
+    const len = cycleForward.length;
+    return cycleForward[((idx + dir) % len + len) % len]!;
+  };
+
   if (d.focusedButton === "text") {
     if (matchesKey(data, Key.tab)) {
-      d.focusedButton = "cancel";
+      d.focusedButton = nextFocus("text", 1);
       ctx.tui?.requestRender();
     } else if (matchesKey(data, Key.shift("tab"))) {
-      d.focusedButton = "send";
+      d.focusedButton = nextFocus("text", -1);
       ctx.tui?.requestRender();
     } else if (d.buffer.handleInput(data, onAsyncRender)) {
       ctx.tui?.requestRender();
@@ -262,10 +279,10 @@ function handleTextareaDialog(
     if (matchesKey(data, Key.enter)) {
       d.onSubmit(d.buffer.getText());
     } else if (matchesKey(data, Key.tab) || matchesKey(data, Key.right)) {
-      d.focusedButton = "text";
+      d.focusedButton = nextFocus("send", 1);
       ctx.tui?.requestRender();
     } else if (matchesKey(data, Key.shift("tab")) || matchesKey(data, Key.left)) {
-      d.focusedButton = "cancel";
+      d.focusedButton = nextFocus("send", -1);
       ctx.tui?.requestRender();
     } else if (d.buffer.handleInput(data, onAsyncRender)) {
       d.focusedButton = "text";
@@ -275,10 +292,23 @@ function handleTextareaDialog(
     if (matchesKey(data, Key.enter)) {
       ctx.closeDialog();
     } else if (matchesKey(data, Key.tab) || matchesKey(data, Key.right)) {
-      d.focusedButton = "send";
+      d.focusedButton = nextFocus("cancel", 1);
       ctx.tui?.requestRender();
     } else if (matchesKey(data, Key.shift("tab")) || matchesKey(data, Key.left)) {
+      d.focusedButton = nextFocus("cancel", -1);
+      ctx.tui?.requestRender();
+    } else if (d.buffer.handleInput(data, onAsyncRender)) {
       d.focusedButton = "text";
+      ctx.tui?.requestRender();
+    }
+  } else if (d.focusedButton === "esc") {
+    if (matchesKey(data, Key.enter)) {
+      d.onSendEsc?.();
+    } else if (matchesKey(data, Key.tab) || matchesKey(data, Key.right)) {
+      d.focusedButton = nextFocus("esc", 1);
+      ctx.tui?.requestRender();
+    } else if (matchesKey(data, Key.shift("tab")) || matchesKey(data, Key.left)) {
+      d.focusedButton = nextFocus("esc", -1);
       ctx.tui?.requestRender();
     } else if (d.buffer.handleInput(data, onAsyncRender)) {
       d.focusedButton = "text";

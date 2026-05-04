@@ -946,7 +946,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(sentMessages[0]!.message).toBe("hello");
   });
 
-  test("send textarea: Tab cycles forward through text → cancel → send → text", async () => {
+  test("send textarea: Tab cycles forward through text → cancel → send → esc → text", async () => {
     await setupDashboardWithAgent();
     dashboard.handleInput("s");
     const d = assertDialog(dashboard.dialog, 'textarea');
@@ -956,15 +956,19 @@ describe("DashboardComponent dialog and action handlers", () => {
     dashboard.handleInput("\t");
     expect(d.focusedButton).toBe("send");
     dashboard.handleInput("\t");
+    expect(d.focusedButton).toBe("esc");
+    dashboard.handleInput("\t");
     expect(d.focusedButton).toBe("text");
   });
 
-  test("send textarea: Shift+Tab cycles backward through text → send → cancel → text", async () => {
+  test("send textarea: Shift+Tab cycles backward through text → esc → send → cancel → text", async () => {
     await setupDashboardWithAgent();
     dashboard.handleInput("s");
     const d = assertDialog(dashboard.dialog, 'textarea');
     expect(d.focusedButton).toBe("text");
     // Legacy Shift+Tab sequence
+    dashboard.handleInput("\x1b[Z");
+    expect(d.focusedButton).toBe("esc");
     dashboard.handleInput("\x1b[Z");
     expect(d.focusedButton).toBe("send");
     dashboard.handleInput("\x1b[Z");
@@ -980,11 +984,33 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(d.focusedButton).toBe("text");
     // Kitty protocol Shift+Tab: CSI 9;2u (tab=9, shift modifier=2)
     dashboard.handleInput("\x1b[9;2u");
+    expect(d.focusedButton).toBe("esc");
+    dashboard.handleInput("\x1b[9;2u");
     expect(d.focusedButton).toBe("send");
     dashboard.handleInput("\x1b[9;2u");
     expect(d.focusedButton).toBe("cancel");
     dashboard.handleInput("\x1b[9;2u");
     expect(d.focusedButton).toBe("text");
+  });
+
+  test("send textarea: Enter on [ Send Esc ] button closes dialog and invokes onSendEsc", async () => {
+    await setupDashboardWithAgent();
+    dashboard.handleInput("s");
+    const d = assertDialog(dashboard.dialog, 'textarea');
+    expect(d.onSendEsc).toBeDefined();
+
+    // Replace onSendEsc with a test spy that doesn't go through tmux
+    let invoked = false;
+    d.onSendEsc = () => { invoked = true; dashboard.closeDialog(); };
+
+    // Tab to esc focus: text → cancel → send → esc
+    dashboard.handleInput("\t");
+    dashboard.handleInput("\t");
+    dashboard.handleInput("\t");
+    expect(d.focusedButton).toBe("esc");
+    dashboard.handleInput("\r");
+    expect(invoked).toBe(true);
+    expect(dashboard.dialog).toBeNull();
   });
 
   test("send textarea: sendAll defaults to false", async () => {

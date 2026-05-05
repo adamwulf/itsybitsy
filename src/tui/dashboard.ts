@@ -1108,6 +1108,7 @@ export class DashboardComponent implements Component {
       this.infoPanel.liveTmuxSessions = this.watcher.lastLiveTmuxSessions;
     }
 
+    // Wire default-agent-type
     this.infoPanel.availableAgentTypes = listSpawnableTypeNamesSync();
     const repoForDefault = this.agentTree.selectedRepoPath
       ? this.repos.find((r) => r.path === this.agentTree.selectedRepoPath)

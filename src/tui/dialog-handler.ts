@@ -8,7 +8,7 @@ import { wrapSingleLine } from "./wrap";
 import { buildFolderItems } from "./folder-browser";
 import type { FolderItem } from "./folder-browser";
 import { RESET, BOLD, DIM, REVERSE, GREEN, DIM_GRAY } from "./colors";
-import { resolvePasteText, cancelPaste } from "./clipboard";
+import { resolvePasteText, cancelPaste, sanitizePasteForSingleLine } from "./clipboard";
 import { TextBuffer, deleteWord } from "./text-buffer";
 
 export const TEXTAREA_VISIBLE_HEIGHT = 5;
@@ -183,7 +183,7 @@ export function handleDialogInput(ctx: DialogCtx, data: string): boolean {
       ctx.tui?.requestRender();
     } else {
       const pasteApply = (text: string) => {
-        dialog.value += text.replace(/[\r\n]/g, " ");
+        dialog.value += sanitizePasteForSingleLine(text);
         ctx.tui?.requestRender();
       };
       const pasteText = resolvePasteText(data, pasteApply);
@@ -600,7 +600,7 @@ function handleFuzzyDialog(
     ctx.tui?.requestRender();
   } else {
     const fuzzyPasteApply = (text: string) => {
-      d.query += text.replace(/[\r\n]/g, " ");
+      d.query += sanitizePasteForSingleLine(text);
       refilter();
       ctx.tui?.requestRender();
     };
@@ -646,7 +646,7 @@ function handlePermissionsEditorDialog(
       ctx.tui?.requestRender();
     } else {
       const permPasteApply = (text: string) => {
-        d.inputValue += text.replace(/[\r\n]/g, " ");
+        d.inputValue += sanitizePasteForSingleLine(text);
         ctx.tui?.requestRender();
       };
       const permPaste = resolvePasteText(data, permPasteApply);

@@ -122,10 +122,34 @@ export function resolvePasteText(
   return null;
 }
 
+/** Strip control characters that break pi-tui's width math.
+ *  Replaces tab with a single space (variable terminal-rendered width 1–8 vs.
+ *  pi-tui's fixed report of 3 — the mismatch trips the render-time width
+ *  assertion). Drops other C0 controls (< 0x20) since they have similar
+ *  width-math issues. Newline is preserved by the caller before this runs. */
+function sanitizeForBuffer(text: string): string {
+  let out = "";
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    if (code === 0x09) { out += " "; continue; }
+    if (code < 0x20) continue;
+    out += text[i];
+  }
+  return out;
+}
+
+/** Sanitize pasted text for single-line input fields.
+ *  Replaces newlines with spaces, then strips other problematic control chars. */
+export function sanitizePasteForSingleLine(text: string): string {
+  return sanitizeForBuffer(text.replace(/[\r\n]/g, " "));
+}
+
 /** Insert pasted text into a textarea-style lines array.
- *  Appends to the last line, then splits on newlines for multiline paste. */
+ *  Appends to the last line, then splits on newlines for multiline paste.
+ *  Tabs and other control chars are stripped per sanitizeForBuffer (pi-tui's
+ *  width math can't handle them — see comment on sanitizeForBuffer). */
 export function insertTextIntoLines(lines: string[], text: string): void {
-  const parts = text.split(/\r?\n/);
+  const parts = text.split(/\r?\n/).map(sanitizeForBuffer);
   const lastIdx = lines.length - 1;
   lines[lastIdx] = (lines[lastIdx] ?? "") + parts[0];
   for (let i = 1; i < parts.length; i++) {

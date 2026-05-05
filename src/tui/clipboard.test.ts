@@ -267,4 +267,59 @@ describe("insertTextIntoLines", () => {
     insertTextIntoLines(lines, " more");
     expect(lines).toEqual(["first", "second more"]);
   });
+
+  test("strips tab characters from pasted TSV", () => {
+    // pi-tui's visibleWidth() reports tab as 3 columns, but a real terminal
+    // expands tab to the next 8-col tab stop (variable 1–8). The mismatch
+    // breaks pi-tui's render-time width assertion. Sanitize tabs on input.
+    const lines = [""];
+    insertTextIntoLines(lines, "Role A\tFirst\tLast\tname@example.com");
+    for (const line of lines) {
+      expect(line).not.toContain("\t");
+    }
+  });
+
+  test("strips control characters except newline", () => {
+    const lines = [""];
+    insertTextIntoLines(lines, "a\x01b\x07c\x1bd");
+    for (const line of lines) {
+      for (let i = 0; i < line.length; i++) {
+        const code = line.charCodeAt(i);
+        expect(code === 0x0a || code >= 0x20).toBe(true);
+      }
+    }
+  });
+
+  test("preserves newlines when splitting multi-line TSV", () => {
+    const lines = [""];
+    insertTextIntoLines(lines, "a\tb\nc\td");
+    expect(lines.length).toBe(2);
+    for (const line of lines) {
+      expect(line).not.toContain("\t");
+    }
+  });
+});
+
+describe("wrapTextareaLines width invariant after paste", () => {
+  test("pasted TSV does not produce wrapped lines wider than requested width", async () => {
+    const { wrapTextareaLines } = await import("./dialog-handler");
+    const { visibleWidth } = await import("@mariozechner/pi-tui");
+    const lines = [""];
+    // Anonymized TSV — placeholders, not real names/emails.
+    insertTextIntoLines(lines, [
+      "Role A\tFirst1\tLast1\tname1@example.com",
+      "Role B\tFirst2\tLast2\tname2@example.com",
+      "Role C\tFirst3\tLast3\tname3@example.com",
+    ].join("\n"));
+
+    const width = 76;
+    const wrapped = wrapTextareaLines(lines, width);
+    for (const line of wrapped) {
+      // pi-tui's render-time assertion fails when a wrapped line's reported
+      // width matches but its actual rendered width exceeds the boundary.
+      // Sanitizing tabs on paste keeps reported and rendered widths aligned.
+      expect(line).not.toContain("\t");
+      expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+    }
+  });
 });

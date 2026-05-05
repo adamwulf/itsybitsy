@@ -20,9 +20,9 @@ import {
   isKeyRelease,
 } from "@mariozechner/pi-tui";
 import type { Component, OverlayHandle } from "@mariozechner/pi-tui";
-import { loadRegistry } from "../registry";
+import { loadRegistry, setRepoDefaultAgentType } from "../registry";
 import { readConfig, checkDeprecatedConfigKeys } from "../config";
-import { validateAllAgentTypes, ensureAgentTypesDir } from "../agent-types";
+import { validateAllAgentTypes, ensureAgentTypesDir, listSpawnableTypeNamesSync } from "../agent-types";
 import type { RepoEntry } from "../registry";
 import { AgentWatcher } from "../watcher";
 import { TmuxPoller, hasAttachedClient, sendTmuxKeys, resizeTmuxWindow } from "../tmux-poller";
@@ -1108,6 +1108,15 @@ export class DashboardComponent implements Component {
       this.infoPanel.liveTmuxSessions = this.watcher.lastLiveTmuxSessions;
     }
 
+    // Wire info-panel default-agent-type field. The `focused` and
+    // `subFocusOnDefaultType` flags are refreshed every render (see render())
+    // since Tab cycles focus without re-running syncSelectedAgent.
+    this.infoPanel.availableAgentTypes = listSpawnableTypeNamesSync();
+    const repoForDefault = this.agentTree.selectedRepoPath
+      ? this.repos.find((r) => r.path === this.agentTree.selectedRepoPath)
+      : undefined;
+    this.infoPanel.selectedRepoDefaultAgentType = repoForDefault?.defaultAgentType;
+
     // Wire health data to info panel and right pane
     const selectedRepoPath = this.agentTree.selectedRepoPath ?? (selected?.repoPath ?? null);
     const healthReport = selectedRepoPath && this.watcher ? this.watcher.healthReports.get(selectedRepoPath) : undefined;
@@ -1277,6 +1286,41 @@ export class DashboardComponent implements Component {
     };
 
     doCheck();
+  }
+
+  /** Persist a new default-agent-type for the currently selected repo header. */
+  private async persistDefaultAgentType(newType: string | null): Promise<void> {
+    const repoPath = this.agentTree.selectedRepoPath;
+    if (!repoPath) return;
+    const repo = this.repos.find((r) => r.path === repoPath);
+    if (!repo) return;
+    const result = await setRepoDefaultAgentType(repoPath, newType);
+    if (!result.ok) {
+      this.setNotice(result.message);
+      return;
+    }
+    if (newType && newType.trim()) {
+      repo.defaultAgentType = newType.trim();
+    } else {
+      delete repo.defaultAgentType;
+    }
+    this.infoPanel.selectedRepoDefaultAgentType = repo.defaultAgentType;
+    this.tui?.requestRender();
+  }
+
+  /** Cycle the info-panel Default Agent Type field to the next available type. */
+  private handleInfoCycleAgentType(): void {
+    const next = this.infoPanel.computeNextAgentType();
+    if (next === null) {
+      this.setNotice("No agent types available");
+      return;
+    }
+    void this.persistDefaultAgentType(next);
+  }
+
+  /** Clear the info-panel Default Agent Type field back to '(default)'. */
+  private handleInfoClearAgentType(): void {
+    void this.persistDefaultAgentType(null);
   }
 
   // --- Input handling ---
@@ -1477,6 +1521,24 @@ export class DashboardComponent implements Component {
       this.focusManager.cycle(-1);
       this.tui?.requestRender();
       return;
+    }
+
+    // Info panel: Default Agent Type cycle/clear when the row is the focused
+    // sub-field. Only active when info focus + repo header selected.
+    if (
+      this.focusManager.current() === "info"
+      && this.agentTree.selectedRepoHeader != null
+      && !this.agentTree.selectedAgent
+      && !this.agentTree.isSystemCoordinatorSelected
+    ) {
+      if (data === " ") {
+        this.handleInfoCycleAgentType();
+        return;
+      }
+      if (matchesKey(data, Key.backspace) || data === "\x7f" || matchesKey(data, Key.delete)) {
+        this.handleInfoClearAgentType();
+        return;
+      }
     }
 
     // Navigation
@@ -1906,6 +1968,14 @@ export class DashboardComponent implements Component {
 
     // Render sidebar and merge with main area
     this.sidebar.focusTarget = this.focusManager.current();
+    // Info-panel focus must follow Tab navigation, which changes focus without
+    // calling syncSelectedAgent. Refresh both flags on every render.
+    this.infoPanel.focused = this.focusManager.current() === "info";
+    this.infoPanel.subFocusOnDefaultType =
+      this.infoPanel.focused
+      && this.agentTree.selectedRepoHeader != null
+      && !this.agentTree.selectedAgent
+      && !this.agentTree.isSystemCoordinatorSelected;
     // Coordinator input field activation is handled in the TMUX render branch above
     // when coordinator is in the main area. For sidebar rendering, only activate when
     // coordinator is NOT selected (i.e., shown in sidebar's coordinator section).

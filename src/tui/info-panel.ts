@@ -1,6 +1,10 @@
 /**
  * InfoPanelComponent — displays details for the currently selected agent or repo header.
- * Read-only, no focus or interactive elements.
+ *
+ * Mostly read-only. The single interactive element is the "Default Agent Type"
+ * row rendered in repo-info mode: when this panel has focus and a repo header
+ * is selected, the row becomes the focused sub-field and accepts Space (cycle)
+ * and Backspace/Delete (clear) via the dashboard's input handler.
  */
 
 import type { Component } from "@mariozechner/pi-tui";
@@ -11,6 +15,7 @@ import { getStateColors } from "./color-scheme";
 import { displayState } from "./agent-tree";
 import { wrapLines, padLines } from "./wrap";
 import { RESET, BOLD, DIM, GREEN, RED, YELLOW } from "./colors";
+import { resolveDefaultAgentType } from "./default-agent-type";
 
 /** Check if a PID refers to a running process */
 function isPidAlive(pid: number): boolean {
@@ -33,6 +38,14 @@ export class InfoPanelComponent implements Component {
   liveTmuxSessions: Set<string> = new Set();
   /** The selected repo's coordinator agent, if any — drives the repo-info stoplights. */
   repoCoordinatorAgent: Agent | null = null;
+  /** The currently saved default agent type for the selected repo, if any. */
+  selectedRepoDefaultAgentType: string | undefined = undefined;
+  /** Spawnable agent type names the cycle field can choose from. */
+  availableAgentTypes: string[] = [];
+  /** Whether this panel has focus (drives Default Agent Type sub-field styling). */
+  focused = false;
+  /** Whether the Default Agent Type row is the focused sub-field within the panel. */
+  subFocusOnDefaultType = false;
   displayHeight = 5;
 
   invalidate(): void {}
@@ -107,6 +120,51 @@ export class InfoPanelComponent implements Component {
     return padLines(lines, this.displayHeight);
   }
 
+  /**
+   * Render the Default Agent Type row for repo info. Returns 1 line.
+   * Saved value still in `availableAgentTypes` → shows the type. Otherwise
+   * shows '(default)' but the underlying saved value is preserved on disk
+   * (see spec §3) so a temporarily-missing type comes back when restored.
+   */
+  private renderDefaultAgentTypeRow(width: number): string[] {
+    const saved = this.selectedRepoDefaultAgentType;
+    const isValid = !!(saved && this.availableAgentTypes.includes(saved));
+    const focused = this.focused && this.subFocusOnDefaultType;
+
+    const valueText = isValid ? saved! : `${DIM}(default)${RESET}`;
+
+    if (focused) {
+      const cycleHint = ` ${DIM}[Space to cycle, Del to reset]${RESET}`;
+      const valueColored = isValid ? `${BOLD}${GREEN}${saved}${RESET}` : valueText;
+      return [
+        truncateToWidth(
+          `${BOLD}${GREEN}Default Agent Type:${RESET} ${valueColored}${cycleHint}`,
+          width,
+          "",
+        ),
+      ];
+    }
+    return [truncateToWidth(`${DIM}Default Agent Type:${RESET} ${valueText}`, width, "")];
+  }
+
+  /**
+   * Compute the next agent type when cycling. From the saved value (or the
+   * resolved default if unset), advance one step in `availableAgentTypes`.
+   * If the saved value is missing from the available list, jump to the first
+   * available type. Returns null when no types are available.
+   */
+  computeNextAgentType(): string | null {
+    if (this.availableAgentTypes.length === 0) return null;
+    const saved = this.selectedRepoDefaultAgentType;
+    if (saved && !this.availableAgentTypes.includes(saved)) {
+      return this.availableAgentTypes[0]!;
+    }
+    const startFrom = saved ?? resolveDefaultAgentType(saved, this.availableAgentTypes);
+    const idx = this.availableAgentTypes.indexOf(startFrom);
+    const next = this.availableAgentTypes[(idx + 1) % this.availableAgentTypes.length]!;
+    return next;
+  }
+
   private renderRepoInfo(width: number): string[] {
     const lines: string[] = [];
 
@@ -118,6 +176,9 @@ export class InfoPanelComponent implements Component {
     // Repo path
     const repoPath = this.selectedRepoPath ?? this.selectedRepoHeader ?? "";
     lines.push(truncateToWidth(`${DIM}Path:${RESET} ${repoPath}`, width, ""));
+
+    // Default Agent Type — focusable cycle field
+    lines.push(...this.renderDefaultAgentTypeRow(width));
 
     // Count active (non-archived) agents and state breakdown
     const agentsInRepo = this.allAgents.filter(

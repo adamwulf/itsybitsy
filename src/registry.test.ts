@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { loadRegistry, saveRegistry, addRepo, removeRepo, renameRepo, listRepos, repoDisplayName } from "./registry";
+import { loadRegistry, saveRegistry, addRepo, removeRepo, renameRepo, listRepos, repoDisplayName, setRepoDefaultAgentType } from "./registry";
 import { join } from "path";
 import { mkdtemp, rm, mkdir } from "fs/promises";
 import { tmpdir } from "os";
@@ -247,6 +247,77 @@ describe("registry", () => {
     await saveRegistry(data);
     const loaded = await loadRegistry();
     expect(loaded.repos[0]!.nickname).toBe("nick");
+  });
+
+  // --- setRepoDefaultAgentType ---
+
+  test("setRepoDefaultAgentType sets the field and persists", async () => {
+    const repoDir = join(tempDir, "myrepo");
+    await mkdir(repoDir, { recursive: true });
+    await addRepo(repoDir);
+    const result = await setRepoDefaultAgentType(repoDir, "worker");
+    expect(result.ok).toBe(true);
+    const reloaded = await loadRegistry();
+    expect(reloaded.repos[0]!.defaultAgentType).toBe("worker");
+  });
+
+  test("setRepoDefaultAgentType clears with null", async () => {
+    const repoDir = join(tempDir, "myrepo");
+    await mkdir(repoDir, { recursive: true });
+    await addRepo(repoDir);
+    await setRepoDefaultAgentType(repoDir, "worker");
+    const result = await setRepoDefaultAgentType(repoDir, null);
+    expect(result.ok).toBe(true);
+    const reloaded = await loadRegistry();
+    expect(reloaded.repos[0]!.defaultAgentType).toBeUndefined();
+  });
+
+  test("setRepoDefaultAgentType clears with empty string", async () => {
+    const repoDir = join(tempDir, "myrepo");
+    await mkdir(repoDir, { recursive: true });
+    await addRepo(repoDir);
+    await setRepoDefaultAgentType(repoDir, "worker");
+    const result = await setRepoDefaultAgentType(repoDir, "");
+    expect(result.ok).toBe(true);
+    const reloaded = await loadRegistry();
+    expect(reloaded.repos[0]!.defaultAgentType).toBeUndefined();
+  });
+
+  test("setRepoDefaultAgentType clears with whitespace-only string", async () => {
+    const repoDir = join(tempDir, "myrepo");
+    await mkdir(repoDir, { recursive: true });
+    await addRepo(repoDir);
+    await setRepoDefaultAgentType(repoDir, "manager");
+    const result = await setRepoDefaultAgentType(repoDir, "   ");
+    expect(result.ok).toBe(true);
+    const reloaded = await loadRegistry();
+    expect(reloaded.repos[0]!.defaultAgentType).toBeUndefined();
+  });
+
+  test("setRepoDefaultAgentType returns error for unknown path", async () => {
+    const result = await setRepoDefaultAgentType("/nonexistent", "worker");
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("Not found");
+  });
+
+  test("setRepoDefaultAgentType updates an existing value", async () => {
+    const repoDir = join(tempDir, "myrepo");
+    await mkdir(repoDir, { recursive: true });
+    await addRepo(repoDir);
+    await setRepoDefaultAgentType(repoDir, "manager");
+    const result = await setRepoDefaultAgentType(repoDir, "worker");
+    expect(result.ok).toBe(true);
+    const reloaded = await loadRegistry();
+    expect(reloaded.repos[0]!.defaultAgentType).toBe("worker");
+  });
+
+  test("loadRegistry preserves defaultAgentType across reload", async () => {
+    const repoDir = join(tempDir, "myrepo");
+    await mkdir(repoDir, { recursive: true });
+    await addRepo(repoDir);
+    await setRepoDefaultAgentType(repoDir, "coordinator");
+    const reloaded = await loadRegistry();
+    expect(reloaded.repos[0]!.defaultAgentType).toBe("coordinator");
   });
 
   test("registry writes to ~/.itsybitsy/repos.json not ~/.itsybitsy.json", async () => {

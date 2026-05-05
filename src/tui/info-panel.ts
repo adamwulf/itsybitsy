@@ -1,10 +1,7 @@
 /**
  * InfoPanelComponent — displays details for the currently selected agent or repo header.
- *
- * Mostly read-only. The single interactive element is the "Default Agent Type"
- * row rendered in repo-info mode: when this panel has focus and a repo header
- * is selected, the row becomes the focused sub-field and accepts Space (cycle)
- * and Backspace/Delete (clear) via the dashboard's input handler.
+ * The Default Agent Type row in repo-info mode is interactive when this panel
+ * has focus (Space cycles, Backspace/Delete clears).
  */
 
 import type { Component } from "@mariozechner/pi-tui";
@@ -120,12 +117,9 @@ export class InfoPanelComponent implements Component {
     return padLines(lines, this.displayHeight);
   }
 
-  /**
-   * Render the Default Agent Type row for repo info. Returns 1 line.
-   * Saved value still in `availableAgentTypes` → shows the type. Otherwise
-   * shows '(default)' but the underlying saved value is preserved on disk
-   * (see spec §3) so a temporarily-missing type comes back when restored.
-   */
+  // A saved value missing from `availableAgentTypes` renders as '(default)'
+  // but the underlying value is preserved so a temporarily-missing type
+  // (e.g. user editing agent-types/) comes back when restored.
   private renderDefaultAgentTypeRow(width: number): string[] {
     const saved = this.selectedRepoDefaultAgentType;
     const isValid = !!(saved && this.availableAgentTypes.includes(saved));
@@ -147,22 +141,15 @@ export class InfoPanelComponent implements Component {
     return [truncateToWidth(`${DIM}Default Agent Type:${RESET} ${valueText}`, width, "")];
   }
 
-  /**
-   * Compute the next agent type when cycling. From the saved value (or the
-   * resolved default if unset), advance one step in `availableAgentTypes`.
-   * If the saved value is missing from the available list, jump to the first
-   * available type. Returns null when no types are available.
-   */
   computeNextAgentType(): string | null {
     if (this.availableAgentTypes.length === 0) return null;
     const saved = this.selectedRepoDefaultAgentType;
     if (saved && !this.availableAgentTypes.includes(saved)) {
       return this.availableAgentTypes[0]!;
     }
-    const startFrom = saved ?? resolveDefaultAgentType(saved, this.availableAgentTypes);
+    const startFrom = saved ?? resolveDefaultAgentType(undefined, this.availableAgentTypes);
     const idx = this.availableAgentTypes.indexOf(startFrom);
-    const next = this.availableAgentTypes[(idx + 1) % this.availableAgentTypes.length]!;
-    return next;
+    return this.availableAgentTypes[(idx + 1) % this.availableAgentTypes.length]!;
   }
 
   private renderRepoInfo(width: number): string[] {

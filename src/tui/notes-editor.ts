@@ -69,14 +69,13 @@ export class NotesEditorComponent implements Component {
       const entry = allWrapped[scrollOffset + vi];
       if (!entry) continue;
       const isLast = (scrollOffset + vi) === totalWrapped - 1;
-      const isEmpty = entry.text.length === 0 && !isLast;
       const placeholderEmpty = !this.active && totalWrapped === 1 && entry.text.length === 0;
       if (placeholderEmpty) {
         out.push(truncateToWidth(`${entry.prefix}${DIM}(no notes)${RESET}`, width, ""));
       } else if (isLast && showCursor) {
         out.push(truncateToWidth(`${entry.prefix}${entry.text}█`, width, ""));
       } else {
-        out.push(truncateToWidth(`${entry.prefix}${entry.text}${isEmpty ? "" : ""}`, width, ""));
+        out.push(truncateToWidth(`${entry.prefix}${entry.text}`, width, ""));
       }
     }
     return out;

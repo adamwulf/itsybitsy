@@ -702,6 +702,9 @@ export class DashboardComponent implements Component {
     this.repoCoordinatorInputField.onAsyncRender = () => {
       this.tui?.requestRender();
     };
+    this.infoPanel.notesEditor.onAsyncRender = () => {
+      this.tui?.requestRender();
+    };
 
     this.tmuxPoller = new TmuxPoller({
       onOutput: (raw, _stripped) => {
@@ -1631,7 +1634,6 @@ export class DashboardComponent implements Component {
           this.tui?.requestRender();
           return;
         }
-        this.infoPanel.notesEditor.onAsyncRender = () => this.tui?.requestRender();
         if (this.infoPanel.notesEditor.handleInput(data)) {
           this.tui?.requestRender();
           return;

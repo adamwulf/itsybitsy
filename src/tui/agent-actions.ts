@@ -963,7 +963,8 @@ export function handleHelp(ctx: ActionCtx) {
       header("Open"),
       row("w", "worktree"),
       row("o", "diff tool"),
-      row("G", "Ghostty"),
+      row("G", "Ghostty (repo/worktree)"),
+      row("C", "Ghostty (Claude tmux)"),
       row("S", "snapshot"),
       "",
       header("App"),
@@ -1229,13 +1230,21 @@ export function handleOpenGhostty(ctx: ActionCtx) {
   }
   const agent = ctx.agentTree.selectedAgent;
   if (agent) {
-    if (!agent.meta.tmux_session) { ctx.setNotice("No active tmux session"); return; }
-    const session = agent.meta.tmux_session;
-    openInGhostty(session).then((result) => {
-      ctx.setNotice(result.message);
-    }).catch((err) => {
-      ctx.setNotice(`Ghostty error: ${err}`);
-    });
+    const worktreePath = agentWorktreePath(agent);
+    (async () => {
+      let pathToOpen = worktreePath;
+      try {
+        const s = await stat(worktreePath);
+        if (!s.isDirectory()) pathToOpen = agent.repoPath;
+      } catch {
+        pathToOpen = agent.repoPath;
+      }
+      openPathInGhostty(pathToOpen).then((result) => {
+        ctx.setNotice(result.message);
+      }).catch((err) => {
+        ctx.setNotice(`Ghostty error: ${err}`);
+      });
+    })();
     return;
   }
   // No agent selected — check for repo header
@@ -1254,6 +1263,27 @@ export function handleOpenGhostty(ctx: ActionCtx) {
     }
   }
   ctx.setNotice("No agent or repo selected");
+}
+
+export function handleOpenGhosttyTmux(ctx: ActionCtx) {
+  // System coordinator selected: open its tmux session
+  if (ctx.agentTree.isSystemCoordinatorSelected) {
+    openInGhostty(IB_COORDINATOR_SESSION).then((result) => {
+      ctx.setNotice(result.message);
+    }).catch((err) => {
+      ctx.setNotice(`Ghostty error: ${err}`);
+    });
+    return;
+  }
+  const agent = ctx.agentTree.selectedAgent;
+  if (!agent) { ctx.setNotice("No agent selected"); return; }
+  if (!agent.meta.tmux_session) { ctx.setNotice("No active tmux session"); return; }
+  const session = agent.meta.tmux_session;
+  openInGhostty(session).then((result) => {
+    ctx.setNotice(result.message);
+  }).catch((err) => {
+    ctx.setNotice(`Ghostty error: ${err}`);
+  });
 }
 
 export function handleSnapshot(ctx: ActionCtx) {

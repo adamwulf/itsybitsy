@@ -984,7 +984,8 @@ export class DashboardComponent implements Component {
       { label: "new agent — a", action: () => agentActions.handleNewAgent(this) },
       { label: "open worktree — w", action: () => agentActions.handleOpenWorktree(this) },
       { label: "open diff in tool — o", action: () => agentActions.handleOpenDiffTool(this) },
-      { label: "open in Ghostty — G", action: () => agentActions.handleOpenGhostty(this) },
+      { label: "open repo in Ghostty — G", action: () => agentActions.handleOpenGhostty(this) },
+      { label: "open Claude tmux in Ghostty — C", action: () => agentActions.handleOpenGhosttyTmux(this) },
       { label: "debug snapshot — S", action: () => agentActions.handleSnapshot(this) },
       { label: "fuzzy jump to agent/repo — @", action: () => agentActions.handleFuzzyAgent(this) },
       { label: "add repo — A", action: () => agentActions.handleAddRepo(this) },
@@ -1796,8 +1797,10 @@ export class DashboardComponent implements Component {
     }
     // Fix resolvable health warnings (REPO mode only)
     else if (data === "f") { agentActions.handleResolveHealth(this); }
-    // Ghostty
+    // Ghostty — repo/worktree
     else if (data === "G") { agentActions.handleOpenGhostty(this); }
+    // Ghostty — Claude tmux session
+    else if (data === "C") { agentActions.handleOpenGhosttyTmux(this); }
     // Cross-repo send
     else if (data === "E") { agentActions.handleCrossRepoSend(this); }
     // Snapshot

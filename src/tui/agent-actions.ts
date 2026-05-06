@@ -823,6 +823,17 @@ export function handleScrollDown(ctx: ActionCtx) {
   ctx.tui?.requestRender();
 }
 
+async function resolveAgentDirPath(agent: Agent): Promise<string> {
+  const worktreePath = agentWorktreePath(agent);
+  try {
+    const s = await stat(worktreePath);
+    if (!s.isDirectory()) return agent.repoPath;
+  } catch {
+    return agent.repoPath;
+  }
+  return worktreePath;
+}
+
 export function handleOpenWorktree(ctx: ActionCtx) {
   const agent = ctx.agentTree.selectedAgent;
   if (!agent) {
@@ -841,16 +852,9 @@ export function handleOpenWorktree(ctx: ActionCtx) {
     }
     return;
   }
-  const worktreePath = agentWorktreePath(agent);
   (async () => {
+    const pathToOpen = await resolveAgentDirPath(agent);
     try {
-      let pathToOpen = worktreePath;
-      try {
-        const s = await stat(worktreePath);
-        if (!s.isDirectory()) pathToOpen = agent.repoPath;
-      } catch {
-        pathToOpen = agent.repoPath;
-      }
       await Bun.$`open ${pathToOpen}`.quiet();
       ctx.setNotice(`Opened ${pathToOpen}`);
     } catch (err) {
@@ -963,7 +967,8 @@ export function handleHelp(ctx: ActionCtx) {
       header("Open"),
       row("w", "worktree"),
       row("o", "diff tool"),
-      row("G", "Ghostty"),
+      row("G", "Ghostty (repo/worktree)"),
+      row("C", "Ghostty (Claude tmux)"),
       row("S", "snapshot"),
       "",
       header("App"),
@@ -1217,25 +1222,31 @@ export function handleResizeLeft(ctx: ActionCtx, delta: number) {
   ctx.tui?.requestRender();
 }
 
+// G and C share the system-coordinator branch: it has no worktree path, so
+// "open repo" and "open Claude tmux" both attach to the coordinator's tmux.
+function openSystemCoordinatorInGhostty(ctx: ActionCtx) {
+  openInGhostty(IB_COORDINATOR_SESSION).then((result) => {
+    ctx.setNotice(result.message);
+  }).catch((err) => {
+    ctx.setNotice(`Ghostty error: ${err}`);
+  });
+}
+
 export function handleOpenGhostty(ctx: ActionCtx) {
-  // System coordinator selected: open its tmux session
   if (ctx.agentTree.isSystemCoordinatorSelected) {
-    openInGhostty(IB_COORDINATOR_SESSION).then((result) => {
-      ctx.setNotice(result.message);
-    }).catch((err) => {
-      ctx.setNotice(`Ghostty error: ${err}`);
-    });
+    openSystemCoordinatorInGhostty(ctx);
     return;
   }
   const agent = ctx.agentTree.selectedAgent;
   if (agent) {
-    if (!agent.meta.tmux_session) { ctx.setNotice("No active tmux session"); return; }
-    const session = agent.meta.tmux_session;
-    openInGhostty(session).then((result) => {
-      ctx.setNotice(result.message);
-    }).catch((err) => {
-      ctx.setNotice(`Ghostty error: ${err}`);
-    });
+    (async () => {
+      const pathToOpen = await resolveAgentDirPath(agent);
+      openPathInGhostty(pathToOpen).then((result) => {
+        ctx.setNotice(result.message);
+      }).catch((err) => {
+        ctx.setNotice(`Ghostty error: ${err}`);
+      });
+    })();
     return;
   }
   // No agent selected — check for repo header
@@ -1254,6 +1265,39 @@ export function handleOpenGhostty(ctx: ActionCtx) {
     }
   }
   ctx.setNotice("No agent or repo selected");
+}
+
+export function handleOpenGhosttyTmux(ctx: ActionCtx) {
+  if (ctx.agentTree.isSystemCoordinatorSelected) {
+    openSystemCoordinatorInGhostty(ctx);
+    return;
+  }
+  const agent = ctx.agentTree.selectedAgent;
+  if (agent) {
+    if (!agent.meta.tmux_session) { ctx.setNotice("No active tmux session"); return; }
+    openInGhostty(agent.meta.tmux_session).then((result) => {
+      ctx.setNotice(result.message);
+    }).catch((err) => {
+      ctx.setNotice(`Ghostty error: ${err}`);
+    });
+    return;
+  }
+  // No agent selected — for repo header, open the per-repo coordinator's tmux
+  // (parallel to G opening the repo's directory).
+  const coordAgent = ctx.rightPane.repoCoordinatorAgent;
+  if (coordAgent && coordAgent.meta.tmux_session) {
+    openInGhostty(coordAgent.meta.tmux_session).then((result) => {
+      ctx.setNotice(result.message);
+    }).catch((err) => {
+      ctx.setNotice(`Ghostty error: ${err}`);
+    });
+    return;
+  }
+  if (ctx.agentTree.selectedRepoHeader) {
+    ctx.setNotice("No coordinator tmux for this repo");
+    return;
+  }
+  ctx.setNotice("No agent selected");
 }
 
 export function handleSnapshot(ctx: ActionCtx) {

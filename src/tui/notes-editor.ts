@@ -86,14 +86,12 @@ export class NotesEditorComponent implements Component {
     const result: Array<{ prefix: string; text: string }> = [];
     for (let li = 0; li < lines.length; li++) {
       const lineText = lines[li] ?? "";
-      const firstPrefix = li === 0 ? "│ " : "  ";
       if (lineText.length <= textWidth) {
-        result.push({ prefix: firstPrefix, text: lineText });
+        result.push({ prefix: "│ ", text: lineText });
       } else {
         for (let offset = 0; offset < lineText.length; offset += textWidth) {
           const chunk = lineText.slice(offset, offset + textWidth);
-          const prefix = offset === 0 ? firstPrefix : "  ";
-          result.push({ prefix, text: chunk });
+          result.push({ prefix: "│ ", text: chunk });
         }
       }
     }

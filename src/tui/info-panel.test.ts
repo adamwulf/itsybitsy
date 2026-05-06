@@ -218,6 +218,143 @@ describe("InfoPanelComponent", () => {
     expect(text).toContain("/path/to/my-repo");
   });
 
+  describe("Default Agent Type field", () => {
+    test("renders '(default)' when not set", () => {
+      const panel = new InfoPanelComponent();
+      panel.displayHeight = 8;
+      panel.selectedRepoHeader = "my-repo";
+      panel.selectedRepoPath = "/path/to/my-repo";
+      panel.availableAgentTypes = ["coordinator", "manager", "worker"];
+      panel.selectedRepoDefaultAgentType = undefined;
+      const lines = panel.render(80);
+      const text = lines.map(stripAnsi).join("\n");
+      expect(text).toContain("Default Agent Type:");
+      expect(text).toContain("(default)");
+    });
+
+    test("renders saved value when valid", () => {
+      const panel = new InfoPanelComponent();
+      panel.displayHeight = 8;
+      panel.selectedRepoHeader = "my-repo";
+      panel.selectedRepoPath = "/path/to/my-repo";
+      panel.availableAgentTypes = ["coordinator", "manager", "worker"];
+      panel.selectedRepoDefaultAgentType = "worker";
+      const lines = panel.render(80);
+      const text = lines.map(stripAnsi).join("\n");
+      const row = text.split("\n").find((l) => l.includes("Default Agent Type:"))!;
+      expect(row).toContain("worker");
+      expect(row).not.toContain("(default)");
+    });
+
+    test("renders '(default)' when saved value is missing from available list", () => {
+      const panel = new InfoPanelComponent();
+      panel.displayHeight = 8;
+      panel.selectedRepoHeader = "my-repo";
+      panel.selectedRepoPath = "/path/to/my-repo";
+      panel.availableAgentTypes = ["manager", "worker"];
+      panel.selectedRepoDefaultAgentType = "deleted-type";
+      const lines = panel.render(80);
+      const text = lines.map(stripAnsi).join("\n");
+      const row = text.split("\n").find((l) => l.includes("Default Agent Type:"))!;
+      expect(row).toContain("(default)");
+      expect(row).not.toContain("deleted-type");
+    });
+
+    test("focused row shows BOLD GREEN with cycle hint", () => {
+      const panel = new InfoPanelComponent();
+      panel.displayHeight = 8;
+      panel.selectedRepoHeader = "my-repo";
+      panel.selectedRepoPath = "/path/to/my-repo";
+      panel.availableAgentTypes = ["manager", "worker"];
+      panel.selectedRepoDefaultAgentType = "worker";
+      panel.focused = true;
+      panel.subFocusOnDefaultType = true;
+      const lines = panel.render(80);
+      const row = lines.find((l) => stripAnsi(l).includes("Default Agent Type:"))!;
+      // BOLD = \x1b[1m, GREEN = \x1b[32m
+      expect(row).toContain("\x1b[1m");
+      expect(row).toContain("\x1b[32m");
+      expect(stripAnsi(row)).toContain("[Space to cycle, Del to reset]");
+    });
+
+    test("unfocused row uses DIM label without cycle hint", () => {
+      const panel = new InfoPanelComponent();
+      panel.displayHeight = 8;
+      panel.selectedRepoHeader = "my-repo";
+      panel.selectedRepoPath = "/path/to/my-repo";
+      panel.availableAgentTypes = ["manager"];
+      panel.selectedRepoDefaultAgentType = "manager";
+      panel.focused = false;
+      panel.subFocusOnDefaultType = false;
+      const lines = panel.render(80);
+      const row = lines.find((l) => stripAnsi(l).includes("Default Agent Type:"))!;
+      expect(stripAnsi(row)).not.toContain("[Space to cycle, Del to reset]");
+      // DIM = \x1b[2m
+      expect(row).toContain("\x1b[2m");
+    });
+
+    test("focus flag without subFocus does not enable cycle hint", () => {
+      const panel = new InfoPanelComponent();
+      panel.displayHeight = 8;
+      panel.selectedRepoHeader = "my-repo";
+      panel.selectedRepoPath = "/path/to/my-repo";
+      panel.availableAgentTypes = ["manager"];
+      panel.focused = true;
+      panel.subFocusOnDefaultType = false;
+      const lines = panel.render(80);
+      const text = lines.map(stripAnsi).join("\n");
+      expect(text).not.toContain("[Space to cycle, Del to reset]");
+    });
+
+    test("Default Agent Type row not rendered for agent info", () => {
+      const panel = new InfoPanelComponent();
+      panel.displayHeight = 10;
+      const agent = makeAgent({ id: "agent-x" });
+      agent.meta.prompt = "do work";
+      panel.agent = agent;
+      panel.availableAgentTypes = ["manager", "worker"];
+      const lines = panel.render(60);
+      const text = lines.map(stripAnsi).join("\n");
+      expect(text).not.toContain("Default Agent Type:");
+    });
+
+    test("computeNextAgentType cycles from saved value", () => {
+      const panel = new InfoPanelComponent();
+      panel.availableAgentTypes = ["coordinator", "manager", "worker"];
+      panel.selectedRepoDefaultAgentType = "manager";
+      expect(panel.computeNextAgentType()).toBe("worker");
+    });
+
+    test("computeNextAgentType wraps from last to first", () => {
+      const panel = new InfoPanelComponent();
+      panel.availableAgentTypes = ["coordinator", "manager", "worker"];
+      panel.selectedRepoDefaultAgentType = "worker";
+      expect(panel.computeNextAgentType()).toBe("coordinator");
+    });
+
+    test("computeNextAgentType from unset advances past resolved default", () => {
+      const panel = new InfoPanelComponent();
+      panel.availableAgentTypes = ["coordinator", "manager", "worker"];
+      panel.selectedRepoDefaultAgentType = undefined;
+      // resolved default = "manager", next = "worker"
+      expect(panel.computeNextAgentType()).toBe("worker");
+    });
+
+    test("computeNextAgentType jumps to first when saved value is missing", () => {
+      const panel = new InfoPanelComponent();
+      panel.availableAgentTypes = ["coordinator", "manager", "worker"];
+      panel.selectedRepoDefaultAgentType = "vanished";
+      expect(panel.computeNextAgentType()).toBe("coordinator");
+    });
+
+    test("computeNextAgentType returns null with no available types", () => {
+      const panel = new InfoPanelComponent();
+      panel.availableAgentTypes = [];
+      panel.selectedRepoDefaultAgentType = undefined;
+      expect(panel.computeNextAgentType()).toBeNull();
+    });
+  });
+
   test("claude PID dead shows red indicator", () => {
     const panel = new InfoPanelComponent();
     panel.displayHeight = 5;

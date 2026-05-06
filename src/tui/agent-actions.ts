@@ -23,6 +23,7 @@ import { parseState } from "../parse-state";
 import { openInGhostty, openPathInGhostty } from "../ghostty";
 import { buildFolderItems } from "./folder-browser";
 import { listSpawnableTypeNamesSync } from "../agent-types";
+import { resolveDefaultAgentType } from "./default-agent-type";
 import type { DialogState, SetupItem, ConfigDialogItem } from "./dialog-handler";
 import { TextBuffer } from "./text-buffer";
 import { readConfig, writeConfig, CONFIG_KEYS, defaultUserConfigPath } from "../config";
@@ -666,9 +667,7 @@ function showNewAgentFormDialog(ctx: ActionCtx, repo: RepoEntry) {
   // are filtered out — they act only as permission/prompt layers. Falls back to
   // embedded defaults when the on-disk types directory is missing.
   const availableTypes = listSpawnableTypeNamesSync();
-  const defaultType = availableTypes.includes("manager")
-    ? "manager"
-    : (availableTypes[0] ?? "manager");
+  const defaultType = resolveDefaultAgentType(repo.defaultAgentType, availableTypes);
 
   ctx.showDialog({
     type: "new-agent-form",

@@ -399,6 +399,43 @@ describe("handleNewAgent", () => {
     expect(dialogs).toHaveLength(1);
     assertDialog(dialogs[0]!, "new-agent-form");
   });
+
+  test("repo with saved defaultAgentType pre-selects it in dialog", () => {
+    const repos: RepoEntry[] = [
+      { path: "/tmp/repo", name: "repo", defaultAgentType: "worker" },
+    ];
+    const { ctx, dialogs } = makeMockCtx({ repos });
+    handleNewAgent(ctx);
+    const d = assertDialog(dialogs[0]!, "new-agent-form");
+    // worker is one of the built-in spawnable types, so it should be valid
+    if (d.availableTypes.includes("worker")) {
+      expect(d.agentType).toBe("worker");
+    }
+  });
+
+  test("repo with missing defaultAgentType falls back to manager", () => {
+    const repos: RepoEntry[] = [
+      { path: "/tmp/repo", name: "repo", defaultAgentType: "this-type-does-not-exist" },
+    ];
+    const { ctx, dialogs } = makeMockCtx({ repos });
+    handleNewAgent(ctx);
+    const d = assertDialog(dialogs[0]!, "new-agent-form");
+    // "this-type-does-not-exist" is not in availableTypes, so fall back to manager
+    expect(d.availableTypes).not.toContain("this-type-does-not-exist");
+    if (d.availableTypes.includes("manager")) {
+      expect(d.agentType).toBe("manager");
+    }
+  });
+
+  test("repo without defaultAgentType uses manager fallback", () => {
+    const repos: RepoEntry[] = [{ path: "/tmp/repo", name: "repo" }];
+    const { ctx, dialogs } = makeMockCtx({ repos });
+    handleNewAgent(ctx);
+    const d = assertDialog(dialogs[0]!, "new-agent-form");
+    if (d.availableTypes.includes("manager")) {
+      expect(d.agentType).toBe("manager");
+    }
+  });
 });
 
 describe("handleScrollUp / handleScrollDown", () => {

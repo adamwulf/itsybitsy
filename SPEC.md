@@ -1132,25 +1132,23 @@ The path is sourced from the `repoPath` field on the `repo-header` FlatEntry, wh
 
 ### 8.12 Ghostty Integration
 
-Two keybindings open a new Ghostty terminal window. They split responsibility along "open the directory" vs. "attach to the Claude tmux session":
+Two keybindings open a new Ghostty terminal window. They split responsibility along "open the directory" vs. "attach to the Claude tmux session". The system coordinator has no worktree directory, so `G` and `C` collapse to the same behavior when it is selected — both attach to the `ib-coordinator` tmux session.
 
 **`G` — open the repo / worktree directory**
 
-- **Agent selected**: Opens Ghostty with a fresh login shell in the agent's worktree directory (`cd <worktree> && exec bash -l`). If the worktree path doesn't exist or isn't a directory (e.g., the worktree was removed or `worktree: false`), falls back to `agent.repoPath`.
+- **Agent selected**: Opens Ghostty with a fresh login shell in the agent's worktree directory (`cd <worktree> && exec bash -l`). If the worktree path doesn't exist or isn't a directory (e.g., the worktree was removed or `worktree: false`), falls back to `agent.repoPath`. The `w` keybinding (open the same directory in Finder) uses the identical fallback rule, so `G` and `w` resolve to the same path for any given agent.
 - **Repo header selected (no agent)**: Opens Ghostty with a fresh login shell in the repo's directory.
-- **System coordinator selected**: Opens Ghostty attached to the `ib-coordinator` tmux session (the coordinator has no worktree, so `G` and `C` collapse to the same behavior here).
+- **System coordinator selected**: Opens Ghostty attached to the `ib-coordinator` tmux session.
 - **Nothing selected**: Shows a notice ("No agent or repo selected").
 
 **`C` — open the Claude tmux session**
 
 - **Agent selected**: Opens Ghostty attached to the agent's tmux session (`tmux attach -t <session>`). The tmux `window-size` option is set to `latest` so the pane resizes to match Ghostty's dimensions. Requires the agent to have an active tmux session.
 - **Repo header selected (no agent)**: Opens Ghostty attached to the per-repo coordinator's tmux session if one exists. If the repo has no coordinator, shows a notice ("No coordinator tmux for this repo"). This parallels `G`'s repo-header behavior, which opens the repo's directory.
-- **System coordinator selected**: Same as `G` for the system coordinator — opens the `ib-coordinator` tmux.
+- **System coordinator selected**: Opens Ghostty attached to the `ib-coordinator` tmux session.
 - **Nothing selected**: Shows a notice ("No agent selected").
 
 Both paths validate their inputs (tmux session names against `/^[\w-]+$/`; directory paths against control characters and DEL) before spawning Ghostty. The spawn uses array-based `Bun.spawn` (no shell interpolation) with `stdio: ["ignore", "ignore", "ignore"]` and `proc.unref()` to detach from the parent process.
-
-The shared agent-directory resolution helper (`resolveAgentDirPath`) is also used by `handleOpenWorktree` (the `w` keybinding) so both paths fall back to `repoPath` identically when a worktree directory is missing.
 
 ### 8.13 REPO Pane Mode
 

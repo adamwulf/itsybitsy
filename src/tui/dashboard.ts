@@ -20,7 +20,7 @@ import {
   isKeyRelease,
 } from "@mariozechner/pi-tui";
 import type { Component, OverlayHandle } from "@mariozechner/pi-tui";
-import { loadRegistry, setRepoDefaultAgentType } from "../registry";
+import { loadRegistry, setRepoDefaultAgentType, setRepoNotes } from "../registry";
 import { readConfig, checkDeprecatedConfigKeys } from "../config";
 import { validateAllAgentTypes, ensureAgentTypesDir, listSpawnableTypeNamesSync } from "../agent-types";
 import type { RepoEntry } from "../registry";
@@ -507,6 +507,10 @@ export class DashboardComponent implements Component {
   /** The tmux session currently being polled for repo coordinator */
   repoCoordinatorSession: string | null = null;
   currentAgentId: string | null = null;
+  /** Repo path whose notes are currently loaded into the info-panel notes editor. */
+  private notesEditorRepoPath: string | null = null;
+  /** Snapshot of notes text taken when the user entered the notes sub-field — used to revert on Escape. */
+  private notesEditorOriginal: string = "";
   _dialog: DialogState = null;
   private overlayHandle: OverlayHandle | null = null;
   private dialogOverlay: DialogOverlayComponent;
@@ -696,6 +700,9 @@ export class DashboardComponent implements Component {
       this.tui?.requestRender();
     };
     this.repoCoordinatorInputField.onAsyncRender = () => {
+      this.tui?.requestRender();
+    };
+    this.infoPanel.notesEditor.onAsyncRender = () => {
       this.tui?.requestRender();
     };
 
@@ -1115,6 +1122,26 @@ export class DashboardComponent implements Component {
       : undefined;
     this.infoPanel.selectedRepoDefaultAgentType = repoForDefault?.defaultAgentType;
 
+    // Wire notes editor — if the selected repo changed, flush any pending edits
+    // for the previous repo, then load the new repo's notes.
+    const newNotesRepoPath = this.agentTree.selectedRepoPath ?? null;
+    if (newNotesRepoPath !== this.notesEditorRepoPath) {
+      if (this.notesEditorRepoPath) {
+        const pending = this.infoPanel.notesEditor.getText();
+        if (pending !== this.notesEditorOriginal) {
+          void this.persistNotes(this.notesEditorRepoPath, pending);
+        }
+      }
+      this.notesEditorRepoPath = newNotesRepoPath;
+      const initial = repoForDefault?.notes ?? "";
+      this.infoPanel.notesEditor.setText(initial);
+      this.notesEditorOriginal = initial;
+      // If the new selection isn't a repo header, drop notes sub-focus.
+      if (!newNotesRepoPath && this.infoPanel.subField === "notes") {
+        this.infoPanel.subField = "default-type";
+      }
+    }
+
     // Wire health data to info panel and right pane
     const selectedRepoPath = this.agentTree.selectedRepoPath ?? (selected?.repoPath ?? null);
     const healthReport = selectedRepoPath && this.watcher ? this.watcher.healthReports.get(selectedRepoPath) : undefined;
@@ -1304,6 +1331,40 @@ export class DashboardComponent implements Component {
     }
     this.infoPanel.selectedRepoDefaultAgentType = repo.defaultAgentType;
     this.tui?.requestRender();
+  }
+
+  /** Save notes for a repo to the registry and update the in-memory copy. */
+  private async persistNotes(repoPath: string, notes: string): Promise<void> {
+    const repo = this.repos.find((r) => r.path === repoPath);
+    if (!repo) return;
+    const result = await setRepoNotes(repoPath, notes);
+    if (!result.ok) {
+      this.setNotice(result.message);
+      return;
+    }
+    if (notes.length > 0) {
+      repo.notes = notes;
+    } else {
+      delete repo.notes;
+    }
+  }
+
+  /**
+   * If the notes editor's text differs from its original snapshot, persist
+   * the change. Updates the snapshot so subsequent blurs are no-ops.
+   */
+  private commitNotesIfChanged(): void {
+    if (!this.notesEditorRepoPath) return;
+    const current = this.infoPanel.notesEditor.getText();
+    if (current === this.notesEditorOriginal) return;
+    const repoPath = this.notesEditorRepoPath;
+    this.notesEditorOriginal = current;
+    void this.persistNotes(repoPath, current);
+  }
+
+  /** Revert notes editor to its original value (used by Escape inside notes). */
+  private revertNotes(): void {
+    this.infoPanel.notesEditor.setText(this.notesEditorOriginal);
   }
 
   /** Cycle the info-panel Default Agent Type field to the next available type. */
@@ -1509,6 +1570,41 @@ export class DashboardComponent implements Component {
       // Pane sub-focus and Send sub-focus: fall through to normal dashboard key handling
     }
 
+    // Info panel: when a repo header is selected, Tab cycles between
+    // sub-fields (default-type → notes → next panel). Shift-Tab cycles back.
+    // When the notes sub-field is leaving focus, save any edits.
+    if (
+      this.focusManager.current() === "info"
+      && this.agentTree.selectedRepoHeader != null
+    ) {
+      if (data === "\t" || matchesKey(data, Key.tab)) {
+        if (this.infoPanel.subField === "default-type") {
+          this.infoPanel.subField = "notes";
+          this.notesEditorOriginal = this.infoPanel.notesEditor.getText();
+          this.tui?.requestRender();
+          return;
+        }
+        // notes → leave panel: save then cycle to next panel
+        this.commitNotesIfChanged();
+        this.infoPanel.subField = "default-type";
+        this.focusManager.cycle(1);
+        this.tui?.requestRender();
+        return;
+      }
+      if (data === "\x1b[Z" || matchesKey(data, Key.shift("tab"))) {
+        if (this.infoPanel.subField === "notes") {
+          this.commitNotesIfChanged();
+          this.infoPanel.subField = "default-type";
+          this.tui?.requestRender();
+          return;
+        }
+        // default-type → leave panel backwards
+        this.focusManager.cycle(-1);
+        this.tui?.requestRender();
+        return;
+      }
+    }
+
     // Tab / Shift-Tab: cycle focus between panels
     if (data === "\t" || matchesKey(data, Key.tab)) {
       this.focusManager.cycle(1);
@@ -1528,13 +1624,30 @@ export class DashboardComponent implements Component {
       this.focusManager.current() === "info"
       && this.agentTree.selectedRepoHeader != null
     ) {
-      if (data === " ") {
-        this.handleInfoCycleAgentType();
-        return;
-      }
-      if (matchesKey(data, Key.backspace) || data === "\x7f" || matchesKey(data, Key.delete)) {
-        this.handleInfoClearAgentType();
-        return;
+      // Notes sub-field: Escape reverts to the snapshot taken on entry,
+      // any other key is routed to the multi-line editor.
+      if (this.infoPanel.subField === "notes") {
+        if (matchesKey(data, Key.escape) || data === "\x1b") {
+          cancelPaste();
+          this.revertNotes();
+          this.infoPanel.subField = "default-type";
+          this.tui?.requestRender();
+          return;
+        }
+        if (this.infoPanel.notesEditor.handleInput(data)) {
+          this.tui?.requestRender();
+          return;
+        }
+        // Editor didn't consume — fall through to normal dashboard handling.
+      } else {
+        if (data === " ") {
+          this.handleInfoCycleAgentType();
+          return;
+        }
+        if (matchesKey(data, Key.backspace) || data === "\x7f" || matchesKey(data, Key.delete)) {
+          this.handleInfoClearAgentType();
+          return;
+        }
       }
     }
 
@@ -1967,9 +2080,17 @@ export class DashboardComponent implements Component {
     this.sidebar.focusTarget = this.focusManager.current();
     // Info-panel focus must follow Tab navigation, which changes focus without
     // calling syncSelectedAgent.
+    const wasInfoFocused = this.infoPanel.focused;
+    const wasNotesSubField = this.infoPanel.subField === "notes";
     this.infoPanel.focused = this.focusManager.current() === "info";
-    this.infoPanel.subFocusOnDefaultType =
-      this.infoPanel.focused && this.agentTree.selectedRepoHeader != null;
+    if (wasInfoFocused && !this.infoPanel.focused && wasNotesSubField) {
+      // Lost info focus while editing notes (e.g. focus jumped via shortcut).
+      // Save edits and reset to the default sub-field.
+      this.commitNotesIfChanged();
+      this.infoPanel.subField = "default-type";
+    } else if (!this.infoPanel.focused && this.infoPanel.subField === "notes") {
+      this.infoPanel.subField = "default-type";
+    }
     // Coordinator input field activation is handled in the TMUX render branch above
     // when coordinator is in the main area. For sidebar rendering, only activate when
     // coordinator is NOT selected (i.e., shown in sidebar's coordinator section).

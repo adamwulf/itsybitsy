@@ -13,6 +13,10 @@ import { displayState } from "./agent-tree";
 import { wrapLines, padLines } from "./wrap";
 import { RESET, BOLD, DIM, GREEN, RED, YELLOW } from "./colors";
 import { resolveDefaultAgentType } from "./default-agent-type";
+import { NotesEditorComponent } from "./notes-editor";
+
+/** Sub-field within the Info panel that has focus when the panel is focused. */
+export type InfoSubField = "default-type" | "notes";
 
 /** Check if a PID refers to a running process */
 function isPidAlive(pid: number): boolean {
@@ -41,8 +45,10 @@ export class InfoPanelComponent implements Component {
   availableAgentTypes: string[] = [];
   /** Whether this panel has focus (drives Default Agent Type sub-field styling). */
   focused = false;
-  /** Whether the Default Agent Type row is the focused sub-field within the panel. */
-  subFocusOnDefaultType = false;
+  /** Which sub-field is focused when the panel is focused (repo-info mode only). */
+  subField: InfoSubField = "default-type";
+  /** Notes editor instance — owns its own TextBuffer; dashboard drives it. */
+  notesEditor = new NotesEditorComponent();
   displayHeight = 5;
 
   invalidate(): void {}
@@ -123,7 +129,7 @@ export class InfoPanelComponent implements Component {
   private renderDefaultAgentTypeRow(width: number): string[] {
     const saved = this.selectedRepoDefaultAgentType;
     const isValid = !!(saved && this.availableAgentTypes.includes(saved));
-    const focused = this.focused && this.subFocusOnDefaultType;
+    const focused = this.focused && this.subField === "default-type";
 
     const valueText = isValid ? saved! : `${DIM}(default)${RESET}`;
 
@@ -139,6 +145,15 @@ export class InfoPanelComponent implements Component {
       ];
     }
     return [truncateToWidth(`${DIM}Default Agent Type:${RESET} ${valueText}`, width, "")];
+  }
+
+  private renderNotesSection(width: number): string[] {
+    const focused = this.focused && this.subField === "notes";
+    const labelStyle = focused ? `${BOLD}${GREEN}` : DIM;
+    const hint = focused ? ` ${DIM}[Esc to cancel]${RESET}` : "";
+    const header = truncateToWidth(`${labelStyle}Notes:${RESET}${hint}`, width, "");
+    this.notesEditor.active = focused;
+    return [header, ...this.notesEditor.render(width)];
   }
 
   computeNextAgentType(): string | null {
@@ -166,6 +181,9 @@ export class InfoPanelComponent implements Component {
 
     // Default Agent Type — focusable cycle field
     lines.push(...this.renderDefaultAgentTypeRow(width));
+
+    // Notes — focusable multi-line editor
+    lines.push(...this.renderNotesSection(width));
 
     // Count active (non-archived) agents and state breakdown
     const agentsInRepo = this.allAgents.filter(

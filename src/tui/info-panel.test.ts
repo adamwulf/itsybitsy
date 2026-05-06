@@ -49,7 +49,7 @@ describe("InfoPanelComponent", () => {
 
   test("renders repo info when repo header selected", () => {
     const panel = new InfoPanelComponent();
-    panel.displayHeight = 5;
+    panel.displayHeight = 8;
     panel.selectedRepoHeader = "my-repo";
     panel.selectedRepoPath = "/path/to/my-repo";
 
@@ -268,7 +268,7 @@ describe("InfoPanelComponent", () => {
       panel.availableAgentTypes = ["manager", "worker"];
       panel.selectedRepoDefaultAgentType = "worker";
       panel.focused = true;
-      panel.subFocusOnDefaultType = true;
+      panel.subField = "default-type";
       const lines = panel.render(80);
       const row = lines.find((l) => stripAnsi(l).includes("Default Agent Type:"))!;
       // BOLD = \x1b[1m, GREEN = \x1b[32m
@@ -285,7 +285,7 @@ describe("InfoPanelComponent", () => {
       panel.availableAgentTypes = ["manager"];
       panel.selectedRepoDefaultAgentType = "manager";
       panel.focused = false;
-      panel.subFocusOnDefaultType = false;
+      panel.subField = "default-type";
       const lines = panel.render(80);
       const row = lines.find((l) => stripAnsi(l).includes("Default Agent Type:"))!;
       expect(stripAnsi(row)).not.toContain("[Space to cycle, Del to reset]");
@@ -293,17 +293,57 @@ describe("InfoPanelComponent", () => {
       expect(row).toContain("\x1b[2m");
     });
 
-    test("focus flag without subFocus does not enable cycle hint", () => {
+    test("notes sub-field focus does not enable default-type cycle hint", () => {
       const panel = new InfoPanelComponent();
       panel.displayHeight = 8;
       panel.selectedRepoHeader = "my-repo";
       panel.selectedRepoPath = "/path/to/my-repo";
       panel.availableAgentTypes = ["manager"];
       panel.focused = true;
-      panel.subFocusOnDefaultType = false;
+      panel.subField = "notes";
       const lines = panel.render(80);
       const text = lines.map(stripAnsi).join("\n");
       expect(text).not.toContain("[Space to cycle, Del to reset]");
+    });
+
+    test("Notes section renders for repo header with editor content", () => {
+      const panel = new InfoPanelComponent();
+      panel.displayHeight = 12;
+      panel.selectedRepoHeader = "my-repo";
+      panel.selectedRepoPath = "/path/to/my-repo";
+      panel.availableAgentTypes = ["manager"];
+      panel.notesEditor.setText("remember to refactor X");
+      const lines = panel.render(60);
+      const text = lines.map(stripAnsi).join("\n");
+      expect(text).toContain("Notes:");
+      expect(text).toContain("remember to refactor X");
+    });
+
+    test("Notes section shows BOLD GREEN label and Esc hint when sub-focused", () => {
+      const panel = new InfoPanelComponent();
+      panel.displayHeight = 12;
+      panel.selectedRepoHeader = "my-repo";
+      panel.selectedRepoPath = "/path/to/my-repo";
+      panel.availableAgentTypes = ["manager"];
+      panel.focused = true;
+      panel.subField = "notes";
+      const lines = panel.render(60);
+      const labelRow = lines.find((l) => stripAnsi(l).includes("Notes:"))!;
+      // BOLD = \x1b[1m, GREEN = \x1b[32m
+      expect(labelRow).toContain("\x1b[1m");
+      expect(labelRow).toContain("\x1b[32m");
+      expect(stripAnsi(labelRow)).toContain("[Esc to cancel]");
+    });
+
+    test("Notes section not rendered for agent info", () => {
+      const panel = new InfoPanelComponent();
+      panel.displayHeight = 10;
+      const agent = makeAgent({ id: "agent-x" });
+      agent.meta.prompt = "do work";
+      panel.agent = agent;
+      const lines = panel.render(60);
+      const text = lines.map(stripAnsi).join("\n");
+      expect(text).not.toContain("Notes:");
     });
 
     test("Default Agent Type row not rendered for agent info", () => {

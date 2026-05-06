@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { loadRegistry, saveRegistry, addRepo, removeRepo, renameRepo, listRepos, repoDisplayName, setRepoDefaultAgentType } from "./registry";
+import { loadRegistry, saveRegistry, addRepo, removeRepo, renameRepo, listRepos, repoDisplayName, setRepoDefaultAgentType, setRepoNotes } from "./registry";
 import { join } from "path";
 import { mkdtemp, rm, mkdir } from "fs/promises";
 import { tmpdir } from "os";
@@ -318,6 +318,67 @@ describe("registry", () => {
     await setRepoDefaultAgentType(repoDir, "coordinator");
     const reloaded = await loadRegistry();
     expect(reloaded.repos[0]!.defaultAgentType).toBe("coordinator");
+  });
+
+  // --- setRepoNotes ---
+
+  test("setRepoNotes sets the field and persists", async () => {
+    const repoDir = join(tempDir, "myrepo");
+    await mkdir(repoDir, { recursive: true });
+    await addRepo(repoDir);
+    const result = await setRepoNotes(repoDir, "first line\nsecond line");
+    expect(result.ok).toBe(true);
+    const reloaded = await loadRegistry();
+    expect(reloaded.repos[0]!.notes).toBe("first line\nsecond line");
+  });
+
+  test("setRepoNotes preserves whitespace verbatim", async () => {
+    const repoDir = join(tempDir, "myrepo");
+    await mkdir(repoDir, { recursive: true });
+    await addRepo(repoDir);
+    const result = await setRepoNotes(repoDir, "  indented  \n\ttabbed\n");
+    expect(result.ok).toBe(true);
+    const reloaded = await loadRegistry();
+    expect(reloaded.repos[0]!.notes).toBe("  indented  \n\ttabbed\n");
+  });
+
+  test("setRepoNotes clears with empty string", async () => {
+    const repoDir = join(tempDir, "myrepo");
+    await mkdir(repoDir, { recursive: true });
+    await addRepo(repoDir);
+    await setRepoNotes(repoDir, "hello");
+    const result = await setRepoNotes(repoDir, "");
+    expect(result.ok).toBe(true);
+    const reloaded = await loadRegistry();
+    expect(reloaded.repos[0]!.notes).toBeUndefined();
+  });
+
+  test("setRepoNotes clears with null", async () => {
+    const repoDir = join(tempDir, "myrepo");
+    await mkdir(repoDir, { recursive: true });
+    await addRepo(repoDir);
+    await setRepoNotes(repoDir, "hello");
+    const result = await setRepoNotes(repoDir, null);
+    expect(result.ok).toBe(true);
+    const reloaded = await loadRegistry();
+    expect(reloaded.repos[0]!.notes).toBeUndefined();
+  });
+
+  test("setRepoNotes returns error for unknown path", async () => {
+    const result = await setRepoNotes("/nonexistent", "x");
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("Not found");
+  });
+
+  test("setRepoNotes coexists with defaultAgentType", async () => {
+    const repoDir = join(tempDir, "myrepo");
+    await mkdir(repoDir, { recursive: true });
+    await addRepo(repoDir);
+    await setRepoDefaultAgentType(repoDir, "worker");
+    await setRepoNotes(repoDir, "TODO: cleanup");
+    const reloaded = await loadRegistry();
+    expect(reloaded.repos[0]!.defaultAgentType).toBe("worker");
+    expect(reloaded.repos[0]!.notes).toBe("TODO: cleanup");
   });
 
   test("registry writes to ~/.itsybitsy/repos.json not ~/.itsybitsy.json", async () => {

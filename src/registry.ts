@@ -7,6 +7,7 @@ export interface RepoEntry {
   name: string;
   nickname?: string;
   defaultAgentType?: string;
+  notes?: string;
 }
 
 /** Returns nickname if set, otherwise name (basename). */
@@ -137,6 +138,31 @@ export async function setRepoDefaultAgentType(
     message: trimmed
       ? `Set default agent type for ${entry.name} → ${trimmed}`
       : `Cleared default agent type for ${entry.name}`,
+  };
+}
+
+export async function setRepoNotes(
+  repoPath: string,
+  notes: string | null,
+): Promise<{ ok: boolean; message: string }> {
+  const resolved = resolve(repoPath);
+  const registry = await loadRegistry();
+  const entry = registry.repos.find((r) => r.path === resolved);
+  if (!entry) {
+    return { ok: false, message: `Not found: ${resolved}` };
+  }
+  const value = notes ?? "";
+  if (value.length > 0) {
+    entry.notes = value;
+  } else {
+    delete entry.notes;
+  }
+  await saveRegistry(registry);
+  return {
+    ok: true,
+    message: value.length > 0
+      ? `Set notes for ${entry.name}`
+      : `Cleared notes for ${entry.name}`,
   };
 }
 

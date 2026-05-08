@@ -18,6 +18,7 @@ import {
   isRateLimited,
   isApiError,
   hasBackgroundTasks,
+  isDeadPane,
   anyChildActive,
   detectAgentStates,
   CREATING_GRACE_PERIOD_MS,
@@ -1143,6 +1144,26 @@ describe("hasBackgroundTasks", () => {
   });
 });
 
+describe("isDeadPane", () => {
+  test("matches the literal 'Pane is dead' banner", () => {
+    expect(isDeadPane("Pane is dead (status 0, ...)\n")).toBe(true);
+  });
+  test("matches when banner is on its own line in a longer pane snapshot", () => {
+    const output = [
+      "$ tmux capture-pane",
+      "Pane is dead (status 143, signal SIGTERM)",
+      "",
+    ].join("\n");
+    expect(isDeadPane(output)).toBe(true);
+  });
+  test("returns false for normal Claude output", () => {
+    expect(isDeadPane("⏵⏵ accept edits on (shift+tab to cycle)")).toBe(false);
+  });
+  test("returns false for empty input", () => {
+    expect(isDeadPane("")).toBe(false);
+  });
+});
+
 // ── anyChildActive ─────────────────────────────────────────────────────────
 
 describe("anyChildActive", () => {
@@ -1870,6 +1891,348 @@ describe("detectAgentStates — reapOrphanedClaude", () => {
     const { readFile } = await import("fs/promises");
     const log = await readFile(logPath, "utf8");
     expect(log).toContain("[orphan-kill] SIGTERM failed");
+  });
+});
+
+// ── detectAgentStates — claude_pid liveness gate (dead-claude detection) ────
+
+describe("detectAgentStates — claude_pid liveness gate", () => {
+  let tmpLogDir: string;
+  let logPath: string;
+
+  beforeEach(async () => {
+    tmpLogDir = await mkdtemp(join(tmpdir(), "claude-liveness-log-"));
+    logPath = join(tmpLogDir, "watch.log");
+    const { setWatchLogPath } = await import("./watch-log");
+    setWatchLogPath(logPath);
+  });
+
+  afterEach(async () => {
+    classifySpawnLogCtx.reset();
+    isPidAliveCtx.reset();
+    killPidCtx.reset();
+    liveTmuxSessionsCtx.reset();
+    tmuxPollerSpawnCtx.reset();
+    const { resetWatchLogPath } = await import("./watch-log");
+    resetWatchLogPath();
+    await rm(tmpLogDir, { recursive: true, force: true });
+  });
+
+  /** Install a tmux-poller spawn runner that returns the given pane text for capture-pane. */
+  function installTmuxRunner(output: string, captureCalls?: { count: number }): void {
+    tmuxPollerSpawnCtx.set(((args: any[]) => {
+      const isCapture = args[0] === "tmux" && args[1] === "capture-pane";
+      if (isCapture && captureCalls) captureCalls.count++;
+      return {
+        stdout: new ReadableStream({
+          start(c) {
+            c.enqueue(new TextEncoder().encode(isCapture ? output : ""));
+            c.close();
+          },
+        }),
+        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        exited: Promise.resolve(0),
+      };
+    }) as any);
+  }
+
+  // Test 1: regression guard for happy path — running + alive PID + alive tmux → still running
+  test("running + claude_pid alive + tmux alive → state stays 'running'", async () => {
+    installTmuxRunner("⏵⏵ accept edits on (shift+tab to cycle)");
+    isPidAliveCtx.set(() => true);
+    liveTmuxSessionsCtx.set(async () => new Set(["ib-a1"]));
+    let killCalls = 0;
+    killPidCtx.set(() => { killCalls++; return true; });
+
+    const a = makeAgent({
+      id: "agent-1",
+      meta: {
+        state: "running",
+        tmux_session: "ib-a1",
+        claude_pid: "12345",
+        created_epoch: Math.floor(Date.now() / 1000) - 3600,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+    await detectAgentStates([a]);
+    expect(a.state).toBe("running");
+    expect(killCalls).toBe(0);
+  });
+
+  // Test 2: running + dead PID + not recently created → reaped to 'stopped'.
+  // Use a transient file with an alive watchdog_pid so reapOrphanedClaude has
+  // something to actually kill — that way the watch.log entry confirms the
+  // reap path ran. (claude_pid itself is dead, so it doesn't get SIGTERMed.)
+  test("running + claude_pid dead + NOT recently created → 'stopped' + reapOrphanedClaude called", async () => {
+    // claude_pid (12345) is dead, watchdog_pid (67890) is alive
+    isPidAliveCtx.set((pid) => pid === 67890);
+    liveTmuxSessionsCtx.set(async () => new Set(["ib-a1"]));
+    const killCalls: Array<{ pid: number; signal: NodeJS.Signals | number }> = [];
+    killPidCtx.set((pid, signal) => {
+      killCalls.push({ pid, signal });
+      return true;
+    });
+
+    // Real on-disk agent dir so readAgentTransient finds the watchdog_pid
+    const agentTmp = await mkdtemp(join(tmpdir(), "claude-liveness-agent-"));
+    const agentDir = join(agentTmp, ".ittybitty", "agents", "agent-1");
+    await mkdir(agentDir, { recursive: true });
+    const transient: TransientState = {
+      tmux_compacting: false,
+      tmux_rate_limited: false,
+      tmux_api_error: false,
+      has_background_tasks: false,
+      updated_at_ms: 0, // stale on purpose so the transient fast-path is skipped
+      watchdog_pid: 67890,
+    };
+    const { writeFile } = await import("fs/promises");
+    await writeFile(join(agentDir, "meta.transient.json"), JSON.stringify(transient));
+
+    const a = makeAgent({
+      id: "agent-1",
+      repoPath: agentTmp,
+      meta: {
+        state: "running",
+        tmux_session: "ib-a1",
+        claude_pid: "12345",
+        created_epoch: Math.floor(Date.now() / 1000) - 3600,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+    await detectAgentStates([a]);
+    expect(a.state).toBe("stopped");
+    // claude_pid was dead → not killed. watchdog_pid was alive → SIGTERMed.
+    expect(killCalls).toEqual([{ pid: 67890, signal: "SIGTERM" }]);
+
+    const { readFile } = await import("fs/promises");
+    const log = await readFile(logPath, "utf8");
+    expect(log).toContain("[orphan-kill] SIGTERM sent");
+    expect(log).toContain("kind=watchdog");
+    expect(log).toContain("pid=67890");
+    expect(log).toContain("claude_pid not alive");
+
+    await rm(agentTmp, { recursive: true, force: true });
+  });
+
+  // Test 3: running + dead PID + recently created → grace window protects, stays 'running'
+  test("running + claude_pid dead + IS recently created (within 6s) → unaffected, no reap", async () => {
+    installTmuxRunner("⏵⏵ accept edits on (shift+tab to cycle)");
+    isPidAliveCtx.set(() => false);
+    liveTmuxSessionsCtx.set(async () => new Set(["ib-a1"]));
+    let killCalls = 0;
+    killPidCtx.set(() => { killCalls++; return true; });
+
+    const a = makeAgent({
+      id: "agent-1",
+      meta: {
+        state: "running",
+        tmux_session: "ib-a1",
+        claude_pid: "12345",
+        // Within the 6s grace window (CREATING_GRACE_PERIOD_MS)
+        created_epoch: Math.floor(Date.now() / 1000) - 1,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+    await detectAgentStates([a]);
+    // The pid liveness gate is skipped during the grace window; falls
+    // through to the existing logic. captureTmuxOutput returns benign
+    // output, no overrides match, meta.state="running" is trusted.
+    expect(a.state).toBe("running");
+    expect(killCalls).toBe(0);
+  });
+
+  // Test 4: waiting + dead PID → 'stopped' (proves fix isn't scoped to 'running')
+  test("waiting + claude_pid dead → 'stopped'", async () => {
+    isPidAliveCtx.set(() => false);
+    liveTmuxSessionsCtx.set(async () => new Set(["ib-a1"]));
+    let killCalls = 0;
+    killPidCtx.set(() => { killCalls++; return true; });
+
+    const a = makeAgent({
+      id: "agent-1",
+      meta: {
+        state: "waiting",
+        tmux_session: "ib-a1",
+        claude_pid: "12345",
+        created_epoch: Math.floor(Date.now() / 1000) - 3600,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+    await detectAgentStates([a]);
+    expect(a.state).toBe("stopped");
+    expect(killCalls).toBe(0); // dead PID — no kill issued
+  });
+
+  // Test 5: regression guard for the case previously handled inline in the
+  // 'complete' branch — make sure removing that inner check didn't break it.
+  test("complete + claude_pid dead → 'stopped'", async () => {
+    let captureCalls = 0;
+    tmuxPollerSpawnCtx.set(((args: any[]) => {
+      if (args[0] === "tmux" && args[1] === "capture-pane") captureCalls++;
+      return {
+        stdout: new ReadableStream({ start(c) { c.close(); } }),
+        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        exited: Promise.resolve(0),
+      };
+    }) as any);
+    isPidAliveCtx.set(() => false);
+    liveTmuxSessionsCtx.set(async () => new Set(["ib-a1"]));
+
+    const a = makeAgent({
+      id: "agent-1",
+      meta: {
+        state: "complete",
+        tmux_session: "ib-a1",
+        claude_pid: "12345",
+        created_epoch: Math.floor(Date.now() / 1000) - 3600,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+    await detectAgentStates([a]);
+    expect(a.state).toBe("stopped");
+    expect(captureCalls).toBe(0); // complete fast-path still skips capture
+  });
+
+  // Test 8: empty/legacy claude_pid → no false positive, falls through normally
+  test("running + claude_pid='' (empty/legacy) + normal tmux → state follows existing logic, no reap", async () => {
+    installTmuxRunner("⏵⏵ accept edits on (shift+tab to cycle)");
+    // isPidAlive should never be called since claude_pid parses to NaN (≤ 0).
+    let pidChecks = 0;
+    isPidAliveCtx.set(() => {
+      pidChecks++;
+      return false;
+    });
+    liveTmuxSessionsCtx.set(async () => new Set(["ib-a1"]));
+    let killCalls = 0;
+    killPidCtx.set(() => { killCalls++; return true; });
+
+    const a = makeAgent({
+      id: "agent-1",
+      meta: {
+        state: "running",
+        tmux_session: "ib-a1",
+        claude_pid: "",
+        created_epoch: Math.floor(Date.now() / 1000) - 3600,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+    await detectAgentStates([a]);
+    expect(a.state).toBe("running");
+    expect(pidChecks).toBe(0);
+    expect(killCalls).toBe(0);
+  });
+});
+
+// ── detectAgentStates — dead-pane (remain-on-exit) detection ───────────────
+
+describe("detectAgentStates — dead-pane husk handling", () => {
+  let tmpLogDir: string;
+  let logPath: string;
+
+  beforeEach(async () => {
+    tmpLogDir = await mkdtemp(join(tmpdir(), "dead-pane-log-"));
+    logPath = join(tmpLogDir, "watch.log");
+    const { setWatchLogPath } = await import("./watch-log");
+    setWatchLogPath(logPath);
+  });
+
+  afterEach(async () => {
+    classifySpawnLogCtx.reset();
+    isPidAliveCtx.reset();
+    killPidCtx.reset();
+    liveTmuxSessionsCtx.reset();
+    tmuxPollerSpawnCtx.reset();
+    const { resetWatchLogPath } = await import("./watch-log");
+    resetWatchLogPath();
+    await rm(tmpLogDir, { recursive: true, force: true });
+  });
+
+  // Test 6: dead pane + alive PID + not recently created → stopped + kill-session called
+  test("running + claude_pid alive + 'Pane is dead' output + NOT recently created → 'stopped', kill-session called", async () => {
+    const killSessionCalls: string[] = [];
+    tmuxPollerSpawnCtx.set(((args: any[]) => {
+      const isCapture = args[0] === "tmux" && args[1] === "capture-pane";
+      const isKill = args[0] === "tmux" && args[1] === "kill-session";
+      if (isKill) {
+        // args is ["tmux", "kill-session", "-t", "ib-a1"]
+        killSessionCalls.push(String(args[3]));
+      }
+      return {
+        stdout: new ReadableStream({
+          start(c) {
+            c.enqueue(new TextEncoder().encode(
+              isCapture ? "Pane is dead (status 0, signal SIGTERM)\n" : ""
+            ));
+            c.close();
+          },
+        }),
+        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        exited: Promise.resolve(0),
+      };
+    }) as any);
+    isPidAliveCtx.set(() => true); // claude_pid still alive (zombie state)
+    liveTmuxSessionsCtx.set(async () => new Set(["ib-a1"]));
+    const killPidCalls: Array<{ pid: number; signal: NodeJS.Signals | number }> = [];
+    killPidCtx.set((pid, signal) => {
+      killPidCalls.push({ pid, signal });
+      return true;
+    });
+
+    const a = makeAgent({
+      id: "agent-1",
+      meta: {
+        state: "running",
+        tmux_session: "ib-a1",
+        claude_pid: "12345",
+        created_epoch: Math.floor(Date.now() / 1000) - 3600,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+    await detectAgentStates([a]);
+    expect(a.state).toBe("stopped");
+    // Husk session should have been torn down
+    expect(killSessionCalls).toEqual(["ib-a1"]);
+    // reapOrphanedClaude should have been invoked (alive PID → SIGTERMed)
+    expect(killPidCalls).toEqual([{ pid: 12345, signal: "SIGTERM" }]);
+
+    const { readFile } = await import("fs/promises");
+    const log = await readFile(logPath, "utf8");
+    expect(log).toContain("[orphan-kill] SIGTERM sent");
+    expect(log).toContain("tmux pane is dead");
+  });
+
+  // Test 7: dead pane + recently created → creating, kill-session NOT called
+  test("running + 'Pane is dead' output + IS recently created → 'creating', kill-session NOT called", async () => {
+    const killSessionCalls: string[] = [];
+    tmuxPollerSpawnCtx.set(((args: any[]) => {
+      const isCapture = args[0] === "tmux" && args[1] === "capture-pane";
+      const isKill = args[0] === "tmux" && args[1] === "kill-session";
+      if (isKill) killSessionCalls.push(String(args[3]));
+      return {
+        stdout: new ReadableStream({
+          start(c) {
+            c.enqueue(new TextEncoder().encode(
+              isCapture ? "Pane is dead (status 0, ...)\n" : ""
+            ));
+            c.close();
+          },
+        }),
+        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        exited: Promise.resolve(0),
+      };
+    }) as any);
+    isPidAliveCtx.set(() => true);
+    liveTmuxSessionsCtx.set(async () => new Set(["ib-a1"]));
+    let killPidCalls = 0;
+    killPidCtx.set(() => { killPidCalls++; return true; });
+
+    const a = makeAgent({
+      id: "agent-1",
+      meta: {
+        state: "running",
+        tmux_session: "ib-a1",
+        claude_pid: "12345",
+        // Within 6s grace window
+        created_epoch: Math.floor(Date.now() / 1000) - 1,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+    await detectAgentStates([a]);
+    expect(a.state).toBe("creating");
+    expect(killSessionCalls).toEqual([]); // grace window protects husk-kill
+    expect(killPidCalls).toBe(0); // reapOrphanedClaude returns early on 'creating'
   });
 });
 

@@ -7,7 +7,7 @@ import { join } from "path";
 import { readdir, rename, stat, unlink } from "fs/promises";
 import type { AgentState } from "./parse-state";
 import { parseState, stripAnsi, STARTUP_MARKERS } from "./parse-state";
-import { captureTmuxOutput, listTmuxSessions } from "./tmux-poller";
+import { captureTmuxOutput, killTmuxSession, listTmuxSessions } from "./tmux-poller";
 import { InjectionContext } from "./types";
 import { logToWatchLog } from "./watch-log";
 
@@ -405,6 +405,18 @@ export function hasBackgroundTasks(tmuxOutput: string): boolean {
   const lines = stripped.split("\n");
   const last15 = lines.slice(-15).join("\n");
   return /⏵⏵.*·\s\d+\s/.test(last15);
+}
+
+/**
+ * Detect tmux 'remain-on-exit' dead-pane banner. When a tmux pane is
+ * configured with `remain-on-exit on` and its child process exits, tmux
+ * renders a literal `Pane is dead (status N, ...)` banner inside the pane
+ * — the session is still alive (so list-sessions/has-session pass) but
+ * Claude is gone and no further work happens. We treat this case the same
+ * as a dead session: the agent is stopped.
+ */
+export function isDeadPane(tmuxOutput: string): boolean {
+  return tmuxOutput.includes("Pane is dead");
 }
 
 /**
@@ -1079,22 +1091,37 @@ export async function detectAgentStates(agents: Agent[]): Promise<void> {
         return;
       }
 
+      // Pid liveness gate: meta.json's stored state is intent, not truth. If
+      // the recorded Claude process is gone, the agent is stopped regardless
+      // of what state was last written. Without this, a hybrid 'zombie' (live
+      // tmux session in remain-on-exit mode + dead claude_pid) would render
+      // as 'running' indefinitely while a sibling watchdog kept writing into
+      // its log. Skip while the agent is recently created so we don't race a
+      // still-spawning agent whose claude_pid hasn't been written yet (legacy
+      // / empty claude_pid is also covered by the >0 guard).
+      const claudePid = parseInt(agent.meta.claude_pid, 10);
+      if (
+        claudePid > 0 &&
+        !isPidAliveCtx.fn(claudePid) &&
+        !isRecentlyCreated(agent.meta.created_epoch)
+      ) {
+        agent.state = "stopped";
+        await reapOrphanedClaude(agent, agentDir, "stopped", "claude_pid not alive");
+        return;
+      }
+
       // Fast-path: 'complete' agents have signed off — no transient overrides
       // apply (compacting/rate_limited shouldn't happen post-signoff, and the
       // background-task override is scoped to meta.state === "waiting"). Trust
       // the stored state and skip the tmux capture (saves a posix_spawn +
       // ~20 openat() per agent per 2s tick).
       //
-      // Liveness gates:
-      //   1. tmux session must still exist. If the tmux server was killed or
-      //      restarted, Claude can outlive its session as an orphaned process
-      //      attached to a regular tty — meaning a PID-only check passes
-      //      while the user sees no working tmux pane. Use the cached
-      //      list-sessions result (shared with readAllAgents).
-      //   2. claude_pid is still alive via signal 0 (free — pure syscall, no
-      //      spawn). If Claude died without archiving the agent, demote to
-      //      'stopped'. Empty/invalid claude_pid (legacy agents) skips this
-      //      check and trusts the tmux gate alone.
+      // Liveness gate: tmux session must still exist. If the tmux server was
+      // killed or restarted, Claude can outlive its session as an orphaned
+      // process attached to a regular tty — meaning a PID-only check passes
+      // while the user sees no working tmux pane. Use the cached
+      // list-sessions result (shared with readAllAgents). The claude_pid
+      // liveness check happens above (applies to all states).
       if (agent.meta.state === "complete") {
         if (liveTmuxSessionsPromise) {
           const liveSessions = await liveTmuxSessionsPromise;
@@ -1103,11 +1130,6 @@ export async function detectAgentStates(agents: Agent[]): Promise<void> {
             await reapOrphanedClaude(agent, agentDir, "stopped", "complete agent: tmux session gone");
             return;
           }
-        }
-        const claudePid = parseInt(agent.meta.claude_pid, 10);
-        if (claudePid > 0 && !isPidAliveCtx.fn(claudePid)) {
-          agent.state = "stopped";
-          return;
         }
         agent.state = "complete";
         return;
@@ -1159,10 +1181,20 @@ export async function detectAgentStates(agents: Agent[]): Promise<void> {
       }
 
       const output = await captureTmuxOutput(tmuxSession, 50);
-      if (output === null) {
+      if (output === null || isDeadPane(output)) {
+        const reason = output === null ? "tmux capture returned null" : "tmux pane is dead";
         const resolved: AgentState = isRecentlyCreated(agent.meta.created_epoch) ? "creating" : "stopped";
+        // Live session with a dead pane is a husk — kill the session so it
+        // stops being counted as live by listTmuxSessions on the next tick.
+        // Best-effort: failure is ignored (the next tick will retry, and the
+        // reapOrphanedClaude path logs separately). Skip while creating so a
+        // freshly-spawning agent that briefly shows a dead pane during
+        // startup is not torn down.
+        if (output !== null && resolved !== "creating") {
+          await killTmuxSession(tmuxSession);
+        }
         agent.state = resolved;
-        await reapOrphanedClaude(agent, agentDir, resolved, "tmux capture returned null");
+        await reapOrphanedClaude(agent, agentDir, resolved, reason);
         return;
       }
 

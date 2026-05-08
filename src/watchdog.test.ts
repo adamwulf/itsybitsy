@@ -18,7 +18,6 @@ import {
   MAX_NOTIFY_TICKS,
   POLL_INTERVAL_MS,
   COMPACT_CHECK_COOLDOWN_MS,
-  stampAgentCompactCheck,
   TMUX_GONE_GRACE_MS,
   setWatchdogSpawnRunner,
   resetWatchdogSpawnRunner,
@@ -1689,6 +1688,19 @@ describe("watchdog", () => {
     }
 
     let compactCalls: Array<{ args: any[] }>;
+    let currentTime: number;
+
+    /**
+     * Pre-create a tracker at the current simulated time, then advance time
+     * past `COMPACT_CHECK_COOLDOWN_MS` so the next tick's cooldown gate is
+     * satisfied. Without this, a freshly-created tracker has `lastCompactCheckMs`
+     * stamped at "now" (see `createTracker()`), and the gate will block the
+     * first check.
+     */
+    function seedTrackerAndAdvancePastCooldown(agentId: string): void {
+      getTracker(agentId);
+      currentTime += COMPACT_CHECK_COOLDOWN_MS;
+    }
 
     beforeEach(() => {
       compactCalls = [];
@@ -1696,8 +1708,8 @@ describe("watchdog", () => {
         compactCalls.push({ args: [...cmd] });
         return { exited: Promise.resolve(0) };
       });
-      // Set time to a large value so cooldown is satisfied on first tick
-      setWatchdogNow(() => 100_000);
+      currentTime = 100_000;
+      setWatchdogNow(() => currentTime);
     });
 
     afterEach(() => {
@@ -1712,6 +1724,7 @@ describe("watchdog", () => {
       setWatchdogReadConfig(async () => mockConfig(80));
 
       const a1 = agent("a1", "running");
+      seedTrackerAndAdvancePastCooldown("a1");
       await tick([a1]);
 
       const compactSendKeys = compactCalls.filter((c) =>
@@ -1726,6 +1739,7 @@ describe("watchdog", () => {
       setWatchdogReadConfig(async () => mockConfig(80));
 
       const a1 = agent("a1", "waiting");
+      seedTrackerAndAdvancePastCooldown("a1");
       await tick([a1]);
 
       const compactSendKeys = compactCalls.filter((c) =>
@@ -1739,6 +1753,7 @@ describe("watchdog", () => {
       setWatchdogReadConfig(async () => mockConfig(80));
 
       const a1 = agent("a1", "running");
+      seedTrackerAndAdvancePastCooldown("a1");
       await tick([a1]);
 
       const compactSendKeys = compactCalls.filter((c) =>
@@ -1757,6 +1772,7 @@ describe("watchdog", () => {
       setWatchdogReadConfig(async () => mockConfig(undefined));
 
       const a1 = agent("a1", "running");
+      seedTrackerAndAdvancePastCooldown("a1");
       await tick([a1]);
 
       expect(usageChecked).toBe(false);
@@ -1774,9 +1790,41 @@ describe("watchdog", () => {
         usageChecked = false;
         clearTrackers();
         const a1 = agent("a1", state);
+        seedTrackerAndAdvancePastCooldown("a1");
         await tick([a1]);
         expect(usageChecked).toBe(false);
       }
+    });
+
+    test("fresh tracker does NOT pass compact-cooldown gate on its first check", async () => {
+      // Regression test: createTracker() must initialize lastCompactCheckMs to nowFn(),
+      // not 0. Without this, a freshly-resumed agent (or any newly-tracked agent)
+      // would receive /compact on the very first watchdog tick.
+      let usageCheckCount = 0;
+      setUsageReader(async () => {
+        usageCheckCount++;
+        return 90;
+      });
+      setWatchdogReadConfig(async () => mockConfig(80));
+
+      const a1 = agent("a1", "running");
+
+      // First tick — tracker is created at currentTime, gate is `now - now >= 60_000` (false)
+      await tick([a1]);
+      expect(usageCheckCount).toBe(0);
+      expect(compactCalls.filter((c) => c.args.includes("/compact")).length).toBe(0);
+
+      // Tick within cooldown — still must NOT check.
+      currentTime += COMPACT_CHECK_COOLDOWN_MS - 1;
+      await tick([a1]);
+      expect(usageCheckCount).toBe(0);
+      expect(compactCalls.filter((c) => c.args.includes("/compact")).length).toBe(0);
+
+      // Tick after cooldown elapses — now the check fires.
+      currentTime += 1;
+      await tick([a1]);
+      expect(usageCheckCount).toBe(1);
+      expect(compactCalls.filter((c) => c.args.includes("/compact")).length).toBe(1);
     });
 
     test("respects per-agent cooldown — skips check within cooldown period", async () => {
@@ -1787,62 +1835,29 @@ describe("watchdog", () => {
       });
       setWatchdogReadConfig(async () => mockConfig(80));
 
-      let currentTime = 100_000;
-      setWatchdogNow(() => currentTime);
-
       const a1 = agent("a1", "running");
+      seedTrackerAndAdvancePastCooldown("a1");
+      const tickStart = currentTime;
       await tick([a1]);
       expect(usageCheckCount).toBe(1);
 
       // Second tick 5s later — should be within cooldown
-      currentTime += 5_000;
+      currentTime = tickStart + 5_000;
       await tick([a1]);
       expect(usageCheckCount).toBe(1);
 
       // Third tick 60s after first — cooldown expired
-      currentTime = 100_000 + COMPACT_CHECK_COOLDOWN_MS;
+      currentTime = tickStart + COMPACT_CHECK_COOLDOWN_MS;
       await tick([a1]);
       expect(usageCheckCount).toBe(2);
-    });
-
-    test("stampAgentCompactCheck delays the first compact check by cooldown", async () => {
-      let usageCheckCount = 0;
-      setUsageReader(async () => {
-        usageCheckCount++;
-        return 90;
-      });
-      setWatchdogReadConfig(async () => mockConfig(80));
-
-      let currentTime = 100_000;
-      setWatchdogNow(() => currentTime);
-
-      // Simulate resumeAgent stamping the tracker before the watchdog starts ticking.
-      stampAgentCompactCheck("a1");
-      expect(getTracker("a1").lastCompactCheckMs).toBe(100_000);
-
-      const a1 = agent("a1", "running");
-
-      // Tick within cooldown — usage must NOT be checked, /compact must NOT be sent.
-      currentTime += COMPACT_CHECK_COOLDOWN_MS - 1;
-      await tick([a1]);
-      expect(usageCheckCount).toBe(0);
-      expect(compactCalls.filter((c) => c.args.includes("/compact")).length).toBe(0);
-
-      // Tick after cooldown elapses — now the check should run and /compact should fire.
-      currentTime = 100_000 + COMPACT_CHECK_COOLDOWN_MS;
-      await tick([a1]);
-      expect(usageCheckCount).toBe(1);
-      expect(compactCalls.filter((c) => c.args.includes("/compact")).length).toBe(1);
     });
 
     test("does not re-send /compact once compactSent is true", async () => {
       setUsageReader(async () => 90);
       setWatchdogReadConfig(async () => mockConfig(80));
 
-      let currentTime = 100_000;
-      setWatchdogNow(() => currentTime);
-
       const a1 = agent("a1", "running");
+      seedTrackerAndAdvancePastCooldown("a1");
       await tick([a1]);
       expect(compactCalls.filter((c) => c.args.includes("/compact")).length).toBe(1);
 
@@ -1858,10 +1873,8 @@ describe("watchdog", () => {
       setUsageReader(async () => usagePct);
       setWatchdogReadConfig(async () => mockConfig(80));
 
-      let currentTime = 100_000;
-      setWatchdogNow(() => currentTime);
-
       const a1 = agent("a1", "running");
+      seedTrackerAndAdvancePastCooldown("a1");
       await tick([a1]);
       expect(getTracker("a1").compactState.compactSent).toBe(true);
 
@@ -1876,10 +1889,11 @@ describe("watchdog", () => {
       expect(COMPACT_CHECK_COOLDOWN_MS).toBe(60_000);
     });
 
-    test("tracker initializes with compactState and lastCompactCheckMs", () => {
+    test("tracker initializes with compactState and lastCompactCheckMs stamped to nowFn()", () => {
+      // setWatchdogNow has been seeded by beforeEach to return `currentTime` (100_000).
       const tracker = createTracker();
       expect(tracker.compactState).toEqual({ compactSent: false });
-      expect(tracker.lastCompactCheckMs).toBe(0);
+      expect(tracker.lastCompactCheckMs).toBe(currentTime);
     });
 
     test("gracefully handles config read errors", async () => {
@@ -1889,6 +1903,7 @@ describe("watchdog", () => {
       });
 
       const a1 = agent("a1", "running");
+      seedTrackerAndAdvancePastCooldown("a1");
       // Should not throw
       await tick([a1]);
       expect(compactCalls.length).toBe(0);

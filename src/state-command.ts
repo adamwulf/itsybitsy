@@ -137,9 +137,9 @@ export async function gatherAgentState(agent: Agent): Promise<AgentStateRow> {
 }
 
 /**
- * Format a single PID/liveness component as `name:<pid> <mark>`. Uses the
- * provided color writer for the mark. Returns the plain (un-colored) text
- * when `colorize` is null — keeps tests readable.
+ * Format a single PID/liveness component as `name:<pid> <mark>`. ✓ marks an
+ * alive PID, ✗ a dead one. When the PID is null (missing/empty/non-numeric)
+ * both slots render as em-dashes: `name:— —`.
  */
 export function formatPidComponent(
   name: string,

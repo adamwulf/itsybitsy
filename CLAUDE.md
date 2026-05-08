@@ -264,6 +264,10 @@ When a manager spawns sub-agents to do work, the manager's role is to **review a
 
 A manager should never duplicate a sub-agent's work by re-implementing it directly. Trust the sub-agent's output, review it, and act accordingly.
 
+### Debugging stuck agents and orphan processes
+
+`ib state` (or `ib state --json`) lists every agent with its tmux pane PID, claude PID, and watchdog PID, plus liveness for each (✓ alive, ✗ dead, — missing). When pane_pid has child processes that aren't the recorded claude_pid, they show as `[orphans: N]`. Use this when an agent is in a strange state, when `ps` shows processes you can't account for, or before/after killing agents to confirm cleanup. Implementation: src/state-command.ts.
+
 ### Sending literal strings with `ib send`
 
 The shell expands `$(...)`, backticks, and `$VAR` inside double quotes before `ib` sees the argument. To pass a literal message:

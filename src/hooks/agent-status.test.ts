@@ -877,6 +877,181 @@ describe("processStopHook — invalid tmux session in meta.json", () => {
   });
 });
 
+// ── executeResultActions: state propagation to recipients ──────────────────
+
+describe("executeResultActions — recipient state propagation", () => {
+  let ctx: Awaited<ReturnType<typeof createTempAgentDir>>;
+
+  beforeEach(async () => {
+    ctx = await createTempAgentDir();
+  });
+
+  afterEach(async () => {
+    await ctx.cleanup();
+  });
+
+  test("nudge writes state='running' to agent's meta.json", async () => {
+    await writeMeta(ctx.agentDir, { tmux_session: "ib-test", state: "waiting" });
+
+    const ret = await executeResultActions(
+      {
+        state: "running",
+        action: "nudge",
+        message: "Resume your work",
+      },
+      ctx.agentDir,
+      ctx.agentsDir,
+    );
+    expect(ret).toBe("ok");
+
+    const meta = JSON.parse(await readFile(join(ctx.agentDir, "meta.json"), "utf-8"));
+    expect(meta.state).toBe("running");
+    expect(typeof meta.state_updated_at).toBe("number");
+  });
+
+  test("remind_commit writes state='running' to agent's meta.json", async () => {
+    await writeMeta(ctx.agentDir, { tmux_session: "ib-test", state: "complete" });
+
+    const ret = await executeResultActions(
+      {
+        state: "complete",
+        action: "remind_commit",
+        message: "You have uncommitted changes.",
+      },
+      ctx.agentDir,
+      ctx.agentsDir,
+    );
+    expect(ret).toBe("ok");
+
+    const meta = JSON.parse(await readFile(join(ctx.agentDir, "meta.json"), "utf-8"));
+    expect(meta.state).toBe("running");
+  });
+
+  test("remind_children writes state='running' to agent's meta.json", async () => {
+    await writeMeta(ctx.agentDir, { tmux_session: "ib-test", state: "complete" });
+
+    const ret = await executeResultActions(
+      {
+        state: "complete",
+        action: "remind_children",
+        message: "You have unfinished sub-agents.",
+      },
+      ctx.agentDir,
+      ctx.agentsDir,
+    );
+    expect(ret).toBe("ok");
+
+    const meta = JSON.parse(await readFile(join(ctx.agentDir, "meta.json"), "utf-8"));
+    expect(meta.state).toBe("running");
+  });
+
+  test("notify_manager writes state='running' to manager's meta.json (NOT the agent's)", async () => {
+    // Agent (the one whose stop hook fired) should NOT have its state changed.
+    await writeMeta(ctx.agentDir, {
+      tmux_session: "ib-test",
+      manager: "manager-001",
+      state: "complete",
+    });
+    const managerDir = join(ctx.agentsDir, "manager-001");
+    await mkdir(managerDir, { recursive: true });
+    await writeMeta(managerDir, { tmux_session: "ib-manager-001", state: "waiting" });
+
+    const ret = await executeResultActions(
+      {
+        state: "complete",
+        action: "notify_manager",
+        message: "[hook]: Your subtask just completed",
+      },
+      ctx.agentDir,
+      ctx.agentsDir,
+    );
+    expect(ret).toBe("ok");
+
+    // Manager flips to running.
+    const managerMeta = JSON.parse(
+      await readFile(join(managerDir, "meta.json"), "utf-8"),
+    );
+    expect(managerMeta.state).toBe("running");
+
+    // Agent's own state is NOT touched by executeResultActions (notify_manager
+    // branch does not call writeAgentState on the agent itself; that's handled
+    // earlier in processStopHook).
+    const agentMeta = JSON.parse(
+      await readFile(join(ctx.agentDir, "meta.json"), "utf-8"),
+    );
+    expect(agentMeta.state).toBe("complete");
+  });
+
+  test("notify_manager with archived manager does NOT write running to manager", async () => {
+    await writeMeta(ctx.agentDir, {
+      tmux_session: "ib-test",
+      manager: "manager-archived",
+      state: "complete",
+    });
+    const managerDir = join(ctx.agentsDir, "manager-archived");
+    await mkdir(managerDir, { recursive: true });
+    await writeMeta(managerDir, {
+      tmux_session: "ib-manager",
+      state: "waiting",
+      archived: true,
+    });
+
+    const ret = await executeResultActions(
+      {
+        state: "complete",
+        action: "notify_manager",
+        message: "[hook]: Your subtask just completed",
+      },
+      ctx.agentDir,
+      ctx.agentsDir,
+    );
+    expect(ret).toBe("ok");
+
+    // Archived manager's state is unchanged.
+    const managerMeta = JSON.parse(
+      await readFile(join(managerDir, "meta.json"), "utf-8"),
+    );
+    expect(managerMeta.state).toBe("waiting");
+    expect(managerMeta.archived).toBe(true);
+  });
+
+  test("nudge with no tmuxSession does NOT write state", async () => {
+    // No tmux_session in meta.json → nothing is sent → state should remain.
+    await writeMeta(ctx.agentDir, { state: "waiting" });
+
+    const ret = await executeResultActions(
+      {
+        state: "running",
+        action: "nudge",
+        message: "Resume your work",
+      },
+      ctx.agentDir,
+      ctx.agentsDir,
+    );
+    expect(ret).toBe("ok");
+
+    const meta = JSON.parse(await readFile(join(ctx.agentDir, "meta.json"), "utf-8"));
+    expect(meta.state).toBe("waiting");
+  });
+
+  test("action='none' does NOT write state", async () => {
+    await writeMeta(ctx.agentDir, { tmux_session: "ib-test", state: "waiting" });
+
+    const ret = await executeResultActions(
+      {
+        state: "waiting",
+        action: "none",
+      },
+      ctx.agentDir,
+      ctx.agentsDir,
+    );
+    expect(ret).toBe("ok");
+
+    const meta = JSON.parse(await readFile(join(ctx.agentDir, "meta.json"), "utf-8"));
+    expect(meta.state).toBe("waiting");
+  });
+});
+
 describe("findUnfinishedChildren — invalid tmux session", () => {
   let ctx: Awaited<ReturnType<typeof createTempAgentDir>>;
 

@@ -1,5 +1,7 @@
 import { test, expect, describe, beforeEach, afterEach, spyOn } from "bun:test";
 import { join } from "path";
+import { mkdir, mkdtemp, readFile, rm } from "fs/promises";
+import { tmpdir } from "os";
 import {
   encodeClaudeProjectPath,
   transcriptPath,
@@ -503,6 +505,131 @@ describe("checkAndCompact", () => {
     await checkAndCompact(agent, 80, state);
     expect(state.compactSent).toBe(true);
     expect(spawnCalls).toHaveLength(2);
+  });
+});
+
+// ── auto-compact logging ────────────────────────────────────────────────
+
+describe("checkAndCompact — agent.log audit line", () => {
+  let tempRepo: string;
+  let agentDir: string;
+  let logPath: string;
+
+  beforeEach(async () => {
+    tempRepo = await mkdtemp(join(tmpdir(), "auto-compact-log-"));
+    agentDir = join(tempRepo, ".ittybitty", "agents", "agent-abc123");
+    await mkdir(agentDir, { recursive: true });
+    logPath = join(agentDir, "agent.log");
+    setCompactSpawnRunner(() => ({ exited: Promise.resolve(0) }));
+  });
+
+  afterEach(async () => {
+    resetCompactSpawnRunner();
+    resetUsageReader();
+    await rm(tempRepo, { recursive: true, force: true });
+  });
+
+  test("writes a single audit line on successful /compact send", async () => {
+    setUsageReader(async () => 85);
+    const state: CompactState = { compactSent: false };
+    const agent: Agent = { ...makeAgent({ state: "running" }), repoPath: tempRepo };
+    const lastCheckMs = Date.now() - 60_500;
+
+    await checkAndCompact(agent, 80, state, lastCheckMs);
+
+    const log = await readFile(logPath, "utf8");
+    const auditLines = log.split("\n").filter((l) => l.includes("[auto-compact]"));
+    expect(auditLines).toHaveLength(1);
+    expect(auditLines[0]).toContain("sent /compact");
+    expect(auditLines[0]).toContain("usage=85%");
+    expect(auditLines[0]).toContain("threshold=80%");
+    expect(auditLines[0]).toMatch(/timeSinceLastCheck=\d+ms/);
+  });
+
+  test("does NOT log when usage is below threshold (no send)", async () => {
+    setUsageReader(async () => 50);
+    const state: CompactState = { compactSent: false };
+    const agent: Agent = { ...makeAgent({ state: "running" }), repoPath: tempRepo };
+
+    await checkAndCompact(agent, 80, state, Date.now() - 60_000);
+
+    // No log file written — logAgent silently no-ops if file never created
+    const exists = await Bun.file(logPath).exists();
+    expect(exists).toBe(false);
+  });
+
+  test("does NOT log when compactSent is already true (no duplicate send)", async () => {
+    setUsageReader(async () => 90);
+    const state: CompactState = { compactSent: true };
+    const agent: Agent = { ...makeAgent({ state: "running" }), repoPath: tempRepo };
+
+    await checkAndCompact(agent, 80, state, Date.now() - 60_000);
+
+    const exists = await Bun.file(logPath).exists();
+    expect(exists).toBe(false);
+  });
+
+  test("does NOT log when agent state cannot receive input", async () => {
+    setUsageReader(async () => 95);
+    const state: CompactState = { compactSent: false };
+    const agent: Agent = { ...makeAgent({ state: "compacting" }), repoPath: tempRepo };
+
+    await checkAndCompact(agent, 80, state, Date.now() - 60_000);
+
+    const exists = await Bun.file(logPath).exists();
+    expect(exists).toBe(false);
+  });
+
+  test("does NOT log when sendCompact fails (non-zero exit)", async () => {
+    setCompactSpawnRunner(() => ({ exited: Promise.resolve(1) }));
+    setUsageReader(async () => 90);
+    const state: CompactState = { compactSent: false };
+    const agent: Agent = { ...makeAgent({ state: "running" }), repoPath: tempRepo };
+
+    await checkAndCompact(agent, 80, state, Date.now() - 60_000);
+
+    expect(state.compactSent).toBe(false);
+    const exists = await Bun.file(logPath).exists();
+    expect(exists).toBe(false);
+  });
+
+  test("logs timeSinceLastCheck=n/a when lastCheckMs is 0 (first check)", async () => {
+    setUsageReader(async () => 85);
+    const state: CompactState = { compactSent: false };
+    const agent: Agent = { ...makeAgent({ state: "running" }), repoPath: tempRepo };
+
+    await checkAndCompact(agent, 80, state, 0);
+
+    const log = await readFile(logPath, "utf8");
+    expect(log).toContain("timeSinceLastCheck=n/a");
+  });
+
+  test("logs timeSinceLastCheck=n/a when lastCheckMs is omitted", async () => {
+    setUsageReader(async () => 85);
+    const state: CompactState = { compactSent: false };
+    const agent: Agent = { ...makeAgent({ state: "running" }), repoPath: tempRepo };
+
+    await checkAndCompact(agent, 80, state);
+
+    const log = await readFile(logPath, "utf8");
+    expect(log).toContain("timeSinceLastCheck=n/a");
+  });
+
+  test("logged interval reflects the gap from lastCheckMs to now", async () => {
+    setUsageReader(async () => 85);
+    const state: CompactState = { compactSent: false };
+    const agent: Agent = { ...makeAgent({ state: "running" }), repoPath: tempRepo };
+    const lastCheckMs = Date.now() - 60_000;
+
+    await checkAndCompact(agent, 80, state, lastCheckMs);
+
+    const log = await readFile(logPath, "utf8");
+    const match = log.match(/timeSinceLastCheck=(\d+)ms/);
+    expect(match).not.toBeNull();
+    const ms = Number(match![1]);
+    // Should be at least the cooldown (60s) but allow generous slack for test scheduling.
+    expect(ms).toBeGreaterThanOrEqual(60_000);
+    expect(ms).toBeLessThan(65_000);
   });
 });
 

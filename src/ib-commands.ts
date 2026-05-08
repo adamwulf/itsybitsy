@@ -37,7 +37,6 @@ import {
   REGULAR_AGENT_INTERCEPT_MATCHER,
 } from "./settings-builder";
 import { listRepos, repoDisplayName } from "./registry";
-import { stampAgentCompactCheck } from "./watchdog";
 import { timed } from "./perf";
 
 export interface IbCommandResult {
@@ -610,11 +609,11 @@ ${qAbsExitScript}
   // Write state: "running" to meta.json
   await writeAgentState(agentDir, "running");
 
-  // Suppress immediate auto-compact on resume: stamp the per-agent tracker so
-  // the watchdog's first compact check is delayed by COMPACT_CHECK_COOLDOWN_MS.
-  // Without this, a resumed agent whose prior transcript is already above
-  // autoCompactThreshold would receive /compact on the very first tick.
-  stampAgentCompactCheck(agent.id);
+  // Note: a freshly-resumed agent whose prior transcript already exceeds
+  // `autoCompactThreshold` won't receive `/compact` on the per-agent watchdog's
+  // first tick because `createTracker()` initializes `lastCompactCheckMs` to
+  // `nowFn()`, giving every new tracker a `COMPACT_CHECK_COOLDOWN_MS` grace
+  // period before the first eligibility check.
 
   // Auto-spawn per-agent watchdog
   try {

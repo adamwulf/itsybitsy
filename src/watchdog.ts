@@ -141,7 +141,16 @@ export function resetWatchdogNow(): void {
 // Tracker management
 // ---------------------------------------------------------------------------
 
-/** Create a fresh tracker for a newly-seen agent */
+/**
+ * Create a fresh tracker for a newly-seen agent.
+ *
+ * `lastCompactCheckMs` is initialized to `nowFn()` so the cooldown gate
+ * (`now - lastCompactCheckMs >= COMPACT_CHECK_COOLDOWN_MS`) is NOT satisfied
+ * on the very first tick after a tracker is created. This gives every newly-
+ * tracked agent a `COMPACT_CHECK_COOLDOWN_MS` grace period before the first
+ * eligibility check — important for freshly-resumed agents whose prior
+ * transcript may already exceed `autoCompactThreshold`.
+ */
 export function createTracker(): AgentTracker {
   return {
     previousState: null,
@@ -150,7 +159,7 @@ export function createTracker(): AgentTracker {
     completionNotified: false,
     rateLimitBypassed: false,
     compactState: { compactSent: false },
-    lastCompactCheckMs: 0,
+    lastCompactCheckMs: nowFn(),
     apiErrorRetries: 0,
     apiErrorLastAtMs: 0,
   };
@@ -172,20 +181,6 @@ export function getTracker(agentId: string): AgentTracker {
 /** Get all current trackers (for testing/inspection) */
 export function getAllTrackers(): ReadonlyMap<string, AgentTracker> {
   return trackers;
-}
-
-/**
- * Stamp the per-agent tracker's `lastCompactCheckMs` to "now", so the next
- * auto-compact eligibility check is delayed by the full `COMPACT_CHECK_COOLDOWN_MS`.
- *
- * Used by `resumeAgent` to suppress an immediate compact-on-resume when the
- * prior transcript already shows usage above `autoCompactThreshold`. Without
- * this, a freshly-resumed agent would receive `/compact` on the very first
- * watchdog tick — defeating the purpose of resuming.
- */
-export function stampAgentCompactCheck(agentId: string): void {
-  const tracker = getTracker(agentId);
-  tracker.lastCompactCheckMs = nowFn();
 }
 
 /** Clear all trackers (for testing) */
@@ -719,13 +714,14 @@ async function processAgents(agents: Agent[], allAgents: Agent[]): Promise<void>
     if (agent.state === "running" || agent.state === "waiting") {
       const now = nowFn();
       if (now - tracker.lastCompactCheckMs >= COMPACT_CHECK_COOLDOWN_MS) {
+        const priorCheckMs = tracker.lastCompactCheckMs;
         tracker.lastCompactCheckMs = now;
         try {
           const config = await readConfigFn();
           const thresholdEntry = config["autoCompactThreshold"];
           const threshold = thresholdEntry?.value as number | undefined;
           if (threshold != null && threshold > 0) {
-            await checkAndCompact(agent, threshold, tracker.compactState);
+            await checkAndCompact(agent, threshold, tracker.compactState, priorCheckMs);
           }
         } catch {
           // Config read or compact check failed — skip silently
@@ -1065,13 +1061,14 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
       if (resolvedState === "running" || resolvedState === "waiting") {
         const now = nowFn();
         if (now - tracker.lastCompactCheckMs >= COMPACT_CHECK_COOLDOWN_MS) {
+          const priorCheckMs = tracker.lastCompactCheckMs;
           tracker.lastCompactCheckMs = now;
           try {
             const config = await readConfigFn();
             const thresholdEntry = config["autoCompactThreshold"];
             const threshold = thresholdEntry?.value as number | undefined;
             if (threshold != null && threshold > 0) {
-              await checkAndCompact(agent, threshold, tracker.compactState);
+              await checkAndCompact(agent, threshold, tracker.compactState, priorCheckMs);
             }
           } catch { /* skip */ }
         }

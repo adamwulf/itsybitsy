@@ -545,6 +545,10 @@ export async function executeResultActions(
         { stdout: "pipe", stderr: "pipe" },
       );
       await enterProc.exited;
+      // Mark the recipient as running — the message has been delivered and the
+      // agent is about to start working again. Without this, meta.state stays
+      // stale ('waiting'/'complete') until the next Stop hook fires.
+      await writeAgentState(agentDir, "running");
     }
   } else if (result.action === "notify_manager" && result.message) {
     const managerId = meta?.manager as string | undefined;
@@ -578,6 +582,10 @@ export async function executeResultActions(
           { stdout: "pipe", stderr: "pipe" },
         );
         await enterProc.exited;
+        // Mark the manager as running — it just received a notification and is
+        // about to work on it. Without this, the manager's meta.state stays
+        // stale until its next Stop hook fires.
+        await writeAgentState(join(agentsDir, managerId), "running");
       }
     }
   }

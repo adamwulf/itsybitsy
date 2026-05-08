@@ -9,6 +9,7 @@ import { join } from "path";
 import { homedir } from "os";
 import type { Agent } from "./agents";
 import { agentWorktreePath } from "./agents";
+import { logAgent } from "./agent-lifecycle";
 import { isValidTmuxSession } from "./validation";
 
 /**
@@ -204,12 +205,17 @@ export async function sendCompact(tmuxSession: string): Promise<boolean> {
  * @param agent - The agent to check
  * @param threshold - The autoCompactThreshold from config (percentage 0-100)
  * @param state - Mutable per-agent compact state
+ * @param lastCheckMs - The watchdog's previous compact-check timestamp (ms since epoch),
+ *   captured BEFORE the current tick stamped `lastCompactCheckMs = now`. Used purely
+ *   for the audit log line so operators can see the cadence of checks. 0 means "first
+ *   check for this agent" — no prior interval to report.
  * @returns The current usage percentage (or null if unavailable)
  */
 export async function checkAndCompact(
   agent: Agent,
   threshold: number,
   state: CompactState,
+  lastCheckMs?: number,
 ): Promise<number | null> {
   const usagePct = await usageReader(agent);
   if (usagePct === null) return null;
@@ -227,6 +233,14 @@ export async function checkAndCompact(
       const sent = await sendCompact(agent.meta.tmux_session);
       if (sent) {
         state.compactSent = true;
+        const agentDir = join(agent.repoPath, ".ittybitty", "agents", agent.id);
+        const sinceLast = lastCheckMs && lastCheckMs > 0
+          ? `${Date.now() - lastCheckMs}ms`
+          : "n/a";
+        await logAgent(
+          agentDir,
+          `[auto-compact] sent /compact: usage=${usagePct}% threshold=${threshold}% timeSinceLastCheck=${sinceLast}`,
+        );
       }
     }
   }

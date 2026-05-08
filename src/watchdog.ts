@@ -714,13 +714,14 @@ async function processAgents(agents: Agent[], allAgents: Agent[]): Promise<void>
     if (agent.state === "running" || agent.state === "waiting") {
       const now = nowFn();
       if (now - tracker.lastCompactCheckMs >= COMPACT_CHECK_COOLDOWN_MS) {
+        const priorCheckMs = tracker.lastCompactCheckMs;
         tracker.lastCompactCheckMs = now;
         try {
           const config = await readConfigFn();
           const thresholdEntry = config["autoCompactThreshold"];
           const threshold = thresholdEntry?.value as number | undefined;
           if (threshold != null && threshold > 0) {
-            await checkAndCompact(agent, threshold, tracker.compactState);
+            await checkAndCompact(agent, threshold, tracker.compactState, priorCheckMs);
           }
         } catch {
           // Config read or compact check failed — skip silently
@@ -1060,13 +1061,14 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
       if (resolvedState === "running" || resolvedState === "waiting") {
         const now = nowFn();
         if (now - tracker.lastCompactCheckMs >= COMPACT_CHECK_COOLDOWN_MS) {
+          const priorCheckMs = tracker.lastCompactCheckMs;
           tracker.lastCompactCheckMs = now;
           try {
             const config = await readConfigFn();
             const thresholdEntry = config["autoCompactThreshold"];
             const threshold = thresholdEntry?.value as number | undefined;
             if (threshold != null && threshold > 0) {
-              await checkAndCompact(agent, threshold, tracker.compactState);
+              await checkAndCompact(agent, threshold, tracker.compactState, priorCheckMs);
             }
           } catch { /* skip */ }
         }

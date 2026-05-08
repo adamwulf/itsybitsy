@@ -999,6 +999,14 @@ export const nowMsCtx = new InjectionContext<() => number>(() => Date.now());
  *  - we're about to render the agent as 'creating' (still spawning — Claude
  *    may not have a tmux session yet)
  *
+ * Also tears down the husk tmux session when resolvedState === "stopped".
+ * Once we've decided the agent is stopped, the session is by definition
+ * useless — it is either already gone (kill is a no-op), a dead-pane husk
+ * still being counted as live by listTmuxSessions, or an orphaned session
+ * whose Claude has died. Centralizing the kill here covers all stopped
+ * branches uniformly (PID-liveness gate, dead-pane husk, complete-with-
+ * missing-session).
+ *
  * Best-effort: failures are swallowed (logged to watch.log); state detection
  * must never block on a kill.
  */
@@ -1029,6 +1037,12 @@ async function reapOrphanedClaude(
   // Watchdog PID lives in meta.transient.json, not meta.json
   const transient = await readAgentTransient(agentDir);
   if (transient) reap("watchdog", transient.watchdog_pid);
+
+  // Tear down the husk tmux session for stopped agents. Best-effort: a kill
+  // against an already-gone session is a cheap no-op.
+  if (resolvedState === "stopped" && agent.meta.tmux_session) {
+    await killTmuxSession(agent.meta.tmux_session);
+  }
 }
 
 /**
@@ -1184,16 +1198,11 @@ export async function detectAgentStates(agents: Agent[]): Promise<void> {
       if (output === null || isDeadPane(output)) {
         const reason = output === null ? "tmux capture returned null" : "tmux pane is dead";
         const resolved: AgentState = isRecentlyCreated(agent.meta.created_epoch) ? "creating" : "stopped";
-        // Live session with a dead pane is a husk — kill the session so it
-        // stops being counted as live by listTmuxSessions on the next tick.
-        // Best-effort: failure is ignored (the next tick will retry, and the
-        // reapOrphanedClaude path logs separately). Skip while creating so a
-        // freshly-spawning agent that briefly shows a dead pane during
-        // startup is not torn down.
-        if (output !== null && resolved !== "creating") {
-          await killTmuxSession(tmuxSession);
-        }
         agent.state = resolved;
+        // reapOrphanedClaude tears down the husk tmux session when
+        // resolved === "stopped". Skipped during the creating grace window
+        // so a freshly-spawning agent that briefly shows a dead pane during
+        // startup is not torn down.
         await reapOrphanedClaude(agent, agentDir, resolved, reason);
         return;
       }

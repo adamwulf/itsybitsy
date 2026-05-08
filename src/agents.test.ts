@@ -2088,6 +2088,46 @@ describe("detectAgentStates — claude_pid liveness gate", () => {
     expect(captureCalls).toBe(0); // complete fast-path still skips capture
   });
 
+  // Regression: the user-hit case where BOTH the pid liveness gate fires
+  // (dead claude_pid) AND the tmux session is a dead-pane husk. The pid
+  // gate previously short-circuited before the husk-kill path could run,
+  // so reapOrphanedClaude reaped the PIDs but left the husk session alive
+  // (still counted by listTmuxSessions on subsequent ticks). Husk teardown
+  // now happens inside reapOrphanedClaude for resolvedState === "stopped",
+  // which covers this branch uniformly.
+  test("running + claude_pid dead + dead-pane husk → 'stopped' + kill-session called", async () => {
+    const killSessionCalls: string[] = [];
+    tmuxPollerSpawnCtx.set(((args: any[]) => {
+      const isKill = args[0] === "tmux" && args[1] === "kill-session";
+      if (isKill) killSessionCalls.push(String(args[3]));
+      return {
+        stdout: new ReadableStream({ start(c) { c.close(); } }),
+        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        exited: Promise.resolve(0),
+      };
+    }) as any);
+    isPidAliveCtx.set(() => false); // claude_pid is dead
+    liveTmuxSessionsCtx.set(async () => new Set(["ib-a1"]));
+    let killPidCalls = 0;
+    killPidCtx.set(() => { killPidCalls++; return true; });
+
+    const a = makeAgent({
+      id: "agent-1",
+      meta: {
+        state: "running",
+        tmux_session: "ib-a1",
+        claude_pid: "12345",
+        created_epoch: Math.floor(Date.now() / 1000) - 3600,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+    await detectAgentStates([a]);
+    expect(a.state).toBe("stopped");
+    // Husk session should have been torn down via reapOrphanedClaude.
+    expect(killSessionCalls).toEqual(["ib-a1"]);
+    // claude_pid was dead → no SIGTERM to it.
+    expect(killPidCalls).toBe(0);
+  });
+
   // Test 8: empty/legacy claude_pid → no false positive, falls through normally
   test("running + claude_pid='' (empty/legacy) + normal tmux → state follows existing logic, no reap", async () => {
     installTmuxRunner("⏵⏵ accept edits on (shift+tab to cycle)");

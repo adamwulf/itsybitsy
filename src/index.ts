@@ -513,6 +513,109 @@ async function main() {
       }
       break;
     }
+    case "state": {
+      const { readAllAgents, buildAgentTree, detectAgentStates } = await import("./agents");
+      const { gatherAgentState, formatPidComponent } = await import("./state-command");
+      const repos = await listRepos();
+      if (repos.length === 0) {
+        console.log("No repos registered. Use 'ib add <path>' to add one.");
+        break;
+      }
+
+      const managerIdx = args.indexOf("--manager");
+      const managerFilter = managerIdx !== -1 ? args[managerIdx + 1] : null;
+      const jsonOutput = args.includes("--json");
+      const verbose = args.includes("--verbose") || args.includes("-v");
+
+      const { agents, errors } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })));
+      if (verbose) {
+        for (const err of errors) {
+          console.error(`Warning: ${err.error}`);
+        }
+      }
+      await detectAgentStates(agents);
+      const roots = buildAgentTree(agents);
+
+      // Collect agents per-repo so we can group output (same shape as `ib list`).
+      const perRepo: { repoName: string; repoPath: string; rows: { agent: Agent; depth: number }[] }[] = [];
+      for (const repo of repos) {
+        const name = repoDisplayName(repo);
+        const repoRoots = roots.filter((a) => a.repoName === name && !a.archived);
+        const rows: { agent: Agent; depth: number }[] = [];
+        for (const root of repoRoots) {
+          if (managerFilter) {
+            if (root.id === managerFilter) {
+              for (const child of root.children) {
+                collectAgents(child, 1, null, rows);
+              }
+            } else {
+              findManagerInTree(root, managerFilter, rows);
+            }
+          } else {
+            collectAgents(root, 0, null, rows);
+          }
+        }
+        perRepo.push({ repoName: name, repoPath: repo.path, rows });
+      }
+
+      // Gather state for every displayed agent. Repos run sequentially so the
+      // human-readable output stays grouped, but agents within a repo are
+      // gathered in parallel (each spawns up to ~3 short-lived helpers).
+      type GatheredRepo = {
+        repoName: string;
+        repoPath: string;
+        rows: { agent: Agent; depth: number; row: Awaited<ReturnType<typeof gatherAgentState>> }[];
+      };
+      const gathered: GatheredRepo[] = [];
+      for (const r of perRepo) {
+        const gatheredRows = await Promise.all(
+          r.rows.map(async ({ agent, depth }) => ({
+            agent,
+            depth,
+            row: await gatherAgentState(agent),
+          }))
+        );
+        gathered.push({ repoName: r.repoName, repoPath: r.repoPath, rows: gatheredRows });
+      }
+
+      if (jsonOutput) {
+        const flat = gathered.flatMap((g) => g.rows.map(({ row }) => row));
+        console.log(JSON.stringify(flat, null, 2));
+        break;
+      }
+
+      const { BOLD, DIM, RESET } = await import("./tui/colors");
+      const { displayState } = await import("./tui/agent-tree");
+      const { getStateColors } = await import("./tui/color-scheme");
+      const stateColors = getStateColors();
+
+      let isFirst = true;
+      for (const g of gathered) {
+        if (!isFirst) console.log("");
+        isFirst = false;
+        console.log(`${BOLD}${g.repoName}${RESET}  ${DIM}→  ${g.repoPath}${RESET}`);
+        if (g.rows.length === 0) {
+          console.log(`  ${DIM}(no agents)${RESET}`);
+          continue;
+        }
+        for (const { agent, depth, row } of g.rows) {
+          const indent = "  ".repeat(depth);
+          const icon = resolveAgentIcon(agent.meta);
+          const stateText = displayState(agent.state);
+          const colorCode = stateColors[stateText] ?? DIM;
+          const orphanMark = agent.orphaned ? "⚠ " : "";
+          const tmux = formatPidComponent("tmux", row.tmux_pane_pid, row.tmux_pane_alive);
+          const claude = formatPidComponent("claude", row.claude_pid, row.claude_alive);
+          const watchdog = formatPidComponent("watchdog", row.watchdog_pid, row.watchdog_alive);
+          const orphanCount = row.unexpected_children.length;
+          const orphans = orphanCount > 0 ? `  ${DIM}[orphans: ${orphanCount}]${RESET}` : "";
+          console.log(
+            `${indent}${orphanMark}${icon} ${agent.id}  ${colorCode}${stateText}${RESET}  ${agent.age}  ${DIM}${tmux}  ${claude}  ${watchdog}${RESET}${orphans}`
+          );
+        }
+      }
+      break;
+    }
     case "watchdog": {
       const watchdogAgentId = args[1];
 
@@ -1437,6 +1540,7 @@ async function main() {
       console.log("  add [path]          Register a repo (default: cwd)");
       console.log("  remove <path>       Unregister a repo");
       console.log("  list, ls            List repos and their agents (--manager <id>, --json)");
+      console.log("  state               List agents with PID/liveness diagnostics (--manager <id>, --json)");
       console.log("");
       console.log("Monitoring:");
       console.log("  watch               Launch TUI dashboard");

@@ -2839,6 +2839,43 @@ describe("Orphaned tmux sessions (Phase 10)", () => {
 
   });
 
+  test("TREE mode is preserved when selecting a repo header (no auto-switch to REPO)", () => {
+    dashboard = makeDashboard();
+    const agent = makeAgent("agent-test", "/repos/test");
+    const repoHeader = makeFlatRepoHeader("/repos/test");
+    const flatList: FlatEntry[] = [repoHeader, makeFlatAgent(agent)];
+    dashboard.onUpdate([agent], flatList, [], []);
+
+    dashboard.jumpToMode("TREE");
+    expect(dashboard.currentMode).toBe("TREE");
+
+    // Select the repo header — would have auto-switched to REPO before the fix.
+    dashboard.agentTree.selectByRepoPath("/repos/test");
+    dashboard.onUpdate([agent], flatList, [], []);
+    expect(dashboard.currentMode).toBe("TREE");
+  });
+
+  test("TREE mode hides the sidebar agent tree (no duplication)", () => {
+    dashboard = makeDashboard();
+    const agent = makeAgent("agent-dup-test", "/repos/test");
+    const flatList: FlatEntry[] = [makeFlatAgent(agent)];
+    dashboard.onUpdate([agent], flatList, [], []);
+
+    dashboard.jumpToMode("TREE");
+    // Render and split each line at the sidebar/main separator (vertical bar `│`).
+    // The tree row should only appear in the main column, never the sidebar column.
+    const lines = dashboard.render(160).map(stripAnsi);
+    let sidebarHasTreeRow = false;
+    for (const l of lines) {
+      const sidebar = l.split("│")[0] ?? "";
+      if (sidebar.includes("agent-dup-test")) {
+        sidebarHasTreeRow = true;
+        break;
+      }
+    }
+    expect(sidebarHasTreeRow).toBe(false);
+  });
+
   test("onUpdate with empty orphans clears previous orphans", () => {
     dashboard = makeDashboard();
     const agent = makeAgent("agent-test", "/repos/test");

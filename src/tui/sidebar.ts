@@ -75,6 +75,10 @@ export class SidebarComponent implements Component {
   focusTarget: FocusTarget = "agent-tree";
   /** Height offsets for sidebar panels — positive grows, negative shrinks */
   heightOffsets: { tree: number; info: number; coordinator: number } = { tree: 0, info: 0, coordinator: 0 };
+  /** When true, sidebar hides the agent tree and gives all space to the info panel.
+   *  Used in TREE mode where the full tree is rendered in the main area, so the
+   *  sidebar tree would just duplicate it. */
+  hideTree = false;
 
   constructor(agentTree: AgentTreeComponent, infoPanel: InfoPanelComponent) {
     this.agentTree = agentTree;
@@ -94,6 +98,16 @@ export class SidebarComponent implements Component {
   private renderNormalLayout(width: number): string[] {
     const w = width;
     const lines: string[] = [];
+
+    if (this.hideTree) {
+      // Info panel takes the whole sidebar (header + content).
+      lines.push(buildFocusSeparator("Info", w, this.focusTarget === "info"));
+      const infoHeight = Math.max(0, this.displayHeight - 1);
+      this.infoPanel.displayHeight = infoHeight;
+      lines.push(...this.infoPanel.render(w));
+      while (lines.length < this.displayHeight) lines.push("");
+      return lines.slice(0, this.displayHeight);
+    }
 
     const itemCount = this.agentTree.visibleList.length;
     const base = computeSidebarHeights(this.displayHeight, itemCount);

@@ -100,6 +100,24 @@ describe("SidebarComponent", () => {
     expect(text).not.toContain("System Coordinator");
   });
 
+  test("hideTree: only Info section renders, no Agents section or tree rows", () => {
+    const sidebar = makeSidebar();
+    sidebar.displayHeight = 25;
+    sidebar.hideTree = true;
+
+    const agent = makeAgent({ id: "agent-hidden" });
+    const flatList: FlatEntry[] = [makeFlatAgent(agent), makeFlatRepoHeader("/some/repo")];
+    sidebar.agentTree.setFlatList(flatList);
+
+    const lines = sidebar.render(SIDEBAR_WIDTH);
+    expect(lines.length).toBe(25);
+
+    const text = lines.map(stripAnsi).join("\n");
+    expect(text).not.toContain("Agents");
+    expect(text).toContain("Info");
+    expect(text).not.toContain("agent-hidden");
+  });
+
   test("output is exactly displayHeight lines", () => {
     const sidebar = makeSidebar();
     sidebar.displayHeight = 20;

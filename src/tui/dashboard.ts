@@ -1187,9 +1187,11 @@ export class DashboardComponent implements Component {
       }
     }
 
-    // Auto-switch to/from REPO mode based on selection
+    // Auto-switch to/from REPO mode based on selection.
+    // TREE mode is preserved across selection changes so the user can browse the
+    // full agent tree regardless of what's selected.
     const currentMode = PANE_MODES[this.modeIndex];
-    if (!selected && !isCoordinator && this.agentTree.selectedRepoHeader) {
+    if (!selected && !isCoordinator && this.agentTree.selectedRepoHeader && currentMode !== "TREE") {
       // Repo header selected — save current mode and switch to REPO
       if (currentMode !== "REPO") {
         this.savedModeIndex = this.modeIndex;
@@ -2081,6 +2083,9 @@ export class DashboardComponent implements Component {
 
     // Render sidebar and merge with main area
     this.sidebar.focusTarget = this.focusManager.current();
+    // In TREE mode the full tree renders in the main area, so hide the
+    // sidebar tree to avoid duplication and let the info panel take all space.
+    this.sidebar.hideTree = isTreeMode;
     // Info-panel focus must follow Tab navigation, which changes focus without
     // calling syncSelectedAgent.
     const wasInfoFocused = this.infoPanel.focused;

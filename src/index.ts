@@ -521,6 +521,7 @@ async function main() {
         gatherOrphans,
         buildTrackedSets,
         cleanupOrphans,
+        sanitizeForDisplay,
       } = await import("./state-command");
       const repos = await listRepos();
       if (repos.length === 0) {
@@ -533,8 +534,13 @@ async function main() {
       const jsonOutput = args.includes("--json");
       const verbose = args.includes("--verbose") || args.includes("-v");
       const cleanupMode = args.includes("--cleanup");
+      const dryRunMode = args.includes("--dry-run");
+      if (dryRunMode && !cleanupMode) {
+        console.error("Error: --dry-run only makes sense with --cleanup");
+        process.exit(1);
+      }
 
-      const { agents, errors } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })));
+      const { agents, errors, liveTmuxSessions } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })));
       if (verbose) {
         for (const err of errors) {
           console.error(`Warning: ${err.error}`);
@@ -588,20 +594,21 @@ async function main() {
       // Always gather orphans across the WHOLE registry (every repo, every
       // agent — never just the ones matched by --manager). The tracked set
       // must include all known agents so legitimate work in other repos isn't
-      // mis-flagged.
+      // mis-flagged. We pass `liveTmuxSessions` from `readAllAgents()` so the
+      // tmux-orphan view is consistent with the rest of the codebase's view
+      // of live sessions (no extra `tmux list-sessions` call).
       const tracked = await buildTrackedSets(agents);
-      const orphans = await gatherOrphans(tracked);
+      const orphans = await gatherOrphans(tracked, liveTmuxSessions);
 
-      // If --cleanup, kill orphans now and capture the result. The cleanup
-      // runs against the orphan list we just computed — no other inputs reach
-      // the kill path.
-      const cleanupReport = cleanupMode ? await cleanupOrphans(orphans) : null;
-      if (cleanupReport) {
-        for (const action of cleanupReport.actions) {
-          const status = action.killed ? "killed" : `kill failed (${action.error ?? "unknown"})`;
-          const detail = action.command ? ` (${action.command})` : "";
-          console.error(`[ib state --cleanup] ${action.kind} ${action.target}${detail}: ${status}`);
-        }
+      // If --cleanup, kill orphans now and capture the result. To defend
+      // against the race where another agent was spawned between our gather
+      // and now, re-build the tracked set immediately before cleanup and pass
+      // it in — cleanupOrphans skips any orphan whose target became tracked
+      // since gather. With --dry-run, no kills are actually issued.
+      let cleanupReport: Awaited<ReturnType<typeof cleanupOrphans>> | null = null;
+      if (cleanupMode) {
+        const trackedNow = await buildTrackedSets(agents);
+        cleanupReport = await cleanupOrphans(orphans, trackedNow, { dryRun: dryRunMode });
       }
 
       if (jsonOutput) {
@@ -649,22 +656,27 @@ async function main() {
 
       // ── ORPHANS section ─────────────────────────────────────────────────
       // Always rendered (even when everything is clean — explicit "none" lines
-      // make it obvious cleanup ran and found nothing). The annotation comes
-      // from cleanupReport when --cleanup was passed; otherwise each line
-      // shows just the orphan identity.
+      // make it obvious cleanup ran and found nothing). When --cleanup was
+      // passed, each entry is annotated inline ([killed] / [skipped: …] /
+      // [kill failed: …]). All cleanup result reporting happens here — no
+      // duplicate per-action stderr line so `2>&1` consumers see one record
+      // per orphan, not two.
       const annotateAction = (kind: string, target: string): string => {
         if (!cleanupReport) return "";
         const action = cleanupReport.actions.find(
           (a) => a.kind === kind && a.target === target
         );
         if (!action) return "";
-        return action.killed
-          ? `  ${DIM}[killed]${RESET}`
-          : `  ${DIM}[kill failed: ${action.error ?? "unknown"}]${RESET}`;
+        if (action.killed) return `  ${DIM}[killed]${RESET}`;
+        if (action.skipped) return `  ${DIM}[skipped: ${action.error ?? "unknown"}]${RESET}`;
+        return `  ${DIM}[kill failed: ${action.error ?? "unknown"}]${RESET}`;
       };
 
       console.log("");
-      console.log(`${BOLD}ORPHANS${RESET}`);
+      const orphansHeader = cleanupMode && dryRunMode
+        ? `${BOLD}ORPHANS${RESET} ${DIM}(dry-run — no kills issued)${RESET}`
+        : `${BOLD}ORPHANS${RESET}`;
+      console.log(orphansHeader);
       const labelWidth = "ib watch processes:".length;
       const renderHeader = (label: string) => `  ${label.padEnd(labelWidth)}`;
 
@@ -674,7 +686,7 @@ async function main() {
         console.log(`${renderHeader("tmux sessions:")}`);
         for (const session of orphans.tmux_sessions) {
           const ann = annotateAction("tmux_session", session);
-          console.log(`    ${session}${ann}`);
+          console.log(`    ${sanitizeForDisplay(session)}${ann}`);
         }
       }
 
@@ -684,7 +696,7 @@ async function main() {
         console.log(`${renderHeader("claude processes:")}`);
         for (const proc of orphans.claude_processes) {
           const ann = annotateAction("claude_process", String(proc.pid));
-          console.log(`    ${proc.pid}  ${DIM}${proc.command}${RESET}${ann}`);
+          console.log(`    ${proc.pid}  ${DIM}${sanitizeForDisplay(proc.command)}${RESET}${ann}`);
         }
       }
 
@@ -694,7 +706,7 @@ async function main() {
         console.log(`${renderHeader("watchdog processes:")}`);
         for (const proc of orphans.watchdog_processes) {
           const ann = annotateAction("watchdog_process", String(proc.pid));
-          console.log(`    ${proc.pid}  ${DIM}${proc.command}${RESET}${ann}`);
+          console.log(`    ${proc.pid}  ${DIM}${sanitizeForDisplay(proc.command)}${RESET}${ann}`);
         }
       }
 
@@ -704,7 +716,7 @@ async function main() {
         console.log(`${renderHeader("ib watch processes:")}`);
         for (const proc of orphans.ib_watch_processes) {
           const ann = annotateAction("ib_watch_process", String(proc.pid));
-          console.log(`    ${proc.pid}  ${DIM}${proc.command}${RESET}${ann}`);
+          console.log(`    ${proc.pid}  ${DIM}${sanitizeForDisplay(proc.command)}${RESET}${ann}`);
         }
       }
       break;
@@ -1633,7 +1645,7 @@ async function main() {
       console.log("  add [path]          Register a repo (default: cwd)");
       console.log("  remove <path>       Unregister a repo");
       console.log("  list, ls            List repos and their agents (--manager <id>, --json)");
-      console.log("  state               List agents with PID/liveness diagnostics + orphan detection (--manager <id>, --json, --cleanup)");
+      console.log("  state               List agents with PID/liveness diagnostics + orphan detection (--manager <id>, --json, --cleanup, --dry-run)");
       console.log("");
       console.log("Monitoring:");
       console.log("  watch               Launch TUI dashboard");

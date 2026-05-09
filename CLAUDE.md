@@ -271,13 +271,20 @@ A manager should never duplicate a sub-agent's work by re-implementing it direct
 `ib state` always renders an `ORPHANS` section after the agent list. Four categories are surfaced:
 
 - **tmux sessions** — sessions matching `ib-coordinator` (system coordinator, exact) or `ittybitty-<repoId>-<agentId>` (every spawned agent + per-repo coordinator) that aren't in any registered repo's tracked set.
-- **claude processes** — running `claude --resume <id>` / `claude --session-id <uuid>` whose PID isn't recorded in any tracked agent's `meta.json` `claude_pid`.
+- **claude processes** — running `claude --resume <id>` / `claude --session-id <uuid>` whose **cwd is inside an itsybitsy worktree** (`.../.ittybitty/agents/<id>/...`) and whose PID isn't recorded in any tracked agent's `meta.json` `claude_pid`. The cwd anchor is critical — `--resume` and `--session-id` are standard Claude CLI flags, so a user running `claude --resume <id>` in their own terminal must NEVER be flagged. cwd lookup uses `lsof -d cwd` on macOS and `/proc/<pid>/cwd` on Linux.
 - **watchdog processes** — running `ib watchdog <agent-id>` whose PID isn't in any agent's `watchdog_pid` (read from both `meta.json` and `meta.transient.json`).
 - **ib watch processes** — every running `ib watch` (informational; there is no tracked set).
 
 The tracked set is built from ALL agents in ALL registered repos plus the system coordinator's session — running `ib state` from any repo will not mis-flag legitimate agents from other repos. Each section reads "none" when empty.
 
-`ib state --cleanup` kills every orphan it finds: `tmux kill-session` for sessions, SIGTERM with a short grace then SIGKILL for processes. Only entries already in the orphan list are touched — tracked PIDs/sessions are never killed. Each kill attempt is annotated `[killed]` / `[kill failed: …]` in the re-rendered ORPHANS section, logged to stderr, and (in `--json` mode) included as a `cleanup_actions` array on the JSON payload alongside the `agents` and `orphans` fields.
+`ib state --cleanup` kills every orphan it finds: `tmux kill-session` for sessions, SIGTERM with a short grace then SIGKILL for processes. Safety guarantees:
+- The tracked set is rebuilt **immediately before** cleanup; any orphan whose target became tracked between gather and cleanup is skipped (race guard against agents spawned mid-`ib state`).
+- Before SIGKILL, each PID's command line is re-resolved via `ps -o command=`; if it no longer matches an itsybitsy pattern, SIGKILL is refused (PID-reuse guard).
+- Tmux session names are validated with `isValidTmuxSession` before being passed to `tmux kill-session`.
+
+Each kill attempt is annotated `[killed]` / `[skipped: …]` / `[kill failed: …]` in the re-rendered ORPHANS section. In `--json` mode, a `cleanup_actions` array is added to the JSON payload (only when `--cleanup` was passed) alongside the `agents` and `orphans` fields. `ib state --cleanup --dry-run` previews what would be killed without issuing any kill commands.
+
+**Known limitation**: if you run both the bash `ib` and the bun `itsybitsy` and they don't share `~/.itsybitsy/repos.json`, `--cleanup` from one install will see the other's watchdogs as orphans. Don't run both simultaneously, or stick with one tracked registry.
 
 ### Sending literal strings with `ib send`
 

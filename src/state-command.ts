@@ -15,10 +15,11 @@
 
 import { join } from "path";
 import type { Agent } from "./agents";
-import { isPidAliveCtx, readAgentTransient } from "./agents";
+import { isPidAliveCtx, killPidCtx, readAgentTransient } from "./agents";
 import { spawnCtx } from "./agent-lifecycle";
 import { isValidTmuxSession } from "./validation";
 import { IB_COORDINATOR_SESSION } from "./coordinator";
+import { InjectionContext } from "./types";
 
 /** A child process under the tmux pane that is NOT the recorded claude_pid. */
 export interface UnexpectedChild {
@@ -195,21 +196,33 @@ export function isItsybitsyTmuxSession(name: string): boolean {
 }
 
 /**
+ * Strip control characters from a tmux session name before printing it. tmux
+ * itself rejects most metacharacters, but a session name pulled from
+ * `tmux list-sessions` could in theory contain ANSI escapes that bleed into
+ * the rendered output. Replace any non-printable char with `?` so the
+ * displayed value can never escape its line.
+ */
+export function sanitizeForDisplay(s: string): string {
+  // Disallow control chars (C0 + DEL + C1) when rendering.
+  return s.replace(/[\x00-\x1f\x7f-\x9f]/g, "?");
+}
+
+/**
  * Parse the output of `ps -o pid=,command= -A` into a list of `{ pid, command }`
- * entries. Each line has the pid left-padded by `ps`, then a single space, then
- * the command tail. Blank or unparseable lines are skipped.
+ * entries. Each line has the pid (possibly left-padded by `ps`), one or more
+ * spaces, then the command tail. Blank or unparseable lines are skipped.
  */
 function parsePsLines(stdout: string): OrphanProcess[] {
   const out: OrphanProcess[] = [];
   for (const raw of stdout.split("\n")) {
-    const line = raw.trim();
+    const line = raw.replace(/^\s+/, "");
     if (!line) continue;
-    const spaceIdx = line.indexOf(" ");
-    if (spaceIdx <= 0) continue;
-    const pidStr = line.slice(0, spaceIdx);
-    const command = line.slice(spaceIdx + 1).trim();
-    const pid = parsePid(pidStr);
+    // `ps -o pid=,command=` always emits PID, then whitespace, then command.
+    const m = line.match(/^(\d+)\s+(.+)$/);
+    if (!m) continue;
+    const pid = parsePid(m[1]!);
     if (pid === null) continue;
+    const command = m[2]!.trim();
     if (!command) continue;
     out.push({ pid, command });
   }
@@ -223,32 +236,41 @@ async function listAllProcesses(): Promise<OrphanProcess[]> {
   return parsePsLines(result.stdout);
 }
 
-/** List all tmux sessions on the host (returns empty when tmux is not running). */
-async function listAllTmuxSessions(): Promise<string[]> {
-  const result = await spawnCtx.run(["tmux", "list-sessions", "-F", "#{session_name}"]);
-  if (result.exitCode !== 0 || !result.stdout) return [];
-  return result.stdout
-    .split("\n")
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
+/**
+ * Resolve a process's current working directory via `lsof -a -d cwd -p <pid>
+ * -Fn` (macOS). Returns the empty string on Linux fallback failure or when
+ * lsof isn't available — callers must treat empty as "unknown" and refuse to
+ * flag the process as an itsybitsy orphan.
+ */
+async function readProcessCwd(pid: number): Promise<string> {
+  // macOS: lsof
+  if (process.platform === "darwin") {
+    const result = await spawnCtx.run(["lsof", "-a", "-d", "cwd", "-p", String(pid), "-Fn"]);
+    if (result.exitCode !== 0) return "";
+    const nLine = result.stdout.split("\n").find((l) => l.startsWith("n"));
+    return nLine ? nLine.slice(1) : "";
+  }
+  // Linux: /proc/<pid>/cwd readlink. We do NOT shell out to `readlink` so the
+  // value isn't subject to spawnCtx fakes (which would return synthetic paths).
+  // Tests run on macOS or override `readProcessCwdCtx` directly.
+  try {
+    const { readlink } = await import("fs/promises");
+    return await readlink(`/proc/${pid}/cwd`);
+  } catch {
+    return "";
+  }
 }
 
-/**
- * Decide whether a `ps` command line belongs to a Claude process spawned by
- * itsybitsy. The agent start scripts launch `claude --resume <id> ...` or
- * `claude --session-id <uuid> ...` (see start.sh templates in
- * src/ib-commands.ts). We match on the `claude` token followed by either of
- * those flags so unrelated binaries that merely contain "claude" in their path
- * (e.g. a user editor session named claude.txt) are not misclassified.
- *
- * The match is intentionally lenient about the path prefix — Bun.which / PATH
- * resolution may render the binary as `claude`, `/usr/local/bin/claude`, or
- * similar. We anchor on the basename token via a word boundary.
- */
-export function isClaudeAgentProcess(command: string): boolean {
-  if (!command) return false;
-  if (!/(?:^|\/|\s)claude(?:\s|$)/.test(command)) return false;
-  return /\s--(?:resume|session-id)\b/.test(command);
+/** Injectable cwd lookup for tests. */
+export const readProcessCwdCtx = new InjectionContext<(pid: number) => Promise<string>>(
+  readProcessCwd,
+);
+
+/** Lookup a process's current command line via `ps -o command= -p <pid>`. */
+async function readProcessCommand(pid: number): Promise<string> {
+  const result = await spawnCtx.run(["ps", "-o", "command=", "-p", String(pid)]);
+  if (result.exitCode !== 0) return "";
+  return (result.stdout.split("\n")[0] ?? "").trim();
 }
 
 /**
@@ -274,18 +296,46 @@ export function isIbWatchProcess(command: string): boolean {
 }
 
 /**
+ * Decide whether a `ps` command line LOOKS LIKE a Claude CLI invocation. The
+ * argv shape `claude --resume <id>` and `claude --session-id <uuid>` is shared
+ * between the user's own terminal sessions and itsybitsy's start.sh template
+ * — argv alone is NOT enough to claim the process is ours. Use this only as a
+ * narrow PRE-FILTER before checking cwd via `isClaudeAgentProcess`.
+ */
+export function looksLikeClaudeArgv(command: string): boolean {
+  if (!command) return false;
+  if (!/(?:^|\/|\s)claude(?:\s|$)/.test(command)) return false;
+  return /\s--(?:resume|session-id)\b/.test(command);
+}
+
+/**
+ * Decide whether a process IS a Claude agent spawned by itsybitsy. Combines
+ * the argv shape pre-filter with a positive cwd check: the process's cwd must
+ * be inside `<repo>/.ittybitty/agents/<id>/repo/` (matching the worktree path
+ * built by `newAgent` in src/ib-commands.ts).
+ *
+ * Why: `claude --resume` / `claude --session-id` are STANDARD Claude CLI
+ * flags. A user running `claude --resume <id>` in a regular terminal must
+ * NEVER be classified as an orphan we kill. The cwd anchor closes that hole —
+ * itsybitsy-spawned claude processes always run from inside an agent worktree
+ * (see start.sh template), and user sessions don't.
+ */
+export async function isClaudeAgentProcess(pid: number, command: string): Promise<boolean> {
+  if (!looksLikeClaudeArgv(command)) return false;
+  const cwd = await readProcessCwdCtx.fn(pid);
+  if (!cwd) return false;
+  // Match `.../.ittybitty/agents/<id>(/repo...)?` — the `repo` subpath is
+  // the worktree, but in some failure modes claude may be running directly
+  // from the agent dir. Anchor on the .ittybitty/agents/ marker.
+  return /\/\.ittybitty\/agents\/[^/]+(?:\/|$)/.test(cwd);
+}
+
+/**
  * Build the complete tracked set used to subtract from running processes /
  * sessions. Includes every tmux_session, claude_pid, and watchdog_pid across
- * ALL agents in ALL registered repos plus the system coordinator and per-repo
- * coordinator sessions for registered repos.
- *
- * `agents` should be the flat list returned by `readAllAgents()`.
- * `repoBasenames` is the set of repo basenames (used to compute tracked
- * coordinator session names — see notes on per-repo coordinator naming in
- * src/coordinator.ts:getCoordinatorAgentId). The coordinator's tmux session is
- * already covered by the per-agent loop because per-repo coordinators have a
- * meta.json entry with `agentType: "coordinator"`. We still add
- * `ib-coordinator` explicitly because the system coordinator has no agent dir.
+ * ALL agents in ALL registered repos. The `ib-coordinator` session is added
+ * unconditionally — it's the system coordinator's tmux session and never
+ * belongs in the orphan list.
  */
 export interface TrackedSets {
   tmuxSessions: Set<string>;
@@ -326,20 +376,30 @@ export async function buildTrackedSets(agents: Agent[]): Promise<TrackedSets> {
 }
 
 /**
- * Gather all four orphan categories. Pure data-gathering: shells out via
- * `spawnCtx.run` so tests can inject a fake. Caller supplies the tracked
- * sets (see `buildTrackedSets`). Anything matching an itsybitsy pattern but
- * not in the tracked set is an orphan.
+ * Gather all four orphan categories.
  *
- * The tmux-session match is intentionally narrow (`isItsybitsyTmuxSession`),
- * and the process matches require both the binary AND the expected argv shape
- * — a bare `claude` with no `--resume`/`--session-id` is NOT flagged.
+ * `tracked` is the result of `buildTrackedSets(agents)`. `liveTmuxSessions`
+ * is the live session set from `readAllAgents()` — passing it in (instead of
+ * calling `tmux list-sessions` again) keeps this in sync with the rest of the
+ * codebase's view of live sessions. Pass `null` when the caller doesn't have
+ * the set handy and `gatherOrphans` will fetch it itself.
+ *
+ * The tmux-session match is intentionally narrow (`isItsybitsyTmuxSession`).
+ * The process matches require both the binary AND the expected argv shape AND
+ * (for claude) a cwd inside an itsybitsy worktree — argv alone is not enough.
  */
-export async function gatherOrphans(tracked: TrackedSets): Promise<OrphanReport> {
-  const [sessions, processes] = await Promise.all([
-    listAllTmuxSessions(),
-    listAllProcesses(),
-  ]);
+export async function gatherOrphans(
+  tracked: TrackedSets,
+  liveTmuxSessions: Set<string> | null = null,
+): Promise<OrphanReport> {
+  const sessions = liveTmuxSessions !== null
+    ? Array.from(liveTmuxSessions)
+    : await (async (): Promise<string[]> => {
+      const result = await spawnCtx.run(["tmux", "list-sessions", "-F", "#{session_name}"]);
+      if (result.exitCode !== 0 || !result.stdout) return [];
+      return result.stdout.split("\n").map((s) => s.trim()).filter((s) => s.length > 0);
+    })();
+  const processes = await listAllProcesses();
 
   const tmuxOrphans: string[] = [];
   for (const name of sessions) {
@@ -352,10 +412,6 @@ export async function gatherOrphans(tracked: TrackedSets): Promise<OrphanReport>
   const watchdogOrphans: OrphanProcess[] = [];
   const ibWatchAll: OrphanProcess[] = [];
   for (const proc of processes) {
-    if (isClaudeAgentProcess(proc.command)) {
-      if (!tracked.claudePids.has(proc.pid)) claudeOrphans.push(proc);
-      continue;
-    }
     if (isWatchdogProcess(proc.command)) {
       if (!tracked.watchdogPids.has(proc.pid)) watchdogOrphans.push(proc);
       continue;
@@ -363,6 +419,13 @@ export async function gatherOrphans(tracked: TrackedSets): Promise<OrphanReport>
     if (isIbWatchProcess(proc.command)) {
       ibWatchAll.push(proc);
       continue;
+    }
+    // Claude check is async (cwd lookup) so it goes last — the cheap matchers
+    // above short-circuit common processes first.
+    if (looksLikeClaudeArgv(proc.command)) {
+      if (tracked.claudePids.has(proc.pid)) continue;
+      const isOurs = await isClaudeAgentProcess(proc.pid, proc.command);
+      if (isOurs) claudeOrphans.push(proc);
     }
   }
 
@@ -385,6 +448,8 @@ export interface CleanupAction {
   command?: string;
   /** Whether the kill succeeded (process gone / session gone). */
   killed: boolean;
+  /** True when this kill was skipped — see `error` for the reason (e.g. dry-run, raced). */
+  skipped?: boolean;
   /** Diagnostic — present when killed=false. */
   error?: string;
 }
@@ -394,43 +459,14 @@ export interface CleanupReport {
 }
 
 /**
- * Injection seam for `process.kill` so tests can verify which signals are sent
- * without actually killing anything. Default delegates to the real
- * `process.kill`. Keep separate from `isPidAliveCtx` because that one is
- * read-only and reused widely.
+ * Tests-only injection seam for the post-SIGTERM grace sleep. Default 200ms
+ * — kept short because cleanup is interactive. Not a project-wide convention:
+ * `agent-lifecycle.ts` uses raw `Bun.sleep` and stays untestable in this
+ * dimension. Tests override this to a no-op so suites stay snappy.
  */
-export const sendSignalCtx = {
-  fn: (pid: number, signal: NodeJS.Signals | 0): void => {
-    process.kill(pid, signal);
-  },
-  set(fn: (pid: number, signal: NodeJS.Signals | 0) => void) {
-    this.fn = fn;
-  },
-  reset() {
-    this.fn = (pid: number, signal: NodeJS.Signals | 0): void => {
-      process.kill(pid, signal);
-    };
-  },
-};
-
-/**
- * Injection seam for the post-SIGTERM grace sleep. Default 200ms (kept short —
- * cleanup is interactive and we don't want to block the user for a full second
- * per orphan). Tests override to 0 so suites stay snappy.
- */
-export const cleanupSleepCtx = {
-  fn: async (ms: number): Promise<void> => {
-    await Bun.sleep(ms);
-  },
-  set(fn: (ms: number) => Promise<void>) {
-    this.fn = fn;
-  },
-  reset() {
-    this.fn = async (ms: number): Promise<void> => {
-      await Bun.sleep(ms);
-    };
-  },
-};
+export const cleanupSleepCtx = new InjectionContext<(ms: number) => Promise<void>>(
+  async (ms: number) => { await Bun.sleep(ms); },
+);
 
 /** Grace period (ms) between SIGTERM and SIGKILL during cleanup. */
 const CLEANUP_GRACE_MS = 200;
@@ -441,24 +477,40 @@ const CLEANUP_GRACE_MS = 200;
  * cleanup vs. the longer 2s wait used during teardown). Returns
  * `{ killed: true }` when the process is gone, `{ killed: false, error }` on
  * any failure including "still alive after SIGKILL".
+ *
+ * `verifyCommand` is the original command line we observed for the orphan.
+ * Before SIGKILL we re-resolve `ps -o command= -p <pid>` and require it to
+ * still match the same itsybitsy pattern that flagged it — this defends
+ * against the kernel reusing the PID in the SIGTERM/SIGKILL grace window.
  */
-async function killProcessGracefully(pid: number): Promise<{ killed: boolean; error?: string }> {
+async function killProcessGracefully(
+  pid: number,
+  verifyCommand: string,
+  matcher: (cmd: string) => boolean,
+): Promise<{ killed: boolean; error?: string }> {
   // Already dead?
   if (!isPidAliveCtx.fn(pid)) return { killed: true };
 
-  try {
-    sendSignalCtx.fn(pid, "SIGTERM");
-  } catch (e) {
-    return { killed: false, error: `SIGTERM failed: ${(e as Error).message}` };
+  if (!killPidCtx.fn(pid, "SIGTERM")) {
+    return { killed: false, error: "SIGTERM failed (already dead or no permission)" };
   }
 
   await cleanupSleepCtx.fn(CLEANUP_GRACE_MS);
   if (!isPidAliveCtx.fn(pid)) return { killed: true };
 
-  try {
-    sendSignalCtx.fn(pid, "SIGKILL");
-  } catch (e) {
-    return { killed: false, error: `SIGKILL failed: ${(e as Error).message}` };
+  // PID-reuse defense: confirm the PID still belongs to a matching itsybitsy
+  // process before escalating. If the cmd shape changed, somebody else now
+  // owns this PID and we must NOT SIGKILL it.
+  const currentCommand = await readProcessCommand(pid);
+  if (currentCommand && currentCommand !== verifyCommand && !matcher(currentCommand)) {
+    return {
+      killed: false,
+      error: `PID reuse detected — refused to SIGKILL (was: ${verifyCommand}, now: ${currentCommand})`,
+    };
+  }
+
+  if (!killPidCtx.fn(pid, "SIGKILL")) {
+    return { killed: false, error: "SIGKILL failed (already dead or no permission)" };
   }
 
   await cleanupSleepCtx.fn(CLEANUP_GRACE_MS);
@@ -467,25 +519,66 @@ async function killProcessGracefully(pid: number): Promise<{ killed: boolean; er
 }
 
 /**
+ * Options controlling cleanupOrphans. `dryRun` reports actions without
+ * issuing any kill commands — required by `--dry-run` so users can preview
+ * what `--cleanup` would do.
+ */
+export interface CleanupOptions {
+  dryRun?: boolean;
+}
+
+/**
  * Kill every orphan in `report` — tmux sessions via `tmux kill-session`,
  * processes via SIGTERM/SIGKILL. Returns a CleanupReport with one action per
  * orphan, in the same order as the input. The caller is responsible for
  * presenting the report to the user.
  *
- * SAFETY: Only entries already in `report` are touched. The caller must pass a
- * report from `gatherOrphans()` (or equivalent) — never construct one by hand
- * without re-running the orphan match against the tracked set.
+ * SAFETY: `tracked` is checked AGAIN before each kill, defending against the
+ * race where a new agent was spawned between `gatherOrphans` and now. Any
+ * target that has appeared in the tracked set since gather is silently
+ * skipped (action.killed=false, action.skipped=true).
+ *
+ * The caller must pass a report from `gatherOrphans()` (or equivalent) —
+ * never construct one by hand without re-running the orphan match against the
+ * tracked set.
  */
-export async function cleanupOrphans(report: OrphanReport): Promise<CleanupReport> {
+export async function cleanupOrphans(
+  report: OrphanReport,
+  tracked: TrackedSets,
+  opts: CleanupOptions = {},
+): Promise<CleanupReport> {
   const actions: CleanupAction[] = [];
+  const dryRun = opts.dryRun === true;
 
   for (const session of report.tmux_sessions) {
+    // Race re-check: tracked could have grown since gather (a new agent was
+    // spawned between gather and cleanup).
+    if (tracked.tmuxSessions.has(session)) {
+      actions.push({
+        kind: "tmux_session",
+        target: session,
+        killed: false,
+        skipped: true,
+        error: "raced with new agent — session is now tracked",
+      });
+      continue;
+    }
     if (!isValidTmuxSession(session)) {
       actions.push({
         kind: "tmux_session",
         target: session,
         killed: false,
         error: "invalid tmux session name — refused to kill",
+      });
+      continue;
+    }
+    if (dryRun) {
+      actions.push({
+        kind: "tmux_session",
+        target: session,
+        killed: false,
+        skipped: true,
+        error: "dry-run",
       });
       continue;
     }
@@ -502,12 +595,38 @@ export async function cleanupOrphans(report: OrphanReport): Promise<CleanupRepor
     }
   }
 
+  // Helper: kill all processes in a list, gated by a per-kill tracked-set
+  // re-check + a verifying matcher used for PID-reuse defense.
   const killEach = async (
     list: OrphanProcess[],
     kind: CleanupAction["kind"],
+    trackedPids: Set<number>,
+    matcher: (cmd: string) => boolean,
   ): Promise<void> => {
     for (const proc of list) {
-      const result = await killProcessGracefully(proc.pid);
+      if (trackedPids.has(proc.pid)) {
+        actions.push({
+          kind,
+          target: String(proc.pid),
+          command: proc.command,
+          killed: false,
+          skipped: true,
+          error: "raced with new agent — PID is now tracked",
+        });
+        continue;
+      }
+      if (dryRun) {
+        actions.push({
+          kind,
+          target: String(proc.pid),
+          command: proc.command,
+          killed: false,
+          skipped: true,
+          error: "dry-run",
+        });
+        continue;
+      }
+      const result = await killProcessGracefully(proc.pid, proc.command, matcher);
       actions.push({
         kind,
         target: String(proc.pid),
@@ -518,9 +637,12 @@ export async function cleanupOrphans(report: OrphanReport): Promise<CleanupRepor
     }
   };
 
-  await killEach(report.claude_processes, "claude_process");
-  await killEach(report.watchdog_processes, "watchdog_process");
-  await killEach(report.ib_watch_processes, "ib_watch_process");
+  // For ib watch processes there is no tracked PID set — pass an empty Set so
+  // every process in the list gets a kill attempt (or skipped only if we
+  // start tracking these in the future).
+  await killEach(report.claude_processes, "claude_process", tracked.claudePids, looksLikeClaudeArgv);
+  await killEach(report.watchdog_processes, "watchdog_process", tracked.watchdogPids, isWatchdogProcess);
+  await killEach(report.ib_watch_processes, "ib_watch_process", new Set<number>(), isIbWatchProcess);
 
   return { actions };
 }

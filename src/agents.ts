@@ -912,7 +912,13 @@ export async function readAllAgents(
   const allErrors = results.flatMap((r) => r.errors);
 
   // Detect orphaned tmux sessions: sessions starting with "ittybitty-"
-  // that don't match any known agent's tmux_session
+  // that don't match any known agent's tmux_session. The "ib-coordinator"
+  // session is owned by `ib watch` itself (not by any agent in any repo) and
+  // is intentionally NOT counted here — there is no agent meta.json that
+  // would mark it as tracked, so flagging it would mean every running ib
+  // watch shows up as an orphan to its own ERRORS pane. `ib state`'s orphan
+  // detection layer handles `ib-coordinator` separately because it builds
+  // its tracked set explicitly (see buildTrackedSets in state-command.ts).
   const knownSessions = new Set(
     allAgents.map((a) => a.meta.tmux_session).filter((s) => s)
   );

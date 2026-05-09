@@ -282,7 +282,7 @@ The tracked set is built from ALL agents in ALL registered repos plus the system
 - Before SIGKILL, each PID's command line is re-resolved via `ps -o command=`; if it no longer matches an itsybitsy pattern, SIGKILL is refused (PID-reuse guard).
 - Tmux session names are validated with `isValidTmuxSession` before being passed to `tmux kill-session`.
 
-Each kill attempt is annotated `[killed]` / `[skipped: …]` / `[kill failed: …]` in the re-rendered ORPHANS section. In `--json` mode, a `cleanup_actions` array is added to the JSON payload (only when `--cleanup` was passed) alongside the `agents` and `orphans` fields. `ib state --cleanup --dry-run` previews what would be killed without issuing any kill commands.
+Each kill attempt is annotated `[killed]` / `[skipped: …]` / `[kill failed: …]` in the re-rendered ORPHANS section. In `--json` mode, a `cleanup_actions` array is added to the JSON payload **only when `--cleanup` was passed** alongside the `agents` and `orphans` fields. `ib state --cleanup --dry-run` previews what would be killed without issuing any kill commands. Under `--dry-run`, every entry in `cleanup_actions` has `killed: false`, `skipped: true`, `error: "dry-run"` so JSON consumers can distinguish "would have killed" from actually-killed without re-deriving from CLI args.
 
 **Known limitation**: if you run both the bash `ib` and the bun `itsybitsy` and they don't share `~/.itsybitsy/repos.json`, `--cleanup` from one install will see the other's watchdogs as orphans. Don't run both simultaneously, or stick with one tracked registry.
 

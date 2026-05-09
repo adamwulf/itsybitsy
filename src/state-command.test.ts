@@ -9,6 +9,7 @@ import {
   gatherOrphans,
   buildTrackedSets,
   cleanupOrphans,
+  prepareAndRunCleanup,
   isItsybitsyTmuxSession,
   looksLikeClaudeArgv,
   isClaudeAgentProcess,
@@ -20,6 +21,7 @@ import {
   type OrphanReport,
   type TrackedSets,
 } from "./state-command";
+import type { Agent } from "./agents";
 import { isPidAliveCtx, killPidCtx } from "./agents";
 import { spawnCtx } from "./agent-lifecycle";
 import type { TransientState } from "./agents";
@@ -308,47 +310,73 @@ describe("looksLikeClaudeArgv", () => {
   });
 });
 
-describe("isClaudeAgentProcess (cwd-anchored)", () => {
+describe("isClaudeAgentProcess (cwd-anchored, repo-path-cross-referenced)", () => {
+  // The cwd must be under one of the registered repos' .ittybitty/agents/
+  // — both the cwd anchor AND the repo-path cross-reference are required.
+  const REPOS = ["/Users/me/Code/repo"];
+
   afterEach(() => {
     readProcessCwdCtx.reset();
   });
 
-  test("returns true when argv looks right AND cwd is inside an itsybitsy worktree", async () => {
+  test("returns true when argv looks right AND cwd is inside a registered repo's worktree", async () => {
     readProcessCwdCtx.set(async () => "/Users/me/Code/repo/.ittybitty/agents/agent-foo/repo");
-    expect(await isClaudeAgentProcess(1234, "claude --resume abc")).toBe(true);
+    expect(await isClaudeAgentProcess(1234, "claude --resume abc", REPOS)).toBe(true);
   });
 
-  test("rejects when cwd is OUTSIDE every itsybitsy worktree (user's own claude)", async () => {
+  test("rejects when cwd is OUTSIDE every registered repo (user's own claude)", async () => {
     readProcessCwdCtx.set(async () => "/Users/me/Documents/notes");
-    expect(await isClaudeAgentProcess(1234, "claude --resume abc")).toBe(false);
+    expect(await isClaudeAgentProcess(1234, "claude --resume abc", REPOS)).toBe(false);
+  });
+
+  test("rejects when cwd looks itsybitsy-shaped but is under an UNREGISTERED repo (stray .ittybitty/)", async () => {
+    // R2 polish: a stray/backup `.ittybitty/agents/` directory anywhere on
+    // disk used to flag user processes as orphans. Repo-path cross-reference
+    // closes that hole.
+    readProcessCwdCtx.set(async () => "/Users/me/Backup/old-clone/.ittybitty/agents/agent-x/repo");
+    expect(await isClaudeAgentProcess(1234, "claude --resume abc", REPOS)).toBe(false);
   });
 
   test("rejects when cwd lookup returns empty (lsof failure / permission)", async () => {
     // SAFETY-CRITICAL: an unknown cwd must NOT count as itsybitsy-owned.
     readProcessCwdCtx.set(async () => "");
-    expect(await isClaudeAgentProcess(1234, "claude --resume abc")).toBe(false);
+    expect(await isClaudeAgentProcess(1234, "claude --resume abc", REPOS)).toBe(false);
+  });
+
+  test("rejects when no repos are registered (empty repoPaths)", async () => {
+    readProcessCwdCtx.set(async () => "/Users/me/Code/repo/.ittybitty/agents/agent-foo/repo");
+    expect(await isClaudeAgentProcess(1234, "claude --resume abc", [])).toBe(false);
   });
 
   test("rejects when argv doesn't look like claude even if cwd is in a worktree", async () => {
     readProcessCwdCtx.set(async () => "/Users/me/Code/repo/.ittybitty/agents/agent-foo/repo");
-    expect(await isClaudeAgentProcess(1234, "vim notes.txt")).toBe(false);
+    expect(await isClaudeAgentProcess(1234, "vim notes.txt", REPOS)).toBe(false);
   });
 
   test("matches when cwd is the agent dir itself (no /repo subpath)", async () => {
     // start.sh runs claude from the worktree, but during certain failure modes
-    // the cwd may briefly be the agent dir itself. The matcher anchors on
-    // `.ittybitty/agents/<id>` so both shapes pass.
+    // the cwd may briefly be the agent dir itself. Both shapes pass as long
+    // as the prefix is a registered repo's `.ittybitty/agents/`.
     readProcessCwdCtx.set(async () => "/Users/me/Code/repo/.ittybitty/agents/agent-foo");
-    expect(await isClaudeAgentProcess(1234, "claude --resume abc")).toBe(true);
+    expect(await isClaudeAgentProcess(1234, "claude --resume abc", REPOS)).toBe(true);
+  });
+
+  test("matches across multiple registered repos", async () => {
+    const repos = ["/repo-a", "/repo-b"];
+    readProcessCwdCtx.set(async () => "/repo-b/.ittybitty/agents/agent-x/repo");
+    expect(await isClaudeAgentProcess(1234, "claude --resume abc", repos)).toBe(true);
   });
 });
 
 describe("sanitizeForDisplay", () => {
-  test("replaces ANSI escapes with ?", () => {
-    expect(sanitizeForDisplay("hello\x1b[31mred\x1b[0mworld")).toBe("hello?[31mred?[0mworld");
+  test("strips full ANSI/CSI sequences (no leftover [31m noise)", () => {
+    expect(sanitizeForDisplay("hello\x1b[31mred\x1b[0mworld")).toBe("helloredworld");
   });
-  test("replaces NUL and other control chars", () => {
+  test("replaces non-CSI control chars with ?", () => {
     expect(sanitizeForDisplay("a\x00b\x07c")).toBe("a?b?c");
+  });
+  test("strips both CSI and bare control chars in one pass", () => {
+    expect(sanitizeForDisplay("\x1b[1;31mfoo\x00bar")).toBe("foo?bar");
   });
   test("leaves regular printable text alone", () => {
     expect(sanitizeForDisplay("ittybitty-abc-foo")).toBe("ittybitty-abc-foo");
@@ -499,11 +527,13 @@ function fakePsOutput(entries: { pid: number; command: string }[]): string {
 }
 
 // Helper: install a `readProcessCwdCtx` fake that reports each PID as living
-// inside an itsybitsy worktree — used by tests that want claude detection to
-// succeed (cwd anchor is required).
+// inside an itsybitsy worktree at `/tmp/repo` — used by tests that want
+// claude detection to succeed (cwd anchor + repo cross-reference are
+// required). Pair with `FAKE_REPOS` when calling gatherOrphans/cleanupOrphans.
 function fakeCwdInsideWorktree(): void {
   readProcessCwdCtx.set(async (pid) => `/tmp/repo/.ittybitty/agents/agent-${pid}/repo`);
 }
+const FAKE_REPOS = ["/tmp/repo"];
 
 describe("gatherOrphans", () => {
   afterEach(() => {
@@ -535,6 +565,7 @@ describe("gatherOrphans", () => {
     const orphans = await gatherOrphans(
       tracked,
       new Set(["ib-coordinator", "ittybitty-deadbeef-agent-aaaa"]),
+      FAKE_REPOS,
     );
     expect(orphans.tmux_sessions).toEqual([]);
     expect(orphans.claude_processes).toEqual([]);
@@ -600,7 +631,7 @@ describe("gatherOrphans", () => {
       return makeSpawnResult(1);
     });
 
-    const orphans = await gatherOrphans(tracked, new Set());
+    const orphans = await gatherOrphans(tracked, new Set(), FAKE_REPOS);
     expect(orphans.claude_processes).toEqual([
       { pid: 9999, command: "claude --resume orphan-id" },
     ]);
@@ -624,7 +655,7 @@ describe("gatherOrphans", () => {
       return makeSpawnResult(1);
     });
 
-    const orphans = await gatherOrphans(tracked, new Set());
+    const orphans = await gatherOrphans(tracked, new Set(), FAKE_REPOS);
     expect(orphans.claude_processes).toEqual([]);
   });
 
@@ -644,7 +675,29 @@ describe("gatherOrphans", () => {
       return makeSpawnResult(1);
     });
 
-    const orphans = await gatherOrphans(tracked, new Set());
+    const orphans = await gatherOrphans(tracked, new Set(), FAKE_REPOS);
+    expect(orphans.claude_processes).toEqual([]);
+  });
+
+  test("does NOT flag claude process whose cwd is in a stray .ittybitty/agents/ NOT under any registered repo", async () => {
+    // R2 polish: this is the "user has a backup .ittybitty/agents/ from an
+    // un-registered project" scenario. Repo cross-reference is what closes it.
+    readProcessCwdCtx.set(async () => "/Users/me/Backup/old-clone/.ittybitty/agents/agent-x/repo");
+    const tracked: TrackedSets = {
+      tmuxSessions: new Set(),
+      claudePids: new Set(),
+      watchdogPids: new Set(),
+    };
+    spawnCtx.set((cmd: string[]) => {
+      if (cmd[0] === "ps") {
+        return makeSpawnResult(0, fakePsOutput([
+          { pid: 9999, command: "claude --resume something" },
+        ]));
+      }
+      return makeSpawnResult(1);
+    });
+
+    const orphans = await gatherOrphans(tracked, new Set(), FAKE_REPOS);
     expect(orphans.claude_processes).toEqual([]);
   });
 
@@ -712,7 +765,7 @@ describe("gatherOrphans", () => {
     });
 
     const live = new Set(["ib-coordinator", "ittybitty-aaaa-agent-good", "ittybitty-bbbb-agent-stale"]);
-    const orphans = await gatherOrphans(tracked, live);
+    const orphans = await gatherOrphans(tracked, live, FAKE_REPOS);
     expect(orphans.tmux_sessions).toEqual(["ittybitty-bbbb-agent-stale"]);
     expect(orphans.claude_processes).toEqual([
       { pid: 3333, command: "claude --resume orphan" },
@@ -805,6 +858,7 @@ describe("gatherOrphans", () => {
       const orphans = await gatherOrphans(
         tracked,
         new Set(["ittybitty-aaaa-agent-a", "ittybitty-bbbb-agent-b"]),
+        [repoADir, repoBDir],
       );
       expect(orphans.tmux_sessions).toEqual([]);
       expect(orphans.claude_processes).toEqual([]);
@@ -1041,6 +1095,69 @@ describe("cleanupOrphans", () => {
     expect(cleanup.actions[0]!.error).toContain("PID reuse");
   });
 
+  test("PID-REUSE GUARD: refuses SIGKILL when ps -o command= returns empty (verification couldn't happen)", async () => {
+    cleanupSleepCtx.set(async () => { /* skip */ });
+    isPidAliveCtx.set(() => true);
+    const signals: NodeJS.Signals[] = [];
+    killPidCtx.set((_pid, signal) => {
+      signals.push(signal as NodeJS.Signals);
+      return true;
+    });
+    // After SIGTERM, ps fails to look up the command line (transient
+    // permission / race). Safer default: refuse SIGKILL.
+    spawnCtx.set((cmd: string[]) => {
+      if (cmd[0] === "ps" && cmd[1] === "-o" && cmd[2] === "command=") {
+        return makeSpawnResult(1, "");
+      }
+      return makeSpawnResult(1);
+    });
+
+    const report: OrphanReport = {
+      tmux_sessions: [],
+      claude_processes: [{ pid: 4242, command: "claude --resume x" }],
+      watchdog_processes: [],
+      ib_watch_processes: [],
+    };
+    const cleanup = await cleanupOrphans(report, EMPTY_TRACKED);
+    expect(signals).toEqual(["SIGTERM"]);
+    expect(cleanup.actions[0]!.killed).toBe(false);
+    expect(cleanup.actions[0]!.error).toContain("could not verify");
+  });
+
+  test("PID-REUSE GUARD (claude): re-verifies cwd, not just argv — recycled PID into user's own claude is refused", async () => {
+    // The dangerous case the cwd anchor was added for, in the PID-reuse
+    // window: SIGTERM fires; PID is recycled; new process is the user's own
+    // `claude --resume`. argv-only matching would let SIGKILL through —
+    // claudeVerify must re-run isClaudeAgentProcess (cwd-anchored).
+    cleanupSleepCtx.set(async () => { /* skip */ });
+    isPidAliveCtx.set(() => true);
+    const signals: NodeJS.Signals[] = [];
+    killPidCtx.set((_pid, signal) => {
+      signals.push(signal as NodeJS.Signals);
+      return true;
+    });
+    // ps reports a different (but still claude --resume) cmd — argv matcher
+    // would say "still claude, fine" but cwd is OUTSIDE every registered repo.
+    spawnCtx.set((cmd: string[]) => {
+      if (cmd[0] === "ps" && cmd[1] === "-o" && cmd[2] === "command=") {
+        return makeSpawnResult(0, "claude --resume my-personal\n");
+      }
+      return makeSpawnResult(1);
+    });
+    readProcessCwdCtx.set(async () => "/Users/me/Documents/notes");
+
+    const report: OrphanReport = {
+      tmux_sessions: [],
+      claude_processes: [{ pid: 4242, command: "claude --resume orphan" }],
+      watchdog_processes: [],
+      ib_watch_processes: [],
+    };
+    const cleanup = await cleanupOrphans(report, EMPTY_TRACKED, { repoPaths: FAKE_REPOS });
+    expect(signals).toEqual(["SIGTERM"]);  // No SIGKILL
+    expect(cleanup.actions[0]!.killed).toBe(false);
+    expect(cleanup.actions[0]!.error).toContain("PID reuse");
+  });
+
   test("DRY-RUN: does not issue any kills, returns skipped actions", async () => {
     let killCalls = 0;
     spawnCtx.set((cmd: string[]) => {
@@ -1101,18 +1218,174 @@ describe("cleanupOrphans", () => {
     };
 
     const liveBefore = new Set(["ib-coordinator", "ittybitty-aaaa-agent-good", "ittybitty-bbbb-stale"]);
-    const before = await gatherOrphans(tracked, liveBefore);
+    const before = await gatherOrphans(tracked, liveBefore, FAKE_REPOS);
     expect(before.tmux_sessions).toEqual(["ittybitty-bbbb-stale"]);
     expect(before.claude_processes.map((p) => p.pid)).toEqual([9999]);
 
-    const cleanup = await cleanupOrphans(before, tracked);
+    const cleanup = await cleanupOrphans(before, tracked, { repoPaths: FAKE_REPOS });
     expect(cleanup.actions.length).toBe(2);
     expect(cleanup.actions.every((a) => a.killed)).toBe(true);
 
     isPidAliveCtx.set(() => false);
     const liveAfter = new Set(["ib-coordinator", "ittybitty-aaaa-agent-good"]);
-    const after = await gatherOrphans(tracked, liveAfter);
+    const after = await gatherOrphans(tracked, liveAfter, FAKE_REPOS);
     expect(after.tmux_sessions).toEqual([]);
     expect(after.claude_processes).toEqual([]);
+  });
+});
+
+describe("prepareAndRunCleanup (CLI race-guard integration)", () => {
+  afterEach(() => {
+    spawnCtx.reset();
+    isPidAliveCtx.reset();
+    killPidCtx.reset();
+    cleanupSleepCtx.reset();
+    readProcessCwdCtx.reset();
+  });
+
+  /** Helper to build a minimal Agent fixture with given tmux_session + PIDs. */
+  function makeRaceAgent(opts: {
+    id: string;
+    tmuxSession: string;
+    claudePid: string;
+    watchdogPid?: number;
+  }): Agent {
+    return makeAgent({
+      id: opts.id,
+      meta: {
+        id: opts.id,
+        session_id: "x",
+        tmux_session: opts.tmuxSession,
+        prompt: "",
+        manager: null,
+        created: "",
+        created_epoch: 0,
+        worktree: false,
+        worker: false,
+        yolo: false,
+        model: "sonnet",
+        claude_pid: opts.claudePid,
+        watchdog_pid: opts.watchdogPid,
+      },
+    });
+  }
+
+  test("BLOCKER FIX: re-reads agents from disk so a freshly-spawned agent is NOT killed", async () => {
+    // Scenario timeline:
+    //   T=0:  initial readAllAgents — returns [agent-good]. Orphans gather
+    //         finds session "ittybitty-late-foo" + claude PID 4242 +
+    //         watchdog PID 8888 as orphans (not yet tracked).
+    //   T=10: another terminal spawns `agent-late` whose meta.json contains
+    //         tmux_session=ittybitty-late-foo, claude_pid=4242,
+    //         watchdog_pid=8888.
+    //   T=50: prepareAndRunCleanup is invoked. It MUST re-read from disk
+    //         (refreshAgents callback returns [agent-good, agent-late]) and
+    //         skip all three orphans.
+    cleanupSleepCtx.set(async () => { /* skip */ });
+    isPidAliveCtx.set(() => true);
+    let killSessionCalled = false;
+    let signalled = 0;
+    spawnCtx.set((cmd: string[]) => {
+      if (cmd[0] === "tmux" && cmd[1] === "kill-session") {
+        killSessionCalled = true;
+        return makeSpawnResult(0);
+      }
+      return makeSpawnResult(1);
+    });
+    killPidCtx.set(() => { signalled++; return true; });
+
+    // Orphans built at T=0 — before agent-late existed.
+    const orphans: OrphanReport = {
+      tmux_sessions: ["ittybitty-late-foo"],
+      claude_processes: [{ pid: 4242, command: "claude --resume late" }],
+      watchdog_processes: [{ pid: 8888, command: "ib watchdog agent-late" }],
+      ib_watch_processes: [],
+    };
+
+    // refreshAgents fake — returns the FRESH snapshot (with agent-late now
+    // present). This is what readAllAgents() would do at T=50.
+    const refreshAgents = async (): Promise<{ agents: Agent[] }> => ({
+      agents: [
+        makeRaceAgent({
+          id: "agent-good",
+          tmuxSession: "ittybitty-aaaa-agent-good",
+          claudePid: "1111",
+          watchdogPid: 2222,
+        }),
+        makeRaceAgent({
+          id: "agent-late",
+          tmuxSession: "ittybitty-late-foo",
+          claudePid: "4242",
+          watchdogPid: 8888,
+        }),
+      ],
+    });
+
+    const result = await prepareAndRunCleanup(orphans, refreshAgents);
+
+    // CRITICAL: nothing should have been killed — every orphan target became
+    // tracked between gather and cleanup, so the race guard skipped all three.
+    expect(killSessionCalled).toBe(false);
+    expect(signalled).toBe(0);
+    expect(result.cleanupReport.actions.length).toBe(3);
+    for (const action of result.cleanupReport.actions) {
+      expect(action.skipped).toBe(true);
+      expect(action.error).toContain("raced");
+    }
+
+    // Sanity: trackedNow contains the freshly-spawned agent's identifiers.
+    expect(result.trackedNow.tmuxSessions.has("ittybitty-late-foo")).toBe(true);
+    expect(result.trackedNow.claudePids.has(4242)).toBe(true);
+    expect(result.trackedNow.watchdogPids.has(8888)).toBe(true);
+  });
+
+  test("kills orphans that are still genuinely orphans after the disk re-read", async () => {
+    cleanupSleepCtx.set(async () => { /* skip */ });
+    let aliveCalls = 0;
+    isPidAliveCtx.set(() => { aliveCalls++; return aliveCalls === 1; });
+    let killSessions = 0;
+    spawnCtx.set((cmd: string[]) => {
+      if (cmd[0] === "tmux" && cmd[1] === "kill-session") {
+        killSessions++;
+        return makeSpawnResult(0);
+      }
+      return makeSpawnResult(1);
+    });
+    killPidCtx.set(() => true);
+
+    const orphans: OrphanReport = {
+      tmux_sessions: ["ittybitty-truly-stale"],
+      claude_processes: [],
+      watchdog_processes: [{ pid: 9000, command: "ib watchdog stale-agent" }],
+      ib_watch_processes: [],
+    };
+    // refreshAgents returns no new agents — orphans are still orphans.
+    const refreshAgents = async (): Promise<{ agents: Agent[] }> => ({ agents: [] });
+
+    const result = await prepareAndRunCleanup(orphans, refreshAgents, { dryRun: false });
+    expect(killSessions).toBe(1);
+    expect(result.cleanupReport.actions.length).toBe(2);
+    expect(result.cleanupReport.actions.every((a) => a.killed)).toBe(true);
+  });
+
+  test("respects dryRun option end-to-end", async () => {
+    let kills = 0;
+    spawnCtx.set((cmd: string[]) => {
+      if (cmd[0] === "tmux" && cmd[1] === "kill-session") kills++;
+      return makeSpawnResult(0);
+    });
+    killPidCtx.set(() => { kills++; return true; });
+
+    const orphans: OrphanReport = {
+      tmux_sessions: ["ittybitty-dryrun"],
+      claude_processes: [],
+      watchdog_processes: [{ pid: 1234, command: "ib watchdog x" }],
+      ib_watch_processes: [],
+    };
+    const refreshAgents = async (): Promise<{ agents: Agent[] }> => ({ agents: [] });
+    const result = await prepareAndRunCleanup(orphans, refreshAgents, { dryRun: true });
+
+    expect(kills).toBe(0);
+    expect(result.cleanupReport.actions.every((a) => a.skipped === true)).toBe(true);
   });
 });

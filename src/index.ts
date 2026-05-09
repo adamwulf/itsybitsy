@@ -520,7 +520,7 @@ async function main() {
         formatPidComponent,
         gatherOrphans,
         buildTrackedSets,
-        cleanupOrphans,
+        prepareAndRunCleanup,
         sanitizeForDisplay,
       } = await import("./state-command");
       const repos = await listRepos();
@@ -596,19 +596,30 @@ async function main() {
       // must include all known agents so legitimate work in other repos isn't
       // mis-flagged. We pass `liveTmuxSessions` from `readAllAgents()` so the
       // tmux-orphan view is consistent with the rest of the codebase's view
-      // of live sessions (no extra `tmux list-sessions` call).
+      // of live sessions (no extra `tmux list-sessions` call). `repoPaths`
+      // is the absolute repo paths from the registry — required so a
+      // claude process whose cwd is inside a stray `.ittybitty/agents/`
+      // directory NOT under any registered repo isn't classified as ours.
+      const repoPaths = repos.map((r) => r.path);
       const tracked = await buildTrackedSets(agents);
-      const orphans = await gatherOrphans(tracked, liveTmuxSessions);
+      const orphans = await gatherOrphans(tracked, liveTmuxSessions, repoPaths);
 
       // If --cleanup, kill orphans now and capture the result. To defend
       // against the race where another agent was spawned between our gather
-      // and now, re-build the tracked set immediately before cleanup and pass
-      // it in — cleanupOrphans skips any orphan whose target became tracked
-      // since gather. With --dry-run, no kills are actually issued.
-      let cleanupReport: Awaited<ReturnType<typeof cleanupOrphans>> | null = null;
+      // and now, `prepareAndRunCleanup` re-reads agents FROM DISK (not from
+      // our in-memory snapshot) and rebuilds the tracked set from that fresh
+      // view before delegating to cleanupOrphans. Any target that became
+      // tracked since gather is skipped. With --dry-run, no kills are issued.
+      type CleanupReportT = Awaited<ReturnType<typeof prepareAndRunCleanup>>["cleanupReport"];
+      let cleanupReport: CleanupReportT | null = null;
       if (cleanupMode) {
-        const trackedNow = await buildTrackedSets(agents);
-        cleanupReport = await cleanupOrphans(orphans, trackedNow, { dryRun: dryRunMode });
+        const repoArgs = repos.map((r) => ({ path: r.path, name: repoDisplayName(r) }));
+        const result = await prepareAndRunCleanup(
+          orphans,
+          () => readAllAgents(repoArgs),
+          { dryRun: dryRunMode, repoPaths },
+        );
+        cleanupReport = result.cleanupReport;
       }
 
       if (jsonOutput) {

@@ -196,15 +196,21 @@ export function isItsybitsyTmuxSession(name: string): boolean {
 }
 
 /**
- * Strip control characters from a tmux session name before printing it. tmux
- * itself rejects most metacharacters, but a session name pulled from
- * `tmux list-sessions` could in theory contain ANSI escapes that bleed into
- * the rendered output. Replace any non-printable char with `?` so the
- * displayed value can never escape its line.
+ * Strip control characters and ANSI escape sequences from a string before
+ * printing it. tmux itself rejects most metacharacters, but a session name or
+ * `ps` command line could in theory contain ANSI escapes that bleed into the
+ * rendered output.
+ *
+ * Two-step strip:
+ *   1. Remove complete CSI sequences (ESC [ … letter) so no broken `[31m`
+ *      tail remains as visible noise after step 2 mangles the leading ESC.
+ *   2. Replace any remaining control char (C0 + DEL + C1) with `?` so any
+ *      non-CSI control byte still cannot escape its line.
  */
 export function sanitizeForDisplay(s: string): string {
-  // Disallow control chars (C0 + DEL + C1) when rendering.
-  return s.replace(/[\x00-\x1f\x7f-\x9f]/g, "?");
+  return s
+    .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "")
+    .replace(/[\x00-\x1f\x7f-\x9f]/g, "?");
 }
 
 /**
@@ -250,9 +256,10 @@ async function readProcessCwd(pid: number): Promise<string> {
     const nLine = result.stdout.split("\n").find((l) => l.startsWith("n"));
     return nLine ? nLine.slice(1) : "";
   }
-  // Linux: /proc/<pid>/cwd readlink. We do NOT shell out to `readlink` so the
-  // value isn't subject to spawnCtx fakes (which would return synthetic paths).
-  // Tests run on macOS or override `readProcessCwdCtx` directly.
+  // Linux: /proc/<pid>/cwd readlink. Direct fs call (not via spawnCtx) so the
+  // synthetic-path fakes spawnCtx tests install for other commands don't leak
+  // here. Tests should override `readProcessCwdCtx` directly rather than rely
+  // on the real `/proc/<pid>/cwd`.
   try {
     const { readlink } = await import("fs/promises");
     return await readlink(`/proc/${pid}/cwd`);
@@ -311,23 +318,40 @@ export function looksLikeClaudeArgv(command: string): boolean {
 /**
  * Decide whether a process IS a Claude agent spawned by itsybitsy. Combines
  * the argv shape pre-filter with a positive cwd check: the process's cwd must
- * be inside `<repo>/.ittybitty/agents/<id>/repo/` (matching the worktree path
- * built by `newAgent` in src/ib-commands.ts).
+ * be inside `<repoPath>/.ittybitty/agents/...` for at least one REGISTERED
+ * repo. Anchoring on the registered repo paths (rather than just the
+ * `.ittybitty/agents/` substring) closes the hole where a user has a stray
+ * or backup `.ittybitty/agents/` directory somewhere on disk and runs
+ * claude from there — only paths under a repo we own count.
  *
  * Why: `claude --resume` / `claude --session-id` are STANDARD Claude CLI
  * flags. A user running `claude --resume <id>` in a regular terminal must
- * NEVER be classified as an orphan we kill. The cwd anchor closes that hole —
- * itsybitsy-spawned claude processes always run from inside an agent worktree
- * (see start.sh template), and user sessions don't.
+ * NEVER be classified as an orphan we kill. The cwd anchor + repo-path
+ * cross-reference closes that hole — itsybitsy-spawned claude processes
+ * always run from inside an agent worktree under a registered repo (see
+ * start.sh template), and user sessions don't.
+ *
+ * `repoPaths` should be the absolute paths from `listRepos()`. Pass an empty
+ * array to disable anchoring entirely (returns false — used by callers that
+ * have no repo context, e.g. some test paths).
  */
-export async function isClaudeAgentProcess(pid: number, command: string): Promise<boolean> {
+export async function isClaudeAgentProcess(
+  pid: number,
+  command: string,
+  repoPaths: string[],
+): Promise<boolean> {
   if (!looksLikeClaudeArgv(command)) return false;
+  if (repoPaths.length === 0) return false;
   const cwd = await readProcessCwdCtx.fn(pid);
   if (!cwd) return false;
-  // Match `.../.ittybitty/agents/<id>(/repo...)?` — the `repo` subpath is
-  // the worktree, but in some failure modes claude may be running directly
-  // from the agent dir. Anchor on the .ittybitty/agents/ marker.
-  return /\/\.ittybitty\/agents\/[^/]+(?:\/|$)/.test(cwd);
+  for (const repoPath of repoPaths) {
+    if (!repoPath) continue;
+    const prefix = repoPath.endsWith("/")
+      ? `${repoPath}.ittybitty/agents/`
+      : `${repoPath}/.ittybitty/agents/`;
+    if (cwd === prefix.slice(0, -1) || cwd.startsWith(prefix)) return true;
+  }
+  return false;
 }
 
 /**
@@ -384,13 +408,20 @@ export async function buildTrackedSets(agents: Agent[]): Promise<TrackedSets> {
  * codebase's view of live sessions. Pass `null` when the caller doesn't have
  * the set handy and `gatherOrphans` will fetch it itself.
  *
+ * `repoPaths` are the absolute paths of registered repos — used to verify
+ * that a `claude` process's cwd lives under an itsybitsy worktree of one of
+ * OUR repos (defense against stray/backup `.ittybitty/agents/` directories
+ * elsewhere on disk). When no repos are registered, no claude process can
+ * be classified as an orphan.
+ *
  * The tmux-session match is intentionally narrow (`isItsybitsyTmuxSession`).
  * The process matches require both the binary AND the expected argv shape AND
- * (for claude) a cwd inside an itsybitsy worktree — argv alone is not enough.
+ * (for claude) a cwd under a registered repo — argv alone is not enough.
  */
 export async function gatherOrphans(
   tracked: TrackedSets,
   liveTmuxSessions: Set<string> | null = null,
+  repoPaths: string[] = [],
 ): Promise<OrphanReport> {
   const sessions = liveTmuxSessions !== null
     ? Array.from(liveTmuxSessions)
@@ -424,7 +455,7 @@ export async function gatherOrphans(
     // above short-circuit common processes first.
     if (looksLikeClaudeArgv(proc.command)) {
       if (tracked.claudePids.has(proc.pid)) continue;
-      const isOurs = await isClaudeAgentProcess(proc.pid, proc.command);
+      const isOurs = await isClaudeAgentProcess(proc.pid, proc.command, repoPaths);
       if (isOurs) claudeOrphans.push(proc);
     }
   }
@@ -479,14 +510,23 @@ const CLEANUP_GRACE_MS = 200;
  * any failure including "still alive after SIGKILL".
  *
  * `verifyCommand` is the original command line we observed for the orphan.
- * Before SIGKILL we re-resolve `ps -o command= -p <pid>` and require it to
- * still match the same itsybitsy pattern that flagged it — this defends
- * against the kernel reusing the PID in the SIGTERM/SIGKILL grace window.
+ * `verifyMatcher` decides whether the CURRENT process at `pid` still belongs
+ * to the same itsybitsy category that flagged it (async because the claude
+ * matcher re-runs the cwd check via `isClaudeAgentProcess`).
+ *
+ * Before SIGKILL we re-resolve `ps -o command= -p <pid>` and require either
+ * an exact-match command line (no PID reuse) or a still-matching pattern
+ * via `verifyMatcher`. Two safety rules:
+ *   - If `ps` returns empty (transient permission/race failure), we REFUSE
+ *     SIGKILL — verification couldn't happen, so we can't be sure the PID
+ *     still belongs to us.
+ *   - If the command line changed AND the matcher rejects the new value,
+ *     somebody else owns this PID and we must NOT SIGKILL it.
  */
 async function killProcessGracefully(
   pid: number,
   verifyCommand: string,
-  matcher: (cmd: string) => boolean,
+  verifyMatcher: (pid: number, cmd: string) => Promise<boolean>,
 ): Promise<{ killed: boolean; error?: string }> {
   // Already dead?
   if (!isPidAliveCtx.fn(pid)) return { killed: true };
@@ -499,14 +539,22 @@ async function killProcessGracefully(
   if (!isPidAliveCtx.fn(pid)) return { killed: true };
 
   // PID-reuse defense: confirm the PID still belongs to a matching itsybitsy
-  // process before escalating. If the cmd shape changed, somebody else now
-  // owns this PID and we must NOT SIGKILL it.
+  // process before escalating.
   const currentCommand = await readProcessCommand(pid);
-  if (currentCommand && currentCommand !== verifyCommand && !matcher(currentCommand)) {
+  if (!currentCommand) {
     return {
       killed: false,
-      error: `PID reuse detected — refused to SIGKILL (was: ${verifyCommand}, now: ${currentCommand})`,
+      error: "could not verify PID still matches — refused to SIGKILL",
     };
+  }
+  if (currentCommand !== verifyCommand) {
+    const stillOurs = await verifyMatcher(pid, currentCommand);
+    if (!stillOurs) {
+      return {
+        killed: false,
+        error: `PID reuse detected — refused to SIGKILL (was: ${verifyCommand}, now: ${currentCommand})`,
+      };
+    }
   }
 
   if (!killPidCtx.fn(pid, "SIGKILL")) {
@@ -521,10 +569,14 @@ async function killProcessGracefully(
 /**
  * Options controlling cleanupOrphans. `dryRun` reports actions without
  * issuing any kill commands — required by `--dry-run` so users can preview
- * what `--cleanup` would do.
+ * what `--cleanup` would do. `repoPaths` is the absolute paths from
+ * `listRepos()`; used by the claude PID-reuse re-check so a recycled PID
+ * that's now a user's own `claude --resume` (cwd outside every registered
+ * repo) is correctly refused for SIGKILL.
  */
 export interface CleanupOptions {
   dryRun?: boolean;
+  repoPaths?: string[];
 }
 
 /**
@@ -547,6 +599,7 @@ export async function cleanupOrphans(
   tracked: TrackedSets,
   opts: CleanupOptions = {},
 ): Promise<CleanupReport> {
+  const repoPaths = opts.repoPaths ?? [];
   const actions: CleanupAction[] = [];
   const dryRun = opts.dryRun === true;
 
@@ -596,12 +649,12 @@ export async function cleanupOrphans(
   }
 
   // Helper: kill all processes in a list, gated by a per-kill tracked-set
-  // re-check + a verifying matcher used for PID-reuse defense.
+  // re-check + an async verifying matcher used for PID-reuse defense.
   const killEach = async (
     list: OrphanProcess[],
     kind: CleanupAction["kind"],
     trackedPids: Set<number>,
-    matcher: (cmd: string) => boolean,
+    verifyMatcher: (pid: number, cmd: string) => Promise<boolean>,
   ): Promise<void> => {
     for (const proc of list) {
       if (trackedPids.has(proc.pid)) {
@@ -626,7 +679,7 @@ export async function cleanupOrphans(
         });
         continue;
       }
-      const result = await killProcessGracefully(proc.pid, proc.command, matcher);
+      const result = await killProcessGracefully(proc.pid, proc.command, verifyMatcher);
       actions.push({
         kind,
         target: String(proc.pid),
@@ -637,12 +690,55 @@ export async function cleanupOrphans(
     }
   };
 
+  // Per-kind verify matchers. These run only on a CHANGED command line — they
+  // decide whether the new owner of the PID is still an itsybitsy process of
+  // the same category (i.e. true → safe to SIGKILL, false → refuse).
+  //   - claude: re-run isClaudeAgentProcess so the cwd anchor is re-verified.
+  //     argv-only matching here would re-introduce R1#1's false-positive
+  //     hole during PID reuse.
+  //   - watchdog / ib watch: argv check is sufficient; no cwd anchor exists
+  //     for these (the original orphan classification didn't use one either).
+  const claudeVerify = (pid: number, cmd: string): Promise<boolean> =>
+    isClaudeAgentProcess(pid, cmd, repoPaths);
+  const watchdogVerify = async (_pid: number, cmd: string): Promise<boolean> =>
+    isWatchdogProcess(cmd);
+  const ibWatchVerify = async (_pid: number, cmd: string): Promise<boolean> =>
+    isIbWatchProcess(cmd);
+
   // For ib watch processes there is no tracked PID set — pass an empty Set so
   // every process in the list gets a kill attempt (or skipped only if we
   // start tracking these in the future).
-  await killEach(report.claude_processes, "claude_process", tracked.claudePids, looksLikeClaudeArgv);
-  await killEach(report.watchdog_processes, "watchdog_process", tracked.watchdogPids, isWatchdogProcess);
-  await killEach(report.ib_watch_processes, "ib_watch_process", new Set<number>(), isIbWatchProcess);
+  await killEach(report.claude_processes, "claude_process", tracked.claudePids, claudeVerify);
+  await killEach(report.watchdog_processes, "watchdog_process", tracked.watchdogPids, watchdogVerify);
+  await killEach(report.ib_watch_processes, "ib_watch_process", new Set<number>(), ibWatchVerify);
 
   return { actions };
+}
+
+/**
+ * Race-safe cleanup entrypoint. Re-reads agents from DISK via `refreshAgents`
+ * (so a freshly-spawned agent that landed in the registry between the initial
+ * `gatherOrphans` and now is visible), rebuilds `tracked` from that fresh
+ * snapshot, and calls `cleanupOrphans`.
+ *
+ * The race this guards against: `ib state --cleanup` builds an `agents`
+ * snapshot at T=0, gathers orphans at T=10ms, and cleans up at T=50ms. If
+ * another terminal runs `ib new-agent` at T=20ms, that new agent's PID and
+ * tmux session are written to disk by T=30ms — but the in-memory `agents`
+ * snapshot from T=0 doesn't contain them. Without a re-read, `cleanupOrphans`
+ * would skip its tracked-set guard for the new agent and kill it.
+ *
+ * `refreshAgents` is injected (rather than imported directly from agents.ts)
+ * so unit tests can simulate the "new agent appears between gather and
+ * cleanup" race without touching the filesystem.
+ */
+export async function prepareAndRunCleanup(
+  orphans: OrphanReport,
+  refreshAgents: () => Promise<{ agents: Agent[] }>,
+  opts: CleanupOptions = {},
+): Promise<{ trackedNow: TrackedSets; cleanupReport: CleanupReport }> {
+  const { agents } = await refreshAgents();
+  const trackedNow = await buildTrackedSets(agents);
+  const cleanupReport = await cleanupOrphans(orphans, trackedNow, opts);
+  return { trackedNow, cleanupReport };
 }

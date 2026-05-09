@@ -458,9 +458,10 @@ class DialogOverlayComponent implements Component {
         const leftSide = `  ${cancelLabel}   ${sendLabel}`;
         if (dialog.onSendEsc) {
           const escLabel = dialog.focusedButton === "esc" ? `${BOLD}${GREEN}[ Send Esc ]${RESET}` : `[ Send Esc ]`;
-          const used = visibleWidth(leftSide) + visibleWidth(escLabel);
+          const rightPad = 2;
+          const used = visibleWidth(leftSide) + visibleWidth(escLabel) + rightPad;
           const pad = Math.max(1, innerWidth - used);
-          lines.push(`${leftSide}${" ".repeat(pad)}${escLabel}`);
+          lines.push(`${leftSide}${" ".repeat(pad)}${escLabel}${" ".repeat(rightPad)}`);
         } else {
           lines.push(leftSide);
         }

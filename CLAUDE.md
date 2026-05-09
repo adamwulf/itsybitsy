@@ -268,6 +268,17 @@ A manager should never duplicate a sub-agent's work by re-implementing it direct
 
 `ib state` (or `ib state --json`) lists every agent with its tmux pane PID, claude PID, and watchdog PID, plus liveness for each (✓ alive, ✗ dead, — missing). When pane_pid has child processes that aren't the recorded claude_pid, they show as `[orphans: N]`. Use this when an agent is in a strange state, when `ps` shows processes you can't account for, or before/after killing agents to confirm cleanup. Implementation: src/state-command.ts.
 
+`ib state` always renders an `ORPHANS` section after the agent list. Four categories are surfaced:
+
+- **tmux sessions** — sessions matching `ib-coordinator` (system coordinator, exact) or `ittybitty-<repoId>-<agentId>` (every spawned agent + per-repo coordinator) that aren't in any registered repo's tracked set.
+- **claude processes** — running `claude --resume <id>` / `claude --session-id <uuid>` whose PID isn't recorded in any tracked agent's `meta.json` `claude_pid`.
+- **watchdog processes** — running `ib watchdog <agent-id>` whose PID isn't in any agent's `watchdog_pid` (read from both `meta.json` and `meta.transient.json`).
+- **ib watch processes** — every running `ib watch` (informational; there is no tracked set).
+
+The tracked set is built from ALL agents in ALL registered repos plus the system coordinator's session — running `ib state` from any repo will not mis-flag legitimate agents from other repos. Each section reads "none" when empty.
+
+`ib state --cleanup` kills every orphan it finds: `tmux kill-session` for sessions, SIGTERM with a short grace then SIGKILL for processes. Only entries already in the orphan list are touched — tracked PIDs/sessions are never killed. Each kill attempt is annotated `[killed]` / `[kill failed: …]` in the re-rendered ORPHANS section, logged to stderr, and (in `--json` mode) included as a `cleanup_actions` array on the JSON payload alongside the `agents` and `orphans` fields.
+
 ### Sending literal strings with `ib send`
 
 The shell expands `$(...)`, backticks, and `$VAR` inside double quotes before `ib` sees the argument. To pass a literal message:

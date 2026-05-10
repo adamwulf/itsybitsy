@@ -16,6 +16,7 @@ import {
   setUsageReader,
   resetUsageReader,
   resetWarnedModels,
+  AUTO_COMPACT_DISABLED,
   type CompactState,
   type TranscriptUsage,
 } from "./auto-compact";
@@ -344,6 +345,7 @@ describe("sendCompact (via runner injection)", () => {
   });
 
   test("sends correct tmux command", async () => {
+    if (AUTO_COMPACT_DISABLED) return; // EXPERIMENT (2026-05-09): kill switch on
     let capturedCmd: string[] = [];
     setCompactSpawnRunner((cmd) => {
       capturedCmd = cmd;
@@ -356,11 +358,13 @@ describe("sendCompact (via runner injection)", () => {
   });
 
   test("returns false on non-zero exit", async () => {
+    if (AUTO_COMPACT_DISABLED) return; // EXPERIMENT (2026-05-09): kill switch on
     setCompactSpawnRunner(() => ({ exited: Promise.resolve(1) }));
     expect(await sendCompact("bad-session")).toBe(false);
   });
 
   test("returns false on spawn error", async () => {
+    if (AUTO_COMPACT_DISABLED) return; // EXPERIMENT (2026-05-09): kill switch on
     setCompactSpawnRunner(() => { throw new Error("tmux not found"); });
     expect(await sendCompact("any-session")).toBe(false);
   });
@@ -401,6 +405,7 @@ describe("checkAndCompact", () => {
   });
 
   test("sends /compact when usage exceeds threshold and agent is running", async () => {
+    if (AUTO_COMPACT_DISABLED) return; // EXPERIMENT (2026-05-09): kill switch on
     setUsageReader(async () => 85);
     const state: CompactState = { compactSent: false };
     const agent = makeAgent({ state: "running" });
@@ -412,6 +417,7 @@ describe("checkAndCompact", () => {
   });
 
   test("sends /compact when agent is waiting", async () => {
+    if (AUTO_COMPACT_DISABLED) return; // EXPERIMENT (2026-05-09): kill switch on
     setUsageReader(async () => 90);
     const state: CompactState = { compactSent: false };
     const agent = makeAgent({ state: "waiting" });
@@ -486,6 +492,7 @@ describe("checkAndCompact", () => {
   });
 
   test("re-sends after flag is cleared by dropping below threshold", async () => {
+    if (AUTO_COMPACT_DISABLED) return; // EXPERIMENT (2026-05-09): kill switch on
     const state: CompactState = { compactSent: false };
     const agent = makeAgent({ state: "running" });
 
@@ -530,6 +537,7 @@ describe("checkAndCompact — agent.log audit line", () => {
   });
 
   test("writes a single audit line on successful /compact send", async () => {
+    if (AUTO_COMPACT_DISABLED) return; // EXPERIMENT (2026-05-09): kill switch on
     setUsageReader(async () => 85);
     const state: CompactState = { compactSent: false };
     const agent: Agent = { ...makeAgent({ state: "running" }), repoPath: tempRepo };
@@ -581,6 +589,7 @@ describe("checkAndCompact — agent.log audit line", () => {
   });
 
   test("does NOT log when sendCompact fails (non-zero exit)", async () => {
+    if (AUTO_COMPACT_DISABLED) return; // EXPERIMENT (2026-05-09): kill switch on
     setCompactSpawnRunner(() => ({ exited: Promise.resolve(1) }));
     setUsageReader(async () => 90);
     const state: CompactState = { compactSent: false };
@@ -594,6 +603,7 @@ describe("checkAndCompact — agent.log audit line", () => {
   });
 
   test("logs timeSinceLastCheck=n/a when lastCheckMs is 0 (first check)", async () => {
+    if (AUTO_COMPACT_DISABLED) return; // EXPERIMENT (2026-05-09): kill switch on
     setUsageReader(async () => 85);
     const state: CompactState = { compactSent: false };
     const agent: Agent = { ...makeAgent({ state: "running" }), repoPath: tempRepo };
@@ -605,6 +615,7 @@ describe("checkAndCompact — agent.log audit line", () => {
   });
 
   test("logs timeSinceLastCheck=n/a when lastCheckMs is omitted", async () => {
+    if (AUTO_COMPACT_DISABLED) return; // EXPERIMENT (2026-05-09): kill switch on
     setUsageReader(async () => 85);
     const state: CompactState = { compactSent: false };
     const agent: Agent = { ...makeAgent({ state: "running" }), repoPath: tempRepo };
@@ -616,6 +627,7 @@ describe("checkAndCompact — agent.log audit line", () => {
   });
 
   test("logged interval reflects the gap from lastCheckMs to now", async () => {
+    if (AUTO_COMPACT_DISABLED) return; // EXPERIMENT (2026-05-09): kill switch on
     setUsageReader(async () => 85);
     const state: CompactState = { compactSent: false };
     const agent: Agent = { ...makeAgent({ state: "running" }), repoPath: tempRepo };

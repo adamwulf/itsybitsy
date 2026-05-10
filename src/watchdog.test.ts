@@ -64,6 +64,7 @@ import {
   resetUsageReader,
   setCompactSpawnRunner,
   resetCompactSpawnRunner,
+  AUTO_COMPACT_DISABLED,
 } from "./auto-compact";
 import {
   spawnCtx as tmuxPollerSpawnCtx,
@@ -1720,6 +1721,7 @@ describe("watchdog", () => {
     });
 
     test("sends /compact when usage exceeds threshold for running agent", async () => {
+      if (AUTO_COMPACT_DISABLED) return; // EXPERIMENT (2026-05-09): kill switch on
       setUsageReader(async () => 85);
       setWatchdogReadConfig(async () => mockConfig(80));
 
@@ -1735,6 +1737,7 @@ describe("watchdog", () => {
     });
 
     test("sends /compact when usage exceeds threshold for waiting agent", async () => {
+      if (AUTO_COMPACT_DISABLED) return; // EXPERIMENT (2026-05-09): kill switch on
       setUsageReader(async () => 90);
       setWatchdogReadConfig(async () => mockConfig(80));
 
@@ -1797,6 +1800,7 @@ describe("watchdog", () => {
     });
 
     test("fresh tracker does NOT pass compact-cooldown gate on its first check", async () => {
+      if (AUTO_COMPACT_DISABLED) return; // EXPERIMENT (2026-05-09): kill switch on
       // Regression test: createTracker() must initialize lastCompactCheckMs to nowFn(),
       // not 0. Without this, a freshly-resumed agent (or any newly-tracked agent)
       // would receive /compact on the very first watchdog tick.
@@ -1853,6 +1857,7 @@ describe("watchdog", () => {
     });
 
     test("does not re-send /compact once compactSent is true", async () => {
+      if (AUTO_COMPACT_DISABLED) return; // EXPERIMENT (2026-05-09): kill switch on
       setUsageReader(async () => 90);
       setWatchdogReadConfig(async () => mockConfig(80));
 

@@ -1,6 +1,7 @@
 /**
  * Async wrappers for ib mutation commands.
- * Every command runs with cwd set to the agent's repoPath.
+ * Git operations target the agent's repo via `git -C <repoPath>` rather than
+ * relying on process-wide cwd; a handful of subprocess calls set `cwd` explicitly.
  * All commands are implemented natively — no ib CLI dependency.
  */
 

@@ -145,35 +145,38 @@ After any code changes, always run:
 Every new feature or fix must be evaluated from these four perspectives before it is considered complete. A change that looks local may have implications in any of the four — explicitly confirm each, even if only to note "not affected":
 
 1. **General agent functionality** — does the change affect what an agent can do, how it is spawned, how its meta.json is shaped, or how its lifecycle proceeds?
-2. **Hooks** — does the change affect any of the five hooks (agent-path, agent-status, permission-denied, intercept-task, session-start) or the main-path hook? New paths, new tool categories, and new agent metadata usually require hook updates.
+2. **Hooks** — does the change affect any of the agent-session hooks (agent-path, agent-status, permission-denied, intercept-task, session-start) or the primary-Claude hooks (main-path, inject-status)? New paths, new tool categories, and new agent metadata usually require hook updates.
 3. **Watchdog** — does the change affect agent state detection, nudge timing, rate-limit recovery, or any background monitoring behavior?
 4. **`ib watch` / dashboard** — does the change affect what the TUI displays, which modes are needed, focus/input handling, or layout?
 
 ## itsybitsy Implementation Notes
 
-1471 tests across 40 files.
+2888 tests across 63 files.
 
 ### State detection flow
 **Deterministic model (Phase 42 — implemented):**
 1. Stop hook (`ib hook-status`) writes `state` to `meta.json` when Claude goes idle (`waiting`, `complete`, or `running`)
 2. `ib send` and `ib resume` write `state: "running"` to `meta.json`
-3. `detectAgentStates()` reads state from meta.json with tmux overrides for compacting/rate_limited/stopped
-4. `creating` is derived from `created_epoch` (< 6s ago), never stored
-5. `parseState()` is retained as legacy for the bash ib reference and the watchdog's rate limit bypass retry loop
+3. `detectAgentStates()` reads state from meta.json with tmux overrides for compacting/rate_limited/api_error/stopped
+4. `MetaState` = `"creating" | "running" | "waiting" | "complete" | "stopped"` (stored). `AgentState` (parse-state.ts) is the broader union that adds `compacting`, `rate_limited`, `api_error`, and `unknown` for runtime overrides
+5. `creating` is written by spawn code for in-progress spawns and is also derived from `created_epoch` (< ~6s ago) when the meta state would otherwise be ambiguous
+6. `api_error` is an override surfaced via `isApiError(tmuxOutput)` and the `tmux_api_error` flag in `TransientState`
+7. `parseState()` is retained as legacy for the bash ib reference and the watchdog's rate limit bypass retry loop
 
 ### SplitPane (src/tui/split-pane.ts)
 pi-tui's `Box` is vertical-only. `SplitPane` renders two child components side-by-side by calling each child's `render(width)` independently, then merging lines: left is padded to exact width, separator char inserted, right is truncated. Left width is configurable.
 
 ### TmuxPoller (src/tmux-poller.ts)
-- Polls only the SELECTED agent at ~1s via `setInterval`
+- Polls only the SELECTED target at ~1s via `setInterval`
+- The dashboard runs three `TmuxPoller` instances: one for the selected agent, one for the system coordinator (`ib-coordinator`), and one for the currently selected per-repo coordinator
 - `setAgent(session)` switches target; triggers immediate poll
-- Race condition guard: snapshots `targetSession` before async `Bun.spawn`, discards result if agent changed during await
+- Race condition guard: snapshots `targetSession` before async `Bun.spawn`, discards result if target changed during await
 - `captureTmuxOutput()` is a separate one-shot export used by `detectAgentStates()` in the watcher
 
 ### Agent data (src/agents.ts)
-- `readAllAgents()` returns `{ agents, errors, orphanedTmuxSessions }` — always check errors
+- `readAllAgents()` returns `{ agents, errors, orphanedTmuxSessions, liveTmuxSessions }` — always check errors
 - `FlatEntry` discriminated union type lives here (not in watcher.ts) since `flattenAgentTree()` produces it — kind: "agent" for agent rows, kind: "repo-header" for repo headers
-- `detectAgentStates()` is the single source of truth for state detection — reads `state` from meta.json with tmux overrides for compacting/rate_limited/stopped
+- `detectAgentStates()` is the single source of truth for state detection — reads `state` from meta.json with tmux overrides for compacting/rate_limited/api_error/stopped
 - `writeAgentState()` atomically writes state to meta.json (used by stop hook, sendMessage, resumeAgent)
 - `isCompacting()`, `isRateLimited()`, `hasBackgroundTasks()` — targeted tmux output checks (no full parseState)
 - `buildAgentTree()` mutates `agent.children` in place; call it after state detection
@@ -194,7 +197,7 @@ Creating (workspace trust prompt, full input) > Compacting (last 5) > Active run
 
 ### Dashboard (src/tui/dashboard.ts)
 - **Layout (Phase 45 — complete):** Three-column layout: resizable sidebar (default 60 cols, range 30–120) with agent tree + info panel | resizable tmux pane | cycling right pane. See SPEC.md §11–13 for full specification.
-- **Focus system (Phase 46 — partially complete):** 4 focusable panels in normal mode: agent-tree, info, active-agent, right-pane. In coordinator mode: agent-tree, info, coordinator. Tab/Shift+Tab cycles focus. Focused panel headers render in reverse video + bold; unfocused render dim. `[`/`]` resize width (focus-aware), `{`/`}` resize sidebar panel height (steals from neighbor). Input fields not yet implemented (deferred to Phase 49).
+- **Focus system (Phase 46 — partially complete):** 5 focus targets in normal mode (`FOCUS_ORDER`): agent-tree, info, active-agent, right-pane, repo-coordinator. The repo-coordinator target is in `skipTargets` by default and only participates in cycling when the right pane is in REPO mode. In coordinator mode: agent-tree, info, coordinator. Tab/Shift+Tab cycles focus. Focused panel headers render in reverse video + bold; unfocused render dim. `[`/`]` resize width (focus-aware), `{`/`}` resize sidebar panel height (steals from neighbor). Input fields not yet implemented (deferred to Phase 49).
 - **Layout persistence:** Panel sizes (sidebar width, split-pane left width, height offsets) saved to `~/.itsybitsy/layout.json` via debounced write (500ms). Restored on startup with validation (rejects NaN/Infinity, clamps to valid ranges). `heightOffsets.coordinator` is kept in the schema for backward compatibility with existing layout files but is no longer used for rendering.
 - **Pane widths — single source of truth:** All pane width math lives in `src/tui/widths.ts`. Spawn/resume code: use the async `getSaved*` helpers. Dashboard render: use the sync `getLive*` wrappers (or `DashboardComponent.getMainWidth()`). Per-repo coordinators render at `mainWidth`, same as the system coordinator. **Never compute pane widths inline.** Formula: `mainWidth = terminalWidth - sidebarWidth - 1`; the rest derive from it.
 - **Coordinator System (Phases 47–49 — largely implemented):** Two-tier system: system coordinator (`ib-coordinator` tmux session, `~/.itsybitsy/`, Bash(ib:*) only) + per-repo coordinators (special agents with `coordinator: true` in meta.json, Read/Glob/Grep/LS + ib:*, no Write/Edit, unqualified Bash denied). When coordinator is selected: sidebar shows only tree + info, main area shows coordinator tmux at full width (`mainWidth`). `n`/`p` toggles between TMUX view (coordinator output with input field) and DASHBOARD view (agent overview table). Focus order in coordinator mode: agent-tree → info → coordinator. Per-repo coordinators are first entry under their repo in agent tree. System coordinator spawns agents in repos via `ib new-agent --repo <name> "task"`. Coordinator tmux is created/resized at `mainWidth` and tracks terminal resize via `process.stdout.on('resize')`. See SPEC.md §12.
@@ -211,45 +214,51 @@ Creating (workspace trust prompt, full input) > Compacting (last 5) > Active run
 - Both panes pad to `displayHeight` for consistent vertical alignment
 - `readAgentLog()` is async — loaded on agent selection change, stale-checked by agent ID
 - `;`/`l` scroll both tmux (left) and right pane simultaneously
-- Dialog system: confirm, text input, select list, fuzzy search, help overlay, timed message — renders in status bar area, variable height
+- Dialog system: confirm, input, select, fuzzy, help, textarea, folder-browser, new-agent-form, setup, permissions-editor — renders in status bar area, variable height. Status-bar notices (`showMessage()`) are separate from dialogs.
 - `executeAndRefresh()` wraps all mutations: runs the action, catches errors, then triggers watcher refresh
 
 ### Hooks (src/hooks/)
-Five native hook implementations run as Claude Code hook commands inside spawned agent sessions:
+Native hook implementations run as Claude Code hook commands. Five fire inside spawned agent sessions; two fire in the primary Claude session that runs `ib watch`:
+
+Agent-session hooks:
 - `hook-check-path <agentId>` maps to `agent-path.ts`: Path isolation — blocks agents from accessing other agents' worktrees or the main repo. Reads JSON from stdin, outputs allow/deny decision JSON.
 - `hook-status <agentId>` maps to `agent-status.ts`: Stop hook — detects stuck agents and sends nudge messages. Debounced via timestamp file.
 - `hook-permission-denied <agentId>` maps to `permission-denied.ts`: Logs permission denial events to agent.log.
 - `hooks intercept-task` maps to `intercept-task.ts`: PreToolUse hook — blocks disallowed models and unauthorized task spawning.
 - `hooks session-start` maps to `session-start.ts`: SessionStart hook — injects role-specific context at session start. Supports agent types: loads type definition, interpolates template body with `{{variable}}` and `{{#if cond}}...{{/if}}` blocks, falls back to hardcoded instructions based on `instructionStyle`. Legacy agents without `agentType` use role detection from `worker`/`coordinator` booleans.
 
-Hooks read input from stdin. Path-check, intercept-task, and session-start write JSON to stdout and use exit codes (0 allow, 1 deny). Agent-status writes a plain state string to stdout. Permission-denied only logs to agent.log and exits 0.
+Primary-Claude hooks:
+- `hooks main-path` maps to `main-path.ts`: PreToolUse hook for the primary Claude session — blocks the user's main Claude from `cd`-ing or otherwise operating inside agent worktrees (`.ittybitty/agents/*`).
+- `hooks inject-status` maps to `inject-status.ts`: UserPromptSubmit hook — injects a brief agents-status summary into the primary Claude's context, gated by `hooks.injectStatus` config and rate-limited by hashing.
+
+Hooks read input from stdin. Path-check, main-path, intercept-task, and session-start write JSON to stdout and use exit codes (0 allow, 1 deny). Agent-status writes a plain state string to stdout. Permission-denied only logs to agent.log and exits 0. Inject-status returns an additionalContext JSON payload.
 
 ### Agent types (src/agent-types.ts)
-Configurable agent type system. Agent types are `.md` files with YAML frontmatter in `~/.itsybitsy/agent-types/` — the `.md` file on disk is the sole source of truth (no hardcoded fallback). Default types (manager, worker, coordinator) plus two layer files (`_all.md`, `_non_coordinator.md`) are embedded in the binary via text imports from `docs/agent-types/*.md` and auto-populated to disk on first run via `ensureAgentTypesDir()`. `AgentType` interface: `name`, `description`, `canSpawnChildren`, `spawnable`, `icon`, `model`, `permissions`, `allowedPaths`, `instructionStyle`, `markdownBody`. `spawnable` defaults to `true` when absent; `false` marks layer-only files (`_all.md`, `_non_coordinator.md`) that cannot be spawned via `ib new-agent --type <name>` but whose frontmatter and body merge into every spawned agent. Key exports: `loadAgentType(name)` (disk-only, throws if not found), `agentTypeExists(name)` (disk-only), `ensureAgentTypesDir()` (auto-populate on first run, no-op if directory exists), `initAgentTypes()` (restore missing embedded files without overwriting existing ones — backs `ib init-types`), `listAgentTypes()`, `listSpawnableTypeNamesSync()` (lightweight sync scan used by TUI — filters out `spawnable: false`), `validateAllAgentTypes()` (startup validation), `parseAgentTypeFile(content)` (YAML frontmatter parser with nested object and list support). Icon is first non-whitespace character of the `icon` field. `allowedPaths` controls file access beyond the worktree: `undefined` = legacy permissive (allow all), `[]` = strict (worktree only), entries = allow listed directories. Paths are expanded (`~` → homedir, `realpathSync` for symlinks) at agent creation time and stored in `meta.json`. The hook-check-path reads them at runtime (see §6.1 in SPEC.md).
+Configurable agent type system. Agent types are `.md` files with YAML frontmatter in `~/.itsybitsy/agent-types/`. The `.md` file on disk is the primary source of truth — `loadAgentType()` reads only from disk and throws if a file is missing. Default types (manager, worker, coordinator) plus three layer files (`_all.md`, `_non_coordinator.md`, `system.md`) are embedded in the binary via text imports from `docs/agent-types/*.md` and auto-populated to disk on first run via `ensureAgentTypesDir()`. When the directory is missing entirely, `listAgentTypeNamesSync()` falls back to the embedded list so the TUI can render type pickers before files are materialised. `AgentType` interface: `name`, `description`, `canSpawnChildren`, `spawnable`, `icon`, `model`, `permissions`, `allowedPaths`, `repos`, `instructionStyle`, `markdownBody`. `spawnable` defaults to `true` when absent; `false` marks layer-only files (`_all.md`, `_non_coordinator.md`, `system.md`) that cannot be spawned via `ib new-agent --type <name>` but whose frontmatter and body merge into spawned agents (`_all.md` into every agent, `_non_coordinator.md` into non-coordinators, `system.md` into the system coordinator). `repos` is an optional string list constraining which repos a type may be spawned into. Key exports: `loadAgentType(name)` (disk-only, throws if not found), `agentTypeExists(name)` (disk-only), `ensureAgentTypesDir()` (auto-populate on first run, no-op if directory exists), `initAgentTypes()` (restore missing embedded files without overwriting existing ones — backs `ib init-types`), `listAgentTypes()`, `listSpawnableTypeNamesSync()` (lightweight sync scan used by TUI — filters out `spawnable: false`), `validateAllAgentTypes()` (startup validation), `parseAgentTypeFile(content)` (YAML frontmatter parser with nested object and list support). Icon is first non-whitespace character of the `icon` field. `allowedPaths` controls file access beyond the worktree: `undefined` = legacy permissive (allow all), `[]` = strict (worktree only), entries = allow listed directories. Paths are expanded (`~` → homedir, `realpathSync` for symlinks) at agent creation time and stored in `meta.json`. The hook-check-path reads them at runtime (see §6.1 in SPEC.md).
 
 ### Agent lifecycle (src/agent-lifecycle.ts)
-Shared agent lifecycle helpers used by multiple ib commands. Mirrors the ib bash script's teardown, archive, kill, and utility functions. Provides a pluggable `SpawnFn` runner (`setSpawnRunner()`/`resetSpawnRunner()`) for test injection. Handles formatting timestamps, archiving agent directories, and cleaning up tmux sessions and git worktrees.
+Shared agent lifecycle helpers used by multiple ib commands. Mirrors the ib bash script's teardown, archive, kill, and utility functions. All subprocess calls go through `spawnCtx` (a `SpawnContext` from `types.ts`); tests inject a fake runner with `spawnCtx.set(fn)` and reset it with `spawnCtx.reset()`. Handles formatting timestamps, archiving agent directories, and cleaning up tmux sessions and git worktrees.
 
 ### Auto-compact (src/auto-compact.ts)
-Reads Claude transcript JSONL files to determine an agent's context window usage percentage, then sends `/compact` to agents that exceed a configured threshold. Matches ib's `get_agent_context_usage()` logic for transcript parsing. Encodes worktree paths into Claude's project directory naming scheme to locate the correct transcript file.
+Reads Claude transcript JSONL files to determine an agent's context window usage percentage. Matches ib's `get_agent_context_usage()` logic for transcript parsing. Encodes worktree paths into Claude's project directory naming scheme to locate the correct transcript file. The actual `/compact` send is **hard-disabled** via the `AUTO_COMPACT_DISABLED = true` kill switch — `sendCompact` short-circuits and logs what it would have sent rather than sending. Re-enabling requires flipping the constant in source.
 
 ### Config (src/config.ts)
-User-wide configuration system with user and default sources. Defines all config keys (`maxAgents`, `model`, `createPullRequests`, `allowAgentQuestions`, `autoCompactThreshold`, `externalDiffTool`, hooks settings, and `coordinator.model`). Permission list keys have been migrated out of `config.json` into agent-type layer files (`~/.itsybitsy/agent-types/_all.md`, `_non_coordinator.md`, `<type>.md`) — see SPEC.md §2.3. Deprecated keys (`permissions.all.*`, `permissions.repo.*`, `permissions.manager.*`, `permissions.worker.*`, `permissions.coordinator.*`) trigger a warning at `ib watch` startup pointing to the correct `.md` replacement file. Reads from `~/.itsybitsy/config.json` (user home), merging with typed defaults. No per-repo configuration.
+User-wide configuration system with user and default sources. Config keys: `maxAgents`, `model`, `createPullRequests`, `allowAgentQuestions`, `autoCompactThreshold`, `externalDiffTool`, `hooks.injectStatus`, `hooks.statusVisible`, `coordinator.model`, `coordinator.imessage`, and `channels.telegram.bot_token`. Permission list keys have been migrated out of `config.json` into agent-type layer files (`~/.itsybitsy/agent-types/_all.md`, `_non_coordinator.md`, `<type>.md`) — see SPEC.md §2.3. Deprecated keys (`permissions.all.*`, `permissions.repo.*`, `permissions.manager.*`, `permissions.worker.*`, `permissions.coordinator.*`) trigger a warning at `ib watch` startup pointing to the correct `.md` replacement file. Reads from `~/.itsybitsy/config.json` (user home), merging with typed defaults. No per-repo configuration.
 
 ### Folder browser (src/tui/folder-browser.ts)
 Builds the navigable item list for the add-repo folder browser dialog. Given a current path, produces a list of `FolderItem` entries: ancestors from root down to parent, the current folder, and sorted child directories. Each item includes depth, git-repo detection, and ancestor/current flags for rendering the tree-style UI.
 
 ### ib-commands (src/ib-commands.ts)
 - Mutations are implemented natively. `runIb()` and `IbRunner` have been deleted. `hooksStatus`, `installSafetyHooks`, `uninstallSafetyHooks`, `installInterceptHook`, `uninstallInterceptHook`, `interceptHooksStatus` are natively implemented — they read/write `~/.claude/settings.json` (global).
-- Always sets `cwd` to `agent.repoPath` — ib requires running from a git repo root
+- Git operations target the agent's repo via `git -C <repoPath>` rather than process-wide `cwd`. Tests inject fake spawn runners via per-command `SpawnContext` instances (e.g., `setKillPauseSpawnRunner`, `resetNukeResumeSpawnRunner`).
 - Commands: killAgent, nukeAgent, nukeAllAgents, pauseAgent, resumeAgent, reassignAgent, mergeCheckAgent, mergeAgent, sendMessage, newAgent, diffAgent, statusAgent, acknowledgeQuestion
 - `newAgent()` calls `ensureAgentTypesDir()` then validates `--type` exists on disk (via `agentTypeExists()`), rejects layer-only types (`_all`, `_non_coordinator`) that have `spawnable: false` in frontmatter, and stores `agentType` and `agentIcon` in meta.json. Permission lookup: every agent merges `_all.md` frontmatter `permissions.allow/deny`; non-coordinator agents additionally merge `_non_coordinator.md`; all agents merge their resolved type file's own `permissions.allow/deny`. The three sources are deduplicated before writing `settings.local.json`.
 - `nukeAllAgents(repoPath)` — kills and archives all agents in a repo, plus cleans orphaned tmux sessions
 - `pauseAgent(agent)` — stops a running agent by killing its Claude process and tmux session without archiving
 
-### Dialog system (in dashboard.ts)
-- 6 dialog types: `confirm`, `input`, `select`, `message`, `fuzzy`, `help`
-- `message` auto-dismisses after 3s or on any key; `messageCounter` prevents stale timeouts
+### Dialog system (in dashboard.ts / src/tui/dialog-handler.ts)
+- 10 dialog types: `confirm`, `input`, `select`, `fuzzy`, `help`, `textarea`, `folder-browser`, `new-agent-form`, `setup`, `permissions-editor`
+- Separate from dialogs, the status bar has a timed-notice mechanism: `showMessage()` queues a one-line notice that auto-dismisses after 3s or on any key, gated by `noticeCounter` to prevent stale timeouts from clearing newer notices
 - `fuzzy` uses pi-tui's `fuzzyFilter`; wraps items with original indices to map filtered selection back
 - `executeAndRefresh(fn)` wraps simple mutations (try/catch + watcher refresh)
 - Multi-step flows (merge, diff-tool, snapshot) use `.then().catch()` because they need intermediate UI or skip refresh
@@ -315,6 +324,7 @@ The loop handles: checking completion, enforcing review cycles, merging approved
 Input validation helpers that enforce strict character allowlists to prevent shell injection in script templates. Exports: `isValidModel()` (alphanumeric, dots, hyphens, underscores), `isValidToolList()` (alphanumeric, underscores, hyphens, asterisks, parens, colons, dots, spaces, commas), `isValidAgentId()` and `isValidTmuxSession()` (alphanumeric, hyphens, underscores), `isValidSessionId()` (hex digits and hyphens). Used wherever user-supplied values are interpolated into shell commands.
 
 ### Ghostty (src/ghostty.ts)
-- `openInGhostty(tmuxSession)` spawns `ghostty --command='bash -c "tmux attach -t {session}"'` detached via `proc.unref()` — bash -c wrapper prevents Ghostty's login shell flags from being passed to tmux. Note: `+new-window` (reuse existing instance) is GTK-only and not available on macOS, so each call spawns a new Ghostty app.
+- `openInGhostty(tmuxSession)` spawns Ghostty with `--command=bash -c 'tmux set-option -t <session> window-size latest && tmux attach -t <session>'`, detached via `proc.unref()` — the `window-size latest` prefix makes tmux re-fit to Ghostty's dimensions on attach, and the bash -c wrapper prevents Ghostty's login shell flags from being passed to tmux. Note: `+new-window` (reuse existing instance) is GTK-only and not available on macOS, so each call spawns a new Ghostty app.
+- `openPathInGhostty(dirPath)` is the directory-opening counterpart — it launches a Ghostty window cd'd into `dirPath` (no tmux attach).
 - Validates session name with `/^[\w-]+$/` before interpolating into `--command`
-- Returns `{ ok, message }` — caller shows result via `showMessage()`
+- Both functions return `{ ok, message }` — caller shows result via `showMessage()`

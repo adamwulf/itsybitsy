@@ -101,29 +101,37 @@ async function readClearedMarker(): Promise<number> {
 }
 
 /**
- * Scan the coordinator transcript dir for the newest `*.jsonl` mtime. Returns
- * 0 when the dir is missing, empty, or contains no valid-id transcripts.
- * Shared between `writeClearedMarker` (to bump the marker past any post-kill
- * flush) and `findLatestCoordinatorTranscriptId` (to pick the resume target).
+ * Scan the coordinator transcript dir and return one entry per `*.jsonl` file
+ * whose basename parses as a valid session id. Each entry is `{ id, mtimeMs }`.
+ *
+ * Returns `[]` when the dir is missing, unreadable, or contains no valid-id
+ * transcripts. Per-file `stat` failures are silently skipped so a single
+ * unreadable file doesn't poison the whole scan.
+ *
+ * Two callers share this:
+ *   - `writeClearedMarker` reduces the entries to the max mtime so it can
+ *     stamp the cleared marker past any post-kill flush.
+ *   - `findLatestCoordinatorTranscriptId` filters by `mtimeMs > clearedAt`,
+ *     sorts desc, and returns the newest non-cleared id.
  */
-async function findNewestTranscriptMtime(): Promise<number> {
+async function scanCoordinatorTranscripts(): Promise<{ id: string; mtimeMs: number }[]> {
   const dir = coordinatorTranscriptDir();
   try {
     const { readdir, stat } = await import("fs/promises");
     const names = await readdir(dir);
-    let newest = 0;
+    const entries: { id: string; mtimeMs: number }[] = [];
     for (const name of names) {
       if (!name.endsWith(".jsonl")) continue;
       const id = name.slice(0, -".jsonl".length);
       if (!isValidSessionId(id)) continue;
       try {
         const s = await stat(join(dir, name));
-        if (s.mtimeMs > newest) newest = s.mtimeMs;
+        entries.push({ id, mtimeMs: s.mtimeMs });
       } catch { /* skip */ }
     }
-    return newest;
+    return entries;
   } catch {
-    return 0;
+    return [];
   }
 }
 
@@ -144,7 +152,8 @@ async function findNewestTranscriptMtime(): Promise<number> {
  */
 async function writeClearedMarker(): Promise<void> {
   await sleepFn(1000);
-  const newestMtime = await findNewestTranscriptMtime();
+  const entries = await scanCoordinatorTranscripts();
+  const newestMtime = entries.reduce((max, e) => Math.max(max, e.mtimeMs), 0);
   const stamp = Math.max(Date.now(), newestMtime + 1);
   await Bun.write(clearedMarkerPath(), String(stamp) + "\n");
 }
@@ -155,26 +164,9 @@ async function writeClearedMarker(): Promise<void> {
  * Claude's mid-conversation session-id rotation.
  */
 async function findLatestCoordinatorTranscriptId(): Promise<string | null> {
-  const dir = coordinatorTranscriptDir();
   const clearedAt = await readClearedMarker();
-  let entries: { id: string; mtimeMs: number }[];
-  try {
-    const { readdir, stat } = await import("fs/promises");
-    const names = await readdir(dir);
-    entries = [];
-    for (const name of names) {
-      if (!name.endsWith(".jsonl")) continue;
-      const id = name.slice(0, -".jsonl".length);
-      if (!isValidSessionId(id)) continue;
-      try {
-        const s = await stat(join(dir, name));
-        if (s.mtimeMs <= clearedAt) continue;
-        entries.push({ id, mtimeMs: s.mtimeMs });
-      } catch { /* skip */ }
-    }
-  } catch {
-    return null;
-  }
+  const entries = (await scanCoordinatorTranscripts())
+    .filter((e) => e.mtimeMs > clearedAt);
   if (entries.length === 0) return null;
   entries.sort((a, b) => b.mtimeMs - a.mtimeMs);
   return entries[0]!.id;

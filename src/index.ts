@@ -1151,9 +1151,10 @@ async function main() {
       // The system coordinator has no Agent object (no meta.json on disk),
       // so it can't go through the regular respawnAgent flow.
       if (idArg === "@system") {
-        const { restartSystemCoordinator } = await import("./coordinator");
-        await restartSystemCoordinator();
-        console.log("System coordinator restart scheduled");
+        const { discardSystemCoordinator, ensureSystemCoordinator } = await import("./coordinator");
+        await discardSystemCoordinator();
+        await ensureSystemCoordinator();
+        console.log("System coordinator restart scheduled (fresh session)");
         process.exit(0);
       }
 
@@ -1171,9 +1172,10 @@ async function main() {
         const { resolveAgentFromCwd, SYSTEM_AGENT_ID } = await import("./hooks/shared");
         const resolved = resolveAgentFromCwd(process.cwd());
         if (resolved?.agentId === SYSTEM_AGENT_ID) {
-          const { restartSystemCoordinator } = await import("./coordinator");
-          await restartSystemCoordinator();
-          console.log("System coordinator restart scheduled");
+          const { discardSystemCoordinator, ensureSystemCoordinator } = await import("./coordinator");
+          await discardSystemCoordinator();
+          await ensureSystemCoordinator();
+          console.log("System coordinator restart scheduled (fresh session)");
           process.exit(0);
         }
         if (!resolved) {

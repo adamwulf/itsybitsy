@@ -100,9 +100,62 @@ async function readClearedMarker(): Promise<number> {
   }
 }
 
-/** Write the cleared-marker so subsequent resumes ignore prior transcripts. */
+/**
+ * Scan the coordinator transcript dir and return one entry per `*.jsonl` file
+ * whose basename parses as a valid session id. Each entry is `{ id, mtimeMs }`.
+ *
+ * Returns `[]` when the dir is missing, unreadable, or contains no valid-id
+ * transcripts. Per-file `stat` failures are silently skipped so a single
+ * unreadable file doesn't poison the whole scan.
+ *
+ * Two callers share this:
+ *   - `writeClearedMarker` reduces the entries to the max mtime so it can
+ *     stamp the cleared marker past any post-kill flush.
+ *   - `findLatestCoordinatorTranscriptId` filters by `mtimeMs > clearedAt`,
+ *     sorts desc, and returns the newest non-cleared id.
+ */
+async function scanCoordinatorTranscripts(): Promise<{ id: string; mtimeMs: number }[]> {
+  const dir = coordinatorTranscriptDir();
+  try {
+    const { readdir, stat } = await import("fs/promises");
+    const names = await readdir(dir);
+    const entries: { id: string; mtimeMs: number }[] = [];
+    for (const name of names) {
+      if (!name.endsWith(".jsonl")) continue;
+      const id = name.slice(0, -".jsonl".length);
+      if (!isValidSessionId(id)) continue;
+      try {
+        const s = await stat(join(dir, name));
+        entries.push({ id, mtimeMs: s.mtimeMs });
+      } catch { /* skip */ }
+    }
+    return entries;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Write the cleared-marker so subsequent resumes ignore prior transcripts.
+ *
+ * Subtle: `tmux kill-session` returns as soon as tmux destroys the pane, but
+ * the SIGHUP cascade gives Claude ~500–700ms to flush a final batch of lines
+ * to its transcript JSONL. If we stamped the marker with `Date.now()`
+ * immediately, that post-kill flush would write a transcript whose `mtimeMs`
+ * is *later* than the marker — and `findLatestCoordinatorTranscriptId` would
+ * happily resume it on the next launch (the exact race that broke /restart
+ * and /respawn).
+ *
+ * Fix: sleep ~1s to let the flush complete, then set the marker to
+ * `max(now, newestTranscriptMtime + 1)` so any straggler is guaranteed to be
+ * <= the marker and therefore filtered out on resume.
+ */
 async function writeClearedMarker(): Promise<void> {
-  await Bun.write(clearedMarkerPath(), String(Date.now()) + "\n");
+  await sleepFn(1000);
+  const entries = await scanCoordinatorTranscripts();
+  const newestMtime = entries.reduce((max, e) => Math.max(max, e.mtimeMs), 0);
+  const stamp = Math.max(Date.now(), newestMtime + 1);
+  await Bun.write(clearedMarkerPath(), String(stamp) + "\n");
 }
 
 /**
@@ -111,26 +164,9 @@ async function writeClearedMarker(): Promise<void> {
  * Claude's mid-conversation session-id rotation.
  */
 async function findLatestCoordinatorTranscriptId(): Promise<string | null> {
-  const dir = coordinatorTranscriptDir();
   const clearedAt = await readClearedMarker();
-  let entries: { id: string; mtimeMs: number }[];
-  try {
-    const { readdir, stat } = await import("fs/promises");
-    const names = await readdir(dir);
-    entries = [];
-    for (const name of names) {
-      if (!name.endsWith(".jsonl")) continue;
-      const id = name.slice(0, -".jsonl".length);
-      if (!isValidSessionId(id)) continue;
-      try {
-        const s = await stat(join(dir, name));
-        if (s.mtimeMs <= clearedAt) continue;
-        entries.push({ id, mtimeMs: s.mtimeMs });
-      } catch { /* skip */ }
-    }
-  } catch {
-    return null;
-  }
+  const entries = (await scanCoordinatorTranscripts())
+    .filter((e) => e.mtimeMs > clearedAt);
   if (entries.length === 0) return null;
   entries.sort((a, b) => b.mtimeMs - a.mtimeMs);
   return entries[0]!.id;

@@ -1015,16 +1015,26 @@ describe("ensureSystemCoordinator", () => {
 // -------------------------------------------------------------------
 describe("discardSystemCoordinator", () => {
   let tmpDir: string;
+  let typesHome: string;
+  const originalHome = process.env.HOME;
 
   beforeEach(async () => {
     tmpDir = await mkdtemp(join(tmpdir(), "coord-discard-"));
     setCoordinatorHome(tmpDir);
+    // Isolate $HOME so the transcript-dir lookup (~/.claude/projects/<encoded>)
+    // resolves under a test-controlled tree.
+    typesHome = await mkdtemp(join(tmpdir(), "coord-discard-home-"));
+    process.env.HOME = typesHome;
+    setCoordinatorSleepFn(async () => {}); // No-op sleep so tests don't actually wait 1s
   });
 
   afterEach(async () => {
     coordinatorSpawnCtx.reset();
     resetCoordinatorHome();
+    resetCoordinatorSleepFn();
+    process.env.HOME = originalHome;
     await rm(tmpDir, { recursive: true, force: true });
+    await rm(typesHome, { recursive: true, force: true });
   });
 
   test("kills tmux, writes cleared marker, removes self PID from refs", async () => {
@@ -1049,6 +1059,38 @@ describe("discardSystemCoordinator", () => {
     const refs = await readFile(refsFile, "utf-8");
     expect(refs).not.toContain(String(process.pid));
     expect(refs).toContain(String(otherPid));
+  });
+
+  test("regression: cleared marker is later than a transcript flushed after kill-session", async () => {
+    // Reproduces the race in the live bug report: `tmux kill-session` returns
+    // immediately but Claude takes ~500–700ms to flush its final transcript
+    // batch. Simulate that by laying down a transcript whose mtime is in the
+    // future relative to "now" (the moment writeClearedMarker computes its
+    // timestamp). The fix scans the dir and bumps the marker past that mtime.
+    const sessionId = "55555555-5555-5555-5555-555555555555";
+    const encoded = encodeClaudeProjectPath(tmpDir);
+    const projectDir = join(typesHome, ".claude", "projects", encoded);
+    await mkdir(projectDir, { recursive: true });
+    const transcriptPath = join(projectDir, `${sessionId}.jsonl`);
+    await Bun.write(transcriptPath, "{}\n");
+
+    // Set the transcript's mtime to 500ms in the future — simulates a flush
+    // that lands AFTER the kill-session returns but BEFORE the marker is
+    // stamped at "Date.now()".
+    const { utimes, stat } = await import("fs/promises");
+    const future = new Date(Date.now() + 500);
+    await utimes(transcriptPath, future, future);
+    const transcriptMtime = (await stat(transcriptPath)).mtimeMs;
+
+    coordinatorSpawnCtx.set((_cmd: string[], _opts?: any) => ({
+      stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(0),
+    }));
+
+    await discardSystemCoordinator();
+
+    const markerRaw = (await readFile(join(tmpDir, "coordinator-session.cleared"), "utf-8")).trim();
+    const markerValue = parseInt(markerRaw, 10);
+    expect(markerValue).toBeGreaterThan(transcriptMtime);
   });
 });
 

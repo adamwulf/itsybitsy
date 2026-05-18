@@ -25,9 +25,15 @@
  *   - Attachment fallback: messages without text/caption produce both a
  *     "Received attachment" Telegram reply AND a `[user sent <type>]`
  *     channel-reminder so the coordinator sees the event.
- *   - Coordinator-offline: one retry after 2s, then a Telegram reply
- *     ("coordinator offline, message dropped — start it with `ib watch`")
- *     and the batch is dropped.
+ *   - Coordinator-offline: one retry after 2s; on failure the batch is
+ *     dropped, the chat is marked "awaiting confirmation", and the user
+ *     is prompted via Telegram: "The coordinator is offline. Start the
+ *     coordinator? (y/n)". The next inbound from that chat is intercepted
+ *     before any forwarding attempt: "y"/"yes" (case-insensitive, trimmed)
+ *     calls `ensureSystemCoordinator()` and replies "online" or a failure
+ *     message; "n"/"no" replies "leaving offline"; anything else (including
+ *     any coalesced multi-message batch) re-prompts and keeps the chat in
+ *     awaiting state. The y/n message itself is never forwarded.
  *   - `</channel>` substrings are stripped from inbound text/caption before
  *     wrapping (defense against forged closing tags).
  *   - `stop()` aborts the in-flight long-poll via AbortController and waits

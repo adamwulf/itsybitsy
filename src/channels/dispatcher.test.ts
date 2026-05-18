@@ -1207,6 +1207,125 @@ describe("TelegramDispatcher", () => {
     const texts = sendMessageInits.map((init) => JSON.parse(init?.body as string).text);
     expect(texts).toContain("The coordinator is offline. Start the coordinator? (y/n)");
   });
+
+  /* ---------------------------------------------------------------- */
+  /*  Telegram slash-command passthrough (/compact, prefix-tolerant)   */
+  /* ---------------------------------------------------------------- */
+
+  test("inbound '/compact' → raw send + wrapped follow-up note", async () => {
+    mock.enqueueResponse({ ok: true, result: [] }); // probe
+    mock.enqueueResponse({
+      ok: true,
+      result: [update(1, { chat: { id: 100 }, from: { id: 7, username: "alice" }, text: "/compact" })],
+    });
+
+    const d = makeDispatcher();
+    await d.start();
+    await waitFor(() => send.calls.length >= 2, 1_000);
+    await d.stop();
+
+    expect(send.calls.length).toBe(2);
+    expect(send.calls[0]!.message).toBe("/compact");
+    expect(send.calls[0]!.opts?.raw).toBe(true);
+    expect(send.calls[0]!.opts?.fromAgent).toBe(TELEGRAM_SENTINEL);
+    // Follow-up: wrapped, mentions compaction + ib tgsend.
+    expect(send.calls[1]!.message).toContain('<channel source="telegram"');
+    expect(send.calls[1]!.message).toContain("your conversation just compacted");
+    expect(send.calls[1]!.message).toContain("ib tgsend");
+    expect(send.calls[1]!.opts?.raw).toBeFalsy();
+  });
+
+  test("'/compact <args>' (prefix + instructions) → raw send + follow-up", async () => {
+    mock.enqueueResponse({ ok: true, result: [] }); // probe
+    mock.enqueueResponse({
+      ok: true,
+      result: [
+        update(1, {
+          chat: { id: 100 },
+          from: { id: 7, username: "alice" },
+          text: "/compact focus on the API work",
+        }),
+      ],
+    });
+
+    const d = makeDispatcher();
+    await d.start();
+    await waitFor(() => send.calls.length >= 2, 1_000);
+    await d.stop();
+
+    expect(send.calls.length).toBe(2);
+    // Raw send preserves the full trimmed body, args and all.
+    expect(send.calls[0]!.message).toBe("/compact focus on the API work");
+    expect(send.calls[0]!.opts?.raw).toBe(true);
+    expect(send.calls[1]!.message).toContain("your conversation just compacted");
+  });
+
+  test("'/compact' with surrounding whitespace is still recognized", async () => {
+    mock.enqueueResponse({ ok: true, result: [] }); // probe
+    mock.enqueueResponse({
+      ok: true,
+      result: [update(1, { chat: { id: 100 }, from: { id: 7, username: "alice" }, text: " /compact \n" })],
+    });
+
+    const d = makeDispatcher();
+    await d.start();
+    await waitFor(() => send.calls.length >= 2, 1_000);
+    await d.stop();
+
+    expect(send.calls.length).toBe(2);
+    expect(send.calls[0]!.message).toBe("/compact");
+    expect(send.calls[0]!.opts?.raw).toBe(true);
+    expect(send.calls[1]!.message).toContain("your conversation just compacted");
+  });
+
+  test("'/compactfoo' (no separator) is NOT a slash command — wrapped normally", async () => {
+    mock.enqueueResponse({ ok: true, result: [] }); // probe
+    mock.enqueueResponse({
+      ok: true,
+      result: [update(1, { chat: { id: 100 }, from: { id: 7, username: "alice" }, text: "/compactfoo" })],
+    });
+
+    const d = makeDispatcher();
+    await d.start();
+    await waitFor(() => send.calls.length >= 1, 1_000);
+    await new Promise<void>((r) => setTimeout(r, 50));
+    await d.stop();
+
+    expect(send.calls.length).toBe(1);
+    expect(send.calls[0]!.message).toContain('<channel source="telegram"');
+    expect(send.calls[0]!.message).toContain("/compactfoo");
+    expect(send.calls[0]!.opts?.raw).toBeFalsy();
+  });
+
+  test("'/compact' when coordinator offline: retries twice, prompts, no follow-up fired", async () => {
+    mock.enqueueResponse({ ok: true, result: [] }); // probe
+    mock.enqueueResponse({
+      ok: true,
+      result: [update(1, { chat: { id: 100 }, from: { id: 7, username: "alice" }, text: "/compact" })],
+    });
+    mock.enqueueResponse({ ok: true, result: { message_id: 1, chat: { id: 100 } } }); // offline prompt
+
+    send.setQueue([false, false]);
+
+    const d = makeDispatcher();
+    await d.start();
+    await waitFor(() => send.calls.length >= 2, 1_000);
+    await waitFor(() => mock.allUrls().some((u) => u.includes("/sendMessage")), 1_000);
+    await d.stop();
+
+    expect(send.calls.length).toBe(2);
+    expect(send.calls[0]!.message).toBe("/compact");
+    expect(send.calls[0]!.opts?.raw).toBe(true);
+    expect(send.calls[1]!.message).toBe("/compact");
+    expect(send.calls[1]!.opts?.raw).toBe(true);
+    expect(dispSleeps).toContain(2_000);
+
+    const sendMessageInits = mock.allInits().filter(
+      (_, i) => mock.allUrls()[i]!.includes("/sendMessage"),
+    );
+    const texts = sendMessageInits.map((init) => JSON.parse(init?.body as string).text);
+    expect(texts).toContain("The coordinator is offline. Start the coordinator? (y/n)");
+  });
 });
 
 /* ------------------------------------------------------------------ */

@@ -37,14 +37,17 @@
  *   - `</channel>` substrings are stripped from inbound text/caption before
  *     wrapping (defense against forged closing tags).
  *   - Telegram slash-command passthrough: an inbound message whose trimmed
- *     body is exactly `/context` or `/clear` is sent raw (no `<channel>`
+ *     body is exactly `/context`, `/clear`, or starts with `/compact`
+ *     (optionally followed by arguments) is sent raw (no `<channel>`
  *     wrapper, no `[sent by ...]:` prefix) so the coordinator's Claude Code
  *     session recognizes it as a slash command. `/context` is followed by
  *     a wrapped channel-reminder note asking the coordinator to summarize
- *     context usage and reply via `ib tgsend`; `/clear` gets no follow-up
- *     (it's a context reset, not a user question). `/usage` is NOT in this
- *     set — it opens an interactive menu the coordinator can't escape, so
- *     it flows through the normal wrapped path like any other message.
+ *     context usage and reply via `ib tgsend`; `/compact` is followed by
+ *     a wrapped note telling the coordinator to notify the user it's ready
+ *     once compaction completes; `/clear` gets no follow-up (it's a
+ *     context reset, not a user question). `/usage` is NOT in this set —
+ *     it opens an interactive menu the coordinator can't escape, so it
+ *     flows through the normal wrapped path like any other message.
  *     When a batch contains both a slash command and other text from the
  *     same chat, the slash command fires first, then the remaining
  *     messages flow through the normal coalesced path. Slash commands are
@@ -117,17 +120,41 @@ export const TELEGRAM_SENTINEL = "@telegram";
 /** Slash commands that should be forwarded to the coordinator verbatim
  *  (no `<channel>` wrapper, no `[sent by ...]:` prefix). These are Claude
  *  Code slash commands the coordinator session executes directly — wrapping
- *  them would break the recognizer. Match is case-sensitive on the trimmed
- *  body; `/context extra` is NOT a slash command. `/usage` is intentionally
- *  NOT in this set — it opens an interactive menu the coordinator can't
- *  escape, so it flows through the normal wrapped path. */
-const TELEGRAM_SLASH_COMMANDS = new Set(["/context", "/clear"]);
+ *  them would break the recognizer. `/context` and `/clear` match exactly
+ *  on the trimmed body; `/compact` matches on a prefix so users can pass
+ *  optional compaction instructions (e.g. `/compact focus on the API work`).
+ *  `/context extra` is NOT a slash command (exact-match rule). `/usage` is
+ *  intentionally NOT in this set — it opens an interactive menu the
+ *  coordinator can't escape, so it flows through the normal wrapped path. */
+const TELEGRAM_SLASH_EXACT_COMMANDS = new Set(["/context", "/clear"]);
+const TELEGRAM_SLASH_PREFIX_COMMANDS = ["/compact"] as const;
+
+/** Returns the canonical command name (e.g. `/compact`) if the trimmed body
+ *  matches one of the passthrough slash commands, else null. Exact matches
+ *  must equal the command verbatim; prefix matches may be followed by
+ *  whitespace and arbitrary arguments. */
+function matchSlashCommand(trimmed: string): string | null {
+  if (TELEGRAM_SLASH_EXACT_COMMANDS.has(trimmed)) return trimmed;
+  for (const cmd of TELEGRAM_SLASH_PREFIX_COMMANDS) {
+    if (trimmed === cmd) return cmd;
+    if (trimmed.startsWith(cmd + " ") || trimmed.startsWith(cmd + "\t")) return cmd;
+  }
+  return null;
+}
 
 /** Channel-reminder note appended after a raw `/context` send so the
  *  coordinator summarizes context usage back to Telegram. `/clear` gets no
  *  follow-up — it's a context reset, not a user question. */
 const CONTEXT_FOLLOWUP_BODY =
   "[user on telegram requested /context — please summarize context usage and reply via `ib tgsend`]";
+
+/** Channel-reminder note appended after a raw `/compact` send so the
+ *  coordinator surfaces its post-compaction status back to the user. Fires
+ *  after the `/compact` command lands in the coordinator's input — Claude
+ *  Code processes the compact synchronously, so by the time it reads this
+ *  note the conversation has already been compacted. */
+const COMPACT_FOLLOWUP_BODY =
+  "[your conversation just compacted — notify the user via `ib tgsend` with a brief status summary and that you're ready to continue]";
 
 /** Tag on the per-coordinator mutex. Phase 5 only ever has one (the system
  *  coordinator) but the structure allows future per-repo coordinators to
@@ -588,7 +615,7 @@ export class TelegramDispatcher {
   }
 
   /** Send one slash-command message raw to the coordinator. On success, fire
-   *  the `/context` follow-up note (wrapped channel-reminder) so the
+   *  any per-command follow-up note (wrapped channel-reminder) so the
    *  coordinator knows to reply via `ib tgsend`. On failure, apply the same
    *  one-retry-after-2s + offline-prompt logic as `deliver()`. The follow-up
    *  is suppressed when the raw send fails — there's no point telling the
@@ -597,12 +624,17 @@ export class TelegramDispatcher {
     chatId: string,
     message: NormalizedMessage,
   ): Promise<void> {
-    const command = message.body.trim();
-    const sendResult = await sendCtx.fn(command, { fromAgent: TELEGRAM_SENTINEL, raw: true });
+    const trimmed = message.body.trim();
+    const canonical = matchSlashCommand(trimmed);
+    // Defensive — caller already filtered via splitSlashCommands, so this
+    // should never be null here. If it is, fall back to the raw trimmed
+    // body for command identification.
+    const commandName = canonical ?? trimmed;
+    const sendResult = await sendCtx.fn(trimmed, { fromAgent: TELEGRAM_SENTINEL, raw: true });
     let delivered = sendResult.ok;
     if (!sendResult.ok) {
       await sleepCtx.fn(COORDINATOR_OFFLINE_RETRY_MS);
-      const retry = await sendCtx.fn(command, { fromAgent: TELEGRAM_SENTINEL, raw: true });
+      const retry = await sendCtx.fn(trimmed, { fromAgent: TELEGRAM_SENTINEL, raw: true });
       delivered = retry.ok;
       if (!delivered) {
         this.awaitingCoordinatorStart.add(chatId);
@@ -613,15 +645,24 @@ export class TelegramDispatcher {
       }
     }
 
-    // Follow-up: only `/context` gets a reminder note. `/clear` is a context
-    // reset and needs no reply.
-    if (command === "/context") {
+    // Per-command follow-up:
+    //   /context → ask coordinator to summarize context usage
+    //   /compact → ask coordinator to surface post-compaction status
+    //   /clear   → no follow-up (context reset, not a user question)
+    let followupBody: string | null = null;
+    if (commandName === "/context") {
+      followupBody = CONTEXT_FOLLOWUP_BODY;
+    } else if (commandName === "/compact") {
+      followupBody = COMPACT_FOLLOWUP_BODY;
+    }
+
+    if (followupBody !== null) {
       const note: NormalizedMessage = {
         chatId: message.chatId,
         userId: message.userId,
         username: message.username,
         ts: message.ts,
-        body: CONTEXT_FOLLOWUP_BODY,
+        body: followupBody,
         attachmentType: null,
       };
       const wrapped = wrapChannelReminder(chatId, [note]);
@@ -632,12 +673,12 @@ export class TelegramDispatcher {
         const followup = await sendCtx.fn(wrapped, { fromAgent: TELEGRAM_SENTINEL });
         if (!followup.ok) {
           logCtx.fn(
-            `Telegram dispatcher: /context follow-up failed: ${followup.stderr || "send returned ok=false"}`,
+            `Telegram dispatcher: ${commandName} follow-up failed: ${followup.stderr || "send returned ok=false"}`,
           );
         }
       } catch (err) {
         logCtx.fn(
-          `Telegram dispatcher: /context follow-up threw: ${err instanceof Error ? err.message : String(err)}`,
+          `Telegram dispatcher: ${commandName} follow-up threw: ${err instanceof Error ? err.message : String(err)}`,
         );
       }
     }
@@ -815,9 +856,11 @@ export class TelegramDispatcher {
  *  ordinary messages (coalesced + wrapped). Order within each bucket is
  *  preserved so the original interleaving of slash and non-slash messages
  *  is reflected — slashes deliver first via the mutex chain, then the
- *  normals deliver as one block. Match is strict: only the exact, trimmed
- *  body matches `/context` or `/clear`. `/context extra` or `/CONTEXT`
- *  fall through as normals. */
+ *  normals deliver as one block. Match is strict for `/context` and
+ *  `/clear` (exact trimmed body) and prefix-tolerant for `/compact` (the
+ *  command may be followed by whitespace and arbitrary compaction
+ *  instructions). `/CONTEXT` or `/context extra` fall through as normals;
+ *  `/compactfoo` (no separator) also falls through. */
 export function splitSlashCommands(messages: NormalizedMessage[]): {
   slashes: NormalizedMessage[];
   normals: NormalizedMessage[];
@@ -825,7 +868,7 @@ export function splitSlashCommands(messages: NormalizedMessage[]): {
   const slashes: NormalizedMessage[] = [];
   const normals: NormalizedMessage[] = [];
   for (const m of messages) {
-    if (TELEGRAM_SLASH_COMMANDS.has(m.body.trim())) {
+    if (matchSlashCommand(m.body.trim()) !== null) {
       slashes.push(m);
     } else {
       normals.push(m);

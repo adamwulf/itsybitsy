@@ -72,6 +72,17 @@ export type LogFn = (line: string) => void;
 const defaultLog: LogFn = (line) => process.stderr.write(line + "\n");
 export const logCtx = new InjectionContext<LogFn>(defaultLog);
 
+/** Injectable bootstrapper for the system coordinator — used when a user
+ *  confirms 'y' to start the coordinator after an offline-prompt. Defaults to
+ *  the real `ensureSystemCoordinator` from src/coordinator.ts; tests inject a
+ *  stub. */
+export type EnsureCoordinatorFn = () => Promise<string>;
+const defaultEnsureCoordinator: EnsureCoordinatorFn = async () => {
+  const { ensureSystemCoordinator } = await import("../coordinator");
+  return ensureSystemCoordinator();
+};
+export const ensureCoordinatorCtx = new InjectionContext<EnsureCoordinatorFn>(defaultEnsureCoordinator);
+
 /** Coordinator-offline retry delay (ms). Plan: "retry once after 2s." */
 const COORDINATOR_OFFLINE_RETRY_MS = 2_000;
 
@@ -157,6 +168,11 @@ export class TelegramDispatcher {
   /** Last drop-log timestamp per chat_id. Throttles the
    *  "non-allowlisted sender" log line to one per hour per chat. */
   private readonly lastDropLog: Map<string, number> = new Map();
+
+  /** Chat IDs currently awaiting a y/n confirmation to start the system
+   *  coordinator. Set when the coordinator-offline retry path fires the
+   *  prompt; cleared on y/n response or when the user chooses 'n'. */
+  private readonly awaitingCoordinatorStart: Set<string> = new Set();
 
   /** Offset to pass to the next `getUpdates` call. Telegram drops everything
    *  with `update_id < offset`. */
@@ -503,6 +519,15 @@ export class TelegramDispatcher {
    *  attachment-fallback Telegram reply. */
   private async deliver(chatId: string, messages: NormalizedMessage[]): Promise<void> {
     if (messages.length === 0) return;
+
+    // If this chat is awaiting a y/n confirmation to start the coordinator,
+    // intercept the batch before any send attempt — a 'y' reply must not be
+    // forwarded as a normal message.
+    if (this.awaitingCoordinatorStart.has(chatId)) {
+      await this.handleAwaitingConfirmation(chatId, messages);
+      return;
+    }
+
     const wrapped = wrapChannelReminder(chatId, messages);
     const sendResult = await sendCtx.fn(wrapped, { fromAgent: TELEGRAM_SENTINEL });
 
@@ -513,9 +538,12 @@ export class TelegramDispatcher {
       const retry = await sendCtx.fn(wrapped, { fromAgent: TELEGRAM_SENTINEL });
       delivered = retry.ok;
       if (!delivered) {
+        this.awaitingCoordinatorStart.add(chatId);
         await this.replyOnTelegram(
-          "coordinator offline, message dropped — start it with `ib watch`.",
+          "The coordinator is offline. Start the coordinator? (y/n)",
         );
+        // Original message is dropped — do not buffer it.
+        return;
       }
     }
 
@@ -527,6 +555,43 @@ export class TelegramDispatcher {
     if (delivered && messages.some((m) => m.attachmentType !== null)) {
       await this.replyOnTelegram("Received attachment — text only supported");
     }
+  }
+
+  /** Handle a batch arriving on a chat that's in awaiting-confirmation state.
+   *  A single-message batch is checked for y/yes/n/no (case-insensitive,
+   *  trimmed); a coalesced multi-message batch is always treated as
+   *  "anything else" and re-prompts. */
+  private async handleAwaitingConfirmation(
+    chatId: string,
+    messages: NormalizedMessage[],
+  ): Promise<void> {
+    const single = messages.length === 1 ? messages[0]! : null;
+    const answer = single ? single.body.trim().toLowerCase() : null;
+
+    if (answer === "y" || answer === "yes") {
+      this.awaitingCoordinatorStart.delete(chatId);
+      try {
+        await ensureCoordinatorCtx.fn();
+        await this.replyOnTelegram("The coordinator is now online.");
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        await this.replyOnTelegram(`Failed to start coordinator: ${msg}`);
+      }
+      return;
+    }
+
+    if (answer === "n" || answer === "no") {
+      this.awaitingCoordinatorStart.delete(chatId);
+      await this.replyOnTelegram("Okay, leaving the coordinator offline.");
+      return;
+    }
+
+    // Anything else (including coalesced multi-message batches): drop and
+    // re-prompt; keep chat in awaiting state.
+    this.awaitingCoordinatorStart.add(chatId);
+    await this.replyOnTelegram(
+      "The coordinator is offline. Start the coordinator? (y/n)",
+    );
   }
 
   /** Append work to the named mutex chain and await it. The chain stays alive

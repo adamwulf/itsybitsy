@@ -12,6 +12,7 @@ import {
   sleepCtx,
   nowCtx,
   logCtx,
+  ensureCoordinatorCtx,
 } from "./dispatcher";
 import type { SendToCoordinatorFn } from "./dispatcher";
 import {
@@ -250,6 +251,7 @@ describe("TelegramDispatcher", () => {
     sleepCtx.reset();
     nowCtx.reset();
     logCtx.reset();
+    ensureCoordinatorCtx.reset();
   });
 
   /** Build a dispatcher pre-wired with a TelegramClient and our mock fetch. */
@@ -405,7 +407,7 @@ describe("TelegramDispatcher", () => {
       (init, i) => mock.allUrls()[i]!.includes("/sendMessage"),
     );
     const body = JSON.parse(sendMessageInit?.body as string);
-    expect(body.text).toContain("coordinator offline");
+    expect(body.text).toBe("The coordinator is offline. Start the coordinator? (y/n)");
     expect(body.chat_id).toBe("100");
   });
 
@@ -681,6 +683,317 @@ describe("TelegramDispatcher", () => {
 
     expect(send.calls.length).toBe(1);
     expect(send.calls[0]!.message).toContain("hi");
+  });
+
+  /* ---------------------------------------------------------------- */
+  /*  Coordinator-offline y/n confirmation flow                         */
+  /* ---------------------------------------------------------------- */
+
+  test("after offline prompt: 'y' starts coordinator, replies 'online', does NOT forward", async () => {
+    // Batch 1: triggers offline prompt (both send attempts fail).
+    // Batch 2: user replies 'y'.
+    mock.enqueueResponse({ ok: true, result: [] }); // probe
+    mock.enqueueResponse({
+      ok: true,
+      result: [update(1, { chat: { id: 100 }, from: { id: 7, username: "alice" }, text: "hi" })],
+    });
+    mock.enqueueResponse({ ok: true, result: { message_id: 1, chat: { id: 100 } } }); // offline prompt reply
+    mock.enqueueResponse({
+      ok: true,
+      result: [update(2, { chat: { id: 100 }, from: { id: 7, username: "alice" }, text: "y" })],
+    });
+    mock.enqueueResponse({ ok: true, result: { message_id: 2, chat: { id: 100 } } }); // "online" reply
+
+    send.setQueue([false, false]); // both initial attempts fail
+    let ensureCalls = 0;
+    ensureCoordinatorCtx.set(async () => {
+      ensureCalls += 1;
+      return "ib-coordinator";
+    });
+
+    const d = makeDispatcher();
+    await d.start();
+    // Wait for offline prompt and 'y' processing.
+    await waitFor(() => ensureCalls >= 1, 1_000);
+    await waitFor(
+      () => mock.allUrls().filter((u) => u.includes("/sendMessage")).length >= 2,
+      1_000,
+    );
+    await d.stop();
+
+    expect(ensureCalls).toBe(1);
+    // The 'y' message was NOT forwarded — only the original 2 failed attempts.
+    expect(send.calls.length).toBe(2);
+
+    const sendMessageInits = mock.allInits().filter(
+      (_, i) => mock.allUrls()[i]!.includes("/sendMessage"),
+    );
+    const texts = sendMessageInits.map((init) => JSON.parse(init?.body as string).text);
+    expect(texts).toContain("The coordinator is offline. Start the coordinator? (y/n)");
+    expect(texts).toContain("The coordinator is now online.");
+  });
+
+  test("after offline prompt: 'yes' / 'Y' / 'YES' / ' yes ' all confirm (case-insensitive, trimmed)", async () => {
+    for (const variant of ["yes", "Y", "YES", " yes "]) {
+      // Fresh mocks per variant via re-init.
+      mock = makeMockFetch();
+      clientFetchCtx.set(mock.fn);
+      send = makeSendSpy();
+      sendCtx.set(send.fn);
+      let ensureCalls = 0;
+      ensureCoordinatorCtx.set(async () => { ensureCalls += 1; return "ib-coordinator"; });
+
+      mock.enqueueResponse({ ok: true, result: [] }); // probe
+      mock.enqueueResponse({
+        ok: true,
+        result: [update(1, { chat: { id: 100 }, from: { id: 7, username: "alice" }, text: "hi" })],
+      });
+      mock.enqueueResponse({ ok: true, result: { message_id: 1, chat: { id: 100 } } }); // offline prompt
+      mock.enqueueResponse({
+        ok: true,
+        result: [update(2, { chat: { id: 100 }, from: { id: 7, username: "alice" }, text: variant })],
+      });
+      mock.enqueueResponse({ ok: true, result: { message_id: 2, chat: { id: 100 } } });
+
+      send.setQueue([false, false]);
+
+      const d = makeDispatcher();
+      await d.start();
+      await waitFor(() => ensureCalls >= 1, 1_000);
+      await d.stop();
+
+      expect(ensureCalls).toBe(1);
+      // The variant message was NOT forwarded.
+      expect(send.calls.length).toBe(2);
+    }
+  });
+
+  test("after offline prompt: 'n' / 'no' / 'N' replies 'leaving offline' and does NOT call ensure", async () => {
+    for (const variant of ["n", "no", "N"]) {
+      mock = makeMockFetch();
+      clientFetchCtx.set(mock.fn);
+      send = makeSendSpy();
+      sendCtx.set(send.fn);
+      let ensureCalls = 0;
+      ensureCoordinatorCtx.set(async () => { ensureCalls += 1; return "ib-coordinator"; });
+
+      mock.enqueueResponse({ ok: true, result: [] }); // probe
+      mock.enqueueResponse({
+        ok: true,
+        result: [update(1, { chat: { id: 100 }, from: { id: 7, username: "alice" }, text: "hi" })],
+      });
+      mock.enqueueResponse({ ok: true, result: { message_id: 1, chat: { id: 100 } } });
+      mock.enqueueResponse({
+        ok: true,
+        result: [update(2, { chat: { id: 100 }, from: { id: 7, username: "alice" }, text: variant })],
+      });
+      mock.enqueueResponse({ ok: true, result: { message_id: 2, chat: { id: 100 } } });
+
+      send.setQueue([false, false]);
+
+      const d = makeDispatcher();
+      await d.start();
+      await waitFor(
+        () => mock.allUrls().filter((u) => u.includes("/sendMessage")).length >= 2,
+        1_000,
+      );
+      await d.stop();
+
+      expect(ensureCalls).toBe(0);
+      // The 'n' message was NOT forwarded.
+      expect(send.calls.length).toBe(2);
+
+      const sendMessageInits = mock.allInits().filter(
+        (_, i) => mock.allUrls()[i]!.includes("/sendMessage"),
+      );
+      const texts = sendMessageInits.map((init) => JSON.parse(init?.body as string).text);
+      expect(texts).toContain("Okay, leaving the coordinator offline.");
+    }
+  });
+
+  test("after offline prompt: random message re-sends prompt and keeps awaiting state", async () => {
+    mock.enqueueResponse({ ok: true, result: [] }); // probe
+    mock.enqueueResponse({
+      ok: true,
+      result: [update(1, { chat: { id: 100 }, from: { id: 7, username: "alice" }, text: "hi" })],
+    });
+    mock.enqueueResponse({ ok: true, result: { message_id: 1, chat: { id: 100 } } }); // first prompt
+    mock.enqueueResponse({
+      ok: true,
+      result: [update(2, { chat: { id: 100 }, from: { id: 7, username: "alice" }, text: "hello there" })],
+    });
+    mock.enqueueResponse({ ok: true, result: { message_id: 2, chat: { id: 100 } } }); // re-prompt
+    mock.enqueueResponse({
+      ok: true,
+      result: [update(3, { chat: { id: 100 }, from: { id: 7, username: "alice" }, text: "y" })],
+    });
+    mock.enqueueResponse({ ok: true, result: { message_id: 3, chat: { id: 100 } } }); // "online" reply
+
+    send.setQueue([false, false]);
+    let ensureCalls = 0;
+    ensureCoordinatorCtx.set(async () => { ensureCalls += 1; return "ib-coordinator"; });
+
+    const d = makeDispatcher();
+    await d.start();
+    await waitFor(() => ensureCalls >= 1, 1_000);
+    await d.stop();
+
+    // The random 'hello there' was NOT forwarded — still only 2 forward attempts.
+    expect(send.calls.length).toBe(2);
+
+    const sendMessageInits = mock.allInits().filter(
+      (_, i) => mock.allUrls()[i]!.includes("/sendMessage"),
+    );
+    const texts = sendMessageInits.map((init) => JSON.parse(init?.body as string).text);
+    // Two offline prompts (initial + re-prompt after 'hello there'), then 'online' after 'y'.
+    const promptCount = texts.filter((t) => t === "The coordinator is offline. Start the coordinator? (y/n)").length;
+    expect(promptCount).toBe(2);
+    expect(texts).toContain("The coordinator is now online.");
+  });
+
+  test("after offline prompt: ensureSystemCoordinator throwing produces 'Failed to start' reply", async () => {
+    mock.enqueueResponse({ ok: true, result: [] }); // probe
+    mock.enqueueResponse({
+      ok: true,
+      result: [update(1, { chat: { id: 100 }, from: { id: 7, username: "alice" }, text: "hi" })],
+    });
+    mock.enqueueResponse({ ok: true, result: { message_id: 1, chat: { id: 100 } } });
+    mock.enqueueResponse({
+      ok: true,
+      result: [update(2, { chat: { id: 100 }, from: { id: 7, username: "alice" }, text: "y" })],
+    });
+    mock.enqueueResponse({ ok: true, result: { message_id: 2, chat: { id: 100 } } });
+
+    send.setQueue([false, false]);
+    ensureCoordinatorCtx.set(async () => {
+      throw new Error("tmux not installed");
+    });
+
+    const d = makeDispatcher();
+    await d.start();
+    await waitFor(
+      () => mock.allUrls().filter((u) => u.includes("/sendMessage")).length >= 2,
+      1_000,
+    );
+    await d.stop();
+
+    const sendMessageInits = mock.allInits().filter(
+      (_, i) => mock.allUrls()[i]!.includes("/sendMessage"),
+    );
+    const texts = sendMessageInits.map((init) => JSON.parse(init?.body as string).text);
+    expect(texts).toContain("Failed to start coordinator: tmux not installed");
+  });
+
+  test("awaiting state is per-chat: 'y' from chat A does not affect chat B", async () => {
+    // Both chats hit offline prompt, then chat A replies 'y' (starts coordinator),
+    // then chat B sends "still here?" — must re-prompt (not forward), proving B
+    // is still in awaiting state independently of A.
+    //
+    // NB: replyOnTelegram uses the dispatcher's configured chatId (not the
+    // inbound message's chat_id), so we can't distinguish outgoing replies by
+    // recipient. We verify per-chat independence via:
+    //   - ensureCoordinator is called exactly once (chat A's 'y'), not twice
+    //   - chat B's "still here?" is NOT forwarded to the coordinator (it
+    //     would have been if B's awaiting state had been wrongly cleared)
+    mock.enqueueResponse({ ok: true, result: [] }); // probe
+    // Batch 1: both chats inbound (both fail to forward → both get offline prompts).
+    mock.enqueueResponse({
+      ok: true,
+      result: [
+        update(1, { chat: { id: 100 }, from: { id: 7, username: "alice" }, text: "hi-A" }),
+        update(2, { chat: { id: 200 }, from: { id: 8, username: "bob" }, text: "hi-B" }),
+      ],
+    });
+    mock.enqueueResponse({ ok: true, result: { message_id: 1, chat: { id: 100 } } }); // prompt to A
+    mock.enqueueResponse({ ok: true, result: { message_id: 2, chat: { id: 100 } } }); // prompt to B
+    // Batch 2: chat A says 'y'.
+    mock.enqueueResponse({
+      ok: true,
+      result: [update(3, { chat: { id: 100 }, from: { id: 7, username: "alice" }, text: "y" })],
+    });
+    mock.enqueueResponse({ ok: true, result: { message_id: 3, chat: { id: 100 } } }); // online reply
+    // Batch 3: chat B sends "still here?" — should be re-prompted (still in awaiting state).
+    mock.enqueueResponse({
+      ok: true,
+      result: [update(4, { chat: { id: 200 }, from: { id: 8, username: "bob" }, text: "still here?" })],
+    });
+    mock.enqueueResponse({ ok: true, result: { message_id: 4, chat: { id: 100 } } }); // re-prompt
+
+    // 4 fails for the initial batch-1 (A "hi-A" + retry, B "hi-B" + retry).
+    // After that, no further forwards happen because both chats are in
+    // awaiting state.
+    send.setQueue([false, false, false, false]);
+    let ensureCalls = 0;
+    ensureCoordinatorCtx.set(async () => { ensureCalls += 1; return "ib-coordinator"; });
+
+    const d = makeDispatcher({ allowedChatIds: ["100", "200"] });
+    await d.start();
+    await waitFor(() => ensureCalls >= 1, 1_000);
+    // Wait for 4 outgoing replies: prompt-A, prompt-B, "online" (A's y), re-prompt (B's "still here?")
+    await waitFor(
+      () => mock.allUrls().filter((u) => u.includes("/sendMessage")).length >= 4,
+      1_000,
+    );
+    await d.stop();
+
+    // Coordinator started exactly once (A's y), proving B's awaiting state
+    // didn't somehow re-trigger ensure when "still here?" arrived.
+    expect(ensureCalls).toBe(1);
+    // Only the initial 2 forwards happened (each with 2s retry → 4 attempts).
+    // The 'y' (chat A), "still here?" (chat B) replies were NOT forwarded.
+    expect(send.calls.length).toBe(4);
+
+    const sendMessageInits = mock.allInits().filter(
+      (_, i) => mock.allUrls()[i]!.includes("/sendMessage"),
+    );
+    const texts = sendMessageInits.map((init) => JSON.parse(init?.body as string).text);
+    const promptCount = texts.filter((t) => t === "The coordinator is offline. Start the coordinator? (y/n)").length;
+    // 3 prompts: one per chat in batch 1, plus the re-prompt for B's "still here?".
+    expect(promptCount).toBe(3);
+    expect(texts).toContain("The coordinator is now online.");
+  });
+
+  test("coalesced multi-message batch in awaiting state: re-prompts even if first message is 'y'", async () => {
+    mock.enqueueResponse({ ok: true, result: [] }); // probe
+    mock.enqueueResponse({
+      ok: true,
+      result: [update(1, { chat: { id: 100 }, from: { id: 7, username: "alice" }, text: "hi" })],
+    });
+    mock.enqueueResponse({ ok: true, result: { message_id: 1, chat: { id: 100 } } }); // first prompt
+    // Two messages coalesced — should be treated as "anything else" even
+    // though the first one is "y".
+    mock.enqueueResponse({
+      ok: true,
+      result: [
+        update(2, { chat: { id: 100 }, from: { id: 7, username: "alice" }, text: "y" }),
+        update(3, { chat: { id: 100 }, from: { id: 7, username: "alice" }, text: "uh wait" }),
+      ],
+    });
+    mock.enqueueResponse({ ok: true, result: { message_id: 2, chat: { id: 100 } } }); // re-prompt
+
+    send.setQueue([false, false]);
+    let ensureCalls = 0;
+    ensureCoordinatorCtx.set(async () => { ensureCalls += 1; return "ib-coordinator"; });
+
+    const d = makeDispatcher();
+    await d.start();
+    await waitFor(
+      () => mock.allUrls().filter((u) => u.includes("/sendMessage")).length >= 2,
+      1_000,
+    );
+    await d.stop();
+
+    // ensureSystemCoordinator was NOT called — coalesced batch is not y/n.
+    expect(ensureCalls).toBe(0);
+    // No additional forward of the coalesced batch (still 2 from original 'hi').
+    expect(send.calls.length).toBe(2);
+
+    const sendMessageInits = mock.allInits().filter(
+      (_, i) => mock.allUrls()[i]!.includes("/sendMessage"),
+    );
+    const texts = sendMessageInits.map((init) => JSON.parse(init?.body as string).text);
+    const promptCount = texts.filter((t) => t === "The coordinator is offline. Start the coordinator? (y/n)").length;
+    expect(promptCount).toBe(2); // initial prompt + re-prompt
   });
 });
 

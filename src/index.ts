@@ -1557,6 +1557,14 @@ async function main() {
       await withHookLogging("hook-permission-denied", agentDir, stdin, () => hookPermissionDenied(id, stdin));
       break;
     }
+    case "hook-mark-running": {
+      const id = args[1];
+      if (!id) { console.error("Usage: ib hook-mark-running <agent-id>"); process.exit(1); }
+      if (id !== SYSTEM_AGENT_ID && !isValidAgentId(id)) { console.error("Invalid agent ID"); process.exit(1); }
+      const { hookMarkRunning } = await import("./hooks/mark-running");
+      await hookMarkRunning();
+      break;
+    }
     case "init-types":
     case "init-agent-types": {
       const { initAgentTypes } = await import("./agent-types");

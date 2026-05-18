@@ -15,7 +15,6 @@ describe("buildHooksBlock — byte-identical with prior inline literals", () => 
         { matcher: "*", hooks: [{ type: "command", command: "ib hook-check-path @system" }] },
         { matcher: "Task|Agent|TaskCreate|Bash|AskUserQuestion", hooks: [{ type: "command", command: "ib hooks intercept-task" }] },
       ],
-      PostToolUse: [{ matcher: "*", hooks: [{ type: "command", command: "ib hook-mark-running @system" }] }],
       PermissionRequest: [{ matcher: "*", hooks: [{ type: "command", command: "ib hook-permission-denied @system" }] }],
       UserPromptSubmit: [{ hooks: [{ type: "command", command: "ib hook-mark-running @system" }] }],
       SessionStart: [{ hooks: [{ type: "command", command: "ib hooks session-start @system" }] }],
@@ -39,7 +38,6 @@ describe("buildHooksBlock — byte-identical with prior inline literals", () => 
         { matcher: "*", hooks: [{ type: "command", command: `ib hook-check-path ${id}` }] },
         { matcher: "Task|Agent|TaskCreate|Bash|AskUserQuestion", hooks: [{ type: "command", command: "ib hooks intercept-task" }] },
       ],
-      PostToolUse: [{ matcher: "*", hooks: [{ type: "command", command: `ib hook-mark-running ${id}` }] }],
       UserPromptSubmit: [{ hooks: [{ type: "command", command: `ib hook-mark-running ${id}` }] }],
       SessionStart: [{ hooks: [{ type: "command", command: `ib hooks session-start ${id}` }] }],
     };
@@ -61,7 +59,6 @@ describe("buildHooksBlock — byte-identical with prior inline literals", () => 
       PreToolUse: [
         { matcher: "*", hooks: [{ type: "command", command: `ib hook-check-path ${id}` }] },
       ],
-      PostToolUse: [{ matcher: "*", hooks: [{ type: "command", command: `ib hook-mark-running ${id}` }] }],
       UserPromptSubmit: [{ hooks: [{ type: "command", command: `ib hook-mark-running ${id}` }] }],
       SessionStart: [{ hooks: [{ type: "command", command: "ib hooks session-start" }] }],
     };
@@ -84,7 +81,6 @@ describe("buildHooksBlock — byte-identical with prior inline literals", () => 
         { matcher: "*", hooks: [{ type: "command", command: `ib hook-check-path ${id}` }] },
         { matcher: "Task|Agent|TaskCreate|AskUserQuestion", hooks: [{ type: "command", command: "ib hooks intercept-task" }] },
       ],
-      PostToolUse: [{ matcher: "*", hooks: [{ type: "command", command: `ib hook-mark-running ${id}` }] }],
       UserPromptSubmit: [{ hooks: [{ type: "command", command: `ib hook-mark-running ${id}` }] }],
       SessionStart: [{ hooks: [{ type: "command", command: "ib hooks session-start" }] }],
     };

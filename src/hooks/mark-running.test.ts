@@ -5,8 +5,6 @@ import { tmpdir } from "os";
 
 describe("hookMarkRunning", () => {
   let tempDir: string;
-  let repoRoot: string;
-  let agentId: string;
   let agentDir: string;
   let worktreeCwd: string;
   let originalCwd: string;
@@ -14,9 +12,8 @@ describe("hookMarkRunning", () => {
   beforeEach(async () => {
     originalCwd = process.cwd();
     tempDir = await mkdtemp(join(tmpdir(), "mark-running-test-"));
-    repoRoot = tempDir;
-    agentId = "agent-test1234";
-    agentDir = join(repoRoot, ".ittybitty", "agents", agentId);
+    const agentId = "agent-test1234";
+    agentDir = join(tempDir, ".ittybitty", "agents", agentId);
     worktreeCwd = join(agentDir, "repo");
     await mkdir(worktreeCwd, { recursive: true });
   });
@@ -26,10 +23,10 @@ describe("hookMarkRunning", () => {
     await rm(tempDir, { recursive: true, force: true });
   });
 
-  test("writes state='running' to meta.json", async () => {
+  test("writes state='running' when current state is 'waiting'", async () => {
     await Bun.write(
       join(agentDir, "meta.json"),
-      JSON.stringify({ agentId, state: "waiting" }),
+      JSON.stringify({ state: "waiting" }),
     );
     process.chdir(worktreeCwd);
 
@@ -40,7 +37,7 @@ describe("hookMarkRunning", () => {
     expect(meta.state).toBe("running");
   });
 
-  test("is a no-op when meta.json is missing", async () => {
+  test("no-op when meta.json is missing", async () => {
     process.chdir(worktreeCwd);
 
     const { hookMarkRunning } = await import("./mark-running");
@@ -48,5 +45,33 @@ describe("hookMarkRunning", () => {
 
     const exists = await Bun.file(join(agentDir, "meta.json")).exists();
     expect(exists).toBe(false);
+  });
+
+  test("guard: keeps state='complete' (does not resurrect terminal state)", async () => {
+    await Bun.write(
+      join(agentDir, "meta.json"),
+      JSON.stringify({ state: "complete" }),
+    );
+    process.chdir(worktreeCwd);
+
+    const { hookMarkRunning } = await import("./mark-running");
+    await hookMarkRunning();
+
+    const meta = JSON.parse(await readFile(join(agentDir, "meta.json"), "utf-8"));
+    expect(meta.state).toBe("complete");
+  });
+
+  test("guard: keeps state='stopped' (does not resurrect terminal state)", async () => {
+    await Bun.write(
+      join(agentDir, "meta.json"),
+      JSON.stringify({ state: "stopped" }),
+    );
+    process.chdir(worktreeCwd);
+
+    const { hookMarkRunning } = await import("./mark-running");
+    await hookMarkRunning();
+
+    const meta = JSON.parse(await readFile(join(agentDir, "meta.json"), "utf-8"));
+    expect(meta.state).toBe("stopped");
   });
 });

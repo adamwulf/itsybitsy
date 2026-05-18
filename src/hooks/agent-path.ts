@@ -11,6 +11,7 @@ import { homedir } from "os";
 import { realpath, stat } from "fs/promises";
 import { realpathSync } from "fs";
 import { logAgent } from "../agent-lifecycle";
+import { writeAgentState } from "../agents";
 import { isValidAgentId } from "../validation";
 import { checkGitDirectoryFlags, resolveAgentFromCwd, SYSTEM_AGENT_ID } from "./shared";
 // Single source of truth for the encoding — see src/auto-compact.ts
@@ -648,6 +649,12 @@ export async function hookCheckPath(agentId: string, rawStdin?: string): Promise
         }
       }
     } catch { /* ignore */ }
+
+    // PreToolUse fires before every tool call — flip state to 'running' so
+    // tmux send-keys messages from other agents (e.g. notify_manager) and
+    // background-tool completions don't leave the agent stuck at 'waiting'.
+    // Skipped for @system because there is no meta.json to write to.
+    await writeAgentState(agentDir, "running");
   }
 
   // Read settings.local.json for allow list (works for both @system and worktree agents)

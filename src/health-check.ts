@@ -42,6 +42,7 @@ const AGENT_HOOK_PATTERNS = [
   /ib\s+hook-check-path\s+(\S+)/,
   /ib\s+hook-status\s+(\S+)/,
   /ib\s+hook-permission-denied\s+(\S+)/,
+  /ib\s+hook-mark-running\s+(\S+)/,
 ];
 
 /** Read and parse a JSON file, returning null on failure */

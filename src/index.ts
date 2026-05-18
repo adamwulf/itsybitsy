@@ -1017,42 +1017,78 @@ async function main() {
     }
     case "send": {
       const repos = await listRepos();
-      // Parse --from flag before determining target and message
+      // Parse --from and -f/--file flags before determining target and message
       const sendArgs = args.slice(1);
       let fromAgent: string | undefined;
+      let filePath: string | undefined;
       const filteredSendArgs: string[] = [];
       for (let i = 0; i < sendArgs.length; i++) {
         if (sendArgs[i] === "--from") {
           if (!sendArgs[i + 1]) { console.error("Error: --from requires a value"); process.exit(1); }
           fromAgent = sendArgs[++i];
+        } else if (sendArgs[i] === "-f" || sendArgs[i] === "--file") {
+          if (!sendArgs[i + 1]) { console.error(`Error: ${sendArgs[i]} requires a path`); process.exit(1); }
+          filePath = sendArgs[++i];
         } else {
           filteredSendArgs.push(sendArgs[i]!);
         }
       }
 
+      const usage = "Usage: ib send [--from <id>] <target> [-f <path>] [message...]\n  -f, --file <path>  Read message body from a file";
+
       if (!filteredSendArgs[0]) {
-        console.error("Usage: ib send [--from <id>] <target> <message...>");
+        console.error(usage);
         console.error("Targets: @system, @coordinator, @<repo>, @<repo>/<agent-id>, or <agent-id>");
         process.exit(1);
       }
 
       const target = filteredSendArgs[0]!;
+      const inlineMessage = filteredSendArgs.slice(1).join(" ");
+
+      // Mutex: -f and inline message are mutually exclusive.
+      if (filePath && inlineMessage) {
+        console.error("Error: cannot combine -f/--file with an inline message");
+        process.exit(1);
+      }
+
+      // Read file upfront so file errors are reported before agent lookup.
+      let fileContent: string | undefined;
+      if (filePath) {
+        try {
+          const f = Bun.file(filePath);
+          if (!(await f.exists())) {
+            console.error(`Error: file not found: ${filePath}`);
+            process.exit(1);
+          }
+          fileContent = (await f.text()).trim();
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.error(`Error: could not read file ${filePath}: ${msg}`);
+          process.exit(1);
+        }
+      }
+
+      // Resolve message content per precedence: inline > file > stdin.
+      const resolveMessageBody = async (): Promise<string> => {
+        if (inlineMessage) return inlineMessage;
+        if (fileContent !== undefined) return fileContent;
+        if (!process.stdin.isTTY) {
+          const chunks: string[] = [];
+          for await (const chunk of process.stdin) {
+            chunks.push(typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk));
+          }
+          return chunks.join("").trim();
+        }
+        return "";
+      };
+
       const { agent: resolvedAgent, isSystemCoordinator } = await resolveTarget(target, repos);
 
       if (isSystemCoordinator) {
-        let coordMessage = filteredSendArgs.slice(1).join(" ");
+        const coordMessage = await resolveMessageBody();
         if (!coordMessage) {
-          if (!process.stdin.isTTY) {
-            const chunks: string[] = [];
-            for await (const chunk of process.stdin) {
-              chunks.push(typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk));
-            }
-            coordMessage = chunks.join("").trim();
-          }
-          if (!coordMessage) {
-            console.error("Usage: ib send [--from <id>] @system <message...>");
-            process.exit(1);
-          }
+          console.error(usage);
+          process.exit(1);
         }
         const result = await sendToSystemCoordinator(coordMessage, fromAgent ? { fromAgent } : undefined);
         await printAndExit(result);
@@ -1063,20 +1099,10 @@ async function main() {
         process.exit(1);
       }
 
-      let message = filteredSendArgs.slice(1).join(" ");
+      const message = await resolveMessageBody();
       if (!message) {
-        // If stdin is piped (not TTY), read message from stdin
-        if (!process.stdin.isTTY) {
-          const chunks: string[] = [];
-          for await (const chunk of process.stdin) {
-            chunks.push(typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk));
-          }
-          message = chunks.join("").trim();
-        }
-        if (!message) {
-          console.error("Usage: ib send [--from <id>] <target> <message...>");
-          process.exit(1);
-        }
+        console.error(usage);
+        process.exit(1);
       }
       const { sendMessage } = await import("./ib-commands");
       await printAndExit(await sendMessage(resolvedAgent, message, fromAgent ? { fromAgent } : undefined));

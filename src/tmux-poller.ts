@@ -250,8 +250,10 @@ export async function captureTmuxOutput(tmuxSession: string, lines = 5000): Prom
  */
 export async function sendTmuxKeys(tmuxSession: string, text: string): Promise<boolean> {
   try {
+    // `--` stops tmux flag parsing so text beginning with `-` isn't mistaken
+    // for an option.
     const sendProc = spawnCtx.runner(
-      ["tmux", "send-keys", "-t", tmuxSession, "-l", text],
+      ["tmux", "send-keys", "-t", tmuxSession, "-l", "--", text],
       { stdout: "pipe", stderr: "pipe" },
     );
     const sendExit = await sendProc.exited;

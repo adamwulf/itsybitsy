@@ -597,7 +597,9 @@ ${qAbsExitScript}
   if (nudgeDelayMs > 0) await Bun.sleep(nudgeDelayMs);
 
   const nudgePrompt = "Resume your work, or end with 'WAITING' or 'I HAVE COMPLETED THE GOAL' as your final line.";
-  await nukeResumeSpawnCtx.run(["tmux", "send-keys", "-t", tmuxSession, "-l", nudgePrompt]);
+  // `--` stops tmux flag parsing so a payload that begins with `-` (e.g. YAML
+  // frontmatter `---`) isn't mistaken for an option.
+  await nukeResumeSpawnCtx.run(["tmux", "send-keys", "-t", tmuxSession, "-l", "--", nudgePrompt]);
 
   const nudgeSleepMs = resumeDelayOverrideMs !== null ? resumeDelayOverrideMs : 100;
   if (nudgeSleepMs > 0) await Bun.sleep(nudgeSleepMs);
@@ -1505,8 +1507,10 @@ export async function sendMessage(
   const interChunkSleepMs = sendDelayOverrideMs !== null ? sendDelayOverrideMs : INTER_CHUNK_SLEEP_MS;
   for (let i = 0; i < fullMessage.length; i += CHUNK_SIZE) {
     const chunk = fullMessage.slice(i, i + CHUNK_SIZE);
+    // `--` stops tmux flag parsing so a chunk that begins with `-` (e.g. YAML
+    // frontmatter `---`) isn't mistaken for an option.
     const chunkProc = sendSpawnCtx.runner(
-      ["tmux", "send-keys", "-t", tmuxSession, "-l", chunk],
+      ["tmux", "send-keys", "-t", tmuxSession, "-l", "--", chunk],
       { stdout: "pipe", stderr: "pipe" }
     );
     const chunkStderr = await new Response(chunkProc.stderr).text();

@@ -86,7 +86,7 @@ describe("ib-commands", () => {
       // Should have: has-session, send-keys (message), send-keys (Enter)
       expect(spawnCalls.length).toBe(3);
       expect(spawnCalls[0]).toEqual(["tmux", "has-session", "-t", `tmux-agent-abc`]);
-      expect(spawnCalls[1]).toEqual(["tmux", "send-keys", "-t", `tmux-agent-abc`, "-l", "hello world"]);
+      expect(spawnCalls[1]).toEqual(["tmux", "send-keys", "-t", `tmux-agent-abc`, "-l", "--", "hello world"]);
       expect(spawnCalls[2]).toEqual(["tmux", "send-keys", "-t", `tmux-agent-abc`, "Enter"]);
     });
 
@@ -115,10 +115,10 @@ describe("ib-commands", () => {
 
       // The send-keys call should have the prefixed message
       const sendKeysCall = spawnCalls.find(
-        (c) => c[0] === "tmux" && c[1] === "send-keys" && c.length === 6 && c[4] === "-l"
+        (c) => c[0] === "tmux" && c[1] === "send-keys" && c.length === 7 && c[4] === "-l" && c[5] === "--"
       );
       expect(sendKeysCall).toBeDefined();
-      expect(sendKeysCall![5]).toBe("[sent by agent agent-sender]: hello");
+      expect(sendKeysCall![6]).toBe("[sent by agent agent-sender]: hello");
     });
 
     test("auto-stamps @system when cwd is the system coordinator home", async () => {
@@ -130,10 +130,10 @@ describe("ib-commands", () => {
         await sendMessage(agent, "ping", { cwd: coordHome });
 
         const sendKeysCall = spawnCalls.find(
-          (c) => c[0] === "tmux" && c[1] === "send-keys" && c.length === 6 && c[4] === "-l"
+          (c) => c[0] === "tmux" && c[1] === "send-keys" && c.length === 7 && c[4] === "-l" && c[5] === "--"
         );
         expect(sendKeysCall).toBeDefined();
-        expect(sendKeysCall![5]).toBe("[sent by @system]: ping");
+        expect(sendKeysCall![6]).toBe("[sent by @system]: ping");
       } finally {
         resetCoordinatorHome();
         await rm(coordHome, { recursive: true, force: true });
@@ -149,10 +149,10 @@ describe("ib-commands", () => {
         await sendMessage(agent, "ping", { cwd: join(coordHome, "subdir") });
 
         const sendKeysCall = spawnCalls.find(
-          (c) => c[0] === "tmux" && c[1] === "send-keys" && c.length === 6 && c[4] === "-l"
+          (c) => c[0] === "tmux" && c[1] === "send-keys" && c.length === 7 && c[4] === "-l" && c[5] === "--"
         );
         expect(sendKeysCall).toBeDefined();
-        expect(sendKeysCall![5]).toBe("[sent by @system]: ping");
+        expect(sendKeysCall![6]).toBe("[sent by @system]: ping");
       } finally {
         resetCoordinatorHome();
         await rm(coordHome, { recursive: true, force: true });
@@ -164,10 +164,10 @@ describe("ib-commands", () => {
       await sendMessage(agent, "ping", { fromAgent: "@system", cwd: "/" });
 
       const sendKeysCall = spawnCalls.find(
-        (c) => c[0] === "tmux" && c[1] === "send-keys" && c.length === 6 && c[4] === "-l"
+        (c) => c[0] === "tmux" && c[1] === "send-keys" && c.length === 7 && c[4] === "-l" && c[5] === "--"
       );
       expect(sendKeysCall).toBeDefined();
-      expect(sendKeysCall![5]).toBe("[sent by @system]: ping");
+      expect(sendKeysCall![6]).toBe("[sent by @system]: ping");
     });
 
     test("agent worktree match wins over coordinator home match", async () => {
@@ -191,11 +191,11 @@ describe("ib-commands", () => {
         await sendMessage(agent, "ping", { cwd: senderCwd });
 
         const sendKeysCall = spawnCalls.find(
-          (c) => c[0] === "tmux" && c[1] === "send-keys" && c.length === 6 && c[4] === "-l"
+          (c) => c[0] === "tmux" && c[1] === "send-keys" && c.length === 7 && c[4] === "-l" && c[5] === "--"
         );
         expect(sendKeysCall).toBeDefined();
         // Should be agent-sender (worktree branch), NOT @system (coord-home branch)
-        expect(sendKeysCall![5]).toBe("[sent by agent agent-sender]: ping");
+        expect(sendKeysCall![6]).toBe("[sent by agent agent-sender]: ping");
       } finally {
         resetCoordinatorHome();
       }
@@ -259,7 +259,7 @@ describe("ib-commands", () => {
         (c) => c[0] === "tmux" && c[1] === "send-keys" && c.includes("-l")
       );
       expect(sendKeysCalls.length).toBe(1);
-      expect(sendKeysCalls[0]![5]).toBe(msg);
+      expect(sendKeysCalls[0]![6]).toBe(msg);
       // Last call must be Enter
       const lastCall = spawnCalls[spawnCalls.length - 1]!;
       expect(lastCall).toEqual(["tmux", "send-keys", "-t", "tmux-agent-abc", "Enter"]);
@@ -280,9 +280,9 @@ describe("ib-commands", () => {
         (c) => c[0] === "tmux" && c[1] === "send-keys" && c.includes("-l")
       );
       expect(sendKeysCalls.length).toBe(3);
-      expect(sendKeysCalls[0]![5]).toBe(part1);
-      expect(sendKeysCalls[1]![5]).toBe(part2);
-      expect(sendKeysCalls[2]![5]).toBe(part3);
+      expect(sendKeysCalls[0]![6]).toBe(part1);
+      expect(sendKeysCalls[1]![6]).toBe(part2);
+      expect(sendKeysCalls[2]![6]).toBe(part3);
 
       // Final call must be the Enter, after all chunks.
       const lastCall = spawnCalls[spawnCalls.length - 1]!;
@@ -295,11 +295,11 @@ describe("ib-commands", () => {
       await sendMessage(agent, "/context", { fromAgent: "@telegram", raw: true, cwd: "/" });
 
       const sendKeysCall = spawnCalls.find(
-        (c) => c[0] === "tmux" && c[1] === "send-keys" && c.length === 6 && c[4] === "-l"
+        (c) => c[0] === "tmux" && c[1] === "send-keys" && c.length === 7 && c[4] === "-l" && c[5] === "--"
       );
       expect(sendKeysCall).toBeDefined();
       // Message goes verbatim — no [sent by @telegram]: prefix.
-      expect(sendKeysCall![5]).toBe("/context");
+      expect(sendKeysCall![6]).toBe("/context");
     });
 
     test("raw=true logs recipient as 'Received raw message' (no sender attribution)", async () => {
@@ -333,9 +333,9 @@ describe("ib-commands", () => {
       await sendMessage(agent, "hello", { fromAgent: "agent-sender" });
 
       const sendKeysCall = spawnCalls.find(
-        (c) => c[0] === "tmux" && c[1] === "send-keys" && c.length === 6 && c[4] === "-l"
+        (c) => c[0] === "tmux" && c[1] === "send-keys" && c.length === 7 && c[4] === "-l" && c[5] === "--"
       );
-      expect(sendKeysCall![5]).toBe("[sent by agent agent-sender]: hello");
+      expect(sendKeysCall![6]).toBe("[sent by agent agent-sender]: hello");
     });
 
     test("returns error and does not send Enter when a chunk fails mid-stream", async () => {
@@ -371,6 +371,27 @@ describe("ib-commands", () => {
         (c) => c[0] === "tmux" && c[1] === "send-keys" && c.includes("-l")
       );
       expect(chunkCalls.length).toBe(2);
+    });
+
+    test("places `--` immediately before the payload so dash-leading content is not parsed as a tmux flag", async () => {
+      const agent = makeAgent("agent-abc", tempDir);
+      // YAML frontmatter starts with `---`. Without `--`, tmux send-keys
+      // parses the leading dashes as a flag and fails with
+      // `command send-keys: invalid flag -`.
+      const dashLeading = "---\ntitle: foo\n---\nbody";
+      const result = await sendMessage(agent, dashLeading, { cwd: "/" });
+
+      expect(result.ok).toBe(true);
+      const sendKeysCall = spawnCalls.find(
+        (c) => c[0] === "tmux" && c[1] === "send-keys" && c.includes("-l")
+      );
+      expect(sendKeysCall).toBeDefined();
+      // argv shape must be [tmux, send-keys, -t, <session>, -l, --, <payload>].
+      // The `--` MUST sit between `-l` and the payload — that is what stops
+      // tmux's flag parser from consuming the leading `-` in `---`.
+      expect(sendKeysCall![4]).toBe("-l");
+      expect(sendKeysCall![5]).toBe("--");
+      expect(sendKeysCall![6]).toBe(dashLeading);
     });
   });
 

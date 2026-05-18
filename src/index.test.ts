@@ -235,6 +235,97 @@ describe("CLI arg parsing", () => {
     expect(exitCode).toBe(1);
   });
 
+  test("send -f without path exits with error", async () => {
+    const { stderr, exitCode } = await runCli(["send", "agent-x", "-f"]);
+    expect(stderr).toContain("-f requires a path");
+    expect(exitCode).toBe(1);
+  });
+
+  test("send --file without path exits with error", async () => {
+    const { stderr, exitCode } = await runCli(["send", "agent-x", "--file"]);
+    expect(stderr).toContain("--file requires a path");
+    expect(exitCode).toBe(1);
+  });
+
+  test("send -f <missing-path> exits with file-not-found error", async () => {
+    const missing = "/tmp/ib-send-file-nonexistent-" + Date.now() + ".md";
+    const { stderr, exitCode } = await runCli(["send", "agent-x", "-f", missing]);
+    expect(stderr).toContain("file not found");
+    expect(stderr).toContain(missing);
+    expect(exitCode).toBe(1);
+  });
+
+  test("send -f combined with inline message is a usage error", async () => {
+    const tmpFile = `/tmp/ib-send-file-mutex-${Date.now()}.txt`;
+    await Bun.write(tmpFile, "from file");
+    try {
+      const { stderr, exitCode } = await runCli(["send", "agent-x", "-f", tmpFile, "inline"]);
+      expect(stderr).toContain("cannot combine -f/--file with an inline message");
+      expect(exitCode).toBe(1);
+    } finally {
+      await Bun.file(tmpFile).delete().catch(() => {});
+    }
+  });
+
+  test("send --file combined with inline message is a usage error", async () => {
+    const tmpFile = `/tmp/ib-send-file-mutex2-${Date.now()}.txt`;
+    await Bun.write(tmpFile, "from file");
+    try {
+      const { stderr, exitCode } = await runCli(["send", "agent-x", "--file", tmpFile, "inline"]);
+      expect(stderr).toContain("cannot combine -f/--file with an inline message");
+      expect(exitCode).toBe(1);
+    } finally {
+      await Bun.file(tmpFile).delete().catch(() => {});
+    }
+  });
+
+  test("send -f <path> with nonexistent agent reaches agent lookup (file content resolved)", async () => {
+    // Verifies that -f reads the file and proceeds past arg parsing.
+    // Agent lookup will fail (no repos), which proves the file content
+    // was successfully resolved into the message body.
+    const tmpFile = `/tmp/ib-send-file-ok-${Date.now()}.txt`;
+    await Bun.write(tmpFile, "hello from file");
+    try {
+      const { stderr, exitCode } = await runCli(["send", "agent-x", "-f", tmpFile]);
+      // Should reach agent resolution (not bail on file read or arg parsing)
+      expect(stderr).toContain("Agent not found");
+      expect(exitCode).toBe(1);
+    } finally {
+      await Bun.file(tmpFile).delete().catch(() => {});
+    }
+  });
+
+  test("send --file <path> works as an alias for -f", async () => {
+    const tmpFile = `/tmp/ib-send-file-alias-${Date.now()}.txt`;
+    await Bun.write(tmpFile, "hello from file");
+    try {
+      const { stderr, exitCode } = await runCli(["send", "agent-x", "--file", tmpFile]);
+      expect(stderr).toContain("Agent not found");
+      expect(exitCode).toBe(1);
+    } finally {
+      await Bun.file(tmpFile).delete().catch(() => {});
+    }
+  });
+
+  test("send usage string lists -f, --file flag", async () => {
+    const { stderr, exitCode } = await runCli(["send"]);
+    expect(stderr).toContain("-f");
+    expect(stderr).toContain("--file");
+    expect(stderr).toContain("Read message body from a file");
+    expect(exitCode).toBe(1);
+  });
+
+  test("send -f file-not-found is reported before agent lookup", async () => {
+    // File-error reporting must happen BEFORE agent resolution — the user
+    // typing `ib send agent-x -f /tmp/missing.md` should see the file error,
+    // not a misleading "Agent not found" message.
+    const missing = `/tmp/ib-send-file-order-${Date.now()}.md`;
+    const { stderr, exitCode } = await runCli(["send", "agent-x", "-f", missing]);
+    expect(stderr).toContain("file not found");
+    expect(stderr).not.toContain("Agent not found");
+    expect(exitCode).toBe(1);
+  });
+
   test("kill strips --force from args (agent lookup fails first)", async () => {
     // kill filters out --force before checking for unknown args.
     // Without a valid agent, requireAgent exits before the unknown-args check.
@@ -592,6 +683,7 @@ describe("sendToSystemCoordinator", () => {
       "-t",
       IB_COORDINATOR_SESSION,
       "-l",
+      "--",
       "hello world",
     ]);
     expect(spawnCalls[2]).toEqual(["tmux", "send-keys", "-t", IB_COORDINATOR_SESSION, "Enter"]);
@@ -607,12 +699,13 @@ describe("sendToSystemCoordinator", () => {
       (c) =>
         c[0] === "tmux" &&
         c[1] === "send-keys" &&
-        c.length === 6 &&
+        c.length === 7 &&
         c[3] === IB_COORDINATOR_SESSION &&
-        c[4] === "-l",
+        c[4] === "-l" &&
+        c[5] === "--",
     );
     expect(sendKeysLiteral).toBeDefined();
-    expect(sendKeysLiteral![5]).toBe("[sent by agent agent-xyz]: ping");
+    expect(sendKeysLiteral![6]).toBe("[sent by agent agent-xyz]: ping");
   });
 
   test("does not prepend a prefix when fromAgent is omitted", async () => {
@@ -624,12 +717,13 @@ describe("sendToSystemCoordinator", () => {
       (c) =>
         c[0] === "tmux" &&
         c[1] === "send-keys" &&
-        c.length === 6 &&
+        c.length === 7 &&
         c[3] === IB_COORDINATOR_SESSION &&
-        c[4] === "-l",
+        c[4] === "-l" &&
+        c[5] === "--",
     );
     expect(sendKeysLiteral).toBeDefined();
-    expect(sendKeysLiteral![5]).toBe("plain text");
+    expect(sendKeysLiteral![6]).toBe("plain text");
   });
 });
 

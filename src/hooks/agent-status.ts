@@ -534,8 +534,10 @@ export async function executeResultActions(
       result.action === "remind_children")
   ) {
     if (tmuxSession) {
+      // `--` stops tmux flag parsing so a message beginning with `-` isn't
+      // mistaken for an option.
       const sendProc = Bun.spawn(
-        ["tmux", "send-keys", "-t", tmuxSession, "-l", result.message],
+        ["tmux", "send-keys", "-t", tmuxSession, "-l", "--", result.message],
         { stdout: "pipe", stderr: "pipe" },
       );
       await sendProc.exited;
@@ -571,8 +573,10 @@ export async function executeResultActions(
           console.log(result.state);
           return `invalid_manager_session`;
         }
+        // `--` stops tmux flag parsing so a message beginning with `-` isn't
+        // mistaken for an option.
         const sendProc = Bun.spawn(
-          ["tmux", "send-keys", "-t", managerSession, "-l", result.message],
+          ["tmux", "send-keys", "-t", managerSession, "-l", "--", result.message],
           { stdout: "pipe", stderr: "pipe" },
         );
         await sendProc.exited;

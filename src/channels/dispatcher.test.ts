@@ -997,14 +997,14 @@ describe("TelegramDispatcher", () => {
   });
 
   /* ---------------------------------------------------------------- */
-  /*  Telegram slash-command passthrough (/usage, /clear)              */
+  /*  Telegram slash-command passthrough (/context, /clear)            */
   /* ---------------------------------------------------------------- */
 
-  test("inbound '/usage' → raw send + wrapped follow-up note", async () => {
+  test("inbound '/context' → raw send + wrapped follow-up note", async () => {
     mock.enqueueResponse({ ok: true, result: [] }); // probe
     mock.enqueueResponse({
       ok: true,
-      result: [update(1, { chat: { id: 100 }, from: { id: 7, username: "alice" }, text: "/usage" })],
+      result: [update(1, { chat: { id: 100 }, from: { id: 7, username: "alice" }, text: "/context" })],
     });
 
     const d = makeDispatcher();
@@ -1013,13 +1013,13 @@ describe("TelegramDispatcher", () => {
     await d.stop();
 
     expect(send.calls.length).toBe(2);
-    // First call: raw /usage, no wrapper, raw=true.
-    expect(send.calls[0]!.message).toBe("/usage");
+    // First call: raw /context, no wrapper, raw=true.
+    expect(send.calls[0]!.message).toBe("/context");
     expect(send.calls[0]!.opts?.raw).toBe(true);
     expect(send.calls[0]!.opts?.fromAgent).toBe(TELEGRAM_SENTINEL);
     // Second call: wrapped follow-up note, raw falsy.
     expect(send.calls[1]!.message).toContain('<channel source="telegram"');
-    expect(send.calls[1]!.message).toContain("[user on telegram requested /usage");
+    expect(send.calls[1]!.message).toContain("[user on telegram requested /context");
     expect(send.calls[1]!.message).toContain("ib tgsend");
     expect(send.calls[1]!.opts?.raw).toBeFalsy();
     expect(send.calls[1]!.opts?.fromAgent).toBe(TELEGRAM_SENTINEL);
@@ -1045,30 +1045,14 @@ describe("TelegramDispatcher", () => {
     expect(send.calls[0]!.opts?.fromAgent).toBe(TELEGRAM_SENTINEL);
   });
 
-  test("'/usage' with surrounding whitespace is still recognized as a slash command", async () => {
+  test("inbound '/usage' → wrapped normally, NOT a slash command", async () => {
+    // /usage opens an interactive menu the coordinator can't escape, so it
+    // must NOT be in the passthrough set — flow it through the normal
+    // wrapped path so the coordinator sees it as user chatter.
     mock.enqueueResponse({ ok: true, result: [] }); // probe
     mock.enqueueResponse({
       ok: true,
-      result: [update(1, { chat: { id: 100 }, from: { id: 7, username: "alice" }, text: " /usage \n" })],
-    });
-
-    const d = makeDispatcher();
-    await d.start();
-    await waitFor(() => send.calls.length >= 2, 1_000);
-    await d.stop();
-
-    expect(send.calls.length).toBe(2);
-    // Raw send uses the trimmed body, not the whitespace-padded original.
-    expect(send.calls[0]!.message).toBe("/usage");
-    expect(send.calls[0]!.opts?.raw).toBe(true);
-    expect(send.calls[1]!.message).toContain("[user on telegram requested /usage");
-  });
-
-  test("'/usage extra' (slash + arg) is NOT a slash command — wrapped normally", async () => {
-    mock.enqueueResponse({ ok: true, result: [] }); // probe
-    mock.enqueueResponse({
-      ok: true,
-      result: [update(1, { chat: { id: 100 }, from: { id: 7, username: "alice" }, text: "/usage extra" })],
+      result: [update(1, { chat: { id: 100 }, from: { id: 7, username: "alice" }, text: "/usage" })],
     });
 
     const d = makeDispatcher();
@@ -1080,16 +1064,55 @@ describe("TelegramDispatcher", () => {
     expect(send.calls.length).toBe(1);
     // Wrapped, not raw.
     expect(send.calls[0]!.message).toContain('<channel source="telegram"');
-    expect(send.calls[0]!.message).toContain("/usage extra");
+    expect(send.calls[0]!.message).toContain("/usage");
     expect(send.calls[0]!.opts?.raw).toBeFalsy();
   });
 
-  test("mixed batch: '/usage' + normal text → 3 sends (raw, follow-up, normal), slashes first", async () => {
+  test("'/context' with surrounding whitespace is still recognized as a slash command", async () => {
+    mock.enqueueResponse({ ok: true, result: [] }); // probe
+    mock.enqueueResponse({
+      ok: true,
+      result: [update(1, { chat: { id: 100 }, from: { id: 7, username: "alice" }, text: " /context \n" })],
+    });
+
+    const d = makeDispatcher();
+    await d.start();
+    await waitFor(() => send.calls.length >= 2, 1_000);
+    await d.stop();
+
+    expect(send.calls.length).toBe(2);
+    // Raw send uses the trimmed body, not the whitespace-padded original.
+    expect(send.calls[0]!.message).toBe("/context");
+    expect(send.calls[0]!.opts?.raw).toBe(true);
+    expect(send.calls[1]!.message).toContain("[user on telegram requested /context");
+  });
+
+  test("'/context extra' (slash + arg) is NOT a slash command — wrapped normally", async () => {
+    mock.enqueueResponse({ ok: true, result: [] }); // probe
+    mock.enqueueResponse({
+      ok: true,
+      result: [update(1, { chat: { id: 100 }, from: { id: 7, username: "alice" }, text: "/context extra" })],
+    });
+
+    const d = makeDispatcher();
+    await d.start();
+    await waitFor(() => send.calls.length >= 1, 1_000);
+    await new Promise<void>((r) => setTimeout(r, 50));
+    await d.stop();
+
+    expect(send.calls.length).toBe(1);
+    // Wrapped, not raw.
+    expect(send.calls[0]!.message).toContain('<channel source="telegram"');
+    expect(send.calls[0]!.message).toContain("/context extra");
+    expect(send.calls[0]!.opts?.raw).toBeFalsy();
+  });
+
+  test("mixed batch: '/context' + normal text → 3 sends (raw, follow-up, normal), slashes first", async () => {
     mock.enqueueResponse({ ok: true, result: [] }); // probe
     mock.enqueueResponse({
       ok: true,
       result: [
-        update(1, { chat: { id: 100 }, from: { id: 7, username: "alice" }, text: "/usage" }),
+        update(1, { chat: { id: 100 }, from: { id: 7, username: "alice" }, text: "/context" }),
         update(2, { chat: { id: 100 }, from: { id: 7, username: "alice" }, text: "btw hello" }),
       ],
     });
@@ -1101,20 +1124,20 @@ describe("TelegramDispatcher", () => {
 
     expect(send.calls.length).toBe(3);
     // Slash and follow-up arrive before the normal wrapped block.
-    expect(send.calls[0]!.message).toBe("/usage");
+    expect(send.calls[0]!.message).toBe("/context");
     expect(send.calls[0]!.opts?.raw).toBe(true);
-    expect(send.calls[1]!.message).toContain("[user on telegram requested /usage");
+    expect(send.calls[1]!.message).toContain("[user on telegram requested /context");
     expect(send.calls[1]!.opts?.raw).toBeFalsy();
     expect(send.calls[2]!.message).toContain('<channel source="telegram"');
     expect(send.calls[2]!.message).toContain("btw hello");
     expect(send.calls[2]!.opts?.raw).toBeFalsy();
     // The normal block must NOT contain the slash command.
-    expect(send.calls[2]!.message).not.toContain("/usage");
+    expect(send.calls[2]!.message).not.toContain("/context");
   });
 
-  test("'/usage' during awaiting-confirmation state: re-prompts, no raw send", async () => {
+  test("'/context' during awaiting-confirmation state: re-prompts, no raw send", async () => {
     // Batch 1: triggers offline prompt (both attempts fail).
-    // Batch 2: user sends '/usage' while in awaiting state — should re-prompt.
+    // Batch 2: user sends '/context' while in awaiting state — should re-prompt.
     mock.enqueueResponse({ ok: true, result: [] }); // probe
     mock.enqueueResponse({
       ok: true,
@@ -1123,7 +1146,7 @@ describe("TelegramDispatcher", () => {
     mock.enqueueResponse({ ok: true, result: { message_id: 1, chat: { id: 100 } } }); // first prompt
     mock.enqueueResponse({
       ok: true,
-      result: [update(2, { chat: { id: 100 }, from: { id: 7, username: "alice" }, text: "/usage" })],
+      result: [update(2, { chat: { id: 100 }, from: { id: 7, username: "alice" }, text: "/context" })],
     });
     mock.enqueueResponse({ ok: true, result: { message_id: 2, chat: { id: 100 } } }); // re-prompt
 
@@ -1137,7 +1160,7 @@ describe("TelegramDispatcher", () => {
     );
     await d.stop();
 
-    // Only the original 2 failing forward attempts — /usage was NOT routed
+    // Only the original 2 failing forward attempts — /context was NOT routed
     // through the raw passthrough.
     expect(send.calls.length).toBe(2);
     // No call ever had raw=true.
@@ -1151,11 +1174,11 @@ describe("TelegramDispatcher", () => {
     expect(promptCount).toBe(2); // initial prompt + re-prompt
   });
 
-  test("'/usage' when coordinator offline: retries twice, prompts, no follow-up fired", async () => {
+  test("'/context' when coordinator offline: retries twice, prompts, no follow-up fired", async () => {
     mock.enqueueResponse({ ok: true, result: [] }); // probe
     mock.enqueueResponse({
       ok: true,
-      result: [update(1, { chat: { id: 100 }, from: { id: 7, username: "alice" }, text: "/usage" })],
+      result: [update(1, { chat: { id: 100 }, from: { id: 7, username: "alice" }, text: "/context" })],
     });
     mock.enqueueResponse({ ok: true, result: { message_id: 1, chat: { id: 100 } } }); // offline prompt
 
@@ -1171,9 +1194,9 @@ describe("TelegramDispatcher", () => {
 
     // Exactly two raw attempts — no follow-up call.
     expect(send.calls.length).toBe(2);
-    expect(send.calls[0]!.message).toBe("/usage");
+    expect(send.calls[0]!.message).toBe("/context");
     expect(send.calls[0]!.opts?.raw).toBe(true);
-    expect(send.calls[1]!.message).toBe("/usage");
+    expect(send.calls[1]!.message).toBe("/context");
     expect(send.calls[1]!.opts?.raw).toBe(true);
     // The 2s retry slept.
     expect(dispSleeps).toContain(2_000);

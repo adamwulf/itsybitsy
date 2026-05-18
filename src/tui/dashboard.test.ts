@@ -20,9 +20,9 @@ import { assertDialog } from "./test-helpers";
 function mockSendSpawnRunner(calls: { args: string[]; cwd: string }[]) {
   setSendSpawnRunner((cmd: string[]) => {
     // Record "send" calls as ib-runner-style entries for test compatibility
-    if (cmd[0] === "tmux" && cmd[1] === "send-keys" && cmd.length === 6 && cmd[4] === "-l") {
+    if (cmd[0] === "tmux" && cmd[1] === "send-keys" && cmd.length === 7 && cmd[4] === "-l" && cmd[5] === "--") {
       // This is the actual message send — extract message
-      calls.push({ args: ["send", "TARGET", cmd[5]!], cwd: "" });
+      calls.push({ args: ["send", "TARGET", cmd[6]!], cwd: "" });
     }
     return makeSpawnResult();
   });
@@ -503,10 +503,10 @@ describe("DashboardComponent dialog and action handlers", () => {
     sentMessages = [];
     setSendSpawnRunner((cmd: string[]) => {
       // Track the actual message send-keys calls (not Enter or has-session)
-      if (cmd[0] === "tmux" && cmd[1] === "send-keys" && cmd.length === 6 && cmd[4] === "-l") {
+      if (cmd[0] === "tmux" && cmd[1] === "send-keys" && cmd.length === 7 && cmd[4] === "-l" && cmd[5] === "--") {
         // Extract target session and message
         const target = cmd[3]!;
-        sentMessages.push({ target, message: cmd[5]! });
+        sentMessages.push({ target, message: cmd[6]! });
       }
       return makeSpawnResult();
     });
@@ -1492,8 +1492,8 @@ describe("Cross-repo send (E key)", () => {
   function setupSendMock() {
     sentMessages = [];
     setSendSpawnRunner((cmd: string[]) => {
-      if (cmd[0] === "tmux" && cmd[1] === "send-keys" && cmd.length === 6 && cmd[4] === "-l") {
-        sentMessages.push({ target: cmd[3]!, message: cmd[5]! });
+      if (cmd[0] === "tmux" && cmd[1] === "send-keys" && cmd.length === 7 && cmd[4] === "-l" && cmd[5] === "--") {
+        sentMessages.push({ target: cmd[3]!, message: cmd[6]! });
       }
       return makeSpawnResult();
     });
@@ -1788,8 +1788,8 @@ describe("DashboardComponent right pane and navigation features", () => {
   function setupSendMock() {
     sentMessages = [];
     setSendSpawnRunner((cmd: string[]) => {
-      if (cmd[0] === "tmux" && cmd[1] === "send-keys" && cmd.length === 6 && cmd[4] === "-l") {
-        sentMessages.push({ target: cmd[3]!, message: cmd[5]! });
+      if (cmd[0] === "tmux" && cmd[1] === "send-keys" && cmd.length === 7 && cmd[4] === "-l" && cmd[5] === "--") {
+        sentMessages.push({ target: cmd[3]!, message: cmd[6]! });
       }
       return makeSpawnResult();
     });

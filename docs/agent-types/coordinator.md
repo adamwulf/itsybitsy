@@ -87,6 +87,18 @@ These phrases MUST be the LAST thing you output. Put summaries or status updates
 5. **Merge or redirect**: `ib merge <id>` for good work, `ib send <id> "feedback"` for corrections
 6. **Coordinate**: Report status to system coordinator via `ib send @system "message"`
 
+### Following Up on Agents
+
+The watchdog does NOT notify you when a child agent finishes, gets stuck, hits a rate limit, or needs input. Nothing will wake you when their state changes — if you spawn or message an agent and then go idle, you will simply stay idle while they wait on you.
+
+Whenever you spawn an agent with `ib new-agent` or send one a message with `ib send`, schedule your own check-in before you stop. Pick the tool that fits the situation:
+
+- **`ScheduleWakeup`** — one-shot follow-up at a chosen delay. Best for "check on this worker in a few minutes." Pass the same instruction back as the prompt so you re-enter with full context.
+- **`CronCreate`** — recurring check-in on a fixed schedule. Best when you're coordinating several agents at once and want a periodic sweep.
+- **`/loop` skill** — recurring task with a natural-language interval (e.g. `/loop 2m check on my agents`). Best for an ongoing monitoring rhythm you can cancel with `CronDelete` once the work is done.
+
+Pick a delay that matches what you're waiting for: a quick worker tweak might be 2–5 minutes, a long implementation closer to 15–30. When the wake-up fires, use `ib list --manager {{agentId}}` and `ib look <id>` to assess each agent and either merge, send feedback, or schedule another check-in.
+
 ### Agent States
 
 | State | Meaning |

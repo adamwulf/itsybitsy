@@ -100,9 +100,53 @@ async function readClearedMarker(): Promise<number> {
   }
 }
 
-/** Write the cleared-marker so subsequent resumes ignore prior transcripts. */
+/**
+ * Scan the coordinator transcript dir for the newest `*.jsonl` mtime. Returns
+ * 0 when the dir is missing, empty, or contains no valid-id transcripts.
+ * Shared between `writeClearedMarker` (to bump the marker past any post-kill
+ * flush) and `findLatestCoordinatorTranscriptId` (to pick the resume target).
+ */
+async function findNewestTranscriptMtime(): Promise<number> {
+  const dir = coordinatorTranscriptDir();
+  try {
+    const { readdir, stat } = await import("fs/promises");
+    const names = await readdir(dir);
+    let newest = 0;
+    for (const name of names) {
+      if (!name.endsWith(".jsonl")) continue;
+      const id = name.slice(0, -".jsonl".length);
+      if (!isValidSessionId(id)) continue;
+      try {
+        const s = await stat(join(dir, name));
+        if (s.mtimeMs > newest) newest = s.mtimeMs;
+      } catch { /* skip */ }
+    }
+    return newest;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Write the cleared-marker so subsequent resumes ignore prior transcripts.
+ *
+ * Subtle: `tmux kill-session` returns as soon as tmux destroys the pane, but
+ * the SIGHUP cascade gives Claude ~500–700ms to flush a final batch of lines
+ * to its transcript JSONL. If we stamped the marker with `Date.now()`
+ * immediately, that post-kill flush would write a transcript whose `mtimeMs`
+ * is *later* than the marker — and `findLatestCoordinatorTranscriptId` would
+ * happily resume it on the next launch (the exact race that broke /restart
+ * and /respawn).
+ *
+ * Fix: sleep ~1s to let the flush complete, then set the marker to
+ * `max(now, newestTranscriptMtime + 1)` so any straggler is guaranteed to be
+ * <= the marker and therefore filtered out on resume.
+ */
 async function writeClearedMarker(): Promise<void> {
-  await Bun.write(clearedMarkerPath(), String(Date.now()) + "\n");
+  await sleepFn(1000);
+  const newestMtime = await findNewestTranscriptMtime();
+  const stamp = Math.max(Date.now(), newestMtime + 1);
+  await Bun.write(clearedMarkerPath(), String(stamp) + "\n");
 }
 
 /**

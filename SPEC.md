@@ -1469,7 +1469,7 @@ The system coordinator's `~/.itsybitsy/.claude/settings.local.json` includes fou
 - `PreToolUse` → `ib hook-check-path @system` (path isolation — `~/.itsybitsy/` is its own worktree, so cross-agent and main-repo blocks are no-ops; the allow-list check still runs)
 - `PreToolUse` → `ib hooks intercept-task` (intercepts Task/Agent/TaskCreate, denies AskUserQuestion, blocks shell metacharacters and `--output` in coordinator Bash commands per §12.2.4)
 - `PermissionRequest` → `ib hook-permission-denied @system` (logs denials to `~/.itsybitsy/agent.log`)
-- `SessionStart` → `ib hooks session-start @system` (returns empty `additionalContext`; the prompt is delivered as a positional arg on fresh launch and lives in the prior transcript on resume — see §12.1.5)
+- `SessionStart` → `ib hooks session-start @system` (delivers `system.md`'s markdown body, prefixed with `_all.md`, via `additionalContext` on every session start — see §12.1.5)
 
 The Stop hook is intentionally **not** installed — the system coordinator's state detection lives in `detectSystemCoordinatorState()` (§12.1.6), which polls tmux output and does not need a Claude-driven idle signal. The `@system` sentinel is the system coordinator's identity at every hook callsite; it is not a valid agent ID per `isValidAgentId()` (it begins with `@`), but the three hook entry points (`hook-check-path`, `hook-permission-denied`, and the optional `agentIdArg` of `hooks session-start`) accept the literal `@system` because it is hardcoded into the coordinator's settings file by `writeCoordinatorFiles()` and is not user input. `ib hook-status` does not accept `@system` — the Stop hook is omitted, so the path is unreachable.
 

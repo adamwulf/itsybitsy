@@ -645,41 +645,67 @@ describe("hookSessionStart — stale 'creating' state correction", () => {
 describe("hookSessionStart with @system", () => {
   let captured: string;
   let originalWrite: typeof process.stdout.write;
+  let tempHome: string;
+  let typesDir: string;
+  const originalHome = process.env.HOME;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     captured = "";
     originalWrite = process.stdout.write.bind(process.stdout);
     process.stdout.write = ((chunk: unknown) => {
       captured += typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk as Uint8Array);
       return true;
     }) as typeof process.stdout.write;
+
+    tempHome = await mkdtemp(join(tmpdir(), "itsybitsy-sys-hook-"));
+    process.env.HOME = tempHome;
+    typesDir = join(tempHome, ".itsybitsy", "agent-types");
+    await mkdir(typesDir, { recursive: true });
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     process.stdout.write = originalWrite;
+    process.env.HOME = originalHome;
+    await rm(tempHome, { recursive: true, force: true });
   });
 
-  test("returns empty additionalContext for @system (prompt is delivered as positional arg)", async () => {
-    // The system coordinator's prompt is delivered to claude as a positional
-    // arg by ensureSystemCoordinatorImpl (so it appears as the first user
-    // message in the conversation transcript). The SessionStart hook still
-    // fires for @system but must NOT re-deliver the prompt — that would
-    // double-deliver on fresh launch and stale-duplicate on resume. There
-    // is no meta.json or worktree-derived role context for @system, so the
-    // hook returns empty additionalContext.
+  test("injects system.md body via additionalContext, merged with _all.md, skipping _non_coordinator.md", async () => {
+    // The system coordinator boots like every other agent type: the SessionStart
+    // hook delivers `system.md`'s markdown body via additionalContext. `_all.md`
+    // is prepended (applies to every agent); `_non_coordinator.md` is NOT
+    // (the system coordinator is its own type, and that layer covers
+    // commit-message etiquette and other things @system has no use for).
+    await Bun.write(
+      join(typesDir, "system.md"),
+      "---\nname: system\ndescription: System coordinator\nspawnable: false\n---\nSYSTEM_BODY_MARKER",
+    );
+    await Bun.write(
+      join(typesDir, "_all.md"),
+      "---\nname: _all\nspawnable: false\n---\nALL_LAYER_MARKER",
+    );
+    await Bun.write(
+      join(typesDir, "_non_coordinator.md"),
+      "---\nname: _non_coordinator\nspawnable: false\n---\nNON_COORDINATOR_LAYER_MARKER",
+    );
+
     const stdin = JSON.stringify({ cwd: "/tmp" });
     await hookSessionStart(stdin, "@system");
 
     const output = JSON.parse(captured);
     const ctx: string = output.hookSpecificOutput.additionalContext;
     expect(output.hookSpecificOutput.hookEventName).toBe("SessionStart");
-    expect(ctx).toBe("");
-    // Structural guards: even if a future change adds role context for
-    // @system, it MUST NOT re-introduce the SYSTEM_COORDINATOR_PROMPT body
-    // (which is delivered as a positional arg to claude). Doing so would
-    // resurrect the double-prompt bug fixed in 968db36.
-    expect(ctx).not.toContain("itsybitsy system coordinator");
-    expect(ctx).not.toContain("ib send <agent-id>");
+
+    // The body is wrapped in <ittybitty>.
+    expect(ctx).toContain("<ittybitty>");
+    expect(ctx).toContain("</ittybitty>");
+
+    // system.md body and _all.md content present; _non_coordinator.md absent.
+    expect(ctx).toContain("SYSTEM_BODY_MARKER");
+    expect(ctx).toContain("ALL_LAYER_MARKER");
+    expect(ctx).not.toContain("NON_COORDINATOR_LAYER_MARKER");
+
+    // _all.md prefix appears before system.md body.
+    expect(ctx.indexOf("ALL_LAYER_MARKER")).toBeLessThan(ctx.indexOf("SYSTEM_BODY_MARKER"));
   });
 });
 

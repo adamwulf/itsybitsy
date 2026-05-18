@@ -220,10 +220,14 @@ export async function generateInstructions(ctx: SessionContext): Promise<string>
     // If the type definition has a markdown body, use it as the full template
     // The <ittybitty> wrapper is added by the code so users don't need to include it
     if (agentType.markdownBody) {
-      // Prepend prefix layer bodies: _all (always) + _non_coordinator (when not coordinator)
+      // Prepend prefix layer bodies: _all (always) + _non_coordinator (when not
+      // coordinator and not system). The system coordinator is its own type
+      // ("system") — it gets _all but skips _non_coordinator (whose body covers
+      // commit-message etiquette and other things irrelevant to @system, which
+      // has no Write/Edit/git access).
       const allPrefix = await loadPrefixLayerBody("_all", ctx);
       const nonCoordPrefix =
-        ctx.agentType !== "coordinator"
+        ctx.agentType !== "coordinator" && ctx.agentType !== "system"
           ? await loadPrefixLayerBody("_non_coordinator", ctx)
           : "";
 
@@ -685,19 +689,27 @@ export async function hookSessionStart(rawStdin?: string, agentIdArg?: string): 
 
   const cwd: string = (data.cwd as string) ?? process.cwd();
 
-  // System coordinator: the prompt is delivered as a positional arg to claude
-  // by ensureSystemCoordinatorImpl (so it appears as the first user message
-  // in the conversation, visible when the user attaches to the tmux session).
-  // The hook fires on every session start (fresh and resumed), so injecting
-  // the prompt here would double-deliver on fresh launches. Resumes already
-  // have the prompt in the prior transcript. There is no meta.json or
-  // worktree-derived role context to add for @system, so return empty
-  // additionalContext.
+  // System coordinator: deliver the prompt via additionalContext, same as
+  // every other agent type. @system has no worktree, no meta.json, and no
+  // manager/spawner — build a SessionContext inline with agentType: "system"
+  // and let generateInstructions load `system.md` (merged with `_all.md`,
+  // skipping `_non_coordinator.md`).
   if (agentIdArg === SYSTEM_AGENT_ID) {
+    const systemCtx: SessionContext = {
+      role: "coordinator",
+      agentId: SYSTEM_AGENT_ID,
+      agentManager: "",
+      parentBranch: "",
+      branchName: "",
+      worktreePath: "",
+      rootRepoPath: "",
+      agentType: "system",
+    };
+    const instructions = await generateInstructions(systemCtx);
     const output = {
       hookSpecificOutput: {
         hookEventName: "SessionStart",
-        additionalContext: "",
+        additionalContext: instructions,
       },
     };
     process.stdout.write(JSON.stringify(output));

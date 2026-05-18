@@ -4,7 +4,6 @@ import { mkdtemp, rm, readFile, readdir, mkdir } from "fs/promises";
 import { tmpdir } from "os";
 import {
   IB_COORDINATOR_SESSION,
-  SYSTEM_COORDINATOR_PROMPT,
   buildSystemCoordinatorSettings,
   sanitizeTmuxInput,
   ensureSystemCoordinator,
@@ -31,40 +30,6 @@ import { spawnCtx as tmuxSpawnCtx } from "./tmux-poller";
 describe("IB_COORDINATOR_SESSION", () => {
   test("has expected session name", () => {
     expect(IB_COORDINATOR_SESSION).toBe("ib-coordinator");
-  });
-});
-
-describe("SYSTEM_COORDINATOR_PROMPT", () => {
-  test("is a non-empty string", () => {
-    expect(typeof SYSTEM_COORDINATOR_PROMPT).toBe("string");
-    expect(SYSTEM_COORDINATOR_PROMPT.length).toBeGreaterThan(0);
-  });
-
-  test("mentions ib commands", () => {
-    expect(SYSTEM_COORDINATOR_PROMPT).toContain("ib list");
-    expect(SYSTEM_COORDINATOR_PROMPT).toContain("ib send");
-    expect(SYSTEM_COORDINATOR_PROMPT).toContain("ib merge");
-    expect(SYSTEM_COORDINATOR_PROMPT).toContain("ib kill");
-    expect(SYSTEM_COORDINATOR_PROMPT).toContain("ib new-agent");
-    expect(SYSTEM_COORDINATOR_PROMPT).toContain("ib status");
-    expect(SYSTEM_COORDINATOR_PROMPT).toContain("ib diff");
-  });
-
-  test("warns against sending to self", () => {
-    expect(SYSTEM_COORDINATOR_PROMPT).toContain(
-      "Do NOT use `ib send @system`"
-    );
-  });
-
-  test("explains delegation to per-repo coordinators", () => {
-    expect(SYSTEM_COORDINATOR_PROMPT).toContain("per-repo coordinators");
-    expect(SYSTEM_COORDINATOR_PROMPT).toContain("ib send @<repo-name>");
-  });
-
-  test("states no file tool access", () => {
-    expect(SYSTEM_COORDINATOR_PROMPT).toContain(
-      "do NOT have access to Read, Write, Edit, or any file tools"
-    );
   });
 });
 
@@ -531,7 +496,10 @@ describe("ensureSystemCoordinator", () => {
     expect(ssCommands).toContain("ib hooks session-start @system");
   });
 
-  test("writes coordinator-prompt.txt during creation", async () => {
+  test("does NOT write coordinator-prompt.txt during creation", async () => {
+    // The system coordinator's prompt is delivered via the SessionStart hook's
+    // additionalContext (see src/hooks/session-start.ts's @system branch),
+    // same as every other agent type. No prompt file is written.
     coordinatorSpawnCtx.set(createCommandRouter({
       "has-session": { exitCode: 1 },
     }));
@@ -539,8 +507,8 @@ describe("ensureSystemCoordinator", () => {
     await ensureSystemCoordinator();
 
     const promptPath = join(tmpDir, "coordinator-prompt.txt");
-    const content = await readFile(promptPath, "utf-8");
-    expect(content).toContain("itsybitsy system coordinator");
+    const promptFile = Bun.file(promptPath);
+    expect(await promptFile.exists()).toBe(false);
   });
 
   test("writes .gitignore with *", async () => {
@@ -659,18 +627,19 @@ describe("ensureSystemCoordinator", () => {
       const cmdStrs = commands.map((c) => c.join(" "));
       const claudeCmd = cmdStrs.find((c) => c.includes("claude --model"));
       expect(claudeCmd).toContain("claude --model sonnet");
-      // Fresh launch: prompt is delivered as a positional arg via cat substitution.
-      expect(claudeCmd).toContain('"$(cat ');
-      expect(claudeCmd).toContain("coordinator-prompt.txt");
+      // The prompt is delivered via the SessionStart hook now — no positional
+      // arg and no cat substitution.
+      expect(claudeCmd).not.toContain("$(cat");
+      expect(claudeCmd).not.toContain("coordinator-prompt.txt");
     } finally {
       resetUserConfigPath();
     }
   });
 
-  test("fresh launch with --channels terminates the flag with `--` before the positional prompt", async () => {
-    // `--channels` is a multi-value flag — without `--` between channels and the
-    // positional `"$(cat …)"`, claude greedily eats the prompt as another channel
-    // entry and exits with "--channels entries must be tagged: <prompt body>".
+  test("fresh launch with --channels does not append `--` (no positional prompt to terminate)", async () => {
+    // After moving the prompt to the SessionStart hook, the claude launch has
+    // no positional prompt — so no `--` end-of-flags marker is needed (or
+    // appropriate). The --channels values stand alone.
     const { mkdir } = await import("fs/promises");
     await mkdir(tmpDir, { recursive: true });
     const configPath = join(tmpDir, "config.json");
@@ -700,23 +669,16 @@ describe("ensureSystemCoordinator", () => {
         .find((c) => c.includes("claude --model"));
       expect(claudeCmd).toBeDefined();
       expect(claudeCmd).toContain("--channels plugin:imessage@claude-plugins-official");
-      expect(claudeCmd).toContain('"$(cat ');
-      // The `--` end-of-flags marker must appear between the last channel entry
-      // and the positional `"$(cat …)"` prompt.
-      const channelsIdx = claudeCmd!.indexOf("--channels");
-      const dashDashIdx = claudeCmd!.indexOf(" -- ", channelsIdx);
-      const catIdx = claudeCmd!.indexOf('"$(cat ');
-      expect(dashDashIdx).toBeGreaterThan(channelsIdx);
-      expect(catIdx).toBeGreaterThan(dashDashIdx);
+      expect(claudeCmd).not.toContain("$(cat");
+      expect(claudeCmd).not.toContain(" -- ");
     } finally {
       resetUserConfigPath();
     }
   });
 
   test("fresh launch without --channels does not emit a stray `--` separator", async () => {
-    // When no channels flag is present, we must not append `--` — the positional
-    // prompt is unambiguous on its own and a stray `--` would noise up the
-    // command line and the rendered transcript.
+    // When no channels flag is present, we must not append `--` — there is no
+    // positional prompt that would need an end-of-flags marker.
     const commands: string[][] = [];
     coordinatorSpawnCtx.set((cmd: string[], _opts?: any) => {
       commands.push([...cmd]);
@@ -737,15 +699,12 @@ describe("ensureSystemCoordinator", () => {
     expect(claudeCmd).not.toContain(" -- ");
   });
 
-  test("fresh launch passes SYSTEM_COORDINATOR_PROMPT as positional arg via cat substitution", async () => {
-    // The prompt is delivered to claude as a positional arg via
-    // `"$(cat coordinator-prompt.txt)"` — the same pattern per-repo
-    // coordinators use (see ib-commands.ts start.sh assembly). This makes
-    // the prompt appear as the first user message in the conversation
-    // transcript (visible when the user attaches the tmux session) rather
-    // than as additionalContext (system-level, invisible). The SessionStart
-    // hook fires for @system but does NOT inject the prompt — that would
-    // double-deliver on fresh launch.
+  test("fresh launch does NOT pass any prompt as a positional arg", async () => {
+    // The prompt body for @system is delivered via the SessionStart hook's
+    // additionalContext (see src/hooks/session-start.ts's @system branch),
+    // same as every other agent type. Nothing about the prompt should appear
+    // on the claude command line, no cat substitution, no literal paste,
+    // and no inline prompt body.
     const commands: string[][] = [];
     coordinatorSpawnCtx.set((cmd: string[], _opts?: any) => {
       commands.push([...cmd]);
@@ -758,23 +717,19 @@ describe("ensureSystemCoordinator", () => {
 
     await ensureSystemCoordinator();
 
-    // The send-keys command that launches claude must include the cat
-    // substitution that supplies the prompt as a positional arg.
     const claudeLaunch = commands.find(
       (c) => c.includes("send-keys") && c.some((a) => a.startsWith("claude --model")),
     );
     expect(claudeLaunch).toBeDefined();
     const claudeCmd = claudeLaunch!.find((a) => a.startsWith("claude --model"))!;
-    expect(claudeCmd).toContain('"$(cat ');
-    expect(claudeCmd).toContain("coordinator-prompt.txt");
+    expect(claudeCmd).not.toContain("$(cat");
+    expect(claudeCmd).not.toContain("coordinator-prompt.txt");
 
-    // No send-keys -l (literal paste) command should fire — the prompt is on
-    // the same launch line, not pasted afterward.
+    // No send-keys -l (literal paste) command should fire either.
     const literalPaste = commands.find((c) => c.includes("send-keys") && c.includes("-l"));
     expect(literalPaste).toBeUndefined();
 
-    // The launch command must not carry the prompt body inline — the prompt
-    // body lives in coordinator-prompt.txt and is interpolated via $(cat).
+    // The launch command must not carry the prompt body inline.
     const carriesPromptBody = commands.find((c) =>
       c.some((arg) => arg.includes("itsybitsy system coordinator")),
     );
@@ -883,9 +838,8 @@ describe("ensureSystemCoordinator", () => {
     expect(claudeCmd).toContain(`claude --resume ${sessionId}`);
     expect(claudeCmd).toContain("--model");
 
-    // Resume reuses the prior session's transcript, which already contains
-    // the prompt. Adding a positional arg would inject a stale duplicate, so
-    // the resume command must NOT include the cat substitution.
+    // No positional prompt — the SessionStart hook delivers system.md's
+    // markdown body via additionalContext on every session start.
     expect(claudeCmd).not.toContain("$(cat");
     expect(claudeCmd).not.toContain("coordinator-prompt.txt");
 
@@ -911,9 +865,10 @@ describe("ensureSystemCoordinator", () => {
     const cmdStrs = commands.map((c) => c.join(" "));
     expect(cmdStrs.some((c) => c.includes("claude --resume"))).toBe(false);
     expect(cmdStrs.some((c) => c.includes("claude --model"))).toBe(true);
-    // Fresh launch must include the prompt as a positional arg via cat
-    // substitution.
-    expect(cmdStrs.some((c) => c.includes("$(cat ") && c.includes("coordinator-prompt.txt"))).toBe(true);
+    // Fresh launch must NOT include a positional prompt — the SessionStart
+    // hook delivers system.md's markdown body via additionalContext.
+    expect(cmdStrs.some((c) => c.includes("$(cat"))).toBe(false);
+    expect(cmdStrs.some((c) => c.includes("coordinator-prompt.txt"))).toBe(false);
     // No tmux -l (literal paste) fallback.
     expect(commands.some((c) => c.includes("-l"))).toBe(false);
   });

@@ -7,6 +7,7 @@ permissions:
     - "ScheduleWakeup"
     - "CronCreate"
     - "CronDelete"
+    - "CronList"
     - "Skill(loop)"
   deny: []
 ---

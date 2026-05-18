@@ -18,6 +18,7 @@ import {
   buildLayeredPermissions,
   COORDINATOR_INTERCEPT_MATCHER,
 } from "./settings-builder";
+import { loadAgentType, ensureAgentTypesDir } from "./agent-types";
 
 /**
  * Encode an absolute path into Claude's project-directory naming scheme:
@@ -173,13 +174,43 @@ async function findLatestCoordinatorTranscriptId(): Promise<string | null> {
 }
 
 /**
- * Initial prompt text for the system coordinator (SPEC §12.1.5).
+ * Fallback prompt text for the system coordinator (SPEC §12.1.5).
+ * The canonical prompt lives in the markdown body of
+ * `~/.itsybitsy/agent-types/system.md` so users can customize it; the
+ * embedded copy of `docs/agent-types/system.md` is auto-restored on first
+ * run via `ensureAgentTypesDir()`. This constant is the last-resort fallback
+ * used by `loadSystemCoordinatorPrompt()` when the file has been emptied or
+ * fails to load — never edit it without also updating `docs/agent-types/system.md`.
+ *
  * Delivered as a positional arg to `claude` on fresh launches (via
  * `"$(cat coordinator-prompt.txt)"`), mirroring the per-repo coordinator
  * launch in `src/ib-commands.ts`. On resume, the prompt is already in the
  * prior session's transcript. The SessionStart hook does not re-inject it.
  */
 export const SYSTEM_COORDINATOR_PROMPT = `You are the itsybitsy system coordinator. You manage agents across all registered repos using \`ib\` commands. You can list agents (\`ib list\`), send messages to agents (\`ib send <agent-id> "message"\`), merge (\`ib merge\`), kill (\`ib kill\`), create agents (\`ib new-agent\`), and check status (\`ib status\`, \`ib diff\`). You do NOT have access to Read, Write, Edit, or any file tools — only \`ib\` Bash commands. You coordinate work at the system level — for repo-specific coordination, delegate to per-repo coordinators. To send messages to per-repo coordinators, use \`ib send @<repo-name> "message"\` (e.g., \`ib send @itsybitsy "review the latest PR"\`). Do NOT use \`ib send @system\` — that routes back to you.`;
+
+/**
+ * Load the system coordinator prompt from `~/.itsybitsy/agent-types/system.md`'s
+ * markdown body. Falls back to {@link SYSTEM_COORDINATOR_PROMPT} when the type
+ * file is missing, empty-bodied, or fails to load — the fallback path keeps the
+ * coordinator launchable on a broken install.
+ *
+ * Calls `ensureAgentTypesDir()` first so the embedded default `system.md` is
+ * materialised on first run before the load attempt.
+ */
+export async function loadSystemCoordinatorPrompt(): Promise<string> {
+  try {
+    await ensureAgentTypesDir();
+    const type = await loadAgentType("system");
+    const body = type.markdownBody?.trim();
+    if (body) return body;
+  } catch (err) {
+    process.stderr.write(
+      `coordinator: failed to load system.md prompt body, using fallback: ${err instanceof Error ? err.message : String(err)}\n`,
+    );
+  }
+  return SYSTEM_COORDINATOR_PROMPT;
+}
 
 /**
  * Hardcoded allow list for the system coordinator.
@@ -346,9 +377,12 @@ async function writeCoordinatorFiles(): Promise<void> {
   };
   await Bun.write(settingsPath, JSON.stringify(settings, null, 2) + "\n");
 
-  // Write coordinator-prompt.txt
+  // Write coordinator-prompt.txt — sourced from system.md's markdown body so
+  // users can edit ~/.itsybitsy/agent-types/system.md to customize the prompt.
+  // Falls back to SYSTEM_COORDINATOR_PROMPT if the body is empty/missing.
   const promptPath = join(home, "coordinator-prompt.txt");
-  await Bun.write(promptPath, SYSTEM_COORDINATOR_PROMPT + "\n");
+  const promptBody = await loadSystemCoordinatorPrompt();
+  await Bun.write(promptPath, promptBody + "\n");
 }
 
 /**
@@ -369,7 +403,8 @@ export function getLastCoordinatorSpawnMode(): CoordinatorSpawnMode {
  * Ensure the system coordinator tmux session is running. If alive, returns
  * immediately. Otherwise launches Claude — resuming the newest non-cleared
  * transcript when one exists, falling back to a fresh launch otherwise. On
- * fresh launches the SYSTEM_COORDINATOR_PROMPT is delivered as a positional
+ * fresh launches the prompt (loaded from `system.md`'s markdown body, or
+ * {@link SYSTEM_COORDINATOR_PROMPT} as fallback) is delivered as a positional
  * arg to claude (via `"$(cat coordinator-prompt.txt)"`), so it appears as the
  * first user message in the conversation transcript. On resume the prompt is
  * already in the prior session's history; no positional arg is appended. The
@@ -434,7 +469,8 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
 
   const channels: string[] = [];
   if (imessage) channels.push("plugin:imessage@claude-plugins-official");
-  // Fresh launch: pass SYSTEM_COORDINATOR_PROMPT as a positional arg via
+  // Fresh launch: pass the coordinator prompt (loaded from system.md, see
+  // loadSystemCoordinatorPrompt) as a positional arg via
   // `"$(cat <prompt-file>)"` — same pattern as per-repo coordinators in
   // `start.sh` (see ib-commands.ts:2426). This delivers the prompt as the
   // first user message in the conversation transcript (visible when the

@@ -16,6 +16,7 @@ describe("buildHooksBlock — byte-identical with prior inline literals", () => 
         { matcher: "Task|Agent|TaskCreate|Bash|AskUserQuestion", hooks: [{ type: "command", command: "ib hooks intercept-task" }] },
       ],
       PermissionRequest: [{ matcher: "*", hooks: [{ type: "command", command: "ib hook-permission-denied @system" }] }],
+      UserPromptSubmit: [{ hooks: [{ type: "command", command: "ib hook-mark-running @system" }] }],
       SessionStart: [{ hooks: [{ type: "command", command: "ib hooks session-start @system" }] }],
     };
     expect(JSON.stringify(result, null, 2)).toBe(JSON.stringify(expected, null, 2));
@@ -37,6 +38,7 @@ describe("buildHooksBlock — byte-identical with prior inline literals", () => 
         { matcher: "*", hooks: [{ type: "command", command: `ib hook-check-path ${id}` }] },
         { matcher: "Task|Agent|TaskCreate|Bash|AskUserQuestion", hooks: [{ type: "command", command: "ib hooks intercept-task" }] },
       ],
+      UserPromptSubmit: [{ hooks: [{ type: "command", command: `ib hook-mark-running ${id}` }] }],
       SessionStart: [{ hooks: [{ type: "command", command: `ib hooks session-start ${id}` }] }],
     };
     expect(JSON.stringify(result, null, 2)).toBe(JSON.stringify(expected, null, 2));
@@ -57,6 +59,7 @@ describe("buildHooksBlock — byte-identical with prior inline literals", () => 
       PreToolUse: [
         { matcher: "*", hooks: [{ type: "command", command: `ib hook-check-path ${id}` }] },
       ],
+      UserPromptSubmit: [{ hooks: [{ type: "command", command: `ib hook-mark-running ${id}` }] }],
       SessionStart: [{ hooks: [{ type: "command", command: "ib hooks session-start" }] }],
     };
     expect(JSON.stringify(result, null, 2)).toBe(JSON.stringify(expected, null, 2));
@@ -78,6 +81,7 @@ describe("buildHooksBlock — byte-identical with prior inline literals", () => 
         { matcher: "*", hooks: [{ type: "command", command: `ib hook-check-path ${id}` }] },
         { matcher: "Task|Agent|TaskCreate|AskUserQuestion", hooks: [{ type: "command", command: "ib hooks intercept-task" }] },
       ],
+      UserPromptSubmit: [{ hooks: [{ type: "command", command: `ib hook-mark-running ${id}` }] }],
       SessionStart: [{ hooks: [{ type: "command", command: "ib hooks session-start" }] }],
     };
     expect(JSON.stringify(result, null, 2)).toBe(JSON.stringify(expected, null, 2));

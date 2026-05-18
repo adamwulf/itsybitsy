@@ -92,8 +92,9 @@ export async function buildLayeredPermissions(opts: {
  *
  * Key insertion order is preserved across callers — when Stop is omitted
  * the remaining keys are emitted as `[PreToolUse, PermissionRequest,
- * SessionStart]` (system coordinator); when Stop is present the order is
- * `[Stop, PermissionRequest, PreToolUse, SessionStart]`.
+ * UserPromptSubmit, SessionStart]` (system coordinator); when Stop is
+ * present the order is `[Stop, PermissionRequest, PreToolUse,
+ * UserPromptSubmit, SessionStart]`.
  */
 export function buildHooksBlock(opts: {
   agentId: string;
@@ -115,16 +116,19 @@ export function buildHooksBlock(opts: {
     ? `ib hooks session-start ${opts.agentId}`
     : "ib hooks session-start";
   const permissionDeniedCmd = `ib hook-permission-denied ${opts.agentId}`;
+  const userPromptSubmitHooks = [{ hooks: [{ type: "command", command: `ib hook-mark-running ${opts.agentId}` }] }];
 
   const hooks: Record<string, unknown> = {};
   if (opts.includeStop) {
     hooks.Stop = [{ matcher: "*", hooks: [{ type: "command", command: `ib hook-status ${opts.agentId}` }] }];
     hooks.PermissionRequest = [{ matcher: "*", hooks: [{ type: "command", command: permissionDeniedCmd }] }];
     hooks.PreToolUse = preToolUseHooks;
+    hooks.UserPromptSubmit = userPromptSubmitHooks;
     hooks.SessionStart = [{ hooks: [{ type: "command", command: sessionStartCmd }] }];
   } else {
     hooks.PreToolUse = preToolUseHooks;
     hooks.PermissionRequest = [{ matcher: "*", hooks: [{ type: "command", command: permissionDeniedCmd }] }];
+    hooks.UserPromptSubmit = userPromptSubmitHooks;
     hooks.SessionStart = [{ hooks: [{ type: "command", command: sessionStartCmd }] }];
   }
   return hooks;

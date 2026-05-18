@@ -103,11 +103,13 @@ State detection is deterministic — the stop hook writes authoritative state to
 
 ### 1.3.1 State Writes
 
-State is written to `meta.json` by exactly three actors:
+State is written to `meta.json` by exactly five actors:
 
 | Actor | When | State written |
 |-------|------|---------------|
 | **Stop hook** (`ib hook-status`) | Claude becomes idle | `waiting`, `complete`, or `running` (nudge case) |
+| **PreToolUse hook** (`ib hook-check-path`) | Before every tool call | `running` |
+| **UserPromptSubmit hook** (`ib hook-mark-running`) | Input arrives (incl. `tmux send-keys` from another agent) | `running` (guarded — bails if current state is `complete` or `stopped`) |
 | **`ib send`** | Message sent to agent | `running` |
 | **`ib resume`** | Agent resumed from stopped | `running` |
 
@@ -618,7 +620,7 @@ itsybitsy hooks operate across three distinct execution contexts. Each context h
 | **Spawning agent** (`canSpawnChildren: true`) | `<repo>/.ittybitsy/agents/<id>/repo` | Agent's `settings.local.json` (5 hooks: path-check, stop, session-start, permission-denied, intercept-task) | Built per §2.3 with `_all.md` (always) + `_non_coordinator.md` (non-coordinators only) + type-defined permissions | CWD matches pattern AND agent type has `canSpawnChildren: true` |
 | **Leaf agent** (`canSpawnChildren: false`) | `<repo>/.ittybitty/agents/<id>/repo` | Agent's `settings.local.json` (4 hooks: path-check, stop, session-start, permission-denied — NO intercept-task) | Built per §2.3 with `_all.md` + `_non_coordinator.md` + type-defined permissions | CWD matches pattern AND agent type has `canSpawnChildren: false` |
 
-**Key distinction**: Primary Claude uses ONLY the global hooks from `~/.claude/settings.json` (§6.6). Per-agent hooks (§6.1–6.5) are installed ONLY in agent worktree `settings.local.json` files and must never leak into the user's repo-level `settings.local.json`. If agent hooks are left in a repo's `settings.local.json` after an agent is killed or merged, they will incorrectly restrict the user's direct Claude sessions in that repo.
+**Key distinction**: Primary Claude uses ONLY the global hooks from `~/.claude/settings.json` (§6.7). Per-agent hooks (§6.1–6.6) are installed ONLY in agent worktree `settings.local.json` files and must never leak into the user's repo-level `settings.local.json`. If agent hooks are left in a repo's `settings.local.json` after an agent is killed or merged, they will incorrectly restrict the user's direct Claude sessions in that repo.
 
 **Hook isolation invariant**: `ib kill`, `ib nuke`, and `ib merge` must ensure agent-specific hooks are cleaned from the repo's `settings.local.json` if they were ever written there. The intended flow is:
 1. Agent creation writes hooks to `<agent-dir>/repo/.claude/settings.local.json` (inside the worktree)
@@ -627,7 +629,7 @@ itsybitsy hooks operate across three distinct execution contexts. Each context h
 
 **Detection pattern**: The `AGENT_CWD_PATTERN` regex (`/.ittybitty/agents/([^/]+)/repo(/|$)`) is used by all hooks to distinguish agent contexts from primary Claude. If CWD does not match this pattern, the session is treated as primary Claude and per-agent restrictions do not apply.
 
-itsybitsy installs hooks into each agent's `settings.local.json`, plus optional global hooks in `~/.claude/settings.json`. Agents with `canSpawnChildren: true` get five hooks (path isolation, stop, session-start, permission-denied, and intercept-task); leaf agents (`canSpawnChildren: false`) get four (no intercept-task).
+itsybitsy installs hooks into each agent's `settings.local.json`, plus optional global hooks in `~/.claude/settings.json`. Agents with `canSpawnChildren: true` get six hooks (path isolation, stop, session-start, permission-denied, mark-running, and intercept-task); leaf agents (`canSpawnChildren: false`) get five (no intercept-task).
 
 ### 6.1 Path Isolation Hook (PreToolUse)
 
@@ -666,6 +668,8 @@ itsybitsy installs hooks into each agent's `settings.local.json`, plus optional 
 The distinction between `undefined` (absent) and `[]` (empty) is critical for backward compatibility: existing agents without `allowedPaths` in meta.json retain the current permissive behavior.
 
 **Logging**: Denials are logged to the agent's `agent.log` with format: `[PreToolUse] Permission denied: <tool-name> (<params>)`
+
+**State write side effect**: PreToolUse fires before every tool call, so the path-check handler also writes `state: "running"` to the agent's `meta.json` (via `writeAgentState()`). This flips state out of `waiting` when Claude resumes after a background-tool completion. PreToolUse is used (rather than PostToolUse) because it cannot race with Stop — Stop fires after the final tool call has completed, so a late PostToolUse could overwrite a legitimate `complete`/`stopped` state. Skipped for `@system` (no `meta.json`).
 
 ### 6.2 Stop Hook (agent-status)
 
@@ -786,7 +790,17 @@ Fires when Claude requests permission for a tool that isn't auto-allowed. Simply
 
 [^callout-permission-denied]: **Bash/TS divergence.** The bash `ib` does not have a handler for the `hook-permission-denied` subcommand — the command hits the "Unknown command" default case and exits 1 with an error to stderr. Since PermissionRequest hooks are informational only and Claude Code ignores non-zero exits from them, this means the bash version silently fails to log permission denials. The TS implementation properly handles the command and logs to `agent.log`.
 
-### 6.6 Global Hooks (installed in ~/.claude/settings.json)
+### 6.6 Mark Running Hook (UserPromptSubmit)
+
+**Command**: `ib hook-mark-running <agent-id>`
+**Matcher**: (none — fires on UserPromptSubmit)
+**Hook type**: UserPromptSubmit
+
+Writes `state: "running"` to the agent's `meta.json` the instant input arrives. This covers the case where another agent sends a message via `tmux send-keys` (e.g. a `notify_manager` from a child) — without this hook the recipient would stay labeled `waiting` until its next Stop hook fires. PreToolUse covers the post-background-tool case (see §6.1).
+
+**Terminal-state guard**: Reads the current `state` from `meta.json` first; bails if it is `complete` or `stopped`. UserPromptSubmit can in theory fire after Stop, and we never want to resurrect a terminal state. No-op when `meta.json` is missing or unparseable. No logging.
+
+### 6.7 Global Hooks (installed in ~/.claude/settings.json)
 
 These are optional hooks that the user installs globally:
 
@@ -1464,14 +1478,15 @@ The system coordinator does **not** have a standard watchdog or stop hook. It is
 
 #### 12.1.7 Hook Installation
 
-The system coordinator's `~/.itsybitsy/.claude/settings.local.json` includes four of the five agent hooks (§6), all keyed to the `@system` sentinel agent ID:
+The system coordinator's `~/.itsybitsy/.claude/settings.local.json` includes five of the six agent hooks (§6), all keyed to the `@system` sentinel agent ID:
 
-- `PreToolUse` → `ib hook-check-path @system` (path isolation — `~/.itsybitsy/` is its own worktree, so cross-agent and main-repo blocks are no-ops; the allow-list check still runs)
+- `PreToolUse` → `ib hook-check-path @system` (path isolation — `~/.itsybitsy/` is its own worktree, so cross-agent and main-repo blocks are no-ops; the allow-list check still runs. The state-write side effect from §6.1 is skipped for `@system` because there is no `meta.json` to write to.)
 - `PreToolUse` → `ib hooks intercept-task` (intercepts Task/Agent/TaskCreate, denies AskUserQuestion, blocks shell metacharacters and `--output` in coordinator Bash commands per §12.2.4)
 - `PermissionRequest` → `ib hook-permission-denied @system` (logs denials to `~/.itsybitsy/agent.log`)
+- `UserPromptSubmit` → `ib hook-mark-running @system` (no-op for `@system` — there is no `meta.json` to update; the hook entry is installed for uniformity with regular agents and to keep `health-check`'s leaked-hook scan symmetric)
 - `SessionStart` → `ib hooks session-start @system` (delivers `system.md`'s markdown body, prefixed with `_all.md`, via `additionalContext` on every session start — see §12.1.5)
 
-The Stop hook is intentionally **not** installed — the system coordinator's state detection lives in `detectSystemCoordinatorState()` (§12.1.6), which polls tmux output and does not need a Claude-driven idle signal. The `@system` sentinel is the system coordinator's identity at every hook callsite; it is not a valid agent ID per `isValidAgentId()` (it begins with `@`), but the three hook entry points (`hook-check-path`, `hook-permission-denied`, and the optional `agentIdArg` of `hooks session-start`) accept the literal `@system` because it is hardcoded into the coordinator's settings file by `writeCoordinatorFiles()` and is not user input. `ib hook-status` does not accept `@system` — the Stop hook is omitted, so the path is unreachable.
+The Stop hook is intentionally **not** installed — the system coordinator's state detection lives in `detectSystemCoordinatorState()` (§12.1.6), which polls tmux output and does not need a Claude-driven idle signal. The `@system` sentinel is the system coordinator's identity at every hook callsite; it is not a valid agent ID per `isValidAgentId()` (it begins with `@`), but the four hook entry points (`hook-check-path`, `hook-permission-denied`, `hook-mark-running`, and the optional `agentIdArg` of `hooks session-start`) accept the literal `@system` because it is hardcoded into the coordinator's settings file by `writeCoordinatorFiles()` and is not user input. `ib hook-status` does not accept `@system` — the Stop hook is omitted, so the path is unreachable.
 
 Existing system coordinator sessions must be restarted (e.g., via the dashboard `x` action on the system coordinator) to pick up new hook configurations after upgrading; `ensureSystemCoordinator` only writes `settings.local.json` when the tmux session is absent.
 
@@ -1908,7 +1923,7 @@ Each check produces zero or more **warnings**. Warnings have a severity level an
 
 **Why it's a problem**: Agent-specific hooks should only exist inside an agent's worktree at `<agent-dir>/repo/.claude/settings.local.json`. If they appear in the repo root's settings, they fire for the user's direct Claude session, where the referenced agent may not exist — causing hook failures that block tool calls.
 
-**Detection**: Parse `<repo>/.claude/settings.local.json`. Scan all hook commands (across all hook types: `PreToolUse`, `Stop`, `PermissionRequest`, `SessionStart`) for patterns matching `ib hook-check-path <id>`, `ib hook-status <id>`, or `ib hook-permission-denied <id>` where `<id>` matches the agent ID format (`agent-[0-9a-f]+` or any string matching `isValidAgentId()`). The `ib hooks intercept-task` and `ib hooks session-start` commands (without agent IDs) are legitimate global/repo hooks and should NOT be flagged.
+**Detection**: Parse `<repo>/.claude/settings.local.json`. Scan all hook commands (across all hook types: `PreToolUse`, `Stop`, `PermissionRequest`, `SessionStart`, `UserPromptSubmit`) for patterns matching `ib hook-check-path <id>`, `ib hook-status <id>`, `ib hook-permission-denied <id>`, or `ib hook-mark-running <id>` where `<id>` matches the agent ID format (`agent-[0-9a-f]+` or any string matching `isValidAgentId()`). The `ib hooks intercept-task` and `ib hooks session-start` commands (without agent IDs) are legitimate global/repo hooks and should NOT be flagged.
 
 **Message**: `"Leaked agent hook in .claude/settings.local.json: <command> — this will block tool calls in your Claude session. Remove the hook entry or restore settings from version control."`
 

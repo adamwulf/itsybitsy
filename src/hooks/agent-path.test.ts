@@ -2,7 +2,7 @@ import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { checkPathAccess, toolMatchesPattern, parseIbCommand, checkIbCommandAccess, isInAllowedPaths, claudeProjectDirFor, hookCheckPath } from "./agent-path";
 import type { PathCheckInput, PathCheckContext } from "./agent-path";
 import { join } from "path";
-import { mkdir, mkdtemp, rm, writeFile } from "fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 
 /** Build a default context for testing */
@@ -1171,5 +1171,49 @@ describe("hookCheckPath with @system", () => {
     await hookCheckPath("@system", stdin);
     const decision = JSON.parse(logged[0]!);
     expect(decision.hookSpecificOutput.permissionDecision).toBe("allow");
+  });
+});
+
+// ── hookCheckPath state-write side effect (worktree agents) ──────────────────
+
+describe("hookCheckPath writes state='running' to meta.json", () => {
+  let tempDir: string;
+  let agentDir: string;
+  let worktreeCwd: string;
+  const originalLog = console.log;
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "mark-running-side-effect-"));
+    const agentId = "agent-test99";
+    agentDir = join(tempDir, ".ittybitty", "agents", agentId);
+    worktreeCwd = join(agentDir, "repo");
+    await mkdir(join(worktreeCwd, ".claude"), { recursive: true });
+    await writeFile(
+      join(worktreeCwd, ".claude", "settings.local.json"),
+      JSON.stringify({ permissions: { allow: ["Read"], deny: [] } }),
+    );
+    console.log = () => {};
+  });
+
+  afterEach(async () => {
+    console.log = originalLog;
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  test("flips state from 'waiting' to 'running' on PreToolUse", async () => {
+    await Bun.write(
+      join(agentDir, "meta.json"),
+      JSON.stringify({ state: "waiting" }),
+    );
+    const stdin = JSON.stringify({
+      tool_name: "Read",
+      tool_input: { file_path: join(worktreeCwd, "any.txt") },
+      cwd: worktreeCwd,
+    });
+
+    await hookCheckPath("agent-test99", stdin);
+
+    const meta = JSON.parse(await readFile(join(agentDir, "meta.json"), "utf-8"));
+    expect(meta.state).toBe("running");
   });
 });

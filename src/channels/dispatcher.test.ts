@@ -1025,24 +1025,38 @@ describe("TelegramDispatcher", () => {
     expect(send.calls[1]!.opts?.fromAgent).toBe(TELEGRAM_SENTINEL);
   });
 
-  test("inbound '/clear' → raw send only, no follow-up", async () => {
+  test("inbound '/clear' → raw send + Telegram ack reply, no coordinator follow-up", async () => {
     mock.enqueueResponse({ ok: true, result: [] }); // probe
     mock.enqueueResponse({
       ok: true,
       result: [update(1, { chat: { id: 100 }, from: { id: 7, username: "alice" }, text: "/clear" })],
     });
+    // Ack sendMessage gets a 200.
+    mock.enqueueResponse({ ok: true, result: { message_id: 99, chat: { id: 100 } } });
 
     const d = makeDispatcher();
     await d.start();
     await waitFor(() => send.calls.length >= 1, 1_000);
-    // Give the loop a tick to (not) send a follow-up.
+    await waitFor(() => mock.allUrls().some((u) => u.includes("/sendMessage")), 1_000);
+    // Give the loop a tick to (not) send a coordinator follow-up.
     await new Promise<void>((r) => setTimeout(r, 50));
     await d.stop();
 
+    // Exactly one coordinator send (the raw /clear), no wrapped follow-up.
     expect(send.calls.length).toBe(1);
     expect(send.calls[0]!.message).toBe("/clear");
     expect(send.calls[0]!.opts?.raw).toBe(true);
     expect(send.calls[0]!.opts?.fromAgent).toBe(TELEGRAM_SENTINEL);
+
+    // Exactly one Telegram sendMessage: the ack to the user.
+    const sendMessageUrls = mock.allUrls().filter((u) => u.includes("/sendMessage"));
+    expect(sendMessageUrls.length).toBe(1);
+    const sendMessageInit = mock.allInits().find(
+      (_, i) => mock.allUrls()[i]!.includes("/sendMessage"),
+    );
+    const body = JSON.parse(sendMessageInit?.body as string);
+    expect(body.text).toBe("Coordinator context is cleared.");
+    expect(body.chat_id).toBe("100");
   });
 
   test("inbound '/usage' → wrapped normally, NOT a slash command", async () => {

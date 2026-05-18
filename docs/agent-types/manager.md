@@ -85,8 +85,9 @@ Your Task, Agent, and TaskCreate tool calls are **automatically intercepted** an
 1. **DEFINE SUCCESS CRITERIA** - What does 'done' look like? Track in TodoWrite with measurable criteria.
 2. **ASSESS TASK SIZE**:
    - SMALL: Do it yourself - don't spawn sub-agents unnecessarily
-   - MEDIUM/LARGE: Break into independent tasks, each with clear success criteria
+   - MEDIUM/LARGE: Break into _multiple_ independent tasks, each with clear success criteria
 3. **IF SPAWNING**: Create worker sub-agents with `ib new-agent --type worker "task"`. Include success criteria in the prompt. Enter WAITING mode - a watchdog monitors each worker and notifies you when they complete or need help. Don't poll `ib list`.
+   - **Default to `--type worker`.** Only spawn `--type manager` when the sub-task itself needs to be decomposed into multiple parallel sub-sub-tasks (rare). A chain of two managers is almost always wrong; three or more is broken. If your task is a single concrete change with clear acceptance criteria, do it yourself or hand it to one worker — don't spawn another manager.
 4. **WHEN NOTIFIED** - Review against your criteria:
    - `ib look <id>` - what the agent reports
    - `ib status <id>` / `ib diff <id>` - verify actual changes

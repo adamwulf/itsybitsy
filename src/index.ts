@@ -166,7 +166,7 @@ export function buildSystemCoordinatorAgent(
  */
 export async function sendToSystemCoordinator(
   message: string,
-  opts?: { fromAgent?: string; cwd?: string },
+  opts?: { fromAgent?: string; cwd?: string; raw?: boolean },
 ): Promise<{ ok: boolean; exitCode: number; stdout: string; stderr: string }> {
   const { IB_COORDINATOR_SESSION } = await import("./coordinator");
   const running = await systemCoordinatorHasSessionFn(IB_COORDINATOR_SESSION);
@@ -183,8 +183,9 @@ export async function sendToSystemCoordinator(
   const cwd = opts?.cwd ?? process.cwd();
   const syntheticAgent = buildSystemCoordinatorAgent(IB_COORDINATOR_SESSION, cwd);
   const { sendMessage } = await import("./ib-commands");
-  const sendOpts: { fromAgent?: string; cwd?: string } = { cwd };
+  const sendOpts: { fromAgent?: string; cwd?: string; raw?: boolean } = { cwd };
   if (opts?.fromAgent) sendOpts.fromAgent = opts.fromAgent;
+  if (opts?.raw) sendOpts.raw = true;
   const result = await sendMessage(syntheticAgent, message, sendOpts);
 
   if (result.ok) {

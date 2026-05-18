@@ -44,8 +44,10 @@
  *     a wrapped channel-reminder note asking the coordinator to summarize
  *     context usage and reply via `ib tgsend`; `/compact` is followed by
  *     a wrapped note telling the coordinator to notify the user it's ready
- *     once compaction completes; `/clear` gets no follow-up (it's a
- *     context reset, not a user question). `/usage` is NOT in this set —
+ *     once compaction completes; `/clear` gets no coordinator follow-up
+ *     (it's a context reset, not a user question) but the dispatcher
+ *     replies on Telegram with "Coordinator context is cleared." so the
+ *     user sees an acknowledgement. `/usage` is NOT in this set —
  *     it opens an interactive menu the coordinator can't escape, so it
  *     flows through the normal wrapped path like any other message.
  *     When a batch contains both a slash command and other text from the
@@ -144,7 +146,9 @@ function matchSlashCommand(trimmed: string): string | null {
 
 /** Channel-reminder note appended after a raw `/context` send so the
  *  coordinator summarizes context usage back to Telegram. `/clear` gets no
- *  follow-up — it's a context reset, not a user question. */
+ *  coordinator follow-up — it's a context reset, not a user question — but
+ *  the dispatcher does send a "Coordinator context is cleared." reply on
+ *  Telegram directly so the user sees the clear was acknowledged. */
 const CONTEXT_FOLLOWUP_BODY =
   "[user on telegram requested /context — please summarize context usage and reply via `ib tgsend`]";
 
@@ -648,12 +652,17 @@ export class TelegramDispatcher {
     // Per-command follow-up:
     //   /context → ask coordinator to summarize context usage
     //   /compact → ask coordinator to surface post-compaction status
-    //   /clear   → no follow-up (context reset, not a user question)
+    //   /clear   → no coordinator follow-up (context reset, not a user
+    //              question), but reply to the user on Telegram confirming
+    //              the clear landed. The reply is fire-and-forget via
+    //              `replyOnTelegram` — errors are logged, never thrown.
     let followupBody: string | null = null;
     if (commandName === "/context") {
       followupBody = CONTEXT_FOLLOWUP_BODY;
     } else if (commandName === "/compact") {
       followupBody = COMPACT_FOLLOWUP_BODY;
+    } else if (commandName === "/clear") {
+      await this.replyOnTelegram("Coordinator context is cleared.");
     }
 
     if (followupBody !== null) {

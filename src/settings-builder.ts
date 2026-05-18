@@ -7,6 +7,7 @@
  */
 
 import { ensureAgentTypesDir, loadAgentType } from "./agent-types";
+import { ensureSlashCommands } from "./slash-commands";
 
 export interface PermissionLayer {
   allow: string[];
@@ -50,6 +51,17 @@ export async function buildLayeredPermissions(opts: {
     await ensureAgentTypesDir();
   } catch {
     // If this fails, fall through — loadLayerPermissions logs and returns empty
+  }
+
+  // Same first-run idempotent populate pattern as ensureAgentTypesDir, but
+  // for `/respawn` and `/restart` slash commands shipped with itsybitsy.
+  // Missing files are written; existing files are left alone so user edits
+  // survive upgrades. Failures are non-fatal — slash commands are a UX
+  // convenience, not a hard requirement.
+  try {
+    await ensureSlashCommands();
+  } catch (err) {
+    console.error(`Warning: failed to ensure slash commands: ${err instanceof Error ? err.message : String(err)}`);
   }
 
   const layerPerms = await Promise.all(opts.layerNames.map(loadLayerPermissions));

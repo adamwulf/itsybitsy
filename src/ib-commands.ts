@@ -28,7 +28,7 @@ import { readConfig } from "./config";
 import { listTmuxSessions } from "./tmux-poller";
 import { SpawnContext } from "./types";
 import type { SpawnFn } from "./types";
-import { isValidModel, isValidToolList, isValidTmuxSession, isValidSessionId, isValidShellPath, shellQuote } from "./validation";
+import { isValidModel, isValidToolList, isValidTmuxSession, isValidSessionId, isValidShellPath, isValidAgentId, shellQuote } from "./validation";
 import { getTmuxWidthForAgent } from "./tui/widths";
 import { buildPerRepoCoordinatorSettings, checkCoordinatorExists, getCoordinatorAgentId, getCoordinatorHome } from "./coordinator";
 import { loadAgentType, agentTypeExists } from "./agent-types";
@@ -645,6 +645,162 @@ ${qAbsExitScript}
   } catch { /* ignore */ }
 
   return { ok: true, exitCode: 0, stdout: `Use 'ib look ${agent.id}' to view output`, stderr: "" };
+}
+
+/** Override the respawn detach runner (for testing) */
+let respawnDetachOverride: ((agent: Agent) => Promise<void>) | null = null;
+
+/** Override for testing — sets a synchronous in-process executor instead of detaching */
+export function setRespawnDetachRunner(fn: (agent: Agent) => Promise<void>): void {
+  respawnDetachOverride = fn;
+}
+
+/** Reset the respawn detach runner */
+export function resetRespawnDetachRunner(): void {
+  respawnDetachOverride = null;
+}
+
+/**
+ * Native respawn implementation — used by the `/respawn` and `/restart`
+ * slash commands.
+ *
+ * The agent runs `ib respawn` from inside its own Claude session. We CAN'T
+ * do the kill-and-restart inline because killing this agent's tmux session
+ * would kill the very process executing the command. Instead we launch a
+ * detached worker — a fresh, untracked tmux session that runs
+ * `ib respawn-self <id>`. That worker survives the agent's session being
+ * torn down, performs the kill-and-restart, then exits.
+ *
+ * For coordinators: the worker calls the existing reset path (full nuke +
+ * `newAgent` with `type: "coordinator"`). The new coordinator's
+ * `settings.local.json` is rebuilt from current sources (hardcoded constants
+ * + `_all.md` + `coordinator.md`), so edits to those files take effect.
+ *
+ * For non-coordinator agents: the worker calls `pauseAgent` (which kills
+ * the existing claude process and tmux session) then `resumeAgent` (which
+ * starts a fresh `claude --resume <session-id>` in the same worktree).
+ * SessionStart fires on the resumed session and re-reads the current
+ * agent-type `.md` body, so edits to `worker.md`, `manager.md`, etc. take
+ * effect.
+ *
+ * For `@system` (system coordinator): the worker calls
+ * `restartSystemCoordinator()`. This is rare — the system coordinator can
+ * already be restarted from the dashboard `R` key — but supporting it from
+ * the slash command keeps the UX uniform.
+ */
+export async function respawnAgent(agent: Agent): Promise<IbCommandResult> {
+  // Confirm the agent's directory still exists; respawning a stale ID is a
+  // common mistake and returning a clear error beats a hanging detached
+  // worker.
+  const agentDir = join(agent.repoPath, ".ittybitty", "agents", agent.id);
+  const dirExists = await Bun.file(join(agentDir, "meta.json")).exists().catch(() => false);
+  if (!dirExists) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' not found` };
+  }
+
+  await logAgent(agentDir, "[respawn] scheduling detached restart");
+
+  // Test override path: tests want to drive respawnSelf synchronously to
+  // observe the kill-and-restart steps without spawning a real subprocess.
+  if (respawnDetachOverride) {
+    await respawnDetachOverride(agent);
+    return { ok: true, exitCode: 0, stdout: `Respawn scheduled for ${agent.id}`, stderr: "" };
+  }
+
+  // Validate the agent ID before interpolating it into a shell command.
+  // `isValidAgentId` accepts alphanumeric + hyphens + underscores, which is
+  // a subset of safe shell tokens — no quoting needed below.
+  if (!isValidAgentId(agent.id)) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Invalid agent ID: ${agent.id}` };
+  }
+
+  // Spawn a detached worker by asking tmux to start a fresh, untracked
+  // session. The worker runs `ib respawn-self <id>` and inherits no file
+  // descriptors from the agent's tmux pane, so when the agent's session is
+  // killed the worker is untouched. A short sleep before the actual work
+  // gives this Claude turn time to finish rendering its tool result so the
+  // user sees the "scheduled" message before the pane disappears.
+  //
+  // We name the detached session deterministically (`ib-respawn-<id>`) so a
+  // stuck worker is easy to find. `-d` keeps it backgrounded; the worker
+  // exits when the shell command completes.
+  const detachSession = `ib-respawn-${agent.id}`;
+  const command = `sleep 1; ib respawn-self ${agent.id}`;
+  const result = await nukeResumeSpawnCtx.run([
+    "tmux", "new-session", "-d", "-s", detachSession, command,
+  ]);
+  if (result.exitCode !== 0) {
+    await logAgent(agentDir, `[respawn] failed to launch detached worker: ${result.stderr.trim()}`);
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Failed to schedule respawn: ${result.stderr.trim() || "tmux new-session failed"}` };
+  }
+
+  // remain-on-exit off so the detached session disappears the moment the
+  // worker exits — no zombie session cluttering `tmux ls`.
+  await nukeResumeSpawnCtx.run([
+    "tmux", "set-option", "-t", detachSession, "remain-on-exit", "off",
+  ]);
+
+  return {
+    ok: true,
+    exitCode: 0,
+    stdout: `Respawn scheduled for ${agent.id} — this session will exit shortly`,
+    stderr: "",
+  };
+}
+
+/**
+ * The "worker half" of respawn — runs in a detached tmux session spawned
+ * by `respawnAgent`. Performs the actual kill-and-restart so it survives
+ * its own target's tmux session being torn down.
+ *
+ * For coordinators, delegates to `resetCoordinator`. For non-coordinator
+ * agents, pauses then resumes — `resumeAgent` re-execs `claude --resume`
+ * which re-fires the SessionStart hook so the latest agent-type `.md`
+ * content is injected into the new conversation.
+ */
+export async function respawnSelf(agent: Agent): Promise<IbCommandResult> {
+  const agentDir = join(agent.repoPath, ".ittybitty", "agents", agent.id);
+
+  const dirExists = await Bun.file(join(agentDir, "meta.json")).exists().catch(() => false);
+  if (!dirExists) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' not found` };
+  }
+
+  await logAgent(agentDir, "[respawn-self] starting kill-and-restart");
+
+  // Per-repo coordinator: full reset. resetCoordinator() handles teardown
+  // and respawn via newAgent, which rebuilds settings.local.json from
+  // current `_all.md` + `coordinator.md` sources.
+  if (agent.meta.agentType === "coordinator") {
+    const result = await resetCoordinator(agent);
+    await logAgent(agentDir, `[respawn-self] coordinator reset complete: ${result.ok ? "ok" : "failed: " + result.stderr}`);
+    return result;
+  }
+
+  // Non-coordinator agent: pause (kills tmux + claude) then resume (starts
+  // fresh claude --resume in the same worktree, re-firing SessionStart).
+  //
+  // pauseAgent rejects already-stopped agents. That's fine — if a previous
+  // respawn attempt failed mid-flight and left the agent stopped, we fall
+  // through to resumeAgent directly.
+  if (agent.state !== "stopped") {
+    const pauseResult = await pauseAgent(agent);
+    if (!pauseResult.ok) {
+      await logAgent(agentDir, `[respawn-self] pause failed: ${pauseResult.stderr}`);
+      return { ok: false, exitCode: 1, stdout: "", stderr: `Respawn pause failed: ${pauseResult.stderr}` };
+    }
+  } else {
+    await logAgent(agentDir, "[respawn-self] agent already stopped, skipping pause");
+  }
+
+  const resumeResult = await resumeAgent(agent);
+  if (!resumeResult.ok) {
+    await logAgent(agentDir, `[respawn-self] resume failed: ${resumeResult.stderr}`);
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Respawn resume failed: ${resumeResult.stderr}` };
+  }
+
+  await logAgent(agentDir, "[respawn-self] respawn complete");
+  return { ok: true, exitCode: 0, stdout: `Respawned ${agent.id}`, stderr: "" };
 }
 
 /**

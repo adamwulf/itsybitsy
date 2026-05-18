@@ -5952,3 +5952,314 @@ describe("telegramSend (native, file-drop client)", () => {
     await promise; // drain the timeout so afterEach can clean up.
   });
 });
+
+// ---------------------------------------------------------------------------
+// respawn / respawn-self
+// ---------------------------------------------------------------------------
+describe("respawnAgent (native)", () => {
+  let tempDir: string;
+  let spawnCalls: string[][];
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "respawn-test-"));
+    spawnCalls = [];
+    const runner = mockSpawnFn(spawnCalls);
+    setNukeResumeSpawnRunner(runner);
+  });
+
+  afterEach(async () => {
+    resetNukeResumeSpawnRunner();
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  test("returns error when agent directory doesn't exist", async () => {
+    const { respawnAgent } = await import("./ib-commands");
+    const agent = makeAgent("agent-abc", tempDir);
+    const result = await respawnAgent(agent);
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("not found");
+  });
+
+  test("rejects invalid agent IDs without spawning anything", async () => {
+    // Setting up a meta.json for an obviously-bad id like "../etc" would be
+    // a test bug; instead, write meta.json under a clean id and then craft
+    // an Agent object that uses an unsafe id to exercise the validator.
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-bad");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-bad",
+      tmux_session: "tmux-agent-bad",
+    }));
+
+    const { respawnAgent } = await import("./ib-commands");
+    // Force a bad id post-construction. We're verifying the validator
+    // rejects shell-unsafe characters before tmux is invoked.
+    const agent = makeAgent("agent-bad", tempDir);
+    (agent as { id: string }).id = "agent$(rm)";
+
+    // Repoint meta.json to the unsafe id so the dirExists check passes —
+    // we want the validator to be the gate, not the dir check.
+    const unsafeDir = join(tempDir, ".ittybitty", "agents", "agent$(rm)");
+    await mkdir(unsafeDir, { recursive: true });
+    await Bun.write(join(unsafeDir, "meta.json"), JSON.stringify({ id: "agent$(rm)" }));
+
+    const result = await respawnAgent(agent);
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("Invalid agent ID");
+    // Critically: no tmux command was issued with the unsafe id
+    const tmuxNewSession = spawnCalls.find(
+      (c) => c[0] === "tmux" && c[1] === "new-session"
+    );
+    expect(tmuxNewSession).toBeUndefined();
+  });
+
+  test("schedules detached tmux worker on success", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-abc",
+      tmux_session: "tmux-agent-abc",
+    }));
+
+    const { respawnAgent } = await import("./ib-commands");
+    const agent = makeAgent("agent-abc", tempDir);
+    const result = await respawnAgent(agent);
+
+    expect(result.ok).toBe(true);
+    expect(result.stdout).toContain("Respawn scheduled");
+
+    // Verify a detached tmux new-session was issued with the right
+    // session name pattern and that the command contains `ib respawn-self`.
+    const newSessionCall = spawnCalls.find(
+      (c) => c[0] === "tmux" && c[1] === "new-session"
+    );
+    expect(newSessionCall).toBeDefined();
+    // -d (detached), -s <name>, and the command argument
+    expect(newSessionCall).toContain("-d");
+    const sessionFlagIdx = newSessionCall!.indexOf("-s");
+    expect(sessionFlagIdx).toBeGreaterThan(-1);
+    expect(newSessionCall![sessionFlagIdx + 1]).toBe("ib-respawn-agent-abc");
+    // The trailing command should call ib respawn-self <id>
+    const cmdArg = newSessionCall![newSessionCall!.length - 1]!;
+    expect(cmdArg).toContain("ib respawn-self agent-abc");
+  });
+
+  test("logs scheduling event to agent.log", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-abc",
+      tmux_session: "tmux-agent-abc",
+    }));
+
+    const { respawnAgent } = await import("./ib-commands");
+    const agent = makeAgent("agent-abc", tempDir);
+    await respawnAgent(agent);
+
+    const log = await Bun.file(join(agentDir, "agent.log")).text();
+    expect(log).toContain("[respawn] scheduling detached restart");
+  });
+
+  test("honors the test detach override", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-abc",
+      tmux_session: "tmux-agent-abc",
+    }));
+
+    const { respawnAgent, setRespawnDetachRunner, resetRespawnDetachRunner } =
+      await import("./ib-commands");
+
+    let invokedWithId: string | undefined;
+    setRespawnDetachRunner(async (a) => {
+      invokedWithId = a.id;
+    });
+
+    try {
+      const agent = makeAgent("agent-abc", tempDir);
+      const result = await respawnAgent(agent);
+
+      expect(result.ok).toBe(true);
+      expect(invokedWithId).toBe("agent-abc");
+
+      // tmux new-session must NOT have been called when the override is set
+      const newSessionCall = spawnCalls.find(
+        (c) => c[0] === "tmux" && c[1] === "new-session"
+      );
+      expect(newSessionCall).toBeUndefined();
+    } finally {
+      resetRespawnDetachRunner();
+    }
+  });
+
+  test("returns error when tmux new-session fails", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-abc",
+      tmux_session: "tmux-agent-abc",
+    }));
+
+    // Make tmux new-session fail
+    setNukeResumeSpawnRunner((cmd: string[]) => {
+      spawnCalls.push(cmd);
+      if (cmd[0] === "tmux" && cmd[1] === "new-session") {
+        return makeSpawnResult(1, "", "tmux: session create failed");
+      }
+      return makeSpawnResult();
+    });
+
+    const { respawnAgent } = await import("./ib-commands");
+    const agent = makeAgent("agent-abc", tempDir);
+    const result = await respawnAgent(agent);
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("Failed to schedule respawn");
+  });
+});
+
+// respawn-self is the "worker half" — invoked from a detached tmux session
+// by the respawn slash command. The interesting routing decision is
+// coordinator-vs-non-coordinator. The coordinator path delegates to the
+// same resetCoordinator code that powers the dashboard `R` key (covered by
+// the existing "coordinator reset path" describe block). Here we focus on
+// the non-coordinator path: it MUST call pause-then-resume rather than
+// the coordinator branch, and the routing is observable via which scripts
+// (resume.sh) and which meta.json fields get touched.
+describe("respawnSelf (native)", () => {
+  let tempDir: string;
+  let spawnCalls: string[][];
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "respawn-self-test-"));
+    spawnCalls = [];
+    const runner = mockSpawnFn(spawnCalls);
+    lifecycleSpawnCtx.set(runner);
+    setKillPauseSpawnRunner(runner);
+    setNukeResumeSpawnRunner(runner);
+  });
+
+  afterEach(async () => {
+    lifecycleSpawnCtx.reset();
+    resetKillPauseSpawnRunner();
+    resetNukeResumeSpawnRunner();
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  test("returns error when agent directory doesn't exist", async () => {
+    const { respawnSelf } = await import("./ib-commands");
+    const agent = makeAgent("agent-abc", tempDir);
+    const result = await respawnSelf(agent);
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("not found");
+  });
+
+  test("non-coordinator: writes resume.sh (proving pause-then-resume routing)", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-noncoord");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-noncoord",
+      tmux_session: "tmux-agent-noncoord",
+      session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    }));
+
+    // Make `tmux has-session` return failure so resumeAgent passes the
+    // liveness guard (no live session blocking the resume).
+    setKillPauseSpawnRunner((cmd: string[]) => {
+      spawnCalls.push(cmd);
+      if (cmd[0] === "tmux" && cmd[1] === "has-session") {
+        return makeSpawnResult(1);
+      }
+      return makeSpawnResult();
+    });
+    setNukeResumeSpawnRunner((cmd: string[]) => {
+      spawnCalls.push(cmd);
+      if (cmd[0] === "tmux" && cmd[1] === "has-session") {
+        return makeSpawnResult(1);
+      }
+      if (cmd.join(" ").includes("capture-pane")) {
+        return makeSpawnResult(0, "Claude Code v1.0\n");
+      }
+      return makeSpawnResult();
+    });
+
+    const { respawnSelf } = await import("./ib-commands");
+    const agent = _makeAgent({
+      id: "agent-noncoord",
+      repoPath: tempDir,
+      repoName: "test",
+      state: "running",
+      meta: {
+        session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        tmux_session: "tmux-agent-noncoord",
+      } as any,
+    });
+
+    await respawnSelf(agent);
+
+    // resume.sh is the smoking-gun proof that the non-coordinator branch
+    // ran — the coordinator branch goes through nukeAgent + newAgent and
+    // never touches resume.sh.
+    const resumeShExists = await Bun.file(join(agentDir, "resume.sh"))
+      .exists()
+      .catch(() => false);
+    expect(resumeShExists).toBe(true);
+  });
+
+  test("non-coordinator already-stopped: skips pause but still resumes", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-stopped");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-stopped",
+      tmux_session: "tmux-agent-stopped",
+      session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    }));
+
+    setKillPauseSpawnRunner((cmd: string[]) => {
+      spawnCalls.push(cmd);
+      if (cmd[0] === "tmux" && cmd[1] === "has-session") {
+        return makeSpawnResult(1);
+      }
+      return makeSpawnResult();
+    });
+    setNukeResumeSpawnRunner((cmd: string[]) => {
+      spawnCalls.push(cmd);
+      if (cmd[0] === "tmux" && cmd[1] === "has-session") {
+        return makeSpawnResult(1);
+      }
+      if (cmd.join(" ").includes("capture-pane")) {
+        return makeSpawnResult(0, "Claude Code v1.0\n");
+      }
+      return makeSpawnResult();
+    });
+
+    const { respawnSelf } = await import("./ib-commands");
+    const agent = _makeAgent({
+      id: "agent-stopped",
+      repoPath: tempDir,
+      repoName: "test",
+      state: "stopped",
+      meta: {
+        session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        tmux_session: "tmux-agent-stopped",
+      } as any,
+    });
+
+    await respawnSelf(agent);
+
+    // Even from stopped, resume.sh must be written — the agent was already
+    // in pause's "after" state, so we skip pause and go straight to resume.
+    const resumeShExists = await Bun.file(join(agentDir, "resume.sh"))
+      .exists()
+      .catch(() => false);
+    expect(resumeShExists).toBe(true);
+    // The "agent already stopped, skipping pause" log line proves the
+    // branch chosen.
+    const log = await Bun.file(join(agentDir, "agent.log")).text();
+    expect(log).toContain("agent already stopped, skipping pause");
+  });
+});
+

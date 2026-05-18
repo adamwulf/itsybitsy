@@ -1136,6 +1136,84 @@ async function main() {
       await printAndExit(await resumeAgent(agent));
       break;
     }
+    case "respawn":
+    case "restart": {
+      // Backs the `/respawn` and `/restart` slash commands. Resolves the
+      // current agent from the explicit ID arg, or — when no arg is given
+      // — from the cwd, so the slash command body can be the literal
+      // string `ib respawn` with no quoting. Schedules a detached
+      // worker that does the actual kill+restart so this Claude session
+      // can exit cleanly. See respawnAgent() for the full design.
+      const idArg = args[1];
+      const repos = await listRepos();
+
+      // @system: route to the system coordinator restart path directly.
+      // The system coordinator has no Agent object (no meta.json on disk),
+      // so it can't go through the regular respawnAgent flow.
+      if (idArg === "@system") {
+        const { restartSystemCoordinator } = await import("./coordinator");
+        await restartSystemCoordinator();
+        console.log("System coordinator restart scheduled");
+        process.exit(0);
+      }
+
+      // Resolve target. If no ID, infer from cwd via the same mechanism
+      // hooks use. This lets the slash command body call `ib respawn` with
+      // no arguments — the most natural UX for a self-respawn.
+      let agent: Agent | null = null;
+      if (idArg) {
+        agent = await findAgentById(idArg, repos);
+        if (!agent) {
+          console.error(`Agent not found: ${idArg}`);
+          process.exit(1);
+        }
+      } else {
+        const { resolveAgentFromCwd, SYSTEM_AGENT_ID } = await import("./hooks/shared");
+        const resolved = resolveAgentFromCwd(process.cwd());
+        if (resolved?.agentId === SYSTEM_AGENT_ID) {
+          const { restartSystemCoordinator } = await import("./coordinator");
+          await restartSystemCoordinator();
+          console.log("System coordinator restart scheduled");
+          process.exit(0);
+        }
+        if (!resolved) {
+          console.error("Could not detect current agent from cwd. Pass an agent ID: ib respawn <id>");
+          process.exit(1);
+        }
+        agent = await findAgentById(resolved.agentId, repos);
+        if (!agent) {
+          console.error(`Agent not found: ${resolved.agentId}`);
+          process.exit(1);
+        }
+      }
+
+      const { detectAgentStates } = await import("./agents");
+      await detectAgentStates([agent]);
+      const { respawnAgent } = await import("./ib-commands");
+      await printAndExit(await respawnAgent(agent));
+      break;
+    }
+    case "respawn-self": {
+      // Internal subcommand: the detached worker launched by `respawn`
+      // calls this to perform the actual kill+restart from outside the
+      // target agent's tmux session. Not intended for direct user use.
+      const idArg = args[1];
+      if (!idArg) {
+        console.error("Usage: ib respawn-self <agent-id>");
+        process.exit(1);
+      }
+      const repos = await listRepos();
+      const agent = await findAgentById(idArg, repos);
+      if (!agent) {
+        console.error(`Agent not found: ${idArg}`);
+        process.exit(1);
+      }
+      const { detectAgentStates } = await import("./agents");
+      await detectAgentStates([agent]);
+      const { respawnSelf } = await import("./ib-commands");
+      await printAndExit(await respawnSelf(agent));
+      break;
+    }
     case "new-agent":
     case "new": {
       const ibArgs = args.slice(1); // strip "new-agent"/"new"
@@ -1683,6 +1761,8 @@ async function main() {
       console.log("  merge <id>          Merge agent's work and close it");
       console.log("  merge-check <id>    Check if agent is ready to merge");
       console.log("  resume <id>         Resume a stopped agent");
+      console.log("  respawn [id]        Restart an agent's Claude session in-place (alias: restart)");
+      console.log("                      No-arg form infers the agent from cwd — used by the /respawn slash command");
       console.log("");
       console.log("Configuration:");
       console.log("  config list         List all config keys with values");

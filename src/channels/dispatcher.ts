@@ -37,16 +37,19 @@
  *   - `</channel>` substrings are stripped from inbound text/caption before
  *     wrapping (defense against forged closing tags).
  *   - Telegram slash-command passthrough: an inbound message whose trimmed
- *     body is exactly `/usage` or `/clear` is sent raw (no `<channel>`
+ *     body is exactly `/context` or `/clear` is sent raw (no `<channel>`
  *     wrapper, no `[sent by ...]:` prefix) so the coordinator's Claude Code
- *     session recognizes it as a slash command. `/usage` is followed by a
- *     wrapped channel-reminder note pointing the coordinator at `ib tgsend`
- *     so it knows the request originated on Telegram; `/clear` gets no
- *     follow-up. When a batch contains both a slash command and other
- *     text from the same chat, the slash command fires first, then the
- *     remaining messages flow through the normal coalesced path. Slash
- *     commands are NOT recognized while a chat is in the offline-prompt
- *     y/n flow — there they count as "anything else" and re-prompt.
+ *     session recognizes it as a slash command. `/context` is followed by
+ *     a wrapped channel-reminder note asking the coordinator to summarize
+ *     context usage and reply via `ib tgsend`; `/clear` gets no follow-up
+ *     (it's a context reset, not a user question). `/usage` is NOT in this
+ *     set — it opens an interactive menu the coordinator can't escape, so
+ *     it flows through the normal wrapped path like any other message.
+ *     When a batch contains both a slash command and other text from the
+ *     same chat, the slash command fires first, then the remaining
+ *     messages flow through the normal coalesced path. Slash commands are
+ *     NOT recognized while a chat is in the offline-prompt y/n flow —
+ *     there they count as "anything else" and re-prompt.
  *   - `stop()` aborts the in-flight long-poll via AbortController and waits
  *     for the loop to exit (caller wraps in a 2s timeout race).
  */
@@ -60,7 +63,7 @@ import { clearCachedChatId } from "./chat-id-cache";
 /** Delivery hook the dispatcher calls per coalesced batch. Defaults to
  *  the real `sendToSystemCoordinator` from src/index.ts; tests inject a
  *  mock to capture call order without booting tmux. `opts.raw` bypasses the
- *  `[sent by @telegram]:` prefix so slash commands like `/usage` and
+ *  `[sent by @telegram]:` prefix so slash commands like `/context` and
  *  `/clear` reach the coordinator verbatim. */
 export type SendToCoordinatorFn = (
   message: string,
@@ -115,15 +118,16 @@ export const TELEGRAM_SENTINEL = "@telegram";
  *  (no `<channel>` wrapper, no `[sent by ...]:` prefix). These are Claude
  *  Code slash commands the coordinator session executes directly — wrapping
  *  them would break the recognizer. Match is case-sensitive on the trimmed
- *  body; `/usage extra` is NOT a slash command. */
-const TELEGRAM_SLASH_COMMANDS = new Set(["/usage", "/clear"]);
+ *  body; `/context extra` is NOT a slash command. `/usage` is intentionally
+ *  NOT in this set — it opens an interactive menu the coordinator can't
+ *  escape, so it flows through the normal wrapped path. */
+const TELEGRAM_SLASH_COMMANDS = new Set(["/context", "/clear"]);
 
-/** Channel-reminder note appended after a raw `/usage` send so the
- *  coordinator knows the request came from Telegram and replies via
- *  `ib tgsend`. `/clear` gets no follow-up — it's a context reset, not a
- *  user question. */
-const USAGE_FOLLOWUP_BODY =
-  "[user on telegram requested /usage — please reply via `ib tgsend`]";
+/** Channel-reminder note appended after a raw `/context` send so the
+ *  coordinator summarizes context usage back to Telegram. `/clear` gets no
+ *  follow-up — it's a context reset, not a user question. */
+const CONTEXT_FOLLOWUP_BODY =
+  "[user on telegram requested /context — please summarize context usage and reply via `ib tgsend`]";
 
 /** Tag on the per-coordinator mutex. Phase 5 only ever has one (the system
  *  coordinator) but the structure allows future per-repo coordinators to
@@ -539,7 +543,7 @@ export class TelegramDispatcher {
     // messages into slash commands (sent raw, one per command, optionally
     // followed by a wrapped reminder) and non-slash messages (coalesced
     // into a single wrapped block via `deliver()`). Slash commands fire
-    // first so the coordinator sees `/usage` or `/clear` ahead of any
+    // first so the coordinator sees `/context` or `/clear` ahead of any
     // accompanying chatter. If the awaiting branch fires, slash commands
     // are NOT routed as commands — the y/n flow treats them as "anything
     // else" and re-prompts.
@@ -584,7 +588,7 @@ export class TelegramDispatcher {
   }
 
   /** Send one slash-command message raw to the coordinator. On success, fire
-   *  the `/usage` follow-up note (wrapped channel-reminder) so the
+   *  the `/context` follow-up note (wrapped channel-reminder) so the
    *  coordinator knows to reply via `ib tgsend`. On failure, apply the same
    *  one-retry-after-2s + offline-prompt logic as `deliver()`. The follow-up
    *  is suppressed when the raw send fails — there's no point telling the
@@ -609,15 +613,15 @@ export class TelegramDispatcher {
       }
     }
 
-    // Follow-up: only `/usage` gets a reminder note. `/clear` is a context
+    // Follow-up: only `/context` gets a reminder note. `/clear` is a context
     // reset and needs no reply.
-    if (command === "/usage") {
+    if (command === "/context") {
       const note: NormalizedMessage = {
         chatId: message.chatId,
         userId: message.userId,
         username: message.username,
         ts: message.ts,
-        body: USAGE_FOLLOWUP_BODY,
+        body: CONTEXT_FOLLOWUP_BODY,
         attachmentType: null,
       };
       const wrapped = wrapChannelReminder(chatId, [note]);
@@ -628,12 +632,12 @@ export class TelegramDispatcher {
         const followup = await sendCtx.fn(wrapped, { fromAgent: TELEGRAM_SENTINEL });
         if (!followup.ok) {
           logCtx.fn(
-            `Telegram dispatcher: /usage follow-up failed: ${followup.stderr || "send returned ok=false"}`,
+            `Telegram dispatcher: /context follow-up failed: ${followup.stderr || "send returned ok=false"}`,
           );
         }
       } catch (err) {
         logCtx.fn(
-          `Telegram dispatcher: /usage follow-up threw: ${err instanceof Error ? err.message : String(err)}`,
+          `Telegram dispatcher: /context follow-up threw: ${err instanceof Error ? err.message : String(err)}`,
         );
       }
     }
@@ -812,8 +816,8 @@ export class TelegramDispatcher {
  *  preserved so the original interleaving of slash and non-slash messages
  *  is reflected — slashes deliver first via the mutex chain, then the
  *  normals deliver as one block. Match is strict: only the exact, trimmed
- *  body matches `/usage` or `/clear`. `/usage extra` or `/USAGE` fall
- *  through as normals. */
+ *  body matches `/context` or `/clear`. `/context extra` or `/CONTEXT`
+ *  fall through as normals. */
 export function splitSlashCommands(messages: NormalizedMessage[]): {
   slashes: NormalizedMessage[];
   normals: NormalizedMessage[];

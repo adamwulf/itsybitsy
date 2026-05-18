@@ -292,14 +292,14 @@ describe("ib-commands", () => {
     test("raw=true suppresses [sent by ...] prefix even when fromAgent is set", async () => {
       const agent = makeAgent("agent-abc", tempDir);
       await mkdir(join(tempDir, ".ittybitty", "agents", "@telegram"), { recursive: true }).catch(() => {});
-      await sendMessage(agent, "/usage", { fromAgent: "@telegram", raw: true, cwd: "/" });
+      await sendMessage(agent, "/context", { fromAgent: "@telegram", raw: true, cwd: "/" });
 
       const sendKeysCall = spawnCalls.find(
         (c) => c[0] === "tmux" && c[1] === "send-keys" && c.length === 6 && c[4] === "-l"
       );
       expect(sendKeysCall).toBeDefined();
       // Message goes verbatim — no [sent by @telegram]: prefix.
-      expect(sendKeysCall![5]).toBe("/usage");
+      expect(sendKeysCall![5]).toBe("/context");
     });
 
     test("raw=true logs recipient as 'Received raw message' (no sender attribution)", async () => {

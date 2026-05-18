@@ -13,6 +13,7 @@ import {
   nowCtx,
   logCtx,
   ensureCoordinatorCtx,
+  restartCoordinatorCtx,
 } from "./dispatcher";
 import type { SendToCoordinatorFn } from "./dispatcher";
 import {
@@ -252,6 +253,7 @@ describe("TelegramDispatcher", () => {
     nowCtx.reset();
     logCtx.reset();
     ensureCoordinatorCtx.reset();
+    restartCoordinatorCtx.reset();
   });
 
   /** Build a dispatcher pre-wired with a TelegramClient and our mock fetch. */
@@ -1060,45 +1062,160 @@ describe("TelegramDispatcher", () => {
     expect(body.chat_id).toBe("100");
   });
 
-  test("inbound '/restart' → raw send, no coordinator follow-up", async () => {
+  test("inbound '/restart' → triggers restartCoordinatorCtx and acks on Telegram, no coordinator send", async () => {
     mock.enqueueResponse({ ok: true, result: [] }); // probe
     mock.enqueueResponse({
       ok: true,
       result: [update(1, { chat: { id: 100 }, from: { id: 7, username: "alice" }, text: "/restart" })],
     });
+    mock.enqueueResponse({ ok: true, result: { message_id: 99, chat: { id: 100 } } }); // ack reply
+
+    let restartCalls = 0;
+    restartCoordinatorCtx.set(async () => {
+      restartCalls += 1;
+      return true;
+    });
 
     const d = makeDispatcher();
     await d.start();
-    await waitFor(() => send.calls.length >= 1, 1_000);
-    // Give the loop a tick to (not) send a coordinator follow-up.
+    await waitFor(() => restartCalls >= 1, 1_000);
+    await waitFor(() => mock.allUrls().some((u) => u.includes("/sendMessage")), 1_000);
+    // Give the loop a tick to (not) send anything to the coordinator.
     await new Promise<void>((r) => setTimeout(r, 50));
     await d.stop();
 
-    // Exactly one coordinator send (the raw /restart), no wrapped follow-up —
-    // the coordinator session is about to be torn down by the respawn.
-    expect(send.calls.length).toBe(1);
-    expect(send.calls[0]!.message).toBe("/restart");
-    expect(send.calls[0]!.opts?.raw).toBe(true);
-    expect(send.calls[0]!.opts?.fromAgent).toBe(TELEGRAM_SENTINEL);
+    // restartCoordinatorCtx was invoked exactly once.
+    expect(restartCalls).toBe(1);
+    // Nothing was sent to the coordinator — /restart no longer passes through.
+    expect(send.calls.length).toBe(0);
+
+    // The user got the success ack on Telegram.
+    const sendMessageInits = mock.allInits().filter(
+      (_, i) => mock.allUrls()[i]!.includes("/sendMessage"),
+    );
+    const texts = sendMessageInits.map((init) => JSON.parse(init?.body as string).text);
+    expect(texts).toContain("Coordinator restarted with a fresh session.");
   });
 
-  test("inbound '/respawn' → raw send, no coordinator follow-up", async () => {
+  test("inbound '/respawn' → triggers restartCoordinatorCtx and acks on Telegram, no coordinator send", async () => {
     mock.enqueueResponse({ ok: true, result: [] }); // probe
     mock.enqueueResponse({
       ok: true,
       result: [update(1, { chat: { id: 100 }, from: { id: 7, username: "alice" }, text: "/respawn" })],
     });
+    mock.enqueueResponse({ ok: true, result: { message_id: 99, chat: { id: 100 } } }); // ack reply
+
+    let restartCalls = 0;
+    restartCoordinatorCtx.set(async () => {
+      restartCalls += 1;
+      return true;
+    });
 
     const d = makeDispatcher();
     await d.start();
-    await waitFor(() => send.calls.length >= 1, 1_000);
+    await waitFor(() => restartCalls >= 1, 1_000);
+    await waitFor(() => mock.allUrls().some((u) => u.includes("/sendMessage")), 1_000);
     await new Promise<void>((r) => setTimeout(r, 50));
     await d.stop();
 
-    expect(send.calls.length).toBe(1);
-    expect(send.calls[0]!.message).toBe("/respawn");
-    expect(send.calls[0]!.opts?.raw).toBe(true);
-    expect(send.calls[0]!.opts?.fromAgent).toBe(TELEGRAM_SENTINEL);
+    expect(restartCalls).toBe(1);
+    expect(send.calls.length).toBe(0);
+
+    const sendMessageInits = mock.allInits().filter(
+      (_, i) => mock.allUrls()[i]!.includes("/sendMessage"),
+    );
+    const texts = sendMessageInits.map((init) => JSON.parse(init?.body as string).text);
+    expect(texts).toContain("Coordinator restarted with a fresh session.");
+  });
+
+  test("'/restart' when restartCoordinatorCtx returns false → 'did not reach ready marker' reply", async () => {
+    mock.enqueueResponse({ ok: true, result: [] }); // probe
+    mock.enqueueResponse({
+      ok: true,
+      result: [update(1, { chat: { id: 100 }, from: { id: 7, username: "alice" }, text: "/restart" })],
+    });
+    mock.enqueueResponse({ ok: true, result: { message_id: 99, chat: { id: 100 } } });
+
+    let restartCalls = 0;
+    restartCoordinatorCtx.set(async () => {
+      restartCalls += 1;
+      return false;
+    });
+
+    const d = makeDispatcher();
+    await d.start();
+    await waitFor(() => restartCalls >= 1, 1_000);
+    await waitFor(() => mock.allUrls().some((u) => u.includes("/sendMessage")), 1_000);
+    await new Promise<void>((r) => setTimeout(r, 50));
+    await d.stop();
+
+    expect(restartCalls).toBe(1);
+    expect(send.calls.length).toBe(0);
+
+    const sendMessageInits = mock.allInits().filter(
+      (_, i) => mock.allUrls()[i]!.includes("/sendMessage"),
+    );
+    const texts = sendMessageInits.map((init) => JSON.parse(init?.body as string).text);
+    expect(texts).toContain(
+      "Coordinator restart did not reach ready marker — check ib watch.",
+    );
+  });
+
+  test("'/restart' when restartCoordinatorCtx throws → 'Coordinator restart failed: <msg>' reply", async () => {
+    mock.enqueueResponse({ ok: true, result: [] }); // probe
+    mock.enqueueResponse({
+      ok: true,
+      result: [update(1, { chat: { id: 100 }, from: { id: 7, username: "alice" }, text: "/restart" })],
+    });
+    mock.enqueueResponse({ ok: true, result: { message_id: 99, chat: { id: 100 } } });
+
+    let restartCalls = 0;
+    restartCoordinatorCtx.set(async () => {
+      restartCalls += 1;
+      throw new Error("tmux died");
+    });
+
+    const d = makeDispatcher();
+    await d.start();
+    await waitFor(() => restartCalls >= 1, 1_000);
+    await waitFor(() => mock.allUrls().some((u) => u.includes("/sendMessage")), 1_000);
+    await new Promise<void>((r) => setTimeout(r, 50));
+    await d.stop();
+
+    expect(restartCalls).toBe(1);
+    expect(send.calls.length).toBe(0);
+
+    const sendMessageInits = mock.allInits().filter(
+      (_, i) => mock.allUrls()[i]!.includes("/sendMessage"),
+    );
+    const texts = sendMessageInits.map((init) => JSON.parse(init?.body as string).text);
+    expect(texts).toContain("Coordinator restart failed: tmux died");
+  });
+
+  test("'/restart' does NOT invoke sendCtx at all (no raw passthrough to coordinator)", async () => {
+    mock.enqueueResponse({ ok: true, result: [] }); // probe
+    mock.enqueueResponse({
+      ok: true,
+      result: [update(1, { chat: { id: 100 }, from: { id: 7, username: "alice" }, text: "/restart" })],
+    });
+    mock.enqueueResponse({ ok: true, result: { message_id: 99, chat: { id: 100 } } });
+
+    let restartCalls = 0;
+    restartCoordinatorCtx.set(async () => {
+      restartCalls += 1;
+      return true;
+    });
+
+    const d = makeDispatcher();
+    await d.start();
+    await waitFor(() => restartCalls >= 1, 1_000);
+    await waitFor(() => mock.allUrls().some((u) => u.includes("/sendMessage")), 1_000);
+    // Give plenty of time for any stray send to fire.
+    await new Promise<void>((r) => setTimeout(r, 100));
+    await d.stop();
+
+    // The contract: dispatcher must not forward /restart text to the coordinator.
+    expect(send.calls.length).toBe(0);
   });
 
   test("inbound '/usage' → wrapped normally, NOT a slash command", async () => {

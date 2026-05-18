@@ -37,23 +37,29 @@
  *   - `</channel>` substrings are stripped from inbound text/caption before
  *     wrapping (defense against forged closing tags).
  *   - Telegram slash-command passthrough: an inbound message whose trimmed
- *     body is exactly `/context`, `/clear`, `/restart`, `/respawn`, or
- *     starts with `/compact` (optionally followed by arguments) is sent raw
- *     (no `<channel>` wrapper, no `[sent by ...]:` prefix) so the
- *     coordinator's Claude Code session recognizes it as a slash command.
- *     `/context` is followed by a wrapped channel-reminder note asking the
- *     coordinator to summarize context usage and reply via `ib tgsend`;
- *     `/compact` is followed by a wrapped note telling the coordinator to
- *     notify the user it's ready once compaction completes; `/clear` gets
- *     no coordinator follow-up (it's a context reset, not a user question)
- *     but the dispatcher replies on Telegram with "Coordinator context is
- *     cleared." so the user sees an acknowledgement. `/restart` and
- *     `/respawn` get no follow-up of any kind — they tear down the
- *     coordinator session and detach a worker that brings it back up, so
- *     any wrapped reminder we queued would land in a session that's about
- *     to die. `/usage` is NOT in this set — it opens an interactive menu
- *     the coordinator can't escape, so it flows through the normal wrapped
- *     path like any other message.
+ *     body is exactly `/context`, `/clear`, or starts with `/compact`
+ *     (optionally followed by arguments) is sent raw (no `<channel>`
+ *     wrapper, no `[sent by ...]:` prefix) so the coordinator's Claude Code
+ *     session recognizes it as a slash command. `/context` is followed by
+ *     a wrapped channel-reminder note asking the coordinator to summarize
+ *     context usage and reply via `ib tgsend`; `/compact` is followed by a
+ *     wrapped note telling the coordinator to notify the user it's ready
+ *     once compaction completes; `/clear` gets no coordinator follow-up
+ *     (it's a context reset, not a user question) but the dispatcher
+ *     replies on Telegram with "Coordinator context is cleared." so the
+ *     user sees an acknowledgement. `/restart` and `/respawn` are also
+ *     recognized but do NOT pass through to the coordinator's Claude Code
+ *     input at all — sending the slash command as raw text proved
+ *     unreliable (Claude often treated it as a normal user prompt rather
+ *     than a slash command). Instead the dispatcher itself kills the
+ *     coordinator tmux session, writes the cleared-marker so the new
+ *     session is FRESH (not a resume), starts a new coordinator, waits
+ *     for the ready marker, and replies on Telegram with an ack. On
+ *     failure the user sees a "Coordinator restart failed/did not reach
+ *     ready marker" reply — these commands never enter the offline-prompt
+ *     y/n flow. `/usage` is NOT in this set — it opens an interactive
+ *     menu the coordinator can't escape, so it flows through the normal
+ *     wrapped path like any other message.
  *     When a batch contains both a slash command and other text from the
  *     same chat, the slash command fires first, then the remaining
  *     messages flow through the normal coalesced path. Slash commands are
@@ -114,6 +120,23 @@ const defaultEnsureCoordinator: EnsureCoordinatorFn = async () => {
 };
 export const ensureCoordinatorCtx = new InjectionContext<EnsureCoordinatorFn>(defaultEnsureCoordinator);
 
+/** Injectable restart-coordinator hook. Used by the /restart and /respawn
+ *  slash commands to tear down the system coordinator and bring up a FRESH
+ *  session (cleared marker written so the prior transcript is not resumed).
+ *  Resolves to `true` once the new coordinator's Claude UI is ready, or
+ *  `false` if the new session never reaches the ready marker. Defaults to a
+ *  wrapper that calls `discardSystemCoordinator()` then
+ *  `ensureSystemCoordinator()` then `waitForCoordinatorReady()`. Tests
+ *  inject a stub. */
+export type RestartCoordinatorFn = () => Promise<boolean>;
+const defaultRestartCoordinator: RestartCoordinatorFn = async () => {
+  const { discardSystemCoordinator, ensureSystemCoordinator, waitForCoordinatorReady } = await import("../coordinator");
+  await discardSystemCoordinator();
+  await ensureSystemCoordinator();
+  return await waitForCoordinatorReady();
+};
+export const restartCoordinatorCtx = new InjectionContext<RestartCoordinatorFn>(defaultRestartCoordinator);
+
 /** Coordinator-offline retry delay (ms). Plan: "retry once after 2s." */
 const COORDINATOR_OFFLINE_RETRY_MS = 2_000;
 
@@ -123,16 +146,21 @@ const DROP_LOG_INTERVAL_MS = 60 * 60 * 1_000;
 /** Fixed sentinel routed by sendMessage as "[sent by @telegram]:". */
 export const TELEGRAM_SENTINEL = "@telegram";
 
-/** Slash commands that should be forwarded to the coordinator verbatim
- *  (no `<channel>` wrapper, no `[sent by ...]:` prefix). These are Claude
- *  Code slash commands the coordinator session executes directly — wrapping
- *  them would break the recognizer. `/context`, `/clear`, `/restart`, and
- *  `/respawn` match exactly on the trimmed body; `/compact` matches on a
- *  prefix so users can pass optional compaction instructions (e.g.
- *  `/compact focus on the API work`). `/context extra` is NOT a slash
- *  command (exact-match rule). `/usage` is intentionally NOT in this set —
- *  it opens an interactive menu the coordinator can't escape, so it flows
- *  through the normal wrapped path. */
+/** Slash commands recognized on the trimmed body. `/context` and `/clear`
+ *  are forwarded to the coordinator verbatim (no `<channel>` wrapper, no
+ *  `[sent by ...]:` prefix) — they are Claude Code slash commands the
+ *  coordinator session executes directly, and wrapping would break the
+ *  recognizer. `/restart` and `/respawn` are recognized here too, but
+ *  `dispatchSlashCommand` handles them differently: it tears down the
+ *  coordinator session and brings up a FRESH one itself rather than
+ *  forwarding the text to Claude (forwarding was unreliable — Claude
+ *  often treated the slash as a normal prompt). `/context extra` is NOT
+ *  a slash command (exact-match rule). `/usage` is intentionally NOT in
+ *  this set — it opens an interactive menu the coordinator can't escape,
+ *  so it flows through the normal wrapped path. `/compact` (the other
+ *  recognized command) is matched separately via the prefix list below
+ *  so users can pass optional compaction instructions (e.g.
+ *  `/compact focus on the API work`). */
 const TELEGRAM_SLASH_EXACT_COMMANDS = new Set(["/context", "/clear", "/restart", "/respawn"]);
 const TELEGRAM_SLASH_PREFIX_COMMANDS = ["/compact"] as const;
 
@@ -623,12 +651,31 @@ export class TelegramDispatcher {
     }
   }
 
-  /** Send one slash-command message raw to the coordinator. On success, fire
-   *  any per-command follow-up note (wrapped channel-reminder) so the
-   *  coordinator knows to reply via `ib tgsend`. On failure, apply the same
-   *  one-retry-after-2s + offline-prompt logic as `deliver()`. The follow-up
-   *  is suppressed when the raw send fails — there's no point telling the
-   *  coordinator to reply on Telegram when the coordinator isn't even up. */
+  /** Send one slash-command message to the coordinator.
+   *
+   *  Two branches:
+   *
+   *  1. `/restart` and `/respawn` are handled directly by the dispatcher —
+   *     they do NOT pass through to the coordinator's Claude Code input
+   *     (sending those as raw text was unreliable because Claude often
+   *     interpreted the text as a normal user prompt rather than as a slash
+   *     command). Instead the dispatcher tears down the coordinator session
+   *     via `restartCoordinatorCtx.fn()` (which clears the resume marker so
+   *     the new session is fresh, not resumed), waits for the new session
+   *     to reach the ready marker, and replies on Telegram with an ack.
+   *     These commands do not enter the offline-prompt y/n flow on failure;
+   *     a thrown error or a not-ready outcome just produces a Telegram
+   *     reply and returns.
+   *
+   *  2. All other slash commands (`/context`, `/clear`, `/compact`) are sent
+   *     raw to the coordinator (no `<channel>` wrapper, no
+   *     `[sent by ...]:` prefix). On success a per-command follow-up note
+   *     (wrapped channel-reminder) may fire so the coordinator knows to
+   *     reply via `ib tgsend`. On send failure the same one-retry-after-2s
+   *     + offline-prompt logic as `deliver()` applies. The follow-up is
+   *     suppressed when the raw send fails — there's no point telling the
+   *     coordinator to reply on Telegram when the coordinator isn't even
+   *     up. */
   private async dispatchSlashCommand(
     chatId: string,
     message: NormalizedMessage,
@@ -639,6 +686,29 @@ export class TelegramDispatcher {
     // should never be null here. If it is, fall back to the raw trimmed
     // body for command identification.
     const commandName = canonical ?? trimmed;
+
+    // /restart and /respawn: tear down the coordinator and bring up a
+    // FRESH session ourselves; never forward the slash command text to the
+    // coordinator (Claude treats it as a normal prompt too often). Acks
+    // fire on Telegram only after the new session is ready.
+    if (commandName === "/restart" || commandName === "/respawn") {
+      try {
+        const ready = await restartCoordinatorCtx.fn();
+        if (ready) {
+          await this.replyOnTelegram("Coordinator restarted with a fresh session.");
+        } else {
+          await this.replyOnTelegram(
+            "Coordinator restart did not reach ready marker — check ib watch.",
+          );
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logCtx.fn(`Telegram dispatcher: ${commandName} failed: ${msg}`);
+        await this.replyOnTelegram(`Coordinator restart failed: ${msg}`);
+      }
+      return;
+    }
+
     const sendResult = await sendCtx.fn(trimmed, { fromAgent: TELEGRAM_SENTINEL, raw: true });
     let delivered = sendResult.ok;
     if (!sendResult.ok) {

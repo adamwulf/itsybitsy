@@ -997,7 +997,8 @@ describe("TelegramDispatcher", () => {
   });
 
   /* ---------------------------------------------------------------- */
-  /*  Telegram slash-command passthrough (/context, /clear)            */
+  /*  Telegram slash-command passthrough                              */
+  /*  (/context, /clear, /restart, /respawn)                          */
   /* ---------------------------------------------------------------- */
 
   test("inbound '/context' → raw send + wrapped follow-up note", async () => {
@@ -1057,6 +1058,47 @@ describe("TelegramDispatcher", () => {
     const body = JSON.parse(sendMessageInit?.body as string);
     expect(body.text).toBe("Coordinator context is cleared.");
     expect(body.chat_id).toBe("100");
+  });
+
+  test("inbound '/restart' → raw send, no coordinator follow-up", async () => {
+    mock.enqueueResponse({ ok: true, result: [] }); // probe
+    mock.enqueueResponse({
+      ok: true,
+      result: [update(1, { chat: { id: 100 }, from: { id: 7, username: "alice" }, text: "/restart" })],
+    });
+
+    const d = makeDispatcher();
+    await d.start();
+    await waitFor(() => send.calls.length >= 1, 1_000);
+    // Give the loop a tick to (not) send a coordinator follow-up.
+    await new Promise<void>((r) => setTimeout(r, 50));
+    await d.stop();
+
+    // Exactly one coordinator send (the raw /restart), no wrapped follow-up —
+    // the coordinator session is about to be torn down by the respawn.
+    expect(send.calls.length).toBe(1);
+    expect(send.calls[0]!.message).toBe("/restart");
+    expect(send.calls[0]!.opts?.raw).toBe(true);
+    expect(send.calls[0]!.opts?.fromAgent).toBe(TELEGRAM_SENTINEL);
+  });
+
+  test("inbound '/respawn' → raw send, no coordinator follow-up", async () => {
+    mock.enqueueResponse({ ok: true, result: [] }); // probe
+    mock.enqueueResponse({
+      ok: true,
+      result: [update(1, { chat: { id: 100 }, from: { id: 7, username: "alice" }, text: "/respawn" })],
+    });
+
+    const d = makeDispatcher();
+    await d.start();
+    await waitFor(() => send.calls.length >= 1, 1_000);
+    await new Promise<void>((r) => setTimeout(r, 50));
+    await d.stop();
+
+    expect(send.calls.length).toBe(1);
+    expect(send.calls[0]!.message).toBe("/respawn");
+    expect(send.calls[0]!.opts?.raw).toBe(true);
+    expect(send.calls[0]!.opts?.fromAgent).toBe(TELEGRAM_SENTINEL);
   });
 
   test("inbound '/usage' → wrapped normally, NOT a slash command", async () => {

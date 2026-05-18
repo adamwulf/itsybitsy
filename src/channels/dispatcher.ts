@@ -37,19 +37,23 @@
  *   - `</channel>` substrings are stripped from inbound text/caption before
  *     wrapping (defense against forged closing tags).
  *   - Telegram slash-command passthrough: an inbound message whose trimmed
- *     body is exactly `/context`, `/clear`, or starts with `/compact`
- *     (optionally followed by arguments) is sent raw (no `<channel>`
- *     wrapper, no `[sent by ...]:` prefix) so the coordinator's Claude Code
- *     session recognizes it as a slash command. `/context` is followed by
- *     a wrapped channel-reminder note asking the coordinator to summarize
- *     context usage and reply via `ib tgsend`; `/compact` is followed by
- *     a wrapped note telling the coordinator to notify the user it's ready
- *     once compaction completes; `/clear` gets no coordinator follow-up
- *     (it's a context reset, not a user question) but the dispatcher
- *     replies on Telegram with "Coordinator context is cleared." so the
- *     user sees an acknowledgement. `/usage` is NOT in this set —
- *     it opens an interactive menu the coordinator can't escape, so it
- *     flows through the normal wrapped path like any other message.
+ *     body is exactly `/context`, `/clear`, `/restart`, `/respawn`, or
+ *     starts with `/compact` (optionally followed by arguments) is sent raw
+ *     (no `<channel>` wrapper, no `[sent by ...]:` prefix) so the
+ *     coordinator's Claude Code session recognizes it as a slash command.
+ *     `/context` is followed by a wrapped channel-reminder note asking the
+ *     coordinator to summarize context usage and reply via `ib tgsend`;
+ *     `/compact` is followed by a wrapped note telling the coordinator to
+ *     notify the user it's ready once compaction completes; `/clear` gets
+ *     no coordinator follow-up (it's a context reset, not a user question)
+ *     but the dispatcher replies on Telegram with "Coordinator context is
+ *     cleared." so the user sees an acknowledgement. `/restart` and
+ *     `/respawn` get no follow-up of any kind — they tear down the
+ *     coordinator session and detach a worker that brings it back up, so
+ *     any wrapped reminder we queued would land in a session that's about
+ *     to die. `/usage` is NOT in this set — it opens an interactive menu
+ *     the coordinator can't escape, so it flows through the normal wrapped
+ *     path like any other message.
  *     When a batch contains both a slash command and other text from the
  *     same chat, the slash command fires first, then the remaining
  *     messages flow through the normal coalesced path. Slash commands are
@@ -122,13 +126,14 @@ export const TELEGRAM_SENTINEL = "@telegram";
 /** Slash commands that should be forwarded to the coordinator verbatim
  *  (no `<channel>` wrapper, no `[sent by ...]:` prefix). These are Claude
  *  Code slash commands the coordinator session executes directly — wrapping
- *  them would break the recognizer. `/context` and `/clear` match exactly
- *  on the trimmed body; `/compact` matches on a prefix so users can pass
- *  optional compaction instructions (e.g. `/compact focus on the API work`).
- *  `/context extra` is NOT a slash command (exact-match rule). `/usage` is
- *  intentionally NOT in this set — it opens an interactive menu the
- *  coordinator can't escape, so it flows through the normal wrapped path. */
-const TELEGRAM_SLASH_EXACT_COMMANDS = new Set(["/context", "/clear"]);
+ *  them would break the recognizer. `/context`, `/clear`, `/restart`, and
+ *  `/respawn` match exactly on the trimmed body; `/compact` matches on a
+ *  prefix so users can pass optional compaction instructions (e.g.
+ *  `/compact focus on the API work`). `/context extra` is NOT a slash
+ *  command (exact-match rule). `/usage` is intentionally NOT in this set —
+ *  it opens an interactive menu the coordinator can't escape, so it flows
+ *  through the normal wrapped path. */
+const TELEGRAM_SLASH_EXACT_COMMANDS = new Set(["/context", "/clear", "/restart", "/respawn"]);
 const TELEGRAM_SLASH_PREFIX_COMMANDS = ["/compact"] as const;
 
 /** Returns the canonical command name (e.g. `/compact`) if the trimmed body

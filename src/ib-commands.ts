@@ -774,6 +774,24 @@ export async function respawnSelf(agent: Agent): Promise<IbCommandResult> {
   if (agent.meta.agentType === "coordinator") {
     const result = await resetCoordinator(agent);
     await logAgent(agentDir, `[respawn-self] coordinator reset complete: ${result.ok ? "ok" : "failed: " + result.stderr}`);
+    if (result.ok) {
+      // Telegram ack so a user who triggered /respawn from their phone sees
+      // confirmation. Writes to the outbox; the dispatcher running in
+      // `ib watch` picks it up and forwards. No-op if Telegram isn't
+      // configured. We await it so the file write completes before the
+      // detached `respawn-self` worker exits — telegramSend caps at ~1s.
+      //
+      // The ack lives here (in respawnSelf, the detached `/respawn` worker)
+      // rather than in resetCoordinator so the dashboard `R` key — which
+      // calls resetCoordinator directly via resumeAgent — does NOT trigger
+      // a Telegram ping. A user pressing R is already looking at the
+      // dashboard and doesn't need the notification.
+      try {
+        await telegramSend("Coordinator has been respawned with a clean session.");
+      } catch (err) {
+        await logAgent(agentDir, `[respawn-self] telegram ack failed: ${err}`);
+      }
+    }
     return result;
   }
 

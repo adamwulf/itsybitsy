@@ -5,6 +5,12 @@ canSpawnChildren: true
 icon: ◇
 instructionStyle: coordinator
 permissions:
+  allow:
+    - "ScheduleWakeup"
+    - "CronCreate"
+    - "CronDelete"
+    - "CronList"
+    - "Skill(loop)"
   deny:
     - Write
     - Edit

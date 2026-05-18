@@ -36,6 +36,17 @@
  *     awaiting state. The y/n message itself is never forwarded.
  *   - `</channel>` substrings are stripped from inbound text/caption before
  *     wrapping (defense against forged closing tags).
+ *   - Telegram slash-command passthrough: an inbound message whose trimmed
+ *     body is exactly `/usage` or `/clear` is sent raw (no `<channel>`
+ *     wrapper, no `[sent by ...]:` prefix) so the coordinator's Claude Code
+ *     session recognizes it as a slash command. `/usage` is followed by a
+ *     wrapped channel-reminder note pointing the coordinator at `ib tgsend`
+ *     so it knows the request originated on Telegram; `/clear` gets no
+ *     follow-up. When a batch contains both a slash command and other
+ *     text from the same chat, the slash command fires first, then the
+ *     remaining messages flow through the normal coalesced path. Slash
+ *     commands are NOT recognized while a chat is in the offline-prompt
+ *     y/n flow — there they count as "anything else" and re-prompt.
  *   - `stop()` aborts the in-flight long-poll via AbortController and waits
  *     for the loop to exit (caller wraps in a 2s timeout race).
  */
@@ -48,10 +59,12 @@ import { clearCachedChatId } from "./chat-id-cache";
 
 /** Delivery hook the dispatcher calls per coalesced batch. Defaults to
  *  the real `sendToSystemCoordinator` from src/index.ts; tests inject a
- *  mock to capture call order without booting tmux. */
+ *  mock to capture call order without booting tmux. `opts.raw` bypasses the
+ *  `[sent by @telegram]:` prefix so slash commands like `/usage` and
+ *  `/clear` reach the coordinator verbatim. */
 export type SendToCoordinatorFn = (
   message: string,
-  opts?: { fromAgent?: string; cwd?: string },
+  opts?: { fromAgent?: string; cwd?: string; raw?: boolean },
 ) => Promise<{ ok: boolean; exitCode: number; stdout: string; stderr: string }>;
 
 const defaultSendToCoordinator: SendToCoordinatorFn = async (msg, opts) => {
@@ -97,6 +110,20 @@ const DROP_LOG_INTERVAL_MS = 60 * 60 * 1_000;
 
 /** Fixed sentinel routed by sendMessage as "[sent by @telegram]:". */
 export const TELEGRAM_SENTINEL = "@telegram";
+
+/** Slash commands that should be forwarded to the coordinator verbatim
+ *  (no `<channel>` wrapper, no `[sent by ...]:` prefix). These are Claude
+ *  Code slash commands the coordinator session executes directly — wrapping
+ *  them would break the recognizer. Match is case-sensitive on the trimmed
+ *  body; `/usage extra` is NOT a slash command. */
+const TELEGRAM_SLASH_COMMANDS = new Set(["/usage", "/clear"]);
+
+/** Channel-reminder note appended after a raw `/usage` send so the
+ *  coordinator knows the request came from Telegram and replies via
+ *  `ib tgsend`. `/clear` gets no follow-up — it's a context reset, not a
+ *  user question. */
+const USAGE_FOLLOWUP_BODY =
+  "[user on telegram requested /usage — please reply via `ib tgsend`]";
 
 /** Tag on the per-coordinator mutex. Phase 5 only ever has one (the system
  *  coordinator) but the structure allows future per-repo coordinators to
@@ -504,9 +531,18 @@ export class TelegramDispatcher {
       }
     }
 
-    // Deliver each chat's coalesced batch through the mutex. We run them
+    // Deliver each chat's batch through the mutex. We run them
     // sequentially via the same mutex chain so two chats' messages never
     // interleave on the coordinator pipe.
+    //
+    // For chats not in awaiting-confirmation state, we split each chat's
+    // messages into slash commands (sent raw, one per command, optionally
+    // followed by a wrapped reminder) and non-slash messages (coalesced
+    // into a single wrapped block via `deliver()`). Slash commands fire
+    // first so the coordinator sees `/usage` or `/clear` ahead of any
+    // accompanying chatter. If the awaiting branch fires, slash commands
+    // are NOT routed as commands — the y/n flow treats them as "anything
+    // else" and re-prompts.
     for (const [chatId, messages] of byChat.entries()) {
       // Mutex acquisition inside this for-await loop is redundant with the
       // sequential iteration — the loop already serializes per-chat batches
@@ -514,10 +550,92 @@ export class TelegramDispatcher {
       // future refactor that parallelizes batches across chats (e.g. via
       // Promise.all) must still serialize keystrokes to a single coordinator
       // tmux session, and the mutex is the contract that enforces it.
-      // Capture for the closure — TS narrows `messages` correctly.
-      await this.withMutex(SYSTEM_COORDINATOR_MUTEX_KEY, async () => {
-        await this.deliver(chatId, messages);
-      });
+      const isAwaiting = this.awaitingCoordinatorStart.has(chatId);
+      if (isAwaiting) {
+        await this.withMutex(SYSTEM_COORDINATOR_MUTEX_KEY, async () => {
+          await this.handleAwaitingConfirmation(chatId, messages);
+        });
+        continue;
+      }
+
+      const { slashes, normals } = splitSlashCommands(messages);
+
+      // Slash commands first, each as its own raw send. If a raw send falls
+      // into the coordinator-offline prompt path, subsequent slash commands
+      // for this chat are skipped (the awaiting flag is set; the next
+      // iteration's `isAwaiting` check would catch them anyway, but the
+      // explicit guard inside the loop avoids spamming offline prompts).
+      for (const slash of slashes) {
+        if (this.awaitingCoordinatorStart.has(chatId)) break;
+        await this.withMutex(SYSTEM_COORDINATOR_MUTEX_KEY, async () => {
+          await this.dispatchSlashCommand(chatId, slash);
+        });
+      }
+
+      // Then the remaining non-slash messages as a coalesced wrapped block.
+      // If the slash-command path put the chat into awaiting state, skip the
+      // normal deliver — the user is now in a y/n flow.
+      if (normals.length > 0 && !this.awaitingCoordinatorStart.has(chatId)) {
+        await this.withMutex(SYSTEM_COORDINATOR_MUTEX_KEY, async () => {
+          await this.deliver(chatId, normals);
+        });
+      }
+    }
+  }
+
+  /** Send one slash-command message raw to the coordinator. On success, fire
+   *  the `/usage` follow-up note (wrapped channel-reminder) so the
+   *  coordinator knows to reply via `ib tgsend`. On failure, apply the same
+   *  one-retry-after-2s + offline-prompt logic as `deliver()`. The follow-up
+   *  is suppressed when the raw send fails — there's no point telling the
+   *  coordinator to reply on Telegram when the coordinator isn't even up. */
+  private async dispatchSlashCommand(
+    chatId: string,
+    message: NormalizedMessage,
+  ): Promise<void> {
+    const command = message.body.trim();
+    const sendResult = await sendCtx.fn(command, { fromAgent: TELEGRAM_SENTINEL, raw: true });
+    let delivered = sendResult.ok;
+    if (!sendResult.ok) {
+      await sleepCtx.fn(COORDINATOR_OFFLINE_RETRY_MS);
+      const retry = await sendCtx.fn(command, { fromAgent: TELEGRAM_SENTINEL, raw: true });
+      delivered = retry.ok;
+      if (!delivered) {
+        this.awaitingCoordinatorStart.add(chatId);
+        await this.replyOnTelegram(
+          "The coordinator is offline. Start the coordinator? (y/n)",
+        );
+        return;
+      }
+    }
+
+    // Follow-up: only `/usage` gets a reminder note. `/clear` is a context
+    // reset and needs no reply.
+    if (command === "/usage") {
+      const note: NormalizedMessage = {
+        chatId: message.chatId,
+        userId: message.userId,
+        username: message.username,
+        ts: message.ts,
+        body: USAGE_FOLLOWUP_BODY,
+        attachmentType: null,
+      };
+      const wrapped = wrapChannelReminder(chatId, [note]);
+      // No retry on the follow-up: the raw command already landed, so a
+      // transient failure here just means the coordinator missed a hint —
+      // it does NOT block the user. Log and move on.
+      try {
+        const followup = await sendCtx.fn(wrapped, { fromAgent: TELEGRAM_SENTINEL });
+        if (!followup.ok) {
+          logCtx.fn(
+            `Telegram dispatcher: /usage follow-up failed: ${followup.stderr || "send returned ok=false"}`,
+          );
+        }
+      } catch (err) {
+        logCtx.fn(
+          `Telegram dispatcher: /usage follow-up threw: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
     }
   }
 
@@ -687,6 +805,29 @@ export class TelegramDispatcher {
 
     return { chatId, userId, username, ts, body, attachmentType };
   }
+}
+
+/** Partition a per-chat batch into slash commands (raw passthrough) and
+ *  ordinary messages (coalesced + wrapped). Order within each bucket is
+ *  preserved so the original interleaving of slash and non-slash messages
+ *  is reflected — slashes deliver first via the mutex chain, then the
+ *  normals deliver as one block. Match is strict: only the exact, trimmed
+ *  body matches `/usage` or `/clear`. `/usage extra` or `/USAGE` fall
+ *  through as normals. */
+export function splitSlashCommands(messages: NormalizedMessage[]): {
+  slashes: NormalizedMessage[];
+  normals: NormalizedMessage[];
+} {
+  const slashes: NormalizedMessage[] = [];
+  const normals: NormalizedMessage[] = [];
+  for (const m of messages) {
+    if (TELEGRAM_SLASH_COMMANDS.has(m.body.trim())) {
+      slashes.push(m);
+    } else {
+      normals.push(m);
+    }
+  }
+  return { slashes, normals };
 }
 
 /** Wrap a coalesced per-chat batch in the channel-reminder block format

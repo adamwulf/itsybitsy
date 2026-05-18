@@ -1250,11 +1250,18 @@ export function resetSendSpawnRunner(): void {
  * 5. Calculate delay: 0.1 + (msg_len / 100) * 0.5, clamped to [0.2, 3.0]
  * 6. Send via tmux send-keys, sleep, Enter
  * 7. Log to recipient's agent.log
+ *
+ * When `opts.raw` is true, the `[sent by ...]:` prefix is suppressed and the
+ * message is delivered verbatim. The recipient's agent.log records this as a
+ * "Received raw message" line (no sender attribution) and the sender's
+ * agent.log (if any) records "Sent raw message". Sender auto-detection is
+ * still performed so the sender log line is reachable, but the prefix never
+ * lands on the recipient pane.
  */
 export async function sendMessage(
   agent: Agent,
   message: string,
-  opts?: { fromAgent?: string; cwd?: string }
+  opts?: { fromAgent?: string; cwd?: string; raw?: boolean }
 ): Promise<IbCommandResult> {
   const tmuxSession = agent.meta.tmux_session;
   if (!tmuxSession) {
@@ -1302,8 +1309,11 @@ export async function sendMessage(
 
   // Format message with sender prefix. `@`-prefixed sender IDs (e.g. @system)
   // are sentinels, not agent IDs, so omit the literal "agent " word for them.
+  // Raw mode (used by Telegram slash-command passthrough) skips the prefix
+  // entirely — the recipient pane sees the message verbatim.
+  const raw = opts?.raw === true;
   let fullMessage = message;
-  if (fromId) {
+  if (fromId && !raw) {
     const label = fromId.startsWith("@") ? fromId : `agent ${fromId}`;
     fullMessage = `[sent by ${label}]: ${message}`;
   }
@@ -1346,9 +1356,14 @@ export async function sendMessage(
   await new Response(enterProc.stderr).text(); // drain
   await enterProc.exited;
 
-  // Log to recipient's agent.log
+  // Log to recipient's agent.log. Raw sends omit sender attribution from the
+  // recipient line since the recipient pane saw the message without any
+  // [sent by ...] prefix — surfacing the sender only in the log would be
+  // confusing.
   const agentDir = join(agent.repoPath, ".ittybitty", "agents", agent.id);
-  if (fromId) {
+  if (raw) {
+    await logAgent(agentDir, `Received raw message: ${message}`);
+  } else if (fromId) {
     await logAgent(agentDir, `Received message from ${fromId}: ${message}`);
   } else {
     await logAgent(agentDir, `Received message: ${message}`);
@@ -1357,7 +1372,8 @@ export async function sendMessage(
   // Log to sender's agent.log if applicable
   if (fromId) {
     const senderDir = join(agent.repoPath, ".ittybitty", "agents", fromId);
-    await logAgent(senderDir, `Sent message to ${agent.id}: ${message}`);
+    const verb = raw ? "Sent raw message" : "Sent message";
+    await logAgent(senderDir, `${verb} to ${agent.id}: ${message}`);
   }
 
   // Write state: "running" to meta.json (agent just received input)

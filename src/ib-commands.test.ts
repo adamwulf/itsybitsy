@@ -289,6 +289,55 @@ describe("ib-commands", () => {
       expect(lastCall).toEqual(["tmux", "send-keys", "-t", "tmux-agent-abc", "Enter"]);
     });
 
+    test("raw=true suppresses [sent by ...] prefix even when fromAgent is set", async () => {
+      const agent = makeAgent("agent-abc", tempDir);
+      await mkdir(join(tempDir, ".ittybitty", "agents", "@telegram"), { recursive: true }).catch(() => {});
+      await sendMessage(agent, "/usage", { fromAgent: "@telegram", raw: true, cwd: "/" });
+
+      const sendKeysCall = spawnCalls.find(
+        (c) => c[0] === "tmux" && c[1] === "send-keys" && c.length === 6 && c[4] === "-l"
+      );
+      expect(sendKeysCall).toBeDefined();
+      // Message goes verbatim — no [sent by @telegram]: prefix.
+      expect(sendKeysCall![5]).toBe("/usage");
+    });
+
+    test("raw=true logs recipient as 'Received raw message' (no sender attribution)", async () => {
+      const agent = makeAgent("agent-abc", tempDir);
+      await sendMessage(agent, "/clear", { fromAgent: "@telegram", raw: true, cwd: "/" });
+
+      const recipientLog = await Bun.file(
+        join(tempDir, ".ittybitty", "agents", "agent-abc", "agent.log")
+      ).text();
+      expect(recipientLog).toContain("Received raw message: /clear");
+      // Must NOT contain the standard "from <sender>" phrasing.
+      expect(recipientLog).not.toContain("Received message from @telegram");
+    });
+
+    test("raw=true logs sender as 'Sent raw message' when sender dir exists", async () => {
+      const agent = makeAgent("agent-abc", tempDir);
+      const senderDir = join(tempDir, ".ittybitty", "agents", "agent-sender");
+      await mkdir(senderDir, { recursive: true });
+
+      await sendMessage(agent, "ping", { fromAgent: "agent-sender", raw: true });
+
+      const senderLog = await Bun.file(join(senderDir, "agent.log")).text();
+      expect(senderLog).toContain("Sent raw message to agent-abc: ping");
+      expect(senderLog).not.toContain("Sent message to agent-abc: ping");
+    });
+
+    test("raw is opt-in: default (no raw flag) still adds the [sent by ...] prefix", async () => {
+      const agent = makeAgent("agent-abc", tempDir);
+      await mkdir(join(tempDir, ".ittybitty", "agents", "agent-sender"), { recursive: true });
+
+      await sendMessage(agent, "hello", { fromAgent: "agent-sender" });
+
+      const sendKeysCall = spawnCalls.find(
+        (c) => c[0] === "tmux" && c[1] === "send-keys" && c.length === 6 && c[4] === "-l"
+      );
+      expect(sendKeysCall![5]).toBe("[sent by agent agent-sender]: hello");
+    });
+
     test("returns error and does not send Enter when a chunk fails mid-stream", async () => {
       let chunkCallCount = 0;
       setSendSpawnRunner((cmd: string[]) => {

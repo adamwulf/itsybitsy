@@ -43,6 +43,19 @@ ib remove /path/to/project
 ib watch
 ```
 
+## Slash Commands
+
+itsybitsy ships two Claude Code slash commands that any agent can use to restart its own Claude session in place. Use them when you've edited an agent-type markdown file (e.g. `~/.itsybitsy/agent-types/coordinator.md`, `worker.md`, `manager.md`, `_all.md`, `_non_coordinator.md`) and want the running agent to pick up the changes without a manual kill-and-resume from the dashboard.
+
+| Command | Action |
+|---|---|
+| `/respawn` | Stop this agent's Claude session and start a fresh one in the same worktree. The SessionStart hook re-fires and re-reads the agent-type `.md` files from `~/.itsybitsy/agent-types/`. |
+| `/restart` | Alias for `/respawn` — same behavior. |
+
+Both commands shell out to `ib respawn`, which schedules a detached worker (a fresh, untracked tmux session) to perform the actual kill-and-restart so this Claude session can exit cleanly. For non-coordinator agents the worker re-execs `claude --resume <session-id>` against the same worktree; for per-repo coordinators it tears down and respawns the coordinator with rebuilt permissions and hooks. Direct CLI use is also supported: `ib respawn <id>`, `ib restart <id>`, or `ib respawn @system` for the system coordinator.
+
+The markdown files are auto-installed to `~/.claude/commands/respawn.md` and `~/.claude/commands/restart.md` on first agent spawn. Existing files are not overwritten — feel free to customize them.
+
 ## Specification
 
 The behavioral specification lives in [SPEC.md](./SPEC.md). It documents the definitive intended behavior for agent lifecycle, hooks, state detection, and orchestration — including intentional divergences from the bash reference implementation.

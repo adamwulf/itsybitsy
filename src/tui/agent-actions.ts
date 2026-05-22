@@ -1311,12 +1311,34 @@ export function handleSnapshot(ctx: ActionCtx) {
       const filename = `snapshot-${timestamp}-${result.state}.txt`;
       const dir = agent.archived ? "archive" : "agents";
       const debugDir = `${agent.repoPath}/.ittybitty/${dir}/${agent.id}/debug-logs`;
+      const snapshotPath = `${debugDir}/${filename}`;
+      const baseName = filename.replace(/\.txt$/, "");
+      const notePath = `${debugDir}/${baseName}-note.txt`;
       await Bun.$`mkdir -p ${debugDir}`.quiet();
       await Bun.write(
-        `${debugDir}/${filename}`,
+        snapshotPath,
         `State: ${result.state}\nReason: ${result.reason}\n\n${strippedOutput}`
       );
       ctx.setNotice(`Snapshot saved: ${filename} (state: ${result.state})`);
+      ctx.showDialog({
+        type: "textarea",
+        prompt: `Note for ${filename} (empty to skip):`,
+        buffer: new TextBuffer(),
+        focusedButton: "text",
+        onSubmit: (note: string) => {
+          ctx.closeDialog();
+          const trimmed = note.trim();
+          if (!trimmed) { ctx.setNotice(`Snapshot saved: ${filename} (no note)`); return; }
+          ctx.executeAndRefresh(async () => {
+            try {
+              await Bun.write(notePath, `${trimmed}\n`);
+              ctx.setNotice(`Snapshot + note saved: ${filename}`);
+            } catch (err) {
+              ctx.setNotice(`Note save error: ${err}`);
+            }
+          });
+        },
+      });
     } catch (err) {
       ctx.setNotice(`Snapshot error: ${err}`);
     }

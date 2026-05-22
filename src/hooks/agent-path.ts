@@ -105,6 +105,25 @@ export function isInAllowedPaths(filePath: string, allowedPaths: string[]): bool
   return false;
 }
 
+// ── Settings file protection ─────────────────────────────────────────────────
+
+/**
+ * Tool names that mutate files. Used to gate the settings*.json write block —
+ * Read/Glob/Grep/LS on settings.json must still be allowed.
+ */
+const WRITE_TOOLS = new Set(["Write", "Edit", "NotebookEdit"]);
+
+/**
+ * Check if an absolute, normalized path points directly to a settings*.json
+ * file inside <worktreePath>/.claude/. Files in subdirectories of .claude do
+ * not match — only files immediately under .claude.
+ */
+export function isWorktreeSettingsFile(filePath: string, worktreePath: string): boolean {
+  const claudeDir = join(worktreePath, ".claude");
+  if (dirname(filePath) !== claudeDir) return false;
+  return /^settings.*\.json$/.test(basename(filePath));
+}
+
 // ── Pure decision logic ──────────────────────────────────────────────────────
 
 /**
@@ -176,6 +195,84 @@ export function checkPathAccess(
 }
 
 /**
+ * Reason string used when a bash command is denied for mutating the agent's
+ * own .claude/settings*.json. Exported so tests can assert against it.
+ */
+export const SETTINGS_WRITE_DENY_REASON =
+  "Access denied: agents cannot modify their own .claude/settings*.json (use 'ib' to change permissions)";
+
+/**
+ * Detect whether a bash command writes to <worktreePath>/.claude/settings*.json.
+ *
+ * Best-effort detection — perfect bash parsing isn't possible, but we cover:
+ *   - `> .claude/settings*.json`   (truncate redirect)
+ *   - `>> .claude/settings*.json`  (append redirect)
+ *   - `sed -i ... .claude/settings*.json`  (in-place edit)
+ * Both relative (`.claude/settings*.json`) and absolute
+ * (`<worktreePath>/.claude/settings*.json`) forms are matched.
+ *
+ * Read-only commands like `cat`, `grep`, or `jq` without redirection are
+ * intentionally left alone.
+ */
+function checkBashSettingsWrite(
+  command: string,
+  worktreePath: string
+): HookDecision | null {
+  // Match a settings file token: either a path ending in /.claude/settings*.json
+  // or just .claude/settings*.json (when relative). The boundary chars are
+  // start-of-string/space/quote/= on the left and end-of-string/space/quote/;/&/|
+  // on the right.
+  //
+  // Two passes:
+  //   1. Find every settings-file occurrence at a word boundary.
+  //   2. For each occurrence, classify the immediate left-context as a write
+  //      redirect (> / >>) or check whether the command line starts with
+  //      `sed -i` and references the file as an argument.
+  const settingsRe = /(^|[\s'"=])((?:\/[^\s'"=;&|<>]*)?\.claude\/settings[^\s'"=;&|<>/]*\.json)/g;
+  let match: RegExpExecArray | null;
+  while ((match = settingsRe.exec(command)) !== null) {
+    const matchedPath = match[2]!;
+    const tokenStart = match.index + match[1]!.length;
+
+    // Only flag paths that resolve into our own .claude/. For absolute paths,
+    // require the path to begin with worktreePath + "/.claude/". For relative
+    // paths (starting with `.claude/`), accept unconditionally — the agent's
+    // cwd is inside its worktree, so this is the only .claude/ they can write.
+    if (matchedPath.startsWith("/")) {
+      if (!matchedPath.startsWith(worktreePath + "/.claude/")) continue;
+    } else if (!matchedPath.startsWith(".claude/")) {
+      continue;
+    }
+
+    // Look back from tokenStart, skipping whitespace, to find a > or >>.
+    let i = tokenStart - 1;
+    while (i >= 0 && (command[i] === " " || command[i] === "\t")) i--;
+    if (i >= 0 && command[i] === ">") {
+      return { decision: "deny", reason: SETTINGS_WRITE_DENY_REASON };
+    }
+  }
+
+  // sed -i / sed -i'<suffix>' / sed --in-place — any of these followed somewhere
+  // by a settings file argument is a mutation.
+  const sedInPlace = /(^|[\s;&|])sed\s+(?:-i\S*|--in-place\S*)/;
+  if (sedInPlace.test(command)) {
+    settingsRe.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = settingsRe.exec(command)) !== null) {
+      const matchedPath = m[2]!;
+      if (matchedPath.startsWith("/")) {
+        if (!matchedPath.startsWith(worktreePath + "/.claude/")) continue;
+      } else if (!matchedPath.startsWith(".claude/")) {
+        continue;
+      }
+      return { decision: "deny", reason: SETTINGS_WRITE_DENY_REASON };
+    }
+  }
+
+  return null;
+}
+
+/**
  * Check a bash command string for references to restricted directories.
  * Catches commands like `cat /repo/.ittybitty/agents/agent-other/...`
  * or commands referencing the root repo directly.
@@ -194,6 +291,11 @@ function checkBashCommandPaths(
   if (blockedFlag) {
     return { decision: "deny", reason: `The ${blockedFlag} flag is not allowed with git. Run git commands from your working directory instead.` };
   }
+
+  // Block bash mutations of <worktreePath>/.claude/settings*.json — agents
+  // must not grant themselves new permissions by rewriting their settings.
+  const settingsDenial = checkBashSettingsWrite(command, worktreePath);
+  if (settingsDenial) return settingsDenial;
 
   // Check for references to other agents' directories
   if (agentsDir) {
@@ -275,24 +377,34 @@ function checkFilePath(
     // Path doesn't exist yet — keep the resolve() result
   }
 
-  // 6. Allow: path within worktree
+  // 6. Block: writes to <worktreePath>/.claude/settings*.json — agents must
+  // not grant themselves new permissions by editing their own settings file.
+  // Reads are allowed; only mutation tools are blocked here.
+  if (WRITE_TOOLS.has(toolName) && isWorktreeSettingsFile(filePath, worktreePath)) {
+    return {
+      decision: "deny",
+      reason: "Access denied: agents cannot modify their own .claude/settings*.json (use 'ib' to change permissions)",
+    };
+  }
+
+  // 7. Allow: path within worktree
   if (filePath.startsWith(worktreePath + "/") || filePath === worktreePath) {
     return { decision: "allow", reason: "Tool in allow list, path in worktree" };
   }
 
-  // 7. Allow: own agent.log
+  // 8. Allow: own agent.log
   if (filePath === join(agentDir, "agent.log")) {
     return { decision: "allow", reason: "Tool in allow list, accessing own log" };
   }
 
-  // 8. Allow: own Claude project dir (where Claude Code spills oversized tool
+  // 9. Allow: own Claude project dir (where Claude Code spills oversized tool
   // responses and stores transcripts — ~/.claude/projects/<encoded-worktree>).
   const projectDir = claudeProjectDirFor(worktreePath);
   if (filePath === projectDir || filePath.startsWith(projectDir + "/")) {
     return { decision: "allow", reason: "Tool in allow list, accessing own Claude project dir" };
   }
 
-  // 9. Block: other agents' directories
+  // 10. Block: other agents' directories
   // Guard: an empty agentsDir means there are no sibling agents to isolate
   // against (e.g. the @system context — see hookCheckPath). Without the
   // guard, `"" + "/"` becomes `/`, which startsWith() matches against every
@@ -305,12 +417,12 @@ function checkFilePath(
     return { decision: "deny", reason: "Access denied: cannot access other agents' files" };
   }
 
-  // 10. Block: main repo (outside worktree)
+  // 11. Block: main repo (outside worktree)
   if (rootRepo && filePath.startsWith(rootRepo + "/") && !filePath.startsWith(worktreePath + "/")) {
     return { decision: "deny", reason: "Access denied: work in your worktree, not the main repo" };
   }
 
-  // 11. allowedPaths-based access control
+  // 12. allowedPaths-based access control
   if (ctx.allowedPaths !== undefined) {
     // allowedPaths is defined: check if path is in the list
     if (isInAllowedPaths(filePath, ctx.allowedPaths)) {
@@ -320,7 +432,7 @@ function checkFilePath(
     return { decision: "deny", reason: "Access denied: path not in allowedPaths" };
   }
 
-  // 12. Legacy fallback: allow all other paths (system files, ~/.claude, etc.)
+  // 13. Legacy fallback: allow all other paths (system files, ~/.claude, etc.)
   return { decision: "allow", reason: "Tool in allow list" };
 }
 

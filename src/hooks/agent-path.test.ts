@@ -523,6 +523,252 @@ describe("checkPathAccess", () => {
   });
 });
 
+// ── settings*.json write protection ─────────────────────────────────────────
+
+describe("checkPathAccess — .claude/settings*.json write protection", () => {
+  // Use a worktree path that exists on disk so realpathSync() doesn't munge
+  // our test values. /tmp is a safe root because path-resolution under it is
+  // a no-op on macOS/Linux for these test paths (they don't exist; realpath
+  // falls back to the resolve() result).
+  test("Edit on .claude/settings.local.json → DENIED", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Edit",
+      toolInput: { file_path: "/repo/.ittybitty/agents/agent-abc123/repo/.claude/settings.local.json" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("cannot modify their own .claude/settings");
+  });
+
+  test("Write on .claude/settings.json → DENIED", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Write",
+      toolInput: { file_path: "/repo/.ittybitty/agents/agent-abc123/repo/.claude/settings.json" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("cannot modify their own .claude/settings");
+  });
+
+  test("Write on .claude/settings.foo.json → DENIED (matches settings*.json)", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Write",
+      toolInput: { file_path: "/repo/.ittybitty/agents/agent-abc123/repo/.claude/settings.foo.json" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("cannot modify their own .claude/settings");
+  });
+
+  test("NotebookEdit on .claude/settings.local.json → DENIED", () => {
+    const ctx = makeCtx({ allowList: ["Read", "Write", "Edit", "NotebookEdit", "Glob", "Grep", "Bash"] });
+    const input = makeInput({
+      toolName: "NotebookEdit",
+      toolInput: { notebook_path: "/repo/.ittybitty/agents/agent-abc123/repo/.claude/settings.local.json" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("cannot modify their own .claude/settings");
+  });
+
+  test("Write on .claude/other.json → ALLOWED (not a settings*.json)", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Write",
+      toolInput: { file_path: "/repo/.ittybitty/agents/agent-abc123/repo/.claude/other.json" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("allow");
+    expect(result.reason).toContain("path in worktree");
+  });
+
+  test("Write on .claude/sub/settings.local.json → ALLOWED (not directly in .claude/)", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Write",
+      toolInput: { file_path: "/repo/.ittybitty/agents/agent-abc123/repo/.claude/sub/settings.local.json" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("allow");
+    expect(result.reason).toContain("path in worktree");
+  });
+
+  test("Read on .claude/settings.local.json → ALLOWED", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Read",
+      toolInput: { file_path: "/repo/.ittybitty/agents/agent-abc123/repo/.claude/settings.local.json" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("allow");
+    expect(result.reason).toContain("path in worktree");
+  });
+
+  test("Glob on .claude/settings.local.json → ALLOWED (read-style tool)", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Glob",
+      toolInput: { path: "/repo/.ittybitty/agents/agent-abc123/repo/.claude/settings.local.json" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("allow");
+  });
+
+  // ── Bash redirection / sed -i ────────────────────────────────────────────
+  test("Bash: echo {} > .claude/settings.local.json → DENIED (relative)", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "echo {} > .claude/settings.local.json" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("cannot modify their own .claude/settings");
+  });
+
+  test("Bash: echo {} >> .claude/settings.json → DENIED (append, relative)", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "echo {} >> .claude/settings.json" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("cannot modify their own .claude/settings");
+  });
+
+  test("Bash: cat foo > .claude/settings.local.json → DENIED", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "cat foo > .claude/settings.local.json" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("cannot modify their own .claude/settings");
+  });
+
+  test("Bash: jq ... > .claude/settings.local.json → DENIED", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "jq '.permissions' some.json > .claude/settings.local.json" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("cannot modify their own .claude/settings");
+  });
+
+  test("Bash: sed -i ... .claude/settings.local.json → DENIED", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "sed -i 's/x/y/' .claude/settings.local.json" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("cannot modify their own .claude/settings");
+  });
+
+  test("Bash: sed -i'.bak' ... .claude/settings.local.json → DENIED (BSD sed)", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "sed -i'.bak' 's/x/y/' .claude/settings.local.json" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("cannot modify their own .claude/settings");
+  });
+
+  test("Bash: cat .claude/settings.local.json → ALLOWED (read-only)", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "cat .claude/settings.local.json" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("allow");
+  });
+
+  test("Bash: jq . .claude/settings.local.json → ALLOWED (no redirection)", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "jq . .claude/settings.local.json" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("allow");
+  });
+
+  test("Bash: grep foo .claude/settings.json → ALLOWED (read-only)", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "grep foo .claude/settings.json" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("allow");
+  });
+
+  // ── Absolute path variants ──────────────────────────────────────────────
+  test("Bash: > <worktree>/.claude/settings.local.json (absolute) → DENIED", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "echo {} > /repo/.ittybitty/agents/agent-abc123/repo/.claude/settings.local.json" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("cannot modify their own .claude/settings");
+  });
+
+  test("Bash: sed -i ... <worktree>/.claude/settings.json (absolute) → DENIED", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "sed -i 's/x/y/' /repo/.ittybitty/agents/agent-abc123/repo/.claude/settings.json" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("cannot modify their own .claude/settings");
+  });
+
+  test("Bash: cat <worktree>/.claude/settings.local.json (absolute, read-only) → ALLOWED", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "cat /repo/.ittybitty/agents/agent-abc123/repo/.claude/settings.local.json" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("allow");
+  });
+
+  // ── Edge cases ──────────────────────────────────────────────────────────
+  test("Bash: redirect to .claude/other.json → ALLOWED (not settings*.json)", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "echo {} > .claude/other.json" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("allow");
+  });
+
+  test("Bash: redirect to .claude/sub/settings.json → ALLOWED (not directly in .claude/)", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "echo {} > .claude/sub/settings.json" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("allow");
+  });
+});
+
 // ── parseIbCommand ───────────────────────────────────────────────────────────
 
 describe("parseIbCommand", () => {

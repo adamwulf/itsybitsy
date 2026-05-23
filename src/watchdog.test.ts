@@ -884,7 +884,7 @@ describe("watchdog", () => {
       resetSystemCoordinatorHasSessionFn();
     });
 
-    test("@system sentinel routes to system coordinator tmux session with @watchdog attribution", async () => {
+    test("@system sentinel routes to system coordinator tmux session with watchdog attribution", async () => {
       const a1 = agent("a1", "complete", null);
       a1.meta.spawned_by = { agent_id: "@system", repo_path: null };
 
@@ -894,7 +894,7 @@ describe("watchdog", () => {
       expect(ok).toBe(true);
       // sendMessage delivers via `tmux send-keys -t <session> -l <chunk>` —
       // assert one chunked payload arrived at the coordinator session AND
-      // carries the `[sent by @watchdog]:` prefix, so a regression dropping
+      // carries the `[sent by watchdog]:` prefix, so a regression dropping
       // the WATCHDOG_SENTINEL would fail this test. Position-independent
       // arg scan mirrors the existing countSendKeysWithText helper.
       const { IB_COORDINATOR_SESSION } = await import("./coordinator");
@@ -903,7 +903,7 @@ describe("watchdog", () => {
         c.args.includes("-t") &&
         c.args.includes(IB_COORDINATOR_SESSION) &&
         c.args.includes("-l") &&
-        c.args.some((a: any) => typeof a === "string" && a.includes("[sent by @watchdog]:"))
+        c.args.some((a: any) => typeof a === "string" && a.includes("[sent by watchdog]:"))
       );
       expect(matchingCalls.length).toBeGreaterThan(0);
     });
@@ -1491,7 +1491,7 @@ describe("watchdog", () => {
 
   describe("api_error handler", () => {
     /** Count "please retry" send-keys -l calls in spawnMock.
-     *  sendMessage prepends `[sent by @watchdog]: ` (see WATCHDOG_SENTINEL),
+     *  sendMessage prepends `[sent by watchdog]: ` (see WATCHDOG_SENTINEL),
      *  so we substring-match instead of exact-match. */
     function countRetryCalls(): number {
       return spawnMock.calls.filter((c) => {
@@ -1600,20 +1600,22 @@ describe("watchdog", () => {
   });
 
   // =========================================================================
-  // @watchdog sentinel prefix — regression test for human-attribution bug.
+  // watchdog sentinel prefix — regression test for human-attribution bug.
   // The watchdog process runs with cwd = agent.repoPath (root repo, not a
   // worktree under .ittybitty/agents/<id>/repo), so without WATCHDOG_SENTINEL
   // the new user-prefix branch in sendMessage would tag every watchdog nudge
   // as `[sent by user]`, making agents think the user typed "please retry"
-  // when actually the watchdog injected it.
+  // when actually the watchdog injected it. The displayed prefix renders
+  // without the leading `@` (see BARE_RENDERED_SENTINELS in ib-commands.ts)
+  // so it cannot be misread as the routable `@<repo-name>` namespace.
   // =========================================================================
 
-  describe("@watchdog sentinel prefix", () => {
+  describe("watchdog sentinel prefix", () => {
     test("WATCHDOG_SENTINEL is the literal @watchdog sentinel", () => {
       expect(WATCHDOG_SENTINEL).toBe("@watchdog");
     });
 
-    test("notifyManager nudge carries [sent by @watchdog]: prefix", async () => {
+    test("notifyManager nudge carries [sent by watchdog]: prefix", async () => {
       const mgr = agent("mgr", "running");
       const worker = agent("w1", "waiting", "mgr");
 
@@ -1623,12 +1625,12 @@ describe("watchdog", () => {
         c.args.includes("send-keys") &&
         c.args.includes("-l") &&
         c.args.includes("tmux-mgr") &&
-        c.args.some((a: unknown) => typeof a === "string" && a.includes("[sent by @watchdog]:"))
+        c.args.some((a: unknown) => typeof a === "string" && a.includes("[sent by watchdog]:"))
       );
       expect(matching.length).toBeGreaterThan(0);
     });
 
-    test("api_error 'please retry' nudge carries [sent by @watchdog]: prefix", async () => {
+    test("api_error 'please retry' nudge carries [sent by watchdog]: prefix", async () => {
       setWatchdogNow(() => 1_000_000);
       const a1 = agent("a1", "api_error");
       await tick([a1]);
@@ -1636,12 +1638,12 @@ describe("watchdog", () => {
       const matching = spawnMock.calls.filter((c) =>
         c.args.includes("send-keys") &&
         c.args.includes("-l") &&
-        c.args.some((a: unknown) => typeof a === "string" && a === "[sent by @watchdog]: please retry")
+        c.args.some((a: unknown) => typeof a === "string" && a === "[sent by watchdog]: please retry")
       );
       expect(matching.length).toBe(1);
     });
 
-    test("rate-limit recovery nudge carries [sent by @watchdog]: prefix", async () => {
+    test("rate-limit recovery nudge carries [sent by watchdog]: prefix", async () => {
       setWatchdogFetchUsage(async () => ({ data: { sessionPct: 3, weeklyPct: 30, sessionReset: "now", weeklyReset: "2d" }, error: false }));
       setWatchdogSleep(async () => {});
       setWatchdogCaptureTmux(async () => "running some task (Esc to interrupt)");
@@ -1654,11 +1656,29 @@ describe("watchdog", () => {
         c.args.includes("-l") &&
         c.args.some((a: unknown) =>
           typeof a === "string" &&
-          a.includes("[sent by @watchdog]:") &&
+          a.includes("[sent by watchdog]:") &&
           a.includes("Usage has refreshed")
         )
       );
       expect(matching.length).toBe(1);
+    });
+
+    test("displayed prefix has no leading @", async () => {
+      // The displayed prefix must NOT begin `[sent by @watchdog]` — that
+      // form is reserved for routable coordinator addresses (e.g. @system,
+      // @<repo-name>). A regression here means the BARE_RENDERED_SENTINELS
+      // allow-list in ib-commands.ts no longer covers @watchdog.
+      const mgr = agent("mgr2", "running");
+      const worker = agent("w2", "waiting", "mgr2");
+
+      await notifyManager(worker, "[watchdog]: hi", [mgr, worker]);
+
+      const atPrefixed = spawnMock.calls.filter((c) =>
+        c.args.includes("send-keys") &&
+        c.args.includes("-l") &&
+        c.args.some((a: unknown) => typeof a === "string" && a.includes("[sent by @watchdog]"))
+      );
+      expect(atPrefixed.length).toBe(0);
     });
   });
 

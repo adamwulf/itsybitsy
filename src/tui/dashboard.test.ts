@@ -943,7 +943,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     dashboard.handleInput("\r");
     await dashboard.flushPendingActions();
     expect(sentMessages.length).toBe(1);
-    expect(sentMessages[0]!.message).toBe("hello");
+    expect(sentMessages[0]!.message).toBe("[sent by user]: hello");
   });
 
   test("send textarea: Tab cycles forward through text → cancel → send → esc → text", async () => {
@@ -1081,8 +1081,8 @@ describe("DashboardComponent dialog and action handlers", () => {
     await dashboard.flushPendingActions();
     // Should have sent to agent-a and agent-b only (agent-c archived, agent-d no tmux)
     expect(sentMessages.length).toBe(2);
-    expect(sentMessages[0]!.message).toBe("hi");
-    expect(sentMessages[1]!.message).toBe("hi");
+    expect(sentMessages[0]!.message).toBe("[sent by user]: hi");
+    expect(sentMessages[1]!.message).toBe("[sent by user]: hi");
   });
 
   test("send textarea: sendAll=false sends to selected agent only", async () => {
@@ -1107,7 +1107,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     dashboard.handleInput("\r");
     await dashboard.flushPendingActions();
     expect(sentMessages.length).toBe(1);
-    expect(sentMessages[0]!.message).toBe("hi");
+    expect(sentMessages[0]!.message).toBe("[sent by user]: hi");
   });
 
   test("send textarea: sendAll state is reflected in dialog", async () => {
@@ -1989,7 +1989,7 @@ describe("DashboardComponent right pane and navigation features", () => {
     expect(updated.questions[0].acknowledged_at).toBeTruthy();
     // And sent the message (via native send)
     expect(sentMessages.length).toBe(1);
-    expect(sentMessages[0]!.message).toBe("yes");
+    expect(sentMessages[0]!.message).toBe("[sent by user]: yes");
 
     await rm(tempRepo, { recursive: true, force: true });
   });

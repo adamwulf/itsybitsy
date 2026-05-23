@@ -684,7 +684,7 @@ describe("sendToSystemCoordinator", () => {
       IB_COORDINATOR_SESSION,
       "-l",
       "--",
-      "hello world",
+      "[sent by user]: hello world",
     ]);
     expect(spawnCalls[2]).toEqual(["tmux", "send-keys", "-t", IB_COORDINATOR_SESSION, "Enter"]);
   });
@@ -708,7 +708,7 @@ describe("sendToSystemCoordinator", () => {
     expect(sendKeysLiteral![6]).toBe("[sent by agent agent-xyz]: ping");
   });
 
-  test("does not prepend a prefix when fromAgent is omitted", async () => {
+  test("prepends [sent by user] prefix when fromAgent is omitted (human-driven send)", async () => {
     setSystemCoordinatorHasSessionFn(async () => true);
 
     await sendToSystemCoordinator("plain text", { cwd: tempDir });
@@ -723,7 +723,7 @@ describe("sendToSystemCoordinator", () => {
         c[5] === "--",
     );
     expect(sendKeysLiteral).toBeDefined();
-    expect(sendKeysLiteral![6]).toBe("plain text");
+    expect(sendKeysLiteral![6]).toBe("[sent by user]: plain text");
   });
 });
 

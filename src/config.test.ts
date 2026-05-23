@@ -31,6 +31,7 @@ describe("readConfig", () => {
   test("returns all defaults when no config files exist", async () => {
     const result = await readConfig(opts());
 
+    expect(result["user.name"]).toEqual({ value: "", source: "default" });
     expect(result["maxAgents"]).toEqual({ value: 10, source: "default" });
     expect(result["model"]).toEqual({ value: "opus", source: "default" });
     expect(result["createPullRequests"]).toEqual({ value: false, source: "default" });

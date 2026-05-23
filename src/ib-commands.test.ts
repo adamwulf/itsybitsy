@@ -4870,9 +4870,16 @@ describe("askQuestion (native)", () => {
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id: agentId }));
     setUserConfigPath(join(tempDir, "config.json"));
+    // Stub the notification side-effects so the suite never spawns `say` or
+    // writes to the real Telegram outbox. The inner `notifications` describe
+    // re-overrides these per test to assert behavior.
+    setSayRunner(() => { /* swallow */ });
+    setAskQuestionTelegramRunner(async () => ({ ok: true, message: "stub" }));
   });
 
   afterEach(async () => {
+    resetSayRunner();
+    resetAskQuestionTelegramRunner();
     resetUserConfigPath();
     await rm(tempDir, { recursive: true, force: true });
   });

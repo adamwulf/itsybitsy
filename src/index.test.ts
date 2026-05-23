@@ -408,6 +408,104 @@ describe("CLI arg parsing", () => {
     expect(exitCode).toBe(1);
   });
 
+  test("new-agent rejects unknown short flag '-x' before the prompt", async () => {
+    const { stderr, exitCode } = await runCli(["new-agent", "-x", "bar"]);
+    expect(stderr).toContain("unknown flag '-x'");
+    expect(exitCode).toBe(1);
+  });
+
+  test("new-agent rejects '-F' (uppercase) as unknown short flag", async () => {
+    const { stderr, exitCode } = await runCli(["new-agent", "-F", "/tmp/foo.md"]);
+    expect(stderr).toContain("unknown flag '-F'");
+    expect(exitCode).toBe(1);
+  });
+
+  test("new-agent -f without value shows error", async () => {
+    const { stderr, exitCode } = await runCli(["new-agent", "-f"]);
+    expect(stderr).toContain("-f requires a value");
+    expect(exitCode).toBe(1);
+  });
+
+  test("new-agent --file without value shows error", async () => {
+    const { stderr, exitCode } = await runCli(["new-agent", "--file"]);
+    expect(stderr).toContain("--file requires a value");
+    expect(exitCode).toBe(1);
+  });
+
+  test("new-agent -f <missing-path> shows file-not-found error", async () => {
+    const missing = `/tmp/ib-newagent-f-missing-${Date.now()}.md`;
+    const { stderr, exitCode } = await runCli(["new-agent", "-f", missing]);
+    expect(stderr).toContain("prompt file not found");
+    expect(stderr).toContain(missing);
+    expect(exitCode).toBe(1);
+  });
+
+  test("new-agent --file is an alias for --prompt-file (reads file body)", async () => {
+    const tmpFile = `/tmp/ib-newagent-file-alias-${Date.now()}.md`;
+    await Bun.write(tmpFile, "prompt from file");
+    try {
+      // Arg parsing should succeed; spawn will fail downstream (no repos),
+      // but reaching that failure proves --file was accepted as an alias.
+      const { stderr, exitCode } = await runCli(["new-agent", "--file", tmpFile]);
+      expect(stderr).not.toContain("unknown flag");
+      expect(exitCode).not.toBe(0);
+    } finally {
+      await Bun.file(tmpFile).delete().catch(() => {});
+    }
+  });
+
+  test("new-agent -f is an alias for --prompt-file (reads file body)", async () => {
+    const tmpFile = `/tmp/ib-newagent-f-alias-${Date.now()}.md`;
+    await Bun.write(tmpFile, "prompt from file");
+    try {
+      const { stderr, exitCode } = await runCli(["new-agent", "-f", tmpFile]);
+      expect(stderr).not.toContain("unknown flag");
+      expect(exitCode).not.toBe(0);
+    } finally {
+      await Bun.file(tmpFile).delete().catch(() => {});
+    }
+  });
+
+  test("new-agent allows '-x' after the first prompt token (treated as prompt body)", async () => {
+    // After the first positional prompt token, a leading '-' is part of the
+    // prompt body, not a flag — so this should NOT error on '-x'.
+    const { stderr, exitCode } = await runCli(["new-agent", "hello", "-x", "world"]);
+    expect(stderr).not.toContain("unknown flag '-x'");
+    // Spawn will still fail (no repos), but not due to flag rejection.
+    expect(exitCode).not.toBe(0);
+  });
+
+  test("send rejects unknown long flag before target", async () => {
+    const { stderr, exitCode } = await runCli(["send", "--bogus", "agent-x", "hello"]);
+    expect(stderr).toContain("unknown flag '--bogus'");
+    expect(exitCode).toBe(1);
+  });
+
+  test("send rejects unknown short flag before target", async () => {
+    const { stderr, exitCode } = await runCli(["send", "-x", "agent-x", "hello"]);
+    expect(stderr).toContain("unknown flag '-x'");
+    expect(exitCode).toBe(1);
+  });
+
+  test("send treats '-n hello' as message body when it comes after the target", async () => {
+    // After the target, a leading '-' is part of the message — must not be
+    // rejected as an unknown flag. Quoted single-arg form arrives as one token.
+    const { stderr, exitCode } = await runCli(["send", "agent-x", "-n hello"]);
+    expect(stderr).not.toContain("unknown flag");
+    expect(stderr).toContain("Agent not found");
+    expect(exitCode).toBe(1);
+  });
+
+  test("send treats unquoted '-n' as message body when it comes after the target", async () => {
+    // Unquoted form: shell splits into multiple argv tokens; the first
+    // non-flag token is the target, and subsequent tokens (including '-n')
+    // are joined as the message body.
+    const { stderr, exitCode } = await runCli(["send", "agent-x", "-n", "hello"]);
+    expect(stderr).not.toContain("unknown flag");
+    expect(stderr).toContain("Agent not found");
+    expect(exitCode).toBe(1);
+  });
+
   test("hook-check-path without agent-id shows usage", async () => {
     const { stderr, exitCode } = await runCli(["hook-check-path"]);
     expect(stderr).toContain("Usage:");

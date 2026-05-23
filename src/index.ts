@@ -1017,20 +1017,43 @@ async function main() {
     }
     case "send": {
       const repos = await listRepos();
-      // Parse --from and -f/--file flags before determining target and message
+      // Parse known flags (--from, -f/--file) at any position. Unknown short
+      // flags (e.g. `-x`) and unknown long flags (e.g. `--bogus`) are rejected
+      // BEFORE the target is seen so typos surface immediately. AFTER the
+      // target, raw tokens — including ones that start with `-` — are joined
+      // as the message body, so users can send messages like "-n hello".
       const sendArgs = args.slice(1);
       let fromAgent: string | undefined;
       let filePath: string | undefined;
       const filteredSendArgs: string[] = [];
+      let seenTarget = false;
       for (let i = 0; i < sendArgs.length; i++) {
-        if (sendArgs[i] === "--from") {
+        const tok = sendArgs[i]!;
+        // Known flags are always recognized, before OR after the target.
+        // Existing scripts pass `ib send <id> -f <path>` and that must keep
+        // working.
+        if (tok === "--from") {
           if (!sendArgs[i + 1]) { console.error("Error: --from requires a value"); process.exit(1); }
           fromAgent = sendArgs[++i];
-        } else if (sendArgs[i] === "-f" || sendArgs[i] === "--file") {
-          if (!sendArgs[i + 1]) { console.error(`Error: ${sendArgs[i]} requires a path`); process.exit(1); }
+          continue;
+        }
+        if (tok === "-f" || tok === "--file") {
+          if (!sendArgs[i + 1]) { console.error(`Error: ${tok} requires a path`); process.exit(1); }
           filePath = sendArgs[++i];
+          continue;
+        }
+        if (!seenTarget) {
+          // Before the target: anything starting with `-` is an unknown flag.
+          if (tok.startsWith("-")) {
+            console.error(`Error: unknown flag '${tok}'`);
+            process.exit(1);
+          }
+          // First non-flag positional is the target.
+          filteredSendArgs.push(tok);
+          seenTarget = true;
         } else {
-          filteredSendArgs.push(sendArgs[i]!);
+          // After the target: tokens are message body, no flag parsing.
+          filteredSendArgs.push(tok);
         }
       }
 
@@ -1252,6 +1275,10 @@ async function main() {
       let repoArg: string | undefined;
       let spawnedByAgentId: string | undefined;
       let spawnedByRepoPath: string | undefined;
+      // Track whether we've seen a positional (non-flag) prompt token. Used to
+      // gate the unknown-short-flag rejection so that a user CAN write a prompt
+      // that starts with a dash by quoting it after the first non-flag token.
+      let seenPromptToken = false;
       for (let i = 0; i < ibArgs.length; i++) {
         const arg = ibArgs[i]!;
         if (arg === "--type") {
@@ -1282,8 +1309,8 @@ async function main() {
           if (!ibArgs[i + 1]) { console.error("Error: --spawned-by-repo requires a value"); process.exit(1); }
           spawnedByRepoPath = ibArgs[++i];
         }
-        else if (arg === "--prompt-file") {
-          if (!ibArgs[i + 1]) { console.error("Error: --prompt-file requires a value"); process.exit(1); }
+        else if (arg === "--prompt-file" || arg === "-f" || arg === "--file") {
+          if (!ibArgs[i + 1]) { console.error(`Error: ${arg} requires a value`); process.exit(1); }
           const promptFilePath = ibArgs[++i]!;
           const promptFile = Bun.file(promptFilePath);
           if (!(await promptFile.exists())) { console.error(`Error: prompt file not found: ${promptFilePath}`); process.exit(1); }
@@ -1303,7 +1330,19 @@ async function main() {
           console.error(`Error: unknown flag '${arg}'`);
           process.exit(1);
         }
-        else { promptParts.push(arg); }
+        // Reject any other `-x` short flag before we have seen a positional
+        // prompt token, to catch typos like `-F /tmp/foo.md` that would
+        // otherwise be silently appended to the prompt body and then rejected
+        // by claude. After the first positional token, a leading `-` is just
+        // part of the prompt body.
+        else if (!seenPromptToken && arg.startsWith("-") && arg.length > 1) {
+          console.error(`Error: unknown flag '${arg}'`);
+          process.exit(1);
+        }
+        else {
+          promptParts.push(arg);
+          seenPromptToken = true;
+        }
       }
       const prompt = promptParts.join(" ");
 

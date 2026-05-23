@@ -26,7 +26,7 @@ import {
 } from "./agent-lifecycle";
 import { readConfig } from "./config";
 import { listTmuxSessions } from "./tmux-poller";
-import { SpawnContext } from "./types";
+import { SpawnContext, InjectionContext } from "./types";
 import type { SpawnFn } from "./types";
 import { isValidModel, isValidToolList, isValidTmuxSession, isValidSessionId, isValidShellPath, isValidAgentId, shellQuote } from "./validation";
 import { getTmuxWidthForAgent } from "./tui/widths";
@@ -3249,6 +3249,50 @@ export async function pauseAgent(agent: Agent): Promise<IbCommandResult> {
 }
 
 /**
+ * Injection context for the macOS `say` invocation in askQuestion(). Tests
+ * swap this out to capture the args without actually spawning a process.
+ * The runner is fire-and-forget — it must not throw and must not block.
+ */
+export type SayRunner = (cmd: string[]) => void;
+
+function defaultSayRunner(cmd: string[]): void {
+  try {
+    const proc = Bun.spawn(cmd, {
+      stdio: ["ignore", "ignore", "ignore"],
+    });
+    proc.unref();
+  } catch { /* swallow: notification is best-effort */ }
+}
+
+export const sayCtx = new InjectionContext<SayRunner>(defaultSayRunner);
+
+export function setSayRunner(runner: SayRunner): void {
+  sayCtx.set(runner);
+}
+
+export function resetSayRunner(): void {
+  sayCtx.reset();
+}
+
+/**
+ * Injection context for the Telegram send call in askQuestion(). Tests
+ * swap this out to observe the message text without going through the outbox.
+ */
+export type TelegramSendFn = (text: string) => Promise<{ ok: boolean; message: string }>;
+
+export const askQuestionTelegramCtx = new InjectionContext<TelegramSendFn>(
+  (text: string) => telegramSend(text)
+);
+
+export function setAskQuestionTelegramRunner(runner: TelegramSendFn): void {
+  askQuestionTelegramCtx.set(runner);
+}
+
+export function resetAskQuestionTelegramRunner(): void {
+  askQuestionTelegramCtx.reset();
+}
+
+/**
  * Native ask implementation — replaces `ib ask "question"`.
  * Top-level agents (no manager, or manager merged/killed) can ask the user a question.
  */
@@ -3335,6 +3379,29 @@ export async function askQuestion(repoPath: string, agentId: string, question: s
 
   // Log to agent's log
   await logAgent(agentDir, `Asked question: ${question} (${questionId})`);
+
+  // Fire-and-forget notifications. Both branches swallow all errors — the
+  // question has already been submitted at this point, so a failed
+  // notification must never affect the return value or timing.
+  try {
+    const metaName = typeof meta.name === "string" && meta.name.length > 0 ? meta.name : agentId;
+    const repoName = basename(repoPath);
+
+    // 1. macOS `say` — gated by config.
+    const sayEnabled = config["notifications.sayOnQuestion"]?.value as boolean | undefined;
+    if (sayEnabled !== false && process.platform === "darwin") {
+      const line = `Agent ${metaName} in ${repoName} has a question`;
+      try {
+        sayCtx.fn(["/usr/bin/say", line]);
+      } catch { /* swallow: notification is best-effort */ }
+    }
+
+    // 2. Telegram — always attempted; harmlessly queues if `ib watch` isn't running.
+    const tgMsg = `Agent ${metaName} in ${repoName} has a question:\n${question}`;
+    try {
+      void askQuestionTelegramCtx.fn(tgMsg).catch(() => { /* swallow */ });
+    } catch { /* swallow synchronous throws */ }
+  } catch { /* defensive: never let notification setup affect the return */ }
 
   return { ok: true, exitCode: 0, stdout: `Question submitted (${questionId})`, stderr: "" };
 }

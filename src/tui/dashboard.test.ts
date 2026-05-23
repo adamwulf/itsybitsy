@@ -513,6 +513,16 @@ describe("DashboardComponent dialog and action handlers", () => {
   }
 
   let actionTempDir: string | null = null;
+  let configTempDir: string;
+
+  beforeEach(async () => {
+    // Isolate user config — sendMessage reads `user.name` to format
+    // human-driven sends. Without isolation tests pick up whatever's in the
+    // developer's ~/.itsybitsy/config.json, so `[sent by user]` asserts
+    // would break if user.name is set.
+    configTempDir = await mkdtemp(join(tmpdir(), "dashboard-config-"));
+    setUserConfigPath(join(configTempDir, "config.json"));
+  });
 
   async function setupDashboardWithAgent(state = "running") {
     dashboard = makeDashboard();
@@ -573,10 +583,12 @@ describe("DashboardComponent dialog and action handlers", () => {
     resetNukeResumeSpawnRunner();
     resetDiffStatusSpawnRunner();
     resetMergeSpawnRunner();
+    resetUserConfigPath();
     if (actionTempDir) {
       await rm(actionTempDir, { recursive: true, force: true });
       actionTempDir = null;
     }
+    await rm(configTempDir, { recursive: true, force: true });
   });
 
   test("x key opens kill confirm dialog with button UI", async () => {
@@ -943,7 +955,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     dashboard.handleInput("\r");
     await dashboard.flushPendingActions();
     expect(sentMessages.length).toBe(1);
-    expect(sentMessages[0]!.message).toBe("hello");
+    expect(sentMessages[0]!.message).toBe("[sent by user]: hello");
   });
 
   test("send textarea: Tab cycles forward through text → cancel → send → esc → text", async () => {
@@ -1081,8 +1093,8 @@ describe("DashboardComponent dialog and action handlers", () => {
     await dashboard.flushPendingActions();
     // Should have sent to agent-a and agent-b only (agent-c archived, agent-d no tmux)
     expect(sentMessages.length).toBe(2);
-    expect(sentMessages[0]!.message).toBe("hi");
-    expect(sentMessages[1]!.message).toBe("hi");
+    expect(sentMessages[0]!.message).toBe("[sent by user]: hi");
+    expect(sentMessages[1]!.message).toBe("[sent by user]: hi");
   });
 
   test("send textarea: sendAll=false sends to selected agent only", async () => {
@@ -1107,7 +1119,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     dashboard.handleInput("\r");
     await dashboard.flushPendingActions();
     expect(sentMessages.length).toBe(1);
-    expect(sentMessages[0]!.message).toBe("hi");
+    expect(sentMessages[0]!.message).toBe("[sent by user]: hi");
   });
 
   test("send textarea: sendAll state is reflected in dialog", async () => {
@@ -1784,6 +1796,7 @@ describe("DashboardComponent right pane and navigation features", () => {
   let dashboard: DashboardComponent;
   let lastIbCall: { args: string[]; cwd: string } | null;
   let sentMessages: { target: string; message: string }[] = [];
+  let configTempDir: string;
 
   function setupSendMock() {
     sentMessages = [];
@@ -1805,9 +1818,19 @@ describe("DashboardComponent right pane and navigation features", () => {
     dashboard.onUpdate([agent], flatList, []);
   }
 
-  afterEach(() => {
+  beforeEach(async () => {
+    // Isolate user config — sendMessage reads `user.name` to format
+    // human-driven sends. Without isolation tests would pick up the
+    // developer's ~/.itsybitsy/config.json.
+    configTempDir = await mkdtemp(join(tmpdir(), "dashboard-config-"));
+    setUserConfigPath(join(configTempDir, "config.json"));
+  });
+
+  afterEach(async () => {
     resetSendSpawnRunner();
     resetDiffStatusSpawnRunner();
+    resetUserConfigPath();
+    await rm(configTempDir, { recursive: true, force: true });
   });
 
   test("addError adds timestamped error to errors list", () => {
@@ -1989,7 +2012,7 @@ describe("DashboardComponent right pane and navigation features", () => {
     expect(updated.questions[0].acknowledged_at).toBeTruthy();
     // And sent the message (via native send)
     expect(sentMessages.length).toBe(1);
-    expect(sentMessages[0]!.message).toBe("yes");
+    expect(sentMessages[0]!.message).toBe("[sent by user]: yes");
 
     await rm(tempRepo, { recursive: true, force: true });
   });

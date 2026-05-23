@@ -15,6 +15,7 @@ import {
   resetSystemCoordinatorHasSessionFn,
 } from "./index";
 import { setSendSpawnRunner, resetSendSpawnRunner } from "./ib-commands";
+import { setUserConfigPath, resetUserConfigPath } from "./config";
 import { IB_COORDINATOR_SESSION } from "./coordinator";
 import type { Agent } from "./agents";
 import type { RepoEntry } from "./registry";
@@ -628,6 +629,11 @@ describe("sendToSystemCoordinator", () => {
   beforeEach(async () => {
     spawnCalls = [];
     tempDir = await mkdtemp(join(tmpdir(), "system-coord-test-"));
+    // Isolate user config — sendMessage reads `user.name` to format
+    // human-driven sends. Without isolation tests would pick up whatever's
+    // in the developer's ~/.itsybitsy/config.json (e.g. if user.name is set
+    // the `[sent by user]` prefix asserts would break).
+    setUserConfigPath(join(tempDir, "config.json"));
     setSendSpawnRunner((cmd: string[]) => {
       spawnCalls.push(cmd);
       return makeSpawnResult();
@@ -636,6 +642,7 @@ describe("sendToSystemCoordinator", () => {
 
   afterEach(() => {
     resetSendSpawnRunner();
+    resetUserConfigPath();
     resetSystemCoordinatorHasSessionFn();
     return rm(tempDir, { recursive: true, force: true });
   });
@@ -684,7 +691,7 @@ describe("sendToSystemCoordinator", () => {
       IB_COORDINATOR_SESSION,
       "-l",
       "--",
-      "hello world",
+      "[sent by user]: hello world",
     ]);
     expect(spawnCalls[2]).toEqual(["tmux", "send-keys", "-t", IB_COORDINATOR_SESSION, "Enter"]);
   });
@@ -708,7 +715,7 @@ describe("sendToSystemCoordinator", () => {
     expect(sendKeysLiteral![6]).toBe("[sent by agent agent-xyz]: ping");
   });
 
-  test("does not prepend a prefix when fromAgent is omitted", async () => {
+  test("prepends [sent by user] prefix when fromAgent is omitted (human-driven send)", async () => {
     setSystemCoordinatorHasSessionFn(async () => true);
 
     await sendToSystemCoordinator("plain text", { cwd: tempDir });
@@ -723,7 +730,7 @@ describe("sendToSystemCoordinator", () => {
         c[5] === "--",
     );
     expect(sendKeysLiteral).toBeDefined();
-    expect(sendKeysLiteral![6]).toBe("plain text");
+    expect(sendKeysLiteral![6]).toBe("[sent by user]: plain text");
   });
 });
 

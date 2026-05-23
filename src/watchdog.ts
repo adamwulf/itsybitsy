@@ -44,6 +44,16 @@ export interface AgentTracker {
   apiErrorLastAtMs: number;
 }
 
+/**
+ * Sentinel sender ID for watchdog-originated messages. Recipients see
+ * `[sent by @watchdog]: ...` so they can distinguish auto-injected nudges
+ * (rate-limit recovery, api_error retries, manager/spawner notifications)
+ * from human user sends, which would otherwise look identical because the
+ * watchdog's cwd is the agent's root repo (not an agent worktree) and so
+ * falls through to the user-prefix branch in sendMessage.
+ */
+export const WATCHDOG_SENTINEL = "@watchdog";
+
 /** How often the watchdog polls, in milliseconds */
 export const POLL_INTERVAL_MS = 5_000;
 
@@ -227,7 +237,7 @@ export async function notifyManager(
   const manager = findAgent(allAgents, managerId);
   if (!manager) return false;
 
-  const result = await sendMessage(manager, message);
+  const result = await sendMessage(manager, message, { fromAgent: WATCHDOG_SENTINEL });
   return result.ok;
 }
 
@@ -269,7 +279,7 @@ export async function notifySpawner(
   if (spawner.agent_id === "@system") {
     try {
       const { sendToSystemCoordinator } = await import("./index");
-      const result = await sendToSystemCoordinator(message, { fromAgent: agent.id });
+      const result = await sendToSystemCoordinator(message, { fromAgent: WATCHDOG_SENTINEL });
       return result.ok;
     } catch { /* swallowed unexpected error counts as delivery failure */
       return false;
@@ -295,7 +305,7 @@ export async function notifySpawner(
       if (!coordStatus.exists || !coordStatus.agentId) return false;
       const coordinator = findAgent(allAgents, coordStatus.agentId);
       if (!coordinator) return false;
-      const result = await sendMessage(coordinator, message);
+      const result = await sendMessage(coordinator, message, { fromAgent: WATCHDOG_SENTINEL });
       return result.ok;
     } catch { /* swallowed unexpected error counts as delivery failure */
       return false;
@@ -306,7 +316,7 @@ export async function notifySpawner(
   try {
     const spawnerAgent = findAgent(allAgents, spawner.agent_id);
     if (!spawnerAgent) return false;
-    const result = await sendMessage(spawnerAgent, message);
+    const result = await sendMessage(spawnerAgent, message, { fromAgent: WATCHDOG_SENTINEL });
     return result.ok;
   } catch {
     return false;
@@ -601,6 +611,7 @@ async function handleRateLimited(agent: Agent, tracker: AgentTracker, _getAllAge
     await sendMessage(
       agent,
       `[watchdog]: Usage has refreshed (${usage.sessionPct}%). Please continue your task.`,
+      { fromAgent: WATCHDOG_SENTINEL },
     );
     // Reset bypass flag so next rate-limit episode will re-bypass
     tracker.rateLimitBypassed = false;
@@ -654,7 +665,7 @@ async function handleApiError(agent: Agent, tracker: AgentTracker, _getAllAgents
 
   tracker.apiErrorLastAtMs = now;
   tracker.apiErrorRetries++;
-  await sendMessage(agent, "please retry");
+  await sendMessage(agent, "please retry", { fromAgent: WATCHDOG_SENTINEL });
 }
 
 // Register built-in handlers

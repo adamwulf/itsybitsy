@@ -53,6 +53,7 @@ import {
   RATE_LIMIT_RETRY_DELAY_MS,
   API_ERROR_MAX_RETRIES,
   API_ERROR_RETRY_INTERVAL_MS,
+  WATCHDOG_SENTINEL,
   type AgentTracker,
 } from "./watchdog";
 import {
@@ -883,7 +884,7 @@ describe("watchdog", () => {
       resetSystemCoordinatorHasSessionFn();
     });
 
-    test("@system sentinel routes to system coordinator tmux session with from-agent attribution", async () => {
+    test("@system sentinel routes to system coordinator tmux session with @watchdog attribution", async () => {
       const a1 = agent("a1", "complete", null);
       a1.meta.spawned_by = { agent_id: "@system", repo_path: null };
 
@@ -893,8 +894,8 @@ describe("watchdog", () => {
       expect(ok).toBe(true);
       // sendMessage delivers via `tmux send-keys -t <session> -l <chunk>` —
       // assert one chunked payload arrived at the coordinator session AND
-      // carries the `[sent by agent a1]:` prefix, so a regression dropping
-      // `fromAgent: agent.id` would fail this test. Position-independent
+      // carries the `[sent by @watchdog]:` prefix, so a regression dropping
+      // the WATCHDOG_SENTINEL would fail this test. Position-independent
       // arg scan mirrors the existing countSendKeysWithText helper.
       const { IB_COORDINATOR_SESSION } = await import("./coordinator");
       const matchingCalls = spawnMock.calls.filter((c) =>
@@ -902,7 +903,7 @@ describe("watchdog", () => {
         c.args.includes("-t") &&
         c.args.includes(IB_COORDINATOR_SESSION) &&
         c.args.includes("-l") &&
-        c.args.some((a: any) => typeof a === "string" && a.includes("[sent by agent a1]:"))
+        c.args.some((a: any) => typeof a === "string" && a.includes("[sent by @watchdog]:"))
       );
       expect(matchingCalls.length).toBeGreaterThan(0);
     });
@@ -1490,8 +1491,8 @@ describe("watchdog", () => {
 
   describe("api_error handler", () => {
     /** Count "please retry" send-keys -l calls in spawnMock.
-     *  Note: sendMessage may auto-detect a fromId from cwd and prefix the
-     *  message with "[sent by agent <id>]: …", so we substring-match. */
+     *  sendMessage prepends `[sent by @watchdog]: ` (see WATCHDOG_SENTINEL),
+     *  so we substring-match instead of exact-match. */
     function countRetryCalls(): number {
       return spawnMock.calls.filter((c) => {
         if (!c.args.includes("send-keys") || !c.args.includes("-l")) return false;
@@ -1595,6 +1596,69 @@ describe("watchdog", () => {
       await tick([agent("a1", "waiting")]);
       expect(getTracker("a1").apiErrorRetries).toBe(0);
       expect(getTracker("a1").apiErrorLastAtMs).toBe(0);
+    });
+  });
+
+  // =========================================================================
+  // @watchdog sentinel prefix — regression test for human-attribution bug.
+  // The watchdog process runs with cwd = agent.repoPath (root repo, not a
+  // worktree under .ittybitty/agents/<id>/repo), so without WATCHDOG_SENTINEL
+  // the new user-prefix branch in sendMessage would tag every watchdog nudge
+  // as `[sent by user]`, making agents think the user typed "please retry"
+  // when actually the watchdog injected it.
+  // =========================================================================
+
+  describe("@watchdog sentinel prefix", () => {
+    test("WATCHDOG_SENTINEL is the literal @watchdog sentinel", () => {
+      expect(WATCHDOG_SENTINEL).toBe("@watchdog");
+    });
+
+    test("notifyManager nudge carries [sent by @watchdog]: prefix", async () => {
+      const mgr = agent("mgr", "running");
+      const worker = agent("w1", "waiting", "mgr");
+
+      await notifyManager(worker, "[watchdog]: hi", [mgr, worker]);
+
+      const matching = spawnMock.calls.filter((c) =>
+        c.args.includes("send-keys") &&
+        c.args.includes("-l") &&
+        c.args.includes("tmux-mgr") &&
+        c.args.some((a: unknown) => typeof a === "string" && a.includes("[sent by @watchdog]:"))
+      );
+      expect(matching.length).toBeGreaterThan(0);
+    });
+
+    test("api_error 'please retry' nudge carries [sent by @watchdog]: prefix", async () => {
+      setWatchdogNow(() => 1_000_000);
+      const a1 = agent("a1", "api_error");
+      await tick([a1]);
+
+      const matching = spawnMock.calls.filter((c) =>
+        c.args.includes("send-keys") &&
+        c.args.includes("-l") &&
+        c.args.some((a: unknown) => typeof a === "string" && a === "[sent by @watchdog]: please retry")
+      );
+      expect(matching.length).toBe(1);
+    });
+
+    test("rate-limit recovery nudge carries [sent by @watchdog]: prefix", async () => {
+      setWatchdogFetchUsage(async () => ({ data: { sessionPct: 3, weeklyPct: 30, sessionReset: "now", weeklyReset: "2d" }, error: false }));
+      setWatchdogSleep(async () => {});
+      setWatchdogCaptureTmux(async () => "running some task (Esc to interrupt)");
+
+      const a1 = agent("a1", "rate_limited");
+      await tick([a1]);
+
+      const matching = spawnMock.calls.filter((c) =>
+        c.args.includes("send-keys") &&
+        c.args.includes("-l") &&
+        c.args.some((a: unknown) =>
+          typeof a === "string" &&
+          a.includes("[sent by @watchdog]:") &&
+          a.includes("Usage has refreshed")
+        )
+      );
+      expect(matching.length).toBe(1);
     });
   });
 

@@ -19,6 +19,7 @@ export interface ConfigEntry {
 export type ConfigResult = Record<string, ConfigEntry>;
 
 export const CONFIG_KEYS: ConfigKeyDef[] = [
+  { key: "user.name", type: "string", default: "" },
   { key: "maxAgents", type: "number", default: 10 },
   { key: "model", type: "string", default: "opus" },
   { key: "createPullRequests", type: "boolean", default: false },

@@ -1485,13 +1485,23 @@ export async function sendMessage(
 
   // Format message with sender prefix. `@`-prefixed sender IDs (e.g. @system)
   // are sentinels, not agent IDs, so omit the literal "agent " word for them.
-  // Raw mode (used by Telegram slash-command passthrough) skips the prefix
-  // entirely — the recipient pane sees the message verbatim.
+  // No fromId means the send originates from a human-driven path (CLI, TUI,
+  // etc.) — prefix as a user send so the recipient can distinguish user vs
+  // agent messages. Raw mode (used by Telegram slash-command passthrough)
+  // skips the prefix entirely — the recipient pane sees the message verbatim.
   const raw = opts?.raw === true;
   let fullMessage = message;
-  if (fromId && !raw) {
-    const label = fromId.startsWith("@") ? fromId : `agent ${fromId}`;
-    fullMessage = `[sent by ${label}]: ${message}`;
+  let userLabel = "";
+  if (!raw) {
+    if (fromId) {
+      const label = fromId.startsWith("@") ? fromId : `agent ${fromId}`;
+      fullMessage = `[sent by ${label}]: ${message}`;
+    } else {
+      const config = await readConfig();
+      const userName = config["user.name"]?.value;
+      userLabel = typeof userName === "string" && userName.length > 0 ? `user ${userName}` : "user";
+      fullMessage = `[sent by ${userLabel}]: ${message}`;
+    }
   }
 
   // Calculate delay: 0.1 + (len / 100) * 0.5, clamped [0.2, 3.0]
@@ -1544,7 +1554,7 @@ export async function sendMessage(
   } else if (fromId) {
     await logAgent(agentDir, `Received message from ${fromId}: ${message}`);
   } else {
-    await logAgent(agentDir, `Received message: ${message}`);
+    await logAgent(agentDir, `Received message from ${userLabel}: ${message}`);
   }
 
   // Log to sender's agent.log if applicable

@@ -67,6 +67,11 @@ describe("ib-commands", () => {
       // Create agent directory for log writing
       await mkdir(join(tempDir, ".ittybitty", "agents", "agent-abc"), { recursive: true });
 
+      // Isolate user config — sendMessage reads `user.name` to format user
+      // sends. Without isolation tests would pick up whatever's in the host
+      // user's ~/.itsybitsy/config.json.
+      setUserConfigPath(join(tempDir, "config.json"));
+
       setSendSpawnRunner((cmd: string[]) => {
         spawnCalls.push(cmd);
         return makeSpawnResult();
@@ -75,6 +80,7 @@ describe("ib-commands", () => {
 
     afterEach(async () => {
       resetSendSpawnRunner();
+      resetUserConfigPath();
       await rm(tempDir, { recursive: true, force: true });
     });
 
@@ -86,7 +92,7 @@ describe("ib-commands", () => {
       // Should have: has-session, send-keys (message), send-keys (Enter)
       expect(spawnCalls.length).toBe(3);
       expect(spawnCalls[0]).toEqual(["tmux", "has-session", "-t", `tmux-agent-abc`]);
-      expect(spawnCalls[1]).toEqual(["tmux", "send-keys", "-t", `tmux-agent-abc`, "-l", "--", "hello world"]);
+      expect(spawnCalls[1]).toEqual(["tmux", "send-keys", "-t", `tmux-agent-abc`, "-l", "--", "[sent by user]: hello world"]);
       expect(spawnCalls[2]).toEqual(["tmux", "send-keys", "-t", `tmux-agent-abc`, "Enter"]);
     });
 
@@ -208,7 +214,7 @@ describe("ib-commands", () => {
       const logContent = await Bun.file(
         join(tempDir, ".ittybitty", "agents", "agent-abc", "agent.log")
       ).text();
-      expect(logContent).toContain("Received message: test message");
+      expect(logContent).toContain("Received message from user: test message");
     });
 
     test("logs to sender agent.log when fromAgent set", async () => {
@@ -252,7 +258,9 @@ describe("ib-commands", () => {
     test("sends short message (< 500 chars) as a single chunk + Enter", async () => {
       const agent = makeAgent("agent-abc", tempDir);
       const msg = "x".repeat(499);
-      const result = await sendMessage(agent, msg, { cwd: "/" });
+      // Use raw=true to bypass the user/agent prefix so we test pure
+      // chunking behavior at the 500-char boundary.
+      const result = await sendMessage(agent, msg, { cwd: "/", raw: true });
 
       expect(result.ok).toBe(true);
       const sendKeysCalls = spawnCalls.filter(
@@ -272,7 +280,9 @@ describe("ib-commands", () => {
       const part2 = "b".repeat(500);
       const part3 = "c".repeat(500);
       const msg = part1 + part2 + part3;
-      const result = await sendMessage(agent, msg, { cwd: "/" });
+      // Use raw=true to bypass prefix so we test pure chunking at 500-char
+      // boundaries.
+      const result = await sendMessage(agent, msg, { cwd: "/", raw: true });
 
       expect(result.ok).toBe(true);
 
@@ -338,6 +348,65 @@ describe("ib-commands", () => {
       expect(sendKeysCall![6]).toBe("[sent by agent agent-sender]: hello");
     });
 
+    test("user send (no fromAgent, no user.name) prefixes with [sent by user] and logs from user", async () => {
+      const agent = makeAgent("agent-abc", tempDir);
+      await sendMessage(agent, "hello", { cwd: "/" });
+
+      const sendKeysCall = spawnCalls.find(
+        (c) => c[0] === "tmux" && c[1] === "send-keys" && c.length === 7 && c[4] === "-l" && c[5] === "--"
+      );
+      expect(sendKeysCall).toBeDefined();
+      expect(sendKeysCall![6]).toBe("[sent by user]: hello");
+
+      const recipientLog = await Bun.file(
+        join(tempDir, ".ittybitty", "agents", "agent-abc", "agent.log")
+      ).text();
+      expect(recipientLog).toContain("Received message from user: hello");
+    });
+
+    test("user send with user.name set prefixes with [sent by user <name>] and logs accordingly", async () => {
+      await Bun.write(
+        join(tempDir, "config.json"),
+        JSON.stringify({ user: { name: "Adam" } }, null, 2)
+      );
+
+      const agent = makeAgent("agent-abc", tempDir);
+      await sendMessage(agent, "hello", { cwd: "/" });
+
+      const sendKeysCall = spawnCalls.find(
+        (c) => c[0] === "tmux" && c[1] === "send-keys" && c.length === 7 && c[4] === "-l" && c[5] === "--"
+      );
+      expect(sendKeysCall).toBeDefined();
+      expect(sendKeysCall![6]).toBe("[sent by user Adam]: hello");
+
+      const recipientLog = await Bun.file(
+        join(tempDir, ".ittybitty", "agents", "agent-abc", "agent.log")
+      ).text();
+      expect(recipientLog).toContain("Received message from user Adam: hello");
+    });
+
+    test("raw=true bypasses the user prefix even when user.name is set", async () => {
+      await Bun.write(
+        join(tempDir, "config.json"),
+        JSON.stringify({ user: { name: "Adam" } }, null, 2)
+      );
+
+      const agent = makeAgent("agent-abc", tempDir);
+      await sendMessage(agent, "verbatim", { cwd: "/", raw: true });
+
+      const sendKeysCall = spawnCalls.find(
+        (c) => c[0] === "tmux" && c[1] === "send-keys" && c.length === 7 && c[4] === "-l" && c[5] === "--"
+      );
+      expect(sendKeysCall).toBeDefined();
+      expect(sendKeysCall![6]).toBe("verbatim");
+
+      const recipientLog = await Bun.file(
+        join(tempDir, ".ittybitty", "agents", "agent-abc", "agent.log")
+      ).text();
+      expect(recipientLog).toContain("Received raw message: verbatim");
+      expect(recipientLog).not.toContain("[sent by user");
+    });
+
     test("returns error and does not send Enter when a chunk fails mid-stream", async () => {
       let chunkCallCount = 0;
       setSendSpawnRunner((cmd: string[]) => {
@@ -378,8 +447,10 @@ describe("ib-commands", () => {
       // YAML frontmatter starts with `---`. Without `--`, tmux send-keys
       // parses the leading dashes as a flag and fails with
       // `command send-keys: invalid flag -`.
+      // Use raw=true so the payload reaches tmux without the user prefix —
+      // the test is about tmux flag-parsing safety for dash-leading content.
       const dashLeading = "---\ntitle: foo\n---\nbody";
-      const result = await sendMessage(agent, dashLeading, { cwd: "/" });
+      const result = await sendMessage(agent, dashLeading, { cwd: "/", raw: true });
 
       expect(result.ok).toBe(true);
       const sendKeysCall = spawnCalls.find(

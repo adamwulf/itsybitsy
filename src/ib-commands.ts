@@ -47,6 +47,18 @@ export interface IbCommandResult {
   stderr: string;
 }
 
+/**
+ * `@`-prefixed sentinels whose displayed `[sent by ...]:` label drops the `@`.
+ * These senders are still routed/detected by their `@<name>` form (so the
+ * sentinel allow-list in sendMessage still recognises them as non-agent IDs
+ * and omits the literal "agent " word), but the recipient-visible prefix
+ * renders as `[sent by <name>]` rather than `[sent by @<name>]`. The intent
+ * is to avoid the `@` namespace shared with routable coordinator addressing
+ * (`@system`, `@<repo-name>`) for sentinels that can never be a `ib send`
+ * target — `@watchdog` is the canonical example.
+ */
+export const BARE_RENDERED_SENTINELS: ReadonlySet<string> = new Set(["@watchdog"]);
+
 
 /**
  * Write meta.json atomically (write .tmp + rename). Mirrors the pattern in
@@ -1485,6 +1497,11 @@ export async function sendMessage(
 
   // Format message with sender prefix. `@`-prefixed sender IDs (e.g. @system)
   // are sentinels, not agent IDs, so omit the literal "agent " word for them.
+  // Sentinels listed in `BARE_RENDERED_SENTINELS` additionally render without
+  // the leading `@` (e.g. `@watchdog` → `[sent by watchdog]`) to avoid being
+  // misread as the routable `@<repo-name>` coordinator namespace — the bracket
+  // shape already distinguishes auto-injected nudges from agent messages, so
+  // the `@` carries no information for these senders.
   // No fromId means the send originates from a human-driven path (CLI, TUI,
   // etc.) — prefix as a user send so the recipient can distinguish user vs
   // agent messages. Raw mode (used by Telegram slash-command passthrough)
@@ -1494,7 +1511,12 @@ export async function sendMessage(
   let userLabel = "";
   if (!raw) {
     if (fromId) {
-      const label = fromId.startsWith("@") ? fromId : `agent ${fromId}`;
+      let label: string;
+      if (fromId.startsWith("@")) {
+        label = BARE_RENDERED_SENTINELS.has(fromId) ? fromId.slice(1) : fromId;
+      } else {
+        label = `agent ${fromId}`;
+      }
       fullMessage = `[sent by ${label}]: ${message}`;
     } else {
       const config = await readConfig();

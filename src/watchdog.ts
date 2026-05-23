@@ -46,11 +46,18 @@ export interface AgentTracker {
 
 /**
  * Sentinel sender ID for watchdog-originated messages. Recipients see
- * `[sent by @watchdog]: ...` so they can distinguish auto-injected nudges
+ * `[sent by watchdog]: ...` so they can distinguish auto-injected nudges
  * (rate-limit recovery, api_error retries, manager/spawner notifications)
  * from human user sends, which would otherwise look identical because the
  * watchdog's cwd is the agent's root repo (not an agent worktree) and so
  * falls through to the user-prefix branch in sendMessage.
+ *
+ * The constant value retains the `@` prefix because sendMessage's prefix
+ * formatter uses `startsWith("@")` to discriminate sentinels from real agent
+ * IDs (so the literal word "agent" is omitted). The displayed `@` is then
+ * stripped via the `BARE_RENDERED_SENTINELS` allow-list in ib-commands.ts —
+ * `@watchdog` deliberately renders without the `@` to avoid being misread as
+ * the routable `@<repo-name>` coordinator namespace.
  */
 export const WATCHDOG_SENTINEL = "@watchdog";
 

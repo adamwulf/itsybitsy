@@ -513,6 +513,16 @@ describe("DashboardComponent dialog and action handlers", () => {
   }
 
   let actionTempDir: string | null = null;
+  let configTempDir: string;
+
+  beforeEach(async () => {
+    // Isolate user config — sendMessage reads `user.name` to format
+    // human-driven sends. Without isolation tests pick up whatever's in the
+    // developer's ~/.itsybitsy/config.json, so `[sent by user]` asserts
+    // would break if user.name is set.
+    configTempDir = await mkdtemp(join(tmpdir(), "dashboard-config-"));
+    setUserConfigPath(join(configTempDir, "config.json"));
+  });
 
   async function setupDashboardWithAgent(state = "running") {
     dashboard = makeDashboard();
@@ -573,10 +583,12 @@ describe("DashboardComponent dialog and action handlers", () => {
     resetNukeResumeSpawnRunner();
     resetDiffStatusSpawnRunner();
     resetMergeSpawnRunner();
+    resetUserConfigPath();
     if (actionTempDir) {
       await rm(actionTempDir, { recursive: true, force: true });
       actionTempDir = null;
     }
+    await rm(configTempDir, { recursive: true, force: true });
   });
 
   test("x key opens kill confirm dialog with button UI", async () => {
@@ -1784,6 +1796,7 @@ describe("DashboardComponent right pane and navigation features", () => {
   let dashboard: DashboardComponent;
   let lastIbCall: { args: string[]; cwd: string } | null;
   let sentMessages: { target: string; message: string }[] = [];
+  let configTempDir: string;
 
   function setupSendMock() {
     sentMessages = [];
@@ -1805,9 +1818,19 @@ describe("DashboardComponent right pane and navigation features", () => {
     dashboard.onUpdate([agent], flatList, []);
   }
 
-  afterEach(() => {
+  beforeEach(async () => {
+    // Isolate user config — sendMessage reads `user.name` to format
+    // human-driven sends. Without isolation tests would pick up the
+    // developer's ~/.itsybitsy/config.json.
+    configTempDir = await mkdtemp(join(tmpdir(), "dashboard-config-"));
+    setUserConfigPath(join(configTempDir, "config.json"));
+  });
+
+  afterEach(async () => {
     resetSendSpawnRunner();
     resetDiffStatusSpawnRunner();
+    resetUserConfigPath();
+    await rm(configTempDir, { recursive: true, force: true });
   });
 
   test("addError adds timestamped error to errors list", () => {

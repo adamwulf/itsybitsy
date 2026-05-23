@@ -15,6 +15,7 @@ import {
   resetSystemCoordinatorHasSessionFn,
 } from "./index";
 import { setSendSpawnRunner, resetSendSpawnRunner } from "./ib-commands";
+import { setUserConfigPath, resetUserConfigPath } from "./config";
 import { IB_COORDINATOR_SESSION } from "./coordinator";
 import type { Agent } from "./agents";
 import type { RepoEntry } from "./registry";
@@ -628,6 +629,11 @@ describe("sendToSystemCoordinator", () => {
   beforeEach(async () => {
     spawnCalls = [];
     tempDir = await mkdtemp(join(tmpdir(), "system-coord-test-"));
+    // Isolate user config — sendMessage reads `user.name` to format
+    // human-driven sends. Without isolation tests would pick up whatever's
+    // in the developer's ~/.itsybitsy/config.json (e.g. if user.name is set
+    // the `[sent by user]` prefix asserts would break).
+    setUserConfigPath(join(tempDir, "config.json"));
     setSendSpawnRunner((cmd: string[]) => {
       spawnCalls.push(cmd);
       return makeSpawnResult();
@@ -636,6 +642,7 @@ describe("sendToSystemCoordinator", () => {
 
   afterEach(() => {
     resetSendSpawnRunner();
+    resetUserConfigPath();
     resetSystemCoordinatorHasSessionFn();
     return rm(tempDir, { recursive: true, force: true });
   });

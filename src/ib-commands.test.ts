@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { join } from "path";
+import { join, basename } from "path";
 import { mkdtemp, rm, mkdir, readdir } from "fs/promises";
 import { tmpdir } from "os";
 import type { Agent, AgentMeta } from "./agents";
@@ -20,6 +20,10 @@ import {
   pauseAgent,
   acknowledgeQuestion,
   askQuestion,
+  setSayRunner,
+  resetSayRunner,
+  setAskQuestionTelegramRunner,
+  resetAskQuestionTelegramRunner,
   setSendSpawnRunner,
   resetSendSpawnRunner,
   setKillPauseSpawnRunner,
@@ -4956,6 +4960,114 @@ describe("askQuestion (native)", () => {
     const qId = data.questions[0].id;
     // ID format: q-<epoch>-<6hex>
     expect(qId).toMatch(/^q-\d+-[0-9a-f]{6}$/);
+  });
+
+  describe("notifications", () => {
+    let sayCalls: string[][];
+    let telegramCalls: string[];
+    const originalPlatform = process.platform;
+
+    function setPlatform(value: NodeJS.Platform): void {
+      Object.defineProperty(process, "platform", { value, configurable: true });
+    }
+
+    beforeEach(() => {
+      sayCalls = [];
+      telegramCalls = [];
+      setSayRunner((cmd) => { sayCalls.push(cmd); });
+      setAskQuestionTelegramRunner(async (text) => {
+        telegramCalls.push(text);
+        return { ok: true, message: "ok" };
+      });
+    });
+
+    afterEach(() => {
+      resetSayRunner();
+      resetAskQuestionTelegramRunner();
+      Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
+    });
+
+    test("say is invoked with the correct text when config is true and platform is darwin", async () => {
+      setPlatform("darwin");
+      const result = await askQuestion(tempDir, agentId, "Should I proceed?");
+      expect(result.ok).toBe(true);
+      expect(sayCalls).toHaveLength(1);
+      expect(sayCalls[0]![0]).toBe("/usr/bin/say");
+      // No meta.name set → falls back to agentId. Repo name is basename(tempDir).
+      const expectedRepoName = basename(tempDir);
+      expect(sayCalls[0]![1]).toBe(`Agent ${agentId} in ${expectedRepoName} has a question`);
+    });
+
+    test("say uses meta.name when present and non-empty", async () => {
+      setPlatform("darwin");
+      await Bun.write(
+        join(agentDir, "meta.json"),
+        JSON.stringify({ id: agentId, name: "my-friendly-name" }),
+      );
+      const result = await askQuestion(tempDir, agentId, "Hi");
+      expect(result.ok).toBe(true);
+      expect(sayCalls).toHaveLength(1);
+      expect(sayCalls[0]![1]).toContain("Agent my-friendly-name in ");
+    });
+
+    test("say is NOT invoked when notifications.sayOnQuestion config is false", async () => {
+      setPlatform("darwin");
+      await Bun.write(
+        join(tempDir, "config.json"),
+        JSON.stringify({ notifications: { sayOnQuestion: false } }),
+      );
+      const result = await askQuestion(tempDir, agentId, "Hello?");
+      expect(result.ok).toBe(true);
+      expect(sayCalls).toHaveLength(0);
+    });
+
+    test("say is NOT invoked when platform is not darwin", async () => {
+      setPlatform("linux");
+      const result = await askQuestion(tempDir, agentId, "Hello?");
+      expect(result.ok).toBe(true);
+      expect(sayCalls).toHaveLength(0);
+    });
+
+    test("telegramSend is called with agent name, repo name, and question text", async () => {
+      setPlatform("linux"); // doesn't matter for telegram
+      const result = await askQuestion(tempDir, agentId, "Should we ship?");
+      expect(result.ok).toBe(true);
+      expect(telegramCalls).toHaveLength(1);
+      const msg = telegramCalls[0]!;
+      expect(msg).toContain(agentId);
+      const expectedRepoName = basename(tempDir);
+      expect(msg).toContain(expectedRepoName);
+      expect(msg).toContain("Should we ship?");
+    });
+
+    test("askQuestion still succeeds when say throws", async () => {
+      setPlatform("darwin");
+      setSayRunner(() => { throw new Error("say boom"); });
+      const result = await askQuestion(tempDir, agentId, "Hi");
+      expect(result.ok).toBe(true);
+      expect(result.stdout).toContain("Question submitted");
+      // Question still written to disk
+      const data = await Bun.file(join(tempDir, ".ittybitty", "user-questions.json")).json();
+      expect(data.questions).toHaveLength(1);
+    });
+
+    test("askQuestion still succeeds when telegramSend throws synchronously", async () => {
+      setPlatform("linux");
+      setAskQuestionTelegramRunner(((_text: string) => {
+        throw new Error("tg sync boom");
+      }) as unknown as (text: string) => Promise<{ ok: boolean; message: string }>);
+      const result = await askQuestion(tempDir, agentId, "Hi");
+      expect(result.ok).toBe(true);
+      expect(result.stdout).toContain("Question submitted");
+    });
+
+    test("askQuestion still succeeds when telegramSend rejects", async () => {
+      setPlatform("linux");
+      setAskQuestionTelegramRunner(async () => { throw new Error("tg async boom"); });
+      const result = await askQuestion(tempDir, agentId, "Hi");
+      expect(result.ok).toBe(true);
+      expect(result.stdout).toContain("Question submitted");
+    });
   });
 });
 

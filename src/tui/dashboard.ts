@@ -2363,7 +2363,7 @@ export async function launchDashboard(): Promise<void> {
         access,
         buildClient: (token) => new TelegramClient({ token }),
         buildDispatcher: (opts) => new TelegramDispatcher(opts),
-        buildOutbox: (opts) => new TelegramOutbox(opts),
+        buildOutbox: (opts) => new TelegramOutbox({ ...opts, log: logToWatchLog }),
         log: logToWatchLog,
       });
       if (bootResult.ok) {

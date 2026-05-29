@@ -1304,6 +1304,10 @@ async function main() {
       // gate the unknown-short-flag rejection so that a user CAN write a prompt
       // that starts with a dash by quoting it after the first non-flag token.
       let seenPromptToken = false;
+      // Track whether an explicit -f/--file/--prompt-file was supplied. When it
+      // was, its content wins over stdin (even if empty), so the heredoc stdin
+      // fallback is suppressed — mirroring `send`'s "-f > stdin" precedence.
+      let promptFromFile = false;
       for (let i = 0; i < ibArgs.length; i++) {
         const arg = ibArgs[i]!;
         if (arg === "--type") {
@@ -1340,6 +1344,11 @@ async function main() {
           const promptFile = Bun.file(promptFilePath);
           if (!(await promptFile.exists())) { console.error(`Error: prompt file not found: ${promptFilePath}`); process.exit(1); }
           promptParts.push(await promptFile.text());
+          // Mark that an explicit -f/--file was supplied so it wins over stdin
+          // even when its content is empty (matching `send`'s "-f > stdin"
+          // precedence). Without this flag, an empty file would leave the prompt
+          // blank and the stdin fallback below would incorrectly leak in.
+          promptFromFile = true;
         }
         else if (arg === "--no-worktree") { opts.noWorktree = true; }
         else if (arg === "--yolo") { opts.yolo = true; }
@@ -1370,12 +1379,13 @@ async function main() {
         }
       }
       // Prompt precedence: positional tokens / -f file content > piped stdin.
-      // When no positional prompt and no -f content was supplied, fall back to
-      // reading stdin (heredoc), exactly like `ib send`. When stdin is a TTY
-      // (interactive, no arg) this returns "" and newAgent() emits the existing
-      // "Error: prompt required" — preserving prior behavior.
+      // Only fall back to reading stdin (heredoc) when NEITHER a positional
+      // prompt NOR an explicit -f/--file was supplied — exactly like `ib send`,
+      // where -f wins over stdin even when the file is empty. When stdin is a
+      // TTY (interactive, no arg) readStdinIfPiped() returns "" and newAgent()
+      // emits the existing "Error: prompt required" — preserving prior behavior.
       let prompt = promptParts.join(" ");
-      if (!prompt) {
+      if (!prompt && !promptFromFile) {
         prompt = await readStdinIfPiped();
       }
 

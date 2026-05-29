@@ -653,6 +653,74 @@ describe("CLI arg parsing", () => {
     }
   });
 
+  test("new-agent -f <empty-file> suppresses stdin fallback (prompt required)", async () => {
+    // Precedence guarantee: an explicit -f wins over stdin even when the file is
+    // empty (matching `send`'s "-f > stdin"). So with an empty -f file AND a
+    // piped heredoc body, the stdin must NOT leak in — newAgent() sees an empty
+    // prompt and emits "prompt required". (Note: the empty-prompt check fires
+    // before --type validation, so we get "prompt required" not unknown-type.)
+    const { mkdtemp } = await import("fs/promises");
+    const { tmpdir } = await import("os");
+    const { join } = await import("path");
+    const fakeHome = await mkdtemp(join(tmpdir(), "ib-newagent-femptystdin-home-"));
+    const repoDir = await mkdtemp(join(tmpdir(), "ib-newagent-femptystdin-repo-"));
+    // Genuinely empty (0-byte) file — this is the exact root cause: -f pushes
+    // "" into promptParts, prompt becomes "" (falsy), and WITHOUT the
+    // promptFromFile guard the `if (!prompt)` fallback would read stdin.
+    const emptyFile = join(tmpdir(), `ib-newagent-empty-promptfile-${Date.now()}.md`);
+    await Bun.write(emptyFile, "");
+    await Bun.write(
+      join(fakeHome, ".itsybitsy", "repos.json"),
+      JSON.stringify({ version: 1, repos: [{ path: repoDir, name: "femptyrepo" }] }),
+    );
+    try {
+      const { stderr, exitCode } = await runCliStdin(
+        ["new-agent", "--repo", "femptyrepo", "-f", emptyFile],
+        "stdin body that must NOT leak in\n",
+        { HOME: fakeHome },
+      );
+      expect(stderr).toContain("prompt required");
+      expect(exitCode).toBe(1);
+    } finally {
+      const { rm } = await import("fs/promises");
+      await rm(fakeHome, { recursive: true, force: true }).catch(() => {});
+      await rm(repoDir, { recursive: true, force: true }).catch(() => {});
+      await Bun.file(emptyFile).delete().catch(() => {});
+    }
+  });
+
+  test("new-agent -f <non-empty-file> wins over stdin (file content used)", async () => {
+    // The complementary case: a non-empty -f file beats a piped heredoc body.
+    // With an unknown --type we reach the unknown-type error past the prompt
+    // check, confirming the file content (not stdin) satisfied the prompt.
+    const { mkdtemp } = await import("fs/promises");
+    const { tmpdir } = await import("os");
+    const { join } = await import("path");
+    const fakeHome = await mkdtemp(join(tmpdir(), "ib-newagent-fwins-home-"));
+    const repoDir = await mkdtemp(join(tmpdir(), "ib-newagent-fwins-repo-"));
+    const promptFile = join(tmpdir(), `ib-newagent-fwins-promptfile-${Date.now()}.md`);
+    await Bun.write(promptFile, "real prompt from file\n");
+    await Bun.write(
+      join(fakeHome, ".itsybitsy", "repos.json"),
+      JSON.stringify({ version: 1, repos: [{ path: repoDir, name: "fwinsrepo" }] }),
+    );
+    try {
+      const { stderr, exitCode } = await runCliStdin(
+        ["new-agent", "--repo", "fwinsrepo", "--type", "bogus-nonexistent-type", "-f", promptFile],
+        "stdin body that should be ignored\n",
+        { HOME: fakeHome },
+      );
+      expect(stderr).not.toContain("prompt required");
+      expect(stderr).toContain("unknown agent type 'bogus-nonexistent-type'");
+      expect(exitCode).toBe(1);
+    } finally {
+      const { rm } = await import("fs/promises");
+      await rm(fakeHome, { recursive: true, force: true }).catch(() => {});
+      await rm(repoDir, { recursive: true, force: true }).catch(() => {});
+      await Bun.file(promptFile).delete().catch(() => {});
+    }
+  });
+
   test("new-agent still rejects flag typos before reading stdin (guard intact)", async () => {
     // The flag-typo guard must fire during arg parsing, before any stdin read,
     // so a piped body does not mask a typo like '-F'.

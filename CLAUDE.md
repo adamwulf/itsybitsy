@@ -151,7 +151,7 @@ Every new feature or fix must be evaluated from these four perspectives before i
 
 ## itsybitsy Implementation Notes
 
-3021 tests across 66 files.
+3085 tests across 67 files.
 
 ### Per-agent message-delivery queue (src/outbox.ts)
 Serializes tmux writes to a single agent so two near-simultaneous sends never interleave their `send-keys -l` chunks + `Enter` into one merged prompt. See SPEC.md §4.1.1 and §8.5.

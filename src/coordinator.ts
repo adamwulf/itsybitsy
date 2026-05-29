@@ -579,16 +579,19 @@ export type CoordinatorState = "stopped" | "compacting" | "rate_limited" | "runn
  * See SPEC.md §12.1.6 for priority order.
  */
 export async function detectSystemCoordinatorState(): Promise<CoordinatorState> {
-  // No session → stopped
-  if (!(await tmuxSessionExists())) {
-    return "stopped";
-  }
-
   // Capture tmux output — only the last 50 lines are inspected (compacting:
   // last 5, rate_limited: last 15), so request just 50 to avoid the default
   // 5000-line capture cost.
+  //
+  // A separate `tmux has-session` existence probe is intentionally NOT run
+  // here: `captureTmuxOutput` already returns null on a non-zero `tmux
+  // capture-pane` exit (the session is gone), which is exactly the
+  // existence signal we need. Collapsing the two spawns into one halves the
+  // per-refresh tmux spawn cost on the coordinator state path (this runs on
+  // every `ib watch` watcher refresh — see src/watcher.ts).
   const output = await captureTmuxOutput(IB_COORDINATOR_SESSION, 50);
   if (output === null) {
+    // No session (or capture failed) → stopped.
     return "stopped";
   }
 

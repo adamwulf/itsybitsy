@@ -474,6 +474,119 @@ describe("TmuxPoller", () => {
     await Bun.sleep(50);
     expect(displayMessageCalls).toBe(0);
   });
+
+  // -----------------------------------------------------------------
+  // isRunning / resume — pause/resume support for hidden panes
+  // -----------------------------------------------------------------
+  test("isRunning reflects start/stop state", () => {
+    poller = new TmuxPoller({ onOutput() {} });
+    expect(poller.isRunning()).toBe(false);
+    poller.start();
+    expect(poller.isRunning()).toBe(true);
+    poller.stop();
+    expect(poller.isRunning()).toBe(false);
+  });
+
+  test("stopped poller does NOT spawn capture-pane on tick", async () => {
+    let captureCalls = 0;
+    spawnCtx.set((cmd: string[], _opts?: any) => {
+      if (cmd.includes("capture-pane")) captureCalls++;
+      return {
+        stdout: new ReadableStream({ start(c) { c.close(); } }),
+        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        exited: Promise.resolve(0),
+      };
+    });
+
+    poller = new TmuxPoller({ onOutput() {} });
+    poller.start();
+    poller.setAgent("session-A");
+    await Bun.sleep(50);
+    expect(captureCalls).toBeGreaterThan(0);
+
+    poller.stop();
+    const countAfterStop = captureCalls;
+    // Wait past more than one interval — a stopped poller must not spawn.
+    await Bun.sleep(1200);
+    expect(captureCalls).toBe(countAfterStop);
+  });
+
+  test("resume() restarts polling and fires an immediate poll when a session is set", async () => {
+    let captureCalls = 0;
+    spawnCtx.set((cmd: string[], _opts?: any) => {
+      if (cmd.includes("capture-pane")) captureCalls++;
+      return {
+        stdout: new ReadableStream({
+          start(c) {
+            c.enqueue(new TextEncoder().encode("data\n"));
+            c.close();
+          },
+        }),
+        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        exited: Promise.resolve(0),
+      };
+    });
+
+    poller = new TmuxPoller({ onOutput() {} });
+    poller.start();
+    poller.setAgent("session-A");
+    await Bun.sleep(50);
+
+    // Pause — simulates the pane going off-screen
+    poller.stop();
+    const countWhilePaused = captureCalls;
+    await Bun.sleep(1100);
+    expect(captureCalls).toBe(countWhilePaused);
+
+    // Resume — should immediately poll (no waiting up to 1s for the next tick)
+    expect(poller.isRunning()).toBe(false);
+    poller.resume();
+    expect(poller.isRunning()).toBe(true);
+    await Bun.sleep(50);
+    expect(captureCalls).toBe(countWhilePaused + 1);
+  });
+
+  test("resume() is a no-op when already running (no duplicate timer / poll)", async () => {
+    let captureCalls = 0;
+    spawnCtx.set((cmd: string[], _opts?: any) => {
+      if (cmd.includes("capture-pane")) captureCalls++;
+      return {
+        stdout: new ReadableStream({ start(c) { c.close(); } }),
+        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        exited: Promise.resolve(0),
+      };
+    });
+
+    poller = new TmuxPoller({ onOutput() {} });
+    poller.start();
+    poller.setAgent("session-A");
+    await Bun.sleep(50);
+    const before = captureCalls;
+
+    // resume() while already running must not fire an extra poll
+    poller.resume();
+    await Bun.sleep(50);
+    expect(captureCalls).toBe(before);
+  });
+
+  test("resume() without a session set does not poll", async () => {
+    let captureCalls = 0;
+    spawnCtx.set((cmd: string[], _opts?: any) => {
+      if (cmd.includes("capture-pane")) captureCalls++;
+      return {
+        stdout: new ReadableStream({ start(c) { c.close(); } }),
+        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        exited: Promise.resolve(0),
+      };
+    });
+
+    poller = new TmuxPoller({ onOutput() {} });
+    // No setAgent — resume should start the timer but not poll a null session.
+    poller.resume();
+    expect(poller.isRunning()).toBe(true);
+    await Bun.sleep(50);
+    expect(captureCalls).toBe(0);
+  });
 });
 
 // -------------------------------------------------------------------

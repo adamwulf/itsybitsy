@@ -75,11 +75,23 @@ describe("AgentWatcher", () => {
       stderr: new Response("").body!,
       exited: Promise.resolve(1),
     }) as any);
+    // detectSystemCoordinatorState now derives "stopped" from captureTmuxOutput
+    // returning null (the redundant `tmux has-session` probe was removed), and
+    // captureTmuxOutput spawns via the tmux-poller spawnCtx — not
+    // coordinatorSpawnCtx. Stub it to a non-zero exit so the coordinator
+    // resolves to "stopped" by default, matching the pre-existing baseline the
+    // polling/lifecycle tests assume.
+    tmuxPollerSpawnCtx.set(() => ({
+      stdout: new Response("").body!,
+      stderr: new Response("").body!,
+      exited: Promise.resolve(1),
+    }) as any);
   });
 
   afterEach(async () => {
     await rm(tempDir, { recursive: true, force: true });
     coordinatorSpawnCtx.reset();
+    tmuxPollerSpawnCtx.reset();
   });
 
   describe("start/stop lifecycle", () => {
@@ -1138,30 +1150,24 @@ describe("AgentWatcher", () => {
     test("cache is invalidated when coordinator state becomes 'stopped'", async () => {
       setupDefaultMocks();
 
-      // Phase 1: session alive — display-message returns 1700000000
-      let hasSessionExit = 0;
-      coordinatorSpawnCtx.set(((cmd: string[]) => {
-        if (cmd.includes("has-session")) {
-          return {
-            stdout: new Response("").body!,
-            stderr: new Response("").body!,
-            exited: Promise.resolve(hasSessionExit),
-          };
-        }
-        return {
-          stdout: new Response("").body!,
-          stderr: new Response("").body!,
-          exited: Promise.resolve(0),
-        };
-      }) as any);
+      // Phase 1: session alive — display-message returns 1700000000.
+      // detectSystemCoordinatorState now signals "stopped" via captureTmuxOutput
+      // returning null (capture-pane non-zero exit), not via `tmux has-session`,
+      // so the alive/stopped toggle lives on the capture-pane branch below.
+      coordinatorSpawnCtx.set((() => ({
+        stdout: new Response("").body!,
+        stderr: new Response("").body!,
+        exited: Promise.resolve(0),
+      })) as any);
 
+      let captureExit = 0;
       let displayMessageCalls = 0;
       tmuxPollerSpawnCtx.set(((cmd: string[]) => {
         if (cmd.includes("capture-pane")) {
           return {
             stdout: new Response("normal output").body!,
             stderr: new Response("").body!,
-            exited: Promise.resolve(0),
+            exited: Promise.resolve(captureExit),
           };
         }
         if (cmd.includes("display-message")) {
@@ -1187,14 +1193,15 @@ describe("AgentWatcher", () => {
       await watcher.start();
       expect(displayMessageCalls).toBe(1);
 
-      // Phase 2: session reported stopped — cache invalidates
-      hasSessionExit = 1;
+      // Phase 2: session reported stopped — capture-pane fails → null →
+      // "stopped" → cache invalidates
+      captureExit = 1;
       await watcher.refresh();
       // display-message NOT called when stopped
       expect(displayMessageCalls).toBe(1);
 
       // Phase 3: session alive again — display-message called again because cache cleared
-      hasSessionExit = 0;
+      captureExit = 0;
       await watcher.refresh();
       expect(displayMessageCalls).toBe(2);
 

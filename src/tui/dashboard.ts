@@ -566,6 +566,16 @@ export class DashboardComponent implements Component {
     return this._questionsFocused;
   }
 
+  /** Read-only access to whether the system-coordinator poller is running (for testing) */
+  get coordinatorPollerRunning(): boolean {
+    return this.coordinatorPoller.isRunning();
+  }
+
+  /** Read-only access to whether the per-repo coordinator poller is running (for testing) */
+  get repoCoordinatorPollerRunning(): boolean {
+    return this.repoCoordinatorPoller.isRunning();
+  }
+
   /**
    * Inputs for the widths module — built fresh on each call so every field stays
    * current. Pass `termWidth` from `render(width)` so a TUI test that overrides
@@ -806,9 +816,15 @@ export class DashboardComponent implements Component {
   }
 
   startPolling() {
+    // The selected-agent poller is always running — its output drives the main
+    // tmux pane in normal mode (and the coordinator session when the system
+    // coordinator is selected, via setAgent in syncSelectedAgent).
     this.tmuxPoller.start();
-    this.coordinatorPoller.start();
-    this.repoCoordinatorPoller.start();
+    // The coordinator and repo-coordinator pollers only spawn `tmux capture-pane`
+    // when their panes are actually visible. updatePollerVisibility() starts the
+    // ones that should be live now and leaves the rest stopped (saves a tmux
+    // spawn/sec per hidden pane).
+    this.updatePollerVisibility();
     this.refreshUsage();
     this.usageTimer = setInterval(() => this.refreshUsage(), 240_000);
   }
@@ -830,6 +846,39 @@ export class DashboardComponent implements Component {
       this.telegramStatusTimer = null;
     }
     // Watchdog runs as standalone process — do NOT stop it when TUI closes
+  }
+
+  /**
+   * Pause/resume the coordinator pollers based on whether their panes are
+   * actually on screen. Each TmuxPoller spawns `tmux capture-pane` every ~1s
+   * while running, so a poller whose output isn't visible is pure waste — it
+   * burns a posix_spawn/sec for a pane the user can't see.
+   *
+   * - The system-coordinator pane (`coordinatorPoller`) is only shown when the
+   *   system coordinator is selected AND its view mode is TMUX (the DASHBOARD
+   *   view renders a static agent table, not tmux output).
+   * - The per-repo coordinator pane (`repoCoordinatorPoller`) is only shown in
+   *   REPO mode when the selected repo has a coordinator agent.
+   *
+   * resume() fires an immediate poll, so a pane that just became visible is not
+   * stale for up to 1s. The always-on selected-agent `tmuxPoller` is untouched.
+   */
+  private updatePollerVisibility() {
+    const coordinatorVisible =
+      this.agentTree.isSystemCoordinatorSelected && this.coordinatorViewMode === "TMUX";
+    if (coordinatorVisible) {
+      this.coordinatorPoller.resume();
+    } else if (this.coordinatorPoller.isRunning()) {
+      this.coordinatorPoller.stop();
+    }
+
+    const repoCoordinatorVisible =
+      this.rightPane.mode === "REPO" && this.rightPane.repoCoordinatorAgent != null;
+    if (repoCoordinatorVisible) {
+      this.repoCoordinatorPoller.resume();
+    } else if (this.repoCoordinatorPoller.isRunning()) {
+      this.repoCoordinatorPoller.stop();
+    }
   }
 
   private refreshUsage() {
@@ -957,6 +1006,9 @@ export class DashboardComponent implements Component {
 
   jumpToMode(mode: PaneMode, forceRefresh = false) {
     jumpToMode(this, mode, forceRefresh);
+    // Entering/leaving REPO mode changes whether the per-repo coordinator pane
+    // is visible — pause/resume its poller to match.
+    this.updatePollerVisibility();
   }
 
   /** Reload AGENT LOG tail-window (or skip via cache) — called from scroll/resize handlers. */
@@ -968,6 +1020,10 @@ export class DashboardComponent implements Component {
 
   private cyclePaneMode(delta: number) {
     cyclePaneMode(this, delta);
+    // cyclePaneMode skips REPO (only entered via repo-header selection), but
+    // keep the visibility sync here for symmetry with jumpToMode in case the
+    // active mode changed.
+    this.updatePollerVisibility();
   }
 
   // --- Command palette ---
@@ -1279,6 +1335,10 @@ export class DashboardComponent implements Component {
       ? IB_COORDINATOR_SESSION
       : (selected?.meta.tmux_session ?? null);
     this.tmuxPoller.setAgent(tmuxSession);
+    // Selection (and the REPO-mode auto-switch above) may have changed which
+    // coordinator pane is visible — pause/resume those pollers accordingly so
+    // we don't spawn `tmux capture-pane` for off-screen panes.
+    this.updatePollerVisibility();
   }
 
   /** Check if the selected agent's tmux session has an attached client, start/stop polling accordingly */
@@ -1700,6 +1760,9 @@ export class DashboardComponent implements Component {
     else if (data === "p" || matchesKey(data, Key.left)) {
       if (this.agentTree.isSystemCoordinatorSelected) {
         this.coordinatorViewMode = this.coordinatorViewMode === "TMUX" ? "DASHBOARD" : "TMUX";
+        // Switching to DASHBOARD hides the coordinator tmux output; switching
+        // back to TMUX shows it again. Pause/resume the poller to match.
+        this.updatePollerVisibility();
       } else {
         this.cyclePaneMode(1);
       }
@@ -1707,6 +1770,7 @@ export class DashboardComponent implements Component {
     } else if (data === "n" || matchesKey(data, Key.right)) {
       if (this.agentTree.isSystemCoordinatorSelected) {
         this.coordinatorViewMode = this.coordinatorViewMode === "TMUX" ? "DASHBOARD" : "TMUX";
+        this.updatePollerVisibility();
       } else {
         this.cyclePaneMode(-1);
       }

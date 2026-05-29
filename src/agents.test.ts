@@ -26,6 +26,7 @@ import {
   classifySpawnLogCtx,
   SPAWN_IN_PROGRESS_WINDOW_MS,
   resetListTmuxSessionsCache,
+  resetReapedTmuxSessions,
   readAgentTransient,
   writeAgentTransient,
   deleteAgentTransient,
@@ -42,7 +43,7 @@ import {
 } from "./agents";
 import type { TransientState, AgentOperation } from "./agents";
 import { spawnCtx as tmuxPollerSpawnCtx } from "./tmux-poller";
-import type { Agent, AgentMeta, FlatEntry } from "./agents";
+import type { Agent, AgentMeta, FlatEntry, SpawnedBy } from "./agents";
 import { makeAgent } from "./test-utils";
 
 /** Narrow a FlatEntry to kind==="agent" or fail */
@@ -1583,6 +1584,7 @@ describe("detectAgentStates — reapOrphanedClaude", () => {
   beforeEach(async () => {
     tmpLogDir = await mkdtemp(join(tmpdir(), "orphan-kill-log-"));
     logPath = join(tmpLogDir, "watch.log");
+    resetReapedTmuxSessions();
     const { setWatchLogPath } = await import("./watch-log");
     setWatchLogPath(logPath);
   });
@@ -1593,6 +1595,7 @@ describe("detectAgentStates — reapOrphanedClaude", () => {
     killPidCtx.reset();
     liveTmuxSessionsCtx.reset();
     tmuxPollerSpawnCtx.reset();
+    resetReapedTmuxSessions();
     const { resetWatchLogPath } = await import("./watch-log");
     resetWatchLogPath();
     await rm(tmpLogDir, { recursive: true, force: true });
@@ -1907,6 +1910,7 @@ describe("detectAgentStates — claude_pid liveness gate", () => {
   beforeEach(async () => {
     tmpLogDir = await mkdtemp(join(tmpdir(), "claude-liveness-log-"));
     logPath = join(tmpLogDir, "watch.log");
+    resetReapedTmuxSessions();
     const { setWatchLogPath } = await import("./watch-log");
     setWatchLogPath(logPath);
   });
@@ -1917,6 +1921,7 @@ describe("detectAgentStates — claude_pid liveness gate", () => {
     killPidCtx.reset();
     liveTmuxSessionsCtx.reset();
     tmuxPollerSpawnCtx.reset();
+    resetReapedTmuxSessions();
     const { resetWatchLogPath } = await import("./watch-log");
     resetWatchLogPath();
     await rm(tmpLogDir, { recursive: true, force: true });
@@ -2132,6 +2137,159 @@ describe("detectAgentStates — claude_pid liveness gate", () => {
     expect(killPidCalls).toBe(0);
   });
 
+  // Regression: detectAgentStates runs every ~2s over ALL agents. A stopped
+  // agent whose meta.json still carries a stale tmux_session must not re-spawn
+  // `tmux kill-session` on every tick forever. The reapedTmuxSessions memo
+  // guarantees the husk is torn down AT MOST ONCE.
+  test("stopped husk → kill-session called once across repeated ticks (memoized)", async () => {
+    const killSessionCalls: string[] = [];
+    tmuxPollerSpawnCtx.set(((args: any[]) => {
+      const isKill = args[0] === "tmux" && args[1] === "kill-session";
+      if (isKill) killSessionCalls.push(String(args[3]));
+      return {
+        stdout: new ReadableStream({ start(c) { c.close(); } }),
+        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        exited: Promise.resolve(0),
+      };
+    }) as any);
+    isPidAliveCtx.set(() => false); // claude_pid is dead → resolves to stopped
+    liveTmuxSessionsCtx.set(async () => new Set(["ib-a1"]));
+    killPidCtx.set(() => true);
+
+    const a = makeAgent({
+      id: "agent-1",
+      meta: {
+        state: "running",
+        tmux_session: "ib-a1",
+        claude_pid: "12345",
+        created_epoch: Math.floor(Date.now() / 1000) - 3600,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+
+    // Three consecutive pollStates ticks over the same stopped agent.
+    await detectAgentStates([a]);
+    await detectAgentStates([a]);
+    await detectAgentStates([a]);
+
+    expect(a.state).toBe("stopped");
+    // kill-session must have fired exactly ONCE, not once per tick.
+    expect(killSessionCalls).toEqual(["ib-a1"]);
+  });
+
+  // Regression (resume re-arm): the reapedTmuxSessions memo must be CLEARED
+  // when an agent is observed alive again, so a stopped -> resume -> stopped
+  // cycle re-kills the husk. `resumeAgent` re-creates the tmux session under
+  // the SAME name and writes state "running"; without clear-on-alive the memo
+  // still holds that name and the second stop would skip teardown, leaking a
+  // husk session. We drive three ticks: stop (kill #1, memo set) -> running
+  // (memo cleared via the live capture path) -> stop again (kill #2).
+  test("stopped -> running -> stopped re-arms husk teardown (kill-session fires twice)", async () => {
+    // phase toggles the agent between a dead husk and a live, running pane.
+    let phase: "stopped" | "running" = "stopped";
+    const killSessionCalls: string[] = [];
+    tmuxPollerSpawnCtx.set(((args: any[]) => {
+      const isCapture = args[0] === "tmux" && args[1] === "capture-pane";
+      const isKill = args[0] === "tmux" && args[1] === "kill-session";
+      if (isKill) killSessionCalls.push(String(args[3]));
+      // When stopped: capture-pane shows a dead husk pane. When running:
+      // capture-pane shows a live Claude pane so detectAgentStates resolves
+      // running and clears the memo.
+      const paneText =
+        phase === "stopped"
+          ? "Pane is dead (status 0, signal SIGTERM)\n"
+          : "⏵⏵ accept edits on (shift+tab to cycle)";
+      return {
+        stdout: new ReadableStream({
+          start(c) {
+            c.enqueue(new TextEncoder().encode(isCapture ? paneText : ""));
+            c.close();
+          },
+        }),
+        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        exited: Promise.resolve(0),
+      };
+    }) as any);
+    // claude_pid liveness tracks the phase: dead while stopped (drives the
+    // husk teardown), alive while running (passes the pid gate so the live
+    // capture path runs and clears the memo).
+    isPidAliveCtx.set(() => phase === "running");
+    liveTmuxSessionsCtx.set(async () => new Set(["ib-a1"]));
+    killPidCtx.set(() => true);
+
+    const a = makeAgent({
+      id: "agent-1",
+      meta: {
+        state: "running",
+        tmux_session: "ib-a1",
+        claude_pid: "12345",
+        created_epoch: Math.floor(Date.now() / 1000) - 3600,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+
+    // Tick 1: stopped husk → kill #1, memo arms ib-a1.
+    phase = "stopped";
+    await detectAgentStates([a]);
+    expect(a.state).toBe("stopped");
+    expect(killSessionCalls).toEqual(["ib-a1"]);
+
+    // Tick 2: resumed → live pane → running, memo cleared for ib-a1.
+    phase = "running";
+    await detectAgentStates([a]);
+    expect(a.state).toBe("running");
+    // No new kill-session on the running tick.
+    expect(killSessionCalls).toEqual(["ib-a1"]);
+
+    // Tick 3: stopped again → husk teardown re-armed → kill #2.
+    phase = "stopped";
+    await detectAgentStates([a]);
+    expect(a.state).toBe("stopped");
+    // The core guarantee: kill-session fired a SECOND time after the resume.
+    expect(killSessionCalls).toEqual(["ib-a1", "ib-a1"]);
+  });
+
+  // The memo is per-session-name: a different stopped session is still killed
+  // even after another session was already reaped this run.
+  test("memo is keyed per session — a different stopped session is still killed", async () => {
+    const killSessionCalls: string[] = [];
+    tmuxPollerSpawnCtx.set(((args: any[]) => {
+      const isKill = args[0] === "tmux" && args[1] === "kill-session";
+      if (isKill) killSessionCalls.push(String(args[3]));
+      return {
+        stdout: new ReadableStream({ start(c) { c.close(); } }),
+        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        exited: Promise.resolve(0),
+      };
+    }) as any);
+    isPidAliveCtx.set(() => false);
+    liveTmuxSessionsCtx.set(async () => new Set(["ib-a1", "ib-a2"]));
+    killPidCtx.set(() => true);
+
+    const a1 = makeAgent({
+      id: "agent-1",
+      meta: {
+        state: "running",
+        tmux_session: "ib-a1",
+        claude_pid: "12345",
+        created_epoch: Math.floor(Date.now() / 1000) - 3600,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+    const a2 = makeAgent({
+      id: "agent-2",
+      meta: {
+        state: "running",
+        tmux_session: "ib-a2",
+        claude_pid: "23456",
+        created_epoch: Math.floor(Date.now() / 1000) - 3600,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+
+    await detectAgentStates([a1, a2]);
+    // Re-run: neither should be re-killed.
+    await detectAgentStates([a1, a2]);
+
+    expect(killSessionCalls.sort()).toEqual(["ib-a1", "ib-a2"]);
+  });
+
   // Test 8: empty/legacy claude_pid → no false positive, falls through normally
   test("running + claude_pid='' (empty/legacy) + normal tmux → state follows existing logic, no reap", async () => {
     installTmuxRunner("⏵⏵ accept edits on (shift+tab to cycle)");
@@ -2170,6 +2328,7 @@ describe("detectAgentStates — dead-pane husk handling", () => {
   beforeEach(async () => {
     tmpLogDir = await mkdtemp(join(tmpdir(), "dead-pane-log-"));
     logPath = join(tmpLogDir, "watch.log");
+    resetReapedTmuxSessions();
     const { setWatchLogPath } = await import("./watch-log");
     setWatchLogPath(logPath);
   });
@@ -2180,6 +2339,7 @@ describe("detectAgentStates — dead-pane husk handling", () => {
     killPidCtx.reset();
     liveTmuxSessionsCtx.reset();
     tmuxPollerSpawnCtx.reset();
+    resetReapedTmuxSessions();
     const { resetWatchLogPath } = await import("./watch-log");
     resetWatchLogPath();
     await rm(tmpLogDir, { recursive: true, force: true });
@@ -3102,6 +3262,106 @@ describe("readAgentMeta mtime cache", () => {
       first.meta.spawned_by.agent_id = "POLLUTED";
       first.meta.spawned_by.repo_path = "/polluted/path";
     }
+    const second = await readAgentMeta(tempDir);
+    expect(second.meta?.spawned_by?.agent_id).toBe("spawner-1");
+    expect(second.meta?.spawned_by?.repo_path).toBe("/orig/path");
+  });
+
+  // copyAgentMeta replaced structuredClone for performance. The cache-HIT path
+  // must keep the same isolation: mutating spawned_by on a copy returned from a
+  // cache hit must not pollute a subsequent cached read, and the two returned
+  // copies must not share the same object/spawned_by reference.
+  test("cache-hit copies are isolated — distinct objects, mutation does not leak", async () => {
+    await Bun.write(join(tempDir, "meta.json"), JSON.stringify({
+      id: "agent-hit",
+      tmux_session: "ib-orig",
+      spawned_by: { agent_id: "spawner-1", repo_path: "/orig/path" },
+    }));
+    // First read = cache miss (populates cache).
+    const miss = await readAgentMeta(tempDir);
+    // Second read = cache hit.
+    const hit1 = await readAgentMeta(tempDir);
+    // Distinct top-level objects and distinct nested spawned_by objects.
+    expect(hit1.meta).not.toBe(miss.meta);
+    expect(hit1.meta?.spawned_by).not.toBe(miss.meta?.spawned_by);
+    // Mutate the cache-hit copy's nested object.
+    if (hit1.meta?.spawned_by) {
+      hit1.meta.spawned_by.agent_id = "POLLUTED";
+      hit1.meta.spawned_by.repo_path = "/polluted/path";
+    }
+    if (hit1.meta) hit1.meta.tmux_session = "ib-mutated";
+    // A subsequent cache hit must still see the original canonical values.
+    const hit2 = await readAgentMeta(tempDir);
+    expect(hit2.meta?.spawned_by?.agent_id).toBe("spawner-1");
+    expect(hit2.meta?.spawned_by?.repo_path).toBe("/orig/path");
+    expect(hit2.meta?.tmux_session).toBe("ib-orig");
+  });
+
+  // FIX 3 (sync guard): copyAgentMeta must deep-copy EVERY nested mutable
+  // (object/array) field of AgentMeta — a shallow spread aliases such fields
+  // between the cached canonical reference and the returned copy, so a caller
+  // mutation would silently pollute the cache for every later reader. This
+  // test has two layers that together fail if a future nested field is added
+  // without a matching deep copy in copyAgentMeta:
+  //
+  //  1. Compile-time: REQUIRED_DEEP_COPY is typed as a record over exactly the
+  //     nested-mutable keys of AgentMeta. Adding a new object/array field to
+  //     AgentMeta makes this object literal fail to typecheck until the field
+  //     is listed here (and, by the reviewer's intent, deep-copied in
+  //     copyAgentMeta) — caught by `bunx tsc --noEmit`.
+  //  2. Runtime: every nested field is populated, read through the cache twice,
+  //     and the first copy's nested fields are mutated; the second cached read
+  //     must be untouched, and each nested field must be a DISTINCT object
+  //     reference from the cached canonical one. A forgotten deep copy makes
+  //     the references identical and the mutation leak — failing the asserts.
+  test("copyAgentMeta isolates every nested AgentMeta field (deep-copy guard)", async () => {
+    // Distinguish nested mutable (object/array) fields from primitive ones,
+    // stripping the optional `undefined`/`null` parts of each field's type.
+    type NonNull<T> = Exclude<T, null | undefined>;
+    type IsNested<V> = NonNull<V> extends object ? true : false;
+    type NestedMutableKeys<T> = {
+      [K in keyof T]-?: IsNested<T[K]> extends true ? K : never;
+    }[keyof T];
+
+    // The author MUST list every nested-mutable AgentMeta field here. If a new
+    // object/array field is added to AgentMeta, this literal stops compiling
+    // ("Property '<field>' is missing") — the type-level half of the guard.
+    const REQUIRED_DEEP_COPY: Record<NestedMutableKeys<AgentMeta>, true> = {
+      spawned_by: true,
+    };
+
+    // Construct a meta with every known nested mutable field populated.
+    const spawnedBy: SpawnedBy = { agent_id: "spawner-1", repo_path: "/orig/path" };
+    await Bun.write(join(tempDir, "meta.json"), JSON.stringify({
+      id: "agent-deepcopy",
+      tmux_session: "ib-orig",
+      spawned_by: spawnedBy,
+    }));
+
+    // First read = cache miss (populates the canonical cache entry).
+    const first = await readAgentMeta(tempDir);
+    expect(first.meta).not.toBeNull();
+
+    // Every nested field on the returned copy must be a DISTINCT object from a
+    // subsequent canonical read — the necessary condition for deep isolation.
+    // Driven off REQUIRED_DEEP_COPY so a newly-added (and listed) field is
+    // automatically exercised here too.
+    const canonicalProbe = await readAgentMeta(tempDir);
+    for (const key of Object.keys(REQUIRED_DEEP_COPY) as NestedMutableKeys<AgentMeta>[]) {
+      const a = first.meta?.[key];
+      const b = canonicalProbe.meta?.[key];
+      if (a != null && typeof a === "object") {
+        expect(a).not.toBe(b);
+      }
+    }
+
+    // Mutate every nested field on the first copy.
+    if (first.meta?.spawned_by) {
+      first.meta.spawned_by.agent_id = "POLLUTED";
+      first.meta.spawned_by.repo_path = "/polluted/path";
+    }
+
+    // A fresh read must see the original canonical values — no leak.
     const second = await readAgentMeta(tempDir);
     expect(second.meta?.spawned_by?.agent_id).toBe("spawner-1");
     expect(second.meta?.spawned_by?.repo_path).toBe("/orig/path");

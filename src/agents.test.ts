@@ -447,6 +447,61 @@ describe("readRepoAgents", () => {
     expect(errors.length).toBe(0);
   });
 
+  test("includeArchived=false excludes archived agents and does not touch archive dir", async () => {
+    // One active agent and one archived agent on disk.
+    const activeDir = join(tempDir, ".ittybitty", "agents", "agent-active");
+    await mkdir(activeDir, { recursive: true });
+    await Bun.write(join(activeDir, "meta.json"), JSON.stringify({
+      id: "agent-active", session_id: "s-a", tmux_session: "t-a",
+      prompt: "active task", manager: null, created: "2026-03-05",
+      created_epoch: Math.floor(Date.now() / 1000) - 60,
+      worktree: true, worker: false, yolo: false, model: "sonnet", claude_pid: "1",
+    }));
+
+    const archiveDir = join(tempDir, ".ittybitty", "archive", "agent-old");
+    await mkdir(archiveDir, { recursive: true });
+    await Bun.write(join(archiveDir, "meta.json"), JSON.stringify({
+      id: "agent-old", session_id: "s-o", tmux_session: "t-o",
+      prompt: "old task", manager: null, created: "2026-03-04",
+      created_epoch: Math.floor(Date.now() / 1000) - 86400,
+      worktree: true, worker: true, yolo: false, model: "opus", claude_pid: "2",
+    }));
+
+    // Proof the archive dir is never read: replace its meta.json with a value
+    // that WOULD surface as a malformed-meta error if the archive were scanned.
+    // Because includeArchived=false skips the archive dir entirely, no error
+    // appears and only the active agent is returned.
+    isRecentlyCreatedDirCtx.set(async () => false);
+    await Bun.write(join(archiveDir, "meta.json"), "{ this is not valid json");
+
+    const { agents, errors } = await readRepoAgents(tempDir, "test-repo", false);
+    expect(errors.length).toBe(0); // archive dir not scanned → no malformed-meta error
+    expect(agents.length).toBe(1);
+    expect(agents[0]!.id).toBe("agent-active");
+    expect(agents.some((a) => a.archived)).toBe(false);
+  });
+
+  test("includeArchived=true (default) still reads archived agents", async () => {
+    const archiveDir = join(tempDir, ".ittybitty", "archive", "agent-old");
+    await mkdir(archiveDir, { recursive: true });
+    await Bun.write(join(archiveDir, "meta.json"), JSON.stringify({
+      id: "agent-old", session_id: "s-o", tmux_session: "t-o",
+      prompt: "old task", manager: null, created: "2026-03-04",
+      created_epoch: Math.floor(Date.now() / 1000) - 86400,
+      worktree: true, worker: true, yolo: false, model: "opus", claude_pid: "2",
+    }));
+    await mkdir(join(tempDir, ".ittybitty", "agents"), { recursive: true });
+
+    // Explicit true and the no-arg default must both include archived agents.
+    const explicit = await readRepoAgents(tempDir, "test-repo", true);
+    expect(explicit.agents.length).toBe(1);
+    expect(explicit.agents[0]!.archived).toBe(true);
+
+    const defaulted = await readRepoAgents(tempDir, "test-repo");
+    expect(defaulted.agents.length).toBe(1);
+    expect(defaulted.agents[0]!.archived).toBe(true);
+  });
+
   test("reports error for malformed meta.json (non-recent dir)", async () => {
     // Override to simulate a directory that's past the grace period
     isRecentlyCreatedDirCtx.set(async () => false);
@@ -907,6 +962,47 @@ describe("readAllAgents", () => {
     ]);
     // orphanedTmuxSessions should be an array (may be empty depending on system state)
     expect(Array.isArray(orphanedTmuxSessions)).toBe(true);
+  });
+
+  test("includeArchived flag controls whether archived agents are returned", async () => {
+    // repo1: one active agent
+    const active = join(tempDir1, ".ittybitty", "agents", "agent-active");
+    await mkdir(active, { recursive: true });
+    await Bun.write(join(active, "meta.json"), JSON.stringify({
+      id: "agent-active", session_id: "s1", tmux_session: "t1",
+      prompt: "p1", manager: null, created: "2026-03-05",
+      created_epoch: Math.floor(Date.now() / 1000) - 60,
+      worktree: true, worker: false, yolo: false, model: "sonnet", claude_pid: "1",
+    }));
+
+    // repo2: one archived agent (and an empty agents/ dir)
+    const archived = join(tempDir2, ".ittybitty", "archive", "agent-old");
+    await mkdir(archived, { recursive: true });
+    await mkdir(join(tempDir2, ".ittybitty", "agents"), { recursive: true });
+    await Bun.write(join(archived, "meta.json"), JSON.stringify({
+      id: "agent-old", session_id: "s2", tmux_session: "t2",
+      prompt: "p2", manager: null, created: "2026-03-04",
+      created_epoch: Math.floor(Date.now() / 1000) - 86400,
+      worktree: true, worker: true, yolo: false, model: "opus", claude_pid: "2",
+    }));
+
+    const repos = [
+      { path: tempDir1, name: "repo1" },
+      { path: tempDir2, name: "repo2" },
+    ];
+
+    // false → only the active agent
+    const excluded = await readAllAgents(repos, false);
+    expect(excluded.agents.map((a) => a.id).sort()).toEqual(["agent-active"]);
+    expect(excluded.agents.some((a) => a.archived)).toBe(false);
+
+    // explicit true → both
+    const includedExplicit = await readAllAgents(repos, true);
+    expect(includedExplicit.agents.map((a) => a.id).sort()).toEqual(["agent-active", "agent-old"]);
+
+    // no-arg default → both (default is true, backward-compatible)
+    const includedDefault = await readAllAgents(repos);
+    expect(includedDefault.agents.map((a) => a.id).sort()).toEqual(["agent-active", "agent-old"]);
   });
 });
 

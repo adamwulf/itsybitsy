@@ -818,11 +818,28 @@ async function readAgentsFromDir(
   return { agents, errors, orphanedTmuxSessions: [], liveTmuxSessions: new Set() };
 }
 
-/** Read all agents for a repo (both active and archived) */
-export async function readRepoAgents(repoPath: string, repoName: string): Promise<ReadAgentsResult> {
+/**
+ * Read agents for a repo.
+ *
+ * When `includeArchived` is true (the default) both the active `agents/` dir
+ * and the immutable `archive/` dir are read. When false, the archive dir is
+ * NOT touched at all (no readdir, no per-agent stat) — this avoids re-reading
+ * the ever-growing pile of archived `meta.json` files on every `ib watch`
+ * refresh tick, where archived agents are always discarded downstream anyway
+ * (flattenAgentTree drops them, and every consumer filters `!a.archived`).
+ */
+export async function readRepoAgents(
+  repoPath: string,
+  repoName: string,
+  includeArchived = true
+): Promise<ReadAgentsResult> {
   const agentsDir = join(repoPath, ".ittybitty", "agents");
-  const archiveDir = join(repoPath, ".ittybitty", "archive");
 
+  if (!includeArchived) {
+    return readAgentsFromDir(agentsDir, repoPath, repoName, false);
+  }
+
+  const archiveDir = join(repoPath, ".ittybitty", "archive");
   const [active, archived] = await Promise.all([
     readAgentsFromDir(agentsDir, repoPath, repoName, false),
     readAgentsFromDir(archiveDir, repoPath, repoName, true),
@@ -1105,12 +1122,17 @@ export const liveTmuxSessionsCtx = new InjectionContext<() => Promise<Set<string
  * Also detects orphaned tmux sessions (sessions matching ittybitty-* pattern
  * that don't correspond to any known agent). The tmux session list is cached
  * for a short TTL so back-to-back refreshes don't each spawn `tmux list-sessions`.
+ *
+ * `includeArchived` defaults to true (read both active and archived agents).
+ * Pass false on hot paths that discard archived agents anyway (the `ib watch`
+ * refresh loop and the inject-status hook) to skip reading the archive dirs.
  */
 export async function readAllAgents(
-  repos: Array<{ path: string; name: string }>
+  repos: Array<{ path: string; name: string }>,
+  includeArchived = true
 ): Promise<ReadAgentsResult> {
   const [results, tmuxSessions] = await Promise.all([
-    Promise.all(repos.map((r) => readRepoAgents(r.path, r.name))),
+    Promise.all(repos.map((r) => readRepoAgents(r.path, r.name, includeArchived))),
     getCachedTmuxSessions(),
   ]);
 

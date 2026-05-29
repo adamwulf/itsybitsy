@@ -7,7 +7,7 @@ import { makeAgent as _makeAgent, makeFlatAgent } from "./test-utils";
 import type { RepoEntry } from "./registry";
 
 // --- Mock agents module ---
-const mockReadAllAgents = jest.fn<() => Promise<{ agents: Agent[]; errors: any[] }>>();
+const mockReadAllAgents = jest.fn<(repos: Array<{ path: string; name: string }>, includeArchived?: boolean) => Promise<{ agents: Agent[]; errors: any[] }>>();
 const mockDetectAgentStates = jest.fn<(agents: Agent[]) => Promise<void>>();
 const mockBuildAgentTree = jest.fn<(agents: Agent[]) => Agent[]>();
 const mockFlattenAgentTree = jest.fn<(roots: Agent[]) => FlatEntry[]>();
@@ -930,10 +930,11 @@ describe("AgentWatcher", () => {
       }
     });
 
-    test("archive dir watch does not error if archive missing", async () => {
+    test("no archive watcher is set up (missing archive dir is a non-event)", async () => {
       setupDefaultMocks();
       const errors: Error[] = [];
-      // Don't create archive dir
+      // Don't create archive dir. archive/ is intentionally not watched anymore,
+      // so its absence can never surface as an error.
       const watcher = new AgentWatcher(
         [{ path: tempDir, name: "test" }],
         {
@@ -945,9 +946,50 @@ describe("AgentWatcher", () => {
       await watcher.start();
       watcher.stop();
 
-      // No errors for missing archive dir (it's expected)
       const watchErrors = errors.filter((e) => e.message.includes("archive"));
       expect(watchErrors.length).toBe(0);
+    });
+  });
+
+  describe("archived agents", () => {
+    test("refresh() passes includeArchived=false to readAllAgents", async () => {
+      setupDefaultMocks();
+      const watcher = new AgentWatcher(
+        [{ path: tempDir, name: "test" }],
+        { onUpdate: () => {} }
+      );
+
+      await watcher.refresh();
+
+      // The hot refresh path must skip the archive dir entirely.
+      expect(mockReadAllAgents).toHaveBeenCalled();
+      const lastCall = mockReadAllAgents.mock.calls.at(-1)!;
+      expect(lastCall[1]).toBe(false);
+    });
+
+    test("archived agents from readAllAgents never reach onUpdate", async () => {
+      // Belt-and-suspenders: even if an archived agent slipped through the read,
+      // flattenAgentTree drops it. Here readAllAgents (correctly) returns only the
+      // active agent, and the flat list passed to onUpdate contains no archived rows.
+      const activeAgent = makeAgent("agent-active", false);
+      mockReadAllAgents.mockResolvedValue({ agents: [activeAgent], errors: [] });
+      mockDetectAgentStates.mockResolvedValue(undefined);
+      mockBuildAgentTree.mockReturnValue([activeAgent]);
+      mockFlattenAgentTree.mockReturnValue([makeFlatAgent(activeAgent)]);
+      mockReadPendingQuestions.mockResolvedValue([]);
+
+      let received: FlatEntry[] = [];
+      const watcher = new AgentWatcher(
+        [{ path: tempDir, name: "test" }],
+        { onUpdate: (_agents, flat) => { received = flat; } }
+      );
+
+      await watcher.refresh();
+
+      const archivedRows = received.filter(
+        (f) => f.kind === "agent" && f.agent.archived
+      );
+      expect(archivedRows.length).toBe(0);
     });
   });
 

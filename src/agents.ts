@@ -626,8 +626,19 @@ const metaCache = new Map<string, { mtimeMs: number; meta: AgentMeta }>();
  * a caller might mutate (notably the watchdog routing notifications). A shallow
  * spread shares the top-level object by value for primitives; we deep-copy
  * `spawned_by` so a caller mutating returned.spawned_by cannot pollute the
- * cached canonical reference. Keep this in sync with the AgentMeta interface:
- * if a new array/object field is added, copy it here too. */
+ * cached canonical reference.
+ *
+ * INVARIANT: every nested mutable field (object or array) on AgentMeta MUST be
+ * deep-copied here. A shallow spread aliases nested objects between the cached
+ * canonical reference and the returned copy, so a caller mutating such a field
+ * would silently corrupt the cache for every subsequent reader. If you add a
+ * new object/array field to AgentMeta, add a deep copy for it in the return
+ * literal below. The "copyAgentMeta isolates every nested AgentMeta field"
+ * test in src/agents.test.ts guards this — it populates every known mutable
+ * field, reads through the cache twice, mutates the first copy, and asserts the
+ * second read is untouched, so a forgotten field surfaces as a test failure.
+ * Do NOT replace this with structuredClone(): deep-cloning every meta on every
+ * read was the 2nd-biggest CPU cost in profiling and is why this helper exists. */
 function copyAgentMeta(meta: AgentMeta): AgentMeta {
   return {
     ...meta,
@@ -1035,11 +1046,32 @@ export function resetListTmuxSessionsCache(): void {
  * stopped agent whose meta.json still carries a stale tmux_session would
  * re-spawn `tmux kill-session` on every tick forever, re-killing an
  * already-dead session. Keyed on the session name, which is unique per agent
- * (ittybitty-<repoId>-<agentId>) and never legitimately reused for a different
- * stopped husk — so a one-shot memo is safe. Only the kill-session call is
- * memoized; PID reaping is NOT (a PID could in principle still be alive on a
- * later tick and warrant another SIGTERM). */
+ * (ittybitty-<repoId>-<agentId>). Only the kill-session call is memoized; PID
+ * reaping is NOT (a PID could in principle still be alive on a later tick and
+ * warrant another SIGTERM).
+ *
+ * Invalidation / bound: a session is REMOVED from this memo as soon as
+ * detectAgentStates() observes it alive again (live, non-dead tmux pane, or a
+ * fresh watchdog-backed transient). This is what re-arms the husk teardown
+ * across a stopped -> resume -> stopped cycle: `resumeAgent` re-creates the
+ * tmux session under the SAME name and writes state "running", so without the
+ * clear-on-alive the second stop would be skipped and leak a husk session.
+ * Because every entry is cleared the moment its session is alive again, the
+ * Set only ever holds CURRENTLY-stopped husks, not every session ever seen —
+ * which is its natural (and sufficient) size bound. No LRU / size cap needed.
+ */
 const reapedTmuxSessions = new Set<string>();
+
+/**
+ * Re-arm husk teardown for a session observed alive again. Called from the
+ * "session is alive" resolution points in detectAgentStates (fresh transient
+ * fast-path and successful live tmux capture). MUST NOT be called from the
+ * stopped/dead-pane paths — clearing there would re-arm a kill against a husk
+ * that is still dead, re-killing it every tick (the exact churn the memo
+ * prevents). See reapedTmuxSessions for the invariant. */
+function clearReapedTmuxSession(tmuxSession: string): void {
+  if (tmuxSession) reapedTmuxSessions.delete(tmuxSession);
+}
 
 /** Reset the reaped-tmux-session memo. Exported for tests. */
 export function resetReapedTmuxSessions(): void {
@@ -1373,6 +1405,8 @@ export async function detectAgentStates(agents: Agent[]): Promise<void> {
             return;
           }
         }
+        // Session confirmed live — re-arm husk teardown. See reapedTmuxSessions.
+        clearReapedTmuxSession(tmuxSession);
         agent.state = "complete";
         return;
       }
@@ -1397,6 +1431,10 @@ export async function detectAgentStates(agents: Agent[]): Promise<void> {
         nowMsCtx.fn() - transient.updated_at_ms < TRANSIENT_FRESH_MS &&
         isPidAliveCtx.fn(transient.watchdog_pid)
       ) {
+        // The session is alive again (fresh, watchdog-backed). Re-arm husk
+        // teardown so a future stop after a resume re-kills the session. See
+        // reapedTmuxSessions.
+        clearReapedTmuxSession(tmuxSession);
         if (transient.tmux_compacting) {
           agent.state = "compacting";
           return;
@@ -1434,6 +1472,11 @@ export async function detectAgentStates(agents: Agent[]): Promise<void> {
         await reapOrphanedClaude(agent, agentDir, resolved, reason);
         return;
       }
+
+      // The pane is live (capture succeeded, not a dead pane). Re-arm husk
+      // teardown so a future stop after a resume re-kills the session. See
+      // reapedTmuxSessions.
+      clearReapedTmuxSession(tmuxSession);
 
       // Step 3: tmux exists — check transient overrides
       if (isCompacting(output)) {

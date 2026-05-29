@@ -92,3 +92,76 @@ describe("buildHooksBlock — byte-identical with prior inline literals", () => 
     expect(REGULAR_AGENT_INTERCEPT_MATCHER).toBe("Task|Agent|TaskCreate|AskUserQuestion");
   });
 });
+
+describe("buildHooksBlock — inject-timestamp PostToolUse hook", () => {
+  test("omitting includeTimestamp produces no PostToolUse key (backward compatible)", () => {
+    const result = buildHooksBlock({
+      agentId: "agent-abc12345",
+      includeStop: true,
+      interceptMatcher: null,
+      sessionStartIncludesAgentId: false,
+    });
+    expect("PostToolUse" in result).toBe(false);
+  });
+
+  test("includeTimestamp false produces no PostToolUse key", () => {
+    const result = buildHooksBlock({
+      agentId: "agent-abc12345",
+      includeStop: true,
+      interceptMatcher: null,
+      sessionStartIncludesAgentId: false,
+      includeTimestamp: false,
+    });
+    expect("PostToolUse" in result).toBe(false);
+  });
+
+  test("regular agent w/ timestamp (Stop, no intercept) adds PostToolUse after PreToolUse", () => {
+    const id = "agent-abc12345";
+    const result = buildHooksBlock({
+      agentId: id,
+      includeStop: true,
+      interceptMatcher: null,
+      sessionStartIncludesAgentId: false,
+      includeTimestamp: true,
+    });
+    const expected = {
+      Stop: [{ matcher: "*", hooks: [{ type: "command", command: `ib hook-status ${id}` }] }],
+      PermissionRequest: [{ matcher: "*", hooks: [{ type: "command", command: `ib hook-permission-denied ${id}` }] }],
+      PreToolUse: [
+        { matcher: "*", hooks: [{ type: "command", command: `ib hook-check-path ${id}` }] },
+      ],
+      PostToolUse: [
+        { matcher: "*", hooks: [{ type: "command", command: "ib hooks inject-timestamp" }] },
+      ],
+      UserPromptSubmit: [{ hooks: [{ type: "command", command: `ib hook-mark-running ${id}` }] }],
+      SessionStart: [{ hooks: [{ type: "command", command: "ib hooks session-start" }] }],
+    };
+    expect(JSON.stringify(result, null, 2)).toBe(JSON.stringify(expected, null, 2));
+  });
+
+  test("PostToolUse is emitted directly after PreToolUse in key order", () => {
+    const result = buildHooksBlock({
+      agentId: "agent-abc12345",
+      includeStop: true,
+      interceptMatcher: REGULAR_AGENT_INTERCEPT_MATCHER,
+      sessionStartIncludesAgentId: false,
+      includeTimestamp: true,
+    });
+    const keys = Object.keys(result);
+    const preIdx = keys.indexOf("PreToolUse");
+    const postIdx = keys.indexOf("PostToolUse");
+    expect(postIdx).toBe(preIdx + 1);
+  });
+
+  test("timestamp hook uses matcher '*' to fire on every tool call", () => {
+    const result = buildHooksBlock({
+      agentId: "agent-abc12345",
+      includeStop: true,
+      interceptMatcher: null,
+      sessionStartIncludesAgentId: false,
+      includeTimestamp: true,
+    });
+    const postToolUse = result.PostToolUse as Array<{ matcher: string }>;
+    expect(postToolUse[0]!.matcher).toBe("*");
+  });
+});

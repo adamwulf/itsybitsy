@@ -1789,6 +1789,7 @@ async function buildAgentSettings(
       includeStop: true,
       interceptMatcher: addIntercept ? REGULAR_AGENT_INTERCEPT_MATCHER : null,
       sessionStartIncludesAgentId: false,
+      includeTimestamp: true,
     }),
   };
 

@@ -1721,6 +1721,14 @@ async function main() {
           await withHookLogging("inject-status", agentDir, stdin, () => hookInjectStatus({ mode, visible }, stdin));
           break;
         }
+        case "inject-timestamp": {
+          const { resolveAgentDir, withHookLogging } = await import("./hooks/slow-hook-logger");
+          const { hookInjectTimestamp } = await import("./hooks/inject-timestamp");
+          const stdin = await new Response(Bun.stdin.stream()).text();
+          const agentDir = resolveAgentDir(process.cwd());
+          await withHookLogging("inject-timestamp", agentDir, stdin, () => hookInjectTimestamp(stdin));
+          break;
+        }
         case "install": {
           const { installSafetyHooks } = await import("./ib-commands");
           await printAndExit(await installSafetyHooks(process.cwd()));
@@ -1753,7 +1761,7 @@ async function main() {
         }
         default:
           console.error(`Unknown hooks subcommand: ${subcommand}`);
-          console.error("Available: intercept-task, session-start, main-path, inject-status, install, uninstall, status, intercept-install, intercept-uninstall, intercept-status");
+          console.error("Available: intercept-task, session-start, main-path, inject-status, inject-timestamp, install, uninstall, status, intercept-install, intercept-uninstall, intercept-status");
           process.exit(1);
       }
       break;

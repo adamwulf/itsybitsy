@@ -9,8 +9,15 @@ import { join, dirname, resolve, basename } from "path";
 import { readdir, chmod, rm, mkdir, rename, stat } from "fs/promises";
 import { realpathSync } from "fs";
 import { homedir } from "node:os";
-import type { Agent, SpawnedBy } from "./agents";
-import { writeAgentState, isRecentlyCreated } from "./agents";
+import type { Agent, SpawnedBy, AgentOperationKind } from "./agents";
+import {
+  writeAgentState,
+  isRecentlyCreated,
+  isPidAliveCtx,
+  readAgentTransient,
+  setAgentOperation,
+  clearAgentOperation,
+} from "./agents";
 import {
   logAgent,
   logSpawn,
@@ -71,6 +78,55 @@ async function writeMetaJsonAtomic(agentDir: string, meta: Record<string, unknow
   const tmpPath = metaPath + ".tmp";
   await Bun.write(tmpPath, JSON.stringify(meta, null, 2) + "\n");
   await rename(tmpPath, metaPath);
+}
+
+/** Human-readable verb for an op kind, used in the guard refusal message. */
+function humanizeOpKind(kind: AgentOperationKind): string {
+  switch (kind) {
+    case "merge_check":
+      return "merge-checking";
+    case "merging":
+      return "merging";
+    case "restarting":
+      return "restarting";
+  }
+}
+
+/**
+ * Result of acquiring the long-running-op guard. On refusal, `stderr` carries
+ * a user-facing "Agent is currently …" message that the dashboard surfaces.
+ */
+type AcquireOpResult = { ok: true } | { ok: false; stderr: string };
+
+/**
+ * Shared preflight for the three slow agent ops (merge-check, merge, restart).
+ * Reads the durable, cross-process op marker from meta.transient.json:
+ *  - if an op is in flight AND its holder process is alive → refuse.
+ *  - otherwise (no op, or the holder has died → crash reclaim) → take the
+ *    marker for `kind` and proceed.
+ *
+ * The marker is cleared in the op's `finally`; a crash mid-op leaves it behind
+ * so the next acquire reclaims it (dead-holder) and detectAgentStates can paint
+ * `op_stuck`. Uses the injectable isPidAliveCtx so tests can stub liveness.
+ *
+ * kill/nuke/pause/reassign deliberately do NOT call this — they are the
+ * recovery path for a wedged op and must never be blocked by the guard.
+ */
+async function acquireAgentOperation(
+  agentDir: string,
+  kind: AgentOperationKind,
+): Promise<AcquireOpResult> {
+  const t = await readAgentTransient(agentDir);
+  const op = t?.operation;
+  if (op && op.pid > 0 && isPidAliveCtx.fn(op.pid)) {
+    return {
+      ok: false,
+      stderr: `Agent is currently ${humanizeOpKind(op.kind)} (pid ${op.pid}) — try again when it finishes`,
+    };
+  }
+  // op absent, or holder dead → reclaim and proceed.
+  await setAgentOperation(agentDir, { kind, pid: process.pid, started_at_ms: Date.now() });
+  return { ok: true };
 }
 
 /** Spawn context for kill/pause operations */
@@ -390,17 +446,27 @@ export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
     return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' not found` };
   }
 
-  // Per-repo coordinators: R triggers a full reset rather than a session resume.
-  // The coordinator's settings.local.json is assembled from three sources at
-  // spawn time (hardcoded constants, _all.md, coordinator.md), and its hooks
-  // template is rebuilt then. Resuming the existing session would reuse stale
-  // permissions and hooks, so we tear the coordinator down and respawn it
-  // — fresher, simpler, and matches the user's mental model of "R to reset".
-  if (agent.meta.agentType === "coordinator") {
-    return await resetCoordinator(agent);
+  // Acquire the long-running-op guard at the VERY TOP — above the coordinator
+  // early-return below — so coordinator resets are guarded against a double-R
+  // too. Op kind `restarting` covers both the resume and coordinator-reset
+  // paths. Refusal `stderr` is surfaced verbatim by the dashboard handler.
+  const acquired = await acquireAgentOperation(agentDir, "restarting");
+  if (!acquired.ok) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: acquired.stderr };
   }
 
-  // Resume is allowed when no live tmux session exists for the agent. We don't
+  try {
+    // Per-repo coordinators: R triggers a full reset rather than a session resume.
+    // The coordinator's settings.local.json is assembled from three sources at
+    // spawn time (hardcoded constants, _all.md, coordinator.md), and its hooks
+    // template is rebuilt then. Resuming the existing session would reuse stale
+    // permissions and hooks, so we tear the coordinator down and respawn it
+    // — fresher, simpler, and matches the user's mental model of "R to reset".
+    if (agent.meta.agentType === "coordinator") {
+      return await resetCoordinator(agent);
+    }
+
+    // Resume is allowed when no live tmux session exists for the agent. We don't
   // trust meta.state here because legacy paused agents (pre-Phase 42) may have a
   // stale state like "complete" or "waiting" that pause never overwrote. Checking
   // tmux directly lets those stuck agents self-heal.
@@ -685,7 +751,14 @@ ${qAbsExitScript}
     }
   } catch { /* ignore */ }
 
-  return { ok: true, exitCode: 0, stdout: `Use 'ib look ${agent.id}' to view output`, stderr: "" };
+    return { ok: true, exitCode: 0, stdout: `Use 'ib look ${agent.id}' to view output`, stderr: "" };
+  } finally {
+    // Clear the op marker on every return path (the body above has many early
+    // returns). ENOENT-safe via updateAgentTransient's best-effort try/catch:
+    // resetCoordinator removes the dir, so this writes into a now-gone dir on
+    // the coordinator path and silently no-ops.
+    await clearAgentOperation(agentDir);
+  }
 }
 
 /** Override the respawn detach runner (for testing) */
@@ -1089,61 +1162,72 @@ export async function mergeCheckAgent(agent: Agent): Promise<IbCommandResult> {
   const worktreePath = join(agentDir, "repo");
   const branchName = `agent/${agent.id}`;
 
-  // 1. Check worktree exists + no uncommitted changes
-  const worktreeCheck = await timed("merge-check", "worktree-check", async () => {
-    try {
-      await readdir(worktreePath);
-    } catch {
-      return { ok: false as const, stderr: `Agent '${agent.id}' has no worktree` };
-    }
-    const worktreeStatus = await mergeSpawnCtx.run(["git", "-C", worktreePath, "status", "--porcelain"]);
-    if (worktreeStatus.exitCode === 0 && worktreeStatus.stdout.trim()) {
-      return { ok: false as const, stderr: `Agent '${agent.id}' has uncommitted changes` };
-    }
-    return { ok: true as const };
-  });
-  if (!worktreeCheck.ok) {
-    return { ok: false, exitCode: 1, stdout: "", stderr: worktreeCheck.stderr };
+  // Long-running-op guard: refuse if another op (check/merge/restart) is in
+  // flight with a live holder; reclaim on a dead holder. Cleared in `finally`.
+  const acquired = await acquireAgentOperation(agentDir, "merge_check");
+  if (!acquired.ok) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: acquired.stderr };
   }
 
-  // 2. Check main + agent branches exist
-  const branchCheck = await timed("merge-check", "branch-resolve", async () => {
-    const mainRef = await mergeSpawnCtx.run(["git", "-C", agent.repoPath, "show-ref", "--verify", "refs/heads/main"]);
-    if (mainRef.exitCode !== 0) {
-      return { ok: false as const, stderr: "Main branch not found" };
+  try {
+    // 1. Check worktree exists + no uncommitted changes
+    const worktreeCheck = await timed("merge-check", "worktree-check", async () => {
+      try {
+        await readdir(worktreePath);
+      } catch {
+        return { ok: false as const, stderr: `Agent '${agent.id}' has no worktree` };
+      }
+      const worktreeStatus = await mergeSpawnCtx.run(["git", "-C", worktreePath, "status", "--porcelain"]);
+      if (worktreeStatus.exitCode === 0 && worktreeStatus.stdout.trim()) {
+        return { ok: false as const, stderr: `Agent '${agent.id}' has uncommitted changes` };
+      }
+      return { ok: true as const };
+    });
+    if (!worktreeCheck.ok) {
+      return { ok: false, exitCode: 1, stdout: "", stderr: worktreeCheck.stderr };
     }
-    const branchRef = await mergeSpawnCtx.run(["git", "-C", agent.repoPath, "show-ref", "--verify", `refs/heads/${branchName}`]);
-    if (branchRef.exitCode !== 0) {
-      return { ok: false as const, stderr: `Branch '${branchName}' does not exist` };
-    }
-    return { ok: true as const };
-  });
-  if (!branchCheck.ok) {
-    return { ok: false, exitCode: 1, stdout: "", stderr: branchCheck.stderr };
-  }
 
-  // 3. Pre-rebase conflict check
-  const conflictResult = await timed("merge-check", "conflict-detect", () =>
-    checkRebaseConflicts(agent.repoPath, "main", branchName)
-  );
-  if (!conflictResult.ok) {
+    // 2. Check main + agent branches exist
+    const branchCheck = await timed("merge-check", "branch-resolve", async () => {
+      const mainRef = await mergeSpawnCtx.run(["git", "-C", agent.repoPath, "show-ref", "--verify", "refs/heads/main"]);
+      if (mainRef.exitCode !== 0) {
+        return { ok: false as const, stderr: "Main branch not found" };
+      }
+      const branchRef = await mergeSpawnCtx.run(["git", "-C", agent.repoPath, "show-ref", "--verify", `refs/heads/${branchName}`]);
+      if (branchRef.exitCode !== 0) {
+        return { ok: false as const, stderr: `Branch '${branchName}' does not exist` };
+      }
+      return { ok: true as const };
+    });
+    if (!branchCheck.ok) {
+      return { ok: false, exitCode: 1, stdout: "", stderr: branchCheck.stderr };
+    }
+
+    // 3. Pre-rebase conflict check
+    const conflictResult = await timed("merge-check", "conflict-detect", () =>
+      checkRebaseConflicts(agent.repoPath, "main", branchName)
+    );
+    if (!conflictResult.ok) {
+      return {
+        ok: false, exitCode: 1, stdout: "",
+        stderr: `Rebase conflict detected between '${branchName}' and 'main'`,
+      };
+    }
+
+    // 4. Count commits
+    const commitCount = await timed("merge-check", "commit-count", async () => {
+      const logResult = await mergeSpawnCtx.run(["git", "-C", agent.repoPath, "log", `main..${branchName}`, "--oneline"]);
+      return logResult.stdout.trim() ? logResult.stdout.trim().split("\n").length : 0;
+    });
+
     return {
-      ok: false, exitCode: 1, stdout: "",
-      stderr: `Rebase conflict detected between '${branchName}' and 'main'`,
+      ok: true, exitCode: 0,
+      stdout: `Merge check passed: ${commitCount} commit(s), no conflicts, no uncommitted changes`,
+      stderr: "",
     };
+  } finally {
+    await clearAgentOperation(agentDir);
   }
-
-  // 4. Count commits
-  const commitCount = await timed("merge-check", "commit-count", async () => {
-    const logResult = await mergeSpawnCtx.run(["git", "-C", agent.repoPath, "log", `main..${branchName}`, "--oneline"]);
-    return logResult.stdout.trim() ? logResult.stdout.trim().split("\n").length : 0;
-  });
-
-  return {
-    ok: true, exitCode: 0,
-    stdout: `Merge check passed: ${commitCount} commit(s), no conflicts, no uncommitted changes`,
-    stderr: "",
-  };
 }
 
 /** Pluggable spawn runner for merge — defaults to Bun.spawn, overridable for tests */
@@ -1240,6 +1324,14 @@ export async function mergeAgent(agent: Agent, targetDir: string): Promise<IbCom
   const worktreePath = join(agentDir, "repo");
   const tmuxSession = agent.meta.tmux_session;
 
+  // Long-running-op guard: refuse if another op (check/merge/restart) is in
+  // flight with a live holder; reclaim on a dead holder. Cleared in `finally`.
+  const acquired = await acquireAgentOperation(agentDir, "merging");
+  if (!acquired.ok) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: acquired.stderr };
+  }
+
+  try {
   // 1-6. Preflight: agent dir, worktree, statuses, target branch, branch existence
   const preflight = await timed("merge", "preflight", async () => {
     // 1. Agent dir must exist
@@ -1433,6 +1525,14 @@ export async function mergeAgent(agent: Agent, targetDir: string): Promise<IbCom
   await timed("merge", "orphan-scan", () => scanAndKillOrphans(agentsDir));
 
   return { ok: true, exitCode: 0, stdout: `Closed agent: ${agent.id}`, stderr: "" };
+  } finally {
+    // Clear the op marker on every return path. On the SUCCESS path the agent
+    // dir was already removed at step 17-19, so this writes into a now-gone
+    // dir — ENOENT-safe via updateAgentTransient's best-effort try/catch. On a
+    // FAILED merge the dir still exists and the marker is cleared so a retry
+    // (or kill) is not blocked. Single clear point — no double-clear.
+    await clearAgentOperation(agentDir);
+  }
 }
 
 /** Spawn context for send operations */

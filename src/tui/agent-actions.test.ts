@@ -13,7 +13,6 @@ import {
   handleOpenDiffTool, getActiveDiffProc, setActiveDiffProc, killActiveDiffProc,
   getDiffToolLaunching, setDiffToolLaunching,
   handleAddPermission, addPermissionToSettings, agentSettingsLocalPath,
-  clearResumingAgentIds, getResumingAgentIds,
 } from "./agent-actions";
 import { MIN_LEFT_WIDTH, MAX_LEFT_WIDTH } from "./split-pane";
 import {
@@ -213,11 +212,6 @@ describe("handleNukeAll", () => {
 });
 
 describe("handleResume", () => {
-  beforeEach(() => {
-    // Reset the module-level in-flight guard so state doesn't leak between cases.
-    clearResumingAgentIds();
-  });
-
   test("does nothing when no agent selected", () => {
     const { ctx, notices } = makeMockCtx({ agent: null });
     handleResume(ctx);
@@ -271,35 +265,26 @@ describe("handleResume", () => {
     expect(notices[0]).toBe("Resuming agent-1…");
   });
 
-  test("double-press triggers exactly one resume; second shows 'Already resuming'", async () => {
+  // The old in-memory `resumingAgentIds` double-press guard has been removed.
+  // Concurrent-press protection is now durable: resumeAgent() takes the
+  // cross-process op-guard (acquireAgentOperation, kind `restarting`) and a
+  // second concurrent attempt is refused with "Agent is currently restarting…",
+  // which handleResume surfaces as "Resume failed: …". That refusal is tested
+  // at the resumeAgent level in ib-commands.test.ts; here we only verify the
+  // handler still issues a single resume per press and surfaces the result.
+  test("each press issues one resume and surfaces its result", async () => {
     const agent = makeAgent({ id: "agent-1", state: "stopped" });
-    // executeAndRefresh that does NOT await fn synchronously — mirrors the real
-    // dashboard, where the resume runs in the background while handleResume
-    // returns immediately. This keeps the in-flight guard set when press #2 lands.
     let resumeAttempts = 0;
     const { ctx, notices } = makeMockCtx({ agent });
     ctx.executeAndRefresh = (fn) => {
       resumeAttempts++;
-      // Run fn but don't block the caller — the guard's finally clears the id
-      // only after fn resolves.
       void fn();
       return Promise.resolve();
     };
     handleResume(ctx);
-    handleResume(ctx); // second press, while the first is still in flight
     expect(resumeAttempts).toBe(1);
     expect(notices).toContain("Resuming agent-1…");
-    expect(notices.some((n) => n === "Already resuming agent-1…")).toBe(true);
     await Bun.sleep(10);
-  });
-
-  test("guard clears after resume completes, allowing a later resume", async () => {
-    const agent = makeAgent({ id: "agent-1", state: "stopped" });
-    const { ctx } = makeMockCtx({ agent });
-    handleResume(ctx);
-    await Bun.sleep(10);
-    // After the resume settles, the in-flight guard must be empty.
-    expect(getResumingAgentIds().has("agent-1")).toBe(false);
   });
 });
 

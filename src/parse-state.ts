@@ -15,6 +15,9 @@ export type AgentState =
   | "rate_limited"
   | "api_error"
   | "stopped"
+  | "merging" // render label for both merge_check and merging op kinds
+  | "restarting" // resume / coordinator-reset in flight
+  | "op_stuck" // op present, holder dead OR started_at older than OP_STUCK_TIMEOUT_MS
   | "unknown";
 
 export interface ParseStateResult {

@@ -104,8 +104,10 @@ export function briefSummary(agents: Agent[], questionCount?: number): string {
     counts.set(state, (counts.get(state) ?? 0) + 1);
   }
 
-  // Ordered state display
-  const order = ["running", "waiting", "complete", "rate_limited", "api_error", "stopped", "creating"];
+  // Ordered state display. op_stuck/merging/restarting are surfaced so the
+  // primary Claude's status summary reflects in-flight long-running ops;
+  // op_stuck is actionable (kill/nuke the wedged agent) so it leads.
+  const order = ["op_stuck", "running", "waiting", "merging", "restarting", "complete", "rate_limited", "api_error", "stopped", "creating"];
   const parts: string[] = [];
   for (const s of order) {
     const n = counts.get(s);

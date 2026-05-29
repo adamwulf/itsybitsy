@@ -40,26 +40,6 @@ import { isValidToolList } from "../validation";
 
 const SCROLL_STEP = 10;
 
-/**
- * In-flight guard for resume/reset operations, keyed by agent id (or a stable
- * sentinel for coordinators). resumeAgent() is slow — autoAcceptWorkspaceTrust
- * polls tmux for up to ~15s — and executeAndRefresh() spawns an independent
- * promise per key-press with no lock. Without this guard, a second 'R' press
- * while the first is still running spawns a duplicate that then trips
- * resumeAgent()'s liveness refusal (press #1 already created the tmux session),
- * surfacing a confusing "Resume failed" notice. We track ids here so the second
- * press is a no-op with an "Already resuming…" notice instead.
- */
-const resumingAgentIds = new Set<string>();
-
-/** Test helper: reset the in-flight resume guard between cases. */
-export function clearResumingAgentIds() { resumingAgentIds.clear(); }
-/** Test helper: inspect the in-flight resume guard. */
-export function getResumingAgentIds(): ReadonlySet<string> { return resumingAgentIds; }
-
-/** Stable id for the system coordinator in the in-flight resume guard. */
-const SYSTEM_COORDINATOR_RESUME_KEY = "@system";
-
 /** Track active diff tool process so we can kill it before relaunching */
 let activeDiffProc: { proc: ReturnType<typeof Bun.spawn>; agentId: string } | null = null;
 
@@ -241,27 +221,20 @@ export function handleKillSystemCoordinator(ctx: ActionCtx) {
  * the notice text and tmux pane reset stay in sync.
  */
 export function handleRestartSystemCoordinator(ctx: ActionCtx) {
-  // In-flight guard: restartSystemCoordinator() can block for several seconds,
-  // so a double-press would otherwise kick off a redundant restart.
-  if (resumingAgentIds.has(SYSTEM_COORDINATOR_RESUME_KEY)) {
-    ctx.setNotice("Already restarting system coordinator…");
-    return;
-  }
+  // The system coordinator has no agent dir, so it is not covered by the
+  // durable op-guard (acquireAgentOperation) — there is nothing to mark. A
+  // rapid double-press is rare here and harmless (the second restart simply
+  // re-runs the kill+relaunch). The immediate notice gives feedback.
   ctx.setNotice("Restarting system coordinator…");
-  resumingAgentIds.add(SYSTEM_COORDINATOR_RESUME_KEY);
   ctx.executeAndRefresh(async () => {
-    try {
-      await restartSystemCoordinator();
-      ctx.coordinatorPane.resetForAgent();
-      const mode = getLastCoordinatorSpawnMode();
-      ctx.setNotice(
-        mode === "resumed"
-          ? "System coordinator resumed"
-          : "System coordinator restarted (fresh)",
-      );
-    } finally {
-      resumingAgentIds.delete(SYSTEM_COORDINATOR_RESUME_KEY);
-    }
+    await restartSystemCoordinator();
+    ctx.coordinatorPane.resetForAgent();
+    const mode = getLastCoordinatorSpawnMode();
+    ctx.setNotice(
+      mode === "resumed"
+        ? "System coordinator resumed"
+        : "System coordinator restarted (fresh)",
+    );
   });
 }
 
@@ -345,39 +318,28 @@ export function handleResume(ctx: ActionCtx) {
   if (!ctx.agentTree.selectedAgent && repoHeader) {
     const repo = ctx.repos.find((r) => repoDisplayName(r) === repoHeader);
     if (!repo) return;
-    // In-flight guard keyed by repo path — the coordinator id isn't known until
-    // after the async checkCoordinatorExists() resolves, so we guard on the repo
-    // to stop a double-press from spawning duplicate reset/spawn operations.
-    const coordKey = `repo:${repo.path}`;
-    if (resumingAgentIds.has(coordKey)) {
-      ctx.setNotice(`Already resetting coordinator for ${repoDisplayName(repo)}…`);
-      return;
-    }
     ctx.setNotice(`Resetting coordinator for ${repoDisplayName(repo)}…`);
-    resumingAgentIds.add(coordKey);
     ctx.executeAndRefresh(async () => {
-      try {
-        const coordStatus = await checkCoordinatorExists(repo.path);
-        if (coordStatus.exists) {
-          // Coordinator exists — full reset (kill + respawn). Allowed regardless
-          // of state: a running coordinator with stale permissions/hooks is the
-          // primary case this command is for. resumeAgent() detects coordinators
-          // and routes to the reset path.
-          const agent = (ctx.watcher?.lastAgents ?? [])
-            .find(a => a.id === coordStatus.agentId);
-          if (agent) {
-            const result = await resumeAgent(agent);
-            ctx.setNotice(result.ok ? `Reset coordinator ${agent.id}` : `Reset failed: ${result.stderr || result.stdout}`);
-          } else {
-            ctx.setNotice(`Coordinator ${coordStatus.agentId} not found in agent tree`);
-          }
+      const coordStatus = await checkCoordinatorExists(repo.path);
+      if (coordStatus.exists) {
+        // Coordinator exists — full reset (kill + respawn). Allowed regardless
+        // of state: a running coordinator with stale permissions/hooks is the
+        // primary case this command is for. resumeAgent() detects coordinators
+        // and routes to the reset path. The durable op-guard inside
+        // resumeAgent() (kind `restarting`) refuses a concurrent reset and
+        // surfaces "Agent is currently restarting…" as the failure stderr.
+        const agent = (ctx.watcher?.lastAgents ?? [])
+          .find(a => a.id === coordStatus.agentId);
+        if (agent) {
+          const result = await resumeAgent(agent);
+          ctx.setNotice(result.ok ? `Reset coordinator ${agent.id}` : `Reset failed: ${result.stderr || result.stdout}`);
         } else {
-          // No coordinator — spawn one
-          const result = await newAgent(repo.path, "You are the per-repo coordinator. Await instructions.", { type: "coordinator" });
-          ctx.setNotice(result.ok ? `Spawned coordinator ${result.stdout}` : `Spawn failed: ${result.stderr || result.stdout}`);
+          ctx.setNotice(`Coordinator ${coordStatus.agentId} not found in agent tree`);
         }
-      } finally {
-        resumingAgentIds.delete(coordKey);
+      } else {
+        // No coordinator — spawn one
+        const result = await newAgent(repo.path, "You are the per-repo coordinator. Await instructions.", { type: "coordinator" });
+        ctx.setNotice(result.ok ? `Spawned coordinator ${result.stdout}` : `Spawn failed: ${result.stderr || result.stdout}`);
       }
     });
     return;
@@ -392,22 +354,17 @@ export function handleResume(ctx: ActionCtx) {
   // agent only shows "complete" while its tmux session is alive), and a live
   // agent's resume is correctly refused by resumeAgent()'s `tmux has-session`
   // guard. That liveness check is the single source of truth for refusing.
+  //
+  // Concurrent-press protection is now durable, not in-memory: resumeAgent()
+  // takes the cross-process op-guard (kind `restarting`) at its top, so a
+  // mashed 'R' (or a shell `ib resume`, or a second `ib watch`) gets a refusal
+  // whose stderr ("Agent is currently restarting…") we surface verbatim below.
 
-  // In-flight guard: ignore duplicate presses while a resume is already running.
-  if (resumingAgentIds.has(agent.id)) {
-    ctx.setNotice(`Already resuming ${agent.id}…`);
-    return;
-  }
   // Immediate feedback — resumeAgent() can block for several seconds.
   ctx.setNotice(`Resuming ${agent.id}…`);
-  resumingAgentIds.add(agent.id);
   ctx.executeAndRefresh(async () => {
-    try {
-      const result = await resumeAgent(agent);
-      ctx.setNotice(result.ok ? `Resumed ${agent.id}` : `Resume failed: ${result.stderr || result.stdout}`);
-    } finally {
-      resumingAgentIds.delete(agent.id);
-    }
+    const result = await resumeAgent(agent);
+    ctx.setNotice(result.ok ? `Resumed ${agent.id}` : `Resume failed: ${result.stderr || result.stdout}`);
   });
 }
 

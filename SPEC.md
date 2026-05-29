@@ -800,6 +800,18 @@ Writes `state: "running"` to the agent's `meta.json` the instant input arrives. 
 
 **Terminal-state guard**: Reads the current `state` from `meta.json` first; bails if it is `complete` or `stopped`. UserPromptSubmit can in theory fire after Stop, and we never want to resurrect a terminal state. No-op when `meta.json` is missing or unparseable. No logging.
 
+### 6.6.1 Inject Timestamp Hook (PostToolUse)
+
+**Command**: `ib hooks inject-timestamp`
+**Matcher**: `*` (fires after every tool call)
+**Hook type**: PostToolUse
+
+Injects the current wall-clock time into the agent's context after each tool call, as `additionalContext` of the form `Current time: 2026-05-29 14:32:07 CDT (epoch 1748547127)` — human-readable local time with timezone abbreviation plus the raw epoch in seconds. Claude only ever gives a conversation a coarse session-level timestamp; this gives the agent a per-message sense of elapsed wall-clock time. Because PostToolUse `additionalContext` is written into the transcript, the timestamps persist for the rest of the conversation (until a compaction) and accumulate into a rough timeline.
+
+**Opt-in**: Gated behind the `hooks.injectTimestamp` config key (default `false`). The hook entry is always present in regular agents' `settings.local.json`, but the body short-circuits (no output, exit 0) unless the config is enabled — so toggling the config takes effect on already-running agents without re-spawning them. Also stays silent if CWD is not inside an agent worktree (defense-in-depth) or if stdin is not valid JSON.
+
+**Scope**: Installed for regular agents only (via `buildHooksBlock({ includeTimestamp: true })`). The system coordinator and per-repo coordinators do not get it. Distinct from the global `inject-status` hook (§6.7), which targets the *primary* Claude session with an agents overview rather than agent sessions with a timestamp.
+
 ### 6.7 Global Hooks (installed in ~/.claude/settings.json)
 
 These are optional hooks that the user installs globally:
@@ -843,6 +855,7 @@ All keys are read from `~/.itsybitsy/config.json`. If a key is absent or has an 
 | `externalDiffTool` | string | (none) | External diff viewer command used by the TUI (`ib watch`). Read from `~/.itsybitsy/config.json` at startup via `readConfig()`; written back via `writeConfig()` when changed in the settings dialog. When absent or empty, the diff action is disabled. |
 | `hooks.injectStatus` | boolean | `true` | When `false`, the `inject-status` UserPromptSubmit/PostToolUse hook exits immediately without injecting agent status into the Claude context. |
 | `hooks.statusVisible` | boolean | `true` | When `true` (and `hooks.injectStatus` is also `true`), the status injection hook also emits a `systemMessage` field so the injected summary appears visibly to the user in the Claude UI. When `false`, status is injected as silent `additionalContext` only. |
+| `hooks.injectTimestamp` | boolean | `false` | When `true`, the `inject-timestamp` PostToolUse hook (installed in regular agents only) injects the current wall-clock time into the agent's context after every tool call. When `false` (the default), the hook exits immediately without injecting. See §6.6.1. |
 | `coordinator.model` | string | `"opus"` | Default model for coordinator agents. Resolution: `--model` > type `model` > `coordinator.model` > `"opus"`. |
 
 **Deprecated keys**: All permission list keys have been moved out of `config.json` into agent type layer files:

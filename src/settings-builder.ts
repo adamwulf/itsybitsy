@@ -81,7 +81,7 @@ export async function buildLayeredPermissions(opts: {
 /**
  * Build the `hooks` block for a `settings.local.json` file.
  *
- * The shape varies along three axes:
+ * The shape varies along several axes:
  *   - whether the Stop hook is included (system coordinator omits it; it
  *     has its own state detection)
  *   - whether intercept-task is enabled and what its matcher should be
@@ -89,18 +89,23 @@ export async function buildLayeredPermissions(opts: {
  *   - whether the session-start hook command takes the agent ID as an
  *     argument (coordinators do; regular agents don't because the hook
  *     derives identity from cwd)
+ *   - whether the inject-timestamp PostToolUse hook is included (regular
+ *     agents get it; the hook body is gated on the `hooks.injectTimestamp`
+ *     config so the entry being present is harmless when the config is off)
  *
  * Key insertion order is preserved across callers — when Stop is omitted
  * the remaining keys are emitted as `[PreToolUse, PermissionRequest,
  * UserPromptSubmit, SessionStart]` (system coordinator); when Stop is
  * present the order is `[Stop, PermissionRequest, PreToolUse,
- * UserPromptSubmit, SessionStart]`.
+ * UserPromptSubmit, SessionStart]`. When `includeTimestamp` is set, a
+ * `PostToolUse` key is appended after `PreToolUse` in either ordering.
  */
 export function buildHooksBlock(opts: {
   agentId: string;
   includeStop: boolean;
   interceptMatcher: string | null;
   sessionStartIncludesAgentId: boolean;
+  includeTimestamp?: boolean;
 }): Record<string, unknown> {
   const preToolUseHooks: unknown[] = [
     { matcher: "*", hooks: [{ type: "command", command: `ib hook-check-path ${opts.agentId}` }] },
@@ -111,6 +116,10 @@ export function buildHooksBlock(opts: {
       hooks: [{ type: "command", command: "ib hooks intercept-task" }],
     });
   }
+
+  const postToolUseHooks: unknown[] | null = opts.includeTimestamp
+    ? [{ matcher: "*", hooks: [{ type: "command", command: "ib hooks inject-timestamp" }] }]
+    : null;
 
   const sessionStartCmd = opts.sessionStartIncludesAgentId
     ? `ib hooks session-start ${opts.agentId}`
@@ -123,10 +132,12 @@ export function buildHooksBlock(opts: {
     hooks.Stop = [{ matcher: "*", hooks: [{ type: "command", command: `ib hook-status ${opts.agentId}` }] }];
     hooks.PermissionRequest = [{ matcher: "*", hooks: [{ type: "command", command: permissionDeniedCmd }] }];
     hooks.PreToolUse = preToolUseHooks;
+    if (postToolUseHooks) hooks.PostToolUse = postToolUseHooks;
     hooks.UserPromptSubmit = userPromptSubmitHooks;
     hooks.SessionStart = [{ hooks: [{ type: "command", command: sessionStartCmd }] }];
   } else {
     hooks.PreToolUse = preToolUseHooks;
+    if (postToolUseHooks) hooks.PostToolUse = postToolUseHooks;
     hooks.PermissionRequest = [{ matcher: "*", hooks: [{ type: "command", command: permissionDeniedCmd }] }];
     hooks.UserPromptSubmit = userPromptSubmitHooks;
     hooks.SessionStart = [{ hooks: [{ type: "command", command: sessionStartCmd }] }];

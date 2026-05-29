@@ -13,6 +13,7 @@ import {
   handleOpenDiffTool, getActiveDiffProc, setActiveDiffProc, killActiveDiffProc,
   getDiffToolLaunching, setDiffToolLaunching,
   handleAddPermission, addPermissionToSettings, agentSettingsLocalPath,
+  clearResumingAgentIds, getResumingAgentIds,
 } from "./agent-actions";
 import { MIN_LEFT_WIDTH, MAX_LEFT_WIDTH } from "./split-pane";
 import {
@@ -212,24 +213,37 @@ describe("handleNukeAll", () => {
 });
 
 describe("handleResume", () => {
+  beforeEach(() => {
+    // Reset the module-level in-flight guard so state doesn't leak between cases.
+    clearResumingAgentIds();
+  });
+
   test("does nothing when no agent selected", () => {
     const { ctx, notices } = makeMockCtx({ agent: null });
     handleResume(ctx);
     expect(notices).toHaveLength(0);
   });
 
-  test("shows notice for running agent", () => {
+  // The old behavior rejected non-stopped/complete agents with
+  // "Can only resume stopped or complete agents". That racy state gate was
+  // removed — handleResume now defers to resumeAgent()'s tmux-liveness check,
+  // so a running/waiting agent still goes through to a resume attempt.
+  test("attempts resume for running agent (defers to liveness check)", async () => {
     const agent = makeAgent({ id: "agent-1", state: "running" });
     const { ctx, notices } = makeMockCtx({ agent });
     handleResume(ctx);
-    expect(notices).toEqual(["Can only resume stopped or complete agents"]);
+    await Bun.sleep(10);
+    expect(notices.some((n) => n.includes("Can only resume"))).toBe(false);
+    expect(notices.some((n) => n.includes("Resuming") || n.includes("Resumed") || n.includes("Resume failed"))).toBe(true);
   });
 
-  test("shows notice for waiting agent", () => {
+  test("attempts resume for waiting agent (defers to liveness check)", async () => {
     const agent = makeAgent({ id: "agent-1", state: "waiting" });
     const { ctx, notices } = makeMockCtx({ agent });
     handleResume(ctx);
-    expect(notices).toEqual(["Can only resume stopped or complete agents"]);
+    await Bun.sleep(10);
+    expect(notices.some((n) => n.includes("Can only resume"))).toBe(false);
+    expect(notices.some((n) => n.includes("Resuming") || n.includes("Resumed") || n.includes("Resume failed"))).toBe(true);
   });
 
   test("resumes stopped agent", async () => {
@@ -246,6 +260,46 @@ describe("handleResume", () => {
     handleResume(ctx);
     await Bun.sleep(10);
     expect(notices.some((n) => n.includes("Resumed") || n.includes("Resume failed"))).toBe(true);
+  });
+
+  test("shows immediate 'Resuming…' notice synchronously on press", () => {
+    const agent = makeAgent({ id: "agent-1", state: "stopped" });
+    const { ctx, notices } = makeMockCtx({ agent });
+    handleResume(ctx);
+    // The "Resuming…" notice must appear synchronously, before resumeAgent
+    // resolves — no await here.
+    expect(notices[0]).toBe("Resuming agent-1…");
+  });
+
+  test("double-press triggers exactly one resume; second shows 'Already resuming'", async () => {
+    const agent = makeAgent({ id: "agent-1", state: "stopped" });
+    // executeAndRefresh that does NOT await fn synchronously — mirrors the real
+    // dashboard, where the resume runs in the background while handleResume
+    // returns immediately. This keeps the in-flight guard set when press #2 lands.
+    let resumeAttempts = 0;
+    const { ctx, notices } = makeMockCtx({ agent });
+    ctx.executeAndRefresh = (fn) => {
+      resumeAttempts++;
+      // Run fn but don't block the caller — the guard's finally clears the id
+      // only after fn resolves.
+      void fn();
+      return Promise.resolve();
+    };
+    handleResume(ctx);
+    handleResume(ctx); // second press, while the first is still in flight
+    expect(resumeAttempts).toBe(1);
+    expect(notices).toContain("Resuming agent-1…");
+    expect(notices.some((n) => n === "Already resuming agent-1…")).toBe(true);
+    await Bun.sleep(10);
+  });
+
+  test("guard clears after resume completes, allowing a later resume", async () => {
+    const agent = makeAgent({ id: "agent-1", state: "stopped" });
+    const { ctx } = makeMockCtx({ agent });
+    handleResume(ctx);
+    await Bun.sleep(10);
+    // After the resume settles, the in-flight guard must be empty.
+    expect(getResumingAgentIds().has("agent-1")).toBe(false);
   });
 });
 

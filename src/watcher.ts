@@ -151,11 +151,10 @@ export class AgentWatcher {
     this.watchers = [];
   }
 
-  /** Set up fs.watch on each repo's .ittybitty/agents/, archive/, and user-questions.json */
+  /** Set up fs.watch on each repo's .ittybitty/agents/ and user-questions.json */
   private setupWatchers(): void {
     for (const repo of this.repos) {
       const agentsDir = join(repo.path, ".ittybitty", "agents");
-      const archiveDir = join(repo.path, ".ittybitty", "archive");
       const questionsFile = join(repo.path, ".ittybitty", "user-questions.json");
 
       try {
@@ -167,14 +166,11 @@ export class AgentWatcher {
         this.events.onError?.(new Error(`Failed to watch ${agentsDir}: ${err}`));
       }
 
-      try {
-        const watcher = watch(archiveDir, { recursive: true }, () => {
-          this.debounceRefresh();
-        });
-        this.watchers.push(watcher);
-      } catch (err) {
-        // archive/ may not exist yet — not an error
-      }
+      // NOTE: archive/ is intentionally NOT watched. The dashboard never renders
+      // archived agents, and archival mutates the active agents/ dir first (the
+      // rename/cp happens FROM agents/), which already triggers a refresh via the
+      // agents/ watcher. Watching archive/ recursively across many repos with
+      // thousands of subdirs only adds FSEvent load and redundant full refreshes.
 
       try {
         const watcher = watch(questionsFile, () => {
@@ -266,7 +262,10 @@ export class AgentWatcher {
     this.refreshing = true;
     try {
       const reposWithDisplayNames = this.repos.map((r) => ({ path: r.path, name: repoDisplayName(r) }));
-      const { agents, errors, orphanedTmuxSessions, liveTmuxSessions } = await readAllAgents(reposWithDisplayNames);
+      // Skip archived agents: the dashboard never renders them (flattenAgentTree
+      // drops every archived row) and re-stat'ing thousands of immutable archived
+      // meta.json files on every refresh tick is pure waste. See readAllAgents docs.
+      const { agents, errors, orphanedTmuxSessions, liveTmuxSessions } = await readAllAgents(reposWithDisplayNames, false);
 
       // Report any read errors
       for (const err of errors) {

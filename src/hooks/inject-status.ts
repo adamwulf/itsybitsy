@@ -172,7 +172,9 @@ export function createDiskAgentProvider(): AgentDataSource {
     },
     async getAgents(repos) {
       const { readAllAgents } = await import("../agents");
-      const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })));
+      // includeArchived: false — buildStatusText/briefSummary/countPendingQuestions
+      // all filter `!a.archived`, so archived agents would be discarded anyway.
+      const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })), false);
       return { agents };
     },
     async detectStates(agents) {

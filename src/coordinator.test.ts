@@ -1279,9 +1279,14 @@ describe("detectSystemCoordinatorState", () => {
     resetCoordinatorHome();
   });
 
-  test("returns 'stopped' when no tmux session exists", async () => {
-    coordinatorSpawnCtx.set(createCommandRouter({
-      "has-session": { exitCode: 1 },
+  test("returns 'stopped' when no tmux session exists (capture fails)", async () => {
+    // Session is gone → `tmux capture-pane` exits non-zero →
+    // captureTmuxOutput returns null → "stopped". No separate `has-session`
+    // probe is run (see "no redundant has-session probe" test below).
+    tmuxSpawnCtx.set((_cmd: string[], _opts?: any) => ({
+      stdout: mockStream(""),
+      stderr: emptyStream(),
+      exited: Promise.resolve(1), // tmux capture fails — session gone
     }));
 
     const state = await detectSystemCoordinatorState();
@@ -1289,9 +1294,6 @@ describe("detectSystemCoordinatorState", () => {
   });
 
   test("returns 'stopped' when captureTmuxOutput returns null", async () => {
-    coordinatorSpawnCtx.set(createCommandRouter({
-      "has-session": { exitCode: 0 },
-    }));
     // captureTmuxOutput uses tmuxSpawnCtx
     tmuxSpawnCtx.set((_cmd: string[], _opts?: any) => ({
       stdout: mockStream(""),
@@ -1303,10 +1305,37 @@ describe("detectSystemCoordinatorState", () => {
     expect(state).toBe("stopped");
   });
 
+  test("does not run a redundant `tmux has-session` existence probe", async () => {
+    // The existence check was collapsed into captureTmuxOutput's null return
+    // (one tmux spawn per call instead of two). Assert no `has-session`
+    // command is issued through either spawn context.
+    const seenCmds: string[] = [];
+    coordinatorSpawnCtx.set((cmd: string[], _opts?: any) => {
+      seenCmds.push(cmd.join(" "));
+      return {
+        stdout: mockStream(""),
+        stderr: emptyStream(),
+        exited: Promise.resolve(0),
+      };
+    });
+    tmuxSpawnCtx.set((cmd: string[], _opts?: any) => {
+      seenCmds.push(cmd.join(" "));
+      return {
+        stdout: mockStream("Claude is running"),
+        stderr: emptyStream(),
+        exited: Promise.resolve(0),
+      };
+    });
+
+    const state = await detectSystemCoordinatorState();
+    expect(state).toBe("running");
+    // Exactly one tmux spawn — the capture — and no existence probe.
+    expect(seenCmds.some((c) => c.includes("has-session"))).toBe(false);
+    expect(seenCmds.filter((c) => c.includes("capture-pane")).length).toBe(1);
+    expect(seenCmds.length).toBe(1);
+  });
+
   test("returns 'compacting' when compacting text in last 5 lines", async () => {
-    coordinatorSpawnCtx.set(createCommandRouter({
-      "has-session": { exitCode: 0 },
-    }));
     const output = "line1\nline2\nline3\nCompacting conversation\nline5";
     tmuxSpawnCtx.set((_cmd: string[], _opts?: any) => ({
       stdout: mockStream(output),
@@ -1319,9 +1348,6 @@ describe("detectSystemCoordinatorState", () => {
   });
 
   test("returns 'rate_limited' when rate limit text in last 15 lines", async () => {
-    coordinatorSpawnCtx.set(createCommandRouter({
-      "has-session": { exitCode: 0 },
-    }));
     const lines = Array.from({ length: 14 }, (_, i) => `line${i}`);
     lines.push("You've hit your limit for the day");
     tmuxSpawnCtx.set((_cmd: string[], _opts?: any) => ({
@@ -1335,9 +1361,6 @@ describe("detectSystemCoordinatorState", () => {
   });
 
   test("returns 'rate_limited' for rate_limit_error pattern", async () => {
-    coordinatorSpawnCtx.set(createCommandRouter({
-      "has-session": { exitCode: 0 },
-    }));
     tmuxSpawnCtx.set((_cmd: string[], _opts?: any) => ({
       stdout: mockStream("some output\nrate_limit_error\nmore output"),
       stderr: emptyStream(),
@@ -1349,9 +1372,6 @@ describe("detectSystemCoordinatorState", () => {
   });
 
   test("returns 'running' for normal output", async () => {
-    coordinatorSpawnCtx.set(createCommandRouter({
-      "has-session": { exitCode: 0 },
-    }));
     tmuxSpawnCtx.set((_cmd: string[], _opts?: any) => ({
       stdout: mockStream("Claude is running\nProcessing request\nDone"),
       stderr: emptyStream(),
@@ -1363,9 +1383,6 @@ describe("detectSystemCoordinatorState", () => {
   });
 
   test("compacting takes priority over rate_limited", async () => {
-    coordinatorSpawnCtx.set(createCommandRouter({
-      "has-session": { exitCode: 0 },
-    }));
     // Both patterns present — compacting should win
     tmuxSpawnCtx.set((_cmd: string[], _opts?: any) => ({
       stdout: mockStream("rate_limit_error\nCompacting conversation\nlast line"),
@@ -1378,9 +1395,6 @@ describe("detectSystemCoordinatorState", () => {
   });
 
   test("returns 'running' for empty output", async () => {
-    coordinatorSpawnCtx.set(createCommandRouter({
-      "has-session": { exitCode: 0 },
-    }));
     tmuxSpawnCtx.set((_cmd: string[], _opts?: any) => ({
       stdout: mockStream(""),
       stderr: emptyStream(),
@@ -1392,9 +1406,6 @@ describe("detectSystemCoordinatorState", () => {
   });
 
   test("captureTmuxOutput is called with the 50-line cap (Change B)", async () => {
-    coordinatorSpawnCtx.set(createCommandRouter({
-      "has-session": { exitCode: 0 },
-    }));
     let captureArgs: string[] | null = null;
     tmuxSpawnCtx.set((cmd: string[], _opts?: any) => {
       if (cmd[0] === "tmux" && cmd[1] === "capture-pane") {

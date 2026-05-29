@@ -87,6 +87,27 @@ export async function printAndExit(result: { ok: boolean; exitCode: number; stdo
 }
 
 /**
+ * Read message/prompt body from stdin when it is piped (not a TTY), trimming
+ * surrounding whitespace to match `send`'s historical semantics. Returns an
+ * empty string when stdin is a TTY, so an interactive invocation with no
+ * positional arg never blocks waiting for input.
+ *
+ * This is the shared stdin-reading core behind the heredoc fallback for
+ * `ib send`, `ib new-agent`, and `ib ask`. It mirrors the established pattern
+ * (`for await (const chunk of process.stdin)`) used by `send` and `parse-state`
+ * — deliberately NOT `Bun.stdin.stream()` — so all three CLI paths stay
+ * consistent.
+ */
+export async function readStdinIfPiped(): Promise<string> {
+  if (process.stdin.isTTY) return "";
+  const chunks: string[] = [];
+  for await (const chunk of process.stdin) {
+    chunks.push(typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk));
+  }
+  return chunks.join("").trim();
+}
+
+/**
  * Injectable check for whether the system-coordinator tmux session is running.
  * Default implementation calls `tmux has-session -t ib-coordinator`. Tests can
  * override via `setSystemCoordinatorHasSessionFn()` to avoid invoking tmux.
@@ -1106,14 +1127,7 @@ async function main() {
       const resolveMessageBody = async (): Promise<string> => {
         if (inlineMessage) return inlineMessage;
         if (fileContent !== undefined) return fileContent;
-        if (!process.stdin.isTTY) {
-          const chunks: string[] = [];
-          for await (const chunk of process.stdin) {
-            chunks.push(typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk));
-          }
-          return chunks.join("").trim();
-        }
-        return "";
+        return readStdinIfPiped();
       };
 
       const { agent: resolvedAgent, isSystemCoordinator } = await resolveTarget(target, repos);
@@ -1355,7 +1369,15 @@ async function main() {
           seenPromptToken = true;
         }
       }
-      const prompt = promptParts.join(" ");
+      // Prompt precedence: positional tokens / -f file content > piped stdin.
+      // When no positional prompt and no -f content was supplied, fall back to
+      // reading stdin (heredoc), exactly like `ib send`. When stdin is a TTY
+      // (interactive, no arg) this returns "" and newAgent() emits the existing
+      // "Error: prompt required" — preserving prior behavior.
+      let prompt = promptParts.join(" ");
+      if (!prompt) {
+        prompt = await readStdinIfPiped();
+      }
 
       // Validate --spawned-by / --spawned-by-repo co-dependency and construct spawnedBy
       if (spawnedByRepoPath && !spawnedByAgentId) {
@@ -1444,7 +1466,14 @@ async function main() {
           askQuestionParts.push(arg);
         }
       }
-      const askQuestionText = askQuestionParts.join(" ");
+      // Question precedence: positional tokens > piped stdin. When no positional
+      // question was supplied, fall back to reading stdin (heredoc), exactly like
+      // `ib send`. A TTY with no arg returns "" and falls through to the existing
+      // usage error below — preserving prior behavior.
+      let askQuestionText = askQuestionParts.join(" ");
+      if (!askQuestionText) {
+        askQuestionText = await readStdinIfPiped();
+      }
 
       // Auto-detect agent ID from CWD
       if (!askAgentId) {

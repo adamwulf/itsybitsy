@@ -506,6 +506,164 @@ describe("CLI arg parsing", () => {
     expect(exitCode).toBe(1);
   });
 
+  // ── Heredoc / stdin fallback (mirrors `ib send`) ──────────────────────────
+  // `runCli` above leaves stdin unset, so Bun gives the child an empty (/dev/null)
+  // stdin — a non-TTY that reads as "". `runCliStdin` instead pipes a string into
+  // the child's stdin so the heredoc fallback path is exercised. Both set HOME to a
+  // nonexistent dir so listRepos() returns [] unless a test overrides HOME.
+  async function runCliStdin(
+    cliArgs: string[],
+    stdinBody: string,
+    env?: Record<string, string>,
+  ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+    const proc = Bun.spawn(["bun", "run", "src/index.ts", ...cliArgs], {
+      cwd: import.meta.dir.replace(/\/src$/, ""),
+      stdin: new TextEncoder().encode(stdinBody),
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, HOME: "/tmp/ib-test-nonexistent-home", ...env },
+    });
+    const [stdout, stderr] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+    ]);
+    const exitCode = await proc.exited;
+    return { stdout, stderr, exitCode };
+  }
+
+  test("ask reads question from stdin when no positional question (heredoc)", async () => {
+    // No positional question; --id given so agent-ID detection succeeds. The
+    // question comes from stdin, so we must reach agent lookup (Agent not found),
+    // NOT the 'Usage: ib ask' error — proving stdin was consumed into the question.
+    const { stderr, exitCode } = await runCliStdin(
+      ["ask", "--id", "agent-deadbeef"],
+      "what should I do next?\n",
+    );
+    expect(stderr).not.toContain("Usage: ib ask");
+    expect(stderr).toContain("Agent not found: agent-deadbeef");
+    expect(exitCode).toBe(1);
+  });
+
+  test("ask with empty stdin and no positional still shows usage error (TTY-parity)", async () => {
+    // Empty piped stdin resolves to "" — same as a TTY with no arg — so the
+    // existing usage error must still fire.
+    const { stderr, exitCode } = await runCliStdin(["ask", "--id", "agent-deadbeef"], "");
+    expect(stderr).toContain("Usage: ib ask");
+    expect(exitCode).toBe(1);
+  });
+
+  test("ask positional question takes precedence over stdin", async () => {
+    // A positional question is present, so stdin must be IGNORED (precedence:
+    // positional > stdin). Reaches agent lookup, not the usage error.
+    const { stderr, exitCode } = await runCliStdin(
+      ["ask", "--id", "agent-deadbeef", "inline question"],
+      "stdin question that should be ignored\n",
+    );
+    expect(stderr).not.toContain("Usage: ib ask");
+    expect(stderr).toContain("Agent not found: agent-deadbeef");
+    expect(exitCode).toBe(1);
+  });
+
+  test("new-agent reads prompt from stdin (heredoc) — passes the prompt-required check", async () => {
+    // Register a repo so repo-determination succeeds and newAgent() is reached.
+    // newAgent()'s FIRST step is the empty-prompt check; an unknown --type fails
+    // immediately after. So with a heredoc prompt we must get the unknown-type
+    // error (proving the stdin prompt was consumed and is non-empty), NOT
+    // 'prompt required'. Metachars in the body are preserved verbatim — the
+    // stdin reader does no expansion (only .trim()), and a quoted heredoc keeps
+    // the shell from expanding them before ib sees stdin.
+    const { mkdtemp } = await import("fs/promises");
+    const { tmpdir } = await import("os");
+    const { join } = await import("path");
+    const fakeHome = await mkdtemp(join(tmpdir(), "ib-newagent-stdin-home-"));
+    const repoDir = await mkdtemp(join(tmpdir(), "ib-newagent-stdin-repo-"));
+    await Bun.write(
+      join(fakeHome, ".itsybitsy", "repos.json"),
+      JSON.stringify({ version: 1, repos: [{ path: repoDir, name: "stdinrepo" }] }),
+    );
+    try {
+      const { stderr, exitCode } = await runCliStdin(
+        ["new-agent", "--repo", "stdinrepo", "--type", "bogus-nonexistent-type"],
+        "fix $(whoami) and `date` for $USER literally\n",
+        { HOME: fakeHome },
+      );
+      expect(stderr).not.toContain("prompt required");
+      expect(stderr).toContain("unknown agent type 'bogus-nonexistent-type'");
+      expect(exitCode).toBe(1);
+    } finally {
+      const { rm } = await import("fs/promises");
+      await rm(fakeHome, { recursive: true, force: true }).catch(() => {});
+      await rm(repoDir, { recursive: true, force: true }).catch(() => {});
+    }
+  });
+
+  test("new-agent with empty stdin + registered repo still errors 'prompt required'", async () => {
+    // Empty piped stdin → empty prompt → newAgent()'s first-line check fires.
+    // This proves the TTY-parity error is preserved when nothing is piped.
+    const { mkdtemp } = await import("fs/promises");
+    const { tmpdir } = await import("os");
+    const { join } = await import("path");
+    const fakeHome = await mkdtemp(join(tmpdir(), "ib-newagent-empty-home-"));
+    const repoDir = await mkdtemp(join(tmpdir(), "ib-newagent-empty-repo-"));
+    await Bun.write(
+      join(fakeHome, ".itsybitsy", "repos.json"),
+      JSON.stringify({ version: 1, repos: [{ path: repoDir, name: "emptyrepo" }] }),
+    );
+    try {
+      const { stderr, exitCode } = await runCliStdin(
+        ["new-agent", "--repo", "emptyrepo"],
+        "",
+        { HOME: fakeHome },
+      );
+      expect(stderr).toContain("prompt required");
+      expect(exitCode).toBe(1);
+    } finally {
+      const { rm } = await import("fs/promises");
+      await rm(fakeHome, { recursive: true, force: true }).catch(() => {});
+      await rm(repoDir, { recursive: true, force: true }).catch(() => {});
+    }
+  });
+
+  test("new-agent positional prompt takes precedence over stdin", async () => {
+    // A positional prompt is present, so stdin must be IGNORED. With an unknown
+    // --type we still reach the unknown-type error (past the prompt check),
+    // confirming the positional prompt satisfied it without consuming stdin.
+    const { mkdtemp } = await import("fs/promises");
+    const { tmpdir } = await import("os");
+    const { join } = await import("path");
+    const fakeHome = await mkdtemp(join(tmpdir(), "ib-newagent-prec-home-"));
+    const repoDir = await mkdtemp(join(tmpdir(), "ib-newagent-prec-repo-"));
+    await Bun.write(
+      join(fakeHome, ".itsybitsy", "repos.json"),
+      JSON.stringify({ version: 1, repos: [{ path: repoDir, name: "precrepo" }] }),
+    );
+    try {
+      const { stderr, exitCode } = await runCliStdin(
+        ["new-agent", "--repo", "precrepo", "--type", "bogus-nonexistent-type", "inline prompt"],
+        "stdin prompt that should be ignored\n",
+        { HOME: fakeHome },
+      );
+      expect(stderr).not.toContain("prompt required");
+      expect(stderr).toContain("unknown agent type 'bogus-nonexistent-type'");
+      expect(exitCode).toBe(1);
+    } finally {
+      const { rm } = await import("fs/promises");
+      await rm(fakeHome, { recursive: true, force: true }).catch(() => {});
+      await rm(repoDir, { recursive: true, force: true }).catch(() => {});
+    }
+  });
+
+  test("new-agent still rejects flag typos before reading stdin (guard intact)", async () => {
+    // The flag-typo guard must fire during arg parsing, before any stdin read,
+    // so a piped body does not mask a typo like '-F'.
+    const { stderr, exitCode } = await runCliStdin(
+      ["new-agent", "-F", "/tmp/foo.md"],
+      "some piped body\n",
+    );
+    expect(stderr).toContain("unknown flag '-F'");
+    expect(exitCode).toBe(1);
+  });
+
   test("hook-check-path without agent-id shows usage", async () => {
     const { stderr, exitCode } = await runCli(["hook-check-path"]);
     expect(stderr).toContain("Usage:");

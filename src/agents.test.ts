@@ -2465,12 +2465,33 @@ describe("updateAgentTransient / setAgentOperation / clearAgentOperation", () =>
   });
 
   test("clearAgentOperation removes the operation, preserving other fields", async () => {
-    await setAgentOperation(tempDir, { kind: "restarting", pid: 5, started_at_ms: 7 });
+    // The marker must belong to THIS process for the compare-and-swap clear to fire.
+    await setAgentOperation(tempDir, { kind: "restarting", pid: process.pid, started_at_ms: 7 });
     await updateAgentTransient(tempDir, (cur) => ({ ...cur, watchdog_pid: 321 }));
     await clearAgentOperation(tempDir);
     const result = await readAgentTransient(tempDir);
     expect(result?.operation).toBeNull();
     expect(result?.watchdog_pid).toBe(321);
+  });
+
+  test("clearAgentOperation (CAS) clears a marker owned by THIS process", async () => {
+    await setAgentOperation(tempDir, { kind: "merging", pid: process.pid, started_at_ms: 7 });
+    await clearAgentOperation(tempDir);
+    const result = await readAgentTransient(tempDir);
+    expect(result?.operation).toBeNull();
+  });
+
+  test("clearAgentOperation (CAS) does NOT clear a marker owned by a DIFFERENT pid", async () => {
+    // Models the age-reclaim race: op B reclaimed an old marker (so the on-disk
+    // pid is B's, not ours), then op A's late `finally` calls clearAgentOperation.
+    // A must NOT wipe B's marker. Use a sentinel pid that is not this process.
+    const otherPid = process.pid + 1;
+    const op: AgentOperation = { kind: "restarting", pid: otherPid, started_at_ms: 7 };
+    await setAgentOperation(tempDir, op);
+    await clearAgentOperation(tempDir);
+    const result = await readAgentTransient(tempDir);
+    // The other process's marker survives unchanged.
+    expect(result?.operation).toEqual(op);
   });
 
   test("clearAgentOperation on a removed dir does not throw (ENOENT swallowed)", async () => {

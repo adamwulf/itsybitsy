@@ -339,6 +339,24 @@ describe("handleResume", () => {
       // finally cleared the key, so the path is open for a subsequent press.
       expect(getCoordinatorSpawnsInFlight().has("repo:/tmp/ib-no-coord-release")).toBe(false);
     });
+
+    test("in-flight key is released even when the spawn body THROWS", async () => {
+      const repos: RepoEntry[] = [{ path: "/tmp/ib-no-coord-throw", name: "my-repo" }];
+      const { ctx } = makeMockCtx({ repoHeader: "my-repo", repos });
+
+      // Force the spawn body to throw: checkCoordinatorExists → exists:false →
+      // newAgent rejects because its spawn runner throws. The body's `finally`
+      // must still release the in-flight key. (Mirror executeAndRefresh's own
+      // error swallowing so the rejection doesn't surface as unhandled.)
+      setNewAgentSpawnRunner(() => { throw new Error("boom: spawn failed"); });
+      ctx.executeAndRefresh = async (fn) => { try { await fn(); } catch { /* swallow, like the real wrapper */ } };
+
+      handleResume(ctx);
+      await Bun.sleep(20);
+
+      // Despite the throw, the finally released the key — no stuck guard.
+      expect(getCoordinatorSpawnsInFlight().has("repo:/tmp/ib-no-coord-throw")).toBe(false);
+    });
   });
 });
 

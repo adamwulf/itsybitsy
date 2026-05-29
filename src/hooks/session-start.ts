@@ -376,6 +376,9 @@ ${SEND_LITERAL_STRINGS_SECTION}
 | \`waiting\` | Idle, may need input |
 | \`complete\` | Signaled done |
 | \`rate_limited\` | Hit API rate limits |
+| \`merging\` | Being merged or merge-checked (a long-running op is in flight) |
+| \`restarting\` | Being restarted/resumed |
+| \`op_stuck\` | A long-running op (merge/restart) appears stuck; may need kill/nuke |
 | \`stopped\` | Session ended |
 | \`unknown\` | State unclear |
 
@@ -519,6 +522,9 @@ ${askSection}
 | \`waiting\` | Idle, may need input |
 | \`complete\` | Signaled done |
 | \`rate_limited\` | Hit API rate limits |
+| \`merging\` | Being merged or merge-checked (a long-running op is in flight) |
+| \`restarting\` | Being restarted/resumed |
+| \`op_stuck\` | A long-running op (merge/restart) appears stuck; may need kill/nuke |
 | \`stopped\` | Session ended |
 | \`unknown\` | State unclear |
 
@@ -663,6 +669,9 @@ These phrases MUST be the LAST thing you output. Put summaries or status updates
 | \`waiting\` | Idle, may need input |
 | \`complete\` | Signaled done |
 | \`rate_limited\` | Hit API rate limits |
+| \`merging\` | Being merged or merge-checked (a long-running op is in flight) |
+| \`restarting\` | Being restarted/resumed |
+| \`op_stuck\` | A long-running op (merge/restart) appears stuck; may need kill/nuke |
 | \`stopped\` | Session ended |
 
 </ittybitty>`;

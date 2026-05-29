@@ -422,12 +422,24 @@ export async function setAgentOperation(agentDir: string, op: AgentOperation): P
 }
 
 /**
- * Clear the in-flight op marker. Thin wrapper over updateAgentTransient;
- * ENOENT-safe (the post-merge success path removes the agent dir before this
- * runs, and the best-effort try/catch swallows the resulting missing-dir error).
+ * Clear the in-flight op marker — but only if it still belongs to THIS process
+ * (compare-and-swap on `operation.pid === process.pid`). Thin wrapper over
+ * updateAgentTransient; ENOENT-safe (the post-merge success path removes the
+ * agent dir before this runs, and the best-effort try/catch swallows the
+ * resulting missing-dir error).
+ *
+ * The compare-and-swap matters because acquireAgentOperation can age-reclaim a
+ * marker older than OP_STUCK_TIMEOUT_MS even while its original holder is still
+ * alive. Without the CAS, this interleaving would wipe a DIFFERENT op's marker:
+ *   op A hangs >300s (still alive) → op B age-reclaims (marker now has B's pid)
+ *   → A un-hangs, its `finally` runs clearAgentOperation → would wipe B's marker.
+ * By clearing only when the marker is still ours, A's late clear no-ops and B's
+ * marker survives. When the marker isn't ours, return `cur` unchanged.
  */
 export async function clearAgentOperation(agentDir: string): Promise<void> {
-  await updateAgentTransient(agentDir, (cur) => ({ ...cur, operation: null }));
+  await updateAgentTransient(agentDir, (cur) =>
+    cur.operation?.pid === process.pid ? { ...cur, operation: null } : cur,
+  );
 }
 
 /**

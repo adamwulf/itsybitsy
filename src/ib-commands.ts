@@ -769,9 +769,13 @@ ${qAbsExitScript}
     return { ok: true, exitCode: 0, stdout: `Use 'ib look ${agent.id}' to view output`, stderr: "" };
   } finally {
     // Clear the op marker on every return path (the body above has many early
-    // returns). ENOENT-safe via updateAgentTransient's best-effort try/catch:
-    // resetCoordinator removes the dir, so this writes into a now-gone dir on
-    // the coordinator path and silently no-ops.
+    // returns). On most paths the dir exists and the marker — if it's still
+    // ours — is cleared. Safe regardless of the dir's fate: clearAgentOperation
+    // is ENOENT-safe (updateAgentTransient's best-effort try/catch no-ops on a
+    // missing dir) AND compare-and-swap (it only nulls a marker whose pid is
+    // ours). So the coordinator path — where resetCoordinator removes the dir
+    // and the success path respawns it — clears safely whether the dir was
+    // removed, recreated, or its marker was age-reclaimed by another op.
     await clearAgentOperation(agentDir);
   }
 }

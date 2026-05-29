@@ -13,7 +13,20 @@ const mockBuildAgentTree = jest.fn<(agents: Agent[]) => Agent[]>();
 const mockFlattenAgentTree = jest.fn<(roots: Agent[]) => FlatEntry[]>();
 const mockReadPendingQuestions = jest.fn<(repoPath: string) => Promise<PendingQuestion[]>>();
 
+// Capture the REAL ./agents BEFORE mocking, then spread it so every export
+// this test does NOT explicitly override (resolveAgentIcon, writeAgentState,
+// readAgentMeta, …) stays present. bun's mock.module is global and replaces the
+// ENTIRE module, so a partial mock breaks module linking for any code in the
+// load graph that imports a non-listed export — but only when this file is the
+// first to load ./agents (e.g. `bun test src/watcher.test.ts` alone). The full
+// suite hid it because another file imported the real ./agents first. This
+// import runs before mock.module is registered, so it returns the real module
+// (no recursion). Overrides below still win over the spread. Mirrors the
+// real-module-spread pattern in orphan-detection.test.ts.
+const realAgents = await import("./agents");
+
 mock.module("./agents", () => ({
+  ...realAgents,
   readAllAgents: mockReadAllAgents,
   detectAgentStates: mockDetectAgentStates,
   buildAgentTree: mockBuildAgentTree,
@@ -33,7 +46,28 @@ mock.module("./agents", () => ({
   },
 }));
 
-// Import after mocking agents module
+// --- Mock fs.watch to capture registered callbacks ---
+// watcher.ts does `import { watch } from "fs"`. We wrap the REAL watch so it
+// still behaves normally (real FSWatcher, real close(), real onError for a
+// missing dir) but additionally records each registered change-callback. Tests
+// can then invoke that captured callback DIRECTLY to drive the fs-event path
+// deterministically — without waiting on macOS FSEvents delivery, whose latency
+// is unbounded under CPU load and made the old fixed-deadline polls flaky.
+const watchCallbacks: Array<(eventType: string, filename: string | null) => void> = [];
+function clearWatchCallbacks() { watchCallbacks.length = 0; }
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const realFs = require("fs");
+mock.module("fs", () => ({
+  ...realFs,
+  watch: (path: string, options: any, listener?: any) => {
+    // fs.watch supports watch(path, listener) and watch(path, options, listener)
+    const cb = typeof options === "function" ? options : listener;
+    if (typeof cb === "function") watchCallbacks.push(cb);
+    return realFs.watch(path, options, listener);
+  },
+}));
+
+// Import after mocking agents + fs modules
 const { AgentWatcher } = await import("./watcher");
 // Import coordinatorSpawnCtx to inject noop (prevents real tmux calls in getCoordinatorInfo)
 const { coordinatorSpawnCtx } = await import("./coordinator");
@@ -864,25 +898,37 @@ describe("AgentWatcher", () => {
         { onUpdate: () => { updateCount++; } }
       );
 
-      await watcher.start();
-      const initial = updateCount;
+      clearWatchCallbacks();
+      jest.useFakeTimers();
+      try {
+        await watcher.start();
+        const callsAfterStart = mockReadAllAgents.mock.calls.length;
 
-      // Create a new agent directory with meta.json
-      const newAgentDir = join(agentsDir, "agent-new");
-      await mkdir(newAgentDir, { recursive: true });
-      await writeFile(join(newAgentDir, "meta.json"), '{"id":"agent-new"}');
+        // setupWatchers() registered real fs.watch change-callbacks (captured by
+        // the fs mock above). Invoke them directly to simulate a file change,
+        // rather than writing a file and waiting for macOS FSEvents to deliver —
+        // FSEvents latency is unbounded under CPU load, which made the old
+        // fixed-deadline poll flaky (it timed out even at 8s under contention).
+        // This drives the exact same wiring (watcher callback → debounceRefresh)
+        // deterministically.
+        expect(watchCallbacks.length).toBeGreaterThan(0);
+        for (const cb of watchCallbacks) cb("change", "meta.json");
 
-      // Poll until the debounced refresh fires (50ms intervals, up to 8s)
-      // macOS fs.watch + 200ms debounce can be very slow under load
-      const deadline = Date.now() + 8000;
-      while (updateCount <= initial && Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 50));
+        // Advance past the 200ms debounce window; assert the debounced refresh
+        // fired (one more readAllAgents). We check the refresh entry point rather
+        // than the onUpdate tail because refresh() awaits several async stages —
+        // matching the deterministic "rapid debounceRefresh" tests above.
+        jest.advanceTimersByTime(250);
+        await Promise.resolve();
+        await Promise.resolve();
+
+        expect(mockReadAllAgents.mock.calls.length).toBe(callsAfterStart + 1);
+
+        watcher.stop();
+      } finally {
+        jest.useRealTimers();
       }
-
-      expect(updateCount).toBeGreaterThan(initial);
-
-      watcher.stop();
-    }, 15_000);
+    });
 
     test("archive dir watch does not error if archive missing", async () => {
       setupDefaultMocks();
@@ -1029,27 +1075,37 @@ describe("AgentWatcher", () => {
         { onUpdate: () => { updateCount++; } }
       );
 
-      await watcher.start();
+      jest.useFakeTimers();
+      try {
+        await watcher.start();
 
-      // updateRepos with the same repo (re-creates watchers)
-      watcher.updateRepos([{ path: tempDir, name: "repo1" }]);
-      const afterUpdate = updateCount;
+        // Clear callbacks captured during start(), then updateRepos (tears down
+        // + re-creates watchers). Only the FRESH, post-updateRepos callbacks are
+        // now in watchCallbacks — invoking them proves the recreated watchers are
+        // still wired to debounceRefresh, which is the exact regression this test
+        // guards. Driving the captured callback directly (vs. writing a file and
+        // waiting for macOS FSEvents) removes the OS-timing race that made the old
+        // fixed 5s poll flaky under CPU load.
+        clearWatchCallbacks();
+        watcher.updateRepos([{ path: tempDir, name: "repo1" }]);
+        const callsAfterUpdate = mockReadAllAgents.mock.calls.length;
 
-      // Write to the original agents dir — the new watcher should pick it up
-      const newAgentDir = join(agentsDir, "agent-new");
-      await mkdir(newAgentDir, { recursive: true });
-      await writeFile(join(newAgentDir, "meta.json"), '{"id":"agent-new"}');
+        expect(watchCallbacks.length).toBeGreaterThan(0);
+        for (const cb of watchCallbacks) cb("change", "meta.json");
 
-      // Poll until the debounced refresh fires
-      const deadline = Date.now() + 5000;
-      while (updateCount <= afterUpdate && Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 50));
+        // Advance past the 200ms debounce window; assert the debounced refresh
+        // fired (one more readAllAgents) via the freshly-recreated watcher.
+        jest.advanceTimersByTime(250);
+        await Promise.resolve();
+        await Promise.resolve();
+
+        expect(mockReadAllAgents.mock.calls.length).toBe(callsAfterUpdate + 1);
+
+        watcher.stop();
+      } finally {
+        jest.useRealTimers();
       }
-
-      expect(updateCount).toBeGreaterThan(afterUpdate);
-
-      watcher.stop();
-    }, 10_000);
+    });
 
     test("removed repo fs.watch does not trigger refresh after updateRepos", async () => {
       setupDefaultMocks();

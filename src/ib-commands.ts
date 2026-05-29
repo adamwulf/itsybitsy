@@ -504,13 +504,37 @@ log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [resume.sh] $1" >> "$AGENT_LOG"; }
 log "Starting claude --resume ${sessionId} ${claudeArgs}"
 log "PWD=$(pwd) which_claude=$(which claude 2>&1)"
 
+# Ignore SIGHUP for the lifetime of this script. When resume is triggered from
+# inside another tmux pane (the ib-coordinator, another agent, or a watchdog
+# spawned from one), that launcher pane's pty can deliver a SIGHUP to this fresh
+# process group as it churns/redraws/closes. The old kill-on-HUP trap turned that
+# stray signal into an exit-129 crash-resume loop. SIG_IGN is inherited by the
+# claude child, so this protects both halves. setsid (below) is the belt to this
+# suspenders — it gives claude its own session so the pty SIGHUP can't reach it
+# at all, but the trap stands alone on hosts where setsid is unavailable.
+trap '' HUP
+log "SIGHUP ignored (resume insulated from launcher pane teardown)"
+
 # Start Claude in background and capture PID. Stderr is redirected to a sidecar
 # file so we can tail it into agent.log on exit (helps diagnose crashes / 429s).
+# Launch under setsid when present so claude leads its own session, fully
+# detached from the launcher's controlling terminal. setsid (no -f) execs in
+# place without forking, so \$! still refers to claude and wait/kill behave
+# identically to the bare launch. Fall back to a plain background launch on
+# hosts lacking setsid (the inherited SIG_IGN above still covers that case).
 : > "$STDERR_LOG"
-claude --resume "${sessionId}" ${claudeArgs} 2> "$STDERR_LOG" &
+if command -v setsid >/dev/null 2>&1; then
+    SETSID=setsid
+else
+    SETSID=none
+fi
+if [[ "$SETSID" == "setsid" ]]; then
+    setsid claude --resume "${sessionId}" ${claudeArgs} 2> "$STDERR_LOG" &
+else
+    claude --resume "${sessionId}" ${claudeArgs} 2> "$STDERR_LOG" &
+fi
 CLAUDE_PID=$!
-log "Claude PID: $CLAUDE_PID"
-trap 'log "script received SIGHUP — tmux pane killed or closed; sending SIGTERM to Claude PID=$CLAUDE_PID"; log "── SIGHUP diagnostics ──"; log "self ps: $(ps -o pid,ppid,pgid,sess,stat,command -p $$ 2>&1 | paste -sd "|" -)"; log "parent ps: $(ps -o pid,ppid,pgid,sess,stat,command -p $PPID 2>&1 | paste -sd "|" -)"; log "tmux processes: $(pgrep -lf tmux 2>&1 | head -20 | paste -sd "|" -)"; log "tmux list-sessions: $(tmux list-sessions 2>&1 | head -20 | paste -sd "|" -)"; log "── end SIGHUP diagnostics ──"; kill $CLAUDE_PID 2>/dev/null' HUP
+log "Claude PID: $CLAUDE_PID (setsid=$SETSID)"
 trap 'log "script received SIGTERM; sending SIGTERM to Claude PID=$CLAUDE_PID"; kill $CLAUDE_PID 2>/dev/null' TERM
 trap 'log "script received SIGINT; sending SIGINT to Claude PID=$CLAUDE_PID"; kill -INT $CLAUDE_PID 2>/dev/null' INT
 
@@ -2613,13 +2637,37 @@ log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [start.sh] $1" >> "$AGENT_LOG"; }
 log "Starting claude --session-id ${sessionUuid} ${claudeArgs}"
 log "PWD=$(pwd) which_claude=$(which claude 2>&1)"
 
+# Ignore SIGHUP for the lifetime of this script. When spawn is triggered from
+# inside another tmux pane (the ib-coordinator, another agent, or a watchdog
+# spawned from one), that launcher pane's pty can deliver a SIGHUP to this fresh
+# process group as it churns/redraws/closes. The old kill-on-HUP trap turned that
+# stray signal into an exit-129 crash. SIG_IGN is inherited by the claude child,
+# so this protects both halves. setsid (below) is the belt to this suspenders —
+# it gives claude its own session so the pty SIGHUP can't reach it at all, but
+# the trap stands alone on hosts where setsid is unavailable.
+trap '' HUP
+log "SIGHUP ignored (spawn insulated from launcher pane teardown)"
+
 # Start Claude in background and capture PID. Stderr is redirected to a sidecar
 # file so we can tail it into agent.log on exit (helps diagnose crashes / 429s).
+# Launch under setsid when present so claude leads its own session, fully
+# detached from the launcher's controlling terminal. setsid (no -f) execs in
+# place without forking, so \$! still refers to claude and wait/kill behave
+# identically to the bare launch. Fall back to a plain background launch on
+# hosts lacking setsid (the inherited SIG_IGN above still covers that case).
 : > "$STDERR_LOG"
-claude --session-id "${sessionUuid}" ${claudeArgs} "$(cat ${qAbsPromptFile})" 2> "$STDERR_LOG" &
+if command -v setsid >/dev/null 2>&1; then
+    SETSID=setsid
+else
+    SETSID=none
+fi
+if [[ "$SETSID" == "setsid" ]]; then
+    setsid claude --session-id "${sessionUuid}" ${claudeArgs} "$(cat ${qAbsPromptFile})" 2> "$STDERR_LOG" &
+else
+    claude --session-id "${sessionUuid}" ${claudeArgs} "$(cat ${qAbsPromptFile})" 2> "$STDERR_LOG" &
+fi
 CLAUDE_PID=$!
-log "Claude PID: $CLAUDE_PID"
-trap 'log "script received SIGHUP — tmux pane killed or closed; sending SIGTERM to Claude PID=$CLAUDE_PID"; log "── SIGHUP diagnostics ──"; log "self ps: $(ps -o pid,ppid,pgid,sess,stat,command -p $$ 2>&1 | paste -sd "|" -)"; log "parent ps: $(ps -o pid,ppid,pgid,sess,stat,command -p $PPID 2>&1 | paste -sd "|" -)"; log "tmux processes: $(pgrep -lf tmux 2>&1 | head -20 | paste -sd "|" -)"; log "tmux list-sessions: $(tmux list-sessions 2>&1 | head -20 | paste -sd "|" -)"; log "── end SIGHUP diagnostics ──"; kill $CLAUDE_PID 2>/dev/null' HUP
+log "Claude PID: $CLAUDE_PID (setsid=$SETSID)"
 trap 'log "script received SIGTERM; sending SIGTERM to Claude PID=$CLAUDE_PID"; kill $CLAUDE_PID 2>/dev/null' TERM
 trap 'log "script received SIGINT; sending SIGINT to Claude PID=$CLAUDE_PID"; kill -INT $CLAUDE_PID 2>/dev/null' INT
 

@@ -1203,6 +1203,55 @@ describe("resumeAgent (native)", () => {
     expect(hookBody).toContain("agent.log");
   });
 
+  test("resume.sh ignores SIGHUP and launches claude under setsid (no kill-on-HUP)", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-hup");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-hup",
+      tmux_session: "tmux-agent-hup",
+      session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      model: "opus",
+    }));
+
+    const agent = _makeAgent({
+      id: "agent-hup",
+      repoPath: tempDir,
+      repoName: "test",
+      state: "stopped",
+      meta: {
+        session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        tmux_session: "tmux-agent-hup",
+        model: "opus",
+      } as any,
+    });
+    const result = await resumeAgent(agent);
+    expect(result.ok).toBe(true);
+
+    const resumeScript = await Bun.file(join(agentDir, "resume.sh")).text();
+
+    // SIGHUP is ignored for the script's lifetime so a stray SIGHUP from the
+    // launcher pane (ib-coordinator / another agent / watchdog) can't tear down
+    // the fresh resume. This is the core fix for the exit-129 crash-resume loop.
+    expect(resumeScript).toContain("trap '' HUP");
+
+    // The old kill-on-HUP trap (which forwarded SIGTERM to claude on a stray
+    // SIGHUP and caused the crash) must be gone. No HUP trap may carry a body.
+    expect(resumeScript).not.toMatch(/trap '[^']+' HUP/);
+    expect(resumeScript).not.toContain("SIGHUP diagnostics");
+
+    // setsid gives claude its own session (defense-in-depth) with a graceful
+    // fallback when setsid is absent — the inherited SIG_IGN still covers that.
+    expect(resumeScript).toContain("command -v setsid");
+    expect(resumeScript).toContain("setsid claude --resume");
+    // Fallback bare launch is still present for hosts without setsid.
+    expect(resumeScript).toMatch(/^ *claude --resume "/m);
+
+    // TERM and INT traps are unchanged — clean teardown on ib kill / pause still
+    // forwards the signal to claude.
+    expect(resumeScript).toMatch(/trap '[^']*kill \$CLAUDE_PID[^']*' TERM/);
+    expect(resumeScript).toMatch(/trap '[^']*kill -INT \$CLAUDE_PID[^']*' INT/);
+  });
+
   test("resume sets window-size manual on the new tmux session", async () => {
     const agentDir = join(tempDir, ".ittybitty", "agents", "agent-window-size");
     await mkdir(join(agentDir, "repo"), { recursive: true });
@@ -2912,6 +2961,29 @@ describe("newAgent (native)", () => {
     expect(startSh).toContain("139) log \"exit=139 → SIGSEGV");
     expect(startSh).toContain("143) log \"exit=143 → SIGTERM");
     expect(startSh).toContain("127) log \"exit=127 → command not found");
+  });
+
+  test("start.sh ignores SIGHUP and launches claude under setsid (no kill-on-HUP)", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    await callNewAgent("do work", { name: "test-hup" });
+
+    const startSh = await Bun.file(join(agentsDir, "test-hup", "start.sh")).text();
+
+    // Same SIGHUP-immunity fix as resume.sh: ignore SIGHUP so a stray signal
+    // from the launcher pane can't kill a freshly-spawned agent.
+    expect(startSh).toContain("trap '' HUP");
+    // The old kill-on-HUP trap (with a body) is gone.
+    expect(startSh).not.toMatch(/trap '[^']+' HUP/);
+    expect(startSh).not.toContain("SIGHUP diagnostics");
+
+    // setsid defense-in-depth with a graceful fallback to a bare launch.
+    expect(startSh).toContain("command -v setsid");
+    expect(startSh).toContain("setsid claude --session-id");
+    expect(startSh).toMatch(/^ *claude --session-id "/m);
+
+    // TERM and INT traps unchanged — clean teardown still forwards to claude.
+    expect(startSh).toMatch(/trap '[^']*kill \$CLAUDE_PID[^']*' TERM/);
+    expect(startSh).toMatch(/trap '[^']*kill -INT \$CLAUDE_PID[^']*' INT/);
   });
 
   test("new-agent sets a tmux pane-died hook that writes to agent.log", async () => {

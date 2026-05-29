@@ -1246,6 +1246,20 @@ describe("resumeAgent (native)", () => {
     // Fallback bare launch is still present for hosts without setsid.
     expect(resumeScript).toMatch(/^ *claude --resume "/m);
 
+    // ORDERING (the subtle part): `trap '' HUP` must be installed BEFORE claude
+    // is forked so the SIG_IGN disposition is inherited by the child. If the
+    // trap moved after the launch, a child started before the trap would catch
+    // a stray SIGHUP and die — reintroducing the bug.
+    const hupIdx = resumeScript.indexOf("trap '' HUP");
+    const setsidGuardIdx = resumeScript.indexOf("command -v setsid");
+    const firstLaunchIdx = resumeScript.search(/(setsid )?claude --resume "/);
+    expect(hupIdx).toBeGreaterThan(-1);
+    expect(hupIdx).toBeLessThan(firstLaunchIdx);
+    // UNCONDITIONAL: the HUP-ignore must not be gated on setsid — it appears
+    // before the `command -v setsid` guard, so the bare-launch fallback path
+    // (setsid absent, e.g. macOS) keeps the protection.
+    expect(hupIdx).toBeLessThan(setsidGuardIdx);
+
     // TERM and INT traps are unchanged — clean teardown on ib kill / pause still
     // forwards the signal to claude.
     expect(resumeScript).toMatch(/trap '[^']*kill \$CLAUDE_PID[^']*' TERM/);
@@ -2980,6 +2994,16 @@ describe("newAgent (native)", () => {
     expect(startSh).toContain("command -v setsid");
     expect(startSh).toContain("setsid claude --session-id");
     expect(startSh).toMatch(/^ *claude --session-id "/m);
+
+    // ORDERING + UNCONDITIONAL: `trap '' HUP` must precede the claude launch
+    // (so SIG_IGN is inherited by the child) AND precede the `command -v setsid`
+    // guard (so the bare-launch fallback path still gets the protection).
+    const hupIdx = startSh.indexOf("trap '' HUP");
+    const setsidGuardIdx = startSh.indexOf("command -v setsid");
+    const firstLaunchIdx = startSh.search(/(setsid )?claude --session-id "/);
+    expect(hupIdx).toBeGreaterThan(-1);
+    expect(hupIdx).toBeLessThan(firstLaunchIdx);
+    expect(hupIdx).toBeLessThan(setsidGuardIdx);
 
     // TERM and INT traps unchanged — clean teardown still forwards to claude.
     expect(startSh).toMatch(/trap '[^']*kill \$CLAUDE_PID[^']*' TERM/);

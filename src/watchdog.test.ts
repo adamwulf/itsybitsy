@@ -2093,37 +2093,65 @@ describe("runPerAgentWatchdog", () => {
     expect(drainCalls).toBe(3);
   });
 
-  test("never drains while the watchdog is mid permission-prompt Enter (busy guard)", async () => {
-    const { isDirectSessionWriteBusy } = await import("./watchdog");
-    let sawBusyDuringDrain = false;
-    setPerAgentDrain(async (_agent, _agentDir) => {
-      // The guard must ensure a drain is never dispatched while a bare
-      // keystroke write is in flight for this agent.
-      if (isDirectSessionWriteBusy("agent-test1")) sawBusyDuringDrain = true;
-    });
+  test("runSessionExclusive serializes overlapping critical sections (both directions)", async () => {
+    // The session-write mutex must guarantee a drain and a bare watchdog Enter
+    // (or any two session writes) never overlap, in EITHER arrival order. We
+    // launch two critical sections concurrently for the same agent; each marks
+    // a shared `active` counter on entry and clears it on exit, with an await in
+    // between so an unguarded pair WOULD overlap. The mutex must keep `active`
+    // from ever exceeding 1, and the sections must run in arrival (FIFO) order.
+    const { runSessionExclusive } = await import("./watchdog");
+    let active = 0;
+    let maxActive = 0;
+    const order: string[] = [];
+    const section = (label: string) => async () => {
+      active++;
+      maxActive = Math.max(maxActive, active);
+      order.push(`${label}:enter`);
+      await new Promise((r) => setTimeout(r, 5)); // yield — overlap window
+      order.push(`${label}:exit`);
+      active--;
+    };
 
-    // Tick 1: permission prompt visible (triggers auto-accept Enter); tick 2:
-    // normal screen; exit after.
-    let captures = 0;
-    setPerAgentCaptureTmux(async (_session: string) => {
-      captures++;
-      if (captures === 1) {
-        return [
-          "New MCP server found in .mcp.json: activepieces",
-          "  Enter to confirm · Esc to cancel",
-        ].join("\n");
-      }
-      return "Claude Code v1.0.0\n[USER TASK]";
-    });
-    setWatchdogSpawnRunner((_cmd, _opts) =>
-      ({ stdout: new ReadableStream(), stderr: new ReadableStream(), exited: Promise.resolve(0) }) as any);
-    let existsChecks = 0;
-    setPerAgentExistsSync((_path: string) => { existsChecks++; return existsChecks <= 3; });
-    setPerAgentReadState(async (_dir: string) => undefined);
+    await Promise.all([
+      runSessionExclusive("agent-mx", section("A")),
+      runSessionExclusive("agent-mx", section("B")),
+    ]);
 
-    await runPerAgentWatchdog("agent-test1", "/tmp/test");
+    expect(maxActive).toBe(1); // never overlapped
+    // FIFO: A fully completes before B starts.
+    expect(order).toEqual(["A:enter", "A:exit", "B:enter", "B:exit"]);
+  });
 
-    expect(sawBusyDuringDrain).toBe(false);
+  test("runSessionExclusive for DIFFERENT agents may overlap (no cross-agent block)", async () => {
+    const { runSessionExclusive } = await import("./watchdog");
+    let active = 0;
+    let maxActive = 0;
+    const section = () => async () => {
+      active++;
+      maxActive = Math.max(maxActive, active);
+      await new Promise((r) => setTimeout(r, 5));
+      active--;
+    };
+    await Promise.all([
+      runSessionExclusive("agent-one", section()),
+      runSessionExclusive("agent-two", section()),
+    ]);
+    // Different keys → genuinely concurrent (the global tick() path must not
+    // cross-block unrelated agents).
+    expect(maxActive).toBe(2);
+  });
+
+  test("runSessionExclusive: a throwing section does not poison the mutex", async () => {
+    const { runSessionExclusive, isSessionWriteBusy } = await import("./watchdog");
+    await expect(
+      runSessionExclusive("agent-err", async () => { throw new Error("boom"); }),
+    ).rejects.toThrow("boom");
+    // Next acquirer still runs, and the mutex reports idle afterward.
+    let ran = false;
+    await runSessionExclusive("agent-err", async () => { ran = true; });
+    expect(ran).toBe(true);
+    expect(isSessionWriteBusy("agent-err")).toBe(false);
   });
 
   test("auto-accepts MCP server permissions prompt", async () => {

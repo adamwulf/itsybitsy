@@ -597,28 +597,24 @@ async function handleRateLimited(agent: Agent, tracker: AgentTracker, _getAllAge
   // matching bash's bypass_rate_limit: send Enter, wait 2s, capture output,
   // check state via parseState, repeat if still rate_limited.
   if (!tracker.rateLimitBypassed && tmuxSession) {
-    // Mark the session busy so the fs.watch-driven outbox drain defers while we
-    // type bare Enters here — otherwise a queued message could be typed into the
-    // session between our Enter keystrokes (interleaving two writes). The busy
-    // flag is a no-op when the handler runs outside runPerAgentWatchdog (e.g.
-    // the global tick() path or tests), which never drives a concurrent drain.
-    beginDirectSessionWrite(agent.id);
-    try {
-      for (let attempt = 0; attempt < RATE_LIMIT_MAX_RETRIES; attempt++) {
-        await sendTmuxEnter(tmuxSession);
-        await watchdogSleepFn(RATE_LIMIT_RETRY_DELAY_MS);
+    for (let attempt = 0; attempt < RATE_LIMIT_MAX_RETRIES; attempt++) {
+      // Hold the session-write mutex for each bare Enter so it never interleaves
+      // with an outbox drain's chunked send-keys/Enter. Each Enter is its own
+      // atomic critical section; a drain may run BETWEEN attempts (that's a
+      // separate complete write, not an interleave). runSessionExclusive is a
+      // straight pass-through when the handler runs outside runPerAgentWatchdog
+      // (e.g. the global tick() path / tests) where no concurrent drain exists.
+      await runSessionExclusive(agent.id, () => sendTmuxEnter(tmuxSession));
+      await watchdogSleepFn(RATE_LIMIT_RETRY_DELAY_MS);
 
-        // Capture tmux output and check if still rate limited
-        const output = await watchdogCaptureTmuxFn(tmuxSession);
-        if (output !== null) {
-          const result = parseState(output);
-          if (result.state !== "rate_limited") {
-            break; // Successfully dismissed
-          }
+      // Capture tmux output and check if still rate limited
+      const output = await watchdogCaptureTmuxFn(tmuxSession);
+      if (output !== null) {
+        const result = parseState(output);
+        if (result.state !== "rate_limited") {
+          break; // Successfully dismissed
         }
       }
-    } finally {
-      endDirectSessionWrite(agent.id);
     }
     tracker.rateLimitBypassed = true;
   }
@@ -924,32 +920,66 @@ export function resetPerAgentDrain(): void {
 const OUTBOX_WATCH_DEBOUNCE_MS = 50;
 
 /**
- * Agents whose own watchdog is mid bare-keystroke write to the tmux session
- * (rate-limit-bypass Enter, permission auto-accept Enter). While an agent id is
- * in this set, that agent's `drainNow()` defers (sets drainPending) instead of
- * delivering, so a queued outbox message can't be typed into the session
- * between the watchdog's own Enter keystrokes. Keyed by agent id so the global
- * `tick()` path (which can process several agents in one process during tests)
- * doesn't cross-block unrelated agents. These bare writes bypass `deliverMessage`
- * (and thus the outbox lock), so this in-process guard — not the file lock — is
- * what serializes them against the fs.watch-driven drain.
+ * Per-agent in-process async mutex serializing every write this watchdog makes
+ * to its agent's tmux session — the outbox drain (`deliverMessage`'s chunked
+ * send-keys/Enter) AND the watchdog's own bare keystrokes (rate-limit-bypass
+ * Enter, permission auto-accept Enter). Those bare keystrokes bypass
+ * `deliverMessage` and the file `.outbox.lock`, so the file lock alone can't
+ * serialize them against the fs.watch-driven drain. This mutex closes BOTH
+ * directions symmetrically: a drain can't start while a direct write holds it,
+ * and a direct write can't start while a drain holds it.
+ *
+ * Keyed by agent id so the global `tick()` path (which can process several
+ * agents in one process during tests) never cross-blocks unrelated agents.
+ * Within a single `runPerAgentWatchdog` process there is only ever one key.
  */
-const directSessionWriteBusy = new Set<string>();
+interface SessionMutexState {
+  /** Tail of the promise chain — the next acquirer awaits this. */
+  tail: Promise<void>;
+  /** Number of holders currently queued or running (for isSessionWriteBusy). */
+  active: number;
+}
+const sessionMutexes = new Map<string, SessionMutexState>();
 
-/** Mark `agentId`'s session busy with a direct watchdog write. */
-function beginDirectSessionWrite(agentId: string): void {
-  directSessionWriteBusy.add(agentId);
+/** Whether `agentId`'s session mutex is currently held or contended (a write is
+ *  in flight or queued). Exported for tests asserting drain/direct-write mutual
+ *  exclusion. */
+export function isSessionWriteBusy(agentId: string): boolean {
+  return (sessionMutexes.get(agentId)?.active ?? 0) > 0;
 }
 
-/** Clear the direct-write busy marker for `agentId`. */
-function endDirectSessionWrite(agentId: string): void {
-  directSessionWriteBusy.delete(agentId);
-}
+/**
+ * Run `fn` while holding `agentId`'s session-write mutex. Serializes against any
+ * other `runSessionExclusive` for the same agent: each caller chains behind the
+ * current tail, so critical sections run one at a time in arrival order. Errors
+ * in `fn` are contained (the chain link always resolves) so one failed section
+ * never poisons the mutex for the next waiter.
+ *
+ * Exported for tests that assert drain/direct-write mutual exclusion.
+ */
+export async function runSessionExclusive<T>(agentId: string, fn: () => Promise<T>): Promise<T> {
+  const state = sessionMutexes.get(agentId) ?? { tail: Promise.resolve(), active: 0 };
+  state.active++;
+  const prior = state.tail;
+  let release!: () => void;
+  // Our link resolves when we finish; the next acquirer awaits it. Publish the
+  // new tail SYNCHRONOUSLY (before any await) so concurrent callers chain in a
+  // deterministic FIFO order.
+  state.tail = new Promise<void>((resolve) => { release = resolve; });
+  sessionMutexes.set(agentId, state);
 
-/** Whether `agentId`'s watchdog is mid direct session write. Exported for tests
- *  that assert a drain never runs while a bare keystroke write is in flight. */
-export function isDirectSessionWriteBusy(agentId: string): boolean {
-  return directSessionWriteBusy.has(agentId);
+  await prior; // wait for all earlier holders to finish
+  try {
+    return await fn();
+  } finally {
+    release();
+    state.active--;
+    // Drop the entry once idle so the map doesn't grow unbounded and
+    // isSessionWriteBusy reflects idleness.
+    if (state.active === 0 && sessionMutexes.get(agentId) === state) {
+      sessionMutexes.delete(agentId);
+    }
+  }
 }
 
 /**
@@ -1060,13 +1090,14 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
   // This watchdog is the single tmux writer for its agent, so it owns draining
   // the per-agent outbox queue. We drain at the top of every poll tick AND on
   // an fs.watch event (so delivery feels instant), serialized via a guard so
-  // this watchdog never runs two of its own drains at once. `drainOutbox`
-  // itself takes the per-session lock, which serializes against any inline
-  // sender that came alive concurrently. A drain ALSO defers while this
-  // watchdog is mid bare-keystroke write (rate-limit-bypass / permission Enter),
-  // tracked via the directSessionWriteBusy set — those writes bypass the outbox
-  // lock, so this in-process guard is what keeps them from interleaving with a
-  // delivered message's chunks+Enter.
+  // this watchdog never runs two of its own drains at once, and — via the
+  // per-agent session-write mutex (runSessionExclusive) — never overlaps a
+  // drain with this watchdog's own bare keystrokes (rate-limit-bypass /
+  // permission auto-accept Enter), in EITHER direction. Those bare writes
+  // bypass `deliverMessage` and the file `.outbox.lock`, so the mutex (not the
+  // file lock) is what keeps them from interleaving with a delivered message's
+  // chunks+Enter. `drainOutbox` ALSO takes the per-session file lock, which
+  // serializes the drain against any inline sender in another process.
   const drainAgent: Agent = {
     id: agentId,
     repoPath,
@@ -1077,42 +1108,23 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
     archived: false,
     children: [],
   };
-  let draining = false;
-  let drainPending = false;
+  let drainQueued = false;
   const drainNow = async (): Promise<void> => {
-    // Defer if this watchdog is mid direct session write — the loop kicks
-    // drainNow() again in endDirectSessionWriteAndFlush once it finishes.
-    if (isDirectSessionWriteBusy(agentId)) {
-      drainPending = true;
-      return;
-    }
-    // Coalesce: if a drain is already running, mark that another pass is needed
-    // and let the in-flight drain pick up anything that arrived meanwhile.
-    if (draining) {
-      drainPending = true;
-      return;
-    }
-    draining = true;
-    try {
-      do {
-        // Re-check the busy guard each pass — a direct write may have started
-        // between iterations; defer the remainder to the post-write flush.
-        if (isDirectSessionWriteBusy(agentId)) { drainPending = true; break; }
-        drainPending = false;
-        try {
-          await perAgentDrainFn(drainAgent, agentDir);
-        } catch { /* never crash the watchdog on a drain error */ }
-      } while (drainPending);
-    } finally {
-      draining = false;
-    }
-  };
-  // After a direct session write ends, flush any drain that was deferred while
-  // busy. Used by the loop-body permission auto-accept (the handler-level
-  // rate-limit path can't see this closure, but the next per-tick drainNow()
-  // covers it; this flush makes the loop-body case instant).
-  const flushAfterDirectWrite = (): void => {
-    if (drainPending && !isDirectSessionWriteBusy(agentId)) void drainNow();
+    // Coalesce redundant triggers: if a drain is already queued/running, one
+    // more pass will pick up anything that arrived meanwhile, so don't pile up.
+    if (drainQueued) return;
+    drainQueued = true;
+    // Hold the session-write mutex for the whole drain so no direct write (and
+    // no second drain) can touch the session concurrently. Awaiting this also
+    // means the top-of-tick `await drainNow()` blocks until an in-flight drain
+    // (e.g. one started by an fs.watch event) finishes — so the loop body's
+    // direct writes can never start mid-drain.
+    await runSessionExclusive(agentId, async () => {
+      drainQueued = false; // allow new triggers to queue once we're delivering
+      try {
+        await perAgentDrainFn(drainAgent, agentDir);
+      } catch { /* never crash the watchdog on a drain error */ }
+    });
   };
 
   // Event-driven drain via fs.watch on the agent dir. Debounced so a burst of
@@ -1124,7 +1136,7 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
   try {
     watcher = watch(agentDir, (_event, filename) => {
       // Only react to outbox changes (filename may be null on some platforms —
-      // in that case react to any change, the per-session lock keeps it safe).
+      // in that case react to any change, the mutex + file lock keep it safe).
       if (filename && filename !== OUTBOX_FILENAME) return;
       if (watchDebounce) clearTimeout(watchDebounce);
       watchDebounce = setTimeout(() => { void drainNow(); }, OUTBOX_WATCH_DEBOUNCE_MS);
@@ -1178,15 +1190,11 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
           /\d+ new MCP servers? found/i.test(output)
         ) {
           await logAgent(agentDir, "[watchdog] Detected permissions prompt — sending Enter to accept");
-          // Serialize against the fs.watch-driven outbox drain so a queued
-          // message can't be typed into the session mid-Enter.
-          beginDirectSessionWrite(agentId);
-          try {
-            await sendTmuxEnter(tmuxSession);
-          } finally {
-            endDirectSessionWrite(agentId);
-            flushAfterDirectWrite();
-          }
+          // Hold the session-write mutex around the bare Enter so it can't
+          // interleave with a concurrent (e.g. fs.watch-driven) outbox drain —
+          // in EITHER direction: a drain in flight blocks us until it finishes,
+          // and a drain that wants to start blocks until we finish.
+          await runSessionExclusive(agentId, () => sendTmuxEnter(tmuxSession));
           await sleepFn(POLL_INTERVAL_MS);
           continue;
         }

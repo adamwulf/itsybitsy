@@ -609,12 +609,31 @@ export interface AgentReadError {
  * live in meta.transient.json — they don't bump meta.json's mtime.
  *
  * Map key: absolute meta.json path. Value: { mtimeMs, meta }.
- * Cache stores a single canonical reference; readers receive a deep copy
- * via structuredClone() so caller mutations to nested objects (e.g.
- * spawned_by) cannot pollute the cache. The shallow-spread alternative
- * leaves spawned_by shared by reference.
+ * Cache stores a single canonical reference; readers receive an isolated copy
+ * via copyAgentMeta() so caller mutations cannot pollute the cache. We do NOT
+ * use structuredClone() — it was the 2nd-biggest CPU cost in profiling because
+ * it deep-clones every meta on every read, every refresh + every 2s pollStates
+ * tick × every agent. AgentMeta is flat primitives/strings except for the one
+ * nested mutable object `spawned_by`, so a shallow spread plus a fresh copy of
+ * spawned_by is dramatically cheaper while preserving the same isolation
+ * guarantee. See copyAgentMeta().
  */
 const metaCache = new Map<string, { mtimeMs: number; meta: AgentMeta }>();
+
+/**
+ * Return an isolated copy of an AgentMeta cheaply. AgentMeta's fields are all
+ * flat primitives/strings EXCEPT `spawned_by`, the only nested mutable object
+ * a caller might mutate (notably the watchdog routing notifications). A shallow
+ * spread shares the top-level object by value for primitives; we deep-copy
+ * `spawned_by` so a caller mutating returned.spawned_by cannot pollute the
+ * cached canonical reference. Keep this in sync with the AgentMeta interface:
+ * if a new array/object field is added, copy it here too. */
+function copyAgentMeta(meta: AgentMeta): AgentMeta {
+  return {
+    ...meta,
+    spawned_by: meta.spawned_by ? { ...meta.spawned_by } : meta.spawned_by,
+  };
+}
 
 /** Reset the meta.json mtime cache. Exported for tests. */
 export function resetReadAgentMetaCache(): void {
@@ -643,7 +662,7 @@ export async function readAgentMeta(agentDir: string): Promise<{ meta: AgentMeta
 
   const cached = metaCache.get(metaPath);
   if (cached && cached.mtimeMs === mtimeMs) {
-    return { meta: structuredClone(cached.meta) };
+    return { meta: copyAgentMeta(cached.meta) };
   }
 
   try {
@@ -687,7 +706,7 @@ export async function readAgentMeta(agentDir: string): Promise<{ meta: AgentMeta
     }
     const meta = data as AgentMeta;
     metaCache.set(metaPath, { mtimeMs, meta });
-    return { meta: structuredClone(meta) };
+    return { meta: copyAgentMeta(meta) };
   } catch (err) {
     metaCache.delete(metaPath);
     return { meta: null, error: `Failed to read ${metaPath}: ${err}` };
@@ -1010,6 +1029,23 @@ export function resetListTmuxSessionsCache(): void {
   listTmuxSessionsCache = null;
 }
 
+/**
+ * Memo of tmux session names already torn down by reapOrphanedClaude.
+ * detectAgentStates() runs every ~2s over ALL agents, so without this a
+ * stopped agent whose meta.json still carries a stale tmux_session would
+ * re-spawn `tmux kill-session` on every tick forever, re-killing an
+ * already-dead session. Keyed on the session name, which is unique per agent
+ * (ittybitty-<repoId>-<agentId>) and never legitimately reused for a different
+ * stopped husk — so a one-shot memo is safe. Only the kill-session call is
+ * memoized; PID reaping is NOT (a PID could in principle still be alive on a
+ * later tick and warrant another SIGTERM). */
+const reapedTmuxSessions = new Set<string>();
+
+/** Reset the reaped-tmux-session memo. Exported for tests. */
+export function resetReapedTmuxSessions(): void {
+  reapedTmuxSessions.clear();
+}
+
 /** Fetch the live tmux session list, using the shared TTL cache.
  *  Used by readAllAgents (orphan detection) and detectAgentStates
  *  (verifying tmux is still alive for `complete` agents). */
@@ -1191,8 +1227,16 @@ async function reapOrphanedClaude(
   if (transient) reap("watchdog", transient.watchdog_pid);
 
   // Tear down the husk tmux session for stopped agents. Best-effort: a kill
-  // against an already-gone session is a cheap no-op.
-  if (resolvedState === "stopped" && agent.meta.tmux_session) {
+  // against an already-gone session is a cheap no-op. Memoize on the session
+  // name so we kill it AT MOST ONCE — detectAgentStates re-runs every ~2s, and
+  // a stopped agent with a stale tmux_session would otherwise re-spawn
+  // `tmux kill-session` on every tick forever (see reapedTmuxSessions).
+  if (
+    resolvedState === "stopped" &&
+    agent.meta.tmux_session &&
+    !reapedTmuxSessions.has(agent.meta.tmux_session)
+  ) {
+    reapedTmuxSessions.add(agent.meta.tmux_session);
     await killTmuxSession(agent.meta.tmux_session);
   }
 }

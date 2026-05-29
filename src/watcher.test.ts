@@ -930,24 +930,36 @@ describe("AgentWatcher", () => {
       }
     });
 
-    test("no archive watcher is set up (missing archive dir is a non-event)", async () => {
+    test("does not register an fs.watch on archive/ even when archive/ exists", async () => {
       setupDefaultMocks();
-      const errors: Error[] = [];
-      // Don't create archive dir. archive/ is intentionally not watched anymore,
-      // so its absence can never surface as an error.
+
+      // setupWatchers() registers one fs.watch per target and pushes each
+      // resulting FSWatcher into `this.watchers`, guarded by try/catch (a
+      // watch() on a missing path throws and is skipped). To make the count
+      // deterministic and meaningful, create ALL THREE candidate targets up
+      // front: agents/ (already made in beforeEach), archive/, and
+      // user-questions.json — so all three are watchable. Only agents/ and
+      // user-questions.json should actually be watched; archive/ must be skipped.
+      //
+      // Before the archive-skip change this registered 3 watchers per repo; now
+      // it registers 2. Asserting exactly 2 (with archive/ present on disk and
+      // watchable) proves the archive dir is deliberately not watched and FAILS
+      // if anyone re-adds a watch(archiveDir) call. The `.watchers` accessor is
+      // the same one the updateRepos tests below already use.
+      await mkdir(join(tempDir, ".ittybitty", "archive"), { recursive: true });
+      await writeFile(join(tempDir, ".ittybitty", "user-questions.json"), "{}");
+
       const watcher = new AgentWatcher(
         [{ path: tempDir, name: "test" }],
-        {
-          onUpdate: () => {},
-          onError: (err) => errors.push(err),
-        }
+        { onUpdate: () => {} }
       );
-
       await watcher.start();
+      const watcherCount = (watcher as any).watchers.length;
       watcher.stop();
 
-      const watchErrors = errors.filter((e) => e.message.includes("archive"));
-      expect(watchErrors.length).toBe(0);
+      // Exactly 2 (agents/ + user-questions.json), NOT 3 — archive/ exists on
+      // disk and would be watchable, yet must not be watched.
+      expect(watcherCount).toBe(2);
     });
   });
 
@@ -961,35 +973,11 @@ describe("AgentWatcher", () => {
 
       await watcher.refresh();
 
-      // The hot refresh path must skip the archive dir entirely.
+      // The hot refresh path must skip the archive dir entirely. readRepoAgents
+      // never touches archive/ when its includeArchived arg is false.
       expect(mockReadAllAgents).toHaveBeenCalled();
       const lastCall = mockReadAllAgents.mock.calls.at(-1)!;
       expect(lastCall[1]).toBe(false);
-    });
-
-    test("archived agents from readAllAgents never reach onUpdate", async () => {
-      // Belt-and-suspenders: even if an archived agent slipped through the read,
-      // flattenAgentTree drops it. Here readAllAgents (correctly) returns only the
-      // active agent, and the flat list passed to onUpdate contains no archived rows.
-      const activeAgent = makeAgent("agent-active", false);
-      mockReadAllAgents.mockResolvedValue({ agents: [activeAgent], errors: [] });
-      mockDetectAgentStates.mockResolvedValue(undefined);
-      mockBuildAgentTree.mockReturnValue([activeAgent]);
-      mockFlattenAgentTree.mockReturnValue([makeFlatAgent(activeAgent)]);
-      mockReadPendingQuestions.mockResolvedValue([]);
-
-      let received: FlatEntry[] = [];
-      const watcher = new AgentWatcher(
-        [{ path: tempDir, name: "test" }],
-        { onUpdate: (_agents, flat) => { received = flat; } }
-      );
-
-      await watcher.refresh();
-
-      const archivedRows = received.filter(
-        (f) => f.kind === "agent" && f.agent.archived
-      );
-      expect(archivedRows.length).toBe(0);
     });
   });
 

@@ -164,4 +164,29 @@ describe("buildHooksBlock — inject-timestamp PostToolUse hook", () => {
     const postToolUse = result.PostToolUse as Array<{ matcher: string }>;
     expect(postToolUse[0]!.matcher).toBe("*");
   });
+
+  // The includeStop:false + includeTimestamp:true combination never occurs in
+  // production (only coordinators use includeStop:false, and they never request
+  // the timestamp hook). The code path exists, though, so pin its key order so a
+  // future caller that combines them gets the documented layout.
+  test("includeStop:false branch also inserts PostToolUse directly after PreToolUse", () => {
+    const result = buildHooksBlock({
+      agentId: "@system",
+      includeStop: false,
+      interceptMatcher: COORDINATOR_INTERCEPT_MATCHER,
+      sessionStartIncludesAgentId: true,
+      includeTimestamp: true,
+    });
+    const keys = Object.keys(result);
+    expect(keys).toEqual([
+      "PreToolUse",
+      "PostToolUse",
+      "PermissionRequest",
+      "UserPromptSubmit",
+      "SessionStart",
+    ]);
+    const postToolUse = result.PostToolUse as Array<{ matcher: string; hooks: Array<{ command: string }> }>;
+    expect(postToolUse[0]!.matcher).toBe("*");
+    expect(postToolUse[0]!.hooks[0]!.command).toBe("ib hooks inject-timestamp");
+  });
 });

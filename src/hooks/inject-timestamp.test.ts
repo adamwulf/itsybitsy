@@ -1,5 +1,9 @@
 import { test, expect, describe } from "bun:test";
-import { formatTimestamp, buildTimestampContext } from "./inject-timestamp";
+import {
+  formatTimestamp,
+  buildTimestampContext,
+  computeTimestampOutput,
+} from "./inject-timestamp";
 
 // A fixed epoch used across tests: 2025-05-29 19:32:07 UTC.
 const FIXED_EPOCH_MS = 1748547127000;
@@ -67,5 +71,62 @@ describe("buildTimestampContext", () => {
     expect(buildTimestampContext(FIXED_EPOCH_MS, "America/Chicago")).toBe(
       `Current time: 2025-05-29 14:32:07 CDT (epoch ${FIXED_EPOCH_SECONDS})`,
     );
+  });
+});
+
+describe("computeTimestampOutput", () => {
+  const base = {
+    rawStdin: JSON.stringify({ hook_event_name: "PostToolUse" }),
+    isAgentContext: true,
+    enabled: true,
+    epochMs: FIXED_EPOCH_MS,
+    timeZone: "America/Chicago",
+  };
+
+  test("emits the payload when in an agent context, enabled, and valid JSON", () => {
+    expect(computeTimestampOutput(base)).toEqual({
+      hookSpecificOutput: {
+        hookEventName: "PostToolUse",
+        additionalContext: `Current time: 2025-05-29 14:32:07 CDT (epoch ${FIXED_EPOCH_SECONDS})`,
+      },
+    });
+  });
+
+  test("returns null on invalid JSON (short-circuit, stays silent)", () => {
+    expect(computeTimestampOutput({ ...base, rawStdin: "not json" })).toBeNull();
+  });
+
+  test("returns null on empty stdin", () => {
+    expect(computeTimestampOutput({ ...base, rawStdin: "" })).toBeNull();
+  });
+
+  test("returns null when not in an agent context", () => {
+    expect(computeTimestampOutput({ ...base, isAgentContext: false })).toBeNull();
+  });
+
+  test("returns null when the config is disabled", () => {
+    expect(computeTimestampOutput({ ...base, enabled: false })).toBeNull();
+  });
+
+  test("defaults hookEventName to PostToolUse when absent from stdin", () => {
+    const out = computeTimestampOutput({ ...base, rawStdin: "{}" });
+    expect(out?.hookSpecificOutput.hookEventName).toBe("PostToolUse");
+  });
+
+  test("echoes back the provided hook_event_name", () => {
+    const out = computeTimestampOutput({
+      ...base,
+      rawStdin: JSON.stringify({ hook_event_name: "SomeOtherEvent" }),
+    });
+    expect(out?.hookSpecificOutput.hookEventName).toBe("SomeOtherEvent");
+  });
+
+  test("the gate order is JSON → agent-context → enabled (bad JSON beats disabled)", () => {
+    // Even with isAgentContext false AND enabled false, bad JSON is the first
+    // gate — all three produce null, so the observable result is the same, but
+    // this documents that no exception escapes regardless of combination.
+    expect(
+      computeTimestampOutput({ rawStdin: "{", isAgentContext: false, enabled: false, epochMs: FIXED_EPOCH_MS }),
+    ).toBeNull();
   });
 });

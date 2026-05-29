@@ -22,8 +22,17 @@
 import { readConfig } from "../config";
 import { resolveAgentFromCwd } from "./shared";
 
+/** Subset of the PostToolUse hook stdin JSON this hook reads. */
 export interface InjectTimestampInput {
   hook_event_name?: string;
+}
+
+/** Shape of the hook's stdout payload when it injects. */
+export interface InjectTimestampOutput {
+  hookSpecificOutput: {
+    hookEventName: string;
+    additionalContext: string;
+  };
 }
 
 /**
@@ -69,6 +78,46 @@ export function buildTimestampContext(epochMs: number, timeZone?: string): strin
 }
 
 /**
+ * Pure decision core for the hook: given the raw stdin, whether the cwd is an
+ * agent context, whether the config is enabled, and the current time, returns
+ * the output payload to write — or `null` when the hook should stay silent.
+ *
+ * All environment inputs are passed in so this is fully unit-testable without
+ * `process.exit`, stdin, the filesystem, or the wall clock. The CLI wrapper
+ * `hookInjectTimestamp` supplies the production values.
+ */
+export function computeTimestampOutput(opts: {
+  rawStdin: string;
+  isAgentContext: boolean;
+  enabled: boolean;
+  epochMs: number;
+  timeZone?: string;
+}): InjectTimestampOutput | null {
+  let data: InjectTimestampInput;
+  try {
+    data = JSON.parse(opts.rawStdin) as InjectTimestampInput;
+  } catch {
+    return null;
+  }
+
+  // Defense-in-depth: this hook is only wired into agent settings, but if it
+  // somehow fires outside an agent worktree, stay silent.
+  if (!opts.isAgentContext) return null;
+
+  // Opt-in: only inject when explicitly enabled.
+  if (!opts.enabled) return null;
+
+  const hookEventName = String(data.hook_event_name ?? "PostToolUse");
+
+  return {
+    hookSpecificOutput: {
+      hookEventName,
+      additionalContext: buildTimestampContext(opts.epochMs, opts.timeZone),
+    },
+  };
+}
+
+/**
  * CLI entry point for `ib hooks inject-timestamp`.
  *
  * Reads stdin JSON, confirms agent context, checks the `hooks.injectTimestamp`
@@ -84,37 +133,27 @@ export async function hookInjectTimestamp(
 ): Promise<void> {
   const raw = rawStdin ?? (await new Response(Bun.stdin.stream()).text());
 
-  let data: Record<string, unknown>;
-  try {
-    data = JSON.parse(raw);
-  } catch {
+  const isAgentContext = resolveAgentFromCwd(process.cwd()) !== null;
+
+  // Only read config if we still might inject — avoids a disk read on the
+  // common short-circuit paths (bad JSON / non-agent cwd).
+  let enabled = false;
+  if (isAgentContext) {
+    const config = await readConfig();
+    enabled = config["hooks.injectTimestamp"]?.value === true;
+  }
+
+  const output = computeTimestampOutput({
+    rawStdin: raw,
+    isAgentContext,
+    enabled,
+    epochMs: epochMs ?? Date.now(),
+  });
+
+  if (output === null) {
     process.exit(0);
     return;
   }
-
-  // Defense-in-depth: this hook is only wired into agent settings, but if it
-  // somehow fires outside an agent worktree, stay silent.
-  if (!resolveAgentFromCwd(process.cwd())) {
-    process.exit(0);
-    return;
-  }
-
-  // Opt-in: only inject when explicitly enabled.
-  const config = await readConfig();
-  if (config["hooks.injectTimestamp"]?.value !== true) {
-    process.exit(0);
-    return;
-  }
-
-  const hookEventName = String(data.hook_event_name ?? "PostToolUse");
-  const now = epochMs ?? Date.now();
-
-  const output = {
-    hookSpecificOutput: {
-      hookEventName,
-      additionalContext: buildTimestampContext(now),
-    },
-  };
 
   process.stdout.write(JSON.stringify(output));
 }

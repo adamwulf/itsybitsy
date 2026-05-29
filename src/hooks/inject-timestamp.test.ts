@@ -121,12 +121,26 @@ describe("computeTimestampOutput", () => {
     expect(out?.hookSpecificOutput.hookEventName).toBe("SomeOtherEvent");
   });
 
-  test("the gate order is JSON → agent-context → enabled (bad JSON beats disabled)", () => {
-    // Even with isAgentContext false AND enabled false, bad JSON is the first
-    // gate — all three produce null, so the observable result is the same, but
-    // this documents that no exception escapes regardless of combination.
+  test("never throws when all gates fail at once (malformed JSON + non-agent + disabled)", () => {
+    // All three gates independently return null, so this can't prove gate
+    // *ordering* — its value is confirming the JSON.parse SyntaxError is caught
+    // and no exception escapes for any combination of failing gates.
     expect(
       computeTimestampOutput({ rawStdin: "{", isAgentContext: false, enabled: false, epochMs: FIXED_EPOCH_MS }),
     ).toBeNull();
+  });
+
+  test("omitting timeZone uses the machine local zone (production wiring)", () => {
+    // The CLI wrapper never passes timeZone, so production formats in local
+    // time. We don't assert the zone label (host-dependent) but pin the shape.
+    const out = computeTimestampOutput({
+      rawStdin: JSON.stringify({ hook_event_name: "PostToolUse" }),
+      isAgentContext: true,
+      enabled: true,
+      epochMs: FIXED_EPOCH_MS,
+    });
+    expect(out?.hookSpecificOutput.additionalContext).toMatch(
+      new RegExp(`^Current time: \\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2} .+ \\(epoch ${FIXED_EPOCH_SECONDS}\\)$`),
+    );
   });
 });

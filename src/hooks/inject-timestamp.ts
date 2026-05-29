@@ -135,8 +135,11 @@ export async function hookInjectTimestamp(
 
   const isAgentContext = resolveAgentFromCwd(process.cwd()) !== null;
 
-  // Only read config if we still might inject — avoids a disk read on the
-  // common short-circuit paths (bad JSON / non-agent cwd).
+  // Skip the config read entirely when the cwd isn't an agent worktree (the
+  // common short-circuit — this hook is only wired into agent settings, so a
+  // non-agent cwd means it fired somewhere unexpected). Note: a malformed
+  // payload within an agent context still reads config here; `computeTimestampOutput`
+  // rejects it on the JSON gate regardless, so the read is harmless, not load-bearing.
   let enabled = false;
   if (isAgentContext) {
     const config = await readConfig();

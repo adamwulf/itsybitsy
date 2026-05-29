@@ -1,4 +1,7 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
+import { mkdtemp, rm } from "fs/promises";
+import { tmpdir } from "os";
+import { join } from "path";
 import { makeAgent, makeFlatAgent, makeFlatRepoHeader } from "../test-utils";
 import type { Agent, FlatEntry, PendingQuestion } from "../agents";
 import type { RepoEntry } from "../registry";
@@ -53,6 +56,9 @@ function makeMockCtx(overrides?: {
   scrollUpCalls: number[];
   scrollDownCalls: number[];
   loadAgentLogIfNeededCalls: number[];
+  /** Await every executeAndRefresh action kicked off so far — deterministic
+   *  alternative to a fixed Bun.sleep for fire-and-forget send paths. */
+  flushActions: () => Promise<void>;
 } {
   const dialogs: NonNullable<DialogState>[] = [];
   const notices: string[] = [];
@@ -60,6 +66,7 @@ function makeMockCtx(overrides?: {
   const scrollUpCalls: number[] = [];
   const scrollDownCalls: number[] = [];
   const loadAgentLogIfNeededCalls: number[] = [];
+  const pendingActions: Promise<void>[] = [];
   let leftWidth = overrides?.leftWidth ?? 60;
 
   const ctx: ActionCtx = {
@@ -108,7 +115,15 @@ function makeMockCtx(overrides?: {
     showDialog: (d: NonNullable<DialogState>) => { dialogs.push(d); },
     closeDialog: () => {},
     setNotice: (text: string) => { notices.push(text); },
-    executeAndRefresh: async (fn: () => Promise<void>) => { await fn(); },
+    executeAndRefresh: (fn: () => Promise<void>) => {
+      // Capture the in-flight action so tests can await it deterministically
+      // (flushActions) instead of racing a fixed sleep against the inline
+      // outbox drain. Swallow errors here to mirror the real wrapper's
+      // try/catch and avoid unhandled rejections leaking across tests.
+      const p = (async () => { try { await fn(); } catch { /* ignore */ } })();
+      pendingActions.push(p);
+      return p;
+    },
     syncSelectedAgent: () => {},
     jumpToMode: () => {},
     loadAgentLogIfNeeded: () => {
@@ -117,23 +132,34 @@ function makeMockCtx(overrides?: {
     setQuestionsFocused: () => {},
     healthReport: undefined,
   };
-  return { ctx, dialogs, notices, refreshCalls, scrollUpCalls, scrollDownCalls, loadAgentLogIfNeededCalls };
+  const flushActions = async () => { await Promise.all(pendingActions); };
+  return { ctx, dialogs, notices, refreshCalls, scrollUpCalls, scrollDownCalls, loadAgentLogIfNeededCalls, flushActions };
 }
 
-beforeEach(() => {
+// Per-test isolated repo root. sendMessage now writes a real outbox.jsonl +
+// .outbox.lock under <repoPath>/.ittybitty/agents/<id>/, so send-path tests
+// MUST use a fresh, isolated repoPath — the old shared "/tmp/test" default
+// (test-utils makeAgent) is reused across ~16 files, and a stale fresh
+// .outbox.lock there makes the inline drain block ~5s on the lock while these
+// tests only wait 10ms → flake. Each test gets its own dir, cleaned afterward.
+let sendRepoDir: string;
+
+beforeEach(async () => {
   setKillPauseSpawnRunner(noopSpawnRunner);
   setNukeResumeSpawnRunner(noopSpawnRunner);
   setSendSpawnRunner(noopSpawnRunner);
   setNewAgentSpawnRunner(noopSpawnRunner);
   lifecycleSpawnCtx.set(noopSpawnRunner);
+  sendRepoDir = await mkdtemp(join(tmpdir(), "agent-actions-send-"));
 });
 
-afterEach(() => {
+afterEach(async () => {
   resetKillPauseSpawnRunner();
   resetNukeResumeSpawnRunner();
   resetSendSpawnRunner();
   resetNewAgentSpawnRunner();
   lifecycleSpawnCtx.reset();
+  await rm(sendRepoDir, { recursive: true, force: true });
 });
 
 describe("handleKill", () => {
@@ -423,12 +449,12 @@ describe("handleSend", () => {
   });
 
   test("onSubmit calls sendMessage", async () => {
-    const agent = makeAgent({ id: "agent-1" });
-    const { ctx, dialogs, notices } = makeMockCtx({ agent });
+    const agent = makeAgent({ id: "agent-1", repoPath: sendRepoDir });
+    const { ctx, dialogs, notices, flushActions } = makeMockCtx({ agent });
     handleSend(ctx);
     const d = assertDialog(dialogs[0]!, "textarea");
     d.onSubmit("Hello agent");
-    await Bun.sleep(10);
+    await flushActions();
     expect(notices.some((n) => n.includes("Sent to agent-1") || n.includes("Send failed"))).toBe(true);
   });
 
@@ -452,13 +478,13 @@ describe("handleSend", () => {
   });
 
   test("per-repo coordinator send calls sendMessage", async () => {
-    const coordAgent = makeAgent({ id: "coord-1", meta: { agentType: "coordinator" } as any });
-    const { ctx, dialogs, notices } = makeMockCtx({ repoHeader: "my-repo" });
+    const coordAgent = makeAgent({ id: "coord-1", repoPath: sendRepoDir, meta: { agentType: "coordinator" } as any });
+    const { ctx, dialogs, notices, flushActions } = makeMockCtx({ repoHeader: "my-repo" });
     ctx.rightPane.repoCoordinatorAgent = coordAgent;
     handleSend(ctx);
     const d = assertDialog(dialogs[0]!, "textarea");
     d.onSubmit("Hello coordinator");
-    await Bun.sleep(10);
+    await flushActions();
     expect(notices.some((n) => n.includes("Sent to coord-1") || n.includes("Send failed"))).toBe(true);
   });
 

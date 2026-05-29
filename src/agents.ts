@@ -400,7 +400,12 @@ export async function updateAgentTransient(
     await stat(agentDir);
     const cur = (await readAgentTransient(agentDir)) ?? emptyTransient();
     const next = fn(cur);
-    const tmpPath = path + ".tmp";
+    // Per-process tmp name: multiple writers (the watchdog + a merge/resume op)
+    // can run concurrently, and a shared ".tmp" lets their writes interleave
+    // bytes into the same file before the rename publishes it. A pid-suffixed
+    // tmp gives each writer its own scratch file so the atomic rename only ever
+    // publishes complete content.
+    const tmpPath = `${path}.tmp.${process.pid}`;
     await Bun.write(tmpPath, JSON.stringify(next, null, 2));
     await rename(tmpPath, path);
   } catch {

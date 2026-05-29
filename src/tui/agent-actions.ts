@@ -45,11 +45,28 @@ let activeDiffProc: { proc: ReturnType<typeof Bun.spawn>; agentId: string } | nu
 
 let diffToolLaunching = false;
 
+/**
+ * UI-layer in-flight guard for the per-repo coordinator SPAWN path only.
+ * Keyed on `repo:${repo.path}`. WHY this exists despite the durable op-guard:
+ * when no coordinator exists yet, there is no agent dir (and no
+ * meta.transient.json) to mark, so acquireAgentOperation() structurally can't
+ * cover the spawn — two rapid 'R' presses both async-resolve `exists:false`
+ * and both call newAgent() at the same deterministic dir, producing a
+ * partial/failed duplicate spawn. This small set serializes that one path
+ * within the process. The reset case is already covered by resumeAgent()'s
+ * durable guard; this is intentionally NOT the old broad resumingAgentIds set.
+ */
+const coordinatorSpawnsInFlight = new Set<string>();
+
 /** Test helpers for activeDiffProc */
 export function getActiveDiffProc() { return activeDiffProc; }
 export function setActiveDiffProc(v: typeof activeDiffProc) { activeDiffProc = v; }
 export function getDiffToolLaunching() { return diffToolLaunching; }
 export function setDiffToolLaunching(v: boolean) { diffToolLaunching = v; }
+
+/** Test helpers for coordinatorSpawnsInFlight */
+export function getCoordinatorSpawnsInFlight() { return coordinatorSpawnsInFlight; }
+export function clearCoordinatorSpawnsInFlight() { coordinatorSpawnsInFlight.clear(); }
 
 /** Resolve the settings.local.json path for an agent.
  * Coordinator agents use <agentDir>/.claude/; everyone else uses <agentDir>/repo/.claude/. */
@@ -221,10 +238,17 @@ export function handleKillSystemCoordinator(ctx: ActionCtx) {
  * the notice text and tmux pane reset stay in sync.
  */
 export function handleRestartSystemCoordinator(ctx: ActionCtx) {
-  // The system coordinator has no agent dir, so it is not covered by the
-  // durable op-guard (acquireAgentOperation) — there is nothing to mark. A
-  // rapid double-press is rare here and harmless (the second restart simply
-  // re-runs the kill+relaunch). The immediate notice gives feedback.
+  // DELIBERATE: this path has NO double-press guard. The old in-memory
+  // `resumingAgentIds` set was removed with the rest of the in-memory guards,
+  // and the durable op-guard (acquireAgentOperation) can't replace it here —
+  // the system coordinator has no agent dir / meta.transient.json to mark. We
+  // accept the gap rather than reintroduce an in-memory set for this one path,
+  // because restartSystemCoordinator() is an idempotent kill+relaunch: a rapid
+  // double-press (rare) simply re-runs it, with no partial/duplicate-spawn
+  // hazard. (Contrast the per-repo coordinator SPAWN path, which DID need the
+  // narrow `coordinatorSpawnsInFlight` guard because two presses there race to
+  // newAgent() into the same deterministic dir.) The immediate notice gives
+  // feedback.
   ctx.setNotice("Restarting system coordinator…");
   ctx.executeAndRefresh(async () => {
     await restartSystemCoordinator();
@@ -318,28 +342,46 @@ export function handleResume(ctx: ActionCtx) {
   if (!ctx.agentTree.selectedAgent && repoHeader) {
     const repo = ctx.repos.find((r) => repoDisplayName(r) === repoHeader);
     if (!repo) return;
+
+    // UI-layer in-flight guard for the SPAWN path. The durable op-guard inside
+    // resumeAgent() covers the reset case, but a first-time coordinator spawn
+    // has no agent dir / meta.transient.json yet, so nothing durable can mark
+    // it. Without this, two rapid 'R' presses both see `exists:false` and both
+    // newAgent() into the same deterministic dir → partial/duplicate spawn.
+    // Keyed per-repo and released in the finally below; intentionally narrow.
+    const spawnKey = `repo:${repo.path}`;
+    if (coordinatorSpawnsInFlight.has(spawnKey)) {
+      ctx.setNotice(`Coordinator action already in progress for ${repoDisplayName(repo)}…`);
+      return;
+    }
+    coordinatorSpawnsInFlight.add(spawnKey);
+
     ctx.setNotice(`Resetting coordinator for ${repoDisplayName(repo)}…`);
     ctx.executeAndRefresh(async () => {
-      const coordStatus = await checkCoordinatorExists(repo.path);
-      if (coordStatus.exists) {
-        // Coordinator exists — full reset (kill + respawn). Allowed regardless
-        // of state: a running coordinator with stale permissions/hooks is the
-        // primary case this command is for. resumeAgent() detects coordinators
-        // and routes to the reset path. The durable op-guard inside
-        // resumeAgent() (kind `restarting`) refuses a concurrent reset and
-        // surfaces "Agent is currently restarting…" as the failure stderr.
-        const agent = (ctx.watcher?.lastAgents ?? [])
-          .find(a => a.id === coordStatus.agentId);
-        if (agent) {
-          const result = await resumeAgent(agent);
-          ctx.setNotice(result.ok ? `Reset coordinator ${agent.id}` : `Reset failed: ${result.stderr || result.stdout}`);
+      try {
+        const coordStatus = await checkCoordinatorExists(repo.path);
+        if (coordStatus.exists) {
+          // Coordinator exists — full reset (kill + respawn). Allowed regardless
+          // of state: a running coordinator with stale permissions/hooks is the
+          // primary case this command is for. resumeAgent() detects coordinators
+          // and routes to the reset path. The durable op-guard inside
+          // resumeAgent() (kind `restarting`) refuses a concurrent reset and
+          // surfaces "Agent is currently restarting…" as the failure stderr.
+          const agent = (ctx.watcher?.lastAgents ?? [])
+            .find(a => a.id === coordStatus.agentId);
+          if (agent) {
+            const result = await resumeAgent(agent);
+            ctx.setNotice(result.ok ? `Reset coordinator ${agent.id}` : `Reset failed: ${result.stderr || result.stdout}`);
+          } else {
+            ctx.setNotice(`Coordinator ${coordStatus.agentId} not found in agent tree`);
+          }
         } else {
-          ctx.setNotice(`Coordinator ${coordStatus.agentId} not found in agent tree`);
+          // No coordinator — spawn one
+          const result = await newAgent(repo.path, "You are the per-repo coordinator. Await instructions.", { type: "coordinator" });
+          ctx.setNotice(result.ok ? `Spawned coordinator ${result.stdout}` : `Spawn failed: ${result.stderr || result.stdout}`);
         }
-      } else {
-        // No coordinator — spawn one
-        const result = await newAgent(repo.path, "You are the per-repo coordinator. Await instructions.", { type: "coordinator" });
-        ctx.setNotice(result.ok ? `Spawned coordinator ${result.stdout}` : `Spawn failed: ${result.stderr || result.stdout}`);
+      } finally {
+        coordinatorSpawnsInFlight.delete(spawnKey);
       }
     });
     return;

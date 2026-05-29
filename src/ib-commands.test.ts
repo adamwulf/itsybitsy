@@ -5,6 +5,8 @@ import { tmpdir } from "os";
 import type { Agent, AgentMeta } from "./agents";
 import {
   isPidAliveCtx,
+  nowMsCtx,
+  OP_STUCK_TIMEOUT_MS,
   setAgentOperation,
   clearAgentOperation,
   readAgentTransient,
@@ -6592,6 +6594,7 @@ describe("long-running-op guard", () => {
 
   afterEach(async () => {
     isPidAliveCtx.reset();
+    nowMsCtx.reset();
     lifecycleSpawnCtx.reset();
     resetMergeSpawnRunner();
     resetNukeResumeSpawnRunner();
@@ -6630,6 +6633,7 @@ describe("long-running-op guard", () => {
   test("mergeCheckAgent refuses when an op is in flight with a LIVE holder", async () => {
     const agentDir = await makeBackedAgentDir("agent-mc");
     isPidAliveCtx.set(() => true); // holder alive
+    nowMsCtx.set(() => 1000); // op fresh (1000 - 1 < OP_STUCK_TIMEOUT_MS) → still refuse
     await setAgentOperation(agentDir, { kind: "merging", pid: 4242, started_at_ms: 1 });
 
     const calls: string[][] = [];
@@ -6653,6 +6657,7 @@ describe("long-running-op guard", () => {
   test("mergeAgent refuses when a merge_check is in flight with a LIVE holder", async () => {
     const agentDir = await makeBackedAgentDir("agent-mm");
     isPidAliveCtx.set(() => true);
+    nowMsCtx.set(() => 1000); // op fresh → still refuse
     await setAgentOperation(agentDir, { kind: "merge_check", pid: 4242, started_at_ms: 1 });
 
     const calls: string[][] = [];
@@ -6692,6 +6697,59 @@ describe("long-running-op guard", () => {
     // Op cleared in finally (merge-check leaves the dir intact).
     const t = await readAgentTransient(agentDir);
     expect(t?.operation).toBeNull();
+  });
+
+  // ── age reclaim: LIVE holder but op ran past OP_STUCK_TIMEOUT_MS ─────────────
+  //
+  // After a crash + OS PID-reuse, the dead holder's pid can belong to an
+  // unrelated LIVE process, so the liveness check alone would refuse forever
+  // while detectAgentStates paints op_stuck. acquireAgentOperation must match
+  // detect's `holderDead || tooOld` logic: reclaim a live-but-too-old op.
+
+  test("mergeCheckAgent RECLAIMS a LIVE holder whose op is older than OP_STUCK_TIMEOUT_MS", async () => {
+    const agentDir = await makeBackedAgentDir("agent-old");
+    isPidAliveCtx.set(() => true); // holder (or a PID-reused unrelated proc) is alive
+    // Op started long ago; "now" is more than the stuck timeout later → tooOld.
+    await setAgentOperation(agentDir, { kind: "merging", pid: 4242, started_at_ms: 1000 });
+    nowMsCtx.set(() => 1000 + OP_STUCK_TIMEOUT_MS + 1);
+
+    const calls: string[][] = [];
+    const runner = makeMergeRunner(calls);
+    lifecycleSpawnCtx.set(runner);
+    setMergeSpawnRunner(runner);
+
+    const agent = makeAgent("agent-old", tempDir);
+    const result = await mergeCheckAgent(agent);
+
+    // tooOld → reclaimed and proceeded, despite the live holder.
+    expect(result.ok).toBe(true);
+    expect(calls.length).toBeGreaterThan(0); // git work ran
+    const t = await readAgentTransient(agentDir);
+    expect(t?.operation).toBeNull(); // cleared in finally
+  });
+
+  test("mergeCheckAgent still REFUSES a LIVE holder whose op is fresh (within timeout)", async () => {
+    const agentDir = await makeBackedAgentDir("agent-fresh");
+    isPidAliveCtx.set(() => true); // holder alive
+    // Same start time, but "now" is just inside the stuck timeout → NOT tooOld.
+    await setAgentOperation(agentDir, { kind: "merging", pid: 4242, started_at_ms: 1000 });
+    nowMsCtx.set(() => 1000 + OP_STUCK_TIMEOUT_MS - 1);
+
+    const calls: string[][] = [];
+    const runner = makeMergeRunner(calls);
+    lifecycleSpawnCtx.set(runner);
+    setMergeSpawnRunner(runner);
+
+    const agent = makeAgent("agent-fresh", tempDir);
+    const result = await mergeCheckAgent(agent);
+
+    // Live + fresh → refused (no age reclaim).
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("currently merging");
+    expect(calls.length).toBe(0); // refused before any git work
+    // Marker untouched.
+    const t = await readAgentTransient(agentDir);
+    expect(t?.operation).toEqual({ kind: "merging", pid: 4242, started_at_ms: 1000 });
   });
 
   // ── clear-on-success and clear-on-failure ───────────────────────────────────
@@ -6751,6 +6809,7 @@ describe("long-running-op guard", () => {
   test("resumeAgent refuses when an op is in flight with a LIVE holder", async () => {
     const agentDir = await makeBackedAgentDir("agent-res");
     isPidAliveCtx.set(() => true);
+    nowMsCtx.set(() => 1000); // op fresh → still refuse
     await setAgentOperation(agentDir, { kind: "restarting", pid: 4242, started_at_ms: 1 });
 
     // has-session must fail so the tmux-liveness guard would otherwise let
@@ -6810,6 +6869,7 @@ describe("long-running-op guard", () => {
       session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
     }));
     isPidAliveCtx.set(() => true);
+    nowMsCtx.set(() => 1000); // op fresh → still refuse
     await setAgentOperation(agentDir, { kind: "restarting", pid: 4242, started_at_ms: 1 });
 
     let nukeRan = false;

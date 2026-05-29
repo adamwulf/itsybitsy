@@ -13,6 +13,7 @@ import {
   handleOpenDiffTool, getActiveDiffProc, setActiveDiffProc, killActiveDiffProc,
   getDiffToolLaunching, setDiffToolLaunching,
   handleAddPermission, addPermissionToSettings, agentSettingsLocalPath,
+  getCoordinatorSpawnsInFlight, clearCoordinatorSpawnsInFlight,
 } from "./agent-actions";
 import { MIN_LEFT_WIDTH, MAX_LEFT_WIDTH } from "./split-pane";
 import {
@@ -285,6 +286,59 @@ describe("handleResume", () => {
     expect(resumeAttempts).toBe(1);
     expect(notices).toContain("Resuming agent-1…");
     await Bun.sleep(10);
+  });
+
+  // ── coordinator SPAWN double-press guard (UI-layer, FIX 2) ──────────────────
+  //
+  // When no coordinator exists yet there is no agent dir / meta.transient.json,
+  // so the durable op-guard inside resumeAgent() structurally can't cover the
+  // first-time spawn. A small per-repo in-flight set serializes the spawn path
+  // so two rapid 'R' presses don't both newAgent() into the same dir.
+  describe("coordinator-spawn in-flight guard", () => {
+    afterEach(() => {
+      clearCoordinatorSpawnsInFlight();
+    });
+
+    test("double-press only fires one coordinator spawn", async () => {
+      // Non-existent repo path → checkCoordinatorExists() returns exists:false,
+      // so handleResume takes the SPAWN branch (the path the durable guard
+      // can't cover).
+      const repos: RepoEntry[] = [{ path: "/tmp/ib-no-coord-doublepress", name: "my-repo" }];
+      const { ctx } = makeMockCtx({ repoHeader: "my-repo", repos });
+
+      // Hold each executeAndRefresh body pending so the in-flight key stays set
+      // across the second synchronous press (mirrors the real race: the first
+      // press's async spawn hasn't finished when the second press lands).
+      let entered = 0;
+      const pending: Array<() => Promise<void>> = [];
+      ctx.executeAndRefresh = (fn) => {
+        entered++;
+        pending.push(fn); // capture, do NOT run → key stays held
+        return Promise.resolve();
+      };
+
+      handleResume(ctx); // first press: takes the in-flight key, queues the spawn
+      handleResume(ctx); // second press: blocked synchronously by the in-flight key
+
+      // Only the first press entered the spawn path.
+      expect(entered).toBe(1);
+      expect(getCoordinatorSpawnsInFlight().has("repo:/tmp/ib-no-coord-doublepress")).toBe(true);
+    });
+
+    test("in-flight key is released after the spawn body completes", async () => {
+      const repos: RepoEntry[] = [{ path: "/tmp/ib-no-coord-release", name: "my-repo" }];
+      const { ctx } = makeMockCtx({ repoHeader: "my-repo", repos });
+
+      // Run the body to completion (checkCoordinatorExists → exists:false →
+      // newAgent stubbed by the noop spawn runner from beforeEach).
+      ctx.executeAndRefresh = async (fn) => { await fn(); };
+
+      handleResume(ctx);
+      await Bun.sleep(20);
+
+      // finally cleared the key, so the path is open for a subsequent press.
+      expect(getCoordinatorSpawnsInFlight().has("repo:/tmp/ib-no-coord-release")).toBe(false);
+    });
   });
 });
 

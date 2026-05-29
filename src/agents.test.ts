@@ -2668,10 +2668,13 @@ describe("detectAgentStates — operation op-branch", () => {
 
   // THE ORDERING REGRESSION GUARD (the showstopper):
   // A wedged merge KILLS claude_pid before removing the dir. The op-branch
-  // must run ABOVE the claude_pid liveness gate, so an operation set with a
-  // DEAD claude_pid must resolve to op_stuck — NOT stopped. If the op-branch
-  // were placed below the claude_pid gate, this would return "stopped".
-  test("operation set + DEAD claude_pid → op_stuck (NOT stopped)", async () => {
+  // must run ABOVE the claude_pid liveness gate. This case has a DEAD
+  // claude_pid but a LIVE, fresh op holder, so the correct result is the
+  // in-flight `merging` label — NOT `stopped`. If the op-branch were placed
+  // below the claude_pid gate, the dead claude_pid would paint "stopped"
+  // first and the op state would never be reached. (The op_stuck variant —
+  // dead holder — is covered by the next test.)
+  test("operation set + dead claude_pid + live holder → merging, NOT stopped (op-branch runs above the claude_pid gate)", async () => {
     const a = await makeOpAgent("agent-wedged", "99999");
     const now = 10_000_000;
     nowMsCtx.set(() => now);

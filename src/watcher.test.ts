@@ -13,7 +13,20 @@ const mockBuildAgentTree = jest.fn<(agents: Agent[]) => Agent[]>();
 const mockFlattenAgentTree = jest.fn<(roots: Agent[]) => FlatEntry[]>();
 const mockReadPendingQuestions = jest.fn<(repoPath: string) => Promise<PendingQuestion[]>>();
 
+// Capture the REAL ./agents BEFORE mocking, then spread it so every export
+// this test does NOT explicitly override (resolveAgentIcon, writeAgentState,
+// readAgentMeta, …) stays present. bun's mock.module is global and replaces the
+// ENTIRE module, so a partial mock breaks module linking for any code in the
+// load graph that imports a non-listed export — but only when this file is the
+// first to load ./agents (e.g. `bun test src/watcher.test.ts` alone). The full
+// suite hid it because another file imported the real ./agents first. This
+// import runs before mock.module is registered, so it returns the real module
+// (no recursion). Overrides below still win over the spread. Mirrors the
+// real-module-spread pattern in orphan-detection.test.ts.
+const realAgents = await import("./agents");
+
 mock.module("./agents", () => ({
+  ...realAgents,
   readAllAgents: mockReadAllAgents,
   detectAgentStates: mockDetectAgentStates,
   buildAgentTree: mockBuildAgentTree,

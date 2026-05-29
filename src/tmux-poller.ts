@@ -86,6 +86,24 @@ export class TmuxPoller {
     }
   }
 
+  /** True while the interval timer is active (i.e. between start() and stop()). */
+  isRunning(): boolean {
+    return this.running;
+  }
+
+  /**
+   * Resume polling after a stop(). Starts the interval timer and, if a session
+   * is already set, fires an immediate poll so the pane isn't stale for up to
+   * 1s after becoming visible again. No-op if already running.
+   */
+  resume(): void {
+    if (this.running) return;
+    this.start();
+    if (this.tmuxSession) {
+      this.poll();
+    }
+  }
+
   private async poll(): Promise<void> {
     // Snapshot the session before async work to detect agent switches
     const targetSession = this.tmuxSession;

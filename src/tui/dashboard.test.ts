@@ -3806,6 +3806,91 @@ describe("coordinator TmuxPoller (Phase 47c)", () => {
     dashboard.stopPolling();
   });
 
+  test("coordinator poller is paused when the system coordinator is NOT selected", () => {
+    const dashboard = makeDashboard();
+    // No coordinator selected at startup → coordinator pane is off-screen → poller paused
+    dashboard.startPolling();
+    try {
+      expect(dashboard.coordinatorPollerRunning).toBe(false);
+    } finally {
+      dashboard.stopPolling();
+    }
+  });
+
+  test("coordinator poller resumes when the system coordinator is selected, pauses when deselected", () => {
+    const dashboard = makeDashboard();
+    dashboard.startPolling();
+    try {
+      // Select the system coordinator (only entry → auto-selected)
+      const coordList: FlatEntry[] = [makeFlatSystemCoordinator()];
+      dashboard.onUpdate([], coordList, []);
+      expect(dashboard.agentTree.isSystemCoordinatorSelected).toBe(true);
+      // Its TMUX pane is now on screen → poller running
+      expect(dashboard.coordinatorPollerRunning).toBe(true);
+
+      // Switch to a regular agent → coordinator pane off screen → poller paused
+      const agent = makeAgent("agent-x", "/repos/test");
+      const agentList: FlatEntry[] = [makeFlatAgent(agent)];
+      dashboard.onUpdate([agent], agentList, []);
+      expect(dashboard.agentTree.isSystemCoordinatorSelected).toBe(false);
+      expect(dashboard.coordinatorPollerRunning).toBe(false);
+    } finally {
+      dashboard.stopPolling();
+    }
+  });
+
+  test("coordinator poller pauses in DASHBOARD view, resumes in TMUX view", () => {
+    const dashboard = makeDashboard();
+    dashboard.startPolling();
+    try {
+      const coordList: FlatEntry[] = [makeFlatSystemCoordinator()];
+      dashboard.onUpdate([], coordList, []);
+      expect(dashboard.agentTree.isSystemCoordinatorSelected).toBe(true);
+      // Default view is TMUX → poller running
+      expect(dashboard.coordinatorViewMode).toBe("TMUX");
+      expect(dashboard.coordinatorPollerRunning).toBe(true);
+
+      // 'n' toggles to DASHBOARD view — coordinator tmux output is no longer shown
+      dashboard.handleInput("n");
+      expect(dashboard.coordinatorViewMode).toBe("DASHBOARD");
+      expect(dashboard.coordinatorPollerRunning).toBe(false);
+
+      // 'n' again toggles back to TMUX — poller resumes
+      dashboard.handleInput("n");
+      expect(dashboard.coordinatorViewMode).toBe("TMUX");
+      expect(dashboard.coordinatorPollerRunning).toBe(true);
+    } finally {
+      dashboard.stopPolling();
+    }
+  });
+
+  test("repo-coordinator poller stays paused when no repo coordinator is visible", () => {
+    const dashboard = makeDashboard();
+    dashboard.startPolling();
+    try {
+      // Default startup: not in REPO mode, no repo coordinator → poller paused
+      expect(dashboard.repoCoordinatorPollerRunning).toBe(false);
+
+      // Selecting a regular agent keeps it paused (REPO mode not active, no coordinator)
+      const agent = makeAgent("agent-y", "/repos/test");
+      const agentList: FlatEntry[] = [makeFlatAgent(agent)];
+      dashboard.onUpdate([agent], agentList, []);
+      expect(dashboard.rightPane.repoCoordinatorAgent).toBeNull();
+      expect(dashboard.repoCoordinatorPollerRunning).toBe(false);
+
+      // Selecting a repo header with no coordinator agent in REPO mode → still paused
+      const repoHeader = makeFlatRepoHeader("test", "/repos/test", true);
+      const listWithHeader: FlatEntry[] = [repoHeader, makeFlatAgent(agent)];
+      dashboard.onUpdate([agent], listWithHeader, []);
+      dashboard.agentTree.selectByRepoPath("/repos/test");
+      dashboard.onUpdate([agent], listWithHeader, []);
+      expect(dashboard.rightPane.repoCoordinatorAgent).toBeNull();
+      expect(dashboard.repoCoordinatorPollerRunning).toBe(false);
+    } finally {
+      dashboard.stopPolling();
+    }
+  });
+
   test("coordinator pane never renders in sidebar (only in main area when selected)", () => {
     const dashboard = makeDashboard();
     // Simulate coordinator poller delivering output

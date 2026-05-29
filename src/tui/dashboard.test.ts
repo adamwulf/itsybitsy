@@ -735,13 +735,19 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(log).toContain("Agent resumed");
   });
 
-  test("R key does not resume running agents", async () => {
+  test("R key on a running agent attempts resume (defers refusal to liveness check)", async () => {
     await setupDashboardWithAgent("running");
     dashboard.handleInput("R");
+    // The state gate was removed — handleResume no longer blocks a "running"
+    // agent. It shows an immediate "Resuming…" notice synchronously, then
+    // defers the actual refusal decision to resumeAgent()'s tmux-liveness
+    // check. (This fixture mocks has-session→fail, so the resume proceeds.)
+    expect(dashboard.notice).toContain("Resuming");
     await dashboard.flushPendingActions();
-    expect(lastIbCall).toBeNull();
-    // Should show a notice in the header instead
-    expect(dashboard.notice).not.toBeNull();
+    // Resume proceeded: native resume logs to agent.log.
+    const agentDir = join(actionTempDir!, ".ittybitty", "agents", "agent-test");
+    const log = await Bun.file(join(agentDir, "agent.log")).text();
+    expect(log).toContain("Agent resumed");
   });
 
   test("P key opens pause confirm dialog for running agents", async () => {

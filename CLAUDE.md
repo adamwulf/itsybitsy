@@ -151,7 +151,7 @@ Every new feature or fix must be evaluated from these four perspectives before i
 
 ## itsybitsy Implementation Notes
 
-3017 tests across 66 files.
+3019 tests across 66 files.
 
 ### Per-agent message-delivery queue (src/outbox.ts)
 Serializes tmux writes to a single agent so two near-simultaneous sends never interleave their `send-keys -l` chunks + `Enter` into one merged prompt. See SPEC.md §4.1.1 and §8.5.
@@ -160,7 +160,8 @@ Serializes tmux writes to a single agent so two near-simultaneous sends never in
 - **`sendMessage` (ib-commands.ts)**: resolve sender (cwd-detect at ENQUEUE time via `resolveSenderId`) → `enqueueOutbox` → if `hasLiveWatchdog(agentDir)` (fresh `meta.transient.json` `watchdog_pid` within `TRANSIENT_FRESH_MS` + `isPidAliveCtx` alive) return immediately (watchdog drains), else `drainOutbox(...,{steal:true})` inline. Signature/return shape and `sendSpawnCtx`/`sendDelayOverrideMs` hooks unchanged; with no transient file the inline drain produces identical observable spawn calls. `opts.outboxDir` overrides the queue dir (used for the system coordinator, whose queue/lock live in `getCoordinatorHome()`).
 - **`deliverMessage(agent, queued)`**: the single tmux writer — has-session, prefix format (`user.name` read, `BARE_RENDERED_SENTINELS`), chunked `send-keys -l`, length-scaled delay, `Enter`, recipient/sender logging, `writeAgentState("running")`. `drainOutbox` pops one at a time under the lock with a 250 ms settle gap; removes a message only after its `Enter` succeeds (rewrite remainder) — no double-delivery, no loss.
 - **Watchdog (watchdog.ts)**: `runPerAgentWatchdog` drains at the top of every tick AND on an `fs.watch` event (debounced 50 ms, falls back to per-tick if `fs.watch` throws), serialized by a guard flag. Injectable via `setPerAgentDrain`/`resetPerAgentDrain`.
-- **Coordinator/hook paths**: `sendToSystemCoordinator` passes `outboxDir: getCoordinatorHome()`; the dashboard coordinator send dialog routes through it. `hooks/agent-status.ts` routes self-nudge / `notify_manager` through `sendMessage` (`raw: true`).
+- **Coordinator/hook paths**: `sendToSystemCoordinator` passes `outboxDir: getCoordinatorHome()`; BOTH dashboard system-coordinator send paths route through it — the `s`-key dialog (`handleSendToCoordinator`) and the inline coordinator input field (`coordinatorInputField.onSubmit`). `hooks/agent-status.ts` routes self-nudge / `notify_manager` through `sendMessage` (`raw: true`).
+- **Watchdog direct writes**: the watchdog's own bare Enters (rate-limit-bypass, permission auto-accept) bypass `deliverMessage`/the lock, so they're serialized against the fs.watch-driven drain via an in-process `directSessionWriteBusy` guard (drains defer while set). The outbox lock carries an ownership token (`<pid>:<uuid>`) verified on release/steal so a stolen-from holder never deletes the thief's lock.
 
 ### State detection flow
 **Deterministic model (Phase 42 — implemented):**

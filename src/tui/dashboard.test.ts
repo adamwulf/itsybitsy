@@ -4049,22 +4049,59 @@ describe("coordinator input field (Phase 49)", () => {
     expect(dashboard.coordinatorInputField.getText()).toBe("p");
   });
 
-  test("coordinator submit calls sendTmuxKeys", () => {
-    const dashboard = setupCoordinatorDashboard();
-    tabToCoordinator(dashboard);
-    expect(dashboard.focus).toBe("coordinator");
-    dashboard.handleInput("\t"); // pane → input sub-focus
+  test("coordinator submit routes through the coordinator outbox (sendToSystemCoordinator)", async () => {
+    // The inline coordinator input field must NOT write straight to the
+    // ib-coordinator tmux session — it must go through sendToSystemCoordinator
+    // so it shares the coordinator-home outbox queue + per-session lock with
+    // `ib send @system` / watchdog notifications / the `s`-key dialog. We prove
+    // routing by isolating the coordinator home, forcing has-session true, and
+    // asserting a send-keys to IB_COORDINATOR_SESSION lands via the outbox
+    // delivery path.
+    const { setSystemCoordinatorHasSessionFn, resetSystemCoordinatorHasSessionFn } = await import("../index");
+    const { setCoordinatorHome, resetCoordinatorHome, IB_COORDINATOR_SESSION } = await import("../coordinator");
+    const coordHome = await mkdtemp(join(tmpdir(), "dash-coord-home-"));
+    const cfgDir = await mkdtemp(join(tmpdir(), "dash-coord-cfg-"));
+    setUserConfigPath(join(cfgDir, "config.json"));
+    setCoordinatorHome(coordHome);
+    setSystemCoordinatorHasSessionFn(async () => true);
+    const sendKeys: string[][] = [];
+    setSendSpawnRunner((cmd: string[]) => {
+      sendKeys.push(cmd);
+      return makeSpawnResult();
+    });
 
-    // Type message
-    dashboard.handleInput("h");
-    dashboard.handleInput("i");
+    try {
+      const dashboard = setupCoordinatorDashboard();
+      tabToCoordinator(dashboard);
+      expect(dashboard.focus).toBe("coordinator");
+      dashboard.handleInput("\t"); // pane → input sub-focus
 
-    // Tab to send sub-focus, press Enter
-    dashboard.handleInput("\t"); // input → send
-    dashboard.handleInput("\r");
+      dashboard.handleInput("h");
+      dashboard.handleInput("i");
+      dashboard.handleInput("\t"); // input → send
+      dashboard.handleInput("\r");
 
-    // Input should be cleared after submit
-    expect(dashboard.coordinatorInputField.getText()).toBe("");
+      // Input cleared after submit.
+      expect(dashboard.coordinatorInputField.getText()).toBe("");
+
+      await dashboard.flushPendingActions();
+
+      // Delivered to the coordinator session via the outbox drain (raw → no prefix).
+      const literal = sendKeys.find(
+        (c) => c[0] === "tmux" && c[1] === "send-keys" && c[3] === IB_COORDINATOR_SESSION && c[4] === "-l" && c[5] === "--",
+      );
+      expect(literal).toBeDefined();
+      expect(literal![6]).toBe("hi");
+      // And an Enter to the same session.
+      expect(sendKeys.some((c) => c[3] === IB_COORDINATOR_SESSION && c[c.length - 1] === "Enter")).toBe(true);
+    } finally {
+      resetSystemCoordinatorHasSessionFn();
+      resetCoordinatorHome();
+      resetUserConfigPath();
+      resetSendSpawnRunner();
+      await rm(coordHome, { recursive: true, force: true });
+      await rm(cfgDir, { recursive: true, force: true });
+    }
   });
 
   test("syncSelectedAgent switches coordinator input field buffer", () => {

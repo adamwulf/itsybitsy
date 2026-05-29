@@ -25,7 +25,7 @@ import { readConfig, checkDeprecatedConfigKeys } from "../config";
 import { validateAllAgentTypes, ensureAgentTypesDir, listSpawnableTypeNamesSync } from "../agent-types";
 import type { RepoEntry } from "../registry";
 import { AgentWatcher } from "../watcher";
-import { TmuxPoller, hasAttachedClient, sendTmuxKeys, resizeTmuxWindow } from "../tmux-poller";
+import { TmuxPoller, hasAttachedClient, resizeTmuxWindow } from "../tmux-poller";
 import {
   IB_COORDINATOR_SESSION,
   acquireSystemCoordinator,
@@ -674,8 +674,16 @@ export class DashboardComponent implements Component {
       if (!text.trim()) return;
       const sanitized = sanitizeTmuxInput(text.trim());
       this.executeAndRefresh(async () => {
-        const sendResult = await sendTmuxKeys(IB_COORDINATOR_SESSION, sanitized);
-        this.setNotice(sendResult ? "Sent to coordinator" : "Failed to send to coordinator");
+        // Route the inline coordinator input through sendToSystemCoordinator so
+        // it shares the coordinator-home outbox queue + per-session lock with
+        // `ib send @system`, watchdog @system notifications, and the `s`-key
+        // dialog (handleSendToCoordinator) — concurrent writes to the single
+        // ib-coordinator tmux session can no longer interleave. raw=true keeps
+        // the historical verbatim send (no `[sent by ...]` prefix); cwd:"/" so
+        // the sender isn't auto-stamped.
+        const { sendToSystemCoordinator } = await import("../index");
+        const sendResult = await sendToSystemCoordinator(sanitized, { raw: true, cwd: "/" });
+        this.setNotice(sendResult.ok ? "Sent to coordinator" : "Failed to send to coordinator");
       });
     };
     this.coordinatorInputField.onCancel = () => {

@@ -2093,6 +2093,39 @@ describe("runPerAgentWatchdog", () => {
     expect(drainCalls).toBe(3);
   });
 
+  test("never drains while the watchdog is mid permission-prompt Enter (busy guard)", async () => {
+    const { isDirectSessionWriteBusy } = await import("./watchdog");
+    let sawBusyDuringDrain = false;
+    setPerAgentDrain(async (_agent, _agentDir) => {
+      // The guard must ensure a drain is never dispatched while a bare
+      // keystroke write is in flight for this agent.
+      if (isDirectSessionWriteBusy("agent-test1")) sawBusyDuringDrain = true;
+    });
+
+    // Tick 1: permission prompt visible (triggers auto-accept Enter); tick 2:
+    // normal screen; exit after.
+    let captures = 0;
+    setPerAgentCaptureTmux(async (_session: string) => {
+      captures++;
+      if (captures === 1) {
+        return [
+          "New MCP server found in .mcp.json: activepieces",
+          "  Enter to confirm · Esc to cancel",
+        ].join("\n");
+      }
+      return "Claude Code v1.0.0\n[USER TASK]";
+    });
+    setWatchdogSpawnRunner((_cmd, _opts) =>
+      ({ stdout: new ReadableStream(), stderr: new ReadableStream(), exited: Promise.resolve(0) }) as any);
+    let existsChecks = 0;
+    setPerAgentExistsSync((_path: string) => { existsChecks++; return existsChecks <= 3; });
+    setPerAgentReadState(async (_dir: string) => undefined);
+
+    await runPerAgentWatchdog("agent-test1", "/tmp/test");
+
+    expect(sawBusyDuringDrain).toBe(false);
+  });
+
   test("auto-accepts MCP server permissions prompt", async () => {
     const sentKeys: string[][] = [];
     setWatchdogSpawnRunner((cmd, _opts) => {

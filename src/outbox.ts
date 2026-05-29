@@ -187,6 +187,16 @@ export async function deleteAgentOutbox(dir: string): Promise<void> {
 export interface OutboxLock {
   dir: string;
   path: string;
+  /**
+   * Unique ownership token written into the lock file at acquire time.
+   * `releaseOutboxLock` only removes the file when the on-disk token still
+   * matches this — so if our lock was stolen (stale-steal by another process)
+   * and re-created by the thief, our release is a no-op and we never delete the
+   * thief's lock out from under them. Without this, an original holder whose
+   * lock was stolen would delete the new holder's lock, letting a third drainer
+   * acquire concurrently → interleaved/duplicated delivery.
+   */
+  token: string;
 }
 
 export interface AcquireLockOpts {
@@ -208,15 +218,28 @@ export interface AcquireLockOpts {
   now?: () => number;
 }
 
+/** Serialize the holder pid + a unique token into the lock file body. */
+function lockBody(token: string): string {
+  return `${process.pid}:${token}`;
+}
+
+/** Parse the token out of a lock-file body (everything after the first `:`). */
+function tokenFromBody(body: string): string {
+  const idx = body.indexOf(":");
+  return idx >= 0 ? body.slice(idx + 1) : body;
+}
+
 /**
  * Acquire the per-session advisory delivery lock via exclusive file creation
  * (O_CREAT|O_EXCL). On EEXIST the lock is held by someone else; retry with
- * backoff up to `timeoutMs`. Writes the holder pid into the lock file for
- * debuggability. Returns the lock handle on success, or null on timeout.
+ * backoff up to `timeoutMs`. Writes `<pid>:<token>` into the lock file (token
+ * for ownership verification on release, pid for debuggability). Returns the
+ * lock handle on success, or null on timeout.
  *
  * Stealing: when `steal` is set and the existing lock's mtime is older than
  * `staleMs`, the stale lock is removed and re-created. This is the inline
- * fallback's safety valve against a crashed holder.
+ * fallback's safety valve against a crashed holder. The token (verified on
+ * release) ensures a stolen-from holder never deletes the thief's lock.
  */
 export async function acquireOutboxLock(dir: string, opts?: AcquireLockOpts): Promise<OutboxLock | null> {
   const path = outboxLockPath(dir);
@@ -230,14 +253,15 @@ export async function acquireOutboxLock(dir: string, opts?: AcquireLockOpts): Pr
   // First attempt is unconditional; subsequent attempts are gated on the
   // deadline so a timeoutMs of 0 still tries exactly once.
   for (;;) {
+    const token = crypto.randomUUID();
     try {
       const handle = await open(path, "wx");
       try {
-        await handle.writeFile(String(process.pid));
+        await handle.writeFile(lockBody(token));
       } finally {
         await handle.close();
       }
-      return { dir, path };
+      return { dir, path, token };
     } catch (err: unknown) {
       const code = (err as { code?: string })?.code;
       if (code !== "EEXIST") {
@@ -249,11 +273,19 @@ export async function acquireOutboxLock(dir: string, opts?: AcquireLockOpts): Pr
         try {
           const st = await stat(path);
           if (now() - st.mtimeMs > staleMs) {
+            // Steal: read the current token so we only remove the lock we
+            // observed as stale (don't unlink a fresh lock a third party may
+            // have just created in the race window). The subsequent O_EXCL
+            // open is the real arbiter — a racing stealer loses with EEXIST
+            // and retries.
+            let staleToken: string | null = null;
             try {
-              await unlink(path);
+              staleToken = tokenFromBody(await readFile(path, "utf-8"));
             } catch {
-              /* someone else may have just released/stolen it — fall through to retry */
+              /* lock vanished — retry immediately */
+              continue;
             }
+            await unlinkIfToken(path, staleToken);
             continue; // retry immediately after steal attempt
           }
         } catch {
@@ -267,12 +299,32 @@ export async function acquireOutboxLock(dir: string, opts?: AcquireLockOpts): Pr
   }
 }
 
-/** Release a held lock by removing the lock file. Best-effort. */
+/**
+ * Remove the lock file ONLY if its on-disk token still matches `token`. This
+ * is the ownership guard shared by release and steal: it prevents deleting a
+ * lock that has since been re-created by a different holder.
+ */
+async function unlinkIfToken(path: string, token: string): Promise<void> {
+  try {
+    const body = await readFile(path, "utf-8");
+    if (tokenFromBody(body) !== token) return; // not our lock anymore — leave it
+  } catch {
+    return; // already gone
+  }
+  try {
+    await unlink(path);
+  } catch {
+    /* raced with another release/steal — fine */
+  }
+}
+
+/**
+ * Release a held lock — removes the lock file only when the on-disk token still
+ * matches the handle's token (i.e. we still hold it). If our lock was stolen
+ * and re-created by another process, this is a no-op so we never delete the new
+ * holder's lock. Best-effort.
+ */
 export async function releaseOutboxLock(lock: OutboxLock | null): Promise<void> {
   if (!lock) return;
-  try {
-    await unlink(lock.path);
-  } catch {
-    /* already removed (e.g. stolen) — fine */
-  }
+  await unlinkIfToken(lock.path, lock.token);
 }

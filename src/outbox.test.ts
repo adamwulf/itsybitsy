@@ -118,11 +118,13 @@ describe("outbox lock", () => {
     await rm(dir, { recursive: true, force: true });
   });
 
-  test("acquire succeeds when unlocked and writes holder pid", async () => {
+  test("acquire succeeds when unlocked and writes <pid>:<token>", async () => {
     const lock = await acquireOutboxLock(dir);
     expect(lock).not.toBeNull();
     const content = await readFile(outboxLockPath(dir), "utf-8");
-    expect(content).toBe(String(process.pid));
+    // Body is `<pid>:<token>`; the token is recorded on the handle.
+    expect(content).toBe(`${process.pid}:${lock!.token}`);
+    expect(lock!.token.length).toBeGreaterThan(0);
     await releaseOutboxLock(lock);
     expect(await Bun.file(outboxLockPath(dir)).exists()).toBe(false);
   });
@@ -158,8 +160,8 @@ describe("outbox lock", () => {
       now: () => future,
     });
     expect(lock).not.toBeNull();
-    // The lock now records our pid (stolen + recreated).
-    expect(await readFile(outboxLockPath(dir), "utf-8")).toBe(String(process.pid));
+    // The lock now records our pid + a fresh token (stolen + recreated).
+    expect(await readFile(outboxLockPath(dir), "utf-8")).toBe(`${process.pid}:${lock!.token}`);
     await releaseOutboxLock(lock);
   });
 
@@ -178,6 +180,36 @@ describe("outbox lock", () => {
     expect(lock).toBeNull();
     // Original holder pid untouched.
     expect(await readFile(outboxLockPath(dir), "utf-8")).toBe("99999");
+  });
+
+  test("release after a steal does NOT delete the thief's lock (ownership token)", async () => {
+    // Reproduces the reviewer's hole: holder A acquires; A's lock goes stale;
+    // B steals it (re-creates with B's token); A then releases. A's release
+    // must be a no-op (token mismatch) so B's lock survives — otherwise a third
+    // drainer could acquire while B is still delivering → interleave.
+    const a = await acquireOutboxLock(dir);
+    expect(a).not.toBeNull();
+    const aStat = await stat(outboxLockPath(dir));
+
+    // B steals A's (now-stale) lock.
+    const b = await acquireOutboxLock(dir, {
+      steal: true,
+      staleMs: 30_000,
+      timeoutMs: 1000,
+      backoffMs: 1,
+      now: () => aStat.mtimeMs + 60_000,
+    });
+    expect(b).not.toBeNull();
+    expect(b!.token).not.toBe(a!.token);
+
+    // A releases — must leave B's lock intact.
+    await releaseOutboxLock(a);
+    expect(await Bun.file(outboxLockPath(dir)).exists()).toBe(true);
+    expect(await readFile(outboxLockPath(dir), "utf-8")).toBe(`${process.pid}:${b!.token}`);
+
+    // B's own release removes it.
+    await releaseOutboxLock(b);
+    expect(await Bun.file(outboxLockPath(dir)).exists()).toBe(false);
   });
 
   test("releaseOutboxLock(null) is a no-op", async () => {

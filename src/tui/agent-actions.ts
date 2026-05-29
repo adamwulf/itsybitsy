@@ -18,7 +18,7 @@ import {
   installInterceptHook, uninstallInterceptHook,
 } from "../ib-commands";
 import type { NewAgentOptions, IbCommandResult } from "../ib-commands";
-import { captureTmuxOutput, resizeTmuxWindow, killTmuxSession, sendTmuxKeys, sendTmuxEscape } from "../tmux-poller";
+import { captureTmuxOutput, resizeTmuxWindow, killTmuxSession, sendTmuxEscape } from "../tmux-poller";
 import { parseState } from "../parse-state";
 import { openInGhostty, openPathInGhostty } from "../ghostty";
 import { buildFolderItems } from "./folder-browser";
@@ -612,8 +612,15 @@ function handleSendToCoordinator(ctx: ActionCtx) {
       if (!message.trim()) { ctx.setNotice("Send cancelled"); return; }
       const sanitized = sanitizeTmuxInput(message.trim());
       ctx.executeAndRefresh(async () => {
-        const sendResult = await sendTmuxKeys(IB_COORDINATOR_SESSION, sanitized);
-        ctx.setNotice(sendResult ? "Sent to coordinator" : "Failed to send to coordinator");
+        // Route through sendToSystemCoordinator so this send shares the
+        // coordinator-home outbox queue + per-session lock with `ib send
+        // @system` and watchdog `@system` notifications — concurrent writes to
+        // the single `ib-coordinator` tmux session can no longer interleave.
+        // raw=true preserves the historical verbatim send (no `[sent by ...]`
+        // prefix). cwd:"/" so the sender isn't auto-stamped.
+        const { sendToSystemCoordinator } = await import("../index");
+        const sendResult = await sendToSystemCoordinator(sanitized, { raw: true, cwd: "/" });
+        ctx.setNotice(sendResult.ok ? "Sent to coordinator" : "Failed to send to coordinator");
       });
     },
   });

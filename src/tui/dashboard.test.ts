@@ -514,6 +514,10 @@ describe("DashboardComponent dialog and action handlers", () => {
 
   let actionTempDir: string | null = null;
   let configTempDir: string;
+  // Writable repo root for send tests: sendMessage now ENQUEUES to the agent's
+  // outbox.jsonl under <repoPath>/.ittybitty/agents/<id>/, so send targets need
+  // a real (writable) repoPath rather than a synthetic /repos/... path.
+  let sendRepoDir: string;
 
   beforeEach(async () => {
     // Isolate user config — sendMessage reads `user.name` to format
@@ -522,6 +526,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     // would break if user.name is set.
     configTempDir = await mkdtemp(join(tmpdir(), "dashboard-config-"));
     setUserConfigPath(join(configTempDir, "config.json"));
+    sendRepoDir = await mkdtemp(join(tmpdir(), "dashboard-send-"));
   });
 
   async function setupDashboardWithAgent(state = "running") {
@@ -589,6 +594,7 @@ describe("DashboardComponent dialog and action handlers", () => {
       actionTempDir = null;
     }
     await rm(configTempDir, { recursive: true, force: true });
+    await rm(sendRepoDir, { recursive: true, force: true });
   });
 
   test("x key opens kill confirm dialog with button UI", async () => {
@@ -1072,13 +1078,13 @@ describe("DashboardComponent dialog and action handlers", () => {
     dashboard = makeDashboard();
     setupSendMock();
 
-    const agent1 = makeAgent("agent-a", "/repos/test");
+    const agent1 = makeAgent("agent-a", sendRepoDir);
     agent1.state = "running";
-    const agent2 = makeAgent("agent-b", "/repos/test");
+    const agent2 = makeAgent("agent-b", sendRepoDir);
     agent2.state = "running";
-    const agent3 = makeAgent("agent-c", "/repos/test");
+    const agent3 = makeAgent("agent-c", sendRepoDir);
     agent3.archived = true; // should be skipped
-    const agent4 = makeAgent("agent-d", "/repos/test");
+    const agent4 = makeAgent("agent-d", sendRepoDir);
     agent4.meta.tmux_session = ""; // no tmux session, should be skipped
     const flatList: FlatEntry[] = [
       makeFlatAgent(agent1),
@@ -1107,9 +1113,9 @@ describe("DashboardComponent dialog and action handlers", () => {
     dashboard = makeDashboard();
     setupSendMock();
 
-    const agent1 = makeAgent("agent-a", "/repos/test");
+    const agent1 = makeAgent("agent-a", sendRepoDir);
     agent1.state = "running";
-    const agent2 = makeAgent("agent-b", "/repos/test");
+    const agent2 = makeAgent("agent-b", sendRepoDir);
     agent2.state = "running";
     const flatList: FlatEntry[] = [
       makeFlatAgent(agent1),
@@ -1506,6 +1512,9 @@ describe("DashboardComponent dialog and action handlers", () => {
 describe("Cross-repo send (E key)", () => {
   let dashboard: DashboardComponent;
   let sentMessages: { target: string; message: string }[] = [];
+  // Writable repo root for the full-flow send test — sendMessage enqueues to
+  // the target's outbox.jsonl, so the send target needs a real repoPath.
+  let sendRepoDir: string;
 
   function setupSendMock() {
     sentMessages = [];
@@ -1517,8 +1526,13 @@ describe("Cross-repo send (E key)", () => {
     });
   }
 
-  afterEach(() => {
+  beforeEach(async () => {
+    sendRepoDir = await mkdtemp(join(tmpdir(), "dashboard-esend-"));
+  });
+
+  afterEach(async () => {
     resetSendSpawnRunner();
+    await rm(sendRepoDir, { recursive: true, force: true });
   });
 
   test("E key no-op with single repo", () => {
@@ -1644,15 +1658,17 @@ describe("Cross-repo send (E key)", () => {
   test("E key full flow calls sendMessage with correct args", async () => {
     dashboard = makeDashboard();
     setupSendMock();
-    const agentA = makeAgent("agent-a", "/repos/alpha");
+    const alphaPath = join(sendRepoDir, "alpha");
+    const betaPath = join(sendRepoDir, "beta");
+    const agentA = makeAgent("agent-a", alphaPath);
     setAgentState(agentA, "running");
     agentA.repoName = "alpha";
-    const agentB = makeAgent("agent-b", "/repos/beta");
+    const agentB = makeAgent("agent-b", betaPath);
     setAgentState(agentB, "running");
     agentB.repoName = "beta";
     dashboard.setRepos([
-      { path: "/repos/alpha", name: "alpha" },
-      { path: "/repos/beta", name: "beta" },
+      { path: alphaPath, name: "alpha" },
+      { path: betaPath, name: "beta" },
     ]);
     dashboard.onUpdate([agentA, agentB], [makeFlatAgent(agentA), makeFlatAgent(agentB)], []);
 
@@ -4033,22 +4049,59 @@ describe("coordinator input field (Phase 49)", () => {
     expect(dashboard.coordinatorInputField.getText()).toBe("p");
   });
 
-  test("coordinator submit calls sendTmuxKeys", () => {
-    const dashboard = setupCoordinatorDashboard();
-    tabToCoordinator(dashboard);
-    expect(dashboard.focus).toBe("coordinator");
-    dashboard.handleInput("\t"); // pane → input sub-focus
+  test("coordinator submit routes through the coordinator outbox (sendToSystemCoordinator)", async () => {
+    // The inline coordinator input field must NOT write straight to the
+    // ib-coordinator tmux session — it must go through sendToSystemCoordinator
+    // so it shares the coordinator-home outbox queue + per-session lock with
+    // `ib send @system` / watchdog notifications / the `s`-key dialog. We prove
+    // routing by isolating the coordinator home, forcing has-session true, and
+    // asserting a send-keys to IB_COORDINATOR_SESSION lands via the outbox
+    // delivery path.
+    const { setSystemCoordinatorHasSessionFn, resetSystemCoordinatorHasSessionFn } = await import("../index");
+    const { setCoordinatorHome, resetCoordinatorHome, IB_COORDINATOR_SESSION } = await import("../coordinator");
+    const coordHome = await mkdtemp(join(tmpdir(), "dash-coord-home-"));
+    const cfgDir = await mkdtemp(join(tmpdir(), "dash-coord-cfg-"));
+    setUserConfigPath(join(cfgDir, "config.json"));
+    setCoordinatorHome(coordHome);
+    setSystemCoordinatorHasSessionFn(async () => true);
+    const sendKeys: string[][] = [];
+    setSendSpawnRunner((cmd: string[]) => {
+      sendKeys.push(cmd);
+      return makeSpawnResult();
+    });
 
-    // Type message
-    dashboard.handleInput("h");
-    dashboard.handleInput("i");
+    try {
+      const dashboard = setupCoordinatorDashboard();
+      tabToCoordinator(dashboard);
+      expect(dashboard.focus).toBe("coordinator");
+      dashboard.handleInput("\t"); // pane → input sub-focus
 
-    // Tab to send sub-focus, press Enter
-    dashboard.handleInput("\t"); // input → send
-    dashboard.handleInput("\r");
+      dashboard.handleInput("h");
+      dashboard.handleInput("i");
+      dashboard.handleInput("\t"); // input → send
+      dashboard.handleInput("\r");
 
-    // Input should be cleared after submit
-    expect(dashboard.coordinatorInputField.getText()).toBe("");
+      // Input cleared after submit.
+      expect(dashboard.coordinatorInputField.getText()).toBe("");
+
+      await dashboard.flushPendingActions();
+
+      // Delivered to the coordinator session via the outbox drain (raw → no prefix).
+      const literal = sendKeys.find(
+        (c) => c[0] === "tmux" && c[1] === "send-keys" && c[3] === IB_COORDINATOR_SESSION && c[4] === "-l" && c[5] === "--",
+      );
+      expect(literal).toBeDefined();
+      expect(literal![6]).toBe("hi");
+      // And an Enter to the same session.
+      expect(sendKeys.some((c) => c[3] === IB_COORDINATOR_SESSION && c[c.length - 1] === "Enter")).toBe(true);
+    } finally {
+      resetSystemCoordinatorHasSessionFn();
+      resetCoordinatorHome();
+      resetUserConfigPath();
+      resetSendSpawnRunner();
+      await rm(coordHome, { recursive: true, force: true });
+      await rm(cfgDir, { recursive: true, force: true });
+    }
   });
 
   test("syncSelectedAgent switches coordinator input field buffer", () => {

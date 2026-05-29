@@ -732,17 +732,27 @@ describe("sendToSystemCoordinator", () => {
     // in the developer's ~/.itsybitsy/config.json (e.g. if user.name is set
     // the `[sent by user]` prefix asserts would break).
     setUserConfigPath(join(tempDir, "config.json"));
+    // Isolate the coordinator home — sendToSystemCoordinator now enqueues to
+    // (and drains from) an outbox.jsonl + .outbox.lock in the coordinator home.
+    // Without isolation these tests would write into the developer's real
+    // ~/.itsybitsy/. Use a SUBDIR distinct from `cwd: tempDir` so the
+    // sender-from-cwd auto-detection does not mis-stamp the human send as
+    // @system (it would if cwd === coordinatorHome).
+    const { setCoordinatorHome } = await import("./coordinator");
+    setCoordinatorHome(join(tempDir, "coord-home"));
     setSendSpawnRunner((cmd: string[]) => {
       spawnCalls.push(cmd);
       return makeSpawnResult();
     });
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     resetSendSpawnRunner();
     resetUserConfigPath();
     resetSystemCoordinatorHasSessionFn();
-    return rm(tempDir, { recursive: true, force: true });
+    const { resetCoordinatorHome } = await import("./coordinator");
+    resetCoordinatorHome();
+    await rm(tempDir, { recursive: true, force: true });
   });
 
   test("returns error and does not invoke sendMessage when coordinator session is not running", async () => {

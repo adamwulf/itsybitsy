@@ -38,6 +38,8 @@ import {
   resetPerAgentSleep,
   setPerAgentReadState,
   resetPerAgentReadState,
+  setPerAgentDrain,
+  resetPerAgentDrain,
   setWatchdogSleep,
   resetWatchdogSleep,
   setWatchdogCaptureTmux,
@@ -2045,6 +2047,10 @@ describe("runPerAgentWatchdog", () => {
     setPerAgentSleep(async () => {});
     // Stub sendMessage spawn runner to no-op
     setSendSpawnRunner(() => ({ stdout: "", exitCode: 0 }) as any);
+    // No-op outbox drain — keeps the per-agent watchdog tests off the real FS
+    // (default drainOutbox would touch /tmp/test). Per-drain assertions set
+    // their own spy.
+    setPerAgentDrain(async () => {});
     // Disable auto-compact
     setWatchdogReadConfig(async () => ({} as any));
     // Module-level snapshot cache survives across tests; clear so
@@ -2062,7 +2068,90 @@ describe("runPerAgentWatchdog", () => {
     resetWatchdogReadConfig();
     resetWatchdogSpawnRunner();
     resetPerAgentReadState();
+    resetPerAgentDrain();
     clearAllAgentsCache();
+  });
+
+  test("drains the outbox at the top of each poll tick", async () => {
+    let drainCalls = 0;
+    setPerAgentDrain(async (agent, agentDir) => {
+      drainCalls++;
+      expect(agent.id).toBe("agent-test1");
+      expect(agentDir).toBe("/tmp/test/.ittybitty/agents/agent-test1");
+    });
+    // Exit after 3 ticks via existsSync.
+    let existsChecks = 0;
+    setPerAgentExistsSync((_path: string) => {
+      existsChecks++;
+      return existsChecks <= 3;
+    });
+    setPerAgentReadState(async (_dir: string) => undefined);
+
+    await runPerAgentWatchdog("agent-test1", "/tmp/test");
+
+    // One drain per tick (3 ticks before the worktree-gone exit).
+    expect(drainCalls).toBe(3);
+  });
+
+  test("runSessionExclusive serializes overlapping critical sections (both directions)", async () => {
+    // The session-write mutex must guarantee a drain and a bare watchdog Enter
+    // (or any two session writes) never overlap, in EITHER arrival order. We
+    // launch two critical sections concurrently for the same agent; each marks
+    // a shared `active` counter on entry and clears it on exit, with an await in
+    // between so an unguarded pair WOULD overlap. The mutex must keep `active`
+    // from ever exceeding 1, and the sections must run in arrival (FIFO) order.
+    const { runSessionExclusive } = await import("./watchdog");
+    let active = 0;
+    let maxActive = 0;
+    const order: string[] = [];
+    const section = (label: string) => async () => {
+      active++;
+      maxActive = Math.max(maxActive, active);
+      order.push(`${label}:enter`);
+      await new Promise((r) => setTimeout(r, 5)); // yield — overlap window
+      order.push(`${label}:exit`);
+      active--;
+    };
+
+    await Promise.all([
+      runSessionExclusive("agent-mx", section("A")),
+      runSessionExclusive("agent-mx", section("B")),
+    ]);
+
+    expect(maxActive).toBe(1); // never overlapped
+    // FIFO: A fully completes before B starts.
+    expect(order).toEqual(["A:enter", "A:exit", "B:enter", "B:exit"]);
+  });
+
+  test("runSessionExclusive for DIFFERENT agents may overlap (no cross-agent block)", async () => {
+    const { runSessionExclusive } = await import("./watchdog");
+    let active = 0;
+    let maxActive = 0;
+    const section = () => async () => {
+      active++;
+      maxActive = Math.max(maxActive, active);
+      await new Promise((r) => setTimeout(r, 5));
+      active--;
+    };
+    await Promise.all([
+      runSessionExclusive("agent-one", section()),
+      runSessionExclusive("agent-two", section()),
+    ]);
+    // Different keys → genuinely concurrent (the global tick() path must not
+    // cross-block unrelated agents).
+    expect(maxActive).toBe(2);
+  });
+
+  test("runSessionExclusive: a throwing section does not poison the mutex", async () => {
+    const { runSessionExclusive, isSessionWriteBusy } = await import("./watchdog");
+    await expect(
+      runSessionExclusive("agent-err", async () => { throw new Error("boom"); }),
+    ).rejects.toThrow("boom");
+    // Next acquirer still runs, and the mutex reports idle afterward.
+    let ran = false;
+    await runSessionExclusive("agent-err", async () => { ran = true; });
+    expect(ran).toBe(true);
+    expect(isSessionWriteBusy("agent-err")).toBe(false);
   });
 
   test("auto-accepts MCP server permissions prompt", async () => {

@@ -19,7 +19,17 @@ import {
   readAgentTransient,
   setAgentOperation,
   clearAgentOperation,
+  TRANSIENT_FRESH_MS,
 } from "./agents";
+import {
+  enqueueOutbox,
+  readOutbox,
+  rewriteOutboxRemoving,
+  acquireOutboxLock,
+  releaseOutboxLock,
+  type OutboxMessage,
+  type AcquireLockOpts,
+} from "./outbox";
 import {
   logAgent,
   logSpawn,
@@ -1572,31 +1582,59 @@ export function resetSendSpawnRunner(): void {
 }
 
 /**
- * Send a message to an agent's tmux session (native implementation).
+ * Resolve the sender ID for a send, performing cwd-based auto-detection.
  *
- * Steps:
- * 1. Read tmux_session from agent meta
- * 2. Verify tmux session exists
- * 3. Auto-detect sender from cwd if applicable (agent worktree → agent ID;
- *    system coordinator home → `@system` sentinel)
- * 4. Format message with [sent by ...] prefix if sender detected
- *    (`agent <id>` for real agent IDs, bare sentinel for `@`-prefixed senders)
- * 5. Calculate delay: 0.1 + (msg_len / 100) * 0.5, clamped to [0.2, 3.0]
- * 6. Send via tmux send-keys, sleep, Enter
- * 7. Log to recipient's agent.log
- *
- * When `opts.raw` is true, the `[sent by ...]:` prefix is suppressed and the
- * message is delivered verbatim. The recipient's agent.log records this as a
- * "Received raw message" line (no sender attribution) and the sender's
- * agent.log (if any) records "Sent raw message". Sender auto-detection is
- * still performed so the sender log line is reachable, but the prefix never
- * lands on the recipient pane.
+ * This MUST happen at ENQUEUE time (not drain time): it depends on the SENDER
+ * process's `opts.cwd`/`process.cwd()`, which is gone by the time a watchdog
+ * drains the queue. The resolved id (real agent id, `@system` sentinel, or ""
+ * for the human user) is stored in the queued record.
  */
-export async function sendMessage(
-  agent: Agent,
-  message: string,
-  opts?: { fromAgent?: string; cwd?: string; raw?: boolean }
-): Promise<IbCommandResult> {
+function resolveSenderId(agentRepoPath: string, opts?: { fromAgent?: string; cwd?: string }): string {
+  let fromId = opts?.fromAgent ?? "";
+  if (fromId) return fromId;
+
+  const cwd = opts?.cwd ?? process.cwd();
+  const worktreeMatch = cwd.match(/\/.ittybitty\/agents\/(?:[^/]+)\/repo/);
+  if (worktreeMatch) {
+    // Read the sender's meta.json to get their ID (synchronously here is fine —
+    // this runs at enqueue time in the sender process).
+    const senderAgentDir = cwd.replace(/(\/\.ittybitty\/agents\/[^/]+)\/repo.*/, "$1");
+    try {
+      const senderMeta = JSON.parse(require("fs").readFileSync(join(senderAgentDir, "meta.json"), "utf-8"));
+      if (senderMeta?.id) fromId = senderMeta.id;
+    } catch { /* ignore */ }
+  } else {
+    // System coordinator runs from ~/.itsybitsy/ — no worktree match.
+    // If cwd is the coordinator home (or under it), stamp as @system.
+    // Both paths are compared as raw strings (no realpath resolution): we
+    // assume process.cwd() and getCoordinatorHome() return paths in the
+    // same un-resolved form. If $HOME is itself a symlink and a caller
+    // resolved it before chdir'ing, this match would silently miss — in
+    // practice the coordinator session is launched with an un-resolved
+    // home so the assumption holds.
+    const coordHome = getCoordinatorHome();
+    if (cwd === coordHome || cwd.startsWith(coordHome + "/")) {
+      fromId = "@system";
+    }
+  }
+  return fromId;
+}
+
+/**
+ * Deliver ONE queued message to an agent's tmux session — the single tmux
+ * writer. This is the exact body the historical `sendMessage` ran for one
+ * message: has-session check, sender-prefix formatting (including the
+ * `user.name` config read), chunked `send-keys -l`, inter-chunk sleep,
+ * length-scaled delay, `Enter`, recipient/sender logging, `writeAgentState`.
+ *
+ * Callers (the watchdog drain and the inline fallback) hold the per-session
+ * delivery lock for the whole batch, so two `send-keys`/`Enter` sequences to
+ * the same session can never interleave.
+ *
+ * Returns an IbCommandResult so callers can propagate failures. On failure the
+ * message is NOT removed from the outbox (no message loss).
+ */
+export async function deliverMessage(agent: Agent, queued: OutboxMessage): Promise<IbCommandResult> {
   const tmuxSession = agent.meta.tmux_session;
   if (!tmuxSession) {
     return { ok: false, exitCode: 1, stdout: "", stderr: "Agent has no tmux session" };
@@ -1613,33 +1651,8 @@ export async function sendMessage(
     return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' is not running` };
   }
 
-  // Auto-detect sender from cwd
-  let fromId = opts?.fromAgent ?? "";
-  if (!fromId) {
-    const cwd = opts?.cwd ?? process.cwd();
-    const worktreeMatch = cwd.match(/\/.ittybitty\/agents\/(?:[^/]+)\/repo/);
-    if (worktreeMatch) {
-      // Read the sender's meta.json to get their ID
-      const senderAgentDir = cwd.replace(/(\/\.ittybitty\/agents\/[^/]+)\/repo.*/, "$1");
-      try {
-        const senderMeta = await Bun.file(join(senderAgentDir, "meta.json")).json();
-        if (senderMeta?.id) fromId = senderMeta.id;
-      } catch { /* ignore */ }
-    } else {
-      // System coordinator runs from ~/.itsybitsy/ — no worktree match.
-      // If cwd is the coordinator home (or under it), stamp as @system.
-      // Both paths are compared as raw strings (no realpath resolution): we
-      // assume process.cwd() and getCoordinatorHome() return paths in the
-      // same un-resolved form. If $HOME is itself a symlink and a caller
-      // resolved it before chdir'ing, this match would silently miss — in
-      // practice the coordinator session is launched with an un-resolved
-      // home so the assumption holds.
-      const coordHome = getCoordinatorHome();
-      if (cwd === coordHome || cwd.startsWith(coordHome + "/")) {
-        fromId = "@system";
-      }
-    }
-  }
+  const fromId = queued.fromAgent;
+  const message = queued.message;
 
   // Format message with sender prefix. `@`-prefixed sender IDs (e.g. @system)
   // are sentinels, not agent IDs, so omit the literal "agent " word for them.
@@ -1652,7 +1665,7 @@ export async function sendMessage(
   // etc.) — prefix as a user send so the recipient can distinguish user vs
   // agent messages. Raw mode (used by Telegram slash-command passthrough)
   // skips the prefix entirely — the recipient pane sees the message verbatim.
-  const raw = opts?.raw === true;
+  const raw = queued.raw === true;
   let fullMessage = message;
   let userLabel = "";
   if (!raw) {
@@ -1737,6 +1750,156 @@ export async function sendMessage(
 
   const stdout = fromId ? "" : `Sent to ${agent.id}`;
   return { ok: true, exitCode: 0, stdout, stderr: "" };
+}
+
+/** Settle gap between consecutive messages in one drain so they land as distinct prompts. */
+const DRAIN_SETTLE_GAP_MS = 250;
+
+/**
+ * Drain the outbox for `agent` under the per-session lock: pop queued messages
+ * one at a time and `deliverMessage` each, with a short settle gap between
+ * consecutive messages so they land as DISTINCT prompts.
+ *
+ * Correctness guarantees:
+ *   - Only the lock holder delivers, so two drains can never interleave their
+ *     `send-keys`/`Enter` sequences to the same session.
+ *   - A delivered message is removed from the outbox only AFTER its Enter
+ *     succeeds and it is logged (the rewrite happens after `deliverMessage`
+ *     returns ok), so a crash mid-batch never redelivers an earlier message.
+ *   - On delivery failure the message REMAINS in the outbox and the drain
+ *     stops (it will be retried on the next tick / call). No message loss.
+ *
+ * `lockOpts.steal` is set by the inline fallback so a crashed holder can't
+ * wedge delivery; the watchdog leaves it false and simply retries next tick.
+ * Returns the IbCommandResult of the FIRST delivered message (so the inline
+ * `sendMessage` path can return the historical success/failure shape), or a
+ * synthetic ok result when the queue was empty / lock unavailable.
+ */
+export async function drainOutbox(
+  agent: Agent,
+  dir: string,
+  lockOpts?: AcquireLockOpts,
+): Promise<IbCommandResult> {
+  const lock = await acquireOutboxLock(dir, lockOpts);
+  if (!lock) {
+    // Could not acquire — messages stay enqueued, another drainer will get them.
+    return { ok: true, exitCode: 0, stdout: `Sent to ${agent.id}`, stderr: "" };
+  }
+
+  const delivered = new Set<string>();
+  let firstResult: IbCommandResult | null = null;
+  try {
+    const batch = await readOutbox(dir);
+    for (let i = 0; i < batch.length; i++) {
+      const queued = batch[i]!;
+      const settleGap = sendDelayOverrideMs !== null ? sendDelayOverrideMs : DRAIN_SETTLE_GAP_MS;
+      if (i > 0 && settleGap > 0) await Bun.sleep(settleGap);
+
+      const result = await deliverMessage(agent, queued);
+      if (firstResult === null) firstResult = result;
+      if (!result.ok) {
+        // Stop the drain — leave this message (and the rest) enqueued.
+        break;
+      }
+      delivered.add(queued.id);
+      // Remove just-delivered messages now, before delivering the next one, so
+      // a crash mid-batch never redelivers an already-sent message.
+      await rewriteOutboxRemoving(dir, delivered);
+    }
+  } finally {
+    await releaseOutboxLock(lock);
+  }
+
+  return firstResult ?? { ok: true, exitCode: 0, stdout: `Sent to ${agent.id}`, stderr: "" };
+}
+
+/**
+ * Detect whether a live watchdog is going to drain this agent's outbox. A
+ * watchdog is "live" when meta.transient.json records a watchdog_pid that is
+ * fresh (updated within TRANSIENT_FRESH_MS) and whose process is alive.
+ */
+async function hasLiveWatchdog(agentDir: string): Promise<boolean> {
+  const transient = await readAgentTransient(agentDir);
+  if (!transient) return false;
+  const fresh = transient.updated_at_ms > 0 && Date.now() - transient.updated_at_ms < TRANSIENT_FRESH_MS;
+  if (!fresh) return false;
+  return isPidAliveCtx.fn(transient.watchdog_pid);
+}
+
+/**
+ * Send a message to an agent's tmux session (native implementation).
+ *
+ * Behavior (per the per-agent outbox design):
+ * 1. Resolve the sender id via cwd auto-detection (must happen here, in the
+ *    sender process — see `resolveSenderId`).
+ * 2. ENQUEUE the message to the agent's `outbox.jsonl`.
+ * 3. If a live watchdog exists, RETURN immediately — the watchdog drains the
+ *    queue under the per-session lock. Otherwise drain inline under the lock
+ *    (the sender becomes the drainer for this batch). This preserves the
+ *    historical behavior of `ib send` to a stopped/complete agent (which
+ *    restarts it) and the coordinator path.
+ *
+ * The public signature and return shape are unchanged: returns an
+ * IbCommandResult with `stdout === "Sent to <id>"` when no sender is set and
+ * `""` when a sender is set, so existing tests and callers keep working. When
+ * no transient file exists (the common unit-test scenario), the inline drain
+ * delivers synchronously within this call, producing the SAME observable tmux
+ * spawn calls in the SAME order as before this refactor.
+ *
+ * When `opts.raw` is true, the `[sent by ...]:` prefix is suppressed and the
+ * message is delivered verbatim (see `deliverMessage`).
+ */
+export async function sendMessage(
+  agent: Agent,
+  message: string,
+  opts?: { fromAgent?: string; cwd?: string; raw?: boolean; outboxDir?: string }
+): Promise<IbCommandResult> {
+  const tmuxSession = agent.meta.tmux_session;
+  if (!tmuxSession) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: "Agent has no tmux session" };
+  }
+
+  // The outbox queue + lock live in `outboxDir` when provided (the system
+  // coordinator has no agent dir, so its queue/lock live in the coordinator
+  // home so all coordinator senders serialize against ONE queue), otherwise in
+  // the agent's own directory. The recipient log/state writes still target the
+  // agent dir (`deliverMessage`), which is correct for both cases.
+  const agentDir = join(agent.repoPath, ".ittybitty", "agents", agent.id);
+  const queueDir = opts?.outboxDir ?? agentDir;
+
+  // Resolve sender at ENQUEUE time (depends on the sender process's cwd).
+  const fromId = resolveSenderId(agent.repoPath, opts);
+  const raw = opts?.raw === true;
+
+  // Enqueue. The agent dir is created by spawn; for the rare case it is
+  // missing, enqueueOutbox mkdir's the queue dir so a queued message is never
+  // silently dropped. A genuine write failure surfaces as an error rather than
+  // an unhandled rejection.
+  try {
+    await enqueueOutbox(queueDir, { message, fromAgent: fromId, raw });
+  } catch (err) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Failed to enqueue message: ${err}` };
+  }
+
+  const stdout = fromId ? "" : `Sent to ${agent.id}`;
+
+  // If a live watchdog will drain, just return — it owns delivery. (The system
+  // coordinator has no per-agent watchdog, so a coordinator send always drains
+  // inline below.)
+  if (await hasLiveWatchdog(agentDir)) {
+    return { ok: true, exitCode: 0, stdout, stderr: "" };
+  }
+
+  // No live watchdog — the sender becomes the drainer for this batch. Steal a
+  // stale lock so a crashed holder can't wedge delivery forever.
+  const result = await drainOutbox(agent, queueDir, { steal: true });
+  // Preserve the historical stdout shape (drainOutbox returns deliverMessage's
+  // result, whose stdout already matches; but on empty/lock-skip it returns a
+  // generic success — normalize the success stdout to the sender-aware value).
+  if (result.ok) {
+    return { ok: true, exitCode: 0, stdout, stderr: "" };
+  }
+  return result;
 }
 
 export interface NewAgentOptions {

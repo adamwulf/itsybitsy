@@ -183,7 +183,18 @@ export async function sendToSystemCoordinator(
   const cwd = opts?.cwd ?? process.cwd();
   const syntheticAgent = buildSystemCoordinatorAgent(IB_COORDINATOR_SESSION, cwd);
   const { sendMessage } = await import("./ib-commands");
-  const sendOpts: { fromAgent?: string; cwd?: string; raw?: boolean } = { cwd };
+  const { getCoordinatorHome } = await import("./coordinator");
+  // The system coordinator has no agent dir and no per-agent watchdog, so its
+  // outbox queue + delivery lock live in the coordinator home. Routing every
+  // coordinator send (CLI `ib send @system`, watchdog `@system` notifications,
+  // and the dashboard coordinator send dialog) through this one queue + lock
+  // serializes all writes to the `ib-coordinator` tmux session so they can't
+  // interleave. There is no central dispatcher — the lock is keyed to the
+  // single coordinator session, exactly mirroring the per-agent design.
+  const sendOpts: { fromAgent?: string; cwd?: string; raw?: boolean; outboxDir?: string } = {
+    cwd,
+    outboxDir: getCoordinatorHome(),
+  };
   if (opts?.fromAgent) sendOpts.fromAgent = opts.fromAgent;
   if (opts?.raw) sendOpts.raw = true;
   const result = await sendMessage(syntheticAgent, message, sendOpts);

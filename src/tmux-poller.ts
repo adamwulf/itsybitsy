@@ -245,32 +245,6 @@ export async function captureTmuxOutput(tmuxSession: string, lines = 5000): Prom
 }
 
 /**
- * Send literal text to a tmux session via send-keys -l, followed by Enter.
- * Returns true on success.
- */
-export async function sendTmuxKeys(tmuxSession: string, text: string): Promise<boolean> {
-  try {
-    // `--` stops tmux flag parsing so text beginning with `-` isn't mistaken
-    // for an option.
-    const sendProc = spawnCtx.runner(
-      ["tmux", "send-keys", "-t", tmuxSession, "-l", "--", text],
-      { stdout: "pipe", stderr: "pipe" },
-    );
-    const sendExit = await sendProc.exited;
-    if (sendExit !== 0) return false;
-
-    const enterProc = spawnCtx.runner(
-      ["tmux", "send-keys", "-t", tmuxSession, "Enter"],
-      { stdout: "pipe", stderr: "pipe" },
-    );
-    const enterExit = await enterProc.exited;
-    return enterExit === 0;
-  } catch {
-    return false;
-  }
-}
-
-/**
  * Send the Escape key to a tmux session. Used to interrupt a stuck/long-running
  * agent without closing it.
  */

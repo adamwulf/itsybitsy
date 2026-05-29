@@ -518,10 +518,13 @@ log "SIGHUP ignored (resume insulated from launcher pane teardown)"
 # Start Claude in background and capture PID. Stderr is redirected to a sidecar
 # file so we can tail it into agent.log on exit (helps diagnose crashes / 429s).
 # Launch under setsid when present so claude leads its own session, fully
-# detached from the launcher's controlling terminal. setsid (no -f) execs in
-# place without forking, so \$! still refers to claude and wait/kill behave
-# identically to the bare launch. Fall back to a plain background launch on
-# hosts lacking setsid (the inherited SIG_IGN above still covers that case).
+# detached from the launcher's controlling terminal. setsid execs in place
+# (no fork) when it is not already a process-group leader — which holds here:
+# this script runs non-interactively with job control off (no \`set -m\`), so the
+# backgrounded setsid stays in the script's process group rather than leading
+# its own. So \$! still refers to claude and wait/kill behave identically to the
+# bare launch. Fall back to a plain background launch on hosts lacking setsid
+# (e.g. macOS, where setsid is absent — the inherited SIG_IGN above covers it).
 : > "$STDERR_LOG"
 if command -v setsid >/dev/null 2>&1; then
     SETSID=setsid
@@ -2651,10 +2654,13 @@ log "SIGHUP ignored (spawn insulated from launcher pane teardown)"
 # Start Claude in background and capture PID. Stderr is redirected to a sidecar
 # file so we can tail it into agent.log on exit (helps diagnose crashes / 429s).
 # Launch under setsid when present so claude leads its own session, fully
-# detached from the launcher's controlling terminal. setsid (no -f) execs in
-# place without forking, so \$! still refers to claude and wait/kill behave
-# identically to the bare launch. Fall back to a plain background launch on
-# hosts lacking setsid (the inherited SIG_IGN above still covers that case).
+# detached from the launcher's controlling terminal. setsid execs in place
+# (no fork) when it is not already a process-group leader — which holds here:
+# this script runs non-interactively with job control off (no \`set -m\`), so the
+# backgrounded setsid stays in the script's process group rather than leading
+# its own. So \$! still refers to claude and wait/kill behave identically to the
+# bare launch. Fall back to a plain background launch on hosts lacking setsid
+# (e.g. macOS, where setsid is absent — the inherited SIG_IGN above covers it).
 : > "$STDERR_LOG"
 if command -v setsid >/dev/null 2>&1; then
     SETSID=setsid

@@ -179,6 +179,30 @@ describe("agent-lifecycle", () => {
 
       await rm(dir, { recursive: true, force: true });
     });
+
+    test("deletes outbox.jsonl and .outbox.lock (not archived)", async () => {
+      const dir = await makeTempDir();
+      const agentDir = join(dir, ".ittybitty", "agents", "agent-test");
+      await mkdir(agentDir, { recursive: true });
+
+      await Bun.write(join(agentDir, "meta.json"), '{"id":"agent-test"}');
+      // Pending queue + held lock at teardown time.
+      await Bun.write(join(agentDir, "outbox.jsonl"), '{"id":"x","message":"m","fromAgent":"","raw":false,"enqueuedAtMs":1}\n');
+      await Bun.write(join(agentDir, ".outbox.lock"), String(process.pid));
+
+      await archiveAgent(dir, "agent-test", agentDir);
+
+      // Both are deleted from source and NOT archived (runtime state only).
+      expect(await Bun.file(join(agentDir, "outbox.jsonl")).exists()).toBe(false);
+      expect(await Bun.file(join(agentDir, ".outbox.lock")).exists()).toBe(false);
+      const archiveDir = join(dir, ".ittybitty", "archive");
+      const archiveEntries = await readdir(archiveDir);
+      const archiveFolder = join(archiveDir, archiveEntries[0]!);
+      expect(await Bun.file(join(archiveFolder, "outbox.jsonl")).exists()).toBe(false);
+      expect(await Bun.file(join(archiveFolder, ".outbox.lock")).exists()).toBe(false);
+
+      await rm(dir, { recursive: true, force: true });
+    });
   });
 
   // ── getDescendantsRecursive ────────────────────────────────────────────

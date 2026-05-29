@@ -151,7 +151,16 @@ Every new feature or fix must be evaluated from these four perspectives before i
 
 ## itsybitsy Implementation Notes
 
-2888 tests across 63 files.
+3017 tests across 66 files.
+
+### Per-agent message-delivery queue (src/outbox.ts)
+Serializes tmux writes to a single agent so two near-simultaneous sends never interleave their `send-keys -l` chunks + `Enter` into one merged prompt. See SPEC.md §4.1.1 and §8.5.
+- **Queue**: `outbox.jsonl` beside `meta.json`. `OutboxMessage = {id, message, fromAgent, raw, enqueuedAtMs}`. `enqueueOutbox` (mkdir's the dir then single-line `appendFile` — no message loss), `readOutbox` (FIFO, skips malformed lines), `rewriteOutboxRemoving(dir, deliveredIds)` (tmp+rename remainder, re-reads to preserve mid-drain appends, unlinks when empty), `deleteAgentOutbox` (removes queue + lock at teardown).
+- **Lock**: `.outbox.lock`, advisory via `open(path, "wx")` (O_CREAT|O_EXCL). `acquireOutboxLock` retries with backoff to ~5 s, writes holder pid; `steal` removes a stale lock (mtime > 30 s) — set by the inline fallback, never the watchdog. Always `releaseOutboxLock` in `finally`. Keyed per-agent (== per tmux session) — **no central dispatcher**.
+- **`sendMessage` (ib-commands.ts)**: resolve sender (cwd-detect at ENQUEUE time via `resolveSenderId`) → `enqueueOutbox` → if `hasLiveWatchdog(agentDir)` (fresh `meta.transient.json` `watchdog_pid` within `TRANSIENT_FRESH_MS` + `isPidAliveCtx` alive) return immediately (watchdog drains), else `drainOutbox(...,{steal:true})` inline. Signature/return shape and `sendSpawnCtx`/`sendDelayOverrideMs` hooks unchanged; with no transient file the inline drain produces identical observable spawn calls. `opts.outboxDir` overrides the queue dir (used for the system coordinator, whose queue/lock live in `getCoordinatorHome()`).
+- **`deliverMessage(agent, queued)`**: the single tmux writer — has-session, prefix format (`user.name` read, `BARE_RENDERED_SENTINELS`), chunked `send-keys -l`, length-scaled delay, `Enter`, recipient/sender logging, `writeAgentState("running")`. `drainOutbox` pops one at a time under the lock with a 250 ms settle gap; removes a message only after its `Enter` succeeds (rewrite remainder) — no double-delivery, no loss.
+- **Watchdog (watchdog.ts)**: `runPerAgentWatchdog` drains at the top of every tick AND on an `fs.watch` event (debounced 50 ms, falls back to per-tick if `fs.watch` throws), serialized by a guard flag. Injectable via `setPerAgentDrain`/`resetPerAgentDrain`.
+- **Coordinator/hook paths**: `sendToSystemCoordinator` passes `outboxDir: getCoordinatorHome()`; the dashboard coordinator send dialog routes through it. `hooks/agent-status.ts` routes self-nudge / `notify_manager` through `sendMessage` (`raw: true`).
 
 ### State detection flow
 **Deterministic model (Phase 42 — implemented):**

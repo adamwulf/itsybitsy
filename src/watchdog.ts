@@ -11,6 +11,7 @@
 
 import { join } from "path";
 import { mkdirSync } from "fs";
+import { watch, type FSWatcher } from "node:fs";
 import { readRepoAgents, readAllAgents, isCompacting, isRateLimited, isApiError, readAgentState, hasBackgroundTasks, anyChildActive, updateAgentTransient } from "./agents";
 import type { Agent } from "./agents";
 import { captureTmuxOutput } from "./tmux-poller";
@@ -28,6 +29,7 @@ import type { CompactState } from "./auto-compact";
 import { readConfig } from "./config";
 import { isValidTmuxSession } from "./validation";
 import { listRepos } from "./registry";
+import { OUTBOX_FILENAME } from "./outbox";
 
 /** Per-agent tracking state managed by the watchdog */
 export interface AgentTracker {
@@ -881,6 +883,37 @@ export function resetPerAgentReadState(): void {
 }
 
 /**
+ * Injectable outbox drain for the per-agent watchdog. The default lazily
+ * imports `drainOutbox` from ib-commands (lazy to avoid a static import cycle —
+ * ib-commands imports nothing from watchdog at module load, but the watchdog's
+ * other helpers already import from ib-commands, so keep this symmetric with
+ * the existing lazy `notifySpawner` import). The watchdog leaves
+ * `steal: false` (it just retries next tick) so a live inline sender's lock is
+ * never stolen out from under it. Returns void — the watchdog ignores the
+ * delivery result; failures stay enqueued for the next drain.
+ */
+let perAgentDrainFn: (agent: Agent, agentDir: string) => Promise<void> = async (agent, agentDir) => {
+  const { drainOutbox } = await import("./ib-commands");
+  await drainOutbox(agent, agentDir);
+};
+
+/** Override the per-agent outbox drain (for testing). */
+export function setPerAgentDrain(fn: (agent: Agent, agentDir: string) => Promise<void>): void {
+  perAgentDrainFn = fn;
+}
+
+/** Reset the per-agent outbox drain to default. */
+export function resetPerAgentDrain(): void {
+  perAgentDrainFn = async (agent, agentDir) => {
+    const { drainOutbox } = await import("./ib-commands");
+    await drainOutbox(agent, agentDir);
+  };
+}
+
+/** Debounce window for fs.watch-triggered drains, in ms. */
+const OUTBOX_WATCH_DEBOUNCE_MS = 50;
+
+/**
  * Resolve agent state for the per-agent watchdog using deterministic meta.json state
  * with tmux overrides for transient states.
  * Resolution: compacting/rate_limited from tmux → meta.json state → fallback to running.
@@ -984,12 +1017,79 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
   const tracker = createTracker();
   let tmuxGoneSince: number | null = null;
 
+  // ── Outbox drain wiring ──────────────────────────────────────────────────
+  // This watchdog is the single tmux writer for its agent, so it owns draining
+  // the per-agent outbox queue. We drain at the top of every poll tick AND on
+  // an fs.watch event (so delivery feels instant), serialized via a guard so
+  // this watchdog never runs two of its own drains at once. `drainOutbox`
+  // itself takes the per-session lock, which serializes against any inline
+  // sender that came alive concurrently.
+  const drainAgent: Agent = {
+    id: agentId,
+    repoPath,
+    repoName: "",
+    meta,
+    state: "running",
+    age: "",
+    archived: false,
+    children: [],
+  };
+  let draining = false;
+  let drainPending = false;
+  const drainNow = async (): Promise<void> => {
+    // Coalesce: if a drain is already running, mark that another pass is needed
+    // and let the in-flight drain pick up anything that arrived meanwhile.
+    if (draining) {
+      drainPending = true;
+      return;
+    }
+    draining = true;
+    try {
+      do {
+        drainPending = false;
+        try {
+          await perAgentDrainFn(drainAgent, agentDir);
+        } catch { /* never crash the watchdog on a drain error */ }
+      } while (drainPending);
+    } finally {
+      draining = false;
+    }
+  };
+
+  // Event-driven drain via fs.watch on the agent dir. Debounced so a burst of
+  // appends coalesces into one drain. If fs.watch is unavailable/throws, fall
+  // back silently to per-tick draining — the test suite does not depend on
+  // fs.watch firing.
+  let watcher: FSWatcher | null = null;
+  let watchDebounce: ReturnType<typeof setTimeout> | null = null;
+  try {
+    watcher = watch(agentDir, (_event, filename) => {
+      // Only react to outbox changes (filename may be null on some platforms —
+      // in that case react to any change, the per-session lock keeps it safe).
+      if (filename && filename !== OUTBOX_FILENAME) return;
+      if (watchDebounce) clearTimeout(watchDebounce);
+      watchDebounce = setTimeout(() => { void drainNow(); }, OUTBOX_WATCH_DEBOUNCE_MS);
+    });
+  } catch {
+    watcher = null; // fs.watch unavailable — per-tick draining still covers it
+  }
+
+  const stopWatching = (): void => {
+    if (watchDebounce) { clearTimeout(watchDebounce); watchDebounce = null; }
+    if (watcher) { try { watcher.close(); } catch { /* ignore */ } watcher = null; }
+  };
+
   // Poll loop
   while (true) {
     // Exit condition (a): worktree directory removed (kill/merge/nuke)
     if (!existsSyncFn(worktreeDir)) {
+      stopWatching();
       break;
     }
+
+    // Drain any queued outbox messages first, before state handling, so a
+    // pending nudge/notification is delivered promptly regardless of state.
+    await drainNow();
 
     // Check tmux session
     const output = await captureTmuxFn(tmuxSession);
@@ -1003,6 +1103,7 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
       } else if (nowFn() - tmuxGoneSince >= TMUX_GONE_GRACE_MS) {
         // Exit condition (b): tmux gone for >10s
         await logAgent(agentDir, "[watchdog] tmux session gone for >10s — exiting watchdog");
+        stopWatching();
         break;
       }
     } else {

@@ -38,6 +38,8 @@ import {
   resetPerAgentSleep,
   setPerAgentReadState,
   resetPerAgentReadState,
+  setPerAgentDrain,
+  resetPerAgentDrain,
   setWatchdogSleep,
   resetWatchdogSleep,
   setWatchdogCaptureTmux,
@@ -2045,6 +2047,10 @@ describe("runPerAgentWatchdog", () => {
     setPerAgentSleep(async () => {});
     // Stub sendMessage spawn runner to no-op
     setSendSpawnRunner(() => ({ stdout: "", exitCode: 0 }) as any);
+    // No-op outbox drain — keeps the per-agent watchdog tests off the real FS
+    // (default drainOutbox would touch /tmp/test). Per-drain assertions set
+    // their own spy.
+    setPerAgentDrain(async () => {});
     // Disable auto-compact
     setWatchdogReadConfig(async () => ({} as any));
     // Module-level snapshot cache survives across tests; clear so
@@ -2062,7 +2068,29 @@ describe("runPerAgentWatchdog", () => {
     resetWatchdogReadConfig();
     resetWatchdogSpawnRunner();
     resetPerAgentReadState();
+    resetPerAgentDrain();
     clearAllAgentsCache();
+  });
+
+  test("drains the outbox at the top of each poll tick", async () => {
+    let drainCalls = 0;
+    setPerAgentDrain(async (agent, agentDir) => {
+      drainCalls++;
+      expect(agent.id).toBe("agent-test1");
+      expect(agentDir).toBe("/tmp/test/.ittybitty/agents/agent-test1");
+    });
+    // Exit after 3 ticks via existsSync.
+    let existsChecks = 0;
+    setPerAgentExistsSync((_path: string) => {
+      existsChecks++;
+      return existsChecks <= 3;
+    });
+    setPerAgentReadState(async (_dir: string) => undefined);
+
+    await runPerAgentWatchdog("agent-test1", "/tmp/test");
+
+    // One drain per tick (3 ticks before the worktree-gone exit).
+    expect(drainCalls).toBe(3);
   });
 
   test("auto-accepts MCP server permissions prompt", async () => {

@@ -9,6 +9,7 @@ import { readdir, mkdir, cp, rm, rename, appendFile } from "fs/promises";
 import { SpawnContext } from "./types";
 import { isValidTmuxSession } from "./validation";
 import { deleteAgentTransient } from "./agents";
+import { deleteAgentOutbox } from "./outbox";
 
 /** Spawn context for agent lifecycle operations */
 export const spawnCtx = new SpawnContext();
@@ -281,6 +282,12 @@ export async function archiveAgent(
   // teardownAgent, nukeAllAgents) all rm-rf afterwards, so this is
   // defensive insurance.
   await deleteAgentTransient(agentDir);
+
+  // The outbox queue + its lock are runtime delivery state — no historical
+  // value, so delete (not archive) alongside meta.transient.json. Any
+  // not-yet-delivered messages are intentionally dropped: the agent is being
+  // torn down, so there is no live tmux session to deliver to.
+  await deleteAgentOutbox(agentDir);
 
   return archiveFolder;
 }

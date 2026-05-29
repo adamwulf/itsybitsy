@@ -476,9 +476,188 @@ describe("ib-commands", () => {
       expect(sendKeysCall![5]).toBe("--");
       expect(sendKeysCall![6]).toBe(dashLeading);
     });
+
+    test("two concurrent sends to the same agent never interleave their send-keys/Enter", async () => {
+      // Critical correctness test (see /tmp/multi-writes-spec.md): the
+      // per-session lock + single-drainer design must make it IMPOSSIBLE for
+      // two send-keys/Enter sequences to the same tmux session to interleave.
+      //
+      // We launch two sendMessage calls concurrently. Each message is long
+      // enough to require multiple `-l` chunks, and the fake spawn runner
+      // resolves `.exited` on a macrotask (setTimeout 0) so the two calls
+      // genuinely race through the event loop — a missing lock would interleave
+      // their chunks. We then assert that, in the recorded `-l` payload order,
+      // each message's chunks form one CONTIGUOUS run and its Enter
+      // immediately follows its last chunk (no A,B,A pattern).
+      const agent = makeAgent("agent-abc", tempDir);
+
+      // Record send-keys (-l payload) and Enter events in delivery order.
+      type Ev = { kind: "chunk"; ch: string } | { kind: "enter" };
+      const events: Ev[] = [];
+      setSendSpawnRunner((cmd: string[]) => {
+        if (cmd[0] === "tmux" && cmd[1] === "send-keys" && cmd[4] === "-l" && cmd[5] === "--") {
+          events.push({ kind: "chunk", ch: cmd[6]! });
+        } else if (cmd[0] === "tmux" && cmd[1] === "send-keys" && cmd[cmd.length - 1] === "Enter") {
+          events.push({ kind: "enter" });
+        }
+        // Resolve on a macrotask so concurrent sends interleave at the await
+        // points if (and only if) the lock fails to serialize them.
+        return {
+          stdout: new Response("").body,
+          stderr: new Response("").body,
+          exited: new Promise<number>((resolve) => setTimeout(() => resolve(0), 0)),
+        } as SpawnResult;
+      });
+
+      // Two distinct, multi-chunk payloads (>500 chars each → 2 chunks each).
+      const msgA = "A".repeat(900);
+      const msgB = "B".repeat(900);
+
+      await Promise.all([
+        sendMessage(agent, msgA, { cwd: "/", raw: true }),
+        sendMessage(agent, msgB, { cwd: "/", raw: true }),
+      ]);
+
+      // Reconstruct the per-Enter "messages": every chunk run terminated by an
+      // Enter is one delivered message. None of these reconstructed payloads
+      // may mix 'A' and 'B' content — that would mean two sends interleaved.
+      const delivered: string[] = [];
+      let buf = "";
+      for (const ev of events) {
+        if (ev.kind === "chunk") {
+          buf += ev.ch;
+        } else {
+          delivered.push(buf);
+          buf = "";
+        }
+      }
+      // Exactly two messages delivered (each exactly once — no loss, no dupes).
+      expect(delivered.length).toBe(2);
+      for (const payload of delivered) {
+        const hasA = payload.includes("A");
+        const hasB = payload.includes("B");
+        // A delivered message must be pure-A or pure-B, never a merge.
+        expect(hasA && hasB).toBe(false);
+      }
+      // The two delivered messages are the two originals (in some order).
+      const sorted = [...delivered].sort();
+      expect(sorted).toEqual([msgA, msgB].sort());
+    });
   });
 
   // newAgent tests are in the dedicated "newAgent (native)" describe block below
+});
+
+describe("sendMessage outbox integration", () => {
+  let spawnCalls: string[][];
+  let tempDir: string;
+  let agentDir: string;
+
+  beforeEach(async () => {
+    spawnCalls = [];
+    tempDir = await mkdtemp(join(tmpdir(), "send-outbox-"));
+    agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(agentDir, { recursive: true });
+    setUserConfigPath(join(tempDir, "config.json"));
+    setSendSpawnRunner((cmd: string[]) => {
+      spawnCalls.push(cmd);
+      return makeSpawnResult();
+    });
+  });
+
+  afterEach(async () => {
+    resetSendSpawnRunner();
+    resetUserConfigPath();
+    const { isPidAliveCtx } = await import("./agents");
+    isPidAliveCtx.reset();
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  test("defers to a live watchdog: enqueues but does NOT deliver inline", async () => {
+    // A fresh transient file with a live watchdog pid means a watchdog will
+    // drain — sendMessage must enqueue and return without typing into tmux.
+    const { writeAgentTransient, isPidAliveCtx } = await import("./agents");
+    isPidAliveCtx.set(() => true); // pretend the watchdog pid is alive
+    await writeAgentTransient(agentDir, {
+      tmux_compacting: false,
+      tmux_rate_limited: false,
+      tmux_api_error: false,
+      has_background_tasks: false,
+      updated_at_ms: Date.now(),
+      watchdog_pid: 4242,
+    });
+
+    const agent = _makeAgent({ id: "agent-abc", repoPath: tempDir, repoName: "r", state: "running" as AgentState });
+    const result = await sendMessage(agent, "hello", { cwd: "/" });
+
+    expect(result.ok).toBe(true);
+    expect(result.stdout).toBe("Sent to agent-abc");
+    // No tmux spawn calls — delivery deferred to the watchdog.
+    expect(spawnCalls.length).toBe(0);
+
+    // The message is sitting in the outbox awaiting the watchdog's drain.
+    const { readOutbox } = await import("./outbox");
+    const queued = await readOutbox(agentDir);
+    expect(queued.length).toBe(1);
+    expect(queued[0]!.message).toBe("hello");
+  });
+
+  test("stale transient (watchdog not fresh): delivers inline", async () => {
+    const { writeAgentTransient, isPidAliveCtx } = await import("./agents");
+    isPidAliveCtx.set(() => true);
+    await writeAgentTransient(agentDir, {
+      tmux_compacting: false,
+      tmux_rate_limited: false,
+      tmux_api_error: false,
+      has_background_tasks: false,
+      updated_at_ms: Date.now() - 60_000, // 60s old → not fresh
+      watchdog_pid: 4242,
+    });
+
+    const agent = _makeAgent({ id: "agent-abc", repoPath: tempDir, repoName: "r", state: "running" as AgentState });
+    const result = await sendMessage(agent, "hello", { cwd: "/" });
+
+    expect(result.ok).toBe(true);
+    // Delivered inline → has-session + send-keys + Enter.
+    expect(spawnCalls.length).toBe(3);
+    // Outbox drained empty.
+    const { readOutbox } = await import("./outbox");
+    expect(await readOutbox(agentDir)).toEqual([]);
+  });
+
+  test("dead watchdog pid: delivers inline", async () => {
+    const { writeAgentTransient, isPidAliveCtx } = await import("./agents");
+    isPidAliveCtx.set(() => false); // pid is dead
+    await writeAgentTransient(agentDir, {
+      tmux_compacting: false,
+      tmux_rate_limited: false,
+      tmux_api_error: false,
+      has_background_tasks: false,
+      updated_at_ms: Date.now(),
+      watchdog_pid: 4242,
+    });
+
+    const agent = _makeAgent({ id: "agent-abc", repoPath: tempDir, repoName: "r", state: "running" as AgentState });
+    await sendMessage(agent, "hello", { cwd: "/" });
+    expect(spawnCalls.length).toBe(3);
+  });
+
+  test("failed delivery leaves the message enqueued (no loss)", async () => {
+    // has-session fails → deliverMessage returns ok:false → message stays.
+    setSendSpawnRunner((cmd: string[]) => {
+      spawnCalls.push(cmd);
+      if (cmd.includes("has-session")) return makeSpawnResult(1, "", "no session");
+      return makeSpawnResult();
+    });
+    const agent = _makeAgent({ id: "agent-abc", repoPath: tempDir, repoName: "r", state: "running" as AgentState });
+    const result = await sendMessage(agent, "keepme", { cwd: "/" });
+    expect(result.ok).toBe(false);
+
+    const { readOutbox } = await import("./outbox");
+    const queued = await readOutbox(agentDir);
+    expect(queued.length).toBe(1);
+    expect(queued[0]!.message).toBe("keepme");
+  });
 });
 
 // Helper: create a mock SpawnFn that records calls and returns success

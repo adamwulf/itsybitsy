@@ -4,7 +4,7 @@
  * then takes appropriate action (nudge, notify manager, remind commit, etc.).
  */
 
-import { join, dirname } from "path";
+import { join, dirname, basename } from "path";
 import { readdir, readFile, writeFile, mkdir, access } from "fs/promises";
 import { logAgent } from "../agent-lifecycle";
 import { parseState } from "../parse-state";
@@ -527,6 +527,11 @@ export async function executeResultActions(
     return "invalid_session";
   }
 
+  // The repo root is three levels up from <repoPath>/.ittybitty/agents/<id>.
+  // (agentDir → agents dir → .ittybitty → repo root.)
+  const repoPath = dirname(dirname(agentsDir));
+  const agentId = basename(agentDir);
+
   if (
     result.message &&
     (result.action === "nudge" ||
@@ -534,19 +539,15 @@ export async function executeResultActions(
       result.action === "remind_children")
   ) {
     if (tmuxSession) {
-      // `--` stops tmux flag parsing so a message beginning with `-` isn't
-      // mistaken for an option.
-      const sendProc = Bun.spawn(
-        ["tmux", "send-keys", "-t", tmuxSession, "-l", "--", result.message],
-        { stdout: "pipe", stderr: "pipe" },
-      );
-      await sendProc.exited;
-      await Bun.sleep(100);
-      const enterProc = Bun.spawn(
-        ["tmux", "send-keys", "-t", tmuxSession, "Enter"],
-        { stdout: "pipe", stderr: "pipe" },
-      );
-      await enterProc.exited;
+      // Route the self-nudge through the per-agent outbox queue so it can't
+      // collide with a concurrent `ib send` to this same agent. raw=true keeps
+      // the message verbatim (no `[sent by ...]` prefix) — it already reads as
+      // a system nudge. `sendMessage` writes state:"running" for the recipient
+      // on success, but we also retain the explicit write below to preserve the
+      // historical unconditional state-write behavior of this hook.
+      const recipient = buildHookAgent(agentId, repoPath, tmuxSession, meta);
+      const { sendMessage } = await import("../ib-commands");
+      await sendMessage(recipient, result.message, { raw: true, cwd: "/" });
       // Mark the recipient as running — the message has been delivered and the
       // agent is about to start working again. Without this, meta.state stays
       // stale ('waiting'/'complete') until the next Stop hook fires.
@@ -573,19 +574,13 @@ export async function executeResultActions(
           console.log(result.state);
           return `invalid_manager_session`;
         }
-        // `--` stops tmux flag parsing so a message beginning with `-` isn't
-        // mistaken for an option.
-        const sendProc = Bun.spawn(
-          ["tmux", "send-keys", "-t", managerSession, "-l", "--", result.message],
-          { stdout: "pipe", stderr: "pipe" },
-        );
-        await sendProc.exited;
-        await Bun.sleep(100);
-        const enterProc = Bun.spawn(
-          ["tmux", "send-keys", "-t", managerSession, "Enter"],
-          { stdout: "pipe", stderr: "pipe" },
-        );
-        await enterProc.exited;
+        // Route the manager notification through the manager's per-agent outbox
+        // queue (raw=true matches today's behavior — the hook types
+        // `result.message` verbatim). Serializes against any concurrent
+        // `ib send` to the manager.
+        const managerAgent = buildHookAgent(managerId, repoPath, managerSession, managerMeta);
+        const { sendMessage } = await import("../ib-commands");
+        await sendMessage(managerAgent, result.message, { raw: true, cwd: "/" });
         // Mark the manager as running — it just received a notification and is
         // about to work on it. Without this, the manager's meta.state stays
         // stale until its next Stop hook fires.
@@ -597,4 +592,40 @@ export async function executeResultActions(
   // Print state to stdout
   console.log(result.state);
   return "ok";
+}
+
+/**
+ * Build a minimal `Agent` for the hook's `sendMessage` calls. Only the fields
+ * `sendMessage`/`deliverMessage` read (`id`, `repoPath`, `meta.tmux_session`)
+ * are populated; the rest are inert defaults.
+ */
+function buildHookAgent(
+  id: string,
+  repoPath: string,
+  tmuxSession: string,
+  meta: { manager?: string } | null,
+): import("../agents").Agent {
+  return {
+    id,
+    repoPath,
+    repoName: "",
+    meta: {
+      id,
+      session_id: "",
+      tmux_session: tmuxSession,
+      prompt: "",
+      manager: meta?.manager ?? null,
+      created: "",
+      created_epoch: 0,
+      worktree: true,
+      worker: false,
+      yolo: false,
+      model: "",
+      claude_pid: "",
+    } as import("../agents").AgentMeta,
+    state: "running",
+    age: "",
+    archived: false,
+    children: [],
+  };
 }

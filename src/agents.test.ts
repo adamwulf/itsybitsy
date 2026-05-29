@@ -29,14 +29,18 @@ import {
   readAgentTransient,
   writeAgentTransient,
   deleteAgentTransient,
+  updateAgentTransient,
+  setAgentOperation,
+  clearAgentOperation,
   isPidAliveCtx,
   killPidCtx,
   liveTmuxSessionsCtx,
   nowMsCtx,
   resetReadAgentMetaCache,
   TRANSIENT_FRESH_MS,
+  OP_STUCK_TIMEOUT_MS,
 } from "./agents";
-import type { TransientState } from "./agents";
+import type { TransientState, AgentOperation } from "./agents";
 import { spawnCtx as tmuxPollerSpawnCtx } from "./tmux-poller";
 import type { Agent, AgentMeta, FlatEntry } from "./agents";
 import { makeAgent } from "./test-utils";
@@ -2365,7 +2369,9 @@ describe("readAgentTransient / writeAgentTransient", () => {
     };
     await writeAgentTransient(tempDir, data);
     const result = await readAgentTransient(tempDir);
-    expect(result).toEqual(data);
+    // A transient written without `operation` reads back with operation: null
+    // (the back-compat default), so compare against the data plus that field.
+    expect(result).toEqual({ ...data, operation: null });
   });
 
   test("returns null when file is malformed", async () => {
@@ -2388,7 +2394,7 @@ describe("readAgentTransient / writeAgentTransient", () => {
     const second: TransientState = { tmux_compacting: false, tmux_rate_limited: true, tmux_api_error: false, has_background_tasks: false, updated_at_ms: 2, watchdog_pid: 200 };
     await writeAgentTransient(tempDir, first);
     await writeAgentTransient(tempDir, second);
-    expect(await readAgentTransient(tempDir)).toEqual(second);
+    expect(await readAgentTransient(tempDir)).toEqual({ ...second, operation: null });
   });
 
   test("deleteAgentTransient removes the file", async () => {
@@ -2402,6 +2408,331 @@ describe("readAgentTransient / writeAgentTransient", () => {
   test("deleteAgentTransient is a no-op when file is missing", async () => {
     await deleteAgentTransient(tempDir);
     expect(await readAgentTransient(tempDir)).toBeNull();
+  });
+});
+
+// ── operation marker: RMW helper, set/clear, back-compat ─────────────────────
+
+describe("updateAgentTransient / setAgentOperation / clearAgentOperation", () => {
+  let tempDir: string;
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "itsybitsy-op-"));
+  });
+  afterEach(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  test("updateAgentTransient seeds a zeroed transient when none exists", async () => {
+    await updateAgentTransient(tempDir, (cur) => ({ ...cur, watchdog_pid: 777 }));
+    const result = await readAgentTransient(tempDir);
+    expect(result).toEqual({
+      tmux_compacting: false,
+      tmux_rate_limited: false,
+      tmux_api_error: false,
+      has_background_tasks: false,
+      updated_at_ms: 0,
+      watchdog_pid: 777,
+      operation: null,
+    });
+  });
+
+  test("updateAgentTransient is ENOENT-safe (missing dir does not throw)", async () => {
+    const missing = join(tempDir, "does", "not", "exist");
+    // Should not throw — best-effort.
+    await updateAgentTransient(missing, (cur) => ({ ...cur, watchdog_pid: 1 }));
+    expect(await readAgentTransient(missing)).toBeNull();
+  });
+
+  test("setAgentOperation writes the operation field, preserving other fields", async () => {
+    await writeAgentTransient(tempDir, {
+      tmux_compacting: true,
+      tmux_rate_limited: false,
+      tmux_api_error: false,
+      has_background_tasks: true,
+      updated_at_ms: 42,
+      watchdog_pid: 9,
+    });
+    const op: AgentOperation = { kind: "merging", pid: 1234, started_at_ms: 99 };
+    await setAgentOperation(tempDir, op);
+    const result = await readAgentTransient(tempDir);
+    expect(result?.operation).toEqual(op);
+    // Other fields untouched (RMW, not overwrite).
+    expect(result?.tmux_compacting).toBe(true);
+    expect(result?.has_background_tasks).toBe(true);
+    expect(result?.updated_at_ms).toBe(42);
+    expect(result?.watchdog_pid).toBe(9);
+  });
+
+  test("clearAgentOperation removes the operation, preserving other fields", async () => {
+    // The marker must belong to THIS process for the compare-and-swap clear to fire.
+    await setAgentOperation(tempDir, { kind: "restarting", pid: process.pid, started_at_ms: 7 });
+    await updateAgentTransient(tempDir, (cur) => ({ ...cur, watchdog_pid: 321 }));
+    await clearAgentOperation(tempDir);
+    const result = await readAgentTransient(tempDir);
+    expect(result?.operation).toBeNull();
+    expect(result?.watchdog_pid).toBe(321);
+  });
+
+  test("clearAgentOperation (CAS) clears a marker owned by THIS process", async () => {
+    await setAgentOperation(tempDir, { kind: "merging", pid: process.pid, started_at_ms: 7 });
+    await clearAgentOperation(tempDir);
+    const result = await readAgentTransient(tempDir);
+    expect(result?.operation).toBeNull();
+  });
+
+  test("clearAgentOperation (CAS) does NOT clear a marker owned by a DIFFERENT pid", async () => {
+    // Models the age-reclaim race: op B reclaimed an old marker (so the on-disk
+    // pid is B's, not ours), then op A's late `finally` calls clearAgentOperation.
+    // A must NOT wipe B's marker. Use a sentinel pid that is not this process.
+    const otherPid = process.pid + 1;
+    const op: AgentOperation = { kind: "restarting", pid: otherPid, started_at_ms: 7 };
+    await setAgentOperation(tempDir, op);
+    await clearAgentOperation(tempDir);
+    const result = await readAgentTransient(tempDir);
+    // The other process's marker survives unchanged.
+    expect(result?.operation).toEqual(op);
+  });
+
+  test("clearAgentOperation on a removed dir does not throw (ENOENT swallowed)", async () => {
+    await setAgentOperation(tempDir, { kind: "merging", pid: 5, started_at_ms: 7 });
+    await rm(tempDir, { recursive: true, force: true });
+    // No throw — mirrors the post-merge success path where the dir is gone.
+    await clearAgentOperation(tempDir);
+    expect(await readAgentTransient(tempDir)).toBeNull();
+  });
+
+  test("watchdog-style write preserves an existing operation field", async () => {
+    // Simulate: merge sets the op, then the watchdog's 5s tick writes its tmux
+    // snapshot via updateAgentTransient. The op must survive.
+    await setAgentOperation(tempDir, { kind: "merging", pid: 100, started_at_ms: 50 });
+    await updateAgentTransient(tempDir, (cur) => ({
+      ...cur,
+      tmux_compacting: true,
+      tmux_rate_limited: false,
+      tmux_api_error: false,
+      has_background_tasks: false,
+      updated_at_ms: 5000,
+      watchdog_pid: 200,
+    }));
+    const result = await readAgentTransient(tempDir);
+    expect(result?.operation).toEqual({ kind: "merging", pid: 100, started_at_ms: 50 });
+    expect(result?.tmux_compacting).toBe(true);
+    expect(result?.watchdog_pid).toBe(200);
+  });
+
+  test("back-compat: transient without operation reads with operation: null", async () => {
+    await Bun.write(
+      join(tempDir, "meta.transient.json"),
+      JSON.stringify({
+        tmux_compacting: false,
+        tmux_rate_limited: false,
+        tmux_api_error: false,
+        has_background_tasks: false,
+        updated_at_ms: 1,
+        watchdog_pid: 1,
+      }),
+    );
+    const result = await readAgentTransient(tempDir);
+    expect(result?.operation).toBeNull();
+  });
+
+  test("back-compat: malformed operation is ignored without failing the read", async () => {
+    const cases: unknown[] = [
+      "not-an-object",
+      { kind: "bogus_kind", pid: 1, started_at_ms: 1 }, // invalid kind
+      { kind: "merging", pid: 0, started_at_ms: 1 }, // pid not > 0
+      { kind: "merging", pid: -3, started_at_ms: 1 }, // negative pid
+      { kind: "merging", pid: 1, started_at_ms: 0 }, // started_at_ms not > 0
+      { kind: "merging", pid: "x", started_at_ms: 1 }, // pid wrong type
+      { pid: 1, started_at_ms: 1 }, // missing kind
+    ];
+    for (const bad of cases) {
+      await Bun.write(
+        join(tempDir, "meta.transient.json"),
+        JSON.stringify({
+          tmux_compacting: false,
+          tmux_rate_limited: false,
+          tmux_api_error: false,
+          has_background_tasks: false,
+          updated_at_ms: 1,
+          watchdog_pid: 1,
+          operation: bad,
+        }),
+      );
+      const result = await readAgentTransient(tempDir);
+      // The whole read still succeeds; the malformed op is treated as absent.
+      expect(result).not.toBeNull();
+      expect(result?.operation).toBeNull();
+    }
+  });
+
+  test("a well-formed operation of each kind round-trips", async () => {
+    for (const kind of ["merge_check", "merging", "restarting"] as const) {
+      await setAgentOperation(tempDir, { kind, pid: 11, started_at_ms: 22 });
+      const result = await readAgentTransient(tempDir);
+      expect(result?.operation).toEqual({ kind, pid: 11, started_at_ms: 22 });
+    }
+  });
+});
+
+// ── detectAgentStates — operation op-branch (merging/restarting/op_stuck) ─────
+
+describe("detectAgentStates — operation op-branch", () => {
+  let tempDir: string;
+
+  /** Build an agent backed by a real dir, with an explicit claude_pid. */
+  async function makeOpAgent(id: string, claudePid: string): Promise<Agent> {
+    const agentDir = join(tempDir, ".ittybitty", "agents", id);
+    await mkdir(agentDir, { recursive: true });
+    return makeAgent({
+      id,
+      repoPath: tempDir,
+      meta: {
+        state: "running",
+        tmux_session: `ib-${id}`,
+        created_epoch: Math.floor(Date.now() / 1000) - 60,
+        claude_pid: claudePid,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+  }
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "itsybitsy-opbranch-"));
+  });
+  afterEach(async () => {
+    isPidAliveCtx.reset();
+    nowMsCtx.reset();
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  test("fresh, live merging op → state=merging", async () => {
+    const a = await makeOpAgent("agent-m", "12345");
+    const now = 10_000_000;
+    nowMsCtx.set(() => now);
+    isPidAliveCtx.set(() => true); // op holder + claude both alive
+    const agentDir = join(tempDir, ".ittybitty", "agents", a.id);
+    await setAgentOperation(agentDir, { kind: "merging", pid: 4242, started_at_ms: now - 1_000 });
+
+    await detectAgentStates([a]);
+    expect(a.state).toBe("merging");
+  });
+
+  test("fresh, live merge_check op → state=merging (collapsed render label)", async () => {
+    const a = await makeOpAgent("agent-mc", "12345");
+    const now = 10_000_000;
+    nowMsCtx.set(() => now);
+    isPidAliveCtx.set(() => true);
+    const agentDir = join(tempDir, ".ittybitty", "agents", a.id);
+    await setAgentOperation(agentDir, { kind: "merge_check", pid: 4242, started_at_ms: now - 1_000 });
+
+    await detectAgentStates([a]);
+    expect(a.state).toBe("merging");
+  });
+
+  test("fresh, live restarting op → state=restarting", async () => {
+    const a = await makeOpAgent("agent-r", "12345");
+    const now = 10_000_000;
+    nowMsCtx.set(() => now);
+    isPidAliveCtx.set(() => true);
+    const agentDir = join(tempDir, ".ittybitty", "agents", a.id);
+    await setAgentOperation(agentDir, { kind: "restarting", pid: 4242, started_at_ms: now - 1_000 });
+
+    await detectAgentStates([a]);
+    expect(a.state).toBe("restarting");
+  });
+
+  test("op older than OP_STUCK_TIMEOUT_MS → state=op_stuck", async () => {
+    const a = await makeOpAgent("agent-old", "12345");
+    const now = 10_000_000;
+    nowMsCtx.set(() => now);
+    isPidAliveCtx.set(() => true); // holder alive, but op too old
+    const agentDir = join(tempDir, ".ittybitty", "agents", a.id);
+    await setAgentOperation(agentDir, {
+      kind: "merging",
+      pid: 4242,
+      started_at_ms: now - OP_STUCK_TIMEOUT_MS - 1, // just past the timeout
+    });
+
+    await detectAgentStates([a]);
+    expect(a.state).toBe("op_stuck");
+  });
+
+  test("op just under OP_STUCK_TIMEOUT_MS stays merging (boundary)", async () => {
+    const a = await makeOpAgent("agent-edge", "12345");
+    const now = 10_000_000;
+    nowMsCtx.set(() => now);
+    isPidAliveCtx.set(() => true);
+    const agentDir = join(tempDir, ".ittybitty", "agents", a.id);
+    await setAgentOperation(agentDir, {
+      kind: "merging",
+      pid: 4242,
+      started_at_ms: now - OP_STUCK_TIMEOUT_MS, // exactly at the timeout → not yet stuck (> comparison)
+    });
+
+    await detectAgentStates([a]);
+    expect(a.state).toBe("merging");
+  });
+
+  test("op holder dead → state=op_stuck (even with a fresh started_at)", async () => {
+    const a = await makeOpAgent("agent-deadholder", "12345");
+    const now = 10_000_000;
+    nowMsCtx.set(() => now);
+    // claude_pid 12345 alive, op holder 4242 dead.
+    isPidAliveCtx.set((pid: number) => pid !== 4242);
+    const agentDir = join(tempDir, ".ittybitty", "agents", a.id);
+    await setAgentOperation(agentDir, { kind: "merging", pid: 4242, started_at_ms: now - 100 });
+
+    await detectAgentStates([a]);
+    expect(a.state).toBe("op_stuck");
+  });
+
+  // THE ORDERING REGRESSION GUARD (the showstopper):
+  // A wedged merge KILLS claude_pid before removing the dir. The op-branch
+  // must run ABOVE the claude_pid liveness gate. This case has a DEAD
+  // claude_pid but a LIVE, fresh op holder, so the correct result is the
+  // in-flight `merging` label — NOT `stopped`. If the op-branch were placed
+  // below the claude_pid gate, the dead claude_pid would paint "stopped"
+  // first and the op state would never be reached. (The op_stuck variant —
+  // dead holder — is covered by the next test.)
+  test("operation set + dead claude_pid + live holder → merging, NOT stopped (op-branch runs above the claude_pid gate)", async () => {
+    const a = await makeOpAgent("agent-wedged", "99999");
+    const now = 10_000_000;
+    nowMsCtx.set(() => now);
+    // claude_pid 99999 is DEAD; the op holder 4242 is ALIVE (the merge is
+    // still grinding away in another process).
+    isPidAliveCtx.set((pid: number) => pid === 4242);
+    const agentDir = join(tempDir, ".ittybitty", "agents", a.id);
+    await setAgentOperation(agentDir, { kind: "merging", pid: 4242, started_at_ms: now - 1_000 });
+
+    await detectAgentStates([a]);
+    expect(a.state).toBe("merging"); // live holder, fresh → merging, definitely not stopped
+  });
+
+  test("operation set + DEAD claude_pid + DEAD holder → op_stuck (NOT stopped)", async () => {
+    const a = await makeOpAgent("agent-crashed", "99999");
+    const now = 10_000_000;
+    nowMsCtx.set(() => now);
+    // Both the recorded claude_pid AND the op holder are dead (crash mid-merge).
+    // The claude_pid gate, if it ran first, would paint "stopped"; the op-branch
+    // above it must win and paint "op_stuck".
+    isPidAliveCtx.set(() => false);
+    const agentDir = join(tempDir, ".ittybitty", "agents", a.id);
+    await setAgentOperation(agentDir, { kind: "merging", pid: 4242, started_at_ms: now - 1_000 });
+
+    await detectAgentStates([a]);
+    expect(a.state).toBe("op_stuck");
+  });
+
+  test("no operation + dead claude_pid still resolves to stopped (gate unchanged)", async () => {
+    const a = await makeOpAgent("agent-nostop", "99999");
+    const now = 10_000_000;
+    nowMsCtx.set(() => now);
+    isPidAliveCtx.set(() => false); // claude_pid dead, no op
+    // No operation set.
+
+    await detectAgentStates([a]);
+    expect(a.state).toBe("stopped");
   });
 });
 

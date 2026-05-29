@@ -7,7 +7,7 @@ import {
   writerCtx,
   resetColorScheme,
 } from "./color-scheme";
-import { BRIGHT_BLUE, BRIGHT_MAGENTA, BLUE, MAGENTA } from "./colors";
+import { BRIGHT_BLUE, BRIGHT_MAGENTA, BLUE, MAGENTA, YELLOW, RED } from "./colors";
 
 /* ── helpers ────────────────────────────────────────────────── */
 
@@ -104,6 +104,22 @@ describe("getStateColors", () => {
     const colors = getStateColors();
     expect(colors.complete).toBe(BLUE);
     expect(colors.compacting).toBe(MAGENTA);
+  });
+
+  test("op states resolve to colors (dark): merging/restarting=YELLOW, op_stuck=RED", () => {
+    const colors = getStateColors();
+    expect(colors.merging).toBe(YELLOW);
+    expect(colors.restarting).toBe(YELLOW);
+    expect(colors.op_stuck).toBe(RED);
+  });
+
+  test("op states resolve to colors (light): merging/restarting=YELLOW, op_stuck=RED", () => {
+    const { inputFilter } = setupColorSchemeDetection(() => {});
+    inputFilter("\x1b]11;rgb:ffff/ffff/ffff\x07");
+    const colors = getStateColors();
+    expect(colors.merging).toBe(YELLOW);
+    expect(colors.restarting).toBe(YELLOW);
+    expect(colors.op_stuck).toBe(RED);
   });
 });
 

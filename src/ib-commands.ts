@@ -9,8 +9,17 @@ import { join, dirname, resolve, basename } from "path";
 import { readdir, chmod, rm, mkdir, rename, stat } from "fs/promises";
 import { realpathSync } from "fs";
 import { homedir } from "node:os";
-import type { Agent, SpawnedBy } from "./agents";
-import { writeAgentState, isRecentlyCreated } from "./agents";
+import type { Agent, SpawnedBy, AgentOperationKind } from "./agents";
+import {
+  writeAgentState,
+  isRecentlyCreated,
+  isPidAliveCtx,
+  nowMsCtx,
+  OP_STUCK_TIMEOUT_MS,
+  readAgentTransient,
+  setAgentOperation,
+  clearAgentOperation,
+} from "./agents";
 import {
   logAgent,
   logSpawn,
@@ -71,6 +80,68 @@ async function writeMetaJsonAtomic(agentDir: string, meta: Record<string, unknow
   const tmpPath = metaPath + ".tmp";
   await Bun.write(tmpPath, JSON.stringify(meta, null, 2) + "\n");
   await rename(tmpPath, metaPath);
+}
+
+/** Human-readable verb for an op kind, used in the guard refusal message. */
+function humanizeOpKind(kind: AgentOperationKind): string {
+  switch (kind) {
+    case "merge_check":
+      return "merge-checking";
+    case "merging":
+      return "merging";
+    case "restarting":
+      return "restarting";
+  }
+}
+
+/**
+ * Result of acquiring the long-running-op guard. On refusal, `stderr` carries
+ * a user-facing "Agent is currently …" message that the dashboard surfaces.
+ */
+type AcquireOpResult = { ok: true } | { ok: false; stderr: string };
+
+/**
+ * Shared preflight for the three slow agent ops (merge-check, merge, restart).
+ * Reads the durable, cross-process op marker from meta.transient.json:
+ *  - if an op is in flight AND its holder process is alive AND it has not run
+ *    past OP_STUCK_TIMEOUT_MS → refuse.
+ *  - otherwise (no op, the holder has died → crash reclaim, or the op is older
+ *    than the stuck timeout → age reclaim) → take the marker for `kind` and
+ *    proceed.
+ *
+ * The age-reclaim branch keeps this consistent with detectAgentStates, which
+ * paints `op_stuck` on `holderDead || tooOld`. Without it, a crash followed by
+ * OS PID-reuse (the dead holder's pid now belongs to an unrelated live process)
+ * would make this guard refuse retries forever while the dashboard shows
+ * op_stuck — the two would disagree about the same marker.
+ *
+ * The marker is cleared in the op's `finally`; a crash mid-op leaves it behind
+ * so the next acquire reclaims it (dead-holder or too-old) and detectAgentStates
+ * can paint `op_stuck`. Uses the injectable isPidAliveCtx/nowMsCtx so tests can
+ * stub liveness and time.
+ *
+ * kill/nuke/pause/reassign deliberately do NOT call this — they are the
+ * recovery path for a wedged op and must never be blocked by the guard.
+ */
+async function acquireAgentOperation(
+  agentDir: string,
+  kind: AgentOperationKind,
+): Promise<AcquireOpResult> {
+  const t = await readAgentTransient(agentDir);
+  const op = t?.operation;
+  if (op && op.pid > 0 && isPidAliveCtx.fn(op.pid)) {
+    const tooOld = nowMsCtx.fn() - op.started_at_ms > OP_STUCK_TIMEOUT_MS;
+    if (!tooOld) {
+      return {
+        ok: false,
+        stderr: `Agent is currently ${humanizeOpKind(op.kind)} (pid ${op.pid}) — try again when it finishes`,
+      };
+    }
+    // live holder but op ran past the stuck timeout → age reclaim.
+  }
+  // op absent, holder dead, or op too old → reclaim and proceed.
+  await setAgentOperation(agentDir, { kind, pid: process.pid, started_at_ms: nowMsCtx.fn() });
+  return { ok: true };
 }
 
 /** Spawn context for kill/pause operations */
@@ -390,110 +461,120 @@ export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
     return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' not found` };
   }
 
-  // Per-repo coordinators: R triggers a full reset rather than a session resume.
-  // The coordinator's settings.local.json is assembled from three sources at
-  // spawn time (hardcoded constants, _all.md, coordinator.md), and its hooks
-  // template is rebuilt then. Resuming the existing session would reuse stale
-  // permissions and hooks, so we tear the coordinator down and respawn it
-  // — fresher, simpler, and matches the user's mental model of "R to reset".
-  if (agent.meta.agentType === "coordinator") {
-    return await resetCoordinator(agent);
+  // Acquire the long-running-op guard at the VERY TOP — above the coordinator
+  // early-return below — so coordinator resets are guarded against a double-R
+  // too. Op kind `restarting` covers both the resume and coordinator-reset
+  // paths. Refusal `stderr` is surfaced verbatim by the dashboard handler.
+  const acquired = await acquireAgentOperation(agentDir, "restarting");
+  if (!acquired.ok) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: acquired.stderr };
   }
 
-  // Resume is allowed when no live tmux session exists for the agent. We don't
-  // trust meta.state here because legacy paused agents (pre-Phase 42) may have a
-  // stale state like "complete" or "waiting" that pause never overwrote. Checking
-  // tmux directly lets those stuck agents self-heal.
-  //
-  // Two refusal cases:
-  // 1. tmux session is alive — agent is running, resuming would clobber it.
-  // 2. agent is in the 6s creating-grace-period and hasn't started tmux yet —
-  //    don't race with the spawn pipeline.
-  const tmuxSessionForGuard = agent.meta.tmux_session;
-  if (tmuxSessionForGuard) {
-    if (!isValidTmuxSession(tmuxSessionForGuard)) {
-      return { ok: false, exitCode: 1, stdout: "", stderr: `Invalid tmux session name: ${tmuxSessionForGuard}` };
-    }
-    const hasSession = await nukeResumeSpawnCtx.run(["tmux", "has-session", "-t", tmuxSessionForGuard]);
-    if (hasSession.exitCode === 0) {
-      return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' has a live tmux session ('${tmuxSessionForGuard}') — refuse to resume a running agent` };
-    }
-  } else if (isRecentlyCreated(agent.meta.created_epoch)) {
-    return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' is still being created — wait for spawn to complete before resuming` };
-  }
-
-  // Read session_id from meta.json
-  const sessionId = agent.meta.session_id;
-  if (!sessionId || sessionId === "null") {
-    return { ok: false, exitCode: 1, stdout: "", stderr: "No session_id found in meta.json" };
-  }
-
-  // Validate session_id before shell interpolation
-  if (!isValidSessionId(sessionId)) {
-    return { ok: false, exitCode: 1, stdout: "", stderr: `Invalid session ID: ${sessionId}` };
-  }
-
-  // Read model
-  const model = agent.meta.model && agent.meta.model !== "null" ? agent.meta.model : "";
-
-  // Validate model if present
-  if (model && !isValidModel(model)) {
-    return { ok: false, exitCode: 1, stdout: "", stderr: `Invalid model name: ${model}` };
-  }
-
-  // Tmux session was validated at the top of resumeAgent (liveness guard).
-  const tmuxSession = agent.meta.tmux_session;
-
-  // Detect yolo mode from start.sh
-  let yoloMode = false;
   try {
-    const startSh = await Bun.file(join(agentDir, "start.sh")).text();
-    if (startSh.includes("dangerously-skip-permissions")) {
-      yoloMode = true;
+    // Per-repo coordinators: R triggers a full reset rather than a session resume.
+    // The coordinator's settings.local.json is assembled from three sources at
+    // spawn time (hardcoded constants, _all.md, coordinator.md), and its hooks
+    // template is rebuilt then. Resuming the existing session would reuse stale
+    // permissions and hooks, so we tear the coordinator down and respawn it
+    // — fresher, simpler, and matches the user's mental model of "R to reset".
+    if (agent.meta.agentType === "coordinator") {
+      return await resetCoordinator(agent);
     }
-  } catch { /* start.sh may not exist */ }
 
-  // Build claude args
-  let claudeArgs = "";
-  if (yoloMode) {
-    claudeArgs = "--dangerously-skip-permissions --permission-mode bypassPermissions";
-  }
-  if (model) {
-    claudeArgs = claudeArgs ? `${claudeArgs} --model ${model}` : `--model ${model}`;
-  }
+    // Resume is allowed when no live tmux session exists for the agent. We don't
+    // trust meta.state here because legacy paused agents (pre-Phase 42) may have a
+    // stale state like "complete" or "waiting" that pause never overwrote. Checking
+    // tmux directly lets those stuck agents self-heal.
+    //
+    // Two refusal cases:
+    // 1. tmux session is alive — agent is running, resuming would clobber it.
+    // 2. agent is in the 6s creating-grace-period and hasn't started tmux yet —
+    //    don't race with the spawn pipeline.
+    const tmuxSessionForGuard = agent.meta.tmux_session;
+    if (tmuxSessionForGuard) {
+      if (!isValidTmuxSession(tmuxSessionForGuard)) {
+        return { ok: false, exitCode: 1, stdout: "", stderr: `Invalid tmux session name: ${tmuxSessionForGuard}` };
+      }
+      const hasSession = await nukeResumeSpawnCtx.run(["tmux", "has-session", "-t", tmuxSessionForGuard]);
+      if (hasSession.exitCode === 0) {
+        return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' has a live tmux session ('${tmuxSessionForGuard}') — refuse to resume a running agent` };
+      }
+    } else if (isRecentlyCreated(agent.meta.created_epoch)) {
+      return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' is still being created — wait for spawn to complete before resuming` };
+    }
 
-  // Note: per-repo coordinators never reach this point — the early branch at
-  // the top of resumeAgent routes them to resetCoordinator instead. So no
-  // need to re-thread --settings to the (no-longer-relevant) saved coordinator
-  // settings file here.
+    // Read session_id from meta.json
+    const sessionId = agent.meta.session_id;
+    if (!sessionId || sessionId === "null") {
+      return { ok: false, exitCode: 1, stdout: "", stderr: "No session_id found in meta.json" };
+    }
 
-  // Validate paths for shell script interpolation
-  if (!isValidShellPath(agentDir)) {
-    return { ok: false, exitCode: 1, stdout: "", stderr: `Agent directory path contains characters unsafe for shell scripts: ${agentDir}` };
-  }
+    // Validate session_id before shell interpolation
+    if (!isValidSessionId(sessionId)) {
+      return { ok: false, exitCode: 1, stdout: "", stderr: `Invalid session ID: ${sessionId}` };
+    }
 
-  // Determine work dir
-  const repoDir = join(agentDir, "repo");
-  let workPath = repoDir;
-  try {
-    await readdir(repoDir);
-  } catch {
-    workPath = agent.repoPath;
-  }
+    // Read model
+    const model = agent.meta.model && agent.meta.model !== "null" ? agent.meta.model : "";
 
-  // Build exit script path
-  const absExitScript = join(agentDir, "exit-check.sh");
+    // Validate model if present
+    if (model && !isValidModel(model)) {
+      return { ok: false, exitCode: 1, stdout: "", stderr: `Invalid model name: ${model}` };
+    }
 
-  // Shell-quote all paths for safe interpolation
-  const qAgentDir = shellQuote(agentDir);
-  const qAbsExitScript = shellQuote(absExitScript);
+    // Tmux session was validated at the top of resumeAgent (liveness guard).
+    const tmuxSession = agent.meta.tmux_session;
 
-  // Write resume.sh
-  const resumeScript = join(agentDir, "resume.sh");
-  const qMetaJson = shellQuote(join(agentDir, "meta.json"));
-  const qAgentLog = shellQuote(join(agentDir, "agent.log"));
-  const qResumeStderrLog = shellQuote(join(agentDir, "claude.stderr.log"));
-  const resumeContent = `#!/bin/bash
+    // Detect yolo mode from start.sh
+    let yoloMode = false;
+    try {
+      const startSh = await Bun.file(join(agentDir, "start.sh")).text();
+      if (startSh.includes("dangerously-skip-permissions")) {
+        yoloMode = true;
+      }
+    } catch { /* start.sh may not exist */ }
+
+    // Build claude args
+    let claudeArgs = "";
+    if (yoloMode) {
+      claudeArgs = "--dangerously-skip-permissions --permission-mode bypassPermissions";
+    }
+    if (model) {
+      claudeArgs = claudeArgs ? `${claudeArgs} --model ${model}` : `--model ${model}`;
+    }
+
+    // Note: per-repo coordinators never reach this point — the early branch at
+    // the top of resumeAgent routes them to resetCoordinator instead. So no
+    // need to re-thread --settings to the (no-longer-relevant) saved coordinator
+    // settings file here.
+
+    // Validate paths for shell script interpolation
+    if (!isValidShellPath(agentDir)) {
+      return { ok: false, exitCode: 1, stdout: "", stderr: `Agent directory path contains characters unsafe for shell scripts: ${agentDir}` };
+    }
+
+    // Determine work dir
+    const repoDir = join(agentDir, "repo");
+    let workPath = repoDir;
+    try {
+      await readdir(repoDir);
+    } catch {
+      workPath = agent.repoPath;
+    }
+
+    // Build exit script path
+    const absExitScript = join(agentDir, "exit-check.sh");
+
+    // Shell-quote all paths for safe interpolation
+    const qAgentDir = shellQuote(agentDir);
+    const qAbsExitScript = shellQuote(absExitScript);
+
+    // Write resume.sh
+    const resumeScript = join(agentDir, "resume.sh");
+    const qMetaJson = shellQuote(join(agentDir, "meta.json"));
+    const qAgentLog = shellQuote(join(agentDir, "agent.log"));
+    const qResumeStderrLog = shellQuote(join(agentDir, "claude.stderr.log"));
+    const resumeContent = `#!/bin/bash
 # Clear Claude Code nesting detection so agents can start their own claude process
 unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT
 
@@ -578,114 +659,125 @@ fi
 # Run exit check
 ${qAbsExitScript}
 `;
-  await Bun.write(resumeScript, resumeContent);
-  await chmod(resumeScript, 0o755);
+    await Bun.write(resumeScript, resumeContent);
+    await chmod(resumeScript, 0o755);
 
-  // Ensure tmux server is running
-  const startServerResult = await nukeResumeSpawnCtx.run(["tmux", "start-server"]);
-  if (startServerResult.exitCode !== 0) {
-    return { ok: false, exitCode: 1, stdout: "", stderr: "Could not start tmux server" };
-  }
-
-  await logAgent(agentDir, `[resume] Creating tmux session '${tmuxSession}' in ${workPath}`);
-
-  // Start tmux session — use saved layout width so it matches the dashboard pane.
-  // Per-repo coordinators are routed to resetCoordinator earlier (see line 382),
-  // so only non-coordinator agents reach here — pass false for clarity. Route
-  // through getTmuxWidthForAgent so all agent-tmux sizing flows through one helper.
-  const resumeTmuxWidth = await getTmuxWidthForAgent(false);
-  const tmuxResult = await nukeResumeSpawnCtx.run([
-    "tmux", "new-session", "-d", "-x", String(resumeTmuxWidth), "-s", tmuxSession, "-c", workPath, shellQuote(resumeScript),
-  ]);
-  if (tmuxResult.exitCode !== 0) {
-    await logAgent(agentDir, `[resume] tmux new-session failed: exit=${tmuxResult.exitCode} stderr=${tmuxResult.stderr}`);
-    return { ok: false, exitCode: 1, stdout: "", stderr: `Could not create tmux session '${tmuxSession}'` };
-  }
-  await nukeResumeSpawnCtx.run(["tmux", "set-option", "-w", "-t", tmuxSession, "history-limit", "50000"]);
-  await nukeResumeSpawnCtx.run(["tmux", "set-option", "-w", "-t", tmuxSession, "remain-on-exit", "on"]);
-  // window-size manual prevents tmux from auto-resizing the window to the
-  // latest attached client's terminal size. The dashboard sizes the session
-  // to the saved pane width; the default ("latest") would silently shrink
-  // it back when other clients attach/detach.
-  await nukeResumeSpawnCtx.run(["tmux", "set-option", "-w", "-t", tmuxSession, "window-size", "manual"]);
-  // pane-died hook fires on every pane termination (graceful or otherwise)
-  // as a backstop for the case where resume.sh itself dies before reaching
-  // its exit-log line. See the new-agent path for the matching comment.
-  const resumePaneDiedHook = `run-shell "echo '[tmux pane-died] session=#{session_name} pane_dead_status=#{pane_dead_status} pane_dead_signal=#{pane_dead_signal}' >> ${shellQuote(join(agentDir, "agent.log"))}"`;
-  await nukeResumeSpawnCtx.run(["tmux", "set-hook", "-t", tmuxSession, "pane-died", resumePaneDiedHook]);
-
-  await logAgent(agentDir, "[resume] tmux session created, running autoAcceptWorkspaceTrust");
-
-  // Auto-accept workspace trust if not yolo (poll tmux for trust prompts)
-  // Must complete before sending nudge to avoid corrupting the permissions flow
-  if (!yoloMode) {
-    await autoAcceptWorkspaceTrust(tmuxSession);
-  }
-
-  await logAgent(agentDir, "[resume] autoAcceptWorkspaceTrust completed, sending nudge");
-
-  // Verify tmux session still exists before sending nudge
-  const verifyResult = await nukeResumeSpawnCtx.run(["tmux", "has-session", "-t", tmuxSession]);
-  if (verifyResult.exitCode !== 0) {
-    await logAgent(agentDir, "[resume] tmux session gone before nudge — Claude likely exited immediately");
-    return { ok: true, exitCode: 0, stdout: `Use 'ib look ${agent.id}' to view output`, stderr: "" };
-  }
-
-  // Send resume nudge after short delay
-  const nudgeDelayMs = resumeDelayOverrideMs !== null ? resumeDelayOverrideMs : 100;
-  if (nudgeDelayMs > 0) await Bun.sleep(nudgeDelayMs);
-
-  const nudgePrompt = "Resume your work, or end with 'WAITING' or 'I HAVE COMPLETED THE GOAL' as your final line.";
-  // `--` stops tmux flag parsing so a payload that begins with `-` (e.g. YAML
-  // frontmatter `---`) isn't mistaken for an option.
-  await nukeResumeSpawnCtx.run(["tmux", "send-keys", "-t", tmuxSession, "-l", "--", nudgePrompt]);
-
-  const nudgeSleepMs = resumeDelayOverrideMs !== null ? resumeDelayOverrideMs : 100;
-  if (nudgeSleepMs > 0) await Bun.sleep(nudgeSleepMs);
-
-  await nukeResumeSpawnCtx.run(["tmux", "send-keys", "-t", tmuxSession, "Enter"]);
-
-  // Log
-  await logAgent(agentDir, "[resume] Agent resumed, nudge sent");
-
-  // Write state: "running" to meta.json
-  await writeAgentState(agentDir, "running");
-
-  // Note: a freshly-resumed agent whose prior transcript already exceeds
-  // `autoCompactThreshold` won't receive `/compact` on the per-agent watchdog's
-  // first tick because `createTracker()` initializes `lastCompactCheckMs` to
-  // `nowFn()`, giving every new tracker a `COMPACT_CHECK_COOLDOWN_MS` grace
-  // period before the first eligibility check.
-
-  // Auto-spawn per-agent watchdog
-  try {
-    const watchdogLog = join(agentDir, "watchdog.log");
-    let watchdogPid: number | undefined;
-
-    if (watchdogSpawnOverride) {
-      const result = watchdogSpawnOverride(agent.id, agent.repoPath, watchdogLog);
-      watchdogPid = result?.pid;
-    } else {
-      const watchdogProc = Bun.spawn(["ib", "watchdog", agent.id], {
-        cwd: agent.repoPath,
-        stdout: Bun.file(watchdogLog),
-        stderr: Bun.file(watchdogLog),
-      });
-      watchdogProc.unref();
-      watchdogPid = watchdogProc.pid;
+    // Ensure tmux server is running
+    const startServerResult = await nukeResumeSpawnCtx.run(["tmux", "start-server"]);
+    if (startServerResult.exitCode !== 0) {
+      return { ok: false, exitCode: 1, stdout: "", stderr: "Could not start tmux server" };
     }
 
-    if (watchdogPid !== undefined) {
-      const metaPath = join(agentDir, "meta.json");
-      const metaContent = await Bun.file(metaPath).json().catch(() => null);
-      if (metaContent) {
-        metaContent.watchdog_pid = watchdogPid;
-        await Bun.write(metaPath, JSON.stringify(metaContent, null, 2));
+    await logAgent(agentDir, `[resume] Creating tmux session '${tmuxSession}' in ${workPath}`);
+
+    // Start tmux session — use saved layout width so it matches the dashboard pane.
+    // Per-repo coordinators are routed to resetCoordinator earlier (see line 382),
+    // so only non-coordinator agents reach here — pass false for clarity. Route
+    // through getTmuxWidthForAgent so all agent-tmux sizing flows through one helper.
+    const resumeTmuxWidth = await getTmuxWidthForAgent(false);
+    const tmuxResult = await nukeResumeSpawnCtx.run([
+      "tmux", "new-session", "-d", "-x", String(resumeTmuxWidth), "-s", tmuxSession, "-c", workPath, shellQuote(resumeScript),
+    ]);
+    if (tmuxResult.exitCode !== 0) {
+      await logAgent(agentDir, `[resume] tmux new-session failed: exit=${tmuxResult.exitCode} stderr=${tmuxResult.stderr}`);
+      return { ok: false, exitCode: 1, stdout: "", stderr: `Could not create tmux session '${tmuxSession}'` };
+    }
+    await nukeResumeSpawnCtx.run(["tmux", "set-option", "-w", "-t", tmuxSession, "history-limit", "50000"]);
+    await nukeResumeSpawnCtx.run(["tmux", "set-option", "-w", "-t", tmuxSession, "remain-on-exit", "on"]);
+    // window-size manual prevents tmux from auto-resizing the window to the
+    // latest attached client's terminal size. The dashboard sizes the session
+    // to the saved pane width; the default ("latest") would silently shrink
+    // it back when other clients attach/detach.
+    await nukeResumeSpawnCtx.run(["tmux", "set-option", "-w", "-t", tmuxSession, "window-size", "manual"]);
+    // pane-died hook fires on every pane termination (graceful or otherwise)
+    // as a backstop for the case where resume.sh itself dies before reaching
+    // its exit-log line. See the new-agent path for the matching comment.
+    const resumePaneDiedHook = `run-shell "echo '[tmux pane-died] session=#{session_name} pane_dead_status=#{pane_dead_status} pane_dead_signal=#{pane_dead_signal}' >> ${shellQuote(join(agentDir, "agent.log"))}"`;
+    await nukeResumeSpawnCtx.run(["tmux", "set-hook", "-t", tmuxSession, "pane-died", resumePaneDiedHook]);
+
+    await logAgent(agentDir, "[resume] tmux session created, running autoAcceptWorkspaceTrust");
+
+    // Auto-accept workspace trust if not yolo (poll tmux for trust prompts)
+    // Must complete before sending nudge to avoid corrupting the permissions flow
+    if (!yoloMode) {
+      await autoAcceptWorkspaceTrust(tmuxSession);
+    }
+
+    await logAgent(agentDir, "[resume] autoAcceptWorkspaceTrust completed, sending nudge");
+
+    // Verify tmux session still exists before sending nudge
+    const verifyResult = await nukeResumeSpawnCtx.run(["tmux", "has-session", "-t", tmuxSession]);
+    if (verifyResult.exitCode !== 0) {
+      await logAgent(agentDir, "[resume] tmux session gone before nudge — Claude likely exited immediately");
+      return { ok: true, exitCode: 0, stdout: `Use 'ib look ${agent.id}' to view output`, stderr: "" };
+    }
+
+    // Send resume nudge after short delay
+    const nudgeDelayMs = resumeDelayOverrideMs !== null ? resumeDelayOverrideMs : 100;
+    if (nudgeDelayMs > 0) await Bun.sleep(nudgeDelayMs);
+
+    const nudgePrompt = "Resume your work, or end with 'WAITING' or 'I HAVE COMPLETED THE GOAL' as your final line.";
+    // `--` stops tmux flag parsing so a payload that begins with `-` (e.g. YAML
+    // frontmatter `---`) isn't mistaken for an option.
+    await nukeResumeSpawnCtx.run(["tmux", "send-keys", "-t", tmuxSession, "-l", "--", nudgePrompt]);
+
+    const nudgeSleepMs = resumeDelayOverrideMs !== null ? resumeDelayOverrideMs : 100;
+    if (nudgeSleepMs > 0) await Bun.sleep(nudgeSleepMs);
+
+    await nukeResumeSpawnCtx.run(["tmux", "send-keys", "-t", tmuxSession, "Enter"]);
+
+    // Log
+    await logAgent(agentDir, "[resume] Agent resumed, nudge sent");
+
+    // Write state: "running" to meta.json
+    await writeAgentState(agentDir, "running");
+
+    // Note: a freshly-resumed agent whose prior transcript already exceeds
+    // `autoCompactThreshold` won't receive `/compact` on the per-agent watchdog's
+    // first tick because `createTracker()` initializes `lastCompactCheckMs` to
+    // `nowFn()`, giving every new tracker a `COMPACT_CHECK_COOLDOWN_MS` grace
+    // period before the first eligibility check.
+
+    // Auto-spawn per-agent watchdog
+    try {
+      const watchdogLog = join(agentDir, "watchdog.log");
+      let watchdogPid: number | undefined;
+
+      if (watchdogSpawnOverride) {
+        const result = watchdogSpawnOverride(agent.id, agent.repoPath, watchdogLog);
+        watchdogPid = result?.pid;
+      } else {
+        const watchdogProc = Bun.spawn(["ib", "watchdog", agent.id], {
+          cwd: agent.repoPath,
+          stdout: Bun.file(watchdogLog),
+          stderr: Bun.file(watchdogLog),
+        });
+        watchdogProc.unref();
+        watchdogPid = watchdogProc.pid;
       }
-    }
-  } catch { /* ignore */ }
 
-  return { ok: true, exitCode: 0, stdout: `Use 'ib look ${agent.id}' to view output`, stderr: "" };
+      if (watchdogPid !== undefined) {
+        const metaPath = join(agentDir, "meta.json");
+        const metaContent = await Bun.file(metaPath).json().catch(() => null);
+        if (metaContent) {
+          metaContent.watchdog_pid = watchdogPid;
+          await Bun.write(metaPath, JSON.stringify(metaContent, null, 2));
+        }
+      }
+    } catch { /* ignore */ }
+
+    return { ok: true, exitCode: 0, stdout: `Use 'ib look ${agent.id}' to view output`, stderr: "" };
+  } finally {
+    // Clear the op marker on every return path (the body above has many early
+    // returns). On most paths the dir exists and the marker — if it's still
+    // ours — is cleared. Safe regardless of the dir's fate: clearAgentOperation
+    // is ENOENT-safe (updateAgentTransient's best-effort try/catch no-ops on a
+    // missing dir) AND compare-and-swap (it only nulls a marker whose pid is
+    // ours). So the coordinator path — where resetCoordinator removes the dir
+    // and the success path respawns it — clears safely whether the dir was
+    // removed, recreated, or its marker was age-reclaimed by another op.
+    await clearAgentOperation(agentDir);
+  }
 }
 
 /** Override the respawn detach runner (for testing) */
@@ -1089,61 +1181,72 @@ export async function mergeCheckAgent(agent: Agent): Promise<IbCommandResult> {
   const worktreePath = join(agentDir, "repo");
   const branchName = `agent/${agent.id}`;
 
-  // 1. Check worktree exists + no uncommitted changes
-  const worktreeCheck = await timed("merge-check", "worktree-check", async () => {
-    try {
-      await readdir(worktreePath);
-    } catch {
-      return { ok: false as const, stderr: `Agent '${agent.id}' has no worktree` };
-    }
-    const worktreeStatus = await mergeSpawnCtx.run(["git", "-C", worktreePath, "status", "--porcelain"]);
-    if (worktreeStatus.exitCode === 0 && worktreeStatus.stdout.trim()) {
-      return { ok: false as const, stderr: `Agent '${agent.id}' has uncommitted changes` };
-    }
-    return { ok: true as const };
-  });
-  if (!worktreeCheck.ok) {
-    return { ok: false, exitCode: 1, stdout: "", stderr: worktreeCheck.stderr };
+  // Long-running-op guard: refuse if another op (check/merge/restart) is in
+  // flight with a live holder; reclaim on a dead holder. Cleared in `finally`.
+  const acquired = await acquireAgentOperation(agentDir, "merge_check");
+  if (!acquired.ok) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: acquired.stderr };
   }
 
-  // 2. Check main + agent branches exist
-  const branchCheck = await timed("merge-check", "branch-resolve", async () => {
-    const mainRef = await mergeSpawnCtx.run(["git", "-C", agent.repoPath, "show-ref", "--verify", "refs/heads/main"]);
-    if (mainRef.exitCode !== 0) {
-      return { ok: false as const, stderr: "Main branch not found" };
+  try {
+    // 1. Check worktree exists + no uncommitted changes
+    const worktreeCheck = await timed("merge-check", "worktree-check", async () => {
+      try {
+        await readdir(worktreePath);
+      } catch {
+        return { ok: false as const, stderr: `Agent '${agent.id}' has no worktree` };
+      }
+      const worktreeStatus = await mergeSpawnCtx.run(["git", "-C", worktreePath, "status", "--porcelain"]);
+      if (worktreeStatus.exitCode === 0 && worktreeStatus.stdout.trim()) {
+        return { ok: false as const, stderr: `Agent '${agent.id}' has uncommitted changes` };
+      }
+      return { ok: true as const };
+    });
+    if (!worktreeCheck.ok) {
+      return { ok: false, exitCode: 1, stdout: "", stderr: worktreeCheck.stderr };
     }
-    const branchRef = await mergeSpawnCtx.run(["git", "-C", agent.repoPath, "show-ref", "--verify", `refs/heads/${branchName}`]);
-    if (branchRef.exitCode !== 0) {
-      return { ok: false as const, stderr: `Branch '${branchName}' does not exist` };
-    }
-    return { ok: true as const };
-  });
-  if (!branchCheck.ok) {
-    return { ok: false, exitCode: 1, stdout: "", stderr: branchCheck.stderr };
-  }
 
-  // 3. Pre-rebase conflict check
-  const conflictResult = await timed("merge-check", "conflict-detect", () =>
-    checkRebaseConflicts(agent.repoPath, "main", branchName)
-  );
-  if (!conflictResult.ok) {
+    // 2. Check main + agent branches exist
+    const branchCheck = await timed("merge-check", "branch-resolve", async () => {
+      const mainRef = await mergeSpawnCtx.run(["git", "-C", agent.repoPath, "show-ref", "--verify", "refs/heads/main"]);
+      if (mainRef.exitCode !== 0) {
+        return { ok: false as const, stderr: "Main branch not found" };
+      }
+      const branchRef = await mergeSpawnCtx.run(["git", "-C", agent.repoPath, "show-ref", "--verify", `refs/heads/${branchName}`]);
+      if (branchRef.exitCode !== 0) {
+        return { ok: false as const, stderr: `Branch '${branchName}' does not exist` };
+      }
+      return { ok: true as const };
+    });
+    if (!branchCheck.ok) {
+      return { ok: false, exitCode: 1, stdout: "", stderr: branchCheck.stderr };
+    }
+
+    // 3. Pre-rebase conflict check
+    const conflictResult = await timed("merge-check", "conflict-detect", () =>
+      checkRebaseConflicts(agent.repoPath, "main", branchName)
+    );
+    if (!conflictResult.ok) {
+      return {
+        ok: false, exitCode: 1, stdout: "",
+        stderr: `Rebase conflict detected between '${branchName}' and 'main'`,
+      };
+    }
+
+    // 4. Count commits
+    const commitCount = await timed("merge-check", "commit-count", async () => {
+      const logResult = await mergeSpawnCtx.run(["git", "-C", agent.repoPath, "log", `main..${branchName}`, "--oneline"]);
+      return logResult.stdout.trim() ? logResult.stdout.trim().split("\n").length : 0;
+    });
+
     return {
-      ok: false, exitCode: 1, stdout: "",
-      stderr: `Rebase conflict detected between '${branchName}' and 'main'`,
+      ok: true, exitCode: 0,
+      stdout: `Merge check passed: ${commitCount} commit(s), no conflicts, no uncommitted changes`,
+      stderr: "",
     };
+  } finally {
+    await clearAgentOperation(agentDir);
   }
-
-  // 4. Count commits
-  const commitCount = await timed("merge-check", "commit-count", async () => {
-    const logResult = await mergeSpawnCtx.run(["git", "-C", agent.repoPath, "log", `main..${branchName}`, "--oneline"]);
-    return logResult.stdout.trim() ? logResult.stdout.trim().split("\n").length : 0;
-  });
-
-  return {
-    ok: true, exitCode: 0,
-    stdout: `Merge check passed: ${commitCount} commit(s), no conflicts, no uncommitted changes`,
-    stderr: "",
-  };
 }
 
 /** Pluggable spawn runner for merge — defaults to Bun.spawn, overridable for tests */
@@ -1240,199 +1343,215 @@ export async function mergeAgent(agent: Agent, targetDir: string): Promise<IbCom
   const worktreePath = join(agentDir, "repo");
   const tmuxSession = agent.meta.tmux_session;
 
-  // 1-6. Preflight: agent dir, worktree, statuses, target branch, branch existence
-  const preflight = await timed("merge", "preflight", async () => {
-    // 1. Agent dir must exist
-    const dirExists = await Bun.file(join(agentDir, "meta.json")).exists().catch(() => false);
-    if (!dirExists) {
-      return { ok: false as const, stderr: `Agent '${agent.id}' not found` };
-    }
+  // Long-running-op guard: refuse if another op (check/merge/restart) is in
+  // flight with a live holder; reclaim on a dead holder. Cleared in `finally`.
+  const acquired = await acquireAgentOperation(agentDir, "merging");
+  if (!acquired.ok) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: acquired.stderr };
+  }
 
-    // 2. Agent must have a worktree
-    try {
-      await readdir(worktreePath);
-    } catch {
-      return { ok: false as const, stderr: `Agent '${agent.id}' has no worktree (was created with --no-worktree?)` };
-    }
+  try {
+    // 1-6. Preflight: agent dir, worktree, statuses, target branch, branch existence
+    const preflight = await timed("merge", "preflight", async () => {
+      // 1. Agent dir must exist
+      const dirExists = await Bun.file(join(agentDir, "meta.json")).exists().catch(() => false);
+      if (!dirExists) {
+        return { ok: false as const, stderr: `Agent '${agent.id}' not found` };
+      }
 
-    // 2b. Cannot merge from within the agent's own worktree
-    const currentDir = process.cwd();
-    if (currentDir.startsWith(worktreePath)) {
-      return { ok: false as const, stderr: "Cannot merge agent from within its own worktree" };
-    }
+      // 2. Agent must have a worktree
+      try {
+        await readdir(worktreePath);
+      } catch {
+        return { ok: false as const, stderr: `Agent '${agent.id}' has no worktree (was created with --no-worktree?)` };
+      }
 
-    // 3. Agent worktree must have no uncommitted changes
-    const worktreeStatus = await mergeSpawnCtx.run(["git", "-C", worktreePath, "status", "--porcelain"]);
-    if (worktreeStatus.exitCode === 0 && worktreeStatus.stdout.trim()) {
-      return { ok: false as const, stderr: `Agent '${agent.id}' has uncommitted changes` };
-    }
+      // 2b. Cannot merge from within the agent's own worktree
+      const currentDir = process.cwd();
+      if (currentDir.startsWith(worktreePath)) {
+        return { ok: false as const, stderr: "Cannot merge agent from within its own worktree" };
+      }
 
-    // 4. Detect target branch from targetDir
-    let targetBranch = "";
-    const currentBranch = await mergeSpawnCtx.run(["git", "-C", targetDir, "branch", "--show-current"]);
-    if (currentBranch.exitCode === 0 && currentBranch.stdout.trim()) {
-      targetBranch = currentBranch.stdout.trim();
-    }
-    if (!targetBranch) {
-      const mainRef = await mergeSpawnCtx.run(["git", "show-ref", "--verify", "refs/heads/main"]);
-      if (mainRef.exitCode === 0) {
-        targetBranch = "main";
-      } else {
-        const masterRef = await mergeSpawnCtx.run(["git", "show-ref", "--verify", "refs/heads/master"]);
-        if (masterRef.exitCode === 0) {
-          targetBranch = "master";
+      // 3. Agent worktree must have no uncommitted changes
+      const worktreeStatus = await mergeSpawnCtx.run(["git", "-C", worktreePath, "status", "--porcelain"]);
+      if (worktreeStatus.exitCode === 0 && worktreeStatus.stdout.trim()) {
+        return { ok: false as const, stderr: `Agent '${agent.id}' has uncommitted changes` };
+      }
+
+      // 4. Detect target branch from targetDir
+      let targetBranch = "";
+      const currentBranch = await mergeSpawnCtx.run(["git", "-C", targetDir, "branch", "--show-current"]);
+      if (currentBranch.exitCode === 0 && currentBranch.stdout.trim()) {
+        targetBranch = currentBranch.stdout.trim();
+      }
+      if (!targetBranch) {
+        const mainRef = await mergeSpawnCtx.run(["git", "show-ref", "--verify", "refs/heads/main"]);
+        if (mainRef.exitCode === 0) {
+          targetBranch = "main";
         } else {
-          return { ok: false as const, stderr: "Could not determine target branch (detached HEAD with no main/master)" };
+          const masterRef = await mergeSpawnCtx.run(["git", "show-ref", "--verify", "refs/heads/master"]);
+          if (masterRef.exitCode === 0) {
+            targetBranch = "master";
+          } else {
+            return { ok: false as const, stderr: "Could not determine target branch (detached HEAD with no main/master)" };
+          }
         }
       }
-    }
 
-    // 5. Agent branch must exist
-    const branchRef = await mergeSpawnCtx.run(["git", "-C", agent.repoPath, "show-ref", "--verify", `refs/heads/${branchName}`]);
-    if (branchRef.exitCode !== 0) {
-      return { ok: false as const, stderr: `Branch '${branchName}' does not exist` };
-    }
-
-    // 6. Target directory must have no uncommitted changes
-    const repoStatus = await mergeSpawnCtx.run(["git", "-C", targetDir, "status", "--porcelain"]);
-    if (repoStatus.exitCode === 0 && repoStatus.stdout.trim()) {
-      return { ok: false as const, stderr: "Target directory has uncommitted changes" };
-    }
-
-    return { ok: true as const, targetBranch };
-  });
-  if (!preflight.ok) {
-    return { ok: false, exitCode: 1, stdout: "", stderr: preflight.stderr };
-  }
-  const targetBranch = preflight.targetBranch;
-
-  // 7. Pre-rebase conflict check
-  const conflictResult = await timed("merge", "conflict-check", () =>
-    checkRebaseConflicts(agent.repoPath, targetBranch, branchName)
-  );
-  if (!conflictResult.ok) {
-    await logAgent(agentDir, `Pre-rebase conflict check failed - conflicts detected with ${targetBranch}`);
-    return {
-      ok: false, exitCode: 1, stdout: "",
-      stderr: `Rebase conflict detected between '${branchName}' and '${targetBranch}'`,
-    };
-  }
-
-  // Count commits to merge
-  const logResult = await mergeSpawnCtx.run(["git", "-C", agent.repoPath, "log", `${targetBranch}..${branchName}`, "--oneline"]);
-  const commitCount = logResult.stdout.trim() ? logResult.stdout.trim().split("\n").length : 0;
-
-  await logAgent(agentDir, `Starting rebase of ${branchName} onto ${targetBranch} (${commitCount} commits)`);
-
-  if (commitCount > 0) {
-    // 8. Rebase agent branch onto target (in agent's worktree)
-    const rebaseOk = await timed("merge", "git-rebase", async () => {
-      await logAgent(agentDir, `Rebasing ${branchName} onto ${targetBranch}...`);
-      const rebaseResult = await mergeSpawnCtx.run(["git", "-C", worktreePath, "rebase", targetBranch]);
-      if (rebaseResult.exitCode !== 0) {
-        return { ok: false as const, stderr: `Rebase failed: ${rebaseResult.stderr || rebaseResult.stdout}` };
+      // 5. Agent branch must exist
+      const branchRef = await mergeSpawnCtx.run(["git", "-C", agent.repoPath, "show-ref", "--verify", `refs/heads/${branchName}`]);
+      if (branchRef.exitCode !== 0) {
+        return { ok: false as const, stderr: `Branch '${branchName}' does not exist` };
       }
-      await logAgent(agentDir, "Rebase completed successfully");
-      return { ok: true as const };
+
+      // 6. Target directory must have no uncommitted changes
+      const repoStatus = await mergeSpawnCtx.run(["git", "-C", targetDir, "status", "--porcelain"]);
+      if (repoStatus.exitCode === 0 && repoStatus.stdout.trim()) {
+        return { ok: false as const, stderr: "Target directory has uncommitted changes" };
+      }
+
+      return { ok: true as const, targetBranch };
     });
-    if (!rebaseOk.ok) {
-      return { ok: false, exitCode: 1, stdout: "", stderr: rebaseOk.stderr };
+    if (!preflight.ok) {
+      return { ok: false, exitCode: 1, stdout: "", stderr: preflight.stderr };
+    }
+    const targetBranch = preflight.targetBranch;
+
+    // 7. Pre-rebase conflict check
+    const conflictResult = await timed("merge", "conflict-check", () =>
+      checkRebaseConflicts(agent.repoPath, targetBranch, branchName)
+    );
+    if (!conflictResult.ok) {
+      await logAgent(agentDir, `Pre-rebase conflict check failed - conflicts detected with ${targetBranch}`);
+      return {
+        ok: false, exitCode: 1, stdout: "",
+        stderr: `Rebase conflict detected between '${branchName}' and '${targetBranch}'`,
+      };
     }
 
-    // 9-10. Checkout target branch + merge
-    const mergeOk = await timed("merge", "git-merge", async () => {
-      await logAgent(agentDir, `Checking out ${targetBranch}...`);
-      const checkoutResult = await mergeSpawnCtx.run(["git", "-C", targetDir, "checkout", targetBranch]);
-      if (checkoutResult.exitCode !== 0) {
-        return { ok: false as const, stderr: `Could not checkout ${targetBranch}: ${checkoutResult.stderr || checkoutResult.stdout}` };
+    // Count commits to merge
+    const logResult = await mergeSpawnCtx.run(["git", "-C", agent.repoPath, "log", `${targetBranch}..${branchName}`, "--oneline"]);
+    const commitCount = logResult.stdout.trim() ? logResult.stdout.trim().split("\n").length : 0;
+
+    await logAgent(agentDir, `Starting rebase of ${branchName} onto ${targetBranch} (${commitCount} commits)`);
+
+    if (commitCount > 0) {
+      // 8. Rebase agent branch onto target (in agent's worktree)
+      const rebaseOk = await timed("merge", "git-rebase", async () => {
+        await logAgent(agentDir, `Rebasing ${branchName} onto ${targetBranch}...`);
+        const rebaseResult = await mergeSpawnCtx.run(["git", "-C", worktreePath, "rebase", targetBranch]);
+        if (rebaseResult.exitCode !== 0) {
+          return { ok: false as const, stderr: `Rebase failed: ${rebaseResult.stderr || rebaseResult.stdout}` };
+        }
+        await logAgent(agentDir, "Rebase completed successfully");
+        return { ok: true as const };
+      });
+      if (!rebaseOk.ok) {
+        return { ok: false, exitCode: 1, stdout: "", stderr: rebaseOk.stderr };
       }
 
-      const runningAsAgent = await isRunningAsAgent();
-      if (runningAsAgent) {
-        await logAgent(agentDir, `Fast-forwarding ${targetBranch} to ${branchName}...`);
-        const ffResult = await mergeSpawnCtx.run(["git", "-C", targetDir, "merge", "--ff-only", branchName]);
-        if (ffResult.exitCode !== 0) {
-          return { ok: false as const, stderr: `Fast-forward failed: ${ffResult.stderr || ffResult.stdout}` };
+      // 9-10. Checkout target branch + merge
+      const mergeOk = await timed("merge", "git-merge", async () => {
+        await logAgent(agentDir, `Checking out ${targetBranch}...`);
+        const checkoutResult = await mergeSpawnCtx.run(["git", "-C", targetDir, "checkout", targetBranch]);
+        if (checkoutResult.exitCode !== 0) {
+          return { ok: false as const, stderr: `Could not checkout ${targetBranch}: ${checkoutResult.stderr || checkoutResult.stdout}` };
         }
-        await logAgent(agentDir, "Fast-forward merge completed successfully");
-      } else {
-        await logAgent(agentDir, `Merging ${branchName} with --no-ff...`);
-        const noFFResult = await mergeSpawnCtx.run(["git", "-C", targetDir, "merge", "--no-ff", branchName, "-m", `Merge agent ${agent.id} work`]);
-        if (noFFResult.exitCode !== 0) {
-          return { ok: false as const, stderr: `Merge failed: ${noFFResult.stderr || noFFResult.stdout}` };
+
+        const runningAsAgent = await isRunningAsAgent();
+        if (runningAsAgent) {
+          await logAgent(agentDir, `Fast-forwarding ${targetBranch} to ${branchName}...`);
+          const ffResult = await mergeSpawnCtx.run(["git", "-C", targetDir, "merge", "--ff-only", branchName]);
+          if (ffResult.exitCode !== 0) {
+            return { ok: false as const, stderr: `Fast-forward failed: ${ffResult.stderr || ffResult.stdout}` };
+          }
+          await logAgent(agentDir, "Fast-forward merge completed successfully");
+        } else {
+          await logAgent(agentDir, `Merging ${branchName} with --no-ff...`);
+          const noFFResult = await mergeSpawnCtx.run(["git", "-C", targetDir, "merge", "--no-ff", branchName, "-m", `Merge agent ${agent.id} work`]);
+          if (noFFResult.exitCode !== 0) {
+            return { ok: false as const, stderr: `Merge failed: ${noFFResult.stderr || noFFResult.stdout}` };
+          }
+          await logAgent(agentDir, "Merge completed successfully");
         }
-        await logAgent(agentDir, "Merge completed successfully");
+        return { ok: true as const };
+      });
+      if (!mergeOk.ok) {
+        return { ok: false, exitCode: 1, stdout: "", stderr: mergeOk.stderr };
       }
-      return { ok: true as const };
+    }
+
+    // 11. Capture tmux output before killing
+    await timed("merge", "tmux-capture", async () => {
+      await logAgent(agentDir, "Capturing tmux output...");
+      if (tmuxSession) {
+        const hasSession = await mergeSpawnCtx.run(["tmux", "has-session", "-t", tmuxSession]);
+        if (hasSession.exitCode === 0) {
+          await captureTmuxOutputToFile(tmuxSession, join(agentDir, "output.log"));
+        }
+      }
     });
-    if (!mergeOk.ok) {
-      return { ok: false, exitCode: 1, stdout: "", stderr: mergeOk.stderr };
-    }
+
+    // 12-13. Kill Claude process + tmux session
+    await timed("merge", "tmux-cleanup", async () => {
+      await logAgent(agentDir, "Terminating Claude process...");
+      const killed = await killAgentProcess(tmuxSession, { claude_pid: agent.meta.claude_pid });
+      if (killed) {
+        await logAgent(agentDir, "Claude process terminated");
+      }
+      if (tmuxSession) {
+        const hasSession2 = await mergeSpawnCtx.run(["tmux", "has-session", "-t", tmuxSession]);
+        if (hasSession2.exitCode === 0) {
+          await mergeSpawnCtx.run(["tmux", "kill-session", "-t", tmuxSession]);
+          await logAgent(agentDir, "Tmux session stopped");
+        }
+      }
+    });
+
+    // 14-16. Copy settings, remove worktree, delete branch
+    await timed("merge", "worktree-cleanup", async () => {
+      const settingsPath = join(worktreePath, ".claude", "settings.local.json");
+      try {
+        if (await Bun.file(settingsPath).exists()) {
+          const content = await Bun.file(settingsPath).text();
+          await Bun.write(join(agentDir, "settings.local.json"), content);
+        }
+      } catch { /* ignore */ }
+
+      await logAgent(agentDir, "Removing worktree...");
+      const removeResult = await mergeSpawnCtx.run(["git", "-C", agent.repoPath, "worktree", "remove", worktreePath, "--force"]);
+      if (removeResult.exitCode !== 0) {
+        try { await rm(worktreePath, { recursive: true, force: true }); } catch { /* ignore */ }
+      }
+      await logAgent(agentDir, "Worktree removed");
+
+      await logAgent(agentDir, `Deleting branch ${branchName}...`);
+      const deleteBranch = await mergeSpawnCtx.run(["git", "-C", agent.repoPath, "branch", "-D", branchName]);
+      if (deleteBranch.exitCode === 0) {
+        await logAgent(agentDir, `Branch deleted: ${branchName}`);
+      }
+    });
+
+    // 17-19. Archive artifacts, remove questions, remove agent dir
+    await timed("merge", "archive", async () => {
+      await logAgent(agentDir, "Merge complete - archiving and closing agent");
+      await archiveAgent(agent.repoPath, agent.id, agentDir);
+      await removeAgentQuestions(agent.repoPath, agent.id);
+      try { await rm(agentDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    });
+
+    // 20. Scan for orphaned Claude processes
+    await timed("merge", "orphan-scan", () => scanAndKillOrphans(agentsDir));
+
+    return { ok: true, exitCode: 0, stdout: `Closed agent: ${agent.id}`, stderr: "" };
+  } finally {
+    // Clear the op marker on every return path. On the SUCCESS path the agent
+    // dir was already removed at step 17-19, so this writes into a now-gone
+    // dir — ENOENT-safe via updateAgentTransient's best-effort try/catch. On a
+    // FAILED merge the dir still exists and the marker is cleared so a retry
+    // (or kill) is not blocked. Single clear point — no double-clear.
+    await clearAgentOperation(agentDir);
   }
-
-  // 11. Capture tmux output before killing
-  await timed("merge", "tmux-capture", async () => {
-    await logAgent(agentDir, "Capturing tmux output...");
-    if (tmuxSession) {
-      const hasSession = await mergeSpawnCtx.run(["tmux", "has-session", "-t", tmuxSession]);
-      if (hasSession.exitCode === 0) {
-        await captureTmuxOutputToFile(tmuxSession, join(agentDir, "output.log"));
-      }
-    }
-  });
-
-  // 12-13. Kill Claude process + tmux session
-  await timed("merge", "tmux-cleanup", async () => {
-    await logAgent(agentDir, "Terminating Claude process...");
-    const killed = await killAgentProcess(tmuxSession, { claude_pid: agent.meta.claude_pid });
-    if (killed) {
-      await logAgent(agentDir, "Claude process terminated");
-    }
-    if (tmuxSession) {
-      const hasSession2 = await mergeSpawnCtx.run(["tmux", "has-session", "-t", tmuxSession]);
-      if (hasSession2.exitCode === 0) {
-        await mergeSpawnCtx.run(["tmux", "kill-session", "-t", tmuxSession]);
-        await logAgent(agentDir, "Tmux session stopped");
-      }
-    }
-  });
-
-  // 14-16. Copy settings, remove worktree, delete branch
-  await timed("merge", "worktree-cleanup", async () => {
-    const settingsPath = join(worktreePath, ".claude", "settings.local.json");
-    try {
-      if (await Bun.file(settingsPath).exists()) {
-        const content = await Bun.file(settingsPath).text();
-        await Bun.write(join(agentDir, "settings.local.json"), content);
-      }
-    } catch { /* ignore */ }
-
-    await logAgent(agentDir, "Removing worktree...");
-    const removeResult = await mergeSpawnCtx.run(["git", "-C", agent.repoPath, "worktree", "remove", worktreePath, "--force"]);
-    if (removeResult.exitCode !== 0) {
-      try { await rm(worktreePath, { recursive: true, force: true }); } catch { /* ignore */ }
-    }
-    await logAgent(agentDir, "Worktree removed");
-
-    await logAgent(agentDir, `Deleting branch ${branchName}...`);
-    const deleteBranch = await mergeSpawnCtx.run(["git", "-C", agent.repoPath, "branch", "-D", branchName]);
-    if (deleteBranch.exitCode === 0) {
-      await logAgent(agentDir, `Branch deleted: ${branchName}`);
-    }
-  });
-
-  // 17-19. Archive artifacts, remove questions, remove agent dir
-  await timed("merge", "archive", async () => {
-    await logAgent(agentDir, "Merge complete - archiving and closing agent");
-    await archiveAgent(agent.repoPath, agent.id, agentDir);
-    await removeAgentQuestions(agent.repoPath, agent.id);
-    try { await rm(agentDir, { recursive: true, force: true }); } catch { /* ignore */ }
-  });
-
-  // 20. Scan for orphaned Claude processes
-  await timed("merge", "orphan-scan", () => scanAndKillOrphans(agentsDir));
-
-  return { ok: true, exitCode: 0, stdout: `Closed agent: ${agent.id}`, stderr: "" };
 }
 
 /** Spawn context for send operations */

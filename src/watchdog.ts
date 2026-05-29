@@ -11,8 +11,8 @@
 
 import { join } from "path";
 import { mkdirSync } from "fs";
-import { readRepoAgents, readAllAgents, isCompacting, isRateLimited, isApiError, readAgentState, hasBackgroundTasks, anyChildActive, writeAgentTransient } from "./agents";
-import type { Agent, TransientState } from "./agents";
+import { readRepoAgents, readAllAgents, isCompacting, isRateLimited, isApiError, readAgentState, hasBackgroundTasks, anyChildActive, updateAgentTransient } from "./agents";
+import type { Agent } from "./agents";
 import { captureTmuxOutput } from "./tmux-poller";
 import { logAgent } from "./agent-lifecycle";
 import { parseState } from "./parse-state";
@@ -1024,18 +1024,22 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
         }
       }
 
-      // Persist transient observations so ib watch can skip its own
-      // tmux capture for this agent. Single writer (this watchdog), so
-      // no lock is needed; readers gate on watchdog liveness + freshness.
-      const transientSnapshot: TransientState = {
+      // Persist transient observations so ib watch can skip its own tmux
+      // capture for this agent. Route through updateAgentTransient (the shared
+      // RMW primitive) rather than building a fresh literal: merge/resume also
+      // write this file now (the `operation` op-marker), so a fresh-literal
+      // write here would erase an in-flight `operation` on the next 5s tick.
+      // We set only our four tmux fields + bookkeeping and preserve whatever
+      // `operation` is on disk.
+      await updateAgentTransient(agentDir, (cur) => ({
+        ...cur,
         tmux_compacting: isCompacting(output),
         tmux_rate_limited: isRateLimited(output),
         tmux_api_error: isApiError(output),
         has_background_tasks: hasBackgroundTasks(output),
         updated_at_ms: nowFn(),
         watchdog_pid: process.pid,
-      };
-      await writeAgentTransient(agentDir, transientSnapshot);
+      }));
 
       // Resolve state from meta.json with tmux overrides
       const metaState = await readAgentStateFn(agentDir);

@@ -250,6 +250,25 @@ describe("briefSummary", () => {
     ];
     expect(briefSummary(agents)).toBe("1 running, 1 creating");
   });
+
+  test("op_stuck leads the summary (actionable) and merging/restarting are surfaced", () => {
+    const agents = [
+      mockAgent({ id: "a1", state: "running" }),
+      mockAgent({ id: "a2", state: "merging" }),
+      mockAgent({ id: "a3", state: "restarting" }),
+      mockAgent({ id: "a4", state: "op_stuck" }),
+    ];
+    // Order: op_stuck, running, waiting, merging, restarting, …
+    expect(briefSummary(agents)).toBe("1 op_stuck, 1 running, 1 merging, 1 restarting");
+  });
+
+  test("counts multiple op_stuck agents", () => {
+    const agents = [
+      mockAgent({ id: "a1", state: "op_stuck" }),
+      mockAgent({ id: "a2", state: "op_stuck" }),
+    ];
+    expect(briefSummary(agents)).toBe("2 op_stuck");
+  });
 });
 
 // ── briefSummary with questionCount ───────────────────────────────────────

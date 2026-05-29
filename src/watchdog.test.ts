@@ -2557,4 +2557,29 @@ describe("runPerAgentWatchdog — meta.transient.json persistence", () => {
     expect(written!.tmux_compacting).toBe(false);
     expect(written!.tmux_rate_limited).toBe(false);
   });
+
+  test("watchdog transient write PRESERVES an in-flight operation field", async () => {
+    // A merge/resume has set an `operation` marker. The watchdog's 5s tick
+    // writes its tmux snapshot via updateAgentTransient — the op MUST survive
+    // (it routes through the shared RMW, not a fresh literal that omits it).
+    const { setAgentOperation, readAgentTransient } = await import("./agents");
+    await setAgentOperation(agentDir, { kind: "merging", pid: 4242, started_at_ms: 123 });
+
+    setPerAgentCaptureTmux(async () => "ordinary output\n");
+    let existsChecks = 0;
+    setPerAgentExistsSync(() => {
+      existsChecks++;
+      return existsChecks <= 1;
+    });
+
+    await runPerAgentWatchdog("agent-test1", tempDir);
+
+    const written = await readAgentTransient(agentDir);
+    expect(written).not.toBeNull();
+    // Watchdog's fields were written…
+    expect(written!.updated_at_ms).toBe(1_700_000_000_000);
+    expect(written!.watchdog_pid).toBe(process.pid);
+    // …AND the operation marker survived.
+    expect(written!.operation).toEqual({ kind: "merging", pid: 4242, started_at_ms: 123 });
+  });
 });

@@ -3,6 +3,14 @@ import { join, basename } from "path";
 import { mkdtemp, rm, mkdir, readdir } from "fs/promises";
 import { tmpdir } from "os";
 import type { Agent, AgentMeta } from "./agents";
+import {
+  isPidAliveCtx,
+  nowMsCtx,
+  OP_STUCK_TIMEOUT_MS,
+  setAgentOperation,
+  clearAgentOperation,
+  readAgentTransient,
+} from "./agents";
 import { makeAgent as _makeAgent, makeSpawnResult } from "./test-utils";
 import {
   killAgent,
@@ -6567,6 +6575,371 @@ describe("respawnSelf (native)", () => {
     // branch chosen.
     const log = await Bun.file(join(agentDir, "agent.log")).text();
     expect(log).toContain("agent already stopped, skipping pause");
+  });
+});
+
+// ── Long-running-op guard (acquireAgentOperation) ────────────────────────────
+//
+// The durable op-guard refuses a conflicting long-running op (merge-check /
+// merge / restart) while one is in flight with a LIVE holder, and reclaims
+// when the holder is dead. kill/nuke/pause/reassign are the recovery path and
+// must NOT be guarded. Uses the injectable isPidAliveCtx to stub liveness.
+
+describe("long-running-op guard", () => {
+  let tempDir: string;
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "op-guard-test-"));
+  });
+
+  afterEach(async () => {
+    isPidAliveCtx.reset();
+    nowMsCtx.reset();
+    lifecycleSpawnCtx.reset();
+    resetMergeSpawnRunner();
+    resetNukeResumeSpawnRunner();
+    resetKillPauseSpawnRunner();
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  /** Build a backed agent dir with meta.json + worktree, returning the dir. */
+  async function makeBackedAgentDir(id: string): Promise<string> {
+    const agentDir = join(tempDir, ".ittybitty", "agents", id);
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id, tmux_session: `tmux-${id}`, claude_pid: "99999",
+      session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    }));
+    return agentDir;
+  }
+
+  /** Smart merge mock: full successful merge path, no real git runs. */
+  function makeMergeRunner(calls: string[][]): (cmd: string[]) => SpawnResult {
+    return (cmd: string[]) => {
+      calls.push(cmd);
+      const s = cmd.join(" ");
+      if (s.includes("status") && s.includes("--porcelain")) return makeSpawnResult(0, "");
+      if (s.includes("branch") && s.includes("--show-current")) return makeSpawnResult(0, "main");
+      if (s.includes("show-ref") && s.includes("--verify")) return makeSpawnResult(0);
+      if (s.includes("log") && s.includes("--oneline")) return makeSpawnResult(0, "abc1234 commit\n");
+      if (s.includes("has-session")) return makeSpawnResult(1);
+      if (cmd[0] === "pgrep") return makeSpawnResult(1);
+      return makeSpawnResult();
+    };
+  }
+
+  // ── merge-check / merge: refuse on live holder ──────────────────────────────
+
+  test("mergeCheckAgent refuses when an op is in flight with a LIVE holder", async () => {
+    const agentDir = await makeBackedAgentDir("agent-mc");
+    isPidAliveCtx.set(() => true); // holder alive
+    nowMsCtx.set(() => 1000); // op fresh (1000 - 1 < OP_STUCK_TIMEOUT_MS) → still refuse
+    await setAgentOperation(agentDir, { kind: "merging", pid: 4242, started_at_ms: 1 });
+
+    const calls: string[][] = [];
+    const runner = makeMergeRunner(calls);
+    lifecycleSpawnCtx.set(runner);
+    setMergeSpawnRunner(runner);
+
+    const agent = makeAgent("agent-mc", tempDir);
+    const result = await mergeCheckAgent(agent);
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("currently merging");
+    expect(result.stderr).toContain("4242");
+    // Refused before any git work.
+    expect(calls.length).toBe(0);
+    // Existing marker is untouched (we didn't clear another op's marker).
+    const t = await readAgentTransient(agentDir);
+    expect(t?.operation).toEqual({ kind: "merging", pid: 4242, started_at_ms: 1 });
+  });
+
+  test("mergeAgent refuses when a merge_check is in flight with a LIVE holder", async () => {
+    const agentDir = await makeBackedAgentDir("agent-mm");
+    isPidAliveCtx.set(() => true);
+    nowMsCtx.set(() => 1000); // op fresh → still refuse
+    await setAgentOperation(agentDir, { kind: "merge_check", pid: 4242, started_at_ms: 1 });
+
+    const calls: string[][] = [];
+    const runner = makeMergeRunner(calls);
+    lifecycleSpawnCtx.set(runner);
+    setMergeSpawnRunner(runner);
+
+    const agent = makeAgent("agent-mm", tempDir);
+    const result = await mergeAgent(agent, tempDir);
+
+    expect(result.ok).toBe(false);
+    // merge_check humanizes to "merge-checking".
+    expect(result.stderr).toContain("currently merge-checking");
+    expect(calls.length).toBe(0);
+    expect(await Bun.file(join(agentDir, "meta.json")).exists()).toBe(true); // not merged
+  });
+
+  // ── reclaim on dead holder ──────────────────────────────────────────────────
+
+  test("mergeCheckAgent reclaims and proceeds when the holder is DEAD", async () => {
+    const agentDir = await makeBackedAgentDir("agent-reclaim");
+    // claude_pid 99999 dead doesn't matter for merge-check; the op holder 4242
+    // is dead, so the guard reclaims.
+    isPidAliveCtx.set((pid: number) => pid !== 4242);
+    await setAgentOperation(agentDir, { kind: "merging", pid: 4242, started_at_ms: 1 });
+
+    const calls: string[][] = [];
+    const runner = makeMergeRunner(calls);
+    lifecycleSpawnCtx.set(runner);
+    setMergeSpawnRunner(runner);
+
+    const agent = makeAgent("agent-reclaim", tempDir);
+    const result = await mergeCheckAgent(agent);
+
+    expect(result.ok).toBe(true);
+    expect(calls.length).toBeGreaterThan(0); // git work ran
+    // Op cleared in finally (merge-check leaves the dir intact).
+    const t = await readAgentTransient(agentDir);
+    expect(t?.operation).toBeNull();
+  });
+
+  // ── age reclaim: LIVE holder but op ran past OP_STUCK_TIMEOUT_MS ─────────────
+  //
+  // After a crash + OS PID-reuse, the dead holder's pid can belong to an
+  // unrelated LIVE process, so the liveness check alone would refuse forever
+  // while detectAgentStates paints op_stuck. acquireAgentOperation must match
+  // detect's `holderDead || tooOld` logic: reclaim a live-but-too-old op.
+
+  test("mergeCheckAgent RECLAIMS a LIVE holder whose op is older than OP_STUCK_TIMEOUT_MS", async () => {
+    const agentDir = await makeBackedAgentDir("agent-old");
+    isPidAliveCtx.set(() => true); // holder (or a PID-reused unrelated proc) is alive
+    // Op started long ago; "now" is more than the stuck timeout later → tooOld.
+    await setAgentOperation(agentDir, { kind: "merging", pid: 4242, started_at_ms: 1000 });
+    nowMsCtx.set(() => 1000 + OP_STUCK_TIMEOUT_MS + 1);
+
+    const calls: string[][] = [];
+    const runner = makeMergeRunner(calls);
+    lifecycleSpawnCtx.set(runner);
+    setMergeSpawnRunner(runner);
+
+    const agent = makeAgent("agent-old", tempDir);
+    const result = await mergeCheckAgent(agent);
+
+    // tooOld → reclaimed and proceeded, despite the live holder.
+    expect(result.ok).toBe(true);
+    expect(calls.length).toBeGreaterThan(0); // git work ran
+    const t = await readAgentTransient(agentDir);
+    expect(t?.operation).toBeNull(); // cleared in finally
+  });
+
+  test("mergeCheckAgent still REFUSES a LIVE holder whose op is fresh (within timeout)", async () => {
+    const agentDir = await makeBackedAgentDir("agent-fresh");
+    isPidAliveCtx.set(() => true); // holder alive
+    // Same start time, but "now" is just inside the stuck timeout → NOT tooOld.
+    await setAgentOperation(agentDir, { kind: "merging", pid: 4242, started_at_ms: 1000 });
+    nowMsCtx.set(() => 1000 + OP_STUCK_TIMEOUT_MS - 1);
+
+    const calls: string[][] = [];
+    const runner = makeMergeRunner(calls);
+    lifecycleSpawnCtx.set(runner);
+    setMergeSpawnRunner(runner);
+
+    const agent = makeAgent("agent-fresh", tempDir);
+    const result = await mergeCheckAgent(agent);
+
+    // Live + fresh → refused (no age reclaim).
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("currently merging");
+    expect(calls.length).toBe(0); // refused before any git work
+    // Marker untouched.
+    const t = await readAgentTransient(agentDir);
+    expect(t?.operation).toEqual({ kind: "merging", pid: 4242, started_at_ms: 1000 });
+  });
+
+  // ── clear-on-success and clear-on-failure ───────────────────────────────────
+
+  test("mergeAgent clears the op marker on SUCCESS (dir removed)", async () => {
+    const agentDir = await makeBackedAgentDir("agent-success");
+    isPidAliveCtx.set(() => true);
+
+    const calls: string[][] = [];
+    const runner = makeMergeRunner(calls);
+    lifecycleSpawnCtx.set(runner);
+    setMergeSpawnRunner(runner);
+
+    const agent = makeAgent("agent-success", tempDir);
+    const result = await mergeAgent(agent, tempDir);
+
+    expect(result.ok).toBe(true);
+    // Dir was removed on the success path; the finally's clearAgentOperation
+    // must not throw (ENOENT-safe) and must not resurrect the dir.
+    expect(await Bun.file(join(agentDir, "meta.json")).exists()).toBe(false);
+    expect(await readAgentTransient(agentDir)).toBeNull();
+  });
+
+  test("mergeAgent clears the op marker on FAILURE (dir intact)", async () => {
+    const agentDir = await makeBackedAgentDir("agent-fail");
+    isPidAliveCtx.set(() => true);
+
+    // Conflict check fails → merge aborts mid-flight but the agent dir survives.
+    const calls: string[][] = [];
+    const runner = (cmd: string[]): SpawnResult => {
+      calls.push(cmd);
+      const s = cmd.join(" ");
+      if (s.includes("status") && s.includes("--porcelain")) return makeSpawnResult(0, "");
+      if (s.includes("branch") && s.includes("--show-current")) return makeSpawnResult(0, "main");
+      if (s.includes("show-ref") && s.includes("--verify")) return makeSpawnResult(0);
+      // Rebase inside the temp conflict-check worktree fails → conflict detected.
+      if (cmd.includes("rebase") && !cmd.includes("--abort")) return makeSpawnResult(1, "CONFLICT");
+      if (s.includes("has-session")) return makeSpawnResult(1);
+      return makeSpawnResult();
+    };
+    lifecycleSpawnCtx.set(runner);
+    setMergeSpawnRunner(runner);
+
+    const agent = makeAgent("agent-fail", tempDir);
+    const result = await mergeAgent(agent, tempDir);
+
+    expect(result.ok).toBe(false);
+    // Dir survives a failed merge; the op marker must be cleared so a retry
+    // (or a kill) isn't blocked.
+    expect(await Bun.file(join(agentDir, "meta.json")).exists()).toBe(true);
+    const t = await readAgentTransient(agentDir);
+    expect(t?.operation).toBeNull();
+  });
+
+  // ── resume guard ────────────────────────────────────────────────────────────
+
+  test("resumeAgent refuses when an op is in flight with a LIVE holder", async () => {
+    const agentDir = await makeBackedAgentDir("agent-res");
+    isPidAliveCtx.set(() => true);
+    nowMsCtx.set(() => 1000); // op fresh → still refuse
+    await setAgentOperation(agentDir, { kind: "restarting", pid: 4242, started_at_ms: 1 });
+
+    // has-session must fail so the tmux-liveness guard would otherwise let
+    // resume proceed — proving it's the OP-guard, not the tmux guard, refusing.
+    const runner = (cmd: string[]): SpawnResult => {
+      if (cmd.includes("has-session")) return makeSpawnResult(1);
+      return makeSpawnResult();
+    };
+    lifecycleSpawnCtx.set(runner);
+    setNukeResumeSpawnRunner(runner);
+
+    const agent = makeAgent("agent-res", tempDir, "stopped");
+    const result = await resumeAgent(agent);
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("currently restarting");
+    // resume.sh must NOT have been written — refused before any work.
+    expect(await Bun.file(join(agentDir, "resume.sh")).exists()).toBe(false);
+    // Marker untouched.
+    const t = await readAgentTransient(agentDir);
+    expect(t?.operation).toEqual({ kind: "restarting", pid: 4242, started_at_ms: 1 });
+  });
+
+  test("resumeAgent clears the op marker after a successful resume", async () => {
+    const agentDir = await makeBackedAgentDir("agent-res-ok");
+    isPidAliveCtx.set(() => true);
+    // No pre-existing op — the guard takes it fresh and the finally clears it.
+
+    let newSessionSeen = false;
+    const runner = (cmd: string[]): SpawnResult => {
+      if (cmd[0] === "tmux" && cmd[1] === "new-session") { newSessionSeen = true; return makeSpawnResult(); }
+      if (cmd.includes("has-session")) return makeSpawnResult(newSessionSeen ? 0 : 1);
+      return makeSpawnResult();
+    };
+    lifecycleSpawnCtx.set(runner);
+    setNukeResumeSpawnRunner(runner);
+
+    const agent = makeAgent("agent-res-ok", tempDir, "stopped");
+    const result = await resumeAgent(agent);
+
+    expect(result.ok).toBe(true);
+    const t = await readAgentTransient(agentDir);
+    expect(t?.operation).toBeNull();
+  });
+
+  // ── coordinator double-resume guard ─────────────────────────────────────────
+
+  test("coordinator: second concurrent resume is refused by the op-guard", async () => {
+    // A coordinator agent: resumeAgent routes to resetCoordinator, but the
+    // op-guard sits ABOVE that branch. Set an in-flight restarting op with a
+    // live holder; the resume must be refused before resetCoordinator runs
+    // (resetCoordinator would nuke + respawn — we must not reach it).
+    const agentDir = join(tempDir, ".ittybitty", "agents", "coord-x");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "coord-x", tmux_session: "ib-coord-x", agentType: "coordinator",
+      session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    }));
+    isPidAliveCtx.set(() => true);
+    nowMsCtx.set(() => 1000); // op fresh → still refuse
+    await setAgentOperation(agentDir, { kind: "restarting", pid: 4242, started_at_ms: 1 });
+
+    let nukeRan = false;
+    const runner = (cmd: string[]): SpawnResult => {
+      // resetCoordinator → nukeAgent issues tmux kill-session / list-sessions.
+      if (cmd.includes("kill-session") || cmd.includes("list-sessions")) nukeRan = true;
+      if (cmd.includes("has-session")) return makeSpawnResult(0);
+      return makeSpawnResult();
+    };
+    lifecycleSpawnCtx.set(runner);
+    setNukeResumeSpawnRunner(runner);
+
+    const agent = _makeAgent({
+      id: "coord-x", repoPath: tempDir, repoName: "test", state: "running",
+      meta: { agentType: "coordinator", tmux_session: "ib-coord-x" } as any,
+    });
+    const result = await resumeAgent(agent);
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("currently restarting");
+    expect(nukeRan).toBe(false); // resetCoordinator never reached
+    // Coordinator dir + meta still present (no reset happened).
+    expect(await Bun.file(join(agentDir, "meta.json")).exists()).toBe(true);
+  });
+
+  // ── kill / nuke bypass the guard ────────────────────────────────────────────
+
+  test("killAgent is NOT blocked by an in-flight op (live holder)", async () => {
+    const agentDir = await makeBackedAgentDir("agent-kill");
+    isPidAliveCtx.set(() => true); // op holder very much alive
+    await setAgentOperation(agentDir, { kind: "merging", pid: 4242, started_at_ms: 1 });
+
+    const calls: string[][] = [];
+    const runner = (cmd: string[]): SpawnResult => {
+      calls.push(cmd);
+      if (cmd.includes("has-session") || cmd[0] === "pgrep") return makeSpawnResult(1);
+      return makeSpawnResult();
+    };
+    lifecycleSpawnCtx.set(runner);
+    setKillPauseSpawnRunner(runner);
+
+    const agent = makeAgent("agent-kill", tempDir);
+    const result = await killAgent(agent);
+
+    // Kill is the recovery path for a wedged op — it must succeed regardless.
+    expect(result.ok).toBe(true);
+    expect(result.stdout).toBe("Closed agent: agent-kill");
+    // Dir removed → marker gone for free.
+    expect(await Bun.file(join(agentDir, "meta.json")).exists()).toBe(false);
+  });
+
+  test("nukeAgent is NOT blocked by an in-flight op (live holder)", async () => {
+    const agentDir = await makeBackedAgentDir("agent-nuke");
+    isPidAliveCtx.set(() => true);
+    await setAgentOperation(agentDir, { kind: "merging", pid: 4242, started_at_ms: 1 });
+
+    const runner = (cmd: string[]): SpawnResult => {
+      if (cmd.includes("has-session") || cmd.includes("list-sessions") || cmd[0] === "pgrep") {
+        return makeSpawnResult(1);
+      }
+      return makeSpawnResult();
+    };
+    lifecycleSpawnCtx.set(runner);
+    setNukeResumeSpawnRunner(runner);
+
+    const agent = makeAgent("agent-nuke", tempDir);
+    const result = await nukeAgent(agent);
+
+    expect(result.ok).toBe(true);
+    expect(await Bun.file(join(agentDir, "meta.json")).exists()).toBe(false);
   });
 });
 

@@ -245,6 +245,27 @@ export async function writeAgentState(agentDir: string, state: MetaState): Promi
  * watchdog liveness (process.kill(pid, 0)) and freshness (updated_at_ms)
  * before trusting these fields, and fall back to live capture otherwise.
  */
+/**
+ * The three slow agent operations that take out a durable, cross-process
+ * marker so a second conflicting op is refused while one is in flight.
+ * `merge_check` and `merging` are distinct on disk (so the refusal message
+ * can say "merge-checking" vs "merging") but collapse to a single `merging`
+ * render label in detectAgentStates.
+ */
+export type AgentOperationKind = "merge_check" | "merging" | "restarting";
+
+/**
+ * A long-running op marker, present only while the op is in flight. Written
+ * by mergeCheckAgent/mergeAgent/resumeAgent (via acquireAgentOperation) and
+ * cleared in their `finally`. A crash mid-op leaves the marker behind, which
+ * is what enables dead-holder reclaim and stuck detection.
+ */
+export interface AgentOperation {
+  kind: AgentOperationKind;
+  pid: number; // process running the op (process.pid of the caller)
+  started_at_ms: number;
+}
+
 export interface TransientState {
   tmux_compacting: boolean;
   tmux_rate_limited: boolean;
@@ -252,6 +273,35 @@ export interface TransientState {
   has_background_tasks: boolean;
   updated_at_ms: number;
   watchdog_pid: number;
+  // Present only while a long-running op (merge-check/merge/restart) is in
+  // flight. Absent on older files; a malformed value is treated as absent.
+  operation?: AgentOperation | null;
+}
+
+/** Allowed values for AgentOperation.kind — used to validate on read. */
+const AGENT_OPERATION_KINDS: ReadonlySet<string> = new Set([
+  "merge_check",
+  "merging",
+  "restarting",
+]);
+
+/**
+ * Validate a raw `operation` value read from disk. Returns the typed
+ * AgentOperation when well-formed (object with kind in the allowed set,
+ * numeric pid > 0, numeric started_at_ms > 0); otherwise undefined so the
+ * field is treated as absent without rejecting the whole transient read.
+ */
+function parseAgentOperation(raw: unknown): AgentOperation | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const op = raw as Record<string, unknown>;
+  if (typeof op.kind !== "string" || !AGENT_OPERATION_KINDS.has(op.kind)) return undefined;
+  if (typeof op.pid !== "number" || !(op.pid > 0)) return undefined;
+  if (typeof op.started_at_ms !== "number" || !(op.started_at_ms > 0)) return undefined;
+  return {
+    kind: op.kind as AgentOperationKind,
+    pid: op.pid,
+    started_at_ms: op.started_at_ms,
+  };
 }
 
 /**
@@ -282,6 +332,9 @@ export async function readAgentTransient(agentDir: string): Promise<TransientSta
       has_background_tasks: data.has_background_tasks,
       updated_at_ms: data.updated_at_ms,
       watchdog_pid: data.watchdog_pid,
+      // Field added later — absent on older files; a malformed value is
+      // ignored (treated as absent) rather than rejecting the whole read.
+      operation: parseAgentOperation(data.operation) ?? null,
     };
   } catch {
     return null;
@@ -302,6 +355,91 @@ export async function writeAgentTransient(agentDir: string, data: TransientState
   } catch {
     /* best-effort */
   }
+}
+
+/** A zeroed transient used as the read-modify-write base when none exists. */
+function emptyTransient(): TransientState {
+  return {
+    tmux_compacting: false,
+    tmux_rate_limited: false,
+    tmux_api_error: false,
+    has_background_tasks: false,
+    updated_at_ms: 0,
+    watchdog_pid: 0,
+    operation: null,
+  };
+}
+
+/**
+ * Single read-modify-write primitive for meta.transient.json. Reads the
+ * current transient (or a zeroed default when missing/malformed), applies
+ * `fn`, and writes the result atomically (.tmp + rename).
+ *
+ * ALL transient writers route through this so that adding merge/resume as
+ * writers (alongside the watchdog) doesn't clobber each other's fields via
+ * last-write-wins on the whole file. The watchdog preserves an in-flight
+ * `operation` it didn't set, and the op writers preserve the watchdog's tmux
+ * snapshot. Worst case is a lost write that degrades to today's behavior
+ * (guard didn't engage), never corruption.
+ *
+ * Best-effort: silently swallows write errors (including a missing dir on the
+ * post-merge clear path) so a failing write does not crash the caller — same
+ * idiom as writeAgentTransient/deleteAgentTransient.
+ */
+export async function updateAgentTransient(
+  agentDir: string,
+  fn: (cur: TransientState) => TransientState,
+): Promise<void> {
+  const path = join(agentDir, "meta.transient.json");
+  try {
+    // Skip if the agent dir is gone. Bun.write auto-creates parent dirs, so
+    // without this guard the post-merge clear path (dir removed at step 17-19,
+    // then clearAgentOperation runs in `finally`) would RESURRECT the deleted
+    // agent dir with a stray meta.transient.json. The stat throws ENOENT on a
+    // missing dir, which the outer catch swallows — a genuine no-op.
+    await stat(agentDir);
+    const cur = (await readAgentTransient(agentDir)) ?? emptyTransient();
+    const next = fn(cur);
+    // Per-process tmp name: multiple writers (the watchdog + a merge/resume op)
+    // can run concurrently, and a shared ".tmp" lets their writes interleave
+    // bytes into the same file before the rename publishes it. A pid-suffixed
+    // tmp gives each writer its own scratch file so the atomic rename only ever
+    // publishes complete content.
+    const tmpPath = `${path}.tmp.${process.pid}`;
+    await Bun.write(tmpPath, JSON.stringify(next, null, 2));
+    await rename(tmpPath, path);
+  } catch {
+    /* best-effort — ENOENT-safe, mirrors writeAgentTransient */
+  }
+}
+
+/**
+ * Mark a long-running op as in flight. Thin wrapper over updateAgentTransient
+ * touching only the `operation` field; preserves the watchdog's tmux snapshot.
+ */
+export async function setAgentOperation(agentDir: string, op: AgentOperation): Promise<void> {
+  await updateAgentTransient(agentDir, (cur) => ({ ...cur, operation: op }));
+}
+
+/**
+ * Clear the in-flight op marker — but only if it still belongs to THIS process
+ * (compare-and-swap on `operation.pid === process.pid`). Thin wrapper over
+ * updateAgentTransient; ENOENT-safe (the post-merge success path removes the
+ * agent dir before this runs, and the best-effort try/catch swallows the
+ * resulting missing-dir error).
+ *
+ * The compare-and-swap matters because acquireAgentOperation can age-reclaim a
+ * marker older than OP_STUCK_TIMEOUT_MS even while its original holder is still
+ * alive. Without the CAS, this interleaving would wipe a DIFFERENT op's marker:
+ *   op A hangs >300s (still alive) → op B age-reclaims (marker now has B's pid)
+ *   → A un-hangs, its `finally` runs clearAgentOperation → would wipe B's marker.
+ * By clearing only when the marker is still ours, A's late clear no-ops and B's
+ * marker survives. When the marker isn't ours, return `cur` unchanged.
+ */
+export async function clearAgentOperation(agentDir: string): Promise<void> {
+  await updateAgentTransient(agentDir, (cur) =>
+    cur.operation?.pid === process.pid ? { ...cur, operation: null } : cur,
+  );
 }
 
 /**
@@ -958,6 +1096,14 @@ export function computeStateFromContent(stripped: string): AgentState | null {
  */
 export const TRANSIENT_FRESH_MS = 15_000;
 
+/**
+ * How long a long-running op (merge-check/merge/restart) may run before
+ * detectAgentStates paints it `op_stuck`. 5 minutes — long enough that a big
+ * rebase never false-positives. The op's per-step `timed()` durations are
+ * already logged to watch.log, so this can be tuned from real data later.
+ */
+export const OP_STUCK_TIMEOUT_MS = 300_000;
+
 /** Default isPidAlive — checks if a process is alive via signal 0. */
 function _isPidAlive(pid: number): boolean {
   try {
@@ -1058,10 +1204,15 @@ async function reapOrphanedClaude(
  * Resolution order:
  * 1. Archived agents → stopped
  * 2. No tmux session → creating (if < 6s old) or stopped
- * 3. Tmux exists → check for compacting/rate_limited overrides
+ * 3. In-flight long-running op (merge-check/merge/restart) → merging/
+ *    restarting, or op_stuck if the holder died or it ran past
+ *    OP_STUCK_TIMEOUT_MS. Checked ABOVE the claude_pid gate because a wedged
+ *    merge kills claude_pid before removing the dir.
+ * 4. claude_pid dead → stopped
+ * 5. Tmux exists → check for compacting/rate_limited overrides
  *    - Fast-path: trust meta.transient.json if its watchdog is alive and
  *      the snapshot is fresh; otherwise fall back to a live tmux capture.
- * 4. Read state from meta.json → return stored value or default to running
+ * 6. Read state from meta.json → return stored value or default to running
  */
 export async function detectAgentStates(agents: Agent[]): Promise<void> {
   // Step 1: archived agents
@@ -1108,6 +1259,33 @@ export async function detectAgentStates(agents: Agent[]): Promise<void> {
         const resolved: AgentState = isRecentlyCreated(agent.meta.created_epoch) ? "creating" : "stopped";
         agent.state = resolved;
         await reapOrphanedClaude(agent, agentDir, resolved, "no tmux_session in meta");
+        return;
+      }
+
+      // Read the transient ONCE, here, above the claude_pid gate below. The
+      // op-branch must see the `operation` field before that gate runs: a
+      // wedged merge KILLS claude_pid (ib-commands.ts mergeAgent, step 12)
+      // well before it removes the agent dir, so if the op-check sat below
+      // the gate a stuck merge would resolve to `stopped` and stuck-detection
+      // would never fire. The freshness-gated compacting/rate-limited
+      // fast-path further down reuses this same `transient` (no second read).
+      const transient = await readAgentTransient(agentDir);
+
+      // Op-branch: an in-flight long-running op (merge-check/merge/restart)
+      // owns the rendered state. Read straight from disk, unconditionally —
+      // NOT gated behind the watchdog-freshness check below, because the
+      // `operation` field is written by merge/resume (not the watchdog), and
+      // during a merge the watchdog has often already exited. Gating it behind
+      // watchdog liveness would hide exactly the stuck merges we care about.
+      const op = transient?.operation;
+      if (op) {
+        const holderDead = op.pid > 0 && !isPidAliveCtx.fn(op.pid);
+        const tooOld = nowMsCtx.fn() - op.started_at_ms > OP_STUCK_TIMEOUT_MS;
+        if (holderDead || tooOld) {
+          agent.state = "op_stuck";
+          return;
+        }
+        agent.state = op.kind === "restarting" ? "restarting" : "merging";
         return;
       }
 
@@ -1160,15 +1338,15 @@ export async function detectAgentStates(agents: Agent[]): Promise<void> {
       // captureTmuxOutput + classify work every 5s — reusing its result
       // saves ~1 posix_spawn + ~20 file opens per agent per tick.
       //
-      // Always read from disk here (not from a preloaded `agent.transient`):
-      // the watcher calls pollStates() every 2s using cached _lastAgents
-      // from a refresh() that runs every 10s. A preloaded snapshot would
-      // age in memory while the watchdog keeps writing fresh data to disk
-      // — we'd hit the staleness threshold and fall back to live capture
-      // even when fresh data was available on disk. The disk read here is
-      // cheap (one stat + a small JSON parse) compared to the tmux spawn
-      // we're avoiding.
-      const transient = await readAgentTransient(agentDir);
+      // Reuses the `transient` read hoisted above the claude_pid gate (for the
+      // op-branch) — no second disk read. The disk read is from disk, not a
+      // preloaded `agent.transient`, deliberately: the watcher calls
+      // pollStates() every 2s using cached _lastAgents from a refresh() that
+      // runs every 10s, so a preloaded snapshot would age in memory while the
+      // watchdog keeps writing fresh data to disk — we'd hit the staleness
+      // threshold and fall back to live capture even when fresh data was on
+      // disk. One stat + a small JSON parse is cheap vs. the tmux spawn we
+      // avoid.
       if (
         transient &&
         transient.updated_at_ms > 0 &&

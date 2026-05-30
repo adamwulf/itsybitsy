@@ -3535,6 +3535,17 @@ describe("newAgent (native)", () => {
     expect(meta.model).toBe("claude-sonnet-4-6");
   });
 
+  test("model precedence C2b: <type>.md model overrides _non_coordinator.md model", async () => {
+    await writeLayerModel("_non_coordinator", "model: claude-opus-4-7", { spawnable: false });
+    // worker.md is the most-specific layer; it must beat _non_coordinator.md.
+    await writeLayerModel("worker", "model: claude-sonnet-4-6");
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    await callNewAgent("task", { name: "test-type-overrides-noncoord", type: "worker" });
+
+    const meta = await Bun.file(join(agentsDir, "test-type-overrides-noncoord", "meta.json")).json();
+    expect(meta.model).toBe("claude-sonnet-4-6");
+  });
+
   test("model precedence C3a: _non_coordinator.md model overrides _all.md for a non-coordinator agent", async () => {
     await writeLayerModel("_all", "model: claude-opus-4-7", { spawnable: false });
     await writeLayerModel("_non_coordinator", "model: claude-sonnet-4-6", { spawnable: false });

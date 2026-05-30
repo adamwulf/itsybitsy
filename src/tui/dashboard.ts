@@ -41,8 +41,12 @@ import { fetchUsage } from "../usage";
 import type { UsageData } from "../usage";
 import { getStateColors, setupColorSchemeDetection } from "./color-scheme";
 import { AgentTreeComponent } from "./agent-tree";
+import { TeamsTreeComponent, flattenTeamsTree } from "./teams-tree";
+import { ChannelPaneComponent } from "./channel-pane";
 import { SidebarComponent, SIDEBAR_WIDTH, computeSidebarHeights, clampSidebarOffsets } from "./sidebar";
 import { InfoPanelComponent } from "./info-panel";
+import { listTeams, getTeam } from "../teams";
+import type { Team } from "../teams";
 import type { DialogState } from "./dialog-handler";
 import {
   wrapTextareaLines, TEXTAREA_VISIBLE_HEIGHT,
@@ -71,7 +75,8 @@ import {
 import { cancelPaste } from "./clipboard";
 import type { LayoutState } from "./layout";
 import { InputFieldComponent } from "./input-field";
-import { sendMessage, pauseAgent } from "../ib-commands";
+import { sendMessage, pauseAgent, teamSend as ibTeamSend } from "../ib-commands";
+import type { IbCommandResult } from "../ib-commands";
 import { getResolvableWarnings } from "../health-check";
 import { logToWatchLog } from "../watch-log";
 
@@ -491,6 +496,19 @@ export const MIN_TERMINAL_HEIGHT = 24;
 /** Main dashboard component that composes everything */
 export class DashboardComponent implements Component {
   agentTree: AgentTreeComponent;
+  /**
+   * Teams tree component (§17.1) — shares the sidebar tree region with the
+   * Agents tree, chosen by the current focus. Owns its OWN selection state
+   * independent of the Agents tree (§17.1 independent-selection invariant).
+   */
+  teamsTree: TeamsTreeComponent;
+  /**
+   * Channel pane (§17.4) — the main-area chat box rendered when a team anchor
+   * is the effective selection. `teamName` is null until selection-sync sets
+   * it; the dashboard calls `channelPane.load()` on the refresh tick to keep
+   * the chat current while the team stays selected.
+   */
+  channelPane: ChannelPaneComponent;
   rightPane: RightPaneComponent;
   tmuxPane: TmuxPaneComponent;
   splitPane: SplitPane;
@@ -531,7 +549,12 @@ export class DashboardComponent implements Component {
   /** Tracks in-flight executeAndRefresh promises — used by tests to await completion */
   private _pendingActions: Set<Promise<void>> = new Set();
   pendingSelectNewestInRepo: string | null = null;
-  private focusManager = new FocusManager();
+  /**
+   * Focus manager — public so structural-typed callers (the agent-actions
+   * `ActionCtx` team-send branch and `@`-jump's `setFocus("agent-tree")`) can
+   * read/write it through ctx without going through dashboard internals.
+   */
+  focusManager = new FocusManager();
   inputField: InputFieldComponent;
   coordinatorInputField: InputFieldComponent;
   repoCoordinatorInputField: InputFieldComponent;
@@ -546,6 +569,16 @@ export class DashboardComponent implements Component {
   private skipWidthReports = 0;
   /** When true, resize all agent tmux sessions on next onUpdate (after layout restore) */
   private pendingTmuxResize = false;
+  /**
+   * One-time guard for the startup auto-select (§17.1, user-confirmed startup
+   * behavior). On the FIRST populate where the flat list is non-empty, the
+   * dashboard selects the first row (the old `ib watch` behavior). After it
+   * fires once this stays true forever, so later refreshes never re-assert a
+   * selection, and a panel focus toggle (Agents<->Teams) — which is NOT a
+   * populate and does not call onUpdate — never trips it. The no-selection
+   * state (§17.1) remains reachable via the panel toggle / @-jump.
+   */
+  private hasAutoSelectedFirstAgent = false;
   private _questionsFocused = false;
   /** Cache of which agents have an attached tmux client */
   private _clientAttached: Map<string, boolean> = new Map();
@@ -650,6 +683,8 @@ export class DashboardComponent implements Component {
 
   constructor() {
     this.agentTree = new AgentTreeComponent();
+    this.teamsTree = new TeamsTreeComponent();
+    this.channelPane = new ChannelPaneComponent();
     this.rightPane = new RightPaneComponent();
     this.tmuxPane = new TmuxPaneComponent();
     this.infoPanel = new InfoPanelComponent();
@@ -658,7 +693,7 @@ export class DashboardComponent implements Component {
 
     this.coordinatorPane = new TmuxPaneComponent();
     this.systemDashboard = new SystemDashboardComponent();
-    this.sidebar = new SidebarComponent(this.agentTree, this.infoPanel);
+    this.sidebar = new SidebarComponent(this.agentTree, this.infoPanel, this.teamsTree);
     this.sidebar.coordinatorPane = this.coordinatorPane;
     this.splitPane = new SplitPane(this.tmuxPane, this.rightPane, DEFAULT_TMUX_WIDTH, `${DIM_GRAY}│${RESET}`);
     this.inputField = new InputFieldComponent();
@@ -1083,12 +1118,26 @@ export class DashboardComponent implements Component {
 
   onUpdate(agents: Agent[], flatList: FlatEntry[], questions: PendingQuestion[], orphanedTmuxSessions: string[] = []) {
     this.agentTree.setFlatList(flatList);
+    // §17.1 (user-confirmed startup behavior): on the VERY FIRST populate with a
+    // non-empty list, auto-select the first row — the old `ib watch` default.
+    // One-time guard: after it fires, later refreshes preserve the user's
+    // selection (or no-selection), and a panel focus toggle (Agents<->Teams) —
+    // which is not a populate — never auto-selects.
+    if (!this.hasAutoSelectedFirstAgent && flatList.length > 0) {
+      this.agentTree.selectFirstRow();
+      this.hasAutoSelectedFirstAgent = true;
+    }
     this.systemDashboard.flatList = flatList;
     this.rightPane.questions = questions;
     this.rightPane.allAgents = flatList;
     this.rightPane.orphanedTmuxSessions = orphanedTmuxSessions;
     this.statusBar.pendingQuestions = questions.length;
     this.statusBar.errorCount = this.rightPane.errors.length + orphanedTmuxSessions.length;
+
+    // §17.2: rebuild the Teams tree's flat list from the already-state-detected
+    // agents (reuse the watcher's pass — no second detect). listTeams() is async;
+    // schedule the load and apply when ready (selection-sync still runs sync).
+    void this.refreshTeamsTree(agents);
 
     // Wire health reports to agent tree
     if (this.watcher) {
@@ -1144,8 +1193,28 @@ export class DashboardComponent implements Component {
   }
 
   syncSelectedAgent() {
-    const selected = this.agentTree.selectedAgent;
-    const isCoordinator = this.agentTree.isSystemCoordinatorSelected;
+    // §17.3: focus-aware effective-selection resolver. When the Teams panel is
+    // focused, the EFFECTIVE selection comes from the Teams tree; otherwise
+    // from the Agents tree. The downstream routing then runs on this single
+    // effective selection — so a `{ kind: "agent" }` selected in the Teams
+    // tree (a team member) behaves identically to selecting that same agent in
+    // the Agents tree (§17.3 child-agent-indistinguishable). The Agents-tree-
+    // only concepts (repo header, system coordinator) are routed from the
+    // agent-tree only — they are not reachable through the Teams tree.
+    const teamsFocused = this.focusManager.current() === "teams-tree";
+    const teamSelection = teamsFocused ? this.teamsTree.selection : null;
+    const teamAnchor = teamSelection?.kind === "team" ? teamSelection.teamName : null;
+    const teamMemberAgent = teamSelection?.kind === "agent" ? teamSelection.agent : null;
+    // The Agents-tree-only properties (repo header, system coordinator) are
+    // unreachable from the Teams panel. When focus is on the Teams panel we
+    // suppress them so a leftover repo-header selection in the (unfocused)
+    // Agents tree doesn't bleed into the main area.
+    const selected = teamsFocused
+      ? teamMemberAgent
+      : this.agentTree.selectedAgent;
+    const isCoordinator = !teamsFocused && this.agentTree.isSystemCoordinatorSelected;
+    const selectedRepoHeader = teamsFocused ? null : this.agentTree.selectedRepoHeader;
+    const selectedRepoPath = teamsFocused ? null : this.agentTree.selectedRepoPath;
 
     // Update focus cycling for coordinator mode
     this.focusManager.coordinatorMode = isCoordinator;
@@ -1168,30 +1237,50 @@ export class DashboardComponent implements Component {
     }
 
     this.rightPane.agent = selected;
-    this.rightPane.selectedRepoHeader = this.agentTree.selectedRepoHeader;
+    this.rightPane.selectedRepoHeader = selectedRepoHeader;
     this.tmuxPane.agent = selected;
-    this.statusBar.repoHeaderSelected = !selected && !isCoordinator && this.agentTree.selectedRepoHeader !== null;
+    this.statusBar.repoHeaderSelected = !selected && !isCoordinator && selectedRepoHeader !== null;
 
     // Wire info panel
     this.infoPanel.agent = selected;
     this.infoPanel.isSystemCoordinatorSelected = isCoordinator;
-    this.infoPanel.selectedRepoHeader = this.agentTree.selectedRepoHeader;
-    this.infoPanel.selectedRepoPath = this.agentTree.selectedRepoPath;
+    this.infoPanel.selectedRepoHeader = selectedRepoHeader;
+    this.infoPanel.selectedRepoPath = selectedRepoPath;
     this.infoPanel.allAgents = this.agentTree.flatList;
     if (this.watcher) {
       this.infoPanel.liveTmuxSessions = this.watcher.lastLiveTmuxSessions;
     }
 
+    // §17.3c / §17.4 team-mode wiring. On a team-anchor effective selection
+    // (only reachable via the Teams panel) populate `infoPanel.selectedTeam`
+    // and `channelPane.teamName` from the Team record; on ANY non-team
+    // effective selection (agent, repo header, system coord, null) clear both
+    // so no stale team metadata or channel lingers.
+    if (teamAnchor) {
+      const previousTeam = this.channelPane.teamName;
+      this.channelPane.teamName = teamAnchor;
+      if (previousTeam !== teamAnchor) {
+        this.channelPane.resetForTeam();
+      }
+      // Async fetch the Team record for the info panel. Fire-and-forget so the
+      // sync path stays sync; on completion we set the field and request a
+      // render. If the team is gone between the tree build and here, clear.
+      void this.refreshSelectedTeamInfo(teamAnchor);
+    } else {
+      this.infoPanel.selectedTeam = null;
+      this.channelPane.teamName = null;
+    }
+
     // Wire default-agent-type
     this.infoPanel.availableAgentTypes = listSpawnableTypeNamesSync();
-    const repoForDefault = this.agentTree.selectedRepoPath
-      ? this.repos.find((r) => r.path === this.agentTree.selectedRepoPath)
+    const repoForDefault = selectedRepoPath
+      ? this.repos.find((r) => r.path === selectedRepoPath)
       : undefined;
     this.infoPanel.selectedRepoDefaultAgentType = repoForDefault?.defaultAgentType;
 
     // Wire notes editor — if the selected repo changed, flush any pending edits
     // for the previous repo, then load the new repo's notes.
-    const newNotesRepoPath = this.agentTree.selectedRepoPath ?? null;
+    const newNotesRepoPath = selectedRepoPath ?? null;
     if (newNotesRepoPath !== this.notesEditorRepoPath) {
       if (this.notesEditorRepoPath) {
         const pending = this.infoPanel.notesEditor.getText();
@@ -1210,14 +1299,14 @@ export class DashboardComponent implements Component {
     }
 
     // Wire health data to info panel and right pane
-    const selectedRepoPath = this.agentTree.selectedRepoPath ?? (selected?.repoPath ?? null);
-    const healthReport = selectedRepoPath && this.watcher ? this.watcher.healthReports.get(selectedRepoPath) : undefined;
+    const healthRepoPath = selectedRepoPath ?? (selected?.repoPath ?? null);
+    const healthReport = healthRepoPath && this.watcher ? this.watcher.healthReports.get(healthRepoPath) : undefined;
     this.infoPanel.healthReport = healthReport;
     this.rightPane.healthReport = healthReport;
     this.statusBar.hasResolvableWarnings = !!(healthReport && getResolvableWarnings(healthReport.warnings).length > 0);
 
     // Find and wire per-repo coordinator for the selected repo
-    const repoPathForCoordinator = this.agentTree.selectedRepoPath;
+    const repoPathForCoordinator = selectedRepoPath;
     if (repoPathForCoordinator && !selected && !isCoordinator) {
       // Repo header is selected — find coordinator agent from the full agent list
       // (coordinators are filtered out of flatList, so search lastAgents directly)
@@ -1257,7 +1346,7 @@ export class DashboardComponent implements Component {
     // TREE mode is preserved across selection changes so the user can browse the
     // full agent tree regardless of what's selected.
     const currentMode = PANE_MODES[this.modeIndex];
-    if (!selected && !isCoordinator && this.agentTree.selectedRepoHeader && currentMode !== "TREE") {
+    if (!selected && !isCoordinator && selectedRepoHeader && currentMode !== "TREE") {
       // Repo header selected — save current mode and switch to REPO
       if (currentMode !== "REPO") {
         this.savedModeIndex = this.modeIndex;
@@ -1340,6 +1429,85 @@ export class DashboardComponent implements Component {
     // coordinator pane is visible — pause/resume those pollers accordingly so
     // we don't spawn `tmux capture-pane` for off-screen panes.
     this.updatePollerVisibility();
+  }
+
+  /**
+   * §17.3a `teamSend` ctx field — bound to the dashboard's `this.repos`. This
+   * is the function the `s`-send team-target branch in agent-actions calls; we
+   * wrap `ibTeamSend` so handlers don't need a repos handle of their own. Use
+   * an arrow property so `this` is preserved when invoked through the ctx.
+   */
+  teamSend = (
+    teamName: string,
+    members: Agent[],
+    message: string,
+    opts: { fromAgent?: string } | undefined,
+  ): Promise<IbCommandResult> => {
+    return ibTeamSend(teamName, members, message, opts, this.repos);
+  };
+
+  /**
+   * §17.2: rebuild the Teams tree from the team registry + the already-state-
+   * detected agents passed to onUpdate (no second detect pass — the watcher
+   * already ran it). listTeams() is async, so this is fire-and-forget; on
+   * completion it sets the flat list and triggers a re-render.
+   */
+  private async refreshTeamsTree(agents: Agent[]): Promise<void> {
+    try {
+      const teams = await listTeams();
+      const agentsById = new Map<string, Agent>();
+      for (const a of agents) agentsById.set(a.id, a);
+      const list = flattenTeamsTree(teams, agentsById);
+      this.teamsTree.setFlatList(list);
+      // If we currently render the Teams panel, request a re-render so the
+      // refreshed list shows up immediately. (Cheap no-op when not focused.)
+      this.tui?.requestRender();
+    } catch {
+      // Best-effort: a teams-registry read failure must never break the dashboard
+      // refresh loop. Leave the tree's last list in place.
+    }
+  }
+
+  /**
+   * §17.3c: async-fetch the Team record for a team-anchor selection and populate
+   * `infoPanel.selectedTeam`. Fire-and-forget from syncSelectedAgent so the
+   * sync path stays sync. If the team has vanished by the time the read lands,
+   * clears the field — but only if the user is still on the same team anchor
+   * (a fast-toggle race shouldn't blow away a freshly-selected team's metadata).
+   */
+  private async refreshSelectedTeamInfo(teamName: string): Promise<void> {
+    let team: Team | null = null;
+    try {
+      team = await getTeam(teamName);
+    } catch {
+      // ignore — leave stale (or absent) team info untouched
+      return;
+    }
+    // Race guard: if the user has navigated away from this team, do nothing.
+    if (this.channelPane.teamName !== teamName) return;
+    if (team) {
+      // §17.2/§17.3c: show the LIVE (resolvable) member count, matching the
+      // tree badge. team.members is the raw roster (which can include
+      // not-yet-pruned dead ids); the teams-tree header row already carries the
+      // live count via flattenTeamsTree, so reuse it. Fall back to the raw
+      // count only if the team isn't in the tree (transient, between rebuilds).
+      let liveCount = team.members.length;
+      for (const row of this.teamsTree.flatList) {
+        if (row.kind === "team-header" && row.teamName === teamName) {
+          liveCount = row.memberCount;
+          break;
+        }
+      }
+      this.infoPanel.selectedTeam = {
+        name: teamName,
+        createdEpoch: team.created_epoch,
+        createdBy: team.created_by,
+        memberCount: liveCount,
+      };
+    } else {
+      this.infoPanel.selectedTeam = null;
+    }
+    this.tui?.requestRender();
   }
 
   /** Check if the selected agent's tmux session has an attached client, start/stop polling accordingly */
@@ -1724,13 +1892,24 @@ export class DashboardComponent implements Component {
       }
     }
 
-    // Navigation
+    // Navigation. §17.1: j/k and shift+j/k are FOCUS-AWARE — when the Teams
+    // panel is focused, they navigate the Teams tree; otherwise the Agents tree.
+    // QUESTIONS-mode j/k retains its agent-tree-only special case.
+    const navigatesTeams = this.focusManager.current() === "teams-tree";
     if (data === "J") {
-      this.agentTree.moveToRepo(1);
+      if (navigatesTeams) {
+        this.teamsTree.navigateAnchor(1);
+      } else {
+        this.agentTree.moveToRepo(1);
+      }
       this.syncSelectedAgent();
       this.tui?.requestRender();
     } else if (data === "K") {
-      this.agentTree.moveToRepo(-1);
+      if (navigatesTeams) {
+        this.teamsTree.navigateAnchor(-1);
+      } else {
+        this.agentTree.moveToRepo(-1);
+      }
       this.syncSelectedAgent();
       this.tui?.requestRender();
     } else if (matchesKey(data, Key.down) || data === "j") {
@@ -1742,7 +1921,11 @@ export class DashboardComponent implements Component {
         this.rightPane.updateContent();
         this.tui?.requestRender();
       } else {
-        this.agentTree.moveSelection(1);
+        if (navigatesTeams) {
+          this.teamsTree.navigate(1);
+        } else {
+          this.agentTree.moveSelection(1);
+        }
         this.syncSelectedAgent();
         this.tui?.requestRender();
       }
@@ -1752,7 +1935,11 @@ export class DashboardComponent implements Component {
         this.rightPane.updateContent();
         this.tui?.requestRender();
       } else {
-        this.agentTree.moveSelection(-1);
+        if (navigatesTeams) {
+          this.teamsTree.navigate(-1);
+        } else {
+          this.agentTree.moveSelection(-1);
+        }
         this.syncSelectedAgent();
         this.tui?.requestRender();
       }
@@ -1887,8 +2074,10 @@ export class DashboardComponent implements Component {
     else if (data === "[" || data === "]") {
       const delta = data === "]" ? LEFT_WIDTH_STEP : -LEFT_WIDTH_STEP;
       const focus = this.focusManager.current();
-      if (focus === "agent-tree" || focus === "info" || focus === "coordinator") {
-        // Sidebar panel focused: adjust sidebar width
+      if (focus === "agent-tree" || focus === "teams-tree" || focus === "info" || focus === "coordinator") {
+        // Sidebar panel focused: adjust sidebar width.
+        // teams-tree shares the sidebar region with agent-tree (§17.3), so width
+        // changes apply to the sidebar exactly as they do when agent-tree is focused.
         this.sidebarWidth = clampSidebarWidth(this.sidebarWidth + delta);
         resizeCoordinatorTmux(this.getMainWidth());
         // Per-repo coordinator renders full-pane like the system coordinator,
@@ -1911,8 +2100,10 @@ export class DashboardComponent implements Component {
     else if (data === "{" || data === "}") {
       const delta = data === "}" ? 1 : -1;
       const focus = this.focusManager.current();
-      if (focus === "agent-tree") {
-        // Grow tree, shrink info; give back to info when shrinking
+      if (focus === "agent-tree" || focus === "teams-tree") {
+        // Grow tree, shrink info; give back to info when shrinking.
+        // teams-tree shares the sidebar tree region (and heightOffsets.tree)
+        // with agent-tree (§17.3), so height changes behave identically.
         const base = computeSidebarHeights(this.sidebar.displayHeight, this.agentTree.visibleList.length);
         const effectiveInfo = Math.max(0, base.infoHeight + this.sidebar.heightOffsets.info);
         if (delta > 0) {
@@ -2022,7 +2213,36 @@ export class DashboardComponent implements Component {
     let mainLines: string[];
     // Reset agentless before branching; only the TMUX branch sets it true
     this.coordinatorPane.agentless = false;
-    if (isCoordinatorView && this.coordinatorViewMode === "TMUX") {
+    // §17.3 / §17.4: when a team anchor is the EFFECTIVE selection (Teams panel
+    // focused + a team header selected), the main area renders the channel chat
+    // box at full main width — overriding the agent/tmux/right-pane split. Also
+    // shown for the Teams no-selection state (channelPane.teamName === null +
+    // teams-tree focused), which renders the channel pane's placeholder.
+    const teamsFocusedRender = this.focusManager.current() === "teams-tree";
+    const showChannelPane =
+      teamsFocusedRender
+      && !isCoordinatorView
+      && (this.channelPane.teamName !== null || this.teamsTree.selection === null);
+    if (showChannelPane) {
+      // Refresh-tick load (§17.4): re-read the channel + user.name BEFORE the
+      // sync render, so the chat updates while the team stays selected. The
+      // load() promise is fired off; the cached `messages` are rendered now.
+      // On completion we request a render so the new messages appear.
+      const teamName = this.channelPane.teamName;
+      if (teamName) {
+        void this.channelPane
+          .load()
+          .then(() => {
+            // Race guard: only re-render if the team is still selected.
+            if (this.channelPane.teamName === teamName) {
+              this.tui?.requestRender();
+            }
+          })
+          .catch(() => {});
+      }
+      this.channelPane.displayHeight = availableHeight;
+      mainLines = [mainTitleSep, ...this.channelPane.render(mainWidth)];
+    } else if (isCoordinatorView && this.coordinatorViewMode === "TMUX") {
       // System coordinator TMUX view: full-width coordinator tmux output in main area.
       // Reuses coordinatorPane (agentless TmuxPaneComponent) for rendering.
       const isCoordFocused = this.focusManager.current() === "coordinator";

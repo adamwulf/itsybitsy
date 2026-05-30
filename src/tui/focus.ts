@@ -8,15 +8,27 @@
 import { truncateToWidth } from "@mariozechner/pi-tui";
 import { RESET, BOLD, DIM, DIM_GRAY, REVERSE } from "./colors";
 
-/** The six focusable panels in the dashboard. */
-export type FocusTarget = "agent-tree" | "info" | "coordinator" | "active-agent" | "right-pane" | "repo-coordinator";
+/** The focusable panels in the dashboard. */
+export type FocusTarget =
+  | "agent-tree"
+  | "teams-tree"
+  | "info"
+  | "coordinator"
+  | "active-agent"
+  | "right-pane"
+  | "repo-coordinator";
 
 /** Sub-focus states for panels with input fields (active-agent, coordinator). */
 export type SubFocus = "pane" | "input" | "send";
 
-/** Ordered list of focus targets for cycling (normal mode). */
+/** Ordered list of focus targets for cycling (normal mode).
+ *  `teams-tree` sits between `agent-tree` and `info` (§17.1) and is ALWAYS an
+ *  active stop in normal mode — it is intentionally NOT in `skipTargets`
+ *  (toggling into an empty teams registry is still valid; the Teams tree renders
+ *  an empty-state line). It is omitted from `COORDINATOR_FOCUS_ORDER` (§17.1). */
 const FOCUS_ORDER: readonly FocusTarget[] = [
   "agent-tree",
+  "teams-tree",
   "info",
   "active-agent",
   "right-pane",

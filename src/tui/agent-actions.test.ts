@@ -48,6 +48,12 @@ function makeMockCtx(overrides?: {
   questions?: PendingQuestion[];
   orphanedTmuxSessions?: string[];
   mode?: PaneMode;
+  /** §17: focused panel — defaults to "agent-tree". */
+  focus?: import("./focus").FocusTarget;
+  /** §17: teams-tree selection — defaults to null. */
+  teamsSelection?: import("./selection").Selection;
+  /** §17: teamSend stub override. */
+  teamSend?: ActionCtx["teamSend"];
 }): {
   ctx: ActionCtx;
   dialogs: NonNullable<DialogState>[];
@@ -56,6 +62,10 @@ function makeMockCtx(overrides?: {
   scrollUpCalls: number[];
   scrollDownCalls: number[];
   loadAgentLogIfNeededCalls: number[];
+  /** §17: focus targets passed to focusManager.setFocus, in order. */
+  setFocusCalls: import("./focus").FocusTarget[];
+  /** §17: teamSend invocations the handler made. */
+  teamSendCalls: Array<{ teamName: string; members: Agent[]; message: string; fromAgent: string | undefined }>;
   /** Await every executeAndRefresh action kicked off so far — deterministic
    *  alternative to a fixed Bun.sleep for fire-and-forget send paths. */
   flushActions: () => Promise<void>;
@@ -67,6 +77,9 @@ function makeMockCtx(overrides?: {
   const scrollDownCalls: number[] = [];
   const loadAgentLogIfNeededCalls: number[] = [];
   const pendingActions: Promise<void>[] = [];
+  const setFocusCalls: import("./focus").FocusTarget[] = [];
+  const teamSendCalls: Array<{ teamName: string; members: Agent[]; message: string; fromAgent: string | undefined }> = [];
+  let currentFocus: import("./focus").FocusTarget = overrides?.focus ?? "agent-tree";
   let leftWidth = overrides?.leftWidth ?? 60;
 
   const ctx: ActionCtx = {
@@ -79,6 +92,21 @@ function makeMockCtx(overrides?: {
       selectAgentById: () => true,
       selectByRepoPath: () => true,
     },
+    // §17 ActionCtx additions: a focus handle, a teams-tree selection handle,
+    // and a teamSend ctx field. Defaults: focus on agent-tree, no teams
+    // selection, teamSend stub that returns OK.
+    focusManager: {
+      current: () => currentFocus,
+      setFocus: (t) => { setFocusCalls.push(t); currentFocus = t; },
+    },
+    teamsTree: {
+      selection: overrides?.teamsSelection ?? null,
+    },
+    teamSend: overrides?.teamSend
+      ?? (async (teamName, members, message, opts) => {
+        teamSendCalls.push({ teamName, members, message, fromAgent: opts?.fromAgent });
+        return { ok: true, stdout: `sent to @${teamName}`, stderr: "", exitCode: 0 };
+      }),
     rightPane: {
       mode: overrides?.mode ?? "AGENT LOG",
       repoCoordinatorAgent: null,
@@ -98,6 +126,10 @@ function makeMockCtx(overrides?: {
       scrollUp: () => {},
       scrollDown: () => {},
       resetForAgent: () => {},
+    },
+    channelPane: {
+      scrollUp: () => {},
+      scrollDown: () => {},
     },
     systemDashboard: {
       scrollUp: () => {},
@@ -133,7 +165,7 @@ function makeMockCtx(overrides?: {
     healthReport: undefined,
   };
   const flushActions = async () => { await Promise.all(pendingActions); };
-  return { ctx, dialogs, notices, refreshCalls, scrollUpCalls, scrollDownCalls, loadAgentLogIfNeededCalls, flushActions };
+  return { ctx, dialogs, notices, refreshCalls, scrollUpCalls, scrollDownCalls, loadAgentLogIfNeededCalls, setFocusCalls, teamSendCalls, flushActions };
 }
 
 // Per-test isolated repo root. sendMessage now writes a real outbox.jsonl +
@@ -956,5 +988,115 @@ describe("handleAddPermission", () => {
     const d = assertDialog(dialogs[0]!, "input");
     d.onSubmit("Bash(foo; rm -rf /)");
     expect(notices.some((n) => n.includes("Invalid permission"))).toBe(true);
+  });
+});
+
+describe("handleSend — §17.3a team-target branch", () => {
+  test("teams-tree focus + team selection opens an @<team> dialog (no agent dialog)", () => {
+    const { ctx, dialogs } = makeMockCtx({
+      focus: "teams-tree",
+      teamsSelection: { kind: "team", teamName: "backend" },
+    });
+    handleSend(ctx);
+    expect(dialogs).toHaveLength(1);
+    const d = assertDialog(dialogs[0]!, "textarea");
+    expect(d.prompt).toContain("@backend");
+    // Team send dialog must NOT show a "send to all" toggle (a team send
+    // already fans out). The textarea dialog has no sendAll field for team
+    // sends — only the agent-send branch sets that.
+    expect(("sendAll" in d) ? d.sendAll : undefined).toBeUndefined();
+  });
+
+  test("onSubmit routes through ctx.teamSend (not sendMessage)", async () => {
+    const { ctx, dialogs, teamSendCalls, flushActions } = makeMockCtx({
+      focus: "teams-tree",
+      teamsSelection: { kind: "team", teamName: "backend" },
+    });
+    handleSend(ctx);
+    const d = assertDialog(dialogs[0]!, "textarea");
+    d.onSubmit("standup time");
+    await flushActions();
+    expect(teamSendCalls).toHaveLength(1);
+    expect(teamSendCalls[0]!.teamName).toBe("backend");
+    expect(teamSendCalls[0]!.message).toBe("standup time");
+    // fromAgent is undefined: the dashboard `s`-send is a CLI/human send;
+    // teamSend will tag it with user.name (or fall back to "user") itself.
+    expect(teamSendCalls[0]!.fromAgent).toBeUndefined();
+  });
+
+  test("team-member (kind:agent) selection from Teams panel is NOT a team-target — falls through to agent send", () => {
+    // §17.3 child-agent-indistinguishable: selecting a member row in the
+    // Teams panel must behave like selecting that agent in the Agents panel.
+    const agent = makeAgent({ id: "agent-a" });
+    const { ctx, dialogs, teamSendCalls } = makeMockCtx({
+      focus: "teams-tree",
+      teamsSelection: { kind: "agent", agent },
+    });
+    handleSend(ctx);
+    expect(dialogs).toHaveLength(1);
+    const d = assertDialog(dialogs[0]!, "textarea");
+    // Point-to-point dialog prompts for the agent, not the team
+    expect(d.prompt).toContain("agent-a");
+    expect(d.prompt).not.toContain("@");
+    // And teamSend is NOT called
+    expect(teamSendCalls).toHaveLength(0);
+  });
+
+  test("empty message cancels the team send", async () => {
+    const { ctx, dialogs, notices, teamSendCalls, flushActions } = makeMockCtx({
+      focus: "teams-tree",
+      teamsSelection: { kind: "team", teamName: "backend" },
+    });
+    handleSend(ctx);
+    const d = assertDialog(dialogs[0]!, "textarea");
+    d.onSubmit("   ");
+    await flushActions();
+    expect(teamSendCalls).toHaveLength(0);
+    expect(notices.some((n) => n.includes("Send cancelled"))).toBe(true);
+  });
+});
+
+describe("handleFuzzyAgent — §17.3 @-jump force-select in Agents panel", () => {
+  test("selecting an agent ALWAYS calls focusManager.setFocus('agent-tree') first", () => {
+    const agent = makeAgent({ id: "agent-x" });
+    const { ctx, dialogs, setFocusCalls } = makeMockCtx({
+      focus: "teams-tree", // user is on the Teams panel
+      flatList: [makeFlatAgent(agent)],
+    });
+    handleFuzzyAgent(ctx);
+    const d = assertDialog(dialogs[0]!, "fuzzy");
+    // The single agent entry — fuzzy lists put repo headers first, agents after.
+    // Our flatList has just an agent so originalIndex 0 selects it.
+    d.onSelect(0);
+    expect(setFocusCalls[0]).toBe("agent-tree");
+  });
+
+  test("selecting a repo also force-focuses to agent-tree", () => {
+    const { ctx, dialogs, setFocusCalls } = makeMockCtx({
+      focus: "teams-tree",
+      flatList: [makeFlatRepoHeader("/tmp/some/repo")],
+    });
+    handleFuzzyAgent(ctx);
+    const d = assertDialog(dialogs[0]!, "fuzzy");
+    d.onSelect(0);
+    expect(setFocusCalls[0]).toBe("agent-tree");
+  });
+});
+
+describe("handleScrollUp/Down — §17.4 channel pane scrolls alongside", () => {
+  test("scrollUp also scrolls the channel pane", () => {
+    let chScrollUp = 0;
+    const { ctx } = makeMockCtx();
+    ctx.channelPane.scrollUp = () => { chScrollUp++; };
+    handleScrollUp(ctx);
+    expect(chScrollUp).toBe(1);
+  });
+
+  test("scrollDown also scrolls the channel pane", () => {
+    let chScrollDown = 0;
+    const { ctx } = makeMockCtx();
+    ctx.channelPane.scrollDown = () => { chScrollDown++; };
+    handleScrollDown(ctx);
+    expect(chScrollDown).toBe(1);
   });
 });

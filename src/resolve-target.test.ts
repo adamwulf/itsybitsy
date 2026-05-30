@@ -110,7 +110,8 @@ describe("Group A: @system addressing", () => {
     const result = await resolveTarget("@System", repos, "/somewhere");
     expect(result.isSystemCoordinator).toBe(false);
     expect(result.agent).toBeNull();
-    expect(errorOutput.some((e) => e.includes("repo not found: System"))).toBe(true);
+    // §16.1 message: a bare unknown @name is "neither repo nor team".
+    expect(errorOutput.some((e) => e.includes("no repo or team named: System"))).toBe(true);
   });
 });
 
@@ -187,13 +188,13 @@ describe("Group C: @repo-name coordinator lookup", () => {
   test("C3: @lib fails because nickname 'libs' overrides basename 'lib'", async () => {
     const result = await resolveTarget("@lib", repos);
     expect(result.agent).toBeNull();
-    expect(errorOutput.some((e) => e.includes("repo not found: lib"))).toBe(true);
+    expect(errorOutput.some((e) => e.includes("no repo or team named: lib"))).toBe(true);
   });
 
   test("C4: @unknown fails with repo not found", async () => {
     const result = await resolveTarget("@unknown", repos);
     expect(result.agent).toBeNull();
-    expect(errorOutput.some((e) => e.includes("repo not found: unknown"))).toBe(true);
+    expect(errorOutput.some((e) => e.includes("no repo or team named: unknown"))).toBe(true);
   });
 
   test("C5: @app but no coordinator exists", async () => {
@@ -234,7 +235,10 @@ describe("Group D: @repo/agent-id scoped lookup", () => {
   test("D4: @unknown/agent-111 fails with repo not found", async () => {
     const result = await resolveTarget("@unknown/agent-111", repos);
     expect(result.agent).toBeNull();
-    expect(errorOutput.some((e) => e.includes("repo not found: unknown"))).toBe(true);
+    // Slashed form can never address a team — still a not-found error, and is
+    // NOT resolved as a team (verified by result.team being undefined).
+    expect(result.team).toBeUndefined();
+    expect(errorOutput.some((e) => e.includes("no repo or team named: unknown"))).toBe(true);
   });
 
   test("D5: @libs/agent-111 cross-repo forbidden (agent-111 is in app, not libs)", async () => {
@@ -491,7 +495,7 @@ describe("Group K: Cross-cutting edge cases", () => {
   test("K2: @ alone treated as repo name empty string", async () => {
     const result = await resolveTarget("@", repos);
     expect(result.agent).toBeNull();
-    expect(errorOutput.some((e) => e.includes("repo not found:"))).toBe(true);
+    expect(errorOutput.some((e) => e.includes("no repo or team named:"))).toBe(true);
   });
 
   test("K3: multi-repo same agent ID - same-repo first wins", async () => {
@@ -542,7 +546,7 @@ describe("Group K: Cross-cutting edge cases", () => {
     // afterAt = "system/something", slashIdx = 6, repoName = "system", agentId = "something"
     const result = await resolveTarget("@system/something", repos);
     expect(result.agent).toBeNull();
-    expect(errorOutput.some((e) => e.includes("repo not found: system"))).toBe(true);
+    expect(errorOutput.some((e) => e.includes("no repo or team named: system"))).toBe(true);
   });
 
   test("K10: agents are found and routed correctly from temp repos", async () => {

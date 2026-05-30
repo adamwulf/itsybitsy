@@ -21,6 +21,7 @@ import {
   clearAgentOperation,
   TRANSIENT_FRESH_MS,
   readAllAgents,
+  detectAgentStates,
 } from "./agents";
 import {
   enqueueOutbox,
@@ -59,6 +60,24 @@ import {
   REGULAR_AGENT_INTERCEPT_MATCHER,
 } from "./settings-builder";
 import { listRepos, repoDisplayName, type RepoEntry } from "./registry";
+import {
+  type Team,
+  normalizeTeamName,
+  isValidTeamName,
+  isReservedTeamName,
+  getTeam,
+  listTeams,
+  createTeam,
+  deleteTeam,
+  addMember,
+  removeMember,
+  pruneDeadMembers,
+} from "./teams";
+import {
+  appendChannelMessage,
+  appendTeamLog,
+  deleteChannelFiles,
+} from "./team-channel";
 import { timed } from "./perf";
 
 export interface IbCommandResult {
@@ -205,6 +224,99 @@ export function resetKillPauseSpawnRunner(): void {
   killPauseSpawnCtx.reset();
 }
 
+// ===========================================================================
+// Teardown leave-notices (§16.4.2 / §16.5). These are owned by THIS layer (the
+// command layer has `listRepos()`); `agent-lifecycle.ts` only performs the
+// membership write and threads the pruned `(team, id)` pairs up. There are TWO
+// notice shapes, chosen by WHICH COMMAND drove the departure (not a runtime
+// flag):
+//   - PER-AGENT  (ib kill, ib merge): `left the team`, `fromAgent` = departed id.
+//   - COALESCED  (any ib nuke): one `N member(s) left @team` per team, system
+//                sender — avoids an O(N²) notice storm on bulk teardown.
+// Both snapshot the SURVIVING members from the POST-prune roster (the departed
+// ids are already absent) and are BEST-EFFORT — a delivery failure can never
+// throw out of the driving command. An empty survivor set sends nothing
+// (empty-survivor carve-out, §16.5).
+// ===========================================================================
+
+/**
+ * PER-AGENT leave notice (§16.4.2) for `ib kill` / `ib merge`. For each pruned
+ * `(team, departedId)` pair, snapshot the team's SURVIVING members (post-prune
+ * via `getTeam`, so the departed id is already gone), resolve each to an Agent,
+ * and send `left the team` with `fromAgent` stamped EXPLICITLY to the departed
+ * id (§16.5 — never cwd-auto-detected; the departed worktree is gone). A team
+ * with no survivors sends nothing. Best-effort: all failures are swallowed.
+ */
+async function emitPerAgentLeaveNotice(
+  prunedTeams: Array<{ team: string; id: string }>,
+  repos: RepoEntry[],
+): Promise<void> {
+  if (prunedTeams.length === 0) return;
+  try {
+    const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })));
+    const byId = new Map(agents.map((a) => [a.id, a]));
+    for (const { team: teamName, id: departedId } of prunedTeams) {
+      // Audit the departure in the team's <team>.log (§17.4). Best-effort.
+      await appendTeamLog(teamName, `agent ${departedId} left (kill/merge)`).catch(() => {});
+      // Post-prune survivors (departed id already removed from teams.json).
+      const team = await getTeam(teamName);
+      if (!team) continue;
+      for (const memberId of team.members) {
+        const member = byId.get(memberId);
+        if (!member) continue;
+        await sendMessage(member, "left the team", { fromAgent: departedId, team: teamName }).catch(() => {});
+      }
+    }
+  } catch {
+    // Best-effort — a notice failure must never fail the driving command (§16.5).
+  }
+}
+
+/**
+ * COALESCED leave notice (§16.4.2) for ANY `ib nuke` (single or bulk — they all
+ * route through `nukeAgentList`). Groups the accumulated pruned `(team, id)`
+ * pairs by team; for each affected team, snapshots its SURVIVING members
+ * (post-prune via `getTeam`) and sends exactly ONE `N member(s) left @team`
+ * notice to those survivors, stamped as a SYSTEM send (`fromAgent: "@system"`),
+ * not any one departed id. This collapses an N-departure storm into one notice
+ * per team. A team with no survivors sends nothing (empty-survivor carve-out,
+ * §16.5). Best-effort: all failures are swallowed.
+ */
+async function emitCoalescedLeaveNotice(
+  prunedTeams: Array<{ team: string; id: string }>,
+  repos: RepoEntry[],
+): Promise<void> {
+  if (prunedTeams.length === 0) return;
+  try {
+    // Count departures per team (insertion-ordered so notices are deterministic).
+    const departuresByTeam = new Map<string, number>();
+    for (const { team: teamName } of prunedTeams) {
+      departuresByTeam.set(teamName, (departuresByTeam.get(teamName) ?? 0) + 1);
+    }
+
+    const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })));
+    const byId = new Map(agents.map((a) => [a.id, a]));
+
+    for (const [teamName, count] of departuresByTeam) {
+      // Audit the coalesced departure in the team's <team>.log (§17.4). Logged
+      // for every affected team, BEFORE the empty-survivor carve-out below, so a
+      // nuke that empties a team still records the event. Best-effort.
+      await appendTeamLog(teamName, `${count} member${count === 1 ? "" : "s"} left (nuke)`).catch(() => {});
+      // Post-prune survivors (all this op's departures already removed).
+      const team = await getTeam(teamName);
+      if (!team || team.members.length === 0) continue; // empty-survivor carve-out
+      const body = `${count} member${count === 1 ? "" : "s"} left @${teamName}`;
+      for (const memberId of team.members) {
+        const member = byId.get(memberId);
+        if (!member) continue;
+        await sendMessage(member, body, { fromAgent: "@system", team: teamName }).catch(() => {});
+      }
+    }
+  } catch {
+    // Best-effort — a notice failure must never fail the driving nuke (§16.5).
+  }
+}
+
 /**
  * Native kill implementation — replaces `ib kill <id> --force`.
  *
@@ -241,14 +353,20 @@ export async function killAgent(agent: Agent): Promise<IbCommandResult> {
   // Remove questions
   await removeAgentQuestions(agent.repoPath, agent.id);
 
-  // Teardown (log, capture, kill process, kill tmux, worktree, branch, archive, remove)
-  await teardownAgent(agent.repoPath, agent.id, agentDir, {
+  // Teardown (log, capture, kill process, kill tmux, worktree, branch, archive,
+  // remove). The teardown prunes this agent from every team and returns the
+  // pruned (team, id) pairs so we can fan out the leave notice (§16.5).
+  const { prunedTeams } = await teardownAgent(agent.repoPath, agent.id, agentDir, {
     tmux_session: tmuxSession,
     claude_pid: agent.meta.claude_pid,
   }, "Agent killed");
 
   // Scan for orphaned Claude processes
   await scanAndKillOrphans(agentsDir);
+
+  // kill = single-agent departure → per-agent leave notice to surviving
+  // teammates, `fromAgent` = the departed id (§16.5). Best-effort.
+  await emitPerAgentLeaveNotice(prunedTeams, await listRepos());
 
   return { ok: true, exitCode: 0, stdout: `Closed agent: ${agent.id}`, stderr: "" };
 }
@@ -325,6 +443,12 @@ async function nukeAgentList(
   let killed = 0;
   let failed = 0;
 
+  // Accumulate pruned (team, id) pairs across the WHOLE loop so we can emit ONE
+  // coalesced leave notice per affected team afterward — never a per-agent storm
+  // (§16.5). Every `ib nuke` (single leaf, manager + descendants, or nuke-all)
+  // flows through here, so this is ALWAYS the coalesced path.
+  const allPruned: Array<{ team: string; id: string }> = [];
+
   for (const id of agentIds) {
     const agentDir = join(agentsDir, id);
     // Skip if directory doesn't exist
@@ -347,9 +471,11 @@ async function nukeAgentList(
       };
     } catch { /* ignore */ }
 
-    // Teardown
+    // Teardown — captures the pruned (team, id) pairs even on the failure path
+    // (the prune ran inside archiveAgent regardless of the final dir-removal).
     try {
-      await teardownAgent(repoPath, id, agentDir, meta, "Agent nuked");
+      const { prunedTeams } = await teardownAgent(repoPath, id, agentDir, meta, "Agent nuked");
+      allPruned.push(...prunedTeams);
       killed++;
     } catch { /* teardown error — count as failure */
       failed++;
@@ -363,6 +489,10 @@ async function nukeAgentList(
   if (killed > 0 || orphansKilled > 0) {
     await scanAndKillOrphans(agentsDir);
   }
+
+  // nuke = coalesced departure → ONE `N member(s) left @team` notice per team,
+  // system sender, to surviving teammates only (§16.5). Best-effort.
+  await emitCoalescedLeaveNotice(allPruned, await listRepos());
 
   return { killed, failed, orphansKilled };
 }
@@ -1686,16 +1816,24 @@ export async function mergeAgent(agent: Agent, targetDir: string): Promise<IbCom
       }
     });
 
-    // 17-19. Archive artifacts, remove questions, remove agent dir
+    // 17-19. Archive artifacts, remove questions, remove agent dir. archiveAgent
+    // also prunes this agent from every team (§16.5); hoist the pruned pairs out
+    // of the timed block so the leave-notice fan-out below can see them.
+    let prunedTeams: Array<{ team: string; id: string }> = [];
     await timed("merge", "archive", async () => {
       await logAgent(agentDir, "Merge complete - archiving and closing agent");
-      await archiveAgent(agent.repoPath, agent.id, agentDir);
+      const res = await archiveAgent(agent.repoPath, agent.id, agentDir);
+      prunedTeams = res.prunedTeams;
       await removeAgentQuestions(agent.repoPath, agent.id);
       try { await rm(agentDir, { recursive: true, force: true }); } catch { /* ignore */ }
     });
 
     // 20. Scan for orphaned Claude processes
     await timed("merge", "orphan-scan", () => scanAndKillOrphans(agentsDir));
+
+    // merge = single-agent departure → per-agent leave notice to surviving
+    // teammates, `fromAgent` = the departed id (§16.5). Best-effort.
+    await emitPerAgentLeaveNotice(prunedTeams, await listRepos());
 
     return { ok: true, exitCode: 0, stdout: `Closed agent: ${agent.id}`, stderr: "" };
   } finally {
@@ -1819,6 +1957,18 @@ export async function deliverMessage(agent: Agent, queued: OutboxMessage): Promi
   // recipient still knows who sent it.
   const raw = queued.raw === true;
   const userPassthrough = !raw && !fromId && (message.startsWith("/") || message.startsWith("!"));
+  // A team fan-out (§16.4) carries the team name on the queued message; the
+  // delivery prefix gains an ` in @<team>` clause so the recipient learns the
+  // reply target by example. The stored team name is BARE (no `@`), so we add a
+  // literal `@` in the rendered prefix. Raw mode (no prefix at all) is unchanged.
+  // Composes naturally with `userPassthrough`: a `/` or `!` user message skips the
+  // whole `[sent by ... in @<team>]:` block (the `if (!raw && !userPassthrough)`
+  // guard below), so a passthrough lands in the recipient terminal verbatim even
+  // for a team send — which is the intended behavior (the prefix would push the
+  // command off the first column and stop it from firing).
+  const teamClause = !raw && typeof queued.team === "string" && queued.team.length > 0
+    ? ` in @${queued.team}`
+    : "";
   let fullMessage = message;
   let userLabel = "";
   if (!raw && !userPassthrough) {
@@ -1827,14 +1977,17 @@ export async function deliverMessage(agent: Agent, queued: OutboxMessage): Promi
       if (fromId.startsWith("@")) {
         label = BARE_RENDERED_SENTINELS.has(fromId) ? fromId.slice(1) : fromId;
       } else {
-        label = `agent ${fromId}`;
+        // In a team context the ` in @<team>` clause already establishes that
+        // the sender is an agent in a room, so the literal "agent " word is
+        // dropped (§16.4 delivery-prefix divergence). Outside a team it stays.
+        label = teamClause ? fromId : `agent ${fromId}`;
       }
-      fullMessage = `[sent by ${label}]: ${message}`;
+      fullMessage = `[sent by ${label}${teamClause}]: ${message}`;
     } else {
       const config = await readConfig();
       const userName = config["user.name"]?.value;
       userLabel = typeof userName === "string" && userName.length > 0 ? `user ${userName}` : "user";
-      fullMessage = `[sent by ${userLabel}]: ${message}`;
+      fullMessage = `[sent by ${userLabel}${teamClause}]: ${message}`;
     }
   }
 
@@ -2008,7 +2161,7 @@ async function hasLiveWatchdog(agentDir: string): Promise<boolean> {
 export async function sendMessage(
   agent: Agent,
   message: string,
-  opts?: { fromAgent?: string; cwd?: string; raw?: boolean; outboxDir?: string }
+  opts?: { fromAgent?: string; cwd?: string; raw?: boolean; outboxDir?: string; team?: string }
 ): Promise<IbCommandResult> {
   const tmuxSession = agent.meta.tmux_session;
   if (!tmuxSession) {
@@ -2032,7 +2185,7 @@ export async function sendMessage(
   // silently dropped. A genuine write failure surfaces as an error rather than
   // an unhandled rejection.
   try {
-    await enqueueOutbox(queueDir, { message, fromAgent: fromId, raw });
+    await enqueueOutbox(queueDir, { message, fromAgent: fromId, raw, team: opts?.team });
   } catch (err) {
     return { ok: false, exitCode: 1, stdout: "", stderr: `Failed to enqueue message: ${err}` };
   }
@@ -2056,6 +2209,420 @@ export async function sendMessage(
     return { ok: true, exitCode: 0, stdout, stderr: "" };
   }
   return result;
+}
+
+// ===========================================================================
+// Teams — fan-out + command layer (SPEC §16.3/§16.4). The registry primitives
+// live in `./teams` (frozen API: getTeam/listTeams/createTeam/deleteTeam/
+// addMember/removeMember/pruneDeadMembers + name validation). This layer owns
+// the resolver-side fan-out (`teamSend`), the `ib team` subcommands, the
+// `ib roster` listing, and the JOIN / per-agent-team-REMOVE leave notices
+// (§16.4.1/§16.4.2). Notices are best-effort: a delivery failure never fails
+// the command (§16.4.1).
+// ===========================================================================
+
+/** Format `name` as a non-zero IbCommandResult error line (stderr + exit 1). */
+function teamErr(message: string): IbCommandResult {
+  return { ok: false, exitCode: 1, stdout: "", stderr: message };
+}
+
+/** Format `name` as a success IbCommandResult (stdout + exit 0). */
+function teamOk(stdout: string): IbCommandResult {
+  return { ok: true, exitCode: 0, stdout, stderr: "" };
+}
+
+/**
+ * Build the set of all live agent ids across every registered repo. Used to
+ * decide membership liveness for lazy pruning (§16.5): a member is "alive" iff
+ * its agent still resolves to a real agent directory. `readAllAgents` only
+ * returns agents whose `meta.json` exists, so membership in this set is the
+ * authoritative "agent still exists" signal.
+ */
+async function liveAgentIds(repos: RepoEntry[]): Promise<Set<string>> {
+  const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })));
+  return new Set(agents.map((a) => a.id));
+}
+
+/**
+ * Resolve the sender id for a team send the SAME way `sendMessage` does:
+ * explicit `--from` wins, else cwd auto-detection (`resolveSenderId`). Returns
+ * `""` when no sender can be detected (human/CLI from outside a worktree),
+ * which excludes nobody — the correct behavior for a human-driven team send.
+ * `resolveSenderId`'s `repoPath` argument is only used for logging context, so
+ * any member's repoPath (or `""`) is fine here; we only need the resolved id.
+ */
+function resolveTeamSenderId(repos: RepoEntry[], opts: { fromAgent?: string } | undefined): string {
+  if (opts?.fromAgent) return opts.fromAgent;
+  return resolveSenderId("", opts);
+}
+
+/**
+ * Fan a message out to a team (§16.4). The caller (`ib send @<team>`) has
+ * already resolved the `@`-target to a team via `resolveTarget`; `members` is
+ * that resolved set, but this function re-derives the authoritative recipient
+ * set itself so it can LAZY-PRUNE dead members from the stored roster at send
+ * time (§16.5) — the resolver's snapshot may include ids that have since died.
+ *
+ * Sequence:
+ *   1. Resolve the sender id (cwd/`--from`, same as `sendMessage`) for exclusion.
+ *   2. Lazy-prune the roster: any stored member whose agent no longer exists is
+ *      removed from `teams.json` (under the lock, by `pruneDeadMembers`).
+ *   3. Fan out to each surviving member EXCEPT the sender, via `sendMessage`
+ *      with the `team` opt set (so the delivery prefix renders `in @<team>`).
+ *   4. Empty recipient set (no members / only-sender / all-pruned) is a no-op
+ *      SUCCESS printing `no recipients in @<team>` (§16.4 empty-set no-op).
+ *
+ * Per-member sends are best-effort: a single failure is recorded but does not
+ * abort the rest, and the aggregate result is non-zero only if EVERY attempted
+ * send failed (mirrors §16.4.1 best-effort notices).
+ */
+export async function teamSend(
+  teamName: string,
+  members: Agent[],
+  message: string,
+  opts: { fromAgent?: string } | undefined,
+  repos: RepoEntry[],
+): Promise<IbCommandResult> {
+  const name = normalizeTeamName(teamName);
+  const senderId = resolveTeamSenderId(repos, opts);
+
+  // Lazy-prune dead members from the stored roster (§16.5): a member is alive
+  // iff it resolves to a still-existing agent directory. The predicate RECOMPUTES
+  // the live set on each call rather than closing over a pre-lock snapshot —
+  // pruneDeadMembers invokes it during BOTH its unlocked pre-scan AND its in-lock
+  // re-scan, and the in-lock pass MUST see fresh state. A frozen Set snapshotted
+  // before the lock would mis-prune a member added in the race window (e.g.
+  // `ib team add` committing concurrently): the in-lock re-test would not find
+  // the just-joined id in the stale Set and would silently drop it. Recomputing
+  // fresh each call closes that window.
+  const isAlive = async (id: string) => (await liveAgentIds(repos)).has(id);
+  const pruneRes = await pruneDeadMembers(name, isAlive);
+  if (!pruneRes.team) {
+    // Team vanished between resolveTarget and here — treat as not found.
+    return teamErr(`Error: team @${name} not found`);
+  }
+
+  // Build the recipient Agent list from the SURVIVING roster, excluding the
+  // sender. Map ids back to Agents via the resolved `members` first (fast),
+  // falling back to a fresh readAllAgents lookup for any survivor not in the
+  // resolver's snapshot (it pruned members it couldn't resolve, but a survivor
+  // is by definition resolvable).
+  const byId = new Map(members.map((m) => [m.id, m]));
+  const survivors = pruneRes.team.members.filter((id) => id !== senderId);
+  let lookupAgents: Agent[] | null = null;
+  const recipients: Agent[] = [];
+  for (const id of survivors) {
+    let agent = byId.get(id);
+    if (!agent) {
+      if (!lookupAgents) {
+        const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })));
+        lookupAgents = agents;
+      }
+      agent = lookupAgents.find((a) => a.id === id);
+    }
+    if (agent) recipients.push(agent);
+  }
+
+  // Persist ONE channel record per send to the shared team channel (§17.4) — the
+  // chat box's backing history. Placed AFTER the not-found check (so a nonexistent
+  // team writes no channel file) but BEFORE the empty-recipient early return, so a
+  // self-only / zero-survivor send to an EXISTING team still records the message
+  // in the room's history (the §17.4 recommended default: append when the team
+  // exists and the message is non-empty, even with an empty recipient set). It is
+  // ONE record per send (NOT inside the per-recipient loop, which would write N
+  // duplicate lines) and records the message regardless of per-recipient delivery
+  // success — the channel is the room's history, not a delivery receipt.
+  // Best-effort: a channel-append failure must never fail the send (§17.4).
+  if (message) {
+    await appendChannelMessage(name, {
+      ts: Math.floor(Date.now() / 1000),
+      fromAgent: senderId,
+      message,
+    }).catch(() => {});
+  }
+
+  if (recipients.length === 0) {
+    // No one to deliver to — empty team, self-only, or all-pruned. No-op success.
+    return teamOk(`no recipients in @${name}`);
+  }
+
+  const fromAgent = senderId || undefined;
+  let failures = 0;
+  const failureLines: string[] = [];
+  for (const recipient of recipients) {
+    const res = await sendMessage(recipient, message, { fromAgent, team: name });
+    if (!res.ok) {
+      failures++;
+      failureLines.push(`  ${recipient.id}: ${res.stderr || "delivery failed"}`);
+    }
+  }
+
+  const delivered = recipients.length - failures;
+  if (failures === recipients.length) {
+    // Every send failed — surface as an error so the caller exits non-zero.
+    return teamErr(`Error: failed to deliver to all ${recipients.length} member(s) of @${name}:\n${failureLines.join("\n")}`);
+  }
+  let stdout = `Sent to ${delivered} member(s) of @${name}`;
+  if (failures > 0) {
+    stdout += `\n(${failures} delivery failure(s):\n${failureLines.join("\n")}\n)`;
+  }
+  return teamOk(stdout);
+}
+
+/**
+ * Deliver the JOIN notice (§16.4.1) after a successful `ib team add` (persist-
+ * then-notify: the membership write already happened under the lock). The
+ * EXISTING members (post-write roster minus the newly-added id) each receive a
+ * `joined the team` fan-out; the NEWLY-ADDED agent instead receives a one-time
+ * instruction teaching the room reply protocol (since session-start may have
+ * fired before it joined). Best-effort — any delivery failure is swallowed so
+ * the command never fails (§16.4.1).
+ */
+async function fireJoinNotice(
+  name: string,
+  team: Team,
+  addedId: string,
+  repos: RepoEntry[],
+): Promise<void> {
+  // Audit the lifecycle event in the team's <team>.log (§17.4). Best-effort and
+  // additive — never changes the notice fan-out below.
+  await appendTeamLog(name, `agent ${addedId} joined`).catch(() => {});
+  try {
+    const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })));
+    const byId = new Map(agents.map((a) => [a.id, a]));
+
+    // Existing members (everyone in the post-write roster except the new joiner).
+    for (const memberId of team.members) {
+      if (memberId === addedId) continue;
+      const member = byId.get(memberId);
+      if (!member) continue;
+      await sendMessage(member, "joined the team", { fromAgent: addedId, team: name }).catch(() => {});
+    }
+
+    // The newly-added agent gets the reply-protocol instruction (§16.4.1). It is
+    // stamped from `@system` so it reads as a system instruction, not a peer
+    // message. Carrying `team` keeps the `in @<team>` clause for consistency.
+    const newAgent = byId.get(addedId);
+    if (newAgent) {
+      const instruction =
+        `You were added to team @${name}. Messages in this room arrive as ` +
+        `"[sent by <agent-id> in @${name}]: ...". The <agent-id> is who spoke; ` +
+        `@${name} is where to reply. To reply to the room, run: ib send @${name} "<message>". ` +
+        `See your teammates with: ib roster @${name}.`;
+      await sendMessage(newAgent, instruction, { fromAgent: "@system", team: name }).catch(() => {});
+    }
+  } catch {
+    // Best-effort — a notice failure must never fail `ib team add` (§16.4.1).
+  }
+}
+
+/**
+ * Deliver the per-agent LEAVE notice (§16.4.2) after a successful
+ * `ib team remove` (persist-then-notify). The post-write members (the departed
+ * id is already absent) each receive a `left the team` fan-out, with `fromAgent`
+ * stamped EXPLICITLY to the departed id (§16.5 — never cwd-auto-detected).
+ * Best-effort. (Leave notices for `ib kill`/`ib merge`/`ib nuke` belong to the
+ * teardown path, owned by another module — NOT here.)
+ */
+async function fireRemoveLeaveNotice(
+  name: string,
+  team: Team,
+  removedId: string,
+  repos: RepoEntry[],
+): Promise<void> {
+  // Audit the lifecycle event in the team's <team>.log (§17.4). Best-effort and
+  // additive — never changes the notice fan-out below.
+  await appendTeamLog(name, `agent ${removedId} left`).catch(() => {});
+  try {
+    const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })));
+    const byId = new Map(agents.map((a) => [a.id, a]));
+    for (const memberId of team.members) {
+      const member = byId.get(memberId);
+      if (!member) continue;
+      await sendMessage(member, "left the team", { fromAgent: removedId, team: name }).catch(() => {});
+    }
+  } catch {
+    // Best-effort — a notice failure must never fail `ib team remove` (§16.4.1).
+  }
+}
+
+/**
+ * Resolve a possibly-partial agent id/nickname to its FULL id, using the same
+ * matcher as `ib send` (`matchAgentById`). Returns `{ id }` on a unique match,
+ * or `{ error }` describing not-found / ambiguity. Used by `ib team add/remove`.
+ */
+async function resolveFullAgentId(
+  partial: string,
+  repos: RepoEntry[],
+): Promise<{ id: string } | { error: string }> {
+  const { matchAgentById } = await import("./index");
+  const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })));
+  const { match, ambiguous } = matchAgentById(partial, agents);
+  if (ambiguous.length > 0) {
+    return { error: `Error: ambiguous agent id "${partial}" matches: ${ambiguous.join(", ")}` };
+  }
+  if (!match) {
+    return { error: `Error: agent not found: ${partial}` };
+  }
+  return { id: match.id };
+}
+
+/**
+ * `ib team create <name>` (§16.3). Validates the name (allowlist + reserved-word
+ * collision per §16.1), then creates an empty team. Idempotency is NOT silent:
+ * a duplicate name is an error, not a no-op (§16.3 — `create` errors when the
+ * name already exists).
+ */
+export async function teamCreate(name: string, opts?: { createdBy?: string }): Promise<IbCommandResult> {
+  const n = normalizeTeamName(name);
+  if (!isValidTeamName(n)) {
+    return teamErr(`Error: invalid team name "${n}" — team names must match [A-Za-z0-9_-]+`);
+  }
+  if (await isReservedTeamName(n)) {
+    return teamErr(`Error: team name @${n} is reserved (collides with a coordinator/system/repo name)`);
+  }
+  try {
+    await createTeam(n, opts?.createdBy ?? "", Math.floor(Date.now() / 1000));
+  } catch {
+    // createTeam throws only on the already-exists race/collision (§teams.ts).
+    return teamErr(`Error: team @${n} already exists`);
+  }
+  // Audit the creation in the team's <team>.log (§17.4). Best-effort.
+  await appendTeamLog(n, `team created by ${opts?.createdBy || "user"}`).catch(() => {});
+  return teamOk(`Created team @${n}`);
+}
+
+/**
+ * `ib team add <name> <agent-id>` (§16.3). Errors if the team does not exist;
+ * resolves `<agent-id>` via the same partial matcher as `ib send`; no-op success
+ * if already a member; fires the JOIN notice (§16.4.1) on a real add.
+ */
+export async function teamAdd(name: string, agentIdOrPartial: string, repos: RepoEntry[]): Promise<IbCommandResult> {
+  const n = normalizeTeamName(name);
+  if (!(await getTeam(n))) {
+    return teamErr(`Error: team @${n} not found`);
+  }
+  const resolved = await resolveFullAgentId(agentIdOrPartial, repos);
+  if ("error" in resolved) return teamErr(resolved.error);
+  const id = resolved.id;
+
+  const { added, team } = await addMember(n, id);
+  if (!team) {
+    // Team was deleted between our check and the locked write.
+    return teamErr(`Error: team @${n} not found`);
+  }
+  if (!added) {
+    return teamOk(`agent ${id} is already in @${n}`);
+  }
+  // Persist-then-notify (§16.4.1): membership write committed under the lock;
+  // fan the join notice to the post-write snapshot. Best-effort.
+  await fireJoinNotice(n, team, id, repos);
+  return teamOk(`Added ${id} to @${n}`);
+}
+
+/**
+ * `ib team remove <name> <agent-id>` (§16.3). Errors if the team does not exist;
+ * resolves `<agent-id>` via the same partial matcher as `ib send`; no-op success
+ * if not a member; fires the per-agent LEAVE notice (§16.4.2) on a real removal.
+ */
+export async function teamRemove(name: string, agentIdOrPartial: string, repos: RepoEntry[]): Promise<IbCommandResult> {
+  const n = normalizeTeamName(name);
+  if (!(await getTeam(n))) {
+    return teamErr(`Error: team @${n} not found`);
+  }
+  const resolved = await resolveFullAgentId(agentIdOrPartial, repos);
+  if ("error" in resolved) return teamErr(resolved.error);
+  const id = resolved.id;
+
+  const { removed, team } = await removeMember(n, id);
+  if (!team) {
+    return teamErr(`Error: team @${n} not found`);
+  }
+  if (!removed) {
+    return teamOk(`agent ${id} was not in @${n}`);
+  }
+  // Persist-then-notify (§16.4.2): leave notice to the post-write snapshot
+  // (the departed id is already absent). Best-effort.
+  await fireRemoveLeaveNotice(n, team, id, repos);
+  return teamOk(`Removed ${id} from @${n}`);
+}
+
+/**
+ * `ib team list` (§16.3). One line per team with its member count, sorted by
+ * name for stable output. Empty → `No teams.`
+ */
+export async function teamList(): Promise<IbCommandResult> {
+  const teams = await listTeams();
+  if (teams.length === 0) {
+    return teamOk("No teams.");
+  }
+  const lines = teams
+    .slice()
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map((t) => `@${t.name}  ${t.members.length} member(s)`);
+  return teamOk(lines.join("\n"));
+}
+
+/**
+ * `ib team delete <name>` (§16.3). Removes the `teams.json` entry. Errors if the
+ * team did not exist. Does NOT notify (the team is gone).
+ */
+export async function teamDelete(name: string): Promise<IbCommandResult> {
+  const n = normalizeTeamName(name);
+  const ok = await deleteTeam(n);
+  if (!ok) {
+    return teamErr(`Error: team @${n} not found`);
+  }
+  // Cleanup the team's channel + log files (§17.4 cleanup default) so a deleted
+  // team leaves no orphaned files and a later `ib team create` of the same name
+  // starts with a clean channel. Best-effort, in the COMMAND wrapper (not the
+  // locked `deleteTeam` registry primitive). Placed after the successful delete.
+  await deleteChannelFiles(n).catch(() => {});
+  return teamOk(`Deleted team @${n}`);
+}
+
+/**
+ * `ib roster <name>` (§16.3). Errors if the team does not exist. LAZY-prunes
+ * dead members first (§16.5), then lists the surviving members one per line
+ * with repo and current state where resolvable. Header `@<name> (<count> members):`.
+ */
+export async function roster(name: string, repos: RepoEntry[]): Promise<IbCommandResult> {
+  const n = normalizeTeamName(name);
+  if (!(await getTeam(n))) {
+    return teamErr(`Error: team @${n} not found`);
+  }
+  // Lazy-prune dead members (§16.5), then list survivors with repo/state.
+  // detectAgentStates mutates `agents` in place so `agent.state` reflects the
+  // live detected state (§16.3: "state read via detectAgentStates()") instead of
+  // the uniform "unknown" readAllAgents assigns.
+  const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })));
+  await detectAgentStates(agents);
+  const byId = new Map(agents.map((a) => [a.id, a]));
+  // The liveness predicate RECOMPUTES the live set on each call rather than
+  // closing over a pre-lock snapshot. pruneDeadMembers invokes it during both its
+  // unlocked pre-scan and its in-lock re-scan; the in-lock pass MUST see fresh
+  // state so a member added in the race window (e.g. a concurrent `ib team add`)
+  // is not mis-pruned against a stale Set. See teamSend for the same fix.
+  const isAlive = async (id: string) => (await liveAgentIds(repos)).has(id);
+  const pruneRes = await pruneDeadMembers(n, isAlive);
+  if (!pruneRes.team) {
+    // Deleted between the existence check and the prune.
+    return teamErr(`Error: team @${n} not found`);
+  }
+  const survivors = pruneRes.team.members;
+  if (survivors.length === 0) {
+    return teamOk(`@${n} (0 members)`);
+  }
+  const lines = [`@${n} (${survivors.length} members):`];
+  for (const id of survivors) {
+    const agent = byId.get(id);
+    if (agent) {
+      lines.push(`  ${id}  ${agent.repoName}  ${agent.state}`);
+    } else {
+      lines.push(`  ${id}`);
+    }
+  }
+  return teamOk(lines.join("\n"));
 }
 
 export interface NewAgentOptions {

@@ -6,6 +6,7 @@ import { join, basename } from "path";
 import { AGENT_CWD_PATTERN, SYSTEM_AGENT_ID } from "./shared";
 import { loadAgentType, listSpawnableAgentTypesSync } from "../agent-types";
 import { writeAgentState } from "../agents";
+import { listTeams } from "../teams";
 
 export type SessionRole = "primary" | "manager" | "worker" | "coordinator";
 
@@ -212,7 +213,76 @@ async function loadPrefixLayerBody(
   }
 }
 
+/**
+ * Build the team-awareness block injected into an agent's session-start
+ * instructions when it belongs to one or more teams (SPEC §16.6).
+ *
+ * Scans `~/.itsybitsy/teams.json` (via `listTeams()`) for every team whose
+ * `members` includes `agentId`. Returns "" when the agent is in NO team — so
+ * non-team agents (and the system coordinator / primary Claude, whose ids never
+ * match a stored bare agent id) get no injection and no behavior change.
+ *
+ * When the agent IS a member, returns an imperative `## Teams` markdown section
+ * (NO `<ittybitty>` wrapper — the caller already wraps) that:
+ *   - names the team(s) the agent belongs to,
+ *   - teaches how to READ the inbound delivery prefix `[sent by <agent-id> in
+ *     @<team>]: <message>` — `<agent-id>` is WHO spoke, `@<team>` is WHERE to
+ *     reply,
+ *   - names `ib send @<team> "..."` as the DEFAULT reply action (reply to the
+ *     whole room, not point-to-point), and
+ *   - points at `ib roster @<team>` for the live (not static) teammate list.
+ *
+ * Membership is reflected as of session-start time. An agent that JOINS a team
+ * later learns the protocol from the join notice (§16.4.1), not from here —
+ * session-start fires once, so mid-session joins are intentionally not handled.
+ */
+export async function teamAwarenessBlock(agentId: string): Promise<string> {
+  if (!agentId) return "";
+  let teams: Array<{ name: string; members: string[] }>;
+  try {
+    teams = await listTeams();
+  } catch {
+    // teams.json missing/malformed → listTeams already swallows that, but be
+    // defensive: a read failure must never break session-start.
+    return "";
+  }
+  const myTeams = teams.filter((t) => t.members.includes(agentId)).map((t) => t.name);
+  if (myTeams.length === 0) return "";
+
+  const teamList = myTeams.map((name) => `@${name}`).join(", ");
+  // Use the first team the agent is in for the concrete `ib send`/`ib roster`
+  // examples — the rule generalizes to all of them (named in `teamList`).
+  const primary = `@${myTeams[0]!}`;
+
+  return `## Teams
+
+You are a member of team(s): ${teamList}.
+
+A team is a shared chat "room". Messages from a team arrive prefixed \`[sent by <agent-id> in @<team>]: <message>\`. Read the prefix carefully: the \`<agent-id>\` is WHO spoke in the room, and the \`@<team>\` is WHERE to reply.
+
+When you reply to something a teammate said, send your reply to the WHOLE room with \`ib send ${primary} "your message"\` — NOT \`ib send <agent-id>\`. Replying with \`ib send <agent-id>\` is a PRIVATE 1:1 reply the rest of the room will not see; use it only when you specifically intend that.
+
+Default to replying to the room (\`ib send @<team>\`) unless a private reply is intended.
+
+See the current teammates of a team any time with: \`ib roster ${primary}\`. The roster is live — members join and leave, so check it rather than assuming a fixed list.`;
+}
+
 export async function generateInstructions(ctx: SessionContext): Promise<string> {
+  const body = await generateInstructionsInner(ctx);
+  const teamBlock = await teamAwarenessBlock(ctx.agentId);
+  if (!teamBlock) return body;
+  // Splice the team block in just before the FINAL closing </ittybitty> tag so
+  // it lands inside the wrapper on whichever return path produced `body`. Every
+  // agent-instruction path emits exactly one trailing </ittybitty>; if for some
+  // reason it's absent (defensive), append the block at the end instead.
+  const closeIdx = body.lastIndexOf("</ittybitty>");
+  if (closeIdx === -1) {
+    return `${body}\n\n${teamBlock}`;
+  }
+  return `${body.slice(0, closeIdx)}\n${teamBlock}\n${body.slice(closeIdx)}`;
+}
+
+async function generateInstructionsInner(ctx: SessionContext): Promise<string> {
   // If agentType is set, load it and check for a template body
   if (ctx.agentType) {
     const agentType = await loadAgentType(ctx.agentType);

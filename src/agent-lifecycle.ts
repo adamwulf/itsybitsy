@@ -10,6 +10,7 @@ import { SpawnContext } from "./types";
 import { isValidTmuxSession } from "./validation";
 import { deleteAgentTransient } from "./agents";
 import { deleteAgentOutbox } from "./outbox";
+import { pruneAgentFromAllTeams } from "./teams";
 
 /** Spawn context for agent lifecycle operations */
 export const spawnCtx = new SpawnContext();
@@ -207,15 +208,42 @@ export async function captureTmuxOutputToFile(
 // ── archiveAgent ─────────────────────────────────────────────────────────────
 
 /**
+ * Result of {@link archiveAgent}. Carries BOTH the historical archive-folder
+ * path (`null` when there were no artifacts to archive) AND the set of
+ * `(team, removed-agent-id)` pairs this agent was pruned from at teardown
+ * (§16.5). The leave-notice fan-out lives in the `ib-commands.ts` command layer,
+ * which threads `prunedTeams` up to decide who to notify; `archiveAgent` itself
+ * emits NO notice and only performs the membership write.
+ */
+export interface ArchiveAgentResult {
+  /** Archive folder path, or null if there were no artifacts to archive. */
+  archivePath: string | null;
+  /** `(team, id)` pairs this agent was pruned from (empty if it was in no team). */
+  prunedTeams: Array<{ team: string; id: string }>;
+}
+
+/**
  * Archive agent artifacts to .ittybitty/archive/YYYYMMDD-HHMMSS-<id>/.
  * Moves/copies: output.log (move), agent.log (copy), meta.json (copy),
  * settings.local.json (move), debug-logs/ (copy recursive).
+ *
+ * Also performs the EAGER team-membership prune (§16.5): the agent's id is
+ * removed from every team it belonged to, UNCONDITIONALLY — pruning is keyed to
+ * teardown, not to whether any artifacts existed, so it runs even on the
+ * no-artifacts early-return path. Pruning is by agent id only (no `repos` data
+ * needed) and emits NO notice. The pruned `(team, id)` pairs are returned so the
+ * command layer can fan out the appropriate leave notice.
  */
 export async function archiveAgent(
   repoPath: string,
   agentId: string,
   agentDir: string
-): Promise<string | null> {
+): Promise<ArchiveAgentResult> {
+  // Eager teardown prune FIRST, unconditionally (§16.5): a torn-down agent must
+  // be removed from every team it belonged to even when there are no artifacts
+  // to archive. Pruning is by id only and never emits a notice.
+  const prunedTeams = await pruneAgentFromAllTeams(agentId);
+
   const archiveDir = join(repoPath, ".ittybitty", "archive");
   const timestamp = formatArchiveTimestamp();
   const archiveFolder = join(archiveDir, `${timestamp}-${agentId}`);
@@ -225,7 +253,7 @@ export async function archiveAgent(
   const hasLog = await Bun.file(join(agentDir, "agent.log")).exists().catch(() => false);
   const hasMeta = await Bun.file(join(agentDir, "meta.json")).exists().catch(() => false);
 
-  if (!hasOutput && !hasLog && !hasMeta) return null;
+  if (!hasOutput && !hasLog && !hasMeta) return { archivePath: null, prunedTeams };
 
   await mkdir(archiveFolder, { recursive: true });
 
@@ -289,7 +317,7 @@ export async function archiveAgent(
   // torn down, so there is no live tmux session to deliver to.
   await deleteAgentOutbox(agentDir);
 
-  return archiveFolder;
+  return { archivePath: archiveFolder, prunedTeams };
 }
 
 // ── teardownAgent ────────────────────────────────────────────────────────────
@@ -317,12 +345,17 @@ export async function teardownAgent(
   agentDir: string,
   meta: TeardownMeta,
   logMsg: string = "Agent killed"
-): Promise<boolean> {
+): Promise<{ ok: boolean; prunedTeams: Array<{ team: string; id: string }> }> {
   const tmuxSession = meta.tmux_session;
 
   if (!isValidTmuxSession(tmuxSession)) {
+    // §16.5 makes the eager team prune UNCONDITIONAL. archiveAgent (which
+    // normally runs the prune) is skipped on this early-return path, so prune
+    // here directly — otherwise an agent with a corrupt tmux_session would be
+    // silently left in its teams until a later lazy prune self-healed it.
+    const prunedTeams = await pruneAgentFromAllTeams(agentId);
     console.error(`[agent-lifecycle] Invalid tmux session name in meta for agent ${agentId}: ${tmuxSession}`);
-    return false;
+    return { ok: false, prunedTeams };
   }
 
   // 1. Log
@@ -375,15 +408,17 @@ export async function teardownAgent(
     }
   } catch { /* ignore */ }
 
-  // 8. Archive
-  await archiveAgent(repoPath, agentId, agentDir);
+  // 8. Archive — also performs the eager team-membership prune (§16.5) and
+  // returns the pruned (team, id) pairs, which we thread up to the command
+  // layer so it can fan out the leave notice.
+  const { prunedTeams } = await archiveAgent(repoPath, agentId, agentDir);
 
   // 9. Remove agent directory
   try {
     await rm(agentDir, { recursive: true, force: true });
-    return true;
+    return { ok: true, prunedTeams };
   } catch {
-    return false;
+    return { ok: false, prunedTeams };
   }
 }
 

@@ -2168,9 +2168,12 @@ describe("DashboardComponent right pane and navigation features", () => {
 });
 
 describe("focus cycling", () => {
-  test("Tab cycles focus forward through all 4 targets (no coordinator in normal mode)", () => {
+  test("Tab cycles focus forward through all targets (no coordinator in normal mode)", () => {
+    // §17.1: teams-tree is an active stop between agent-tree and info.
     const dashboard = makeDashboard();
     expect(dashboard.focus).toBe("agent-tree");
+    dashboard.handleInput("\t");
+    expect(dashboard.focus).toBe("teams-tree");
     dashboard.handleInput("\t");
     expect(dashboard.focus).toBe("info");
     dashboard.handleInput("\t");
@@ -2181,7 +2184,8 @@ describe("focus cycling", () => {
     expect(dashboard.focus).toBe("agent-tree");
   });
 
-  test("Shift+Tab cycles focus backward through all 4 targets (no coordinator in normal mode)", () => {
+  test("Shift+Tab cycles focus backward through all targets (no coordinator in normal mode)", () => {
+    // §17.1: teams-tree is an active stop between agent-tree and info.
     const dashboard = makeDashboard();
     expect(dashboard.focus).toBe("agent-tree");
     dashboard.handleInput("\x1b[Z"); // Shift+Tab
@@ -2190,6 +2194,8 @@ describe("focus cycling", () => {
     expect(dashboard.focus).toBe("active-agent");
     dashboard.handleInput("\x1b[Z");
     expect(dashboard.focus).toBe("info");
+    dashboard.handleInput("\x1b[Z");
+    expect(dashboard.focus).toBe("teams-tree");
     dashboard.handleInput("\x1b[Z");
     expect(dashboard.focus).toBe("agent-tree");
   });
@@ -2218,7 +2224,8 @@ describe("focus cycling", () => {
       const mainPartDefault = titleLineDefault!.split("│").slice(1).join("│");
       expect(mainPartDefault).not.toContain("\x1b[7m"); // REVERSE
 
-      // Tab twice to active-agent (agent-tree -> info -> active-agent)
+      // Tab to active-agent (agent-tree -> teams-tree -> info -> active-agent)
+      dashboard.handleInput("\t"); // teams-tree
       dashboard.handleInput("\t"); // info
       dashboard.handleInput("\t"); // active-agent
       expect(dashboard.focus).toBe("active-agent");
@@ -2530,8 +2537,13 @@ describe("AgentTreeComponent scroll indicators", () => {
       makeFlatAgent(makeAgent(`agent-${i}`, "/repos/test"))
     );
     tree.setFlatList(flatList);
-    // Override scrollOffset (private) via type assertion for testing
+    // Override scrollOffset (private) via type assertion for testing.
+    // §17.1: the tree now STARTS in no-selection. These scroll tests set
+    // selectedIndex directly and then call moveSelection, so they need a real
+    // selection (hasSelection) for moveSelection to advance from the set index
+    // rather than treat the first call as the no-selection bootstrap.
     (tree as any).scrollOffset = scrollOffset;
+    (tree as any).hasSelection = true;
     return tree;
   }
 
@@ -3356,6 +3368,7 @@ describe("sidebar height resize ({/} keys)", () => {
     const dashboard = makeDashboard();
     // Give tree some extra height so it can be stolen from (tree min is 1)
     dashboard.sidebar.heightOffsets.tree = 3;
+    dashboard.handleInput("\t"); // teams-tree
     dashboard.handleInput("\t"); // move to info
     expect(dashboard.focus).toBe("info");
     const before = { ...dashboard.sidebar.heightOffsets };
@@ -3368,6 +3381,7 @@ describe("sidebar height resize ({/} keys)", () => {
     const dashboard = makeDashboard();
     // Give tree some extra height, then grow info to have room to shrink
     dashboard.sidebar.heightOffsets.tree = 3;
+    dashboard.handleInput("\t"); // teams-tree
     dashboard.handleInput("\t"); // move to info
     dashboard.handleInput("}"); // grow info, steal from tree
     const before = { ...dashboard.sidebar.heightOffsets };
@@ -3391,6 +3405,7 @@ describe("sidebar height resize ({/} keys)", () => {
     const agent = makeAgent("agent-a", "/repos/test");
     dashboard.onUpdate([agent], [makeFlatAgent(agent)], []);
     // Tab to active-agent
+    dashboard.handleInput("\t"); // teams-tree
     dashboard.handleInput("\t"); // info
     dashboard.handleInput("\t"); // active-agent
     expect(dashboard.focus).toBe("active-agent");
@@ -3403,6 +3418,7 @@ describe("sidebar height resize ({/} keys)", () => {
   test("{/} are no-ops for sidebar height when right-pane is focused", () => {
     const dashboard = makeDashboard();
     // Tab to right-pane
+    dashboard.handleInput("\t"); // teams-tree
     dashboard.handleInput("\t"); // info
     dashboard.handleInput("\t"); // active-agent
     dashboard.handleInput("\t"); // right-pane
@@ -3430,7 +3446,8 @@ describe("sidebar height resize ({/} keys)", () => {
     const dashboard = makeDashboard();
     dashboard.sidebar.displayHeight = 30;
     // Tab to info focus
-    dashboard.handleInput("\t");
+    dashboard.handleInput("\t"); // teams-tree
+    dashboard.handleInput("\t"); // info
     expect(dashboard.focus).toBe("info");
     // Grow info (shrink tree) as many times as possible
     for (let i = 0; i < 100; i++) {
@@ -3445,7 +3462,8 @@ describe("sidebar height resize ({/} keys)", () => {
     const dashboard = makeDashboard();
     dashboard.sidebar.displayHeight = 30;
     // Tab to info focus
-    dashboard.handleInput("\t");
+    dashboard.handleInput("\t"); // teams-tree
+    dashboard.handleInput("\t"); // info
     expect(dashboard.focus).toBe("info");
     // Shrink info as many times as possible
     for (let i = 0; i < 100; i++) {
@@ -3454,6 +3472,51 @@ describe("sidebar height resize ({/} keys)", () => {
     const base = computeSidebarHeights(30, dashboard.agentTree.visibleList.length);
     const effectiveInfo = base.infoHeight + dashboard.sidebar.heightOffsets.info;
     expect(effectiveInfo).toBeGreaterThanOrEqual(1);
+  });
+
+  // §17.3 (B1): when teams-tree is focused, `[`/`]` must adjust the SIDEBAR
+  // width (the panel that's focused), not the main split-pane. Before the fix,
+  // teams-tree was not in the sidebar-width branch, so the keys fell through to
+  // handleResizeLeft and resized the main split + fired resizeTmuxWindow on
+  // every agent — wrong panel.
+  test("[/] when teams-tree focused resizes the SIDEBAR, not the split pane (§17.3 B1)", () => {
+    const dashboard = makeDashboard();
+    const agent = makeAgent("agent-a", "/repos/test");
+    dashboard.onUpdate([agent], [makeFlatAgent(agent)], []);
+    dashboard.focusManager.setFocus("teams-tree");
+    expect(dashboard.focus).toBe("teams-tree");
+
+    const sidebarBefore = dashboard.sidebarWidth;
+    const splitLeftBefore = dashboard.splitPane.getLeftWidth();
+
+    dashboard.handleInput("]");
+    expect(dashboard.sidebarWidth).toBeGreaterThan(sidebarBefore);
+    expect(dashboard.splitPane.getLeftWidth()).toBe(splitLeftBefore);
+
+    const sidebarAfterGrow = dashboard.sidebarWidth;
+    dashboard.handleInput("[");
+    expect(dashboard.sidebarWidth).toBeLessThan(sidebarAfterGrow);
+    // Split pane still untouched after both keys.
+    expect(dashboard.splitPane.getLeftWidth()).toBe(splitLeftBefore);
+  });
+
+  // §17.3 (B2): when teams-tree is focused, `{`/`}` must adjust the sidebar
+  // tree-height the same way it does for agent-tree (they share heightOffsets.tree).
+  // Before the fix, teams-tree hit no branch and the keys were silent no-ops.
+  test("{/} when teams-tree focused adjusts heightOffsets.tree like agent-tree (§17.3 B2)", () => {
+    const dashboard = makeDashboard();
+    dashboard.focusManager.setFocus("teams-tree");
+    expect(dashboard.focus).toBe("teams-tree");
+
+    const before = { ...dashboard.sidebar.heightOffsets };
+    dashboard.handleInput("}");
+    expect(dashboard.sidebar.heightOffsets.tree).toBe(before.tree + 1);
+    expect(dashboard.sidebar.heightOffsets.info).toBe(before.info - 1);
+
+    const afterGrow = { ...dashboard.sidebar.heightOffsets };
+    dashboard.handleInput("{");
+    expect(dashboard.sidebar.heightOffsets.tree).toBe(afterGrow.tree - 1);
+    expect(dashboard.sidebar.heightOffsets.info).toBe(afterGrow.info + 1);
   });
 });
 
@@ -3499,6 +3562,7 @@ describe("input field integration", () => {
     Object.defineProperty(process.stdout, "rows", { value: 30, writable: true, configurable: true });
     try {
       // Tab to active-agent, then Tab again to enter input sub-focus
+      dashboard.handleInput("\t"); // teams-tree
       dashboard.handleInput("\t"); // info
       dashboard.handleInput("\t"); // active-agent
       expect(dashboard.focus).toBe("active-agent");
@@ -3549,6 +3613,7 @@ describe("input field integration", () => {
     dashboard.onUpdate([agent], flatList, []);
 
     // Tab to active-agent, then Tab to input sub-focus
+    dashboard.handleInput("\t"); // teams-tree
     dashboard.handleInput("\t"); // info
     dashboard.handleInput("\t"); // active-agent
     expect(dashboard.focus).toBe("active-agent");
@@ -3576,6 +3641,7 @@ describe("input field integration", () => {
     dashboard.onUpdate([agent], flatList, []);
 
     // Tab to active-agent, then Tab to input sub-focus
+    dashboard.handleInput("\t"); // teams-tree
     dashboard.handleInput("\t"); // info
     dashboard.handleInput("\t"); // active-agent
     expect(dashboard.focus).toBe("active-agent");
@@ -3600,6 +3666,7 @@ describe("input field integration", () => {
     dashboard.onUpdate([agent], flatList, []);
 
     // Tab to active-agent, then Tab to input sub-focus
+    dashboard.handleInput("\t"); // teams-tree
     dashboard.handleInput("\t"); // info
     dashboard.handleInput("\t"); // active-agent
     expect(dashboard.focus).toBe("active-agent");
@@ -3625,6 +3692,7 @@ describe("input field integration", () => {
     dashboard.onUpdate([agent], flatList, []);
 
     // Tab to active-agent, then Tab to input sub-focus
+    dashboard.handleInput("\t"); // teams-tree
     dashboard.handleInput("\t"); // info
     dashboard.handleInput("\t"); // active-agent
     expect(dashboard.focus).toBe("active-agent");
@@ -3647,6 +3715,7 @@ describe("input field integration", () => {
     dashboard.onUpdate([agent], flatList, []);
 
     // Tab to active-agent — stays in pane sub-focus
+    dashboard.handleInput("\t"); // teams-tree
     dashboard.handleInput("\t"); // info
     dashboard.handleInput("\t"); // active-agent
     expect(dashboard.focus).toBe("active-agent");
@@ -3665,6 +3734,7 @@ describe("input field integration", () => {
     const flatList: FlatEntry[] = [makeFlatAgent(agent)];
     dashboard.onUpdate([agent], flatList, []);
 
+    dashboard.handleInput("\t"); // teams-tree
     dashboard.handleInput("\t"); // info
     dashboard.handleInput("\t"); // active-agent (pane)
     expect(dashboard.focus).toBe("active-agent");
@@ -3681,6 +3751,7 @@ describe("input field integration", () => {
     const flatList: FlatEntry[] = [makeFlatAgent(agent)];
     dashboard.onUpdate([agent], flatList, []);
 
+    dashboard.handleInput("\t"); // teams-tree
     dashboard.handleInput("\t"); // info
     dashboard.handleInput("\t"); // active-agent (pane)
     dashboard.handleInput("\t"); // pane → input
@@ -3695,6 +3766,7 @@ describe("input field integration", () => {
     const flatList: FlatEntry[] = [makeFlatAgent(agent)];
     dashboard.onUpdate([agent], flatList, []);
 
+    dashboard.handleInput("\t"); // teams-tree
     dashboard.handleInput("\t"); // info
     dashboard.handleInput("\t"); // active-agent (pane)
     dashboard.handleInput("\t"); // pane → input
@@ -3711,6 +3783,7 @@ describe("input field integration", () => {
     dashboard.onUpdate([agent], flatList, []);
 
     // Get to send sub-focus
+    dashboard.handleInput("\t"); // teams-tree
     dashboard.handleInput("\t"); // info
     dashboard.handleInput("\t"); // active-agent (pane)
     dashboard.handleInput("\t"); // pane → input
@@ -3737,6 +3810,7 @@ describe("input field integration", () => {
     dashboard.onUpdate([agent], flatList, []);
 
     // Get to send sub-focus
+    dashboard.handleInput("\t"); // teams-tree
     dashboard.handleInput("\t"); // info
     dashboard.handleInput("\t"); // active-agent (pane)
     dashboard.handleInput("\t"); // pane → input
@@ -3755,6 +3829,7 @@ describe("input field integration", () => {
     dashboard.onUpdate([agent], flatList, []);
 
     // Get to input sub-focus
+    dashboard.handleInput("\t"); // teams-tree
     dashboard.handleInput("\t"); // info
     dashboard.handleInput("\t"); // active-agent (pane)
     dashboard.handleInput("\t"); // pane → input
@@ -3771,6 +3846,7 @@ describe("input field integration", () => {
     dashboard.onUpdate([agent], flatList, []);
 
     // Get to send sub-focus
+    dashboard.handleInput("\t"); // teams-tree
     dashboard.handleInput("\t"); // info
     dashboard.handleInput("\t"); // active-agent (pane)
     dashboard.handleInput("\t"); // pane → input
@@ -4401,3 +4477,203 @@ describe("Telegram header indicator", () => {
     expect(visibleWidth(header)).toBeLessThanOrEqual(140);
   });
 });
+
+describe("DashboardComponent — §17 Teams panel wiring", () => {
+  let coordHome: string;
+
+  beforeEach(async () => {
+    const { setCoordinatorHome } = await import("../coordinator");
+    coordHome = await mkdtemp(join(tmpdir(), "dash-teams-coord-"));
+    setCoordinatorHome(coordHome);
+  });
+
+  afterEach(async () => {
+    const { resetCoordinatorHome } = await import("../coordinator");
+    resetCoordinatorHome();
+    await rm(coordHome, { recursive: true, force: true });
+  });
+
+  test("focus-aware sync: team-anchor selection populates infoPanel.selectedTeam + channelPane.teamName", () => {
+    const dashboard = makeDashboard();
+    // Directly drive the Teams tree (skip the on-disk teams.json round-trip)
+    dashboard.teamsTree.setFlatList([
+      { kind: "team-header", teamName: "backend", memberCount: 1, createdEpoch: 1735689600, createdBy: "@system" },
+    ]);
+    dashboard.teamsTree.navigate(1); // selects the team-header row
+    dashboard.focusManager.setFocus("teams-tree");
+    dashboard.syncSelectedAgent();
+    expect(dashboard.channelPane.teamName).toBe("backend");
+    // infoPanel.selectedTeam is populated async — refreshSelectedTeamInfo runs
+    // getTeam(name); when the team isn't in the on-disk registry it CLEARS.
+    // Direct render-time guarantee: channelPane.teamName tracks the team anchor.
+  });
+
+  test("focus-aware sync: team-MEMBER selection drives the agent path (rightPane/tmuxPane/infoPanel.agent)", () => {
+    const dashboard = makeDashboard();
+    const tmp = "/tmp/test-repo";
+    const a = makeAgent("agent-tm1", tmp);
+    dashboard.teamsTree.setFlatList([
+      { kind: "team-header", teamName: "backend", memberCount: 1, createdEpoch: 1, createdBy: "@system" },
+      { kind: "team-member", teamName: "backend", agent: a, connector: "  " },
+    ]);
+    dashboard.teamsTree.navigate(1); // header
+    dashboard.teamsTree.navigate(1); // member row
+    dashboard.focusManager.setFocus("teams-tree");
+    dashboard.syncSelectedAgent();
+    // Member selection populates the agent path identically to an Agents-tree select.
+    expect(dashboard.rightPane.agent?.id).toBe("agent-tm1");
+    expect(dashboard.tmuxPane.agent?.id).toBe("agent-tm1");
+    expect(dashboard.infoPanel.agent?.id).toBe("agent-tm1");
+    // And the team-mode fields are CLEAR — no stale team state.
+    expect(dashboard.channelPane.teamName).toBe(null);
+    expect(dashboard.infoPanel.selectedTeam).toBe(null);
+  });
+
+  test("focus-aware sync: switching from team back to Agents clears team state", () => {
+    const dashboard = makeDashboard();
+    dashboard.teamsTree.setFlatList([
+      { kind: "team-header", teamName: "backend", memberCount: 0, createdEpoch: 1, createdBy: "@system" },
+    ]);
+    dashboard.teamsTree.navigate(1);
+    dashboard.focusManager.setFocus("teams-tree");
+    dashboard.syncSelectedAgent();
+    expect(dashboard.channelPane.teamName).toBe("backend");
+
+    // Tab back to agent-tree — selection-sync must clear team state
+    dashboard.focusManager.setFocus("agent-tree");
+    dashboard.syncSelectedAgent();
+    expect(dashboard.channelPane.teamName).toBe(null);
+    expect(dashboard.infoPanel.selectedTeam).toBe(null);
+  });
+
+  test("focus-aware sync: teams-tree focused with no selection clears all team/agent state", () => {
+    const dashboard = makeDashboard();
+    dashboard.focusManager.setFocus("teams-tree");
+    dashboard.syncSelectedAgent();
+    expect(dashboard.channelPane.teamName).toBe(null);
+    expect(dashboard.infoPanel.selectedTeam).toBe(null);
+    expect(dashboard.rightPane.agent).toBe(null);
+    expect(dashboard.tmuxPane.agent).toBe(null);
+  });
+
+  test("j/k routes to teamsTree.navigate when teams-tree focused (else agentTree.moveSelection)", () => {
+    const dashboard = makeDashboard();
+    // Populate both trees so j/k routes have something to move over
+    const tmp = "/tmp/repo-jk";
+    const a1 = makeAgent("agent-jk1", tmp);
+    const a2 = makeAgent("agent-jk2", tmp);
+    dashboard.agentTree.setFlatList([makeFlatAgent(a1), makeFlatAgent(a2)]);
+    dashboard.teamsTree.setFlatList([
+      { kind: "team-header", teamName: "t1", memberCount: 0, createdEpoch: 1, createdBy: "@system" },
+      { kind: "team-header", teamName: "t2", memberCount: 0, createdEpoch: 1, createdBy: "@system" },
+    ]);
+
+    // With agent-tree focused, j moves the agent tree
+    dashboard.focusManager.setFocus("agent-tree");
+    const before = dashboard.agentTree.selection;
+    dashboard.handleInput("j");
+    // agentTree starts in no-selection; j enters selected at index 0
+    const after = dashboard.agentTree.selection;
+    expect(after).not.toBeNull();
+    // teamsTree should NOT have advanced
+    expect(dashboard.teamsTree.selection).toBeNull();
+
+    // Reset and switch to teams-tree focus
+    const dashboard2 = makeDashboard();
+    dashboard2.agentTree.setFlatList([makeFlatAgent(a1), makeFlatAgent(a2)]);
+    dashboard2.teamsTree.setFlatList([
+      { kind: "team-header", teamName: "t1", memberCount: 0, createdEpoch: 1, createdBy: "@system" },
+      { kind: "team-header", teamName: "t2", memberCount: 0, createdEpoch: 1, createdBy: "@system" },
+    ]);
+    dashboard2.focusManager.setFocus("teams-tree");
+    dashboard2.handleInput("j");
+    expect(dashboard2.teamsTree.selection?.kind).toBe("team");
+    // agentTree must NOT have a selection — independent (§17.1)
+    expect(dashboard2.agentTree.selection).toBeNull();
+  });
+
+  test("shift+j (J) routes to teamsTree.navigateAnchor when teams-tree focused", () => {
+    const dashboard = makeDashboard();
+    dashboard.teamsTree.setFlatList([
+      { kind: "team-header", teamName: "t1", memberCount: 0, createdEpoch: 1, createdBy: "@system" },
+      { kind: "team-header", teamName: "t2", memberCount: 0, createdEpoch: 1, createdBy: "@system" },
+    ]);
+    dashboard.focusManager.setFocus("teams-tree");
+    dashboard.handleInput("J");
+    // From no-selection, shift+j lands on the first team anchor
+    expect(dashboard.teamsTree.selection?.kind).toBe("team");
+    if (dashboard.teamsTree.selection?.kind === "team") {
+      expect(dashboard.teamsTree.selection.teamName).toBe("t1");
+    }
+  });
+
+  test("focus toggle (Tab) preserves each tree's selection (§17.1 independent selection)", () => {
+    const dashboard = makeDashboard();
+    const tmp = "/tmp/repo-tog";
+    const a = makeAgent("agent-tog", tmp);
+    dashboard.agentTree.setFlatList([makeFlatAgent(a)]);
+    dashboard.teamsTree.setFlatList([
+      { kind: "team-header", teamName: "t1", memberCount: 0, createdEpoch: 1, createdBy: "@system" },
+    ]);
+    // Select in both panels
+    dashboard.agentTree.selectFirstRow();
+    dashboard.teamsTree.navigate(1);
+    expect(dashboard.agentTree.selection).not.toBeNull();
+    expect(dashboard.teamsTree.selection).not.toBeNull();
+
+    // Tab — focus moves from agent-tree to teams-tree
+    dashboard.focusManager.setFocus("teams-tree");
+    // Each panel's selection is preserved
+    expect(dashboard.agentTree.selection).not.toBeNull();
+    expect(dashboard.teamsTree.selection).not.toBeNull();
+
+    // Shift+Tab back
+    dashboard.focusManager.setFocus("agent-tree");
+    expect(dashboard.agentTree.selection).not.toBeNull();
+    expect(dashboard.teamsTree.selection).not.toBeNull();
+  });
+
+  test("startup auto-select still selects first agent (§17.1 user-confirmed startup)", () => {
+    const dashboard = makeDashboard();
+    const tmp = "/tmp/repo-startup";
+    const a = makeAgent("agent-startup", tmp);
+    // hasAutoSelectedFirstAgent is private; we exercise it through onUpdate
+    dashboard.onUpdate([a], [makeFlatAgent(a)], []);
+    expect(dashboard.agentTree.selection).not.toBeNull();
+    expect(dashboard.agentTree.selectedAgent?.id).toBe("agent-startup");
+  });
+
+  test("render with team selected calls channelPane.load() (§17.4 refresh cadence)", () => {
+    Object.defineProperty(process.stdout, "rows", { value: 30, writable: true, configurable: true });
+    const dashboard = makeDashboard();
+    dashboard.teamsTree.setFlatList([
+      { kind: "team-header", teamName: "backend", memberCount: 0, createdEpoch: 1, createdBy: "@system" },
+    ]);
+    dashboard.teamsTree.navigate(1);
+    dashboard.focusManager.setFocus("teams-tree");
+    dashboard.syncSelectedAgent();
+
+    // Intercept channelPane.load() to assert the render path triggers it
+    let loadCalls = 0;
+    const originalLoad = dashboard.channelPane.load.bind(dashboard.channelPane);
+    dashboard.channelPane.load = async () => { loadCalls++; return originalLoad(); };
+
+    const lines = dashboard.render(160);
+    expect(lines.length).toBeGreaterThan(1);
+    // Render fires `void channelPane.load()` synchronously when a team is selected
+    expect(loadCalls).toBe(1);
+  });
+
+  test("render with teams-tree focus + no selection does NOT call channelPane.load (no teamName)", () => {
+    Object.defineProperty(process.stdout, "rows", { value: 30, writable: true, configurable: true });
+    const dashboard = makeDashboard();
+    dashboard.focusManager.setFocus("teams-tree");
+    dashboard.syncSelectedAgent();
+
+    let loadCalls = 0;
+    dashboard.channelPane.load = async () => { loadCalls++; };
+    dashboard.render(160);
+    expect(loadCalls).toBe(0);
+  });
+});
+

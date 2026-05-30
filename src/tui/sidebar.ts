@@ -7,6 +7,7 @@
 
 import type { Component } from "@mariozechner/pi-tui";
 import { AgentTreeComponent, MAX_TREE_HEIGHT } from "./agent-tree";
+import { TeamsTreeComponent } from "./teams-tree";
 import { InfoPanelComponent } from "./info-panel";
 import type { TmuxPaneComponent } from "./dashboard";
 import type { InputFieldComponent } from "./input-field";
@@ -64,6 +65,13 @@ export function clampSidebarOffsets(
 
 export class SidebarComponent implements Component {
   agentTree: AgentTreeComponent;
+  /**
+   * Teams tree component (§17.1). Shares the SAME tree region with `agentTree`
+   * — only one renders at a time, chosen by `focusTarget`. The two panels hold
+   * independent selection state (§17.1 independent-selection invariant); the
+   * sidebar never resets either when focus toggles.
+   */
+  teamsTree: TeamsTreeComponent;
   infoPanel: InfoPanelComponent;
   /** Coordinator tmux pane component — used by the dashboard main area when coordinator is selected */
   coordinatorPane: TmuxPaneComponent | null = null;
@@ -80,13 +88,15 @@ export class SidebarComponent implements Component {
    *  sidebar tree would just duplicate it. */
   hideTree = false;
 
-  constructor(agentTree: AgentTreeComponent, infoPanel: InfoPanelComponent) {
+  constructor(agentTree: AgentTreeComponent, infoPanel: InfoPanelComponent, teamsTree?: TeamsTreeComponent) {
     this.agentTree = agentTree;
     this.infoPanel = infoPanel;
+    this.teamsTree = teamsTree ?? new TeamsTreeComponent();
   }
 
   invalidate(): void {
     this.agentTree.invalidate();
+    this.teamsTree.invalidate();
     this.infoPanel.invalidate();
   }
 
@@ -109,8 +119,14 @@ export class SidebarComponent implements Component {
       return lines.slice(0, this.displayHeight);
     }
 
-    const itemCount = this.agentTree.visibleList.length;
-    const base = computeSidebarHeights(this.displayHeight, itemCount);
+    // §17.1: when focus is on the Teams tree, render the Teams tree into the
+    // shared tree region; otherwise render the Agents tree. The two panels share
+    // the same height budget — only one is visible at a time.
+    const showTeams = this.focusTarget === "teams-tree";
+    const treeItemCount = showTeams
+      ? this.teamsTree.flatList.length
+      : this.agentTree.visibleList.length;
+    const base = computeSidebarHeights(this.displayHeight, treeItemCount);
     // Apply height offsets: grow focused panel, shrink the other.
     // Render-path clamping (BUG-3/§7.7): normalize offsets so they stay valid
     // for the current terminal size and agent count.
@@ -119,7 +135,7 @@ export class SidebarComponent implements Component {
     let infoHeight = Math.max(0, base.infoHeight + this.heightOffsets.info);
 
     // Clamp so total content + headers fits within displayHeight.
-    // Headers: 1 (Agents) + 1 (Info, if shown)
+    // Headers: 1 (tree title) + 1 (Info, if shown)
     const headerCount = 1 + (infoHeight > 0 ? 1 : 0);
     const budget = this.displayHeight - headerCount;
     if (budget > 0 && treeHeight + infoHeight > budget) {
@@ -133,11 +149,18 @@ export class SidebarComponent implements Component {
       }
     }
 
-    // Agents section header + tree
-    lines.push(buildFocusSeparator("Agents", w, this.focusTarget === "agent-tree"));
-    this.agentTree.maxHeight = treeHeight;
-    const treeLines = this.agentTree.render(w);
-    lines.push(...treeLines);
+    // Tree section header + tree (whichever tree is active for this focus)
+    if (showTeams) {
+      lines.push(buildFocusSeparator("Teams", w, true));
+      this.teamsTree.maxHeight = treeHeight;
+      const treeLines = this.teamsTree.render(w);
+      lines.push(...treeLines);
+    } else {
+      lines.push(buildFocusSeparator("Agents", w, this.focusTarget === "agent-tree"));
+      this.agentTree.maxHeight = treeHeight;
+      const treeLines = this.agentTree.render(w);
+      lines.push(...treeLines);
+    }
     // Pad tree to exact height (header + treeHeight)
     while (lines.length < treeHeight + 1) {
       lines.push("");

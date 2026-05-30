@@ -9,4 +9,5 @@ export type Selection =
   | { kind: "agent"; agent: Agent }
   | { kind: "system-coordinator" }
   | { kind: "repo-header"; repoName: string; repoPath: string }
+  | { kind: "team"; teamName: string }
   | null;

@@ -288,3 +288,67 @@ describe("SidebarComponent", () => {
     expect(text).toContain("Info");
   });
 });
+
+describe("SidebarComponent — §17 Teams panel rendering", () => {
+  test("default focus renders the Agents tree title (not Teams)", () => {
+    const sidebar = makeSidebar();
+    sidebar.displayHeight = 25;
+    sidebar.focusTarget = "agent-tree";
+    const agent = makeAgent({ id: "agent-x" });
+    sidebar.agentTree.setFlatList([makeFlatAgent(agent)]);
+
+    const lines = sidebar.render(SIDEBAR_WIDTH);
+    const text = lines.map(stripAnsi).join("\n");
+    expect(text).toContain("Agents");
+    expect(text).not.toContain("Teams");
+  });
+
+  test("teams-tree focus renders the Teams tree title (not Agents)", () => {
+    const sidebar = makeSidebar();
+    sidebar.displayHeight = 25;
+    sidebar.focusTarget = "teams-tree";
+    // Populate both trees: only the Teams one should appear given focus.
+    const agent = makeAgent({ id: "agent-x" });
+    sidebar.agentTree.setFlatList([makeFlatAgent(agent)]);
+
+    const lines = sidebar.render(SIDEBAR_WIDTH);
+    const text = lines.map(stripAnsi).join("\n");
+    expect(text).toContain("Teams");
+    expect(text).not.toContain("Agents");
+  });
+
+  test("teams-tree focus + empty teams registry renders the empty-state hint", () => {
+    const sidebar = makeSidebar();
+    sidebar.displayHeight = 25;
+    sidebar.focusTarget = "teams-tree";
+    // teamsTree is empty by default
+    const lines = sidebar.render(SIDEBAR_WIDTH);
+    const text = lines.map(stripAnsi).join("\n");
+    expect(text).toContain("No teams");
+    expect(text).toContain("Teams");
+  });
+
+  test("Teams header renders focused (reverse video) when teams-tree is focused", () => {
+    const sidebar = makeSidebar();
+    sidebar.displayHeight = 25;
+    sidebar.focusTarget = "teams-tree";
+    const lines = sidebar.render(SIDEBAR_WIDTH);
+    // First line is the Teams separator — should contain REVERSE (focused)
+    expect(lines[0]).toContain(REVERSE);
+  });
+
+  test("Agents header renders unfocused when teams-tree is focused (Agents tree hidden anyway)", () => {
+    // Sanity check on the toggle: switching back to agent-tree shows Agents,
+    // not Teams — and the Teams panel's selection is preserved.
+    const sidebar = makeSidebar();
+    sidebar.displayHeight = 25;
+    sidebar.focusTarget = "teams-tree";
+    let lines = sidebar.render(SIDEBAR_WIDTH);
+    expect(lines.map(stripAnsi).join("\n")).toContain("Teams");
+
+    sidebar.focusTarget = "agent-tree";
+    lines = sidebar.render(SIDEBAR_WIDTH);
+    expect(lines.map(stripAnsi).join("\n")).toContain("Agents");
+    expect(lines.map(stripAnsi).join("\n")).not.toContain("Teams");
+  });
+});

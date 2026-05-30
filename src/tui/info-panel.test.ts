@@ -427,4 +427,68 @@ describe("InfoPanelComponent", () => {
     // Red ANSI code \x1b[31m should appear for Claude
     expect(lines[0]!).toContain("\x1b[31m");
   });
+
+  describe("team mode (§17.3c)", () => {
+    test("renders team name, member count, created_by, and a formatted created date", () => {
+      const panel = new InfoPanelComponent();
+      panel.displayHeight = 8;
+      // 2024-01-15 00:00:00 local — created_epoch is SECONDS (§16.2).
+      const createdEpoch = Math.floor(new Date(2024, 0, 15, 9, 30, 0).getTime() / 1000);
+      panel.selectedTeam = {
+        name: "backend",
+        createdEpoch,
+        createdBy: "agent-creator",
+        memberCount: 3,
+      };
+      const text = panel.render(60).map(stripAnsi).join("\n");
+      expect(text).toContain("@backend");
+      expect(text).toContain("Members: 3");
+      expect(text).toContain("Created by: agent-creator");
+      // Date formatted via _formatTimestamp (YYYY-MM-DD HH:MM:SS).
+      expect(text).toContain("2024-01-15 09:30:00");
+    });
+
+    test("created_by of '' renders as 'user'", () => {
+      const panel = new InfoPanelComponent();
+      panel.displayHeight = 8;
+      panel.selectedTeam = {
+        name: "frontend",
+        createdEpoch: 1700000000,
+        createdBy: "",
+        memberCount: 0,
+      };
+      const text = panel.render(60).map(stripAnsi).join("\n");
+      expect(text).toContain("@frontend");
+      expect(text).toContain("Created by: user");
+      expect(text).toContain("Members: 0");
+    });
+
+    test("team branch takes precedence and does not break agent rendering", () => {
+      const panel = new InfoPanelComponent();
+      panel.displayHeight = 8;
+      panel.selectedTeam = { name: "ops", createdEpoch: 1700000000, createdBy: "@system", memberCount: 1 };
+      let text = panel.render(60).map(stripAnsi).join("\n");
+      expect(text).toContain("@ops");
+      expect(text).toContain("Created by: @system");
+
+      // Clearing selectedTeam falls back to the agent branch unchanged.
+      panel.selectedTeam = null;
+      const agent = makeAgent({ id: "agent-fallback" });
+      agent.meta.model = "opus";
+      panel.agent = agent;
+      text = panel.render(60).map(stripAnsi).join("\n");
+      expect(text).not.toContain("@ops");
+      expect(text).toContain("opus");
+    });
+
+    test("clearing selectedTeam (null) falls back to 'No selection'", () => {
+      const panel = new InfoPanelComponent();
+      panel.displayHeight = 5;
+      panel.selectedTeam = { name: "x", createdEpoch: 1700000000, createdBy: "user", memberCount: 1 };
+      expect(panel.render(60).map(stripAnsi).join("\n")).toContain("@x");
+      panel.selectedTeam = null;
+      const text = panel.render(60).map(stripAnsi).join("\n");
+      expect(text).toContain("No selection");
+    });
+  });
 });

@@ -218,6 +218,93 @@ export function resetKillPauseSpawnRunner(): void {
   killPauseSpawnCtx.reset();
 }
 
+// ===========================================================================
+// Teardown leave-notices (§16.4.2 / §16.5). These are owned by THIS layer (the
+// command layer has `listRepos()`); `agent-lifecycle.ts` only performs the
+// membership write and threads the pruned `(team, id)` pairs up. There are TWO
+// notice shapes, chosen by WHICH COMMAND drove the departure (not a runtime
+// flag):
+//   - PER-AGENT  (ib kill, ib merge): `left the team`, `fromAgent` = departed id.
+//   - COALESCED  (any ib nuke): one `N member(s) left @team` per team, system
+//                sender — avoids an O(N²) notice storm on bulk teardown.
+// Both snapshot the SURVIVING members from the POST-prune roster (the departed
+// ids are already absent) and are BEST-EFFORT — a delivery failure can never
+// throw out of the driving command. An empty survivor set sends nothing
+// (empty-survivor carve-out, §16.5).
+// ===========================================================================
+
+/**
+ * PER-AGENT leave notice (§16.4.2) for `ib kill` / `ib merge`. For each pruned
+ * `(team, departedId)` pair, snapshot the team's SURVIVING members (post-prune
+ * via `getTeam`, so the departed id is already gone), resolve each to an Agent,
+ * and send `left the team` with `fromAgent` stamped EXPLICITLY to the departed
+ * id (§16.5 — never cwd-auto-detected; the departed worktree is gone). A team
+ * with no survivors sends nothing. Best-effort: all failures are swallowed.
+ */
+async function emitPerAgentLeaveNotice(
+  prunedTeams: Array<{ team: string; id: string }>,
+  repos: RepoEntry[],
+): Promise<void> {
+  if (prunedTeams.length === 0) return;
+  try {
+    const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })));
+    const byId = new Map(agents.map((a) => [a.id, a]));
+    for (const { team: teamName, id: departedId } of prunedTeams) {
+      // Post-prune survivors (departed id already removed from teams.json).
+      const team = await getTeam(teamName);
+      if (!team) continue;
+      for (const memberId of team.members) {
+        const member = byId.get(memberId);
+        if (!member) continue;
+        await sendMessage(member, "left the team", { fromAgent: departedId, team: teamName }).catch(() => {});
+      }
+    }
+  } catch {
+    // Best-effort — a notice failure must never fail the driving command (§16.5).
+  }
+}
+
+/**
+ * COALESCED leave notice (§16.4.2) for ANY `ib nuke` (single or bulk — they all
+ * route through `nukeAgentList`). Groups the accumulated pruned `(team, id)`
+ * pairs by team; for each affected team, snapshots its SURVIVING members
+ * (post-prune via `getTeam`) and sends exactly ONE `N member(s) left @team`
+ * notice to those survivors, stamped as a SYSTEM send (`fromAgent: "@system"`),
+ * not any one departed id. This collapses an N-departure storm into one notice
+ * per team. A team with no survivors sends nothing (empty-survivor carve-out,
+ * §16.5). Best-effort: all failures are swallowed.
+ */
+async function emitCoalescedLeaveNotice(
+  prunedTeams: Array<{ team: string; id: string }>,
+  repos: RepoEntry[],
+): Promise<void> {
+  if (prunedTeams.length === 0) return;
+  try {
+    // Count departures per team (insertion-ordered so notices are deterministic).
+    const departuresByTeam = new Map<string, number>();
+    for (const { team: teamName } of prunedTeams) {
+      departuresByTeam.set(teamName, (departuresByTeam.get(teamName) ?? 0) + 1);
+    }
+
+    const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })));
+    const byId = new Map(agents.map((a) => [a.id, a]));
+
+    for (const [teamName, count] of departuresByTeam) {
+      // Post-prune survivors (all this op's departures already removed).
+      const team = await getTeam(teamName);
+      if (!team || team.members.length === 0) continue; // empty-survivor carve-out
+      const body = `${count} member${count === 1 ? "" : "s"} left @${teamName}`;
+      for (const memberId of team.members) {
+        const member = byId.get(memberId);
+        if (!member) continue;
+        await sendMessage(member, body, { fromAgent: "@system", team: teamName }).catch(() => {});
+      }
+    }
+  } catch {
+    // Best-effort — a notice failure must never fail the driving nuke (§16.5).
+  }
+}
+
 /**
  * Native kill implementation — replaces `ib kill <id> --force`.
  *
@@ -254,14 +341,20 @@ export async function killAgent(agent: Agent): Promise<IbCommandResult> {
   // Remove questions
   await removeAgentQuestions(agent.repoPath, agent.id);
 
-  // Teardown (log, capture, kill process, kill tmux, worktree, branch, archive, remove)
-  await teardownAgent(agent.repoPath, agent.id, agentDir, {
+  // Teardown (log, capture, kill process, kill tmux, worktree, branch, archive,
+  // remove). The teardown prunes this agent from every team and returns the
+  // pruned (team, id) pairs so we can fan out the leave notice (§16.5).
+  const { prunedTeams } = await teardownAgent(agent.repoPath, agent.id, agentDir, {
     tmux_session: tmuxSession,
     claude_pid: agent.meta.claude_pid,
   }, "Agent killed");
 
   // Scan for orphaned Claude processes
   await scanAndKillOrphans(agentsDir);
+
+  // kill = single-agent departure → per-agent leave notice to surviving
+  // teammates, `fromAgent` = the departed id (§16.5). Best-effort.
+  await emitPerAgentLeaveNotice(prunedTeams, await listRepos());
 
   return { ok: true, exitCode: 0, stdout: `Closed agent: ${agent.id}`, stderr: "" };
 }
@@ -338,6 +431,12 @@ async function nukeAgentList(
   let killed = 0;
   let failed = 0;
 
+  // Accumulate pruned (team, id) pairs across the WHOLE loop so we can emit ONE
+  // coalesced leave notice per affected team afterward — never a per-agent storm
+  // (§16.5). Every `ib nuke` (single leaf, manager + descendants, or nuke-all)
+  // flows through here, so this is ALWAYS the coalesced path.
+  const allPruned: Array<{ team: string; id: string }> = [];
+
   for (const id of agentIds) {
     const agentDir = join(agentsDir, id);
     // Skip if directory doesn't exist
@@ -360,9 +459,11 @@ async function nukeAgentList(
       };
     } catch { /* ignore */ }
 
-    // Teardown
+    // Teardown — captures the pruned (team, id) pairs even on the failure path
+    // (the prune ran inside archiveAgent regardless of the final dir-removal).
     try {
-      await teardownAgent(repoPath, id, agentDir, meta, "Agent nuked");
+      const { prunedTeams } = await teardownAgent(repoPath, id, agentDir, meta, "Agent nuked");
+      allPruned.push(...prunedTeams);
       killed++;
     } catch { /* teardown error — count as failure */
       failed++;
@@ -376,6 +477,10 @@ async function nukeAgentList(
   if (killed > 0 || orphansKilled > 0) {
     await scanAndKillOrphans(agentsDir);
   }
+
+  // nuke = coalesced departure → ONE `N member(s) left @team` notice per team,
+  // system sender, to surviving teammates only (§16.5). Best-effort.
+  await emitCoalescedLeaveNotice(allPruned, await listRepos());
 
   return { killed, failed, orphansKilled };
 }
@@ -1699,16 +1804,24 @@ export async function mergeAgent(agent: Agent, targetDir: string): Promise<IbCom
       }
     });
 
-    // 17-19. Archive artifacts, remove questions, remove agent dir
+    // 17-19. Archive artifacts, remove questions, remove agent dir. archiveAgent
+    // also prunes this agent from every team (§16.5); hoist the pruned pairs out
+    // of the timed block so the leave-notice fan-out below can see them.
+    let prunedTeams: Array<{ team: string; id: string }> = [];
     await timed("merge", "archive", async () => {
       await logAgent(agentDir, "Merge complete - archiving and closing agent");
-      await archiveAgent(agent.repoPath, agent.id, agentDir);
+      const res = await archiveAgent(agent.repoPath, agent.id, agentDir);
+      prunedTeams = res.prunedTeams;
       await removeAgentQuestions(agent.repoPath, agent.id);
       try { await rm(agentDir, { recursive: true, force: true }); } catch { /* ignore */ }
     });
 
     // 20. Scan for orphaned Claude processes
     await timed("merge", "orphan-scan", () => scanAndKillOrphans(agentsDir));
+
+    // merge = single-agent departure → per-agent leave notice to surviving
+    // teammates, `fromAgent` = the departed id (§16.5). Best-effort.
+    await emitPerAgentLeaveNotice(prunedTeams, await listRepos());
 
     return { ok: true, exitCode: 0, stdout: `Closed agent: ${agent.id}`, stderr: "" };
   } finally {

@@ -7677,3 +7677,298 @@ describe("long-running-op guard", () => {
   });
 });
 
+// ===========================================================================
+// Teardown leave-notices (SPEC §16.4.2 / §16.5). kill/merge fire a PER-AGENT
+// `left the team` notice stamped to the departed id; ANY nuke fires ONE
+// COALESCED `N member(s) left @team` notice per team, system-sender. Both
+// snapshot SURVIVING members from the post-prune roster and are best-effort.
+//
+// Isolation mirrors the teams-commands tests: setCoordinatorHome redirects
+// teams.json; saveRegistry makes listRepos() surface our temp repo so the
+// notice fan-out can resolve survivor agents; a live (mocked) watchdog on each
+// SURVIVOR defers its notice into the outbox so we can assert it. The DEPARTED
+// agent's dir is removed by teardown, so we only inspect SURVIVOR outboxes.
+// ===========================================================================
+describe("teams: teardown leave-notices (kill / merge / nuke)", () => {
+  let baseDir: string;
+  let homeDir: string;
+  let repoDir: string;
+  let originalHome: string | undefined;
+  let spawnCalls: string[][];
+
+  // Plant a survivor agent so readAllAgents surfaces it and any notice to it
+  // DEFERS into its outbox (live-watchdog transient + isPidAliveCtx → true).
+  async function plantSurvivor(id: string): Promise<string> {
+    const agentDir = join(repoDir, ".ittybitty", "agents", id);
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id, tmux_session: `t-${id}` }));
+    const { writeAgentTransient } = await import("./agents");
+    await writeAgentTransient(agentDir, {
+      tmux_compacting: false,
+      tmux_rate_limited: false,
+      tmux_api_error: false,
+      has_background_tasks: false,
+      updated_at_ms: Date.now(),
+      watchdog_pid: 4242,
+    });
+    return agentDir;
+  }
+
+  // Plant a to-be-torn-down agent with a real worktree dir (needed by merge).
+  async function plantDeparting(id: string): Promise<string> {
+    const agentDir = join(repoDir, ".ittybitty", "agents", id);
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id, tmux_session: `t-${id}` }));
+    return agentDir;
+  }
+
+  // makeAgent bound to the temp repo.
+  function agentOf(id: string): Agent {
+    return _makeAgent({ id, repoPath: repoDir, repoName: basename(repoDir), state: "running" as AgentState });
+  }
+
+  beforeEach(async () => {
+    baseDir = await mkdtemp(join(tmpdir(), "team-teardown-" + crypto.randomUUID() + "-"));
+    homeDir = join(baseDir, ".itsybitsy");
+    repoDir = join(baseDir, "repo");
+    await mkdir(homeDir, { recursive: true });
+    await mkdir(repoDir, { recursive: true });
+    originalHome = process.env.HOME;
+    process.env.HOME = baseDir;
+    spawnCalls = [];
+
+    const { setCoordinatorHome } = await import("./coordinator");
+    setCoordinatorHome(homeDir);
+    setUserConfigPath(join(homeDir, "config.json"));
+    await saveRegistry({ repos: [{ path: repoDir, name: basename(repoDir) }] });
+
+    // Teardown spawn ctxs: all tmux/git/pgrep calls succeed-ish; has-session
+    // fails so teardown skips kill paths. The send ctx is set so any notice
+    // delivery is faked (though live-watchdog survivors defer, not deliver).
+    const teardownRunner = (cmd: string[]) => {
+      spawnCalls.push(cmd);
+      if (cmd.includes("has-session") || cmd[0] === "pgrep") return makeSpawnResult(1);
+      return makeSpawnResult();
+    };
+    lifecycleSpawnCtx.set(teardownRunner);
+    setKillPauseSpawnRunner(teardownRunner);
+    setNukeResumeSpawnRunner(teardownRunner);
+    setSendSpawnRunner((cmd: string[]) => {
+      spawnCalls.push(cmd);
+      return makeSpawnResult();
+    });
+    isPidAliveCtx.set(() => true);
+    resetReadAgentMetaCache();
+  });
+
+  afterEach(async () => {
+    const { resetCoordinatorHome } = await import("./coordinator");
+    lifecycleSpawnCtx.reset();
+    resetKillPauseSpawnRunner();
+    resetNukeResumeSpawnRunner();
+    resetSendSpawnRunner();
+    resetMergeSpawnRunner();
+    resetUserConfigPath();
+    resetCoordinatorHome();
+    isPidAliveCtx.reset();
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+    resetReadAgentMetaCache();
+    await rm(baseDir, { recursive: true, force: true });
+  });
+
+  // --- killAgent -----------------------------------------------------------
+
+  test("killAgent fires a per-agent leave notice to survivors, stamped to the departed id", async () => {
+    const { createTeam, addMember, getTeam } = await import("./teams");
+    const { readOutbox } = await import("./outbox");
+    await createTeam("backend", "", 1000);
+    const survivorDir = await plantSurvivor("agent-survivor");
+    await plantDeparting("agent-leaver");
+    await addMember("backend", "agent-survivor");
+    await addMember("backend", "agent-leaver");
+    resetReadAgentMetaCache();
+
+    const res = await killAgent(agentOf("agent-leaver"));
+    expect(res.ok).toBe(true);
+
+    // The departed id is pruned from the roster.
+    const team = await getTeam("backend");
+    expect(team!.members).toEqual(["agent-survivor"]);
+
+    // The survivor got exactly one per-agent leave notice, fromAgent = departed.
+    const queue = await readOutbox(survivorDir);
+    expect(queue.length).toBe(1);
+    expect(queue[0]!.message).toBe("left the team");
+    expect(queue[0]!.fromAgent).toBe("agent-leaver");
+    expect(queue[0]!.team).toBe("backend");
+  });
+
+  test("killAgent of an agent in no team enqueues no leave notice", async () => {
+    const { createTeam, addMember } = await import("./teams");
+    const { readOutbox } = await import("./outbox");
+    // A team exists with only the survivor; the departing agent is NOT a member.
+    await createTeam("backend", "", 1000);
+    const survivorDir = await plantSurvivor("agent-survivor");
+    await plantDeparting("agent-loner");
+    await addMember("backend", "agent-survivor");
+    resetReadAgentMetaCache();
+
+    const res = await killAgent(agentOf("agent-loner"));
+    expect(res.ok).toBe(true);
+
+    // No notice — the departing agent shared no team with the survivor.
+    expect(await readOutbox(survivorDir)).toEqual([]);
+  });
+
+  test("killAgent of the LAST member sends no notice (empty-survivor carve-out)", async () => {
+    const { createTeam, addMember, getTeam } = await import("./teams");
+    await createTeam("solo", "", 1000);
+    await plantDeparting("agent-last");
+    await addMember("solo", "agent-last");
+    resetReadAgentMetaCache();
+
+    const res = await killAgent(agentOf("agent-last"));
+    expect(res.ok).toBe(true);
+
+    // Roster emptied; team persists empty; nobody was notified (no recipients).
+    const team = await getTeam("solo");
+    expect(team).not.toBeNull();
+    expect(team!.members).toEqual([]);
+  });
+
+  // --- mergeAgent ----------------------------------------------------------
+
+  test("mergeAgent fires a per-agent leave notice to survivors, stamped to the departed id", async () => {
+    const { createTeam, addMember, getTeam } = await import("./teams");
+    const { readOutbox } = await import("./outbox");
+    await createTeam("backend", "", 1000);
+    const survivorDir = await plantSurvivor("agent-survivor");
+    await plantDeparting("agent-merged");
+    await addMember("backend", "agent-survivor");
+    await addMember("backend", "agent-merged");
+    resetReadAgentMetaCache();
+
+    // A merge needs the git mock; reuse a minimal success runner.
+    const mergeRunner = (cmd: string[]) => {
+      spawnCalls.push(cmd);
+      const cmdStr = cmd.join(" ");
+      if (cmdStr.includes("status") && cmdStr.includes("--porcelain")) return makeSpawnResult(0, "");
+      if (cmdStr.includes("branch") && cmdStr.includes("--show-current")) return makeSpawnResult(0, "main");
+      if (cmdStr.includes("show-ref") && cmdStr.includes("--verify")) return makeSpawnResult(0);
+      if (cmdStr.includes("log") && cmdStr.includes("--oneline")) return makeSpawnResult(0, "abc0 commit 0");
+      if (cmd.includes("rebase")) return makeSpawnResult(0, "");
+      if (cmd.includes("checkout")) return makeSpawnResult(0);
+      if (cmd.includes("merge") && (cmd.includes("--ff-only") || cmd.includes("--no-ff"))) return makeSpawnResult(0);
+      if (cmdStr.includes("has-session")) return makeSpawnResult(1);
+      if (cmd[0] === "pgrep") return makeSpawnResult(1);
+      return makeSpawnResult();
+    };
+    lifecycleSpawnCtx.set(mergeRunner);
+    setMergeSpawnRunner(mergeRunner);
+
+    const res = await mergeAgent(agentOf("agent-merged"), repoDir);
+    expect(res.ok).toBe(true);
+
+    const team = await getTeam("backend");
+    expect(team!.members).toEqual(["agent-survivor"]);
+
+    const queue = await readOutbox(survivorDir);
+    expect(queue.length).toBe(1);
+    expect(queue[0]!.message).toBe("left the team");
+    expect(queue[0]!.fromAgent).toBe("agent-merged");
+    expect(queue[0]!.team).toBe("backend");
+  });
+
+  // --- nukeAgent (coalesced) ----------------------------------------------
+
+  test("nuke of 3 members of one team sends ONE coalesced '3 members left @T' notice to the survivor (system sender)", async () => {
+    const { createTeam, addMember, getTeam } = await import("./teams");
+    const { readOutbox } = await import("./outbox");
+    // The 3-departures-1-survivor trace from the task. The manager (a) is the
+    // nuke target; b and c are its descendants; d is the surviving teammate.
+    await createTeam("T", "", 1000);
+    const aDir = await plantDeparting("agent-a"); // manager (nuke target)
+    await plantDeparting("agent-b");
+    await plantDeparting("agent-c");
+    const dDir = await plantSurvivor("agent-d");
+    // Make b and c descendants of a so getDescendantsRecursive picks all three.
+    await Bun.write(join(aDir, "meta.json"), JSON.stringify({ id: "agent-a", tmux_session: "t-agent-a", manager: "" }));
+    await Bun.write(
+      join(repoDir, ".ittybitty", "agents", "agent-b", "meta.json"),
+      JSON.stringify({ id: "agent-b", tmux_session: "t-agent-b", manager: "agent-a" }),
+    );
+    await Bun.write(
+      join(repoDir, ".ittybitty", "agents", "agent-c", "meta.json"),
+      JSON.stringify({ id: "agent-c", tmux_session: "t-agent-c", manager: "agent-a" }),
+    );
+    for (const id of ["agent-a", "agent-b", "agent-c", "agent-d"]) {
+      await addMember("T", id);
+    }
+    resetReadAgentMetaCache();
+
+    // nukeAgent requires a non-worker OR descendants — agent-a has descendants.
+    const res = await nukeAgent(agentOf("agent-a"));
+    expect(res.ok).toBe(true);
+
+    // All three departures pruned; only the survivor remains.
+    const team = await getTeam("T");
+    expect(team!.members).toEqual(["agent-d"]);
+
+    // Exactly ONE coalesced notice to d, system sender, count = 3.
+    const queue = await readOutbox(dDir);
+    expect(queue.length).toBe(1);
+    expect(queue[0]!.message).toBe("3 members left @T");
+    expect(queue[0]!.fromAgent).toBe("@system");
+    expect(queue[0]!.team).toBe("T");
+  });
+
+  test("single-departure nuke yields a '1 member left @T' coalesced notice (singular wording)", async () => {
+    const { createTeam, addMember } = await import("./teams");
+    const { readOutbox } = await import("./outbox");
+    // A manager (not a team member) + one descendant leaf (a team member). The
+    // survivor is a separate teammate that is NOT in the nuke set. Nuking the
+    // manager tears down manager+leaf, so exactly ONE member departs T → the
+    // singular "1 member left @T" coalesced notice goes to the survivor.
+    await createTeam("T", "", 1000);
+    const mgrDir = join(repoDir, ".ittybitty", "agents", "agent-mgr");
+    await mkdir(join(mgrDir, "repo"), { recursive: true });
+    await Bun.write(join(mgrDir, "meta.json"), JSON.stringify({ id: "agent-mgr", tmux_session: "t-agent-mgr", manager: "" }));
+    const leafDir = join(repoDir, ".ittybitty", "agents", "agent-leaf");
+    await mkdir(join(leafDir, "repo"), { recursive: true });
+    await Bun.write(join(leafDir, "meta.json"), JSON.stringify({ id: "agent-leaf", tmux_session: "t-agent-leaf", manager: "agent-mgr" }));
+    const survivorDir = await plantSurvivor("agent-keep");
+    await addMember("T", "agent-leaf"); // the only T member that gets nuked
+    await addMember("T", "agent-keep"); // survivor
+    resetReadAgentMetaCache();
+
+    const res = await nukeAgent(agentOf("agent-mgr"));
+    expect(res.ok).toBe(true);
+
+    const queue = await readOutbox(survivorDir);
+    expect(queue.length).toBe(1);
+    expect(queue[0]!.message).toBe("1 member left @T");
+    expect(queue[0]!.fromAgent).toBe("@system");
+    expect(queue[0]!.team).toBe("T");
+  });
+
+  test("nuke that tears down EVERY member of a team sends no notice (empty-survivor carve-out)", async () => {
+    const { createTeam, addMember, getTeam } = await import("./teams");
+    await createTeam("T", "", 1000);
+    await plantDeparting("agent-x");
+    await plantDeparting("agent-y");
+    await addMember("T", "agent-x");
+    await addMember("T", "agent-y");
+    resetReadAgentMetaCache();
+
+    // nukeAllAgents tears down EVERY agent — no survivors left in T.
+    const res = await nukeAllAgents(repoDir);
+    expect(res.ok).toBe(true);
+
+    // Roster emptied; team persists empty; no recipient existed → no throw.
+    const team = await getTeam("T");
+    expect(team).not.toBeNull();
+    expect(team!.members).toEqual([]);
+  });
+});
+

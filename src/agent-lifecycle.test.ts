@@ -117,7 +117,8 @@ describe("agent-lifecycle", () => {
       await Bun.write(join(agentDir, "meta.json"), '{"id":"agent-test"}');
 
       const result = await archiveAgent(repoPath, agentId, agentDir);
-      expect(result).not.toBeNull();
+      expect(result.archivePath).not.toBeNull();
+      expect(result.prunedTeams).toEqual([]);
 
       // Archive folder should exist
       const archiveEntries = await readdir(archiveDir);
@@ -153,7 +154,7 @@ describe("agent-lifecycle", () => {
       await Bun.write(join(agentDir, "debug-logs", "capture.log"), "debug data");
 
       const result = await archiveAgent(dir, "agent-test", agentDir);
-      expect(result).not.toBeNull();
+      expect(result.archivePath).not.toBeNull();
 
       const archiveEntries = await readdir(archiveDir);
       const archiveFolder = join(archiveDir, archiveEntries[0]!);
@@ -175,7 +176,8 @@ describe("agent-lifecycle", () => {
       await mkdir(agentDir, { recursive: true });
 
       const result = await archiveAgent(dir, "agent-empty", agentDir);
-      expect(result).toBeNull();
+      expect(result.archivePath).toBeNull();
+      expect(result.prunedTeams).toEqual([]);
 
       await rm(dir, { recursive: true, force: true });
     });
@@ -202,6 +204,144 @@ describe("agent-lifecycle", () => {
       expect(await Bun.file(join(archiveFolder, ".outbox.lock")).exists()).toBe(false);
 
       await rm(dir, { recursive: true, force: true });
+    });
+  });
+
+  // ── archiveAgent / teardownAgent — team prune (§16.5) ───────────────────
+  // archiveAgent eagerly prunes the agent from every team it belonged to and
+  // returns the pruned (team, id) pairs; teardownAgent threads them up. The
+  // membership write is unconditional (runs even when there are no artifacts).
+  // teams.json is isolated via setCoordinatorHome so these never touch the real
+  // ~/.itsybitsy/teams.json.
+
+  describe("archiveAgent / teardownAgent team prune", () => {
+    test("archiveAgent prunes the agent from every team it was in and returns the pairs", async () => {
+      const { setCoordinatorHome, resetCoordinatorHome } = await import("./coordinator");
+      const { createTeam, addMember, getTeam } = await import("./teams");
+      const home = await mkdtemp(join(tmpdir(), "lc-teams-"));
+      setCoordinatorHome(home);
+      try {
+        const dir = await makeTempDir();
+        const agentDir = join(dir, ".ittybitty", "agents", "agent-arch");
+        await mkdir(agentDir, { recursive: true });
+        await Bun.write(join(agentDir, "meta.json"), '{"id":"agent-arch"}');
+
+        // agent-arch is in two teams alongside a survivor; survivor must remain.
+        await createTeam("backend", "", 1000);
+        await createTeam("frontend", "", 1000);
+        await addMember("backend", "agent-arch");
+        await addMember("backend", "agent-keep");
+        await addMember("frontend", "agent-arch");
+
+        const result = await archiveAgent(dir, "agent-arch", agentDir);
+
+        // Archive path is still returned (meta.json existed).
+        expect(result.archivePath).not.toBeNull();
+        // Pruned from BOTH teams; pairs name the team + the departed id.
+        expect(result.prunedTeams).toEqual([
+          { team: "backend", id: "agent-arch" },
+          { team: "frontend", id: "agent-arch" },
+        ]);
+        // Survivor still present; departed removed from both rosters.
+        expect((await getTeam("backend"))!.members).toEqual(["agent-keep"]);
+        expect((await getTeam("frontend"))!.members).toEqual([]);
+
+        await rm(dir, { recursive: true, force: true });
+      } finally {
+        resetCoordinatorHome();
+        await rm(home, { recursive: true, force: true });
+      }
+    });
+
+    test("archiveAgent returns prunedTeams:[] for an agent in no team (still returns archivePath)", async () => {
+      const { setCoordinatorHome, resetCoordinatorHome } = await import("./coordinator");
+      const { createTeam, addMember } = await import("./teams");
+      const home = await mkdtemp(join(tmpdir(), "lc-teams-"));
+      setCoordinatorHome(home);
+      try {
+        const dir = await makeTempDir();
+        const agentDir = join(dir, ".ittybitty", "agents", "agent-solo");
+        await mkdir(agentDir, { recursive: true });
+        await Bun.write(join(agentDir, "meta.json"), '{"id":"agent-solo"}');
+
+        // A team exists but agent-solo is not in it.
+        await createTeam("backend", "", 1000);
+        await addMember("backend", "agent-other");
+
+        const result = await archiveAgent(dir, "agent-solo", agentDir);
+        expect(result.archivePath).not.toBeNull();
+        expect(result.prunedTeams).toEqual([]);
+
+        await rm(dir, { recursive: true, force: true });
+      } finally {
+        resetCoordinatorHome();
+        await rm(home, { recursive: true, force: true });
+      }
+    });
+
+    test("archiveAgent prunes unconditionally even when there are no artifacts to archive", async () => {
+      const { setCoordinatorHome, resetCoordinatorHome } = await import("./coordinator");
+      const { createTeam, addMember, getTeam } = await import("./teams");
+      const home = await mkdtemp(join(tmpdir(), "lc-teams-"));
+      setCoordinatorHome(home);
+      try {
+        const dir = await makeTempDir();
+        const agentDir = join(dir, ".ittybitty", "agents", "agent-empty");
+        await mkdir(agentDir, { recursive: true }); // no output/agent/meta files
+
+        await createTeam("backend", "", 1000);
+        await addMember("backend", "agent-empty");
+        await addMember("backend", "agent-keep");
+
+        const result = await archiveAgent(dir, "agent-empty", agentDir);
+        // No artifacts → null archive path, but the prune STILL ran (§16.5).
+        expect(result.archivePath).toBeNull();
+        expect(result.prunedTeams).toEqual([{ team: "backend", id: "agent-empty" }]);
+        expect((await getTeam("backend"))!.members).toEqual(["agent-keep"]);
+
+        await rm(dir, { recursive: true, force: true });
+      } finally {
+        resetCoordinatorHome();
+        await rm(home, { recursive: true, force: true });
+      }
+    });
+
+    test("teardownAgent threads the pruned pairs up through its return", async () => {
+      const { setCoordinatorHome, resetCoordinatorHome } = await import("./coordinator");
+      const { createTeam, addMember, getTeam } = await import("./teams");
+      const home = await mkdtemp(join(tmpdir(), "lc-teams-"));
+      setCoordinatorHome(home);
+      // teardownAgent runs tmux/git via spawnCtx — fake them so it succeeds.
+      // has-session / pgrep fail (no live session) so teardown skips kill paths.
+      spawnCtx.set((cmd: string[]) => {
+        const fails = cmd.includes("has-session") || cmd[0] === "pgrep";
+        return {
+          stdout: new Response("").body!,
+          stderr: new Response("").body!,
+          exited: Promise.resolve(fails ? 1 : 0),
+        } as SpawnResult;
+      });
+      try {
+        const dir = await makeTempDir();
+        const agentDir = join(dir, ".ittybitty", "agents", "agent-td");
+        await mkdir(agentDir, { recursive: true });
+        await Bun.write(join(agentDir, "meta.json"), '{"id":"agent-td"}');
+
+        await createTeam("backend", "", 1000);
+        await addMember("backend", "agent-td");
+        await addMember("backend", "agent-keep");
+
+        const result = await teardownAgent(dir, "agent-td", agentDir, { tmux_session: "t-agent-td" });
+        expect(result.ok).toBe(true);
+        expect(result.prunedTeams).toEqual([{ team: "backend", id: "agent-td" }]);
+        expect((await getTeam("backend"))!.members).toEqual(["agent-keep"]);
+
+        await rm(dir, { recursive: true, force: true });
+      } finally {
+        spawnCtx.reset();
+        resetCoordinatorHome();
+        await rm(home, { recursive: true, force: true });
+      }
     });
   });
 
@@ -424,7 +564,9 @@ describe("agent-lifecycle", () => {
         agentDir,
         { tmux_session: "bad;inject" },
       );
-      expect(result).toBe(false);
+      expect(result.ok).toBe(false);
+      // Invalid-session early-return ran no archive, so nothing was pruned.
+      expect(result.prunedTeams).toEqual([]);
 
       await rm(tmpDir, { recursive: true, force: true });
     });

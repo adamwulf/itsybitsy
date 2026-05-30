@@ -1,7 +1,7 @@
 # SPEC: Codex CLI as an alternative agent model
 
-Status: **DRAFT — design.** Phase 0 IMPLEMENTED + merged. Phases 1–7 pending.
-Branch: `agent/codex-agent`. Author: codex-agent (manager). Last updated: 2026-05-30 (consolidated rewrite after research + design rounds).
+Status: **DRAFT — design.** Phase 0 + Phase 1 IMPLEMENTED, reviewed (2 worker reviewers, both APPROVE), and merged on `agent/codex-agent` (rebased onto main; 3281 tests pass, tsc 0 errors). Phases 2–8 pending.
+Branch: `agent/codex-agent`. Author: codex-agent (manager). Last updated: 2026-05-30 (Phase 1 status update; consolidated rewrite earlier same day folded research + design rounds).
 Companion docs (supporting evidence, do not duplicate here):
 - `SETTINGS-HOOKS-RESEARCH.md` — authoritative Claude vs Codex settings/hooks reference (every claim evidence-tagged).
 - `MODEL-NAME-FORMAT-PROPOSAL.md` — design proposal that drove the §5.1 + Phase 1 design.
@@ -99,9 +99,9 @@ Where `<MODEL>` is the **model half** of the parsed `<cli>:<model>` (the `codex:
 | Seam | Location | Notes |
 |------|----------|-------|
 | AgentMeta type | `src/agents.ts:49` | `model: string` at :60; `session_id` at :51; **`codex_session_id?: string`** added in Phase 0 for codex resume. No `cli` field (parsed on demand per D1). |
-| Model default | `src/config.ts:24` (`model` default `"opus"`); coordinator `:32` | Both defaults become **invalid** under D1/D5 — must be re-spelled to `"claude:opus"` in Phase 1. |
-| Model precedence | `src/ib-commands.ts:2551–2552` (`--model > type.model > config.model > 'opus'`) | Default literal updated to `"claude:opus"` in Phase 1. |
-| isValidModel | `src/validation.ts:7–9` allowlist `^[a-zA-Z0-9._-]+$` | **Must widen** to `^[a-zA-Z0-9._:-]+$` in Phase 1 — without this, every qualified model is rejected. This is the one load-bearing one-character change. |
+| Model default | `src/config.ts:24` (`model` default `"claude:opus"`); coordinator `:32` (also `"claude:opus"`) | ✅ DONE in Phase 1 — defaults updated from bare `"opus"` to qualified form (D5: no back-compat). |
+| Model precedence | `src/ib-commands.ts` newAgent (`--model > <type>.md model > _non_coordinator.md model > _all.md model > config.model > 'claude:opus'`); main's `0791dd6` layered walk preserved through rebase | ✅ DONE in Phase 1 — default literal is `"claude:opus"`; main's layered walk + parseModel validation integrated. |
+| isValidModel | `src/validation.ts:14` allowlist `^[a-zA-Z0-9._:-]+$` | ✅ DONE in Phase 1 — widened to allow `:` (the one load-bearing one-character change; without it every qualified model would be rejected at spawn). |
 | VALID_MODELS allowlists | `src/config-command.ts:6` (`["sonnet","opus","haiku"]`), `src/hooks/intercept-task.ts:24` (same set + `""`) | Replace with `parseModel + KNOWN_CLIS` validation (must accept any `<known-cli>:<model>`). |
 | session UUID | `src/ib-commands.ts:2723` `crypto.randomUUID()`; stored `:2781` `session_id` | Codex has its own rollout-id model; capture into `codex_session_id` after first launch. |
 | Spawn `claude` cmd | `src/ib-commands.ts` `newAgent()` — `claudeArgs` built `2989–3010`; generated `start.sh` written from `:3072`; launch lines **`3111`/`3113`** (`setsid claude --session-id … "$(cat promptfile)"` / bare `claude --session-id …`); `CLAUDE_PID=$!` at `:3115`; SIGHUP `trap '' HUP` at `:3091` | **Branch point for codex launch.** Pass `parseModel(model).model` (NOT the raw `<cli>:<model>`) to `--model`. |
@@ -240,31 +240,30 @@ Status: complete on `agent/codex-agent` (commits `ed91375` + `d59f171`).
 - `resolveCli` wired at the model-precedence seam (`ib-commands.ts:~2579`) — no behavior change yet (claude spawn byte-identical).
 - **Note:** Phase 1 below will delete the `CODEX_MODELS`/prefix machinery this phase introduced and replace it with explicit parsing. That code was correct under the original D1 wording but is superseded by the new D1 (explicit prefix required).
 
-### Phase 1 — Explicit `<cli>:<model>` format (the new D1) 🆕
-**Goal:** replace bare-name routing with parsed `<cli>:<model>`. No backwards compat (D5); hard-reject unknown cli (D6).
+### Phase 1 — Explicit `<cli>:<model>` format (the new D1) ✅ MERGED
+Status: complete on `agent/codex-agent` (rebased onto main; reviewed by 2 worker reviewers, both APPROVE). Commits:
+- `8c14eed` feat(codex): Phase 1 — parseModel + KNOWN_CLIS, drop bare-name prefix matching
+- `90fc3f3` feat(codex): Phase 1 — route spawn/resume/coordinator through parseModel
+- `138e85a` test(codex): Phase 1 — invert agent-cli tests + migrate fixtures to qualified models
+- `a35d482` test(codex): post-rebase fixture migration to qualified `<cli>:<model>` (also fixes one test-isolation bug uncovered by Phase 1's strict validation)
 
-Code that lands (design intent for the implementer):
-1. `src/agent-cli.ts`: add `parseModel`, `KNOWN_CLIS`; delete `CODEX_MODELS`/`CODEX_MODEL_PREFIXES`/prefix matching; reduce `resolveCli` to `parseModel(m).cli`; re-base `isCodexModel` on the parsed cli.
-2. `src/validation.ts:7`: widen `isValidModel` to allow `:` (`^[a-zA-Z0-9._:-]+$`). **One-line, load-bearing.**
-3. `src/config.ts:24,32`: change `model` and `coordinator.model` defaults from `"opus"` to `"claude:opus"`.
-4. `src/ib-commands.ts`:
-   - At the spawn (`~3010–3012`) and resume (`~587–590`) seams, pass `parseModel(model).model` to `--model` (not the raw string).
-   - After `isValidModel` (`:2570`) add a `parseModel`-throws check → spawn rejects with the D6 message on unknown cli.
-   - Store the **raw** input string in meta (`:2800`, unchanged) so meta is human-readable / round-trippable.
-5. `src/coordinator.ts:419–436`: parse `coordinator.model`; pass the model half to `--model`; branch the launch on the parsed cli (per D9 — coordinators are NOT claude-only; any `<cli>:<model>` is valid). Full codex-coordinator wiring lands in Phases 3–7 alongside regular codex agents.
-6. `src/agent-types.ts`: confirm the existing `model?: string` frontmatter field accepts the qualified form; merge logic at agent-creation time uses `parseModel` for validation, just like CLI/config inputs. Applies to `system.md`, `coordinator.md`, `manager.md`, `worker.md`, and any user-defined types (per D9).
-7. `src/config-command.ts:6,74–78`: replace the hard-coded `VALID_MODELS` allowlist with `parseModel + KNOWN_CLIS` validation.
-8. `src/hooks/intercept-task.ts:24,269–304`: same — accept any qualified `<known-cli>:<model>` string.
-9. `src/tui/info-panel.ts:120` + `src/tui/agent-tree.ts:64,93`: render `meta.model` verbatim — per D8, all stored values are already qualified, so no special split required.
-10. Rewrite the relevant `src/agent-cli.test.ts` blocks: bare codex names (e.g. `o3`) now must be rejected (not routed to codex); qualified names (`codex:o3`) route to codex. Add `parseModel` tests (split-on-first-colon, greedy model, colon-in-model, malformed cli, unknown cli throws).
+Gate met: **3281 pass / 0 fail; tsc 0 errors.**
 
-**Gate:**
-- `bun test` green. Only `src/agent-cli.test.ts` is rewritten (the intentional inversion); every other test stays green.
-- `bunx tsc --noEmit` — 0 errors.
-- `ib new-agent --model "claude:opus" "task"` spawns identically to today's `--model opus` (assert the generated `start.sh` line for a claude agent is byte-identical to a Phase-0 spawn with `--model opus`, except for the model arg literal).
-- `ib new-agent --model "opus" "task"` is **rejected** at spawn with a clear message.
-- `ib new-agent --model "gemini:foo" "task"` is **rejected** at spawn with `Unknown CLI 'gemini' in model 'gemini:foo'; known: claude, codex`.
-- `parseModel("codex:gpt-5.1-codex")` → `{cli:"codex", model:"gpt-5.1-codex"}` (unit test) — gives Phases 3/4 a deterministic cli.
+What landed (design intent from the original Phase 1 spec, all 10 steps):
+1. ✅ `src/agent-cli.ts`: `parseModel` + `KNOWN_CLIS` added; `CODEX_MODELS` / `CODEX_MODEL_PREFIXES` / boundary-aware prefix matching DELETED (no more inference); `resolveCli` reduced to a thin wrapper over `parseModel(m).cli`; `isCodexModel` re-based on the parsed cli.
+2. ✅ `src/validation.ts:14`: `isValidModel` regex widened to `^[a-zA-Z0-9._:-]+$`.
+3. ✅ `src/config.ts:24,32`: `model` and `coordinator.model` defaults updated to `"claude:opus"`.
+4. ✅ `src/ib-commands.ts`: spawn (newAgent) + resume (resumeAgent) now run `parseModel` in a try/catch that surfaces the D6 message on failure; the parsed **model half** (e.g. `"opus"`) is passed to `--model` rather than the raw qualified string; meta.json stores the **raw** qualified value verbatim. The `agentCli` const is kept (currently unused) as the Phase 4 spawn-branch seam.
+5. ✅ `src/coordinator.ts:428`: parses `coordinator.model`; non-claude cli is HARD-REJECTED with `"codex coordinators not yet implemented; use claude:<model>"` (D9 stub — full codex-coordinator support lands later).
+6. ✅ `src/agent-types.ts`: any non-empty `model:` frontmatter is validated via `parseModel` in `validateAllAgentTypes` (which the dashboard calls at startup), so a bare-name slip in `_all.md` / `_non_coordinator.md` / `<type>.md` surfaces with a clear file-name + parseModel error. The "empty `model:` = inherit" convention is preserved.
+7. ✅ `src/config-command.ts:6,81`: replaced hard-coded `VALID_MODELS` allowlist with `parseModel + KNOWN_CLIS` validation.
+8. ✅ `src/hooks/intercept-task.ts:32-38`: `isAcceptableTaskModel` uses `parseModel`; bare names + unknown CLIs are silently coerced to `""` (defensive carryover, documented).
+9. ✅ `src/tui/info-panel.ts` + `src/tui/agent-tree.ts`: render `meta.model` verbatim (per D8 — already qualified post-Phase-1).
+10. ✅ `src/agent-cli.test.ts`: all bare-name route tests inverted (now assert THROW); new `parseModel` tests cover split-on-first-colon, greedy model, colon-in-model, malformed cli, unknown cli throws with the D6 message regex.
+
+Integration with main: rebase of `agent/codex-agent` onto main (`6143297`) replayed the 9 commits cleanly with 2 keep-both conflict resolutions in `src/ib-commands.ts` (Phase 0 resolver block kept alongside main's layered-walk comment, no semantic overlap). The agent-types loader × parseModel integration was verified by both reviewers as the highest-value check.
+
+User-facing follow-up (per D5, your call): any bare-name `model:` value in your installed `~/.itsybitsy/agent-types/*.md` or `~/.itsybitsy/config.json` will now be rejected at `ib watch` startup with a clear error. Migrate to the qualified `<cli>:<model>` form by hand.
 
 ### Phase 2 — Spike: verify interactive codex + deny semantics (manual)
 Unchanged from the prior Phase 1; just renumbered.

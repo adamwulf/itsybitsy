@@ -1175,6 +1175,14 @@ describe("isRateLimited", () => {
     const output = "line1\nline2\nline3";
     expect(isRateLimited(output)).toBe(false);
   });
+
+  test("does NOT match server-side transient throttle (routed to api_error instead)", () => {
+    // "API Error: Server is temporarily limiting requests (not your usage limit)"
+    // is a transient server throttle, NOT a usage-limit exhaustion. It must be
+    // handled by isApiError's "please retry" backoff, not the usage-limit path.
+    const output = "  ⎿  API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited";
+    expect(isRateLimited(output)).toBe(false);
+  });
 });
 
 describe("isApiError", () => {
@@ -1220,6 +1228,11 @@ describe("isApiError", () => {
 
   test("detects ECONNRESET", () => {
     const output = "  ⎿  API Error: ECONNRESET";
+    expect(isApiError(output)).toBe(true);
+  });
+
+  test("detects server-side transient throttle (not usage limit)", () => {
+    const output = "  ⎿  API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited";
     expect(isApiError(output)).toBe(true);
   });
 

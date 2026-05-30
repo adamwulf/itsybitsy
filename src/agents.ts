@@ -538,6 +538,11 @@ export function isApiError(tmuxOutput: string): boolean {
   if (/Request was aborted/i.test(last15)) return true;
   if (/ETIMEDOUT/.test(last15)) return true;
   if (/ECONNRESET/.test(last15)) return true;
+  // Server-side transient throttle (NOT the usage limit) — Claude renders
+  // "API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited".
+  // This is recovery-eligible via "please retry"; isRateLimited deliberately
+  // does NOT match it (it requires usage-limit phrasing), so there is no overlap.
+  if (/temporarily limiting requests/i.test(last15)) return true;
 
   return false;
 }

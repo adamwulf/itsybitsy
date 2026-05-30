@@ -8,13 +8,43 @@
 import { watch, type FSWatcher } from "fs";
 import { join } from "path";
 import { readAllAgents, buildAgentTree, flattenAgentTree, readPendingQuestions, detectAgentStates, computeAge } from "./agents";
-import type { Agent, FlatEntry, PendingQuestion } from "./agents";
+import type { Agent, FlatEntry, PendingQuestion, ReadAgentsResult } from "./agents";
 import { repoDisplayName } from "./registry";
 import type { RepoEntry } from "./registry";
 import { checkRepoHealth, checkGlobalHealth } from "./health-check";
 import type { RepoHealthReport, RepoHealthWarning } from "./health-check";
 import { detectSystemCoordinatorState, IB_COORDINATOR_SESSION } from "./coordinator";
 import { spawnCtx as tmuxSpawnCtx } from "./tmux-poller";
+import { InjectionContext } from "./types";
+
+/**
+ * Injectable bundle of the ./agents functions AgentWatcher consumes. Defaults
+ * to the real implementations; tests inject fakes via `agentsCtx.set(...)` and
+ * restore with `agentsCtx.reset()`. This replaces the old per-file
+ * `mock.module("./agents", ...)` in watcher.test.ts — bun's mock.module is a
+ * PROCESS-GLOBAL registry that is never auto-restored, so stubbing ./agents
+ * there leaked into any later-loading test file whose ./agents binding resolved
+ * afterward (it would receive the mockReset()-emptied stubs and get `undefined`
+ * back from readAllAgents/buildAgentTree). Scoping the seam to this context
+ * keeps the swap local to the watcher and off the global module registry.
+ * Mirrors the SpawnContext pattern in types.ts (tmux-poller's spawnCtx,
+ * coordinator's coordinatorSpawnCtx).
+ */
+export interface WatcherAgentsApi {
+  readAllAgents: (repos: Array<{ path: string; name: string }>, includeArchived?: boolean) => Promise<ReadAgentsResult>;
+  detectAgentStates: (agents: Agent[]) => Promise<void>;
+  buildAgentTree: (agents: Agent[]) => Agent[];
+  flattenAgentTree: (roots: Agent[], repos?: string[] | { name: string; path: string }[], coordinator?: { state: string; age: string }) => FlatEntry[];
+  readPendingQuestions: (repoPath: string) => Promise<PendingQuestion[]>;
+}
+
+export const agentsCtx = new InjectionContext<WatcherAgentsApi>({
+  readAllAgents,
+  detectAgentStates,
+  buildAgentTree,
+  flattenAgentTree,
+  readPendingQuestions,
+});
 
 export interface WatcherEvents {
   onUpdate: (agents: Agent[], flatList: FlatEntry[], questions: PendingQuestion[], orphanedTmuxSessions: string[]) => void;
@@ -231,17 +261,18 @@ export class AgentWatcher {
     if (agents.length === 0 || this.polling || this.refreshing) return;
     this.polling = true;
     try {
+      const agentsApi = agentsCtx.fn;
       const [, coordinatorInfo] = await Promise.all([
-        detectAgentStates(agents),
+        agentsApi.detectAgentStates(agents),
         this.getCoordinatorInfo(),
       ]);
       // If refresh() swapped lastAgents while we were awaiting, discard stale results
       if (agents !== this._lastAgents) return;
-      const roots = buildAgentTree(agents);
+      const roots = agentsApi.buildAgentTree(agents);
       const repoInfos = this.repos.map((r) => ({ name: repoDisplayName(r), path: r.path }));
-      const flatList = flattenAgentTree(roots, repoInfos, coordinatorInfo);
+      const flatList = agentsApi.flattenAgentTree(roots, repoInfos, coordinatorInfo);
       const questionResults = await Promise.all(
-        this.repos.map((r) => readPendingQuestions(r.path))
+        this.repos.map((r) => agentsApi.readPendingQuestions(r.path))
       );
       const questions = questionResults.flat();
       if (!this.running) return;
@@ -261,11 +292,12 @@ export class AgentWatcher {
     }
     this.refreshing = true;
     try {
+      const agentsApi = agentsCtx.fn;
       const reposWithDisplayNames = this.repos.map((r) => ({ path: r.path, name: repoDisplayName(r) }));
       // Skip archived agents: the dashboard never renders them (flattenAgentTree
       // drops every archived row) and re-stat'ing thousands of immutable archived
       // meta.json files on every refresh tick is pure waste. See readAllAgents docs.
-      const { agents, errors, orphanedTmuxSessions, liveTmuxSessions } = await readAllAgents(reposWithDisplayNames, false);
+      const { agents, errors, orphanedTmuxSessions, liveTmuxSessions } = await agentsApi.readAllAgents(reposWithDisplayNames, false);
 
       // Report any read errors
       for (const err of errors) {
@@ -279,17 +311,17 @@ export class AgentWatcher {
 
       // Detect state for each agent via tmux capture + parseState, and get coordinator info
       const [, coordinatorInfo] = await Promise.all([
-        detectAgentStates(agents),
+        agentsApi.detectAgentStates(agents),
         this.getCoordinatorInfo(),
       ]);
 
-      const roots = buildAgentTree(agents);
+      const roots = agentsApi.buildAgentTree(agents);
       const repoInfos = this.repos.map((r) => ({ name: repoDisplayName(r), path: r.path }));
-      const flatList = flattenAgentTree(roots, repoInfos, coordinatorInfo);
+      const flatList = agentsApi.flattenAgentTree(roots, repoInfos, coordinatorInfo);
 
       // Read pending questions from all repos
       const questionResults = await Promise.all(
-        this.repos.map((r) => readPendingQuestions(r.path))
+        this.repos.map((r) => agentsApi.readPendingQuestions(r.path))
       );
       const questions = questionResults.flat();
 

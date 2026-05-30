@@ -2,49 +2,44 @@ import { test, expect, describe, beforeEach, afterEach, jest, mock } from "bun:t
 import { join } from "path";
 import { mkdtemp, rm, mkdir, writeFile } from "fs/promises";
 import { tmpdir } from "os";
-import type { Agent, FlatEntry, PendingQuestion } from "./agents";
+import type { Agent, FlatEntry, PendingQuestion, ReadAgentsResult } from "./agents";
 import { makeAgent as _makeAgent, makeFlatAgent } from "./test-utils";
 import type { RepoEntry } from "./registry";
 
-// --- Mock agents module ---
-const mockReadAllAgents = jest.fn<(repos: Array<{ path: string; name: string }>, includeArchived?: boolean) => Promise<{ agents: Agent[]; errors: any[] }>>();
+// --- Inject fake ./agents functions via the watcher's agentsCtx ---
+// AgentWatcher consumes readAllAgents/detectAgentStates/buildAgentTree/
+// flattenAgentTree/readPendingQuestions through an InjectionContext
+// (`agentsCtx`, defined in watcher.ts and mirroring tmux-poller's spawnCtx).
+// We inject these jest.fn fakes via agentsCtx.set() in beforeEach and restore
+// the real implementations via agentsCtx.reset() in afterEach.
+//
+// This deliberately AVOIDS `mock.module("./agents", ...)`: bun's mock.module is
+// a PROCESS-GLOBAL registry that is never auto-restored, so stubbing ./agents
+// here used to leak into any later-loading test file whose ./agents binding
+// resolved afterward — that file received the mockReset()-emptied stubs and got
+// `undefined` back from the real readAllAgents/buildAgentTree it expected.
+// Scoping the seam to agentsCtx keeps the swap local to this file and off the
+// global module registry, so test load order no longer matters.
+const mockReadAllAgents = jest.fn<(repos: Array<{ path: string; name: string }>, includeArchived?: boolean) => Promise<ReadAgentsResult>>();
 const mockDetectAgentStates = jest.fn<(agents: Agent[]) => Promise<void>>();
 const mockBuildAgentTree = jest.fn<(agents: Agent[]) => Agent[]>();
 const mockFlattenAgentTree = jest.fn<(roots: Agent[]) => FlatEntry[]>();
 const mockReadPendingQuestions = jest.fn<(repoPath: string) => Promise<PendingQuestion[]>>();
 
-// Capture the REAL ./agents BEFORE mocking, then spread it so every export
-// this test does NOT explicitly override (resolveAgentIcon, writeAgentState,
-// readAgentMeta, …) stays present. bun's mock.module is global and replaces the
-// ENTIRE module, so a partial mock breaks module linking for any code in the
-// load graph that imports a non-listed export — but only when this file is the
-// first to load ./agents (e.g. `bun test src/watcher.test.ts` alone). The full
-// suite hid it because another file imported the real ./agents first. This
-// import runs before mock.module is registered, so it returns the real module
-// (no recursion). Overrides below still win over the spread. Mirrors the
-// real-module-spread pattern in orphan-detection.test.ts.
-const realAgents = await import("./agents");
-
-mock.module("./agents", () => ({
-  ...realAgents,
-  readAllAgents: mockReadAllAgents,
-  detectAgentStates: mockDetectAgentStates,
-  buildAgentTree: mockBuildAgentTree,
-  flattenAgentTree: mockFlattenAgentTree,
-  readPendingQuestions: mockReadPendingQuestions,
-  computeAge: (epoch: number) => `${Math.floor((Date.now() / 1000 - epoch) / 60)}m`,
-  isCompacting: (output: string) => {
-    const lines = output.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "").split("\n");
-    return lines.slice(-5).join("\n").includes("Compacting conversation");
-  },
-  isRateLimited: (output: string) => {
-    const text = output.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "").split("\n").slice(-15).join("\n");
-    if (text.includes("rate_limit_error")) return true;
-    const lower = text.toLowerCase();
-    return lower.includes("usage limit reached") || lower.includes("limit will reset at") ||
-      lower.includes("hit your limit") || lower.includes("rate limit");
-  },
-}));
+// Build a full ReadAgentsResult from the fields a given test cares about.
+// readAllAgents always returns four fields; every watcher test only varies
+// `agents`/`errors`, so default the two tmux-session fields to empty. (The old
+// global mock let tests resolve a partial `{agents, errors}` and the watcher
+// silently took `undefined` for the rest — this keeps the fakes structurally
+// valid against the real return type without churning every call site.)
+function readResult(partial: { agents?: Agent[]; errors?: any[] } = {}): ReadAgentsResult {
+  return {
+    agents: partial.agents ?? [],
+    errors: partial.errors ?? [],
+    orphanedTmuxSessions: [],
+    liveTmuxSessions: new Set<string>(),
+  };
+}
 
 // --- Mock fs.watch to capture registered callbacks ---
 // watcher.ts does `import { watch } from "fs"`. We wrap the REAL watch so it
@@ -67,8 +62,9 @@ mock.module("fs", () => ({
   },
 }));
 
-// Import after mocking agents + fs modules
-const { AgentWatcher } = await import("./watcher");
+// Import after mocking the fs module. agentsCtx is the watcher's injection seam
+// for the ./agents functions — fakes are wired in via agentsCtx.set() below.
+const { AgentWatcher, agentsCtx } = await import("./watcher");
 // Import coordinatorSpawnCtx to inject noop (prevents real tmux calls in getCoordinatorInfo)
 const { coordinatorSpawnCtx } = await import("./coordinator");
 // Import tmux-poller spawnCtx for tests that exercise captureTmuxOutput / display-message
@@ -79,7 +75,7 @@ function makeAgent(id: string, archived = false): Agent {
 }
 
 function setupDefaultMocks(agents: Agent[] = []) {
-  mockReadAllAgents.mockResolvedValue({ agents, errors: [] });
+  mockReadAllAgents.mockResolvedValue(readResult({ agents }));
   mockDetectAgentStates.mockResolvedValue(undefined);
   mockBuildAgentTree.mockReturnValue(agents);
   mockFlattenAgentTree.mockReturnValue(agents.map((a) => makeFlatAgent(a)));
@@ -103,6 +99,16 @@ describe("AgentWatcher", () => {
     agentsDir = join(tempDir, ".ittybitty", "agents");
     await mkdir(agentsDir, { recursive: true });
     resetMocks();
+    // Inject the jest.fn fakes into the watcher's ./agents seam. Done per-test
+    // (after resetMocks) so each test starts from clean stubs; restored to the
+    // real implementations in afterEach via agentsCtx.reset().
+    agentsCtx.set({
+      readAllAgents: mockReadAllAgents,
+      detectAgentStates: mockDetectAgentStates,
+      buildAgentTree: mockBuildAgentTree,
+      flattenAgentTree: mockFlattenAgentTree,
+      readPendingQuestions: mockReadPendingQuestions,
+    });
     // Prevent real tmux calls from coordinatorSpawnCtx (exit code 1 → "stopped")
     coordinatorSpawnCtx.set(() => ({
       stdout: new Response("").body!,
@@ -124,6 +130,7 @@ describe("AgentWatcher", () => {
 
   afterEach(async () => {
     await rm(tempDir, { recursive: true, force: true });
+    agentsCtx.reset();
     coordinatorSpawnCtx.reset();
     tmuxPollerSpawnCtx.reset();
   });
@@ -353,7 +360,7 @@ describe("AgentWatcher", () => {
       const agentC = makeAgent("agent-c");
 
       // First snapshot: [A, B]
-      mockReadAllAgents.mockResolvedValueOnce({ agents: [agentA, agentB], errors: [] });
+      mockReadAllAgents.mockResolvedValueOnce(readResult({ agents: [agentA, agentB] }));
       mockDetectAgentStates.mockResolvedValueOnce(undefined);
       mockBuildAgentTree.mockReturnValueOnce([agentA, agentB]);
       mockFlattenAgentTree.mockReturnValueOnce([
@@ -363,7 +370,7 @@ describe("AgentWatcher", () => {
       mockReadPendingQuestions.mockResolvedValue([]);
 
       // Second snapshot: [A, B, C] — C was added
-      mockReadAllAgents.mockResolvedValueOnce({ agents: [agentA, agentB, agentC], errors: [] });
+      mockReadAllAgents.mockResolvedValueOnce(readResult({ agents: [agentA, agentB, agentC] }));
       mockDetectAgentStates.mockResolvedValueOnce(undefined);
       mockBuildAgentTree.mockReturnValueOnce([agentA, agentB, agentC]);
       mockFlattenAgentTree.mockReturnValueOnce([
@@ -396,7 +403,7 @@ describe("AgentWatcher", () => {
       const agentB = makeAgent("agent-b");
 
       // First snapshot: [A, B]
-      mockReadAllAgents.mockResolvedValueOnce({ agents: [agentA, agentB], errors: [] });
+      mockReadAllAgents.mockResolvedValueOnce(readResult({ agents: [agentA, agentB] }));
       mockDetectAgentStates.mockResolvedValueOnce(undefined);
       mockBuildAgentTree.mockReturnValueOnce([agentA, agentB]);
       mockFlattenAgentTree.mockReturnValueOnce([
@@ -406,7 +413,7 @@ describe("AgentWatcher", () => {
       mockReadPendingQuestions.mockResolvedValue([]);
 
       // Second snapshot: [A] — B removed
-      mockReadAllAgents.mockResolvedValueOnce({ agents: [agentA], errors: [] });
+      mockReadAllAgents.mockResolvedValueOnce(readResult({ agents: [agentA] }));
       mockDetectAgentStates.mockResolvedValueOnce(undefined);
       mockBuildAgentTree.mockReturnValueOnce([agentA]);
       mockFlattenAgentTree.mockReturnValueOnce([
@@ -433,7 +440,7 @@ describe("AgentWatcher", () => {
       const agentC = makeAgent("agent-c");
 
       // First snapshot: [A, B]
-      mockReadAllAgents.mockResolvedValueOnce({ agents: [agentA, agentB], errors: [] });
+      mockReadAllAgents.mockResolvedValueOnce(readResult({ agents: [agentA, agentB] }));
       mockDetectAgentStates.mockResolvedValueOnce(undefined);
       mockBuildAgentTree.mockReturnValueOnce([agentA, agentB]);
       mockFlattenAgentTree.mockReturnValueOnce([
@@ -443,7 +450,7 @@ describe("AgentWatcher", () => {
       mockReadPendingQuestions.mockResolvedValue([]);
 
       // Second snapshot: [A, C] — B removed, C added
-      mockReadAllAgents.mockResolvedValueOnce({ agents: [agentA, agentC], errors: [] });
+      mockReadAllAgents.mockResolvedValueOnce(readResult({ agents: [agentA, agentC] }));
       mockDetectAgentStates.mockResolvedValueOnce(undefined);
       mockBuildAgentTree.mockReturnValueOnce([agentA, agentC]);
       mockFlattenAgentTree.mockReturnValueOnce([
@@ -469,7 +476,7 @@ describe("AgentWatcher", () => {
       const agent1 = makeAgent("agent-1");
       agent1.state = "unknown";
 
-      mockReadAllAgents.mockResolvedValue({ agents: [agent1], errors: [] });
+      mockReadAllAgents.mockResolvedValue(readResult({ agents: [agent1] }));
       // Simulate detectAgentStates mutating the agent's state in-place
       mockDetectAgentStates.mockImplementation(async (agents: Agent[]) => {
         for (const a of agents) {
@@ -504,7 +511,7 @@ describe("AgentWatcher", () => {
       mockReadAllAgents.mockImplementation(async () => {
         // Return a fresh agent each time so state starts at "unknown"
         const a = makeAgent("agent-1");
-        return { agents: [a], errors: [] };
+        return readResult({ agents: [a] });
       });
       mockDetectAgentStates.mockImplementation(async (agents: Agent[]) => {
         callNum++;
@@ -535,7 +542,7 @@ describe("AgentWatcher", () => {
       const agent1 = makeAgent("agent-1");
       const agent2 = makeAgent("agent-2");
 
-      mockReadAllAgents.mockResolvedValue({ agents: [agent1, agent2], errors: [] });
+      mockReadAllAgents.mockResolvedValue(readResult({ agents: [agent1, agent2] }));
       mockDetectAgentStates.mockImplementation(async (agents: Agent[]) => {
         agents[0]!.state = "running";
         agents[1]!.state = "complete";
@@ -637,10 +644,10 @@ describe("AgentWatcher", () => {
     });
 
     test("onError called when readAllAgents returns errors", async () => {
-      mockReadAllAgents.mockResolvedValue({
+      mockReadAllAgents.mockResolvedValue(readResult({
         agents: [],
         errors: [{ agentDir: "/tmp/bad", error: "bad meta.json" }],
-      });
+      }));
       mockDetectAgentStates.mockResolvedValue(undefined);
       mockBuildAgentTree.mockReturnValue([]);
       mockFlattenAgentTree.mockReturnValue([]);
@@ -713,7 +720,7 @@ describe("AgentWatcher", () => {
       mockReadAllAgents.mockImplementation(async () => {
         callCount++;
         if (callCount === 1) throw new Error("transient");
-        return { agents: [], errors: [] };
+        return readResult();
       });
       mockDetectAgentStates.mockResolvedValue(undefined);
       mockBuildAgentTree.mockReturnValue([]);

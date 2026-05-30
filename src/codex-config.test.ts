@@ -1,0 +1,180 @@
+import { test, expect, describe } from "bun:test";
+import {
+  buildCodexLaunchArgs,
+  isCodexSafeBinaryPath,
+  renderCodexHookFlagPayload,
+  CODEX_REGISTERED_EVENTS,
+  DEFAULT_CODEX_HOOK_TIMEOUT_SECS,
+} from "./codex-config";
+
+describe("isCodexSafeBinaryPath", () => {
+  test("accepts a normal absolute install path", () => {
+    expect(isCodexSafeBinaryPath("/usr/local/bin/ib")).toBe(true);
+    expect(isCodexSafeBinaryPath("/Users/alice/Developer/itsybitsy/ib")).toBe(true);
+  });
+
+  test("rejects apostrophes (would close the shell single-quoted arg)", () => {
+    expect(isCodexSafeBinaryPath("/Users/o'malley/bin/ib")).toBe(false);
+  });
+
+  test("rejects double quotes (would corrupt the TOML string literal)", () => {
+    expect(isCodexSafeBinaryPath('/some/"weird"/path/ib')).toBe(false);
+  });
+
+  test("rejects backslashes (would escape inside the TOML string)", () => {
+    expect(isCodexSafeBinaryPath("/some/back\\slash/ib")).toBe(false);
+  });
+
+  test("rejects control characters", () => {
+    expect(isCodexSafeBinaryPath("/path/with\nnewline/ib")).toBe(false);
+    expect(isCodexSafeBinaryPath("/path/with\ttab/ib")).toBe(false);
+    expect(isCodexSafeBinaryPath("/path/with\x00null/ib")).toBe(false);
+    expect(isCodexSafeBinaryPath("/path/with\x7fdel/ib")).toBe(false);
+  });
+
+  test("rejects empty / non-string inputs", () => {
+    expect(isCodexSafeBinaryPath("")).toBe(false);
+    // @ts-expect-error — test runtime guard against non-strings
+    expect(isCodexSafeBinaryPath(undefined)).toBe(false);
+    // @ts-expect-error — test runtime guard against non-strings
+    expect(isCodexSafeBinaryPath(null)).toBe(false);
+  });
+});
+
+describe("renderCodexHookFlagPayload", () => {
+  test("emits a single hooks.<Event>=[...] payload with the right event name", () => {
+    const out = renderCodexHookFlagPayload("PreToolUse", "/usr/local/bin/ib", "agent-abc123", 30);
+    expect(out.startsWith("hooks.PreToolUse=[")).toBe(true);
+  });
+
+  test("interpolates the dispatcher command for each event", () => {
+    const pre = renderCodexHookFlagPayload("PreToolUse", "/bin/ib", "agent-abc123", 30);
+    expect(pre).toContain('command="/bin/ib hooks codex-pre-tool-use agent-abc123"');
+
+    const ss = renderCodexHookFlagPayload("SessionStart", "/bin/ib", "agent-abc123", 30);
+    expect(ss).toContain('command="/bin/ib hooks codex-session-start agent-abc123"');
+
+    const stop = renderCodexHookFlagPayload("Stop", "/bin/ib", "agent-abc123", 30);
+    expect(stop).toContain('command="/bin/ib hooks codex-stop agent-abc123"');
+  });
+
+  test("includes the matcher and timeout fields", () => {
+    const out = renderCodexHookFlagPayload("PreToolUse", "/bin/ib", "agent-abc123", 42);
+    expect(out).toContain('matcher=".*"');
+    expect(out).toContain("timeout=42");
+    expect(out).toContain('type="command"');
+  });
+});
+
+describe("buildCodexLaunchArgs — well-formedness", () => {
+  test("emits exactly one '-c' flag per registered event in stable order", () => {
+    const { args } = buildCodexLaunchArgs({
+      ibBinaryPath: "/usr/local/bin/ib",
+      agentId: "agent-abc123",
+    });
+    // args alternates: -c, payload, -c, payload, ...
+    expect(args.length).toBe(CODEX_REGISTERED_EVENTS.length * 2);
+    for (let i = 0; i < args.length; i += 2) {
+      expect(args[i]).toBe("-c");
+    }
+    expect(args[1]).toContain("hooks.PreToolUse=");
+    expect(args[3]).toContain("hooks.SessionStart=");
+    expect(args[5]).toContain("hooks.Stop=");
+  });
+
+  test("each payload contains <abs ib> and <agentId>", () => {
+    const { args } = buildCodexLaunchArgs({
+      ibBinaryPath: "/usr/local/bin/ib",
+      agentId: "agent-abc123",
+    });
+    for (let i = 1; i < args.length; i += 2) {
+      const payload = args[i]!;
+      expect(payload).toContain("/usr/local/bin/ib hooks codex-");
+      expect(payload).toContain("agent-abc123");
+    }
+  });
+
+  test("uses the default timeout when none is supplied", () => {
+    const { args } = buildCodexLaunchArgs({
+      ibBinaryPath: "/bin/ib",
+      agentId: "agent-abc",
+    });
+    expect(args[1]).toContain(`timeout=${DEFAULT_CODEX_HOOK_TIMEOUT_SECS}`);
+  });
+
+  test("honors a caller-supplied timeout", () => {
+    const { args } = buildCodexLaunchArgs({
+      ibBinaryPath: "/bin/ib",
+      agentId: "agent-abc",
+      timeoutSecs: 12,
+    });
+    for (let i = 1; i < args.length; i += 2) {
+      expect(args[i]).toContain("timeout=12");
+    }
+  });
+
+  test("rejects invalid timeouts (zero, negative, non-integer)", () => {
+    const base = { ibBinaryPath: "/bin/ib", agentId: "agent-abc" };
+    expect(() => buildCodexLaunchArgs({ ...base, timeoutSecs: 0 })).toThrow();
+    expect(() => buildCodexLaunchArgs({ ...base, timeoutSecs: -5 })).toThrow();
+    expect(() => buildCodexLaunchArgs({ ...base, timeoutSecs: 3.5 })).toThrow();
+  });
+
+  test("payload body parses to a structure with the expected fields", () => {
+    // We can't fully parse TOML inline, but the body shape is small enough
+    // to verify the load-bearing fragments without a TOML parser. The Phase 2
+    // spike captured this exact wire format and codex consumed it cleanly.
+    const out = renderCodexHookFlagPayload("PreToolUse", "/bin/ib", "agent-abc", 30);
+    expect(out).toMatch(/^hooks\.PreToolUse=\[\{matcher=".*?",hooks=\[\{type="command",command=".+?",timeout=\d+\}\]\}\]$/);
+  });
+});
+
+describe("buildCodexLaunchArgs — path-safety rejection (gate (b))", () => {
+  test("rejects ibBinaryPath containing an apostrophe", () => {
+    expect(() =>
+      buildCodexLaunchArgs({ ibBinaryPath: "/Users/o'malley/bin/ib", agentId: "agent-abc" }),
+    ).toThrow(/Unsafe ib binary path/);
+  });
+
+  test("rejects ibBinaryPath containing a double quote", () => {
+    expect(() =>
+      buildCodexLaunchArgs({ ibBinaryPath: '/Users/who"ah/ib', agentId: "agent-abc" }),
+    ).toThrow(/Unsafe ib binary path/);
+  });
+
+  test("rejects ibBinaryPath containing a backslash", () => {
+    expect(() =>
+      buildCodexLaunchArgs({ ibBinaryPath: "/Users/back\\slash/ib", agentId: "agent-abc" }),
+    ).toThrow(/Unsafe ib binary path/);
+  });
+
+  test("rejects ibBinaryPath containing a newline", () => {
+    expect(() =>
+      buildCodexLaunchArgs({ ibBinaryPath: "/Users/new\nline/ib", agentId: "agent-abc" }),
+    ).toThrow(/Unsafe ib binary path/);
+  });
+
+  test("rejects ibBinaryPath containing a tab", () => {
+    expect(() =>
+      buildCodexLaunchArgs({ ibBinaryPath: "/Users/with\ttab/ib", agentId: "agent-abc" }),
+    ).toThrow(/Unsafe ib binary path/);
+  });
+
+  test("rejects an empty ibBinaryPath", () => {
+    expect(() => buildCodexLaunchArgs({ ibBinaryPath: "", agentId: "agent-abc" })).toThrow(
+      /Unsafe ib binary path/,
+    );
+  });
+
+  test("rejects an invalid agent id (special chars)", () => {
+    expect(() =>
+      buildCodexLaunchArgs({ ibBinaryPath: "/bin/ib", agentId: "bad id with spaces" }),
+    ).toThrow(/Invalid agent id/);
+  });
+
+  test("rejects an agent id containing a shell metacharacter", () => {
+    expect(() =>
+      buildCodexLaunchArgs({ ibBinaryPath: "/bin/ib", agentId: "agent-abc;rm-rf" }),
+    ).toThrow(/Invalid agent id/);
+  });
+});

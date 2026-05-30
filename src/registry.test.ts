@@ -3,6 +3,8 @@ import { loadRegistry, saveRegistry, addRepo, removeRepo, renameRepo, listRepos,
 import { join } from "path";
 import { mkdtemp, rm, mkdir } from "fs/promises";
 import { tmpdir } from "os";
+import { setCoordinatorHome, resetCoordinatorHome } from "./coordinator";
+import { createTeam } from "./teams";
 
 // Override registry path for tests
 const originalHome = process.env.HOME;
@@ -389,4 +391,126 @@ describe("registry", () => {
     expect(await oldFile.exists()).toBe(false);
   });
 
+});
+
+// Bidirectional repo↔team name-collision refusal (SPEC §16.1). The repo side:
+// adding/renaming a repo whose basename/nickname collides with an EXISTING team
+// is hard-refused. Both repos.json (process.env.HOME/.itsybitsy) and teams.json
+// (coordinator home) must share the test dir, so set BOTH HOME and the
+// coordinator-home override at <tmp>/.itsybitsy — mirrors teams.test.ts.
+describe("registry team-name collision refusal", () => {
+  let baseDir: string;
+  let homeDir: string;
+  const savedHome = process.env.HOME;
+
+  beforeEach(async () => {
+    baseDir = await mkdtemp(join(tmpdir(), "ib-registry-teams-" + crypto.randomUUID() + "-"));
+    homeDir = join(baseDir, ".itsybitsy");
+    await mkdir(homeDir, { recursive: true });
+    process.env.HOME = baseDir;
+    setCoordinatorHome(homeDir);
+  });
+
+  afterEach(async () => {
+    resetCoordinatorHome();
+    process.env.HOME = savedHome;
+    await rm(baseDir, { recursive: true, force: true });
+  });
+
+  test("addRepo refuses a basename that matches an existing team", async () => {
+    await createTeam("backend", "@system", 100);
+    const repoDir = join(baseDir, "backend");
+    await mkdir(repoDir, { recursive: true });
+    const result = await addRepo(repoDir);
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("already a team name");
+    // Nothing was registered.
+    const repos = await listRepos();
+    expect(repos.length).toBe(0);
+  });
+
+  test("addRepo refuses a custom name that matches an existing team", async () => {
+    await createTeam("backend", "@system", 100);
+    const repoDir = join(baseDir, "some-dir");
+    await mkdir(repoDir, { recursive: true });
+    const result = await addRepo(repoDir, "backend");
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("already a team name");
+  });
+
+  test("addRepo allows a name with no team collision", async () => {
+    await createTeam("backend", "@system", 100);
+    const repoDir = join(baseDir, "frontend");
+    await mkdir(repoDir, { recursive: true });
+    const result = await addRepo(repoDir);
+    expect(result.ok).toBe(true);
+    const repos = await listRepos();
+    expect(repos.length).toBe(1);
+    expect(repos[0]!.name).toBe("frontend");
+  });
+
+  test("addRepo team collision is case-SENSITIVE", async () => {
+    // A team "backend" must NOT block a repo named "Backend".
+    await createTeam("backend", "@system", 100);
+    const repoDir = join(baseDir, "Backend");
+    await mkdir(repoDir, { recursive: true });
+    const result = await addRepo(repoDir);
+    expect(result.ok).toBe(true);
+  });
+
+  test("addRepo strips a leading @ defensively before the team check", async () => {
+    // Repo names won't normally have a leading @, but normalizeTeamName strips
+    // one — so a custom name "@backend" still collides with team "backend".
+    await createTeam("backend", "@system", 100);
+    const repoDir = join(baseDir, "weird-dir");
+    await mkdir(repoDir, { recursive: true });
+    const result = await addRepo(repoDir, "@backend");
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("already a team name");
+  });
+
+  test("renameRepo refuses a nickname matching an existing team", async () => {
+    await createTeam("backend", "@system", 100);
+    const repoDir = join(baseDir, "myrepo");
+    await mkdir(repoDir, { recursive: true });
+    await addRepo(repoDir);
+    const result = await renameRepo(repoDir, "backend");
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("already a team name");
+    // Nickname was not set.
+    const repos = await listRepos();
+    expect(repos[0]!.nickname).toBeUndefined();
+  });
+
+  test("renameRepo allows a nickname that doesn't collide with a team", async () => {
+    await createTeam("backend", "@system", 100);
+    const repoDir = join(baseDir, "myrepo");
+    await mkdir(repoDir, { recursive: true });
+    await addRepo(repoDir);
+    const result = await renameRepo(repoDir, "frontend");
+    expect(result.ok).toBe(true);
+    const repos = await listRepos();
+    expect(repos[0]!.nickname).toBe("frontend");
+  });
+
+  test("renameRepo team collision is case-SENSITIVE", async () => {
+    await createTeam("backend", "@system", 100);
+    const repoDir = join(baseDir, "myrepo");
+    await mkdir(repoDir, { recursive: true });
+    await addRepo(repoDir);
+    const result = await renameRepo(repoDir, "Backend");
+    expect(result.ok).toBe(true);
+  });
+
+  test("renameRepo clearing a nickname needs no team check (empty branch)", async () => {
+    await createTeam("backend", "@system", 100);
+    const repoDir = join(baseDir, "myrepo");
+    await mkdir(repoDir, { recursive: true });
+    await addRepo(repoDir);
+    await renameRepo(repoDir, "frontend");
+    const result = await renameRepo(repoDir, "");
+    expect(result.ok).toBe(true);
+    const repos = await listRepos();
+    expect(repos[0]!.nickname).toBeUndefined();
+  });
 });

@@ -1,6 +1,13 @@
 import { join, resolve, basename } from "path";
 import { homedir } from "os";
 import { mkdir } from "fs/promises";
+// teams.ts imports listRepos/repoDisplayName FROM this module, so a static
+// `import { getTeam } from "./teams"` forms an import cycle. It is SAFE here
+// because we only dereference `getTeam`/`normalizeTeamName` INSIDE the async
+// addRepo/renameRepo functions — long after both modules finish initializing
+// (never at module-init / top-level). See SPEC §16.1 (bidirectional repo↔team
+// name-collision refusal).
+import { getTeam, normalizeTeamName } from "./teams";
 
 export interface RepoEntry {
   path: string;
@@ -57,6 +64,15 @@ export async function addRepo(repoPath: string, name?: string): Promise<{ ok: bo
     return { ok: false, message: `"coordinator" is a reserved name — rename the directory or use a custom name` };
   }
 
+  // Reject a repo name that collides with an EXISTING team — `@<repo>` and
+  // `@<team>` share one flat `@` namespace, so an after-the-fact repo of the
+  // same name would silently shadow the team (the resolver checks repos before
+  // teams). Bidirectional with team-create's collision refusal (SPEC §16.1).
+  // Case-SENSITIVE strict lookup, matching the resolver and getTeam's exact keys.
+  if ((await getTeam(normalizeTeamName(repoName))) !== null) {
+    return { ok: false, message: `"${repoName}" is already a team name — choose a different repo name (e.g. ib add <path> <name>)` };
+  }
+
   const registry = await loadRegistry();
 
   // Check for duplicate
@@ -107,6 +123,13 @@ export async function renameRepo(repoPath: string, nickname: string): Promise<{ 
     );
     if (collision) {
       return { ok: false, message: `Name "${trimmed}" already used by ${collision.path}` };
+    }
+    // Also reject a nickname that collides with an EXISTING team name — `@<repo>`
+    // (by nickname) and `@<team>` share one flat `@` namespace (SPEC §16.1).
+    // Case-SENSITIVE strict lookup. Only checked when SETTING a nickname;
+    // clearing it (empty branch below) needs no team check.
+    if ((await getTeam(normalizeTeamName(trimmed))) !== null) {
+      return { ok: false, message: `Name "${trimmed}" is already a team name` };
     }
     entry.nickname = trimmed;
   } else {

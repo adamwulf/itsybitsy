@@ -1,9 +1,11 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { detectRole, generateInstructions, interpolateTemplate, buildPathIsolationSection, hookSessionStart, type SessionContext } from "./session-start";
+import { detectRole, generateInstructions, teamAwarenessBlock, interpolateTemplate, buildPathIsolationSection, hookSessionStart, type SessionContext } from "./session-start";
 import { readAgentState } from "../agents";
 import { mkdtemp, rm, mkdir } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
+import { setCoordinatorHome, resetCoordinatorHome } from "../coordinator";
+import { createTeam, addMember } from "../teams";
 
 describe("session-start", () => {
   test("detectRole non-agent cwd → primary", () => {
@@ -706,6 +708,147 @@ describe("hookSessionStart with @system", () => {
 
     // _all.md prefix appears before system.md body.
     expect(ctx.indexOf("ALL_LAYER_MARKER")).toBeLessThan(ctx.indexOf("SYSTEM_BODY_MARKER"));
+  });
+});
+
+describe("session-start team awareness (§16.6)", () => {
+  // The tmp dir doubles as both HOME (so agent-types load from
+  // <tmp>/.itsybitsy/agent-types) AND the coordinator home (teams.json), by
+  // pointing setCoordinatorHome at <tmp>/.itsybitsy — mirrors teams.test.ts.
+  let baseDir: string;
+  let homeDir: string;
+  let typesDir: string;
+  const originalHome = process.env.HOME;
+
+  beforeEach(async () => {
+    baseDir = await mkdtemp(join(tmpdir(), "ib-sessionstart-teams-" + crypto.randomUUID() + "-"));
+    homeDir = join(baseDir, ".itsybitsy");
+    typesDir = join(homeDir, "agent-types");
+    await mkdir(typesDir, { recursive: true });
+    process.env.HOME = baseDir;
+    setCoordinatorHome(homeDir);
+  });
+
+  afterEach(async () => {
+    resetCoordinatorHome();
+    process.env.HOME = originalHome;
+    await rm(baseDir, { recursive: true, force: true });
+  });
+
+  test("teamAwarenessBlock returns '' for an agent in no team (no behavior change)", async () => {
+    await createTeam("backend", "@system", 100);
+    await addMember("backend", "agent-other");
+    const block = await teamAwarenessBlock("agent-notamember");
+    expect(block).toBe("");
+  });
+
+  test("teamAwarenessBlock returns '' when given an empty agent id", async () => {
+    const block = await teamAwarenessBlock("");
+    expect(block).toBe("");
+  });
+
+  test("generateInstructions for a TEAM MEMBER includes the ## Teams section with all required elements", async () => {
+    await createTeam("backend", "@system", 100);
+    await addMember("backend", "agent-member1");
+
+    const cwd = "/Users/me/project/.ittybitty/agents/agent-member1/repo";
+    const ctx = detectRole(cwd, {
+      id: "agent-member1",
+      manager: "agent-mgr",
+      worker: true,
+    });
+    const instructions = await generateInstructions(ctx);
+
+    // Names the team.
+    expect(instructions).toContain("## Teams");
+    expect(instructions).toContain("@backend");
+    // Imperative reply action naming `ib send @<team>`.
+    expect(instructions).toContain('ib send @backend "');
+    // Live-roster pointer.
+    expect(instructions).toContain("ib roster @backend");
+    // Who-spoke / where-to-reply disambiguation of the inbound prefix.
+    expect(instructions).toContain("[sent by <agent-id> in @<team>]");
+    expect(instructions).toContain("WHO");
+    expect(instructions).toContain("WHERE");
+    // The block lives inside the <ittybitty> wrapper.
+    expect(instructions).toContain("<ittybitty>");
+    expect(instructions).toContain("</ittybitty>");
+    const teamsIdx = instructions.indexOf("## Teams");
+    const closeIdx = instructions.lastIndexOf("</ittybitty>");
+    expect(teamsIdx).toBeGreaterThan(-1);
+    expect(teamsIdx).toBeLessThan(closeIdx);
+  });
+
+  test("generateInstructions names ALL teams an agent belongs to", async () => {
+    await createTeam("backend", "@system", 100);
+    await createTeam("infra", "@system", 100);
+    await addMember("backend", "agent-multi");
+    await addMember("infra", "agent-multi");
+
+    const cwd = "/Users/me/project/.ittybitty/agents/agent-multi/repo";
+    const ctx = detectRole(cwd, { id: "agent-multi", manager: "agent-mgr", worker: true });
+    const instructions = await generateInstructions(ctx);
+
+    expect(instructions).toContain("## Teams");
+    expect(instructions).toContain("@backend");
+    expect(instructions).toContain("@infra");
+  });
+
+  test("generateInstructions for an agent in NO team does NOT include a ## Teams section", async () => {
+    await createTeam("backend", "@system", 100);
+    await addMember("backend", "agent-someoneelse");
+
+    const cwd = "/Users/me/project/.ittybitty/agents/agent-loner/repo";
+    const ctx = detectRole(cwd, { id: "agent-loner", manager: "agent-mgr", worker: true });
+    const instructions = await generateInstructions(ctx);
+
+    expect(instructions).not.toContain("## Teams");
+    // Worker instructions still render normally (no behavior change).
+    expect(instructions).toContain("Worker Agent");
+  });
+
+  test("team block appears on the markdownBody path (the real agent path)", async () => {
+    // Materialize an agent-type with a markdown body — this is the path real
+    // agents hit (generateInstructions wraps the body in <ittybitty>).
+    await Bun.write(
+      join(typesDir, "_all.md"),
+      "---\nname: _all\nspawnable: false\n---\nALL_LAYER_MARKER",
+    );
+    await Bun.write(
+      join(typesDir, "_non_coordinator.md"),
+      "---\nname: _non_coordinator\nspawnable: false\n---\nNON_COORDINATOR_LAYER_MARKER",
+    );
+    await Bun.write(
+      join(typesDir, "researcher.md"),
+      "---\nname: researcher\ndescription: Researches\n---\nRESEARCHER_BODY_MARKER for {{agentId}}",
+    );
+
+    await createTeam("backend", "@system", 100);
+    await addMember("backend", "agent-md1");
+
+    const cwd = "/Users/me/project/.ittybitty/agents/agent-md1/repo";
+    const ctx = detectRole(cwd, { id: "agent-md1", manager: "agent-mgr", agentType: "researcher" });
+    const instructions = await generateInstructions(ctx);
+
+    // The markdownBody content rendered…
+    expect(instructions).toContain("RESEARCHER_BODY_MARKER for agent-md1");
+    expect(instructions).toContain("ALL_LAYER_MARKER");
+    // …AND the team block was spliced in, inside the wrapper.
+    expect(instructions).toContain("## Teams");
+    expect(instructions).toContain("ib send @backend");
+    expect(instructions).toContain("ib roster @backend");
+    const teamsIdx = instructions.indexOf("## Teams");
+    const closeIdx = instructions.lastIndexOf("</ittybitty>");
+    expect(teamsIdx).toBeLessThan(closeIdx);
+  });
+
+  test("@system coordinator gets no team block (its id never matches a stored bare agent id)", async () => {
+    // Even if a team somehow listed a bare agent, @system's id is "@system" and
+    // won't match — confirm no injection.
+    await createTeam("backend", "@system", 100);
+    await addMember("backend", "agent-x");
+    const block = await teamAwarenessBlock("@system");
+    expect(block).toBe("");
   });
 });
 

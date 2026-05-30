@@ -54,6 +54,7 @@ import { getTmuxWidthForAgent } from "./tui/widths";
 import { buildPerRepoCoordinatorSettings, checkCoordinatorExists, getCoordinatorAgentId, getCoordinatorHome } from "./coordinator";
 import { loadAgentType, agentTypeExists } from "./agent-types";
 import type { AgentType } from "./agent-types";
+import { resolveCli } from "./agent-cli";
 import {
   buildHooksBlock,
   COORDINATOR_INTERCEPT_MATCHER,
@@ -3195,6 +3196,13 @@ export async function newAgent(
   if (!isValidModel(model)) {
     return { ok: false, exitCode: 1, stdout: "", stderr: `Invalid model name: ${model}` };
   }
+
+  // Resolve which CLI this model implies (SPEC-CODEX-MODEL.md §5.1, Phase 0).
+  // Phase 0 only computes the value so it is available at the model-precedence
+  // seam; it does NOT yet branch the spawn path — the generated start.sh below
+  // still launches `claude` unconditionally, so the claude launch is unchanged.
+  // Later phases (3+) will branch start.sh assembly on `agentCli`.
+  const agentCli = resolveCli(model);
 
   // 7.1. Permissions are assembled in three layers (SPEC §2.3):
   //   1. `_all.md` frontmatter — applied to every spawned agent

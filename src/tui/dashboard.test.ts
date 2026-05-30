@@ -2537,8 +2537,13 @@ describe("AgentTreeComponent scroll indicators", () => {
       makeFlatAgent(makeAgent(`agent-${i}`, "/repos/test"))
     );
     tree.setFlatList(flatList);
-    // Override scrollOffset (private) via type assertion for testing
+    // Override scrollOffset (private) via type assertion for testing.
+    // §17.1: the tree now STARTS in no-selection. These scroll tests set
+    // selectedIndex directly and then call moveSelection, so they need a real
+    // selection (hasSelection) for moveSelection to advance from the set index
+    // rather than treat the first call as the no-selection bootstrap.
     (tree as any).scrollOffset = scrollOffset;
+    (tree as any).hasSelection = true;
     return tree;
   }
 

@@ -138,6 +138,16 @@ export class AgentTreeComponent implements Component {
   maxHeight = MAX_TREE_HEIGHT;
   private scrollOffset = 0;
   private selectedId: string | null = null;
+  /**
+   * Whether the Agents panel currently has a selected row (§17.1). The panel
+   * STARTS in no-selection and only enters the selected state via j/k
+   * (moveSelection), shift+j/k (moveToRepo), selectAgentById (the @-jump), or
+   * selectByRepoPath. selectedIndex is kept as a non-negative value for the
+   * scroll math even when nothing is selected; hasSelection is the single
+   * source of truth for "is anything selected". When false, `selection`
+   * returns null and no row renders in reverse video.
+   */
+  private hasSelection = false;
   questionAgentIds: Set<string> = new Set();
   healthReports: Map<string, RepoHealthReport> = new Map();
   suppressSelection = false;
@@ -149,12 +159,20 @@ export class AgentTreeComponent implements Component {
   setFlatList(list: FlatEntry[]) {
     const wasEmpty = this._flatList.length === 0;
     this._flatList = list;
+    // §17.1: setFlatList must NOT silently (re-)assert a selection. On first
+    // populate (and any repopulate) the panel STAYS in whatever selection state
+    // it was already in. Repopulating while in no-selection keeps it in
+    // no-selection; the user must press j/k or trigger an @-jump to select.
     if (wasEmpty && list.length > 0) {
-      this.selectedIndex = 0;
       this.scrollOffset = 0;
-      this.selectedId = null;
+      // Keep selectedIndex at a valid value for the scroll math, but do not
+      // flip hasSelection on — startup begins in no-selection.
+      this.selectedIndex = 0;
     }
-    this.resolveSelection();
+    if (this.hasSelection) {
+      // Only re-anchor a real selection to its row after the list changed.
+      this.resolveSelection();
+    }
     // Guard: if maxHeight hasn't been set yet (still default 1 from sidebar),
     // ensureSelectedVisible may have computed a bogus scrollOffset. Reset it.
     if (wasEmpty && list.length > 0) {
@@ -170,6 +188,9 @@ export class AgentTreeComponent implements Component {
 
   /** Discriminated union selection — the canonical way to query what is selected */
   get selection(): Selection {
+    // §17.1: no-selection state — nothing is selected until j/k, shift+j/k, or
+    // an @-jump sets hasSelection.
+    if (!this.hasSelection) return null;
     const visible = this.visibleList;
     if (this.selectedIndex >= 0 && this.selectedIndex < visible.length) {
       const item = visible[this.selectedIndex]!;
@@ -199,36 +220,73 @@ export class AgentTreeComponent implements Component {
     return this.selection?.kind === "system-coordinator";
   }
 
-  /** Select agent by ID. Returns true if found. */
+  /** Select agent by ID. Returns true if found. Force-selects (§17.1/§17.3). */
   selectAgentById(agentId: string): boolean {
     const visible = this.visibleList;
     const idx = visible.findIndex((f) => f.kind === "agent" && f.agent.id === agentId);
     if (idx !== -1) {
       this.selectedIndex = idx;
       this.selectedId = agentId;
+      this.hasSelection = true;
       this.ensureSelectedVisible();
       return true;
     }
     return false;
   }
 
-  /** Select repo header by repoPath. Returns true if found. */
+  /** Select repo header by repoPath. Returns true if found. Force-selects (§17.1). */
   selectByRepoPath(repoPath: string): boolean {
     const visible = this.visibleList;
     const idx = visible.findIndex((f) => f.kind === "repo-header" && f.repoPath === repoPath);
     if (idx !== -1) {
       this.selectedIndex = idx;
       this.selectedId = `repopath:${repoPath}`;
+      this.hasSelection = true;
       this.ensureSelectedVisible();
       return true;
     }
     return false;
   }
 
+  /**
+   * Return the tree to the no-selection state (§17.1): `selection` becomes null
+   * and no row renders in reverse video. selectedIndex/scrollOffset are kept as
+   * valid values for the render math; only hasSelection (and selectedId) clear.
+   */
+  deselect(): void {
+    this.hasSelection = false;
+    this.selectedId = null;
+  }
+
+  /**
+   * Select the first visible row (index 0), entering the selected state.
+   * Restores the old `ib watch` startup behavior (row 0 auto-selected on first
+   * populate, any kind — agent, repo-header, or system-coordinator). Used by the
+   * dashboard's one-time startup auto-select (§17.1, user-confirmed). No-op on an
+   * empty list.
+   */
+  selectFirstRow(): void {
+    if (this.visibleList.length === 0) return;
+    this.selectedIndex = 0;
+    this.hasSelection = true;
+    this.updateSelectedId();
+    this.ensureSelectedVisible();
+  }
+
   moveSelection(delta: number) {
     const visible = this.visibleList;
     if (visible.length === 0) return;
     const len = visible.length;
+    // §17.1: from no-selection, j (delta>0) selects the FIRST visible row and
+    // k (delta<0) the LAST, then enters the selected state. Subsequent moves
+    // use the existing wrap-around behavior.
+    if (!this.hasSelection) {
+      this.hasSelection = true;
+      this.selectedIndex = delta < 0 ? len - 1 : 0;
+      this.updateSelectedId();
+      this.ensureSelectedVisible();
+      return;
+    }
     this.selectedIndex = ((this.selectedIndex + delta) % len + len) % len;
     this.updateSelectedId();
     this.ensureSelectedVisible();
@@ -254,8 +312,22 @@ export class AgentTreeComponent implements Component {
     const visible = this.visibleList;
     if (visible.length === 0) return;
 
+    // §17.1: from no-selection, shift+j lands on the FIRST anchor's landing row
+    // and shift+k on the LAST anchor's landing row (the anchor-granularity
+    // analogue of j/k's first/last-row rule). We enter the selected state and
+    // seed selectedIndex so the existing cycle logic below advances to the
+    // intended anchor: for delta=+1 seed at the end (so +1 wraps to the first
+    // anchor); for delta=-1 seed at the start (so -1 wraps to the last anchor).
+    // We deliberately route through the agent-group anchor path (not the
+    // repo-header-cycle path) so the landing matches j/k's row-granularity rule.
+    const fromNoSelection = !this.hasSelection;
+    if (fromNoSelection) {
+      this.hasSelection = true;
+      this.selectedIndex = delta === 1 ? visible.length - 1 : 0;
+    }
+
     const current = visible[this.selectedIndex];
-    const isRepoHeader = current?.kind === "repo-header";
+    const isRepoHeader = !fromNoSelection && current?.kind === "repo-header";
 
     if (isRepoHeader) {
       // Original behavior: cycle through repo headers only.
@@ -423,6 +495,10 @@ export class AgentTreeComponent implements Component {
     const lines: string[] = [];
     let start = this.scrollOffset;
 
+    // §17.1: no row renders in reverse video unless the panel actually has a
+    // selection. suppressSelection (focus-driven dimming) still applies on top.
+    const selectionActive = this.hasSelection && !this.suppressSelection;
+
     // If only 1 hidden above, absorb it: show that row instead of a "▲ 1 more" indicator.
     if (start === 1) start = 0;
 
@@ -467,11 +543,11 @@ export class AgentTreeComponent implements Component {
       if (item.kind === "system-coordinator") {
         lines.push(formatCoordinatorRow(
           item.state, item.age,
-          i === this.selectedIndex && !this.suppressSelection,
+          selectionActive && i === this.selectedIndex,
           width, maxNameWidth, stateColWidth,
         ));
       } else if (item.kind === "repo-header") {
-        const selected = i === this.selectedIndex && !this.suppressSelection;
+        const selected = selectionActive && i === this.selectedIndex;
         const triangle = item.hasAgents ? "▾" : "▸";
         // Append health indicator based on highest severity
         let healthIndicator = "";
@@ -490,7 +566,7 @@ export class AgentTreeComponent implements Component {
         }
       } else {
         const hasQ = this.questionAgentIds.has(item.agent.id);
-        lines.push(formatAgentRow(item.agent, item.connector, i === this.selectedIndex && !this.suppressSelection, width, maxNameWidth, stateColWidth, hasQ));
+        lines.push(formatAgentRow(item.agent, item.connector, selectionActive && i === this.selectedIndex, width, maxNameWidth, stateColWidth, hasQ));
       }
     }
 

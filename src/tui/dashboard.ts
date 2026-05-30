@@ -546,6 +546,16 @@ export class DashboardComponent implements Component {
   private skipWidthReports = 0;
   /** When true, resize all agent tmux sessions on next onUpdate (after layout restore) */
   private pendingTmuxResize = false;
+  /**
+   * One-time guard for the startup auto-select (§17.1, user-confirmed startup
+   * behavior). On the FIRST populate where the flat list is non-empty, the
+   * dashboard selects the first row (the old `ib watch` behavior). After it
+   * fires once this stays true forever, so later refreshes never re-assert a
+   * selection, and a panel focus toggle (Agents<->Teams) — which is NOT a
+   * populate and does not call onUpdate — never trips it. The no-selection
+   * state (§17.1) remains reachable via the panel toggle / @-jump.
+   */
+  private hasAutoSelectedFirstAgent = false;
   private _questionsFocused = false;
   /** Cache of which agents have an attached tmux client */
   private _clientAttached: Map<string, boolean> = new Map();
@@ -1083,6 +1093,15 @@ export class DashboardComponent implements Component {
 
   onUpdate(agents: Agent[], flatList: FlatEntry[], questions: PendingQuestion[], orphanedTmuxSessions: string[] = []) {
     this.agentTree.setFlatList(flatList);
+    // §17.1 (user-confirmed startup behavior): on the VERY FIRST populate with a
+    // non-empty list, auto-select the first row — the old `ib watch` default.
+    // One-time guard: after it fires, later refreshes preserve the user's
+    // selection (or no-selection), and a panel focus toggle (Agents<->Teams) —
+    // which is not a populate — never auto-selects.
+    if (!this.hasAutoSelectedFirstAgent && flatList.length > 0) {
+      this.agentTree.selectFirstRow();
+      this.hasAutoSelectedFirstAgent = true;
+    }
     this.systemDashboard.flatList = flatList;
     this.rightPane.questions = questions;
     this.rightPane.allAgents = flatList;

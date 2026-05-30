@@ -1266,6 +1266,21 @@ describe("isApiError", () => {
     expect(isApiError(output)).toBe(false);
   });
 
+  test("detects retry-countdown line after API Error scrolls out", () => {
+    // Real-world capture: original ⎿ API Error line has scrolled out of the
+    // last-15 window; only the watchdog nudge + retry countdown remain.
+    const output = [
+      "❯ [sent by watchdog]: please retry",
+      "  ⎿  Retrying in 35s · attempt 9/10",
+    ].join("\n");
+    expect(isApiError(output)).toBe(true);
+  });
+
+  test("detects retry-countdown with single-digit attempt", () => {
+    const output = "  ⎿  Retrying in 5s · attempt 1/10";
+    expect(isApiError(output)).toBe(true);
+  });
+
   test("returns false on empty input", () => {
     expect(isApiError("")).toBe(false);
   });

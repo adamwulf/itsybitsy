@@ -79,6 +79,17 @@ function makeMockCtx(overrides?: {
       selectAgentById: () => true,
       selectByRepoPath: () => true,
     },
+    // §17 ActionCtx additions: a focus handle, a teams-tree selection handle,
+    // and a teamSend ctx field. Defaults: focus on agent-tree, no teams
+    // selection, teamSend stub that returns OK.
+    focusManager: {
+      current: () => "agent-tree",
+      setFocus: () => {},
+    },
+    teamsTree: {
+      selection: null,
+    },
+    teamSend: async () => ({ ok: true, stdout: "", stderr: "", exitCode: 0 }),
     rightPane: {
       mode: overrides?.mode ?? "AGENT LOG",
       repoCoordinatorAgent: null,
@@ -98,6 +109,10 @@ function makeMockCtx(overrides?: {
       scrollUp: () => {},
       scrollDown: () => {},
       resetForAgent: () => {},
+    },
+    channelPane: {
+      scrollUp: () => {},
+      scrollDown: () => {},
     },
     systemDashboard: {
       scrollUp: () => {},

@@ -150,6 +150,38 @@ export interface ActionCtx {
     selectAgentById(id: string): boolean;
     selectByRepoPath(repoPath: string): boolean;
   };
+  /**
+   * §17.3a / §17.3: handlers that need to gate on the FOCUSED PANEL (the
+   * team-send branch, the `@`-jump's "always force-select in Agents" rule) read
+   * focus through this handle. Structurally satisfied by the dashboard's
+   * `FocusManager`. The `setFocus`/`current` surface is intentionally narrow —
+   * the handlers only need to know "is the Teams panel focused?" and how to
+   * jump to the Agents panel.
+   */
+  focusManager: {
+    current(): import("./focus").FocusTarget;
+    setFocus(target: import("./focus").FocusTarget): void;
+  };
+  /**
+   * §17.3 / §17.3a: the Teams-tree handle. Lets `handleSend` read the team
+   * anchor (`{ kind: "team", teamName }`) selected in the Teams panel, since
+   * the team-target dialog and `teamSend` fan-out only fire on that selection.
+   */
+  teamsTree: {
+    selection: import("./selection").Selection;
+  };
+  /**
+   * §16.4 fan-out from the dashboard's `s`-key when a team is selected. We
+   * accept `teamSend` as a function-typed ctx field so tests can inject a
+   * stub without dragging in `ib-commands.ts`'s real I/O. The dashboard wires
+   * the real `teamSend`.
+   */
+  teamSend: (
+    teamName: string,
+    members: Agent[],
+    message: string,
+    opts: { fromAgent?: string } | undefined,
+  ) => Promise<IbCommandResult>;
   rightPane: {
     mode: PaneMode;
     repoCoordinatorAgent: Agent | null;
@@ -163,6 +195,12 @@ export interface ActionCtx {
   };
   tmuxPane: { scrollUp(n?: number): void; scrollDown(n?: number): void };
   coordinatorPane: { scrollUp(n?: number): void; scrollDown(n?: number): void; resetForAgent(): void };
+  /**
+   * §17.4: the main-area channel chat box. The shared scroll keys (`;`/`l`)
+   * scroll it alongside tmuxPane/coordinatorPane/right-pane so a team-channel
+   * selection scrolls naturally.
+   */
+  channelPane: { scrollUp(n?: number): void; scrollDown(n?: number): void };
   systemDashboard: { scrollUp(n?: number): void; scrollDown(n?: number): void };
   splitPane: { getLeftWidth(): number; setLeftWidth(w: number): void };
   tui: { requestRender(): void } | null;
@@ -565,6 +603,17 @@ export function handleMerge(ctx: ActionCtx) {
 }
 
 export function handleSend(ctx: ActionCtx) {
+  // §17.3a: team-target branch — when the Teams panel is focused AND a team
+  // anchor is selected, open a `Send message to @<team>:` dialog and route
+  // through `teamSend` (§16.4 fan-out). A team MEMBER selection (kind:"agent")
+  // is INTENTIONALLY NOT routed here — it falls through to the point-to-point
+  // agent-send path below (§17.3 child-agent-indistinguishable).
+  const teamsFocused = ctx.focusManager.current() === "teams-tree";
+  const teamSel = teamsFocused ? ctx.teamsTree.selection : null;
+  if (teamSel?.kind === "team") {
+    handleSendToTeam(ctx, teamSel.teamName);
+    return;
+  }
   // System coordinator: send via tmux send-keys with sanitizeTmuxInput
   if (ctx.agentTree.isSystemCoordinatorSelected) {
     handleSendToCoordinator(ctx);
@@ -580,7 +629,12 @@ export function handleSend(ctx: ActionCtx) {
     handleSendToRepoCoordinator(ctx, repoCoord);
     return;
   }
-  const agent = ctx.agentTree.selectedAgent;
+  // §17.3 child-agent-indistinguishable: a team-member selection from the
+  // Teams panel is `{ kind: "agent" }` — let it fall through to the same
+  // point-to-point send path as an Agents-panel selection. The dashboard's
+  // focus-aware selection-sync has already populated `selectedAgent` from the
+  // Teams-tree selection when teams-tree is focused.
+  const agent = teamSel?.kind === "agent" ? teamSel.agent : ctx.agentTree.selectedAgent;
   if (!agent) return;
   const dialog: Extract<NonNullable<DialogState>, { type: "textarea" }> = {
     type: "textarea",
@@ -628,6 +682,40 @@ export function handleSend(ctx: ActionCtx) {
     },
   };
   ctx.showDialog(dialog);
+}
+
+/**
+ * §17.3a: open a `Send message to @<team>:` dialog. On submit, resolve the
+ * team's members from the dashboard's `lastAgents` (the same source the
+ * Teams tree already uses) and call `ctx.teamSend` (the fan-out path, §16.4).
+ * The `sendAll`/`Ctrl-A` toggle is intentionally omitted — a team send already
+ * fans out, so the all-agents broadcast is a separate, repo-wide concern.
+ *
+ * fromAgent is left undefined: a `s`-key send from the dashboard is a CLI/
+ * human send (resolveTeamSenderId in `teamSend` will tag it with `user.name`
+ * when configured). This matches `ib send @<team>` from a non-agent shell.
+ */
+function handleSendToTeam(ctx: ActionCtx, teamName: string) {
+  ctx.showDialog({
+    type: "textarea",
+    prompt: `Send message to @${teamName}:`,
+    buffer: new TextBuffer(),
+    focusedButton: "text",
+    onSubmit: (message: string) => {
+      ctx.closeDialog();
+      const trimmed = message.trim();
+      if (!trimmed) { ctx.setNotice("Send cancelled"); return; }
+      // Resolve member ids → live Agent records from the watcher's last batch
+      // (the same source that fed flattenTeamsTree, so the set is consistent
+      // with what the user just saw in the Teams panel). `teamSend` re-prunes
+      // dead members under its own lock — this is a hint set, not authoritative.
+      const live = ctx.watcher?.lastAgents ?? [];
+      ctx.executeAndRefresh(async () => {
+        const result = await ctx.teamSend(teamName, live, trimmed, undefined);
+        ctx.setNotice(result.ok ? (result.stdout || `Sent to @${teamName}`) : `Send failed: ${result.stderr || result.stdout}`);
+      });
+    },
+  });
 }
 
 function handleSendToCoordinator(ctx: ActionCtx) {
@@ -885,6 +973,11 @@ export function handleFuzzyAgent(ctx: ActionCtx) {
     onSelect: (originalIndex: number) => {
       ctx.closeDialog();
       const selected = entries[originalIndex]!;
+      // §17.3: the @-jump ALWAYS lands in the Agents panel — even when the
+      // user is currently focused on the Teams panel and the agent they jump
+      // to happens to be a team member. This is the ONLY thing that force-
+      // selects in the Agents tree from no-selection.
+      ctx.focusManager.setFocus("agent-tree");
       if (selected.kind === "repo") {
         ctx.agentTree.selectByRepoPath(selected.entry.repoPath);
         ctx.syncSelectedAgent();
@@ -903,6 +996,7 @@ export function handleFuzzyAgent(ctx: ActionCtx) {
 export function handleScrollUp(ctx: ActionCtx) {
   ctx.tmuxPane.scrollUp(SCROLL_STEP);
   ctx.coordinatorPane.scrollUp(SCROLL_STEP);
+  ctx.channelPane.scrollUp(SCROLL_STEP);
   ctx.rightPane.scrollOffset += SCROLL_STEP;
   ctx.rightPane.repoCoordinatorScrollBack += SCROLL_STEP;
   ctx.systemDashboard.scrollUp(SCROLL_STEP);
@@ -918,6 +1012,7 @@ export function handleScrollUp(ctx: ActionCtx) {
 export function handleScrollDown(ctx: ActionCtx) {
   ctx.tmuxPane.scrollDown(SCROLL_STEP);
   ctx.coordinatorPane.scrollDown(SCROLL_STEP);
+  ctx.channelPane.scrollDown(SCROLL_STEP);
   ctx.rightPane.scrollOffset = Math.max(0, ctx.rightPane.scrollOffset - SCROLL_STEP);
   ctx.rightPane.repoCoordinatorScrollBack = Math.max(0, ctx.rightPane.repoCoordinatorScrollBack - SCROLL_STEP);
   ctx.systemDashboard.scrollDown(SCROLL_STEP);

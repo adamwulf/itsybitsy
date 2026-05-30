@@ -21,7 +21,7 @@ When a new agent is created (`ib new-agent "prompt"`):
 
 3. **Yolo escalation prevention**: A `--yolo` child cannot be spawned by a non-yolo parent. This prevents permission escalation where a constrained agent spawns an unconstrained one. The parent's yolo status is checked via `meta.json` or `start.sh`.
 
-4. **Configuration**: Config is loaded from `~/.itsybitsy/config.json` (user-wide). The agent type is resolved by: `--type` flag > default `"manager"`. The type definition is loaded from `~/.itsybitsy/agent-types/<name>.md` — the `.md` file on disk is the sole source of truth (no hardcoded fallback). On first run, `~/.itsybitsy/agent-types/` is auto-populated with embedded default templates (see §2.7). The model is determined by: `--model` flag > type definition `model` > config `model` (or `coordinator.model` for coordinators) > `"opus"` (default).
+4. **Configuration**: Config is loaded from `~/.itsybitsy/config.json` (user-wide). The agent type is resolved by: `--type` flag > default `"manager"`. The type definition is loaded from `~/.itsybitsy/agent-types/<name>.md` — the `.md` file on disk is the sole source of truth (no hardcoded fallback). On first run, `~/.itsybitsy/agent-types/` is auto-populated with embedded default templates (see §2.7). The model is determined by a most-specific-wins precedence chain across the agent-type layer files (same layer set and gating as the permissions merge, §2.3): `--model` flag > `<type>.md` `model` > `_non_coordinator.md` `model` (non-coordinator agents only) > `_all.md` `model` > config `model` (or `coordinator.model` for coordinators) > `"opus"` (default). The agent-type layers all override the user's config `model`; config `model` is the final fallback before `"opus"`. A blank `model:` value in any layer (parsed to `undefined`) is skipped, so a more-specific file declaring `model:` with no value does NOT clobber a real model set by a less-specific file.
 
 5. **Max agents check**: The number of active agents (directories with `meta.json` in `.ittybitty/agents/`) must not exceed the `maxAgents` config value (default: 10).
 
@@ -859,7 +859,7 @@ All keys are read from `~/.itsybitsy/config.json`. If a key is absent or has an 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `maxAgents` | number | `10` | Maximum number of concurrently active agents. Checked at spawn time in `newAgent()` — the count of agent directories that contain a `meta.json` must not exceed this value. |
-| `model` | string | `"opus"` | Default Claude model for new agents. Resolution order at spawn time: `--model` CLI flag → config `model` → `"opus"`. |
+| `model` | string | `"opus"` | Default Claude model for new agents — the final fallback before `"opus"`. Full resolution order at spawn time (most-specific wins): `--model` CLI flag → `<type>.md` `model` → `_non_coordinator.md` `model` (non-coordinator agents only) → `_all.md` `model` → config `model` → `"opus"`. The agent-type layer files all override this config key; a blank `model:` in a layer is skipped (see §2 item 4). |
 | `fps` | number | `10` | TUI screen refresh rate (frames per second) for `ib watch`. |
 | `createPullRequests` | boolean | `false` | When `true`, agents are instructed (via their prompt) to create a pull request upon completing their work. |
 | `allowAgentQuestions` | boolean | `true` | When `false`, the `askQuestion` (`ib ask`) command returns an error, blocking top-level manager agents from posing questions to the user. (`acknowledgeQuestion` is the user-facing command to mark a question answered and does not check this flag.) |
@@ -868,7 +868,7 @@ All keys are read from `~/.itsybitsy/config.json`. If a key is absent or has an 
 | `hooks.injectStatus` | boolean | `true` | When `false`, the `inject-status` UserPromptSubmit/PostToolUse hook exits immediately without injecting agent status into the Claude context. |
 | `hooks.statusVisible` | boolean | `true` | When `true` (and `hooks.injectStatus` is also `true`), the status injection hook also emits a `systemMessage` field so the injected summary appears visibly to the user in the Claude UI. When `false`, status is injected as silent `additionalContext` only. |
 | `hooks.injectTimestamp` | boolean | `false` | When `true`, the `inject-timestamp` PostToolUse hook (installed in regular agents only) injects the current wall-clock time into the agent's context after every tool call. When `false` (the default), the hook exits immediately without injecting. See §6.6.1. |
-| `coordinator.model` | string | `"opus"` | Default model for coordinator agents. Resolution: `--model` > type `model` > `coordinator.model` > `"opus"`. |
+| `coordinator.model` | string | `"opus"` | Default model for coordinator agents — the final fallback before `"opus"` on the coordinator path. Resolution (most-specific wins): `--model` > `<type>.md` `model` (i.e. `coordinator.md`) > `_all.md` `model` > `coordinator.model` > `"opus"`. The `_non_coordinator.md` layer is NOT consulted for coordinators. |
 
 **Deprecated keys**: All permission list keys have been moved out of `config.json` into agent type layer files:
 

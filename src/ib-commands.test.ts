@@ -3089,6 +3089,26 @@ describe("newAgent (native)", () => {
     await Bun.write(path, body);
   }
 
+  /**
+   * Write a minimal agent-type layer/type file with an optional `model:` field.
+   * `modelLine` is inserted verbatim into the frontmatter, so callers can pass
+   * "model: claude-opus-4-7" (real value), "model:" (blank → inherit), or ""
+   * (omit the key entirely). `spawnable` defaults to true; layer files
+   * (`_all`, `_non_coordinator`, `system`) must pass `spawnable: false`.
+   */
+  async function writeLayerModel(
+    name: string,
+    modelLine: string,
+    opts?: { spawnable?: boolean; canSpawnChildren?: boolean },
+  ) {
+    const path = join(process.env.HOME!, ".itsybitsy", "agent-types", `${name}.md`);
+    const spawnableLine = opts?.spawnable === false ? "spawnable: false\n" : "";
+    const canSpawnLine = opts?.canSpawnChildren ? "canSpawnChildren: true\n" : "";
+    const fmModel = modelLine ? `${modelLine}\n` : "";
+    const body = `---\nname: ${name}\ndescription: Test ${name} layer\n${spawnableLine}${canSpawnLine}${fmModel}---\n`;
+    await Bun.write(path, body);
+  }
+
   /** Wrapper that always passes _cwd to prevent auto-detect manager from our own worktree */
   async function callNewAgent(prompt: string, opts?: import("./ib-commands").NewAgentOptions) {
     return newAgent(tempDir, prompt, { ...opts, _cwd: tempDir });
@@ -3484,6 +3504,127 @@ describe("newAgent (native)", () => {
     await callNewAgent("task", { name: "test-default-model" });
 
     const meta = await Bun.file(join(agentsDir, "test-default-model", "meta.json")).json();
+    expect(meta.model).toBe("opus");
+  });
+
+  // ── model precedence across agent-type layer files ──────────────────────────
+  // Precedence (most-specific wins):
+  //   --model > <type>.md > _non_coordinator.md > _all.md > config.model > 'opus'
+
+  test("model precedence C1: model in _all.md is used when nothing more specific declares one", async () => {
+    // config.model is "sonnet" (from beforeEach) — the _all.md layer overrides it.
+    await writeLayerModel("_all", "model: claude-opus-4-7", { spawnable: false });
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    await callNewAgent("task", { name: "test-all-model" });
+
+    const meta = await Bun.file(join(agentsDir, "test-all-model", "meta.json")).json();
+    expect(meta.model).toBe("claude-opus-4-7");
+
+    const startSh = await Bun.file(join(agentsDir, "test-all-model", "start.sh")).text();
+    expect(startSh).toContain("--model claude-opus-4-7");
+  });
+
+  test("model precedence C2: <type>.md model overrides _all.md model", async () => {
+    await writeLayerModel("_all", "model: claude-opus-4-7", { spawnable: false });
+    // worker.md is the most-specific layer for a worker agent.
+    await writeLayerModel("worker", "model: claude-sonnet-4-6");
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    await callNewAgent("task", { name: "test-type-overrides-all", type: "worker" });
+
+    const meta = await Bun.file(join(agentsDir, "test-type-overrides-all", "meta.json")).json();
+    expect(meta.model).toBe("claude-sonnet-4-6");
+  });
+
+  test("model precedence C3a: _non_coordinator.md model overrides _all.md for a non-coordinator agent", async () => {
+    await writeLayerModel("_all", "model: claude-opus-4-7", { spawnable: false });
+    await writeLayerModel("_non_coordinator", "model: claude-sonnet-4-6", { spawnable: false });
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    await callNewAgent("task", { name: "test-noncoord-overrides-all", type: "worker" });
+
+    const meta = await Bun.file(join(agentsDir, "test-noncoord-overrides-all", "meta.json")).json();
+    expect(meta.model).toBe("claude-sonnet-4-6");
+  });
+
+  test("model precedence C3b: _non_coordinator.md model is ignored for a coordinator", async () => {
+    // Coordinators never read _non_coordinator.md — they should fall through to
+    // _all.md's model. Set _non_coordinator to a value that must NOT win.
+    const coordRepoDir = await mkdtemp(join(tmpdir(), "ib-coord-model-"));
+    const coordRepo = join(coordRepoDir, "myrepo");
+    await mkdir(join(coordRepo, ".ittybitty", "agents"), { recursive: true });
+    await Bun.write(join(coordRepo, ".ittybitty", "repo-id"), "coordmodel\n");
+
+    const userConfigPath = join(coordRepo, "config.json");
+    setUserConfigPath(userConfigPath);
+    // No coordinator.model in config so _all.md is the deciding layer.
+    await Bun.write(userConfigPath, JSON.stringify({}, null, 2));
+
+    await writeLayerModel("_all", "model: claude-opus-4-7", { spawnable: false });
+    await writeLayerModel("_non_coordinator", "model: claude-sonnet-4-6", { spawnable: false });
+
+    lifecycleSpawnCtx.set((cmd: string[], _opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
+      const cmdStr = cmd.join(" ");
+      if (cmdStr.includes("--git-common-dir")) return makeSpawnResult(".git", 0);
+      if (cmdStr.includes("--show-toplevel")) return makeSpawnResult(coordRepo, 0);
+      if (cmdStr.includes("--git-dir")) return makeSpawnResult(".git", 0);
+      return makeSpawnResult("", 0);
+    });
+
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await newAgent(coordRepo, "start", { type: "coordinator", _cwd: coordRepo });
+    expect(result.ok).toBe(true);
+
+    const coordId = result.stdout.trim();
+    const meta = await Bun.file(join(coordRepo, ".ittybitty", "agents", coordId, "meta.json")).json();
+    // _all.md wins; _non_coordinator.md ignored for coordinators.
+    expect(meta.model).toBe("claude-opus-4-7");
+
+    await rm(coordRepoDir, { recursive: true, force: true });
+  });
+
+  test("model precedence C4: blank model in a more-specific file does NOT clobber a real model in a less-specific file", async () => {
+    // _all.md sets a real model; worker.md declares `model:` blank (= inherit).
+    // The blank worker model must not override _all.md's real value.
+    await writeLayerModel("_all", "model: claude-opus-4-7", { spawnable: false });
+    await writeLayerModel("worker", "model:");
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    await callNewAgent("task", { name: "test-blank-inherits", type: "worker" });
+
+    const meta = await Bun.file(join(agentsDir, "test-blank-inherits", "meta.json")).json();
+    expect(meta.model).toBe("claude-opus-4-7");
+  });
+
+  test("model precedence C5: --model flag wins over all layer files", async () => {
+    await writeLayerModel("_all", "model: claude-opus-4-7", { spawnable: false });
+    await writeLayerModel("worker", "model: claude-sonnet-4-6");
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    await callNewAgent("task", { name: "test-flag-wins", type: "worker", model: "haiku" });
+
+    const meta = await Bun.file(join(agentsDir, "test-flag-wins", "meta.json")).json();
+    expect(meta.model).toBe("haiku");
+  });
+
+  test("model precedence C6: falls back to config.model when no layer declares a model", async () => {
+    // beforeEach wrote config.model = "sonnet". With every layer blank, the
+    // resolution falls through the layers to config.model (criterion 6).
+    await writeLayerModel("_all", "model:", { spawnable: false });
+    await writeLayerModel("_non_coordinator", "model:", { spawnable: false });
+    await writeLayerModel("worker", "model:");
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    await callNewAgent("task", { name: "test-fallback-config", type: "worker" });
+
+    const meta = await Bun.file(join(agentsDir, "test-fallback-config", "meta.json")).json();
+    expect(meta.model).toBe("sonnet");
+  });
+
+  test("model precedence C6b: falls back to 'opus' when no layer and no config declare a model", async () => {
+    await Bun.write(join(tempDir, "config.json"), JSON.stringify({}));
+    await writeLayerModel("_all", "model:", { spawnable: false });
+    await writeLayerModel("_non_coordinator", "model:", { spawnable: false });
+    await writeLayerModel("worker", "model:");
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    await callNewAgent("task", { name: "test-fallback-opus", type: "worker" });
+
+    const meta = await Bun.file(join(agentsDir, "test-fallback-opus", "meta.json")).json();
     expect(meta.model).toBe("opus");
   });
 

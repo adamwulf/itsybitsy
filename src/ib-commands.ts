@@ -52,6 +52,7 @@ import { isValidModel, isValidToolList, isValidTmuxSession, isValidSessionId, is
 import { getTmuxWidthForAgent } from "./tui/widths";
 import { buildPerRepoCoordinatorSettings, checkCoordinatorExists, getCoordinatorAgentId, getCoordinatorHome } from "./coordinator";
 import { loadAgentType, agentTypeExists } from "./agent-types";
+import type { AgentType } from "./agent-types";
 import {
   buildHooksBlock,
   COORDINATOR_INTERCEPT_MATCHER,
@@ -2560,11 +2561,57 @@ export async function newAgent(
   // Leaf agents can't spawn children (worker-like behavior)
   const isLeafAgent = !agentTypeDef.canSpawnChildren;
 
-  // 7. Model fallback: --model > type.model > config.model > 'opus'
-  //    For coordinators: --model > type.model > coordinator.model > 'opus'
+  // Load the agent-type layer files once, up front, so BOTH the model
+  // resolution (step 7) and the permissions merge (step 7.1) read from the
+  // same objects. This mirrors the permissions-layer set exactly:
+  //   - `_all.md` — applied to every spawned agent
+  //   - `_non_coordinator.md` — applied to non-coordinator agents only
+  //   - `<type>.md` (already loaded above as `agentTypeDef`) — per-type
+  // Each is loaded defensively (a missing/broken layer warns but doesn't throw,
+  // matching the legacy permissions code). `loadAgentType(...).model` is either
+  // a non-empty string or `undefined` — `parseAgentTypeFile` collapses a blank
+  // `model:` value to `undefined` (see agent-types.ts:538), so a layer that
+  // declares `model:` with no value contributes nothing to the precedence chain.
+  let allLayer: AgentType | undefined;
+  try {
+    allLayer = await loadAgentType("_all");
+  } catch (err) {
+    console.error(`Warning: failed to load _all agent type layer: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  let nonCoordLayer: AgentType | undefined;
+  if (!coordinatorMode) {
+    try {
+      nonCoordLayer = await loadAgentType("_non_coordinator");
+    } catch (err) {
+      console.error(`Warning: failed to load _non_coordinator agent type layer: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  // 7. Model precedence (most-specific wins, where 'more specific' overrides
+  //    'less specific'):
+  //      --model (CLI flag)
+  //        > <type>.md model
+  //        > _non_coordinator.md model (non-coordinator agents only)
+  //        > _all.md model
+  //        > config.model (or coordinator.model for coordinators)
+  //        > 'opus'
+  //    The agent-type layers (least→most specific: _all < _non_coordinator <
+  //    <type>) all override the user's config.model; config.model is the final
+  //    fallback before 'opus'. A blank `model:` in a more-specific layer is
+  //    `undefined` after parsing and so does NOT clobber a real value set by a
+  //    less-specific layer.
   let model = opts?.model ?? "";
-  if (!model && agentTypeDef.model) {
-    model = agentTypeDef.model;
+  if (!model) {
+    // Walk layers from most-specific to least; first non-empty wins.
+    const layerChain: Array<string | undefined> = [
+      agentTypeDef.model,
+      coordinatorMode ? undefined : nonCoordLayer?.model,
+      allLayer?.model,
+    ];
+    for (const layerModel of layerChain) {
+      if (layerModel) { model = layerModel; break; }
+    }
   }
   if (!model) {
     if (coordinatorMode) {
@@ -2582,34 +2629,18 @@ export async function newAgent(
     return { ok: false, exitCode: 1, stdout: "", stderr: `Invalid model name: ${model}` };
   }
 
-  // Permissions are assembled in three layers (SPEC §2.3):
+  // 7.1. Permissions are assembled in three layers (SPEC §2.3):
   //   1. `_all.md` frontmatter — applied to every spawned agent
   //   2. `_non_coordinator.md` frontmatter — applied to non-coordinator agents only
   //   3. `<type>.md` frontmatter — per-type permissions
   // The layers are merged (allow/deny deduplicated via Set). Config-level
   // `permissions.all.*` / `permissions.repo.*` keys have been deprecated —
   // their contents have moved into the `_all.md` and `_non_coordinator.md` files.
-  let allLayerAllow: string[] = [];
-  let allLayerDeny: string[] = [];
-  try {
-    const allLayer = await loadAgentType("_all");
-    allLayerAllow = allLayer.permissions?.allow ?? [];
-    allLayerDeny = allLayer.permissions?.deny ?? [];
-  } catch (err) {
-    console.error(`Warning: failed to load _all agent type layer: ${err instanceof Error ? err.message : String(err)}`);
-  }
-
-  let nonCoordAllow: string[] = [];
-  let nonCoordDeny: string[] = [];
-  if (!coordinatorMode) {
-    try {
-      const nonCoordLayer = await loadAgentType("_non_coordinator");
-      nonCoordAllow = nonCoordLayer.permissions?.allow ?? [];
-      nonCoordDeny = nonCoordLayer.permissions?.deny ?? [];
-    } catch (err) {
-      console.error(`Warning: failed to load _non_coordinator agent type layer: ${err instanceof Error ? err.message : String(err)}`);
-    }
-  }
+  // Reuses the layer objects loaded above for the model precedence chain.
+  const allLayerAllow = allLayer?.permissions?.allow ?? [];
+  const allLayerDeny = allLayer?.permissions?.deny ?? [];
+  const nonCoordAllow = nonCoordLayer?.permissions?.allow ?? [];
+  const nonCoordDeny = nonCoordLayer?.permissions?.deny ?? [];
 
   const typeAllow = agentTypeDef.permissions?.allow ?? [];
   const typeDeny = agentTypeDef.permissions?.deny ?? [];

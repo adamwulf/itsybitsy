@@ -2521,7 +2521,7 @@ Per the project's required review checklist, teams touch each perspective as fol
 1. **General agent functionality** — new user-tier state (`~/.itsybitsy/teams.json`); agent teardown gains a membership-pruning step. No change to how agents are spawned or to `meta.json` shape (team membership is stored centrally, not per-agent, so a coordinator restart or agent re-read does not lose it).
 2. **Hooks** — `session-start.ts` gains a team-awareness injection (§16.6). No other agent-session hook is affected; the path-check, stop, permission-denied, and intercept-task hooks are team-agnostic.
 3. **Watchdog** — **no changes required.** The watchdog never tears down agents (it only notifies a manager/spawner), so it never reaches the team-prune point; leave-notices are emitted by the `archiveAgent`/CLI teardown path instead (§16.5). Nudge timing, rate-limit recovery, and state detection are all unaffected. This corrects an earlier draft that incorrectly assigned the watchdog a leave-notice role.
-4. **`ib watch` / dashboard** — minimum viable: the info panel for a selected agent surfaces its team membership(s) ("member of: @backend"). A dedicated team-chat pane/view is explicitly **deferred to a later phase** — the registry and fan-out are usable from the CLI without it. [^needs review] The exact dashboard surface for teams is deferred.
+4. **`ib watch` / dashboard** — minimum viable: the info panel for a selected agent surfaces its team membership(s) ("member of: @backend"). A dedicated team-chat pane/view was explicitly **deferred to a later phase** — the registry and fan-out are usable from the CLI without it. That deferred dashboard work is **now fully specified in §17** (Teams panel as a focus stop, the cross-repo Teams tree, the shared team-channel chat box, and the cross-cutting/affected-files impact).
 
 ### 16.8 Affected Files and Modules
 
@@ -2536,5 +2536,182 @@ Per the project's required review checklist, teams touch each perspective as fol
 | `src/registry.ts` / repo-add path | **Hard-refuse** adding a repo whose basename/nickname collides with an existing team name (§16.1) — not a soft warning. |
 | `src/validation.ts` | New `isValidTeamName()` allowlist helper (or reuse the agent-id allowlist), used by `teamCreate` (§16.1). |
 | `src/tui/dashboard.ts` (later phase) | Surface team membership in the info panel; full team view deferred. |
+
+---
+
+## 17. Teams in the Dashboard (`ib watch`)
+
+§16 built the Teams data layer, the `ib send @<team>` fan-out, the `ib team`/`ib roster` commands, and the join/leave notices — all usable from the CLI. §16.7.4 deferred the dashboard surface. §17 specifies that deferred work: a **Teams panel** that shares the sidebar's tree region with the existing Agents tree, a cross-repo **Teams tree** grouped by team, team-aware **selection / send-target / info** behavior, and a **shared team-channel chat box** rendered in the main area — backed by a new per-team `*.channel.jsonl` persistence layer that mirrors the proven `outbox.ts` append/read discipline (§4.1.1).
+
+Like Teams itself (§16), this is a **TypeScript-only** feature with no bash reference equivalent. It builds on the dashboard architecture in §11–§13: the resizable sidebar (`SidebarComponent`, `src/tui/sidebar.ts`), the focus system (`FocusManager`/`FocusTarget`, `src/tui/focus.ts`), the discriminated `Selection` union (`src/tui/selection.ts`), the `AgentTreeComponent` (`src/tui/agent-tree.ts`), and `layout.json` persistence (`src/tui/layout.ts`). It reuses the `@`-sentinel address namespace and `teams.json` schema from §16 verbatim — the dashboard is a **reader and a sender**, never a new owner of team state.
+
+**One new persistence file pair (`<team>.channel.jsonl` + `<team>.log`) and a new send-path append are the only non-dashboard changes.** Everything else is sidebar/focus/selection/main-area wiring. The cross-cutting impact (§17.5) is therefore almost entirely in the `ib watch` perspective.
+
+### 17.1 Teams Panel as a Focus Stop (the toggle)
+
+The sidebar's tree region (the top section that `SidebarComponent.renderNormalLayout` fills with the `Agents` separator + `AgentTreeComponent`, `src/tui/sidebar.ts`) is **shared** between the existing Agents tree and a new **Teams tree**. They are **two ordered focus stops occupying the same screen region** — only the focused one renders. Agents is the default resting view (§13.6 keeps `agent-tree` as the initial focus). This realizes the settled design: the Agents panel *upgrades* into a Teams view that **replaces** it when selected, rather than adding a third always-visible sidebar section.
+
+**New `FocusTarget`.** Add `"teams-tree"` to the `FocusTarget` union (`src/tui/focus.ts`), positioned **between `"agent-tree"` and `"info"`** in `FOCUS_ORDER`:
+
+```
+agent-tree → teams-tree → info → active-agent → right-pane → repo-coordinator
+```
+
+Concretely, `FOCUS_ORDER` becomes `["agent-tree", "teams-tree", "info", "active-agent", "right-pane", "repo-coordinator"]`. Tab from Agents lands on Teams; Tab from Teams lands on Info; Shift+Tab from Info lands on Teams; Shift+Tab from Teams lands on Agents. The existing `cycle(+1/-1)` skip-set machinery already handles wrap-around and skipping — no change to `cycle()` itself is required beyond the new entry.
+
+- **Coordinator mode.** `COORDINATOR_FOCUS_ORDER` (`["agent-tree", "info", "coordinator"]`) is the restricted order used when the system coordinator is selected (§12.1.4). [^needs review] The Teams panel is **not** added to `COORDINATOR_FOCUS_ORDER` in v1 — when the system coordinator is selected the main area is the coordinator tmux at full width and there is no room for a team-channel view. Recommended default: **omit `teams-tree` from coordinator mode** (the user Tabs out of coordinator-select first, then into Teams). Flagged so it is a conscious scope line, not an omission.
+- **Skip behavior.** Unlike `repo-coordinator` (which lives in `skipTargets` by default and only participates when the right pane is in REPO mode), `teams-tree` is **always** an active focus stop in normal mode — it is never in `skipTargets`. Toggling into an empty teams registry is still valid (the Teams tree renders an empty-state line, §17.2), so there is no condition under which it should be skipped.
+
+**Independent selection — the core invariant.** Toggling focus between Agents and Teams **must not change either panel's selection.** The two panels hold **independent selection state**: the Agents tree keeps its `AgentTreeComponent` selection; the Teams tree owns its own selection (a parallel component, §17.2). `FocusManager.cycle()`/`setFocus()` only move the *focus pointer* — they never call `selectAgentById`/`moveSelection`/`moveToRepo` on either tree. This is already how focus works for every other panel; §17 only requires that the Teams toggle preserve it symmetrically.
+
+**Recommendation — a parallel `TeamsTreeComponent`, not a mode flag on `AgentTreeComponent`.** [^needs review] Two implementations were considered:
+
+1. **(Recommended) A new `src/tui/teams-tree.ts` `TeamsTreeComponent`** that reuses the `AgentTreeComponent` *pattern* (a `FlatEntry`-style flat list, `selectedIndex`, `visibleList`, a `selection` getter, `navigate` vs `navigateAnchor`, `MAX_TREE_HEIGHT`, scroll indicators) but groups by **team** instead of repo and owns its own selection state.
+2. *(Rejected)* A `mode: "agents" | "teams"` flag on the single `AgentTreeComponent`. Rejected because `AgentTreeComponent` already encodes deep repo-grouping assumptions (the `moveToRepo` anchor logic, `repo-header` rows, repo-path selection ids, the §12.4.2 coordinator integration), and a shared `selectedIndex` would make "independent selection" the hard case rather than the free case — the two views index different flat lists, so one index cannot serve both.
+
+The recommended split keeps `AgentTreeComponent` untouched except for the **no-selection state** below (which the Agents tree needs regardless) and lets `SidebarComponent` render whichever of the two components matches the current focus (`agent-tree` → render `AgentTreeComponent`; `teams-tree` → render `TeamsTreeComponent`). Both are constructed once in the dashboard and held on `SidebarComponent`.
+
+**The Agents tree gains a valid no-selection state.** `AgentTreeComponent` currently *always* points at a row (`selectedIndex` defaults to `0`, and `setFlatList` resets it to `0` on first populate). §17 introduces a genuine **no-selection** state so that the Agents panel does not force a selection the user never made (important now that an `@agent` jump — §17.3 — is the canonical way to force-select an agent). Specify it as a real state, not a sentinel index abuse:
+
+- Add a `hasSelection: boolean` flag (or model `selectedIndex === -1` as "no selection" — pick one consistently; **recommended: a `hasSelection` boolean** alongside the existing index, because so much of the scroll math assumes a non-negative `selectedIndex`). When `hasSelection` is false, the `selection` getter returns `null`, no row renders in reverse video, and `selectedId` is `null`.
+- **The Agents panel starts in no-selection.** On dashboard startup the Agents tree has no selected row until the user presses `j`/`k` or an `@agent` jump (§17.3) sets it. (This changes today's behavior, where row 0 is auto-selected; §13.6's *focus* default is unchanged — `agent-tree` is still the initially focused panel — only its *selection* now starts empty.)
+- **`j`/`k` from no-selection:** `j` selects the **first** visible row; `k` selects the **last** visible row. (After the first move the existing `moveSelection` wrap-around behavior takes over.)
+- **`shift+j`/`shift+k` from no-selection:** `shift+j` (forward anchor jump, today `moveToRepo(1)`) selects the **first anchor's** landing row (first repo's first agent, or the coordinator if it sorts first); `shift+k` selects the **last anchor's** landing row. This mirrors the `j`/`k` first/last rule at anchor granularity.
+- `setFlatList` must **not** silently re-assert a selection: when the panel is in no-selection and the list is repopulated, it stays in no-selection (today's `wasEmpty` branch that sets `selectedIndex = 0` must be gated on "had a selection before"). An `@agent` jump or a `j`/`k` press is the only thing that leaves no-selection.
+
+**Teams tree initial selection — symmetric choice.** [^needs review] For consistency the Teams tree should adopt the **same** discipline. Recommended default: **the Teams tree starts with the first team selected** (not no-selection), because (a) a team anchor selection immediately gives the main area something useful to render (the channel chat box, §17.4) whereas an agent no-selection has a sensible empty main area already, and (b) the Teams tree is a smaller, flatter list where "nothing selected" is more surprising than helpful. If the registry is empty, the Teams tree is in no-selection by necessity (nothing to select) and renders the empty-state line. Flagged because the alternative (Teams also starts no-selection, fully symmetric with Agents) is defensible; the implementer should pick one and not leave it ambiguous.
+
+### 17.2 The Teams Tree
+
+A **flat-across-repos** tree grouped by **team**. Teams span repos (unlike the repo-grouped Agents tree), so the Teams tree is **not** nested under repo headers — a team is a top-level anchor whose members may live in any repo. It reuses the `FlatEntry`/anchor tree pattern from `AgentTreeComponent`.
+
+**Row kinds.** Define a `TeamFlatEntry` discriminated union analogous to `FlatEntry` (`src/agents.ts`):
+
+```ts
+type TeamFlatEntry =
+  | { kind: "team-header"; teamName: string; memberCount: number; createdEpoch: number; createdBy: string }
+  | { kind: "team-member"; teamName: string; agent: Agent; connector: string };
+```
+
+- A **team** is an anchor row (`team-header`), the analogue of today's `repo-header`. It renders bold with a disclosure triangle, e.g. `▾ @backend  (3)`, where `(3)` is the live member count.
+- Its **member agents** are `team-member` child rows beneath it (analogous to `{ kind: "agent" }` rows). The same `Agent` object the Agents tree uses is reused, so state/icon/age are identical.
+
+**Building the list.** A `flattenTeamsTree()` helper (sibling to `flattenAgentTree()` in `src/agents.ts`, or co-located in `src/tui/teams-tree.ts`) reads `listTeams()` (`src/teams.ts`, §16.2 — an UNLOCKED pure read) and `readAllAgents()` (`src/agents.ts`), then for each team emits a `team-header` followed by one `team-member` per resolvable member id. **The member state must be the REAL detected state** — run `detectAgentStates()` (`src/agents.ts`) over the resolved member agents before building rows, exactly as the §16.3 `ib roster` fix does. A row must never show `"unknown"` for a member whose state is actually known; `displayState()` (`src/tui/agent-tree.ts`) maps a genuine `"unknown"` to `"running"` for display as it does today.
+
+**Member id that no longer resolves.** A member id with no live agent directory is **omitted** from the rendered tree (it is what the §16.5 lazy prune would remove). The Teams tree is a read-only view and must **not** mutate `teams.json` — lazy pruning remains the job of `ib send @<team>`/`ib roster` (§16.5). Showing only resolvable members keeps the tree honest without the dashboard taking the `.teams.lock`.
+
+**Member row format.** Member rows must disambiguate cross-repo members by showing the agent's **repo and model**. Reuse the `formatAgentRow` approach (`src/tui/agent-tree.ts`) — icon + name + state + age, compact-mode aware (`COMPACT_WIDTH_THRESHOLD`, `width <= 60`) — extended with a `repo/model` token:
+
+- **Compact mode** (`width <= 60`, the default sidebar width): `<connector><icon> <id>  <repo>/<model>  <state>  <age>`. Because the sidebar is narrow, `truncateToWidth` will clip the `repo/model` token first; that is acceptable (the full data is in the info panel, §17.3). The icon comes from `resolveAgentIcon(agent.meta)`; the state is colored via `getStateColors()` like every other row.
+- **Full mode** (wider sidebar): additionally append the prompt/summary as `formatAgentRow` does today.
+- The `repo/model` token is formatted as `${agent.repoName}/${agent.meta.model}` — e.g. `frontend/opus` — placed where the Agents tree shows nothing (the Agents tree groups by repo, so it omits the repo on each row; the Teams tree must add it back because members are cross-repo).
+
+**Empty team.** A team with 0 members **still renders its anchor** (teams persist per §16.3 even when auto-pruned to empty). The header shows a zero count, e.g. `▾ @backend  (0 members)` (or just `(0)`), and no child rows follow. [^needs review] Exact empty-count wording (`(0)` vs `(0 members)`) is cosmetic and open; recommend `(0 members)` only when expanded/selected and `(0)` in the compact count badge, to match the `(3)` badge form above.
+
+**Empty registry.** When `teams.json` has no teams, the Teams tree renders a single dim placeholder line — e.g. `  No teams (create with: ib team create @<name>)` — mirroring `AgentTreeComponent`'s `No agents found` empty line.
+
+**Navigation (dual, like the Agents tree).** The Teams tree reuses the two-level navigation `AgentTreeComponent` exposes via `moveSelection` (j/k) and `moveToRepo` (shift+j/k):
+
+- **`j`/`k`** move **one row at a time**: team → its first member → … → its last member → next team header → that team's first member → …  (i.e. `navigate(±1)` over the flat visible list).
+- **`shift+j`/`shift+k`** move **anchor-to-anchor between teams**: `navigateAnchor(+1)` jumps to the next `team-header`, `navigateAnchor(-1)` to the previous — the analogue of `moveToRepo` cycling repo anchors, where each team is one anchor. Landing on a team header selects the header (a team anchor selection, §17.3). [^needs review] When `shift+j` lands on a team, does it select the **header** or the team's **first member**? Recommended default: **select the header** (so anchor-jump → team-channel view in the main area, the more useful destination), diverging from the Agents tree's `moveToRepo`, which lands on the first *agent* of a repo. Rationale: a repo header has no first-class "view" of its own, but a team header does (the channel). Flagged because matching the Agents-tree convention (land on first member) is the consistency-driven alternative.
+
+**Scroll / height.** Reuse `MAX_TREE_HEIGHT` (7) and the scroll-indicator logic from `AgentTreeComponent.render` (the `▲ N more` / `▼ N more` indicators), so the Teams tree scrolls identically when it exceeds the visible window. Because Agents and Teams share the same sidebar tree region, they share the same height budget from `computeSidebarHeights` (`src/tui/sidebar.ts`) — whichever is focused renders into that budget.
+
+### 17.3 Selection Semantics & the `@agent` Jump
+
+**New `Selection` kind.** Extend the `Selection` union (`src/tui/selection.ts`) with a team-anchor kind; child agents reuse the existing `agent` kind:
+
+```ts
+export type Selection =
+  | { kind: "agent"; agent: Agent }
+  | { kind: "system-coordinator" }
+  | { kind: "repo-header"; repoName: string; repoPath: string }
+  | { kind: "team"; teamName: string }
+  | null;
+```
+
+The Teams tree's `selection` getter returns `{ kind: "team", teamName }` when a `team-header` row is selected, and `{ kind: "agent", agent }` when a `team-member` row is selected. (The existing `repo-header`/`system-coordinator` kinds never originate from the Teams tree.)
+
+**Team anchor selected (Teams panel focused, a `team-header` row):**
+
+- **(a) Send dialog targets `@<teamName>`.** The `s`-key send handler (`handleSend`, `src/tui/agent-actions.ts`) currently branches on system-coordinator / repo-coordinator / selected-agent. Add a branch: when the focused panel is `teams-tree` and the selection is `{ kind: "team" }`, the send dialog prompt is `Send message to @<teamName>:` and `onSubmit` routes through the **team fan-out path** (`teamSend`, `src/ib-commands.ts`, §16.4) — i.e. the same code `ib send @<team>` runs, fanning out to all members except the sender. The dialog's existing "send to all" (`sendAll`/`Ctrl-A`) toggle is **not** shown for a team target (a team send already fans out; the all-agents broadcast is a different, repo-wide feature). The send is best-effort like every other dashboard send and reports the `teamSend` result string via `setNotice`.
+- **(b) Main area shows the SHARED TEAM CHANNEL view** (§17.4) — the chat box tailing `<team>.channel.jsonl`.
+- **(c) Info panel shows team metadata.** The info panel (`InfoPanelComponent`, `src/tui/info-panel.ts`) gains a team mode (a `selectedTeam: { name, ... } | null` field set by the dashboard's selection-sync, parallel to `isSystemCoordinatorSelected`/`selectedRepoHeader`). It renders: team name (`@backend`), live member count, `created_by` and creation date — both read from the `Team` record (`teams.json` `Team.created_epoch` / `Team.created_by`, §16.2). Format the date with the existing `formatTimestamp` helper (`src/agent-lifecycle.ts`, exported as `_formatTimestamp`) applied to `new Date(created_epoch * 1000)` (epoch is **seconds**, §16.2).
+
+**Child agent selected (Teams panel focused, a `team-member` row):** behaves **exactly** like selecting that same agent in the Agents panel:
+
+- Main area shows that agent's tmux pane (the normal `tmuxPane` + `rightPane` split).
+- The `s` send dialog sends **point-to-point** to that agent (`sendMessage(agent, …)`), not to the team — selecting a member is a window into the individual agent, not the room.
+- The info panel shows the normal agent info (stoplights, model, summary) via the existing `InfoPanelComponent.agent` path.
+
+In other words, a `{ kind: "agent" }` selection that *originated* in the Teams tree is **indistinguishable** downstream from one that originated in the Agents tree. The dashboard's selection-sync should funnel both into the same `rightPane.agent`/`tmuxPane.agent`/`infoPanel.agent` assignments (`src/tui/dashboard.ts` ~1170–1180), keyed only on `selection.kind === "agent"`.
+
+**The `@agent` jump always force-selects in the Agents panel.** The fuzzy jump hotkey `@` (`handleFuzzyAgent`, `src/tui/agent-actions.ts`) always:
+
+1. switches focus to the **Agents** panel (`focusManager.setFocus("agent-tree")`), and
+2. highlights the chosen agent there (`agentTree.selectAgentById(id)` + `syncSelectedAgent()`),
+
+**even if that agent is currently visible as a team member** in the Teams tree. The `@agent` jump is the **only** thing that force-selects an agent in the Agents panel — it sets the Agents panel out of its no-selection state (§17.1). Absent a jump, the Agents panel keeps its own independent selection (or no-selection), untouched by anything happening in the Teams panel. This makes "jump to the agent itself" unambiguous: it is always an Agents-panel operation, never a Teams-panel one. (The fuzzy list's contents are unchanged — it still searches agents and repo headers; teams are addressed by selecting a team row in the Teams tree, not via the `@`-fuzzy jump. [^needs review] Whether the `@`-fuzzy list should *also* offer team names as jump targets is a possible later refinement; v1 keeps `@`-fuzzy agent/repo-only to preserve the "jump always lands in the Agents panel" invariant — a team match would have to switch to the Teams panel, muddying the rule. Flagged.)
+
+**Resize.** The Teams panel resizes the same as the other sidebar panels (§11.3, §13.3.1): `[`/`]` adjust width (focus-aware — when `teams-tree` is focused, width changes apply to the sidebar exactly as they do when `agent-tree` is focused, since the two share the sidebar region), and `{`/`}` adjust the sidebar panel's height by stealing from its neighbor. Because Agents and Teams occupy the **same** tree region, they share one width and one height budget; there is no separate Teams width to resize.
+
+### 17.4 The Shared Team Channel (new persistence — the chat box)
+
+**Problem.** Today `ib send @<team>` fans out to each recipient's tmux scrollback (§16.4); there is **no stored team-message log**, so a chat box would have nothing to render. §17 adds a persistent channel so the main-area team view has a real history to tail.
+
+**Two files per team, under `~/.itsybitsy/teams/`** (a new `teams/` subdirectory beside `teams.json`, located via `getCoordinatorHome()`, `src/coordinator.ts` — the same home that owns `teams.json` and `.teams.lock`):
+
+1. **`<team>.channel.jsonl` — the persistent CHAT HISTORY the chat box tails.** Each `ib send @<team>` (and each dashboard team-send) appends **one** JSON line:
+
+   ```json
+   { "ts": 1780166606, "fromAgent": "agent-a1b2c3d4", "message": "ship it" }
+   ```
+
+   - `ts` — creation time. [^needs review] Exact unit: **epoch seconds** (recommended, to match `Team.created_epoch` and the §16 convention; `Math.floor(Date.now() / 1000)`). Flagged only because the outbox uses `enqueuedAtMs` (ms); the channel is a *display* log, so matching the §16 `_epoch` seconds convention reads more consistently. Pick one and keep it uniform across the record.
+   - `fromAgent` — the **resolved** sender id (the same value `teamSend` resolves via `resolveTeamSenderId`/`resolveSenderId`, §16.4): a real agent id, an `@`-sentinel (`@system`), or `""` for a human/CLI sender.
+   - `message` — the raw message text (no `[sent by …]` prefix; the prefix is a tmux-delivery concern, reconstructed at render time by the chat box from `fromAgent`).
+
+   [^needs review] The exact field names (`ts`/`fromAgent`/`message`) are open; these three are the recommended default and mirror the `OutboxMessage` field naming (`fromAgent`, `message`) so the two records read alike. Whatever is chosen, the read path must reconstruct **field-by-field** (not by spread), exactly as `readOutbox` does, so a future field can't silently round-trip-drop (§16.4 trap).
+
+2. **`<team>.log` — a free-form per-team interaction LOG** for lifecycle/system events: join, leave, "N members left", team create/delete. One line per event (a timestamp prefix + free-form event text, the same shape `agent.log` uses via `formatTimestamp`). This is the **audit/debug** log and is **NOT** shown in the chat box — the chat box renders only `<team>.channel.jsonl`. The lifecycle notices (§16.4.1/§16.4.2) write a line here on their existing emit paths (`fireJoinNotice`, `emitPerAgentLeaveNotice`, `emitCoalescedLeaveNotice`, `teamRemove`, and `teamCreate`/`teamDelete` in `src/ib-commands.ts`).
+
+**Where the channel write happens.** The `<team>.channel.jsonl` append happens on the **`ib send @<team>` fan-out path — once per team send, not once per recipient.** Concretely, in `teamSend` (`src/ib-commands.ts`, §16.4): after the recipient set is resolved and the message is about to be (or has been) fanned out, append **one** channel record `{ ts, fromAgent: senderId, message }`. Place the append so it records the message **regardless of per-recipient delivery success** (the channel is the *room's* history; a delivery failure to one member does not mean the message wasn't "said"). It must **not** be inside the `for (const recipient of recipients)` loop — that would write N duplicate lines. It should also fire for an **empty-recipient** team send (self-only or zero-survivor) **only if** the team actually exists and the human/agent meant to post to the room — [^needs review] recommended default: **append when the team exists and the message is non-empty, even if the recipient set is empty after sender-exclusion**, so a sender talking to a room they're the sole member of still sees their own line in the channel history. Flagged because the alternative (only append when ≥1 recipient) is also reasonable; the empty-recipient send currently returns `teamOk("no recipients in @<team>")` (§16.4), and the channel should reflect that the message was posted to the room either way.
+
+The append is **best-effort** and uses the **same jsonl-append discipline as `outbox.ts`** (§4.1.1): a single-line `appendFile(JSON.stringify(record) + "\n")` after a `mkdir(teamsDir, { recursive: true })` no-message-loss safeguard; a failure to append never fails the send.
+
+**Read / tail semantics (the chat box).** A new module (`src/team-channel.ts`, §17.6) exposes `appendChannelMessage(teamName, record)` and `readChannel(teamName, opts?)`:
+
+- `readChannel` reads the file, splits on `\n`, skips blank/malformed lines (tolerant line-skipping, **never throws** — mirrors `readOutbox` and `readTeams`), and reconstructs each record **field-by-field**. A **missing file** returns `[]` (no channel yet → empty chat box), exactly as `readOutbox` returns `[]` for a missing queue.
+- The chat box renders the **last N lines** (newest at the **bottom**, oldest scrolling off the top), scrollable like the tmux pane's scroll-back (`;`/`l` scroll, `scrollBack` from the bottom, §13). N is bounded by the rendered pane height plus a scroll-back budget (the `TmuxPaneComponent` pattern of capturing only as much as the pane will render, `src/tui/dashboard.ts`). The dashboard polls/re-reads the channel on the same cadence it refreshes other main-area content for the selected entry.
+- Each line is **sender-prefixed** like the §16.4 delivery prefix but **without the tmux mechanics**: render `[sent by <fromAgent> in @<team>]: <message>` (or, for `fromAgent === ""`, the human form `[sent by user in @<team>]: <message>`), reusing the §16.4 prefix grammar so the chat box reads identically to what each member saw in their pane. A timestamp gutter (from `ts`) may be shown on the left. [^needs review] Whether to show the `ts` gutter and in what format (relative age vs clock time) is a cosmetic open decision; recommend a short clock time (`HH:MM`) gutter for scannability.
+
+**Concurrency — no lock needed for the channel.** Appends from concurrent `teamSend` calls do **not** require a lock. A single-line `appendFile` of a sub-`PIPE_BUF` record is **atomic on POSIX** (O_APPEND), so concurrent appenders never interleave a half-written line — this is the exact rationale `outbox.ts`/§4.1.1 relies on for `enqueueOutbox`. This is **unlike `teams.json`** (§16.2), which needs `.teams.lock` because it is **read-modify-write** (a lost-update race); the channel is **append-only**, so there is nothing to lose-update. State this explicitly so no one adds a needless `.channel.lock`. The tolerant read (skip a torn final line) covers the vanishingly rare partial-write case, identical to `readOutbox`.
+
+**Cleanup on team delete.** [^needs review] When `ib team delete @<name>` (§16.3) tears down a team, the channel files may either be removed or left as history. Recommended default: **`ib team delete` removes both `<team>.channel.jsonl` and `<team>.log`** (best-effort `unlink`, ignore-if-missing), so a deleted team leaves no orphaned files and a later `ib team create @<name>` of the same name starts with a clean channel rather than inheriting a stale predecessor's chat. Flagged because "leave them as history" is defensible (post-mortem value) — if chosen, document that re-creating a team of the same name would resurrect the old channel, which is the surprising case the recommended default avoids. `deleteTeam` (`src/teams.ts`) does the registry delete under the lock; the file cleanup belongs in the `teamDelete` command wrapper (`src/ib-commands.ts`), beside where it already calls `deleteTeam`, not in the locked registry primitive.
+
+### 17.5 Cross-Cutting Impact (the mandated four perspectives + dashboard)
+
+1. **General agent functionality** — **largely unaffected.** No change to how an agent is spawned, to its `meta.json` shape, or to its lifecycle. The only new behavior on a non-dashboard path is the **channel append** in `teamSend` (a best-effort `appendFile` on the existing fan-out, §17.4) and the lifecycle notices additionally writing to `<team>.log` on their existing emit paths. Team membership remains centrally stored (§16.2), so nothing here touches per-agent state.
+2. **Hooks** — **unaffected.** This is a dashboard surface plus a send-path append. None of the agent-session hooks (agent-path, agent-status, permission-denied, intercept-task, session-start) or primary-Claude hooks (main-path, inject-status) change. (The session-start team-awareness injection already landed in §16.6 and is not modified here.) **Confirmed.**
+3. **Watchdog** — **unaffected.** The watchdog has no team role (§16.5/§16.7.3 — it never tears down agents, never emits leave notices, and does not read the channel). Nudge timing, rate-limit recovery, and state detection are all untouched. **Confirmed.**
+4. **`ib watch` / dashboard** — **this is the main impact.** New `FocusTarget "teams-tree"` and its `FOCUS_ORDER` placement (§17.1); new `Selection` kind `{ kind: "team" }` (§17.3); a new `TeamsTreeComponent` (cross-repo, team-grouped, real detected state) plus `flattenTeamsTree()` and a `TeamFlatEntry` union (§17.2); an info-panel **team mode** (team metadata, §17.3c); a main-area **channel view** (the chat box, §17.4); the Agents tree's new **no-selection** state and the **independent-selection** invariant (§17.1); the `s`-send handler's new **team-target branch** routing to `teamSend` (§17.3a); and the `@`-fuzzy jump's **force-select-in-Agents** rule (§17.3). **Layout persistence:** [^needs review] does the Teams panel need its own persisted width/height in `layout.json` (`LayoutState`, `src/tui/layout.ts`)? Recommended default: **no new fields** — because the Teams panel **shares** the sidebar tree region with the Agents panel (§17.1), it shares the existing `sidebarWidth` and `heightOffsets.tree`/`heightOffsets.info`. No `teamsWidth`/`teamsHeightOffset` is added. Flagged so the implementer consciously confirms the shared-region model rather than adding a redundant persisted size. (One small consideration: the *focused-vs-resting* choice between Agents and Teams is **not** persisted — the dashboard always rests on Agents at startup, §13.6; persisting "last viewed Teams" is out of scope.)
+
+### 17.6 Affected Files and Modules
+
+| Module | Changes needed |
+|--------|---------------|
+| `src/tui/focus.ts` | Add `"teams-tree"` to the `FocusTarget` union and insert it into `FOCUS_ORDER` **between `"agent-tree"` and `"info"`** (§17.1). Do **not** add it to `COORDINATOR_FOCUS_ORDER` or `skipTargets` (§17.1). No change to `cycle()`/`setFocus()` logic beyond the new ordering entry. |
+| `src/tui/selection.ts` | Add `{ kind: "team"; teamName: string }` to the `Selection` union (§17.3). |
+| `src/tui/teams-tree.ts` (new) | `TeamsTreeComponent` (recommended over a mode flag, §17.1): a `TeamFlatEntry` union (`team-header` \| `team-member`), `flattenTeamsTree()` reading `listTeams()` + `readAllAgents()` + `detectAgentStates()` (real state, §17.2), `selectedIndex` + a **no-selection-aware** `selection` getter returning `{ kind: "team" }` / `{ kind: "agent" }`, `navigate` (j/k one-at-a-time) and `navigateAnchor` (shift+j/k team-to-team), member-row format with `repo/model` (compact-aware via `COMPACT_WIDTH_THRESHOLD`), empty-team anchor `(0 members)`, empty-registry placeholder, and `MAX_TREE_HEIGHT` scroll indicators reused from the agent-tree pattern. |
+| `src/agents.ts` | (If `flattenTeamsTree`/`TeamFlatEntry` are co-located with the other tree helpers rather than in `teams-tree.ts`.) Otherwise unchanged — `readAllAgents`, `detectAgentStates`, `resolveAgentIcon` are reused as-is. |
+| `src/tui/agent-tree.ts` | Add the **no-selection** state to `AgentTreeComponent` (a `hasSelection` flag; `selection` returns `null` when unset; `j`/`k` from no-selection → first/last; `shift+j`/`shift+k` → first/last anchor; `setFlatList` does not re-assert selection when previously unset — §17.1). `formatAgentRow` is reused by the Teams tree's member rows (extended with the `repo/model` token, or a parallel `formatTeamMemberRow` in `teams-tree.ts`). |
+| `src/tui/sidebar.ts` | Render whichever tree matches the focused panel: `agent-tree` → `AgentTreeComponent`, `teams-tree` → `TeamsTreeComponent`, into the **shared** tree region (one `Agents`/`Teams` separator title chosen by focus; the two share `computeSidebarHeights` budget and the sidebar width). Hold the `TeamsTreeComponent` reference alongside `agentTree`. |
+| `src/tui/info-panel.ts` | New **team mode**: a `selectedTeam` field (parallel to `isSystemCoordinatorSelected`/`selectedRepoHeader`) and a render branch showing team name, live member count, `created_by`, and creation date (`_formatTimestamp(new Date(created_epoch * 1000))`) from the `Team` record (§17.3c). |
+| `src/tui/dashboard.ts` | Wire the new panel: construct `TeamsTreeComponent`; route Tab/Shift+Tab through the extended `FOCUS_ORDER`; in the selection-sync, branch on the focused panel + selection kind — `{ kind: "team" }` → main area renders the **channel chat box** + info-panel team mode + send-target `@<team>`; `{ kind: "agent" }` (from either tree) → the existing agent tmux/info/point-to-point send; funnel both agent-origin selections into the same `rightPane.agent`/`tmuxPane.agent`/`infoPanel.agent` assignments (§17.3). Add the channel chat-box render in the main area (tail `readChannel`, newest-at-bottom, `;`/`l` scroll, sender-prefixed lines, §17.4). |
+| `src/tui/agent-actions.ts` | `handleSend`: add a **team-target branch** (focused panel `teams-tree` + `{ kind: "team" }`) that opens a `Send message to @<team>:` dialog and routes `onSubmit` through `teamSend` (§16.4); suppress the `sendAll`/`Ctrl-A` toggle for team targets (§17.3a). `handleFuzzyAgent` (`@` jump): on select, `focusManager.setFocus("agent-tree")` then `selectAgentById` so the jump **always** force-selects in the Agents panel and leaves no-selection (§17.3). |
+| `src/team-channel.ts` (new) | The channel persistence module: `channelPath(teamName)` / `teamLogPath(teamName)` under `getCoordinatorHome()/teams/`; `appendChannelMessage(teamName, { ts, fromAgent, message })` (single-line `appendFile` after `mkdir` recursive, best-effort, **no lock** — append-only atomicity, §17.4); `readChannel(teamName)` (tolerant, field-by-field reconstruction, `[]` on missing file); `appendTeamLog(teamName, text)` (timestamped free-form line); `deleteChannelFiles(teamName)` (best-effort `unlink` of both files, used by `teamDelete`). Mirrors `outbox.ts` append/read discipline (§4.1.1). |
+| `src/ib-commands.ts` (`teamSend`) | Append **one** channel record per team send via `appendChannelMessage` — outside the per-recipient loop, best-effort, recording the message regardless of per-recipient delivery success and (recommended) even for an empty-recipient send when the team exists (§17.4). |
+| `src/ib-commands.ts` (notice + create/delete paths) | The lifecycle notices write a line to `<team>.log` via `appendTeamLog` on their existing emit paths (`fireJoinNotice`, `emitPerAgentLeaveNotice`, `emitCoalescedLeaveNotice`, `teamRemove`); `teamCreate`/`teamDelete` log create/delete events; `teamDelete` also calls `deleteChannelFiles` (recommended cleanup, §17.4). |
+| `src/tui/layout.ts` (`LayoutState`) | **No new fields** (recommended, §17.5): the Teams panel shares `sidebarWidth` + `heightOffsets.tree`/`info` with the Agents panel. Confirm the shared-region model rather than adding `teamsWidth`/`teamsHeightOffset`. |
 
 ---

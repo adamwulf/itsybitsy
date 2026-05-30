@@ -10,6 +10,7 @@ import { resolveAgentIcon } from "./agents";
 import type { Agent, FlatEntry } from "./agents";
 import { isValidAgentId } from "./validation";
 import { SYSTEM_AGENT_ID } from "./hooks/shared";
+import { normalizeTeamName, getTeam } from "./teams";
 
 const args = process.argv.slice(2);
 const command = args[0];
@@ -303,19 +304,25 @@ export async function requireAgent(idArg: string | undefined, repos: RepoEntry[]
 
 /**
  * Resolve a send target using @-based addressing.
- * Returns { agent, isSystemCoordinator } or null if not found/invalid.
+ * Returns { agent, isSystemCoordinator, team? } or null if not found/invalid.
  * Supports:
  *   @system → system coordinator
  *   @coordinator → own repo's coordinator
  *   @<repo-name> → that repo's coordinator
  *   @<repo-name>/<agent-id> → agent in specific repo
+ *   @<team-name> → a team, resolved to its current member Agents (§16.4)
  *   <agent-id> (bare) → search same-repo first, then all repos
+ *
+ * Resolution order for a bare `@<name>` (§16.1): @system → @coordinator/@<repo>
+ * → team. The team lookup is a FALL-THROUGH reached only after the repo lookup
+ * fails, and only for a bare `@<name>` (no slash) — `@<repo>/<agent>` can never
+ * address a team and still hard-errors on an unknown repo.
  */
 export async function resolveTarget(
   target: string,
   repos: RepoEntry[],
   cwd: string = process.cwd(),
-): Promise<{ agent: Agent | null; isSystemCoordinator: boolean }> {
+): Promise<{ agent: Agent | null; isSystemCoordinator: boolean; team?: { name: string; members: Agent[] } }> {
   const { readAllAgents } = await import("./agents");
   const { checkCoordinatorExists } = await import("./coordinator");
 
@@ -370,7 +377,27 @@ export async function resolveTarget(
 
     const repo = repos.find((r) => repoDisplayName(r) === repoName);
     if (!repo) {
-      console.error(`Error: repo not found: ${repoName}`);
+      // No repo by this name. For a bare `@<name>` (no slash) this is where the
+      // TEAM lookup falls through (§16.1/§16.4): try a team before erroring. A
+      // slashed `@<repo>/<agent>` can never address a team, so it still errors.
+      if (!agentId) {
+        const teamName = normalizeTeamName(repoName);
+        const team = await getTeam(teamName);
+        if (team) {
+          // Resolve each member id to a live Agent. Members that no longer
+          // exist are simply skipped here — eager/lazy pruning happens at SEND
+          // time (teamSend calls pruneDeadMembers), not during resolution.
+          const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })));
+          const byId = new Map(agents.map((a) => [a.id, a]));
+          const members: Agent[] = [];
+          for (const id of team.members) {
+            const agent = byId.get(id);
+            if (agent) members.push(agent);
+          }
+          return { agent: null, isSystemCoordinator: false, team: { name: teamName, members } };
+        }
+      }
+      console.error(`Error: no repo or team named: ${repoName}`);
       return { agent: null, isSystemCoordinator: false };
     }
 
@@ -1111,7 +1138,7 @@ async function main() {
 
       if (!filteredSendArgs[0]) {
         console.error(usage);
-        console.error("Targets: @system, @coordinator, @<repo>, @<repo>/<agent-id>, or <agent-id>");
+        console.error("Targets: @system, @coordinator, @<repo>, @<repo>/<agent-id>, @<team>, or <agent-id>");
         process.exit(1);
       }
 
@@ -1148,7 +1175,7 @@ async function main() {
         return readStdinIfPiped();
       };
 
-      const { agent: resolvedAgent, isSystemCoordinator } = await resolveTarget(target, repos);
+      const { agent: resolvedAgent, isSystemCoordinator, team } = await resolveTarget(target, repos);
 
       if (isSystemCoordinator) {
         const coordMessage = await resolveMessageBody();
@@ -1158,6 +1185,21 @@ async function main() {
         }
         const result = await sendToSystemCoordinator(coordMessage, fromAgent ? { fromAgent } : undefined);
         await printAndExit(result);
+        break;
+      }
+
+      // A team target resolves to ZERO-OR-MORE recipients, so it must branch
+      // BEFORE the single-recipient `!resolvedAgent` guard below (§16.4): an
+      // empty team is a no-op SUCCESS, not the exit-1 an unresolved single
+      // `@name` produces. `teamSend` handles the empty recipient set itself.
+      if (team) {
+        const teamMessage = await resolveMessageBody();
+        if (!teamMessage) {
+          console.error(usage);
+          process.exit(1);
+        }
+        const { teamSend } = await import("./ib-commands");
+        await printAndExit(await teamSend(team.name, team.members, teamMessage, fromAgent ? { fromAgent } : undefined, repos));
         break;
       }
 
@@ -1849,6 +1891,90 @@ async function main() {
       }
       break;
     }
+    case "team": {
+      const sub = args[1];
+      const teamUsage =
+        "Usage: ib team <create|add|remove|list|delete> ...\n" +
+        "  ib team create <name>\n" +
+        "  ib team add <name> <agent-id>\n" +
+        "  ib team remove <name> <agent-id>\n" +
+        "  ib team list\n" +
+        "  ib team delete <name>";
+      if (!sub) {
+        console.error(teamUsage);
+        process.exit(1);
+      }
+      const repos = await listRepos();
+      const {
+        teamCreate,
+        teamAdd,
+        teamRemove,
+        teamList,
+        teamDelete,
+      } = await import("./ib-commands");
+      switch (sub) {
+        case "create": {
+          const name = args[2];
+          if (!name) {
+            console.error("Usage: ib team create <name>");
+            process.exit(1);
+          }
+          // createdBy is left "" for human CLI creation (§16 DETAIL 7).
+          await printAndExit(await teamCreate(name));
+          break;
+        }
+        case "add": {
+          const name = args[2];
+          const agentId = args[3];
+          if (!name || !agentId) {
+            console.error("Usage: ib team add <name> <agent-id>");
+            process.exit(1);
+          }
+          await printAndExit(await teamAdd(name, agentId, repos));
+          break;
+        }
+        case "remove": {
+          const name = args[2];
+          const agentId = args[3];
+          if (!name || !agentId) {
+            console.error("Usage: ib team remove <name> <agent-id>");
+            process.exit(1);
+          }
+          await printAndExit(await teamRemove(name, agentId, repos));
+          break;
+        }
+        case "list": {
+          await printAndExit(await teamList());
+          break;
+        }
+        case "delete": {
+          const name = args[2];
+          if (!name) {
+            console.error("Usage: ib team delete <name>");
+            process.exit(1);
+          }
+          await printAndExit(await teamDelete(name));
+          break;
+        }
+        default: {
+          console.error(`Error: unknown team subcommand '${sub}'`);
+          console.error(teamUsage);
+          process.exit(1);
+        }
+      }
+      break;
+    }
+    case "roster": {
+      const name = args[1];
+      if (!name) {
+        console.error("Usage: ib roster <name>");
+        process.exit(1);
+      }
+      const repos = await listRepos();
+      const { roster } = await import("./ib-commands");
+      await printAndExit(await roster(name, repos));
+      break;
+    }
     case "tgallow": {
       const id = args[1];
       if (!id) {
@@ -1915,10 +2041,18 @@ async function main() {
       console.log("  info <id>           Show agent's metadata");
       console.log("");
       console.log("Communication:");
-      console.log("  send <id> <msg>     Send a message to an agent (--from <id>, stdin)");
+      console.log("  send <id> <msg>     Send a message to an agent or @<team> (--from <id>, stdin)");
       console.log("  ask <question>      Ask user a question (--id <agent-id>)");
       console.log("  questions, q        Show pending agent questions (--all)");
       console.log("  acknowledge <qid>   Acknowledge a pending question (alias: ack)");
+      console.log("");
+      console.log("Teams:");
+      console.log("  team create <name>  Create an empty team");
+      console.log("  team add <name> <id>    Add an agent to a team");
+      console.log("  team remove <name> <id> Remove an agent from a team");
+      console.log("  team list           List all teams with member counts");
+      console.log("  team delete <name>  Delete a team");
+      console.log("  roster <name>       List a team's members with repo and state");
       console.log("");
       console.log("Agent Lifecycle:");
       console.log("  new-agent, new      Spawn a new agent");

@@ -17,7 +17,11 @@ import {
   getDiffToolLaunching, setDiffToolLaunching,
   handleAddPermission, addPermissionToSettings, agentSettingsLocalPath,
   getCoordinatorSpawnsInFlight, clearCoordinatorSpawnsInFlight,
+  handleCreateTeam, handleAddAgentToTeam,
 } from "./agent-actions";
+import { setCoordinatorHome, resetCoordinatorHome } from "../coordinator";
+import { readTeams, createTeam, addMember } from "../teams";
+import { mkdir } from "fs/promises";
 import { MIN_LEFT_WIDTH, MAX_LEFT_WIDTH } from "./split-pane";
 import {
   setKillPauseSpawnRunner, resetKillPauseSpawnRunner,
@@ -1098,5 +1102,179 @@ describe("handleScrollUp/Down — §17.4 channel pane scrolls alongside", () => 
     ctx.channelPane.scrollDown = () => { chScrollDown++; };
     handleScrollDown(ctx);
     expect(chScrollDown).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Teams handlers — Change 3: 'T' creates a team, 't' adds selected agent to a
+// team. Both must isolate their teams.json via setCoordinatorHome so they
+// don't write to the user's real `~/.itsybitsy/`.
+// ---------------------------------------------------------------------------
+
+describe("handleCreateTeam", () => {
+  let teamsHomeDir: string;
+  const originalHome = process.env.HOME;
+
+  beforeEach(async () => {
+    teamsHomeDir = await mkdtemp(join(tmpdir(), "agent-actions-teams-create-"));
+    const home = join(teamsHomeDir, ".itsybitsy");
+    await mkdir(home, { recursive: true });
+    process.env.HOME = teamsHomeDir;
+    setCoordinatorHome(home);
+  });
+
+  afterEach(async () => {
+    resetCoordinatorHome();
+    process.env.HOME = originalHome;
+    await rm(teamsHomeDir, { recursive: true, force: true });
+  });
+
+  test("opens an empty input dialog labeled 'Team name:'", () => {
+    const { ctx, dialogs } = makeMockCtx();
+    handleCreateTeam(ctx);
+    const d = assertDialog(dialogs[0]!, "input");
+    expect(d.value).toBe("");
+    expect(d.prompt).toBe("Team name:");
+  });
+
+  test("happy path: a valid name creates a team and shows a success notice", async () => {
+    const { ctx, dialogs, notices, flushActions } = makeMockCtx();
+    handleCreateTeam(ctx);
+    const d = assertDialog(dialogs[0]!, "input");
+    d.onSubmit("backend");
+    await flushActions();
+    const reg = await readTeams();
+    expect(reg.teams["backend"]).toBeDefined();
+    expect(notices.some((n) => n.includes("Created team @backend"))).toBe(true);
+  });
+
+  test("invalid name: rejects with a notice and does not create the team", async () => {
+    const { ctx, dialogs, notices, flushActions } = makeMockCtx();
+    handleCreateTeam(ctx);
+    const d = assertDialog(dialogs[0]!, "input");
+    d.onSubmit("has spaces");
+    await flushActions();
+    const reg = await readTeams();
+    expect(Object.keys(reg.teams)).toHaveLength(0);
+    expect(notices.some((n) => n.includes("Invalid team name"))).toBe(true);
+  });
+
+  test("empty submission is a silent no-op (no team, no notice)", async () => {
+    const { ctx, dialogs, notices, flushActions } = makeMockCtx();
+    handleCreateTeam(ctx);
+    const d = assertDialog(dialogs[0]!, "input");
+    d.onSubmit("   ");
+    await flushActions();
+    const reg = await readTeams();
+    expect(Object.keys(reg.teams)).toHaveLength(0);
+    expect(notices).toHaveLength(0);
+  });
+});
+
+describe("handleAddAgentToTeam", () => {
+  let teamsHomeDir: string;
+  const originalHome = process.env.HOME;
+
+  beforeEach(async () => {
+    teamsHomeDir = await mkdtemp(join(tmpdir(), "agent-actions-teams-add-"));
+    const home = join(teamsHomeDir, ".itsybitsy");
+    await mkdir(home, { recursive: true });
+    process.env.HOME = teamsHomeDir;
+    setCoordinatorHome(home);
+  });
+
+  afterEach(async () => {
+    resetCoordinatorHome();
+    process.env.HOME = originalHome;
+    await rm(teamsHomeDir, { recursive: true, force: true });
+  });
+
+  test("no agent selected: does nothing (no dialog)", async () => {
+    const { ctx, dialogs } = makeMockCtx({ agent: null });
+    handleAddAgentToTeam(ctx);
+    // listTeams resolves on a microtask — wait a tick.
+    await Bun.sleep(5);
+    expect(dialogs).toHaveLength(0);
+  });
+
+  test("happy path: picking an existing team adds the agent and shows a notice", async () => {
+    await createTeam("backend", "user", 1700000000);
+    const agent = makeAgent({ id: "agent-aaa" });
+    const { ctx, dialogs, notices, flushActions } = makeMockCtx({ agent });
+    handleAddAgentToTeam(ctx);
+    await Bun.sleep(10);
+    const d = assertDialog(dialogs[0]!, "fuzzy");
+    // The "+ Create new team…" entry must be the last item.
+    expect(d.allItems[d.allItems.length - 1]).toContain("Create new team");
+    // The first item is the existing team.
+    expect(d.allItems[0]).toBe("backend");
+    d.onSelect(0);
+    await flushActions();
+    const reg = await readTeams();
+    expect(reg.teams["backend"]!.members).toContain("agent-aaa");
+    expect(notices.some((n) => n.includes("Added agent-aaa to @backend"))).toBe(true);
+  });
+
+  test("empty teams: skips the picker and opens the create-team input directly", async () => {
+    const agent = makeAgent({ id: "agent-bbb" });
+    const { ctx, dialogs } = makeMockCtx({ agent });
+    handleAddAgentToTeam(ctx);
+    await Bun.sleep(10);
+    // No fuzzy picker — went straight to the input.
+    const d = assertDialog(dialogs[0]!, "input");
+    expect(d.prompt).toBe("Team name:");
+    expect(d.value).toBe("");
+  });
+
+  test("empty teams: submitting the create input both creates the team AND adds the selected agent", async () => {
+    const agent = makeAgent({ id: "agent-ccc" });
+    const { ctx, dialogs, notices, flushActions } = makeMockCtx({ agent });
+    handleAddAgentToTeam(ctx);
+    await Bun.sleep(10);
+    const d = assertDialog(dialogs[0]!, "input");
+    d.onSubmit("frontend");
+    await flushActions();
+    const reg = await readTeams();
+    expect(reg.teams["frontend"]).toBeDefined();
+    expect(reg.teams["frontend"]!.members).toContain("agent-ccc");
+    expect(notices.some((n) => n.includes("Created team @frontend") && n.includes("agent-ccc"))).toBe(true);
+  });
+
+  test("picker '+ Create new team…' branch: also creates AND adds the selected agent", async () => {
+    await createTeam("existing", "user", 1700000000);
+    const agent = makeAgent({ id: "agent-ddd" });
+    const { ctx, dialogs, notices, flushActions } = makeMockCtx({ agent });
+    handleAddAgentToTeam(ctx);
+    await Bun.sleep(10);
+    const picker = assertDialog(dialogs[0]!, "fuzzy");
+    // Select the LAST entry — "+ Create new team…"
+    const createIdx = picker.allItems.length - 1;
+    expect(picker.allItems[createIdx]).toContain("Create new team");
+    picker.onSelect(createIdx);
+    // Picker transitions to an input dialog for the new team name.
+    const input = assertDialog(dialogs[1]!, "input");
+    expect(input.prompt).toBe("Team name:");
+    input.onSubmit("brand-new");
+    await flushActions();
+    const reg = await readTeams();
+    expect(reg.teams["brand-new"]).toBeDefined();
+    expect(reg.teams["brand-new"]!.members).toContain("agent-ddd");
+    expect(notices.some((n) => n.includes("Created team @brand-new") && n.includes("agent-ddd"))).toBe(true);
+  });
+
+  test("already-a-member: picking the same team reports it without re-adding", async () => {
+    await createTeam("backend", "user", 1700000000);
+    await addMember("backend", "agent-eee");
+    const agent = makeAgent({ id: "agent-eee" });
+    const { ctx, dialogs, notices, flushActions } = makeMockCtx({ agent });
+    handleAddAgentToTeam(ctx);
+    await Bun.sleep(10);
+    const d = assertDialog(dialogs[0]!, "fuzzy");
+    d.onSelect(0);
+    await flushActions();
+    const reg = await readTeams();
+    // Roster is unchanged.
+    expect(reg.teams["backend"]!.members.filter((m) => m === "agent-eee")).toHaveLength(1);
+    expect(notices.some((n) => n.includes("already in @backend"))).toBe(true);
   });
 });

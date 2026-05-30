@@ -2024,6 +2024,9 @@ export class DashboardComponent implements Component {
     else if (data === "N") { agentActions.handleRename(this); }
     else if (data === "m") { agentActions.handleMerge(this); }
     else if (data === "s") { agentActions.handleSend(this); }
+    // Team actions: T = create a new team, t = add selected agent to a team
+    else if (data === "T") { agentActions.handleCreateTeam(this); }
+    else if (data === "t") { agentActions.handleAddAgentToTeam(this); }
     // Add permission to selected agent's settings.local.json allow list
     else if (data === "b") { agentActions.handleAddPermission(this); }
     // New agent

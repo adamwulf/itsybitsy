@@ -37,6 +37,14 @@ import type { RepoHealthReport } from "../health-check";
 import { getResolvableWarnings, resolveHealthWarnings } from "../health-check";
 import { IB_COORDINATOR_SESSION, sanitizeTmuxInput, restartSystemCoordinator, checkCoordinatorExists, getLastCoordinatorSpawnMode, discardSystemCoordinator } from "../coordinator";
 import { isValidToolList } from "../validation";
+import {
+  createTeam as createTeamRegistry,
+  addMember as addTeamMember,
+  listTeams,
+  isValidTeamName,
+  normalizeTeamName,
+  isReservedTeamName,
+} from "../teams";
 
 const SCROLL_STEP = 10;
 
@@ -565,6 +573,162 @@ export function handleRename(ctx: ActionCtx) {
         }
       });
     },
+  });
+}
+
+/**
+ * 'T' — prompt for a name and create a new team (§16). The notice loop is
+ * intentionally light: validate the name client-side (allowlist + reserved-word
+ * collision), then call `createTeam`. On success the notice quotes the
+ * @-prefixed name so the user can read it back. On failure (rare — only the
+ * already-exists race makes it past validation) the notice surfaces the error.
+ *
+ * `createdBy` is the SELECTED agent's id when one is selected (mirroring
+ * `ib team create --created-by <agent>` from a worker), else the literal
+ * `"user"` to match how the CLI's audit log records human creations.
+ */
+export function handleCreateTeam(ctx: ActionCtx) {
+  runCreateTeam(ctx, /*initialValue*/ "", /*alsoAddSelectedAgent*/ false);
+}
+
+/**
+ * 't' — add the selected agent to a team. If teams exist, open a picker with
+ * an extra "+ Create new team…" entry at the bottom. If no teams exist, skip
+ * the picker and go straight to the create-team input dialog (which will also
+ * add the selected agent to the new team on success). Coordinator-selected and
+ * no-agent states are both no-ops.
+ */
+export function handleAddAgentToTeam(ctx: ActionCtx) {
+  if (ctx.agentTree.isSystemCoordinatorSelected) return;
+  const agent = ctx.agentTree.selectedAgent;
+  if (!agent) return;
+  // Load teams asynchronously, then show the appropriate dialog. Errors here
+  // are non-fatal — fall back to the create-team flow so the user still has a
+  // path forward without first having to debug `teams.json`.
+  listTeams().then((teams) => {
+    if (teams.length === 0) {
+      runCreateTeam(ctx, "", /*alsoAddSelectedAgent*/ true);
+      return;
+    }
+    showTeamPicker(ctx, agent, teams.map((t) => t.name));
+  }).catch((err) => {
+    ctx.setNotice(`Failed to list teams: ${(err as Error).message}`);
+  });
+}
+
+/**
+ * Show a fuzzy picker for an existing team, with a trailing "+ Create new
+ * team…" entry that transitions into the same input dialog used by 'T'. On
+ * selecting an existing team, calls `addMember` and shows a notice. On
+ * selecting "+ Create new team…", opens the create dialog and joins the
+ * agent to the new team on success.
+ */
+function showTeamPicker(ctx: ActionCtx, agent: Agent, teamNames: string[]) {
+  const CREATE_LABEL = "+ Create new team…";
+  // Distinct trailing entry: the picker is fuzzy-filterable, but the create
+  // entry is always selectable (its label is unique enough to survive any
+  // partial query unless the user types `+` or `Create`, which is fine).
+  const items = [...teamNames, CREATE_LABEL];
+  ctx.showDialog({
+    type: "fuzzy",
+    prompt: `Add ${agent.id} to team:`,
+    query: "",
+    allItems: items,
+    filteredIndices: items.map((_, i) => i),
+    filteredItems: [...items],
+    selectedIndex: 0,
+    onSelect: (originalIndex: number) => {
+      ctx.closeDialog();
+      const choice = items[originalIndex];
+      if (choice === undefined) return;
+      if (choice === CREATE_LABEL) {
+        runCreateTeam(ctx, "", /*alsoAddSelectedAgent*/ true);
+        return;
+      }
+      runAddMember(ctx, agent, choice);
+    },
+  });
+}
+
+/**
+ * Shared helper for the 'T' create flow and the 't' "create new team…" branch.
+ * Opens an input dialog seeded with `initialValue` (empty for 'T'; also empty
+ * for the picker's create branch — the user has not typed a name yet). When
+ * `alsoAddSelectedAgent` is true and a non-system-coordinator agent is
+ * selected, the newly-created team is followed by an `addMember` so the
+ * 't' flow ends with the agent already in the team.
+ */
+function runCreateTeam(ctx: ActionCtx, initialValue: string, alsoAddSelectedAgent: boolean) {
+  // Capture the selected agent at dialog-open time. The user could navigate the
+  // tree before submitting; we want the join to target the agent they intended
+  // to add. If no agent is selected, the join branch is silently skipped.
+  const agentForJoin = alsoAddSelectedAgent && !ctx.agentTree.isSystemCoordinatorSelected
+    ? ctx.agentTree.selectedAgent
+    : null;
+  const createdBy = ctx.agentTree.selectedAgent?.id ?? "user";
+  ctx.showDialog({
+    type: "input",
+    prompt: "Team name:",
+    value: initialValue,
+    onSubmit: (value: string) => {
+      ctx.closeDialog();
+      const trimmed = value.trim();
+      if (!trimmed) return; // empty → no-op
+      const normalized = normalizeTeamName(trimmed);
+      if (!isValidTeamName(normalized)) {
+        ctx.setNotice(`Invalid team name "${normalized}" — must match [A-Za-z0-9_-]+`);
+        return;
+      }
+      ctx.executeAndRefresh(async () => {
+        // Reserved-word check runs against the live repo list — mirrors
+        // ib-commands.teamCreate so a TUI create can't bypass the CLI's
+        // collision rule.
+        if (await isReservedTeamName(normalized)) {
+          ctx.setNotice(`Team name @${normalized} is reserved`);
+          return;
+        }
+        try {
+          await createTeamRegistry(normalized, createdBy, Math.floor(Date.now() / 1000));
+        } catch (err) {
+          ctx.setNotice(`Create team failed: ${(err as Error).message}`);
+          return;
+        }
+        if (agentForJoin) {
+          const { added, team } = await addTeamMember(normalized, agentForJoin.id);
+          if (!team) {
+            ctx.setNotice(`Created team @${normalized} but team disappeared before add`);
+            return;
+          }
+          ctx.setNotice(added
+            ? `Created team @${normalized} and added ${agentForJoin.id}`
+            : `Created team @${normalized} (${agentForJoin.id} already a member)`);
+        } else {
+          ctx.setNotice(`Created team @${normalized}`);
+        }
+      });
+    },
+  });
+}
+
+/**
+ * Add an agent to an existing team and surface the result as a notice. The
+ * team may have been deleted between the picker render and the submit — in
+ * that case we surface the not-found error.
+ */
+function runAddMember(ctx: ActionCtx, agent: Agent, teamName: string) {
+  ctx.executeAndRefresh(async () => {
+    try {
+      const { added, team } = await addTeamMember(teamName, agent.id);
+      if (!team) {
+        ctx.setNotice(`Team @${teamName} not found`);
+        return;
+      }
+      ctx.setNotice(added
+        ? `Added ${agent.id} to @${teamName}`
+        : `${agent.id} is already in @${teamName}`);
+    } catch (err) {
+      ctx.setNotice(`Add to team failed: ${(err as Error).message}`);
+    }
   });
 }
 

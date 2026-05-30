@@ -168,6 +168,33 @@ describe("ChannelPaneComponent", () => {
     expect(pane.scrollBack).toBe(0);
   });
 
+  // Corr-N1: a fast team-switch A→B must not leave team A's messages cached
+  // under team B's header even when A's readChannel resolves AFTER B's. The
+  // load() snapshot-and-discard guard mirrors TmuxPoller's pattern.
+  test("stale load for old team is discarded after switch (Corr-N1)", async () => {
+    await appendChannelMessage("alpha", { ts: 100, fromAgent: "agent-a", message: "from-alpha" });
+    await appendChannelMessage("beta", { ts: 200, fromAgent: "agent-b", message: "from-beta" });
+
+    const pane = new ChannelPaneComponent();
+    pane.displayHeight = 10;
+
+    // Start the "slow" load for alpha but don't await yet. Switching teamName
+    // mid-await simulates a user navigating to beta before alpha's read settles.
+    pane.teamName = "alpha";
+    const loadAlpha = pane.load();
+
+    // Switch to beta synchronously, then trigger and await its load.
+    pane.teamName = "beta";
+    await pane.load();
+    // Now let the alpha load settle. Its guard must see teamName !== "alpha"
+    // and discard its result instead of overwriting beta's messages.
+    await loadAlpha;
+
+    expect(pane.teamName).toBe("beta");
+    expect(pane.messages.length).toBe(1);
+    expect(pane.messages[0]!.message).toBe("from-beta");
+  });
+
   describe("formatChannelLine grammar", () => {
     test("agent id drops 'agent' word", () => {
       const line = formatChannelLine({ ts: 0, fromAgent: "agent-z", message: "m" }, "backend", null);

@@ -572,6 +572,35 @@ describe("teams: command layer (create/add/remove/list/delete/roster/send)", () 
     const team = await getTeam("backend");
     expect(team!.members).toEqual(["agent-keep"]);
   });
+
+  // Spec-N1 (§17.4): pin the channel-append placement. The append in teamSend
+  // must sit AFTER the team-not-found check and BEFORE the empty-recipient
+  // early return — a §16.4-class trap that a future refactor could silently
+  // break. Two assertions cover both edges of the placement window:
+  //   (1) EXISTING team, zero post-exclusion recipients → still appends 1 record
+  //       (sender talking to a room they're alone in is part of the channel).
+  //   (2) NONEXISTENT team → no channel file is created and the command errors.
+  test("teamSend channel-append placement: existing-empty appends 1, nonexistent appends 0 (§17.4 Spec-N1)", async () => {
+    // Case (1): existing team, no recipients after sender-exclusion.
+    await teamCreate("backend");
+    await plantAgent("agent-solo");
+    await addMember("backend", "agent-solo");
+    resetReadAgentMetaCache();
+    const members = await resolvedMembers(["agent-solo"]);
+    const res1 = await teamSend("backend", members, "alone but talking", { fromAgent: "agent-solo" }, repos());
+    expect(res1.ok).toBe(true);
+    expect(res1.stdout).toBe("no recipients in @backend");
+    const channel = await readChannel("backend");
+    expect(channel.length).toBe(1);
+    expect(channel[0]!.message).toBe("alone but talking");
+    expect(channel[0]!.fromAgent).toBe("agent-solo");
+
+    // Case (2): nonexistent team — no append, command errors.
+    const res2 = await teamSend("ghost-team", [], "into the void", undefined, repos());
+    expect(res2.ok).toBe(false);
+    const ghostFileExists = await Bun.file(channelPath("ghost-team")).exists();
+    expect(ghostFileExists).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------

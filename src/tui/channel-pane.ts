@@ -131,10 +131,18 @@ export class ChannelPaneComponent implements Component {
    * Reads ONLY `<team>.channel.jsonl` (via `readChannel`) — never the `.log`.
    */
   async load(): Promise<void> {
-    this.messages = this.teamName ? await readChannel(this.teamName) : [];
+    // Snapshot the target at the top so a fast team-switch A→B can't land A's
+    // messages under B's header if A's readChannel happens to resolve AFTER B's
+    // (mirrors TmuxPoller's snapshot-and-discard pattern). Display-only race; the
+    // next tick self-heals it, but we want to avoid the cross-team flash.
+    const t = this.teamName;
+    const messages = t ? await readChannel(t) : [];
     const config = await readConfig();
     const name = config["user.name"]?.value;
-    this.userName = typeof name === "string" && name.length > 0 ? name : null;
+    const userName = typeof name === "string" && name.length > 0 ? name : null;
+    if (this.teamName !== t) return;
+    this.messages = messages;
+    this.userName = userName;
   }
 
   render(width: number): string[] {

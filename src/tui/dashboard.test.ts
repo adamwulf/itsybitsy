@@ -3473,6 +3473,51 @@ describe("sidebar height resize ({/} keys)", () => {
     const effectiveInfo = base.infoHeight + dashboard.sidebar.heightOffsets.info;
     expect(effectiveInfo).toBeGreaterThanOrEqual(1);
   });
+
+  // §17.3 (B1): when teams-tree is focused, `[`/`]` must adjust the SIDEBAR
+  // width (the panel that's focused), not the main split-pane. Before the fix,
+  // teams-tree was not in the sidebar-width branch, so the keys fell through to
+  // handleResizeLeft and resized the main split + fired resizeTmuxWindow on
+  // every agent — wrong panel.
+  test("[/] when teams-tree focused resizes the SIDEBAR, not the split pane (§17.3 B1)", () => {
+    const dashboard = makeDashboard();
+    const agent = makeAgent("agent-a", "/repos/test");
+    dashboard.onUpdate([agent], [makeFlatAgent(agent)], []);
+    dashboard.focusManager.setFocus("teams-tree");
+    expect(dashboard.focus).toBe("teams-tree");
+
+    const sidebarBefore = dashboard.sidebarWidth;
+    const splitLeftBefore = dashboard.splitPane.getLeftWidth();
+
+    dashboard.handleInput("]");
+    expect(dashboard.sidebarWidth).toBeGreaterThan(sidebarBefore);
+    expect(dashboard.splitPane.getLeftWidth()).toBe(splitLeftBefore);
+
+    const sidebarAfterGrow = dashboard.sidebarWidth;
+    dashboard.handleInput("[");
+    expect(dashboard.sidebarWidth).toBeLessThan(sidebarAfterGrow);
+    // Split pane still untouched after both keys.
+    expect(dashboard.splitPane.getLeftWidth()).toBe(splitLeftBefore);
+  });
+
+  // §17.3 (B2): when teams-tree is focused, `{`/`}` must adjust the sidebar
+  // tree-height the same way it does for agent-tree (they share heightOffsets.tree).
+  // Before the fix, teams-tree hit no branch and the keys were silent no-ops.
+  test("{/} when teams-tree focused adjusts heightOffsets.tree like agent-tree (§17.3 B2)", () => {
+    const dashboard = makeDashboard();
+    dashboard.focusManager.setFocus("teams-tree");
+    expect(dashboard.focus).toBe("teams-tree");
+
+    const before = { ...dashboard.sidebar.heightOffsets };
+    dashboard.handleInput("}");
+    expect(dashboard.sidebar.heightOffsets.tree).toBe(before.tree + 1);
+    expect(dashboard.sidebar.heightOffsets.info).toBe(before.info - 1);
+
+    const afterGrow = { ...dashboard.sidebar.heightOffsets };
+    dashboard.handleInput("{");
+    expect(dashboard.sidebar.heightOffsets.tree).toBe(afterGrow.tree - 1);
+    expect(dashboard.sidebar.heightOffsets.info).toBe(afterGrow.info + 1);
+  });
 });
 
 describe("input field integration", () => {

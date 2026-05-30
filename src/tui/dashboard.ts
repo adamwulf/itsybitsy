@@ -1486,11 +1486,23 @@ export class DashboardComponent implements Component {
     // Race guard: if the user has navigated away from this team, do nothing.
     if (this.channelPane.teamName !== teamName) return;
     if (team) {
+      // §17.2/§17.3c: show the LIVE (resolvable) member count, matching the
+      // tree badge. team.members is the raw roster (which can include
+      // not-yet-pruned dead ids); the teams-tree header row already carries the
+      // live count via flattenTeamsTree, so reuse it. Fall back to the raw
+      // count only if the team isn't in the tree (transient, between rebuilds).
+      let liveCount = team.members.length;
+      for (const row of this.teamsTree.flatList) {
+        if (row.kind === "team-header" && row.teamName === teamName) {
+          liveCount = row.memberCount;
+          break;
+        }
+      }
       this.infoPanel.selectedTeam = {
         name: teamName,
         createdEpoch: team.created_epoch,
         createdBy: team.created_by,
-        memberCount: team.members.length,
+        memberCount: liveCount,
       };
     } else {
       this.infoPanel.selectedTeam = null;
@@ -2062,8 +2074,10 @@ export class DashboardComponent implements Component {
     else if (data === "[" || data === "]") {
       const delta = data === "]" ? LEFT_WIDTH_STEP : -LEFT_WIDTH_STEP;
       const focus = this.focusManager.current();
-      if (focus === "agent-tree" || focus === "info" || focus === "coordinator") {
-        // Sidebar panel focused: adjust sidebar width
+      if (focus === "agent-tree" || focus === "teams-tree" || focus === "info" || focus === "coordinator") {
+        // Sidebar panel focused: adjust sidebar width.
+        // teams-tree shares the sidebar region with agent-tree (§17.3), so width
+        // changes apply to the sidebar exactly as they do when agent-tree is focused.
         this.sidebarWidth = clampSidebarWidth(this.sidebarWidth + delta);
         resizeCoordinatorTmux(this.getMainWidth());
         // Per-repo coordinator renders full-pane like the system coordinator,
@@ -2086,8 +2100,10 @@ export class DashboardComponent implements Component {
     else if (data === "{" || data === "}") {
       const delta = data === "}" ? 1 : -1;
       const focus = this.focusManager.current();
-      if (focus === "agent-tree") {
-        // Grow tree, shrink info; give back to info when shrinking
+      if (focus === "agent-tree" || focus === "teams-tree") {
+        // Grow tree, shrink info; give back to info when shrinking.
+        // teams-tree shares the sidebar tree region (and heightOffsets.tree)
+        // with agent-tree (§17.3), so height changes behave identically.
         const base = computeSidebarHeights(this.sidebar.displayHeight, this.agentTree.visibleList.length);
         const effectiveInfo = Math.max(0, base.infoHeight + this.sidebar.heightOffsets.info);
         if (delta > 0) {

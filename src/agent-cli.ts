@@ -2,100 +2,93 @@
  * Model → CLI resolution (SPEC-CODEX-MODEL.md §5.1).
  *
  * itsybitsy launches one of two underlying agent CLIs depending on the agent's
- * `model` name (Decision D1: the model name IS the selector — there is no
- * separate `cli` meta field). OpenAI's Codex CLI model names route to `codex`;
- * everything else (and every unknown model) routes to `claude`.
+ * `model` name. Per Decision D1 the model string is ALWAYS the explicit form
+ * `<cli>:<model>` (e.g. `claude:opus`, `claude:claude-opus-4-7`,
+ * `codex:gpt-5.1-codex`, `codex:o3-mini`). The CLI is NAMED, never inferred —
+ * there is no hidden model→CLI guessing table. Bare names (`opus`, `o3`) are
+ * rejected as invalid (D1/D5: no back-compat).
  *
  * This is the single source of truth for "which CLI runs this model." Callers in
- * the spawn / resume / state / watchdog code consult `resolveCli(meta.model)`
- * instead of hardcoding `claude`.
- *
- * Claude is the default for EVERY model that is not a known Codex model, so
- * adding this resolver introduces no regression for existing Claude agents.
+ * the spawn / resume / state / watchdog code consult `parseModel(meta.model)`
+ * (or the thin `resolveCli` / `isCodexModel` wrappers) instead of hardcoding
+ * `claude`.
  */
 
 export type AgentCli = "claude" | "codex";
 
-/**
- * Known OpenAI Codex CLI model names.
- *
- * Matching is done two ways (see `isCodexModel`):
- *   1. Exact name match against this set (case-insensitive, whitespace-trimmed).
- *   2. Sensible prefix match against `CODEX_MODEL_PREFIXES` so versioned /
- *      dated / sized variants of the same family (e.g. `gpt-5-codex-2025-xx`,
- *      `o3-mini`, `o4-mini-high`) resolve to codex without enumerating each one.
- *
- * Keep this list in one place so it is trivial to extend as OpenAI ships new
- * Codex models. A `config.json` override (e.g. `codexModels: string[]`) is a
- * deliberate later nicety — NOT part of Phase 0.
- *
- * Pinned to the model families current as of Codex CLI v0.135.0 (2026-05-30,
- * cross-checked against ~/.codex/models_cache.json):
- *   - gpt-5-codex      (the original dedicated Codex model)
- *   - gpt-5.1-codex*   (the gpt-5.1 dedicated Codex family: -max/-min/-mini)
- *   - o3 / o3-mini     (OpenAI reasoning models usable via `codex -m`)
- *   - o4-mini          (OpenAI reasoning model usable via `codex -m`)
- *
- * NOTE: `gpt-5.1-codex` does NOT share a prefix with `gpt-5-codex`
- * ("gpt-5.1-codex".startsWith("gpt-5-codex") is false — char 6 is '.', not '-'),
- * so the gpt-5.1 family needs its own prefix entry below.
- */
-const CODEX_MODELS: ReadonlySet<string> = new Set([
-  "gpt-5-codex",
-  "gpt-5.1-codex",
-  "gpt-5.1-codex-max",
-  "gpt-5.1-codex-min",
-  "gpt-5.1-codex-mini",
-  "o3",
-  "o3-mini",
-  "o4-mini",
-]);
+/** The set of CLIs itsybitsy knows how to launch. */
+export const KNOWN_CLIS: ReadonlySet<AgentCli> = new Set<AgentCli>(["claude", "codex"]);
+
+/** A parsed `<cli>:<model>` string: the resolved CLI and the verbatim model half. */
+export interface ParsedModel {
+  cli: AgentCli;
+  model: string;
+}
+
+/** A syntactically valid cli token: starts with a letter, then alphanumeric + dash. */
+const CLI_TOKEN = /^[A-Za-z][A-Za-z0-9-]*$/;
 
 /**
- * Prefixes that mark a model as Codex even when the exact name is not in
- * `CODEX_MODELS` (covers versioned / dated / sized variants of each family).
- * Compared case-insensitively against the trimmed, lowercased model name.
+ * Parse a `<cli>:<model>` model string (SPEC-CODEX-MODEL.md §5.1).
  *
- * Ordering / specificity does not matter — any match means "codex".
+ * Rules:
+ *   - Split on the FIRST colon; the model half is greedy-to-end (everything
+ *     after the first `:`) and is preserved VERBATIM (case + any further colons).
+ *   - The cli half is whitespace-trimmed and compared case-insensitively against
+ *     `KNOWN_CLIS`.
+ *
+ * Throws a typed `Error` on:
+ *   - missing colon (a bare name like `opus`),
+ *   - a malformed cli token (must match `^[A-Za-z][A-Za-z0-9-]*$`),
+ *   - an unknown cli not in `KNOWN_CLIS` (D6: hard-reject).
+ *
+ * Examples:
+ *   parseModel("claude:opus")           -> { cli: "claude", model: "opus" }
+ *   parseModel("codex:gpt-5.1-codex")   -> { cli: "codex",  model: "gpt-5.1-codex" }
+ *   parseModel("claude:weird:value")    -> { cli: "claude", model: "weird:value" }
+ *   parseModel("opus")                  -> throws (missing colon)
+ *   parseModel("gemini:foo")            -> throws (unknown cli)
  */
-const CODEX_MODEL_PREFIXES: readonly string[] = [
-  "gpt-5-codex", // gpt-5-codex, gpt-5-codex-2025-xx-xx, gpt-5-codex-high, …
-  "gpt-5.1-codex", // gpt-5.1-codex, gpt-5.1-codex-max, gpt-5.1-codex-min, gpt-5.1-codex-mini, …
-  "o3", // o3, o3-mini, o3-pro, …
-  "o4-mini", // o4-mini, o4-mini-high, …
-];
+export function parseModel(input: string): ParsedModel {
+  const colon = input.indexOf(":");
+  if (colon < 0) {
+    throw new Error(
+      `Invalid model '${input}': expected '<cli>:<model>' (e.g. 'claude:opus'); known CLIs: claude, codex`,
+    );
+  }
 
-/** Normalize a raw model string for matching: trim surrounding whitespace, lowercase. */
-function normalizeModel(model: string): string {
-  return model.trim().toLowerCase();
+  // cli half: whitespace-trimmed, case-insensitive against KNOWN_CLIS.
+  const rawCli = input.slice(0, colon).trim();
+  // model half: everything after the FIRST colon, verbatim (greedy-to-end).
+  const model = input.slice(colon + 1);
+
+  if (!CLI_TOKEN.test(rawCli)) {
+    throw new Error(
+      `Malformed CLI '${rawCli}' in model '${input}': a CLI name must match ^[A-Za-z][A-Za-z0-9-]*$`,
+    );
+  }
+
+  const cli = rawCli.toLowerCase();
+  if (!KNOWN_CLIS.has(cli as AgentCli)) {
+    throw new Error(`Unknown CLI '${cli}' in model '${input}'; known: claude, codex`);
+  }
+
+  return { cli: cli as AgentCli, model };
 }
 
 /**
- * True iff `model` is a known OpenAI Codex CLI model (exact or prefix match).
- *
- * Case-insensitive and tolerant of surrounding whitespace. Empty / whitespace-
- * only input is NOT a Codex model (→ false → resolves to claude default).
- */
-export function isCodexModel(model: string): boolean {
-  const normalized = normalizeModel(model);
-  if (!normalized) return false;
-  if (CODEX_MODELS.has(normalized)) return true;
-  // Boundary-aware prefix match: a prefix matches only the exact name or a
-  // `<prefix>-<variant>` family member, never a longer run-on token. So `o3`
-  // matches `o3` / `o3-mini` / `o3-pro` but NOT `o35` / `o3x` / `o32`, and
-  // `gpt-5-codex` does not bleed into `gpt-5-codexx`.
-  return CODEX_MODEL_PREFIXES.some(
-    (prefix) => normalized === prefix || normalized.startsWith(prefix + "-"),
-  );
-}
-
-/**
- * Resolve which CLI should run a given model.
- *
- * Returns `"codex"` iff the model is a known Codex model (see `isCodexModel`);
- * otherwise `"claude"`. Claude is the default for every unknown / Claude model
- * so existing agents are never re-routed.
+ * Resolve which CLI should run a given model string. Thin wrapper over
+ * `parseModel` (D1: the cli is the explicit prefix, never inferred). Throws on
+ * an invalid / unknown model string, same as `parseModel`.
  */
 export function resolveCli(model: string): AgentCli {
-  return isCodexModel(model) ? "codex" : "claude";
+  return parseModel(model).cli;
+}
+
+/**
+ * True iff `model` is a codex model string (`codex:<model>`). Thin wrapper over
+ * `parseModel`; throws on an invalid / unknown model string.
+ */
+export function isCodexModel(model: string): boolean {
+  return parseModel(model).cli === "codex";
 }

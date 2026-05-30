@@ -87,6 +87,27 @@ export async function printAndExit(result: { ok: boolean; exitCode: number; stdo
 }
 
 /**
+ * Read message/prompt body from stdin when it is piped (not a TTY), trimming
+ * surrounding whitespace to match `send`'s historical semantics. Returns an
+ * empty string when stdin is a TTY, so an interactive invocation with no
+ * positional arg never blocks waiting for input.
+ *
+ * This is the shared stdin-reading core behind the heredoc fallback for
+ * `ib send`, `ib new-agent`, and `ib ask`. It mirrors the established pattern
+ * (`for await (const chunk of process.stdin)`) used by `send` and `parse-state`
+ * — deliberately NOT `Bun.stdin.stream()` — so all three CLI paths stay
+ * consistent.
+ */
+export async function readStdinIfPiped(): Promise<string> {
+  if (process.stdin.isTTY) return "";
+  const chunks: string[] = [];
+  for await (const chunk of process.stdin) {
+    chunks.push(typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk));
+  }
+  return chunks.join("").trim();
+}
+
+/**
  * Injectable check for whether the system-coordinator tmux session is running.
  * Default implementation calls `tmux has-session -t ib-coordinator`. Tests can
  * override via `setSystemCoordinatorHasSessionFn()` to avoid invoking tmux.
@@ -1106,14 +1127,7 @@ async function main() {
       const resolveMessageBody = async (): Promise<string> => {
         if (inlineMessage) return inlineMessage;
         if (fileContent !== undefined) return fileContent;
-        if (!process.stdin.isTTY) {
-          const chunks: string[] = [];
-          for await (const chunk of process.stdin) {
-            chunks.push(typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk));
-          }
-          return chunks.join("").trim();
-        }
-        return "";
+        return readStdinIfPiped();
       };
 
       const { agent: resolvedAgent, isSystemCoordinator } = await resolveTarget(target, repos);
@@ -1290,6 +1304,10 @@ async function main() {
       // gate the unknown-short-flag rejection so that a user CAN write a prompt
       // that starts with a dash by quoting it after the first non-flag token.
       let seenPromptToken = false;
+      // Track whether an explicit -f/--file/--prompt-file was supplied. When it
+      // was, its content wins over stdin (even if empty), so the heredoc stdin
+      // fallback is suppressed — mirroring `send`'s "-f > stdin" precedence.
+      let promptFromFile = false;
       for (let i = 0; i < ibArgs.length; i++) {
         const arg = ibArgs[i]!;
         if (arg === "--type") {
@@ -1326,6 +1344,11 @@ async function main() {
           const promptFile = Bun.file(promptFilePath);
           if (!(await promptFile.exists())) { console.error(`Error: prompt file not found: ${promptFilePath}`); process.exit(1); }
           promptParts.push(await promptFile.text());
+          // Mark that an explicit -f/--file was supplied so it wins over stdin
+          // even when its content is empty (matching `send`'s "-f > stdin"
+          // precedence). Without this flag, an empty file would leave the prompt
+          // blank and the stdin fallback below would incorrectly leak in.
+          promptFromFile = true;
         }
         else if (arg === "--no-worktree") { opts.noWorktree = true; }
         else if (arg === "--yolo") { opts.yolo = true; }
@@ -1355,7 +1378,16 @@ async function main() {
           seenPromptToken = true;
         }
       }
-      const prompt = promptParts.join(" ");
+      // Prompt precedence: positional tokens / -f file content > piped stdin.
+      // Only fall back to reading stdin (heredoc) when NEITHER a positional
+      // prompt NOR an explicit -f/--file was supplied — exactly like `ib send`,
+      // where -f wins over stdin even when the file is empty. When stdin is a
+      // TTY (interactive, no arg) readStdinIfPiped() returns "" and newAgent()
+      // emits the existing "Error: prompt required" — preserving prior behavior.
+      let prompt = promptParts.join(" ");
+      if (!prompt && !promptFromFile) {
+        prompt = await readStdinIfPiped();
+      }
 
       // Validate --spawned-by / --spawned-by-repo co-dependency and construct spawnedBy
       if (spawnedByRepoPath && !spawnedByAgentId) {
@@ -1444,7 +1476,14 @@ async function main() {
           askQuestionParts.push(arg);
         }
       }
-      const askQuestionText = askQuestionParts.join(" ");
+      // Question precedence: positional tokens > piped stdin. When no positional
+      // question was supplied, fall back to reading stdin (heredoc), exactly like
+      // `ib send`. A TTY with no arg returns "" and falls through to the existing
+      // usage error below — preserving prior behavior.
+      let askQuestionText = askQuestionParts.join(" ");
+      if (!askQuestionText) {
+        askQuestionText = await readStdinIfPiped();
+      }
 
       // Auto-detect agent ID from CWD
       if (!askAgentId) {

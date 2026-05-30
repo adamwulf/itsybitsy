@@ -50,7 +50,16 @@ describe("resolveCli", () => {
   });
 
   describe("known codex models -> codex (exact)", () => {
-    const codexModels = ["gpt-5-codex", "o3", "o3-mini", "o4-mini"];
+    const codexModels = [
+      "gpt-5-codex",
+      "gpt-5.1-codex",
+      "gpt-5.1-codex-max",
+      "gpt-5.1-codex-min",
+      "gpt-5.1-codex-mini",
+      "o3",
+      "o3-mini",
+      "o4-mini",
+    ];
     for (const model of codexModels) {
       test(`'${model}' -> codex`, () => {
         expect(resolveCli(model)).toBe("codex");
@@ -63,6 +72,8 @@ describe("resolveCli", () => {
       "gpt-5-codex-2025-06-01",
       "gpt-5-codex-high",
       "gpt-5-codex-preview",
+      "gpt-5.1-codex-2025-11-01",
+      "gpt-5.1-codex-preview",
       "o3-pro",
       "o3-mini-2025-01-31",
       "o4-mini-high",
@@ -71,6 +82,25 @@ describe("resolveCli", () => {
     for (const model of prefixVariants) {
       test(`'${model}' -> codex`, () => {
         expect(resolveCli(model)).toBe("codex");
+      });
+    }
+  });
+
+  describe("boundary-aware prefix matching: run-on tokens -> claude", () => {
+    // A prefix matches the exact name or a `<prefix>-<variant>` family member,
+    // never a longer run-on token (no delimiter boundary => not a match).
+    const runOns = [
+      "o35",
+      "o3x",
+      "o32",
+      "o4-minix",
+      "gpt-5-codexx",
+      "gpt-5-codexFOO",
+      "gpt-5.1-codexx",
+    ];
+    for (const model of runOns) {
+      test(`'${model}' -> claude`, () => {
+        expect(resolveCli(model)).toBe("claude");
       });
     }
   });
@@ -131,6 +161,22 @@ describe("isCodexModel", () => {
     expect(isCodexModel("o5")).toBe(false);
   });
 
+  test("false for boundary run-on tokens", () => {
+    expect(isCodexModel("o35")).toBe(false);
+    expect(isCodexModel("o3x")).toBe(false);
+    expect(isCodexModel("o32")).toBe(false);
+    expect(isCodexModel("o4-minix")).toBe(false);
+    expect(isCodexModel("gpt-5-codexx")).toBe(false);
+    expect(isCodexModel("gpt-5.1-codexx")).toBe(false);
+  });
+
+  test("true for gpt-5.1-codex family", () => {
+    expect(isCodexModel("gpt-5.1-codex")).toBe(true);
+    expect(isCodexModel("gpt-5.1-codex-max")).toBe(true);
+    expect(isCodexModel("gpt-5.1-codex-min")).toBe(true);
+    expect(isCodexModel("gpt-5.1-codex-mini")).toBe(true);
+  });
+
   test("false for empty / whitespace-only", () => {
     expect(isCodexModel("")).toBe(false);
     expect(isCodexModel("   ")).toBe(false);
@@ -153,14 +199,22 @@ describe("isCodexModel and resolveCli agree", () => {
     "gpt-4o",
     "o2",
     "o5",
+    "o35",
+    "o3x",
+    "gpt-5-codexx",
+    "o4-minix",
     "codex",
     "",
     "   ",
     "gpt-5-codex",
+    "gpt-5.1-codex",
+    "gpt-5.1-codex-max",
+    "gpt-5.1-codex-mini",
     "o3",
     "o3-mini",
     "o4-mini",
     "gpt-5-codex-high",
+    "gpt-5.1-codex-preview",
     "o3-pro",
     "o4-mini-2025-04-16",
     "  GPT-5-CODEX  ",

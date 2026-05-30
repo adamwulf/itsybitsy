@@ -29,13 +29,23 @@ export type AgentCli = "claude" | "codex";
  * Codex models. A `config.json` override (e.g. `codexModels: string[]`) is a
  * deliberate later nicety — NOT part of Phase 0.
  *
- * Pinned to the model families current as of Codex CLI v0.135.0 (2026-05-30):
- *   - gpt-5-codex     (the dedicated Codex model family)
- *   - o3 / o3-mini    (OpenAI reasoning models usable via `codex -m`)
- *   - o4-mini         (OpenAI reasoning model usable via `codex -m`)
+ * Pinned to the model families current as of Codex CLI v0.135.0 (2026-05-30,
+ * cross-checked against ~/.codex/models_cache.json):
+ *   - gpt-5-codex      (the original dedicated Codex model)
+ *   - gpt-5.1-codex*   (the gpt-5.1 dedicated Codex family: -max/-min/-mini)
+ *   - o3 / o3-mini     (OpenAI reasoning models usable via `codex -m`)
+ *   - o4-mini          (OpenAI reasoning model usable via `codex -m`)
+ *
+ * NOTE: `gpt-5.1-codex` does NOT share a prefix with `gpt-5-codex`
+ * ("gpt-5.1-codex".startsWith("gpt-5-codex") is false — char 6 is '.', not '-'),
+ * so the gpt-5.1 family needs its own prefix entry below.
  */
 const CODEX_MODELS: ReadonlySet<string> = new Set([
   "gpt-5-codex",
+  "gpt-5.1-codex",
+  "gpt-5.1-codex-max",
+  "gpt-5.1-codex-min",
+  "gpt-5.1-codex-mini",
   "o3",
   "o3-mini",
   "o4-mini",
@@ -50,6 +60,7 @@ const CODEX_MODELS: ReadonlySet<string> = new Set([
  */
 const CODEX_MODEL_PREFIXES: readonly string[] = [
   "gpt-5-codex", // gpt-5-codex, gpt-5-codex-2025-xx-xx, gpt-5-codex-high, …
+  "gpt-5.1-codex", // gpt-5.1-codex, gpt-5.1-codex-max, gpt-5.1-codex-min, gpt-5.1-codex-mini, …
   "o3", // o3, o3-mini, o3-pro, …
   "o4-mini", // o4-mini, o4-mini-high, …
 ];
@@ -69,7 +80,13 @@ export function isCodexModel(model: string): boolean {
   const normalized = normalizeModel(model);
   if (!normalized) return false;
   if (CODEX_MODELS.has(normalized)) return true;
-  return CODEX_MODEL_PREFIXES.some((prefix) => normalized.startsWith(prefix));
+  // Boundary-aware prefix match: a prefix matches only the exact name or a
+  // `<prefix>-<variant>` family member, never a longer run-on token. So `o3`
+  // matches `o3` / `o3-mini` / `o3-pro` but NOT `o35` / `o3x` / `o32`, and
+  // `gpt-5-codex` does not bleed into `gpt-5-codexx`.
+  return CODEX_MODEL_PREFIXES.some(
+    (prefix) => normalized === prefix || normalized.startsWith(prefix + "-"),
+  );
 }
 
 /**

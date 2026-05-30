@@ -10,7 +10,12 @@ import {
   setAgentOperation,
   clearAgentOperation,
   readAgentTransient,
+  resetReadAgentMetaCache,
+  readAllAgents,
+  buildAgentTree,
 } from "./agents";
+import { matchAgentById } from "./index";
+import { saveRegistry } from "./registry";
 import { makeAgent as _makeAgent, makeSpawnResult } from "./test-utils";
 import {
   killAgent,
@@ -4301,11 +4306,34 @@ describe("newAgent (native)", () => {
     }
   });
 
-  // NOTE: the new-agent → existing-nickname collision check (K5) lives in
-  // nickname.test.ts, not here. It exercises newAgent's internal global
-  // readAllAgents() scan, which watcher.test.ts's GLOBAL mock.module("./agents")
-  // stubs out for files whose ./agents binding resolves after that mock. A
-  // dedicated nickname.test.ts captures the real ./agents first; see its header.
+  test("K5: rejects --name matching an existing agent's nickname (global)", async () => {
+    const originalHome = process.env.HOME;
+    const fakeHome = await mkdtemp(join(tmpdir(), "ib-nick-collision-"));
+    process.env.HOME = fakeHome;
+    try {
+      // Register THIS repo (tempDir) so readAllAgents() scans it, then plant an
+      // existing agent whose nickname is "taken".
+      await mkdir(join(fakeHome, ".itsybitsy"), { recursive: true });
+      await Bun.write(join(fakeHome, ".itsybitsy", "repos.json"), JSON.stringify({
+        repos: [{ path: tempDir, name: "nick-repo" }],
+      }));
+      // The agent-types dir must exist for newAgent's ensureAgentTypesDir().
+      await (await import("./agent-types")).ensureAgentTypesDir();
+      const existingDir = join(agentsDir, "agent-existing");
+      await mkdir(existingDir, { recursive: true });
+      await Bun.write(join(existingDir, "meta.json"), JSON.stringify({ id: "agent-existing", nickname: "taken", tmux_session: "t-existing" }));
+      resetReadAgentMetaCache();
+
+      setNewAgentSpawnRunner(mockSpawnRunner());
+      const result = await callNewAgent("task", { name: "taken" });
+      expect(result.ok).toBe(false);
+      expect(result.stderr).toContain("collides with an existing agent nickname");
+    } finally {
+      if (originalHome === undefined) delete process.env.HOME;
+      else process.env.HOME = originalHome;
+      await rm(fakeHome, { recursive: true, force: true });
+    }
+  });
 
   // --- Spawn logging tests ---
 
@@ -4813,6 +4841,239 @@ describe("validateAgentName (shared)", () => {
     expect(validateAgentName("alpha", repos)).toContain("collides with registered repo name");
     expect(validateAgentName("r1", repos)).toContain("collides with registered repo name");
     expect(validateAgentName("beta", repos)).toBeNull();
+  });
+});
+
+describe("renameAgent (native, nickname)", () => {
+  let tempDir: string;
+  let secondRepo: string;
+  let originalHome: string | undefined;
+  let fakeHome: string;
+
+  // Register the agent's repo (and optionally a second repo) so renameAgent's
+  // listRepos()/readAllAgents() global scans see the agents on disk.
+  async function registerRepos(paths: string[]): Promise<void> {
+    await saveRegistry({
+      repos: paths.map((p) => ({ path: p, name: basename(p) })),
+    });
+  }
+
+  // Write a meta.json for an agent under <repoPath>/.ittybitty/agents/<id>/.
+  async function writeAgentMeta(repoPath: string, id: string, extra: Record<string, unknown> = {}): Promise<string> {
+    const agentDir = join(repoPath, ".ittybitty", "agents", id);
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id, tmux_session: `t-${id}`, ...extra }));
+    return agentDir;
+  }
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "rename-test-"));
+    secondRepo = await mkdtemp(join(tmpdir(), "rename-test2-"));
+    originalHome = process.env.HOME;
+    fakeHome = await mkdtemp(join(tmpdir(), "rename-home-"));
+    process.env.HOME = fakeHome;
+    resetReadAgentMetaCache();
+  });
+
+  afterEach(async () => {
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+    await rm(tempDir, { recursive: true, force: true });
+    await rm(secondRepo, { recursive: true, force: true });
+    await rm(fakeHome, { recursive: true, force: true });
+    resetReadAgentMetaCache();
+  });
+
+  test("happy path: writes nickname, resolvable by nickname, id still resolves", async () => {
+    const agentDir = await writeAgentMeta(tempDir, "agent-abc");
+    await registerRepos([tempDir]);
+
+    const agent = makeAgent("agent-abc", tempDir);
+    const result = await renameAgent(agent, "pikachu");
+    expect(result.ok).toBe(true);
+
+    // Field written to meta.json
+    const meta = await Bun.file(join(agentDir, "meta.json")).json();
+    expect(meta.nickname).toBe("pikachu");
+
+    // Resolvable by nickname AND by id
+    resetReadAgentMetaCache();
+    const { agents } = await readAllAgents([{ path: tempDir, name: basename(tempDir) }]);
+    expect(matchAgentById("pikachu", agents).match?.id).toBe("agent-abc");
+    expect(matchAgentById("agent-abc", agents).match?.id).toBe("agent-abc");
+  });
+
+  test("writes meta.json with a trailing newline and preserves other fields", async () => {
+    // renameAgent must write meta.json via the shared atomic writer so its
+    // output matches every other meta writer: pretty-printed + trailing "\n".
+    const agentDir = await writeAgentMeta(tempDir, "agent-abc", { model: "opus", prompt: "do work" });
+    await registerRepos([tempDir]);
+
+    const agent = makeAgent("agent-abc", tempDir);
+    const result = await renameAgent(agent, "pikachu");
+    expect(result.ok).toBe(true);
+
+    const raw = await Bun.file(join(agentDir, "meta.json")).text();
+    expect(raw.endsWith("\n")).toBe(true);
+    const meta = JSON.parse(raw);
+    expect(meta.nickname).toBe("pikachu");
+    // Other fields survive the round-trip.
+    expect(meta.id).toBe("agent-abc");
+    expect(meta.model).toBe("opus");
+    expect(meta.prompt).toBe("do work");
+  });
+
+  test("clear also writes meta.json with a trailing newline", async () => {
+    const agentDir = await writeAgentMeta(tempDir, "agent-abc", { nickname: "pikachu" });
+    await registerRepos([tempDir]);
+    const agent = makeAgent("agent-abc", tempDir);
+    agent.meta.nickname = "pikachu";
+    const result = await renameAgent(agent, null);
+    expect(result.ok).toBe(true);
+    const raw = await Bun.file(join(agentDir, "meta.json")).text();
+    expect(raw.endsWith("\n")).toBe(true);
+    expect("nickname" in JSON.parse(raw)).toBe(false);
+  });
+
+  test("overwrite: setting a new nickname replaces the old one", async () => {
+    const agentDir = await writeAgentMeta(tempDir, "agent-abc", { nickname: "old-name" });
+    await registerRepos([tempDir]);
+
+    const agent = makeAgent("agent-abc", tempDir);
+    agent.meta.nickname = "old-name";
+    const result = await renameAgent(agent, "new-name");
+    expect(result.ok).toBe(true);
+
+    const meta = await Bun.file(join(agentDir, "meta.json")).json();
+    expect(meta.nickname).toBe("new-name");
+  });
+
+  test("clear: deletes the field (not empty string)", async () => {
+    const agentDir = await writeAgentMeta(tempDir, "agent-abc", { nickname: "pikachu" });
+    await registerRepos([tempDir]);
+
+    const agent = makeAgent("agent-abc", tempDir);
+    agent.meta.nickname = "pikachu";
+    const result = await renameAgent(agent, null);
+    expect(result.ok).toBe(true);
+
+    const meta = await Bun.file(join(agentDir, "meta.json")).json();
+    expect("nickname" in meta).toBe(false);
+    expect(meta.nickname).toBeUndefined();
+  });
+
+  test("negative: invalid regex rejected", async () => {
+    await writeAgentMeta(tempDir, "agent-abc");
+    await registerRepos([tempDir]);
+    const agent = makeAgent("agent-abc", tempDir);
+    const result = await renameAgent(agent, "has spaces");
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("letters, digits");
+  });
+
+  test("negative: reserved coordinator/system rejected", async () => {
+    await writeAgentMeta(tempDir, "agent-abc");
+    await registerRepos([tempDir]);
+    const agent = makeAgent("agent-abc", tempDir);
+    expect((await renameAgent(agent, "coordinator")).stderr).toContain("reserved");
+    expect((await renameAgent(agent, "system")).stderr).toContain("reserved");
+  });
+
+  test("negative: collision with repo basename AND repo nickname rejected", async () => {
+    await writeAgentMeta(tempDir, "agent-abc");
+    // Register a repo whose basename is "tools" with a repo-nickname "alpha".
+    await saveRegistry({
+      repos: [
+        { path: tempDir, name: basename(tempDir) },
+        { path: "/tmp/tools-repo", name: "tools", nickname: "alpha" },
+      ],
+    });
+    const agent = makeAgent("agent-abc", tempDir);
+    // repo basename
+    expect((await renameAgent(agent, "tools")).stderr).toContain("collides with registered repo name");
+    // repo (display) nickname
+    expect((await renameAgent(agent, "alpha")).stderr).toContain("collides with registered repo name");
+  });
+
+  test("negative: nickname == an existing agent id (global) rejected", async () => {
+    await writeAgentMeta(tempDir, "agent-abc");
+    await writeAgentMeta(tempDir, "agent-other");
+    await registerRepos([tempDir]);
+    const agent = makeAgent("agent-abc", tempDir);
+    const result = await renameAgent(agent, "agent-other");
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("collides with an existing agent id");
+  });
+
+  test("negative: nickname == another agent's nickname (cross-repo) rejected", async () => {
+    await writeAgentMeta(tempDir, "agent-abc");
+    // A DIFFERENT repo holds an agent that already owns the nickname "shared".
+    await writeAgentMeta(secondRepo, "agent-far", { nickname: "shared" });
+    await registerRepos([tempDir, secondRepo]);
+
+    const agent = makeAgent("agent-abc", tempDir);
+    const result = await renameAgent(agent, "shared");
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("already used by agent agent-far");
+  });
+
+  test("negative: nickname == own id rejected (points at --clear)", async () => {
+    await writeAgentMeta(tempDir, "agent-abc");
+    await registerRepos([tempDir]);
+    const agent = makeAgent("agent-abc", tempDir);
+    const result = await renameAgent(agent, "agent-abc");
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("--clear");
+  });
+
+  test("allows re-setting THIS agent's own existing nickname value", async () => {
+    // Setting the same nickname again should not trip the "another agent's
+    // nickname" check (it's this agent's own).
+    const agentDir = await writeAgentMeta(tempDir, "agent-abc", { nickname: "pikachu" });
+    await registerRepos([tempDir]);
+    const agent = makeAgent("agent-abc", tempDir);
+    agent.meta.nickname = "pikachu";
+    const result = await renameAgent(agent, "pikachu");
+    expect(result.ok).toBe(true);
+    const meta = await Bun.file(join(agentDir, "meta.json")).json();
+    expect(meta.nickname).toBe("pikachu");
+  });
+
+  test("byId shadow guard: a nickname equal to another agent's id does not shadow it in buildAgentTree", async () => {
+    // manager "agent-mgr" + child whose manager points at "agent-mgr".
+    // A third agent carries nickname "agent-mgr". buildAgentTree's byId map is
+    // keyed by real id, so the child must still resolve to the real manager.
+    const mgr = makeAgent("agent-mgr", tempDir);
+    const child = makeAgent("agent-child", tempDir);
+    child.meta.manager = "agent-mgr";
+    const impostor = makeAgent("agent-impostor", tempDir);
+    impostor.meta.nickname = "agent-mgr"; // would shadow if nickname were keyed
+
+    const roots = buildAgentTree([impostor, mgr, child]);
+    // The real manager owns the child; the impostor does not.
+    const realMgr = roots.find((a) => a.id === "agent-mgr");
+    expect(realMgr).toBeDefined();
+    expect(realMgr!.children.map((c) => c.id)).toContain("agent-child");
+    const imp = roots.find((a) => a.id === "agent-impostor");
+    expect(imp?.children.length ?? 0).toBe(0);
+  });
+
+  test("clear on an agent that has no nickname is a no-op success", async () => {
+    const agentDir = await writeAgentMeta(tempDir, "agent-abc");
+    await registerRepos([tempDir]);
+    const agent = makeAgent("agent-abc", tempDir);
+    const result = await renameAgent(agent, null);
+    expect(result.ok).toBe(true);
+    const meta = await Bun.file(join(agentDir, "meta.json")).json();
+    expect("nickname" in meta).toBe(false);
+  });
+
+  test("agent not found (set) returns error", async () => {
+    await registerRepos([tempDir]);
+    const agent = makeAgent("agent-missing", tempDir);
+    const result = await renameAgent(agent, "pikachu");
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("not found");
   });
 });
 

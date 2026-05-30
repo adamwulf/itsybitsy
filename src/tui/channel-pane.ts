@@ -79,6 +79,32 @@ export function formatChannelLine(
   return `[sent by ${label}${teamClause}]: ${record.message}`;
 }
 
+/**
+ * Render one SYSTEM (lifecycle) record as a dimmed `── … ──` separator-style
+ * line. System records carry join/leave/team-create notices that are written to
+ * `<team>.channel.jsonl` alongside chat (§17.4 design update); this renders
+ * them in a visually distinct, deliberately quieter form so they don't compete
+ * with the chat grammar. Exported so tests can assert directly.
+ *
+ * Actor shapes:
+ *   - real agent id (not `@`-prefixed, not `""`) → `── <agentId> <message> ──`
+ *     (e.g. `── agent-abc123 joined the team ──`)
+ *   - `@`-sentinel actor (e.g. `@system`) → `── <message> ──`
+ *     (the sentinel is dropped — `@system created the team` is noise; the
+ *     bare separator form already reads as a system event)
+ *
+ * The whole line is wrapped in `DIM`/`RESET` so the chat box renders it dimmed.
+ */
+export function formatChannelSystemLine(record: ChannelMessage): string {
+  const isSentinel = record.fromAgent.startsWith("@");
+  const isHuman = record.fromAgent === "";
+  const body =
+    isSentinel || isHuman
+      ? record.message
+      : `${record.fromAgent} ${record.message}`;
+  return `${DIM}── ${body} ──${RESET}`;
+}
+
 /** Format an epoch-SECONDS timestamp as a short `HH:MM` clock-time gutter. */
 function formatClockGutter(ts: number): string {
   const d = new Date(ts * 1000);
@@ -164,12 +190,18 @@ export class ChannelPaneComponent implements Component {
     }
 
     // Build the full wrapped line list (newest at the bottom). Each record
-    // becomes a `HH:MM` dim gutter + the §16.4 sender-prefixed line, then is
+    // becomes a `HH:MM` dim gutter + the per-kind formatted body, then is
     // hard-wrapped to the pane width (ANSI-aware) like the tmux pane does.
+    // The gutter shape is identical for chat and system records (the clock-
+    // time is useful context for both); only the body changes — chat uses the
+    // §16.4 sender-prefixed grammar, system uses the dimmed `── … ──` form.
     const wrapped: string[] = [];
     for (const rec of this.messages) {
       const gutter = `${DIM}${formatClockGutter(rec.ts)}${RESET} `;
-      const body = formatChannelLine(rec, this.teamName, this.userName);
+      const body =
+        rec.kind === "system"
+          ? formatChannelSystemLine(rec)
+          : formatChannelLine(rec, this.teamName, this.userName);
       wrapped.push(...wrapLines(gutter + body, width));
     }
 

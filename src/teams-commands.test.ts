@@ -294,6 +294,19 @@ describe("teams: command layer (create/add/remove/list/delete/roster/send)", () 
     expect(dup.stderr).toContain("already exists");
   });
 
+  test("teamCreate writes a SYSTEM record to the team's channel.jsonl ('team created', @system actor)", async () => {
+    const res = await teamCreate("backend");
+    expect(res.ok).toBe(true);
+    const recs = await readChannel("backend");
+    // The team-create system notice should be the ONLY record in the new channel.
+    expect(recs.length).toBe(1);
+    expect(recs[0]!.kind).toBe("system");
+    expect(recs[0]!.fromAgent).toBe("@system");
+    // §17.4 design update: chat-box copy drops the "by <user>" attribution
+    // suffix that <team>.log keeps. Audit log keeps the full version.
+    expect(recs[0]!.message).toBe("team created");
+  });
+
   // --- teamAdd ------------------------------------------------------------
 
   test("teamAdd errors when the team does not exist", async () => {
@@ -333,6 +346,15 @@ describe("teams: command layer (create/add/remove/list/delete/roster/send)", () 
     expect(newQueue[0]!.team).toBe("backend");
     expect(newQueue[0]!.message).toContain("ib send @backend");
     expect(newQueue[0]!.message).toContain("ib roster @backend");
+
+    // And the channel.jsonl now carries a SYSTEM `joined the team` record so
+    // the chat box renders the lifecycle event dimmed inline with chat (§17.4
+    // design update). The actor is the joiner's FULL id (not the partial used
+    // on the CLI), matching what was persisted to teams.json.
+    const recs = await readChannel("backend");
+    const joins = recs.filter((r) => r.kind === "system" && r.message === "joined the team");
+    expect(joins.length).toBe(1);
+    expect(joins[0]!.fromAgent).toBe("agent-newcomer");
   });
 
   test("teamAdd of an already-member is a no-op success (no notice)", async () => {
@@ -376,6 +398,13 @@ describe("teams: command layer (create/add/remove/list/delete/roster/send)", () 
     expect(queue[0]!.message).toBe("left the team");
     expect(queue[0]!.fromAgent).toBe("agent-leaver");
     expect(queue[0]!.team).toBe("backend");
+
+    // The leave is also mirrored into the channel.jsonl as a SYSTEM record so
+    // the chat box renders it dimmed inline with chat (§17.4 design update).
+    const recs = await readChannel("backend");
+    const leaves = recs.filter((r) => r.kind === "system" && r.message === "left the team");
+    expect(leaves.length).toBe(1);
+    expect(leaves[0]!.fromAgent).toBe("agent-leaver");
   });
 
   test("teamRemove of a non-member is a no-op success", async () => {
@@ -590,10 +619,14 @@ describe("teams: command layer (create/add/remove/list/delete/roster/send)", () 
     const res1 = await teamSend("backend", members, "alone but talking", { fromAgent: "agent-solo" }, repos());
     expect(res1.ok).toBe(true);
     expect(res1.stdout).toBe("no recipients in @backend");
+    // The channel now contains TWO records: the SYSTEM `team created` notice
+    // written by teamCreate (§17.4 design update) and the chat record this
+    // teamSend appended. Filter to the chat path for the placement assertion.
     const channel = await readChannel("backend");
-    expect(channel.length).toBe(1);
-    expect(channel[0]!.message).toBe("alone but talking");
-    expect(channel[0]!.fromAgent).toBe("agent-solo");
+    const chatRecords = channel.filter((r) => r.kind !== "system");
+    expect(chatRecords.length).toBe(1);
+    expect(chatRecords[0]!.message).toBe("alone but talking");
+    expect(chatRecords[0]!.fromAgent).toBe("agent-solo");
 
     // Case (2): nonexistent team — no append, command errors.
     const res2 = await teamSend("ghost-team", [], "into the void", undefined, repos());

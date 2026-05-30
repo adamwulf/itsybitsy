@@ -7791,6 +7791,7 @@ describe("teams: teardown leave-notices (kill / merge / nuke)", () => {
   test("killAgent fires a per-agent leave notice to survivors, stamped to the departed id", async () => {
     const { createTeam, addMember, getTeam } = await import("./teams");
     const { readOutbox } = await import("./outbox");
+    const { readChannel } = await import("./team-channel");
     await createTeam("backend", "", 1000);
     const survivorDir = await plantSurvivor("agent-survivor");
     await plantDeparting("agent-leaver");
@@ -7811,6 +7812,13 @@ describe("teams: teardown leave-notices (kill / merge / nuke)", () => {
     expect(queue[0]!.message).toBe("left the team");
     expect(queue[0]!.fromAgent).toBe("agent-leaver");
     expect(queue[0]!.team).toBe("backend");
+
+    // §17.4 design update: the leave is also mirrored into channel.jsonl as a
+    // SYSTEM record so the chat box renders it dimmed inline with chat.
+    const recs = await readChannel("backend");
+    const leaves = recs.filter((r) => r.kind === "system" && r.message === "left the team");
+    expect(leaves.length).toBe(1);
+    expect(leaves[0]!.fromAgent).toBe("agent-leaver");
   });
 
   test("killAgent of an agent in no team enqueues no leave notice", async () => {
@@ -7887,6 +7895,14 @@ describe("teams: teardown leave-notices (kill / merge / nuke)", () => {
     expect(queue[0]!.message).toBe("left the team");
     expect(queue[0]!.fromAgent).toBe("agent-merged");
     expect(queue[0]!.team).toBe("backend");
+
+    // §17.4 design update: the leave is also mirrored into channel.jsonl as a
+    // SYSTEM record so the chat box renders it dimmed inline with chat.
+    const { readChannel } = await import("./team-channel");
+    const recs = await readChannel("backend");
+    const leaves = recs.filter((r) => r.kind === "system" && r.message === "left the team");
+    expect(leaves.length).toBe(1);
+    expect(leaves[0]!.fromAgent).toBe("agent-merged");
   });
 
   // --- nukeAgent (coalesced) ----------------------------------------------
@@ -7930,6 +7946,17 @@ describe("teams: teardown leave-notices (kill / merge / nuke)", () => {
     expect(queue[0]!.message).toBe("3 members left @T");
     expect(queue[0]!.fromAgent).toBe("@system");
     expect(queue[0]!.team).toBe("T");
+
+    // §17.4 design update: the coalesced leave is also mirrored into
+    // channel.jsonl as a SYSTEM record so the chat box renders it dimmed.
+    // The chat-box copy DROPS the `@<team>` suffix that the outbox notice
+    // carries — the pane already shows which team is being viewed.
+    const { readChannel } = await import("./team-channel");
+    const recs = await readChannel("T");
+    const sys = recs.filter((r) => r.kind === "system");
+    expect(sys.length).toBe(1);
+    expect(sys[0]!.fromAgent).toBe("@system");
+    expect(sys[0]!.message).toBe("3 members left");
   });
 
   test("single-departure nuke yields a '1 member left @T' coalesced notice (singular wording)", async () => {

@@ -54,7 +54,7 @@ import { getTmuxWidthForAgent } from "./tui/widths";
 import { buildPerRepoCoordinatorSettings, checkCoordinatorExists, getCoordinatorAgentId, getCoordinatorHome } from "./coordinator";
 import { loadAgentType, agentTypeExists } from "./agent-types";
 import type { AgentType } from "./agent-types";
-import { resolveCli } from "./agent-cli";
+import { parseModel } from "./agent-cli";
 import {
   buildHooksBlock,
   COORDINATOR_INTERCEPT_MATCHER,
@@ -701,6 +701,23 @@ export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
       return { ok: false, exitCode: 1, stdout: "", stderr: `Invalid model name: ${model}` };
     }
 
+    // Parse the qualified `<cli>:<model>` form (D1) so we pass the model HALF
+    // to `--model`, not the raw `claude:opus`. parseModel throws on
+    // missing/malformed/unknown cli — surface as a resume failure (D6).
+    let modelFlagValue = "";
+    if (model) {
+      try {
+        modelFlagValue = parseModel(model).model;
+      } catch (err) {
+        return {
+          ok: false,
+          exitCode: 1,
+          stdout: "",
+          stderr: err instanceof Error ? err.message : String(err),
+        };
+      }
+    }
+
     // Tmux session was validated at the top of resumeAgent (liveness guard).
     const tmuxSession = agent.meta.tmux_session;
 
@@ -718,8 +735,8 @@ export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
     if (yoloMode) {
       claudeArgs = "--dangerously-skip-permissions --permission-mode bypassPermissions";
     }
-    if (model) {
-      claudeArgs = claudeArgs ? `${claudeArgs} --model ${model}` : `--model ${model}`;
+    if (modelFlagValue) {
+      claudeArgs = claudeArgs ? `${claudeArgs} --model ${modelFlagValue}` : `--model ${modelFlagValue}`;
     }
 
     // Note: per-repo coordinators never reach this point — the early branch at
@@ -2839,7 +2856,7 @@ async function buildAgentSettings(
  * 4.  Validate manager (resolve partial ID, check not a worker)
  * 5.  Yolo escalation check
  * 6.  Load config for model, maxAgents, permissions, prompts
- * 7.  Model fallback: --model > config.model > 'opus'
+ * 7.  Model fallback: --model > config.model > 'claude:opus'
  * 8.  Max agents check
  * 9.  Generate agent ID (--name or agent-<8 hex chars>)
  * 10. Uniqueness check (dir + tmux session)
@@ -3163,12 +3180,13 @@ export async function newAgent(
   //        > _non_coordinator.md model (non-coordinator agents only)
   //        > _all.md model
   //        > config.model (or coordinator.model for coordinators)
-  //        > 'opus'
+  //        > 'claude:opus'
   //    The agent-type layers (least→most specific: _all < _non_coordinator <
   //    <type>) all override the user's config.model; config.model is the final
-  //    fallback before 'opus'. A blank `model:` in a more-specific layer is
-  //    `undefined` after parsing and so does NOT clobber a real value set by a
-  //    less-specific layer.
+  //    fallback before 'claude:opus'. A blank `model:` in a more-specific layer
+  //    is `undefined` after parsing and so does NOT clobber a real value set by
+  //    a less-specific layer. All model strings are the qualified
+  //    `<cli>:<model>` form (D1/D5); parseModel below rejects bare names + unknown CLI.
   let model = opts?.model ?? "";
   if (!model) {
     // Walk layers from most-specific to least; first non-empty wins.
@@ -3190,19 +3208,29 @@ export async function newAgent(
       if (configModel) model = configModel;
     }
   }
-  if (!model) model = "opus";
+  if (!model) model = "claude:opus";
 
-  // Validate model name before bash interpolation
+  // Validate model name before bash interpolation (syntactic / shell-safety).
   if (!isValidModel(model)) {
     return { ok: false, exitCode: 1, stdout: "", stderr: `Invalid model name: ${model}` };
   }
 
-  // Resolve which CLI this model implies (SPEC-CODEX-MODEL.md §5.1, Phase 0).
-  // Phase 0 only computes the value so it is available at the model-precedence
-  // seam; it does NOT yet branch the spawn path — the generated start.sh below
-  // still launches `claude` unconditionally, so the claude launch is unchanged.
-  // Later phases (3+) will branch start.sh assembly on `agentCli`.
-  const agentCli = resolveCli(model);
+  // Parse the qualified `<cli>:<model>` form (SPEC-CODEX-MODEL.md §5.1, D1).
+  // parseModel throws on a missing/malformed/unknown cli — the spawn is rejected
+  // with the D6 message ("Unknown CLI '<x>' in model '<x>:<...>'; known: claude, codex").
+  let parsed: ReturnType<typeof parseModel>;
+  try {
+    parsed = parseModel(model);
+  } catch (err) {
+    return {
+      ok: false,
+      exitCode: 1,
+      stdout: "",
+      stderr: err instanceof Error ? err.message : String(err),
+    };
+  }
+  const agentCli = parsed.cli;
+  const modelFlagValue = parsed.model;
 
   // 7.1. Permissions are assembled in three layers (SPEC §2.3):
   //   1. `_all.md` frontmatter — applied to every spawned agent
@@ -3617,8 +3645,8 @@ When your task is complete:
   if (denyTools) {
     claudeArgs = claudeArgs ? `${claudeArgs} --disallowedTools ${denyTools}` : `--disallowedTools ${denyTools}`;
   }
-  if (model) {
-    claudeArgs = claudeArgs ? `${claudeArgs} --model ${model}` : `--model ${model}`;
+  if (modelFlagValue) {
+    claudeArgs = claudeArgs ? `${claudeArgs} --model ${modelFlagValue}` : `--model ${modelFlagValue}`;
   }
   if (coordinatorMode) {
     // Load permissions + hooks from the coordinator's isolated settings file

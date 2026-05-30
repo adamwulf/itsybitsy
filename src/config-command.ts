@@ -1,9 +1,11 @@
 import { readConfig, writeConfig, CONFIG_KEYS, validateConfigValue, defaultUserConfigPath, ensureConfigFilePerms, type ConfigKeyDef } from "./config";
 import { join, dirname } from "path";
 import { mkdir } from "fs/promises";
+import { parseModel } from "./agent-cli";
 
 const ARRAY_KEYS = CONFIG_KEYS.filter((k) => k.type === "string[]").map((k) => k.key);
-const VALID_MODELS = ["sonnet", "opus", "haiku"];
+// Keys whose values are model strings: must be the qualified `<cli>:<model>` form (D1/D5).
+const MODEL_KEYS = new Set(["model", "coordinator.model"]);
 
 function findKey(key: string): ConfigKeyDef | undefined {
   return CONFIG_KEYS.find((k) => k.key === key);
@@ -71,9 +73,18 @@ function parseSetValue(key: string, rawValue: string, def: ConfigKeyDef): { valu
     return { value: rawValue === "true" };
   }
   if (def.type === "string") {
-    if (key === "model") {
-      if (!VALID_MODELS.includes(rawValue)) {
-        return { value: null, error: `'${key}' must be one of: ${VALID_MODELS.join(", ")}` };
+    if (MODEL_KEYS.has(key)) {
+      // Per D1/D5 model strings must be the qualified `<cli>:<model>` form
+      // (e.g. "claude:opus", "codex:gpt-5.1-codex"). Bare names ("opus") are
+      // rejected; unknown CLIs are rejected with the D6 message.
+      try {
+        parseModel(rawValue);
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        return {
+          value: null,
+          error: `'${key}' must be a qualified '<cli>:<model>' string (e.g. 'claude:opus', 'codex:gpt-5.1-codex'): ${reason}`,
+        };
       }
     }
     return { value: rawValue };
@@ -100,7 +111,7 @@ function printHelp(): void {
   }
   console.log("");
   console.log("Examples:");
-  console.log("  ib config set model sonnet");
+  console.log("  ib config set model claude:sonnet");
   console.log("  ib config set maxAgents 5");
   console.log("  ib config set hooks.injectStatus false");
   console.log("  ib config set hooks.injectTimestamp true");

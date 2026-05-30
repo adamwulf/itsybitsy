@@ -13,6 +13,7 @@ import { isCompacting, isRateLimited } from "./agents";
 import { SpawnContext } from "./types";
 import { getTmuxWidthForAgent } from "./tui/widths";
 import { isValidSessionId, isValidModel } from "./validation";
+import { parseModel } from "./agent-cli";
 import {
   buildHooksBlock,
   buildLayeredPermissions,
@@ -416,10 +417,21 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
   await coordinatorSpawnCtx.run(["tmux", "set-option", "-w", "-t", IB_COORDINATOR_SESSION, "window-size", "manual"]);
 
   const config = await readConfig();
-  const rawModel = (config["coordinator.model"]?.value as string) ?? "opus";
+  const rawModel = (config["coordinator.model"]?.value as string) ?? "claude:opus";
   // Reject malformed model names — they would otherwise be interpolated into
-  // the shell command below.
-  const model = isValidModel(rawModel) ? rawModel : "opus";
+  // the shell command below. Fall back to the qualified default if shell-unsafe.
+  const safeModel = isValidModel(rawModel) ? rawModel : "claude:opus";
+  // Parse the qualified `<cli>:<model>` form (SPEC-CODEX-MODEL.md §5.1, D1/D9).
+  // Per D9 the coordinator is NOT claude-only — any `<cli>:<model>` is valid —
+  // but full codex-coordinator wiring lands in a later phase. Reject codex
+  // values loudly rather than silently launching claude with the wrong model.
+  const parsed = parseModel(safeModel);
+  if (parsed.cli !== "claude") {
+    throw new Error(
+      `codex coordinators not yet implemented; use claude:<model> for coordinator.model (got '${safeModel}')`,
+    );
+  }
+  const model = parsed.model;
   const imessage = config["coordinator.imessage"]?.value === true;
 
   // Resume the newest non-cleared transcript. Skip on the post-failure retry

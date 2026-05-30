@@ -52,6 +52,7 @@ import {
   resetSendSpawnRunner,
 } from "./ib-commands";
 import { createTeam, getTeam, addMember } from "./teams";
+import { readChannel, channelPath } from "./team-channel";
 import { resolveTarget } from "./index";
 
 // A fresh transient that makes sendMessage believe a live watchdog will drain,

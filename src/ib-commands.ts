@@ -73,6 +73,11 @@ import {
   removeMember,
   pruneDeadMembers,
 } from "./teams";
+import {
+  appendChannelMessage,
+  appendTeamLog,
+  deleteChannelFiles,
+} from "./team-channel";
 import { timed } from "./perf";
 
 export interface IbCommandResult {
@@ -251,6 +256,8 @@ async function emitPerAgentLeaveNotice(
     const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })));
     const byId = new Map(agents.map((a) => [a.id, a]));
     for (const { team: teamName, id: departedId } of prunedTeams) {
+      // Audit the departure in the team's <team>.log (§17.4). Best-effort.
+      await appendTeamLog(teamName, `agent ${departedId} left (kill/merge)`).catch(() => {});
       // Post-prune survivors (departed id already removed from teams.json).
       const team = await getTeam(teamName);
       if (!team) continue;
@@ -291,6 +298,10 @@ async function emitCoalescedLeaveNotice(
     const byId = new Map(agents.map((a) => [a.id, a]));
 
     for (const [teamName, count] of departuresByTeam) {
+      // Audit the coalesced departure in the team's <team>.log (§17.4). Logged
+      // for every affected team, BEFORE the empty-survivor carve-out below, so a
+      // nuke that empties a team still records the event. Best-effort.
+      await appendTeamLog(teamName, `${count} member${count === 1 ? "" : "s"} left (nuke)`).catch(() => {});
       // Post-prune survivors (all this op's departures already removed).
       const team = await getTeam(teamName);
       if (!team || team.members.length === 0) continue; // empty-survivor carve-out
@@ -2312,6 +2323,24 @@ export async function teamSend(
     if (agent) recipients.push(agent);
   }
 
+  // Persist ONE channel record per send to the shared team channel (§17.4) — the
+  // chat box's backing history. Placed AFTER the not-found check (so a nonexistent
+  // team writes no channel file) but BEFORE the empty-recipient early return, so a
+  // self-only / zero-survivor send to an EXISTING team still records the message
+  // in the room's history (the §17.4 recommended default: append when the team
+  // exists and the message is non-empty, even with an empty recipient set). It is
+  // ONE record per send (NOT inside the per-recipient loop, which would write N
+  // duplicate lines) and records the message regardless of per-recipient delivery
+  // success — the channel is the room's history, not a delivery receipt.
+  // Best-effort: a channel-append failure must never fail the send (§17.4).
+  if (message) {
+    await appendChannelMessage(name, {
+      ts: Math.floor(Date.now() / 1000),
+      fromAgent: senderId,
+      message,
+    }).catch(() => {});
+  }
+
   if (recipients.length === 0) {
     // No one to deliver to — empty team, self-only, or all-pruned. No-op success.
     return teamOk(`no recipients in @${name}`);
@@ -2355,6 +2384,9 @@ async function fireJoinNotice(
   addedId: string,
   repos: RepoEntry[],
 ): Promise<void> {
+  // Audit the lifecycle event in the team's <team>.log (§17.4). Best-effort and
+  // additive — never changes the notice fan-out below.
+  await appendTeamLog(name, `agent ${addedId} joined`).catch(() => {});
   try {
     const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })));
     const byId = new Map(agents.map((a) => [a.id, a]));
@@ -2398,6 +2430,9 @@ async function fireRemoveLeaveNotice(
   removedId: string,
   repos: RepoEntry[],
 ): Promise<void> {
+  // Audit the lifecycle event in the team's <team>.log (§17.4). Best-effort and
+  // additive — never changes the notice fan-out below.
+  await appendTeamLog(name, `agent ${removedId} left`).catch(() => {});
   try {
     const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })));
     const byId = new Map(agents.map((a) => [a.id, a]));
@@ -2452,6 +2487,8 @@ export async function teamCreate(name: string, opts?: { createdBy?: string }): P
     // createTeam throws only on the already-exists race/collision (§teams.ts).
     return teamErr(`Error: team @${n} already exists`);
   }
+  // Audit the creation in the team's <team>.log (§17.4). Best-effort.
+  await appendTeamLog(n, `team created by ${opts?.createdBy || "user"}`).catch(() => {});
   return teamOk(`Created team @${n}`);
 }
 
@@ -2536,6 +2573,11 @@ export async function teamDelete(name: string): Promise<IbCommandResult> {
   if (!ok) {
     return teamErr(`Error: team @${n} not found`);
   }
+  // Cleanup the team's channel + log files (§17.4 cleanup default) so a deleted
+  // team leaves no orphaned files and a later `ib team create` of the same name
+  // starts with a clean channel. Best-effort, in the COMMAND wrapper (not the
+  // locked `deleteTeam` registry primitive). Placed after the successful delete.
+  await deleteChannelFiles(n).catch(() => {});
   return teamOk(`Deleted team @${n}`);
 }
 

@@ -2168,9 +2168,12 @@ describe("DashboardComponent right pane and navigation features", () => {
 });
 
 describe("focus cycling", () => {
-  test("Tab cycles focus forward through all 4 targets (no coordinator in normal mode)", () => {
+  test("Tab cycles focus forward through all targets (no coordinator in normal mode)", () => {
+    // §17.1: teams-tree is an active stop between agent-tree and info.
     const dashboard = makeDashboard();
     expect(dashboard.focus).toBe("agent-tree");
+    dashboard.handleInput("\t");
+    expect(dashboard.focus).toBe("teams-tree");
     dashboard.handleInput("\t");
     expect(dashboard.focus).toBe("info");
     dashboard.handleInput("\t");
@@ -2181,7 +2184,8 @@ describe("focus cycling", () => {
     expect(dashboard.focus).toBe("agent-tree");
   });
 
-  test("Shift+Tab cycles focus backward through all 4 targets (no coordinator in normal mode)", () => {
+  test("Shift+Tab cycles focus backward through all targets (no coordinator in normal mode)", () => {
+    // §17.1: teams-tree is an active stop between agent-tree and info.
     const dashboard = makeDashboard();
     expect(dashboard.focus).toBe("agent-tree");
     dashboard.handleInput("\x1b[Z"); // Shift+Tab
@@ -2190,6 +2194,8 @@ describe("focus cycling", () => {
     expect(dashboard.focus).toBe("active-agent");
     dashboard.handleInput("\x1b[Z");
     expect(dashboard.focus).toBe("info");
+    dashboard.handleInput("\x1b[Z");
+    expect(dashboard.focus).toBe("teams-tree");
     dashboard.handleInput("\x1b[Z");
     expect(dashboard.focus).toBe("agent-tree");
   });
@@ -2218,7 +2224,8 @@ describe("focus cycling", () => {
       const mainPartDefault = titleLineDefault!.split("│").slice(1).join("│");
       expect(mainPartDefault).not.toContain("\x1b[7m"); // REVERSE
 
-      // Tab twice to active-agent (agent-tree -> info -> active-agent)
+      // Tab to active-agent (agent-tree -> teams-tree -> info -> active-agent)
+      dashboard.handleInput("\t"); // teams-tree
       dashboard.handleInput("\t"); // info
       dashboard.handleInput("\t"); // active-agent
       expect(dashboard.focus).toBe("active-agent");
@@ -3356,6 +3363,7 @@ describe("sidebar height resize ({/} keys)", () => {
     const dashboard = makeDashboard();
     // Give tree some extra height so it can be stolen from (tree min is 1)
     dashboard.sidebar.heightOffsets.tree = 3;
+    dashboard.handleInput("\t"); // teams-tree
     dashboard.handleInput("\t"); // move to info
     expect(dashboard.focus).toBe("info");
     const before = { ...dashboard.sidebar.heightOffsets };
@@ -3368,6 +3376,7 @@ describe("sidebar height resize ({/} keys)", () => {
     const dashboard = makeDashboard();
     // Give tree some extra height, then grow info to have room to shrink
     dashboard.sidebar.heightOffsets.tree = 3;
+    dashboard.handleInput("\t"); // teams-tree
     dashboard.handleInput("\t"); // move to info
     dashboard.handleInput("}"); // grow info, steal from tree
     const before = { ...dashboard.sidebar.heightOffsets };
@@ -3391,6 +3400,7 @@ describe("sidebar height resize ({/} keys)", () => {
     const agent = makeAgent("agent-a", "/repos/test");
     dashboard.onUpdate([agent], [makeFlatAgent(agent)], []);
     // Tab to active-agent
+    dashboard.handleInput("\t"); // teams-tree
     dashboard.handleInput("\t"); // info
     dashboard.handleInput("\t"); // active-agent
     expect(dashboard.focus).toBe("active-agent");
@@ -3403,6 +3413,7 @@ describe("sidebar height resize ({/} keys)", () => {
   test("{/} are no-ops for sidebar height when right-pane is focused", () => {
     const dashboard = makeDashboard();
     // Tab to right-pane
+    dashboard.handleInput("\t"); // teams-tree
     dashboard.handleInput("\t"); // info
     dashboard.handleInput("\t"); // active-agent
     dashboard.handleInput("\t"); // right-pane
@@ -3430,7 +3441,8 @@ describe("sidebar height resize ({/} keys)", () => {
     const dashboard = makeDashboard();
     dashboard.sidebar.displayHeight = 30;
     // Tab to info focus
-    dashboard.handleInput("\t");
+    dashboard.handleInput("\t"); // teams-tree
+    dashboard.handleInput("\t"); // info
     expect(dashboard.focus).toBe("info");
     // Grow info (shrink tree) as many times as possible
     for (let i = 0; i < 100; i++) {
@@ -3445,7 +3457,8 @@ describe("sidebar height resize ({/} keys)", () => {
     const dashboard = makeDashboard();
     dashboard.sidebar.displayHeight = 30;
     // Tab to info focus
-    dashboard.handleInput("\t");
+    dashboard.handleInput("\t"); // teams-tree
+    dashboard.handleInput("\t"); // info
     expect(dashboard.focus).toBe("info");
     // Shrink info as many times as possible
     for (let i = 0; i < 100; i++) {
@@ -3499,6 +3512,7 @@ describe("input field integration", () => {
     Object.defineProperty(process.stdout, "rows", { value: 30, writable: true, configurable: true });
     try {
       // Tab to active-agent, then Tab again to enter input sub-focus
+      dashboard.handleInput("\t"); // teams-tree
       dashboard.handleInput("\t"); // info
       dashboard.handleInput("\t"); // active-agent
       expect(dashboard.focus).toBe("active-agent");
@@ -3549,6 +3563,7 @@ describe("input field integration", () => {
     dashboard.onUpdate([agent], flatList, []);
 
     // Tab to active-agent, then Tab to input sub-focus
+    dashboard.handleInput("\t"); // teams-tree
     dashboard.handleInput("\t"); // info
     dashboard.handleInput("\t"); // active-agent
     expect(dashboard.focus).toBe("active-agent");
@@ -3576,6 +3591,7 @@ describe("input field integration", () => {
     dashboard.onUpdate([agent], flatList, []);
 
     // Tab to active-agent, then Tab to input sub-focus
+    dashboard.handleInput("\t"); // teams-tree
     dashboard.handleInput("\t"); // info
     dashboard.handleInput("\t"); // active-agent
     expect(dashboard.focus).toBe("active-agent");
@@ -3600,6 +3616,7 @@ describe("input field integration", () => {
     dashboard.onUpdate([agent], flatList, []);
 
     // Tab to active-agent, then Tab to input sub-focus
+    dashboard.handleInput("\t"); // teams-tree
     dashboard.handleInput("\t"); // info
     dashboard.handleInput("\t"); // active-agent
     expect(dashboard.focus).toBe("active-agent");
@@ -3625,6 +3642,7 @@ describe("input field integration", () => {
     dashboard.onUpdate([agent], flatList, []);
 
     // Tab to active-agent, then Tab to input sub-focus
+    dashboard.handleInput("\t"); // teams-tree
     dashboard.handleInput("\t"); // info
     dashboard.handleInput("\t"); // active-agent
     expect(dashboard.focus).toBe("active-agent");
@@ -3647,6 +3665,7 @@ describe("input field integration", () => {
     dashboard.onUpdate([agent], flatList, []);
 
     // Tab to active-agent — stays in pane sub-focus
+    dashboard.handleInput("\t"); // teams-tree
     dashboard.handleInput("\t"); // info
     dashboard.handleInput("\t"); // active-agent
     expect(dashboard.focus).toBe("active-agent");
@@ -3665,6 +3684,7 @@ describe("input field integration", () => {
     const flatList: FlatEntry[] = [makeFlatAgent(agent)];
     dashboard.onUpdate([agent], flatList, []);
 
+    dashboard.handleInput("\t"); // teams-tree
     dashboard.handleInput("\t"); // info
     dashboard.handleInput("\t"); // active-agent (pane)
     expect(dashboard.focus).toBe("active-agent");
@@ -3681,6 +3701,7 @@ describe("input field integration", () => {
     const flatList: FlatEntry[] = [makeFlatAgent(agent)];
     dashboard.onUpdate([agent], flatList, []);
 
+    dashboard.handleInput("\t"); // teams-tree
     dashboard.handleInput("\t"); // info
     dashboard.handleInput("\t"); // active-agent (pane)
     dashboard.handleInput("\t"); // pane → input
@@ -3695,6 +3716,7 @@ describe("input field integration", () => {
     const flatList: FlatEntry[] = [makeFlatAgent(agent)];
     dashboard.onUpdate([agent], flatList, []);
 
+    dashboard.handleInput("\t"); // teams-tree
     dashboard.handleInput("\t"); // info
     dashboard.handleInput("\t"); // active-agent (pane)
     dashboard.handleInput("\t"); // pane → input
@@ -3711,6 +3733,7 @@ describe("input field integration", () => {
     dashboard.onUpdate([agent], flatList, []);
 
     // Get to send sub-focus
+    dashboard.handleInput("\t"); // teams-tree
     dashboard.handleInput("\t"); // info
     dashboard.handleInput("\t"); // active-agent (pane)
     dashboard.handleInput("\t"); // pane → input
@@ -3737,6 +3760,7 @@ describe("input field integration", () => {
     dashboard.onUpdate([agent], flatList, []);
 
     // Get to send sub-focus
+    dashboard.handleInput("\t"); // teams-tree
     dashboard.handleInput("\t"); // info
     dashboard.handleInput("\t"); // active-agent (pane)
     dashboard.handleInput("\t"); // pane → input
@@ -3755,6 +3779,7 @@ describe("input field integration", () => {
     dashboard.onUpdate([agent], flatList, []);
 
     // Get to input sub-focus
+    dashboard.handleInput("\t"); // teams-tree
     dashboard.handleInput("\t"); // info
     dashboard.handleInput("\t"); // active-agent (pane)
     dashboard.handleInput("\t"); // pane → input
@@ -3771,6 +3796,7 @@ describe("input field integration", () => {
     dashboard.onUpdate([agent], flatList, []);
 
     // Get to send sub-focus
+    dashboard.handleInput("\t"); // teams-tree
     dashboard.handleInput("\t"); // info
     dashboard.handleInput("\t"); // active-agent (pane)
     dashboard.handleInput("\t"); // pane → input

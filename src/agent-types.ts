@@ -12,6 +12,7 @@ import coordinatorMd from '../docs/agent-types/coordinator.md' with { type: 'tex
 import systemLayerMd from '../docs/agent-types/system.md' with { type: 'text' };
 import allLayerMd from '../docs/agent-types/_all.md' with { type: 'text' };
 import nonCoordinatorLayerMd from '../docs/agent-types/_non_coordinator.md' with { type: 'text' };
+import { parseModel } from './agent-cli';
 
 const EMBEDDED_TYPES: Record<string, string> = {
   'manager': managerMd,
@@ -774,9 +775,17 @@ export async function validateAllAgentTypes(): Promise<string[]> {
           }
         }
 
-        // Validate model if present
+        // Validate model if present. Per D1/D5 the value must be the qualified
+        // `<cli>:<model>` form (e.g. "claude:opus", "codex:gpt-5.1-codex").
+        // Empty string is the "inherit" convention (see EMPTY_STRING_INHERITS).
         if (frontmatter.model !== undefined && typeof frontmatter.model !== "string") {
           errors.push(`${file}: model must be a string`);
+        } else if (typeof frontmatter.model === "string" && frontmatter.model !== "") {
+          try {
+            parseModel(frontmatter.model);
+          } catch (err) {
+            errors.push(`${file}: invalid model — ${err instanceof Error ? err.message : String(err)}`);
+          }
         }
 
         // Validate allowedPaths if present

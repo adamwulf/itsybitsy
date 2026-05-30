@@ -3,9 +3,15 @@
  * Prevents shell injection by enforcing strict character allowlists.
  */
 
-/** Validate a Claude model name: alphanumeric, dots, hyphens, underscores only. */
+/**
+ * Validate a model string for shell interpolation: alphanumeric, dots, hyphens,
+ * underscores, and colons. The colon is needed for the `<cli>:<model>` form
+ * (e.g. `claude:opus`, `codex:gpt-5.1-codex`); it is shell-safe (not a
+ * metacharacter inside the already-quoted interpolations). This is a
+ * syntactic/shell-safety check only — semantic CLI validation is `parseModel`.
+ */
 export function isValidModel(value: string): boolean {
-  return /^[a-zA-Z0-9._-]+$/.test(value);
+  return /^[a-zA-Z0-9._:-]+$/.test(value);
 }
 
 /** Validate a comma-separated tool list for --allowedTools / --disallowedTools. */

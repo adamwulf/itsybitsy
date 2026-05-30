@@ -26,7 +26,7 @@ export function makeAgent(overrides: Partial<Agent> & { id: string }): Agent {
       worktree: true,
       worker: false,
       yolo: false,
-      model: "sonnet",
+      model: "claude:sonnet",
       claude_pid: "12345",
       ...(overrides.meta ?? {}),
     } as AgentMeta,

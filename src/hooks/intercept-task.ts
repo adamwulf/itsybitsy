@@ -6,6 +6,7 @@ import { join } from "path";
 import { newAgent } from "../ib-commands";
 import { checkGitDirectoryFlags, resolveAgentFromCwd, SYSTEM_AGENT_ID } from "./shared";
 import { loadAgentType } from "../agent-types";
+import { parseModel } from "../agent-cli";
 
 export interface InterceptResult {
   action: "skip" | "intercept";
@@ -21,7 +22,21 @@ const SKIP_SUBAGENT_TYPES = [
   "ib-merge",
 ];
 
-const VALID_MODELS = new Set(["sonnet", "opus", "haiku", ""]);
+/**
+ * Validate a Task-tool-supplied model string. Empty (no override) is fine —
+ * the spawn step inherits from agent-type / config. Non-empty values must be
+ * the qualified `<cli>:<model>` form (D1/D5); anything else is silently
+ * coerced to `""` so a malformed Task `model:` arg doesn't fail the spawn.
+ */
+function isAcceptableTaskModel(value: string): boolean {
+  if (value === "") return true;
+  try {
+    parseModel(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Shell metacharacters blocked for coordinator Bash commands (SPEC §12.2.4).
@@ -268,8 +283,10 @@ export async function processTaskIntercept(
   const description = (input.tool_input.description as string) ?? "";
   let model = (input.tool_input.model as string) ?? "";
 
-  // 6. Validate model
-  if (!VALID_MODELS.has(model)) {
+  // 6. Validate model — accept the qualified `<cli>:<model>` form (D1/D5)
+  // or empty (inherit from agent-type / config). Anything malformed is
+  // silently dropped to "" so a bad Task `model:` arg doesn't block the spawn.
+  if (!isAcceptableTaskModel(model)) {
     model = "";
   }
 

@@ -49,6 +49,11 @@ export interface SpawnedBy {
 export interface AgentMeta {
   id: string;
   session_id: string;
+  /**
+   * Codex agents track their own rollout/session id here for `codex resume`;
+   * claude agents leave it unset (they reuse the generated `session_id` UUID).
+   */
+  codex_session_id?: string;
   tmux_session: string;
   prompt: string;
   manager: string | null;

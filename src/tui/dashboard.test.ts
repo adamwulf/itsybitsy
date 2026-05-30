@@ -1310,7 +1310,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     await mkdir(join(newAgentTempDir, ".ittybitty"), { recursive: true });
     await Bun.write(join(newAgentTempDir, ".ittybitty", "repo-id"), "abcd1234\n");
     setUserConfigPath(join(newAgentTempDir, "config.json"));
-    await Bun.write(join(newAgentTempDir, "config.json"), JSON.stringify({ model: "sonnet" }));
+    await Bun.write(join(newAgentTempDir, "config.json"), JSON.stringify({ model: "claude:sonnet" }));
 
     const tempHome = await mkdtemp(join(tmpdir(), "ib-na-home-"));
     const originalHome = process.env.HOME;
@@ -1388,7 +1388,17 @@ describe("DashboardComponent dialog and action handlers", () => {
     await mkdir(join(newAgentTempDir, ".ittybitty"), { recursive: true });
     await Bun.write(join(newAgentTempDir, ".ittybitty", "repo-id"), "abcd1234\n");
     setUserConfigPath(join(newAgentTempDir, "config.json"));
-    await Bun.write(join(newAgentTempDir, "config.json"), JSON.stringify({ model: "sonnet" }));
+    await Bun.write(join(newAgentTempDir, "config.json"), JSON.stringify({ model: "claude:sonnet" }));
+
+    // Isolate from the developer's real ~/.itsybitsy/ so the agent-type layer
+    // files (and any `model:` they declare) come from embedded defaults rather
+    // than the host install. Without this, the spawn would read the user's
+    // possibly-stale ~/.itsybitsy/agent-types/_all.md and a bare-name `model:`
+    // there would be rejected by parseModel (D1/D5).
+    const tempHome = await mkdtemp(join(tmpdir(), "ib-na-home-"));
+    const originalHome = process.env.HOME;
+    process.env.HOME = tempHome;
+    await (await import("../agent-types")).ensureAgentTypesDir();
 
     const spawnCalls: string[] = [];
     const mockSpawn = (cmd: string[]): SpawnResult => {
@@ -1442,7 +1452,9 @@ describe("DashboardComponent dialog and action handlers", () => {
     resetNewAgentSpawnRunner();
     lifecycleSpawnCtx.reset();
     resetUserConfigPath();
+    process.env.HOME = originalHome;
     await rm(newAgentTempDir, { recursive: true, force: true });
+    await rm(tempHome, { recursive: true, force: true });
   });
 
   test("new-agent form: Create is no-op when prompt is empty", async () => {

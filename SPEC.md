@@ -2342,17 +2342,24 @@ Teams are a **TypeScript-only** feature with no bash reference equivalent.
 
 itsybitsy already addresses non-agent routing destinations with an `@`-prefixed **sentinel** convention (§4.1, §8.5, the watchdog notify path): `@system` resolves to the system coordinator, and `@<repo-name>` resolves to that repo's per-repo coordinator. A sentinel is a *named destination that resolves to one-or-more real recipients* — which is exactly what a team is.
 
-Teams therefore fold into the same namespace: a team is addressed as `@<team-name>`. This is a deliberate generalization of the existing sentinel — from "resolves to 1 coordinator" to "resolves to N members" — not a new syntax.
+Teams therefore reuse the same **addressing** namespace: a team is addressed as `@<team-name>`, a deliberate generalization of the existing sentinel — from "resolves to 1 coordinator" to "resolves to N members" — not a new syntax. (This is a statement about the user-facing address space only. It does **not** mean teams drop into the existing resolver code for free — the resolver currently hard-errors on unknown `@name` and returns a single recipient; see §16.4 "Resolver integration is net-new code.")
 
 **Why `@` and not `#`:** an earlier design used `#<team-name>`, but `#` begins a comment in POSIX shells, so a bare `ib team add #team agent-id` would have everything from `#team` onward swallowed by the shell. `@` has no shell-metacharacter problem in any position, so `ib send @team "msg"` and `ib team add @team agent-id` both work unquoted.
 
-**Flat namespace, collision-prevented at creation (the "Option B" rule):** because `@system`, `@<repo-name>`, and `@<team-name>` all share one flat `@` namespace, an ambiguous name would otherwise have to be resolved by guessing precedence at send time. Instead, ambiguity is **refused at creation**:
+**Team-name validation (allowlist):** a team name must match a strict character allowlist before it is ever stored or interpolated into a delivery prefix or session-start injection. The allowed character set mirrors `isValidAgentId` / `isValidTmuxSession` in `validation.ts`: ASCII alphanumerics, hyphen, and underscore (`/^[A-Za-z0-9_-]+$/`), non-empty, with a reasonable length cap. This is **required**, not optional, for three reasons: (a) a name containing `/` would collide with the `@<repo>/<agent>` slash-addressing form (§12.3.1); (b) the name is echoed verbatim into the `[sent by … in @<team>]:` prefix typed into a tmux pane and into the session-start injection, so an unconstrained name is an injection vector; (c) the name is used as a JSON object key and in CLI arguments. `ib team create` rejects any name that fails the allowlist. Case is significant for storage but see the case-folding rule below.
 
-- `ib team create @<name>` fails if `<name>` is the reserved word `system`.
-- `ib team create @<name>` fails if `<name>` matches the basename of any registered repo (§9) — because `@<repo>` already routes to that repo's coordinator.
-- Symmetrically, adding a repo (§9) whose basename collides with an existing team name SHOULD warn (the team becomes shadowed/unreachable otherwise). [^needs review] The exact UX of the repo-add-side warning is not yet finalized; at minimum the collision must be surfaced, not silent.
+**Flat namespace, collision-prevented at creation (the "Option B" rule):** because `@system`, `@<repo-name>`, `@coordinator`, and `@<team-name>` all share one flat `@` namespace, an ambiguous name would otherwise have to be resolved by guessing precedence at send time. Instead, ambiguity is **refused at creation**:
 
-With creation-time prevention, the resolver never has to guess: an `@`-target is `@system` (exact) → a registered repo's coordinator → a team — and the first two can never collide with the third.
+- `ib team create @<name>` fails if `<name>` is a **reserved word**. The reserved set is: `system`, `coordinator`, `watchdog`, `telegram`, and any other bare-rendered sentinel in `BARE_RENDERED_SENTINELS` (§4.1). [^needs review] The implementer must derive this set from the actual sentinel constants at build time rather than hard-coding a literal list here, so the spec and code cannot drift.
+- `ib team create @<name>` fails if `<name>` matches the basename **or the configured nickname** of any registered repo (§9, §12.3.1) — because `@<repo>` (by either name) already routes to that repo's coordinator. Both forms must be checked; checking only the basename leaves a nickname collision open.
+- **Case-folding:** the collision check is **case-insensitive** (`@Backend` collides with a `backend` repo), because the resolver's repo lookup is case-insensitive [^needs review] (confirm against `resolveTarget` — if repo lookup is case-sensitive, drop this and store team names case-sensitively). Team names are stored as entered but matched case-insensitively for both collision-prevention and resolution, so two teams differing only in case cannot coexist.
+
+**Closing the namespace symmetrically (the repo-add side):** create-time prevention on the team side is not sufficient on its own — a repo added *after* a team of the same name would silently shadow the team, because the resolver checks repos before teams. Two acceptable resolutions, and the spec picks the first:
+
+1. **Hard refusal (chosen):** adding a repo (§9) whose basename/nickname collides with an existing team name is **refused**, exactly as the team-create side is refused. This keeps the flat namespace genuinely collision-free in both directions. The user must rename or delete the team first (or choose a different repo nickname).
+2. *(Rejected)* A soft warning that lets the repo win and shadows the team — rejected because it reintroduces the silent-ambiguity the Option B rule exists to eliminate.
+
+With bidirectional creation-time prevention, the resolver never has to guess. Resolution order for an `@`-target is documented as: `@system` (exact) → `@coordinator` / `@<repo>` (a registered repo's coordinator, by basename or nickname) → a team. Because both create paths refuse collisions, the first two branches can never overlap with the third — but the order is still specified so behavior is defined even if a stale `teams.json` survives a repo rename.
 
 ### 16.2 Team Registry State
 
@@ -2380,9 +2387,14 @@ Fields:
 
 Reads tolerate a missing file (no teams yet → empty map). Writes are atomic (tmp + rename), consistent with how `meta.json` and other user-tier state are written.
 
+**Concurrency / locking (required).** Atomic rename guarantees no *torn* file, but **not** no *lost update*: a bare read-modify-write race (A reads `{m1}`, B reads `{m1}`, A writes `{m1,m2}`, B writes `{m1,m3}` → `m2` is lost) is real here, because `ib team add`/`remove`, lazy send-time pruning (§16.5), and teardown pruning all do read-modify-write on the single shared `teams.json`. Concurrent team mutations are plausible (e.g. the system coordinator adds a member while a worker's teardown prunes it). The outbox solves the analogous problem with `.outbox.lock` (§4.1.1); teams gets the same treatment:
+
+- **Lock file**: `.teams.lock` beside `teams.json` in `~/.itsybitsy/`, an advisory lock acquired via exclusive create (`open(path, "wx")`, O_CREAT|O_EXCL) with backoff-retry and a stale-steal threshold, mirroring `acquireOutboxLock`/`steal` (§4.1.1). Every mutating operation (add, remove, create, delete, lazy-prune, teardown-prune) performs **read → modify → write entirely under the lock**, released in a `finally`. Reads that do not mutate (`ib team list`, `ib roster`, resolver lookups, session-start scan) do **not** take the lock — they tolerate reading a concurrently-rewritten file because the atomic rename guarantees they see either the pre- or post-write whole file, never a torn one.
+- This is a single global lock (one `teams.json`), unlike the per-agent outbox lock. Team mutations are infrequent (membership changes, not message traffic), so a single lock is not a throughput concern — message **delivery** still rides the per-agent outbox queues and is never serialized through this lock.
+
 ### 16.3 Commands
 
-All `ib team` subcommands and `ib roster` accept the team name **with or without** a leading `@` and normalize internally, so `@backend` and `backend` are equivalent on the command line. The `@` is required only where the name shares the line with other positional args is ambiguous — but accepting both forms means the user never has to remember which.
+All `ib team` subcommands and `ib roster` accept the team name **with or without** a leading `@` and normalize internally (strip a single leading `@`), so `@backend` and `backend` are equivalent on the command line. The team name is always a distinct positional argument, so the leading `@` is never required for disambiguation — accepting both forms simply means the user never has to remember which. (`ib send` is the one place the `@` carries meaning: `ib send @backend` routes to the team/sentinel namespace, whereas `ib send backend` would be a partial agent-id/repo match per §4.1 — so for `ib send` the `@` is significant, not optional.)
 
 | Command | Behavior |
 |---------|----------|
@@ -2398,9 +2410,17 @@ A team **auto-prunes to empty but is not auto-deleted**: lifecycle pruning (§16
 
 ### 16.4 Team Send (Fan-Out)
 
-`ib send @<team> "message"` resolves the `@`-target to a team (§16.1 resolution order) and then, for each member **other than the sender**, performs a standard `sendMessage` enqueue. Each per-member delivery is independent and rides the existing per-agent outbox queue (§4.1.1), so deliveries to different members serialize per-recipient and never interleave.
+`ib send @<team> "message"` resolves the `@`-target to a team and then, for each member **other than the sender**, performs a standard `sendMessage` enqueue. Each per-member delivery is independent and rides the existing per-agent outbox queue (§4.1.1), so deliveries to different members serialize per-recipient and never interleave.
 
-**Sender exclusion:** the sender (resolved at enqueue time via the same cwd/`--from` logic as §4.1) is omitted from the fan-out. An agent never receives an echo of its own team message. If the sender is not a member of the team (e.g. a human via CLI, or `@system`), all members receive it.
+**Resolver integration is net-new code, not free folding.** An earlier framing claimed teams "fold into" the existing `@`-sentinel resolver for free; that is **not accurate** and the implementer must not assume it. Today the send-target resolver (`resolveTarget`, `index.ts` ~365–401) (a) **hard-errors** on an unknown `@name` rather than falling through, and (b) returns a **single** destination, not an N-recipient set. Team support therefore requires two concrete changes:
+1. A **team branch** added to the resolver, ordered per §16.1 (`@system` → `@coordinator`/`@<repo>` → team) — the team lookup must run only after the existing sentinel/repo branches fail, and must be reached *before* the unknown-`@name` hard-error.
+2. A **return-shape that can express multiple recipients** (or a dedicated team-send path that bypasses the single-recipient resolver and calls `sendMessage` per member). The spec does not mandate which; it mandates that the single-recipient shape is acknowledged and handled, because silently reusing it would deliver to only one member.
+
+**Sender exclusion:** the sender (resolved at enqueue time via the same cwd/`--from` logic as §4.1, `resolveSenderId`) is omitted from the fan-out. An agent never receives an echo of its own team message. If the sender is not a member of the team (e.g. a human via CLI, or `@system`), all members receive it.
+
+- **Caveat — human inside an agent worktree:** sender resolution is cwd-based (`resolveSenderId`), so a *human* who runs `ib send @team` from within an agent's worktree is auto-attributed to that agent and would be excluded from the fan-out as if the agent had sent it. This is the same cwd-attribution behavior as point-to-point `ib send`; the documented escape hatch is `--from` (and the human can pass `--from ""` / omit to force the user-sender path). The implementer should not add special-casing here — just document the `--from` override.
+
+**Empty-team and self-only sends:** after sender-exclusion and dead-member pruning, the recipient set may be empty — either the team has zero members (auto-pruned, §16.3) or its only member is the sender. `ib send @<team>` in that case is a **no-op success** that prints an informational `no recipients in @<team>` line (not an error, not a silent nothing). This must be specified so the implementer does not pick a surprising behavior (error vs. silent).
 
 **Dead/stopped members:** a member whose agent directory no longer exists is **pruned** from the roster at send time (skip-and-prune, see §16.5), not treated as an error. A member that exists but whose tmux session is stopped/complete is delivered to exactly as a point-to-point `ib send` would (the inline drain restarts/queues per §4.1.1) — team send does not special-case agent run state beyond what `sendMessage` already does.
 
@@ -2417,7 +2437,11 @@ This extends the §4.1 step-4 prefix grammar. Note two intentional choices:
 
 For a **human/CLI** sender (no `fromId`), the prefix follows the user form with the team clause: `[sent by user <name> in @<team-name>]: <message>` (or `[sent by user in @<team>]:` when no `user.name` is configured), consistent with §4.1 step 4.
 
-**Implementation note:** the team identity is carried as an optional field on the queued message (e.g. `OutboxMessage.team?: string`) and resolved into the prefix at DRAIN time in `deliverMessage` — matching the §4.1.1 invariant that all label/prefix resolution happens at drain time, not enqueue time. Only the team name (a stable string) is captured at enqueue; no cwd-dependent resolution is deferred incorrectly.
+**Implementation note:** the team identity is carried as an optional field on the queued message (`OutboxMessage.team?: string`) and resolved into the prefix at DRAIN time in `deliverMessage` — matching the §4.1.1 invariant that all label/prefix resolution happens at drain time, not enqueue time. Only the team name (a stable string) is captured at enqueue; no cwd-dependent resolution is deferred incorrectly.
+
+> **Concrete trap (must not be missed):** `readOutbox` in `outbox.ts` reconstructs each `OutboxMessage` by **explicitly listing the known fields** when it parses a JSONL line (it does not spread the parsed object). A newly added `team` field will be **silently dropped on the round-trip through the queue file** unless `readOutbox`'s reconstruction (and the type guard it uses to validate a line) is updated to carry `team` through. This is the single most likely implementation bug for this feature — the field will appear to work for inline drains and vanish for watchdog-driven drains. The implementer must update both the `OutboxMessage` type and the `readOutbox` field reconstruction together, with a test that enqueues a team message and asserts it survives a read-back.
+
+**Notice ordering (persist-then-notify).** All membership notices (join, leave) follow the same rule: the roster change is **persisted first** (under the `.teams.lock`, §16.2), and notices are fanned out **from the post-write roster** only after the write succeeds. Notices are **best-effort** — a delivery failure does not roll back the membership change (consistent with the outbox being best-effort, §4.1.1). This avoids announcing a join/leave that didn't actually persist, and avoids notifying a stale roster. The notice fan-out itself happens **outside** the lock (it only reads the just-written roster), so notice delivery never holds the global teams lock.
 
 #### 16.4.1 Join Notice
 
@@ -2430,27 +2454,43 @@ When an agent is added to a team (`ib team add`), the **existing** members each 
 
 When a member leaves a team — whether via explicit `ib team remove` or via lifecycle teardown (§16.5) — the remaining members receive a leave notice fanned out the same way: `[sent by <agent-id> in @<team>]: left the team` (or system-phrased). [^needs review] Exact wording TBD in review.
 
+**Notice-storm suppression on bulk teardown.** A bulk operation — `ib nuke-all` / `nukeAllAgents` (§3), or any path that tears down many agents at once — would otherwise produce an O(N²) storm: tearing down N agents that share a team fires N leave-notices, each fanned out to up to N−1 recipients. To prevent this, bulk teardown **coalesces**: it computes the net membership delta per team once, applies it as a single roster write, and fans out **at most one summarizing leave notice per team** (e.g. `3 members left @<team>`) rather than one-per-departed-agent. [^needs review] The exact coalescing trigger (which operations count as "bulk") and the summary wording are open; the requirement that bulk teardown must not emit per-agent leave notices is **not** optional. Single-agent teardown (`ib kill`/`ib merge` of one agent) emits the normal per-agent leave notice.
+
 ### 16.5 Lifecycle and Membership Pruning
 
-Membership is stored by agent ID, and agent IDs are **ephemeral** — they retire when an agent is merged, killed, or nuked (§1, §3). The roster must therefore be self-healing:
+Membership is stored by agent ID, and agent IDs are **ephemeral** — they retire when an agent is merged, killed, or nuked (§1, §3). The roster must therefore be self-healing. The mechanism is two-tier: an **eager** prune at teardown (the primary path, fires the leave notice) and a **lazy** prune on read (a safety net for departures that skipped teardown).
 
-- **On `ib merge`, `ib kill`, `ib nuke`** (and `nukeAll`): the torn-down agent's ID is removed from **every** team it belongs to, and a leave notice (§16.4.2) is fanned out to each affected team's remaining members. The natural hook is the existing teardown path in `agent-lifecycle.ts` — the same place that calls `deleteAgentOutbox()` / `deleteAgentTransient()` — so team pruning is one more cleanup step in the established teardown sequence.
-- **On team send / roster read**: any member whose agent directory no longer exists is pruned lazily (skip-and-prune), covering cases where an agent vanished without going through the standard teardown (e.g. a manual directory removal). Lazy pruning is a safety net; the teardown-time pruning above is the primary mechanism and is what triggers the leave notice.
-- **Pruning never errors a send**: a fan-out that encounters dead members prunes them and delivers to the rest.
+**Eager prune — the CLI teardown path (`archiveAgent`).** The single correct hook is `archiveAgent` in `agent-lifecycle.ts` — the function `ib merge`, `ib kill`, `ib nuke`, and `nukeAllAgents` all route through, and the same place that calls `deleteAgentOutbox()` / `deleteAgentTransient()`. Adding the team-prune-plus-leave-notice there covers **every** standard teardown in one spot:
 
-The watchdog's existing notification routing (§8, the `@system` / `@<repo>` sentinel notify path) is the same machinery used to fan out leave notices when teardown is initiated by the watchdog rather than a direct CLI call — `@<team>` is just another sentinel destination the notify path can resolve.
+| Departure path | Covered by `archiveAgent`? | Notice |
+|---|---|---|
+| `ib merge` | yes | per-agent leave notice |
+| `ib kill` | yes | per-agent leave notice |
+| `ib nuke` | yes | per-agent leave notice |
+| `nukeAllAgents` (bulk) | yes | **coalesced** notice (§16.4.2) |
+| `ib pause` (stops Claude + tmux, does **not** archive) | **no** — pause is not a teardown; the agent keeps its dir and ID and can resume | none — a paused agent is still a member (it will receive queued messages on resume per §4.1.1) |
+| Manual `rm -rf` of the agent dir / machine crash mid-run | **no** — never reaches `archiveAgent` | none at departure; cleaned up by the lazy prune below |
+
+The `ib pause` row is a deliberate decision, not an omission: a paused agent is dormant, not gone, so it **retains** team membership. [^needs review] If product intent is that a paused agent should appear "absent" to the room, that is a separate feature (a per-member dormant flag) and is out of scope here — flagged so it is a conscious choice.
+
+**Lazy prune — on team send and roster read.** Any member whose agent directory no longer exists is pruned lazily (skip-and-prune) during `ib send @<team>` and `ib roster`. This is the safety net for the two "no" rows above (manual deletion, crash) where no teardown ran. **Lazy pruning is silent — it fires no leave notice** (there is no reliable moment-of-departure to attribute it to, and a notice on every read would be noisy and possibly duplicated). The eager teardown path is the *only* path that emits leave notices; the lazy path only keeps the roster honest. This cleanly separates the two and removes any risk of a **duplicated** leave notice (eager fires once at teardown; lazy never fires one).
+
+**Pruning never errors a send:** a fan-out that encounters dead members prunes them (under the lock, §16.2) and delivers to the rest.
+
+**The watchdog has no team role.** [^callout] An earlier draft claimed the watchdog fans out leave notices "via the same `@`-sentinel notify path." That is **incorrect** and has been removed: the watchdog never tears down agents — it only *notifies* a manager/spawner that an agent finished (`notifyManager`/`notifySpawner` in `watchdog.ts`), and the actual teardown is performed later by whoever runs `ib merge`/`ib kill`, which routes through `archiveAgent` (where the eager prune lives). Moreover `notifySpawner` is a single-destination switch, not a reusable N-recipient fan-out primitive. Team leave-notices therefore belong entirely to the `archiveAgent`/CLI path, and the watchdog requires **no** team-specific changes.
 
 ### 16.6 Session-Start Awareness (Hook Integration)
 
 Mechanical delivery is necessary but not sufficient: an agent must *know* it is in a team and that replying to the room means `ib send @<team>` rather than a point-to-point reply to whoever it thinks sent the last message. Without this, the "room" illusion collapses into point-to-point messaging.
 
-The session-start hook (§6, `session-start.ts`) injects team awareness, analogous to the existing "Talking to other agents" block:
+The session-start hook (§6, `session-start.ts`) injects team awareness, analogous to the existing "Talking to other agents" block. **The pointer alone is not enough.** An agent's strongest default signal is "the last message came from `<agent-id>`, so reply to `<agent-id>`" — point-to-point. Overcoming that default requires more than a passive pointer to `ib roster`; the injection must be **imperative and explicit** about the reply target. The block therefore combines three things:
 
-- **Pointer, not snapshot:** the injected block tells the agent which team(s) it belongs to and instructs it to run `ib roster @<team>` to see current teammates — it does **not** enumerate a static teammate list. A static list would go stale as members join/leave mid-session; the pointer stays correct. This mirrors how the existing block points agents at `ib list` rather than enumerating agents.
-- **Reply protocol:** the block states that to reply to the room the agent uses `ib send @<team> "..."`, and that point-to-point `ib send <agent-id>` still works for addressing a single teammate directly.
-- **Mid-session joins:** session-start fires once. An agent added to a team *after* it is already running learns the protocol from the join notice (§16.4.1), which carries the same `ib roster` / `ib send @<team>` instruction.
+- **Membership + live-roster pointer:** the block names which team(s) the agent belongs to and instructs it to run `ib roster @<team>` to see current teammates — it does **not** enumerate a static teammate list (which would go stale as members join/leave mid-session). This mirrors how the existing block points agents at `ib list`.
+- **Imperative reply rule (the key part):** explicit wording, not a hint — e.g. *"You are in team `@<team>`. When you reply to something a teammate said in the team, send your reply to the WHOLE room with `ib send @<team> \"...\"` — do NOT reply only to the individual agent who messaged you. Use `ib send <agent-id>` only when you specifically intend a private, one-to-one message that the rest of the team should not see."* This directly counters the point-to-point default rather than relying on the agent to infer it.
+- **Per-message reinforcement:** the delivery prefix itself (`[sent by <agent-id> in @<team>]:`, §16.4) carries the `@<team>` token in every single message, so the reply target is reinforced on every inbound message, not just once at session-start. This is why the prefix names the team verbatim. [^needs review] Exact imperative wording is subject to tuning in review; the *requirement* is that it be imperative and name `ib send @<team>` as the default reply action, not merely point at `ib roster`.
+- **Mid-session joins:** session-start fires once. An agent added to a team *after* it is already running learns the protocol from the join notice (§16.4.1), which carries the same imperative `ib send @<team>` reply instruction (not just the `ib roster` pointer).
 
-The agent's team memberships are derived at session-start time by scanning `~/.itsybitsy/teams.json` for the agent's ID.
+**Implementation reality (not a template edit).** [^callout] The existing "Talking to other agents" block is a **static** `{{...}}`-templated layer body in `~/.itsybitsy/agent-types/_all.md` with no per-agent data. Team membership is **dynamic per agent**, so this is **net-new code** in `generateInstructions` (`session-start.ts`) — either an appended built block computed in code, or a `{{teamMembership}}` template variable populated by code that scans `~/.itsybitsy/teams.json` for `ctx.agentId`. The "analogous to" framing is about placement and tone, not about it being a static-template change.
 
 ### 16.7 Cross-Cutting Impact (Four-Perspective Checklist)
 
@@ -2458,19 +2498,21 @@ Per the project's required review checklist, teams touch each perspective as fol
 
 1. **General agent functionality** — new user-tier state (`~/.itsybitsy/teams.json`); agent teardown gains a membership-pruning step. No change to how agents are spawned or to `meta.json` shape (team membership is stored centrally, not per-agent, so a coordinator restart or agent re-read does not lose it).
 2. **Hooks** — `session-start.ts` gains a team-awareness injection (§16.6). No other agent-session hook is affected; the path-check, stop, permission-denied, and intercept-task hooks are team-agnostic.
-3. **Watchdog** — when the watchdog initiates a merge/kill notification, it must also trigger the leave-notice fan-out (§16.5) via the same `@`-sentinel notify path it already uses. No change to nudge timing, rate-limit recovery, or state detection.
+3. **Watchdog** — **no changes required.** The watchdog never tears down agents (it only notifies a manager/spawner), so it never reaches the team-prune point; leave-notices are emitted by the `archiveAgent`/CLI teardown path instead (§16.5). Nudge timing, rate-limit recovery, and state detection are all unaffected. This corrects an earlier draft that incorrectly assigned the watchdog a leave-notice role.
 4. **`ib watch` / dashboard** — minimum viable: the info panel for a selected agent surfaces its team membership(s) ("member of: @backend"). A dedicated team-chat pane/view is explicitly **deferred to a later phase** — the registry and fan-out are usable from the CLI without it. [^needs review] The exact dashboard surface for teams is deferred.
 
 ### 16.8 Affected Files and Modules
 
 | Module | Changes needed |
 |--------|---------------|
-| `src/teams.ts` (new) | Registry read/write (`~/.itsybitsy/teams.json`), roster, collision check, name normalization, prune helpers. |
-| `src/ib-commands.ts` | `sendMessage` resolver: `@<team>` branch → fan-out (excluding sender). `OutboxMessage.team?` field; `deliverMessage` prefix extension (`in @<team>`). New commands: `teamCreate`, `teamAdd`, `teamRemove`, `teamList`, `teamDelete`, `roster`. |
-| `src/outbox.ts` | `OutboxMessage` gains optional `team` field; serialize/parse updated to preserve it. |
-| `src/agent-lifecycle.ts` | Teardown prunes the agent from all teams + fans out leave notices (alongside `deleteAgentOutbox`). |
-| `src/hooks/session-start.ts` | Inject team-awareness block (pointer to `ib roster @<team>` + reply protocol). |
-| `src/registry.ts` / repo-add path | Warn on repo-name/team-name collision (§16.1). |
+| `src/teams.ts` (new) | Registry read/write (`~/.itsybitsy/teams.json`) with **`.teams.lock`** read-modify-write serialization (§16.2, mirrors `acquireOutboxLock`), roster, name allowlist validation (§16.1, mirrors `validation.ts`), collision check (reserved set + repo basename **and nickname**, case-insensitive), name normalization (strip leading `@`), eager + lazy prune helpers. |
+| `src/index.ts` (`resolveTarget`) | **Add a team branch** to the send-target resolver, ordered `@system` → `@coordinator`/`@<repo>` → team, reached **before** the unknown-`@name` hard-error; return a shape that expresses multiple recipients (or route team sends down a dedicated per-member `sendMessage` loop). This is the change that makes `ib send @<team>` actually fan out (§16.4) — it does **not** work for free. |
+| `src/ib-commands.ts` | Team-send fan-out (per-member `sendMessage`, excluding sender, empty-set → "no recipients"). `deliverMessage` prefix extension (`in @<team>`, drains the new `team` field at §4.1.1's drain-time). New commands: `teamCreate`, `teamAdd`, `teamRemove`, `teamList`, `teamDelete`, `roster`. Join/leave notice emission (persist-then-notify, §16.4.1/.2). |
+| `src/outbox.ts` | `OutboxMessage` gains optional `team` field — **and `readOutbox`'s explicit field reconstruction + its line type-guard must be updated to carry `team` through**, or it is silently dropped on the queue round-trip (§16.4 trap). Add a regression test for read-back survival. |
+| `src/agent-lifecycle.ts` | `archiveAgent` prunes the torn-down agent from all teams + emits the leave notice (single-agent) / participates in coalesced bulk notice (`nukeAllAgents`), alongside `deleteAgentOutbox`. `ib pause` deliberately does NOT prune (§16.5). |
+| `src/hooks/session-start.ts` | Inject team-awareness block — **net-new dynamic code** in `generateInstructions` (not a static-template edit), scanning `teams.json` for the agent's ID; imperative reply rule naming `ib send @<team>` (§16.6). |
+| `src/registry.ts` / repo-add path | **Hard-refuse** adding a repo whose basename/nickname collides with an existing team name (§16.1) — not a soft warning. |
+| `src/validation.ts` | New `isValidTeamName()` allowlist helper (or reuse the agent-id allowlist), used by `teamCreate` (§16.1). |
 | `src/tui/dashboard.ts` (later phase) | Surface team membership in the info panel; full team view deferred. |
 
 ---

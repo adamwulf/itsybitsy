@@ -93,6 +93,99 @@ describe("moveToRepo skips stopped agents when jumping between agents", () => {
   });
 });
 
+describe("moveToRepo skips interior stopped agents within a repo", () => {
+  test("forward lands on the first live agent past a stopped one (not the interior stopped)", () => {
+    const a = agentInRepo("a1", "repoA", "running");
+    const b1 = agentInRepo("b1", "repoB", "running");
+    const b2 = agentInRepo("b2", "repoB", "stopped");
+    const b3 = agentInRepo("b3", "repoB", "running");
+    const list: FlatEntry[] = [
+      makeFlatRepoHeader("repoA", "/tmp/repoA", true),
+      makeFlatAgent(a),
+      makeFlatRepoHeader("repoB", "/tmp/repoB", true),
+      makeFlatAgent(b1),
+      makeFlatAgent(b2),
+      makeFlatAgent(b3),
+    ];
+    const tree = treeWith(list, "a1");
+    tree.moveToRepo(1);
+    // First live agent in repoB is b1; the interior stopped b2 is never a target.
+    expect(tree.selectedAgent?.id).toBe("b1");
+  });
+
+  test("backward lands on the last live agent (skipping a trailing stopped one)", () => {
+    const a = agentInRepo("a1", "repoA", "running");
+    const b1 = agentInRepo("b1", "repoB", "running");
+    const b2 = agentInRepo("b2", "repoB", "stopped");
+    const b3 = agentInRepo("b3", "repoB", "running");
+    const list: FlatEntry[] = [
+      makeFlatRepoHeader("repoA", "/tmp/repoA", true),
+      makeFlatAgent(a),
+      makeFlatRepoHeader("repoB", "/tmp/repoB", true),
+      makeFlatAgent(b1),
+      makeFlatAgent(b2),
+      makeFlatAgent(b3),
+    ];
+    // Start on repoA, jump backward — wraps to repoB and should land on its
+    // last LIVE agent (b3), not the interior-trailing stopped b2.
+    const tree = treeWith(list, "a1");
+    tree.moveToRepo(-1);
+    expect(tree.selectedAgent?.id).toBe("b3");
+  });
+});
+
+describe("moveToRepo with empty and all-stopped repos composed", () => {
+  test("forward skips both an empty repo and an all-stopped repo to reach a live one", () => {
+    const a = agentInRepo("a1", "repoA", "running");
+    const cStopped = agentInRepo("c1", "repoC", "stopped");
+    const d = agentInRepo("d1", "repoD", "running");
+    const list: FlatEntry[] = [
+      makeFlatRepoHeader("repoA", "/tmp/repoA", true),
+      makeFlatAgent(a),
+      makeFlatRepoHeader("repoB", "/tmp/repoB", false), // empty
+      makeFlatRepoHeader("repoC", "/tmp/repoC", true), // all stopped
+      makeFlatAgent(cStopped),
+      makeFlatRepoHeader("repoD", "/tmp/repoD", true),
+      makeFlatAgent(d),
+    ];
+    const tree = treeWith(list, "a1");
+    tree.moveToRepo(1);
+    // repoB (empty) and repoC (all stopped) are both skipped; land on repoD.
+    expect(tree.selectedAgent?.id).toBe("d1");
+  });
+});
+
+describe("moveToRepo when the only live agent is the current selection", () => {
+  test("forward stays put (no live agent to jump to)", () => {
+    const a = agentInRepo("a1", "repoA", "running"); // the only live agent
+    const b = agentInRepo("b1", "repoB", "stopped");
+    const list: FlatEntry[] = [
+      makeFlatRepoHeader("repoA", "/tmp/repoA", true),
+      makeFlatAgent(a),
+      makeFlatRepoHeader("repoB", "/tmp/repoB", true),
+      makeFlatAgent(b),
+    ];
+    const tree = treeWith(list, "a1");
+    tree.moveToRepo(1);
+    // Everything else is stopped; the only live landing spot is ourselves.
+    expect(tree.selectedAgent?.id).toBe("a1");
+  });
+
+  test("backward stays put (no live agent to jump to)", () => {
+    const a = agentInRepo("a1", "repoA", "stopped");
+    const b = agentInRepo("b1", "repoB", "running"); // the only live agent
+    const list: FlatEntry[] = [
+      makeFlatRepoHeader("repoA", "/tmp/repoA", true),
+      makeFlatAgent(a),
+      makeFlatRepoHeader("repoB", "/tmp/repoB", true),
+      makeFlatAgent(b),
+    ];
+    const tree = treeWith(list, "b1");
+    tree.moveToRepo(-1);
+    expect(tree.selectedAgent?.id).toBe("b1");
+  });
+});
+
 describe("moveToRepo falls back when everything is stopped", () => {
   test("all agents stopped: still cycles between repos as before (forward)", () => {
     const a = agentInRepo("a1", "repoA", "stopped");

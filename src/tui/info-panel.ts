@@ -14,6 +14,25 @@ import { wrapLines, padLines } from "./wrap";
 import { RESET, BOLD, DIM, GREEN, RED, YELLOW } from "./colors";
 import { resolveDefaultAgentType } from "./default-agent-type";
 import { NotesEditorComponent } from "./notes-editor";
+import { _formatTimestamp } from "../agent-lifecycle";
+
+/**
+ * Team-mode payload for the info panel (SPEC §17.3c). Parallel to the
+ * `isSystemCoordinatorSelected` / `selectedRepoHeader` modes — the dashboard's
+ * selection-sync populates this from the `Team` record on a team-anchor
+ * selection and clears it to `null` otherwise. Holds exactly the data the team
+ * render branch shows.
+ */
+export interface SelectedTeamInfo {
+  /** Bare team name (no `@`). */
+  name: string;
+  /** `Team.created_epoch` — epoch SECONDS (§16.2). */
+  createdEpoch: number;
+  /** `Team.created_by` — an agent id, an `@`-sentinel, or `""` (a human). */
+  createdBy: string;
+  /** Live member count (`Team.members.length`). */
+  memberCount: number;
+}
 
 /** Sub-field within the Info panel that has focus when the panel is focused. */
 export type InfoSubField = "default-type" | "notes";
@@ -31,6 +50,13 @@ function isPidAlive(pid: number): boolean {
 export class InfoPanelComponent implements Component {
   agent: Agent | null = null;
   isSystemCoordinatorSelected = false;
+  /**
+   * Team mode (§17.3c): when set, the render branch shows team metadata. The
+   * dashboard's selection-sync sets this on a team-anchor selection and clears
+   * it to `null` on any non-team / no selection (parallel to
+   * `isSystemCoordinatorSelected` / `selectedRepoHeader`).
+   */
+  selectedTeam: SelectedTeamInfo | null = null;
   selectedRepoHeader: string | null = null;
   selectedRepoPath: string | null = null;
   allAgents: FlatEntry[] = [];
@@ -56,6 +82,9 @@ export class InfoPanelComponent implements Component {
   render(width: number): string[] {
     if (this.agent) {
       return this.renderAgentInfo(width);
+    }
+    if (this.selectedTeam) {
+      return this.renderTeamInfo(width);
     }
     if (this.isSystemCoordinatorSelected) {
       // System coordinator uses full-width mode; info panel renders empty/minimal
@@ -128,6 +157,34 @@ export class InfoPanelComponent implements Component {
         lines.push(truncateToWidth(wl, width, ""));
       }
     }
+
+    return padLines(lines, this.displayHeight);
+  }
+
+  /**
+   * Team mode (§17.3c) — renders the selected team's metadata: name (`@<name>`),
+   * live member count, `created_by`, and creation date. Visual style mirrors the
+   * other branches (same `DIM` label + value idiom, same `truncateToWidth`/
+   * `padLines` width handling).
+   */
+  private renderTeamInfo(width: number): string[] {
+    const team = this.selectedTeam!;
+    const lines: string[] = [];
+
+    // Team name as `@<name>`.
+    lines.push(truncateToWidth(`${BOLD}@${team.name}${RESET}`, width, ""));
+
+    // Live member count.
+    lines.push(truncateToWidth(`${DIM}Members:${RESET} ${team.memberCount}`, width, ""));
+
+    // created_by — an agent id, an `@`-sentinel (kept verbatim), or `""` → "user".
+    const createdBy = team.createdBy === "" ? "user" : team.createdBy;
+    lines.push(truncateToWidth(`${DIM}Created by:${RESET} ${createdBy}`, width, ""));
+
+    // Creation date — created_epoch is SECONDS (§16.2), formatted with the
+    // shared `_formatTimestamp` helper (`agent-lifecycle.ts`).
+    const created = _formatTimestamp(new Date(team.createdEpoch * 1000));
+    lines.push(truncateToWidth(`${DIM}Created:${RESET} ${created}`, width, ""));
 
     return padLines(lines, this.displayHeight);
   }

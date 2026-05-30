@@ -109,6 +109,38 @@ describe("renameAgent (native, nickname)", () => {
     expect(matchAgentById("pika", agents).match).toBeNull();
   });
 
+  test("writes meta.json with a trailing newline and preserves other fields", async () => {
+    // renameAgent must write meta.json via the shared atomic writer so its
+    // output matches every other meta writer: pretty-printed + trailing "\n".
+    const agentDir = await writeAgentMeta(tempDir, "agent-abc", { model: "opus", prompt: "do work" });
+    await registerRepos([tempDir]);
+
+    const agent = makeAgent("agent-abc", tempDir);
+    const result = await renameAgent(agent, "pikachu");
+    expect(result.ok).toBe(true);
+
+    const raw = await Bun.file(join(agentDir, "meta.json")).text();
+    expect(raw.endsWith("\n")).toBe(true);
+    const meta = JSON.parse(raw);
+    expect(meta.nickname).toBe("pikachu");
+    // Other fields survive the round-trip.
+    expect(meta.id).toBe("agent-abc");
+    expect(meta.model).toBe("opus");
+    expect(meta.prompt).toBe("do work");
+  });
+
+  test("clear also writes meta.json with a trailing newline", async () => {
+    const agentDir = await writeAgentMeta(tempDir, "agent-abc", { nickname: "pikachu" });
+    await registerRepos([tempDir]);
+    const agent = makeAgent("agent-abc", tempDir);
+    agent.meta.nickname = "pikachu";
+    const result = await renameAgent(agent, null);
+    expect(result.ok).toBe(true);
+    const raw = await Bun.file(join(agentDir, "meta.json")).text();
+    expect(raw.endsWith("\n")).toBe(true);
+    expect("nickname" in JSON.parse(raw)).toBe(false);
+  });
+
   test("overwrite: setting a new nickname replaces the old one", async () => {
     const agentDir = await writeAgentMeta(tempDir, "agent-abc", { nickname: "old-name" });
     await registerRepos([tempDir]);

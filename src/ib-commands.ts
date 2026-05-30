@@ -1252,9 +1252,9 @@ export async function renameAgent(agent: Agent, nickname: string | null): Promis
     }
     delete meta.nickname; // delete the field, never write ""
     try {
-      const tmpPath = metaPath + ".tmp";
-      await Bun.write(tmpPath, JSON.stringify(meta, null, 2));
-      await rename(tmpPath, metaPath);
+      // Reuse the shared atomic writer (tmp+rename + trailing newline) so
+      // `ib nickname` writes meta.json identically to every other meta writer.
+      await writeMetaJsonAtomic(agentDir, meta);
     } catch (err) {
       return { ok: false, exitCode: 1, stdout: "", stderr: `Failed to write meta.json: ${err}` };
     }
@@ -1309,9 +1309,9 @@ export async function renameAgent(agent: Agent, nickname: string | null): Promis
   }
   meta.nickname = nickname;
   try {
-    const tmpPath = metaPath + ".tmp";
-    await Bun.write(tmpPath, JSON.stringify(meta, null, 2));
-    await rename(tmpPath, metaPath);
+    // Reuse the shared atomic writer (tmp+rename + trailing newline) so
+    // `ib nickname` writes meta.json identically to every other meta writer.
+    await writeMetaJsonAtomic(agentDir, meta);
   } catch (err) {
     return { ok: false, exitCode: 1, stdout: "", stderr: `Failed to write meta.json: ${err}` };
   }

@@ -707,7 +707,10 @@ export async function readAgentMeta(agentDir: string): Promise<{ meta: AgentMeta
     if (data.summary !== undefined && typeof data.summary !== "string") delete data.summary;
     if (data.agentType !== undefined && typeof data.agentType !== "string") delete data.agentType;
     if (data.agentIcon !== undefined && typeof data.agentIcon !== "string") delete data.agentIcon;
-    if (data.nickname !== undefined && typeof data.nickname !== "string") delete data.nickname;
+    // Drop a non-string OR empty-string nickname on read. "" should never exist
+    // (renameAgent deletes the field instead of writing ""), but be defensive so
+    // a hand-edited or stale meta.json can't surface an empty nickname.
+    if (data.nickname !== undefined && (typeof data.nickname !== "string" || data.nickname === "")) delete data.nickname;
     // Validate spawned_by: must be an object with string agent_id; repo_path
     // is either a string or null (null is reserved for the @system sentinel
     // whose spawner is not a registered repo).

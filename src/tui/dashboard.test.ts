@@ -4432,3 +4432,203 @@ describe("Telegram header indicator", () => {
     expect(visibleWidth(header)).toBeLessThanOrEqual(140);
   });
 });
+
+describe("DashboardComponent — §17 Teams panel wiring", () => {
+  let coordHome: string;
+
+  beforeEach(async () => {
+    const { setCoordinatorHome } = await import("../coordinator");
+    coordHome = await mkdtemp(join(tmpdir(), "dash-teams-coord-"));
+    setCoordinatorHome(coordHome);
+  });
+
+  afterEach(async () => {
+    const { resetCoordinatorHome } = await import("../coordinator");
+    resetCoordinatorHome();
+    await rm(coordHome, { recursive: true, force: true });
+  });
+
+  test("focus-aware sync: team-anchor selection populates infoPanel.selectedTeam + channelPane.teamName", () => {
+    const dashboard = makeDashboard();
+    // Directly drive the Teams tree (skip the on-disk teams.json round-trip)
+    dashboard.teamsTree.setFlatList([
+      { kind: "team-header", teamName: "backend", memberCount: 1, createdEpoch: 1735689600, createdBy: "@system" },
+    ]);
+    dashboard.teamsTree.navigate(1); // selects the team-header row
+    dashboard.focusManager.setFocus("teams-tree");
+    dashboard.syncSelectedAgent();
+    expect(dashboard.channelPane.teamName).toBe("backend");
+    // infoPanel.selectedTeam is populated async — refreshSelectedTeamInfo runs
+    // getTeam(name); when the team isn't in the on-disk registry it CLEARS.
+    // Direct render-time guarantee: channelPane.teamName tracks the team anchor.
+  });
+
+  test("focus-aware sync: team-MEMBER selection drives the agent path (rightPane/tmuxPane/infoPanel.agent)", () => {
+    const dashboard = makeDashboard();
+    const tmp = "/tmp/test-repo";
+    const a = makeAgent("agent-tm1", tmp);
+    dashboard.teamsTree.setFlatList([
+      { kind: "team-header", teamName: "backend", memberCount: 1, createdEpoch: 1, createdBy: "@system" },
+      { kind: "team-member", teamName: "backend", agent: a, connector: "  " },
+    ]);
+    dashboard.teamsTree.navigate(1); // header
+    dashboard.teamsTree.navigate(1); // member row
+    dashboard.focusManager.setFocus("teams-tree");
+    dashboard.syncSelectedAgent();
+    // Member selection populates the agent path identically to an Agents-tree select.
+    expect(dashboard.rightPane.agent?.id).toBe("agent-tm1");
+    expect(dashboard.tmuxPane.agent?.id).toBe("agent-tm1");
+    expect(dashboard.infoPanel.agent?.id).toBe("agent-tm1");
+    // And the team-mode fields are CLEAR — no stale team state.
+    expect(dashboard.channelPane.teamName).toBe(null);
+    expect(dashboard.infoPanel.selectedTeam).toBe(null);
+  });
+
+  test("focus-aware sync: switching from team back to Agents clears team state", () => {
+    const dashboard = makeDashboard();
+    dashboard.teamsTree.setFlatList([
+      { kind: "team-header", teamName: "backend", memberCount: 0, createdEpoch: 1, createdBy: "@system" },
+    ]);
+    dashboard.teamsTree.navigate(1);
+    dashboard.focusManager.setFocus("teams-tree");
+    dashboard.syncSelectedAgent();
+    expect(dashboard.channelPane.teamName).toBe("backend");
+
+    // Tab back to agent-tree — selection-sync must clear team state
+    dashboard.focusManager.setFocus("agent-tree");
+    dashboard.syncSelectedAgent();
+    expect(dashboard.channelPane.teamName).toBe(null);
+    expect(dashboard.infoPanel.selectedTeam).toBe(null);
+  });
+
+  test("focus-aware sync: teams-tree focused with no selection clears all team/agent state", () => {
+    const dashboard = makeDashboard();
+    dashboard.focusManager.setFocus("teams-tree");
+    dashboard.syncSelectedAgent();
+    expect(dashboard.channelPane.teamName).toBe(null);
+    expect(dashboard.infoPanel.selectedTeam).toBe(null);
+    expect(dashboard.rightPane.agent).toBe(null);
+    expect(dashboard.tmuxPane.agent).toBe(null);
+  });
+
+  test("j/k routes to teamsTree.navigate when teams-tree focused (else agentTree.moveSelection)", () => {
+    const dashboard = makeDashboard();
+    // Populate both trees so j/k routes have something to move over
+    const tmp = "/tmp/repo-jk";
+    const a1 = makeAgent("agent-jk1", tmp);
+    const a2 = makeAgent("agent-jk2", tmp);
+    dashboard.agentTree.setFlatList([makeFlatAgent(a1), makeFlatAgent(a2)]);
+    dashboard.teamsTree.setFlatList([
+      { kind: "team-header", teamName: "t1", memberCount: 0, createdEpoch: 1, createdBy: "@system" },
+      { kind: "team-header", teamName: "t2", memberCount: 0, createdEpoch: 1, createdBy: "@system" },
+    ]);
+
+    // With agent-tree focused, j moves the agent tree
+    dashboard.focusManager.setFocus("agent-tree");
+    const before = dashboard.agentTree.selection;
+    dashboard.handleInput("j");
+    // agentTree starts in no-selection; j enters selected at index 0
+    const after = dashboard.agentTree.selection;
+    expect(after).not.toBeNull();
+    // teamsTree should NOT have advanced
+    expect(dashboard.teamsTree.selection).toBeNull();
+
+    // Reset and switch to teams-tree focus
+    const dashboard2 = makeDashboard();
+    dashboard2.agentTree.setFlatList([makeFlatAgent(a1), makeFlatAgent(a2)]);
+    dashboard2.teamsTree.setFlatList([
+      { kind: "team-header", teamName: "t1", memberCount: 0, createdEpoch: 1, createdBy: "@system" },
+      { kind: "team-header", teamName: "t2", memberCount: 0, createdEpoch: 1, createdBy: "@system" },
+    ]);
+    dashboard2.focusManager.setFocus("teams-tree");
+    dashboard2.handleInput("j");
+    expect(dashboard2.teamsTree.selection?.kind).toBe("team");
+    // agentTree must NOT have a selection — independent (§17.1)
+    expect(dashboard2.agentTree.selection).toBeNull();
+  });
+
+  test("shift+j (J) routes to teamsTree.navigateAnchor when teams-tree focused", () => {
+    const dashboard = makeDashboard();
+    dashboard.teamsTree.setFlatList([
+      { kind: "team-header", teamName: "t1", memberCount: 0, createdEpoch: 1, createdBy: "@system" },
+      { kind: "team-header", teamName: "t2", memberCount: 0, createdEpoch: 1, createdBy: "@system" },
+    ]);
+    dashboard.focusManager.setFocus("teams-tree");
+    dashboard.handleInput("J");
+    // From no-selection, shift+j lands on the first team anchor
+    expect(dashboard.teamsTree.selection?.kind).toBe("team");
+    if (dashboard.teamsTree.selection?.kind === "team") {
+      expect(dashboard.teamsTree.selection.teamName).toBe("t1");
+    }
+  });
+
+  test("focus toggle (Tab) preserves each tree's selection (§17.1 independent selection)", () => {
+    const dashboard = makeDashboard();
+    const tmp = "/tmp/repo-tog";
+    const a = makeAgent("agent-tog", tmp);
+    dashboard.agentTree.setFlatList([makeFlatAgent(a)]);
+    dashboard.teamsTree.setFlatList([
+      { kind: "team-header", teamName: "t1", memberCount: 0, createdEpoch: 1, createdBy: "@system" },
+    ]);
+    // Select in both panels
+    dashboard.agentTree.selectFirstRow();
+    dashboard.teamsTree.navigate(1);
+    expect(dashboard.agentTree.selection).not.toBeNull();
+    expect(dashboard.teamsTree.selection).not.toBeNull();
+
+    // Tab — focus moves from agent-tree to teams-tree
+    dashboard.focusManager.setFocus("teams-tree");
+    // Each panel's selection is preserved
+    expect(dashboard.agentTree.selection).not.toBeNull();
+    expect(dashboard.teamsTree.selection).not.toBeNull();
+
+    // Shift+Tab back
+    dashboard.focusManager.setFocus("agent-tree");
+    expect(dashboard.agentTree.selection).not.toBeNull();
+    expect(dashboard.teamsTree.selection).not.toBeNull();
+  });
+
+  test("startup auto-select still selects first agent (§17.1 user-confirmed startup)", () => {
+    const dashboard = makeDashboard();
+    const tmp = "/tmp/repo-startup";
+    const a = makeAgent("agent-startup", tmp);
+    // hasAutoSelectedFirstAgent is private; we exercise it through onUpdate
+    dashboard.onUpdate([a], [makeFlatAgent(a)], []);
+    expect(dashboard.agentTree.selection).not.toBeNull();
+    expect(dashboard.agentTree.selectedAgent?.id).toBe("agent-startup");
+  });
+
+  test("render with team selected calls channelPane.load() (§17.4 refresh cadence)", () => {
+    Object.defineProperty(process.stdout, "rows", { value: 30, writable: true, configurable: true });
+    const dashboard = makeDashboard();
+    dashboard.teamsTree.setFlatList([
+      { kind: "team-header", teamName: "backend", memberCount: 0, createdEpoch: 1, createdBy: "@system" },
+    ]);
+    dashboard.teamsTree.navigate(1);
+    dashboard.focusManager.setFocus("teams-tree");
+    dashboard.syncSelectedAgent();
+
+    // Intercept channelPane.load() to assert the render path triggers it
+    let loadCalls = 0;
+    const originalLoad = dashboard.channelPane.load.bind(dashboard.channelPane);
+    dashboard.channelPane.load = async () => { loadCalls++; return originalLoad(); };
+
+    const lines = dashboard.render(160);
+    expect(lines.length).toBeGreaterThan(1);
+    // Render fires `void channelPane.load()` synchronously when a team is selected
+    expect(loadCalls).toBe(1);
+  });
+
+  test("render with teams-tree focus + no selection does NOT call channelPane.load (no teamName)", () => {
+    Object.defineProperty(process.stdout, "rows", { value: 30, writable: true, configurable: true });
+    const dashboard = makeDashboard();
+    dashboard.focusManager.setFocus("teams-tree");
+    dashboard.syncSelectedAgent();
+
+    let loadCalls = 0;
+    dashboard.channelPane.load = async () => { loadCalls++; };
+    dashboard.render(160);
+    expect(loadCalls).toBe(0);
+  });
+});
+

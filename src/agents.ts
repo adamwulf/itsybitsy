@@ -63,6 +63,14 @@ export interface AgentMeta {
   watchdog_pid?: number;
   agentType?: string;
   agentIcon?: string;
+  /**
+   * Optional friendly alias the agent ALSO answers to in name resolution
+   * (`ib send`, dashboard selection, etc). The immutable `id` remains the
+   * canonical identity; nickname is a pure INPUT ALIAS — never used as an
+   * internal key (see buildAgentTree's byId callout). Globally unique across
+   * all repos. Set/cleared via `ib nickname`. Absent (never "") when unset.
+   */
+  nickname?: string;
   state?: MetaState;
   state_updated_at?: number;
   spawned_by?: SpawnedBy | null;
@@ -699,6 +707,10 @@ export async function readAgentMeta(agentDir: string): Promise<{ meta: AgentMeta
     if (data.summary !== undefined && typeof data.summary !== "string") delete data.summary;
     if (data.agentType !== undefined && typeof data.agentType !== "string") delete data.agentType;
     if (data.agentIcon !== undefined && typeof data.agentIcon !== "string") delete data.agentIcon;
+    // Drop a non-string OR empty-string nickname on read. "" should never exist
+    // (renameAgent deletes the field instead of writing ""), but be defensive so
+    // a hand-edited or stale meta.json can't surface an empty nickname.
+    if (data.nickname !== undefined && (typeof data.nickname !== "string" || data.nickname === "")) delete data.nickname;
     // Validate spawned_by: must be an object with string agent_id; repo_path
     // is either a string or null (null is reserved for the @system sentinel
     // whose spawner is not a registered repo).

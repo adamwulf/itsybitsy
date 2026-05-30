@@ -190,6 +190,43 @@ describe("matchAgentById", () => {
     expect(match).toBeNull();
     expect(ambiguous).toEqual([]);
   });
+
+  // ─── nickname resolution ───────────────────────────────────────────────
+  test("resolves an agent by its exact nickname", () => {
+    const withNick = [
+      makeAgent({ id: "agent-zzz111", meta: { nickname: "pikachu" } as any }),
+      makeAgent({ id: "agent-yyy222" }),
+    ];
+    const { match, ambiguous } = matchAgentById("pikachu", withNick);
+    expect(match!.id).toBe("agent-zzz111");
+    expect(ambiguous).toEqual([]);
+  });
+
+  test("exact id wins over a matching nickname (precedence)", () => {
+    // "agent-abc" is BOTH agent A's id and agent B's nickname. Id must win,
+    // regardless of array order.
+    const a = makeAgent({ id: "agent-abc" });
+    const b = makeAgent({ id: "agent-bbb", meta: { nickname: "agent-abc" } as any });
+    expect(matchAgentById("agent-abc", [b, a]).match!.id).toBe("agent-abc");
+    expect(matchAgentById("agent-abc", [a, b]).match!.id).toBe("agent-abc");
+  });
+
+  test("nickname is matched EXACTLY only, never as a prefix", () => {
+    const withNick = [makeAgent({ id: "agent-zzz111", meta: { nickname: "pikachu" } as any })];
+    // A prefix of the nickname does not match via the nickname tier.
+    expect(matchAgentById("pika", withNick).match).toBeNull();
+    // The exact nickname still resolves.
+    expect(matchAgentById("pikachu", withNick).match!.id).toBe("agent-zzz111");
+  });
+
+  test("exact nickname wins over an id-prefix of a different agent", () => {
+    // "alpha" is an exact nickname on A, and also a prefix of B's id.
+    // Exact-nickname tier runs before id-prefix, so A wins.
+    const a = makeAgent({ id: "agent-aaa", meta: { nickname: "alpha" } as any });
+    const b = makeAgent({ id: "alpha-999" });
+    const { match } = matchAgentById("alpha", [a, b]);
+    expect(match!.id).toBe("agent-aaa");
+  });
 });
 
 // ─── CLI arg parsing — documenting behavior via subprocess ──────────────────
@@ -861,6 +898,113 @@ describe("list-types CLI command", () => {
     const { stdout, exitCode } = await runCliWithHome([], "/tmp/ib-test-nonexistent-home");
     expect(exitCode).toBe(0);
     expect(stdout).toContain("list-types");
+  });
+});
+
+// ─── nickname CLI command ───────────────────────────────────────────────────
+
+describe("nickname CLI command", () => {
+  async function runCliWithHome(cliArgs: string[], home: string): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+    const proc = Bun.spawn(["bun", "run", "src/index.ts", ...cliArgs], {
+      cwd: import.meta.dir.replace(/\/src$/, ""),
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, HOME: home },
+    });
+    const [stdout, stderr] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+    ]);
+    const exitCode = await proc.exited;
+    return { stdout, stderr, exitCode };
+  }
+
+  // Build a temp HOME with a registry pointing at a temp repo that holds one
+  // agent dir. Returns { home, repoPath, cleanup }.
+  async function setupRepoWithAgent(id: string, extraMeta: Record<string, unknown> = {}) {
+    const { mkdtemp, rm, mkdir } = await import("fs/promises");
+    const { tmpdir } = await import("os");
+    const { join: joinPath } = await import("path");
+    const home = await mkdtemp(joinPath(tmpdir(), "ib-nick-home-"));
+    const repoPath = await mkdtemp(joinPath(tmpdir(), "ib-nick-repo-"));
+    await mkdir(joinPath(home, ".itsybitsy"), { recursive: true });
+    await Bun.write(
+      joinPath(home, ".itsybitsy", "repos.json"),
+      JSON.stringify({ repos: [{ path: repoPath, name: "nick-repo" }] }),
+    );
+    const agentDir = joinPath(repoPath, ".ittybitty", "agents", id);
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(
+      joinPath(agentDir, "meta.json"),
+      JSON.stringify({ id, tmux_session: `t-${id}`, ...extraMeta }),
+    );
+    const cleanup = async () => {
+      await rm(home, { recursive: true, force: true });
+      await rm(repoPath, { recursive: true, force: true });
+    };
+    return { home, repoPath, agentDir, cleanup };
+  }
+
+  test("set nickname writes it and exits 0", async () => {
+    const { home, agentDir, cleanup } = await setupRepoWithAgent("agent-nick1");
+    try {
+      const { exitCode } = await runCliWithHome(["nickname", "agent-nick1", "pikachu"], home);
+      expect(exitCode).toBe(0);
+      const { join: joinPath } = await import("path");
+      const meta = await Bun.file(joinPath(agentDir, "meta.json")).json();
+      expect(meta.nickname).toBe("pikachu");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("no-arg shows the current nickname", async () => {
+    const { home, cleanup } = await setupRepoWithAgent("agent-nick2", { nickname: "charmander" });
+    try {
+      const { stdout, exitCode } = await runCliWithHome(["nickname", "agent-nick2"], home);
+      expect(exitCode).toBe(0);
+      expect(stdout.trim()).toBe("charmander");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("no-arg shows placeholder when no nickname set", async () => {
+    const { home, cleanup } = await setupRepoWithAgent("agent-nick3");
+    try {
+      const { stdout, exitCode } = await runCliWithHome(["nickname", "agent-nick3"], home);
+      expect(exitCode).toBe(0);
+      expect(stdout).toContain("(no nickname set)");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("--clear deletes the nickname field", async () => {
+    const { home, agentDir, cleanup } = await setupRepoWithAgent("agent-nick4", { nickname: "squirtle" });
+    try {
+      const { exitCode } = await runCliWithHome(["nickname", "agent-nick4", "--clear"], home);
+      expect(exitCode).toBe(0);
+      const { join: joinPath } = await import("path");
+      const meta = await Bun.file(joinPath(agentDir, "meta.json")).json();
+      expect("nickname" in meta).toBe(false);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("the agent resolves by its nickname (requireAgent)", async () => {
+    // Set a nickname, then run a command (`look`) addressed by the nickname.
+    const { home, cleanup } = await setupRepoWithAgent("agent-nick5", { nickname: "snorlax" });
+    try {
+      // `look <nickname>` must resolve to the agent (it won't have a tmux
+      // session, but resolution succeeding means it gets past requireAgent —
+      // a "not found" error would mean nickname resolution failed).
+      const { stderr } = await runCliWithHome(["look", "snorlax"], home);
+      expect(stderr).not.toContain("Agent not found");
+    } finally {
+      await cleanup();
+    }
   });
 });
 

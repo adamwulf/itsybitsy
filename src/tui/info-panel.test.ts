@@ -47,6 +47,27 @@ describe("InfoPanelComponent", () => {
     expect(text).toContain("build a widget");
   });
 
+  test("shows BOTH nickname and id when a nickname is set", () => {
+    const panel = new InfoPanelComponent();
+    panel.displayHeight = 10;
+    const agent = makeAgent({ id: "agent-longid", meta: { nickname: "pikachu" } as any });
+    panel.agent = agent;
+    const text = panel.render(60).map(stripAnsi).join("\n");
+    // The nickname AND the canonical id (with an `id:` label) are both shown.
+    expect(text).toContain("pikachu");
+    expect(text).toContain("id: agent-longid");
+  });
+
+  test("omits the identity line when no nickname is set (id is the tree label)", () => {
+    const panel = new InfoPanelComponent();
+    panel.displayHeight = 10;
+    const agent = makeAgent({ id: "agent-plain" });
+    panel.agent = agent;
+    const text = panel.render(60).map(stripAnsi).join("\n");
+    // No "(id: ...)" identity line, and the model/summary still render.
+    expect(text).not.toContain("(id: agent-plain)");
+  });
+
   test("renders repo info when repo header selected", () => {
     const panel = new InfoPanelComponent();
     panel.displayHeight = 8;

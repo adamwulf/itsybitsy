@@ -11,7 +11,7 @@ import type { Agent, FlatEntry, PendingQuestion } from "../agents";
 import type { RepoEntry } from "../registry";
 import { addRepo, listRepos, renameRepo, removeRepo, repoDisplayName } from "../registry";
 import {
-  killAgent, nukeAgent, nukeAllAgents, resumeAgent, pauseAgent, reassignAgent,
+  killAgent, nukeAgent, nukeAllAgents, resumeAgent, pauseAgent, reassignAgent, renameAgent,
   mergeCheckAgent, mergeAgent, sendMessage, newAgent,
   acknowledgeQuestion, hooksStatus, interceptHooksStatus,
   installSafetyHooks, uninstallSafetyHooks,
@@ -494,6 +494,42 @@ export function handleReassign(ctx: ActionCtx) {
   });
 }
 
+/**
+ * 'N' — set or clear the selected agent's nickname. Mirrors handleRenameRepo:
+ * an input dialog pre-filled with the current nickname (or the id when none is
+ * set). Submitting empty clears the nickname; a value sets it. Selection is
+ * id-keyed and unaffected by the nickname change, so no re-selection is needed.
+ */
+export function handleRename(ctx: ActionCtx) {
+  if (ctx.agentTree.isSystemCoordinatorSelected) return;
+  const agent = ctx.agentTree.selectedAgent;
+  if (!agent) return;
+  ctx.showDialog({
+    type: "input",
+    prompt: `Nickname for ${agent.id} (empty to clear):`,
+    // Pre-fill the current nickname (so it can be edited), or EMPTY when none
+    // is set. Empty is deliberate: the field is for a NEW nickname, and an
+    // empty Enter already means "clear" (a no-op when none exists) — pre-filling
+    // the id would make Enter-unchanged submit nickname==id, which is rejected.
+    value: agent.meta.nickname ?? "",
+    onSubmit: (value: string) => {
+      ctx.closeDialog();
+      const trimmed = value.trim();
+      // Empty submission clears; a value sets. renameAgent runs the full
+      // validation + global collision checks.
+      const nickname: string | null = trimmed.length === 0 ? null : trimmed;
+      ctx.executeAndRefresh(async () => {
+        const result = await renameAgent(agent, nickname);
+        if (result.ok) {
+          ctx.setNotice(nickname === null ? `Cleared nickname for ${agent.id}` : `Nicknamed ${agent.id} "${nickname}"`);
+        } else {
+          ctx.setNotice(`Nickname failed: ${result.stderr || result.stdout}`);
+        }
+      });
+    },
+  });
+}
+
 export function handleMerge(ctx: ActionCtx) {
   if (ctx.agentTree.isSystemCoordinatorSelected) return;
   const agent = ctx.agentTree.selectedAgent;
@@ -833,7 +869,10 @@ export function handleFuzzyAgent(ctx: ActionCtx) {
     }
     const promptText = (e.entry.agent.meta.summary ?? e.entry.agent.meta.prompt).replace(/\n/g, " ");
     const state = displayState(e.entry.agent.state);
-    return `${e.entry.agent.repoName}/${e.entry.agent.id}  ${state.padEnd(fuzzyStateColWidth)}  ${e.entry.agent.age.padStart(AGE_COL_WIDTH)}  ${promptText}`;
+    // Include the nickname in the searchable string so `@` can jump by it —
+    // otherwise nicknames would be un-findable in the very place they help.
+    const nick = e.entry.agent.meta.nickname ? `  ${e.entry.agent.meta.nickname}` : "";
+    return `${e.entry.agent.repoName}/${e.entry.agent.id}${nick}  ${state.padEnd(fuzzyStateColWidth)}  ${e.entry.agent.age.padStart(AGE_COL_WIDTH)}  ${promptText}`;
   });
   ctx.showDialog({
     type: "fuzzy",
@@ -1024,6 +1063,7 @@ export function handleHelp(ctx: ActionCtx) {
       row("R", "resume"),
       row("P", "pause"),
       row("r", "reassign"),
+      row("N", "nickname agent"),
       row("a", "new agent"),
       "",
       header("Repo"),

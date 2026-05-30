@@ -795,6 +795,36 @@ describe("readAgentMeta", () => {
     expect(meta).not.toBeNull();
     expect(meta!.summary).toBeUndefined();
   });
+
+  test("reads a valid nickname from meta.json when present", async () => {
+    await Bun.write(
+      join(tempDir, "meta.json"),
+      JSON.stringify({ id: "agent-nick", nickname: "pikachu" })
+    );
+    const { meta } = await readAgentMeta(tempDir);
+    expect(meta).not.toBeNull();
+    expect(meta!.nickname).toBe("pikachu");
+  });
+
+  test("strips a non-string nickname value", async () => {
+    await Bun.write(
+      join(tempDir, "meta.json"),
+      JSON.stringify({ id: "agent-bad-nick", nickname: 42 })
+    );
+    const { meta } = await readAgentMeta(tempDir);
+    expect(meta).not.toBeNull();
+    expect(meta!.nickname).toBeUndefined();
+  });
+
+  test("drops an empty-string nickname on read (defensive — should never exist)", async () => {
+    await Bun.write(
+      join(tempDir, "meta.json"),
+      JSON.stringify({ id: "agent-empty-nick", nickname: "" })
+    );
+    const { meta } = await readAgentMeta(tempDir);
+    expect(meta).not.toBeNull();
+    expect(meta!.nickname).toBeUndefined();
+  });
 });
 
 describe("readPendingQuestions", () => {

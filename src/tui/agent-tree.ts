@@ -38,11 +38,22 @@ function agentIcon(agent: Agent): string {
   return resolveAgentIcon(agent.meta);
 }
 
+/**
+ * The name shown for an agent in the (≤60-col) sidebar tree: its nickname if
+ * set, else its id. Single shared helper used by BOTH agentNamePrefixWidth and
+ * formatAgentRow's namePrefix so the width calc and the rendered text always
+ * agree (otherwise the state/age columns misalign). Compact tree shows the
+ * nickname ALONE — the full id stays visible in the info panel.
+ */
+export function agentDisplayName(agent: Agent): string {
+  return agent.meta.nickname ?? agent.id;
+}
+
 /** Compute the visible width of the name prefix (connector + icon + repo/id) for an agent row */
 function agentNamePrefixWidth(agent: Agent, connector: string): number {
   const orphanedPrefix = agent.orphaned ? "⚠ " : "";
   const icon = agentIcon(agent);
-  return visibleWidth(`${connector}${orphanedPrefix}${icon} ${agent.id}`);
+  return visibleWidth(`${connector}${orphanedPrefix}${icon} ${agentDisplayName(agent)}`);
 }
 
 /** Width threshold at or below which compact mode is used */
@@ -69,7 +80,7 @@ export function formatAgentRow(
 
   const nameColor = hasQuestion ? RED : "";
   const nameEnd = hasQuestion ? RESET : "";
-  const namePrefix = `${connector}${orphanedPrefix}${icon} ${nameColor}${agent.id}${nameEnd}`;
+  const namePrefix = `${connector}${orphanedPrefix}${icon} ${nameColor}${agentDisplayName(agent)}${nameEnd}`;
   const namePad = Math.max(0, nameColWidth - visibleWidth(namePrefix));
   const coloredState = `${stateColor}${state}${RESET}${" ".repeat(Math.max(0, stateColWidth - state.length))}`;
   const paddedAge = agent.age.padStart(AGE_COL_WIDTH);

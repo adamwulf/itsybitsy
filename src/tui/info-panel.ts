@@ -94,6 +94,15 @@ export class InfoPanelComponent implements Component {
 
     lines.push(...this.renderStoplights(agent, width));
 
+    // Identity line — only shown when a nickname is set, so the canonical id
+    // stays visible/copyable: `nickname (id: <id>)`. The sidebar tree shows the
+    // nickname ALONE, so without this the real id would be hidden. When there's
+    // no nickname the id is already the tree label, so we omit the line to
+    // avoid duplicating it in the sidebar.
+    if (agent.meta.nickname) {
+      lines.push(truncateToWidth(`${BOLD}${agent.meta.nickname}${RESET} ${DIM}(id: ${agent.id})${RESET}`, width, ""));
+    }
+
     // Orphan warning
     if (agent.orphaned && agent.meta.manager) {
       const managerId = agent.meta.manager;

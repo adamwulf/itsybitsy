@@ -404,6 +404,115 @@ describe("ib-commands", () => {
       expect(recipientLog).toContain("Received message from user Adam: hello");
     });
 
+    test("user message starting with / is passed through verbatim (no prefix)", async () => {
+      // user.name set to prove the passthrough beats the named-user prefix too.
+      await Bun.write(
+        join(tempDir, "config.json"),
+        JSON.stringify({ user: { name: "Adam" } }, null, 2)
+      );
+
+      const agent = makeAgent("agent-abc", tempDir);
+      await sendMessage(agent, "/clear", { cwd: "/" });
+
+      const sendKeysCall = spawnCalls.find(
+        (c) => c[0] === "tmux" && c[1] === "send-keys" && c.length === 7 && c[4] === "-l" && c[5] === "--"
+      );
+      expect(sendKeysCall).toBeDefined();
+      expect(sendKeysCall![6]).toBe("/clear");
+
+      const recipientLog = await Bun.file(
+        join(tempDir, ".ittybitty", "agents", "agent-abc", "agent.log")
+      ).text();
+      expect(recipientLog).toContain("Received command from user: /clear");
+      expect(recipientLog).not.toContain("[sent by user");
+    });
+
+    test("user message starting with ! is passed through verbatim (no prefix)", async () => {
+      const agent = makeAgent("agent-abc", tempDir);
+      await sendMessage(agent, "!ls -la", { cwd: "/" });
+
+      const sendKeysCall = spawnCalls.find(
+        (c) => c[0] === "tmux" && c[1] === "send-keys" && c.length === 7 && c[4] === "-l" && c[5] === "--"
+      );
+      expect(sendKeysCall).toBeDefined();
+      expect(sendKeysCall![6]).toBe("!ls -la");
+
+      const recipientLog = await Bun.file(
+        join(tempDir, ".ittybitty", "agents", "agent-abc", "agent.log")
+      ).text();
+      expect(recipientLog).toContain("Received command from user: !ls -la");
+    });
+
+    test("agent-relayed message starting with / is NOT passed through (keeps attribution)", async () => {
+      // Passthrough is user-only — an agent forwarding a `/`-leading string must
+      // still carry its [sent by agent ...] prefix so the recipient knows the source.
+      const agent = makeAgent("agent-abc", tempDir);
+      await mkdir(join(tempDir, ".ittybitty", "agents", "agent-sender"), { recursive: true });
+
+      await sendMessage(agent, "/clear", { fromAgent: "agent-sender" });
+
+      const sendKeysCall = spawnCalls.find(
+        (c) => c[0] === "tmux" && c[1] === "send-keys" && c.length === 7 && c[4] === "-l" && c[5] === "--"
+      );
+      expect(sendKeysCall).toBeDefined();
+      expect(sendKeysCall![6]).toBe("[sent by agent agent-sender]: /clear");
+    });
+
+    test("user message that merely contains / or ! (not leading) still gets the prefix", async () => {
+      const agent = makeAgent("agent-abc", tempDir);
+      await sendMessage(agent, "run /help please", { cwd: "/" });
+
+      const sendKeysCall = spawnCalls.find(
+        (c) => c[0] === "tmux" && c[1] === "send-keys" && c.length === 7 && c[4] === "-l" && c[5] === "--"
+      );
+      expect(sendKeysCall).toBeDefined();
+      expect(sendKeysCall![6]).toBe("[sent by user]: run /help please");
+    });
+
+    test("user message with leading whitespace before / still gets the prefix (column-0 only)", async () => {
+      // Passthrough keys off the literal first character. A leading space means
+      // the `/` would not land in column 0 anyway, so the message is treated as
+      // ordinary text and prefixed normally.
+      const agent = makeAgent("agent-abc", tempDir);
+      await sendMessage(agent, " /clear", { cwd: "/" });
+
+      const sendKeysCall = spawnCalls.find(
+        (c) => c[0] === "tmux" && c[1] === "send-keys" && c.length === 7 && c[4] === "-l" && c[5] === "--"
+      );
+      expect(sendKeysCall).toBeDefined();
+      expect(sendKeysCall![6]).toBe("[sent by user]:  /clear");
+    });
+
+    test("user message that is exactly '/' is passed through verbatim", async () => {
+      const agent = makeAgent("agent-abc", tempDir);
+      await sendMessage(agent, "/", { cwd: "/" });
+
+      const sendKeysCall = spawnCalls.find(
+        (c) => c[0] === "tmux" && c[1] === "send-keys" && c.length === 7 && c[4] === "-l" && c[5] === "--"
+      );
+      expect(sendKeysCall).toBeDefined();
+      expect(sendKeysCall![6]).toBe("/");
+    });
+
+    test("raw=true takes precedence over passthrough (both skip the prefix; raw wins the log line)", async () => {
+      // A raw send of a `/`-leading message must be logged as a raw message, not
+      // as a user-command passthrough — raw is checked first.
+      const agent = makeAgent("agent-abc", tempDir);
+      await sendMessage(agent, "/clear", { cwd: "/", raw: true });
+
+      const sendKeysCall = spawnCalls.find(
+        (c) => c[0] === "tmux" && c[1] === "send-keys" && c.length === 7 && c[4] === "-l" && c[5] === "--"
+      );
+      expect(sendKeysCall).toBeDefined();
+      expect(sendKeysCall![6]).toBe("/clear");
+
+      const recipientLog = await Bun.file(
+        join(tempDir, ".ittybitty", "agents", "agent-abc", "agent.log")
+      ).text();
+      expect(recipientLog).toContain("Received raw message: /clear");
+      expect(recipientLog).not.toContain("Received command from user");
+    });
+
     test("raw=true bypasses the user prefix even when user.name is set", async () => {
       await Bun.write(
         join(tempDir, "config.json"),

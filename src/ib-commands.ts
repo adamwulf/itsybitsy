@@ -1808,10 +1808,19 @@ export async function deliverMessage(agent: Agent, queued: OutboxMessage): Promi
   // etc.) — prefix as a user send so the recipient can distinguish user vs
   // agent messages. Raw mode (used by Telegram slash-command passthrough)
   // skips the prefix entirely — the recipient pane sees the message verbatim.
+  // A human-originated message (no fromId) that begins with `/` or `!` is a
+  // passthrough: the user is sending a slash command or a `!`-bang shell command
+  // meant to land in the agent's terminal verbatim, exactly as if they had typed
+  // it directly. Such messages skip the `[sent by user ...]` prefix (which would
+  // otherwise push the `/`/`!` off the first column and stop the command from
+  // firing). Only applies to user sends — an agent-relayed message keeps its
+  // `[sent by agent ...]` attribution even when it starts with `/` or `!`, so the
+  // recipient still knows who sent it.
   const raw = queued.raw === true;
+  const userPassthrough = !raw && !fromId && (message.startsWith("/") || message.startsWith("!"));
   let fullMessage = message;
   let userLabel = "";
-  if (!raw) {
+  if (!raw && !userPassthrough) {
     if (fromId) {
       let label: string;
       if (fromId.startsWith("@")) {
@@ -1875,6 +1884,9 @@ export async function deliverMessage(agent: Agent, queued: OutboxMessage): Promi
   const agentDir = join(agent.repoPath, ".ittybitty", "agents", agent.id);
   if (raw) {
     await logAgent(agentDir, `Received raw message: ${message}`);
+  } else if (userPassthrough) {
+    // Delivered verbatim (no prefix) — a user slash/bang command passthrough.
+    await logAgent(agentDir, `Received command from user: ${message}`);
   } else if (fromId) {
     await logAgent(agentDir, `Received message from ${fromId}: ${message}`);
   } else {

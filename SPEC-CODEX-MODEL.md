@@ -1,7 +1,7 @@
 # SPEC: Codex CLI as an alternative agent model
 
-Status: **DRAFT — design.** Phase 0 + Phase 1 IMPLEMENTED, reviewed (2 worker reviewers, both APPROVE), and merged on `agent/codex-agent` (rebased onto main; 3281 tests pass, tsc 0 errors). Phases 2–8 pending.
-Branch: `agent/codex-agent`. Author: codex-agent (manager). Last updated: 2026-05-30 (Phase 1 status update; consolidated rewrite earlier same day folded research + design rounds).
+Status: **DRAFT — design.** Phase 0 + Phase 1 + Phase 2 spike all IMPLEMENTED, reviewed, and merged on `agent/codex-agent`. Phase 2 is docs-only (3 commits, +534 lines on `CODEX-CLI-NOTES.md`) and resolved THE CRUX (D4 silent-deny confirmed) plus the inline-`-c` registration architecture. Phases 3–8 pending.
+Branch: `agent/codex-agent`. Author: codex-agent (manager). Last updated: 2026-05-30 (Phase 2 spike + follow-up merged; SPEC rewritten across §3.1/§3.2/§3.3/§4/§5.4/§5.5/§5.6/§6 Phase 2+3/§7 risks to fold in spike findings + both reviewers' notes).
 Companion docs (supporting evidence, do not duplicate here):
 - `SETTINGS-HOOKS-RESEARCH.md` — authoritative Claude vs Codex settings/hooks reference (every claim evidence-tagged).
 - `MODEL-NAME-FORMAT-PROPOSAL.md` — design proposal that drove the §5.1 + Phase 1 design.
@@ -63,34 +63,49 @@ Authoritative reference: `SETTINGS-HOOKS-RESEARCH.md` (every claim evidence-tagg
 - **Interactive launch:** bare `codex [OPTIONS] [PROMPT]` runs the interactive TUI; positional prompt seeds the session, like `claude "<prompt>"`. [research §B5]
 - **Hook events match Claude:** `PreToolUse`, `PostToolUse`, `SessionStart`, `UserPromptSubmit`, `Stop`, `PermissionRequest`, `SubagentStart`, `SubagentStop`. [research §B2/B3]
 - **PreToolUse JSON contract ≈ Claude:** identical `hookSpecificOutput.{permissionDecision, permissionDecisionReason}` shape; one field renamed (`modifiedToolInput` → `updatedInput`); exit code 2 = block on both. [research §B3, §C]
-- **Never-prompt:** `-a never` = "Never ask for user approval; execution failures are immediately returned to the model." [research §B5] Combined with deny-by-default PreToolUse = D4.
-- **Per-worktree isolation works.** A `<worktree>/.codex/config.toml` is loaded if `[projects."<abs path>"].trust_level = "trusted"` is set in `~/.codex/config.toml`. **No `CODEX_HOME` relocation needed.** [research §B1] This is the chosen isolation strategy; `CODEX_HOME` is a documented fallback only.
+- **Never-prompt VERIFIED (Phase 2 spike Q1):** `-a never` + a PreToolUse hook returning `permissionDecision: "deny"` blocks **silently in interactive tmux** — no modal, no approval UI. TUI shows a one-line `• PreToolUse hook (blocked)` entry with the reason; model receives the deny as tool-output and continues autonomously. D4 confirmed end-to-end.
+- **Inline-`-c` hook registration bypasses the project-trust gate (Phase 2 spike Q2).** Registering hooks entirely via `-c 'hooks.PreToolUse=[{...}]'` on the codex CLI is the chosen path. No on-disk `<worktree>/.codex/config.toml` is required and no entry in `~/.codex/config.toml` is needed. This is the isolation strategy for itsybitsy. (On-disk per-worktree config + `[projects."<abs>"].trust_level = "trusted"` is documented but UNUSED — see §3.2 for why we did not adopt it.) `CODEX_HOME` relocation is also not used (breaks auth — see §3.2).
 - **Native session-start instructions:** Codex reads `AGENTS.md` in the worktree natively. [research §C] Replaces inline session-start injection.
+- **PreToolUse fires for `apply_patch` on v0.135.0 (Phase 2 follow-up).** Earlier docs (openai/codex#16732) suggested apply_patch was exempt; empirical verification shows the hook fires with the full patch body in `tool_input.command` (containing `*** Add File:` / `*** Update File:` / `*** Delete File:` directives with target paths). itsybitsy can gate file edits via the same hook handler that gates Bash — see §5.5. **Hook is the primary boundary, not the sandbox.**
 
 ### 3.2 Real gaps we must work around
-- **`apply_patch` does NOT fire PreToolUse hooks** (open issue openai/codex#16732). [research §B3] ⇒ Hooks gate Bash but not file edits. The OS **sandbox** (`-s workspace-write`) is the real boundary for file edits.
-- **No `permissions.allow/deny` array equivalent** in codex; no `--allowedTools`/`--disallowedTools` CLI flags. [research §C "Where there is NO clean equivalent"] ⇒ We MUST translate the agent-type allow/deny lists into a **generated PreToolUse hook script** (Bash or similar) executed per tool call. This is the only path.
+- ~~**`apply_patch` does NOT fire PreToolUse hooks** (open issue openai/codex#16732).~~ **RESOLVED (Phase 2 follow-up):** apply_patch DOES fire PreToolUse on v0.135.0 with the full patch body (including target paths) in `tool_input.command`. The hook is the primary boundary for both Bash AND file edits. See §5.5 for the unified path-extraction approach.
+- **`-s workspace-write` allows writes to `/tmp`, `$TMPDIR`, and `~/.codex/memories` by default (Phase 2 follow-up).** Codex's default `writable_roots` on macOS includes `/private/tmp` (= `/tmp`), `/private/var/folders/.../T`, and `~/.codex/memories` in addition to cwd. The sandbox alone does NOT keep a codex agent inside its worktree — writes to these paths succeed without firing the hook. **Hook is the enforcement layer; sandbox is defense-in-depth.** Writes to non-writable roots like `~/Documents` or `../../parent` are MODEL-level declines (codex's system prompt lists writable_roots) — an adversarial prompt could bypass model self-restriction, so the hook must still gate.
+- **No `permissions.allow/deny` array equivalent** in codex; no `--allowedTools`/`--disallowedTools` CLI flags. [research §C "Where there is NO clean equivalent"] ⇒ We MUST translate the agent-type allow/deny lists into a **generated PreToolUse hook handler** invoked per tool call. The handler is implemented as a TypeScript dispatcher (`ib hooks codex-pre-tool-use <agentId>`) — same architecture as the existing claude hooks. No on-disk shell script is needed.
 - **`Task` interception is irrelevant** — codex has no `Task` tool. The equivalent is the `SubagentStart` event (documented but not yet battle-tested per issues #14754/#18888). [research §C] ⇒ `intercept-task` is a no-op on codex; gate sub-agent spawning via `SubagentStart` if/when needed.
 - **No system-prompt CLI flag** (no `--append-system-prompt`). [research §C] ⇒ Use the worktree `AGENTS.md` instead.
 - **`-a never` is "never PROMPT", not "deny everything by default."** Without our PreToolUse hook a command would be ALLOWED (subject to sandbox); with the hook returning deny-by-default, denied commands return to the model rather than escalating to a human. The hook is what makes D4 true.
 - **Hash-pinned hook trust.** Codex hashes every hook command; any edit invalidates trust and the hook is **silently skipped** until re-trusted. [research §B4] ⇒ itsybitsy MUST pass `--dangerously-bypass-hook-trust` on every spawn (our hook source is first-party and vetted). Without it, regenerating the hook silently disables it — a permission-bypass disaster.
 - **No hot-reload.** Codex config + hooks require a fresh session to pick up edits (Claude reloads `permissions`/`hooks` live). [research §C] ⇒ Mutations require respawn.
 - **Permission model is 2D.** Codex: `-a {untrusted|on-request|never} × -s {read-only|workspace-write|danger-full-access}`. Claude: 1D `--permission-mode`. [research §C] ⇒ Map our equivalent of `acceptEdits` to **`-a never -s workspace-write`**.
-- **No `.local`-style override file.** No `.codex/config.local.toml`. [research §B1] ⇒ Either gitignore the per-worktree `.codex/config.toml`, or accept that it's in-repo. We will gitignore it (it's per-agent, ephemeral, agent-specific).
-- **PreToolUse is not airtight** (OpenAI's own caveat — model may route around a blocked tool via another path). [research §B3] ⇒ Sandbox is the real boundary; hooks are policy + logging — same posture as Claude.
+- **No `.local`-style override file and no on-disk per-worktree config is used.** Hooks are registered via inline `-c` at launch time (Phase 2 spike Q2); no per-worktree config.toml is written by itsybitsy. `<worktree>/.codex/hooks/` is added to `.gitignore` to cover any incidental files (e.g. hook logs).
+- **`CODEX_HOME` relocation breaks auth (Phase 2 spike B2).** Setting `CODEX_HOME=<per-agent-path>` triggers the first-time-login flow because `~/.codex/auth.json` isn't in the redirected home. **NOT pursued** (per user direction — no symlink workaround either). itsybitsy uses global `~/.codex/` for auth + sessions + memories; per-agent isolation comes from cwd + inline `-c` hooks + the worktree path-isolation matcher in the hook handler.
+- **Hook failure mode is FAIL-OPEN (Phase 2 spike B1).** Per the codex docs at `developers.openai.com/codex/hooks`: a hook that crashes, emits malformed JSON, or returns an unsupported `permissionDecision` is marked failed and the tool call PROCEEDS. The hook handler MUST wrap all logic in try/catch and emit a deny payload on exception. See §5.5 for the defense-in-depth requirements.
+- **`permissionDecision: "allow"` requires being paired with `updatedInput` (Phase 2 spike B1).** Standalone `permissionDecision: "allow"` triggers `error: PreToolUse hook returned unsupported permissionDecision:allow` and fails open. Explicit allow must echo the original `tool_input` back as `updatedInput` (a no-op rewrite). Alternative is to emit `{}` and rely on "no decision = proceed" (works empirically but undocumented).
+- **PreToolUse is not airtight** (OpenAI's own caveat — model may route around a blocked tool via another path). [research §B3] ⇒ Hooks + sandbox layered together is the defense; either alone is insufficient.
 
-### 3.3 Canonical codex launch line (target)
+### 3.3 Canonical codex launch line (Phase 2 verified)
 
 ```
 codex -m <MODEL> -a never -s workspace-write \
-      -C <worktree> \
       --dangerously-bypass-hook-trust \
+      -c 'hooks.PreToolUse=[{matcher=".*",hooks=[{type="command",command="<abs ib> hooks codex-pre-tool-use <agentId>",timeout=30}]}]' \
+      -c 'hooks.SessionStart=[{matcher=".*",hooks=[{type="command",command="<abs ib> hooks codex-session-start <agentId>",timeout=30}]}]' \
+      -c 'hooks.Stop=[{matcher=".*",hooks=[{type="command",command="<abs ib> hooks codex-stop <agentId>",timeout=30}]}]' \
       "<prompt>"
 ```
 
-Where `<MODEL>` is the **model half** of the parsed `<cli>:<model>` (the `codex:` prefix is stripped). The per-worktree `<worktree>/.codex/config.toml` (written at spawn time) supplies the `[hooks]` block + any other config. `--dangerously-bypass-hook-trust` is **mandatory on every invocation** because the generated hook script's hash changes every spawn.
+Where `<MODEL>` is the **model half** of the parsed `<cli>:<model>` (the `codex:` prefix is stripped), `<abs ib>` is the absolute path to the `ib` binary resolved at spawn time (NOT a bare `ib` — codex's spawn environment may have a different PATH; see §5.5), and `<agentId>` is the itsybitsy agent id (ASCII, regex-validated, safe to interpolate).
 
-`~/.codex/config.toml` must have `[projects."<abs worktree path>"].trust_level = "trusted"` for the project layer to load. This is set once during the worktree setup.
+**No on-disk config file is written.** Per Phase 2 spike Q2, the inline-`-c` registration bypasses codex's project-config-walk and trust gate entirely. No `<worktree>/.codex/config.toml` is created and no entry is added to `~/.codex/config.toml`.
+
+`-C <worktree>` is OPTIONAL — codex inherits cwd from the parent shell (tmux is already created in the worktree by itsybitsy). Add it only as defensive belt-and-braces if a future codex version changes cwd resolution.
+
+`--dangerously-bypass-hook-trust` is **mandatory on every invocation** because the inline hook command's hash changes every spawn (the `<agentId>` interpolates into it). User has explicitly accepted this bypass — see Authoritative Decision D4.
+
+**Path-safety precondition (per reviewer #2 #3):** the `<abs ib>` path is interpolated into a TOML string literal inside a shell single-quoted argument. Before constructing the `-c` payload, itsybitsy MUST validate that the resolved binary path contains no `'`, `"`, `\`, or control characters. If it does, fail the spawn with a clear error pointing the user at the unsafe install path. (itsybitsy's default install paths are safe; this guards against user-customized installs.)
+
+**Model availability:** under a ChatGPT-plan account, only models in `~/.codex/models_cache.json` work. As of v0.135.0 + ChatGPT auth: `gpt-5.5`, `gpt-5.4-mini`, `codex-auto-review`. API-key billing may expose others. `gpt-5-codex` is NOT available on ChatGPT auth (HTTP 400). itsybitsy cannot pre-validate model availability client-side — an invalid model surfaces as HTTP 400 after the first prompt.
 
 ---
 
@@ -106,7 +121,7 @@ Where `<MODEL>` is the **model half** of the parsed `<cli>:<model>` (the `codex:
 | session UUID | `src/ib-commands.ts:2723` `crypto.randomUUID()`; stored `:2781` `session_id` | Codex has its own rollout-id model; capture into `codex_session_id` after first launch. |
 | Spawn `claude` cmd | `src/ib-commands.ts` `newAgent()` — `claudeArgs` built `2989–3010`; generated `start.sh` written from `:3072`; launch lines **`3111`/`3113`** (`setsid claude --session-id … "$(cat promptfile)"` / bare `claude --session-id …`); `CLAUDE_PID=$!` at `:3115`; SIGHUP `trap '' HUP` at `:3091` | **Branch point for codex launch.** Pass `parseModel(model).model` (NOT the raw `<cli>:<model>`) to `--model`. |
 | Resume `claude` cmd | `src/ib-commands.ts` `resumeAgent()` — args ~587–590, `resume.sh` written 619–709, `claude --resume …` launch lines ~663/665, SIGHUP-ignore insulation 635–644 | Codex resume differs: `codex resume <id>` via `codex_session_id` (not `claude --resume <uuid>`). |
-| Hook reg + perms | `src/settings-builder.ts` + `buildAgentSettings()` in `ib-commands.ts` (~2163–2267); writes `settings.local.json` (`hooks` block + `permissions.allow/deny`) | Codex needs a parallel writer for `<worktree>/.codex/config.toml` + a generated PreToolUse hook script (no `permissions.allow/deny` equivalent on codex). |
+| Hook reg + perms | `src/settings-builder.ts` + `buildAgentSettings()` in `ib-commands.ts` (~2163–2267); writes `settings.local.json` (`hooks` block + `permissions.allow/deny`) | Codex needs a parallel **inline-`-c` payload builder** (NOT an on-disk config writer) called from the codex branch of `start.sh` assembly. Output is one `-c 'hooks.PreToolUse=[...]'` flag per registered hook event (PreToolUse, SessionStart, Stop), with `command="<abs ib> hooks codex-<event> <agentId>"` interpolated. Per-spawn path-safety check on `<abs ib>` (no quotes/backslashes/control chars). No on-disk codex config file is created. |
 | Permission `.md` merge | `src/agent-types.ts` (`_all.md`, `_non_coordinator.md`, `<type>.md`) | Shared source of truth; consumed by both writers. |
 | Hook dispatch | `src/index.ts` routes `hook-check-path` / `hook-status` / `hooks intercept-task` / `hooks session-start` → `src/hooks/*.ts` | Add codex-shaped subcommands. |
 | State detection | `detectAgentStates()` in `src/agents.ts` + `src/parse-state.ts` | **Claude-UI-specific** — branch on parsed cli. Prefer codex `SessionStart`/`Stop` hooks writing state deterministically over TUI scraping. |
@@ -174,35 +189,62 @@ Permission mapping reference (for claude callers translating intent):
 | `plan` | `-a untrusted -s read-only` |
 | `bypassPermissions` / `--dangerously-skip-permissions` | `--dangerously-bypass-approvals-and-sandbox` (aka `--yolo`) |
 
-### 5.4 Permissions → generated PreToolUse hook script (D3 + D4)
+### 5.4 Permissions → inline PreToolUse hook handler (D3 + D4)
 
-Codex has no `permissions.allow/deny` array, no `--allowedTools` flag. The ONLY way to express our agent-type allow/deny lists is a **generated PreToolUse hook script** invoked per tool call.
+Codex has no `permissions.allow/deny` array, no `--allowedTools` flag. We express our agent-type allow/deny lists as a **TypeScript PreToolUse handler** (`src/hooks/codex-pre-tool-use.ts`) dispatched from `src/index.ts`, registered with codex via inline `-c` flags at spawn time. **No on-disk codex config is written** (Phase 2 spike Q2 — the on-disk path is silently ignored without a trust entry in `~/.codex/config.toml`, and inline-`-c` registration bypasses the trust gate cleanly).
 
-At spawn (Phase 3), `buildCodexConfig()`:
+At spawn (Phase 3), `buildCodexLaunchArgs()`:
 1. Reads the SAME merged allow/deny lists (`_all.md` + `_non_coordinator.md` + `<type>.md`).
-2. Writes `<worktree>/.codex/config.toml` containing:
-   - `model = "<parsed model half>"`
-   - `approval_policy = "never"`
-   - `sandbox_mode = "workspace-write"`
-   - `[[hooks.PreToolUse]]` registering a generated hook script under `<worktree>/.codex/hooks/pre-tool-use.sh` (or similar).
-   - Optionally additional `[[hooks.SessionStart]]` / `[[hooks.Stop]]` for state-detection (§5.6).
-3. Writes a generated `<worktree>/.codex/hooks/pre-tool-use.sh` script that reads the codex stdin JSON, matches `tool_name` + `tool_input.command` against the merged allow/deny lists, and prints the deny-by-default JSON contract.
-   - Alternative: have the script call `ib hooks codex-pre-tool-use <agentId>` and put the matching logic in TypeScript (`src/hooks/codex-pre-tool-use.ts`) — preferred for consistency with the existing claude hooks. The script then is a one-liner.
-4. Adds `[projects."<abs worktree path>"].trust_level = "trusted"` to `~/.codex/config.toml` (once per worktree) so the project layer loads. **This is the one cross-worktree write** we make; required by the codex trust model.
-5. Adds `.codex/` to the worktree's `.gitignore` (no `.local`-style file exists in codex).
+2. Resolves the absolute path to the `ib` binary (`<abs ib>`, e.g. `process.execPath` or a cached `which ib` result). **Path-safety check:** reject the spawn with a clear error if `<abs ib>` contains `'`, `"`, `\`, or control characters — these would break the TOML-in-shell quoting in the `-c` payload.
+3. Generates one `-c` flag per registered hook event (PreToolUse + state-detection events from §5.6), each with the same shape:
+   - `-c 'hooks.PreToolUse=[{matcher=".*",hooks=[{type="command",command="<abs ib> hooks codex-pre-tool-use <agentId>",timeout=30}]}]'`
+   - `-c 'hooks.SessionStart=[{matcher=".*",hooks=[{type="command",command="<abs ib> hooks codex-session-start <agentId>",timeout=30}]}]'`
+   - `-c 'hooks.Stop=[{matcher=".*",hooks=[{type="command",command="<abs ib> hooks codex-stop <agentId>",timeout=30}]}]'`
+4. `model` (`-m`), `approval_policy` (`-a never`), `sandbox_mode` (`-s workspace-write`) are passed as CLI flags, not via `-c`. Per-spawn fail-open hardening: the `command=` value above invokes `ib` directly with no shell wrapper, so any non-zero exit before our handler runs (binary missing, dispatcher crash, `<agentId>` argv parse failure) results in codex fail-open. Mitigation lives in §5.5 (handler-level try/catch + a spawn-time precheck).
+5. Adds `<worktree>/.codex/` to the worktree's `.gitignore` to cover any incidental files (hook logs, sentinel files, future per-agent scratch). No `.codex/config.toml` is created by itsybitsy; if codex itself drops anything there it's gitignored.
 6. Writes a per-agent `<worktree>/AGENTS.md` containing the role/session-start instructions (replaces what `session-start.ts` injects for Claude).
+7. **`~/.codex/config.toml` is NEVER modified by itsybitsy.** The user's existing trust entries, model defaults, and other config are left untouched. (Closes Risk #10.)
 
-**Trust:** `--dangerously-bypass-hook-trust` is passed on **every** spawn (hash-pinned trust requires this; see §3.2).
+**Trust:** `--dangerously-bypass-hook-trust` is passed on **every** spawn (hash-pinned trust requires this; the inline-`-c` payload's hash changes per spawn because `<agentId>` interpolates into it; see §3.2). User-approved bypass per D4.
 
-**Defense in depth:** the `workspace-write` sandbox is the real boundary for `apply_patch` edits (which don't fire PreToolUse hooks); hooks gate Bash + MCP calls.
+**Launch-line length:** three inline `-c` payloads with absolute paths is ~600–800 bytes. macOS `ARG_MAX` is ~1 MB so we have several orders of magnitude of headroom; not a concern.
+
+**Defense in depth:** Per Phase 2 follow-up, the hook fires for BOTH `Bash` AND `apply_patch` on v0.135.0 (issue #16732 appears resolved). The hook is the primary boundary; `-s workspace-write` is secondary (and leaky on macOS — it permits `/tmp`, `$TMPDIR`, `~/.codex/memories` by default). See §5.5 for the path-extraction approach that gates both tool types.
 
 ### 5.5 Codex PreToolUse hook handler (D3 + D4)
 
-New `src/hooks/codex-pre-tool-use.ts`, dispatched from `src/index.ts`:
-- Reads codex's stdin JSON (`tool_name`, `tool_input.command`, `cwd`, `session_id`, …).
-- Applies the same allow/deny matching used for Claude (reuse the matcher logic, not a fork of the rules — share with `intercept-task` / `agent-path` as a library function).
-- Emits codex's stdout contract: `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"|"deny","permissionDecisionReason":…}}`. **Default = deny.**
-- Also covers path isolation (the codex analog of `agent-path`/`main-path`) so codex agents stay in their worktree. (Caveat: `.git`, `.codex`, `.agents` are already OS-enforced read-only under `workspace-write` per research §B5.)
+New `src/hooks/codex-pre-tool-use.ts`, dispatched from `src/index.ts` via `ib hooks codex-pre-tool-use <agentId>`:
+
+**Inputs (stdin JSON, verified empirically in Phase 2):**
+- `tool_name` — `"Bash"`, `"apply_patch"`, MCP tool names, etc.
+- `tool_input.command` — for Bash, the shell command string; for `apply_patch`, the full patch body including `*** Begin Patch` / `*** Add File: <path>` / `*** Update File: <path>` / `*** Delete File: <path>` / `*** End Patch` directives with target paths.
+- `cwd` — the agent's worktree (already canonicalized; use directly for path comparisons, no symlink resolution needed).
+- `session_id` — the codex rollout id (snake_case on v0.135.0). **Capture this into `meta.codex_session_id` on first hook firing** if the field is empty (Phase 7 resume support). **Defensively read both `session_id` AND `sessionId`** in case a future codex version renames the field (per reviewer #2 #7).
+- `hook_event_name`, `turn_id`, `tool_use_id`, `model`, `permission_mode`, `transcript_path` — additional metadata; log but not used for the deny decision.
+
+**Logic:**
+1. Resolve agent-type allow/deny lists (same merged source as the claude-side hook): `_all.md` + `_non_coordinator.md` + `<type>.md`. Reuse the matcher logic as a shared library function (don't fork).
+2. **Path-isolation matcher** (the codex analog of `agent-path`):
+   - For `tool_name === "Bash"`: existing shell-command path detection (extract paths from `tool_input.command` via the same regex/parser used in `agent-path.ts`).
+   - For `tool_name === "apply_patch"`: parse the patch body — grep lines starting with `*** Add File:`, `*** Update File:`, `*** Delete File:` and extract the path after the colon. Each path is the target the agent wants to write to.
+   - Deny if ANY extracted path resolves outside the worktree (parent itsybitsy repo, sibling agent worktree, etc.). Allow if all resolve inside or to a known-safe writable_root (cwd, `/tmp` SCOPED to known-safe subpaths IF we want, etc. — defer to a follow-up decision).
+3. Apply allow/deny matching from the agent-type lists.
+4. **Always include `permissionDecisionReason`** on deny (omitting it triggers a separate codex error path).
+
+**Outputs (codex stdout contract, exit 0):**
+- **Deny:** `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"<reason>"}}`. Confirmed in Phase 2 spike Q1 to silently block in interactive `-a never` mode (no modal).
+- **Allow:** emit `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","updatedInput":<echo of original tool_input>}}`. Standalone `permissionDecision: "allow"` is rejected by codex as "unsupported permissionDecision:allow" and FAIL-OPENs (Phase 2 spike B1). The echo-back-original-input pattern is a no-op rewrite, documented and verified working. **Alternative (Option B):** emit `{}` or no decision and rely on codex defaulting to allow. Empirically works but undocumented; keep Option A unless codex adds rewrite-detection telemetry, in which case flip.
+- **Default (no match):** deny.
+
+**Fail-open hardening (CRITICAL — codex's documented hook failure mode is FAIL-OPEN per `developers.openai.com/codex/hooks`):**
+- Wrap ALL handler logic in a try/catch; emit a deny payload on ANY exception. Never let the process throw or exit non-zero.
+- Validate `<agentId>` as the first argv before any other work; on parse failure emit deny and exit 0.
+- Emit valid JSON to stdout on every code path. Never emit a partial JSON write.
+- Out-of-process failures (binary missing from PATH, dispatcher crash before `codex-pre-tool-use.ts` runs) cannot be caught by the handler itself. Mitigation: §5.4 step 2 resolves an ABSOLUTE path to `ib` at spawn time, eliminating PATH dependency. A spawn-time precheck (run `ib hooks codex-pre-tool-use --dry-run <agentId>` before launching codex) verifies the dispatcher resolves; fail the spawn cleanly if not.
+
+**Session-id capture (Phase 7 prep, reviewer #1 recommendation):**
+- The PreToolUse handler captures `session_id` into `meta.codex_session_id` only on FIRST firing — but this misses sessions where the agent never triggers a tool call (rare but possible).
+- The `SessionStart` handler (§5.6) is the right home for session-id capture: it ALWAYS fires regardless of tool calls. The PreToolUse handler should still capture defensively as a fallback (in case SessionStart fails or codex changes the event firing order).
 
 `intercept-task` does **not** need a codex equivalent — codex has no `Task` tool. If/when we need to gate codex sub-agent spawning, use the `SubagentStart` event.
 
@@ -210,7 +252,10 @@ New `src/hooks/codex-pre-tool-use.ts`, dispatched from `src/index.ts`:
 
 `parse-state.ts` greps Claude's TUI strings; codex's TUI differs. Two complementary tactics:
 1. **Hook-driven state writes (preferred, deterministic):** wire codex's `SessionStart` → `running`, `Stop` → `waiting`/`complete`, mirroring the Phase-42 deterministic flow (`ib hook-status` writes `state` to meta.json via `writeAgentState()`). Avoids brittle screen-scraping. The native `AGENTS.md` instructions can even tell the agent to emit specific markers if needed.
+   - **`SessionStart` is also the primary session-id capture point** (reviewer #1 recommendation): it always fires regardless of whether the agent triggers a tool call. Handler reads `session_id` from stdin and writes `meta.codex_session_id` if empty. PreToolUse handler (§5.5) captures defensively as a fallback.
 2. **Codex tmux overrides:** a small `parse-state-codex.ts` (or codex branch) for the override states the hooks can't capture (rate-limited, api_error, compacting) by matching codex's actual UI strings (gathered empirically in Phase 5 — formerly Phase 4).
+
+All state-detection hooks are registered via the same inline-`-c` pattern as PreToolUse (§5.4 step 3): `-c 'hooks.SessionStart=[{matcher=".*",hooks=[{type="command",command="<abs ib> hooks codex-session-start <agentId>",timeout=30}]}]'`, etc.
 
 `detectAgentStates()` branches on `parseModel(meta.model).cli` to pick the codex path.
 
@@ -265,16 +310,35 @@ Integration with main: rebase of `agent/codex-agent` onto main (`6143297`) repla
 
 User-facing follow-up (per D5, your call): any bare-name `model:` value in your installed `~/.itsybitsy/agent-types/*.md` or `~/.itsybitsy/config.json` will now be rejected at `ib watch` startup with a clear error. Migrate to the qualified `<cli>:<model>` form by hand.
 
-### Phase 2 — Spike: verify interactive codex + deny semantics (manual)
-Unchanged from the prior Phase 1; just renumbered.
-- Manually run interactive `codex -m <some-model> -a never -s workspace-write --dangerously-bypass-hook-trust` in a tmux session with a trivial deny-all PreToolUse hook (registered via a throwaway per-worktree `.codex/config.toml` + trust entry).
-- **Resolve THE crux:** does a hook `deny` in *interactive* mode block silently (return to model, no modal)? Document the exact working launch line + how the codex session/rollout id is captured for resume + whether the worktree-local hook actually fires (the per-worktree design's load-bearing assumption).
-- **Gate:** a written findings note (append to `CODEX-CLI-NOTES.md` AND fold into this SPEC §3) with the verified launch command, no-modal confirmation, session-id capture method, and worktree-hook-fires confirmation. NO code.
+### Phase 2 — Spike: verify interactive codex + deny semantics (manual) ✅ MERGED
+Status: complete on `agent/codex-agent`. Three commits:
+- `64b8202` docs(codex): Phase 2 spike findings — silent-deny + inline-c hook registration (+320)
+- `736b8b2` docs(codex): Phase 2 — add canonical-launch-line TL;DR to spike findings (+41)
+- `a808fce` docs(codex): Phase 2 follow-up — apply_patch sandbox boundary verified on v0.135.0 (+173)
 
-### Phase 3 — Codex config / hook writer
-- `buildCodexConfig()` writes per-worktree `<worktree>/.codex/config.toml` + generated `<worktree>/.codex/hooks/pre-tool-use.sh` (which calls `ib hooks codex-pre-tool-use <agentId>`) + `<worktree>/AGENTS.md` (session-start instructions). Adds `[projects."<abs>"].trust_level = "trusted"` to `~/.codex/config.toml` once per worktree. Adds `.codex/` to the worktree `.gitignore`. Trust handled by `--dangerously-bypass-hook-trust` on every spawn.
-- `src/hooks/codex-pre-tool-use.ts` implements the codex-shaped allow/deny handler emitting the codex JSON contract. Default = deny.
-- **Gate:** unit tests asserting (a) generated `config.toml` is valid TOML, (b) the hook script is generated correctly, (c) the handler's allow/deny matches the merged `.md` lists, (d) the codex JSON contract is correct. Manual: `codex` loads the config; an allow-listed cmd runs; a non-listed cmd is denied — no prompt.
+Gate met: findings folded into `CODEX-CLI-NOTES.md` (+534 lines) AND this SPEC (§3.1, §3.2, §3.3, §4 seam table, §5.4, §5.5, §5.6, §7 risks all updated). NO code changes (per gate spec).
+
+Verified empirically on `codex-cli 0.135.0`, ChatGPT-auth, `gpt-5.4-mini`:
+1. ✅ **THE CRUX (Q1):** `permissionDecision: "deny"` blocks silently in interactive `-a never` mode. No modal, no approval UI. D4 confirmed end-to-end. Two worker reviewers (general + adversarial) both validated the evidence.
+2. ✅ **Q2 (worktree hook fires):** on-disk `<worktree>/.codex/config.toml` is silently ignored without a `~/.codex/config.toml` trust entry. **Inline `-c hooks.PreToolUse=[...]` bypasses the project-trust gate entirely** — this is the chosen registration path. No on-disk codex config and no `~/.codex/config.toml` modification.
+3. ✅ **Q3 (session-id):** captured from PreToolUse stdin (`session_id` field) AND from `SessionStart` stdin (preferred — always fires). Rollout files at `~/.codex/sessions/YYYY/MM/DD/rollout-<ISO>-<UUID>.jsonl` as fallback. `codex resume <UUID>` re-attaches.
+4. ✅ **Q4 (launch line):** `-C <worktree>` is optional; ChatGPT-auth limits models to `gpt-5.5` / `gpt-5.4-mini` / `codex-auto-review`; hook registration moves from on-disk → inline `-c`. See §3.3 for the verified line.
+
+Phase 2 follow-up (apply_patch + sandbox) flipped two SPEC assumptions:
+- **`apply_patch` DOES fire PreToolUse on v0.135.0** (issue #16732 appears resolved). The hook receives the full patch body with target paths in `tool_input.command`. itsybitsy's hook handler gates BOTH Bash AND file edits.
+- **`-s workspace-write` allows writes to `/tmp`, `$TMPDIR`, `~/.codex/memories` by default.** Sandbox is leaky on macOS; the hook is the primary boundary.
+
+Reviewer #2 raised 11 issues; manager triage merged 5 actionable items into the SPEC patch (#7 field-name stability, #10 SPEC patch completeness across §3.1/§4/§6/§5.6, #11 reframe inferences as observations, plus #3 path-safety preconditions and #2 fail-open coverage outside TypeScript). Items #4/#5 (bypass-trust blast radius / CODEX_HOME symlink workaround) explicitly closed by user direction — NOT pursued.
+
+### Phase 3 — Codex inline-`-c` launch builder + hook handler
+- `buildCodexLaunchArgs()` in `src/ib-commands.ts` (alongside `buildAgentSettings()`) returns the inline-`-c` flag array per §5.4. Reads merged allow/deny lists from `_all.md` + `_non_coordinator.md` + `<type>.md`; resolves `<abs ib>` with path-safety check (no `'`, `"`, `\`, or control chars); emits one `-c 'hooks.<event>=[{...}]'` per registered event (PreToolUse + SessionStart + Stop).
+- `src/hooks/codex-pre-tool-use.ts` implements the allow/deny handler per §5.5: reads stdin JSON; extracts paths from `tool_input.command` for BOTH Bash (existing shell parser) AND `apply_patch` (parse `*** Add/Update/Delete File:` directives); applies path-isolation + allow/deny list matching; emits `permissionDecision: "deny"` (with `permissionDecisionReason`) OR `permissionDecision: "allow"` paired with `updatedInput` echoing the original `tool_input`; defaults to deny. Wraps ALL logic in try/catch and emits deny on exception (codex fail-open mitigation).
+- `src/hooks/codex-session-start.ts` + `src/hooks/codex-stop.ts` for state-detection (per §5.6) — write `state` to meta.json via `writeAgentState()`; SessionStart additionally captures `session_id` into `meta.codex_session_id` if empty (with `sessionId` defensive fallback).
+- `src/index.ts` routes `hooks codex-pre-tool-use` / `hooks codex-session-start` / `hooks codex-stop` → the new handlers.
+- `<worktree>/.codex/` added to gitignore (covers incidental files even though we don't write a config.toml).
+- Per-agent `<worktree>/AGENTS.md` generated with role/session-start instructions (Claude-side equivalent: `session-start.ts` injection).
+- Spawn-time precheck: `ib hooks codex-pre-tool-use --dry-run <agentId>` invoked before launching codex; fail the spawn cleanly if the dispatcher doesn't resolve (out-of-process fail-open mitigation).
+- **Gate:** unit tests asserting (a) `buildCodexLaunchArgs()` produces well-formed `-c` payloads (parseable TOML; correct event names; correct command interpolation); (b) path-safety rejection fires for unsafe `<abs ib>` paths; (c) the handler's allow/deny matches the merged `.md` lists for Bash AND apply_patch tool calls; (d) the codex JSON contract is correct (deny with reason; allow + echo-back `updatedInput`); (e) the handler emits deny on uncaught exception; (f) SessionStart handler writes `codex_session_id` to meta.json on first firing; (g) defensive `sessionId`/`session_id` read works. Manual: `codex` launches with the inline-`-c` flags; an allow-listed cmd runs; a non-listed cmd is denied — no prompt; deny payload reaches the model and shows in the TUI as `• PreToolUse hook (blocked)`.
 
 ### Phase 4 — Spawn path (headed, in tmux)
 - Branch `start.sh` assembly in `newAgent()` on `parseModel(model).cli` → launch the canonical line from §3.3. Capture PID + codex session id → meta (`codex_session_id`).
@@ -301,16 +365,21 @@ Unchanged from the prior Phase 1; just renumbered.
 
 ## 7. Risks / open questions
 
-1. **THE CRUX (Phase 2 gate):** does interactive `codex -a never` + deny hook block silently (no modal)? The whole D4 guarantee rests on this. Still UNVERIFIED.
-2. **`apply_patch` doesn't fire PreToolUse hooks** (openai/codex#16732). File edits aren't gated by hooks today — the `-s workspace-write` sandbox is the real boundary. Document this so users don't over-trust the hook for edits. (Bash + MCP calls ARE gated.)
-3. **Hash-pinned trust + mandatory bypass.** Every spawn must pass `--dangerously-bypass-hook-trust`; without it our regenerated hook silently disables itself. There is no config-key to pre-trust by hash. Codify in `buildCodexConfig()`.
+1. ~~**THE CRUX (Phase 2 gate):** does interactive `codex -a never` + deny hook block silently (no modal)?~~ **RESOLVED (Phase 2 spike Q1).** Silent deny confirmed end-to-end on v0.135.0 in interactive tmux. D4 holds.
+2. ~~**`apply_patch` doesn't fire PreToolUse hooks** (openai/codex#16732).~~ **RESOLVED (Phase 2 follow-up).** apply_patch DOES fire PreToolUse on v0.135.0 with the full patch body in `tool_input.command`. Our hook handler gates both Bash AND file edits. Note: `-s workspace-write` is leaky on macOS (permits `/tmp`, `$TMPDIR`, `~/.codex/memories` by default) — the hook MUST do path-isolation; sandbox alone is insufficient.
+3. **Hash-pinned trust + mandatory bypass.** Every spawn must pass `--dangerously-bypass-hook-trust`; without it our inline `-c` hook silently disables itself. There is no config-key to pre-trust by hash. Codified in `buildCodexLaunchArgs()` per §5.4. User-accepted bypass per D4. Scope of the flag was not empirically tested beyond hook-trust (reviewer #2 #4 closed by user as not pursued); revisit if codex's release notes ever change the flag's semantics.
 4. **No hot-reload.** Codex config/hook edits require a fresh session. Mutating an agent's permissions mid-session means killing+respawning, not editing.
 5. **`SubagentStart` is documented but not battle-tested** (issues #14754/#18888). If/when we need to gate codex sub-agent spawning, plan to verify it fires reliably before relying on it.
 6. **State-detection brittleness.** Prefer hook-driven deterministic state over scraping codex's TUI; treat tmux overrides as a thin supplement. (Phase 5.)
-7. **Codex version drift.** All facts pinned to v0.135.0; flags/contracts may change. Add a `codex --version` check + a `codex doctor`-style health note at spawn.
-8. **`PermissionRequest` event.** Codex's docs show `permissionDecision: ask` only on `PermissionRequest`, not `PreToolUse` (research §B3 / §C). With `-a never` + deny-by-default our hook returns only allow/deny; we should never see `PermissionRequest`. Verify in Phase 2.
-9. **No `--allowedTools` / `--disallowedTools` / `permissions.allow/deny`.** The generated PreToolUse hook script is the only path. (Architecturally fine, but more code than Claude needs.)
-10. **`~/.codex/config.toml` trust list grows per worktree.** Each spawn adds one `[projects."<abs>"].trust_level = "trusted"`. This is user-global state; cleanup on agent archive is worth considering (low priority).
+7. **Codex version drift.** All facts pinned to v0.135.0; flags/contracts may change. Add a `codex --version` check at spawn and stamp it in meta.json so we can correlate state-detection failures against version bumps (reviewer #2 #7). Defensively read hook-payload fields (`session_id` AND `sessionId`) to survive snake_case → camelCase renames.
+8. **`PermissionRequest` event.** Codex's docs show `permissionDecision: ask` only on `PermissionRequest`, not `PreToolUse` (research §B3 / §C). With `-a never` + deny-by-default our hook returns only allow/deny; we should never see `PermissionRequest`. **Verified in Phase 2 spike** — never observed during interactive testing.
+9. **No `--allowedTools` / `--disallowedTools` / `permissions.allow/deny`.** The inline-`-c` PreToolUse handler is the only path. (Architecturally fine, but more code than Claude needs.)
+10. ~~**`~/.codex/config.toml` trust list grows per worktree.**~~ **RESOLVED (Phase 2 spike Q2).** Inline `-c hooks.PreToolUse=[...]` registration bypasses the project-trust gate entirely. `~/.codex/config.toml` is never modified by itsybitsy. No per-worktree cleanup needed.
+11. **Codex hook contract is FAIL-OPEN (Phase 2 spike B1).** `permissionDecision: "allow"` requires being paired with `updatedInput` (a no-op echo-back rewrite is the safe expression of explicit allow). Standalone allow / crashes / malformed JSON / unsupported decisions ALL result in the tool call PROCEEDING per the documented behavior at `developers.openai.com/codex/hooks`. Our handler must: (a) wrap all logic in try/catch + emit deny on exception; (b) resolve `<abs ib>` at spawn time (no PATH dependency); (c) validate `<agentId>` argv before any other work; (d) include a spawn-time precheck (`--dry-run`) to verify dispatcher resolves. Monitor hook-fail rate via PostToolUse or external telemetry to detect gating regressions in production.
+12. **ChatGPT-account model availability is constrained (Phase 2 spike Q4).** Only models in `~/.codex/models_cache.json` are reachable: `gpt-5.5`, `gpt-5.4-mini`, `codex-auto-review`. `gpt-5-codex` returns HTTP 400. itsybitsy cannot pre-validate client-side; surface the HTTP 400 cleanly in the TUI after first prompt.
+13. **`CODEX_HOME` relocation breaks auth (Phase 2 spike B2).** No `auth.json` in the redirected home → first-time-login flow every spawn. Decided **NOT pursued** (per user direction — no symlink workaround either). Global `~/.codex/` is the chosen home; per-agent isolation comes from cwd + inline-`-c` hooks + the path-isolation matcher in the handler.
+14. **Inline-`-c` TOML-in-shell path safety (reviewer #2 #3).** The `<abs ib>` path is interpolated into a TOML string literal inside a shell single-quoted argument. `buildCodexLaunchArgs()` must reject the spawn if `<abs ib>` contains `'`, `"`, `\`, or control characters. itsybitsy's default install paths are safe; this guards against user-customized installs in paths with apostrophes or quotes.
+15. **Q2 negative-result methodology has residual confound (reviewer #2 #1).** The "on-disk config.toml is silently ignored without trust" finding was tested with potentially-different script paths between arms and without a clean-`~/.codex/`-per-arm protocol. The PRACTICAL conclusion (use inline `-c`) is unaffected because we picked inline-`-c` for its own merits, not because the on-disk path is definitively broken. Treat "on-disk path status" as UNVERIFIED rather than KNOWN-BROKEN; revisit only if a future codex version changes the trust model and we want to re-evaluate.
 
 ---
 

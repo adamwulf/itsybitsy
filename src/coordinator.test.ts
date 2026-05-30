@@ -605,7 +605,7 @@ describe("ensureSystemCoordinator", () => {
     const { mkdir } = await import("fs/promises");
     await mkdir(tmpDir, { recursive: true });
     const configPath = join(tmpDir, "config.json");
-    await Bun.write(configPath, JSON.stringify({ coordinator: { model: "sonnet" } }));
+    await Bun.write(configPath, JSON.stringify({ coordinator: { model: "claude:sonnet" } }));
 
     // Override config path
     const { setUserConfigPath, resetUserConfigPath } = await import("./config");

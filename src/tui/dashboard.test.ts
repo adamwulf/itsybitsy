@@ -1310,7 +1310,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     await mkdir(join(newAgentTempDir, ".ittybitty"), { recursive: true });
     await Bun.write(join(newAgentTempDir, ".ittybitty", "repo-id"), "abcd1234\n");
     setUserConfigPath(join(newAgentTempDir, "config.json"));
-    await Bun.write(join(newAgentTempDir, "config.json"), JSON.stringify({ model: "sonnet" }));
+    await Bun.write(join(newAgentTempDir, "config.json"), JSON.stringify({ model: "claude:sonnet" }));
 
     const tempHome = await mkdtemp(join(tmpdir(), "ib-na-home-"));
     const originalHome = process.env.HOME;
@@ -1388,7 +1388,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     await mkdir(join(newAgentTempDir, ".ittybitty"), { recursive: true });
     await Bun.write(join(newAgentTempDir, ".ittybitty", "repo-id"), "abcd1234\n");
     setUserConfigPath(join(newAgentTempDir, "config.json"));
-    await Bun.write(join(newAgentTempDir, "config.json"), JSON.stringify({ model: "sonnet" }));
+    await Bun.write(join(newAgentTempDir, "config.json"), JSON.stringify({ model: "claude:sonnet" }));
 
     const spawnCalls: string[] = [];
     const mockSpawn = (cmd: string[]): SpawnResult => {

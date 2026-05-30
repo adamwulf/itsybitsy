@@ -85,7 +85,7 @@ describe("config list", () => {
     await runConfigCommand(["list"]);
     const output = logged();
     expect(output).toContain("maxAgents = 10 (default)");
-    expect(output).toContain("model = opus (default)");
+    expect(output).toContain("model = claude:opus (default)");
     expect(output).toContain("autoCompactThreshold = (unset)");
     // Permission list keys have all been removed from CONFIG_KEYS and now live in
     // ~/.itsybitsy/agent-types/*.md frontmatter.
@@ -196,10 +196,10 @@ describe("config set", () => {
   });
 
   test("sets string value", async () => {
-    await runConfigCommand(["set", "model", "sonnet"]);
-    expect(logged()).toBe("Set model = sonnet");
+    await runConfigCommand(["set", "model", "claude:sonnet"]);
+    expect(logged()).toBe("Set model = claude:sonnet");
     const data = await Bun.file(cfgPath).json();
-    expect(data.model).toBe("sonnet");
+    expect(data.model).toBe("claude:sonnet");
   });
 
   test("sets nested key", async () => {
@@ -245,9 +245,14 @@ describe("config set", () => {
     expect(errored()).toContain("'createPullRequests' must be true or false, got 'yes'");
   });
 
-  test("rejects invalid model", async () => {
-    await expect(runConfigCommand(["set", "model", "gpt4"])).rejects.toThrow("EXIT");
-    expect(errored()).toContain("'model' must be one of: sonnet, opus, haiku");
+  test("rejects bare model name (D1/D5: must be qualified <cli>:<model>)", async () => {
+    await expect(runConfigCommand(["set", "model", "opus"])).rejects.toThrow("EXIT");
+    expect(errored()).toContain("'model' must be a qualified '<cli>:<model>' string");
+  });
+
+  test("rejects unknown CLI (D6: hard-reject)", async () => {
+    await expect(runConfigCommand(["set", "model", "gemini:foo"])).rejects.toThrow("EXIT");
+    expect(errored()).toContain("Unknown CLI 'gemini'");
   });
 
   test("rejects deprecated permissions.repo.allow as unknown key (moved to _non_coordinator.md)", async () => {
@@ -421,8 +426,16 @@ describe("edge cases", () => {
     expect(data.maxAgents).toBe(10);
   });
 
-  test("set all valid models", async () => {
-    for (const model of ["sonnet", "opus", "haiku"]) {
+  test("set all valid qualified models (claude + codex)", async () => {
+    const models = [
+      "claude:sonnet",
+      "claude:opus",
+      "claude:haiku",
+      "claude:claude-opus-4-7",
+      "codex:gpt-5.1-codex",
+      "codex:o3-mini",
+    ];
+    for (const model of models) {
       logSpy.mockClear();
       await runConfigCommand(["set", "model", model]);
       expect(logged()).toBe(`Set model = ${model}`);

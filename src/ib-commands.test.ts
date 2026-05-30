@@ -1421,7 +1421,7 @@ describe("resumeAgent (native)", () => {
       id: "agent-abc",
       tmux_session: "tmux-agent-abc",
       session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-      model: "opus",
+      model: "claude:opus",
     }));
 
     const agent = _makeAgent({
@@ -1432,7 +1432,7 @@ describe("resumeAgent (native)", () => {
       meta: {
         session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
         tmux_session: "tmux-agent-abc",
-        model: "opus",
+        model: "claude:opus",
       } as any,
     });
     const result = await resumeAgent(agent);
@@ -1468,7 +1468,7 @@ describe("resumeAgent (native)", () => {
       id: "agent-resume",
       tmux_session: "tmux-agent-resume",
       session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-      model: "opus",
+      model: "claude:opus",
     }));
 
     const agent = _makeAgent({
@@ -1479,7 +1479,7 @@ describe("resumeAgent (native)", () => {
       meta: {
         session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
         tmux_session: "tmux-agent-resume",
-        model: "opus",
+        model: "claude:opus",
       } as any,
     });
     const result = await resumeAgent(agent);
@@ -1513,7 +1513,7 @@ describe("resumeAgent (native)", () => {
       id: "agent-hup",
       tmux_session: "tmux-agent-hup",
       session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-      model: "opus",
+      model: "claude:opus",
     }));
 
     const agent = _makeAgent({
@@ -1524,7 +1524,7 @@ describe("resumeAgent (native)", () => {
       meta: {
         session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
         tmux_session: "tmux-agent-hup",
-        model: "opus",
+        model: "claude:opus",
       } as any,
     });
     const result = await resumeAgent(agent);
@@ -1576,7 +1576,7 @@ describe("resumeAgent (native)", () => {
       id: "agent-window-size",
       tmux_session: "tmux-agent-window-size",
       session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-      model: "opus",
+      model: "claude:opus",
     }));
 
     const agent = _makeAgent({
@@ -1587,7 +1587,7 @@ describe("resumeAgent (native)", () => {
       meta: {
         session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
         tmux_session: "tmux-agent-window-size",
-        model: "opus",
+        model: "claude:opus",
       } as any,
     });
     const result = await resumeAgent(agent);
@@ -1988,7 +1988,7 @@ describe("resumeAgent (native)", () => {
       // Isolate user config too — newAgent reads it for default model.
       const userConfigPath = join(coordTempDir, "ib-coord-config.json");
       setUserConfigPath(userConfigPath);
-      await Bun.write(userConfigPath, JSON.stringify({ model: "sonnet" }, null, 2));
+      await Bun.write(userConfigPath, JSON.stringify({ model: "claude:sonnet" }, null, 2));
 
       // newAgent uses its own spawn context; route everything through the
       // shared spawnCalls log so tests can introspect.
@@ -3051,7 +3051,7 @@ describe("newAgent (native)", () => {
     // Set user config path to temp dir so tests don't inherit the real user config
     const userConfigPath = join(tempDir, "config.json");
     setUserConfigPath(userConfigPath);
-    await Bun.write(userConfigPath, JSON.stringify({ model: "sonnet" }, null, 2));
+    await Bun.write(userConfigPath, JSON.stringify({ model: "claude:sonnet" }, null, 2));
 
     // Also set the lifecycle spawn runner (used by resolveGitRoot)
     lifecycleSpawnCtx.set((cmd: string[], _opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
@@ -3148,7 +3148,7 @@ describe("newAgent (native)", () => {
     expect(meta.worker).toBe(false);
     expect(meta.agentType).toBe("manager"); // default type
     expect(meta.yolo).toBe(false);
-    expect(meta.model).toBe("sonnet"); // model from test config
+    expect(meta.model).toBe("claude:sonnet"); // model from test config (qualified <cli>:<model> form)
     expect(meta.session_id).toMatch(/^[0-9a-f-]+$/);
     expect(typeof meta.created_epoch).toBe("number");
   });
@@ -3478,33 +3478,42 @@ describe("newAgent (native)", () => {
 
   test("uses custom model from opts", async () => {
     setNewAgentSpawnRunner(mockSpawnRunner());
-    await callNewAgent("task", { name: "test-model", model: "opus" });
+    await callNewAgent("task", { name: "test-model", model: "claude:opus" });
 
     const meta = await Bun.file(join(agentsDir, "test-model", "meta.json")).json();
-    expect(meta.model).toBe("opus");
+    // meta stores the raw qualified string verbatim (SPEC §4 / D8).
+    expect(meta.model).toBe("claude:opus");
 
+    // start.sh receives the model HALF — claude command stays byte-identical
+    // to today's `claude --model opus`.
     const startSh = await Bun.file(join(agentsDir, "test-model", "start.sh")).text();
     expect(startSh).toContain("--model opus");
+    expect(startSh).not.toContain("--model claude:opus");
   });
 
   test("uses model from config when not specified", async () => {
-    await Bun.write(join(tempDir, "config.json"), JSON.stringify({ model: "haiku" }));
+    // User config uses qualified `claude:haiku` form (D1/D5).
+    const cfgPath = join(tempDir, "config.json");
+    setUserConfigPath(cfgPath);
+    await Bun.write(cfgPath, JSON.stringify({ model: "claude:haiku" }));
 
     setNewAgentSpawnRunner(mockSpawnRunner());
     await callNewAgent("task", { name: "test-cfg-model" });
 
     const meta = await Bun.file(join(agentsDir, "test-cfg-model", "meta.json")).json();
-    expect(meta.model).toBe("haiku");
+    expect(meta.model).toBe("claude:haiku");
   });
 
-  test("defaults model to opus when neither opts nor config specify", async () => {
+  test("defaults model to claude:opus when neither opts nor config specify", async () => {
     // Clear config so no model is set
-    await Bun.write(join(tempDir, "config.json"), JSON.stringify({}));
+    const cfgPath = join(tempDir, "config.json");
+    setUserConfigPath(cfgPath);
+    await Bun.write(cfgPath, JSON.stringify({}));
     setNewAgentSpawnRunner(mockSpawnRunner());
     await callNewAgent("task", { name: "test-default-model" });
 
     const meta = await Bun.file(join(agentsDir, "test-default-model", "meta.json")).json();
-    expect(meta.model).toBe("opus");
+    expect(meta.model).toBe("claude:opus");
   });
 
   // ── model precedence across agent-type layer files ──────────────────────────
@@ -4219,7 +4228,7 @@ describe("newAgent (native)", () => {
     setNewAgentSpawnRunner(mockSpawnRunner());
     const result = await callNewAgent("task", {
       name: "test-valid-tools",
-      model: "claude-sonnet-4-6",
+      model: "claude:claude-sonnet-4-6",
       allowTools: "Bash(git:*),Read",
       denyTools: "Write",
     });
@@ -5167,7 +5176,7 @@ describe("renameAgent (native, nickname)", () => {
   test("writes meta.json with a trailing newline and preserves other fields", async () => {
     // renameAgent must write meta.json via the shared atomic writer so its
     // output matches every other meta writer: pretty-printed + trailing "\n".
-    const agentDir = await writeAgentMeta(tempDir, "agent-abc", { model: "opus", prompt: "do work" });
+    const agentDir = await writeAgentMeta(tempDir, "agent-abc", { model: "claude:opus", prompt: "do work" });
     await registerRepos([tempDir]);
 
     const agent = makeAgent("agent-abc", tempDir);
@@ -5180,7 +5189,7 @@ describe("renameAgent (native, nickname)", () => {
     expect(meta.nickname).toBe("pikachu");
     // Other fields survive the round-trip.
     expect(meta.id).toBe("agent-abc");
-    expect(meta.model).toBe("opus");
+    expect(meta.model).toBe("claude:opus");
     expect(meta.prompt).toBe("do work");
   });
 
@@ -6572,12 +6581,12 @@ describe("spawned_by Case 2 coordinator auto-detect", () => {
       worktree: false,
       worker: false,
       yolo: false,
-      model: "sonnet",
+      model: "claude:sonnet",
     }));
 
     // Set user config path to temp dir
     setUserConfigPath(join(tempDir, "config.json"));
-    await Bun.write(join(tempDir, "config.json"), JSON.stringify({ model: "sonnet" }));
+    await Bun.write(join(tempDir, "config.json"), JSON.stringify({ model: "claude:sonnet" }));
 
     lifecycleSpawnCtx.set((cmd: string[], _opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
       const cmdStr = cmd.join(" ");

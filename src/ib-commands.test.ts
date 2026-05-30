@@ -18,6 +18,8 @@ import {
   nukeAllAgents,
   resumeAgent,
   reassignAgent,
+  renameAgent,
+  validateAgentName,
   mergeCheckAgent,
   mergeAgent,
   sendMessage,
@@ -4299,6 +4301,12 @@ describe("newAgent (native)", () => {
     }
   });
 
+  // NOTE: the new-agent → existing-nickname collision check (K5) lives in
+  // nickname.test.ts, not here. It exercises newAgent's internal global
+  // readAllAgents() scan, which watcher.test.ts's GLOBAL mock.module("./agents")
+  // stubs out for files whose ./agents binding resolves after that mock. A
+  // dedicated nickname.test.ts captures the real ./agents first; see its header.
+
   // --- Spawn logging tests ---
 
   test("spawn log: writes [spawn] lines to spawnee agent.log on success", async () => {
@@ -4780,6 +4788,31 @@ describe("reassignAgent (native)", () => {
     const selfMsg = messages.find(m => m.includes("You've been reassigned"));
     expect(selfMsg).toBeDefined();
     expect(selfMsg!).toContain("from agent-old to (none)");
+  });
+});
+
+describe("validateAgentName (shared)", () => {
+  test("accepts a plain valid name", () => {
+    expect(validateAgentName("my-agent_1", [])).toBeNull();
+  });
+
+  test("rejects names with invalid characters", () => {
+    expect(validateAgentName("has spaces", [])).toContain("letters, digits");
+    expect(validateAgentName("has.dot", [])).toContain("letters, digits");
+    expect(validateAgentName("@at", [])).toContain("letters, digits");
+    expect(validateAgentName("", [])).toContain("letters, digits");
+  });
+
+  test("rejects reserved coordinator/system", () => {
+    expect(validateAgentName("coordinator", [])).toContain("reserved");
+    expect(validateAgentName("system", [])).toContain("reserved");
+  });
+
+  test("rejects collision with a repo display name (nickname) or basename", () => {
+    const repos = [{ path: "/tmp/r1", name: "r1", nickname: "alpha" }];
+    expect(validateAgentName("alpha", repos)).toContain("collides with registered repo name");
+    expect(validateAgentName("r1", repos)).toContain("collides with registered repo name");
+    expect(validateAgentName("beta", repos)).toBeNull();
   });
 });
 

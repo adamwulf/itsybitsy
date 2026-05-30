@@ -20,6 +20,7 @@ import {
   setAgentOperation,
   clearAgentOperation,
   TRANSIENT_FRESH_MS,
+  readAllAgents,
 } from "./agents";
 import {
   enqueueOutbox,
@@ -56,7 +57,7 @@ import {
   COORDINATOR_INTERCEPT_MATCHER,
   REGULAR_AGENT_INTERCEPT_MATCHER,
 } from "./settings-builder";
-import { listRepos, repoDisplayName } from "./registry";
+import { listRepos, repoDisplayName, type RepoEntry } from "./registry";
 import { timed } from "./perf";
 
 export interface IbCommandResult {
@@ -77,6 +78,42 @@ export interface IbCommandResult {
  * target — `@watchdog` is the canonical example.
  */
 export const BARE_RENDERED_SENTINELS: ReadonlySet<string> = new Set(["@watchdog"]);
+
+/**
+ * Shared syntactic + reservation validator for a user-supplied agent NAME.
+ * Used for both new-agent custom ids and `ib nickname` aliases so the two share
+ * one definition of "valid". Returns an error string when the name is invalid,
+ * or `null` when it passes. Does NOT check id/nickname collisions against other
+ * agents — those are global readAllAgents() scans the callers run separately.
+ *
+ * The repo list is a parameter because the repo-collision check needs it;
+ * new-agent already has `repos` in scope, and renameAgent must `await
+ * listRepos()` and pass it in.
+ *
+ * Checks (mirrors the original inline new-agent checks):
+ *   - allowlist `/^[a-zA-Z0-9_\-]+$/` (bars `@`, `.`, spaces, etc.)
+ *   - reserved `coordinator` / `system` (used for coordinator addressing)
+ *   - collision against any registered repo's display name OR basename. NOTE:
+ *     `repoDisplayName(r)` is the repo's own nickname-or-name (a pre-existing,
+ *     DISTINCT concept from an agent's meta.nickname); agent names must not
+ *     collide with either form.
+ */
+export function validateAgentName(name: string, repos: RepoEntry[]): string | null {
+  if (!/^[a-zA-Z0-9_\-]+$/.test(name)) {
+    return "agent name may only contain letters, digits, hyphens, and underscores";
+  }
+  if (name === "coordinator") {
+    return '"coordinator" is a reserved name (used for system coordinator addressing)';
+  }
+  if (name === "system") {
+    return '"system" is a reserved name (used for system coordinator addressing)';
+  }
+  const collision = repos.find((r) => repoDisplayName(r) === name || r.name === name);
+  if (collision) {
+    return `agent name "${name}" collides with registered repo name`;
+  }
+  return null;
+}
 
 
 /**
@@ -1175,6 +1212,112 @@ export async function reassignAgent(agent: Agent, newManager: string | null): Pr
     stdout: `Reassigned ${agent.id} from ${oldLabel} to ${newLabel}`,
     stderr: "",
   };
+}
+
+/**
+ * Set or clear an agent's friendly NICKNAME — backs `ib nickname <id> [name]`.
+ *
+ * A nickname is a pure input alias: the agent's immutable `id` is unchanged, no
+ * directories/branches/tmux sessions move, Claude state is untouched, and no
+ * references break. So this is a small, mostly-validation command — no pause,
+ * no git, no file moves, NO notifications.
+ *
+ * `nickname === null` CLEARS (deletes the field — never writes ""). A non-null
+ * value SETS it (validating + collision-checking first).
+ *
+ * Collision checks are GLOBAL (readAllAgents over every registered repo)
+ * because resolution spans all repos. A nickname must not equal:
+ *   - any existing agent's `id` (global) — ids aren't globally unique,
+ *   - any OTHER agent's `nickname` (global, incl. cross-repo),
+ *   - this agent's own `id` (a no-op alias; use --clear to remove instead).
+ * Re-setting THIS agent's own existing nickname to a new value is allowed.
+ */
+export async function renameAgent(agent: Agent, nickname: string | null): Promise<IbCommandResult> {
+  const agentDir = join(agent.repoPath, ".ittybitty", "agents", agent.id);
+  const metaPath = join(agentDir, "meta.json");
+
+  // ── Clear path ──────────────────────────────────────────────────────────
+  // Skips validateAgentName entirely (there's no name to validate) and just
+  // deletes the field. Idempotent: clearing an already-unset nickname is fine.
+  if (nickname === null) {
+    let meta: Record<string, unknown>;
+    try {
+      const file = Bun.file(metaPath);
+      if (!(await file.exists())) {
+        return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' not found` };
+      }
+      meta = await file.json();
+    } catch {
+      return { ok: false, exitCode: 1, stdout: "", stderr: `Failed to read meta.json for '${agent.id}'` };
+    }
+    delete meta.nickname; // delete the field, never write ""
+    try {
+      const tmpPath = metaPath + ".tmp";
+      await Bun.write(tmpPath, JSON.stringify(meta, null, 2));
+      await rename(tmpPath, metaPath);
+    } catch (err) {
+      return { ok: false, exitCode: 1, stdout: "", stderr: `Failed to write meta.json: ${err}` };
+    }
+    await logAgent(agentDir, `Cleared nickname (id ${agent.id})`);
+    return { ok: true, exitCode: 0, stdout: `Cleared nickname for ${agent.id}`, stderr: "" };
+  }
+
+  // ── Set path ────────────────────────────────────────────────────────────
+  const repos = await listRepos();
+
+  // 1. Syntactic + reservation validation (shared with new-agent).
+  const nameError = validateAgentName(nickname, repos);
+  if (nameError) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Error: ${nameError}` };
+  }
+
+  // 2. A nickname equal to this agent's own id is a no-op alias — reject and
+  //    point at --clear (which is how you remove a nickname).
+  if (nickname === agent.id) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Error: nickname "${nickname}" is already this agent's id; use --clear to remove a nickname` };
+  }
+
+  // 3. Global collision scan across ALL registered repos.
+  const { agents: allAgents } = await readAllAgents(
+    repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })),
+  );
+  for (const other of allAgents) {
+    // Reject if the nickname equals any existing agent's id (ids aren't
+    // globally unique, so this must scan every repo).
+    if (other.id === nickname) {
+      return { ok: false, exitCode: 1, stdout: "", stderr: `Error: nickname "${nickname}" collides with an existing agent id` };
+    }
+    // Reject if the nickname equals ANOTHER agent's nickname. Skip THIS agent
+    // (re-setting its own nickname is allowed).
+    if (other.id !== agent.id && other.meta.nickname === nickname) {
+      return { ok: false, exitCode: 1, stdout: "", stderr: `Error: nickname "${nickname}" is already used by agent ${other.id}` };
+    }
+  }
+
+  // 4. Write the nickname (whole-object round-trip, like writeAgentState —
+  //    every meta writer preserves unknown fields, so this is safe). Cache is
+  //    mtime-keyed and auto-invalidates on the rename().
+  let meta: Record<string, unknown>;
+  try {
+    const file = Bun.file(metaPath);
+    if (!(await file.exists())) {
+      return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' not found` };
+    }
+    meta = await file.json();
+  } catch {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Failed to read meta.json for '${agent.id}'` };
+  }
+  meta.nickname = nickname;
+  try {
+    const tmpPath = metaPath + ".tmp";
+    await Bun.write(tmpPath, JSON.stringify(meta, null, 2));
+    await rename(tmpPath, metaPath);
+  } catch (err) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Failed to write meta.json: ${err}` };
+  }
+
+  await logAgent(agentDir, `Nicknamed "${nickname}" (id ${agent.id})`);
+  return { ok: true, exitCode: 0, stdout: `Nicknamed ${agent.id} "${nickname}"`, stderr: "" };
 }
 
 /**
@@ -2471,6 +2614,7 @@ export async function newAgent(
   }
 
   // 9. Generate agent ID
+  const repos = await listRepos();
   let id: string;
   if (coordinatorMode) {
     id = getCoordinatorAgentId(rootRepoPath);
@@ -2483,11 +2627,11 @@ export async function newAgent(
       id = `${id}-${suffix}`;
     }
   } else if (opts?.name) {
-    if (!/^[a-zA-Z0-9_\-]+$/.test(opts.name)) {
-      return { ok: false, exitCode: 1, stdout: "", stderr: "Error: agent name may only contain letters, digits, hyphens, and underscores" };
-    }
-    if (opts.name === "coordinator") {
-      return { ok: false, exitCode: 1, stdout: "", stderr: 'Error: "coordinator" is a reserved name (used for system coordinator addressing)' };
+    // Shared validator: regex allowlist, reserved coordinator/system, and
+    // repo-name/basename collision — same checks nicknames go through.
+    const nameError = validateAgentName(opts.name, repos);
+    if (nameError) {
+      return { ok: false, exitCode: 1, stdout: "", stderr: `Error: ${nameError}` };
     }
     id = opts.name;
   } else {
@@ -2496,7 +2640,9 @@ export async function newAgent(
     id = `agent-${Array.from(bytes).map(b => b.toString(16).padStart(2, "0")).join("")}`;
   }
 
-  // Reserved names check — applies to all ID generation paths
+  // Reserved names check — applies to all ID generation paths (the named path
+  // already rejected these via validateAgentName; this also guards the
+  // coordinator/random paths).
   if (id === "coordinator") {
     return { ok: false, exitCode: 1, stdout: "", stderr: 'Error: "coordinator" is a reserved name (used for system coordinator addressing)' };
   }
@@ -2505,18 +2651,17 @@ export async function newAgent(
   }
 
   // Repo display name collision check
-  const repos = await listRepos();
   if (coordinatorMode) {
     // For coordinator agents, check against OTHER repos' display names
     // (the ID IS the repo basename by design, which is the current repo)
-    const thisRepo = repos.find(r => r.path === rootRepoPath);
     const otherRepos = repos.filter(r => r.path !== rootRepoPath);
     const collision = otherRepos.find(r => repoDisplayName(r) === id);
     if (collision) {
       return { ok: false, exitCode: 1, stdout: "", stderr: `Error: agent name "${id}" collides with registered repo name` };
     }
   } else {
-    // For named and random agents, check against ALL repos' display names and basenames
+    // For random agents (and a defensive re-check of named agents), check
+    // against ALL repos' display names and basenames.
     const collision = repos.find(r => repoDisplayName(r) === id || r.name === id);
     if (collision) {
       return { ok: false, exitCode: 1, stdout: "", stderr: `Error: agent name "${id}" collides with registered repo name` };
@@ -2537,6 +2682,19 @@ export async function newAgent(
   const hasSessionResult = await newAgentSpawnCtx.run(["tmux", "has-session", "-t", tmuxSession]);
   if (hasSessionResult.exitCode === 0) {
     return { ok: false, exitCode: 1, stdout: "", stderr: `Error: agent '${id}' already exists` };
+  }
+  // Nickname collision: a new agent's id must not equal any existing agent's
+  // nickname (symmetric with the nickname validator rejecting nickname == id).
+  // The id-collision check above is filesystem/tmux-based per repo; nicknames
+  // aren't directory names, so this needs a fresh GLOBAL readAllAgents scan.
+  {
+    const { agents: existingAgents } = await readAllAgents(
+      repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })),
+    );
+    const nickCollision = existingAgents.find((a) => a.meta.nickname === id);
+    if (nickCollision) {
+      return { ok: false, exitCode: 1, stdout: "", stderr: `Error: agent name "${id}" collides with an existing agent nickname (${nickCollision.id})` };
+    }
   }
 
   // 11. Create agent directory

@@ -1046,6 +1046,7 @@ export class DashboardComponent implements Component {
       { label: "resume agent — R", action: () => agentActions.handleResume(this) },
       { label: "pause agent — P", action: () => agentActions.handlePause(this) },
       { label: "reassign manager — r", action: () => agentActions.handleReassign(this) },
+      { label: "nickname agent — N", action: () => agentActions.handleRename(this) },
       { label: "new agent — a", action: () => agentActions.handleNewAgent(this) },
       { label: "open worktree — w", action: () => agentActions.handleOpenWorktree(this) },
       { label: "open diff in tool — o", action: () => agentActions.handleOpenDiffTool(this) },
@@ -1847,6 +1848,8 @@ export class DashboardComponent implements Component {
         agentActions.handleReassign(this);
       }
     }
+    // Nickname the selected agent (distinct from `r`=reassign and `n`=pane-cycle)
+    else if (data === "N") { agentActions.handleRename(this); }
     else if (data === "m") { agentActions.handleMerge(this); }
     else if (data === "s") { agentActions.handleSend(this); }
     // Add permission to selected agent's settings.local.json allow list

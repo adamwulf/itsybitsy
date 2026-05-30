@@ -55,12 +55,25 @@ export function findManagerInTree(
 }
 
 /**
- * Match an agent by ID from a pre-loaded list. Exact match first, then prefix.
- * Returns { match, ambiguous } — ambiguous is set when multiple prefix matches exist.
+ * Match an agent by ID (or nickname) from a pre-loaded list.
+ *
+ * Precedence — strictly ordered so a stale meta.json can't produce
+ * nondeterminism: exact id > exact nickname > id-prefix.
+ *   1. Exact id wins over everything (the canonical, immutable identity).
+ *   2. Exact nickname is the input alias — matched EXACTLY only, never as a
+ *      prefix. A typed prefix of a nickname does NOT resolve.
+ *   3. Falls back to the existing id-PREFIX match (id-only; nicknames never
+ *      participate in prefix matching).
+ * Returns { match, ambiguous } — ambiguous is set when multiple prefix matches
+ * exist. (Nicknames are validated globally unique and never equal to any id, so
+ * the exact-nickname tier is unambiguous by construction; we still encode the
+ * id-wins precedence here rather than rely on that invariant.)
  */
 export function matchAgentById(id: string, agents: Agent[]): { match: Agent | null; ambiguous: string[] } {
-  const exact = agents.find((a) => a.id === id);
-  if (exact) return { match: exact, ambiguous: [] };
+  const exactId = agents.find((a) => a.id === id);
+  if (exactId) return { match: exactId, ambiguous: [] };
+  const exactNick = agents.find((a) => a.meta.nickname === id);
+  if (exactNick) return { match: exactNick, ambiguous: [] };
   const matches = agents.filter((a) => a.id.startsWith(id));
   if (matches.length === 1) return { match: matches[0]!, ambiguous: [] };
   if (matches.length > 1) return { match: null, ambiguous: matches.map((a) => a.id) };
@@ -482,6 +495,7 @@ async function main() {
         }
         const jsonData = agentsToShow.map(({ agent: a }) => ({
           id: a.id,
+          nickname: a.meta.nickname ?? null,
           state: a.state,
           age: a.age,
           model: a.meta.model,
@@ -540,7 +554,11 @@ async function main() {
             const colorCode = stateColors[state] ?? DIM;
             const orphanMark = agent.orphaned ? "⚠ " : "";
             const mgr = agent.meta.manager ? `  ${DIM}mgr:${agent.meta.manager.slice(-8)}${RESET}` : "";
-            console.log(`${indent}${orphanMark}${icon} ${agent.id}  ${colorCode}${state}${RESET}  ${agent.age}  ${DIM}${agent.meta.model}${RESET}${mgr}`);
+            // Show `nickname (id)` when a nickname is set, else just the id.
+            const nameLabel = agent.meta.nickname
+              ? `${agent.meta.nickname} ${DIM}(${agent.id})${RESET}`
+              : agent.id;
+            console.log(`${indent}${orphanMark}${icon} ${nameLabel}  ${colorCode}${state}${RESET}  ${agent.age}  ${DIM}${agent.meta.model}${RESET}${mgr}`);
           }
         }
       }
@@ -1154,6 +1172,21 @@ async function main() {
       }
       const { sendMessage } = await import("./ib-commands");
       await printAndExit(await sendMessage(resolvedAgent, message, fromAgent ? { fromAgent } : undefined));
+      break;
+    }
+    case "nickname": {
+      const repos = await listRepos();
+      const agent = await requireAgent(args[1], repos);   // resolves by id OR nickname
+      const rest = args.slice(2);
+      const clear = rest.includes("--clear");
+      const nickname = clear ? "" : rest[0];
+      if (!clear && !nickname) {
+        // no-arg: show current nickname
+        console.log(agent.meta.nickname ?? "(no nickname set)");
+        process.exit(0);
+      }
+      const { renameAgent } = await import("./ib-commands");
+      await printAndExit(await renameAgent(agent, clear ? null : nickname!));  // null = clear
       break;
     }
     case "kill": {

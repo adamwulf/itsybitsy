@@ -12,7 +12,7 @@ import { assertDialog } from "./test-helpers";
 import {
   handleKill, handleNuke, handleNukeAll, handleResume, handlePause,
   handleSend, handleNewAgent, handleScrollUp, handleScrollDown,
-  handleHelp, handleResizeLeft,
+  handleHelp, handleResizeLeft, handleFuzzyAgent, handleRename,
   handleOpenDiffTool, getActiveDiffProc, setActiveDiffProc, killActiveDiffProc,
   getDiffToolLaunching, setDiffToolLaunching,
   handleAddPermission, addPermissionToSettings, agentSettingsLocalPath,
@@ -628,6 +628,63 @@ describe("handleHelp", () => {
     expect(dialogs).toHaveLength(1);
     const d = assertDialog(dialogs[0]!, "help");
     expect(d.lines.length).toBeGreaterThan(5);
+  });
+
+  test("help legend lists the N nickname action", () => {
+    const { ctx, dialogs } = makeMockCtx();
+    handleHelp(ctx);
+    const d = assertDialog(dialogs[0]!, "help");
+    const text = d.lines.join("\n");
+    expect(text).toContain("nickname agent");
+  });
+});
+
+describe("handleFuzzyAgent nickname search", () => {
+  test("includes the agent's nickname in the searchable item string", () => {
+    const agent = makeAgent({ id: "agent-fuzz1" });
+    agent.meta.nickname = "pikachu";
+    const { ctx, dialogs } = makeMockCtx({ flatList: [makeFlatAgent(agent)] });
+    handleFuzzyAgent(ctx);
+    const d = assertDialog(dialogs[0]!, "fuzzy");
+    // The item that contains the agent id should also contain the nickname so
+    // `@` can jump by nickname.
+    const item = d.allItems.find((s) => s.includes("agent-fuzz1"));
+    expect(item).toBeDefined();
+    expect(item!).toContain("pikachu");
+  });
+
+  test("agents without a nickname still appear (no extra token)", () => {
+    const agent = makeAgent({ id: "agent-fuzz2" });
+    const { ctx, dialogs } = makeMockCtx({ flatList: [makeFlatAgent(agent)] });
+    handleFuzzyAgent(ctx);
+    const d = assertDialog(dialogs[0]!, "fuzzy");
+    expect(d.allItems.some((s) => s.includes("agent-fuzz2"))).toBe(true);
+  });
+});
+
+describe("handleRename", () => {
+  test("does nothing when no agent selected", () => {
+    const { ctx, dialogs } = makeMockCtx({ agent: null });
+    handleRename(ctx);
+    expect(dialogs).toHaveLength(0);
+  });
+
+  test("opens an input dialog pre-filled with the current nickname", () => {
+    const agent = makeAgent({ id: "agent-ren1" });
+    agent.meta.nickname = "pikachu";
+    const { ctx, dialogs } = makeMockCtx({ agent });
+    handleRename(ctx);
+    const d = assertDialog(dialogs[0]!, "input");
+    expect(d.value).toBe("pikachu");
+    expect(d.prompt).toContain("agent-ren1");
+  });
+
+  test("pre-fills with the id when no nickname is set", () => {
+    const agent = makeAgent({ id: "agent-ren2" });
+    const { ctx, dialogs } = makeMockCtx({ agent });
+    handleRename(ctx);
+    const d = assertDialog(dialogs[0]!, "input");
+    expect(d.value).toBe("agent-ren2");
   });
 });
 

@@ -4637,24 +4637,31 @@ describe("DashboardComponent — §17 Teams panel wiring", () => {
     expect(dashboard.agentTree.selectedAgent?.id).toBe("agent-startup");
   });
 
-  test("render with team selected calls channelPane.load() (§17.4 refresh cadence)", () => {
+  test("selecting a team triggers an immediate channelPane.load() (§17.4 refresh cadence)", () => {
     Object.defineProperty(process.stdout, "rows", { value: 30, writable: true, configurable: true });
     const dashboard = makeDashboard();
     dashboard.teamsTree.setFlatList([
       { kind: "team-header", teamName: "backend", memberCount: 0, createdEpoch: 1, createdBy: "@system" },
     ]);
-    dashboard.teamsTree.navigate(1);
-    dashboard.focusManager.setFocus("teams-tree");
-    dashboard.syncSelectedAgent();
 
-    // Intercept channelPane.load() to assert the render path triggers it
+    // Intercept channelPane.load() to assert the selection-change path triggers it
     let loadCalls = 0;
     const originalLoad = dashboard.channelPane.load.bind(dashboard.channelPane);
     dashboard.channelPane.load = async () => { loadCalls++; return originalLoad(); };
 
+    dashboard.teamsTree.navigate(1);
+    dashboard.focusManager.setFocus("teams-tree");
+    dashboard.syncSelectedAgent();
+
+    // The one-shot refreshChannel() on team selection change fires load() once;
+    // render() must NOT add a second call (that would re-introduce the loop bug).
     const lines = dashboard.render(160);
     expect(lines.length).toBeGreaterThan(1);
-    // Render fires `void channelPane.load()` synchronously when a team is selected
+    expect(loadCalls).toBe(1);
+
+    // Subsequent renders MUST NOT trigger load — the timer is the only driver.
+    dashboard.render(160);
+    dashboard.render(160);
     expect(loadCalls).toBe(1);
   });
 

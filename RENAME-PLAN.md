@@ -66,130 +66,184 @@ Resolution is **centralized**, which is what makes this a small change:
   string or absent (reject other types, like the existing `agentIcon` guard).
 
 ### 2. Resolution (the core behavior)
-- In `matchAgentById` (`index.ts:61-68`), add `|| a.meta.nickname === id` to the match.
-  This single line makes the agent resolvable by nickname across `ib send`, `ib look`,
-  `ib status`, `requireAgent`, `resolveTarget`, and dashboard selection.
+- In `matchAgentById` (`index.ts:61-68`), add an **exact** nickname tier with explicit
+  precedence — **id wins over nickname, and nickname is matched exactly only (never as a
+  prefix)**. The existing contract (`index.test.ts:176-186`) is "exact id beats prefix"; we
+  insert exact-nickname between exact-id and id-prefix:
+  ```ts
+  const exactId = agents.find((a) => a.id === id);
+  if (exactId) return { match: exactId, ambiguous: [] };
+  const exactNick = agents.find((a) => a.meta.nickname === id);   // exact, AFTER id
+  if (exactNick) return { match: exactNick, ambiguous: [] };
+  const matches = agents.filter((a) => a.id.startsWith(id));       // prefix stays id-only
+  ```
+  Naively OR-ing `a.id === id || a.meta.nickname === id` into the first `find` is a **bug**:
+  `find` returns whichever array element matches *either* first, so id would NOT reliably
+  win. The validator (§3, reject nickname == any existing id) makes that collision
+  impossible in practice, but the code must still encode the precedence so a stale
+  `meta.json` can't produce nondeterminism. Resolution makes agents resolvable by nickname
+  across `ib send`, `ib look`, `ib info`, `ib status`, `ib kill`, `ib merge`, `ib resume`,
+  `requireAgent`, `resolveTarget`, and dashboard selection (all route through
+  `matchAgentById`, verified).
+- **`resolveAgentId` is a SECOND resolution path that will NOT pick up nicknames.**
+  `resolveAgentId` (`ib-commands.ts:3270`) scans directory + tmux-session names (not
+  `meta.json`) and backs the `--manager` flag at new-agent time (`ib-commands.ts:2358`).
+  **Decision: `--manager <name>` requires the real id** — document it, don't silently leave
+  it. (Managers are always referenced by their immutable id internally, so this is fine.)
 - **Do NOT** touch `watchdog.ts:218` `findAgent` (it resolves only manager ids, which are
   always real ids — leave id-only).
-- **Do NOT** index nickname into the `byId` map in `buildAgentTree` (callout 1).
+- **Do NOT** index nickname into the `byId` map in `buildAgentTree` (`agents.ts:912-925`,
+  callout 1) — a nickname there could shadow another agent's real id.
 
 ### 3. The `rename` (set-nickname) command — `renameAgent(agent, nickname)`
 A small, mostly-validation command. No pause, no git, no file moves.
 
-1. **Validate `nickname`** via a shared `validateAgentName(name)` helper (extracted from
-   the new-agent checks so id and nickname share one validator):
-   - Allowlist `/^[a-zA-Z0-9_\-]+$/` (`ib-commands.ts:2486`).
-   - Reject reserved `coordinator` / `system` (and `@`-prefixed, already barred by the
-     regex) (`ib-commands.ts:2500-2505`).
-   - Reject repo-name collisions (`ib-commands.ts:2520`).
-2. **Read all agents** (`readAllAgents()`) for in-memory collision checks (callout 2):
-   - Reject if `nickname` equals any existing agent's `id` (would make the alias ambiguous).
-   - Reject if `nickname` equals any **other** agent's `nickname`.
-   - Reject if `nickname === agent.id` (a no-op alias; allow clearing instead — see below).
+1. **Validate `nickname`** via a shared `validateAgentName(name, repos)` helper — extracted
+   from the new-agent checks so id and nickname share one validator. **It takes the repo
+   list as a parameter** (the repo-collision check needs it; new-agent already has `repos`
+   in scope at `ib-commands.ts:2508`, and `renameAgent` must `await listRepos()` and pass
+   it in). Checks:
+   - Allowlist `/^[a-zA-Z0-9_\-]+$/` (`ib-commands.ts:2486`) — already bars `@`, `.`, spaces.
+   - Reject reserved `coordinator` / `system` (`ib-commands.ts:2489/2500/2503`).
+   - Reject repo collisions against **both** the repo name AND the repo nickname — reuse the
+     exact predicate `repos.find(r => repoDisplayName(r) === name || r.name === name)`
+     (`ib-commands.ts:2520`). **Note:** `RepoEntry.nickname` is a *pre-existing, distinct*
+     concept (`registry.ts:8`, `repoDisplayName = repo.nickname ?? repo.name`). Do not
+     conflate it with `meta.nickname` (agent). Agent nicknames must not collide with repo
+     names or repo nicknames.
+2. **Read all agents GLOBALLY** (`readAllAgents()` over ALL registered repos) for in-memory
+   collision checks (callout 2). **Nicknames are globally unique** — resolution spans all
+   repos (`findAgentById`/`resolveTarget` read all repos then `matchAgentById` over the
+   global set), even though id-collision prevention is only per-repo today. So:
+   - Reject if `nickname` equals any existing agent's `id` (global) — ids aren't globally
+     unique, so this must scan every repo.
+   - Reject if `nickname` equals any **other** agent's `nickname` (global).
+   - Reject if `nickname === agent.id` (a no-op alias; use `--clear` to remove instead).
    - Allow re-setting the same agent's existing nickname to a new value (overwrite).
-3. **Write** `meta.nickname = nickname` into the agent's `meta.json` (whole-object
-   round-trip, like `writeAgentState`). Cache auto-invalidates (mtime-keyed).
-4. **Log** to `agent.log`: `Nicknamed "<nickname>" (id <id>)`.
-5. **Notify** (courtesy — not load-bearing; mirror `reassignAgent`'s `notifyAgent` helper,
-   `ib-commands.ts:1137-1170`, `fromAgent` = the agent's id):
-   - The agent itself: `[watchdog]: You now also answer to the nickname "<nickname>".`
-   - The manager (`meta.manager`, if set): `[watchdog for <id>]: Agent <id> now also goes by "<nickname>".`
-   - The spawner (`meta.spawned_by.agent_id`, routed like `notifySpawner`, `watchdog.ts:274-333`;
-     skip if spawner === manager to avoid a double-send).
-   - Each child (`meta.manager === id`): `[watchdog]: Your manager <id> now also goes by "<nickname>".`
-   - All sends silently skip targets without a `tmux_session` (same as reassign).
+3. **Write / clear** `meta.nickname` into the agent's `meta.json` (whole-object round-trip,
+   like `writeAgentState` — confirmed all writers preserve the field). Cache
+   auto-invalidates (mtime-keyed).
+   - Set: `meta.nickname = nickname`.
+   - **Clear** (`--clear` or empty arg): `delete meta.nickname` — **delete the field, never
+     write `""`** (an empty-string nickname would serialize into meta and could match edge
+     cases). `--clear` **skips `validateAgentName` entirely**.
+4. **Log** to `agent.log`: `Nicknamed "<nickname>" (id <id>)` (or `Cleared nickname (id <id>)`).
+5. **No notifications** (decided by Adam). A nickname breaks no references — `ib send <id>`
+   to the original id still works, and children's `meta.manager`/`spawned_by.agent_id` still
+   point at the immutable id — so there's nothing to announce. (This drops the whole
+   spawner/manager/child notification surface the earlier draft carried.)
 6. Return the standard `{ ok, stdout?, stderr? }` shape.
 
-**Clearing a nickname:** support `ib rename <id> --clear` (or empty nickname) to delete the
-field. Decision needed only on the exact flag spelling — default to `--clear`.
-
 ### 4. new-agent validation update (`ib-commands.ts`, newAgent)
-- Replace the inline name checks with the shared `validateAgentName`.
-- After the existing filesystem id-collision check, add an in-memory pass over
+- Replace the inline name checks with the shared `validateAgentName(name, repos)`.
+- After the existing filesystem id-collision check, add an in-memory pass over a **global**
   `readAllAgents()` rejecting the new id if it collides with any existing **nickname**
-  (callout 2). (A new agent's id must not equal an existing nickname, just as a nickname
-  must not equal an existing id.)
+  (callout 2). A new agent's id must not equal an existing nickname, just as a nickname must
+  not equal an existing id — symmetric, both global.
 
 ### 5. CLI wiring (`src/index.ts`)
-Add a `case "rename":` to the dispatch switch (`index.ts:403`):
+Add a `case "nickname":` to the dispatch switch (`index.ts:403`). **No `rename` alias**
+(decided by Adam — the id is unchanged, so `nickname` is the honest verb). No-arg **shows**
+the current nickname rather than erroring:
 
 ```ts
-case "rename": {
+case "nickname": {
   const repos = await listRepos();
   const agent = await requireAgent(args[1], repos);   // resolves by id OR nickname
   const rest = args.slice(2);
   const clear = rest.includes("--clear");
   const nickname = clear ? "" : rest[0];
-  if (!clear && !nickname) { console.error("usage: ib rename <id> <nickname> | ib rename <id> --clear"); process.exit(1); }
+  if (!clear && !nickname) {
+    // no-arg: show current nickname
+    console.log(agent.meta.nickname ?? "(no nickname set)");
+    process.exit(0);
+  }
   const { renameAgent } = await import("./ib-commands");
-  await printAndExit(await renameAgent(agent, nickname));
+  await printAndExit(await renameAgent(agent, clear ? null : nickname));  // null = clear
   break;
 }
 ```
+(`renameAgent(agent, null)` clears; `renameAgent(agent, "<name>")` sets.)
 
 ### 6. Dashboard wiring (`src/tui/dashboard.ts` + `src/tui/agent-actions.ts`)
-- Bind **`N`** to rename (set nickname). `R`=resume, `P`=pause, `r`=reassign/rename-repo,
-  `N`=nickname. Confirm `N` is unbound before wiring.
-- Add `handleRename` in `agent-actions.ts` mirroring `handleRenameRepo`: input dialog
-  pre-filled with the current nickname (or id), validate, call
-  `ctx.executeAndRefresh(() => renameAgent(agent, nickname))`, show a notice. Selection is
-  unaffected (the `id` is unchanged), so no re-selection logic is needed.
-- Add `N nickname` to the help legend (`dashboard.ts:1046-1048`).
+- Bind **`N`** to nickname (verified unbound; `n` is pane-cycle-backward, so `n`/`N` is
+  distinct — slightly non-obvious but no conflict). `R`=resume, `P`=pause,
+  `r`=reassign/rename-repo, `N`=nickname.
+- Add `handleRename` in `agent-actions.ts` mirroring `handleReassign`/`handleRenameRepo`
+  (`agent-actions.ts:450`/`1533`): input dialog pre-filled with the current nickname (or
+  id), validate, call `ctx.executeAndRefresh(() => renameAgent(agent, nickname))`, show a
+  notice. Selection is id-keyed and unaffected — no re-selection needed.
+- **Fuzzy finder (`@` jump) must include the nickname.** `handleFuzzyAgent`
+  (`agent-actions.ts:830-836`) builds its search string from repoName/id/state/age/prompt —
+  **not** the nickname. Append `agent.meta.nickname` to that string so `@` can jump by
+  nickname (otherwise nicknames are un-findable in the exact place they're meant to help).
+- Register the action in the command palette (`dashboard.ts:1040-1053` — that list is the
+  palette, not a "help legend") as `N nickname`.
 
-### 7. Display (cosmetic — surface the nickname where the id shows)
-Where an agent has a nickname, show it as **`<nickname>`** with the id available (e.g.
-`<nickname> (<id>)` in wider contexts, `<nickname>` alone in compact ones). Call sites:
-- Dashboard tree row: `agent-tree.ts:72` (`formatAgentRow`) — and keep the width helper at
-  `agent-tree.ts:45` in sync.
-- `ib list`: `index.ts:522`; `--json`: `index.ts:462` (add a `nickname` field).
-- Dashboard info/labels: `dashboard.ts:183/207/222/1295/2216`.
-All cosmetic; decide the exact format (`nickname (id)` vs `nickname`) during implementation,
-defaulting to showing the nickname with the id in parentheses where width allows.
+### 7. Display — single shared `agentDisplayName(agent)` helper
+Compact width forces the format (a long id + `(id)` won't fit the ≤60-col sidebar):
+- **Compact dashboard tree (≤60 cols):** show the **nickname ALONE** (replacing the id).
+  Factor a single `agentDisplayName(agent)` → `nickname ?? id` used by **both**
+  `agentNamePrefixWidth` (`agent-tree.ts:42-45`) **and** `formatAgentRow`'s `namePrefix`
+  (`agent-tree.ts:64-72`) — one function, not two parallel edits, or the columns misalign.
+- **Info panel (always show the real id):** render `nickname (id: <id>)` where there's room
+  (`dashboard.ts:207/222`) so the canonical id is always visible/copyable.
+- **`ib list` text (`index.ts:522`):** `nickname (id)` (free-form, fits).
+- **`ib list --json` (`index.ts:462-475`):** always emit `nickname: a.meta.nickname ?? null`
+  so consumers don't have to feature-detect.
 
 ## Tests (`src/ib-commands.test.ts` + others)
 
 `renameAgent` describe block (pattern: `mkdtemp` + `meta.json` blobs + `makeAgent` +
 per-command spawn-runner mock, like `reassignAgent` at 4546-4783):
 - Happy path: nickname written to `meta.json`; agent then resolvable by nickname via
-  `findAgentById`/`resolveTarget`; notifications to manager/spawner/children/self with the
-  exact strings; existing `id` still resolves.
+  `findAgentById`/`resolveTarget`; existing `id` still resolves.
+- **Precedence:** typed name == one agent's id AND another agent's nickname → **id wins**;
+  nickname matched exactly only (a nickname does NOT match a typed prefix).
 - Overwrite: setting a new nickname over an old one replaces it.
-- Clear: `--clear` removes the field.
-- Negative: invalid name (regex), reserved (`coordinator`/`system`), repo-name collision,
-  nickname == an existing id, nickname == another agent's nickname, nickname == own id.
-- Callout guards: a nickname does NOT shadow another agent's id in `buildAgentTree`
-  (resolve a manager whose id equals some other agent's nickname → still resolves to the
-  real id).
+- Clear: `--clear`/null **deletes** the field (asserts the key is absent, not `""`).
+- Negative: invalid name (regex), reserved (`coordinator`/`system`), repo-name AND
+  repo-nickname collision, nickname == an existing id (global), nickname == another agent's
+  nickname (global, incl. **cross-repo**), nickname == own id.
+- **byId shadow guard:** a nickname equal to some other agent's id does NOT shadow it in
+  `buildAgentTree` (manager resolution still finds the real id).
 
 Other test files:
-- `src/index.test.ts`: `rename` CLI dispatch case; `requireAgent` resolves by nickname.
-- new-agent validation: new id colliding with an existing nickname is rejected.
-- `agent-tree`/dashboard: nickname renders in the row.
+- `src/index.test.ts`: `nickname` CLI dispatch (set, `--clear`, no-arg shows current);
+  `requireAgent` resolves by nickname.
+- new-agent validation: a new id colliding with an existing nickname (global) is rejected.
+- `agent-actions`/dashboard: nickname renders in the tree row; fuzzy finder matches nickname.
 
 ## Cross-cutting review checklist (from CLAUDE.md)
 
-1. **General agent functionality** — YES: adds a `meta.json` field and a new resolution
-   alias. Lifecycle/spawn unchanged (no pause/resume). meta shape gains optional `nickname`.
-2. **Hooks** — **Not affected.** Hook commands key off the immutable `id`; nickname never
-   reaches `settings.local.json`, path isolation, or any hook. (Confirm: the session-start
-   instructions reference the agent by id — fine to leave, or optionally mention the
-   nickname; default: leave as id.)
-3. **Watchdog** — Minimal: `findAgent` (manager resolution) stays id-only — **not affected**.
-   The watchdog's notify helpers are reused as the model for the courtesy notifications, but
-   nudge timing / state detection are untouched.
-4. **`ib watch` / dashboard** — YES: new `N` key + `handleRename` dialog + nickname display
-   in the tree/info/list. Selection stays id-keyed (unchanged), so no focus-follow logic.
+1. **General agent functionality** — YES: adds an optional `meta.json` field + a new
+   resolution alias. Lifecycle/spawn unchanged (no pause/resume). Note `--manager <name>`
+   still requires the real id (`resolveAgentId` doesn't consult nicknames).
+2. **Hooks** — **Intentionally not changed** (not "unaffected by accident").
+   `session-start.ts` is the one place the agent learns its own identity (`You are … agent
+   ${ctx.agentId}`, `session-start.ts:436/545`); we **deliberately leave it id-only** —
+   nickname is for *others* addressing the agent, and the agent doesn't need to know its own
+   nickname. Nickname never reaches `settings.local.json`, path isolation, or any hook
+   command (those key off the immutable id), so isolation is genuinely unaffected.
+3. **Watchdog** — **Not affected.** `findAgent` (manager/spawner resolution) stays id-only;
+   nudge timing / state detection untouched. (No notifications, so the notify helpers aren't
+   even used.)
+4. **`ib watch` / dashboard** — YES: new `N` key + `handleRename` dialog + nickname in the
+   tree row, both nickname + id in the info panel, `ib list`, and the `@` fuzzy finder.
+   Selection stays id-keyed.
 
 ## Decisions (locked)
 
 - **Nickname design** (not physical rename) — per Adam: smaller change, no Claude state
   change, agent answers to both id and nickname.
-- **3a — `N` dashboard key.**
-- **Notifications** — keep them as a courtesy to manager + spawner + children (mutually
-  exclusive manager-over-spawner), since the relationship surface was explicitly requested,
-  even though nothing breaks without them.
-
-## Open question (small)
-
-- **Clear-nickname flag spelling** — default `ib rename <id> --clear`. Confirm or adjust
-  during the plan review.
+- **No notifications** — `ib send <id>` still works and no references break, so nothing to
+  announce to manager/spawner/children.
+- **`N` dashboard key** (verified unbound).
+- **Precedence:** exact id > exact nickname > id-prefix; nickname matched exactly only.
+- **Global nickname uniqueness** (validated across all repos).
+- **`--manager` requires real id** (documented limitation; `resolveAgentId` is name-based).
+- **Hooks left id-only** (agent isn't told its own nickname).
+- **CLI:** `ib nickname <id> <name>` — no `rename` alias; no-arg shows current; `--clear`
+  (or empty) deletes the field.
+- **Display:** compact tree = nickname-only; info panel shows **both** nickname + id; `ib
+  list` shows `nickname (id)`.

@@ -543,6 +543,14 @@ export class DashboardComponent implements Component {
   }
   private lastSentNotice: string | null = null;
   private usageTimer: ReturnType<typeof setInterval> | null = null;
+  /**
+   * Periodic channel-pane refresh timer (§17.4). Mirrors the TmuxPoller cadence
+   * (~1s): when a team is selected (channelPane.teamName !== null) the timer
+   * re-reads `<team>.channel.jsonl` + user.name and requests a render. Driving
+   * this off a timer — NOT off render() — is what keeps the render path pure;
+   * a load() inside render() would call requestRender on completion and spin.
+   */
+  private channelRefreshTimer: ReturnType<typeof setInterval> | null = null;
   private telegramStatus: "red" | "yellow" | "green" | null = null;
   telegramStatusTimer: ReturnType<typeof setInterval> | null = null;
   /** Tracks in-flight executeAndRefresh promises — used by tests to await completion */
@@ -856,6 +864,12 @@ export class DashboardComponent implements Component {
     this.updatePollerVisibility();
     this.refreshUsage();
     this.usageTimer = setInterval(() => this.refreshUsage(), 240_000);
+    // §17.4 channel-pane refresh tick (~1s, matches TmuxPoller cadence). Only
+    // does work when a team is selected (refreshChannel returns immediately on
+    // null teamName), so the cost when not on the Teams tab is one no-op call.
+    this.channelRefreshTimer = setInterval(() => {
+      void this.refreshChannel();
+    }, 1000);
   }
 
   stopPolling() {
@@ -865,6 +879,10 @@ export class DashboardComponent implements Component {
     if (this.usageTimer) {
       clearInterval(this.usageTimer);
       this.usageTimer = null;
+    }
+    if (this.channelRefreshTimer) {
+      clearInterval(this.channelRefreshTimer);
+      this.channelRefreshTimer = null;
     }
     if (this.clientCheckTimer) {
       clearInterval(this.clientCheckTimer);
@@ -1255,6 +1273,9 @@ export class DashboardComponent implements Component {
       this.channelPane.teamName = teamAnchor;
       if (previousTeam !== teamAnchor) {
         this.channelPane.resetForTeam();
+        // Fire an immediate channel refresh so the chat box appears instantly
+        // on selection rather than waiting up to one channelRefreshTimer tick.
+        void this.refreshChannel();
       }
       // Async fetch the Team record for the info panel. Fire-and-forget so the
       // sync path stays sync; on completion we set the field and request a
@@ -1501,6 +1522,26 @@ export class DashboardComponent implements Component {
     } else {
       this.infoPanel.selectedTeam = null;
     }
+    this.tui?.requestRender();
+  }
+
+  /**
+   * Refresh the channel pane's cached messages + user.name (§17.4). Driven off
+   * `channelRefreshTimer` (and a one-shot on team-selection change) — NOT off
+   * render(), which would create a load→requestRender→render loop. No-op when
+   * no team is selected. Snapshots `teamName` at entry so a fast team-switch
+   * during the await won't request a render that no longer matches the user's
+   * selection (the channelPane.load itself also race-guards internally).
+   */
+  private async refreshChannel(): Promise<void> {
+    const teamName = this.channelPane.teamName;
+    if (!teamName) return;
+    try {
+      await this.channelPane.load();
+    } catch {
+      return;
+    }
+    if (this.channelPane.teamName !== teamName) return;
     this.tui?.requestRender();
   }
 
@@ -2212,22 +2253,11 @@ export class DashboardComponent implements Component {
       && !isCoordinatorView
       && (this.channelPane.teamName !== null || this.teamsTree.selection === null);
     if (showChannelPane) {
-      // Refresh-tick load (§17.4): re-read the channel + user.name BEFORE the
-      // sync render, so the chat updates while the team stays selected. The
-      // load() promise is fired off; the cached `messages` are rendered now.
-      // On completion we request a render so the new messages appear.
-      const teamName = this.channelPane.teamName;
-      if (teamName) {
-        void this.channelPane
-          .load()
-          .then(() => {
-            // Race guard: only re-render if the team is still selected.
-            if (this.channelPane.teamName === teamName) {
-              this.tui?.requestRender();
-            }
-          })
-          .catch(() => {});
-      }
+      // §17.4 refresh cadence: the chat box is refreshed by `channelRefreshTimer`
+      // (set up in startPolling) and by a one-shot `refreshChannel()` on team
+      // selection change. render() is PURE here — it must NOT call load(),
+      // because load completes by calling requestRender(), which would re-enter
+      // render() and spin a load→render loop (the bug this fix removes).
       this.channelPane.displayHeight = availableHeight;
       mainLines = [mainTitleSep, ...this.channelPane.render(mainWidth)];
     } else if (isCoordinatorView && this.coordinatorViewMode === "TMUX") {

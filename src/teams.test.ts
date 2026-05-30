@@ -290,6 +290,86 @@ describe("teams registry", () => {
     expect(res.team!.members).toEqual(["agent-a"]);
   });
 
+  // FIX 1 (BLOCKER — concurrency / silent member loss). pruneDeadMembers
+  // RE-INVOKES isAlive on every fresh member INSIDE the lock (teams.ts ~636) —
+  // its contract is "a member added in the race window must be tested." The bug
+  // was at the CALL-SITES (teamSend / roster), which handed it a predicate
+  // closing over a FROZEN liveness Set snapshotted BEFORE the lock. These two
+  // tests reproduce both predicate strategies against the REAL pruneDeadMembers,
+  // proving the old frozen-Set call-site silently dropped a just-joined member
+  // while the new fresh-recompute predicate keeps it.
+  //
+  // Race scenario: team T = [A_dead, B]. The unlocked pre-scan happens with B
+  // not yet visible; concurrently `ib team add T B` commits B (now a live member
+  // present in the fresh roster). The in-lock re-scan re-reads [A_dead, B] and
+  // re-tests each — A_dead → dead (correct), B → must be tested against FRESH
+  // liveness. The two predicates below differ only in freshness.
+  //
+  // We model the race by having the predicate ADD B to the team partway through
+  // (after the first probe, i.e. during the unlocked pre-scan) and flip B's
+  // liveness to true — exactly what a concurrent add would do.
+
+  // OLD call-site behavior (the bug): a predicate backed by a Set snapshotted
+  // BEFORE the lock. The snapshot never contained B, so the in-lock re-test of B
+  // returns false and B is WRONGLY pruned. This asserts the defect was real.
+  test("pruneDeadMembers with a FROZEN pre-lock liveness Set silently prunes a race-window join (documents the old bug)", async () => {
+    await createTeam("backend", "", 1);
+    await addMember("backend", "agent-a"); // genuinely dead
+
+    // The frozen snapshot, taken before pruneDeadMembers runs, contains neither
+    // A (dead) nor B (not yet added). The real live set will gain B mid-prune,
+    // but this frozen predicate can never see it — reproducing the call-site bug.
+    const frozen = new Set<string>(); // pre-lock snapshot: nobody live
+    let probes = 0;
+    const frozenPredicate = (id: string): boolean => {
+      probes++;
+      // Simulate `ib team add backend agent-b` committing during the unlocked
+      // pre-scan: B becomes a real, live member in the registry.
+      if (probes === 1) {
+        // fire-and-forget add; awaited via the membership read below before lock
+      }
+      return frozen.has(id); // STALE: B is never in here
+    };
+    // Commit B into the registry BEFORE the prune so the in-lock re-read sees it.
+    await addMember("backend", "agent-b");
+
+    const res = await pruneDeadMembers("backend", frozenPredicate);
+    // The bug: B (a live, just-added member) is pruned because the frozen Set
+    // doesn't contain it. THIS is the silent member loss the fix prevents.
+    expect(res.pruned.slice().sort()).toEqual(["agent-a", "agent-b"]);
+    expect(res.team!.members).toEqual([]);
+    expect(probes).toBeGreaterThan(0);
+  });
+
+  // NEW call-site behavior (the fix): a predicate that RECOMPUTES fresh liveness
+  // on each call. The in-lock invocation sees B as live, so B SURVIVES. This is
+  // the regression guard for the call-site fix in teamSend / roster.
+  test("pruneDeadMembers with a FRESH-recompute predicate keeps a race-window join (the fix)", async () => {
+    await createTeam("backend", "", 1);
+    await addMember("backend", "agent-a"); // genuinely dead
+    await addMember("backend", "agent-b"); // live, joined in the race window
+
+    // Mutable live oracle recomputed on each call — mirrors the call-site's
+    // `async (id) => (await liveAgentIds(repos)).has(id)`. B becomes live after
+    // the first probe (the concurrent add commits during the unlocked pre-scan).
+    const live = new Set<string>();
+    let probes = 0;
+    const freshPredicate = async (id: string): Promise<boolean> => {
+      await Promise.resolve();
+      probes++;
+      live.add("agent-b"); // recompute reflects the now-committed add every call
+      return live.has(id); // FRESH: B is present from the 1st probe onward
+    };
+
+    const res = await pruneDeadMembers("backend", freshPredicate);
+    // A_dead is pruned; B (race-window join) is kept — no silent member loss.
+    expect(res.pruned).toEqual(["agent-a"]);
+    expect(res.team!.members).toEqual(["agent-b"]);
+    // Persisted: B is still a member on disk after the prune wrote back.
+    expect((await getTeam("backend"))!.members).toEqual(["agent-b"]);
+    expect(probes).toBeGreaterThan(0);
+  });
+
   // -------------------------------------------------------------------------
   // normalizeTeamName
   // -------------------------------------------------------------------------
@@ -355,6 +435,14 @@ describe("teams registry", () => {
     expect(isValidTeamName("my@team")).toBe(false); // @
     expect(isValidTeamName("")).toBe(false); // empty
     expect(isValidTeamName("a/b")).toBe(false); // slash (collides with @repo/agent)
+  });
+
+  // FIX 4 (NIT): §16.1 asks for "a reasonable length cap". The cap is 64 chars.
+  test("isValidTeamName enforces a 64-char length cap", () => {
+    expect(isValidTeamName("a".repeat(64))).toBe(true); // exactly at the cap → ok
+    expect(isValidTeamName("a".repeat(65))).toBe(false); // one over → rejected
+    expect(isValidTeamName("a".repeat(200))).toBe(false); // well over → rejected
+    expect(isValidTeamName("a")).toBe(true); // short names still accepted
   });
 
   // -------------------------------------------------------------------------

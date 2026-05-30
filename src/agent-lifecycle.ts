@@ -349,9 +349,13 @@ export async function teardownAgent(
   const tmuxSession = meta.tmux_session;
 
   if (!isValidTmuxSession(tmuxSession)) {
+    // §16.5 makes the eager team prune UNCONDITIONAL. archiveAgent (which
+    // normally runs the prune) is skipped on this early-return path, so prune
+    // here directly — otherwise an agent with a corrupt tmux_session would be
+    // silently left in its teams until a later lazy prune self-healed it.
+    const prunedTeams = await pruneAgentFromAllTeams(agentId);
     console.error(`[agent-lifecycle] Invalid tmux session name in meta for agent ${agentId}: ${tmuxSession}`);
-    // No archive ran on this path, so nothing was pruned.
-    return { ok: false, prunedTeams: [] };
+    return { ok: false, prunedTeams };
   }
 
   // 1. Log

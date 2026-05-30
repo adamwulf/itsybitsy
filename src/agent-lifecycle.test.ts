@@ -565,10 +565,50 @@ describe("agent-lifecycle", () => {
         { tmux_session: "bad;inject" },
       );
       expect(result.ok).toBe(false);
-      // Invalid-session early-return ran no archive, so nothing was pruned.
+      // Agent is in no team (no setCoordinatorHome / teams.json here), so the
+      // unconditional eager prune (FIX 3) finds nothing and returns [].
       expect(result.prunedTeams).toEqual([]);
 
       await rm(tmpDir, { recursive: true, force: true });
+    });
+
+    // FIX 3 (NIT): §16.5 makes the eager team prune UNCONDITIONAL. The
+    // invalid-tmux-session early return previously skipped archiveAgent (and
+    // thus the prune), silently leaving the corrupt-session agent in its teams.
+    // It must now prune the agent from all teams even on this path and thread
+    // the real pruned pairs up so the caller can emit the leave notice.
+    test("still prunes the agent from all teams on the invalid-tmux-session path", async () => {
+      const { setCoordinatorHome, resetCoordinatorHome } = await import("./coordinator");
+      const { createTeam, addMember, getTeam } = await import("./teams");
+      const home = await mkdtemp(join(tmpdir(), "lc-teams-invalid-tmux-"));
+      setCoordinatorHome(home);
+      try {
+        const tmpDir = await makeTempDir();
+        const agentDir = join(tmpDir, "agents", "agent-corrupt");
+        await mkdir(agentDir, { recursive: true });
+
+        await createTeam("backend", "", 1000);
+        await addMember("backend", "agent-corrupt");
+        await addMember("backend", "agent-keep");
+
+        const result = await teardownAgent(
+          tmpDir,
+          "agent-corrupt",
+          agentDir,
+          { tmux_session: "bad;inject" }, // invalid → early-return path
+        );
+        expect(result.ok).toBe(false);
+        // Eager prune ran despite the early return: the corrupt-session agent
+        // is removed from its team and the pair is threaded up.
+        expect(result.prunedTeams).toEqual([{ team: "backend", id: "agent-corrupt" }]);
+        // Roster no longer lists the pruned agent.
+        expect((await getTeam("backend"))!.members).toEqual(["agent-keep"]);
+
+        await rm(tmpDir, { recursive: true, force: true });
+      } finally {
+        resetCoordinatorHome();
+        await rm(home, { recursive: true, force: true });
+      }
     });
   });
 });

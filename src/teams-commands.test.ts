@@ -445,6 +445,34 @@ describe("teams: command layer (create/add/remove/list/delete/roster/send)", () 
     expect(res.stdout).toBe("@backend (0 members)");
   });
 
+  // FIX 2 (BLOCKER — spec conformance): roster must render the LIVE detected
+  // state (§16.3: "state read via detectAgentStates()"), not the uniform
+  // "unknown" that readAllAgents stamps. The planted agent carries
+  // meta.state === "waiting" + a fresh live-watchdog transient, so
+  // detectAgentStates resolves its state to "waiting" via the transient
+  // fast-path. Before the fix (no detectAgentStates call) the column read
+  // "unknown".
+  test("roster renders each member's live detected state, not 'unknown'", async () => {
+    await teamCreate("backend");
+    const agentDir = join(repoDir, ".ittybitty", "agents", "agent-wait");
+    await mkdir(agentDir, { recursive: true });
+    // meta.state === "waiting" → detectAgentStates resolves "waiting" through the
+    // fresh-watchdog transient fast-path (isPidAliveCtx is stubbed true).
+    await Bun.write(
+      join(agentDir, "meta.json"),
+      JSON.stringify({ id: "agent-wait", tmux_session: "t-agent-wait", state: "waiting" }),
+    );
+    await plantLiveWatchdog(agentDir);
+    await addMember("backend", "agent-wait");
+    resetReadAgentMetaCache();
+
+    const res = await roster("backend", repos());
+    expect(res.ok).toBe(true);
+    expect(res.stdout).toContain("agent-wait");
+    expect(res.stdout).toContain("waiting");
+    expect(res.stdout).not.toContain("unknown");
+  });
+
   // --- teamSend (fan-out) -------------------------------------------------
 
   async function resolvedMembers(ids: string[]): Promise<Agent[]> {
@@ -514,6 +542,34 @@ describe("teams: command layer (create/add/remove/list/delete/roster/send)", () 
     expect((await readOutbox(liveDir)).length).toBe(1);
     const team = await getTeam("backend");
     expect(team!.members).toEqual(["agent-live"]);
+  });
+
+  // FIX 1 (BLOCKER) — call-site coverage. teamSend now builds its liveness
+  // predicate as `(id) => (await liveAgentIds(repos)).has(id)`, which RECOMPUTES
+  // fresh existence on each call rather than closing over a pre-lock Set. This
+  // exercises the new predicate end-to-end: a dead member forces the locked
+  // prune branch, and a genuinely-live member (planted on disk) MUST survive the
+  // in-lock re-scan and still receive the message. The teams.ts contract tests
+  // prove the frozen-vs-fresh difference; this confirms the wired-up call-site
+  // keeps a live member while pruning a dead one through the real fan-out.
+  test("teamSend keeps a live member through the locked prune while a dead one is removed", async () => {
+    await teamCreate("backend");
+    const liveDir = await plantAgent("agent-keep");
+    // agent-dead forces the locked prune branch (it is dead); agent-keep is a
+    // real, on-disk live member that the in-lock re-scan must NOT drop.
+    await addMember("backend", "agent-dead");
+    await addMember("backend", "agent-keep");
+    resetReadAgentMetaCache();
+
+    const members = await resolvedMembers(["agent-keep"]);
+    const res = await teamSend("backend", members, "still here?", { fromAgent: "@system" }, repos());
+    expect(res.ok).toBe(true);
+    expect(res.stdout).toBe("Sent to 1 member(s) of @backend");
+
+    // Live member received it and survived; dead member pruned.
+    expect((await readOutbox(liveDir)).length).toBe(1);
+    const team = await getTeam("backend");
+    expect(team!.members).toEqual(["agent-keep"]);
   });
 });
 

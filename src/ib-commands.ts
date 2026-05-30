@@ -21,6 +21,7 @@ import {
   clearAgentOperation,
   TRANSIENT_FRESH_MS,
   readAllAgents,
+  detectAgentStates,
 } from "./agents";
 import {
   enqueueOutbox,
@@ -2275,9 +2276,16 @@ export async function teamSend(
   const senderId = resolveTeamSenderId(repos, opts);
 
   // Lazy-prune dead members from the stored roster (§16.5): a member is alive
-  // iff it resolves to a still-existing agent directory.
-  const existingIds = await liveAgentIds(repos);
-  const pruneRes = await pruneDeadMembers(name, (id) => existingIds.has(id));
+  // iff it resolves to a still-existing agent directory. The predicate RECOMPUTES
+  // the live set on each call rather than closing over a pre-lock snapshot —
+  // pruneDeadMembers invokes it during BOTH its unlocked pre-scan AND its in-lock
+  // re-scan, and the in-lock pass MUST see fresh state. A frozen Set snapshotted
+  // before the lock would mis-prune a member added in the race window (e.g.
+  // `ib team add` committing concurrently): the in-lock re-test would not find
+  // the just-joined id in the stale Set and would silently drop it. Recomputing
+  // fresh each call closes that window.
+  const isAlive = async (id: string) => (await liveAgentIds(repos)).has(id);
+  const pruneRes = await pruneDeadMembers(name, isAlive);
   if (!pruneRes.team) {
     // Team vanished between resolveTarget and here — treat as not found.
     return teamErr(`Error: team @${name} not found`);
@@ -2542,10 +2550,19 @@ export async function roster(name: string, repos: RepoEntry[]): Promise<IbComman
     return teamErr(`Error: team @${n} not found`);
   }
   // Lazy-prune dead members (§16.5), then list survivors with repo/state.
+  // detectAgentStates mutates `agents` in place so `agent.state` reflects the
+  // live detected state (§16.3: "state read via detectAgentStates()") instead of
+  // the uniform "unknown" readAllAgents assigns.
   const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })));
+  await detectAgentStates(agents);
   const byId = new Map(agents.map((a) => [a.id, a]));
-  const existingIds = new Set(agents.map((a) => a.id));
-  const pruneRes = await pruneDeadMembers(n, (id) => existingIds.has(id));
+  // The liveness predicate RECOMPUTES the live set on each call rather than
+  // closing over a pre-lock snapshot. pruneDeadMembers invokes it during both its
+  // unlocked pre-scan and its in-lock re-scan; the in-lock pass MUST see fresh
+  // state so a member added in the race window (e.g. a concurrent `ib team add`)
+  // is not mis-pruned against a stale Set. See teamSend for the same fix.
+  const isAlive = async (id: string) => (await liveAgentIds(repos)).has(id);
+  const pruneRes = await pruneDeadMembers(n, isAlive);
   if (!pruneRes.team) {
     // Deleted between the existence check and the prune.
     return teamErr(`Error: team @${n} not found`);

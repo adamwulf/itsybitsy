@@ -24,9 +24,14 @@ export function isValidTmuxSession(value: string): boolean {
   return /^[a-zA-Z0-9_-]+$/.test(value);
 }
 
-/** Validate a team name: alphanumeric, hyphens, underscores only (same allowlist as agent IDs). */
+/**
+ * Validate a team name: alphanumeric, hyphens, underscores only (same allowlist
+ * as agent IDs), bounded to a reasonable length (§16.1 — "a reasonable length
+ * cap"). Max 64 chars keeps team names well within any filesystem/display limit
+ * while still allowing descriptive names.
+ */
 export function isValidTeamName(value: string): boolean {
-  return /^[a-zA-Z0-9_-]+$/.test(value);
+  return value.length >= 1 && value.length <= 64 && /^[a-zA-Z0-9_-]+$/.test(value);
 }
 
 /** Validate a Claude session ID (UUID format): hex digits and hyphens only. */

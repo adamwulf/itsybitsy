@@ -524,6 +524,14 @@ export function isApiError(tmuxOutput: string): boolean {
   const lines = stripped.split("\n");
   const last15 = lines.slice(-15).join("\n");
 
+  // Claude's retry-countdown line after a "please retry" nudge:
+  //   ⎿  Retrying in 35s · attempt 9/10
+  // The original "⎿  API Error: …" line scrolls out of the 15-line window
+  // during the countdown, so without this branch we'd lose the api_error
+  // state mid-retry and fall back to whatever meta.json says (usually
+  // waiting/running). Treat the countdown as a continuation of the episode.
+  if (/⎿\s+Retrying in \d+s\s*·\s*attempt \d+\/\d+/.test(last15)) return true;
+
   // Require the tool-result connector ⎿ followed by "API Error:" — anchor strictly
   // so quoted occurrences in a watchdog nudge ("…the message 'API Error:'…") don't match.
   if (!/⎿\s*API Error:/.test(last15)) return false;

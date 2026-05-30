@@ -138,6 +138,47 @@ Confirmed via the official doc `developers.openai.com/codex/hooks` AND the binar
 
 > Spike performed by `agent-6e76ccd2` (worker) under `codex-agent` manager. All tests on `codex-cli 0.135.0`, macOS Darwin 25.3.0 (Mac OS 26.3.1), zsh inside tmux 3.6a. ChatGPT-account auth (no API key billing). Worktree: `/Users/adamwulf/Developer/bun/itsybitsy/.ittybitty/agents/agent-6e76ccd2/repo`.
 
+### THE canonical launch line (Phase 2 verified, use exactly this shape)
+
+This is the single authoritative shape itsybitsy should use to launch a codex agent with our custom PreToolUse hook. Every claim below is verified empirically (see Q1–Q4 sections for evidence). **If anything in the SPEC or implementation diverges from this line, follow this line — not the SPEC's older §3.3.**
+
+```
+codex \
+  -m <MODEL> \
+  -a never \
+  -s workspace-write \
+  --dangerously-bypass-hook-trust \
+  -c 'hooks.PreToolUse=[{matcher=".*",hooks=[{type="command",command="<HOOK_CMD>",timeout=30}]}]' \
+  "<prompt>"
+```
+
+**Slot-by-slot:**
+
+| Slot | Value | Notes |
+|---|---|---|
+| `<MODEL>` | parsed model half of `codex:<model>` | Server-validated; under ChatGPT auth on this machine only `gpt-5.5`, `gpt-5.4-mini`, `codex-auto-review` work. `gpt-5-codex` returns HTTP 400 on ChatGPT plans. |
+| `-a never` | fixed | "Never ask for user approval; execution failures are immediately returned to the model" — the load-bearing flag for D4. |
+| `-s workspace-write` | fixed | OS-level sandbox boundary (macOS Seatbelt). Real boundary for `apply_patch` since hooks don't fire on it (open issue #16732). |
+| `--dangerously-bypass-hook-trust` | always on | Hook trust is hash-pinned in codex. Our hook command changes hash on every spawn (agent-id is in the command line). Without this flag, every spawn would silently disable the hook. |
+| `-c 'hooks.PreToolUse=[...]'` | **inline, NOT on-disk** | Registering the hook here (rather than in `<worktree>/.codex/config.toml`) bypasses codex's project-trust gate entirely. NO `~/.codex/config.toml` modification is needed; NO `<worktree>/.codex/config.toml` file needs to exist. (See Q2 below for why on-disk fails.) |
+| `<HOOK_CMD>` | `ib hooks codex-pre-tool-use <agent-id>` (recommended) | Free-form shell command. Same architecture as Claude's hooks. The handler lives in `src/hooks/codex-pre-tool-use.ts`. Can alternatively be an absolute path to a small dispatch script in `<worktree>/.codex/hooks/pre-tool-use.sh` that calls `ib`. |
+| `timeout=30` | seconds | codex's default is 600s. Tighten to 30 to match Claude's behavior; tune later if needed. |
+| `matcher=".*"` | regex | Matches every tool name. We rely on the handler (not the matcher) to do allow/deny — same as Claude. If we ever want to restrict to Bash only, use `"^Bash$"`. |
+| `"<prompt>"` | initial prompt | Positional, like `claude "<prompt>"`. Seeds the session. |
+| `-C <worktree>` | OPTIONAL | If tmux is already cd'd into the worktree (which itsybitsy already does for Claude), `-C` is unnecessary. Add it only as belt-and-braces. |
+
+**What the PreToolUse handler must emit (verified):**
+
+| Decision | stdout | Exit code | Codex's behavior |
+|---|---|---|---|
+| **Deny** | `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"<why>"}}` | `0` | Silent block in TUI: `• PreToolUse hook (blocked) — feedback: <why>`. No modal. Deny reason returned to the model. |
+| **Allow** | `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","updatedInput":<echo of tool_input>}}` | `0` | Tool call proceeds normally. The `updatedInput` echo-back is REQUIRED; standalone `permissionDecision:"allow"` triggers the unsupported-decision path. |
+| **Anything else** (crash, malformed JSON, no decision, missing field) | — | any | **FAIL-OPEN**: codex marks the hook failed and **proceeds with the tool call anyway**. Documented behavior at developers.openai.com/codex/hooks. The handler MUST never crash. |
+
+**One-line summary:** `codex -m … -a never -s workspace-write --dangerously-bypass-hook-trust -c 'hooks.PreToolUse=[{matcher=".*",hooks=[{type="command",command="ib hooks codex-pre-tool-use <id>",timeout=30}]}]' "<prompt>"`. No on-disk `.codex/config.toml`. No `~/.codex` mutation. Deny-by-default in the handler. Echo-back-allow for matched commands. Try/catch wrapper to prevent fail-open.
+
+---
+
 ### Question 1 — THE CRUX: silent-deny in interactive `-a never` mode?
 
 **Verdict: YES — silent deny confirmed.**

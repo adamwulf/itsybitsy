@@ -245,7 +245,10 @@ export class AgentTreeComponent implements Component {
    * - **Agent or system-coordinator selected**: cycle through agent groups,
    *   where the coordinator counts as its own group. Repo groups land on the
    *   first/last agent of that repo (empty repos skipped); the coordinator
-   *   group lands on the coordinator row itself.
+   *   group lands on the coordinator row itself. `stopped` agents (and a
+   *   stopped coordinator) are skipped so jumping always lands on a live agent.
+   *   If every candidate is stopped, it falls back to the prior behavior and
+   *   still cycles between repos as before.
    */
   moveToRepo(delta: 1 | -1) {
     const visible = this.visibleList;
@@ -279,15 +282,20 @@ export class AgentTreeComponent implements Component {
     }
     if (anchors.length === 0) return;
 
-    // Helper: get agent indices for the repo anchor at anchors[ai]
-    const agentsForAnchor = (ai: number): number[] => {
+    // Helper: get agent indices for the repo anchor at anchors[ai]. When
+    // skipStopped is set, stopped agents are excluded so jumping always lands
+    // on a live (non-stopped) agent.
+    const agentsForAnchor = (ai: number, skipStopped: boolean): number[] => {
       const anchor = anchors[ai]!;
       if (anchor.kind !== "repo-header") return [];
       const nextAnchor = anchors[ai + 1];
       const endPos = nextAnchor ? nextAnchor.index : visible.length;
       const result: number[] = [];
       for (let i = anchor.index + 1; i < endPos; i++) {
-        if (visible[i]?.kind === "agent") result.push(i);
+        const item = visible[i];
+        if (item?.kind !== "agent") continue;
+        if (skipStopped && item.agent.state === "stopped") continue;
+        result.push(i);
       }
       return result;
     };
@@ -303,21 +311,36 @@ export class AgentTreeComponent implements Component {
       }
     }
 
-    // Cycle through anchors. Coordinator anchor is always a valid landing spot;
-    // repo anchors require at least one agent (skip empty repos).
-    let targetAnchorIdx = currentAnchorIdx;
-    for (let step = 0; step < anchors.length; step++) {
-      targetAnchorIdx = ((targetAnchorIdx + delta) % anchors.length + anchors.length) % anchors.length;
-      const target = anchors[targetAnchorIdx]!;
-      if (target.kind === "system-coordinator") {
-        this.selectedIndex = target.index;
-        break;
+    // Cycle through anchors and return the visible index to land on, or null if
+    // no anchor yields a valid landing spot. Coordinator anchors are valid
+    // unless skipStopped excludes a stopped coordinator; repo anchors require at
+    // least one (non-stopped, when skipStopped) agent — empty repos are skipped.
+    const findTarget = (skipStopped: boolean): number | null => {
+      let targetAnchorIdx = currentAnchorIdx;
+      for (let step = 0; step < anchors.length; step++) {
+        targetAnchorIdx = ((targetAnchorIdx + delta) % anchors.length + anchors.length) % anchors.length;
+        const target = anchors[targetAnchorIdx]!;
+        if (target.kind === "system-coordinator") {
+          const coordItem = visible[target.index];
+          if (skipStopped && coordItem?.kind === "system-coordinator" && coordItem.state === "stopped") {
+            continue;
+          }
+          return target.index;
+        }
+        const agents = agentsForAnchor(targetAnchorIdx, skipStopped);
+        if (agents.length > 0) {
+          return delta === 1 ? agents[0]! : agents[agents.length - 1]!;
+        }
       }
-      const agents = agentsForAnchor(targetAnchorIdx);
-      if (agents.length > 0) {
-        this.selectedIndex = delta === 1 ? agents[0]! : agents[agents.length - 1]!;
-        break;
-      }
+      return null;
+    };
+
+    // Prefer landing on a non-stopped agent. If every candidate is stopped (or
+    // there are none), fall back to the original behavior, which still jumps
+    // between repos as before.
+    const target = findTarget(true) ?? findTarget(false);
+    if (target !== null) {
+      this.selectedIndex = target;
     }
 
     this.updateSelectedId();

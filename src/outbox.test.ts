@@ -215,4 +215,38 @@ describe("outbox lock", () => {
   test("releaseOutboxLock(null) is a no-op", async () => {
     await releaseOutboxLock(null); // must not throw
   });
+
+  // SPEC §16.4 trap: the team field is dropped on the round-trip through the
+  // queue file unless BOTH the enqueue WRITE literal and the readOutbox READ
+  // literal carry it. These regression tests pin both ends.
+  test("a message WITH team survives enqueue → readOutbox", async () => {
+    await enqueueOutbox(dir, {
+      message: "team msg",
+      fromAgent: "agent-a1b2c3d4",
+      raw: false,
+      team: "backend",
+      id: "t1",
+      enqueuedAtMs: 1,
+    });
+    const msgs = await readOutbox(dir);
+    expect(msgs.length).toBe(1);
+    expect(msgs[0]!.team).toBe("backend");
+    expect(msgs[0]!.message).toBe("team msg");
+  });
+
+  test("a message WITHOUT team reads back team === undefined", async () => {
+    await enqueueOutbox(dir, {
+      message: "plain msg",
+      fromAgent: "",
+      raw: false,
+      id: "p1",
+      enqueuedAtMs: 1,
+    });
+    const msgs = await readOutbox(dir);
+    expect(msgs.length).toBe(1);
+    expect(msgs[0]!.team).toBeUndefined();
+    // The undefined team must NOT be serialized as a key on disk.
+    const onDisk = await readFile(outboxPath(dir), "utf-8");
+    expect(onDisk).not.toContain("\"team\"");
+  });
 });

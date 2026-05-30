@@ -24,6 +24,11 @@ export function isValidTmuxSession(value: string): boolean {
   return /^[a-zA-Z0-9_-]+$/.test(value);
 }
 
+/** Validate a team name: alphanumeric, hyphens, underscores only (same allowlist as agent IDs). */
+export function isValidTeamName(value: string): boolean {
+  return /^[a-zA-Z0-9_-]+$/.test(value);
+}
+
 /** Validate a Claude session ID (UUID format): hex digits and hyphens only. */
 export function isValidSessionId(value: string): boolean {
   return /^[a-fA-F0-9-]+$/.test(value);

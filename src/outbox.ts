@@ -52,6 +52,8 @@ export interface OutboxMessage {
   raw: boolean;
   /** Wall-clock ms at enqueue time (debugging / ordering aid). */
   enqueuedAtMs: number;
+  /** When set, this message was fanned out to team @<team>; deliverMessage renders "in @<team>" in the prefix. Resolved at drain time. */
+  team?: string;
 }
 
 /** Path to an agent/coordinator outbox file, given the directory that holds meta.json. */
@@ -83,6 +85,7 @@ export async function enqueueOutbox(
     fromAgent: msg.fromAgent,
     raw: msg.raw,
     enqueuedAtMs: msg.enqueuedAtMs ?? Date.now(),
+    team: msg.team,
   };
   // Ensure the agent/coordinator directory exists before appending. In
   // production this dir always exists (created at spawn); creating it here is a
@@ -129,6 +132,7 @@ export async function readOutbox(dir: string): Promise<OutboxMessage[]> {
           fromAgent: obj.fromAgent,
           raw: obj.raw,
           enqueuedAtMs: typeof obj.enqueuedAtMs === "number" ? obj.enqueuedAtMs : 0,
+          team: typeof obj.team === "string" ? obj.team : undefined,
         });
       }
     } catch {

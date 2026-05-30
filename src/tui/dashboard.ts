@@ -56,11 +56,10 @@ import {
 import {
   RightPaneComponent, colorizeDiff, colorizeLog,
   PANE_MODES, FULL_WIDTH_MODES,
-  DENIAL_FILTERS,
   cyclePaneMode, jumpToMode, triggerAsyncLoadIfNeeded,
   loadAgentLog, loadAgentPrompt,
 } from "./pane-manager";
-import type { PaneMode, DenialFilter } from "./pane-manager";
+import type { PaneMode } from "./pane-manager";
 import * as agentActions from "./agent-actions";
 import { RESET, BOLD, DIM, RED, GREEN, YELLOW, DIM_GRAY, REVERSE } from "./colors";
 import { FocusManager } from "./focus";
@@ -659,11 +658,6 @@ export class DashboardComponent implements Component {
   /** Read-only access to current pane mode (for testing) */
   get currentMode(): PaneMode {
     return this.rightPane.mode;
-  }
-
-  /** Read-only access to denial filter (for testing) */
-  get denialFilter(): DenialFilter {
-    return this.rightPane.denialFilter;
   }
 
   /** Read-only access to questions selected index (for testing) */
@@ -1981,15 +1975,6 @@ export class DashboardComponent implements Component {
     } else if (data === "q") {
       this.jumpToMode("QUESTIONS");
       this.tui?.requestRender();
-    }
-    // Denials time filter
-    else if (data === "t") {
-      if (this.rightPane.mode === "DENIALS") {
-        const currentIdx = DENIAL_FILTERS.indexOf(this.rightPane.denialFilter);
-        this.rightPane.denialFilter = DENIAL_FILTERS[(currentIdx + 1) % DENIAL_FILTERS.length]!;
-        this.rightPane.updateContent();
-        this.tui?.requestRender();
-      }
     }
     // Clear errors
     else if (data === "c") {

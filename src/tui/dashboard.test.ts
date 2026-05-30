@@ -1924,24 +1924,6 @@ describe("DashboardComponent right pane and navigation features", () => {
     expect(dashboard.errors.length).toBe(0);
   });
 
-  test("t key cycles denials filter only in DENIALS mode", () => {
-    setupDashboard();
-    expect(dashboard.denialFilter).toBe("all");
-    // t outside DENIALS does nothing
-    dashboard.handleInput("t");
-    expect(dashboard.denialFilter).toBe("all");
-    // Cycle to DENIALS mode (mode index 2)
-    dashboard.handleInput("p"); // 0→1
-    dashboard.handleInput("p"); // 1→2 (DENIALS)
-    expect(dashboard.currentMode).toBe("DENIALS");
-    dashboard.handleInput("t"); // cycle filter: all → 24h
-    expect(dashboard.denialFilter).toBe("24h");
-    dashboard.handleInput("t"); // 24h → 7d
-    expect(dashboard.denialFilter).toBe("7d");
-    dashboard.handleInput("t"); // 7d → all
-    expect(dashboard.denialFilter).toBe("all");
-  });
-
   test("d key triggers diff loading and jumps to DIFF mode", async () => {
     setupDashboard();
     // diffAgent will fail (no worktree at /repos/test) but mode still switches

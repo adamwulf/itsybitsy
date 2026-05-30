@@ -131,3 +131,323 @@ Confirmed via the official doc `developers.openai.com/codex/hooks` AND the binar
 - This is **notes only**; no code changed. Next deliverable the user asked for: a **phased SPEC** for this feature (the draft phases above → formalize, re-confirm file:line anchors, write the OPEN-question verification into Phase 1).
 - Re-confirm before writing SPEC: exact AgentMeta fields (`src/agents.ts:104`), `config.ts` model default, watchdog Claude-specific functions, and the interactive-deny-no-modal behavior.
 - Two read-only research agents were spawned and closed during this session (no commits): codex research + seam mapping. Findings are captured above.
+
+---
+
+## Phase 2 spike findings — 2026-05-30
+
+> Spike performed by `agent-6e76ccd2` (worker) under `codex-agent` manager. All tests on `codex-cli 0.135.0`, macOS Darwin 25.3.0 (Mac OS 26.3.1), zsh inside tmux 3.6a. ChatGPT-account auth (no API key billing). Worktree: `/Users/adamwulf/Developer/bun/itsybitsy/.ittybitty/agents/agent-6e76ccd2/repo`.
+
+### Question 1 — THE CRUX: silent-deny in interactive `-a never` mode?
+
+**Verdict: YES — silent deny confirmed.**
+
+When a PreToolUse hook returns `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"..."}}` while codex runs interactively with `-a never -s workspace-write`:
+
+- **No modal, no prompt, no approval UI.** Just a one-line status entry in the TUI:
+  ```
+  • PreToolUse hook (blocked)
+    feedback: spike: deny-all test
+  ```
+- The model received the deny feedback ("spike: deny-all test") as tool-output and gracefully reported back to the user: *"I couldn't run ls here because the workspace blocked the command with a pre-tool hook (deny-all test). If you want, I can still help interpret the directory contents..."*
+- No human intervention required; the session continued autonomously after the deny.
+
+**This validates the D4 guarantee in SPEC-CODEX-MODEL.md.** itsybitsy can safely run codex agents unattended in tmux with deny-by-default hook semantics.
+
+**Evidence (tmux capture):**
+```
+› run ls in the current directory and tell me what you see
+
+⚠ `--dangerously-bypass-hook-trust` is enabled. Enabled hooks may run without review for this invocation.
+
+• I’m checking the current directory contents now so I can report exactly what’s there.
+
+• PreToolUse hook (blocked)
+  feedback: spike: deny-all test
+
+• I couldn’t run ls here because the workspace blocked the command with a pre-tool hook (deny-all test). If you want, I can still help interpret the directory contents if you paste them, or try a
+  different way to inspect the repo.
+```
+
+**Hook stdin payload captured (`.codex/hook.log`):**
+```json
+{
+  "session_id": "019e7b21-cb7d-7f23-8674-11036ed141ef",
+  "turn_id": "019e7b21-cbce-7d00-8e6d-1fa40d030352",
+  "transcript_path": "/Users/adamwulf/.codex/sessions/2026/05/30/rollout-2026-05-30T18-04-32-019e7b21-cb7d-7f23-8674-11036ed141ef.jsonl",
+  "cwd": "/Users/adamwulf/Developer/bun/itsybitsy/.ittybitty/agents/agent-6e76ccd2/repo",
+  "hook_event_name": "PreToolUse",
+  "model": "gpt-5.4-mini",
+  "permission_mode": "bypassPermissions",
+  "tool_name": "Bash",
+  "tool_input": {"command": "ls"},
+  "tool_use_id": "call_Qwjy8dya7IBgFSX8Ygj5sZ99"
+}
+```
+
+Note: codex maps our `-a never -s workspace-write` combo to `permission_mode: "bypassPermissions"` in the hook payload — surprising, since "bypass" suggests no enforcement, yet our hook still gates. **Read this as a Codex-internal label, not a guarantee about which rules apply.** Treat the hook decision as authoritative.
+
+### Question 2 — Does the worktree-local hook actually fire?
+
+**Verdict: YES — but ONLY when registered via the `-c` inline override, NOT via on-disk `<worktree>/.codex/config.toml`.**
+
+This is a load-bearing departure from SPEC §5.4 step 2. Details:
+
+**What does NOT work:**
+- Putting `[[hooks.PreToolUse]]` blocks in `<worktree>/.codex/config.toml` alone is silently ignored when the project is not trusted in `~/.codex/config.toml`. The hook does not fire; the `ls` command runs unhindered; no warning is emitted.
+- Adding `-c 'projects."<abs-worktree-path>".trust_level="trusted"'` as a runtime override does NOT activate the project config — the project-config-walk's trust check runs against the on-disk `~/.codex/config.toml` BEFORE the `-c` override layer is applied. So inline trust overrides don't help.
+
+**What DOES work:**
+- Registering hooks ENTIRELY via inline `-c` overrides:
+  ```
+  -c 'hooks.PreToolUse=[{matcher=".*",hooks=[{type="command",command="<abs path to hook script>",timeout=30}]}]'
+  ```
+- No on-disk `.codex/config.toml` is required at all. No trust entry in `~/.codex/config.toml` is required. The hook fires reliably; the deny payload reaches the model; the call is blocked.
+- This is the cleanest architecture for itsybitsy: **`~/.codex/config.toml` is never modified per-spawn.** Each agent gets its hook injected at launch time via `-c`.
+
+**Implications for the SPEC:**
+- §5.4 step 2 ("Writes `<worktree>/.codex/config.toml` containing... `[[hooks.PreToolUse]]`...") should be **replaced** with "passes the hook block as a `-c hooks.PreToolUse=...` inline override on the codex CLI". The worktree's `.codex/` dir can still hold the hook script file, but the config.toml is unnecessary.
+- §5.4 step 4 ("Adds `[projects."<abs worktree path>"].trust_level = "trusted"` to `~/.codex/config.toml`") can be **deleted entirely**. No trust entry needed.
+- §5.4 step 5 (gitignore `.codex/`) still applies because the hook script lives there.
+- Risk #10 ("`~/.codex/config.toml` trust list grows per worktree") is **resolved** by this change — we never touch that file.
+
+**Evidence:**
+- Tried `<worktree>/.codex/config.toml` alone, NO trust entry: hook did NOT fire (no log, no sentinel; `ls` ran).
+- Tried `<worktree>/.codex/config.toml` + `-c 'projects."$PWD".trust_level="trusted"'`: hook did NOT fire.
+- Tried inline-only `-c 'hooks.PreToolUse=[...]'` with NO on-disk config and NO trust entry: hook DID fire (log + sentinel populated; deny shown in TUI; model received deny).
+
+### Question 3 — Session-id capture for resume
+
+**Verdict: Three ways to capture, each more reliable than the last.**
+
+**Capture path (best → worst):**
+
+1. **From the PreToolUse hook stdin JSON** (`session_id` field): captured the instant the first tool call fires. Best for `meta.codex_session_id` because the hook is something itsybitsy controls at every spawn.
+2. **From codex's stdout on session exit**: codex prints `To continue this session, run codex resume <UUID>` as its last line. Parseable from `tail -1` of the tmux pane or session stdout.
+3. **From the filesystem**: `~/.codex/sessions/YYYY/MM/DD/rollout-<ISO8601>-<UUID>.jsonl` where the first JSONL line is `{"type":"session_meta","payload":{"id":"<UUID>","cwd":"...","git":{...},...}}`.
+
+**Rollout file path scheme:**
+```
+~/.codex/sessions/<YYYY>/<MM>/<DD>/rollout-<ISO8601-Z>-<UUID>.jsonl
+```
+Example: `~/.codex/sessions/2026/05/30/rollout-2026-05-30T18-04-32-019e7b21-cb7d-7f23-8674-11036ed141ef.jsonl`
+
+**JSON shape (first line):**
+```json
+{
+  "timestamp": "2026-05-30T22:59:36.303Z",
+  "type": "session_meta",
+  "payload": {
+    "id": "<UUID>",
+    "timestamp": "2026-05-30T22:59:36.222Z",
+    "cwd": "/Users/adamwulf/.../repo",
+    "originator": "codex-tui",
+    "cli_version": "0.135.0",
+    "source": "cli",
+    "model_provider": "openai",
+    "base_instructions": {"text": "<system prompt...>"},
+    "git": {"commit_hash": "...", "branch": "...", "repository_url": "..."}
+  }
+}
+```
+
+**Recommendation for Phase 7 (resume):**
+- Capture the session id via **method 1** (hook stdin) at the very first tool call. Write it to `meta.codex_session_id` from `src/hooks/codex-pre-tool-use.ts` if the field is empty.
+- Fallback: parse codex's stdout on session exit (method 2) — useful if no tool call fires in a session.
+- `codex resume <UUID>` re-attaches the session (subcommand form; not the `--resume` flag pattern claude uses).
+- Note: rollout files live in `~/.codex/sessions/` regardless of where the agent's worktree is — they are NOT under the worktree. If we ever wanted them under the worktree, we'd need to redirect `CODEX_HOME`, which breaks auth (see "CODEX_HOME breaks auth" below).
+
+### Question 4 — Exact working launch line
+
+**Verdict: SPEC §3.3 is mostly correct, with three deltas.**
+
+**Working line (confirmed end-to-end):**
+```
+codex \
+  -m gpt-5.4-mini \
+  -a never \
+  -s workspace-write \
+  --dangerously-bypass-hook-trust \
+  -c 'hooks.PreToolUse=[{matcher=".*",hooks=[{type="command",command="<abs-path-to-hook-script>",timeout=30}]}]' \
+  "<prompt>"
+```
+
+**Deltas vs SPEC §3.3:**
+
+1. **`-C <worktree>` is OPTIONAL.** If you already cd'd to the worktree (or tmux was created with `-c <worktree>`), `-C` is unnecessary. Codex picks up cwd correctly. SPEC §3.3 should note this is optional, not mandatory.
+2. **Model name validation matters.** SPEC §3 vaguely references "Codex model names" — but reality: under a **ChatGPT-plan account** only the models in `~/.codex/models_cache.json` are available. On this machine: `gpt-5.5`, `gpt-5.4-mini`, `codex-auto-review`. The originally-tried `gpt-5-codex` returns: *"The 'gpt-5-codex' model is not supported when using Codex with a ChatGPT account."* — and codex's `-m` is server-validated, so itsybitsy can't pre-check this client-side. SPEC should list the realistic ChatGPT-account model set with a note that the API/Plus tiers may have different sets.
+3. **Hook registration moves from on-disk config → inline `-c`.** See Q2 above.
+
+**Other observations:**
+- The `--dangerously-bypass-hook-trust` warning prints ONCE on launch and AGAIN when the first hook fires (twice total in the TUI). Cosmetic but visible.
+- `codex --help` v0.135.0 confirms all SPEC-required flags exist with the documented spelling: `-a/--ask-for-approval`, `-s/--sandbox`, `-m/--model`, `-C/--cd`, `-c/--config`, `--dangerously-bypass-hook-trust`. No deprecation warnings on the four-flag combination.
+- `--ask-for-approval on-failure` is marked DEPRECATED in v0.135.0 help text — confirms SPEC §3.1's claim is current.
+
+### Bonus findings (not in the original 4 questions, but SPEC-relevant)
+
+**B1. `permissionDecision: "allow"` is only supported PAIRED with `updatedInput` (not standalone).**
+
+The allow-test produced this error in the TUI:
+```
+• PreToolUse hook (failed)
+  error: PreToolUse hook returned unsupported permissionDecision:allow
+```
+
+After re-reading the official doc at `developers.openai.com/codex/hooks` (verbatim):
+
+> "To rewrite a supported tool call without blocking, return `permissionDecision: "allow"` with `updatedInput`"
+
+> "`permissionDecision: "ask"`, legacy `decision: "approve"`, `continue: false`, `stopReason`, and `suppressOutput` are parsed but not supported yet. Codex **marks the hook run as failed, reports the error, and continues the tool call**." (emphasis added)
+
+So:
+- `permissionDecision: "allow"` ALONE (no `updatedInput`) is rejected by codex 0.135.0 (our error message confirms this).
+- `permissionDecision: "allow"` PAIRED with `updatedInput: {...}` is the only documented "allow" form. It's intended for rewriting/sanitizing the tool input, not as a no-op allow.
+- The doc does NOT document a "plain allow / no rewrite" form. There appears to be no first-class "explicit allow" path; the implicit allow path is "emit no decision, exit 0".
+- Hook failures (including unsupported decisions) are **fail-open**: codex continues the tool call.
+
+**Implications:**
+- A buggy or crashing hook script results in **silent allow**, not silent deny — the OPPOSITE of fail-safe. This is documented behavior, not a bug. Production deployments must monitor hook-fail rate via PostToolUse, Stop, or external telemetry to detect when our hook stops gating.
+- The codex hook contract is fundamentally weaker than Claude's: Claude has `exit 2 = hard block before permission rules` AND `permissionDecision: "deny" = soft block`. Codex only has the soft path; exit 2 is documented as deny-equivalent but a CRASH (exit code 1, segfault, malformed JSON) is allow-equivalent. We should always exit 0 + emit JSON, never let the hook process crash.
+- The SETTINGS-HOOKS-RESEARCH.md §B3 doc claim that `allow` is a valid value alongside `deny` should be **refined**: it's valid ONLY when paired with `updatedInput`.
+
+**Recommended `codex-pre-tool-use.ts` shape:**
+- If command matches the deny list → emit `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"..."}}`, exit 0.
+- If command matches the allow list → emit either:
+  - **Option A (preferred):** `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","updatedInput":<the original tool_input echoed back verbatim>}}`. This uses the documented allow path with a no-op rewrite — explicit, deterministic, doesn't rely on "no decision = proceed" inference.
+  - **Option B (simpler but undocumented):** emit `{}` or `{"hookSpecificOutput":{"hookEventName":"PreToolUse"}}` — relies on codex defaulting to allow when no decision is returned. Empirically works but is not in the documented contract.
+- If command matches neither (deny-by-default) → emit deny as above.
+- **Never let the hook crash or emit malformed JSON** — codex will silently allow.
+- Wrap all hook logic in a try/catch that emits a `deny` payload on exception. Failing closed is the only safe default.
+
+**Verified empirically (third spike run):** a hook returning `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","updatedInput":{"command":"ls"}}}` (echoing the original tool_input as updatedInput) ran cleanly — no "hook failed" error, `ls` executed normally, codex showed the standard `• Explored └ List ls` tool output. The documented allow-with-rewrite form works as advertised; the echo-back-original-input pattern is the right way to express explicit allow.
+
+**B2. `CODEX_HOME` relocation breaks auth.**
+
+Setting `CODEX_HOME=<per-agent-path>` causes codex to show the first-time ChatGPT login flow on every spawn, because `~/.codex/auth.json` is not present in the redirected home. This rules out per-agent CODEX_HOME as a way to isolate config/sessions/state unless we also seed `auth.json` into the per-agent home (read-copy or symlink).
+
+**Implication:** the SPEC should NOT pivot to per-agent CODEX_HOME without addressing auth seeding. Sticking with the global `~/.codex/` + inline `-c` hook approach (no on-disk per-worktree config) is the right answer.
+
+**B3. Mixed-auth warning.**
+
+`codex doctor` reported:
+```
+⚠ auth         mixed auth signals: ChatGPT login plus API key env var; HTTP reachability uses API-key mode
+```
+
+This means the user has both `OPENAI_API_KEY` (or similar) set AND a ChatGPT login. Codex prefers the API key path for HTTP reachability. May affect which models are available — worth surfacing as a config-time check at spawn (`codex doctor` parse, or environment-variable detection). Out of scope for Phase 2 but a note for Phase 8.
+
+**B4. Tool call telemetry visible in the TUI.**
+
+When a hook denies, the TUI shows:
+- `• PreToolUse hook (blocked)` with the `feedback: <reason>` line.
+- The model's subsequent reasoning treats this as a tool error and may surface a user-readable explanation.
+
+When a hook errors (e.g. unsupported decision), the TUI shows:
+- `• PreToolUse hook (failed)` with the `error: <message>` line.
+- Codex defaults to allowing the call after the error (see B1).
+
+The string `"hook returned decision:block without a non-empty reason"` mentioned in CODEX-CLI-NOTES.md line 46 was NOT observed in this spike — likely only fires when a deny is returned without a reason. We always passed `permissionDecisionReason`.
+
+**B5. `apply_patch` PreToolUse caveat NOT tested.**
+
+This spike only triggered Bash tool calls (`ls`). The SPEC §3.2 caveat about `apply_patch` not firing PreToolUse hooks (openai/codex#16732) was not empirically verified. Recommend a separate micro-spike before Phase 3 that asks codex to edit a file and checks whether the hook fires.
+
+### Spike scratch artifacts
+
+Left in the worktree for codex-agent's inspection (gitignored / not committed):
+- `<worktree>/.codex/hooks/pre-deny.sh` — deny-all PreToolUse hook script (proved Q1 silent-deny)
+- `<worktree>/.codex/hooks/pre-allow.sh` — naive allow-all hook returning `permissionDecision:"allow"` standalone (produced the unsupported-decision error; fail-open behavior observed)
+- `<worktree>/.codex/hooks/pre-allow-echo.sh` — documented allow form: `permissionDecision:"allow"` + `updatedInput:<echo of tool_input>` (verified working — no hook errors, tool ran)
+- `<worktree>/.codex/hook.log` — captured stdin payloads from hook invocations
+- `<worktree>/.codex/hook-fired.flag` — sentinel file from the last hook run
+- `<worktree>/.codex/config.toml.disabled` — the on-disk config that didn't fire (renamed to prove inline-only works)
+- `<worktree>/.codex-home/` — abandoned attempt at CODEX_HOME redirect (auth-flow trap)
+
+The user explicitly directed **NOT** to modify `~/.codex/config.toml`. That directive was honored; no trust entry was added. The spike succeeded WITHOUT trust entries because the inline-`-c` hook-registration path doesn't require project trust.
+
+### Recommended SPEC §3 patch (for codex-agent to review and apply)
+
+Suggested diff in `SPEC-CODEX-MODEL.md`:
+
+**1. Replace §3.3 launch line:**
+
+```diff
+ ### 3.3 Canonical codex launch line (target)
+
+ ```
+-codex -m <MODEL> -a never -s workspace-write \
+-      -C <worktree> \
+-      --dangerously-bypass-hook-trust \
+-      "<prompt>"
++codex -m <MODEL> -a never -s workspace-write \
++      --dangerously-bypass-hook-trust \
++      -c 'hooks.PreToolUse=[{matcher=".*",hooks=[{type="command",command="<abs path>",timeout=30}]}]' \
++      "<prompt>"
+ ```
+ 
+-Where `<MODEL>` is the **model half** of the parsed `<cli>:<model>` (the `codex:` prefix is stripped). The per-worktree `<worktree>/.codex/config.toml` (written at spawn time) supplies the `[hooks]` block + any other config. `--dangerously-bypass-hook-trust` is **mandatory on every invocation** because the generated hook script's hash changes every spawn.
++Where `<MODEL>` is the **model half** of the parsed `<cli>:<model>` (the `codex:` prefix is stripped) and the inline `-c` override registers our PreToolUse hook entirely in-memory (no on-disk `.codex/config.toml` required — see Phase 2 spike findings in `CODEX-CLI-NOTES.md` for why the on-disk path is silently ignored without a trust entry). `--dangerously-bypass-hook-trust` is **mandatory on every invocation** because the inline hook command's hash changes every spawn.
++
++`-C <worktree>` is optional — codex picks up cwd if tmux was created in the worktree (which itsybitsy already does). Add it only as a defensive belt-and-braces.
+
+-`~/.codex/config.toml` must have `[projects."<abs worktree path>"].trust_level = "trusted"` for the project layer to load. This is set once during the worktree setup.
++**No `~/.codex/config.toml` modification required.** Because we register the hook via inline `-c`, codex's project-config-walk and trust gate are bypassed entirely. This avoids unbounded growth of `~/.codex/config.toml`'s trust list and resolves Risk #10.
++
++**Model availability:** under a ChatGPT-plan account, only models listed in `~/.codex/models_cache.json` work. As of v0.135.0 + ChatGPT auth: `gpt-5.5`, `gpt-5.4-mini`, `codex-auto-review`. API-key billing may expose others. `gpt-5-codex` is NOT available on ChatGPT auth (returns HTTP 400). itsybitsy cannot pre-validate model availability client-side — invalid model surfaces as an HTTP 400 in the TUI after first prompt.
+```
+
+**2. Update §5.4 "Permissions → generated PreToolUse hook script":**
+
+```diff
+ At spawn (Phase 3), `buildCodexConfig()`:
+ 1. Reads the SAME merged allow/deny lists (`_all.md` + `_non_coordinator.md` + `<type>.md`).
+-2. Writes `<worktree>/.codex/config.toml` containing:
+-   - `model = "<parsed model half>"`
+-   - `approval_policy = "never"`
+-   - `sandbox_mode = "workspace-write"`
+-   - `[[hooks.PreToolUse]]` registering a generated hook script under `<worktree>/.codex/hooks/pre-tool-use.sh` (or similar).
+-   - Optionally additional `[[hooks.SessionStart]]` / `[[hooks.Stop]]` for state-detection (§5.6).
++2. Generates the inline `-c` payload for codex's CLI:
++   - `-c 'hooks.PreToolUse=[{matcher=".*",hooks=[{type="command",command="ib hooks codex-pre-tool-use <agentId>",timeout=30}]}]'`
++   - The `model`, `approval_policy`, and `sandbox_mode` are passed as CLI flags (`-m`, `-a`, `-s`), not via config.
++   - Optionally add inline `-c hooks.SessionStart=[...]` / `-c hooks.Stop=[...]` for state-detection (§5.6).
+ 3. Writes a generated `<worktree>/.codex/hooks/pre-tool-use.sh` script that reads the codex stdin JSON, matches `tool_name` + `tool_input.command` against the merged allow/deny lists, and prints the deny-by-default JSON contract.
+    - Alternative: have the script call `ib hooks codex-pre-tool-use <agentId>` and put the matching logic in TypeScript (`src/hooks/codex-pre-tool-use.ts`) — preferred for consistency with the existing claude hooks. The script then is a one-liner.
+-4. Adds `[projects."<abs worktree path>"].trust_level = "trusted"` to `~/.codex/config.toml` (once per worktree) so the project layer loads. **This is the one cross-worktree write** we make; required by the codex trust model.
+-5. Adds `.codex/` to the worktree's `.gitignore` (no `.local`-style file exists in codex).
++4. **No `~/.codex/config.toml` modification needed** — inline `-c` overrides don't pass through the project-config trust gate. (Phase 2 spike confirmed.)
++5. Adds `.codex/hooks/` to the worktree's `.gitignore` (the hook script lives there; no config.toml is written).
+ 6. Writes a per-agent `<worktree>/AGENTS.md` containing the role/session-start instructions (replaces what `session-start.ts` injects for Claude).
+
+ **Trust:** `--dangerously-bypass-hook-trust` is passed on **every** spawn (hash-pinned trust requires this; see §3.2).
+```
+
+**3. Update §5.5 with the no-`allow`-decision constraint:**
+
+```diff
+ New `src/hooks/codex-pre-tool-use.ts`, dispatched from `src/index.ts`:
+ - Reads codex's stdin JSON (`tool_name`, `tool_input.command`, `cwd`, `session_id`, …).
+ - Applies the same allow/deny matching used for Claude (reuse the matcher logic, not a fork of the rules — share with `intercept-task` / `agent-path` as a library function).
+-- Emits codex's stdout contract: `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"|"deny","permissionDecisionReason":…}}`. **Default = deny.**
++- Emits codex's stdout contract (verified against developers.openai.com/codex/hooks):
++  - **Deny** (any unmatched / explicit-deny command): `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"..."}}`, exit 0.
++  - **Allow** (matched allow-list): emit `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","updatedInput":<echo of the original tool_input>}}`. The doc allows `permissionDecision:"allow"` ONLY paired with `updatedInput` (intended for rewriting the command). Standalone `allow` (no `updatedInput`) is rejected as "unsupported permissionDecision:allow" — codex marks the hook failed and continues the call (documented fail-open). Use a no-op rewrite (echo back original input) for explicit allows.
++  - **Default = deny.**
++  - Also write `meta.codex_session_id` from the stdin payload's `session_id` field on first hook firing (resume capture).
++- **Defense-in-depth caveat:** codex's hook failure mode is FAIL-OPEN per the docs: any crash, malformed JSON, unrecognized decision, or non-zero exit (other than `2`) results in the tool call PROCEEDING. This is the opposite of fail-safe. The handler must (a) wrap all logic in try/catch and emit a `deny` payload on exception, (b) never throw uncaught errors, (c) monitor hook-fail rate via PostToolUse or external logging.
+ - Also covers path isolation (the codex analog of `agent-path`/`main-path`) so codex agents stay in their worktree. (Caveat: `.git`, `.codex`, `.agents` are already OS-enforced read-only under `workspace-write` per research §B5.)
+```
+
+**4. Update §7 risks:**
+
+```diff
+-10. **`~/.codex/config.toml` trust list grows per worktree.** Each spawn adds one `[projects."<abs>"].trust_level = "trusted"`. This is user-global state; cleanup on agent archive is worth considering (low priority).
++10. **RESOLVED (Phase 2 spike).** Inline `-c hooks.PreToolUse=...` registration bypasses the project-trust gate entirely. `~/.codex/config.toml` is never modified by itsybitsy. No per-worktree cleanup needed.
++11. **NEW (Phase 2 spike).** Codex's PreToolUse contract supports `permissionDecision: "allow"` ONLY paired with `updatedInput` (a tool-input rewrite). Standalone `allow` triggers the "unsupported decision" path, which is FAIL-OPEN per the documented behavior at developers.openai.com/codex/hooks: "Codex marks the hook run as failed, reports the error, and continues the tool call." Same fail-open behavior applies to crashes, malformed JSON, or any non-`2` non-zero exit. Our handler must (a) emit an echo-back allow (`updatedInput` = original `tool_input`) for allow-listed commands, (b) wrap all logic in try/catch and emit deny on exception, (c) monitor hook-fail rate via PostToolUse or external telemetry.
++12. **NEW (Phase 2 spike).** Under a ChatGPT-plan account, only the models in `~/.codex/models_cache.json` are reachable (currently `gpt-5.5`, `gpt-5.4-mini`, `codex-auto-review`). `gpt-5-codex` and other API-tier models return HTTP 400 *"not supported when using Codex with a ChatGPT account"*. itsybitsy cannot pre-validate this client-side; surface a clear error after first prompt if the model is rejected.
++13. **NEW (Phase 2 spike).** `CODEX_HOME` relocation breaks auth (no `auth.json` in the redirected home → first-time-login flow appears every spawn). Per-agent CODEX_HOME is NOT a usable isolation strategy without seeding `auth.json`. Stick with global `~/.codex/` + inline `-c` overrides.
+```
+
+---
+
+**End of Phase 2 spike findings.** Manager (codex-agent) should review the recommended SPEC patch, then merge or send feedback.

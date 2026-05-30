@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { FocusManager, buildFocusSeparator } from "./focus";
+import { FocusManager, buildFocusSeparator, buildTabbedFocusSeparator } from "./focus";
 import type { FocusTarget, SubFocus } from "./focus";
 import { RESET, BOLD, DIM, DIM_GRAY, REVERSE } from "./colors";
 
@@ -285,5 +285,92 @@ describe("buildFocusSeparator", () => {
     const focused = buildFocusSeparator("Agents", 30, true);
     const unfocused = buildFocusSeparator("Agents", 30, false);
     expect(focused).not.toBe(unfocused);
+  });
+});
+
+describe("buildTabbedFocusSeparator", () => {
+  test("focused tab A applies REVERSE+BOLD to its label, not the other", () => {
+    const sep = buildTabbedFocusSeparator(
+      [{ label: "Agents", focused: true }, { label: "Teams", focused: false }],
+      40,
+    );
+    expect(sep).toContain("Agents");
+    expect(sep).toContain("Teams");
+    // Find the position of each label's wrapper. The focused tab uses REVERSE+BOLD.
+    // We verify by splitting on the label and inspecting the preceding escape.
+    const beforeAgents = sep.slice(0, sep.indexOf("Agents"));
+    expect(beforeAgents).toContain(REVERSE);
+    expect(beforeAgents).toContain(BOLD);
+    // The Teams label should be DIM (unfocused tab styling).
+    const beforeTeams = sep.slice(0, sep.indexOf("Teams"));
+    // Find the most recent DIM in the prefix BEFORE Teams (after the focused
+    // RESET that closes the Agents tab).
+    const lastReset = beforeTeams.lastIndexOf(RESET);
+    const afterReset = beforeTeams.slice(lastReset);
+    expect(afterReset).toContain(DIM);
+  });
+
+  test("focused tab B applies REVERSE+BOLD to its label, not the other", () => {
+    const sep = buildTabbedFocusSeparator(
+      [{ label: "Agents", focused: false }, { label: "Teams", focused: true }],
+      40,
+    );
+    expect(sep).toContain("Agents");
+    expect(sep).toContain("Teams");
+    const beforeTeams = sep.slice(0, sep.indexOf("Teams"));
+    // Find the most recent REVERSE after the last RESET — that's the styling
+    // applied to the Teams label.
+    const lastReset = beforeTeams.lastIndexOf(RESET);
+    const afterReset = beforeTeams.slice(lastReset);
+    expect(afterReset).toContain(REVERSE);
+    expect(afterReset).toContain(BOLD);
+    // And the Agents label is DIM (unfocused).
+    const beforeAgents = sep.slice(0, sep.indexOf("Agents"));
+    expect(beforeAgents).toContain(DIM);
+  });
+
+  test("neither focused: the whole line is wrapped in DIM", () => {
+    const sep = buildTabbedFocusSeparator(
+      [{ label: "Agents", focused: false }, { label: "Teams", focused: false }],
+      40,
+    );
+    expect(sep).toContain("Agents");
+    expect(sep).toContain("Teams");
+    // The wrap is applied at the outermost layer — sep starts with DIM and
+    // contains no REVERSE anywhere.
+    expect(sep.startsWith(DIM)).toBe(true);
+    expect(sep).not.toContain(REVERSE);
+  });
+
+  test("contains 4-dash left pad like buildFocusSeparator", () => {
+    const sep = buildTabbedFocusSeparator(
+      [{ label: "Agents", focused: true }, { label: "Teams", focused: false }],
+      60,
+    );
+    expect(sep).toContain("────");
+  });
+
+  test("contains dash characters between and around tabs", () => {
+    const sep = buildTabbedFocusSeparator(
+      [{ label: "Agents", focused: true }, { label: "Teams", focused: false }],
+      50,
+    );
+    expect(sep).toContain("─");
+  });
+
+  test("dashes always use DIM_GRAY", () => {
+    const sep = buildTabbedFocusSeparator(
+      [{ label: "Agents", focused: true }, { label: "Teams", focused: false }],
+      40,
+    );
+    expect(sep).toContain(DIM_GRAY);
+  });
+
+  test("handles narrow width without crashing", () => {
+    const sep = buildTabbedFocusSeparator(
+      [{ label: "Agents", focused: true }, { label: "Teams", focused: false }],
+      5,
+    );
+    expect(typeof sep).toBe("string");
   });
 });

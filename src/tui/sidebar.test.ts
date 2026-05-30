@@ -290,7 +290,7 @@ describe("SidebarComponent", () => {
 });
 
 describe("SidebarComponent — §17 Teams panel rendering", () => {
-  test("default focus renders the Agents tree title (not Teams)", () => {
+  test("default focus renders both tab labels in the combined header (Agents content below)", () => {
     const sidebar = makeSidebar();
     sidebar.displayHeight = 25;
     sidebar.focusTarget = "agent-tree";
@@ -299,22 +299,28 @@ describe("SidebarComponent — §17 Teams panel rendering", () => {
 
     const lines = sidebar.render(SIDEBAR_WIDTH);
     const text = lines.map(stripAnsi).join("\n");
+    // Both tab labels are always shown; only the active tree renders below.
     expect(text).toContain("Agents");
-    expect(text).not.toContain("Teams");
+    expect(text).toContain("Teams");
+    // The Agents tree is active — its content (the test agent) should appear.
+    expect(text).toContain("agent-x");
   });
 
-  test("teams-tree focus renders the Teams tree title (not Agents)", () => {
+  test("teams-tree focus renders the Teams tree content (the Agents tree is hidden)", () => {
     const sidebar = makeSidebar();
     sidebar.displayHeight = 25;
     sidebar.focusTarget = "teams-tree";
-    // Populate both trees: only the Teams one should appear given focus.
+    // Populate both trees: only the Teams one should render content given focus.
     const agent = makeAgent({ id: "agent-x" });
     sidebar.agentTree.setFlatList([makeFlatAgent(agent)]);
 
     const lines = sidebar.render(SIDEBAR_WIDTH);
     const text = lines.map(stripAnsi).join("\n");
+    expect(text).toContain("Agents");
     expect(text).toContain("Teams");
-    expect(text).not.toContain("Agents");
+    // The Teams tree is empty by default — the Agents tree content must NOT
+    // appear (its tree row is suppressed when teams-tree is focused).
+    expect(text).not.toContain("agent-x");
   });
 
   test("teams-tree focus + empty teams registry renders the empty-state hint", () => {
@@ -328,27 +334,45 @@ describe("SidebarComponent — §17 Teams panel rendering", () => {
     expect(text).toContain("Teams");
   });
 
-  test("Teams header renders focused (reverse video) when teams-tree is focused", () => {
+  test("Teams header renders focused (reverse video) on the Teams tab when teams-tree is focused", () => {
     const sidebar = makeSidebar();
     sidebar.displayHeight = 25;
     sidebar.focusTarget = "teams-tree";
     const lines = sidebar.render(SIDEBAR_WIDTH);
-    // First line is the Teams separator — should contain REVERSE (focused)
-    expect(lines[0]).toContain(REVERSE);
+    // First line is the combined tab header. The focused tab uses REVERSE.
+    // Confirm REVERSE precedes the Teams label, not the Agents label.
+    const header = lines[0]!;
+    const teamsIdx = header.indexOf("Teams");
+    const agentsIdx = header.indexOf("Agents");
+    expect(teamsIdx).toBeGreaterThan(0);
+    expect(agentsIdx).toBeGreaterThan(0);
+    // The REVERSE escape should appear between the Agents label and Teams label,
+    // (right before Teams), not before Agents.
+    const betweenAgentsAndTeams = header.slice(agentsIdx + "Agents".length, teamsIdx);
+    expect(betweenAgentsAndTeams).toContain(REVERSE);
   });
 
-  test("Agents header renders unfocused when teams-tree is focused (Agents tree hidden anyway)", () => {
-    // Sanity check on the toggle: switching back to agent-tree shows Agents,
-    // not Teams — and the Teams panel's selection is preserved.
+  test("Agents tab is focused when agent-tree has focus; switching focus swaps tree content", () => {
     const sidebar = makeSidebar();
     sidebar.displayHeight = 25;
     sidebar.focusTarget = "teams-tree";
     let lines = sidebar.render(SIDEBAR_WIDTH);
-    expect(lines.map(stripAnsi).join("\n")).toContain("Teams");
+    let text = lines.map(stripAnsi).join("\n");
+    expect(text).toContain("Teams");
+    expect(text).toContain("Agents");
+    // Teams tree is empty → no-teams hint visible
+    expect(text).toContain("No teams");
 
     sidebar.focusTarget = "agent-tree";
+    const agent = makeAgent({ id: "agent-y" });
+    sidebar.agentTree.setFlatList([makeFlatAgent(agent)]);
     lines = sidebar.render(SIDEBAR_WIDTH);
-    expect(lines.map(stripAnsi).join("\n")).toContain("Agents");
-    expect(lines.map(stripAnsi).join("\n")).not.toContain("Teams");
+    text = lines.map(stripAnsi).join("\n");
+    expect(text).toContain("Teams");
+    expect(text).toContain("Agents");
+    // Now the Agents tree is active; its content should appear.
+    expect(text).toContain("agent-y");
+    // And the no-teams hint should be GONE (Teams tree no longer rendering).
+    expect(text).not.toContain("No teams");
   });
 });

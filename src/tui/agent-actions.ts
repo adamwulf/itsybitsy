@@ -507,7 +507,11 @@ export function handleRename(ctx: ActionCtx) {
   ctx.showDialog({
     type: "input",
     prompt: `Nickname for ${agent.id} (empty to clear):`,
-    value: agent.meta.nickname ?? agent.id,
+    // Pre-fill the current nickname (so it can be edited), or EMPTY when none
+    // is set. Empty is deliberate: the field is for a NEW nickname, and an
+    // empty Enter already means "clear" (a no-op when none exists) — pre-filling
+    // the id would make Enter-unchanged submit nickname==id, which is rejected.
+    value: agent.meta.nickname ?? "",
     onSubmit: (value: string) => {
       ctx.closeDialog();
       const trimmed = value.trim();

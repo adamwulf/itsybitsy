@@ -679,12 +679,12 @@ describe("handleRename", () => {
     expect(d.prompt).toContain("agent-ren1");
   });
 
-  test("pre-fills with the id when no nickname is set", () => {
+  test("pre-fills EMPTY when no nickname is set (Enter-unchanged is a no-op clear, not nickname==id)", () => {
     const agent = makeAgent({ id: "agent-ren2" });
     const { ctx, dialogs } = makeMockCtx({ agent });
     handleRename(ctx);
     const d = assertDialog(dialogs[0]!, "input");
-    expect(d.value).toBe("agent-ren2");
+    expect(d.value).toBe("");
   });
 });
 

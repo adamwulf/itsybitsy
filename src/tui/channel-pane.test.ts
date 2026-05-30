@@ -10,7 +10,7 @@ import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { mkdtemp, rm } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
-import { ChannelPaneComponent, formatChannelLine } from "./channel-pane";
+import { ChannelPaneComponent, formatChannelLine, formatChannelSystemLine } from "./channel-pane";
 import { setCoordinatorHome, resetCoordinatorHome } from "../coordinator";
 import { setUserConfigPath, resetUserConfigPath } from "../config";
 import { appendChannelMessage } from "../team-channel";
@@ -211,6 +211,146 @@ describe("ChannelPaneComponent", () => {
     test("human with user.name → user <name>", () => {
       const line = formatChannelLine({ ts: 0, fromAgent: "", message: "m" }, "backend", "Adam");
       expect(line).toBe("[sent by user Adam in @backend]: m");
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // System (lifecycle) record rendering (§17.4 design update). Lifecycle
+  // notices (join/leave/team-create) are written to channel.jsonl with
+  // kind: "system" and rendered as a dimmed `── … ──` separator line so they
+  // read distinctly from chat without disappearing from the room history.
+  // -------------------------------------------------------------------------
+  describe("formatChannelSystemLine", () => {
+    test("agent actor prepends the id to the message", () => {
+      const line = formatChannelSystemLine({
+        ts: 0,
+        fromAgent: "agent-abc123",
+        message: "joined the team",
+        kind: "system",
+      });
+      expect(stripAnsi(line)).toBe("── agent-abc123 joined the team ──");
+    });
+    test("@system actor renders the message bare (sentinel dropped)", () => {
+      const line = formatChannelSystemLine({
+        ts: 0,
+        fromAgent: "@system",
+        message: "team created",
+        kind: "system",
+      });
+      expect(stripAnsi(line)).toBe("── team created ──");
+    });
+    test("system line is wrapped in DIM/RESET so the chat box renders it dimmed", () => {
+      const line = formatChannelSystemLine({
+        ts: 0,
+        fromAgent: "@system",
+        message: "team created",
+        kind: "system",
+      });
+      // The DIM SGR ("\x1b[2m") opens the line and the universal RESET closes
+      // it — both must be present for the dim styling to render correctly.
+      expect(line.startsWith("\x1b[2m")).toBe(true);
+      expect(line.endsWith("\x1b[0m")).toBe(true);
+    });
+    test("coalesced-leave actor (@system) still renders bare even with a count phrase", () => {
+      const line = formatChannelSystemLine({
+        ts: 0,
+        fromAgent: "@system",
+        message: "3 members left",
+        kind: "system",
+      });
+      expect(stripAnsi(line)).toBe("── 3 members left ──");
+    });
+  });
+
+  describe("render dispatch by kind", () => {
+    test("system records render as `── … ──` (NOT the `[sent by …]` chat grammar)", async () => {
+      await appendChannelMessage("backend", {
+        ts: 100,
+        fromAgent: "agent-joiner",
+        message: "joined the team",
+        kind: "system",
+      });
+      const pane = new ChannelPaneComponent();
+      pane.displayHeight = 10;
+      pane.teamName = "backend";
+      await pane.load();
+      const text = pane.render(80).map(stripAnsi).join("\n");
+      expect(text).toContain("── agent-joiner joined the team ──");
+      // Crucially, the system render branch does NOT produce the chat-grammar
+      // bracket prefix — that would conflate lifecycle notices with chat.
+      expect(text).not.toContain("[sent by agent-joiner");
+    });
+
+    test("@system actor renders bare (no actor token); chat-grammar prefix is NOT emitted", async () => {
+      await appendChannelMessage("backend", {
+        ts: 100,
+        fromAgent: "@system",
+        message: "team created",
+        kind: "system",
+      });
+      const pane = new ChannelPaneComponent();
+      pane.displayHeight = 10;
+      pane.teamName = "backend";
+      await pane.load();
+      const text = pane.render(80).map(stripAnsi).join("\n");
+      expect(text).toContain("── team created ──");
+      expect(text).not.toContain("[sent by @system");
+    });
+
+    test("rendered system line carries DIM/RESET ANSI in the visible output", async () => {
+      await appendChannelMessage("backend", {
+        ts: 100,
+        fromAgent: "@system",
+        message: "team created",
+        kind: "system",
+      });
+      const pane = new ChannelPaneComponent();
+      pane.displayHeight = 10;
+      pane.teamName = "backend";
+      await pane.load();
+      const joined = pane.render(80).join("\n");
+      // Expect both the DIM SGR open and the RESET close present in the raw
+      // ANSI output (the system line is wrapped end-to-end in DIM/RESET).
+      expect(joined).toContain("\x1b[2m");
+      expect(joined).toContain("\x1b[0m");
+    });
+
+    test("mixed chat + system records: chat keeps its grammar, system gets the separator form", async () => {
+      await appendChannelMessage("backend", {
+        ts: 100,
+        fromAgent: "agent-a",
+        message: "hello",
+      });
+      await appendChannelMessage("backend", {
+        ts: 200,
+        fromAgent: "agent-b",
+        message: "joined the team",
+        kind: "system",
+      });
+      const pane = new ChannelPaneComponent();
+      pane.displayHeight = 10;
+      pane.teamName = "backend";
+      await pane.load();
+      const text = pane.render(80).map(stripAnsi).join("\n");
+      expect(text).toContain("[sent by agent-a in @backend]: hello");
+      expect(text).toContain("── agent-b joined the team ──");
+    });
+
+    test("a record with no `kind` field still renders as chat (back-compat)", async () => {
+      // Hand-seed a legacy record shape (no kind) to confirm the render branch
+      // treats undefined as chat — the on-disk back-compat contract.
+      await appendChannelMessage("backend", {
+        ts: 100,
+        fromAgent: "agent-legacy",
+        message: "still chat",
+      });
+      const pane = new ChannelPaneComponent();
+      pane.displayHeight = 10;
+      pane.teamName = "backend";
+      await pane.load();
+      const text = pane.render(80).map(stripAnsi).join("\n");
+      expect(text).toContain("[sent by agent-legacy in @backend]: still chat");
+      expect(text).not.toContain("── agent-legacy");
     });
   });
 });

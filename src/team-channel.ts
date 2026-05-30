@@ -75,6 +75,13 @@ export interface ChannelMessage {
    * concern reconstructed at render time by the chat box from `fromAgent`.
    */
   message: string;
+  /**
+   * Record kind. Defaults to "chat" when missing (existing records on disk
+   * have no kind field and must continue to render as chat). New lifecycle
+   * notices are written with kind: "system" and rendered dimmed in the chat box.
+   * The §17.4 channel pane dispatches its render path off this field.
+   */
+  kind?: "chat" | "system";
 }
 
 /** Absolute path to `~/.itsybitsy/teams/`. Honors the `setCoordinatorHome` test override. */
@@ -129,7 +136,42 @@ export async function appendChannelMessage(teamName: string, record: ChannelMess
   // Ensure `~/.itsybitsy/teams/` exists before appending. In production it is
   // created on the first append; `mkdir` recursive is a no-op once it exists.
   await mkdir(teamsDir(), { recursive: true });
-  await appendFile(channelPath(teamName), JSON.stringify(record) + "\n");
+  // Write `kind` VERBATIM if present, but DROP it when undefined so existing
+  // chat records stay bit-identical on disk — we don't want a `kind: undefined`
+  // (or worse, a hard-coded `kind: "chat"`) churning every historical channel
+  // file just because the field was added.
+  const payload: ChannelMessage =
+    record.kind === undefined
+      ? { ts: record.ts, fromAgent: record.fromAgent, message: record.message }
+      : record;
+  await appendFile(channelPath(teamName), JSON.stringify(payload) + "\n");
+}
+
+/**
+ * Append a SYSTEM lifecycle record to a team's `<team>.channel.jsonl`. Used by
+ * the team join / leave / create notice paths so the channel pane can render
+ * lifecycle events inline with chat (rendered dimmed per §17.4 design update).
+ *
+ * The `fromAgent` is the ACTOR: `@system` for create / coalesced-nuke notices,
+ * a real agent id for per-agent join / leave notices. `ts` is stamped to the
+ * current epoch SECONDS internally so callers don't have to thread a clock.
+ *
+ * Best-effort like `appendChannelMessage` — the `mkdir` recursive runs first so
+ * a missing dir can't throw, but callers should still `.catch(() => {})` so a
+ * failed channel write never breaks the driving command (matches the
+ * `appendTeamLog` discipline at every fire-point).
+ */
+export async function appendChannelSystemMessage(
+  teamName: string,
+  fromAgent: string,
+  message: string,
+): Promise<void> {
+  await appendChannelMessage(teamName, {
+    ts: Math.floor(Date.now() / 1000),
+    fromAgent,
+    message,
+    kind: "system",
+  });
 }
 
 /**
@@ -166,11 +208,26 @@ export async function readChannel(teamName: string): Promise<ChannelMessage[]> {
         typeof obj.fromAgent === "string" &&
         typeof obj.message === "string"
       ) {
-        out.push({
+        // `kind` is optional: missing → undefined (treated as "chat" at render
+        // time per the §17.4 back-compat contract); explicit "chat" / "system"
+        // round-trip verbatim; any OTHER value skips the whole record, matching
+        // the existing field-by-field guard discipline (a malformed field, not
+        // a malformed line, is still bad data we won't trust).
+        let kind: "chat" | "system" | undefined;
+        if (obj.kind === undefined) {
+          kind = undefined;
+        } else if (obj.kind === "chat" || obj.kind === "system") {
+          kind = obj.kind;
+        } else {
+          continue;
+        }
+        const record: ChannelMessage = {
           ts: obj.ts,
           fromAgent: obj.fromAgent,
           message: obj.message,
-        });
+        };
+        if (kind !== undefined) record.kind = kind;
+        out.push(record);
       }
     } catch {
       /* skip malformed line — never let one bad record wedge the channel */

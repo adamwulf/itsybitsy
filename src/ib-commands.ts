@@ -76,6 +76,7 @@ import {
 } from "./teams";
 import {
   appendChannelMessage,
+  appendChannelSystemMessage,
   appendTeamLog,
   deleteChannelFiles,
 } from "./team-channel";
@@ -259,6 +260,10 @@ async function emitPerAgentLeaveNotice(
     for (const { team: teamName, id: departedId } of prunedTeams) {
       // Audit the departure in the team's <team>.log (§17.4). Best-effort.
       await appendTeamLog(teamName, `agent ${departedId} left (kill/merge)`).catch(() => {});
+      // Mirror the leave into the team's channel.jsonl as a SYSTEM record so
+      // the chat box renders it inline with chat, dimmed (§17.4 design update).
+      // Additive to the audit log above — both paths fire on every departure.
+      await appendChannelSystemMessage(teamName, departedId, "left the team").catch(() => {});
       // Post-prune survivors (departed id already removed from teams.json).
       const team = await getTeam(teamName);
       if (!team) continue;
@@ -303,6 +308,16 @@ async function emitCoalescedLeaveNotice(
       // for every affected team, BEFORE the empty-survivor carve-out below, so a
       // nuke that empties a team still records the event. Best-effort.
       await appendTeamLog(teamName, `${count} member${count === 1 ? "" : "s"} left (nuke)`).catch(() => {});
+      // Mirror the coalesced departure into the channel.jsonl as a SYSTEM
+      // record so the chat box renders it dimmed (§17.4). DROP the `@<team>`
+      // suffix here — the channel pane already shows which team the user is
+      // looking at, so repeating it is redundant; the audit-log line keeps the
+      // suffix because that log is consumed cross-team.
+      await appendChannelSystemMessage(
+        teamName,
+        "@system",
+        `${count} member${count === 1 ? "" : "s"} left`,
+      ).catch(() => {});
       // Post-prune survivors (all this op's departures already removed).
       const team = await getTeam(teamName);
       if (!team || team.members.length === 0) continue; // empty-survivor carve-out
@@ -2405,6 +2420,10 @@ async function fireJoinNotice(
   // Audit the lifecycle event in the team's <team>.log (§17.4). Best-effort and
   // additive — never changes the notice fan-out below.
   await appendTeamLog(name, `agent ${addedId} joined`).catch(() => {});
+  // Mirror the join into the team's channel.jsonl as a SYSTEM record so the
+  // chat box renders it inline with chat, dimmed (§17.4 design update). Additive
+  // to the audit log; both paths fire on every join.
+  await appendChannelSystemMessage(name, addedId, "joined the team").catch(() => {});
   try {
     const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })));
     const byId = new Map(agents.map((a) => [a.id, a]));
@@ -2451,6 +2470,9 @@ async function fireRemoveLeaveNotice(
   // Audit the lifecycle event in the team's <team>.log (§17.4). Best-effort and
   // additive — never changes the notice fan-out below.
   await appendTeamLog(name, `agent ${removedId} left`).catch(() => {});
+  // Mirror the leave into the team's channel.jsonl as a SYSTEM record so the
+  // chat box renders it inline with chat, dimmed (§17.4 design update).
+  await appendChannelSystemMessage(name, removedId, "left the team").catch(() => {});
   try {
     const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })));
     const byId = new Map(agents.map((a) => [a.id, a]));
@@ -2507,6 +2529,11 @@ export async function teamCreate(name: string, opts?: { createdBy?: string }): P
   }
   // Audit the creation in the team's <team>.log (§17.4). Best-effort.
   await appendTeamLog(n, `team created by ${opts?.createdBy || "user"}`).catch(() => {});
+  // Mirror the creation into the team's channel.jsonl as a SYSTEM record so
+  // the chat box renders it inline with chat, dimmed (§17.4 design update).
+  // DROP the `by <user>` suffix here — it's noise in the chat box; the full
+  // attribution stays in the audit log above.
+  await appendChannelSystemMessage(n, "@system", "team created").catch(() => {});
   return teamOk(`Created team @${n}`);
 }
 

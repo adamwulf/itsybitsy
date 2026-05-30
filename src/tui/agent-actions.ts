@@ -16,6 +16,7 @@ import {
   acknowledgeQuestion, hooksStatus, interceptHooksStatus,
   installSafetyHooks, uninstallSafetyHooks,
   installInterceptHook, uninstallInterceptHook,
+  teamCreate, teamAdd,
 } from "../ib-commands";
 import type { NewAgentOptions, IbCommandResult } from "../ib-commands";
 import { captureTmuxOutput, resizeTmuxWindow, killTmuxSession, sendTmuxEscape } from "../tmux-poller";
@@ -37,6 +38,7 @@ import type { RepoHealthReport } from "../health-check";
 import { getResolvableWarnings, resolveHealthWarnings } from "../health-check";
 import { IB_COORDINATOR_SESSION, sanitizeTmuxInput, restartSystemCoordinator, checkCoordinatorExists, getLastCoordinatorSpawnMode, discardSystemCoordinator } from "../coordinator";
 import { isValidToolList } from "../validation";
+import { listTeams } from "../teams";
 
 const SCROLL_STEP = 10;
 
@@ -565,6 +567,151 @@ export function handleRename(ctx: ActionCtx) {
         }
       });
     },
+  });
+}
+
+/**
+ * 'T' — prompt for a name and create a new team (§16). The notice loop is
+ * intentionally light: validate the name client-side (allowlist + reserved-word
+ * collision), then call `createTeam`. On success the notice quotes the
+ * @-prefixed name so the user can read it back. On failure (rare — only the
+ * already-exists race makes it past validation) the notice surfaces the error.
+ *
+ * `createdBy` is the SELECTED agent's id when one is selected (mirroring
+ * `ib team create --created-by <agent>` from a worker), else the literal
+ * `"user"` to match how the CLI's audit log records human creations.
+ */
+export function handleCreateTeam(ctx: ActionCtx) {
+  runCreateTeam(ctx, /*initialValue*/ "", /*alsoAddSelectedAgent*/ false);
+}
+
+/**
+ * 't' — add the selected agent to a team. If teams exist, open a picker with
+ * an extra "+ Create new team…" entry at the bottom. If no teams exist, skip
+ * the picker and go straight to the create-team input dialog (which will also
+ * add the selected agent to the new team on success). Coordinator-selected and
+ * no-agent states are both no-ops.
+ */
+export function handleAddAgentToTeam(ctx: ActionCtx) {
+  if (ctx.agentTree.isSystemCoordinatorSelected) return;
+  const agent = ctx.agentTree.selectedAgent;
+  if (!agent) return;
+  // Load teams asynchronously, then show the appropriate dialog. Errors here
+  // are non-fatal — fall back to the create-team flow so the user still has a
+  // path forward without first having to debug `teams.json`.
+  listTeams().then((teams) => {
+    if (teams.length === 0) {
+      runCreateTeam(ctx, "", /*alsoAddSelectedAgent*/ true);
+      return;
+    }
+    showTeamPicker(ctx, agent, teams.map((t) => t.name));
+  }).catch((err) => {
+    ctx.setNotice(`Failed to list teams: ${(err as Error).message}`);
+  });
+}
+
+/**
+ * Show a fuzzy picker for an existing team, with a trailing "+ Create new
+ * team…" entry that transitions into the same input dialog used by 'T'. On
+ * selecting an existing team, calls `addMember` and shows a notice. On
+ * selecting "+ Create new team…", opens the create dialog and joins the
+ * agent to the new team on success.
+ */
+function showTeamPicker(ctx: ActionCtx, agent: Agent, teamNames: string[]) {
+  const CREATE_LABEL = "+ Create new team…";
+  // Distinct trailing entry: the picker is fuzzy-filterable, but the create
+  // entry is always selectable (its label is unique enough to survive any
+  // partial query unless the user types `+` or `Create`, which is fine).
+  const items = [...teamNames, CREATE_LABEL];
+  ctx.showDialog({
+    type: "fuzzy",
+    prompt: `Add ${agent.id} to team:`,
+    query: "",
+    allItems: items,
+    filteredIndices: items.map((_, i) => i),
+    filteredItems: [...items],
+    selectedIndex: 0,
+    onSelect: (originalIndex: number) => {
+      ctx.closeDialog();
+      const choice = items[originalIndex];
+      if (choice === undefined) return;
+      if (choice === CREATE_LABEL) {
+        runCreateTeam(ctx, "", /*alsoAddSelectedAgent*/ true);
+        return;
+      }
+      runAddMember(ctx, agent, choice);
+    },
+  });
+}
+
+/**
+ * Shared helper for the 'T' create flow and the 't' "create new team…" branch.
+ * Opens an input dialog seeded with `initialValue` (empty for 'T'; also empty
+ * for the picker's create branch — the user has not typed a name yet). When
+ * `alsoAddSelectedAgent` is true and a non-system-coordinator agent is
+ * selected, the newly-created team is followed by `teamAdd` so the 't' flow
+ * ends with the agent already in the team.
+ *
+ * Routes through `teamCreate`/`teamAdd` from ib-commands rather than calling
+ * the bare registry helpers, so the TUI path runs the SAME audit log
+ * (`appendTeamLog`) and join-notice fan-out (`fireJoinNotice`) the CLI does
+ * (§16.4.1 / §17.4). The `IbCommandResult` returned from those helpers carries
+ * the human-readable success/error string, which we feed straight into the
+ * status-bar notice — no string duplication.
+ */
+function runCreateTeam(ctx: ActionCtx, initialValue: string, alsoAddSelectedAgent: boolean) {
+  // Capture the selected agent at dialog-open time. The user could navigate the
+  // tree before submitting; we want the join to target the agent they intended
+  // to add. If no agent is selected, the join branch is silently skipped.
+  const agentForJoin = alsoAddSelectedAgent && !ctx.agentTree.isSystemCoordinatorSelected
+    ? ctx.agentTree.selectedAgent
+    : null;
+  const createdBy = ctx.agentTree.selectedAgent?.id ?? "user";
+  ctx.showDialog({
+    type: "input",
+    prompt: "Team name:",
+    value: initialValue,
+    onSubmit: (value: string) => {
+      ctx.closeDialog();
+      const trimmed = value.trim();
+      if (!trimmed) return; // empty → no-op
+      ctx.executeAndRefresh(async () => {
+        const createResult = await teamCreate(trimmed, { createdBy });
+        if (!createResult.ok) {
+          // teamCreate already produced a user-readable message (invalid name,
+          // reserved-word collision, or already-exists). Surface it verbatim.
+          ctx.setNotice(createResult.stderr || createResult.stdout || "Create team failed");
+          return;
+        }
+        if (!agentForJoin) {
+          ctx.setNotice(createResult.stdout || "Team created");
+          return;
+        }
+        // Chain into teamAdd so the new agent triggers the join notice +
+        // reply-protocol instruction fan-out that the CLI `ib team add` runs.
+        const addResult = await teamAdd(trimmed, agentForJoin.id, ctx.repos);
+        if (addResult.ok) {
+          // Combine both successful operations into a single notice.
+          ctx.setNotice(`${createResult.stdout}; ${addResult.stdout}`);
+        } else {
+          ctx.setNotice(`${createResult.stdout}; add failed: ${addResult.stderr || addResult.stdout}`);
+        }
+      });
+    },
+  });
+}
+
+/**
+ * Add an agent to an existing team via `teamAdd` (the CLI path). Routing
+ * through teamAdd ensures the join notice fan-out + audit-log entry fire,
+ * matching `ib team add <name> <agent-id>` exactly (§16.4.1).
+ */
+function runAddMember(ctx: ActionCtx, agent: Agent, teamName: string) {
+  ctx.executeAndRefresh(async () => {
+    const result = await teamAdd(teamName, agent.id, ctx.repos);
+    ctx.setNotice(result.ok
+      ? (result.stdout || `Added ${agent.id} to @${teamName}`)
+      : (result.stderr || result.stdout || `Add to team failed`));
   });
 }
 
@@ -1152,6 +1299,8 @@ export function handleHelp(ctx: ActionCtx) {
       header("Actions"),
       row("s", "send message"),
       row("E", "cross-repo send"),
+      row("T", "create team"),
+      row("t", "add agent to team"),
       row("b", "add permission"),
       row("m", "merge"),
       row("x / !", "kill / nuke (all if none selected)"),

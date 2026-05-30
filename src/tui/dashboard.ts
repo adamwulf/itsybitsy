@@ -56,11 +56,10 @@ import {
 import {
   RightPaneComponent, colorizeDiff, colorizeLog,
   PANE_MODES, FULL_WIDTH_MODES,
-  DENIAL_FILTERS,
   cyclePaneMode, jumpToMode, triggerAsyncLoadIfNeeded,
   loadAgentLog, loadAgentPrompt,
 } from "./pane-manager";
-import type { PaneMode, DenialFilter } from "./pane-manager";
+import type { PaneMode } from "./pane-manager";
 import * as agentActions from "./agent-actions";
 import { RESET, BOLD, DIM, RED, GREEN, YELLOW, DIM_GRAY, REVERSE } from "./colors";
 import { FocusManager } from "./focus";
@@ -659,11 +658,6 @@ export class DashboardComponent implements Component {
   /** Read-only access to current pane mode (for testing) */
   get currentMode(): PaneMode {
     return this.rightPane.mode;
-  }
-
-  /** Read-only access to denial filter (for testing) */
-  get denialFilter(): DenialFilter {
-    return this.rightPane.denialFilter;
   }
 
   /** Read-only access to questions selected index (for testing) */
@@ -1982,15 +1976,6 @@ export class DashboardComponent implements Component {
       this.jumpToMode("QUESTIONS");
       this.tui?.requestRender();
     }
-    // Denials time filter
-    else if (data === "t") {
-      if (this.rightPane.mode === "DENIALS") {
-        const currentIdx = DENIAL_FILTERS.indexOf(this.rightPane.denialFilter);
-        this.rightPane.denialFilter = DENIAL_FILTERS[(currentIdx + 1) % DENIAL_FILTERS.length]!;
-        this.rightPane.updateContent();
-        this.tui?.requestRender();
-      }
-    }
     // Clear errors
     else if (data === "c") {
       if (this.rightPane.mode === "ERRORS") { this.clearErrors(); }
@@ -2039,6 +2024,9 @@ export class DashboardComponent implements Component {
     else if (data === "N") { agentActions.handleRename(this); }
     else if (data === "m") { agentActions.handleMerge(this); }
     else if (data === "s") { agentActions.handleSend(this); }
+    // Team actions: T = create a new team, t = add selected agent to a team
+    else if (data === "T") { agentActions.handleCreateTeam(this); }
+    else if (data === "t") { agentActions.handleAddAgentToTeam(this); }
     // Add permission to selected agent's settings.local.json allow list
     else if (data === "b") { agentActions.handleAddPermission(this); }
     // New agent

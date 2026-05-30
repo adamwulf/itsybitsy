@@ -2,7 +2,7 @@ import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { mkdtemp, rm } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
-import { makeAgent, makeFlatAgent, makeFlatRepoHeader } from "../test-utils";
+import { makeAgent, makeFlatAgent, makeFlatRepoHeader, makeSpawnResult } from "../test-utils";
 import type { Agent, FlatEntry, PendingQuestion } from "../agents";
 import type { RepoEntry } from "../registry";
 import type { ActionCtx } from "./agent-actions";
@@ -17,7 +17,20 @@ import {
   getDiffToolLaunching, setDiffToolLaunching,
   handleAddPermission, addPermissionToSettings, agentSettingsLocalPath,
   getCoordinatorSpawnsInFlight, clearCoordinatorSpawnsInFlight,
+  handleCreateTeam, handleAddAgentToTeam,
 } from "./agent-actions";
+import { setCoordinatorHome, resetCoordinatorHome } from "../coordinator";
+import { readTeams, createTeam, addMember } from "../teams";
+import { teamLogPath } from "../team-channel";
+import { saveRegistry } from "../registry";
+import {
+  writeAgentTransient,
+  isPidAliveCtx,
+  resetReadAgentMetaCache,
+} from "../agents";
+import { setUserConfigPath, resetUserConfigPath } from "../config";
+import { mkdir } from "fs/promises";
+import { basename } from "path";
 import { MIN_LEFT_WIDTH, MAX_LEFT_WIDTH } from "./split-pane";
 import {
   setKillPauseSpawnRunner, resetKillPauseSpawnRunner,
@@ -1098,5 +1111,246 @@ describe("handleScrollUp/Down — §17.4 channel pane scrolls alongside", () => 
     ctx.channelPane.scrollDown = () => { chScrollDown++; };
     handleScrollDown(ctx);
     expect(chScrollDown).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Teams handlers — Change 3: 'T' creates a team, 't' adds selected agent to a
+// team. Both handlers now route through `teamCreate` / `teamAdd` from
+// ib-commands so the audit log (appendTeamLog → channelPath) and the join-
+// notice fan-out (fireJoinNotice) run in the TUI path exactly as they do for
+// the CLI. The fixtures isolate HOME + coordinator home, register a real repo,
+// and plant the selected agent on disk so `teamAdd`'s resolver finds it.
+// ---------------------------------------------------------------------------
+
+/** Read the team's audit log (the `<team>.log` file appendTeamLog writes to). */
+async function readTeamAuditLog(team: string): Promise<string> {
+  try {
+    return await Bun.file(teamLogPath(team)).text();
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Plant a real agent meta.json + a live-watchdog transient under
+ * `<repoDir>/.ittybitty/agents/<id>/`. The transient makes sendMessage DEFER
+ * delivery so we don't shell out from tests; the meta is enough for
+ * readAllAgents (which teamAdd uses) to surface the id.
+ */
+async function plantTestAgent(repoDir: string, id: string): Promise<string> {
+  const agentDir = join(repoDir, ".ittybitty", "agents", id);
+  await mkdir(agentDir, { recursive: true });
+  await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id, tmux_session: `t-${id}` }));
+  await writeAgentTransient(agentDir, {
+    tmux_compacting: false,
+    tmux_rate_limited: false,
+    tmux_api_error: false,
+    has_background_tasks: false,
+    updated_at_ms: Date.now(),
+    watchdog_pid: 4242,
+  });
+  return agentDir;
+}
+
+async function setupTeamsFixture(): Promise<{
+  baseDir: string;
+  homeDir: string;
+  repoDir: string;
+  repoEntry: RepoEntry;
+  originalHome: string | undefined;
+}> {
+  const baseDir = await mkdtemp(join(tmpdir(), "agent-actions-teams-" + crypto.randomUUID() + "-"));
+  const homeDir = join(baseDir, ".itsybitsy");
+  const repoDir = join(baseDir, "repo");
+  await mkdir(homeDir, { recursive: true });
+  await mkdir(repoDir, { recursive: true });
+  const originalHome = process.env.HOME;
+  process.env.HOME = baseDir;
+  setCoordinatorHome(homeDir);
+  setUserConfigPath(join(homeDir, "config.json"));
+  const repoEntry: RepoEntry = { path: repoDir, name: basename(repoDir) };
+  await saveRegistry({ repos: [repoEntry] });
+  setSendSpawnRunner(() => makeSpawnResult());
+  isPidAliveCtx.set(() => true);
+  resetReadAgentMetaCache();
+  return { baseDir, homeDir, repoDir, repoEntry, originalHome };
+}
+
+async function teardownTeamsFixture(fx: {
+  baseDir: string;
+  originalHome: string | undefined;
+}): Promise<void> {
+  resetSendSpawnRunner();
+  resetUserConfigPath();
+  resetCoordinatorHome();
+  isPidAliveCtx.reset();
+  if (fx.originalHome === undefined) delete process.env.HOME;
+  else process.env.HOME = fx.originalHome;
+  resetReadAgentMetaCache();
+  await rm(fx.baseDir, { recursive: true, force: true });
+}
+
+describe("handleCreateTeam", () => {
+  let fx: Awaited<ReturnType<typeof setupTeamsFixture>>;
+
+  beforeEach(async () => { fx = await setupTeamsFixture(); });
+  afterEach(async () => { await teardownTeamsFixture(fx); });
+
+  test("opens an empty input dialog labeled 'Team name:'", () => {
+    const { ctx, dialogs } = makeMockCtx({ repos: [fx.repoEntry] });
+    handleCreateTeam(ctx);
+    const d = assertDialog(dialogs[0]!, "input");
+    expect(d.value).toBe("");
+    expect(d.prompt).toBe("Team name:");
+  });
+
+  test("happy path: a valid name creates a team, shows success notice, AND writes the audit-log entry the CLI would", async () => {
+    const { ctx, dialogs, notices, flushActions } = makeMockCtx({ repos: [fx.repoEntry] });
+    handleCreateTeam(ctx);
+    const d = assertDialog(dialogs[0]!, "input");
+    d.onSubmit("backend");
+    await flushActions();
+    const reg = await readTeams();
+    expect(reg.teams["backend"]).toBeDefined();
+    expect(notices.some((n) => n.includes("Created team @backend"))).toBe(true);
+    // Audit log written via teamCreate → appendTeamLog. The audit log carries
+    // "team created by …" — present here means the TUI path runs the same
+    // audit as the CLI does (Reviewer Issue A).
+    const audit = await readTeamAuditLog("backend");
+    expect(audit).toContain("team created by");
+  });
+
+  test("invalid name: surfaces teamCreate's error verbatim and does not create the team", async () => {
+    const { ctx, dialogs, notices, flushActions } = makeMockCtx({ repos: [fx.repoEntry] });
+    handleCreateTeam(ctx);
+    const d = assertDialog(dialogs[0]!, "input");
+    d.onSubmit("has spaces");
+    await flushActions();
+    const reg = await readTeams();
+    expect(Object.keys(reg.teams)).toHaveLength(0);
+    // teamCreate's error string: 'Error: invalid team name "has spaces" — …'
+    expect(notices.some((n) => n.toLowerCase().includes("invalid team name"))).toBe(true);
+  });
+
+  test("empty submission is a silent no-op (no team, no notice)", async () => {
+    const { ctx, dialogs, notices, flushActions } = makeMockCtx({ repos: [fx.repoEntry] });
+    handleCreateTeam(ctx);
+    const d = assertDialog(dialogs[0]!, "input");
+    d.onSubmit("   ");
+    await flushActions();
+    const reg = await readTeams();
+    expect(Object.keys(reg.teams)).toHaveLength(0);
+    expect(notices).toHaveLength(0);
+  });
+});
+
+describe("handleAddAgentToTeam", () => {
+  let fx: Awaited<ReturnType<typeof setupTeamsFixture>>;
+
+  beforeEach(async () => { fx = await setupTeamsFixture(); });
+  afterEach(async () => { await teardownTeamsFixture(fx); });
+
+  test("no agent selected: does nothing (no dialog)", async () => {
+    const { ctx, dialogs } = makeMockCtx({ agent: null, repos: [fx.repoEntry] });
+    handleAddAgentToTeam(ctx);
+    // listTeams resolves on a microtask — wait a tick.
+    await Bun.sleep(5);
+    expect(dialogs).toHaveLength(0);
+  });
+
+  test("happy path: picking an existing team adds the agent, shows a notice, AND fires the audit-log join entry", async () => {
+    await createTeam("backend", "user", 1700000000);
+    await plantTestAgent(fx.repoDir, "agent-aaa");
+    const agent = makeAgent({ id: "agent-aaa", repoPath: fx.repoDir });
+    const { ctx, dialogs, notices, flushActions } = makeMockCtx({ agent, repos: [fx.repoEntry] });
+    handleAddAgentToTeam(ctx);
+    await Bun.sleep(10);
+    const d = assertDialog(dialogs[0]!, "fuzzy");
+    // The "+ Create new team…" entry must be the last item.
+    expect(d.allItems[d.allItems.length - 1]).toContain("Create new team");
+    // The first item is the existing team.
+    expect(d.allItems[0]).toBe("backend");
+    d.onSelect(0);
+    await flushActions();
+    const reg = await readTeams();
+    expect(reg.teams["backend"]!.members).toContain("agent-aaa");
+    expect(notices.some((n) => n.includes("Added agent-aaa to @backend"))).toBe(true);
+    // teamAdd → fireJoinNotice → appendTeamLog("agent agent-aaa joined").
+    // This is the proof the TUI path runs the SAME audit + notice helpers as
+    // the CLI (Reviewer Issue A).
+    const audit = await readTeamAuditLog("backend");
+    expect(audit).toContain("agent-aaa joined");
+  });
+
+  test("empty teams: skips the picker and opens the create-team input directly", async () => {
+    await plantTestAgent(fx.repoDir, "agent-bbb");
+    const agent = makeAgent({ id: "agent-bbb", repoPath: fx.repoDir });
+    const { ctx, dialogs } = makeMockCtx({ agent, repos: [fx.repoEntry] });
+    handleAddAgentToTeam(ctx);
+    await Bun.sleep(10);
+    // No fuzzy picker — went straight to the input.
+    const d = assertDialog(dialogs[0]!, "input");
+    expect(d.prompt).toBe("Team name:");
+    expect(d.value).toBe("");
+  });
+
+  test("empty teams: submitting the create input both creates the team AND adds the selected agent (and fires both audit entries)", async () => {
+    await plantTestAgent(fx.repoDir, "agent-ccc");
+    const agent = makeAgent({ id: "agent-ccc", repoPath: fx.repoDir });
+    const { ctx, dialogs, notices, flushActions } = makeMockCtx({ agent, repos: [fx.repoEntry] });
+    handleAddAgentToTeam(ctx);
+    await Bun.sleep(10);
+    const d = assertDialog(dialogs[0]!, "input");
+    d.onSubmit("frontend");
+    await flushActions();
+    const reg = await readTeams();
+    expect(reg.teams["frontend"]).toBeDefined();
+    expect(reg.teams["frontend"]!.members).toContain("agent-ccc");
+    expect(notices.some((n) => n.includes("Created team @frontend") && n.includes("agent-ccc"))).toBe(true);
+    // BOTH the create-audit and the join-audit must be present.
+    const audit = await readTeamAuditLog("frontend");
+    expect(audit).toContain("team created by");
+    expect(audit).toContain("agent-ccc joined");
+  });
+
+  test("picker '+ Create new team…' branch: also creates AND adds the selected agent", async () => {
+    await createTeam("existing", "user", 1700000000);
+    await plantTestAgent(fx.repoDir, "agent-ddd");
+    const agent = makeAgent({ id: "agent-ddd", repoPath: fx.repoDir });
+    const { ctx, dialogs, notices, flushActions } = makeMockCtx({ agent, repos: [fx.repoEntry] });
+    handleAddAgentToTeam(ctx);
+    await Bun.sleep(10);
+    const picker = assertDialog(dialogs[0]!, "fuzzy");
+    // Select the LAST entry — "+ Create new team…"
+    const createIdx = picker.allItems.length - 1;
+    expect(picker.allItems[createIdx]).toContain("Create new team");
+    picker.onSelect(createIdx);
+    // Picker transitions to an input dialog for the new team name.
+    const input = assertDialog(dialogs[1]!, "input");
+    expect(input.prompt).toBe("Team name:");
+    input.onSubmit("brand-new");
+    await flushActions();
+    const reg = await readTeams();
+    expect(reg.teams["brand-new"]).toBeDefined();
+    expect(reg.teams["brand-new"]!.members).toContain("agent-ddd");
+    expect(notices.some((n) => n.includes("Created team @brand-new") && n.includes("agent-ddd"))).toBe(true);
+  });
+
+  test("already-a-member: picking the same team reports it without re-adding", async () => {
+    await createTeam("backend", "user", 1700000000);
+    await addMember("backend", "agent-eee");
+    await plantTestAgent(fx.repoDir, "agent-eee");
+    const agent = makeAgent({ id: "agent-eee", repoPath: fx.repoDir });
+    const { ctx, dialogs, notices, flushActions } = makeMockCtx({ agent, repos: [fx.repoEntry] });
+    handleAddAgentToTeam(ctx);
+    await Bun.sleep(10);
+    const d = assertDialog(dialogs[0]!, "fuzzy");
+    d.onSelect(0);
+    await flushActions();
+    const reg = await readTeams();
+    // Roster is unchanged.
+    expect(reg.teams["backend"]!.members.filter((m) => m === "agent-eee")).toHaveLength(1);
+    expect(notices.some((n) => n.includes("already in @backend"))).toBe(true);
   });
 });

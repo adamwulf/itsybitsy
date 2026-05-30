@@ -27,10 +27,6 @@ export const FULL_WIDTH_MODES: Set<PaneMode> = new Set(["DENIALS", "ERRORS", "DI
 export const TOP_ANCHORED_MODES: Set<PaneMode> = new Set(["DIFF", "ERRORS", "STATUS", "QUESTIONS", "REPO"]);
 const AGENT_SPECIFIC_MODES: Set<PaneMode> = new Set(["AGENT LOG", "INITIAL PROMPT", "DENIALS", "DIFF", "STATUS"]);
 
-// Denials time filter levels
-export const DENIAL_FILTERS = ["all", "24h", "7d"] as const;
-export type DenialFilter = (typeof DENIAL_FILTERS)[number];
-
 /** Escape a string for use in a RegExp */
 function escapeForRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -136,7 +132,6 @@ export class RightPaneComponent implements Component {
   promptContent: string[] | null = null;
   denialsContent: DenialEntry[] | null = null;
   denialsLoading = false;
-  denialFilter: DenialFilter = "all";
   errors: string[] = [];
   orphanedTmuxSessions: string[] = [];
   healthReport: RepoHealthReport | undefined = undefined;
@@ -239,11 +234,10 @@ export class RightPaneComponent implements Component {
         if (!this.agent) { this.content = [`${DIM}No agent selected${RESET}`]; }
         else if (this.denialsLoading || !this.denialsContent) { this.content = [`${DIM}Loading denials...${RESET}`]; }
         else {
-          const filtered = this.filterDenials(this.denialsContent);
-          const filterLabel = this.denialFilter === "all" ? "all time" : `last ${this.denialFilter}`;
-          this.content = [`${DIM}Filter: ${filterLabel} (t to cycle)  ${filtered.length} denial(s)${RESET}`];
-          if (filtered.length === 0) { this.content.push(`${DIM}No denials found${RESET}`); }
-          else { for (const d of filtered) {
+          const denials = this.denialsContent;
+          this.content = [`${DIM}${denials.length} denial(s)${RESET}`];
+          if (denials.length === 0) { this.content.push(`${DIM}No denials found${RESET}`); }
+          else { for (const d of denials) {
             const stripped = d.line.replace(/^\[.*?\] \[PreToolUse\] /, "");
             this.content.push(`${DIM}[${d.timestamp}]${RESET} ${stripped}`);
           } }
@@ -367,13 +361,6 @@ export class RightPaneComponent implements Component {
         break;
       }
     }
-  }
-
-  private filterDenials(denials: DenialEntry[]): DenialEntry[] {
-    if (this.denialFilter === "all") return denials;
-    const now = Math.floor(Date.now() / 1000);
-    const cutoff = this.denialFilter === "24h" ? now - 86400 : now - 604800;
-    return denials.filter((d) => d.epoch >= cutoff);
   }
 
   /**

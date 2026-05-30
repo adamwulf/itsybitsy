@@ -11,7 +11,7 @@ import { TeamsTreeComponent } from "./teams-tree";
 import { InfoPanelComponent } from "./info-panel";
 import type { TmuxPaneComponent } from "./dashboard";
 import type { InputFieldComponent } from "./input-field";
-import { buildFocusSeparator } from "./focus";
+import { buildFocusSeparator, buildTabbedFocusSeparator } from "./focus";
 import type { FocusTarget } from "./focus";
 
 export const SIDEBAR_WIDTH = 60;
@@ -149,14 +149,20 @@ export class SidebarComponent implements Component {
       }
     }
 
-    // Tree section header + tree (whichever tree is active for this focus)
+    // Tree section header: a side-by-side Agents/Teams tab line. The active
+    // tab is highlighted (REVERSE+BOLD); the inactive tab is DIM. Only ONE
+    // tree (the active one) renders below — the header reflects which is
+    // visible AND which has focus.
+    const tabs = [
+      { label: "Agents", focused: this.focusTarget === "agent-tree" },
+      { label: "Teams", focused: this.focusTarget === "teams-tree" },
+    ];
+    lines.push(buildTabbedFocusSeparator(tabs, w));
     if (showTeams) {
-      lines.push(buildFocusSeparator("Teams", w, true));
       this.teamsTree.maxHeight = treeHeight;
       const treeLines = this.teamsTree.render(w);
       lines.push(...treeLines);
     } else {
-      lines.push(buildFocusSeparator("Agents", w, this.focusTarget === "agent-tree"));
       this.agentTree.maxHeight = treeHeight;
       const treeLines = this.agentTree.render(w);
       lines.push(...treeLines);

@@ -135,3 +135,60 @@ export function buildFocusSeparator(
     "",
   );
 }
+
+/**
+ * Render a tabbed section separator line with multiple labels side-by-side.
+ *
+ * Layout: 4-dash left pad, then each tab as ` label ` separated by a single
+ * dash, with remaining dashes filling to `width`.
+ *
+ * - Focused tab: ` label ` in REVERSE+BOLD (mirrors buildFocusSeparator's
+ *   focused branch).
+ * - Unfocused tab: ` label ` in DIM.
+ * - Dashes (both pads and separators): DIM_GRAY.
+ * - When NO tab is focused: the entire line is wrapped in DIM to match the
+ *   unfocused look of buildFocusSeparator (so the header doesn't visually
+ *   dominate when focus is elsewhere).
+ */
+export function buildTabbedFocusSeparator(
+  tabs: ReadonlyArray<{ label: string; focused: boolean }>,
+  width: number,
+): string {
+  const anyFocused = tabs.some((t) => t.focused);
+  const leftPad = 4;
+  // Each tab string takes ` label `. Between tabs we render a single dash.
+  // Compute consumed width: leftPad + sum(tab widths) + (tabs.length-1) separators.
+  let consumed = leftPad;
+  for (let i = 0; i < tabs.length; i++) {
+    consumed += tabs[i]!.label.length + 2; // ` label `
+    if (i < tabs.length - 1) consumed += 1; // separator dash
+  }
+  const rightPad = Math.max(1, width - consumed);
+
+  // Build dashes. Dashes are DIM_GRAY in both modes; the outer DIM wrap (when
+  // no tab is focused) is applied to the entire line for parity with the
+  // unfocused buildFocusSeparator look.
+  const dashSegment = (n: number) => `${DIM_GRAY}${"─".repeat(n)}${RESET}`;
+
+  const parts: string[] = [];
+  parts.push(dashSegment(leftPad));
+  for (let i = 0; i < tabs.length; i++) {
+    const tab = tabs[i]!;
+    const labelStr = ` ${tab.label} `;
+    if (tab.focused) {
+      parts.push(`${REVERSE}${BOLD}${labelStr}${RESET}`);
+    } else {
+      parts.push(`${DIM}${labelStr}${RESET}`);
+    }
+    if (i < tabs.length - 1) {
+      parts.push(dashSegment(1));
+    }
+  }
+  parts.push(dashSegment(rightPad));
+
+  const line = parts.join("");
+  if (!anyFocused) {
+    return truncateToWidth(`${DIM}${line}${RESET}`, width, "");
+  }
+  return truncateToWidth(line, width, "");
+}

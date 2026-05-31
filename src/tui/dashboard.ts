@@ -148,6 +148,22 @@ export class TmuxPaneComponent implements Component {
     if (!this.trimInputSeparator || !this.rawOutput) return;
 
     const wrapped = wrapLines(this.rawOutput, width);
+
+    // Codex emits full-width ─ section dividers between output blocks, so
+    // findLastTwoSeparators (designed for Claude's input chrome) routinely
+    // matches content dividers instead of the input box. For codex agents,
+    // prefer the codex-specific detector — it anchors on the status bar and
+    // the › prompt, which together unambiguously identify the input chrome.
+    if (isCodexAgent(this.agent)) {
+      const codexChrome = findCodexInputChrome(wrapped);
+      if (codexChrome) {
+        this.statusLines = wrapped.slice(codexChrome.statusIndex, codexChrome.endIndex + 1).map(
+          (line) => truncateToWidth(line, width, "")
+        );
+      }
+      return;
+    }
+
     const { lowerIndex } = findLastTwoSeparators(wrapped);
     // Extract lines after the lower separator
     if (lowerIndex >= 0 && lowerIndex < wrapped.length - 1) {
@@ -158,14 +174,6 @@ export class TmuxPaneComponent implements Component {
       while (this.statusLines.length > 0 && this.statusLines[this.statusLines.length - 1]!.trim() === "") {
         this.statusLines.pop();
       }
-      return;
-    }
-
-    const codexChrome = isCodexAgent(this.agent) ? findCodexInputChrome(wrapped) : null;
-    if (codexChrome) {
-      this.statusLines = wrapped.slice(codexChrome.statusIndex, codexChrome.endIndex + 1).map(
-        (line) => truncateToWidth(line, width, "")
-      );
     }
   }
 
@@ -241,19 +249,22 @@ export class TmuxPaneComponent implements Component {
     // Wrap lines to pane width
     let wrapped = wrapLines(this.rawOutput, width);
 
-    // When showing our own input field, trim Claude's native input area.
-    // Claude's input area has two separator lines made of ─ characters.
-    // Users can paste ─ lines into chat, so earlier separators may be content.
-    // Search from the bottom to find the last two ─ separators — those are
-    // Claude's UI chrome. Trim at the first of the two (the upper one).
+    // When showing our own input field, trim the CLI's native input area.
+    // Claude's input area has two separator lines made of ─ characters, so we
+    // find the last two ─ separators and slice at the upper one. Codex doesn't
+    // use that double-separator chrome — it emits full-width ─ section
+    // dividers between output blocks, so the Claude detector would mis-match
+    // there. For codex, anchor on the › prompt + status bar instead.
     if (this.trimInputSeparator) {
-      const { upperIndex } = findLastTwoSeparators(wrapped);
-      if (upperIndex >= 0 && upperIndex < wrapped.length) {
-        wrapped = wrapped.slice(0, upperIndex);
-      } else {
-        const codexChrome = isCodexAgent(this.agent) ? findCodexInputChrome(wrapped) : null;
+      if (isCodexAgent(this.agent)) {
+        const codexChrome = findCodexInputChrome(wrapped);
         if (codexChrome) {
           wrapped = wrapped.slice(0, codexChrome.promptIndex);
+        }
+      } else {
+        const { upperIndex } = findLastTwoSeparators(wrapped);
+        if (upperIndex >= 0 && upperIndex < wrapped.length) {
+          wrapped = wrapped.slice(0, upperIndex);
         }
       }
     }

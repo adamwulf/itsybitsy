@@ -227,6 +227,45 @@ describe("parseCodexState", () => {
   });
 });
 
+describe("parseCodexState — real captured snapshots", () => {
+  // Real `S`-key snapshots from a codex agent. Each one ended up exposing
+  // the codex input chrome (`›` + status bar) at the bottom of the dashboard
+  // pane — the trim logic was tripping on codex's section dividers. These
+  // also exercise the parse-state path with rich, real content.
+
+  async function readFixture(name: string): Promise<string> {
+    const text = await Bun.file(
+      new URL(`../src/fixtures/${name}`, import.meta.url),
+    ).text();
+    // Snapshot files start with a 2-line header followed by a blank line.
+    const idx = text.indexOf("\n\n");
+    return idx >= 0 ? text.slice(idx + 2) : text;
+  }
+
+  test("codex-snapshot-input-fail-1 (running → waiting fallback) parses as waiting", async () => {
+    // Mid-task capture: tail shows "Working (10s • esc to interrupt)" above
+    // the input box. parseCodexState has no running-state detector yet, so a
+    // running codex tail still surfaces the trailing status bar as `waiting`.
+    const r = parseCodexState(await readFixture("codex-snapshot-input-fail-1.txt"));
+    expect(r.state).toBe("waiting");
+  });
+
+  test("codex-snapshot-input-fail-2 (WAITING marker before chrome) → waiting", async () => {
+    const r = parseCodexState(await readFixture("codex-snapshot-input-fail-2.txt"));
+    expect(r.state).toBe("waiting");
+  });
+
+  test("codex-snapshot-input-fail-3 (mid-tool 'Working' tail) → waiting", async () => {
+    const r = parseCodexState(await readFixture("codex-snapshot-input-fail-3.txt"));
+    expect(r.state).toBe("waiting");
+  });
+
+  test("codex-snapshot-input-fail-4 ('I HAVE COMPLETED THE GOAL') → complete", async () => {
+    const r = parseCodexState(await readFixture("codex-snapshot-input-fail-4.txt"));
+    expect(r.state).toBe("complete");
+  });
+});
+
 describe("parseState codex dispatch", () => {
   test("real codex snapshot routed through parseState → waiting (not unknown)", () => {
     // This is the bug the task is fixing: the real captured snapshot was previously

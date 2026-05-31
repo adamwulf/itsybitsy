@@ -1344,6 +1344,7 @@ export function handleHelp(ctx: ActionCtx) {
     lines: [
       header("Navigation"),
       row("j / k / ↑↓", "select agent"),
+      row("0 / 1", "switch sidebar (Teams / Agents)"),
       row("@", "fuzzy jump to agent/repo"),
       row("/", "fuzzy mode picker"),
       "",

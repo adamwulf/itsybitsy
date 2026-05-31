@@ -1893,6 +1893,20 @@ export class DashboardComponent implements Component {
       return;
     }
 
+    // §17.1: '0' / '1' switch the sidebar tree between Teams and Agents.
+    // teams-tree is no longer in FOCUS_ORDER, so these are the canonical way
+    // to reach the Teams panel. Gated by the dialog/input-field returns above.
+    if (data === "0") {
+      this.focusManager.setFocus("teams-tree");
+      this.tui?.requestRender();
+      return;
+    }
+    if (data === "1") {
+      this.focusManager.setFocus("agent-tree");
+      this.tui?.requestRender();
+      return;
+    }
+
     // Info panel: Default Agent Type cycle/clear when the row is the focused
     // sub-field. selectedRepoHeader != null implies neither agent nor
     // system-coordinator is selected (discriminated union in agent-tree).

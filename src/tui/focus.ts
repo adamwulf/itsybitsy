@@ -22,13 +22,11 @@ export type FocusTarget =
 export type SubFocus = "pane" | "input" | "send";
 
 /** Ordered list of focus targets for cycling (normal mode).
- *  `teams-tree` sits between `agent-tree` and `info` (§17.1) and is ALWAYS an
- *  active stop in normal mode — it is intentionally NOT in `skipTargets`
- *  (toggling into an empty teams registry is still valid; the Teams tree renders
- *  an empty-state line). It is omitted from `COORDINATOR_FOCUS_ORDER` (§17.1). */
+ *  `teams-tree` is NOT in the cycle (§17.1) — it is reachable only via the
+ *  dedicated `0` key (and `1` returns focus to `agent-tree`). `setFocus("teams-tree")`
+ *  still works, but `cycle()` never lands on it. */
 const FOCUS_ORDER: readonly FocusTarget[] = [
   "agent-tree",
-  "teams-tree",
   "info",
   "active-agent",
   "right-pane",

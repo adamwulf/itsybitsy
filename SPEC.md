@@ -2551,16 +2551,28 @@ Like Teams itself (§16), this is a **TypeScript-only** feature with no bash ref
 
 The sidebar's tree region (the top section that `SidebarComponent.renderNormalLayout` fills with the `Agents` separator + `AgentTreeComponent`, `src/tui/sidebar.ts`) is **shared** between the existing Agents tree and a new **Teams tree**. They are **two ordered focus stops occupying the same screen region** — only the focused one renders. Agents is the default resting view (§13.6 keeps `agent-tree` as the initial focus). This realizes the settled design: the Agents panel *upgrades* into a Teams view that **replaces** it when selected, rather than adding a third always-visible sidebar section.
 
-**New `FocusTarget`.** Add `"teams-tree"` to the `FocusTarget` union (`src/tui/focus.ts`), positioned **between `"agent-tree"` and `"info"`** in `FOCUS_ORDER`:
+**New `FocusTarget`.** Add `"teams-tree"` to the `FocusTarget` union (`src/tui/focus.ts`). `teams-tree` is **NOT** in `FOCUS_ORDER` — it is reached via dedicated keys, not by Tab cycling.
 
 ```
-agent-tree → teams-tree → info → active-agent → right-pane → repo-coordinator
+FOCUS_ORDER:  agent-tree → info → active-agent → right-pane → repo-coordinator
 ```
 
-Concretely, `FOCUS_ORDER` becomes `["agent-tree", "teams-tree", "info", "active-agent", "right-pane", "repo-coordinator"]`. Tab from Agents lands on Teams; Tab from Teams lands on Info; Shift+Tab from Info lands on Teams; Shift+Tab from Teams lands on Agents. The existing `cycle(+1/-1)` skip-set machinery already handles wrap-around and skipping — no change to `cycle()` itself is required beyond the new entry.
+Concretely, `FOCUS_ORDER` becomes `["agent-tree", "info", "active-agent", "right-pane", "repo-coordinator"]` (same as before §17, with `repo-coordinator` still in `skipTargets` by default). `teams-tree` is a valid `FocusTarget` — `setFocus("teams-tree")` works — but `cycle(+1/-1)` never lands on it.
 
-- **Coordinator mode.** `COORDINATOR_FOCUS_ORDER` (`["agent-tree", "info", "coordinator"]`) is the restricted order used when the system coordinator is selected (§12.1.4). [^needs review] The Teams panel is **not** added to `COORDINATOR_FOCUS_ORDER` in v1 — when the system coordinator is selected the main area is the coordinator tmux at full width and there is no room for a team-channel view. Recommended default: **omit `teams-tree` from coordinator mode** (the user Tabs out of coordinator-select first, then into Teams). Flagged so it is a conscious scope line, not an omission.
-- **Skip behavior.** Unlike `repo-coordinator` (which lives in `skipTargets` by default and only participates when the right pane is in REPO mode), `teams-tree` is **always** an active focus stop in normal mode — it is never in `skipTargets`. Toggling into an empty teams registry is still valid (the Teams tree renders an empty-state line, §17.2), so there is no condition under which it should be skipped.
+**Switching to/from the Teams panel — the `0` / `1` keys.** Two dedicated top-level keys move focus into and out of the Teams panel:
+
+- **`0`** → `focusManager.setFocus("teams-tree")` (the sidebar tree region renders the Teams tree).
+- **`1`** → `focusManager.setFocus("agent-tree")` (the sidebar tree region renders the Agents tree).
+
+These are top-level dashboard keys, mirroring the gating of the existing Tab handler:
+
+- **Suppressed when a dialog is open** (the `handleDialogInput` early-return at the top of `handleInput` already covers this).
+- **Suppressed when an input sub-focus is active** (e.g. `active-agent` / `coordinator` / `repo-coordinator` in `subFocus === "input"`). Those panels' sub-focus blocks return before reaching the top-level key handlers, so `0` / `1` typed into the input field are captured as text, not as focus toggles. The `'0'`/`'1'` handlers live at the same scope as the Tab handler — right after the Tab/Shift-Tab block in `handleInput` — and rely on the same early-return gating.
+
+The toggle preserves each panel's selection (§17.1 independent-selection invariant): pressing `0` switches focus only, the Agents tree's selection is untouched, and pressing `1` switches focus back without disturbing the Teams tree's selection.
+
+- **Coordinator mode.** `COORDINATOR_FOCUS_ORDER` (`["agent-tree", "info", "coordinator"]`) is the restricted Tab order used when the system coordinator is selected (§12.1.4). Because `teams-tree` is no longer in `FOCUS_ORDER` at all, the historical "omit `teams-tree` from coordinator mode" carveout is moot — `cycle()` would never have landed there anyway. The `0` / `1` keys are still active in coordinator mode (the system coordinator's sidebar shows the tree + info panel), so the user can still toggle to Teams from a coordinator selection.
+- **Skip behavior.** `teams-tree` is not in `FOCUS_ORDER`, so it is also not in `skipTargets` (there is nothing to skip). Toggling into an empty teams registry remains valid — the Teams tree renders its empty-state line (§17.2).
 
 **Independent selection — the core invariant.** Toggling focus between Agents and Teams **must not change either panel's selection.** The two panels hold **independent selection state**: the Agents tree keeps its `AgentTreeComponent` selection; the Teams tree owns its own selection (a parallel component, §17.2). `FocusManager.cycle()`/`setFocus()` only move the *focus pointer* — they never call `selectAgentById`/`moveSelection`/`moveToRepo` on either tree. This is already how focus works for every other panel; §17 only requires that the Teams toggle preserve it symmetrically.
 

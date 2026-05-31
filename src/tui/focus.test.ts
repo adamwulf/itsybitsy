@@ -1,6 +1,5 @@
 import { test, expect, describe } from "bun:test";
 import { FocusManager, buildFocusSeparator, buildTabbedFocusSeparator } from "./focus";
-import type { FocusTarget, SubFocus } from "./focus";
 import { RESET, BOLD, DIM, DIM_GRAY, REVERSE } from "./colors";
 
 describe("FocusManager", () => {
@@ -15,10 +14,8 @@ describe("FocusManager", () => {
   });
 
   test("cycle(+1) moves forward through focus order", () => {
-    // §17.1: teams-tree sits between agent-tree and info.
+    // §17.1: teams-tree is NOT in the cycle — reachable only via the '0' key.
     const fm = new FocusManager("agent-tree");
-    fm.cycle(1);
-    expect(fm.current()).toBe("teams-tree");
     fm.cycle(1);
     expect(fm.current()).toBe("info");
     fm.cycle(1);
@@ -34,14 +31,12 @@ describe("FocusManager", () => {
   });
 
   test("cycle(-1) moves backward through focus order", () => {
-    // §17.1: teams-tree sits between agent-tree and info.
+    // §17.1: teams-tree is NOT in the cycle — reachable only via the '0' key.
     const fm = new FocusManager("right-pane");
     fm.cycle(-1);
     expect(fm.current()).toBe("active-agent");
     fm.cycle(-1);
     expect(fm.current()).toBe("info");
-    fm.cycle(-1);
-    expect(fm.current()).toBe("teams-tree");
     fm.cycle(-1);
     expect(fm.current()).toBe("agent-tree");
   });
@@ -54,7 +49,6 @@ describe("FocusManager", () => {
 
   test("full forward cycle returns to start", () => {
     const fm = new FocusManager("agent-tree");
-    fm.cycle(1); // teams-tree
     fm.cycle(1); // info
     fm.cycle(1); // active-agent
     fm.cycle(1); // right-pane
@@ -67,7 +61,6 @@ describe("FocusManager", () => {
     fm.cycle(-1); // right-pane (repo-coordinator skipped)
     fm.cycle(-1); // active-agent
     fm.cycle(-1); // info
-    fm.cycle(-1); // teams-tree
     fm.cycle(-1); // agent-tree
     expect(fm.current()).toBe("agent-tree");
   });
@@ -96,8 +89,9 @@ describe("FocusManager", () => {
   test("multiple rapid cycles are stable", () => {
     const fm = new FocusManager("agent-tree");
     for (let i = 0; i < 100; i++) fm.cycle(1);
-    // 5 active stops (agent-tree, teams-tree, info, active-agent, right-pane;
-    // repo-coordinator skipped). 100 % 5 = 0, so back at index 0 = agent-tree.
+    // 4 active stops (agent-tree, info, active-agent, right-pane;
+    // repo-coordinator skipped, teams-tree no longer in cycle).
+    // 100 % 4 = 0, so back at index 0 = agent-tree.
     expect(fm.current()).toBe("agent-tree");
   });
 
@@ -144,17 +138,43 @@ describe("FocusManager", () => {
     expect(FocusManager.panelHasInput("teams-tree")).toBe(false);
   });
 
-  test("teams-tree is an active stop between agent-tree and info (§17.1)", () => {
+  test("teams-tree is NOT in cycle but is reachable via setFocus (§17.1)", () => {
+    // §17.1: teams-tree was removed from FOCUS_ORDER; the '0' key (handled at
+    // the dashboard level) is the only entry point. setFocus must still work.
     const fm = new FocusManager();
-    // Never in skipTargets — always participates in normal-mode cycling.
-    expect(fm.skipTargets.has("teams-tree" as FocusTarget)).toBe(false);
     fm.setFocus("teams-tree");
     expect(fm.current()).toBe("teams-tree");
-    fm.cycle(1);
-    expect(fm.current()).toBe("info");
+  });
+
+  test("cycle() never lands on teams-tree (§17.1)", () => {
+    const fm = new FocusManager("agent-tree");
+    fm.skipTargets.delete("repo-coordinator");
+    // Cycle many times in both directions and confirm teams-tree is never reached.
+    for (let i = 0; i < 50; i++) {
+      fm.cycle(1);
+      expect(fm.current()).not.toBe("teams-tree");
+    }
+    for (let i = 0; i < 50; i++) {
+      fm.cycle(-1);
+      expect(fm.current()).not.toBe("teams-tree");
+    }
+    // And starting from teams-tree (set via setFocus), a forward cycle must
+    // also leave it — cycle() resolves an unknown-position to index 0 and
+    // advances from there, landing on the first non-skipped FOCUS_ORDER entry.
+    fm.skipTargets.add("repo-coordinator");
     fm.setFocus("teams-tree");
-    fm.cycle(-1);
+    fm.cycle(1);
+    expect(fm.current()).not.toBe("teams-tree");
+  });
+
+  test("teams-tree remains reachable via setFocus() (§17.1)", () => {
+    const fm = new FocusManager("agent-tree");
+    fm.setFocus("teams-tree");
+    expect(fm.current()).toBe("teams-tree");
+    fm.setFocus("agent-tree");
     expect(fm.current()).toBe("agent-tree");
+    fm.setFocus("teams-tree");
+    expect(fm.current()).toBe("teams-tree");
   });
 
   test("repo-coordinator is skipped by default", () => {
@@ -173,8 +193,6 @@ describe("FocusManager", () => {
   test("cycle forward through all targets including repo-coordinator", () => {
     const fm = new FocusManager("agent-tree");
     fm.skipTargets.delete("repo-coordinator");
-    fm.cycle(1); // teams-tree
-    expect(fm.current()).toBe("teams-tree");
     fm.cycle(1); // info
     expect(fm.current()).toBe("info");
     fm.cycle(1); // active-agent
@@ -198,8 +216,6 @@ describe("FocusManager", () => {
     expect(fm.current()).toBe("active-agent");
     fm.cycle(-1); // info
     expect(fm.current()).toBe("info");
-    fm.cycle(-1); // teams-tree
-    expect(fm.current()).toBe("teams-tree");
     fm.cycle(-1); // agent-tree (wrap)
     expect(fm.current()).toBe("agent-tree");
   });
@@ -207,16 +223,14 @@ describe("FocusManager", () => {
   test("skipTargets can skip multiple targets", () => {
     const fm = new FocusManager("agent-tree");
     fm.skipTargets.delete("repo-coordinator");
-    fm.skipTargets.add("teams-tree");
     fm.skipTargets.add("info");
     fm.skipTargets.add("active-agent");
-    fm.cycle(1); // skips teams-tree, info, and active-agent
+    fm.cycle(1); // skips info and active-agent
     expect(fm.current()).toBe("right-pane");
   });
 
   test("cycle does not infinite loop when all targets are skipped", () => {
     const fm = new FocusManager("agent-tree");
-    fm.skipTargets.add("teams-tree");
     fm.skipTargets.add("info");
     fm.skipTargets.add("active-agent");
     fm.skipTargets.add("right-pane");

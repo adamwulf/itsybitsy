@@ -460,6 +460,340 @@ export async function resolveTarget(
   return { agent: globalResult.match, isSystemCoordinator: false };
 }
 
+/**
+ * True when `args` (excluding the command itself at index 0) contains a help flag.
+ * Used at the top of each command case block to print a per-command usage string
+ * and return, before the command's normal argument parsing runs.
+ */
+export function hasHelpFlag(args: string[]): boolean {
+  return args.slice(1).some((a) => a === "--help" || a === "-h");
+}
+
+/**
+ * Per-command usage strings. Looked up by the command keyword as it appears
+ * after `ib` (e.g. "new-agent", "send", "team add"). Each entry is the full
+ * text to print when the user passes --help / -h.
+ *
+ * Sub-grouped commands (team, hooks, config) have both an outer entry (e.g.
+ * "team") and per-subcommand entries (e.g. "team add"). The dispatcher in
+ * main() picks the most specific available match.
+ */
+const COMMAND_HELP: Record<string, string> = {
+  add:
+    "Usage: ib add [path]\n" +
+    "  Register a repo. Defaults to the current working directory.",
+  remove:
+    "Usage: ib remove <path|name>\n" +
+    "  Unregister a previously added repo by absolute path or display name.",
+  list:
+    "Usage: ib list [--manager <id>] [--json] [--verbose|-v]\n" +
+    "  Aliases: ls\n" +
+    "  List repos and their agents.\n" +
+    "  --manager <id>  Only show children of the given manager agent\n" +
+    "  --json          Emit machine-readable JSON\n" +
+    "  --verbose, -v   Print warnings about unreadable agent dirs",
+  state:
+    "Usage: ib state [--manager <id>] [--json] [--verbose|-v] [--cleanup [--dry-run]]\n" +
+    "  List agents with PID/liveness diagnostics and orphan detection.\n" +
+    "  --manager <id>  Only show children of the given manager agent\n" +
+    "  --json          Emit machine-readable JSON\n" +
+    "  --verbose, -v   Print warnings about unreadable agent dirs\n" +
+    "  --cleanup       Kill orphan tmux sessions and processes\n" +
+    "  --dry-run       Only valid with --cleanup; print what would be killed",
+  watch:
+    "Usage: ib watch\n" +
+    "  Launch the interactive TUI dashboard. Requires tmux.",
+  watchdog:
+    "Usage: ib watchdog <agent-id>\n" +
+    "  Run the per-agent watchdog loop for an agent. Internal — used by the\n" +
+    "  agent lifecycle; not normally invoked by users.",
+  agents:
+    "Usage: ib agents [--verbose|-v]\n" +
+    "  Aliases: tree\n" +
+    "  List every agent across all registered repos in a tree view with state,\n" +
+    "  age, model, and prompt summary.\n" +
+    "  --verbose, -v   Print warnings about unreadable agent dirs",
+  look:
+    "Usage: ib look <agent-id> [--lines N] [--all] [--follow]\n" +
+    "  Show an agent's live tmux pane contents.\n" +
+    "  --lines N       Capture the last N lines (default 100)\n" +
+    "  --all           Capture up to 10000 lines\n" +
+    "  --follow        Attach to the agent's tmux session (Ctrl+b d to detach)",
+  status:
+    "Usage: ib status [<agent-id>]\n" +
+    "  Show an agent's git log and working-tree status. With no id, infers the\n" +
+    "  agent from the current working directory.",
+  diff:
+    "Usage: ib diff [<agent-id>] [--stat]\n" +
+    "  Show an agent's git diff against its parent branch. With no id, infers\n" +
+    "  the agent from the current working directory; if there is no agent\n" +
+    "  context, diffs the current branch against its merge-base.\n" +
+    "  --stat          Show a diffstat summary instead of the full diff",
+  log:
+    'Usage: ib log [--id <agent-id>] [--quiet|-q] "message"\n' +
+    "  Append a line to an agent's log file.\n" +
+    "  --id <id>       Target agent id (defaults to cwd-detected agent)\n" +
+    "  --quiet, -q     Do not also echo the message to stdout",
+  "parse-state":
+    "Usage: ib parse-state [file] [-v|--verbose]\n" +
+    "  Parse agent state from a tmux capture (file path or piped stdin).\n" +
+    "  -v, --verbose   Also print the matched reason",
+  info:
+    "Usage: ib info <agent-id>\n" +
+    "  Show an agent's metadata (id, repo, state, model, type, worktree, etc.).",
+  questions:
+    "Usage: ib questions [--all|-a]\n" +
+    "  Alias: q\n" +
+    "  Show pending agent questions across all repos.\n" +
+    "  --all, -a       Include already-acknowledged questions",
+  send:
+    "Usage: ib send [--from <id>] <target> [-f|--file <path>] [message...]\n" +
+    "  Send a message to an agent, the system coordinator, a repo coordinator,\n" +
+    "  or a team. If no inline message and no -f file is given, the message body\n" +
+    "  is read from stdin.\n" +
+    "  --from <id>     Mark the sender for the recipient's notification\n" +
+    "  -f, --file <p>  Read the message body from a file (wins over stdin)\n" +
+    "\n" +
+    "Targets:\n" +
+    "  @system                System coordinator\n" +
+    "  @coordinator           Own repo's coordinator (cwd-detected)\n" +
+    "  @<repo>                A repo's coordinator\n" +
+    "  @<repo>/<agent-id>     A specific agent in a specific repo\n" +
+    "  @<team>                Every member of a team\n" +
+    "  <agent-id>             A specific agent by id or nickname",
+  nickname:
+    "Usage: ib nickname <agent-id> [<new-nickname> | --clear]\n" +
+    "  Set, clear, or show an agent's nickname. With no third arg, prints the\n" +
+    "  current nickname.\n" +
+    "  --clear         Remove the existing nickname",
+  kill:
+    "Usage: ib kill <agent-id> [--force]\n" +
+    "  Stop an agent without archiving its worktree.\n" +
+    "  --force         Skip confirmation prompts",
+  nuke:
+    "Usage: ib nuke <agent-id>\n" +
+    "  Kill an agent AND archive its directory. Removes the tmux session and\n" +
+    "  git worktree.",
+  "merge-check":
+    "Usage: ib merge-check <agent-id>\n" +
+    "  Check whether an agent's branch is ready to merge cleanly into its\n" +
+    "  parent. Does not perform the merge.",
+  merge:
+    "Usage: ib merge <agent-id> [--force]\n" +
+    "  Merge an agent's branch into its parent and close the agent.\n" +
+    "  --force         Skip confirmation prompts",
+  resume:
+    "Usage: ib resume <agent-id> [--force]\n" +
+    "  Resume a stopped agent in its existing worktree.\n" +
+    "  --force         Skip confirmation prompts",
+  respawn:
+    "Usage: ib respawn [<agent-id>]\n" +
+    "  Alias: restart\n" +
+    "  Restart an agent's Claude session in-place. With no id, infers the agent\n" +
+    "  from the current working directory (backs the /respawn slash command).\n" +
+    "  Pass @system to restart the system coordinator.",
+  "new-agent":
+    "Usage: ib new-agent [--type <type>] [--model <model>] [--manager <id>] [--name <name>]\n" +
+    "                    [--repo <name|path>] [--spawned-by <id> [--spawned-by-repo <path>]]\n" +
+    '                    [--allow <tools>] [--deny <tools>] [--no-worktree] [--yolo]\n' +
+    '                    [-f|--file|--prompt-file <path>] ["prompt..."]\n' +
+    "  Alias: new\n" +
+    "  Spawn a new agent. The prompt may be supplied positionally, via -f/--file,\n" +
+    "  or piped on stdin.\n" +
+    "  --type <type>          Agent type (see `ib list-types`)\n" +
+    "  --model <m>            Model selector, e.g. claude:opus or codex:gpt-5-codex\n" +
+    "  --manager <id>         Parent manager agent id\n" +
+    "  --name <n>             Optional human-readable agent name\n" +
+    "  --repo <name|path>     Target repo (defaults to cwd-matched repo)\n" +
+    "  --allow <tools>        Comma-separated extra allowed tools\n" +
+    "  --deny <tools>         Comma-separated extra denied tools\n" +
+    "  --no-worktree          Do not create a git worktree\n" +
+    "  --yolo                 Skip safety prompts (rarely needed)\n" +
+    "  -f, --file <path>      Read prompt body from a file",
+  acknowledge:
+    "Usage: ib acknowledge <question-id>\n" +
+    "  Alias: ack\n" +
+    "  Acknowledge a pending agent question by id.",
+  ask:
+    'Usage: ib ask [--id <agent-id>] "question"\n' +
+    "  Ask the user a question from an agent context. The question may be passed\n" +
+    "  positionally or piped on stdin.\n" +
+    "  --id <id>       Agent id (defaults to cwd-detected agent)",
+  "init-types":
+    "Usage: ib init-types\n" +
+    "  Alias: init-agent-types\n" +
+    "  Populate ~/.itsybitsy/agent-types/ with the built-in agent type files.\n" +
+    "  Existing files are not overwritten.",
+  "list-types":
+    "Usage: ib list-types\n" +
+    "  Alias: list-agent-types\n" +
+    "  List available agent types with whether they are spawnable and whether\n" +
+    "  they may spawn children.",
+  "list-models":
+    "Usage: ib list-models [--json]\n" +
+    "  Alias: models\n" +
+    "  List known <cli>:<model> selectors grouped by CLI.\n" +
+    "  --json          Emit machine-readable JSON",
+  config:
+    "Usage: ib config <subcommand> [args...]\n" +
+    "  list, ls              List all config keys with values\n" +
+    "  get <key>             Get a config value\n" +
+    "  set <key> <value>     Set a scalar config value\n" +
+    "  add <key> <value>     Add a value to an array config key\n" +
+    "  remove <key> <value>  Remove a value from an array config key\n" +
+    "  unset <key>           Remove a key, reverting to default",
+  "config list":
+    "Usage: ib config list\n" +
+    "  Alias: ib config ls\n" +
+    "  Print every known config key with its current value and source.",
+  "config get":
+    "Usage: ib config get <key>\n" +
+    "  Print the current value of a config key.",
+  "config set":
+    "Usage: ib config set <key> <value>\n" +
+    "  Set a scalar config value. Use `ib config add` for array-typed keys.",
+  "config add":
+    "Usage: ib config add <key> <value>\n" +
+    "  Append a value to an array-typed config key.",
+  "config remove":
+    "Usage: ib config remove <key> <value>\n" +
+    "  Remove a value from an array-typed config key.",
+  "config unset":
+    "Usage: ib config unset <key>\n" +
+    "  Remove a key from the user config file, reverting to its built-in default.",
+  hooks:
+    "Usage: ib hooks <subcommand>\n" +
+    "  install                Install safety hooks (~/.claude/settings.json)\n" +
+    "  uninstall              Uninstall safety hooks\n" +
+    "  status                 Show safety-hook installation status\n" +
+    "  intercept-install      Install the intercept hook\n" +
+    "  intercept-uninstall    Uninstall the intercept hook\n" +
+    "  intercept-status       Show intercept-hook installation status\n" +
+    "\n" +
+    "Internal hook entrypoints (invoked by Claude Code, not directly by users):\n" +
+    "  intercept-task, session-start, main-path, inject-status, inject-timestamp,\n" +
+    "  codex-pre-tool-use, codex-session-start, codex-stop",
+  "hooks install":
+    "Usage: ib hooks install\n" +
+    "  Install the safety hooks block into ~/.claude/settings.json.",
+  "hooks uninstall":
+    "Usage: ib hooks uninstall\n" +
+    "  Remove the safety hooks block from ~/.claude/settings.json.",
+  "hooks status":
+    "Usage: ib hooks status\n" +
+    "  Show whether the safety hooks are installed.",
+  "hooks intercept-install":
+    "Usage: ib hooks intercept-install\n" +
+    "  Install the intercept (PreToolUse on Task) hook into ~/.claude/settings.json.",
+  "hooks intercept-uninstall":
+    "Usage: ib hooks intercept-uninstall\n" +
+    "  Remove the intercept hook from ~/.claude/settings.json.",
+  "hooks intercept-status":
+    "Usage: ib hooks intercept-status\n" +
+    "  Show whether the intercept hook is installed.",
+  "hooks intercept-task":
+    "Usage: ib hooks intercept-task\n" +
+    "  Internal: PreToolUse hook entrypoint for Task tool calls. Reads JSON from\n" +
+    "  stdin, writes a permission decision to stdout.",
+  "hooks session-start":
+    "Usage: ib hooks session-start [<agent-id>]\n" +
+    "  Internal: SessionStart hook entrypoint. Injects role-specific context\n" +
+    "  into the new Claude session.",
+  "hooks main-path":
+    "Usage: ib hooks main-path\n" +
+    "  Internal: PreToolUse hook for the primary Claude session — blocks the\n" +
+    "  user's main Claude from operating inside agent worktrees.",
+  "hooks inject-status":
+    "Usage: ib hooks inject-status [--full|--if-changed|--brief] [--visible]\n" +
+    "  Internal: UserPromptSubmit hook that injects a brief agents-status\n" +
+    "  summary into the primary Claude's context.",
+  "hooks inject-timestamp":
+    "Usage: ib hooks inject-timestamp\n" +
+    "  Internal: hook entrypoint that injects a current-timestamp marker.",
+  "hooks codex-pre-tool-use":
+    "Usage: ib hooks codex-pre-tool-use <agent-id> [--dry-run]\n" +
+    "  Internal: codex PreToolUse hook entrypoint. --dry-run is used by the\n" +
+    "  spawn-time precheck.",
+  "hooks codex-session-start":
+    "Usage: ib hooks codex-session-start <agent-id> [--dry-run]\n" +
+    "  Internal: codex SessionStart hook entrypoint. --dry-run is used by the\n" +
+    "  spawn-time precheck.",
+  "hooks codex-stop":
+    "Usage: ib hooks codex-stop <agent-id> [--dry-run]\n" +
+    "  Internal: codex Stop hook entrypoint. --dry-run is used by the spawn-time\n" +
+    "  precheck.",
+  team:
+    "Usage: ib team <subcommand> [args...]\n" +
+    "  create <name>             Create an empty team\n" +
+    "  add <name> <agent-id>     Add an agent to a team\n" +
+    "  remove <name> <agent-id>  Remove an agent from a team\n" +
+    "  list                      List all teams with member counts\n" +
+    "  delete <name>             Delete a team",
+  "team create":
+    "Usage: ib team create <name>\n" +
+    "  Create a new empty team.",
+  "team add":
+    "Usage: ib team add <name> <agent-id>\n" +
+    "  Add an agent to an existing team.",
+  "team remove":
+    "Usage: ib team remove <name> <agent-id>\n" +
+    "  Remove an agent from a team.",
+  "team list":
+    "Usage: ib team list\n" +
+    "  List every team with its member count.",
+  "team delete":
+    "Usage: ib team delete <name>\n" +
+    "  Delete a team. Does not affect the agents themselves.",
+  roster:
+    "Usage: ib roster <name>\n" +
+    "  List a team's members with their repo and current state.",
+  tgallow:
+    "Usage: ib tgallow <chat_id>\n" +
+    "  Allow a Telegram chat id to interact with itsybitsy.",
+  tgdeny:
+    "Usage: ib tgdeny <chat_id>\n" +
+    "  Remove a Telegram chat id from the allowlist.",
+  tgsend:
+    "Usage: ib tgsend <text>\n" +
+    "  Send a one-shot message to the configured Telegram chat.",
+  "generate-summary":
+    "Usage: ib generate-summary <agentDir>\n" +
+    "  Internal: regenerate an agent's summary file. Fire-and-forget.",
+  "write-pid":
+    "Usage: ib write-pid <agent-id> <pid>\n" +
+    "  Internal: record an agent's spawned process PID into meta.json. Called\n" +
+    "  by start.sh / resume.sh.",
+  "respawn-self":
+    "Usage: ib respawn-self <agent-id>\n" +
+    "  Internal: the detached worker launched by `ib respawn` calls this to\n" +
+    "  perform the kill+restart from outside the target agent's tmux session.",
+  "hook-check-path":
+    "Usage: ib hook-check-path <agent-id>\n" +
+    "  Internal: PreToolUse hook entrypoint that enforces path isolation. Reads\n" +
+    "  JSON from stdin, writes a permission decision to stdout.",
+  "hook-status":
+    "Usage: ib hook-status <agent-id>\n" +
+    "  Internal: Stop hook entrypoint. Detects stuck agents and triggers nudges.",
+  "hook-permission-denied":
+    "Usage: ib hook-permission-denied <agent-id>\n" +
+    "  Internal: hook entrypoint that records permission-denied events to the\n" +
+    "  agent log.",
+  "hook-mark-running":
+    "Usage: ib hook-mark-running <agent-id>\n" +
+    "  Internal: hook entrypoint that records that an agent has resumed.",
+};
+
+/**
+ * Print the help text for a known command and return true. Returns false when
+ * no entry exists, so the caller can fall back to top-level usage.
+ */
+export function printCommandHelp(commandKey: string): boolean {
+  const text = COMMAND_HELP[commandKey];
+  if (!text) return false;
+  console.log(text);
+  return true;
+}
+
 function printUsage(): void {
   console.log("ib — Cross-repo agent dashboard");
   console.log("");
@@ -534,6 +868,42 @@ async function main() {
     printUsage();
     return;
   }
+
+  // Per-command help dispatch: `ib <command> --help` (or -h). Handled BEFORE
+  // the switch so each case body doesn't need its own help check. Nested
+  // subcommands (hooks / team / config) are checked at both layers — e.g.
+  // `ib team add --help` resolves to the "team add" entry, while `ib team
+  // --help` resolves to the "team" entry.
+  if (command && hasHelpFlag(args)) {
+    // Try the deepest match first: "<command> <sub>" if a sub is present.
+    // Only do this for the known sub-grouped commands; everywhere else, the
+    // top-level command key is the only valid lookup.
+    const sub = args[1];
+    if (sub && (command === "hooks" || command === "team" || command === "config")) {
+      const subKey = `${command} ${sub}`;
+      if (COMMAND_HELP[subKey]) {
+        console.log(COMMAND_HELP[subKey]);
+        return;
+      }
+    }
+    // Alias normalisation — look up help text under the canonical command name.
+    const canonical =
+      command === "ls" ? "list"
+      : command === "tree" ? "agents"
+      : command === "q" ? "questions"
+      : command === "ack" ? "acknowledge"
+      : command === "new" ? "new-agent"
+      : command === "restart" ? "respawn"
+      : command === "init-agent-types" ? "init-types"
+      : command === "list-agent-types" ? "list-types"
+      : command === "models" ? "list-models"
+      : command;
+    if (printCommandHelp(canonical)) return;
+    // Unknown command + --help — fall through to top-level usage.
+    printUsage();
+    return;
+  }
+
   switch (command) {
     case "add": {
       const target = args[1] ?? process.cwd();

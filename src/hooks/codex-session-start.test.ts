@@ -2,7 +2,10 @@ import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { mkdtemp, mkdir, rm, writeFile } from "fs/promises";
 import { join } from "path";
 import { tmpdir } from "os";
-import { hookCodexSessionStart } from "./codex-session-start";
+import {
+  hookCodexSessionStart,
+  hookCodexSessionStartDryRun,
+} from "./codex-session-start";
 
 function captureStdout(): {
   capture: string[];
@@ -210,5 +213,70 @@ describe("hookCodexSessionStart — state write + fail-open", () => {
     }
     const parsed = JSON.parse(capture.join(""));
     expect(parsed.hookSpecificOutput.hookEventName).toBe("SessionStart");
+  });
+});
+
+// ── HIGH 3 from Phase 4 review: dry-run must actually exercise the handler ──
+describe("hookCodexSessionStartDryRun — exercises real handler with synthetic payload", () => {
+  let tempHome: string;
+  let originalHome: string | undefined;
+  let agentDir: string;
+
+  beforeEach(async () => {
+    tempHome = await mkdtemp(join(tmpdir(), "codex-ss-dryrun-"));
+    originalHome = process.env.HOME;
+    process.env.HOME = tempHome;
+    agentDir = join(tempHome, ".ittybitty", "agents", "agent-dryrun01");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    await writeFile(
+      join(agentDir, "meta.json"),
+      JSON.stringify({
+        id: "agent-dryrun01",
+        worktree: true,
+        model: "codex:gpt-5.4-mini",
+      }),
+    );
+  });
+
+  afterEach(async () => {
+    process.env.HOME = originalHome;
+    await rm(tempHome, { recursive: true, force: true });
+  });
+
+  test("succeeds when meta.json exists", async () => {
+    const origCwd = process.cwd();
+    process.chdir(tempHome);
+    try {
+      await hookCodexSessionStartDryRun("agent-dryrun01");
+    } finally {
+      process.chdir(origCwd);
+    }
+  });
+
+  test("throws when meta.json is missing", async () => {
+    const origCwd = process.cwd();
+    process.chdir(tempHome);
+    try {
+      await expect(hookCodexSessionStartDryRun("agent-missing")).rejects.toThrow(/meta\.json not found/);
+    } finally {
+      process.chdir(origCwd);
+    }
+  });
+
+  test("throws when agent id is invalid", async () => {
+    await expect(hookCodexSessionStartDryRun("bad agent id")).rejects.toThrow(/Invalid agent id/);
+  });
+
+  test("does NOT mutate meta.json (skipMetaWrites is set)", async () => {
+    const before = await Bun.file(join(agentDir, "meta.json")).text();
+    const origCwd = process.cwd();
+    process.chdir(tempHome);
+    try {
+      await hookCodexSessionStartDryRun("agent-dryrun01");
+    } finally {
+      process.chdir(origCwd);
+    }
+    const after = await Bun.file(join(agentDir, "meta.json")).text();
+    expect(after).toBe(before);
   });
 });

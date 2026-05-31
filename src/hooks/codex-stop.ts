@@ -31,12 +31,14 @@ import { detectStateFromMessage } from "./agent-status";
 
 const HOOK_EVENT_NAME = "Stop";
 
-function emitNoop(): void {
-  process.stdout.write(
-    JSON.stringify({
-      hookSpecificOutput: { hookEventName: HOOK_EVENT_NAME, additionalContext: "" },
-    }),
-  );
+function buildStopNoop(): string {
+  return JSON.stringify({
+    hookSpecificOutput: { hookEventName: HOOK_EVENT_NAME, additionalContext: "" },
+  });
+}
+
+function emitNoop(write: (chunk: string) => unknown = (c) => process.stdout.write(c)): void {
+  write(buildStopNoop());
 }
 
 async function resolveAgentDir(agentId: string, cwd: string, override?: string): Promise<string> {
@@ -65,12 +67,17 @@ export function deriveCodexStopState(lastAssistantMessage?: string): MetaState {
 export interface CodexStopDeps {
   rawStdin?: string;
   agentDirOverride?: string;
+  /** Skip mutating meta.json on disk (used by the dry-run path). */
+  skipMetaWrites?: boolean;
+  /** Optional stdout writer override (used by dry-run to capture output). */
+  write?: (chunk: string) => unknown;
 }
 
 export async function hookCodexStop(agentId: string, deps?: CodexStopDeps): Promise<void> {
+  const write = deps?.write ?? ((chunk: string) => process.stdout.write(chunk));
   try {
     if (!isValidAgentId(agentId)) {
-      emitNoop();
+      emitNoop(write);
       return;
     }
 
@@ -92,18 +99,23 @@ export async function hookCodexStop(agentId: string, deps?: CodexStopDeps): Prom
         ? data.last_assistant_message
         : undefined;
     const state = deriveCodexStopState(lastMessage);
-    await writeAgentState(agentDir, state);
+    if (!deps?.skipMetaWrites) {
+      await writeAgentState(agentDir, state);
+    }
 
-    emitNoop();
+    emitNoop(write);
   } catch {
     try {
-      emitNoop();
+      emitNoop(write);
     } catch { /* even stdout failed — exit 0 silently */ }
   }
 }
 
 /**
- * Spawn-time precheck. Mirrors the other codex hooks' dry-run contract.
+ * Spawn-time precheck (HIGH 3 from the Phase 4 review). Actually invokes
+ * the real handler with a synthetic payload and verifies the resulting
+ * stdout is valid JSON with the right hookEventName. Catches module-load
+ * failures, runtime crashes, and output-contract regressions.
  */
 export async function hookCodexStopDryRun(agentId: string): Promise<void> {
   if (!isValidAgentId(agentId)) {
@@ -113,5 +125,30 @@ export async function hookCodexStopDryRun(agentId: string): Promise<void> {
   const metaFile = Bun.file(join(dir, "meta.json"));
   if (!(await metaFile.exists())) {
     throw new Error(`codex-stop dry-run: meta.json not found at ${join(dir, "meta.json")}`);
+  }
+  const buf: string[] = [];
+  const syntheticInput = JSON.stringify({ cwd: dir });
+  await hookCodexStop(agentId, {
+    rawStdin: syntheticInput,
+    skipMetaWrites: true,
+    write: (chunk: string) => { buf.push(chunk); return chunk.length; },
+  });
+  const out = buf.join("");
+  if (!out) {
+    throw new Error("codex-stop dry-run: handler produced no output");
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(out);
+  } catch (err) {
+    throw new Error(`codex-stop dry-run: handler emitted non-JSON output: ${(err as Error).message}`);
+  }
+  const hookOutput = (parsed as Record<string, unknown>)?.hookSpecificOutput as
+    | Record<string, unknown>
+    | undefined;
+  if (!hookOutput || hookOutput.hookEventName !== "Stop") {
+    throw new Error(
+      `codex-stop dry-run: handler output missing hookSpecificOutput.hookEventName="Stop" (got ${JSON.stringify(parsed)})`,
+    );
   }
 }

@@ -6,6 +6,7 @@ import {
   checkCodexPreToolUse,
   captureCodexSessionId,
   hookCodexPreToolUse,
+  hookCodexPreToolUseDryRun,
 } from "./codex-pre-tool-use";
 import type { PathCheckContext } from "./agent-path";
 
@@ -364,5 +365,70 @@ describe("captureCodexSessionId — idempotent session id capture", () => {
   test("does nothing when sessionId is empty", async () => {
     const written = await captureCodexSessionId(agentDir, "");
     expect(written).toBe(false);
+  });
+});
+
+// ── HIGH 3 from Phase 4 review: dry-run must actually exercise the handler ──
+describe("hookCodexPreToolUseDryRun — exercises real handler with synthetic payload", () => {
+  let tempHome: string;
+  let originalHome: string | undefined;
+  let agentDir: string;
+
+  beforeEach(async () => {
+    tempHome = await mkdtemp(join(tmpdir(), "codex-hook-dryrun-"));
+    originalHome = process.env.HOME;
+    process.env.HOME = tempHome;
+    const typesDir = join(tempHome, ".itsybitsy", "agent-types");
+    await mkdir(typesDir, { recursive: true });
+    await writeFile(
+      join(typesDir, "_all.md"),
+      "---\nname: _all\ndescription: shared\npermissions:\n  allow:\n    - Bash(ls:*)\n  deny: []\n---\n",
+    );
+    // Use cwd resolution that resolveAgentContext expects: cwd contains
+    // ".ittybitty/agents/<id>" — we use process.cwd() in the dry-run, so
+    // put the agent dir under the current cwd's .ittybitty/agents/...
+    // Easier: pre-resolve by chdir'ing? No — use realpath default. Place
+    // the agent dir under tempHome and rely on dir-resolution.
+    agentDir = join(tempHome, ".ittybitty", "agents", "agent-dryrun01");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    await writeFile(
+      join(agentDir, "meta.json"),
+      JSON.stringify({
+        id: "agent-dryrun01",
+        worktree: true,
+        worker: true,
+        model: "codex:gpt-5.4-mini",
+        agentType: "worker",
+      }),
+    );
+  });
+
+  afterEach(async () => {
+    process.env.HOME = originalHome;
+    await rm(tempHome, { recursive: true, force: true });
+  });
+
+  test("succeeds when meta.json exists and the handler resolves cleanly", async () => {
+    const origCwd = process.cwd();
+    process.chdir(join(tempHome));
+    try {
+      await hookCodexPreToolUseDryRun("agent-dryrun01");
+    } finally {
+      process.chdir(origCwd);
+    }
+  });
+
+  test("throws when meta.json is missing", async () => {
+    const origCwd = process.cwd();
+    process.chdir(join(tempHome));
+    try {
+      await expect(hookCodexPreToolUseDryRun("agent-missing")).rejects.toThrow(/meta\.json not found/);
+    } finally {
+      process.chdir(origCwd);
+    }
+  });
+
+  test("throws when agent id is invalid", async () => {
+    await expect(hookCodexPreToolUseDryRun("bad agent id")).rejects.toThrow(/Invalid agent id/);
   });
 });

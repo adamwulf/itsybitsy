@@ -152,6 +152,12 @@ interface DispatcherDeps {
   agentDirOverride?: string;
   /** Disable the on-disk side-effects (session-id capture) — tests with no fs. */
   skipSessionIdCapture?: boolean;
+  /**
+   * Optional stdout writer override. Default is `process.stdout.write`.
+   * The dry-run path injects a buffer-collector so it can validate the
+   * handler's JSON output without leaking to the dispatcher's stdout.
+   */
+  write?: (chunk: string) => unknown;
 }
 
 /**
@@ -237,10 +243,11 @@ export async function hookCodexPreToolUse(
   agentId: string,
   deps?: DispatcherDeps,
 ): Promise<void> {
+  const write = deps?.write ?? ((chunk: string) => process.stdout.write(chunk));
   // Wrap EVERYTHING in try/catch — any uncaught error in codex fails open.
   try {
     if (!isValidAgentId(agentId)) {
-      process.stdout.write(buildCodexDenyOutput("Invalid agent id passed to codex-pre-tool-use"));
+      write(buildCodexDenyOutput("Invalid agent id passed to codex-pre-tool-use"));
       return;
     }
 
@@ -254,7 +261,7 @@ export async function hookCodexPreToolUse(
       }
     } catch {
       // Codex sent malformed JSON. Per fail-safe-on-the-itsybitsy-side, deny.
-      process.stdout.write(buildCodexDenyOutput("codex hook stdin was not valid JSON"));
+      write(buildCodexDenyOutput("codex hook stdin was not valid JSON"));
       return;
     }
 
@@ -289,15 +296,15 @@ export async function hookCodexPreToolUse(
     const decision = checkCodexPreToolUse({ toolName, toolInput, cwd }, ctx);
 
     if (decision.decision === "allow") {
-      process.stdout.write(buildCodexAllowOutput(toolInput));
+      write(buildCodexAllowOutput(toolInput));
     } else {
-      process.stdout.write(buildCodexDenyOutput(decision.reason));
+      write(buildCodexDenyOutput(decision.reason));
     }
   } catch (err) {
     // Last-ditch deny. Never let the process throw — codex would fail open.
     const msg = err instanceof Error ? err.message : String(err);
     try {
-      process.stdout.write(buildCodexDenyOutput(`codex-pre-tool-use crashed: ${msg}`));
+      write(buildCodexDenyOutput(`codex-pre-tool-use crashed: ${msg}`));
     } catch {
       // If even stdout.write fails, exit 0 silently — codex still fails open,
       // but at least we didn't propagate the throw.
@@ -306,9 +313,19 @@ export async function hookCodexPreToolUse(
 }
 
 /**
- * Spawn-time precheck (SPEC §5.4 step 7 / §5.5 fail-open mitigation): verify
- * the dispatcher resolves for the given agent id and that meta.json exists.
- * Does NOT read stdin. Throws on failure so the spawn caller can abort.
+ * Spawn-time precheck (SPEC §5.4 step 7 / §5.5 fail-open mitigation, plus
+ * HIGH 3 from the Phase 4 review). Actually invokes the real handler with
+ * a synthetic stdin payload and verifies the resulting stdout is valid
+ * JSON — not just "meta.json exists". This catches:
+ *   - Module-load failures (syntax error, missing import) — surfaced at
+ *     the `await import` boundary in the dispatcher above.
+ *   - Runtime errors inside the handler (missing function, bad regex,
+ *     path-extraction crash) — surfaced when we exercise the deny path
+ *     with a synthetic Bash payload.
+ *   - Output contract failures (non-JSON, missing required keys) —
+ *     surfaced by the JSON.parse + shape check on the captured output.
+ *
+ * Throws on failure so the spawn caller can abort.
  */
 export async function hookCodexPreToolUseDryRun(agentId: string): Promise<void> {
   if (!isValidAgentId(agentId)) {
@@ -319,5 +336,39 @@ export async function hookCodexPreToolUseDryRun(agentId: string): Promise<void> 
   const file = Bun.file(metaPath);
   if (!(await file.exists())) {
     throw new Error(`codex-pre-tool-use dry-run: meta.json not found at ${metaPath}`);
+  }
+  // Exercise the actual handler with a synthetic payload that will be
+  // denied (a Bash echo). The handler must produce valid JSON whose
+  // hookSpecificOutput names PreToolUse — anything else is a regression
+  // that would fail-open in production.
+  const buf: string[] = [];
+  const syntheticInput = JSON.stringify({
+    tool_name: "Bash",
+    tool_input: { command: "echo dry-run-probe" },
+    cwd: ctxResolved.worktreePath ?? ctxResolved.agentDir,
+    session_id: "dry-run-no-uuid",
+  });
+  await hookCodexPreToolUse(agentId, {
+    rawStdin: syntheticInput,
+    skipSessionIdCapture: true,
+    write: (chunk: string) => { buf.push(chunk); return chunk.length; },
+  });
+  const out = buf.join("");
+  if (!out) {
+    throw new Error("codex-pre-tool-use dry-run: handler produced no output");
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(out);
+  } catch (err) {
+    throw new Error(`codex-pre-tool-use dry-run: handler emitted non-JSON output: ${(err as Error).message}`);
+  }
+  const hookOutput = (parsed as Record<string, unknown>)?.hookSpecificOutput as
+    | Record<string, unknown>
+    | undefined;
+  if (!hookOutput || hookOutput.hookEventName !== "PreToolUse") {
+    throw new Error(
+      `codex-pre-tool-use dry-run: handler output missing hookSpecificOutput.hookEventName="PreToolUse" (got ${JSON.stringify(parsed)})`,
+    );
   }
 }

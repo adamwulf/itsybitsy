@@ -36,12 +36,14 @@ function readDefensive(
   return undefined;
 }
 
-function emitNoop(): void {
-  process.stdout.write(
-    JSON.stringify({
-      hookSpecificOutput: { hookEventName: HOOK_EVENT_NAME, additionalContext: "" },
-    }),
-  );
+function buildSessionStartNoop(): string {
+  return JSON.stringify({
+    hookSpecificOutput: { hookEventName: HOOK_EVENT_NAME, additionalContext: "" },
+  });
+}
+
+function emitNoop(write: (chunk: string) => unknown = (c) => process.stdout.write(c)): void {
+  write(buildSessionStartNoop());
 }
 
 async function resolveAgentDir(agentId: string, cwd: string, override?: string): Promise<string> {
@@ -58,16 +60,21 @@ async function resolveAgentDir(agentId: string, cwd: string, override?: string):
 export interface CodexSessionStartDeps {
   rawStdin?: string;
   agentDirOverride?: string;
+  /** Skip mutating meta.json on disk (used by the dry-run path). */
+  skipMetaWrites?: boolean;
+  /** Optional stdout writer override (used by dry-run to capture output). */
+  write?: (chunk: string) => unknown;
 }
 
 export async function hookCodexSessionStart(
   agentId: string,
   deps?: CodexSessionStartDeps,
 ): Promise<void> {
+  const write = deps?.write ?? ((chunk: string) => process.stdout.write(chunk));
   try {
     if (!isValidAgentId(agentId)) {
       // Argv parse failure. Still emit a valid payload so codex doesn't fail open.
-      emitNoop();
+      emitNoop(write);
       return;
     }
 
@@ -84,24 +91,27 @@ export async function hookCodexSessionStart(
     const cwd = typeof data.cwd === "string" ? data.cwd : process.cwd();
     const agentDir = await resolveAgentDir(agentId, cwd, deps?.agentDirOverride);
 
-    await writeAgentState(agentDir, "running");
-
-    const sessionId = readDefensive(data, "session_id", "sessionId");
-    if (sessionId) {
-      await captureCodexSessionId(agentDir, sessionId);
+    if (!deps?.skipMetaWrites) {
+      await writeAgentState(agentDir, "running");
+      const sessionId = readDefensive(data, "session_id", "sessionId");
+      if (sessionId) {
+        await captureCodexSessionId(agentDir, sessionId);
+      }
     }
 
-    emitNoop();
+    emitNoop(write);
   } catch {
     try {
-      emitNoop();
+      emitNoop(write);
     } catch { /* even stdout failed — exit 0 silently */ }
   }
 }
 
 /**
- * Spawn-time precheck. Verifies the dispatcher can resolve and reach an
- * agent dir with a meta.json. Does NOT read stdin.
+ * Spawn-time precheck (HIGH 3 from the Phase 4 review). Actually invokes
+ * the real handler with a synthetic payload and verifies the resulting
+ * stdout is valid JSON with the right hookEventName. Catches module-load
+ * failures, runtime crashes, and output-contract regressions.
  */
 export async function hookCodexSessionStartDryRun(agentId: string): Promise<void> {
   if (!isValidAgentId(agentId)) {
@@ -111,5 +121,35 @@ export async function hookCodexSessionStartDryRun(agentId: string): Promise<void
   const metaFile = Bun.file(join(dir, "meta.json"));
   if (!(await metaFile.exists())) {
     throw new Error(`codex-session-start dry-run: meta.json not found at ${join(dir, "meta.json")}`);
+  }
+  // Actually invoke the handler with a synthetic SessionStart payload and
+  // skipMetaWrites so we don't mutate the running agent's state.
+  const buf: string[] = [];
+  const syntheticInput = JSON.stringify({
+    cwd: dir,
+    session_id: "dry-run-no-uuid",
+  });
+  await hookCodexSessionStart(agentId, {
+    rawStdin: syntheticInput,
+    skipMetaWrites: true,
+    write: (chunk: string) => { buf.push(chunk); return chunk.length; },
+  });
+  const out = buf.join("");
+  if (!out) {
+    throw new Error("codex-session-start dry-run: handler produced no output");
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(out);
+  } catch (err) {
+    throw new Error(`codex-session-start dry-run: handler emitted non-JSON output: ${(err as Error).message}`);
+  }
+  const hookOutput = (parsed as Record<string, unknown>)?.hookSpecificOutput as
+    | Record<string, unknown>
+    | undefined;
+  if (!hookOutput || hookOutput.hookEventName !== "SessionStart") {
+    throw new Error(
+      `codex-session-start dry-run: handler output missing hookSpecificOutput.hookEventName="SessionStart" (got ${JSON.stringify(parsed)})`,
+    );
   }
 }

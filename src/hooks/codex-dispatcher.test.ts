@@ -128,4 +128,21 @@ describe("runCodexDispatcher — HIGH 1 fail-open contract", () => {
     expect(res.exitCode).toBe(0);
     expect(writes.length).toBe(0);
   });
+
+  // HIGH 3 from Phase 4 review — simulate a handler that throws when invoked
+  // with the synthetic payload (the load-bearing case the old "meta exists?"
+  // check missed). The dispatcher must still surface exit 1 so the spawn
+  // refuses to launch into a fail-open hook.
+  test("--dry-run failure: handler module loads but throws at invoke → exit 1", async () => {
+    const { writes, write } = captureWrite();
+    const res = await runCodexDispatcher("stop", "agent-okzz", {
+      dryRun: true,
+      deps: {
+        write,
+        invokeDryRun: () => Promise.reject(new Error("runtime crash in handler")),
+      },
+    });
+    expect(res.exitCode).toBe(1);
+    expect(writes.length).toBe(0);
+  });
 });

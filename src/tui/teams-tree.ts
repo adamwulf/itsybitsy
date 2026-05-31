@@ -311,6 +311,42 @@ export class TeamsTreeComponent implements Component {
     this.ensureSelectedVisible();
   }
 
+  /**
+   * §17.1 Phase 2 mirror: find the FIRST `team-member` row whose agent id
+   * matches and select it (visual only — the dashboard updates
+   * `activeSelectionSource` separately when appropriate). If the agent appears
+   * under multiple teams, the first occurrence wins (the team registry order
+   * from `listTeams()` is stable). Returns true on a hit, false otherwise.
+   *
+   * Used by the dashboard's `mirrorSelectionToVisibleTree()` so a `0`/`1`
+   * sidebar toggle visually highlights the active agent in the newly visible
+   * tree when possible.
+   */
+  selectMemberByAgentId(agentId: string): boolean {
+    const list = this._flatList;
+    for (let i = 0; i < list.length; i++) {
+      const row = list[i]!;
+      if (row.kind === "team-member" && row.agent.id === agentId) {
+        this.selectedIndex = i;
+        this.hasSelection = true;
+        this.ensureSelectedVisible();
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * §17.1 Phase 2: return the tree to the no-selection state. Visual only —
+   * does NOT change which tree owns the active selection. Used by the
+   * dashboard when the active selection lives in the Agents tree but has no
+   * counterpart in the Teams tree (a repo header, the system coordinator, or
+   * an agent that is not a member of any team).
+   */
+  deselect(): void {
+    this.hasSelection = false;
+  }
+
   /** Keep the selected index within the visible scroll window (mirror AgentTree). */
   private ensureSelectedVisible() {
     const lastIndex = this._flatList.length - 1;

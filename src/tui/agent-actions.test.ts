@@ -17,10 +17,10 @@ import {
   getDiffToolLaunching, setDiffToolLaunching,
   handleAddPermission, addPermissionToSettings, agentSettingsLocalPath,
   getCoordinatorSpawnsInFlight, clearCoordinatorSpawnsInFlight,
-  handleCreateTeam, handleAddAgentToTeam,
+  handleCreateTeam, handleAddAgentToTeam, handleDisbandTeam,
 } from "./agent-actions";
 import { setCoordinatorHome, resetCoordinatorHome } from "../coordinator";
-import { readTeams, createTeam, addMember } from "../teams";
+import { readTeams, createTeam, addMember, deleteTeam } from "../teams";
 import { teamLogPath } from "../team-channel";
 import { saveRegistry } from "../registry";
 import {
@@ -1352,5 +1352,97 @@ describe("handleAddAgentToTeam", () => {
     // Roster is unchanged.
     expect(reg.teams["backend"]!.members.filter((m) => m === "agent-eee")).toHaveLength(1);
     expect(notices.some((n) => n.includes("already in @backend"))).toBe(true);
+  });
+});
+
+describe("handleDisbandTeam", () => {
+  let fx: Awaited<ReturnType<typeof setupTeamsFixture>>;
+
+  beforeEach(async () => { fx = await setupTeamsFixture(); });
+  afterEach(async () => { await teardownTeamsFixture(fx); });
+
+  test("opens a confirm dialog with disband prompt", () => {
+    const { ctx, dialogs } = makeMockCtx({ repos: [fx.repoEntry] });
+    handleDisbandTeam(ctx, "backend");
+    const d = assertDialog(dialogs[0]!, "confirm");
+    expect(d.prompt).toContain("Disband team @backend");
+    expect(d.prompt).toContain("Members will be notified");
+    expect(d.confirmLabel).toBe("Disband");
+    expect(d.focusedButton).toBe("cancel");
+  });
+
+  test("happy path: confirm fans out closure message to members, deletes the team, and reports success", async () => {
+    await createTeam("backend", "user", 1700000000);
+    await addMember("backend", "agent-aaa");
+    await addMember("backend", "agent-bbb");
+    const { ctx, dialogs, notices, teamSendCalls, flushActions } = makeMockCtx({ repos: [fx.repoEntry] });
+    handleDisbandTeam(ctx, "backend");
+    const d = assertDialog(dialogs[0]!, "confirm");
+    d.onYes();
+    await flushActions();
+    // teamSend was called with the closure message and an empty fromAgent
+    // (a CLI/human send — the resolver tags it with the user's name).
+    expect(teamSendCalls).toHaveLength(1);
+    expect(teamSendCalls[0]!.teamName).toBe("backend");
+    expect(teamSendCalls[0]!.message).toBe("team @backend has been disbanded");
+    expect(teamSendCalls[0]!.fromAgent).toBe("");
+    // Team is gone from the registry.
+    const reg = await readTeams();
+    expect(reg.teams["backend"]).toBeUndefined();
+    // Notice reports the count and confirms deletion.
+    expect(notices.some((n) => n.includes("disbanded team @backend") && n.includes("2 members notified"))).toBe(true);
+  });
+
+  test("cancel: dismissing the confirm dialog does not call teamSend and leaves the team intact", async () => {
+    await createTeam("backend", "user", 1700000000);
+    await addMember("backend", "agent-aaa");
+    const { ctx, dialogs, notices, teamSendCalls, flushActions } = makeMockCtx({ repos: [fx.repoEntry] });
+    handleDisbandTeam(ctx, "backend");
+    // Don't call onYes — just flush any pending actions (there should be none).
+    await flushActions();
+    // teamSend was never invoked.
+    expect(teamSendCalls).toHaveLength(0);
+    // Team is still in the registry.
+    const reg = await readTeams();
+    expect(reg.teams["backend"]).toBeDefined();
+    expect(reg.teams["backend"]!.members).toContain("agent-aaa");
+    // No success notice was emitted.
+    expect(notices.some((n) => n.includes("disbanded"))).toBe(false);
+    // The dialog WAS shown though.
+    expect(dialogs).toHaveLength(1);
+  });
+
+  test("team vanished mid-flight: skips fan-out, sets notice, does not error", async () => {
+    // Team is never created — getTeam returns null.
+    const { ctx, dialogs, notices, teamSendCalls, flushActions } = makeMockCtx({ repos: [fx.repoEntry] });
+    handleDisbandTeam(ctx, "ghost");
+    const d = assertDialog(dialogs[0]!, "confirm");
+    d.onYes();
+    await flushActions();
+    // No fan-out (we never resolved a team).
+    expect(teamSendCalls).toHaveLength(0);
+    // Notice reports the vanished state.
+    expect(notices.some((n) => n.includes("team @ghost no longer exists"))).toBe(true);
+  });
+
+  test("team deleted between getTeam and deleteTeam: still reports vanished state", async () => {
+    await createTeam("backend", "user", 1700000000);
+    await addMember("backend", "agent-aaa");
+    // Inject a teamSend stub that deletes the team mid-flight to simulate a race.
+    const teamSend: ActionCtx["teamSend"] = async (teamName, _members, _message, _opts) => {
+      await deleteTeam(teamName);
+      return { ok: true, stdout: `sent to @${teamName}`, stderr: "", exitCode: 0 };
+    };
+    const { ctx, dialogs, notices, flushActions } = makeMockCtx({ repos: [fx.repoEntry], teamSend });
+    handleDisbandTeam(ctx, "backend");
+    const d = assertDialog(dialogs[0]!, "confirm");
+    d.onYes();
+    await flushActions();
+    // Team is gone (the stub did it).
+    const reg = await readTeams();
+    expect(reg.teams["backend"]).toBeUndefined();
+    // Notice reports the vanished-mid-flight state rather than success — the
+    // second deleteTeam returned false so we don't claim a successful disband.
+    expect(notices.some((n) => n.includes("no longer exists"))).toBe(true);
   });
 });

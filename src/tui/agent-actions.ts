@@ -38,7 +38,7 @@ import type { RepoHealthReport } from "../health-check";
 import { getResolvableWarnings, resolveHealthWarnings } from "../health-check";
 import { IB_COORDINATOR_SESSION, sanitizeTmuxInput, restartSystemCoordinator, checkCoordinatorExists, getLastCoordinatorSpawnMode, discardSystemCoordinator } from "../coordinator";
 import { isValidToolList } from "../validation";
-import { listTeams } from "../teams";
+import { listTeams, getTeam, deleteTeam } from "../teams";
 
 const SCROLL_STEP = 10;
 
@@ -712,6 +712,56 @@ function runAddMember(ctx: ActionCtx, agent: Agent, teamName: string) {
     ctx.setNotice(result.ok
       ? (result.stdout || `Added ${agent.id} to @${teamName}`)
       : (result.stderr || result.stdout || `Add to team failed`));
+  });
+}
+
+/**
+ * 'x' on a TEAM anchor in the Teams panel — disband the team. Shows a confirm
+ * dialog; on confirm, fans out a closure notice via `teamSend` (so members get
+ * the same delivery prefix/audit treatment as any other team broadcast), then
+ * deletes the team from the registry. Order matters: the fan-out reads the
+ * roster from `teams.json`, so it MUST happen before the delete.
+ *
+ * Selection of a team MEMBER (kind:"agent") is intentionally NOT routed here —
+ * the dashboard's selection-sync makes a team-member look just like an Agents-
+ * panel agent selection, so it continues to fall through to `handleKill`.
+ */
+export function handleDisbandTeam(ctx: ActionCtx, teamName: string) {
+  ctx.showDialog({
+    type: "confirm",
+    prompt: `Disband team @${teamName}? Members will be notified.`,
+    confirmLabel: "Disband",
+    focusedButton: "cancel",
+    confirmColor: RED,
+    onYes: () => {
+      ctx.closeDialog();
+      ctx.executeAndRefresh(async () => {
+        const team = await getTeam(teamName);
+        if (!team) {
+          ctx.setNotice(`team @${teamName} no longer exists`);
+          return;
+        }
+        const members = team.members;
+        const closureMessage = `team @${teamName} has been disbanded`;
+        // Fan out BEFORE deleting — `teamSend` re-reads the roster from
+        // `teams.json` under its own lock and would find an empty roster (or
+        // a not-found error) if we deleted first. The `live` list is a hint
+        // set; `teamSend`'s lazy-prune resolves the canonical recipients.
+        const live = ctx.watcher?.lastAgents ?? [];
+        const sendResult = await ctx.teamSend(teamName, live, closureMessage, { fromAgent: "" });
+        const deleted = await deleteTeam(teamName);
+        if (!deleted) {
+          // Team vanished between getTeam and deleteTeam — race with another
+          // mutator. The fan-out already ran against the live roster, so just
+          // surface the unusual state.
+          ctx.setNotice(`team @${teamName} no longer exists`);
+          return;
+        }
+        const sendOk = sendResult.ok;
+        const sendNote = sendOk ? "" : ` (notify failed: ${sendResult.stderr || sendResult.stdout})`;
+        ctx.setNotice(`disbanded team @${teamName} (${members.length} members notified)${sendNote}`);
+      });
+    },
   });
 }
 

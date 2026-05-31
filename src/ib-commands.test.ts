@@ -4989,6 +4989,38 @@ body`,
       const agentsMdExists = await Bun.file(join(agentsDir, "claude-regression-guard", "repo", "AGENTS.md")).exists();
       expect(agentsMdExists).toBe(false);
     });
+
+    test("HIGH 1: per-repo coordinator + codex model is rejected BEFORE any side effects", async () => {
+      // Tracks every command issued so we can assert NO tmux / worktree
+      // call fired. The reject MUST happen during the codex-precondition
+      // block, before agentDir creation, before worktree-add, before
+      // tmux new-session.
+      const spawnCalls: string[][] = [];
+      const trackedSpawn = (cmd: string[], _opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
+        spawnCalls.push(cmd);
+        // Default succeed — we only care that the reject prevented
+        // these calls from being issued in the first place.
+        return makeSpawnResult("", 0);
+      };
+      setNewAgentSpawnRunner(trackedSpawn);
+
+      const result = await callNewAgent("start coordinator", {
+        name: "codex-coord-attempt",
+        type: "coordinator",
+        model: "codex:gpt-5.4-mini",
+      });
+
+      expect(result.ok).toBe(false);
+      expect(result.stderr).toContain("codex coordinators not yet implemented");
+      // No agent dir created — reject fires before mkdir.
+      const dirExists = await Bun.file(join(agentsDir, "codex-coord-attempt", "meta.json")).exists();
+      expect(dirExists).toBe(false);
+      // No tmux session created, no worktree, no branch.
+      const cmdStrs = spawnCalls.map((c) => c.join(" "));
+      expect(cmdStrs.some((c) => c.includes("tmux new-session"))).toBe(false);
+      expect(cmdStrs.some((c) => c.includes("git worktree add"))).toBe(false);
+      expect(cmdStrs.some((c) => c.includes("hooks codex-"))).toBe(false);
+    });
   });
 });
 

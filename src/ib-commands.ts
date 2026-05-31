@@ -3281,8 +3281,23 @@ export async function newAgent(
   // path so its spawn env's PATH cannot break hook dispatch. The dispatcher
   // precheck is deferred until after agentDir is created so we can clean
   // it up uniformly with the rest of the spawn-failure paths.
+  //
+  // Codex + per-repo coordinator is rejected up-front (SPEC §D9 stub).
+  // The system coordinator path (coordinator.ts:spawnCoordinator) has the
+  // same guard, but per-repo coordinators reach `newAgent` directly with
+  // coordinatorMode=true, so we need a guard HERE — without it the spawn
+  // would skip the useWorktree branch (AGENTS.md, .gitignore, precheck)
+  // and produce a broken half-codex coordinator.
   let codexIbBinaryPath: string | null = null;
   if (agentCli === "codex") {
+    if (coordinatorMode) {
+      return {
+        ok: false,
+        exitCode: 1,
+        stdout: "",
+        stderr: `codex coordinators not yet implemented (per SPEC D9 stub); coordinator.model must use a claude:<model> form. Pending Phase 9 coordinator support.`,
+      };
+    }
     const { resolveIbBinaryPath } = await import("./codex-spawn");
     const { isCodexSafeBinaryPath } = await import("./codex-config");
     codexIbBinaryPath = resolveIbBinaryPath();
@@ -3605,8 +3620,10 @@ export async function newAgent(
       //   2. Generate a per-agent <worktree>/AGENTS.md — codex reads this
       //      natively at session start (the codex analog of the claude
       //      session-start prompt injection).
-      // Coordinator mode + codex was rejected up-front in coordinator.ts —
-      // see SPEC §D9 stub; we never reach this branch with coordinatorMode set.
+      // Coordinator+codex was rejected up-front in the codex precondition
+      // block above (SPEC §D9 stub) — both the system coordinator (handled
+      // in coordinator.ts) and the per-repo coordinator (handled here in
+      // newAgent) refuse codex models before any side-effects.
       const { appendCodexGitignoreEntry, writeCodexAgentsMd } = await import("./codex-spawn");
       const { detectRole } = await import("./hooks/session-start");
       try {

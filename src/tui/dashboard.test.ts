@@ -503,6 +503,76 @@ describe("TmuxPaneComponent scroll logic", () => {
     expect(rendered).not.toContain("gpt-5.5 default");
   });
 
+  describe("trimInputSeparator on real codex tmux captures", () => {
+    // These fixtures are real `S`-key snapshots from codex agents where the
+    // dashboard mis-rendered the input box at the bottom of the tmux pane.
+    // Each capture ends with the codex input chrome:
+    //
+    //   › Improve documentation in @filename
+    //
+    //     <model> · <cwd>
+    //
+    // All four also contain codex section dividers (full-width "─" lines)
+    // higher in the buffer — those dividers were tripping
+    // findLastTwoSeparators, which was designed for Claude's input chrome.
+    //
+    // Expected: trim everything from the "›" line down, and surface the
+    // status bar as statusLines.
+
+    async function readFixture(name: string): Promise<string> {
+      const text = await Bun.file(
+        new URL(`../fixtures/${name}`, import.meta.url),
+      ).text();
+      // Snapshot files are written by handleSnapshot with a two-line header
+      // followed by a blank line, then the raw tmux capture. Strip the header.
+      const idx = text.indexOf("\n\n");
+      return idx >= 0 ? text.slice(idx + 2) : text;
+    }
+
+    function makeCodexPane(rawOutput: string): TmuxPaneComponent {
+      const pane = new TmuxPaneComponent();
+      pane.agent = makeAgent("agent-codex", "/tmp/test");
+      pane.agent.meta.model = "codex:gpt-5.5";
+      pane.hasPolled = true;
+      pane.displayHeight = 40;
+      pane.trimInputSeparator = true;
+      pane.rawOutput = rawOutput;
+      return pane;
+    }
+
+    const fixtures = [
+      "codex-snapshot-input-fail-1.txt",
+      "codex-snapshot-input-fail-2.txt",
+      "codex-snapshot-input-fail-3.txt",
+      "codex-snapshot-input-fail-4.txt",
+    ];
+
+    for (const fixture of fixtures) {
+      test(`${fixture} — status bar extracted and input chrome trimmed`, async () => {
+        const raw = await readFixture(fixture);
+        const pane = makeCodexPane(raw);
+
+        // Match the real terminal width the captures were taken at — the
+        // status line in every fixture is ~84 chars wide, so 154 leaves room
+        // without wrapping.
+        const width = 154;
+        pane.parseStatusLines(width);
+
+        // The status bar line (model + cwd) must surface in statusLines.
+        expect(pane.statusLines.length).toBeGreaterThan(0);
+        const statusJoined = pane.statusLines.map((l) => stripAnsi(l)).join("\n");
+        expect(statusJoined).toContain("gpt-5.5");
+        expect(statusJoined).toContain("·");
+
+        // The rendered pane must NOT contain the input chrome (placeholder
+        // text or status bar) — those belong to our own input field.
+        const rendered = pane.render(width).map((l) => stripAnsi(l)).join("\n");
+        expect(rendered).not.toContain("Improve documentation in @filename");
+        expect(rendered).not.toContain("gpt-5.5 default ·");
+      });
+    }
+  });
+
   test("resetForAgent clears clientAttached", () => {
     const pane = new TmuxPaneComponent();
     pane.clientAttached = true;

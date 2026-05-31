@@ -55,6 +55,7 @@ import { buildPerRepoCoordinatorSettings, checkCoordinatorExists, getCoordinator
 import { loadAgentType, agentTypeExists } from "./agent-types";
 import type { AgentType } from "./agent-types";
 import { parseModel } from "./agent-cli";
+import { isKnownModel, listKnownSelectorsForCli } from "./known-models";
 import {
   buildHooksBlock,
   COORDINATOR_INTERCEPT_MATCHER,
@@ -3428,6 +3429,26 @@ export async function newAgent(
         exitCode: 1,
         stdout: "",
         stderr: `codex coordinators not yet implemented (per SPEC D9 stub); coordinator.model must use a claude:<model> form. Pending Phase 9 coordinator support.`,
+      };
+    }
+    // Reject codex models not in our static allow-list before the codex CLI
+    // is launched. Without this, an unsupported model (e.g. gpt-5.3-codex
+    // on a ChatGPT-plan account) starts the agent, hits an HTTP 400 after
+    // the first prompt, and leaves the user with a stuck "unknown"-state
+    // agent that has to be nuked manually. KNOWN_MODELS is the source of
+    // truth — update it when codex adds new models that are reachable on
+    // the typical ChatGPT-plan account. See src/known-models.ts.
+    if (!isKnownModel(parsed)) {
+      const valid = listKnownSelectorsForCli("codex");
+      return {
+        ok: false,
+        exitCode: 1,
+        stdout: "",
+        stderr:
+          `Codex model '${modelFlagValue}' is not supported. Valid models: ${valid.join(", ")}. ` +
+          `Note: ChatGPT-plan and API-key codex accounts expose different model sets; ` +
+          `if the model you want is missing here, it may not be reachable on a ChatGPT plan. ` +
+          `Run 'ib list-models' for the full list.`,
       };
     }
     const { resolveIbBinaryPath } = await import("./codex-spawn");

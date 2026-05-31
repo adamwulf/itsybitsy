@@ -261,6 +261,56 @@ describe("CLI arg parsing", () => {
     expect(exitCode).toBe(0);
   });
 
+  test("--help shows usage block including list-models", async () => {
+    const { stdout, exitCode } = await runCli(["--help"]);
+    expect(stdout).toContain("ib — Cross-repo agent dashboard");
+    expect(stdout).toContain("list-models");
+    expect(exitCode).toBe(0);
+  });
+
+  test("-h shows usage block", async () => {
+    const { stdout, exitCode } = await runCli(["-h"]);
+    expect(stdout).toContain("ib — Cross-repo agent dashboard");
+    expect(stdout).toContain("list-models");
+    expect(exitCode).toBe(0);
+  });
+
+  test("help command shows usage block", async () => {
+    const { stdout, exitCode } = await runCli(["help"]);
+    expect(stdout).toContain("ib — Cross-repo agent dashboard");
+    expect(stdout).toContain("list-models");
+    expect(exitCode).toBe(0);
+  });
+
+  test("list-models prints grouped selectors for both CLIs", async () => {
+    const { stdout, exitCode } = await runCli(["list-models"]);
+    expect(stdout).toContain("CLAUDE");
+    expect(stdout).toContain("CODEX");
+    expect(stdout).toContain("claude:opus");
+    expect(stdout).toContain("codex:gpt-5-codex");
+    expect(exitCode).toBe(0);
+  });
+
+  test("models alias works", async () => {
+    const { stdout, exitCode } = await runCli(["models"]);
+    expect(stdout).toContain("claude:opus");
+    expect(stdout).toContain("codex:gpt-5-codex");
+    expect(exitCode).toBe(0);
+  });
+
+  test("list-models --json emits valid JSON of known models", async () => {
+    const { stdout, exitCode } = await runCli(["list-models", "--json"]);
+    expect(exitCode).toBe(0);
+    const parsed = JSON.parse(stdout);
+    expect(Array.isArray(parsed)).toBe(true);
+    expect(parsed.length).toBeGreaterThan(0);
+    for (const entry of parsed) {
+      expect(typeof entry.cli).toBe("string");
+      expect(typeof entry.model).toBe("string");
+      expect(entry.full).toBe(`${entry.cli}:${entry.model}`);
+    }
+  });
+
   test("list with no repos shows message", async () => {
     const { stdout, exitCode } = await runCli(["list"]);
     expect(stdout).toContain("No repos registered");

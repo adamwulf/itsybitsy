@@ -39,7 +39,7 @@ import type { Agent, FlatEntry, PendingQuestion } from "../agents";
 import { stripAnsi } from "../parse-state";
 import { SplitPane } from "./split-pane";
 import { wrapLines, wordWrapLines, padLines, findLastTwoSeparators } from "./wrap";
-import { fetchUsage } from "../usage";
+import { fetchCodexUsage, fetchUsage } from "../usage";
 import type { UsageData } from "../usage";
 import { getStateColors, setupColorSchemeDetection } from "./color-scheme";
 import { AgentTreeComponent } from "./agent-tree";
@@ -363,8 +363,10 @@ function padToWidth(str: string, width: number): string {
 class StatusBarComponent implements Component {
   pendingQuestions = 0;
   errorCount = 0;
-  usage: UsageData | null = null;
-  usageError = false;
+  claudeUsage: UsageData | null = null;
+  claudeUsageError = false;
+  codexUsage: UsageData | null = null;
+  codexUsageError = false;
   version = "";
   repoHeaderSelected = false;
   hasResolvableWarnings = false;
@@ -378,24 +380,25 @@ class StatusBarComponent implements Component {
     const errBadge = this.errorCount > 0
       ? `  ${BOLD}${RED}[${this.errorCount} errors]${RESET}${DIM}`
       : "";
-    const usageStr = this.formatUsage();
+    const claudeUsageStr = this.formatUsage("claude", this.claudeUsage, this.claudeUsageError);
+    const codexUsageStr = this.formatUsage("codex", this.codexUsage, this.codexUsageError);
     const now = new Date();
     const timeStr = now.toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
     const versionStr = this.version ? `v${this.version}` : "";
-    const row2Right = `${DIM}${timeStr}  ${versionStr}${RESET}`;
+    const row2Right = this.composeRight(codexUsageStr, versionStr ? `${DIM}${versionStr}${RESET}` : "");
 
     let row1Left: string;
     let row2Left: string;
     if (this.repoHeaderSelected) {
       const fixHint = this.hasResolvableWarnings ? "    f: fix" : "";
       row1Left = `${DIM}j/k: select    J/K: repo    ;/l: scroll    p/n: pane    ${qLabel}${errBadge}${RESET}`;
-      row2Left = `${DIM}@: jump    /: commands    a: new agent    ?: help    h: setup    A: add repo${fixHint}${RESET}`;
+      row2Left = `${DIM}${timeStr}  @: jump    /: commands    a: new agent    ?: help    h: setup    A: add repo${fixHint}${RESET}`;
     } else {
       row1Left = `${DIM}j/k: select    J/K: repo    ;/l: scroll    p/n: pane    ${qLabel}    s: send    m: merge${errBadge}${RESET}`;
-      row2Left = `${DIM}@: jump    /: commands    a: new agent    ?: help    h: setup    x: kill${RESET}`;
+      row2Left = `${DIM}${timeStr}  @: jump    /: commands    a: new agent    ?: help    h: setup    x: kill${RESET}`;
     }
 
-    const row1 = this.composeLine(row1Left, usageStr, width);
+    const row1 = this.composeLine(row1Left, claudeUsageStr, width);
     const row2 = this.composeLine(row2Left, row2Right, width);
 
     return [row1, row2];
@@ -409,26 +412,31 @@ class StatusBarComponent implements Component {
     return truncateToWidth(left + " ".repeat(gap) + right, width, "");
   }
 
-  private formatUsage(): string {
-    const prefix = this.usageError ? "⚠️  " : "";
-    if (!this.usage) {
-      return this.usageError ? `${YELLOW}⚠️  usage unavailable${RESET}` : "";
+  private composeRight(primary: string, secondary: string): string {
+    if (primary && secondary) return `${primary}  ${secondary}`;
+    return primary || secondary;
+  }
+
+  private formatUsage(label: "claude" | "codex", usage: UsageData | null, usageError: boolean): string {
+    const prefix = usageError ? "⚠️  " : "";
+    if (!usage) {
+      return usageError ? `${YELLOW}⚠️  ${label} usage unavailable${RESET}` : "";
     }
     const parts: string[] = [];
-    if (this.usage.sessionPct !== null) {
-      const pct = this.usage.sessionPct;
+    if (usage.sessionPct !== null) {
+      const pct = usage.sessionPct;
       const color = pct > 90 ? RED : pct > 80 ? YELLOW : DIM;
-      const reset = this.usage.sessionReset ? ` (${this.usage.sessionReset})` : "";
+      const reset = usage.sessionReset ? ` (${usage.sessionReset})` : "";
       parts.push(`${color}session:${pct}%${reset}${RESET}`);
     }
-    if (this.usage.weeklyPct !== null) {
-      const pct = this.usage.weeklyPct;
+    if (usage.weeklyPct !== null) {
+      const pct = usage.weeklyPct;
       const color = pct > 90 ? RED : pct > 80 ? YELLOW : DIM;
-      const reset = this.usage.weeklyReset ? ` (${this.usage.weeklyReset})` : "";
+      const reset = usage.weeklyReset ? ` (${usage.weeklyReset})` : "";
       parts.push(`${color}weekly:${pct}%${reset}${RESET}`);
     }
     if (parts.length === 0) return "";
-    return prefix + parts.join("  ");
+    return `${prefix}${label} ${parts.join("  ")}`;
   }
 }
 
@@ -993,12 +1001,23 @@ export class DashboardComponent implements Component {
   private refreshUsage() {
     fetchUsage()
       .then((result) => {
-        this.statusBar.usage = result.data;
-        this.statusBar.usageError = result.error;
+        this.statusBar.claudeUsage = result.data;
+        this.statusBar.claudeUsageError = result.error;
         this.tui?.requestRender();
       })
       .catch(() => {
-        this.statusBar.usageError = true;
+        this.statusBar.claudeUsageError = true;
+        this.tui?.requestRender();
+      });
+
+    fetchCodexUsage()
+      .then((result) => {
+        this.statusBar.codexUsage = result.data;
+        this.statusBar.codexUsageError = result.error;
+        this.tui?.requestRender();
+      })
+      .catch(() => {
+        this.statusBar.codexUsageError = true;
         this.tui?.requestRender();
       });
   }

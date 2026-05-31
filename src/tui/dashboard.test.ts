@@ -3429,13 +3429,13 @@ describe("usage error indicator", () => {
 
     // Simulate an error fetch that returned stale data
     // Access the private statusBar via the dashboard's render
-    (dashboard as any).statusBar.usage = { sessionPct: 57, weeklyPct: 35, sessionReset: "44m", weeklyReset: "2d 7h" };
-    (dashboard as any).statusBar.usageError = true;
+    (dashboard as any).statusBar.claudeUsage = { sessionPct: 57, weeklyPct: 35, sessionReset: "44m", weeklyReset: "2d 7h" };
+    (dashboard as any).statusBar.claudeUsageError = true;
 
     const lines = dashboard.render(160);
     const footer = lines.map(l => stripAnsi(l)).join("\n");
     expect(footer).toContain("⚠️");
-    expect(footer).toContain("session:57%");
+    expect(footer).toContain("claude session:57%");
   });
 
   test("shows 'usage unavailable' when error with no data", () => {
@@ -3447,12 +3447,12 @@ describe("usage error indicator", () => {
     ];
     dashboard.onUpdate([agent], flatList, []);
 
-    (dashboard as any).statusBar.usage = null;
-    (dashboard as any).statusBar.usageError = true;
+    (dashboard as any).statusBar.claudeUsage = null;
+    (dashboard as any).statusBar.claudeUsageError = true;
 
     const lines = dashboard.render(160);
     const footer = lines.map(l => stripAnsi(l)).join("\n");
-    expect(footer).toContain("⚠️  usage unavailable");
+    expect(footer).toContain("⚠️  claude usage unavailable");
   });
 
   test("no warning when fetch succeeds", () => {
@@ -3464,13 +3464,13 @@ describe("usage error indicator", () => {
     ];
     dashboard.onUpdate([agent], flatList, []);
 
-    (dashboard as any).statusBar.usage = { sessionPct: 57, weeklyPct: 35, sessionReset: "44m", weeklyReset: "2d 7h" };
-    (dashboard as any).statusBar.usageError = false;
+    (dashboard as any).statusBar.claudeUsage = { sessionPct: 57, weeklyPct: 35, sessionReset: "44m", weeklyReset: "2d 7h" };
+    (dashboard as any).statusBar.claudeUsageError = false;
 
     const lines = dashboard.render(160);
     const footer = lines.map(l => stripAnsi(l)).join("\n");
     expect(footer).not.toContain("⚠️");
-    expect(footer).toContain("session:57%");
+    expect(footer).toContain("claude session:57%");
   });
 
   test("no warning and no usage text when no data and no error", () => {
@@ -3482,14 +3482,33 @@ describe("usage error indicator", () => {
     ];
     dashboard.onUpdate([agent], flatList, []);
 
-    (dashboard as any).statusBar.usage = null;
-    (dashboard as any).statusBar.usageError = false;
+    (dashboard as any).statusBar.claudeUsage = null;
+    (dashboard as any).statusBar.claudeUsageError = false;
 
     const lines = dashboard.render(160);
     const footer = lines.map(l => stripAnsi(l)).join("\n");
     expect(footer).not.toContain("⚠️");
     expect(footer).not.toContain("usage unavailable");
     expect(footer).not.toContain("session:");
+  });
+
+  test("shows codex usage on the second status row and time before jump", () => {
+    const dashboard = makeDashboard();
+    const agent = makeAgent("agent-1", "/repos/a");
+    const flatList: FlatEntry[] = [
+      makeFlatRepoHeader("a", "/repos/a", true),
+      makeFlatAgent(agent, { connector: "└── " }),
+    ];
+    dashboard.onUpdate([agent], flatList, []);
+
+    (dashboard as any).statusBar.codexUsage = { sessionPct: 4, weeklyPct: 1, sessionReset: "5h 0m", weeklyReset: "7d 0h" };
+    (dashboard as any).statusBar.codexUsageError = false;
+
+    const lines = dashboard.render(160);
+    const statusRows = lines.slice(-2).map(l => stripAnsi(l));
+    expect(statusRows[1]).toMatch(/^\d{2}:\d{2}:\d{2}  @: jump/);
+    expect(statusRows[1]).toContain("codex session:4%");
+    expect(statusRows[1]).toContain("weekly:1%");
   });
 });
 

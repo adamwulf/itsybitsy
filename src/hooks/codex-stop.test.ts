@@ -104,6 +104,48 @@ describe("hookCodexStop — writes deterministic state", () => {
     expect(meta.state).toBe("complete");
   });
 
+  test("complete with active git modifications replies with commit reminder and marks running", async () => {
+    const { capture, restore } = captureStdout();
+    try {
+      await hookCodexStop("agent-stop01", {
+        rawStdin: JSON.stringify({
+          cwd: agentDir,
+          last_assistant_message: "all clean\nI HAVE COMPLETED THE GOAL",
+        }),
+        agentDirOverride: agentDir,
+        checkGitStatus: async () => " M src/file.ts\n",
+      });
+    } finally {
+      restore();
+    }
+
+    const meta = await Bun.file(join(agentDir, "meta.json")).json();
+    expect(meta.state).toBe("running");
+    const parsed = JSON.parse(capture.join(""));
+    expect(parsed.systemMessage).toContain("uncommitted changes");
+    expect(parsed.systemMessage).toContain("git add && git commit");
+  });
+
+  test("complete with clean git status emits the normal stop no-op", async () => {
+    const { capture, restore } = captureStdout();
+    try {
+      await hookCodexStop("agent-stop01", {
+        rawStdin: JSON.stringify({
+          cwd: agentDir,
+          last_assistant_message: "all clean\nI HAVE COMPLETED THE GOAL",
+        }),
+        agentDirOverride: agentDir,
+        checkGitStatus: async () => "",
+      });
+    } finally {
+      restore();
+    }
+
+    const meta = await Bun.file(join(agentDir, "meta.json")).json();
+    expect(meta.state).toBe("complete");
+    expect(JSON.parse(capture.join(""))).toEqual({});
+  });
+
   test("emits valid JSON and exits 0 on invalid agent id (argv parse failure)", async () => {
     const { capture, restore } = captureStdout();
     try {

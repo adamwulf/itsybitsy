@@ -216,7 +216,7 @@ describe("buildCodexLaunchArgs — disables codex's native multi-agent feature",
     expect(args).toContain('commit_attribution=""');
     expect(args).toContain('log_dir="/var/agents/agent-abc123/codex"');
     expect(args).toContain("tui.show_tooltips=false");
-    expect(args).toContain('tui.status_line=["model-with-reasoning","current-dir","five-hour-limit","weekly-limit"]');
+    expect(args).toContain('tui.status_line=["model-with-reasoning","context-remaining","five-hour-limit","weekly-limit"]');
   });
 });
 
@@ -268,7 +268,7 @@ describe("buildCodexLaunchArgs — log_dir and tui.show_tooltips flags", () => {
     expect(foundAt).toBeGreaterThanOrEqual(0);
   });
 
-  test("appends `-c tui.status_line=[...]` with Codex limit usage items", () => {
+  test("appends `-c tui.status_line=[...]` with Codex context and limit usage items", () => {
     const { args } = buildCodexLaunchArgs({
       ibBinaryPath: "/usr/local/bin/ib",
       agentId: "agent-abc123",
@@ -278,7 +278,7 @@ describe("buildCodexLaunchArgs — log_dir and tui.show_tooltips flags", () => {
     for (let i = 0; i < args.length - 1; i++) {
       if (
         args[i] === "-c" &&
-        args[i + 1] === 'tui.status_line=["model-with-reasoning","current-dir","five-hour-limit","weekly-limit"]'
+        args[i + 1] === 'tui.status_line=["model-with-reasoning","context-remaining","five-hour-limit","weekly-limit"]'
       ) {
         foundAt = i;
         break;

@@ -700,18 +700,6 @@ export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
       }
     }
 
-    // Codex resume is Phase 7 (SPEC §5.8). Reject cleanly BEFORE the tmux
-    // has-session probe so we don't issue a needless tmux call for the
-    // not-yet-implemented path (MED 1 from the Phase 4 review).
-    if (resumeCli === "codex") {
-      return {
-        ok: false,
-        exitCode: 1,
-        stdout: "",
-        stderr: `codex resume not yet implemented (agent ${agent.id} uses ${rawModel}); pending Phase 7 of SPEC-CODEX-MODEL.md`,
-      };
-    }
-
     // Resume is allowed when no live tmux session exists for the agent. We don't
     // trust meta.state here because legacy paused agents (pre-Phase 42) may have a
     // stale state like "complete" or "waiting" that pause never overwrote. Checking
@@ -734,47 +722,8 @@ export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
       return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' is still being created — wait for spawn to complete before resuming` };
     }
 
-    // Read session_id from meta.json
-    const sessionId = agent.meta.session_id;
-    if (!sessionId || sessionId === "null") {
-      return { ok: false, exitCode: 1, stdout: "", stderr: "No session_id found in meta.json" };
-    }
-
-    // Validate session_id before shell interpolation
-    if (!isValidSessionId(sessionId)) {
-      return { ok: false, exitCode: 1, stdout: "", stderr: `Invalid session ID: ${sessionId}` };
-    }
-
-    // `model` is the local alias used by the existing claude-resume code path
-    // below (claudeArgs construction, log line interpolation). Keep the name
-    // for minimal diff to the post-codex-reject claude path.
-    const model = rawModel;
-
     // Tmux session was validated at the top of resumeAgent (liveness guard).
     const tmuxSession = agent.meta.tmux_session;
-
-    // Detect yolo mode from start.sh
-    let yoloMode = false;
-    try {
-      const startSh = await Bun.file(join(agentDir, "start.sh")).text();
-      if (startSh.includes("dangerously-skip-permissions")) {
-        yoloMode = true;
-      }
-    } catch { /* start.sh may not exist */ }
-
-    // Build claude args
-    let claudeArgs = "";
-    if (yoloMode) {
-      claudeArgs = "--dangerously-skip-permissions --permission-mode bypassPermissions";
-    }
-    if (modelFlagValue) {
-      claudeArgs = claudeArgs ? `${claudeArgs} --model ${modelFlagValue}` : `--model ${modelFlagValue}`;
-    }
-
-    // Note: per-repo coordinators never reach this point — the early branch at
-    // the top of resumeAgent routes them to resetCoordinator instead. So no
-    // need to re-thread --settings to the (no-longer-relevant) saved coordinator
-    // settings file here.
 
     // Validate paths for shell script interpolation
     if (!isValidShellPath(agentDir)) {
@@ -792,17 +741,109 @@ export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
 
     // Build exit script path
     const absExitScript = join(agentDir, "exit-check.sh");
-
-    // Shell-quote all paths for safe interpolation
-    const qAgentDir = shellQuote(agentDir);
-    const qAbsExitScript = shellQuote(absExitScript);
-
-    // Write resume.sh
     const resumeScript = join(agentDir, "resume.sh");
-    const qMetaJson = shellQuote(join(agentDir, "meta.json"));
-    const qAgentLog = shellQuote(join(agentDir, "agent.log"));
-    const qResumeStderrLog = shellQuote(join(agentDir, "claude.stderr.log"));
-    const resumeContent = `#!/bin/bash
+
+    let yoloMode = false;
+    if (resumeCli === "codex") {
+      // ── Codex resume branch (SPEC §5.8 + §6 Phase 7) ─────────────────────────
+      // Read codex's rollout/session id (NOT the claude session_id UUID).
+      // Captured by SessionStart/PreToolUse hooks on first launch.
+      const codexSessionId = agent.meta.codex_session_id;
+      if (!codexSessionId || codexSessionId === "null" || codexSessionId.trim() === "") {
+        return {
+          ok: false,
+          exitCode: 1,
+          stdout: "",
+          stderr: `Cannot resume codex agent '${agent.id}': codex_session_id not yet captured (SessionStart hook never fired). Try nuking + respawning instead.`,
+        };
+      }
+      if (!isValidSessionId(codexSessionId)) {
+        return {
+          ok: false,
+          exitCode: 1,
+          stdout: "",
+          stderr: `Invalid codex_session_id for agent '${agent.id}': ${codexSessionId}`,
+        };
+      }
+
+      // Resolve the absolute `ib` binary path (codex hook dispatch needs it).
+      // Same path-safety check that gates the spawn-side codex launch.
+      const { resolveIbBinaryPath } = await import("./codex-spawn");
+      const { isCodexSafeBinaryPath } = await import("./codex-config");
+      const codexIbBinaryPath = resolveIbBinaryPath();
+      if (!codexIbBinaryPath) {
+        return {
+          ok: false,
+          exitCode: 1,
+          stdout: "",
+          stderr: "Error: codex resume requires an absolute path to the `ib` binary, but `ib` is not on PATH. Install ib and ensure it is reachable via PATH before resuming a codex agent.",
+        };
+      }
+      if (!isCodexSafeBinaryPath(codexIbBinaryPath)) {
+        return {
+          ok: false,
+          exitCode: 1,
+          stdout: "",
+          stderr: `Error: Unsafe ib binary path for codex resume: ${JSON.stringify(codexIbBinaryPath)} contains quotes, backslashes, or control characters. Reinstall ib to a path made of printable ASCII with no apostrophes, quotes, or backslashes.`,
+        };
+      }
+
+      // Build resume.sh via the shared codex builder (mirrors start.sh).
+      const { buildCodexResumeContent } = await import("./codex-spawn");
+      const codexResumeContent = buildCodexResumeContent({
+        agentId: agent.id,
+        ibBinaryPath: codexIbBinaryPath,
+        codexSessionId,
+        absMetaJson: join(agentDir, "meta.json"),
+        absExitScript,
+        absAgentLog: join(agentDir, "agent.log"),
+        absStderrLog: join(agentDir, "claude.stderr.log"),
+      });
+      await Bun.write(resumeScript, codexResumeContent);
+      await chmod(resumeScript, 0o755);
+    } else {
+      // ── Claude resume branch (unchanged) ─────────────────────────────────────
+      // Read session_id from meta.json
+      const sessionId = agent.meta.session_id;
+      if (!sessionId || sessionId === "null") {
+        return { ok: false, exitCode: 1, stdout: "", stderr: "No session_id found in meta.json" };
+      }
+
+      // Validate session_id before shell interpolation
+      if (!isValidSessionId(sessionId)) {
+        return { ok: false, exitCode: 1, stdout: "", stderr: `Invalid session ID: ${sessionId}` };
+      }
+
+      // Detect yolo mode from start.sh
+      try {
+        const startSh = await Bun.file(join(agentDir, "start.sh")).text();
+        if (startSh.includes("dangerously-skip-permissions")) {
+          yoloMode = true;
+        }
+      } catch { /* start.sh may not exist */ }
+
+      // Build claude args
+      let claudeArgs = "";
+      if (yoloMode) {
+        claudeArgs = "--dangerously-skip-permissions --permission-mode bypassPermissions";
+      }
+      if (modelFlagValue) {
+        claudeArgs = claudeArgs ? `${claudeArgs} --model ${modelFlagValue}` : `--model ${modelFlagValue}`;
+      }
+
+      // Note: per-repo coordinators never reach this point — the early branch at
+      // the top of resumeAgent routes them to resetCoordinator instead. So no
+      // need to re-thread --settings to the (no-longer-relevant) saved coordinator
+      // settings file here.
+
+      // Shell-quote all paths for safe interpolation
+      const qAbsExitScript = shellQuote(absExitScript);
+
+      // Write resume.sh
+      const qMetaJson = shellQuote(join(agentDir, "meta.json"));
+      const qAgentLog = shellQuote(join(agentDir, "agent.log"));
+      const qResumeStderrLog = shellQuote(join(agentDir, "claude.stderr.log"));
+      const resumeContent = `#!/bin/bash
 # Clear Claude Code nesting detection so agents can start their own claude process
 unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT
 
@@ -888,8 +929,9 @@ fi
 # Run exit check
 ${qAbsExitScript}
 `;
-    await Bun.write(resumeScript, resumeContent);
-    await chmod(resumeScript, 0o755);
+      await Bun.write(resumeScript, resumeContent);
+      await chmod(resumeScript, 0o755);
+    }
 
     // Ensure tmux server is running
     const startServerResult = await nukeResumeSpawnCtx.run(["tmux", "start-server"]);

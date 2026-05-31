@@ -2129,15 +2129,18 @@ describe("resumeAgent (native)", () => {
     });
   });
 
-  // ── codex resume (Phase 4 stub — full codex resume is Phase 7) ───────────────
-  test("refuses to resume a codex agent with a clear 'not yet implemented' message", async () => {
+  // ── codex resume (SPEC-CODEX-MODEL.md §5.8 + §6 Phase 7) ────────────────────
+  // The full Phase 7 test suite (resume.sh content, precheck, claude byte
+  // snapshot regression guard) lives in dedicated test commits — these two
+  // tests are the minimum smoke-coverage for the structural change.
+  test("refuses to resume codex agent when codex_session_id is missing", async () => {
     const agentDir = join(tempDir, ".ittybitty", "agents", "agent-codex01");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-codex01",
       tmux_session: "tmux-agent-codex01",
-      session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
       model: "codex:gpt-5.4-mini",
+      // No codex_session_id — SessionStart hook never fired.
     }));
 
     const agent = _makeAgent({
@@ -2146,7 +2149,6 @@ describe("resumeAgent (native)", () => {
       repoName: "test",
       state: "stopped",
       meta: {
-        session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
         tmux_session: "tmux-agent-codex01",
         model: "codex:gpt-5.4-mini",
       } as any,
@@ -2154,30 +2156,21 @@ describe("resumeAgent (native)", () => {
     const result = await resumeAgent(agent);
 
     expect(result.ok).toBe(false);
-    expect(result.stderr).toContain("codex resume not yet implemented");
-    expect(result.stderr).toContain("Phase 7");
+    expect(result.stderr).toContain("codex_session_id not yet captured");
+    // resume.sh must not be written.
+    const resumeShExists = await Bun.file(join(agentDir, "resume.sh")).exists();
+    expect(resumeShExists).toBe(false);
   });
 
-  // MED 1 from Phase 4 review: codex resume reject fires BEFORE any tmux work.
-  test("MED 1: codex resume reject fires before any tmux call (no wasted work)", async () => {
+  test("refuses to resume codex agent when codex_session_id is malformed", async () => {
     const agentDir = join(tempDir, ".ittybitty", "agents", "agent-codex02");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-codex02",
       tmux_session: "tmux-agent-codex02",
-      session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
       model: "codex:gpt-5.4-mini",
+      codex_session_id: "not-a-valid-uuid!@#",
     }));
-
-    // Track all spawn calls — codex reject must short-circuit before
-    // the `tmux has-session` probe runs.
-    const spawnCalls: string[][] = [];
-    const trackedSpawn = (cmd: string[]): SpawnResult => {
-      spawnCalls.push(cmd);
-      return makeSpawnResult();
-    };
-    lifecycleSpawnCtx.set(trackedSpawn);
-    setNukeResumeSpawnRunner(trackedSpawn);
 
     const agent = _makeAgent({
       id: "agent-codex02",
@@ -2185,20 +2178,15 @@ describe("resumeAgent (native)", () => {
       repoName: "test",
       state: "stopped",
       meta: {
-        session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
         tmux_session: "tmux-agent-codex02",
         model: "codex:gpt-5.4-mini",
+        codex_session_id: "not-a-valid-uuid!@#",
       } as any,
     });
     const result = await resumeAgent(agent);
 
     expect(result.ok).toBe(false);
-    expect(result.stderr).toContain("codex resume not yet implemented");
-    // No tmux command issued — reject fired before the tmux probe.
-    const cmdStrs = spawnCalls.map((c) => c.join(" "));
-    expect(cmdStrs.some((c) => c.includes("tmux has-session"))).toBe(false);
-    expect(cmdStrs.some((c) => c.includes("tmux new-session"))).toBe(false);
-    // resume.sh must not be written either.
+    expect(result.stderr).toContain("Invalid codex_session_id");
     const resumeShExists = await Bun.file(join(agentDir, "resume.sh")).exists();
     expect(resumeShExists).toBe(false);
   });

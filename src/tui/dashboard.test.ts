@@ -416,6 +416,37 @@ describe("TmuxPaneComponent scroll logic", () => {
     expect(allText).not.toContain("[opened in terminal]");
   });
 
+  test("trimInputSeparator removes Codex prompt chrome and preserves status line", () => {
+    const pane = new TmuxPaneComponent();
+    pane.agent = makeAgent("agent-codex", "/tmp/test");
+    pane.hasPolled = true;
+    pane.displayHeight = 10;
+    pane.trimInputSeparator = true;
+    pane.rawOutput = [
+      "• SessionStart hook (completed)",
+      "  hook context:",
+      "",
+      "• WAITING",
+      "",
+      "",
+      "› Use /skills to list available skills",
+      "",
+      "  gpt-5.5 default · ~/Developer/muse/muse-ios/.ittybitty/agents/agent-c8fc00e0/repo",
+      "",
+      "",
+    ].join("\n");
+
+    pane.parseStatusLines(120);
+    expect(pane.statusLines).toEqual([
+      "  gpt-5.5 default · ~/Developer/muse/muse-ios/.ittybitty/agents/agent-c8fc00e0/repo",
+    ]);
+
+    const rendered = pane.render(120).map((line) => stripAnsi(line)).join("\n");
+    expect(rendered).toContain("• WAITING");
+    expect(rendered).not.toContain("Use /skills");
+    expect(rendered).not.toContain("gpt-5.5 default");
+  });
+
   test("resetForAgent clears clientAttached", () => {
     const pane = new TmuxPaneComponent();
     pane.clientAttached = true;
@@ -4703,4 +4734,3 @@ describe("DashboardComponent — §17 Teams panel wiring", () => {
     expect(loadCalls).toBe(0);
   });
 });
-

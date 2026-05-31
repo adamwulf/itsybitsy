@@ -460,7 +460,80 @@ export async function resolveTarget(
   return { agent: globalResult.match, isSystemCoordinator: false };
 }
 
+function printUsage(): void {
+  console.log("ib — Cross-repo agent dashboard");
+  console.log("");
+  console.log("Registry:");
+  console.log("  add [path]          Register a repo (default: cwd)");
+  console.log("  remove <path>       Unregister a repo");
+  console.log("  list, ls            List repos and their agents (--manager <id>, --json)");
+  console.log("  state               List agents with PID/liveness diagnostics + orphan detection (--manager <id>, --json, --cleanup, --dry-run)");
+  console.log("");
+  console.log("Monitoring:");
+  console.log("  watch               Launch TUI dashboard");
+  console.log("  watchdog <id>       Run per-agent watchdog");
+  console.log("  agents, tree        List all agents with states");
+  console.log("  look <id>           Show agent's live tmux output (--lines N, --all, --follow)");
+  console.log("  status <id>         Show agent's git log and status");
+  console.log("  diff <id>           Show agent's git diff from parent (--stat)");
+  console.log("  log <msg>           Write to agent log (--id <id>, --quiet)");
+  console.log("  parse-state [file]  Parse agent state from text (-v for verbose)");
+  console.log("  info <id>           Show agent's metadata");
+  console.log("");
+  console.log("Communication:");
+  console.log("  send <id> <msg>     Send a message to an agent or @<team> (--from <id>, stdin)");
+  console.log("  ask <question>      Ask user a question (--id <agent-id>)");
+  console.log("  questions, q        Show pending agent questions (--all)");
+  console.log("  acknowledge <qid>   Acknowledge a pending question (alias: ack)");
+  console.log("");
+  console.log("Teams:");
+  console.log("  team create <name>  Create an empty team");
+  console.log("  team add <name> <id>    Add an agent to a team");
+  console.log("  team remove <name> <id> Remove an agent from a team");
+  console.log("  team list           List all teams with member counts");
+  console.log("  team delete <name>  Delete a team");
+  console.log("  roster <name>       List a team's members with repo and state");
+  console.log("");
+  console.log("Agent Lifecycle:");
+  console.log("  new-agent, new      Spawn a new agent");
+  console.log("  kill <id>           Stop an agent without merging");
+  console.log("  nuke <id>           Kill and archive an agent");
+  console.log("  merge <id>          Merge agent's work and close it");
+  console.log("  merge-check <id>    Check if agent is ready to merge");
+  console.log("  resume <id>         Resume a stopped agent");
+  console.log("  respawn [id]        Restart an agent's Claude session in-place (alias: restart)");
+  console.log("                      No-arg form infers the agent from cwd — used by the /respawn slash command");
+  console.log("");
+  console.log("Configuration:");
+  console.log("  config list         List all config keys with values");
+  console.log("  config get <key>    Get a config value");
+  console.log("  config set <k> <v>  Set a config value");
+  console.log("  init-types          Populate ~/.itsybitsy/agent-types/ with built-in types");
+  console.log("  list-types          List available agent types");
+  console.log("  list-models, models  List known <cli>:<model> selectors");
+  console.log("  config add <k> <v>  Add to array config key");
+  console.log("  config remove <k> <v> Remove from array config key");
+  console.log("  config unset <key>  Unset a config key (revert to default)");
+  console.log("");
+  console.log("Hooks:");
+  console.log("  hooks install       Install safety hooks");
+  console.log("  hooks uninstall     Uninstall safety hooks");
+  console.log("  hooks status        Show hook installation status");
+  console.log("  hooks intercept-install    Install intercept hook");
+  console.log("  hooks intercept-uninstall  Uninstall intercept hook");
+  console.log("  hooks intercept-status     Show intercept hook status");
+  console.log("");
+  console.log("Telegram:");
+  console.log("  tgallow <chat_id>   Allow a Telegram chat_id");
+  console.log("  tgdeny <chat_id>    Remove a Telegram chat_id from the allowlist");
+  console.log("  tgsend <text>       Send a message to the configured Telegram chat");
+}
+
 async function main() {
+  if (command === "--help" || command === "-h" || command === "help") {
+    printUsage();
+    return;
+  }
   switch (command) {
     case "add": {
       const target = args[1] ?? process.cwd();
@@ -1837,6 +1910,38 @@ async function main() {
       }
       break;
     }
+    case "list-models":
+    case "models": {
+      const { KNOWN_MODELS } = await import("./known-models");
+      if (args.includes("--json")) {
+        const enriched = KNOWN_MODELS.map((m) => ({ ...m, full: `${m.cli}:${m.model}` }));
+        console.log(JSON.stringify(enriched, null, 2));
+        break;
+      }
+      const byCli = new Map<string, typeof KNOWN_MODELS>();
+      for (const entry of KNOWN_MODELS) {
+        const bucket = byCli.get(entry.cli) ?? [];
+        bucket.push(entry);
+        byCli.set(entry.cli, bucket);
+      }
+      const fullWidth = Math.max(...KNOWN_MODELS.map((m) => `${m.cli}:${m.model}`.length));
+      const pad = (s: string, w: number): string => s + " ".repeat(Math.max(0, w - s.length));
+      const clis = Array.from(byCli.keys()).sort();
+      for (let i = 0; i < clis.length; i++) {
+        const cli = clis[i]!;
+        if (i > 0) console.log("");
+        console.log(cli.toUpperCase());
+        for (const entry of byCli.get(cli)!) {
+          const full = `${entry.cli}:${entry.model}`;
+          if (entry.description) {
+            console.log(`  ${pad(full, fullWidth)} — ${entry.description}`);
+          } else {
+            console.log(`  ${full}`);
+          }
+        }
+      }
+      break;
+    }
     case "config": {
       const { runConfigCommand } = await import("./config-command");
       await runConfigCommand(args.slice(1));
@@ -2081,71 +2186,7 @@ async function main() {
       break;
     }
     default: {
-      console.log("ib — Cross-repo agent dashboard");
-      console.log("");
-      console.log("Registry:");
-      console.log("  add [path]          Register a repo (default: cwd)");
-      console.log("  remove <path>       Unregister a repo");
-      console.log("  list, ls            List repos and their agents (--manager <id>, --json)");
-      console.log("  state               List agents with PID/liveness diagnostics + orphan detection (--manager <id>, --json, --cleanup, --dry-run)");
-      console.log("");
-      console.log("Monitoring:");
-      console.log("  watch               Launch TUI dashboard");
-      console.log("  watchdog <id>       Run per-agent watchdog");
-      console.log("  agents, tree        List all agents with states");
-      console.log("  look <id>           Show agent's live tmux output (--lines N, --all, --follow)");
-      console.log("  status <id>         Show agent's git log and status");
-      console.log("  diff <id>           Show agent's git diff from parent (--stat)");
-      console.log("  log <msg>           Write to agent log (--id <id>, --quiet)");
-      console.log("  parse-state [file]  Parse agent state from text (-v for verbose)");
-      console.log("  info <id>           Show agent's metadata");
-      console.log("");
-      console.log("Communication:");
-      console.log("  send <id> <msg>     Send a message to an agent or @<team> (--from <id>, stdin)");
-      console.log("  ask <question>      Ask user a question (--id <agent-id>)");
-      console.log("  questions, q        Show pending agent questions (--all)");
-      console.log("  acknowledge <qid>   Acknowledge a pending question (alias: ack)");
-      console.log("");
-      console.log("Teams:");
-      console.log("  team create <name>  Create an empty team");
-      console.log("  team add <name> <id>    Add an agent to a team");
-      console.log("  team remove <name> <id> Remove an agent from a team");
-      console.log("  team list           List all teams with member counts");
-      console.log("  team delete <name>  Delete a team");
-      console.log("  roster <name>       List a team's members with repo and state");
-      console.log("");
-      console.log("Agent Lifecycle:");
-      console.log("  new-agent, new      Spawn a new agent");
-      console.log("  kill <id>           Stop an agent without merging");
-      console.log("  nuke <id>           Kill and archive an agent");
-      console.log("  merge <id>          Merge agent's work and close it");
-      console.log("  merge-check <id>    Check if agent is ready to merge");
-      console.log("  resume <id>         Resume a stopped agent");
-      console.log("  respawn [id]        Restart an agent's Claude session in-place (alias: restart)");
-      console.log("                      No-arg form infers the agent from cwd — used by the /respawn slash command");
-      console.log("");
-      console.log("Configuration:");
-      console.log("  config list         List all config keys with values");
-      console.log("  config get <key>    Get a config value");
-      console.log("  config set <k> <v>  Set a config value");
-      console.log("  init-types          Populate ~/.itsybitsy/agent-types/ with built-in types");
-      console.log("  list-types          List available agent types");
-      console.log("  config add <k> <v>  Add to array config key");
-      console.log("  config remove <k> <v> Remove from array config key");
-      console.log("  config unset <key>  Unset a config key (revert to default)");
-      console.log("");
-      console.log("Hooks:");
-      console.log("  hooks install       Install safety hooks");
-      console.log("  hooks uninstall     Uninstall safety hooks");
-      console.log("  hooks status        Show hook installation status");
-      console.log("  hooks intercept-install    Install intercept hook");
-      console.log("  hooks intercept-uninstall  Uninstall intercept hook");
-      console.log("  hooks intercept-status     Show intercept hook status");
-      console.log("");
-      console.log("Telegram:");
-      console.log("  tgallow <chat_id>   Allow a Telegram chat_id");
-      console.log("  tgdeny <chat_id>    Remove a Telegram chat_id from the allowlist");
-      console.log("  tgsend <text>       Send a message to the configured Telegram chat");
+      printUsage();
       break;
     }
   }

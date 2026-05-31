@@ -14,6 +14,7 @@ import { tmpdir } from "os";
 import { join } from "path";
 import {
   buildCodexStartContent,
+  buildCodexResumeContent,
   appendCodexGitignoreEntry,
   stripIttybittyWrapper,
   resolveIbBinaryPath,
@@ -126,6 +127,124 @@ describe("buildCodexStartContent — launch line", () => {
     // to agent.log here.
     expect(content).toContain('log "Starting codex -m gpt-5.4-mini');
     expect(content).toContain("codex agent id=agent-abc12345");
+  });
+});
+
+describe("buildCodexResumeContent — launch line (SPEC §5.8 + §6 Phase 7)", () => {
+  const baseInput = () => ({
+    agentId: "agent-abc12345",
+    ibBinaryPath: "/usr/local/bin/ib",
+    codexSessionId: "019e7b21-cb7d-7f23-8674-11036ed141ef",
+    absMetaJson: "/tmp/test/meta.json",
+    absExitScript: "/tmp/test/exit-check.sh",
+    absAgentLog: "/tmp/test/agent.log",
+    absStderrLog: "/tmp/test/claude.stderr.log",
+  });
+
+  test("launches `codex resume <UUID>` (subcommand form, not the --resume flag)", () => {
+    const content = buildCodexResumeContent(baseInput());
+    // The UUID is shell-quoted by shellQuote (no metacharacters in a UUID, so
+    // single-quoting is the form bun's shellQuote produces).
+    expect(content).toContain("setsid codex resume '019e7b21-cb7d-7f23-8674-11036ed141ef'");
+    expect(content).toContain("codex resume '019e7b21-cb7d-7f23-8674-11036ed141ef'"); // bare-launch arm
+    // MUST NOT use claude's --resume flag pattern.
+    expect(content).not.toContain("--resume");
+  });
+
+  test("re-passes -a never -s workspace-write --dangerously-bypass-hook-trust on resume (Phase 7 Q2)", () => {
+    const content = buildCodexResumeContent(baseInput());
+    expect(content).toContain("-a never");
+    expect(content).toContain("-s workspace-write");
+    expect(content).toContain("--dangerously-bypass-hook-trust");
+  });
+
+  test("re-passes one inline `-c` flag per registered hook event on resume (Phase 7 Q1)", () => {
+    const content = buildCodexResumeContent(baseInput());
+    for (const event of CODEX_REGISTERED_EVENTS) {
+      expect(content).toContain(`'hooks.${event}=[`);
+    }
+  });
+
+  test("each -c payload interpolates the agent id and absolute ib path", () => {
+    const content = buildCodexResumeContent(baseInput());
+    expect(content).toContain("/usr/local/bin/ib hooks codex-pre-tool-use agent-abc12345");
+    expect(content).toContain("/usr/local/bin/ib hooks codex-session-start agent-abc12345");
+    expect(content).toContain("/usr/local/bin/ib hooks codex-stop agent-abc12345");
+  });
+
+  test("captures the PID into CLAUDE_PID (kept for back-compat with the watchdog)", () => {
+    const content = buildCodexResumeContent(baseInput());
+    expect(content).toContain("CLAUDE_PID=$!");
+    // PID writeback routes through `ib write-pid` (Phase 4 HIGH 2 — same as start.sh).
+    expect(content).toContain(`'/usr/local/bin/ib' write-pid 'agent-abc12345' "$CLAUDE_PID"`);
+  });
+
+  test("includes the SIGHUP-ignore trap (mirrors the claude resume.sh insulation)", () => {
+    const content = buildCodexResumeContent(baseInput());
+    expect(content).toContain("trap '' HUP");
+  });
+
+  test("offers both setsid and bare-launch paths", () => {
+    const content = buildCodexResumeContent(baseInput());
+    expect(content).toContain("setsid codex resume");
+    expect(content).toMatch(/else\s*\n\s*codex resume/);
+  });
+
+  test("includes the exit-code annotation table (matches start.sh)", () => {
+    const content = buildCodexResumeContent(baseInput());
+    expect(content).toContain("exit=0 → clean exit");
+    expect(content).toContain("exit=127 → command not found");
+    expect(content).toContain("exit=129 → SIGHUP");
+    expect(content).toContain("exit=143 → SIGTERM");
+  });
+
+  test("dumps codex stderr tail into agent.log on non-clean exit", () => {
+    const content = buildCodexResumeContent(baseInput());
+    expect(content).toContain('"$EXIT_CODE" -ne 0 && -s "$STDERR_LOG"');
+    expect(content).toContain("tail -n 50");
+  });
+
+  test("does NOT pass `-m <model>` on resume — model is bound to the rollout", () => {
+    const content = buildCodexResumeContent(baseInput());
+    // `codex resume` re-attaches an existing session; no -m needed.
+    // The shell-quoted form would be `-m '<model>'` (with quotes), so the
+    // bare `-m ` (with trailing space) suffices to assert absence.
+    expect(content).not.toMatch(/\bcodex resume[^\n]* -m /);
+  });
+
+  test("does NOT pass a positional prompt — resume continues an existing session", () => {
+    const content = buildCodexResumeContent(baseInput());
+    expect(content).not.toContain("$(cat ");
+  });
+
+  test("rejects an unsafe ib binary path", () => {
+    expect(() =>
+      buildCodexResumeContent({
+        ...baseInput(),
+        ibBinaryPath: "/Users/o'malley/bin/ib",
+      }),
+    ).toThrow(/Unsafe ib binary path for codex resume/);
+  });
+
+  test("rejects an invalid agent id (caught via buildCodexLaunchArgs)", () => {
+    expect(() =>
+      buildCodexResumeContent({
+        ...baseInput(),
+        agentId: "bad agent id with spaces",
+      }),
+    ).toThrow(/Invalid agent id/);
+  });
+
+  test("the resume.sh log line names the codex agent id (not the prompt)", () => {
+    const content = buildCodexResumeContent(baseInput());
+    expect(content).toContain("Resuming codex resume 019e7b21-cb7d-7f23-8674-11036ed141ef");
+    expect(content).toContain("codex agent id=agent-abc12345");
+  });
+
+  test("does NOT call out to `claude` — it's a codex resume launcher", () => {
+    const content = buildCodexResumeContent(baseInput());
+    expect(content).not.toMatch(/setsid claude/);
+    expect(content).not.toMatch(/^claude /m);
   });
 });
 

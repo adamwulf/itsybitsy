@@ -2130,9 +2130,139 @@ describe("resumeAgent (native)", () => {
   });
 
   // ── codex resume (SPEC-CODEX-MODEL.md §5.8 + §6 Phase 7) ────────────────────
-  // The full Phase 7 test suite (resume.sh content, precheck, claude byte
-  // snapshot regression guard) lives in dedicated test commits — these two
-  // tests are the minimum smoke-coverage for the structural change.
+  test("resumes codex agent with valid codex_session_id — writes codex-shaped resume.sh + spawns tmux", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-codex-ok");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-codex-ok",
+      tmux_session: "tmux-agent-codex-ok",
+      model: "codex:gpt-5.4-mini",
+      codex_session_id: "019e7b21-cb7d-7f23-8674-11036ed141ef",
+    }));
+
+    const agent = _makeAgent({
+      id: "agent-codex-ok",
+      repoPath: tempDir,
+      repoName: "test",
+      state: "stopped",
+      meta: {
+        tmux_session: "tmux-agent-codex-ok",
+        model: "codex:gpt-5.4-mini",
+        codex_session_id: "019e7b21-cb7d-7f23-8674-11036ed141ef",
+      } as any,
+    });
+    const result = await resumeAgent(agent);
+
+    expect(result.ok).toBe(true);
+    // resume.sh should be created with codex launch line.
+    const resumeScript = await Bun.file(join(agentDir, "resume.sh")).text();
+    expect(resumeScript).toContain("codex resume '019e7b21-cb7d-7f23-8674-11036ed141ef'");
+    expect(resumeScript).toContain("--dangerously-bypass-hook-trust");
+    expect(resumeScript).toContain("-a never");
+    expect(resumeScript).toContain("-s workspace-write");
+    // Must NOT use claude --resume.
+    expect(resumeScript).not.toContain("claude --resume");
+
+    // tmux new-session should have been called with the resume script path.
+    const newSessionCall = spawnCalls.find(c => c[0] === "tmux" && c[1] === "new-session");
+    expect(newSessionCall).toBeDefined();
+    expect(newSessionCall!.some(arg => arg.includes("resume.sh"))).toBe(true);
+
+    // dispatcher precheck must have run (3 events).
+    const cmdStrs = spawnCalls.map(c => c.join(" "));
+    expect(cmdStrs.some(c => c.includes("hooks codex-pre-tool-use") && c.includes("--dry-run"))).toBe(true);
+    expect(cmdStrs.some(c => c.includes("hooks codex-session-start") && c.includes("--dry-run"))).toBe(true);
+    expect(cmdStrs.some(c => c.includes("hooks codex-stop") && c.includes("--dry-run"))).toBe(true);
+  });
+
+  test("codex resume refuses when dispatcher precheck fails — no resume.sh, no tmux launch", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-codex-pre");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-codex-pre",
+      tmux_session: "tmux-agent-codex-pre",
+      model: "codex:gpt-5.4-mini",
+      codex_session_id: "019e7b21-cb7d-7f23-8674-11036ed141ef",
+    }));
+
+    // Custom runner: succeed on tmux ops EXCEPT fail any codex dispatcher
+    // dry-run with stderr "dispatcher broken".
+    const failedPrecheckRunner = (cmd: string[]): SpawnResult => {
+      spawnCalls.push(cmd);
+      const cmdStr = cmd.join(" ");
+      if (cmdStr.includes("hooks codex-") && cmdStr.includes("--dry-run")) {
+        return makeSpawnResult(1, "", "dispatcher broken");
+      }
+      // Mimic the default resume runner: has-session fails initially (no live
+      // tmux), then succeeds after new-session.
+      if (cmd[0] === "tmux" && cmd[1] === "new-session") return makeSpawnResult();
+      if (cmd.includes("has-session")) return makeSpawnResult(1);
+      return makeSpawnResult();
+    };
+    lifecycleSpawnCtx.set(failedPrecheckRunner);
+    setNukeResumeSpawnRunner(failedPrecheckRunner);
+
+    const agent = _makeAgent({
+      id: "agent-codex-pre",
+      repoPath: tempDir,
+      repoName: "test",
+      state: "stopped",
+      meta: {
+        tmux_session: "tmux-agent-codex-pre",
+        model: "codex:gpt-5.4-mini",
+        codex_session_id: "019e7b21-cb7d-7f23-8674-11036ed141ef",
+      } as any,
+    });
+    const result = await resumeAgent(agent);
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("codex dispatcher precheck failed");
+    expect(result.stderr).toContain("dispatcher broken");
+    // resume.sh must NOT be written on precheck failure.
+    const resumeShExists = await Bun.file(join(agentDir, "resume.sh")).exists();
+    expect(resumeShExists).toBe(false);
+    // tmux new-session must NOT have been called (precheck fails before launch).
+    const cmdStrs = spawnCalls.map(c => c.join(" "));
+    expect(cmdStrs.some(c => c.includes("tmux new-session"))).toBe(false);
+  });
+
+  test("codex resume — live tmux session refusal applies (CLI-agnostic guard)", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-codex-live");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-codex-live",
+      tmux_session: "tmux-agent-codex-live",
+      model: "codex:gpt-5.4-mini",
+      codex_session_id: "019e7b21-cb7d-7f23-8674-11036ed141ef",
+    }));
+
+    // Override the default runner: has-session always succeeds (live tmux).
+    const liveRunner = (cmd: string[]): SpawnResult => {
+      spawnCalls.push(cmd);
+      return makeSpawnResult();
+    };
+    lifecycleSpawnCtx.set(liveRunner);
+    setNukeResumeSpawnRunner(liveRunner);
+
+    const agent = _makeAgent({
+      id: "agent-codex-live",
+      repoPath: tempDir,
+      repoName: "test",
+      state: "stopped",
+      meta: {
+        tmux_session: "tmux-agent-codex-live",
+        model: "codex:gpt-5.4-mini",
+        codex_session_id: "019e7b21-cb7d-7f23-8674-11036ed141ef",
+      } as any,
+    });
+    const result = await resumeAgent(agent);
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("live tmux session");
+    const resumeShExists = await Bun.file(join(agentDir, "resume.sh")).exists();
+    expect(resumeShExists).toBe(false);
+  });
+
   test("refuses to resume codex agent when codex_session_id is missing", async () => {
     const agentDir = join(tempDir, ".ittybitty", "agents", "agent-codex01");
     await mkdir(join(agentDir, "repo"), { recursive: true });

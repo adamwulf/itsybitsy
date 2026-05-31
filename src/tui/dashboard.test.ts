@@ -2386,34 +2386,58 @@ describe("focus cycling", () => {
     }
   });
 
-  // §17.1 Phase 1 three-axis model: `0` / `1` switch sidebar visibility only.
-  // Focus is a separate axis, not changed by these keys.
-  test("'0' sets sidebarMode to teams without changing focus (§17.1 Phase 1)", () => {
+  // §17.1 Phase 3 three-axis model: `0` / `1` switch sidebar visibility. Focus
+  // moves only when the current target is the HEAD of one cycle and is not in
+  // the other cycle: `agent-tree` ↔ `teams-tree`. Shared targets stay put.
+  test("'0' from agent-tree focus moves focus to teams-tree (§17.1 Phase 3)", () => {
     const dashboard = makeDashboard();
     expect(dashboard.focus).toBe("agent-tree");
     expect(dashboard.sidebarMode).toBe("agents");
     dashboard.handleInput("0");
     expect(dashboard.sidebarMode).toBe("teams");
-    // Focus does NOT change.
-    expect(dashboard.focus).toBe("agent-tree");
+    // Phase 3: focus mirrors agent-tree → teams-tree.
+    expect(dashboard.focus).toBe("teams-tree");
   });
 
-  test("'1' sets sidebarMode to agents without changing focus (§17.1 Phase 1)", () => {
+  test("'0' from a shared focus target leaves focus alone (§17.1 Phase 3)", () => {
     const dashboard = makeDashboard();
-    dashboard.sidebarMode = "teams";
-    // Tab into a different focus target to confirm '1' leaves it alone.
+    // Move focus to a target that exists in BOTH FOCUS_ORDER and
+    // TEAMS_FOCUS_ORDER (info / active-agent / right-pane). Tab once → info.
     dashboard.handleInput("\t");
-    const focusBefore = dashboard.focus;
-    expect(focusBefore).not.toBe("agent-tree");
+    expect(dashboard.focus).toBe("info");
+    dashboard.handleInput("0");
+    expect(dashboard.sidebarMode).toBe("teams");
+    // Focus unchanged because info is in BOTH cycles.
+    expect(dashboard.focus).toBe("info");
+  });
+
+  test("'1' from teams-tree focus moves focus to agent-tree (§17.1 Phase 3)", () => {
+    const dashboard = makeDashboard();
+    // Set up: sidebarMode=teams + focus on teams-tree (the natural state after `0`).
+    dashboard.handleInput("0");
+    expect(dashboard.sidebarMode).toBe("teams");
+    expect(dashboard.focus).toBe("teams-tree");
     dashboard.handleInput("1");
     expect(dashboard.sidebarMode as string).toBe("agents");
-    // Focus unchanged.
-    expect(dashboard.focus).toBe(focusBefore);
+    // Phase 3: focus mirrors teams-tree → agent-tree.
+    expect(dashboard.focus).toBe("agent-tree");
   });
 
-  test("Tab never reaches teams-tree on a fresh dashboard (§17.1)", () => {
+  test("'1' from a shared focus target leaves focus alone (§17.1 Phase 3)", () => {
+    const dashboard = makeDashboard();
+    dashboard.handleInput("0"); // sidebarMode=teams, focus=teams-tree
+    dashboard.handleInput("\t"); // teams-tree → info (teams cycle)
+    expect(dashboard.focus).toBe("info");
+    dashboard.handleInput("1");
+    expect(dashboard.sidebarMode as string).toBe("agents");
+    // Focus unchanged because info is in BOTH cycles.
+    expect(dashboard.focus).toBe("info");
+  });
+
+  test("Tab in agents mode never reaches teams-tree (§17.1 Phase 3)", () => {
     const dashboard = makeDashboard();
     expect(dashboard.focus).toBe("agent-tree");
+    expect(dashboard.sidebarMode).toBe("agents");
     for (let i = 0; i < 20; i++) {
       dashboard.handleInput("\t");
       expect(dashboard.focus).not.toBe("teams-tree");
@@ -2421,6 +2445,66 @@ describe("focus cycling", () => {
     for (let i = 0; i < 20; i++) {
       dashboard.handleInput("\x1b[Z");
       expect(dashboard.focus).not.toBe("teams-tree");
+    }
+  });
+
+  test("Tab in teams mode cycles teams-tree → info → active-agent → right-pane → teams-tree (§17.1 Phase 3)", () => {
+    const dashboard = makeDashboard();
+    dashboard.handleInput("0"); // sidebarMode=teams, focus=teams-tree
+    expect(dashboard.sidebarMode).toBe("teams");
+    expect(dashboard.focus).toBe("teams-tree");
+    dashboard.handleInput("\t");
+    expect(dashboard.focus).toBe("info");
+    dashboard.handleInput("\t");
+    expect(dashboard.focus).toBe("active-agent");
+    dashboard.handleInput("\t");
+    expect(dashboard.focus).toBe("right-pane");
+    dashboard.handleInput("\t");
+    // Wraps back to teams-tree (no repo-coordinator stop in teams mode).
+    expect(dashboard.focus).toBe("teams-tree");
+  });
+
+  test("Shift+Tab in teams mode cycles teams-tree backward through right-pane (§17.1 Phase 3)", () => {
+    const dashboard = makeDashboard();
+    dashboard.handleInput("0"); // sidebarMode=teams, focus=teams-tree
+    expect(dashboard.focus).toBe("teams-tree");
+    dashboard.handleInput("\x1b[Z"); // Shift+Tab → right-pane (wrap)
+    expect(dashboard.focus).toBe("right-pane");
+    dashboard.handleInput("\x1b[Z");
+    expect(dashboard.focus).toBe("active-agent");
+    dashboard.handleInput("\x1b[Z");
+    expect(dashboard.focus).toBe("info");
+    dashboard.handleInput("\x1b[Z");
+    expect(dashboard.focus).toBe("teams-tree");
+  });
+
+  test("Tab in coordinator mode uses COORDINATOR_FOCUS_ORDER regardless of sidebarMode (§17.1 Phase 3)", () => {
+    const dashboard = makeDashboard();
+    const flatList: FlatEntry[] = [makeFlatSystemCoordinator()];
+    dashboard.onUpdate([], flatList, []);
+    // System coordinator is selected → coordinatorMode is on.
+    expect(dashboard.agentTree.isSystemCoordinatorSelected).toBe(true);
+    expect(dashboard.focusManager.coordinatorMode).toBe(true);
+    // Flip sidebarMode to teams — coordinator mode should still trump it.
+    dashboard.handleInput("0");
+    expect(dashboard.sidebarMode).toBe("teams");
+    expect(dashboard.focusManager.coordinatorMode).toBe(true);
+    // Tab cycles agent-tree → info → coordinator → agent-tree (coordinator order).
+    // Note: '0' from agent-tree moved focus to teams-tree, but the next Tab
+    // resolves cycle() against COORDINATOR_FOCUS_ORDER. teams-tree is not in
+    // that order, so it falls through to index 0 (agent-tree) + 1 = info.
+    dashboard.handleInput("\t");
+    expect(dashboard.focus).toBe("info");
+    dashboard.handleInput("\t");
+    expect(dashboard.focus).toBe("coordinator");
+    dashboard.handleInput("\t");
+    expect(dashboard.focus).toBe("agent-tree");
+    // teams-tree is NEVER in the coordinator-mode cycle.
+    for (let i = 0; i < 10; i++) {
+      dashboard.handleInput("\t");
+      expect(dashboard.focus).not.toBe("teams-tree");
+      expect(dashboard.focus).not.toBe("active-agent");
+      expect(dashboard.focus).not.toBe("right-pane");
     }
   });
 

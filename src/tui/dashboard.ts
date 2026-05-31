@@ -652,8 +652,10 @@ export class DashboardComponent implements Component {
    * Which tree the sidebar renders in its tree region — Phase 1 of the
    * three-axis model (see SPEC §17.1). Independent of focus and of the global
    * selection (Phase 2). Toggled exclusively by the `0` (teams) and `1`
-   * (agents) keys; Tab cycling never changes it. Phase 3 will make Tab cycling
-   * depend on `sidebarMode`.
+   * (agents) keys; Tab cycling never changes it. Phase 3 makes Tab cycling
+   * depend on `sidebarMode` — the dashboard mirrors this field into
+   * `focusManager.sidebarMode` whenever it changes, so `FocusManager.cycle()`
+   * picks the correct order (agents | teams).
    */
   sidebarMode: SidebarMode = "agents";
   /**
@@ -1606,6 +1608,11 @@ export class DashboardComponent implements Component {
 
   setSidebarMode = (mode: SidebarMode): void => {
     this.sidebarMode = mode;
+    // §17.1 Phase 3: keep the FocusManager's sidebarMode in sync so Tab
+    // cycling picks the correct order. The `0`/`1` handlers do this too;
+    // mirroring it here covers the `@`-fuzzy jump and `g`-go-to-question-agent
+    // paths that flip sidebarMode through this setter.
+    this.focusManager.sidebarMode = mode;
   };
 
   /**
@@ -2108,22 +2115,24 @@ export class DashboardComponent implements Component {
       return;
     }
 
-    // §17.1 (Phase 2 three-axis model): '0' / '1' switch ONLY the sidebar tree
-    // visibility (`sidebarMode`). They do NOT change focus (separate axis,
-    // cycled by Tab) and they do NOT change the GLOBAL selection
-    // (`activeSelectionSource`, set by j/k navigation). After flipping
-    // visibility we mirror the active selection into the newly-visible tree
-    // (visual only — `activeSelectionSource` is unchanged), then re-run
-    // selection sync so the info / main / right panes update immediately
-    // instead of waiting a tmux-poll tick. Gated by the dialog/input-field
-    // returns above. If the legacy "teams-tree" focus is still set (e.g. from
-    // a saved state or test setup), reset it to `agent-tree` so focus never
-    // settles on a target that is not in FOCUS_ORDER. Phase 3 will
-    // re-introduce sidebar-mode-aware Tab cycling.
+    // §17.1 (Phase 3 three-axis model): '0' / '1' switch the sidebar tree
+    // visibility (`sidebarMode`). They do NOT change the GLOBAL selection
+    // (`activeSelectionSource`, set by j/k navigation). Focus moves only when
+    // the current focus target is the HEAD of one cycle and would not exist
+    // in the other cycle: `agent-tree` ↔ `teams-tree` (natural mirror), and
+    // `repo-coordinator` (agents-only) → `teams-tree` when entering teams
+    // mode. Other targets (`info` / `active-agent` / `right-pane`) are
+    // present in BOTH orders, so focus stays where it is. We also mirror the
+    // active selection into the newly-visible tree (visual only —
+    // `activeSelectionSource` is unchanged) and re-run selection sync so the
+    // info / main / right panes update immediately instead of waiting a
+    // tmux-poll tick. Gated by the dialog/input-field returns above.
     if (data === "0") {
       this.sidebarMode = "teams";
-      if (this.focusManager.current() === "teams-tree") {
-        this.focusManager.setFocus("agent-tree");
+      this.focusManager.sidebarMode = "teams";
+      const focus = this.focusManager.current();
+      if (focus === "agent-tree" || focus === "repo-coordinator") {
+        this.focusManager.setFocus("teams-tree");
       }
       this.mirrorSelectionToVisibleTree();
       this.syncSelectedAgent();
@@ -2132,6 +2141,7 @@ export class DashboardComponent implements Component {
     }
     if (data === "1") {
       this.sidebarMode = "agents";
+      this.focusManager.sidebarMode = "agents";
       if (this.focusManager.current() === "teams-tree") {
         this.focusManager.setFocus("agent-tree");
       }

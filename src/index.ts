@@ -1914,7 +1914,8 @@ async function main() {
     case "models": {
       const { KNOWN_MODELS } = await import("./known-models");
       if (args.includes("--json")) {
-        console.log(JSON.stringify(KNOWN_MODELS, null, 2));
+        const enriched = KNOWN_MODELS.map((m) => ({ ...m, full: `${m.cli}:${m.model}` }));
+        console.log(JSON.stringify(enriched, null, 2));
         break;
       }
       const byCli = new Map<string, typeof KNOWN_MODELS>();
@@ -1923,7 +1924,7 @@ async function main() {
         bucket.push(entry);
         byCli.set(entry.cli, bucket);
       }
-      const fullWidth = Math.max(...KNOWN_MODELS.map((m) => m.full.length));
+      const fullWidth = Math.max(...KNOWN_MODELS.map((m) => `${m.cli}:${m.model}`.length));
       const pad = (s: string, w: number): string => s + " ".repeat(Math.max(0, w - s.length));
       const clis = Array.from(byCli.keys()).sort();
       for (let i = 0; i < clis.length; i++) {
@@ -1931,10 +1932,11 @@ async function main() {
         if (i > 0) console.log("");
         console.log(cli.toUpperCase());
         for (const entry of byCli.get(cli)!) {
+          const full = `${entry.cli}:${entry.model}`;
           if (entry.description) {
-            console.log(`  ${pad(entry.full, fullWidth)} — ${entry.description}`);
+            console.log(`  ${pad(full, fullWidth)} — ${entry.description}`);
           } else {
-            console.log(`  ${entry.full}`);
+            console.log(`  ${full}`);
           }
         }
       }

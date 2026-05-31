@@ -45,7 +45,7 @@ export const KNOWN_MODELS: KnownModel[] = [
   // ChatGPT account". The remaining entries are believed reachable but have
   // not been individually account-tested; an API-key-only model would still
   // surface a runtime HTTP 400 at first prompt rather than a spawn-time
-  // rejection — that residual risk is documented in SPEC-CODEX-MODEL.md §108.
+  // rejection (residual risk we accept — the upstream page is our truth).
   { cli: "codex", model: "gpt-5.5", description: "Frontier — complex coding, computer use, research" },
   { cli: "codex", model: "gpt-5.4", description: "Flagship — strong reasoning + tool use" },
   { cli: "codex", model: "gpt-5.4-mini", description: "Fast/efficient mini — responsive coding + subagents" },

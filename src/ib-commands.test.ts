@@ -2129,6 +2129,66 @@ describe("resumeAgent (native)", () => {
     });
   });
 
+  // Phase 7 regression snapshot — mirrors the Phase 4 MED 4 byte-equality
+  // guard on claude start.sh. The codex resume branch sits next to the
+  // claude resume branch in resumeAgent; any future codex/cli-routing
+  // change risks accidentally touching the claude path. This fixture
+  // assertion fails the moment claude resume.sh diverges from the recorded
+  // baseline; if the divergence is intentional, update the fixture in the
+  // same PR with a visible diff and a clear reason in the commit message.
+  test("claude resume.sh matches the byte-equality fixture (regression snapshot)", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-claude-snapshot");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-claude-snapshot",
+      tmux_session: "tmux-agent-claude-snapshot",
+      session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      model: "claude:sonnet",
+    }));
+
+    const agent = _makeAgent({
+      id: "agent-claude-snapshot",
+      repoPath: tempDir,
+      repoName: "test",
+      state: "stopped",
+      meta: {
+        session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        tmux_session: "tmux-agent-claude-snapshot",
+        model: "claude:sonnet",
+      } as any,
+    });
+    const result = await resumeAgent(agent);
+    expect(result.ok).toBe(true);
+
+    const rawResumeSh = await Bun.file(join(agentDir, "resume.sh")).text();
+    // Normalise per-run varying bits:
+    //   * tempDir prefix → <AGENTSDIR>
+    //   * UUID session id → <SESSION-UUID>
+    const sessionUuidPattern = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g;
+    const normalised = rawResumeSh
+      .replaceAll(tempDir, "<AGENTSDIR>")
+      .replaceAll(sessionUuidPattern, "<SESSION-UUID>");
+
+    const fixturePath = join(
+      import.meta.dir.replace(/\/src$/, ""),
+      "tests",
+      "fixtures",
+      "claude-resume-sh-baseline.sh",
+    );
+    const fixtureFile = Bun.file(fixturePath);
+    if (!(await fixtureFile.exists())) {
+      // Bootstrap: write the fixture and fail loudly so the dev commits
+      // the new baseline. This codepath should never fire on CI.
+      await Bun.write(fixturePath, normalised);
+      throw new Error(
+        `Fixture missing — wrote a fresh baseline to ${fixturePath}. ` +
+          `Commit the fixture, then re-run.`,
+      );
+    }
+    const expected = await fixtureFile.text();
+    expect(normalised).toBe(expected);
+  });
+
   // ── codex resume (SPEC-CODEX-MODEL.md §5.8 + §6 Phase 7) ────────────────────
   test("resumes codex agent with valid codex_session_id — writes codex-shaped resume.sh + spawns tmux", async () => {
     const agentDir = join(tempDir, ".ittybitty", "agents", "agent-codex-ok");

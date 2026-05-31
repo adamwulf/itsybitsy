@@ -5059,5 +5059,88 @@ describe("DashboardComponent — §17 Teams panel wiring", () => {
       // QUESTIONS focus, the only other source of suppress).
       expect(dashboard.agentTree.suppressSelection).toBe(false);
     });
+
+    // Phase 2 reviewer regression: when the system coordinator was the active
+    // selection and the user then navigates to a team, the stale coord pointer
+    // in the (now-inactive) Agents tree must NOT bleed into the render path.
+    // The team channel must render, NOT the coordinator pane.
+    test("stale isSystemCoordinatorSelected does NOT suppress the team channel render path", () => {
+      Object.defineProperty(process.stdout, "rows", { value: 30, writable: true, configurable: true });
+      const dashboard = makeDashboard();
+
+      // 1. Start with the system coordinator selected (Agents tree, active).
+      const coordList: FlatEntry[] = [makeFlatSystemCoordinator()];
+      dashboard.onUpdate([], coordList, []);
+      expect(dashboard.agentTree.isSystemCoordinatorSelected).toBe(true);
+      expect(dashboard.activeSelectionSource).toBe("agents");
+
+      // 2. User flips to teams, then selects a team header.
+      dashboard.teamsTree.setFlatList([
+        { kind: "team-header", teamName: "backend", memberCount: 0, createdEpoch: 1, createdBy: "@system" },
+      ]);
+      dashboard.handleInput("0"); // sidebarMode -> teams; coord still selected in agentTree
+      dashboard.handleInput("j"); // navigate teams; activeSelectionSource -> teams
+
+      expect(dashboard.activeSelectionSource).toBe("teams");
+      // The Agents tree's coord pointer is intentionally untouched — the bug
+      // was that the RENDER path checked the raw agent-tree property instead
+      // of gating on the active source.
+      expect(dashboard.agentTree.isSystemCoordinatorSelected).toBe(true);
+
+      // syncSelectedAgent already routes correctly — verify and pin.
+      expect(dashboard.channelPane.teamName).toBe("backend");
+
+      // Render and assert the result is the TEAM view, not the coord view.
+      const output = dashboard.render(160).join("\n");
+      const plain = stripAnsi(output);
+
+      // Team title separator shows `@backend CHAT` / `@backend LOG`.
+      expect(plain).toContain("@backend CHAT");
+      expect(plain).toContain("@backend LOG");
+      // No "Coordinator" title — the coord title separator's signature.
+      expect(plain).not.toContain("Coordinator");
+    });
+
+    test("updatePollerVisibility pauses the coordinator poller when active source is teams", () => {
+      const dashboard = makeDashboard();
+      dashboard.startPolling();
+      try {
+        // 1. Coordinator selected → poller running.
+        const coordList: FlatEntry[] = [makeFlatSystemCoordinator()];
+        dashboard.onUpdate([], coordList, []);
+        expect(dashboard.agentTree.isSystemCoordinatorSelected).toBe(true);
+        expect(dashboard.coordinatorPollerRunning).toBe(true);
+
+        // 2. Flip to teams panel, navigate to a team — active source flips,
+        //    but the Agents tree still has the coord pointer.
+        dashboard.teamsTree.setFlatList([
+          { kind: "team-header", teamName: "backend", memberCount: 0, createdEpoch: 1, createdBy: "@system" },
+        ]);
+        dashboard.handleInput("0");
+        dashboard.handleInput("j");
+        expect(dashboard.activeSelectionSource).toBe("teams");
+        expect(dashboard.agentTree.isSystemCoordinatorSelected).toBe(true);
+
+        // Coordinator pane is no longer rendered — poller must pause.
+        expect(dashboard.coordinatorPollerRunning).toBe(false);
+
+        // 3. Flip back to agents (sidebar) — active source still teams, so the
+        //    coord pane is still NOT rendered (sidebar shows the agents tree,
+        //    but the main area drives off the active team selection). Poller
+        //    must stay paused.
+        dashboard.handleInput("1");
+        expect(dashboard.activeSelectionSource).toBe("teams");
+        expect(dashboard.coordinatorPollerRunning).toBe(false);
+
+        // 4. Press j in the agents tree — active source flips back to agents,
+        //    coord row is selected again, poller resumes.
+        dashboard.handleInput("j");
+        expect(dashboard.activeSelectionSource).toBe("agents");
+        expect(dashboard.agentTree.isSystemCoordinatorSelected).toBe(true);
+        expect(dashboard.coordinatorPollerRunning).toBe(true);
+      } finally {
+        dashboard.stopPolling();
+      }
+    });
   });
 });

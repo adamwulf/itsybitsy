@@ -1016,8 +1016,16 @@ export class DashboardComponent implements Component {
    * stale for up to 1s. The always-on selected-agent `tmuxPoller` is untouched.
    */
   private updatePollerVisibility() {
+    // §17.1 Phase 2: gate the system coordinator poller on the active source
+    // matching the render path. A stale coord pointer in the (inactive)
+    // Agents tree must not keep the coordinator tmux poller running while
+    // the Teams tree is driving the main area — the coordinator pane is not
+    // visible, so polling it is wasted work (and would also fight the team
+    // channel for the main area in the render-aware paths).
     const coordinatorVisible =
-      this.agentTree.isSystemCoordinatorSelected && this.coordinatorViewMode === "TMUX";
+      this.activeSelectionSource === "agents"
+      && this.agentTree.isSystemCoordinatorSelected
+      && this.coordinatorViewMode === "TMUX";
     if (coordinatorVisible) {
       this.coordinatorPoller.resume();
     } else if (this.coordinatorPoller.isRunning()) {
@@ -2468,7 +2476,14 @@ export class DashboardComponent implements Component {
 
     const lines: string[] = [];
     const terminalRows = process.stdout.rows || 24;
-    const isCoordinatorView = this.agentTree.isSystemCoordinatorSelected;
+    // §17.1 Phase 2: a leftover system-coordinator selection in the (inactive)
+    // Agents tree must NOT bleed into the team-active render path. When the
+    // Teams tree owns the global selection the main area renders the team
+    // channel, regardless of what the Agents tree's pointer happens to be on.
+    // Mirrors the same gate `syncSelectedAgent` uses (`!teamsActive &&
+    // agentTree.isSystemCoordinatorSelected`).
+    const isCoordinatorView =
+      this.activeSelectionSource === "agents" && this.agentTree.isSystemCoordinatorSelected;
     const isTreeMode = this.rightPane.mode === "TREE";
     const isFullWidth = isCoordinatorView || FULL_WIDTH_MODES.has(this.rightPane.mode);
 

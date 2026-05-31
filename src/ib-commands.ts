@@ -3259,6 +3259,36 @@ export async function newAgent(
   const agentCli = parsed.cli;
   const modelFlagValue = parsed.model;
 
+  // Codex spawn-path preconditions (SPEC §5.4 step 2 + §7 risk 14). Run
+  // BEFORE any worktree/tmux work so a fail here doesn't leave residual
+  // state behind. The path-safety check guards the TOML-in-shell quoting
+  // in the inline `-c` payload; the binary lookup gives codex an absolute
+  // path so its spawn env's PATH cannot break hook dispatch. The dispatcher
+  // precheck is deferred until after agentDir is created so we can clean
+  // it up uniformly with the rest of the spawn-failure paths.
+  let codexIbBinaryPath: string | null = null;
+  if (agentCli === "codex") {
+    const { resolveIbBinaryPath } = await import("./codex-spawn");
+    const { isCodexSafeBinaryPath } = await import("./codex-config");
+    codexIbBinaryPath = resolveIbBinaryPath();
+    if (!codexIbBinaryPath) {
+      return {
+        ok: false,
+        exitCode: 1,
+        stdout: "",
+        stderr: "Error: codex spawn requires an absolute path to the `ib` binary, but `ib` is not on PATH. Install ib and ensure it is reachable via PATH before spawning a codex agent.",
+      };
+    }
+    if (!isCodexSafeBinaryPath(codexIbBinaryPath)) {
+      return {
+        ok: false,
+        exitCode: 1,
+        stdout: "",
+        stderr: `Error: Unsafe ib binary path for codex launch: ${JSON.stringify(codexIbBinaryPath)} contains quotes, backslashes, or control characters. Reinstall ib to a path made of printable ASCII with no apostrophes, quotes, or backslashes.`,
+      };
+    }
+  }
+
   // 7.1. Permissions are assembled in three layers (SPEC §2.3):
   //   1. `_all.md` frontmatter — applied to every spawned agent
   //   2. `_non_coordinator.md` frontmatter — applied to non-coordinator agents only
@@ -3551,13 +3581,75 @@ export async function newAgent(
     }
     workPath = join(agentDir, "repo");
 
-    // 13. Write settings.local.json (worktree mode only).
-    // Coordinators force useWorktree=false above (SPEC §12.2.3), so we never
-    // reach here in coordinator mode — only regular agents need settings here.
-    await mkdir(join(agentDir, "repo", ".claude"), { recursive: true });
-    const managerOrWorker: "manager" | "worker" = isLeafAgent ? "worker" : "manager";
-    const settingsContent = await buildAgentSettings(rootRepoPath, managerOrWorker, id, configAllow, configDeny);
-    await Bun.write(join(agentDir, "repo", ".claude", "settings.local.json"), settingsContent);
+    if (agentCli === "codex") {
+      // Codex agents do NOT read .claude/settings.local.json — their hook
+      // registration is inline via `-c` flags built in `buildCodexLaunchArgs`
+      // (SPEC §3.3 + §5.4). Per Phase 4 we instead:
+      //   1. Append `.codex/` to <worktree>/.gitignore (covers any incidental
+      //      files codex itself drops — hook logs, sentinels, scratch).
+      //   2. Generate a per-agent <worktree>/AGENTS.md — codex reads this
+      //      natively at session start (the codex analog of the claude
+      //      session-start prompt injection).
+      // Coordinator mode + codex was rejected up-front in coordinator.ts —
+      // see SPEC §D9 stub; we never reach this branch with coordinatorMode set.
+      const { appendCodexGitignoreEntry, writeCodexAgentsMd } = await import("./codex-spawn");
+      const { detectRole } = await import("./hooks/session-start");
+      try {
+        await appendCodexGitignoreEntry(workPath);
+      } catch (err) {
+        await logSpawn(agentDir, spawnerAgentDir, id, `codex .gitignore append failed: ${(err as Error)?.message ?? String(err)}`);
+      }
+      const sessionCtx = detectRole(workPath, {
+        id,
+        manager: manager || null,
+        worker: isLeafAgent,
+        agentType: typeName,
+        spawned_by: spawnedBy ?? undefined,
+        allowedPaths: resolvedAllowedPaths,
+      }, id);
+      try {
+        await writeCodexAgentsMd(workPath, sessionCtx);
+      } catch (err) {
+        await logSpawn(agentDir, spawnerAgentDir, id, `codex AGENTS.md write failed: ${(err as Error)?.message ?? String(err)}`);
+      }
+
+      // Codex hook-dispatcher precheck (SPEC §5.4 step 7 + §5.5 fail-open
+      // mitigation). Codex treats any non-zero hook exit as fail-open — if
+      // our dispatcher is missing or its module-import throws at runtime,
+      // every PreToolUse call would be allowed through. The `--dry-run`
+      // flag returns exit 1 on failure so we can refuse the spawn before
+      // creating the tmux session.
+      const codexPrecheckEvents = ["codex-pre-tool-use", "codex-session-start", "codex-stop"];
+      for (const event of codexPrecheckEvents) {
+        const result = await newAgentSpawnCtx.run([codexIbBinaryPath!, "hooks", event, id, "--dry-run"]);
+        if (result.exitCode !== 0) {
+          const errMsg = result.stderr.trim() || `dispatcher precheck failed with exit code ${result.exitCode}`;
+          await logSpawn(
+            agentDir,
+            spawnerAgentDir,
+            id,
+            `spawn FAILED: codex dispatcher precheck failed for ${event}: ${errMsg}`,
+          );
+          await rm(agentDir, { recursive: true, force: true });
+          await newAgentSpawnCtx.run(["git", "-C", rootRepoPath, "worktree", "remove", join(agentDir, "repo"), "--force"]);
+          await newAgentSpawnCtx.run(["git", "-C", rootRepoPath, "branch", "-D", branchName]);
+          return {
+            ok: false,
+            exitCode: 1,
+            stdout: "",
+            stderr: `Error: codex dispatcher precheck failed (${event}): ${errMsg}`,
+          };
+        }
+      }
+    } else {
+      // 13. Write settings.local.json (worktree mode only).
+      // Coordinators force useWorktree=false above (SPEC §12.2.3), so we never
+      // reach here in coordinator mode — only regular agents need settings here.
+      await mkdir(join(agentDir, "repo", ".claude"), { recursive: true });
+      const managerOrWorker: "manager" | "worker" = isLeafAgent ? "worker" : "manager";
+      const settingsContent = await buildAgentSettings(rootRepoPath, managerOrWorker, id, configAllow, configDeny);
+      await Bun.write(join(agentDir, "repo", ".claude", "settings.local.json"), settingsContent);
+    }
   } else if (coordinatorMode) {
     // Per-repo coordinator: write settings (permissions + hooks) into the
     // coordinator's own agent dir, NOT the repo's .claude/settings.local.json.
@@ -3742,7 +3834,29 @@ echo ""
   const qStartExitScript = shellQuote(absExitScript);
   const qStartAgentLog = shellQuote(join(agentDir, "agent.log"));
   const qStartStderrLog = shellQuote(join(agentDir, "claude.stderr.log"));
-  const startContent = `#!/bin/bash
+
+  let startContent: string;
+  if (agentCli === "codex") {
+    // Codex spawn branch — SPEC §6 Phase 4. The launch line is the canonical
+    // §3.3 form: `codex -m <model> -a never -s workspace-write
+    // --dangerously-bypass-hook-trust <inline -c flags> "<prompt>"`. The
+    // path-safety + dispatcher precheck guarantees ran above (we wouldn't
+    // be here on failure). PID variable + meta-field stay `CLAUDE_PID` /
+    // `claude_pid` so the watchdog and other readers don't break — renaming
+    // is its own follow-up.
+    const { buildCodexStartContent } = await import("./codex-spawn");
+    startContent = buildCodexStartContent({
+      agentId: id,
+      ibBinaryPath: codexIbBinaryPath!,
+      codexModel: modelFlagValue,
+      absPromptFile,
+      absMetaJson: join(agentDir, "meta.json"),
+      absExitScript,
+      absAgentLog: join(agentDir, "agent.log"),
+      absStderrLog: join(agentDir, "claude.stderr.log"),
+    });
+  } else {
+    startContent = `#!/bin/bash
 # Clear Claude Code nesting detection so agents can start their own claude process
 unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT
 
@@ -3827,6 +3941,7 @@ fi
 # Run exit check
 ${qStartExitScript}
 `;
+  }
   await Bun.write(startScript, startContent);
   await chmod(startScript, 0o755);
 

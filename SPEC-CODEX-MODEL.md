@@ -1,7 +1,7 @@
 # SPEC: Codex CLI as an alternative agent model
 
-Status: **DRAFT — design.** Phase 0 + Phase 1 + Phase 2 spike + Phase 3 + Phase 4 all IMPLEMENTED, reviewed, and merged on `agent/codex-agent` (3627 tests pass + tsc clean). Phase 2 is docs-only (3 commits, +534 lines on `CODEX-CLI-NOTES.md`) and resolved THE CRUX (D4 silent-deny confirmed) plus the inline-`-c` registration architecture. Phase 3 = hook handlers + dispatcher (5 commits merged). Phase 4 = spawn-path branching in `newAgent()` + AGENTS.md generation + `ib write-pid` + dispatcher dry-run exercising the real handler + claude byte-snapshot regression guard (8 commits merged including review fix-ups). Implementation order for the rest: **Phase 6 → Phase 7 → Phase 8 → Phase 5** (Phase 5 deferred to last because the override-state parser needs live codex UI strings captured from real Phase-6/7/8 agent sessions — see §6 Phase 5 ordering note).
-Branch: `agent/codex-agent`. Author: codex-agent (manager). Last updated: 2026-05-31 (Phase 4 merged; Phase 5 moved to LAST in implementation order — hook-driven state writes already landed in Phase 3, but the override-state UI-scraping parser needs empirical codex UI strings best gathered during Phases 6–8 manual gates).
+Status: **DRAFT — design.** Phase 0 + Phase 1 + Phase 2 spike + Phase 3 + Phase 4 + Phase 6 + Phase 7 all IMPLEMENTED, reviewed, and merged on `agent/codex-agent` (3657 tests pass + tsc clean). Phase 8 (this docs fold-in) is IN FLIGHT on a fork of `agent/codex-agent`. Phase 5 (codex tmux-overrides parser for `rate_limited`/`api_error`/`compacting`) remains **DEFERRED** and runs LAST. Phase 2 is docs-only (3 commits, +534 lines on `CODEX-CLI-NOTES.md`) and resolved THE CRUX (D4 silent-deny confirmed) plus the inline-`-c` registration architecture. Phase 3 = hook handlers + dispatcher (5 commits merged). Phase 4 = spawn-path branching in `newAgent()` + AGENTS.md generation + `ib write-pid` + dispatcher dry-run exercising the real handler + claude byte-snapshot regression guard (8 commits merged including review fix-ups). Phase 6 = watchdog gating behind `classifyAgentCli` helper (2 commits merged: `bd9bb9b` + `ae31787`). Phase 7 = `resumeAgent()` codex branch + `buildCodexResumeContent` + resume-time dispatcher precheck + claude resume.sh byte-snapshot regression guard (5 commits merged: `f2c10ae`, `86077a0`, `5e3b903`, `0cd1d02`, `8c5a395`). Implementation order remaining: **Phase 8 (in flight) → Phase 5 (deferred)**.
+Branch: `agent/codex-agent`. Author: codex-agent (manager). Last updated: 2026-05-31 (Phases 6 + 7 merged; Phase 8 docs fold-in in flight on worker branch; Phase 5 remains LAST in implementation order — hook-driven state writes already landed in Phase 3, but the override-state UI-scraping parser needs empirical codex UI strings best gathered during Phase 8 manual gates and after-merge use).
 Companion docs (supporting evidence, do not duplicate here):
 - `SETTINGS-HOOKS-RESEARCH.md` — authoritative Claude vs Codex settings/hooks reference (every claim evidence-tagged).
 - `MODEL-NAME-FORMAT-PROPOSAL.md` — design proposal that drove the §5.1 + Phase 1 design.
@@ -357,17 +357,34 @@ Scope clarification (post-Phase-3 review, 2026-05-30): three spawn-co-located de
   - Add a minimal codex-specific tmux-overrides parser (`src/parse-state-codex.ts` or a codex branch in `parse-state.ts`) matching codex's actual UI strings — gathered empirically by then from real agent transcripts.
   - **Gate:** a codex agent shows correct override states through induced conditions (synthetic rate-limit, induced api-error) in the dashboard.
 
-### Phase 6 — Watchdog for codex
-- CLI-branch `runPerAgentWatchdog`: codex idle/nudge + rate-limit handling; disable inapplicable Claude-only behaviors (permission auto-accept is unnecessary since `-a never` + hooks block prompts).
-- **Gate:** a stuck codex agent gets nudged; a simulated rate-limit recovers; no spurious bare-Enter behavior; outbox + state-exclusive mutex still work cross-cli.
+### Phase 6 — Watchdog for codex ✅ MERGED
+Status: complete on `agent/codex-agent`. Two commits:
+- `bd9bb9b` feat(codex): Phase 6 — gate watchdog claude-specific behaviors on parseModel(meta.model).cli
+- `ae31787` test(codex): Phase 6 — watchdog codex-agent regression tests
 
-### Phase 7 — Resume + lifecycle
-- `resumeAgent()` codex branch (`codex resume` via `codex_session_id`); regenerate `resume.sh` branched on cli; confirm kill/merge/diff/nuke unaffected (they're git+tmux-level).
-- **Gate:** resume re-attaches the same codex session in tmux; merge of a codex agent's branch works end-to-end.
+What landed: `runPerAgentWatchdog` gates three Claude-specific behaviors (`handleRateLimited`, `handleApiError`, permission auto-accept) behind a `classifyAgentCli(meta)` helper = `parseModel(meta.model).cli`. The outbox drain, `fs.watch` coalescing, `runSessionExclusive` mutex, nudge timing, and notification routing stay CLI-agnostic. Regression tests cover the gating + ensure claude agents still hit the gated paths.
 
-### Phase 8 — Docs, SPEC.md, tests
-- Fold this SPEC into project `SPEC.md`; update `CLAUDE.md` implementation notes; ensure full test coverage; `bunx tsc --noEmit` clean.
-- **Gate:** SPEC.md updated; test count increased; CI-green.
+What deferred to Phase 5 (the override-state codex parser is still pending — see §6 Phase 5 ordering note): codex-specific idle/nudge UI signatures and codex-specific rate-limit recovery. Codex agents currently get the deterministic running/waiting/complete states from Phase 3 hooks and degrade to `unknown` for override states — the Phase 6 gating prevents claude-only false positives from corrupting that interim state.
+
+### Phase 7 — Resume + lifecycle ✅ MERGED
+Status: complete on `agent/codex-agent`. Five commits:
+- `f2c10ae` feat(codex): Phase 7 — buildCodexResumeContent helper
+- `86077a0` feat(codex): Phase 7 — drop blanket reject in resumeAgent; branch on resumeCli
+- `5e3b903` feat(codex): Phase 7 — resume-time dispatcher precheck
+- `0cd1d02` test(codex): Phase 7 — codex resume unit + integration tests
+- `8c5a395` test(codex): Phase 7 — claude resume.sh byte-snapshot regression guard
+
+What landed: `resumeAgent()` in `src/ib-commands.ts` branches on `parseModel(meta.model).cli`. The codex path validates `meta.codex_session_id` (populated by the SessionStart hook on first spawn), runs the same spawn-time dispatcher precheck as `newAgent()`, then generates a codex-shaped `resume.sh` via `buildCodexResumeContent` invoking `codex resume "<UUID>"` with re-passed inline `-c` hook flags + sandbox/approval/trust flags. Same SIGHUP-ignore insulation + `ib write-pid` PID capture as `start.sh`. The claude path is unchanged — byte-snapshot-guarded at `tests/fixtures/claude-resume-sh-baseline.sh` so any drift fails CI. kill/merge/diff/nuke are git+tmux-level and unaffected.
+
+### Phase 8 — Docs, SPEC.md, tests 🚧 IN FLIGHT
+In flight on a worker fork of `agent/codex-agent`. Three commits planned:
+1. `docs(codex): Phase 8 — add SPEC.md §18 Codex CLI as Alternative Agent Model`
+2. `docs(codex): Phase 8 — update CLAUDE.md implementation notes with codex pieces`
+3. `docs(codex): Phase 8 — update SPEC-CODEX-MODEL.md status: Phases 0-4+6+7 merged + Phase 8 in flight` (this commit)
+
+Scope: docs-only fold-in of the codex CLI design into project `SPEC.md` (new §18, 15 subsections summarizing this SPEC), parallel updates to `CLAUDE.md` "itsybitsy Implementation Notes" (new sections for codex hook handlers / codex spawn-resume helpers / codex launch line builder, plus appended codex paragraphs to existing Hooks / ib-commands / State detection flow sections), and this status block update. No code changes — `bun test` stays at 3657 pass / 0 fail; `bunx tsc --noEmit` stays clean.
+
+**Gate:** SPEC.md §18 present; CLAUDE.md mentions codex implementation; test count unchanged at 3657; CI-green.
 
 ---
 

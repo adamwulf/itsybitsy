@@ -91,7 +91,7 @@ describe("checkCodexPreToolUse — allow/deny matcher applies to Bash AND apply_
     expect(decision.reason).toContain("work in your worktree");
   });
 
-  test("apply_patch: target absolute /private/tmp path (codex's macOS canonicalization)", () => {
+  test("apply_patch: target absolute /private/tmp path is DENIED (SPEC §3.2 path-isolation)", () => {
     const ctx = makeCtx();
     const patch =
       "*** Begin Patch\n*** Add File: /private/tmp/codex-escape.txt\n+I escaped\n*** End Patch\n";
@@ -99,10 +99,27 @@ describe("checkCodexPreToolUse — allow/deny matcher applies to Bash AND apply_
       { toolName: "apply_patch", toolInput: { command: patch }, cwd: ctx.worktreePath },
       ctx,
     );
-    // /private/tmp is not inside the worktree but isn't another agent or the
-    // main repo either — the legacy fallback in checkPathAccess allows it.
-    // (The hook's role here is to flag the SPEC-known leaky-sandbox behavior:
-    // a deployment that wants /tmp blocked needs allowedPaths.)
+    // SPEC §3.2: codex's `-s workspace-write` sandbox leaks /tmp, $TMPDIR, and
+    // ~/.codex/memories. The hook MUST do path-isolation independently of the
+    // sandbox; checkCodexPreToolUse forces step 12 of checkPathAccess to fire
+    // (allowedPaths = [worktreePath] when none configured) so the legacy
+    // permissive fallback can't allow apply_patch escapes.
+    expect(decision.decision).toBe("deny");
+    expect(decision.reason).toContain("apply_patch target rejected");
+    expect(decision.reason).toContain("/private/tmp/codex-escape.txt");
+  });
+
+  test("apply_patch: target in /private/tmp is allowed when agent.allowedPaths includes it", () => {
+    const ctx = makeCtx({ allowedPaths: ["/private/tmp"] });
+    const patch =
+      "*** Begin Patch\n*** Add File: /private/tmp/whitelisted.txt\n+ok\n*** End Patch\n";
+    const decision = checkCodexPreToolUse(
+      { toolName: "apply_patch", toolInput: { command: patch }, cwd: ctx.worktreePath },
+      ctx,
+    );
+    // If the agent's meta.json declares allowedPaths, we honor that list
+    // verbatim (do NOT override it with [worktreePath]) — same contract as
+    // claude-side hookCheckPath.
     expect(decision.decision).toBe("allow");
   });
 

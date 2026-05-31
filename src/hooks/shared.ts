@@ -184,7 +184,10 @@ export function extractApplyPatchPaths(patchBody: string): string[] {
   const paths: string[] = [];
   const lines = patchBody.split(/\r?\n/);
   for (const line of lines) {
-    const m = line.match(/^\*\*\* (?:Add|Update|Delete) File:\s*(.+?)\s*$/);
+    // Whitespace tolerance: `\s+` (rather than a single space) covers tabs,
+    // double-spaces, and any other whitespace codex might emit between the
+    // marker and the directive across versions.
+    const m = line.match(/^\*\*\*\s+(?:Add|Update|Delete) File:\s*(.+?)\s*$/);
     if (m) paths.push(m[1]!);
   }
   return paths;

@@ -14,6 +14,7 @@ import {
   isRecentlyCreated,
   writeAgentState,
   readAgentState,
+  mutateAgentMeta,
   isCompacting,
   isRateLimited,
   isApiError,
@@ -1133,6 +1134,94 @@ describe("writeAgentState / readAgentState", () => {
     await writeAgentState(tempDir, "complete");
     const state = await readAgentState(tempDir);
     expect(state).toBe("complete");
+  });
+});
+
+describe("mutateAgentMeta — concurrent RMW (codex SessionStart vs PreToolUse race)", () => {
+  let tempDir: string;
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "agents-meta-mutate-"));
+  });
+
+  afterEach(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  test("two concurrent writers both land — writeAgentState + captureCodexSessionId equivalent", async () => {
+    const metaPath = join(tempDir, "meta.json");
+    await Bun.write(metaPath, JSON.stringify({ id: "agent-x", model: "codex:gpt-5.4-mini" }));
+
+    // Race the equivalent of: SessionStart writes state=running,
+    // PreToolUse writes codex_session_id. Both must land.
+    await Promise.all([
+      writeAgentState(tempDir, "running"),
+      mutateAgentMeta(tempDir, (m) => { m.codex_session_id = "rollout-aaa"; }),
+    ]);
+
+    const meta = await Bun.file(metaPath).json();
+    expect(meta.id).toBe("agent-x");
+    expect(meta.state).toBe("running");
+    expect(meta.codex_session_id).toBe("rollout-aaa");
+  });
+
+  test("ten concurrent counter-bumps all land (lock is correct, not just lucky)", async () => {
+    const metaPath = join(tempDir, "meta.json");
+    await Bun.write(metaPath, JSON.stringify({ id: "agent-y", counter: 0 }));
+
+    const N = 10;
+    await Promise.all(
+      Array.from({ length: N }, () =>
+        mutateAgentMeta(tempDir, (m) => { m.counter = ((m.counter as number) ?? 0) + 1; }),
+      ),
+    );
+
+    const meta = await Bun.file(metaPath).json();
+    expect(meta.counter).toBe(N);
+  });
+
+  test("mutator returning null is a no-op (idempotent capture)", async () => {
+    const metaPath = join(tempDir, "meta.json");
+    await Bun.write(metaPath, JSON.stringify({ id: "agent-z", codex_session_id: "original" }));
+
+    const wrote = await mutateAgentMeta(tempDir, (m) => {
+      if (m.codex_session_id) return null;
+      m.codex_session_id = "newer";
+    });
+
+    expect(wrote).toBe(false);
+    const meta = await Bun.file(metaPath).json();
+    expect(meta.codex_session_id).toBe("original");
+  });
+
+  test("returns false when meta.json is missing (best-effort)", async () => {
+    const wrote = await mutateAgentMeta(tempDir, (m) => { m.foo = "bar"; });
+    expect(wrote).toBe(false);
+  });
+
+  test("uses a unique tmp suffix — concurrent writes don't clobber each other's tmp files", async () => {
+    // Regression guard for HIGH 2: writeAgentState used to write to
+    // metaPath + ".tmp" unconditionally, which two concurrent writers would
+    // clobber. The new code uses metaPath + ".tmp.<pid>.<uuid>". This test
+    // ensures no stray .tmp file is left behind after a successful write
+    // and no shared-suffix collision could happen.
+    const metaPath = join(tempDir, "meta.json");
+    await Bun.write(metaPath, JSON.stringify({ id: "agent-tmp" }));
+
+    await Promise.all([
+      writeAgentState(tempDir, "running"),
+      mutateAgentMeta(tempDir, (m) => { m.codex_session_id = "rollout-tmp"; }),
+      mutateAgentMeta(tempDir, (m) => { m.tag = "x"; }),
+    ]);
+
+    const { readdir } = await import("fs/promises");
+    const files = await readdir(tempDir);
+    const stray = files.filter((f) => f.startsWith("meta.json.tmp"));
+    expect(stray).toEqual([]);
+    const finalMeta = await Bun.file(metaPath).json();
+    expect(finalMeta.state).toBe("running");
+    expect(finalMeta.codex_session_id).toBe("rollout-tmp");
+    expect(finalMeta.tag).toBe("x");
   });
 });
 

@@ -1854,56 +1854,23 @@ async function main() {
           await withHookLogging("inject-timestamp", agentDir, stdin, () => hookInjectTimestamp(stdin));
           break;
         }
-        case "codex-pre-tool-use": {
-          const id = args[2];
-          if (!id) { console.error("Usage: ib hooks codex-pre-tool-use <agent-id> [--dry-run]"); process.exit(1); }
-          if (!isValidAgentId(id)) { console.error("Invalid agent ID"); process.exit(1); }
-          const dryRun = args.slice(3).includes("--dry-run");
-          if (dryRun) {
-            const { hookCodexPreToolUseDryRun } = await import("./hooks/codex-pre-tool-use");
-            try { await hookCodexPreToolUseDryRun(id); } catch (err) {
-              console.error(err instanceof Error ? err.message : String(err));
-              process.exit(1);
-            }
-            break;
-          }
-          const { hookCodexPreToolUse } = await import("./hooks/codex-pre-tool-use");
-          await hookCodexPreToolUse(id);
-          break;
-        }
-        case "codex-session-start": {
-          const id = args[2];
-          if (!id) { console.error("Usage: ib hooks codex-session-start <agent-id> [--dry-run]"); process.exit(1); }
-          if (!isValidAgentId(id)) { console.error("Invalid agent ID"); process.exit(1); }
-          const dryRun = args.slice(3).includes("--dry-run");
-          if (dryRun) {
-            const { hookCodexSessionStartDryRun } = await import("./hooks/codex-session-start");
-            try { await hookCodexSessionStartDryRun(id); } catch (err) {
-              console.error(err instanceof Error ? err.message : String(err));
-              process.exit(1);
-            }
-            break;
-          }
-          const { hookCodexSessionStart } = await import("./hooks/codex-session-start");
-          await hookCodexSessionStart(id);
-          break;
-        }
+        case "codex-pre-tool-use":
+        case "codex-session-start":
         case "codex-stop": {
+          // Codex's hook contract is FAIL-OPEN — any non-zero exit / thrown
+          // error / unsupported decision means the tool call PROCEEDS.
+          // Dispatcher-level argv parsing + import errors must be caught and
+          // converted to a valid no-op/deny payload + exit 0. See
+          // src/hooks/codex-dispatcher.ts for the load-bearing logic.
+          const event = subcommand.replace(/^codex-/, "") as
+            | "pre-tool-use"
+            | "session-start"
+            | "stop";
           const id = args[2];
-          if (!id) { console.error("Usage: ib hooks codex-stop <agent-id> [--dry-run]"); process.exit(1); }
-          if (!isValidAgentId(id)) { console.error("Invalid agent ID"); process.exit(1); }
           const dryRun = args.slice(3).includes("--dry-run");
-          if (dryRun) {
-            const { hookCodexStopDryRun } = await import("./hooks/codex-stop");
-            try { await hookCodexStopDryRun(id); } catch (err) {
-              console.error(err instanceof Error ? err.message : String(err));
-              process.exit(1);
-            }
-            break;
-          }
-          const { hookCodexStop } = await import("./hooks/codex-stop");
-          await hookCodexStop(id);
-          break;
+          const { runCodexDispatcher } = await import("./hooks/codex-dispatcher");
+          const { exitCode } = await runCodexDispatcher(event, id, { dryRun });
+          process.exit(exitCode);
         }
         case "install": {
           const { installSafetyHooks } = await import("./ib-commands");

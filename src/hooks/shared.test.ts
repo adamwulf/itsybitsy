@@ -146,6 +146,26 @@ describe("extractApplyPatchPaths", () => {
     const body = "*** Add File: src/win.ts\r\n*** Update File: src/win2.ts\r\n";
     expect(extractApplyPatchPaths(body)).toEqual(["src/win.ts", "src/win2.ts"]);
   });
+
+  test("accepts a tab separator after the *** marker", () => {
+    const body = "***\tAdd File: src/tabbed.ts\n";
+    expect(extractApplyPatchPaths(body)).toEqual(["src/tabbed.ts"]);
+  });
+
+  test("accepts double-spaces after the *** marker (defensive across codex versions)", () => {
+    const body = "***  Add File: src/double.ts\n";
+    expect(extractApplyPatchPaths(body)).toEqual(["src/double.ts"]);
+  });
+
+  test("accepts mixed whitespace runs (e.g. space-tab-space)", () => {
+    const body = "*** \t Add File: src/mixed.ts\n";
+    expect(extractApplyPatchPaths(body)).toEqual(["src/mixed.ts"]);
+  });
+
+  test("CRLF + alternate whitespace combine correctly", () => {
+    const body = "***\tAdd File: src/crlf-tab.ts\r\n***  Update File: src/crlf-2.ts\r\n";
+    expect(extractApplyPatchPaths(body)).toEqual(["src/crlf-tab.ts", "src/crlf-2.ts"]);
+  });
 });
 
 describe("buildCodexDenyOutput", () => {

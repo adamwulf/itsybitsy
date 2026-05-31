@@ -41,7 +41,7 @@ function emitNoop(): void {
 
 async function resolveAgentDir(agentId: string, cwd: string, override?: string): Promise<string> {
   if (override) return override;
-  const m = cwd.match(/(.*\/.ittybitty\/agents)/);
+  const m = cwd.match(/(.*\/\.ittybitty\/agents)/);
   const agentsDir = m ? m[1]! : join(process.cwd(), ".ittybitty", "agents");
   let dir = join(agentsDir, agentId);
   try {

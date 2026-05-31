@@ -31,6 +31,7 @@
 import { join } from "path";
 import { realpath } from "fs/promises";
 import { isValidAgentId } from "../validation";
+import { mutateAgentMeta } from "../agents";
 import {
   buildCodexAllowOutput,
   buildCodexDenyOutput,
@@ -42,8 +43,6 @@ import {
   type HookDecision,
   type PathCheckContext,
 } from "./agent-path";
-
-const HOOK_EVENT_NAME = "PreToolUse";
 
 /** Read a value from data, accepting both snake_case and camelCase spellings. */
 function readDefensive(
@@ -93,6 +92,16 @@ export function checkCodexPreToolUse(
         reason: "apply_patch payload contained no Add/Update/Delete File directives",
       };
     }
+    // SPEC §3.2: codex's `-s workspace-write` sandbox leaks /tmp, $TMPDIR, and
+    // ~/.codex/memories. Per SPEC we MUST do path-isolation in the hook and
+    // MUST NOT fall through to checkPathAccess's legacy permissive branch
+    // (step 13). Force step 12 to fire by passing an explicit `allowedPaths`
+    // that contains only the worktree (plus any agent-configured extras).
+    // Worktree-internal paths still allow via step 7 BEFORE step 12 is checked.
+    // apply_patch's "allow list" is path-only by intent: see SPEC §5.5 — apply_patch
+    // is codex's equivalent of claude's Write+Edit, gated on path not tool-allow.
+    const apEffectiveAllowedPaths =
+      ctx.allowedPaths !== undefined ? ctx.allowedPaths : [ctx.worktreePath];
     for (const target of targets) {
       const synthesized = {
         toolName: "Write",
@@ -102,6 +111,7 @@ export function checkCodexPreToolUse(
       const decision = checkPathAccess(synthesized, {
         ...ctx,
         allowList: ["Write", ...ctx.allowList],
+        allowedPaths: apEffectiveAllowedPaths,
       });
       if (decision.decision === "deny") {
         return {
@@ -127,23 +137,12 @@ export async function captureCodexSessionId(
   sessionId: string,
 ): Promise<boolean> {
   if (!sessionId) return false;
-  try {
-    const metaPath = join(agentDir, "meta.json");
-    const file = Bun.file(metaPath);
-    if (!(await file.exists())) return false;
-    const meta = await file.json();
-    if (typeof meta.codex_session_id === "string" && meta.codex_session_id.length > 0) {
-      return false;
+  return mutateAgentMeta(agentDir, (meta) => {
+    if (typeof meta.codex_session_id === "string" && (meta.codex_session_id as string).length > 0) {
+      return null;
     }
     meta.codex_session_id = sessionId;
-    const tmpPath = metaPath + ".tmp";
-    await Bun.write(tmpPath, JSON.stringify(meta, null, 2));
-    const { rename } = await import("fs/promises");
-    await rename(tmpPath, metaPath);
-    return true;
-  } catch {
-    return false;
-  }
+  });
 }
 
 interface DispatcherDeps {
@@ -178,10 +177,18 @@ async function resolveAgentContext(
     agentDir = agentDirOverride;
     agentsDir = join(agentDir, "..");
   } else {
-    const cwdMatch = cwd.match(/(.*\/.ittybitty\/agents)/);
+    const cwdMatch = cwd.match(/(.*\/\.ittybitty\/agents)/);
     agentsDir = cwdMatch ? cwdMatch[1]! : join(process.cwd(), ".ittybitty", "agents");
     agentDir = join(agentsDir, agentId);
   }
+
+  // Canonicalize agentDir so PreToolUse + SessionStart agree on path identity
+  // (matters for the per-agent .meta.lock — different forms = different lock
+  // files = no mutual exclusion). resolveAgentDir in codex-session-start.ts
+  // does the same realpath.
+  try {
+    agentDir = await realpath(agentDir);
+  } catch { /* directory may not exist yet (transient) */ }
 
   let worktreePath = join(agentDir, "repo");
   try {

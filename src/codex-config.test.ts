@@ -124,6 +124,30 @@ describe("buildCodexLaunchArgs — well-formedness", () => {
     }
   });
 
+  test("prepends --add-dir pairs for extra writable roots", () => {
+    const { args } = buildCodexLaunchArgs({
+      ibBinaryPath: "/bin/ib",
+      agentId: "agent-abc",
+      agentDir: "/var/agents/agent-abc",
+      extraWritableRoots: ["/repo/.git"],
+    });
+    expect(args[0]).toBe("--add-dir");
+    expect(args[1]).toBe("/repo/.git");
+    expect(args[2]).toBe("-c");
+    expect(args[3]).toContain("hooks.PreToolUse=");
+  });
+
+  test("rejects unsafe extra writable roots", () => {
+    expect(() =>
+      buildCodexLaunchArgs({
+        ibBinaryPath: "/bin/ib",
+        agentId: "agent-abc",
+        agentDir: "/var/agents/agent-abc",
+        extraWritableRoots: ["/Users/o'malley/repo/.git"],
+      }),
+    ).toThrow(/Unsafe extra writable root/);
+  });
+
   test("rejects invalid timeouts (zero, negative, non-integer)", () => {
     const base = {
       ibBinaryPath: "/bin/ib",

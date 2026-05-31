@@ -74,6 +74,8 @@ export interface BuildCodexStartContentInput {
   absAgentLog: string;
   /** Absolute path to claude.stderr.log (sidecar; reused name for back-compat). */
   absStderrLog: string;
+  /** Extra directories Codex should treat as writable under workspace-write. */
+  extraWritableRoots?: string[];
 }
 
 /**
@@ -102,6 +104,7 @@ export function buildCodexStartContent(input: BuildCodexStartContentInput): stri
     ibBinaryPath: input.ibBinaryPath,
     agentId: input.agentId,
     agentDir: input.agentDir,
+    extraWritableRoots: input.extraWritableRoots,
   });
 
   // Shell-quote each codex argv element so the resulting `codex ... ` line is
@@ -233,6 +236,8 @@ export interface BuildCodexResumeContentInput {
   absAgentLog: string;
   /** Absolute path to claude.stderr.log (sidecar; reused name for back-compat). */
   absStderrLog: string;
+  /** Extra directories Codex should treat as writable under workspace-write. */
+  extraWritableRoots?: string[];
 }
 
 /**
@@ -270,6 +275,7 @@ export function buildCodexResumeContent(input: BuildCodexResumeContentInput): st
     ibBinaryPath: input.ibBinaryPath,
     agentId: input.agentId,
     agentDir: input.agentDir,
+    extraWritableRoots: input.extraWritableRoots,
   });
 
   const qSessionId = shellQuote(input.codexSessionId);

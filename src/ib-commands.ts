@@ -405,6 +405,16 @@ export function resetNukeResumeSpawnRunner(): void {
   resumeDelayOverrideMs = null;
 }
 
+function resolveGitRevParsePath(worktreePath: string, rawPath: string): string {
+  const trimmed = rawPath.trim().split(/\r?\n/)[0]?.trim() ?? "";
+  const absPath = trimmed.startsWith("/") ? trimmed : resolve(worktreePath, trimmed);
+  try {
+    return realpathSync(absPath);
+  } catch {
+    return absPath;
+  }
+}
+
 /**
  * Clean up orphaned tmux sessions — sessions with the ittybitty- prefix
  * that don't correspond to any remaining agent directory.
@@ -820,6 +830,23 @@ export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
         }
       }
 
+      const gitCommonDirResult = await nukeResumeSpawnCtx.run([
+        "git", "-C", workPath, "rev-parse", "--git-common-dir",
+      ]);
+      if (gitCommonDirResult.exitCode !== 0 || !gitCommonDirResult.stdout.trim()) {
+        const errMsg = gitCommonDirResult.stderr.trim() || `git rev-parse --git-common-dir failed with exit code ${gitCommonDirResult.exitCode}`;
+        await logAgent(agentDir, `[resume] could not resolve git common dir for codex writable root: ${errMsg}`);
+        return {
+          ok: false,
+          exitCode: 1,
+          stdout: "",
+          stderr: `Error: could not resolve git common dir for codex writable root: ${errMsg}`,
+        };
+      }
+      const codexExtraWritableRoots = [
+        resolveGitRevParsePath(workPath, gitCommonDirResult.stdout),
+      ];
+
       // Build resume.sh via the shared codex builder (mirrors start.sh).
       const { buildCodexResumeContent } = await import("./codex-spawn");
       const codexResumeContent = buildCodexResumeContent({
@@ -831,6 +858,7 @@ export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
         absExitScript,
         absAgentLog: join(agentDir, "agent.log"),
         absStderrLog: join(agentDir, "claude.stderr.log"),
+        extraWritableRoots: codexExtraWritableRoots,
       });
       await Bun.write(resumeScript, codexResumeContent);
       await chmod(resumeScript, 0o755);
@@ -3600,6 +3628,7 @@ export async function newAgent(
 
   // Working directory defaults to root repo
   let workPath = rootRepoPath;
+  let codexExtraWritableRoots: string[] = [];
 
   // Compute fields needed for the early meta.json write below. These were
   // previously computed just before the late meta.json write (post worktree-add),
@@ -3823,6 +3852,35 @@ export async function newAgent(
       } catch (err) {
         await logSpawn(agentDir, spawnerAgentDir, id, `codex AGENTS.md write failed: ${(err as Error)?.message ?? String(err)}`);
       }
+
+      const gitCommonDirResult = await newAgentSpawnCtx.run([
+        "git", "-C", workPath, "rev-parse", "--git-common-dir",
+      ]);
+      if (gitCommonDirResult.exitCode !== 0 || !gitCommonDirResult.stdout.trim()) {
+        const errMsg = gitCommonDirResult.stderr.trim() || `git rev-parse --git-common-dir failed with exit code ${gitCommonDirResult.exitCode}`;
+        await logSpawn(
+          agentDir,
+          spawnerAgentDir,
+          id,
+          `spawn FAILED: could not resolve git common dir for codex writable root: ${errMsg}`,
+        );
+        await cleanupOnFailure();
+        return {
+          ok: false,
+          exitCode: 1,
+          stdout: "",
+          stderr: `Error: could not resolve git common dir for codex writable root: ${errMsg}`,
+        };
+      }
+      codexExtraWritableRoots = [
+        resolveGitRevParsePath(workPath, gitCommonDirResult.stdout),
+      ];
+      await logSpawn(
+        agentDir,
+        spawnerAgentDir,
+        id,
+        `codex writable git root: ${codexExtraWritableRoots[0]}`,
+      );
 
       // Codex hook-dispatcher precheck (SPEC §5.4 step 7 + §5.5 fail-open
       // mitigation). Codex treats any non-zero hook exit as fail-open — if
@@ -4076,6 +4134,7 @@ echo ""
       absExitScript,
       absAgentLog: join(agentDir, "agent.log"),
       absStderrLog: join(agentDir, "claude.stderr.log"),
+      extraWritableRoots: codexExtraWritableRoots,
     });
   } else {
     startContent = `#!/bin/bash
@@ -5275,4 +5334,3 @@ export async function telegramSend(text: string): Promise<{ ok: boolean; message
     message: "queued (ib watch may not be running, or Telegram is not configured)",
   };
 }
-

@@ -720,9 +720,12 @@ export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
     // to `--model`, not the raw `claude:opus`. parseModel throws on
     // missing/malformed/unknown cli — surface as a resume failure (D6).
     let modelFlagValue = "";
+    let resumeCli: ReturnType<typeof parseModel>["cli"] = "claude";
     if (model) {
       try {
-        modelFlagValue = parseModel(model).model;
+        const parsedResume = parseModel(model);
+        modelFlagValue = parsedResume.model;
+        resumeCli = parsedResume.cli;
       } catch (err) {
         return {
           ok: false,
@@ -731,6 +734,18 @@ export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
           stderr: err instanceof Error ? err.message : String(err),
         };
       }
+    }
+
+    // Codex resume is Phase 7 (SPEC §5.8). Reject cleanly until then —
+    // claude --resume's session-id mechanism does not translate; codex uses
+    // its own rollout id stored in `meta.codex_session_id`.
+    if (resumeCli === "codex") {
+      return {
+        ok: false,
+        exitCode: 1,
+        stdout: "",
+        stderr: `codex resume not yet implemented (agent ${agent.id} uses ${model}); pending Phase 7 of SPEC-CODEX-MODEL.md`,
+      };
     }
 
     // Tmux session was validated at the top of resumeAgent (liveness guard).

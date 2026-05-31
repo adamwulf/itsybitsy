@@ -2126,6 +2126,35 @@ describe("resumeAgent (native)", () => {
     });
   });
 
+  // ── codex resume (Phase 4 stub — full codex resume is Phase 7) ───────────────
+  test("refuses to resume a codex agent with a clear 'not yet implemented' message", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-codex01");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-codex01",
+      tmux_session: "tmux-agent-codex01",
+      session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      model: "codex:gpt-5.4-mini",
+    }));
+
+    const agent = _makeAgent({
+      id: "agent-codex01",
+      repoPath: tempDir,
+      repoName: "test",
+      state: "stopped",
+      meta: {
+        session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        tmux_session: "tmux-agent-codex01",
+        model: "codex:gpt-5.4-mini",
+      } as any,
+    });
+    const result = await resumeAgent(agent);
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("codex resume not yet implemented");
+    expect(result.stderr).toContain("Phase 7");
+  });
+
 });
 
 describe("mergeAgent (native)", () => {

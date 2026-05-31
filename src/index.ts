@@ -1854,6 +1854,57 @@ async function main() {
           await withHookLogging("inject-timestamp", agentDir, stdin, () => hookInjectTimestamp(stdin));
           break;
         }
+        case "codex-pre-tool-use": {
+          const id = args[2];
+          if (!id) { console.error("Usage: ib hooks codex-pre-tool-use <agent-id> [--dry-run]"); process.exit(1); }
+          if (!isValidAgentId(id)) { console.error("Invalid agent ID"); process.exit(1); }
+          const dryRun = args.slice(3).includes("--dry-run");
+          if (dryRun) {
+            const { hookCodexPreToolUseDryRun } = await import("./hooks/codex-pre-tool-use");
+            try { await hookCodexPreToolUseDryRun(id); } catch (err) {
+              console.error(err instanceof Error ? err.message : String(err));
+              process.exit(1);
+            }
+            break;
+          }
+          const { hookCodexPreToolUse } = await import("./hooks/codex-pre-tool-use");
+          await hookCodexPreToolUse(id);
+          break;
+        }
+        case "codex-session-start": {
+          const id = args[2];
+          if (!id) { console.error("Usage: ib hooks codex-session-start <agent-id> [--dry-run]"); process.exit(1); }
+          if (!isValidAgentId(id)) { console.error("Invalid agent ID"); process.exit(1); }
+          const dryRun = args.slice(3).includes("--dry-run");
+          if (dryRun) {
+            const { hookCodexSessionStartDryRun } = await import("./hooks/codex-session-start");
+            try { await hookCodexSessionStartDryRun(id); } catch (err) {
+              console.error(err instanceof Error ? err.message : String(err));
+              process.exit(1);
+            }
+            break;
+          }
+          const { hookCodexSessionStart } = await import("./hooks/codex-session-start");
+          await hookCodexSessionStart(id);
+          break;
+        }
+        case "codex-stop": {
+          const id = args[2];
+          if (!id) { console.error("Usage: ib hooks codex-stop <agent-id> [--dry-run]"); process.exit(1); }
+          if (!isValidAgentId(id)) { console.error("Invalid agent ID"); process.exit(1); }
+          const dryRun = args.slice(3).includes("--dry-run");
+          if (dryRun) {
+            const { hookCodexStopDryRun } = await import("./hooks/codex-stop");
+            try { await hookCodexStopDryRun(id); } catch (err) {
+              console.error(err instanceof Error ? err.message : String(err));
+              process.exit(1);
+            }
+            break;
+          }
+          const { hookCodexStop } = await import("./hooks/codex-stop");
+          await hookCodexStop(id);
+          break;
+        }
         case "install": {
           const { installSafetyHooks } = await import("./ib-commands");
           await printAndExit(await installSafetyHooks(process.cwd()));
@@ -1886,7 +1937,7 @@ async function main() {
         }
         default:
           console.error(`Unknown hooks subcommand: ${subcommand}`);
-          console.error("Available: intercept-task, session-start, main-path, inject-status, inject-timestamp, install, uninstall, status, intercept-install, intercept-uninstall, intercept-status");
+          console.error("Available: intercept-task, session-start, main-path, inject-status, inject-timestamp, codex-pre-tool-use, codex-session-start, codex-stop, install, uninstall, status, intercept-install, intercept-uninstall, intercept-status");
           process.exit(1);
       }
       break;

@@ -2322,17 +2322,19 @@ export class DashboardComponent implements Component {
     else if (data === "l") { agentActions.handleScrollDown(this); }
     // Agent/repo actions — context-sensitive on whether a repo header is selected
     else if (data === "x") {
-      // §17.3 disband-team: when a team ANCHOR is the GLOBAL selection
-      // (active source = teams), `x` disbands. A team MEMBER selection
-      // (kind:"agent") falls through to the agent-kill path so killing a team
-      // member from the Teams tree behaves identically to killing from the
-      // Agents tree (child-agent-indistinguishable). Phase 2 (§17.1) keys this
-      // off `activeSelectionSource` — the same source of truth as
-      // syncSelectedAgent — so the effective selection stays consistent.
+      // §17.3 manage-team: when a team ANCHOR is the GLOBAL selection
+      // (active source = teams), `x` opens the manage-team picker (disband or
+      // remove a single member, each gated by a second confirm dialog). A
+      // team MEMBER selection (kind:"agent") falls through to the agent-kill
+      // path so killing a team member from the Teams tree behaves identically
+      // to killing from the Agents tree (child-agent-indistinguishable).
+      // Phase 2 (§17.1) keys this off `activeSelectionSource` — the same
+      // source of truth as syncSelectedAgent — so the effective selection
+      // stays consistent.
       const teamsActive = this.activeSelectionSource === "teams";
       const teamSel = teamsActive ? this.teamsTree.selection : null;
       if (teamSel?.kind === "team") {
-        agentActions.handleDisbandTeam(this, teamSel.teamName);
+        agentActions.handleManageTeam(this, teamSel.teamName);
       } else if (this.agentTree.isSystemCoordinatorSelected) {
         agentActions.handleKillSystemCoordinator(this);
       } else if (!this.agentTree.selectedAgent && this.agentTree.selectedRepoHeader) {

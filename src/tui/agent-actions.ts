@@ -16,7 +16,7 @@ import {
   acknowledgeQuestion, hooksStatus, interceptHooksStatus,
   installSafetyHooks, uninstallSafetyHooks,
   installInterceptHook, uninstallInterceptHook,
-  teamCreate, teamAdd, teamDelete,
+  teamCreate, teamAdd, teamDelete, teamRemove,
 } from "../ib-commands";
 import type { NewAgentOptions, IbCommandResult } from "../ib-commands";
 import { captureTmuxOutput, resizeTmuxWindow, killTmuxSession, sendTmuxEscape } from "../tmux-poller";
@@ -758,11 +758,88 @@ function runAddMember(ctx: ActionCtx, agent: Agent, teamName: string) {
 }
 
 /**
- * 'x' on a TEAM anchor in the Teams panel — disband the team. Shows a confirm
- * dialog; on confirm, fans out a closure notice via `teamSend` (so members get
- * the same delivery prefix/audit treatment as any other team broadcast), then
+ * 'x' on a TEAM anchor in the Teams panel — show a manage-team picker. The
+ * first option disbands the team (falls through to `handleDisbandTeam`); the
+ * remaining options remove a single member each. Per-member labels are
+ * `<repo>/<id>` (cross-repo disambiguated, matching the Teams-tree row form,
+ * §17.2) when the member's live Agent record is resolvable, falling back to
+ * the bare member id otherwise. Each destructive choice is gated by a second
+ * confirm dialog before any state change.
+ *
+ * Reads the team via `getTeam` so an empty team (no members) just shows the
+ * "Disband team @<name>" option with no remove rows. If the team vanished
+ * between display and selection, the underlying handlers (`handleDisbandTeam`
+ * for disband, `teamRemove` for member-removal) surface the not-found state
+ * exactly as if it had vanished mid-`x`.
+ *
+ * Note on `x` on a team MEMBER row in the Teams tree: that path is NOT routed
+ * here. The dashboard's selection-sync makes a team-member look just like an
+ * Agents-panel agent selection, so it falls through to `handleKill` (kill the
+ * agent), matching `x` behavior in the Agents tree exactly.
+ */
+export function handleManageTeam(ctx: ActionCtx, teamName: string) {
+  ctx.executeAndRefresh(async () => {
+    const team = await getTeam(teamName);
+    if (!team) {
+      ctx.setNotice(`team @${teamName} no longer exists`);
+      return;
+    }
+    const live = ctx.watcher?.lastAgents ?? [];
+    const byId = new Map(live.map((a) => [a.id, a] as const));
+    const memberItems = team.members.map((id) => {
+      const agent = byId.get(id);
+      const label = agent ? `${agent.repoName}/${id}` : id;
+      return { memberId: id, label };
+    });
+    const items = [
+      `Disband team @${teamName}`,
+      ...memberItems.map((m) => `Remove ${m.label}`),
+    ];
+    ctx.showDialog({
+      type: "select",
+      prompt: `Manage team @${teamName}`,
+      items,
+      selectedIndex: 0,
+      onSelect: (index: number) => {
+        ctx.closeDialog();
+        if (index === 0) {
+          handleDisbandTeam(ctx, teamName);
+          return;
+        }
+        const member = memberItems[index - 1]!;
+        ctx.showDialog({
+          type: "confirm",
+          prompt: `Remove ${member.label} from @${teamName}?`,
+          confirmLabel: "Remove",
+          focusedButton: "cancel",
+          confirmColor: RED,
+          onYes: () => {
+            ctx.closeDialog();
+            ctx.executeAndRefresh(async () => {
+              const result = await teamRemove(teamName, member.memberId, ctx.repos);
+              ctx.setNotice(
+                result.ok
+                  ? (result.stdout || `Removed ${member.label} from @${teamName}`)
+                  : (result.stderr || result.stdout || `Remove failed`),
+              );
+            });
+          },
+        });
+      },
+    });
+  });
+}
+
+/**
+ * Disband flow — fans out a closure notice via `teamSend` (so members get the
+ * same delivery prefix/audit treatment as any other team broadcast), then
  * deletes the team via the `teamDelete` CLI wrapper. Order matters: the fan-out
  * reads the roster from `teams.json`, so it MUST happen before the delete.
+ *
+ * Reached from `handleManageTeam` (the `x`-on-team-anchor entry point) when the
+ * user picks the "Disband team @<name>" option, OR from any future call site
+ * that wants the bare disband flow. Shows a confirm dialog before the
+ * destructive action.
  *
  * Uses the `teamDelete` CLI wrapper (not the bare `deleteTeam` registry
  * primitive) so the registry delete + channel/log cleanup (§17.4 cleanup
@@ -770,10 +847,6 @@ function runAddMember(ctx: ActionCtx, agent: Agent, teamName: string) {
  * same name starts with a clean channel rather than inheriting the disbanded
  * predecessor's history (including the closure notice teamSend just appended
  * to the channel file).
- *
- * Selection of a team MEMBER (kind:"agent") is intentionally NOT routed here —
- * the dashboard's selection-sync makes a team-member look just like an Agents-
- * panel agent selection, so it continues to fall through to `handleKill`.
  */
 export function handleDisbandTeam(ctx: ActionCtx, teamName: string) {
   ctx.showDialog({

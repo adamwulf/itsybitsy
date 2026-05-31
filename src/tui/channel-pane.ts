@@ -23,19 +23,20 @@
  * audit log) — messages and notices are deliberately separate. This module does
  * not import `teamLogPath` and does not touch the `.log` in any way.
  *
- * Sender-prefix grammar (reconstructed from the bare stored `message`, §16.4): the
- * on-disk record stores the RAW message with NO `[sent by …]` prefix; the prefix
- * is a tmux-delivery concern reconstructed here so the chat box reads IDENTICALLY
- * to what each member saw in their pane (`deliverMessage`, `ib-commands.ts`):
+ * Sender-prefix grammar (§17.4 in-pane form): the chat box already lives under
+ * the selected team's view (the team name is the panel context), so the in-pane
+ * prefix OMITS the ` in @<team>` clause that the tmux-delivery form uses. The
+ * on-disk record stores the RAW message with NO `[sent by …]` prefix; here we
+ * reconstruct a SHORTENED version of the §16.4 grammar:
  *   - agent sender (real id, not `@`-prefixed, not `""`):
- *       `[sent by <id> in @<team>]: <msg>`  — the literal word "agent" is DROPPED
- *       inside a team context (the ` in @<team>` clause already establishes it).
+ *       `[sent by <id>]: <msg>`  — the literal word "agent" is still dropped
+ *       (the chat-box context already establishes the sender is an agent).
  *   - `@`-sentinel sender (e.g. `@system`):
- *       `[sent by @system in @<team>]: <msg>` — the sentinel is kept verbatim.
+ *       `[sent by @system]: <msg>` — the sentinel is kept verbatim.
  *   - human/CLI sender (`fromAgent === ""`):
- *       `[sent by user <name> in @<team>]: <msg>` WHEN a `user.name` is configured,
- *       `[sent by user in @<team>]: <msg>` WHEN it is not (the bare "user" form is
- *       ONLY the no-`user.name` case).
+ *       `[sent by user <name>]: <msg>` WHEN a `user.name` is configured,
+ *       `[sent by user]: <msg>` WHEN it is not (the bare "user" form is ONLY
+ *       the no-`user.name` case).
  */
 
 import type { Component } from "@mariozechner/pi-tui";
@@ -46,20 +47,27 @@ import { wrapLines, padLines } from "./wrap";
 import { RESET, BOLD, DIM, CYAN, BRIGHT_BLUE, BRIGHT_MAGENTA } from "./colors";
 
 /**
- * Render one channel record as a §16.4-grammar sender-prefixed line (no tmux
- * mechanics). Exported so tests can assert the prefix grammar directly.
+ * Render one channel record as a sender-prefixed line in the team chat box
+ * (no tmux mechanics). Exported so tests can assert the prefix grammar
+ * directly.
+ *
+ * The in-pane grammar drops the ` in @<team>` clause from the §16.4
+ * tmux-delivery form because the chat box already lives under the selected
+ * team's view — the team name is the panel context, so repeating it on every
+ * line is noise. `teamName` is retained in the signature for forward use
+ * (and so callers don't have to thread context through differently for chat
+ * vs. delivery prefixes) but is no longer interpolated.
  *
  * @param record   the stored channel message (raw text, no prefix)
- * @param teamName the bare team name (no `@`); a literal `@` is added in the prefix
+ * @param teamName the bare team name (no `@`) — reserved for forward use; not rendered
  * @param userName the configured `user.name`, or null/empty if unset — drives the
  *                 human-form prefix (`user <name>` vs bare `user`)
  */
 export function formatChannelLine(
   record: ChannelMessage,
-  teamName: string,
+  _teamName: string,
   userName: string | null,
 ): string {
-  const teamClause = ` in @${teamName}`;
   let label: string;
   let color: string;
   if (record.fromAgent === "") {
@@ -74,17 +82,15 @@ export function formatChannelLine(
     label = record.fromAgent;
     color = BRIGHT_MAGENTA;
   } else {
-    // Real agent id — the literal word "agent" is DROPPED in a team context
-    // because the ` in @<team>` clause already establishes the sender is an
-    // agent in a room (§16.4 delivery-prefix divergence).
+    // Real agent id — the literal word "agent" is DROPPED inside a team chat
+    // box (the panel's team context already establishes the sender is an
+    // agent in this room — §16.4 delivery-prefix divergence).
     label = record.fromAgent;
     color = CYAN;
   }
   // The bracketed sender prefix is BOLD + color so it visually separates from
-  // the message body in the chat box. stripAnsi-based tests see the same
-  // literal `[sent by … in @<team>]:` text — the ANSI wraps don't change the
-  // underlying grammar.
-  const prefix = `${BOLD}${color}[sent by ${label}${teamClause}]:${RESET}`;
+  // the message body in the chat box.
+  const prefix = `${BOLD}${color}[sent by ${label}]:${RESET}`;
   return `${prefix} ${record.message}`;
 }
 

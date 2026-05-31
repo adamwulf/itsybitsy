@@ -21,10 +21,9 @@ export type FocusTarget =
 /** Sub-focus states for panels with input fields (active-agent, coordinator). */
 export type SubFocus = "pane" | "input" | "send";
 
-/** Ordered list of focus targets for cycling (normal mode).
- *  `teams-tree` is NOT in the cycle (§17.1) — it is reachable only via the
- *  dedicated `0` key (and `1` returns focus to `agent-tree`). `setFocus("teams-tree")`
- *  still works, but `cycle()` never lands on it. */
+/** Ordered list of focus targets for cycling when `sidebarMode === "agents"`.
+ *  In agents mode, the sidebar shows the Agents tree, so `agent-tree` is the
+ *  head of the cycle (§17.1). `teams-tree` is NOT in this order. */
 const FOCUS_ORDER: readonly FocusTarget[] = [
   "agent-tree",
   "info",
@@ -33,8 +32,23 @@ const FOCUS_ORDER: readonly FocusTarget[] = [
   "repo-coordinator",
 ] as const;
 
+/** Ordered list of focus targets for cycling when `sidebarMode === "teams"`.
+ *  In teams mode, the sidebar shows the Teams tree, so `teams-tree` is the
+ *  head of the cycle (§17.1 Phase 3). `repo-coordinator` is omitted because
+ *  repo headers cannot exist as team selections. The middle pane stop
+ *  (`active-agent`) is shared with agents mode — it represents "the main-area
+ *  pane" regardless of whether it currently renders an agent tmux pane or a
+ *  team channel. */
+const TEAMS_FOCUS_ORDER: readonly FocusTarget[] = [
+  "teams-tree",
+  "info",
+  "active-agent",
+  "right-pane",
+] as const;
+
 /** Restricted focus order when system coordinator is selected.
- *  Includes info (sidebar) and coordinator (main area tmux pane). */
+ *  Includes info (sidebar) and coordinator (main area tmux pane).
+ *  Trumps `sidebarMode` — coordinator mode wins over teams mode. */
 const COORDINATOR_FOCUS_ORDER: readonly FocusTarget[] = [
   "agent-tree",
   "info",
@@ -53,8 +67,14 @@ export class FocusManager {
   private focus: FocusTarget;
   /** Sub-focus state for panels with input fields. */
   subFocus: SubFocus = "pane";
-  /** When true, only cycle between agent-tree and coordinator */
+  /** When true, only cycle between agent-tree and coordinator. Trumps
+   *  `sidebarMode` — coordinator mode wins. */
   coordinatorMode = false;
+  /** Which sidebar tree is visible. Determines which Tab cycling order is
+   *  active when not in coordinator mode. Mirrors `DashboardComponent.sidebarMode`
+   *  (§17.1 Phase 3) — the dashboard writes this whenever it flips sidebar
+   *  visibility (`0`/`1` keys). Defaults to `"agents"`. */
+  sidebarMode: "agents" | "teams" = "agents";
   /** Targets to skip when cycling (e.g., repo-coordinator when not in REPO mode) */
   skipTargets: Set<FocusTarget> = new Set(["repo-coordinator"]);
 
@@ -77,9 +97,17 @@ export class FocusManager {
     this.subFocus = sf;
   }
 
-  /** Cycle focus forward (+1) or backward (-1), wrapping around. Skips targets in skipTargets. */
+  /** Cycle focus forward (+1) or backward (-1), wrapping around. Skips targets in skipTargets.
+   *  Mode precedence (§17.1 Phase 3): coordinator > teams > agents. When
+   *  `coordinatorMode === true`, uses `COORDINATOR_FOCUS_ORDER` regardless of
+   *  `sidebarMode`. Otherwise, `sidebarMode === "teams"` uses
+   *  `TEAMS_FOCUS_ORDER`; the agents-mode `FOCUS_ORDER` is the default. */
   cycle(delta: 1 | -1): void {
-    const order = this.coordinatorMode ? COORDINATOR_FOCUS_ORDER : FOCUS_ORDER;
+    const order = this.coordinatorMode
+      ? COORDINATOR_FOCUS_ORDER
+      : this.sidebarMode === "teams"
+      ? TEAMS_FOCUS_ORDER
+      : FOCUS_ORDER;
     const idx = order.indexOf(this.focus);
     // If current focus is not in the active order, reset to first
     const currentIdx = idx === -1 ? 0 : idx;

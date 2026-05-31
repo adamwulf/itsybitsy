@@ -565,6 +565,11 @@ export async function readAgentState(agentDir: string): Promise<MetaState | unde
 /**
  * Check if tmux output indicates context compaction in progress.
  * Checks for "Compacting conversation" in last 5 lines.
+ *
+ * TODO: codex-equivalent detection — see SPEC-CODEX-MODEL.md §5.6. Codex's compaction
+ * UI strings haven't been captured yet; a codex agent that is compacting will currently
+ * fall through this check (claude-shaped pattern doesn't match codex output). Avoid
+ * guessing patterns without samples — false positives here are worse than false negatives.
  */
 export function isCompacting(tmuxOutput: string): boolean {
   const stripped = stripAnsi(tmuxOutput);
@@ -576,6 +581,11 @@ export function isCompacting(tmuxOutput: string): boolean {
 /**
  * Check if tmux output indicates rate limiting.
  * Checks for rate limit patterns in last 15 lines.
+ *
+ * TODO: codex-equivalent detection — see SPEC-CODEX-MODEL.md §5.6. Codex's rate-limit
+ * UI strings haven't been captured yet; a codex agent that hits a rate limit will
+ * currently fall through this check (claude-shaped patterns don't match codex output).
+ * Avoid guessing patterns without samples — false positives here are worse than false negatives.
  */
 export function isRateLimited(tmuxOutput: string): boolean {
   const stripped = stripAnsi(tmuxOutput);
@@ -601,6 +611,13 @@ export function isRateLimited(tmuxOutput: string): boolean {
  *
  * The leading `⎿` (tool-result connector) is required so we don't false-positive
  * on a watchdog nudge that quotes the phrase "API Error:" inside a sentence.
+ *
+ * TODO: codex-equivalent detection — see SPEC-CODEX-MODEL.md §5.6. Codex's api-error
+ * UI strings haven't been captured yet; a codex agent that hits a transient API error
+ * will currently fall through this check (claude-shaped patterns don't match codex
+ * output — e.g. codex's ChatGPT-auth 400 response shows up as an "■" prefixed line,
+ * but a single sample isn't enough to commit to a regex). Avoid guessing without
+ * samples — false positives here are worse than false negatives.
  */
 export function isApiError(tmuxOutput: string): boolean {
   const stripped = stripAnsi(tmuxOutput);

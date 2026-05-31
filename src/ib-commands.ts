@@ -825,6 +825,7 @@ export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
       const codexResumeContent = buildCodexResumeContent({
         agentId: agent.id,
         ibBinaryPath: codexIbBinaryPath,
+        agentDir,
         codexSessionId,
         absMetaJson: join(agentDir, "meta.json"),
         absExitScript,
@@ -4068,6 +4069,7 @@ echo ""
     startContent = buildCodexStartContent({
       agentId: id,
       ibBinaryPath: codexIbBinaryPath!,
+      agentDir,
       codexModel: modelFlagValue,
       absPromptFile,
       absMetaJson: join(agentDir, "meta.json"),

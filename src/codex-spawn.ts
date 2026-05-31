@@ -56,6 +56,12 @@ export interface BuildCodexStartContentInput {
   agentId: string;
   /** Absolute, path-safe path to the `ib` binary. */
   ibBinaryPath: string;
+  /**
+   * Absolute path to the agent's directory (parent of meta.json / agent.log
+   * etc.). Threaded through `buildCodexLaunchArgs` so codex's `log_dir`
+   * lands at `<agentDir>/codex`. Quote-safety is enforced inside that helper.
+   */
+  agentDir: string;
   /** Model half from `parseModel(model).model` — e.g. `gpt-5.4-mini`. */
   codexModel: string;
   /** Absolute path to prompt.txt — passed as `"$(cat <quoted>)"`. */
@@ -95,6 +101,7 @@ export function buildCodexStartContent(input: BuildCodexStartContentInput): stri
   const { args: hookFlags } = buildCodexLaunchArgs({
     ibBinaryPath: input.ibBinaryPath,
     agentId: input.agentId,
+    agentDir: input.agentDir,
   });
 
   // Shell-quote each codex argv element so the resulting `codex ... ` line is
@@ -209,6 +216,13 @@ export interface BuildCodexResumeContentInput {
   agentId: string;
   /** Absolute, path-safe path to the `ib` binary. */
   ibBinaryPath: string;
+  /**
+   * Absolute path to the agent's directory (parent of meta.json / agent.log
+   * etc.). Threaded through `buildCodexLaunchArgs` so codex's `log_dir`
+   * lands at `<agentDir>/codex` on resume too. Quote-safety is enforced
+   * inside that helper.
+   */
+  agentDir: string;
   /** Codex rollout/session UUID from meta.codex_session_id. Already validated upstream by isValidSessionId. */
   codexSessionId: string;
   /** Absolute path to meta.json — pid is written here. */
@@ -255,6 +269,7 @@ export function buildCodexResumeContent(input: BuildCodexResumeContentInput): st
   const { args: hookFlags } = buildCodexLaunchArgs({
     ibBinaryPath: input.ibBinaryPath,
     agentId: input.agentId,
+    agentDir: input.agentDir,
   });
 
   const qSessionId = shellQuote(input.codexSessionId);

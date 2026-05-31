@@ -25,6 +25,7 @@ describe("buildCodexStartContent — launch line", () => {
   const baseInput = () => ({
     agentId: "agent-abc12345",
     ibBinaryPath: "/usr/local/bin/ib",
+    agentDir: "/tmp/test",
     codexModel: "gpt-5.4-mini",
     absPromptFile: "/tmp/test/prompt.txt",
     absMetaJson: "/tmp/test/meta.json",
@@ -150,12 +151,34 @@ describe("buildCodexStartContent — launch line", () => {
     // shellQuote, the apostrophe wrapping makes this `'commit_attribution=""'`.
     expect(content).toContain(`'commit_attribution=""'`);
   });
+
+  test("sets codex's log_dir to <agentDir>/codex on every spawn", () => {
+    // shellQuote wraps the payload in apostrophes; the TOML string literal
+    // inside uses double quotes around the path.
+    const content = buildCodexStartContent(baseInput());
+    expect(content).toContain(`'log_dir="/tmp/test/codex"'`);
+  });
+
+  test("suppresses codex's onboarding tooltips on every spawn", () => {
+    const content = buildCodexStartContent(baseInput());
+    expect(content).toContain("'tui.show_tooltips=false'");
+  });
+
+  test("rejects an unsafe agentDir (apostrophe would break TOML+shell quoting)", () => {
+    expect(() =>
+      buildCodexStartContent({
+        ...baseInput(),
+        agentDir: "/Users/o'malley/work/.ittybitty/agents/agent-abc12345",
+      }),
+    ).toThrow(/Unsafe agent directory path/);
+  });
 });
 
 describe("buildCodexResumeContent — launch line (SPEC §5.8 + §6 Phase 7)", () => {
   const baseInput = () => ({
     agentId: "agent-abc12345",
     ibBinaryPath: "/usr/local/bin/ib",
+    agentDir: "/tmp/test",
     codexSessionId: "019e7b21-cb7d-7f23-8674-11036ed141ef",
     absMetaJson: "/tmp/test/meta.json",
     absExitScript: "/tmp/test/exit-check.sh",
@@ -289,6 +312,25 @@ describe("buildCodexResumeContent — launch line (SPEC §5.8 + §6 Phase 7)", (
   test("re-passes commit_attribution=\"\" on resume", () => {
     const content = buildCodexResumeContent(baseInput());
     expect(content).toContain(`'commit_attribution=""'`);
+  });
+
+  test("re-passes log_dir=\"<agentDir>/codex\" on resume", () => {
+    const content = buildCodexResumeContent(baseInput());
+    expect(content).toContain(`'log_dir="/tmp/test/codex"'`);
+  });
+
+  test("re-passes tui.show_tooltips=false on resume", () => {
+    const content = buildCodexResumeContent(baseInput());
+    expect(content).toContain("'tui.show_tooltips=false'");
+  });
+
+  test("rejects an unsafe agentDir on resume", () => {
+    expect(() =>
+      buildCodexResumeContent({
+        ...baseInput(),
+        agentDir: "/Users/o'malley/work/.ittybitty/agents/agent-abc12345",
+      }),
+    ).toThrow(/Unsafe agent directory path/);
   });
 });
 

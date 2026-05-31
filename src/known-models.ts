@@ -11,11 +11,9 @@
  *    failure mode (see bug report 2026-05-31, agent-26165de0 in muse-ios).
  *
  * Maintenance:
- * - Add a new codex entry when codex CLI gains support for a new model AND
- *   that model is confirmed reachable on the typical ChatGPT-plan account
- *   (visible in `~/.codex/models_cache.json`). API-key-only models may still
- *   be reachable for some users; if you add such a model, document the
- *   account-plan caveat in the `description`.
+ * - The codex side is sourced from https://developers.openai.com/codex/models
+ *   (last refresh: commit 6f6e35d, 2026-05-31). Refresh when OpenAI updates
+ *   that page.
  * - The claude side can be updated as Anthropic announces new model IDs.
  *
  * Validation rules live in `parseModel`/`KNOWN_CLIS` (src/agent-cli.ts); the
@@ -40,16 +38,19 @@ export const KNOWN_MODELS: KnownModel[] = [
   { cli: "claude", model: "claude-opus-4-8", description: "Opus 4.8" },
   { cli: "claude", model: "claude-sonnet-4-6", description: "Sonnet 4.6" },
   { cli: "claude", model: "claude-haiku-4-5-20251001", description: "Haiku 4.5" },
-  // Codex — restricted to models reachable on a typical ChatGPT-plan account
-  // (verified against ~/.codex/models_cache.json, codex-cli 0.135.0 + ChatGPT
-  // auth). API-key-only models (e.g. gpt-5.3-codex) are intentionally omitted
-  // because they fail with HTTP 400 on ChatGPT plans, producing the
-  // half-broken "agent stuck in unknown state" failure mode. If you add a
-  // model here, confirm it works for the typical account; otherwise users
-  // hit the same bug we just fixed.
+  // Codex — sourced from https://developers.openai.com/codex/models (2026-05-31)
+  // NOTE: gpt-5.3-codex was previously listed but is intentionally omitted —
+  // bug repro (agent-26165de0 in muse-ios, 2026-05-31) confirmed the codex
+  // CLI rejects it with HTTP 400 "not supported when using Codex with a
+  // ChatGPT account". The remaining entries are believed reachable but have
+  // not been individually account-tested; an API-key-only model would still
+  // surface a runtime HTTP 400 at first prompt rather than a spawn-time
+  // rejection — that residual risk is documented in SPEC-CODEX-MODEL.md §108.
   { cli: "codex", model: "gpt-5.5", description: "Frontier — complex coding, computer use, research" },
+  { cli: "codex", model: "gpt-5.4", description: "Flagship — strong reasoning + tool use" },
   { cli: "codex", model: "gpt-5.4-mini", description: "Fast/efficient mini — responsive coding + subagents" },
-  { cli: "codex", model: "codex-auto-review", description: "Codex review specialist" },
+  { cli: "codex", model: "gpt-5.3-codex-spark", description: "Preview — near-instant real-time iteration (text-only)" },
+  { cli: "codex", model: "gpt-5.2", description: "Legacy — previous general-purpose coding/agentic model" },
 ];
 
 /**

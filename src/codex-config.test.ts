@@ -74,9 +74,10 @@ describe("buildCodexLaunchArgs — well-formedness", () => {
       agentDir: "/var/agents/agent-abc123",
     });
     // args alternates: -c, payload, -c, payload, ... The trailing pairs
-    // beyond the hook events are the 4 always-on flags:
-    //   features.multi_agent, commit_attribution, log_dir, tui.show_tooltips.
-    expect(args.length).toBe(CODEX_REGISTERED_EVENTS.length * 2 + 8);
+    // beyond the hook events are the 5 always-on flags:
+    //   features.multi_agent, commit_attribution, log_dir, tui.show_tooltips,
+    //   tui.status_line.
+    expect(args.length).toBe(CODEX_REGISTERED_EVENTS.length * 2 + 10);
     for (let i = 0; i < args.length; i += 2) {
       expect(args[i]).toBe("-c");
     }
@@ -204,7 +205,7 @@ describe("buildCodexLaunchArgs — disables codex's native multi-agent feature",
     expect(foundAt).toBeGreaterThanOrEqual(0);
   });
 
-  test("all four flags appear regardless of timeout override", () => {
+  test("all five flags appear regardless of timeout override", () => {
     const { args } = buildCodexLaunchArgs({
       ibBinaryPath: "/usr/local/bin/ib",
       agentId: "agent-abc123",
@@ -215,6 +216,7 @@ describe("buildCodexLaunchArgs — disables codex's native multi-agent feature",
     expect(args).toContain('commit_attribution=""');
     expect(args).toContain('log_dir="/var/agents/agent-abc123/codex"');
     expect(args).toContain("tui.show_tooltips=false");
+    expect(args).toContain('tui.status_line=["model-with-reasoning","current-dir","five-hour-limit","weekly-limit"]');
   });
 });
 
@@ -259,6 +261,25 @@ describe("buildCodexLaunchArgs — log_dir and tui.show_tooltips flags", () => {
     let foundAt = -1;
     for (let i = 0; i < args.length - 1; i++) {
       if (args[i] === "-c" && args[i + 1] === "tui.show_tooltips=false") {
+        foundAt = i;
+        break;
+      }
+    }
+    expect(foundAt).toBeGreaterThanOrEqual(0);
+  });
+
+  test("appends `-c tui.status_line=[...]` with Codex limit usage items", () => {
+    const { args } = buildCodexLaunchArgs({
+      ibBinaryPath: "/usr/local/bin/ib",
+      agentId: "agent-abc123",
+      agentDir: "/var/agents/agent-abc123",
+    });
+    let foundAt = -1;
+    for (let i = 0; i < args.length - 1; i++) {
+      if (
+        args[i] === "-c" &&
+        args[i + 1] === 'tui.status_line=["model-with-reasoning","current-dir","five-hour-limit","weekly-limit"]'
+      ) {
         foundAt = i;
         break;
       }

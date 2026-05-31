@@ -182,5 +182,9 @@ export function buildCodexLaunchArgs(input: BuildCodexLaunchArgsInput): CodexLau
   // Suppress codex's onboarding tooltips on the TUI welcome screen — they
   // clutter the pane the watchdog scrapes for state.
   args.push("-c", "tui.show_tooltips=false");
+  // Keep Codex's native status line useful inside the manager pane. The limit
+  // items are built-in Codex TUI modules that render ChatGPT five-hour/session
+  // and weekly usage information when available.
+  args.push("-c", 'tui.status_line=["model-with-reasoning","current-dir","five-hour-limit","weekly-limit"]');
   return { args };
 }

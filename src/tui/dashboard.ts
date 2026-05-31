@@ -26,6 +26,7 @@ import { validateAllAgentTypes, ensureAgentTypesDir, listSpawnableTypeNamesSync 
 import type { RepoEntry } from "../registry";
 import { AgentWatcher } from "../watcher";
 import { TmuxPoller, hasAttachedClient, resizeTmuxWindow } from "../tmux-poller";
+import { parseModel } from "../agent-cli";
 import {
   IB_COORDINATOR_SESSION,
   acquireSystemCoordinator,
@@ -160,7 +161,7 @@ export class TmuxPaneComponent implements Component {
       return;
     }
 
-    const codexChrome = findCodexInputChrome(wrapped);
+    const codexChrome = isCodexAgent(this.agent) ? findCodexInputChrome(wrapped) : null;
     if (codexChrome) {
       this.statusLines = wrapped.slice(codexChrome.statusIndex, codexChrome.endIndex + 1).map(
         (line) => truncateToWidth(line, width, "")
@@ -250,7 +251,7 @@ export class TmuxPaneComponent implements Component {
       if (upperIndex >= 0 && upperIndex < wrapped.length) {
         wrapped = wrapped.slice(0, upperIndex);
       } else {
-        const codexChrome = findCodexInputChrome(wrapped);
+        const codexChrome = isCodexAgent(this.agent) ? findCodexInputChrome(wrapped) : null;
         if (codexChrome) {
           wrapped = wrapped.slice(0, codexChrome.promptIndex);
         }
@@ -284,6 +285,15 @@ export class TmuxPaneComponent implements Component {
   }
 }
 
+function isCodexAgent(agent: Agent | null): boolean {
+  if (!agent) return false;
+  try {
+    return parseModel(agent.meta.model).cli === "codex";
+  } catch {
+    return false;
+  }
+}
+
 function findCodexInputChrome(wrapped: string[]): { promptIndex: number; statusIndex: number; endIndex: number } | null {
   let endIndex = wrapped.length - 1;
   while (endIndex >= 0 && stripAnsi(wrapped[endIndex]!).trim() === "") {
@@ -301,7 +311,7 @@ function findCodexInputChrome(wrapped: string[]): { promptIndex: number; statusI
   }
   if (statusIndex < 0) return null;
 
-  for (let i = statusIndex - 1; i >= Math.max(0, statusIndex - 20); i--) {
+  for (let i = statusIndex - 1; i >= 0; i--) {
     const line = stripAnsi(wrapped[i]!);
     if (/^›(?:\s|$)/.test(line)) {
       return { promptIndex: i, statusIndex, endIndex };

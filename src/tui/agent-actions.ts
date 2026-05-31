@@ -20,7 +20,9 @@ import {
 } from "../ib-commands";
 import type { NewAgentOptions, IbCommandResult } from "../ib-commands";
 import { captureTmuxOutput, resizeTmuxWindow, killTmuxSession, sendTmuxEscape } from "../tmux-poller";
-import { parseState } from "../parse-state";
+import { parseStateForCli } from "../parse-state";
+import { parseModel } from "../agent-cli";
+import type { AgentCli } from "../agent-cli";
 import { openInGhostty, openPathInGhostty } from "../ghostty";
 import { buildFolderItems } from "./folder-browser";
 import { listSpawnableTypeNamesSync } from "../agent-types";
@@ -33,6 +35,15 @@ import { fuzzyFilterIndices } from "./dialog-handler";
 import { displayState, computeStateColWidth, AGE_COL_WIDTH } from "./agent-tree";
 import type { PaneMode } from "./pane-manager";
 import { RESET, BOLD, DIM, RED } from "./colors";
+
+function classifyAgentCli(model: string | undefined | null): AgentCli {
+  if (!model) return "claude";
+  try {
+    return parseModel(model).cli;
+  } catch {
+    return "claude";
+  }
+}
 import { clampLeftWidthAbsolute } from "./widths";
 import type { RepoHealthReport } from "../health-check";
 import { getResolvableWarnings, resolveHealthWarnings } from "../health-check";
@@ -1719,7 +1730,7 @@ export function handleSnapshot(ctx: ActionCtx) {
   captureTmuxOutput(agent.meta.tmux_session).then(async (strippedOutput) => {
     try {
       if (!strippedOutput) { ctx.setNotice("No tmux output captured"); return; }
-      const result = parseState(strippedOutput);
+      const result = parseStateForCli(strippedOutput, classifyAgentCli(agent.meta.model));
       const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
       const filename = `snapshot-${timestamp}-${result.state}.txt`;
       const dir = agent.archived ? "archive" : "agents";

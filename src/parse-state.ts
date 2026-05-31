@@ -3,6 +3,8 @@
  * Pure string matching — no side effects.
  */
 
+import type { AgentCli } from "./agent-cli";
+
 /** Claude startup markers that indicate the session has progressed past initial creation */
 export const STARTUP_MARKERS = ["Claude Code v", "[USER TASK]", "╭─ Claude Code", "[AGENT CONTEXT]"];
 
@@ -130,21 +132,17 @@ export function parseCodexState(input: string): ParseStateResult {
     return { state: "waiting", reason: "WAITING in last 15 lines (codex)" };
   }
 
-  // Idle at codex input prompt — the tail has a bare "›" line near the end AND
-  // the very last non-blank line is a codex status bar ("<model> · <path>"). The
-  // "›" is U+203A. Status bar pattern: "<text> · <path>" with the path anchored
-  // to "/" or "~/" (rules out a "·" appearing inside a sentence).
+  // Idle at codex input prompt — walk from the bottom to the last "›" prompt,
+  // then inspect the tail block after it. Codex can wrap long typed prompts
+  // across many terminal lines, so fixed "last 5 lines" prompt lookbacks are
+  // brittle. Status bar pattern: "<text> · <path>" with the path anchored to
+  // "/" or "~/" (rules out a "·" appearing inside a sentence).
   const tailLines = stripTrailingBlanks(input.split("\n"));
   const last = tailLines[tailLines.length - 1] ?? "";
   const hasStatusBar = /\s·\s+(?:~|\/)/.test(last);
   if (hasStatusBar) {
-    // Look back through the trailing region for the most recent "›"-prefixed line.
-    // The block between the last "›" and the status bar is the user's typed (or
-    // queued) input — codex shows it inline above the prompt. We only need to find
-    // a single "›" in the last ~5 lines to confirm we're at the prompt.
-    const recent = tailLines.slice(-5);
-    const hasPromptLine = recent.some((line) => /^›\s/.test(line) || /^›\s*$/.test(line));
-    if (hasPromptLine) {
+    const promptIndex = findLastCodexPromptIndex(tailLines);
+    if (promptIndex >= 0) {
       return { state: "waiting", reason: "idle at codex input prompt" };
     }
     // Even without a "›" in the last 5 lines, a trailing status bar alone is a
@@ -154,6 +152,20 @@ export function parseCodexState(input: string): ParseStateResult {
   }
 
   return { state: "unknown", reason: "no codex patterns matched" };
+}
+
+function findLastCodexPromptIndex(lines: string[]): number {
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (/^›(?:\s|$)/.test(lines[i] ?? "")) return i;
+  }
+  return -1;
+}
+
+export function parseStateForCli(input: string, cli: AgentCli): ParseStateResult {
+  if (!input || input.trim() === "") {
+    return { state: "unknown", reason: "empty input" };
+  }
+  return cli === "codex" ? parseCodexState(input) : parseClaudeState(input);
 }
 
 /**
@@ -181,6 +193,10 @@ export function parseState(input: string): ParseStateResult {
     return parseCodexState(input);
   }
 
+  return parseClaudeState(input);
+}
+
+export function parseClaudeState(input: string): ParseStateResult {
   // Check for 'creating' state — permission screens before Claude starts
   // Only if Claude logo/[USER TASK] is NOT present
   if (!STARTUP_MARKERS.some((m) => input.includes(m))) {

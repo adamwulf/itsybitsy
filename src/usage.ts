@@ -6,7 +6,7 @@
 
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { rename, mkdir, stat, writeFile, unlink } from "node:fs/promises";
+import { rename, mkdir, stat, writeFile, unlink, readdir, readFile } from "node:fs/promises";
 
 import { InjectionContext, SpawnContext } from "./types";
 import type { FetchLike } from "./types";
@@ -21,6 +21,7 @@ let ITSYBITSY_DIR = join(homedir(), ".itsybitsy");
 let CACHE_PATH = join(ITSYBITSY_DIR, "usage-cache.json");
 let LOCK_PATH = join(ITSYBITSY_DIR, "usage.lock");
 let CREDENTIALS_PATH = join(homedir(), ".claude", ".credentials.json");
+let CODEX_SESSIONS_DIR = join(homedir(), ".codex", "sessions");
 const CACHE_TTL_MS = 180_000; // 3 minute normal refresh
 const LOCK_MAX_AGE_MS = 30_000; // only one API attempt per 30s across processes
 const API_TIMEOUT_MS = 5_000; // 5s fetch timeout
@@ -32,6 +33,7 @@ export function setTestDir(dir: string): void {
   CACHE_PATH = join(dir, "usage-cache.json");
   LOCK_PATH = join(dir, "usage.lock");
   CREDENTIALS_PATH = join(dir, "credentials.json");
+  CODEX_SESSIONS_DIR = join(dir, "codex-sessions");
 }
 
 /** Reset directory paths to defaults. */
@@ -40,6 +42,7 @@ export function resetTestDir(): void {
   CACHE_PATH = join(ITSYBITSY_DIR, "usage-cache.json");
   LOCK_PATH = join(ITSYBITSY_DIR, "usage.lock");
   CREDENTIALS_PATH = join(homedir(), ".claude", ".credentials.json");
+  CODEX_SESSIONS_DIR = join(homedir(), ".codex", "sessions");
 }
 
 export interface UsageData {
@@ -64,6 +67,22 @@ interface CacheFile {
   timestamp: number;
   response: ApiResponse;
   nextBackoffMs?: number; // backoff interval for next failure (ms)
+}
+
+interface CodexRateLimitWindow {
+  used_percent?: unknown;
+  window_minutes?: unknown;
+  resets_at?: unknown;
+}
+
+interface CodexRateLimits {
+  primary?: CodexRateLimitWindow;
+  secondary?: CodexRateLimitWindow;
+}
+
+interface CodexUsageCandidate {
+  data: UsageData;
+  timestamp: number;
 }
 
 /** Format a duration from now to a future ISO date as human-readable. */
@@ -92,6 +111,108 @@ export function parseUsageResponse(resp: ApiResponse, now?: Date): UsageData {
     sessionReset: resp.five_hour ? formatResetTime(resp.five_hour.resets_at, now) : null,
     weeklyReset: resp.seven_day ? formatResetTime(resp.seven_day.resets_at, now) : null,
   };
+}
+
+function formatCodexResetTime(value: unknown, now?: Date): string | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return formatResetTime(new Date(value * 1000).toISOString(), now);
+  }
+  if (typeof value === "string" && value.length > 0) {
+    const numeric = Number(value);
+    if (Number.isFinite(numeric)) {
+      return formatResetTime(new Date(numeric * 1000).toISOString(), now);
+    }
+    return formatResetTime(value, now);
+  }
+  return null;
+}
+
+function percent(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  return Math.round(value);
+}
+
+/** Parse a Codex token_count rate_limits payload into the shared usage shape. */
+export function parseCodexRateLimits(rateLimits: CodexRateLimits, now?: Date): UsageData {
+  const primary = rateLimits.primary;
+  const secondary = rateLimits.secondary;
+  return {
+    sessionPct: primary ? percent(primary.used_percent) : null,
+    weeklyPct: secondary ? percent(secondary.used_percent) : null,
+    sessionReset: primary ? formatCodexResetTime(primary.resets_at, now) : null,
+    weeklyReset: secondary ? formatCodexResetTime(secondary.resets_at, now) : null,
+  };
+}
+
+async function collectJsonlFiles(dir: string, depth = 0): Promise<string[]> {
+  if (depth > 5) return [];
+  let entries;
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+
+  const files: string[] = [];
+  for (const entry of entries) {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...(await collectJsonlFiles(path, depth + 1)));
+    } else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
+      files.push(path);
+    }
+  }
+  return files;
+}
+
+function parseCodexUsageLine(line: string): CodexUsageCandidate | null {
+  let record: any;
+  try {
+    record = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  const rateLimits = record?.payload?.rate_limits;
+  if (!rateLimits || typeof rateLimits !== "object") return null;
+
+  const data = parseCodexRateLimits(rateLimits);
+  if (
+    data.sessionPct === null
+    && data.weeklyPct === null
+    && data.sessionReset === null
+    && data.weeklyReset === null
+  ) {
+    return null;
+  }
+
+  const timestamp = typeof record?.timestamp === "string"
+    ? new Date(record.timestamp).getTime()
+    : 0;
+  return { data, timestamp: Number.isFinite(timestamp) ? timestamp : 0 };
+}
+
+/** Read the newest Codex usage payload from local Codex session JSONL logs. */
+export async function fetchCodexUsage(): Promise<UsageResult> {
+  const files = await collectJsonlFiles(CODEX_SESSIONS_DIR);
+  let newest: CodexUsageCandidate | null = null;
+
+  for (const file of files) {
+    let text: string;
+    try {
+      text = await readFile(file, "utf8");
+    } catch {
+      continue;
+    }
+    for (const line of text.split("\n")) {
+      if (line.trim().length === 0) continue;
+      const candidate = parseCodexUsageLine(line);
+      if (!candidate) continue;
+      if (!newest || candidate.timestamp >= newest.timestamp) newest = candidate;
+    }
+  }
+
+  if (!newest) return { data: null, error: true };
+  return { data: newest.data, error: false };
 }
 
 async function readAccessToken(): Promise<string | null> {

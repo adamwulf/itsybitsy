@@ -1,7 +1,7 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { formatResetTime, parseUsageResponse, fetchUsage, setTestDir, resetTestDir, fetchCtx, spawnCtx, type UsageResult } from "./usage";
+import { formatResetTime, parseUsageResponse, parseCodexRateLimits, fetchCodexUsage, fetchUsage, setTestDir, resetTestDir, fetchCtx, spawnCtx, type UsageResult } from "./usage";
 import { join } from "path";
-import { mkdtemp, rm, writeFile } from "fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import { mockFetch as createMockFetch } from "./test-utils";
 
@@ -95,6 +95,27 @@ describe("parseUsageResponse", () => {
       weeklyPct: null,
       sessionReset: null,
       weeklyReset: null,
+    });
+  });
+});
+
+describe("parseCodexRateLimits", () => {
+  const now = new Date("2026-05-31T20:00:00Z");
+
+  test("parses Codex primary and secondary limit windows", () => {
+    const result = parseCodexRateLimits(
+      {
+        primary: { used_percent: 4.4, window_minutes: 300, resets_at: 1780275600 },
+        secondary: { used_percent: 1.2, window_minutes: 10080, resets_at: 1780779600 },
+      },
+      now,
+    );
+
+    expect(result).toEqual({
+      sessionPct: 4,
+      weeklyPct: 1,
+      sessionReset: "5h 0m",
+      weeklyReset: "6d 1h",
     });
   });
 });
@@ -337,6 +358,66 @@ describe("fetchUsage", () => {
     const cache = await Bun.file(join(tmpDir, "usage-cache.json")).json();
     // Should cap at 600_000 (10 minutes)
     expect(cache.nextBackoffMs).toBe(600_000);
+  });
+});
+
+describe("fetchCodexUsage", () => {
+  let tmpDir: string;
+
+  beforeEach(async () => {
+    tmpDir = await mkdtemp(join(tmpdir(), "codex-usage-test-"));
+    setTestDir(tmpDir);
+  });
+
+  afterEach(async () => {
+    resetTestDir();
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  test("reads newest Codex rate limits from session jsonl", async () => {
+    const sessionsDir = join(tmpDir, "codex-sessions", "2026", "05", "31");
+    await mkdir(sessionsDir, { recursive: true });
+    await writeFile(
+      join(sessionsDir, "rollout-old.jsonl"),
+      JSON.stringify({
+        timestamp: "2026-05-31T19:00:00.000Z",
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          rate_limits: {
+            primary: { used_percent: 12, window_minutes: 300, resets_at: 1780275600 },
+            secondary: { used_percent: 3, window_minutes: 10080, resets_at: 1780779600 },
+          },
+        },
+      }) + "\n",
+    );
+    await writeFile(
+      join(sessionsDir, "rollout-new.jsonl"),
+      JSON.stringify({
+        timestamp: "2026-05-31T20:00:00.000Z",
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          rate_limits: {
+            primary: { used_percent: 42, window_minutes: 300, resets_at: 1780275600 },
+            secondary: { used_percent: 9, window_minutes: 10080, resets_at: 1780779600 },
+          },
+        },
+      }) + "\n",
+    );
+
+    const result = await fetchCodexUsage();
+
+    expect(result.error).toBe(false);
+    expect(result.data?.sessionPct).toBe(42);
+    expect(result.data?.weeklyPct).toBe(9);
+  });
+
+  test("returns an error when no Codex usage payload exists", async () => {
+    const result = await fetchCodexUsage();
+
+    expect(result.error).toBe(true);
+    expect(result.data).toBeNull();
   });
 });
 

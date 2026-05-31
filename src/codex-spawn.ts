@@ -242,10 +242,20 @@ export async function appendCodexGitignoreEntry(worktreePath: string): Promise<b
  * `<ittybitty>` XML wrapper because codex doesn't recognize it; the rest is
  * portable markdown.
  *
- * Tools that don't exist in codex (Task, ExitPlanMode) are not referenced
- * by the current agent-type templates — they're embedded in Claude's
- * hardcoded fallback paths, not in the worker/manager `.md` bodies. So the
- * template path is safe to reuse verbatim.
+ * Claude-only tool audit (HIGH 4 from the Phase 4 review):
+ *   - `TodoWrite` references — removed in manager.md + the session-start.ts
+ *     hardcoded fallback; replaced with "Track progress with measurable
+ *     criteria" (CLI-agnostic).
+ *   - `Write(...)` snippet in `_non_coordinator.md`'s commit-message
+ *     section — rewritten to "Default to writing the message to a temp
+ *     file first" so codex agents (whose file-edit tool is apply_patch,
+ *     not Write) read CLI-agnostic guidance.
+ *   - The Tool Interception block in manager.md (mentions Task, Agent,
+ *     TaskCreate) is left in place. Those tools don't exist on codex, so
+ *     a codex manager simply won't trigger the deny-on-intercept path
+ *     described — the block is harmless but technically Claude-specific.
+ *     A future phase should conditionalize this block per-cli once the
+ *     agent-type template engine grows {{#if cli == "claude"}} support.
  */
 export async function buildCodexAgentsMd(ctx: SessionContext): Promise<string> {
   const wrapped = await generateInstructions(ctx);

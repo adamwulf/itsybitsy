@@ -306,4 +306,43 @@ describe("buildCodexAgentsMd / writeCodexAgentsMd", () => {
     expect(body.length).toBeGreaterThan(0);
     expect(body).toContain("agent-test02");
   });
+
+  // HIGH 4 from Phase 4 review: AGENTS.md for codex manager must not
+  // reference Claude-only tools like TodoWrite.
+  test("HIGH 4: codex manager AGENTS.md does not reference TodoWrite", async () => {
+    const { buildCodexAgentsMd } = await import("./codex-spawn");
+    const ctx = {
+      role: "manager" as const,
+      agentId: "agent-mgr-test",
+      agentManager: "",
+      parentBranch: "main",
+      branchName: "agent/agent-mgr-test",
+      worktreePath: join(tempDir, "wt"),
+      rootRepoPath: tempDir,
+      agentType: "manager",
+    };
+    const body = await buildCodexAgentsMd(ctx);
+    expect(body).not.toContain("TodoWrite");
+    // Replacement phrasing should be present.
+    expect(body).toContain("Track progress with measurable criteria");
+  });
+
+  test("HIGH 4: codex worker AGENTS.md does not contain Write(...) tool reference", async () => {
+    const { buildCodexAgentsMd } = await import("./codex-spawn");
+    const ctx = {
+      role: "worker" as const,
+      agentId: "agent-w-test",
+      agentManager: "agent-mgr",
+      parentBranch: "main",
+      branchName: "agent/agent-w-test",
+      worktreePath: join(tempDir, "wt"),
+      rootRepoPath: tempDir,
+      agentType: "worker",
+    };
+    const body = await buildCodexAgentsMd(ctx);
+    // The original _non_coordinator.md had `Write(/tmp/commit-msg.txt, ...)`
+    // which references the Claude `Write` tool. After the HIGH 4 fix, this
+    // exact snippet must be gone.
+    expect(body).not.toContain('Write(/tmp/commit-msg.txt');
+  });
 });

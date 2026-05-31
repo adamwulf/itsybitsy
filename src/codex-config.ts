@@ -123,5 +123,18 @@ export function buildCodexLaunchArgs(input: BuildCodexLaunchArgsInput): CodexLau
   for (const event of CODEX_REGISTERED_EVENTS) {
     args.push("-c", renderCodexHookFlagPayload(event, ibBinaryPath, agentId, timeoutSecs));
   }
+  // Disable codex's native multi-agent collaboration tools (spawn_agent,
+  // send_input, resume_agent, wait_agent, close_agent). All sub-agent spawning
+  // MUST go through `ib new-agent` so the harness owns the lifecycle
+  // (meta.json, watchdog, path-isolation, tracked tmux session). The claude
+  // side enforces this via the intercept-task hook; this is the codex
+  // equivalent — codex's native tools cannot fire if the feature is off.
+  args.push("-c", "features.multi_agent=false");
+  // Disable the "Co-authored-by: Codex <noreply@openai.com>" commit trailer.
+  // codex's commit_attribution is a TOML string — an empty string in TOML
+  // is `""` (two adjacent double quotes); when codex sees this it skips
+  // appending the trailer entirely. User preference: commits made by codex
+  // agents should look like normal local commits.
+  args.push("-c", 'commit_attribution=""');
   return { args };
 }

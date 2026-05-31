@@ -72,8 +72,10 @@ describe("buildCodexLaunchArgs — well-formedness", () => {
       ibBinaryPath: "/usr/local/bin/ib",
       agentId: "agent-abc123",
     });
-    // args alternates: -c, payload, -c, payload, ...
-    expect(args.length).toBe(CODEX_REGISTERED_EVENTS.length * 2);
+    // args alternates: -c, payload, -c, payload, ... The trailing pairs
+    // beyond the hook events are the multi_agent + commit_attribution flags
+    // (always present — see the dedicated describe block below).
+    expect(args.length).toBe(CODEX_REGISTERED_EVENTS.length * 2 + 4);
     for (let i = 0; i < args.length; i += 2) {
       expect(args[i]).toBe("-c");
     }
@@ -82,12 +84,14 @@ describe("buildCodexLaunchArgs — well-formedness", () => {
     expect(args[5]).toContain("hooks.Stop=");
   });
 
-  test("each payload contains <abs ib> and <agentId>", () => {
+  test("each hook payload contains <abs ib> and <agentId>", () => {
     const { args } = buildCodexLaunchArgs({
       ibBinaryPath: "/usr/local/bin/ib",
       agentId: "agent-abc123",
     });
-    for (let i = 1; i < args.length; i += 2) {
+    // Only the hook-flag payloads carry the dispatcher command — the trailing
+    // multi_agent / commit_attribution flags are intentionally agent-agnostic.
+    for (let i = 1; i < CODEX_REGISTERED_EVENTS.length * 2; i += 2) {
       const payload = args[i]!;
       expect(payload).toContain("/usr/local/bin/ib hooks codex-");
       expect(payload).toContain("agent-abc123");
@@ -108,7 +112,9 @@ describe("buildCodexLaunchArgs — well-formedness", () => {
       agentId: "agent-abc",
       timeoutSecs: 12,
     });
-    for (let i = 1; i < args.length; i += 2) {
+    // Only the hook-flag payloads carry a timeout — the trailing
+    // multi_agent / commit_attribution flags have nothing to do with hooks.
+    for (let i = 1; i < CODEX_REGISTERED_EVENTS.length * 2; i += 2) {
       expect(args[i]).toContain("timeout=12");
     }
   });
@@ -126,6 +132,51 @@ describe("buildCodexLaunchArgs — well-formedness", () => {
     // spike captured this exact wire format and codex consumed it cleanly.
     const out = renderCodexHookFlagPayload("PreToolUse", "/bin/ib", "agent-abc", 30);
     expect(out).toMatch(/^hooks\.PreToolUse=\[\{matcher=".*?",hooks=\[\{type="command",command=".+?",timeout=\d+\}\]\}\]$/);
+  });
+});
+
+describe("buildCodexLaunchArgs — disables codex's native multi-agent feature", () => {
+  test("appends `-c features.multi_agent=false` to the args array", () => {
+    const { args } = buildCodexLaunchArgs({
+      ibBinaryPath: "/usr/local/bin/ib",
+      agentId: "agent-abc123",
+    });
+    // The flag pair must appear as two adjacent entries: the `-c` token,
+    // then the literal TOML `features.multi_agent=false` payload.
+    let foundAt = -1;
+    for (let i = 0; i < args.length - 1; i++) {
+      if (args[i] === "-c" && args[i + 1] === "features.multi_agent=false") {
+        foundAt = i;
+        break;
+      }
+    }
+    expect(foundAt).toBeGreaterThanOrEqual(0);
+  });
+
+  test("appends `-c commit_attribution=\"\"` to disable the codex commit trailer", () => {
+    const { args } = buildCodexLaunchArgs({
+      ibBinaryPath: "/usr/local/bin/ib",
+      agentId: "agent-abc123",
+    });
+    // The TOML empty-string literal is `""` (two adjacent double quotes).
+    let foundAt = -1;
+    for (let i = 0; i < args.length - 1; i++) {
+      if (args[i] === "-c" && args[i + 1] === 'commit_attribution=""') {
+        foundAt = i;
+        break;
+      }
+    }
+    expect(foundAt).toBeGreaterThanOrEqual(0);
+  });
+
+  test("both flags appear regardless of timeout override", () => {
+    const { args } = buildCodexLaunchArgs({
+      ibBinaryPath: "/usr/local/bin/ib",
+      agentId: "agent-abc123",
+      timeoutSecs: 7,
+    });
+    expect(args).toContain("features.multi_agent=false");
+    expect(args).toContain('commit_attribution=""');
   });
 });
 

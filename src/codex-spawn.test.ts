@@ -136,6 +136,20 @@ describe("buildCodexStartContent — launch line", () => {
     expect(content).toContain('log "Starting codex -m gpt-5.4-mini');
     expect(content).toContain("codex agent id=agent-abc12345");
   });
+
+  test("disables codex's native multi-agent feature on every spawn", () => {
+    // `-c features.multi_agent=false` is shell-quoted by shellQuote, so it
+    // appears as `'-c' 'features.multi_agent=false'` in the launch line.
+    const content = buildCodexStartContent(baseInput());
+    expect(content).toContain("'features.multi_agent=false'");
+  });
+
+  test("disables codex's commit_attribution trailer on every spawn", () => {
+    const content = buildCodexStartContent(baseInput());
+    // The TOML empty-string literal is `""` (two double quotes). After
+    // shellQuote, the apostrophe wrapping makes this `'commit_attribution=""'`.
+    expect(content).toContain(`'commit_attribution=""'`);
+  });
 });
 
 describe("buildCodexResumeContent — launch line (SPEC §5.8 + §6 Phase 7)", () => {
@@ -261,6 +275,20 @@ describe("buildCodexResumeContent — launch line (SPEC §5.8 + §6 Phase 7)", (
     const content = buildCodexResumeContent(baseInput());
     expect(content).not.toMatch(/setsid claude/);
     expect(content).not.toMatch(/^claude /m);
+  });
+
+  test("re-passes features.multi_agent=false on resume", () => {
+    // Resume goes through buildCodexLaunchArgs (same path as start.sh), so the
+    // disable flag propagates. Verifying explicitly because resume.sh is the
+    // resurrection path — if the flag were lost here, a resumed agent would
+    // regain access to the codex native multi-agent tools.
+    const content = buildCodexResumeContent(baseInput());
+    expect(content).toContain("'features.multi_agent=false'");
+  });
+
+  test("re-passes commit_attribution=\"\" on resume", () => {
+    const content = buildCodexResumeContent(baseInput());
+    expect(content).toContain(`'commit_attribution=""'`);
   });
 });
 

@@ -32,6 +32,7 @@ import { join } from "path";
 import { realpath } from "fs/promises";
 import { isValidAgentId } from "../validation";
 import { mutateAgentMeta } from "../agents";
+import { logAgent } from "../agent-lifecycle";
 import {
   buildCodexAllowOutput,
   buildCodexDenyOutput,
@@ -43,6 +44,18 @@ import {
   type HookDecision,
   type PathCheckContext,
 } from "./agent-path";
+
+/** Format tool input params for denial logs, matching the Claude hook style. */
+function formatToolInput(toolInput: Record<string, unknown>): string {
+  const parts: string[] = [];
+  for (const [key, value] of Object.entries(toolInput)) {
+    if (typeof value === "string") {
+      const truncated = value.length > 60 ? value.slice(0, 57) + "..." : value;
+      parts.push(`${key}=${truncated}`);
+    }
+  }
+  return parts.join(", ");
+}
 
 /** Read a value from data, accepting both snake_case and camelCase spellings. */
 function readDefensive(
@@ -298,6 +311,9 @@ export async function hookCodexPreToolUse(
     if (decision.decision === "allow") {
       write(buildCodexAllowOutput(toolInput));
     } else {
+      const params = formatToolInput(toolInput);
+      const suffix = params ? ` (${params})` : "";
+      await logAgent(ctxResolved.agentDir, `[PreToolUse] Permission denied: ${toolName}${suffix}`);
       write(buildCodexDenyOutput(decision.reason));
     }
   } catch (err) {

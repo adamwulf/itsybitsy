@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { mkdtemp, mkdir, rm, writeFile } from "fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "fs/promises";
 import { join } from "path";
 import { tmpdir } from "os";
 import {
@@ -225,6 +225,24 @@ describe("hookCodexPreToolUse — codex JSON contract (gate (d))", () => {
     expect(parsed.hookSpecificOutput.permissionDecision).toBe("deny");
     expect(typeof parsed.hookSpecificOutput.permissionDecisionReason).toBe("string");
     expect(parsed.hookSpecificOutput.permissionDecisionReason.length).toBeGreaterThan(0);
+  });
+
+  test("deny logs a PreToolUse Permission denied line for the denial panel", async () => {
+    const stdin = JSON.stringify({
+      tool_name: "Bash",
+      tool_input: { command: "curl https://evil" },
+      cwd: join(agentDir, "repo"),
+    });
+    await hookCodexPreToolUse("agent-test01", {
+      rawStdin: stdin,
+      agentDirOverride: agentDir,
+      skipSessionIdCapture: true,
+      write: () => true,
+    });
+
+    const log = await readFile(join(agentDir, "agent.log"), "utf-8");
+    expect(log).toContain("[PreToolUse] Permission denied: Bash");
+    expect(log).toContain("command=curl https://evil");
   });
 
   test("allow includes updatedInput echoing the original tool_input verbatim", async () => {

@@ -176,6 +176,32 @@ export interface ActionCtx {
     setFocus(target: import("./focus").FocusTarget): void;
   };
   /**
+   * §17.1 (Phase 1 three-axis model): which tree the sidebar currently shows.
+   * Independent of focus and of the active selection. The source of truth for
+   * "is the Teams panel visible in the sidebar?". The `@`-fuzzy jump writes
+   * this back to "agents" so the user sees the agent it just jumped to.
+   */
+  sidebarMode: import("./sidebar").SidebarMode;
+  /**
+   * §17.1 (Phase 2 three-axis model): which tree owns the GLOBAL selection.
+   * Independent of `sidebarMode`. `handleSend`'s team-target branch reads
+   * this — only a team that is the active selection counts as a `@<team>`
+   * target. The `@`-fuzzy jump writes this back to "agents" so the jumped-to
+   * agent becomes the active selection.
+   */
+  activeSelectionSource: import("./sidebar").SidebarMode;
+  /**
+   * §17.1 Phase 2: setter — flips `activeSelectionSource` on the host
+   * dashboard. The `@`-fuzzy jump uses this; tests inject a recording stub.
+   */
+  setActiveSelectionSource: (source: import("./sidebar").SidebarMode) => void;
+  /**
+   * §17.1 Phase 2: setter — flips `sidebarMode` on the host dashboard. Used by
+   * the `@`-fuzzy jump (forces visibility to "agents" so the user sees the
+   * jumped-to agent in the visible tree). Tests inject a recording stub.
+   */
+  setSidebarMode: (mode: import("./sidebar").SidebarMode) => void;
+  /**
    * §17.3 / §17.3a: the Teams-tree handle. Lets `handleSend` read the team
    * anchor (`{ kind: "team", teamName }`) selected in the Teams panel, since
    * the team-target dialog and `teamSend` fan-out only fire on that selection.
@@ -826,13 +852,16 @@ export function handleMerge(ctx: ActionCtx) {
 }
 
 export function handleSend(ctx: ActionCtx) {
-  // §17.3a: team-target branch — when the Teams panel is focused AND a team
-  // anchor is selected, open a `Send message to @<team>:` dialog and route
-  // through `teamSend` (§16.4 fan-out). A team MEMBER selection (kind:"agent")
-  // is INTENTIONALLY NOT routed here — it falls through to the point-to-point
-  // agent-send path below (§17.3 child-agent-indistinguishable).
-  const teamsFocused = ctx.focusManager.current() === "teams-tree";
-  const teamSel = teamsFocused ? ctx.teamsTree.selection : null;
+  // §17.3a: team-target branch — when the Teams tree OWNS THE ACTIVE
+  // SELECTION (Phase 2, §17.1) AND a team anchor is selected, open a
+  // `Send message to @<team>:` dialog and route through `teamSend` (§16.4
+  // fan-out). A team MEMBER selection (kind:"agent") is INTENTIONALLY NOT
+  // routed here — it falls through to the point-to-point agent-send path
+  // below (§17.3 child-agent-indistinguishable). Phase 2 (§17.1) keys this
+  // off `activeSelectionSource`, matching the dashboard's effective-selection
+  // resolver (`syncSelectedAgent`).
+  const teamsActive = ctx.activeSelectionSource === "teams";
+  const teamSel = teamsActive ? ctx.teamsTree.selection : null;
   if (teamSel?.kind === "team") {
     handleSendToTeam(ctx, teamSel.teamName);
     return;
@@ -855,8 +884,11 @@ export function handleSend(ctx: ActionCtx) {
   // §17.3 child-agent-indistinguishable: a team-member selection from the
   // Teams panel is `{ kind: "agent" }` — let it fall through to the same
   // point-to-point send path as an Agents-panel selection. The dashboard's
-  // focus-aware selection-sync has already populated `selectedAgent` from the
-  // Teams-tree selection when teams-tree is focused.
+  // effective-selection resolver (activeSelectionSource-aware after Phase 2,
+  // §17.1) has already populated `rightPane.agent`/`tmuxPane.agent`/
+  // `infoPanel.agent` from the Teams-tree member selection when the Teams
+  // tree is the active source; here we read it back through `teamSel` so the
+  // send target is correct without going through the agentTree.
   const agent = teamSel?.kind === "agent" ? teamSel.agent : ctx.agentTree.selectedAgent;
   if (!agent) return;
   const dialog: Extract<NonNullable<DialogState>, { type: "textarea" }> = {
@@ -1154,6 +1186,11 @@ export function handleGoToQuestionAgent(ctx: ActionCtx) {
   if (idx < 0 || idx >= questions.length) return;
   const q = questions[idx]!;
   if (ctx.agentTree.selectAgentById(q.agent)) {
+    // §17.1 Phase 2: jumping from the QUESTIONS pane to an agent is an
+    // Agents-panel operation — make the Agents tree the active source and
+    // ensure the sidebar shows it (parallel to the @-fuzzy jump).
+    ctx.setActiveSelectionSource("agents");
+    ctx.setSidebarMode("agents");
     ctx.syncSelectedAgent();
     ctx.jumpToMode("AGENT LOG");
     ctx.tui?.requestRender();
@@ -1201,6 +1238,13 @@ export function handleFuzzyAgent(ctx: ActionCtx) {
       // to happens to be a team member. This is the ONLY thing that force-
       // selects in the Agents tree from no-selection.
       ctx.focusManager.setFocus("agent-tree");
+      // §17.1 Phase 2: the @-jump is the canonical Agents-panel operation —
+      // it makes the Agents tree the active selection source AND flips the
+      // sidebar to "agents" so the user sees the agent it just jumped to.
+      // Both axes are written explicitly so the routing is unambiguous (the
+      // user spec: "yes, flip sidebarMode to agents on @-jump").
+      ctx.setActiveSelectionSource("agents");
+      ctx.setSidebarMode("agents");
       if (selected.kind === "repo") {
         ctx.agentTree.selectByRepoPath(selected.entry.repoPath);
         ctx.syncSelectedAgent();

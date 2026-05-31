@@ -47,6 +47,7 @@ import { TeamsTreeComponent, flattenTeamsTree } from "./teams-tree";
 import { ChannelPaneComponent } from "./channel-pane";
 import { TeamLogPaneComponent } from "./team-log-pane";
 import { SidebarComponent, SIDEBAR_WIDTH, computeSidebarHeights, clampSidebarOffsets } from "./sidebar";
+import type { SidebarMode } from "./sidebar";
 import { InfoPanelComponent } from "./info-panel";
 import { listTeams, getTeam } from "../teams";
 import type { Team } from "../teams";
@@ -647,6 +648,34 @@ export class DashboardComponent implements Component {
   coordinatorViewMode: "TMUX" | "DASHBOARD" = "TMUX";
   /** Dynamic sidebar width — adjustable via [ ] when sidebar panel is focused */
   sidebarWidth = SIDEBAR_WIDTH;
+  /**
+   * Which tree the sidebar renders in its tree region — Phase 1 of the
+   * three-axis model (see SPEC §17.1). Independent of focus and of the global
+   * selection (Phase 2). Toggled exclusively by the `0` (teams) and `1`
+   * (agents) keys; Tab cycling never changes it. Phase 3 makes Tab cycling
+   * depend on `sidebarMode` — the dashboard mirrors this field into
+   * `focusManager.sidebarMode` whenever it changes, so `FocusManager.cycle()`
+   * picks the correct order (agents | teams).
+   */
+  sidebarMode: SidebarMode = "agents";
+  /**
+   * Which tree owns the GLOBAL selection — Phase 2 of the three-axis model
+   * (see SPEC §17.1). Independent of `sidebarMode`. Updated whenever the user
+   * navigates the visible tree (j/k/J/K) so that the navigated tree becomes
+   * the active source. `0`/`1` (sidebar toggles) NEVER change this — the
+   * global selection persists across visibility flips.
+   *
+   * `syncSelectedAgent` reads selection from whichever tree this names; the
+   * info / main / right panes therefore follow the global selection rather
+   * than the visible tree.
+   *
+   * Mirroring: on a `0`/`1` flip, the dashboard tries to mirror the agent
+   * selection across trees for visual continuity (see
+   * `mirrorSelectionToVisibleTree`). That is a VISUAL mirror only — it does
+   * NOT change `activeSelectionSource`. The active source flips only when
+   * the user navigates the visible tree.
+   */
+  activeSelectionSource: SidebarMode = "agents";
   /** When true, saved layout was applied — suppress onWidth overrides from tmux poller */
   private layoutRestored = false;
   /** Skip the next N tmux width reports to handle round-trip latency after resize */
@@ -989,8 +1018,16 @@ export class DashboardComponent implements Component {
    * stale for up to 1s. The always-on selected-agent `tmuxPoller` is untouched.
    */
   private updatePollerVisibility() {
+    // §17.1 Phase 2: gate the system coordinator poller on the active source
+    // matching the render path. A stale coord pointer in the (inactive)
+    // Agents tree must not keep the coordinator tmux poller running while
+    // the Teams tree is driving the main area — the coordinator pane is not
+    // visible, so polling it is wasted work (and would also fight the team
+    // channel for the main area in the render-aware paths).
     const coordinatorVisible =
-      this.agentTree.isSystemCoordinatorSelected && this.coordinatorViewMode === "TMUX";
+      this.activeSelectionSource === "agents"
+      && this.agentTree.isSystemCoordinatorSelected
+      && this.coordinatorViewMode === "TMUX";
     if (coordinatorVisible) {
       this.coordinatorPoller.resume();
     } else if (this.coordinatorPoller.isRunning()) {
@@ -1294,28 +1331,32 @@ export class DashboardComponent implements Component {
   }
 
   syncSelectedAgent() {
-    // §17.3: focus-aware effective-selection resolver. When the Teams panel is
-    // focused, the EFFECTIVE selection comes from the Teams tree; otherwise
-    // from the Agents tree. The downstream routing then runs on this single
-    // effective selection — so a `{ kind: "agent" }` selected in the Teams
-    // tree (a team member) behaves identically to selecting that same agent in
-    // the Agents tree (§17.3 child-agent-indistinguishable). The Agents-tree-
-    // only concepts (repo header, system coordinator) are routed from the
-    // agent-tree only — they are not reachable through the Teams tree.
-    const teamsFocused = this.focusManager.current() === "teams-tree";
-    const teamSelection = teamsFocused ? this.teamsTree.selection : null;
+    // §17.3: effective-selection resolver. Phase 2 of the three-axis model
+    // (SPEC §17.1): the EFFECTIVE selection is sourced from whichever tree
+    // owns the GLOBAL selection (`activeSelectionSource === "teams"` → Teams
+    // tree, otherwise the Agents tree). This is INDEPENDENT of `sidebarMode`
+    // (which tree is currently visible). Toggling `0`/`1` flips visibility but
+    // not selection; navigating the visible tree (j/k) flips active source to
+    // that tree. The downstream routing runs on this single effective
+    // selection — so a `{ kind: "agent" }` selected in the Teams tree (a team
+    // member) behaves identically to selecting that same agent in the Agents
+    // tree (§17.3 child-agent-indistinguishable). The Agents-tree-only
+    // concepts (repo header, system coordinator) are routed from the Agents
+    // tree only — they are not reachable through the Teams tree.
+    const teamsActive = this.activeSelectionSource === "teams";
+    const teamSelection = teamsActive ? this.teamsTree.selection : null;
     const teamAnchor = teamSelection?.kind === "team" ? teamSelection.teamName : null;
     const teamMemberAgent = teamSelection?.kind === "agent" ? teamSelection.agent : null;
     // The Agents-tree-only properties (repo header, system coordinator) are
-    // unreachable from the Teams panel. When focus is on the Teams panel we
-    // suppress them so a leftover repo-header selection in the (unfocused)
-    // Agents tree doesn't bleed into the main area.
-    const selected = teamsFocused
+    // unreachable from the Teams panel. When the Teams tree owns the active
+    // selection we suppress them so a leftover repo-header selection in the
+    // (inactive) Agents tree doesn't bleed into the main area.
+    const selected = teamsActive
       ? teamMemberAgent
       : this.agentTree.selectedAgent;
-    const isCoordinator = !teamsFocused && this.agentTree.isSystemCoordinatorSelected;
-    const selectedRepoHeader = teamsFocused ? null : this.agentTree.selectedRepoHeader;
-    const selectedRepoPath = teamsFocused ? null : this.agentTree.selectedRepoPath;
+    const isCoordinator = !teamsActive && this.agentTree.isSystemCoordinatorSelected;
+    const selectedRepoHeader = teamsActive ? null : this.agentTree.selectedRepoHeader;
+    const selectedRepoPath = teamsActive ? null : this.agentTree.selectedRepoPath;
 
     // Update focus cycling for coordinator mode
     this.focusManager.coordinatorMode = isCoordinator;
@@ -1553,6 +1594,90 @@ export class DashboardComponent implements Component {
   ): Promise<IbCommandResult> => {
     return ibTeamSend(teamName, members, message, opts, this.repos);
   };
+
+  /**
+   * §17.1 Phase 2: ctx setters bound to the dashboard. Arrow properties so
+   * `this` is preserved when invoked through the ctx. They write to the
+   * dashboard's `activeSelectionSource` / `sidebarMode` fields and are used
+   * by the `@`-fuzzy jump and `g`-go-to-question-agent handlers (which need
+   * to force the Agents tree into the active-selection role + visible).
+   */
+  setActiveSelectionSource = (source: SidebarMode): void => {
+    this.activeSelectionSource = source;
+  };
+
+  setSidebarMode = (mode: SidebarMode): void => {
+    this.sidebarMode = mode;
+    // §17.1 Phase 3: keep the FocusManager's sidebarMode in sync so Tab
+    // cycling picks the correct order. The `0`/`1` handlers do this too;
+    // mirroring it here covers the `@`-fuzzy jump and `g`-go-to-question-agent
+    // paths that flip sidebarMode through this setter.
+    this.focusManager.sidebarMode = mode;
+  };
+
+  /**
+   * §17.1 Phase 2 mirror — visual continuity across a sidebar toggle.
+   *
+   * When the user flips `sidebarMode` (`0`/`1`), the global selection
+   * (`activeSelectionSource`) is preserved unchanged. To keep the user
+   * oriented, we ALSO try to mirror the active agent into the newly visible
+   * tree so it lights up the same row visually. The active selection itself
+   * still lives in the original tree — this is a *visual* mirror, not a
+   * source-of-truth change.
+   *
+   * Rules (per the user's Phase 2 spec):
+   *  - Active selection is an AGENT:
+   *      * If sidebarMode === "agents", select that agent in the Agents tree.
+   *      * If sidebarMode === "teams", select the FIRST team-member row whose
+   *        id matches in the Teams tree (the agent's first team, per stable
+   *        listTeams() order). If the agent is not a member of any team, the
+   *        Teams tree is left in no-selection (no row highlighted).
+   *  - Active selection is a TEAM: the Agents tree has nothing to mirror; it
+   *    is left in no-selection (no row highlighted) when sidebarMode flips
+   *    to "agents". The team remains the active selection.
+   *  - Active selection is a REPO HEADER or SYSTEM COORDINATOR: lives only in
+   *    the Agents tree. When sidebarMode flips to "teams", the Teams tree is
+   *    left in no-selection. When sidebarMode flips back to "agents" the
+   *    Agents tree already holds the right selection (we never cleared it).
+   *  - Null active selection: nothing to mirror.
+   */
+  private mirrorSelectionToVisibleTree(): void {
+    if (this.activeSelectionSource === "agents") {
+      // The agent tree owns the active selection. Mirror an agent into the
+      // newly visible Teams tree if the user just flipped to teams.
+      if (this.sidebarMode === "teams") {
+        const sel = this.agentTree.selection;
+        if (sel?.kind === "agent") {
+          // Try to find this agent in the Teams tree; on miss, drop teams
+          // selection so no stale highlight lingers from a previous mirror.
+          if (!this.teamsTree.selectMemberByAgentId(sel.agent.id)) {
+            this.teamsTree.deselect();
+          }
+        } else {
+          // Repo header, system coordinator, or null — nothing to mirror.
+          this.teamsTree.deselect();
+        }
+      }
+      // sidebarMode === "agents": the agent tree already holds its selection
+      // (untouched by visibility toggles). Nothing to do.
+      return;
+    }
+    // activeSelectionSource === "teams" — Teams tree owns selection.
+    if (this.sidebarMode === "agents") {
+      const sel = this.teamsTree.selection;
+      if (sel?.kind === "agent") {
+        // A team-member (an agent) is the active selection — mirror it into
+        // the Agents tree so the user sees the same agent highlighted.
+        if (!this.agentTree.selectAgentById(sel.agent.id)) {
+          this.agentTree.deselect();
+        }
+      } else {
+        // Team anchor or null — no agent to mirror in the Agents tree.
+        this.agentTree.deselect();
+      }
+    }
+    // sidebarMode === "teams": the teams tree already holds its selection.
+  }
 
   /**
    * §17.2: rebuild the Teams tree from the team registry + the already-state-
@@ -1990,16 +2115,38 @@ export class DashboardComponent implements Component {
       return;
     }
 
-    // §17.1: '0' / '1' switch the sidebar tree between Teams and Agents.
-    // teams-tree is no longer in FOCUS_ORDER, so these are the canonical way
-    // to reach the Teams panel. Gated by the dialog/input-field returns above.
+    // §17.1 (Phase 3 three-axis model): '0' / '1' switch the sidebar tree
+    // visibility (`sidebarMode`). They do NOT change the GLOBAL selection
+    // (`activeSelectionSource`, set by j/k navigation). Focus moves only when
+    // the current focus target is the HEAD of one cycle and would not exist
+    // in the other cycle: `agent-tree` ↔ `teams-tree` (natural mirror), and
+    // `repo-coordinator` (agents-only) → `teams-tree` when entering teams
+    // mode. Other targets (`info` / `active-agent` / `right-pane`) are
+    // present in BOTH orders, so focus stays where it is. We also mirror the
+    // active selection into the newly-visible tree (visual only —
+    // `activeSelectionSource` is unchanged) and re-run selection sync so the
+    // info / main / right panes update immediately instead of waiting a
+    // tmux-poll tick. Gated by the dialog/input-field returns above.
     if (data === "0") {
-      this.focusManager.setFocus("teams-tree");
+      this.sidebarMode = "teams";
+      this.focusManager.sidebarMode = "teams";
+      const focus = this.focusManager.current();
+      if (focus === "agent-tree" || focus === "repo-coordinator") {
+        this.focusManager.setFocus("teams-tree");
+      }
+      this.mirrorSelectionToVisibleTree();
+      this.syncSelectedAgent();
       this.tui?.requestRender();
       return;
     }
     if (data === "1") {
-      this.focusManager.setFocus("agent-tree");
+      this.sidebarMode = "agents";
+      this.focusManager.sidebarMode = "agents";
+      if (this.focusManager.current() === "teams-tree") {
+        this.focusManager.setFocus("agent-tree");
+      }
+      this.mirrorSelectionToVisibleTree();
+      this.syncSelectedAgent();
       this.tui?.requestRender();
       return;
     }
@@ -2038,16 +2185,22 @@ export class DashboardComponent implements Component {
       }
     }
 
-    // Navigation. §17.1: j/k and shift+j/k are FOCUS-AWARE — when the Teams
-    // panel is focused, they navigate the Teams tree; otherwise the Agents tree.
-    // QUESTIONS-mode j/k retains its agent-tree-only special case.
-    const navigatesTeams = this.focusManager.current() === "teams-tree";
+    // Navigation. §17.1 (Phase 2 three-axis model): j/k and shift+j/k navigate
+    // whichever tree is currently VISIBLE in the sidebar (`sidebarMode`). After
+    // any navigation, the navigated tree becomes the active selection source
+    // (`activeSelectionSource = sidebarMode`) — the user just declared what they
+    // are selecting by moving the cursor in this tree. QUESTIONS-mode j/k
+    // retains its agent-tree-only special case below and does NOT touch
+    // activeSelectionSource (it's a right-pane question selector, not a
+    // sidebar-tree navigation).
+    const navigatesTeams = this.sidebarMode === "teams";
     if (data === "J") {
       if (navigatesTeams) {
         this.teamsTree.navigateAnchor(1);
       } else {
         this.agentTree.moveToRepo(1);
       }
+      this.activeSelectionSource = this.sidebarMode;
       this.syncSelectedAgent();
       this.tui?.requestRender();
     } else if (data === "K") {
@@ -2056,6 +2209,7 @@ export class DashboardComponent implements Component {
       } else {
         this.agentTree.moveToRepo(-1);
       }
+      this.activeSelectionSource = this.sidebarMode;
       this.syncSelectedAgent();
       this.tui?.requestRender();
     } else if (matchesKey(data, Key.down) || data === "j") {
@@ -2072,6 +2226,7 @@ export class DashboardComponent implements Component {
         } else {
           this.agentTree.moveSelection(1);
         }
+        this.activeSelectionSource = this.sidebarMode;
         this.syncSelectedAgent();
         this.tui?.requestRender();
       }
@@ -2086,16 +2241,19 @@ export class DashboardComponent implements Component {
         } else {
           this.agentTree.moveSelection(-1);
         }
+        this.activeSelectionSource = this.sidebarMode;
         this.syncSelectedAgent();
         this.tui?.requestRender();
       }
     }
-    // Right pane cycling. Suppressed entirely when the Teams panel is focused
-    // and a team is selected — the team view fixes the right pane to the team
-    // log, and cycling here would silently mutate the underlying right-pane
-    // mode that re-appears on a return to the Agents panel.
+    // Right pane cycling. Suppressed entirely when a team is the GLOBAL
+    // selection (`activeSelectionSource === "teams"` + a team in channelPane)
+    // — the team view fixes the right pane to the team log, and cycling here
+    // would silently mutate the underlying right-pane mode that re-appears
+    // when the active selection returns to an agent. Phase 2 (§17.1): keyed
+    // on the active source, not on sidebar visibility.
     else if (data === "p" || matchesKey(data, Key.left)) {
-      if (this.focusManager.current() === "teams-tree" && this.channelPane.teamName !== null) {
+      if (this.activeSelectionSource === "teams" && this.channelPane.teamName !== null) {
         // no-op in teams view
       } else if (this.agentTree.isSystemCoordinatorSelected) {
         this.coordinatorViewMode = this.coordinatorViewMode === "TMUX" ? "DASHBOARD" : "TMUX";
@@ -2107,7 +2265,7 @@ export class DashboardComponent implements Component {
       }
       this.tui?.requestRender();
     } else if (data === "n" || matchesKey(data, Key.right)) {
-      if (this.focusManager.current() === "teams-tree" && this.channelPane.teamName !== null) {
+      if (this.activeSelectionSource === "teams" && this.channelPane.teamName !== null) {
         // no-op in teams view (see "p" branch above)
       } else if (this.agentTree.isSystemCoordinatorSelected) {
         this.coordinatorViewMode = this.coordinatorViewMode === "TMUX" ? "DASHBOARD" : "TMUX";
@@ -2161,12 +2319,15 @@ export class DashboardComponent implements Component {
     else if (data === "l") { agentActions.handleScrollDown(this); }
     // Agent/repo actions — context-sensitive on whether a repo header is selected
     else if (data === "x") {
-      // §17.3 disband-team: Teams panel focused + team ANCHOR selected → disband.
-      // A team MEMBER selection (kind:"agent") falls through to the agent-kill
-      // path so killing a team member from the Teams tree behaves identically
-      // to killing from the Agents tree (child-agent-indistinguishable).
-      const teamsFocused = this.focusManager.current() === "teams-tree";
-      const teamSel = teamsFocused ? this.teamsTree.selection : null;
+      // §17.3 disband-team: when a team ANCHOR is the GLOBAL selection
+      // (active source = teams), `x` disbands. A team MEMBER selection
+      // (kind:"agent") falls through to the agent-kill path so killing a team
+      // member from the Teams tree behaves identically to killing from the
+      // Agents tree (child-agent-indistinguishable). Phase 2 (§17.1) keys this
+      // off `activeSelectionSource` — the same source of truth as
+      // syncSelectedAgent — so the effective selection stays consistent.
+      const teamsActive = this.activeSelectionSource === "teams";
+      const teamSel = teamsActive ? this.teamsTree.selection : null;
       if (teamSel?.kind === "team") {
         agentActions.handleDisbandTeam(this, teamSel.teamName);
       } else if (this.agentTree.isSystemCoordinatorSelected) {
@@ -2325,7 +2486,14 @@ export class DashboardComponent implements Component {
 
     const lines: string[] = [];
     const terminalRows = process.stdout.rows || 24;
-    const isCoordinatorView = this.agentTree.isSystemCoordinatorSelected;
+    // §17.1 Phase 2: a leftover system-coordinator selection in the (inactive)
+    // Agents tree must NOT bleed into the team-active render path. When the
+    // Teams tree owns the global selection the main area renders the team
+    // channel, regardless of what the Agents tree's pointer happens to be on.
+    // Mirrors the same gate `syncSelectedAgent` uses (`!teamsActive &&
+    // agentTree.isSystemCoordinatorSelected`).
+    const isCoordinatorView =
+      this.activeSelectionSource === "agents" && this.agentTree.isSystemCoordinatorSelected;
     const isTreeMode = this.rightPane.mode === "TREE";
     const isFullWidth = isCoordinatorView || FULL_WIDTH_MODES.has(this.rightPane.mode);
 
@@ -2361,9 +2529,13 @@ export class DashboardComponent implements Component {
     // Build main area title separator (agent-id left, pane-mode right).
     // Pass leftPaneWidth so the junction lines up with the SplitPane's seam.
     const leftPaneW = getLiveLeftPaneWidth(renderLayout);
-    const teamsFocusedForTitle = this.focusManager.current() === "teams-tree";
+    // §17.1 Phase 2: main-area title-bar follows the GLOBAL selection
+    // (`activeSelectionSource`), not sidebar visibility. The title belongs to
+    // whatever drives the main pane (agent vs team channel); that's the active
+    // selection, not whichever tree the sidebar happens to be showing.
+    const teamsActiveForTitle = this.activeSelectionSource === "teams";
     const teamSelectedForTitle =
-      teamsFocusedForTitle && !isCoordinatorView && this.channelPane.teamName !== null;
+      teamsActiveForTitle && !isCoordinatorView && this.channelPane.teamName !== null;
     const mainTitleSep = isCoordinatorView
       ? this.buildCoordinatorTitleSeparator(mainWidth)
       : teamSelectedForTitle
@@ -2379,11 +2551,18 @@ export class DashboardComponent implements Component {
     // seam math so the title separator junction lines up. The user's normal
     // right-pane mode (AGENT LOG / DENIALS / etc.) is preserved; only the
     // visual is overridden while the team is selected. Also covers the Teams
-    // no-selection state (channelPane.teamName === null + teams-tree focused),
+    // no-selection state (channelPane.teamName === null + teams sidebar mode),
     // which renders the channel pane's placeholder full-width.
-    const teamsFocusedRender = this.focusManager.current() === "teams-tree";
+    // §17.1 Phase 2: main-area branching follows the GLOBAL selection
+    // (`activeSelectionSource`), not sidebar visibility. The main area shows
+    // the team channel when a team is the active selection (regardless of
+    // which sidebar tree is currently rendered); for any other active
+    // selection (agent, repo header, system coord, or null in the Agents
+    // tree) the main area falls through to the agent / coordinator / repo
+    // branches below.
+    const teamsActiveRender = this.activeSelectionSource === "teams";
     const showChannelPane =
-      teamsFocusedRender
+      teamsActiveRender
       && !isCoordinatorView
       && (this.channelPane.teamName !== null || this.teamsTree.selection === null);
     if (showChannelPane) {
@@ -2557,6 +2736,21 @@ export class DashboardComponent implements Component {
 
     // Render sidebar and merge with main area
     this.sidebar.focusTarget = this.focusManager.current();
+    // §17.1 Phase 1: sidebar visibility is a separate axis from focus.
+    this.sidebar.sidebarMode = this.sidebarMode;
+    // §17.1 Phase 2: the VISIBLE tree highlights its selection only when it
+    // owns the active selection. When the visible tree is NOT the active
+    // source, its `selection` getter still points somewhere (possibly mirrored
+    // by `mirrorSelectionToVisibleTree`), but no row should render in reverse
+    // video — because the EFFECTIVE selection lives in the other tree. The
+    // tree components already honor a `suppressSelection` flag for this exact
+    // purpose; flip it on for whichever tree is visible but inactive. The
+    // QUESTIONS-mode suppression (already set by `setQuestionsFocused`) is
+    // OR'd in so neither flag clobbers the other.
+    const inactiveSourceAgents = this.activeSelectionSource !== "agents";
+    const inactiveSourceTeams = this.activeSelectionSource !== "teams";
+    this.agentTree.suppressSelection = this._questionsFocused || inactiveSourceAgents;
+    this.teamsTree.suppressSelection = inactiveSourceTeams;
     // In TREE mode the full tree renders in the main area, so hide the
     // sidebar tree to avoid duplication and let the info panel take all space.
     this.sidebar.hideTree = isTreeMode;

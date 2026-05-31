@@ -146,8 +146,9 @@ describe("FocusManager", () => {
     expect(fm.current()).toBe("teams-tree");
   });
 
-  test("cycle() never lands on teams-tree (§17.1)", () => {
+  test("cycle() never lands on teams-tree when sidebarMode='agents' (§17.1 Phase 3)", () => {
     const fm = new FocusManager("agent-tree");
+    // Default sidebarMode is "agents" — teams-tree is not in that order.
     fm.skipTargets.delete("repo-coordinator");
     // Cycle many times in both directions and confirm teams-tree is never reached.
     for (let i = 0; i < 50; i++) {
@@ -238,6 +239,85 @@ describe("FocusManager", () => {
     fm.cycle(1);
     // Should land on agent-tree (the only non-skipped target)
     expect(fm.current()).toBe("agent-tree");
+  });
+
+  // §17.1 Phase 3: cycle() picks TEAMS_FOCUS_ORDER when sidebarMode === "teams".
+  // Coordinator mode trumps both — COORDINATOR_FOCUS_ORDER wins regardless of
+  // sidebarMode.
+  test("sidebarMode='teams' makes cycle use TEAMS_FOCUS_ORDER (§17.1 Phase 3)", () => {
+    const fm = new FocusManager("teams-tree");
+    fm.sidebarMode = "teams";
+    fm.cycle(1);
+    expect(fm.current()).toBe("info");
+    fm.cycle(1);
+    expect(fm.current()).toBe("active-agent");
+    fm.cycle(1);
+    expect(fm.current()).toBe("right-pane");
+    fm.cycle(1);
+    // Wraps to teams-tree (no repo-coordinator stop).
+    expect(fm.current()).toBe("teams-tree");
+  });
+
+  test("sidebarMode='teams' Shift+Tab wraps to right-pane (§17.1 Phase 3)", () => {
+    const fm = new FocusManager("teams-tree");
+    fm.sidebarMode = "teams";
+    fm.cycle(-1);
+    expect(fm.current()).toBe("right-pane");
+    fm.cycle(-1);
+    expect(fm.current()).toBe("active-agent");
+    fm.cycle(-1);
+    expect(fm.current()).toBe("info");
+    fm.cycle(-1);
+    expect(fm.current()).toBe("teams-tree");
+  });
+
+  test("sidebarMode='teams' cycle never lands on agent-tree or repo-coordinator (§17.1 Phase 3)", () => {
+    const fm = new FocusManager("teams-tree");
+    fm.sidebarMode = "teams";
+    for (let i = 0; i < 50; i++) {
+      fm.cycle(1);
+      expect(fm.current()).not.toBe("agent-tree");
+      expect(fm.current()).not.toBe("repo-coordinator");
+    }
+    for (let i = 0; i < 50; i++) {
+      fm.cycle(-1);
+      expect(fm.current()).not.toBe("agent-tree");
+      expect(fm.current()).not.toBe("repo-coordinator");
+    }
+  });
+
+  test("flipping sidebarMode mid-cycle changes which order Tab uses (§17.1 Phase 3)", () => {
+    const fm = new FocusManager("agent-tree");
+    fm.sidebarMode = "agents";
+    fm.cycle(1);
+    expect(fm.current()).toBe("info");
+    // Flip to teams; the next cycle should advance in TEAMS_FOCUS_ORDER from info.
+    fm.sidebarMode = "teams";
+    fm.cycle(1);
+    expect(fm.current()).toBe("active-agent");
+    fm.cycle(1);
+    expect(fm.current()).toBe("right-pane");
+    fm.cycle(1);
+    // Teams order wraps right-pane → teams-tree, not back to agent-tree.
+    expect(fm.current()).toBe("teams-tree");
+  });
+
+  test("coordinatorMode trumps sidebarMode='teams' (§17.1 Phase 3)", () => {
+    const fm = new FocusManager("agent-tree");
+    fm.sidebarMode = "teams";
+    fm.coordinatorMode = true;
+    fm.cycle(1);
+    expect(fm.current()).toBe("info");
+    fm.cycle(1);
+    // Coordinator order is agent-tree → info → coordinator, not teams-tree.
+    expect(fm.current()).toBe("coordinator");
+    fm.cycle(1);
+    expect(fm.current()).toBe("agent-tree");
+  });
+
+  test("sidebarMode defaults to 'agents' (§17.1 Phase 3)", () => {
+    const fm = new FocusManager();
+    expect(fm.sidebarMode).toBe("agents");
   });
 });
 

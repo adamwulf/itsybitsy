@@ -64,6 +64,10 @@ function makeMockCtx(overrides?: {
   mode?: PaneMode;
   /** §17: focused panel — defaults to "agent-tree". */
   focus?: import("./focus").FocusTarget;
+  /** §17.1 Phase 1: sidebar mode — defaults to "agents". */
+  sidebarMode?: import("./sidebar").SidebarMode;
+  /** §17.1 Phase 2: active selection source — defaults to "agents". */
+  activeSelectionSource?: import("./sidebar").SidebarMode;
   /** §17: teams-tree selection — defaults to null. */
   teamsSelection?: import("./selection").Selection;
   /** §17: teamSend stub override. */
@@ -80,6 +84,10 @@ function makeMockCtx(overrides?: {
   setFocusCalls: import("./focus").FocusTarget[];
   /** §17: teamSend invocations the handler made. */
   teamSendCalls: Array<{ teamName: string; members: Agent[]; message: string; fromAgent: string | undefined }>;
+  /** §17.1 Phase 2: activeSelectionSource values passed to the ctx setter. */
+  setActiveSelectionSourceCalls: import("./sidebar").SidebarMode[];
+  /** §17.1 Phase 2: sidebarMode values passed to the ctx setter. */
+  setSidebarModeCalls: import("./sidebar").SidebarMode[];
   /** Await every executeAndRefresh action kicked off so far — deterministic
    *  alternative to a fixed Bun.sleep for fire-and-forget send paths. */
   flushActions: () => Promise<void>;
@@ -93,7 +101,12 @@ function makeMockCtx(overrides?: {
   const pendingActions: Promise<void>[] = [];
   const setFocusCalls: import("./focus").FocusTarget[] = [];
   const teamSendCalls: Array<{ teamName: string; members: Agent[]; message: string; fromAgent: string | undefined }> = [];
+  const setActiveSelectionSourceCalls: import("./sidebar").SidebarMode[] = [];
+  const setSidebarModeCalls: import("./sidebar").SidebarMode[] = [];
   let currentFocus: import("./focus").FocusTarget = overrides?.focus ?? "agent-tree";
+  let currentSidebarMode: import("./sidebar").SidebarMode = overrides?.sidebarMode ?? "agents";
+  let currentActiveSelectionSource: import("./sidebar").SidebarMode =
+    overrides?.activeSelectionSource ?? "agents";
   let leftWidth = overrides?.leftWidth ?? 60;
 
   const ctx: ActionCtx = {
@@ -112,6 +125,16 @@ function makeMockCtx(overrides?: {
     focusManager: {
       current: () => currentFocus,
       setFocus: (t) => { setFocusCalls.push(t); currentFocus = t; },
+    },
+    get sidebarMode() { return currentSidebarMode; },
+    get activeSelectionSource() { return currentActiveSelectionSource; },
+    setActiveSelectionSource: (source) => {
+      setActiveSelectionSourceCalls.push(source);
+      currentActiveSelectionSource = source;
+    },
+    setSidebarMode: (mode) => {
+      setSidebarModeCalls.push(mode);
+      currentSidebarMode = mode;
     },
     teamsTree: {
       selection: overrides?.teamsSelection ?? null,
@@ -183,7 +206,7 @@ function makeMockCtx(overrides?: {
     healthReport: undefined,
   };
   const flushActions = async () => { await Promise.all(pendingActions); };
-  return { ctx, dialogs, notices, refreshCalls, scrollUpCalls, scrollDownCalls, loadAgentLogIfNeededCalls, setFocusCalls, teamSendCalls, flushActions };
+  return { ctx, dialogs, notices, refreshCalls, scrollUpCalls, scrollDownCalls, loadAgentLogIfNeededCalls, setFocusCalls, teamSendCalls, setActiveSelectionSourceCalls, setSidebarModeCalls, flushActions };
 }
 
 // Per-test isolated repo root. sendMessage now writes a real outbox.jsonl +
@@ -1010,9 +1033,16 @@ describe("handleAddPermission", () => {
 });
 
 describe("handleSend — §17.3a team-target branch", () => {
-  test("teams-tree focus + team selection opens an @<team> dialog (no agent dialog)", () => {
+  // §17.1 Phase 2: the team-target branch keys off
+  // `activeSelectionSource === "teams"` (the Teams tree OWNS the global
+  // selection), not sidebarMode. These tests pass BOTH
+  // `sidebarMode: "teams"` AND `activeSelectionSource: "teams"` because the
+  // user's "select-then-send" flow puts the Teams tree both visible AND
+  // active — that's the only state where `s` should hit the team fan-out.
+  test("teams active source + team selection opens an @<team> dialog (no agent dialog)", () => {
     const { ctx, dialogs } = makeMockCtx({
-      focus: "teams-tree",
+      sidebarMode: "teams",
+      activeSelectionSource: "teams",
       teamsSelection: { kind: "team", teamName: "backend" },
     });
     handleSend(ctx);
@@ -1027,7 +1057,8 @@ describe("handleSend — §17.3a team-target branch", () => {
 
   test("onSubmit routes through ctx.teamSend (not sendMessage)", async () => {
     const { ctx, dialogs, teamSendCalls, flushActions } = makeMockCtx({
-      focus: "teams-tree",
+      sidebarMode: "teams",
+      activeSelectionSource: "teams",
       teamsSelection: { kind: "team", teamName: "backend" },
     });
     handleSend(ctx);
@@ -1047,7 +1078,8 @@ describe("handleSend — §17.3a team-target branch", () => {
     // Teams panel must behave like selecting that agent in the Agents panel.
     const agent = makeAgent({ id: "agent-a" });
     const { ctx, dialogs, teamSendCalls } = makeMockCtx({
-      focus: "teams-tree",
+      sidebarMode: "teams",
+      activeSelectionSource: "teams",
       teamsSelection: { kind: "agent", agent },
     });
     handleSend(ctx);
@@ -1062,7 +1094,8 @@ describe("handleSend — §17.3a team-target branch", () => {
 
   test("empty message cancels the team send", async () => {
     const { ctx, dialogs, notices, teamSendCalls, flushActions } = makeMockCtx({
-      focus: "teams-tree",
+      sidebarMode: "teams",
+      activeSelectionSource: "teams",
       teamsSelection: { kind: "team", teamName: "backend" },
     });
     handleSend(ctx);
@@ -1071,6 +1104,30 @@ describe("handleSend — §17.3a team-target branch", () => {
     await flushActions();
     expect(teamSendCalls).toHaveLength(0);
     expect(notices.some((n) => n.includes("Send cancelled"))).toBe(true);
+  });
+
+  test("Phase 2: team selected but Agents tree is the active source — `s` does NOT fan out to the team", () => {
+    // §17.1 Phase 2: after the user has navigated to a team but then flipped
+    // back to the Agents tree (sidebarMode flip + j to select an agent), the
+    // active selection lives in the Agents tree. Even though the Teams tree
+    // still has a team selected, `s` must NOT open the team dialog — it
+    // should drive whatever the Agents tree's selection is.
+    const agent = makeAgent({ id: "agent-active" });
+    const { ctx, dialogs, teamSendCalls } = makeMockCtx({
+      agent,
+      sidebarMode: "agents",
+      activeSelectionSource: "agents",
+      // Teams tree still holds a team selection that pre-dated the flip.
+      teamsSelection: { kind: "team", teamName: "backend" },
+    });
+    handleSend(ctx);
+    // The team fan-out branch must NOT have fired.
+    expect(teamSendCalls).toHaveLength(0);
+    // We expect the agent point-to-point send dialog instead.
+    expect(dialogs).toHaveLength(1);
+    const d = assertDialog(dialogs[0]!, "textarea");
+    expect(d.prompt).toContain("agent-active");
+    expect(d.prompt).not.toContain("@backend");
   });
 });
 
@@ -1098,6 +1155,23 @@ describe("handleFuzzyAgent — §17.3 @-jump force-select in Agents panel", () =
     const d = assertDialog(dialogs[0]!, "fuzzy");
     d.onSelect(0);
     expect(setFocusCalls[0]).toBe("agent-tree");
+  });
+
+  test("§17.1 Phase 2: @-jump flips sidebarMode AND activeSelectionSource to 'agents'", () => {
+    const agent = makeAgent({ id: "agent-jumped" });
+    // User is on the Teams panel with the Teams tree active — the @-jump
+    // must yank both axes back to Agents so the jumped-to agent is the
+    // visible, active selection.
+    const { ctx, dialogs, setSidebarModeCalls, setActiveSelectionSourceCalls } = makeMockCtx({
+      sidebarMode: "teams",
+      activeSelectionSource: "teams",
+      flatList: [makeFlatAgent(agent)],
+    });
+    handleFuzzyAgent(ctx);
+    const d = assertDialog(dialogs[0]!, "fuzzy");
+    d.onSelect(0);
+    expect(setSidebarModeCalls).toEqual(["agents"]);
+    expect(setActiveSelectionSourceCalls).toEqual(["agents"]);
   });
 });
 

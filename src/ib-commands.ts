@@ -788,6 +788,30 @@ export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
         };
       }
 
+      // Resume-time dispatcher precheck (SPEC §5.5 fail-open mitigation).
+      // Same guard as the Phase 4 spawn-time precheck: if our hook dispatcher
+      // is missing/broken (e.g. `ib` was rebuilt between spawn and resume),
+      // every PreToolUse call would silently fail-open and the codex agent
+      // would lose its path-isolation + permission gate. Re-running the dry-run
+      // on resume catches that case before we hand off to tmux.
+      //
+      // On precheck failure: refuse the resume cleanly. Do NOT touch the
+      // worktree — it is the user's existing agent state, not ours to nuke.
+      const codexPrecheckEvents = ["codex-pre-tool-use", "codex-session-start", "codex-stop"];
+      for (const event of codexPrecheckEvents) {
+        const result = await nukeResumeSpawnCtx.run([codexIbBinaryPath, "hooks", event, agent.id, "--dry-run"]);
+        if (result.exitCode !== 0) {
+          const errMsg = result.stderr.trim() || `dispatcher precheck failed with exit code ${result.exitCode}`;
+          await logAgent(agentDir, `[resume] codex dispatcher precheck failed for ${event}: ${errMsg}`);
+          return {
+            ok: false,
+            exitCode: 1,
+            stdout: "",
+            stderr: `Error: codex dispatcher precheck failed (${event}): ${errMsg}`,
+          };
+        }
+      }
+
       // Build resume.sh via the shared codex builder (mirrors start.sh).
       const { buildCodexResumeContent } = await import("./codex-spawn");
       const codexResumeContent = buildCodexResumeContent({

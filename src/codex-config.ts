@@ -59,6 +59,12 @@ export interface BuildCodexLaunchArgsInput {
   agentDir: string;
   /** Optional override for the per-hook timeout in seconds. */
   timeoutSecs?: number;
+  /**
+   * Extra directories Codex should treat as writable while in workspace-write
+   * mode. Used for git worktrees: the working tree lives under the agent dir,
+   * but git metadata writes go through the resolved common git dir.
+   */
+  extraWritableRoots?: string[];
 }
 
 export interface CodexLaunchArgs {
@@ -142,6 +148,15 @@ export function buildCodexLaunchArgs(input: BuildCodexLaunchArgsInput): CodexLau
   }
 
   const args: string[] = [];
+  for (const root of input.extraWritableRoots ?? []) {
+    if (!isCodexSafeBinaryPath(root)) {
+      throw new Error(
+        `Unsafe extra writable root for codex launch: ${JSON.stringify(root)} contains quotes, backslashes, or control characters. ` +
+          `Move the directory to a path made of printable ASCII with no apostrophes, quotes, or backslashes.`,
+      );
+    }
+    args.push("--add-dir", root);
+  }
   for (const event of CODEX_REGISTERED_EVENTS) {
     args.push("-c", renderCodexHookFlagPayload(event, ibBinaryPath, agentId, timeoutSecs));
   }

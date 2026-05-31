@@ -43,6 +43,14 @@ describe("buildCodexStartContent — launch line", () => {
     expect(content).toContain("--dangerously-bypass-hook-trust");
   });
 
+  test("passes extra writable roots through as --add-dir flags", () => {
+    const content = buildCodexStartContent({
+      ...baseInput(),
+      extraWritableRoots: ["/repo/.git"],
+    });
+    expect(content).toContain("'--add-dir' '/repo/.git'");
+  });
+
   test("contains one inline `-c` flag per registered hook event", () => {
     const content = buildCodexStartContent(baseInput());
     for (const event of CODEX_REGISTERED_EVENTS) {
@@ -172,6 +180,15 @@ describe("buildCodexStartContent — launch line", () => {
       }),
     ).toThrow(/Unsafe agent directory path/);
   });
+
+  test("rejects unsafe extra writable roots", () => {
+    expect(() =>
+      buildCodexStartContent({
+        ...baseInput(),
+        extraWritableRoots: ["/Users/o'malley/repo/.git"],
+      }),
+    ).toThrow(/Unsafe extra writable root/);
+  });
 });
 
 describe("buildCodexResumeContent — launch line (SPEC §5.8 + §6 Phase 7)", () => {
@@ -201,6 +218,14 @@ describe("buildCodexResumeContent — launch line (SPEC §5.8 + §6 Phase 7)", (
     expect(content).toContain("-a never");
     expect(content).toContain("-s workspace-write");
     expect(content).toContain("--dangerously-bypass-hook-trust");
+  });
+
+  test("re-passes extra writable roots through as --add-dir flags on resume", () => {
+    const content = buildCodexResumeContent({
+      ...baseInput(),
+      extraWritableRoots: ["/repo/.git"],
+    });
+    expect(content).toContain("'--add-dir' '/repo/.git'");
   });
 
   test("re-passes one inline `-c` flag per registered hook event on resume (Phase 7 Q1)", () => {
@@ -331,6 +356,15 @@ describe("buildCodexResumeContent — launch line (SPEC §5.8 + §6 Phase 7)", (
         agentDir: "/Users/o'malley/work/.ittybitty/agents/agent-abc12345",
       }),
     ).toThrow(/Unsafe agent directory path/);
+  });
+
+  test("rejects unsafe extra writable roots on resume", () => {
+    expect(() =>
+      buildCodexResumeContent({
+        ...baseInput(),
+        extraWritableRoots: ["/Users/o'malley/repo/.git"],
+      }),
+    ).toThrow(/Unsafe extra writable root/);
   });
 });
 

@@ -1340,6 +1340,9 @@ describe("resumeAgent (native)", () => {
       if (cmd.includes("has-session")) {
         return makeSpawnResult(newSessionSeen ? 0 : 1);
       }
+      if (cmd[0] === "git" && cmd.includes("rev-parse") && cmd.includes("--git-common-dir")) {
+        return makeSpawnResult(0, "/tmp/repo/.git\n");
+      }
       return makeSpawnResult();
     };
   }
@@ -8593,4 +8596,3 @@ describe("teams: teardown leave-notices (kill / merge / nuke)", () => {
     expect(team!.members).toEqual([]);
   });
 });
-

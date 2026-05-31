@@ -137,9 +137,10 @@ describe("ChannelPaneComponent", () => {
     expect(atBottom).not.toContain("msg-0");
 
     // Scroll back to the maximum: the oldest line comes fully into view and the
-    // newest has scrolled off the bottom. With 10 lines and displayHeight 4, the
-    // max scrollBack (6) shows lines[1..3] (msg-1..msg-3) plus the indicator.
-    pane.scrollUp(6);
+    // newest has scrolled off the bottom. With 10 messages each separated by a
+    // blank line (19 wrapped lines) and displayHeight 4, the max scrollBack
+    // (15) brings the oldest messages into view alongside the scroll indicator.
+    pane.scrollUp(15);
     const scrolled = pane.render(80).map(stripAnsi).join("\n");
     expect(scrolled).toContain("msg-1");
     expect(scrolled).not.toContain("msg-9");
@@ -198,19 +199,26 @@ describe("ChannelPaneComponent", () => {
   describe("formatChannelLine grammar", () => {
     test("agent id drops 'agent' word", () => {
       const line = formatChannelLine({ ts: 0, fromAgent: "agent-z", message: "m" }, "backend", null);
-      expect(line).toBe("[sent by agent-z in @backend]: m");
+      expect(stripAnsi(line)).toBe("[sent by agent-z in @backend]: m");
     });
     test("@-sentinel kept verbatim", () => {
       const line = formatChannelLine({ ts: 0, fromAgent: "@system", message: "m" }, "backend", null);
-      expect(line).toBe("[sent by @system in @backend]: m");
+      expect(stripAnsi(line)).toBe("[sent by @system in @backend]: m");
     });
     test("human with no user.name → bare user", () => {
       const line = formatChannelLine({ ts: 0, fromAgent: "", message: "m" }, "backend", null);
-      expect(line).toBe("[sent by user in @backend]: m");
+      expect(stripAnsi(line)).toBe("[sent by user in @backend]: m");
     });
     test("human with user.name → user <name>", () => {
       const line = formatChannelLine({ ts: 0, fromAgent: "", message: "m" }, "backend", "Adam");
-      expect(line).toBe("[sent by user Adam in @backend]: m");
+      expect(stripAnsi(line)).toBe("[sent by user Adam in @backend]: m");
+    });
+    test("sender prefix carries BOLD + color ANSI", () => {
+      const line = formatChannelLine({ ts: 0, fromAgent: "agent-z", message: "m" }, "backend", null);
+      // BOLD = \x1b[1m, CYAN = \x1b[36m, RESET = \x1b[0m
+      expect(line).toContain("\x1b[1m");
+      expect(line).toContain("\x1b[36m");
+      expect(line).toContain("\x1b[0m");
     });
   });
 

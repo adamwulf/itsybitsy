@@ -214,6 +214,11 @@ export interface ActionCtx {
    * selection scrolls naturally.
    */
   channelPane: { scrollUp(n?: number): void; scrollDown(n?: number): void };
+  /**
+   * §17.4 companion: the right-side team log pane. Scrolled alongside the chat
+   * box so the side-by-side Teams view stays in sync.
+   */
+  teamLogPane: { scrollUp(n?: number): void; scrollDown(n?: number): void };
   systemDashboard: { scrollUp(n?: number): void; scrollDown(n?: number): void };
   splitPane: { getLeftWidth(): number; setLeftWidth(w: number): void };
   tui: { requestRender(): void } | null;
@@ -1215,6 +1220,7 @@ export function handleScrollUp(ctx: ActionCtx) {
   ctx.tmuxPane.scrollUp(SCROLL_STEP);
   ctx.coordinatorPane.scrollUp(SCROLL_STEP);
   ctx.channelPane.scrollUp(SCROLL_STEP);
+  ctx.teamLogPane.scrollUp(SCROLL_STEP);
   ctx.rightPane.scrollOffset += SCROLL_STEP;
   ctx.rightPane.repoCoordinatorScrollBack += SCROLL_STEP;
   ctx.systemDashboard.scrollUp(SCROLL_STEP);
@@ -1231,6 +1237,7 @@ export function handleScrollDown(ctx: ActionCtx) {
   ctx.tmuxPane.scrollDown(SCROLL_STEP);
   ctx.coordinatorPane.scrollDown(SCROLL_STEP);
   ctx.channelPane.scrollDown(SCROLL_STEP);
+  ctx.teamLogPane.scrollDown(SCROLL_STEP);
   ctx.rightPane.scrollOffset = Math.max(0, ctx.rightPane.scrollOffset - SCROLL_STEP);
   ctx.rightPane.repoCoordinatorScrollBack = Math.max(0, ctx.rightPane.repoCoordinatorScrollBack - SCROLL_STEP);
   ctx.systemDashboard.scrollDown(SCROLL_STEP);

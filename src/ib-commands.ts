@@ -675,6 +675,43 @@ export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
       return await resetCoordinator(agent);
     }
 
+    // Parse the qualified `<cli>:<model>` form (D1) EARLY so we can reject
+    // codex resume before issuing any tmux / shell-script work (MED 1 from
+    // the Phase 4 review). parseModel throws on missing/malformed/unknown
+    // cli — surface as a resume failure (D6).
+    const rawModel = agent.meta.model && agent.meta.model !== "null" ? agent.meta.model : "";
+    if (rawModel && !isValidModel(rawModel)) {
+      return { ok: false, exitCode: 1, stdout: "", stderr: `Invalid model name: ${rawModel}` };
+    }
+    let modelFlagValue = "";
+    let resumeCli: ReturnType<typeof parseModel>["cli"] = "claude";
+    if (rawModel) {
+      try {
+        const parsedResume = parseModel(rawModel);
+        modelFlagValue = parsedResume.model;
+        resumeCli = parsedResume.cli;
+      } catch (err) {
+        return {
+          ok: false,
+          exitCode: 1,
+          stdout: "",
+          stderr: err instanceof Error ? err.message : String(err),
+        };
+      }
+    }
+
+    // Codex resume is Phase 7 (SPEC §5.8). Reject cleanly BEFORE the tmux
+    // has-session probe so we don't issue a needless tmux call for the
+    // not-yet-implemented path (MED 1 from the Phase 4 review).
+    if (resumeCli === "codex") {
+      return {
+        ok: false,
+        exitCode: 1,
+        stdout: "",
+        stderr: `codex resume not yet implemented (agent ${agent.id} uses ${rawModel}); pending Phase 7 of SPEC-CODEX-MODEL.md`,
+      };
+    }
+
     // Resume is allowed when no live tmux session exists for the agent. We don't
     // trust meta.state here because legacy paused agents (pre-Phase 42) may have a
     // stale state like "complete" or "waiting" that pause never overwrote. Checking
@@ -708,45 +745,10 @@ export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
       return { ok: false, exitCode: 1, stdout: "", stderr: `Invalid session ID: ${sessionId}` };
     }
 
-    // Read model
-    const model = agent.meta.model && agent.meta.model !== "null" ? agent.meta.model : "";
-
-    // Validate model if present
-    if (model && !isValidModel(model)) {
-      return { ok: false, exitCode: 1, stdout: "", stderr: `Invalid model name: ${model}` };
-    }
-
-    // Parse the qualified `<cli>:<model>` form (D1) so we pass the model HALF
-    // to `--model`, not the raw `claude:opus`. parseModel throws on
-    // missing/malformed/unknown cli — surface as a resume failure (D6).
-    let modelFlagValue = "";
-    let resumeCli: ReturnType<typeof parseModel>["cli"] = "claude";
-    if (model) {
-      try {
-        const parsedResume = parseModel(model);
-        modelFlagValue = parsedResume.model;
-        resumeCli = parsedResume.cli;
-      } catch (err) {
-        return {
-          ok: false,
-          exitCode: 1,
-          stdout: "",
-          stderr: err instanceof Error ? err.message : String(err),
-        };
-      }
-    }
-
-    // Codex resume is Phase 7 (SPEC §5.8). Reject cleanly until then —
-    // claude --resume's session-id mechanism does not translate; codex uses
-    // its own rollout id stored in `meta.codex_session_id`.
-    if (resumeCli === "codex") {
-      return {
-        ok: false,
-        exitCode: 1,
-        stdout: "",
-        stderr: `codex resume not yet implemented (agent ${agent.id} uses ${model}); pending Phase 7 of SPEC-CODEX-MODEL.md`,
-      };
-    }
+    // `model` is the local alias used by the existing claude-resume code path
+    // below (claudeArgs construction, log line interpolation). Keep the name
+    // for minimal diff to the post-codex-reject claude path.
+    const model = rawModel;
 
     // Tmux session was validated at the top of resumeAgent (liveness guard).
     const tmuxSession = agent.meta.tmux_session;
@@ -3537,6 +3539,20 @@ export async function newAgent(
   // Note: coordinator branch format retained for backward compatibility with
   // session-start.ts and health-check.ts, even though coordinators no longer use worktrees.
   const branchName = coordinatorMode ? `agent/${id}-${repoId}` : `agent/${id}`;
+
+  // Centralised cleanup helper. Defined here (above the codex precheck and
+  // every subsequent spawn-failure path) so the codex dispatcher precheck
+  // can share the same exact unwind logic as later failures — see MED 2
+  // from the Phase 4 review. Captures `agentDir`, `useWorktree`,
+  // `rootRepoPath`, `branchName` by reference.
+  async function cleanupOnFailure() {
+    await rm(agentDir, { recursive: true, force: true });
+    if (useWorktree) {
+      await newAgentSpawnCtx.run(["git", "-C", rootRepoPath, "worktree", "remove", join(agentDir, "repo"), "--force"]);
+      await newAgentSpawnCtx.run(["git", "-C", rootRepoPath, "branch", "-D", branchName]);
+    }
+  }
+
   const baseRefForLog = manager ? `agent/${manager}` : "HEAD";
   await logSpawn(
     agentDir,
@@ -3628,7 +3644,18 @@ export async function newAgent(
       const { appendCodexGitignoreEntry, writeCodexAgentsMd } = await import("./codex-spawn");
       const { detectRole } = await import("./hooks/session-start");
       try {
-        await appendCodexGitignoreEntry(workPath);
+        const giResult = await appendCodexGitignoreEntry(workPath);
+        if (giResult === "negation-respected") {
+          // MED 3 from the Phase 4 review: user has an explicit `!.codex/`
+          // negation — we deferred to their intent. Surface this so they know
+          // codex's incidental files (hook logs, sentinels) may end up tracked.
+          await logSpawn(
+            agentDir,
+            spawnerAgentDir,
+            id,
+            `codex .gitignore: explicit negation present (!.codex/ or !.codex); deferring — codex incidental files may be tracked.`,
+          );
+        }
       } catch (err) {
         await logSpawn(agentDir, spawnerAgentDir, id, `codex .gitignore append failed: ${(err as Error)?.message ?? String(err)}`);
       }
@@ -3651,7 +3678,9 @@ export async function newAgent(
       // our dispatcher is missing or its module-import throws at runtime,
       // every PreToolUse call would be allowed through. The `--dry-run`
       // flag returns exit 1 on failure so we can refuse the spawn before
-      // creating the tmux session.
+      // creating the tmux session. On failure we reuse `cleanupOnFailure()`
+      // (see MED 2 from the Phase 4 review) so any future cleanup additions
+      // (e.g. tmux session kill) are inherited automatically.
       const codexPrecheckEvents = ["codex-pre-tool-use", "codex-session-start", "codex-stop"];
       for (const event of codexPrecheckEvents) {
         const result = await newAgentSpawnCtx.run([codexIbBinaryPath!, "hooks", event, id, "--dry-run"]);
@@ -3663,9 +3692,7 @@ export async function newAgent(
             id,
             `spawn FAILED: codex dispatcher precheck failed for ${event}: ${errMsg}`,
           );
-          await rm(agentDir, { recursive: true, force: true });
-          await newAgentSpawnCtx.run(["git", "-C", rootRepoPath, "worktree", "remove", join(agentDir, "repo"), "--force"]);
-          await newAgentSpawnCtx.run(["git", "-C", rootRepoPath, "branch", "-D", branchName]);
+          await cleanupOnFailure();
           return {
             ok: false,
             exitCode: 1,
@@ -3984,16 +4011,6 @@ ${qStartExitScript}
   await chmod(startScript, 0o755);
 
   // 17. Init agent.log (already done via logAgent above)
-
-  // Helper: clean up agent dir, worktree, and branch on failure
-  async function cleanupOnFailure() {
-    await rm(agentDir, { recursive: true, force: true });
-    if (useWorktree) {
-      await newAgentSpawnCtx.run(["git", "-C", rootRepoPath, "worktree", "remove", join(agentDir, "repo"), "--force"]);
-      await newAgentSpawnCtx.run(["git", "-C", rootRepoPath, "branch", "-D", branchName]);
-    }
-  }
-
   // 18. Ensure tmux server is running
   const startServerResult = await timed("new-agent", "tmux-start-server", () =>
     newAgentSpawnCtx.run(["tmux", "start-server"])

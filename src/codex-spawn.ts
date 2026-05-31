@@ -199,35 +199,49 @@ ${qStartExitScript}
 `;
 }
 
+export type AppendCodexGitignoreResult =
+  | "appended"
+  | "already-present"
+  | "negation-respected";
+
 /**
  * Append `.codex/` to <worktree>/.gitignore if not already present. Idempotent:
  * a worktree whose .gitignore already lists `.codex/` (or `.codex` without
  * trailing slash) is left untouched. The file is created with mode 644 if
  * missing — `mkdir -p` is the caller's responsibility (worktree must exist).
  *
- * Returns true if anything was written (file created or line appended),
- * false if the file already had the entry.
+ * Per MED 3 from the Phase 4 review, an explicit negation (`!.codex/` or
+ * `!.codex`) is treated as the user's intent to TRACK that directory. We
+ * skip the append in that case and return "negation-respected" so the
+ * caller can log a notice. Without this guard, last-match-wins gitignore
+ * semantics would silently reverse the user's intent.
+ *
+ * Returns:
+ *   - "appended"          file was created or `.codex/` was appended.
+ *   - "already-present"   `.codex/` or `.codex` already in the file.
+ *   - "negation-respected" the file has an explicit `!.codex/` or `!.codex`
+ *                          negation; we did not append.
  */
-export async function appendCodexGitignoreEntry(worktreePath: string): Promise<boolean> {
+export async function appendCodexGitignoreEntry(worktreePath: string): Promise<AppendCodexGitignoreResult> {
   const gitignorePath = join(worktreePath, ".gitignore");
   const file = Bun.file(gitignorePath);
   let existing = "";
   if (await file.exists()) {
     existing = await file.text();
   }
-  // Normalize line check: strip leading/trailing whitespace per line; match
-  // `.codex/` OR `.codex` (both are valid gitignore entries that exclude the
-  // directory).
-  const hasEntry = existing
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .some((l) => l === ".codex/" || l === ".codex");
-  if (hasEntry) return false;
+  const trimmedLines = existing.split(/\r?\n/).map((l) => l.trim());
+  // Explicit negation wins — the user has said "track this directory". Do
+  // not silently override with an `.codex/` append (gitignore last-match
+  // semantics would reverse their intent).
+  const hasNegation = trimmedLines.some((l) => l === "!.codex/" || l === "!.codex");
+  if (hasNegation) return "negation-respected";
+  const hasEntry = trimmedLines.some((l) => l === ".codex/" || l === ".codex");
+  if (hasEntry) return "already-present";
 
   const needsLeadingNewline = existing.length > 0 && !existing.endsWith("\n");
   const appended = (needsLeadingNewline ? "\n" : "") + ".codex/\n";
   await Bun.write(gitignorePath, existing + appended);
-  return true;
+  return "appended";
 }
 
 /**

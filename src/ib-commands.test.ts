@@ -2158,6 +2158,51 @@ describe("resumeAgent (native)", () => {
     expect(result.stderr).toContain("Phase 7");
   });
 
+  // MED 1 from Phase 4 review: codex resume reject fires BEFORE any tmux work.
+  test("MED 1: codex resume reject fires before any tmux call (no wasted work)", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-codex02");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-codex02",
+      tmux_session: "tmux-agent-codex02",
+      session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      model: "codex:gpt-5.4-mini",
+    }));
+
+    // Track all spawn calls — codex reject must short-circuit before
+    // the `tmux has-session` probe runs.
+    const spawnCalls: string[][] = [];
+    const trackedSpawn = (cmd: string[]): SpawnResult => {
+      spawnCalls.push(cmd);
+      return makeSpawnResult();
+    };
+    lifecycleSpawnCtx.set(trackedSpawn);
+    setNukeResumeSpawnRunner(trackedSpawn);
+
+    const agent = _makeAgent({
+      id: "agent-codex02",
+      repoPath: tempDir,
+      repoName: "test",
+      state: "stopped",
+      meta: {
+        session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        tmux_session: "tmux-agent-codex02",
+        model: "codex:gpt-5.4-mini",
+      } as any,
+    });
+    const result = await resumeAgent(agent);
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("codex resume not yet implemented");
+    // No tmux command issued — reject fired before the tmux probe.
+    const cmdStrs = spawnCalls.map((c) => c.join(" "));
+    expect(cmdStrs.some((c) => c.includes("tmux has-session"))).toBe(false);
+    expect(cmdStrs.some((c) => c.includes("tmux new-session"))).toBe(false);
+    // resume.sh must not be written either.
+    const resumeShExists = await Bun.file(join(agentDir, "resume.sh")).exists();
+    expect(resumeShExists).toBe(false);
+  });
+
 });
 
 describe("mergeAgent (native)", () => {
@@ -4960,12 +5005,17 @@ body`,
       // Custom runner: succeed normally EXCEPT for the codex dispatcher
       // precheck, which we make fail. The spawn must refuse cleanly and
       // clean up the agent dir + worktree.
+      const cleanupCalls: string[][] = [];
       const baseRunner = mockSpawnRunner();
       const customSpawn = (cmd: string[], opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
         const cmdStr = cmd.join(" ");
         if (cmdStr.includes("hooks codex-") && cmdStr.includes("--dry-run")) {
           // Simulate dispatcher failure
           return makeSpawnResult("", 1);
+        }
+        // Track the cleanup git commands (MED 5 from the Phase 4 review).
+        if (cmdStr.includes("worktree remove") || cmdStr.includes("branch -D")) {
+          cleanupCalls.push(cmd);
         }
         return baseRunner(cmd, opts);
       };
@@ -4979,6 +5029,12 @@ body`,
       // Agent dir should be cleaned up — the precheck-fail path runs rm.
       const dirExists = await Bun.file(join(agentsDir, "codex-precheck-fail", "meta.json")).exists();
       expect(dirExists).toBe(false);
+      // MED 5: assert cleanup git commands were issued (centralised via
+      // cleanupOnFailure() — MED 2). Without this assertion the duplicated
+      // cleanup logic was untested at integration level.
+      const cleanupCmdStrs = cleanupCalls.map((c) => c.join(" "));
+      expect(cleanupCmdStrs.some((c) => c.includes("worktree remove"))).toBe(true);
+      expect(cleanupCmdStrs.some((c) => c.includes("branch -D agent/codex-precheck-fail"))).toBe(true);
     });
 
     test("regression guard: claude agents do NOT use the codex codepath", async () => {
@@ -4999,6 +5055,49 @@ body`,
       // No codex artifacts in the worktree
       const agentsMdExists = await Bun.file(join(agentsDir, "claude-regression-guard", "repo", "AGENTS.md")).exists();
       expect(agentsMdExists).toBe(false);
+    });
+
+    // MED 4 from Phase 4 review: golden-snapshot byte-equality check on
+    // claude start.sh. The earlier `toContain` regression guard is too
+    // loose — a change that adds 200 new lines to claude start.sh would
+    // pass it. This fixture-based assertion fails the moment claude
+    // start.sh diverges from the recorded baseline; if the divergence is
+    // intentional, the fixture must be updated in the same PR with a
+    // visible diff (and a clear reason in the commit).
+    test("MED 4: claude start.sh matches the byte-equality fixture (regression snapshot)", async () => {
+      setNewAgentSpawnRunner(mockSpawnRunner());
+      const result = await callNewAgent("snapshot fixture prompt", {
+        name: "claude-snapshot",
+        model: "claude:sonnet",
+      });
+      expect(result.ok).toBe(true);
+      const rawStartSh = await Bun.file(join(agentsDir, "claude-snapshot", "start.sh")).text();
+      // Normalise the parts that vary per run:
+      //   * agentsDir prefix → <AGENTSDIR>
+      //   * UUID session id → <SESSION-UUID>
+      const sessionUuidPattern = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g;
+      const normalised = rawStartSh
+        .replaceAll(agentsDir, "<AGENTSDIR>")
+        .replaceAll(sessionUuidPattern, "<SESSION-UUID>");
+
+      const fixturePath = join(
+        import.meta.dir.replace(/\/src$/, ""),
+        "tests",
+        "fixtures",
+        "claude-start-sh-baseline.sh",
+      );
+      const fixtureFile = Bun.file(fixturePath);
+      if (!(await fixtureFile.exists())) {
+        // Bootstrap: write the fixture and fail loudly so the dev commits
+        // the new baseline. This codepath should never fire on CI.
+        await Bun.write(fixturePath, normalised);
+        throw new Error(
+          `Fixture missing — wrote a fresh baseline to ${fixturePath}. ` +
+            `Commit the fixture, then re-run.`,
+        );
+      }
+      const expected = await fixtureFile.text();
+      expect(normalised).toBe(expected);
     });
 
     test("HIGH 1: per-repo coordinator + codex model is rejected BEFORE any side effects", async () => {

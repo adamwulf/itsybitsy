@@ -141,16 +141,16 @@ describe("appendCodexGitignoreEntry", () => {
   });
 
   test("creates .gitignore with .codex/ when missing", async () => {
-    const wrote = await appendCodexGitignoreEntry(tempDir);
-    expect(wrote).toBe(true);
+    const result = await appendCodexGitignoreEntry(tempDir);
+    expect(result).toBe("appended");
     const text = await Bun.file(join(tempDir, ".gitignore")).text();
     expect(text).toContain(".codex/");
   });
 
   test("appends .codex/ when .gitignore exists without it", async () => {
     await Bun.write(join(tempDir, ".gitignore"), "node_modules/\n.env\n");
-    const wrote = await appendCodexGitignoreEntry(tempDir);
-    expect(wrote).toBe(true);
+    const result = await appendCodexGitignoreEntry(tempDir);
+    expect(result).toBe("appended");
     const text = await Bun.file(join(tempDir, ".gitignore")).text();
     expect(text).toContain("node_modules/");
     expect(text).toContain(".env");
@@ -159,16 +159,16 @@ describe("appendCodexGitignoreEntry", () => {
 
   test("is idempotent — already-present .codex/ is a no-op", async () => {
     await Bun.write(join(tempDir, ".gitignore"), "node_modules/\n.codex/\n");
-    const wrote = await appendCodexGitignoreEntry(tempDir);
-    expect(wrote).toBe(false);
+    const result = await appendCodexGitignoreEntry(tempDir);
+    expect(result).toBe("already-present");
     const text = await Bun.file(join(tempDir, ".gitignore")).text();
     expect(text).toBe("node_modules/\n.codex/\n");
   });
 
   test("recognizes .codex without trailing slash as the equivalent entry", async () => {
     await Bun.write(join(tempDir, ".gitignore"), ".codex\n");
-    const wrote = await appendCodexGitignoreEntry(tempDir);
-    expect(wrote).toBe(false);
+    const result = await appendCodexGitignoreEntry(tempDir);
+    expect(result).toBe("already-present");
   });
 
   test("appends a leading newline when existing content does not end with one", async () => {
@@ -176,6 +176,26 @@ describe("appendCodexGitignoreEntry", () => {
     await appendCodexGitignoreEntry(tempDir);
     const text = await Bun.file(join(tempDir, ".gitignore")).text();
     expect(text).toBe("node_modules/\n.codex/\n");
+  });
+
+  // MED 3 from Phase 4 review: respect explicit `!.codex/` negation.
+  test("MED 3: respects !.codex/ negation — leaves file untouched", async () => {
+    const before = "node_modules/\n!.codex/\n";
+    await Bun.write(join(tempDir, ".gitignore"), before);
+    const result = await appendCodexGitignoreEntry(tempDir);
+    expect(result).toBe("negation-respected");
+    const text = await Bun.file(join(tempDir, ".gitignore")).text();
+    expect(text).toBe(before);
+    expect(text).not.toContain("\n.codex/\n");
+  });
+
+  test("MED 3: respects !.codex (no slash) negation — leaves file untouched", async () => {
+    const before = "node_modules/\n!.codex\n";
+    await Bun.write(join(tempDir, ".gitignore"), before);
+    const result = await appendCodexGitignoreEntry(tempDir);
+    expect(result).toBe("negation-respected");
+    const text = await Bun.file(join(tempDir, ".gitignore")).text();
+    expect(text).toBe(before);
   });
 });
 

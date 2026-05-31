@@ -306,11 +306,13 @@ describe("SidebarComponent — §17 Teams panel rendering", () => {
     expect(text).toContain("agent-x");
   });
 
-  test("teams-tree focus renders the Teams tree content (the Agents tree is hidden)", () => {
+  // §17.1 Phase 1: sidebar visibility is `sidebarMode`, independent of focus.
+  test("sidebarMode=teams renders the Teams tree content (the Agents tree is hidden)", () => {
     const sidebar = makeSidebar();
     sidebar.displayHeight = 25;
-    sidebar.focusTarget = "teams-tree";
-    // Populate both trees: only the Teams one should render content given focus.
+    sidebar.sidebarMode = "teams";
+    // Populate both trees: only the Teams one should render content given
+    // sidebarMode.
     const agent = makeAgent({ id: "agent-x" });
     sidebar.agentTree.setFlatList([makeFlatAgent(agent)]);
 
@@ -319,14 +321,14 @@ describe("SidebarComponent — §17 Teams panel rendering", () => {
     expect(text).toContain("Agents");
     expect(text).toContain("Teams");
     // The Teams tree is empty by default — the Agents tree content must NOT
-    // appear (its tree row is suppressed when teams-tree is focused).
+    // appear (its tree row is suppressed when sidebarMode === "teams").
     expect(text).not.toContain("agent-x");
   });
 
-  test("teams-tree focus + empty teams registry renders the empty-state hint", () => {
+  test("sidebarMode=teams + empty teams registry renders the empty-state hint", () => {
     const sidebar = makeSidebar();
     sidebar.displayHeight = 25;
-    sidebar.focusTarget = "teams-tree";
+    sidebar.sidebarMode = "teams";
     // teamsTree is empty by default
     const lines = sidebar.render(SIDEBAR_WIDTH);
     const text = lines.map(stripAnsi).join("\n");
@@ -352,10 +354,10 @@ describe("SidebarComponent — §17 Teams panel rendering", () => {
     expect(betweenAgentsAndTeams).toContain(REVERSE);
   });
 
-  test("Agents tab is focused when agent-tree has focus; switching focus swaps tree content", () => {
+  test("switching sidebarMode swaps tree content (Phase 1: independent of focus)", () => {
     const sidebar = makeSidebar();
     sidebar.displayHeight = 25;
-    sidebar.focusTarget = "teams-tree";
+    sidebar.sidebarMode = "teams";
     let lines = sidebar.render(SIDEBAR_WIDTH);
     let text = lines.map(stripAnsi).join("\n");
     expect(text).toContain("Teams");
@@ -363,7 +365,7 @@ describe("SidebarComponent — §17 Teams panel rendering", () => {
     // Teams tree is empty → no-teams hint visible
     expect(text).toContain("No teams");
 
-    sidebar.focusTarget = "agent-tree";
+    sidebar.sidebarMode = "agents";
     const agent = makeAgent({ id: "agent-y" });
     sidebar.agentTree.setFlatList([makeFlatAgent(agent)]);
     lines = sidebar.render(SIDEBAR_WIDTH);

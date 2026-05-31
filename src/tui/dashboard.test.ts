@@ -2386,19 +2386,29 @@ describe("focus cycling", () => {
     }
   });
 
-  test("'0' switches focus to teams-tree (§17.1)", () => {
+  // §17.1 Phase 1 three-axis model: `0` / `1` switch sidebar visibility only.
+  // Focus is a separate axis, not changed by these keys.
+  test("'0' sets sidebarMode to teams without changing focus (§17.1 Phase 1)", () => {
     const dashboard = makeDashboard();
     expect(dashboard.focus).toBe("agent-tree");
+    expect(dashboard.sidebarMode).toBe("agents");
     dashboard.handleInput("0");
-    expect(dashboard.focus).toBe("teams-tree");
+    expect(dashboard.sidebarMode).toBe("teams");
+    // Focus does NOT change.
+    expect(dashboard.focus).toBe("agent-tree");
   });
 
-  test("'1' switches focus to agent-tree (§17.1)", () => {
+  test("'1' sets sidebarMode to agents without changing focus (§17.1 Phase 1)", () => {
     const dashboard = makeDashboard();
-    dashboard.focusManager.setFocus("teams-tree");
-    expect(dashboard.focus).toBe("teams-tree");
+    dashboard.sidebarMode = "teams";
+    // Tab into a different focus target to confirm '1' leaves it alone.
+    dashboard.handleInput("\t");
+    const focusBefore = dashboard.focus;
+    expect(focusBefore).not.toBe("agent-tree");
     dashboard.handleInput("1");
-    expect(dashboard.focus).toBe("agent-tree");
+    expect(dashboard.sidebarMode as string).toBe("agents");
+    // Focus unchanged.
+    expect(dashboard.focus).toBe(focusBefore);
   });
 
   test("Tab never reaches teams-tree on a fresh dashboard (§17.1)", () => {
@@ -4689,14 +4699,17 @@ describe("DashboardComponent — §17 Teams panel wiring", () => {
     await rm(coordHome, { recursive: true, force: true });
   });
 
-  test("focus-aware sync: team-anchor selection populates infoPanel.selectedTeam + channelPane.teamName", () => {
+  // §17.1 Phase 1: effective-selection routing follows `sidebarMode`, not
+  // focus. These tests set `dashboard.sidebarMode = "teams"` (the new source
+  // of truth) to drive the Teams-tree branch.
+  test("selection sync: team-anchor selection populates infoPanel.selectedTeam + channelPane.teamName", () => {
     const dashboard = makeDashboard();
     // Directly drive the Teams tree (skip the on-disk teams.json round-trip)
     dashboard.teamsTree.setFlatList([
       { kind: "team-header", teamName: "backend", memberCount: 1, createdEpoch: 1735689600, createdBy: "@system" },
     ]);
     dashboard.teamsTree.navigate(1); // selects the team-header row
-    dashboard.focusManager.setFocus("teams-tree");
+    dashboard.sidebarMode = "teams";
     dashboard.syncSelectedAgent();
     expect(dashboard.channelPane.teamName).toBe("backend");
     // infoPanel.selectedTeam is populated async — refreshSelectedTeamInfo runs
@@ -4704,7 +4717,7 @@ describe("DashboardComponent — §17 Teams panel wiring", () => {
     // Direct render-time guarantee: channelPane.teamName tracks the team anchor.
   });
 
-  test("focus-aware sync: team-MEMBER selection drives the agent path (rightPane/tmuxPane/infoPanel.agent)", () => {
+  test("selection sync: team-MEMBER selection drives the agent path (rightPane/tmuxPane/infoPanel.agent)", () => {
     const dashboard = makeDashboard();
     const tmp = "/tmp/test-repo";
     const a = makeAgent("agent-tm1", tmp);
@@ -4714,7 +4727,7 @@ describe("DashboardComponent — §17 Teams panel wiring", () => {
     ]);
     dashboard.teamsTree.navigate(1); // header
     dashboard.teamsTree.navigate(1); // member row
-    dashboard.focusManager.setFocus("teams-tree");
+    dashboard.sidebarMode = "teams";
     dashboard.syncSelectedAgent();
     // Member selection populates the agent path identically to an Agents-tree select.
     expect(dashboard.rightPane.agent?.id).toBe("agent-tm1");
@@ -4725,26 +4738,26 @@ describe("DashboardComponent — §17 Teams panel wiring", () => {
     expect(dashboard.infoPanel.selectedTeam).toBe(null);
   });
 
-  test("focus-aware sync: switching from team back to Agents clears team state", () => {
+  test("selection sync: switching sidebarMode from teams back to agents clears team state", () => {
     const dashboard = makeDashboard();
     dashboard.teamsTree.setFlatList([
       { kind: "team-header", teamName: "backend", memberCount: 0, createdEpoch: 1, createdBy: "@system" },
     ]);
     dashboard.teamsTree.navigate(1);
-    dashboard.focusManager.setFocus("teams-tree");
+    dashboard.sidebarMode = "teams";
     dashboard.syncSelectedAgent();
     expect(dashboard.channelPane.teamName).toBe("backend");
 
-    // Tab back to agent-tree — selection-sync must clear team state
-    dashboard.focusManager.setFocus("agent-tree");
+    // Switch sidebarMode back to agents — selection-sync must clear team state
+    dashboard.sidebarMode = "agents";
     dashboard.syncSelectedAgent();
     expect(dashboard.channelPane.teamName).toBe(null);
     expect(dashboard.infoPanel.selectedTeam).toBe(null);
   });
 
-  test("focus-aware sync: teams-tree focused with no selection clears all team/agent state", () => {
+  test("selection sync: teams sidebar mode with no selection clears all team/agent state", () => {
     const dashboard = makeDashboard();
-    dashboard.focusManager.setFocus("teams-tree");
+    dashboard.sidebarMode = "teams";
     dashboard.syncSelectedAgent();
     expect(dashboard.channelPane.teamName).toBe(null);
     expect(dashboard.infoPanel.selectedTeam).toBe(null);
@@ -4752,7 +4765,7 @@ describe("DashboardComponent — §17 Teams panel wiring", () => {
     expect(dashboard.tmuxPane.agent).toBe(null);
   });
 
-  test("j/k routes to teamsTree.navigate when teams-tree focused (else agentTree.moveSelection)", () => {
+  test("j/k routes to teamsTree.navigate when sidebarMode is teams (else agentTree.moveSelection)", () => {
     const dashboard = makeDashboard();
     // Populate both trees so j/k routes have something to move over
     const tmp = "/tmp/repo-jk";
@@ -4764,8 +4777,7 @@ describe("DashboardComponent — §17 Teams panel wiring", () => {
       { kind: "team-header", teamName: "t2", memberCount: 0, createdEpoch: 1, createdBy: "@system" },
     ]);
 
-    // With agent-tree focused, j moves the agent tree
-    dashboard.focusManager.setFocus("agent-tree");
+    // §17.1 Phase 1: with sidebarMode=agents (default), j moves the agent tree.
     const before = dashboard.agentTree.selection;
     dashboard.handleInput("j");
     // agentTree starts in no-selection; j enters selected at index 0
@@ -4774,27 +4786,27 @@ describe("DashboardComponent — §17 Teams panel wiring", () => {
     // teamsTree should NOT have advanced
     expect(dashboard.teamsTree.selection).toBeNull();
 
-    // Reset and switch to teams-tree focus
+    // Reset and switch to teams sidebar mode
     const dashboard2 = makeDashboard();
     dashboard2.agentTree.setFlatList([makeFlatAgent(a1), makeFlatAgent(a2)]);
     dashboard2.teamsTree.setFlatList([
       { kind: "team-header", teamName: "t1", memberCount: 0, createdEpoch: 1, createdBy: "@system" },
       { kind: "team-header", teamName: "t2", memberCount: 0, createdEpoch: 1, createdBy: "@system" },
     ]);
-    dashboard2.focusManager.setFocus("teams-tree");
+    dashboard2.sidebarMode = "teams";
     dashboard2.handleInput("j");
     expect(dashboard2.teamsTree.selection?.kind).toBe("team");
     // agentTree must NOT have a selection — independent (§17.1)
     expect(dashboard2.agentTree.selection).toBeNull();
   });
 
-  test("shift+j (J) routes to teamsTree.navigateAnchor when teams-tree focused", () => {
+  test("shift+j (J) routes to teamsTree.navigateAnchor when sidebarMode is teams", () => {
     const dashboard = makeDashboard();
     dashboard.teamsTree.setFlatList([
       { kind: "team-header", teamName: "t1", memberCount: 0, createdEpoch: 1, createdBy: "@system" },
       { kind: "team-header", teamName: "t2", memberCount: 0, createdEpoch: 1, createdBy: "@system" },
     ]);
-    dashboard.focusManager.setFocus("teams-tree");
+    dashboard.sidebarMode = "teams";
     dashboard.handleInput("J");
     // From no-selection, shift+j lands on the first team anchor
     expect(dashboard.teamsTree.selection?.kind).toBe("team");
@@ -4852,7 +4864,7 @@ describe("DashboardComponent — §17 Teams panel wiring", () => {
     dashboard.channelPane.load = async () => { loadCalls++; return originalLoad(); };
 
     dashboard.teamsTree.navigate(1);
-    dashboard.focusManager.setFocus("teams-tree");
+    dashboard.sidebarMode = "teams";
     dashboard.syncSelectedAgent();
 
     // The one-shot refreshChannel() on team selection change fires load() once;
@@ -4867,10 +4879,10 @@ describe("DashboardComponent — §17 Teams panel wiring", () => {
     expect(loadCalls).toBe(1);
   });
 
-  test("render with teams-tree focus + no selection does NOT call channelPane.load (no teamName)", () => {
+  test("render with sidebarMode=teams + no selection does NOT call channelPane.load (no teamName)", () => {
     Object.defineProperty(process.stdout, "rows", { value: 30, writable: true, configurable: true });
     const dashboard = makeDashboard();
-    dashboard.focusManager.setFocus("teams-tree");
+    dashboard.sidebarMode = "teams";
     dashboard.syncSelectedAgent();
 
     let loadCalls = 0;

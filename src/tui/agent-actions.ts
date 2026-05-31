@@ -176,6 +176,12 @@ export interface ActionCtx {
     setFocus(target: import("./focus").FocusTarget): void;
   };
   /**
+   * §17.1 (Phase 1 three-axis model): which tree the sidebar currently shows.
+   * Independent of focus; the source of truth for "is the Teams panel visible
+   * in the sidebar?". `handleSend`'s team-target branch reads this.
+   */
+  sidebarMode: import("./sidebar").SidebarMode;
+  /**
    * §17.3 / §17.3a: the Teams-tree handle. Lets `handleSend` read the team
    * anchor (`{ kind: "team", teamName }`) selected in the Teams panel, since
    * the team-target dialog and `teamSend` fan-out only fire on that selection.
@@ -826,12 +832,14 @@ export function handleMerge(ctx: ActionCtx) {
 }
 
 export function handleSend(ctx: ActionCtx) {
-  // §17.3a: team-target branch — when the Teams panel is focused AND a team
-  // anchor is selected, open a `Send message to @<team>:` dialog and route
-  // through `teamSend` (§16.4 fan-out). A team MEMBER selection (kind:"agent")
-  // is INTENTIONALLY NOT routed here — it falls through to the point-to-point
-  // agent-send path below (§17.3 child-agent-indistinguishable).
-  const teamsFocused = ctx.focusManager.current() === "teams-tree";
+  // §17.3a: team-target branch — when the Teams tree is the visible sidebar
+  // tree AND a team anchor is selected, open a `Send message to @<team>:`
+  // dialog and route through `teamSend` (§16.4 fan-out). A team MEMBER
+  // selection (kind:"agent") is INTENTIONALLY NOT routed here — it falls
+  // through to the point-to-point agent-send path below (§17.3
+  // child-agent-indistinguishable). Phase 1 (§17.1) keys this off
+  // `sidebarMode`, matching the dashboard's effective-selection resolver.
+  const teamsFocused = ctx.sidebarMode === "teams";
   const teamSel = teamsFocused ? ctx.teamsTree.selection : null;
   if (teamSel?.kind === "team") {
     handleSendToTeam(ctx, teamSel.teamName);

@@ -64,6 +64,8 @@ function makeMockCtx(overrides?: {
   mode?: PaneMode;
   /** §17: focused panel — defaults to "agent-tree". */
   focus?: import("./focus").FocusTarget;
+  /** §17.1 Phase 1: sidebar mode — defaults to "agents". */
+  sidebarMode?: import("./sidebar").SidebarMode;
   /** §17: teams-tree selection — defaults to null. */
   teamsSelection?: import("./selection").Selection;
   /** §17: teamSend stub override. */
@@ -113,6 +115,7 @@ function makeMockCtx(overrides?: {
       current: () => currentFocus,
       setFocus: (t) => { setFocusCalls.push(t); currentFocus = t; },
     },
+    sidebarMode: overrides?.sidebarMode ?? "agents",
     teamsTree: {
       selection: overrides?.teamsSelection ?? null,
     },
@@ -1010,9 +1013,12 @@ describe("handleAddPermission", () => {
 });
 
 describe("handleSend — §17.3a team-target branch", () => {
-  test("teams-tree focus + team selection opens an @<team> dialog (no agent dialog)", () => {
+  // §17.1 Phase 1: the team-target branch keys off `sidebarMode === "teams"`,
+  // not focus. These tests pass `sidebarMode: "teams"` to put the Teams tree
+  // in view in the sidebar; focus stays on agent-tree by default.
+  test("teams sidebar mode + team selection opens an @<team> dialog (no agent dialog)", () => {
     const { ctx, dialogs } = makeMockCtx({
-      focus: "teams-tree",
+      sidebarMode: "teams",
       teamsSelection: { kind: "team", teamName: "backend" },
     });
     handleSend(ctx);
@@ -1027,7 +1033,7 @@ describe("handleSend — §17.3a team-target branch", () => {
 
   test("onSubmit routes through ctx.teamSend (not sendMessage)", async () => {
     const { ctx, dialogs, teamSendCalls, flushActions } = makeMockCtx({
-      focus: "teams-tree",
+      sidebarMode: "teams",
       teamsSelection: { kind: "team", teamName: "backend" },
     });
     handleSend(ctx);
@@ -1047,7 +1053,7 @@ describe("handleSend — §17.3a team-target branch", () => {
     // Teams panel must behave like selecting that agent in the Agents panel.
     const agent = makeAgent({ id: "agent-a" });
     const { ctx, dialogs, teamSendCalls } = makeMockCtx({
-      focus: "teams-tree",
+      sidebarMode: "teams",
       teamsSelection: { kind: "agent", agent },
     });
     handleSend(ctx);
@@ -1062,7 +1068,7 @@ describe("handleSend — §17.3a team-target branch", () => {
 
   test("empty message cancels the team send", async () => {
     const { ctx, dialogs, notices, teamSendCalls, flushActions } = makeMockCtx({
-      focus: "teams-tree",
+      sidebarMode: "teams",
       teamsSelection: { kind: "team", teamName: "backend" },
     });
     handleSend(ctx);

@@ -25,6 +25,7 @@ describe("buildCodexStartContent — launch line", () => {
   const baseInput = () => ({
     agentId: "agent-abc12345",
     ibBinaryPath: "/usr/local/bin/ib",
+    agentDir: "/tmp/test",
     codexModel: "gpt-5.4-mini",
     absPromptFile: "/tmp/test/prompt.txt",
     absMetaJson: "/tmp/test/meta.json",
@@ -136,12 +137,48 @@ describe("buildCodexStartContent — launch line", () => {
     expect(content).toContain('log "Starting codex -m gpt-5.4-mini');
     expect(content).toContain("codex agent id=agent-abc12345");
   });
+
+  test("disables codex's native multi-agent feature on every spawn", () => {
+    // `-c features.multi_agent=false` is shell-quoted by shellQuote, so it
+    // appears as `'-c' 'features.multi_agent=false'` in the launch line.
+    const content = buildCodexStartContent(baseInput());
+    expect(content).toContain("'features.multi_agent=false'");
+  });
+
+  test("disables codex's commit_attribution trailer on every spawn", () => {
+    const content = buildCodexStartContent(baseInput());
+    // The TOML empty-string literal is `""` (two double quotes). After
+    // shellQuote, the apostrophe wrapping makes this `'commit_attribution=""'`.
+    expect(content).toContain(`'commit_attribution=""'`);
+  });
+
+  test("sets codex's log_dir to <agentDir>/codex on every spawn", () => {
+    // shellQuote wraps the payload in apostrophes; the TOML string literal
+    // inside uses double quotes around the path.
+    const content = buildCodexStartContent(baseInput());
+    expect(content).toContain(`'log_dir="/tmp/test/codex"'`);
+  });
+
+  test("suppresses codex's onboarding tooltips on every spawn", () => {
+    const content = buildCodexStartContent(baseInput());
+    expect(content).toContain("'tui.show_tooltips=false'");
+  });
+
+  test("rejects an unsafe agentDir (apostrophe would break TOML+shell quoting)", () => {
+    expect(() =>
+      buildCodexStartContent({
+        ...baseInput(),
+        agentDir: "/Users/o'malley/work/.ittybitty/agents/agent-abc12345",
+      }),
+    ).toThrow(/Unsafe agent directory path/);
+  });
 });
 
 describe("buildCodexResumeContent — launch line (SPEC §5.8 + §6 Phase 7)", () => {
   const baseInput = () => ({
     agentId: "agent-abc12345",
     ibBinaryPath: "/usr/local/bin/ib",
+    agentDir: "/tmp/test",
     codexSessionId: "019e7b21-cb7d-7f23-8674-11036ed141ef",
     absMetaJson: "/tmp/test/meta.json",
     absExitScript: "/tmp/test/exit-check.sh",
@@ -261,6 +298,39 @@ describe("buildCodexResumeContent — launch line (SPEC §5.8 + §6 Phase 7)", (
     const content = buildCodexResumeContent(baseInput());
     expect(content).not.toMatch(/setsid claude/);
     expect(content).not.toMatch(/^claude /m);
+  });
+
+  test("re-passes features.multi_agent=false on resume", () => {
+    // Resume goes through buildCodexLaunchArgs (same path as start.sh), so the
+    // disable flag propagates. Verifying explicitly because resume.sh is the
+    // resurrection path — if the flag were lost here, a resumed agent would
+    // regain access to the codex native multi-agent tools.
+    const content = buildCodexResumeContent(baseInput());
+    expect(content).toContain("'features.multi_agent=false'");
+  });
+
+  test("re-passes commit_attribution=\"\" on resume", () => {
+    const content = buildCodexResumeContent(baseInput());
+    expect(content).toContain(`'commit_attribution=""'`);
+  });
+
+  test("re-passes log_dir=\"<agentDir>/codex\" on resume", () => {
+    const content = buildCodexResumeContent(baseInput());
+    expect(content).toContain(`'log_dir="/tmp/test/codex"'`);
+  });
+
+  test("re-passes tui.show_tooltips=false on resume", () => {
+    const content = buildCodexResumeContent(baseInput());
+    expect(content).toContain("'tui.show_tooltips=false'");
+  });
+
+  test("rejects an unsafe agentDir on resume", () => {
+    expect(() =>
+      buildCodexResumeContent({
+        ...baseInput(),
+        agentDir: "/Users/o'malley/work/.ittybitty/agents/agent-abc12345",
+      }),
+    ).toThrow(/Unsafe agent directory path/);
   });
 });
 

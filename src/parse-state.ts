@@ -66,6 +66,97 @@ function filterHookSpinners(text: string): string {
 }
 
 /**
+ * Detect whether the tmux output came from a codex agent rather than a claude agent.
+ * Two complementary signals (either is enough):
+ *   1. The codex banner ("OpenAI Codex (v") appears near the top of the pane.
+ *   2. The codex-shaped status bar ("<model> default · <path>" or "<model> · <path>")
+ *      appears near the very end of the pane.
+ *
+ * The banner check is the strongest signal (it scrolls out after enough output,
+ * so we also check the status bar as a fallback for long-running sessions).
+ */
+export function isCodexTmuxOutput(input: string): boolean {
+  if (!input) return false;
+  const lines = input.split("\n");
+
+  // Banner check — first 15 lines (codex's box layout occupies ~7 lines after blank space).
+  const head = lines.slice(0, 15).join("\n");
+  if (head.includes("OpenAI Codex (v")) return true;
+
+  // Status-bar check — last 5 non-blank lines. Codex's bottom status line has the shape
+  // "<model> default · <path>" (or sometimes "<model> · <path>"). The middle separator
+  // is "·" (U+00B7) and the path begins with "/" or "~/". The model token typically
+  // starts with "gpt-" or "codex-" but we don't hard-code it — the "· /" / "· ~/" anchor
+  // is the load-bearing pattern.
+  const tail = stripTrailingBlanks(lines).slice(-5).join("\n");
+  if (/\s·\s+(?:~|\/)/.test(tail)) return true;
+
+  return false;
+}
+
+/**
+ * Parse codex agent state from tmux output. Codex's TUI differs from claude's — different
+ * glyphs (› for input prompt, • for output bullets), no surrounding box, status bar is
+ * "<model> · <path>" on the last line.
+ *
+ * Priority order (mirrors claude's intent):
+ *   1. Completion sentinel ("I HAVE COMPLETED THE GOAL") in last 15 lines (excluding quoted) → complete.
+ *   2. Standalone WAITING marker in last 15 lines → waiting.
+ *   3. Idle at codex input prompt (a line starting with "›" near the tail AND a status-bar
+ *      line at the very end) → waiting.
+ *   4. Default → unknown.
+ *
+ * Active-running detection is intentionally NOT implemented: we don't yet have confident
+ * codex "running" samples to derive a pattern from. The deterministic state path (Stop hook
+ * writing meta.json) covers steady-state running. See SPEC-CODEX-MODEL.md §5.6.
+ */
+export function parseCodexState(input: string): ParseStateResult {
+  if (!input || input.trim() === "") {
+    return { state: "unknown", reason: "empty input" };
+  }
+
+  const last15 = lastNLines(input, STANDARD_WINDOW);
+
+  // Completion signal — exclude quoted occurrences (in watchdog nudge prompts)
+  const unquoted15 = last15.replace(/'I HAVE COMPLETED THE GOAL'/g, "");
+  if (unquoted15.includes("I HAVE COMPLETED THE GOAL")) {
+    return { state: "complete", reason: "I HAVE COMPLETED THE GOAL in last 15 lines (codex)" };
+  }
+
+  // Explicit WAITING — standalone on its own line (codex agents emit this verbatim
+  // per the standby-agent instruction). Codex doesn't use ⏺, so no marker variant.
+  const waitingRegex = /(^|\n)\s*WAITING\s*($|\n)/;
+  if (waitingRegex.test(last15)) {
+    return { state: "waiting", reason: "WAITING in last 15 lines (codex)" };
+  }
+
+  // Idle at codex input prompt — the tail has a bare "›" line near the end AND
+  // the very last non-blank line is a codex status bar ("<model> · <path>"). The
+  // "›" is U+203A. Status bar pattern: "<text> · <path>" with the path anchored
+  // to "/" or "~/" (rules out a "·" appearing inside a sentence).
+  const tailLines = stripTrailingBlanks(input.split("\n"));
+  const last = tailLines[tailLines.length - 1] ?? "";
+  const hasStatusBar = /\s·\s+(?:~|\/)/.test(last);
+  if (hasStatusBar) {
+    // Look back through the trailing region for the most recent "›"-prefixed line.
+    // The block between the last "›" and the status bar is the user's typed (or
+    // queued) input — codex shows it inline above the prompt. We only need to find
+    // a single "›" in the last ~5 lines to confirm we're at the prompt.
+    const recent = tailLines.slice(-5);
+    const hasPromptLine = recent.some((line) => /^›\s/.test(line) || /^›\s*$/.test(line));
+    if (hasPromptLine) {
+      return { state: "waiting", reason: "idle at codex input prompt" };
+    }
+    // Even without a "›" in the last 5 lines, a trailing status bar alone is a
+    // strong signal of idle — codex only renders the status bar when the prompt
+    // is interactive. Fall through to a softer waiting verdict.
+    return { state: "waiting", reason: "codex status bar at tail (no visible › in last 5)" };
+  }
+
+  return { state: "unknown", reason: "no codex patterns matched" };
+}
+
+/**
  * Parse agent state from tmux output text.
  * This is a direct port of ib's parse_state() bash function.
  *
@@ -80,6 +171,14 @@ function filterHookSpinners(text: string): string {
 export function parseState(input: string): ParseStateResult {
   if (!input || input.trim() === "") {
     return { state: "unknown", reason: "empty input" };
+  }
+
+  // Codex agents have a different TUI shape — dispatch to the codex parser early
+  // so the claude-shaped patterns below don't accidentally match (or fail to match)
+  // against codex output. The detector checks for the codex banner ("OpenAI Codex (v")
+  // OR the codex status-bar shape at the tail.
+  if (isCodexTmuxOutput(input)) {
+    return parseCodexState(input);
   }
 
   // Check for 'creating' state — permission screens before Claude starts

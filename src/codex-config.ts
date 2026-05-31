@@ -45,6 +45,18 @@ export interface BuildCodexLaunchArgsInput {
   ibBinaryPath: string;
   /** Agent ID — must satisfy `isValidAgentId`. Interpolated into the hook command. */
   agentId: string;
+  /**
+   * Absolute path to the agent's directory (the directory that already
+   * houses meta.json, agent.log, claude.stderr.log, watchdog.log). Codex's
+   * `log_dir` is set to `<agentDir>/codex` so its plaintext TUI log lives
+   * alongside the rest of the per-agent diagnostics. archiveAgent moves
+   * `<agentDir>` wholesale, so no separate cleanup is needed.
+   *
+   * Must be quote-safe: the path is interpolated into a TOML string literal
+   * which sits inside a shell single-quoted argument. `'`, `"`, `\`, and
+   * control characters are rejected at build time.
+   */
+  agentDir: string;
   /** Optional override for the per-hook timeout in seconds. */
   timeoutSecs?: number;
 }
@@ -103,7 +115,7 @@ export function renderCodexHookFlagPayload(
  * any precondition fails — callers handle the spawn rejection.
  */
 export function buildCodexLaunchArgs(input: BuildCodexLaunchArgsInput): CodexLaunchArgs {
-  const { ibBinaryPath, agentId } = input;
+  const { ibBinaryPath, agentId, agentDir } = input;
   const timeoutSecs = input.timeoutSecs ?? DEFAULT_CODEX_HOOK_TIMEOUT_SECS;
 
   if (!isCodexSafeBinaryPath(ibBinaryPath)) {
@@ -115,6 +127,16 @@ export function buildCodexLaunchArgs(input: BuildCodexLaunchArgsInput): CodexLau
   if (!isValidAgentId(agentId)) {
     throw new Error(`Invalid agent id for codex launch: ${JSON.stringify(agentId)}`);
   }
+  // agentDir is interpolated into the inline `-c log_dir="…"` TOML string
+  // which itself sits inside a shell single-quoted argument. Reuse the
+  // ib-binary-path safety predicate — the character set we forbid (apostrophe,
+  // double-quote, backslash, control chars) is the same for both contexts.
+  if (!isCodexSafeBinaryPath(agentDir)) {
+    throw new Error(
+      `Unsafe agent directory path for codex launch: ${JSON.stringify(agentDir)} contains quotes, backslashes, or control characters. ` +
+        `Move the agent directory to a path made of printable ASCII with no apostrophes, quotes, or backslashes.`,
+    );
+  }
   if (!Number.isFinite(timeoutSecs) || timeoutSecs <= 0 || !Number.isInteger(timeoutSecs)) {
     throw new Error(`Invalid codex hook timeout: ${timeoutSecs}`);
   }
@@ -123,5 +145,27 @@ export function buildCodexLaunchArgs(input: BuildCodexLaunchArgsInput): CodexLau
   for (const event of CODEX_REGISTERED_EVENTS) {
     args.push("-c", renderCodexHookFlagPayload(event, ibBinaryPath, agentId, timeoutSecs));
   }
+  // Disable codex's native multi-agent collaboration tools (spawn_agent,
+  // send_input, resume_agent, wait_agent, close_agent). All sub-agent spawning
+  // MUST go through `ib new-agent` so the harness owns the lifecycle
+  // (meta.json, watchdog, path-isolation, tracked tmux session). The claude
+  // side enforces this via the intercept-task hook; this is the codex
+  // equivalent — codex's native tools cannot fire if the feature is off.
+  args.push("-c", "features.multi_agent=false");
+  // Disable the "Co-authored-by: Codex <noreply@openai.com>" commit trailer.
+  // codex's commit_attribution is a TOML string — an empty string in TOML
+  // is `""` (two adjacent double quotes); when codex sees this it skips
+  // appending the trailer entirely. User preference: commits made by codex
+  // agents should look like normal local commits.
+  args.push("-c", 'commit_attribution=""');
+  // Redirect codex's log dir into <agentDir>/codex so the plaintext TUI log
+  // (codex-tui.log, opt-in only when log_dir is set explicitly) lives next
+  // to the other per-agent diagnostics. archiveAgent() moves <agentDir>
+  // wholesale, so the codex/ subdir gets cleaned up with the agent. Codex
+  // creates the directory on first write — we don't pre-create it.
+  args.push("-c", `log_dir="${agentDir}/codex"`);
+  // Suppress codex's onboarding tooltips on the TUI welcome screen — they
+  // clutter the pane the watchdog scrapes for state.
+  args.push("-c", "tui.show_tooltips=false");
   return { args };
 }

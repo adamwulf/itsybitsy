@@ -71,9 +71,12 @@ describe("buildCodexLaunchArgs — well-formedness", () => {
     const { args } = buildCodexLaunchArgs({
       ibBinaryPath: "/usr/local/bin/ib",
       agentId: "agent-abc123",
+      agentDir: "/var/agents/agent-abc123",
     });
-    // args alternates: -c, payload, -c, payload, ...
-    expect(args.length).toBe(CODEX_REGISTERED_EVENTS.length * 2);
+    // args alternates: -c, payload, -c, payload, ... The trailing pairs
+    // beyond the hook events are the 4 always-on flags:
+    //   features.multi_agent, commit_attribution, log_dir, tui.show_tooltips.
+    expect(args.length).toBe(CODEX_REGISTERED_EVENTS.length * 2 + 8);
     for (let i = 0; i < args.length; i += 2) {
       expect(args[i]).toBe("-c");
     }
@@ -82,12 +85,15 @@ describe("buildCodexLaunchArgs — well-formedness", () => {
     expect(args[5]).toContain("hooks.Stop=");
   });
 
-  test("each payload contains <abs ib> and <agentId>", () => {
+  test("each hook payload contains <abs ib> and <agentId>", () => {
     const { args } = buildCodexLaunchArgs({
       ibBinaryPath: "/usr/local/bin/ib",
       agentId: "agent-abc123",
+      agentDir: "/var/agents/agent-abc123",
     });
-    for (let i = 1; i < args.length; i += 2) {
+    // Only the hook-flag payloads carry the dispatcher command — the trailing
+    // multi_agent / commit_attribution flags are intentionally agent-agnostic.
+    for (let i = 1; i < CODEX_REGISTERED_EVENTS.length * 2; i += 2) {
       const payload = args[i]!;
       expect(payload).toContain("/usr/local/bin/ib hooks codex-");
       expect(payload).toContain("agent-abc123");
@@ -98,6 +104,7 @@ describe("buildCodexLaunchArgs — well-formedness", () => {
     const { args } = buildCodexLaunchArgs({
       ibBinaryPath: "/bin/ib",
       agentId: "agent-abc",
+      agentDir: "/var/agents/agent-abc",
     });
     expect(args[1]).toContain(`timeout=${DEFAULT_CODEX_HOOK_TIMEOUT_SECS}`);
   });
@@ -106,15 +113,23 @@ describe("buildCodexLaunchArgs — well-formedness", () => {
     const { args } = buildCodexLaunchArgs({
       ibBinaryPath: "/bin/ib",
       agentId: "agent-abc",
+      agentDir: "/var/agents/agent-abc",
       timeoutSecs: 12,
     });
-    for (let i = 1; i < args.length; i += 2) {
+    // Only the hook-flag payloads carry a timeout — the trailing
+    // multi_agent / commit_attribution / log_dir / tui flags have nothing
+    // to do with hooks.
+    for (let i = 1; i < CODEX_REGISTERED_EVENTS.length * 2; i += 2) {
       expect(args[i]).toContain("timeout=12");
     }
   });
 
   test("rejects invalid timeouts (zero, negative, non-integer)", () => {
-    const base = { ibBinaryPath: "/bin/ib", agentId: "agent-abc" };
+    const base = {
+      ibBinaryPath: "/bin/ib",
+      agentId: "agent-abc",
+      agentDir: "/var/agents/agent-abc",
+    };
     expect(() => buildCodexLaunchArgs({ ...base, timeoutSecs: 0 })).toThrow();
     expect(() => buildCodexLaunchArgs({ ...base, timeoutSecs: -5 })).toThrow();
     expect(() => buildCodexLaunchArgs({ ...base, timeoutSecs: 3.5 })).toThrow();
@@ -129,52 +144,235 @@ describe("buildCodexLaunchArgs — well-formedness", () => {
   });
 });
 
+describe("buildCodexLaunchArgs — disables codex's native multi-agent feature", () => {
+  test("appends `-c features.multi_agent=false` to the args array", () => {
+    const { args } = buildCodexLaunchArgs({
+      ibBinaryPath: "/usr/local/bin/ib",
+      agentId: "agent-abc123",
+      agentDir: "/var/agents/agent-abc123",
+    });
+    // The flag pair must appear as two adjacent entries: the `-c` token,
+    // then the literal TOML `features.multi_agent=false` payload.
+    let foundAt = -1;
+    for (let i = 0; i < args.length - 1; i++) {
+      if (args[i] === "-c" && args[i + 1] === "features.multi_agent=false") {
+        foundAt = i;
+        break;
+      }
+    }
+    expect(foundAt).toBeGreaterThanOrEqual(0);
+  });
+
+  test("appends `-c commit_attribution=\"\"` to disable the codex commit trailer", () => {
+    const { args } = buildCodexLaunchArgs({
+      ibBinaryPath: "/usr/local/bin/ib",
+      agentId: "agent-abc123",
+      agentDir: "/var/agents/agent-abc123",
+    });
+    // The TOML empty-string literal is `""` (two adjacent double quotes).
+    let foundAt = -1;
+    for (let i = 0; i < args.length - 1; i++) {
+      if (args[i] === "-c" && args[i + 1] === 'commit_attribution=""') {
+        foundAt = i;
+        break;
+      }
+    }
+    expect(foundAt).toBeGreaterThanOrEqual(0);
+  });
+
+  test("all four flags appear regardless of timeout override", () => {
+    const { args } = buildCodexLaunchArgs({
+      ibBinaryPath: "/usr/local/bin/ib",
+      agentId: "agent-abc123",
+      agentDir: "/var/agents/agent-abc123",
+      timeoutSecs: 7,
+    });
+    expect(args).toContain("features.multi_agent=false");
+    expect(args).toContain('commit_attribution=""');
+    expect(args).toContain('log_dir="/var/agents/agent-abc123/codex"');
+    expect(args).toContain("tui.show_tooltips=false");
+  });
+});
+
+describe("buildCodexLaunchArgs — log_dir and tui.show_tooltips flags", () => {
+  test("appends `-c log_dir=\"<agentDir>/codex\"` so codex logs land in the agent dir", () => {
+    const { args } = buildCodexLaunchArgs({
+      ibBinaryPath: "/usr/local/bin/ib",
+      agentId: "agent-abc123",
+      agentDir: "/Users/me/work/.ittybitty/agents/agent-abc123",
+    });
+    let foundAt = -1;
+    for (let i = 0; i < args.length - 1; i++) {
+      if (
+        args[i] === "-c" &&
+        args[i + 1] === 'log_dir="/Users/me/work/.ittybitty/agents/agent-abc123/codex"'
+      ) {
+        foundAt = i;
+        break;
+      }
+    }
+    expect(foundAt).toBeGreaterThanOrEqual(0);
+  });
+
+  test("the log_dir value ends with `/codex` (the substring the manager asked for)", () => {
+    const { args } = buildCodexLaunchArgs({
+      ibBinaryPath: "/bin/ib",
+      agentId: "agent-abc",
+      agentDir: "/var/agents/agent-abc",
+    });
+    const logDirFlag = args.find((a) => a.startsWith("log_dir="));
+    expect(logDirFlag).toBeDefined();
+    expect(logDirFlag).toContain("codex");
+    expect(logDirFlag!.endsWith('/codex"')).toBe(true);
+  });
+
+  test("appends `-c tui.show_tooltips=false` so the welcome onboarding tips stay off", () => {
+    const { args } = buildCodexLaunchArgs({
+      ibBinaryPath: "/usr/local/bin/ib",
+      agentId: "agent-abc123",
+      agentDir: "/var/agents/agent-abc123",
+    });
+    let foundAt = -1;
+    for (let i = 0; i < args.length - 1; i++) {
+      if (args[i] === "-c" && args[i + 1] === "tui.show_tooltips=false") {
+        foundAt = i;
+        break;
+      }
+    }
+    expect(foundAt).toBeGreaterThanOrEqual(0);
+  });
+
+  test("rejects agentDir containing an apostrophe (would close the shell quoting)", () => {
+    expect(() =>
+      buildCodexLaunchArgs({
+        ibBinaryPath: "/bin/ib",
+        agentId: "agent-abc",
+        agentDir: "/Users/o'malley/agents/agent-abc",
+      }),
+    ).toThrow(/Unsafe agent directory path/);
+  });
+
+  test("rejects agentDir containing a double quote (would corrupt the TOML string)", () => {
+    expect(() =>
+      buildCodexLaunchArgs({
+        ibBinaryPath: "/bin/ib",
+        agentId: "agent-abc",
+        agentDir: '/Users/who"ah/agents/agent-abc',
+      }),
+    ).toThrow(/Unsafe agent directory path/);
+  });
+
+  test("rejects agentDir containing a backslash", () => {
+    expect(() =>
+      buildCodexLaunchArgs({
+        ibBinaryPath: "/bin/ib",
+        agentId: "agent-abc",
+        agentDir: "/Users/back\\slash/agents/agent-abc",
+      }),
+    ).toThrow(/Unsafe agent directory path/);
+  });
+
+  test("rejects agentDir containing a control character (newline)", () => {
+    expect(() =>
+      buildCodexLaunchArgs({
+        ibBinaryPath: "/bin/ib",
+        agentId: "agent-abc",
+        agentDir: "/Users/new\nline/agents/agent-abc",
+      }),
+    ).toThrow(/Unsafe agent directory path/);
+  });
+
+  test("rejects an empty agentDir", () => {
+    expect(() =>
+      buildCodexLaunchArgs({
+        ibBinaryPath: "/bin/ib",
+        agentId: "agent-abc",
+        agentDir: "",
+      }),
+    ).toThrow(/Unsafe agent directory path/);
+  });
+});
+
 describe("buildCodexLaunchArgs — path-safety rejection (gate (b))", () => {
+  const okAgentDir = "/var/agents/agent-abc";
+
   test("rejects ibBinaryPath containing an apostrophe", () => {
     expect(() =>
-      buildCodexLaunchArgs({ ibBinaryPath: "/Users/o'malley/bin/ib", agentId: "agent-abc" }),
+      buildCodexLaunchArgs({
+        ibBinaryPath: "/Users/o'malley/bin/ib",
+        agentId: "agent-abc",
+        agentDir: okAgentDir,
+      }),
     ).toThrow(/Unsafe ib binary path/);
   });
 
   test("rejects ibBinaryPath containing a double quote", () => {
     expect(() =>
-      buildCodexLaunchArgs({ ibBinaryPath: '/Users/who"ah/ib', agentId: "agent-abc" }),
+      buildCodexLaunchArgs({
+        ibBinaryPath: '/Users/who"ah/ib',
+        agentId: "agent-abc",
+        agentDir: okAgentDir,
+      }),
     ).toThrow(/Unsafe ib binary path/);
   });
 
   test("rejects ibBinaryPath containing a backslash", () => {
     expect(() =>
-      buildCodexLaunchArgs({ ibBinaryPath: "/Users/back\\slash/ib", agentId: "agent-abc" }),
+      buildCodexLaunchArgs({
+        ibBinaryPath: "/Users/back\\slash/ib",
+        agentId: "agent-abc",
+        agentDir: okAgentDir,
+      }),
     ).toThrow(/Unsafe ib binary path/);
   });
 
   test("rejects ibBinaryPath containing a newline", () => {
     expect(() =>
-      buildCodexLaunchArgs({ ibBinaryPath: "/Users/new\nline/ib", agentId: "agent-abc" }),
+      buildCodexLaunchArgs({
+        ibBinaryPath: "/Users/new\nline/ib",
+        agentId: "agent-abc",
+        agentDir: okAgentDir,
+      }),
     ).toThrow(/Unsafe ib binary path/);
   });
 
   test("rejects ibBinaryPath containing a tab", () => {
     expect(() =>
-      buildCodexLaunchArgs({ ibBinaryPath: "/Users/with\ttab/ib", agentId: "agent-abc" }),
+      buildCodexLaunchArgs({
+        ibBinaryPath: "/Users/with\ttab/ib",
+        agentId: "agent-abc",
+        agentDir: okAgentDir,
+      }),
     ).toThrow(/Unsafe ib binary path/);
   });
 
   test("rejects an empty ibBinaryPath", () => {
-    expect(() => buildCodexLaunchArgs({ ibBinaryPath: "", agentId: "agent-abc" })).toThrow(
-      /Unsafe ib binary path/,
-    );
+    expect(() =>
+      buildCodexLaunchArgs({
+        ibBinaryPath: "",
+        agentId: "agent-abc",
+        agentDir: okAgentDir,
+      }),
+    ).toThrow(/Unsafe ib binary path/);
   });
 
   test("rejects an invalid agent id (special chars)", () => {
     expect(() =>
-      buildCodexLaunchArgs({ ibBinaryPath: "/bin/ib", agentId: "bad id with spaces" }),
+      buildCodexLaunchArgs({
+        ibBinaryPath: "/bin/ib",
+        agentId: "bad id with spaces",
+        agentDir: okAgentDir,
+      }),
     ).toThrow(/Invalid agent id/);
   });
 
   test("rejects an agent id containing a shell metacharacter", () => {
     expect(() =>
-      buildCodexLaunchArgs({ ibBinaryPath: "/bin/ib", agentId: "agent-abc;rm-rf" }),
+      buildCodexLaunchArgs({
+        ibBinaryPath: "/bin/ib",
+        agentId: "agent-abc;rm-rf",
+        agentDir: okAgentDir,
+      }),
     ).toThrow(/Invalid agent id/);
   });
 });

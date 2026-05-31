@@ -27,9 +27,12 @@ import { buildCodexDenyOutput } from "./shared";
 const SESSION_START_NOOP = JSON.stringify({
   hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: "" },
 });
-const STOP_NOOP = JSON.stringify({
-  hookSpecificOutput: { hookEventName: "Stop", additionalContext: "" },
-});
+// Stop uses the common-output-fields shape (continue / stopReason / systemMessage /
+// suppressOutput — all optional), NOT a hookSpecificOutput envelope. An empty
+// object is a valid no-op. The earlier hookSpecificOutput shape triggered
+// `Stop hook (failed) — error: hook returned invalid stop hook JSON output`.
+// See developers.openai.com/codex/hooks#stop.
+const STOP_NOOP = "{}";
 
 export type CodexDispatcherEvent = "pre-tool-use" | "session-start" | "stop";
 

@@ -29,12 +29,19 @@ import { isValidAgentId } from "../validation";
 import { writeAgentState, type MetaState } from "../agents";
 import { detectStateFromMessage } from "./agent-status";
 
-const HOOK_EVENT_NAME = "Stop";
-
+/**
+ * Codex Stop hook output contract (verified against developers.openai.com/codex/hooks#stop):
+ *
+ *   - Stop does NOT use `hookSpecificOutput` / `hookEventName` / `additionalContext`
+ *     (those are SessionStart/SubagentStart-specific). Emitting that shape triggers
+ *     `Stop hook (failed) — error: hook returned invalid stop hook JSON output`.
+ *   - The documented common output fields for Stop are `continue`, `stopReason`,
+ *     `systemMessage`, `suppressOutput` — all optional. An empty object `{}` is
+ *     valid and the right no-op (we have nothing to add to the model's turn end).
+ *   - Plain text on stdout is documented as invalid; exit 0 + `{}` is the safe no-op.
+ */
 function buildStopNoop(): string {
-  return JSON.stringify({
-    hookSpecificOutput: { hookEventName: HOOK_EVENT_NAME, additionalContext: "" },
-  });
+  return "{}";
 }
 
 function emitNoop(write: (chunk: string) => unknown = (c) => process.stdout.write(c)): void {
@@ -137,18 +144,26 @@ export async function hookCodexStopDryRun(agentId: string): Promise<void> {
   if (!out) {
     throw new Error("codex-stop dry-run: handler produced no output");
   }
+  // Stop's documented output is the common-fields shape (continue/stopReason/
+  // systemMessage/suppressOutput — all optional) OR an empty object `{}`.
+  // It MUST NOT carry a `hookSpecificOutput` envelope: codex rejects that as
+  // "invalid stop hook JSON output" (see developers.openai.com/codex/hooks#stop).
+  // The dry-run validates that the handler emits a JSON object and is not
+  // carrying the wrong-shape envelope.
   let parsed: unknown;
   try {
     parsed = JSON.parse(out);
   } catch (err) {
     throw new Error(`codex-stop dry-run: handler emitted non-JSON output: ${(err as Error).message}`);
   }
-  const hookOutput = (parsed as Record<string, unknown>)?.hookSpecificOutput as
-    | Record<string, unknown>
-    | undefined;
-  if (!hookOutput || hookOutput.hookEventName !== "Stop") {
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     throw new Error(
-      `codex-stop dry-run: handler output missing hookSpecificOutput.hookEventName="Stop" (got ${JSON.stringify(parsed)})`,
+      `codex-stop dry-run: handler output is not a JSON object (got ${JSON.stringify(parsed)})`,
+    );
+  }
+  if ("hookSpecificOutput" in (parsed as Record<string, unknown>)) {
+    throw new Error(
+      `codex-stop dry-run: handler emitted hookSpecificOutput envelope (Stop must use the common-fields shape; got ${JSON.stringify(parsed)})`,
     );
   }
 }

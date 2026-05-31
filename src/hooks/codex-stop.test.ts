@@ -78,8 +78,13 @@ describe("hookCodexStop — writes deterministic state", () => {
     }
     const meta = await Bun.file(join(agentDir, "meta.json")).json();
     expect(meta.state).toBe("waiting");
+    // Stop uses the common-output-fields shape; `{}` is the documented no-op.
+    // Reject any `hookSpecificOutput` envelope — codex rejects that shape as
+    // "invalid stop hook JSON output".
     const parsed = JSON.parse(capture.join(""));
-    expect(parsed.hookSpecificOutput.hookEventName).toBe("Stop");
+    expect(typeof parsed).toBe("object");
+    expect(parsed).not.toBeNull();
+    expect("hookSpecificOutput" in parsed).toBe(false);
   });
 
   test("writes state=complete when the last message signals completion", async () => {
@@ -107,7 +112,9 @@ describe("hookCodexStop — writes deterministic state", () => {
       restore();
     }
     const parsed = JSON.parse(capture.join(""));
-    expect(parsed.hookSpecificOutput.hookEventName).toBe("Stop");
+    expect(typeof parsed).toBe("object");
+    expect(parsed).not.toBeNull();
+    expect("hookSpecificOutput" in parsed).toBe(false);
   });
 
   test("emits valid JSON on malformed stdin", async () => {
@@ -121,7 +128,9 @@ describe("hookCodexStop — writes deterministic state", () => {
       restore();
     }
     const parsed = JSON.parse(capture.join(""));
-    expect(parsed.hookSpecificOutput.hookEventName).toBe("Stop");
+    expect(typeof parsed).toBe("object");
+    expect(parsed).not.toBeNull();
+    expect("hookSpecificOutput" in parsed).toBe(false);
   });
 });
 

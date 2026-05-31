@@ -35,6 +35,7 @@ import {
   sanitizeTmuxInput,
 } from "../coordinator";
 import type { Agent, FlatEntry, PendingQuestion } from "../agents";
+import { stripAnsi } from "../parse-state";
 import { SplitPane } from "./split-pane";
 import { wrapLines, wordWrapLines, padLines, findLastTwoSeparators } from "./wrap";
 import { fetchUsage } from "../usage";
@@ -156,6 +157,14 @@ export class TmuxPaneComponent implements Component {
       while (this.statusLines.length > 0 && this.statusLines[this.statusLines.length - 1]!.trim() === "") {
         this.statusLines.pop();
       }
+      return;
+    }
+
+    const codexChrome = findCodexInputChrome(wrapped);
+    if (codexChrome) {
+      this.statusLines = wrapped.slice(codexChrome.statusIndex, codexChrome.endIndex + 1).map(
+        (line) => truncateToWidth(line, width, "")
+      );
     }
   }
 
@@ -240,6 +249,11 @@ export class TmuxPaneComponent implements Component {
       const { upperIndex } = findLastTwoSeparators(wrapped);
       if (upperIndex >= 0 && upperIndex < wrapped.length) {
         wrapped = wrapped.slice(0, upperIndex);
+      } else {
+        const codexChrome = findCodexInputChrome(wrapped);
+        if (codexChrome) {
+          wrapped = wrapped.slice(0, codexChrome.promptIndex);
+        }
       }
     }
 
@@ -268,6 +282,33 @@ export class TmuxPaneComponent implements Component {
 
     return padLines(lines, this.displayHeight);
   }
+}
+
+function findCodexInputChrome(wrapped: string[]): { promptIndex: number; statusIndex: number; endIndex: number } | null {
+  let endIndex = wrapped.length - 1;
+  while (endIndex >= 0 && stripAnsi(wrapped[endIndex]!).trim() === "") {
+    endIndex--;
+  }
+  if (endIndex < 0) return null;
+
+  let statusIndex = -1;
+  for (let i = endIndex; i >= Math.max(0, endIndex - 5); i--) {
+    const line = stripAnsi(wrapped[i]!).trim();
+    if (/\s·\s+(?:~|\/)/.test(line)) {
+      statusIndex = i;
+      break;
+    }
+  }
+  if (statusIndex < 0) return null;
+
+  for (let i = statusIndex - 1; i >= Math.max(0, statusIndex - 20); i--) {
+    const line = stripAnsi(wrapped[i]!);
+    if (/^›(?:\s|$)/.test(line)) {
+      return { promptIndex: i, statusIndex, endIndex };
+    }
+  }
+
+  return null;
 }
 
 /** Merge sidebar lines and main area lines side by side with a separator */

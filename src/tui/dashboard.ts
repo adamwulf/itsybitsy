@@ -2043,7 +2043,15 @@ export class DashboardComponent implements Component {
     else if (data === "l") { agentActions.handleScrollDown(this); }
     // Agent/repo actions — context-sensitive on whether a repo header is selected
     else if (data === "x") {
-      if (this.agentTree.isSystemCoordinatorSelected) {
+      // §17.3 disband-team: Teams panel focused + team ANCHOR selected → disband.
+      // A team MEMBER selection (kind:"agent") falls through to the agent-kill
+      // path so killing a team member from the Teams tree behaves identically
+      // to killing from the Agents tree (child-agent-indistinguishable).
+      const teamsFocused = this.focusManager.current() === "teams-tree";
+      const teamSel = teamsFocused ? this.teamsTree.selection : null;
+      if (teamSel?.kind === "team") {
+        agentActions.handleDisbandTeam(this, teamSel.teamName);
+      } else if (this.agentTree.isSystemCoordinatorSelected) {
         agentActions.handleKillSystemCoordinator(this);
       } else if (!this.agentTree.selectedAgent && this.agentTree.selectedRepoHeader) {
         this.executeAndRefresh(() => agentActions.handleRemoveRepoSafe(this));

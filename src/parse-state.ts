@@ -156,7 +156,7 @@ export function parseCodexState(input: string): ParseStateResult {
 
 function findLastCodexPromptIndex(lines: string[]): number {
   for (let i = lines.length - 1; i >= 0; i--) {
-    if (/^›(?:\s|$)/.test(lines[i] ?? "")) return i;
+    if (/^›(?:\s|$)/.test((lines[i] ?? "").trimStart())) return i;
   }
   return -1;
 }

@@ -41,8 +41,14 @@ describe("runCodexDispatcher — HIGH 1 fail-open contract", () => {
     const { writes, write } = captureWrite();
     const res = await runCodexDispatcher("stop", "/etc/passwd", { deps: { write } });
     expect(res.exitCode).toBe(0);
+    // Stop uses the common-output-fields shape (continue / stopReason /
+    // systemMessage / suppressOutput — all optional). `{}` is the valid no-op.
+    // The hookSpecificOutput envelope is REJECTED by codex as
+    // "invalid stop hook JSON output".
     const parsed = JSON.parse(writes[0]!);
-    expect(parsed.hookSpecificOutput.hookEventName).toBe("Stop");
+    expect(typeof parsed).toBe("object");
+    expect(parsed).not.toBeNull();
+    expect("hookSpecificOutput" in parsed).toBe(false);
   });
 
   test("handler module fails to import (synthetic): pre-tool-use emits deny + exit 0", async () => {
@@ -83,7 +89,9 @@ describe("runCodexDispatcher — HIGH 1 fail-open contract", () => {
     });
     expect(res.exitCode).toBe(0);
     const parsed = JSON.parse(writes[0]!);
-    expect(parsed.hookSpecificOutput.hookEventName).toBe("Stop");
+    expect(typeof parsed).toBe("object");
+    expect(parsed).not.toBeNull();
+    expect("hookSpecificOutput" in parsed).toBe(false);
   });
 
   test("happy-path handler success: no extra write, exit 0", async () => {

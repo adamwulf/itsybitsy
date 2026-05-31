@@ -257,6 +257,11 @@ New `src/hooks/codex-pre-tool-use.ts`, dispatched from `src/index.ts` via `ib ho
 
 All state-detection hooks are registered via the same inline-`-c` pattern as PreToolUse (§5.4 step 3): `-c 'hooks.SessionStart=[{matcher=".*",hooks=[{type="command",command="<abs ib> hooks codex-session-start <agentId>",timeout=30}]}]'`, etc.
 
+**Hook output contracts differ per event** (verified against `developers.openai.com/codex/hooks`):
+- **PreToolUse** uses the `hookSpecificOutput.{hookEventName, permissionDecision, permissionDecisionReason, updatedInput}` envelope (§5.5).
+- **SessionStart** uses `hookSpecificOutput.{hookEventName, additionalContext}` — codex accepts an empty `additionalContext` as a valid no-op.
+- **Stop** uses the **common-output-fields shape** (`continue`, `stopReason`, `systemMessage`, `suppressOutput` — all optional). It MUST NOT carry a `hookSpecificOutput` envelope: codex rejects that shape as `Stop hook (failed) — error: hook returned invalid stop hook JSON output`. The minimal valid no-op is `{}` (an empty JSON object). The state write to `meta.json` via `writeAgentState()` is the load-bearing side effect; the stdout payload is just contract compliance.
+
 `detectAgentStates()` branches on `parseModel(meta.model).cli` to pick the codex path.
 
 ### 5.7 Watchdog

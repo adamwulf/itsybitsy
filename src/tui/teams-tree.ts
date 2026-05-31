@@ -97,30 +97,29 @@ function computeTeamStateColWidth(rows: TeamFlatEntry[]): number {
   return maxLen;
 }
 
-/** The `repo/model` disambiguation token for a cross-repo member (§17.2). */
-function repoModelToken(agent: Agent): string {
-  return `${agent.repoName}/${agent.meta.model}`;
+/** The `<repo>/<id>` name token for a cross-repo member (§17.2). */
+function repoQualifiedName(agent: Agent): string {
+  return `${agent.repoName}/${agentDisplayName(agent)}`;
 }
 
-/** Width of the member row name prefix (connector + icon + display name). */
+/** Width of the member row name prefix (connector + icon + repo/display-name). */
 function memberNamePrefixWidth(agent: Agent, connector: string): number {
   const orphanedPrefix = agent.orphaned ? "⚠ " : "";
   const icon = resolveAgentIcon(agent.meta);
-  return visibleWidth(`${connector}${orphanedPrefix}${icon} ${agentDisplayName(agent)}`);
+  return visibleWidth(`${connector}${orphanedPrefix}${icon} ${repoQualifiedName(agent)}`);
 }
 
 /**
- * Format a team-member row (§17.2). Mirrors `formatAgentRow` but adds a
- * `repo/model` token (e.g. `frontend/opus`) so cross-repo members are
- * disambiguated.
+ * Format a team-member row (§17.2). Mirrors `formatAgentRow`'s column order
+ * exactly; the only difference is that the cross-repo name is qualified as
+ * `<repo>/<id>` (e.g. `frontend/agent-6f61e45b`) so members from different
+ * repos are disambiguated. The model lives in its own column after age, same
+ * as the Agents tree, instead of being bundled with the repo.
  *
  * Compact mode (width <= COMPACT_WIDTH_THRESHOLD):
- *   `<connector><icon> <id>  <repo>/<model>  <state>  <age>`
- * Full mode (wider): additionally appends the prompt/summary.
- *
- * In compact mode the row is built so `truncateToWidth` clips the longest token
- * (the `repo/model` token, placed mid-row) first when the sidebar is narrow —
- * the full data lives in the info panel (§17.3).
+ *   `<connector><icon> <repo>/<id>  <state>  <age>`
+ * Full mode (wider): additionally appends the model and prompt/summary, in
+ * the same order as `formatAgentRow`.
  */
 export function formatTeamMemberRow(
   agent: Agent,
@@ -136,18 +135,17 @@ export function formatTeamMemberRow(
   const state = displayState(agent.state);
   const stateColor = getStateColors()[state] ?? getStateColors().unknown;
 
-  const namePrefix = `${connector}${orphanedPrefix}${icon} ${agentDisplayName(agent)}`;
+  const namePrefix = `${connector}${orphanedPrefix}${icon} ${repoQualifiedName(agent)}`;
   const namePad = Math.max(0, nameColWidth - visibleWidth(namePrefix));
   const coloredState = `${stateColor}${state}${RESET}${" ".repeat(Math.max(0, stateColWidth - state.length))}`;
   const paddedAge = agent.age.padStart(AGE_COL_WIDTH);
-  const token = repoModelToken(agent);
 
   let line: string;
   if (compact) {
-    line = `${namePrefix}${" ".repeat(namePad)}  ${token}  ${coloredState}  ${paddedAge}`;
+    line = `${namePrefix}${" ".repeat(namePad)}  ${coloredState}  ${paddedAge}`;
   } else {
     const promptText = (agent.meta.summary ?? agent.meta.prompt).replace(/\n/g, " ");
-    line = `${namePrefix}${" ".repeat(namePad)}  ${token}  ${coloredState}  ${paddedAge}  ${promptText}`;
+    line = `${namePrefix}${" ".repeat(namePad)}  ${coloredState}  ${paddedAge}  ${agent.meta.model}  ${promptText}`;
   }
 
   const truncated = truncateToWidth(line, width, "");

@@ -78,8 +78,10 @@ describe("ChannelPaneComponent", () => {
     pane.teamName = "backend";
     await pane.load();
     const text = pane.render(80).map(stripAnsi).join("\n");
-    expect(text).toContain("[sent by agent-aaa in @backend]: hi team");
+    expect(text).toContain("[sent by agent-aaa]: hi team");
     expect(text).not.toContain("[sent by agent agent-aaa");
+    // §17.4 in-pane form drops the ` in @<team>` clause — the team is the panel context.
+    expect(text).not.toContain("in @backend");
   });
 
   test("@system-sender line keeps the sentinel verbatim", async () => {
@@ -89,7 +91,7 @@ describe("ChannelPaneComponent", () => {
     pane.teamName = "backend";
     await pane.load();
     const text = pane.render(80).map(stripAnsi).join("\n");
-    expect(text).toContain("[sent by @system in @backend]: deploy now");
+    expect(text).toContain("[sent by @system]: deploy now");
   });
 
   test("human sender with NO user.name → bare 'user' form", async () => {
@@ -99,9 +101,9 @@ describe("ChannelPaneComponent", () => {
     pane.teamName = "backend";
     await pane.load(); // config path points at a missing file → user.name = ""
     const text = pane.render(80).map(stripAnsi).join("\n");
-    expect(text).toContain("[sent by user in @backend]: ping");
-    // The bare form has NO name token between "user" and "in".
-    expect(text).not.toMatch(/\[sent by user \S+ in @backend\]/);
+    expect(text).toContain("[sent by user]: ping");
+    // The bare form has NO name token after "user" — i.e. no `user <name>` form.
+    expect(text).not.toMatch(/\[sent by user \S+\]/);
   });
 
   test("human sender WITH user.name configured → 'user <name>' form", async () => {
@@ -114,7 +116,7 @@ describe("ChannelPaneComponent", () => {
     pane.teamName = "backend";
     await pane.load();
     const text = pane.render(80).map(stripAnsi).join("\n");
-    expect(text).toContain("[sent by user Adam in @backend]: ping");
+    expect(text).toContain("[sent by user Adam]: ping");
   });
 
   test("scrollBack shifts which lines render (older lines come into view)", async () => {
@@ -197,21 +199,21 @@ describe("ChannelPaneComponent", () => {
   });
 
   describe("formatChannelLine grammar", () => {
-    test("agent id drops 'agent' word", () => {
+    test("agent id drops 'agent' word; omits ` in @<team>` clause (in-pane form)", () => {
       const line = formatChannelLine({ ts: 0, fromAgent: "agent-z", message: "m" }, "backend", null);
-      expect(stripAnsi(line)).toBe("[sent by agent-z in @backend]: m");
+      expect(stripAnsi(line)).toBe("[sent by agent-z]: m");
     });
-    test("@-sentinel kept verbatim", () => {
+    test("@-sentinel kept verbatim; omits ` in @<team>` clause", () => {
       const line = formatChannelLine({ ts: 0, fromAgent: "@system", message: "m" }, "backend", null);
-      expect(stripAnsi(line)).toBe("[sent by @system in @backend]: m");
+      expect(stripAnsi(line)).toBe("[sent by @system]: m");
     });
-    test("human with no user.name → bare user", () => {
+    test("human with no user.name → bare user; omits ` in @<team>` clause", () => {
       const line = formatChannelLine({ ts: 0, fromAgent: "", message: "m" }, "backend", null);
-      expect(stripAnsi(line)).toBe("[sent by user in @backend]: m");
+      expect(stripAnsi(line)).toBe("[sent by user]: m");
     });
-    test("human with user.name → user <name>", () => {
+    test("human with user.name → user <name>; omits ` in @<team>` clause", () => {
       const line = formatChannelLine({ ts: 0, fromAgent: "", message: "m" }, "backend", "Adam");
-      expect(stripAnsi(line)).toBe("[sent by user Adam in @backend]: m");
+      expect(stripAnsi(line)).toBe("[sent by user Adam]: m");
     });
     test("sender prefix carries BOLD + color ANSI", () => {
       const line = formatChannelLine({ ts: 0, fromAgent: "agent-z", message: "m" }, "backend", null);
@@ -340,7 +342,7 @@ describe("ChannelPaneComponent", () => {
       pane.teamName = "backend";
       await pane.load();
       const text = pane.render(80).map(stripAnsi).join("\n");
-      expect(text).toContain("[sent by agent-a in @backend]: hello");
+      expect(text).toContain("[sent by agent-a]: hello");
       expect(text).toContain("── agent-b joined the team ──");
     });
 
@@ -357,7 +359,7 @@ describe("ChannelPaneComponent", () => {
       pane.teamName = "backend";
       await pane.load();
       const text = pane.render(80).map(stripAnsi).join("\n");
-      expect(text).toContain("[sent by agent-legacy in @backend]: still chat");
+      expect(text).toContain("[sent by agent-legacy]: still chat");
       expect(text).not.toContain("── agent-legacy");
     });
   });

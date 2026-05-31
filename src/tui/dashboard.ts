@@ -1331,6 +1331,15 @@ export class DashboardComponent implements Component {
   }
 
   syncSelectedAgent() {
+    // §17.1 Phase 2 (refined): before the effective-selection resolver runs,
+    // push the active source's selection into the INACTIVE tree (or deselect
+    // it when there's no counterpart). This keeps both trees pointing at the
+    // same effective selection whenever possible, so the render layer can
+    // highlight matched-mirror rows in BOTH trees without a separate
+    // suppression flag. Called here (the single dashboard-wide "selection
+    // changed" chokepoint) so every entry point — j/k, 0/1, @-fuzzy, g-go-
+    // to-question — re-mirrors automatically.
+    this.mirrorSelectionToVisibleTree();
     // §17.3: effective-selection resolver. Phase 2 of the three-axis model
     // (SPEC §17.1): the EFFECTIVE selection is sourced from whichever tree
     // owns the GLOBAL selection (`activeSelectionSource === "teams"` → Teams
@@ -1625,58 +1634,52 @@ export class DashboardComponent implements Component {
    * still lives in the original tree — this is a *visual* mirror, not a
    * source-of-truth change.
    *
-   * Rules (per the user's Phase 2 spec):
+   * Rules (per the user's Phase 2 spec, refined):
    *  - Active selection is an AGENT:
-   *      * If sidebarMode === "agents", select that agent in the Agents tree.
-   *      * If sidebarMode === "teams", select the FIRST team-member row whose
-   *        id matches in the Teams tree (the agent's first team, per stable
-   *        listTeams() order). If the agent is not a member of any team, the
-   *        Teams tree is left in no-selection (no row highlighted).
-   *  - Active selection is a TEAM: the Agents tree has nothing to mirror; it
-   *    is left in no-selection (no row highlighted) when sidebarMode flips
-   *    to "agents". The team remains the active selection.
+   *      * The ACTIVE tree already holds the canonical selection (j/k set it).
+   *      * The INACTIVE tree: try to find the SAME agent and select it there
+   *        too (so both trees light up the same row when possible). When the
+   *        agent has no counterpart row (e.g. it's not a member of any team
+   *        on the Teams side, or its row hasn't been built on the Agents side
+   *        yet), `deselect()` the inactive tree so no stale highlight lingers.
+   *      * Visually: BOTH trees highlight the same agent when it appears in
+   *        both; only the active tree highlights when it appears in just one.
+   *  - Active selection is a TEAM anchor: the Agents tree has no team-anchor
+   *    row, so the inactive Agents tree is `deselect()`ed.
    *  - Active selection is a REPO HEADER or SYSTEM COORDINATOR: lives only in
-   *    the Agents tree. When sidebarMode flips to "teams", the Teams tree is
-   *    left in no-selection. When sidebarMode flips back to "agents" the
-   *    Agents tree already holds the right selection (we never cleared it).
-   *  - Null active selection: nothing to mirror.
+   *    the Agents tree; the inactive Teams tree is `deselect()`ed.
+   *  - Null active selection: deselect the inactive tree too.
+   *
+   * Called from BOTH the `0`/`1` sidebar-toggle handlers AND the j/k/J/K
+   * navigation handlers — every path that changes the effective selection
+   * re-mirrors so the inactive tree never holds a stale pointer (which used
+   * to be papered over by suppressing its highlight; now we keep the trees
+   * actually in sync instead).
    */
   private mirrorSelectionToVisibleTree(): void {
     if (this.activeSelectionSource === "agents") {
-      // The agent tree owns the active selection. Mirror an agent into the
-      // newly visible Teams tree if the user just flipped to teams.
-      if (this.sidebarMode === "teams") {
-        const sel = this.agentTree.selection;
-        if (sel?.kind === "agent") {
-          // Try to find this agent in the Teams tree; on miss, drop teams
-          // selection so no stale highlight lingers from a previous mirror.
-          if (!this.teamsTree.selectMemberByAgentId(sel.agent.id)) {
-            this.teamsTree.deselect();
-          }
-        } else {
-          // Repo header, system coordinator, or null — nothing to mirror.
+      // Agents tree owns the active selection; mirror into the Teams tree.
+      const sel = this.agentTree.selection;
+      if (sel?.kind === "agent") {
+        if (!this.teamsTree.selectMemberByAgentId(sel.agent.id)) {
           this.teamsTree.deselect();
         }
+      } else {
+        // Repo header, system coordinator, or null — no Teams counterpart.
+        this.teamsTree.deselect();
       }
-      // sidebarMode === "agents": the agent tree already holds its selection
-      // (untouched by visibility toggles). Nothing to do.
       return;
     }
     // activeSelectionSource === "teams" — Teams tree owns selection.
-    if (this.sidebarMode === "agents") {
-      const sel = this.teamsTree.selection;
-      if (sel?.kind === "agent") {
-        // A team-member (an agent) is the active selection — mirror it into
-        // the Agents tree so the user sees the same agent highlighted.
-        if (!this.agentTree.selectAgentById(sel.agent.id)) {
-          this.agentTree.deselect();
-        }
-      } else {
-        // Team anchor or null — no agent to mirror in the Agents tree.
+    const sel = this.teamsTree.selection;
+    if (sel?.kind === "agent") {
+      if (!this.agentTree.selectAgentById(sel.agent.id)) {
         this.agentTree.deselect();
       }
+    } else {
+      // Team anchor or null — no Agents counterpart.
+      this.agentTree.deselect();
     }
-    // sidebarMode === "teams": the teams tree already holds its selection.
   }
 
   /**
@@ -2134,7 +2137,7 @@ export class DashboardComponent implements Component {
       if (focus === "agent-tree" || focus === "repo-coordinator") {
         this.focusManager.setFocus("teams-tree");
       }
-      this.mirrorSelectionToVisibleTree();
+      // syncSelectedAgent() runs the inactive-tree mirror at its top.
       this.syncSelectedAgent();
       this.tui?.requestRender();
       return;
@@ -2145,7 +2148,7 @@ export class DashboardComponent implements Component {
       if (this.focusManager.current() === "teams-tree") {
         this.focusManager.setFocus("agent-tree");
       }
-      this.mirrorSelectionToVisibleTree();
+      // syncSelectedAgent() runs the inactive-tree mirror at its top.
       this.syncSelectedAgent();
       this.tui?.requestRender();
       return;
@@ -2319,17 +2322,19 @@ export class DashboardComponent implements Component {
     else if (data === "l") { agentActions.handleScrollDown(this); }
     // Agent/repo actions — context-sensitive on whether a repo header is selected
     else if (data === "x") {
-      // §17.3 disband-team: when a team ANCHOR is the GLOBAL selection
-      // (active source = teams), `x` disbands. A team MEMBER selection
-      // (kind:"agent") falls through to the agent-kill path so killing a team
-      // member from the Teams tree behaves identically to killing from the
-      // Agents tree (child-agent-indistinguishable). Phase 2 (§17.1) keys this
-      // off `activeSelectionSource` — the same source of truth as
-      // syncSelectedAgent — so the effective selection stays consistent.
+      // §17.3 manage-team: when a team ANCHOR is the GLOBAL selection
+      // (active source = teams), `x` opens the manage-team picker (disband or
+      // remove a single member, each gated by a second confirm dialog). A
+      // team MEMBER selection (kind:"agent") falls through to the agent-kill
+      // path so killing a team member from the Teams tree behaves identically
+      // to killing from the Agents tree (child-agent-indistinguishable).
+      // Phase 2 (§17.1) keys this off `activeSelectionSource` — the same
+      // source of truth as syncSelectedAgent — so the effective selection
+      // stays consistent.
       const teamsActive = this.activeSelectionSource === "teams";
       const teamSel = teamsActive ? this.teamsTree.selection : null;
       if (teamSel?.kind === "team") {
-        agentActions.handleDisbandTeam(this, teamSel.teamName);
+        agentActions.handleManageTeam(this, teamSel.teamName);
       } else if (this.agentTree.isSystemCoordinatorSelected) {
         agentActions.handleKillSystemCoordinator(this);
       } else if (!this.agentTree.selectedAgent && this.agentTree.selectedRepoHeader) {
@@ -2738,19 +2743,18 @@ export class DashboardComponent implements Component {
     this.sidebar.focusTarget = this.focusManager.current();
     // §17.1 Phase 1: sidebar visibility is a separate axis from focus.
     this.sidebar.sidebarMode = this.sidebarMode;
-    // §17.1 Phase 2: the VISIBLE tree highlights its selection only when it
-    // owns the active selection. When the visible tree is NOT the active
-    // source, its `selection` getter still points somewhere (possibly mirrored
-    // by `mirrorSelectionToVisibleTree`), but no row should render in reverse
-    // video — because the EFFECTIVE selection lives in the other tree. The
-    // tree components already honor a `suppressSelection` flag for this exact
-    // purpose; flip it on for whichever tree is visible but inactive. The
-    // QUESTIONS-mode suppression (already set by `setQuestionsFocused`) is
-    // OR'd in so neither flag clobbers the other.
-    const inactiveSourceAgents = this.activeSelectionSource !== "agents";
-    const inactiveSourceTeams = this.activeSelectionSource !== "teams";
-    this.agentTree.suppressSelection = this._questionsFocused || inactiveSourceAgents;
-    this.teamsTree.suppressSelection = inactiveSourceTeams;
+    // §17.1 Phase 2 (updated): the visible tree highlights its selection
+    // unconditionally, whether or not it owns the active source. When the
+    // user toggles sidebarMode, `mirrorSelectionToVisibleTree` already
+    // points the inactive tree at the same effective selection (or
+    // `deselect()`s it when there's no counterpart — e.g. a team anchor
+    // has no row in the Agents tree). Highlighting the mirror gives the
+    // user a clear "same agent" visual cue across both trees. The
+    // `suppressSelection` flag remains as the dimming hook for QUESTIONS
+    // mode on the Agents tree; the Teams tree has no question-focused
+    // sub-state.
+    this.agentTree.suppressSelection = this._questionsFocused;
+    this.teamsTree.suppressSelection = false;
     // In TREE mode the full tree renders in the main area, so hide the
     // sidebar tree to avoid duplication and let the info panel take all space.
     this.sidebar.hideTree = isTreeMode;

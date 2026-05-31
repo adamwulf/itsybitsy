@@ -218,13 +218,15 @@ describe("TeamsTreeComponent render", () => {
     expect(lines[0]).toContain("(0 members)");
   });
 
-  test("member row shows the repo/model token (§17.2)", () => {
+  test("member row shows <repo>/<id> name and model column (§17.2)", () => {
     const { tree } = fixture();
     const joined = tree.render(80).join("\n");
-    // a1 lives in repo "api" on model "opus".
-    expect(joined).toContain("api/opus");
+    // a1 lives in repo "api" on model "opus" — repo qualifies the id, model is its own column.
+    expect(joined).toContain("api/a1");
+    expect(joined).toContain("opus");
     // a2 lives in repo "web" on model "sonnet".
-    expect(joined).toContain("web/sonnet");
+    expect(joined).toContain("web/a2");
+    expect(joined).toContain("sonnet");
   });
 
   test("header shows the live member count badge", () => {
@@ -273,11 +275,12 @@ describe("teams-tree row formatters", () => {
     expect(row).toContain("(0 members)");
   });
 
-  test("formatTeamMemberRow includes id, state, and repo/model", () => {
+  test("formatTeamMemberRow includes <repo>/<id>, state, age, and model", () => {
     const agent = makeAgent("a1", "api", "opus", "waiting");
     const row = formatTeamMemberRow(agent, "  ", false, 80, 20);
-    expect(row).toContain("a1");
-    expect(row).toContain("api/opus");
+    expect(row).toContain("api/a1");
     expect(row).toContain("waiting");
+    // Full mode (width=80) appends the model column after age.
+    expect(row).toContain("opus");
   });
 });

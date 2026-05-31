@@ -5113,7 +5113,7 @@ describe("DashboardComponent — §17 Teams panel wiring", () => {
       expect(dashboard.channelPane.teamName).toBe("backend");
     });
 
-    test("activeSelectionSource=teams + sidebarMode=agents: agentTree.suppressSelection=true on render", () => {
+    test("active source = teams + team-anchor selected: Agents tree is deselected (no counterpart)", () => {
       Object.defineProperty(process.stdout, "rows", { value: 30, writable: true, configurable: true });
       const dashboard = makeDashboard();
       const a = makeAgent("agent-sup", "/tmp/r");
@@ -5127,9 +5127,37 @@ describe("DashboardComponent — §17 Teams panel wiring", () => {
       dashboard.teamsTree.navigate(1);
       dashboard.syncSelectedAgent();
       dashboard.render(160);
-      // The visible (Agents) tree should NOT render its selection highlighted
-      // because the active source lives in the (invisible) Teams tree.
-      expect(dashboard.agentTree.suppressSelection).toBe(true);
+      // A team anchor has no Agents-tree counterpart, so the inactive Agents
+      // tree is deselected by the mirror — no highlight regardless of
+      // suppressSelection (which is now only used for QUESTIONS dimming).
+      expect(dashboard.agentTree.selection).toBeNull();
+      expect(dashboard.agentTree.suppressSelection).toBe(false);
+    });
+
+    test("active source = teams + member-agent selected that also lives in Agents tree: BOTH trees highlight", () => {
+      Object.defineProperty(process.stdout, "rows", { value: 30, writable: true, configurable: true });
+      const dashboard = makeDashboard();
+      const a = makeAgent("agent-shared", "/tmp/r");
+      dashboard.agentTree.setFlatList([makeFlatAgent(a)]);
+      dashboard.teamsTree.setFlatList([
+        { kind: "team-header", teamName: "t1", memberCount: 1, createdEpoch: 1, createdBy: "@system" },
+        { kind: "team-member", teamName: "t1", agent: a, connector: "  " },
+      ]);
+      // Active source = teams, select the team member.
+      dashboard.activeSelectionSource = "teams";
+      dashboard.teamsTree.navigate(1); // team header
+      dashboard.teamsTree.navigate(1); // member
+      dashboard.syncSelectedAgent();
+      dashboard.render(160);
+      // BOTH trees should now point at the same agent (mirror selected it in
+      // the Agents tree) and neither should be suppressed.
+      expect(dashboard.agentTree.selection?.kind).toBe("agent");
+      if (dashboard.agentTree.selection?.kind === "agent") {
+        expect(dashboard.agentTree.selection.agent.id).toBe("agent-shared");
+      }
+      expect(dashboard.teamsTree.selection?.kind).toBe("agent");
+      expect(dashboard.agentTree.suppressSelection).toBe(false);
+      expect(dashboard.teamsTree.suppressSelection).toBe(false);
     });
 
     test("sidebarMode=activeSelectionSource: visible tree highlights normally", () => {
@@ -5166,10 +5194,12 @@ describe("DashboardComponent — §17 Teams panel wiring", () => {
       dashboard.handleInput("j"); // navigate teams; activeSelectionSource -> teams
 
       expect(dashboard.activeSelectionSource).toBe("teams");
-      // The Agents tree's coord pointer is intentionally untouched — the bug
-      // was that the RENDER path checked the raw agent-tree property instead
-      // of gating on the active source.
-      expect(dashboard.agentTree.isSystemCoordinatorSelected).toBe(true);
+      // §17.1 Phase 2 (refined mirror): selecting a team anchor triggers
+      // `mirrorSelectionToVisibleTree` which `deselect()`s the inactive
+      // Agents tree, clearing the coord pointer too. The render path's
+      // active-source gating still belt-and-suspenders the team view, but
+      // there is no stale coord pointer left to mishandle.
+      expect(dashboard.agentTree.isSystemCoordinatorSelected).toBe(false);
 
       // syncSelectedAgent already routes correctly — verify and pin.
       expect(dashboard.channelPane.teamName).toBe("backend");
@@ -5196,14 +5226,15 @@ describe("DashboardComponent — §17 Teams panel wiring", () => {
         expect(dashboard.coordinatorPollerRunning).toBe(true);
 
         // 2. Flip to teams panel, navigate to a team — active source flips,
-        //    but the Agents tree still has the coord pointer.
+        //    and the mirror clears the Agents tree's coord pointer (team
+        //    anchors have no Agents-tree counterpart).
         dashboard.teamsTree.setFlatList([
           { kind: "team-header", teamName: "backend", memberCount: 0, createdEpoch: 1, createdBy: "@system" },
         ]);
         dashboard.handleInput("0");
         dashboard.handleInput("j");
         expect(dashboard.activeSelectionSource).toBe("teams");
-        expect(dashboard.agentTree.isSystemCoordinatorSelected).toBe(true);
+        expect(dashboard.agentTree.isSystemCoordinatorSelected).toBe(false);
 
         // Coordinator pane is no longer rendered — poller must pause.
         expect(dashboard.coordinatorPollerRunning).toBe(false);

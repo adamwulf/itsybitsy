@@ -17,7 +17,7 @@ import {
   getDiffToolLaunching, setDiffToolLaunching,
   handleAddPermission, addPermissionToSettings, agentSettingsLocalPath,
   getCoordinatorSpawnsInFlight, clearCoordinatorSpawnsInFlight,
-  handleCreateTeam, handleAddAgentToTeam, handleDisbandTeam,
+  handleCreateTeam, handleAddAgentToTeam, handleDisbandTeam, handleManageTeam,
 } from "./agent-actions";
 import { setCoordinatorHome, resetCoordinatorHome } from "../coordinator";
 import { readTeams, createTeam, addMember, deleteTeam } from "../teams";
@@ -72,6 +72,10 @@ function makeMockCtx(overrides?: {
   teamsSelection?: import("./selection").Selection;
   /** §17: teamSend stub override. */
   teamSend?: ActionCtx["teamSend"];
+  /** §17.3 manage-team: lastAgents on the watcher handle, used by handlers
+   *  that look up live Agent records by id (e.g. handleManageTeam for the
+   *  <repo>/<id> member labels). Defaults to []. */
+  lastAgents?: Agent[];
 }): {
   ctx: ActionCtx;
   dialogs: NonNullable<DialogState>[];
@@ -182,7 +186,7 @@ function makeMockCtx(overrides?: {
     },
     tui: { requestRender: () => {} },
     repos: overrides?.repos ?? [],
-    watcher: { refresh: () => refreshCalls.push(1), updateRepos: () => {}, recheckHealth: () => {}, lastAgents: [] },
+    watcher: { refresh: () => refreshCalls.push(1), updateRepos: () => {}, recheckHealth: () => {}, lastAgents: overrides?.lastAgents ?? [] },
     diffTool: undefined,
     pendingSelectNewestInRepo: null,
     showDialog: (d: NonNullable<DialogState>) => { dialogs.push(d); },
@@ -1536,5 +1540,169 @@ describe("handleDisbandTeam", () => {
     // Notice reports the vanished-mid-flight state rather than success — the
     // teamDelete wrapper returned ok:false so we don't claim a successful disband.
     expect(notices.some((n) => n.includes("no longer exists"))).toBe(true);
+  });
+});
+
+// --- handleManageTeam (§17.3 manage-team picker — x-on-team-anchor) ---------
+//
+// The picker shows a `select` dialog whose first option disbands the team and
+// whose remaining options remove a single member each. Each destructive choice
+// is gated by a second confirm dialog before any state change. Member labels
+// are `<repo>/<id>` when the member's live Agent record is resolvable, or the
+// bare id otherwise (no Agents record yet, e.g. for a recently-added member).
+
+function mkAgent(id: string, repoName: string): Agent {
+  return {
+    id,
+    repoPath: `/repos/${repoName}/${id}`,
+    repoName,
+    meta: {
+      id,
+      session_id: `sess-${id}`,
+      tmux_session: `ittybitty-${repoName}-${id}`,
+      prompt: `Task for ${id}`,
+      manager: null,
+      created: "2025-01-01T00:00:00Z",
+      created_epoch: 1735689600,
+      worktree: true,
+      worker: false,
+      yolo: false,
+      model: "sonnet",
+      claude_pid: "12345",
+    },
+    state: "running",
+    age: "5m",
+    archived: false,
+    children: [],
+  };
+}
+
+describe("handleManageTeam", () => {
+  let fx: Awaited<ReturnType<typeof setupTeamsFixture>>;
+
+  beforeEach(async () => { fx = await setupTeamsFixture(); });
+  afterEach(async () => { await teardownTeamsFixture(fx); });
+
+  test("opens a select dialog with Disband first then one Remove row per member", async () => {
+    await createTeam("backend", "user", 1700000000);
+    await addMember("backend", "agent-aaa");
+    await addMember("backend", "agent-bbb");
+    const lastAgents = [mkAgent("agent-aaa", "api"), mkAgent("agent-bbb", "web")];
+    const { ctx, dialogs, flushActions } = makeMockCtx({ repos: [fx.repoEntry], lastAgents });
+    handleManageTeam(ctx, "backend");
+    await flushActions();
+    const d = assertDialog(dialogs[0]!, "select");
+    expect(d.prompt).toContain("Manage team @backend");
+    // Order: Disband, then members in roster order.
+    expect(d.items[0]).toBe("Disband team @backend");
+    expect(d.items[1]).toBe("Remove api/agent-aaa");
+    expect(d.items[2]).toBe("Remove web/agent-bbb");
+    expect(d.items.length).toBe(3);
+  });
+
+  test("a member with no live Agent record falls back to the bare id label", async () => {
+    await createTeam("backend", "user", 1700000000);
+    await addMember("backend", "agent-aaa");
+    await addMember("backend", "agent-ghost"); // not in lastAgents
+    const lastAgents = [mkAgent("agent-aaa", "api")];
+    const { ctx, dialogs, flushActions } = makeMockCtx({ repos: [fx.repoEntry], lastAgents });
+    handleManageTeam(ctx, "backend");
+    await flushActions();
+    const d = assertDialog(dialogs[0]!, "select");
+    // Resolvable member is repo-qualified; unresolvable falls back to bare id.
+    expect(d.items[1]).toBe("Remove api/agent-aaa");
+    expect(d.items[2]).toBe("Remove agent-ghost");
+  });
+
+  test("an empty team still opens the dialog with only the Disband option", async () => {
+    await createTeam("backend", "user", 1700000000);
+    const { ctx, dialogs, flushActions } = makeMockCtx({ repos: [fx.repoEntry] });
+    handleManageTeam(ctx, "backend");
+    await flushActions();
+    const d = assertDialog(dialogs[0]!, "select");
+    expect(d.items).toEqual(["Disband team @backend"]);
+  });
+
+  test("picking index 0 falls through to handleDisbandTeam's confirm dialog", async () => {
+    await createTeam("backend", "user", 1700000000);
+    await addMember("backend", "agent-aaa");
+    const lastAgents = [mkAgent("agent-aaa", "api")];
+    const { ctx, dialogs, flushActions } = makeMockCtx({ repos: [fx.repoEntry], lastAgents });
+    handleManageTeam(ctx, "backend");
+    await flushActions();
+    const picker = assertDialog(dialogs[0]!, "select");
+    picker.onSelect(0); // Disband
+    // The disband confirm dialog is now the next-pushed dialog.
+    const confirm = assertDialog(dialogs[1]!, "confirm");
+    expect(confirm.prompt).toContain("Disband team @backend");
+    expect(confirm.confirmLabel).toBe("Disband");
+  });
+
+  test("picking a Remove row opens a confirm dialog with the labelled member", async () => {
+    await createTeam("backend", "user", 1700000000);
+    await addMember("backend", "agent-aaa");
+    await addMember("backend", "agent-bbb");
+    const lastAgents = [mkAgent("agent-aaa", "api"), mkAgent("agent-bbb", "web")];
+    const { ctx, dialogs, flushActions } = makeMockCtx({ repos: [fx.repoEntry], lastAgents });
+    handleManageTeam(ctx, "backend");
+    await flushActions();
+    const picker = assertDialog(dialogs[0]!, "select");
+    picker.onSelect(2); // Remove web/agent-bbb
+    const confirm = assertDialog(dialogs[1]!, "confirm");
+    expect(confirm.prompt).toContain("Remove web/agent-bbb from @backend");
+    expect(confirm.confirmLabel).toBe("Remove");
+    expect(confirm.focusedButton).toBe("cancel");
+  });
+
+  test("confirming Remove calls teamRemove which prunes the roster + fires the leave notice", async () => {
+    // teamRemove resolves the member id via readAllAgents, so we plant real
+    // agent dirs on disk for both members. The live `lastAgents` is unrelated
+    // (it only drives the picker's label format) but we keep it consistent
+    // with the planted dirs.
+    await plantTestAgent(fx.repoDir, "agent-aaa");
+    await plantTestAgent(fx.repoDir, "agent-bbb");
+    await createTeam("backend", "user", 1700000000);
+    await addMember("backend", "agent-aaa");
+    await addMember("backend", "agent-bbb");
+    const lastAgents = [mkAgent("agent-aaa", "api"), mkAgent("agent-bbb", "web")];
+    const { ctx, dialogs, notices, flushActions } = makeMockCtx({ repos: [fx.repoEntry], lastAgents });
+    handleManageTeam(ctx, "backend");
+    await flushActions();
+    const picker = assertDialog(dialogs[0]!, "select");
+    picker.onSelect(2); // Remove agent-bbb
+    const confirm = assertDialog(dialogs[1]!, "confirm");
+    confirm.onYes();
+    await flushActions();
+    // The persist step ran (member is gone from the roster); teamRemove is the
+    // CLI wrapper that also fires the leave notice (§16.4.2 — best-effort, may
+    // be a no-op in this fixture if the recipient agent has no live tmux pane,
+    // which is fine: the registry update is the visible state change).
+    const reg = await readTeams();
+    expect(reg.teams["backend"]!.members).toEqual(["agent-aaa"]);
+    expect(notices.some((n) => n.includes("Removed") && n.includes("backend"))).toBe(true);
+  });
+
+  test("cancelling the Remove confirm leaves the roster intact", async () => {
+    await plantTestAgent(fx.repoDir, "agent-aaa");
+    await createTeam("backend", "user", 1700000000);
+    await addMember("backend", "agent-aaa");
+    const lastAgents = [mkAgent("agent-aaa", "api")];
+    const { ctx, dialogs, flushActions } = makeMockCtx({ repos: [fx.repoEntry], lastAgents });
+    handleManageTeam(ctx, "backend");
+    await flushActions();
+    const picker = assertDialog(dialogs[0]!, "select");
+    picker.onSelect(1); // Remove agent-aaa
+    // Don't call onYes — just leave the confirm open. The roster is unchanged.
+    await flushActions();
+    const reg = await readTeams();
+    expect(reg.teams["backend"]!.members).toEqual(["agent-aaa"]);
+  });
+
+  test("a team that does not exist sets a notice and does NOT open a dialog", async () => {
+    const { ctx, dialogs, notices, flushActions } = makeMockCtx({ repos: [fx.repoEntry] });
+    handleManageTeam(ctx, "ghost");
+    await flushActions();
+    expect(dialogs).toHaveLength(0);
+    expect(notices.some((n) => n.includes("team @ghost no longer exists"))).toBe(true);
   });
 });

@@ -156,10 +156,14 @@ log "Codex PID: $CLAUDE_PID (setsid=$SETSID)"
 trap 'log "script received SIGTERM; sending SIGTERM to Codex PID=$CLAUDE_PID"; kill $CLAUDE_PID 2>/dev/null' TERM
 trap 'log "script received SIGINT; sending SIGINT to Codex PID=$CLAUDE_PID"; kill -INT $CLAUDE_PID 2>/dev/null' INT
 
-# Store PID in meta.json
+# Store PID in meta.json — route through "ib write-pid" which uses
+# mutateAgentMeta + the meta-lock so the write does not lose a concurrent
+# codex SessionStart write of codex_session_id (HIGH 2 from the Phase 4
+# review). The absolute ib path is used because codex's PATH may not match
+# the spawn shell's.
 META_JSON=${qStartMetaJson}
 if [[ -f "$META_JSON" ]]; then
-    bun -e "const f=process.argv[1];const m=JSON.parse(require('fs').readFileSync(f,'utf8'));m.claude_pid=String(process.argv[2]);require('fs').writeFileSync(f,JSON.stringify(m,null,2))" "$META_JSON" "$CLAUDE_PID"
+    ${shellQuote(input.ibBinaryPath)} write-pid ${shellQuote(input.agentId)} "$CLAUDE_PID" || log "write-pid failed (exit=$?); meta.json claude_pid not set"
 fi
 
 # Wait for codex to complete

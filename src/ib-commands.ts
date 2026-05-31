@@ -848,10 +848,11 @@ log "Claude PID: $CLAUDE_PID (setsid=$SETSID)"
 trap 'log "script received SIGTERM; sending SIGTERM to Claude PID=$CLAUDE_PID"; kill $CLAUDE_PID 2>/dev/null' TERM
 trap 'log "script received SIGINT; sending SIGINT to Claude PID=$CLAUDE_PID"; kill -INT $CLAUDE_PID 2>/dev/null' INT
 
-# Store PID in meta.json
+# Store PID in meta.json — route through "ib write-pid" which uses
+# mutateAgentMeta + the meta-lock (HIGH 2 from the Phase 4 review).
 META_JSON=${qMetaJson}
 if [[ -f "$META_JSON" ]]; then
-    bun -e "const f=process.argv[1];const m=JSON.parse(require('fs').readFileSync(f,'utf8'));m.claude_pid=String(process.argv[2]);require('fs').writeFileSync(f,JSON.stringify(m,null,2))" "$META_JSON" "$CLAUDE_PID"
+    ib write-pid ${shellQuote(agent.id)} "$CLAUDE_PID" || log "write-pid failed (exit=$?); meta.json claude_pid not set"
 fi
 
 # Wait for Claude to complete
@@ -3936,10 +3937,15 @@ log "Claude PID: $CLAUDE_PID (setsid=$SETSID)"
 trap 'log "script received SIGTERM; sending SIGTERM to Claude PID=$CLAUDE_PID"; kill $CLAUDE_PID 2>/dev/null' TERM
 trap 'log "script received SIGINT; sending SIGINT to Claude PID=$CLAUDE_PID"; kill -INT $CLAUDE_PID 2>/dev/null' INT
 
-# Store PID in meta.json
+# Store PID in meta.json — route through "ib write-pid" which uses
+# mutateAgentMeta + the meta-lock so the write does not lose a concurrent
+# mutation (e.g. the watchdog setting watchdog_pid). The naive inline
+# bun -e read-modify-write it replaces had a real lost-write race window
+# whose symptom is benign on claude today but matters symmetrically with
+# the codex side (HIGH 2 from the Phase 4 review).
 META_JSON=${qStartMetaJson}
 if [[ -f "$META_JSON" ]]; then
-    bun -e "const f=process.argv[1];const m=JSON.parse(require('fs').readFileSync(f,'utf8'));m.claude_pid=String(process.argv[2]);require('fs').writeFileSync(f,JSON.stringify(m,null,2))" "$META_JSON" "$CLAUDE_PID"
+    ib write-pid ${shellQuote(id)} "$CLAUDE_PID" || log "write-pid failed (exit=$?); meta.json claude_pid not set"
 fi
 
 # Wait for Claude to complete

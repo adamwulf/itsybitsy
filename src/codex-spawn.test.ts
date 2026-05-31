@@ -65,8 +65,12 @@ describe("buildCodexStartContent — launch line", () => {
   test("captures the PID into CLAUDE_PID (kept for back-compat with the watchdog)", () => {
     const content = buildCodexStartContent(baseInput());
     expect(content).toContain("CLAUDE_PID=$!");
-    // The meta.json write also uses m.claude_pid (back-compat).
-    expect(content).toContain("m.claude_pid=String(process.argv[2])");
+    // The meta.json write routes through `ib write-pid` (HIGH 2 fix from
+    // the Phase 4 review) so the claude_pid write does not race with
+    // concurrent codex SessionStart meta mutations.
+    expect(content).toContain(`'/usr/local/bin/ib' write-pid 'agent-abc12345' "$CLAUDE_PID"`);
+    // Must NOT use the old race-prone inline read-modify-write.
+    expect(content).not.toContain("m.claude_pid=String(process.argv[2])");
   });
 
   test("includes the SIGHUP-ignore trap (mirrors the claude start.sh insulation)", () => {

@@ -1223,6 +1223,30 @@ describe("mutateAgentMeta — concurrent RMW (codex SessionStart vs PreToolUse r
     expect(finalMeta.codex_session_id).toBe("rollout-tmp");
     expect(finalMeta.tag).toBe("x");
   });
+
+  // HIGH 2 from Phase 4 review: simulate the race the new `ib write-pid`
+  // subcommand prevents. The inline `bun -e readFileSync...writeFileSync`
+  // in the OLD start.sh had a read-then-write window the codex SessionStart
+  // hook could fall inside, losing codex_session_id. Replacing the inline
+  // write with `ib write-pid` (which routes through mutateAgentMeta) closes
+  // the race. This test asserts the equivalent mutator pattern is safe.
+  test("HIGH 2: concurrent claude_pid write + codex_session_id write both land", async () => {
+    const metaPath = join(tempDir, "meta.json");
+    await Bun.write(metaPath, JSON.stringify({ id: "agent-codex01", model: "codex:gpt-5.4-mini" }));
+
+    // Race the equivalent of: start.sh writing claude_pid via
+    // `ib write-pid`, and codex SessionStart writing codex_session_id.
+    // Both must land in the final file — neither is lost.
+    await Promise.all([
+      mutateAgentMeta(tempDir, (m) => { m.claude_pid = "12345"; }),
+      mutateAgentMeta(tempDir, (m) => { m.codex_session_id = "rollout-bbb"; }),
+    ]);
+
+    const meta = await Bun.file(metaPath).json();
+    expect(meta.id).toBe("agent-codex01");
+    expect(meta.claude_pid).toBe("12345");
+    expect(meta.codex_session_id).toBe("rollout-bbb");
+  });
 });
 
 describe("isCompacting", () => {

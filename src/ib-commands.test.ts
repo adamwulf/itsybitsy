@@ -1784,14 +1784,17 @@ describe("resumeAgent (native)", () => {
     const resumeScript = await Bun.file(join(agentDir, "resume.sh")).text();
     // No PATH export — ib is already on the user's PATH
     expect(resumeScript).not.toContain("export PATH");
-    // meta.json should be passed as process.argv, not embedded in JS
+    // meta.json should be passed via `ib write-pid` which routes through
+    // mutateAgentMeta (HIGH 2 fix from the Phase 4 review).
     expect(resumeScript).toContain(`META_JSON='${join(agentDir, "meta.json")}'`);
-    expect(resumeScript).toContain('bun -e "const f=process.argv[1]');
-    expect(resumeScript).toContain('"$META_JSON" "$CLAUDE_PID"');
+    expect(resumeScript).toContain("ib write-pid 'agent-abc' \"$CLAUDE_PID\"");
     // exit-check.sh should be single-quoted
     expect(resumeScript).toContain(`'${join(agentDir, "exit-check.sh")}'`);
     // Should NOT have old pattern of embedding path in JS string
     expect(resumeScript).not.toContain("const f='/");
+    // Should NOT use the race-prone inline bun -e read-modify-write.
+    expect(resumeScript).not.toContain("m.claude_pid=String(process.argv[2])");
+    expect(resumeScript).not.toContain("bun -e \"const f=");
   });
 
   test("spawns watchdog for top-level agents (no manager)", async () => {
@@ -4402,21 +4405,29 @@ describe("newAgent (native)", () => {
     // prompt.txt path should be single-quoted
     const agentDir = join(agentsDir, "test-quotes");
     expect(startSh).toContain(`$(cat '${join(agentDir, "prompt.txt")}')`);
-    // meta.json should be passed as argument, not embedded in JS
+    // meta.json should be passed as argument to `ib write-pid`, not
+    // embedded in inline JS (HIGH 2 fix — see Phase 4 review).
     expect(startSh).toContain(`META_JSON='${join(agentDir, "meta.json")}'`);
-    expect(startSh).toContain('bun -e "const f=process.argv[1]');
-    expect(startSh).toContain('"$META_JSON" "$CLAUDE_PID"');
+    expect(startSh).toContain("ib write-pid 'test-quotes' \"$CLAUDE_PID\"");
     // exit-check.sh should be single-quoted
     expect(startSh).toContain(`'${join(agentDir, "exit-check.sh")}'`);
   });
 
-  test("start.sh does not embed paths directly in JS code", async () => {
+  test("start.sh does not embed paths directly in JS code (HIGH 2 — no inline bun -e)", async () => {
     setNewAgentSpawnRunner(mockSpawnRunner());
     await callNewAgent("do work", { name: "test-no-embed" });
 
     const startSh = await Bun.file(join(agentsDir, "test-no-embed", "start.sh")).text();
     // Should NOT have the old pattern of embedding path in JS string
     expect(startSh).not.toContain("const f='/" );
+    // Should NOT use the race-prone inline bun -e read-modify-write
+    // — replaced with `ib write-pid` for meta-lock safety. The bare-text
+    // "bun -e" may appear in a script comment; the executable form
+    // includes the JS payload.
+    expect(startSh).not.toContain("m.claude_pid=String(process.argv[2])");
+    expect(startSh).not.toContain("bun -e \"const f=");
+    // Positive: uses `ib write-pid` instead.
+    expect(startSh).toContain("ib write-pid 'test-no-embed'");
   });
 
   test("spawns watchdog for top-level agents (no manager)", async () => {

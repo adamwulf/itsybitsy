@@ -16,7 +16,7 @@ import {
   acknowledgeQuestion, hooksStatus, interceptHooksStatus,
   installSafetyHooks, uninstallSafetyHooks,
   installInterceptHook, uninstallInterceptHook,
-  teamCreate, teamAdd,
+  teamCreate, teamAdd, teamDelete,
 } from "../ib-commands";
 import type { NewAgentOptions, IbCommandResult } from "../ib-commands";
 import { captureTmuxOutput, resizeTmuxWindow, killTmuxSession, sendTmuxEscape } from "../tmux-poller";
@@ -38,7 +38,7 @@ import type { RepoHealthReport } from "../health-check";
 import { getResolvableWarnings, resolveHealthWarnings } from "../health-check";
 import { IB_COORDINATOR_SESSION, sanitizeTmuxInput, restartSystemCoordinator, checkCoordinatorExists, getLastCoordinatorSpawnMode, discardSystemCoordinator } from "../coordinator";
 import { isValidToolList } from "../validation";
-import { listTeams, getTeam, deleteTeam } from "../teams";
+import { listTeams, getTeam } from "../teams";
 
 const SCROLL_STEP = 10;
 
@@ -719,8 +719,15 @@ function runAddMember(ctx: ActionCtx, agent: Agent, teamName: string) {
  * 'x' on a TEAM anchor in the Teams panel — disband the team. Shows a confirm
  * dialog; on confirm, fans out a closure notice via `teamSend` (so members get
  * the same delivery prefix/audit treatment as any other team broadcast), then
- * deletes the team from the registry. Order matters: the fan-out reads the
- * roster from `teams.json`, so it MUST happen before the delete.
+ * deletes the team via the `teamDelete` CLI wrapper. Order matters: the fan-out
+ * reads the roster from `teams.json`, so it MUST happen before the delete.
+ *
+ * Uses the `teamDelete` CLI wrapper (not the bare `deleteTeam` registry
+ * primitive) so the registry delete + channel/log cleanup (§17.4 cleanup
+ * default) match `ib team delete` exactly — a later `ib team create` of the
+ * same name starts with a clean channel rather than inheriting the disbanded
+ * predecessor's history (including the closure notice teamSend just appended
+ * to the channel file).
  *
  * Selection of a team MEMBER (kind:"agent") is intentionally NOT routed here —
  * the dashboard's selection-sync makes a team-member look just like an Agents-
@@ -747,11 +754,14 @@ export function handleDisbandTeam(ctx: ActionCtx, teamName: string) {
         // `teams.json` under its own lock and would find an empty roster (or
         // a not-found error) if we deleted first. The `live` list is a hint
         // set; `teamSend`'s lazy-prune resolves the canonical recipients.
+        // opts is left undefined to match the 's'-key team-send call shape —
+        // resolveTeamSenderId tags a falsy fromAgent with the configured
+        // user.name (the CLI/human send path).
         const live = ctx.watcher?.lastAgents ?? [];
-        const sendResult = await ctx.teamSend(teamName, live, closureMessage, { fromAgent: "" });
-        const deleted = await deleteTeam(teamName);
-        if (!deleted) {
-          // Team vanished between getTeam and deleteTeam — race with another
+        const sendResult = await ctx.teamSend(teamName, live, closureMessage, undefined);
+        const deleteResult = await teamDelete(teamName);
+        if (!deleteResult.ok) {
+          // Team vanished between getTeam and teamDelete — race with another
           // mutator. The fan-out already ran against the live roster, so just
           // surface the unusual state.
           ctx.setNotice(`team @${teamName} no longer exists`);

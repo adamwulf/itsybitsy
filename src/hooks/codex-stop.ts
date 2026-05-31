@@ -74,10 +74,32 @@ export function deriveCodexStopState(lastAssistantMessage?: string): MetaState {
 export interface CodexStopDeps {
   rawStdin?: string;
   agentDirOverride?: string;
+  /** Override git status for tests. */
+  checkGitStatus?: () => Promise<string>;
   /** Skip mutating meta.json on disk (used by the dry-run path). */
   skipMetaWrites?: boolean;
   /** Optional stdout writer override (used by dry-run to capture output). */
   write?: (chunk: string) => unknown;
+}
+
+function buildStopSystemMessage(message: string): string {
+  return JSON.stringify({ systemMessage: message });
+}
+
+async function readGitPorcelain(agentDir: string, deps?: CodexStopDeps): Promise<string> {
+  if (deps?.checkGitStatus) return deps.checkGitStatus();
+  try {
+    const repoDir = join(agentDir, "repo");
+    const proc = Bun.spawn(
+      ["git", "-C", repoDir, "status", "--porcelain"],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    const porcelain = await new Response(proc.stdout).text();
+    await proc.exited;
+    return porcelain;
+  } catch {
+    return "";
+  }
 }
 
 export async function hookCodexStop(agentId: string, deps?: CodexStopDeps): Promise<void> {
@@ -108,6 +130,19 @@ export async function hookCodexStop(agentId: string, deps?: CodexStopDeps): Prom
     const state = deriveCodexStopState(lastMessage);
     if (!deps?.skipMetaWrites) {
       await writeAgentState(agentDir, state);
+    }
+
+    if (state === "complete") {
+      const porcelain = await readGitPorcelain(agentDir, deps);
+      if (porcelain.trim() !== "") {
+        if (!deps?.skipMetaWrites) {
+          await writeAgentState(agentDir, "running");
+        }
+        write(buildStopSystemMessage(
+          "[watchdog]: You have uncommitted changes. Please commit your work using git add && git commit before completing.",
+        ));
+        return;
+      }
     }
 
     emitNoop(write);

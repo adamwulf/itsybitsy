@@ -145,6 +145,10 @@ function makeMockCtx(overrides?: {
       scrollUp: () => {},
       scrollDown: () => {},
     },
+    teamLogPane: {
+      scrollUp: () => {},
+      scrollDown: () => {},
+    },
     systemDashboard: {
       scrollUp: () => {},
       scrollDown: () => {},

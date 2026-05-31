@@ -45,6 +45,7 @@ import { getStateColors, setupColorSchemeDetection } from "./color-scheme";
 import { AgentTreeComponent } from "./agent-tree";
 import { TeamsTreeComponent, flattenTeamsTree } from "./teams-tree";
 import { ChannelPaneComponent } from "./channel-pane";
+import { TeamLogPaneComponent } from "./team-log-pane";
 import { SidebarComponent, SIDEBAR_WIDTH, computeSidebarHeights, clampSidebarOffsets } from "./sidebar";
 import { InfoPanelComponent } from "./info-panel";
 import { listTeams, getTeam } from "../teams";
@@ -578,6 +579,12 @@ export class DashboardComponent implements Component {
    * the chat current while the team stays selected.
    */
   channelPane: ChannelPaneComponent;
+  /**
+   * Team log pane — the right-side companion to `channelPane` in the Teams
+   * view. Renders `<team>.log` (lifecycle/audit) while the chat box renders
+   * `<team>.channel.jsonl`. Refreshed on the same tick as `channelPane`.
+   */
+  teamLogPane: TeamLogPaneComponent;
   rightPane: RightPaneComponent;
   tmuxPane: TmuxPaneComponent;
   splitPane: SplitPane;
@@ -757,6 +764,7 @@ export class DashboardComponent implements Component {
     this.agentTree = new AgentTreeComponent();
     this.teamsTree = new TeamsTreeComponent();
     this.channelPane = new ChannelPaneComponent();
+    this.teamLogPane = new TeamLogPaneComponent();
     this.rightPane = new RightPaneComponent();
     this.tmuxPane = new TmuxPaneComponent();
     this.infoPanel = new InfoPanelComponent();
@@ -1352,10 +1360,13 @@ export class DashboardComponent implements Component {
     if (teamAnchor) {
       const previousTeam = this.channelPane.teamName;
       this.channelPane.teamName = teamAnchor;
+      this.teamLogPane.teamName = teamAnchor;
       if (previousTeam !== teamAnchor) {
         this.channelPane.resetForTeam();
+        this.teamLogPane.resetForTeam();
         // Fire an immediate channel refresh so the chat box appears instantly
         // on selection rather than waiting up to one channelRefreshTimer tick.
+        // The same refresh tick reloads the team log via refreshChannel().
         void this.refreshChannel();
       }
       // Async fetch the Team record for the info panel. Fire-and-forget so the
@@ -1365,6 +1376,7 @@ export class DashboardComponent implements Component {
     } else {
       this.infoPanel.selectedTeam = null;
       this.channelPane.teamName = null;
+      this.teamLogPane.teamName = null;
     }
 
     // Wire default-agent-type
@@ -1618,7 +1630,11 @@ export class DashboardComponent implements Component {
     const teamName = this.channelPane.teamName;
     if (!teamName) return;
     try {
-      await this.channelPane.load();
+      // Load chat + log in parallel — both feed the side-by-side Teams view.
+      await Promise.all([
+        this.channelPane.load(),
+        this.teamLogPane.load(),
+      ]);
     } catch {
       return;
     }
@@ -2074,9 +2090,14 @@ export class DashboardComponent implements Component {
         this.tui?.requestRender();
       }
     }
-    // Right pane cycling
+    // Right pane cycling. Suppressed entirely when the Teams panel is focused
+    // and a team is selected — the team view fixes the right pane to the team
+    // log, and cycling here would silently mutate the underlying right-pane
+    // mode that re-appears on a return to the Agents panel.
     else if (data === "p" || matchesKey(data, Key.left)) {
-      if (this.agentTree.isSystemCoordinatorSelected) {
+      if (this.focusManager.current() === "teams-tree" && this.channelPane.teamName !== null) {
+        // no-op in teams view
+      } else if (this.agentTree.isSystemCoordinatorSelected) {
         this.coordinatorViewMode = this.coordinatorViewMode === "TMUX" ? "DASHBOARD" : "TMUX";
         // Switching to DASHBOARD hides the coordinator tmux output; switching
         // back to TMUX shows it again. Pause/resume the poller to match.
@@ -2086,7 +2107,9 @@ export class DashboardComponent implements Component {
       }
       this.tui?.requestRender();
     } else if (data === "n" || matchesKey(data, Key.right)) {
-      if (this.agentTree.isSystemCoordinatorSelected) {
+      if (this.focusManager.current() === "teams-tree" && this.channelPane.teamName !== null) {
+        // no-op in teams view (see "p" branch above)
+      } else if (this.agentTree.isSystemCoordinatorSelected) {
         this.coordinatorViewMode = this.coordinatorViewMode === "TMUX" ? "DASHBOARD" : "TMUX";
         this.updatePollerVisibility();
       } else {
@@ -2338,31 +2361,65 @@ export class DashboardComponent implements Component {
     // Build main area title separator (agent-id left, pane-mode right).
     // Pass leftPaneWidth so the junction lines up with the SplitPane's seam.
     const leftPaneW = getLiveLeftPaneWidth(renderLayout);
+    const teamsFocusedForTitle = this.focusManager.current() === "teams-tree";
+    const teamSelectedForTitle =
+      teamsFocusedForTitle && !isCoordinatorView && this.channelPane.teamName !== null;
     const mainTitleSep = isCoordinatorView
       ? this.buildCoordinatorTitleSeparator(mainWidth)
-      : this.buildMainTitleSeparator(mainWidth, leftPaneW, isTreeMode, isFullWidth);
+      : teamSelectedForTitle
+        ? this.buildTeamTitleSeparator(mainWidth, leftPaneW, this.channelPane.teamName!)
+        : this.buildMainTitleSeparator(mainWidth, leftPaneW, isTreeMode, isFullWidth);
 
     let mainLines: string[];
     // Reset agentless before branching; only the TMUX branch sets it true
     this.coordinatorPane.agentless = false;
     // §17.3 / §17.4: when a team anchor is the EFFECTIVE selection (Teams panel
-    // focused + a team header selected), the main area renders the channel chat
-    // box at full main width — overriding the agent/tmux/right-pane split. Also
-    // shown for the Teams no-selection state (channelPane.teamName === null +
-    // teams-tree focused), which renders the channel pane's placeholder.
+    // focused + a team header selected), the main area renders the team CHAT on
+    // the left and the team LOG on the right — using the existing split-pane
+    // seam math so the title separator junction lines up. The user's normal
+    // right-pane mode (AGENT LOG / DENIALS / etc.) is preserved; only the
+    // visual is overridden while the team is selected. Also covers the Teams
+    // no-selection state (channelPane.teamName === null + teams-tree focused),
+    // which renders the channel pane's placeholder full-width.
     const teamsFocusedRender = this.focusManager.current() === "teams-tree";
     const showChannelPane =
       teamsFocusedRender
       && !isCoordinatorView
       && (this.channelPane.teamName !== null || this.teamsTree.selection === null);
     if (showChannelPane) {
-      // §17.4 refresh cadence: the chat box is refreshed by `channelRefreshTimer`
-      // (set up in startPolling) and by a one-shot `refreshChannel()` on team
-      // selection change. render() is PURE here — it must NOT call load(),
-      // because load completes by calling requestRender(), which would re-enter
-      // render() and spin a load→render loop (the bug this fix removes).
-      this.channelPane.displayHeight = availableHeight;
-      mainLines = [mainTitleSep, ...this.channelPane.render(mainWidth)];
+      // §17.4 refresh cadence: the chat box + log are refreshed by
+      // `channelRefreshTimer` (set up in startPolling) and by a one-shot
+      // `refreshChannel()` on team-selection change. render() is PURE here — it
+      // must NOT call load(), because load completes by calling requestRender(),
+      // which would re-enter render() and spin a load→render loop.
+      if (this.channelPane.teamName === null) {
+        // Teams no-selection placeholder: full main width, channel pane only.
+        this.channelPane.displayHeight = availableHeight;
+        mainLines = [mainTitleSep, ...this.channelPane.render(mainWidth)];
+      } else {
+        // Team selected → side-by-side chat | log using the split-pane geometry.
+        const sepWidth = 1;
+        const lw = Math.max(1, Math.min(leftPaneW, mainWidth - sepWidth - 1));
+        const rw = Math.max(1, mainWidth - lw - sepWidth);
+        this.channelPane.displayHeight = availableHeight;
+        this.teamLogPane.displayHeight = availableHeight;
+        const leftLines = this.channelPane.render(lw);
+        const rightLines = this.teamLogPane.render(rw);
+        const sepChar = `${DIM_GRAY}│${RESET}`;
+        const merged: string[] = [];
+        const maxLines = Math.max(leftLines.length, rightLines.length);
+        for (let i = 0; i < maxLines; i++) {
+          const ll = i < leftLines.length ? leftLines[i]! : "";
+          const rl = i < rightLines.length ? rightLines[i]! : "";
+          const leftVisible = visibleWidth(ll);
+          const needsReset = ll.includes("\x1b[");
+          const leftPadded = leftVisible >= lw
+            ? truncateToWidth(ll, lw, "")
+            : ll + (needsReset ? RESET : "") + " ".repeat(lw - leftVisible);
+          merged.push(leftPadded + sepChar + truncateToWidth(rl, rw, ""));
+        }
+        mainLines = [mainTitleSep, ...merged];
+      }
     } else if (isCoordinatorView && this.coordinatorViewMode === "TMUX") {
       // System coordinator TMUX view: full-width coordinator tmux output in main area.
       // Reuses coordinatorPane (agentless TmuxPaneComponent) for rendering.
@@ -2592,6 +2649,33 @@ export class DashboardComponent implements Component {
     const fixedChars = leftPad + leftTitle.length + rightTitle.length + rightPad;
     const fillCount = Math.max(1, mainWidth - fixedChars);
     const sep = `${leftDashColor}${"─".repeat(leftPad)}${RESET}${leftTitleStyle}${leftTitle}${RESET}${rightTitleStyle}${rightTitle}${RESET}${leftDashColor}${"─".repeat(fillCount)}${RESET}${rightDashColor}${"─".repeat(rightPad)}${RESET}`;
+    return truncateToWidth(sep, mainWidth, "");
+  }
+
+  /**
+   * Build the team-mode title separator: `@<team> CHAT  ┬  @<team> LOG`. Uses
+   * the same split-pane junction math as `buildMainTitleSeparator` so the `┬`
+   * lines up with the chat | log seam.
+   */
+  private buildTeamTitleSeparator(mainWidth: number, leftPaneW: number, teamName: string): string {
+    const leftTitle = ` @${teamName} CHAT `;
+    const rightTitle = ` @${teamName} LOG `;
+    const leftPad = 3;
+    const rightPad = 3;
+    const leftDashColor = DIM_GRAY;
+    const rightDashColor = DIM_GRAY;
+    const leftTitleStyle = BOLD;
+    const rightTitleStyle = BOLD;
+
+    const splitAt = leftPaneW + 1;
+    const leftHalfDashes = Math.max(1, splitAt - leftPad - leftTitle.length);
+    const rightHalfDashes = Math.max(1, mainWidth - splitAt - rightTitle.length - rightPad);
+    const leftDashStr = "─".repeat(Math.max(0, leftHalfDashes - 1)) + "┬";
+    const sep =
+      `${leftDashColor}${"─".repeat(leftPad)}${RESET}${leftTitleStyle}${leftTitle}${RESET}` +
+      `${leftDashColor}${leftDashStr}${RESET}` +
+      `${rightTitleStyle}${rightTitle}${RESET}` +
+      `${rightDashColor}${"─".repeat(rightHalfDashes)}${"─".repeat(rightPad)}${RESET}`;
     return truncateToWidth(sep, mainWidth, "");
   }
 

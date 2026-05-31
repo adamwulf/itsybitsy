@@ -43,7 +43,7 @@ import { truncateToWidth } from "@mariozechner/pi-tui";
 import { readChannel, type ChannelMessage } from "../team-channel";
 import { readConfig } from "../config";
 import { wrapLines, padLines } from "./wrap";
-import { RESET, DIM } from "./colors";
+import { RESET, BOLD, DIM, CYAN, BRIGHT_BLUE, BRIGHT_MAGENTA } from "./colors";
 
 /**
  * Render one channel record as a §16.4-grammar sender-prefixed line (no tmux
@@ -61,22 +61,31 @@ export function formatChannelLine(
 ): string {
   const teamClause = ` in @${teamName}`;
   let label: string;
+  let color: string;
   if (record.fromAgent === "") {
     // Human/CLI sender — match deliverMessage's user form: `user <name>` when a
     // user.name is configured, bare `user` when it is not (§16.4 / §17.4 EDIT9).
     label =
       typeof userName === "string" && userName.length > 0 ? `user ${userName}` : "user";
+    color = BRIGHT_BLUE;
   } else if (record.fromAgent.startsWith("@")) {
     // @-sentinel sender (e.g. `@system`) — kept verbatim (the bracket shape
     // already distinguishes it; for the chat box @system is the common case).
     label = record.fromAgent;
+    color = BRIGHT_MAGENTA;
   } else {
     // Real agent id — the literal word "agent" is DROPPED in a team context
     // because the ` in @<team>` clause already establishes the sender is an
     // agent in a room (§16.4 delivery-prefix divergence).
     label = record.fromAgent;
+    color = CYAN;
   }
-  return `[sent by ${label}${teamClause}]: ${record.message}`;
+  // The bracketed sender prefix is BOLD + color so it visually separates from
+  // the message body in the chat box. stripAnsi-based tests see the same
+  // literal `[sent by … in @<team>]:` text — the ANSI wraps don't change the
+  // underlying grammar.
+  const prefix = `${BOLD}${color}[sent by ${label}${teamClause}]:${RESET}`;
+  return `${prefix} ${record.message}`;
 }
 
 /**
@@ -196,13 +205,20 @@ export class ChannelPaneComponent implements Component {
     // time is useful context for both); only the body changes — chat uses the
     // §16.4 sender-prefixed grammar, system uses the dimmed `── … ──` form.
     const wrapped: string[] = [];
-    for (const rec of this.messages) {
+    for (let i = 0; i < this.messages.length; i++) {
+      const rec = this.messages[i]!;
       const gutter = `${DIM}${formatClockGutter(rec.ts)}${RESET} `;
       const body =
         rec.kind === "system"
           ? formatChannelSystemLine(rec)
           : formatChannelLine(rec, this.teamName, this.userName);
       wrapped.push(...wrapLines(gutter + body, width));
+      // Insert a blank visual separator BETWEEN messages (not after the
+      // newest) so chat reads less like a wall of text. The blank line counts
+      // toward the scrollback window like any other rendered row.
+      if (i < this.messages.length - 1) {
+        wrapped.push("");
+      }
     }
 
     // Clamp scrollBack to the valid range (mirrors TmuxPaneComponent).

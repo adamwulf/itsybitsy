@@ -199,6 +199,151 @@ ${qStartExitScript}
 `;
 }
 
+export interface BuildCodexResumeContentInput {
+  /** Agent id — used by the inline `-c` hook payloads. */
+  agentId: string;
+  /** Absolute, path-safe path to the `ib` binary. */
+  ibBinaryPath: string;
+  /** Codex rollout/session UUID from meta.codex_session_id. Already validated upstream by isValidSessionId. */
+  codexSessionId: string;
+  /** Absolute path to meta.json — pid is written here. */
+  absMetaJson: string;
+  /** Absolute path to exit-check.sh. */
+  absExitScript: string;
+  /** Absolute path to agent.log. */
+  absAgentLog: string;
+  /** Absolute path to claude.stderr.log (sidecar; reused name for back-compat). */
+  absStderrLog: string;
+}
+
+/**
+ * Render the codex resume.sh body for an agent. Mirrors `buildCodexStartContent`
+ * exactly (same setsid + SIGHUP ignore + pid capture + meta-json write + wait
+ * + exit-check skeleton) but the launch line is:
+ *   `codex resume "<UUID>" -a never -s workspace-write --dangerously-bypass-hook-trust <inline -c flags>`
+ *
+ * Differences from start.sh:
+ *   - Subcommand form (`codex resume <UUID>`), not the top-level `codex` invocation.
+ *   - No `-m <model>` flag — the model is bound to the resumed rollout.
+ *   - No positional prompt — `codex resume` continues an existing session.
+ *   - Re-passes the inline `-c` hook flags and `--dangerously-bypass-hook-trust`
+ *     defensively (Q1 in the Phase 7 prompt): we cannot rely on codex
+ *     persisting the original spawn's hook registration across resume; passing
+ *     them again is a no-op if codex DOES persist them and safety-critical if
+ *     it doesn't (without hooks every PreToolUse silently fail-opens).
+ *   - Re-passes `-a never -s workspace-write` for the same defense-in-depth
+ *     reason (Q2 in the Phase 7 prompt).
+ *
+ * The PID variable is kept as `CLAUDE_PID` (and stored as `claude_pid` in
+ * meta.json) intentionally — see `buildCodexStartContent` rationale.
+ *
+ * Throws if the launch-args builder rejects the binary path or agent id.
+ */
+export function buildCodexResumeContent(input: BuildCodexResumeContentInput): string {
+  if (!isCodexSafeBinaryPath(input.ibBinaryPath)) {
+    throw new Error(
+      `Unsafe ib binary path for codex resume: ${JSON.stringify(input.ibBinaryPath)} contains quotes, backslashes, or control characters. ` +
+        `Reinstall ib to a path made of printable ASCII with no apostrophes, quotes, or backslashes.`,
+    );
+  }
+
+  const { args: hookFlags } = buildCodexLaunchArgs({
+    ibBinaryPath: input.ibBinaryPath,
+    agentId: input.agentId,
+  });
+
+  const qSessionId = shellQuote(input.codexSessionId);
+  const qFlagArgs = hookFlags.map(shellQuote).join(" ");
+  const qResumeMetaJson = shellQuote(input.absMetaJson);
+  const qResumeExitScript = shellQuote(input.absExitScript);
+  const qResumeAgentLog = shellQuote(input.absAgentLog);
+  const qResumeStderrLog = shellQuote(input.absStderrLog);
+
+  return `#!/bin/bash
+# Clear Claude Code nesting detection so agents can start their own claude process
+unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT
+
+AGENT_LOG=${qResumeAgentLog}
+STDERR_LOG=${qResumeStderrLog}
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [resume.sh] $1" >> "$AGENT_LOG"; }
+
+log "Resuming codex resume ${input.codexSessionId} (codex agent id=${input.agentId})"
+log "PWD=$(pwd) which_codex=$(which codex 2>&1)"
+
+# Ignore SIGHUP for the lifetime of this script. When resume is triggered from
+# inside another tmux pane (the ib-coordinator, another agent, or a watchdog
+# spawned from one), that launcher pane's pty can deliver a SIGHUP to this fresh
+# process group as it churns/redraws/closes. The old kill-on-HUP trap turned that
+# stray signal into an exit-129 crash-resume loop. SIG_IGN is inherited by the
+# codex child, so this protects both halves. setsid (below) is the belt to this
+# suspenders — it gives codex its own session so the pty SIGHUP can't reach it
+# at all, but the trap stands alone on hosts where setsid is unavailable.
+trap '' HUP
+log "SIGHUP ignored (resume insulated from launcher pane teardown)"
+
+# Start codex in background and capture PID. Stderr is redirected to a sidecar
+# file so we can tail it into agent.log on exit (helps diagnose crashes / 429s).
+# Launch under setsid when present so codex leads its own session, fully
+# detached from the launcher's controlling terminal.
+: > "$STDERR_LOG"
+if command -v setsid >/dev/null 2>&1; then
+    SETSID=setsid
+else
+    SETSID=none
+fi
+if [[ "$SETSID" == "setsid" ]]; then
+    setsid codex resume ${qSessionId} -a never -s workspace-write --dangerously-bypass-hook-trust ${qFlagArgs} 2> "$STDERR_LOG" &
+else
+    codex resume ${qSessionId} -a never -s workspace-write --dangerously-bypass-hook-trust ${qFlagArgs} 2> "$STDERR_LOG" &
+fi
+CLAUDE_PID=$!
+log "Codex PID: $CLAUDE_PID (setsid=$SETSID)"
+trap 'log "script received SIGTERM; sending SIGTERM to Codex PID=$CLAUDE_PID"; kill $CLAUDE_PID 2>/dev/null' TERM
+trap 'log "script received SIGINT; sending SIGINT to Codex PID=$CLAUDE_PID"; kill -INT $CLAUDE_PID 2>/dev/null' INT
+
+# Store PID in meta.json — route through "ib write-pid" which uses
+# mutateAgentMeta + the meta-lock so the write does not lose a concurrent
+# codex SessionStart write of codex_session_id (HIGH 2 from the Phase 4
+# review). The absolute ib path is used because codex's PATH may not match
+# the spawn shell's.
+META_JSON=${qResumeMetaJson}
+if [[ -f "$META_JSON" ]]; then
+    ${shellQuote(input.ibBinaryPath)} write-pid ${shellQuote(input.agentId)} "$CLAUDE_PID" || log "write-pid failed (exit=$?); meta.json claude_pid not set"
+fi
+
+# Wait for codex to complete
+wait $CLAUDE_PID
+EXIT_CODE=$?
+SIGNAL=$(kill -l $EXIT_CODE 2>/dev/null || echo "none")
+log "Codex exited: code=$EXIT_CODE signal=$SIGNAL"
+
+# Annotate common exit codes so the cause is obvious in agent.log.
+case $EXIT_CODE in
+    0)   log "exit=0 → clean exit" ;;
+    1)   log "exit=1 → generic codex error (check stderr tail below)" ;;
+    2)   log "exit=2 → codex usage / argument error" ;;
+    127) log "exit=127 → command not found ('codex' missing from PATH?)" ;;
+    129) log "exit=129 → SIGHUP (tmux pane closed or controlling terminal lost)" ;;
+    130) log "exit=130 → SIGINT (Ctrl-C)" ;;
+    137) log "exit=137 → SIGKILL (likely OOM kill or 'kill -9'; check Console.app for 'low memory')" ;;
+    139) log "exit=139 → SIGSEGV (codex segfault)" ;;
+    143) log "exit=143 → SIGTERM (graceful kill, e.g. ib kill / pause)" ;;
+    *)   log "exit=$EXIT_CODE → unrecognized; SIGNAL=$SIGNAL" ;;
+esac
+
+# If codex exited non-cleanly and wrote anything to stderr, dump the tail into
+# agent.log so the post-mortem doesn't depend on the (now-dying) tmux pane.
+if [[ "$EXIT_CODE" -ne 0 && -s "$STDERR_LOG" ]]; then
+    log "── codex stderr (last 50 lines) ──"
+    tail -n 50 "$STDERR_LOG" >> "$AGENT_LOG"
+    log "── end codex stderr ──"
+fi
+
+# Run exit check
+${qResumeExitScript}
+`;
+}
+
 export type AppendCodexGitignoreResult =
   | "appended"
   | "already-present"

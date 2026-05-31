@@ -1784,14 +1784,17 @@ describe("resumeAgent (native)", () => {
     const resumeScript = await Bun.file(join(agentDir, "resume.sh")).text();
     // No PATH export — ib is already on the user's PATH
     expect(resumeScript).not.toContain("export PATH");
-    // meta.json should be passed as process.argv, not embedded in JS
+    // meta.json should be passed via `ib write-pid` which routes through
+    // mutateAgentMeta (HIGH 2 fix from the Phase 4 review).
     expect(resumeScript).toContain(`META_JSON='${join(agentDir, "meta.json")}'`);
-    expect(resumeScript).toContain('bun -e "const f=process.argv[1]');
-    expect(resumeScript).toContain('"$META_JSON" "$CLAUDE_PID"');
+    expect(resumeScript).toContain("ib write-pid 'agent-abc' \"$CLAUDE_PID\"");
     // exit-check.sh should be single-quoted
     expect(resumeScript).toContain(`'${join(agentDir, "exit-check.sh")}'`);
     // Should NOT have old pattern of embedding path in JS string
     expect(resumeScript).not.toContain("const f='/");
+    // Should NOT use the race-prone inline bun -e read-modify-write.
+    expect(resumeScript).not.toContain("m.claude_pid=String(process.argv[2])");
+    expect(resumeScript).not.toContain("bun -e \"const f=");
   });
 
   test("spawns watchdog for top-level agents (no manager)", async () => {
@@ -2124,6 +2127,258 @@ describe("resumeAgent (native)", () => {
       const metaExists = await Bun.file(join(agentDir, "meta.json")).exists();
       expect(metaExists).toBe(true);
     });
+  });
+
+  // Phase 7 regression snapshot — mirrors the Phase 4 MED 4 byte-equality
+  // guard on claude start.sh. The codex resume branch sits next to the
+  // claude resume branch in resumeAgent; any future codex/cli-routing
+  // change risks accidentally touching the claude path. This fixture
+  // assertion fails the moment claude resume.sh diverges from the recorded
+  // baseline; if the divergence is intentional, update the fixture in the
+  // same PR with a visible diff and a clear reason in the commit message.
+  test("claude resume.sh matches the byte-equality fixture (regression snapshot)", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-claude-snapshot");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-claude-snapshot",
+      tmux_session: "tmux-agent-claude-snapshot",
+      session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      model: "claude:sonnet",
+    }));
+
+    const agent = _makeAgent({
+      id: "agent-claude-snapshot",
+      repoPath: tempDir,
+      repoName: "test",
+      state: "stopped",
+      meta: {
+        session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        tmux_session: "tmux-agent-claude-snapshot",
+        model: "claude:sonnet",
+      } as any,
+    });
+    const result = await resumeAgent(agent);
+    expect(result.ok).toBe(true);
+
+    const rawResumeSh = await Bun.file(join(agentDir, "resume.sh")).text();
+    // Normalise per-run varying bits:
+    //   * tempDir prefix → <AGENTSDIR>
+    //   * UUID session id → <SESSION-UUID>
+    const sessionUuidPattern = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g;
+    const normalised = rawResumeSh
+      .replaceAll(tempDir, "<AGENTSDIR>")
+      .replaceAll(sessionUuidPattern, "<SESSION-UUID>");
+
+    const fixturePath = join(
+      import.meta.dir.replace(/\/src$/, ""),
+      "tests",
+      "fixtures",
+      "claude-resume-sh-baseline.sh",
+    );
+    const fixtureFile = Bun.file(fixturePath);
+    if (!(await fixtureFile.exists())) {
+      // Bootstrap: write the fixture and fail loudly so the dev commits
+      // the new baseline. This codepath should never fire on CI.
+      await Bun.write(fixturePath, normalised);
+      throw new Error(
+        `Fixture missing — wrote a fresh baseline to ${fixturePath}. ` +
+          `Commit the fixture, then re-run.`,
+      );
+    }
+    const expected = await fixtureFile.text();
+    expect(normalised).toBe(expected);
+  });
+
+  // ── codex resume (SPEC-CODEX-MODEL.md §5.8 + §6 Phase 7) ────────────────────
+  test("resumes codex agent with valid codex_session_id — writes codex-shaped resume.sh + spawns tmux", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-codex-ok");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-codex-ok",
+      tmux_session: "tmux-agent-codex-ok",
+      model: "codex:gpt-5.4-mini",
+      codex_session_id: "019e7b21-cb7d-7f23-8674-11036ed141ef",
+    }));
+
+    const agent = _makeAgent({
+      id: "agent-codex-ok",
+      repoPath: tempDir,
+      repoName: "test",
+      state: "stopped",
+      meta: {
+        tmux_session: "tmux-agent-codex-ok",
+        model: "codex:gpt-5.4-mini",
+        codex_session_id: "019e7b21-cb7d-7f23-8674-11036ed141ef",
+      } as any,
+    });
+    const result = await resumeAgent(agent);
+
+    expect(result.ok).toBe(true);
+    // resume.sh should be created with codex launch line.
+    const resumeScript = await Bun.file(join(agentDir, "resume.sh")).text();
+    expect(resumeScript).toContain("codex resume '019e7b21-cb7d-7f23-8674-11036ed141ef'");
+    expect(resumeScript).toContain("--dangerously-bypass-hook-trust");
+    expect(resumeScript).toContain("-a never");
+    expect(resumeScript).toContain("-s workspace-write");
+    // Must NOT use claude --resume.
+    expect(resumeScript).not.toContain("claude --resume");
+
+    // tmux new-session should have been called with the resume script path.
+    const newSessionCall = spawnCalls.find(c => c[0] === "tmux" && c[1] === "new-session");
+    expect(newSessionCall).toBeDefined();
+    expect(newSessionCall!.some(arg => arg.includes("resume.sh"))).toBe(true);
+
+    // dispatcher precheck must have run (3 events).
+    const cmdStrs = spawnCalls.map(c => c.join(" "));
+    expect(cmdStrs.some(c => c.includes("hooks codex-pre-tool-use") && c.includes("--dry-run"))).toBe(true);
+    expect(cmdStrs.some(c => c.includes("hooks codex-session-start") && c.includes("--dry-run"))).toBe(true);
+    expect(cmdStrs.some(c => c.includes("hooks codex-stop") && c.includes("--dry-run"))).toBe(true);
+  });
+
+  test("codex resume refuses when dispatcher precheck fails — no resume.sh, no tmux launch", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-codex-pre");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-codex-pre",
+      tmux_session: "tmux-agent-codex-pre",
+      model: "codex:gpt-5.4-mini",
+      codex_session_id: "019e7b21-cb7d-7f23-8674-11036ed141ef",
+    }));
+
+    // Custom runner: succeed on tmux ops EXCEPT fail any codex dispatcher
+    // dry-run with stderr "dispatcher broken".
+    const failedPrecheckRunner = (cmd: string[]): SpawnResult => {
+      spawnCalls.push(cmd);
+      const cmdStr = cmd.join(" ");
+      if (cmdStr.includes("hooks codex-") && cmdStr.includes("--dry-run")) {
+        return makeSpawnResult(1, "", "dispatcher broken");
+      }
+      // Mimic the default resume runner: has-session fails initially (no live
+      // tmux), then succeeds after new-session.
+      if (cmd[0] === "tmux" && cmd[1] === "new-session") return makeSpawnResult();
+      if (cmd.includes("has-session")) return makeSpawnResult(1);
+      return makeSpawnResult();
+    };
+    lifecycleSpawnCtx.set(failedPrecheckRunner);
+    setNukeResumeSpawnRunner(failedPrecheckRunner);
+
+    const agent = _makeAgent({
+      id: "agent-codex-pre",
+      repoPath: tempDir,
+      repoName: "test",
+      state: "stopped",
+      meta: {
+        tmux_session: "tmux-agent-codex-pre",
+        model: "codex:gpt-5.4-mini",
+        codex_session_id: "019e7b21-cb7d-7f23-8674-11036ed141ef",
+      } as any,
+    });
+    const result = await resumeAgent(agent);
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("codex dispatcher precheck failed");
+    expect(result.stderr).toContain("dispatcher broken");
+    // resume.sh must NOT be written on precheck failure.
+    const resumeShExists = await Bun.file(join(agentDir, "resume.sh")).exists();
+    expect(resumeShExists).toBe(false);
+    // tmux new-session must NOT have been called (precheck fails before launch).
+    const cmdStrs = spawnCalls.map(c => c.join(" "));
+    expect(cmdStrs.some(c => c.includes("tmux new-session"))).toBe(false);
+  });
+
+  test("codex resume — live tmux session refusal applies (CLI-agnostic guard)", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-codex-live");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-codex-live",
+      tmux_session: "tmux-agent-codex-live",
+      model: "codex:gpt-5.4-mini",
+      codex_session_id: "019e7b21-cb7d-7f23-8674-11036ed141ef",
+    }));
+
+    // Override the default runner: has-session always succeeds (live tmux).
+    const liveRunner = (cmd: string[]): SpawnResult => {
+      spawnCalls.push(cmd);
+      return makeSpawnResult();
+    };
+    lifecycleSpawnCtx.set(liveRunner);
+    setNukeResumeSpawnRunner(liveRunner);
+
+    const agent = _makeAgent({
+      id: "agent-codex-live",
+      repoPath: tempDir,
+      repoName: "test",
+      state: "stopped",
+      meta: {
+        tmux_session: "tmux-agent-codex-live",
+        model: "codex:gpt-5.4-mini",
+        codex_session_id: "019e7b21-cb7d-7f23-8674-11036ed141ef",
+      } as any,
+    });
+    const result = await resumeAgent(agent);
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("live tmux session");
+    const resumeShExists = await Bun.file(join(agentDir, "resume.sh")).exists();
+    expect(resumeShExists).toBe(false);
+  });
+
+  test("refuses to resume codex agent when codex_session_id is missing", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-codex01");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-codex01",
+      tmux_session: "tmux-agent-codex01",
+      model: "codex:gpt-5.4-mini",
+      // No codex_session_id — SessionStart hook never fired.
+    }));
+
+    const agent = _makeAgent({
+      id: "agent-codex01",
+      repoPath: tempDir,
+      repoName: "test",
+      state: "stopped",
+      meta: {
+        tmux_session: "tmux-agent-codex01",
+        model: "codex:gpt-5.4-mini",
+      } as any,
+    });
+    const result = await resumeAgent(agent);
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("codex_session_id not yet captured");
+    // resume.sh must not be written.
+    const resumeShExists = await Bun.file(join(agentDir, "resume.sh")).exists();
+    expect(resumeShExists).toBe(false);
+  });
+
+  test("refuses to resume codex agent when codex_session_id is malformed", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-codex02");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-codex02",
+      tmux_session: "tmux-agent-codex02",
+      model: "codex:gpt-5.4-mini",
+      codex_session_id: "not-a-valid-uuid!@#",
+    }));
+
+    const agent = _makeAgent({
+      id: "agent-codex02",
+      repoPath: tempDir,
+      repoName: "test",
+      state: "stopped",
+      meta: {
+        tmux_session: "tmux-agent-codex02",
+        model: "codex:gpt-5.4-mini",
+        codex_session_id: "not-a-valid-uuid!@#",
+      } as any,
+    });
+    const result = await resumeAgent(agent);
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("Invalid codex_session_id");
+    const resumeShExists = await Bun.file(join(agentDir, "resume.sh")).exists();
+    expect(resumeShExists).toBe(false);
   });
 
 });
@@ -4373,21 +4628,29 @@ describe("newAgent (native)", () => {
     // prompt.txt path should be single-quoted
     const agentDir = join(agentsDir, "test-quotes");
     expect(startSh).toContain(`$(cat '${join(agentDir, "prompt.txt")}')`);
-    // meta.json should be passed as argument, not embedded in JS
+    // meta.json should be passed as argument to `ib write-pid`, not
+    // embedded in inline JS (HIGH 2 fix — see Phase 4 review).
     expect(startSh).toContain(`META_JSON='${join(agentDir, "meta.json")}'`);
-    expect(startSh).toContain('bun -e "const f=process.argv[1]');
-    expect(startSh).toContain('"$META_JSON" "$CLAUDE_PID"');
+    expect(startSh).toContain("ib write-pid 'test-quotes' \"$CLAUDE_PID\"");
     // exit-check.sh should be single-quoted
     expect(startSh).toContain(`'${join(agentDir, "exit-check.sh")}'`);
   });
 
-  test("start.sh does not embed paths directly in JS code", async () => {
+  test("start.sh does not embed paths directly in JS code (HIGH 2 — no inline bun -e)", async () => {
     setNewAgentSpawnRunner(mockSpawnRunner());
     await callNewAgent("do work", { name: "test-no-embed" });
 
     const startSh = await Bun.file(join(agentsDir, "test-no-embed", "start.sh")).text();
     // Should NOT have the old pattern of embedding path in JS string
     expect(startSh).not.toContain("const f='/" );
+    // Should NOT use the race-prone inline bun -e read-modify-write
+    // — replaced with `ib write-pid` for meta-lock safety. The bare-text
+    // "bun -e" may appear in a script comment; the executable form
+    // includes the JS payload.
+    expect(startSh).not.toContain("m.claude_pid=String(process.argv[2])");
+    expect(startSh).not.toContain("bun -e \"const f=");
+    // Positive: uses `ib write-pid` instead.
+    expect(startSh).toContain("ib write-pid 'test-no-embed'");
   });
 
   test("spawns watchdog for top-level agents (no manager)", async () => {
@@ -4846,6 +5109,206 @@ body`,
     setNewAgentSpawnRunner(mockSpawnRunner());
     const result = await callNewAgent("do work", { name: "test-repos-unregistered", type: "unregistered-ok" });
     expect(result.ok).toBe(true);
+  });
+
+  // ── codex spawn-path tests (SPEC-CODEX-MODEL.md §6 Phase 4) ─────────────────
+  //
+  // These tests exercise the codex branch of newAgent end-to-end with the
+  // existing mock spawn runner. They DO NOT actually spawn codex or tmux —
+  // they verify the artifacts dropped into the worktree, the contents of
+  // start.sh, and the failure paths when the dispatcher precheck refuses.
+
+  describe("codex spawn branch", () => {
+    test("spawns a codex agent and writes a codex-shaped start.sh", async () => {
+      setNewAgentSpawnRunner(mockSpawnRunner());
+      const result = await callNewAgent("read README", {
+        name: "codex-agent-1",
+        model: "codex:gpt-5.4-mini",
+      });
+      expect(result.ok).toBe(true);
+
+      const startSh = await Bun.file(join(agentsDir, "codex-agent-1", "start.sh")).text();
+      // Canonical §3.3 launch line components, model is shell-quoted.
+      expect(startSh).toContain("setsid codex -m 'gpt-5.4-mini'");
+      expect(startSh).toContain("-a never");
+      expect(startSh).toContain("-s workspace-write");
+      expect(startSh).toContain("--dangerously-bypass-hook-trust");
+      // PID variable + meta-field keep claude_pid for back-compat.
+      expect(startSh).toContain("CLAUDE_PID=$!");
+      // Prompt passes via $(cat ...) — same as claude.
+      expect(startSh).toContain('"$(cat ');
+      // No claude command — codex agent runs codex, not claude.
+      expect(startSh).not.toMatch(/setsid claude/);
+      expect(startSh).not.toContain("--session-id");
+      expect(startSh).not.toContain("--model");
+    });
+
+    test("does NOT write <worktree>/.claude/settings.local.json for codex", async () => {
+      setNewAgentSpawnRunner(mockSpawnRunner());
+      const result = await callNewAgent("task", {
+        name: "codex-no-claude-settings",
+        model: "codex:gpt-5.4-mini",
+      });
+      expect(result.ok).toBe(true);
+      const settingsPath = join(agentsDir, "codex-no-claude-settings", "repo", ".claude", "settings.local.json");
+      const exists = await Bun.file(settingsPath).exists();
+      expect(exists).toBe(false);
+    });
+
+    test("appends .codex/ to <worktree>/.gitignore", async () => {
+      setNewAgentSpawnRunner(mockSpawnRunner());
+      const result = await callNewAgent("task", {
+        name: "codex-gitignore",
+        model: "codex:gpt-5.4-mini",
+      });
+      expect(result.ok).toBe(true);
+      const gitignore = await Bun.file(join(agentsDir, "codex-gitignore", "repo", ".gitignore")).text();
+      expect(gitignore).toContain(".codex/");
+    });
+
+    test("writes <worktree>/AGENTS.md with role + agent id (no <ittybitty> wrapper)", async () => {
+      setNewAgentSpawnRunner(mockSpawnRunner());
+      const result = await callNewAgent("task", {
+        name: "codex-agents-md",
+        model: "codex:gpt-5.4-mini",
+        type: "worker",
+      });
+      expect(result.ok).toBe(true);
+      const agentsMd = await Bun.file(join(agentsDir, "codex-agents-md", "repo", "AGENTS.md")).text();
+      expect(agentsMd).toContain("codex-agents-md");
+      expect(agentsMd.startsWith("<ittybitty>")).toBe(false);
+    });
+
+    test("fails the spawn cleanly when the dispatcher precheck exits non-zero", async () => {
+      // Custom runner: succeed normally EXCEPT for the codex dispatcher
+      // precheck, which we make fail. The spawn must refuse cleanly and
+      // clean up the agent dir + worktree.
+      const cleanupCalls: string[][] = [];
+      const baseRunner = mockSpawnRunner();
+      const customSpawn = (cmd: string[], opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
+        const cmdStr = cmd.join(" ");
+        if (cmdStr.includes("hooks codex-") && cmdStr.includes("--dry-run")) {
+          // Simulate dispatcher failure
+          return makeSpawnResult("", 1);
+        }
+        // Track the cleanup git commands (MED 5 from the Phase 4 review).
+        if (cmdStr.includes("worktree remove") || cmdStr.includes("branch -D")) {
+          cleanupCalls.push(cmd);
+        }
+        return baseRunner(cmd, opts);
+      };
+      setNewAgentSpawnRunner(customSpawn);
+      const result = await callNewAgent("task", {
+        name: "codex-precheck-fail",
+        model: "codex:gpt-5.4-mini",
+      });
+      expect(result.ok).toBe(false);
+      expect(result.stderr).toContain("codex dispatcher precheck failed");
+      // Agent dir should be cleaned up — the precheck-fail path runs rm.
+      const dirExists = await Bun.file(join(agentsDir, "codex-precheck-fail", "meta.json")).exists();
+      expect(dirExists).toBe(false);
+      // MED 5: assert cleanup git commands were issued (centralised via
+      // cleanupOnFailure() — MED 2). Without this assertion the duplicated
+      // cleanup logic was untested at integration level.
+      const cleanupCmdStrs = cleanupCalls.map((c) => c.join(" "));
+      expect(cleanupCmdStrs.some((c) => c.includes("worktree remove"))).toBe(true);
+      expect(cleanupCmdStrs.some((c) => c.includes("branch -D agent/codex-precheck-fail"))).toBe(true);
+    });
+
+    test("regression guard: claude agents do NOT use the codex codepath", async () => {
+      setNewAgentSpawnRunner(mockSpawnRunner());
+      const result = await callNewAgent("task", {
+        name: "claude-regression-guard",
+        model: "claude:opus",
+      });
+      expect(result.ok).toBe(true);
+      // Claude agent should still get its settings.local.json
+      const settings = await Bun.file(join(agentsDir, "claude-regression-guard", "repo", ".claude", "settings.local.json")).text();
+      expect(settings.length).toBeGreaterThan(0);
+      // Claude start.sh launches claude, not codex
+      const startSh = await Bun.file(join(agentsDir, "claude-regression-guard", "start.sh")).text();
+      expect(startSh).toMatch(/setsid claude/);
+      expect(startSh).not.toContain("setsid codex");
+      expect(startSh).toContain("--session-id");
+      // No codex artifacts in the worktree
+      const agentsMdExists = await Bun.file(join(agentsDir, "claude-regression-guard", "repo", "AGENTS.md")).exists();
+      expect(agentsMdExists).toBe(false);
+    });
+
+    // MED 4 from Phase 4 review: golden-snapshot byte-equality check on
+    // claude start.sh. The earlier `toContain` regression guard is too
+    // loose — a change that adds 200 new lines to claude start.sh would
+    // pass it. This fixture-based assertion fails the moment claude
+    // start.sh diverges from the recorded baseline; if the divergence is
+    // intentional, the fixture must be updated in the same PR with a
+    // visible diff (and a clear reason in the commit).
+    test("MED 4: claude start.sh matches the byte-equality fixture (regression snapshot)", async () => {
+      setNewAgentSpawnRunner(mockSpawnRunner());
+      const result = await callNewAgent("snapshot fixture prompt", {
+        name: "claude-snapshot",
+        model: "claude:sonnet",
+      });
+      expect(result.ok).toBe(true);
+      const rawStartSh = await Bun.file(join(agentsDir, "claude-snapshot", "start.sh")).text();
+      // Normalise the parts that vary per run:
+      //   * agentsDir prefix → <AGENTSDIR>
+      //   * UUID session id → <SESSION-UUID>
+      const sessionUuidPattern = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g;
+      const normalised = rawStartSh
+        .replaceAll(agentsDir, "<AGENTSDIR>")
+        .replaceAll(sessionUuidPattern, "<SESSION-UUID>");
+
+      const fixturePath = join(
+        import.meta.dir.replace(/\/src$/, ""),
+        "tests",
+        "fixtures",
+        "claude-start-sh-baseline.sh",
+      );
+      const fixtureFile = Bun.file(fixturePath);
+      if (!(await fixtureFile.exists())) {
+        // Bootstrap: write the fixture and fail loudly so the dev commits
+        // the new baseline. This codepath should never fire on CI.
+        await Bun.write(fixturePath, normalised);
+        throw new Error(
+          `Fixture missing — wrote a fresh baseline to ${fixturePath}. ` +
+            `Commit the fixture, then re-run.`,
+        );
+      }
+      const expected = await fixtureFile.text();
+      expect(normalised).toBe(expected);
+    });
+
+    test("HIGH 1: per-repo coordinator + codex model is rejected BEFORE any side effects", async () => {
+      // Tracks every command issued so we can assert NO tmux / worktree
+      // call fired. The reject MUST happen during the codex-precondition
+      // block, before agentDir creation, before worktree-add, before
+      // tmux new-session.
+      const spawnCalls: string[][] = [];
+      const trackedSpawn = (cmd: string[], _opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
+        spawnCalls.push(cmd);
+        // Default succeed — we only care that the reject prevented
+        // these calls from being issued in the first place.
+        return makeSpawnResult("", 0);
+      };
+      setNewAgentSpawnRunner(trackedSpawn);
+
+      const result = await callNewAgent("start coordinator", {
+        name: "codex-coord-attempt",
+        type: "coordinator",
+        model: "codex:gpt-5.4-mini",
+      });
+
+      expect(result.ok).toBe(false);
+      expect(result.stderr).toContain("codex coordinators not yet implemented");
+      // No agent dir created — reject fires before mkdir.
+      const dirExists = await Bun.file(join(agentsDir, "codex-coord-attempt", "meta.json")).exists();
+      expect(dirExists).toBe(false);
+      // No tmux session created, no worktree, no branch.
+      const cmdStrs = spawnCalls.map((c) => c.join(" "));
+      expect(cmdStrs.some((c) => c.includes("tmux new-session"))).toBe(false);
+      expect(cmdStrs.some((c) => c.includes("git worktree add"))).toBe(false);
+      expect(cmdStrs.some((c) => c.includes("hooks codex-"))).toBe(false);
+    });
   });
 });
 

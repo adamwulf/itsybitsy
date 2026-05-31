@@ -5,6 +5,7 @@
 import { join } from "path";
 import { homedir } from "os";
 import { realpathSync } from "fs";
+import { loadAgentType } from "../agent-types";
 
 /**
  * Matches agent worktree paths: .ittybitty/agents/<agentId>/repo
@@ -160,4 +161,107 @@ export function checkGitDirectoryFlags(command: string): string | null {
   }
 
   return null;
+}
+
+// ── Codex hook helpers ───────────────────────────────────────────────────────
+
+/**
+ * Extract target file paths from an apply_patch tool_input.command body.
+ *
+ * Codex's apply_patch uses git-style markers:
+ *   *** Begin Patch
+ *   *** Add File: <path>
+ *   *** Update File: <path>
+ *   *** Delete File: <path>
+ *   *** End Patch
+ *
+ * Returns the list of paths in document order (duplicates preserved so callers
+ * can report exactly what the patch targeted). Paths are returned verbatim —
+ * the caller is responsible for resolving relative paths against cwd.
+ */
+export function extractApplyPatchPaths(patchBody: string): string[] {
+  if (!patchBody) return [];
+  const paths: string[] = [];
+  const lines = patchBody.split(/\r?\n/);
+  for (const line of lines) {
+    // Whitespace tolerance: `\s+` (rather than a single space) covers tabs,
+    // double-spaces, and any other whitespace codex might emit between the
+    // marker and the directive across versions.
+    const m = line.match(/^\*\*\*\s+(?:Add|Update|Delete) File:\s*(.+?)\s*$/);
+    if (m) paths.push(m[1]!);
+  }
+  return paths;
+}
+
+/**
+ * Build the codex PreToolUse JSON contract for a "deny" decision.
+ * Always includes `permissionDecisionReason` — omitting it triggers a separate
+ * codex error path that fails open.
+ */
+export function buildCodexDenyOutput(reason: string): string {
+  return JSON.stringify({
+    hookSpecificOutput: {
+      hookEventName: "PreToolUse",
+      permissionDecision: "deny",
+      permissionDecisionReason: reason,
+    },
+  });
+}
+
+/**
+ * Build the codex PreToolUse JSON contract for an "allow" decision.
+ * Pairs `permissionDecision: "allow"` with `updatedInput` echoing the original
+ * tool_input verbatim — standalone allow triggers codex's "unsupported
+ * permissionDecision:allow" path which is FAIL-OPEN. The echo-back rewrite is
+ * the documented no-op allow form (Phase 2 spike B1).
+ */
+export function buildCodexAllowOutput(originalToolInput: Record<string, unknown>): string {
+  return JSON.stringify({
+    hookSpecificOutput: {
+      hookEventName: "PreToolUse",
+      permissionDecision: "allow",
+      updatedInput: originalToolInput,
+    },
+  });
+}
+
+/**
+ * Merged allow/deny permission lists for an agent, derived from the same
+ * three-layer source as `buildAgentSettings()`:
+ *   - `_all.md` — applied to every spawned agent
+ *   - `_non_coordinator.md` — applied to non-coordinator agents only
+ *   - `<type>.md` — per-type permissions
+ *
+ * Each layer is loaded defensively; a missing layer contributes nothing rather
+ * than throwing. Allow + deny are deduplicated via Set.
+ */
+export async function loadMergedAgentTypePermissions(
+  agentType: string | undefined,
+): Promise<{ allow: string[]; deny: string[] }> {
+  const allowSet = new Set<string>();
+  const denySet = new Set<string>();
+
+  async function addLayer(name: string): Promise<{ ok: boolean; isCoordinator: boolean }> {
+    try {
+      const layer = await loadAgentType(name);
+      for (const a of layer.permissions?.allow ?? []) allowSet.add(a);
+      for (const d of layer.permissions?.deny ?? []) denySet.add(d);
+      return { ok: true, isCoordinator: layer.name === "coordinator" };
+    } catch {
+      return { ok: false, isCoordinator: false };
+    }
+  }
+
+  await addLayer("_all");
+
+  const isCoordinatorType = agentType === "coordinator" || agentType === "system";
+  if (!isCoordinatorType) {
+    await addLayer("_non_coordinator");
+  }
+
+  if (agentType) {
+    await addLayer(agentType);
+  }
+
+  return { allow: [...allowSet], deny: [...denySet] };
 }

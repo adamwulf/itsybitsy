@@ -560,7 +560,7 @@ Your Task, Agent, and TaskCreate tool calls are **automatically intercepted** an
 
 ### Workflow
 
-1. **DEFINE SUCCESS CRITERIA** - What does 'done' look like? Track in TodoWrite with measurable criteria.
+1. **DEFINE SUCCESS CRITERIA** - What does 'done' look like? Track progress with measurable criteria.
 2. **ASSESS TASK SIZE**:
    - SMALL: Do it yourself - don't spawn sub-agents unnecessarily
    - MEDIUM/LARGE: Break into independent tasks, each with clear success criteria

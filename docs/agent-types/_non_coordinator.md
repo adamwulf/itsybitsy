@@ -9,10 +9,9 @@ permissions:
 
 ### Writing Commit Messages
 
-Apostrophes and other shell metacharacters inside `git commit -m` (even with `<<'EOF'` heredocs) routinely break the command. Default to a temp file:
+Apostrophes and other shell metacharacters inside `git commit -m` (even with `<<'EOF'` heredocs) routinely break the command. Default to writing the message to a temp file first, then:
 
 ```
-Write(/tmp/commit-msg.txt, "<message>")
 git commit -F /tmp/commit-msg.txt
 rm -f /tmp/commit-msg.txt
 ```

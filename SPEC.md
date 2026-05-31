@@ -2751,3 +2751,234 @@ The append is **best-effort** and uses the **same jsonl-append discipline as `ou
 | `src/tui/layout.ts` (`LayoutState`) | **No new fields** (recommended, §17.5): the Teams panel shares `sidebarWidth` + `heightOffsets.tree`/`info` with the Agents panel. Confirm the shared-region model rather than adding `teamsWidth`/`teamsHeightOffset`. |
 
 ---
+
+## 18. Codex CLI as Alternative Agent Model
+
+This section summarizes the design landed in Phases 0–4 + 6 + 7 of `SPEC-CODEX-MODEL.md` (the design source-of-truth). Phase 5 (codex tmux-overrides parser for `rate_limited`/`api_error`/`compacting`) is **DEFERRED** and runs last; Phase 8 (this docs fold-in) is in flight on `agent/codex-agent`. Everything below is implemented and merged unless explicitly flagged otherwise.
+
+### 18.1 Goal
+
+itsybitsy can launch an agent under either Anthropic's `claude` CLI or OpenAI's `codex` CLI (v0.135.0). The CLI is selected per-agent via a **`<cli>:<model>`** model string (e.g. `claude:opus`, `codex:gpt-5.4-mini`) — itsybitsy parses the prefix to choose the underlying CLI, with **no inference and no hidden model→CLI guessing table**. Codex agents launch the interactive `codex` TUI inside tmux exactly the way Claude agents launch today; their permissions are enforced by a generated PreToolUse hook handler (codex has no `permissions.allow/deny` array equivalent), configured deny-by-default so the agent never shows an approval prompt and runs unattended in tmux. Non-goals: no headless/`codex exec` agent loop, no new dashboard panes, no multi-provider abstraction beyond claude|codex.
+
+### 18.2 Authoritative Decisions
+
+Verbatim from `SPEC-CODEX-MODEL.md` §2:
+
+| # | Decision |
+|---|---|
+| D1 | **`<cli>:<model>`** is the model string. The CLI is NAMED, not inferred. `claude:` and `codex:` prefixes are **required**. Bare names (`opus`, `o3`) are **rejected** as invalid. |
+| D2 | Codex agents launch **headed/interactive in tmux**, like Claude — NOT `codex exec`. Preserves `C` (open-in-Ghostty → live interactive session). |
+| D3 | **Reuse the same agent-type permission lists** (`_all.md` / `_non_coordinator.md` / `<type>.md`). Translate `allow`/`deny` into a generated PreToolUse hook handler on the codex side (no `permissions.allow/deny` array equivalent in codex). |
+| D4 | **Auto-deny anything not granted by a hook; never prompt.** Codex runs unattended in tmux and must never surface an approval modal. |
+| D5 | **No backwards compatibility, no migration.** Existing meta.json / config files with bare names are invalid under the new format; the user fixes them by hand. |
+| D6 | **Unknown CLI = hard-reject at spawn** with a clear message ("Unknown CLI '<X>' in model '<X>:<model>'; known: claude, codex"). No silent fallback. |
+| D7 | Scope = SPEC + phased implementation, verified incrementally. |
+| D8 | **Display the canonical `<cli>:<model>` form everywhere.** Dashboard info-panel, agent-tree column, anywhere the model is shown. Under D1/D5 all stored values are already qualified — UI renders them verbatim. |
+| D9 | **Every agent-type's `.md` frontmatter may set `model:`** (qualified `<cli>:<model>` form). Applies to every type: `system.md`, `coordinator.md`, `manager.md`, `worker.md`, plus any user-defined type. Coordinators are NOT claude-only — they may be set to a codex model via their agent-type frontmatter. |
+
+### 18.3 Model String Format
+
+The model string is **always** `<cli>:<model>`. Bare names are rejected.
+
+**Grammar:**
+
+```
+model-string := cli ":" model-rest
+cli          := [A-Za-z][A-Za-z0-9-]*          ; alphanumeric+dash, must start with a letter
+model-rest   := <everything after the FIRST ":">  ; greedy to end; preserved verbatim
+```
+
+Split on the **first** colon; the model half is greedy-to-end (`claude:claude-opus-4-7` → `{cli:"claude", model:"claude-opus-4-7"}`). The `cli` half is compared case-insensitive, whitespace-trimmed, against `KNOWN_CLIS = new Set<AgentCli>(["claude", "codex"])`. The `model` half is preserved verbatim (preserves case for `claude --model`).
+
+**Module surface (`src/agent-cli.ts`):**
+
+```ts
+export type AgentCli = "claude" | "codex";
+export const KNOWN_CLIS = new Set<AgentCli>(["claude", "codex"]);
+export interface ParsedModel { cli: AgentCli; model: string; }
+export function parseModel(input: string): ParsedModel;     // throws on missing colon, malformed cli, or unknown cli
+export function resolveCli(model: string): AgentCli;        // thin wrapper over parseModel(m).cli
+```
+
+**Validation order at spawn:**
+
+1. `isValidModel(input)` — shell-safety syntactic check (regex widened to allow `:`).
+2. `parseModel(input)` — throws on missing/wrong colon, malformed cli, or unknown cli (D6 hard-reject).
+3. Pass `parseModel(input).model` (the model half, e.g. `"opus"`) to the CLI flag; branch the launch on `parseModel(input).cli`.
+
+`meta.json` stores the **raw qualified value** verbatim (e.g. `"claude:opus"`) — never the parsed pieces. `parseModel(meta.model).cli` is computed on demand wherever the discriminator is needed.
+
+### 18.4 Permission Model (Codex side)
+
+Codex has no `permissions.allow/deny` array, no `--allowedTools` / `--disallowedTools` CLI flags. itsybitsy expresses the same agent-type allow/deny lists as a generated PreToolUse hook handler dispatched from `src/index.ts`. The canonical codex launch line is:
+
+```
+codex -m <MODEL> -a never -s workspace-write \
+      --dangerously-bypass-hook-trust \
+      -c 'hooks.PreToolUse=[{matcher=".*",hooks=[{type="command",command="<abs ib> hooks codex-pre-tool-use <agentId>",timeout=30}]}]' \
+      -c 'hooks.SessionStart=[{matcher=".*",hooks=[{type="command",command="<abs ib> hooks codex-session-start <agentId>",timeout=30}]}]' \
+      -c 'hooks.Stop=[{matcher=".*",hooks=[{type="command",command="<abs ib> hooks codex-stop <agentId>",timeout=30}]}]' \
+      "<prompt>"
+```
+
+Where `<MODEL>` is the model half of the parsed `<cli>:<model>`, `<abs ib>` is the absolute path to the `ib` binary resolved at spawn time, and `<agentId>` is the itsybitsy agent id.
+
+**Permission mode mapping** (the claude-side `--permission-mode` analogue):
+
+| Claude `--permission-mode` | Codex equivalent |
+|---|---|
+| `acceptEdits` | `-a never -s workspace-write` ← itsybitsy default for codex agents |
+| `plan` | `-a untrusted -s read-only` |
+| `bypassPermissions` / `--dangerously-skip-permissions` | `--dangerously-bypass-approvals-and-sandbox` (aka `--yolo`) |
+
+**Key constraints (the gritty ones):**
+
+- `-a never` is "never PROMPT", not "deny everything by default." Without the PreToolUse hook a tool call would be ALLOWED (subject to sandbox). The hook returning deny-by-default is what makes D4 (auto-deny-anything-not-granted) true.
+- `-s workspace-write` is leaky on macOS — it permits writes to `/private/tmp` (`/tmp`), `$TMPDIR`, and `~/.codex/memories` by default. The hook MUST do path-isolation; sandbox alone is insufficient. **Hook is the primary boundary, sandbox is defense-in-depth.**
+- `--dangerously-bypass-hook-trust` is **mandatory on every spawn** because codex hashes every hook command and the inline-`-c` payload's hash changes per spawn (the `<agentId>` interpolates into it). Without the bypass, a regenerated hook is silently skipped — a permission-bypass disaster. User-approved bypass per D4.
+- The launch line is built by `buildCodexLaunchArgs()` in `src/codex-config.ts`, which reads the SAME merged allow/deny lists used for Claude (`_all.md` + `_non_coordinator.md` + `<type>.md`) via `loadMergedAgentTypePermissions()`.
+- `~/.codex/config.toml` is NEVER modified by itsybitsy. The user's existing trust entries, model defaults, and other codex config are left untouched. Inline-`-c` registration bypasses codex's project-trust gate entirely (Phase 2 spike Q2).
+
+### 18.5 Hook Architecture (Codex side)
+
+Three codex-side hook handlers, all dispatched through a fail-open-safe wrapper:
+
+| Hook | Subcommand | Handler | Purpose |
+|---|---|---|---|
+| **PreToolUse** | `ib hooks codex-pre-tool-use <agentId>` | `src/hooks/codex-pre-tool-use.ts` | Allow/deny + path-isolation for `Bash` AND `apply_patch`. Default: deny. |
+| **SessionStart** | `ib hooks codex-session-start <agentId>` | `src/hooks/codex-session-start.ts` | Writes `state: "running"` to `meta.json`; captures `meta.codex_session_id` on first firing (defensive snake_case/camelCase read). |
+| **Stop** | `ib hooks codex-stop <agentId>` | `src/hooks/codex-stop.ts` | Writes `state: "waiting"` / `"complete"` to `meta.json` (deterministic state — no tmux scraping). |
+
+**Dispatcher pattern (`src/hooks/codex-dispatcher.ts`):** all three handlers are invoked through a single dispatcher that NEVER throws and ALWAYS exits 0 in the production path. Codex's documented hook failure mode is **FAIL-OPEN** (a hook that crashes, emits malformed JSON, or returns an unsupported `permissionDecision` is marked failed and the tool call PROCEEDS per `developers.openai.com/codex/hooks`). The dispatcher is the defense:
+
+- Wraps all handler logic in try/catch; emits a deny payload on any uncaught exception.
+- Validates `<agentId>` as the first argv before doing any other work; emits deny + `exit 0` on parse failure.
+- Module-import failure or any other pre-handler error MUST emit a deny payload + `exit 0` — NEVER `exit non-zero` (codex treats any non-zero dispatcher exit as a fail-open crash).
+- Supports a `--dry-run` flag for the spawn-time precheck (§18.6 / §18.7). Dry-run is the only path that may exit non-zero (so the spawn caller can fail cleanly).
+
+**PreToolUse JSON contract:**
+
+- **Deny:** `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"<reason>"}}` (always include the reason — omitting it triggers a separate codex error path).
+- **Allow:** `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","updatedInput":<echo of original tool_input>}}` — standalone `permissionDecision: "allow"` is rejected by codex as "unsupported permissionDecision:allow" and FAIL-OPENs (Phase 2 spike B1). The echo-back-original-input pattern is a documented no-op rewrite, verified working.
+- **Default (no match):** deny.
+
+**apply_patch handling:** PreToolUse fires for both `Bash` AND `apply_patch` on v0.135.0. For `apply_patch`, the handler parses the patch body — grepping lines starting with `*** Add File:`, `*** Update File:`, `*** Delete File:` — and extracts the target path. apply_patch is treated as path-only-gated: the handler synthesizes a `{toolName: "Write", toolInput: {file_path: <target>}}` call and reuses `checkPathAccess`'s path-isolation logic (prepending `"Write"` to the allow list for the synthesized call). Operators who want to forbid file edits entirely should use `-a never -s read-only` instead of relying on tool-name allow lists.
+
+### 18.6 Spawn Path
+
+`newAgent()` in `src/ib-commands.ts` branches on `parseModel(model).cli`:
+
+- **claude path:** unchanged (byte-snapshot-guarded at `tests/fixtures/claude-start-sh-baseline.sh` — any drift fails CI).
+- **codex path:** generates a codex-shaped `start.sh` via `buildCodexStartContent()` in `src/codex-spawn.ts`. The codex branch:
+  1. Skips `<worktree>/.claude/settings.local.json` entirely (codex doesn't read it).
+  2. Appends `.codex/` to `<worktree>/.gitignore` via `appendCodexGitignoreEntry()` (idempotent; respects `!.codex/` negation) to cover any incidental files codex itself drops.
+  3. Writes a per-agent `<worktree>/AGENTS.md` via `writeCodexAgentsMd()` containing the role/session-start instructions (codex reads `AGENTS.md` natively — replaces what `session-start.ts` injects for Claude). The `<ittybitty>` wrapper from the session-start template is stripped via `stripIttybittyWrapper()` before writing.
+  4. Runs a spawn-time precheck: invokes `ib hooks codex-pre-tool-use --dry-run <agentId>` and the SessionStart + Stop counterparts before launching codex. If any dispatcher fails to resolve (binary missing, module-import crash), the spawn fails cleanly — closing the out-of-process fail-open hole.
+  5. Generates `start.sh` launching the §18.4 canonical line in tmux. Same `setsid … &` + `wait` + `exit-check` skeleton as the claude path; same SIGHUP-ignore insulation. PID capture goes through the `ib write-pid` subcommand (§18.11), not an inline `bun -e` snippet.
+
+`resolveIbBinaryPath()` resolves the absolute `ib` path with a `Bun.which("ib") → process.execPath` fallback chain (eliminates PATH dependency in codex's spawn environment). `isCodexSafeBinaryPath()` rejects paths containing `'`, `"`, `\`, or control characters — a belt-and-suspenders defense against TOML-in-shell quoting bugs, called both in `buildCodexLaunchArgs()` AND in the upstream `newAgent()` precheck.
+
+Coordinators cannot currently be spawned under codex: `newAgent()` rejects `codex:` for `--coordinator` with `"codex coordinators not yet implemented; use claude:<model>"` (Phase 4 review HIGH 1). Full codex-coordinator support is a later phase.
+
+### 18.7 Resume Path
+
+`resumeAgent()` in `src/ib-commands.ts` branches on `parseModel(meta.model).cli`:
+
+- **claude path:** unchanged (byte-snapshot-guarded at `tests/fixtures/claude-resume-sh-baseline.sh`).
+- **codex path:** validates that `meta.codex_session_id` is present (populated by the SessionStart hook on first spawn); runs the same spawn-time dispatcher precheck as `newAgent()`; generates a codex-shaped `resume.sh` via `buildCodexResumeContent()` in `src/codex-spawn.ts`. The resume script invokes `codex resume "<UUID>"` with the SAME re-passed inline `-c` hook flags + `-a never -s workspace-write --dangerously-bypass-hook-trust` flags as the original spawn. Same SIGHUP-ignore insulation, same `ib write-pid` PID capture.
+
+Resume is a hot-reload-equivalent: any change to the agent-type allow/deny lists takes effect on the next resume (codex has no live hot-reload — §18.13 Risk 4).
+
+### 18.8 Watchdog (Codex side)
+
+`runPerAgentWatchdog` in `src/watchdog.ts` branches Claude-specific behaviors behind a `classifyAgentCli(meta)` helper (= `parseModel(meta.model).cli`). Three Claude-only behaviors are gated:
+
+- **`handleRateLimited`** — uses claude's `usage limit reached` / `/upgrade` UI strings and the claude-specific bare-Enter bypass. Skipped for codex agents.
+- **`handleApiError`** — uses claude's API error UI signature. Skipped for codex agents.
+- **Permission auto-accept** — unnecessary for codex (`-a never` + hooks already prevent prompts). Skipped for codex agents.
+
+Everything else stays CLI-agnostic:
+
+- Per-agent outbox delivery (`drainOutbox` + `runSessionExclusive` mutex).
+- `fs.watch`-driven drain coalescing.
+- Idle/nudge timing (the nudge text itself is claude-tuned but is short and harmless on codex; refining it is part of the future watchdog Phase 6 work on the codex side).
+- Notifications (manager / spawner / coordinator routing through the `@`-sentinel namespace).
+
+### 18.9 State Detection (Codex side)
+
+The deterministic half landed in Phase 3: codex agents reach the canonical `MetaState` (`running` / `waiting` / `complete`) via the SessionStart and Stop hooks writing `state` to `meta.json` through `writeAgentState()`. `detectAgentStates()` reads `state` from meta.json with the same precedence as for claude agents.
+
+The override states (`compacting`, `rate_limited`, `api_error`) are **DEFERRED** to Phase 5 of `SPEC-CODEX-MODEL.md` — they need empirically-captured codex UI strings from real interactive sessions. In the interim, codex agents surface `unknown` for these overrides; the deterministic `running` / `waiting` / `complete` states from the hooks still work correctly. Capturing the codex UI strings synthetically risks chasing the wrong regex, so the parser waits until codex agents from Phases 6/7/8 have generated real transcripts.
+
+### 18.10 meta.json Additions
+
+One new optional field on `AgentMeta` (`src/agents.ts:49`):
+
+```ts
+codex_session_id?: string;  // populated on first codex SessionStart hook firing; used by codex resume
+```
+
+The existing `session_id` (the spawn-generated UUID) is retained for claude. `codex_session_id` is independent — codex has its own rollout-id model. Defensively read both `session_id` AND `sessionId` from hook payloads in case a future codex version renames the field (Risk 7).
+
+`model` stays the discriminator. No `cli` field is added — `parseModel(meta.model).cli` is computed on demand.
+
+### 18.11 `ib write-pid` subcommand
+
+A small mutate-meta-from-shell helper introduced in Phase 4 review HIGH 2 (commit `85588fd`). Both claude `start.sh` + `resume.sh` AND codex `start.sh` + `resume.sh` write the launched CLI process's PID into `meta.json` via:
+
+```
+ib write-pid <agent-id> <pid>
+```
+
+The subcommand routes through `mutateAgentMeta()` in `src/agents.ts` so concurrent meta.json writers (the PID write, racing with a SessionStart-driven `codex_session_id` capture, or any other hook-driven mutation) can't clobber each other. Previously the spawn scripts used an inline `bun -e` snippet to merge a PID into the meta file, which had a lost-update race when a SessionStart hook fired before the PID write completed.
+
+### 18.12 Cross-Cutting Impact (Four-Perspective Checklist)
+
+Per the mandated `CLAUDE.md` Cross-Cutting Review Checklist:
+
+1. **General agent functionality** — **affected.** New spawn (§18.6) and resume (§18.7) paths branch on a new CLI discriminator derived from `meta.model`. Codex agents skip the claude-side `settings.local.json` write entirely and instead get a generated `<worktree>/AGENTS.md` + `.codex/` gitignore entry. One new optional meta field (`codex_session_id`, §18.10). One new mutate-meta-from-shell subcommand (`ib write-pid`, §18.11) used by spawn scripts of BOTH CLIs.
+2. **Hooks** — **affected.** Three new codex-side hook handlers (PreToolUse, SessionStart, Stop) dispatched through a fail-open-safe dispatcher with `--dry-run` support (§18.5). All three are registered via inline `-c` flags at spawn time (no on-disk codex config is written). Claude-side hooks are unchanged.
+3. **Watchdog** — **affected.** Three Claude-specific behaviors (`handleRateLimited`, `handleApiError`, permission auto-accept) are gated behind `classifyAgentCli(meta)` (§18.8). The outbox drain, `fs.watch` coalescing, `runSessionExclusive` mutex, nudge timing, and notification routing stay CLI-agnostic.
+4. **`ib watch` / dashboard** — **largely unaffected.** Info-panel and agent-tree render `meta.model` verbatim (D8), so `codex:<model>` displays correctly with no special split required. No new modes, no new panels, no new layout fields. (State detection in the dashboard for codex's override states is deferred — §18.9.)
+
+### 18.13 Open Risks
+
+Open items from `SPEC-CODEX-MODEL.md` §7 that have NOT been closed by the implementation:
+
+| # | Risk |
+|---|------|
+| 3 | **Hash-pinned trust + mandatory `--dangerously-bypass-hook-trust`.** Codified per-spawn in `buildCodexLaunchArgs()`. User-accepted bypass per D4. Scope of the flag beyond hook-trust is not empirically tested; revisit if codex's release notes change its semantics. |
+| 4 | **No hot-reload.** Codex config/hook edits require a fresh session. Mutating an agent's permissions mid-session means killing+respawning, not editing. |
+| 5 | **`SubagentStart` is documented but not battle-tested** (issues #14754/#18888). If/when itsybitsy needs to gate codex sub-agent spawning, verify it fires reliably before relying on it. |
+| 6 | **State-detection brittleness.** Hook-driven deterministic state is preferred; tmux overrides (§18.9) are a thin supplement deferred to Phase 5. |
+| 7 | **Codex version drift.** All facts pinned to v0.135.0; flags/contracts may change. Defensively read hook-payload fields (`session_id` AND `sessionId`) to survive snake_case → camelCase renames. Stamping `codex --version` into `meta.json` at spawn time is a future enhancement. |
+| 9 | **No `--allowedTools` / `--disallowedTools` / `permissions.allow/deny`.** The inline-`-c` PreToolUse handler is the only path. Architecturally fine, but more code than Claude needs. |
+| 11 | **Codex hook contract is FAIL-OPEN.** Crashes, malformed JSON, standalone `permissionDecision: "allow"`, and unsupported decisions all result in the tool call PROCEEDING. Mitigations layered: handler try/catch, dispatcher fail-open-safe wrap, absolute `<abs ib>` path resolution, spawn-time `--dry-run` precheck. Monitor hook-fail rate via PostToolUse or external telemetry to detect gating regressions in production. |
+| 12 | **ChatGPT-account model availability is constrained.** Only models in `~/.codex/models_cache.json` are reachable on ChatGPT-auth: `gpt-5.5`, `gpt-5.4-mini`, `codex-auto-review`. `gpt-5-codex` returns HTTP 400. itsybitsy cannot pre-validate client-side; the HTTP 400 surfaces cleanly in the TUI after the first prompt. |
+| 14 | **Inline-`-c` TOML-in-shell path safety.** `<abs ib>` is interpolated into a TOML string literal inside a shell single-quoted argument. `isCodexSafeBinaryPath()` rejects paths containing `'`, `"`, `\`, or control characters. itsybitsy's default install paths are safe; this guards against user-customized installs. |
+
+### 18.14 Affected Files and Modules
+
+Grep-able file list for the codex implementation:
+
+| File | Role |
+|------|------|
+| `src/agent-cli.ts` | `AgentCli` type, `KNOWN_CLIS` set, `parseModel()`, `resolveCli()`, `isCodexModel()` — the model-string parser. |
+| `src/codex-config.ts` | `buildCodexLaunchArgs()` (inline-`-c` flag array builder), `isCodexSafeBinaryPath()`, `renderCodexHookFlagPayload()`, `loadMergedAgentTypePermissions()`, `buildCodexDenyOutput()`, `buildCodexAllowOutput()`. |
+| `src/codex-spawn.ts` | `buildCodexStartContent()`, `buildCodexResumeContent()`, `appendCodexGitignoreEntry()`, `buildCodexAgentsMd()`, `writeCodexAgentsMd()`, `resolveIbBinaryPath()`, `stripIttybittyWrapper()`. |
+| `src/hooks/codex-pre-tool-use.ts` | PreToolUse handler — allow/deny + path-isolation for Bash AND apply_patch. |
+| `src/hooks/codex-session-start.ts` | SessionStart handler — writes `state: "running"` + captures `codex_session_id`. |
+| `src/hooks/codex-stop.ts` | Stop handler — writes `state: "waiting"` / `"complete"`. |
+| `src/hooks/codex-dispatcher.ts` | Fail-open-safe wrapper around all three handlers; supports `--dry-run`. |
+| `src/ib-commands.ts` | `newAgent()` + `resumeAgent()` codex branches (calls `buildCodexStartContent` / `buildCodexResumeContent`); rejects `codex` for `--coordinator`. |
+| `src/watchdog.ts` | `classifyAgentCli(meta)` gate on `handleRateLimited`, `handleApiError`, permission auto-accept. |
+| `src/index.ts` | Routes for `hooks codex-pre-tool-use` / `hooks codex-session-start` / `hooks codex-stop` (all via `codex-dispatcher.ts`); `write-pid` subcommand. |
+| `src/agents.ts` | `codex_session_id?: string` on `AgentMeta`; `mutateAgentMeta()` helper used by `ib write-pid`. |
+| `tests/fixtures/claude-start-sh-baseline.sh` | Byte-snapshot regression guard — claude spawn script must remain unchanged. |
+| `tests/fixtures/claude-resume-sh-baseline.sh` | Byte-snapshot regression guard — claude resume script must remain unchanged. |
+
+### 18.15 Reference: SPEC-CODEX-MODEL.md
+
+The design source-of-truth for codex CLI support is **`SPEC-CODEX-MODEL.md`** in the repo root. It carries the full evidence trail (Phase 2 spike findings, reviewer feedback fold-ins, per-phase commit history) that this §18 summarizes. Future codex SPEC changes update `SPEC-CODEX-MODEL.md` first, then this §18 summary follows. The supporting research docs (`SETTINGS-HOOKS-RESEARCH.md`, `MODEL-NAME-FORMAT-PROPOSAL.md`, `CODEX-CLI-NOTES.md`) referenced from `SPEC-CODEX-MODEL.md` are evidence-only and not summarized here.
+
+---

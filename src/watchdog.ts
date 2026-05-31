@@ -30,6 +30,23 @@ import { readConfig } from "./config";
 import { isValidTmuxSession } from "./validation";
 import { listRepos } from "./registry";
 import { OUTBOX_FILENAME } from "./outbox";
+import { parseModel } from "./agent-cli";
+import type { AgentCli } from "./agent-cli";
+
+/**
+ * Phase 6: classify an agent's CLI for watchdog branching.
+ * Legacy/malformed `meta.model` (bare names, empty strings, unknown prefixes)
+ * default to "claude" — preserves pre-Phase-1 behavior for agents whose meta
+ * was written before the `<cli>:<model>` requirement landed.
+ */
+function classifyAgentCli(model: string | undefined | null): AgentCli {
+  if (!model) return "claude";
+  try {
+    return parseModel(model).cli;
+  } catch {
+    return "claude";
+  }
+}
 
 /** Per-agent tracking state managed by the watchdog */
 export interface AgentTracker {
@@ -586,6 +603,13 @@ export const RATE_LIMIT_RETRY_DELAY_MS = 2_000;
  * - Check usage API; when session usage drops below threshold, nudge agent
  */
 async function handleRateLimited(agent: Agent, tracker: AgentTracker, _getAllAgents: GetAllAgents): Promise<void> {
+  // Phase 6: codex has its own rate-limit UX (no "Esc to dismiss" dialog +
+  // no Anthropic usage API). The bypass loop's `parseState` matchers and the
+  // `fetchUsage()` call are both claude-specific; skip the handler entirely
+  // for codex agents. Phase 5 will add codex-specific override-state handling
+  // if/when it's needed.
+  if (classifyAgentCli(agent.meta.model) !== "claude") return;
+
   const tmuxSession = agent.meta.tmux_session;
 
   if (tmuxSession && !isValidTmuxSession(tmuxSession)) {
@@ -661,6 +685,12 @@ export const API_ERROR_RETRY_INTERVAL_MS = 10_000;
  * (or a different transient state) starts the next episode from zero.
  */
 async function handleApiError(agent: Agent, tracker: AgentTracker, _getAllAgents: GetAllAgents): Promise<void> {
+  // Phase 6: "please retry" is claude-specific UX (typed into claude's TUI in
+  // response to its api-error idle prompt). Codex surfaces transient errors
+  // differently and there's no equivalent retry-by-keypress affordance, so
+  // skip for codex agents. Phase 5 will add codex-specific handling if needed.
+  if (classifyAgentCli(agent.meta.model) !== "claude") return;
+
   if (tracker.apiErrorRetries >= API_ERROR_MAX_RETRIES) {
     // One-shot log on the tick we hit the cap so user knows we backed off.
     if (tracker.previousState !== "api_error") {
@@ -1083,6 +1113,13 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
     return;
   }
 
+  // Phase 6: classify the agent's CLI once. The permission auto-accept block
+  // below is gated on this — codex agents launch with `-a never` + hooks that
+  // pre-resolve permission decisions, so they never surface "Enter to confirm"
+  // prompts; gating on cli makes the intent explicit and avoids a per-tick
+  // regex pass. Falls back to "claude" for legacy/malformed meta.
+  const agentCli = classifyAgentCli(meta.model);
+
   const tracker = createTracker();
   let tmuxGoneSince: number | null = null;
 
@@ -1181,8 +1218,11 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
       // Tmux session exists — reset grace period
       tmuxGoneSince = null;
 
-      // Auto-accept permissions prompts (workspace trust, external imports, MCP servers)
-      if (/enter to confirm/i.test(output)) {
+      // Auto-accept permissions prompts (workspace trust, external imports, MCP servers).
+      // Phase 6: claude-only — codex never surfaces these modals (`-a never` +
+      // hooks pre-resolve every permission decision), so the regex would never
+      // match in practice. Gating on cli is explicit + skips the regex pass.
+      if (agentCli === "claude" && /enter to confirm/i.test(output)) {
         if (
           /trust/i.test(output) ||
           /Allow external CLAUDE\.md file imports/i.test(output) ||

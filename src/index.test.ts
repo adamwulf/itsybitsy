@@ -811,6 +811,43 @@ describe("CLI arg parsing", () => {
     const { stdout } = await runCli(["q"]);
     expect(stdout).toContain("No repos registered");
   });
+
+  // ── HIGH 2 from Phase 4 review: write-pid CLI surface ─────────────────────
+  test("write-pid with no args shows usage", async () => {
+    const { stderr, exitCode } = await runCli(["write-pid"]);
+    expect(stderr).toContain("Usage: ib write-pid <agent-id> <pid>");
+    expect(exitCode).toBe(1);
+  });
+
+  test("write-pid with only agent-id shows usage", async () => {
+    const { stderr, exitCode } = await runCli(["write-pid", "agent-abc"]);
+    expect(stderr).toContain("Usage:");
+    expect(exitCode).toBe(1);
+  });
+
+  test("write-pid with invalid agent-id rejects", async () => {
+    const { stderr, exitCode } = await runCli(["write-pid", "bad agent id", "12345"]);
+    expect(stderr).toContain("Invalid agent ID");
+    expect(exitCode).toBe(1);
+  });
+
+  test("write-pid with non-numeric pid rejects", async () => {
+    const { stderr, exitCode } = await runCli(["write-pid", "agent-abc", "notanumber"]);
+    expect(stderr).toContain("Invalid PID");
+    expect(exitCode).toBe(1);
+  });
+
+  test("write-pid with negative pid rejects", async () => {
+    const { stderr, exitCode } = await runCli(["write-pid", "agent-abc", "-1"]);
+    expect(stderr).toContain("Invalid PID");
+    expect(exitCode).toBe(1);
+  });
+
+  test("write-pid with leading-zero pid rejects (defense in depth)", async () => {
+    const { stderr, exitCode } = await runCli(["write-pid", "agent-abc", "012"]);
+    expect(stderr).toContain("Invalid PID");
+    expect(exitCode).toBe(1);
+  });
 });
 
 // ─── list-types CLI command ─────────────────────────────────────────────────

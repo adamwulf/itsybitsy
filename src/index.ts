@@ -854,6 +854,48 @@ async function main() {
       } catch { /* ignore — fire-and-forget subprocess */ }
       break;
     }
+    case "write-pid": {
+      // Internal subcommand called by start.sh to record the
+      // spawned process PID. Routes through mutateAgentMeta so the
+      // claude_pid write does not race with concurrent meta.json mutations
+      // from the codex SessionStart hook (which writes codex_session_id) or
+      // the watchdog (which writes watchdog_pid). The naive inline
+      // `bun -e readFileSync...writeFileSync` it replaces had a real
+      // lost-write race window on codex agents.
+      // Usage: ib write-pid <agent-id> <pid>
+      const wpAgentId = args[1];
+      const wpPidArg = args[2];
+      if (!wpAgentId || !wpPidArg) {
+        console.error("Usage: ib write-pid <agent-id> <pid>");
+        process.exit(1);
+      }
+      if (!isValidAgentId(wpAgentId)) {
+        console.error(`Invalid agent ID: ${wpAgentId}`);
+        process.exit(1);
+      }
+      // Validate PID syntactically — start.sh passes $! which is always
+      // numeric, but defense-in-depth rejects anything that isn't a
+      // positive integer to keep garbage out of meta.json.
+      if (!/^[1-9][0-9]*$/.test(wpPidArg)) {
+        console.error(`Invalid PID: ${wpPidArg}`);
+        process.exit(1);
+      }
+      const { mutateAgentMeta } = await import("./agents");
+      const wpRepos = await listRepos();
+      const { existsSync: wpExists } = await import("fs");
+      const wpRepo = wpRepos.find((r) =>
+        wpExists(join(r.path, ".ittybitty", "agents", wpAgentId, "meta.json"))
+      );
+      if (!wpRepo) {
+        console.error(`Agent ${wpAgentId} not found in any registered repo.`);
+        process.exit(1);
+      }
+      const wpAgentDir = join(wpRepo.path, ".ittybitty", "agents", wpAgentId);
+      await mutateAgentMeta(wpAgentDir, (meta) => {
+        meta.claude_pid = wpPidArg;
+      });
+      break;
+    }
     case "watch": {
       if (!Bun.which("tmux")) {
         console.error("Error: 'tmux' not found on PATH. Install tmux: brew install tmux");
@@ -1854,6 +1896,24 @@ async function main() {
           await withHookLogging("inject-timestamp", agentDir, stdin, () => hookInjectTimestamp(stdin));
           break;
         }
+        case "codex-pre-tool-use":
+        case "codex-session-start":
+        case "codex-stop": {
+          // Codex's hook contract is FAIL-OPEN — any non-zero exit / thrown
+          // error / unsupported decision means the tool call PROCEEDS.
+          // Dispatcher-level argv parsing + import errors must be caught and
+          // converted to a valid no-op/deny payload + exit 0. See
+          // src/hooks/codex-dispatcher.ts for the load-bearing logic.
+          const event = subcommand.replace(/^codex-/, "") as
+            | "pre-tool-use"
+            | "session-start"
+            | "stop";
+          const id = args[2];
+          const dryRun = args.slice(3).includes("--dry-run");
+          const { runCodexDispatcher } = await import("./hooks/codex-dispatcher");
+          const { exitCode } = await runCodexDispatcher(event, id, { dryRun });
+          process.exit(exitCode);
+        }
         case "install": {
           const { installSafetyHooks } = await import("./ib-commands");
           await printAndExit(await installSafetyHooks(process.cwd()));
@@ -1886,7 +1946,7 @@ async function main() {
         }
         default:
           console.error(`Unknown hooks subcommand: ${subcommand}`);
-          console.error("Available: intercept-task, session-start, main-path, inject-status, inject-timestamp, install, uninstall, status, intercept-install, intercept-uninstall, intercept-status");
+          console.error("Available: intercept-task, session-start, main-path, inject-status, inject-timestamp, codex-pre-tool-use, codex-session-start, codex-stop, install, uninstall, status, intercept-install, intercept-uninstall, intercept-status");
           process.exit(1);
       }
       break;

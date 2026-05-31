@@ -4,7 +4,8 @@
  */
 
 import { join } from "path";
-import { readdir, rename, stat, unlink } from "fs/promises";
+import { readdir, rename, stat, unlink, open } from "fs/promises";
+import { randomUUID } from "crypto";
 import type { AgentState } from "./parse-state";
 import { parseState, stripAnsi, STARTUP_MARKERS } from "./parse-state";
 import { captureTmuxOutput, killTmuxSession, listTmuxSessions } from "./tmux-poller";
@@ -229,24 +230,101 @@ async function _classifySpawnLog(agentDir: string): Promise<SpawnLogStatus> {
 export const classifySpawnLogCtx = new InjectionContext<(agentDir: string) => Promise<SpawnLogStatus>>(_classifySpawnLog);
 
 /**
- * Write agent state to meta.json atomically (write .tmp, rename over original).
+ * Acquire an advisory lock on a meta.json so concurrent read-modify-write
+ * operations across the codex SessionStart + PreToolUse hooks (and any future
+ * RMW caller) don't lose each other's mutations. The lock file is created
+ * with O_EXCL and removed in `finally`. Short retry loop tolerates a
+ * sibling-handler firing milliseconds earlier; max wait ~1s, then the lock is
+ * forcibly stolen (the previous holder probably crashed mid-op).
+ */
+async function acquireMetaLock(agentDir: string): Promise<{ release: () => Promise<void> } | null> {
+  const lockPath = join(agentDir, ".meta.lock");
+  const startMs = Date.now();
+  const tokenBody = `${process.pid}:${randomUUID()}`;
+  while (true) {
+    try {
+      const handle = await open(lockPath, "wx");
+      await handle.writeFile(tokenBody);
+      await handle.close();
+      return {
+        release: async () => {
+          try {
+            const cur = await Bun.file(lockPath).text();
+            if (cur === tokenBody) await unlink(lockPath);
+          } catch { /* lock already gone */ }
+        },
+      };
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code !== "EEXIST") return null;
+      if (Date.now() - startMs > 1000) {
+        try { await unlink(lockPath); } catch { /* race ok */ }
+        continue;
+      }
+      await new Promise((r) => setTimeout(r, 25));
+    }
+  }
+}
+
+/**
+ * Mutate meta.json under a per-agent advisory lock. The mutator receives the
+ * current parsed object, mutates in place (or returns a replacement), and the
+ * helper persists via unique-suffixed tmp file + atomic rename. Returns true
+ * if a write happened, false if meta.json was missing or the mutator returned
+ * `null` (signaling "no change").
+ *
+ * The unique tmp suffix (".tmp.<pid>.<uuid>") is critical: two writers
+ * sharing ".tmp" would clobber each other's intermediate state and could
+ * surface a corrupted JSON file under the rename. The advisory lock prevents
+ * lost mutations (writer A's read → writer B's read → A renames → B renames,
+ * losing A's changes).
+ */
+export async function mutateAgentMeta(
+  agentDir: string,
+  mutator: (meta: Record<string, unknown>) => Record<string, unknown> | null | void,
+): Promise<boolean> {
+  const metaPath = join(agentDir, "meta.json");
+  // Pre-lock existence check (cheap, avoids taking the lock for a missing file).
+  if (!(await Bun.file(metaPath).exists())) return false;
+
+  const lock = await acquireMetaLock(agentDir);
+  try {
+    // Critical: re-create the BunFile reference UNDER the lock. Bun.file()
+    // binds to the inode at construction; after a sibling writer's `rename`
+    // swaps the file, an old BunFile reference reads stale/empty bytes and
+    // `.json()` throws "Failed to parse JSON". Creating it fresh here means
+    // we always read the latest committed inode.
+    const fileUnderLock = Bun.file(metaPath);
+    const current = await fileUnderLock.json();
+    const result = mutator(current);
+    if (result === null) return false;
+    const next = result ?? current;
+    const tmpPath = `${metaPath}.tmp.${process.pid}.${randomUUID()}`;
+    try {
+      await Bun.write(tmpPath, JSON.stringify(next, null, 2));
+      await rename(tmpPath, metaPath);
+      return true;
+    } catch {
+      try { await unlink(tmpPath); } catch { /* tmp already gone */ }
+      return false;
+    }
+  } catch {
+    return false;
+  } finally {
+    if (lock) await lock.release();
+  }
+}
+
+/**
+ * Write agent state to meta.json atomically. Uses `mutateAgentMeta` so a
+ * concurrent codex SessionStart `writeAgentState("running")` and a
+ * PreToolUse `captureCodexSessionId` both land in the final file.
  * No-op if meta.json doesn't exist.
  */
 export async function writeAgentState(agentDir: string, state: MetaState): Promise<void> {
-  const metaPath = join(agentDir, "meta.json");
-  const file = Bun.file(metaPath);
-  if (!(await file.exists())) return;
-
-  try {
-    const data = await file.json();
-    data.state = state;
-    data.state_updated_at = Math.floor(Date.now() / 1000);
-    const tmpPath = metaPath + ".tmp";
-    await Bun.write(tmpPath, JSON.stringify(data, null, 2));
-    await rename(tmpPath, metaPath);
-  } catch {
-    /* best-effort — don't crash on write failures */
-  }
+  await mutateAgentMeta(agentDir, (meta) => {
+    meta.state = state;
+    meta.state_updated_at = Math.floor(Date.now() / 1000);
+  });
 }
 
 /**

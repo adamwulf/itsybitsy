@@ -675,6 +675,31 @@ export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
       return await resetCoordinator(agent);
     }
 
+    // Parse the qualified `<cli>:<model>` form (D1) EARLY so we can reject
+    // codex resume before issuing any tmux / shell-script work (MED 1 from
+    // the Phase 4 review). parseModel throws on missing/malformed/unknown
+    // cli — surface as a resume failure (D6).
+    const rawModel = agent.meta.model && agent.meta.model !== "null" ? agent.meta.model : "";
+    if (rawModel && !isValidModel(rawModel)) {
+      return { ok: false, exitCode: 1, stdout: "", stderr: `Invalid model name: ${rawModel}` };
+    }
+    let modelFlagValue = "";
+    let resumeCli: ReturnType<typeof parseModel>["cli"] = "claude";
+    if (rawModel) {
+      try {
+        const parsedResume = parseModel(rawModel);
+        modelFlagValue = parsedResume.model;
+        resumeCli = parsedResume.cli;
+      } catch (err) {
+        return {
+          ok: false,
+          exitCode: 1,
+          stdout: "",
+          stderr: err instanceof Error ? err.message : String(err),
+        };
+      }
+    }
+
     // Resume is allowed when no live tmux session exists for the agent. We don't
     // trust meta.state here because legacy paused agents (pre-Phase 42) may have a
     // stale state like "complete" or "waiting" that pause never overwrote. Checking
@@ -697,67 +722,8 @@ export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
       return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' is still being created — wait for spawn to complete before resuming` };
     }
 
-    // Read session_id from meta.json
-    const sessionId = agent.meta.session_id;
-    if (!sessionId || sessionId === "null") {
-      return { ok: false, exitCode: 1, stdout: "", stderr: "No session_id found in meta.json" };
-    }
-
-    // Validate session_id before shell interpolation
-    if (!isValidSessionId(sessionId)) {
-      return { ok: false, exitCode: 1, stdout: "", stderr: `Invalid session ID: ${sessionId}` };
-    }
-
-    // Read model
-    const model = agent.meta.model && agent.meta.model !== "null" ? agent.meta.model : "";
-
-    // Validate model if present
-    if (model && !isValidModel(model)) {
-      return { ok: false, exitCode: 1, stdout: "", stderr: `Invalid model name: ${model}` };
-    }
-
-    // Parse the qualified `<cli>:<model>` form (D1) so we pass the model HALF
-    // to `--model`, not the raw `claude:opus`. parseModel throws on
-    // missing/malformed/unknown cli — surface as a resume failure (D6).
-    let modelFlagValue = "";
-    if (model) {
-      try {
-        modelFlagValue = parseModel(model).model;
-      } catch (err) {
-        return {
-          ok: false,
-          exitCode: 1,
-          stdout: "",
-          stderr: err instanceof Error ? err.message : String(err),
-        };
-      }
-    }
-
     // Tmux session was validated at the top of resumeAgent (liveness guard).
     const tmuxSession = agent.meta.tmux_session;
-
-    // Detect yolo mode from start.sh
-    let yoloMode = false;
-    try {
-      const startSh = await Bun.file(join(agentDir, "start.sh")).text();
-      if (startSh.includes("dangerously-skip-permissions")) {
-        yoloMode = true;
-      }
-    } catch { /* start.sh may not exist */ }
-
-    // Build claude args
-    let claudeArgs = "";
-    if (yoloMode) {
-      claudeArgs = "--dangerously-skip-permissions --permission-mode bypassPermissions";
-    }
-    if (modelFlagValue) {
-      claudeArgs = claudeArgs ? `${claudeArgs} --model ${modelFlagValue}` : `--model ${modelFlagValue}`;
-    }
-
-    // Note: per-repo coordinators never reach this point — the early branch at
-    // the top of resumeAgent routes them to resetCoordinator instead. So no
-    // need to re-thread --settings to the (no-longer-relevant) saved coordinator
-    // settings file here.
 
     // Validate paths for shell script interpolation
     if (!isValidShellPath(agentDir)) {
@@ -775,17 +741,133 @@ export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
 
     // Build exit script path
     const absExitScript = join(agentDir, "exit-check.sh");
-
-    // Shell-quote all paths for safe interpolation
-    const qAgentDir = shellQuote(agentDir);
-    const qAbsExitScript = shellQuote(absExitScript);
-
-    // Write resume.sh
     const resumeScript = join(agentDir, "resume.sh");
-    const qMetaJson = shellQuote(join(agentDir, "meta.json"));
-    const qAgentLog = shellQuote(join(agentDir, "agent.log"));
-    const qResumeStderrLog = shellQuote(join(agentDir, "claude.stderr.log"));
-    const resumeContent = `#!/bin/bash
+
+    let yoloMode = false;
+    if (resumeCli === "codex") {
+      // ── Codex resume branch (SPEC §5.8 + §6 Phase 7) ─────────────────────────
+      // Read codex's rollout/session id (NOT the claude session_id UUID).
+      // Captured by SessionStart/PreToolUse hooks on first launch.
+      const codexSessionId = agent.meta.codex_session_id;
+      if (!codexSessionId || codexSessionId === "null" || codexSessionId.trim() === "") {
+        return {
+          ok: false,
+          exitCode: 1,
+          stdout: "",
+          stderr: `Cannot resume codex agent '${agent.id}': codex_session_id not yet captured (SessionStart hook never fired). Try nuking + respawning instead.`,
+        };
+      }
+      if (!isValidSessionId(codexSessionId)) {
+        return {
+          ok: false,
+          exitCode: 1,
+          stdout: "",
+          stderr: `Invalid codex_session_id for agent '${agent.id}': ${codexSessionId}`,
+        };
+      }
+
+      // Resolve the absolute `ib` binary path (codex hook dispatch needs it).
+      // Same path-safety check that gates the spawn-side codex launch.
+      const { resolveIbBinaryPath } = await import("./codex-spawn");
+      const { isCodexSafeBinaryPath } = await import("./codex-config");
+      const codexIbBinaryPath = resolveIbBinaryPath();
+      if (!codexIbBinaryPath) {
+        return {
+          ok: false,
+          exitCode: 1,
+          stdout: "",
+          stderr: "Error: codex resume requires an absolute path to the `ib` binary, but `ib` is not on PATH. Install ib and ensure it is reachable via PATH before resuming a codex agent.",
+        };
+      }
+      if (!isCodexSafeBinaryPath(codexIbBinaryPath)) {
+        return {
+          ok: false,
+          exitCode: 1,
+          stdout: "",
+          stderr: `Error: Unsafe ib binary path for codex resume: ${JSON.stringify(codexIbBinaryPath)} contains quotes, backslashes, or control characters. Reinstall ib to a path made of printable ASCII with no apostrophes, quotes, or backslashes.`,
+        };
+      }
+
+      // Resume-time dispatcher precheck (SPEC §5.5 fail-open mitigation).
+      // Same guard as the Phase 4 spawn-time precheck: if our hook dispatcher
+      // is missing/broken (e.g. `ib` was rebuilt between spawn and resume),
+      // every PreToolUse call would silently fail-open and the codex agent
+      // would lose its path-isolation + permission gate. Re-running the dry-run
+      // on resume catches that case before we hand off to tmux.
+      //
+      // On precheck failure: refuse the resume cleanly. Do NOT touch the
+      // worktree — it is the user's existing agent state, not ours to nuke.
+      const codexPrecheckEvents = ["codex-pre-tool-use", "codex-session-start", "codex-stop"];
+      for (const event of codexPrecheckEvents) {
+        const result = await nukeResumeSpawnCtx.run([codexIbBinaryPath, "hooks", event, agent.id, "--dry-run"]);
+        if (result.exitCode !== 0) {
+          const errMsg = result.stderr.trim() || `dispatcher precheck failed with exit code ${result.exitCode}`;
+          await logAgent(agentDir, `[resume] codex dispatcher precheck failed for ${event}: ${errMsg}`);
+          return {
+            ok: false,
+            exitCode: 1,
+            stdout: "",
+            stderr: `Error: codex dispatcher precheck failed (${event}): ${errMsg}`,
+          };
+        }
+      }
+
+      // Build resume.sh via the shared codex builder (mirrors start.sh).
+      const { buildCodexResumeContent } = await import("./codex-spawn");
+      const codexResumeContent = buildCodexResumeContent({
+        agentId: agent.id,
+        ibBinaryPath: codexIbBinaryPath,
+        codexSessionId,
+        absMetaJson: join(agentDir, "meta.json"),
+        absExitScript,
+        absAgentLog: join(agentDir, "agent.log"),
+        absStderrLog: join(agentDir, "claude.stderr.log"),
+      });
+      await Bun.write(resumeScript, codexResumeContent);
+      await chmod(resumeScript, 0o755);
+    } else {
+      // ── Claude resume branch (unchanged) ─────────────────────────────────────
+      // Read session_id from meta.json
+      const sessionId = agent.meta.session_id;
+      if (!sessionId || sessionId === "null") {
+        return { ok: false, exitCode: 1, stdout: "", stderr: "No session_id found in meta.json" };
+      }
+
+      // Validate session_id before shell interpolation
+      if (!isValidSessionId(sessionId)) {
+        return { ok: false, exitCode: 1, stdout: "", stderr: `Invalid session ID: ${sessionId}` };
+      }
+
+      // Detect yolo mode from start.sh
+      try {
+        const startSh = await Bun.file(join(agentDir, "start.sh")).text();
+        if (startSh.includes("dangerously-skip-permissions")) {
+          yoloMode = true;
+        }
+      } catch { /* start.sh may not exist */ }
+
+      // Build claude args
+      let claudeArgs = "";
+      if (yoloMode) {
+        claudeArgs = "--dangerously-skip-permissions --permission-mode bypassPermissions";
+      }
+      if (modelFlagValue) {
+        claudeArgs = claudeArgs ? `${claudeArgs} --model ${modelFlagValue}` : `--model ${modelFlagValue}`;
+      }
+
+      // Note: per-repo coordinators never reach this point — the early branch at
+      // the top of resumeAgent routes them to resetCoordinator instead. So no
+      // need to re-thread --settings to the (no-longer-relevant) saved coordinator
+      // settings file here.
+
+      // Shell-quote all paths for safe interpolation
+      const qAbsExitScript = shellQuote(absExitScript);
+
+      // Write resume.sh
+      const qMetaJson = shellQuote(join(agentDir, "meta.json"));
+      const qAgentLog = shellQuote(join(agentDir, "agent.log"));
+      const qResumeStderrLog = shellQuote(join(agentDir, "claude.stderr.log"));
+      const resumeContent = `#!/bin/bash
 # Clear Claude Code nesting detection so agents can start their own claude process
 unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT
 
@@ -833,10 +915,11 @@ log "Claude PID: $CLAUDE_PID (setsid=$SETSID)"
 trap 'log "script received SIGTERM; sending SIGTERM to Claude PID=$CLAUDE_PID"; kill $CLAUDE_PID 2>/dev/null' TERM
 trap 'log "script received SIGINT; sending SIGINT to Claude PID=$CLAUDE_PID"; kill -INT $CLAUDE_PID 2>/dev/null' INT
 
-# Store PID in meta.json
+# Store PID in meta.json — route through "ib write-pid" which uses
+# mutateAgentMeta + the meta-lock (HIGH 2 from the Phase 4 review).
 META_JSON=${qMetaJson}
 if [[ -f "$META_JSON" ]]; then
-    bun -e "const f=process.argv[1];const m=JSON.parse(require('fs').readFileSync(f,'utf8'));m.claude_pid=String(process.argv[2]);require('fs').writeFileSync(f,JSON.stringify(m,null,2))" "$META_JSON" "$CLAUDE_PID"
+    ib write-pid ${shellQuote(agent.id)} "$CLAUDE_PID" || log "write-pid failed (exit=$?); meta.json claude_pid not set"
 fi
 
 # Wait for Claude to complete
@@ -870,8 +953,9 @@ fi
 # Run exit check
 ${qAbsExitScript}
 `;
-    await Bun.write(resumeScript, resumeContent);
-    await chmod(resumeScript, 0o755);
+      await Bun.write(resumeScript, resumeContent);
+      await chmod(resumeScript, 0o755);
+    }
 
     // Ensure tmux server is running
     const startServerResult = await nukeResumeSpawnCtx.run(["tmux", "start-server"]);
@@ -3259,6 +3343,51 @@ export async function newAgent(
   const agentCli = parsed.cli;
   const modelFlagValue = parsed.model;
 
+  // Codex spawn-path preconditions (SPEC §5.4 step 2 + §7 risk 14). Run
+  // BEFORE any worktree/tmux work so a fail here doesn't leave residual
+  // state behind. The path-safety check guards the TOML-in-shell quoting
+  // in the inline `-c` payload; the binary lookup gives codex an absolute
+  // path so its spawn env's PATH cannot break hook dispatch. The dispatcher
+  // precheck is deferred until after agentDir is created so we can clean
+  // it up uniformly with the rest of the spawn-failure paths.
+  //
+  // Codex + per-repo coordinator is rejected up-front (SPEC §D9 stub).
+  // The system coordinator path (coordinator.ts:spawnCoordinator) has the
+  // same guard, but per-repo coordinators reach `newAgent` directly with
+  // coordinatorMode=true, so we need a guard HERE — without it the spawn
+  // would skip the useWorktree branch (AGENTS.md, .gitignore, precheck)
+  // and produce a broken half-codex coordinator.
+  let codexIbBinaryPath: string | null = null;
+  if (agentCli === "codex") {
+    if (coordinatorMode) {
+      return {
+        ok: false,
+        exitCode: 1,
+        stdout: "",
+        stderr: `codex coordinators not yet implemented (per SPEC D9 stub); coordinator.model must use a claude:<model> form. Pending Phase 9 coordinator support.`,
+      };
+    }
+    const { resolveIbBinaryPath } = await import("./codex-spawn");
+    const { isCodexSafeBinaryPath } = await import("./codex-config");
+    codexIbBinaryPath = resolveIbBinaryPath();
+    if (!codexIbBinaryPath) {
+      return {
+        ok: false,
+        exitCode: 1,
+        stdout: "",
+        stderr: "Error: codex spawn requires an absolute path to the `ib` binary, but `ib` is not on PATH. Install ib and ensure it is reachable via PATH before spawning a codex agent.",
+      };
+    }
+    if (!isCodexSafeBinaryPath(codexIbBinaryPath)) {
+      return {
+        ok: false,
+        exitCode: 1,
+        stdout: "",
+        stderr: `Error: Unsafe ib binary path for codex launch: ${JSON.stringify(codexIbBinaryPath)} contains quotes, backslashes, or control characters. Reinstall ib to a path made of printable ASCII with no apostrophes, quotes, or backslashes.`,
+      };
+    }
+  }
+
   // 7.1. Permissions are assembled in three layers (SPEC §2.3):
   //   1. `_all.md` frontmatter — applied to every spawned agent
   //   2. `_non_coordinator.md` frontmatter — applied to non-coordinator agents only
@@ -3476,6 +3605,20 @@ export async function newAgent(
   // Note: coordinator branch format retained for backward compatibility with
   // session-start.ts and health-check.ts, even though coordinators no longer use worktrees.
   const branchName = coordinatorMode ? `agent/${id}-${repoId}` : `agent/${id}`;
+
+  // Centralised cleanup helper. Defined here (above the codex precheck and
+  // every subsequent spawn-failure path) so the codex dispatcher precheck
+  // can share the same exact unwind logic as later failures — see MED 2
+  // from the Phase 4 review. Captures `agentDir`, `useWorktree`,
+  // `rootRepoPath`, `branchName` by reference.
+  async function cleanupOnFailure() {
+    await rm(agentDir, { recursive: true, force: true });
+    if (useWorktree) {
+      await newAgentSpawnCtx.run(["git", "-C", rootRepoPath, "worktree", "remove", join(agentDir, "repo"), "--force"]);
+      await newAgentSpawnCtx.run(["git", "-C", rootRepoPath, "branch", "-D", branchName]);
+    }
+  }
+
   const baseRefForLog = manager ? `agent/${manager}` : "HEAD";
   await logSpawn(
     agentDir,
@@ -3551,13 +3694,88 @@ export async function newAgent(
     }
     workPath = join(agentDir, "repo");
 
-    // 13. Write settings.local.json (worktree mode only).
-    // Coordinators force useWorktree=false above (SPEC §12.2.3), so we never
-    // reach here in coordinator mode — only regular agents need settings here.
-    await mkdir(join(agentDir, "repo", ".claude"), { recursive: true });
-    const managerOrWorker: "manager" | "worker" = isLeafAgent ? "worker" : "manager";
-    const settingsContent = await buildAgentSettings(rootRepoPath, managerOrWorker, id, configAllow, configDeny);
-    await Bun.write(join(agentDir, "repo", ".claude", "settings.local.json"), settingsContent);
+    if (agentCli === "codex") {
+      // Codex agents do NOT read .claude/settings.local.json — their hook
+      // registration is inline via `-c` flags built in `buildCodexLaunchArgs`
+      // (SPEC §3.3 + §5.4). Per Phase 4 we instead:
+      //   1. Append `.codex/` to <worktree>/.gitignore (covers any incidental
+      //      files codex itself drops — hook logs, sentinels, scratch).
+      //   2. Generate a per-agent <worktree>/AGENTS.md — codex reads this
+      //      natively at session start (the codex analog of the claude
+      //      session-start prompt injection).
+      // Coordinator+codex was rejected up-front in the codex precondition
+      // block above (SPEC §D9 stub) — both the system coordinator (handled
+      // in coordinator.ts) and the per-repo coordinator (handled here in
+      // newAgent) refuse codex models before any side-effects.
+      const { appendCodexGitignoreEntry, writeCodexAgentsMd } = await import("./codex-spawn");
+      const { detectRole } = await import("./hooks/session-start");
+      try {
+        const giResult = await appendCodexGitignoreEntry(workPath);
+        if (giResult === "negation-respected") {
+          // MED 3 from the Phase 4 review: user has an explicit `!.codex/`
+          // negation — we deferred to their intent. Surface this so they know
+          // codex's incidental files (hook logs, sentinels) may end up tracked.
+          await logSpawn(
+            agentDir,
+            spawnerAgentDir,
+            id,
+            `codex .gitignore: explicit negation present (!.codex/ or !.codex); deferring — codex incidental files may be tracked.`,
+          );
+        }
+      } catch (err) {
+        await logSpawn(agentDir, spawnerAgentDir, id, `codex .gitignore append failed: ${(err as Error)?.message ?? String(err)}`);
+      }
+      const sessionCtx = detectRole(workPath, {
+        id,
+        manager: manager || null,
+        worker: isLeafAgent,
+        agentType: typeName,
+        spawned_by: spawnedBy ?? undefined,
+        allowedPaths: resolvedAllowedPaths,
+      }, id);
+      try {
+        await writeCodexAgentsMd(workPath, sessionCtx);
+      } catch (err) {
+        await logSpawn(agentDir, spawnerAgentDir, id, `codex AGENTS.md write failed: ${(err as Error)?.message ?? String(err)}`);
+      }
+
+      // Codex hook-dispatcher precheck (SPEC §5.4 step 7 + §5.5 fail-open
+      // mitigation). Codex treats any non-zero hook exit as fail-open — if
+      // our dispatcher is missing or its module-import throws at runtime,
+      // every PreToolUse call would be allowed through. The `--dry-run`
+      // flag returns exit 1 on failure so we can refuse the spawn before
+      // creating the tmux session. On failure we reuse `cleanupOnFailure()`
+      // (see MED 2 from the Phase 4 review) so any future cleanup additions
+      // (e.g. tmux session kill) are inherited automatically.
+      const codexPrecheckEvents = ["codex-pre-tool-use", "codex-session-start", "codex-stop"];
+      for (const event of codexPrecheckEvents) {
+        const result = await newAgentSpawnCtx.run([codexIbBinaryPath!, "hooks", event, id, "--dry-run"]);
+        if (result.exitCode !== 0) {
+          const errMsg = result.stderr.trim() || `dispatcher precheck failed with exit code ${result.exitCode}`;
+          await logSpawn(
+            agentDir,
+            spawnerAgentDir,
+            id,
+            `spawn FAILED: codex dispatcher precheck failed for ${event}: ${errMsg}`,
+          );
+          await cleanupOnFailure();
+          return {
+            ok: false,
+            exitCode: 1,
+            stdout: "",
+            stderr: `Error: codex dispatcher precheck failed (${event}): ${errMsg}`,
+          };
+        }
+      }
+    } else {
+      // 13. Write settings.local.json (worktree mode only).
+      // Coordinators force useWorktree=false above (SPEC §12.2.3), so we never
+      // reach here in coordinator mode — only regular agents need settings here.
+      await mkdir(join(agentDir, "repo", ".claude"), { recursive: true });
+      const managerOrWorker: "manager" | "worker" = isLeafAgent ? "worker" : "manager";
+      const settingsContent = await buildAgentSettings(rootRepoPath, managerOrWorker, id, configAllow, configDeny);
+      await Bun.write(join(agentDir, "repo", ".claude", "settings.local.json"), settingsContent);
+    }
   } else if (coordinatorMode) {
     // Per-repo coordinator: write settings (permissions + hooks) into the
     // coordinator's own agent dir, NOT the repo's .claude/settings.local.json.
@@ -3742,7 +3960,29 @@ echo ""
   const qStartExitScript = shellQuote(absExitScript);
   const qStartAgentLog = shellQuote(join(agentDir, "agent.log"));
   const qStartStderrLog = shellQuote(join(agentDir, "claude.stderr.log"));
-  const startContent = `#!/bin/bash
+
+  let startContent: string;
+  if (agentCli === "codex") {
+    // Codex spawn branch — SPEC §6 Phase 4. The launch line is the canonical
+    // §3.3 form: `codex -m <model> -a never -s workspace-write
+    // --dangerously-bypass-hook-trust <inline -c flags> "<prompt>"`. The
+    // path-safety + dispatcher precheck guarantees ran above (we wouldn't
+    // be here on failure). PID variable + meta-field stay `CLAUDE_PID` /
+    // `claude_pid` so the watchdog and other readers don't break — renaming
+    // is its own follow-up.
+    const { buildCodexStartContent } = await import("./codex-spawn");
+    startContent = buildCodexStartContent({
+      agentId: id,
+      ibBinaryPath: codexIbBinaryPath!,
+      codexModel: modelFlagValue,
+      absPromptFile,
+      absMetaJson: join(agentDir, "meta.json"),
+      absExitScript,
+      absAgentLog: join(agentDir, "agent.log"),
+      absStderrLog: join(agentDir, "claude.stderr.log"),
+    });
+  } else {
+    startContent = `#!/bin/bash
 # Clear Claude Code nesting detection so agents can start their own claude process
 unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT
 
@@ -3790,10 +4030,15 @@ log "Claude PID: $CLAUDE_PID (setsid=$SETSID)"
 trap 'log "script received SIGTERM; sending SIGTERM to Claude PID=$CLAUDE_PID"; kill $CLAUDE_PID 2>/dev/null' TERM
 trap 'log "script received SIGINT; sending SIGINT to Claude PID=$CLAUDE_PID"; kill -INT $CLAUDE_PID 2>/dev/null' INT
 
-# Store PID in meta.json
+# Store PID in meta.json — route through "ib write-pid" which uses
+# mutateAgentMeta + the meta-lock so the write does not lose a concurrent
+# mutation (e.g. the watchdog setting watchdog_pid). The naive inline
+# bun -e read-modify-write it replaces had a real lost-write race window
+# whose symptom is benign on claude today but matters symmetrically with
+# the codex side (HIGH 2 from the Phase 4 review).
 META_JSON=${qStartMetaJson}
 if [[ -f "$META_JSON" ]]; then
-    bun -e "const f=process.argv[1];const m=JSON.parse(require('fs').readFileSync(f,'utf8'));m.claude_pid=String(process.argv[2]);require('fs').writeFileSync(f,JSON.stringify(m,null,2))" "$META_JSON" "$CLAUDE_PID"
+    ib write-pid ${shellQuote(id)} "$CLAUDE_PID" || log "write-pid failed (exit=$?); meta.json claude_pid not set"
 fi
 
 # Wait for Claude to complete
@@ -3827,20 +4072,11 @@ fi
 # Run exit check
 ${qStartExitScript}
 `;
+  }
   await Bun.write(startScript, startContent);
   await chmod(startScript, 0o755);
 
   // 17. Init agent.log (already done via logAgent above)
-
-  // Helper: clean up agent dir, worktree, and branch on failure
-  async function cleanupOnFailure() {
-    await rm(agentDir, { recursive: true, force: true });
-    if (useWorktree) {
-      await newAgentSpawnCtx.run(["git", "-C", rootRepoPath, "worktree", "remove", join(agentDir, "repo"), "--force"]);
-      await newAgentSpawnCtx.run(["git", "-C", rootRepoPath, "branch", "-D", branchName]);
-    }
-  }
-
   // 18. Ensure tmux server is running
   const startServerResult = await timed("new-agent", "tmux-start-server", () =>
     newAgentSpawnCtx.run(["tmux", "start-server"])

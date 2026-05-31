@@ -419,6 +419,7 @@ describe("TmuxPaneComponent scroll logic", () => {
   test("trimInputSeparator removes Codex prompt chrome and preserves status line", () => {
     const pane = new TmuxPaneComponent();
     pane.agent = makeAgent("agent-codex", "/tmp/test");
+    pane.agent.meta.model = "codex:gpt-5.5";
     pane.hasPolled = true;
     pane.displayHeight = 10;
     pane.trimInputSeparator = true;
@@ -444,6 +445,33 @@ describe("TmuxPaneComponent scroll logic", () => {
     const rendered = pane.render(120).map((line) => stripAnsi(line)).join("\n");
     expect(rendered).toContain("• WAITING");
     expect(rendered).not.toContain("Use /skills");
+    expect(rendered).not.toContain("gpt-5.5 default");
+  });
+
+  test("trimInputSeparator finds Codex prompt chrome from the bottom after long wrapped input", () => {
+    const pane = new TmuxPaneComponent();
+    pane.agent = makeAgent("agent-codex", "/tmp/test");
+    pane.agent.meta.model = "codex:gpt-5.5";
+    pane.hasPolled = true;
+    pane.displayHeight = 10;
+    pane.trimInputSeparator = true;
+    pane.rawOutput = [
+      "• Standing by.",
+      "",
+      "› long queued prompt",
+      ...Array.from({ length: 25 }, (_, i) => `  continuation ${i}`),
+      "",
+      "  gpt-5.5 default · /tmp/test",
+      "",
+    ].join("\n");
+
+    pane.parseStatusLines(80);
+    expect(pane.statusLines).toEqual(["  gpt-5.5 default · /tmp/test"]);
+
+    const rendered = pane.render(80).map((line) => stripAnsi(line)).join("\n");
+    expect(rendered).toContain("• Standing by.");
+    expect(rendered).not.toContain("long queued prompt");
+    expect(rendered).not.toContain("continuation");
     expect(rendered).not.toContain("gpt-5.5 default");
   });
 

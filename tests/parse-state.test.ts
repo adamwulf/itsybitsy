@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { isCodexTmuxOutput, parseCodexState, parseState } from "../src/parse-state";
+import { isCodexTmuxOutput, parseCodexState, parseState, parseStateForCli } from "../src/parse-state";
 
 // Real codex tmux capture (Codex CLI v0.135.0, gpt-5.5) — abridged from
 // /Users/adamwulf/Developer/muse/muse-ios/.ittybitty/agents/agent-2a4815af/debug-logs/
@@ -178,6 +178,20 @@ describe("parseCodexState", () => {
     expect(r.state).toBe("waiting");
   });
 
+  test("long codex input prompt is parsed bottom-up from the last prompt", () => {
+    const input = [
+      "• Standing by.",
+      "",
+      "› " + "Explain this codebase in detail",
+      ...Array.from({ length: 25 }, (_, i) => `  wrapped input ${i}`),
+      "",
+      "  gpt-5.5 default · /repo",
+    ].join("\n");
+    const r = parseCodexState(input);
+    expect(r.state).toBe("waiting");
+    expect(r.reason).toBe("idle at codex input prompt");
+  });
+
   test("completion sentinel → complete", () => {
     const r = parseCodexState(CODEX_WITH_COMPLETION);
     expect(r.state).toBe("complete");
@@ -229,6 +243,20 @@ describe("parseState codex dispatch", () => {
   test("codex with completion routed through parseState → complete", () => {
     const r = parseState(CODEX_WITH_COMPLETION);
     expect(r.state).toBe("complete");
+  });
+});
+
+describe("parseStateForCli", () => {
+  test("uses explicit codex cli instead of detecting from tmux text", () => {
+    const input = "› hello\n\n  gpt-5.5 default · /repo\n";
+    const r = parseStateForCli(input, "codex");
+    expect(r.state).toBe("waiting");
+  });
+
+  test("uses explicit claude cli instead of codex status bar detection", () => {
+    const input = "› hello\n\n  gpt-5.5 default · /repo\n";
+    const r = parseStateForCli(input, "claude");
+    expect(r.state).toBe("unknown");
   });
 });
 

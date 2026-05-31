@@ -74,9 +74,10 @@ export class SidebarComponent implements Component {
   agentTree: AgentTreeComponent;
   /**
    * Teams tree component (§17.1). Shares the SAME tree region with `agentTree`
-   * — only one renders at a time, chosen by `focusTarget`. The two panels hold
-   * independent selection state (§17.1 independent-selection invariant); the
-   * sidebar never resets either when focus toggles.
+   * — only one renders at a time, chosen by `sidebarMode` (Phase 1 three-axis
+   * model). The two panels hold independent selection state (§17.1
+   * independent-selection invariant); the sidebar never resets either when
+   * `sidebarMode` toggles.
    */
   teamsTree: TeamsTreeComponent;
   infoPanel: InfoPanelComponent;
@@ -164,11 +165,14 @@ export class SidebarComponent implements Component {
 
     // Tree section header: a side-by-side Agents/Teams tab line. The active
     // tab is highlighted (REVERSE+BOLD); the inactive tab is DIM. Only ONE
-    // tree (the active one) renders below — the header reflects which is
-    // visible AND which has focus.
+    // tree (the active one) renders below — the header reflects which tree
+    // is currently VISIBLE (i.e., `sidebarMode`), not which panel has focus.
+    // After Phase 1 (§17.1) focus and sidebar visibility are independent axes;
+    // the tab header tracks visibility so the user always sees the correct
+    // label highlighted for the tree below.
     const tabs = [
-      { label: "Agents", focused: this.focusTarget === "agent-tree" },
-      { label: "Teams", focused: this.focusTarget === "teams-tree" },
+      { label: "Agents", focused: this.sidebarMode === "agents" },
+      { label: "Teams", focused: this.sidebarMode === "teams" },
     ];
     lines.push(buildTabbedFocusSeparator(tabs, w));
     if (showTeams) {

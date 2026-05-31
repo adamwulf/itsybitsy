@@ -147,27 +147,34 @@ describe("SidebarComponent", () => {
     expect(text).toContain("doing work");
   });
 
-  test("Agents separator is focused when focusTarget is agent-tree", () => {
+  // §17.1 Phase 1: the tree-section tab header tracks sidebar VISIBILITY
+  // (sidebarMode), not focus. Focus state is communicated separately (by the
+  // Info separator and the active-pane chrome elsewhere). The two tests below
+  // pin the new semantics: the Agents tab is highlighted iff sidebarMode is
+  // "agents", regardless of which panel currently has focus.
+  test("Agents tab is highlighted when sidebarMode is agents (default)", () => {
     const sidebar = makeSidebar();
     sidebar.displayHeight = 25;
     sidebar.focusTarget = "agent-tree";
     sidebar.agentTree.setFlatList([]);
 
     const lines = sidebar.render(SIDEBAR_WIDTH);
-    // First line is the Agents separator — should contain REVERSE (focused)
+    // First line is the Agents/Teams tab header — Agents tab should be REVERSE.
     expect(lines[0]).toContain(REVERSE);
   });
 
-  test("Agents separator is unfocused when focusTarget is active-agent", () => {
+  test("Agents tab stays highlighted when focus is on active-agent (sidebarMode=agents)", () => {
+    // Phase 1: changing focus away from the sidebar must NOT de-highlight the
+    // Agents tab — the tab header reflects which tree is visible, not which
+    // panel has focus.
     const sidebar = makeSidebar();
     sidebar.displayHeight = 25;
     sidebar.focusTarget = "active-agent";
     sidebar.agentTree.setFlatList([]);
 
     const lines = sidebar.render(SIDEBAR_WIDTH);
-    // First line is the Agents separator — should NOT contain REVERSE
-    expect(lines[0]).not.toContain(REVERSE);
-    expect(lines[0]).toContain(DIM);
+    // Agents tab is still highlighted (sidebarMode defaults to "agents").
+    expect(lines[0]).toContain(REVERSE);
   });
 
   test("Info separator is never focused regardless of focusTarget", () => {
@@ -336,10 +343,11 @@ describe("SidebarComponent — §17 Teams panel rendering", () => {
     expect(text).toContain("Teams");
   });
 
-  test("Teams header renders focused (reverse video) on the Teams tab when teams-tree is focused", () => {
+  // §17.1 Phase 1: tab header tracks VISIBILITY (sidebarMode), not focus.
+  test("Teams tab is highlighted when sidebarMode is teams", () => {
     const sidebar = makeSidebar();
     sidebar.displayHeight = 25;
-    sidebar.focusTarget = "teams-tree";
+    sidebar.sidebarMode = "teams";
     const lines = sidebar.render(SIDEBAR_WIDTH);
     // First line is the combined tab header. The focused tab uses REVERSE.
     // Confirm REVERSE precedes the Teams label, not the Agents label.
@@ -352,6 +360,28 @@ describe("SidebarComponent — §17 Teams panel rendering", () => {
     // (right before Teams), not before Agents.
     const betweenAgentsAndTeams = header.slice(agentsIdx + "Agents".length, teamsIdx);
     expect(betweenAgentsAndTeams).toContain(REVERSE);
+  });
+
+  test("Teams tab is highlighted when sidebarMode=teams even if focus is on agent-tree (Phase 1 independence)", () => {
+    // Realistic Phase-1 scenario: the user presses `0` (sidebarMode → teams)
+    // but focus does NOT move (it stays on agent-tree). The Teams tab header
+    // MUST still highlight Teams — it tracks visibility, not focus.
+    const sidebar = makeSidebar();
+    sidebar.displayHeight = 25;
+    sidebar.sidebarMode = "teams";
+    sidebar.focusTarget = "agent-tree";
+    const lines = sidebar.render(SIDEBAR_WIDTH);
+    const header = lines[0]!;
+    const teamsIdx = header.indexOf("Teams");
+    const agentsIdx = header.indexOf("Agents");
+    expect(teamsIdx).toBeGreaterThan(0);
+    expect(agentsIdx).toBeGreaterThan(0);
+    // REVERSE highlights the Teams tab (between "Agents" label and "Teams"),
+    // not the Agents tab — visibility, not focus.
+    const beforeAgents = header.slice(0, agentsIdx);
+    const betweenAgentsAndTeams = header.slice(agentsIdx + "Agents".length, teamsIdx);
+    expect(betweenAgentsAndTeams).toContain(REVERSE);
+    expect(beforeAgents).not.toContain(REVERSE);
   });
 
   test("switching sidebarMode swaps tree content (Phase 1: independent of focus)", () => {

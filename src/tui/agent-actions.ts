@@ -863,8 +863,11 @@ export function handleSend(ctx: ActionCtx) {
   // §17.3 child-agent-indistinguishable: a team-member selection from the
   // Teams panel is `{ kind: "agent" }` — let it fall through to the same
   // point-to-point send path as an Agents-panel selection. The dashboard's
-  // focus-aware selection-sync has already populated `selectedAgent` from the
-  // Teams-tree selection when teams-tree is focused.
+  // effective-selection resolver (sidebarMode-aware after Phase 1, §17.1) has
+  // already populated `rightPane.agent`/`tmuxPane.agent`/`infoPanel.agent`
+  // from the Teams-tree member selection when sidebarMode === "teams"; here
+  // we read it back through `teamSel` so the send target is correct without
+  // going through the agentTree.
   const agent = teamSel?.kind === "agent" ? teamSel.agent : ctx.agentTree.selectedAgent;
   if (!agent) return;
   const dialog: Extract<NonNullable<DialogState>, { type: "textarea" }> = {

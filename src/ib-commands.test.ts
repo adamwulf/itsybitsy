@@ -4847,6 +4847,120 @@ body`,
     const result = await callNewAgent("do work", { name: "test-repos-unregistered", type: "unregistered-ok" });
     expect(result.ok).toBe(true);
   });
+
+  // ── codex spawn-path tests (SPEC-CODEX-MODEL.md §6 Phase 4) ─────────────────
+  //
+  // These tests exercise the codex branch of newAgent end-to-end with the
+  // existing mock spawn runner. They DO NOT actually spawn codex or tmux —
+  // they verify the artifacts dropped into the worktree, the contents of
+  // start.sh, and the failure paths when the dispatcher precheck refuses.
+
+  describe("codex spawn branch", () => {
+    test("spawns a codex agent and writes a codex-shaped start.sh", async () => {
+      setNewAgentSpawnRunner(mockSpawnRunner());
+      const result = await callNewAgent("read README", {
+        name: "codex-agent-1",
+        model: "codex:gpt-5.4-mini",
+      });
+      expect(result.ok).toBe(true);
+
+      const startSh = await Bun.file(join(agentsDir, "codex-agent-1", "start.sh")).text();
+      // Canonical §3.3 launch line components, model is shell-quoted.
+      expect(startSh).toContain("setsid codex -m 'gpt-5.4-mini'");
+      expect(startSh).toContain("-a never");
+      expect(startSh).toContain("-s workspace-write");
+      expect(startSh).toContain("--dangerously-bypass-hook-trust");
+      // PID variable + meta-field keep claude_pid for back-compat.
+      expect(startSh).toContain("CLAUDE_PID=$!");
+      // Prompt passes via $(cat ...) — same as claude.
+      expect(startSh).toContain('"$(cat ');
+      // No claude command — codex agent runs codex, not claude.
+      expect(startSh).not.toMatch(/setsid claude/);
+      expect(startSh).not.toContain("--session-id");
+      expect(startSh).not.toContain("--model");
+    });
+
+    test("does NOT write <worktree>/.claude/settings.local.json for codex", async () => {
+      setNewAgentSpawnRunner(mockSpawnRunner());
+      const result = await callNewAgent("task", {
+        name: "codex-no-claude-settings",
+        model: "codex:gpt-5.4-mini",
+      });
+      expect(result.ok).toBe(true);
+      const settingsPath = join(agentsDir, "codex-no-claude-settings", "repo", ".claude", "settings.local.json");
+      const exists = await Bun.file(settingsPath).exists();
+      expect(exists).toBe(false);
+    });
+
+    test("appends .codex/ to <worktree>/.gitignore", async () => {
+      setNewAgentSpawnRunner(mockSpawnRunner());
+      const result = await callNewAgent("task", {
+        name: "codex-gitignore",
+        model: "codex:gpt-5.4-mini",
+      });
+      expect(result.ok).toBe(true);
+      const gitignore = await Bun.file(join(agentsDir, "codex-gitignore", "repo", ".gitignore")).text();
+      expect(gitignore).toContain(".codex/");
+    });
+
+    test("writes <worktree>/AGENTS.md with role + agent id (no <ittybitty> wrapper)", async () => {
+      setNewAgentSpawnRunner(mockSpawnRunner());
+      const result = await callNewAgent("task", {
+        name: "codex-agents-md",
+        model: "codex:gpt-5.4-mini",
+        type: "worker",
+      });
+      expect(result.ok).toBe(true);
+      const agentsMd = await Bun.file(join(agentsDir, "codex-agents-md", "repo", "AGENTS.md")).text();
+      expect(agentsMd).toContain("codex-agents-md");
+      expect(agentsMd.startsWith("<ittybitty>")).toBe(false);
+    });
+
+    test("fails the spawn cleanly when the dispatcher precheck exits non-zero", async () => {
+      // Custom runner: succeed normally EXCEPT for the codex dispatcher
+      // precheck, which we make fail. The spawn must refuse cleanly and
+      // clean up the agent dir + worktree.
+      const baseRunner = mockSpawnRunner();
+      const customSpawn = (cmd: string[], opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
+        const cmdStr = cmd.join(" ");
+        if (cmdStr.includes("hooks codex-") && cmdStr.includes("--dry-run")) {
+          // Simulate dispatcher failure
+          return makeSpawnResult("", 1);
+        }
+        return baseRunner(cmd, opts);
+      };
+      setNewAgentSpawnRunner(customSpawn);
+      const result = await callNewAgent("task", {
+        name: "codex-precheck-fail",
+        model: "codex:gpt-5.4-mini",
+      });
+      expect(result.ok).toBe(false);
+      expect(result.stderr).toContain("codex dispatcher precheck failed");
+      // Agent dir should be cleaned up — the precheck-fail path runs rm.
+      const dirExists = await Bun.file(join(agentsDir, "codex-precheck-fail", "meta.json")).exists();
+      expect(dirExists).toBe(false);
+    });
+
+    test("regression guard: claude agents do NOT use the codex codepath", async () => {
+      setNewAgentSpawnRunner(mockSpawnRunner());
+      const result = await callNewAgent("task", {
+        name: "claude-regression-guard",
+        model: "claude:opus",
+      });
+      expect(result.ok).toBe(true);
+      // Claude agent should still get its settings.local.json
+      const settings = await Bun.file(join(agentsDir, "claude-regression-guard", "repo", ".claude", "settings.local.json")).text();
+      expect(settings.length).toBeGreaterThan(0);
+      // Claude start.sh launches claude, not codex
+      const startSh = await Bun.file(join(agentsDir, "claude-regression-guard", "start.sh")).text();
+      expect(startSh).toMatch(/setsid claude/);
+      expect(startSh).not.toContain("setsid codex");
+      expect(startSh).toContain("--session-id");
+      // No codex artifacts in the worktree
+      const agentsMdExists = await Bun.file(join(agentsDir, "claude-regression-guard", "repo", "AGENTS.md")).exists();
+      expect(agentsMdExists).toBe(false);
+    });
+  });
 });
 
 describe("reassignAgent (native)", () => {

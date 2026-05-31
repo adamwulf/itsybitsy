@@ -86,6 +86,14 @@ describe("buildCodexStartContent — launch line", () => {
     expect(content).toMatch(/else\s*\n\s*codex -m/);
   });
 
+  test("redirects stdin from <&0 on both launch arms (codex enforces isatty(0); bash bg-jobs default stdin to /dev/null)", () => {
+    const content = buildCodexStartContent(baseInput());
+    // setsid arm
+    expect(content).toMatch(/setsid codex -m [^\n]* <&0 2> "\$STDERR_LOG" &/);
+    // bare arm
+    expect(content).toMatch(/^    codex -m [^\n]* <&0 2> "\$STDERR_LOG" &$/m);
+  });
+
   test("rejects an unsafe ib binary path (SPEC §7 risk 14)", () => {
     expect(() =>
       buildCodexStartContent({
@@ -188,6 +196,14 @@ describe("buildCodexResumeContent — launch line (SPEC §5.8 + §6 Phase 7)", (
     const content = buildCodexResumeContent(baseInput());
     expect(content).toContain("setsid codex resume");
     expect(content).toMatch(/else\s*\n\s*codex resume/);
+  });
+
+  test("redirects stdin from <&0 on both launch arms (codex enforces isatty(0); bash bg-jobs default stdin to /dev/null)", () => {
+    const content = buildCodexResumeContent(baseInput());
+    // setsid arm
+    expect(content).toMatch(/setsid codex resume [^\n]* <&0 2> "\$STDERR_LOG" &/);
+    // bare arm
+    expect(content).toMatch(/^    codex resume [^\n]* <&0 2> "\$STDERR_LOG" &$/m);
   });
 
   test("includes the exit-code annotation table (matches start.sh)", () => {

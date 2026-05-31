@@ -140,6 +140,11 @@ log "SIGHUP ignored (spawn insulated from launcher pane teardown)"
 # file so we can tail it into agent.log on exit (helps diagnose crashes / 429s).
 # Launch under setsid when present so codex leads its own session, fully
 # detached from the launcher's controlling terminal.
+#
+# <&0: explicitly re-inherit the tmux pane pty as stdin; bash bg-jobs without
+# job-control silently redirect stdin to /dev/null otherwise, which makes codex
+# bail with "stdin is not a terminal". Using <&0 instead of </dev/tty avoids
+# the "no controlling terminal" risk after setsid detaches the process group.
 : > "$STDERR_LOG"
 if command -v setsid >/dev/null 2>&1; then
     SETSID=setsid
@@ -147,9 +152,9 @@ else
     SETSID=none
 fi
 if [[ "$SETSID" == "setsid" ]]; then
-    setsid codex -m ${qModel} -a never -s workspace-write --dangerously-bypass-hook-trust ${qFlagArgs} "$(cat ${qAbsPromptFile})" 2> "$STDERR_LOG" &
+    setsid codex -m ${qModel} -a never -s workspace-write --dangerously-bypass-hook-trust ${qFlagArgs} "$(cat ${qAbsPromptFile})" <&0 2> "$STDERR_LOG" &
 else
-    codex -m ${qModel} -a never -s workspace-write --dangerously-bypass-hook-trust ${qFlagArgs} "$(cat ${qAbsPromptFile})" 2> "$STDERR_LOG" &
+    codex -m ${qModel} -a never -s workspace-write --dangerously-bypass-hook-trust ${qFlagArgs} "$(cat ${qAbsPromptFile})" <&0 2> "$STDERR_LOG" &
 fi
 CLAUDE_PID=$!
 log "Codex PID: $CLAUDE_PID (setsid=$SETSID)"
@@ -285,6 +290,11 @@ log "SIGHUP ignored (resume insulated from launcher pane teardown)"
 # file so we can tail it into agent.log on exit (helps diagnose crashes / 429s).
 # Launch under setsid when present so codex leads its own session, fully
 # detached from the launcher's controlling terminal.
+#
+# <&0: explicitly re-inherit the tmux pane pty as stdin; bash bg-jobs without
+# job-control silently redirect stdin to /dev/null otherwise, which makes codex
+# bail with "stdin is not a terminal". Using <&0 instead of </dev/tty avoids
+# the "no controlling terminal" risk after setsid detaches the process group.
 : > "$STDERR_LOG"
 if command -v setsid >/dev/null 2>&1; then
     SETSID=setsid
@@ -292,9 +302,9 @@ else
     SETSID=none
 fi
 if [[ "$SETSID" == "setsid" ]]; then
-    setsid codex resume ${qSessionId} -a never -s workspace-write --dangerously-bypass-hook-trust ${qFlagArgs} 2> "$STDERR_LOG" &
+    setsid codex resume ${qSessionId} -a never -s workspace-write --dangerously-bypass-hook-trust ${qFlagArgs} <&0 2> "$STDERR_LOG" &
 else
-    codex resume ${qSessionId} -a never -s workspace-write --dangerously-bypass-hook-trust ${qFlagArgs} 2> "$STDERR_LOG" &
+    codex resume ${qSessionId} -a never -s workspace-write --dangerously-bypass-hook-trust ${qFlagArgs} <&0 2> "$STDERR_LOG" &
 fi
 CLAUDE_PID=$!
 log "Codex PID: $CLAUDE_PID (setsid=$SETSID)"

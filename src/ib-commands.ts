@@ -799,7 +799,14 @@ export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
       // worktree — it is the user's existing agent state, not ours to nuke.
       const codexPrecheckEvents = ["codex-pre-tool-use", "codex-session-start", "codex-stop"];
       for (const event of codexPrecheckEvents) {
-        const result = await nukeResumeSpawnCtx.run([codexIbBinaryPath, "hooks", event, agent.id, "--dry-run"]);
+        // Route through codexDryRunSpawnCtx with cwd=workPath so the dry-run
+        // subprocess's process.cwd() lands inside the agent's worktree —
+        // identical reason to the newAgent path above (resolveAgentDir's
+        // cwd regex must match `/\.ittybitty\/agents/`).
+        const result = await codexDryRunSpawnCtx.run(
+          [codexIbBinaryPath, "hooks", event, agent.id, "--dry-run"],
+          workPath,
+        );
         if (result.exitCode !== 0) {
           const errMsg = result.stderr.trim() || `dispatcher precheck failed with exit code ${result.exitCode}`;
           await logAgent(agentDir, `[resume] codex dispatcher precheck failed for ${event}: ${errMsg}`);
@@ -2786,6 +2793,62 @@ export function resetNewAgentSpawnRunner(): void {
   newAgentDelayOverrideMs = null;
 }
 
+/**
+ * Injectable spawn function for the codex dispatcher dry-run precheck.
+ * Takes an explicit `cwd` so the spawned `ib hooks <event> <id> --dry-run`
+ * subprocess inherits the agent's worktree path — without this, the dry-run
+ * resolves agentsDir relative to the parent process's cwd, which is wrong
+ * when the spawn caller (e.g. system coordinator) lives outside any worktree.
+ *
+ * Kept separate from SpawnContext/SpawnFn so we don't have to widen the
+ * shared signature; tests can inject via setCodexDryRunSpawnRunner.
+ */
+export type CodexDryRunFn = (
+  cmd: string[],
+  cwd: string,
+) => import("./types").SpawnResult;
+
+const defaultCodexDryRunFn: CodexDryRunFn = (cmd, cwd) =>
+  Bun.spawn(cmd, { stdout: "pipe", stderr: "pipe", cwd }) as import("./types").SpawnResult;
+
+class CodexDryRunContext {
+  private _fn: CodexDryRunFn = defaultCodexDryRunFn;
+
+  set(fn: CodexDryRunFn): void {
+    this._fn = fn;
+  }
+
+  reset(): void {
+    this._fn = defaultCodexDryRunFn;
+  }
+
+  async run(
+    cmd: string[],
+    cwd: string,
+  ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+    const proc = this._fn(cmd, cwd);
+    const [stdout, stderr] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+    ]);
+    const exitCode = await proc.exited;
+    return { stdout: stdout.trim(), stderr: stderr.trim(), exitCode };
+  }
+}
+
+/** Spawn context for the codex spawn-time dispatcher dry-run precheck. */
+export const codexDryRunSpawnCtx = new CodexDryRunContext();
+
+/** Override the codex dry-run spawn runner (for testing). */
+export function setCodexDryRunSpawnRunner(fn: CodexDryRunFn): void {
+  codexDryRunSpawnCtx.set(fn);
+}
+
+/** Reset the codex dry-run spawn runner. */
+export function resetCodexDryRunSpawnRunner(): void {
+  codexDryRunSpawnCtx.reset();
+}
+
 /** Injectable watchdog spawn for testing — returns PID or undefined */
 type WatchdogSpawnFn = (id: string, repoPath: string, logPath: string) => { pid?: number } | null;
 let watchdogSpawnOverride: WatchdogSpawnFn | null = null;
@@ -3749,7 +3812,17 @@ export async function newAgent(
       // (e.g. tmux session kill) are inherited automatically.
       const codexPrecheckEvents = ["codex-pre-tool-use", "codex-session-start", "codex-stop"];
       for (const event of codexPrecheckEvents) {
-        const result = await newAgentSpawnCtx.run([codexIbBinaryPath!, "hooks", event, id, "--dry-run"]);
+        // Route through codexDryRunSpawnCtx with cwd=workPath so the dry-run
+        // subprocess's process.cwd() lands inside the agent's worktree. The
+        // hook handlers' resolveAgentContext / resolveAgentDir regex matches
+        // `/\.ittybitty\/agents/` in cwd; without this, callers whose cwd is
+        // outside any worktree (e.g. system coordinator at ~/.itsybitsy/repo)
+        // would fall back to `<cwd>/.ittybitty/agents/<id>` and the dry-run
+        // would fail with `meta.json not found`.
+        const result = await codexDryRunSpawnCtx.run(
+          [codexIbBinaryPath!, "hooks", event, id, "--dry-run"],
+          workPath,
+        );
         if (result.exitCode !== 0) {
           const errMsg = result.stderr.trim() || `dispatcher precheck failed with exit code ${result.exitCode}`;
           await logSpawn(

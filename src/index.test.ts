@@ -287,14 +287,14 @@ describe("CLI arg parsing", () => {
     expect(stdout).toContain("CLAUDE");
     expect(stdout).toContain("CODEX");
     expect(stdout).toContain("claude:opus");
-    expect(stdout).toContain("codex:gpt-5-codex");
+    expect(stdout).toContain("codex:gpt-5.3-codex");
     expect(exitCode).toBe(0);
   });
 
   test("models alias works", async () => {
     const { stdout, exitCode } = await runCli(["models"]);
     expect(stdout).toContain("claude:opus");
-    expect(stdout).toContain("codex:gpt-5-codex");
+    expect(stdout).toContain("codex:gpt-5.3-codex");
     expect(exitCode).toBe(0);
   });
 

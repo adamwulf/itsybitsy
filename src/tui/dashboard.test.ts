@@ -475,6 +475,34 @@ describe("TmuxPaneComponent scroll logic", () => {
     expect(rendered).not.toContain("gpt-5.5 default");
   });
 
+  test("trimInputSeparator clips at the last Codex prompt marker before the status bar", () => {
+    const pane = new TmuxPaneComponent();
+    pane.agent = makeAgent("agent-codex", "/tmp/test");
+    pane.agent.meta.model = "codex:gpt-5.5";
+    pane.hasPolled = true;
+    pane.displayHeight = 10;
+    pane.trimInputSeparator = true;
+    pane.rawOutput = [
+      "• Standing by.",
+      "",
+      "› older queued prompt",
+      "",
+      "  › Improve documentation in @filename",
+      "",
+      "  gpt-5.5 default · /tmp/test",
+      "",
+    ].join("\n");
+
+    pane.parseStatusLines(80);
+    expect(pane.statusLines).toEqual(["  gpt-5.5 default · /tmp/test"]);
+
+    const rendered = pane.render(80).map((line) => stripAnsi(line)).join("\n");
+    expect(rendered).toContain("• Standing by.");
+    expect(rendered).toContain("older queued prompt");
+    expect(rendered).not.toContain("Improve documentation");
+    expect(rendered).not.toContain("gpt-5.5 default");
+  });
+
   test("resetForAgent clears clientAttached", () => {
     const pane = new TmuxPaneComponent();
     pane.clientAttached = true;

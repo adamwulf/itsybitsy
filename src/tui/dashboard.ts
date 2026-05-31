@@ -312,7 +312,7 @@ function findCodexInputChrome(wrapped: string[]): { promptIndex: number; statusI
   if (statusIndex < 0) return null;
 
   for (let i = statusIndex - 1; i >= 0; i--) {
-    const line = stripAnsi(wrapped[i]!);
+    const line = stripAnsi(wrapped[i]!).trimStart();
     if (/^›(?:\s|$)/.test(line)) {
       return { promptIndex: i, statusIndex, endIndex };
     }

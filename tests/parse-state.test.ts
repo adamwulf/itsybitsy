@@ -153,6 +153,17 @@ describe("isCodexTmuxOutput", () => {
     expect(isCodexTmuxOutput(input)).toBe(true);
   });
 
+  test("detects codex by telemetry-only tail status bar", () => {
+    const input = [
+      "some earlier output line",
+      "",
+      "› Run /review on my current changes",
+      "",
+      "  gpt-5.5 default · Context 86% left · 5h 95% left · weekly 84% left",
+    ].join("\n");
+    expect(isCodexTmuxOutput(input)).toBe(true);
+  });
+
   test("returns false for claude pane", () => {
     expect(isCodexTmuxOutput(CLAUDE_IDLE)).toBe(false);
   });
@@ -186,6 +197,54 @@ describe("parseCodexState", () => {
       ...Array.from({ length: 25 }, (_, i) => `  wrapped input ${i}`),
       "",
       "  gpt-5.5 default · /repo",
+    ].join("\n");
+    const r = parseCodexState(input);
+    expect(r.state).toBe("waiting");
+    expect(r.reason).toBe("idle at codex input prompt");
+  });
+
+  test("codex Working line above input chrome parses as running", () => {
+    const input = [
+      "• Edited src/ib-commands.ts (+1 -0)",
+      "    4118        absStderrLog: join(agentDir, \"claude.stderr.log\"),",
+      "    4119 +      extraWritableRoots: codexExtraWritableRoots,",
+      "    4120      });",
+      "",
+      "• Working (2m 41s • esc to interrupt)",
+      "",
+      "",
+      "› Improve documentation in @filename",
+      "",
+      "  gpt-5.5 default · ~/Developer/bun/itsybitsy/.ittybitty/agents/codex-git-commit/repo",
+    ].join("\n");
+    const r = parseCodexState(input);
+    expect(r.state).toBe("running");
+    expect(r.reason).toBe("codex Working interrupt marker in last 15 lines");
+  });
+
+  test("codex Working line above telemetry-only input chrome parses as running", () => {
+    const input = [
+      "• Ran bun test tests/parse-state.test.ts",
+      "  └ bun test v1.3.10 (30e609e0)",
+      "",
+      "• Working (2m 49s • esc to interrupt)",
+      "",
+      "",
+      "› Run /review on my current changes",
+      "",
+      "  gpt-5.5 default · Context 86% left · 5h 95% left · weekly 84% left",
+    ].join("\n");
+    const r = parseCodexState(input);
+    expect(r.state).toBe("running");
+  });
+
+  test("codex telemetry-only input chrome parses as waiting", () => {
+    const input = [
+      "• Standing by for the next task.",
+      "",
+      "› Run /review on my current changes",
+      "",
+      "  gpt-5.5 default · Context 86% left · 5h 95% left · weekly 84% left",
     ].join("\n");
     const r = parseCodexState(input);
     expect(r.state).toBe("waiting");
@@ -242,12 +301,11 @@ describe("parseCodexState — real captured snapshots", () => {
     return idx >= 0 ? text.slice(idx + 2) : text;
   }
 
-  test("codex-snapshot-input-fail-1 (running → waiting fallback) parses as waiting", async () => {
-    // Mid-task capture: tail shows "Working (10s • esc to interrupt)" above
-    // the input box. parseCodexState has no running-state detector yet, so a
-    // running codex tail still surfaces the trailing status bar as `waiting`.
+  test("codex-snapshot-input-fail-1 (running with input chrome) parses as running", async () => {
+    // Mid-task capture: Codex keeps the input chrome visible while it also
+    // shows "Working (10s • esc to interrupt)" above the prompt.
     const r = parseCodexState(await readFixture("codex-snapshot-input-fail-1.txt"));
-    expect(r.state).toBe("waiting");
+    expect(r.state).toBe("running");
   });
 
   test("codex-snapshot-input-fail-2 (WAITING marker before chrome) → waiting", async () => {
@@ -255,9 +313,9 @@ describe("parseCodexState — real captured snapshots", () => {
     expect(r.state).toBe("waiting");
   });
 
-  test("codex-snapshot-input-fail-3 (mid-tool 'Working' tail) → waiting", async () => {
+  test("codex-snapshot-input-fail-3 (mid-tool 'Working' tail) → running", async () => {
     const r = parseCodexState(await readFixture("codex-snapshot-input-fail-3.txt"));
-    expect(r.state).toBe("waiting");
+    expect(r.state).toBe("running");
   });
 
   test("codex-snapshot-input-fail-4 ('I HAVE COMPLETED THE GOAL') → complete", async () => {

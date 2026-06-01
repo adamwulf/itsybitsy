@@ -71,8 +71,7 @@ function filterHookSpinners(text: string): string {
  * Detect whether the tmux output came from a codex agent rather than a claude agent.
  * Two complementary signals (either is enough):
  *   1. The codex banner ("OpenAI Codex (v") appears near the top of the pane.
- *   2. The codex-shaped status bar ("<model> default · <path>" or "<model> · <path>")
- *      appears near the very end of the pane.
+ *   2. The codex-shaped status bar appears near the very end of the pane.
  *
  * The banner check is the strongest signal (it scrolls out after enough output,
  * so we also check the status bar as a fallback for long-running sessions).
@@ -85,32 +84,27 @@ export function isCodexTmuxOutput(input: string): boolean {
   const head = lines.slice(0, 15).join("\n");
   if (head.includes("OpenAI Codex (v")) return true;
 
-  // Status-bar check — last 5 non-blank lines. Codex's bottom status line has the shape
-  // "<model> default · <path>" (or sometimes "<model> · <path>"). The middle separator
-  // is "·" (U+00B7) and the path begins with "/" or "~/". The model token typically
-  // starts with "gpt-" or "codex-" but we don't hard-code it — the "· /" / "· ~/" anchor
-  // is the load-bearing pattern.
+  // Status-bar check — last 5 non-blank lines. Codex's bottom status line can be
+  // path-shaped ("<model> default · <path>") or telemetry-shaped
+  // ("<model> default · Context ... · ... left").
   const tail = stripTrailingBlanks(lines).slice(-5).join("\n");
-  if (/\s·\s+(?:~|\/)/.test(tail)) return true;
+  if (tail.split("\n").some(isCodexStatusLine)) return true;
 
   return false;
 }
 
 /**
  * Parse codex agent state from tmux output. Codex's TUI differs from claude's — different
- * glyphs (› for input prompt, • for output bullets), no surrounding box, status bar is
- * "<model> · <path>" on the last line.
+ * glyphs (› for input prompt, • for output bullets), no surrounding box, and a status
+ * bar that may show either cwd or context/quota telemetry on the last line.
  *
  * Priority order (mirrors claude's intent):
- *   1. Completion sentinel ("I HAVE COMPLETED THE GOAL") in last 15 lines (excluding quoted) → complete.
- *   2. Standalone WAITING marker in last 15 lines → waiting.
- *   3. Idle at codex input prompt (a line starting with "›" near the tail AND a status-bar
+ *   1. Active work marker ("Working (... esc to interrupt)") in last 15 lines → running.
+ *   2. Completion sentinel ("I HAVE COMPLETED THE GOAL") in last 15 lines (excluding quoted) → complete.
+ *   3. Standalone WAITING marker in last 15 lines → waiting.
+ *   4. Idle at codex input prompt (a line starting with "›" near the tail AND a status-bar
  *      line at the very end) → waiting.
- *   4. Default → unknown.
- *
- * Active-running detection is intentionally NOT implemented: we don't yet have confident
- * codex "running" samples to derive a pattern from. The deterministic state path (Stop hook
- * writing meta.json) covers steady-state running. See SPEC-CODEX-MODEL.md §5.6.
+ *   5. Default → unknown.
  */
 export function parseCodexState(input: string): ParseStateResult {
   if (!input || input.trim() === "") {
@@ -118,6 +112,13 @@ export function parseCodexState(input: string): ParseStateResult {
   }
 
   const last15 = lastNLines(input, STANDARD_WINDOW);
+
+  // Codex keeps its native input chrome visible while work is active. The
+  // "Working (... esc to interrupt)" line must therefore win over the trailing
+  // "›" prompt/status bar, otherwise active agents are misclassified as idle.
+  if (/\bWorking\s*\([^)]*(?:esc|ctrl\+c) to interrupt/i.test(last15)) {
+    return { state: "running", reason: "codex Working interrupt marker in last 15 lines" };
+  }
 
   // Completion signal — exclude quoted occurrences (in watchdog nudge prompts)
   const unquoted15 = last15.replace(/'I HAVE COMPLETED THE GOAL'/g, "");
@@ -135,11 +136,10 @@ export function parseCodexState(input: string): ParseStateResult {
   // Idle at codex input prompt — walk from the bottom to the last "›" prompt,
   // then inspect the tail block after it. Codex can wrap long typed prompts
   // across many terminal lines, so fixed "last 5 lines" prompt lookbacks are
-  // brittle. Status bar pattern: "<text> · <path>" with the path anchored to
-  // "/" or "~/" (rules out a "·" appearing inside a sentence).
+  // brittle.
   const tailLines = stripTrailingBlanks(input.split("\n"));
   const last = tailLines[tailLines.length - 1] ?? "";
-  const hasStatusBar = /\s·\s+(?:~|\/)/.test(last);
+  const hasStatusBar = isCodexStatusLine(last);
   if (hasStatusBar) {
     const promptIndex = findLastCodexPromptIndex(tailLines);
     if (promptIndex >= 0) {
@@ -159,6 +159,14 @@ function findLastCodexPromptIndex(lines: string[]): number {
     if (/^›(?:\s|$)/.test((lines[i] ?? "").trimStart())) return i;
   }
   return -1;
+}
+
+function isCodexStatusLine(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed.includes("·")) return false;
+  if (!/^(?:gpt|codex)-[A-Za-z0-9._-]+(?:\s+\S+)?\s+·\s+/.test(trimmed)) return false;
+  if (/\s·\s+(?:~|\/)/.test(trimmed)) return true;
+  return /\bContext\s+\d+%|\b\d+[hm]\b.*\bleft\b|\bweekly\b.*\bleft\b/.test(trimmed);
 }
 
 export function parseStateForCli(input: string, cli: AgentCli): ParseStateResult {

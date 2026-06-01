@@ -1354,15 +1354,20 @@ describe("handleCreateTeam", () => {
     expect(d.prompt).toBe("Team name:");
   });
 
-  test("happy path: a valid name creates a team, shows success notice, AND writes the audit-log entry the CLI would", async () => {
+  test("happy path: a valid name creates a team, drives the wizard to completion, AND writes the audit-log entry the CLI would", async () => {
+    // With no live agents the wizard skips the member picker and goes straight
+    // to the first-message textarea; an empty submit ends the wizard cleanly.
     const { ctx, dialogs, notices, flushActions } = makeMockCtx({ repos: [fx.repoEntry] });
     handleCreateTeam(ctx);
     const d = assertDialog(dialogs[0]!, "input");
     d.onSubmit("backend");
     await flushActions();
+    const ta = assertDialog(dialogs[1]!, "textarea");
+    ta.onSubmit("");
+    await flushActions();
     const reg = await readTeams();
     expect(reg.teams["backend"]).toBeDefined();
-    expect(notices.some((n) => n.includes("Created team @backend"))).toBe(true);
+    expect(notices.some((n) => n.includes("created team @backend"))).toBe(true);
     // Audit log written via teamCreate → appendTeamLog. The audit log carries
     // "team created by …" — present here means the TUI path runs the same
     // audit as the CLI does (Reviewer Issue A).
@@ -1391,6 +1396,151 @@ describe("handleCreateTeam", () => {
     const reg = await readTeams();
     expect(Object.keys(reg.teams)).toHaveLength(0);
     expect(notices).toHaveLength(0);
+  });
+
+  // ─── Wizard: 3-step name → members → first-message flow ─────────────────
+
+  test("wizard happy path: name → check 2 of 3 → send first message → teamSend called once, single combined notice", async () => {
+    // Plant 3 candidate agents; check 2 of them.
+    await plantTestAgent(fx.repoDir, "agent-a");
+    await plantTestAgent(fx.repoDir, "agent-b");
+    await plantTestAgent(fx.repoDir, "agent-c");
+    const a = makeAgent({ id: "agent-a", repoPath: fx.repoDir });
+    const b = makeAgent({ id: "agent-b", repoPath: fx.repoDir });
+    const c = makeAgent({ id: "agent-c", repoPath: fx.repoDir });
+    const { ctx, dialogs, notices, teamSendCalls, flushActions } = makeMockCtx({
+      agent: null,
+      repos: [fx.repoEntry],
+      lastAgents: [a, b, c],
+    });
+    handleCreateTeam(ctx);
+    const nameInput = assertDialog(dialogs[0]!, "input");
+    nameInput.onSubmit("squad");
+    await flushActions();
+    const picker = assertDialog(dialogs[1]!, "multi-select");
+    expect(picker.items.length).toBe(3);
+    // Check items 0 and 2.
+    picker.onSubmit([0, 2]);
+    await flushActions();
+    const ta = assertDialog(dialogs[2]!, "textarea");
+    ta.onSubmit("hello team");
+    await flushActions();
+    // teamSend was called exactly once with the message.
+    expect(teamSendCalls).toHaveLength(1);
+    expect(teamSendCalls[0]!.teamName).toBe("squad");
+    expect(teamSendCalls[0]!.message).toBe("hello team");
+    // The team has both checked agents (teamAdd was called twice).
+    const reg = await readTeams();
+    expect(reg.teams["squad"]).toBeDefined();
+    expect(reg.teams["squad"]!.members.sort()).toEqual(["agent-a", "agent-c"]);
+    // Single combined final notice mentioning the recipient count.
+    expect(notices.some((n) => n.includes("created team @squad") && n.includes("2 member") && n.includes("recipient"))).toBe(true);
+  });
+
+  test("wizard with empty message: name → check 1 → Esc on textarea → teamAdd called once, no teamSend", async () => {
+    await plantTestAgent(fx.repoDir, "agent-x");
+    const x = makeAgent({ id: "agent-x", repoPath: fx.repoDir });
+    const { ctx, dialogs, notices, teamSendCalls, flushActions } = makeMockCtx({
+      agent: null,
+      repos: [fx.repoEntry],
+      lastAgents: [x],
+    });
+    handleCreateTeam(ctx);
+    const nameInput = assertDialog(dialogs[0]!, "input");
+    nameInput.onSubmit("solo");
+    await flushActions();
+    const picker = assertDialog(dialogs[1]!, "multi-select");
+    picker.onSubmit([0]);
+    await flushActions();
+    const ta = assertDialog(dialogs[2]!, "textarea");
+    // Empty submission — equivalent to Esc-skip from the wizard's perspective.
+    ta.onSubmit("");
+    await flushActions();
+    expect(teamSendCalls).toHaveLength(0);
+    const reg = await readTeams();
+    expect(reg.teams["solo"]!.members).toEqual(["agent-x"]);
+    expect(notices.some((n) => n.includes("created team @solo") && n.includes("1 member"))).toBe(true);
+  });
+
+  test("wizard with no members selected: textarea still appears; teamCreate only, no teamAdd, no teamSend", async () => {
+    await plantTestAgent(fx.repoDir, "agent-y");
+    const y = makeAgent({ id: "agent-y", repoPath: fx.repoDir });
+    const { ctx, dialogs, notices, teamSendCalls, flushActions } = makeMockCtx({
+      agent: null,
+      repos: [fx.repoEntry],
+      lastAgents: [y],
+    });
+    handleCreateTeam(ctx);
+    const nameInput = assertDialog(dialogs[0]!, "input");
+    nameInput.onSubmit("empty-team");
+    await flushActions();
+    const picker = assertDialog(dialogs[1]!, "multi-select");
+    // Submit with NO checked indices.
+    picker.onSubmit([]);
+    await flushActions();
+    const ta = assertDialog(dialogs[2]!, "textarea");
+    ta.onSubmit("");
+    await flushActions();
+    expect(teamSendCalls).toHaveLength(0);
+    const reg = await readTeams();
+    expect(reg.teams["empty-team"]).toBeDefined();
+    expect(reg.teams["empty-team"]!.members).toEqual([]);
+    expect(notices.some((n) => n.includes("created team @empty-team"))).toBe(true);
+  });
+
+  test("wizard Esc on member step: teamDelete is called to roll back the just-created team", async () => {
+    await plantTestAgent(fx.repoDir, "agent-z");
+    const z = makeAgent({ id: "agent-z", repoPath: fx.repoDir });
+    const { ctx, dialogs, flushActions } = makeMockCtx({
+      agent: null,
+      repos: [fx.repoEntry],
+      lastAgents: [z],
+    });
+    handleCreateTeam(ctx);
+    const nameInput = assertDialog(dialogs[0]!, "input");
+    nameInput.onSubmit("ephemeral");
+    await flushActions();
+    // Team exists at this point.
+    let reg = await readTeams();
+    expect(reg.teams["ephemeral"]).toBeDefined();
+    const picker = assertDialog(dialogs[1]!, "multi-select");
+    // Invoke onCancel (the wizard's rollback hook). Mirrors the dialog-handler
+    // Esc path that fires onCancel on a multi-select dialog.
+    expect(picker.onCancel).toBeDefined();
+    picker.onCancel!();
+    await flushActions();
+    reg = await readTeams();
+    expect(reg.teams["ephemeral"]).toBeUndefined();
+  });
+
+  test("wizard pre-checks the selected agent when alsoAddSelectedAgent is true", async () => {
+    // T-flow path: alsoAddSelectedAgent=false; t-flow: true.
+    // handleCreateTeam uses alsoAddSelectedAgent=false, so the pre-check only
+    // fires via handleAddAgentToTeam's empty-teams branch. We exercise it by
+    // submitting through the empty-teams path.
+    await plantTestAgent(fx.repoDir, "agent-pre");
+    await plantTestAgent(fx.repoDir, "agent-other");
+    const preChecked = makeAgent({ id: "agent-pre", repoPath: fx.repoDir });
+    const other = makeAgent({ id: "agent-other", repoPath: fx.repoDir });
+    const { ctx, dialogs, flushActions } = makeMockCtx({
+      agent: preChecked,
+      repos: [fx.repoEntry],
+      lastAgents: [preChecked, other],
+    });
+    handleAddAgentToTeam(ctx);
+    await Bun.sleep(10);
+    // Empty-teams → input dialog opens directly.
+    const nameInput = assertDialog(dialogs[0]!, "input");
+    nameInput.onSubmit("alpha");
+    await flushActions();
+    const picker = assertDialog(dialogs[1]!, "multi-select");
+    // The selected agent (agent-pre) is pre-checked; the other is NOT.
+    const preIdx = picker.items.findIndex((i) => i.includes("agent-pre"));
+    const otherIdx = picker.items.findIndex((i) => i.includes("agent-other"));
+    expect(preIdx).toBeGreaterThanOrEqual(0);
+    expect(otherIdx).toBeGreaterThanOrEqual(0);
+    expect(picker.checked[preIdx]).toBe(true);
+    expect(picker.checked[otherIdx]).toBe(false);
   });
 });
 
@@ -1444,30 +1594,47 @@ describe("handleAddAgentToTeam", () => {
     expect(d.value).toBe("");
   });
 
-  test("empty teams: submitting the create input both creates the team AND adds the selected agent (and fires both audit entries)", async () => {
+  test("empty teams: submitting the create input pre-checks the selected agent, then drives the wizard to completion", async () => {
     await plantTestAgent(fx.repoDir, "agent-ccc");
     const agent = makeAgent({ id: "agent-ccc", repoPath: fx.repoDir });
-    const { ctx, dialogs, notices, flushActions } = makeMockCtx({ agent, repos: [fx.repoEntry] });
+    const { ctx, dialogs, notices, flushActions } = makeMockCtx({
+      agent,
+      repos: [fx.repoEntry],
+      lastAgents: [agent],
+    });
     handleAddAgentToTeam(ctx);
     await Bun.sleep(10);
     const d = assertDialog(dialogs[0]!, "input");
     d.onSubmit("frontend");
     await flushActions();
+    // Step 2: multi-select picker opens with the selected agent pre-checked.
+    const picker = assertDialog(dialogs[1]!, "multi-select");
+    expect(picker.items[0]).toContain("agent-ccc");
+    expect(picker.checked[0]).toBe(true);
+    picker.onSubmit([0]);
+    await flushActions();
+    // Step 3: textarea — skip with empty submit.
+    const ta = assertDialog(dialogs[2]!, "textarea");
+    ta.onSubmit("");
+    await flushActions();
     const reg = await readTeams();
     expect(reg.teams["frontend"]).toBeDefined();
     expect(reg.teams["frontend"]!.members).toContain("agent-ccc");
-    expect(notices.some((n) => n.includes("Created team @frontend") && n.includes("agent-ccc"))).toBe(true);
     // BOTH the create-audit and the join-audit must be present.
     const audit = await readTeamAuditLog("frontend");
     expect(audit).toContain("team created by");
     expect(audit).toContain("agent-ccc joined");
   });
 
-  test("picker '+ Create new team…' branch: also creates AND adds the selected agent", async () => {
+  test("picker '+ Create new team…' branch: also drives the wizard with the selected agent pre-checked", async () => {
     await createTeam("existing", "user", 1700000000);
     await plantTestAgent(fx.repoDir, "agent-ddd");
     const agent = makeAgent({ id: "agent-ddd", repoPath: fx.repoDir });
-    const { ctx, dialogs, notices, flushActions } = makeMockCtx({ agent, repos: [fx.repoEntry] });
+    const { ctx, dialogs, notices, flushActions } = makeMockCtx({
+      agent,
+      repos: [fx.repoEntry],
+      lastAgents: [agent],
+    });
     handleAddAgentToTeam(ctx);
     await Bun.sleep(10);
     const picker = assertDialog(dialogs[0]!, "fuzzy");
@@ -1480,10 +1647,18 @@ describe("handleAddAgentToTeam", () => {
     expect(input.prompt).toBe("Team name:");
     input.onSubmit("brand-new");
     await flushActions();
+    // Wizard step 2: multi-select with the selected agent pre-checked.
+    const memberPicker = assertDialog(dialogs[2]!, "multi-select");
+    expect(memberPicker.checked[0]).toBe(true);
+    memberPicker.onSubmit([0]);
+    await flushActions();
+    // Wizard step 3: textarea — skip.
+    const ta = assertDialog(dialogs[3]!, "textarea");
+    ta.onSubmit("");
+    await flushActions();
     const reg = await readTeams();
     expect(reg.teams["brand-new"]).toBeDefined();
     expect(reg.teams["brand-new"]!.members).toContain("agent-ddd");
-    expect(notices.some((n) => n.includes("Created team @brand-new") && n.includes("agent-ddd"))).toBe(true);
   });
 
   test("already-a-member: picking the same team reports it without re-adding", async () => {

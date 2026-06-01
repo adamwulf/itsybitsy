@@ -198,6 +198,61 @@ describe("select dialog", () => {
   });
 });
 
+// ─── multi-select dialog ────────────────────────────────
+
+describe("multi-select dialog", () => {
+  function makeMultiSelect(opts?: { onCancel?: () => void }) {
+    let submitted: number[] | null = null;
+    const dialog: NonNullable<DialogState> = {
+      type: "multi-select", prompt: "Pick members:",
+      items: ["alpha", "beta", "gamma"],
+      checked: [false, false, false],
+      selectedIndex: 0,
+      onSubmit: (indices: number[]) => { submitted = indices; },
+      onCancel: opts?.onCancel,
+    };
+    const ctx = makeDialogCtx(dialog);
+    return { ctx, dialog, get submitted() { return submitted; } };
+  }
+
+  test("Space toggles checked at selectedIndex", () => {
+    const { ctx, dialog } = makeMultiSelect();
+    handleDialogInput(ctx, " ");
+    expect((dialog as any).checked).toEqual([true, false, false]);
+    handleDialogInput(ctx, " ");
+    expect((dialog as any).checked).toEqual([false, false, false]);
+  });
+
+  test("j/k navigate the cursor", () => {
+    const { ctx, dialog } = makeMultiSelect();
+    handleDialogInput(ctx, "j");
+    expect((dialog as any).selectedIndex).toBe(1);
+    handleDialogInput(ctx, "j");
+    expect((dialog as any).selectedIndex).toBe(2);
+    handleDialogInput(ctx, "k");
+    expect((dialog as any).selectedIndex).toBe(1);
+  });
+
+  test("Enter calls onSubmit with checked indices", () => {
+    const t = makeMultiSelect();
+    // Check items 0 and 2.
+    handleDialogInput(t.ctx, " ");
+    handleDialogInput(t.ctx, "j");
+    handleDialogInput(t.ctx, "j");
+    handleDialogInput(t.ctx, " ");
+    handleDialogInput(t.ctx, "\r");
+    expect(t.submitted).toEqual([0, 2]);
+  });
+
+  test("Escape calls onCancel and closes the dialog", () => {
+    let cancelled = false;
+    const { ctx } = makeMultiSelect({ onCancel: () => { cancelled = true; } });
+    handleDialogInput(ctx, "\x1b");
+    expect(ctx.closed).toHaveLength(1);
+    expect(cancelled).toBe(true);
+  });
+});
+
 // ─── fuzzy dialog ───────────────────────────────────────
 
 describe("fuzzy dialog", () => {

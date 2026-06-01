@@ -64,6 +64,7 @@ import {
   resetNewAgentSummaryGenerator,
   setWatchdogSpawnFn,
   resetWatchdogSpawnFn,
+  teamAdd,
 } from "./ib-commands";
 import { spawnCtx as lifecycleSpawnCtx } from "./agent-lifecycle";
 import { setUserConfigPath, resetUserConfigPath } from "./config";
@@ -8686,5 +8687,122 @@ describe("teams: teardown leave-notices (kill / merge / nuke)", () => {
     const team = await getTeam("T");
     expect(team).not.toBeNull();
     expect(team!.members).toEqual([]);
+  });
+});
+
+// ─── teamAdd: suppressJoinNotice opt ────────────────────────────────────
+//
+// The TUI team-creation wizard bulk-adds members via `teamAdd` with the
+// internal `suppressJoinNotice: true` opt so members don't get N inbound
+// "joined the team" messages before the user's optional first message. The
+// audit log + channel system record must still fire — only the per-recipient
+// fan-out is gated.
+
+describe("teamAdd suppressJoinNotice opt", () => {
+  let baseDir: string;
+  let homeDir: string;
+  let repoDir: string;
+  let originalHome: string | undefined;
+  let repoEntry: import("./registry").RepoEntry;
+
+  // Plant a real agent so readAllAgents surfaces it. The transient with a
+  // watchdog pid makes sendMessage defer to the outbox queue.
+  async function plant(id: string): Promise<string> {
+    const agentDir = join(repoDir, ".ittybitty", "agents", id);
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id, tmux_session: `t-${id}` }));
+    const { writeAgentTransient } = await import("./agents");
+    await writeAgentTransient(agentDir, {
+      tmux_compacting: false,
+      tmux_rate_limited: false,
+      tmux_api_error: false,
+      has_background_tasks: false,
+      updated_at_ms: Date.now(),
+      watchdog_pid: 4242,
+    });
+    return agentDir;
+  }
+
+  beforeEach(async () => {
+    baseDir = await mkdtemp(join(tmpdir(), "team-add-opt-" + crypto.randomUUID() + "-"));
+    homeDir = join(baseDir, ".itsybitsy");
+    repoDir = join(baseDir, "repo");
+    await mkdir(homeDir, { recursive: true });
+    await mkdir(repoDir, { recursive: true });
+    originalHome = process.env.HOME;
+    process.env.HOME = baseDir;
+    const { setCoordinatorHome } = await import("./coordinator");
+    setCoordinatorHome(homeDir);
+    setUserConfigPath(join(homeDir, "config.json"));
+    repoEntry = { path: repoDir, name: basename(repoDir) };
+    await saveRegistry({ repos: [repoEntry] });
+    setSendSpawnRunner(() => makeSpawnResult());
+    isPidAliveCtx.set(() => true);
+    resetReadAgentMetaCache();
+  });
+
+  afterEach(async () => {
+    const { resetCoordinatorHome } = await import("./coordinator");
+    resetSendSpawnRunner();
+    resetUserConfigPath();
+    resetCoordinatorHome();
+    isPidAliveCtx.reset();
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+    resetReadAgentMetaCache();
+    await rm(baseDir, { recursive: true, force: true });
+  });
+
+  test("default opts: per-recipient fan-out fires (regression guard)", async () => {
+    const { createTeam, addMember } = await import("./teams");
+    const { readOutbox } = await import("./outbox");
+    const { readChannel } = await import("./team-channel");
+    await createTeam("T", "user", 1000);
+    const existingDir = await plant("agent-existing");
+    const joinerDir = await plant("agent-joiner");
+    await addMember("T", "agent-existing");
+    resetReadAgentMetaCache();
+
+    const res = await teamAdd("T", "agent-joiner", [repoEntry]);
+    expect(res.ok).toBe(true);
+    // Existing member received "joined the team" notice fromAgent=joiner.
+    const existingQueue = await readOutbox(existingDir);
+    expect(existingQueue.length).toBe(1);
+    expect(existingQueue[0]!.message).toBe("joined the team");
+    expect(existingQueue[0]!.fromAgent).toBe("agent-joiner");
+    // The new joiner received the reply-protocol instruction from @system.
+    const joinerQueue = await readOutbox(joinerDir);
+    expect(joinerQueue.length).toBe(1);
+    expect(joinerQueue[0]!.fromAgent).toBe("@system");
+    // Channel system record still fires.
+    const recs = await readChannel("T");
+    expect(recs.some((r) => r.kind === "system" && r.message === "joined the team")).toBe(true);
+  });
+
+  test("suppressJoinNotice: true: NO per-recipient fan-out, but audit + channel system record still fire", async () => {
+    const { createTeam, addMember } = await import("./teams");
+    const { readOutbox } = await import("./outbox");
+    const { readChannel } = await import("./team-channel");
+    const { teamLogPath } = await import("./team-channel");
+    await createTeam("T", "user", 1000);
+    const existingDir = await plant("agent-existing");
+    const joinerDir = await plant("agent-joiner");
+    await addMember("T", "agent-existing");
+    resetReadAgentMetaCache();
+
+    const res = await teamAdd("T", "agent-joiner", [repoEntry], { suppressJoinNotice: true });
+    expect(res.ok).toBe(true);
+
+    // No inbound messages on either side.
+    expect(await readOutbox(existingDir)).toEqual([]);
+    expect(await readOutbox(joinerDir)).toEqual([]);
+
+    // Audit log STILL fires.
+    const audit = await Bun.file(teamLogPath("T")).text().catch(() => "");
+    expect(audit).toContain("agent agent-joiner joined");
+
+    // Channel system record STILL fires.
+    const recs = await readChannel("T");
+    expect(recs.some((r) => r.kind === "system" && r.message === "joined the team")).toBe(true);
   });
 });

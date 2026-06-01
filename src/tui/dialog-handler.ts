@@ -22,6 +22,18 @@ export type DialogState =
   | ({ type: "confirm"; prompt: string; confirmLabel: string; focusedButton: "confirm" | "cancel"; confirmColor?: string; onYes: () => void } & DialogCommon)
   | ({ type: "input"; prompt: string; value: string; onSubmit: (value: string) => void } & DialogCommon)
   | ({ type: "select"; prompt: string; items: string[]; selectedIndex: number; onSelect: (index: number) => void } & DialogCommon)
+  | ({
+      type: "multi-select";
+      prompt: string;
+      items: string[];
+      /** Parallel to `items`, same length. true = checked. */
+      checked: boolean[];
+      selectedIndex: number;
+      onSubmit: (checkedIndices: number[]) => void;
+      /** Optional callback fired when the dialog is cancelled via Escape (used to
+       *  roll back side effects already committed by an earlier wizard step). */
+      onCancel?: () => void;
+    } & DialogCommon)
   | ({ type: "fuzzy"; prompt: string; query: string; allItems: string[]; filteredIndices: number[]; filteredItems: string[]; selectedIndex: number; onSelect: (originalIndex: number) => void } & DialogCommon)
   | ({ type: "help"; lines: string[] } & DialogCommon)
   | ({
@@ -154,6 +166,15 @@ export function handleDialogInput(ctx: DialogCtx, data: string): boolean {
   // so its buffered prefix can't leak into the next dialog or input field.
   if (matchesKey(data, Key.escape)) {
     cancelPaste();
+    // multi-select supports an optional onCancel callback so a wizard step can
+    // roll back side effects already committed by an earlier step (e.g. the
+    // team-creation wizard deletes the just-created team on Esc from step 2).
+    if (dialog.type === "multi-select") {
+      const onCancel = dialog.onCancel;
+      ctx.closeDialog();
+      onCancel?.();
+      return true;
+    }
     ctx.closeDialog();
     return true;
   }
@@ -206,6 +227,28 @@ export function handleDialogInput(ctx: DialogCtx, data: string): boolean {
       ctx.tui?.requestRender();
     } else if (matchesKey(data, Key.enter)) {
       dialog.onSelect(dialog.selectedIndex);
+    }
+    return true;
+  }
+
+  if (dialog.type === "multi-select") {
+    if (matchesKey(data, Key.down) || data === "j") {
+      dialog.selectedIndex = Math.min(dialog.items.length - 1, dialog.selectedIndex + 1);
+      ctx.tui?.requestRender();
+    } else if (matchesKey(data, Key.up) || data === "k") {
+      dialog.selectedIndex = Math.max(0, dialog.selectedIndex - 1);
+      ctx.tui?.requestRender();
+    } else if (data === " ") {
+      if (dialog.checked.length > dialog.selectedIndex) {
+        dialog.checked[dialog.selectedIndex] = !dialog.checked[dialog.selectedIndex];
+        ctx.tui?.requestRender();
+      }
+    } else if (matchesKey(data, Key.enter)) {
+      const indices: number[] = [];
+      for (let i = 0; i < dialog.checked.length; i++) {
+        if (dialog.checked[i]) indices.push(i);
+      }
+      dialog.onSubmit(indices);
     }
     return true;
   }
@@ -750,6 +793,25 @@ export function renderTextareaBlock(
   }
 
   return { outputLines, hasScrollIndicator: scrollOffset > 0 };
+}
+
+/** Build content for the multi-select dialog. Mirrors the `select` rendering
+ *  but adds a `[x]` / `[ ]` checkbox prefix to each row so the user can see
+ *  which entries are toggled. The highlighted row uses the same `> ` arrow
+ *  prefix `select` does so the navigation cue is identical. */
+export function buildMultiSelectContent(
+  dialog: Extract<NonNullable<DialogState>, { type: "multi-select" }>,
+  innerWidth: number
+): DialogContent {
+  const lines: string[] = [`${DIM}(j/k, Space toggles, Enter submits, Esc cancels)${RESET}`];
+  for (let i = 0; i < dialog.items.length; i++) {
+    const selected = i === dialog.selectedIndex;
+    const arrow = selected ? `${GREEN}> ` : "  ";
+    const reset = selected ? RESET : "";
+    const box = dialog.checked[i] ? "[x]" : "[ ]";
+    lines.push(truncateToWidth(`${arrow}${box} ${dialog.items[i]}${reset}`, innerWidth, ""));
+  }
+  return { title: dialog.prompt, contentLines: lines };
 }
 
 /** Build content for the folder-browser dialog */

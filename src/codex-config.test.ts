@@ -74,10 +74,10 @@ describe("buildCodexLaunchArgs — well-formedness", () => {
       agentDir: "/var/agents/agent-abc123",
     });
     // args alternates: -c, payload, -c, payload, ... The trailing pairs
-    // beyond the hook events are the 5 always-on flags:
-    //   features.multi_agent, commit_attribution, log_dir, tui.show_tooltips,
-    //   tui.status_line.
-    expect(args.length).toBe(CODEX_REGISTERED_EVENTS.length * 2 + 10);
+    // beyond the hook events are the 6 always-on flags:
+    //   features.multi_agent, sandbox_workspace_write.network_access,
+    //   commit_attribution, log_dir, tui.show_tooltips, tui.status_line.
+    expect(args.length).toBe(CODEX_REGISTERED_EVENTS.length * 2 + 12);
     for (let i = 0; i < args.length; i += 2) {
       expect(args[i]).toBe("-c");
     }
@@ -205,7 +205,23 @@ describe("buildCodexLaunchArgs — disables codex's native multi-agent feature",
     expect(foundAt).toBeGreaterThanOrEqual(0);
   });
 
-  test("all five flags appear regardless of timeout override", () => {
+  test("appends `-c sandbox_workspace_write.network_access=true` so codex agents can reach the network", () => {
+    const { args } = buildCodexLaunchArgs({
+      ibBinaryPath: "/usr/local/bin/ib",
+      agentId: "agent-abc123",
+      agentDir: "/var/agents/agent-abc123",
+    });
+    let foundAt = -1;
+    for (let i = 0; i < args.length - 1; i++) {
+      if (args[i] === "-c" && args[i + 1] === "sandbox_workspace_write.network_access=true") {
+        foundAt = i;
+        break;
+      }
+    }
+    expect(foundAt).toBeGreaterThanOrEqual(0);
+  });
+
+  test("all six always-on flags appear regardless of timeout override", () => {
     const { args } = buildCodexLaunchArgs({
       ibBinaryPath: "/usr/local/bin/ib",
       agentId: "agent-abc123",
@@ -213,6 +229,7 @@ describe("buildCodexLaunchArgs — disables codex's native multi-agent feature",
       timeoutSecs: 7,
     });
     expect(args).toContain("features.multi_agent=false");
+    expect(args).toContain("sandbox_workspace_write.network_access=true");
     expect(args).toContain('commit_attribution=""');
     expect(args).toContain('log_dir="/var/agents/agent-abc123/codex"');
     expect(args).toContain("tui.show_tooltips=false");

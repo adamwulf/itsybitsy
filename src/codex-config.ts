@@ -15,6 +15,7 @@
  */
 
 import { isValidAgentId } from "./validation";
+import { getCoordinatorHome } from "./coordinator";
 
 /** Hook events codex fires that itsybitsy registers a handler for. */
 export type CodexHookEvent = "PreToolUse" | "SessionStart" | "Stop";
@@ -148,6 +149,22 @@ export function buildCodexLaunchArgs(input: BuildCodexLaunchArgsInput): CodexLau
   }
 
   const args: string[] = [];
+  // Always grant the codex agent write access to the entire coordinator home
+  // (`~/.itsybitsy/`). Codex agents run with `-s workspace-write`, which only
+  // permits writes inside the worktree and explicit `--add-dir` roots — without
+  // this, `ib send <other-agent> ...` (per-agent outbox under `agents/`),
+  // `ib send @<team>` (team channels under `teams/`), and team membership writes
+  // (`teams.json`) would all fail with EPERM. One root covers every piece of
+  // centralized state and any future additions. The trust boundary is identical
+  // to giving the agent the `ib` binary at all.
+  const coordinatorHome = getCoordinatorHome();
+  if (!isCodexSafeBinaryPath(coordinatorHome)) {
+    throw new Error(
+      `Unsafe coordinator home for codex launch: ${JSON.stringify(coordinatorHome)} contains quotes, backslashes, or control characters. ` +
+        `Reinstall ib so the coordinator home lives at a path made of printable ASCII with no apostrophes, quotes, or backslashes.`,
+    );
+  }
+  args.push("--add-dir", coordinatorHome);
   for (const root of input.extraWritableRoots ?? []) {
     if (!isCodexSafeBinaryPath(root)) {
       throw new Error(

@@ -1,4 +1,4 @@
-import { test, expect, describe } from "bun:test";
+import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import {
   buildCodexLaunchArgs,
   isCodexSafeBinaryPath,
@@ -6,6 +6,17 @@ import {
   CODEX_REGISTERED_EVENTS,
   DEFAULT_CODEX_HOOK_TIMEOUT_SECS,
 } from "./codex-config";
+import { setCoordinatorHome, resetCoordinatorHome } from "./coordinator";
+
+// Pin the coordinator-home to a stable, safe absolute path so assertions about
+// the always-prepended `--add-dir <coordinatorHome>` pair are deterministic
+// regardless of the real ~/.itsybitsy/ on the host. Real installs always
+// resolve to a path under $HOME with no apostrophes/quotes/backslashes, so
+// pinning to a hand-crafted safe path is fine for the well-formedness tests.
+const FAKE_COORDINATOR_HOME = "/tmp/codex-config-test-home";
+
+beforeEach(() => setCoordinatorHome(FAKE_COORDINATOR_HOME));
+afterEach(() => resetCoordinatorHome());
 
 describe("isCodexSafeBinaryPath", () => {
   test("accepts a normal absolute install path", () => {
@@ -73,17 +84,24 @@ describe("buildCodexLaunchArgs — well-formedness", () => {
       agentId: "agent-abc123",
       agentDir: "/var/agents/agent-abc123",
     });
-    // args alternates: -c, payload, -c, payload, ... The trailing pairs
+    // Every codex spawn ALWAYS prepends `--add-dir <coordinatorHome>` so the
+    // agent can write to centralized state under ~/.itsybitsy/ (per-agent
+    // outboxes, team channels, teams.json) under `-s workspace-write`.
+    // Skip that leading pair, then verify the -c flags alternate as before.
+    expect(args[0]).toBe("--add-dir");
+    expect(args[1]).toBe(FAKE_COORDINATOR_HOME);
+    const flags = args.slice(2);
+    // flags alternates: -c, payload, -c, payload, ... The trailing pairs
     // beyond the hook events are the 6 always-on flags:
     //   features.multi_agent, sandbox_workspace_write.network_access,
     //   commit_attribution, log_dir, tui.show_tooltips, tui.status_line.
-    expect(args.length).toBe(CODEX_REGISTERED_EVENTS.length * 2 + 12);
-    for (let i = 0; i < args.length; i += 2) {
-      expect(args[i]).toBe("-c");
+    expect(flags.length).toBe(CODEX_REGISTERED_EVENTS.length * 2 + 12);
+    for (let i = 0; i < flags.length; i += 2) {
+      expect(flags[i]).toBe("-c");
     }
-    expect(args[1]).toContain("hooks.PreToolUse=");
-    expect(args[3]).toContain("hooks.SessionStart=");
-    expect(args[5]).toContain("hooks.Stop=");
+    expect(flags[1]).toContain("hooks.PreToolUse=");
+    expect(flags[3]).toContain("hooks.SessionStart=");
+    expect(flags[5]).toContain("hooks.Stop=");
   });
 
   test("each hook payload contains <abs ib> and <agentId>", () => {
@@ -92,10 +110,13 @@ describe("buildCodexLaunchArgs — well-formedness", () => {
       agentId: "agent-abc123",
       agentDir: "/var/agents/agent-abc123",
     });
-    // Only the hook-flag payloads carry the dispatcher command — the trailing
-    // multi_agent / commit_attribution flags are intentionally agent-agnostic.
+    // Skip the leading `--add-dir <coordinatorHome>` pair, then inspect the
+    // hook flag payloads. Only the hook-flag payloads carry the dispatcher
+    // command — the trailing multi_agent / commit_attribution flags are
+    // intentionally agent-agnostic.
+    const flags = args.slice(2);
     for (let i = 1; i < CODEX_REGISTERED_EVENTS.length * 2; i += 2) {
-      const payload = args[i]!;
+      const payload = flags[i]!;
       expect(payload).toContain("/usr/local/bin/ib hooks codex-");
       expect(payload).toContain("agent-abc123");
     }
@@ -107,7 +128,8 @@ describe("buildCodexLaunchArgs — well-formedness", () => {
       agentId: "agent-abc",
       agentDir: "/var/agents/agent-abc",
     });
-    expect(args[1]).toContain(`timeout=${DEFAULT_CODEX_HOOK_TIMEOUT_SECS}`);
+    // First hook payload is at args[3] (after the leading --add-dir pair).
+    expect(args[3]).toContain(`timeout=${DEFAULT_CODEX_HOOK_TIMEOUT_SECS}`);
   });
 
   test("honors a caller-supplied timeout", () => {
@@ -117,11 +139,12 @@ describe("buildCodexLaunchArgs — well-formedness", () => {
       agentDir: "/var/agents/agent-abc",
       timeoutSecs: 12,
     });
-    // Only the hook-flag payloads carry a timeout — the trailing
-    // multi_agent / commit_attribution / log_dir / tui flags have nothing
-    // to do with hooks.
+    // Skip the leading --add-dir pair, then check the hook payloads. Only the
+    // hook-flag payloads carry a timeout — the trailing multi_agent /
+    // commit_attribution / log_dir / tui flags have nothing to do with hooks.
+    const flags = args.slice(2);
     for (let i = 1; i < CODEX_REGISTERED_EVENTS.length * 2; i += 2) {
-      expect(args[i]).toContain("timeout=12");
+      expect(flags[i]).toContain("timeout=12");
     }
   });
 
@@ -132,10 +155,53 @@ describe("buildCodexLaunchArgs — well-formedness", () => {
       agentDir: "/var/agents/agent-abc",
       extraWritableRoots: ["/repo/.git"],
     });
+    // The always-on `--add-dir <coordinatorHome>` pair comes FIRST so codex
+    // can write to centralized state; user-supplied extra roots come after.
     expect(args[0]).toBe("--add-dir");
-    expect(args[1]).toBe("/repo/.git");
-    expect(args[2]).toBe("-c");
-    expect(args[3]).toContain("hooks.PreToolUse=");
+    expect(args[1]).toBe(FAKE_COORDINATOR_HOME);
+    expect(args[2]).toBe("--add-dir");
+    expect(args[3]).toBe("/repo/.git");
+    expect(args[4]).toBe("-c");
+    expect(args[5]).toContain("hooks.PreToolUse=");
+  });
+
+  test("always prepends --add-dir <coordinatorHome> so codex can write to centralized state", () => {
+    // The whole coordinator home is writable so codex agents can use `ib send`
+    // (writes to per-agent outboxes under `agents/`), `ib send @<team>` (team
+    // channels under `teams/`), and team membership commands (teams.json).
+    // One root covers all three plus any future centralized state.
+    const { args } = buildCodexLaunchArgs({
+      ibBinaryPath: "/bin/ib",
+      agentId: "agent-abc",
+      agentDir: "/var/agents/agent-abc",
+    });
+    // Find the --add-dir pair pointing at the coordinator home — must be there
+    // regardless of whether the caller supplied extraWritableRoots.
+    let foundAt = -1;
+    for (let i = 0; i < args.length - 1; i++) {
+      if (args[i] === "--add-dir" && args[i + 1] === FAKE_COORDINATOR_HOME) {
+        foundAt = i;
+        break;
+      }
+    }
+    expect(foundAt).toBeGreaterThanOrEqual(0);
+    // And it MUST appear even when no extraWritableRoots are supplied — the
+    // central-state grant is unconditional.
+    expect(foundAt).toBe(0);
+  });
+
+  test("rejects when getCoordinatorHome resolves to a path with shell-unsafe chars", () => {
+    // The defensive path-safety check on getCoordinatorHome() guards a path
+    // like /Users/o'malley/.itsybitsy/ that would corrupt the shell quoting
+    // around the inline `-c` payload. setCoordinatorHome lets us simulate.
+    setCoordinatorHome("/Users/o'malley/.itsybitsy");
+    expect(() =>
+      buildCodexLaunchArgs({
+        ibBinaryPath: "/bin/ib",
+        agentId: "agent-abc",
+        agentDir: "/var/agents/agent-abc",
+      }),
+    ).toThrow(/Unsafe coordinator home/);
   });
 
   test("rejects unsafe extra writable roots", () => {

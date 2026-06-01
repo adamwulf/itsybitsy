@@ -21,12 +21,29 @@
  */
 
 import { join } from "path";
-import { rename, unlink, stat, readFile, appendFile, open, mkdir } from "fs/promises";
+import { rename, unlink, stat, readFile, appendFile, open, mkdir, rmdir } from "fs/promises";
+import { getCoordinatorHome } from "./coordinator";
 
-/** Filename for the per-agent message queue (sibling of meta.json). */
+/** Filename for the per-agent message queue. */
 export const OUTBOX_FILENAME = "outbox.jsonl";
 /** Filename for the per-session delivery lock. */
 export const OUTBOX_LOCK_FILENAME = ".outbox.lock";
+
+/**
+ * Per-agent outbox directory under the coordinator home
+ * (`~/.itsybitsy/agents/<id>/`). Centralizing the queue out of each agent's
+ * per-worktree directory lets a codex agent running with `-s workspace-write`
+ * write to ANY other agent's outbox via `ib send` — codex agents are sandboxed
+ * to their own worktree plus any roots passed via `--add-dir`, so we add this
+ * single root to every codex spawn (see `buildCodexLaunchArgs`).
+ *
+ * The agent's own log, state, and meta still live under the per-worktree
+ * `<repoPath>/.ittybitty/agents/<id>/` — only the message-delivery queue and
+ * its lock move here.
+ */
+export function agentOutboxDir(agentId: string): string {
+  return join(getCoordinatorHome(), "agents", agentId);
+}
 
 /**
  * One queued message awaiting delivery to an agent's tmux session.
@@ -176,6 +193,13 @@ export async function rewriteOutboxRemoving(dir: string, deliveredIds: Set<strin
  * Delete the outbox queue and its lock. Called from agent teardown
  * (archive/kill/nuke) alongside `deleteAgentTransient`. Best-effort:
  * any error (including ENOENT) is ignored.
+ *
+ * Also attempts to rmdir `dir` itself afterwards — when this is called against
+ * the centralized per-agent outbox dir (`agentOutboxDir(id)`), that dir is
+ * ours to create and clean up. The rmdir is best-effort: ENOENT (already
+ * gone) and ENOTEMPTY (something else dropped a file in there) are both
+ * ignored. The coordinator's outbox lives in `getCoordinatorHome()` directly,
+ * which we must NOT rmdir; that case is naturally protected by ENOTEMPTY.
  */
 export async function deleteAgentOutbox(dir: string): Promise<void> {
   for (const p of [outboxPath(dir), outboxLockPath(dir)]) {
@@ -184,6 +208,11 @@ export async function deleteAgentOutbox(dir: string): Promise<void> {
     } catch {
       /* best-effort */
     }
+  }
+  try {
+    await rmdir(dir);
+  } catch {
+    /* best-effort — ENOENT/ENOTEMPTY both ignored */
   }
 }
 

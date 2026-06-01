@@ -29,6 +29,7 @@ import {
   rewriteOutboxRemoving,
   acquireOutboxLock,
   releaseOutboxLock,
+  agentOutboxDir,
   type OutboxMessage,
   type AcquireLockOpts,
 } from "./outbox";
@@ -667,6 +668,11 @@ export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
   if (!dirExists) {
     return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' not found` };
   }
+
+  // Ensure the central per-agent outbox dir exists before the agent starts so
+  // the first enqueue doesn't race a missing-dir append. Idempotent — no-op
+  // when the dir already exists.
+  await mkdir(agentOutboxDir(agent.id), { recursive: true });
 
   // Acquire the long-running-op guard at the VERY TOP — above the coordinator
   // early-return below — so coordinator resets are guarded against a double-R
@@ -2326,11 +2332,14 @@ export async function sendMessage(
 
   // The outbox queue + lock live in `outboxDir` when provided (the system
   // coordinator has no agent dir, so its queue/lock live in the coordinator
-  // home so all coordinator senders serialize against ONE queue), otherwise in
-  // the agent's own directory. The recipient log/state writes still target the
-  // agent dir (`deliverMessage`), which is correct for both cases.
+  // home directly so all coordinator senders serialize against ONE queue).
+  // Otherwise the per-agent queue lives under the CENTRAL outbox root
+  // (`agentOutboxDir(id)` → `~/.itsybitsy/agents/<id>/`) so codex agents
+  // running under `-s workspace-write` can write to other agents' outboxes.
+  // Log/state writes still target the per-worktree agent dir
+  // (`deliverMessage`), which is correct for both cases.
   const agentDir = join(agent.repoPath, ".ittybitty", "agents", agent.id);
-  const queueDir = opts?.outboxDir ?? agentDir;
+  const queueDir = opts?.outboxDir ?? agentOutboxDir(agent.id);
 
   // Resolve sender at ENQUEUE time (depends on the sender process's cwd).
   const fromId = resolveSenderId(agent.repoPath, opts);
@@ -3600,6 +3609,11 @@ export async function newAgent(
 
   // 11. Create agent directory
   await mkdir(agentDir, { recursive: true });
+  // The per-agent outbox now lives under the CENTRAL coordinator-home root
+  // (so codex agents under `-s workspace-write` can write to other agents'
+  // outboxes — see agentOutboxDir). mkdir it before the agent starts so the
+  // first enqueue doesn't race a missing-dir append.
+  await mkdir(agentOutboxDir(id), { recursive: true });
 
   // Prefer spawnedBy; fall back to --manager flag.
   // @-prefixed sentinels (e.g. @system, @<repo-name>) and null repo_path are

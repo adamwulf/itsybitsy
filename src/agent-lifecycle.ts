@@ -9,7 +9,7 @@ import { readdir, mkdir, cp, rm, rename, appendFile } from "fs/promises";
 import { SpawnContext } from "./types";
 import { isValidTmuxSession } from "./validation";
 import { deleteAgentTransient } from "./agents";
-import { deleteAgentOutbox } from "./outbox";
+import { deleteAgentOutbox, agentOutboxDir } from "./outbox";
 import { pruneAgentFromAllTeams } from "./teams";
 
 /** Spawn context for agent lifecycle operations */
@@ -314,8 +314,11 @@ export async function archiveAgent(
   // The outbox queue + its lock are runtime delivery state — no historical
   // value, so delete (not archive) alongside meta.transient.json. Any
   // not-yet-delivered messages are intentionally dropped: the agent is being
-  // torn down, so there is no live tmux session to deliver to.
-  await deleteAgentOutbox(agentDir);
+  // torn down, so there is no live tmux session to deliver to. The outbox
+  // now lives under the CENTRAL coordinator-home root (agentOutboxDir), not
+  // beside meta.json in the per-worktree agent dir; deleteAgentOutbox also
+  // best-effort rmdir's the per-agent outbox subdir.
+  await deleteAgentOutbox(agentOutboxDir(agentId));
 
   return { archivePath: archiveFolder, prunedTeams };
 }

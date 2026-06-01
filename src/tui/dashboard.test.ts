@@ -673,9 +673,12 @@ describe("DashboardComponent dialog and action handlers", () => {
 
   let actionTempDir: string | null = null;
   let configTempDir: string;
-  // Writable repo root for send tests: sendMessage now ENQUEUES to the agent's
-  // outbox.jsonl under <repoPath>/.ittybitty/agents/<id>/, so send targets need
-  // a real (writable) repoPath rather than a synthetic /repos/... path.
+  // Writable repo root for send tests: sendMessage ENQUEUES to the agent's
+  // CENTRAL outbox dir (`<coordinatorHome>/agents/<id>/`), and the recipient
+  // log/state writes still target the per-worktree agent dir — so send targets
+  // need a real (writable) repoPath rather than a synthetic /repos/... path.
+  // The coordinator home itself is pinned to configTempDir/coord-home in
+  // beforeEach so the central queue stays inside the sandbox.
   let sendRepoDir: string;
 
   beforeEach(async () => {
@@ -1693,7 +1696,10 @@ describe("Cross-repo send (E key)", () => {
   let dashboard: DashboardComponent;
   let sentMessages: { target: string; message: string }[] = [];
   // Writable repo root for the full-flow send test — sendMessage enqueues to
-  // the target's outbox.jsonl, so the send target needs a real repoPath.
+  // the target's CENTRAL outbox dir (`<coordinatorHome>/agents/<id>/`), so
+  // the send target needs both a real repoPath (for log/state writes) and a
+  // pinned coordinator home (so the central queue dir resolves into the
+  // sandbox, not the developer's real ~/.itsybitsy/).
   let sendRepoDir: string;
 
   function setupSendMock() {
@@ -1708,10 +1714,19 @@ describe("Cross-repo send (E key)", () => {
 
   beforeEach(async () => {
     sendRepoDir = await mkdtemp(join(tmpdir(), "dashboard-esend-"));
+    // Per-agent outboxes now live under getCoordinatorHome() / agents / <id>.
+    // Without this isolation, queued messages from the full-flow send test
+    // would land in the developer's real ~/.itsybitsy/agents/agent-b/ and
+    // leak into subsequent runs (sendMessage drains inline when no live
+    // watchdog), inflating sentMessages.
+    const { setCoordinatorHome } = await import("../coordinator");
+    setCoordinatorHome(join(sendRepoDir, "coord-home"));
   });
 
   afterEach(async () => {
     resetSendSpawnRunner();
+    const { resetCoordinatorHome } = await import("../coordinator");
+    resetCoordinatorHome();
     await rm(sendRepoDir, { recursive: true, force: true });
   });
 

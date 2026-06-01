@@ -7,12 +7,19 @@
  * serialization, so two messages to the SAME agent that overlap in wall-clock
  * time interleave their chunks and Enters and land as one merged prompt.
  *
- * Fix: every write path ENQUEUES to a per-agent `outbox.jsonl` (sibling of
- * `meta.json`). A single drainer — the agent's own watchdog
- * (`runPerAgentWatchdog`), or a lock-guarded inline fallback when no live
- * watchdog exists — pops messages one at a time and types them. A per-session
- * advisory lock (`.outbox.lock`) guarantees only one drainer ever writes to a
- * given session, so two `send-keys`/`Enter` sequences can never interleave.
+ * Fix: every write path ENQUEUES to a per-agent `outbox.jsonl` under
+ * `<coordinatorHome>/agents/<id>/` (computed via `agentOutboxDir(id)`). The
+ * queue was moved out of the per-worktree agent dir so codex agents running
+ * with `-s workspace-write` can write to any other agent's outbox — codex
+ * spawns add the entire `<coordinatorHome>` as a writable root, and the
+ * per-worktree agent dir is invisible to other sandboxes. A single drainer —
+ * the agent's own watchdog (`runPerAgentWatchdog`), or a lock-guarded inline
+ * fallback when no live watchdog exists — pops messages one at a time and
+ * types them. A per-session advisory lock (`.outbox.lock`) guarantees only one
+ * drainer ever writes to a given session, so two `send-keys`/`Enter` sequences
+ * can never interleave. The system coordinator's outbox is the one exception:
+ * it lives in `<coordinatorHome>` directly (not under `agents/`), and callers
+ * pass that path explicitly via `sendMessage`'s `outboxDir` opt.
  *
  * There is intentionally NO central dispatcher: the queue and lock are keyed
  * per-agent (i.e. per tmux session), so busy multi-agent communication has no
@@ -199,7 +206,9 @@ export async function rewriteOutboxRemoving(dir: string, deliveredIds: Set<strin
  * ours to create and clean up. The rmdir is best-effort: ENOENT (already
  * gone) and ENOTEMPTY (something else dropped a file in there) are both
  * ignored. The coordinator's outbox lives in `getCoordinatorHome()` directly,
- * which we must NOT rmdir; that case is naturally protected by ENOTEMPTY.
+ * which we must NOT rmdir; that case is explicitly short-circuited below as
+ * defense-in-depth (ENOTEMPTY would also naturally protect it, but a guard
+ * removes any latent footgun for a future caller that does pass it in).
  */
 export async function deleteAgentOutbox(dir: string): Promise<void> {
   for (const p of [outboxPath(dir), outboxLockPath(dir)]) {
@@ -209,6 +218,9 @@ export async function deleteAgentOutbox(dir: string): Promise<void> {
       /* best-effort */
     }
   }
+  // Never rmdir the coordinator home itself — that path is the system
+  // coordinator's outbox location, not an ephemeral per-agent subdir.
+  if (dir === getCoordinatorHome()) return;
   try {
     await rmdir(dir);
   } catch {

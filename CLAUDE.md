@@ -308,6 +308,7 @@ Builds the navigable item list for the add-repo folder browser dialog. Given a c
 - `fuzzy` uses pi-tui's `fuzzyFilter`; wraps items with original indices to map filtered selection back
 - `executeAndRefresh(fn)` wraps simple mutations (try/catch + watcher refresh)
 - Multi-step flows (merge, diff-tool, snapshot) use `.then().catch()` because they need intermediate UI or skip refresh
+- The `S` snapshot key in `ib watch` routes through `handleSnapshot()` in `src/tui/agent-actions.ts`. It writes the captured tmux output to `${agent.repoPath}/.ittybitty/${agent.archived ? "archive" : "agents"}/${agent.id}/debug-logs/snapshot-<timestamp>-<state>.txt`; if the user enters a note, it writes `snapshot-<timestamp>-<state>-note.txt` next to it.
 
 ### Manager/coordinator agent workflow
 

@@ -29,7 +29,7 @@ import type { CompactState } from "./auto-compact";
 import { readConfig } from "./config";
 import { isValidTmuxSession } from "./validation";
 import { listRepos } from "./registry";
-import { OUTBOX_FILENAME } from "./outbox";
+import { OUTBOX_FILENAME, agentOutboxDir } from "./outbox";
 import { parseModel } from "./agent-cli";
 import type { AgentCli } from "./agent-cli";
 
@@ -1145,6 +1145,14 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
     archived: false,
     children: [],
   };
+  // The per-agent outbox now lives under the CENTRAL coordinator-home root
+  // (`agentOutboxDir(agentId)` → `~/.itsybitsy/agents/<id>/`), not under the
+  // per-worktree agent dir. We watch that dir for outbox appends and drain
+  // from it. Ensure it exists so fs.watch doesn't throw on a fresh agent
+  // whose first outbox enqueue hasn't happened yet.
+  const outboxQueueDir = agentOutboxDir(agentId);
+  try { mkdirSync(outboxQueueDir, { recursive: true }); } catch { /* best-effort */ }
+
   let drainQueued = false;
   const drainNow = async (): Promise<void> => {
     // Coalesce redundant triggers: if a drain is already queued/running, one
@@ -1159,19 +1167,19 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
     await runSessionExclusive(agentId, async () => {
       drainQueued = false; // allow new triggers to queue once we're delivering
       try {
-        await perAgentDrainFn(drainAgent, agentDir);
+        await perAgentDrainFn(drainAgent, outboxQueueDir);
       } catch { /* never crash the watchdog on a drain error */ }
     });
   };
 
-  // Event-driven drain via fs.watch on the agent dir. Debounced so a burst of
-  // appends coalesces into one drain. If fs.watch is unavailable/throws, fall
-  // back silently to per-tick draining — the test suite does not depend on
-  // fs.watch firing.
+  // Event-driven drain via fs.watch on the central outbox dir. Debounced so a
+  // burst of appends coalesces into one drain. If fs.watch is unavailable or
+  // throws, fall back silently to per-tick draining — the test suite does not
+  // depend on fs.watch firing.
   let watcher: FSWatcher | null = null;
   let watchDebounce: ReturnType<typeof setTimeout> | null = null;
   try {
-    watcher = watch(agentDir, (_event, filename) => {
+    watcher = watch(outboxQueueDir, (_event, filename) => {
       // Only react to outbox changes (filename may be null on some platforms —
       // in that case react to any change, the mutex + file lock keep it safe).
       if (filename && filename !== OUTBOX_FILENAME) return;

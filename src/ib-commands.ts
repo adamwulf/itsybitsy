@@ -59,6 +59,8 @@ import { isKnownModel, listKnownSelectorsForCli } from "./known-models";
 import {
   buildHooksBlock,
   COORDINATOR_INTERCEPT_MATCHER,
+  REGULAR_AGENT_DEFAULT_ALLOW,
+  REGULAR_AGENT_DEFAULT_DENY,
   REGULAR_AGENT_INTERCEPT_MATCHER,
 } from "./settings-builder";
 import { listRepos, repoDisplayName, type RepoEntry } from "./registry";
@@ -2984,22 +2986,6 @@ async function buildAgentSettings(
     }
   } catch { /* ignore */ }
 
-  // Mandatory permissions that are always added
-  const ibPerms = [
-    "Bash(ib:*)",
-    "Bash(git status:*)", "Bash(git add:*)", "Bash(git commit:*)",
-    "Bash(git diff:*)", "Bash(git show:*)", "Bash(git log:*)",
-    "Bash(git ls-files:*)", "Bash(git grep:*)", "Bash(git rm:*)",
-    "Bash(git merge:*)", "Bash(git rebase:*)", "Bash(git checkout:*)",
-    "Bash(git restore:*)", "Bash(git reset:*)",
-    "Bash(pwd:*)", "Bash(ls:*)", "Bash(head:*)", "Bash(tail:*)",
-    "Bash(cat:*)", "Bash(grep:*)",
-    "Read", "Write", "Edit", "MultiEdit", "Glob", "Grep", "LS",
-    "TodoWrite", "Task", "TaskCreate", "Agent", "TaskOutput", "KillShell", "NotebookEdit",
-    "WebFetch", "WebSearch", "ToolSearch",
-  ];
-  const blockedTools = ["EnterPlanMode", "ExitPlanMode"];
-
   // Initialize permissions
   // Note: we inherit existing allow entries from settings.json (harmless — more
   // permissions don't hurt), but NOT existing deny entries. The base settings.json
@@ -3009,8 +2995,8 @@ async function buildAgentSettings(
   const existingAllow = Array.isArray(perms.allow) ? (perms.allow as string[]) : [];
 
   // Merge and deduplicate
-  const allAllow = [...new Set([...existingAllow, ...ibPerms, ...configAllow])];
-  const allDeny = [...new Set([...blockedTools, ...configDeny])];
+  const allAllow = [...new Set([...existingAllow, ...REGULAR_AGENT_DEFAULT_ALLOW, ...configAllow])];
+  const allDeny = [...new Set([...REGULAR_AGENT_DEFAULT_DENY, ...configDeny])];
 
   // Check if intercept hook should be added (reuse already-parsed baseSettings)
   let addIntercept = false;
@@ -3809,9 +3795,11 @@ export async function newAgent(
     workPath = join(agentDir, "repo");
 
     if (agentCli === "codex") {
-      // Codex agents do NOT read .claude/settings.local.json — their hook
+      // Codex agents do not launch with Claude settings; their hook
       // registration is inline via `-c` flags built in `buildCodexLaunchArgs`
-      // (SPEC §3.3 + §5.4). Per Phase 4 we instead:
+      // (SPEC §3.3 + §5.4). The codex PreToolUse hook itself reads the shared
+      // dynamic grant file at <worktree>/.claude/settings.local.json so ib
+      // watch's permission-grant flow works for running agents. Per Phase 4:
       //   1. Append `.codex/` to <worktree>/.gitignore (covers any incidental
       //      files codex itself drops — hook logs, sentinels, scratch).
       //   2. Generate a per-agent <worktree>/AGENTS.md — codex reads this

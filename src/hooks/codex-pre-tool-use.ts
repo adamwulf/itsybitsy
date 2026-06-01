@@ -34,6 +34,10 @@ import { isValidAgentId } from "../validation";
 import { mutateAgentMeta } from "../agents";
 import { logAgent } from "../agent-lifecycle";
 import {
+  REGULAR_AGENT_DEFAULT_ALLOW,
+  REGULAR_AGENT_DEFAULT_DENY,
+} from "../settings-builder";
+import {
   buildCodexAllowOutput,
   buildCodexDenyOutput,
   extractApplyPatchPaths,
@@ -156,6 +160,36 @@ export async function captureCodexSessionId(
     }
     meta.codex_session_id = sessionId;
   });
+}
+
+async function loadCodexEffectivePermissions(
+  agentType: string | undefined,
+  worktreePath: string,
+): Promise<{ allow: string[]; deny: string[] }> {
+  const permissions = await loadMergedAgentTypePermissions(agentType);
+  permissions.allow.unshift(...REGULAR_AGENT_DEFAULT_ALLOW);
+  permissions.deny.unshift(...REGULAR_AGENT_DEFAULT_DENY);
+  try {
+    const settingsFile = Bun.file(join(worktreePath, ".claude", "settings.local.json"));
+    if (await settingsFile.exists()) {
+      const settings = await settingsFile.json();
+      if (Array.isArray(settings?.permissions?.allow)) {
+        for (const entry of settings.permissions.allow) {
+          if (typeof entry === "string") permissions.allow.push(entry);
+        }
+      }
+      if (Array.isArray(settings?.permissions?.deny)) {
+        for (const entry of settings.permissions.deny) {
+          if (typeof entry === "string") permissions.deny.push(entry);
+        }
+      }
+    }
+  } catch { /* dynamic grant file is best-effort; static permissions still apply */ }
+
+  return {
+    allow: [...new Set(permissions.allow)],
+    deny: [...new Set(permissions.deny)],
+  };
 }
 
 interface DispatcherDeps {
@@ -295,7 +329,10 @@ export async function hookCodexPreToolUse(
       }
     }
 
-    const permissions = await loadMergedAgentTypePermissions(ctxResolved.agentType);
+    const permissions = await loadCodexEffectivePermissions(
+      ctxResolved.agentType,
+      ctxResolved.worktreePath,
+    );
 
     const ctx: PathCheckContext = {
       agentId,

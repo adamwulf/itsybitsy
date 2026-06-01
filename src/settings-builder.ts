@@ -14,6 +14,22 @@ export interface PermissionLayer {
   deny: string[];
 }
 
+export const REGULAR_AGENT_DEFAULT_ALLOW = [
+  "Bash(ib:*)",
+  "Bash(git status:*)", "Bash(git add:*)", "Bash(git commit:*)",
+  "Bash(git diff:*)", "Bash(git show:*)", "Bash(git log:*)",
+  "Bash(git ls-files:*)", "Bash(git grep:*)", "Bash(git rm:*)",
+  "Bash(git merge:*)", "Bash(git rebase:*)", "Bash(git checkout:*)",
+  "Bash(git restore:*)", "Bash(git reset:*)",
+  "Bash(pwd:*)", "Bash(ls:*)", "Bash(head:*)", "Bash(tail:*)",
+  "Bash(cat:*)", "Bash(grep:*)",
+  "Read", "Write", "Edit", "MultiEdit", "Glob", "Grep", "LS",
+  "TodoWrite", "Task", "TaskCreate", "Agent", "TaskOutput", "KillShell", "NotebookEdit",
+  "WebFetch", "WebSearch", "ToolSearch",
+];
+
+export const REGULAR_AGENT_DEFAULT_DENY = ["EnterPlanMode", "ExitPlanMode"];
+
 /**
  * Load a single agent-type layer file's permissions block. Missing layers
  * are reported on stderr and treated as empty — this matches the previous

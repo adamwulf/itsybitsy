@@ -271,6 +271,114 @@ describe("hookCodexPreToolUse — codex JSON contract (gate (d))", () => {
     expect(parsed.hookSpecificOutput.permissionDecision).toBe("allow");
     expect(parsed.hookSpecificOutput.updatedInput).toEqual(toolInput);
   });
+
+  test("allows the shared regular-agent default permissions for fresh codex agents", async () => {
+    const toolInput = { command: "git status --short" };
+    const stdin = JSON.stringify({
+      tool_name: "Bash",
+      tool_input: toolInput,
+      cwd: join(agentDir, "repo"),
+    });
+    let captured = "";
+    const orig = process.stdout.write;
+    process.stdout.write = ((chunk: string | Uint8Array) => {
+      captured += typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf-8");
+      return true;
+    }) as typeof process.stdout.write;
+    try {
+      await hookCodexPreToolUse("agent-test01", {
+        rawStdin: stdin,
+        agentDirOverride: agentDir,
+        skipSessionIdCapture: true,
+      });
+    } finally {
+      process.stdout.write = orig;
+    }
+    const parsed = JSON.parse(captured);
+    expect(parsed.hookSpecificOutput.permissionDecision).toBe("allow");
+    expect(parsed.hookSpecificOutput.updatedInput).toEqual(toolInput);
+  });
+
+  test("loads _all, _non_coordinator, and concrete agent-type permissions", async () => {
+    const typesDir = join(tempHome, ".itsybitsy", "agent-types");
+    await writeFile(
+      join(typesDir, "_all.md"),
+      "---\nname: _all\ndescription: shared\npermissions:\n  allow:\n    - Bash(from-all:*)\n  deny: []\n---\n",
+    );
+    await writeFile(
+      join(typesDir, "_non_coordinator.md"),
+      "---\nname: _non_coordinator\ndescription: shared\npermissions:\n  allow:\n    - Bash(from-noncoord:*)\n  deny: []\n---\n",
+    );
+    await writeFile(
+      join(typesDir, "worker.md"),
+      "---\nname: worker\ndescription: worker\npermissions:\n  allow:\n    - Bash(from-worker:*)\n  deny: []\n---\n",
+    );
+
+    for (const command of ["from-all ok", "from-noncoord ok", "from-worker ok"]) {
+      const toolInput = { command };
+      const stdin = JSON.stringify({
+        tool_name: "Bash",
+        tool_input: toolInput,
+        cwd: join(agentDir, "repo"),
+      });
+      let captured = "";
+      const orig = process.stdout.write;
+      process.stdout.write = ((chunk: string | Uint8Array) => {
+        captured += typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf-8");
+        return true;
+      }) as typeof process.stdout.write;
+      try {
+        await hookCodexPreToolUse("agent-test01", {
+          rawStdin: stdin,
+          agentDirOverride: agentDir,
+          skipSessionIdCapture: true,
+        });
+      } finally {
+        process.stdout.write = orig;
+      }
+      const parsed = JSON.parse(captured);
+      expect(parsed.hookSpecificOutput.permissionDecision).toBe("allow");
+      expect(parsed.hookSpecificOutput.updatedInput).toEqual(toolInput);
+    }
+  });
+
+  test("allows Bash grants added by ib watch to .claude/settings.local.json", async () => {
+    await mkdir(join(agentDir, "repo", ".claude"), { recursive: true });
+    await writeFile(
+      join(agentDir, "repo", ".claude", "settings.local.json"),
+      JSON.stringify({
+        permissions: {
+          allow: ["Bash(ib look:*)"],
+          deny: [],
+        },
+      }),
+    );
+
+    const toolInput = { command: "ib look codex-input-line" };
+    const stdin = JSON.stringify({
+      tool_name: "Bash",
+      tool_input: toolInput,
+      cwd: join(agentDir, "repo"),
+    });
+    let captured = "";
+    const orig = process.stdout.write;
+    process.stdout.write = ((chunk: string | Uint8Array) => {
+      captured += typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf-8");
+      return true;
+    }) as typeof process.stdout.write;
+    try {
+      await hookCodexPreToolUse("agent-test01", {
+        rawStdin: stdin,
+        agentDirOverride: agentDir,
+        skipSessionIdCapture: true,
+      });
+    } finally {
+      process.stdout.write = orig;
+    }
+    const parsed = JSON.parse(captured);
+    expect(parsed.hookSpecificOutput.permissionDecision).toBe("allow");
+    expect(parsed.hookSpecificOutput.updatedInput).toEqual(toolInput);
+  });
 });
 
 // ── (e) deny on uncaught exception (fail-OPEN mitigation) ────────────────────

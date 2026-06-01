@@ -186,24 +186,37 @@ describe("agent-lifecycle", () => {
       const dir = await makeTempDir();
       const agentDir = join(dir, ".ittybitty", "agents", "agent-test");
       await mkdir(agentDir, { recursive: true });
+      // The outbox queue now lives under the CENTRAL coordinator-home root.
+      // Point coordinator-home into a sandbox subdir so agentOutboxDir
+      // resolves there, plant the queue + lock there, then verify deletion.
+      const { setCoordinatorHome, resetCoordinatorHome } = await import("./coordinator");
+      const { agentOutboxDir } = await import("./outbox");
+      const coordHome = join(dir, ".itsybitsy");
+      setCoordinatorHome(coordHome);
+      const queueDir = agentOutboxDir("agent-test");
+      await mkdir(queueDir, { recursive: true });
 
-      await Bun.write(join(agentDir, "meta.json"), '{"id":"agent-test"}');
-      // Pending queue + held lock at teardown time.
-      await Bun.write(join(agentDir, "outbox.jsonl"), '{"id":"x","message":"m","fromAgent":"","raw":false,"enqueuedAtMs":1}\n');
-      await Bun.write(join(agentDir, ".outbox.lock"), String(process.pid));
+      try {
+        await Bun.write(join(agentDir, "meta.json"), '{"id":"agent-test"}');
+        // Pending queue + held lock at teardown time, in the central location.
+        await Bun.write(join(queueDir, "outbox.jsonl"), '{"id":"x","message":"m","fromAgent":"","raw":false,"enqueuedAtMs":1}\n');
+        await Bun.write(join(queueDir, ".outbox.lock"), String(process.pid));
 
-      await archiveAgent(dir, "agent-test", agentDir);
+        await archiveAgent(dir, "agent-test", agentDir);
 
-      // Both are deleted from source and NOT archived (runtime state only).
-      expect(await Bun.file(join(agentDir, "outbox.jsonl")).exists()).toBe(false);
-      expect(await Bun.file(join(agentDir, ".outbox.lock")).exists()).toBe(false);
-      const archiveDir = join(dir, ".ittybitty", "archive");
-      const archiveEntries = await readdir(archiveDir);
-      const archiveFolder = join(archiveDir, archiveEntries[0]!);
-      expect(await Bun.file(join(archiveFolder, "outbox.jsonl")).exists()).toBe(false);
-      expect(await Bun.file(join(archiveFolder, ".outbox.lock")).exists()).toBe(false);
-
-      await rm(dir, { recursive: true, force: true });
+        // Both are deleted from the central outbox dir and NOT archived
+        // (runtime state only, no historical value).
+        expect(await Bun.file(join(queueDir, "outbox.jsonl")).exists()).toBe(false);
+        expect(await Bun.file(join(queueDir, ".outbox.lock")).exists()).toBe(false);
+        const archiveDir = join(dir, ".ittybitty", "archive");
+        const archiveEntries = await readdir(archiveDir);
+        const archiveFolder = join(archiveDir, archiveEntries[0]!);
+        expect(await Bun.file(join(archiveFolder, "outbox.jsonl")).exists()).toBe(false);
+        expect(await Bun.file(join(archiveFolder, ".outbox.lock")).exists()).toBe(false);
+      } finally {
+        resetCoordinatorHome();
+        await rm(dir, { recursive: true, force: true });
+      }
     });
   });
 

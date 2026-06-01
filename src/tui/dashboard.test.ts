@@ -686,6 +686,13 @@ describe("DashboardComponent dialog and action handlers", () => {
     configTempDir = await mkdtemp(join(tmpdir(), "dashboard-config-"));
     setUserConfigPath(join(configTempDir, "config.json"));
     sendRepoDir = await mkdtemp(join(tmpdir(), "dashboard-send-"));
+    // Per-agent outboxes now live under getCoordinatorHome() / agents / <id>.
+    // Without this isolation, dashboard sends from this test suite would
+    // accumulate in the developer's real ~/.itsybitsy/agents/agent-test/
+    // outbox.jsonl, then leak into the next test run when sendMessage drains
+    // them inline (no live watchdog in test setup), inflating sentMessages.
+    const { setCoordinatorHome } = await import("../coordinator");
+    setCoordinatorHome(join(configTempDir, "coord-home"));
   });
 
   async function setupDashboardWithAgent(state = "running") {
@@ -748,6 +755,8 @@ describe("DashboardComponent dialog and action handlers", () => {
     resetDiffStatusSpawnRunner();
     resetMergeSpawnRunner();
     resetUserConfigPath();
+    const { resetCoordinatorHome } = await import("../coordinator");
+    resetCoordinatorHome();
     if (actionTempDir) {
       await rm(actionTempDir, { recursive: true, force: true });
       actionTempDir = null;

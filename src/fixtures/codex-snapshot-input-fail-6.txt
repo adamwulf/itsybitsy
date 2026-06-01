@@ -1,0 +1,195 @@
+State: unknown
+Reason: no codex patterns matched
+
+
+
+╭────────────────────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.135.0)                         │
+│                                                    │
+│ model:     gpt-5.5   /model to change              │
+│ directory: ~/Developer/bun/…/codex-input-line/repo │
+╰────────────────────────────────────────────────────╯
+
+
+› I've just saved a new tmux snapshot and note (follow the 'S' keymap trail to see where it saves, then
+  update CLAUDE.md with the  location where these snapshots get saved)
+
+  the most recent snapshot i the instruments-performance agent's tmux shows how we're not correctly
+  parsing the input line.
+
+  please turn this input into a test case and find teh root cause reason why we still are not parsing
+  correctly.
+
+
+⚠ `--dangerously-bypass-hook-trust` is enabled. Enabled hooks may run without review for this invocation.
+
+• SessionStart hook (completed)
+  hook context:
+
+• I’ll trace the snapshot save path from the S keymap first, then inspect the latest instruments-
+  performance tmux snapshot and turn the failing input into a focused test before fixing the parser.
+
+• Ran pwd
+  └ /Users/adamwulf/Developer/bun/itsybitsy/.ittybitty/agents/codex-input-line/repo
+
+• PreToolUse hook (blocked)
+  feedback: Tool not in allow list
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• rg is blocked by the harness here, so I’m switching to allowed single shell commands and keeping each
+  command isolated as required by the repo instructions.
+
+• PreToolUse hook (blocked)
+  feedback: Tool not in allow list
+
+• Explored
+  └ List ls
+    Search keymap in .
+    Search snapshot in .
+    Search *snapshot* in .
+    Search snapshot-* in ..
+    Read agent-actions.ts
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• I found the S trail: dashboard action routes to handleSnapshot, which writes snapshot-...txt and an
+  optional snapshot-...-note.txt under the selected agent’s .ittybitty/.../debug-logs. I’m going to
+  document that, then work from the available fixture pattern unless I can reach the new agent snapshot
+  locally.
+
+• Explored
+  └ Read CLAUDE.md
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• I’m updating CLAUDE.md in the TUI notes, because that’s where the snapshot action behavior is already
+  summarized and the missing detail belongs.
+
+• Edited CLAUDE.md (+1 -0)
+    310  - Multi-step flows (merge, diff-tool, snapshot) use `.then().catch()` because they need intermed
+         iate UI or skip refresh
+    311 +- The `S` snapshot key in `ib watch` routes through `handleSnapshot()` in `src/tui/agent-actions
+         .ts`. It writes the captured tmux output to `${agent.repoPath}/.ittybitty/${agent.archived ? "ar
+         chive" : "agents"}/${agent.id}/debug-logs/snapshot-<timestamp>-<state>.txt`; if the user enters
+         a note, it writes `snapshot-<timestamp>-<state>-note.txt` next to it.
+    312
+
+• PreToolUse hook (blocked)
+  feedback: Tool not in allow list
+
+• PreToolUse hook (blocked)
+  feedback: Tool not in allow list
+
+• Explored
+  └ Search snapshot-* in tmp
+    Search snapshot-* in tmp
+    Read parse-state.test.ts, parse-state.ts, codex-snapshot-input-fail-4.txt
+
+• Ran bun test tests/parse-state.test.ts
+  └ bun test v1.3.10 (30e609e0)
+
+    … +32 lines (ctrl + t to view transcript)
+     31 expect() calls
+    Ran 28 tests across 1 file. [86.00ms]
+
+• Explored
+  └ Read dashboard.test.ts
+    Search parseStatusLines in dashboard.ts
+    Read dashboard.ts, codex-snapshot-input-fail-1.txt, codex-snapshot-input-fail-3.txt
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• The representative fixture already shows the failure mode: Codex renders • Working (... esc to
+  interrupt) above the native › ... input chrome, so our parser sees the prompt/status bar and calls it
+  waiting. I’m changing the priority so active Codex work wins over the input chrome.
+
+• Edited src/parse-state.ts (+12 -8)
+    104   * Priority order (mirrors claude's intent):
+    105 - *   1. Completion sentinel ("I HAVE COMPLETED THE GOAL") in last 15 lines (excluding quoted) →
+         complete.
+    106 - *   2. Standalone WAITING marker in last 15 lines → waiting.
+    107 - *   3. Idle at codex input prompt (a line starting with "›" near the tail AND a status-bar
+    105 + *   1. Active work marker ("Working (... esc to interrupt)") in last 15 lines → running.
+    106 + *   2. Completion sentinel ("I HAVE COMPLETED THE GOAL") in last 15 lines (excluding quoted) →
+         complete.
+    107 + *   3. Standalone WAITING marker in last 15 lines → waiting.
+    108 + *   4. Idle at codex input prompt (a line starting with "›" near the tail AND a status-bar
+    109   *      line at the very end) → waiting.
+    109 - *   4. Default → unknown.
+    110 - *
+    111 - * Active-running detection is intentionally NOT implemented: we don't yet have confident
+    112 - * codex "running" samples to derive a pattern from. The deterministic state path (Stop hook
+    113 - * writing meta.json) covers steady-state running. See SPEC-CODEX-MODEL.md §5.6.
+    110 + *   5. Default → unknown.
+    111   */
+        ⋮
+    118
+    119 +  // Codex keeps its native input chrome visible while work is active. The
+    120 +  // "Working (... esc to interrupt)" line must therefore win over the trailing
+    121 +  // "›" prompt/status bar, otherwise active agents are misclassified as idle.
+    122 +  if (/\bWorking\s*\([^)]*(?:esc|ctrl\+c) to interrupt/i.test(last15)) {
+    123 +    return { state: "running", reason: "codex Working interrupt marker in last 15 lines" };
+    124 +  }
+    125 +
+    126    // Completion signal — exclude quoted occurrences (in watchdog nudge prompts)
+
+• Edited tests/parse-state.test.ts (+25 -7)
+    194
+    195 +  test("codex Working line above input chrome parses as running", () => {
+    196 +    const input = [
+    197 +      "• Edited src/ib-commands.ts (+1 -0)",
+    198 +      "    4118        absStderrLog: join(agentDir, \"claude.stderr.log\"),",
+    199 +      "    4119 +      extraWritableRoots: codexExtraWritableRoots,",
+    200 +      "    4120      });",
+    201 +      "",
+    202 +      "• Working (2m 41s • esc to interrupt)",
+    203 +      "",
+    204 +      "",
+    205 +      "› Improve documentation in @filename",
+    206 +      "",
+    207 +      "  gpt-5.5 default · ~/Developer/bun/itsybitsy/.ittybitty/agents/codex-git-commit/repo",
+    208 +    ].join("\n");
+    209 +    const r = parseCodexState(input);
+    210 +    expect(r.state).toBe("running");
+    211 +    expect(r.reason).toBe("codex Working interrupt marker in last 15 lines");
+    212 +  });
+    213 +
+    214    test("completion sentinel → complete", () => {
+        ⋮
+    263
+    245 -  test("codex-snapshot-input-fail-1 (running → waiting fallback) parses as waiting", async () =>
+          {
+    246 -    // Mid-task capture: tail shows "Working (10s • esc to interrupt)" above
+    247 -    // the input box. parseCodexState has no running-state detector yet, so a
+    248 -    // running codex tail still surfaces the trailing status bar as `waiting`.
+    264 +  test("codex-snapshot-input-fail-1 (running with input chrome) parses as running", async () =>
+         {
+    265 +    // Mid-task capture: Codex keeps the input chrome visible while it also
+    266 +    // shows "Working (10s • esc to interrupt)" above the prompt.
+    267      const r = parseCodexState(await readFixture("codex-snapshot-input-fail-1.txt"));
+    250 -    expect(r.state).toBe("waiting");
+    268 +    expect(r.state).toBe("running");
+    269    });
+        ⋮
+    275
+    258 -  test("codex-snapshot-input-fail-3 (mid-tool 'Working' tail) → waiting", async () => {
+    276 +  test("codex-snapshot-input-fail-3 (mid-tool 'Working' tail) → running", async () => {
+    277      const r = parseCodexState(await readFixture("codex-snapshot-input-fail-3.txt"));
+    260 -    expect(r.state).toBe("waiting");
+    278 +    expect(r.state).toBe("running");
+    279    });
+
+• Ran bun test tests/parse-state.test.ts
+  └ bun test v1.3.10 (30e609e0)
+
+    … +33 lines (ctrl + t to view transcript)
+     33 expect() calls
+    Ran 29 tests across 1 file. [9.00ms]
+
+• Working (2m 49s • esc to interrupt)
+
+
+› Run /review on my current changes
+
+  gpt-5.5 default · Context 86% left · 5h 95% left · weekly 84% left

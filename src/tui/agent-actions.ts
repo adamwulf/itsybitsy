@@ -5,7 +5,7 @@
 
 import { existsSync } from "node:fs";
 import { stat, readdir } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { agentWorktreePath } from "../agents";
 import type { Agent, FlatEntry, PendingQuestion } from "../agents";
 import type { RepoEntry } from "../registry";
@@ -1862,9 +1862,18 @@ export function handleSnapshot(ctx: ActionCtx) {
       const snapshotPath = `${debugDir}/${filename}`;
       const baseName = filename.replace(/\.txt$/, "");
       const notePath = `${debugDir}/${baseName}-note.txt`;
+      const snapshotsDir = join(dirname(defaultUserConfigPath()), "snapshots");
+      const mirrorBaseName = `${agent.id}-${baseName}`;
+      const mirrorSnapshotPath = join(snapshotsDir, `${mirrorBaseName}.txt`);
+      const mirrorNotePath = join(snapshotsDir, `${mirrorBaseName}-note.txt`);
       await Bun.$`mkdir -p ${debugDir}`.quiet();
+      await Bun.$`mkdir -p ${snapshotsDir}`.quiet();
       await Bun.write(
         snapshotPath,
+        `State: ${result.state}\nReason: ${result.reason}\n\n${strippedOutput}`
+      );
+      await Bun.write(
+        mirrorSnapshotPath,
         `State: ${result.state}\nReason: ${result.reason}\n\n${strippedOutput}`
       );
       ctx.setNotice(`Snapshot saved: ${filename} (state: ${result.state})`);
@@ -1880,6 +1889,7 @@ export function handleSnapshot(ctx: ActionCtx) {
           ctx.executeAndRefresh(async () => {
             try {
               await Bun.write(notePath, `${trimmed}\n`);
+              await Bun.write(mirrorNotePath, `${trimmed}\n`);
               ctx.setNotice(`Snapshot + note saved: ${filename}`);
             } catch (err) {
               ctx.setNotice(`Note save error: ${err}`);

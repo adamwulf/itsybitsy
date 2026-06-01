@@ -545,6 +545,8 @@ describe("TmuxPaneComponent scroll logic", () => {
       "codex-snapshot-input-fail-2.txt",
       "codex-snapshot-input-fail-3.txt",
       "codex-snapshot-input-fail-4.txt",
+      "codex-snapshot-input-fail-5.txt",
+      "codex-snapshot-input-fail-6.txt",
     ];
 
     for (const fixture of fixtures) {

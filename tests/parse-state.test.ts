@@ -322,6 +322,16 @@ describe("parseCodexState — real captured snapshots", () => {
     const r = parseCodexState(await readFixture("codex-snapshot-input-fail-4.txt"));
     expect(r.state).toBe("complete");
   });
+
+  test("codex-snapshot-input-fail-5 (telemetry footer) → waiting", async () => {
+    const r = parseCodexState(await readFixture("codex-snapshot-input-fail-5.txt"));
+    expect(r.state).toBe("waiting");
+  });
+
+  test("codex-snapshot-input-fail-6 (archived unknown telemetry footer) → running", async () => {
+    const r = parseCodexState(await readFixture("codex-snapshot-input-fail-6.txt"));
+    expect(r.state).toBe("running");
+  });
 });
 
 describe("parseState codex dispatch", () => {

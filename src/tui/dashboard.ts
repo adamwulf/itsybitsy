@@ -36,7 +36,7 @@ import {
   sanitizeTmuxInput,
 } from "../coordinator";
 import type { Agent, FlatEntry, PendingQuestion } from "../agents";
-import { stripAnsi } from "../parse-state";
+import { isCodexStatusLine, stripAnsi } from "../parse-state";
 import { SplitPane } from "./split-pane";
 import { wrapLines, wordWrapLines, padLines, findLastTwoSeparators } from "./wrap";
 import { fetchCodexUsage, fetchUsage } from "../usage";
@@ -314,24 +314,26 @@ function findCodexInputChrome(wrapped: string[]): { promptIndex: number; statusI
   }
   if (endIndex < 0) return null;
 
+  let promptIndex = -1;
+  for (let i = endIndex; i >= 0; i--) {
+    const line = stripAnsi(wrapped[i]!).trimStart();
+    if (/^›(?:\s|$)/.test(line)) {
+      promptIndex = i;
+      break;
+    }
+  }
+  if (promptIndex < 0) return null;
+
   let statusIndex = -1;
-  for (let i = endIndex; i >= Math.max(0, endIndex - 5); i--) {
-    const line = stripAnsi(wrapped[i]!).trim();
-    if (/\s·\s+(?:~|\/)/.test(line)) {
+  for (let i = endIndex; i > promptIndex; i--) {
+    if (isCodexStatusLine(stripAnsi(wrapped[i]!))) {
       statusIndex = i;
       break;
     }
   }
   if (statusIndex < 0) return null;
 
-  for (let i = statusIndex - 1; i >= 0; i--) {
-    const line = stripAnsi(wrapped[i]!).trimStart();
-    if (/^›(?:\s|$)/.test(line)) {
-      return { promptIndex: i, statusIndex, endIndex };
-    }
-  }
-
-  return null;
+  return { promptIndex, statusIndex, endIndex };
 }
 
 /** Merge sidebar lines and main area lines side by side with a separator */

@@ -41,6 +41,7 @@ import {
   resetReadAgentMetaCache,
   TRANSIENT_FRESH_MS,
   OP_STUCK_TIMEOUT_MS,
+  _isPidAliveForTests,
 } from "./agents";
 import type { TransientState, AgentOperation } from "./agents";
 import { spawnCtx as tmuxPollerSpawnCtx } from "./tmux-poller";
@@ -3651,5 +3652,191 @@ describe("readAgentMeta mtime cache", () => {
     await rename(tmpPath, path);
     const b = await readAgentMeta(tempDir);
     expect(b.meta?.tmux_session).toBe("ib-v2");
+  });
+});
+
+// Regression: inside a codex agent sandbox, process.kill(pid, 0) against a PID
+// owned by another sandbox (or root) returns EPERM, not ESRCH. The previous
+// catch-all branch returned `false` for EPERM and detectAgentStates resolved
+// every external agent to "stopped" → reapOrphanedClaude SIGTERM'd them all.
+describe("_isPidAlive — EPERM vs ESRCH classification", () => {
+  let origKill: typeof process.kill;
+  beforeEach(() => {
+    origKill = process.kill;
+  });
+  afterEach(() => {
+    process.kill = origKill;
+  });
+
+  test("returns true when process.kill throws EPERM (alive but unsignal-able)", () => {
+    process.kill = ((_pid: number, _sig?: any) => {
+      const err: any = new Error("operation not permitted");
+      err.code = "EPERM";
+      throw err;
+    }) as unknown as typeof process.kill;
+    expect(_isPidAliveForTests(99999)).toBe(true);
+  });
+
+  test("returns false when process.kill throws ESRCH (no such process)", () => {
+    process.kill = ((_pid: number, _sig?: any) => {
+      const err: any = new Error("no such process");
+      err.code = "ESRCH";
+      throw err;
+    }) as unknown as typeof process.kill;
+    expect(_isPidAliveForTests(99999)).toBe(false);
+  });
+
+  test("returns false for any other error code (e.g. EINVAL)", () => {
+    process.kill = ((_pid: number, _sig?: any) => {
+      const err: any = new Error("invalid signal");
+      err.code = "EINVAL";
+      throw err;
+    }) as unknown as typeof process.kill;
+    expect(_isPidAliveForTests(99999)).toBe(false);
+  });
+
+  test("returns true when process.kill succeeds (signal delivered, process alive)", () => {
+    process.kill = ((_pid: number, _sig?: any) => true) as unknown as typeof process.kill;
+    expect(_isPidAliveForTests(99999)).toBe(true);
+  });
+});
+
+// Regression: read-only callers (ib list, ib roster, ib info, inject-status)
+// must NOT reap. Previously detectAgentStates unconditionally SIGTERM'd any
+// agent whose claude_pid looked dead — inside a codex sandbox EPERM was
+// misread as dead, so every read of agent state tore down the world.
+//
+// reapOrphanedClaude has two visible side-effects:
+//   1. SIGTERM via killPidCtx (only fires when the inner isPidAliveCtx says
+//      the PID is alive)
+//   2. `tmux kill-session` via tmuxPollerSpawnCtx (always fires for
+//      resolvedState === "stopped" + tmux_session set, regardless of PID
+//      liveness)
+//
+// These tests assert side-effect #2 — it's the unconditional one and the
+// most direct proof that reapOrphanedClaude was (or wasn't) reached.
+describe("detectAgentStates — reap option", () => {
+  let tmpLogDir: string;
+  let logPath: string;
+  let killSessionCalls: string[];
+
+  beforeEach(async () => {
+    tmpLogDir = await mkdtemp(join(tmpdir(), "reap-option-log-"));
+    logPath = join(tmpLogDir, "watch.log");
+    resetReapedTmuxSessions();
+    const { setWatchLogPath } = await import("./watch-log");
+    setWatchLogPath(logPath);
+    killSessionCalls = [];
+    // Stub the tmux runner so a `tmux kill-session -t <name>` invocation is
+    // captured (and otherwise lets capture-pane / other commands succeed).
+    tmuxPollerSpawnCtx.set(((args: any[]) => {
+      const argv = Array.isArray(args) ? args : [];
+      if (argv[0] === "tmux" && argv[1] === "kill-session") {
+        const tIdx = argv.indexOf("-t");
+        if (tIdx >= 0 && typeof argv[tIdx + 1] === "string") {
+          killSessionCalls.push(argv[tIdx + 1]);
+        }
+      }
+      return {
+        stdout: new ReadableStream({ start(c) { c.close(); } }),
+        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        exited: Promise.resolve(0),
+      };
+    }) as any);
+  });
+
+  afterEach(async () => {
+    classifySpawnLogCtx.reset();
+    isPidAliveCtx.reset();
+    killPidCtx.reset();
+    liveTmuxSessionsCtx.reset();
+    tmuxPollerSpawnCtx.reset();
+    resetReapedTmuxSessions();
+    const { resetWatchLogPath } = await import("./watch-log");
+    resetWatchLogPath();
+    await rm(tmpLogDir, { recursive: true, force: true });
+  });
+
+  test("reap: false — does NOT call reapOrphanedClaude when claude_pid reads dead", async () => {
+    classifySpawnLogCtx.set(async () => ({ kind: "orphan" }));
+    isPidAliveCtx.set(() => false);
+    let killCalls = 0;
+    killPidCtx.set(() => { killCalls++; return true; });
+
+    const a = makeAgent({
+      id: "agent-2",
+      meta: {
+        state: "running",
+        tmux_session: "ib-a2",
+        claude_pid: "12345",
+        created_epoch: Math.floor(Date.now() / 1000) - 3600,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+    await detectAgentStates([a], { reap: false });
+    // State still resolves correctly — only the reap side-effect is skipped.
+    expect(a.state).toBe("stopped");
+    expect(killCalls).toBe(0);
+    expect(killSessionCalls).toEqual([]);
+  });
+
+  test("reap: false — does NOT tear down husk tmux for complete-with-dead-session", async () => {
+    isPidAliveCtx.set(() => true);
+    liveTmuxSessionsCtx.set(async () => new Set([])); // session is gone
+    let killCalls = 0;
+    killPidCtx.set(() => { killCalls++; return true; });
+
+    const a = makeAgent({
+      id: "agent-3",
+      meta: {
+        state: "complete",
+        tmux_session: "ib-a3",
+        claude_pid: "12345",
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+    await detectAgentStates([a], { reap: false });
+    expect(a.state).toBe("stopped");
+    expect(killCalls).toBe(0);
+    expect(killSessionCalls).toEqual([]);
+  });
+
+  test("reap: false — does NOT reap in the no-tmux_session branch", async () => {
+    classifySpawnLogCtx.set(async () => ({ kind: "orphan" }));
+    isPidAliveCtx.set(() => true); // PID looks alive → SIGTERM would fire if reaped
+    const killCalls: number[] = [];
+    killPidCtx.set((pid) => { killCalls.push(pid); return true; });
+
+    const a = makeAgent({
+      id: "agent-4",
+      meta: {
+        tmux_session: "",
+        claude_pid: "12345",
+        created_epoch: Math.floor(Date.now() / 1000) - 3600,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+    await detectAgentStates([a], { reap: false });
+    expect(a.state).toBe("stopped");
+    expect(killCalls).toEqual([]);
+  });
+
+  test("reap: true (default) — DOES reap when claude_pid reads dead (husk tmux torn down)", async () => {
+    classifySpawnLogCtx.set(async () => ({ kind: "orphan" }));
+    isPidAliveCtx.set(() => false);
+    killPidCtx.set(() => true);
+
+    const a = makeAgent({
+      id: "agent-5",
+      meta: {
+        state: "running",
+        tmux_session: "ib-a5",
+        claude_pid: "12345",
+        created_epoch: Math.floor(Date.now() / 1000) - 3600,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+    // Default (no opts) — reap path active.
+    // The husk tmux teardown is unconditional inside reapOrphanedClaude when
+    // resolvedState === "stopped" and tmux_session is set — proves we reached it.
+    await detectAgentStates([a]);
+    expect(a.state).toBe("stopped");
+    expect(killSessionCalls).toEqual(["ib-a5"]);
   });
 });

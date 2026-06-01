@@ -1319,18 +1319,29 @@ export const TRANSIENT_FRESH_MS = 15_000;
  */
 export const OP_STUCK_TIMEOUT_MS = 300_000;
 
-/** Default isPidAlive — checks if a process is alive via signal 0. */
+/** Default isPidAlive — checks if a process is alive via signal 0.
+ *
+ * EPERM means "the PID exists, you just can't signal it" (e.g. the process is
+ * owned by another sandbox or another user) — treat as alive. ESRCH (and any
+ * other error) means the process doesn't exist — dead. Inside a codex agent
+ * sandbox, signal 0 against PIDs owned by other sandboxes returns EPERM
+ * empirically; without this distinction every external agent's PID would be
+ * misclassified as dead and reapOrphanedClaude would tear down the world. */
 function _isPidAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;
-  } catch {
-    return false;
+  } catch (e: any) {
+    return e?.code === "EPERM";
   }
 }
 
 /** Injectable isPidAlive for tests. */
 export const isPidAliveCtx = new InjectionContext<(pid: number) => boolean>(_isPidAlive);
+
+/** Test-only re-export of the default _isPidAlive — lets tests exercise the
+ *  actual signal-0 + EPERM/ESRCH classification by stubbing process.kill. */
+export const _isPidAliveForTests = _isPidAlive;
 
 /** Default killPid — sends a signal to a process. Returns true if the kill
  *  syscall succeeded (process existed and we had permission). */
@@ -1437,7 +1448,18 @@ async function reapOrphanedClaude(
  *      the snapshot is fresh; otherwise fall back to a live tmux capture.
  * 6. Read state from meta.json → return stored value or default to running
  */
-export async function detectAgentStates(agents: Agent[]): Promise<void> {
+export async function detectAgentStates(
+  agents: Agent[],
+  opts: { reap?: boolean } = {},
+): Promise<void> {
+  // Read-only callers (ib list, ib roster, ib info, inject-status, etc.) pass
+  // {reap: false}. Inside a codex sandbox, process.kill(pid, 0) on external
+  // PIDs returns EPERM — we now treat that as alive, but a read-only caller
+  // should never SIGTERM another agent's process even if liveness is somehow
+  // misreported. Lifecycle callers (watcher tick, ib resume, ib respawn) keep
+  // the default reap-enabled behavior.
+  const shouldReap = opts.reap !== false;
+
   // Step 1: archived agents
   for (const agent of agents) {
     if (agent.archived) {
@@ -1481,7 +1503,9 @@ export async function detectAgentStates(agents: Agent[]): Promise<void> {
         }
         const resolved: AgentState = isRecentlyCreated(agent.meta.created_epoch) ? "creating" : "stopped";
         agent.state = resolved;
-        await reapOrphanedClaude(agent, agentDir, resolved, "no tmux_session in meta");
+        if (shouldReap) {
+          await reapOrphanedClaude(agent, agentDir, resolved, "no tmux_session in meta");
+        }
         return;
       }
 
@@ -1527,7 +1551,9 @@ export async function detectAgentStates(agents: Agent[]): Promise<void> {
         !isRecentlyCreated(agent.meta.created_epoch)
       ) {
         agent.state = "stopped";
-        await reapOrphanedClaude(agent, agentDir, "stopped", "claude_pid not alive");
+        if (shouldReap) {
+          await reapOrphanedClaude(agent, agentDir, "stopped", "claude_pid not alive");
+        }
         return;
       }
 
@@ -1548,7 +1574,9 @@ export async function detectAgentStates(agents: Agent[]): Promise<void> {
           const liveSessions = await liveTmuxSessionsPromise;
           if (!liveSessions.has(tmuxSession)) {
             agent.state = "stopped";
-            await reapOrphanedClaude(agent, agentDir, "stopped", "complete agent: tmux session gone");
+            if (shouldReap) {
+              await reapOrphanedClaude(agent, agentDir, "stopped", "complete agent: tmux session gone");
+            }
             return;
           }
         }
@@ -1616,7 +1644,9 @@ export async function detectAgentStates(agents: Agent[]): Promise<void> {
         // resolved === "stopped". Skipped during the creating grace window
         // so a freshly-spawning agent that briefly shows a dead pane during
         // startup is not torn down.
-        await reapOrphanedClaude(agent, agentDir, resolved, reason);
+        if (shouldReap) {
+          await reapOrphanedClaude(agent, agentDir, resolved, reason);
+        }
         return;
       }
 

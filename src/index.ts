@@ -944,7 +944,8 @@ async function main() {
           console.error(`Warning: ${err.error}`);
         }
       }
-      await detectAgentStates(agents);
+      // Read-only display: don't reap (ib list never mutates agent state).
+      await detectAgentStates(agents, { reap: false });
       const roots = buildAgentTree(agents);
 
       if (jsonOutput) {
@@ -1067,7 +1068,9 @@ async function main() {
           console.error(`Warning: ${err.error}`);
         }
       }
-      await detectAgentStates(agents);
+      // Read-only display: don't reap. `ib state --cleanup` has its own
+      // explicit orphan-kill path via prepareAndRunCleanup below.
+      await detectAgentStates(agents, { reap: false });
       const roots = buildAgentTree(agents);
 
       // Collect agents per-repo so we can group output (same shape as `ib list`).
@@ -1363,7 +1366,8 @@ async function main() {
           console.error(`Warning: ${err.error}`);
         }
       }
-      await detectAgentStates(agents);
+      // Read-only display: don't reap (ib tree never mutates agent state).
+      await detectAgentStates(agents, { reap: false });
       const roots = buildAgentTree(agents);
       const flat = flattenAgentTree(roots, repos.map((r) => ({ name: repoDisplayName(r), path: r.path })));
       if (flat.length === 0) {
@@ -1484,7 +1488,8 @@ async function main() {
       const { detectAgentStates } = await import("./agents");
       const repos = await listRepos();
       const agent = await requireAgent(args[1], repos);
-      await detectAgentStates([agent]);
+      // Read-only display: don't reap (ib info never mutates agent state).
+      await detectAgentStates([agent], { reap: false });
       const m = agent.meta;
       console.log(`Agent:        ${agent.id}`);
       console.log(`Repo:         ${agent.repoName} (${agent.repoPath})`);

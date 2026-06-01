@@ -2773,7 +2773,11 @@ export async function roster(name: string, repos: RepoEntry[]): Promise<IbComman
   // live detected state (§16.3: "state read via detectAgentStates()") instead of
   // the uniform "unknown" readAllAgents assigns.
   const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })));
-  await detectAgentStates(agents);
+  // Read-only display: don't reap. detectAgentStates would otherwise SIGTERM
+  // any PID misreported as dead — and inside a codex sandbox `kill(pid, 0)`
+  // against an external agent's PID can return EPERM (we now treat that as
+  // alive, but `roster` should never side-effect either way).
+  await detectAgentStates(agents, { reap: false });
   const byId = new Map(agents.map((a) => [a.id, a]));
   // The liveness predicate RECOMPUTES the live set on each call rather than
   // closing over a pre-lock snapshot. pruneDeadMembers invokes it during both its

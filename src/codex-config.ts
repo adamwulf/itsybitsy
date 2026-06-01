@@ -167,6 +167,11 @@ export function buildCodexLaunchArgs(input: BuildCodexLaunchArgsInput): CodexLau
   // side enforces this via the intercept-task hook; this is the codex
   // equivalent — codex's native tools cannot fire if the feature is off.
   args.push("-c", "features.multi_agent=false");
+  // Allow outbound network access under workspace-write. Claude agents already
+  // have unrestricted network; matching that for codex unblocks SwiftPM /
+  // package-manager fetches (e.g. xcodebuild resolving GitHub-hosted deps).
+  // Revisit when we add per-agent-type capability gating.
+  args.push("-c", "sandbox_workspace_write.network_access=true");
   // Disable the "Co-authored-by: Codex <noreply@openai.com>" commit trailer.
   // codex's commit_attribution is a TOML string — an empty string in TOML
   // is `""` (two adjacent double quotes); when codex sees this it skips

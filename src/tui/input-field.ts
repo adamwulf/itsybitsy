@@ -229,7 +229,7 @@ export class InputFieldComponent implements Component {
 
   /**
    * Wrap all logical lines into physical line entries with prefix info.
-   * Each entry has { prefix, text } where prefix is '> ' for first logical line's first chunk,
+   * Each entry has { prefix, text } where prefix is '❯ ' for first logical line's first chunk,
    * '  ' for continuation lines.
    */
   private wrapAllLines(textWidth: number): Array<{ prefix: string; text: string }> {
@@ -237,7 +237,7 @@ export class InputFieldComponent implements Component {
     const result: Array<{ prefix: string; text: string }> = [];
     for (let li = 0; li < lines.length; li++) {
       const lineText = lines[li] ?? "";
-      const firstPrefix = li === 0 ? "> " : "  ";
+      const firstPrefix = li === 0 ? "❯ " : "  ";
       if (lineText.length <= textWidth) {
         result.push({ prefix: firstPrefix, text: lineText });
       } else {
@@ -250,7 +250,7 @@ export class InputFieldComponent implements Component {
       }
     }
     if (result.length === 0) {
-      result.push({ prefix: "> ", text: "" });
+      result.push({ prefix: "❯ ", text: "" });
     }
     return result;
   }

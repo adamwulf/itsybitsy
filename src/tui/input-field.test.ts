@@ -257,7 +257,7 @@ describe("InputFieldComponent", () => {
       const lines = field.render(40);
       const inputLine = stripAnsi(lines[1]!);
       expect(inputLine).toContain("█");
-      expect(inputLine).toContain("> hi█");
+      expect(inputLine).toContain("❯ hi█");
     });
 
     test("top separator is dash line", () => {
@@ -279,10 +279,10 @@ describe("InputFieldComponent", () => {
       const field = makeField();
       const lines = field.render(40);
       const inputLine = stripAnsi(lines[1]!);
-      expect(inputLine).toBe("> █");
+      expect(inputLine).toBe("❯ █");
     });
 
-    test("second line uses indent prefix instead of >", () => {
+    test("second line uses indent prefix instead of ❯", () => {
       const field = makeField();
       field.handleInput("a");
       field.handleInput("\r");
@@ -290,7 +290,7 @@ describe("InputFieldComponent", () => {
       const lines = field.render(40);
       const line1 = stripAnsi(lines[1]!);
       const line2 = stripAnsi(lines[2]!);
-      expect(line1).toBe("> a");
+      expect(line1).toBe("❯ a");
       expect(line2).toContain("  b█"); // indented, with cursor on last line
     });
 
@@ -311,7 +311,7 @@ describe("InputFieldComponent", () => {
       field.handleInput("\t"); // focus send
       const lines = field.render(40);
       const inputLine = stripAnsi(lines[1]!);
-      expect(inputLine).toBe("> hi"); // no cursor block
+      expect(inputLine).toBe("❯ hi"); // no cursor block
     });
   });
 

@@ -604,4 +604,71 @@ describe("buildCodexAgentsMd / writeCodexAgentsMd", () => {
     // exact snippet must be gone.
     expect(body).not.toContain('Write(/tmp/commit-msg.txt');
   });
+
+  test("project CLAUDE.md is referenced via codex @./CLAUDE.md import when present in the worktree", async () => {
+    const { buildCodexAgentsMd } = await import("./codex-spawn");
+    const worktree = join(tempDir, "wt");
+    await mkdir(worktree, { recursive: true });
+    await Bun.write(join(worktree, "CLAUDE.md"), "# project rules\n");
+    const ctx = {
+      role: "worker" as const,
+      agentId: "agent-pclaude",
+      agentManager: "agent-mgr",
+      parentBranch: "main",
+      branchName: "agent/agent-pclaude",
+      worktreePath: worktree,
+      rootRepoPath: tempDir,
+      agentType: "worker",
+    };
+    const body = await buildCodexAgentsMd(ctx);
+    expect(body).toContain("## Project CLAUDE.md");
+    expect(body).toContain("@./CLAUDE.md");
+    // The project CLAUDE.md content must NOT be inlined — it goes through
+    // the `@` import so edits to the checked-in file propagate without a
+    // regeneration.
+    expect(body).not.toContain("# project rules");
+  });
+
+  test("user-global ~/.claude/CLAUDE.md is inlined when present (codex @ import can't reach outside the project root)", async () => {
+    const { buildCodexAgentsMd } = await import("./codex-spawn");
+    const fakeHome = process.env.HOME!;
+    await mkdir(join(fakeHome, ".claude"), { recursive: true });
+    await Bun.write(
+      join(fakeHome, ".claude", "CLAUDE.md"),
+      "GLOBAL: be terse\n",
+    );
+    const ctx = {
+      role: "worker" as const,
+      agentId: "agent-gclaude",
+      agentManager: "agent-mgr",
+      parentBranch: "main",
+      branchName: "agent/agent-gclaude",
+      worktreePath: join(tempDir, "wt"),
+      rootRepoPath: tempDir,
+      agentType: "worker",
+    };
+    const body = await buildCodexAgentsMd(ctx);
+    expect(body).toContain("## User-global CLAUDE.md");
+    // The global file MUST be inlined — codex `@` import doesn't resolve
+    // paths outside the project root.
+    expect(body).toContain("GLOBAL: be terse");
+  });
+
+  test("no CLAUDE.md section is emitted when neither project nor user-global file exists", async () => {
+    const { buildCodexAgentsMd } = await import("./codex-spawn");
+    const ctx = {
+      role: "worker" as const,
+      agentId: "agent-noclaude",
+      agentManager: "agent-mgr",
+      parentBranch: "main",
+      branchName: "agent/agent-noclaude",
+      worktreePath: join(tempDir, "wt"),
+      rootRepoPath: tempDir,
+      agentType: "worker",
+    };
+    const body = await buildCodexAgentsMd(ctx);
+    expect(body).not.toContain("## Project CLAUDE.md");
+    expect(body).not.toContain("## User-global CLAUDE.md");
+    expect(body).not.toContain("@./CLAUDE.md");
+  });
 });

@@ -22,6 +22,7 @@
  */
 
 import { join } from "path";
+import { homedir } from "os";
 import { mkdir } from "fs/promises";
 import { shellQuote } from "./validation";
 import { buildCodexLaunchArgs, isCodexSafeBinaryPath } from "./codex-config";
@@ -454,7 +455,49 @@ export async function buildCodexAgentsMd(ctx: SessionContext): Promise<string> {
   // wrapper so the markdown reads naturally in codex's session-start context.
   // The body inside may still contain <ittybitty>-related text but the
   // wrapping XML tags are what we drop.
-  return stripIttybittyWrapper(wrapped);
+  const body = stripIttybittyWrapper(wrapped);
+  const claudeMdSection = await buildClaudeMdImports(ctx.worktreePath);
+  return claudeMdSection ? `${body}\n${claudeMdSection}` : body;
+}
+
+/**
+ * Build a "Project + user CLAUDE.md" appendix for the codex AGENTS.md so
+ * codex agents see the same context as claude. Two sources are merged:
+ *
+ *   - Project CLAUDE.md (`<worktree>/CLAUDE.md`): referenced via codex's
+ *     native `@./CLAUDE.md` import. This keeps the AGENTS.md small and
+ *     stays in sync with the checked-in project doc on every branch switch.
+ *     Codex's `@` import is scoped to within the project root, so a
+ *     relative reference from `<worktree>/AGENTS.md` resolves correctly.
+ *
+ *   - User-global CLAUDE.md (`~/.claude/CLAUDE.md`): codex's `@` import
+ *     refuses paths outside the project root (openai/codex discussion
+ *     #4272), so the global file is INLINED at AGENTS.md write time.
+ *     A regeneration is required to pick up edits to the user-global file
+ *     — that's the same lifecycle as the rest of AGENTS.md (next spawn or
+ *     `ib resume` rewrites it).
+ *
+ * Returns an empty string if neither source exists so the caller can avoid
+ * emitting a trailing section header for nothing.
+ *
+ * Codex's default `project_doc_max_bytes` cap is 32 KiB; the combined
+ * AGENTS.md plus inlined global doc can exceed this. Bumping the cap to
+ * 128 KiB via `~/.codex/config.toml` (`project_doc_max_bytes = 131072`) is
+ * recommended.
+ */
+async function buildClaudeMdImports(worktreePath: string): Promise<string> {
+  const parts: string[] = [];
+  const projectClaudeMd = join(worktreePath, "CLAUDE.md");
+  if (await Bun.file(projectClaudeMd).exists()) {
+    parts.push("## Project CLAUDE.md\n\n@./CLAUDE.md");
+  }
+  const home = process.env.HOME || homedir();
+  const userClaudeMd = join(home, ".claude", "CLAUDE.md");
+  if (await Bun.file(userClaudeMd).exists()) {
+    const contents = await Bun.file(userClaudeMd).text();
+    parts.push(`## User-global CLAUDE.md (~/.claude/CLAUDE.md)\n\n${contents.trimEnd()}`);
+  }
+  return parts.length === 0 ? "" : parts.join("\n\n") + "\n";
 }
 
 /**

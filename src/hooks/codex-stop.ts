@@ -82,8 +82,8 @@ export interface CodexStopDeps {
   write?: (chunk: string) => unknown;
 }
 
-function buildStopSystemMessage(message: string): string {
-  return JSON.stringify({ systemMessage: message });
+function buildStopContinuation(message: string): string {
+  return JSON.stringify({ decision: "block", reason: message });
 }
 
 async function readGitPorcelain(agentDir: string, deps?: CodexStopDeps): Promise<string> {
@@ -138,7 +138,7 @@ export async function hookCodexStop(agentId: string, deps?: CodexStopDeps): Prom
         if (!deps?.skipMetaWrites) {
           await writeAgentState(agentDir, "running");
         }
-        write(buildStopSystemMessage(
+        write(buildStopContinuation(
           "[watchdog]: You have uncommitted changes. Please commit your work using git add && git commit before completing.",
         ));
         return;

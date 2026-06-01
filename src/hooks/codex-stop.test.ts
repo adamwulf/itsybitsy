@@ -122,8 +122,9 @@ describe("hookCodexStop — writes deterministic state", () => {
     const meta = await Bun.file(join(agentDir, "meta.json")).json();
     expect(meta.state).toBe("running");
     const parsed = JSON.parse(capture.join(""));
-    expect(parsed.systemMessage).toContain("uncommitted changes");
-    expect(parsed.systemMessage).toContain("git add && git commit");
+    expect(parsed.decision).toBe("block");
+    expect(parsed.reason).toContain("uncommitted changes");
+    expect(parsed.reason).toContain("git add && git commit");
   });
 
   test("complete with clean git status emits the normal stop no-op", async () => {

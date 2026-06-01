@@ -3878,8 +3878,8 @@ describe("input field integration", () => {
 
       const lines = dashboard.render(160);
       const allText = lines.map(l => stripAnsi(l)).join("\n");
-      // Input field should show "> hi█" somewhere in the output
-      expect(allText).toContain("> hi█");
+      // Input field should show "❯ hi█" somewhere in the output
+      expect(allText).toContain("❯ hi█");
     } finally {
       Object.defineProperty(process.stdout, "rows", { value: origRows, writable: true, configurable: true });
     }
@@ -3898,7 +3898,7 @@ describe("input field integration", () => {
       const lines = dashboard.render(160);
       const allText = lines.map(l => stripAnsi(l)).join("\n");
       // Input field is shown but without cursor block (not active)
-      expect(allText).toContain("> ");
+      expect(allText).toContain("❯ ");
       expect(allText).toContain("[Send]");
       expect(allText).not.toContain("█");
     } finally {
@@ -4463,7 +4463,7 @@ describe("coordinator input field (Phase 49)", () => {
       const lines = dashboard.render(160);
       const text = lines.map(l => stripAnsi(l)).join("\n");
       // Input field should show the typed text with cursor in main area
-      expect(text).toContain("> test█");
+      expect(text).toContain("❯ test█");
       expect(text).toContain("[Send]");
     } finally {
       Object.defineProperty(process.stdout, "rows", { value: origRows, writable: true, configurable: true });

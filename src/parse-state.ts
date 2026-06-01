@@ -161,7 +161,7 @@ function findLastCodexPromptIndex(lines: string[]): number {
   return -1;
 }
 
-function isCodexStatusLine(line: string): boolean {
+export function isCodexStatusLine(line: string): boolean {
   const trimmed = line.trim();
   if (!trimmed.includes("·")) return false;
   if (!/^(?:gpt|codex)-[A-Za-z0-9._-]+(?:\s+\S+)?\s+·\s+/.test(trimmed)) return false;

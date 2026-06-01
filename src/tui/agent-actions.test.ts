@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { mkdtemp, rm } from "fs/promises";
+import { mkdtemp, readdir, rm } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
 import { makeAgent, makeFlatAgent, makeFlatRepoHeader, makeSpawnResult } from "../test-utils";
@@ -13,6 +13,7 @@ import {
   handleKill, handleNuke, handleNukeAll, handleResume, handlePause,
   handleSend, handleNewAgent, handleScrollUp, handleScrollDown,
   handleHelp, handleResizeLeft, handleFuzzyAgent, handleRename,
+  handleSnapshot,
   handleOpenDiffTool, getActiveDiffProc, setActiveDiffProc, killActiveDiffProc,
   getDiffToolLaunching, setDiffToolLaunching,
   handleAddPermission, addPermissionToSettings, agentSettingsLocalPath,
@@ -40,6 +41,7 @@ import {
   setNewAgentSpawnRunner, resetNewAgentSpawnRunner,
 } from "../ib-commands";
 import { spawnCtx as lifecycleSpawnCtx } from "../agent-lifecycle";
+import { spawnCtx as tmuxSpawnCtx } from "../tmux-poller";
 import type { SpawnResult } from "../types";
 
 /** Noop spawn runner that always succeeds */
@@ -236,7 +238,64 @@ afterEach(async () => {
   resetSendSpawnRunner();
   resetNewAgentSpawnRunner();
   lifecycleSpawnCtx.reset();
+  tmuxSpawnCtx.reset();
   await rm(sendRepoDir, { recursive: true, force: true });
+});
+
+describe("handleSnapshot", () => {
+  test("saves snapshot and note to per-agent debug logs and ~/.itsybitsy/snapshots", async () => {
+    const baseDir = await mkdtemp(join(tmpdir(), "agent-actions-snapshot-"));
+    const repoDir = join(baseDir, "repo");
+    const homeDir = join(baseDir, "home");
+    await mkdir(repoDir, { recursive: true });
+    await mkdir(join(homeDir, ".itsybitsy"), { recursive: true });
+    setUserConfigPath(join(homeDir, ".itsybitsy", "config.json"));
+
+    try {
+      tmuxSpawnCtx.set(() => makeSpawnResult(
+        0,
+        "› check snapshot mirror\n\n  gpt-5.5 default · /repo\n",
+      ));
+      const agent = makeAgent({ id: "agent-snap", repoPath: repoDir });
+      agent.meta.model = "codex:gpt-5.5";
+      agent.meta.tmux_session = "tmux-agent-snap";
+      const { ctx, dialogs, notices, flushActions } = makeMockCtx({ agent });
+
+      handleSnapshot(ctx);
+      await Bun.sleep(20);
+
+      expect(dialogs).toHaveLength(1);
+      expect(notices.at(-1)).toContain("Snapshot saved:");
+
+      const debugDir = join(repoDir, ".ittybitty", "agents", "agent-snap", "debug-logs");
+      const debugFiles = await readdir(debugDir);
+      const snapshotName = debugFiles.find((name) => /^snapshot-.*-waiting\.txt$/.test(name));
+      expect(snapshotName).toBeDefined();
+
+      const snapshotsDir = join(homeDir, ".itsybitsy", "snapshots");
+      const mirrorFiles = await readdir(snapshotsDir);
+      const mirrorName = mirrorFiles.find((name) => /^agent-snap-snapshot-.*-waiting\.txt$/.test(name));
+      expect(mirrorName).toBeDefined();
+
+      const debugText = await Bun.file(join(debugDir, snapshotName!)).text();
+      const mirrorText = await Bun.file(join(snapshotsDir, mirrorName!)).text();
+      expect(mirrorText).toBe(debugText);
+      expect(mirrorText).toContain("State: waiting");
+      expect(mirrorText).toContain("check snapshot mirror");
+
+      const dialog = assertDialog(dialogs[0]!, "textarea");
+      dialog.onSubmit("remember this capture");
+      await flushActions();
+
+      const noteText = await Bun.file(join(debugDir, snapshotName!.replace(/\.txt$/, "-note.txt"))).text();
+      const mirrorNoteText = await Bun.file(join(snapshotsDir, mirrorName!.replace(/\.txt$/, "-note.txt"))).text();
+      expect(noteText).toBe("remember this capture\n");
+      expect(mirrorNoteText).toBe(noteText);
+    } finally {
+      resetUserConfigPath();
+      await rm(baseDir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("handleKill", () => {

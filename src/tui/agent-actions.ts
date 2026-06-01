@@ -748,11 +748,10 @@ function runCreateTeam(ctx: ActionCtx, initialValue: string, alsoAddSelectedAgen
 function openMemberPicker(ctx: ActionCtx, teamName: string, preCheckAgent: Agent | null) {
   const liveAgents = ctx.watcher?.lastAgents ?? [];
   if (liveAgents.length === 0) {
-    // No agents available — skip the picker entirely. The textarea still opens
-    // so the user can decide whether to send a first message (which will fan
-    // out to zero recipients but the user might still want to type one before
-    // the next agent joins). The simpler choice — just emit the create notice
-    // and stop — is what we do here.
+    // No agents available — skip the picker entirely and hand off straight to
+    // step 3, which still opens the textarea so the user can decide whether to
+    // type a first message (it'll fan out to zero recipients, but the team
+    // exists and the user might want to type the message anyway).
     openFirstMessagePrompt(ctx, teamName, /*addedCount*/ 0, /*addFailures*/ 0);
     return;
   }
@@ -768,10 +767,13 @@ function openMemberPicker(ctx: ActionCtx, teamName: string, preCheckAgent: Agent
     selectedIndex: 0,
     onCancel: () => {
       // Roll back: delete the team we just created so a cancelled wizard
-      // leaves no orphan. Fire-and-forget; surface a notice on failure.
+      // leaves no orphan. Emit a notice in both branches so the user can see
+      // the cancel actually happened — the dialog vanishing alone is silent.
       ctx.executeAndRefresh(async () => {
         const delResult = await teamDelete(teamName);
-        if (!delResult.ok) {
+        if (delResult.ok) {
+          ctx.setNotice(`Cancelled — team @${teamName} rolled back`);
+        } else {
           ctx.setNotice(`Cancelled; rollback failed: ${delResult.stderr || delResult.stdout}`);
         }
       });
@@ -800,12 +802,19 @@ function openMemberPicker(ctx: ActionCtx, teamName: string, preCheckAgent: Agent
  * Step 3 of the team-creation wizard: an optional `textarea` for the first
  * message. Esc / empty submit skip the send. The single combined notice for
  * the whole wizard is emitted from here.
+ *
+ * NOTE on lastAgents snapshot: step 2 and step 3 each read
+ * `ctx.watcher?.lastAgents` independently — if an agent is killed between
+ * step-2 add and step-3 send, the recipient count we surface could be lower
+ * than the added count. Acceptable for now; the watcher tick is ~1s and the
+ * user spends much longer reading the textarea.
  */
 function openFirstMessagePrompt(ctx: ActionCtx, teamName: string, addedCount: number, addFailures: number) {
   // The notice for steps 1 + 2 only — appended to in step 3 if a message gets
   // sent. Each branch below sets it as the final status-bar line.
+  const memberPlural = addedCount === 1 ? "member" : "members";
   const baseNotice = addedCount > 0
-    ? `created team @${teamName} with ${addedCount} member(s)`
+    ? `created team @${teamName} with ${addedCount} ${memberPlural}`
     : `created team @${teamName}`;
   const withFailures = (suffix: string = "") =>
     addFailures > 0
@@ -814,9 +823,16 @@ function openFirstMessagePrompt(ctx: ActionCtx, teamName: string, addedCount: nu
 
   ctx.showDialog({
     type: "textarea",
-    prompt: `First message to @${teamName} (Enter=send, Esc=skip):`,
+    prompt: `First message to @${teamName}:`,
     buffer: new TextBuffer(),
     focusedButton: "text",
+    // Esc on this textarea — treat as "skip the send" rather than silently
+    // vanishing. Without this hook the global Esc handler just closes the
+    // dialog and the user sees no confirmation that the team + members were
+    // actually saved.
+    onCancel: () => {
+      ctx.setNotice(withFailures());
+    },
     onSubmit: (message: string) => {
       ctx.closeDialog();
       const trimmed = message.trim();
@@ -834,10 +850,11 @@ function openFirstMessagePrompt(ctx: ActionCtx, teamName: string, addedCount: nu
         if (sendResult.ok) {
           // teamSend's stdout typically reads "Sent to N member(s) of @<team>".
           // We surface a recipient count if we can parse it; otherwise we fall
-          // back to the team-name suffix.
+          // back to the addedCount (the wizard's own tally).
           const match = sendResult.stdout.match(/Sent to (\d+) member/);
-          const recipients = match?.[1] ?? `${addedCount}`;
-          ctx.setNotice(`${withFailures("")}, sent first message to ${recipients} recipient(s)`);
+          const recipients = match?.[1] ?? String(addedCount);
+          const recipientPlural = recipients === "1" ? "recipient" : "recipients";
+          ctx.setNotice(`${withFailures("")}, sent first message to ${recipients} ${recipientPlural}`);
         } else {
           ctx.setNotice(`${withFailures("")} (send failed: ${sendResult.stderr || sendResult.stdout})`);
         }

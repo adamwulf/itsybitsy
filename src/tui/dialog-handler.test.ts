@@ -2,6 +2,7 @@ import { test, expect, describe } from "bun:test";
 import type { DialogState, DialogCtx } from "./dialog-handler";
 import {
   handleDialogInput, fuzzyFilterIndices, wrapTextareaLines,
+  buildMultiSelectContent, MULTI_SELECT_MAX_VISIBLE,
 } from "./dialog-handler";
 import { TextBuffer, deleteWord } from "./text-buffer";
 import { assertDialog } from "./test-helpers";
@@ -250,6 +251,52 @@ describe("multi-select dialog", () => {
     handleDialogInput(ctx, "\x1b");
     expect(ctx.closed).toHaveLength(1);
     expect(cancelled).toBe(true);
+  });
+
+  test("renderer scroll window: 20 items, selectedIndex=15 → shows neighborhood of 15, hides 0–9", () => {
+    // Reviewer must-fix #2: multi-select must scroll, not dump every row into
+    // the dialog. The window slides to keep selectedIndex visible.
+    const items = Array.from({ length: 20 }, (_, i) => `item-${i.toString().padStart(2, "0")}`);
+    const checked = items.map(() => false);
+    const dialog: NonNullable<DialogState> = {
+      type: "multi-select", prompt: "Pick:",
+      items, checked, selectedIndex: 15,
+      onSubmit: () => {},
+    };
+    const { contentLines } = buildMultiSelectContent(
+      dialog as Extract<NonNullable<DialogState>, { type: "multi-select" }>,
+      72,
+    );
+    const joined = contentLines.join("\n");
+    // selectedIndex (15) is visible
+    expect(joined).toContain("item-15");
+    // Early items are NOT shown
+    expect(joined).not.toContain("item-00");
+    expect(joined).not.toContain("item-09");
+    // No more than MULTI_SELECT_MAX_VISIBLE rows of items rendered
+    const itemRows = contentLines.filter((l) => /item-\d\d/.test(l));
+    expect(itemRows.length).toBeLessThanOrEqual(MULTI_SELECT_MAX_VISIBLE);
+    // The "↑ N more" indicator is present (items above are hidden)
+    expect(joined).toContain("more");
+  });
+
+  test("renderer scroll window: list shorter than max shows all items, no indicators", () => {
+    const items = ["a", "b", "c"];
+    const dialog: NonNullable<DialogState> = {
+      type: "multi-select", prompt: "Pick:",
+      items, checked: [false, false, false], selectedIndex: 0,
+      onSubmit: () => {},
+    };
+    const { contentLines } = buildMultiSelectContent(
+      dialog as Extract<NonNullable<DialogState>, { type: "multi-select" }>,
+      72,
+    );
+    const joined = contentLines.join("\n");
+    expect(joined).toContain("a");
+    expect(joined).toContain("b");
+    expect(joined).toContain("c");
+    // No "N more" indicators when everything fits.
+    expect(joined).not.toContain("more");
   });
 });
 

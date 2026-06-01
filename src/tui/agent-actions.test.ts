@@ -1542,6 +1542,116 @@ describe("handleCreateTeam", () => {
     expect(picker.checked[preIdx]).toBe(true);
     expect(picker.checked[otherIdx]).toBe(false);
   });
+
+  test("wizard Esc on textarea: emits the same notice as empty-submit (team + members persist)", async () => {
+    // Reviewer must-fix #1: Esc on step 3 must NOT vanish silently. The
+    // wizard's textarea now wires an onCancel that emits the same notice as
+    // an empty-submit would.
+    await plantTestAgent(fx.repoDir, "agent-keep");
+    const keep = makeAgent({ id: "agent-keep", repoPath: fx.repoDir });
+    const { ctx, dialogs, notices, flushActions } = makeMockCtx({
+      agent: null,
+      repos: [fx.repoEntry],
+      lastAgents: [keep],
+    });
+    handleCreateTeam(ctx);
+    const nameInput = assertDialog(dialogs[0]!, "input");
+    nameInput.onSubmit("persist");
+    await flushActions();
+    const picker = assertDialog(dialogs[1]!, "multi-select");
+    picker.onSubmit([0]);
+    await flushActions();
+    const ta = assertDialog(dialogs[2]!, "textarea");
+    // Invoke the Esc-cancel hook directly (mirrors the dialog-handler global
+    // Esc path that fires onCancel on a textarea with one set).
+    expect(ta.onCancel).toBeDefined();
+    ta.onCancel!();
+    await flushActions();
+    // Team + members persisted; final notice fired.
+    const reg = await readTeams();
+    expect(reg.teams["persist"]!.members).toEqual(["agent-keep"]);
+    expect(notices.some((n) => n.includes("created team @persist") && n.includes("1 member"))).toBe(true);
+  });
+
+  test("wizard step-2 Esc: success notice mentions rollback (not just silence)", async () => {
+    // Reviewer should-fix #4: the onCancel branch now emits a success notice
+    // on successful teamDelete, not only on failure.
+    await plantTestAgent(fx.repoDir, "agent-tmp");
+    const tmp = makeAgent({ id: "agent-tmp", repoPath: fx.repoDir });
+    const { ctx, dialogs, notices, flushActions } = makeMockCtx({
+      agent: null,
+      repos: [fx.repoEntry],
+      lastAgents: [tmp],
+    });
+    handleCreateTeam(ctx);
+    const nameInput = assertDialog(dialogs[0]!, "input");
+    nameInput.onSubmit("doomed");
+    await flushActions();
+    const picker = assertDialog(dialogs[1]!, "multi-select");
+    picker.onCancel!();
+    await flushActions();
+    // Team gone + user-visible notice that the rollback happened.
+    const reg = await readTeams();
+    expect(reg.teams["doomed"]).toBeUndefined();
+    expect(notices.some((n) => n.includes("doomed") && n.toLowerCase().includes("rolled back"))).toBe(true);
+  });
+
+  test("wizard teamSend failure: notice includes 'send failed'", async () => {
+    // Reviewer should-fix #5a: assert the send-failure branch produces the
+    // expected notice format.
+    await plantTestAgent(fx.repoDir, "agent-q");
+    const q = makeAgent({ id: "agent-q", repoPath: fx.repoDir });
+    const { ctx, dialogs, notices, flushActions } = makeMockCtx({
+      agent: null,
+      repos: [fx.repoEntry],
+      lastAgents: [q],
+      teamSend: async (teamName) => ({
+        ok: false,
+        stdout: "",
+        stderr: "delivery failed",
+        exitCode: 1,
+      }),
+    });
+    handleCreateTeam(ctx);
+    const nameInput = assertDialog(dialogs[0]!, "input");
+    nameInput.onSubmit("brokerage");
+    await flushActions();
+    const picker = assertDialog(dialogs[1]!, "multi-select");
+    picker.onSubmit([0]);
+    await flushActions();
+    const ta = assertDialog(dialogs[2]!, "textarea");
+    ta.onSubmit("ping");
+    await flushActions();
+    expect(notices.some((n) => n.includes("created team @brokerage") && n.includes("send failed") && n.includes("delivery failed"))).toBe(true);
+  });
+
+  test("wizard partial add failure: notice includes the add-failure count", async () => {
+    // Reviewer should-fix #5b: assert partial-failure path. lastAgents
+    // surfaces an entry not planted on disk so teamAdd's resolver errors out
+    // — produces ok:false on that one teamAdd while the other succeeds.
+    await plantTestAgent(fx.repoDir, "agent-real");
+    const real = makeAgent({ id: "agent-real", repoPath: fx.repoDir });
+    // ghost is NOT planted — readAllAgents won't surface it, so teamAdd's
+    // resolveFullAgentId returns an error and the add fails.
+    const ghost = makeAgent({ id: "agent-ghost", repoPath: fx.repoDir });
+    const { ctx, dialogs, notices, flushActions } = makeMockCtx({
+      agent: null,
+      repos: [fx.repoEntry],
+      lastAgents: [real, ghost],
+    });
+    handleCreateTeam(ctx);
+    const nameInput = assertDialog(dialogs[0]!, "input");
+    nameInput.onSubmit("mixed");
+    await flushActions();
+    const picker = assertDialog(dialogs[1]!, "multi-select");
+    // Check BOTH — the real one will succeed, the ghost will fail.
+    picker.onSubmit([0, 1]);
+    await flushActions();
+    const ta = assertDialog(dialogs[2]!, "textarea");
+    ta.onSubmit("");
+    await flushActions();
+    expect(notices.some((n) => n.includes("created team @mixed") && n.includes("1 member") && n.includes("1 add failure"))).toBe(true);
+  });
 });
 
 describe("handleAddAgentToTeam", () => {

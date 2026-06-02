@@ -221,9 +221,10 @@ describe("Group D: @repo/agent-id scoped lookup", () => {
     expect(result.agent?.id).toBe("agent-111");
   });
 
-  test("D2: @app/agent-1 prefix match (unique in Repo A)", async () => {
+  test("D2: @app/agent-1 prefix does NOT match (exact-only)", async () => {
     const result = await resolveTarget("@app/agent-1", repos);
-    expect(result.agent?.id).toBe("agent-111");
+    expect(result.agent).toBeNull();
+    expect(errorOutput.some((e) => e.includes("Agent not found: agent-1 in repo app"))).toBe(true);
   });
 
   test("D3: @app/agent-222 not in Repo A (only in Repo B)", async () => {
@@ -247,22 +248,17 @@ describe("Group D: @repo/agent-id scoped lookup", () => {
     expect(errorOutput.some((e) => e.includes("Agent not found: agent-111 in repo libs"))).toBe(true);
   });
 
-  test("D6: @app/agent-a prefix ambiguous with agent-abc only (agent-abd is in Repo B)", async () => {
-    // Only agent-abc is in repoA, agent-abd is in repoB, so prefix "agent-a" matches only 1 in repoA
+  test("D6: @app/agent-a prefix does NOT match agent-abc (exact-only)", async () => {
     const result = await resolveTarget("@app/agent-a", repos);
-    expect(result.agent?.id).toBe("agent-abc");
+    expect(result.agent).toBeNull();
+    expect(errorOutput.some((e) => e.includes("Agent not found: agent-a in repo app"))).toBe(true);
   });
 
-  test("D7: @app/agent-a ambiguous when Repo A has both agent-abc and agent-abd", async () => {
+  test("D7: @app/agent-a prefix does NOT match even with multiple candidates (exact-only)", async () => {
     addAgentToRepo(repoA.path, "agent-abd");
     const result = await resolveTarget("@app/agent-a", repos);
     expect(result.agent).toBeNull();
-    const hasError = errorOutput.some((e) =>
-      e.includes('Ambiguous ID "agent-a" in repo app matches:') &&
-      e.includes("agent-abc") &&
-      e.includes("agent-abd")
-    );
-    expect(hasError).toBe(true);
+    expect(errorOutput.some((e) => e.includes("Agent not found: agent-a in repo app"))).toBe(true);
   });
 });
 
@@ -284,51 +280,42 @@ describe("Group E: Bare agent-id (same-repo-first)", () => {
     expect(result.agent?.id).toBe("agent-111");
   });
 
-  test("E2: same-repo-first - agent-abc in alpha AND agent-abc prefix in beta, alpha wins", async () => {
-    // agent-abc is in repoA; from repoA CWD, it should find same-repo match first
+  test("E2: same-repo exact match wins over cross-repo agent of same id", async () => {
+    // agent-abc is in repoA; from repoA CWD, exact same-repo match resolves.
     const result = await resolveTarget("agent-abc", repos, repoA.path);
     expect(result.agent?.id).toBe("agent-abc");
     expect(result.agent?.repoPath).toBe(repoA.path);
   });
 
-  test("E3: prefix match unique in same repo", async () => {
+  test("E3: prefix does NOT match in same repo (exact-only)", async () => {
     const result = await resolveTarget("agent-1", repos, repoA.path);
-    expect(result.agent?.id).toBe("agent-111");
+    expect(result.agent).toBeNull();
+    expect(errorOutput.some((e) => e.includes("Agent not found: agent-1"))).toBe(true);
   });
 
-  test("E4: prefix ambiguous in same repo does NOT fall back to global", async () => {
-    // "agent-" matches agent-111 and agent-abc in repoA (2 matches)
+  test("E4: prefix does NOT match in same repo (no ambiguous fallback)", async () => {
+    // "agent-" used to match multiple in repoA; with exact-only it just fails.
     const result = await resolveTarget("agent-", repos, repoA.path);
     expect(result.agent).toBeNull();
-    const hasError = errorOutput.some((e) =>
-      e.includes('Ambiguous ID "agent-" in app matches:') &&
-      e.includes("agent-111") &&
-      e.includes("agent-abc")
-    );
-    expect(hasError).toBe(true);
+    expect(errorOutput.some((e) => e.includes("Agent not found: agent-"))).toBe(true);
   });
 
-  test("E5: not in same repo, falls back to global", async () => {
+  test("E5: not in same repo, falls back to global exact match", async () => {
     const result = await resolveTarget("agent-222", repos, repoA.path);
     expect(result.agent?.id).toBe("agent-222");
   });
 
-  test("E6: not in same repo, prefix match in global", async () => {
+  test("E6: prefix does NOT match globally (exact-only)", async () => {
     const result = await resolveTarget("agent-2", repos, repoA.path);
-    expect(result.agent?.id).toBe("agent-222");
+    expect(result.agent).toBeNull();
+    expect(errorOutput.some((e) => e.includes("Agent not found: agent-2"))).toBe(true);
   });
 
-  test("E7: global prefix ambiguous", async () => {
-    // Add agent-2yy to repoB so "agent-2" matches 2 globally
+  test("E7: prefix that would once have been ambiguous globally now just fails", async () => {
     addAgentToRepo(repoB.path, "agent-2yy");
     const result = await resolveTarget("agent-2", repos, repoA.path);
     expect(result.agent).toBeNull();
-    const hasError = errorOutput.some((e) =>
-      e.includes('Ambiguous ID "agent-2" matches:') &&
-      e.includes("agent-222") &&
-      e.includes("agent-2yy")
-    );
-    expect(hasError).toBe(true);
+    expect(errorOutput.some((e) => e.includes("Agent not found: agent-2"))).toBe(true);
   });
 
   test("E8: same-repo takes precedence when agent-id exists in both repos", async () => {
@@ -351,9 +338,10 @@ describe("Group E: Bare agent-id (same-repo-first)", () => {
     expect(errorOutput.some((e) => e.includes("Agent not found: nonexistent-id"))).toBe(true);
   });
 
-  test("E11: worker-001 found in same repo via prefix", async () => {
+  test("E11: worker-0 prefix does NOT match worker-001 (exact-only)", async () => {
     const result = await resolveTarget("worker-0", repos, repoA.path);
-    expect(result.agent?.id).toBe("worker-001");
+    expect(result.agent).toBeNull();
+    expect(errorOutput.some((e) => e.includes("Agent not found: worker-0"))).toBe(true);
   });
 });
 
@@ -368,57 +356,41 @@ describe("Group F: matchAgentById unit tests", () => {
   ];
 
   test("F1: exact match returns agent", () => {
-    const result = matchAgentById("agent-111", agents);
-    expect(result.match?.id).toBe("agent-111");
-    expect(result.ambiguous).toEqual([]);
+    expect(matchAgentById("agent-111", agents)?.id).toBe("agent-111");
   });
 
-  test("F2: prefix match (unique) returns agent", () => {
-    const result = matchAgentById("agent-1", agents);
-    expect(result.match?.id).toBe("agent-111");
-    expect(result.ambiguous).toEqual([]);
+  test("F2: prefix does NOT match (exact-only)", () => {
+    expect(matchAgentById("agent-1", agents)).toBeNull();
   });
 
-  test("F3: prefix match ambiguous returns null + ids", () => {
-    const result = matchAgentById("agent-", agents);
-    expect(result.match).toBeNull();
-    expect(result.ambiguous).toEqual(["agent-111", "agent-abc"]);
+  test("F3: prefix that would once have been ambiguous returns null", () => {
+    expect(matchAgentById("agent-", agents)).toBeNull();
   });
 
-  test("F4: no match returns null + empty ambiguous", () => {
-    const result = matchAgentById("nonexistent", agents);
-    expect(result.match).toBeNull();
-    expect(result.ambiguous).toEqual([]);
+  test("F4: no match returns null", () => {
+    expect(matchAgentById("nonexistent", agents)).toBeNull();
   });
 
-  test("F5: exact match takes precedence over prefix matches", () => {
+  test("F5: exact match resolves even with overlapping shorter/longer ids present", () => {
     const agentsWithOverlap = [
       makeAgent({ id: "agent-1" }),
       makeAgent({ id: "agent-11" }),
       makeAgent({ id: "agent-111" }),
     ];
-    const result = matchAgentById("agent-1", agentsWithOverlap);
-    expect(result.match?.id).toBe("agent-1");
-    expect(result.ambiguous).toEqual([]);
+    expect(matchAgentById("agent-1", agentsWithOverlap)?.id).toBe("agent-1");
   });
 
-  test("F6: empty string prefix matches all agents (ambiguous)", () => {
-    const result = matchAgentById("", agents);
-    expect(result.match).toBeNull();
-    expect(result.ambiguous).toEqual(["agent-111", "agent-abc", "worker-001"]);
+  test("F6: empty string does NOT match anything (exact-only)", () => {
+    expect(matchAgentById("", agents)).toBeNull();
   });
 
   test("F7: case-sensitive matching", () => {
-    const result = matchAgentById("Agent-111", agents);
-    expect(result.match).toBeNull();
-    expect(result.ambiguous).toEqual([]);
+    expect(matchAgentById("Agent-111", agents)).toBeNull();
   });
 
-  test("F8: single agent in list, prefix match", () => {
+  test("F8: single agent in list, prefix does NOT match", () => {
     const single = [makeAgent({ id: "agent-foo-bar" })];
-    const result = matchAgentById("agent-foo", single);
-    expect(result.match?.id).toBe("agent-foo-bar");
-    expect(result.ambiguous).toEqual([]);
+    expect(matchAgentById("agent-foo", single)).toBeNull();
   });
 });
 
@@ -436,7 +408,7 @@ describe("Group G: findOwnRepo edge cases", () => {
     expect(result.agent?.id).toBe("agent-aaa");
   });
 
-  test("G2: CWD inside repo subdirectory (prefix match)", async () => {
+  test("G2: CWD inside repo subdirectory resolves own-repo agent", async () => {
     const cwdInside = join(repoA.path, "src", "deep", "nested");
     const result = await resolveTarget("agent-aaa", repos, cwdInside);
     expect(result.agent?.id).toBe("agent-aaa");

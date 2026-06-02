@@ -5859,8 +5859,8 @@ describe("renameAgent (native, nickname)", () => {
     // Resolvable by nickname AND by id
     resetReadAgentMetaCache();
     const { agents } = await readAllAgents([{ path: tempDir, name: basename(tempDir) }]);
-    expect(matchAgentById("pikachu", agents).match?.id).toBe("agent-abc");
-    expect(matchAgentById("agent-abc", agents).match?.id).toBe("agent-abc");
+    expect(matchAgentById("pikachu", agents)?.id).toBe("agent-abc");
+    expect(matchAgentById("agent-abc", agents)?.id).toBe("agent-abc");
   });
 
   test("writes meta.json with a trailing newline and preserves other fields", async () => {
@@ -7438,24 +7438,23 @@ describe("resolveAgentId", () => {
     expect(result).toEqual({ resolved: "agent-abc123" });
   });
 
-  test("substring match via directory", async () => {
+  test("substring does NOT match via directory (exact-only)", async () => {
     const agentDir = join(agentsDir, "agent-abc123");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), "{}");
 
     const result = await resolveAgentId(agentsDir, "abc123", async () => []);
-    expect(result).toEqual({ resolved: "agent-abc123" });
+    expect(result).toEqual({ error: "No matching agent found", matches: [] });
   });
 
-  test("substring match via tmux session only (no directory)", async () => {
+  test("substring does NOT match via tmux session (exact-only)", async () => {
     const result = await resolveAgentId(agentsDir, "abc123", async () => [
       "ittybitty-abc12345-agent-abc123",
     ]);
-    expect(result).toEqual({ resolved: "agent-abc123" });
+    expect(result).toEqual({ error: "No matching agent found", matches: [] });
   });
 
-  test("ambiguous match returns error with sorted matches", async () => {
-    // Create two agent dirs that both contain "abc"
+  test("substring with multiple candidates does NOT match (exact-only, no ambiguous error)", async () => {
     for (const id of ["agent-abc111", "agent-abc222"]) {
       const dir = join(agentsDir, id);
       await mkdir(dir, { recursive: true });
@@ -7463,26 +7462,7 @@ describe("resolveAgentId", () => {
     }
 
     const result = await resolveAgentId(agentsDir, "abc", async () => []);
-    expect(result).toEqual({
-      error: "Ambiguous agent ID — multiple matches",
-      matches: ["agent-abc111", "agent-abc222"],
-    });
-  });
-
-  test("ambiguous match across directory and tmux session", async () => {
-    // One agent in directory
-    const dir = join(agentsDir, "agent-abc111");
-    await mkdir(dir, { recursive: true });
-    await Bun.write(join(dir, "meta.json"), "{}");
-
-    // Another agent only in tmux
-    const result = await resolveAgentId(agentsDir, "abc", async () => [
-      "ittybitty-abc12345-agent-abc222",
-    ]);
-    expect(result).toEqual({
-      error: "Ambiguous agent ID — multiple matches",
-      matches: ["agent-abc111", "agent-abc222"],
-    });
+    expect(result).toEqual({ error: "No matching agent found", matches: [] });
   });
 
   test("no match returns error with empty matches", async () => {
@@ -7493,20 +7473,19 @@ describe("resolveAgentId", () => {
     });
   });
 
-  test("deduplicates matches found in both directory and tmux", async () => {
+  test("exact match found in both directory and tmux still resolves", async () => {
     const dir = join(agentsDir, "agent-abc123");
     await mkdir(dir, { recursive: true });
     await Bun.write(join(dir, "meta.json"), "{}");
 
-    // Same agent also in tmux — should still be a single unique match
-    const result = await resolveAgentId(agentsDir, "abc123", async () => [
+    const result = await resolveAgentId(agentsDir, "agent-abc123", async () => [
       "ittybitty-abc12345-agent-abc123",
     ]);
     expect(result).toEqual({ resolved: "agent-abc123" });
   });
 
   test("ignores non-ittybitty tmux sessions", async () => {
-    const result = await resolveAgentId(agentsDir, "abc123", async () => [
+    const result = await resolveAgentId(agentsDir, "agent-abc123", async () => [
       "my-other-session",
       "random-session-agent-abc123",
     ]);

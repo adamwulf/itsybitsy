@@ -148,47 +148,35 @@ describe("matchAgentById", () => {
   ];
 
   test("exact match returns the agent", () => {
-    const { match, ambiguous } = matchAgentById("agent-abc123", agents);
+    const match = matchAgentById("agent-abc123", agents);
     expect(match).not.toBeNull();
     expect(match!.id).toBe("agent-abc123");
-    expect(ambiguous).toEqual([]);
   });
 
-  test("unique prefix match returns the agent", () => {
-    const { match, ambiguous } = matchAgentById("agent-def", agents);
-    expect(match).not.toBeNull();
-    expect(match!.id).toBe("agent-def456");
-    expect(ambiguous).toEqual([]);
+  test("unique prefix does NOT match (exact-only)", () => {
+    expect(matchAgentById("agent-def", agents)).toBeNull();
   });
 
-  test("ambiguous prefix returns null with ambiguous IDs", () => {
-    const { match, ambiguous } = matchAgentById("agent-abc", agents);
-    expect(match).toBeNull();
-    expect(ambiguous).toEqual(["agent-abc123", "agent-abc999"]);
+  test("non-unique prefix does NOT match (exact-only)", () => {
+    expect(matchAgentById("agent-abc", agents)).toBeNull();
   });
 
-  test("no match returns null with empty ambiguous", () => {
-    const { match, ambiguous } = matchAgentById("zzz-nonexistent", agents);
-    expect(match).toBeNull();
-    expect(ambiguous).toEqual([]);
+  test("no match returns null", () => {
+    expect(matchAgentById("zzz-nonexistent", agents)).toBeNull();
   });
 
-  test("exact match takes priority even if prefix would be ambiguous", () => {
-    // If there's an exact match, it should be returned even if other agents share the prefix
+  test("exact match still resolves when other agents share the prefix", () => {
     const agentsWithExact = [
       makeAgent({ id: "agent-abc" }),
       makeAgent({ id: "agent-abc123" }),
     ];
-    const { match, ambiguous } = matchAgentById("agent-abc", agentsWithExact);
+    const match = matchAgentById("agent-abc", agentsWithExact);
     expect(match).not.toBeNull();
     expect(match!.id).toBe("agent-abc");
-    expect(ambiguous).toEqual([]);
   });
 
   test("empty agents list returns null", () => {
-    const { match, ambiguous } = matchAgentById("anything", []);
-    expect(match).toBeNull();
-    expect(ambiguous).toEqual([]);
+    expect(matchAgentById("anything", [])).toBeNull();
   });
 
   // ─── nickname resolution ───────────────────────────────────────────────
@@ -197,9 +185,7 @@ describe("matchAgentById", () => {
       makeAgent({ id: "agent-zzz111", meta: { nickname: "pikachu" } as any }),
       makeAgent({ id: "agent-yyy222" }),
     ];
-    const { match, ambiguous } = matchAgentById("pikachu", withNick);
-    expect(match!.id).toBe("agent-zzz111");
-    expect(ambiguous).toEqual([]);
+    expect(matchAgentById("pikachu", withNick)!.id).toBe("agent-zzz111");
   });
 
   test("exact id wins over a matching nickname (precedence)", () => {
@@ -207,25 +193,24 @@ describe("matchAgentById", () => {
     // regardless of array order.
     const a = makeAgent({ id: "agent-abc" });
     const b = makeAgent({ id: "agent-bbb", meta: { nickname: "agent-abc" } as any });
-    expect(matchAgentById("agent-abc", [b, a]).match!.id).toBe("agent-abc");
-    expect(matchAgentById("agent-abc", [a, b]).match!.id).toBe("agent-abc");
+    expect(matchAgentById("agent-abc", [b, a])!.id).toBe("agent-abc");
+    expect(matchAgentById("agent-abc", [a, b])!.id).toBe("agent-abc");
   });
 
   test("nickname is matched EXACTLY only, never as a prefix", () => {
     const withNick = [makeAgent({ id: "agent-zzz111", meta: { nickname: "pikachu" } as any })];
     // A prefix of the nickname does not match via the nickname tier.
-    expect(matchAgentById("pika", withNick).match).toBeNull();
+    expect(matchAgentById("pika", withNick)).toBeNull();
     // The exact nickname still resolves.
-    expect(matchAgentById("pikachu", withNick).match!.id).toBe("agent-zzz111");
+    expect(matchAgentById("pikachu", withNick)!.id).toBe("agent-zzz111");
   });
 
-  test("exact nickname wins over an id-prefix of a different agent", () => {
-    // "alpha" is an exact nickname on A, and also a prefix of B's id.
-    // Exact-nickname tier runs before id-prefix, so A wins.
+  test("exact nickname resolves; prefix of another id does NOT", () => {
+    // "alpha" is an exact nickname on A, and also a prefix of B's id. The
+    // nickname tier matches; the prefix tier no longer exists (exact-only).
     const a = makeAgent({ id: "agent-aaa", meta: { nickname: "alpha" } as any });
     const b = makeAgent({ id: "alpha-999" });
-    const { match } = matchAgentById("alpha", [a, b]);
-    expect(match!.id).toBe("agent-aaa");
+    expect(matchAgentById("alpha", [a, b])!.id).toBe("agent-aaa");
   });
 });
 

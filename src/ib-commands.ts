@@ -866,8 +866,21 @@ export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
           stderr: `Error: could not resolve git common dir for codex writable root: ${errMsg}`,
         };
       }
+      // Parent repo path — granted as a writable root so `ib new-agent` from
+      // inside a codex agent can mkdir into <parentRepo>/.ittybitty/agents/.
+      // See the spawn path for the full rationale; on resume we read
+      // agent.repoPath (the parent repo recorded at spawn time) and apply
+      // the same realpathSync canonicalisation.
+      let codexParentRepoRoot = agent.repoPath;
+      try {
+        codexParentRepoRoot = realpathSync(agent.repoPath);
+      } catch {
+        // Fall back to the unresolved path — codex will reject control
+        // characters / quotes itself if the path is unsafe.
+      }
       const codexExtraWritableRoots = [
         resolveGitRevParsePath(workPath, gitCommonDirResult.stdout),
+        codexParentRepoRoot,
       ];
 
       // Build resume.sh via the shared codex builder (mirrors start.sh).
@@ -3924,14 +3937,30 @@ export async function newAgent(
           stderr: `Error: could not resolve git common dir for codex writable root: ${errMsg}`,
         };
       }
+      // Parent repo path — granted as a writable root so `ib new-agent` from
+      // inside a codex agent can mkdir into <parentRepo>/.ittybitty/agents/.
+      // Codex's `-s workspace-write` sandbox is kept as defense-in-depth (our
+      // PreToolUse hook is the primary path-isolation gate); without this
+      // entry the sandbox blocks the agent-spawn mkdir even though the hook
+      // would allow it. Canonicalise via realpathSync so the path matches the
+      // one ib's mkdir actually uses.
+      let codexParentRepoRoot = rootRepoPath;
+      try {
+        codexParentRepoRoot = realpathSync(rootRepoPath);
+      } catch {
+        // rootRepoPath should always exist (we just created a worktree inside
+        // its .git), but fall back to the unresolved path rather than fail
+        // the spawn — codex will reject control characters / quotes itself.
+      }
       codexExtraWritableRoots = [
         resolveGitRevParsePath(workPath, gitCommonDirResult.stdout),
+        codexParentRepoRoot,
       ];
       await logSpawn(
         agentDir,
         spawnerAgentDir,
         id,
-        `codex writable git root: ${codexExtraWritableRoots[0]}`,
+        `codex writable roots: git=${codexExtraWritableRoots[0]} parentRepo=${codexExtraWritableRoots[1]}`,
       );
 
       // Codex hook-dispatcher precheck (SPEC §5.4 step 7 + §5.5 fail-open

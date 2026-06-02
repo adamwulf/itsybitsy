@@ -87,8 +87,8 @@ describe("openInGhostty", () => {
       expect(cmdArray[0]).toBe("ghostty");
       // Ghostty requires --key=value format (not --key value)
       expect(cmdArray[1]).toMatch(/^--command=/);
-      expect(cmdArray[1]).toContain("tmux attach -t test-session");
-      expect(cmdArray[1]).toContain("tmux set-option -t test-session");
+      expect(cmdArray[1]).toContain("tmux attach -t =test-session");
+      expect(cmdArray[1]).toContain("tmux set-option -t =test-session");
       expect(cmdArray.length).toBe(2);
     });
 

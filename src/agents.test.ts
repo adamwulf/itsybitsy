@@ -2402,7 +2402,7 @@ describe("detectAgentStates — claude_pid liveness gate", () => {
     await detectAgentStates([a], { reap: true });
     expect(a.state).toBe("stopped");
     // Husk session should have been torn down via reapOrphanedClaude.
-    expect(killSessionCalls).toEqual(["ib-a1"]);
+    expect(killSessionCalls).toEqual(["=ib-a1"]);
     // claude_pid was dead → no SIGTERM to it.
     expect(killPidCalls).toBe(0);
   });
@@ -2443,7 +2443,7 @@ describe("detectAgentStates — claude_pid liveness gate", () => {
 
     expect(a.state).toBe("stopped");
     // kill-session must have fired exactly ONCE, not once per tick.
-    expect(killSessionCalls).toEqual(["ib-a1"]);
+    expect(killSessionCalls).toEqual(["=ib-a1"]);
   });
 
   // Regression (resume re-arm): the reapedTmuxSessions memo must be CLEARED
@@ -2500,21 +2500,21 @@ describe("detectAgentStates — claude_pid liveness gate", () => {
     phase = "stopped";
     await detectAgentStates([a], { reap: true });
     expect(a.state).toBe("stopped");
-    expect(killSessionCalls).toEqual(["ib-a1"]);
+    expect(killSessionCalls).toEqual(["=ib-a1"]);
 
     // Tick 2: resumed → live pane → running, memo cleared for ib-a1.
     phase = "running";
     await detectAgentStates([a], { reap: true });
     expect(a.state).toBe("running");
     // No new kill-session on the running tick.
-    expect(killSessionCalls).toEqual(["ib-a1"]);
+    expect(killSessionCalls).toEqual(["=ib-a1"]);
 
     // Tick 3: stopped again → husk teardown re-armed → kill #2.
     phase = "stopped";
     await detectAgentStates([a], { reap: true });
     expect(a.state).toBe("stopped");
     // The core guarantee: kill-session fired a SECOND time after the resume.
-    expect(killSessionCalls).toEqual(["ib-a1", "ib-a1"]);
+    expect(killSessionCalls).toEqual(["=ib-a1", "=ib-a1"]);
   });
 
   // The memo is per-session-name: a different stopped session is still killed
@@ -2557,7 +2557,7 @@ describe("detectAgentStates — claude_pid liveness gate", () => {
     // Re-run: neither should be re-killed.
     await detectAgentStates([a1, a2], { reap: true });
 
-    expect(killSessionCalls.sort()).toEqual(["ib-a1", "ib-a2"]);
+    expect(killSessionCalls.sort()).toEqual(["=ib-a1", "=ib-a2"]);
   });
 
   // Test 8: empty/legacy claude_pid → no false positive, falls through normally
@@ -2658,7 +2658,7 @@ describe("detectAgentStates — dead-pane husk handling", () => {
     await detectAgentStates([a], { reap: true });
     expect(a.state).toBe("stopped");
     // Husk session should have been torn down
-    expect(killSessionCalls).toEqual(["ib-a1"]);
+    expect(killSessionCalls).toEqual(["=ib-a1"]);
     // reapOrphanedClaude should have been invoked (alive PID → SIGTERMed)
     expect(killPidCalls).toEqual([{ pid: 12345, signal: "SIGTERM" }]);
 
@@ -3839,7 +3839,7 @@ describe("detectAgentStates — reap option", () => {
     // set — proves we reached it.
     await detectAgentStates([a], { reap: true });
     expect(a.state).toBe("stopped");
-    expect(killSessionCalls).toEqual(["ib-a5"]);
+    expect(killSessionCalls).toEqual(["=ib-a5"]);
   });
 
   test("default (no opts) — does NOT reap (opt-in semantics)", async () => {

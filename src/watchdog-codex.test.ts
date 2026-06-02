@@ -111,7 +111,7 @@ function countEnterCalls(spawnMock: ReturnType<typeof mockSpawnRunner>, tmuxSess
   return spawnMock.calls.filter((c) =>
     c.args.includes("send-keys") &&
     c.args.includes("Enter") &&
-    c.args.includes(tmuxSession)
+    c.args.includes("=" + tmuxSession)
   ).length;
 }
 

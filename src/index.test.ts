@@ -1233,17 +1233,17 @@ describe("sendToSystemCoordinator", () => {
     // Verify sendMessage routed to IB_COORDINATOR_SESSION via the standard
     // tmux send-keys path: has-session probe + literal-paste + Enter.
     expect(spawnCalls.length).toBe(3);
-    expect(spawnCalls[0]).toEqual(["tmux", "has-session", "-t", IB_COORDINATOR_SESSION]);
+    expect(spawnCalls[0]).toEqual(["tmux", "has-session", "-t", "=" + IB_COORDINATOR_SESSION]);
     expect(spawnCalls[1]).toEqual([
       "tmux",
       "send-keys",
       "-t",
-      IB_COORDINATOR_SESSION,
+      "=" + IB_COORDINATOR_SESSION,
       "-l",
       "--",
       "[sent by user]: hello world",
     ]);
-    expect(spawnCalls[2]).toEqual(["tmux", "send-keys", "-t", IB_COORDINATOR_SESSION, "Enter"]);
+    expect(spawnCalls[2]).toEqual(["tmux", "send-keys", "-t", "=" + IB_COORDINATOR_SESSION, "Enter"]);
   });
 
   test("renders [sent by agent <id>]: prefix when fromAgent is supplied", async () => {
@@ -1257,7 +1257,7 @@ describe("sendToSystemCoordinator", () => {
         c[0] === "tmux" &&
         c[1] === "send-keys" &&
         c.length === 7 &&
-        c[3] === IB_COORDINATOR_SESSION &&
+        c[3] === "=" + IB_COORDINATOR_SESSION &&
         c[4] === "-l" &&
         c[5] === "--",
     );
@@ -1275,7 +1275,7 @@ describe("sendToSystemCoordinator", () => {
         c[0] === "tmux" &&
         c[1] === "send-keys" &&
         c.length === 7 &&
-        c[3] === IB_COORDINATOR_SESSION &&
+        c[3] === "=" + IB_COORDINATOR_SESSION &&
         c[4] === "-l" &&
         c[5] === "--",
     );

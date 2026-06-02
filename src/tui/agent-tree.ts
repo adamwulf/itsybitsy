@@ -151,6 +151,20 @@ export class AgentTreeComponent implements Component {
   questionAgentIds: Set<string> = new Set();
   healthReports: Map<string, RepoHealthReport> = new Map();
   suppressSelection = false;
+  /** When true, hide empty repo headers from visibleList unless their repo
+   * contains the current selection. Toggled by the dashboard's Option+Shift+.
+   * key. System-coordinator entries are a separate FlatEntry kind and unaffected. */
+  hideEmptyRepos = false;
+  /**
+   * Repo path that is force-kept visible even though its header is empty —
+   * the "the user is sitting on an empty repo, so don't yank it out from under
+   * them" carve-out. Explicitly set by selection-changing methods (NOT derived
+   * from selectedId on every getter call) so visibleList stays stable across
+   * intra-action selectedId mutations. Cleared when selection moves to a
+   * non-empty repo, the coordinator, or no-selection. Only meaningful while
+   * hideEmptyRepos is true.
+   */
+  private _stickyRevealedRepoPath: string | null = null;
 
   get flatList(): FlatEntry[] {
     return this._flatList;
@@ -181,9 +195,73 @@ export class AgentTreeComponent implements Component {
   }
 
   get visibleList(): FlatEntry[] {
-    return this.flatList.filter((f) =>
+    const base = this.flatList.filter((f) =>
       f.kind === "repo-header" || f.kind === "system-coordinator" || !f.agent.archived
     );
+    if (!this.hideEmptyRepos) return base;
+    const sticky = this._stickyRevealedRepoPath;
+    return base.filter((f) => {
+      if (f.kind !== "repo-header") return true;
+      if (f.hasAgents) return true;
+      return sticky !== null && f.repoPath === sticky;
+    });
+  }
+
+  /**
+   * Recompute _stickyRevealedRepoPath from the current selectedId. Called after
+   * every selection mutation so the filter has a stable input across the rest
+   * of the operation. No-op when hideEmptyRepos is false (filter ignores sticky
+   * anyway), but we still null it out so a later toggle starts clean.
+   */
+  private updateStickyReveal(): void {
+    if (!this.hideEmptyRepos || !this.hasSelection || this.selectedId === null) {
+      this._stickyRevealedRepoPath = null;
+      return;
+    }
+    let repoPath: string | null = null;
+    if (this.selectedId.startsWith("repopath:")) {
+      repoPath = this.selectedId.slice("repopath:".length);
+    } else if (this.selectedId !== SYSTEM_COORDINATOR_ID) {
+      const found = this._flatList.find(
+        (f) => f.kind === "agent" && f.agent.id === this.selectedId
+      );
+      if (found && found.kind === "agent") repoPath = found.agent.repoPath;
+    }
+    if (repoPath === null) {
+      this._stickyRevealedRepoPath = null;
+      return;
+    }
+    // Only stick if the matching repo-header is empty — otherwise it's already
+    // visible on its own merits and sticky would just hide stale state on toggle.
+    const header = this._flatList.find(
+      (f) => f.kind === "repo-header" && f.repoPath === repoPath
+    );
+    if (header && header.kind === "repo-header" && !header.hasAgents) {
+      this._stickyRevealedRepoPath = repoPath;
+    } else {
+      this._stickyRevealedRepoPath = null;
+    }
+  }
+
+  /**
+   * Toggle the hide-empty-repos flag. Updates sticky-reveal based on the
+   * current selection, then re-resolves selectedIndex so it stays consistent
+   * with the (now possibly shorter) visibleList — without this, hidden rows
+   * above the selection would leave selectedIndex pointing past the new end.
+   */
+  setHideEmptyRepos(value: boolean): void {
+    if (this.hideEmptyRepos === value) return;
+    this.hideEmptyRepos = value;
+    this.updateStickyReveal();
+    if (this.hasSelection) {
+      this.resolveSelection();
+    } else {
+      // Clamp scrollOffset/index so the render math stays valid even with no
+      // active selection (regardless of whether visibleList is empty now).
+      const len = this.visibleList.length;
+      this.selectedIndex = len > 0 ? Math.min(this.selectedIndex, len - 1) : 0;
+      this.scrollOffset = len > 0 ? Math.min(this.scrollOffset, len - 1) : 0;
+    }
   }
 
   /** Discriminated union selection — the canonical way to query what is selected */
@@ -222,30 +300,41 @@ export class AgentTreeComponent implements Component {
 
   /** Select agent by ID. Returns true if found. Force-selects (§17.1/§17.3). */
   selectAgentById(agentId: string): boolean {
+    // An agent's repo by definition has agents, so sticky-reveal clears when
+    // landing on one. Update selectedId+hasSelection first, then refresh sticky,
+    // then re-find the index against the post-sticky visibleList — same
+    // ordering used by updateSelectedId so the cursor never drifts.
+    const found = this._flatList.find((f) => f.kind === "agent" && f.agent.id === agentId);
+    if (!found || found.kind !== "agent") return false;
+    this.selectedId = agentId;
+    this.hasSelection = true;
+    this.updateStickyReveal();
     const visible = this.visibleList;
     const idx = visible.findIndex((f) => f.kind === "agent" && f.agent.id === agentId);
-    if (idx !== -1) {
-      this.selectedIndex = idx;
-      this.selectedId = agentId;
-      this.hasSelection = true;
-      this.ensureSelectedVisible();
-      return true;
-    }
-    return false;
+    if (idx === -1) return false;
+    this.selectedIndex = idx;
+    this.ensureSelectedVisible();
+    return true;
   }
 
   /** Select repo header by repoPath. Returns true if found. Force-selects (§17.1). */
   selectByRepoPath(repoPath: string): boolean {
+    // Repo headers may be empty (hidden by hideEmptyRepos); set selectedId
+    // first so updateStickyReveal can decide whether to keep the header
+    // visible, then re-find selectedIndex in the post-sticky visibleList.
+    const headerExists = this._flatList.some(
+      (f) => f.kind === "repo-header" && f.repoPath === repoPath
+    );
+    if (!headerExists) return false;
+    this.selectedId = `repopath:${repoPath}`;
+    this.hasSelection = true;
+    this.updateStickyReveal();
     const visible = this.visibleList;
     const idx = visible.findIndex((f) => f.kind === "repo-header" && f.repoPath === repoPath);
-    if (idx !== -1) {
-      this.selectedIndex = idx;
-      this.selectedId = `repopath:${repoPath}`;
-      this.hasSelection = true;
-      this.ensureSelectedVisible();
-      return true;
-    }
-    return false;
+    if (idx === -1) return false;
+    this.selectedIndex = idx;
+    this.ensureSelectedVisible();
+    return true;
   }
 
   /**
@@ -256,6 +345,7 @@ export class AgentTreeComponent implements Component {
   deselect(): void {
     this.hasSelection = false;
     this.selectedId = null;
+    this.updateStickyReveal();
   }
 
   /**
@@ -419,23 +509,43 @@ export class AgentTreeComponent implements Component {
     this.ensureSelectedVisible();
   }
 
-  /** Update selectedId from current selectedIndex */
+  /**
+   * Update selectedId from current selectedIndex, refresh sticky-reveal, then
+   * re-resolve selectedIndex against the new visibleList. The final re-resolve
+   * is what closes HIGH 1: a sticky update can shrink the visible list, and
+   * without re-finding selectedIndex it would point past (or to the wrong row
+   * in) the post-update list.
+   */
   private updateSelectedId() {
     const visible = this.visibleList;
-    if (this.selectedIndex >= 0 && this.selectedIndex < visible.length) {
-      const item = visible[this.selectedIndex]!;
-      if (item.kind === "system-coordinator") {
-        this.selectedId = SYSTEM_COORDINATOR_ID;
-      } else if (item.kind === "repo-header") {
-        this.selectedId = `repopath:${item.repoPath}`;
-      } else {
-        this.selectedId = item.agent.id;
-      }
+    if (this.selectedIndex < 0 || this.selectedIndex >= visible.length) return;
+    const item = visible[this.selectedIndex]!;
+    if (item.kind === "system-coordinator") {
+      this.selectedId = SYSTEM_COORDINATOR_ID;
+    } else if (item.kind === "repo-header") {
+      this.selectedId = `repopath:${item.repoPath}`;
+    } else {
+      this.selectedId = item.agent.id;
     }
+    this.updateStickyReveal();
+    // Re-resolve selectedIndex inline (NOT via resolveSelection, which would
+    // call back into updateSelectedId on a miss). The sticky update above may
+    // have changed visibleList's shape; selectedIndex must follow.
+    const updatedVisible = this.visibleList;
+    const idx = updatedVisible.findIndex((f) => {
+      if (f.kind === "system-coordinator") return this.selectedId === SYSTEM_COORDINATOR_ID;
+      if (f.kind === "repo-header") return `repopath:${f.repoPath}` === this.selectedId;
+      return f.agent.id === this.selectedId;
+    });
+    if (idx !== -1) this.selectedIndex = idx;
   }
 
   /** Re-resolve selectedIndex from selectedId after flatList changes */
   private resolveSelection() {
+    // flatList may have changed shape (e.g. a previously-empty repo gained an
+    // agent), so refresh sticky-reveal from the current selectedId before
+    // computing visibleList.
+    this.updateStickyReveal();
     const visible = this.visibleList;
     if (visible.length === 0) {
       this.selectedIndex = 0;

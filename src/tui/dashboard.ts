@@ -2383,6 +2383,13 @@ export class DashboardComponent implements Component {
       this.setNotice("Re-checking repo health...");
       this.watcher?.recheckHealth();
     }
+    // Option+Shift+. (ESC >) — toggle hide-empty-repos
+    else if (data === "\x1b>") {
+      const next = !this.agentTree.hideEmptyRepos;
+      this.agentTree.setHideEmptyRepos(next);
+      this.setNotice(next ? "Hiding empty repos" : "Showing all repos");
+      this.tui?.requestRender();
+    }
     // Fix resolvable health warnings (REPO mode only)
     else if (data === "f") { agentActions.handleResolveHealth(this); }
     // Ghostty — repo/worktree

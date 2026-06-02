@@ -433,7 +433,7 @@ describe("ensureSystemCoordinator", () => {
       (c) =>
         c[0] === "tmux" &&
         c[1] === "set-option" &&
-        c.includes("=" + IB_COORDINATOR_SESSION) &&
+        c.includes("=" + IB_COORDINATOR_SESSION + ":") &&
         c.includes("window-size") &&
         c.includes("manual")
     );

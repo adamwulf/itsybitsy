@@ -354,7 +354,7 @@ describe("sendCompact (via runner injection)", () => {
 
     const result = await sendCompact("ib_agent-abc123");
     expect(result).toBe(true);
-    expect(capturedCmd).toEqual(["tmux", "send-keys", "-t", "=ib_agent-abc123", "/compact", "Enter"]);
+    expect(capturedCmd).toEqual(["tmux", "send-keys", "-t", "=ib_agent-abc123:", "/compact", "Enter"]);
   });
 
   test("returns false on non-zero exit", async () => {

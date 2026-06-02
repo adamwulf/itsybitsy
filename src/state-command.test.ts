@@ -145,8 +145,8 @@ describe("gatherAgentState", () => {
     //   pgrep -P 3000    -> "1111\n9999\n"  (claude + one stranger)
     //   ps -p 9999       -> "node weird-process"
     spawnCtx.set(makeSpawnRouter([
-      { match: (c) => c[0] === "tmux" && c[1] === "has-session" && c[3] === "=ib-test01", result: makeSpawnResult(0) },
-      { match: (c) => c[0] === "tmux" && c[1] === "list-panes" && c[3] === "=ib-test01", result: makeSpawnResult(0, "3000\n") },
+      { match: (c) => c[0] === "tmux" && c[1] === "has-session" && c[3] === "=ib-test01:", result: makeSpawnResult(0) },
+      { match: (c) => c[0] === "tmux" && c[1] === "list-panes" && c[3] === "=ib-test01:", result: makeSpawnResult(0, "3000\n") },
       { match: (c) => c[0] === "pgrep" && c[2] === "3000", result: makeSpawnResult(0, "1111\n9999\n") },
       { match: (c) => c[0] === "ps" && c[c.length - 1] === "9999", result: makeSpawnResult(0, "node weird-process\n") },
     ]));
@@ -901,8 +901,8 @@ describe("cleanupOrphans", () => {
     };
     const cleanup = await cleanupOrphans(report, EMPTY_TRACKED);
 
-    expect(calls.filter((c) => c[0] === "tmux" && c[1] === "kill-session" && c[3] === "=ittybitty-stale-foo").length).toBe(1);
-    expect(calls.filter((c) => c[0] === "tmux" && c[1] === "kill-session" && c[3] === "=ittybitty-stale-bar").length).toBe(1);
+    expect(calls.filter((c) => c[0] === "tmux" && c[1] === "kill-session" && c[3] === "=ittybitty-stale-foo:").length).toBe(1);
+    expect(calls.filter((c) => c[0] === "tmux" && c[1] === "kill-session" && c[3] === "=ittybitty-stale-bar:").length).toBe(1);
     expect(cleanup.actions.length).toBe(2);
     for (const action of cleanup.actions) {
       expect(action.kind).toBe("tmux_session");
@@ -1024,7 +1024,7 @@ describe("cleanupOrphans", () => {
     await cleanupOrphans(report, EMPTY_TRACKED);
 
     // Only the explicit orphan entries get killed.
-    expect(tmuxKills).toEqual(["=ittybitty-orphan-only"]);
+    expect(tmuxKills).toEqual(["=ittybitty-orphan-only:"]);
     expect([...signaled]).toEqual([7777]);
   });
 

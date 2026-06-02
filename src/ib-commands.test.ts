@@ -123,9 +123,9 @@ describe("ib-commands", () => {
       expect(result.ok).toBe(true);
       // Should have: has-session, send-keys (message), send-keys (Enter)
       expect(spawnCalls.length).toBe(3);
-      expect(spawnCalls[0]).toEqual(["tmux", "has-session", "-t", `=tmux-agent-abc`]);
-      expect(spawnCalls[1]).toEqual(["tmux", "send-keys", "-t", `=tmux-agent-abc`, "-l", "--", "[sent by user]: hello world"]);
-      expect(spawnCalls[2]).toEqual(["tmux", "send-keys", "-t", `=tmux-agent-abc`, "Enter"]);
+      expect(spawnCalls[0]).toEqual(["tmux", "has-session", "-t", `=tmux-agent-abc:`]);
+      expect(spawnCalls[1]).toEqual(["tmux", "send-keys", "-t", `=tmux-agent-abc:`, "-l", "--", "[sent by user]: hello world"]);
+      expect(spawnCalls[2]).toEqual(["tmux", "send-keys", "-t", `=tmux-agent-abc:`, "Enter"]);
     });
 
     test("returns error when tmux session not found", async () => {
@@ -302,7 +302,7 @@ describe("ib-commands", () => {
       expect(sendKeysCalls[0]![6]).toBe(msg);
       // Last call must be Enter
       const lastCall = spawnCalls[spawnCalls.length - 1]!;
-      expect(lastCall).toEqual(["tmux", "send-keys", "-t", "=tmux-agent-abc", "Enter"]);
+      expect(lastCall).toEqual(["tmux", "send-keys", "-t", "=tmux-agent-abc:", "Enter"]);
     });
 
     test("sends long message (1500 chars) as 3 ordered chunks + Enter", async () => {
@@ -328,7 +328,7 @@ describe("ib-commands", () => {
 
       // Final call must be the Enter, after all chunks.
       const lastCall = spawnCalls[spawnCalls.length - 1]!;
-      expect(lastCall).toEqual(["tmux", "send-keys", "-t", "=tmux-agent-abc", "Enter"]);
+      expect(lastCall).toEqual(["tmux", "send-keys", "-t", "=tmux-agent-abc:", "Enter"]);
     });
 
     test("raw=true suppresses [sent by ...] prefix even when fromAgent is set", async () => {
@@ -1112,7 +1112,7 @@ describe("pauseAgent (native)", () => {
       (c) => c[0] === "tmux" && c[1] === "kill-session"
     );
     expect(killSessionCall).toBeDefined();
-    expect(killSessionCall![3]).toBe("=tmux-agent-abc");
+    expect(killSessionCall![3]).toBe("=tmux-agent-abc:");
 
     // Should log tmux session kill
     const log = await Bun.file(join(agentDir, "agent.log")).text();
@@ -1711,7 +1711,7 @@ describe("resumeAgent (native)", () => {
       (c) =>
         c[0] === "tmux" &&
         c[1] === "set-option" &&
-        c.includes("=tmux-agent-window-size") &&
+        c.includes("=tmux-agent-window-size:") &&
         c.includes("window-size") &&
         c.includes("manual"),
     );

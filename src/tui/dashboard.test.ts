@@ -1877,7 +1877,7 @@ describe("Cross-repo send (E key)", () => {
 
     // Verify message was sent to agent-b's tmux session
     expect(sentMessages.length).toBeGreaterThanOrEqual(1);
-    const msg = sentMessages.find((m) => m.target === "=tmux-agent-b");
+    const msg = sentMessages.find((m) => m.target === "=tmux-agent-b:");
     expect(msg).toBeDefined();
     expect(msg!.message).toContain("hello cross-repo");
   });
@@ -4565,12 +4565,12 @@ describe("coordinator input field (Phase 49)", () => {
 
       // Delivered to the coordinator session via the outbox drain (raw → no prefix).
       const literal = sendKeys.find(
-        (c) => c[0] === "tmux" && c[1] === "send-keys" && c[3] === "=" + IB_COORDINATOR_SESSION && c[4] === "-l" && c[5] === "--",
+        (c) => c[0] === "tmux" && c[1] === "send-keys" && c[3] === "=" + IB_COORDINATOR_SESSION + ":" && c[4] === "-l" && c[5] === "--",
       );
       expect(literal).toBeDefined();
       expect(literal![6]).toBe("hi");
       // And an Enter to the same session.
-      expect(sendKeys.some((c) => c[3] === "=" + IB_COORDINATOR_SESSION && c[c.length - 1] === "Enter")).toBe(true);
+      expect(sendKeys.some((c) => c[3] === "=" + IB_COORDINATOR_SESSION + ":" && c[c.length - 1] === "Enter")).toBe(true);
     } finally {
       resetSystemCoordinatorHasSessionFn();
       resetCoordinatorHome();

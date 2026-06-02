@@ -1279,6 +1279,16 @@ export class DashboardComponent implements Component {
     // schedule the load and apply when ready (selection-sync still runs sync).
     void this.refreshTeamsTree(agents);
 
+    // §17.4: feed channel-pane the current id → repoName map so chat lines
+    // render `[sent by <repoName>/<agentId>]:` for real-agent senders. Built
+    // from `agents` (not `flatList`, which interleaves repo-header rows) so the
+    // lookup is uniform across teams. Agents absent from the map (archived,
+    // cross-coordinator, unknown) fall through to the bare-id form in the
+    // pane's renderer — no crash, no stray slash.
+    const repoByAgent = new Map<string, string>();
+    for (const agent of agents) repoByAgent.set(agent.id, agent.repoName);
+    this.channelPane.agentRepoById = repoByAgent;
+
     // Wire health reports to agent tree
     if (this.watcher) {
       this.agentTree.healthReports = this.watcher.healthReports;

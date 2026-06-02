@@ -29,8 +29,14 @@
  * on-disk record stores the RAW message with NO `[sent by …]` prefix; here we
  * reconstruct a SHORTENED version of the §16.4 grammar:
  *   - agent sender (real id, not `@`-prefixed, not `""`):
- *       `[sent by <id>]: <msg>`  — the literal word "agent" is still dropped
- *       (the chat-box context already establishes the sender is an agent).
+ *       `[sent by <repoName>/<id>]: <msg>` WHEN the agent's repo is known
+ *       (cross-repo disambiguation — many teams span repos),
+ *       `[sent by <id>]: <msg>` WHEN the repo lookup misses (archived /
+ *       unknown / cross-coordinator agent). The literal word "agent" is
+ *       still dropped in both forms (the chat-box context already
+ *       establishes the sender is an agent). The lookup is dashboard-driven:
+ *       `ChannelPaneComponent.agentRepoById` is populated by the dashboard's
+ *       `onUpdate` from the current `Agent[]`.
  *   - `@`-sentinel sender (e.g. `@system`):
  *       `[sent by @system]: <msg>` — the sentinel is kept verbatim.
  *   - human/CLI sender (`fromAgent === ""`):
@@ -62,11 +68,18 @@ import { RESET, BOLD, DIM, CYAN, BRIGHT_BLUE, BRIGHT_MAGENTA } from "./colors";
  * @param teamName the bare team name (no `@`) — reserved for forward use; not rendered
  * @param userName the configured `user.name`, or null/empty if unset — drives the
  *                 human-form prefix (`user <name>` vs bare `user`)
+ * @param agentRepoById optional map from agent id → repo name; when provided and
+ *                 the record's `fromAgent` is a real agent id with an entry in
+ *                 the map, the rendered label is prefixed `<repoName>/<id>` so
+ *                 chat lines disambiguate cross-repo participants. Map miss is a
+ *                 graceful fallback to the bare agent id (no stray slash, no
+ *                 throw). Does NOT affect `@`-sentinel or human senders.
  */
 export function formatChannelLine(
   record: ChannelMessage,
   _teamName: string,
   userName: string | null,
+  agentRepoById?: Map<string, string> | null,
 ): string {
   let label: string;
   let color: string;
@@ -82,10 +95,14 @@ export function formatChannelLine(
     label = record.fromAgent;
     color = BRIGHT_MAGENTA;
   } else {
-    // Real agent id — the literal word "agent" is DROPPED inside a team chat
-    // box (the panel's team context already establishes the sender is an
-    // agent in this room — §16.4 delivery-prefix divergence).
-    label = record.fromAgent;
+    // Real agent id — render `<repoName>/<id>` when the dashboard-supplied
+    // lookup map has an entry for this agent (cross-repo disambiguation —
+    // many teams span repos), falling back to the bare id on map miss
+    // (archived / unknown / cross-coordinator). The literal word "agent" is
+    // DROPPED in both forms (the panel's team context already establishes
+    // the sender is an agent in this room — §16.4 delivery-prefix divergence).
+    const repoName = agentRepoById?.get(record.fromAgent);
+    label = repoName ? `${repoName}/${record.fromAgent}` : record.fromAgent;
     color = CYAN;
   }
   // The bracketed sender prefix is BOLD + color so it visually separates from
@@ -143,6 +160,15 @@ export class ChannelPaneComponent implements Component {
    * can build the human-form prefix without awaiting. `null` when unset.
    */
   userName: string | null = null;
+
+  /**
+   * Map from agent id → repo name, refreshed by the dashboard's `onUpdate` from
+   * the current `Agent[]`. The render pass threads it into `formatChannelLine`
+   * so real-agent-id chat lines render as `<repoName>/<agentId>` (map miss →
+   * bare id; archived / unknown / cross-repo agents fall through gracefully).
+   * Empty map → every line falls through to the bare-id form (the no-data form).
+   */
+  agentRepoById: Map<string, string> = new Map();
 
   /** Lines scrolled back from the bottom. 0 = following the newest message. */
   scrollBack = 0;
@@ -217,7 +243,7 @@ export class ChannelPaneComponent implements Component {
       const body =
         rec.kind === "system"
           ? formatChannelSystemLine(rec)
-          : formatChannelLine(rec, this.teamName, this.userName);
+          : formatChannelLine(rec, this.teamName, this.userName, this.agentRepoById);
       wrapped.push(...wrapLines(gutter + body, width));
       // Insert a blank visual separator BETWEEN messages (not after the
       // newest) so chat reads less like a wall of text. The blank line counts

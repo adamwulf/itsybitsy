@@ -694,14 +694,6 @@ export class DashboardComponent implements Component {
    * state (§17.1) remains reachable via the panel toggle / @-jump.
    */
   private hasAutoSelectedFirstAgent = false;
-  /**
-   * Session-only toggle: when true, repo headers with zero non-archived
-   * sub-agents are hidden from the agent tree (unless the currently selected
-   * entry belongs to that repo). Bound to Option+Shift+. (ESC >). The actual
-   * filtering lives on AgentTreeComponent.visibleList — this field is the
-   * dashboard-side mirror so other panes / future state inspection can read it.
-   */
-  hideEmptyRepos = false;
   private _questionsFocused = false;
   /** Cache of which agents have an attached tmux client */
   private _clientAttached: Map<string, boolean> = new Map();
@@ -2393,9 +2385,9 @@ export class DashboardComponent implements Component {
     }
     // Option+Shift+. (ESC >) — toggle hide-empty-repos
     else if (data === "\x1b>") {
-      this.hideEmptyRepos = !this.hideEmptyRepos;
-      this.agentTree.setHideEmptyRepos(this.hideEmptyRepos);
-      this.setNotice(this.hideEmptyRepos ? "Hiding empty repos" : "Showing all repos");
+      const next = !this.agentTree.hideEmptyRepos;
+      this.agentTree.setHideEmptyRepos(next);
+      this.setNotice(next ? "Hiding empty repos" : "Showing all repos");
       this.tui?.requestRender();
     }
     // Fix resolvable health warnings (REPO mode only)

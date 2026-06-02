@@ -220,6 +220,104 @@ describe("AgentTreeComponent", () => {
     // With no repo headers, selection should remain valid (an agent row).
     expect(tree.selectedAgent).toBeTruthy();
   });
+
+  // HIGH 1 regression: moving off a selected-empty-repo header must leave
+  // selectedIndex, selectedId, and visibleList[selectedIndex] mutually
+  // consistent. Pre-fix, the sticky-reveal repo path was derived from the
+  // live selectedId inside visibleList, so visibleList shrank between the
+  // updateSelectedId and ensureSelectedVisible reads — leaving selectedIndex
+  // pointing one row past the intended landing in the shrunken list.
+  test("HIGH 1: j off a selected empty repo header keeps selection consistent", () => {
+    const tree = new AgentTreeComponent();
+    const flat: FlatEntry[] = [
+      // Non-empty repo A with one agent
+      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: true },
+      { kind: "agent", agent: makeAgent("a1", "running", { repoName: "alpha", repoPath: "/repos/alpha" }), depth: 1, connector: "" },
+      // Empty repo X (this is the one we'll sit on)
+      { kind: "repo-header", repoName: "xerox", repoPath: "/repos/xerox", hasAgents: false },
+      // Non-empty repo Z with one agent
+      { kind: "repo-header", repoName: "zulu", repoPath: "/repos/zulu", hasAgents: true },
+      { kind: "agent", agent: makeAgent("z1", "running", { repoName: "zulu", repoPath: "/repos/zulu" }), depth: 1, connector: "" },
+    ];
+    tree.setFlatList(flat);
+    tree.setHideEmptyRepos(true);
+    // Sit on the empty repo header. With hideEmptyRepos on, it remains visible
+    // because it is the current selection — visibleList is
+    // [headerA, agentA1, headerX (sticky), headerZ, agentZ1] = length 5.
+    expect(tree.selectByRepoPath("/repos/xerox")).toBe(true);
+    expect(tree.visibleList.length).toBe(5);
+    expect(tree.selectedRepoPath).toBe("/repos/xerox");
+
+    // Press j — should land on the next visible row (headerZ).
+    tree.moveSelection(1);
+
+    // headerX should now be hidden again (selection moved off it). visibleList
+    // is now [headerA, agentA1, headerZ, agentZ1] (length 4), and selection
+    // should be on headerZ at index 2.
+    const visible = tree.visibleList;
+    expect(visible.length).toBe(4);
+    expect(visible.some((f) => f.kind === "repo-header" && f.repoPath === "/repos/xerox")).toBe(false);
+    expect(tree.selectedRepoPath).toBe("/repos/zulu");
+    // Crux: selectedIndex must point to the row matching selectedId in the
+    // POST-mutation visibleList.
+    const sel = tree.selection;
+    expect(sel?.kind).toBe("repo-header");
+    if (sel?.kind === "repo-header") {
+      expect(sel.repoPath).toBe("/repos/zulu");
+    }
+    const matched = visible.findIndex(
+      (f) => f.kind === "repo-header" && f.repoPath === "/repos/zulu"
+    );
+    expect(matched).not.toBe(-1);
+    // The visibleList row reachable via the public selection getter must be
+    // the same row identified by selectedRepoPath/selectedId — that's the
+    // consistency invariant the bug violated.
+    const selRepoPath = (sel?.kind === "repo-header") ? sel.repoPath : null;
+    expect(selRepoPath).toBe(visible[matched]!.kind === "repo-header" ? "/repos/zulu" : null);
+  });
+
+  // Toggling hideEmptyRepos off while sitting on an empty header should leave
+  // the selection intact (the header was visible-when-selected, and is now
+  // visible unconditionally).
+  test("setHideEmptyRepos(false) while on an empty header preserves selection", () => {
+    const tree = new AgentTreeComponent();
+    const flat: FlatEntry[] = [
+      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: true },
+      { kind: "agent", agent: makeAgent("a1", "running", { repoName: "alpha", repoPath: "/repos/alpha" }), depth: 1, connector: "" },
+      { kind: "repo-header", repoName: "xerox", repoPath: "/repos/xerox", hasAgents: false },
+    ];
+    tree.setFlatList(flat);
+    tree.setHideEmptyRepos(true);
+    tree.selectByRepoPath("/repos/xerox");
+    expect(tree.selectedRepoPath).toBe("/repos/xerox");
+    tree.setHideEmptyRepos(false);
+    expect(tree.selectedRepoPath).toBe("/repos/xerox");
+    expect(tree.visibleList.length).toBe(3); // both headers + one agent
+  });
+
+  // The @ fuzzy-jump scenario: selecting an agent in an otherwise-hidden empty
+  // repo should reveal that repo's header. (The repo has an agent so it isn't
+  // strictly "empty", but this also covers the case where selectAgentById is
+  // called on a freshly-spawned agent in a previously-empty repo before the
+  // flatList catches up — sticky stays null and the header reappears via
+  // hasAgents on the next setFlatList.)
+  test("selectAgentById on an agent in a non-empty repo leaves sticky null", () => {
+    const tree = new AgentTreeComponent();
+    const flat: FlatEntry[] = [
+      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: false },
+      { kind: "repo-header", repoName: "beta", repoPath: "/repos/beta", hasAgents: true },
+      { kind: "agent", agent: makeAgent("b1", "running", { repoName: "beta", repoPath: "/repos/beta" }), depth: 1, connector: "" },
+    ];
+    tree.setFlatList(flat);
+    tree.setHideEmptyRepos(true);
+    // Alpha is hidden (empty, not selected). Beta is visible.
+    expect(tree.visibleList.length).toBe(2);
+    // Select b1 — beta is already visible via hasAgents.
+    expect(tree.selectAgentById("b1")).toBe(true);
+    expect(tree.selectedAgent?.id).toBe("b1");
+    // Alpha is still hidden because nothing in alpha is selected.
+    expect(tree.visibleList.some((f) => f.kind === "repo-header" && f.repoPath === "/repos/alpha")).toBe(false);
+  });
 });
 
 describe("agent-tree helpers", () => {

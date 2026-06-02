@@ -29,8 +29,14 @@
  * on-disk record stores the RAW message with NO `[sent by …]` prefix; here we
  * reconstruct a SHORTENED version of the §16.4 grammar:
  *   - agent sender (real id, not `@`-prefixed, not `""`):
- *       `[sent by <id>]: <msg>`  — the literal word "agent" is still dropped
- *       (the chat-box context already establishes the sender is an agent).
+ *       `[sent by <repoName>/<id>]: <msg>` WHEN the agent's repo is known
+ *       (cross-repo disambiguation — many teams span repos),
+ *       `[sent by <id>]: <msg>` WHEN the repo lookup misses (archived /
+ *       unknown / cross-coordinator agent). The literal word "agent" is
+ *       still dropped in both forms (the chat-box context already
+ *       establishes the sender is an agent). The lookup is dashboard-driven:
+ *       `ChannelPaneComponent.agentRepoById` is populated by the dashboard's
+ *       `onUpdate` from the current `Agent[]`.
  *   - `@`-sentinel sender (e.g. `@system`):
  *       `[sent by @system]: <msg>` — the sentinel is kept verbatim.
  *   - human/CLI sender (`fromAgent === ""`):
@@ -89,12 +95,12 @@ export function formatChannelLine(
     label = record.fromAgent;
     color = BRIGHT_MAGENTA;
   } else {
-    // Real agent id — the literal word "agent" is DROPPED inside a team chat
-    // box (the panel's team context already establishes the sender is an
-    // agent in this room — §16.4 delivery-prefix divergence). When a repo
-    // lookup map is provided AND has an entry for this agent, prefix the id
-    // with `<repoName>/` so cross-repo participants are disambiguated. Map
-    // miss → bare id (graceful fallback for archived / unknown agents).
+    // Real agent id — render `<repoName>/<id>` when the dashboard-supplied
+    // lookup map has an entry for this agent (cross-repo disambiguation —
+    // many teams span repos), falling back to the bare id on map miss
+    // (archived / unknown / cross-coordinator). The literal word "agent" is
+    // DROPPED in both forms (the panel's team context already establishes
+    // the sender is an agent in this room — §16.4 delivery-prefix divergence).
     const repoName = agentRepoById?.get(record.fromAgent);
     label = repoName ? `${repoName}/${record.fromAgent}` : record.fromAgent;
     color = CYAN;

@@ -1210,6 +1210,53 @@ describe("acquireSystemCoordinator / releaseSystemCoordinator", () => {
     expect(content).toContain(String(process.pid));
     expect(content).not.toContain("not-a-number");
   });
+
+  // Regression: the pruner originally called process.kill(pid, 0) directly
+  // and treated EPERM as "dead", which from inside a codex sandbox dropped
+  // every external PID on every refresh. Post-fix, liveness goes through
+  // the canonical isPidAliveCtx (EPERM-aware) and EPERM-alive PIDs are kept.
+  test("EPERM-as-alive PIDs are KEPT (not pruned) — sandbox regression", async () => {
+    const { isPidAliveCtx } = await import("./agents");
+    const refsFile = join(tmpDir, "coordinator.refs");
+    await Bun.write(refsFile, "55555\n");
+
+    // Stub canonical liveness probe to mimic _isPidAlive's EPERM → true rule.
+    isPidAliveCtx.set(() => true);
+    try {
+      await acquireSystemCoordinator();
+      const content = await readFile(refsFile, "utf-8");
+      // The previously-foreign PID survives because the probe says "alive".
+      expect(content).toContain("55555");
+      expect(content).toContain(String(process.pid));
+    } finally {
+      isPidAliveCtx.reset();
+    }
+  });
+
+  test("pruner emits [coordinator-prune] watch.log entry when stale PIDs are dropped", async () => {
+    const { isPidAliveCtx } = await import("./agents");
+    const { setWatchLogPath, resetWatchLogPath } = await import("./watch-log");
+    const logDir = await mkdtemp(join(tmpdir(), "coord-prune-log-"));
+    const logPath = join(logDir, "watch.log");
+    setWatchLogPath(logPath);
+
+    const refsFile = join(tmpDir, "coordinator.refs");
+    await Bun.write(refsFile, "11111\n22222\n");
+
+    // Liveness probe reports both PIDs dead — both get pruned.
+    isPidAliveCtx.set(() => false);
+    try {
+      await acquireSystemCoordinator();
+      const log = await readFile(logPath, "utf-8");
+      expect(log).toContain("[coordinator-prune]");
+      // Either order is acceptable — the function pushes in input order.
+      expect(log).toMatch(/dropped=11111,22222|dropped=22222,11111/);
+    } finally {
+      isPidAliveCtx.reset();
+      resetWatchLogPath();
+      await rm(logDir, { recursive: true, force: true });
+    }
+  });
 });
 
 // -------------------------------------------------------------------

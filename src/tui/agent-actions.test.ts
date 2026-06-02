@@ -215,12 +215,15 @@ function makeMockCtx(overrides?: {
   return { ctx, dialogs, notices, refreshCalls, scrollUpCalls, scrollDownCalls, loadAgentLogIfNeededCalls, setFocusCalls, teamSendCalls, setActiveSelectionSourceCalls, setSidebarModeCalls, flushActions };
 }
 
-// Per-test isolated repo root. sendMessage now writes a real outbox.jsonl +
-// .outbox.lock under <repoPath>/.ittybitty/agents/<id>/, so send-path tests
-// MUST use a fresh, isolated repoPath — the old shared "/tmp/test" default
-// (test-utils makeAgent) is reused across ~16 files, and a stale fresh
-// .outbox.lock there makes the inline drain block ~5s on the lock while these
-// tests only wait 10ms → flake. Each test gets its own dir, cleaned afterward.
+// Per-test isolated repo root + coordinator home. sendMessage now writes a
+// real outbox.jsonl + .outbox.lock under the CENTRAL outbox dir
+// (`agentOutboxDir(id)` → `<coordinatorHome>/agents/<id>/`), so send-path
+// tests MUST pin both: a fresh repoPath (the agent's worktree, used for
+// log/state writes) AND a fresh coordinator home (so the central queue dir
+// resolves into the sandbox instead of the developer's real ~/.itsybitsy/).
+// Without coordinator-home isolation, a queued message from one test can
+// drain inline in the NEXT test (sendMessage has no live watchdog in this
+// suite), inflating call counts and corrupting target-id assertions.
 let sendRepoDir: string;
 
 beforeEach(async () => {
@@ -230,6 +233,8 @@ beforeEach(async () => {
   setNewAgentSpawnRunner(noopSpawnRunner);
   lifecycleSpawnCtx.set(noopSpawnRunner);
   sendRepoDir = await mkdtemp(join(tmpdir(), "agent-actions-send-"));
+  const { setCoordinatorHome } = await import("../coordinator");
+  setCoordinatorHome(join(sendRepoDir, "coord-home"));
 });
 
 afterEach(async () => {
@@ -239,6 +244,8 @@ afterEach(async () => {
   resetNewAgentSpawnRunner();
   lifecycleSpawnCtx.reset();
   tmuxSpawnCtx.reset();
+  const { resetCoordinatorHome } = await import("../coordinator");
+  resetCoordinatorHome();
   await rm(sendRepoDir, { recursive: true, force: true });
 });
 

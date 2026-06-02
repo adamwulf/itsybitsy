@@ -41,6 +41,9 @@ import {
   resetReadAgentMetaCache,
   TRANSIENT_FRESH_MS,
   OP_STUCK_TIMEOUT_MS,
+  _isPidAliveForTests,
+  terminateProcess,
+  sleepMsCtx,
 } from "./agents";
 import type { TransientState, AgentOperation } from "./agents";
 import { spawnCtx as tmuxPollerSpawnCtx } from "./tmux-poller";
@@ -1885,7 +1888,7 @@ describe("detectAgentStates — reapOrphanedClaude", () => {
         created_epoch: Math.floor(Date.now() / 1000) - 3600,
       } as Partial<AgentMeta> as AgentMeta,
     });
-    await detectAgentStates([a]);
+    await detectAgentStates([a], { reap: true });
     expect(a.state).toBe("stopped");
     expect(killCalls).toEqual([{ pid: 12345, signal: "SIGTERM" }]);
 
@@ -1917,7 +1920,7 @@ describe("detectAgentStates — reapOrphanedClaude", () => {
         created_epoch: Math.floor(Date.now() / 1000) - 1,
       } as Partial<AgentMeta> as AgentMeta,
     });
-    await detectAgentStates([a]);
+    await detectAgentStates([a], { reap: true });
     expect(a.state).toBe("creating");
     expect(killCalls).toBe(0);
   });
@@ -1942,7 +1945,7 @@ describe("detectAgentStates — reapOrphanedClaude", () => {
         created_epoch: Math.floor(Date.now() / 1000) - 60,
       } as Partial<AgentMeta> as AgentMeta,
     });
-    await detectAgentStates([a]);
+    await detectAgentStates([a], { reap: true });
     expect(a.state).toBe("creating");
     expect(killCalls).toBe(0);
   });
@@ -1964,7 +1967,7 @@ describe("detectAgentStates — reapOrphanedClaude", () => {
         created_epoch: Math.floor(Date.now() / 1000) - 3600,
       } as Partial<AgentMeta> as AgentMeta,
     });
-    await detectAgentStates([a]);
+    await detectAgentStates([a], { reap: true });
     expect(a.state).toBe("stopped");
     expect(killCalls).toBe(0);
   });
@@ -1986,7 +1989,7 @@ describe("detectAgentStates — reapOrphanedClaude", () => {
         created_epoch: Math.floor(Date.now() / 1000) - 3600,
       } as Partial<AgentMeta> as AgentMeta,
     });
-    await detectAgentStates([a]);
+    await detectAgentStates([a], { reap: true });
     expect(a.state).toBe("stopped");
     expect(killCalls).toBe(0);
   });
@@ -2008,7 +2011,7 @@ describe("detectAgentStates — reapOrphanedClaude", () => {
         claude_pid: "12345",
       } as Partial<AgentMeta> as AgentMeta,
     });
-    await detectAgentStates([a]);
+    await detectAgentStates([a], { reap: true });
     expect(a.state).toBe("stopped");
     expect(killCalls).toEqual([{ pid: 12345, signal: "SIGTERM" }]);
 
@@ -2048,7 +2051,7 @@ describe("detectAgentStates — reapOrphanedClaude", () => {
         created_epoch: Math.floor(Date.now() / 1000) - 3600,
       } as Partial<AgentMeta> as AgentMeta,
     });
-    await detectAgentStates([a]);
+    await detectAgentStates([a], { reap: true });
     expect(a.state).toBe("stopped");
     expect(killCalls).toEqual([{ pid: 12345, signal: "SIGTERM" }]);
 
@@ -2091,7 +2094,7 @@ describe("detectAgentStates — reapOrphanedClaude", () => {
         created_epoch: Math.floor(Date.now() / 1000) - 3600,
       } as Partial<AgentMeta> as AgentMeta,
     });
-    await detectAgentStates([a]);
+    await detectAgentStates([a], { reap: true });
     expect(a.state).toBe("stopped");
     // Both PIDs should be SIGTERMed
     expect(killCalls).toEqual([
@@ -2141,7 +2144,7 @@ describe("detectAgentStates — reapOrphanedClaude", () => {
         created_epoch: Math.floor(Date.now() / 1000) - 3600,
       } as Partial<AgentMeta> as AgentMeta,
     });
-    await detectAgentStates([a]);
+    await detectAgentStates([a], { reap: true });
     expect(killCalls).toEqual([{ pid: 67890, signal: "SIGTERM" }]);
 
     await rm(agentTmp, { recursive: true, force: true });
@@ -2160,7 +2163,7 @@ describe("detectAgentStates — reapOrphanedClaude", () => {
         created_epoch: Math.floor(Date.now() / 1000) - 3600,
       } as Partial<AgentMeta> as AgentMeta,
     });
-    await detectAgentStates([a]);
+    await detectAgentStates([a], { reap: true });
 
     const { readFile } = await import("fs/promises");
     const log = await readFile(logPath, "utf8");
@@ -2229,7 +2232,7 @@ describe("detectAgentStates — claude_pid liveness gate", () => {
         created_epoch: Math.floor(Date.now() / 1000) - 3600,
       } as Partial<AgentMeta> as AgentMeta,
     });
-    await detectAgentStates([a]);
+    await detectAgentStates([a], { reap: true });
     expect(a.state).toBe("running");
     expect(killCalls).toBe(0);
   });
@@ -2273,7 +2276,7 @@ describe("detectAgentStates — claude_pid liveness gate", () => {
         created_epoch: Math.floor(Date.now() / 1000) - 3600,
       } as Partial<AgentMeta> as AgentMeta,
     });
-    await detectAgentStates([a]);
+    await detectAgentStates([a], { reap: true });
     expect(a.state).toBe("stopped");
     // claude_pid was dead → not killed. watchdog_pid was alive → SIGTERMed.
     expect(killCalls).toEqual([{ pid: 67890, signal: "SIGTERM" }]);
@@ -2306,7 +2309,7 @@ describe("detectAgentStates — claude_pid liveness gate", () => {
         created_epoch: Math.floor(Date.now() / 1000) - 1,
       } as Partial<AgentMeta> as AgentMeta,
     });
-    await detectAgentStates([a]);
+    await detectAgentStates([a], { reap: true });
     // The pid liveness gate is skipped during the grace window; falls
     // through to the existing logic. captureTmuxOutput returns benign
     // output, no overrides match, meta.state="running" is trusted.
@@ -2330,7 +2333,7 @@ describe("detectAgentStates — claude_pid liveness gate", () => {
         created_epoch: Math.floor(Date.now() / 1000) - 3600,
       } as Partial<AgentMeta> as AgentMeta,
     });
-    await detectAgentStates([a]);
+    await detectAgentStates([a], { reap: true });
     expect(a.state).toBe("stopped");
     expect(killCalls).toBe(0); // dead PID — no kill issued
   });
@@ -2359,7 +2362,7 @@ describe("detectAgentStates — claude_pid liveness gate", () => {
         created_epoch: Math.floor(Date.now() / 1000) - 3600,
       } as Partial<AgentMeta> as AgentMeta,
     });
-    await detectAgentStates([a]);
+    await detectAgentStates([a], { reap: true });
     expect(a.state).toBe("stopped");
     expect(captureCalls).toBe(0); // complete fast-path still skips capture
   });
@@ -2396,7 +2399,7 @@ describe("detectAgentStates — claude_pid liveness gate", () => {
         created_epoch: Math.floor(Date.now() / 1000) - 3600,
       } as Partial<AgentMeta> as AgentMeta,
     });
-    await detectAgentStates([a]);
+    await detectAgentStates([a], { reap: true });
     expect(a.state).toBe("stopped");
     // Husk session should have been torn down via reapOrphanedClaude.
     expect(killSessionCalls).toEqual(["ib-a1"]);
@@ -2434,9 +2437,9 @@ describe("detectAgentStates — claude_pid liveness gate", () => {
     });
 
     // Three consecutive pollStates ticks over the same stopped agent.
-    await detectAgentStates([a]);
-    await detectAgentStates([a]);
-    await detectAgentStates([a]);
+    await detectAgentStates([a], { reap: true });
+    await detectAgentStates([a], { reap: true });
+    await detectAgentStates([a], { reap: true });
 
     expect(a.state).toBe("stopped");
     // kill-session must have fired exactly ONCE, not once per tick.
@@ -2495,20 +2498,20 @@ describe("detectAgentStates — claude_pid liveness gate", () => {
 
     // Tick 1: stopped husk → kill #1, memo arms ib-a1.
     phase = "stopped";
-    await detectAgentStates([a]);
+    await detectAgentStates([a], { reap: true });
     expect(a.state).toBe("stopped");
     expect(killSessionCalls).toEqual(["ib-a1"]);
 
     // Tick 2: resumed → live pane → running, memo cleared for ib-a1.
     phase = "running";
-    await detectAgentStates([a]);
+    await detectAgentStates([a], { reap: true });
     expect(a.state).toBe("running");
     // No new kill-session on the running tick.
     expect(killSessionCalls).toEqual(["ib-a1"]);
 
     // Tick 3: stopped again → husk teardown re-armed → kill #2.
     phase = "stopped";
-    await detectAgentStates([a]);
+    await detectAgentStates([a], { reap: true });
     expect(a.state).toBe("stopped");
     // The core guarantee: kill-session fired a SECOND time after the resume.
     expect(killSessionCalls).toEqual(["ib-a1", "ib-a1"]);
@@ -2550,9 +2553,9 @@ describe("detectAgentStates — claude_pid liveness gate", () => {
       } as Partial<AgentMeta> as AgentMeta,
     });
 
-    await detectAgentStates([a1, a2]);
+    await detectAgentStates([a1, a2], { reap: true });
     // Re-run: neither should be re-killed.
-    await detectAgentStates([a1, a2]);
+    await detectAgentStates([a1, a2], { reap: true });
 
     expect(killSessionCalls.sort()).toEqual(["ib-a1", "ib-a2"]);
   });
@@ -2579,7 +2582,7 @@ describe("detectAgentStates — claude_pid liveness gate", () => {
         created_epoch: Math.floor(Date.now() / 1000) - 3600,
       } as Partial<AgentMeta> as AgentMeta,
     });
-    await detectAgentStates([a]);
+    await detectAgentStates([a], { reap: true });
     expect(a.state).toBe("running");
     expect(pidChecks).toBe(0);
     expect(killCalls).toBe(0);
@@ -2652,7 +2655,7 @@ describe("detectAgentStates — dead-pane husk handling", () => {
         created_epoch: Math.floor(Date.now() / 1000) - 3600,
       } as Partial<AgentMeta> as AgentMeta,
     });
-    await detectAgentStates([a]);
+    await detectAgentStates([a], { reap: true });
     expect(a.state).toBe("stopped");
     // Husk session should have been torn down
     expect(killSessionCalls).toEqual(["ib-a1"]);
@@ -2700,7 +2703,7 @@ describe("detectAgentStates — dead-pane husk handling", () => {
         created_epoch: Math.floor(Date.now() / 1000) - 1,
       } as Partial<AgentMeta> as AgentMeta,
     });
-    await detectAgentStates([a]);
+    await detectAgentStates([a], { reap: true });
     expect(a.state).toBe("creating");
     expect(killSessionCalls).toEqual([]); // grace window protects husk-kill
     expect(killPidCalls).toBe(0); // reapOrphanedClaude returns early on 'creating'
@@ -3651,5 +3654,376 @@ describe("readAgentMeta mtime cache", () => {
     await rename(tmpPath, path);
     const b = await readAgentMeta(tempDir);
     expect(b.meta?.tmux_session).toBe("ib-v2");
+  });
+});
+
+// Regression: inside a codex agent sandbox, process.kill(pid, 0) against a PID
+// owned by another sandbox (or root) returns EPERM, not ESRCH. The previous
+// catch-all branch returned `false` for EPERM and detectAgentStates resolved
+// every external agent to "stopped" → reapOrphanedClaude SIGTERM'd them all.
+describe("_isPidAlive — EPERM vs ESRCH classification", () => {
+  let origKill: typeof process.kill;
+  beforeEach(() => {
+    origKill = process.kill;
+  });
+  afterEach(() => {
+    process.kill = origKill;
+  });
+
+  test("returns true when process.kill throws EPERM (alive but unsignal-able)", () => {
+    process.kill = ((_pid: number, _sig?: any) => {
+      const err: any = new Error("operation not permitted");
+      err.code = "EPERM";
+      throw err;
+    }) as unknown as typeof process.kill;
+    expect(_isPidAliveForTests(99999)).toBe(true);
+  });
+
+  test("returns false when process.kill throws ESRCH (no such process)", () => {
+    process.kill = ((_pid: number, _sig?: any) => {
+      const err: any = new Error("no such process");
+      err.code = "ESRCH";
+      throw err;
+    }) as unknown as typeof process.kill;
+    expect(_isPidAliveForTests(99999)).toBe(false);
+  });
+
+  test("returns false for any other error code (e.g. EINVAL)", () => {
+    process.kill = ((_pid: number, _sig?: any) => {
+      const err: any = new Error("invalid signal");
+      err.code = "EINVAL";
+      throw err;
+    }) as unknown as typeof process.kill;
+    expect(_isPidAliveForTests(99999)).toBe(false);
+  });
+
+  test("returns true when process.kill succeeds (signal delivered, process alive)", () => {
+    process.kill = ((_pid: number, _sig?: any) => true) as unknown as typeof process.kill;
+    expect(_isPidAliveForTests(99999)).toBe(true);
+  });
+});
+
+// Regression: read-only callers (ib list, ib roster, ib info, inject-status)
+// must NOT reap. Previously detectAgentStates unconditionally SIGTERM'd any
+// agent whose claude_pid looked dead — inside a codex sandbox EPERM was
+// misread as dead, so every read of agent state tore down the world.
+//
+// reapOrphanedClaude has two visible side-effects:
+//   1. SIGTERM via killPidCtx (only fires when the inner isPidAliveCtx says
+//      the PID is alive)
+//   2. `tmux kill-session` via tmuxPollerSpawnCtx (always fires for
+//      resolvedState === "stopped" + tmux_session set, regardless of PID
+//      liveness)
+//
+// These tests assert side-effect #2 — it's the unconditional one and the
+// most direct proof that reapOrphanedClaude was (or wasn't) reached.
+describe("detectAgentStates — reap option", () => {
+  let tmpLogDir: string;
+  let logPath: string;
+  let killSessionCalls: string[];
+
+  beforeEach(async () => {
+    tmpLogDir = await mkdtemp(join(tmpdir(), "reap-option-log-"));
+    logPath = join(tmpLogDir, "watch.log");
+    resetReapedTmuxSessions();
+    const { setWatchLogPath } = await import("./watch-log");
+    setWatchLogPath(logPath);
+    killSessionCalls = [];
+    // Stub the tmux runner so a `tmux kill-session -t <name>` invocation is
+    // captured (and otherwise lets capture-pane / other commands succeed).
+    tmuxPollerSpawnCtx.set(((args: any[]) => {
+      const argv = Array.isArray(args) ? args : [];
+      if (argv[0] === "tmux" && argv[1] === "kill-session") {
+        const tIdx = argv.indexOf("-t");
+        if (tIdx >= 0 && typeof argv[tIdx + 1] === "string") {
+          killSessionCalls.push(argv[tIdx + 1]);
+        }
+      }
+      return {
+        stdout: new ReadableStream({ start(c) { c.close(); } }),
+        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        exited: Promise.resolve(0),
+      };
+    }) as any);
+  });
+
+  afterEach(async () => {
+    classifySpawnLogCtx.reset();
+    isPidAliveCtx.reset();
+    killPidCtx.reset();
+    liveTmuxSessionsCtx.reset();
+    tmuxPollerSpawnCtx.reset();
+    resetReapedTmuxSessions();
+    const { resetWatchLogPath } = await import("./watch-log");
+    resetWatchLogPath();
+    await rm(tmpLogDir, { recursive: true, force: true });
+  });
+
+  test("reap: false — does NOT call reapOrphanedClaude when claude_pid reads dead", async () => {
+    classifySpawnLogCtx.set(async () => ({ kind: "orphan" }));
+    isPidAliveCtx.set(() => false);
+    let killCalls = 0;
+    killPidCtx.set(() => { killCalls++; return true; });
+
+    const a = makeAgent({
+      id: "agent-2",
+      meta: {
+        state: "running",
+        tmux_session: "ib-a2",
+        claude_pid: "12345",
+        created_epoch: Math.floor(Date.now() / 1000) - 3600,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+    await detectAgentStates([a], { reap: false });
+    // State still resolves correctly — only the reap side-effect is skipped.
+    expect(a.state).toBe("stopped");
+    expect(killCalls).toBe(0);
+    expect(killSessionCalls).toEqual([]);
+  });
+
+  test("reap: false — does NOT tear down husk tmux for complete-with-dead-session", async () => {
+    isPidAliveCtx.set(() => true);
+    liveTmuxSessionsCtx.set(async () => new Set([])); // session is gone
+    let killCalls = 0;
+    killPidCtx.set(() => { killCalls++; return true; });
+
+    const a = makeAgent({
+      id: "agent-3",
+      meta: {
+        state: "complete",
+        tmux_session: "ib-a3",
+        claude_pid: "12345",
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+    await detectAgentStates([a], { reap: false });
+    expect(a.state).toBe("stopped");
+    expect(killCalls).toBe(0);
+    expect(killSessionCalls).toEqual([]);
+  });
+
+  test("reap: false — does NOT reap in the no-tmux_session branch", async () => {
+    classifySpawnLogCtx.set(async () => ({ kind: "orphan" }));
+    isPidAliveCtx.set(() => true); // PID looks alive → SIGTERM would fire if reaped
+    const killCalls: number[] = [];
+    killPidCtx.set((pid) => { killCalls.push(pid); return true; });
+
+    const a = makeAgent({
+      id: "agent-4",
+      meta: {
+        tmux_session: "",
+        claude_pid: "12345",
+        created_epoch: Math.floor(Date.now() / 1000) - 3600,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+    await detectAgentStates([a], { reap: false });
+    expect(a.state).toBe("stopped");
+    expect(killCalls).toEqual([]);
+  });
+
+  test("reap: true — DOES reap when claude_pid reads dead (husk tmux torn down)", async () => {
+    classifySpawnLogCtx.set(async () => ({ kind: "orphan" }));
+    isPidAliveCtx.set(() => false);
+    killPidCtx.set(() => true);
+
+    const a = makeAgent({
+      id: "agent-5",
+      meta: {
+        state: "running",
+        tmux_session: "ib-a5",
+        claude_pid: "12345",
+        created_epoch: Math.floor(Date.now() / 1000) - 3600,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+    // Explicit opt-in. The husk tmux teardown is unconditional inside
+    // reapOrphanedClaude when resolvedState === "stopped" and tmux_session is
+    // set — proves we reached it.
+    await detectAgentStates([a], { reap: true });
+    expect(a.state).toBe("stopped");
+    expect(killSessionCalls).toEqual(["ib-a5"]);
+  });
+
+  test("default (no opts) — does NOT reap (opt-in semantics)", async () => {
+    classifySpawnLogCtx.set(async () => ({ kind: "orphan" }));
+    isPidAliveCtx.set(() => false);
+    killPidCtx.set(() => true);
+
+    const a = makeAgent({
+      id: "agent-6",
+      meta: {
+        state: "running",
+        tmux_session: "ib-a6",
+        claude_pid: "12345",
+        created_epoch: Math.floor(Date.now() / 1000) - 3600,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+    // No opts → reap defaults to false. Husk tmux must remain intact.
+    await detectAgentStates([a]);
+    expect(a.state).toBe("stopped");
+    expect(killSessionCalls).toEqual([]);
+  });
+});
+
+// ── terminateProcess — canonical kill funnel ─────────────────────────────────
+//
+// Verifies the structural fix: every kill site outside agents.ts now routes
+// through terminateProcess, which itself uses isPidAliveCtx + killPidCtx.
+// The EPERM-as-alive regression — fixed in _isPidAlive — is the load-bearing
+// behaviour that makes these tests meaningful.
+describe("terminateProcess", () => {
+  let tmpLogDir: string;
+  let logPath: string;
+
+  beforeEach(async () => {
+    tmpLogDir = await mkdtemp(join(tmpdir(), "terminate-process-log-"));
+    logPath = join(tmpLogDir, "watch.log");
+    const { setWatchLogPath } = await import("./watch-log");
+    setWatchLogPath(logPath);
+    // Make grace-period sleeps a no-op so escalation runs instantly.
+    sleepMsCtx.set(async () => {});
+  });
+
+  afterEach(async () => {
+    isPidAliveCtx.reset();
+    killPidCtx.reset();
+    sleepMsCtx.reset();
+    const { resetWatchLogPath } = await import("./watch-log");
+    resetWatchLogPath();
+    await rm(tmpLogDir, { recursive: true, force: true });
+  });
+
+  test("happy path: PID alive → SIGTERM lands → exits in grace → killed, not escalated", async () => {
+    let alive = true;
+    isPidAliveCtx.set(() => alive);
+    const calls: Array<{ pid: number; signal: NodeJS.Signals | number }> = [];
+    killPidCtx.set((pid, signal) => {
+      calls.push({ pid, signal });
+      if (signal === "SIGTERM") alive = false; // SIGTERM lands → process exits
+      return true;
+    });
+
+    const result = await terminateProcess({
+      pid: 4242,
+      label: "test-claude",
+      agentId: "agent-abc",
+      repoName: "myrepo",
+      tmuxSession: "ib-x",
+    });
+
+    expect(result).toEqual({ outcome: "term-exited", killed: true, escalated: false });
+    expect(calls).toEqual([{ pid: 4242, signal: "SIGTERM" }]);
+
+    const { readFile } = await import("fs/promises");
+    const log = await readFile(logPath, "utf8");
+    expect(log).toContain("[terminate] outcome=term-exited");
+    expect(log).toContain("label=test-claude");
+    expect(log).toContain("agent=myrepo/agent-abc");
+    expect(log).toContain("pid=4242");
+    expect(log).toContain("tmux=ib-x");
+  });
+
+  test("escalation: PID stays alive after SIGTERM → SIGKILL fires → killed + escalated", async () => {
+    let alive = true;
+    isPidAliveCtx.set(() => alive);
+    const calls: Array<{ pid: number; signal: NodeJS.Signals | number }> = [];
+    killPidCtx.set((pid, signal) => {
+      calls.push({ pid, signal });
+      if (signal === "SIGKILL") alive = false; // only SIGKILL succeeds
+      return true;
+    });
+
+    const result = await terminateProcess({
+      pid: 1234,
+      label: "stuck-proc",
+      gracePeriodMs: 200, // 2 polls → fast
+    });
+
+    expect(result).toEqual({ outcome: "kill-exited", killed: true, escalated: true });
+    expect(calls).toEqual([
+      { pid: 1234, signal: "SIGTERM" },
+      { pid: 1234, signal: "SIGKILL" },
+    ]);
+
+    const { readFile } = await import("fs/promises");
+    const log = await readFile(logPath, "utf8");
+    expect(log).toContain("[terminate] outcome=kill-exited");
+  });
+
+  test("already-dead: liveness probe returns false → no signal sent → not-alive", async () => {
+    isPidAliveCtx.set(() => false);
+    let killCalls = 0;
+    killPidCtx.set(() => { killCalls++; return true; });
+
+    const result = await terminateProcess({ pid: 999, label: "dead" });
+
+    expect(result).toEqual({ outcome: "not-alive", killed: true, escalated: false });
+    expect(killCalls).toBe(0);
+
+    const { readFile } = await import("fs/promises");
+    const log = await readFile(logPath, "utf8");
+    expect(log).toContain("[terminate] outcome=not-alive");
+  });
+
+  // The original EPERM-as-dead bug: a sandboxed view of a foreign PID returns
+  // EPERM from process.kill(pid, 0). Before the fix, callers treated EPERM as
+  // "already dead" and silently skipped SIGTERM. Inject isPidAliveCtx → true
+  // (mimicking the canonical _isPidAlive's EPERM-aware behaviour) and verify
+  // SIGTERM is actually sent.
+  test("EPERM-as-alive: probe returns true → SIGTERM IS sent (regression)", async () => {
+    isPidAliveCtx.set(() => true); // stays alive throughout — escalation path
+    const calls: Array<{ pid: number; signal: NodeJS.Signals | number }> = [];
+    killPidCtx.set((pid, signal) => {
+      calls.push({ pid, signal });
+      return true;
+    });
+
+    const result = await terminateProcess({
+      pid: 5555,
+      label: "claude",
+      agentId: "agent-eperm",
+      gracePeriodMs: 100,
+    });
+
+    // SIGTERM MUST have been sent — pre-fix code would have early-returned
+    // with "already dead" on the same EPERM and never sent any signal.
+    expect(calls).toContainEqual({ pid: 5555, signal: "SIGTERM" });
+    // Final state: liveness still says alive (stub never flips) → SIGKILL
+    // also fires and final outcome is kill-failed.
+    expect(calls).toContainEqual({ pid: 5555, signal: "SIGKILL" });
+    expect(result.escalated).toBe(true);
+    expect(result.outcome).toBe("kill-failed");
+  });
+
+  test("invalid pid (NaN / 0 / negative) → no signals, not-alive outcome", async () => {
+    isPidAliveCtx.set(() => true);
+    let killCalls = 0;
+    killPidCtx.set(() => { killCalls++; return true; });
+
+    const r1 = await terminateProcess({ pid: NaN, label: "bad" });
+    const r2 = await terminateProcess({ pid: 0, label: "bad" });
+    const r3 = await terminateProcess({ pid: -1, label: "bad" });
+
+    expect(r1.outcome).toBe("not-alive");
+    expect(r2.outcome).toBe("not-alive");
+    expect(r3.outcome).toBe("not-alive");
+    expect(killCalls).toBe(0);
+  });
+
+  test("term-failed: SIGTERM syscall returns false → no escalation", async () => {
+    isPidAliveCtx.set(() => true);
+    const calls: Array<{ pid: number; signal: NodeJS.Signals | number }> = [];
+    killPidCtx.set((pid, signal) => {
+      calls.push({ pid, signal });
+      return false; // SIGTERM fails
+    });
+
+    const result = await terminateProcess({ pid: 7777, label: "term-fail" });
+
+    expect(result).toEqual({ outcome: "term-failed", killed: false, escalated: false });
+    // No SIGKILL — escalation only happens if SIGTERM landed.
+    expect(calls).toEqual([{ pid: 7777, signal: "SIGTERM" }]);
+
+    const { readFile } = await import("fs/promises");
+    const log = await readFile(logPath, "utf8");
+    expect(log).toContain("[terminate] outcome=term-failed");
   });
 });

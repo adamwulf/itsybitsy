@@ -9,7 +9,8 @@ import { homedir } from "os";
 import { readFileSync, existsSync } from "node:fs";
 import { readConfig } from "./config";
 import { captureTmuxOutput, resizeTmuxWindow } from "./tmux-poller";
-import { isCompacting, isRateLimited } from "./agents";
+import { isCompacting, isRateLimited, isPidAliveCtx } from "./agents";
+import { logToWatchLog } from "./watch-log";
 import { SpawnContext } from "./types";
 import { getTmuxWidthForAgent } from "./tui/widths";
 import { isValidSessionId, isValidModel } from "./validation";
@@ -481,6 +482,16 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
 /**
  * Read live PIDs from the coordinator.refs file.
  * Returns an array of PIDs that are currently alive.
+ *
+ * Liveness is checked via the canonical {@link isPidAliveCtx} in src/agents.ts
+ * — which treats EPERM as "alive but unsignal-able" so PIDs owned by another
+ * sandbox (e.g. external codex agents) are NOT incorrectly pruned. Without
+ * that distinction every external PID would look dead from inside a sandbox
+ * and the coordinator refcount would collapse to zero.
+ *
+ * Stale PIDs that get pruned are recorded in watch.log as a single
+ * `[coordinator-prune]` line listing the dropped PIDs (observability only —
+ * the pruning behaviour is unchanged).
  */
 async function readLivePids(): Promise<number[]> {
   const path = refsPath();
@@ -495,15 +506,19 @@ async function readLivePids(): Promise<number[]> {
       .map((l) => parseInt(l, 10))
       .filter((n) => !isNaN(n));
 
-    // Prune stale PIDs
-    return pids.filter((pid) => {
-      try {
-        process.kill(pid, 0);
-        return true;
-      } catch {
-        return false;
-      }
-    });
+    const live: number[] = [];
+    const pruned: number[] = [];
+    for (const pid of pids) {
+      if (isPidAliveCtx.fn(pid)) live.push(pid);
+      else pruned.push(pid);
+    }
+    if (pruned.length > 0) {
+      logToWatchLog(
+        `[coordinator-prune] dropped=${pruned.join(",")} kept=${live.length} ` +
+        `refs=${path}`
+      );
+    }
+    return live;
   } catch {
     return [];
   }

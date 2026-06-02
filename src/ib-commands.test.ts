@@ -93,6 +93,15 @@ describe("ib-commands", () => {
       // user's ~/.itsybitsy/config.json.
       setUserConfigPath(join(tempDir, "config.json"));
 
+      // Per-agent outboxes now live under getCoordinatorHome() / agents / <id>,
+      // not under the per-worktree agent dir. Without this isolation, queued
+      // messages would accumulate in the developer's real
+      // ~/.itsybitsy/agents/agent-abc/outbox.jsonl and leak from one test into
+      // the next (sendMessage drains inline when no live watchdog), inflating
+      // spawnCalls / corrupting prefix assertions.
+      const { setCoordinatorHome } = await import("./coordinator");
+      setCoordinatorHome(join(tempDir, "coord-home"));
+
       setSendSpawnRunner((cmd: string[]) => {
         spawnCalls.push(cmd);
         return makeSpawnResult();
@@ -102,6 +111,8 @@ describe("ib-commands", () => {
     afterEach(async () => {
       resetSendSpawnRunner();
       resetUserConfigPath();
+      const { resetCoordinatorHome } = await import("./coordinator");
+      resetCoordinatorHome();
       await rm(tempDir, { recursive: true, force: true });
     });
 
@@ -669,13 +680,25 @@ describe("ib-commands", () => {
 describe("sendMessage outbox integration", () => {
   let spawnCalls: string[][];
   let tempDir: string;
+  // Per-worktree agent dir — still used for the agent's own meta.transient.json
+  // / agent.log / state writes. The outbox queue itself now lives under the
+  // CENTRAL coordinator-home root (see queueDir below).
   let agentDir: string;
+  // Central outbox queue dir — agentOutboxDir(id) under setCoordinatorHome.
+  let queueDir: string;
 
   beforeEach(async () => {
     spawnCalls = [];
     tempDir = await mkdtemp(join(tmpdir(), "send-outbox-"));
     agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
     await mkdir(agentDir, { recursive: true });
+    // Point the coordinator-home to a sandbox subdir so agentOutboxDir() resolves
+    // there instead of the real ~/.itsybitsy/.
+    const { setCoordinatorHome } = await import("./coordinator");
+    setCoordinatorHome(join(tempDir, "coord-home"));
+    const { agentOutboxDir } = await import("./outbox");
+    queueDir = agentOutboxDir("agent-abc");
+    await mkdir(queueDir, { recursive: true });
     setUserConfigPath(join(tempDir, "config.json"));
     setSendSpawnRunner((cmd: string[]) => {
       spawnCalls.push(cmd);
@@ -686,6 +709,8 @@ describe("sendMessage outbox integration", () => {
   afterEach(async () => {
     resetSendSpawnRunner();
     resetUserConfigPath();
+    const { resetCoordinatorHome } = await import("./coordinator");
+    resetCoordinatorHome();
     const { isPidAliveCtx } = await import("./agents");
     isPidAliveCtx.reset();
     await rm(tempDir, { recursive: true, force: true });
@@ -715,7 +740,7 @@ describe("sendMessage outbox integration", () => {
 
     // The message is sitting in the outbox awaiting the watchdog's drain.
     const { readOutbox } = await import("./outbox");
-    const queued = await readOutbox(agentDir);
+    const queued = await readOutbox(queueDir);
     expect(queued.length).toBe(1);
     expect(queued[0]!.message).toBe("hello");
   });
@@ -740,7 +765,7 @@ describe("sendMessage outbox integration", () => {
     expect(spawnCalls.length).toBe(3);
     // Outbox drained empty.
     const { readOutbox } = await import("./outbox");
-    expect(await readOutbox(agentDir)).toEqual([]);
+    expect(await readOutbox(queueDir)).toEqual([]);
   });
 
   test("dead watchdog pid: delivers inline", async () => {
@@ -772,7 +797,7 @@ describe("sendMessage outbox integration", () => {
     expect(result.ok).toBe(false);
 
     const { readOutbox } = await import("./outbox");
-    const queued = await readOutbox(agentDir);
+    const queued = await readOutbox(queueDir);
     expect(queued.length).toBe(1);
     expect(queued[0]!.message).toBe("keepme");
   });
@@ -919,6 +944,41 @@ describe("killAgent (native)", () => {
 
     expect(result.ok).toBe(true);
     expect(result.stdout).toBe("Closed agent: agent-abc");
+  });
+
+  test("appends a [kill] line to the system watch log on success", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-loggy");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-loggy",
+      tmux_session: "tmux-agent-loggy",
+      claude_pid: "77777",
+    }));
+
+    const runner = mockSpawnFnWithFailures(spawnCalls, (cmd) =>
+      cmd.includes("has-session") || cmd.includes("pgrep")
+    );
+    lifecycleSpawnCtx.set(runner);
+    setKillPauseSpawnRunner(runner);
+
+    const logPath = join(tempDir, "watch.log");
+    const { setWatchLogPath, resetWatchLogPath } = await import("./watch-log");
+    setWatchLogPath(logPath);
+    try {
+      const agent = makeAgent("agent-loggy", tempDir);
+      const result = await killAgent(agent);
+      expect(result.ok).toBe(true);
+
+      const { readFile } = await import("fs/promises");
+      const log = await readFile(logPath, "utf8");
+      expect(log).toContain("[kill]");
+      expect(log).toContain("agent-loggy");
+      // makeAgent's default claude_pid is "12345"; assert the prefix so we
+      // verify pid= is included without coupling to the helper's literal.
+      expect(log).toMatch(/pid=\d+/);
+    } finally {
+      resetWatchLogPath();
+    }
   });
 });
 
@@ -1134,6 +1194,39 @@ describe("pauseAgent (native)", () => {
     const second = await pauseAgent(agent2);
     expect(second.ok).toBe(false);
     expect(second.stderr).toContain("already stopped");
+  });
+
+  test("appends a [pause] line to the system watch log on success", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-pauseloggy");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-pauseloggy",
+      tmux_session: "tmux-agent-pauseloggy",
+      claude_pid: "55555",
+    }));
+
+    const runner = mockSpawnFnWithFailures(spawnCalls, (cmd) =>
+      cmd.includes("has-session") || cmd.includes("pgrep")
+    );
+    lifecycleSpawnCtx.set(runner);
+    setKillPauseSpawnRunner(runner);
+
+    const logPath = join(tempDir, "watch.log");
+    const { setWatchLogPath, resetWatchLogPath } = await import("./watch-log");
+    setWatchLogPath(logPath);
+    try {
+      const agent = makeAgent("agent-pauseloggy", tempDir, "waiting");
+      const result = await pauseAgent(agent);
+      expect(result.ok).toBe(true);
+
+      const { readFile } = await import("fs/promises");
+      const log = await readFile(logPath, "utf8");
+      expect(log).toContain("[pause]");
+      expect(log).toContain("agent-pauseloggy");
+      expect(log).toMatch(/pid=\d+/);
+    } finally {
+      resetWatchLogPath();
+    }
   });
 });
 
@@ -5449,10 +5542,18 @@ describe("reassignAgent (native)", () => {
       stderr: new Response("").body!,
       exited: Promise.resolve(cmd.includes("has-session") ? 1 : 0), // no tmux sessions
     } as SpawnResult));
+    // Per-agent outboxes now live under getCoordinatorHome() / agents / <id>.
+    // Isolate so the reassign-notification sendMessage calls don't bleed into
+    // the developer's real ~/.itsybitsy/agents/.../outbox.jsonl or leak from
+    // one test to the next (sendMessage drains inline when no live watchdog).
+    const { setCoordinatorHome } = await import("./coordinator");
+    setCoordinatorHome(join(tempDir, "coord-home"));
   });
 
   afterEach(async () => {
     resetSendSpawnRunner();
+    const { resetCoordinatorHome } = await import("./coordinator");
+    resetCoordinatorHome();
     await rm(tempDir, { recursive: true, force: true });
   });
 
@@ -8294,11 +8395,22 @@ describe("teams: teardown leave-notices (kill / merge / nuke)", () => {
   let originalHome: string | undefined;
   let spawnCalls: string[][];
 
+  // Returns the CENTRAL outbox queue dir for `id` (~/.itsybitsy/agents/<id>/
+  // under our test setCoordinatorHome(homeDir)). The per-worktree agent dir
+  // still hosts meta.json / meta.transient.json / agent.log — only the message
+  // queue lives here.
+  function queueDirOf(id: string): string {
+    return join(homeDir, "agents", id);
+  }
+
   // Plant a survivor agent so readAllAgents surfaces it and any notice to it
   // DEFERS into its outbox (live-watchdog transient + isPidAliveCtx → true).
+  // Returns the WORKTREE agent dir; readers of the outbox queue should use
+  // `queueDirOf(id)` instead.
   async function plantSurvivor(id: string): Promise<string> {
     const agentDir = join(repoDir, ".ittybitty", "agents", id);
     await mkdir(agentDir, { recursive: true });
+    await mkdir(queueDirOf(id), { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id, tmux_session: `t-${id}` }));
     const { writeAgentTransient } = await import("./agents");
     await writeAgentTransient(agentDir, {
@@ -8316,6 +8428,7 @@ describe("teams: teardown leave-notices (kill / merge / nuke)", () => {
   async function plantDeparting(id: string): Promise<string> {
     const agentDir = join(repoDir, ".ittybitty", "agents", id);
     await mkdir(join(agentDir, "repo"), { recursive: true });
+    await mkdir(queueDirOf(id), { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id, tmux_session: `t-${id}` }));
     return agentDir;
   }
@@ -8396,7 +8509,7 @@ describe("teams: teardown leave-notices (kill / merge / nuke)", () => {
     expect(team!.members).toEqual(["agent-survivor"]);
 
     // The survivor got exactly one per-agent leave notice, fromAgent = departed.
-    const queue = await readOutbox(survivorDir);
+    const queue = await readOutbox(queueDirOf("agent-survivor"));
     expect(queue.length).toBe(1);
     expect(queue[0]!.message).toBe("left the team");
     expect(queue[0]!.fromAgent).toBe("agent-leaver");
@@ -8424,7 +8537,7 @@ describe("teams: teardown leave-notices (kill / merge / nuke)", () => {
     expect(res.ok).toBe(true);
 
     // No notice — the departing agent shared no team with the survivor.
-    expect(await readOutbox(survivorDir)).toEqual([]);
+    expect(await readOutbox(queueDirOf("agent-survivor"))).toEqual([]);
   });
 
   test("killAgent of the LAST member sends no notice (empty-survivor carve-out)", async () => {
@@ -8479,7 +8592,7 @@ describe("teams: teardown leave-notices (kill / merge / nuke)", () => {
     const team = await getTeam("backend");
     expect(team!.members).toEqual(["agent-survivor"]);
 
-    const queue = await readOutbox(survivorDir);
+    const queue = await readOutbox(queueDirOf("agent-survivor"));
     expect(queue.length).toBe(1);
     expect(queue[0]!.message).toBe("left the team");
     expect(queue[0]!.fromAgent).toBe("agent-merged");
@@ -8530,7 +8643,7 @@ describe("teams: teardown leave-notices (kill / merge / nuke)", () => {
     expect(team!.members).toEqual(["agent-d"]);
 
     // Exactly ONE coalesced notice to d, system sender, count = 3.
-    const queue = await readOutbox(dDir);
+    const queue = await readOutbox(queueDirOf("agent-d"));
     expect(queue.length).toBe(1);
     expect(queue[0]!.message).toBe("3 members left @T");
     expect(queue[0]!.fromAgent).toBe("@system");
@@ -8570,7 +8683,7 @@ describe("teams: teardown leave-notices (kill / merge / nuke)", () => {
     const res = await nukeAgent(agentOf("agent-mgr"));
     expect(res.ok).toBe(true);
 
-    const queue = await readOutbox(survivorDir);
+    const queue = await readOutbox(queueDirOf("agent-keep"));
     expect(queue.length).toBe(1);
     expect(queue[0]!.message).toBe("1 member left @T");
     expect(queue[0]!.fromAgent).toBe("@system");

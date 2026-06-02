@@ -29,6 +29,7 @@ import {
   rewriteOutboxRemoving,
   acquireOutboxLock,
   releaseOutboxLock,
+  agentOutboxDir,
   type OutboxMessage,
   type AcquireLockOpts,
 } from "./outbox";
@@ -47,6 +48,7 @@ import {
 } from "./agent-lifecycle";
 import { readConfig } from "./config";
 import { listTmuxSessions } from "./tmux-poller";
+import { logToWatchLog } from "./watch-log";
 import { SpawnContext, InjectionContext } from "./types";
 import type { SpawnFn } from "./types";
 import { isValidModel, isValidToolList, isValidTmuxSession, isValidSessionId, isValidShellPath, isValidAgentId, shellQuote } from "./validation";
@@ -387,6 +389,11 @@ export async function killAgent(agent: Agent): Promise<IbCommandResult> {
   // teammates, `fromAgent` = the departed id (§16.5). Best-effort.
   await emitPerAgentLeaveNotice(prunedTeams, await listRepos());
 
+  logToWatchLog(
+    `[kill] agent=${agent.repoName ? `${agent.repoName}/` : ""}${agent.id} ` +
+    `tmux=${tmuxSession || "<none>"} pid=${agent.meta.claude_pid || "<none>"}`
+  );
+
   return { ok: true, exitCode: 0, stdout: `Closed agent: ${agent.id}`, stderr: "" };
 }
 
@@ -562,6 +569,11 @@ export async function nukeAgent(agent: Agent): Promise<IbCommandResult> {
   if (orphansKilled > 0) stdout += `, cleaned ${orphansKilled} orphaned session(s)`;
   if (failed > 0) stdout += ` (${failed} failed)`;
 
+  logToWatchLog(
+    `[nuke] root=${agent.repoName ? `${agent.repoName}/` : ""}${agent.id} ` +
+    `killed=${killed} failed=${failed} orphans=${orphansKilled}`
+  );
+
   return { ok: true, exitCode: 0, stdout, stderr: "" };
 }
 
@@ -593,6 +605,10 @@ export async function nukeAllAgents(repoPath: string): Promise<IbCommandResult> 
   let stdout = `Nuked ${killed} agent(s)`;
   if (orphansKilled > 0) stdout += `, cleaned ${orphansKilled} orphaned session(s)`;
   if (failed > 0) stdout += ` (${failed} failed)`;
+
+  logToWatchLog(
+    `[nuke-all] repo=${repoPath} killed=${killed} failed=${failed} orphans=${orphansKilled}`
+  );
 
   return { ok: true, exitCode: 0, stdout, stderr: "" };
 }
@@ -667,6 +683,11 @@ export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
   if (!dirExists) {
     return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' not found` };
   }
+
+  // Ensure the central per-agent outbox dir exists before the agent starts so
+  // the first enqueue doesn't race a missing-dir append. Idempotent — no-op
+  // when the dir already exists.
+  await mkdir(agentOutboxDir(agent.id), { recursive: true });
 
   // Acquire the long-running-op guard at the VERY TOP — above the coordinator
   // early-return below — so coordinator resets are guarded against a double-R
@@ -1935,7 +1956,11 @@ export async function mergeAgent(agent: Agent, targetDir: string): Promise<IbCom
     // 12-13. Kill Claude process + tmux session
     await timed("merge", "tmux-cleanup", async () => {
       await logAgent(agentDir, "Terminating Claude process...");
-      const killed = await killAgentProcess(tmuxSession, { claude_pid: agent.meta.claude_pid });
+      const killed = await killAgentProcess(
+        tmuxSession,
+        { claude_pid: agent.meta.claude_pid },
+        { agentId: agent.id, repoName: agent.repoName },
+      );
       if (killed) {
         await logAgent(agentDir, "Claude process terminated");
       }
@@ -2326,11 +2351,14 @@ export async function sendMessage(
 
   // The outbox queue + lock live in `outboxDir` when provided (the system
   // coordinator has no agent dir, so its queue/lock live in the coordinator
-  // home so all coordinator senders serialize against ONE queue), otherwise in
-  // the agent's own directory. The recipient log/state writes still target the
-  // agent dir (`deliverMessage`), which is correct for both cases.
+  // home directly so all coordinator senders serialize against ONE queue).
+  // Otherwise the per-agent queue lives under the CENTRAL outbox root
+  // (`agentOutboxDir(id)` → `~/.itsybitsy/agents/<id>/`) so codex agents
+  // running under `-s workspace-write` can write to other agents' outboxes.
+  // Log/state writes still target the per-worktree agent dir
+  // (`deliverMessage`), which is correct for both cases.
   const agentDir = join(agent.repoPath, ".ittybitty", "agents", agent.id);
-  const queueDir = opts?.outboxDir ?? agentDir;
+  const queueDir = opts?.outboxDir ?? agentOutboxDir(agent.id);
 
   // Resolve sender at ENQUEUE time (depends on the sender process's cwd).
   const fromId = resolveSenderId(agent.repoPath, opts);
@@ -2764,7 +2792,10 @@ export async function roster(name: string, repos: RepoEntry[]): Promise<IbComman
   // live detected state (§16.3: "state read via detectAgentStates()") instead of
   // the uniform "unknown" readAllAgents assigns.
   const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })));
-  await detectAgentStates(agents);
+  // Read-only display: explicitly opt out of reaping. detectAgentStates
+  // defaults to reap-disabled, but pass {reap: false} to make intent
+  // unambiguous — `roster` must never side-effect agents.
+  await detectAgentStates(agents, { reap: false });
   const byId = new Map(agents.map((a) => [a.id, a]));
   // The liveness predicate RECOMPUTES the live set on each call rather than
   // closing over a pre-lock snapshot. pruneDeadMembers invokes it during both its
@@ -3600,6 +3631,11 @@ export async function newAgent(
 
   // 11. Create agent directory
   await mkdir(agentDir, { recursive: true });
+  // The per-agent outbox now lives under the CENTRAL coordinator-home root
+  // (so codex agents under `-s workspace-write` can write to other agents'
+  // outboxes — see agentOutboxDir). mkdir it before the agent starts so the
+  // first enqueue doesn't race a missing-dir append.
+  await mkdir(agentOutboxDir(id), { recursive: true });
 
   // Prefer spawnedBy; fall back to --manager flag.
   // @-prefixed sentinels (e.g. @system, @<repo-name>) and null repo_path are
@@ -4338,6 +4374,11 @@ ${qStartExitScript}
   // 23. Generate prompt summary in background (fire-and-forget)
   generatePromptSummary(agentDir).catch(() => {});
 
+  logToWatchLog(
+    `[spawn] agent=${id} type=${typeName} cli=${agentCli} model=${modelFlagValue ?? "<default>"} ` +
+    `tmux=${tmuxSession} repo=${rootRepoPath}`
+  );
+
   return { ok: true, exitCode: 0, stdout, stderr: "" };
 }
 
@@ -4749,7 +4790,11 @@ export async function pauseAgent(agent: Agent): Promise<IbCommandResult> {
 
   // Kill Claude process
   await logAgent(agentDir, `Pausing agent (state=${agent.state}, pid=${agent.meta.claude_pid ?? "none"}, tmux=${tmuxSession ?? "none"})`);
-  const killed = await killAgentProcess(tmuxSession, { claude_pid: agent.meta.claude_pid });
+  const killed = await killAgentProcess(
+    tmuxSession,
+    { claude_pid: agent.meta.claude_pid },
+    { agentId: agent.id, repoName: agent.repoName },
+  );
   if (killed) {
     await logAgent(agentDir, "Terminated Claude process");
   } else {
@@ -4786,6 +4831,11 @@ export async function pauseAgent(agent: Agent): Promise<IbCommandResult> {
 
   // Log the pause
   await logAgent(agentDir, "Agent paused");
+
+  logToWatchLog(
+    `[pause] agent=${agent.repoName ? `${agent.repoName}/` : ""}${agent.id} ` +
+    `tmux=${tmuxSession || "<none>"} pid=${agent.meta.claude_pid || "<none>"}`
+  );
 
   return {
     ok: true,

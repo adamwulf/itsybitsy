@@ -179,7 +179,9 @@ export function createDiskAgentProvider(): AgentDataSource {
     },
     async detectStates(agents) {
       const { detectAgentStates } = await import("../agents");
-      await detectAgentStates(agents);
+      // Read-only status injection: don't reap. This hook fires on every
+      // primary-Claude user prompt; it must never side-effect agents.
+      await detectAgentStates(agents, { reap: false });
     },
   };
 }

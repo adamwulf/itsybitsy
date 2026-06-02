@@ -169,12 +169,20 @@ describe("teams: deliverMessage team-prefix rendering", () => {
 
 describe("teams: sendMessage threads team into the outbox", () => {
   let tempDir: string;
+  // Per-worktree agent dir hosts meta.transient.json (drives the live-watchdog
+  // gate) and agent.log. The outbox queue itself now lives under the central
+  // coordinator-home root (`queueDir`), so reads target that path.
   let agentDir: string;
+  let queueDir: string;
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "team-send-thread-"));
     agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
     await mkdir(agentDir, { recursive: true });
+    setCoordinatorHome(join(tempDir, "coord-home"));
+    const { agentOutboxDir } = await import("./outbox");
+    queueDir = agentOutboxDir("agent-abc");
+    await mkdir(queueDir, { recursive: true });
     setUserConfigPath(join(tempDir, "config.json"));
     setSendSpawnRunner(() => makeSpawnResult());
     isPidAliveCtx.set(() => true);
@@ -183,6 +191,7 @@ describe("teams: sendMessage threads team into the outbox", () => {
   afterEach(async () => {
     resetSendSpawnRunner();
     resetUserConfigPath();
+    resetCoordinatorHome();
     isPidAliveCtx.reset();
     await rm(tempDir, { recursive: true, force: true });
   });
@@ -193,7 +202,7 @@ describe("teams: sendMessage threads team into the outbox", () => {
     const res = await sendMessage(agent, "hi room", { fromAgent: "agent-x", team: "backend" });
     expect(res.ok).toBe(true);
 
-    const queued = await readOutbox(agentDir);
+    const queued = await readOutbox(queueDir);
     expect(queued.length).toBe(1);
     expect(queued[0]!.team).toBe("backend");
     expect(queued[0]!.fromAgent).toBe("agent-x");
@@ -204,7 +213,7 @@ describe("teams: sendMessage threads team into the outbox", () => {
     await plantLiveWatchdog(agentDir);
     const agent = _makeAgent({ id: "agent-abc", repoPath: tempDir, repoName: "r", state: "running" as AgentState });
     await sendMessage(agent, "hi", { fromAgent: "agent-x" });
-    const queued = await readOutbox(agentDir);
+    const queued = await readOutbox(queueDir);
     expect(queued[0]!.team).toBeUndefined();
   });
 });
@@ -226,11 +235,21 @@ describe("teams: command layer (create/add/remove/list/delete/roster/send)", () 
     return [{ path: repoDir, name: basename(repoDir) }];
   }
 
+  // Returns the CENTRAL outbox queue dir for `id` under our test
+  // setCoordinatorHome(homeDir). The per-worktree agent dir still hosts
+  // meta.json / meta.transient.json / agent.log — only the message queue
+  // lives here.
+  function queueDirOf(id: string): string {
+    return join(homeDir, "agents", id);
+  }
+
   // Plant an agent on disk so readAllAgents surfaces it, with a live-watchdog
-  // transient so any delivery to it DEFERS into its outbox.
+  // transient so any delivery to it DEFERS into its outbox. Returns the
+  // WORKTREE agent dir; readers of the outbox queue should use queueDirOf(id).
   async function plantAgent(id: string): Promise<string> {
     const agentDir = join(repoDir, ".ittybitty", "agents", id);
     await mkdir(agentDir, { recursive: true });
+    await mkdir(queueDirOf(id), { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id, tmux_session: `t-${id}` }));
     await plantLiveWatchdog(agentDir);
     return agentDir;
@@ -333,14 +352,14 @@ describe("teams: command layer (create/add/remove/list/delete/roster/send)", () 
     expect(team!.members).toContain("agent-newcomer");
 
     // Existing member receives "joined the team" with team prefix.
-    const existingQueue = await readOutbox(existingDir);
+    const existingQueue = await readOutbox(queueDirOf("agent-existing"));
     expect(existingQueue.length).toBe(1);
     expect(existingQueue[0]!.message).toBe("joined the team");
     expect(existingQueue[0]!.fromAgent).toBe("agent-newcomer");
     expect(existingQueue[0]!.team).toBe("backend");
 
     // Newcomer receives the reply-protocol instruction from @system.
-    const newQueue = await readOutbox(newDir);
+    const newQueue = await readOutbox(queueDirOf("agent-newcomer"));
     expect(newQueue.length).toBe(1);
     expect(newQueue[0]!.fromAgent).toBe("@system");
     expect(newQueue[0]!.team).toBe("backend");
@@ -367,7 +386,7 @@ describe("teams: command layer (create/add/remove/list/delete/roster/send)", () 
     expect(res.ok).toBe(true);
     expect(res.stdout).toContain("already in @backend");
     // No join notice fired (the agent was already a member).
-    expect(await readOutbox(aDir)).toEqual([]);
+    expect(await readOutbox(queueDirOf("agent-a"))).toEqual([]);
   });
 
   // --- teamRemove ---------------------------------------------------------
@@ -393,7 +412,7 @@ describe("teams: command layer (create/add/remove/list/delete/roster/send)", () 
     const team = await getTeam("backend");
     expect(team!.members).toEqual(["agent-survivor"]);
 
-    const queue = await readOutbox(survivorDir);
+    const queue = await readOutbox(queueDirOf("agent-survivor"));
     expect(queue.length).toBe(1);
     expect(queue[0]!.message).toBe("left the team");
     expect(queue[0]!.fromAgent).toBe("agent-leaver");
@@ -527,10 +546,10 @@ describe("teams: command layer (create/add/remove/list/delete/roster/send)", () 
     expect(res.stdout).toBe("Sent to 2 member(s) of @backend");
 
     // Sender excluded.
-    expect(await readOutbox(aDir)).toEqual([]);
+    expect(await readOutbox(queueDirOf("agent-a"))).toEqual([]);
     // Other two received with team prefix metadata.
-    const bQueue = await readOutbox(bDir);
-    const cQueue = await readOutbox(cDir);
+    const bQueue = await readOutbox(queueDirOf("agent-b"));
+    const cQueue = await readOutbox(queueDirOf("agent-c"));
     expect(bQueue[0]!.message).toBe("standup time");
     expect(bQueue[0]!.team).toBe("backend");
     expect(bQueue[0]!.fromAgent).toBe("agent-a");
@@ -569,7 +588,7 @@ describe("teams: command layer (create/add/remove/list/delete/roster/send)", () 
     expect(res.stdout).toBe("Sent to 1 member(s) of @backend");
 
     // Live member received it; roster pruned to just the live member.
-    expect((await readOutbox(liveDir)).length).toBe(1);
+    expect((await readOutbox(queueDirOf("agent-live"))).length).toBe(1);
     const team = await getTeam("backend");
     expect(team!.members).toEqual(["agent-live"]);
   });
@@ -597,7 +616,7 @@ describe("teams: command layer (create/add/remove/list/delete/roster/send)", () 
     expect(res.stdout).toBe("Sent to 1 member(s) of @backend");
 
     // Live member received it and survived; dead member pruned.
-    expect((await readOutbox(liveDir)).length).toBe(1);
+    expect((await readOutbox(queueDirOf("agent-keep"))).length).toBe(1);
     const team = await getTeam("backend");
     expect(team!.members).toEqual(["agent-keep"]);
   });

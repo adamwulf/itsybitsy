@@ -51,6 +51,24 @@ describe("buildCodexStartContent — launch line", () => {
     expect(content).toContain("'--add-dir' '/repo/.git'");
   });
 
+  test("always grants --add-dir <coordinatorHome> so codex can write centralized state", async () => {
+    // Per-agent outboxes (`<coordinatorHome>/agents/<id>/outbox.jsonl`),
+    // team channels (`<coordinatorHome>/teams/...`), and `teams.json` all
+    // live under the coordinator home. Codex agents run with `-s workspace-write`,
+    // so the entire coordinator home MUST appear as an --add-dir on every
+    // codex spawn — otherwise `ib send <other-id>` and `ib send @<team>`
+    // fail with EPERM trying to append to centralized state.
+    const { setCoordinatorHome, resetCoordinatorHome } = await import("./coordinator");
+    const fakeHome = "/tmp/codex-spawn-test-home";
+    setCoordinatorHome(fakeHome);
+    try {
+      const content = buildCodexStartContent(baseInput());
+      expect(content).toContain(`'--add-dir' '${fakeHome}'`);
+    } finally {
+      resetCoordinatorHome();
+    }
+  });
+
   test("contains one inline `-c` flag per registered hook event", () => {
     const content = buildCodexStartContent(baseInput());
     for (const event of CODEX_REGISTERED_EVENTS) {

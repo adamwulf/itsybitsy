@@ -944,7 +944,8 @@ async function main() {
           console.error(`Warning: ${err.error}`);
         }
       }
-      await detectAgentStates(agents);
+      // Read-only display: don't reap (ib list never mutates agent state).
+      await detectAgentStates(agents, { reap: false });
       const roots = buildAgentTree(agents);
 
       if (jsonOutput) {
@@ -1067,7 +1068,9 @@ async function main() {
           console.error(`Warning: ${err.error}`);
         }
       }
-      await detectAgentStates(agents);
+      // Read-only display: don't reap. `ib state --cleanup` has its own
+      // explicit orphan-kill path via prepareAndRunCleanup below.
+      await detectAgentStates(agents, { reap: false });
       const roots = buildAgentTree(agents);
 
       // Collect agents per-repo so we can group output (same shape as `ib list`).
@@ -1363,7 +1366,8 @@ async function main() {
           console.error(`Warning: ${err.error}`);
         }
       }
-      await detectAgentStates(agents);
+      // Read-only display: don't reap (ib tree never mutates agent state).
+      await detectAgentStates(agents, { reap: false });
       const roots = buildAgentTree(agents);
       const flat = flattenAgentTree(roots, repos.map((r) => ({ name: repoDisplayName(r), path: r.path })));
       if (flat.length === 0) {
@@ -1484,7 +1488,8 @@ async function main() {
       const { detectAgentStates } = await import("./agents");
       const repos = await listRepos();
       const agent = await requireAgent(args[1], repos);
-      await detectAgentStates([agent]);
+      // Read-only display: don't reap (ib info never mutates agent state).
+      await detectAgentStates([agent], { reap: false });
       const m = agent.meta;
       console.log(`Agent:        ${agent.id}`);
       console.log(`Repo:         ${agent.repoName} (${agent.repoPath})`);
@@ -1765,7 +1770,9 @@ async function main() {
         console.error(`Warning: unknown arguments ignored: ${extraArgs.join(" ")}`);
       }
       const { detectAgentStates } = await import("./agents");
-      await detectAgentStates([agent]);
+      // Lifecycle path: about to mutate the agent (resume). Reaping a stale
+      // husk tmux session before relaunch is desired.
+      await detectAgentStates([agent], { reap: true });
       const { resumeAgent } = await import("./ib-commands");
       await printAndExit(await resumeAgent(agent));
       break;
@@ -1824,7 +1831,9 @@ async function main() {
       }
 
       const { detectAgentStates } = await import("./agents");
-      await detectAgentStates([agent]);
+      // Lifecycle path: about to mutate the agent (respawn). Reaping a stale
+      // husk tmux session before relaunch is desired.
+      await detectAgentStates([agent], { reap: true });
       const { respawnAgent } = await import("./ib-commands");
       await printAndExit(await respawnAgent(agent));
       break;
@@ -1845,7 +1854,9 @@ async function main() {
         process.exit(1);
       }
       const { detectAgentStates } = await import("./agents");
-      await detectAgentStates([agent]);
+      // Lifecycle path: about to mutate the agent (respawn-self). Reaping a
+      // stale husk tmux session before relaunch is desired.
+      await detectAgentStates([agent], { reap: true });
       const { respawnSelf } = await import("./ib-commands");
       await printAndExit(await respawnSelf(agent));
       break;

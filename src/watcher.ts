@@ -32,7 +32,7 @@ import { InjectionContext } from "./types";
  */
 export interface WatcherAgentsApi {
   readAllAgents: (repos: Array<{ path: string; name: string }>, includeArchived?: boolean) => Promise<ReadAgentsResult>;
-  detectAgentStates: (agents: Agent[]) => Promise<void>;
+  detectAgentStates: (agents: Agent[], opts?: { reap?: boolean }) => Promise<void>;
   buildAgentTree: (agents: Agent[]) => Agent[];
   flattenAgentTree: (roots: Agent[], repos?: string[] | { name: string; path: string }[], coordinator?: { state: string; age: string }) => FlatEntry[];
   readPendingQuestions: (repoPath: string) => Promise<PendingQuestion[]>;
@@ -262,8 +262,10 @@ export class AgentWatcher {
     this.polling = true;
     try {
       const agentsApi = agentsCtx.fn;
+      // Lifecycle path: the watcher tick is authorized to reap orphan PIDs
+      // and tear down husk tmux sessions for agents detected as stopped.
       const [, coordinatorInfo] = await Promise.all([
-        agentsApi.detectAgentStates(agents),
+        agentsApi.detectAgentStates(agents, { reap: true }),
         this.getCoordinatorInfo(),
       ]);
       // If refresh() swapped lastAgents while we were awaiting, discard stale results
@@ -309,9 +311,11 @@ export class AgentWatcher {
       this.lastOrphanedSessions = orphanedTmuxSessions;
       this._lastLiveTmuxSessions = liveTmuxSessions;
 
-      // Detect state for each agent via tmux capture + parseState, and get coordinator info
+      // Detect state for each agent via tmux capture + parseState, and get coordinator info.
+      // Lifecycle path: the watcher refresh is authorized to reap orphan PIDs
+      // and tear down husk tmux sessions for agents detected as stopped.
       const [, coordinatorInfo] = await Promise.all([
-        agentsApi.detectAgentStates(agents),
+        agentsApi.detectAgentStates(agents, { reap: true }),
         this.getCoordinatorInfo(),
       ]);
 

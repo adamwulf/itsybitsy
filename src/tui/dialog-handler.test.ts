@@ -2,6 +2,7 @@ import { test, expect, describe } from "bun:test";
 import type { DialogState, DialogCtx } from "./dialog-handler";
 import {
   handleDialogInput, fuzzyFilterIndices, wrapTextareaLines,
+  buildMultiSelectContent, MULTI_SELECT_MAX_VISIBLE,
 } from "./dialog-handler";
 import { TextBuffer, deleteWord } from "./text-buffer";
 import { assertDialog } from "./test-helpers";
@@ -195,6 +196,161 @@ describe("select dialog", () => {
     (dialog as any).selectedIndex = 2;
     handleDialogInput(ctx, "j"); // already at end
     expect((dialog as any).selectedIndex).toBe(2);
+  });
+});
+
+// ─── multi-select dialog ────────────────────────────────
+
+describe("multi-select dialog", () => {
+  function makeMultiSelect(opts?: { onCancel?: () => void }) {
+    let submitted: number[] | null = null;
+    const dialog: NonNullable<DialogState> = {
+      type: "multi-select", prompt: "Pick members:",
+      items: ["alpha", "beta", "gamma"],
+      checked: [false, false, false],
+      selectedIndex: 0,
+      onSubmit: (indices: number[]) => { submitted = indices; },
+      onCancel: opts?.onCancel,
+    };
+    const ctx = makeDialogCtx(dialog);
+    return { ctx, dialog, get submitted() { return submitted; } };
+  }
+
+  test("Space toggles checked at selectedIndex", () => {
+    const { ctx, dialog } = makeMultiSelect();
+    handleDialogInput(ctx, " ");
+    expect((dialog as any).checked).toEqual([true, false, false]);
+    handleDialogInput(ctx, " ");
+    expect((dialog as any).checked).toEqual([false, false, false]);
+  });
+
+  test("j/k navigate the cursor", () => {
+    const { ctx, dialog } = makeMultiSelect();
+    handleDialogInput(ctx, "j");
+    expect((dialog as any).selectedIndex).toBe(1);
+    handleDialogInput(ctx, "j");
+    expect((dialog as any).selectedIndex).toBe(2);
+    handleDialogInput(ctx, "k");
+    expect((dialog as any).selectedIndex).toBe(1);
+  });
+
+  test("Enter calls onSubmit with checked indices", () => {
+    const t = makeMultiSelect();
+    // Check items 0 and 2.
+    handleDialogInput(t.ctx, " ");
+    handleDialogInput(t.ctx, "j");
+    handleDialogInput(t.ctx, "j");
+    handleDialogInput(t.ctx, " ");
+    handleDialogInput(t.ctx, "\r");
+    expect(t.submitted).toEqual([0, 2]);
+  });
+
+  test("Escape calls onCancel and closes the dialog", () => {
+    let cancelled = false;
+    const { ctx } = makeMultiSelect({ onCancel: () => { cancelled = true; } });
+    handleDialogInput(ctx, "\x1b");
+    expect(ctx.closed).toHaveLength(1);
+    expect(cancelled).toBe(true);
+  });
+
+  test("renderer scroll window: 20 items, selectedIndex=15 → shows neighborhood of 15, hides 0–9", () => {
+    // Reviewer must-fix #2: multi-select must scroll, not dump every row into
+    // the dialog. The window slides to keep selectedIndex visible.
+    const items = Array.from({ length: 20 }, (_, i) => `item-${i.toString().padStart(2, "0")}`);
+    const checked = items.map(() => false);
+    const dialog: NonNullable<DialogState> = {
+      type: "multi-select", prompt: "Pick:",
+      items, checked, selectedIndex: 15,
+      onSubmit: () => {},
+    };
+    const { contentLines } = buildMultiSelectContent(
+      dialog as Extract<NonNullable<DialogState>, { type: "multi-select" }>,
+      72,
+    );
+    const joined = contentLines.join("\n");
+    // selectedIndex (15) is visible
+    expect(joined).toContain("item-15");
+    // Early items are NOT shown
+    expect(joined).not.toContain("item-00");
+    expect(joined).not.toContain("item-09");
+    // No more than MULTI_SELECT_MAX_VISIBLE rows of items rendered
+    const itemRows = contentLines.filter((l) => /item-\d\d/.test(l));
+    expect(itemRows.length).toBeLessThanOrEqual(MULTI_SELECT_MAX_VISIBLE);
+    // The "↑ N more" indicator is present (items above are hidden)
+    expect(joined).toContain("more");
+  });
+
+  test("renderer scroll window: list shorter than max shows all items, no indicators", () => {
+    const items = ["a", "b", "c"];
+    const dialog: NonNullable<DialogState> = {
+      type: "multi-select", prompt: "Pick:",
+      items, checked: [false, false, false], selectedIndex: 0,
+      onSubmit: () => {},
+    };
+    const { contentLines } = buildMultiSelectContent(
+      dialog as Extract<NonNullable<DialogState>, { type: "multi-select" }>,
+      72,
+    );
+    const joined = contentLines.join("\n");
+    expect(joined).toContain("a");
+    expect(joined).toContain("b");
+    expect(joined).toContain("c");
+    // No "N more" indicators when everything fits.
+    expect(joined).not.toContain("more");
+  });
+});
+
+// ─── textarea dialog onCancel wiring ──────────────────────
+
+describe("textarea dialog onCancel", () => {
+  function makeTextarea(opts?: { onCancel?: () => void }) {
+    let submitted: string | null = null;
+    const dialog: NonNullable<DialogState> = {
+      type: "textarea",
+      prompt: "Type:",
+      buffer: new TextBuffer(),
+      focusedButton: "text",
+      onSubmit: (v: string) => { submitted = v; },
+      onCancel: opts?.onCancel,
+    };
+    const ctx = makeDialogCtx(dialog);
+    return { ctx, dialog, get submitted() { return submitted; } };
+  }
+
+  test("Escape fires onCancel and closes the dialog", () => {
+    // Regression guard: dialog-handler.ts global Esc handler must invoke
+    // onCancel on textarea, same shape as the multi-select path. The wizard
+    // depends on it for step-3 silent-vanish fix.
+    let cancelled = false;
+    const { ctx } = makeTextarea({ onCancel: () => { cancelled = true; } });
+    handleDialogInput(ctx, "\x1b");
+    expect(ctx.closed).toHaveLength(1);
+    expect(cancelled).toBe(true);
+  });
+
+  test("Cancel button (Tab → Enter) fires onCancel and closes the dialog", () => {
+    // Round-2 must-fix: the focusable [ Cancel ] button on the textarea must
+    // fire onCancel the same way Esc does. Round 1 only fixed Esc, leaving
+    // the button-cancel path silent.
+    let cancelled = false;
+    const { ctx, dialog } = makeTextarea({ onCancel: () => { cancelled = true; } });
+    // Tab from text → cancel
+    handleDialogInput(ctx, "\t");
+    expect((dialog as any).focusedButton).toBe("cancel");
+    // Enter activates [ Cancel ]
+    handleDialogInput(ctx, "\r");
+    expect(ctx.closed).toHaveLength(1);
+    expect(cancelled).toBe(true);
+  });
+
+  test("Cancel button without onCancel still closes the dialog", () => {
+    // Defense: omitting onCancel must still work (existing dialogs don't set
+    // it).  The optional-chain in the handler should swallow the no-op.
+    const { ctx, dialog } = makeTextarea(); // no onCancel
+    handleDialogInput(ctx, "\t");
+    expect((dialog as any).focusedButton).toBe("cancel");
+    handleDialogInput(ctx, "\r");
+    expect(ctx.closed).toHaveLength(1);
   });
 });
 

@@ -688,27 +688,33 @@ function showTeamPicker(ctx: ActionCtx, agent: Agent, teamNames: string[]) {
 
 /**
  * Shared helper for the 'T' create flow and the 't' "create new team…" branch.
- * Opens an input dialog seeded with `initialValue` (empty for 'T'; also empty
- * for the picker's create branch — the user has not typed a name yet). When
- * `alsoAddSelectedAgent` is true and a non-system-coordinator agent is
- * selected, the newly-created team is followed by `teamAdd` so the 't' flow
- * ends with the agent already in the team.
+ * Drives the 3-step wizard: name → member multi-select → optional first
+ * message. Members get ONE inbound message (the user's first message, if any),
+ * NOT N join notices — see `teamAdd`'s `suppressJoinNotice` opt.
  *
- * Routes through `teamCreate`/`teamAdd` from ib-commands rather than calling
- * the bare registry helpers, so the TUI path runs the SAME audit log
- * (`appendTeamLog`) and join-notice fan-out (`fireJoinNotice`) the CLI does
- * (§16.4.1 / §17.4). The `IbCommandResult` returned from those helpers carries
- * the human-readable success/error string, which we feed straight into the
- * status-bar notice — no string duplication.
+ * Step 1 (name): an `input` dialog seeded with `initialValue`. Empty submit
+ *   silently aborts. Routes through `teamCreate` so the audit log + channel
+ *   system record fire exactly as the CLI does.
+ * Step 2 (members): a `multi-select` dialog over the watcher's live agents
+ *   formatted as `<repo>/<id> (<state>)`. The currently-selected agent (if
+ *   `alsoAddSelectedAgent` is true) is pre-checked. Each checked member is
+ *   added via `teamAdd` with `suppressJoinNotice: true` so members do NOT
+ *   receive an inbound "joined the team" message — the audit + channel
+ *   system records still fire. Esc rolls back step 1 via `teamDelete`. If
+ *   there are no live agents at all, the picker is skipped.
+ * Step 3 (first message): a `textarea` dialog. Submitting with a non-empty
+ *   buffer fans out via `ctx.teamSend` to every live member. Esc here does
+ *   NOT roll back — the team and its members persist with no inbound message.
  */
 function runCreateTeam(ctx: ActionCtx, initialValue: string, alsoAddSelectedAgent: boolean) {
-  // Capture the selected agent at dialog-open time. The user could navigate the
-  // tree before submitting; we want the join to target the agent they intended
-  // to add. If no agent is selected, the join branch is silently skipped.
-  const agentForJoin = alsoAddSelectedAgent && !ctx.agentTree.isSystemCoordinatorSelected
+  // Capture the selected agent at dialog-open time so step 2's pre-check
+  // targets the agent the user intended at the start of the wizard, even if
+  // they navigate the tree between steps.
+  const preCheckAgent = alsoAddSelectedAgent && !ctx.agentTree.isSystemCoordinatorSelected
     ? ctx.agentTree.selectedAgent
     : null;
   const createdBy = ctx.agentTree.selectedAgent?.id ?? "user";
+
   ctx.showDialog({
     type: "input",
     prompt: "Team name:",
@@ -725,18 +731,141 @@ function runCreateTeam(ctx: ActionCtx, initialValue: string, alsoAddSelectedAgen
           ctx.setNotice(createResult.stderr || createResult.stdout || "Create team failed");
           return;
         }
-        if (!agentForJoin) {
-          ctx.setNotice(createResult.stdout || "Team created");
-          return;
-        }
-        // Chain into teamAdd so the new agent triggers the join notice +
-        // reply-protocol instruction fan-out that the CLI `ib team add` runs.
-        const addResult = await teamAdd(trimmed, agentForJoin.id, ctx.repos);
-        if (addResult.ok) {
-          // Combine both successful operations into a single notice.
-          ctx.setNotice(`${createResult.stdout}; ${addResult.stdout}`);
+        // Hand off to step 2 (member picker). The picker takes ownership of
+        // status-bar notice production from here on so we can emit a single
+        // combined notice at the END of the full wizard.
+        openMemberPicker(ctx, trimmed, preCheckAgent);
+      });
+    },
+  });
+}
+
+/**
+ * Step 2 of the team-creation wizard: a multi-select over live agents. Esc
+ * rolls back step 1 via `teamDelete`. If there are no live agents, skips
+ * straight to step 3.
+ */
+function openMemberPicker(ctx: ActionCtx, teamName: string, preCheckAgent: Agent | null) {
+  const liveAgents = ctx.watcher?.lastAgents ?? [];
+  if (liveAgents.length === 0) {
+    // No agents available — skip the picker entirely and hand off straight to
+    // step 3, which still opens the textarea so the user can decide whether to
+    // type a first message (it'll fan out to zero recipients, but the team
+    // exists and the user might want to type the message anyway).
+    openFirstMessagePrompt(ctx, teamName, /*addedCount*/ 0, /*addFailures*/ 0);
+    return;
+  }
+
+  const items = liveAgents.map((a) => `${a.repoName}/${a.id} (${displayState(a.state)})`);
+  const checked = liveAgents.map((a) => preCheckAgent?.id === a.id);
+
+  ctx.showDialog({
+    type: "multi-select",
+    prompt: `Add members to @${teamName}:`,
+    items,
+    checked,
+    selectedIndex: 0,
+    onCancel: () => {
+      // Roll back: delete the team we just created so a cancelled wizard
+      // leaves no orphan. Emit a notice in both branches so the user can see
+      // the cancel actually happened — the dialog vanishing alone is silent.
+      //
+      // NOTE on rollback race: this is fire-and-forget under executeAndRefresh.
+      // If a user re-opens the wizard and recreates a team with the SAME name
+      // before this teamDelete commits, the rollback could silently nuke the
+      // recreated team. The window is sub-second (one syscall) and the
+      // recreate path is at least three keypresses — extremely unlikely in
+      // practice. Awaiting before close was rejected as a UI block. Document,
+      // don't fix.
+      ctx.executeAndRefresh(async () => {
+        const delResult = await teamDelete(teamName);
+        if (delResult.ok) {
+          ctx.setNotice(`Cancelled — team @${teamName} rolled back`);
         } else {
-          ctx.setNotice(`${createResult.stdout}; add failed: ${addResult.stderr || addResult.stdout}`);
+          ctx.setNotice(`Cancelled; rollback failed: ${delResult.stderr || delResult.stdout}`);
+        }
+      });
+    },
+    onSubmit: (checkedIndices: number[]) => {
+      ctx.closeDialog();
+      ctx.executeAndRefresh(async () => {
+        let addedCount = 0;
+        let addFailures = 0;
+        for (const i of checkedIndices) {
+          const agent = liveAgents[i];
+          if (!agent) continue;
+          const addResult = await teamAdd(teamName, agent.id, ctx.repos, { suppressJoinNotice: true });
+          if (addResult.ok) addedCount++;
+          else addFailures++;
+        }
+        // Hand off to step 3 (optional first message). It owns the final
+        // notice so all three steps roll up into one status line.
+        openFirstMessagePrompt(ctx, teamName, addedCount, addFailures);
+      });
+    },
+  });
+}
+
+/**
+ * Step 3 of the team-creation wizard: an optional `textarea` for the first
+ * message. Esc / empty submit skip the send. The single combined notice for
+ * the whole wizard is emitted from here.
+ *
+ * NOTE on lastAgents snapshot: step 2 and step 3 each read
+ * `ctx.watcher?.lastAgents` independently — if an agent is killed between
+ * step-2 add and step-3 send, the recipient count we surface could be lower
+ * than the added count. Acceptable for now; the watcher tick is ~1s and the
+ * user spends much longer reading the textarea.
+ */
+function openFirstMessagePrompt(ctx: ActionCtx, teamName: string, addedCount: number, addFailures: number) {
+  // The notice for steps 1 + 2 only — appended to in step 3 if a message gets
+  // sent. Each branch below sets it as the final status-bar line.
+  const memberPlural = addedCount === 1 ? "member" : "members";
+  const baseNotice = addedCount > 0
+    ? `created team @${teamName} with ${addedCount} ${memberPlural}`
+    : `created team @${teamName}`;
+  const withFailures = (suffix: string = "") =>
+    addFailures > 0
+      ? `${baseNotice}${suffix} (${addFailures} add failure${addFailures === 1 ? "" : "s"})`
+      : `${baseNotice}${suffix}`;
+
+  ctx.showDialog({
+    type: "textarea",
+    prompt: `First message to @${teamName}:`,
+    buffer: new TextBuffer(),
+    focusedButton: "text",
+    // Esc on this textarea — treat as "skip the send" rather than silently
+    // vanishing. Without this hook the global Esc handler just closes the
+    // dialog and the user sees no confirmation that the team + members were
+    // actually saved.
+    onCancel: () => {
+      ctx.setNotice(withFailures());
+    },
+    onSubmit: (message: string) => {
+      ctx.closeDialog();
+      const trimmed = message.trim();
+      if (!trimmed) {
+        // Empty submit — treat like skip; team stays, no send.
+        ctx.setNotice(withFailures());
+        return;
+      }
+      // Fan-out via teamSend to every live member of the team. The snapshot
+      // is the watcher's last batch (same source we used to populate the
+      // multi-select), consistent with what the user saw a moment ago.
+      const live = ctx.watcher?.lastAgents ?? [];
+      ctx.executeAndRefresh(async () => {
+        const sendResult = await ctx.teamSend(teamName, live, trimmed, undefined);
+        if (sendResult.ok) {
+          // teamSend's stdout typically reads "Sent to N member(s) of @<team>".
+          // We surface a recipient count if we can parse it; otherwise we fall
+          // back to the addedCount (the wizard's own tally).
+          const match = sendResult.stdout.match(/Sent to (\d+) member/);
+          const recipients = match?.[1] ?? String(addedCount);
+          // Numeric compare so a leading-zero match (e.g. "01") still pluralizes.
+          const recipientPlural = Number(recipients) === 1 ? "recipient" : "recipients";
+          ctx.setNotice(`${withFailures("")}, sent first message to ${recipients} ${recipientPlural}`);
+        } else {
+          ctx.setNotice(`${withFailures("")} (send failed: ${sendResult.stderr || sendResult.stdout})`);
         }
       });
     },

@@ -55,7 +55,7 @@ import type { DialogState } from "./dialog-handler";
 import {
   wrapTextareaLines, TEXTAREA_VISIBLE_HEIGHT,
   handleDialogInput, renderTextareaBlock, buildFolderBrowserContent, buildNewAgentFormContent,
-  buildSetupContent, buildPermissionsEditorContent,
+  buildSetupContent, buildPermissionsEditorContent, buildMultiSelectContent,
 } from "./dialog-handler";
 import {
   RightPaneComponent, colorizeDiff, colorizeLog,
@@ -500,6 +500,9 @@ class DialogOverlayComponent implements Component {
           lines.push(truncateToWidth(`${prefix}${dialog.items[i]}${suffix}`, innerWidth, ""));
         }
         return { title: dialog.prompt, contentLines: lines };
+      }
+      case "multi-select": {
+        return buildMultiSelectContent(dialog, innerWidth);
       }
       case "fuzzy": {
         const matchCount = dialog.filteredItems.length;
@@ -1121,7 +1124,7 @@ export class DashboardComponent implements Component {
     this._dialog = dialog;
     const width = dialog.width
       ?? (dialog.type === "help" ? 72
-        : (dialog.type === "folder-browser" || dialog.type === "new-agent-form" || dialog.type === "setup" || dialog.type === "permissions-editor") ? 70
+        : (dialog.type === "folder-browser" || dialog.type === "new-agent-form" || dialog.type === "setup" || dialog.type === "permissions-editor" || dialog.type === "multi-select") ? 70
         : DIALOG_WIDTH);
     if (width !== DIALOG_WIDTH && this.overlayHandle) {
       this.overlayHandle.hide();

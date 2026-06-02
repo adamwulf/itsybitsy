@@ -22,6 +22,18 @@ export type DialogState =
   | ({ type: "confirm"; prompt: string; confirmLabel: string; focusedButton: "confirm" | "cancel"; confirmColor?: string; onYes: () => void } & DialogCommon)
   | ({ type: "input"; prompt: string; value: string; onSubmit: (value: string) => void } & DialogCommon)
   | ({ type: "select"; prompt: string; items: string[]; selectedIndex: number; onSelect: (index: number) => void } & DialogCommon)
+  | ({
+      type: "multi-select";
+      prompt: string;
+      items: string[];
+      /** Parallel to `items`, same length. true = checked. */
+      checked: boolean[];
+      selectedIndex: number;
+      onSubmit: (checkedIndices: number[]) => void;
+      /** Optional callback fired when the dialog is cancelled via Escape (used to
+       *  roll back side effects already committed by an earlier wizard step). */
+      onCancel?: () => void;
+    } & DialogCommon)
   | ({ type: "fuzzy"; prompt: string; query: string; allItems: string[]; filteredIndices: number[]; filteredItems: string[]; selectedIndex: number; onSelect: (originalIndex: number) => void } & DialogCommon)
   | ({ type: "help"; lines: string[] } & DialogCommon)
   | ({
@@ -36,6 +48,11 @@ export type DialogState =
        *  which typically sends the Escape key to the agent's tmux session to
        *  interrupt a stuck task. */
       onSendEsc?: () => void;
+      /** Optional: invoked when the dialog is cancelled via Escape. Used by
+       *  multi-step wizards that need to emit a final status notice on cancel
+       *  (the wizard's step-3 "first message" textarea is silent on Esc
+       *  otherwise, leaving the user wondering whether the team persisted). */
+      onCancel?: () => void;
     } & DialogCommon)
   | ({
       type: "folder-browser";
@@ -154,6 +171,18 @@ export function handleDialogInput(ctx: DialogCtx, data: string): boolean {
   // so its buffered prefix can't leak into the next dialog or input field.
   if (matchesKey(data, Key.escape)) {
     cancelPaste();
+    // multi-select / textarea support an optional onCancel callback so a
+    // wizard step can roll back side effects already committed by an earlier
+    // step (the team-creation wizard deletes the just-created team on Esc
+    // from step 2) or emit a final status notice on Esc (step 3 textarea —
+    // otherwise the wizard vanishes silently after a save the user can't
+    // observe).
+    if (dialog.type === "multi-select" || dialog.type === "textarea") {
+      const onCancel = dialog.onCancel;
+      ctx.closeDialog();
+      onCancel?.();
+      return true;
+    }
     ctx.closeDialog();
     return true;
   }
@@ -206,6 +235,28 @@ export function handleDialogInput(ctx: DialogCtx, data: string): boolean {
       ctx.tui?.requestRender();
     } else if (matchesKey(data, Key.enter)) {
       dialog.onSelect(dialog.selectedIndex);
+    }
+    return true;
+  }
+
+  if (dialog.type === "multi-select") {
+    if (matchesKey(data, Key.down) || data === "j") {
+      dialog.selectedIndex = Math.min(dialog.items.length - 1, dialog.selectedIndex + 1);
+      ctx.tui?.requestRender();
+    } else if (matchesKey(data, Key.up) || data === "k") {
+      dialog.selectedIndex = Math.max(0, dialog.selectedIndex - 1);
+      ctx.tui?.requestRender();
+    } else if (data === " ") {
+      if (dialog.checked.length > dialog.selectedIndex) {
+        dialog.checked[dialog.selectedIndex] = !dialog.checked[dialog.selectedIndex];
+        ctx.tui?.requestRender();
+      }
+    } else if (matchesKey(data, Key.enter)) {
+      const indices: number[] = [];
+      for (let i = 0; i < dialog.checked.length; i++) {
+        if (dialog.checked[i]) indices.push(i);
+      }
+      dialog.onSubmit(indices);
     }
     return true;
   }
@@ -290,7 +341,12 @@ function handleTextareaDialog(
     }
   } else if (d.focusedButton === "cancel") {
     if (matchesKey(data, Key.enter)) {
+      // Same shape as the global Esc branch — close first, THEN invoke
+      // onCancel. Required so a wizard step (e.g. step-3 textarea) can emit
+      // a final notice on user cancel instead of vanishing silently.
+      const onCancel = d.onCancel;
       ctx.closeDialog();
+      onCancel?.();
     } else if (matchesKey(data, Key.tab) || matchesKey(data, Key.right)) {
       d.focusedButton = nextFocus("cancel", 1);
       ctx.tui?.requestRender();
@@ -750,6 +806,52 @@ export function renderTextareaBlock(
   }
 
   return { outputLines, hasScrollIndicator: scrollOffset > 0 };
+}
+
+/** Max visible rows in the multi-select sliding window. Chosen larger than the
+ *  fuzzy dialog's 5 because the user must navigate the full list here, but
+ *  small enough that the dialog still fits a typical terminal even with the
+ *  scroll indicators. */
+export const MULTI_SELECT_MAX_VISIBLE = 10;
+
+/** Build content for the multi-select dialog. Mirrors the `select` rendering
+ *  but adds a `[x]` / `[ ]` checkbox prefix to each row so the user can see
+ *  which entries are toggled. The highlighted row uses the same `> ` arrow
+ *  prefix `select` does so the navigation cue is identical.
+ *
+ *  A sliding window of at most MULTI_SELECT_MAX_VISIBLE rows is shown, keeping
+ *  the selectedIndex visible. When items are hidden above/below, dimmed
+ *  `↑ N more` / `↓ N more` indicators render in their place — mirrors the
+ *  folder-browser convention. */
+export function buildMultiSelectContent(
+  dialog: Extract<NonNullable<DialogState>, { type: "multi-select" }>,
+  innerWidth: number
+): DialogContent {
+  const lines: string[] = [`${DIM}(j/k, Space toggles, Enter submits, Esc cancels)${RESET}`];
+  const total = dialog.items.length;
+  const maxVisible = MULTI_SELECT_MAX_VISIBLE;
+  // Sliding window: clamp start so selectedIndex stays in range, and so we
+  // don't waste rows past the end when the list is shorter than the window.
+  let start = 0;
+  if (total > maxVisible) {
+    start = Math.max(0, Math.min(dialog.selectedIndex - Math.floor(maxVisible / 2), total - maxVisible));
+  }
+  const end = Math.min(total, start + maxVisible);
+  if (start > 0) {
+    lines.push(`${DIM}  ↑ ${start} more${RESET}`);
+  }
+  for (let i = start; i < end; i++) {
+    const selected = i === dialog.selectedIndex;
+    const arrow = selected ? `${GREEN}> ` : "  ";
+    const reset = selected ? RESET : "";
+    const box = dialog.checked[i] ? "[x]" : "[ ]";
+    lines.push(truncateToWidth(`${arrow}${box} ${dialog.items[i]}${reset}`, innerWidth, ""));
+  }
+  const remaining = total - end;
+  if (remaining > 0) {
+    lines.push(`${DIM}  ↓ ${remaining} more${RESET}`);
+  }
+  return { title: dialog.prompt, contentLines: lines };
 }
 
 /** Build content for the folder-browser dialog */

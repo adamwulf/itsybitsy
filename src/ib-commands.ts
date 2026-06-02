@@ -2561,12 +2561,19 @@ export async function teamSend(
  * instruction teaching the room reply protocol (since session-start may have
  * fired before it joined). Best-effort — any delivery failure is swallowed so
  * the command never fails (§16.4.1).
+ *
+ * When `suppressFanOut` is true, the audit log + channel system record still
+ * fire (so team history is unaffected), but the per-recipient fan-out is
+ * skipped — used by the TUI team-creation wizard to bulk-add members without
+ * each one receiving an inbound `joined the team` message. The user's
+ * subsequent first-message send (if any) becomes the single inbound delivery.
  */
 async function fireJoinNotice(
   name: string,
   team: Team,
   addedId: string,
   repos: RepoEntry[],
+  suppressFanOut: boolean = false,
 ): Promise<void> {
   // Audit the lifecycle event in the team's <team>.log (§17.4). Best-effort and
   // additive — never changes the notice fan-out below.
@@ -2575,6 +2582,19 @@ async function fireJoinNotice(
   // chat box renders it inline with chat, dimmed (§17.4 design update). Additive
   // to the audit log; both paths fire on every join.
   await appendChannelSystemMessage(name, addedId, "joined the team").catch(() => {});
+  if (suppressFanOut) return;
+  await fireJoinNoticeFanOut(name, team, addedId, repos);
+}
+
+/** Per-recipient JOIN delivery extracted from fireJoinNotice so the audit +
+ *  channel-system records can fire independently of the inbound fan-out.
+ *  Best-effort; any delivery failure is swallowed. */
+async function fireJoinNoticeFanOut(
+  name: string,
+  team: Team,
+  addedId: string,
+  repos: RepoEntry[],
+): Promise<void> {
   try {
     const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })));
     const byId = new Map(agents.map((a) => [a.id, a]));
@@ -2689,8 +2709,19 @@ export async function teamCreate(name: string, opts?: { createdBy?: string }): P
  * `ib team add <name> <agent-id>` (§16.3). Errors if the team does not exist;
  * resolves `<agent-id>` via the same partial matcher as `ib send`; no-op success
  * if already a member; fires the JOIN notice (§16.4.1) on a real add.
+ *
+ * Internal-use `opts.suppressJoinNotice` (TUI team-creation wizard only — NOT a
+ * CLI flag): when true, the audit log + channel system record still fire so
+ * team history is unaffected, but the per-recipient `joined the team` fan-out
+ * is skipped. Used to bulk-add members so they don't receive N join notices
+ * before the user's optional first message.
  */
-export async function teamAdd(name: string, agentIdOrPartial: string, repos: RepoEntry[]): Promise<IbCommandResult> {
+export async function teamAdd(
+  name: string,
+  agentIdOrPartial: string,
+  repos: RepoEntry[],
+  opts?: { suppressJoinNotice?: boolean },
+): Promise<IbCommandResult> {
   const n = normalizeTeamName(name);
   if (!(await getTeam(n))) {
     return teamErr(`Error: team @${n} not found`);
@@ -2709,7 +2740,7 @@ export async function teamAdd(name: string, agentIdOrPartial: string, repos: Rep
   }
   // Persist-then-notify (§16.4.1): membership write committed under the lock;
   // fan the join notice to the post-write snapshot. Best-effort.
-  await fireJoinNotice(n, team, id, repos);
+  await fireJoinNotice(n, team, id, repos, opts?.suppressJoinNotice === true);
   return teamOk(`Added ${id} to @${n}`);
 }
 

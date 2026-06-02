@@ -68,6 +68,37 @@ describe("registry", () => {
     expect(result.message).toContain("reserved name");
   });
 
+  test("addRepo rejects a name with a space", async () => {
+    const repoDir = join(tempDir, "Rice Teaching");
+    await mkdir(repoDir, { recursive: true });
+    const result = await addRepo(repoDir);
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("not a valid repo name");
+  });
+
+  test("addRepo rejects an empty custom name", async () => {
+    const repoDir = join(tempDir, "myrepo3");
+    await mkdir(repoDir, { recursive: true });
+    const result = await addRepo(repoDir, "");
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("not a valid repo name");
+  });
+
+  test("addRepo rejects a name with disallowed characters", async () => {
+    const repoDir = join(tempDir, "myrepo4");
+    await mkdir(repoDir, { recursive: true });
+    const result = await addRepo(repoDir, "foo!bar");
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("not a valid repo name");
+  });
+
+  test("addRepo accepts a name with allowed characters", async () => {
+    const repoDir = join(tempDir, "myrepo5");
+    await mkdir(repoDir, { recursive: true });
+    const result = await addRepo(repoDir, "foo-bar_baz123");
+    expect(result.ok).toBe(true);
+  });
+
   test("removeRepo removes by path", async () => {
     const repoDir = join(tempDir, "myrepo");
     await mkdir(repoDir, { recursive: true });
@@ -128,6 +159,15 @@ describe("registry", () => {
     const result = await renameRepo(repoDir, "coordinator");
     expect(result.ok).toBe(false);
     expect(result.message).toContain("reserved name");
+  });
+
+  test("renameRepo rejects a nickname with a space", async () => {
+    const repoDir = join(tempDir, "myrepo-rename");
+    await mkdir(repoDir, { recursive: true });
+    await addRepo(repoDir);
+    const result = await renameRepo(repoDir, "Rice Teaching");
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("not a valid repo name");
   });
 
   // --- Group I: additional addRepo coordinator enforcement ---

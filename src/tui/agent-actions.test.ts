@@ -19,12 +19,13 @@ import {
   handleAddPermission, addPermissionToSettings, agentSettingsLocalPath,
   getCoordinatorSpawnsInFlight, clearCoordinatorSpawnsInFlight,
   handleCreateTeam, handleAddAgentToTeam, handleDisbandTeam, handleManageTeam,
+  handleFolderBrowser,
 } from "./agent-actions";
 import { setCoordinatorHome, resetCoordinatorHome } from "../coordinator";
 import { readTeams, createTeam, addMember, deleteTeam } from "../teams";
 import { teamLogPath, channelPath, appendChannelMessage, appendTeamLog } from "../team-channel";
 import { existsSync } from "node:fs";
-import { saveRegistry } from "../registry";
+import { saveRegistry, loadRegistry } from "../registry";
 import {
   writeAgentTransient,
   isPidAliveCtx,
@@ -2055,5 +2056,39 @@ describe("handleManageTeam", () => {
     await flushActions();
     expect(dialogs).toHaveLength(0);
     expect(notices.some((n) => n.includes("team @ghost no longer exists"))).toBe(true);
+  });
+});
+
+describe("handleFolderBrowser", () => {
+  let fx: Awaited<ReturnType<typeof setupTeamsFixture>>;
+
+  beforeEach(async () => { fx = await setupTeamsFixture(); });
+  afterEach(async () => { await teardownTeamsFixture(fx); });
+
+  test("sanitizes a folder name with a space when adding a repo", async () => {
+    // Plant a folder named "Rice Teaching" under the temp base dir. The
+    // fixture has already pre-seeded a "repo" entry via saveRegistry —
+    // we look up our new entry by its path.
+    const repoPath = join(fx.baseDir, "Rice Teaching");
+    await mkdir(repoPath, { recursive: true });
+
+    const { ctx, dialogs } = makeMockCtx({ repos: [fx.repoEntry] });
+    await handleFolderBrowser(ctx);
+    const dialog = assertDialog(dialogs[0]!, "folder-browser");
+
+    // Simulate the user picking the "Rice Teaching" folder. onSelect is
+    // fire-and-forget (addRepo runs inside a .then chain); poll the registry
+    // until the new entry appears.
+    dialog.onSelect(repoPath);
+    for (let i = 0; i < 50; i++) {
+      const reg = await loadRegistry();
+      if (reg.repos.some((r) => r.path === repoPath)) break;
+      await Bun.sleep(10);
+    }
+
+    const reg = await loadRegistry();
+    const added = reg.repos.find((r) => r.path === repoPath);
+    expect(added).toBeDefined();
+    expect(added!.name).toBe("rice-teaching");
   });
 });

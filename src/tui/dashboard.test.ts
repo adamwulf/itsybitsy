@@ -5286,6 +5286,23 @@ describe("DashboardComponent — §17 Teams panel wiring", () => {
   });
 
   describe("manage roster ('t' on a team anchor)", () => {
+    // saveRegistry writes to `<HOME>/.itsybitsy/repos.json` (registry.ts uses
+    // process.env.HOME, NOT the coordinator-home test seam). Isolate HOME for
+    // every test in this sub-describe so a successful or aborted test cannot
+    // bleed a `repos.json` entry into the developer's real ~/.itsybitsy/.
+    let savedHome: string | undefined;
+    let homeTmp: string;
+    beforeEach(async () => {
+      savedHome = process.env.HOME;
+      homeTmp = await mkdtemp(join(tmpdir(), "dash-roster-home-"));
+      process.env.HOME = homeTmp;
+    });
+    afterEach(async () => {
+      if (savedHome === undefined) delete process.env.HOME;
+      else process.env.HOME = savedHome;
+      await rm(homeTmp, { recursive: true, force: true });
+    });
+
     test("opens a multi-select dialog with current members pre-toggled ON; confirm adds/removes the diff", async () => {
       const { createTeam, addMember, readTeams } = await import("../teams");
       const { saveRegistry } = await import("../registry");
@@ -5315,6 +5332,8 @@ describe("DashboardComponent — §17 Teams panel wiring", () => {
       await plant("agent-existing");
       await plant("agent-new");
       const repoEntry = { path: repoTmp, name: "repo-a" };
+      // saveRegistry writes to HOME/.itsybitsy/repos.json; HOME is the
+      // isolated tmp set in beforeEach, so this is sandboxed.
       await saveRegistry({ repos: [repoEntry] });
       dashboard.repos = [repoEntry];
 

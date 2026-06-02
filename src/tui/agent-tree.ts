@@ -151,6 +151,10 @@ export class AgentTreeComponent implements Component {
   questionAgentIds: Set<string> = new Set();
   healthReports: Map<string, RepoHealthReport> = new Map();
   suppressSelection = false;
+  /** When true, hide empty repo headers from visibleList unless their repo
+   * contains the current selection. Toggled by the dashboard's Option+Shift+.
+   * key. System-coordinator entries are a separate FlatEntry kind and unaffected. */
+  hideEmptyRepos = false;
 
   get flatList(): FlatEntry[] {
     return this._flatList;
@@ -181,9 +185,51 @@ export class AgentTreeComponent implements Component {
   }
 
   get visibleList(): FlatEntry[] {
-    return this.flatList.filter((f) =>
+    const base = this.flatList.filter((f) =>
       f.kind === "repo-header" || f.kind === "system-coordinator" || !f.agent.archived
     );
+    if (!this.hideEmptyRepos) return base;
+
+    // Resolve the selected entry's repoPath (if any) so its repo-header stays
+    // visible. We read from selectedId + _flatList (NOT selection/visibleList)
+    // to avoid recursion.
+    let selectedRepoPath: string | null = null;
+    if (this.hasSelection && this.selectedId !== null) {
+      if (this.selectedId.startsWith("repopath:")) {
+        selectedRepoPath = this.selectedId.slice("repopath:".length);
+      } else if (this.selectedId !== SYSTEM_COORDINATOR_ID) {
+        const found = this._flatList.find(
+          (f) => f.kind === "agent" && f.agent.id === this.selectedId
+        );
+        if (found && found.kind === "agent") selectedRepoPath = found.agent.repoPath;
+      }
+    }
+
+    return base.filter((f) => {
+      if (f.kind !== "repo-header") return true;
+      if (f.hasAgents) return true;
+      if (selectedRepoPath !== null && f.repoPath === selectedRepoPath) return true;
+      return false;
+    });
+  }
+
+  /**
+   * Toggle the hide-empty-repos flag. Re-resolves the selection so
+   * selectedIndex/scrollOffset stay in sync with the (now possibly shorter)
+   * visibleList — without this, hidden rows above the selection would leave
+   * selectedIndex pointing past the new end.
+   */
+  setHideEmptyRepos(value: boolean): void {
+    if (this.hideEmptyRepos === value) return;
+    this.hideEmptyRepos = value;
+    if (this.hasSelection) {
+      this.resolveSelection();
+    } else if (this.visibleList.length > 0) {
+      // Clamp scrollOffset/index so the render math stays valid even with no
+      // active selection.
+      this.selectedIndex = Math.min(this.selectedIndex, this.visibleList.length - 1);
+      this.scrollOffset = Math.min(this.scrollOffset, Math.max(0, this.visibleList.length - 1));
+    }
   }
 
   /** Discriminated union selection — the canonical way to query what is selected */

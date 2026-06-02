@@ -130,10 +130,10 @@ export async function killAgentProcess(
   let pid: string | null = null;
 
   // Strategy 1: Dynamic lookup from tmux
-  const hasSession = await spawnCtx.run(["tmux", "has-session", "-t", tmuxSession]);
+  const hasSession = await spawnCtx.run(["tmux", "has-session", "-t", "=" + tmuxSession]);
   if (hasSession.exitCode === 0) {
     const paneResult = await spawnCtx.run([
-      "tmux", "list-panes", "-t", tmuxSession, "-F", "#{pane_pid}",
+      "tmux", "list-panes", "-t", "=" + tmuxSession, "-F", "#{pane_pid}",
     ]);
     if (paneResult.exitCode === 0 && paneResult.stdout) {
       const panePid = paneResult.stdout.split("\n")[0]!.trim();
@@ -182,7 +182,7 @@ export async function captureTmuxOutputToFile(
   }
   try {
     const proc = spawnCtx.runner(
-      ["tmux", "capture-pane", "-t", tmuxSession, "-p", "-S", "-"],
+      ["tmux", "capture-pane", "-t", "=" + tmuxSession, "-p", "-S", "-"],
       { stdout: "pipe", stderr: "pipe" }
     );
     const raw = await new Response(proc.stdout).text();
@@ -355,7 +355,7 @@ export async function teardownAgent(
   await logAgent(agentDir, logMsg);
 
   // 2. Capture tmux output
-  const hasSession = await spawnCtx.run(["tmux", "has-session", "-t", tmuxSession]);
+  const hasSession = await spawnCtx.run(["tmux", "has-session", "-t", "=" + tmuxSession]);
   if (hasSession.exitCode === 0) {
     await captureTmuxOutputToFile(tmuxSession, join(agentDir, "output.log"));
   }
@@ -367,9 +367,9 @@ export async function teardownAgent(
   }
 
   // 4. Kill tmux session
-  const hasSession2 = await spawnCtx.run(["tmux", "has-session", "-t", tmuxSession]);
+  const hasSession2 = await spawnCtx.run(["tmux", "has-session", "-t", "=" + tmuxSession]);
   if (hasSession2.exitCode === 0) {
-    await spawnCtx.run(["tmux", "kill-session", "-t", tmuxSession]);
+    await spawnCtx.run(["tmux", "kill-session", "-t", "=" + tmuxSession]);
     await logAgent(agentDir, "Killed tmux session");
   }
 

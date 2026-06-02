@@ -239,7 +239,7 @@ export class AgentWatcher {
       }
 
       const proc = tmuxSpawnCtx.runner(
-        ["tmux", "display-message", "-t", IB_COORDINATOR_SESSION, "-p", "#{session_created}"],
+        ["tmux", "display-message", "-t", "=" + IB_COORDINATOR_SESSION, "-p", "#{session_created}"],
         { stdout: "pipe", stderr: "pipe" },
       );
       const output = (await new Response(proc.stdout).text()).trim();

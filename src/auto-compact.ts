@@ -223,7 +223,7 @@ export async function sendCompact(tmuxSession: string): Promise<boolean> {
     return false;
   }
   try {
-    const proc = compactSpawnRunner(["tmux", "send-keys", "-t", tmuxSession, "/compact", "Enter"]);
+    const proc = compactSpawnRunner(["tmux", "send-keys", "-t", "=" + tmuxSession, "/compact", "Enter"]);
     const exitCode = await proc.exited;
     return exitCode === 0;
   } catch {

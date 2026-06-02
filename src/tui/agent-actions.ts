@@ -5,7 +5,7 @@
 
 import { existsSync } from "node:fs";
 import { stat, readdir } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, basename } from "node:path";
 import { agentWorktreePath } from "../agents";
 import type { Agent, FlatEntry, PendingQuestion } from "../agents";
 import type { RepoEntry } from "../registry";
@@ -2354,7 +2354,13 @@ export async function handleFolderBrowser(ctx: ActionCtx) {
     focused: "list",
     scrollOffset: Math.max(0, (currentIdx !== -1 ? currentIdx : 0) - 7),
     onSelect: (path: string) => {
-      addRepo(path).then(async (result) => {
+      const raw = basename(path);
+      const sanitized = raw.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9_-]/g, "");
+      if (!sanitized) {
+        ctx.setNotice(`Cannot derive a valid name from ${raw}`);
+        return;
+      }
+      addRepo(path, sanitized).then(async (result) => {
         ctx.setNotice(result.message);
         if (result.ok) {
           const freshRepos = await listRepos();

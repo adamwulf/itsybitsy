@@ -2373,10 +2373,15 @@ export class DashboardComponent implements Component {
     else if (data === "m") { agentActions.handleMerge(this); }
     else if (data === "s") { agentActions.handleSend(this); }
     // Team actions: T = create a new team, t = add selected agent to a team
-    // (or manage roster when a team anchor in the Teams tree is selected).
+    // (or manage roster when a team anchor in the Teams tree is the active
+    // selection). Phase 2 (§17.1): keyed off `activeSelectionSource` — the
+    // same source-of-truth the `x`-on-team-anchor dispatch uses (line ~2349)
+    // — so a visible-but-not-active Teams panel doesn't mis-fire the roster
+    // path. The Teams panel must own the global selection for `t` to route
+    // to the manage-roster dialog.
     else if (data === "T") { agentActions.handleCreateTeam(this); }
     else if (data === "t") {
-      const teamSel = this.sidebarMode === "teams" ? this.teamsTree.selection : null;
+      const teamSel = this.activeSelectionSource === "teams" ? this.teamsTree.selection : null;
       if (teamSel?.kind === "team") {
         agentActions.handleManageRoster(this, teamSel.teamName);
       } else {

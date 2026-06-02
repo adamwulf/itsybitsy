@@ -49,7 +49,7 @@ import type { RepoHealthReport } from "../health-check";
 import { getResolvableWarnings, resolveHealthWarnings } from "../health-check";
 import { IB_COORDINATOR_SESSION, sanitizeTmuxInput, restartSystemCoordinator, checkCoordinatorExists, getLastCoordinatorSpawnMode, discardSystemCoordinator } from "../coordinator";
 import { isValidToolList } from "../validation";
-import { listTeams, getTeam, addMember, removeMember } from "../teams";
+import { listTeams, getTeam } from "../teams";
 
 const SCROLL_STEP = 10;
 
@@ -890,12 +890,23 @@ function runAddMember(ctx: ActionCtx, agent: Agent, teamName: string) {
  * 't' on a TEAM anchor in the Teams panel — open a multi-select roster
  * editor listing every live agent. Members already in `team.members` are
  * pre-toggled ON; others OFF. On confirm we diff the new selection against
- * the current roster and call `addMember`/`removeMember` for each change.
+ * the current roster and call `teamAdd`/`teamRemove` for each change.
  *
- * Uses the bare registry primitives (`addMember`/`removeMember`) rather than
- * the `teamAdd`/`teamRemove` CLI wrappers because this batch-edit flow
- * already lets the user see and confirm the full diff in one shot — firing
- * the wrappers' join/leave notice fan-out per toggle would be noisy.
+ * Routes adds through `teamAdd(..., { suppressJoinNotice: true })` rather
+ * than the bare `addMember` primitive: the wrapper still appends the audit
+ * log entry (§17.4 <team>.log), still writes the SYSTEM record into
+ * channel.jsonl (§17.4), and still sends the §16.4.1 @system reply-protocol
+ * onboarding instruction to the newly-added agent — `suppressJoinNotice`
+ * only skips the per-existing-recipient `joined the team` fan-out so the
+ * batch edit doesn't pelt every old member with N notices. Removals go
+ * through `teamRemove`, which similarly preserves the audit + channel
+ * system record and fires the §16.4.2 leave notice to the departed agent.
+ *
+ * Roster constraint: only ids that appear in the dialog (live agents) are
+ * eligible for removal. A stale id in `team.members` that has no live
+ * Agent record (archived-but-not-pruned, missing meta dir) won't be shown,
+ * won't be checked, and must NOT be force-removed on confirm — that would
+ * confuse "user did not check" with "row didn't exist."
  */
 export function handleManageRoster(ctx: ActionCtx, teamName: string) {
   ctx.executeAndRefresh(async () => {
@@ -910,6 +921,7 @@ export function handleManageRoster(ctx: ActionCtx, teamName: string) {
       return;
     }
     const memberSet = new Set(team.members);
+    const liveIds = new Set(liveAgents.map((a) => a.id));
     const items = liveAgents.map((a) => `${a.repoName}/${a.id} (${displayState(a.state)})`);
     const checked = liveAgents.map((a) => memberSet.has(a.id));
 
@@ -931,8 +943,12 @@ export function handleManageRoster(ctx: ActionCtx, teamName: string) {
         for (const id of nextMemberIds) {
           if (!memberSet.has(id)) toAdd.push(id);
         }
+        // Only remove ids the dialog actually showed — a stale id in
+        // team.members with no live Agent record cannot have been
+        // unchecked by the user; treating its absence as "remove" would
+        // conflate "row didn't exist" with "user opted out."
         for (const id of memberSet) {
-          if (!nextMemberIds.has(id)) toRemove.push(id);
+          if (liveIds.has(id) && !nextMemberIds.has(id)) toRemove.push(id);
         }
         if (toAdd.length === 0 && toRemove.length === 0) {
           ctx.setNotice(`Roster unchanged for @${teamName}`);
@@ -942,21 +958,30 @@ export function handleManageRoster(ctx: ActionCtx, teamName: string) {
           let added = 0;
           let removed = 0;
           let failures = 0;
+          let teamGone = false;
+          // The team-gone wrapper signal is the literal `Error: team @<n> not
+          // found` stderr line from ib-commands.ts:2727/2755/2763. Detect it
+          // explicitly so the disband-mid-dialog race surfaces as "team gone"
+          // instead of silently rolling up into the failure count.
+          const isTeamGone = (stderr: string): boolean =>
+            stderr.includes(`team @${teamName} not found`);
           for (const id of toAdd) {
-            try {
-              const r = await addMember(teamName, id);
-              if (r.added) added++;
-            } catch {
-              failures++;
+            const r = await teamAdd(teamName, id, ctx.repos, { suppressJoinNotice: true });
+            if (r.ok) added++;
+            else if (isTeamGone(r.stderr)) { teamGone = true; break; }
+            else failures++;
+          }
+          if (!teamGone) {
+            for (const id of toRemove) {
+              const r = await teamRemove(teamName, id, ctx.repos);
+              if (r.ok) removed++;
+              else if (isTeamGone(r.stderr)) { teamGone = true; break; }
+              else failures++;
             }
           }
-          for (const id of toRemove) {
-            try {
-              const r = await removeMember(teamName, id);
-              if (r.removed) removed++;
-            } catch {
-              failures++;
-            }
+          if (teamGone) {
+            ctx.setNotice(`team @${teamName} no longer exists`);
+            return;
           }
           const parts: string[] = [];
           if (added > 0) parts.push(`+${added}`);

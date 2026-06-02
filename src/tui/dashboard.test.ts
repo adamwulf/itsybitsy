@@ -5288,14 +5288,39 @@ describe("DashboardComponent — §17 Teams panel wiring", () => {
   describe("manage roster ('t' on a team anchor)", () => {
     test("opens a multi-select dialog with current members pre-toggled ON; confirm adds/removes the diff", async () => {
       const { createTeam, addMember, readTeams } = await import("../teams");
+      const { saveRegistry } = await import("../registry");
       // Plant a team with one existing member.
       await createTeam("backend", "user", 1700000000);
       await addMember("backend", "agent-existing");
 
       const dashboard = makeDashboard();
+      // Plant real agent dirs so teamAdd/teamRemove's resolveFullAgentId
+      // can resolve the bare ids — the wrappers walk repos.json + agent
+      // dirs rather than trusting the in-memory lastAgents list.
+      const repoTmp = await mkdtemp(join(tmpdir(), "dash-roster-repo-"));
+      const { writeAgentTransient } = await import("../agents");
+      async function plant(id: string) {
+        const agentDir = join(repoTmp, ".ittybitty", "agents", id);
+        await mkdir(agentDir, { recursive: true });
+        await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id, tmux_session: `t-${id}` }));
+        await writeAgentTransient(agentDir, {
+          tmux_compacting: false,
+          tmux_rate_limited: false,
+          tmux_api_error: false,
+          has_background_tasks: false,
+          updated_at_ms: Date.now(),
+          watchdog_pid: 4242,
+        });
+      }
+      await plant("agent-existing");
+      await plant("agent-new");
+      const repoEntry = { path: repoTmp, name: "repo-a" };
+      await saveRegistry({ repos: [repoEntry] });
+      dashboard.repos = [repoEntry];
+
       // Three live agents: one already a member, two not.
-      const a1 = makeAgent("agent-existing", "/tmp/repo-a");
-      const a2 = makeAgent("agent-new", "/tmp/repo-a");
+      const a1 = makeAgent("agent-existing", repoTmp);
+      const a2 = makeAgent("agent-new", repoTmp);
       const a3 = makeAgent("agent-other", "/tmp/repo-b");
       // Inject a fake watcher exposing lastAgents — the only thing
       // handleManageRoster reads off the watcher handle.
@@ -5306,12 +5331,15 @@ describe("DashboardComponent — §17 Teams panel wiring", () => {
         recheckHealth: () => {},
       } as unknown as DashboardComponent["watcher"];
 
-      // Drive the Teams tree to a team-header selection with sidebarMode=teams.
+      // Drive the Teams tree to a team-header selection; the manage-roster
+      // dispatch keys off `activeSelectionSource === "teams"` (Phase 2
+      // §17.1) — set BOTH so the team panel is the active source.
       dashboard.teamsTree.setFlatList([
         { kind: "team-header", teamName: "backend", memberCount: 1, createdEpoch: 1700000000, createdBy: "user" },
       ]);
       dashboard.teamsTree.navigate(1); // header selected
       dashboard.sidebarMode = "teams";
+      dashboard.activeSelectionSource = "teams";
 
       // Press 't' — should open the multi-select roster dialog.
       dashboard.handleInput("t");
@@ -5323,42 +5351,70 @@ describe("DashboardComponent — §17 Teams panel wiring", () => {
       // Pre-check state reflects current roster: only agent-existing is ON.
       expect(dlg.checked).toEqual([true, false, false]);
 
-      // Toggle: remove agent-existing (uncheck index 0), add agent-new (check index 1).
-      dlg.checked[0] = false;
-      dlg.checked[1] = true;
-      // Confirm — submits with the checked indices ([1]).
+      // Confirm with NEW selection — keep only `agent-new` (index 1) so the
+      // diff is: -agent-existing, +agent-new. The handler reads
+      // `checkedIndices` directly (NOT `dlg.checked`), so passing [1] is
+      // the correct way to simulate the dialog-level toggle that
+      // dialog-handler.ts builds before calling onSubmit.
       dlg.onSubmit([1]);
       await dashboard.flushPendingActions();
 
       // Roster after the diff: agent-new added, agent-existing removed.
       const reg = await readTeams();
       expect(reg.teams["backend"]!.members).toEqual(["agent-new"]);
+
+      await rm(repoTmp, { recursive: true, force: true });
     });
 
-    test("'t' on a team-MEMBER row (not a header) is a no-op for the roster path", () => {
+    test("'t' when the active selection is NOT a team-header opens the add-to-team picker, NOT the manage-roster dialog", async () => {
+      const { createTeam, addMember } = await import("../teams");
+      // Plant a team so handleAddAgentToTeam's listTeams() branch into the
+      // fuzzy picker (the path it takes when at least one team exists).
+      await createTeam("backend", "user", 1700000000);
+      await addMember("backend", "agent-other");
+
       const dashboard = makeDashboard();
-      const a = makeAgent("agent-mem", "/tmp/repo");
-      dashboard.teamsTree.setFlatList([
-        { kind: "team-header", teamName: "backend", memberCount: 1, createdEpoch: 1, createdBy: "user" },
-        { kind: "team-member", teamName: "backend", agent: a, connector: "  " },
-      ]);
-      dashboard.teamsTree.navigate(1); // header
-      dashboard.teamsTree.navigate(1); // member row
-      dashboard.sidebarMode = "teams";
-      // Inject fake watcher — handleAddAgentToTeam (the fallback path) reads it too.
+      const a = makeAgent("agent-sel", "/tmp/repo");
+      // Set up an Agents-tree selection so handleAddAgentToTeam has a
+      // selectedAgent to add. Driving onUpdate populates the tree.
+      const flatList: FlatEntry[] = [makeFlatAgent(a)];
+      dashboard.onUpdate([a], flatList, []);
       dashboard.watcher = {
         lastAgents: [a],
         refresh: () => {},
         updateRepos: () => {},
         recheckHealth: () => {},
       } as unknown as DashboardComponent["watcher"];
+
+      // Active selection is in the AGENTS tree (the dashboard default).
+      // Even though the teams tree carries a header row, sidebarMode is
+      // "agents" and activeSelectionSource is "agents", so `t` MUST route
+      // to handleAddAgentToTeam — not handleManageRoster.
+      dashboard.teamsTree.setFlatList([
+        { kind: "team-header", teamName: "backend", memberCount: 1, createdEpoch: 1, createdBy: "user" },
+      ]);
+      expect(dashboard.sidebarMode).toBe("agents");
+      expect(dashboard.activeSelectionSource).toBe("agents");
+
+      // Sanity: the auto-select on first onUpdate should have selected
+      // agent-sel — the precondition for handleAddAgentToTeam to do work.
+      expect(dashboard.agentTree.selectedAgent?.id).toBe("agent-sel");
+
       dashboard.handleInput("t");
-      // The manage-roster path requires a team-header selection; a member
-      // row falls through to handleAddAgentToTeam, which does NOT open the
-      // multi-select roster dialog (it opens an input / fuzzy picker / nothing).
-      // Asserting we did not open a multi-select roster dialog is enough.
-      if (dashboard.dialog && dashboard.dialog.type === "multi-select") {
-        expect(dashboard.dialog.prompt).not.toContain("Manage roster:");
+      // handleAddAgentToTeam uses fire-and-forget listTeams().then(...) —
+      // not executeAndRefresh — so flushPendingActions doesn't track it.
+      // Wait long enough for the file read + .then() to land.
+      await Bun.sleep(50);
+
+      // Positive assertion: the add-to-team picker opened (fuzzy picker
+      // because at least one team exists). NOT a multi-select roster.
+      expect(dashboard.dialog).not.toBeNull();
+      const dlg = dashboard.dialog!;
+      expect(dlg.type).toBe("fuzzy");
+      // Belt-and-suspenders: if any future refactor changed the dialog
+      // type, this still rules out the manage-roster path explicitly.
+      if (dlg.type === "multi-select") {
+        expect(dlg.prompt).not.toContain("Manage roster:");
       }
     });
   });

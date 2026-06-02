@@ -8705,11 +8705,20 @@ describe("teamAdd suppressJoinNotice opt", () => {
   let originalHome: string | undefined;
   let repoEntry: import("./registry").RepoEntry;
 
+  // Returns the CENTRAL outbox queue dir for `id` (~/.itsybitsy/agents/<id>/
+  // under our test setCoordinatorHome(homeDir)). The per-worktree agent dir
+  // still hosts meta.json / meta.transient.json / agent.log — only the message
+  // queue lives here.
+  function queueDirOf(id: string): string {
+    return join(homeDir, "agents", id);
+  }
+
   // Plant a real agent so readAllAgents surfaces it. The transient with a
   // watchdog pid makes sendMessage defer to the outbox queue.
   async function plant(id: string): Promise<string> {
     const agentDir = join(repoDir, ".ittybitty", "agents", id);
     await mkdir(agentDir, { recursive: true });
+    await mkdir(queueDirOf(id), { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id, tmux_session: `t-${id}` }));
     const { writeAgentTransient } = await import("./agents");
     await writeAgentTransient(agentDir, {
@@ -8758,20 +8767,20 @@ describe("teamAdd suppressJoinNotice opt", () => {
     const { readOutbox } = await import("./outbox");
     const { readChannel } = await import("./team-channel");
     await createTeam("T", "user", 1000);
-    const existingDir = await plant("agent-existing");
-    const joinerDir = await plant("agent-joiner");
+    await plant("agent-existing");
+    await plant("agent-joiner");
     await addMember("T", "agent-existing");
     resetReadAgentMetaCache();
 
     const res = await teamAdd("T", "agent-joiner", [repoEntry]);
     expect(res.ok).toBe(true);
     // Existing member received "joined the team" notice fromAgent=joiner.
-    const existingQueue = await readOutbox(existingDir);
+    const existingQueue = await readOutbox(queueDirOf("agent-existing"));
     expect(existingQueue.length).toBe(1);
     expect(existingQueue[0]!.message).toBe("joined the team");
     expect(existingQueue[0]!.fromAgent).toBe("agent-joiner");
     // The new joiner received the reply-protocol instruction from @system.
-    const joinerQueue = await readOutbox(joinerDir);
+    const joinerQueue = await readOutbox(queueDirOf("agent-joiner"));
     expect(joinerQueue.length).toBe(1);
     expect(joinerQueue[0]!.fromAgent).toBe("@system");
     // Channel system record still fires.
@@ -8785,8 +8794,8 @@ describe("teamAdd suppressJoinNotice opt", () => {
     const { readChannel } = await import("./team-channel");
     const { teamLogPath } = await import("./team-channel");
     await createTeam("T", "user", 1000);
-    const existingDir = await plant("agent-existing");
-    const joinerDir = await plant("agent-joiner");
+    await plant("agent-existing");
+    await plant("agent-joiner");
     await addMember("T", "agent-existing");
     resetReadAgentMetaCache();
 
@@ -8794,8 +8803,8 @@ describe("teamAdd suppressJoinNotice opt", () => {
     expect(res.ok).toBe(true);
 
     // No inbound messages on either side.
-    expect(await readOutbox(existingDir)).toEqual([]);
-    expect(await readOutbox(joinerDir)).toEqual([]);
+    expect(await readOutbox(queueDirOf("agent-existing"))).toEqual([]);
+    expect(await readOutbox(queueDirOf("agent-joiner"))).toEqual([]);
 
     // Audit log STILL fires.
     const audit = await Bun.file(teamLogPath("T")).text().catch(() => "");

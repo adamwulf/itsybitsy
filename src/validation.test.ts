@@ -30,6 +30,10 @@ describe("isValidToolList", () => {
     expect(isValidToolList("mcp__server__tool")).toBe(true);
     expect(isValidToolList("Bash(ib:*), Read")).toBe(true);
     expect(isValidToolList("Tool-Name")).toBe(true);
+    expect(isValidToolList("Bash(./screensnap)")).toBe(true);
+    expect(isValidToolList("Bash(./screensnap:*)")).toBe(true);
+    expect(isValidToolList("Bash(~/bin/foo:*)")).toBe(true);
+    expect(isValidToolList("Bash(/usr/local/bin/tool:*)")).toBe(true);
   });
 
   test("rejects shell injection attempts", () => {

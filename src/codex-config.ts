@@ -14,6 +14,8 @@
  * Phase 4 work.
  */
 
+import { homedir } from "os";
+import { join } from "path";
 import { isValidAgentId } from "./validation";
 import { getCoordinatorHome } from "./coordinator";
 
@@ -165,6 +167,22 @@ export function buildCodexLaunchArgs(input: BuildCodexLaunchArgsInput): CodexLau
     );
   }
   args.push("--add-dir", coordinatorHome);
+  // Always grant write access to ~/Library/Caches. macOS toolchains (SwiftPM,
+  // xcodebuild's manifest loader, Homebrew helpers, Xcode itself) write
+  // diagnostics, package manifests, and intermediate artifacts here BEFORE
+  // any `-derivedDataPath` redirection takes effect. Without this, even a
+  // simple `xcodebuild build` aborts during package resolution with EPERM on
+  // ~/Library/Caches/org.swift.swiftpm. The directory is shared user state
+  // (every macOS app writes to it), so the trust boundary is no narrower than
+  // giving the agent the `ib` binary at all.
+  const libraryCaches = join(process.env.HOME ?? homedir(), "Library", "Caches");
+  if (!isCodexSafeBinaryPath(libraryCaches)) {
+    throw new Error(
+      `Unsafe Library/Caches path for codex launch: ${JSON.stringify(libraryCaches)} contains quotes, backslashes, or control characters. ` +
+        `Move $HOME to a path made of printable ASCII with no apostrophes, quotes, or backslashes.`,
+    );
+  }
+  args.push("--add-dir", libraryCaches);
   for (const root of input.extraWritableRoots ?? []) {
     if (!isCodexSafeBinaryPath(root)) {
       throw new Error(

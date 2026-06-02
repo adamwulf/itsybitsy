@@ -15,8 +15,21 @@ import { setCoordinatorHome, resetCoordinatorHome } from "./coordinator";
 // pinning to a hand-crafted safe path is fine for the well-formedness tests.
 const FAKE_COORDINATOR_HOME = "/tmp/codex-config-test-home";
 
-beforeEach(() => setCoordinatorHome(FAKE_COORDINATOR_HOME));
-afterEach(() => resetCoordinatorHome());
+// The Library/Caches grant is derived from $HOME at call time, so pin $HOME
+// to a stable, shell-safe path for the same reason.
+const FAKE_HOME = "/tmp/codex-config-test-home-dir";
+const FAKE_LIBRARY_CACHES = `${FAKE_HOME}/Library/Caches`;
+const ORIGINAL_HOME = process.env.HOME;
+
+beforeEach(() => {
+  setCoordinatorHome(FAKE_COORDINATOR_HOME);
+  process.env.HOME = FAKE_HOME;
+});
+afterEach(() => {
+  resetCoordinatorHome();
+  if (ORIGINAL_HOME === undefined) delete process.env.HOME;
+  else process.env.HOME = ORIGINAL_HOME;
+});
 
 describe("isCodexSafeBinaryPath", () => {
   test("accepts a normal absolute install path", () => {
@@ -87,10 +100,14 @@ describe("buildCodexLaunchArgs — well-formedness", () => {
     // Every codex spawn ALWAYS prepends `--add-dir <coordinatorHome>` so the
     // agent can write to centralized state under ~/.itsybitsy/ (per-agent
     // outboxes, team channels, teams.json) under `-s workspace-write`.
-    // Skip that leading pair, then verify the -c flags alternate as before.
+    // Immediately after comes `--add-dir <home>/Library/Caches` so macOS
+    // toolchains (SwiftPM, xcodebuild, etc.) can write their per-user caches.
+    // Skip both leading pairs, then verify the -c flags alternate as before.
     expect(args[0]).toBe("--add-dir");
     expect(args[1]).toBe(FAKE_COORDINATOR_HOME);
-    const flags = args.slice(2);
+    expect(args[2]).toBe("--add-dir");
+    expect(args[3]).toBe(FAKE_LIBRARY_CACHES);
+    const flags = args.slice(4);
     // flags alternates: -c, payload, -c, payload, ... The trailing pairs
     // beyond the hook events are the 6 always-on flags:
     //   features.multi_agent, sandbox_workspace_write.network_access,
@@ -110,11 +127,11 @@ describe("buildCodexLaunchArgs — well-formedness", () => {
       agentId: "agent-abc123",
       agentDir: "/var/agents/agent-abc123",
     });
-    // Skip the leading `--add-dir <coordinatorHome>` pair, then inspect the
-    // hook flag payloads. Only the hook-flag payloads carry the dispatcher
-    // command — the trailing multi_agent / commit_attribution flags are
-    // intentionally agent-agnostic.
-    const flags = args.slice(2);
+    // Skip the leading `--add-dir <coordinatorHome>` AND `--add-dir
+    // <Library/Caches>` pairs, then inspect the hook flag payloads. Only the
+    // hook-flag payloads carry the dispatcher command — the trailing
+    // multi_agent / commit_attribution flags are intentionally agent-agnostic.
+    const flags = args.slice(4);
     for (let i = 1; i < CODEX_REGISTERED_EVENTS.length * 2; i += 2) {
       const payload = flags[i]!;
       expect(payload).toContain("/usr/local/bin/ib hooks codex-");
@@ -128,8 +145,9 @@ describe("buildCodexLaunchArgs — well-formedness", () => {
       agentId: "agent-abc",
       agentDir: "/var/agents/agent-abc",
     });
-    // First hook payload is at args[3] (after the leading --add-dir pair).
-    expect(args[3]).toContain(`timeout=${DEFAULT_CODEX_HOOK_TIMEOUT_SECS}`);
+    // First hook payload is at args[5] (after the two leading --add-dir pairs:
+    // coordinator-home and Library/Caches).
+    expect(args[5]).toContain(`timeout=${DEFAULT_CODEX_HOOK_TIMEOUT_SECS}`);
   });
 
   test("honors a caller-supplied timeout", () => {
@@ -139,10 +157,11 @@ describe("buildCodexLaunchArgs — well-formedness", () => {
       agentDir: "/var/agents/agent-abc",
       timeoutSecs: 12,
     });
-    // Skip the leading --add-dir pair, then check the hook payloads. Only the
-    // hook-flag payloads carry a timeout — the trailing multi_agent /
-    // commit_attribution / log_dir / tui flags have nothing to do with hooks.
-    const flags = args.slice(2);
+    // Skip the two leading --add-dir pairs (coordinator-home + Library/Caches),
+    // then check the hook payloads. Only the hook-flag payloads carry a timeout
+    // — the trailing multi_agent / commit_attribution / log_dir / tui flags
+    // have nothing to do with hooks.
+    const flags = args.slice(4);
     for (let i = 1; i < CODEX_REGISTERED_EVENTS.length * 2; i += 2) {
       expect(flags[i]).toContain("timeout=12");
     }
@@ -155,14 +174,17 @@ describe("buildCodexLaunchArgs — well-formedness", () => {
       agentDir: "/var/agents/agent-abc",
       extraWritableRoots: ["/repo/.git"],
     });
-    // The always-on `--add-dir <coordinatorHome>` pair comes FIRST so codex
-    // can write to centralized state; user-supplied extra roots come after.
+    // Stable order: always-on `--add-dir <coordinatorHome>` first (centralized
+    // state), then `--add-dir <Library/Caches>` (macOS toolchain caches), then
+    // any user-supplied extra roots, then the hook -c flags.
     expect(args[0]).toBe("--add-dir");
     expect(args[1]).toBe(FAKE_COORDINATOR_HOME);
     expect(args[2]).toBe("--add-dir");
-    expect(args[3]).toBe("/repo/.git");
-    expect(args[4]).toBe("-c");
-    expect(args[5]).toContain("hooks.PreToolUse=");
+    expect(args[3]).toBe(FAKE_LIBRARY_CACHES);
+    expect(args[4]).toBe("--add-dir");
+    expect(args[5]).toBe("/repo/.git");
+    expect(args[6]).toBe("-c");
+    expect(args[7]).toContain("hooks.PreToolUse=");
   });
 
   test("always prepends --add-dir <coordinatorHome> so codex can write to centralized state", () => {
@@ -188,6 +210,42 @@ describe("buildCodexLaunchArgs — well-formedness", () => {
     // And it MUST appear even when no extraWritableRoots are supplied — the
     // central-state grant is unconditional.
     expect(foundAt).toBe(0);
+  });
+
+  test("always prepends --add-dir <home>/Library/Caches so macOS toolchains can write their caches", () => {
+    // SwiftPM, xcodebuild's manifest loader, Homebrew helpers, and Xcode all
+    // write to ~/Library/Caches BEFORE any -derivedDataPath redirection
+    // applies — without this grant, even `xcodebuild build` aborts during
+    // package resolution with EPERM on ~/Library/Caches/org.swift.swiftpm.
+    const { args } = buildCodexLaunchArgs({
+      ibBinaryPath: "/bin/ib",
+      agentId: "agent-abc",
+      agentDir: "/var/agents/agent-abc",
+    });
+    let foundAt = -1;
+    for (let i = 0; i < args.length - 1; i++) {
+      if (args[i] === "--add-dir" && args[i + 1] === FAKE_LIBRARY_CACHES) {
+        foundAt = i;
+        break;
+      }
+    }
+    expect(foundAt).toBeGreaterThanOrEqual(0);
+    // Must appear immediately after the coordinator-home pair (positions 2-3),
+    // regardless of extraWritableRoots — the macOS-cache grant is unconditional.
+    expect(foundAt).toBe(2);
+  });
+
+  test("rejects when $HOME resolves to a path with shell-unsafe chars (Library/Caches grant)", () => {
+    // Library/Caches is derived from $HOME; the same shell/TOML safety check
+    // that gates coordinator-home and the ib binary path must gate this too.
+    process.env.HOME = "/Users/o'malley";
+    expect(() =>
+      buildCodexLaunchArgs({
+        ibBinaryPath: "/bin/ib",
+        agentId: "agent-abc",
+        agentDir: "/var/agents/agent-abc",
+      }),
+    ).toThrow(/Unsafe Library\/Caches path/);
   });
 
   test("rejects when getCoordinatorHome resolves to a path with shell-unsafe chars", () => {

@@ -5859,8 +5859,8 @@ describe("renameAgent (native, nickname)", () => {
     // Resolvable by nickname AND by id
     resetReadAgentMetaCache();
     const { agents } = await readAllAgents([{ path: tempDir, name: basename(tempDir) }]);
-    expect(matchAgentById("pikachu", agents).match?.id).toBe("agent-abc");
-    expect(matchAgentById("agent-abc", agents).match?.id).toBe("agent-abc");
+    expect(matchAgentById("pikachu", agents)?.id).toBe("agent-abc");
+    expect(matchAgentById("agent-abc", agents)?.id).toBe("agent-abc");
   });
 
   test("writes meta.json with a trailing newline and preserves other fields", async () => {

@@ -2648,7 +2648,7 @@ async function resolveFullAgentId(
 ): Promise<{ id: string } | { error: string }> {
   const { matchAgentById } = await import("./index");
   const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })));
-  const { match } = matchAgentById(partial, agents);
+  const match = matchAgentById(partial, agents);
   if (!match) {
     return { error: `Error: agent not found: ${partial}` };
   }

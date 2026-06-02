@@ -63,24 +63,20 @@ export function findManagerInTree(
  * Precedence:
  *   1. Exact id wins over everything (the canonical, immutable identity).
  *   2. Exact nickname is the input alias — matched EXACTLY only.
- *
- * Returns { match, ambiguous }. `ambiguous` is retained for callsite
- * compatibility but is always `[]` under exact-only matching.
  */
-export function matchAgentById(id: string, agents: Agent[]): { match: Agent | null; ambiguous: string[] } {
+export function matchAgentById(id: string, agents: Agent[]): Agent | null {
   const exactId = agents.find((a) => a.id === id);
-  if (exactId) return { match: exactId, ambiguous: [] };
+  if (exactId) return exactId;
   const exactNick = agents.find((a) => a.meta.nickname === id);
-  if (exactNick) return { match: exactNick, ambiguous: [] };
-  return { match: null, ambiguous: [] };
+  if (exactNick) return exactNick;
+  return null;
 }
 
 /** Find an agent by exact ID (or nickname) across all registered repos. */
 export async function findAgentById(id: string, repos: RepoEntry[]): Promise<Agent | null> {
   const { readAllAgents } = await import("./agents");
   const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })));
-  const { match } = matchAgentById(id, agents);
-  return match;
+  return matchAgentById(id, agents);
 }
 
 /** Print an IbCommandResult and exit. */
@@ -395,11 +391,7 @@ export async function resolveTarget(
       // @<repo>/<agent-id> → agent in specific repo
       const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })));
       const repoAgents = agents.filter((a) => a.repoPath === repo.path);
-      const { match, ambiguous } = matchAgentById(agentId, repoAgents);
-      if (ambiguous.length > 0) {
-        console.error(`Ambiguous ID "${agentId}" in repo ${repoName} matches: ${ambiguous.join(", ")}`);
-        return { agent: null, isSystemCoordinator: false };
-      }
+      const match = matchAgentById(agentId, repoAgents);
       if (!match) {
         console.error(`Agent not found: ${agentId} in repo ${repoName}`);
         return { agent: null, isSystemCoordinator: false };
@@ -424,30 +416,21 @@ export async function resolveTarget(
   // Try same-repo agents first (if we have an ownRepo)
   if (ownRepo) {
     const sameRepoAgents = agents.filter((a) => a.repoPath === ownRepo.path);
-    const sameRepoResult = matchAgentById(target, sameRepoAgents);
-    if (sameRepoResult.match) {
-      return { agent: sameRepoResult.match, isSystemCoordinator: false };
-    }
-    // If ambiguous in same repo, report it
-    if (sameRepoResult.ambiguous.length > 0) {
-      console.error(`Ambiguous ID "${target}" in ${repoDisplayName(ownRepo)} matches: ${sameRepoResult.ambiguous.join(", ")}`);
-      return { agent: null, isSystemCoordinator: false };
+    const sameRepoMatch = matchAgentById(target, sameRepoAgents);
+    if (sameRepoMatch) {
+      return { agent: sameRepoMatch, isSystemCoordinator: false };
     }
     // No match in same repo, continue to global
   }
 
   // Fall back to global search
-  const globalResult = matchAgentById(target, agents);
-  if (globalResult.ambiguous.length > 0) {
-    console.error(`Ambiguous ID "${target}" matches: ${globalResult.ambiguous.join(", ")}`);
-    return { agent: null, isSystemCoordinator: false };
-  }
-  if (!globalResult.match) {
+  const globalMatch = matchAgentById(target, agents);
+  if (!globalMatch) {
     console.error(`Agent not found: ${target}`);
     return { agent: null, isSystemCoordinator: false };
   }
 
-  return { agent: globalResult.match, isSystemCoordinator: false };
+  return { agent: globalMatch, isSystemCoordinator: false };
 }
 
 /**

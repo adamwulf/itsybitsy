@@ -356,27 +356,19 @@ describe("Group F: matchAgentById unit tests", () => {
   ];
 
   test("F1: exact match returns agent", () => {
-    const result = matchAgentById("agent-111", agents);
-    expect(result.match?.id).toBe("agent-111");
-    expect(result.ambiguous).toEqual([]);
+    expect(matchAgentById("agent-111", agents)?.id).toBe("agent-111");
   });
 
   test("F2: prefix does NOT match (exact-only)", () => {
-    const result = matchAgentById("agent-1", agents);
-    expect(result.match).toBeNull();
-    expect(result.ambiguous).toEqual([]);
+    expect(matchAgentById("agent-1", agents)).toBeNull();
   });
 
-  test("F3: prefix that would once have been ambiguous returns null + empty ambiguous", () => {
-    const result = matchAgentById("agent-", agents);
-    expect(result.match).toBeNull();
-    expect(result.ambiguous).toEqual([]);
+  test("F3: prefix that would once have been ambiguous returns null", () => {
+    expect(matchAgentById("agent-", agents)).toBeNull();
   });
 
-  test("F4: no match returns null + empty ambiguous", () => {
-    const result = matchAgentById("nonexistent", agents);
-    expect(result.match).toBeNull();
-    expect(result.ambiguous).toEqual([]);
+  test("F4: no match returns null", () => {
+    expect(matchAgentById("nonexistent", agents)).toBeNull();
   });
 
   test("F5: exact match resolves even with overlapping shorter/longer ids present", () => {
@@ -385,28 +377,20 @@ describe("Group F: matchAgentById unit tests", () => {
       makeAgent({ id: "agent-11" }),
       makeAgent({ id: "agent-111" }),
     ];
-    const result = matchAgentById("agent-1", agentsWithOverlap);
-    expect(result.match?.id).toBe("agent-1");
-    expect(result.ambiguous).toEqual([]);
+    expect(matchAgentById("agent-1", agentsWithOverlap)?.id).toBe("agent-1");
   });
 
   test("F6: empty string does NOT match anything (exact-only)", () => {
-    const result = matchAgentById("", agents);
-    expect(result.match).toBeNull();
-    expect(result.ambiguous).toEqual([]);
+    expect(matchAgentById("", agents)).toBeNull();
   });
 
   test("F7: case-sensitive matching", () => {
-    const result = matchAgentById("Agent-111", agents);
-    expect(result.match).toBeNull();
-    expect(result.ambiguous).toEqual([]);
+    expect(matchAgentById("Agent-111", agents)).toBeNull();
   });
 
   test("F8: single agent in list, prefix does NOT match", () => {
     const single = [makeAgent({ id: "agent-foo-bar" })];
-    const result = matchAgentById("agent-foo", single);
-    expect(result.match).toBeNull();
-    expect(result.ambiguous).toEqual([]);
+    expect(matchAgentById("agent-foo", single)).toBeNull();
   });
 });
 

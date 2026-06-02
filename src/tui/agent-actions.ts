@@ -892,15 +892,14 @@ function runAddMember(ctx: ActionCtx, agent: Agent, teamName: string) {
  * pre-toggled ON; others OFF. On confirm we diff the new selection against
  * the current roster and call `teamAdd`/`teamRemove` for each change.
  *
- * Routes adds through `teamAdd(..., { suppressJoinNotice: true })` rather
- * than the bare `addMember` primitive: the wrapper still appends the audit
- * log entry (§17.4 <team>.log), still writes the SYSTEM record into
- * channel.jsonl (§17.4), and still sends the §16.4.1 @system reply-protocol
- * onboarding instruction to the newly-added agent — `suppressJoinNotice`
- * only skips the per-existing-recipient `joined the team` fan-out so the
- * batch edit doesn't pelt every old member with N notices. Removals go
- * through `teamRemove`, which similarly preserves the audit + channel
- * system record and fires the §16.4.2 leave notice to the departed agent.
+ * Routes through `teamAdd`/`teamRemove` so the audit log (§17.4 <team>.log),
+ * the channel SYSTEM record (§17.4 channel.jsonl), the §16.4.1 @system
+ * reply-protocol onboarding instruction to the newly-added agent, and the
+ * per-existing-member join/leave fan-out all fire — same effective behavior
+ * as running `ib team add`/`ib team remove` once per change. A batch edit
+ * is a UI ergonomic over the dialog, NOT a way to silence notices: a user
+ * who toggles N members on should still expect each new member to receive
+ * onboarding and each existing member to receive a join notice.
  *
  * Roster constraint: only ids that appear in the dialog (live agents) are
  * eligible for removal. A stale id in `team.members` that has no live
@@ -966,7 +965,7 @@ export function handleManageRoster(ctx: ActionCtx, teamName: string) {
           const isTeamGone = (stderr: string): boolean =>
             stderr.includes(`team @${teamName} not found`);
           for (const id of toAdd) {
-            const r = await teamAdd(teamName, id, ctx.repos, { suppressJoinNotice: true });
+            const r = await teamAdd(teamName, id, ctx.repos);
             if (r.ok) added++;
             else if (isTeamGone(r.stderr)) { teamGone = true; break; }
             else failures++;

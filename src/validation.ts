@@ -62,6 +62,15 @@ export function isValidTeamName(value: string): boolean {
   return value.length >= 1 && value.length <= 64 && /^[a-zA-Z0-9_-]+$/.test(value);
 }
 
+/**
+ * Validate a repo name: same allowlist as team names. Repo names share the
+ * flat `@` namespace with team names, so any character that breaks shell
+ * tokenization (notably spaces) would break `@<repo>/<agent-id>` addressing.
+ */
+export function isValidRepoName(value: string): boolean {
+  return value.length >= 1 && value.length <= 64 && /^[a-zA-Z0-9_-]+$/.test(value);
+}
+
 /** Validate a Claude session ID (UUID format): hex digits and hyphens only. */
 export function isValidSessionId(value: string): boolean {
   return /^[a-fA-F0-9-]+$/.test(value);

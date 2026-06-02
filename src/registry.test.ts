@@ -458,15 +458,15 @@ describe("registry team-name collision refusal", () => {
     expect(result.ok).toBe(true);
   });
 
-  test("addRepo strips a leading @ defensively before the team check", async () => {
-    // Repo names won't normally have a leading @, but normalizeTeamName strips
-    // one — so a custom name "@backend" still collides with team "backend".
+  test("addRepo rejects a leading @ outright (allowlist rejects before team check)", async () => {
+    // Repo names won't normally have a leading @, and the new repo-name
+    // allowlist (^[A-Za-z0-9_-]+$) rejects it before any team-collision check.
     await createTeam("backend", "@system", 100);
     const repoDir = join(baseDir, "weird-dir");
     await mkdir(repoDir, { recursive: true });
     const result = await addRepo(repoDir, "@backend");
     expect(result.ok).toBe(false);
-    expect(result.message).toContain("already a team name");
+    expect(result.message).toContain("not a valid repo name");
   });
 
   test("renameRepo refuses a nickname matching an existing team", async () => {

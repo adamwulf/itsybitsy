@@ -8,6 +8,7 @@ import { mkdir } from "fs/promises";
 // (never at module-init / top-level). See SPEC §16.1 (bidirectional repo↔team
 // name-collision refusal).
 import { getTeam, normalizeTeamName } from "./teams";
+import { isValidRepoName } from "./validation";
 
 export interface RepoEntry {
   path: string;
@@ -58,6 +59,10 @@ export async function saveRegistry(data: RegistryData): Promise<void> {
 export async function addRepo(repoPath: string, name?: string): Promise<{ ok: boolean; message: string }> {
   const resolved = resolve(repoPath);
   const repoName = name ?? basename(resolved);
+
+  if (!isValidRepoName(repoName)) {
+    return { ok: false, message: `"${repoName}" is not a valid repo name — use alphanumeric, hyphens, underscores only (1-64 chars)` };
+  }
 
   // "coordinator" is reserved for system coordinator addressing (SPEC §12.3.1)
   if (repoName === "coordinator") {
@@ -113,6 +118,9 @@ export async function renameRepo(repoPath: string, nickname: string): Promise<{ 
   }
   const trimmed = nickname.trim();
   if (trimmed) {
+    if (!isValidRepoName(trimmed)) {
+      return { ok: false, message: `"${trimmed}" is not a valid repo name — use alphanumeric, hyphens, underscores only (1-64 chars)` };
+    }
     // "coordinator" is reserved for system coordinator addressing (SPEC §12.3.1)
     if (trimmed === "coordinator") {
       return { ok: false, message: `"coordinator" is a reserved name` };

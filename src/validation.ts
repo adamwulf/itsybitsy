@@ -16,8 +16,8 @@ export function isValidModel(value: string): boolean {
 
 /** Validate a comma-separated tool list for --allowedTools / --disallowedTools. */
 export function isValidToolList(value: string): boolean {
-  // Each token: alphanumeric, underscores, hyphens, asterisks, parens, colons, dots, spaces
-  return /^[a-zA-Z0-9_*()\-:,. ]+$/.test(value);
+  // Each token: alphanumeric, underscores, hyphens, asterisks, parens, colons, dots, spaces, slashes, tildes
+  return /^[a-zA-Z0-9_*()\-:,. /~]+$/.test(value);
 }
 
 /** Validate an agent ID: alphanumeric, hyphens, underscores only. */

@@ -152,8 +152,8 @@ export class AgentTreeComponent implements Component {
   healthReports: Map<string, RepoHealthReport> = new Map();
   suppressSelection = false;
   /** When true, hide empty repo headers from visibleList unless their repo
-   * contains the current selection. Toggled by the dashboard's Option+Shift+.
-   * key. System-coordinator entries are a separate FlatEntry kind and unaffected. */
+   * contains the current selection. Toggled by the dashboard's V key.
+   * System-coordinator entries are a separate FlatEntry kind and unaffected. */
   hideEmptyRepos = false;
   /**
    * Repo path that is force-kept visible even though its header is empty —

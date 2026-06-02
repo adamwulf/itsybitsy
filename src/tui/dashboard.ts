@@ -2383,8 +2383,8 @@ export class DashboardComponent implements Component {
       this.setNotice("Re-checking repo health...");
       this.watcher?.recheckHealth();
     }
-    // Option+Shift+. (ESC >) — toggle hide-empty-repos
-    else if (data === "\x1b>") {
+    // V — toggle hide-empty-repos
+    else if (data === "V") {
       const next = !this.agentTree.hideEmptyRepos;
       this.agentTree.setHideEmptyRepos(next);
       this.setNotice(next ? "Hiding empty repos" : "Showing all repos");

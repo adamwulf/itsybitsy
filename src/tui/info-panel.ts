@@ -7,6 +7,7 @@
 import type { Component } from "@mariozechner/pi-tui";
 import { truncateToWidth } from "@mariozechner/pi-tui";
 import type { Agent, FlatEntry } from "../agents";
+import { isPidAliveCtx } from "../agents";
 import type { RepoHealthReport } from "../health-check";
 import { getStateColors } from "./color-scheme";
 import { displayState } from "./agent-tree";
@@ -36,16 +37,6 @@ export interface SelectedTeamInfo {
 
 /** Sub-field within the Info panel that has focus when the panel is focused. */
 export type InfoSubField = "default-type" | "notes";
-
-/** Check if a PID refers to a running process */
-function isPidAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 export class InfoPanelComponent implements Component {
   agent: Agent | null = null;
@@ -100,12 +91,12 @@ export class InfoPanelComponent implements Component {
     const lines: string[] = [];
 
     const claudePid = agent.meta.claude_pid ? parseInt(agent.meta.claude_pid, 10) : NaN;
-    const claudeAlive = !isNaN(claudePid) && isPidAlive(claudePid);
+    const claudeAlive = !isNaN(claudePid) && isPidAliveCtx.fn(claudePid);
     const claudeColor = claudeAlive ? GREEN : RED;
     lines.push(truncateToWidth(`${claudeColor}●${RESET} ${labelPrefix}Claude`, width, ""));
 
     const watchdogPid = agent.meta.watchdog_pid;
-    const watchdogAlive = typeof watchdogPid === "number" && isPidAlive(watchdogPid);
+    const watchdogAlive = typeof watchdogPid === "number" && isPidAliveCtx.fn(watchdogPid);
     const watchdogColor = watchdogAlive ? GREEN : RED;
     lines.push(truncateToWidth(`${watchdogColor}●${RESET} ${labelPrefix}Watchdog`, width, ""));
 

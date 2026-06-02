@@ -5529,6 +5529,39 @@ body`,
       const startSh = await Bun.file(join(agentsDir, "codex-good-model", "start.sh")).text();
       expect(startSh).toContain("setsid codex -m 'gpt-5.5'");
     });
+
+    // Round-2 review HIGH: the codex `-s workspace-write` sandbox is granted
+    // the NARROW `.ittybitty` + `.claude` subdirs of the parent repo, not
+    // the bare parent repo. Granting the bare parent would let a misbehaving
+    // codex agent reach src/, CLAUDE.md, etc. via relative-path Bash writes
+    // (`../../../../CLAUDE.md`) that the PreToolUse hook's textual matcher
+    // does not catch. This test asserts the narrowed grant is encoded in
+    // the rendered start.sh launch line.
+    test("codex start.sh grants narrow parent-repo subdirs (.ittybitty + .claude), not the bare parent repo", async () => {
+      const { realpathSync } = await import("fs");
+      setNewAgentSpawnRunner(mockSpawnRunner());
+      const result = await callNewAgent("task", {
+        name: "codex-sandbox-roots",
+        model: "codex:gpt-5.5",
+      });
+      expect(result.ok).toBe(true);
+      const startSh = await Bun.file(join(agentsDir, "codex-sandbox-roots", "start.sh")).text();
+      // Resolve via realpathSync because /tmp on macOS is a symlink to
+      // /private/tmp, and the production code canonicalises before pushing
+      // each entry into the --add-dir list.
+      const expectedIttybitty = realpathSync(join(tempDir, ".ittybitty"));
+      const expectedClaude = realpathSync(join(tempDir, ".claude"));
+      // Each argv element is shell-quoted independently in the rendered
+      // launch line, so the flag and path appear as `'--add-dir' '<path>'`.
+      expect(startSh).toContain(`'--add-dir' '${expectedIttybitty}'`);
+      expect(startSh).toContain(`'--add-dir' '${expectedClaude}'`);
+      // The bare parent repo MUST NOT appear as its own `--add-dir` entry.
+      // Use the trailing apostrophe to anchor the match so the .ittybitty /
+      // .claude lines (which begin with `'--add-dir' '<tempDir>/.`) don't
+      // false-positive the negation.
+      const realTempDir = realpathSync(tempDir);
+      expect(startSh).not.toContain(`'--add-dir' '${realTempDir}'`);
+    });
   });
 });
 

@@ -222,6 +222,66 @@ describe("ChannelPaneComponent", () => {
       expect(line).toContain("\x1b[36m");
       expect(line).toContain("\x1b[0m");
     });
+    // Repo-prefix: when the optional id → repoName map has an entry for the
+    // sender, the rendered label is `<repoName>/<agentId>`; map miss falls
+    // through to the bare id. `@`-sentinel and human-sender branches are NOT
+    // affected.
+    test("real-agent id WITH map hit → repoName/id label", () => {
+      const line = formatChannelLine(
+        { ts: 0, fromAgent: "agent-z", message: "m" },
+        "backend",
+        null,
+        new Map([["agent-z", "my-repo"]]),
+      );
+      expect(stripAnsi(line)).toBe("[sent by my-repo/agent-z]: m");
+    });
+    test("real-agent id with map MISS → bare id (graceful fallback)", () => {
+      const line = formatChannelLine(
+        { ts: 0, fromAgent: "agent-z", message: "m" },
+        "backend",
+        null,
+        new Map([["agent-other", "their-repo"]]),
+      );
+      expect(stripAnsi(line)).toBe("[sent by agent-z]: m");
+    });
+    test("@-sentinel line is NOT affected by the repo map", () => {
+      const line = formatChannelLine(
+        { ts: 0, fromAgent: "@system", message: "m" },
+        "backend",
+        null,
+        new Map([["@system", "should-not-prepend"]]),
+      );
+      expect(stripAnsi(line)).toBe("[sent by @system]: m");
+    });
+    test("human sender line is NOT affected by the repo map", () => {
+      const line = formatChannelLine(
+        { ts: 0, fromAgent: "", message: "m" },
+        "backend",
+        null,
+        new Map([["", "should-not-prepend"]]),
+      );
+      expect(stripAnsi(line)).toBe("[sent by user]: m");
+    });
+  });
+
+  // ChannelPaneComponent end-to-end: seeding agentRepoById on the component
+  // (the dashboard's wire-up) makes the render pass thread the lookup map into
+  // formatChannelLine, producing `<repoName>/<id>` labels for real-agent chat.
+  describe("ChannelPaneComponent agentRepoById integration", () => {
+    test("seeded agentRepoById renders chat lines with the repo prefix", async () => {
+      await appendChannelMessage("backend", {
+        ts: 100,
+        fromAgent: "agent-aaa",
+        message: "hi team",
+      });
+      const pane = new ChannelPaneComponent();
+      pane.displayHeight = 10;
+      pane.teamName = "backend";
+      pane.agentRepoById = new Map([["agent-aaa", "backend-repo"]]);
+      await pane.load();
+      const text = pane.render(80).map(stripAnsi).join("\n");
+      expect(text).toContain("[sent by backend-repo/agent-aaa]: hi team");
+    });
   });
 
   // -------------------------------------------------------------------------

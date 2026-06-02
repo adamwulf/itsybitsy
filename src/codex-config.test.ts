@@ -17,18 +17,36 @@ const FAKE_COORDINATOR_HOME = "/tmp/codex-config-test-home";
 
 // The Library/Caches grant is derived from $HOME at call time, so pin $HOME
 // to a stable, shell-safe path for the same reason.
+//
+// NB: pinning $HOME via process.env.HOME works ONLY because production reads
+// `process.env.HOME || homedir()` — env first, then homedir() fallback. Node's
+// os.homedir() does NOT re-read $HOME at runtime (it's cached from the initial
+// userInfo lookup). If anyone flips the operand order in production to
+// `homedir() || process.env.HOME`, these tests will keep passing while the
+// real binary reads the actual host home — a silent breakage. Don't flip it.
 const FAKE_HOME = "/tmp/codex-config-test-home-dir";
 const FAKE_LIBRARY_CACHES = `${FAKE_HOME}/Library/Caches`;
 const ORIGINAL_HOME = process.env.HOME;
 
+// Pin process.platform to "darwin" for the positional-argv tests. The
+// Library/Caches grant only fires on macOS, so on Linux/Windows CI the args
+// array would lack that pair and every `--add-dir`-position assertion would
+// shift back. The non-darwin behavior gets its own dedicated test below.
+const originalPlatform = process.platform;
+function setPlatform(value: NodeJS.Platform): void {
+  Object.defineProperty(process, "platform", { value, configurable: true });
+}
+
 beforeEach(() => {
   setCoordinatorHome(FAKE_COORDINATOR_HOME);
   process.env.HOME = FAKE_HOME;
+  setPlatform("darwin");
 });
 afterEach(() => {
   resetCoordinatorHome();
   if (ORIGINAL_HOME === undefined) delete process.env.HOME;
   else process.env.HOME = ORIGINAL_HOME;
+  setPlatform(originalPlatform);
 });
 
 describe("isCodexSafeBinaryPath", () => {
@@ -246,6 +264,62 @@ describe("buildCodexLaunchArgs — well-formedness", () => {
         agentDir: "/var/agents/agent-abc",
       }),
     ).toThrow(/Unsafe Library\/Caches path/);
+  });
+
+  test("empty-string $HOME falls back to homedir() (not a relative path)", () => {
+    // An empty-string $HOME (env -i, systemd unit overrides, some sandboxes)
+    // must NOT produce `Library/Caches` as a relative path — that would
+    // either be rejected by codex or, worse, be resolved against the
+    // worktree cwd and silently widen the worktree allowlist. Using `||`
+    // instead of `??` makes empty-string trigger the homedir() fallback.
+    const { homedir } = require("os") as typeof import("os");
+    const realHomedir = homedir();
+    process.env.HOME = "";
+    const { args } = buildCodexLaunchArgs({
+      ibBinaryPath: "/bin/ib",
+      agentId: "agent-abc",
+      agentDir: "/var/agents/agent-abc",
+    });
+    // The Library/Caches --add-dir pair MUST be an absolute path. The
+    // exact value depends on the host home (we can't pin it without
+    // monkey-patching os.homedir), but it must start with `/` and end
+    // with `/Library/Caches`.
+    let found: string | undefined;
+    for (let i = 0; i < args.length - 1; i++) {
+      if (args[i] === "--add-dir" && args[i + 1]!.endsWith("/Library/Caches")) {
+        found = args[i + 1];
+        break;
+      }
+    }
+    expect(found).toBeDefined();
+    expect(found!.startsWith("/")).toBe(true);
+    expect(found).toBe(`${realHomedir}/Library/Caches`);
+    // Explicitly assert the regression: must NOT be the relative form.
+    expect(found).not.toBe("Library/Caches");
+  });
+
+  test("skips the Library/Caches --add-dir on non-darwin platforms", () => {
+    // ~/Library/Caches is a macOS-only convention. On Linux/Windows, pushing
+    // it would be either noise (path never exists) or actively wrong (some
+    // unrelated tool auto-creating it would silently grant write access).
+    setPlatform("linux");
+    const { args } = buildCodexLaunchArgs({
+      ibBinaryPath: "/bin/ib",
+      agentId: "agent-abc",
+      agentDir: "/var/agents/agent-abc",
+    });
+    // Coordinator home is unconditional — verify it's still first.
+    expect(args[0]).toBe("--add-dir");
+    expect(args[1]).toBe(FAKE_COORDINATOR_HOME);
+    // Library/Caches MUST NOT appear anywhere in the args on linux.
+    for (let i = 0; i < args.length - 1; i++) {
+      if (args[i] === "--add-dir") {
+        expect(args[i + 1]!.endsWith("/Library/Caches")).toBe(false);
+      }
+    }
+    // And the next non-add-dir argv element should be a -c flag, not a
+    // second --add-dir for Library/Caches.
+    expect(args[2]).toBe("-c");
   });
 
   test("rejects when getCoordinatorHome resolves to a path with shell-unsafe chars", () => {

@@ -903,7 +903,7 @@ describe("watchdog", () => {
       const matchingCalls = spawnMock.calls.filter((c) =>
         c.args.includes("send-keys") &&
         c.args.includes("-t") &&
-        c.args.includes(IB_COORDINATOR_SESSION) &&
+        c.args.includes("=" + IB_COORDINATOR_SESSION + ":") &&
         c.args.includes("-l") &&
         c.args.some((a: any) => typeof a === "string" && a.includes("[sent by watchdog]:"))
       );
@@ -963,7 +963,7 @@ describe("watchdog", () => {
 
         expect(ok).toBe(true);
         const sendKeysCalls = spawnMock.calls.filter((c) =>
-          c.args.includes("send-keys") && c.args.includes("-t") && c.args.includes("tmux-coord")
+          c.args.includes("send-keys") && c.args.includes("-t") && c.args.includes("=tmux-coord:")
         );
         expect(sendKeysCalls.length).toBeGreaterThan(0);
       } finally {
@@ -1352,7 +1352,7 @@ describe("watchdog", () => {
       await tick([a1]);
 
       const enterCalls = spawnMock.calls.filter((c) =>
-        c.args.includes("send-keys") && c.args.includes("Enter") && c.args.includes("tmux-a1")
+        c.args.includes("send-keys") && c.args.includes("Enter") && c.args.includes("=tmux-a1:")
       );
       // Should have sent Enter twice (first attempt still rate limited, second resolves)
       expect(enterCalls.length).toBe(2);
@@ -1369,7 +1369,7 @@ describe("watchdog", () => {
       await tick([a1]);
 
       const enterCalls = spawnMock.calls.filter((c) =>
-        c.args.includes("send-keys") && c.args.includes("Enter") && c.args.includes("tmux-a1")
+        c.args.includes("send-keys") && c.args.includes("Enter") && c.args.includes("=tmux-a1:")
       );
       expect(enterCalls.length).toBe(RATE_LIMIT_MAX_RETRIES);
       expect(getTracker("a1").rateLimitBypassed).toBe(true);
@@ -1385,7 +1385,7 @@ describe("watchdog", () => {
       await tick([a1]);
 
       const enterCalls = spawnMock.calls.filter((c) =>
-        c.args.includes("send-keys") && c.args.includes("Enter") && c.args.includes("tmux-a1")
+        c.args.includes("send-keys") && c.args.includes("Enter") && c.args.includes("=tmux-a1:")
       );
       // Only 1 Enter — first attempt resolved it
       expect(enterCalls.length).toBe(1);
@@ -1415,12 +1415,12 @@ describe("watchdog", () => {
       const a1 = agent("a1", "rate_limited");
       await tick([a1]);
       const firstEnterCalls = spawnMock.calls.filter((c) =>
-        c.args.includes("send-keys") && c.args.includes("Enter") && c.args.includes("tmux-a1")
+        c.args.includes("send-keys") && c.args.includes("Enter") && c.args.includes("=tmux-a1:")
       ).length;
 
       await tick([a1]);
       const secondEnterCalls = spawnMock.calls.filter((c) =>
-        c.args.includes("send-keys") && c.args.includes("Enter") && c.args.includes("tmux-a1")
+        c.args.includes("send-keys") && c.args.includes("Enter") && c.args.includes("=tmux-a1:")
       ).length;
 
       expect(secondEnterCalls).toBe(firstEnterCalls);
@@ -1626,7 +1626,7 @@ describe("watchdog", () => {
       const matching = spawnMock.calls.filter((c) =>
         c.args.includes("send-keys") &&
         c.args.includes("-l") &&
-        c.args.includes("tmux-mgr") &&
+        c.args.includes("=tmux-mgr:") &&
         c.args.some((a: unknown) => typeof a === "string" && a.includes("[sent by watchdog]:"))
       );
       expect(matching.length).toBeGreaterThan(0);

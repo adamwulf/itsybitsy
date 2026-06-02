@@ -27,7 +27,7 @@ import type { SpawnFn } from "./types";
 import { checkAndCompact } from "./auto-compact";
 import type { CompactState } from "./auto-compact";
 import { readConfig } from "./config";
-import { isValidTmuxSession } from "./validation";
+import { isValidTmuxSession, tmuxSessionTarget } from "./validation";
 import { listRepos } from "./registry";
 import { OUTBOX_FILENAME, agentOutboxDir } from "./outbox";
 import { parseModel } from "./agent-cli";
@@ -357,7 +357,7 @@ async function sendTmuxEnter(tmuxSession: string): Promise<boolean> {
   }
   try {
     const proc = spawnCtx.runner(
-      ["tmux", "send-keys", "-t", tmuxSession, "Enter"],
+      ["tmux", "send-keys", "-t", tmuxSessionTarget(tmuxSession), "Enter"],
       { stdout: "pipe", stderr: "pipe" },
     );
     const exitCode = await proc.exited;
@@ -1047,7 +1047,7 @@ async function captureAndLogDeadPane(agentId: string, agentDir: string, tmuxSess
   try {
     // Check if the pane is dead (remain-on-exit kept it)
     const deadCheck = spawnCtx.runner(
-      ["tmux", "display-message", "-p", "-t", tmuxSession, "#{pane_dead}"],
+      ["tmux", "display-message", "-p", "-t", tmuxSessionTarget(tmuxSession), "#{pane_dead}"],
       { stdout: "pipe", stderr: "pipe" },
     );
     const deadExitCode = await deadCheck.exited;
@@ -1057,7 +1057,7 @@ async function captureAndLogDeadPane(agentId: string, agentDir: string, tmuxSess
 
     // Capture the last screen content
     const captureProc = spawnCtx.runner(
-      ["tmux", "capture-pane", "-p", "-t", tmuxSession, "-E", "-"],
+      ["tmux", "capture-pane", "-p", "-t", tmuxSessionTarget(tmuxSession), "-E", "-"],
       { stdout: "pipe", stderr: "pipe" },
     );
     const captureExitCode = await captureProc.exited;
@@ -1076,7 +1076,7 @@ async function captureAndLogDeadPane(agentId: string, agentDir: string, tmuxSess
 
     // Kill the dead pane so cleanup proceeds normally
     const killProc = spawnCtx.runner(
-      ["tmux", "kill-pane", "-t", tmuxSession],
+      ["tmux", "kill-pane", "-t", tmuxSessionTarget(tmuxSession)],
       { stdout: "pipe", stderr: "pipe" },
     );
     await killProc.exited;

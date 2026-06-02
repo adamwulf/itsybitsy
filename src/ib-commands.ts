@@ -51,7 +51,7 @@ import { listTmuxSessions } from "./tmux-poller";
 import { logToWatchLog } from "./watch-log";
 import { SpawnContext, InjectionContext } from "./types";
 import type { SpawnFn } from "./types";
-import { isValidModel, isValidToolList, isValidTmuxSession, isValidSessionId, isValidShellPath, isValidAgentId, shellQuote } from "./validation";
+import { isValidModel, isValidToolList, isValidTmuxSession, isValidSessionId, isValidShellPath, isValidAgentId, shellQuote, tmuxSessionTarget } from "./validation";
 import { getTmuxWidthForAgent } from "./tui/widths";
 import { buildPerRepoCoordinatorSettings, checkCoordinatorExists, getCoordinatorAgentId, getCoordinatorHome } from "./coordinator";
 import { loadAgentType, agentTypeExists } from "./agent-types";
@@ -359,7 +359,7 @@ export async function killAgent(agent: Agent): Promise<IbCommandResult> {
   if (tmuxSession) {
     try {
       const proc = killPauseSpawnCtx.runner(
-        ["tmux", "has-session", "-t", tmuxSession],
+        ["tmux", "has-session", "-t", tmuxSessionTarget(tmuxSession)],
         { stdout: "pipe", stderr: "pipe" }
       );
       await new Response(proc.stderr).text(); // drain
@@ -459,7 +459,7 @@ async function cleanupOrphanedTmuxSessions(agentsDir: string): Promise<number> {
 
     const isKnown = knownIds.includes(agentId);
     if (!isKnown) {
-      const killResult = await nukeResumeSpawnCtx.run(["tmux", "kill-session", "-t", session]);
+      const killResult = await nukeResumeSpawnCtx.run(["tmux", "kill-session", "-t", tmuxSessionTarget(session)]);
       if (killResult.exitCode === 0) cleaned++;
     }
   }
@@ -748,7 +748,7 @@ export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
       if (!isValidTmuxSession(tmuxSessionForGuard)) {
         return { ok: false, exitCode: 1, stdout: "", stderr: `Invalid tmux session name: ${tmuxSessionForGuard}` };
       }
-      const hasSession = await nukeResumeSpawnCtx.run(["tmux", "has-session", "-t", tmuxSessionForGuard]);
+      const hasSession = await nukeResumeSpawnCtx.run(["tmux", "has-session", "-t", tmuxSessionTarget(tmuxSessionForGuard)]);
       if (hasSession.exitCode === 0) {
         return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' has a live tmux session ('${tmuxSessionForGuard}') — refuse to resume a running agent` };
       }
@@ -1037,18 +1037,18 @@ ${qAbsExitScript}
       await logAgent(agentDir, `[resume] tmux new-session failed: exit=${tmuxResult.exitCode} stderr=${tmuxResult.stderr}`);
       return { ok: false, exitCode: 1, stdout: "", stderr: `Could not create tmux session '${tmuxSession}'` };
     }
-    await nukeResumeSpawnCtx.run(["tmux", "set-option", "-w", "-t", tmuxSession, "history-limit", "50000"]);
-    await nukeResumeSpawnCtx.run(["tmux", "set-option", "-w", "-t", tmuxSession, "remain-on-exit", "on"]);
+    await nukeResumeSpawnCtx.run(["tmux", "set-option", "-w", "-t", tmuxSessionTarget(tmuxSession), "history-limit", "50000"]);
+    await nukeResumeSpawnCtx.run(["tmux", "set-option", "-w", "-t", tmuxSessionTarget(tmuxSession), "remain-on-exit", "on"]);
     // window-size manual prevents tmux from auto-resizing the window to the
     // latest attached client's terminal size. The dashboard sizes the session
     // to the saved pane width; the default ("latest") would silently shrink
     // it back when other clients attach/detach.
-    await nukeResumeSpawnCtx.run(["tmux", "set-option", "-w", "-t", tmuxSession, "window-size", "manual"]);
+    await nukeResumeSpawnCtx.run(["tmux", "set-option", "-w", "-t", tmuxSessionTarget(tmuxSession), "window-size", "manual"]);
     // pane-died hook fires on every pane termination (graceful or otherwise)
     // as a backstop for the case where resume.sh itself dies before reaching
     // its exit-log line. See the new-agent path for the matching comment.
     const resumePaneDiedHook = `run-shell "echo '[tmux pane-died] session=#{session_name} pane_dead_status=#{pane_dead_status} pane_dead_signal=#{pane_dead_signal}' >> ${shellQuote(join(agentDir, "agent.log"))}"`;
-    await nukeResumeSpawnCtx.run(["tmux", "set-hook", "-t", tmuxSession, "pane-died", resumePaneDiedHook]);
+    await nukeResumeSpawnCtx.run(["tmux", "set-hook", "-t", tmuxSessionTarget(tmuxSession), "pane-died", resumePaneDiedHook]);
 
     await logAgent(agentDir, "[resume] tmux session created, running autoAcceptWorkspaceTrust");
 
@@ -1061,7 +1061,7 @@ ${qAbsExitScript}
     await logAgent(agentDir, "[resume] autoAcceptWorkspaceTrust completed, sending nudge");
 
     // Verify tmux session still exists before sending nudge
-    const verifyResult = await nukeResumeSpawnCtx.run(["tmux", "has-session", "-t", tmuxSession]);
+    const verifyResult = await nukeResumeSpawnCtx.run(["tmux", "has-session", "-t", tmuxSessionTarget(tmuxSession)]);
     if (verifyResult.exitCode !== 0) {
       await logAgent(agentDir, "[resume] tmux session gone before nudge — Claude likely exited immediately");
       return { ok: true, exitCode: 0, stdout: `Use 'ib look ${agent.id}' to view output`, stderr: "" };
@@ -1074,12 +1074,12 @@ ${qAbsExitScript}
     const nudgePrompt = "Resume your work, or end with 'WAITING' or 'I HAVE COMPLETED THE GOAL' as your final line.";
     // `--` stops tmux flag parsing so a payload that begins with `-` (e.g. YAML
     // frontmatter `---`) isn't mistaken for an option.
-    await nukeResumeSpawnCtx.run(["tmux", "send-keys", "-t", tmuxSession, "-l", "--", nudgePrompt]);
+    await nukeResumeSpawnCtx.run(["tmux", "send-keys", "-t", tmuxSessionTarget(tmuxSession), "-l", "--", nudgePrompt]);
 
     const nudgeSleepMs = resumeDelayOverrideMs !== null ? resumeDelayOverrideMs : 100;
     if (nudgeSleepMs > 0) await Bun.sleep(nudgeSleepMs);
 
-    await nukeResumeSpawnCtx.run(["tmux", "send-keys", "-t", tmuxSession, "Enter"]);
+    await nukeResumeSpawnCtx.run(["tmux", "send-keys", "-t", tmuxSessionTarget(tmuxSession), "Enter"]);
 
     // Log
     await logAgent(agentDir, "[resume] Agent resumed, nudge sent");
@@ -1225,7 +1225,7 @@ export async function respawnAgent(agent: Agent): Promise<IbCommandResult> {
   // remain-on-exit off so the detached session disappears the moment the
   // worker exits — no zombie session cluttering `tmux ls`.
   await nukeResumeSpawnCtx.run([
-    "tmux", "set-option", "-t", detachSession, "remain-on-exit", "off",
+    "tmux", "set-option", "-t", tmuxSessionTarget(detachSession), "remain-on-exit", "off",
   ]);
 
   return {
@@ -1325,7 +1325,7 @@ async function autoAcceptWorkspaceTrust(tmuxSession: string): Promise<void> {
     if (delayMs > 0) await Bun.sleep(delayMs);
 
     const captureResult = await nukeResumeSpawnCtx.run([
-      "tmux", "capture-pane", "-t", tmuxSession, "-p", "-S", "-",
+      "tmux", "capture-pane", "-t", tmuxSessionTarget(tmuxSession), "-p", "-S", "-",
     ]);
     if (captureResult.exitCode !== 0) continue;
 
@@ -1354,13 +1354,13 @@ async function autoAcceptWorkspaceTrust(tmuxSession: string): Promise<void> {
 
   // Accept permissions (may need multiple Enter presses)
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    await nukeResumeSpawnCtx.run(["tmux", "send-keys", "-t", tmuxSession, "Enter"]);
+    await nukeResumeSpawnCtx.run(["tmux", "send-keys", "-t", tmuxSessionTarget(tmuxSession), "Enter"]);
 
     const delayMs = resumeDelayOverrideMs !== null ? resumeDelayOverrideMs : 4000;
     if (delayMs > 0) await Bun.sleep(delayMs);
 
     const captureResult = await nukeResumeSpawnCtx.run([
-      "tmux", "capture-pane", "-t", tmuxSession, "-p", "-S", "-",
+      "tmux", "capture-pane", "-t", tmuxSessionTarget(tmuxSession), "-p", "-S", "-",
     ]);
     if (captureResult.exitCode !== 0) continue;
 
@@ -1386,7 +1386,7 @@ async function autoAcceptWorkspaceTrust(tmuxSession: string): Promise<void> {
         if (logoDelay > 0) await Bun.sleep(logoDelay);
 
         const logoCapture = await nukeResumeSpawnCtx.run([
-          "tmux", "capture-pane", "-t", tmuxSession, "-p", "-S", "-",
+          "tmux", "capture-pane", "-t", tmuxSessionTarget(tmuxSession), "-p", "-S", "-",
         ]);
         if (logoCapture.exitCode !== 0) continue;
         if (logoCapture.stdout.includes("Claude Code v") || logoCapture.stdout.includes("[USER TASK]")) {
@@ -1946,7 +1946,7 @@ export async function mergeAgent(agent: Agent, targetDir: string): Promise<IbCom
     await timed("merge", "tmux-capture", async () => {
       await logAgent(agentDir, "Capturing tmux output...");
       if (tmuxSession) {
-        const hasSession = await mergeSpawnCtx.run(["tmux", "has-session", "-t", tmuxSession]);
+        const hasSession = await mergeSpawnCtx.run(["tmux", "has-session", "-t", tmuxSessionTarget(tmuxSession)]);
         if (hasSession.exitCode === 0) {
           await captureTmuxOutputToFile(tmuxSession, join(agentDir, "output.log"));
         }
@@ -1965,9 +1965,9 @@ export async function mergeAgent(agent: Agent, targetDir: string): Promise<IbCom
         await logAgent(agentDir, "Claude process terminated");
       }
       if (tmuxSession) {
-        const hasSession2 = await mergeSpawnCtx.run(["tmux", "has-session", "-t", tmuxSession]);
+        const hasSession2 = await mergeSpawnCtx.run(["tmux", "has-session", "-t", tmuxSessionTarget(tmuxSession)]);
         if (hasSession2.exitCode === 0) {
-          await mergeSpawnCtx.run(["tmux", "kill-session", "-t", tmuxSession]);
+          await mergeSpawnCtx.run(["tmux", "kill-session", "-t", tmuxSessionTarget(tmuxSession)]);
           await logAgent(agentDir, "Tmux session stopped");
         }
       }
@@ -2105,7 +2105,7 @@ export async function deliverMessage(agent: Agent, queued: OutboxMessage): Promi
 
   // Verify session exists
   const hasSessionProc = sendSpawnCtx.runner(
-    ["tmux", "has-session", "-t", tmuxSession],
+    ["tmux", "has-session", "-t", tmuxSessionTarget(tmuxSession)],
     { stdout: "pipe", stderr: "pipe" }
   );
   await new Response(hasSessionProc.stderr).text(); // drain
@@ -2188,7 +2188,7 @@ export async function deliverMessage(agent: Agent, queued: OutboxMessage): Promi
     // `--` stops tmux flag parsing so a chunk that begins with `-` (e.g. YAML
     // frontmatter `---`) isn't mistaken for an option.
     const chunkProc = sendSpawnCtx.runner(
-      ["tmux", "send-keys", "-t", tmuxSession, "-l", "--", chunk],
+      ["tmux", "send-keys", "-t", tmuxSessionTarget(tmuxSession), "-l", "--", chunk],
       { stdout: "pipe", stderr: "pipe" }
     );
     const chunkStderr = await new Response(chunkProc.stderr).text();
@@ -2206,7 +2206,7 @@ export async function deliverMessage(agent: Agent, queued: OutboxMessage): Promi
 
   // Send Enter
   const enterProc = sendSpawnCtx.runner(
-    ["tmux", "send-keys", "-t", tmuxSession, "Enter"],
+    ["tmux", "send-keys", "-t", tmuxSessionTarget(tmuxSession), "Enter"],
     { stdout: "pipe", stderr: "pipe" }
   );
   await new Response(enterProc.stderr).text(); // drain
@@ -3608,7 +3608,7 @@ export async function newAgent(
     return { ok: false, exitCode: 1, stdout: "", stderr: `Error: agent '${id}' already exists` };
   }
   // Check tmux session
-  const hasSessionResult = await newAgentSpawnCtx.run(["tmux", "has-session", "-t", tmuxSession]);
+  const hasSessionResult = await newAgentSpawnCtx.run(["tmux", "has-session", "-t", tmuxSessionTarget(tmuxSession)]);
   if (hasSessionResult.exitCode === 0) {
     return { ok: false, exitCode: 1, stdout: "", stderr: `Error: agent '${id}' already exists` };
   }
@@ -4304,16 +4304,16 @@ ${qStartExitScript}
   const paneDiedHook = `run-shell "echo '[tmux pane-died] session=#{session_name} pane_dead_status=#{pane_dead_status} pane_dead_signal=#{pane_dead_signal}' >> ${shellQuote(join(agentDir, "agent.log"))}"`;
   await logSpawn(agentDir, spawnerAgentDir, id, `tmux has-session verify starting: -t ${tmuxSession}`);
   const [, , , , verifyResult] = await Promise.all([
-    newAgentSpawnCtx.run(["tmux", "set-option", "-w", "-t", tmuxSession, "history-limit", "50000"]),
-    newAgentSpawnCtx.run(["tmux", "set-option", "-w", "-t", tmuxSession, "remain-on-exit", "on"]),
+    newAgentSpawnCtx.run(["tmux", "set-option", "-w", "-t", tmuxSessionTarget(tmuxSession), "history-limit", "50000"]),
+    newAgentSpawnCtx.run(["tmux", "set-option", "-w", "-t", tmuxSessionTarget(tmuxSession), "remain-on-exit", "on"]),
     // window-size manual prevents tmux from auto-resizing the window to the
     // latest attached client's terminal size. The dashboard sizes the session
     // to the saved pane width; the default ("latest") would silently shrink
     // it back when other clients attach/detach.
-    newAgentSpawnCtx.run(["tmux", "set-option", "-w", "-t", tmuxSession, "window-size", "manual"]),
-    newAgentSpawnCtx.run(["tmux", "set-hook", "-t", tmuxSession, "pane-died", paneDiedHook]),
+    newAgentSpawnCtx.run(["tmux", "set-option", "-w", "-t", tmuxSessionTarget(tmuxSession), "window-size", "manual"]),
+    newAgentSpawnCtx.run(["tmux", "set-hook", "-t", tmuxSessionTarget(tmuxSession), "pane-died", paneDiedHook]),
     // 19. Verify tmux session created
-    newAgentSpawnCtx.run(["tmux", "has-session", "-t", tmuxSession]),
+    newAgentSpawnCtx.run(["tmux", "has-session", "-t", tmuxSessionTarget(tmuxSession)]),
   ]);
   await logSpawn(agentDir, spawnerAgentDir, id, `tmux has-session verify → exit=${verifyResult.exitCode}`);
   if (verifyResult.exitCode !== 0) {
@@ -4429,7 +4429,7 @@ async function autoAcceptWorkspaceTrustForNewAgent(tmuxSession: string): Promise
     if (delayMs > 0) await Bun.sleep(delayMs);
 
     const captureResult = await newAgentSpawnCtx.run([
-      "tmux", "capture-pane", "-t", tmuxSession, "-p", "-S", "-",
+      "tmux", "capture-pane", "-t", tmuxSessionTarget(tmuxSession), "-p", "-S", "-",
     ]);
     if (captureResult.exitCode !== 0) continue;
 
@@ -4454,13 +4454,13 @@ async function autoAcceptWorkspaceTrustForNewAgent(tmuxSession: string): Promise
   if (startedWith !== "permissions") return;
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    await newAgentSpawnCtx.run(["tmux", "send-keys", "-t", tmuxSession, "Enter"]);
+    await newAgentSpawnCtx.run(["tmux", "send-keys", "-t", tmuxSessionTarget(tmuxSession), "Enter"]);
 
     const delayMs = newAgentDelayOverrideMs !== null ? newAgentDelayOverrideMs : 4000;
     if (delayMs > 0) await Bun.sleep(delayMs);
 
     const captureResult = await newAgentSpawnCtx.run([
-      "tmux", "capture-pane", "-t", tmuxSession, "-p", "-S", "-",
+      "tmux", "capture-pane", "-t", tmuxSessionTarget(tmuxSession), "-p", "-S", "-",
     ]);
     if (captureResult.exitCode !== 0) continue;
 
@@ -4483,7 +4483,7 @@ async function autoAcceptWorkspaceTrustForNewAgent(tmuxSession: string): Promise
         if (logoDelay > 0) await Bun.sleep(logoDelay);
 
         const logoCapture = await newAgentSpawnCtx.run([
-          "tmux", "capture-pane", "-t", tmuxSession, "-p", "-S", "-",
+          "tmux", "capture-pane", "-t", tmuxSessionTarget(tmuxSession), "-p", "-S", "-",
         ]);
         if (logoCapture.exitCode !== 0) continue;
         if (logoCapture.stdout.includes("Claude Code v") || logoCapture.stdout.includes("[USER TASK]")) {
@@ -4778,14 +4778,14 @@ export async function pauseAgent(agent: Agent): Promise<IbCommandResult> {
   // Kill tmux session
   if (tmuxSession) {
     const proc = killPauseSpawnCtx.runner(
-      ["tmux", "has-session", "-t", tmuxSession],
+      ["tmux", "has-session", "-t", tmuxSessionTarget(tmuxSession)],
       { stdout: "pipe", stderr: "pipe" }
     );
     await new Response(proc.stderr).text(); // drain
     const hasSession = (await proc.exited) === 0;
     if (hasSession) {
       const killProc = killPauseSpawnCtx.runner(
-        ["tmux", "kill-session", "-t", tmuxSession],
+        ["tmux", "kill-session", "-t", tmuxSessionTarget(tmuxSession)],
         { stdout: "pipe", stderr: "pipe" }
       );
       await new Response(killProc.stderr).text(); // drain

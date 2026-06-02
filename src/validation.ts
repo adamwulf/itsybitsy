@@ -31,6 +31,28 @@ export function isValidTmuxSession(value: string): boolean {
 }
 
 /**
+ * Build a tmux `-t` target string that forces exact-match on the session name.
+ *
+ * tmux's `-t` flag does unambiguous-prefix matching by default, which causes
+ * `ittybitty-foo` to silently match `ittybitty-foo-codex` if that's the only
+ * other match. The `=` modifier forces verbatim matching, with one caveat:
+ *
+ * - Session-target commands (has-session, kill-session, attach, list-clients)
+ *   accept either `=name` or `=name:`.
+ * - Window/pane-target commands (capture-pane, send-keys, display-message,
+ *   set-option -w, set-hook, resize-window, list-panes, kill-pane) treat
+ *   `=name` as a literal session named `=name` and fail with "can't find
+ *   pane/session". They require `=name:` so tmux parses it as "exact-match
+ *   session, then default window/pane".
+ *
+ * `=name:` is universally accepted by both kinds of targets, so callers can
+ * use this helper everywhere without thinking about the distinction.
+ */
+export function tmuxSessionTarget(session: string): string {
+  return "=" + session + ":";
+}
+
+/**
  * Validate a team name: alphanumeric, hyphens, underscores only (same allowlist
  * as agent IDs), bounded to a reasonable length (§16.1 — "a reasonable length
  * cap"). Max 64 chars keeps team names well within any filesystem/display limit

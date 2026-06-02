@@ -17,7 +17,7 @@ import { join, basename } from "path";
 import { homedir } from "os";
 import { readdir, rm } from "fs/promises";
 import { SpawnContext } from "./types";
-import { isValidAgentId } from "./validation";
+import { isValidAgentId, tmuxSessionTarget } from "./validation";
 
 export interface RepoHealthWarning {
   repoPath: string;
@@ -252,7 +252,7 @@ export async function checkAgentDirectories(repoPath: string): Promise<RepoHealt
       // Check if tmux session exists
       const tmuxSession = m.tmux_session as string;
       try {
-        const result = await healthSpawnCtx.run(["tmux", "has-session", "-t", tmuxSession]);
+        const result = await healthSpawnCtx.run(["tmux", "has-session", "-t", tmuxSessionTarget(tmuxSession)]);
         if (result.exitCode !== 0) {
           // No tmux session — check for worktree
           const worktreePath = join(agentDir, "repo");

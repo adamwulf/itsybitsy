@@ -13,7 +13,7 @@ import { isCompacting, isRateLimited, isPidAliveCtx } from "./agents";
 import { logToWatchLog } from "./watch-log";
 import { SpawnContext } from "./types";
 import { getTmuxWidthForAgent } from "./tui/widths";
-import { isValidSessionId, isValidModel } from "./validation";
+import { isValidSessionId, isValidModel, tmuxSessionTarget } from "./validation";
 import { parseModel } from "./agent-cli";
 import {
   buildHooksBlock,
@@ -252,7 +252,7 @@ export function sanitizeTmuxInput(text: string): string {
 /** Check if the ib-coordinator tmux session exists. */
 async function tmuxSessionExists(): Promise<boolean> {
   const { exitCode } = await coordinatorSpawnCtx.run([
-    "tmux", "has-session", "-t", IB_COORDINATOR_SESSION,
+    "tmux", "has-session", "-t", tmuxSessionTarget(IB_COORDINATOR_SESSION),
   ]);
   return exitCode === 0;
 }
@@ -410,12 +410,12 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
     }
     throw new Error("Failed to create system coordinator tmux session");
   }
-  await coordinatorSpawnCtx.run(["tmux", "set-option", "-w", "-t", IB_COORDINATOR_SESSION, "history-limit", "50000"]);
+  await coordinatorSpawnCtx.run(["tmux", "set-option", "-w", "-t", tmuxSessionTarget(IB_COORDINATOR_SESSION), "history-limit", "50000"]);
   // window-size manual prevents tmux from auto-resizing the window to the
   // latest attached client's terminal size. The dashboard sizes the session
   // to the rendered pane width; the default ("latest") would silently shrink
   // it back when other clients attach/detach.
-  await coordinatorSpawnCtx.run(["tmux", "set-option", "-w", "-t", IB_COORDINATOR_SESSION, "window-size", "manual"]);
+  await coordinatorSpawnCtx.run(["tmux", "set-option", "-w", "-t", tmuxSessionTarget(IB_COORDINATOR_SESSION), "window-size", "manual"]);
 
   const config = await readConfig();
   const rawModel = (config["coordinator.model"]?.value as string) ?? "claude:opus";
@@ -452,7 +452,7 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
     : "";
   const claudeCmd = `${baseCmd}${channelsArg}`;
   await coordinatorSpawnCtx.run([
-    "tmux", "send-keys", "-t", IB_COORDINATOR_SESSION,
+    "tmux", "send-keys", "-t", tmuxSessionTarget(IB_COORDINATOR_SESSION),
     claudeCmd, "Enter",
   ]);
 
@@ -467,7 +467,7 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
     // Resume failed (likely a corrupt or version-mismatched transcript). Kill
     // the dead session, write the cleared marker so this transcript is
     // skipped, and retry once as a fresh launch.
-    await coordinatorSpawnCtx.run(["tmux", "kill-session", "-t", IB_COORDINATOR_SESSION]);
+    await coordinatorSpawnCtx.run(["tmux", "kill-session", "-t", tmuxSessionTarget(IB_COORDINATOR_SESSION)]);
     await writeClearedMarker();
     return await ensureSystemCoordinatorImpl(true);
   }
@@ -567,7 +567,7 @@ export async function releaseSystemCoordinator(
       await onLastRef();
     }
     await coordinatorSpawnCtx.run([
-      "tmux", "kill-session", "-t", IB_COORDINATOR_SESSION,
+      "tmux", "kill-session", "-t", tmuxSessionTarget(IB_COORDINATOR_SESSION),
     ]);
   }
 }
@@ -575,7 +575,7 @@ export async function releaseSystemCoordinator(
 /** Restart the system coordinator — kill the tmux session and re-create. */
 export async function restartSystemCoordinator(): Promise<void> {
   await coordinatorSpawnCtx.run([
-    "tmux", "kill-session", "-t", IB_COORDINATOR_SESSION,
+    "tmux", "kill-session", "-t", tmuxSessionTarget(IB_COORDINATOR_SESSION),
   ]);
   await ensureSystemCoordinator();
 }
@@ -591,7 +591,7 @@ export async function restartSystemCoordinator(): Promise<void> {
  */
 export async function discardSystemCoordinator(): Promise<void> {
   await coordinatorSpawnCtx.run([
-    "tmux", "kill-session", "-t", IB_COORDINATOR_SESSION,
+    "tmux", "kill-session", "-t", tmuxSessionTarget(IB_COORDINATOR_SESSION),
   ]);
   await writeClearedMarker();
   const livePids = await readLivePids();

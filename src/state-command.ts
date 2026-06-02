@@ -17,7 +17,7 @@ import { join } from "path";
 import type { Agent } from "./agents";
 import { isPidAliveCtx, killPidCtx, readAgentTransient } from "./agents";
 import { spawnCtx } from "./agent-lifecycle";
-import { isValidTmuxSession } from "./validation";
+import { isValidTmuxSession, tmuxSessionTarget } from "./validation";
 import { IB_COORDINATOR_SESSION } from "./coordinator";
 import { InjectionContext } from "./types";
 
@@ -63,10 +63,10 @@ function parsePid(value: string | number | undefined | null): number | null {
  */
 async function readTmuxPanePid(tmuxSession: string): Promise<number | null> {
   if (!tmuxSession || !isValidTmuxSession(tmuxSession)) return null;
-  const has = await spawnCtx.run(["tmux", "has-session", "-t", "=" + tmuxSession]);
+  const has = await spawnCtx.run(["tmux", "has-session", "-t", tmuxSessionTarget(tmuxSession)]);
   if (has.exitCode !== 0) return null;
   const result = await spawnCtx.run([
-    "tmux", "list-panes", "-t", "=" + tmuxSession, "-F", "#{pane_pid}",
+    "tmux", "list-panes", "-t", tmuxSessionTarget(tmuxSession), "-F", "#{pane_pid}",
   ]);
   if (result.exitCode !== 0 || !result.stdout) return null;
   const first = result.stdout.split("\n")[0]?.trim();
@@ -635,7 +635,7 @@ export async function cleanupOrphans(
       });
       continue;
     }
-    const result = await spawnCtx.run(["tmux", "kill-session", "-t", "=" + session]);
+    const result = await spawnCtx.run(["tmux", "kill-session", "-t", tmuxSessionTarget(session)]);
     if (result.exitCode === 0) {
       actions.push({ kind: "tmux_session", target: session, killed: true });
     } else {

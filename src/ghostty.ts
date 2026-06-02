@@ -56,7 +56,7 @@ export async function openInGhostty(
     // is one string value that Ghostty splits with shell-like parsing.
     // tmuxSession is validated to /^[\w-]+$/ so it is safe to interpolate directly.
     // Set window-size to 'latest' so tmux resizes to Ghostty's dimensions when attaching.
-    const proc = spawnCtx.fn(["ghostty", `--command=bash -c 'tmux set-option -t =${tmuxSession} window-size latest && tmux attach -t =${tmuxSession}'`], {
+    const proc = spawnCtx.fn(["ghostty", `--command=bash -c 'tmux set-option -t =${tmuxSession}: window-size latest && tmux attach -t =${tmuxSession}:'`], {
       stdio: ["ignore", "ignore", "ignore"],
     });
     proc.unref();

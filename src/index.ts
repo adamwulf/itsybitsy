@@ -8,7 +8,7 @@ import { join } from "path";
 import { addRepo, removeRepo, listRepos, repoDisplayName, type RepoEntry } from "./registry";
 import { resolveAgentIcon } from "./agents";
 import type { Agent, FlatEntry } from "./agents";
-import { isValidAgentId } from "./validation";
+import { isValidAgentId, tmuxSessionTarget } from "./validation";
 import { SYSTEM_AGENT_ID } from "./hooks/shared";
 import { normalizeTeamName, getTeam } from "./teams";
 
@@ -115,7 +115,7 @@ export async function readStdinIfPiped(): Promise<string> {
 let systemCoordinatorHasSessionFn: (sessionName: string) => Promise<boolean> = async (
   sessionName: string,
 ) => {
-  const exit = await Bun.spawn(["tmux", "has-session", "-t", "=" + sessionName], {
+  const exit = await Bun.spawn(["tmux", "has-session", "-t", tmuxSessionTarget(sessionName)], {
     stdout: "ignore",
     stderr: "ignore",
   }).exited;
@@ -130,7 +130,7 @@ export function setSystemCoordinatorHasSessionFn(
 
 export function resetSystemCoordinatorHasSessionFn(): void {
   systemCoordinatorHasSessionFn = async (sessionName: string) => {
-    const exit = await Bun.spawn(["tmux", "has-session", "-t", "=" + sessionName], {
+    const exit = await Bun.spawn(["tmux", "has-session", "-t", tmuxSessionTarget(sessionName)], {
       stdout: "ignore",
       stderr: "ignore",
     }).exited;
@@ -1432,7 +1432,7 @@ async function main() {
           process.exit(1);
         }
         console.error(`Attaching to ${agent.id} (Ctrl+b d to detach)...`);
-        const attachProc = Bun.spawn(["tmux", "attach", "-t", "=" + tmuxSession, "-r"], {
+        const attachProc = Bun.spawn(["tmux", "attach", "-t", tmuxSessionTarget(tmuxSession), "-r"], {
           stdin: "inherit",
           stdout: "inherit",
           stderr: "inherit",

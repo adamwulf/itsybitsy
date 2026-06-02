@@ -6,6 +6,7 @@
 
 import { stripAnsi } from "./parse-state";
 import { SpawnContext } from "./types";
+import { tmuxSessionTarget } from "./validation";
 
 /** Spawn context for tmux poller operations */
 export const spawnCtx = new SpawnContext();
@@ -111,7 +112,7 @@ export class TmuxPoller {
 
     try {
       const proc = spawnCtx.runner(
-        ["tmux", "capture-pane", "-t", "=" + targetSession, "-p", `-S`, `-${this.lines}`, "-E", "-"],
+        ["tmux", "capture-pane", "-t", tmuxSessionTarget(targetSession), "-p", `-S`, `-${this.lines}`, "-E", "-"],
         { stdout: "pipe", stderr: "pipe" }
       );
       const raw = await new Response(proc.stdout).text();
@@ -143,7 +144,7 @@ export class TmuxPoller {
 export async function getTmuxWindowWidth(tmuxSession: string): Promise<number | null> {
   try {
     const proc = spawnCtx.runner(
-      ["tmux", "display-message", "-t", "=" + tmuxSession, "-p", "#{window_width}"],
+      ["tmux", "display-message", "-t", tmuxSessionTarget(tmuxSession), "-p", "#{window_width}"],
       { stdout: "pipe", stderr: "pipe" }
     );
     const raw = await new Response(proc.stdout).text();
@@ -160,7 +161,7 @@ export async function getTmuxWindowWidth(tmuxSession: string): Promise<number | 
 export async function resizeTmuxWindow(tmuxSession: string, width: number): Promise<boolean> {
   try {
     const proc = spawnCtx.runner(
-      ["tmux", "resize-window", "-t", "=" + tmuxSession, "-x", String(width)],
+      ["tmux", "resize-window", "-t", tmuxSessionTarget(tmuxSession), "-x", String(width)],
       { stdout: "pipe", stderr: "pipe" }
     );
     const exitCode = await proc.exited;
@@ -179,7 +180,7 @@ export async function resizeTmuxWindow(tmuxSession: string, width: number): Prom
 export async function clearTmuxWindowSizeOverride(tmuxSession: string): Promise<boolean> {
   try {
     const proc = spawnCtx.runner(
-      ["tmux", "resize-window", "-A", "-t", "=" + tmuxSession],
+      ["tmux", "resize-window", "-A", "-t", tmuxSessionTarget(tmuxSession)],
       { stdout: "pipe", stderr: "pipe" }
     );
     const exitCode = await proc.exited;
@@ -213,7 +214,7 @@ export async function listTmuxSessions(): Promise<string[]> {
 export async function killTmuxSession(sessionName: string): Promise<boolean> {
   try {
     const proc = spawnCtx.runner(
-      ["tmux", "kill-session", "-t", "=" + sessionName],
+      ["tmux", "kill-session", "-t", tmuxSessionTarget(sessionName)],
       { stdout: "pipe", stderr: "pipe" }
     );
     const exitCode = await proc.exited;
@@ -230,7 +231,7 @@ export async function killTmuxSession(sessionName: string): Promise<boolean> {
 export async function hasAttachedClient(tmuxSession: string): Promise<boolean> {
   try {
     const proc = spawnCtx.runner(
-      ["tmux", "list-clients", "-t", "=" + tmuxSession, "-F", "#{client_name}"],
+      ["tmux", "list-clients", "-t", tmuxSessionTarget(tmuxSession), "-F", "#{client_name}"],
       { stdout: "pipe", stderr: "pipe" }
     );
     const raw = await new Response(proc.stdout).text();
@@ -249,7 +250,7 @@ export async function hasAttachedClient(tmuxSession: string): Promise<boolean> {
 export async function captureTmuxOutput(tmuxSession: string, lines = 5000): Promise<string | null> {
   try {
     const proc = spawnCtx.runner(
-      ["tmux", "capture-pane", "-t", "=" + tmuxSession, "-p", `-S`, `-${lines}`, "-E", "-"],
+      ["tmux", "capture-pane", "-t", tmuxSessionTarget(tmuxSession), "-p", `-S`, `-${lines}`, "-E", "-"],
       { stdout: "pipe", stderr: "pipe" }
     );
     const raw = await new Response(proc.stdout).text();
@@ -269,7 +270,7 @@ export async function captureTmuxOutput(tmuxSession: string, lines = 5000): Prom
 export async function sendTmuxEscape(tmuxSession: string): Promise<boolean> {
   try {
     const proc = spawnCtx.runner(
-      ["tmux", "send-keys", "-t", "=" + tmuxSession, "Escape"],
+      ["tmux", "send-keys", "-t", tmuxSessionTarget(tmuxSession), "Escape"],
       { stdout: "pipe", stderr: "pipe" },
     );
     const exitCode = await proc.exited;

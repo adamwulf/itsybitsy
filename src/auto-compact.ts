@@ -13,7 +13,7 @@ import { homedir } from "os";
 import type { Agent } from "./agents";
 import { agentWorktreePath } from "./agents";
 import { logAgent } from "./agent-lifecycle";
-import { isValidTmuxSession } from "./validation";
+import { isValidTmuxSession, tmuxSessionTarget } from "./validation";
 
 /**
  * Encode a worktree path into Claude's project directory name.
@@ -223,7 +223,7 @@ export async function sendCompact(tmuxSession: string): Promise<boolean> {
     return false;
   }
   try {
-    const proc = compactSpawnRunner(["tmux", "send-keys", "-t", "=" + tmuxSession, "/compact", "Enter"]);
+    const proc = compactSpawnRunner(["tmux", "send-keys", "-t", tmuxSessionTarget(tmuxSession), "/compact", "Enter"]);
     const exitCode = await proc.exited;
     return exitCode === 0;
   } catch {

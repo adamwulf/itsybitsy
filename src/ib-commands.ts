@@ -425,6 +425,44 @@ function resolveGitRevParsePath(worktreePath: string, rawPath: string): string {
 }
 
 /**
+ * Derive the narrow set of parent-repo subdirectories codex agents need
+ * write access to under `-s workspace-write`. Returns absolute, canonicalised
+ * paths for `<parentRepo>/.ittybitty` and `<parentRepo>/.claude` (the only
+ * two subdirs `ib new-agent` writes outside the worktree/gitdir/caches).
+ *
+ * Granting the bare `<parentRepo>` would expose src/, CLAUDE.md, etc. to
+ * relative-path Bash writes (`../../../../CLAUDE.md`) that bypass the
+ * PreToolUse hook's textual matcher (see round-2 review HIGH). The two
+ * subdirs above are the minimum needed for `ib new-agent` to function.
+ *
+ * The directories are mkdir'd before realpathSync so resolution succeeds
+ * even on first spawn (codex spawn runs before `ib new-agent` would
+ * otherwise create them). If mkdir or realpathSync fails, we fall back to
+ * the unresolved `join(parentRepo, ".ittybitty"|".claude")` path — codex's
+ * own path-safety check rejects only quotes/backslashes/control chars, so
+ * the unresolved path is still safe to pass.
+ */
+async function deriveCodexParentRepoRoots(parentRepoPath: string): Promise<string[]> {
+  const subdirs = [".ittybitty", ".claude"];
+  const out: string[] = [];
+  for (const sub of subdirs) {
+    const dir = join(parentRepoPath, sub);
+    try {
+      await mkdir(dir, { recursive: true });
+    } catch {
+      // Permission errors, EROFS, etc. — fall through to realpathSync, which
+      // will succeed if the dir already exists from a prior spawn.
+    }
+    try {
+      out.push(realpathSync(dir));
+    } catch {
+      out.push(dir);
+    }
+  }
+  return out;
+}
+
+/**
  * Clean up orphaned tmux sessions — sessions with the ittybitty- prefix
  * that don't correspond to any remaining agent directory.
  */
@@ -866,8 +904,22 @@ export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
           stderr: `Error: could not resolve git common dir for codex writable root: ${errMsg}`,
         };
       }
+      // Parent repo subdirs — granted as writable roots so `ib new-agent`
+      // from inside the resumed codex agent can mkdir into
+      // <parentRepo>/.ittybitty/ and write <parentRepo>/.claude/settings.local.json.
+      // See the spawn path for the full rationale on why we narrow to the
+      // .ittybitty + .claude subdirs rather than granting the bare parent
+      // repo (round-2 review HIGH: bypass via relative-path Bash writes).
+      //
+      // Derive via resolveGitRoot for consistency with the spawn-side
+      // `rootRepoPath = resolveGitRoot(repoPath) || repoPath` — without this
+      // a repo registered at a non-git-root path would yield different
+      // grants on spawn vs resume.
+      const resumeParentRepoPath = (await resolveGitRoot(agent.repoPath)) || agent.repoPath;
+      const codexParentRepoSubdirs = await deriveCodexParentRepoRoots(resumeParentRepoPath);
       const codexExtraWritableRoots = [
         resolveGitRevParsePath(workPath, gitCommonDirResult.stdout),
+        ...codexParentRepoSubdirs,
       ];
 
       // Build resume.sh via the shared codex builder (mirrors start.sh).
@@ -3924,14 +3976,28 @@ export async function newAgent(
           stderr: `Error: could not resolve git common dir for codex writable root: ${errMsg}`,
         };
       }
+      // Parent repo subdirs — granted as writable roots so `ib new-agent`
+      // from inside a codex agent can mkdir into <parentRepo>/.ittybitty/
+      // (agents+archive subdirs) and write <parentRepo>/.claude/settings.local.json
+      // when spawning a claude sub-agent. Codex's `-s workspace-write`
+      // sandbox is kept as defense-in-depth (our PreToolUse hook is the
+      // primary path-isolation gate); without these entries the sandbox
+      // blocks the spawn mkdir even though the hook would allow it.
+      //
+      // We grant the .ittybitty and .claude SUBDIRS rather than the bare
+      // parent repo so a misbehaving agent cannot reach src/, CLAUDE.md,
+      // etc. via a relative-path Bash write that bypasses the textual
+      // matcher in checkBashCommandPaths.
+      const codexParentRepoSubdirs = await deriveCodexParentRepoRoots(rootRepoPath);
       codexExtraWritableRoots = [
         resolveGitRevParsePath(workPath, gitCommonDirResult.stdout),
+        ...codexParentRepoSubdirs,
       ];
       await logSpawn(
         agentDir,
         spawnerAgentDir,
         id,
-        `codex writable git root: ${codexExtraWritableRoots[0]}`,
+        `codex writable roots: git=${codexExtraWritableRoots[0]} parentRepoSubdirs=[${codexParentRepoSubdirs.join(",")}]`,
       );
 
       // Codex hook-dispatcher precheck (SPEC §5.4 step 7 + §5.5 fail-open

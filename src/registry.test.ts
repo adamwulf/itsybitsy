@@ -68,6 +68,37 @@ describe("registry", () => {
     expect(result.message).toContain("reserved name");
   });
 
+  test("addRepo rejects a name with a space", async () => {
+    const repoDir = join(tempDir, "Rice Teaching");
+    await mkdir(repoDir, { recursive: true });
+    const result = await addRepo(repoDir);
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("not a valid repo name");
+  });
+
+  test("addRepo rejects an empty custom name", async () => {
+    const repoDir = join(tempDir, "myrepo3");
+    await mkdir(repoDir, { recursive: true });
+    const result = await addRepo(repoDir, "");
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("not a valid repo name");
+  });
+
+  test("addRepo rejects a name with disallowed characters", async () => {
+    const repoDir = join(tempDir, "myrepo4");
+    await mkdir(repoDir, { recursive: true });
+    const result = await addRepo(repoDir, "foo!bar");
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("not a valid repo name");
+  });
+
+  test("addRepo accepts a name with allowed characters", async () => {
+    const repoDir = join(tempDir, "myrepo5");
+    await mkdir(repoDir, { recursive: true });
+    const result = await addRepo(repoDir, "foo-bar_baz123");
+    expect(result.ok).toBe(true);
+  });
+
   test("removeRepo removes by path", async () => {
     const repoDir = join(tempDir, "myrepo");
     await mkdir(repoDir, { recursive: true });
@@ -128,6 +159,15 @@ describe("registry", () => {
     const result = await renameRepo(repoDir, "coordinator");
     expect(result.ok).toBe(false);
     expect(result.message).toContain("reserved name");
+  });
+
+  test("renameRepo rejects a nickname with a space", async () => {
+    const repoDir = join(tempDir, "myrepo-rename");
+    await mkdir(repoDir, { recursive: true });
+    await addRepo(repoDir);
+    const result = await renameRepo(repoDir, "Rice Teaching");
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("not a valid repo name");
   });
 
   // --- Group I: additional addRepo coordinator enforcement ---
@@ -458,15 +498,15 @@ describe("registry team-name collision refusal", () => {
     expect(result.ok).toBe(true);
   });
 
-  test("addRepo strips a leading @ defensively before the team check", async () => {
-    // Repo names won't normally have a leading @, but normalizeTeamName strips
-    // one — so a custom name "@backend" still collides with team "backend".
+  test("addRepo rejects a leading @ outright (allowlist rejects before team check)", async () => {
+    // Repo names won't normally have a leading @, and the new repo-name
+    // allowlist (^[A-Za-z0-9_-]+$) rejects it before any team-collision check.
     await createTeam("backend", "@system", 100);
     const repoDir = join(baseDir, "weird-dir");
     await mkdir(repoDir, { recursive: true });
     const result = await addRepo(repoDir, "@backend");
     expect(result.ok).toBe(false);
-    expect(result.message).toContain("already a team name");
+    expect(result.message).toContain("not a valid repo name");
   });
 
   test("renameRepo refuses a nickname matching an existing team", async () => {

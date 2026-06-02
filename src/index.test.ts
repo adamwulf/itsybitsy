@@ -154,17 +154,16 @@ describe("matchAgentById", () => {
     expect(ambiguous).toEqual([]);
   });
 
-  test("unique prefix match returns the agent", () => {
+  test("unique prefix does NOT match (exact-only)", () => {
     const { match, ambiguous } = matchAgentById("agent-def", agents);
-    expect(match).not.toBeNull();
-    expect(match!.id).toBe("agent-def456");
+    expect(match).toBeNull();
     expect(ambiguous).toEqual([]);
   });
 
-  test("ambiguous prefix returns null with ambiguous IDs", () => {
+  test("non-unique prefix does NOT match (exact-only)", () => {
     const { match, ambiguous } = matchAgentById("agent-abc", agents);
     expect(match).toBeNull();
-    expect(ambiguous).toEqual(["agent-abc123", "agent-abc999"]);
+    expect(ambiguous).toEqual([]);
   });
 
   test("no match returns null with empty ambiguous", () => {
@@ -173,8 +172,7 @@ describe("matchAgentById", () => {
     expect(ambiguous).toEqual([]);
   });
 
-  test("exact match takes priority even if prefix would be ambiguous", () => {
-    // If there's an exact match, it should be returned even if other agents share the prefix
+  test("exact match still resolves when other agents share the prefix", () => {
     const agentsWithExact = [
       makeAgent({ id: "agent-abc" }),
       makeAgent({ id: "agent-abc123" }),
@@ -219,9 +217,9 @@ describe("matchAgentById", () => {
     expect(matchAgentById("pikachu", withNick).match!.id).toBe("agent-zzz111");
   });
 
-  test("exact nickname wins over an id-prefix of a different agent", () => {
-    // "alpha" is an exact nickname on A, and also a prefix of B's id.
-    // Exact-nickname tier runs before id-prefix, so A wins.
+  test("exact nickname resolves; prefix of another id does NOT", () => {
+    // "alpha" is an exact nickname on A, and also a prefix of B's id. The
+    // nickname tier matches; the prefix tier no longer exists (exact-only).
     const a = makeAgent({ id: "agent-aaa", meta: { nickname: "alpha" } as any });
     const b = makeAgent({ id: "alpha-999" });
     const { match } = matchAgentById("alpha", [a, b]);

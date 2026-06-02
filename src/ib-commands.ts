@@ -2638,9 +2638,9 @@ async function fireRemoveLeaveNotice(
 }
 
 /**
- * Resolve a possibly-partial agent id/nickname to its FULL id, using the same
- * matcher as `ib send` (`matchAgentById`). Returns `{ id }` on a unique match,
- * or `{ error }` describing not-found / ambiguity. Used by `ib team add/remove`.
+ * Resolve an agent id/nickname to its FULL id (exact match only), using the
+ * same matcher as `ib send` (`matchAgentById`). Returns `{ id }` on a match,
+ * or `{ error }` on not-found. Used by `ib team add/remove`.
  */
 async function resolveFullAgentId(
   partial: string,
@@ -2648,10 +2648,7 @@ async function resolveFullAgentId(
 ): Promise<{ id: string } | { error: string }> {
   const { matchAgentById } = await import("./index");
   const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })));
-  const { match, ambiguous } = matchAgentById(partial, agents);
-  if (ambiguous.length > 0) {
-    return { error: `Error: ambiguous agent id "${partial}" matches: ${ambiguous.join(", ")}` };
-  }
+  const { match } = matchAgentById(partial, agents);
   if (!match) {
     return { error: `Error: agent not found: ${partial}` };
   }
@@ -4512,9 +4509,9 @@ function extractAgentIdFromTmuxSession(sessionName: string): string | null {
 }
 
 /**
- * Resolve a partial agent ID to a full ID.
- * Mirrors resolve_agent_id() in ib bash.
- * Scans both agent directories and tmux sessions.
+ * Resolve an agent ID to a full ID. Exact match only — CLI inputs must use the
+ * full agent id. Substring/partial matching is intentionally NOT supported.
+ * Scans both agent directories and tmux sessions for an exact match.
  *
  * @param tmuxLister - injectable for testing; defaults to listTmuxSessions
  */
@@ -4538,30 +4535,7 @@ export async function resolveAgentId(
     }
   }
 
-  // Partial/substring match: scan directories
-  const matches = new Set<string>();
-  try {
-    const entries = await readdir(agentsDir, { withFileTypes: true });
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
-      if (entry.name.includes(partial)) {
-        matches.add(entry.name);
-      }
-    }
-  } catch { /* ignore */ }
-
-  // Partial/substring match: scan tmux sessions
-  for (const session of sessions) {
-    if (!session.startsWith("ittybitty-")) continue;
-    const agentId = extractAgentIdFromTmuxSession(session);
-    if (agentId && agentId.includes(partial)) {
-      matches.add(agentId);
-    }
-  }
-
-  if (matches.size === 1) return { resolved: [...matches][0]! };
-  if (matches.size === 0) return { error: "No matching agent found", matches: [] };
-  return { error: "Ambiguous agent ID — multiple matches", matches: [...matches].sort() };
+  return { error: "No matching agent found", matches: [] };
 }
 
 /** Pluggable spawn runner for diff/status — defaults to Bun.spawn, overridable for tests */

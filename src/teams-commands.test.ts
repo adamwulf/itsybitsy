@@ -335,7 +335,7 @@ describe("teams: command layer (create/add/remove/list/delete/roster/send)", () 
     expect(res.stderr).toContain("not found");
   });
 
-  test("teamAdd resolves a partial id, stores the full id, fires join notice", async () => {
+  test("teamAdd with a prefix does NOT resolve (exact-only); full id stores + fires join notice", async () => {
     await teamCreate("backend");
     const existingDir = await plantAgent("agent-existing");
     const newDir = await plantAgent("agent-newcomer");
@@ -343,8 +343,13 @@ describe("teams: command layer (create/add/remove/list/delete/roster/send)", () 
     await addMember("backend", "agent-existing");
     resetReadAgentMetaCache();
 
-    // Add by a unique prefix — must store the FULL id.
-    const res = await teamAdd("backend", "agent-newc", repos());
+    // Prefix-only input must be rejected.
+    const prefixRes = await teamAdd("backend", "agent-newc", repos());
+    expect(prefixRes.ok).toBe(false);
+    expect(prefixRes.stderr).toContain("agent not found: agent-newc");
+
+    // Full id resolves and fires the join notice.
+    const res = await teamAdd("backend", "agent-newcomer", repos());
     expect(res.ok).toBe(true);
     expect(res.stdout).toBe("Added agent-newcomer to @backend");
 
@@ -368,8 +373,7 @@ describe("teams: command layer (create/add/remove/list/delete/roster/send)", () 
 
     // And the channel.jsonl now carries a SYSTEM `joined the team` record so
     // the chat box renders the lifecycle event dimmed inline with chat (§17.4
-    // design update). The actor is the joiner's FULL id (not the partial used
-    // on the CLI), matching what was persisted to teams.json.
+    // design update).
     const recs = await readChannel("backend");
     const joins = recs.filter((r) => r.kind === "system" && r.message === "joined the team");
     expect(joins.length).toBe(1);

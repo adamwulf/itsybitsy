@@ -2373,8 +2373,16 @@ export class DashboardComponent implements Component {
     else if (data === "m") { agentActions.handleMerge(this); }
     else if (data === "s") { agentActions.handleSend(this); }
     // Team actions: T = create a new team, t = add selected agent to a team
+    // (or manage roster when a team anchor in the Teams tree is selected).
     else if (data === "T") { agentActions.handleCreateTeam(this); }
-    else if (data === "t") { agentActions.handleAddAgentToTeam(this); }
+    else if (data === "t") {
+      const teamSel = this.sidebarMode === "teams" ? this.teamsTree.selection : null;
+      if (teamSel?.kind === "team") {
+        agentActions.handleManageRoster(this, teamSel.teamName);
+      } else {
+        agentActions.handleAddAgentToTeam(this);
+      }
+    }
     // Add permission to selected agent's settings.local.json allow list
     else if (data === "b") { agentActions.handleAddPermission(this); }
     // New agent

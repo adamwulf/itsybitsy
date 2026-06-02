@@ -49,7 +49,7 @@ import type { RepoHealthReport } from "../health-check";
 import { getResolvableWarnings, resolveHealthWarnings } from "../health-check";
 import { IB_COORDINATOR_SESSION, sanitizeTmuxInput, restartSystemCoordinator, checkCoordinatorExists, getLastCoordinatorSpawnMode, discardSystemCoordinator } from "../coordinator";
 import { isValidToolList } from "../validation";
-import { listTeams, getTeam } from "../teams";
+import { listTeams, getTeam, addMember, removeMember } from "../teams";
 
 const SCROLL_STEP = 10;
 
@@ -883,6 +883,90 @@ function runAddMember(ctx: ActionCtx, agent: Agent, teamName: string) {
     ctx.setNotice(result.ok
       ? (result.stdout || `Added ${agent.id} to @${teamName}`)
       : (result.stderr || result.stdout || `Add to team failed`));
+  });
+}
+
+/**
+ * 't' on a TEAM anchor in the Teams panel — open a multi-select roster
+ * editor listing every live agent. Members already in `team.members` are
+ * pre-toggled ON; others OFF. On confirm we diff the new selection against
+ * the current roster and call `addMember`/`removeMember` for each change.
+ *
+ * Uses the bare registry primitives (`addMember`/`removeMember`) rather than
+ * the `teamAdd`/`teamRemove` CLI wrappers because this batch-edit flow
+ * already lets the user see and confirm the full diff in one shot — firing
+ * the wrappers' join/leave notice fan-out per toggle would be noisy.
+ */
+export function handleManageRoster(ctx: ActionCtx, teamName: string) {
+  ctx.executeAndRefresh(async () => {
+    const team = await getTeam(teamName);
+    if (!team) {
+      ctx.setNotice(`team @${teamName} no longer exists`);
+      return;
+    }
+    const liveAgents = ctx.watcher?.lastAgents ?? [];
+    if (liveAgents.length === 0) {
+      ctx.setNotice("No agents to manage");
+      return;
+    }
+    const memberSet = new Set(team.members);
+    const items = liveAgents.map((a) => `${a.repoName}/${a.id} (${displayState(a.state)})`);
+    const checked = liveAgents.map((a) => memberSet.has(a.id));
+
+    ctx.showDialog({
+      type: "multi-select",
+      prompt: `Manage roster: @${teamName}`,
+      items,
+      checked,
+      selectedIndex: 0,
+      onSubmit: (checkedIndices: number[]) => {
+        ctx.closeDialog();
+        const nextMemberIds = new Set<string>();
+        for (const i of checkedIndices) {
+          const a = liveAgents[i];
+          if (a) nextMemberIds.add(a.id);
+        }
+        const toAdd: string[] = [];
+        const toRemove: string[] = [];
+        for (const id of nextMemberIds) {
+          if (!memberSet.has(id)) toAdd.push(id);
+        }
+        for (const id of memberSet) {
+          if (!nextMemberIds.has(id)) toRemove.push(id);
+        }
+        if (toAdd.length === 0 && toRemove.length === 0) {
+          ctx.setNotice(`Roster unchanged for @${teamName}`);
+          return;
+        }
+        ctx.executeAndRefresh(async () => {
+          let added = 0;
+          let removed = 0;
+          let failures = 0;
+          for (const id of toAdd) {
+            try {
+              const r = await addMember(teamName, id);
+              if (r.added) added++;
+            } catch {
+              failures++;
+            }
+          }
+          for (const id of toRemove) {
+            try {
+              const r = await removeMember(teamName, id);
+              if (r.removed) removed++;
+            } catch {
+              failures++;
+            }
+          }
+          const parts: string[] = [];
+          if (added > 0) parts.push(`+${added}`);
+          if (removed > 0) parts.push(`-${removed}`);
+          const summary = parts.length > 0 ? parts.join(" ") : "no changes";
+          const failSuffix = failures > 0 ? ` (${failures} failure${failures === 1 ? "" : "s"})` : "";
+          ctx.setNotice(`Updated @${teamName}: ${summary}${failSuffix}`);
+        });
+      },
+    });
   });
 }
 

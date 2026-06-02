@@ -341,7 +341,12 @@ function handleTextareaDialog(
     }
   } else if (d.focusedButton === "cancel") {
     if (matchesKey(data, Key.enter)) {
+      // Same shape as the global Esc branch — close first, THEN invoke
+      // onCancel. Required so a wizard step (e.g. step-3 textarea) can emit
+      // a final notice on user cancel instead of vanishing silently.
+      const onCancel = d.onCancel;
       ctx.closeDialog();
+      onCancel?.();
     } else if (matchesKey(data, Key.tab) || matchesKey(data, Key.right)) {
       d.focusedButton = nextFocus("cancel", 1);
       ctx.tui?.requestRender();

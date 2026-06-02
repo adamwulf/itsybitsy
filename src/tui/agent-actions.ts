@@ -769,6 +769,14 @@ function openMemberPicker(ctx: ActionCtx, teamName: string, preCheckAgent: Agent
       // Roll back: delete the team we just created so a cancelled wizard
       // leaves no orphan. Emit a notice in both branches so the user can see
       // the cancel actually happened — the dialog vanishing alone is silent.
+      //
+      // NOTE on rollback race: this is fire-and-forget under executeAndRefresh.
+      // If a user re-opens the wizard and recreates a team with the SAME name
+      // before this teamDelete commits, the rollback could silently nuke the
+      // recreated team. The window is sub-second (one syscall) and the
+      // recreate path is at least three keypresses — extremely unlikely in
+      // practice. Awaiting before close was rejected as a UI block. Document,
+      // don't fix.
       ctx.executeAndRefresh(async () => {
         const delResult = await teamDelete(teamName);
         if (delResult.ok) {
@@ -853,7 +861,8 @@ function openFirstMessagePrompt(ctx: ActionCtx, teamName: string, addedCount: nu
           // back to the addedCount (the wizard's own tally).
           const match = sendResult.stdout.match(/Sent to (\d+) member/);
           const recipients = match?.[1] ?? String(addedCount);
-          const recipientPlural = recipients === "1" ? "recipient" : "recipients";
+          // Numeric compare so a leading-zero match (e.g. "01") still pluralizes.
+          const recipientPlural = Number(recipients) === 1 ? "recipient" : "recipients";
           ctx.setNotice(`${withFailures("")}, sent first message to ${recipients} ${recipientPlural}`);
         } else {
           ctx.setNotice(`${withFailures("")} (send failed: ${sendResult.stderr || sendResult.stdout})`);

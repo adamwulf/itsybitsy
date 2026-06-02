@@ -300,6 +300,60 @@ describe("multi-select dialog", () => {
   });
 });
 
+// ─── textarea dialog onCancel wiring ──────────────────────
+
+describe("textarea dialog onCancel", () => {
+  function makeTextarea(opts?: { onCancel?: () => void }) {
+    let submitted: string | null = null;
+    const dialog: NonNullable<DialogState> = {
+      type: "textarea",
+      prompt: "Type:",
+      buffer: new TextBuffer(),
+      focusedButton: "text",
+      onSubmit: (v: string) => { submitted = v; },
+      onCancel: opts?.onCancel,
+    };
+    const ctx = makeDialogCtx(dialog);
+    return { ctx, dialog, get submitted() { return submitted; } };
+  }
+
+  test("Escape fires onCancel and closes the dialog", () => {
+    // Regression guard: dialog-handler.ts global Esc handler must invoke
+    // onCancel on textarea, same shape as the multi-select path. The wizard
+    // depends on it for step-3 silent-vanish fix.
+    let cancelled = false;
+    const { ctx } = makeTextarea({ onCancel: () => { cancelled = true; } });
+    handleDialogInput(ctx, "\x1b");
+    expect(ctx.closed).toHaveLength(1);
+    expect(cancelled).toBe(true);
+  });
+
+  test("Cancel button (Tab → Enter) fires onCancel and closes the dialog", () => {
+    // Round-2 must-fix: the focusable [ Cancel ] button on the textarea must
+    // fire onCancel the same way Esc does. Round 1 only fixed Esc, leaving
+    // the button-cancel path silent.
+    let cancelled = false;
+    const { ctx, dialog } = makeTextarea({ onCancel: () => { cancelled = true; } });
+    // Tab from text → cancel
+    handleDialogInput(ctx, "\t");
+    expect((dialog as any).focusedButton).toBe("cancel");
+    // Enter activates [ Cancel ]
+    handleDialogInput(ctx, "\r");
+    expect(ctx.closed).toHaveLength(1);
+    expect(cancelled).toBe(true);
+  });
+
+  test("Cancel button without onCancel still closes the dialog", () => {
+    // Defense: omitting onCancel must still work (existing dialogs don't set
+    // it).  The optional-chain in the handler should swallow the no-op.
+    const { ctx, dialog } = makeTextarea(); // no onCancel
+    handleDialogInput(ctx, "\t");
+    expect((dialog as any).focusedButton).toBe("cancel");
+    handleDialogInput(ctx, "\r");
+    expect(ctx.closed).toHaveLength(1);
+  });
+});
+
 // ─── fuzzy dialog ───────────────────────────────────────
 
 describe("fuzzy dialog", () => {

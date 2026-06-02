@@ -1,4 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
+import { homedir } from "os";
 import {
   buildCodexLaunchArgs,
   isCodexSafeBinaryPath,
@@ -272,7 +273,11 @@ describe("buildCodexLaunchArgs — well-formedness", () => {
     // either be rejected by codex or, worse, be resolved against the
     // worktree cwd and silently widen the worktree allowlist. Using `||`
     // instead of `??` makes empty-string trigger the homedir() fallback.
-    const { homedir } = require("os") as typeof import("os");
+    // (A whitespace-only $HOME like "   " is intentionally NOT covered:
+    // `"   "` is truthy under `||`, so it would produce "   /Library/Caches".
+    // No real shell sets $HOME like that; if it ever happens, the existing
+    // isCodexSafeBinaryPath check still permits it (space is not a control
+    // char) and codex would silently fail to register the directory.)
     const realHomedir = homedir();
     process.env.HOME = "";
     const { args } = buildCodexLaunchArgs({

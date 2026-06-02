@@ -1770,7 +1770,9 @@ async function main() {
         console.error(`Warning: unknown arguments ignored: ${extraArgs.join(" ")}`);
       }
       const { detectAgentStates } = await import("./agents");
-      await detectAgentStates([agent]);
+      // Lifecycle path: about to mutate the agent (resume). Reaping a stale
+      // husk tmux session before relaunch is desired.
+      await detectAgentStates([agent], { reap: true });
       const { resumeAgent } = await import("./ib-commands");
       await printAndExit(await resumeAgent(agent));
       break;
@@ -1829,7 +1831,9 @@ async function main() {
       }
 
       const { detectAgentStates } = await import("./agents");
-      await detectAgentStates([agent]);
+      // Lifecycle path: about to mutate the agent (respawn). Reaping a stale
+      // husk tmux session before relaunch is desired.
+      await detectAgentStates([agent], { reap: true });
       const { respawnAgent } = await import("./ib-commands");
       await printAndExit(await respawnAgent(agent));
       break;
@@ -1850,7 +1854,9 @@ async function main() {
         process.exit(1);
       }
       const { detectAgentStates } = await import("./agents");
-      await detectAgentStates([agent]);
+      // Lifecycle path: about to mutate the agent (respawn-self). Reaping a
+      // stale husk tmux session before relaunch is desired.
+      await detectAgentStates([agent], { reap: true });
       const { respawnSelf } = await import("./ib-commands");
       await printAndExit(await respawnSelf(agent));
       break;

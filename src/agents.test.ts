@@ -1886,7 +1886,7 @@ describe("detectAgentStates — reapOrphanedClaude", () => {
         created_epoch: Math.floor(Date.now() / 1000) - 3600,
       } as Partial<AgentMeta> as AgentMeta,
     });
-    await detectAgentStates([a]);
+    await detectAgentStates([a], { reap: true });
     expect(a.state).toBe("stopped");
     expect(killCalls).toEqual([{ pid: 12345, signal: "SIGTERM" }]);
 
@@ -1918,7 +1918,7 @@ describe("detectAgentStates — reapOrphanedClaude", () => {
         created_epoch: Math.floor(Date.now() / 1000) - 1,
       } as Partial<AgentMeta> as AgentMeta,
     });
-    await detectAgentStates([a]);
+    await detectAgentStates([a], { reap: true });
     expect(a.state).toBe("creating");
     expect(killCalls).toBe(0);
   });
@@ -1943,7 +1943,7 @@ describe("detectAgentStates — reapOrphanedClaude", () => {
         created_epoch: Math.floor(Date.now() / 1000) - 60,
       } as Partial<AgentMeta> as AgentMeta,
     });
-    await detectAgentStates([a]);
+    await detectAgentStates([a], { reap: true });
     expect(a.state).toBe("creating");
     expect(killCalls).toBe(0);
   });
@@ -1965,7 +1965,7 @@ describe("detectAgentStates — reapOrphanedClaude", () => {
         created_epoch: Math.floor(Date.now() / 1000) - 3600,
       } as Partial<AgentMeta> as AgentMeta,
     });
-    await detectAgentStates([a]);
+    await detectAgentStates([a], { reap: true });
     expect(a.state).toBe("stopped");
     expect(killCalls).toBe(0);
   });
@@ -1987,7 +1987,7 @@ describe("detectAgentStates — reapOrphanedClaude", () => {
         created_epoch: Math.floor(Date.now() / 1000) - 3600,
       } as Partial<AgentMeta> as AgentMeta,
     });
-    await detectAgentStates([a]);
+    await detectAgentStates([a], { reap: true });
     expect(a.state).toBe("stopped");
     expect(killCalls).toBe(0);
   });
@@ -2009,7 +2009,7 @@ describe("detectAgentStates — reapOrphanedClaude", () => {
         claude_pid: "12345",
       } as Partial<AgentMeta> as AgentMeta,
     });
-    await detectAgentStates([a]);
+    await detectAgentStates([a], { reap: true });
     expect(a.state).toBe("stopped");
     expect(killCalls).toEqual([{ pid: 12345, signal: "SIGTERM" }]);
 
@@ -2049,7 +2049,7 @@ describe("detectAgentStates — reapOrphanedClaude", () => {
         created_epoch: Math.floor(Date.now() / 1000) - 3600,
       } as Partial<AgentMeta> as AgentMeta,
     });
-    await detectAgentStates([a]);
+    await detectAgentStates([a], { reap: true });
     expect(a.state).toBe("stopped");
     expect(killCalls).toEqual([{ pid: 12345, signal: "SIGTERM" }]);
 
@@ -2092,7 +2092,7 @@ describe("detectAgentStates — reapOrphanedClaude", () => {
         created_epoch: Math.floor(Date.now() / 1000) - 3600,
       } as Partial<AgentMeta> as AgentMeta,
     });
-    await detectAgentStates([a]);
+    await detectAgentStates([a], { reap: true });
     expect(a.state).toBe("stopped");
     // Both PIDs should be SIGTERMed
     expect(killCalls).toEqual([
@@ -2142,7 +2142,7 @@ describe("detectAgentStates — reapOrphanedClaude", () => {
         created_epoch: Math.floor(Date.now() / 1000) - 3600,
       } as Partial<AgentMeta> as AgentMeta,
     });
-    await detectAgentStates([a]);
+    await detectAgentStates([a], { reap: true });
     expect(killCalls).toEqual([{ pid: 67890, signal: "SIGTERM" }]);
 
     await rm(agentTmp, { recursive: true, force: true });
@@ -2161,7 +2161,7 @@ describe("detectAgentStates — reapOrphanedClaude", () => {
         created_epoch: Math.floor(Date.now() / 1000) - 3600,
       } as Partial<AgentMeta> as AgentMeta,
     });
-    await detectAgentStates([a]);
+    await detectAgentStates([a], { reap: true });
 
     const { readFile } = await import("fs/promises");
     const log = await readFile(logPath, "utf8");
@@ -2230,7 +2230,7 @@ describe("detectAgentStates — claude_pid liveness gate", () => {
         created_epoch: Math.floor(Date.now() / 1000) - 3600,
       } as Partial<AgentMeta> as AgentMeta,
     });
-    await detectAgentStates([a]);
+    await detectAgentStates([a], { reap: true });
     expect(a.state).toBe("running");
     expect(killCalls).toBe(0);
   });
@@ -2274,7 +2274,7 @@ describe("detectAgentStates — claude_pid liveness gate", () => {
         created_epoch: Math.floor(Date.now() / 1000) - 3600,
       } as Partial<AgentMeta> as AgentMeta,
     });
-    await detectAgentStates([a]);
+    await detectAgentStates([a], { reap: true });
     expect(a.state).toBe("stopped");
     // claude_pid was dead → not killed. watchdog_pid was alive → SIGTERMed.
     expect(killCalls).toEqual([{ pid: 67890, signal: "SIGTERM" }]);
@@ -2307,7 +2307,7 @@ describe("detectAgentStates — claude_pid liveness gate", () => {
         created_epoch: Math.floor(Date.now() / 1000) - 1,
       } as Partial<AgentMeta> as AgentMeta,
     });
-    await detectAgentStates([a]);
+    await detectAgentStates([a], { reap: true });
     // The pid liveness gate is skipped during the grace window; falls
     // through to the existing logic. captureTmuxOutput returns benign
     // output, no overrides match, meta.state="running" is trusted.
@@ -2331,7 +2331,7 @@ describe("detectAgentStates — claude_pid liveness gate", () => {
         created_epoch: Math.floor(Date.now() / 1000) - 3600,
       } as Partial<AgentMeta> as AgentMeta,
     });
-    await detectAgentStates([a]);
+    await detectAgentStates([a], { reap: true });
     expect(a.state).toBe("stopped");
     expect(killCalls).toBe(0); // dead PID — no kill issued
   });
@@ -2360,7 +2360,7 @@ describe("detectAgentStates — claude_pid liveness gate", () => {
         created_epoch: Math.floor(Date.now() / 1000) - 3600,
       } as Partial<AgentMeta> as AgentMeta,
     });
-    await detectAgentStates([a]);
+    await detectAgentStates([a], { reap: true });
     expect(a.state).toBe("stopped");
     expect(captureCalls).toBe(0); // complete fast-path still skips capture
   });
@@ -2397,7 +2397,7 @@ describe("detectAgentStates — claude_pid liveness gate", () => {
         created_epoch: Math.floor(Date.now() / 1000) - 3600,
       } as Partial<AgentMeta> as AgentMeta,
     });
-    await detectAgentStates([a]);
+    await detectAgentStates([a], { reap: true });
     expect(a.state).toBe("stopped");
     // Husk session should have been torn down via reapOrphanedClaude.
     expect(killSessionCalls).toEqual(["ib-a1"]);
@@ -2435,9 +2435,9 @@ describe("detectAgentStates — claude_pid liveness gate", () => {
     });
 
     // Three consecutive pollStates ticks over the same stopped agent.
-    await detectAgentStates([a]);
-    await detectAgentStates([a]);
-    await detectAgentStates([a]);
+    await detectAgentStates([a], { reap: true });
+    await detectAgentStates([a], { reap: true });
+    await detectAgentStates([a], { reap: true });
 
     expect(a.state).toBe("stopped");
     // kill-session must have fired exactly ONCE, not once per tick.
@@ -2496,20 +2496,20 @@ describe("detectAgentStates — claude_pid liveness gate", () => {
 
     // Tick 1: stopped husk → kill #1, memo arms ib-a1.
     phase = "stopped";
-    await detectAgentStates([a]);
+    await detectAgentStates([a], { reap: true });
     expect(a.state).toBe("stopped");
     expect(killSessionCalls).toEqual(["ib-a1"]);
 
     // Tick 2: resumed → live pane → running, memo cleared for ib-a1.
     phase = "running";
-    await detectAgentStates([a]);
+    await detectAgentStates([a], { reap: true });
     expect(a.state).toBe("running");
     // No new kill-session on the running tick.
     expect(killSessionCalls).toEqual(["ib-a1"]);
 
     // Tick 3: stopped again → husk teardown re-armed → kill #2.
     phase = "stopped";
-    await detectAgentStates([a]);
+    await detectAgentStates([a], { reap: true });
     expect(a.state).toBe("stopped");
     // The core guarantee: kill-session fired a SECOND time after the resume.
     expect(killSessionCalls).toEqual(["ib-a1", "ib-a1"]);
@@ -2551,9 +2551,9 @@ describe("detectAgentStates — claude_pid liveness gate", () => {
       } as Partial<AgentMeta> as AgentMeta,
     });
 
-    await detectAgentStates([a1, a2]);
+    await detectAgentStates([a1, a2], { reap: true });
     // Re-run: neither should be re-killed.
-    await detectAgentStates([a1, a2]);
+    await detectAgentStates([a1, a2], { reap: true });
 
     expect(killSessionCalls.sort()).toEqual(["ib-a1", "ib-a2"]);
   });
@@ -2580,7 +2580,7 @@ describe("detectAgentStates — claude_pid liveness gate", () => {
         created_epoch: Math.floor(Date.now() / 1000) - 3600,
       } as Partial<AgentMeta> as AgentMeta,
     });
-    await detectAgentStates([a]);
+    await detectAgentStates([a], { reap: true });
     expect(a.state).toBe("running");
     expect(pidChecks).toBe(0);
     expect(killCalls).toBe(0);
@@ -2653,7 +2653,7 @@ describe("detectAgentStates — dead-pane husk handling", () => {
         created_epoch: Math.floor(Date.now() / 1000) - 3600,
       } as Partial<AgentMeta> as AgentMeta,
     });
-    await detectAgentStates([a]);
+    await detectAgentStates([a], { reap: true });
     expect(a.state).toBe("stopped");
     // Husk session should have been torn down
     expect(killSessionCalls).toEqual(["ib-a1"]);
@@ -2701,7 +2701,7 @@ describe("detectAgentStates — dead-pane husk handling", () => {
         created_epoch: Math.floor(Date.now() / 1000) - 1,
       } as Partial<AgentMeta> as AgentMeta,
     });
-    await detectAgentStates([a]);
+    await detectAgentStates([a], { reap: true });
     expect(a.state).toBe("creating");
     expect(killSessionCalls).toEqual([]); // grace window protects husk-kill
     expect(killPidCalls).toBe(0); // reapOrphanedClaude returns early on 'creating'
@@ -3818,7 +3818,7 @@ describe("detectAgentStates — reap option", () => {
     expect(killCalls).toEqual([]);
   });
 
-  test("reap: true (default) — DOES reap when claude_pid reads dead (husk tmux torn down)", async () => {
+  test("reap: true — DOES reap when claude_pid reads dead (husk tmux torn down)", async () => {
     classifySpawnLogCtx.set(async () => ({ kind: "orphan" }));
     isPidAliveCtx.set(() => false);
     killPidCtx.set(() => true);
@@ -3832,11 +3832,31 @@ describe("detectAgentStates — reap option", () => {
         created_epoch: Math.floor(Date.now() / 1000) - 3600,
       } as Partial<AgentMeta> as AgentMeta,
     });
-    // Default (no opts) — reap path active.
-    // The husk tmux teardown is unconditional inside reapOrphanedClaude when
-    // resolvedState === "stopped" and tmux_session is set — proves we reached it.
-    await detectAgentStates([a]);
+    // Explicit opt-in. The husk tmux teardown is unconditional inside
+    // reapOrphanedClaude when resolvedState === "stopped" and tmux_session is
+    // set — proves we reached it.
+    await detectAgentStates([a], { reap: true });
     expect(a.state).toBe("stopped");
     expect(killSessionCalls).toEqual(["ib-a5"]);
+  });
+
+  test("default (no opts) — does NOT reap (opt-in semantics)", async () => {
+    classifySpawnLogCtx.set(async () => ({ kind: "orphan" }));
+    isPidAliveCtx.set(() => false);
+    killPidCtx.set(() => true);
+
+    const a = makeAgent({
+      id: "agent-6",
+      meta: {
+        state: "running",
+        tmux_session: "ib-a6",
+        claude_pid: "12345",
+        created_epoch: Math.floor(Date.now() / 1000) - 3600,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+    // No opts → reap defaults to false. Husk tmux must remain intact.
+    await detectAgentStates([a]);
+    expect(a.state).toBe("stopped");
+    expect(killSessionCalls).toEqual([]);
   });
 });

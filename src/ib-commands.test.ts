@@ -945,6 +945,41 @@ describe("killAgent (native)", () => {
     expect(result.ok).toBe(true);
     expect(result.stdout).toBe("Closed agent: agent-abc");
   });
+
+  test("appends a [kill] line to the system watch log on success", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-loggy");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-loggy",
+      tmux_session: "tmux-agent-loggy",
+      claude_pid: "77777",
+    }));
+
+    const runner = mockSpawnFnWithFailures(spawnCalls, (cmd) =>
+      cmd.includes("has-session") || cmd.includes("pgrep")
+    );
+    lifecycleSpawnCtx.set(runner);
+    setKillPauseSpawnRunner(runner);
+
+    const logPath = join(tempDir, "watch.log");
+    const { setWatchLogPath, resetWatchLogPath } = await import("./watch-log");
+    setWatchLogPath(logPath);
+    try {
+      const agent = makeAgent("agent-loggy", tempDir);
+      const result = await killAgent(agent);
+      expect(result.ok).toBe(true);
+
+      const { readFile } = await import("fs/promises");
+      const log = await readFile(logPath, "utf8");
+      expect(log).toContain("[kill]");
+      expect(log).toContain("agent-loggy");
+      // makeAgent's default claude_pid is "12345"; assert the prefix so we
+      // verify pid= is included without coupling to the helper's literal.
+      expect(log).toMatch(/pid=\d+/);
+    } finally {
+      resetWatchLogPath();
+    }
+  });
 });
 
 describe("pauseAgent (native)", () => {
@@ -1159,6 +1194,39 @@ describe("pauseAgent (native)", () => {
     const second = await pauseAgent(agent2);
     expect(second.ok).toBe(false);
     expect(second.stderr).toContain("already stopped");
+  });
+
+  test("appends a [pause] line to the system watch log on success", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-pauseloggy");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-pauseloggy",
+      tmux_session: "tmux-agent-pauseloggy",
+      claude_pid: "55555",
+    }));
+
+    const runner = mockSpawnFnWithFailures(spawnCalls, (cmd) =>
+      cmd.includes("has-session") || cmd.includes("pgrep")
+    );
+    lifecycleSpawnCtx.set(runner);
+    setKillPauseSpawnRunner(runner);
+
+    const logPath = join(tempDir, "watch.log");
+    const { setWatchLogPath, resetWatchLogPath } = await import("./watch-log");
+    setWatchLogPath(logPath);
+    try {
+      const agent = makeAgent("agent-pauseloggy", tempDir, "waiting");
+      const result = await pauseAgent(agent);
+      expect(result.ok).toBe(true);
+
+      const { readFile } = await import("fs/promises");
+      const log = await readFile(logPath, "utf8");
+      expect(log).toContain("[pause]");
+      expect(log).toContain("agent-pauseloggy");
+      expect(log).toMatch(/pid=\d+/);
+    } finally {
+      resetWatchLogPath();
+    }
   });
 });
 

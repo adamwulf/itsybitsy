@@ -1452,13 +1452,13 @@ export async function detectAgentStates(
   agents: Agent[],
   opts: { reap?: boolean } = {},
 ): Promise<void> {
-  // Read-only callers (ib list, ib roster, ib info, inject-status, etc.) pass
-  // {reap: false}. Inside a codex sandbox, process.kill(pid, 0) on external
-  // PIDs returns EPERM — we now treat that as alive, but a read-only caller
-  // should never SIGTERM another agent's process even if liveness is somehow
-  // misreported. Lifecycle callers (watcher tick, ib resume, ib respawn) keep
-  // the default reap-enabled behavior.
-  const shouldReap = opts.reap !== false;
+  // Reaping is OPT-IN: callers must pass {reap: true} to authorize SIGTERM +
+  // tmux kill-session side-effects. Default is read-only so accidental reads
+  // (especially from inside a codex sandbox, where process.kill(pid, 0) can
+  // return EPERM and falsely look like a dead PID) can never tear down
+  // external agents. Lifecycle callers — watcher tick, ib resume, ib respawn —
+  // explicitly opt in.
+  const shouldReap = opts.reap === true;
 
   // Step 1: archived agents
   for (const agent of agents) {

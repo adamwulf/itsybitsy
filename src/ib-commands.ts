@@ -48,6 +48,7 @@ import {
 } from "./agent-lifecycle";
 import { readConfig } from "./config";
 import { listTmuxSessions } from "./tmux-poller";
+import { logToWatchLog } from "./watch-log";
 import { SpawnContext, InjectionContext } from "./types";
 import type { SpawnFn } from "./types";
 import { isValidModel, isValidToolList, isValidTmuxSession, isValidSessionId, isValidShellPath, isValidAgentId, shellQuote } from "./validation";
@@ -388,6 +389,11 @@ export async function killAgent(agent: Agent): Promise<IbCommandResult> {
   // teammates, `fromAgent` = the departed id (§16.5). Best-effort.
   await emitPerAgentLeaveNotice(prunedTeams, await listRepos());
 
+  logToWatchLog(
+    `[kill] agent=${agent.repoName ? `${agent.repoName}/` : ""}${agent.id} ` +
+    `tmux=${tmuxSession || "<none>"} pid=${agent.meta.claude_pid || "<none>"}`
+  );
+
   return { ok: true, exitCode: 0, stdout: `Closed agent: ${agent.id}`, stderr: "" };
 }
 
@@ -563,6 +569,11 @@ export async function nukeAgent(agent: Agent): Promise<IbCommandResult> {
   if (orphansKilled > 0) stdout += `, cleaned ${orphansKilled} orphaned session(s)`;
   if (failed > 0) stdout += ` (${failed} failed)`;
 
+  logToWatchLog(
+    `[nuke] root=${agent.repoName ? `${agent.repoName}/` : ""}${agent.id} ` +
+    `killed=${killed} failed=${failed} orphans=${orphansKilled}`
+  );
+
   return { ok: true, exitCode: 0, stdout, stderr: "" };
 }
 
@@ -594,6 +605,10 @@ export async function nukeAllAgents(repoPath: string): Promise<IbCommandResult> 
   let stdout = `Nuked ${killed} agent(s)`;
   if (orphansKilled > 0) stdout += `, cleaned ${orphansKilled} orphaned session(s)`;
   if (failed > 0) stdout += ` (${failed} failed)`;
+
+  logToWatchLog(
+    `[nuke-all] repo=${repoPath} killed=${killed} failed=${failed} orphans=${orphansKilled}`
+  );
 
   return { ok: true, exitCode: 0, stdout, stderr: "" };
 }
@@ -2773,10 +2788,9 @@ export async function roster(name: string, repos: RepoEntry[]): Promise<IbComman
   // live detected state (§16.3: "state read via detectAgentStates()") instead of
   // the uniform "unknown" readAllAgents assigns.
   const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })));
-  // Read-only display: don't reap. detectAgentStates would otherwise SIGTERM
-  // any PID misreported as dead — and inside a codex sandbox `kill(pid, 0)`
-  // against an external agent's PID can return EPERM (we now treat that as
-  // alive, but `roster` should never side-effect either way).
+  // Read-only display: explicitly opt out of reaping. detectAgentStates
+  // defaults to reap-disabled, but pass {reap: false} to make intent
+  // unambiguous — `roster` must never side-effect agents.
   await detectAgentStates(agents, { reap: false });
   const byId = new Map(agents.map((a) => [a.id, a]));
   // The liveness predicate RECOMPUTES the live set on each call rather than
@@ -4356,6 +4370,11 @@ ${qStartExitScript}
   // 23. Generate prompt summary in background (fire-and-forget)
   generatePromptSummary(agentDir).catch(() => {});
 
+  logToWatchLog(
+    `[spawn] agent=${id} type=${typeName} cli=${agentCli} model=${modelFlagValue ?? "<default>"} ` +
+    `tmux=${tmuxSession} repo=${rootRepoPath}`
+  );
+
   return { ok: true, exitCode: 0, stdout, stderr: "" };
 }
 
@@ -4804,6 +4823,11 @@ export async function pauseAgent(agent: Agent): Promise<IbCommandResult> {
 
   // Log the pause
   await logAgent(agentDir, "Agent paused");
+
+  logToWatchLog(
+    `[pause] agent=${agent.repoName ? `${agent.repoName}/` : ""}${agent.id} ` +
+    `tmux=${tmuxSession || "<none>"} pid=${agent.meta.claude_pid || "<none>"}`
+  );
 
   return {
     ok: true,

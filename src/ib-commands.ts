@@ -1956,7 +1956,11 @@ export async function mergeAgent(agent: Agent, targetDir: string): Promise<IbCom
     // 12-13. Kill Claude process + tmux session
     await timed("merge", "tmux-cleanup", async () => {
       await logAgent(agentDir, "Terminating Claude process...");
-      const killed = await killAgentProcess(tmuxSession, { claude_pid: agent.meta.claude_pid });
+      const killed = await killAgentProcess(
+        tmuxSession,
+        { claude_pid: agent.meta.claude_pid },
+        { agentId: agent.id, repoName: agent.repoName },
+      );
       if (killed) {
         await logAgent(agentDir, "Claude process terminated");
       }
@@ -4786,7 +4790,11 @@ export async function pauseAgent(agent: Agent): Promise<IbCommandResult> {
 
   // Kill Claude process
   await logAgent(agentDir, `Pausing agent (state=${agent.state}, pid=${agent.meta.claude_pid ?? "none"}, tmux=${tmuxSession ?? "none"})`);
-  const killed = await killAgentProcess(tmuxSession, { claude_pid: agent.meta.claude_pid });
+  const killed = await killAgentProcess(
+    tmuxSession,
+    { claude_pid: agent.meta.claude_pid },
+    { agentId: agent.id, repoName: agent.repoName },
+  );
   if (killed) {
     await logAgent(agentDir, "Terminated Claude process");
   } else {

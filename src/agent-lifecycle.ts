@@ -8,7 +8,7 @@ import { join, dirname, resolve } from "path";
 import { readdir, mkdir, cp, rm, rename, appendFile } from "fs/promises";
 import { SpawnContext } from "./types";
 import { isValidTmuxSession } from "./validation";
-import { deleteAgentTransient } from "./agents";
+import { deleteAgentTransient, terminateProcess } from "./agents";
 import { deleteAgentOutbox, agentOutboxDir } from "./outbox";
 import { pruneAgentFromAllTeams } from "./teams";
 
@@ -90,18 +90,37 @@ export interface KillAgentMeta {
   claude_pid?: string;
 }
 
+/** Optional log-enrichment context for {@link killAgentProcess}. Threaded
+ *  through to {@link terminateProcess} so the resulting `[terminate]` line
+ *  carries agent/repo provenance. All callers SHOULD pass this when known —
+ *  the optional shape is purely for backward compatibility with the test
+ *  surface that already exercises the function without an agent.
+ */
+export interface KillAgentLogContext {
+  agentId?: string;
+  repoName?: string;
+}
+
 /**
  * Kill the Claude process for an agent.
  *
  * Strategy 1: tmux list-panes pane_pid -> pgrep -P for claude
  * Strategy 2: claude_pid from meta
  *
- * SIGTERM + wait up to 2s + SIGKILL if still alive.
- * Returns true if killed (or already dead), false if no PID found.
+ * Delegates the SIGTERM → wait → SIGKILL escalation to the canonical
+ * {@link terminateProcess} funnel in src/agents.ts, which writes a
+ * `[terminate] label=claude …` line to watch.log per call and uses the
+ * EPERM-aware liveness probe (so a sandboxed view of an unsignal-able PID is
+ * not misread as already-dead, the bug that originally motivated this
+ * refactor).
+ *
+ * Returns true if the process was killed (or was already dead), false if no
+ * PID could be resolved or the kill failed.
  */
 export async function killAgentProcess(
   tmuxSession: string,
-  meta: KillAgentMeta
+  meta: KillAgentMeta,
+  logCtx: KillAgentLogContext = {}
 ): Promise<boolean> {
   if (!isValidTmuxSession(tmuxSession)) {
     console.error(`[agent-lifecycle] Invalid tmux session name: ${tmuxSession}`);
@@ -137,43 +156,14 @@ export async function killAgentProcess(
   const numPid = parseInt(pid, 10);
   if (isNaN(numPid)) return false;
 
-  // Check if process is still running
-  try {
-    process.kill(numPid, 0);
-  } catch {
-    return true; // Already dead
-  }
-
-  // SIGTERM
-  try {
-    process.kill(numPid, "SIGTERM");
-  } catch { /* expected: process already dead or no permission */
-    return false;
-  }
-
-  // Wait up to 2 seconds (20 × 100ms)
-  for (let i = 0; i < 20; i++) {
-    await Bun.sleep(100);
-    try {
-      process.kill(numPid, 0);
-    } catch {
-      return true; // Dead
-    }
-  }
-
-  // SIGKILL if still alive
-  try {
-    process.kill(numPid, "SIGKILL");
-    await Bun.sleep(100);
-  } catch { /* ignore */ }
-
-  // Final check
-  try {
-    process.kill(numPid, 0);
-    return false; // Still alive somehow
-  } catch { /* expected: process is dead after SIGKILL */
-    return true;
-  }
+  const result = await terminateProcess({
+    pid: numPid,
+    label: "claude",
+    agentId: logCtx.agentId,
+    repoName: logCtx.repoName,
+    tmuxSession,
+  });
+  return result.killed;
 }
 
 // ── captureTmuxOutputToFile ──────────────────────────────────────────────────
@@ -371,7 +361,7 @@ export async function teardownAgent(
   }
 
   // 3. Kill Claude process
-  const killed = await killAgentProcess(tmuxSession, meta);
+  const killed = await killAgentProcess(tmuxSession, meta, { agentId });
   if (killed) {
     await logAgent(agentDir, "Terminated Claude process");
   }
@@ -476,28 +466,17 @@ export async function scanAndKillOrphans(agentsDir: string): Promise<number> {
       continue; // Dir exists — not an orphan
     } catch { /* dir doesn't exist — orphan confirmed */ }
 
-    // Kill the orphan
-    try {
-      process.kill(pid, "SIGTERM");
-      for (let i = 0; i < 20; i++) {
-        await Bun.sleep(100);
-        try {
-          process.kill(pid, 0);
-        } catch {
-          killedCount++;
-          break;
-        }
-        if (i === 19) {
-          try { process.kill(pid, "SIGKILL"); } catch { /* ignore */ }
-          await Bun.sleep(100);
-          try {
-            process.kill(pid, 0);
-          } catch {
-            killedCount++;
-          }
-        }
-      }
-    } catch { /* ignore */ }
+    // Kill the orphan via the canonical funnel — extract the agent id from
+    // the cwd path so the watch.log line carries provenance.
+    const idMatch = agentPath.match(/\/agents\/([^/]+)$/);
+    const orphanAgentId = idMatch ? idMatch[1] : undefined;
+    const result = await terminateProcess({
+      pid,
+      label: "lifecycle-orphan",
+      agentId: orphanAgentId,
+      reason: "agent-dir-deleted",
+    });
+    if (result.killed && result.outcome !== "not-alive") killedCount++;
   }
 
   return killedCount;

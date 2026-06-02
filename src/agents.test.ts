@@ -42,6 +42,8 @@ import {
   TRANSIENT_FRESH_MS,
   OP_STUCK_TIMEOUT_MS,
   _isPidAliveForTests,
+  terminateProcess,
+  sleepMsCtx,
 } from "./agents";
 import type { TransientState, AgentOperation } from "./agents";
 import { spawnCtx as tmuxPollerSpawnCtx } from "./tmux-poller";
@@ -3858,5 +3860,170 @@ describe("detectAgentStates — reap option", () => {
     await detectAgentStates([a]);
     expect(a.state).toBe("stopped");
     expect(killSessionCalls).toEqual([]);
+  });
+});
+
+// ── terminateProcess — canonical kill funnel ─────────────────────────────────
+//
+// Verifies the structural fix: every kill site outside agents.ts now routes
+// through terminateProcess, which itself uses isPidAliveCtx + killPidCtx.
+// The EPERM-as-alive regression — fixed in _isPidAlive — is the load-bearing
+// behaviour that makes these tests meaningful.
+describe("terminateProcess", () => {
+  let tmpLogDir: string;
+  let logPath: string;
+
+  beforeEach(async () => {
+    tmpLogDir = await mkdtemp(join(tmpdir(), "terminate-process-log-"));
+    logPath = join(tmpLogDir, "watch.log");
+    const { setWatchLogPath } = await import("./watch-log");
+    setWatchLogPath(logPath);
+    // Make grace-period sleeps a no-op so escalation runs instantly.
+    sleepMsCtx.set(async () => {});
+  });
+
+  afterEach(async () => {
+    isPidAliveCtx.reset();
+    killPidCtx.reset();
+    sleepMsCtx.reset();
+    const { resetWatchLogPath } = await import("./watch-log");
+    resetWatchLogPath();
+    await rm(tmpLogDir, { recursive: true, force: true });
+  });
+
+  test("happy path: PID alive → SIGTERM lands → exits in grace → killed, not escalated", async () => {
+    let alive = true;
+    isPidAliveCtx.set(() => alive);
+    const calls: Array<{ pid: number; signal: NodeJS.Signals | number }> = [];
+    killPidCtx.set((pid, signal) => {
+      calls.push({ pid, signal });
+      if (signal === "SIGTERM") alive = false; // SIGTERM lands → process exits
+      return true;
+    });
+
+    const result = await terminateProcess({
+      pid: 4242,
+      label: "test-claude",
+      agentId: "agent-abc",
+      repoName: "myrepo",
+      tmuxSession: "ib-x",
+    });
+
+    expect(result).toEqual({ outcome: "term-exited", killed: true, escalated: false });
+    expect(calls).toEqual([{ pid: 4242, signal: "SIGTERM" }]);
+
+    const { readFile } = await import("fs/promises");
+    const log = await readFile(logPath, "utf8");
+    expect(log).toContain("[terminate] outcome=term-exited");
+    expect(log).toContain("label=test-claude");
+    expect(log).toContain("agent=myrepo/agent-abc");
+    expect(log).toContain("pid=4242");
+    expect(log).toContain("tmux=ib-x");
+  });
+
+  test("escalation: PID stays alive after SIGTERM → SIGKILL fires → killed + escalated", async () => {
+    let alive = true;
+    isPidAliveCtx.set(() => alive);
+    const calls: Array<{ pid: number; signal: NodeJS.Signals | number }> = [];
+    killPidCtx.set((pid, signal) => {
+      calls.push({ pid, signal });
+      if (signal === "SIGKILL") alive = false; // only SIGKILL succeeds
+      return true;
+    });
+
+    const result = await terminateProcess({
+      pid: 1234,
+      label: "stuck-proc",
+      gracePeriodMs: 200, // 2 polls → fast
+    });
+
+    expect(result).toEqual({ outcome: "kill-exited", killed: true, escalated: true });
+    expect(calls).toEqual([
+      { pid: 1234, signal: "SIGTERM" },
+      { pid: 1234, signal: "SIGKILL" },
+    ]);
+
+    const { readFile } = await import("fs/promises");
+    const log = await readFile(logPath, "utf8");
+    expect(log).toContain("[terminate] outcome=kill-exited");
+  });
+
+  test("already-dead: liveness probe returns false → no signal sent → not-alive", async () => {
+    isPidAliveCtx.set(() => false);
+    let killCalls = 0;
+    killPidCtx.set(() => { killCalls++; return true; });
+
+    const result = await terminateProcess({ pid: 999, label: "dead" });
+
+    expect(result).toEqual({ outcome: "not-alive", killed: true, escalated: false });
+    expect(killCalls).toBe(0);
+
+    const { readFile } = await import("fs/promises");
+    const log = await readFile(logPath, "utf8");
+    expect(log).toContain("[terminate] outcome=not-alive");
+  });
+
+  // The original EPERM-as-dead bug: a sandboxed view of a foreign PID returns
+  // EPERM from process.kill(pid, 0). Before the fix, callers treated EPERM as
+  // "already dead" and silently skipped SIGTERM. Inject isPidAliveCtx → true
+  // (mimicking the canonical _isPidAlive's EPERM-aware behaviour) and verify
+  // SIGTERM is actually sent.
+  test("EPERM-as-alive: probe returns true → SIGTERM IS sent (regression)", async () => {
+    isPidAliveCtx.set(() => true); // stays alive throughout — escalation path
+    const calls: Array<{ pid: number; signal: NodeJS.Signals | number }> = [];
+    killPidCtx.set((pid, signal) => {
+      calls.push({ pid, signal });
+      return true;
+    });
+
+    const result = await terminateProcess({
+      pid: 5555,
+      label: "claude",
+      agentId: "agent-eperm",
+      gracePeriodMs: 100,
+    });
+
+    // SIGTERM MUST have been sent — pre-fix code would have early-returned
+    // with "already dead" on the same EPERM and never sent any signal.
+    expect(calls).toContainEqual({ pid: 5555, signal: "SIGTERM" });
+    // Final state: liveness still says alive (stub never flips) → SIGKILL
+    // also fires and final outcome is kill-failed.
+    expect(calls).toContainEqual({ pid: 5555, signal: "SIGKILL" });
+    expect(result.escalated).toBe(true);
+    expect(result.outcome).toBe("kill-failed");
+  });
+
+  test("invalid pid (NaN / 0 / negative) → no signals, not-alive outcome", async () => {
+    isPidAliveCtx.set(() => true);
+    let killCalls = 0;
+    killPidCtx.set(() => { killCalls++; return true; });
+
+    const r1 = await terminateProcess({ pid: NaN, label: "bad" });
+    const r2 = await terminateProcess({ pid: 0, label: "bad" });
+    const r3 = await terminateProcess({ pid: -1, label: "bad" });
+
+    expect(r1.outcome).toBe("not-alive");
+    expect(r2.outcome).toBe("not-alive");
+    expect(r3.outcome).toBe("not-alive");
+    expect(killCalls).toBe(0);
+  });
+
+  test("term-failed: SIGTERM syscall returns false → no escalation", async () => {
+    isPidAliveCtx.set(() => true);
+    const calls: Array<{ pid: number; signal: NodeJS.Signals | number }> = [];
+    killPidCtx.set((pid, signal) => {
+      calls.push({ pid, signal });
+      return false; // SIGTERM fails
+    });
+
+    const result = await terminateProcess({ pid: 7777, label: "term-fail" });
+
+    expect(result).toEqual({ outcome: "term-failed", killed: false, escalated: false });
+    // No SIGKILL — escalation only happens if SIGTERM landed.
+    expect(calls).toEqual([{ pid: 7777, signal: "SIGTERM" }]);
+
+    const { readFile } = await import("fs/promises");
+    const log = await readFile(logPath, "utf8");
+    expect(log).toContain("[terminate] outcome=term-failed");
   });
 });

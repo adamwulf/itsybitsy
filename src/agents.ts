@@ -1360,6 +1360,166 @@ export const killPidCtx = new InjectionContext<(pid: number, signal: NodeJS.Sign
 /** Injectable Date.now for tests. */
 export const nowMsCtx = new InjectionContext<() => number>(() => Date.now());
 
+/** Injectable sleep for tests — used by {@link terminateProcess} to wait
+ *  between SIGTERM and the post-grace liveness check. Default is `Bun.sleep`.
+ *  Tests override this with a stub so escalation paths run instantly. */
+export const sleepMsCtx = new InjectionContext<(ms: number) => Promise<void>>((ms) => Bun.sleep(ms));
+
+/** Outcome string written to watch.log + returned by {@link terminateProcess}.
+ *
+ *  - `not-alive`     — PID was already dead at entry; no signal sent.
+ *  - `term-failed`   — SIGTERM syscall failed (race: process died between the
+ *                       liveness probe and the kill call).
+ *  - `term-exited`   — SIGTERM landed and the process exited within the grace
+ *                       window. No SIGKILL needed.
+ *  - `kill-exited`   — SIGTERM did not land the process inside the grace
+ *                       window, so SIGKILL was sent and the process is now
+ *                       dead.
+ *  - `kill-failed`   — SIGKILL was sent but the final liveness probe still
+ *                       returns alive. Process is stuck (e.g. ptraced, kernel
+ *                       wedge) — caller should log and move on. */
+export type TerminateOutcome =
+  | "not-alive"
+  | "term-failed"
+  | "term-exited"
+  | "kill-exited"
+  | "kill-failed";
+
+/** Options for {@link terminateProcess}. */
+export interface TerminateProcessOptions {
+  /** PID to terminate. Must be a finite positive integer. */
+  pid: number;
+  /** Short label identifying the call site for watch.log ([terminate] label=…).
+   *  Recommended values: "claude", "lifecycle-orphan", "coordinator-prune". */
+  label: string;
+  /** Optional agent id for log enrichment. Repo-prefixed at log time iff
+   *  `repoName` is also supplied. */
+  agentId?: string;
+  /** Optional repo name for log enrichment. */
+  repoName?: string;
+  /** Optional tmux session name for log enrichment. */
+  tmuxSession?: string;
+  /** How long (ms) to wait after SIGTERM before escalating to SIGKILL.
+   *  Defaults to 2000 ms (20 × 100 ms polls). */
+  gracePeriodMs?: number;
+  /** Free-form reason string captured in the watch.log entry (e.g. the
+   *  resolvedState that triggered the kill). Optional. */
+  reason?: string;
+}
+
+/** Result returned by {@link terminateProcess}. */
+export interface TerminateProcessResult {
+  outcome: TerminateOutcome;
+  /** True iff the process is dead at the end of the call (outcomes
+   *  not-alive | term-exited | kill-exited). */
+  killed: boolean;
+  /** True iff SIGKILL was sent (outcomes kill-exited | kill-failed). */
+  escalated: boolean;
+}
+
+/**
+ * The canonical kill funnel: orchestrate the SIGTERM → wait → SIGKILL
+ * escalation pattern using the canonical {@link isPidAliveCtx} +
+ * {@link killPidCtx} wrappers, and emit a single rich `[terminate]` line to
+ * watch.log per call.
+ *
+ * Every code path that wants to terminate a process MUST route through this
+ * function (or directly through `killPidCtx.fn` if SIGTERM/SIGKILL
+ * orchestration is intentionally not wanted — but such cases should be
+ * documented). Direct `process.kill(pid, …)` calls outside src/agents.ts are
+ * forbidden — the EPERM-as-dead misclassification only stays fixed if there
+ * is exactly one place that turns kill syscalls into "alive/dead" booleans.
+ *
+ * Behaviour:
+ *   1. Validate the PID. If not finite or ≤ 0 → log + return `not-alive`.
+ *   2. Probe liveness via `isPidAliveCtx.fn(pid)`. The injected probe handles
+ *      EPERM-as-alive — inside a sandbox, signal 0 against an unsignal-able
+ *      PID returns EPERM and the probe correctly reports `true` (alive).
+ *      If not alive → return `not-alive` and skip the kill.
+ *   3. SIGTERM via `killPidCtx.fn(pid, "SIGTERM")`. If the syscall fails
+ *      (race: process died between probe and SIGTERM, or genuine EPERM on
+ *      the signal) → return `term-failed`.
+ *   4. Poll `isPidAliveCtx.fn(pid)` every 100 ms for up to `gracePeriodMs`
+ *      (default 2 s, so 20 iterations). If the probe reports dead → return
+ *      `term-exited`.
+ *   5. SIGKILL via `killPidCtx.fn(pid, "SIGKILL")`, sleep 100 ms for the
+ *      kernel to reap.
+ *   6. Final liveness check. Dead → `kill-exited`. Still alive → `kill-failed`.
+ *
+ * watch.log: exactly one line per call, format:
+ *   `[terminate] outcome=<…> label=<…> agent=<repo/id|<none>> pid=<n>`
+ *   `tmux=<session|<none>> reason=<…|<none>>`
+ *
+ * Returns `{outcome, killed, escalated}` — see {@link TerminateProcessResult}.
+ */
+export async function terminateProcess(
+  opts: TerminateProcessOptions
+): Promise<TerminateProcessResult> {
+  const {
+    pid,
+    label,
+    agentId,
+    repoName,
+    tmuxSession,
+    gracePeriodMs = 2_000,
+    reason,
+  } = opts;
+
+  const agentLabel = agentId
+    ? (repoName ? `${repoName}/${agentId}` : agentId)
+    : "<none>";
+  const tmuxLabel = tmuxSession || "<none>";
+  const reasonLabel = reason || "<none>";
+
+  const log = (outcome: TerminateOutcome): void => {
+    logToWatchLog(
+      `[terminate] outcome=${outcome} label=${label} agent=${agentLabel} ` +
+      `pid=${pid} tmux=${tmuxLabel} reason=${reasonLabel}`
+    );
+  };
+
+  // 1. Validate
+  if (!Number.isFinite(pid) || pid <= 0) {
+    log("not-alive");
+    return { outcome: "not-alive", killed: true, escalated: false };
+  }
+
+  // 2. Liveness probe — EPERM-aware
+  if (!isPidAliveCtx.fn(pid)) {
+    log("not-alive");
+    return { outcome: "not-alive", killed: true, escalated: false };
+  }
+
+  // 3. SIGTERM
+  if (!killPidCtx.fn(pid, "SIGTERM")) {
+    log("term-failed");
+    return { outcome: "term-failed", killed: false, escalated: false };
+  }
+
+  // 4. Wait up to gracePeriodMs in 100 ms slices
+  const POLL_INTERVAL_MS = 100;
+  const iterations = Math.max(1, Math.ceil(gracePeriodMs / POLL_INTERVAL_MS));
+  for (let i = 0; i < iterations; i++) {
+    await sleepMsCtx.fn(POLL_INTERVAL_MS);
+    if (!isPidAliveCtx.fn(pid)) {
+      log("term-exited");
+      return { outcome: "term-exited", killed: true, escalated: false };
+    }
+  }
+
+  // 5. SIGKILL escalation
+  killPidCtx.fn(pid, "SIGKILL");
+  await sleepMsCtx.fn(POLL_INTERVAL_MS);
+
+  // 6. Final check
+  if (!isPidAliveCtx.fn(pid)) {
+    log("kill-exited");
+    return { outcome: "kill-exited", killed: true, escalated: true };
+  }
+  log("kill-failed");
+  return { outcome: "kill-failed", killed: false, escalated: true };
+}
+
 /**
  * Reap an orphaned Claude process AND its watchdog: when an agent's tmux
  * session is gone, the Claude process and its per-agent watchdog are no

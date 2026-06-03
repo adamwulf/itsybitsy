@@ -10,7 +10,7 @@ import type { FolderItem } from "./folder-browser";
 import { RESET, BOLD, DIM, REVERSE, GREEN, DIM_GRAY } from "./colors";
 import { resolvePasteText, cancelPaste, sanitizePasteForSingleLine } from "./clipboard";
 import { TextBuffer, deleteWord } from "./text-buffer";
-import { sanitizeAgentNameInput } from "../ib-commands";
+import { sanitizeAgentNameInput } from "../validation";
 
 export const TEXTAREA_VISIBLE_HEIGHT = 5;
 export const FOLDER_BROWSER_HEIGHT = 15;

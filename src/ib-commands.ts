@@ -142,17 +142,6 @@ export function validateAgentName(name: string, repos: RepoEntry[]): string | nu
   return null;
 }
 
-/**
- * Input-time filter for agent-name fields (new-agent Name field, nickname
- * dialog). Replaces every character outside `[a-zA-Z0-9-]` with `-`. Stricter
- * than {@link validateAgentName} — the validator also accepts underscore for
- * back-compat with names already on disk — but the input filter only emits
- * what is unambiguously a fresh, idiomatic name.
- */
-export function sanitizeAgentNameInput(text: string): string {
-  return text.replace(/[^a-zA-Z0-9-]/g, "-");
-}
-
 
 /**
  * Write meta.json atomically (write .tmp + rename). Mirrors the pattern in

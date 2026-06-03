@@ -25,6 +25,17 @@ export function isValidAgentId(value: string): boolean {
   return /^[a-zA-Z0-9_-]+$/.test(value);
 }
 
+/**
+ * Input-time filter for agent-name fields (new-agent Name field, nickname
+ * dialog). Replaces every character outside `[a-zA-Z0-9-]` with `-`. Stricter
+ * than `validateAgentName` — the validator also accepts underscore for
+ * back-compat with names already on disk — but the input filter only emits
+ * what is unambiguously a fresh, idiomatic name.
+ */
+export function sanitizeAgentNameInput(text: string): string {
+  return text.replace(/[^a-zA-Z0-9-]/g, "-");
+}
+
 /** Validate a tmux session name: alphanumeric, hyphens, underscores only. */
 export function isValidTmuxSession(value: string): boolean {
   return /^[a-zA-Z0-9_-]+$/.test(value);

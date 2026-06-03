@@ -17,8 +17,8 @@ import {
   installSafetyHooks, uninstallSafetyHooks,
   installInterceptHook, uninstallInterceptHook,
   teamCreate, teamAdd, teamDelete, teamRemove,
-  sanitizeAgentNameInput,
 } from "../ib-commands";
+import { sanitizeAgentNameInput } from "../validation";
 import type { NewAgentOptions, IbCommandResult } from "../ib-commands";
 import { captureTmuxOutput, resizeTmuxWindow, killTmuxSession, sendTmuxEscape } from "../tmux-poller";
 import { parseStateForCli } from "../parse-state";

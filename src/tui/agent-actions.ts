@@ -594,6 +594,9 @@ export function handleRename(ctx: ActionCtx) {
     // empty Enter already means "clear" (a no-op when none exists) — pre-filling
     // the id would make Enter-unchanged submit nickname==id, which is rejected.
     value: agent.meta.nickname ?? "",
+    // Same filter as the new-agent Name field: keep [a-zA-Z0-9-], replace
+    // anything else (including spaces and newlines from paste) with '-'.
+    sanitize: (text: string) => text.replace(/[^a-zA-Z0-9-]/g, "-"),
     onSubmit: (value: string) => {
       ctx.closeDialog();
       const trimmed = value.trim();

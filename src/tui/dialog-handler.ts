@@ -20,7 +20,7 @@ type DialogCommon = { width?: number };
 // Dialog types for agent actions
 export type DialogState =
   | ({ type: "confirm"; prompt: string; confirmLabel: string; focusedButton: "confirm" | "cancel"; confirmColor?: string; onYes: () => void } & DialogCommon)
-  | ({ type: "input"; prompt: string; value: string; onSubmit: (value: string) => void } & DialogCommon)
+  | ({ type: "input"; prompt: string; value: string; onSubmit: (value: string) => void; sanitize?: (text: string) => string } & DialogCommon)
   | ({ type: "select"; prompt: string; items: string[]; selectedIndex: number; onSelect: (index: number) => void } & DialogCommon)
   | ({
       type: "multi-select";
@@ -211,15 +211,17 @@ export function handleDialogInput(ctx: DialogCtx, data: string): boolean {
       dialog.value = dialog.value.slice(0, -1);
       ctx.tui?.requestRender();
     } else {
+      const sanitize = dialog.sanitize;
       const pasteApply = (text: string) => {
-        dialog.value += sanitizePasteForSingleLine(text);
+        const cleaned = sanitizePasteForSingleLine(text);
+        dialog.value += sanitize ? sanitize(cleaned) : cleaned;
         ctx.tui?.requestRender();
       };
       const pasteText = resolvePasteText(data, pasteApply);
       if (pasteText !== null) {
         pasteApply(pasteText);
       } else if (data.length === 1 && data >= " ") {
-        dialog.value += data;
+        dialog.value += sanitize ? sanitize(data) : data;
         ctx.tui?.requestRender();
       }
     }

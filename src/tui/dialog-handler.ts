@@ -10,6 +10,7 @@ import type { FolderItem } from "./folder-browser";
 import { RESET, BOLD, DIM, REVERSE, GREEN, DIM_GRAY } from "./colors";
 import { resolvePasteText, cancelPaste, sanitizePasteForSingleLine } from "./clipboard";
 import { TextBuffer, deleteWord } from "./text-buffer";
+import { sanitizeAgentNameInput } from "../ib-commands";
 
 export const TEXTAREA_VISIBLE_HEIGHT = 5;
 export const FOLDER_BROWSER_HEIGHT = 15;
@@ -412,18 +413,15 @@ function handleNewAgentFormDialog(
       d.name = d.name.slice(0, -1);
       ctx.tui?.requestRender();
     } else {
-      // Paste support for name field: sanitize to alphanumeric and '-'
-      const sanitizeName = (text: string) => text.replace(/[^a-zA-Z0-9-]/g, "-");
       const namePasteApply = (text: string) => {
-        d.name += sanitizeName(text.replace(/[\r\n]/g, "-"));
+        d.name += sanitizeAgentNameInput(text.replace(/[\r\n]/g, "-"));
         ctx.tui?.requestRender();
       };
       const namePaste = resolvePasteText(data, namePasteApply);
       if (namePaste !== null) {
         namePasteApply(namePaste);
       } else if (data.length === 1 && data >= " ") {
-        // Allow only alphanumeric and '-'; replace anything else with '-'
-        d.name += /^[a-zA-Z0-9-]$/.test(data) ? data : "-";
+        d.name += sanitizeAgentNameInput(data);
         ctx.tui?.requestRender();
       }
     }

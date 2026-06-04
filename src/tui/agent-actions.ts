@@ -18,6 +18,7 @@ import {
   installInterceptHook, uninstallInterceptHook,
   teamCreate, teamAdd, teamDelete, teamRemove,
 } from "../ib-commands";
+import { sanitizeAgentNameInput } from "../validation";
 import type { NewAgentOptions, IbCommandResult } from "../ib-commands";
 import { captureTmuxOutput, resizeTmuxWindow, killTmuxSession, sendTmuxEscape } from "../tmux-poller";
 import { parseStateForCli } from "../parse-state";
@@ -594,6 +595,7 @@ export function handleRename(ctx: ActionCtx) {
     // empty Enter already means "clear" (a no-op when none exists) — pre-filling
     // the id would make Enter-unchanged submit nickname==id, which is rejected.
     value: agent.meta.nickname ?? "",
+    sanitize: sanitizeAgentNameInput,
     onSubmit: (value: string) => {
       ctx.closeDialog();
       const trimmed = value.trim();

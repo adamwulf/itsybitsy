@@ -631,7 +631,7 @@ describe("teams: command layer (create/add/remove/list/delete/roster/send)", () 
   // therefore drop it from teams.json instead of treating it as alive.
   test("teamSend prunes an ARCHIVED member (liveAgentIds excludes archived agents)", async () => {
     await teamCreate("backend");
-    const liveDir = await plantAgent("agent-keep");
+    await plantAgent("agent-keep");
     // Plant an archived agent: same meta.json shape, but under archive/, not agents/.
     // readAllAgents(repos, false) must NOT surface it → liveAgentIds drops it → prune.
     const archivedDir = join(repoDir, ".ittybitty", "archive", "agent-archived");

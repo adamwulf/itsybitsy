@@ -1347,6 +1347,11 @@ describe("isApiError", () => {
     expect(isApiError(output)).toBe(true);
   });
 
+  test("detects socket connection closed unexpectedly", () => {
+    const output = "  ⎿  API Error: The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()";
+    expect(isApiError(output)).toBe(true);
+  });
+
   test("detects server-side transient throttle (not usage limit)", () => {
     const output = "  ⎿  API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited";
     expect(isApiError(output)).toBe(true);

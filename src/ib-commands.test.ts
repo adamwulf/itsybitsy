@@ -5007,6 +5007,32 @@ describe("newAgent (native)", () => {
     }
   });
 
+  test("K5: allows --name matching an ARCHIVED agent's nickname", async () => {
+    const originalHome = process.env.HOME;
+    const fakeHome = await mkdtemp(join(tmpdir(), "ib-nick-collision-archived-"));
+    process.env.HOME = fakeHome;
+    try {
+      await mkdir(join(fakeHome, ".itsybitsy"), { recursive: true });
+      await Bun.write(join(fakeHome, ".itsybitsy", "repos.json"), JSON.stringify({
+        repos: [{ path: tempDir, name: "nick-repo" }],
+      }));
+      await (await import("./agent-types")).ensureAgentTypesDir();
+      // Plant an ARCHIVED agent whose nickname is "taken" — should NOT block reuse.
+      const archiveDir = join(tempDir, ".ittybitty", "archive", "agent-archived");
+      await mkdir(archiveDir, { recursive: true });
+      await Bun.write(join(archiveDir, "meta.json"), JSON.stringify({ id: "agent-archived", nickname: "taken", tmux_session: "t-archived" }));
+      resetReadAgentMetaCache();
+
+      setNewAgentSpawnRunner(mockSpawnRunner());
+      const result = await callNewAgent("task", { name: "taken" });
+      expect(result.ok).toBe(true);
+    } finally {
+      if (originalHome === undefined) delete process.env.HOME;
+      else process.env.HOME = originalHome;
+      await rm(fakeHome, { recursive: true, force: true });
+    }
+  });
+
   // --- Spawn logging tests ---
 
   test("spawn log: writes [spawn] lines to spawnee agent.log on success", async () => {

@@ -3703,7 +3703,7 @@ export async function newAgent(
     const { agents: existingAgents } = await readAllAgents(
       repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })),
     );
-    const nickCollision = existingAgents.find((a) => a.meta.nickname === id);
+    const nickCollision = existingAgents.find((a) => !a.archived && a.meta.nickname === id);
     if (nickCollision) {
       return { ok: false, exitCode: 1, stdout: "", stderr: `Error: agent name "${id}" collides with an existing agent nickname (${nickCollision.id})` };
     }

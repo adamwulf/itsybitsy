@@ -529,7 +529,7 @@ describe("teams: command layer (create/add/remove/list/delete/roster/send)", () 
   // --- teamSend (fan-out) -------------------------------------------------
 
   async function resolvedMembers(ids: string[]): Promise<Agent[]> {
-    const { agents } = await readAllAgents(repos());
+    const { agents } = await readAllAgents(repos(), false);
     const byId = new Map(agents.map((a) => [a.id, a]));
     return ids.map((id) => byId.get(id)).filter((a): a is Agent => Boolean(a));
   }
@@ -621,6 +621,32 @@ describe("teams: command layer (create/add/remove/list/delete/roster/send)", () 
 
     // Live member received it and survived; dead member pruned.
     expect((await readOutbox(queueDirOf("agent-keep"))).length).toBe(1);
+    const team = await getTeam("backend");
+    expect(team!.members).toEqual(["agent-keep"]);
+  });
+
+  // Regression: an ARCHIVED member is dead from the team's perspective.
+  // liveAgentIds (in ib-commands.ts) calls readAllAgents(..., false), so an
+  // archived agent's id is NOT in the live set; teamSend's lazy-prune must
+  // therefore drop it from teams.json instead of treating it as alive.
+  test("teamSend prunes an ARCHIVED member (liveAgentIds excludes archived agents)", async () => {
+    await teamCreate("backend");
+    const liveDir = await plantAgent("agent-keep");
+    // Plant an archived agent: same meta.json shape, but under archive/, not agents/.
+    // readAllAgents(repos, false) must NOT surface it → liveAgentIds drops it → prune.
+    const archivedDir = join(repoDir, ".ittybitty", "archive", "agent-archived");
+    await mkdir(archivedDir, { recursive: true });
+    await Bun.write(join(archivedDir, "meta.json"), JSON.stringify({ id: "agent-archived", tmux_session: "t-agent-archived" }));
+    await addMember("backend", "agent-archived");
+    await addMember("backend", "agent-keep");
+    resetReadAgentMetaCache();
+
+    const members = await resolvedMembers(["agent-keep"]);
+    const res = await teamSend("backend", members, "ping", { fromAgent: "@system" }, repos());
+    expect(res.ok).toBe(true);
+
+    // Live member survived; archived member pruned (would have stayed if
+    // liveAgentIds erroneously included archived agents in its live set).
     const team = await getTeam("backend");
     expect(team!.members).toEqual(["agent-keep"]);
   });

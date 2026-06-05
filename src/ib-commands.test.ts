@@ -5918,7 +5918,7 @@ describe("renameAgent (native, nickname)", () => {
 
     // Resolvable by nickname AND by id
     resetReadAgentMetaCache();
-    const { agents } = await readAllAgents([{ path: tempDir, name: basename(tempDir) }]);
+    const { agents } = await readAllAgents([{ path: tempDir, name: basename(tempDir) }], false);
     expect(matchAgentById("pikachu", agents)?.id).toBe("agent-abc");
     expect(matchAgentById("agent-abc", agents)?.id).toBe("agent-abc");
   });
@@ -6035,6 +6035,25 @@ describe("renameAgent (native, nickname)", () => {
     const result = await renameAgent(agent, "shared");
     expect(result.ok).toBe(false);
     expect(result.stderr).toContain("already used by agent agent-far");
+  });
+
+  test("allows nickname matching an ARCHIVED agent's nickname", async () => {
+    // Regression for the readAllAgents-includes-archived-by-default bug: the
+    // collision scan in renameAgent must NOT see archived agents, otherwise
+    // killing an agent and re-aliasing a live one with its old nickname fails.
+    await writeAgentMeta(tempDir, "agent-abc");
+    // Plant an ARCHIVED agent in the same repo whose nickname is "taken".
+    const archivedDir = join(tempDir, ".ittybitty", "archive", "agent-archived");
+    await mkdir(archivedDir, { recursive: true });
+    await Bun.write(join(archivedDir, "meta.json"), JSON.stringify({ id: "agent-archived", nickname: "taken", tmux_session: "t-archived" }));
+    await registerRepos([tempDir]);
+    resetReadAgentMetaCache();
+
+    const agent = makeAgent("agent-abc", tempDir);
+    const result = await renameAgent(agent, "taken");
+    expect(result.ok).toBe(true);
+    const meta = await Bun.file(join(tempDir, ".ittybitty", "agents", "agent-abc", "meta.json")).json();
+    expect(meta.nickname).toBe("taken");
   });
 
   test("negative: nickname == own id rejected (points at --clear)", async () => {

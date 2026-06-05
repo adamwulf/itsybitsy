@@ -5007,7 +5007,7 @@ describe("newAgent (native)", () => {
     }
   });
 
-  test("K5: allows --name matching an ARCHIVED agent's nickname", async () => {
+  test("K6: allows --name matching an ARCHIVED agent's nickname", async () => {
     const originalHome = process.env.HOME;
     const fakeHome = await mkdtemp(join(tmpdir(), "ib-nick-collision-archived-"));
     process.env.HOME = fakeHome;

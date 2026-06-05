@@ -984,7 +984,7 @@ describe("readAllAgents", () => {
     const { agents, errors } = await readAllAgents([
       { path: tempDir1, name: "repo1" },
       { path: tempDir2, name: "repo2" },
-    ]);
+    ], false);
     expect(errors.length).toBe(0);
     expect(agents.length).toBe(2);
     expect(agents.map((a) => a.repoName).sort()).toEqual(["repo1", "repo2"]);
@@ -993,7 +993,7 @@ describe("readAllAgents", () => {
   test("returns orphanedTmuxSessions field (empty when no stale sessions)", async () => {
     const { orphanedTmuxSessions } = await readAllAgents([
       { path: tempDir1, name: "repo1" },
-    ]);
+    ], false);
     // orphanedTmuxSessions should be an array (may be empty depending on system state)
     expect(Array.isArray(orphanedTmuxSessions)).toBe(true);
   });
@@ -1033,10 +1033,6 @@ describe("readAllAgents", () => {
     // explicit true → both
     const includedExplicit = await readAllAgents(repos, true);
     expect(includedExplicit.agents.map((a) => a.id).sort()).toEqual(["agent-active", "agent-old"]);
-
-    // no-arg default → both (default is true, backward-compatible)
-    const includedDefault = await readAllAgents(repos);
-    expect(includedDefault.agents.map((a) => a.id).sort()).toEqual(["agent-active", "agent-old"]);
   });
 });
 
@@ -2747,8 +2743,8 @@ describe("readAllAgents — listTmuxSessions cache", () => {
       };
     }) as any);
 
-    await readAllAgents([{ path: tempDir, name: "test-repo" }]);
-    await readAllAgents([{ path: tempDir, name: "test-repo" }]);
+    await readAllAgents([{ path: tempDir, name: "test-repo" }], false);
+    await readAllAgents([{ path: tempDir, name: "test-repo" }], false);
     expect(listCalls).toBe(1);
   });
 
@@ -2768,9 +2764,9 @@ describe("readAllAgents — listTmuxSessions cache", () => {
       };
     }) as any);
 
-    await readAllAgents([{ path: tempDir, name: "test-repo" }]);
+    await readAllAgents([{ path: tempDir, name: "test-repo" }], false);
     resetListTmuxSessionsCache();
-    await readAllAgents([{ path: tempDir, name: "test-repo" }]);
+    await readAllAgents([{ path: tempDir, name: "test-repo" }], false);
     expect(listCalls).toBe(2);
   });
 });

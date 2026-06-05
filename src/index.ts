@@ -75,7 +75,7 @@ export function matchAgentById(id: string, agents: Agent[]): Agent | null {
 /** Find an agent by exact ID (or nickname) across all registered repos. */
 export async function findAgentById(id: string, repos: RepoEntry[]): Promise<Agent | null> {
   const { readAllAgents } = await import("./agents");
-  const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })));
+  const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })), false);
   return matchAgentById(id, agents);
 }
 
@@ -345,7 +345,7 @@ export async function resolveTarget(
     }
     const coordResult = await checkCoordinatorExists(ownRepo.path);
     if (coordResult.exists && coordResult.isCoordinator) {
-      const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })));
+      const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })), false);
       const coordinator = agents.find((a) => a.id === coordResult.agentId);
       return { agent: coordinator || null, isSystemCoordinator: false };
     }
@@ -373,7 +373,7 @@ export async function resolveTarget(
           // Resolve each member id to a live Agent. Members that no longer
           // exist are simply skipped here — eager/lazy pruning happens at SEND
           // time (teamSend calls pruneDeadMembers), not during resolution.
-          const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })));
+          const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })), false);
           const byId = new Map(agents.map((a) => [a.id, a]));
           const members: Agent[] = [];
           for (const id of team.members) {
@@ -389,7 +389,7 @@ export async function resolveTarget(
 
     if (agentId) {
       // @<repo>/<agent-id> → agent in specific repo
-      const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })));
+      const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })), false);
       const repoAgents = agents.filter((a) => a.repoPath === repo.path);
       const match = matchAgentById(agentId, repoAgents);
       if (!match) {
@@ -402,7 +402,7 @@ export async function resolveTarget(
     // @<repo> → that repo's coordinator
     const coordResult = await checkCoordinatorExists(repo.path);
     if (coordResult.exists && coordResult.isCoordinator) {
-      const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })));
+      const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })), false);
       const coordinator = agents.find((a) => a.id === coordResult.agentId);
       return { agent: coordinator || null, isSystemCoordinator: false };
     }
@@ -411,7 +411,7 @@ export async function resolveTarget(
   }
 
   // <agent-id> (bare) → search same-repo first, then all repos
-  const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })));
+  const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })), false);
 
   // Try same-repo agents first (if we have an ownRepo)
   if (ownRepo) {
@@ -911,7 +911,7 @@ async function main() {
       const jsonOutput = args.includes("--json");
 
       const verbose = args.includes("--verbose") || args.includes("-v");
-      const { agents, errors } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })));
+      const { agents, errors } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })), false);
       if (verbose) {
         for (const err of errors) {
           console.error(`Warning: ${err.error}`);
@@ -1035,7 +1035,11 @@ async function main() {
         process.exit(1);
       }
 
-      const { agents, errors, liveTmuxSessions } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })));
+      // `ib state` is the orphan-detection command: include archived agents so
+      // their tmux_session/claude_pid/watchdog_pid metadata enters the tracked
+      // set (buildTrackedSets). A stale-but-archived PID/session must not be
+      // mis-classified as an orphan just because it's archived.
+      const { agents, errors, liveTmuxSessions } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })), true);
       if (verbose) {
         for (const err of errors) {
           console.error(`Warning: ${err.error}`);
@@ -1113,7 +1117,12 @@ async function main() {
         const repoArgs = repos.map((r) => ({ path: r.path, name: repoDisplayName(r) }));
         const result = await prepareAndRunCleanup(
           orphans,
-          () => readAllAgents(repoArgs),
+          // Cleanup re-reads agents from disk to defend against the gather/kill
+          // race (see prepareAndRunCleanup docs). Pass `true` for the same
+          // reason as the initial scan above — buildTrackedSets needs every
+          // archived agent's metadata so post-archive PIDs/sessions aren't
+          // mis-flagged as orphans.
+          () => readAllAgents(repoArgs, true),
           { dryRun: dryRunMode, repoPaths },
         );
         cleanupReport = result.cleanupReport;
@@ -1333,7 +1342,7 @@ async function main() {
         break;
       }
       const verbose = args.includes("--verbose") || args.includes("-v");
-      const { agents, errors } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })));
+      const { agents, errors } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })), false);
       if (verbose) {
         for (const err of errors) {
           console.error(`Warning: ${err.error}`);

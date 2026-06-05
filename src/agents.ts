@@ -1249,13 +1249,20 @@ export const liveTmuxSessionsCtx = new InjectionContext<() => Promise<Set<string
  * that don't correspond to any known agent). The tmux session list is cached
  * for a short TTL so back-to-back refreshes don't each spawn `tmux list-sessions`.
  *
- * `includeArchived` defaults to true (read both active and archived agents).
- * Pass false on hot paths that discard archived agents anyway (the `ib watch`
- * refresh loop and the inject-status hook) to skip reading the archive dirs.
+ * `includeArchived` is REQUIRED — every caller must declare intent explicitly.
+ * Pass `false` whenever the caller only operates on LIVE agents (sends,
+ * collision checks, dashboards, team-membership liveness, recipient lookup).
+ * Pass `true` only when the caller specifically needs ARCHIVED history (e.g.
+ * `ib state --cleanup` orphan detection that must see every tracked PID/
+ * session). Reading archive dirs adds I/O cost and any code path that filters
+ * `!a.archived` afterward is just wasting that cost — and worse, code paths
+ * that DON'T filter will accidentally pick up archived agents and mis-treat
+ * them as live (e.g. nickname-collision checks rejecting reuse of an archived
+ * agent's nickname).
  */
 export async function readAllAgents(
   repos: Array<{ path: string; name: string }>,
-  includeArchived = true
+  includeArchived: boolean
 ): Promise<ReadAgentsResult> {
   const [results, tmuxSessions] = await Promise.all([
     Promise.all(repos.map((r) => readRepoAgents(r.path, r.name, includeArchived))),

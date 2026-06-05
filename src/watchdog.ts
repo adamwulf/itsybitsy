@@ -1377,7 +1377,9 @@ async function loadAllAgentsForNotification(): Promise<Agent[]> {
     // The previous implementation only read the agent's own repo, which made
     // cross-repo notifySpawner impossible since findAgent can't locate the spawner.
     const repos = await listReposFn();
-    const { agents } = await readAllAgentsFn(repos.map(r => ({ path: r.path, name: r.name })));
+    // Watchdog notifies LIVE agents only — an archived spawner can never be
+    // notified, so skip the archive-dir I/O.
+    const { agents } = await readAllAgentsFn(repos.map(r => ({ path: r.path, name: r.name })), false);
     // Note: buildAgentTree() is NOT called here. findAgent() iterates the flat
     // array first (exact ID match) so tree structure is unnecessary for notifications.
     // Also note: detectAgentStates() is intentionally omitted — sendMessage() sends

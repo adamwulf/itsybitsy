@@ -260,7 +260,7 @@ async function emitPerAgentLeaveNotice(
 ): Promise<void> {
   if (prunedTeams.length === 0) return;
   try {
-    const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })));
+    const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })), false);
     const byId = new Map(agents.map((a) => [a.id, a]));
     for (const { team: teamName, id: departedId } of prunedTeams) {
       // Audit the departure in the team's <team>.log (§17.4). Best-effort.
@@ -305,7 +305,7 @@ async function emitCoalescedLeaveNotice(
       departuresByTeam.set(teamName, (departuresByTeam.get(teamName) ?? 0) + 1);
     }
 
-    const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })));
+    const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })), false);
     const byId = new Map(agents.map((a) => [a.id, a]));
 
     for (const [teamName, count] of departuresByTeam) {
@@ -1637,9 +1637,12 @@ export async function renameAgent(agent: Agent, nickname: string | null): Promis
     return { ok: false, exitCode: 1, stdout: "", stderr: `Error: nickname "${nickname}" is already this agent's id; use --clear to remove a nickname` };
   }
 
-  // 3. Global collision scan across ALL registered repos.
+  // 3. Global collision scan across ALL registered repos. Skip archived agents
+  //    — a nickname previously held by an archived agent is free to reuse,
+  //    matching new-agent's reuse-an-archived-nickname semantics.
   const { agents: allAgents } = await readAllAgents(
     repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })),
+    false,
   );
   for (const other of allAgents) {
     // Reject if the nickname equals any existing agent's id (ids aren't
@@ -2470,12 +2473,13 @@ function teamOk(stdout: string): IbCommandResult {
 /**
  * Build the set of all live agent ids across every registered repo. Used to
  * decide membership liveness for lazy pruning (§16.5): a member is "alive" iff
- * its agent still resolves to a real agent directory. `readAllAgents` only
- * returns agents whose `meta.json` exists, so membership in this set is the
- * authoritative "agent still exists" signal.
+ * its agent still resolves to a real, non-archived agent directory. We pass
+ * `includeArchived: false` so archived agents are excluded — an archived
+ * member is dead from the team's perspective, and a stale roster entry should
+ * be pruned, not treated as alive.
  */
 async function liveAgentIds(repos: RepoEntry[]): Promise<Set<string>> {
-  const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })));
+  const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })), false);
   return new Set(agents.map((a) => a.id));
 }
 
@@ -2551,7 +2555,7 @@ export async function teamSend(
     let agent = byId.get(id);
     if (!agent) {
       if (!lookupAgents) {
-        const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })));
+        const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })), false);
         lookupAgents = agents;
       }
       agent = lookupAgents.find((a) => a.id === id);
@@ -2648,7 +2652,7 @@ async function fireJoinNoticeFanOut(
   repos: RepoEntry[],
 ): Promise<void> {
   try {
-    const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })));
+    const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })), false);
     const byId = new Map(agents.map((a) => [a.id, a]));
 
     // Existing members (everyone in the post-write roster except the new joiner).
@@ -2697,7 +2701,7 @@ async function fireRemoveLeaveNotice(
   // chat box renders it inline with chat, dimmed (§17.4 design update).
   await appendChannelSystemMessage(name, removedId, "left the team").catch(() => {});
   try {
-    const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })));
+    const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })), false);
     const byId = new Map(agents.map((a) => [a.id, a]));
     for (const memberId of team.members) {
       const member = byId.get(memberId);
@@ -2719,7 +2723,7 @@ async function resolveFullAgentId(
   repos: RepoEntry[],
 ): Promise<{ id: string } | { error: string }> {
   const { matchAgentById } = await import("./index");
-  const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })));
+  const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })), false);
   const match = matchAgentById(partial, agents);
   if (!match) {
     return { error: `Error: agent not found: ${partial}` };
@@ -2871,7 +2875,7 @@ export async function roster(name: string, repos: RepoEntry[]): Promise<IbComman
   // detectAgentStates mutates `agents` in place so `agent.state` reflects the
   // live detected state (§16.3: "state read via detectAgentStates()") instead of
   // the uniform "unknown" readAllAgents assigns.
-  const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })));
+  const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })), false);
   // Read-only display: explicitly opt out of reaping. detectAgentStates
   // defaults to reap-disabled, but pass {reap: false} to make intent
   // unambiguous — `roster` must never side-effect agents.
@@ -3699,9 +3703,12 @@ export async function newAgent(
   // nickname (symmetric with the nickname validator rejecting nickname == id).
   // The id-collision check above is filesystem/tmux-based per repo; nicknames
   // aren't directory names, so this needs a fresh GLOBAL readAllAgents scan.
+  // Archived agents are excluded — a nickname previously held by an archived
+  // agent is free to reuse (see the K6 test that pins this behavior).
   {
     const { agents: existingAgents } = await readAllAgents(
       repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })),
+      false,
     );
     const nickCollision = existingAgents.find((a) => a.meta.nickname === id);
     if (nickCollision) {

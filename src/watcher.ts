@@ -32,7 +32,7 @@ import { tmuxSessionTarget } from "./validation";
  * coordinator's coordinatorSpawnCtx).
  */
 export interface WatcherAgentsApi {
-  readAllAgents: (repos: Array<{ path: string; name: string }>, includeArchived?: boolean) => Promise<ReadAgentsResult>;
+  readAllAgents: (repos: Array<{ path: string; name: string }>, includeArchived: boolean) => Promise<ReadAgentsResult>;
   detectAgentStates: (agents: Agent[], opts?: { reap?: boolean }) => Promise<void>;
   buildAgentTree: (agents: Agent[]) => Agent[];
   flattenAgentTree: (roots: Agent[], repos?: string[] | { name: string; path: string }[], coordinator?: { state: string; age: string }) => FlatEntry[];

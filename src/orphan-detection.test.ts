@@ -50,7 +50,7 @@ describe("orphaned tmux session detection", () => {
     mockListTmuxSessions.mockResolvedValue([]);
     await createAgent("agent-a", "ittybitty-repo1-agent-a");
 
-    const { orphanedTmuxSessions } = await readAllAgents([{ path: tempDir, name: "test" }]);
+    const { orphanedTmuxSessions } = await readAllAgents([{ path: tempDir, name: "test" }], false);
     expect(orphanedTmuxSessions).toEqual([]);
   });
 
@@ -62,7 +62,7 @@ describe("orphaned tmux session detection", () => {
       "ittybitty-repo1-agent-b",
     ]);
 
-    const { orphanedTmuxSessions } = await readAllAgents([{ path: tempDir, name: "test" }]);
+    const { orphanedTmuxSessions } = await readAllAgents([{ path: tempDir, name: "test" }], false);
     expect(orphanedTmuxSessions).toEqual([]);
   });
 
@@ -73,7 +73,7 @@ describe("orphaned tmux session detection", () => {
       "ittybitty-repo1-agent-deleted",
     ]);
 
-    const { orphanedTmuxSessions } = await readAllAgents([{ path: tempDir, name: "test" }]);
+    const { orphanedTmuxSessions } = await readAllAgents([{ path: tempDir, name: "test" }], false);
     expect(orphanedTmuxSessions).toEqual(["ittybitty-repo1-agent-deleted"]);
   });
 
@@ -84,7 +84,7 @@ describe("orphaned tmux session detection", () => {
       "0",
     ]);
 
-    const { orphanedTmuxSessions } = await readAllAgents([{ path: tempDir, name: "test" }]);
+    const { orphanedTmuxSessions } = await readAllAgents([{ path: tempDir, name: "test" }], false);
     expect(orphanedTmuxSessions).toEqual([]);
   });
 
@@ -97,7 +97,7 @@ describe("orphaned tmux session detection", () => {
       "not-ittybitty-session",
     ]);
 
-    const { orphanedTmuxSessions } = await readAllAgents([{ path: tempDir, name: "test" }]);
+    const { orphanedTmuxSessions } = await readAllAgents([{ path: tempDir, name: "test" }], false);
     expect(orphanedTmuxSessions).toEqual(["ittybitty-repo1-stale1", "ittybitty-repo2-stale2"]);
   });
 
@@ -109,7 +109,7 @@ describe("orphaned tmux session detection", () => {
       "ittybitty-repo1-orphan2",
     ]);
 
-    const { orphanedTmuxSessions } = await readAllAgents([{ path: tempDir, name: "test" }]);
+    const { orphanedTmuxSessions } = await readAllAgents([{ path: tempDir, name: "test" }], false);
     expect(orphanedTmuxSessions).toEqual(["ittybitty-repo1-orphan1", "ittybitty-repo1-orphan2"]);
   });
 
@@ -119,7 +119,7 @@ describe("orphaned tmux session detection", () => {
       "ittybitty-repo1-stale",
     ]);
 
-    const { orphanedTmuxSessions } = await readAllAgents([{ path: tempDir, name: "test" }]);
+    const { orphanedTmuxSessions } = await readAllAgents([{ path: tempDir, name: "test" }], false);
     expect(orphanedTmuxSessions).toEqual(["ittybitty-repo1-stale"]);
   });
 });

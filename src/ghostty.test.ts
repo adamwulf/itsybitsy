@@ -228,6 +228,24 @@ describe("openPathInGhostty", () => {
       expect(cmdArray.length).toBe(2);
     });
 
+    test("wraps path in inner single quotes so cd survives spaces", async () => {
+      whichCtx.set(() => "/usr/bin/ghostty");
+      let spawnArgs: any[] = [];
+      spawnCtx.set((...args: any[]) => {
+        spawnArgs = args;
+        return { unref: () => {} };
+      });
+
+      await openPathInGhostty("/Users/test/Filing Cabinet/NSF I-Corps");
+
+      const cmdArray = spawnArgs[0] as string[];
+      // The path must be wrapped in inner single quotes inside the bash -c
+      // script so `cd` sees it as a single argument even when it contains
+      // spaces. Using the standard '\'' idiom: outer single-quote closes,
+      // then '\'' opens, the path, then '\'' closes and outer reopens.
+      expect(cmdArray[1]).toContain("cd '\\''/Users/test/Filing Cabinet/NSF I-Corps'\\''");
+    });
+
     test("escapes single quotes in path", async () => {
       whichCtx.set(() => "/usr/bin/ghostty");
       let spawnArgs: any[] = [];

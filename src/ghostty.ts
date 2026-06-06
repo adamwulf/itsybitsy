@@ -28,9 +28,13 @@ export async function openPathInGhostty(
     }
     // Ghostty's CLI requires --key=value (with equals sign). The entire command
     // is one string value that Ghostty splits with shell-like parsing.
-    // Escape single quotes in the path so it survives single-quoting.
+    // The path needs to survive TWO layers: Ghostty's outer shell-like parser
+    // (which strips the outer single quotes) and bash's inner parsing of the
+    // -c script (where `cd` would split unquoted whitespace). We wrap the path
+    // in inner single quotes (escaping any embedded single quotes via '\'')
+    // so `cd` sees a single argument even when the path contains spaces.
     const escapedPath = dirPath.replace(/'/g, "'\\''");
-    const proc = spawnCtx.fn(["ghostty", `--command=bash -c 'cd ${escapedPath} && exec bash -l'`], {
+    const proc = spawnCtx.fn(["ghostty", `--command=bash -c 'cd '\\''${escapedPath}'\\'' && exec bash -l'`], {
       stdio: ["ignore", "ignore", "ignore"],
     });
     proc.unref();

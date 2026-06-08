@@ -72,9 +72,13 @@ export function formatTimestamp(epochMs: number, timeZone?: string): string {
 
 /**
  * Build the `additionalContext` payload for the PostToolUse hook output.
+ *
+ * The leading "[information only, no ack required]" prefix muzzles the model:
+ * without it, Opus reflexively writes "Acknowledged." after every tool call
+ * because each fresh system-reminder reads like something to react to.
  */
 export function buildTimestampContext(epochMs: number, timeZone?: string): string {
-  return `Current time: ${formatTimestamp(epochMs, timeZone)}`;
+  return `[information only, no ack required] Current time: ${formatTimestamp(epochMs, timeZone)}`;
 }
 
 /**

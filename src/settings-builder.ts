@@ -141,7 +141,15 @@ export function buildHooksBlock(opts: {
     ? `ib hooks session-start ${opts.agentId}`
     : "ib hooks session-start";
   const permissionDeniedCmd = `ib hook-permission-denied ${opts.agentId}`;
-  const userPromptSubmitHooks = [{ hooks: [{ type: "command", command: `ib hook-mark-running ${opts.agentId}` }] }];
+  // When timestamps are enabled, also inject one alongside the state-flip on
+  // every user prompt — gives the agent a wall-clock anchor for messages that
+  // arrive long after its last tool call. Same hook command, same config gate.
+  const userPromptSubmitHooks: unknown[] = [
+    { hooks: [{ type: "command", command: `ib hook-mark-running ${opts.agentId}` }] },
+  ];
+  if (opts.includeTimestamp) {
+    userPromptSubmitHooks.push({ hooks: [{ type: "command", command: "ib hooks inject-timestamp" }] });
+  }
 
   const hooks: Record<string, unknown> = {};
   if (opts.includeStop) {

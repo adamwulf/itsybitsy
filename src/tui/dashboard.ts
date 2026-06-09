@@ -1906,7 +1906,11 @@ export class DashboardComponent implements Component {
       const hex = Array.from(data).map(c => c.charCodeAt(0).toString(16).padStart(2, "0")).join(" ");
       const printable = data.replace(/[\x00-\x1f\x7f]/g, c => `\\x${c.charCodeAt(0).toString(16).padStart(2, "0")}`);
       require("node:fs").appendFileSync("/tmp/ib-input.log", `${new Date().toISOString()} [${hex}] "${printable}"\n`);
-    } catch {}
+    } catch (err) {
+      try {
+        require("node:fs").appendFileSync("/tmp/ib-input.log", `${new Date().toISOString()} [LOG-ERROR] ${err instanceof Error ? err.stack ?? err.message : String(err)}\n`);
+      } catch {}
+    }
 
     // Dialog input takes priority
     if (this._dialog && handleDialogInput(this, data)) return;

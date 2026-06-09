@@ -67,9 +67,9 @@ describe("formatTimestamp", () => {
 });
 
 describe("buildTimestampContext", () => {
-  test("prefixes the timestamp with a human-readable label", () => {
+  test("prefixes the timestamp with a no-ack muzzle and human-readable label", () => {
     expect(buildTimestampContext(FIXED_EPOCH_MS, "America/Chicago")).toBe(
-      `Current time: 2025-05-29 14:32:07 CDT (epoch ${FIXED_EPOCH_SECONDS})`,
+      `[information only, no ack required] Current time: 2025-05-29 14:32:07 CDT (epoch ${FIXED_EPOCH_SECONDS})`,
     );
   });
 });
@@ -87,7 +87,7 @@ describe("computeTimestampOutput", () => {
     expect(computeTimestampOutput(base)).toEqual({
       hookSpecificOutput: {
         hookEventName: "PostToolUse",
-        additionalContext: `Current time: 2025-05-29 14:32:07 CDT (epoch ${FIXED_EPOCH_SECONDS})`,
+        additionalContext: `[information only, no ack required] Current time: 2025-05-29 14:32:07 CDT (epoch ${FIXED_EPOCH_SECONDS})`,
       },
     });
   });
@@ -140,7 +140,7 @@ describe("computeTimestampOutput", () => {
       epochMs: FIXED_EPOCH_MS,
     });
     expect(out?.hookSpecificOutput.additionalContext).toMatch(
-      new RegExp(`^Current time: \\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2} .+ \\(epoch ${FIXED_EPOCH_SECONDS}\\)$`),
+      new RegExp(`^\\[information only, no ack required\\] Current time: \\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2} .+ \\(epoch ${FIXED_EPOCH_SECONDS}\\)$`),
     );
   });
 });

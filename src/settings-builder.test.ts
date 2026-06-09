@@ -115,7 +115,7 @@ describe("buildHooksBlock — inject-timestamp PostToolUse hook", () => {
     expect("PostToolUse" in result).toBe(false);
   });
 
-  test("regular agent w/ timestamp (Stop, no intercept) adds PostToolUse after PreToolUse", () => {
+  test("regular agent w/ timestamp (Stop, no intercept) adds PostToolUse after PreToolUse and appends inject-timestamp to UserPromptSubmit", () => {
     const id = "agent-abc12345";
     const result = buildHooksBlock({
       agentId: id,
@@ -133,7 +133,10 @@ describe("buildHooksBlock — inject-timestamp PostToolUse hook", () => {
       PostToolUse: [
         { matcher: "*", hooks: [{ type: "command", command: "ib hooks inject-timestamp" }] },
       ],
-      UserPromptSubmit: [{ hooks: [{ type: "command", command: `ib hook-mark-running ${id}` }] }],
+      UserPromptSubmit: [
+        { hooks: [{ type: "command", command: `ib hook-mark-running ${id}` }] },
+        { hooks: [{ type: "command", command: "ib hooks inject-timestamp" }] },
+      ],
       SessionStart: [{ hooks: [{ type: "command", command: "ib hooks session-start" }] }],
     };
     expect(JSON.stringify(result, null, 2)).toBe(JSON.stringify(expected, null, 2));
@@ -163,6 +166,37 @@ describe("buildHooksBlock — inject-timestamp PostToolUse hook", () => {
     });
     const postToolUse = result.PostToolUse as Array<{ matcher: string }>;
     expect(postToolUse[0]!.matcher).toBe("*");
+  });
+
+  test("includeTimestamp false leaves UserPromptSubmit as a single hook-mark-running entry", () => {
+    const id = "agent-abc12345";
+    const result = buildHooksBlock({
+      agentId: id,
+      includeStop: true,
+      interceptMatcher: null,
+      sessionStartIncludesAgentId: false,
+      includeTimestamp: false,
+    });
+    const userPromptSubmit = result.UserPromptSubmit as Array<{ hooks: Array<{ command: string }> }>;
+    expect(userPromptSubmit).toHaveLength(1);
+    expect(userPromptSubmit[0]!.hooks[0]!.command).toBe(`ib hook-mark-running ${id}`);
+  });
+
+  test("includeTimestamp true appends inject-timestamp as a second UserPromptSubmit entry", () => {
+    const id = "agent-abc12345";
+    const result = buildHooksBlock({
+      agentId: id,
+      includeStop: true,
+      interceptMatcher: null,
+      sessionStartIncludesAgentId: false,
+      includeTimestamp: true,
+    });
+    const userPromptSubmit = result.UserPromptSubmit as Array<{ hooks: Array<{ command: string }> }>;
+    expect(userPromptSubmit).toHaveLength(2);
+    // Order matters: state-flip runs first (signals "running" before injection
+    // appears in the agent's context), timestamp injection second.
+    expect(userPromptSubmit[0]!.hooks[0]!.command).toBe(`ib hook-mark-running ${id}`);
+    expect(userPromptSubmit[1]!.hooks[0]!.command).toBe("ib hooks inject-timestamp");
   });
 
   // The includeStop:false + includeTimestamp:true combination never occurs in

@@ -895,6 +895,76 @@ describe("coordinator Bash restrictions", () => {
       await cleanup();
     }
   });
+
+  // Lock-in tests for adversarial shapes flagged by review — these shapes are
+  // already caught by the lexer (the `<` / `>` redirect rules and the inner
+  // walk into `${…}` bodies handle them), but pinning them down prevents a
+  // future refactor from quietly relaxing the wrong knob.
+
+  test("still blocks <<<word here-string redirect", async () => {
+    await setupCoordinatorDir();
+    try {
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: { command: "ib send agent <<<malicious" },
+        cwd: coordCwd,
+      });
+      expect(result.action).toBe("intercept");
+      const output = result.output as Record<string, unknown>;
+      const hookOutput = output.hookSpecificOutput as Record<string, unknown>;
+      expect(hookOutput.permissionDecision).toBe("deny");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("still blocks process substitution <(...) and >(...)", async () => {
+    await setupCoordinatorDir();
+    try {
+      const a = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: { command: "ib diff <(cat /etc/passwd)" },
+        cwd: coordCwd,
+      });
+      expect(a.action).toBe("intercept");
+      expect(
+        (a.output as { hookSpecificOutput: { permissionDecision: string } })
+          .hookSpecificOutput.permissionDecision
+      ).toBe("deny");
+
+      const b = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: { command: "ib status >(tee /tmp/sink)" },
+        cwd: coordCwd,
+      });
+      expect(b.action).toBe("intercept");
+      expect(
+        (b.output as { hookSpecificOutput: { permissionDecision: string } })
+          .hookSpecificOutput.permissionDecision
+      ).toBe("deny");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("still blocks $( nested inside ${VAR:-…} parameter expansion", async () => {
+    await setupCoordinatorDir();
+    try {
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: {
+          command: "ib send agent-abcd1234 ${MSG:-$(whoami)}",
+        },
+        cwd: coordCwd,
+      });
+      expect(result.action).toBe("intercept");
+      const output = result.output as Record<string, unknown>;
+      const hookOutput = output.hookSpecificOutput as Record<string, unknown>;
+      expect(hookOutput.permissionDecision).toBe("deny");
+    } finally {
+      await cleanup();
+    }
+  });
 });
 
 describe("agent types", () => {

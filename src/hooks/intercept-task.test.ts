@@ -965,6 +965,174 @@ describe("coordinator Bash restrictions", () => {
       await cleanup();
     }
   });
+
+  // ------------------------------------------------------------------
+  // Heredoc state-machine adversarial round (round 2 of review)
+  //
+  // Reviewer #2 surfaced HOLE-1: the newline that ended the terminator
+  // line was being silently consumed, so a second command on the line
+  // after `EOF` was approved as long as the second command itself had
+  // no scanned metachars. Reviewer #1 surfaced two related concerns:
+  // the "no following newline" path used to return null without
+  // scanning the opener tail, and the `<<-` tab-stripping was too
+  // permissive (stripped spaces too).
+  // ------------------------------------------------------------------
+
+  test("blocks a second command on the line AFTER a heredoc terminator", async () => {
+    await setupCoordinatorDir();
+    try {
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: {
+          command: "ib send a <<'EOF'\nbody\nEOF\nrm -rf /tmp/x",
+        },
+        cwd: coordCwd,
+      });
+      expect(result.action).toBe("intercept");
+      const output = result.output as Record<string, unknown>;
+      const hookOutput = output.hookSpecificOutput as Record<string, unknown>;
+      expect(hookOutput.permissionDecision).toBe("deny");
+      expect(hookOutput.permissionDecisionReason).toContain("heredoc terminator");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("blocks a second command after EOF even when the second command has no scanned metachars", async () => {
+    await setupCoordinatorDir();
+    try {
+      // The original HOLE-1 shape: second command is a plain word, so
+      // none of the per-char metachar rules fire; only the newline-
+      // after-terminator check can catch it.
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: {
+          command: "ib send a <<'EOF'\nbody\nEOF\nib kill agent-x",
+        },
+        cwd: coordCwd,
+      });
+      expect(result.action).toBe("intercept");
+      const output = result.output as Record<string, unknown>;
+      const hookOutput = output.hookSpecificOutput as Record<string, unknown>;
+      expect(hookOutput.permissionDecision).toBe("deny");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("allows a heredoc terminated by EOF at end-of-command (no trailing content)", async () => {
+    await setupCoordinatorDir();
+    try {
+      // The new "block on trailing content" rule must NOT regress the
+      // common case of a single heredoc whose terminator is the last
+      // thing in the command.
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: {
+          command: "ib send a <<'EOF'\nbody line\nEOF",
+        },
+        cwd: coordCwd,
+      });
+      expect(result.action).toBe("skip");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("allows a heredoc whose terminator line is followed only by whitespace", async () => {
+    await setupCoordinatorDir();
+    try {
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: {
+          command: "ib send a <<'EOF'\nbody line\nEOF\n  \t\n",
+        },
+        cwd: coordCwd,
+      });
+      expect(result.action).toBe("skip");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("blocks `<<EOF` opener with no following newline but a `;` in the opener tail (defense-in-depth)", async () => {
+    await setupCoordinatorDir();
+    try {
+      // No newlines anywhere — bash would error, but the guard must not
+      // rely on bash to refuse it. The `;` in the opener tail must be
+      // caught even though the heredoc body never opens.
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: { command: "ib send a <<EOF garbage ; rm -rf /tmp/x" },
+        cwd: coordCwd,
+      });
+      expect(result.action).toBe("intercept");
+      const output = result.output as Record<string, unknown>;
+      const hookOutput = output.hookSpecificOutput as Record<string, unknown>;
+      expect(hookOutput.permissionDecision).toBe("deny");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("`<<-` strips leading TABS only — leading SPACES on terminator do NOT terminate", async () => {
+    await setupCoordinatorDir();
+    try {
+      // With `<<-`, bash strips leading tabs from the terminator. A
+      // terminator line indented with spaces does NOT terminate in bash;
+      // the body continues. Our lexer must match this so it doesn't
+      // approve a heredoc that bash would reject as never-terminated.
+      //
+      // Note: even when the lexer's terminator detection misses, the
+      // overall scan reaches end-of-string still in heredoc mode and
+      // returns null (an "allow"). That's fine when there's no following
+      // content. We pair this with the next test where there IS a
+      // post-body second command to make the requirement crisp.
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: {
+          command: "ib send a <<-EOF\n  EOF\n; rm -rf /tmp/x",
+        },
+        cwd: coordCwd,
+      });
+      // With proper tab-only stripping, the `  EOF` line is body data,
+      // not a terminator. The body continues through `; rm -rf /tmp/x`.
+      // Body is `expand=true` (bare delim), so `;` is harmless literal
+      // and `rm -rf /tmp/x` has no flagged char. We end in heredoc state
+      // at end-of-string → return null → ALLOW. (Bash would also error
+      // out at parse time, so nothing executes.)
+      //
+      // This test pins down that we DON'T misidentify the spaces-prefix
+      // line as a terminator, which would otherwise expose the trailing
+      // `; rm -rf /tmp/x` as a normal-shell command. We assert ALLOW.
+      expect(result.action).toBe("skip");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("`<<-` with leading TABS on the terminator does terminate (then second command is blocked)", async () => {
+    await setupCoordinatorDir();
+    try {
+      // With `<<-`, leading TABS on the terminator are stripped. The
+      // tabbed line terminates the body and the post-body `\nrm -rf …`
+      // must be blocked by the new "newline after heredoc terminator"
+      // rule.
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: {
+          command: "ib send a <<-EOF\n\tbody\n\tEOF\nrm -rf /tmp/x",
+        },
+        cwd: coordCwd,
+      });
+      expect(result.action).toBe("intercept");
+      const output = result.output as Record<string, unknown>;
+      const hookOutput = output.hookSpecificOutput as Record<string, unknown>;
+      expect(hookOutput.permissionDecision).toBe("deny");
+    } finally {
+      await cleanup();
+    }
+  });
 });
 
 describe("agent types", () => {

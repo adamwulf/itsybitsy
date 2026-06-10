@@ -973,6 +973,108 @@ describe("list-types CLI command", () => {
   });
 });
 
+// ─── show-type CLI command ─────────────────────────────────────────────────
+
+describe("show-type CLI command", () => {
+  async function runCliWithHome(cliArgs: string[], home: string): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+    const proc = Bun.spawn(["bun", "run", "src/index.ts", ...cliArgs], {
+      cwd: import.meta.dir.replace(/\/src$/, ""),
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, HOME: home },
+    });
+    const [stdout, stderr] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+    ]);
+    const exitCode = await proc.exited;
+    return { stdout, stderr, exitCode };
+  }
+
+  test("show-type prints the manager definition and exits 0", async () => {
+    const { mkdtemp, rm } = await import("fs/promises");
+    const { tmpdir } = await import("os");
+    const { join: joinPath } = await import("path");
+    const home = await mkdtemp(joinPath(tmpdir(), "ib-show-type-test-"));
+    try {
+      const { stdout, exitCode } = await runCliWithHome(["show-type", "manager"], home);
+      expect(exitCode).toBe(0);
+      expect(stdout).toContain("NAME: manager");
+      expect(stdout).toContain("DESCRIPTION:");
+      expect(stdout).toContain("SPAWNABLE: yes");
+      expect(stdout).toContain("SPAWNS CHILDREN: yes");
+      expect(stdout).toContain("INSTRUCTION STYLE: manager");
+      expect(stdout).toContain("PERMISSIONS ALLOW");
+      expect(stdout).toContain("PERMISSIONS DENY");
+      expect(stdout).toContain("PROMPT BODY:");
+      // Prompt body should contain a templated placeholder from the manager type
+      expect(stdout).toContain("{{agentId}}");
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("show-type --json emits valid JSON with expected fields", async () => {
+    const { mkdtemp, rm } = await import("fs/promises");
+    const { tmpdir } = await import("os");
+    const { join: joinPath } = await import("path");
+    const home = await mkdtemp(joinPath(tmpdir(), "ib-show-type-json-test-"));
+    try {
+      const { stdout, exitCode } = await runCliWithHome(["show-type", "worker", "--json"], home);
+      expect(exitCode).toBe(0);
+      const parsed = JSON.parse(stdout);
+      expect(parsed.name).toBe("worker");
+      expect(typeof parsed.description).toBe("string");
+      expect(parsed.instructionStyle).toBe("worker");
+      expect(typeof parsed.canSpawnChildren).toBe("boolean");
+      expect(typeof parsed.markdownBody).toBe("string");
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("show-agent-type alias works the same as show-type", async () => {
+    const { mkdtemp, rm } = await import("fs/promises");
+    const { tmpdir } = await import("os");
+    const { join: joinPath } = await import("path");
+    const home = await mkdtemp(joinPath(tmpdir(), "ib-show-type-alias-test-"));
+    try {
+      const { stdout, exitCode } = await runCliWithHome(["show-agent-type", "worker"], home);
+      expect(exitCode).toBe(0);
+      expect(stdout).toContain("NAME: worker");
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("show-type with unknown name errors and exits 1", async () => {
+    const { mkdtemp, rm } = await import("fs/promises");
+    const { tmpdir } = await import("os");
+    const { join: joinPath } = await import("path");
+    const home = await mkdtemp(joinPath(tmpdir(), "ib-show-type-missing-test-"));
+    try {
+      const { stderr, exitCode } = await runCliWithHome(["show-type", "nonexistent-type-xyz"], home);
+      expect(exitCode).toBe(1);
+      expect(stderr).toContain("nonexistent-type-xyz");
+      expect(stderr).toContain("ib list-types");
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("show-type with no name prints usage and exits 1", async () => {
+    const { stderr, exitCode } = await runCliWithHome(["show-type"], "/tmp/ib-test-nonexistent-home");
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain("Usage:");
+  });
+
+  test("help text mentions show-type", async () => {
+    const { stdout, exitCode } = await runCliWithHome([], "/tmp/ib-test-nonexistent-home");
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("show-type");
+  });
+});
+
 // ─── nickname CLI command ───────────────────────────────────────────────────
 
 describe("nickname CLI command", () => {

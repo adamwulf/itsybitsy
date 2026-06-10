@@ -1111,6 +1111,28 @@ describe("coordinator Bash restrictions", () => {
     }
   });
 
+  test("allows a heredoc whose body contains a line `EOF ` (trailing space, NOT a bash terminator)", async () => {
+    await setupCoordinatorDir();
+    try {
+      // Reviewer #2 over-block: bash's terminator match is exact — a body
+      // line of `EOF` followed by a space is data, not a terminator. The
+      // lexer must NOT terminate on that line, otherwise the real `EOF`
+      // line that follows would look like a "second command" under the
+      // HOLE-1 rule and get rejected. This pins down the exact-match
+      // (no trailing-whitespace tolerance) on the terminator line.
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: {
+          command: "ib send a <<'EOF'\nEOF \nEOF",
+        },
+        cwd: coordCwd,
+      });
+      expect(result.action).toBe("skip");
+    } finally {
+      await cleanup();
+    }
+  });
+
   test("`<<-` with leading TABS on the terminator does terminate (then second command is blocked)", async () => {
     await setupCoordinatorDir();
     try {

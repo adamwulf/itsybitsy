@@ -106,15 +106,16 @@ function findShellMetachar(command: string): string | null {
 
       // Match the terminator. Bash strips leading TABS only when the
       // opener was `<<-`, and the line must equal the delimiter exactly
-      // (no leading or trailing extras). We tolerate trailing whitespace
-      // intentionally — if that makes us terminate one line earlier than
-      // bash, the post-body tail is then scanned as normal shell, which
-      // only over-blocks (never under-blocks).
+      // — no trailing whitespace either. Matching bash precisely matters
+      // now that we block any non-whitespace content AFTER the terminator
+      // (HOLE-1 fix below): if we terminated too eagerly on `EOF<space>`
+      // when bash would treat it as body data, the real `EOF` line that
+      // follows would look like a "second command" and we'd reject a
+      // valid heredoc.
       const leadingStripped = heredoc.dash
         ? line.replace(/^\t+/, "")
         : line;
-      const trimmed = leadingStripped.replace(/\s+$/, "");
-      if (trimmed === heredoc.delimiter) {
+      if (leadingStripped === heredoc.delimiter) {
         // End of heredoc body. The `\n` that ended the terminator line is
         // itself a command separator in bash — if anything non-whitespace
         // follows that newline, it's a second command and must be blocked.

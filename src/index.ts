@@ -602,6 +602,15 @@ const COMMAND_HELP: Record<string, string> = {
     "  Alias: list-agent-types\n" +
     "  List available agent types with whether they are spawnable and whether\n" +
     "  they may spawn children.",
+  "show-type":
+    "Usage: ib show-type <name> [--json]\n" +
+    "  Alias: show-agent-type\n" +
+    "  Print the full definition for a single agent type: description, flags,\n" +
+    "  allow/deny tool lists, and the prompt body. The `inherits:` chain is\n" +
+    "  resolved before display. Layer files (_all.md, _non_coordinator.md) are\n" +
+    "  applied at spawn time and are NOT shown here — inspect them directly\n" +
+    "  with `ib show-type _all` / `ib show-type _non_coordinator`.\n" +
+    "  --json          Emit machine-readable JSON",
   "list-models":
     "Usage: ib list-models [--json]\n" +
     "  Alias: models\n" +
@@ -817,6 +826,7 @@ function printUsage(): void {
   console.log("  config set <k> <v>  Set a config value");
   console.log("  init-types          Populate ~/.itsybitsy/agent-types/ with built-in types");
   console.log("  list-types          List available agent types");
+  console.log("  show-type <name>    Show full definition for a single agent type");
   console.log("  list-models, models  List known <cli>:<model> selectors");
   console.log("  config add <k> <v>  Add to array config key");
   console.log("  config remove <k> <v> Remove from array config key");
@@ -869,6 +879,7 @@ async function main() {
       : command === "restart" ? "respawn"
       : command === "init-agent-types" ? "init-types"
       : command === "list-agent-types" ? "list-types"
+      : command === "show-agent-type" ? "show-type"
       : command === "models" ? "list-models"
       : command;
     if (printCommandHelp(canonical)) return;
@@ -2269,6 +2280,60 @@ async function main() {
         }
       } catch (err) {
         console.error(`Error listing agent types: ${err instanceof Error ? err.message : String(err)}`);
+        process.exit(1);
+      }
+      break;
+    }
+    case "show-type":
+    case "show-agent-type": {
+      const name = args[1];
+      if (!name || name.startsWith("--")) {
+        console.error("Usage: ib show-type <name> [--json]");
+        process.exit(1);
+      }
+      const wantJson = args.includes("--json");
+      const { ensureAgentTypesDir, loadAgentType } = await import("./agent-types");
+      try {
+        await ensureAgentTypesDir();
+        const type = await loadAgentType(name);
+        if (wantJson) {
+          console.log(JSON.stringify(type, null, 2));
+          break;
+        }
+        const allow = type.permissions?.allow ?? [];
+        const deny = type.permissions?.deny ?? [];
+        const spawnable = type.spawnable === false ? "no" : "yes";
+        const spawnsChildren =
+          type.spawnable === false ? "-" : type.canSpawnChildren ? "yes" : "no";
+
+        console.log(`NAME: ${type.name}`);
+        if (type.description) console.log(`DESCRIPTION: ${type.description}`);
+        console.log(`SPAWNABLE: ${spawnable}`);
+        console.log(`SPAWNS CHILDREN: ${spawnsChildren}`);
+        console.log(`INSTRUCTION STYLE: ${type.instructionStyle}`);
+        if (type.model) console.log(`MODEL: ${type.model}`);
+        if (type.icon) console.log(`ICON: ${type.icon}`);
+        if (type.allowedPaths && type.allowedPaths.length > 0) {
+          console.log("ALLOWED PATHS:");
+          for (const p of type.allowedPaths) console.log(`  ${p}`);
+        }
+        if (type.repos && type.repos.length > 0) {
+          console.log("REPOS:");
+          for (const r of type.repos) console.log(`  ${r}`);
+        }
+        console.log("");
+        console.log(`PERMISSIONS ALLOW (${allow.length}):`);
+        for (const t of allow) console.log(`  ${t}`);
+        console.log("");
+        console.log(`PERMISSIONS DENY (${deny.length}):`);
+        for (const t of deny) console.log(`  ${t}`);
+        console.log("");
+        console.log("PROMPT BODY (template — {{vars}} are substituted at spawn time):");
+        console.log(type.markdownBody ?? "");
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`Error: ${msg}`);
+        console.error("Run 'ib list-types' to see available agent types.");
         process.exit(1);
       }
       break;

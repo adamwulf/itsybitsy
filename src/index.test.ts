@@ -1006,7 +1006,8 @@ describe("show-type CLI command", () => {
       expect(stdout).toContain("INSTRUCTION STYLE: manager");
       expect(stdout).toContain("PERMISSIONS ALLOW");
       expect(stdout).toContain("PERMISSIONS DENY");
-      expect(stdout).toContain("PROMPT BODY:");
+      expect(stdout).toContain("PROMPT BODY");
+      expect(stdout).toContain("substituted at spawn time");
       // Prompt body should contain a templated placeholder from the manager type
       expect(stdout).toContain("{{agentId}}");
     } finally {

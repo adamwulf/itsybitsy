@@ -606,8 +606,10 @@ const COMMAND_HELP: Record<string, string> = {
     "Usage: ib show-type <name> [--json]\n" +
     "  Alias: show-agent-type\n" +
     "  Print the full definition for a single agent type: description, flags,\n" +
-    "  resolved allow/deny tool lists, and the prompt body. Inheritance is\n" +
-    "  resolved before display.\n" +
+    "  allow/deny tool lists, and the prompt body. The `inherits:` chain is\n" +
+    "  resolved before display. Layer files (_all.md, _non_coordinator.md) are\n" +
+    "  applied at spawn time and are NOT shown here — inspect them directly\n" +
+    "  with `ib show-type _all` / `ib show-type _non_coordinator`.\n" +
     "  --json          Emit machine-readable JSON",
   "list-models":
     "Usage: ib list-models [--json]\n" +
@@ -2326,7 +2328,7 @@ async function main() {
         console.log(`PERMISSIONS DENY (${deny.length}):`);
         for (const t of deny) console.log(`  ${t}`);
         console.log("");
-        console.log("PROMPT BODY:");
+        console.log("PROMPT BODY (template — {{vars}} are substituted at spawn time):");
         console.log(type.markdownBody ?? "");
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);

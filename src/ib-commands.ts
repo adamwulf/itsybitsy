@@ -3179,6 +3179,30 @@ async function buildAgentSettings(
  * 22. Auto-accept workspace trust (if not yolo)
  * 23. Auto-spawn watchdog
  */
+/**
+ * Block spawning a subagent when the spawner's worktree has uncommitted
+ * changes. This forces agents to commit before spawning so subagents always
+ * start with the most recent git context — otherwise an agent could edit
+ * files, skip the commit, spawn a sub-agent in a new worktree, and have that
+ * sub-agent silently work from stale code. Skipped when cwd isn't a git
+ * working tree (e.g. system coordinator home, raw temp dir) — there's nothing
+ * for a subagent to inherit from.
+ */
+async function checkSpawnerWorktreeClean(cwd: string): Promise<string | null> {
+  const insideResult = await newAgentSpawnCtx.run([
+    "git", "-C", cwd, "rev-parse", "--is-inside-work-tree",
+  ]);
+  if (insideResult.exitCode !== 0 || insideResult.stdout.trim() !== "true") {
+    return null;
+  }
+  const statusResult = await newAgentSpawnCtx.run([
+    "git", "-C", cwd, "status", "--porcelain",
+  ]);
+  if (statusResult.exitCode !== 0) return null;
+  if (statusResult.stdout.trim() === "") return null;
+  return statusResult.stdout;
+}
+
 export async function newAgent(
   repoPath: string,
   prompt: string,
@@ -3187,6 +3211,25 @@ export async function newAgent(
   // 1. Validate prompt
   if (!prompt || !prompt.trim()) {
     return { ok: false, exitCode: 1, stdout: "", stderr: "Error: prompt required" };
+  }
+
+  // 1a. Require a clean worktree in the spawner's cwd. A sub-agent created
+  //     from a dirty worktree would silently miss the spawner's uncommitted
+  //     work (worktrees branch from HEAD), so we reject up-front. Skipped when
+  //     cwd isn't a git work tree (system coordinator, etc.).
+  const spawnerCwd = opts?._cwd ?? process.cwd();
+  const dirty = await checkSpawnerWorktreeClean(spawnerCwd);
+  if (dirty !== null) {
+    return {
+      ok: false,
+      exitCode: 1,
+      stdout: "",
+      stderr:
+        `Error: cannot spawn a sub-agent while the current worktree has uncommitted changes — ` +
+        `commit your work first so the sub-agent inherits it.\n` +
+        `\n` +
+        `Uncommitted changes in ${spawnerCwd}:\n${dirty}`,
+    };
   }
 
   // Resolve the root repo path (handles worktrees)

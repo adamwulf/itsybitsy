@@ -139,6 +139,38 @@ describe("intercept-task", () => {
     }
   });
 
+  test("intercept surfaces spawn failure (e.g. dirty spawner worktree) as deny with the spawn error in the reason", async () => {
+    // Simulates newAgent's dirty-worktree rejection bubbling up through the
+    // intercept hook: the Task is denied (so the original tool call doesn't
+    // run) and the deny reason names the underlying spawn error so the agent
+    // knows it must commit before retrying.
+    const result = await processTaskIntercept(
+      {
+        tool_name: "Task",
+        tool_input: {
+          prompt: "implement feature Z",
+          subagent_type: "general-purpose",
+        },
+        cwd: "/some/repo",
+      },
+      {
+        spawnAgent: async () => ({
+          ok: false,
+          stdout: "",
+          stderr:
+            "Error: cannot spawn a sub-agent while the current worktree has uncommitted changes — commit your work first so the sub-agent inherits it.\n\nUncommitted changes in /some/repo:\n M src/foo.ts\n",
+        }),
+      }
+    );
+
+    expect(result.action).toBe("intercept");
+    const output = result.output as Record<string, unknown>;
+    const hookOutput = output.hookSpecificOutput as Record<string, unknown>;
+    expect(hookOutput.permissionDecision).toBe("deny");
+    expect(hookOutput.permissionDecisionReason).toContain("uncommitted changes");
+    expect(hookOutput.permissionDecisionReason).toContain("Do NOT retry");
+  });
+
   test("successful intercept with mock spawnAgent", async () => {
     const result = await processTaskIntercept(
       {

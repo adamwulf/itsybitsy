@@ -3514,6 +3514,127 @@ describe("newAgent (native)", () => {
     expect(result.stderr).toContain("prompt required");
   });
 
+  /** Mock runner where the spawner's git worktree is clean. */
+  function cleanWorktreeRunner() {
+    const inner = mockSpawnRunner();
+    return (cmd: string[], opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
+      const cmdStr = cmd.join(" ");
+      if (cmdStr.includes("rev-parse --is-inside-work-tree")) {
+        return makeSpawnResult("true", 0);
+      }
+      if (cmdStr.includes("status --porcelain")) {
+        return makeSpawnResult("", 0);
+      }
+      return inner(cmd, opts);
+    };
+  }
+
+  /** Mock runner where the spawner's git worktree has uncommitted changes. */
+  function dirtyWorktreeRunner(porcelain = " M src/foo.ts\n?? new.ts\n") {
+    const inner = mockSpawnRunner();
+    return (cmd: string[], opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
+      const cmdStr = cmd.join(" ");
+      if (cmdStr.includes("rev-parse --is-inside-work-tree")) {
+        return makeSpawnResult("true", 0);
+      }
+      if (cmdStr.includes("status --porcelain")) {
+        return makeSpawnResult(porcelain, 0);
+      }
+      return inner(cmd, opts);
+    };
+  }
+
+  test("rejects spawn when spawner worktree has uncommitted changes", async () => {
+    setNewAgentSpawnRunner(dirtyWorktreeRunner());
+    const result = await callNewAgent("do work");
+    expect(result.ok).toBe(false);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("uncommitted changes");
+    // The porcelain output is surfaced so the user knows what's dirty.
+    expect(result.stderr).toContain("src/foo.ts");
+    // The cwd is named so the user knows which worktree to commit in.
+    expect(result.stderr).toContain(tempDir);
+  });
+
+  test("dirty-worktree spawn does not create the agent directory", async () => {
+    setNewAgentSpawnRunner(dirtyWorktreeRunner());
+    const result = await callNewAgent("do work", { name: "dirty-spawn" });
+    expect(result.ok).toBe(false);
+    // No agent dir should have been created — the check runs before any
+    // side effects so we don't leave orphans behind.
+    const dir = Bun.file(join(agentsDir, "dirty-spawn", "meta.json"));
+    expect(await dir.exists()).toBe(false);
+  });
+
+  test("allows spawn when spawner worktree is clean (porcelain empty)", async () => {
+    setNewAgentSpawnRunner(cleanWorktreeRunner());
+    const result = await callNewAgent("do something", { name: "clean-spawn" });
+    expect(result.ok).toBe(true);
+    expect(result.stdout).toBe("clean-spawn");
+  });
+
+  test("allows spawn when spawner cwd is not a git worktree", async () => {
+    // is-inside-work-tree exits non-zero outside a repo — the default mock
+    // returns exit 0 + empty stdout for unrecognized commands, which the
+    // check treats as "not inside a worktree" and proceeds.
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("do something");
+    expect(result.ok).toBe(true);
+  });
+
+  test("dirty-worktree check fires for coordinator spawns too", async () => {
+    // Coordinators go through the same newAgent codepath; a dirty repo at
+    // the coordinator's cwd must still block.
+    setNewAgentSpawnRunner(dirtyWorktreeRunner());
+    const result = await newAgent(tempDir, "start coordinator", {
+      type: "coordinator",
+      _cwd: tempDir,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("uncommitted changes");
+  });
+
+  test("dirty-worktree check uses _cwd, not process.cwd()", async () => {
+    // The check must read the spawner-supplied cwd, not the test runner's
+    // process.cwd(). We point _cwd at a directory the mock treats as a
+    // dirty git worktree; if the check were using process.cwd() instead,
+    // it would not see the dirty marker and the spawn would proceed.
+    const otherCwd = join(tempDir, "elsewhere");
+    setNewAgentSpawnRunner((cmd: string[], opts?: { stdout: "pipe"; stderr: "pipe" }) => {
+      const cmdStr = cmd.join(" ");
+      // Only return dirty status when git is run against the otherCwd.
+      if (cmdStr.includes(`-C ${otherCwd} rev-parse --is-inside-work-tree`)) {
+        return makeSpawnResult("true", 0);
+      }
+      if (cmdStr.includes(`-C ${otherCwd} status --porcelain`)) {
+        return makeSpawnResult(" M foo\n", 0);
+      }
+      return mockSpawnRunner()(cmd, opts);
+    });
+    const result = await newAgent(tempDir, "do work", { _cwd: otherCwd });
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("uncommitted changes");
+    expect(result.stderr).toContain(otherCwd);
+  });
+
+  test("dirty check tolerates `git status` exit failure (silent skip)", async () => {
+    // If `git status` somehow exits non-zero (e.g. corrupt index), the check
+    // should not block the spawn — falling open is preferable to producing
+    // a confusing error from a transient git failure.
+    setNewAgentSpawnRunner((cmd: string[], opts?: { stdout: "pipe"; stderr: "pipe" }) => {
+      const cmdStr = cmd.join(" ");
+      if (cmdStr.includes("rev-parse --is-inside-work-tree")) {
+        return makeSpawnResult("true", 0);
+      }
+      if (cmdStr.includes("status --porcelain")) {
+        return makeSpawnResult("", 128); // git error
+      }
+      return mockSpawnRunner()(cmd, opts);
+    });
+    const result = await callNewAgent("do work", { name: "git-err" });
+    expect(result.ok).toBe(true);
+  });
+
   test("creates agent with correct ID format when no name given", async () => {
     setNewAgentSpawnRunner(mockSpawnRunner());
     const result = await callNewAgent("do something");

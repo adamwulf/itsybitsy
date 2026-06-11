@@ -15,6 +15,7 @@ import { SpawnContext } from "./types";
 import { getTmuxWidthForAgent } from "./tui/widths";
 import { isValidSessionId, isValidModel, tmuxSessionTarget } from "./validation";
 import { parseModel } from "./agent-cli";
+import { loadAgentType } from "./agent-types";
 import {
   buildHooksBlock,
   buildLayeredPermissions,
@@ -418,7 +419,19 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
   await coordinatorSpawnCtx.run(["tmux", "set-option", "-w", "-t", tmuxSessionTarget(IB_COORDINATOR_SESSION), "window-size", "manual"]);
 
   const config = await readConfig();
-  const rawModel = (config["coordinator.model"]?.value as string) ?? "claude:opus";
+  // Source of truth for the system coordinator's model is the `coordinator`
+  // agent-type file (~/.itsybitsy/agent-types/coordinator.md). config.model is
+  // intentionally NOT consulted — it would let a user's global model setting
+  // clobber the coordinator agent-type. Fall back to `claude:opus` if the
+  // agent-type declares no `model:`.
+  let agentTypeModel: string | undefined;
+  try {
+    const coordType = await loadAgentType("coordinator");
+    agentTypeModel = coordType.model;
+  } catch (err) {
+    logToWatchLog(`[coordinator] failed to load coordinator agent type: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  const rawModel = agentTypeModel ?? "claude:opus";
   // Reject malformed model names — they would otherwise be interpolated into
   // the shell command below. Fall back to the qualified default if shell-unsafe.
   const safeModel = isValidModel(rawModel) ? rawModel : "claude:opus";
@@ -429,7 +442,7 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
   const parsed = parseModel(safeModel);
   if (parsed.cli !== "claude") {
     throw new Error(
-      `codex coordinators not yet implemented; use claude:<model> for coordinator.model (got '${safeModel}')`,
+      `codex coordinators not yet implemented; set 'model: claude:<model>' in ~/.itsybitsy/agent-types/coordinator.md (got '${safeModel}')`,
     );
   }
   const model = parsed.model;
